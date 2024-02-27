@@ -1,4 +1,4 @@
-# friday
+# D.A.W.N.
 
 ## Credits
 
@@ -7,9 +7,7 @@ Initial adaptation from the piper project: https://github.com/rhasspy/piper
 Piper and the language models are covered under the MIT license.
 Vosk Licensed under the Apache License, Version 2.0.
 
-Needed for LUFS calculation: `sudo apt-get install libebur128-dev`
-
-## JARVIS/Friday Installation Notes
+## Installation Notes
 ### Cmake 3.27.1
 1. `tar xvf cmake-3.27.1.tar.gz`
 2. `cd cmake-3.27.1`
