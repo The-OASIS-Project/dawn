@@ -1,0 +1,151 @@
+{
+  "types": {
+     "boolean": {
+        "actions": {
+           "enable": {
+              "action_words": ["enable %device_name%", "turn on %device_name%", "switch on %device_name%", "show %device_name%", "display %device_name%", "open %device_name%", "start %device_name%"],
+              "action_command": "{\"device\": \"%device_name%\", \"action\": \"enable\"}"
+           },
+           "disable": {
+              "action_words": ["disable %device_name%", "turn off %device_name%", "switch off %device_name%", "hide %device_name%", "close %device_name%", "stop %device_name%"],
+              "action_command": "{\"device\": \"%device_name%\", \"action\": \"disable\"}"
+           }
+        }
+     },
+     "analog": {
+        "actions": {
+           "set": {
+              "action_words": ["set %device_name% to %value%", "adjust %device_name% to %value%", "switch %device_name% to %value%", "which %device_name% to %value%"],
+              "action_command": "{\"device\": \"%device_name%\", \"action\": \"set\", \"value\": \"%value%\"}"
+           }
+        }
+     },
+     "getter": {
+        "actions": {
+           "get": {
+              "action_words": ["what is the %device_name%", "what %device_name% is it", "give me the %device_name%", "tell me the %device_name%", "what is %device_name%"],
+              "action_command": "{\"device\": \"%device_name%\", \"action\": \"get\"}"
+           }
+        }
+     },
+     "music": {
+        "actions": {
+           "next": {
+              "action_words": ["next song", "next track", "play next song", "play next track", "play next"],
+              "action_command": "{\"device\": \"music\", \"action\": \"next\"}"
+           },
+           "previous": {
+              "action_words": ["previous song", "previous track", "play previous song", "play previous track", "play previous"],
+              "action_command": "{\"device\": \"music\", \"action\": \"previous\"}"
+           },
+           "play": {
+              "action_words": ["play %value%", "play music %value%", "play me some %value%", "can you play %value%"],
+              "action_command": "{\"device\": \"music\", \"action\": \"play\", \"value\": \"%value%\"}"
+           },
+           "stop": {
+              "action_words": ["stop music", "stop playing music", "stop playback", "stop the music"],
+              "action_command": "{\"device\": \"music\", \"action\": \"stop\"}"
+           }
+        }
+     }
+  },
+  "devices": {
+    "armor": {
+      "type": "boolean",
+      "aliases": ["armor", "armor display","enabled devices"],
+      "topic": "hud"
+    },
+    "detect": {
+      "type": "boolean",
+      "aliases": ["detect objects", "detected objects", "object detection"],
+      "topic": "hud"
+    },
+    "map": {
+      "type": "boolean",
+      "aliases": ["mini map", "minimap", "nav", "navigation"],
+      "topic": "hud"
+    },
+    "visual offset": {
+      "type": "analog",
+      "aliases": ["3d offset", "eye offset"],
+      "unit": "pixels",
+      "topic": "hud"
+    },
+    "mask": {
+       "type": "boolean",
+       "aliases": ["face mask", "helmet", "bucket", "facemask"],
+       "topic": "helmet"
+    },
+    "info": {
+       "type": "boolean",
+       "aliases": ["log"],
+       "topic": "hud"
+    },
+    "record and stream": {
+       "type": "boolean",
+       "aliases": ["stream and record", "recording and streaming", "streaming and recording"],
+       "topic": "hud"
+    },
+    "record": {
+       "type": "boolean",
+       "aliases": ["recording"],
+       "topic": "hud"
+    },
+    "stream": {
+       "type": "boolean",
+       "aliases": ["streaming"],
+       "topic": "hud"
+    },
+    "audio capture device": {
+       "type": "analog",
+       "aliases": ["audio input", "microphone"],
+       "topic": "dawn"
+    },
+    "audio playback device": {
+       "type": "analog",
+       "aliases": ["audio output", "audio output device", "speaker", "speakers", "speaker output"],
+       "topic": "dawn"
+    },
+    "date": {
+       "type": "getter",
+       "aliases": ["current date", "today's date"],
+       "topic": "dawn"
+    },
+    "time": {
+       "type": "getter",
+       "aliases": ["current time", "hour", "time right now"],
+       "topic": "dawn"
+    },
+    "flac": {
+       "type": "music",
+       "topic": "dawn"
+    },
+    "voice amplifier": {
+       "type": "boolean",
+       "aliases": ["voice output", "voice passthrough", "pa", "pa system", "p a", "p a system", "bull horn", "bullhorn"],
+       "topic": "dawn"
+    },
+    "shutdown alpha bravo charlie": {
+       "type": "boolean",
+       "aliases": ["shut down alpha bravo charlie"],
+       "topic": "dawn"
+    }
+  },
+  "audio devices": {
+     "microphone": {
+        "type": "audio capture device",
+        "aliases": ["mic", "helmet mic", "audio input device"],
+        "device": "alsa_input.usb-Creative_Technology_Ltd_Sound_Blaster_Play__3_00128226-00.analog-stereo"
+     },
+     "headphones": {
+        "type": "audio playback device",
+        "aliases": ["helmet"],
+        "device": "combined"
+     },
+     "speakers": {
+        "type": "audio playback device",
+        "aliases": ["speaker", "loud speakers", "loud speaker", "chest speaker"],
+        "device": "combined"
+     }
+  }
+}
