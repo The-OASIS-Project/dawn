@@ -3,3 +3,4 @@ libvosk.so
 vosk-model*/
 en_GB-alba-medium.onnx*
 utils/
+secrets.h
