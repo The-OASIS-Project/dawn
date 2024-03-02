@@ -25,9 +25,9 @@
 void drawWaveform(const int16_t *audioBuffer, size_t numSamples);
 void textToSpeechCallback(const char *actionName, char *value);
 void setPcmPlaybackDevice(const char *actioName, char *value);
-char *getPcmPlaybackDevice(void);
+const char *getPcmPlaybackDevice(void);
+const char *getPcmCaptureDevice(void);
 char *findAudioPlaybackDevice(char *name);
 void setPcmCaptureDevice(const char *actioName, char *value);
-char *getPcmCaptureDevice(void);
 
 #endif // DAWN_H

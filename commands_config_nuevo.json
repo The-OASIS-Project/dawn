@@ -23,7 +23,7 @@
      "getter": {
         "actions": {
            "get": {
-              "action_words": ["what is the %device_name%", "what %device_name% is it", "give me the %device_name%", "tell me the %device_name%", "what is %device_name%"],
+              "action_words": ["what is the %device_name%", "what %device_name% is it", "give me the %device_name%", "tell me the %device_name%", "what is %device_name%", "what's %device_name%"],
               "action_command": "{\"device\": \"%device_name%\", \"action\": \"get\"}"
            }
         }

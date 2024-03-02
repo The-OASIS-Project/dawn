@@ -478,6 +478,10 @@ int parseCommandConfig(char *json, actionType *actions, int *numActions,
       }
 
       (*numActions)++;  // Increment to the next type.
+      if (*numActions > MAX_ACTIONS) {
+         fprintf(stderr, "Number of actions processed > max actions supported!\n");
+         break;
+      }
 
       json_object_iter_next(&it);
    }

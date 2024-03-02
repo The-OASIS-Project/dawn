@@ -210,7 +210,7 @@ void dateCallback(const char *actionName, char *value) {
    time(&current_time);
    time_info = localtime(&current_time);
    srand(time(NULL));
-   choice = rand() % 4;
+   choice = rand() % 3;
 
    switch (choice) {
       case 0:
@@ -220,9 +220,6 @@ void dateCallback(const char *actionName, char *value) {
          strftime(buffer, sizeof(buffer), "In case you've forgotten, Sir, it's %A, %B %d, %Y today.", time_info);
          break;
       case 2:
-         strftime(buffer, sizeof(buffer), "I suppose you want to know the date again? Fine, it's %A, %B %d, %Y.", time_info);
-         break;
-      case 3:
          strftime(buffer, sizeof(buffer), "The current date is %A, %B %d, %Y.", time_info);
          break;
    }

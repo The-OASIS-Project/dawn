@@ -3,6 +3,6 @@
 
 /* This is the API key from OpenAI. This is an INVALID key. Change this to your key after
  * registering for one on their site. */
-#define OPENAI_HEADER   "Authorization: Bearer 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"
+#define OPENAI_HEADER   "Authorization: Bearer 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"
 
 #endif // SECRETS_H

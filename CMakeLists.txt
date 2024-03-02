@@ -39,14 +39,15 @@ target_link_libraries(piper onnxruntime)
 link_directories(${CMAKE_SOURCE_DIR})
 
 add_executable(dawn
-               openai.c
-               text_to_speech.cpp
+               audio_utils.c
                dawn.c
-               text_to_command_nuevo.c
-               word_to_number.c
-               mosquitto_comms.c
                flac_playback.c
-               mic_passthrough.c)
+               mic_passthrough.c
+               mosquitto_comms.c
+               openai.c
+               text_to_command_nuevo.c
+               text_to_speech.cpp
+               word_to_number.c)
 
 target_link_libraries(dawn
                       asound
