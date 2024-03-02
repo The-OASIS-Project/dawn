@@ -1,3 +1,23 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * All contributions to this project are agreed to be licensed under the
+ * GPLv3 or any later version. Contributions are understood to be
+ * any modifications, enhancements, or additions to the project
+ * and become the property of the original author Kris Kersey.
+ */
+
 #include <stdio.h>
 #include <string.h>
 
@@ -9,6 +29,17 @@ typedef struct {
    double multiplier;
 } Magnitude;
 
+/**
+ * Converts English textual numerical representations into their integer equivalents.
+ * Currently supports numbers from 0 to 99, including unit numbers (0-9),
+ * teen numbers (10-19), and tens (20, 30, ..., 90).
+ *
+ * @param token The textual representation of a number (e.g., "one", "twenty", "fourteen").
+ * @return The integer value of the number, or 0 if the token does not represent a known number.
+ *
+ * Note: This function returns 0 both for the textual representation "zero" and for any unrecognized token.
+ *       Consider improving error handling to distinguish these cases if necessary.
+ */
 int parseNumericalWord(const char *token)
 {
    char *units[] = {
@@ -36,30 +67,40 @@ int parseNumericalWord(const char *token)
    return 0;                    // or handle error
 }
 
+/**
+ * Converts a textual representation of a number into a double-precision floating-point number.
+ * Supports magnitudes from "thousand" to "trillion" and can handle decimal fractions indicated by "point".
+ *
+ * @param originalWord The string representation of the number (e.g., "two thousand twenty-one point five").
+ * @return The numerical value as a double. Returns 0.0 for unrecognizable tokens.
+ *
+ * Note: This function uses `parseNumericalWord` for converting individual word tokens to numbers,
+ * which should be defined elsewhere to handle basic numeric words and teens.
+ */
 double wordToNumber(char *originalWord)
 {
-   char word[1024];
-   strncpy(word, originalWord, sizeof(word));
+   char word[1024]; // Temporary buffer for tokenization.
+   strncpy(word, originalWord, sizeof(word) - 1); // Ensure null-termination.
+   word[sizeof(word) - 1] = '\0';
 
    Magnitude magnitudes[] = {
       {"thousand", 1000},
       {"million", 1000000},
       {"billion", 1000000000},
-      {"trillion", 1000000000000}       // You can add more as needed
+      {"trillion", 1000000000000} // Extendable for more magnitudes.
    };
 
-   double result = 0.0;
-   double tempValue = 0.0;
-   char *token = strtok(word, " ");
+   double result = 0.0; // Accumulator for the result.
+   double tempValue = 0.0; // Temporary accumulator for the current numeric segment.
+   char *token = strtok(word, " "); // Tokenize the input string by spaces.
 
-   // Process the whole number part
    while (token != NULL) {
       if (strcmp(token, "point") == 0) {
-         break;                 // Stop processing the integer part if "point" is found
+         break; // Transition to processing the fractional part.
       } else if (strcmp(token, "hundred") == 0) {
          tempValue *= 100;
       } else {
-         int found = 0;
+         int found = 0; // Flag to track if the token matches a magnitude.
          for (int i = 0; i < sizeof(magnitudes) / sizeof(Magnitude); i++) {
             if (strcmp(token, magnitudes[i].name) == 0) {
                result += tempValue * magnitudes[i].multiplier;
@@ -69,16 +110,16 @@ double wordToNumber(char *originalWord)
             }
          }
 
-         if (!found) {
+         if (!found) { // If not a magnitude, attempt to parse as a number.
             tempValue += parseNumericalWord(token);
          }
       }
 
       token = strtok(NULL, " ");
    }
-   result += tempValue;
+   result += tempValue; // Add any remaining value to the result.
 
-   // If "point" was found, process the fractional part
+   // Process fractional part if "point" was found.
    strncpy(word, originalWord, sizeof(word));
    char *decimalPart = strstr(word, "point");
    if (decimalPart) {

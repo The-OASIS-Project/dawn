@@ -1,3 +1,23 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * All contributions to this project are agreed to be licensed under the
+ * GPLv3 or any later version. Contributions are understood to be
+ * any modifications, enhancements, or additions to the project
+ * and become the property of the original author Kris Kersey.
+ */
+
 #include <stdio.h>
 #include <stdint.h>
 #include <pthread.h>
@@ -27,6 +47,25 @@ void setStopVA(void) {
 }
 
 #ifdef ALSA_DEVICE
+/**
+ * Continuously captures audio from a specified input device and plays it back through a specified output device,
+ * effectively amplifying the captured sound. This function is intended to be run in a separate thread and will
+ * continue running until `setStopVA` is called to set the global `running` flag to 0.
+ *
+ * This implementation is specific to systems with ALSA support. It uses ALSA's API to open PCM devices for
+ * capture and playback, and to handle audio data transfer between these devices.
+ *
+ * Prerequisites:
+ * - ALSA (Advanced Linux Sound Architecture) must be supported and configured on the system.
+ * - Proper ALSA devices must be available and specified by the user or configuration.
+ *
+ * @param arg Unused parameter, included for compatibility with pthreads' start routine signature.
+ * @return NULL Always returns NULL, indicating the thread has completed execution.
+ *
+ * Note:
+ * - Error handling is incorporated to address issues with device initialization and audio data transfer.
+ * - The global `running` variable controls the main loop. Use `setStopVA` to request thread termination.
+ */
 void* voiceAmplificationThread(void* arg) {
    char *pcmCaptureDevice = getPcmCaptureDevice();
    char *pcmPlaybackDevice = findAudioPlaybackDevice("speakers");
@@ -74,47 +113,72 @@ void* voiceAmplificationThread(void* arg) {
    return NULL;
 }
 #else
+/**
+ * Implements a real-time voice amplification loop using PulseAudio for both audio capture and playback.
+ * It captures audio from a microphone and plays it back through speakers in real-time until told to stop.
+ * This function is specifically designed to run in a separate thread and relies on the global `running` flag
+ * to control the execution of its main loop.
+ *
+ * Prerequisites:
+ * - PulseAudio must be supported and properly configured on the system.
+ * - The specified audio capture (microphone) and playback (speakers) devices must be available.
+ *
+ * @param arg Unused parameter, included for compatibility with pthreads' start routine signature.
+ * @return NULL Always returns NULL, indicating the thread has completed execution.
+ *
+ * Note:
+ * - The function initializes PulseAudio streams for both input and output using the specified device names.
+ * - The global `running` variable controls the loop execution, enabling external control to start or stop the voice amplification.
+ * - Proper error handling is implemented to manage issues during audio capture and playback initialization and operation.
+ * - Resource management ensures that PulseAudio streams are freed appropriately before thread termination.
+ */
 void* voiceAmplificationThread(void* arg) {
-   char *pcmCaptureDevice = getPcmCaptureDevice();
-   char *pcmPlaybackDevice = findAudioPlaybackDevice("speakers");
+   // PulseAudio simple API objects for input and output.
    pa_simple *input = NULL, *output = NULL;
-   int error = 0;
+   int error = 0; // Variable to capture PulseAudio error codes.
 
+   // Retrieve the PCM device names for capture and playback.
+   const char *pcmCaptureDevice = getPcmCaptureDevice();
+   const char *pcmPlaybackDevice = findAudioPlaybackDevice("speakers");
+
+   // Validate playback device availability.
    if (pcmPlaybackDevice == NULL) {
       printf("Unabled to find \"speakers\" device.\n");
       return NULL;
    }
 
+   // Initialize the PulseAudio input stream.
    if (!(input = pa_simple_new(NULL, "Mic Amp (In)", PA_STREAM_RECORD, pcmCaptureDevice, "record", &ss, NULL, NULL, &error))) {
       fprintf(stderr, "Error initializing input: %s\n", pa_strerror(error));
       return NULL;
    }
 
+   // Initialize the PulseAudio output stream.
    if (!(output = pa_simple_new(NULL, "Mic Amp (Out)", PA_STREAM_PLAYBACK, pcmPlaybackDevice, "playback", &ss, NULL, NULL, &error))) {
       fprintf(stderr, "Error initializing output: %s\n", pa_strerror(error));
+      pa_simple_free(input); // Ensure input is freed if output initialization fails.
       return NULL;
    }
 
    running = 1;
-   uint8_t buffer[BUFSIZE];
+   // Main loop for capturing and playing back audio in real-time.
+   uint8_t buffer[BUFSIZE]; // Buffer for audio data.
    while (running) {
+      // Read audio data from input.
       if (pa_simple_read(input, buffer, sizeof(buffer), &error) < 0) {
          fprintf(stderr, "Error reading: %s\n", pa_strerror(error));
          break;
       }
 
+      // Write audio data to output.
       if (pa_simple_write(output, buffer, sizeof(buffer), &error) < 0) {
          fprintf(stderr, "Error writing: %s\n", pa_strerror(error));
          break;
       }
    }
 
-   if (output != NULL) {
-      pa_simple_free(output);
-   }
-   if (input != NULL) {
-      pa_simple_free(input);
-   }
+   pa_simple_free(output);
+   pa_simple_free(input);
 
    return NULL;
 }
