@@ -41,7 +41,7 @@
 #include "text_to_speech.h"
 
 // Define the default sample rate for audio capture.
-#define DEFAULT_RATE             22050
+#define DEFAULT_RATE             44100
 
 // Define the default number of audio channels (1 for mono).
 #define DEFAULT_CHANNELS         1
@@ -730,6 +730,8 @@ int main(int argc, char *argv[])
    char *command_text = NULL;
    char *response_text = NULL;
    const char *vosk_output = NULL;
+   size_t vosk_output_length = 0;
+   int vosk_nochange = 0;
    struct json_object *conversation_history = NULL;
    struct json_object *system_message = NULL;
    int rc = 0;
@@ -1045,18 +1047,32 @@ int main(int argc, char *argv[])
 
             if (rms >= (backgroundRMS + TALKING_THRESHOLD_OFFSET)) {
                printf("WAKEWORD_LISTEN: Talking still in progress.\n");
+               /* For an additional layer of "silence," I'm getting the length of the
+                * vosk output to see if the volume was up but no one was saying
+                * anything. */
+               vosk_output_length = strlen(vosk_output);
+
                vosk_recognizer_accept_waveform(recognizer, max_buff, buff_size);
                vosk_output = vosk_recognizer_partial_result(recognizer);
                if (vosk_output == NULL) {
                   fprintf(stderr, "vosk_recognizer_partial_result() returned NULL!\n");
                } else {
                   printf("Partial Input: %s\n", vosk_output);
+                  if (strlen(vosk_output) == vosk_output_length) {
+                     vosk_nochange = 1;
+                  }
                }
-            } else if ((rms < (backgroundRMS + TALKING_THRESHOLD_OFFSET)) &&
-                ((commandTimeout) < DEFAULT_COMMAND_TIMEOUT)) {
+            }
+
+            if (rms < (backgroundRMS + TALKING_THRESHOLD_OFFSET) || vosk_nochange) {
                printf(".");
                commandTimeout++;
+               vosk_nochange = 0;
             } else {
+               commandTimeout = 0;
+            }
+
+            if (commandTimeout >= DEFAULT_COMMAND_TIMEOUT) {
                printf("\n");
                commandTimeout = 0;
                printf("WAKEWORD_LISTEN: Checking for wake word.\n");
@@ -1144,18 +1160,32 @@ int main(int argc, char *argv[])
 
             if (rms >= (backgroundRMS + TALKING_THRESHOLD_OFFSET)) {
                printf("COMMAND_RECORDING: Talking still in progress.\n");
+               /* For an additional layer of "silence," I'm getting the length of the
+                * vosk output to see if the volume was up but no one was saying
+                * anything. */
+               vosk_output_length = strlen(vosk_output);
+
                vosk_recognizer_accept_waveform(recognizer, max_buff, buff_size);
                vosk_output = vosk_recognizer_partial_result(recognizer);
                if (vosk_output == NULL) {
                   fprintf(stderr, "vosk_recognizer_partial_result() returned NULL!\n");
                } else {
                   printf("Partial Input: %s\n", vosk_output);
+                  if (strlen(vosk_output) == vosk_output_length) {
+                     vosk_nochange = 1;
+                  }
                }
-            } else if ((rms < (backgroundRMS + TALKING_THRESHOLD_OFFSET)) &&
-                ((commandTimeout) < DEFAULT_COMMAND_TIMEOUT)) {
+            }
+
+            if (rms < (backgroundRMS + TALKING_THRESHOLD_OFFSET) || vosk_nochange) {
                printf(".");
                commandTimeout++;
+               vosk_nochange = 0;
             } else {
+               commandTimeout = 0;
+            }
+
+            if (commandTimeout >= DEFAULT_COMMAND_TIMEOUT) {
                printf("\n");
                commandTimeout = 0;
                printf("COMMAND_RECORDING: Command processing.\n");
