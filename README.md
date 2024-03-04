@@ -82,20 +82,22 @@ The following tests FAILED:
 9. `./configure --mathlib=OPENBLAS_CLAPACK --shared`
 10. `make -j 10 online2 lm rnnlm`
 11. `cd ../..`
-12. `sudo git clone https://github.com/alphacep/vosk-api --depth=1`
-13. `sudo chown -R $USER vosk-api`
-14. `cd vosk-api/src`
-15. `KALDI_ROOT=/opt/kaldi make -j8`
-16. `cd ../c`
-17. Edit Makefile. Add the following to LDFLAGS: `$(shell pkg-config --libs cuda-11.4 cudart-11.4) -lcusparse -lcublas -lcusolver -lcurand`
-17.1. `make`
-18. `wget https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip`
-OR
-18. THIS ONE -> `wget https://alphacephei.com/vosk/models/vosk-model-en-us-0.22.zip`
-18.1. `unzip vosk-model-en-us-0.22.zip`
-19. `ln -s vosk-model-en-us-0.22 model`
-20. `cp ../python/example/test.wav .`
-21. `./test_vosk`
+
+### vosk-api
+1. `sudo git clone https://github.com/alphacep/vosk-api --depth=1`
+2. `sudo chown -R $USER vosk-api`
+3. `cd vosk-api/src`
+4. `KALDI_ROOT=/opt/kaldi make -j8`
+5. `cd ../c`
+6. Edit Makefile. Add the following to LDFLAGS: `$(shell pkg-config --libs cuda-11.4 cudart-11.4) -lcusparse -lcublas -lcusolver -lcurand`
+7. `make`
+8. `wget https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip`
+  OR
+  THIS ONE -> `wget https://alphacephei.com/vosk/models/vosk-model-en-us-0.22.zip`
+9. `unzip vosk-model-en-us-0.22.zip`
+10. `ln -s vosk-model-en-us-0.22 model`
+11. `cp ../python/example/test.wav .`
+12. `./test_vosk`
 
 ### Copy some files over for compiling
 1. `cp -r vosk-model-en-us-0.22 SOURCE_DIR`
