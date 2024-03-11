@@ -44,6 +44,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <json-c/json.h>
 #include <fnmatch.h>
 
@@ -119,6 +120,10 @@ char* replaceWithValues(const char* templateStr, const char* deviceName, const c
    int slDeviceName = 0;
    int slValue = 0;
 
+   time_t r_time;
+   struct tm *l_time = NULL;
+   char datetime[16];
+
    if (templateStr == NULL) {
       fprintf(stderr, "replaceWithValues() templateStr cannot be NULL.\n");
 
@@ -133,7 +138,8 @@ char* replaceWithValues(const char* templateStr, const char* deviceName, const c
       slValue = strlen(value);
    }
 
-   modifiedStr = (char*)malloc(strlen(templateStr) + slDeviceName + slValue + 1);   // This isn't perfect but it's safe.
+   modifiedStr = (char*)malloc(strlen(templateStr) + slDeviceName + slValue +
+                               15 /* datetime */ + 1 /* '\0' */); // This isn't perfect but it's safe.
    if (modifiedStr == NULL) {
       fprintf(stderr, "Memory allocation failed.\n");
       return NULL;
@@ -158,6 +164,13 @@ char* replaceWithValues(const char* templateStr, const char* deviceName, const c
             } else if ((value != NULL) && (strncmp(placeholder, "value", placeholderLen) == 0)) {
                strcpy(modPtr, value);
                modPtr += slValue;
+            } else if (strncmp(placeholder, "datetime", placeholderLen) == 0) {
+               time(&r_time);
+               l_time = localtime(&r_time);
+               strftime(datetime, sizeof(datetime), "%Y%m%d_%H%M%S", l_time);
+
+               strcpy(modPtr, datetime);
+               modPtr += 15;
             }
          }
       } else {

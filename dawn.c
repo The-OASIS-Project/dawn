@@ -18,21 +18,30 @@
  * and become the property of the original author Kris Kersey.
  */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <unistd.h>
-#include <string.h>
+/* Std C */
+#include <getopt.h>
 #include <math.h>
 #include <pthread.h>
-#include <curl/curl.h>
-#include <json-c/json.h>
-#include <getopt.h>
+#include <signal.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
+/* JSON */
+#include <json-c/json.h>
+
+/* CURL */
+#include <curl/curl.h>
+
+/* Mosquitto */
 #include <mosquitto.h>
 
+/* Speech to Text */
 #include "vosk_api.h"
 
+/* Local */
 #include "audio_utils.h"
 #include "dawn.h"
 #include "mosquitto_comms.h"
@@ -118,7 +127,6 @@ typedef struct {
    snd_pcm_uframes_t frames;
 #else
    pa_simple *pa_handle;
-   pa_usec_t pa_latency;
    size_t pa_framesize;
 #endif
 
@@ -182,12 +190,66 @@ const char* morning_greeting = "Good morning boss.";
 const char* day_greeting = "Good day Sir.";
 const char* evening_greeting = "Good evening Sir.";
 
-// Enum representing the possible states of the AI's listening process.
-// - SILENCE: The AI is not actively listening or processing commands. It's waiting for a noise threshold.
-// - WAKEWORD_LISTEN: The AI is listening for a wake word to initiate interaction.
-// - COMMAND_RECORDING: The AI is recording a command after recognizing a wake word alone.
-// - PROCESS_COMMAND: The AI is processing a recorded command.
-typedef enum { SILENCE, WAKEWORD_LISTEN, COMMAND_RECORDING, PROCESS_COMMAND } listeningState;
+/**
+ * @enum listeningState
+ * Enum representing the possible states of Dawn's listening process.
+ *
+ * @var SILENCE
+ * The AI is not actively listening or processing commands.
+ * It's waiting for a noise threshold to be exceeded.
+ *
+ * @var WAKEWORD_LISTEN
+ * The AI is listening for a wake word to initiate interaction.
+ *
+ * @var COMMAND_RECORDING
+ * The AI is recording a command after recognizing a wake word.
+ *
+ * @var PROCESS_COMMAND
+ * The AI is processing a recorded command.
+ *
+ * @var VISION_AI_READY
+ * Indicates that the vision AI component is ready for processing.
+ */
+typedef enum {
+   SILENCE,
+   WAKEWORD_LISTEN,
+   COMMAND_RECORDING,
+   PROCESS_COMMAND,
+   VISION_AI_READY
+} listeningState;
+
+/**
+ * @var static char *vision_ai_image
+ * Pointer to a buffer containing the latest image captured for vision AI processing.
+ * Initially set to NULL and should be allocated when an image is captured.
+ */
+static char *vision_ai_image = NULL;
+
+/**
+ * @var static int vision_ai_image_size
+ * Size of the buffer pointed to by vision_ai_image, representing the image size in bytes.
+ * Initially set to 0 and updated upon capturing an image.
+ */
+static int vision_ai_image_size = 0;
+
+/**
+ * @var static int vision_ai_ready
+ * Flag indicating whether the vision AI component is ready for image processing.
+ * Set to 1 when ready, 0 otherwise.
+ */
+static int vision_ai_ready = 0;
+
+/**
+ * @var volatile sig_atomic_t quit
+ * @brief Global flag indicating the application should quit.
+ *
+ * This flag is set to 1 when a SIGINT signal is received, signaling the
+ * main loop to terminate and allow for a graceful exit. The use of
+ * `volatile sig_atomic_t` ensures that the variable is updated atomically
+ * and prevents the compiler from applying unwanted optimizations, considering
+ * it may be altered asynchronously by signal handling.
+ */
+volatile sig_atomic_t quit = 0;
 
 #if 0
 // Define the function to draw the waveform using SDL
@@ -233,6 +295,22 @@ void drawWaveform(const int16_t *audioBuffer, size_t numSamples) {
     SDL_RenderPresent(ren);
 }
 #endif
+
+/**
+ * @fn void signal_handler(int signal)
+ * @brief Signal handler for SIGINT.
+ *
+ * This function is designed to handle the SIGINT signal (typically generated
+ * by pressing Ctrl+C). When the signal is received, it sets the global
+ * `quit` flag to 1, indicating to the application that it should exit.
+ *
+ * @param signal The signal number received, expected to be SIGINT.
+ */
+void signal_handler(int signal) {
+    if (signal == SIGINT) {
+        quit = 1;
+    }
+}
 
 /**
  * Callback function for text-to-speech commands.
@@ -394,11 +472,7 @@ void *measureBackgroundAudio(void *audHandle)
    }
 
    uint32_t max_buff_size = // Calculate maximum buffer size based on backend.
-#ifdef ALSA_DEVICE
-   DEFAULT_RATE * DEFAULT_CHANNELS * 2 * BACKGROUND_CAPTURE_SECONDS;
-#else
-   (myControl->pa_latency + (BACKGROUND_CAPTURE_SECONDS * DEFAULT_RATE * myControl->pa_framesize)) / myControl->pa_framesize;
-#endif
+      DEFAULT_RATE * DEFAULT_CHANNELS * sizeof(int16_t) * BACKGROUND_CAPTURE_SECONDS;
 
    char *max_buff = (char *)malloc(max_buff_size);
    if (max_buff == NULL) {
@@ -703,6 +777,41 @@ int capture_buffer(audioControl *myAudioControls,
 }
 
 /**
+ * Stores a base64 encoded image for vision AI processing, including the null terminator.
+ * Updates global variables to indicate readiness for processing.
+ *
+ * @param base64_image Null-terminated base64 encoded image data.
+ * @param image_size Length of the base64 image data, including the null terminator.
+ *
+ * Preconditions:
+ * - vision_ai_image is freed if previously allocated to avoid memory leaks.
+ *
+ * Postconditions:
+ * - vision_ai_image contains the base64 image data, ready for AI processing.
+ * - vision_ai_image_size reflects the size of the data including the null terminator.
+ * - vision_ai_ready is set, indicating AI processing can proceed.
+ *
+ * Error Handling:
+ * - If memory allocation fails, an error is logged, and the function exits early.
+ */
+void process_vision_ai(const char *base64_image, size_t image_size) {
+   if (vision_ai_image != NULL) {
+      free(vision_ai_image);
+      vision_ai_image = NULL;
+   }
+
+   vision_ai_image = malloc(image_size);
+   if (!vision_ai_image) {
+      fprintf(stderr, "Error: Memory allocation failed.\n");
+      return;
+   }
+   memcpy(vision_ai_image, base64_image, image_size);
+
+   vision_ai_image_size = image_size;
+   vision_ai_ready = 1;
+}
+
+/**
  * Displays help information for the program, outlining the usage and available command-line options.
  * The function dynamically adjusts the usage message based on whether the program name is available
  * from the command-line arguments.
@@ -744,13 +853,8 @@ int main(int argc, char *argv[])
 
    // Audio Buffer
    uint32_t buff_size = 0;
-#ifdef ALSA_DEVICE
-   float temp_buff_size = DEFAULT_RATE * DEFAULT_CHANNELS * 2 * DEFAULT_CAPTURE_SECONDS;
+   float temp_buff_size = DEFAULT_RATE * DEFAULT_CHANNELS * sizeof(int16_t) * DEFAULT_CAPTURE_SECONDS;
    uint32_t max_buff_size = (uint32_t)ceil(temp_buff_size);
-#else
-   float temp_buff_size = 0;
-   uint32_t max_buff_size = 0;
-#endif
    char *max_buff = NULL;
    double rms = 0.0;
 
@@ -783,7 +887,6 @@ int main(int argc, char *argv[])
 
    int i = 0;
 
-   int quit = 0;
    listeningState recState = SILENCE;
    listeningState silenceNextState = WAKEWORD_LISTEN;
 
@@ -888,13 +991,9 @@ int main(int argc, char *argv[])
       return 1;
    }
 
-   myAudioControls.pa_latency = pa_simple_get_latency(myAudioControls.pa_handle, &error);
    myAudioControls.pa_framesize = pa_frame_size(&sample_spec);
 
    myAudioControls.full_buff_size = myAudioControls.pa_framesize;
-
-   temp_buff_size = DEFAULT_CAPTURE_SECONDS * DEFAULT_RATE * myAudioControls.pa_framesize;
-   max_buff_size = (myAudioControls.pa_latency + ceil(temp_buff_size)) / myAudioControls.pa_framesize;
 #endif
 
    printf("max_buff_size: %u, full_buff_size: %u\n", max_buff_size, myAudioControls.full_buff_size);
@@ -1020,7 +1119,17 @@ int main(int argc, char *argv[])
    }
 #endif
 
+   // Register the signal handler for SIGINT.
+   if (signal(SIGINT, signal_handler) == SIG_ERR) {
+      printf("Error: Unable to register signal handler.\n");
+      exit(EXIT_FAILURE);
+   }
+
    while (!quit) {
+      if (vision_ai_ready){
+         recState = VISION_AI_READY;
+      }
+
       switch (recState) {
          case SILENCE:
             capture_buffer(&myAudioControls, max_buff, max_buff_size, &buff_size);
@@ -1263,7 +1372,7 @@ int main(int argc, char *argv[])
                   silenceNextState = WAKEWORD_LISTEN;
                   recState = SILENCE;
                } else {
-                  response_text = getGptResponse(conversation_history, command_text);
+                  response_text = getGptResponse(conversation_history, command_text, NULL, 0);
                   if (response_text != NULL) {
                      printf("AI: %s\n", response_text);
                      text_to_speech(pcm_playback_device, response_text);
@@ -1309,6 +1418,62 @@ int main(int argc, char *argv[])
                return 1;
             }
 #endif
+            silenceNextState = WAKEWORD_LISTEN;
+            recState = SILENCE;
+
+            break;
+         case VISION_AI_READY:
+            // Get the AI response using the image recognition.
+            response_text = getGptResponse(conversation_history,
+                  "What am I looking at? Ignore the overlay unless asked about it specifically.",
+                  vision_ai_image, vision_ai_image_size);
+            if (response_text != NULL) {
+               // AI returned successfully, vocalize response.
+               printf("AI: %s\n", response_text);
+               text_to_speech(pcm_playback_device, response_text);
+
+               // Add the successful AI response to the conversation.
+               struct json_object *ai_message = json_object_new_object();
+               json_object_object_add(ai_message, "role", json_object_new_string("assistant"));
+               json_object_object_add(ai_message, "content", json_object_new_string(response_text));
+               json_object_array_add(conversation_history, ai_message);
+
+               free(response_text);
+            } else {
+               // Error on AI response
+               fprintf(stderr, "GPT error.\n");
+               text_to_speech(pcm_playback_device, "I'm sorry but I'm currently unavailable boss.");
+            }
+
+            // Cleanup the image
+            if (vision_ai_image != NULL) {
+               free(vision_ai_image);
+               vision_ai_image = NULL;
+            }
+            vision_ai_image_size = 0;
+            vision_ai_ready = 0;
+
+            // Flush the audio buffers before we continue
+#ifdef ALSA_DEVICE
+            snd_pcm_drop(myAudioControls.handle);
+            if (snd_pcm_prepare(myAudioControls.handle) < 0) {
+            fprintf(stderr, "Cannot prepare audio interface for use (%s)\n",
+               snd_strerror(rc));
+               exit(1);
+            }
+#else
+            if (pa_simple_flush(myAudioControls.pa_handle, &error) != 0) {
+               printf("Unable to flush buffer: %s\n", pa_strerror(error));
+            }
+            pa_simple_free(myAudioControls.pa_handle);
+
+            myAudioControls.pa_handle = openPulseaudioCaptureDevice(pcm_capture_device);
+            if (myAudioControls.pa_handle == NULL) {
+               fprintf(stderr, "Error creating Pulse capture device.\n");
+               return 1;
+            }
+#endif
+            // Set the next listening state
             silenceNextState = WAKEWORD_LISTEN;
             recState = SILENCE;
 

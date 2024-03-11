@@ -21,6 +21,7 @@
 #ifndef OPENAI_H
 #define OPENAI_H
 
-char *getGptResponse(struct json_object *conversation_history, const char *input_text);
+char *getGptResponse(struct json_object *conversation_history, const char *input_text,
+                     char *vision_ai_image, size_t vision_ai_image_size);
 
 #endif // OPENAI_H

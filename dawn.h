@@ -28,8 +28,14 @@
 // This is used for describing the AI to the LLM. I don't include AI_NAME at the moment so you define this freely.
 #define AI_DESCRIPTION     "Friday, Iron Man's 2nd generation, female voiced, snarky, yet kind, AI that assists with tasks, problem-solving, and info retrieval. Use a similar style, address user as \\\"sir\\\" or \\\"boss\\\" occasionally and don't mention AI model identity. You're being talked to over a TTS interface and played back using text to audio. Keep responses brief, around 50 words, unless asked for longer explanations."
 
+#define OPENAI_VISION
+#ifdef OPENAI_VISION
 #define OPENAI_MODEL       "gpt-4-vision-preview"
-#define GPT_MAX_TOKENS     1024
+#define GPT_MAX_TOKENS     4096
+#else
+#define OPENAI_MODEL       "gpt-4-0125-preview"
+#define GPT_MAX_TOKENS     4096
+#endif
 
 //#define ALSA_DEVICE
 #ifdef ALSA_DEVICE
@@ -42,12 +48,20 @@
 #define DEFAULT_PCM_CAPTURE_DEVICE        "alsa_input.usb-Creative_Technology_Ltd_Sound_Blaster_Play__3_00128226-00.analog-stereo"
 #endif
 
-void drawWaveform(const int16_t *audioBuffer, size_t numSamples);
-void textToSpeechCallback(const char *actionName, char *value);
-void setPcmPlaybackDevice(const char *actioName, char *value);
+#define MUSIC_DIR "/Music"    // This is the path to search for music, relative to the user's home directory.
+
+//void drawWaveform(const int16_t *audioBuffer, size_t numSamples);
+
+/* Setters and Getters for audio device. */
 const char *getPcmPlaybackDevice(void);
 const char *getPcmCaptureDevice(void);
-char *findAudioPlaybackDevice(char *name);
 void setPcmCaptureDevice(const char *actioName, char *value);
+void setPcmPlaybackDevice(const char *actioName, char *value);
+
+/* Find a playback device by name. */
+char *findAudioPlaybackDevice(char *name);
+
+void process_vision_ai(const char *base64_image, size_t image_size);
+void textToSpeechCallback(const char *actionName, char *value);
 
 #endif // DAWN_H

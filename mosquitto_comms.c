@@ -19,27 +19,39 @@
  */
 
 #define _GNU_SOURCE
-#include <stdio.h>
-#include <string.h>
-#include <time.h>
-#include <stdlib.h>
 #include <dirent.h>
 #include <fnmatch.h>
 #include <pthread.h>
-int pthread_kill(pthread_t thread, int sig); /**< Unfortunately needed. */
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+/* Mosquitto */
 #include <mosquitto.h>
+
+/* JSON-C */
 #include <json-c/json.h>
 
-#include "mosquitto_comms.h"
-#include "flac_playback.h"
+/* OpenSSL */
+#include <openssl/buffer.h>
+#include <openssl/evp.h>
+
+/* Local */
 #include "dawn.h"
+#include "flac_playback.h"
 #include "mic_passthrough.h"
+#include "mosquitto_comms.h"
 
 #define MAX_FILENAME_LENGTH 1024
 #define MAX_PLAYLIST_LENGTH 100
 
-#define MUSIC_ROOT "/home/kkersey/Music"
-
+/**
+ * Array of device callbacks associating device types with their respective handling functions.
+ * This facilitates dynamic invocation of actions based on the device type, enhancing the application's
+ * modularity and scalability.
+ */
 static deviceCallback deviceCallbackArray[] = {
    {AUDIO_PLAYBACK_DEVICE, setPcmPlaybackDevice},
    {AUDIO_CAPTURE_DEVICE, setPcmCaptureDevice},
@@ -48,11 +60,60 @@ static deviceCallback deviceCallbackArray[] = {
    {TIME, timeCallback},
    {MUSIC, musicCallback},
    {VOICE_AMPLIFIER, voiceAmplifierCallback},
-   {SHUTDOWN, shutdownCallback}
+   {SHUTDOWN, shutdownCallback},
+   {VIEWING, viewingCallback}
 };
 
 static pthread_t music_thread = -1;
 static pthread_t voice_thread = -1;
+
+/**
+ * Retrieves the current user's home directory.
+ *
+ * @return A pointer to a string containing the path to the home directory. This string
+ *         should not be modified or freed by the caller, as it points to an environment variable.
+ */
+const char* getUserHomeDirectory() {
+   const char* homeDir = getenv("HOME");
+   if (!homeDir) {
+      fprintf(stderr, "Error: HOME environment variable not set.\n");
+      return NULL;
+   }
+
+   return homeDir;
+}
+
+/**
+ * Appends a specified subdirectory to the user's home directory to construct a path.
+ *
+ * @param subdirectory The subdirectory to append to the home directory.
+ * @return A dynamically allocated string containing the full path. The caller is responsible
+ *         for freeing this memory using free().
+ */
+char* constructPathWithSubdirectory(const char* subdirectory) {
+   const char* homeDir = getUserHomeDirectory();
+   if (!homeDir) {
+      // getUserHomeDirectory already prints an error message if needed.
+
+      return NULL;
+   }
+
+   // Calculate the size needed for the full path, including null terminator
+   size_t fullPathSize = strlen(homeDir) + strlen(subdirectory) + 1;
+
+   // Allocate memory for the full path
+   char* fullPath = (char*)malloc(fullPathSize);
+   if (!fullPath) {
+      fprintf(stderr, "Error: Memory allocation failed for full path.\n");
+
+      return NULL;
+   }
+
+   // Construct the full path
+   snprintf(fullPath, fullPathSize, "%s%s", homeDir, subdirectory);
+
+   return fullPath;
+}
 
 /**
  * @struct  Playlist
@@ -67,36 +128,36 @@ static Playlist playlist = { .count = 0 };
 static int current_track = 0;
 
 void searchDirectory(const char *rootDir, const char *pattern, Playlist *playlist) {
-    DIR *dir = opendir(rootDir);
-    if (!dir) {
-        perror("Error opening directory");
-        return;
-    }
+   DIR *dir = opendir(rootDir);
+   if (!dir) {
+      perror("Error opening directory");
+      return;
+   }
 
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_type == DT_REG) { // Regular file
-            if (playlist->count >= MAX_PLAYLIST_LENGTH) {
-                fprintf(stderr, "Playlist is full\n");
-                closedir(dir);
-                return;
-            }
+   struct dirent *entry;
+   while ((entry = readdir(dir)) != NULL) {
+      if (entry->d_type == DT_REG) { // Regular file
+         if (playlist->count >= MAX_PLAYLIST_LENGTH) {
+            fprintf(stderr, "Playlist is full\n");
+            closedir(dir);
+            return;
+         }
 
-            char filePath[MAX_FILENAME_LENGTH];
-            snprintf(filePath, sizeof(filePath), "%s/%s", rootDir, entry->d_name);
+         char filePath[MAX_FILENAME_LENGTH];
+         snprintf(filePath, sizeof(filePath), "%s/%s", rootDir, entry->d_name);
 
-            if (fnmatch(pattern, entry->d_name, FNM_CASEFOLD) == 0) {
-                strcpy(playlist->filenames[playlist->count], filePath);
-                playlist->count++;
-            }
-        } else if (entry->d_type == DT_DIR && strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) { // Directory
-            char subPath[MAX_FILENAME_LENGTH];
-            snprintf(subPath, sizeof(subPath), "%s/%s", rootDir, entry->d_name);
-            searchDirectory(subPath, pattern, playlist);
-        }
-    }
+         if (fnmatch(pattern, entry->d_name, FNM_CASEFOLD) == 0) {
+            strcpy(playlist->filenames[playlist->count], filePath);
+            playlist->count++;
+         }
+      } else if (entry->d_type == DT_DIR && strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) { // Directory
+         char subPath[MAX_FILENAME_LENGTH];
+         snprintf(subPath, sizeof(subPath), "%s/%s", rootDir, entry->d_name);
+         searchDirectory(subPath, pattern, playlist);
+      }
+   }
 
-    closedir(dir);
+   closedir(dir);
 }
 
 void parseJsonCommandandExecute(const char *input)
@@ -302,6 +363,14 @@ void musicCallback(const char *actionName, char *value) {
          return;
       }
 
+      // Construct the full path to the user's music directory
+      char* musicDir = constructPathWithSubdirectory(MUSIC_DIR);
+      if (!musicDir) {
+         fprintf(stderr, "Error constructing music path.\n");
+
+         return;
+      }
+
       strWildcards[0] = '*';
       for (i = 0; value[i] != '\0'; i++) {
          if (value[i] == ' ') {
@@ -315,7 +384,9 @@ void musicCallback(const char *actionName, char *value) {
       strcat(strWildcards, ".flac");
 
       printf("Original pattern: \"%s\", New pattern: \"%s\"\n", value, strWildcards);
-      searchDirectory(MUSIC_ROOT, strWildcards, &playlist);
+      searchDirectory(musicDir, strWildcards, &playlist);
+
+      free(musicDir); // free the allocated memory
 
       // Sort the array using qsort
       qsort(playlist.filenames, playlist.count, MAX_FILENAME_LENGTH, compare);
@@ -418,6 +489,164 @@ void voiceAmplifierCallback(const char *actionName, char *value) {
 void shutdownCallback(const char *actionName, char *value) {
    system("sudo shutdown -h now");
    textToSpeechCallback(NULL, "Emergency shutdown initiated.");
+}
+
+/**
+ * Reads the entire contents of a file into memory.
+ *
+ * @param filename The path to the file to be read.
+ * @param length Pointer to a size_t variable where the size of the file will be stored.
+ * @return A pointer to the allocated memory containing the file's contents. The caller
+ *         is responsible for freeing this memory. Returns NULL on failure.
+ */
+unsigned char *read_file(const char *filename, size_t *length) {
+   *length = 0; // Ensure length is set to 0 initially
+   FILE *file = fopen(filename, "rb");
+   if (!file) {
+      perror("File opening failed");
+      return NULL;
+   }
+
+   fseek(file, 0, SEEK_END);
+   long size = ftell(file);
+   if (size == -1) {
+      perror("Failed to determine file size");
+      fclose(file);
+      return NULL;
+   }
+   *length = (size_t)size;
+   printf("The image file is %ld bytes.\n", *length);
+   fseek(file, 0, SEEK_SET);
+
+   unsigned char *content = malloc(*length);
+   if (!content) {
+      perror("Memory allocation failed");
+      fclose(file);
+      return NULL;
+   }
+
+   size_t read_length = fread(content, 1, *length, file);
+   if (*length != read_length) {
+      fprintf(stderr, "Failed to read the total size. Expected: %ld, Read: %ld\n", *length, read_length);
+      free(content);
+      fclose(file);
+      return NULL;
+   }
+
+   fclose(file);
+   return content;
+}
+
+/**
+ * Encodes data using Base64 encoding.
+ *
+ * @param buffer Pointer to the data to be encoded.
+ * @param length Length of the data to encode.
+ * @return A pointer to the null-terminated Base64 encoded string, or NULL if an error occurred.
+ *         The caller is responsible for freeing this memory.
+ */
+char *base64_encode(const unsigned char *buffer, size_t length) {
+   if (buffer == NULL || length <= 0) {
+      fprintf(stderr, "Invalid input to base64_encode.\n");
+      return NULL;
+   }
+
+   BIO *bio = NULL, *b64 = NULL;
+   BUF_MEM *bufferPtr = NULL;
+
+   // Create a new BIO for Base64 encoding.
+   b64 = BIO_new(BIO_f_base64());
+   if (b64 == NULL) {
+      fprintf(stderr, "Failed to create Base64 BIO.\n");
+      return NULL;
+   }
+
+   // Create a new BIO that holds data in memory.
+   bio = BIO_new(BIO_s_mem());
+   if (bio == NULL) {
+      fprintf(stderr, "Failed to create memory BIO.\n");
+      BIO_free_all(b64); // Ensure cleanup
+      return NULL;
+   }
+
+   // Chain the base64 BIO onto the memory BIO.
+   // This means that data written to 'bio' will first be Base64 encoded, then stored in memory.
+   bio = BIO_push(b64, bio);
+
+   // Set the flag to not use newlines as BIO_FLAGS_BASE64_NO_NL implies.
+   // This affects the Base64 encoding to output all data in one continuous line.
+   BIO_set_flags(bio, BIO_FLAGS_BASE64_NO_NL);
+
+   // Write the input buffer into the BIO chain.
+   // This data gets Base64 encoded by 'b64', then stored in the memory managed by 'bio'.
+   if (BIO_write(bio, buffer, length) <= 0) {
+      fprintf(stderr, "Failed to write data to BIO.\n");
+      BIO_free_all(bio); // Also frees 'b64' since it's pushed onto 'bio'
+      return NULL;
+   }
+
+   // Ensure all data is flushed through the BIO chain and any encoding is completed.
+   if (BIO_flush(bio) <= 0) {
+      fprintf(stderr, "Failed to flush BIO.\n");
+      BIO_free_all(bio);
+      return NULL;
+   }
+
+   // Retrieve a pointer to the memory BIO's data.
+   // This does not remove the data from the BIO, but allows access to it.
+   BIO_get_mem_ptr(bio, &bufferPtr);
+   if (bufferPtr == NULL || bufferPtr->data == NULL) {
+      fprintf(stderr, "Failed to get pointer to BIO memory.\n");
+      BIO_free_all(bio);
+      return NULL;
+   }
+
+   // Allocate memory for the output text and copy the Base64 encoded data.
+   // Note: 'bufferPtr->length' contains the length of the Base64 encoded data.
+   char *b64text = malloc(bufferPtr->length + 1);
+   if (b64text == NULL) {
+      fprintf(stderr, "Memory allocation failed for Base64 text.\n");
+      BIO_free_all(bio);
+      return NULL;
+   }
+
+   memcpy(b64text, bufferPtr->data, bufferPtr->length);
+   b64text[bufferPtr->length] = '\0'; // Null-terminate the Base64 encoded string.
+
+   // Free the entire BIO chain, automatically freeing both 'b64' and 'bio'.
+   BIO_free_all(bio);
+
+   return b64text;
+}
+
+/**
+ * Callback function to handle the viewing of an image. It reads the specified image file,
+ * encodes its content into Base64, and passes the encoded data for vision AI processing.
+ *
+ * @param actionName The name of the action triggering this callback. Not used in this function,
+ *                   but included to match expected callback signature.
+ * @param value The file path to the image to be viewed and processed.
+ */
+void viewingCallback(const char *actionName, char *value) {
+   size_t image_size = 0;
+
+   printf("Viewing image received: %s\n", value);
+
+   // Read the image file into memory.
+   unsigned char *image_content = read_file(value, &image_size);
+   if (image_content != NULL) {
+      // Encode the image content into Base64.
+      char *base64_image = base64_encode(image_content, image_size);
+      if (base64_image) {
+         // Process the Base64-encoded image for vision AI tasks.
+         process_vision_ai(base64_image, strlen(base64_image) + 1);
+
+         free(base64_image);
+      }
+      free(image_content);
+   } else {
+      printf("Error reading image file.\n");
+   }
 }
 /* End Mosquitto Stuff */
 

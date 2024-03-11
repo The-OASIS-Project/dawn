@@ -1,24 +1,35 @@
 cmake_minimum_required(VERSION 3.10)
+
+# For native CUDA code
 set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-11.4")
 project(dawn LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# HTTP connections (AI and such)
 find_package(CURL REQUIRED)
 include_directories(${CURL_INCLUDE_DIRS})
 
+# Audio input and output
 find_package(PulseAudio REQUIRED)
 include_directories(${PULSEAUDIO_INCLUDE_DIRS})
 
+# Local config, MQTT commmands, AI APIs
 pkg_check_modules(JSONC REQUIRED json-c)
 include_directories(${JSONC_INCLUDE_DIRS})
 
+# MQTT
 pkg_check_modules(MOSQUITTO REQUIRED libmosquitto)
 include_directories(${MOSQUITTO_INCLUDE_DIRS})
 
+# Audio file playback
 pkg_check_modules(FLAC REQUIRED flac)
 include_directories(${FLAC_INCLUDE_DIRS})
+
+# Base64 Encoding
+find_package(OpenSSL REQUIRED)
+include_directories(${OpenSSL_INCLUDE_DIR})
 
 # Find the required CUDA libraries and add them to the link libraries
 find_library(CUDA_LIBRARIES NAMES cuda HINTS ${CUDA_TOOLKIT_ROOT_DIR}/targets/aarch64-linux/lib)
@@ -28,11 +39,13 @@ find_library(CUBLAS_LIBRARIES NAMES cublas HINTS ${CUDA_TOOLKIT_ROOT_DIR}/target
 find_library(CUSOLVER_LIBRARIES NAMES cusolver HINTS ${CUDA_TOOLKIT_ROOT_DIR}/targets/aarch64-linux/lib)
 find_library(CURAND_LIBRARIES NAMES curand HINTS ${CUDA_TOOLKIT_ROOT_DIR}/targets/aarch64-linux/lib)
 
-find_package(PkgConfig QUIET)
-if(PKG_CONFIG_FOUND)
-    pkg_check_modules(LIBSNDFILE_PKGCONF sndfile)
-endif(PKG_CONFIG_FOUND)
+# Wave file handling
+#find_package(PkgConfig QUIET)
+#if(PKG_CONFIG_FOUND)
+#    pkg_check_modules(LIBSNDFILE_PKGCONF sndfile)
+#endif(PKG_CONFIG_FOUND)
 
+# Text to Speech
 add_library(piper STATIC piper.cpp)
 target_link_libraries(piper onnxruntime)
 
@@ -70,7 +83,9 @@ target_link_libraries(dawn
                       ${CUSOLVER_LIBRARIES}
                       ${CURAND_LIBRARIES}
                       ${MOSQUITTO_LIBRARIES}
-                      ${FLAC_LIBRARIES})
+                      ${FLAC_LIBRARIES}
+                      OpenSSL::SSL
+                      OpenSSL::Crypto)
 
 target_include_directories(piper PUBLIC
                            /usr/local/include/piper-phonemize
