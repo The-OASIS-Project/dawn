@@ -30,6 +30,21 @@
 #include "flac_playback.h"
 #include "mosquitto_comms.h"
 
+/**
+ * @var float global_volume
+ * @brief Global volume control for audio playback.
+ *
+ * This variable controls the volume level of audio playback throughout the application.
+ * The volume level is represented as a floating-point number between 0.0 and 1.0,
+ * where 0.0 means silence and 1.0 corresponds to the maximum volume level without amplification.
+ * Values above 1.0 may result in amplification and potentially introduce distortion or clipping.
+ *
+ * Usage:
+ * Assign a value to this variable to adjust the playback volume before starting or during audio playback.
+ * For example, setting `global_volume = 0.75;` adjusts the volume to 75% of the maximum level.
+ */
+static float global_volume = 0.5f;
+
 // Global variable to control music playback state.
 // When set to 0, music playback is stopped.
 // When set to 1, music playback is active.
@@ -148,7 +163,17 @@ FLAC__StreamDecoderWriteStatus write_callback(
    // Interleave audio samples from all channels into a single buffer.
    for (unsigned i = 0, j = 0; i < frame->header.blocksize; ++i) {
       for (unsigned ch = 0; ch < frame->header.channels; ++ch, ++j) {
-         interleaved[j] = buffer[ch][i];
+         // Adjust the sample volume before interleaving.
+         int32_t adjusted_sample = (int32_t)(buffer[ch][i] * global_volume);
+
+         // Clipping protection (optional but recommended).
+         if (adjusted_sample < INT16_MIN) {
+            adjusted_sample = INT16_MIN;
+         } else if (adjusted_sample > INT16_MAX) {
+            adjusted_sample = INT16_MAX;
+         }
+
+         interleaved[j] = (int16_t)adjusted_sample;
       }
    }
 
@@ -248,35 +273,19 @@ void *playFlacAudio(void *arg) {
    return NULL;
 }
 
-#ifdef ENABLE_MAIN
-int main(int argc, char *argv[]) {
-   if (argc < 4) {
-      fprintf(stderr, "Usage: %s <sink_name> <file_name> <start_time>\n", argv[0]);
-      return 1;
-   }
-
-   PlaybackArgs args;
-   args.sink_name = argv[1];
-   args.file_name = argv[2];
-   args.start_time = atoi(argv[3]);
-
-   printf("Playing: %s %s %d\n", args.sink_name, args.file_name, args.start_time);
-
-   pthread_t audio_thread;
-    
-   // Create the playback thread
-   if (pthread_create(&audio_thread, NULL, play_flac_audio, &args)) {
-      fprintf(stderr, "Error creating thread\n");
-      return 1;
-   }
-
-   // Do other stuff or just wait
-   // ...
-
-   // Stop playback and exit
-   //pthread_cancel(audio_thread);
-   pthread_join(audio_thread, NULL);
-
-   return 0;
+/**
+ * @brief Sets the global music playback volume.
+ *
+ * This function adjusts the global volume level for music playback across the application.
+ * It directly modifies the `global_volume` variable, which affects the volume at which audio is played.
+ * The volume level should be specified as a float between 0.0 and 2.0, where 0.0 is complete silence,
+ * 1.0 is the maximum volume level, greater than 1.0 is amplification.
+ * Values outside this range may lead to undefined behavior.
+ *
+ * @param val The new volume level as a float. Valid values range from 0.0 to 2.0.
+ * @note It's recommended to clamp the value of `val` within the 0.0 to 2.0 range before calling this function
+ *       to avoid unexpected behavior.
+ */
+void setMusicVolume(float val) {
+   global_volume = val;
 }
-#endif

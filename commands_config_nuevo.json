@@ -106,6 +106,10 @@
        "aliases": ["audio output", "audio output device", "speaker", "speakers", "speaker output"],
        "topic": "dawn"
     },
+    "volume": {
+       "type": "analog",
+       "topic": "dawn"
+    },
     "date": {
        "type": "getter",
        "aliases": ["current date", "today's date"],

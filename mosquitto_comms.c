@@ -43,6 +43,7 @@
 #include "flac_playback.h"
 #include "mic_passthrough.h"
 #include "mosquitto_comms.h"
+#include "word_to_number.h"
 
 #define MAX_FILENAME_LENGTH 1024
 #define MAX_PLAYLIST_LENGTH 100
@@ -61,7 +62,8 @@ static deviceCallback deviceCallbackArray[] = {
    {MUSIC, musicCallback},
    {VOICE_AMPLIFIER, voiceAmplifierCallback},
    {SHUTDOWN, shutdownCallback},
-   {VIEWING, viewingCallback}
+   {VIEWING, viewingCallback},
+   {VOLUME, volumeCallback}
 };
 
 static pthread_t music_thread = -1;
@@ -648,5 +650,22 @@ void viewingCallback(const char *actionName, char *value) {
       printf("Error reading image file.\n");
    }
 }
+
+/**
+ * @brief Adjusts music volume based on user input, with values from 0.0 (silence) to 2.0 (maximum).
+ *
+ * @param actionName Unused but included for callback signature consistency.
+ * @param value String representing the desired volume level, converted to a float and validated.
+ */
+void volumeCallback(const char *actionName, char *value) {
+   float floatVol = wordToNumber(value);
+
+   printf("Music volume: %s/%0.2f\n", value, floatVol);
+
+   if (floatVol >= 0 && floatVol <= 2.0) {
+      setMusicVolume(floatVol);
+   }
+}
+
 /* End Mosquitto Stuff */
 

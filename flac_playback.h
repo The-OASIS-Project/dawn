@@ -30,6 +30,7 @@ typedef struct {
 void setMusicPlay(int play);
 int getMusicPlay(void);
 void *playFlacAudio(void *arg);
+void setMusicVolume(float val);
 
 #endif // FLAC_PLAYBACK_H
 

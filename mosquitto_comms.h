@@ -34,6 +34,7 @@ typedef enum {
    VOICE_AMPLIFIER,        /**< Voice amplifier control. */
    SHUTDOWN,               /**< System shutdown action. */
    VIEWING,                /**< Viewing or display actions. */
+   VOLUME,                 /**< Music playback volume, */
    MAX_DEVICE_TYPES        /**< Used to determine the number of device types. */
 } deviceType;
 
@@ -50,7 +51,8 @@ static const char *deviceTypeStrings[] = {
    "music",
    "voice amplifier",
    "shutdown alpha bravo charlie",
-   "viewing"
+   "viewing",
+   "volume"
 };
 
 /**
@@ -73,6 +75,7 @@ void musicCallback(const char *actionName, char *value);
 void voiceAmplifierCallback(const char *actionName, char *value);
 void shutdownCallback(const char *actionName, char *value);
 void viewingCallback(const char *actionName, char *value);
+void volumeCallback(const char *actionName, char *value);
 
 #endif // MOSQUITTO_COMMS_H
 
