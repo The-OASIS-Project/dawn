@@ -7,6 +7,27 @@ project(dawn LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Define the version number in the header file directly
+set(VERSION_NUMBER "1.0.0")
+
+# Try to get the current Git SHA
+execute_process(
+    COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_SHA
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE GIT_SHA_RESULT
+)
+
+# Check if the command was successful
+if(NOT GIT_SHA_RESULT EQUAL 0)
+    set(GIT_SHA "unknown")
+endif()
+
+# Pass the Git SHA to the compiler
+add_definitions(-DGIT_SHA=\"${GIT_SHA}\")
+
 # HTTP connections (AI and such)
 find_package(CURL REQUIRED)
 include_directories(${CURL_INCLUDE_DIRS})
@@ -55,6 +76,7 @@ add_executable(dawn
                audio_utils.c
                dawn.c
                flac_playback.c
+               logging.c
                mic_passthrough.c
                mosquitto_comms.c
                openai.c

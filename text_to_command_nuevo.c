@@ -12,10 +12,11 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  *
- * All contributions to this project are agreed to be licensed under the
- * GPLv3 or any later version. Contributions are understood to be
- * any modifications, enhancements, or additions to the project
- * and become the property of the original author Kris Kersey.
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s). Contributions include any modifications,
+ * enhancements, or additions to the project. These contributions become
+ * part of the project and are adopted by the project author(s).
  */
 
 /**
@@ -48,6 +49,7 @@
 #include <json-c/json.h>
 #include <fnmatch.h>
 
+#include "logging.h"
 #include "text_to_command_nuevo.h"
 
 /**
@@ -109,7 +111,7 @@ int searchString(const char* templateStr, const char* secondStr) {
    } else if (found == FNM_NOMATCH) {
       return 0;
    } else {
-      printf("Error occurred during wildcard matching.\n");
+      LOG_ERROR("Error occurred during wildcard matching.");
       return -1;
    }
 }
@@ -125,7 +127,7 @@ char* replaceWithValues(const char* templateStr, const char* deviceName, const c
    char datetime[16];
 
    if (templateStr == NULL) {
-      fprintf(stderr, "replaceWithValues() templateStr cannot be NULL.\n");
+      LOG_ERROR("replaceWithValues() templateStr cannot be NULL.");
 
       return NULL;
    }
@@ -141,7 +143,7 @@ char* replaceWithValues(const char* templateStr, const char* deviceName, const c
    modifiedStr = (char*)malloc(strlen(templateStr) + slDeviceName + slValue +
                                15 /* datetime */ + 1 /* '\0' */); // This isn't perfect but it's safe.
    if (modifiedStr == NULL) {
-      fprintf(stderr, "Memory allocation failed.\n");
+      LOG_ERROR("Memory allocation failed.");
       return NULL;
    }
 
@@ -205,21 +207,16 @@ void convertActionsToCommands(actionType *actions, int *numActions,
 
    for (i = 0; i < *numActions; i++) {
       for (j = 0; j < actions[i].numSubActions; j++) {
-         //printf("\tAction Command: %s\n", actions[i].subActions[j].actionCommand);
          thisActionCommand = actions[i].subActions[j].actionCommand;
 
          for (k = 0; k < actions[i].subActions[j].numActionWords; k++) {
-            //printf("Action Words: %s\n", actions[i].subActions[j].actionWords[k]);
             thisActionWord = actions[i].subActions[j].actionWords[k];
 
             for (m = 0; m < actions[i].numDevices; m++) {
-               //printf("\tDevice Unit: %s\n", actions[i].devices[m].unit);
                thisUnit = actions[i].devices[m].unit;
 
-               //printf("\tDevice Topic: %s\n", actions[i].devices[m].topic);
                thisTopic = actions[i].devices[m].topic;
 
-               //printf("\tDevice Name: %s\n", actions[i].devices[m].name);
                thisDevice = actions[i].devices[m].name;
 
                newActionWordsWildcard = replaceWithValues(thisActionWord, thisDevice, "*");
@@ -235,7 +232,7 @@ void convertActionsToCommands(actionType *actions, int *numActions,
                free(newActionWordsRegex);
                free(newActionCommand);
                if (*numCommands == MAX_COMMANDS) {
-                  printf("COMMAND OVERFLOW!!!\n");
+                  LOG_ERROR("COMMAND OVERFLOW!!!");
 
                   return;
                }
@@ -257,7 +254,7 @@ void convertActionsToCommands(actionType *actions, int *numActions,
                   free(newActionCommand);
 
                   if (*numCommands == MAX_COMMANDS) {
-                     printf("COMMAND OVERFLOW!!!\n");
+                     LOG_ERROR("COMMAND OVERFLOW!!!");
 
                      return;
                   }
@@ -267,7 +264,7 @@ void convertActionsToCommands(actionType *actions, int *numActions,
       }
    }
 
-   printf("Total commands generated: %d\n", *numCommands);
+   LOG_INFO("Total commands generated: %d", *numCommands);
 }
 
 /**
@@ -414,17 +411,16 @@ int parseCommandConfig(char *json, actionType *actions, int *numActions,
    int i = 0;
    int deviceNum = 0;
 
-   printf("Parsing json...");
+   LOG_INFO("Parsing json...");
    parsedJson = json_tokener_parse(json);
-   printf("Done.\n");
    if (parsedJson == NULL) {
-      fprintf(stderr, "Error parsing json.\n");
+      LOG_ERROR("Error parsing json.");
       return 1;
    }
 
    /* TYPES */
    if (!json_object_object_get_ex(parsedJson, "types", &typeObject)) {
-      fprintf(stderr, "\"types\" object not found in json.\n");
+      LOG_ERROR("\"types\" object not found in json.");
 
       return 1;
    }
@@ -432,11 +428,9 @@ int parseCommandConfig(char *json, actionType *actions, int *numActions,
    it = json_object_iter_begin(typeObject);
    itEnd = json_object_iter_end(typeObject);
 
-   //printf("types:\n");
    /* types loop */
    while (!json_object_iter_equal(&it, &itEnd)) {
       typeName = json_object_iter_peek_name(&it);
-      //printf("\t%s\n", typeName);
 
       strncpy(actions[*numActions].name, typeName, MAX_WORD_LENGTH);  // actionType to struct.
 
@@ -445,7 +439,7 @@ int parseCommandConfig(char *json, actionType *actions, int *numActions,
 
       /* the next object must be actions */
       if (!json_object_object_get_ex(nextTypeObject, "actions", &actionsObject)) {
-         fprintf(stderr, "\"actions\" object not found in json.\n");
+         LOG_ERROR("\"actions\" object not found in json.");
 
          break;
       }
@@ -454,54 +448,48 @@ int parseCommandConfig(char *json, actionType *actions, int *numActions,
       itSub = json_object_iter_begin(actionsObject);
       itSubEnd = json_object_iter_end(actionsObject);
 
-      //printf("\t\tactions:\n");
       /* actions loop */
       while (!json_object_iter_equal(&itSub, &itSubEnd)) {
          actionName = json_object_iter_peek_name(&itSub);
-         //printf("\t\t\t%s\n", actionName);
 
          strncpy(actions[*numActions].subActions[actions[*numActions].numSubActions].name, actionName, MAX_WORD_LENGTH); // actionName to struct.
 
          if (!json_object_object_get_ex(actionsObject, actionName, &nextActionObject)) {
-            fprintf(stderr, "\"%s\" object not found in json.\n", actionName);
+            LOG_ERROR("\"%s\" object not found in json.", actionName);
 
             break;
          }
 
          if (!json_object_object_get_ex(nextActionObject, "action_words", &actionWordArrayObject)) {
-            fprintf(stderr, "\"action_words\" object not found in json.\n");
+            LOG_ERROR("\"action_words\" object not found in json.");
 
             break;
          }
 
-         //printf("\t\t\t\taction_words: ");
          arrayLength = json_object_array_length(actionWordArrayObject);
          for (i = 0; i < arrayLength; i++) {
             actionWordObject = json_object_array_get_idx(actionWordArrayObject, i);
             if (actionWordObject == NULL) {
-               fprintf(stderr, "Next action_word string object not found in json.\n");
+               LOG_ERROR("Next action_word string object not found in json.");
 
                break;
             }
 
             actionWord = json_object_get_string(actionWordObject);
-            //printf("\"%s\" ", actionWord);
 
             strncpy(actions[*numActions].subActions[actions[*numActions].numSubActions].actionWords[actions[*numActions].subActions[actions[*numActions].numSubActions].numActionWords],
                     actionWord, MAX_WORD_LENGTH); // actionWord to struct.
 
             actions[*numActions].subActions[actions[*numActions].numSubActions].numActionWords++;   // Increment numActionWords to struct.
          }
-         //printf("\n");
 
          if (!json_object_object_get_ex(nextActionObject, "action_command", &actionCommandObject)) {
-            fprintf(stderr, "\"action_command\" object not found in json.\n");
+            LOG_ERROR("\"action_command\" object not found in json.");
 
             break;
          }
 
          actionCommand = json_object_get_string(actionCommandObject);
-         //printf("\t\t\t\taction_command: \"%s\"\n", actionCommand);
 
          strncpy(actions[*numActions].subActions[actions[*numActions].numSubActions].actionCommand, actionCommand, MAX_WORD_LENGTH); // actionCommand to struct.
 
@@ -512,7 +500,7 @@ int parseCommandConfig(char *json, actionType *actions, int *numActions,
 
       (*numActions)++;  // Increment to the next type.
       if (*numActions > MAX_ACTIONS) {
-         fprintf(stderr, "Number of actions processed > max actions supported!\n");
+         LOG_ERROR("Number of actions processed > max actions supported!");
          break;
       }
 
@@ -521,7 +509,7 @@ int parseCommandConfig(char *json, actionType *actions, int *numActions,
 
    /* DEVICES */
    if (!json_object_object_get_ex(parsedJson, "devices", &devicesObject)) {
-      fprintf(stderr, "\"devices\" object not found in json.\n");
+      LOG_ERROR("\"devices\" object not found in json.\n");
 
       return 1;
    }
@@ -529,28 +517,24 @@ int parseCommandConfig(char *json, actionType *actions, int *numActions,
    it = json_object_iter_begin(devicesObject);
    itEnd = json_object_iter_end(devicesObject);
 
-   //printf("devices:\n");
    /* device loop */
    while (!json_object_iter_equal(&it, &itEnd)) {
       deviceName = json_object_iter_peek_name(&it);
-      //printf("\t%s\n", deviceName);
 
       /* grab that device's object */
       json_object_object_get_ex(devicesObject, deviceName, &nextDeviceObject);
 
       /* the next object must be type */
       if (!json_object_object_get_ex(nextDeviceObject, "type", &deviceTypeObject)) {
-         fprintf(stderr, "\"type\" object not found in json.\n");
+         LOG_ERROR("\"type\" object not found in json.");
 
          break;
       }
 
       deviceNum = -1;
       deviceType = json_object_get_string(deviceTypeObject);
-      //printf("\t\ttype: \"%s\"\n", deviceType);
 
       for (i = 0; i <= *numActions; i++) {
-         //printf("Comparing %s to %s.\n", actions[i].name, deviceType);
          if (strcmp(actions[i].name, deviceType) == 0) {
             deviceNum = i;
 
@@ -559,7 +543,7 @@ int parseCommandConfig(char *json, actionType *actions, int *numActions,
       }
 
       if (deviceNum == -1) {
-         fprintf(stderr, "Could not find device type: %s\n", deviceType);
+         LOG_ERROR("Could not find device type: %s", deviceType);
          break;
       }
 
@@ -567,45 +551,39 @@ int parseCommandConfig(char *json, actionType *actions, int *numActions,
 
       /* the next object must be aliases, strictly not required */
       if (!json_object_object_get_ex(nextDeviceObject, "aliases", &deviceAliasesArrayObject)) {
-         fprintf(stderr, "\"aliases\" object not found in json.\n");
+         LOG_WARNING("\"aliases\" object not found in json.");
       } else {
-         //printf("\t\t\taliases: ");
          arrayLength = json_object_array_length(deviceAliasesArrayObject);
          for (i = 0; i < arrayLength; i++) {
             deviceAliasObject = json_object_array_get_idx(deviceAliasesArrayObject, i);
             if (deviceAliasObject == NULL) {
-               fprintf(stderr, "Next aliases string object not found in json.\n");
+               LOG_WARNING("Next aliases string object not found in json.");
 
                break;
             }
 
             deviceAlias = json_object_get_string(deviceAliasObject);
-            //printf("\"%s\" ", deviceAlias);
 
             strncpy(actions[deviceNum].devices[actions[deviceNum].numDevices].aliases[actions[deviceNum].devices[actions[deviceNum].numDevices].numAliases], deviceAlias, MAX_WORD_LENGTH); // deviceAlias to struct.
             actions[deviceNum].devices[actions[deviceNum].numDevices].numAliases++; // Increment numAliases
          }
-         //printf("\n");
       }
 
       /* the next object must be unit, strictly not required */
       if (!json_object_object_get_ex(nextDeviceObject, "unit", &deviceUnitObject)) {
-         //fprintf(stderr, "\"unit\" object not found in json.\n");
          actions[deviceNum].devices[actions[deviceNum].numDevices].unit[0] = '\0';
       } else {
          deviceUnit = json_object_get_string(deviceUnitObject);
-         //printf("\t\tunit: \"%s\"\n", deviceUnit);
 
          strncpy(actions[deviceNum].devices[actions[deviceNum].numDevices].unit, deviceUnit, MAX_WORD_LENGTH);
       }
 
       /* the next object must be topic, required */
       if (!json_object_object_get_ex(nextDeviceObject, "topic", &deviceTopicObject)) {
-         fprintf(stderr, "\"topic\" object not found in json.\n");
+         LOG_ERROR("\"topic\" object not found in json.");
          break;
       } else {
          deviceTopic = json_object_get_string(deviceTopicObject);
-         //printf("\t\ttopic: \"%s\"\n", deviceUnit);
 
          strncpy(actions[deviceNum].devices[actions[deviceNum].numDevices].topic, deviceTopic, MAX_WORD_LENGTH);
       }
@@ -617,7 +595,7 @@ int parseCommandConfig(char *json, actionType *actions, int *numActions,
 
    /* AUDIO DEVICES */
    if (!json_object_object_get_ex(parsedJson, "audio devices", &audioDevicesObject)) {
-      fprintf(stderr, "\"audio devices\" object not found in json.\n");
+      LOG_ERROR("\"audio devices\" object not found in json.");
 
       return 1;
    }
@@ -625,7 +603,6 @@ int parseCommandConfig(char *json, actionType *actions, int *numActions,
    it = json_object_iter_begin(audioDevicesObject);
    itEnd = json_object_iter_end(audioDevicesObject);
 
-   printf("audio devices:\n");
    /* audio device loop */
    while (!json_object_iter_equal(&it, &itEnd)) {
       adType adTypeNum = AUDIO_DEVICE_UNKNOWN;
@@ -633,20 +610,18 @@ int parseCommandConfig(char *json, actionType *actions, int *numActions,
       int *thisDeviceCount = NULL;
 
       audioDeviceName = json_object_iter_peek_name(&it);
-      printf("\t%s\n", audioDeviceName);
 
       /* grab that device's object */
       json_object_object_get_ex(audioDevicesObject, audioDeviceName, &nextAudioDeviceObject);
 
       /* the next object must be type */
       if (!json_object_object_get_ex(nextAudioDeviceObject, "type", &audioDeviceTypeObject)) {
-         fprintf(stderr, "\"type\" object not found in json.\n");
+         LOG_ERROR("\"type\" object not found in json.");
 
          break;
       }
 
       audioDeviceType = json_object_get_string(audioDeviceTypeObject);
-      printf("\t\ttype: \"%s\"\n", audioDeviceType);
 
       if (strcmp(AUDIO_DEVICE_CAPTURE_STRING, audioDeviceType) == 0) {
          adTypeNum = AUDIO_DEVICE_CAPTURE;
@@ -657,7 +632,7 @@ int parseCommandConfig(char *json, actionType *actions, int *numActions,
          thisDeviceType = playbackDevices;
          thisDeviceCount = numAudioPlaybackDevices;
       } else {
-         fprintf(stderr, "Could not find device type: %s\n", audioDeviceType);
+         LOG_ERROR("Could not find device type: %s", audioDeviceType);
          break;
       }
 
@@ -666,36 +641,32 @@ int parseCommandConfig(char *json, actionType *actions, int *numActions,
 
       /* the next object must be aliases, not strictly equired */
       if (!json_object_object_get_ex(nextAudioDeviceObject, "aliases", &audioDeviceAliasesArrayObject)) {
-         fprintf(stderr, "\"aliases\" object not found in json.\n");
+         LOG_ERROR("\"aliases\" object not found in json.");
       } else {
-         printf("\t\t\taliases: ");
          arrayLength = json_object_array_length(audioDeviceAliasesArrayObject);
          for (i = 0; i < arrayLength; i++) {
             audioDeviceAliasObject = json_object_array_get_idx(audioDeviceAliasesArrayObject, i);
             if (audioDeviceAliasObject == NULL) {
-               fprintf(stderr, "Next aliases string object not found in json.\n");
+               LOG_ERROR("Next aliases string object not found in json.");
 
                break;
             }
 
             audioDeviceAlias = json_object_get_string(audioDeviceAliasObject);
-            printf("\"%s\" ", audioDeviceAlias);
 
             strncpy(thisDeviceType[*thisDeviceCount].aliases[thisDeviceType[*thisDeviceCount].numAliases], audioDeviceAlias, MAX_WORD_LENGTH); // deviceAlias to struct.
             thisDeviceType[*thisDeviceCount].numAliases++; // Increment numAliases
          }
-         printf("\n");
       }
 
       /* the next object must be device, required */
       if (!json_object_object_get_ex(nextAudioDeviceObject, "device", &audioDeviceDeviceObject)) {
-         fprintf(stderr, "\"device\" object not found in json.\n");
+         LOG_ERROR("\"device\" object not found in json.");
 
          break;
       }
 
       audioDeviceDevice = json_object_get_string(audioDeviceDeviceObject);
-      printf("\t\tdevice: \"%s\"\n", audioDeviceDevice);
 
       strncpy(thisDeviceType[*thisDeviceCount].device, audioDeviceDevice, MAX_WORD_LENGTH);
 

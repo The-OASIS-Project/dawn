@@ -12,16 +12,19 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  *
- * All contributions to this project are agreed to be licensed under the
- * GPLv3 or any later version. Contributions are understood to be
- * any modifications, enhancements, or additions to the project
- * and become the property of the original author Kris Kersey.
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s). Contributions include any modifications,
+ * enhancements, or additions to the project. These contributions become
+ * part of the project and are adopted by the project author(s).
  */
 
 #include <stdio.h>
 #include <stdint.h>
 #include <pthread.h>
+
 #include "dawn.h"
+#include "logging.h"
 
 #ifdef ALSA_DEVICE
 #include <alsa/asoundlib.h>
@@ -74,17 +77,17 @@ void* voiceAmplificationThread(void* arg) {
    int error = 0;
 
    if (!(pcmCaptureDevice && pcmPlaybackDevice)) {
-      printf("Unable to find audio devices.\n");
+      LOG_ERROR("Unable to find audio devices.");
       return NULL;
    }
 
    if ((error = snd_pcm_open(&inputHandle, pcmCaptureDevice, SND_PCM_STREAM_CAPTURE, 0)) < 0) {
-      fprintf(stderr, "Error opening input PCM device: %s\n", snd_strerror(error));
+      LOG_ERROR("Error opening input PCM device: %s", snd_strerror(error));
       return NULL;
    }
 
    if ((error = snd_pcm_open(&outputHandle, pcmPlaybackDevice, SND_PCM_STREAM_PLAYBACK, 0)) < 0) {
-      fprintf(stderr, "Error opening output PCM device: %s\n", snd_strerror(error));
+      LOG_ERROR("Error opening output PCM device: %s", snd_strerror(error));
       return NULL;
    }
 
@@ -93,12 +96,12 @@ void* voiceAmplificationThread(void* arg) {
 
    while (running) {
       if ((error = snd_pcm_readi(inputHandle, buffer, sizeof(buffer))) < 0) {
-         fprintf(stderr, "Error reading: %s\n", snd_strerror(error));
+         LOG_ERROR("Error reading: %s", snd_strerror(error));
          break;
       }
 
       if ((error = snd_pcm_writei(outputHandle, buffer, sizeof(buffer))) < 0) {
-         fprintf(stderr, "Error writing: %s\n", snd_strerror(error));
+         LOG_ERROR("Error writing: %s", snd_strerror(error));
          break;
       }
    }
@@ -143,19 +146,19 @@ void* voiceAmplificationThread(void* arg) {
 
    // Validate playback device availability.
    if (pcmPlaybackDevice == NULL) {
-      printf("Unabled to find \"speakers\" device.\n");
+      LOG_ERROR("Unabled to find \"speakers\" device.");
       return NULL;
    }
 
    // Initialize the PulseAudio input stream.
    if (!(input = pa_simple_new(NULL, "Mic Amp (In)", PA_STREAM_RECORD, pcmCaptureDevice, "record", &ss, NULL, NULL, &error))) {
-      fprintf(stderr, "Error initializing input: %s\n", pa_strerror(error));
+      LOG_ERROR("Error initializing input: %s", pa_strerror(error));
       return NULL;
    }
 
    // Initialize the PulseAudio output stream.
    if (!(output = pa_simple_new(NULL, "Mic Amp (Out)", PA_STREAM_PLAYBACK, pcmPlaybackDevice, "playback", &ss, NULL, NULL, &error))) {
-      fprintf(stderr, "Error initializing output: %s\n", pa_strerror(error));
+      LOG_ERROR("Error initializing output: %s", pa_strerror(error));
       pa_simple_free(input); // Ensure input is freed if output initialization fails.
       return NULL;
    }
@@ -166,13 +169,13 @@ void* voiceAmplificationThread(void* arg) {
    while (running) {
       // Read audio data from input.
       if (pa_simple_read(input, buffer, sizeof(buffer), &error) < 0) {
-         fprintf(stderr, "Error reading: %s\n", pa_strerror(error));
+         LOG_ERROR("Error reading: %s", pa_strerror(error));
          break;
       }
 
       // Write audio data to output.
       if (pa_simple_write(output, buffer, sizeof(buffer), &error) < 0) {
-         fprintf(stderr, "Error writing: %s\n", pa_strerror(error));
+         LOG_ERROR("Error writing: %s", pa_strerror(error));
          break;
       }
    }

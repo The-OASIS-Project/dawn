@@ -19,9 +19,43 @@
  * part of the project and are adopted by the project author(s).
  */
 
-#ifndef WORD_TO_NUMBER_H
-#define WORD_TO_NUMBER_H
+#ifndef LOGGING_H
+#define LOGGING_H
 
-double wordToNumber(char *originalWord);
+#include <stdio.h>
 
-#endif // WORD_TO_NUMBER_H
+// Log levels
+typedef enum {
+    LOG_INFO,
+    LOG_WARNING,
+    LOG_ERROR,
+} log_level_t;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Logging function
+void log_message(log_level_t level, const char *file, int line, const char *func, const char *fmt, ...);
+
+#ifdef __cplusplus
+}
+#endif
+
+// Initialization function
+int init_logging(const char *filename, int to_file);
+
+// Close logging function
+void close_logging(void);
+
+// Logging modes
+#define LOG_TO_CONSOLE 0
+#define LOG_TO_FILE 1
+
+// Macros for easy logging
+#define LOG_INFO(fmt, ...) log_message(LOG_INFO, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
+#define LOG_WARNING(fmt, ...) log_message(LOG_WARNING, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
+#define LOG_ERROR(fmt, ...) log_message(LOG_ERROR, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
+
+#endif // LOGGING_H
+

@@ -4,8 +4,9 @@
 #include <sstream>
 #include <vector>
 
-#include "piper.hpp"
 #include "dawn.h"
+#include "logging.h"
+#include "piper.hpp"
 
 #define DEFAULT_RATE       22050
 #define DEFAULT_CHANNELS   1
@@ -37,11 +38,11 @@ int openAlsaPcmPlaybackDevice(snd_pcm_t **handle, const char *pcm_device, snd_pc
    *frames = DEFAULT_FRAMES;
    int rc = 0;
 
-   printf("ALSA PLAYBACK DRIVER\n");
+   LOG_INFO("ALSA PLAYBACK DRIVER\n");
    /* Open PCM device for playback. */
    rc = snd_pcm_open(handle, pcm_device, SND_PCM_STREAM_PLAYBACK, 0);
    if (rc < 0) {
-      fprintf(stderr, "unable to open pcm device for playback (%s): %s\n", pcm_device, snd_strerror(rc));
+      LOG_ERROR("unable to open pcm device for playback (%s): %s", pcm_device, snd_strerror(rc));
       return 1;
    }
 
@@ -54,7 +55,7 @@ int openAlsaPcmPlaybackDevice(snd_pcm_t **handle, const char *pcm_device, snd_pc
    snd_pcm_hw_params_set_period_size_near(*handle, params, frames, &dir);
    rc = snd_pcm_hw_params(*handle, params);
    if (rc < 0) {
-      fprintf(stderr, "unable to set hw parameters: %s\n", snd_strerror(rc));
+      LOG_ERROR("unable to set hw parameters: %s", snd_strerror(rc));
       snd_pcm_close(*handle);
       *handle = NULL;
       return 1;
@@ -74,16 +75,14 @@ pa_simple *openPulseaudioPlaybackDevice(char *pcm_playback_device)
    int rc = 0;
    pa_simple *pa_handle = NULL;
 
-   printf("PULSEAUDIO PLAYBACK DRIVER: %s\n", pcm_playback_device);
+   LOG_INFO("PULSEAUDIO PLAYBACK DRIVER: %s", pcm_playback_device);
 
    /* Create a new PulseAudio simple connection for playback. */
    pa_handle = pa_simple_new(NULL, APPLICATION_NAME, PA_STREAM_PLAYBACK, pcm_playback_device, "playback", &ss, NULL, NULL, &rc);
    if (!pa_handle) {
-      fprintf(stderr, "PA simple error: %s\n", pa_strerror(rc));
+      LOG_ERROR("PA simple error: %s", pa_strerror(rc));
       return NULL;
    }
-
-   printf("Playback opened successfully.\n");
 
    return pa_handle;
 }
@@ -123,13 +122,13 @@ extern "C" {
 #ifdef ALSA_DEVICE
         rc = openAlsaPcmPlaybackDevice(&handle, pcm_device, &frames);
         if (rc) {
-           fprintf(stderr, "Error creating ALSA playback device.\n");
+           LOG_ERROR("Error creating ALSA playback device.");
            return;
         }
 #else
         pa_handle = openPulseaudioPlaybackDevice(pcm_device);
         if (pa_handle == NULL) {
-           fprintf(stderr, "Error creating Pulse playback device.\n");
+           LOG_ERROR("Error creating Pulse playback device.");
            return;
         }
 #endif
@@ -142,16 +141,16 @@ extern "C" {
                rc = snd_pcm_writei(handle, &audioBuffer[i], min(frames, audioBuffer.size() - i));
                if (rc == -EPIPE) {
                   /* EPIPE means underrun */
-                  fprintf(stderr, "underrun occurred\n");
+                  LOG_ERROR("ALSA underrun occurred");
                   snd_pcm_prepare(handle);
                } else if (rc < 0) {
-                  fprintf(stderr, "error from writei: %s\n", snd_strerror(rc));
+                  LOG_ERROR("ALSA error from writei: %s", snd_strerror(rc));
                }
             }
 #else
             rc = pa_simple_write(pa_handle, audioBuffer.data(), audioBuffer.size() * sizeof(int16_t), &error);
             if (rc < 0) {
-               fprintf(stderr, "error from pa_simple_write: %s\n", pa_strerror(rc));
+               LOG_ERROR("PulseAudio error from pa_simple_write: %s", pa_strerror(rc));
             }
 #endif
             // Clear the audio buffer for the next sentence

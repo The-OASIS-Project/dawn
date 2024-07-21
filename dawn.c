@@ -12,10 +12,11 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  *
- * All contributions to this project are agreed to be licensed under the
- * GPLv3 or any later version. Contributions are understood to be
- * any modifications, enhancements, or additions to the project
- * and become the property of the original author Kris Kersey.
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s). Contributions include any modifications,
+ * enhancements, or additions to the project. These contributions become
+ * part of the project and are adopted by the project author(s).
  */
 
 /* Std C */
@@ -44,10 +45,12 @@
 /* Local */
 #include "audio_utils.h"
 #include "dawn.h"
+#include "logging.h"
 #include "mosquitto_comms.h"
 #include "openai.h"
 #include "text_to_command_nuevo.h"
 #include "text_to_speech.h"
+#include "version.h"
 
 // Define the default sample rate for audio capture.
 #define DEFAULT_RATE             44100
@@ -322,7 +325,7 @@ void signal_handler(int signal) {
  * to play it through the PCM playback device.
  */
 void textToSpeechCallback(const char *actionName, char *value) {
-   printf("Received text to speech command: \"%s\"\n", value);
+   LOG_INFO("Received text to speech command: \"%s\"\n", value);
    text_to_speech(pcm_playback_device, value);
 }
 
@@ -398,7 +401,7 @@ void setPcmPlaybackDevice(const char *actionName, char *value) {
 
    for (i = 0; i < numAudioPlaybackDevices; i++) {
       if (strcmp(playbackDevices[i].name, value) == 0) {
-         printf("Setting audio playback device to \"%s\".\n", playbackDevices[i].device);
+         LOG_INFO("Setting audio playback device to \"%s\".\n", playbackDevices[i].device);
          strncpy(pcm_playback_device, playbackDevices[i].device, MAX_WORD_LENGTH);
          pcm_playback_device[MAX_WORD_LENGTH] = '\0'; // Ensure null termination
          snprintf(speech, MAX_COMMAND_LENGTH, "Switching playback device to %s.", value);
@@ -408,7 +411,7 @@ void setPcmPlaybackDevice(const char *actionName, char *value) {
    }
 
    if (i >= numAudioPlaybackDevices) {
-      fprintf(stderr, "Requested audio playback device not found.\n");
+      LOG_ERROR("Requested audio playback device not found.\n");
       snprintf(speech, MAX_COMMAND_LENGTH, "Sorry sir. A playback devices called %s was not found.", value);
       text_to_speech(pcm_playback_device, speech);
    }
@@ -432,7 +435,7 @@ void setPcmCaptureDevice(const char *actionName, char *value) {
 
    for (i = 0; i < numAudioCaptureDevices; i++) {
       if (strcmp(captureDevices[i].name, value) == 0) {
-         printf("Setting audio capture device to \"%s\".\n", captureDevices[i].device);
+         LOG_INFO("Setting audio capture device to \"%s\".\n", captureDevices[i].device);
          strncpy(pcm_capture_device, captureDevices[i].device, MAX_WORD_LENGTH);
          pcm_capture_device[MAX_WORD_LENGTH] = '\0'; // Ensure null termination
          snprintf(speech, MAX_COMMAND_LENGTH, "Switching capture device to %s.", value);
@@ -442,7 +445,7 @@ void setPcmCaptureDevice(const char *actionName, char *value) {
    }
 
    if (i >= numAudioCaptureDevices) {
-      fprintf(stderr, "Requested audio capture device not found.\n");
+      LOG_ERROR("Requested audio capture device not found.\n");
       snprintf(speech, MAX_COMMAND_LENGTH, "Sorry sir. A capture devices called %s was not found.", value);
       text_to_speech(pcm_playback_device, speech);
    }
@@ -467,7 +470,7 @@ void *measureBackgroundAudio(void *audHandle)
    // Allocate Audio Buffers based on the backend and specified parameters.
    char *buff = (char *)malloc(myControl->full_buff_size);
    if (buff == NULL) {
-      fprintf(stderr, "malloc() failed on buff.\n");
+      LOG_ERROR("malloc() failed on buff.\n");
       return NULL; // Early return on allocation failure for buff.
    }
 
@@ -476,7 +479,7 @@ void *measureBackgroundAudio(void *audHandle)
 
    char *max_buff = (char *)malloc(max_buff_size);
    if (max_buff == NULL) {
-      fprintf(stderr, "malloc() failed on max_buff.\n");
+      LOG_ERROR("malloc() failed on max_buff.\n");
       free(buff); // Ensure buff is freed to avoid a memory leak.
       return NULL; // Early return on allocation failure for max_buff.
    }
@@ -493,7 +496,7 @@ void *measureBackgroundAudio(void *audHandle)
          buff_size += myControl->full_buff_size;
       } else {
          if (rc <= 0) {
-            printf("Error reading PCM.\n");
+            LOG_ERROR("Error reading PCM.\n");
          }
          break; // Exit loop on read error or buffer full.
       }
@@ -502,7 +505,7 @@ void *measureBackgroundAudio(void *audHandle)
    // PulseAudio audio capture loop.
    for (size_t i = 0; i < max_buff_size / myControl->full_buff_size; ++i) {
       if (pa_simple_read(myControl->pa_handle, buff, myControl->pa_framesize, &error) < 0) {
-         printf("Could not read audio: %s\n", pa_strerror(error));
+         LOG_ERROR("Could not read audio: %s\n", pa_strerror(error));
          break; // Exit loop on read error.
       }
       memcpy(max_buff + buff_size, buff, myControl->full_buff_size);
@@ -512,7 +515,7 @@ void *measureBackgroundAudio(void *audHandle)
 
    // Compute RMS for captured audio.
    double rms = calculateRMS((int16_t*)max_buff, buff_size / (DEFAULT_CHANNELS * 2));
-   printf("RMS of background recording is %g.\n", rms);
+   LOG_INFO("RMS of background recording is %g.\n", rms);
    backgroundRMS = rms; // Store RMS value in a global variable.
 
    // Clean up allocated buffers.
@@ -539,7 +542,7 @@ char *getTextResponse(const char *input) {
    // Parse the JSON data
    parsed_json = json_tokener_parse(input);
    if (parsed_json == NULL) {
-      fprintf(stderr, "Error: Unable to process text response.\n");
+      LOG_ERROR("Error: Unable to process text response.\n");
       return NULL;
    }
 
@@ -547,14 +550,14 @@ char *getTextResponse(const char *input) {
    if (json_object_object_get_ex(parsed_json, "text", &text_object)) {
       const char *input_text = json_object_get_string(text_object);
       if (input_text == NULL) {
-         fprintf(stderr, "Error: Unable to get string from input text.\n");
+         LOG_ERROR("Error: Unable to get string from input text.\n");
          json_object_put(parsed_json);
          return NULL;
       }
 
       return_text = malloc((strlen(input_text) + 1) * sizeof(char));
       if (return_text == NULL) {
-         fprintf(stderr, "malloc() failed in getTextResponse().\n");
+         LOG_ERROR("malloc() failed in getTextResponse().\n");
          json_object_put(parsed_json);
          return NULL;
       }
@@ -563,9 +566,9 @@ char *getTextResponse(const char *input) {
       strcpy(return_text, input_text);
 
       // Debugging: Print the extracted text
-      printf("Input Text: %s\n", return_text);
+      LOG_INFO("Input Text: %s\n", return_text);
    } else {
-      fprintf(stderr, "Error: 'text' field not found in JSON.\n");
+      LOG_ERROR("Error: 'text' field not found in JSON.\n");
    }
 
    // Cleanup and return
@@ -594,12 +597,12 @@ int openAlsaPcmCaptureDevice(snd_pcm_t **handle, char *pcm_device, snd_pcm_ufram
    *frames = DEFAULT_FRAMES;
    int rc = 0;
 
-   printf("ALSA CAPTURE DRIVER\n");
+   LOG_INFO("ALSA CAPTURE DRIVER\n");
 
    /* Open PCM device for playback. */
    rc = snd_pcm_open(handle, pcm_device, SND_PCM_STREAM_CAPTURE, 0);
    if (rc < 0) {
-      fprintf(stderr, "unable to open pcm device for capture (%s): %s\n", pcm_device, snd_strerror(rc));
+      LOG_ERROR("Unable to open pcm device for capture (%s): %s\n", pcm_device, snd_strerror(rc));
       return 1;
    }
 
@@ -609,12 +612,12 @@ int openAlsaPcmCaptureDevice(snd_pcm_t **handle, char *pcm_device, snd_pcm_ufram
    snd_pcm_hw_params_set_format(*handle, params, DEFAULT_FORMAT);
    snd_pcm_hw_params_set_channels(*handle, params, DEFAULT_CHANNELS);
    snd_pcm_hw_params_set_rate_near(*handle, params, &rate, &dir);
-   printf("Capture rate set to %u\n", rate);
+   LOG_INFO("Capture rate set to %u\n", rate);
    snd_pcm_hw_params_set_period_size_near(*handle, params, frames, &dir);
-   printf("Frames set to %lu\n", *frames);
+   LOG_INFO("Frames set to %lu\n", *frames);
    rc = snd_pcm_hw_params(*handle, params);
    if (rc < 0) {
-      fprintf(stderr, "unable to set hw parameters: %s\n", snd_strerror(rc));
+      LOG_ERROR("Unable to set hw parameters: %s\n", snd_strerror(rc));
       snd_pcm_close(*handle);
       *handle = NULL;
       return 1;
@@ -640,15 +643,15 @@ pa_simple *openPulseaudioCaptureDevice(char *pcm_capture_device)
    pa_simple *pa_handle = NULL;
    int rc = 0;
 
-   printf("PULSEAUDIO CAPTURE DRIVER: %s\n", pcm_capture_device);
+   LOG_INFO("PULSEAUDIO CAPTURE DRIVER: %s\n", pcm_capture_device);
 
    /* Create a new playback stream */
    if (!(pa_handle = pa_simple_new(NULL, APPLICATION_NAME, PA_STREAM_RECORD, pcm_capture_device, "record", &sample_spec, NULL, NULL, &rc))) {
-      fprintf(stderr, "Error opening PulseAudio record: %s\n", pa_strerror(rc));
+      LOG_ERROR("Error opening PulseAudio record: %s\n", pa_strerror(rc));
       return NULL;
    }
 
-   printf("Capture opened successfully.\n");
+   LOG_INFO("Capture opened successfully.\n");
 
    return pa_handle;
 }
@@ -734,7 +737,7 @@ int capture_buffer(audioControl *myAudioControls,
    // Allocate a local buffer for audio data capture.
    char *buff = (char *)malloc(myAudioControls->full_buff_size);
    if (buff == NULL) {
-      fprintf(stderr, "malloc() failed on buff.\n");
+      LOG_ERROR("malloc() failed on buff.\n");
       return 1; // Return error code on memory allocation failure.
    }
 
@@ -748,7 +751,7 @@ int capture_buffer(audioControl *myAudioControls,
          *ret_buff_size += myAudioControls->full_buff_size; // Update the size of captured data.
       } else {
          if (rc <= 0) {
-            printf("Error reading PCM.\n");
+            LOG_ERROR("Error reading PCM.\n");
             free(buff); // Free the local buffer on error.
             return 1; // Return error code on read failure.
          }
@@ -763,7 +766,7 @@ int capture_buffer(audioControl *myAudioControls,
          *ret_buff_size += myAudioControls->full_buff_size; // Update the size of captured data.
       } else {
          if (rc < 0) {
-            fprintf(stderr, "pa_simple_read() failed: %s\n", pa_strerror(error));
+            LOG_ERROR("pa_simple_read() failed: %s\n", pa_strerror(error));
             free(buff); // Free the local buffer on error.
             return 1; // Return error code on read failure.
          }
@@ -802,7 +805,7 @@ void process_vision_ai(const char *base64_image, size_t image_size) {
 
    vision_ai_image = malloc(image_size);
    if (!vision_ai_image) {
-      fprintf(stderr, "Error: Memory allocation failed.\n");
+      LOG_ERROR("Error: Memory allocation failed.\n");
       return;
    }
    memcpy(vision_ai_image, base64_image, image_size);
@@ -821,16 +824,17 @@ void process_vision_ai(const char *base64_image, size_t image_size) {
  */
 void display_help(int argc, char *argv[]) {
    if (argc > 0) {
-      printf("Usage: %s [options]\n", argv[0]);
+      LOG_INFO("Usage: %s [options]\n", argv[0]);
    } else {
-      printf("Usage: [options]\n");
+      LOG_INFO("Usage: [options]\n");
    }
 
    // Print the list of available command-line options.
-   printf("Options:\n");
-   printf("  -c, --capture DEVICE   Specify the PCM capture device.\n");
-   printf("  -d, --playback DEVICE  Specify the PCM playback device.\n");
-   printf("  -h, --help             Display this help message and exit.\n");
+   LOG_INFO("Options:\n");
+   LOG_INFO("  -c, --capture DEVICE   Specify the PCM capture device.");
+   LOG_INFO("  -l, --logfile LOGFILE  Specify the log filename instead of stdout/stderr.");
+   LOG_INFO("  -d, --playback DEVICE  Specify the PCM playback device.");
+   LOG_INFO("  -h, --help             Display this help message and exit.");
 }
 
 int main(int argc, char *argv[])
@@ -845,6 +849,7 @@ int main(int argc, char *argv[])
    struct json_object *system_message = NULL;
    int rc = 0;
    int opt = 0;
+   const char *log_filename = NULL;
 
 #ifndef ALSA_DEVICE
    // Define the Pulse parameters
@@ -892,16 +897,19 @@ int main(int argc, char *argv[])
 
    static struct option long_options[] = {
       {"capture", required_argument, NULL, 'c'},
+      {"logfile", required_argument, NULL, 'l'},
       {"playback", required_argument, NULL, 'd'},
       {"help", no_argument, NULL, 'h'},
       {0, 0, 0, 0}
    };
    int option_index = 0;
 
+   LOG_INFO("%s Version %s: %s\n", APP_NAME, VERSION_NUMBER, GIT_SHA);
+
    // TODO: I'm adding this here but it will need better error clean-ups.
    curl_global_init(CURL_GLOBAL_DEFAULT);
 
-   while ((opt = getopt_long(argc, argv, "c:d:h", long_options, &option_index)) != -1) {
+   while ((opt = getopt_long(argc, argv, "c:d:hl:", long_options, &option_index)) != -1) {
       switch (opt) {
       case 'c':
          strncpy(pcm_capture_device, optarg, sizeof(pcm_capture_device));
@@ -914,12 +922,29 @@ int main(int argc, char *argv[])
       case 'h':
          display_help(argc, argv);
          exit(EXIT_SUCCESS);
+      case 'l':
+         log_filename = optarg;
+         break;
       case '?':
          display_help(argc, argv);
          exit(EXIT_FAILURE);
       default:
          display_help(argc, argv);
          exit(EXIT_FAILURE);
+      }
+   }
+
+
+   // Initialize logging
+   if (log_filename) {
+      if (init_logging(log_filename, LOG_TO_FILE) != 0) {
+         fprintf(stderr, "Failed to initialize logging to file: %s\n", log_filename);
+         return 1;
+      }
+   } else {
+      if (init_logging(NULL, LOG_TO_CONSOLE) != 0) {
+         fprintf(stderr, "Failed to initialize logging to console\n");
+         return 1;
       }
    }
 
@@ -936,35 +961,36 @@ int main(int argc, char *argv[])
    // Command Processing
    initActions(actions);
 
-   printf("Reading json file...");
+   LOG_INFO("Reading json file...");
    configFile = fopen(CONFIG_FILE, "r");
    if (configFile == NULL) {
-      fprintf(stderr, "Unable to open config file: %s\n", CONFIG_FILE);
+      LOG_ERROR("Unable to open config file: %s\n", CONFIG_FILE);
       return 1;
    }
 
    if ((bytes_read = fread(buffer, 1, sizeof(buffer), configFile)) > 0) {
       buffer[bytes_read] = '\0';
    } else {
-      fprintf(stderr, "Failed to read config file (%s): %s\n", CONFIG_FILE, strerror(bytes_read));
+      LOG_ERROR("Failed to read config file (%s): %s\n", CONFIG_FILE, strerror(bytes_read));
       fclose(configFile);
       return 1;
    }
 
    fclose(configFile);
-   printf("Done.\n");
+   LOG_INFO("Done.\n");
 
    if (parseCommandConfig(buffer, actions, &numActions,
                           captureDevices, &numAudioCaptureDevices,
                           playbackDevices, &numAudioPlaybackDevices)) {
-      fprintf(stderr, "Error parsing json.\n");
+      LOG_ERROR("Error parsing json.\n");
       return 1;
    }
 
-   printf("\n");
-   printParsedData(actions, numActions);
+   LOG_INFO("\n");
+   //printParsedData(actions, numActions);
    convertActionsToCommands(actions, &numActions, commands, &numCommands);
-   printCommands(commands, numCommands);
+   LOG_INFO("Processed %d commands.", numCommands);
+   //printCommands(commands, numCommands);
 
    // JSON setup for OpenAI
    conversation_history = json_object_new_array();
@@ -980,14 +1006,14 @@ int main(int argc, char *argv[])
    // Open Audio Capture Device
    rc = openAlsaPcmCaptureDevice(myAudioControls.handle, pcm_capture_device, myAudioControls.frames);
    if (rc) {
-      fprintf(stderr, "Error creating ALSA capture device.\n");
+      LOG_ERROR("Error creating ALSA capture device.\n");
       return 1;
    }
    myAudioControls.full_buff_size = myAudioControls.frames * DEFAULT_CHANNELS * 2;
 #else
    myAudioControls.pa_handle = openPulseaudioCaptureDevice(pcm_capture_device);
    if (myAudioControls.pa_handle == NULL) {
-      fprintf(stderr, "Error creating Pulse capture device.\n");
+      LOG_ERROR("Error creating Pulse capture device.\n");
       return 1;
    }
 
@@ -996,11 +1022,11 @@ int main(int argc, char *argv[])
    myAudioControls.full_buff_size = myAudioControls.pa_framesize;
 #endif
 
-   printf("max_buff_size: %u, full_buff_size: %u\n", max_buff_size, myAudioControls.full_buff_size);
+   LOG_INFO("max_buff_size: %u, full_buff_size: %u\n", max_buff_size, myAudioControls.full_buff_size);
 
    max_buff = (char *)malloc(max_buff_size);
    if (max_buff == NULL) {
-      fprintf(stderr, "malloc() failed on max_buff.\n");
+      LOG_ERROR("malloc() failed on max_buff.\n");
 
 #ifdef ALSA_DEVICE
       snd_pcm_close(myAudioControls.handle);
@@ -1012,9 +1038,9 @@ int main(int argc, char *argv[])
    }
 
    // Test background audio level
-#if 0
+#if 1
    if (pthread_create(&backgroundAudioDetect, NULL, measureBackgroundAudio, (void *) &myAudioControls) != 0) {
-      fprintf(stderr, "Error creating background audio detection thread.\n");
+      LOG_ERROR("Error creating background audio detection thread.\n");
    }
 #else
    measureBackgroundAudio((void *) &myAudioControls);
@@ -1026,7 +1052,7 @@ int main(int argc, char *argv[])
 
    VoskModel *model = vosk_model_new("model");
    if (model == NULL) {
-      fprintf(stderr, "Error creating new Vosk model.\n");
+      LOG_ERROR("Error creating new Vosk model.\n");
 
       free(max_buff);
 
@@ -1040,7 +1066,7 @@ int main(int argc, char *argv[])
    }
    VoskRecognizer *recognizer = vosk_recognizer_new(model, DEFAULT_RATE);
    if (recognizer == NULL) {
-      fprintf(stderr, "Error creating new Vosk recognizer.\n");
+      LOG_ERROR("Error creating new Vosk recognizer.\n");
 
       vosk_model_free(model);
 
@@ -1060,7 +1086,7 @@ int main(int argc, char *argv[])
 
    mosq = mosquitto_new(NULL, true, NULL);
    if (mosq == NULL){
-      fprintf(stderr, "Error: Out of memory.\n");
+      LOG_ERROR("Error: Out of memory.\n");
       return 1;
    }
 
@@ -1073,20 +1099,20 @@ int main(int argc, char *argv[])
    rc = mosquitto_connect(mosq, "127.0.0.1", 1883, 60);
    if (rc != MOSQ_ERR_SUCCESS){
       mosquitto_destroy(mosq);
-      fprintf(stderr, "Error on mosquitto_connect(): %s\n", mosquitto_strerror(rc));
+      LOG_ERROR("Error on mosquitto_connect(): %s\n", mosquitto_strerror(rc));
       return 1;
    } else {
-      printf("Connected to local MQTT server.\n");
+      LOG_INFO("Connected to local MQTT server.\n");
    }
 
    rc = mosquitto_subscribe(mosq, NULL, APPLICATION_NAME, 0);
    if (rc != MOSQ_ERR_SUCCESS) {
       mosquitto_destroy(mosq);
-      fprintf(stderr, "Error on mosquitto_subscribe():\"/%s\" : %s\n",
+      LOG_ERROR("Error on mosquitto_subscribe():\"/%s\" : %s\n",
               APPLICATION_NAME, mosquitto_strerror(rc));
       return 1;
    } else {
-      printf("Subscribed to \"%s\" MQTT.\n", APPLICATION_NAME);
+      LOG_INFO("Subscribed to \"%s\" MQTT.\n", APPLICATION_NAME);
    }
 
    /* Start processing MQTT events. */
@@ -1096,32 +1122,32 @@ int main(int argc, char *argv[])
    text_to_speech(pcm_playback_device, (char *) timeOfDayGreeting());
 
    // Main loop
-   printf("Listening...\n");
+   LOG_INFO("Listening...\n");
 
 #ifdef ALSA_DEVICE
    snd_pcm_drop(myAudioControls.handle);
    rc = snd_pcm_prepare(myAudioControls.handle);
    if (rc < 0) {
-   fprintf(stderr, "Cannot prepare audio interface for use (%s)\n",
+   LOG_ERROR("Cannot prepare audio interface for use (%s)\n",
       snd_strerror(rc));
       exit(1);
    }
 #else
    if (pa_simple_flush(myAudioControls.pa_handle, &error) != 0) {
-      printf("Unable to flush buffer: %s\n", pa_strerror(error));
+      LOG_WARNING("Unable to flush buffer: %s\n", pa_strerror(error));
    }
    pa_simple_free(myAudioControls.pa_handle);
 
    myAudioControls.pa_handle = openPulseaudioCaptureDevice(pcm_capture_device);
    if (myAudioControls.pa_handle == NULL) {
-      fprintf(stderr, "Error creating Pulse capture device.\n");
+      LOG_ERROR("Error creating Pulse capture device.\n");
       return 1;
    }
 #endif
 
    // Register the signal handler for SIGINT.
    if (signal(SIGINT, signal_handler) == SIG_ERR) {
-      printf("Error: Unable to register signal handler.\n");
+      LOG_ERROR("Error: Unable to register signal handler.\n");
       exit(EXIT_FAILURE);
    }
 
@@ -1137,15 +1163,15 @@ int main(int argc, char *argv[])
             rms = calculateRMS((int16_t*)max_buff, buff_size / (DEFAULT_CHANNELS * 2));
 
             if (rms >= (backgroundRMS + TALKING_THRESHOLD_OFFSET)) {
-               printf("SILENCE: Talking detected. Going into WAKEWORD_LISTENING.\n");
+               LOG_WARNING("SILENCE: Talking detected. Going into WAKEWORD_LISTENING.\n");
                recState = silenceNextState;
 
                vosk_recognizer_accept_waveform(recognizer, max_buff, buff_size);
                vosk_output = vosk_recognizer_partial_result(recognizer);
                if (vosk_output == NULL) {
-                  fprintf(stderr, "vosk_recognizer_partial_result() returned NULL!\n");
+                  LOG_ERROR("vosk_recognizer_partial_result() returned NULL!\n");
                } else {
-                  printf("Partial Input: %s\n", vosk_output);
+                  LOG_WARNING("Partial Input: %s\n", vosk_output);
                }
             }
             break;
@@ -1155,7 +1181,7 @@ int main(int argc, char *argv[])
             rms = calculateRMS((int16_t*)max_buff, buff_size / (DEFAULT_CHANNELS * 2));
 
             if (rms >= (backgroundRMS + TALKING_THRESHOLD_OFFSET)) {
-               printf("WAKEWORD_LISTEN: Talking still in progress.\n");
+               LOG_WARNING("WAKEWORD_LISTEN: Talking still in progress.\n");
                /* For an additional layer of "silence," I'm getting the length of the
                 * vosk output to see if the volume was up but no one was saying
                 * anything. */
@@ -1164,9 +1190,9 @@ int main(int argc, char *argv[])
                vosk_recognizer_accept_waveform(recognizer, max_buff, buff_size);
                vosk_output = vosk_recognizer_partial_result(recognizer);
                if (vosk_output == NULL) {
-                  fprintf(stderr, "vosk_recognizer_partial_result() returned NULL!\n");
+                  LOG_ERROR("vosk_recognizer_partial_result() returned NULL!\n");
                } else {
-                  printf("Partial Input: %s\n", vosk_output);
+                  LOG_WARNING("Partial Input: %s\n", vosk_output);
                   if (strlen(vosk_output) == vosk_output_length) {
                      vosk_nochange = 1;
                   }
@@ -1174,7 +1200,6 @@ int main(int argc, char *argv[])
             }
 
             if (rms < (backgroundRMS + TALKING_THRESHOLD_OFFSET) || vosk_nochange) {
-               printf(".");
                commandTimeout++;
                vosk_nochange = 0;
             } else {
@@ -1182,15 +1207,14 @@ int main(int argc, char *argv[])
             }
 
             if (commandTimeout >= DEFAULT_COMMAND_TIMEOUT) {
-               printf("\n");
                commandTimeout = 0;
-               printf("WAKEWORD_LISTEN: Checking for wake word.\n");
+               LOG_WARNING("WAKEWORD_LISTEN: Checking for wake word.\n");
                vosk_recognizer_accept_waveform(recognizer, max_buff, buff_size);
                vosk_output = vosk_recognizer_final_result(recognizer);
                if (vosk_output == NULL) {
-                  fprintf(stderr, "vosk_recognizer_final_result() returned NULL!\n");
+                  LOG_ERROR("vosk_recognizer_final_result() returned NULL!\n");
                } else {
-                  printf("Input: %s\n", vosk_output);
+                  LOG_WARNING("Input: %s\n", vosk_output);
                   input_text = getTextResponse(vosk_output);
 
                   for (i = 0; i < numGoodbyeWords; i++) {
@@ -1204,7 +1228,7 @@ int main(int argc, char *argv[])
                   for (i = 0; i < numWakeWords; i++) {
                      char *found_ptr = strstr(input_text, wakeWords[i]);
                      if (found_ptr != NULL) {
-                        printf("Wake word detected.\n");
+                        LOG_WARNING("Wake word detected.\n");
 
                         // Calculate the length of the wake word
                         size_t wakeWordLength = strlen(wakeWords[i]);
@@ -1219,26 +1243,26 @@ int main(int argc, char *argv[])
                   if (i < numWakeWords) {
 
                      if (*next_char_ptr == '\0') {
-                        printf("wakeWords[i] was found at the end of input_text.\n");
+                        LOG_WARNING("wakeWords[i] was found at the end of input_text.\n");
                         text_to_speech(pcm_playback_device, "Hello sir.");
 
 #ifdef ALSA_DEVICE
                         /* Remove if we can detect immediately. */
                         snd_pcm_drop(myAudioControls.handle);
                         if (snd_pcm_prepare(myAudioControls.handle) < 0) {
-                           fprintf(stderr, "Cannot prepare audio interface for use (%s)\n",
+                           LOG_ERROR("Cannot prepare audio interface for use (%s)\n",
                            snd_strerror(rc));
                            exit(1);
                         }
 #else
                         if (pa_simple_flush(myAudioControls.pa_handle, &error) != 0) {
-                           printf("Unable to flush buffer: %s\n", pa_strerror(error));
+                           LOG_WARNING("Unable to flush buffer: %s\n", pa_strerror(error));
                         }
                         pa_simple_free(myAudioControls.pa_handle);
 
                         myAudioControls.pa_handle = openPulseaudioCaptureDevice(pcm_capture_device);
                         if (myAudioControls.pa_handle == NULL) {
-                           fprintf(stderr, "Error creating Pulse capture device.\n");
+                           LOG_ERROR("Error creating Pulse capture device.\n");
                            return 1;
                         }
 #endif
@@ -1268,7 +1292,7 @@ int main(int argc, char *argv[])
             rms = calculateRMS((int16_t*)max_buff, buff_size / (DEFAULT_CHANNELS * 2));
 
             if (rms >= (backgroundRMS + TALKING_THRESHOLD_OFFSET)) {
-               printf("COMMAND_RECORDING: Talking still in progress.\n");
+               LOG_WARNING("COMMAND_RECORDING: Talking still in progress.\n");
                /* For an additional layer of "silence," I'm getting the length of the
                 * vosk output to see if the volume was up but no one was saying
                 * anything. */
@@ -1277,9 +1301,9 @@ int main(int argc, char *argv[])
                vosk_recognizer_accept_waveform(recognizer, max_buff, buff_size);
                vosk_output = vosk_recognizer_partial_result(recognizer);
                if (vosk_output == NULL) {
-                  fprintf(stderr, "vosk_recognizer_partial_result() returned NULL!\n");
+                  LOG_ERROR("vosk_recognizer_partial_result() returned NULL!\n");
                } else {
-                  printf("Partial Input: %s\n", vosk_output);
+                  LOG_WARNING("Partial Input: %s\n", vosk_output);
                   if (strlen(vosk_output) == vosk_output_length) {
                      vosk_nochange = 1;
                   }
@@ -1287,7 +1311,6 @@ int main(int argc, char *argv[])
             }
 
             if (rms < (backgroundRMS + TALKING_THRESHOLD_OFFSET) || vosk_nochange) {
-               printf(".");
                commandTimeout++;
                vosk_nochange = 0;
             } else {
@@ -1295,15 +1318,14 @@ int main(int argc, char *argv[])
             }
 
             if (commandTimeout >= DEFAULT_COMMAND_TIMEOUT) {
-               printf("\n");
                commandTimeout = 0;
-               printf("COMMAND_RECORDING: Command processing.\n");
+               LOG_WARNING("COMMAND_RECORDING: Command processing.\n");
                vosk_recognizer_accept_waveform(recognizer, max_buff, buff_size);
                vosk_output = vosk_recognizer_final_result(recognizer);
                if (vosk_output == NULL) {
-                  fprintf(stderr, "vosk_recognizer_final_result() returned NULL!\n");
+                  LOG_ERROR("vosk_recognizer_final_result() returned NULL!\n");
                } else {
-                  printf("Input: %s\n", vosk_output);
+                  LOG_WARNING("Input: %s\n", vosk_output);
 
                   input_text = getTextResponse(vosk_output);
 
@@ -1320,37 +1342,32 @@ int main(int argc, char *argv[])
             for (i = 0; i < numCommands; i++) {
                if (searchString(commands[i].actionWordsWildcard, command_text) == 1) {
                   char thisValue[1024];   // FIXME: These are abnormally large.
-                                                // I'm in a hurry and don't want overflows.
+                                          // I'm in a hurry and don't want overflows.
                   char thisCommand[2048];
                   char thisSubstring[2048];
                   int strLength = 0;
 
                   memset(thisValue, '\0', sizeof(thisValue));
-                  printf("Found command \"%s\".\n\tLooking for value in \"%s\".\n",
+                  LOG_WARNING("Found command \"%s\".\n\tLooking for value in \"%s\".\n",
                          commands[i].actionWordsWildcard, commands[i].actionWordsRegex);
 
-                  /* HERE */
                   strLength = strlen(commands[i].actionWordsRegex);
                   if ((strLength >= 2) && (commands[i].actionWordsRegex[strLength - 2] == '%') &&
                       (commands[i].actionWordsRegex[strLength - 1] == 's')) {
                      strncpy(thisSubstring, commands[i].actionWordsRegex, strLength - 2);
                      thisSubstring[strLength - 2] = '\0';
-                     printf("extract_remaining_after_substring(\"%s\", %s\")\n", command_text, thisSubstring);
                      strcpy(thisValue, extract_remaining_after_substring(command_text, thisSubstring));
                   } else {
-                     printf("sscanf(\"%s\", \"%s\", thisValue)\n",
-                            command_text, commands[i].actionWordsRegex);
                      int retSs = sscanf(command_text, commands[i].actionWordsRegex, thisValue);
-                     printf("sscanf() returned %d and \"%s\"\n", retSs, thisValue);
                   }
                   snprintf(thisCommand, sizeof(thisCommand),
                            commands[i].actionCommand, thisValue);
-                  printf("Sending: \"%s\"\n", thisCommand);
+                  LOG_WARNING("Sending: \"%s\"\n", thisCommand);
 
                   rc = mosquitto_publish(mosq, NULL, commands[i].topic, strlen(thisCommand),
                                          thisCommand, 0, false);
                   if(rc != MOSQ_ERR_SUCCESS){
-                     fprintf(stderr, "Error publishing: %s\n", mosquitto_strerror(rc));
+                     LOG_ERROR("Error publishing: %s\n", mosquitto_strerror(rc));
                   }
 
                   break;
@@ -1358,23 +1375,23 @@ int main(int argc, char *argv[])
             }
 
             if (i >= numCommands) {
-               printf("Not detected as a command.\n");
+               LOG_WARNING("Not detected as a command.\n");
 #ifndef DISABLE_AI
                for (i = 0; i < numIgnoreWords; i++) {
                   if (strcmp(command_text, ignoreWords[i]) == 0) {
-                     printf("Ignore word detected.\n");
+                     LOG_WARNING("Ignore word detected.\n");
                      break;
                   }
                }
 
                if (i < numIgnoreWords) {
-                  printf("Input ignored. Found in ignore list.\n");
+                  LOG_WARNING("Input ignored. Found in ignore list.\n");
                   silenceNextState = WAKEWORD_LISTEN;
                   recState = SILENCE;
                } else {
                   response_text = getGptResponse(conversation_history, command_text, NULL, 0);
                   if (response_text != NULL) {
-                     printf("AI: %s\n", response_text);
+                     LOG_WARNING("AI: %s\n", response_text);
                      text_to_speech(pcm_playback_device, response_text);
 
                      struct json_object *ai_message = json_object_new_object();
@@ -1384,7 +1401,7 @@ int main(int argc, char *argv[])
 
                      free(response_text);
                   } else {
-                     fprintf(stderr, "GPT error.\n");
+                     LOG_ERROR("GPT error.\n");
                      text_to_speech(pcm_playback_device, "I'm sorry but I'm currently unavailable boss.");
                   }
                }
@@ -1402,19 +1419,19 @@ int main(int argc, char *argv[])
 #ifdef ALSA_DEVICE
             snd_pcm_drop(myAudioControls.handle);
             if (snd_pcm_prepare(myAudioControls.handle) < 0) {
-            fprintf(stderr, "Cannot prepare audio interface for use (%s)\n",
+               LOG_ERROR("Cannot prepare audio interface for use (%s)\n",
                snd_strerror(rc));
                exit(1);
             }
 #else
             if (pa_simple_flush(myAudioControls.pa_handle, &error) != 0) {
-               printf("Unable to flush buffer: %s\n", pa_strerror(error));
+               LOG_WARNING("Unable to flush buffer: %s\n", pa_strerror(error));
             }
             pa_simple_free(myAudioControls.pa_handle);
 
             myAudioControls.pa_handle = openPulseaudioCaptureDevice(pcm_capture_device);
             if (myAudioControls.pa_handle == NULL) {
-               fprintf(stderr, "Error creating Pulse capture device.\n");
+               LOG_ERROR("Error creating Pulse capture device.\n");
                return 1;
             }
 #endif
@@ -1429,7 +1446,7 @@ int main(int argc, char *argv[])
                   vision_ai_image, vision_ai_image_size);
             if (response_text != NULL) {
                // AI returned successfully, vocalize response.
-               printf("AI: %s\n", response_text);
+               LOG_WARNING("AI: %s\n", response_text);
                text_to_speech(pcm_playback_device, response_text);
 
                // Add the successful AI response to the conversation.
@@ -1441,7 +1458,7 @@ int main(int argc, char *argv[])
                free(response_text);
             } else {
                // Error on AI response
-               fprintf(stderr, "GPT error.\n");
+               LOG_ERROR("GPT error.\n");
                text_to_speech(pcm_playback_device, "I'm sorry but I'm currently unavailable boss.");
             }
 
@@ -1457,19 +1474,19 @@ int main(int argc, char *argv[])
 #ifdef ALSA_DEVICE
             snd_pcm_drop(myAudioControls.handle);
             if (snd_pcm_prepare(myAudioControls.handle) < 0) {
-            fprintf(stderr, "Cannot prepare audio interface for use (%s)\n",
+            LOG_ERROR("Cannot prepare audio interface for use (%s)\n",
                snd_strerror(rc));
                exit(1);
             }
 #else
             if (pa_simple_flush(myAudioControls.pa_handle, &error) != 0) {
-               printf("Unable to flush buffer: %s\n", pa_strerror(error));
+               LOG_WARNING("Unable to flush buffer: %s\n", pa_strerror(error));
             }
             pa_simple_free(myAudioControls.pa_handle);
 
             myAudioControls.pa_handle = openPulseaudioCaptureDevice(pcm_capture_device);
             if (myAudioControls.pa_handle == NULL) {
-               fprintf(stderr, "Error creating Pulse capture device.\n");
+               LOG_ERROR("Error creating Pulse capture device.\n");
                return 1;
             }
 #endif
@@ -1479,11 +1496,11 @@ int main(int argc, char *argv[])
 
             break;
          default:
-            printf("I really shouldn't be here.\n");
+            LOG_ERROR("I really shouldn't be here.\n");
       }
    }
 
-   printf("Quit.\n");
+   LOG_INFO("Quit.\n");
 
    mosquitto_disconnect(mosq);
    mosquitto_loop_stop(mosq, false);
@@ -1504,6 +1521,9 @@ int main(int argc, char *argv[])
    free(max_buff);
 
    curl_global_cleanup();
+
+   // Close the log file properly
+   close_logging();
 
    return 0;
 }

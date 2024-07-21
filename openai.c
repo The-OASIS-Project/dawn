@@ -12,10 +12,11 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  *
- * All contributions to this project are agreed to be licensed under the
- * GPLv3 or any later version. Contributions are understood to be
- * any modifications, enhancements, or additions to the project
- * and become the property of the original author Kris Kersey.
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s). Contributions include any modifications,
+ * enhancements, or additions to the project. These contributions become
+ * part of the project and are adopted by the project author(s).
  */
 
 #include <stdio.h>
@@ -30,9 +31,10 @@
 #include <curl/curl.h>
 #include <json-c/json.h>
 
-#include "text_to_speech.h"
-#include "secrets.h"
 #include "dawn.h"
+#include "logging.h"
+#include "secrets.h"
+#include "text_to_speech.h"
 
 /**
  * @brief A structure to manage dynamic memory as a buffer.
@@ -72,7 +74,7 @@ static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, voi
 
    mem->memory = realloc(mem->memory, mem->size + realsize + 1);
    if (mem->memory == NULL) {
-      printf("Not enough memory (realloc returned NULL)\n");
+      LOG_ERROR("Not enough memory (realloc returned NULL)");
       return 0;
    }
 
@@ -217,7 +219,7 @@ char *getGptResponse(struct json_object *conversation_history, char *input_text,
          free(data_uri);
       } else {
          // Handle memory allocation failure
-         fprintf(stderr, "Failed to allocate memory for data URI.\n");
+         LOG_ERROR("Failed to allocate memory for data URI.");
       }
 
       json_object_object_add(image_obj, "image_url", image_url_obj);
@@ -235,18 +237,18 @@ char *getGptResponse(struct json_object *conversation_history, char *input_text,
    json_object_object_add(root, "max_tokens", json_object_new_int(GPT_MAX_TOKENS));
 
    payload = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN | JSON_C_TO_STRING_NOSLASHESCAPE);
-   printf("JSON Payload (PLAIN):\n%s\n", payload);
+   LOG_INFO("JSON Payload (PLAIN): %s", payload);
 
    chunk.memory = malloc(1);
    if (chunk.memory == NULL) {
-      printf("Error allocating memory!\n");
+      LOG_ERROR("Error allocating memory!");
 
       return NULL;
    }
    chunk.size = 0;
 
    if (checkInternetConnectionWithTimeout("https://api.openai.com", 4)) {
-      printf("URL did not return. Unavailable.\n");
+      LOG_ERROR("URL did not return. Unavailable.");
 
       return NULL;
    }
@@ -264,18 +266,18 @@ char *getGptResponse(struct json_object *conversation_history, char *input_text,
 
       res = curl_easy_perform(curl_handle);
       if (res != CURLE_OK) {
-         fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+         LOG_ERROR("curl_easy_perform() failed: %s", curl_easy_strerror(res));
       }
 
       curl_easy_cleanup(curl_handle);
       curl_slist_free_all(headers);
    }
 
-   printf("Raw receive from ChatGPT: %s\n", (char *) chunk.memory);
+   LOG_INFO("Raw receive from ChatGPT: %s", (char *) chunk.memory);
 
    parsed_json = json_tokener_parse(chunk.memory);
    if (!parsed_json) {
-      fprintf(stderr, "Failed to parse JSON response.\n");
+      LOG_ERROR("Failed to parse JSON response.");
       free(chunk.memory);
       return NULL;
    }
@@ -283,7 +285,7 @@ char *getGptResponse(struct json_object *conversation_history, char *input_text,
    if (!json_object_object_get_ex(parsed_json, "choices", &choices) ||
       json_object_get_type(choices) != json_type_array ||
       json_object_array_length(choices) < 1) {
-      fprintf(stderr, "Error in parsing response: 'choices' missing or invalid.\n");
+      LOG_ERROR("Error in parsing response: 'choices' missing or invalid.");
       json_object_put(parsed_json); // Correctly free JSON object
       free(chunk.memory);
       return NULL;
@@ -291,7 +293,7 @@ char *getGptResponse(struct json_object *conversation_history, char *input_text,
 
    first_choice = json_object_array_get_idx(choices, 0);
    if (!first_choice) {
-      fprintf(stderr, "Error: 'choices' array is empty.\n");
+      LOG_ERROR("Error: 'choices' array is empty.");
       json_object_put(parsed_json);
       free(chunk.memory);
       return NULL;
@@ -299,7 +301,7 @@ char *getGptResponse(struct json_object *conversation_history, char *input_text,
 
    if (!json_object_object_get_ex(first_choice, "message", &message) ||
       !json_object_object_get_ex(message, "content", &content)) {
-      fprintf(stderr, "Error: 'message' or 'content' field missing.\n");
+      LOG_ERROR("Error: 'message' or 'content' field missing.");
       json_object_put(parsed_json);
       free(chunk.memory);
       return NULL;
@@ -310,19 +312,19 @@ char *getGptResponse(struct json_object *conversation_history, char *input_text,
 
    if (!json_object_object_get_ex(parsed_json, "usage", &usage_obj) ||
       !json_object_object_get_ex(usage_obj, "total_tokens", &total_tokens_obj)) {
-      fprintf(stderr, "Error: 'usage' or 'total_tokens' field missing.\n");
+      LOG_ERROR("Error: 'usage' or 'total_tokens' field missing.");
       json_object_put(parsed_json);
       free(chunk.memory);
       return NULL;
    }
 
    total_tokens = json_object_get_int(total_tokens_obj);
-   printf("Total tokens: %d\n", total_tokens);
+   LOG_WARNING("Total tokens: %d", total_tokens);
 
    // Duplicate the response content string safely
    const char* content_str = json_object_get_string(content);
    if (!content_str) {
-      fprintf(stderr, "Error: 'content' field is empty or not a string.\n");
+      LOG_ERROR("Error: 'content' field is empty or not a string.");
       json_object_put(parsed_json);
       free(chunk.memory);
       return NULL;
@@ -334,14 +336,14 @@ char *getGptResponse(struct json_object *conversation_history, char *input_text,
 #if 0 /* They change this API, so for now, remove the reason. */
       if (strcmp(json_object_get_string(type), "length") == 0)
       {
-         printf("GPT returned prematurely due to token length.\n");
+         LOG_ERROR("GPT returned prematurely due to token length.");
       } else {
-         printf("GPT returned prematurely due to \"%s\".\n",
+         LOG_ERROR("GPT returned prematurely due to \"%s\".",
                 json_object_get_string(type));
       }
 #endif
    } else {
-      printf("Response finished properly.\n");
+      LOG_INFO("Response finished properly.");
    }
 
    json_object_put(parsed_json);
