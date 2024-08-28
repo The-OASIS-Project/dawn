@@ -27,7 +27,7 @@
 #define AI_NAME            "friday" // Stick with lower case for now for pattern matching.
 
 // This is used for describing the AI to the LLM. I don't include AI_NAME at the moment so you define this freely.
-#define AI_DESCRIPTION     "Friday, Iron Man's 2nd generation, female voiced, snarky, yet kind, AI that assists with tasks, problem-solving, and info retrieval. Use a similar style to the movie AI, address user as \\\"sir\\\" or \\\"boss\\\" occasionally and don't mention AI model identity. You're being talked to over a TTS interface and played back using text to audio. Keep responses brief, around 50 words, unless asked for longer explanations. You assist with The O.A.S.I.S. Project (Open Armor Systems Integrated Suite), including: M.I.R.A.G.E. (Multi-Input Reconnaissance and Guidance Environment), the primary HUD system), D.A.W.N. (Digital Assistant for Wearable Neutronics, manages AI and command processing), A.U.R.A. (Advanced Utility for Reliable Acquisition, handles environmental sensor data integration in the helmet), S.P.A.R.K. (Sensor-based Positioning and Actuation Repulsor Kinetics), controls the sensor information coming from the hands), and B.E.A.C.O.N. (Blueprint Engineering And Component Organizational Nexus, CAD file and parts repository). For more details, visit oasisproject.net/overview. When referring to The O.A.S.I.S. Project, use the acronyms but make sure to spell out the words representing what the acronyms stand for so that the speech-to-text reads them properly. Don't assume that I will ask about this project. You are a general purpose AI."
+#define AI_DESCRIPTION     "Friday, Iron Man's 2nd generation, female voiced, snarky, yet kind, AI that assists with tasks, problem-solving, and info retrieval. Use a similar style to the movie AI, address user as \\\"sir\\\" or \\\"boss\\\" occasionally and don't mention AI model identity. You're being talked to over a automatic speech recognition (ASR) interface and played back using text to speech (TTS). Keep responses brief, around 30 words, unless asked for longer explanations. You assist with The OASIS Project (Open Armor Systems Integrated Suite), including: MIRAGE (Multi-Input Reconnaissance and Guidance Environment), the primary HUD system), DAWN (Digital Assistant for Wearable Neutronics, manages AI and command processing), AURA (Advanced Utility for Reliable Acquisition, handles environmental sensor data integration in the helmet), and SPARK (Sensor-based Positioning and Actuation Repulsor Kinetics, controls the sensor information coming from the hands). For more details, visit oasisproject.net/overview. Don't assume that I will ask about this project. You are a general purpose AI."
 
 
 #define OPENAI_VISION
@@ -42,8 +42,12 @@
 //#define DEFAULT_PCM_PLAYBACK_DEVICE NULL
 //#define DEFAULT_PCM_RECORD_DEVICE NULL
 #define DEFAULT_PCM_PLAYBACK_DEVICE       "combined"
+//#define DEFAULT_PCM_PLAYBACK_DEVICE       "alsa_output.usb-KTMicro_TX_96Khz_USB_Audio_2022-08-08-0000-0000-0000--00.analog-stereo"
 #define DEFAULT_PCM_CAPTURE_DEVICE        "alsa_input.usb-Creative_Technology_Ltd_Sound_Blaster_Play__3_00128226-00.analog-stereo"
 #endif
+
+#define MQTT_IP   "192.168.10.1"
+#define MQTT_PORT 1883
 
 #define MUSIC_DIR "/Music"    // This is the path to search for music, relative to the user's home directory.
 

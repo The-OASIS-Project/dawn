@@ -62,7 +62,7 @@
 #define DEFAULT_CAPTURE_SECONDS  0.5f
 
 // Define the default command timeout in terms of iterations of DEFAULT_CAPTURE_SECONDS.
-#define DEFAULT_COMMAND_TIMEOUT  4
+#define DEFAULT_COMMAND_TIMEOUT  2
 
 // Define the duration for background audio capture in seconds.
 #define BACKGROUND_CAPTURE_SECONDS  6
@@ -155,7 +155,10 @@ static char *wakeWords[] = {
    "okay " AI_NAME,
    "alright " AI_NAME,
    "hey " AI_NAME,
-   "hi " AI_NAME
+   "hi " AI_NAME,
+   "good evening " AI_NAME,
+   "good day " AI_NAME,
+   "good morning " AI_NAME
 };
 
 // Array of words/phrases used to signal the end of an interaction with the AI.
@@ -218,7 +221,8 @@ typedef enum {
    WAKEWORD_LISTEN,
    COMMAND_RECORDING,
    PROCESS_COMMAND,
-   VISION_AI_READY
+   VISION_AI_READY,
+   INVALID_STATE
 } listeningState;
 
 /**
@@ -253,6 +257,9 @@ static int vision_ai_ready = 0;
  * it may be altered asynchronously by signal handling.
  */
 volatile sig_atomic_t quit = 0;
+
+/* MQTT */
+static struct mosquitto *mosq;
 
 #if 0
 // Define the function to draw the waveform using SDL
@@ -326,7 +333,7 @@ void signal_handler(int signal) {
  */
 void textToSpeechCallback(const char *actionName, char *value) {
    LOG_INFO("Received text to speech command: \"%s\"\n", value);
-   text_to_speech(pcm_playback_device, value);
+   text_to_speech(value);
 }
 
 /**
@@ -405,7 +412,7 @@ void setPcmPlaybackDevice(const char *actionName, char *value) {
          strncpy(pcm_playback_device, playbackDevices[i].device, MAX_WORD_LENGTH);
          pcm_playback_device[MAX_WORD_LENGTH] = '\0'; // Ensure null termination
          snprintf(speech, MAX_COMMAND_LENGTH, "Switching playback device to %s.", value);
-         text_to_speech(pcm_playback_device, speech);
+         text_to_speech(speech);
          break;
       }
    }
@@ -413,7 +420,7 @@ void setPcmPlaybackDevice(const char *actionName, char *value) {
    if (i >= numAudioPlaybackDevices) {
       LOG_ERROR("Requested audio playback device not found.\n");
       snprintf(speech, MAX_COMMAND_LENGTH, "Sorry sir. A playback devices called %s was not found.", value);
-      text_to_speech(pcm_playback_device, speech);
+      text_to_speech(speech);
    }
 }
 
@@ -439,7 +446,7 @@ void setPcmCaptureDevice(const char *actionName, char *value) {
          strncpy(pcm_capture_device, captureDevices[i].device, MAX_WORD_LENGTH);
          pcm_capture_device[MAX_WORD_LENGTH] = '\0'; // Ensure null termination
          snprintf(speech, MAX_COMMAND_LENGTH, "Switching capture device to %s.", value);
-         text_to_speech(pcm_playback_device, speech);
+         text_to_speech(speech);
          break;
       }
    }
@@ -447,7 +454,7 @@ void setPcmCaptureDevice(const char *actionName, char *value) {
    if (i >= numAudioCaptureDevices) {
       LOG_ERROR("Requested audio capture device not found.\n");
       snprintf(speech, MAX_COMMAND_LENGTH, "Sorry sir. A capture devices called %s was not found.", value);
-      text_to_speech(pcm_playback_device, speech);
+      text_to_speech(speech);
    }
 }
 
@@ -502,6 +509,7 @@ void *measureBackgroundAudio(void *audHandle)
       }
    }
 #else
+   pa_simple_flush(myControl->pa_handle, NULL);
    // PulseAudio audio capture loop.
    for (size_t i = 0; i < max_buff_size / myControl->full_buff_size; ++i) {
       if (pa_simple_read(myControl->pa_handle, buff, myControl->pa_framesize, &error) < 0) {
@@ -645,7 +653,7 @@ pa_simple *openPulseaudioCaptureDevice(char *pcm_capture_device)
 
    LOG_INFO("PULSEAUDIO CAPTURE DRIVER: %s\n", pcm_capture_device);
 
-   /* Create a new playback stream */
+   /* Create a new capture stream */
    if (!(pa_handle = pa_simple_new(NULL, APPLICATION_NAME, PA_STREAM_RECORD, pcm_capture_device, "record", &sample_spec, NULL, NULL, &rc))) {
       LOG_ERROR("Error opening PulseAudio record: %s\n", pa_strerror(rc));
       return NULL;
@@ -768,6 +776,11 @@ int capture_buffer(audioControl *myAudioControls,
          if (rc < 0) {
             LOG_ERROR("pa_simple_read() failed: %s\n", pa_strerror(error));
             free(buff); // Free the local buffer on error.
+            pa_simple_free(myAudioControls->pa_handle);
+            myAudioControls->pa_handle = openPulseaudioCaptureDevice(pcm_capture_device);
+            if (myAudioControls->pa_handle == NULL) {
+               LOG_ERROR("Error creating Pulse capture device.\n");
+            }
             return 1; // Return error code on read failure.
          }
          buffer_full = 1; // Set buffer_full flag if max_buff is filled.
@@ -813,6 +826,77 @@ void process_vision_ai(const char *base64_image, size_t image_size) {
    vision_ai_image_size = image_size;
    vision_ai_ready = 1;
 }
+
+listeningState currentState = INVALID_STATE;
+
+/* Publish AI State. Only send state if it's changed.
+ *
+ * FIXME: Build this JSON correctly.
+ *        Also pick a better topic for general purpose use.
+ */
+int publish_ai_state(listeningState newState) {
+   const char stateTemplate[] = "{\"device\": \"ai\", \"name\":\"%s\", \"state\":\"%s\"}";
+   char state[18] = "";
+   char *aiState = NULL;
+   int aiStateLength = 0;
+   int rc = 0;
+
+   if (newState == currentState || newState == INVALID_STATE) {
+      return 0;
+   }
+
+   switch (newState) {
+      case SILENCE:
+         strcpy(state, "SILENCE");
+         break;
+      case WAKEWORD_LISTEN:
+         strcpy(state, "WAKEWORD_LISTEN");
+         break;
+      case COMMAND_RECORDING:
+         strcpy(state, "COMMAND_RECORDING");
+         break;
+      case PROCESS_COMMAND:
+         strcpy(state, "PROCESS_COMMAND");
+         break;
+      case VISION_AI_READY:
+         strcpy(state, "VISION_AI_READY");
+         break;
+      default:
+         LOG_ERROR("Unknown state: %d", newState);
+         return 1;
+   }
+
+   /* "- 4" is from substracting the two %s but adding the term char */
+   aiStateLength = strlen(stateTemplate) + strlen(AI_NAME) + strlen(state) - 4 + 1;
+   aiState = malloc(aiStateLength);
+   if (aiState == NULL ) {
+      LOG_ERROR("Error allocating memory for AI state.");
+      return 1;
+   }
+
+   rc = snprintf(aiState, aiStateLength, stateTemplate, AI_NAME, state);
+   if (rc < 0 || rc >= aiStateLength) {
+      LOG_ERROR("Error creating AI state message.");
+      free(aiState);
+      return 1;
+   }
+
+   rc = mosquitto_publish(mosq, NULL, "hud", strlen(aiState),
+                          aiState, 0, false);
+   if(rc != MOSQ_ERR_SUCCESS){
+      LOG_ERROR("Error publishing: %s\n", mosquitto_strerror(rc));
+      free(aiState);
+      return 1;
+   }
+
+   free(aiState);
+
+   currentState = newState;  // Update the state after successful publish
+
+   return 0;
+}
+
+
 
 /**
  * Displays help information for the program, outlining the usage and available command-line options.
@@ -881,9 +965,6 @@ int main(int argc, char *argv[])
    pthread_t backgroundAudioDetect;
 
    int commandTimeout = 0;
-
-   /* MQTT */
-   struct mosquitto *mosq;
 
    /* Array Counts */
    int numGoodbyeWords = sizeof(goodbyeWords) / sizeof(goodbyeWords[0]);
@@ -1096,7 +1177,7 @@ int main(int argc, char *argv[])
    mosquitto_message_callback_set(mosq, on_message);
 
    /* Connect to local MQTT server. */
-   rc = mosquitto_connect(mosq, "127.0.0.1", 1883, 60);
+   rc = mosquitto_connect(mosq, MQTT_IP, MQTT_PORT, 60);
    if (rc != MOSQ_ERR_SUCCESS){
       mosquitto_destroy(mosq);
       LOG_ERROR("Error on mosquitto_connect(): %s\n", mosquitto_strerror(rc));
@@ -1117,9 +1198,11 @@ int main(int argc, char *argv[])
 
    /* Start processing MQTT events. */
    mosquitto_loop_start(mosq);
-   /* End MQTT Setup */
 
-   text_to_speech(pcm_playback_device, (char *) timeOfDayGreeting());
+   /* Initialize text to speech processing. */
+   initialize_text_to_speech(pcm_playback_device);
+
+   text_to_speech((char *) timeOfDayGreeting());
 
    // Main loop
    LOG_INFO("Listening...\n");
@@ -1130,7 +1213,7 @@ int main(int argc, char *argv[])
    if (rc < 0) {
    LOG_ERROR("Cannot prepare audio interface for use (%s)\n",
       snd_strerror(rc));
-      exit(1);
+      exit(EXIT_FAILURE);
    }
 #else
    if (pa_simple_flush(myAudioControls.pa_handle, &error) != 0) {
@@ -1141,7 +1224,7 @@ int main(int argc, char *argv[])
    myAudioControls.pa_handle = openPulseaudioCaptureDevice(pcm_capture_device);
    if (myAudioControls.pa_handle == NULL) {
       LOG_ERROR("Error creating Pulse capture device.\n");
-      return 1;
+      exit(EXIT_FAILURE);
    }
 #endif
 
@@ -1156,6 +1239,7 @@ int main(int argc, char *argv[])
          recState = VISION_AI_READY;
       }
 
+      publish_ai_state(recState);
       switch (recState) {
          case SILENCE:
             capture_buffer(&myAudioControls, max_buff, max_buff_size, &buff_size);
@@ -1221,7 +1305,7 @@ int main(int argc, char *argv[])
                      if (strcmp(input_text, goodbyeWords[i]) == 0) {
                         quit = 1;
 
-                        text_to_speech(pcm_playback_device, "Goodbye sir.");
+                        text_to_speech("Goodbye sir.");
                      }
                   }
 
@@ -1244,7 +1328,7 @@ int main(int argc, char *argv[])
 
                      if (*next_char_ptr == '\0') {
                         LOG_WARNING("wakeWords[i] was found at the end of input_text.\n");
-                        text_to_speech(pcm_playback_device, "Hello sir.");
+                        text_to_speech("Hello sir.");
 
 #ifdef ALSA_DEVICE
                         /* Remove if we can detect immediately. */
@@ -1392,7 +1476,23 @@ int main(int argc, char *argv[])
                   response_text = getGptResponse(conversation_history, command_text, NULL, 0);
                   if (response_text != NULL) {
                      LOG_WARNING("AI: %s\n", response_text);
-                     text_to_speech(pcm_playback_device, response_text);
+
+                     /* This match section was added for local AI models that return extra data that needs
+                      * to be filtered out.
+                      */
+                     // <end_of_turn> is being added by Gemma 2B
+                     char *match = NULL;
+                     if ((match = strstr(response_text, "<end_of_turn>")) != NULL) {
+                        *match = '\0';
+                        LOG_WARNING("AI: %s\n", response_text);
+                     }
+
+                     // Now be sure to filter out special characters that give us problems.
+                     remove_chars(response_text, "*");
+                     remove_emojis(response_text);
+
+                     // Now let's see how it sounds.
+                     text_to_speech(response_text);
 
                      struct json_object *ai_message = json_object_new_object();
                      json_object_object_add(ai_message, "role", json_object_new_string("assistant"));
@@ -1402,7 +1502,7 @@ int main(int argc, char *argv[])
                      free(response_text);
                   } else {
                      LOG_ERROR("GPT error.\n");
-                     text_to_speech(pcm_playback_device, "I'm sorry but I'm currently unavailable boss.");
+                     text_to_speech("I'm sorry but I'm currently unavailable boss.");
                   }
                }
 #endif
@@ -1447,7 +1547,12 @@ int main(int argc, char *argv[])
             if (response_text != NULL) {
                // AI returned successfully, vocalize response.
                LOG_WARNING("AI: %s\n", response_text);
-               text_to_speech(pcm_playback_device, response_text);
+	       char *match = NULL;
+	       if ((match = strstr(response_text, "<end_of_turn>")) != NULL) {
+                  *match = '\0';
+                  LOG_WARNING("AI: %s\n", response_text);
+	       }
+               text_to_speech(response_text);
 
                // Add the successful AI response to the conversation.
                struct json_object *ai_message = json_object_new_object();
@@ -1459,7 +1564,7 @@ int main(int argc, char *argv[])
             } else {
                // Error on AI response
                LOG_ERROR("GPT error.\n");
-               text_to_speech(pcm_playback_device, "I'm sorry but I'm currently unavailable boss.");
+               text_to_speech("I'm sorry but I'm currently unavailable boss.");
             }
 
             // Cleanup the image
@@ -1501,6 +1606,8 @@ int main(int argc, char *argv[])
    }
 
    LOG_INFO("Quit.\n");
+
+   cleanup_text_to_speech();
 
    mosquitto_disconnect(mosq);
    mosquitto_loop_stop(mosq, false);

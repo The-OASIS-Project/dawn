@@ -22,6 +22,20 @@
 #ifndef TEXT_TO_SPEECH_H
 #define TEXT_TO_SPEECH_H
 
-void text_to_speech(char *pcm_device, char* text);
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void initialize_text_to_speech(char *pcm_device);
+void text_to_speech(char *text);
+void cleanup_text_to_speech(void);
+
+// Text utility function(s) to clean-up TTS text.
+void remove_chars(char *str, const char *remove_chars);
+void remove_emojis(char *str);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // TEXT_TO_SPEECH_H

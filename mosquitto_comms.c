@@ -19,7 +19,6 @@
  * part of the project and are adopted by the project author(s).
  */
 
-#define _GNU_SOURCE
 #include <dirent.h>
 #include <fnmatch.h>
 #include <pthread.h>

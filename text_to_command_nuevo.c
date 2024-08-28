@@ -452,7 +452,8 @@ int parseCommandConfig(char *json, actionType *actions, int *numActions,
       while (!json_object_iter_equal(&itSub, &itSubEnd)) {
          actionName = json_object_iter_peek_name(&itSub);
 
-         strncpy(actions[*numActions].subActions[actions[*numActions].numSubActions].name, actionName, MAX_WORD_LENGTH); // actionName to struct.
+         strncpy(actions[*numActions].subActions[actions[*numActions].numSubActions].name,
+                 actionName, MAX_WORD_LENGTH); // actionName to struct.
 
          if (!json_object_object_get_ex(actionsObject, actionName, &nextActionObject)) {
             LOG_ERROR("\"%s\" object not found in json.", actionName);
