@@ -12,10 +12,11 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  *
- * All contributions to this project are agreed to be licensed under the
- * GPLv3 or any later version. Contributions are understood to be
- * any modifications, enhancements, or additions to the project
- * and become the property of the original author Kris Kersey.
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s). Contributions include any modifications,
+ * enhancements, or additions to the project. These contributions become
+ * part of the project and are adopted by the project author(s).
  */
 
 #include <stdio.h>

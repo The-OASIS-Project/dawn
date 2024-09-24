@@ -4,8 +4,10 @@
 #include <sstream>
 #include <vector>
 
-#include "piper.hpp"
+#include "text_to_command_nuevo.h"
 #include "dawn.h"
+#include "logging.h"
+#include "piper.hpp"
 
 #define DEFAULT_RATE       22050
 #define DEFAULT_CHANNELS   1
@@ -24,12 +26,27 @@
 #define DEFAULT_PULSE_FORMAT  PA_SAMPLE_S16LE
 #endif
 
-
 using namespace std;
 using namespace piper;
 
+typedef struct {
+    PiperConfig config;
+    Voice voice;
+    int is_initialized;
+    char pcm_capture_device[MAX_WORD_LENGTH + 1];
 #ifdef ALSA_DEVICE
-int openAlsaPcmPlaybackDevice(snd_pcm_t **handle, const char *pcm_device, snd_pcm_uframes_t *frames)
+    snd_pcm_t *handle;
+    snd_pcm_uframes_t frames;
+#else
+    pa_simple *pa_handle;
+#endif
+} TTS_Handle;
+
+// Global TTS_Handle object
+static TTS_Handle tts_handle;
+
+#ifdef ALSA_DEVICE
+int openAlsaPcmPlaybackDevice(snd_pcm_t **handle, char *pcm_device, snd_pcm_uframes_t *frames)
 {
    snd_pcm_hw_params_t *params = NULL;
    unsigned int rate = DEFAULT_RATE;
@@ -37,11 +54,11 @@ int openAlsaPcmPlaybackDevice(snd_pcm_t **handle, const char *pcm_device, snd_pc
    *frames = DEFAULT_FRAMES;
    int rc = 0;
 
-   printf("ALSA PLAYBACK DRIVER\n");
+   LOG_INFO("ALSA PLAYBACK DRIVER\n");
    /* Open PCM device for playback. */
    rc = snd_pcm_open(handle, pcm_device, SND_PCM_STREAM_PLAYBACK, 0);
    if (rc < 0) {
-      fprintf(stderr, "unable to open pcm device for playback (%s): %s\n", pcm_device, snd_strerror(rc));
+      LOG_ERROR("unable to open pcm device for playback (%s): %s", pcm_device, snd_strerror(rc));
       return 1;
    }
 
@@ -54,7 +71,7 @@ int openAlsaPcmPlaybackDevice(snd_pcm_t **handle, const char *pcm_device, snd_pc
    snd_pcm_hw_params_set_period_size_near(*handle, params, frames, &dir);
    rc = snd_pcm_hw_params(*handle, params);
    if (rc < 0) {
-      fprintf(stderr, "unable to set hw parameters: %s\n", snd_strerror(rc));
+      LOG_ERROR("unable to set hw parameters: %s", snd_strerror(rc));
       snd_pcm_close(*handle);
       *handle = NULL;
       return 1;
@@ -74,100 +91,186 @@ pa_simple *openPulseaudioPlaybackDevice(char *pcm_playback_device)
    int rc = 0;
    pa_simple *pa_handle = NULL;
 
-   printf("PULSEAUDIO PLAYBACK DRIVER: %s\n", pcm_playback_device);
+   LOG_INFO("PULSEAUDIO PLAYBACK DRIVER: %s", pcm_playback_device);
 
    /* Create a new PulseAudio simple connection for playback. */
    pa_handle = pa_simple_new(NULL, APPLICATION_NAME, PA_STREAM_PLAYBACK, pcm_playback_device, "playback", &ss, NULL, NULL, &rc);
    if (!pa_handle) {
-      fprintf(stderr, "PA simple error: %s\n", pa_strerror(rc));
+      LOG_ERROR("PA simple error: %s", pa_strerror(rc));
       return NULL;
    }
-
-   printf("Playback opened successfully.\n");
 
    return pa_handle;
 }
 #endif
 
 extern "C" {
-    void text_to_speech(char *pcm_device, char* text) {
-        // Convert the input text to a std::string
-        string inputText(text);
+   // Initialization function
+   void initialize_text_to_speech(char *pcm_device) {
+      // Load the voice
+      //std::optional<SpeakerId> speakerIdOpt = std::nullopt;
+      std::optional<SpeakerId> speakerIdOpt = 0;
+      loadVoice(tts_handle.config, "en_GB-alba-medium.onnx", "en_GB-alba-medium.onnx.json", tts_handle.voice, speakerIdOpt, false);
+      // Initialize the piper
+      initialize(tts_handle.config);
 
-        // Piper
-        PiperConfig config;
-        Voice voice;
-        SynthesisResult result;
-        vector<int16_t> audioBuffer;
+      strcpy(tts_handle.pcm_capture_device, pcm_device);
+
+      tts_handle.voice.synthesisConfig.lengthScale = 0.85f;
+
+      tts_handle.is_initialized = 1;
+   }
+
+   void text_to_speech(char* text) {
+      int error = 0;
+
+      if (!tts_handle.is_initialized) {
+         LOG_ERROR("Text-to-Speech system not initialized. Call initialize_text_to_speech() first.");
+         return;
+      }
+
+      assert(text != nullptr && "Received a null pointer");
+      std::string inputText(text);
+
+      // Piper
+      SynthesisResult result;
+      vector<int16_t> audioBuffer;
+
+      int rc = 0;
 
 #ifdef ALSA_DEVICE
-        // Define the ALSA parameters
-        snd_pcm_t *handle = NULL;
-        snd_pcm_uframes_t frames = 0;
+      int rc = openAlsaPcmPlaybackDevice(&(tts_handle.handle), tts_handle.pcm_capture_device, &(tts_handle.frames));
+      if (rc) {
+         LOG_ERROR("Error creating ALSA playback device.");
+         return;
+      }
 #else
-        // Define the Pulse parameters
-        pa_simple *pa_handle = NULL;
-        int error = 0;
+      tts_handle.pa_handle = openPulseaudioPlaybackDevice(tts_handle.pcm_capture_device);
+      if (tts_handle.pa_handle == NULL) {
+         LOG_ERROR("Error creating Pulse playback device.");
+         return;
+      }
 #endif
 
-        int rc = 0;
-
-        // Initialize the piper
-        initialize(config);
-        
-        // Load the voice
-        std::optional<SpeakerId> speakerIdOpt = std::nullopt;
-        loadVoice(config, "en_GB-alba-medium.onnx", "en_GB-alba-medium.onnx.json", voice, speakerIdOpt);
-        voice.synthesisConfig.lengthScale = 0.85f;
-
+      // Convert text to audio data
+      textToAudio(tts_handle.config, tts_handle.voice, inputText, audioBuffer, result, [&]() {
 #ifdef ALSA_DEVICE
-        rc = openAlsaPcmPlaybackDevice(&handle, pcm_device, &frames);
-        if (rc) {
-           fprintf(stderr, "Error creating ALSA playback device.\n");
-           return;
-        }
-#else
-        pa_handle = openPulseaudioPlaybackDevice(pcm_device);
-        if (pa_handle == NULL) {
-           fprintf(stderr, "Error creating Pulse playback device.\n");
-           return;
-        }
-#endif
-
-        // Convert text to audio data
-        textToAudio(config, voice, inputText, audioBuffer, result, [&]() {
-#ifdef ALSA_DEVICE
-            // In the callback, play the audio data using ALSA
-            for (size_t i = 0; i < audioBuffer.size(); i += frames) {
-               rc = snd_pcm_writei(handle, &audioBuffer[i], min(frames, audioBuffer.size() - i));
-               if (rc == -EPIPE) {
-                  /* EPIPE means underrun */
-                  fprintf(stderr, "underrun occurred\n");
-                  snd_pcm_prepare(handle);
-               } else if (rc < 0) {
-                  fprintf(stderr, "error from writei: %s\n", snd_strerror(rc));
-               }
+         // In the callback, play the audio data using ALSA
+         for (size_t i = 0; i < audioBuffer.size(); i += frames) {
+            rc = snd_pcm_writei(tts_handle.handle, &audioBuffer[i], min(tts_handle.frames, audioBuffer.size() - i));
+            if (rc == -EPIPE) {
+               /* EPIPE means underrun */
+               LOG_ERROR("ALSA underrun occurred");
+               snd_pcm_prepare(tts_handle.handle);
+            } else if (rc < 0) {
+               LOG_ERROR("ALSA error from writei: %s", snd_strerror(rc));
             }
+         }
 #else
-            rc = pa_simple_write(pa_handle, audioBuffer.data(), audioBuffer.size() * sizeof(int16_t), &error);
-            if (rc < 0) {
-               fprintf(stderr, "error from pa_simple_write: %s\n", pa_strerror(rc));
-            }
-#endif
-            // Clear the audio buffer for the next sentence
+         rc = pa_simple_write(tts_handle.pa_handle, audioBuffer.data(), audioBuffer.size() * sizeof(int16_t), &error);
+         if (rc < 0) {
+            LOG_ERROR("PulseAudio error from pa_simple_write: %s", pa_strerror(rc));
             audioBuffer.clear();
-        });
+            return;
+         }
 
-        // Clean up
-        terminate(config);
+         pa_simple_drain(tts_handle.pa_handle, NULL);
+         pa_simple_flush(tts_handle.pa_handle, NULL);
+#endif
+         // Clear the audio buffer for the next sentence
+         audioBuffer.clear();
+      });
 
 #ifdef ALSA_DEVICE
-        snd_pcm_drain(handle);
-        snd_pcm_close(handle);
+      if (tts_handle.handle) {
+         snd_pcm_close(tts_handle.handle);
+         tts_handle.handle = NULL;
+      }
 #else
-        pa_simple_drain(pa_handle, NULL);
-        pa_simple_free(pa_handle);
+      if (tts_handle.pa_handle) {
+         pa_simple_free(tts_handle.pa_handle);
+         tts_handle.pa_handle = NULL;
+      }
 #endif
-    }
-}
+   }
+
+   // Cleanup function
+   void cleanup_text_to_speech() {
+      if (!tts_handle.is_initialized) {
+         LOG_ERROR("Text-to-Speech system not initialized. Call initialize_text_to_speech() first.");
+         return;
+      }
+
+      // Clean up Piper
+      terminate(tts_handle.config);
+
+   }
+
+   void remove_chars(char *str, const char *remove_chars) {
+      char *src, *dst;
+      bool should_remove;
+      for (src = dst = str; *src != '\0'; src++) {
+         should_remove = false;
+         for (const char *rc = remove_chars; *rc != '\0'; rc++) {
+            if (*src == *rc) {
+               should_remove = true;
+               break;
+            }
+         }
+         if (!should_remove) {
+            *dst++ = *src;
+         }
+      }
+      *dst = '\0';
+   }
+
+   bool is_emoji(unsigned int codepoint) {
+    // Basic emoji ranges (not exhaustive)
+    return (codepoint >= 0x1F600 && codepoint <= 0x1F64F) || // Emoticons
+           (codepoint >= 0x1F300 && codepoint <= 0x1F5FF) || // Miscellaneous Symbols and Pictographs
+           (codepoint >= 0x1F680 && codepoint <= 0x1F6FF) || // Transport and Map Symbols
+           (codepoint >= 0x2600 && codepoint <= 0x26FF) ||   // Miscellaneous Symbols
+           (codepoint >= 0x2700 && codepoint <= 0x27BF) ||   // Dingbats
+           (codepoint >= 0x1F900 && codepoint <= 0x1F9FF);   // Supplemental Symbols and Pictographs
+   }
+
+   void remove_emojis(char *str) {
+      char *src, *dst;
+      src = dst = str;
+
+      while (*src) {
+         unsigned char byte = *src;
+         unsigned int codepoint = 0;
+         int bytes_in_char = 1;
+
+         if (byte < 0x80) {
+            codepoint = byte; // 1-byte ASCII character
+         } else if (byte < 0xE0) {
+            codepoint = (byte & 0x1F) << 6;
+            codepoint |= (*(src + 1) & 0x3F);
+            bytes_in_char = 2;
+         } else if (byte < 0xF0) {
+            codepoint = (byte & 0x0F) << 12;
+            codepoint |= (*(src + 1) & 0x3F) << 6;
+            codepoint |= (*(src + 2) & 0x3F);
+            bytes_in_char = 3;
+         } else {
+            codepoint = (byte & 0x07) << 18;
+            codepoint |= (*(src + 1) & 0x3F) << 12;
+            codepoint |= (*(src + 2) & 0x3F) << 6;
+            codepoint |= (*(src + 3) & 0x3F);
+            bytes_in_char = 4;
+         }
+
+         if (!is_emoji(codepoint)) {
+            for (int i = 0; i < bytes_in_char; i++) {
+               *dst++ = *src++;
+            }
+         } else {
+            src += bytes_in_char; // Skip emoji
+         }
+      }
+      *dst = '\0'; // Null-terminate the filtered string
+   }
+} // extern "C"
 

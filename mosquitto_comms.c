@@ -12,13 +12,13 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  *
- * All contributions to this project are agreed to be licensed under the
- * GPLv3 or any later version. Contributions are understood to be
- * any modifications, enhancements, or additions to the project
- * and become the property of the original author Kris Kersey.
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s). Contributions include any modifications,
+ * enhancements, or additions to the project. These contributions become
+ * part of the project and are adopted by the project author(s).
  */
 
-#define _GNU_SOURCE
 #include <dirent.h>
 #include <fnmatch.h>
 #include <pthread.h>
@@ -41,6 +41,7 @@
 /* Local */
 #include "dawn.h"
 #include "flac_playback.h"
+#include "logging.h"
 #include "mic_passthrough.h"
 #include "mosquitto_comms.h"
 #include "word_to_number.h"
@@ -78,7 +79,7 @@ static pthread_t voice_thread = -1;
 const char* getUserHomeDirectory() {
    const char* homeDir = getenv("HOME");
    if (!homeDir) {
-      fprintf(stderr, "Error: HOME environment variable not set.\n");
+      LOG_ERROR("Error: HOME environment variable not set.");
       return NULL;
    }
 
@@ -106,7 +107,7 @@ char* constructPathWithSubdirectory(const char* subdirectory) {
    // Allocate memory for the full path
    char* fullPath = (char*)malloc(fullPathSize);
    if (!fullPath) {
-      fprintf(stderr, "Error: Memory allocation failed for full path.\n");
+      LOG_ERROR("Error: Memory allocation failed for full path.");
 
       return NULL;
    }
@@ -132,7 +133,7 @@ static int current_track = 0;
 void searchDirectory(const char *rootDir, const char *pattern, Playlist *playlist) {
    DIR *dir = opendir(rootDir);
    if (!dir) {
-      perror("Error opening directory");
+      LOG_ERROR("Error opening directory: %s", rootDir);
       return;
    }
 
@@ -140,7 +141,7 @@ void searchDirectory(const char *rootDir, const char *pattern, Playlist *playlis
    while ((entry = readdir(dir)) != NULL) {
       if (entry->d_type == DT_REG) { // Regular file
          if (playlist->count >= MAX_PLAYLIST_LENGTH) {
-            fprintf(stderr, "Playlist is full\n");
+            LOG_WARNING("Playlist is full.");
             closedir(dir);
             return;
          }
@@ -178,7 +179,7 @@ void parseJsonCommandandExecute(const char *input)
    // Parse the JSON data
    parsedJson = json_tokener_parse(input);
    if (parsedJson == NULL) {
-      fprintf(stderr, "Error: Unable to process mqtt command.\n");
+      LOG_ERROR("Error: Unable to process mqtt command.");
 
       return;
    }
@@ -188,12 +189,12 @@ void parseJsonCommandandExecute(const char *input)
       // Extract the text value as a C string
       deviceName = json_object_get_string(deviceObject);
       if (deviceName == NULL) {
-         fprintf(stderr, "Error: Unable to get device name from json command.\n");
+         LOG_ERROR("Error: Unable to get device name from json command.");
          json_object_put(parsedJson);
          return;
       }
    } else {
-      fprintf(stderr, "Error: 'device' field not found in JSON.\n");
+      LOG_ERROR("Error: 'device' field not found in JSON.");
       json_object_put(parsedJson);
 
       return;
@@ -204,12 +205,12 @@ void parseJsonCommandandExecute(const char *input)
       // Extract the text value as a C string
       actionName = json_object_get_string(actionObject);
       if (actionName == NULL) {
-         fprintf(stderr, "Error: Unable to get action name from json command.\n");
+         LOG_ERROR("Error: Unable to get action name from json command.");
          json_object_put(parsedJson);
          return;
       }
    } else {
-      fprintf(stderr, "Error: 'action' field not found in JSON.\n");
+      LOG_ERROR("Error: 'action' field not found in JSON.");
       json_object_put(parsedJson);
 
       return;
@@ -220,10 +221,10 @@ void parseJsonCommandandExecute(const char *input)
       // Extract the text value as a C string
       value = json_object_get_string(valueObject);
       if (value == NULL) {
-         fprintf(stderr, "Notice: Unable to get value name from json command.\n");
+         LOG_WARNING("Notice: Unable to get value name from json command.");
       }
    } else {
-      fprintf(stderr, "Notice: 'value' field not found in JSON.\n");
+      LOG_WARNING("Notice: 'value' field not found in JSON.");
    }
 
    /* Loop through device names for device types. */
@@ -233,7 +234,7 @@ void parseJsonCommandandExecute(const char *input)
          {
             deviceCallbackArray[i].callback(actionName, (void *) value);
          } else {
-            printf("Skipping callback, value NULL.\n");
+            LOG_WARNING("Skipping callback, value NULL.");
          }
       }
    }
@@ -248,10 +249,10 @@ void on_connect(struct mosquitto *mosq, void *obj, int reason_code)
 {
    int rc;
 
-   printf("MQTT Connecting.\n");
+   LOG_INFO("MQTT Connecting.");
 
    if(reason_code != 0){
-      printf("MQTT disconnecting?\n");
+      LOG_WARNING("MQTT disconnecting?");
       mosquitto_disconnect(mosq);
       return;
    }
@@ -263,7 +264,7 @@ void on_subscribe(struct mosquitto *mosq, void *obj, int mid, int qos_count, con
 	int i;
 	bool have_subscription = false;
 
-   printf("MQTT subscribed.\n");
+   LOG_INFO("MQTT subscribed.");
 
 	for(i=0; i<qos_count; i++){
 		if(granted_qos[i] <= 2){
@@ -271,7 +272,7 @@ void on_subscribe(struct mosquitto *mosq, void *obj, int mid, int qos_count, con
 		}
 	}
 	if(have_subscription == false){
-		fprintf(stderr, "Error: All subscriptions rejected.\n");
+		LOG_ERROR("Error: All subscriptions rejected.");
 		mosquitto_disconnect(mosq);
 	}
 }
@@ -279,7 +280,7 @@ void on_subscribe(struct mosquitto *mosq, void *obj, int mid, int qos_count, con
 /* Callback called when the client receives a message. */
 void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto_message *msg)
 {
-	printf("%s %d %s\n", msg->topic, msg->qos, (char *)msg->payload);
+	LOG_INFO("%s %d %s", msg->topic, msg->qos, (char *)msg->payload);
 
    parseJsonCommandandExecute((char *)msg->payload);
 }
@@ -341,7 +342,6 @@ void timeCallback(const char *actionName, char *value) {
 
 // Custom comparison function for qsort
 int compare(const void *p1, const void *p2) {
-    printf("Comparing %s to %s\n", (char *)p1, (char *)p2);
     return strcmp((char *)p1, (char *)p2);
 }
 
@@ -360,7 +360,7 @@ void musicCallback(const char *actionName, char *value) {
       current_track = 0;
 
       if ((strlen(value) + 8) > MAX_FILENAME_LENGTH) {
-         fprintf(stderr, "\"%s\" is too long to search for.\n", value);
+         LOG_ERROR("\"%s\" is too long to search for.", value);
 
          return;
       }
@@ -368,7 +368,7 @@ void musicCallback(const char *actionName, char *value) {
       // Construct the full path to the user's music directory
       char* musicDir = constructPathWithSubdirectory(MUSIC_DIR);
       if (!musicDir) {
-         fprintf(stderr, "Error constructing music path.\n");
+         LOG_ERROR("Error constructing music path.");
 
          return;
       }
@@ -385,7 +385,6 @@ void musicCallback(const char *actionName, char *value) {
       strWildcards[i+2] = '\0';
       strcat(strWildcards, ".flac");
 
-      printf("Original pattern: \"%s\", New pattern: \"%s\"\n", value, strWildcards);
       searchDirectory(musicDir, strWildcards, &playlist);
 
       free(musicDir); // free the allocated memory
@@ -393,9 +392,9 @@ void musicCallback(const char *actionName, char *value) {
       // Sort the array using qsort
       qsort(playlist.filenames, playlist.count, MAX_FILENAME_LENGTH, compare);
 
-      printf("New playlist:\n");
+      LOG_INFO("New playlist:");
       for (i = 0; i < playlist.count; i++) {
-         printf("%s\n", playlist.filenames[i]);
+         LOG_INFO("\t%s", playlist.filenames[i]);
       }
 
       if (playlist.count > 0) {
@@ -403,18 +402,18 @@ void musicCallback(const char *actionName, char *value) {
          args.file_name = playlist.filenames[current_track];
          args.start_time = 0;       /* For now set to zero. We may support other modes later. */
 
-         printf("Playing: %s %s %d\n", args.sink_name, args.file_name, args.start_time);
+         LOG_WARNING("Playing: %s %s %d", args.sink_name, args.file_name, args.start_time);
 
          // Create the playback thread
          if (pthread_create(&music_thread, NULL, playFlacAudio, &args)) {
-            fprintf(stderr, "Error creating thread\n");
+            LOG_ERROR("Error creating thread");
             return;
          }
       } else {
-         printf("No music matching that description was found.\n");
+         LOG_WARNING("No music matching that description was found.");
       }
    } else if (strcmp(actionName, "stop") == 0) {
-      printf("Stopping music playback.\n");
+      LOG_WARNING("Stopping music playback.");
       setMusicPlay(0);
    } else if (strcmp(actionName, "next") == 0) {
       if ((music_thread != -1) && (pthread_kill(music_thread, 0) == 0)) {
@@ -432,11 +431,11 @@ void musicCallback(const char *actionName, char *value) {
          args.file_name = playlist.filenames[current_track];
          args.start_time = 0;       /* For now set to zero. We may support other modes later. */
 
-         printf("Playing: %s %s %d\n", args.sink_name, args.file_name, args.start_time);
+         LOG_WARNING("Playing: %s %s %d", args.sink_name, args.file_name, args.start_time);
 
          // Create the playback thread
          if (pthread_create(&music_thread, NULL, playFlacAudio, &args)) {
-            fprintf(stderr, "Error creating music thread\n");
+            LOG_ERROR("Error creating music thread");
             return;
          }
       }
@@ -456,11 +455,11 @@ void musicCallback(const char *actionName, char *value) {
          args.file_name = playlist.filenames[current_track];
          args.start_time = 0;       /* For now set to zero. We may support other modes later. */
 
-         printf("Playing: %s %s %d\n", args.sink_name, args.file_name, args.start_time);
+         LOG_WARNING("Playing: %s %s %d", args.sink_name, args.file_name, args.start_time);
 
          // Create the playback thread
          if (pthread_create(&music_thread, NULL, playFlacAudio, &args)) {
-            fprintf(stderr, "Error creating music thread\n");
+            LOG_ERROR("Error creating music thread");
             return;
          }
       }
@@ -470,20 +469,20 @@ void musicCallback(const char *actionName, char *value) {
 void voiceAmplifierCallback(const char *actionName, char *value) {
    if (strcmp(actionName, "enable") == 0) {
       if ((voice_thread != -1) && (pthread_kill(voice_thread, 0) == 0)) {
-         printf("Voice amplificiation thread already running.\n");
+         LOG_WARNING("Voice amplificiation thread already running.");
          return;
       }
 
       // Create the playback thread
       if (pthread_create(&voice_thread, NULL, voiceAmplificationThread, NULL)) {
-         fprintf(stderr, "Error creating voice thread\n");
+         LOG_ERROR("Error creating voice thread");
          return;
       }
    } else if (strcmp(actionName, "disable") == 0) {
       if ((voice_thread != -1) && (pthread_kill(voice_thread, 0) == 0)) {
          setStopVA();
       } else {
-         printf("Voice amplificiation thread not running.\n");
+         LOG_WARNING("Voice amplificiation thread not running.");
       }
    }
 }
@@ -505,31 +504,31 @@ unsigned char *read_file(const char *filename, size_t *length) {
    *length = 0; // Ensure length is set to 0 initially
    FILE *file = fopen(filename, "rb");
    if (!file) {
-      perror("File opening failed");
+      LOG_ERROR("File opening failed: %s", filename);
       return NULL;
    }
 
    fseek(file, 0, SEEK_END);
    long size = ftell(file);
    if (size == -1) {
-      perror("Failed to determine file size");
+      LOG_ERROR("Failed to determine file size: %s", filename);
       fclose(file);
       return NULL;
    }
    *length = (size_t)size;
-   printf("The image file is %ld bytes.\n", *length);
+   LOG_INFO("The image file is %ld bytes.\n", *length);
    fseek(file, 0, SEEK_SET);
 
    unsigned char *content = malloc(*length);
    if (!content) {
-      perror("Memory allocation failed");
+      LOG_ERROR("Memory allocation failed");
       fclose(file);
       return NULL;
    }
 
    size_t read_length = fread(content, 1, *length, file);
    if (*length != read_length) {
-      fprintf(stderr, "Failed to read the total size. Expected: %ld, Read: %ld\n", *length, read_length);
+      LOG_ERROR("Failed to read the total size. Expected: %ld, Read: %ld", *length, read_length);
       free(content);
       fclose(file);
       return NULL;
@@ -549,7 +548,7 @@ unsigned char *read_file(const char *filename, size_t *length) {
  */
 char *base64_encode(const unsigned char *buffer, size_t length) {
    if (buffer == NULL || length <= 0) {
-      fprintf(stderr, "Invalid input to base64_encode.\n");
+      LOG_ERROR("Invalid input to base64_encode.");
       return NULL;
    }
 
@@ -559,14 +558,14 @@ char *base64_encode(const unsigned char *buffer, size_t length) {
    // Create a new BIO for Base64 encoding.
    b64 = BIO_new(BIO_f_base64());
    if (b64 == NULL) {
-      fprintf(stderr, "Failed to create Base64 BIO.\n");
+      LOG_ERROR("Failed to create Base64 BIO.");
       return NULL;
    }
 
    // Create a new BIO that holds data in memory.
    bio = BIO_new(BIO_s_mem());
    if (bio == NULL) {
-      fprintf(stderr, "Failed to create memory BIO.\n");
+      LOG_ERROR("Failed to create memory BIO.");
       BIO_free_all(b64); // Ensure cleanup
       return NULL;
    }
@@ -582,14 +581,14 @@ char *base64_encode(const unsigned char *buffer, size_t length) {
    // Write the input buffer into the BIO chain.
    // This data gets Base64 encoded by 'b64', then stored in the memory managed by 'bio'.
    if (BIO_write(bio, buffer, length) <= 0) {
-      fprintf(stderr, "Failed to write data to BIO.\n");
+      LOG_ERROR("Failed to write data to BIO.");
       BIO_free_all(bio); // Also frees 'b64' since it's pushed onto 'bio'
       return NULL;
    }
 
    // Ensure all data is flushed through the BIO chain and any encoding is completed.
    if (BIO_flush(bio) <= 0) {
-      fprintf(stderr, "Failed to flush BIO.\n");
+      LOG_ERROR("Failed to flush BIO.");
       BIO_free_all(bio);
       return NULL;
    }
@@ -598,7 +597,7 @@ char *base64_encode(const unsigned char *buffer, size_t length) {
    // This does not remove the data from the BIO, but allows access to it.
    BIO_get_mem_ptr(bio, &bufferPtr);
    if (bufferPtr == NULL || bufferPtr->data == NULL) {
-      fprintf(stderr, "Failed to get pointer to BIO memory.\n");
+      LOG_ERROR("Failed to get pointer to BIO memory.");
       BIO_free_all(bio);
       return NULL;
    }
@@ -607,7 +606,7 @@ char *base64_encode(const unsigned char *buffer, size_t length) {
    // Note: 'bufferPtr->length' contains the length of the Base64 encoded data.
    char *b64text = malloc(bufferPtr->length + 1);
    if (b64text == NULL) {
-      fprintf(stderr, "Memory allocation failed for Base64 text.\n");
+      LOG_ERROR("Memory allocation failed for Base64 text.");
       BIO_free_all(bio);
       return NULL;
    }
@@ -632,7 +631,7 @@ char *base64_encode(const unsigned char *buffer, size_t length) {
 void viewingCallback(const char *actionName, char *value) {
    size_t image_size = 0;
 
-   printf("Viewing image received: %s\n", value);
+   LOG_INFO("Viewing image received: %s", value);
 
    // Read the image file into memory.
    unsigned char *image_content = read_file(value, &image_size);
@@ -647,7 +646,7 @@ void viewingCallback(const char *actionName, char *value) {
       }
       free(image_content);
    } else {
-      printf("Error reading image file.\n");
+      LOG_ERROR("Error reading image file.");
    }
 }
 
@@ -660,7 +659,7 @@ void viewingCallback(const char *actionName, char *value) {
 void volumeCallback(const char *actionName, char *value) {
    float floatVol = wordToNumber(value);
 
-   printf("Music volume: %s/%0.2f\n", value, floatVol);
+   LOG_WARNING("Music volume: %s/%0.2f", value, floatVol);
 
    if (floatVol >= 0 && floatVol <= 2.0) {
       setMusicVolume(floatVol);

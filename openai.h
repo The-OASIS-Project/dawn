@@ -12,14 +12,18 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  *
- * All contributions to this project are agreed to be licensed under the
- * GPLv3 or any later version. Contributions are understood to be
- * any modifications, enhancements, or additions to the project
- * and become the property of the original author Kris Kersey.
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s). Contributions include any modifications,
+ * enhancements, or additions to the project. These contributions become
+ * part of the project and are adopted by the project author(s).
  */
 
 #ifndef OPENAI_H
 #define OPENAI_H
+
+//#define OPENAI_URL	"https://api.openai.com"
+#define OPENAI_URL	"http://127.0.0.1:8080"
 
 char *getGptResponse(struct json_object *conversation_history, const char *input_text,
                      char *vision_ai_image, size_t vision_ai_image_size);

@@ -12,10 +12,11 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  *
- * All contributions to this project are agreed to be licensed under the
- * GPLv3 or any later version. Contributions are understood to be
- * any modifications, enhancements, or additions to the project
- * and become the property of the original author Kris Kersey.
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s). Contributions include any modifications,
+ * enhancements, or additions to the project. These contributions become
+ * part of the project and are adopted by the project author(s).
  */
 
 #include <pulse/simple.h>
@@ -28,6 +29,7 @@
 #include <mosquitto.h>
 
 #include "flac_playback.h"
+#include "logging.h"
 #include "mosquitto_comms.h"
 
 /**
@@ -81,26 +83,16 @@ int getMusicPlay(void) {
 void metadata_callback(const FLAC__StreamDecoder *decoder, const FLAC__StreamMetadata *metadata, void *client_data) {
    if(metadata->type == FLAC__METADATA_TYPE_STREAMINFO) {
       FLAC__StreamMetadata_StreamInfo info = metadata->data.stream_info;
-      printf("Sample rate: %u Hz\n", info.sample_rate);
-      printf("Channels: %u\n", info.channels);
-      printf("Bits per sample: %u\n", info.bits_per_sample);
-      printf("Min blocksize: %u\n", info.min_blocksize);
-      printf("Max blocksize: %u\n", info.max_blocksize);
-      printf("Min framesize: %u\n", info.min_framesize);
-      printf("Max framesize: %u\n", info.max_framesize);
-      printf("Total samples: %lu\n", info.total_samples);
-      printf("MD5: ");
-      for(int i = 0; i < 16; ++i) {
-         printf("%02x", info.md5sum[i]);
-      }
-      printf("\n");
+      LOG_INFO("Sample rate: %u Hz", info.sample_rate);
+      LOG_INFO("Channels: %u", info.channels);
+      LOG_INFO("Bits per sample: %u", info.bits_per_sample);
    }
    else if(metadata->type == FLAC__METADATA_TYPE_PICTURE) {
-      printf("*** Got FLAC__METADATA_TYPE_PICTURE.\n");
+      LOG_INFO("*** Got FLAC__METADATA_TYPE_PICTURE.");
       FLAC__StreamMetadata_Picture picture = metadata->data.picture;
 
       if(picture.type == FLAC__STREAM_METADATA_PICTURE_TYPE_FRONT_COVER) {
-         printf("Found front cover art. MIME type: %s\n", picture.mime_type);
+         LOG_INFO("Found front cover art. MIME type: %s", picture.mime_type);
 
          // Now, picture.data contains the image data of length picture.data_length
          // You can write this data to a file or use it as needed.
@@ -121,7 +113,7 @@ void error_callback(
    FLAC__StreamDecoderErrorStatus status,
    void *client_data) {
    const char *status_str = FLAC__StreamDecoderErrorStatusString[status];
-   fprintf(stderr, "FLAC Error callback: %s\n", status_str);
+   LOG_ERROR("FLAC Error callback: %s", status_str);
 }
 
 /**
@@ -146,7 +138,7 @@ FLAC__StreamDecoderWriteStatus write_callback(
 
    // Check if music playback has been stopped externally.
    if (!music_play) {
-      printf("Stop playback requested.\n");
+      LOG_WARNING("Stop playback requested.");
       return FLAC__STREAM_DECODER_WRITE_STATUS_ABORT;
    }
 
@@ -156,7 +148,7 @@ FLAC__StreamDecoderWriteStatus write_callback(
    // Allocate memory for interleaved audio samples.
    int16_t *interleaved = malloc(frame->header.blocksize * frame->header.channels * sizeof(int16_t));
    if (!interleaved) {
-       fprintf(stderr, "Memory allocation failed for interleaved audio buffer.\n");
+       LOG_ERROR("Memory allocation failed for interleaved audio buffer.");
        return FLAC__STREAM_DECODER_WRITE_STATUS_ABORT;
    }
 
@@ -224,21 +216,21 @@ void *playFlacAudio(void *arg) {
    // Open PulsAudio for playback.
    if (!(pa_handle = pa_simple_new(NULL, "FLAC Player", PA_STREAM_PLAYBACK, args->sink_name,
                                    "playback", &ss, NULL, NULL, &error))) {
-      fprintf(stderr, "Error opening PulseAudio for playback: %s\n", pa_strerror(error));
+      LOG_ERROR("Error opening PulseAudio for playback: %s", pa_strerror(error));
       return NULL;
    }
 
    // Initialize FLAC decoder.
    FLAC__StreamDecoder *decoder = FLAC__stream_decoder_new();
    if (decoder == NULL) {
-      fprintf(stderr, "Error creating FLAC decorder.\n");
+      LOG_ERROR("Error creating FLAC decorder.");
       pa_simple_free(pa_handle);
       return NULL;
    }
 
    // Enable MD5 checking for the decoder.
    if (!FLAC__stream_decoder_set_md5_checking(decoder, true)) {
-      fprintf(stderr, "Error setting FLAC md5 checking.\n");
+      LOG_ERROR("Error setting FLAC md5 checking.");
       FLAC__stream_decoder_delete(decoder);
       pa_simple_free(pa_handle);
       return NULL;
@@ -248,7 +240,7 @@ void *playFlacAudio(void *arg) {
    if ((init_status = FLAC__stream_decoder_init_file(decoder, args->file_name, write_callback,
                                                      metadata_callback, error_callback, pa_handle))
          != FLAC__STREAM_DECODER_INIT_STATUS_OK) {
-      fprintf(stderr, "ERROR: initializing decoder: %s\n", FLAC__StreamDecoderInitStatusString[init_status]);
+      LOG_ERROR("ERROR: initializing decoder: %s", FLAC__StreamDecoderInitStatusString[init_status]);
       FLAC__stream_decoder_delete(decoder);
       pa_simple_free(pa_handle);
       return NULL;
@@ -256,9 +248,9 @@ void *playFlacAudio(void *arg) {
 
    // Process the FLAC stream until the end or an error occurs.
    if (!(error = FLAC__stream_decoder_process_until_end_of_stream(decoder))) {
-      fprintf(stderr, "Error during FLAC decoding process.\n");
+      LOG_ERROR("Error during FLAC decoding process.");
    } else {
-      fprintf(stderr, "Decoding completed successfully.\n");
+      LOG_INFO("Decoding completed successfully.");
    }
 
    // Cleanup and resource management.

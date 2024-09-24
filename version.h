@@ -19,9 +19,10 @@
  * part of the project and are adopted by the project author(s).
  */
 
-#ifndef WORD_TO_NUMBER_H
-#define WORD_TO_NUMBER_H
+#ifndef VERSION_H
+#define VERSION_H
 
-double wordToNumber(char *originalWord);
+#define APP_NAME "Dawn"
+#define VERSION_NUMBER "1.0.0"
 
-#endif // WORD_TO_NUMBER_H
+#endif // VERSION_H

@@ -1,11 +1,32 @@
 cmake_minimum_required(VERSION 3.10)
 
 # For native CUDA code
-set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-11.4")
+set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-12.2")
 project(dawn LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Define the version number in the header file directly
+set(VERSION_NUMBER "1.0.0")
+
+# Try to get the current Git SHA
+execute_process(
+    COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_SHA
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE GIT_SHA_RESULT
+)
+
+# Check if the command was successful
+if(NOT GIT_SHA_RESULT EQUAL 0)
+    set(GIT_SHA "unknown")
+endif()
+
+# Pass the Git SHA to the compiler
+add_definitions(-DGIT_SHA=\"${GIT_SHA}\")
 
 # HTTP connections (AI and such)
 find_package(CURL REQUIRED)
@@ -31,6 +52,12 @@ include_directories(${FLAC_INCLUDE_DIRS})
 find_package(OpenSSL REQUIRED)
 include_directories(${OpenSSL_INCLUDE_DIR})
 
+# If llama-config.cmake is not found by default, set CMAKE_PREFIX_PATH
+set(CMAKE_PREFIX_PATH "/usr/local/lib/cmake/llama")
+
+# Use find_package for llama and ggml if CMake config files are provided
+find_package(llama REQUIRED)
+
 # Find the required CUDA libraries and add them to the link libraries
 find_library(CUDA_LIBRARIES NAMES cuda HINTS ${CUDA_TOOLKIT_ROOT_DIR}/targets/aarch64-linux/lib)
 find_library(CUDART_LIBRARIES NAMES cudart HINTS ${CUDA_TOOLKIT_ROOT_DIR}/targets/aarch64-linux/lib)
@@ -55,6 +82,8 @@ add_executable(dawn
                audio_utils.c
                dawn.c
                flac_playback.c
+               #llama_lib.cpp
+               logging.c
                mic_passthrough.c
                mosquitto_comms.c
                openai.c
@@ -67,6 +96,7 @@ target_link_libraries(dawn
                       piper
                       piper_phonemize
                       espeak-ng
+                      llama
                       onnxruntime
                       pthread
                       sndfile
@@ -90,7 +120,7 @@ target_link_libraries(dawn
 target_include_directories(piper PUBLIC
                            /usr/local/include/piper-phonemize
                            ${SPDLOG_INCLUDE_DIRS}
-                           /usr/local/include/onnxruntime/core/session)
+                           /usr/local/include/onnxruntime/)
 
 set(SOURCE_FILES
     ${CMAKE_SOURCE_DIR}/en_GB-alba-medium.onnx
