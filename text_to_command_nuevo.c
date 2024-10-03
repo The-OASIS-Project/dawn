@@ -52,22 +52,6 @@
 #include "logging.h"
 #include "text_to_command_nuevo.h"
 
-/**
- * @brief Extracts and returns the remaining part of a string after a given substring.
- *
- * This function takes a string and a substring, and returns a pointer to the
- * part of the string that comes after the first occurrence of the substring.
- * If the substring is not found, the function returns NULL.
- *
- * @param input The original string in which to search for the substring.
- * @param substring The substring to search for in the original string.
- *
- * @return A pointer to the remaining part of the string after the first occurrence of the substring.
- *         Returns NULL if the substring is not found.
- *
- * @note The function returns a pointer into the original string, so the caller should not modify
- *       the content unless they are sure of what they are doing.
- */
 char* extract_remaining_after_substring(const char* input, const char* substring) {
     char *pos = strstr(input, substring);
 
@@ -78,16 +62,6 @@ char* extract_remaining_after_substring(const char* input, const char* substring
     return pos + strlen(substring);
 }
 
-/*
- * @brief Function to search the second string for the template.
- *
- * This command supports wildcards.
- *
- * @param templateStr String to a wildcard enabled string.
- * @param secondStr String to search through.
- *
- * @return 1 if found, 0 if not found, -1 on error.
- */
 int searchString(const char* templateStr, const char* secondStr) {
    if ((templateStr == NULL) || (secondStr == NULL)) {
       return -1;
@@ -185,7 +159,7 @@ char* replaceWithValues(const char* templateStr, const char* deviceName, const c
 }
 
 /**
- * @brief Convert the actions data struct into something useful for the commands processor.
+ * Convert the actions data struct into something useful for the commands processor.
  *
  * We need nice strings that can be filtered for in the audio to text section.
  * This should do that.
@@ -267,9 +241,7 @@ void convertActionsToCommands(actionType *actions, int *numActions,
    LOG_INFO("Total commands generated: %d", *numCommands);
 }
 
-/**
- * @brief Debug function to print the parsed data from the struct.
- */
+// Debug function to print the parsed data from the struct.
 void printParsedData(actionType *actions, int numActions) {
    int i = 0, j = 0, k = 0;
 
@@ -299,7 +271,7 @@ void printParsedData(actionType *actions, int numActions) {
    }
 }
 
-/**
+/*
  * @brief Debug function to print the parsed audio device data.
  */
 void printParsedAudioDevices(audioDevices *devices, int numDevices) {
@@ -331,9 +303,7 @@ void printParsedAudioDevices(audioDevices *devices, int numDevices) {
    }
 }
 
-/**
- * @brief Debug function to print the resulting action commands array.
- */
+// Debug function to print the resulting action commands array.
 void printCommands(commandSearchElement *commands, int numCommands) {
    int i = 0;
 
@@ -344,19 +314,7 @@ void printCommands(commandSearchElement *commands, int numCommands) {
    }
 }
 
-/**
- * @brief Parse the passed in json string into the actionType struct.
- *
- * This is the usual long, drawn-out json processing that makes life easy in
- * the long run.
- *
- * @note I don't really like passing all of this in here. It was easiest
- *       given the timeline.
- *
- * @param json Json string to parse.
- *
- * @return 0 on success, 1 on failure.
- */
+// Parse the passed in json string into the actionType struct.
 int parseCommandConfig(char *json, actionType *actions, int *numActions,
                        audioDevices *captureDevices, int *numAudioCaptureDevices,
                        audioDevices *playbackDevices, int *numAudioPlaybackDevices)
@@ -681,9 +639,7 @@ int parseCommandConfig(char *json, actionType *actions, int *numActions,
    return 0;
 }
 
-/**
- * * @brief Initialize all of the action structs' counters.
- */
+// Initialize all of the action structs' counters.
 void initActions(actionType *actions)
 {
    int i = 0, j = 0, k = 0;

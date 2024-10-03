@@ -26,12 +26,70 @@
 extern "C" {
 #endif
 
-void initialize_text_to_speech(char *pcm_device);
-void text_to_speech(char *text);
-void cleanup_text_to_speech(void);
+/**
+ * @brief Initializes the text-to-speech system.
+ *
+ * This function loads the voice model, initializes the TTS engine, sets up the
+ * audio device, and starts the worker thread that processes TTS requests.
+ *
+ * @param pcm_device The name of the PCM device to use for audio playback.
+ */
+void initialize_text_to_speech(char* pcm_device);
 
-// Text utility function(s) to clean-up TTS text.
+/**
+ * @brief Enqueues a text string for conversion to speech.
+ *
+ * This function can be safely called from multiple threads. It adds the provided
+ * text to a queue that is processed by a dedicated worker thread.
+ *
+ * @param text The text to be converted to speech.
+ */
+void text_to_speech(char* text);
+
+/**
+ * @brief Cleans up the text-to-speech system.
+ *
+ * This function signals the worker thread to terminate, waits for it to finish,
+ * and then releases all resources used by the TTS engine.
+ */
+void cleanup_text_to_speech();
+
+/**
+ * @brief Removes all occurrences of specified characters from a string.
+ *
+ * This function modifies the input string `str` in place by removing any characters
+ * that are present in the `remove_chars` string. The resulting string will be a subset
+ * of the original, excluding the unwanted characters.
+ *
+ * The function operates by iterating over each character in `str` and copying it
+ * to the destination position if it is not found in `remove_chars`. It does not
+ * allocate additional memory and adjusts the string in place.
+ *
+ * @param str          The string to be modified. Must be a null-terminated mutable string.
+ * @param remove_chars A null-terminated string containing characters to remove from `str`.
+ *
+ * @note
+ * - The input string `str` must be mutable and large enough to hold the modified string.
+ * - If `str` is `NULL`, the function has no effect.
+ * - If `remove_chars` is `NULL` or empty, `str` remains unchanged.
+ * - The function compares characters based on their exact value and does not account for locale-specific variations.
+ */
 void remove_chars(char *str, const char *remove_chars);
+
+/**
+ * @brief Checks if a Unicode code point represents an emoji character.
+ *
+ * This helper function determines whether a given Unicode code point falls within
+ * common emoji ranges. It is used internally by `remove_emojis` to identify emojis.
+ *
+ * @param codepoint The Unicode code point to check.
+ * @return `true` if the code point is an emoji, `false` otherwise.
+ *
+ * @note
+ * - The emoji ranges checked are not exhaustive but cover commonly used emojis.
+ * - This function does not account for all possible emojis, including those that
+ *   require variation selectors or are represented by sequences of code points.
+ */
 void remove_emojis(char *str);
 
 #ifdef __cplusplus

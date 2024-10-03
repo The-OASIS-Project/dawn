@@ -22,6 +22,16 @@
 #ifndef WORD_TO_NUMBER_H
 #define WORD_TO_NUMBER_H
 
+/**
+ * Converts a textual representation of a number into a double-precision floating-point number.
+ * Supports magnitudes from "thousand" to "trillion" and can handle decimal fractions indicated by "point".
+ *
+ * @param originalWord The string representation of the number (e.g., "two thousand twenty-one point five").
+ * @return The numerical value as a double. Returns 0.0 for unrecognizable tokens.
+ *
+ * Note: This function uses `parseNumericalWord` for converting individual word tokens to numbers,
+ * which should be defined elsewhere to handle basic numeric words and teens.
+ */
 double wordToNumber(char *originalWord);
 
 #endif // WORD_TO_NUMBER_H

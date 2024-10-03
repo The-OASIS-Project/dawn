@@ -108,16 +108,125 @@ typedef struct {
    char device[MAX_WORD_LENGTH];             /**< Audio device name. May be an ALSA device or Pulseaudio device.  */
 } audioDevices;
 
+/**
+ * @brief Extracts and returns the remaining part of a string after a given substring.
+ *
+ * This function takes a string and a substring, and returns a pointer to the
+ * part of the string that comes after the first occurrence of the substring.
+ * If the substring is not found, the function returns NULL.
+ *
+ * @param input The original string in which to search for the substring.
+ * @param substring The substring to search for in the original string.
+ *
+ * @return A pointer to the remaining part of the string after the first occurrence of the substring.
+ *         Returns NULL if the substring is not found.
+ *
+ * @note The function returns a pointer into the original string, so the caller should not modify
+ *       the content unless they are sure of what they are doing.
+ */
 char* extract_remaining_after_substring(const char* input, const char* substring);
+
+/*
+ * @brief Function to search the second string for the template.
+ *
+ * This command supports wildcards.
+ *
+ * @param templateStr String to a wildcard enabled string.
+ * @param secondStr String to search through.
+ *
+ * @return 1 if found, 0 if not found, -1 on error.
+ */
 int searchString(const char* templateStr, const char* secondStr);
+
+/**
+ * @brief Replaces placeholders in a template string with provided values.
+ *
+ * This function takes a template string containing placeholders and replaces
+ * occurrences of specific placeholders with the provided device name and value.
+ * The placeholders are expected to be enclosed in percent signs (`%`).
+ *
+ * **Supported placeholders:**
+ * - `%device_name%`: Replaced with the value of `deviceName`.
+ * - `%value%`: Replaced with the value of `value`.
+ * - `%datetime%`: Replaced with the current date and time in the format `YYYYMMDD_HHMMSS`.
+ *
+ * @param templateStr The template string containing placeholders.
+ * @param deviceName  The device name to replace `%device_name%` placeholder. Can be `NULL`.
+ * @param value       The value to replace `%value%` placeholder. Can be `NULL`.
+ *
+ * @return A newly allocated string with placeholders replaced, or `NULL` on error.
+ *         The caller is responsible for freeing the returned string using `free()`.
+ */
 char* replaceWithValues(const char* templateStr, const char* deviceName, const char* value);
+
+/**
+ * @brief Converts action definitions into command search elements.
+ *
+ * This function processes the given array of actions and generates command search elements
+ * that can be used to match user inputs. It populates the `commands` array with generated commands
+ * based on the actions and devices provided.
+ *
+ * @param actions     Array of `actionType` structures representing the actions.
+ * @param numActions  Pointer to the number of actions in the `actions` array.
+ * @param commands    Array of `commandSearchElement` structures to be populated with generated commands.
+ * @param numCommands Pointer to the number of commands generated. This will be updated by the function.
+ */
 void convertActionsToCommands(actionType *actions, int *numActions,
                               commandSearchElement *commands, int *numCommands);
+
+/**
+ * @brief Prints the parsed action data for debugging purposes.
+ *
+ * This function outputs the contents of the parsed actions to the console.
+ * It is intended for debugging and verification of the parsed data.
+ *
+ * @param actions    Array of `actionType` structures representing the parsed actions.
+ * @param numActions The number of actions in the `actions` array.
+ */
 void printParsedData(actionType *actions, int numActions);
+
+/**
+ * @brief Prints the generated command search elements for debugging purposes.
+ *
+ * This function outputs the contents of the `commands` array to the console.
+ * It is intended for debugging and verification of the generated commands.
+ *
+ * @param commands    Array of `commandSearchElement` structures representing the commands.
+ * @param numCommands The number of commands in the `commands` array.
+ */
 void printCommands(commandSearchElement *commands, int numCommands);
+
+/**
+ * @brief Parses a JSON string into action configurations and device lists.
+ *
+ * This function parses the provided JSON string and populates the `actions` array,
+ * as well as the lists of audio capture and playback devices.
+ *
+ * @param json                     JSON string to parse.
+ * @param actions                  Array of `actionType` structures to be populated.
+ * @param numActions               Pointer to an integer to receive the number of actions parsed.
+ * @param captureDevices           Array of `audioDevices` structures for capture devices to be populated.
+ * @param numAudioCaptureDevices   Pointer to an integer to receive the number of capture devices parsed.
+ * @param playbackDevices          Array of `audioDevices` structures for playback devices to be populated.
+ * @param numAudioPlaybackDevices  Pointer to an integer to receive the number of playback devices parsed.
+ *
+ * @return `0` on success, `1` on failure.
+ *
+ * @note This function handles the parsing of complex JSON configurations,
+ *       mapping them into structured data types for use within the application.
+ */
 int parseCommandConfig(char *json, actionType *actions, int *numActions,
                        audioDevices *captureDevices, int *numAudioCaptureDevices,
                        audioDevices *playbackDevices, int *numAudioPlaybackDevices);
+
+/**
+ * @brief Initializes the actions array.
+ *
+ * This function initializes the given `actions` array by setting the initial values
+ * for the number of sub-actions and devices to zero.
+ *
+ * @param actions Array of `actionType` structures to initialize.
+ */
 void initActions(actionType *actions);
 
 #endif // TEXT_TO_COMMAND_H

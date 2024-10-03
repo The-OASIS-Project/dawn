@@ -1,3 +1,4 @@
+#include <queue>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
@@ -104,26 +105,172 @@ pa_simple *openPulseaudioPlaybackDevice(char *pcm_playback_device)
 }
 #endif
 
+/**
+ * @brief Thread-safe queue for text-to-speech requests.
+ */
+std::queue<std::string> tts_queue;
+
+/**
+ * @brief Mutex for synchronizing access to the text-to-speech queue.
+ */
+pthread_mutex_t tts_queue_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/**
+ * @brief Condition variable to signal the worker thread when new data is available.
+ */
+pthread_cond_t tts_queue_cond = PTHREAD_COND_INITIALIZER;
+
+/**
+ * @brief Thread handle for the text-to-speech worker thread.
+ */
+pthread_t tts_thread;
+
+/**
+ * @brief Flag indicating whether the worker thread should continue running.
+ */
+bool tts_thread_running = false;
+
 extern "C" {
-   // Initialization function
-   void initialize_text_to_speech(char *pcm_device) {
-      // Load the voice
-      //std::optional<SpeakerId> speakerIdOpt = std::nullopt;
+   /**
+    * @brief Worker thread function that processes text-to-speech requests.
+    *
+    * This function runs in a separate thread and continuously processes text strings
+    * from the queue, converting them to speech and playing them back using the audio
+    * system.
+    *
+    * @param arg Unused parameter.
+    * @return Always returns NULL.
+    */
+   void* tts_thread_function(void* arg) {
+      LOG_INFO("tts_thread_function() started.");
+      while (!get_quit()) {
+         pthread_mutex_lock(&tts_queue_mutex);
+
+         LOG_INFO("Waiting on text...");
+         // Wait until there's text to process or the thread is signaled to exit
+         while (tts_queue.empty() && tts_thread_running) {
+            pthread_cond_wait(&tts_queue_cond, &tts_queue_mutex);
+         }
+         LOG_INFO("Text acquired.");
+
+         // Exit if the thread is no longer running and the queue is empty
+         if (!tts_thread_running && tts_queue.empty()) {
+            pthread_mutex_unlock(&tts_queue_mutex);
+            break;
+         }
+
+         // Retrieve text from the queue
+         std::string inputText = tts_queue.front();
+         tts_queue.pop();
+         pthread_mutex_unlock(&tts_queue_mutex);
+
+         // Process text-to-speech
+         SynthesisResult result;
+         std::vector<int16_t> audioBuffer;
+         int rc = 0;
+         int error = 0;
+
+         // Convert text to audio data
+         textToAudio(tts_handle.config, tts_handle.voice, inputText, audioBuffer, result, [&]() {
+#ifdef ALSA_DEVICE
+            // Play audio data using ALSA
+            for (size_t i = 0; i < audioBuffer.size(); i += tts_handle.frames) {
+               rc = snd_pcm_writei(tts_handle.handle, &audioBuffer[i], std::min(tts_handle.frames, audioBuffer.size() - i));
+               if (rc == -EPIPE) {
+                  LOG_ERROR("ALSA underrun occurred");
+                  snd_pcm_prepare(tts_handle.handle);
+               } else if (rc < 0) {
+                  LOG_ERROR("ALSA error from writei: %s", snd_strerror(rc));
+               }
+            }
+#else
+            rc = pa_simple_write(tts_handle.pa_handle, audioBuffer.data(), audioBuffer.size() * sizeof(int16_t), &error);
+            if (rc < 0) {
+               LOG_ERROR("PulseAudio error from pa_simple_write: %s", pa_strerror(rc));
+               //audioBuffer.clear();
+
+               // Close the current PulseAudio connection
+               if (tts_handle.pa_handle) {
+                  pa_simple_free(tts_handle.pa_handle);
+                  tts_handle.pa_handle = NULL;
+               }
+
+               // Reopen the PulseAudio playback device
+               tts_handle.pa_handle = openPulseaudioPlaybackDevice(tts_handle.pcm_capture_device);
+               if (tts_handle.pa_handle == NULL) {
+                  LOG_ERROR("Error re-opening PulseAudio playback device.");
+               }
+            }
+#endif
+            // Clear the audio buffer for the next request
+            audioBuffer.clear();
+         });
+      }
+
+      return NULL;
+   }
+
+   /**
+    * @brief Initializes the text-to-speech system.
+    *
+    * This function loads the voice model, initializes the TTS engine, opens the
+    * audio playback device, and starts the worker thread that processes TTS requests.
+    *
+    * @param pcm_device The name of the PCM device to use for audio playback.
+    */
+   void initialize_text_to_speech(char* pcm_device) {
+      // Load the voice model
       std::optional<SpeakerId> speakerIdOpt = 0;
       loadVoice(tts_handle.config, "en_GB-alba-medium.onnx", "en_GB-alba-medium.onnx.json", tts_handle.voice, speakerIdOpt, false);
-      // Initialize the piper
+
+      // Initialize the TTS engine
       initialize(tts_handle.config);
 
       strcpy(tts_handle.pcm_capture_device, pcm_device);
 
+      // Configure synthesis parameters
       tts_handle.voice.synthesisConfig.lengthScale = 0.85f;
 
       tts_handle.is_initialized = 1;
+
+      // Initialize synchronization primitives
+      pthread_mutex_init(&tts_queue_mutex, NULL);
+      pthread_cond_init(&tts_queue_cond, NULL);
+
+      // Open the audio playback device once
+#ifdef ALSA_DEVICE
+      int rc = openAlsaPcmPlaybackDevice(&(tts_handle.handle), tts_handle.pcm_capture_device, &(tts_handle.frames));
+      if (rc) {
+         LOG_ERROR("Error creating ALSA playback device.");
+         // Handle error (e.g., set tts_handle.is_initialized = 0)
+         tts_handle.is_initialized = 0;
+         return;
+      }
+#else
+      int error = 0;
+      tts_handle.pa_handle = openPulseaudioPlaybackDevice(tts_handle.pcm_capture_device);
+      if (tts_handle.pa_handle == NULL) {
+         LOG_ERROR("Error creating Pulse playback device.");
+         // Handle error (e.g., set tts_handle.is_initialized = 0)
+         tts_handle.is_initialized = 0;
+         return;
+      }
+#endif
+
+      // Start the worker thread
+      tts_thread_running = true;
+      pthread_create(&tts_thread, NULL, tts_thread_function, NULL);
    }
 
+   /**
+    * @brief Enqueues a text string for conversion to speech.
+    *
+    * This function can be safely called from multiple threads. It adds the provided
+    * text to a queue that is processed by a dedicated worker thread.
+    *
+    * @param text The text to be converted to speech.
+    */
    void text_to_speech(char* text) {
-      int error = 0;
-
       if (!tts_handle.is_initialized) {
          LOG_ERROR("Text-to-Speech system not initialized. Call initialize_text_to_speech() first.");
          return;
@@ -132,55 +279,35 @@ extern "C" {
       assert(text != nullptr && "Received a null pointer");
       std::string inputText(text);
 
-      // Piper
-      SynthesisResult result;
-      vector<int16_t> audioBuffer;
+      // Add text to the processing queue
+      pthread_mutex_lock(&tts_queue_mutex);
+      tts_queue.push(inputText);
+      pthread_cond_signal(&tts_queue_cond);
+      pthread_mutex_unlock(&tts_queue_mutex);
+   }
 
-      int rc = 0;
-
-#ifdef ALSA_DEVICE
-      int rc = openAlsaPcmPlaybackDevice(&(tts_handle.handle), tts_handle.pcm_capture_device, &(tts_handle.frames));
-      if (rc) {
-         LOG_ERROR("Error creating ALSA playback device.");
+   /**
+    * @brief Cleans up the text-to-speech system.
+    *
+    * This function signals the worker thread to terminate, waits for it to finish,
+    * closes the audio playback device, and then releases all resources used by the TTS engine.
+    */
+   void cleanup_text_to_speech() {
+      if (!tts_handle.is_initialized) {
+         LOG_ERROR("Text-to-Speech system not initialized. Call initialize_text_to_speech() first.");
          return;
       }
-#else
-      tts_handle.pa_handle = openPulseaudioPlaybackDevice(tts_handle.pcm_capture_device);
-      if (tts_handle.pa_handle == NULL) {
-         LOG_ERROR("Error creating Pulse playback device.");
-         return;
-      }
-#endif
 
-      // Convert text to audio data
-      textToAudio(tts_handle.config, tts_handle.voice, inputText, audioBuffer, result, [&]() {
-#ifdef ALSA_DEVICE
-         // In the callback, play the audio data using ALSA
-         for (size_t i = 0; i < audioBuffer.size(); i += frames) {
-            rc = snd_pcm_writei(tts_handle.handle, &audioBuffer[i], min(tts_handle.frames, audioBuffer.size() - i));
-            if (rc == -EPIPE) {
-               /* EPIPE means underrun */
-               LOG_ERROR("ALSA underrun occurred");
-               snd_pcm_prepare(tts_handle.handle);
-            } else if (rc < 0) {
-               LOG_ERROR("ALSA error from writei: %s", snd_strerror(rc));
-            }
-         }
-#else
-         rc = pa_simple_write(tts_handle.pa_handle, audioBuffer.data(), audioBuffer.size() * sizeof(int16_t), &error);
-         if (rc < 0) {
-            LOG_ERROR("PulseAudio error from pa_simple_write: %s", pa_strerror(rc));
-            audioBuffer.clear();
-            return;
-         }
+      // Signal the worker thread to exit
+      pthread_mutex_lock(&tts_queue_mutex);
+      tts_thread_running = false;
+      pthread_cond_signal(&tts_queue_cond);
+      pthread_mutex_unlock(&tts_queue_mutex);
 
-         pa_simple_drain(tts_handle.pa_handle, NULL);
-         pa_simple_flush(tts_handle.pa_handle, NULL);
-#endif
-         // Clear the audio buffer for the next sentence
-         audioBuffer.clear();
-      });
+      // Wait for the worker thread to finish
+      pthread_join(tts_thread, NULL);
 
+      // Close the audio playback device
 #ifdef ALSA_DEVICE
       if (tts_handle.handle) {
          snd_pcm_close(tts_handle.handle);
@@ -192,18 +319,15 @@ extern "C" {
          tts_handle.pa_handle = NULL;
       }
 #endif
-   }
 
-   // Cleanup function
-   void cleanup_text_to_speech() {
-      if (!tts_handle.is_initialized) {
-         LOG_ERROR("Text-to-Speech system not initialized. Call initialize_text_to_speech() first.");
-         return;
-      }
+      // Destroy synchronization primitives
+      pthread_mutex_destroy(&tts_queue_mutex);
+      pthread_cond_destroy(&tts_queue_cond);
 
-      // Clean up Piper
+      // Clean up the TTS engine
       terminate(tts_handle.config);
 
+      tts_handle.is_initialized = 0;
    }
 
    void remove_chars(char *str, const char *remove_chars) {
@@ -272,5 +396,4 @@ extern "C" {
       }
       *dst = '\0'; // Null-terminate the filtered string
    }
-} // extern "C"
-
+}

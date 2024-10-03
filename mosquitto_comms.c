@@ -28,9 +28,6 @@
 #include <string.h>
 #include <time.h>
 
-/* Mosquitto */
-#include <mosquitto.h>
-
 /* JSON-C */
 #include <json-c/json.h>
 
@@ -243,7 +240,7 @@ void parseJsonCommandandExecute(const char *input)
    json_object_put(parsedJson);
 }
 
-/* Mosquitto STUFF */
+/* Mosquitto */
 /* Callback called when the client receives a CONNACK message from the broker. */
 void on_connect(struct mosquitto *mosq, void *obj, int reason_code)
 {
@@ -620,14 +617,6 @@ char *base64_encode(const unsigned char *buffer, size_t length) {
    return b64text;
 }
 
-/**
- * Callback function to handle the viewing of an image. It reads the specified image file,
- * encodes its content into Base64, and passes the encoded data for vision AI processing.
- *
- * @param actionName The name of the action triggering this callback. Not used in this function,
- *                   but included to match expected callback signature.
- * @param value The file path to the image to be viewed and processed.
- */
 void viewingCallback(const char *actionName, char *value) {
    size_t image_size = 0;
 
@@ -650,12 +639,6 @@ void viewingCallback(const char *actionName, char *value) {
    }
 }
 
-/**
- * @brief Adjusts music volume based on user input, with values from 0.0 (silence) to 2.0 (maximum).
- *
- * @param actionName Unused but included for callback signature consistency.
- * @param value String representing the desired volume level, converted to a float and validated.
- */
 void volumeCallback(const char *actionName, char *value) {
    float floatVol = wordToNumber(value);
 

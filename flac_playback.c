@@ -52,22 +52,10 @@ static float global_volume = 0.5f;
 // When set to 1, music playback is active.
 static int music_play = 0;
 
-/**
- * Sets the music playback state.
- *
- * @param play An integer indicating the desired playback state.
- *             Set to 1 to start playback, or 0 to stop playback.
- */
 void setMusicPlay(int play) {
    music_play = play;
 }
 
-/**
- * Retrieves the current music playback state.
- *
- * @return An integer representing the playback state.
- *         Returns 1 if playback is active, or 0 if playback is stopped.
- */
 int getMusicPlay(void) {
    return music_play;
 }
@@ -182,22 +170,6 @@ FLAC__StreamDecoderWriteStatus write_callback(
    return FLAC__STREAM_DECODER_WRITE_STATUS_CONTINUE;
 }
 
-/**
- * Plays a FLAC audio file.
- * This function sets up a FLAC decoder and a PulseAudio playback stream to play the specified FLAC audio file.
- * It utilizes callbacks for writing decoded audio to the PulseAudio stream, handling metadata, and managing errors.
- *
- * @param arg A pointer to a PlaybackArgs structure containing playback parameters such as the file name and PulseAudio sink name.
- * @return NULL always. This function does not return a value and is intended to be used with threading.
- *
- * The function performs the following steps:
- * 1. Initializes a PulseAudio playback stream with a specified sample format, channel count, and sample rate.
- * 2. Creates a new FLAC stream decoder and configures it for MD5 checking to verify the integrity of the decoded audio.
- * 3. Initializes the FLAC decoder with the specified file and sets up callbacks for writing audio data, handling metadata, and errors.
- * 4. Starts the decoding process and continues until the end of the stream or an error occurs.
- * 5. Cleans up resources by finishing the decoding process, deleting the decoder, and freeing the PulseAudio stream.
- * 6. If an error occurs during decoding, a callback is triggered to handle the next action, such as playing the next track.
- */
 void *playFlacAudio(void *arg) {
    PlaybackArgs *args = (PlaybackArgs *)arg;
 
@@ -265,19 +237,6 @@ void *playFlacAudio(void *arg) {
    return NULL;
 }
 
-/**
- * @brief Sets the global music playback volume.
- *
- * This function adjusts the global volume level for music playback across the application.
- * It directly modifies the `global_volume` variable, which affects the volume at which audio is played.
- * The volume level should be specified as a float between 0.0 and 2.0, where 0.0 is complete silence,
- * 1.0 is the maximum volume level, greater than 1.0 is amplification.
- * Values outside this range may lead to undefined behavior.
- *
- * @param val The new volume level as a float. Valid values range from 0.0 to 2.0.
- * @note It's recommended to clamp the value of `val` within the 0.0 to 2.0 range before calling this function
- *       to avoid unexpected behavior.
- */
 void setMusicVolume(float val) {
    global_volume = val;
 }

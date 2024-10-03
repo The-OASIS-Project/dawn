@@ -22,6 +22,15 @@
 #ifndef AUDIO_UTILS_H
 #define AUDIO_UTILS_H
 
+/**
+ * Calculates the Root Mean Square (RMS) value of an audio signal.
+ * RMS is a statistical measure of the magnitude of a varying quantity and
+ * is used here to estimate the power of an audio signal.
+ *
+ * @param audioBuffer Pointer to the buffer containing 16-bit signed audio samples.
+ * @param numSamples The number of samples in the audio buffer.
+ * @return The calculated RMS value as a double.
+ */
 double calculateRMS(const int16_t *audioBuffer, size_t numSamples);
 
 #endif // AUDIO_UTILS_H

@@ -43,32 +43,13 @@ static const pa_sample_spec ss = {
 };
 #endif
 
-int running = 1; // Control variable
+static int running = 1; // Control variable
 
 void setStopVA(void) {
    running = 0;
 }
 
 #ifdef ALSA_DEVICE
-/**
- * Continuously captures audio from a specified input device and plays it back through a specified output device,
- * effectively amplifying the captured sound. This function is intended to be run in a separate thread and will
- * continue running until `setStopVA` is called to set the global `running` flag to 0.
- *
- * This implementation is specific to systems with ALSA support. It uses ALSA's API to open PCM devices for
- * capture and playback, and to handle audio data transfer between these devices.
- *
- * Prerequisites:
- * - ALSA (Advanced Linux Sound Architecture) must be supported and configured on the system.
- * - Proper ALSA devices must be available and specified by the user or configuration.
- *
- * @param arg Unused parameter, included for compatibility with pthreads' start routine signature.
- * @return NULL Always returns NULL, indicating the thread has completed execution.
- *
- * Note:
- * - Error handling is incorporated to address issues with device initialization and audio data transfer.
- * - The global `running` variable controls the main loop. Use `setStopVA` to request thread termination.
- */
 void* voiceAmplificationThread(void* arg) {
    char *pcmCaptureDevice = getPcmCaptureDevice();
    char *pcmPlaybackDevice = findAudioPlaybackDevice("speakers");
@@ -116,25 +97,6 @@ void* voiceAmplificationThread(void* arg) {
    return NULL;
 }
 #else
-/**
- * Implements a real-time voice amplification loop using PulseAudio for both audio capture and playback.
- * It captures audio from a microphone and plays it back through speakers in real-time until told to stop.
- * This function is specifically designed to run in a separate thread and relies on the global `running` flag
- * to control the execution of its main loop.
- *
- * Prerequisites:
- * - PulseAudio must be supported and properly configured on the system.
- * - The specified audio capture (microphone) and playback (speakers) devices must be available.
- *
- * @param arg Unused parameter, included for compatibility with pthreads' start routine signature.
- * @return NULL Always returns NULL, indicating the thread has completed execution.
- *
- * Note:
- * - The function initializes PulseAudio streams for both input and output using the specified device names.
- * - The global `running` variable controls the loop execution, enabling external control to start or stop the voice amplification.
- * - Proper error handling is implemented to manage issues during audio capture and playback initialization and operation.
- * - Resource management ensures that PulseAudio streams are freed appropriately before thread termination.
- */
 void* voiceAmplificationThread(void* arg) {
    // PulseAudio simple API objects for input and output.
    pa_simple *input = NULL, *output = NULL;

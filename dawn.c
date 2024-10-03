@@ -261,6 +261,10 @@ volatile sig_atomic_t quit = 0;
 /* MQTT */
 static struct mosquitto *mosq;
 
+sig_atomic_t get_quit(void) {
+    return quit;
+}
+
 #if 0
 // Define the function to draw the waveform using SDL
 void drawWaveform(const int16_t *audioBuffer, size_t numSamples) {
@@ -322,61 +326,19 @@ void signal_handler(int signal) {
     }
 }
 
-/**
- * Callback function for text-to-speech commands.
- *
- * @param actionName The name of the action triggered this callback (unused in the current implementation).
- * @param value The text that needs to be converted to speech.
- *
- * This function prints the received text command and then calls the text_to_speech function
- * to play it through the PCM playback device.
- */
 void textToSpeechCallback(const char *actionName, char *value) {
    LOG_INFO("Received text to speech command: \"%s\"\n", value);
    text_to_speech(value);
 }
 
-/**
- * Retrieves the current PCM playback device string.
- *
- * Note:
- * - The returned string must not be modified by the caller.
- * - The caller must not free the returned string. The memory management of the returned
- *   string is handled internally and may point to static memory or memory managed elsewhere
- *   in the application.
- *
- * @return A pointer to a constant character array (string) representing the PCM playback device.
- *         This pointer is to be treated as read-only and not to be freed by the caller.
- */
 const char *getPcmPlaybackDevice(void) {
    return (const char*) pcm_playback_device;
 }
 
-/**
- * Retrieves the current PCM capture device string.
- *
- * Note:
- * - The returned string must not be modified by the caller.
- * - The caller must not free the returned string. The memory management of the returned
- *   string is handled internally and may point to static memory or memory managed elsewhere
- *   in the application.
- *
- * @return A pointer to a constant character array (string) representing the PCM capture device.
- *         This pointer is to be treated as read-only and not to be freed by the caller.
- */
 const char *getPcmCaptureDevice(void) {
    return (const char*) pcm_capture_device;
 }
 
-/**
- * Searches for an audio playback device by name.
- *
- * @param name The name of the audio playback device to search for.
- * @return A pointer to the device identifier if found, otherwise NULL.
- *
- * This function iterates over the list of known audio playback devices, comparing each
- * device's name with the provided name. If a match is found, it returns the device identifier.
- */
 char *findAudioPlaybackDevice(char *name) {
    int i = 0;
    char speech[MAX_COMMAND_LENGTH];
@@ -390,18 +352,6 @@ char *findAudioPlaybackDevice(char *name) {
    return NULL;
 }
 
-/**
- * Sets the current PCM playback device based on the specified device name.
- * This function searches through the list of available audio playback devices and,
- * if a matching name is found, sets the PCM playback device to the corresponding device.
- * It also uses text-to-speech to announce the change or report an error if the device is not found.
- *
- * Note:
- * - The `actionName` parameter is currently unused.
- *
- * @param actionName Unused.
- * @param value The name of the audio playback device to set.
- */
 void setPcmPlaybackDevice(const char *actionName, char *value) {
    int i = 0;
    char speech[MAX_COMMAND_LENGTH];
@@ -424,18 +374,6 @@ void setPcmPlaybackDevice(const char *actionName, char *value) {
    }
 }
 
-/**
- * Sets the current PCM capture device based on the specified device name.
- * Similar to setPcmPlaybackDevice, but for audio capture devices. It updates
- * the global `pcm_capture_device` with the device name if found, and notifies
- * the user via text-to-speech.
- *
- * Note:
- * - The `actionName` parameter is currently unused.
- *
- * @param actionName Unused.
- * @param value The name of the audio capture device to set.
- */
 void setPcmCaptureDevice(const char *actionName, char *value) {
    int i = 0;
    char speech[MAX_COMMAND_LENGTH];
@@ -792,24 +730,6 @@ int capture_buffer(audioControl *myAudioControls,
    return 0; // Return success.
 }
 
-/**
- * Stores a base64 encoded image for vision AI processing, including the null terminator.
- * Updates global variables to indicate readiness for processing.
- *
- * @param base64_image Null-terminated base64 encoded image data.
- * @param image_size Length of the base64 image data, including the null terminator.
- *
- * Preconditions:
- * - vision_ai_image is freed if previously allocated to avoid memory leaks.
- *
- * Postconditions:
- * - vision_ai_image contains the base64 image data, ready for AI processing.
- * - vision_ai_image_size reflects the size of the data including the null terminator.
- * - vision_ai_ready is set, indicating AI processing can proceed.
- *
- * Error Handling:
- * - If memory allocation fails, an error is logged, and the function exits early.
- */
 void process_vision_ai(const char *base64_image, size_t image_size) {
    if (vision_ai_image != NULL) {
       free(vision_ai_image);
@@ -1119,7 +1039,7 @@ int main(int argc, char *argv[])
    }
 
    // Test background audio level
-#if 1
+#if 0
    if (pthread_create(&backgroundAudioDetect, NULL, measureBackgroundAudio, (void *) &myAudioControls) != 0) {
       LOG_ERROR("Error creating background audio detection thread.\n");
    }
@@ -1127,6 +1047,7 @@ int main(int argc, char *argv[])
    measureBackgroundAudio((void *) &myAudioControls);
 #endif
 
+   LOG_INFO("Init vosk.");
    // Vosk
    vosk_gpu_init();
    vosk_gpu_thread_init();
@@ -1162,6 +1083,7 @@ int main(int argc, char *argv[])
       return 1;
    }
 
+   LOG_INFO("Init mosquitto.");
    /* MQTT Setup */
    mosquitto_lib_init();
 
@@ -1199,34 +1121,11 @@ int main(int argc, char *argv[])
    /* Start processing MQTT events. */
    mosquitto_loop_start(mosq);
 
+   LOG_INFO("Init text to speech.");
    /* Initialize text to speech processing. */
    initialize_text_to_speech(pcm_playback_device);
 
    text_to_speech((char *) timeOfDayGreeting());
-
-   // Main loop
-   LOG_INFO("Listening...\n");
-
-#ifdef ALSA_DEVICE
-   snd_pcm_drop(myAudioControls.handle);
-   rc = snd_pcm_prepare(myAudioControls.handle);
-   if (rc < 0) {
-   LOG_ERROR("Cannot prepare audio interface for use (%s)\n",
-      snd_strerror(rc));
-      exit(EXIT_FAILURE);
-   }
-#else
-   if (pa_simple_flush(myAudioControls.pa_handle, &error) != 0) {
-      LOG_WARNING("Unable to flush buffer: %s\n", pa_strerror(error));
-   }
-   pa_simple_free(myAudioControls.pa_handle);
-
-   myAudioControls.pa_handle = openPulseaudioCaptureDevice(pcm_capture_device);
-   if (myAudioControls.pa_handle == NULL) {
-      LOG_ERROR("Error creating Pulse capture device.\n");
-      exit(EXIT_FAILURE);
-   }
-#endif
 
    // Register the signal handler for SIGINT.
    if (signal(SIGINT, signal_handler) == SIG_ERR) {
@@ -1234,6 +1133,8 @@ int main(int argc, char *argv[])
       exit(EXIT_FAILURE);
    }
 
+   // Main loop
+   LOG_INFO("Listening...\n");
    while (!quit) {
       if (vision_ai_ready){
          recState = VISION_AI_READY;
@@ -1329,27 +1230,6 @@ int main(int argc, char *argv[])
                      if (*next_char_ptr == '\0') {
                         LOG_WARNING("wakeWords[i] was found at the end of input_text.\n");
                         text_to_speech("Hello sir.");
-
-#ifdef ALSA_DEVICE
-                        /* Remove if we can detect immediately. */
-                        snd_pcm_drop(myAudioControls.handle);
-                        if (snd_pcm_prepare(myAudioControls.handle) < 0) {
-                           LOG_ERROR("Cannot prepare audio interface for use (%s)\n",
-                           snd_strerror(rc));
-                           exit(1);
-                        }
-#else
-                        if (pa_simple_flush(myAudioControls.pa_handle, &error) != 0) {
-                           LOG_WARNING("Unable to flush buffer: %s\n", pa_strerror(error));
-                        }
-                        pa_simple_free(myAudioControls.pa_handle);
-
-                        myAudioControls.pa_handle = openPulseaudioCaptureDevice(pcm_capture_device);
-                        if (myAudioControls.pa_handle == NULL) {
-                           LOG_ERROR("Error creating Pulse capture device.\n");
-                           return 1;
-                        }
-#endif
 
                         commandTimeout = 0;
                         silenceNextState = COMMAND_RECORDING;
@@ -1515,26 +1395,6 @@ int main(int argc, char *argv[])
             }
 
             free(command_text);
-
-#ifdef ALSA_DEVICE
-            snd_pcm_drop(myAudioControls.handle);
-            if (snd_pcm_prepare(myAudioControls.handle) < 0) {
-               LOG_ERROR("Cannot prepare audio interface for use (%s)\n",
-               snd_strerror(rc));
-               exit(1);
-            }
-#else
-            if (pa_simple_flush(myAudioControls.pa_handle, &error) != 0) {
-               LOG_WARNING("Unable to flush buffer: %s\n", pa_strerror(error));
-            }
-            pa_simple_free(myAudioControls.pa_handle);
-
-            myAudioControls.pa_handle = openPulseaudioCaptureDevice(pcm_capture_device);
-            if (myAudioControls.pa_handle == NULL) {
-               LOG_ERROR("Error creating Pulse capture device.\n");
-               return 1;
-            }
-#endif
             silenceNextState = WAKEWORD_LISTEN;
             recState = SILENCE;
 
@@ -1575,26 +1435,6 @@ int main(int argc, char *argv[])
             vision_ai_image_size = 0;
             vision_ai_ready = 0;
 
-            // Flush the audio buffers before we continue
-#ifdef ALSA_DEVICE
-            snd_pcm_drop(myAudioControls.handle);
-            if (snd_pcm_prepare(myAudioControls.handle) < 0) {
-            LOG_ERROR("Cannot prepare audio interface for use (%s)\n",
-               snd_strerror(rc));
-               exit(1);
-            }
-#else
-            if (pa_simple_flush(myAudioControls.pa_handle, &error) != 0) {
-               LOG_WARNING("Unable to flush buffer: %s\n", pa_strerror(error));
-            }
-            pa_simple_free(myAudioControls.pa_handle);
-
-            myAudioControls.pa_handle = openPulseaudioCaptureDevice(pcm_capture_device);
-            if (myAudioControls.pa_handle == NULL) {
-               LOG_ERROR("Error creating Pulse capture device.\n");
-               return 1;
-            }
-#endif
             // Set the next listening state
             silenceNextState = WAKEWORD_LISTEN;
             recState = SILENCE;
