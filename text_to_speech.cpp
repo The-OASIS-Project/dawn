@@ -1,3 +1,4 @@
+#include <atomic>
 #include <queue>
 #include <stdlib.h>
 #include <stdint.h>
@@ -5,10 +6,11 @@
 #include <sstream>
 #include <vector>
 
-#include "text_to_command_nuevo.h"
 #include "dawn.h"
 #include "logging.h"
 #include "piper.hpp"
+#include "text_to_command_nuevo.h"
+#include "text_to_speech.h"
 
 #define DEFAULT_RATE       22050
 #define DEFAULT_CHANNELS   1
@@ -143,6 +145,10 @@ extern "C" {
     */
    void* tts_thread_function(void* arg) {
       LOG_INFO("tts_thread_function() started.");
+
+      // Declare the interruption flag
+      std::atomic<bool> tts_stop_processing(false);
+
       while (!get_quit()) {
          pthread_mutex_lock(&tts_queue_mutex);
 
@@ -170,12 +176,48 @@ extern "C" {
          int rc = 0;
          int error = 0;
 
+         // Reset the interruption flag
+         tts_stop_processing.store(false);
+
          // Convert text to audio data
-         textToAudio(tts_handle.config, tts_handle.voice, inputText, audioBuffer, result, [&]() {
+         textToAudio(tts_handle.config, tts_handle.voice, inputText, audioBuffer, result, tts_stop_processing, [&]() {
+            pthread_mutex_lock(&tts_mutex);
+            tts_playback_state = TTS_PLAYBACK_PLAY;
+            pthread_mutex_unlock(&tts_mutex);
+
 #ifdef ALSA_DEVICE
             // Play audio data using ALSA
             for (size_t i = 0; i < audioBuffer.size(); i += tts_handle.frames) {
-               rc = snd_pcm_writei(tts_handle.handle, &audioBuffer[i], std::min(tts_handle.frames, audioBuffer.size() - i));
+               // Check playback state
+               pthread_mutex_lock(&tts_mutex);
+               while (tts_playback_state == TTS_PLAYBACK_PAUSE) {
+                  LOG_WARNING("TTS playback is PAUSED.");
+                  pthread_cond_wait(&tts_cond, &tts_mutex);
+               }
+               if (tts_playback_state == TTS_PLAYBACK_DISCARD) {
+                  LOG_WARNING("TTS unpaused to DISCARD.");
+                  tts_playback_state = TTS_PLAYBACK_IDLE;
+                  audioBuffer.clear();
+                  LOG_WARNING("Emptying TTS queue.");
+                  while (!tts_queue.empty()) {
+                     tts_queue.pop();
+                  }
+                  pthread_mutex_unlock(&tts_mutex);
+
+                  tts_stop_processing.store(true);
+                  return;
+               } else if (tts_playback_state == TTS_PLAYBACK_PLAY) {
+                  LOG_WARNING("TTS unpaused to PLAY.");
+               } else if (tts_playback_state == TTS_PLAYBACK_IDLE) {
+                  LOG_WARNING("TTS unpaused to IDLE.");
+               } else {
+                  LOG_ERROR("TTS unpaused to UNKNOWN.");
+               }
+               pthread_mutex_unlock(&tts_mutex);
+
+               // Write audio frames
+               rc = snd_pcm_writei(tts_handle.handle, &audioBuffer[i],
+                                   std::min(tts_handle.frames, audioBuffer.size() - i));
                if (rc == -EPIPE) {
                   LOG_ERROR("ALSA underrun occurred");
                   snd_pcm_prepare(tts_handle.handle);
@@ -184,27 +226,71 @@ extern "C" {
                }
             }
 #else
-            rc = pa_simple_write(tts_handle.pa_handle, audioBuffer.data(), audioBuffer.size() * sizeof(int16_t), &error);
-            if (rc < 0) {
-               LOG_ERROR("PulseAudio error from pa_simple_write: %s", pa_strerror(rc));
-               //audioBuffer.clear();
+            const size_t chunk_frames = 1024;  // Adjust as needed
+            const size_t chunk_bytes = chunk_frames * sizeof(int16_t);
+            size_t total_bytes = audioBuffer.size() * sizeof(int16_t);
 
-               // Close the current PulseAudio connection
-               if (tts_handle.pa_handle) {
-                  pa_simple_free(tts_handle.pa_handle);
-                  tts_handle.pa_handle = NULL;
+            for (size_t i = 0; i < total_bytes; i += chunk_bytes) {
+               // Check playback state
+               pthread_mutex_lock(&tts_mutex);
+               while (tts_playback_state == TTS_PLAYBACK_PAUSE) {
+                  LOG_WARNING("TTS playback is PAUSED.");
+                  pthread_cond_wait(&tts_cond, &tts_mutex);
                }
+               if (tts_playback_state == TTS_PLAYBACK_DISCARD) {
+                  LOG_WARNING("TTS unpaused to DISCARD.");
+                  tts_playback_state = TTS_PLAYBACK_IDLE;
+                  audioBuffer.clear();
+                  LOG_WARNING("Emptying TTS queue.");
+                  while (!tts_queue.empty()) {
+                     tts_queue.pop();
+                  }
+                  pthread_mutex_unlock(&tts_mutex);
 
-               // Reopen the PulseAudio playback device
-               tts_handle.pa_handle = openPulseaudioPlaybackDevice(tts_handle.pcm_capture_device);
-               if (tts_handle.pa_handle == NULL) {
-                  LOG_ERROR("Error re-opening PulseAudio playback device.");
+                  tts_stop_processing.store(true);
+                  return;
+               } else if (tts_playback_state == TTS_PLAYBACK_PLAY) {
+                  //LOG_WARNING("TTS unpaused to PLAY.");
+               } else if (tts_playback_state == TTS_PLAYBACK_IDLE) {
+                  LOG_WARNING("TTS unpaused to IDLE.");
+               } else {
+                  LOG_ERROR("TTS unpaused to UNKNOWN.");
+               }
+               pthread_mutex_unlock(&tts_mutex);
+
+               // Calculate bytes to write
+               size_t bytes_to_write = std::min(chunk_bytes, total_bytes - i);
+
+               // Write audio data
+               rc = pa_simple_write(tts_handle.pa_handle, ((uint8_t*)audioBuffer.data()) + i,
+                                    bytes_to_write, &error);
+               if (rc < 0) {
+                  LOG_ERROR("PulseAudio error from pa_simple_write: %s", pa_strerror(error));
+                  //audioBuffer.clear();
+
+                  // Close the current PulseAudio connection
+                  if (tts_handle.pa_handle) {
+                     pa_simple_free(tts_handle.pa_handle);
+                     tts_handle.pa_handle = NULL;
+                  }
+
+                  // Reopen the PulseAudio playback device
+                  tts_handle.pa_handle = openPulseaudioPlaybackDevice(tts_handle.pcm_capture_device);
+                  if (tts_handle.pa_handle == NULL) {
+                     LOG_ERROR("Error re-opening PulseAudio playback device.");
+                  }
                }
             }
 #endif
             // Clear the audio buffer for the next request
             audioBuffer.clear();
+
+            pthread_mutex_lock(&tts_mutex);
+            tts_playback_state = TTS_PLAYBACK_IDLE;
+            pthread_mutex_unlock(&tts_mutex);
          });
+
+         tts_stop_processing.store(false);
       }
 
       return NULL;

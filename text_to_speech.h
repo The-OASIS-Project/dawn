@@ -26,6 +26,19 @@
 extern "C" {
 #endif
 
+// Enumeration for playback state
+typedef enum {
+    TTS_PLAYBACK_IDLE = 0,    /**< Idle playback state */
+    TTS_PLAYBACK_PLAY,        /**< Playing state */
+    TTS_PLAYBACK_PAUSE,       /**< Pause playback */
+    TTS_PLAYBACK_DISCARD      /**< Discard current playback */
+} tts_playback_state_t;
+
+// Declare the shared variables as extern
+extern pthread_cond_t tts_cond;
+extern pthread_mutex_t tts_mutex;
+extern volatile sig_atomic_t tts_playback_state;
+
 /**
  * @brief Initializes the text-to-speech system.
  *

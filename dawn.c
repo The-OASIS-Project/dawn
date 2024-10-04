@@ -191,6 +191,35 @@ static char *ignoreWords[] = {
    "ignore"
 };
 
+// Array of words/phrases that we accept as a way to tell the AI to cancel its current
+// text to speech instead of requiring another command.
+static char *cancelWords[] = {
+   "stop",
+   "stop it",
+   "cancel",
+   "hold on",
+   "wait",
+   "never mind",
+   "abort",
+   "pause",
+   "enough",
+   "disregard",
+   "no thanks",
+   "forget it",
+   "leave it",
+   "drop it",
+   "stand by",
+   "cease",
+   "interrupt",
+   "say no more",
+   "shut up",
+   "silence",
+   "zip it",
+   "enough already",
+   "that's enough",
+   "stop right there"
+};
+
 // Standard greeting messages based on the time of day.
 const char* morning_greeting = "Good morning boss.";
 const char* day_greeting = "Good day Sir.";
@@ -224,6 +253,11 @@ typedef enum {
    VISION_AI_READY,
    INVALID_STATE
 } listeningState;
+
+// Define the shared variables for tts state
+pthread_cond_t tts_cond = PTHREAD_COND_INITIALIZER;
+pthread_mutex_t tts_mutex = PTHREAD_MUTEX_INITIALIZER;
+volatile sig_atomic_t tts_playback_state = TTS_PLAYBACK_IDLE;
 
 /**
  * @var static char *vision_ai_image
@@ -890,6 +924,7 @@ int main(int argc, char *argv[])
    int numGoodbyeWords = sizeof(goodbyeWords) / sizeof(goodbyeWords[0]);
    int numWakeWords = sizeof(wakeWords) / sizeof(wakeWords[0]);
    int numIgnoreWords = sizeof(ignoreWords) / sizeof(ignoreWords[0]);
+   int numCancelWords = sizeof(cancelWords) / sizeof(cancelWords[0]);
 
    int i = 0;
 
@@ -1143,6 +1178,13 @@ int main(int argc, char *argv[])
       publish_ai_state(recState);
       switch (recState) {
          case SILENCE:
+            pthread_mutex_lock(&tts_mutex);
+            if (tts_playback_state == TTS_PLAYBACK_PAUSE) {
+               tts_playback_state = TTS_PLAYBACK_PLAY;
+               pthread_cond_signal(&tts_cond);
+            }
+            pthread_mutex_unlock(&tts_mutex);
+
             capture_buffer(&myAudioControls, max_buff, max_buff_size, &buff_size);
 
             rms = calculateRMS((int16_t*)max_buff, buff_size / (DEFAULT_CHANNELS * 2));
@@ -1161,6 +1203,12 @@ int main(int argc, char *argv[])
             }
             break;
          case WAKEWORD_LISTEN:
+            pthread_mutex_lock(&tts_mutex);
+            if (tts_playback_state == TTS_PLAYBACK_PLAY) {
+               tts_playback_state = TTS_PLAYBACK_PAUSE;
+            }
+            pthread_mutex_unlock(&tts_mutex);
+
             capture_buffer(&myAudioControls, max_buff, max_buff_size, &buff_size);
 
             rms = calculateRMS((int16_t*)max_buff, buff_size / (DEFAULT_CHANNELS * 2));
@@ -1204,11 +1252,34 @@ int main(int argc, char *argv[])
 
                   for (i = 0; i < numGoodbyeWords; i++) {
                      if (strcmp(input_text, goodbyeWords[i]) == 0) {
-                        quit = 1;
+                        pthread_mutex_lock(&tts_mutex);
+                        if (tts_playback_state == TTS_PLAYBACK_PAUSE) {
+                           tts_playback_state = TTS_PLAYBACK_DISCARD;
+                           pthread_cond_signal(&tts_cond);
+                        }
+                        pthread_mutex_unlock(&tts_mutex);
 
                         text_to_speech("Goodbye sir.");
+
+                        quit = 1;
                      }
                   }
+
+                  pthread_mutex_lock(&tts_mutex);
+                  if (tts_playback_state == TTS_PLAYBACK_PAUSE) {
+                     for (i = 0; i < numCancelWords; i++) {
+                        if (strcmp(input_text, cancelWords[i]) == 0) {
+                           LOG_WARNING("Cancel word detected.\n");
+
+                           tts_playback_state = TTS_PLAYBACK_DISCARD;
+                           pthread_cond_signal(&tts_cond);
+
+                           silenceNextState = WAKEWORD_LISTEN;
+                           recState = SILENCE;
+                        }
+                     }
+                  }
+                  pthread_mutex_unlock(&tts_mutex);
 
                   for (i = 0; i < numWakeWords; i++) {
                      char *found_ptr = strstr(input_text, wakeWords[i]);
@@ -1226,6 +1297,12 @@ int main(int argc, char *argv[])
                   }
 
                   if (i < numWakeWords) {
+                     pthread_mutex_lock(&tts_mutex);
+                     if (tts_playback_state == TTS_PLAYBACK_PAUSE) {
+                        tts_playback_state = TTS_PLAYBACK_DISCARD;
+                        pthread_cond_signal(&tts_cond);
+                     }
+                     pthread_mutex_unlock(&tts_mutex);
 
                      if (*next_char_ptr == '\0') {
                         LOG_WARNING("wakeWords[i] was found at the end of input_text.\n");
@@ -1243,6 +1320,13 @@ int main(int argc, char *argv[])
                         recState = PROCESS_COMMAND;
                      }
                   } else {
+                     pthread_mutex_lock(&tts_mutex);
+                     if (tts_playback_state == TTS_PLAYBACK_PAUSE) {
+                        tts_playback_state = TTS_PLAYBACK_PLAY;
+                        pthread_cond_signal(&tts_cond);
+                     }
+                     pthread_mutex_unlock(&tts_mutex);
+
                      silenceNextState = WAKEWORD_LISTEN;
                      recState = SILENCE;
                   }
@@ -1251,6 +1335,13 @@ int main(int argc, char *argv[])
             buff_size = 0;
             break;
          case COMMAND_RECORDING:
+            pthread_mutex_lock(&tts_mutex);
+            if (tts_playback_state == TTS_PLAYBACK_PAUSE) {
+               tts_playback_state = TTS_PLAYBACK_DISCARD;
+               pthread_cond_signal(&tts_cond);
+            }
+            pthread_mutex_unlock(&tts_mutex);
+
             capture_buffer(&myAudioControls, max_buff, max_buff_size, &buff_size);
 
             rms = calculateRMS((int16_t*)max_buff, buff_size / (DEFAULT_CHANNELS * 2));
@@ -1311,6 +1402,13 @@ int main(int argc, char *argv[])
                   char thisSubstring[2048];
                   int strLength = 0;
 
+                  pthread_mutex_lock(&tts_mutex);
+                  if (tts_playback_state == TTS_PLAYBACK_PAUSE) {
+                     tts_playback_state = TTS_PLAYBACK_DISCARD;
+                     pthread_cond_signal(&tts_cond);
+                  }
+                  pthread_mutex_unlock(&tts_mutex);
+
                   memset(thisValue, '\0', sizeof(thisValue));
                   LOG_WARNING("Found command \"%s\".\n\tLooking for value in \"%s\".\n",
                          commands[i].actionWordsWildcard, commands[i].actionWordsRegex);
@@ -1341,14 +1439,24 @@ int main(int argc, char *argv[])
             if (i >= numCommands) {
                LOG_WARNING("Not detected as a command.\n");
 #ifndef DISABLE_AI
-               for (i = 0; i < numIgnoreWords; i++) {
-                  if (strcmp(command_text, ignoreWords[i]) == 0) {
+               int ignoreCount = 0;
+
+               for (ignoreCount = 0; ignoreCount < numIgnoreWords; ignoreCount++) {
+                  if (strcmp(command_text, ignoreWords[ignoreCount]) == 0) {
                      LOG_WARNING("Ignore word detected.\n");
+
+                     pthread_mutex_lock(&tts_mutex);
+                     if (tts_playback_state == TTS_PLAYBACK_PAUSE) {
+                        tts_playback_state = TTS_PLAYBACK_PLAY;
+                        pthread_cond_signal(&tts_cond);
+                     }
+                     pthread_mutex_unlock(&tts_mutex);
+
                      break;
                   }
                }
 
-               if (i < numIgnoreWords) {
+               if (ignoreCount < numIgnoreWords) {
                   LOG_WARNING("Input ignored. Found in ignore list.\n");
                   silenceNextState = WAKEWORD_LISTEN;
                   recState = SILENCE;
@@ -1371,6 +1479,13 @@ int main(int argc, char *argv[])
                      remove_chars(response_text, "*");
                      remove_emojis(response_text);
 
+                     pthread_mutex_lock(&tts_mutex);
+                     if (tts_playback_state == TTS_PLAYBACK_PAUSE) {
+                        tts_playback_state = TTS_PLAYBACK_DISCARD;
+                        pthread_cond_signal(&tts_cond);
+                     }
+                     pthread_mutex_unlock(&tts_mutex);
+
                      // Now let's see how it sounds.
                      text_to_speech(response_text);
 
@@ -1381,6 +1496,14 @@ int main(int argc, char *argv[])
 
                      free(response_text);
                   } else {
+                     pthread_mutex_lock(&tts_mutex);
+                     if (tts_playback_state == TTS_PLAYBACK_PAUSE) {
+                        tts_playback_state = TTS_PLAYBACK_DISCARD;
+                        pthread_cond_signal(&tts_cond);
+                     }
+                     pthread_mutex_unlock(&tts_mutex);
+
+
                      LOG_ERROR("GPT error.\n");
                      text_to_speech("I'm sorry but I'm currently unavailable boss.");
                   }
@@ -1400,6 +1523,13 @@ int main(int argc, char *argv[])
 
             break;
          case VISION_AI_READY:
+            pthread_mutex_lock(&tts_mutex);
+            if (tts_playback_state == TTS_PLAYBACK_PAUSE) {
+               tts_playback_state = TTS_PLAYBACK_PLAY;
+               pthread_cond_signal(&tts_cond);
+            }
+            pthread_mutex_unlock(&tts_mutex);
+
             // Get the AI response using the image recognition.
             response_text = getGptResponse(conversation_history,
                   "What am I looking at? Ignore the overlay unless asked about it specifically.",
@@ -1407,11 +1537,11 @@ int main(int argc, char *argv[])
             if (response_text != NULL) {
                // AI returned successfully, vocalize response.
                LOG_WARNING("AI: %s\n", response_text);
-	       char *match = NULL;
-	       if ((match = strstr(response_text, "<end_of_turn>")) != NULL) {
+	            char *match = NULL;
+	            if ((match = strstr(response_text, "<end_of_turn>")) != NULL) {
                   *match = '\0';
                   LOG_WARNING("AI: %s\n", response_text);
-	       }
+	            }
                text_to_speech(response_text);
 
                // Add the successful AI response to the conversation.

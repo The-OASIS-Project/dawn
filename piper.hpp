@@ -121,6 +121,7 @@ void loadVoice(PiperConfig &config, std::string modelPath,
 // Phonemize text and synthesize audio
 void textToAudio(PiperConfig &config, Voice &voice, std::string text,
                  std::vector<int16_t> &audioBuffer, SynthesisResult &result,
+                 std::atomic<bool> &tts_stop_processing,
                  const std::function<void()> &audioCallback);
 
 // Phonemize text and synthesize audio to WAV file

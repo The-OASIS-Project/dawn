@@ -448,6 +448,7 @@ void synthesize(std::vector<PhonemeId> &phonemeIds,
 // Phonemize text and synthesize audio
 void textToAudio(PiperConfig &config, Voice &voice, std::string text,
                  std::vector<int16_t> &audioBuffer, SynthesisResult &result,
+                 std::atomic<bool> &tts_stop_processing,
                  const std::function<void()> &audioCallback) {
 
   std::size_t sentenceSilenceSamples = 0;
@@ -486,6 +487,12 @@ void textToAudio(PiperConfig &config, Voice &voice, std::string text,
   std::map<Phoneme, std::size_t> missingPhonemes;
   for (auto phonemesIter = phonemes.begin(); phonemesIter != phonemes.end();
        ++phonemesIter) {
+    // Check for interruption before processing the sentence
+    if (tts_stop_processing.load()) {
+      spdlog::info("textToAudio(): Interruption requested, stopping processing.");
+      break;
+    }
+
     std::vector<Phoneme> &sentencePhonemes = *phonemesIter;
 
     if (spdlog::should_log(spdlog::level::debug)) {
@@ -598,6 +605,12 @@ void textToAudio(PiperConfig &config, Voice &voice, std::string text,
     }
 
     phonemeIds.clear();
+
+    // Check for interruption after the callback
+    if (tts_stop_processing.load()) {
+      spdlog::info("textToAudio(): Interruption requested after callback, stopping processing.");
+      break;
+    }
   }
 
   if (missingPhonemes.size() > 0) {
@@ -623,7 +636,8 @@ void textToWavFile(PiperConfig &config, Voice &voice, std::string text,
                    std::ostream &audioFile, SynthesisResult &result) {
 
   std::vector<int16_t> audioBuffer;
-  textToAudio(config, voice, text, audioBuffer, result, NULL);
+  std::atomic<bool> tts_stop_processing(false);
+  textToAudio(config, voice, text, audioBuffer, result, tts_stop_processing, NULL);
 
   // Write WAV
   auto synthesisConfig = voice.synthesisConfig;
