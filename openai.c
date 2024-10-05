@@ -19,15 +19,17 @@
  * part of the project and are adopted by the project author(s).
  */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
 #include <netinet/in.h>
 #include <netdb.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/select.h>
+#include <unistd.h>
+
 #include <curl/curl.h>
 #include <json-c/json.h>
 
@@ -36,6 +38,29 @@
 #include "openai.h"
 #include "secrets.h"
 #include "text_to_speech.h"
+
+/**
+ * @brief A static buffer to store the URL of the selected LLM service.
+ *
+ * This buffer stores the URL for the currently selected LLM,
+ * either cloud or local. Its maximum length is 2048 characters.
+ */
+static char llm_url[2048];
+
+void setLLM(llm_t type) {
+   switch (type) {
+      case CLOUD_LLM:
+         text_to_speech("Setting to AI to cloud LLM.");
+         snprintf(llm_url, 2048, "%s", CLOUDAI_URL);
+         break;
+      case LOCAL_LLM:
+         text_to_speech("Setting to AI to local LLM.");
+         snprintf(llm_url, 2048, "%s", LOCALAI_URL);
+         break;
+      default:
+         text_to_speech("Unknown AI requested.");
+   }
+}
 
 /**
  * @brief A structure to manage dynamic memory as a buffer.
@@ -87,6 +112,62 @@ static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, voi
 }
 
 /**
+ * @brief Extracts the host and port from a URL, removing protocol and paths.
+ *
+ * This function handles stripping protocols (http, https) and extracts the host and port from URLs.
+ * If no port is provided, it defaults to port 80 for http and 443 for https.
+ *
+ * @param url The input URL string.
+ * @param host Output buffer to store the extracted host (must be pre-allocated).
+ * @param port Output buffer to store the extracted port (must be large enough for the port number).
+ * @return int Returns 0 on success, -1 on failure.
+ */
+int extract_host_and_port(const char *url, char *host, char *port) {
+   // Validate the input arguments
+   if (url == NULL || host == NULL || port == NULL) {
+      LOG_ERROR("Error: NULL argument passed to extract_host_and_port.");
+      return -1;
+   }
+
+   if (strlen(url) == 0) {
+      LOG_ERROR("Error: Empty URL provided.");
+      return -1;
+   }
+
+   const char *start = url;
+
+   // Determine protocol and set default port
+   if (strncmp(url, "http://", 7) == 0) {
+      start = url + 7;  // Skip "http://"
+      strcpy(port, "80");  // Default port for http
+   } else if (strncmp(url, "https://", 8) == 0) {
+      start = url + 8;  // Skip "https://"
+      strcpy(port, "443");  // Default port for https
+   } else {
+      // If no recognizable protocol, assume http and continue
+      strcpy(port, "80");
+   }
+
+   // Find the end of the host part (either ':' for port or '/' for path)
+   const char *end = strpbrk(start, ":/");
+   if (end == NULL) {
+      // No port or path, the host is the entire remaining string
+      strcpy(host, start);
+   } else if (*end == ':') {
+      // Extract the host and port
+      strncpy(host, start, end - start);
+      host[end - start] = '\0';  // Null-terminate the host
+      strcpy(port, end + 1);     // Port starts after ':'
+   } else {
+      // Extract the host only (no port, but has a path)
+      strncpy(host, start, end - start);
+      host[end - start] = '\0';  // Null-terminate the host
+   }
+
+   return 0;
+}
+
+/**
  * @brief Check internet connection with timeout.
  *
  * This function checks the availability of an internet connection by attempting to
@@ -100,48 +181,78 @@ static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, voi
  *       to provide a timeout mechanism for the connection attempt.
  */
 int checkInternetConnectionWithTimeout(const char *url, int timeout_seconds) {
-    struct hostent *host = gethostbyname(url);
-    if (host == NULL) {
-        return 0;
-    }
+   char host[2048];
+   char port[6];
 
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock == -1) {
-        return 0;
-    }
+   // Extract host from the URL (ignores path and protocol)
+   if (extract_host_and_port(url, host, port) == -1) {
+       LOG_ERROR("Error: Invalid URL format");
+       return 0;
+   }
 
-    struct sockaddr_in server;
-    server.sin_family = AF_INET;
-    server.sin_port = htons(80);
-    server.sin_addr = *((struct in_addr *)host->h_addr);
+   // Set up address resolution hints
+   struct addrinfo hints, *res;
+   memset(&hints, 0, sizeof(hints));
+   hints.ai_family = AF_INET;        // Use IPv4
+   hints.ai_socktype = SOCK_STREAM;  // TCP stream sockets
 
-    // Set socket as non-blocking
-    fcntl(sock, F_SETFL, O_NONBLOCK);
+   // Resolve host (works for both hostnames and IP addresses)
+   int status = getaddrinfo(host, port, &hints, &res);
+   if (status != 0) {
+      LOG_ERROR("getaddrinfo: %s", gai_strerror(status));
+      return 0;
+   }
 
-    int result = connect(sock, (struct sockaddr *)&server, sizeof(server));
-    if (result == -1) {
-        fd_set write_fds;
-        FD_ZERO(&write_fds);
-        FD_SET(sock, &write_fds);
+   // Create a socket
+   int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+   if (sock == -1) {
+      LOG_ERROR("socket: %s", strerror(errno));
+      freeaddrinfo(res);
+      return 0;
+   }
 
-        struct timeval timeout;
-        timeout.tv_sec = timeout_seconds;
-        timeout.tv_usec = 0;
+   // Set socket as non-blocking
+   fcntl(sock, F_SETFL, O_NONBLOCK);
 
-        result = select(sock + 1, NULL, &write_fds, NULL, &timeout);
-        if (result == 1) {
-            int error;
-            socklen_t error_len = sizeof(error);
-            getsockopt(sock, SOL_SOCKET, SO_ERROR, &error, &error_len);
-            if (error == 0) {
-                result = 0;  // Connection successful
-            }
-        }
-    }
+   // Attempt to connect
+   int result = connect(sock, res->ai_addr, res->ai_addrlen);
+   if (result == -1 && errno != EINPROGRESS) {
+      LOG_ERROR("connect: %s", strerror(errno));
+      close(sock);
+      freeaddrinfo(res);
+      return 0;
+   }
 
-    close(sock);
+   // Set up the file descriptor set for select()
+   fd_set write_fds;
+   FD_ZERO(&write_fds);
+   FD_SET(sock, &write_fds);
 
-    return (result == 0);
+   // Set the timeout value
+   struct timeval timeout;
+   timeout.tv_sec = timeout_seconds;
+   timeout.tv_usec = 0;
+
+   // Wait for the socket to become writable within the timeout
+   result = select(sock + 1, NULL, &write_fds, NULL, &timeout);
+   if (result == 1) {
+      // Socket is writable, check for connection success
+      int error;
+      socklen_t error_len = sizeof(error);
+      if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &error, &error_len) == 0 && error == 0) {
+         result = 1;  // Connection successful
+      } else {
+         result = 0;  // Connection failed
+      }
+   } else {
+      result = 0;  // Timeout or error
+   }
+
+   // Clean up
+   close(sock);
+   freeaddrinfo(res);
+
+   return result;
 }
 
 char *getGptResponse(struct json_object *conversation_history, const char *input_text,
@@ -150,6 +261,7 @@ char *getGptResponse(struct json_object *conversation_history, const char *input
    CURL *curl_handle = NULL;  /* Handle for curl library. */
    CURLcode res = -1;
    struct curl_slist *headers = NULL;
+   char full_url[2048 + 20] = "";
 
    struct MemoryStruct chunk;
 
@@ -237,10 +349,18 @@ char *getGptResponse(struct json_object *conversation_history, const char *input
    }
    chunk.size = 0;
 
-   if (checkInternetConnectionWithTimeout(OPENAI_URL, 4)) {
+   if (!checkInternetConnectionWithTimeout(llm_url, 4)) {
       LOG_ERROR("URL did not return. Unavailable.");
 
-      return NULL;
+      if (strcmp(CLOUDAI_URL, llm_url) == 0) {
+         LOG_WARNING("Falling back to local LLM.");
+
+         text_to_speech("Unable to contact cloud LLM.");
+
+         setLLM(LOCAL_LLM);
+      } else {
+         return NULL;
+      }
    }
 
    curl_handle = curl_easy_init();
@@ -248,7 +368,8 @@ char *getGptResponse(struct json_object *conversation_history, const char *input
       headers = curl_slist_append(headers, "Content-Type: application/json");
       headers = curl_slist_append(headers, OPENAI_HEADER);
 
-      curl_easy_setopt(curl_handle, CURLOPT_URL, OPENAI_URL "/v1/chat/completions");
+      snprintf(full_url, 2048 + 20, "%s%s", llm_url, "/v1/chat/completions");
+      curl_easy_setopt(curl_handle, CURLOPT_URL, full_url);
       curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, payload);
       curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, headers);
       curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);

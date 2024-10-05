@@ -96,6 +96,16 @@
        "aliases": ["streaming"],
        "topic": "hud"
     },
+    "local llm": {
+       "type": "boolean",
+       "aliases": ["llama cpp", "llama.cpp", "local ai"],
+       "topic": "dawn"
+    },
+    "cloud llm": {
+       "type": "boolean",
+       "aliases": ["open ai", "openai", "remote llm", "cloud ll m", "cloud l l m", "cloud ai"],
+       "topic": "dawn"
+    },
     "audio capture device": {
        "type": "analog",
        "aliases": ["audio input", "microphone"],

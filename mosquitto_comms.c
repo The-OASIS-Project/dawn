@@ -38,6 +38,7 @@
 /* Local */
 #include "dawn.h"
 #include "flac_playback.h"
+#include "openai.h"
 #include "logging.h"
 #include "mic_passthrough.h"
 #include "mosquitto_comms.h"
@@ -61,7 +62,9 @@ static deviceCallback deviceCallbackArray[] = {
    {VOICE_AMPLIFIER, voiceAmplifierCallback},
    {SHUTDOWN, shutdownCallback},
    {VIEWING, viewingCallback},
-   {VOLUME, volumeCallback}
+   {VOLUME, volumeCallback},
+   {LOCAL_LLM_SWITCH, localLLMCallback},
+   {CLOUD_LLM_SWITCH, cloudLLMCallback}
 };
 
 static pthread_t music_thread = -1;
@@ -127,6 +130,19 @@ typedef struct {
 static Playlist playlist = { .count = 0 };
 static int current_track = 0;
 
+/**
+ * @brief Recursively searches a directory for files matching a pattern and adds them to a playlist.
+ *
+ * This function searches through the given root directory and all its subdirectories
+ * for files that match the provided filename pattern. It adds matching files to the playlist.
+ *
+ * @param rootDir The root directory where the search begins.
+ * @param pattern The pattern to match filenames (supports wildcards and case folding).
+ * @param playlist Pointer to the Playlist structure where matching files will be added.
+ *
+ * @note The function stops adding files if the playlist reaches its maximum length.
+ * @note Uses the `fnmatch()` function to match filenames.
+ */
 void searchDirectory(const char *rootDir, const char *pattern, Playlist *playlist) {
    DIR *dir = opendir(rootDir);
    if (!dir) {
@@ -647,6 +663,18 @@ void volumeCallback(const char *actionName, char *value) {
    if (floatVol >= 0 && floatVol <= 2.0) {
       setMusicVolume(floatVol);
    }
+}
+
+void localLLMCallback(const char *actionName, char *value) {
+   LOG_WARNING("Setting AI to local LLM.");
+
+   setLLM(LOCAL_LLM);
+}
+
+void cloudLLMCallback(const char *actionName, char *value) {
+   LOG_WARNING("Setting AI to cloud LLM.");
+
+   setLLM(CLOUD_LLM);
 }
 
 /* End Mosquitto Stuff */

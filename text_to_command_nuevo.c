@@ -523,8 +523,10 @@ int parseCommandConfig(char *json, actionType *actions, int *numActions,
 
             deviceAlias = json_object_get_string(deviceAliasObject);
 
-            strncpy(actions[deviceNum].devices[actions[deviceNum].numDevices].aliases[actions[deviceNum].devices[actions[deviceNum].numDevices].numAliases], deviceAlias, MAX_WORD_LENGTH); // deviceAlias to struct.
-            actions[deviceNum].devices[actions[deviceNum].numDevices].numAliases++; // Increment numAliases
+            if (deviceAlias != NULL) {
+               strncpy(actions[deviceNum].devices[actions[deviceNum].numDevices].aliases[actions[deviceNum].devices[actions[deviceNum].numDevices].numAliases], deviceAlias, MAX_WORD_LENGTH); // deviceAlias to struct.
+               actions[deviceNum].devices[actions[deviceNum].numDevices].numAliases++; // Increment numAliases
+            }
          }
       }
 

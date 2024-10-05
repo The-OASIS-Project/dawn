@@ -62,7 +62,7 @@
 #define DEFAULT_CAPTURE_SECONDS  0.5f
 
 // Define the default command timeout in terms of iterations of DEFAULT_CAPTURE_SECONDS.
-#define DEFAULT_COMMAND_TIMEOUT  2
+#define DEFAULT_COMMAND_TIMEOUT  3
 
 // Define the duration for background audio capture in seconds.
 #define BACKGROUND_CAPTURE_SECONDS  6
@@ -89,7 +89,7 @@
 #endif
 
 // Define the threshold offset for detecting talking in the audio stream.
-#define TALKING_THRESHOLD_OFFSET 0.015
+#define TALKING_THRESHOLD_OFFSET 0.025
 
 static char pcm_capture_device[MAX_WORD_LENGTH + 1] = "";
 static char pcm_playback_device[MAX_WORD_LENGTH + 1] = "";
@@ -1167,6 +1167,8 @@ int main(int argc, char *argv[])
       LOG_ERROR("Error: Unable to register signal handler.\n");
       exit(EXIT_FAILURE);
    }
+
+   setLLM(CLOUD_LLM);
 
    // Main loop
    LOG_INFO("Listening...\n");

@@ -22,8 +22,31 @@
 #ifndef OPENAI_H
 #define OPENAI_H
 
-#define OPENAI_URL	"https://api.openai.com"
-//#define OPENAI_URL	"http://127.0.0.1:8080"
+#define CLOUDAI_URL	"https://api.openai.com"
+#define LOCALAI_URL	"http://127.0.0.1:8080"
+
+/**
+ * @brief Enumeration for different LLM (Large Language Model) types.
+ *
+ * This enumeration defines two types of LLM:
+ * - CLOUD_LLM: Represents a cloud-based large language model.
+ * - LOCAL_LLM: Represents a local instance of a large language model.
+ */
+typedef enum {
+   CLOUD_LLM,  /**< Cloud-based large language model */
+   LOCAL_LLM   /**< Local large language model */
+} llm_t;
+
+/**
+ * @brief Sets the LLM (Large Language Model) type to either cloud or local.
+ *
+ * This function changes the LLM type based on the input parameter. It updates the URL
+ * in the `llm_url` buffer based on whether the user selects the cloud-based or local-based LLM.
+ * It also provides feedback using the `text_to_speech()` function.
+ *
+ * @param type The LLM type to be set (either CLOUD_LLM or LOCAL_LLM).
+ */
+void setLLM(llm_t type);
 
 /**
  * @brief Get a response using the GPT-based conversational model.

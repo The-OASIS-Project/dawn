@@ -157,7 +157,6 @@ extern "C" {
          while (tts_queue.empty() && tts_thread_running) {
             pthread_cond_wait(&tts_queue_cond, &tts_queue_mutex);
          }
-         LOG_INFO("Text acquired.");
 
          // Exit if the thread is no longer running and the queue is empty
          if (!tts_thread_running && tts_queue.empty()) {

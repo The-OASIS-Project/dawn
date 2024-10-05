@@ -47,6 +47,8 @@ typedef enum {
    SHUTDOWN,               /**< System shutdown action. */
    VIEWING,                /**< Viewing or display actions. */
    VOLUME,                 /**< Music playback volume, */
+   LOCAL_LLM_SWITCH,       /**< Local LLM switch. */
+   CLOUD_LLM_SWITCH,       /**< Cloud LLM switch. */
    MAX_DEVICE_TYPES        /**< Used to determine the number of device types. */
 } deviceType;
 
@@ -66,7 +68,9 @@ static const char *deviceTypeStrings[] = {
    "voice amplifier",
    "shutdown alpha bravo charlie",
    "viewing",
-   "volume"
+   "volume",
+   "local llm",
+   "cloud llm"
 };
 
 /**
@@ -184,6 +188,26 @@ void viewingCallback(const char *actionName, char *value);
  * @param value      String representing the desired volume level, converted to a float and validated.
  */
 void volumeCallback(const char *actionName, char *value);
+
+/**
+ * @brief Callback function for setting the AI to use the local LLM.
+ *
+ * This function is triggered by an action to switch the AI to the local LLM (Large Language Model).
+ *
+ * @param actionName The name of the action triggering the callback.
+ * @param value The value associated with the action (unused in this implementation).
+ */
+void localLLMCallback(const char *actionName, char *value);
+
+/**
+ * @brief Callback function for setting the AI to use the cloud LLM.
+ *
+ * This function is triggered by an action to switch the AI to the cloud LLM (Large Language Model).
+ *
+ * @param actionName The name of the action triggering the callback.
+ * @param value The value associated with the action (unused in this implementation).
+ */
+void cloudLLMCallback(const char *actionName, char *value);
 
 #endif // MOSQUITTO_COMMS_H
 

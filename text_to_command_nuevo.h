@@ -26,7 +26,7 @@
 #define MAX_COMMAND_LENGTH       512
 #define MAX_SUBACTIONS           10
 #define MAX_ACTIONS              10
-#define MAX_DEVICES_PER_ACTION   10
+#define MAX_DEVICES_PER_ACTION   20
 #define MAX_WORDS                10
 
 #define MAX_AUDIO_DEVICES        5
