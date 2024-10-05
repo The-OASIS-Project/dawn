@@ -1168,7 +1168,11 @@ int main(int argc, char *argv[])
       exit(EXIT_FAILURE);
    }
 
-   setLLM(CLOUD_LLM);
+   if (checkInternetConnectionWithTimeout(CLOUDAI_URL, 4)) {
+      setLLM(CLOUD_LLM);
+   } else {
+      setLLM(LOCAL_LLM);
+   }
 
    // Main loop
    LOG_INFO("Listening...\n");
@@ -1200,7 +1204,7 @@ int main(int argc, char *argv[])
                if (vosk_output == NULL) {
                   LOG_ERROR("vosk_recognizer_partial_result() returned NULL!\n");
                } else {
-                  LOG_WARNING("Partial Input: %s\n", vosk_output);
+                  //LOG_WARNING("Partial Input: %s\n", vosk_output);
                }
             }
             break;
@@ -1216,7 +1220,7 @@ int main(int argc, char *argv[])
             rms = calculateRMS((int16_t*)max_buff, buff_size / (DEFAULT_CHANNELS * 2));
 
             if (rms >= (backgroundRMS + TALKING_THRESHOLD_OFFSET)) {
-               LOG_WARNING("WAKEWORD_LISTEN: Talking still in progress.\n");
+               //LOG_WARNING("WAKEWORD_LISTEN: Talking still in progress.\n");
                /* For an additional layer of "silence," I'm getting the length of the
                 * vosk output to see if the volume was up but no one was saying
                 * anything. */
@@ -1227,7 +1231,7 @@ int main(int argc, char *argv[])
                if (vosk_output == NULL) {
                   LOG_ERROR("vosk_recognizer_partial_result() returned NULL!\n");
                } else {
-                  LOG_WARNING("Partial Input: %s\n", vosk_output);
+                  //LOG_WARNING("Partial Input: %s\n", vosk_output);
                   if (strlen(vosk_output) == vosk_output_length) {
                      vosk_nochange = 1;
                   }

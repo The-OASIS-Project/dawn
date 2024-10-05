@@ -167,19 +167,6 @@ int extract_host_and_port(const char *url, char *host, char *port) {
    return 0;
 }
 
-/**
- * @brief Check internet connection with timeout.
- *
- * This function checks the availability of an internet connection by attempting to
- * establish a connection to the specified URL within a given timeout period.
- *
- * @param url The URL to check for connection.
- * @param timeout_seconds The timeout value in seconds for the connection attempt.
- * @return 1 if a connection is successfully established within the timeout, 0 otherwise.
- *
- * @note This function uses non-blocking socket techniques and the select() function
- *       to provide a timeout mechanism for the connection attempt.
- */
 int checkInternetConnectionWithTimeout(const char *url, int timeout_seconds) {
    char host[2048];
    char port[6];
