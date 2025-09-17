@@ -15,7 +15,7 @@
      "analog": {
         "actions": {
            "set": {
-              "action_words": ["set %device_name% to %value%", "adjust %device_name% to %value%", "switch %device_name% to %value%", "which %device_name% to %value%"],
+              "action_words": ["set %device_name% to %value%", "adjust %device_name% to %value%", "switch %device_name% to %value%", "which %device_name% to %value%", "switch to %value% %device_name%"],
               "action_command": "{\"device\": \"%device_name%\", \"action\": \"set\", \"value\": \"%value%\"}"
            }
         }
@@ -76,9 +76,9 @@
        "aliases": ["display", "screen"],
        "topic": "hud"
     },
-    "mask": {
+    "faceplate": {
        "type": "boolean",
-       "aliases": ["face mask", "helmet", "bucket", "facemask"],
+       "aliases": ["face plate", "mask", "face mask", "helmet", "bucket", "facemask"],
        "topic": "helmet"
     },
     "info": {

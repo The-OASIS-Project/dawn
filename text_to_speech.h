@@ -60,6 +60,21 @@ void initialize_text_to_speech(char* pcm_device);
 void text_to_speech(char* text);
 
 /**
+ * @brief Generate WAV audio data from text for network transmission
+ *
+ * This function generates WAV audio using the same Piper instance as local TTS,
+ * but returns the audio data in memory instead of playing it locally.
+ *
+ * @param text The text to be converted to WAV audio
+ * @param wav_data_out Pointer to receive allocated WAV data (caller must free)
+ * @param wav_size_out Pointer to receive WAV data size in bytes
+ * @return 0 on success, -1 on error
+ */
+int text_to_speech_to_wav(const char* text, uint8_t** wav_data_out, size_t* wav_size_out);
+
+uint8_t* error_to_wav(const char* error_message, size_t* tts_size_out);
+
+/**
  * @brief Cleans up the text-to-speech system.
  *
  * This function signals the worker thread to terminate, waits for it to finish,

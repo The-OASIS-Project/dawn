@@ -289,6 +289,11 @@ void parseJsonCommandandExecute(const char *input)
    }
 
    LOG_INFO("Command result for AI: %s", pending_command_result);
+   if (pending_command_result == NULL) {
+      LOG_WARNING("pending_command_result is NULL. That probablu shouldn't happen.");
+      json_object_put(parsedJson);
+      return;
+   }
    snprintf(gpt_response, 512, "{\"response\": \"%s\"}", pending_command_result);
 
    response_text = getGptResponse(conversation_history, gpt_response, NULL, 0);
@@ -300,13 +305,16 @@ void parseJsonCommandandExecute(const char *input)
          *match = '\0';
          LOG_WARNING("AI: %s\n", response_text);
       }
-      text_to_speech(response_text);
+      /* FIXME: This is a quick workaround for null responses. */
+      if (response_text[0] != '{') {
+         text_to_speech(response_text);
 
-      // Add the successful AI response to the conversation.
-      struct json_object *ai_message = json_object_new_object();
-      json_object_object_add(ai_message, "role", json_object_new_string("assistant"));
-      json_object_object_add(ai_message, "content", json_object_new_string(response_text));
-      json_object_array_add(conversation_history, ai_message);
+         // Add the successful AI response to the conversation.
+         struct json_object *ai_message = json_object_new_object();
+         json_object_object_add(ai_message, "role", json_object_new_string("assistant"));
+         json_object_object_add(ai_message, "content", json_object_new_string(response_text));
+         json_object_array_add(conversation_history, ai_message);
+      }
 
       free(response_text);
       response_text = NULL;

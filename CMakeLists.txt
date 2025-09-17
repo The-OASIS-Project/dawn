@@ -75,6 +75,9 @@ link_directories(${CMAKE_SOURCE_DIR})
 add_executable(dawn
                audio_utils.c
                dawn.c
+               dawn_network_audio.c
+               dawn_server.c
+               dawn_tts_wrapper.cpp
                flac_playback.c
                llm_command_parser.c
                logging.c

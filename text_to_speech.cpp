@@ -11,6 +11,7 @@
 #include "piper.hpp"
 #include "text_to_command_nuevo.h"
 #include "text_to_speech.h"
+#include "dawn_tts_wrapper.h"
 
 #define DEFAULT_RATE       22050
 #define DEFAULT_CHANNELS   1
@@ -369,6 +370,115 @@ extern "C" {
       tts_queue.push(inputText);
       pthread_cond_signal(&tts_queue_cond);
       pthread_mutex_unlock(&tts_queue_mutex);
+   }
+
+   // Network WAV generation using existing TTS system
+   int text_to_speech_to_wav(const char* text, uint8_t** wav_data_out, size_t* wav_size_out) {
+       if (!text || !wav_data_out || !wav_size_out) {
+           LOG_ERROR("Invalid parameters for WAV generation");
+           return -1;
+       }
+
+       if (!tts_handle.is_initialized) {
+           LOG_ERROR("TTS not initialized for WAV generation");
+           return -1;
+       }
+
+       // THREAD SAFETY: Lock the TTS mutex to prevent conflicts with local TTS
+       pthread_mutex_lock(&tts_mutex);
+
+       // Store original state (fix type and scope)
+       volatile sig_atomic_t original_state = tts_playback_state;
+
+       try {
+           LOG_INFO("Generating network WAV: \"%s\"", text);
+
+           // Pause local TTS to prevent conflicts
+           if (tts_playback_state == TTS_PLAYBACK_PLAY) {
+               tts_playback_state = TTS_PLAYBACK_PAUSE;
+               LOG_INFO("Paused local TTS for network generation");
+           }
+
+           std::ostringstream audioStream;
+           piper::SynthesisResult result;
+
+           // Generate WAV using shared TTS handle (now thread-safe)
+           piper::textToWavFile(tts_handle.config, tts_handle.voice, std::string(text),
+                               audioStream, result);
+
+           // Restore local TTS state
+           tts_playback_state = original_state;
+           if (original_state == TTS_PLAYBACK_PLAY) {
+               pthread_cond_signal(&tts_cond);
+               LOG_INFO("Resumed local TTS after network generation");
+           }
+
+           std::string wavData = audioStream.str();
+           if (wavData.empty()) {
+               LOG_ERROR("Generated WAV data is empty");
+               pthread_mutex_unlock(&tts_mutex);
+               return -1;
+           }
+
+           *wav_size_out = wavData.size();
+           *wav_data_out = (uint8_t*)malloc(*wav_size_out);
+
+           if (!*wav_data_out) {
+               LOG_ERROR("Failed to allocate WAV buffer (%zu bytes)", *wav_size_out);
+               pthread_mutex_unlock(&tts_mutex);
+               return -1;
+           }
+
+           memcpy(*wav_data_out, wavData.data(), *wav_size_out);
+           LOG_INFO("Network WAV generated safely: %zu bytes", *wav_size_out);
+
+           pthread_mutex_unlock(&tts_mutex);
+           return 0;
+
+       } catch (const std::exception& e) {
+           LOG_ERROR("TTS WAV generation failed: %s", e.what());
+
+           // Restore TTS state on error (original_state is now in scope)
+           tts_playback_state = original_state;
+           if (original_state == TTS_PLAYBACK_PLAY) {
+               pthread_cond_signal(&tts_cond);
+           }
+
+           pthread_mutex_unlock(&tts_mutex);
+           return -1;
+       }
+   }
+
+   uint8_t* error_to_wav(const char* error_message, size_t* tts_size_out) {
+       uint8_t *tts_wav_data = NULL;
+       size_t tts_wav_size = 0;
+
+       LOG_INFO("Generating error TTS: \"%s\"", error_message);
+
+       int tts_result = text_to_speech_to_wav(error_message, &tts_wav_data, &tts_wav_size);
+
+       if (tts_result == 0 && tts_wav_data && tts_wav_size > 0) {
+           // Apply same size/truncation logic as normal TTS
+           if (check_response_size_limit(tts_wav_size)) {
+               *tts_size_out = tts_wav_size;
+               return tts_wav_data;
+           } else {
+               uint8_t *truncated_data = NULL;
+               size_t truncated_size = 0;
+
+               if (truncate_wav_response(tts_wav_data, tts_wav_size,
+                                       &truncated_data, &truncated_size) == 0) {
+                   free(tts_wav_data);
+                   *tts_size_out = truncated_size;
+                   return truncated_data;
+               }
+               free(tts_wav_data);
+           }
+       }
+
+       LOG_ERROR("Failed to generate error TTS");
+       *tts_size_out = 0;
+       return NULL;
    }
 
    /**

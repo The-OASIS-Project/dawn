@@ -23,6 +23,8 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
+#include <time.h>
 
 // Global variable for the log file
 static FILE *log_file = NULL;
@@ -33,6 +35,23 @@ static FILE *log_file = NULL;
 #define ANSI_COLOR_RED     "\x1b[31m"
 #define ANSI_COLOR_RESET   "\x1b[0m"
 
+// Fixed width for the preamble
+#define PREAMBLE_WIDTH 45
+
+// Get current timestamp with milliseconds
+static void get_timestamp_ms(char *buffer, size_t buffer_size) {
+    struct timeval tv;
+    struct tm *tm_info;
+
+    gettimeofday(&tv, NULL);
+    tm_info = localtime(&tv.tv_sec);
+
+    // Format: HH:MM:SS.mmm
+    snprintf(buffer, buffer_size, "%02d:%02d:%02d.%03d",
+             tm_info->tm_hour, tm_info->tm_min, tm_info->tm_sec,
+             (int)(tv.tv_usec / 1000));
+}
+
 // Utility function to get the filename from the path
 static const char *get_filename(const char *path) {
     const char *filename = strrchr(path, '/');
@@ -41,9 +60,6 @@ static const char *get_filename(const char *path) {
     }
     return filename ? filename + 1 : path;
 }
-
-// Fixed width for the preamble
-#define PREAMBLE_WIDTH 30
 
 // Utility function to remove newlines from a string
 static void remove_newlines(char *str) {
@@ -87,15 +103,17 @@ void log_message(log_level_t level, const char *file, int line, const char *func
 
     const char *filename = get_filename(file);
 
-    // Create the preamble
-    char preamble[PREAMBLE_WIDTH + 1];
-    int preamble_length = snprintf(preamble, sizeof(preamble), "[%s] %s:%d: ", level_str, filename, line);
+    // Get timestamp
+    char timestamp[13]; // "HH:MM:SS.mmm"
+    get_timestamp_ms(timestamp, sizeof(timestamp));
 
-    if (preamble_length > PREAMBLE_WIDTH) {
-        // Truncate the preamble if it's too long
-        preamble[PREAMBLE_WIDTH] = '\0';
-    } else {
-        // Pad the preamble with spaces if it's too short
+    // Create the preamble
+    char preamble[PREAMBLE_WIDTH + 5];
+    int preamble_length = snprintf(preamble, sizeof(preamble), "[%s] %s %s:%d: ",
+                              level_str, timestamp, filename, line);
+
+    // Pad to fixed width for alignment
+    if (preamble_length < PREAMBLE_WIDTH) {
         int padding_length = PREAMBLE_WIDTH - preamble_length;
         memset(preamble + preamble_length, ' ', padding_length);
         preamble[PREAMBLE_WIDTH] = '\0';

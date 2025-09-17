@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 /* JSON */
@@ -45,6 +46,9 @@
 /* Local */
 #include "audio_utils.h"
 #include "dawn.h"
+#include "dawn_network_audio.h"
+#include "dawn_server.h"
+#include "dawn_tts_wrapper.h"
 #include "llm_command_parser.h"
 #include "logging.h"
 #include "mosquitto_comms.h"
@@ -147,7 +151,7 @@ static const pa_sample_spec sample_spec = {
 
 // Holds the current RMS (Root Mean Square) level of the background audio.
 // Used to monitor ambient noise levels and potentially adjust listening sensitivity.
-static double backgroundRMS = 0.0;
+static double backgroundRMS = 0.002;
 
 // Holds the current RMS (Root Mean Square) level of the background audio.
 // Used to monitor ambient noise levels and potentially adjust listening sensitivity.
@@ -252,6 +256,7 @@ typedef enum {
    COMMAND_RECORDING,
    PROCESS_COMMAND,
    VISION_AI_READY,
+   NETWORK_PROCESSING,
    INVALID_STATE
 } listeningState;
 
@@ -295,6 +300,30 @@ volatile sig_atomic_t quit = 0;
 
 /* MQTT */
 static struct mosquitto *mosq;
+
+// Is remote DAWN enabled
+static int enable_network_audio = 0;
+pthread_mutex_t processing_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t processing_done = PTHREAD_COND_INITIALIZER;
+uint8_t *processing_result_data = NULL;
+size_t processing_result_size = 0;
+int processing_complete = 0;
+
+// Network processing state
+static listeningState previous_state_before_network = SILENCE;
+static uint8_t *network_pcm_buffer = NULL;
+static size_t network_pcm_size = 0;
+static pthread_mutex_t network_processing_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// PCM Data Structure for network processing
+typedef struct {
+    uint8_t *pcm_data;
+    size_t pcm_size;
+    uint32_t sample_rate;
+    uint16_t num_channels;
+    uint16_t bits_per_sample;
+    int is_valid;
+} NetworkPCMData;
 
 // Global variable for command processing mode
 command_processing_mode_t command_processing_mode = CMD_MODE_DIRECT_ONLY;
@@ -369,7 +398,9 @@ char *textToSpeechCallback(const char *actionName, char *value, int *should_resp
    LOG_INFO("Received text to speech command: \"%s\"\n", value);
 
    // TTS commands always execute directly, regardless of mode
-   *should_respond = 0;  // No need to respond about TTS
+   if (should_respond != NULL) {
+      *should_respond = 0;  // No need to respond about TTS
+   }
    text_to_speech(value);
    return NULL;
 }
@@ -842,7 +873,7 @@ listeningState currentState = INVALID_STATE;
  */
 int publish_ai_state(listeningState newState) {
    const char stateTemplate[] = "{\"device\": \"ai\", \"name\":\"%s\", \"state\":\"%s\"}";
-   char state[18] = "";
+   char state[20] = "";
    char *aiState = NULL;
    int aiStateLength = 0;
    int rc = 0;
@@ -866,6 +897,9 @@ int publish_ai_state(listeningState newState) {
          break;
       case VISION_AI_READY:
          strcpy(state, "VISION_AI_READY");
+         break;
+      case NETWORK_PROCESSING:
+         strcpy(state, "NETWORK_PROCESSING");
          break;
       default:
          LOG_ERROR("Unknown state: %d", newState);
@@ -902,7 +936,50 @@ int publish_ai_state(listeningState newState) {
    return 0;
 }
 
+NetworkPCMData* extract_pcm_from_network_wav(const uint8_t *wav_data, size_t wav_size) {
+    if (wav_size < sizeof(WAVHeader)) {
+        LOG_ERROR("WAV data too small for header");
+        return NULL;
+    }
 
+    const WAVHeader *header = (const WAVHeader *)wav_data;
+
+    // Validate WAV header
+    if (strncmp(header->riff_header, "RIFF", 4) != 0 ||
+        strncmp(header->wave_header, "WAVE", 4) != 0) {
+        LOG_ERROR("Invalid WAV header format");
+        return NULL;
+    }
+
+    uint32_t sample_rate = le32toh(header->sample_rate);
+    uint16_t num_channels = le16toh(header->num_channels);
+    uint16_t bits_per_sample = le16toh(header->bits_per_sample);
+    uint32_t data_bytes = le32toh(header->data_bytes);
+
+    NetworkPCMData *pcm = malloc(sizeof(NetworkPCMData));
+    if (!pcm) return NULL;
+
+    pcm->pcm_data = malloc(data_bytes);
+    if (!pcm->pcm_data) {
+        free(pcm);
+        return NULL;
+    }
+
+    memcpy(pcm->pcm_data, wav_data + sizeof(WAVHeader), data_bytes);
+    pcm->pcm_size = data_bytes;
+    pcm->sample_rate = sample_rate;
+    pcm->num_channels = num_channels;
+    pcm->bits_per_sample = bits_per_sample;
+    pcm->is_valid = (num_channels == 1 && bits_per_sample == 16);
+
+    return pcm;
+}
+
+void free_network_pcm_data(NetworkPCMData *pcm) {
+    if (!pcm) return;
+    if (pcm->pcm_data) free(pcm->pcm_data);
+    free(pcm);
+}
 
 /**
  * Displays help information for the program, outlining the usage and available command-line options.
@@ -924,6 +1001,7 @@ void display_help(int argc, char *argv[]) {
    printf("  -c, --capture DEVICE   Specify the PCM capture device.\n");
    printf("  -d, --playback DEVICE  Specify the PCM playback device.\n");
    printf("  -l, --logfile LOGFILE  Specify the log filename instead of stdout/stderr.\n");
+   printf("  -N, --network-audio    Enable network audio processing server\n");
    printf("  -h, --help             Display this help message and exit.\n");
    printf("Command Processing Modes:\n");
    printf("  -D, --commands-only    Direct command processing only (default).\n");
@@ -994,6 +1072,7 @@ int main(int argc, char *argv[])
       {"llm-only", no_argument, NULL, 'L'},           // LLM handles everything
       {"llm-commands", no_argument, NULL, 'C'},       // Commands first, then LLM
       {"commands-only", no_argument, NULL, 'D'},      // Direct commands only (explicit)
+      {"network-audio", no_argument, NULL, 'N'},      // Start server for remote DAWN access
       {0, 0, 0, 0}
    };
    int option_index = 0;
@@ -1003,7 +1082,7 @@ int main(int argc, char *argv[])
    // TODO: I'm adding this here but it will need better error clean-ups.
    curl_global_init(CURL_GLOBAL_DEFAULT);
 
-   while ((opt = getopt_long(argc, argv, "c:d:hl:LCD", long_options, &option_index)) != -1) {
+   while ((opt = getopt_long(argc, argv, "c:d:hl:LCDN", long_options, &option_index)) != -1) {
       switch (opt) {
       case 'c':
          strncpy(pcm_capture_device, optarg, sizeof(pcm_capture_device));
@@ -1031,6 +1110,10 @@ int main(int argc, char *argv[])
          command_processing_mode = CMD_MODE_DIRECT_ONLY;
          LOG_INFO("Direct commands only mode enabled");
          break;
+      case 'N':
+        enable_network_audio = 1;
+        LOG_INFO("Network audio enabled");
+        break;
       case '?':
          display_help(argc, argv);
          exit(EXIT_FAILURE);
@@ -1246,11 +1329,113 @@ int main(int argc, char *argv[])
       setLLM(LOCAL_LLM);
    }
 
+   if (enable_network_audio) {
+      LOG_INFO("Initializing network audio system...");
+      if (dawn_network_audio_init() != 0) {
+         LOG_ERROR("Failed to initialize network audio system");
+         enable_network_audio = 0;
+      } else {
+         LOG_INFO("Starting DAWN network server...");
+         if (dawn_server_start() != DAWN_SUCCESS) {
+            LOG_ERROR("Failed to start DAWN server - network audio disabled");
+            dawn_network_audio_cleanup();
+            enable_network_audio = 0;
+         } else {
+            LOG_INFO("DAWN network server started successfully on port 5000");
+            LOG_INFO("Network TTS will use existing Piper instance");
+         }
+      }
+   }
+
    // Main loop
    LOG_INFO("Listening...\n");
    while (!quit) {
       if (vision_ai_ready){
          recState = VISION_AI_READY;
+      }
+
+      if (enable_network_audio) {
+         uint8_t *network_audio = NULL;
+         size_t network_audio_size = 0;
+         char client_info[64];
+
+         if (dawn_get_network_audio(&network_audio, &network_audio_size, client_info)) {
+            LOG_INFO("Network audio received from %s (%zu bytes)", client_info, network_audio_size);
+
+            // State transition safety check
+            if (recState == PROCESS_COMMAND || recState == VISION_AI_READY) {
+                LOG_WARNING("Network audio received during %s - deferring",
+                           recState == PROCESS_COMMAND ? "command processing" : "vision AI");
+
+                // Send busy message TTS
+                size_t busy_wav_size = 0;
+                uint8_t *busy_wav = error_to_wav("I'm currently busy. Please try again in a moment.", &busy_wav_size);
+                if (busy_wav) {
+                   pthread_mutex_lock(&processing_mutex);
+                   processing_result_data = busy_wav;
+                   processing_result_size = busy_wav_size;
+                   processing_complete = 1;
+                   pthread_cond_signal(&processing_done);
+                   pthread_mutex_unlock(&processing_mutex);
+
+                   LOG_INFO("Sent busy message to %s", client_info);
+                }
+
+                dawn_clear_network_audio();
+                continue; // Skip to next loop iteration
+            }
+
+            // Safe to process - save current state and transition
+            LOG_INFO("Interrupting %s state for network processing",
+                    recState == SILENCE ? "SILENCE" :
+                    recState == WAKEWORD_LISTEN ? "WAKEWORD_LISTEN" :
+                    recState == COMMAND_RECORDING ? "COMMAND_RECORDING" : "OTHER");
+
+            previous_state_before_network = recState;
+
+            // Extract PCM from WAV
+            NetworkPCMData *pcm = extract_pcm_from_network_wav(network_audio, network_audio_size);
+
+            if (pcm && pcm->is_valid) {
+               // Store PCM data for processing
+               pthread_mutex_lock(&network_processing_mutex);
+
+               if (network_pcm_buffer) free(network_pcm_buffer);
+               network_pcm_buffer = malloc(pcm->pcm_size);
+               if (network_pcm_buffer) {
+                  memcpy(network_pcm_buffer, pcm->pcm_data, pcm->pcm_size);
+                  network_pcm_size = pcm->pcm_size;
+
+                  // Transition to network processing
+                  recState = NETWORK_PROCESSING;
+                  LOG_INFO("Transitioned to NETWORK_PROCESSING state");
+               } else {
+                  LOG_ERROR("Failed to allocate network PCM buffer");
+               }
+
+               pthread_mutex_unlock(&network_processing_mutex);
+               free_network_pcm_data(pcm);
+
+            } else {
+               LOG_ERROR("Invalid WAV format from network client");
+
+               // Send error TTS
+               size_t error_wav_size = 0;
+               uint8_t *error_wav = error_to_wav(ERROR_MSG_WAV_INVALID, &error_wav_size);
+               if (error_wav) {
+                  pthread_mutex_lock(&processing_mutex);
+                  processing_result_data = error_wav;
+                  processing_result_size = error_wav_size;
+                  processing_complete = 1;
+                  pthread_cond_signal(&processing_done);
+                  pthread_mutex_unlock(&processing_mutex);
+               }
+
+               if (pcm) free_network_pcm_data(pcm);
+            }
+
+            dawn_clear_network_audio();
+         }
       }
 
       publish_ai_state(recState);
@@ -1694,12 +1879,261 @@ int main(int argc, char *argv[])
             recState = SILENCE;
 
             break;
+         case NETWORK_PROCESSING:
+             LOG_INFO("Processing network audio from client");
+
+             pthread_mutex_lock(&network_processing_mutex);
+
+             if (network_pcm_buffer && network_pcm_size > 0) {
+                 // Reset Vosk for new session
+                 vosk_recognizer_reset(recognizer);
+
+                 // Process PCM data with Vosk
+                 vosk_recognizer_accept_waveform(recognizer, (const char*)network_pcm_buffer, network_pcm_size);
+                 vosk_output = vosk_recognizer_final_result(recognizer);
+
+                 if (vosk_output) {
+                     LOG_INFO("Network transcription result: %s", vosk_output);
+
+                     // Extract text using existing function
+                     input_text = getTextResponse(vosk_output);
+
+                     /* Process Commands before AI if LLM command processing is disabled */
+                     if (command_processing_mode != CMD_MODE_LLM_ONLY) {
+                        /* Process Commands before AI. */
+                        direct_command_found = 0;
+                        for (i = 0; i < numCommands; i++) {
+                           if (searchString(commands[i].actionWordsWildcard, input_text) == 1) {
+                              char thisValue[1024];   // FIXME: These are abnormally large.
+                                                      // I'm in a hurry and don't want overflows.
+                              char thisCommand[2048];
+                              char thisSubstring[2048];
+                              int strLength = 0;
+
+                              pthread_mutex_lock(&tts_mutex);
+                              if (tts_playback_state == TTS_PLAYBACK_PAUSE) {
+                                 tts_playback_state = TTS_PLAYBACK_DISCARD;
+                                 pthread_cond_signal(&tts_cond);
+                              }
+                              pthread_mutex_unlock(&tts_mutex);
+
+                              memset(thisValue, '\0', sizeof(thisValue));
+                              LOG_WARNING("Found command \"%s\".\n\tLooking for value in \"%s\".\n",
+                                     commands[i].actionWordsWildcard, commands[i].actionWordsRegex);
+
+                              strLength = strnlen(commands[i].actionWordsRegex, MAX_COMMAND_LENGTH);
+                              if ((strLength >= 2) && (commands[i].actionWordsRegex[strLength - 2] == '%') &&
+                                  (commands[i].actionWordsRegex[strLength - 1] == 's')) {
+                                 strncpy(thisSubstring, commands[i].actionWordsRegex, strLength - 2);
+                                 thisSubstring[strLength - 2] = '\0';
+                                 strcpy(thisValue, extract_remaining_after_substring(input_text, thisSubstring));
+                              } else {
+                                 int retSs = sscanf(input_text, commands[i].actionWordsRegex, thisValue);
+                              }
+                              printf("2\n");
+                              snprintf(thisCommand, sizeof(thisCommand),
+                                       commands[i].actionCommand, thisValue);
+                              LOG_WARNING("Sending: \"%s\"\n", thisCommand);
+
+                              rc = mosquitto_publish(mosq, NULL, commands[i].topic, strlen(thisCommand),
+                                                     thisCommand, 0, false);
+                              if(rc != MOSQ_ERR_SUCCESS){
+                                 LOG_ERROR("Error publishing: %s\n", mosquitto_strerror(rc));
+                              }
+
+                              direct_command_found = 1;
+                              printf("3\n");
+                              break;
+                           }
+                        }
+                     }
+
+                     if (input_text && strlen(input_text) > 0 && !direct_command_found) {
+                         LOG_INFO("Network speech recognized: \"%s\"", input_text);
+
+                         // Get LLM response using existing function
+                         response_text = getGptResponse(conversation_history, input_text, NULL, 0);
+
+                         if (response_text && strlen(response_text) > 0) {
+
+                             // Now be sure to filter out special characters that give us problems.
+                             remove_chars(response_text, "*");
+                             remove_emojis(response_text);
+
+                             LOG_INFO("Network LLM response: \"%s\"", response_text);
+
+                             // Generate TTS WAV for network transmission with ESP32 size limits
+                             size_t response_wav_size = 0;
+                             uint8_t *response_wav = NULL;
+
+                             if (text_to_speech_to_wav(response_text, &response_wav, &response_wav_size) == 0 && response_wav) {
+                                 LOG_INFO("Network TTS generated: %zu bytes", response_wav_size);
+
+                                 // Check ESP32 buffer limits
+                                 if (check_response_size_limit(response_wav_size)) {
+                                     // Fits within ESP32 limits - send as-is
+                                     pthread_mutex_lock(&processing_mutex);
+                                     processing_result_data = response_wav;
+                                     processing_result_size = response_wav_size;
+                                     processing_complete = 1;
+                                     pthread_cond_signal(&processing_done);
+                                     pthread_mutex_unlock(&processing_mutex);
+
+                                     LOG_INFO("Network TTS response ready (%zu bytes)", response_wav_size);
+                                 } else {
+                                     // Too large for ESP32 - truncate
+                                     LOG_WARNING("TTS response too large for ESP32, truncating...");
+
+                                     uint8_t *truncated_wav = NULL;
+                                     size_t truncated_size = 0;
+
+                                     if (truncate_wav_response(response_wav, response_wav_size,
+                                                             &truncated_wav, &truncated_size) == 0) {
+                                         // Truncation successful
+                                         free(response_wav);  // Free original
+
+                                         pthread_mutex_lock(&processing_mutex);
+                                         processing_result_data = truncated_wav;
+                                         processing_result_size = truncated_size;
+                                         processing_complete = 1;
+                                         pthread_cond_signal(&processing_done);
+                                         pthread_mutex_unlock(&processing_mutex);
+
+                                         LOG_INFO("Network TTS truncated and ready (%zu bytes)", truncated_size);
+                                     } else {
+                                         // Truncation failed - send error TTS
+                                         free(response_wav);
+                                         LOG_ERROR("Failed to truncate TTS response");
+
+                                         size_t error_wav_size = 0;
+                                         uint8_t *error_wav = error_to_wav("Response too long. Please ask for a shorter answer.", &error_wav_size);
+                                         if (error_wav) {
+                                             pthread_mutex_lock(&processing_mutex);
+                                             processing_result_data = error_wav;
+                                             processing_result_size = error_wav_size;
+                                             processing_complete = 1;
+                                             pthread_cond_signal(&processing_done);
+                                             pthread_mutex_unlock(&processing_mutex);
+
+                                             LOG_INFO("Sent 'too long' error TTS (%zu bytes)", error_wav_size);
+                                         }
+                                     }
+                                 }
+                             } else {
+                                 // Send TTS error
+                                 size_t error_wav_size = 0;
+                                 uint8_t *error_wav = error_to_wav(ERROR_MSG_TTS_FAILED, &error_wav_size);
+                                 if (error_wav) {
+                                     pthread_mutex_lock(&processing_mutex);
+                                     processing_result_data = error_wav;
+                                     processing_result_size = error_wav_size;
+                                     processing_complete = 1;
+                                     pthread_cond_signal(&processing_done);
+                                     pthread_mutex_unlock(&processing_mutex);
+                                 }
+                             }
+
+                             free(response_text);
+                         } else {
+                             LOG_WARNING("Network LLM processing failed");
+
+                             // Send LLM timeout error
+                             size_t error_wav_size = 0;
+                             uint8_t *error_wav = error_to_wav(ERROR_MSG_LLM_TIMEOUT, &error_wav_size);
+                             if (error_wav) {
+                                 pthread_mutex_lock(&processing_mutex);
+                                 processing_result_data = error_wav;
+                                 processing_result_size = error_wav_size;
+                                 processing_complete = 1;
+                                 pthread_cond_signal(&processing_done);
+                                 pthread_mutex_unlock(&processing_mutex);
+                             }
+                         }
+
+                         free(input_text);
+                     } else {
+                         // Send speech error
+                         size_t error_wav_size = 0;
+                         uint8_t *error_wav = NULL;
+
+                         if (direct_command_found) {
+                            LOG_WARNING("Direct command found.");
+                            error_wav = error_to_wav("Direct command found and acted upon.", &error_wav_size);
+                         } else {
+                            LOG_WARNING("Network speech recognition failed");
+                            error_wav = error_to_wav(ERROR_MSG_SPEECH_FAILED, &error_wav_size);
+                         }
+                         if (error_wav) {
+                             pthread_mutex_lock(&processing_mutex);
+                             processing_result_data = error_wav;
+                             processing_result_size = error_wav_size;
+                             processing_complete = 1;
+                             pthread_cond_signal(&processing_done);
+                             pthread_mutex_unlock(&processing_mutex);
+                         }
+                     }
+                 } else {
+                     LOG_WARNING("Vosk processing returned no output");
+
+                     // Send speech error
+                     size_t error_wav_size = 0;
+                     uint8_t *error_wav = error_to_wav(ERROR_MSG_SPEECH_FAILED, &error_wav_size);
+                     if (error_wav) {
+                         pthread_mutex_lock(&processing_mutex);
+                         processing_result_data = error_wav;
+                         processing_result_size = error_wav_size;
+                         processing_complete = 1;
+                         pthread_cond_signal(&processing_done);
+                         pthread_mutex_unlock(&processing_mutex);
+                     }
+                 }
+
+                 // Cleanup network buffers
+                 if (network_pcm_buffer) {
+                    free(network_pcm_buffer);
+                    network_pcm_buffer = NULL;
+                    network_pcm_size = 0;
+                 }
+             }
+
+             pthread_mutex_unlock(&network_processing_mutex);
+
+             // Return to previous state
+             recState = previous_state_before_network;
+             LOG_INFO("Network processing complete, returned to %s",
+                      recState == SILENCE ? "SILENCE" : "previous state");
+             break;
          default:
             LOG_ERROR("I really shouldn't be here.\n");
       }
    }
 
    LOG_INFO("Quit.\n");
+
+   if (enable_network_audio) {
+      LOG_INFO("Stopping network audio system...");
+      dawn_server_stop();
+      dawn_network_audio_cleanup();
+
+      // Cleanup IPC resources
+      pthread_mutex_lock(&processing_mutex);
+      if (processing_result_data) {
+         free(processing_result_data);
+         processing_result_data = NULL;
+         processing_complete = 0;
+      }
+      pthread_mutex_unlock(&processing_mutex);
+
+      pthread_mutex_lock(&network_processing_mutex);
+      if (network_pcm_buffer) {
+         free(network_pcm_buffer);
+         network_pcm_buffer = NULL;
+         network_pcm_size = 0;
+      }
+      pthread_mutex_unlock(&network_processing_mutex);
+
+      LOG_INFO("Network audio cleanup complete");
+   }
 
    cleanup_text_to_speech();
 
