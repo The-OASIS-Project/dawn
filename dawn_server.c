@@ -1,3 +1,31 @@
+/**
+ * @file dawn_server.c
+ * @brief DAWN Audio Protocol Server Implementation
+ *
+ * Implements the DAWN Audio Protocol for receiving audio from ESP32 clients,
+ * processing through the DAWN AI pipeline, and returning synthesized responses.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s). Contributions include any modifications,
+ * enhancements, or additions to the project. These contributions become
+ * part of the project and are adopted by the project author(s).
+ *
+ */
+
 #define _GNU_SOURCE
 
 #include <stdio.h>
@@ -223,6 +251,9 @@ static int dawn_handle_handshake(dawn_client_session_t *session) {
     return DAWN_SUCCESS;
 }
 
+#define MAX_SEQUENCE_RETRIES 10
+#define MAX_PACKETS_PER_TRANSFER 10000  // ~80MB at 8KB chunks
+
 static int dawn_receive_data_chunks(dawn_client_session_t *session, uint8_t **data_out, size_t *size_out) {
     if (!session || !data_out || !size_out) return DAWN_ERROR;
 
@@ -233,9 +264,17 @@ static int dawn_receive_data_chunks(dawn_client_session_t *session, uint8_t **da
         return DAWN_ERROR_MEMORY;
     }
 
+    int packet_count = 0;
     size_t total_received = 0;
 
     while (1) {
+        packet_count++;
+        if (packet_count > MAX_PACKETS_PER_TRANSFER) {
+            LOG_ERROR("%s: Too many packets in transfer, aborting", session->client_ip);
+            free(buffer);
+            return DAWN_ERROR_PROTOCOL;
+        }
+
         // Read packet header
         uint8_t header_buffer[PACKET_HEADER_SIZE];
         int result = dawn_read_exact(session->socket_fd, header_buffer, PACKET_HEADER_SIZE);
@@ -279,11 +318,25 @@ static int dawn_receive_data_chunks(dawn_client_session_t *session, uint8_t **da
 
         uint16_t packet_sequence = ((uint16_t)seq_bytes[0] << 8) | (uint16_t)seq_bytes[1];
 
-        // Verify sequence number
+        // Verify sequence number with max retry
+        int sequence_retry_count = 0;
         if (packet_sequence != session->receive_sequence) {
+            LOG_WARNING("%s: Sequence mismatch: expected %u, got %u (retry %d/%d)",
+                       session->client_ip, session->receive_sequence,
+                       packet_sequence, sequence_retry_count, MAX_SEQUENCE_RETRIES);
             dawn_send_nack(session->socket_fd);
+
+            sequence_retry_count++;
+            if (sequence_retry_count >= MAX_SEQUENCE_RETRIES) {
+                LOG_ERROR("%s: Too many sequence errors, aborting", session->client_ip);
+                free(buffer);
+                return DAWN_ERROR_PROTOCOL;
+            }
             continue;
         }
+
+        // Reset counter on successful packet
+        sequence_retry_count = 0;
 
         // Read chunk data
         uint8_t *chunk_buffer = malloc(header.data_length);
@@ -335,6 +388,42 @@ static int dawn_receive_data_chunks(dawn_client_session_t *session, uint8_t **da
     return DAWN_SUCCESS;
 }
 
+/**
+ * @brief Send data to client in chunks with retry logic
+ *
+ * Breaks large data into PACKET_MAX_SIZE chunks and sends them sequentially
+ * with sequence numbers. Implements retry logic with exponential backoff on
+ * ACK timeout or NACK reception.
+ *
+ * BLOCKING: This function blocks until all data is sent or max retries exceeded.
+ * Total blocking time can be significant for large transfers:
+ * - 1MB transfer = ~130 chunks
+ * - With retries: potentially minutes
+ *
+ * THREAD SAFETY: Not thread-safe. Session must not be accessed concurrently.
+ *
+ * MEMORY: Does not allocate or free any memory. Data pointer must remain valid
+ * for the entire call duration.
+ *
+ * @param session Client session with initialized socket and sequence counters
+ * @param data Pointer to data to send (must remain valid for call duration)
+ * @param size Total size of data in bytes (must be > 0)
+ *
+ * @return DAWN_SUCCESS on complete transmission
+ * @return DAWN_ERROR on invalid parameters
+ * @return DAWN_ERROR_SOCKET on unrecoverable socket error
+ * @return DAWN_ERROR_TIMEOUT if max retries exceeded
+ *
+ * @pre session != NULL && session->socket_fd >= 0
+ * @pre data != NULL && size > 0
+ * @post session->send_sequence incremented by number of chunks sent
+ * @post All data transmitted or error occurred
+ *
+ * @note Large transfers may block for extended periods
+ * @note Logs progress for transfers > 50KB
+ * @note Uses 2-second ACK timeout per chunk
+ * @note Maximum 5 retries per chunk with exponential backoff
+ */
 static int dawn_send_data_chunks(dawn_client_session_t *session, const uint8_t *data, size_t size) {
     if (!session || !data || size == 0) return DAWN_ERROR;
 
@@ -383,7 +472,9 @@ static int dawn_send_data_chunks(dawn_client_session_t *session, const uint8_t *
             struct timeval timeout;
             timeout.tv_sec = 2;
             timeout.tv_usec = 0;
-            setsockopt(session->socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+            if (setsockopt(session->socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+                LOG_WARNING("%s: Failed to set receive timeout: %s", __func__, strerror(errno));
+            }
 
             uint8_t ack_header[PACKET_HEADER_SIZE];
             result = dawn_read_exact(session->socket_fd, ack_header, PACKET_HEADER_SIZE);
@@ -391,7 +482,9 @@ static int dawn_send_data_chunks(dawn_client_session_t *session, const uint8_t *
             // Reset timeout
             timeout.tv_sec = SOCKET_TIMEOUT_SEC;
             timeout.tv_usec = 0;
-            setsockopt(session->socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+            if (setsockopt(session->socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+                LOG_WARNING("%s: Failed to set send timeout: %s", __func__, strerror(errno));
+            }
 
             if (result != DAWN_SUCCESS) continue;
 
@@ -436,16 +529,24 @@ static int dawn_handle_client_connection(int client_fd, struct sockaddr_in *clie
     // Initialize session
     session.socket_fd = client_fd;
     session.addr = *client_addr;
-    inet_ntop(AF_INET, &client_addr->sin_addr, session.client_ip, sizeof(session.client_ip));
-
+    const char *ip_str = inet_ntop(AF_INET, &client_addr->sin_addr,
+                              session.client_ip, sizeof(session.client_ip));
+    if (ip_str == NULL) {
+        LOG_ERROR("Failed to convert client IP address: %s", strerror(errno));
+        snprintf(session.client_ip, sizeof(session.client_ip), "unknown");
+    }
     LOG_INFO("%s: Client connected", session.client_ip);
 
     // Set socket timeout
     struct timeval timeout;
     timeout.tv_sec = SOCKET_TIMEOUT_SEC;
     timeout.tv_usec = 0;
-    setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-    setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    if (setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+        LOG_WARNING("%s: Failed to set receive timeout: %s", session.client_ip, strerror(errno));
+    }
+    if (setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) < 0) {
+        LOG_WARNING("%s: Failed to set send timeout: %s", session.client_ip, strerror(errno));
+    }
 
     int result = DAWN_SUCCESS;
     uint8_t *received_data = NULL;
@@ -633,7 +734,7 @@ int dawn_server_start(void) {
 
     int result = pthread_create(&server_thread, NULL, dawn_server_thread, NULL);
     if (result != 0) {
-        LOG_ERROR("Failed to create server thread: %s", strerror(result));
+        LOG_ERROR("Failed to create server thread (error code %d)", result);
         server_running = 0;
         pthread_mutex_unlock(&server_mutex);
         return DAWN_ERROR;
@@ -658,13 +759,16 @@ void dawn_server_stop(void) {
     LOG_INFO("Stopping server...\n");
     server_running = 0;
 
+    // Close server socket to wake up accept() - under mutex protection
+    int fd_to_close = server_socket_fd;
+    server_socket_fd = -1;
+
     pthread_mutex_unlock(&server_mutex);
 
     // Close server socket to wake up accept()
-    if (server_socket_fd >= 0) {
-        shutdown(server_socket_fd, SHUT_RDWR);
-        close(server_socket_fd);
-        server_socket_fd = -1;
+    if (fd_to_close >= 0) {
+        shutdown(fd_to_close, SHUT_RDWR);
+        close(fd_to_close);
     }
 
     // Wait for server thread to complete

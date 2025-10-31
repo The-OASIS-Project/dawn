@@ -48,7 +48,7 @@
 #include "dawn.h"
 #include "dawn_network_audio.h"
 #include "dawn_server.h"
-#include "dawn_tts_wrapper.h"
+#include "dawn_wav_utils.h"
 #include "llm_command_parser.h"
 #include "logging.h"
 #include "mosquitto_comms.h"
@@ -936,45 +936,149 @@ int publish_ai_state(listeningState newState) {
    return 0;
 }
 
+/**
+ * @brief Extract PCM audio data from a WAV file received over the network
+ *
+ * This function parses a WAV file buffer, validates the header format, and extracts
+ * the raw PCM audio data for processing by Vosk speech recognition. The function
+ * performs basic validation to ensure the WAV format is compatible with the DAWN
+ * audio pipeline (16-bit mono PCM).
+ *
+ * @param wav_data Pointer to buffer containing complete WAV file data
+ * @param wav_size Total size of WAV data buffer in bytes
+ *
+ * @return NetworkPCMData* Pointer to allocated structure containing extracted PCM data
+ *                         and format information, or NULL on error
+ * @retval NULL if:
+ *         - wav_size is smaller than WAV header (44 bytes)
+ *         - RIFF/WAVE header validation fails
+ *         - Memory allocation fails
+ *
+ * @note Caller is responsible for freeing returned structure using free_network_pcm_data()
+ * @note The function uses le32toh/le16toh for endian conversion (assumes little-endian WAV)
+ * @note is_valid flag is set only if format is mono 16-bit (compatible with pipeline)
+ *
+ * @warning Does not validate data_bytes field against actual buffer size - potential
+ *          buffer overflow vulnerability
+ *
+ * @see free_network_pcm_data() for proper cleanup
+ * @see WAVHeader structure definition in dawn_tts_wrapper.h
+ */
 NetworkPCMData* extract_pcm_from_network_wav(const uint8_t *wav_data, size_t wav_size) {
-    if (wav_size < sizeof(WAVHeader)) {
-        LOG_ERROR("WAV data too small for header");
-        return NULL;
-    }
+   // Validate parameters
+   if (!wav_data || wav_size == 0) {
+      LOG_ERROR("Invalid parameters: wav_data=%p, wav_size=%zu",
+                (void*)wav_data, wav_size);
+      return NULL;
+   }
 
-    const WAVHeader *header = (const WAVHeader *)wav_data;
+   // Validate minimum size
+   if (wav_size < sizeof(WAVHeader)) {
+      LOG_ERROR("WAV data too small for header: %zu bytes (need %zu)",
+                wav_size, sizeof(WAVHeader));
+      return NULL;
+   }
 
-    // Validate WAV header
-    if (strncmp(header->riff_header, "RIFF", 4) != 0 ||
-        strncmp(header->wave_header, "WAVE", 4) != 0) {
-        LOG_ERROR("Invalid WAV header format");
-        return NULL;
-    }
+   const WAVHeader *header = (const WAVHeader *)wav_data;
 
-    uint32_t sample_rate = le32toh(header->sample_rate);
-    uint16_t num_channels = le16toh(header->num_channels);
-    uint16_t bits_per_sample = le16toh(header->bits_per_sample);
-    uint32_t data_bytes = le32toh(header->data_bytes);
+   // Validate RIFF/WAVE headers
+   if (strncmp(header->riff_header, "RIFF", 4) != 0 ||
+       strncmp(header->wave_header, "WAVE", 4) != 0) {
+      LOG_ERROR("Invalid WAV header format");
+      return NULL;
+   }
 
-    NetworkPCMData *pcm = malloc(sizeof(NetworkPCMData));
-    if (!pcm) return NULL;
+   // Extract format information (little-endian)
+   uint32_t sample_rate = le32toh(header->sample_rate);
+   uint16_t num_channels = le16toh(header->num_channels);
+   uint16_t bits_per_sample = le16toh(header->bits_per_sample);
+   uint16_t audio_format = le16toh(header->audio_format);
+   uint32_t data_bytes = le32toh(header->data_bytes);
 
-    pcm->pcm_data = malloc(data_bytes);
-    if (!pcm->pcm_data) {
-        free(pcm);
-        return NULL;
-    }
+   // Validate audio format (must be PCM)
+   if (audio_format != 1) {
+      LOG_ERROR("Not PCM format: %u", audio_format);
+      return NULL;
+   }
 
-    memcpy(pcm->pcm_data, wav_data + sizeof(WAVHeader), data_bytes);
-    pcm->pcm_size = data_bytes;
-    pcm->sample_rate = sample_rate;
-    pcm->num_channels = num_channels;
-    pcm->bits_per_sample = bits_per_sample;
-    pcm->is_valid = (num_channels == 1 && bits_per_sample == 16);
+   // Validate data_bytes against actual buffer size
+   size_t expected_total_size = sizeof(WAVHeader) + data_bytes;
+   if (expected_total_size > wav_size) {
+      LOG_WARNING("WAV header claims %u data bytes, but only %zu available",
+                  data_bytes, wav_size - sizeof(WAVHeader));
+      data_bytes = wav_size - sizeof(WAVHeader);
+   }
 
-    return pcm;
+   // Sanity check for unreasonably large data
+   if (data_bytes > ESP32_MAX_RESPONSE_BYTES) {
+      LOG_ERROR("WAV data size unreasonably large: %u bytes (max: %ld)",
+                data_bytes, (long)ESP32_MAX_RESPONSE_BYTES);
+      return NULL;
+   }
+
+   LOG_INFO("WAV format: %uHz, %u channels, %u-bit, %u data bytes",
+            sample_rate, num_channels, bits_per_sample, data_bytes);
+
+   // Allocate PCM structure
+   NetworkPCMData *pcm = malloc(sizeof(NetworkPCMData));
+   if (!pcm) {
+      LOG_ERROR("Failed to allocate NetworkPCMData structure");
+      return NULL;
+   }
+
+   // Allocate PCM data buffer
+   pcm->pcm_data = malloc(data_bytes);
+   if (!pcm->pcm_data) {
+      LOG_ERROR("Failed to allocate %u bytes for PCM data", data_bytes);
+      free(pcm);
+      return NULL;
+   }
+
+   // Copy PCM data (skip WAV header)
+   memcpy(pcm->pcm_data, wav_data + sizeof(WAVHeader), data_bytes);
+
+   // Populate structure
+   pcm->pcm_size = data_bytes;
+   pcm->sample_rate = sample_rate;
+   pcm->num_channels = num_channels;
+   pcm->bits_per_sample = bits_per_sample;
+   pcm->is_valid = (num_channels == 1 && bits_per_sample == 16);
+
+   if (!pcm->is_valid) {
+      LOG_WARNING("WAV format not pipeline-compatible (need mono 16-bit)");
+   }
+
+   return pcm;
 }
 
+/**
+ * @brief Free memory allocated for NetworkPCMData structure
+ *
+ * This function safely deallocates a NetworkPCMData structure and its associated
+ * PCM data buffer that was allocated by extract_pcm_from_network_wav(). The function
+ * performs NULL checks before freeing to prevent crashes.
+ *
+ * @param pcm Pointer to NetworkPCMData structure to free (may be NULL)
+ *
+ * @note This function is safe to call with NULL pointer (no-op)
+ * @note The pcm pointer becomes invalid after this call - do not use after freeing
+ * @note This function does NOT modify any global state or mutexes
+ *
+ * @warning Calling this function twice on the same pointer causes undefined behavior
+ *          (double-free). Caller must set pointer to NULL after freeing.
+ *
+ * @see extract_pcm_from_network_wav() for structure allocation
+ *
+ * @par Example Usage:
+ * @code
+ *   NetworkPCMData *pcm = extract_pcm_from_network_wav(wav_data, wav_size);
+ *   if (pcm) {
+ *      // Use pcm...
+ *      free_network_pcm_data(pcm);
+ *      pcm = NULL;  // Good practice to prevent double-free
+ *   }
+ * @endcode
+ */
 void free_network_pcm_data(NetworkPCMData *pcm) {
     if (!pcm) return;
     if (pcm->pcm_data) free(pcm->pcm_data);
@@ -1325,8 +1429,10 @@ int main(int argc, char *argv[])
 
    if (checkInternetConnectionWithTimeout(CLOUDAI_URL, 4)) {
       setLLM(CLOUD_LLM);
+      text_to_speech("Setting to AI to cloud LLM.");
    } else {
       setLLM(LOCAL_LLM);
+      text_to_speech("Setting to AI to local LLM.");
    }
 
    if (enable_network_audio) {
@@ -1362,6 +1468,13 @@ int main(int argc, char *argv[])
          if (dawn_get_network_audio(&network_audio, &network_audio_size, client_info)) {
             LOG_INFO("Network audio received from %s (%zu bytes)", client_info, network_audio_size);
 
+            // Validate returned data
+            if (!network_audio || network_audio_size == 0) {
+               LOG_ERROR("dawn_get_network_audio returned invalid data");
+               dawn_clear_network_audio();
+               continue;
+            }
+
             // State transition safety check
             if (recState == PROCESS_COMMAND || recState == VISION_AI_READY) {
                 LOG_WARNING("Network audio received during %s - deferring",
@@ -1379,6 +1492,15 @@ int main(int argc, char *argv[])
                    pthread_mutex_unlock(&processing_mutex);
 
                    LOG_INFO("Sent busy message to %s", client_info);
+                } else {
+                   // Fallback: signal with no data (triggers echo fallback in server)
+                   LOG_ERROR("Failed to generate busy TTS - client will timeout");
+                   pthread_mutex_lock(&processing_mutex);
+                   processing_result_data = NULL;
+                   processing_result_size = 0;
+                   processing_complete = 1;
+                   pthread_cond_signal(&processing_done);
+                   pthread_mutex_unlock(&processing_mutex);
                 }
 
                 dawn_clear_network_audio();
@@ -1395,27 +1517,48 @@ int main(int argc, char *argv[])
 
             // Extract PCM from WAV
             NetworkPCMData *pcm = extract_pcm_from_network_wav(network_audio, network_audio_size);
-
             if (pcm && pcm->is_valid) {
                // Store PCM data for processing
                pthread_mutex_lock(&network_processing_mutex);
 
-               if (network_pcm_buffer) free(network_pcm_buffer);
+               if (network_pcm_buffer) {
+                  free(network_pcm_buffer);
+               }
+
                network_pcm_buffer = malloc(pcm->pcm_size);
                if (network_pcm_buffer) {
                   memcpy(network_pcm_buffer, pcm->pcm_data, pcm->pcm_size);
                   network_pcm_size = pcm->pcm_size;
-
-                  // Transition to network processing
                   recState = NETWORK_PROCESSING;
                   LOG_INFO("Transitioned to NETWORK_PROCESSING state");
                } else {
                   LOG_ERROR("Failed to allocate network PCM buffer");
+
+                  // Send error response to client
+                  size_t error_wav_size = 0;
+                  uint8_t *error_wav = error_to_wav("Sorry, I ran out of memory. Please try again.",
+                                                    &error_wav_size);
+                  if (error_wav) {
+                     pthread_mutex_lock(&processing_mutex);
+                     processing_result_data = error_wav;
+                     processing_result_size = error_wav_size;
+                     processing_complete = 1;
+                     pthread_cond_signal(&processing_done);
+                     pthread_mutex_unlock(&processing_mutex);
+                  } else {
+                     // Fallback: signal with no data (triggers echo fallback in server)
+                     LOG_ERROR("Failed to generate busy TTS - client will timeout");
+                     pthread_mutex_lock(&processing_mutex);
+                     processing_result_data = NULL;
+                     processing_result_size = 0;
+                     processing_complete = 1;
+                     pthread_cond_signal(&processing_done);
+                     pthread_mutex_unlock(&processing_mutex);
+                  } 
                }
 
                pthread_mutex_unlock(&network_processing_mutex);
                free_network_pcm_data(pcm);
-
             } else {
                LOG_ERROR("Invalid WAV format from network client");
 
@@ -1429,7 +1572,16 @@ int main(int argc, char *argv[])
                   processing_complete = 1;
                   pthread_cond_signal(&processing_done);
                   pthread_mutex_unlock(&processing_mutex);
-               }
+               } else {
+                  // Fallback: signal with no data (triggers echo fallback in server)
+                  LOG_ERROR("Failed to generate busy TTS - client will timeout");
+                  pthread_mutex_lock(&processing_mutex);
+                  processing_result_data = NULL;
+                  processing_result_size = 0;
+                  processing_complete = 1;
+                  pthread_cond_signal(&processing_done);
+                  pthread_mutex_unlock(&processing_mutex);
+               } 
 
                if (pcm) free_network_pcm_data(pcm);
             }
@@ -1930,7 +2082,6 @@ int main(int argc, char *argv[])
                               } else {
                                  int retSs = sscanf(input_text, commands[i].actionWordsRegex, thisValue);
                               }
-                              printf("2\n");
                               snprintf(thisCommand, sizeof(thisCommand),
                                        commands[i].actionCommand, thisValue);
                               LOG_WARNING("Sending: \"%s\"\n", thisCommand);
@@ -1942,7 +2093,6 @@ int main(int argc, char *argv[])
                               }
 
                               direct_command_found = 1;
-                              printf("3\n");
                               break;
                            }
                         }

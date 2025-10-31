@@ -1,3 +1,27 @@
+/*
+ * DAWN Network Audio - IPC Bridge for Network Client Processing
+ * 
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s). Contributions include any modifications,
+ * enhancements, or additions to the project. These contributions become
+ * part of the project and are adopted by the project author(s).
+ *
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,21 +33,26 @@
 #include "text_to_speech.h"
 
 // Global Variables
-volatile sig_atomic_t network_audio_ready = 0;
-uint8_t *network_audio_buffer = NULL;
-size_t network_audio_size = 0;
-pthread_mutex_t network_audio_mutex = PTHREAD_MUTEX_INITIALIZER;
-char network_client_info[64] = {0};
-
-// Processing synchronization (external from main application)
-extern pthread_mutex_t processing_mutex;
-extern pthread_cond_t processing_done;
-extern uint8_t *processing_result_data;
-extern size_t processing_result_size;
-extern int processing_complete;
+static volatile sig_atomic_t network_audio_ready = 0;
+static uint8_t *network_audio_buffer = NULL;
+static size_t network_audio_size = 0;
+static pthread_mutex_t network_audio_mutex = PTHREAD_MUTEX_INITIALIZER;
+static char network_client_info[64] = {0};
 
 // Internal state
 static int network_audio_initialized = 0;
+
+//#define ENABLE_AUDIO_ANALYSIS
+#ifdef ENABLE_AUDIO_ANALYSIS
+/**
+ * Print detailed information about received network audio
+ * 
+ * @param audio_data Pointer to audio data
+ * @param audio_size Size of audio data
+ * @param client_info Client information string
+ */
+static void dawn_log_network_audio(const uint8_t *audio_data, size_t audio_size, const char *client_info);
+#endif
 
 int dawn_network_audio_init(void) {
     pthread_mutex_lock(&network_audio_mutex);
@@ -90,8 +119,10 @@ uint8_t* dawn_process_network_audio(const uint8_t *audio_data,
     LOG_INFO("Audio processor callback triggered");
     LOG_INFO("Client: %s, received %zu bytes", client_info ? client_info : "unknown", audio_size);
 
+#ifdef ENABLE_AUDIO_ANALYSIS
     // Log basic audio information
     dawn_log_network_audio(audio_data, audio_size, client_info);
+#endif
 
     pthread_mutex_lock(&network_audio_mutex);
 
@@ -125,20 +156,30 @@ uint8_t* dawn_process_network_audio(const uint8_t *audio_data,
     pthread_mutex_unlock(&network_audio_mutex);
 
     // Signal main thread and wait for processing
-    pthread_mutex_lock(&network_audio_mutex);
+    pthread_mutex_lock(&processing_mutex);
     processing_complete = 0;
-    pthread_mutex_unlock(&network_audio_mutex);
 
     // Wait for main thread to complete processing (with timeout)
-    pthread_mutex_lock(&processing_mutex);
     struct timespec timeout;
     clock_gettime(CLOCK_REALTIME, &timeout);
-    timeout.tv_sec += 30; // 30 second timeout
+    timeout.tv_sec += NETWORK_PROCESSING_TIMEOUT_SEC;
 
     while (!processing_complete) {
         int result = pthread_cond_timedwait(&processing_done, &processing_mutex, &timeout);
         if (result == ETIMEDOUT) {
             LOG_WARNING("Processing timeout, using echo fallback");
+
+            // Check if main thread finished right after timeout
+            if (processing_result_data != NULL) {
+               LOG_WARNING("Main thread completed after timeout - freeing orphaned result");
+               free(processing_result_data);
+               processing_result_data = NULL;
+            }
+            processing_complete = 0;
+            break;
+        } else if (result != 0) {
+            LOG_ERROR("pthread_cond_timedwait failed with error %d", result);
+            processing_complete = 0;
             break;
         }
     }
@@ -146,12 +187,18 @@ uint8_t* dawn_process_network_audio(const uint8_t *audio_data,
     uint8_t *result_data = NULL;
     if (processing_complete && processing_result_data && processing_result_size > 0) {
         // Return the processed result (TTS WAV)
+        // NOTE: This pointer was allocated in dawn.c and will be freed in dawn_server.c
+        //       We're just passing it through without copying
         *response_size = processing_result_size;
         result_data = processing_result_data;
 
+        processing_result_data = NULL;
+        processing_result_size = 0;
+        processing_complete = 0;
+
         LOG_INFO("Returning processed response: %zu bytes", *response_size);
     } else {
-        // Fallback to echo
+        // Fallback to echo - WE allocate this, caller will free it
         result_data = malloc(audio_size);
         if (result_data) {
             memcpy(result_data, audio_data, audio_size);
@@ -164,16 +211,13 @@ uint8_t* dawn_process_network_audio(const uint8_t *audio_data,
     }
 
     pthread_mutex_unlock(&processing_mutex);
+
+    // IMPORTANT: Caller (dawn_server.c) is responsible for freeing this pointer
     return result_data;   
 }
 
 int dawn_get_network_audio(uint8_t **audio_data_out, size_t *audio_size_out, char *client_info_out) {
     if (!audio_data_out || !audio_size_out) {
-        return 0;
-    }
-
-    // Check flag first (atomic read)
-    if (!network_audio_ready) {
         return 0;
     }
 
@@ -219,7 +263,8 @@ void dawn_clear_network_audio(void) {
     pthread_mutex_unlock(&network_audio_mutex);
 }
 
-void dawn_log_network_audio(const uint8_t *audio_data, size_t audio_size, const char *client_info) {
+#ifdef ENABLE_AUDIO_ANALYSIS
+static void dawn_log_network_audio(const uint8_t *audio_data, size_t audio_size, const char *client_info) {
     LOG_INFO("Network audio analysis:");
     LOG_INFO("Client: %s, size: %zu bytes", client_info ? client_info : "unknown", audio_size);
 
@@ -285,3 +330,4 @@ void dawn_log_network_audio(const uint8_t *audio_data, size_t audio_size, const 
                  audio_data[8], audio_data[9], audio_data[10], audio_data[11]);
     }
 }
+#endif

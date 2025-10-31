@@ -288,9 +288,9 @@ void parseJsonCommandandExecute(const char *input)
       }
    }
 
-   LOG_INFO("Command result for AI: %s", pending_command_result);
+   LOG_INFO("Command result for AI: %s", pending_command_result ? pending_command_result : "(null)");
    if (pending_command_result == NULL) {
-      LOG_WARNING("pending_command_result is NULL. That probablu shouldn't happen.");
+      LOG_WARNING("pending_command_result is NULL. That probably shouldn't happen.");
       json_object_put(parsedJson);
       return;
    }
@@ -1002,8 +1002,10 @@ char* localLLMCallback(const char *actionName, char *value, int *should_respond)
    LOG_WARNING("Setting AI to local LLM.");
    setLLM(LOCAL_LLM);
 
-   *should_respond = 0;  // setLLM already does TTS
-   return NULL;
+   // Always return string for AI modes (ignored in DIRECT_ONLY)
+   strcpy(return_buffer, "AI switched to local LLM");
+   *should_respond = 1;
+   return return_buffer;
 }
 
 char* cloudLLMCallback(const char *actionName, char *value, int *should_respond) {
@@ -1012,8 +1014,10 @@ char* cloudLLMCallback(const char *actionName, char *value, int *should_respond)
    LOG_WARNING("Setting AI to cloud LLM.");
    setLLM(CLOUD_LLM);
 
-   *should_respond = 0;  // setLLM already does TTS
-   return NULL;
+   // Always return string for AI modes (ignored in DIRECT_ONLY)
+   strcpy(return_buffer, "AI switched to cloud LLM");
+   *should_respond = 1;
+   return return_buffer;
 }
 /* End Mosquitto Stuff */
 

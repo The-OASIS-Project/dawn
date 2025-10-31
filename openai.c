@@ -52,15 +52,13 @@ static char llm_url[2048];
 void setLLM(llm_t type) {
    switch (type) {
       case CLOUD_LLM:
-         text_to_speech("Setting to AI to cloud LLM.");
          snprintf(llm_url, 2048, "%s", CLOUDAI_URL);
          break;
       case LOCAL_LLM:
-         text_to_speech("Setting to AI to local LLM.");
          snprintf(llm_url, 2048, "%s", LOCALAI_URL);
          break;
       default:
-         text_to_speech("Unknown AI requested.");
+         LOG_ERROR("Unknown LLM type requested");
    }
 }
 
@@ -348,6 +346,7 @@ char *getGptResponse(struct json_object *conversation_history, const char *input
          text_to_speech("Unable to contact cloud LLM.");
 
          setLLM(LOCAL_LLM);
+         text_to_speech("Setting to AI to local LLM.");
       } else {
          return NULL;
       }

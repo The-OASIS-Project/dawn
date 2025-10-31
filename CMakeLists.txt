@@ -77,7 +77,7 @@ add_executable(dawn
                dawn.c
                dawn_network_audio.c
                dawn_server.c
-               dawn_tts_wrapper.cpp
+               dawn_wav_utils.c
                flac_playback.c
                llm_command_parser.c
                logging.c

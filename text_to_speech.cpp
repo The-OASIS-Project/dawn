@@ -7,11 +7,11 @@
 #include <vector>
 
 #include "dawn.h"
+#include "dawn_wav_utils.h"
 #include "logging.h"
 #include "piper.hpp"
 #include "text_to_command_nuevo.h"
 #include "text_to_speech.h"
-#include "dawn_tts_wrapper.h"
 
 #define DEFAULT_RATE       22050
 #define DEFAULT_CHANNELS   1

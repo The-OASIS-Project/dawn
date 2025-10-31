@@ -1,3 +1,91 @@
+/**
+ * @file dawn_server.h
+ * @brief DAWN Audio Protocol Server - Network protocol implementation
+ *
+ * This module implements the DAWN (Digital Assistant for Wearable Neutronics)
+ * Audio Protocol server, which receives audio data from ESP32 clients over
+ * TCP/IP, processes it through speech recognition and AI processing, and
+ * returns synthesized audio responses.
+ *
+ * ARCHITECTURE:
+ * ------------
+ * - Single-threaded server running in a pthread
+ * - Handles one client connection at a time (blocking)
+ * - Integrates with main DAWN system via callback function
+ * - Uses Fletcher-16 checksums for data integrity
+ * - Implements retry logic with exponential backoff
+ *
+ * PROTOCOL FLOW:
+ * --------------
+ * 1. Client connects via TCP
+ * 2. Handshake exchange (magic bytes verification)
+ * 3. Client sends audio data in chunks (with sequence numbers)
+ * 4. Server processes audio and generates response
+ * 5. Server sends response audio in chunks
+ * 6. Connection closes
+ *
+ * THREADING MODEL:
+ * ----------------
+ * - Server runs in its own pthread created by dawn_server_start()
+ * - Client connections are handled sequentially (not concurrent)
+ * - Callback to main DAWN system may block for 10-15 seconds during LLM processing
+ *
+ * MEMORY OWNERSHIP:
+ * -----------------
+ * - Server allocates buffers for received data
+ * - Callback receives ownership of received data
+ * - Callback returns allocated response data
+ * - Server frees response data after transmission
+ *
+ * USAGE EXAMPLE:
+ * --------------
+ * @code
+ * // 1. Register callback
+ * dawn_server_set_audio_callback(my_audio_processor);
+ *
+ * // 2. Start server
+ * if (dawn_server_start() != DAWN_SUCCESS) {
+ *    fprintf(stderr, "Failed to start server\n");
+ *    return -1;
+ * }
+ *
+ * // 3. Server runs in background
+ * while (running) {
+ *    // Do other work
+ *    sleep(1);
+ * }
+ *
+ * // 4. Stop server
+ * dawn_server_stop();
+ * @endcode
+ *
+ * FUTURE ENHANCEMENTS:
+ * --------------------
+ * - Multi-client support via worker threads (see dawn_multi_client_architecture.md)
+ * - Per-client session management with conversation history
+ * - Non-blocking operation to avoid blocking main thread
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s). Contributions include any modifications,
+ * enhancements, or additions to the project. These contributions become
+ * part of the project and are adopted by the project author(s).
+ *
+ */
+
 #ifndef DAWN_SERVER_H
 #define DAWN_SERVER_H
 
