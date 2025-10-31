@@ -35,25 +35,25 @@ DAP follows a client-server model where typically:
 ### 2.1 Communication Flow
 
 ```
-â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”                          â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”
-â”‚        â”‚     1. Handshake         â”‚        â”‚
-â”‚        â”‚ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â–ºâ”‚        â”‚
-â”‚        â”‚                          â”‚        â”‚
-â”‚        â”‚     2. Handshake ACK     â”‚        â”‚
-â”‚        â”‚ â—„â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”‚        â”‚
-â”‚        â”‚                          â”‚        â”‚
-â”‚        â”‚     3. Data Chunks       â”‚        â”‚
-â”‚ Client â”‚ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â–ºâ”‚ Server â”‚
-â”‚        â”‚                          â”‚        â”‚
-â”‚        â”‚     4. ACK for Chunks    â”‚        â”‚
-â”‚        â”‚ â—„â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”‚        â”‚
-â”‚        â”‚                          â”‚        â”‚
-â”‚        â”‚     5. Response Data     â”‚        â”‚
-â”‚        â”‚ â—„â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”‚        â”‚
-â”‚        â”‚                          â”‚        â”‚
-â”‚        â”‚     6. ACK for Response  â”‚        â”‚
-â”‚        â”‚ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â–ºâ”‚        â”‚
-â””â”€â”€â”€â”€â”€â”€â”€â”€â”˜                          â””â”€â”€â”€â”€â”€â”€â”€â”€â”˜
++--------+                          +--------+
+|        |     1. Handshake         |        |
+|        | -----------------------> |        |
+|        |                          |        |
+|        |     2. Handshake ACK     |        |
+|        | <----------------------- |        |
+|        |                          |        |
+|        |     3. Data Chunks       |        |
+| Client | -----------------------> | Server |
+|        |                          |        |
+|        |     4. ACK for Chunks    |        |
+|        | <----------------------- |        |
+|        |                          |        |
+|        |     5. Response Data     |        |
+|        | <----------------------- |        |
+|        |                          |        |
+|        |     6. ACK for Response  |        |
+|        | -----------------------> |        |
++--------+                          +--------+
 ```
 
 ## 3. Packet Structure
@@ -63,13 +63,13 @@ Every packet in DAP consists of a header followed by an optional payload.
 ### 3.1 Header Format (8 bytes)
 
 ```
-â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-â”‚                      Packet Header                         â”‚
-â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
-â”‚ Data Length â”‚  Protocol   â”‚   Packet    â”‚    Checksum     â”‚
-â”‚  (4 bytes)  â”‚  Version    â”‚    Type     â”‚    (2 bytes)    â”‚
-â”‚             â”‚  (1 byte)   â”‚   (1 byte)  â”‚                 â”‚
-â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”´â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”´â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”´â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
++-----------------------------------------------------------+
+|                      Packet Header                        |
++-------------+-------------+-------------+-----------------+
+| Data Length |  Protocol   |   Packet    |    Checksum     |
+|  (4 bytes)  |  Version    |    Type     |    (2 bytes)    |
+|             |  (1 byte)   |   (1 byte)  |                 |
++-------------+-------------+-------------+-----------------+
 ```
 
 **Field Descriptions:**
@@ -90,22 +90,35 @@ Every packet in DAP consists of a header followed by an optional payload.
 | 0x05 | NACK | Negative acknowledgment |
 | 0x06 | RETRY | Retry request |
 
-### 3.3 Sequence Numbers
+### 3.3 Configuration Compatibility
+
+**CRITICAL REQUIREMENT**: Client and server implementations MUST use identical configuration values for the following parameters:
+
+- **PACKET_MAX_SIZE**: Maximum chunk size in bytes
+- **PROTOCOL_VERSION**: Protocol version identifier
+
+**Mismatched chunk sizes will cause protocol failures.** The reference implementations (dawn_server.c and remote_dawn.ino) use:
+- PACKET_MAX_SIZE = 8192 bytes (8KB)
+- PROTOCOL_VERSION = 0x01
+
+If you modify these values, ensure both client and server use identical settings.
+
+### 3.4 Sequence Numbers
 
 For DATA and DATA_END packets, the first 2 bytes of the payload contain a sequence number (16-bit, big-endian). This allows the receiver to detect missing or out-of-order packets.
 
 **IMPORTANT**: Sequence numbers are sent separately from the actual data and must NOT be included when reassembling the final data stream. This is critical to preserve the integrity of WAV headers and other binary data.
 
 ```
-â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-â”‚                           Data Packet                             â”‚
-â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-â”‚  Header    â”‚                     Wire Format                     â”‚
-â”‚  (8 bytes) â”‚                                                     â”‚
-â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
-â”‚            â”‚   Sequence      â”‚         Actual Data              â”‚
-â”‚            â”‚   (2 bytes)     â”‚                                  â”‚
-â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”´â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”´â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
++----------------------------------------------------------------+
+|                           Data Packet                          |
++------------+---------------------------------------------------+
+|  Header    |                     Wire Format                    |
+|  (8 bytes) |                                                    |
++------------+-----------------+----------------------------------+
+|            |   Sequence      |         Actual Data             |
+|            |   (2 bytes)     |                                 |
++------------+-----------------+----------------------------------+
 ```
 
 When reassembling the data:
@@ -151,7 +164,7 @@ Before data transfer, a handshake must be completed:
 After a successful handshake, the client can send audio data:
 
 1. **Client prepares data**:
-   - Divides large data into chunks (recommended: â‰¤1024 bytes)
+   - Divides large data into chunks (recommended: 4KB-8KB, reference implementations use 8KB)
    - Sends chunks sequentially with DATA packet type
    - For the final chunk, uses DATA_END packet type
    - Each chunk includes a sequence number starting from 0
@@ -250,36 +263,36 @@ A session can end in several ways:
 
 ```
 00 00 00 04   01 01   D6 DD   A5 5A B2 2B
-â”‚             â”‚  â”‚    â”‚       â”‚
-â”‚             â”‚  â”‚    â”‚       â””â”€ Payload: Magic bytes
-â”‚             â”‚  â”‚    â””â”€â”€â”€â”€â”€â”€â”€â”€â”€ Checksum (Fletcher-16)
-â”‚             â”‚  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ Packet Type: HANDSHAKE (0x01)
-â”‚             â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ Protocol Version: 0x01
-â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ Data Length: 4 bytes
+|             |  |    |       |
+|             |  |    |       +-- Payload: Magic bytes
+|             |  |    +---------- Checksum (Fletcher-16)
+|             |  +--------------- Packet Type: HANDSHAKE (0x01)
+|             +------------------ Protocol Version: 0x01
++-------------------------------- Data Length: 4 bytes
 ```
 
 ### 8.2 ACK Packet (Server to Client)
 
 ```
 00 00 00 00   01 04   00 00
-â”‚             â”‚  â”‚    â”‚
-â”‚             â”‚  â”‚    â””â”€â”€â”€â”€â”€â”€â”€â”€â”€ Checksum (empty payload)
-â”‚             â”‚  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ Packet Type: ACK (0x04)
-â”‚             â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ Protocol Version: 0x01
-â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ Data Length: 0 bytes
+|             |  |    |
+|             |  |    +---------- Checksum (empty payload)
+|             |  +--------------- Packet Type: ACK (0x04)
+|             +------------------ Protocol Version: 0x01
++-------------------------------- Data Length: 0 bytes
 ```
 
 ### 8.3 Data Packet (Client to Server)
 
 ```
 00 00 04 00   01 02   XX XX   00 00   [1024 bytes of data]
-â”‚             â”‚  â”‚    â”‚       â”‚       â”‚
-â”‚             â”‚  â”‚    â”‚       â”‚       â””â”€ Actual payload data
-â”‚             â”‚  â”‚    â”‚       â””â”€â”€â”€â”€â”€â”€â”€â”€â”€ Sequence number: 0
-â”‚             â”‚  â”‚    â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ Checksum of payload
-â”‚             â”‚  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ Packet Type: DATA (0x02)
-â”‚             â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ Protocol Version: 0x01
-â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ Data Length: 1024 bytes
+|             |  |    |       |       |
+|             |  |    |       |       +-- Actual payload data
+|             |  |    |       +---------- Sequence number: 0
+|             |  |    +------------------ Checksum of payload
+|             |  +----------------------- Packet Type: DATA (0x02)
+|             +-------------------------- Protocol Version: 0x01
++---------------------------------------- Data Length: 1024 bytes
 ```
 
 ## 9. Performance Considerations
@@ -289,11 +302,13 @@ A session can end in several ways:
 The protocol supports variable chunk sizes, with tradeoffs:
 
 - **Small chunks** (1KB or less): More overhead, but better recovery from errors
-- **Medium chunks** (4KB): Good balance for most applications
+- **Medium chunks** (4KB): Good balance for environments with high packet loss
 - **Large chunks** (8-16KB): Better throughput, but requires more memory
-- **Recommended**: 4KB for reliable performance, 8KB for higher throughput over WiFi
+- **Recommended**: 4KB for unreliable networks, **8KB for typical WiFi deployments**
 
-**CRITICAL**: Both client and server MUST agree on the maximum allowed chunk size (`PACKET_MAX_SIZE`).
+**REFERENCE IMPLEMENTATION STANDARD**: The reference implementations (dawn_server.c and remote_dawn.ino) use **8KB (8192 bytes)** as the standard chunk size, optimized for WiFi performance.
+
+**CRITICAL**: Both client and server MUST agree on the maximum allowed chunk size (`PACKET_MAX_SIZE`). Mismatched chunk sizes will cause protocol failures.
 
 ### 9.2 Timeout Values
 
