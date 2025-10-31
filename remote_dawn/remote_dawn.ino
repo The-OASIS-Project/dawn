@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
+#include <Adafruit_NeoPixel.h>
 #include <SPI.h>
 
 // WiFi credentials
@@ -23,6 +24,11 @@ const int CONNECTION_TIMEOUT_MS = 3000;   // Connection timeout in milliseconds
 #define I2S_DOUT           9      // GPIO9 - I2S data output
 #define MIC_ADC_PIN        1      // GPIO1 (ADC1_CH0) - Analog microphone input
 
+// NeoPixel configuration
+#define NEOPIXEL_PIN       17     // GPIO17 - NeoPixel data pin
+#define NEOPIXEL_COUNT     3      // Number of NeoPixels
+#define NEOPIXEL_TYPE      NEO_GRB + NEO_KHZ800  // Most common NeoPixel type
+
 // TFT Display pins - Use built-in pins for ESP32-S3 TFT Feather
 #define TFT_BACKLIGHT      45     // GPIO45 - TFT Backlight
 
@@ -31,7 +37,7 @@ const int CONNECTION_TIMEOUT_MS = 3000;   // Connection timeout in milliseconds
 #define BITS_PER_SAMPLE    16     // 16-bit samples
 
 // Audio buffer configuration
-#define RECORD_TIME        10     // Max recording time in seconds
+#define RECORD_TIME        30     // Max recording time in seconds
 #define BUFFER_SIZE        (SAMPLE_RATE * RECORD_TIME)  // Buffer in samples
 
 // Debounce settings
@@ -55,6 +61,41 @@ const uint32_t sampleInterval_us = (uint32_t)((1000000ULL + SAMPLE_RATE/2) / SAM
 
 // Initialize TFT display - Use TFT_CS, TFT_DC, and TFT_RST from the pins_arduino.h
 Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+
+// Initialize NeoPixel strip
+Adafruit_NeoPixel strip(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEOPIXEL_TYPE);
+
+// NeoPixel states
+enum NeoPixelMode {
+   NEO_IDLE_CYCLING,    // Normal color cycling
+   NEO_RECORDING,       // Blue - recording audio
+   NEO_PLAYING,         // Green - playing back audio
+   NEO_WAITING,         // Yellow - waiting for server response
+   NEO_ERROR,           // Red - error state
+   NEO_OFF              // LEDs off to conserve power
+};
+
+// NeoPixel color cycling variables - single state for all pixels
+struct ColorState {
+   uint8_t current_hue;
+   uint8_t target_hue;
+   uint8_t current_sat;
+   uint8_t target_sat;
+   uint8_t current_val;
+   uint8_t target_val;
+   float transition_progress;
+   bool transitioning;
+};
+
+ColorState globalColorState;
+volatile NeoPixelMode currentNeoMode = NEO_IDLE_CYCLING;
+volatile uint32_t lastIdleActivity = 0;
+volatile uint32_t errorStartTime = 0;
+const uint32_t IDLE_TIMEOUT_MS = 60000; // 1 minute
+const uint32_t ERROR_DISPLAY_MS = 3000;  // 3 seconds
+
+// NeoPixel task handle
+TaskHandle_t neoPixelTaskHandle = NULL;
 
 // TFT Display settings
 #define TEXT_SIZE 2             // Slightly larger than the smallest font
@@ -102,15 +143,158 @@ struct __attribute__((packed)) WavHeader {
   uint32_t subchunk2Size = 0;
 };
 
+// NeoPixel state management functions
+void setNeoPixelMode(NeoPixelMode mode) {
+   currentNeoMode = mode;
+   if (mode == NEO_ERROR) {
+      errorStartTime = millis();
+   } else if (mode == NEO_IDLE_CYCLING) {
+      lastIdleActivity = millis();
+   }
+}
+
+void setNeoPixelColor(uint8_t r, uint8_t g, uint8_t b) {
+   uint32_t color = strip.Color(r, g, b);
+   for (int i = 0; i < NEOPIXEL_COUNT; i++) {
+      strip.setPixelColor(i, color);
+   }
+   strip.show();
+}
+
+void turnOffNeoPixels() {
+   for (int i = 0; i < NEOPIXEL_COUNT; i++) {
+      strip.setPixelColor(i, 0);
+   }
+   strip.show();
+}
+
+// NeoPixel color cycling task
+void neoPixelTask(void *pvParameters) {
+   const TickType_t xDelay = pdMS_TO_TICKS(50); // Update every 50ms for smooth transitions
+   const float TRANSITION_SPEED = 0.015f; // Speed of color transitions (0.0 to 1.0 per update)
+   const uint32_t NEW_COLOR_INTERVAL = 3000; // Change target color every 3 seconds
+
+   // Initialize global color state with random starting color
+   globalColorState.current_hue = random(0, 256);
+   globalColorState.target_hue = random(0, 256);
+   globalColorState.current_sat = 255; // Full saturation
+   globalColorState.target_sat = 255;
+   globalColorState.current_val = 200; // Moderate brightness
+   globalColorState.target_val = 200;
+   globalColorState.transition_progress = 0.0f;
+   globalColorState.transitioning = true;
+
+   uint32_t lastColorChange = millis();
+   lastIdleActivity = millis();
+
+   while (1) {
+      uint32_t currentTime = millis();
+
+      // Handle different NeoPixel modes
+      switch (currentNeoMode) {
+         case NEO_IDLE_CYCLING: {
+            // Check if idle timeout has been reached
+            if (currentTime - lastIdleActivity >= IDLE_TIMEOUT_MS) {
+               currentNeoMode = NEO_OFF;
+               turnOffNeoPixels();
+               break;
+            }
+
+            // Check if it's time to select a new target color
+            if (currentTime - lastColorChange >= NEW_COLOR_INTERVAL) {
+               // Only set new target if not currently transitioning or transition is nearly complete
+               if (!globalColorState.transitioning || globalColorState.transition_progress > 0.9f) {
+                  globalColorState.target_hue = random(0, 256);
+                  globalColorState.target_sat = random(200, 256); // High saturation with some variation
+                  globalColorState.target_val = random(150, 255); // Varied brightness
+                  globalColorState.transition_progress = 0.0f;
+                  globalColorState.transitioning = true;
+                  lastColorChange = currentTime; // Only update when we actually start a new transition
+               }
+            }
+
+            // Update color state
+            if (globalColorState.transitioning) {
+               // Smooth interpolation between current and target colors
+               int16_t hue_diff = globalColorState.target_hue - globalColorState.current_hue;
+               // Handle hue wrap-around (shortest path around color wheel)
+               if (hue_diff > 128) hue_diff -= 256;
+               if (hue_diff < -128) hue_diff += 256;
+
+               globalColorState.current_hue = (uint8_t)(globalColorState.current_hue + hue_diff * TRANSITION_SPEED);
+               globalColorState.current_sat = (uint8_t)(globalColorState.current_sat + 
+                  (globalColorState.target_sat - globalColorState.current_sat) * TRANSITION_SPEED);
+               globalColorState.current_val = (uint8_t)(globalColorState.current_val + 
+                  (globalColorState.target_val - globalColorState.current_val) * TRANSITION_SPEED);
+
+               // Update progress
+               globalColorState.transition_progress += TRANSITION_SPEED;
+
+               // Check if transition is complete
+               if (globalColorState.transition_progress >= 1.0f) {
+                  globalColorState.current_hue = globalColorState.target_hue;
+                  globalColorState.current_sat = globalColorState.target_sat;
+                  globalColorState.current_val = globalColorState.target_val;
+                  globalColorState.transitioning = false;
+                  globalColorState.transition_progress = 0.0f;
+               }
+            }
+
+            // Convert HSV to RGB and set all pixels to the same color
+            uint32_t color = strip.ColorHSV(
+               globalColorState.current_hue * 256, // Convert 8-bit hue to 16-bit
+               globalColorState.current_sat,
+               globalColorState.current_val
+            );
+
+            // Set all pixels to the same color
+            for (int i = 0; i < NEOPIXEL_COUNT; i++) {
+               strip.setPixelColor(i, color);
+            }
+            strip.show();
+            break;
+         }
+
+         case NEO_RECORDING:
+            setNeoPixelColor(0, 0, 255);  // Blue
+            break;
+
+         case NEO_PLAYING:
+            setNeoPixelColor(0, 255, 0);  // Green
+            break;
+
+         case NEO_WAITING:
+            setNeoPixelColor(255, 255, 0);  // Yellow
+            break;
+
+         case NEO_ERROR:
+            setNeoPixelColor(255, 0, 0);  // Red
+            // Check if error display time has elapsed
+            if (currentTime - errorStartTime >= ERROR_DISPLAY_MS) {
+               currentNeoMode = NEO_IDLE_CYCLING;
+               lastIdleActivity = millis();  // Reset idle timer
+            }
+            break;
+
+         case NEO_OFF:
+            // LEDs are already off, do nothing
+            break;
+      }
+
+      // Wait before next update
+      vTaskDelay(xDelay);
+   }
+}
+
 // Function to update TFT display with status message
 void updateTFTStatus(const String& message, uint16_t color, bool clearScreen = false) {
   static int statusLine = 0;
-  
+
   if (clearScreen) {
     tft.fillScreen(ST77XX_BLACK);
     statusLine = 0;
   }
-  
+
   // If we've filled the screen, clear it and start again
   if (statusLine >= MAX_STATUS_LINES) {
     tft.fillScreen(ST77XX_BLACK);
@@ -153,7 +337,7 @@ void setup() {
    Serial.begin(115200);
    delay(1000);  // Give serial monitor time to start up
    
-   Serial.println("ESP32-S3 Dawn Audio Client");
+   Serial.println("ESP32-S3 Dawn Audio Client with NeoPixels");
    
    // Initialize TFT display
    pinMode(TFT_BACKLIGHT, OUTPUT);
@@ -167,7 +351,14 @@ void setup() {
    
    updateTFTStatus("Dawn Audio Client", ST77XX_BLUE, true);
    
-   // Initialize PSRAM - ESP32-S3 has psram enabled by default if the board config is set
+   // Initialize NeoPixel strip
+   strip.begin();
+   strip.clear();
+   strip.show();
+   updateTFTStatus("NeoPixels: OK", ST77XX_GREEN);
+   Serial.println("NeoPixel strip initialized");
+   
+   // Initialize PSRAM
    Serial.println("Checking PSRAM...");
    if (psramFound()) {
       Serial.println("PSRAM found and initialized");
@@ -175,25 +366,38 @@ void setup() {
    } else {
       Serial.println("PSRAM not found! Please enable PSRAM in the board config");
       updateTFTStatus("PSRAM: ERROR", ST77XX_RED);
-      while(1);  // Stop here if PSRAM isn't working
+      while(1);
    }
    
-   // Allocate buffer in PSRAM (in samples, not bytes)
+   // Allocate all buffers at startup - never reallocate during operation
+   Serial.println("Allocating static buffers...");
+   
+   // Audio recording buffer (in samples, not bytes)
    audioBuffer = (int16_t*)ps_malloc(BUFFER_SIZE * sizeof(int16_t));
    if (audioBuffer == NULL) {
-      Serial.println("Failed to allocate PSRAM buffer!");
-      updateTFTStatus("PSRAM alloc failed!", ST77XX_RED);
+      Serial.println("Failed to allocate PSRAM audio buffer!");
+      updateTFTStatus("Audio buffer failed!", ST77XX_RED);
       while(1);
    }
    Serial.printf("Allocated %d bytes in PSRAM for audio buffer\n", BUFFER_SIZE * sizeof(int16_t));
    
-   // Allocate response buffer in PSRAM
-   responseBuffer = (uint8_t*)ps_malloc(BUFFER_SIZE * sizeof(int16_t) + 1024); // Extra space for WAV header
+   // Dual-purpose buffer: WAV creation when sending, server response when receiving
+   // Size: large enough for max audio data + WAV header + padding
+   size_t responseBufferSize = BUFFER_SIZE * sizeof(int16_t) + sizeof(WavHeader) + 1024;
+   responseBuffer = (uint8_t*)ps_malloc(responseBufferSize);
    if (responseBuffer == NULL) {
       Serial.println("Failed to allocate PSRAM response buffer!");
-      updateTFTStatus("PSRAM resp failed!", ST77XX_RED);
+      updateTFTStatus("Response buffer failed!", ST77XX_RED);
       while(1);
    }
+   Serial.printf("Allocated %d bytes in PSRAM for dual-purpose buffer\n", responseBufferSize);
+   
+   // Clear both buffers
+   memset(audioBuffer, 0, BUFFER_SIZE * sizeof(int16_t));
+   memset(responseBuffer, 0, responseBufferSize);
+   
+   Serial.println("Two-buffer system allocated successfully");
+   updateTFTStatus("Buffers allocated", ST77XX_GREEN);
    
    // Initialize button pin
    pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -226,8 +430,32 @@ void setup() {
       updateTFTStatus("Local mode only", ST77XX_YELLOW);
    }
    
+   // Create NeoPixel task on Core 0 (Core 1 is used by Arduino main loop)
+   xTaskCreatePinnedToCore(
+      neoPixelTask,           // Task function
+      "NeoPixel Task",        // Task name
+      4096,                   // Stack size (4KB should be sufficient)
+      NULL,                   // Task parameters
+      1,                      // Priority (1 = low priority, higher numbers = higher priority)
+      &neoPixelTaskHandle,    // Task handle
+      0                       // Core to run on (0 or 1)
+   );
+   
+   if (neoPixelTaskHandle != NULL) {
+      Serial.println("NeoPixel task created successfully");
+      updateTFTStatus("NeoPixel task: OK", ST77XX_GREEN);
+   } else {
+      Serial.println("Failed to create NeoPixel task!");
+      updateTFTStatus("NeoPixel task: FAILED", ST77XX_RED);
+   }
+   
+   reportMemoryUsage();
+
    updateTFTStatus("Press button to record", ST77XX_WHITE);
    Serial.println("Setup complete. Press the button to start recording.");
+   
+   // Start in idle cycling mode
+   setNeoPixelMode(NEO_IDLE_CYCLING);
 }
 
 void loop() {
@@ -303,6 +531,7 @@ void loop() {
 void startRecording() {
    Serial.println("Starting recording...");
    updateTFTStatus("Recording...", ST77XX_RED, true);
+   setNeoPixelMode(NEO_RECORDING);
    sampleCount    = 0;
    isRecording    = true;
    recStartUs     = micros();
@@ -324,14 +553,17 @@ void stopRecording() {
    updateTFTStatus("Recording complete", ST77XX_GREEN);
    updateTFTStatus(String(sampleCount) + " samples", ST77XX_WHITE);
    drawRecordingIndicator(false);
+   setNeoPixelMode(NEO_IDLE_CYCLING);  // Return to idle state
 }
 
 void processRecording() {
    bool useLocalPlayback = true;
+   bool hasError = false;
    
    // Only try server connection if WiFi is connected
    if (WiFi.status() == WL_CONNECTED) {
       updateTFTStatus("Connecting to server...", ST77XX_YELLOW);
+      setNeoPixelMode(NEO_WAITING);
       Serial.println("Trying to connect to Dawn server...");
       if (sendToServerAndGetResponse()) {
          Serial.println("Successfully communicated with server");
@@ -341,35 +573,42 @@ void processRecording() {
          Serial.println("Server communication failed, falling back to local playback");
          updateTFTStatus("Server failed", ST77XX_RED);
          updateTFTStatus("Using local playback", ST77XX_YELLOW);
+         setNeoPixelMode(NEO_ERROR);
          useLocalPlayback = true;
+         hasError = true;
       }
    } else {
       Serial.println("No WiFi connection, using local playback");
       updateTFTStatus("No WiFi, local mode", ST77XX_YELLOW);
    }
    
-   if (useLocalPlayback) {
+   if (useLocalPlayback && !hasError) {
       // Use local playback with our recorded data
       playRecording(true);
-   } else {
+   } else if (!hasError) {
       // Play the response from the server
       playServerResponse();
+   }
+   // If hasError is true, we just display the error and wait for next recording
+   
+   // Return to idle state after processing (unless there was an error)
+   if (!hasError) {
+      setNeoPixelMode(NEO_IDLE_CYCLING);
    }
 }
 
 // Create a WAV file in memory from the audio buffer
-uint8_t* createWavFile(size_t* wavSize) {
+size_t createWavFileInResponseBuffer() {
    // Calculate WAV size
    size_t dataSize = sampleCount * sizeof(int16_t);
    size_t totalSize = sizeof(WavHeader) + dataSize;
    
-   // Allocate memory for the WAV file
-   uint8_t* wavBuffer = (uint8_t*)ps_malloc(totalSize);
-   if (!wavBuffer) {
-      Serial.println("Failed to allocate WAV buffer");
-      updateTFTStatus("WAV alloc failed!", ST77XX_RED);
-      *wavSize = 0;
-      return NULL;
+   // responseBuffer should be large enough (we allocated it with extra space)
+   size_t responseBufferSize = BUFFER_SIZE * sizeof(int16_t) + sizeof(WavHeader) + 1024;
+   if (totalSize > responseBufferSize) {
+      Serial.printf("WAV file too large: %d bytes (buffer: %d bytes)\n", totalSize, responseBufferSize);
+      updateTFTStatus("WAV too large!", ST77XX_RED);
+      return 0;
    }
    
    // Create WAV header
@@ -377,14 +616,14 @@ uint8_t* createWavFile(size_t* wavSize) {
    header.subchunk2Size = dataSize;
    header.chunkSize = 36 + dataSize;
    
-   // Copy header to buffer
-   memcpy(wavBuffer, &header, sizeof(WavHeader));
+   // Copy header to responseBuffer (reusing it for transmission)
+   memcpy(responseBuffer, &header, sizeof(WavHeader));
    
-   // Copy audio data to buffer
-   memcpy(wavBuffer + sizeof(WavHeader), audioBuffer, dataSize);
+   // Copy audio data to responseBuffer after the header
+   memcpy(responseBuffer + sizeof(WavHeader), audioBuffer, dataSize);
    
-   *wavSize = totalSize;
-   return wavBuffer;
+   Serial.printf("Created WAV file in response buffer: %d bytes\n", totalSize);
+   return totalSize;
 }
 
 bool connectToServer(WiFiClient &client) {
@@ -492,7 +731,7 @@ bool performHandshake(WiFiClient &client) {
     return false;
   }
   
-  client.flush(); // Make sure data is sent immediately
+  client.clear(); // Make sure data is sent immediately
   
   // Wait for acknowledgment with timeout
   unsigned long startTime = millis();
@@ -733,12 +972,18 @@ bool receiveDataWithVerification(WiFiClient &client, uint8_t* buffer, size_t buf
                   packetType, (unsigned long)dataLength, expectedChecksum);
     
     // Check if data length is valid
-   if (dataLength > PACKET_MAX_SIZE || *receivedSize + dataLength > bufferSize) {
+   if (dataLength > PACKET_MAX_SIZE) {
      Serial.printf("Data length too large: %lu (max: %d)\n", (unsigned long)dataLength, PACKET_MAX_SIZE);
      sendNack(client);
      return false;
    }
-    
+
+   if (*receivedSize + dataLength > bufferSize) {
+     Serial.printf("Receive buffer overflow: %lu (max: %d)\n", *receivedSize + dataLength, bufferSize);
+     sendNack(client);
+     return false;
+   }
+
     // Read sequence number (first 2 bytes)
     uint8_t seqBytes[2];
     unsigned long seqTimeout = millis() + 1000;
@@ -867,7 +1112,7 @@ bool sendAck(WiFiClient &client) {
   
   // Send with verification
   size_t sent = client.write(header, PACKET_HEADER_SIZE);
-  client.flush(); // Ensure data is sent immediately
+  client.clear(); // Ensure data is sent immediately
   
   return (sent == PACKET_HEADER_SIZE);
 }
@@ -973,94 +1218,96 @@ bool isValidWavFormat(const uint8_t* buffer, size_t size) {
 
 // === Updated Server Communication Function ===
 bool sendToServerAndGetResponse() {
-  WiFiClient client;
-  
-  // Try to connect to server
-  if (!connectToServer(client)) {
-    return false;
-  }
-  
-  // Perform handshake with retry
-  int handshakeAttempts = 0;
-  bool handshakeSuccess = false;
-  
-  while (handshakeAttempts < 3 && !handshakeSuccess) {
-    if (handshakeAttempts > 0) {
-      Serial.printf("Retrying handshake (attempt %d/3)...\n", handshakeAttempts + 1);
-      delay(500 * handshakeAttempts); // Increasing backoff
-    }
-    
-    handshakeSuccess = performHandshake(client);
-    handshakeAttempts++;
-  }
-  
-  if (!handshakeSuccess) {
-    Serial.println("Handshake failed after multiple attempts");
-    client.stop();
-    return false;
-  }
-  
-  // Create WAV file from the recording
-  size_t wavSize = 0;
-  uint8_t* wavBuffer = createWavFile(&wavSize);
-  if (!wavBuffer || wavSize == 0) {
-    client.stop();
-    return false;
-  }
-  
-  Serial.printf("Sending %zu bytes of WAV data to server using improved protocol\n", wavSize);
-  updateTFTStatus("Sending data...", ST77XX_BLUE);
-  
-  // Send data with retries
-  bool sendSuccess = sendDataWithRetries(client, wavBuffer, wavSize);
-  
-  // Free the WAV buffer now that we've sent it
-  free(wavBuffer);
-  
-  if (!sendSuccess) {
-    Serial.println("Failed to send data to server");
-    updateTFTStatus("Send failed!", ST77XX_RED);
-    client.stop();
-    return false;
-  }
-  
-  Serial.println("Waiting for response...");
-  updateTFTStatus("Waiting for response...", ST77XX_CYAN);
-  
-  // Keep the connection alive while waiting for response
-  client.setNoDelay(true); // Disable Nagle algorithm to reduce latency
-  
-  // Receive response with verification
-  size_t receivedSize = 0;
-  bool receiveSuccess = receiveDataWithVerification(client, responseBuffer, 
+   WiFiClient client;
+   
+   // Try to connect to server
+   if (!connectToServer(client)) {
+      return false;
+   }
+   
+   // Perform handshake with retry
+   int handshakeAttempts = 0;
+   bool handshakeSuccess = false;
+   
+   while (handshakeAttempts < 3 && !handshakeSuccess) {
+      if (handshakeAttempts > 0) {
+         Serial.printf("Retrying handshake (attempt %d/3)...\n", handshakeAttempts + 1);
+         delay(500 * handshakeAttempts);
+      }
+      
+      handshakeSuccess = performHandshake(client);
+      handshakeAttempts++;
+   }
+   
+   if (!handshakeSuccess) {
+      Serial.println("Handshake failed after multiple attempts");
+      client.stop();
+      return false;
+   }
+   
+   // Create WAV file in response buffer (reusing for transmission)
+   size_t wavSize = createWavFileInResponseBuffer();
+   if (wavSize == 0) {
+      Serial.println("Failed to create WAV file in response buffer");
+      updateTFTStatus("WAV creation failed!", ST77XX_RED);
+      client.stop();
+      return false;
+   }
+   
+   Serial.printf("Sending %zu bytes of WAV data using dual-purpose buffer\n", wavSize);
+   updateTFTStatus("Sending data...", ST77XX_BLUE);
+   
+   // Send data directly from responseBuffer
+   bool sendSuccess = sendDataWithRetries(client, responseBuffer, wavSize);
+   
+   // No need to free anything - using static buffer!
+   
+   if (!sendSuccess) {
+      Serial.println("Failed to send data to server");
+      updateTFTStatus("Send failed!", ST77XX_RED);
+      client.stop();
+      return false;
+   }
+   
+   Serial.println("Waiting for response...");
+   updateTFTStatus("Waiting for response...", ST77XX_CYAN);
+   setNeoPixelMode(NEO_WAITING);
+   
+   // Keep the connection alive while waiting for response
+   client.setNoDelay(true);
+   
+   // Receive response into static buffer
+   size_t receivedSize = 0;
+   bool receiveSuccess = receiveDataWithVerification(client, responseBuffer, 
                                                    BUFFER_SIZE * sizeof(int16_t) + 1024,
                                                    &receivedSize);
-  
-  client.stop();
-  
-  if (!receiveSuccess) {
-    Serial.println("Failed to receive response");
-    updateTFTStatus("Receive failed!", ST77XX_RED);
-    return false;
-  }
-  
-  responseLength = receivedSize;
-  Serial.printf("Successfully received %zu bytes\n", responseLength);
-  
-  // Validate WAV header with improved validation
-  if (!isValidWavFormat(responseBuffer, responseLength)) {
-    Serial.println("Invalid WAV format in response");
-    updateTFTStatus("Invalid WAV format!", ST77XX_RED);
-    return false;
-  }
-  
-  // Cast to WavHeader now that we know it's valid
-  WavHeader* header = (WavHeader*)responseBuffer;
-  
-  Serial.printf("Valid WAV response: %lu Hz, %u-bit, %u-ch\n", 
+   
+   client.stop();
+   
+   if (!receiveSuccess) {
+      Serial.println("Failed to receive response");
+      updateTFTStatus("Receive failed!", ST77XX_RED);
+      setNeoPixelMode(NEO_ERROR);
+      return false;
+   }
+   
+   responseLength = receivedSize;
+   Serial.printf("Successfully received %zu bytes into static buffer\n", responseLength);
+   
+   // Validate WAV format
+   if (!isValidWavFormat(responseBuffer, responseLength)) {
+      Serial.println("Invalid WAV format in response");
+      updateTFTStatus("Invalid WAV format!", ST77XX_RED);
+      return false;
+   }
+   
+   // Cast to WavHeader now that we know it's valid
+   WavHeader* header = (WavHeader*)responseBuffer;
+   
+   Serial.printf("Valid WAV response: %lu Hz, %u-bit, %u-ch\n", 
               (unsigned long)header->sampleRate, header->bitsPerSample, header->numChannels);
-  
-  return true;
+   
+   return true;
 }
 
 // === Improved PlayServerResponse Function ===
@@ -1068,11 +1315,13 @@ bool sendToServerAndGetResponse() {
 void playServerResponse() {
   Serial.println("Playing server response...");
   updateTFTStatus("Playing server audio...", ST77XX_CYAN, true);
+  setNeoPixelMode(NEO_PLAYING);
   
   if (responseLength < 44) {
     Serial.println("Response too small to be audio data");
     updateTFTStatus("Invalid audio data!", ST77XX_RED);
-    return;
+    setNeoPixelMode(NEO_ERROR);
+    return; // Don't attempt playback, just show error
   }
   
   // Try to detect if this is a valid WAV file
@@ -1107,25 +1356,18 @@ void playServerResponse() {
     // Play using our playback function with resampling
     playAudioSamples(responseSamples, numResponseSamples, serverSampleRate);
   } else {
-    // Not a valid WAV - try to play as raw PCM
-    Serial.println("Not a valid WAV - attempting to play as raw PCM");
-    updateTFTStatus("Raw PCM playback", ST77XX_YELLOW);
-    
-    // Assume 16-bit mono PCM at 16kHz
-    int16_t* rawSamples = (int16_t*)responseBuffer;
-    size_t numSamples = responseLength / sizeof(int16_t);
-    
-    Serial.printf("Playing %zu raw samples at 16000 Hz\n", numSamples);
-    updateTFTStatus(String(numSamples) + " raw samples", ST77XX_WHITE);
-    
-    // Play as raw PCM
-    playAudioSamples(rawSamples, numSamples, 16000);
+    // Not a valid WAV - don't attempt playback, show error
+    Serial.println("Not a valid WAV - cannot play invalid audio data");
+    updateTFTStatus("Invalid WAV format!", ST77XX_RED);
+    setNeoPixelMode(NEO_ERROR);
+    return;
   }
 }
 
 void playRecording(bool useLocalBuffer) {
    Serial.println("Playing back recording...");
    updateTFTStatus("Playing local audio...", ST77XX_YELLOW, true);
+   setNeoPixelMode(NEO_PLAYING);
    updateTFTStatus(String(sampleCount) + " samples", ST77XX_WHITE);
    updateTFTStatus(String((int)recFs) + " Hz", ST77XX_WHITE);
    
@@ -1165,7 +1407,7 @@ void playAudioSamples(int16_t* samples, size_t numSamples, double sourceSampleRa
 
    std_cfg.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
       I2S_DATA_BIT_WIDTH_16BIT, 
-      I2S_SLOT_MODE_STEREO);   // bit_shift=true, Philips I²S
+      I2S_SLOT_MODE_STEREO);   // bit_shift=true, Philips IÃ‚Â²S
    
    std_cfg.gpio_cfg.mclk = GPIO_NUM_NC;
    std_cfg.gpio_cfg.bclk = (gpio_num_t)I2S_BCLK;
@@ -1228,6 +1470,7 @@ void playAudioSamples(int16_t* samples, size_t numSamples, double sourceSampleRa
     
    Serial.println("Playback finished");
    updateTFTStatus("Playback complete", ST77XX_GREEN);
+   setNeoPixelMode(NEO_IDLE_CYCLING);  // Return to idle after playback
    
    // Stop I2S driver
    ESP_ERROR_CHECK(i2s_channel_disable(tx_handle));
@@ -1239,4 +1482,24 @@ void playAudioSamples(int16_t* samples, size_t numSamples, double sourceSampleRa
    // Ready for next recording
    updateTFTStatus("Ready for recording", ST77XX_WHITE);
    Serial.println("Ready for next recording. Press the button to start.");
+}
+
+// Memory usage reporting function - updated for two-buffer system
+void reportMemoryUsage() {
+   Serial.println("=== Memory Usage Report ===");
+   Serial.printf("Total PSRAM: %d bytes\n", ESP.getPsramSize());
+   Serial.printf("Free PSRAM: %d bytes\n", ESP.getFreePsram());
+   Serial.printf("Used PSRAM: %d bytes\n", ESP.getPsramSize() - ESP.getFreePsram());
+   
+   size_t audioSize = BUFFER_SIZE * sizeof(int16_t);
+   size_t responseSize = BUFFER_SIZE * sizeof(int16_t) + sizeof(WavHeader) + 1024;
+   size_t totalStaticAllocation = audioSize + responseSize;
+   
+   Serial.printf("Audio buffer: %d bytes\n", audioSize);
+   Serial.printf("Response buffer: %d bytes\n", responseSize);
+   Serial.printf("Total static allocation: %d bytes\n", totalStaticAllocation);
+   
+   Serial.printf("Heap free: %d bytes\n", ESP.getFreeHeap());
+   Serial.printf("Heap total: %d bytes\n", ESP.getHeapSize());
+   Serial.println("=============================");
 }
