@@ -305,47 +305,103 @@ extern "C" {
     * @param pcm_device The name of the PCM device to use for audio playback.
     */
    void initialize_text_to_speech(char* pcm_device) {
+      // Check if already initialized
+      if (tts_handle.is_initialized) {
+         LOG_WARNING("Text-to-Speech system already initialized");
+         return;
+      }
+
+      // Validate input
+      if (!pcm_device) {
+         LOG_ERROR("Invalid PCM device parameter");
+         return;
+      }
+
+      LOG_INFO("Initializing Text-to-Speech system...");
+
+      // Store device name (with bounds checking)
+      strncpy(tts_handle.pcm_capture_device, pcm_device, MAX_WORD_LENGTH);
+      tts_handle.pcm_capture_device[MAX_WORD_LENGTH] = '\0';
+
       // Load the voice model
       std::optional<SpeakerId> speakerIdOpt = 0;
-      loadVoice(tts_handle.config, "en_GB-alba-medium.onnx", "en_GB-alba-medium.onnx.json", tts_handle.voice, speakerIdOpt, false);
+      try {
+         loadVoice(tts_handle.config, "en_GB-alba-medium.onnx", "en_GB-alba-medium.onnx.json", 
+                   tts_handle.voice, speakerIdOpt, false);
+      } catch (const std::exception& e) {
+         LOG_ERROR("Failed to load voice model: %s", e.what());
+         return;
+      }
 
       // Initialize the TTS engine
-      initialize(tts_handle.config);
-
-      strcpy(tts_handle.pcm_capture_device, pcm_device);
+      try {
+         initialize(tts_handle.config);
+      } catch (const std::exception& e) {
+         LOG_ERROR("Failed to initialize TTS engine: %s", e.what());
+         return;
+      }
 
       // Configure synthesis parameters
       tts_handle.voice.synthesisConfig.lengthScale = 0.85f;
-
-      tts_handle.is_initialized = 1;
 
       // Initialize synchronization primitives
       pthread_mutex_init(&tts_queue_mutex, NULL);
       pthread_cond_init(&tts_queue_cond, NULL);
 
-      // Open the audio playback device once
+      // Open the audio playback device
 #ifdef ALSA_DEVICE
-      int rc = openAlsaPcmPlaybackDevice(&(tts_handle.handle), tts_handle.pcm_capture_device, &(tts_handle.frames));
+      int rc = openAlsaPcmPlaybackDevice(&(tts_handle.handle), tts_handle.pcm_capture_device, 
+                                         &(tts_handle.frames));
       if (rc) {
-         LOG_ERROR("Error creating ALSA playback device.");
-         // Handle error (e.g., set tts_handle.is_initialized = 0)
-         tts_handle.is_initialized = 0;
+         LOG_ERROR("Error creating ALSA playback device");
+         // Cleanup Piper
+         terminate(tts_handle.config);
+         // Cleanup synchronization primitives
+         pthread_mutex_destroy(&tts_queue_mutex);
+         pthread_cond_destroy(&tts_queue_cond);
          return;
       }
 #else
-      int error = 0;
       tts_handle.pa_handle = openPulseaudioPlaybackDevice(tts_handle.pcm_capture_device);
       if (tts_handle.pa_handle == NULL) {
-         LOG_ERROR("Error creating Pulse playback device.");
-         // Handle error (e.g., set tts_handle.is_initialized = 0)
-         tts_handle.is_initialized = 0;
+         LOG_ERROR("Error creating PulseAudio playback device");
+         // Cleanup Piper
+         terminate(tts_handle.config);
+         // Cleanup synchronization primitives
+         pthread_mutex_destroy(&tts_queue_mutex);
+         pthread_cond_destroy(&tts_queue_cond);
          return;
       }
 #endif
 
       // Start the worker thread
       tts_thread_running = true;
-      pthread_create(&tts_thread, NULL, tts_thread_function, NULL);
+      int thread_result = pthread_create(&tts_thread, NULL, tts_thread_function, NULL);
+      if (thread_result != 0) {
+         LOG_ERROR("Failed to create TTS worker thread: %s", strerror(thread_result));
+         tts_thread_running = false;
+         
+         // Cleanup audio device
+#ifdef ALSA_DEVICE
+         snd_pcm_close(tts_handle.handle);
+         tts_handle.handle = NULL;
+#else
+         pa_simple_free(tts_handle.pa_handle);
+         tts_handle.pa_handle = NULL;
+#endif
+         
+         // Cleanup Piper
+         terminate(tts_handle.config);
+         
+         // Cleanup synchronization primitives
+         pthread_mutex_destroy(&tts_queue_mutex);
+         pthread_cond_destroy(&tts_queue_cond);
+         return;
+      }
+
+      // Only mark as initialized if everything succeeded
+      tts_handle.is_initialized = 1;
+      LOG_INFO("Text-to-Speech system initialized successfully");
    }
 
    /**
@@ -456,27 +512,41 @@ extern "C" {
        LOG_INFO("Generating error TTS: \"%s\"", error_message);
 
        int tts_result = text_to_speech_to_wav(error_message, &tts_wav_data, &tts_wav_size);
-
        if (tts_result == 0 && tts_wav_data && tts_wav_size > 0) {
            // Apply same size/truncation logic as normal TTS
-           if (check_response_size_limit(tts_wav_size)) {
-               *tts_size_out = tts_wav_size;
-               return tts_wav_data;
-           } else {
+           if (!check_response_size_limit(tts_wav_size)) {
                uint8_t *truncated_data = NULL;
                size_t truncated_size = 0;
 
                if (truncate_wav_response(tts_wav_data, tts_wav_size,
-                                       &truncated_data, &truncated_size) == 0) {
-                   free(tts_wav_data);
-                   *tts_size_out = truncated_size;
-                   return truncated_data;
+                                        &truncated_data, &truncated_size) == 0) {
+                   if (truncated_data != NULL) {
+                       // Actual truncation occurred
+                       free(tts_wav_data);
+                       *tts_size_out = truncated_size;
+                       return truncated_data;
+                   }
+                   // Edge case: truncation succeeded but returned NULL
+                   // This shouldn't happen since we verified it needs truncation
+                   LOG_ERROR("Truncation logic error: succeeded but no data returned");
+               } else {
+                  // Truncation failed - free and return NULL
+                  free(tts_wav_data);
+                  LOG_ERROR("Failed to truncate error TTS");
+                  *tts_size_out = 0;
+                  return NULL;
                }
-               free(tts_wav_data);
+           } else {
+               // Fits in buffer, return original
+               *tts_size_out = tts_wav_size;
+               return tts_wav_data;
            }
        }
+       if (tts_wav_data != NULL) {
+           free(tts_wav_data);
+       }
 
-       LOG_ERROR("Failed to generate error TTS");
+       LOG_ERROR("Failed to generate error TTS WAV");
        *tts_size_out = 0;
        return NULL;
    }
@@ -492,6 +562,8 @@ extern "C" {
          LOG_ERROR("Text-to-Speech system not initialized. Call initialize_text_to_speech() first.");
          return;
       }
+
+      tts_handle.is_initialized = 0;
 
       // Signal the worker thread to exit
       pthread_mutex_lock(&tts_queue_mutex);
@@ -521,8 +593,6 @@ extern "C" {
 
       // Clean up the TTS engine
       terminate(tts_handle.config);
-
-      tts_handle.is_initialized = 0;
    }
 
    void remove_chars(char *str, const char *remove_chars) {

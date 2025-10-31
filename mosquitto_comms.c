@@ -53,6 +53,10 @@
  * Array of device callbacks associating device types with their respective handling functions.
  * This facilitates dynamic invocation of actions based on the device type, enhancing the application's
  * modularity and scalability.
+ *
+ * FIXME:
+ *    1. The static returns are not threadsafe or safe in general. Have the caller pass a pointer to fill.
+ *    2. I am not currently using should_respond correctly. This needs fixing.
  */
 static deviceCallback deviceCallbackArray[] = {
    {AUDIO_PLAYBACK_DEVICE, setPcmPlaybackDevice},
@@ -155,29 +159,47 @@ void searchDirectory(const char *rootDir, const char *pattern, Playlist *playlis
 
    struct dirent *entry;
    while ((entry = readdir(dir)) != NULL) {
-      if (entry->d_type == DT_REG) { // Regular file
-         if (playlist->count >= MAX_PLAYLIST_LENGTH) {
-            LOG_WARNING("Playlist is full.");
-            closedir(dir);
-            return;
-         }
+      // Check if playlist is full before processing
+      if (playlist->count >= MAX_PLAYLIST_LENGTH) {
+         LOG_WARNING("Playlist is full.");
+         closedir(dir);
+         return;
+      }
 
+      if (entry->d_type == DT_REG) {
          char filePath[MAX_FILENAME_LENGTH];
-         snprintf(filePath, sizeof(filePath), "%s/%s", rootDir, entry->d_name);
+         int written = snprintf(filePath, sizeof(filePath), "%s/%s", rootDir, entry->d_name);
+         
+         // Check if path was truncated
+         if (written >= MAX_FILENAME_LENGTH) {
+            LOG_WARNING("Path too long, skipping: %s/%s", rootDir, entry->d_name);
+            continue;
+         }
 
          if (fnmatch(pattern, entry->d_name, FNM_CASEFOLD) == 0) {
-            strcpy(playlist->filenames[playlist->count], filePath);
+            strncpy(playlist->filenames[playlist->count], filePath, MAX_FILENAME_LENGTH - 1);
+            playlist->filenames[playlist->count][MAX_FILENAME_LENGTH - 1] = '\0';
             playlist->count++;
          }
-      } else if (entry->d_type == DT_DIR && strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) { // Directory
+      } else if (entry->d_type == DT_DIR && strcmp(entry->d_name, ".") != 0 && 
+                 strcmp(entry->d_name, "..") != 0) {
          char subPath[MAX_FILENAME_LENGTH];
-         snprintf(subPath, sizeof(subPath), "%s/%s", rootDir, entry->d_name);
+         int written = snprintf(subPath, sizeof(subPath), "%s/%s", rootDir, entry->d_name);
+         
+         // Check if path was truncated
+         if (written >= MAX_FILENAME_LENGTH) {
+            LOG_WARNING("Path too long, skipping directory: %s/%s", rootDir, entry->d_name);
+            continue;
+         }
+         
          searchDirectory(subPath, pattern, playlist);
       }
    }
 
    closedir(dir);
 }
+
+#define GPT_RESPONSE_BUFFER_SIZE 512
 
 void parseJsonCommandandExecute(const char *input)
 {
@@ -188,7 +210,7 @@ void parseJsonCommandandExecute(const char *input)
 
    extern struct json_object *conversation_history;
    char *response_text = NULL;
-   char gpt_response[512];
+   char gpt_response[GPT_RESPONSE_BUFFER_SIZE];
 
    const char *deviceName = NULL;
    const char *actionName = NULL;
@@ -273,10 +295,13 @@ void parseJsonCommandandExecute(const char *input)
                size_t src_len = strlen(callback_result);
 
                // Resize memory to fit both strings plus space and null terminator
-               pending_command_result = realloc(pending_command_result, dest_len + src_len + 2);
-               if (pending_command_result == NULL) {
+               char *temp = pending_command_result = realloc(pending_command_result, dest_len + src_len + 2);
+               if (temp == NULL) {
+                  free(pending_command_result);
+                  pending_command_result = NULL;
                   continue;
                }
+               pending_command_result = temp;
 
                // Copy the new string to the end
                strcpy(pending_command_result + dest_len, " ");
@@ -294,16 +319,16 @@ void parseJsonCommandandExecute(const char *input)
       json_object_put(parsedJson);
       return;
    }
-   snprintf(gpt_response, 512, "{\"response\": \"%s\"}", pending_command_result);
+   snprintf(gpt_response, sizeof(gpt_response), "{\"response\": \"%s\"}", pending_command_result);
 
    response_text = getGptResponse(conversation_history, gpt_response, NULL, 0);
    if (response_text != NULL) {
       // AI returned successfully, vocalize response.
-      LOG_WARNING("AI: %s\n", response_text);
+      LOG_INFO("AI: %s\n", response_text);
       char *match = NULL;
       if ((match = strstr(response_text, "<end_of_turn>")) != NULL) {
          *match = '\0';
-         LOG_WARNING("AI: %s\n", response_text);
+         LOG_INFO("AI: %s\n", response_text);
       }
       /* FIXME: This is a quick workaround for null responses. */
       if (response_text[0] != '{') {
@@ -481,18 +506,23 @@ int compare(const void *p1, const void *p2) {
     return strcmp((char *)p1, (char *)p2);
 }
 
+#define MUSIC_CALLBACK_BUFFER_SIZE 512
+
 char* musicCallback(const char *actionName, char *value, int *should_respond) {
    PlaybackArgs args;
    char strWildcards[MAX_FILENAME_LENGTH];
-   static char return_buffer[512];
+   static char return_buffer[MUSIC_CALLBACK_BUFFER_SIZE];
    int i = 0;
 
    *should_respond = 1;  // Default to responding
 
    if (strcmp(actionName, "play") == 0) {
-      if ((music_thread != -1) && (pthread_kill(music_thread, 0) == 0)) {
+      if (music_thread != -1) {
          setMusicPlay(0);
-         pthread_join(music_thread, NULL);
+         int join_result = pthread_join(music_thread, NULL);
+         if (join_result == 0) {
+            music_thread = -1;
+         }
       }
 
       playlist.count = 0;
@@ -554,7 +584,7 @@ char* musicCallback(const char *actionName, char *value, int *should_respond) {
          args.file_name = playlist.filenames[current_track];
          args.start_time = 0;       /* For now set to zero. We may support other modes later. */
 
-         LOG_WARNING("Playing: %s %s %d", args.sink_name, args.file_name, args.start_time);
+         LOG_INFO("Playing: %s %s %d", args.sink_name, args.file_name, args.start_time);
 
          // Create the playback thread
          if (pthread_create(&music_thread, NULL, playFlacAudio, &args)) {
@@ -591,7 +621,7 @@ char* musicCallback(const char *actionName, char *value, int *should_respond) {
          }
       }
    } else if (strcmp(actionName, "stop") == 0) {
-      LOG_WARNING("Stopping music playback.");
+      LOG_INFO("Stopping music playback.");
       setMusicPlay(0);
 
       if (command_processing_mode == CMD_MODE_DIRECT_ONLY) {
@@ -602,9 +632,12 @@ char* musicCallback(const char *actionName, char *value, int *should_respond) {
          return return_buffer;
       }
    } else if (strcmp(actionName, "next") == 0) {
-      if ((music_thread != -1) && (pthread_kill(music_thread, 0) == 0)) {
+      if (music_thread != -1) {
          setMusicPlay(0);
-         pthread_join(music_thread, NULL);
+         int join_result = pthread_join(music_thread, NULL);
+         if (join_result == 0) {
+            music_thread = -1;
+         }
       }
 
       if (playlist.count > 0) {
@@ -617,7 +650,7 @@ char* musicCallback(const char *actionName, char *value, int *should_respond) {
          args.file_name = playlist.filenames[current_track];
          args.start_time = 0;       /* For now set to zero. We may support other modes later. */
 
-         LOG_WARNING("Playing: %s %s %d", args.sink_name, args.file_name, args.start_time);
+         LOG_INFO("Playing: %s %s %d", args.sink_name, args.file_name, args.start_time);
 
          // Create the playback thread
          if (pthread_create(&music_thread, NULL, playFlacAudio, &args)) {
@@ -657,9 +690,12 @@ char* musicCallback(const char *actionName, char *value, int *should_respond) {
          }
       }
    } else if (strcmp(actionName, "previous") == 0) {
-      if ((music_thread != -1) && (pthread_kill(music_thread, 0) == 0)) {
+      if (music_thread != -1) {
          setMusicPlay(0);
-         pthread_join(music_thread, NULL);
+         int join_result = pthread_join(music_thread, NULL);
+         if (join_result == 0) {
+            music_thread = -1;
+         }
       }
 
       if (playlist.count > 0) {
@@ -672,7 +708,7 @@ char* musicCallback(const char *actionName, char *value, int *should_respond) {
          args.file_name = playlist.filenames[current_track];
          args.start_time = 0;       /* For now set to zero. We may support other modes later. */
 
-         LOG_WARNING("Playing: %s %s %d", args.sink_name, args.file_name, args.start_time);
+         LOG_INFO("Playing: %s %s %d", args.sink_name, args.file_name, args.start_time);
 
          // Create the playback thread
          if (pthread_create(&music_thread, NULL, playFlacAudio, &args)) {
@@ -966,7 +1002,7 @@ char* volumeCallback(const char *actionName, char *value, int *should_respond) {
    static char return_buffer[256];
    float floatVol = wordToNumber(value);
 
-   LOG_WARNING("Music volume: %s/%0.2f", value, floatVol);
+   LOG_INFO("Music volume: %s/%0.2f", value, floatVol);
 
    if (floatVol >= 0 && floatVol <= 2.0) {
       setMusicVolume(floatVol);
@@ -999,7 +1035,7 @@ char* volumeCallback(const char *actionName, char *value, int *should_respond) {
 char* localLLMCallback(const char *actionName, char *value, int *should_respond) {
    static char return_buffer[256];
 
-   LOG_WARNING("Setting AI to local LLM.");
+   LOG_INFO("Setting AI to local LLM.");
    setLLM(LOCAL_LLM);
 
    // Always return string for AI modes (ignored in DIRECT_ONLY)
@@ -1011,7 +1047,7 @@ char* localLLMCallback(const char *actionName, char *value, int *should_respond)
 char* cloudLLMCallback(const char *actionName, char *value, int *should_respond) {
    static char return_buffer[256];
 
-   LOG_WARNING("Setting AI to cloud LLM.");
+   LOG_INFO("Setting AI to cloud LLM.");
    setLLM(CLOUD_LLM);
 
    // Always return string for AI modes (ignored in DIRECT_ONLY)
