@@ -174,6 +174,15 @@ bool worker_pool_is_initialized(void);
  */
 void worker_pool_set_mosq(struct mosquitto *mosq);
 
+/**
+ * @brief Get mosquitto instance for command processing
+ *
+ * Used by other modules (e.g., WebUI) that need to publish MQTT commands.
+ *
+ * @return Mosquitto client instance, or NULL if not set
+ */
+struct mosquitto *worker_pool_get_mosq(void);
+
 #ifdef __cplusplus
 }
 #endif

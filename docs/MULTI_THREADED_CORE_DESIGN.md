@@ -159,7 +159,7 @@ Manages per-client conversation context with reference counting.
 // include/core/session_manager.h
 
 #define MAX_SESSIONS 8
-#define SESSION_TIMEOUT_SEC 300  // 5 minute idle timeout
+#define SESSION_TIMEOUT_SEC 1800  // 30 minute idle timeout
 #define LOCAL_SESSION_ID 0       // Reserved for local microphone
 
 typedef enum {
@@ -851,7 +851,7 @@ session_t *session = session_get_or_create_dap(client_fd, client_ip);
 **Behavior**:
 - First connection from IP: Creates new session, assigns to worker
 - Reconnection from same IP: Returns existing session with preserved history
-- Session timeout (5 min idle): Session destroyed, next connection creates fresh session
+- Session timeout (30 min idle): Session destroyed, next connection creates fresh session
 
 **Limitations** (acceptable for testing):
 - Multiple devices behind NAT appear as single session

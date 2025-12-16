@@ -893,6 +893,64 @@ static int flaresolverr_fetch(const char *url, char **out_html, size_t *out_size
    return URL_FETCH_SUCCESS;
 }
 
+/**
+ * @brief Try FlareSolverr fallback and extract content
+ *
+ * Common helper for all FlareSolverr fallback paths. Fetches via FlareSolverr,
+ * extracts markdown, and returns the result.
+ *
+ * @param url URL to fetch
+ * @param base_url Base URL for relative link resolution (can be NULL, defaults to url)
+ * @param out_content Receives extracted markdown (caller frees on success)
+ * @param out_size Receives content size (optional, can be NULL)
+ * @return URL_FETCH_SUCCESS on success, error code otherwise
+ */
+static int try_flaresolverr_fallback(const char *url,
+                                     const char *base_url,
+                                     char **out_content,
+                                     size_t *out_size) {
+   if (!flaresolverr_is_enabled() || !flaresolverr_is_available()) {
+      return URL_FETCH_ERROR_NETWORK;
+   }
+
+   char *flare_html = NULL;
+   size_t flare_size = 0;
+   int flare_result = flaresolverr_fetch(url, &flare_html, &flare_size);
+
+   if (flare_result != URL_FETCH_SUCCESS || !flare_html) {
+      free(flare_html);  // safe if NULL
+      return URL_FETCH_ERROR_NETWORK;
+   }
+
+   char *extracted = NULL;
+   const char *effective_base = base_url ? base_url : url;
+
+   int html_result = html_extract_text_with_base(flare_html, flare_size, &extracted,
+                                                 effective_base);
+   free(flare_html);
+
+   if (html_result != HTML_PARSE_SUCCESS || !extracted) {
+      free(extracted);
+      return URL_FETCH_ERROR_EMPTY;
+   }
+
+   size_t extracted_len = strlen(extracted);
+   if (extracted_len == 0) {
+      free(extracted);
+      return URL_FETCH_ERROR_EMPTY;
+   }
+
+   LOG_INFO("url_fetcher: FlareSolverr fallback extracted %zu bytes of markdown", extracted_len);
+   LOG_INFO("url_fetcher: Content preview:\n%.2000s%s", extracted,
+            extracted_len > 2000 ? "\n... (truncated)" : "");
+
+   *out_content = extracted;
+   if (out_size) {
+      *out_size = extracted_len;
+   }
+   return URL_FETCH_SUCCESS;
+}
+
 // =============================================================================
 // SSRF Protection
 // =============================================================================
@@ -1269,10 +1327,15 @@ int url_fetch_content_with_base(const char *url,
          // Check if this was a buffer truncation (response too large)
          // We can still use the partial content we received
          if (res == CURLE_WRITE_ERROR && buffer.truncated && buffer.data && buffer.size > 0) {
-            LOG_WARNING("url_fetcher: Response truncated at %zuKB (max %zuKB) for %s",
-                        buffer.size / 1024, URL_FETCH_MAX_SIZE / 1024, url);
+            LOG_WARNING("url_fetcher: Response truncated at %zuKB (max %zuKB) on attempt %d for %s",
+                        buffer.size / 1024, URL_FETCH_MAX_SIZE / 1024, retry_count + 1, url);
+            // Get HTTP code and content type before breaking (needed for post-loop checks)
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+            curl_easy_getinfo(curl, CURLINFO_CONTENT_TYPE, &content_type);
             // Continue processing with truncated content - don't treat as error
             // The truncated flag will be checked later to add a notice
+            // Clear the error so post-loop check doesn't fail
+            res = CURLE_OK;
             break;
          }
          LOG_WARNING("url_fetcher: Network error on attempt %d: %s", retry_count + 1,
@@ -1312,6 +1375,16 @@ int url_fetch_content_with_base(const char *url,
       if (resolve_list)
          curl_slist_free_all(resolve_list);
       curl_easy_cleanup(curl);
+
+      // For redirect loops (often caused by JS-based paywalls), try FlareSolverr
+      if (res == CURLE_TOO_MANY_REDIRECTS) {
+         LOG_INFO("url_fetcher: Redirect loop detected, trying FlareSolverr fallback");
+         if (try_flaresolverr_fallback(url, base_url, out_content, out_size) == URL_FETCH_SUCCESS) {
+            return URL_FETCH_SUCCESS;
+         }
+         LOG_WARNING("url_fetcher: FlareSolverr fallback failed for redirect loop");
+      }
+
       return URL_FETCH_ERROR_NETWORK;
    }
 
@@ -1325,45 +1398,12 @@ int url_fetch_content_with_base(const char *url,
       curl_easy_cleanup(curl);
 
       // If we got 403 Forbidden, try FlareSolverr as fallback (Cloudflare/bot protection)
-      // Only attempt if FlareSolverr is enabled in config AND available
-      if (http_code == 403 && flaresolverr_is_enabled() && flaresolverr_is_available()) {
-         char *flare_html = NULL;
-         size_t flare_size = 0;
-         int flare_result = flaresolverr_fetch(url, &flare_html, &flare_size);
-
-         if (flare_result == URL_FETCH_SUCCESS && flare_html) {
-            // Successfully fetched via FlareSolverr - now extract markdown
-            char *extracted = NULL;
-            const char *effective_base = base_url ? base_url : url;
-
-            int html_result = html_extract_text_with_base(flare_html, flare_size, &extracted,
-                                                          effective_base);
-            free(flare_html);
-
-            if (html_result == HTML_PARSE_SUCCESS && extracted) {
-               size_t extracted_len = strlen(extracted);
-               LOG_INFO("url_fetcher: FlareSolverr fallback extracted %zu bytes of markdown",
-                        extracted_len);
-
-               if (extracted_len > 0) {
-                  LOG_INFO("url_fetcher: Content preview:\n%.2000s%s", extracted,
-                           extracted_len > 2000 ? "\n... (truncated)" : "");
-               }
-
-               *out_content = extracted;
-               if (out_size)
-                  *out_size = extracted_len;
-               return URL_FETCH_SUCCESS;
-            }
-
-            if (extracted)
-               free(extracted);
-            LOG_WARNING("url_fetcher: FlareSolverr fallback HTML extraction failed");
-         } else {
-            if (flare_html)
-               free(flare_html);
-            LOG_WARNING("url_fetcher: FlareSolverr fallback failed for %s", url);
+      if (http_code == 403) {
+         LOG_INFO("url_fetcher: HTTP 403, trying FlareSolverr fallback");
+         if (try_flaresolverr_fallback(url, base_url, out_content, out_size) == URL_FETCH_SUCCESS) {
+            return URL_FETCH_SUCCESS;
          }
+         LOG_WARNING("url_fetcher: FlareSolverr fallback failed for %s", url);
       }
 
       return URL_FETCH_ERROR_HTTP;
@@ -1442,10 +1482,35 @@ int url_fetch_content_with_base(const char *url,
    curl_buffer_free(&buffer);
 
    if (result != URL_FETCH_SUCCESS) {
+      // If content extraction failed (likely JS-rendered page), try FlareSolverr
+      LOG_INFO("url_fetcher: Direct fetch failed with %d, trying FlareSolverr fallback", result);
+      if (try_flaresolverr_fallback(url, base_url, out_content, out_size) == URL_FETCH_SUCCESS) {
+         return URL_FETCH_SUCCESS;
+      }
+      LOG_WARNING("url_fetcher: FlareSolverr fallback also failed");
       return result;
    }
 
    size_t extracted_len = strlen(extracted);
+
+   // If extraction succeeded but returned empty/minimal content, try FlareSolverr
+   // (Many JS-rendered pages return valid HTML with no text content)
+   if (extracted_len < 100) {
+      LOG_INFO("url_fetcher: Extracted only %zu bytes, trying FlareSolverr fallback",
+               extracted_len);
+      char *flare_content = NULL;
+      size_t flare_len = 0;
+      if (try_flaresolverr_fallback(url, base_url, &flare_content, &flare_len) ==
+          URL_FETCH_SUCCESS) {
+         free(extracted);
+         extracted = flare_content;
+         extracted_len = flare_len;
+      } else {
+         LOG_WARNING("url_fetcher: FlareSolverr fallback failed, using minimal content");
+         // Keep original extracted content even if minimal
+      }
+   }
+
    LOG_INFO("url_fetcher: Extracted %zu bytes of markdown content%s", extracted_len,
             was_truncated ? " (truncated)" : "");
 

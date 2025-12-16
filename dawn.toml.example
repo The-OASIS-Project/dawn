@@ -172,7 +172,7 @@
                                   # Env: DAWN_NETWORK_WORKERS
 # socket_timeout_sec = 30         # Client socket timeout
                                   # Env: DAWN_NETWORK_SOCKET_TIMEOUT_SEC
-# session_timeout_sec = 300       # Idle session expiry (5 minutes)
+# session_timeout_sec = 1800      # Idle session expiry (30 minutes)
                                   # Env: DAWN_NETWORK_SESSION_TIMEOUT_SEC
 # llm_timeout_ms = 30000          # Per-request LLM timeout (30 seconds)
                                   # Env: DAWN_NETWORK_LLM_TIMEOUT_MS

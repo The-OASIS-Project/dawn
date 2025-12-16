@@ -217,6 +217,17 @@ typedef struct {
 } tui_config_t;
 
 /* =============================================================================
+ * WebUI Configuration
+ * ============================================================================= */
+typedef struct {
+   bool enabled;                       /* Enable WebUI server */
+   int port;                           /* HTTP/WebSocket port (default: 8080) */
+   int max_clients;                    /* Max concurrent WebSocket clients */
+   char www_path[CONFIG_PATH_MAX];     /* Path to static files */
+   char bind_address[CONFIG_NAME_MAX]; /* Bind address (default: 127.0.0.1) */
+} webui_config_t;
+
+/* =============================================================================
  * Debug Configuration
  * ============================================================================= */
 typedef struct {
@@ -262,6 +273,7 @@ typedef struct {
    mqtt_config_t mqtt;
    network_config_t network;
    tui_config_t tui;
+   webui_config_t webui;
    debug_config_t debug;
    paths_config_t paths;
 } dawn_config_t;

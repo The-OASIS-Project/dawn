@@ -96,6 +96,21 @@ if(ENABLE_TUI)
     endif()
 endif()
 
+# WebUI (libwebsockets)
+option(ENABLE_WEBUI "Enable WebUI server" ON)
+if(ENABLE_WEBUI)
+    pkg_check_modules(WEBSOCKETS REQUIRED libwebsockets)
+    if(WEBSOCKETS_FOUND)
+        include_directories(${WEBSOCKETS_INCLUDE_DIRS})
+        add_definitions(-DENABLE_WEBUI)
+        message(STATUS "WebUI support: ENABLED (libwebsockets ${WEBSOCKETS_VERSION})")
+    else()
+        message(WARNING "libwebsockets not found, WebUI support disabled")
+        message(WARNING "Install with: sudo apt install libwebsockets-dev")
+        set(ENABLE_WEBUI OFF)
+    endif()
+endif()
+
 # Platform-specific CUDA configuration (Jetson only)
 if(PLATFORM STREQUAL "JETSON")
     set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-12.6")
@@ -330,6 +345,11 @@ if(ENABLE_TUI)
     list(APPEND DAWN_SOURCES src/ui/tui.c)
 endif()
 
+# Conditionally add WebUI source files
+if(ENABLE_WEBUI)
+    list(APPEND DAWN_SOURCES src/webui/webui_server.c)
+endif()
+
 # Note: ALSA_DEVICE define removed - audio backend is now selected at runtime via --audio-backend
 # The USE_ALSA option is kept for backwards compatibility but has no effect on compilation.
 # Both ALSA and PulseAudio backends are always compiled in and selected at runtime.
@@ -380,6 +400,11 @@ target_link_libraries(dawn asound pulse-simple pulse)
 # Conditionally link ncurses for TUI
 if(ENABLE_TUI)
     target_link_libraries(dawn ${CURSES_LIBRARIES})
+endif()
+
+# Conditionally link libwebsockets for WebUI
+if(ENABLE_WEBUI)
+    target_link_libraries(dawn ${WEBSOCKETS_LIBRARIES})
 endif()
 
 # Conditionally link ASR library (Vosk OR Whisper, not both)

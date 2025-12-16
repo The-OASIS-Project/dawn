@@ -419,6 +419,21 @@ static void parse_tui(toml_table_t *table, tui_config_t *config) {
    PARSE_BOOL(table, "enabled", config->enabled);
 }
 
+static void parse_webui(toml_table_t *table, webui_config_t *config) {
+   if (!table)
+      return;
+
+   static const char *const known_keys[] = { "enabled",  "port",         "max_clients",
+                                             "www_path", "bind_address", NULL };
+   warn_unknown_keys(table, "webui", known_keys);
+
+   PARSE_BOOL(table, "enabled", config->enabled);
+   PARSE_INT(table, "port", config->port);
+   PARSE_INT(table, "max_clients", config->max_clients);
+   PARSE_STRING(table, "www_path", config->www_path);
+   PARSE_STRING(table, "bind_address", config->bind_address);
+}
+
 static void parse_debug(toml_table_t *table, debug_config_t *config) {
    if (!table)
       return;
@@ -502,6 +517,7 @@ int config_parse_file(const char *path, dawn_config_t *config) {
    parse_mqtt(toml_table_in(root, "mqtt"), &config->mqtt);
    parse_network(toml_table_in(root, "network"), &config->network);
    parse_tui(toml_table_in(root, "tui"), &config->tui);
+   parse_webui(toml_table_in(root, "webui"), &config->webui);
    parse_debug(toml_table_in(root, "debug"), &config->debug);
    parse_paths(toml_table_in(root, "paths"), &config->paths);
 

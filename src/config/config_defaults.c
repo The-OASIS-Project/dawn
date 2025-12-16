@@ -145,11 +145,18 @@ void config_set_defaults(dawn_config_t *config) {
    config->network.port = 5000;
    config->network.workers = 4;
    config->network.socket_timeout_sec = 30;
-   config->network.session_timeout_sec = 300;
+   config->network.session_timeout_sec = 1800;  // 30 minutes
    config->network.llm_timeout_ms = 30000;
 
    /* TUI */
    config->tui.enabled = false;
+
+   /* WebUI */
+   config->webui.enabled = false;
+   config->webui.port = 3000; /* "I love you 3000" */
+   config->webui.max_clients = 4;
+   SAFE_COPY(config->webui.www_path, "www");
+   SAFE_COPY(config->webui.bind_address, "0.0.0.0");
 
    /* Debug */
    config->debug.mic_record = false;

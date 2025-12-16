@@ -347,6 +347,10 @@ void worker_pool_set_mosq(struct mosquitto *mosq) {
    worker_mosq = mosq;
 }
 
+struct mosquitto *worker_pool_get_mosq(void) {
+   return worker_mosq;
+}
+
 // =============================================================================
 // Command Processing with Request/Response
 // =============================================================================

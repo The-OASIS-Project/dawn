@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DAWN - Voice Assistant</title>
+  <link rel="stylesheet" href="/css/dawn.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Header -->
+    <header id="header">
+      <h1>D.A.W.N.</h1>
+      <div id="header-controls">
+        <label id="debug-toggle" title="Show command/tool call details">
+          <input type="checkbox" id="debug-mode">
+          <span>Debug</span>
+        </label>
+        <span id="connection-status" class="disconnected">Disconnected</span>
+      </div>
+    </header>
+
+    <!-- Visualization container -->
+    <div id="visualizer">
+      <div id="ring-container">
+        <div id="ring-outer" class="ring"></div>
+        <div id="ring-inner" class="ring"></div>
+        <div id="logo">FRIDAY</div>
+      </div>
+    </div>
+
+    <!-- State indicator -->
+    <div id="status">
+      <span id="status-dot"></span>
+      <span id="status-text">IDLE</span>
+    </div>
+
+    <!-- Transcript display -->
+    <div id="transcript">
+      <div class="transcript-placeholder">
+        Transcripts will appear here...
+      </div>
+    </div>
+
+    <!-- Input area -->
+    <div id="input-area">
+      <input type="text" id="text-input" placeholder="Type a message..." autocomplete="off">
+      <button id="send-btn" title="Send message">Send</button>
+      <button id="mic-btn" title="Voice input (coming soon)" disabled>Mic</button>
+    </div>
+
+    <!-- Footer -->
+    <footer id="footer">
+      <span>DAWN WebUI v1.0 | Phase 1</span>
+    </footer>
+  </div>
+
+  <script src="/js/dawn.js"></script>
+</body>
+</html>

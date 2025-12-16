@@ -37,8 +37,8 @@ extern "C" {
 #endif
 
 #define MAX_SESSIONS 8
-#define SESSION_TIMEOUT_SEC 300  // 5 minute idle timeout
-#define LOCAL_SESSION_ID 0       // Reserved for local microphone
+#define SESSION_TIMEOUT_SEC 1800  // 30 minute idle timeout
+#define LOCAL_SESSION_ID 0        // Reserved for local microphone
 
 /**
  * LOCK ACQUISITION ORDER (to prevent deadlocks):
@@ -222,6 +222,19 @@ session_t *session_get_or_create_dap(int client_fd, const char *client_ip);
  * @note Returns NULL for disconnected sessions (prevents new refs to dying sessions)
  */
 session_t *session_get(uint32_t session_id);
+
+/**
+ * @brief Get session by ID for reconnection (allows disconnected sessions)
+ *
+ * Similar to session_get() but returns disconnected sessions to allow
+ * WebSocket clients to reconnect with their existing conversation history.
+ *
+ * @param session_id Session ID to look up
+ * @return Session pointer (caller must call session_release), or NULL if not found
+ *
+ * @note Caller should clear the disconnected flag after reconnecting
+ */
+session_t *session_get_for_reconnect(uint32_t session_id);
 
 /**
  * @brief Release session reference (decrements ref_count)

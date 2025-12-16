@@ -34,6 +34,13 @@ DAWN integrates modern speech recognition, large language models, and text-to-sp
   - Integration with other OASIS components or external systems
   - Extensible device callback architecture
 
+- **Web UI**
+  - Browser-based interface on port 3000
+  - Real-time WebSocket communication
+  - Session persistence across page refresh (30-minute timeout)
+  - Debug mode for viewing commands and tool results
+  - Mobile-friendly responsive design
+
 - **LLM Tools**
   - **Web Search** - Voice-activated search via SearXNG (self-hosted, privacy-focused)
   - **URL Fetcher** - Fetch and read web pages; large pages auto-summarized via local LLM
@@ -89,6 +96,8 @@ dawn/
 │   │   ├── weather_service.c     # Open-Meteo weather API
 │   │   ├── calculator.c          # Math expression evaluation
 │   │   └── tinyexpr.c            # Expression parser library
+│   ├── webui/                    # Web UI server subsystem
+│   │   └── webui_server.c        # HTTP/WebSocket server (libwebsockets)
 │   └── (core files)              # Core application files
 │       ├── dawn.c                # Main application & state machine
 │       ├── logging.c             # Centralized logging
@@ -103,8 +112,14 @@ dawn/
 │   ├── network/
 │   ├── audio/
 │   ├── tools/                    # LLM tool headers
+│   ├── webui/                    # Web UI headers
 │   ├── utf8/                     # UTF-8 library for TTS
 │   └── (core headers)
+│
+├── www/                          # Web UI static files
+│   ├── index.html                # Main HTML page
+│   ├── css/dawn.css              # Stylesheet
+│   └── js/dawn.js                # JavaScript client
 │
 ├── whisper.cpp/                  # Whisper ASR engine (submodule)
 ├── models/                       # ML models (TTS, VAD)
@@ -207,6 +222,9 @@ sudo apt install -y libcurl4-openssl-dev
 
 # OpenSSL
 sudo apt install -y libssl-dev
+
+# libwebsockets (for Web UI)
+sudo apt install -y libwebsockets-dev
 ```
 
 ### 2. Install Core Dependencies
@@ -633,6 +651,17 @@ See `LLM_INTEGRATION_GUIDE.md` for detailed setup instructions for:
 - Context: 1024
 - Service: `services/llama-server/` (systemd service included)
 
+### Web UI Configuration
+
+The Web UI is enabled by default. Configure via `dawn.toml`:
+
+```toml
+[webui]
+enabled = true              # Enable/disable Web UI server
+port = 3000                 # HTTP/WebSocket port
+host = "0.0.0.0"            # Bind address (0.0.0.0 = all interfaces)
+```
+
 ## Running
 
 ### Local Mode (microphone input)
@@ -653,6 +682,40 @@ DAWN includes a network server that accepts connections from ESP32 clients using
 4. ESP32 client connects and sends voice commands over WiFi
 
 See `remote_dawn/protocol_specification.md` for protocol details.
+
+### Web UI Mode
+
+The Web UI provides a browser-based interface for interacting with DAWN:
+
+1. Start DAWN (the Web UI server starts automatically):
+   ```bash
+   cd build
+   ./dawn
+   ```
+
+2. Open a browser and navigate to:
+   ```
+   http://localhost:3000
+   ```
+   Or from another device on your network:
+   ```
+   http://<dawn-ip-address>:3000
+   ```
+
+**Features**:
+- **Text input** - Type messages instead of speaking
+- **Real-time responses** - See LLM responses stream in real-time
+- **Session persistence** - Your conversation history persists across page refreshes (30-minute timeout)
+- **Debug mode** - Toggle debug view to see tool results, commands, and system messages
+- **Mobile friendly** - Responsive design works on phones and tablets
+
+**How it works**:
+- HTTP serves static files from `www/` directory
+- WebSocket connection on the same port handles real-time communication
+- Sessions are tracked via token stored in browser localStorage
+- Each browser tab maintains its own conversation context
+
+See `docs/WEBUI_DESIGN.md` for technical architecture details.
 
 ## Testing
 

@@ -450,6 +450,32 @@ session_t *session_get(uint32_t session_id) {
    }
 
    pthread_rwlock_unlock(&session_manager_rwlock);
+   return found;
+}
+
+session_t *session_get_for_reconnect(uint32_t session_id) {
+   if (!initialized) {
+      return NULL;
+   }
+
+   pthread_rwlock_rdlock(&session_manager_rwlock);
+
+   session_t *found = NULL;
+   for (int i = 0; i < MAX_SESSIONS; i++) {
+      if (sessions[i] != NULL && sessions[i]->session_id == session_id) {
+         found = sessions[i];
+         break;
+      }
+   }
+
+   if (found) {
+      // Increment ref count (even for disconnected sessions - allows reconnection)
+      pthread_mutex_lock(&found->ref_mutex);
+      found->ref_count++;
+      pthread_mutex_unlock(&found->ref_mutex);
+   }
+
+   pthread_rwlock_unlock(&session_manager_rwlock);
 
    return found;
 }

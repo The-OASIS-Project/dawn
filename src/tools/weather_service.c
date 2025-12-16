@@ -151,6 +151,86 @@ int weather_service_is_initialized(void) {
    return __atomic_load_n(&module_initialized, __ATOMIC_ACQUIRE);
 }
 
+// US state abbreviation to full name mapping
+static const struct {
+   const char *abbrev;
+   const char *full;
+} us_state_map[] = { { "AL", "Alabama" },
+                     { "AK", "Alaska" },
+                     { "AZ", "Arizona" },
+                     { "AR", "Arkansas" },
+                     { "CA", "California" },
+                     { "CO", "Colorado" },
+                     { "CT", "Connecticut" },
+                     { "DE", "Delaware" },
+                     { "FL", "Florida" },
+                     { "GA", "Georgia" },
+                     { "HI", "Hawaii" },
+                     { "ID", "Idaho" },
+                     { "IL", "Illinois" },
+                     { "IN", "Indiana" },
+                     { "IA", "Iowa" },
+                     { "KS", "Kansas" },
+                     { "KY", "Kentucky" },
+                     { "LA", "Louisiana" },
+                     { "ME", "Maine" },
+                     { "MD", "Maryland" },
+                     { "MA", "Massachusetts" },
+                     { "MI", "Michigan" },
+                     { "MN", "Minnesota" },
+                     { "MS", "Mississippi" },
+                     { "MO", "Missouri" },
+                     { "MT", "Montana" },
+                     { "NE", "Nebraska" },
+                     { "NV", "Nevada" },
+                     { "NH", "New Hampshire" },
+                     { "NJ", "New Jersey" },
+                     { "NM", "New Mexico" },
+                     { "NY", "New York" },
+                     { "NC", "North Carolina" },
+                     { "ND", "North Dakota" },
+                     { "OH", "Ohio" },
+                     { "OK", "Oklahoma" },
+                     { "OR", "Oregon" },
+                     { "PA", "Pennsylvania" },
+                     { "RI", "Rhode Island" },
+                     { "SC", "South Carolina" },
+                     { "SD", "South Dakota" },
+                     { "TN", "Tennessee" },
+                     { "TX", "Texas" },
+                     { "UT", "Utah" },
+                     { "VT", "Vermont" },
+                     { "VA", "Virginia" },
+                     { "WA", "Washington" },
+                     { "WV", "West Virginia" },
+                     { "WI", "Wisconsin" },
+                     { "WY", "Wyoming" },
+                     { "DC", "District of Columbia" },
+                     { NULL, NULL } };
+
+/**
+ * @brief Expand US state abbreviation to full name
+ * @param abbrev State abbreviation (e.g., "GA")
+ * @return Full state name (e.g., "Georgia") or NULL if not found
+ */
+static const char *expand_state_abbrev(const char *abbrev) {
+   if (!abbrev || strlen(abbrev) != 2) {
+      return NULL;
+   }
+   // Make uppercase copy for comparison
+   char upper[3];
+   upper[0] = toupper((unsigned char)abbrev[0]);
+   upper[1] = toupper((unsigned char)abbrev[1]);
+   upper[2] = '\0';
+
+   for (int i = 0; us_state_map[i].abbrev != NULL; i++) {
+      if (strcmp(upper, us_state_map[i].abbrev) == 0) {
+         return us_state_map[i].full;
+      }
+   }
+   return NULL;
+}
+
 // Case-insensitive substring match
 static int str_contains_ci(const char *haystack, const char *needle) {
    if (!haystack || !needle)
@@ -210,6 +290,14 @@ static int geocode_location(const char *location,
       char *end = state_filter + strlen(state_filter) - 1;
       while (end > state_filter && *end == ' ')
          *end-- = '\0';
+
+      // Expand US state abbreviation to full name (e.g., "GA" -> "Georgia")
+      const char *expanded = expand_state_abbrev(state_filter);
+      if (expanded) {
+         LOG_INFO("Geocoding: Expanded state '%s' to '%s'", state_filter, expanded);
+         strncpy(state_filter, expanded, sizeof(state_filter) - 1);
+         state_filter[sizeof(state_filter) - 1] = '\0';
+      }
    }
 
    // Trim whitespace from city name

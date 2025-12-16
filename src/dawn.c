@@ -71,6 +71,9 @@
 #ifdef ENABLE_TUI
 #include "ui/tui.h"
 #endif
+#ifdef ENABLE_WEBUI
+#include "webui/webui_server.h"
+#endif
 #ifdef ENABLE_AEC
 #include "audio/aec_processor.h"
 #endif
@@ -1940,6 +1943,9 @@ int main(int argc, char *argv[]) {
 
       /* Start processing MQTT events. */
       mosquitto_loop_start(mosq);
+
+      /* Make MQTT available for command processing (WebUI, worker pool) */
+      worker_pool_set_mosq(mosq);
    } else {
       LOG_INFO("MQTT disabled by config");
    }
@@ -2056,8 +2062,6 @@ int main(int argc, char *argv[]) {
          enable_network_audio = 0;
       } else {
          LOG_INFO("Starting DAWN network server (multi-client worker pool)...");
-         // Pass mosquitto to worker pool for command processing
-         worker_pool_set_mosq(mosq);
          if (accept_thread_start(asr_engine, asr_model_path) != 0) {
             LOG_ERROR("Failed to start accept thread - network audio disabled");
             dawn_network_audio_cleanup();
@@ -2068,6 +2072,18 @@ int main(int argc, char *argv[]) {
          }
       }
    }
+
+#ifdef ENABLE_WEBUI
+   /* Initialize WebUI server if enabled */
+   if (g_config.webui.enabled) {
+      LOG_INFO("Initializing WebUI server...");
+      if (webui_server_init(0, NULL) == WEBUI_SUCCESS) {
+         LOG_INFO("WebUI server started on port %d", webui_server_get_port());
+      } else {
+         LOG_WARNING("Failed to start WebUI server - continuing without WebUI");
+      }
+   }
+#endif
 
    // Main loop
    LOG_INFO("Listening...\n");
@@ -3575,6 +3591,14 @@ int main(int argc, char *argv[]) {
       strftime(stats_filename, sizeof(stats_filename), "dawn_stats_%Y%m%d_%H%M%S.json", time_info);
       metrics_export_json(stats_filename);
    }
+
+#ifdef ENABLE_WEBUI
+   /* Shutdown WebUI server before metrics cleanup */
+   if (webui_server_is_running()) {
+      webui_server_shutdown();
+   }
+#endif
+
    metrics_cleanup();
 
 #ifdef ENABLE_TUI
