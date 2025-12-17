@@ -143,9 +143,9 @@
        "aliases": ["current time", "hour", "time right now"],
        "topic": "dawn"
     },
-    "llm status": {
+    "llm": {
        "type": "getter",
-       "aliases": ["ai status", "current llm", "which llm", "what llm", "llm mode", "ai mode"],
+       "aliases": ["ai status", "current llm", "which llm", "what llm", "llm mode", "ai mode", "llm status"],
        "topic": "dawn"
     },
     "viewing": {

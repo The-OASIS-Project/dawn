@@ -423,15 +423,28 @@ static void parse_webui(toml_table_t *table, webui_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = { "enabled",  "port",         "max_clients",
-                                             "www_path", "bind_address", NULL };
+   static const char *const known_keys[] = {
+      "enabled",      "port",  "max_clients",   "audio_chunk_ms", "www_path",
+      "bind_address", "https", "ssl_cert_path", "ssl_key_path",   NULL
+   };
    warn_unknown_keys(table, "webui", known_keys);
 
    PARSE_BOOL(table, "enabled", config->enabled);
    PARSE_INT(table, "port", config->port);
    PARSE_INT(table, "max_clients", config->max_clients);
+   PARSE_INT(table, "audio_chunk_ms", config->audio_chunk_ms);
    PARSE_STRING(table, "www_path", config->www_path);
    PARSE_STRING(table, "bind_address", config->bind_address);
+   PARSE_BOOL(table, "https", config->https);
+   PARSE_STRING(table, "ssl_cert_path", config->ssl_cert_path);
+   PARSE_STRING(table, "ssl_key_path", config->ssl_key_path);
+
+   /* Clamp audio_chunk_ms to valid range */
+   if (config->audio_chunk_ms < 100) {
+      config->audio_chunk_ms = 100;
+   } else if (config->audio_chunk_ms > 500) {
+      config->audio_chunk_ms = 500;
+   }
 }
 
 static void parse_debug(toml_table_t *table, debug_config_t *config) {

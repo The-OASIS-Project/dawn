@@ -71,9 +71,10 @@ extern "C" {
  * Buffer Size Constants
  * ============================================================================= */
 
-#define WEBUI_SESSION_TOKEN_LEN 33    /* 32 hex chars + null terminator */
-#define WEBUI_AUDIO_BUFFER_SIZE 32768 /* 32KB for compressed Opus frames */
-#define WEBUI_RESPONSE_QUEUE_SIZE 64  /* Pending responses from workers */
+#define WEBUI_SESSION_TOKEN_LEN 33      /* 32 hex chars + null terminator */
+#define WEBUI_AUDIO_BUFFER_SIZE 32768   /* 32KB initial buffer for audio input */
+#define WEBUI_AUDIO_MAX_CAPACITY 960000 /* ~30s @ 16kHz mono 16-bit PCM */
+#define WEBUI_RESPONSE_QUEUE_SIZE 256   /* Pending responses (handles ~30s audio @ 8KB chunks) */
 
 /* Forward declarations */
 struct lws;
@@ -88,6 +89,8 @@ typedef enum {
    WS_RESP_TRANSCRIPT, /* ASR or LLM text */
    WS_RESP_ERROR,      /* Error notification */
    WS_RESP_SESSION,    /* Session token for client */
+   WS_RESP_AUDIO,      /* Binary audio data (Opus encoded) */
+   WS_RESP_AUDIO_END,  /* End of audio stream marker */
 } ws_response_type_t;
 
 /* =============================================================================

@@ -220,11 +220,15 @@ typedef struct {
  * WebUI Configuration
  * ============================================================================= */
 typedef struct {
-   bool enabled;                       /* Enable WebUI server */
-   int port;                           /* HTTP/WebSocket port (default: 8080) */
-   int max_clients;                    /* Max concurrent WebSocket clients */
-   char www_path[CONFIG_PATH_MAX];     /* Path to static files */
-   char bind_address[CONFIG_NAME_MAX]; /* Bind address (default: 127.0.0.1) */
+   bool enabled;                        /* Enable WebUI server */
+   int port;                            /* HTTP/WebSocket port (default: 3000) */
+   int max_clients;                     /* Max concurrent WebSocket clients */
+   int audio_chunk_ms;                  /* Audio chunk size in ms (100-500, default: 200) */
+   char www_path[CONFIG_PATH_MAX];      /* Path to static files */
+   char bind_address[CONFIG_NAME_MAX];  /* Bind address (default: 127.0.0.1) */
+   bool https;                          /* Enable HTTPS (required for mic on LAN) */
+   char ssl_cert_path[CONFIG_PATH_MAX]; /* Path to SSL certificate (.pem) */
+   char ssl_key_path[CONFIG_PATH_MAX];  /* Path to SSL private key (.pem) */
 } webui_config_t;
 
 /* =============================================================================

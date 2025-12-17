@@ -821,12 +821,10 @@ int text_to_speech_to_pcm(const char *text,
       std::atomic<bool> stop_flag(false);
 
       // Generate PCM using shared TTS handle
-      // The callback is called when synthesis starts - we don't need to do anything special here
-      // since we're just collecting the samples, not playing them
+      // Pass nullptr for callback - when a callback is provided, piper clears audioBuffer after
+      // calling it (for streaming use). We want to keep the samples, so no callback.
       piper::textToAudio(tts_handle.config, tts_handle.voice, processedText, audioBuffer, result,
-                         stop_flag, []() {
-                            // Empty callback - we're not playing audio, just collecting samples
-                         });
+                         stop_flag, nullptr);
 
       // Record TTS timing metrics (inferSeconds is in seconds, convert to ms)
       double tts_time_ms = result.inferSeconds * 1000.0;

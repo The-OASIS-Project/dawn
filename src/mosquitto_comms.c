@@ -1438,13 +1438,30 @@ char *cloudLLMCallback(const char *actionName, char *value, int *should_respond)
 }
 
 char *llmStatusCallback(const char *actionName, char *value, int *should_respond) {
+   char *result = NULL;
+   *should_respond = 1;
+
+   // Handle "set" action to switch LLM type
+   if (actionName && strcmp(actionName, "set") == 0) {
+      if (value && (strcasecmp(value, "local") == 0 || strcasecmp(value, "llama") == 0)) {
+         LOG_INFO("Setting AI to local LLM via unified llm.set command.");
+         llm_set_type(LLM_LOCAL);
+         return strdup("AI switched to local LLM");
+      } else if (value && (strcasecmp(value, "cloud") == 0 || strcasecmp(value, "openai") == 0 ||
+                           strcasecmp(value, "claude") == 0)) {
+         LOG_INFO("Setting AI to cloud LLM via unified llm.set command.");
+         llm_set_type(LLM_CLOUD);
+         return strdup("AI switched to cloud LLM");
+      } else {
+         return strdup("Invalid LLM type. Use 'local' or 'cloud'.");
+      }
+   }
+
+   // Handle "get" action (or default) to return current status
    llm_type_t current = llm_get_type();
    const char *type_str = (current == LLM_LOCAL) ? "local" : "cloud";
    const char *model = llm_get_model_name();
    const char *provider = llm_get_cloud_provider_name();
-   char *result = NULL;
-
-   *should_respond = 1;
 
    if (command_processing_mode == CMD_MODE_DIRECT_ONLY) {
       // Direct mode: use text-to-speech

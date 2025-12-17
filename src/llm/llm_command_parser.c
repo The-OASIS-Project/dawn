@@ -130,6 +130,9 @@ const char *get_system_instructions(void) {
    // URL fetcher always available
    len += snprintf(system_instructions_buffer + len, remaining - len, ", fetch URLs");
 
+   // LLM status always available
+   len += snprintf(system_instructions_buffer + len, remaining - len, ", report AI status");
+
    // Vision if enabled
    if (is_vision_enabled_for_current_llm()) {
       len += snprintf(system_instructions_buffer + len, remaining - len,
@@ -161,6 +164,9 @@ const char *get_system_instructions(void) {
 
    // URL fetcher always available
    len += snprintf(system_instructions_buffer + len, remaining - len, "%s\n", AI_RULES_URL);
+
+   // LLM status always available
+   len += snprintf(system_instructions_buffer + len, remaining - len, "%s\n", AI_RULES_LLM_STATUS);
 
    // Add examples
    len += snprintf(system_instructions_buffer + len, remaining - len, "%s", AI_EXAMPLES_CORE);

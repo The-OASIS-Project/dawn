@@ -36,6 +36,9 @@ DAWN integrates modern speech recognition, large language models, and text-to-sp
 
 - **Web UI**
   - Browser-based interface on port 3000
+  - Push-to-talk voice input (requires HTTPS for remote access)
+  - TTS audio playback through browser
+  - FFT waveform visualization with lightning trail effect
   - Real-time WebSocket communication
   - Session persistence across page refresh (30-minute timeout)
   - Debug mode for viewing commands and tool results
@@ -662,6 +665,20 @@ port = 3000                 # HTTP/WebSocket port
 host = "0.0.0.0"            # Bind address (0.0.0.0 = all interfaces)
 ```
 
+### SSL/HTTPS Setup (for remote voice input)
+
+Browsers require HTTPS (secure context) to access the microphone from non-localhost origins. If accessing the Web UI from another device on your network:
+
+```bash
+# Generate self-signed certificate
+./generate_ssl_cert.sh
+
+# This creates ssl/dawn.crt and ssl/dawn.key
+# DAWN will automatically use HTTPS when these files exist
+```
+
+**Note**: You'll need to accept the self-signed certificate warning in your browser on first visit.
+
 ## Running
 
 ### Local Mode (microphone input)
@@ -704,6 +721,9 @@ The Web UI provides a browser-based interface for interacting with DAWN:
 
 **Features**:
 - **Text input** - Type messages instead of speaking
+- **Voice input** - Hold the mic button to speak (requires HTTPS for remote access)
+- **Audio playback** - Hear DAWN's responses through your browser
+- **Visual feedback** - FFT waveform with lightning trail effect animates when DAWN speaks
 - **Real-time responses** - See LLM responses stream in real-time
 - **Session persistence** - Your conversation history persists across page refreshes (30-minute timeout)
 - **Debug mode** - Toggle debug view to see tool results, commands, and system messages

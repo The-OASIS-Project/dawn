@@ -480,6 +480,16 @@ session_t *session_get_for_reconnect(uint32_t session_id) {
    return found;
 }
 
+void session_retain(session_t *session) {
+   if (!session) {
+      return;
+   }
+
+   pthread_mutex_lock(&session->ref_mutex);
+   session->ref_count++;
+   pthread_mutex_unlock(&session->ref_mutex);
+}
+
 void session_release(session_t *session) {
    if (!session) {
       return;

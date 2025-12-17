@@ -152,15 +152,99 @@ html, body {
 #ring-outer {
   width: 200px;
   height: 200px;
-  opacity: 0.6;
+  opacity: 0.8;
   animation: ring-rotate 20s linear infinite;
+  border: none;  /* Override .ring border - path handles visualization */
+}
+
+#ring-outer path {
+  stroke: var(--accent);
+  filter: drop-shadow(0 0 8px var(--accent-glow));
+  transition: d 50ms ease-out;
+}
+
+/* Waveform trail effect - fading echoes */
+.waveform-trail {
+  stroke: var(--accent);
+}
+
+#waveform-trail-1 {
+  opacity: 0.5;
+  filter: drop-shadow(0 0 4px var(--accent-glow));
+}
+
+#waveform-trail-2 {
+  opacity: 0.35;
+  filter: drop-shadow(0 0 3px var(--accent-glow));
+}
+
+#waveform-trail-3 {
+  opacity: 0.22;
+  filter: drop-shadow(0 0 2px var(--accent-glow));
+}
+
+#waveform-trail-4 {
+  opacity: 0.12;
+}
+
+#waveform-trail-5 {
+  opacity: 0.06;
+}
+
+/* State-based waveform colors (main path and trails) */
+#ring-container.listening #ring-outer path {
+  stroke: var(--success);
+}
+#ring-container.listening #waveform-path {
+  filter: drop-shadow(0 0 12px rgba(34, 197, 94, 0.6));
+}
+
+#ring-container.thinking #ring-outer path {
+  stroke: var(--warning);
+}
+#ring-container.thinking #waveform-path {
+  filter: drop-shadow(0 0 12px rgba(245, 158, 11, 0.6));
+}
+
+#ring-container.speaking #ring-outer path {
+  stroke: var(--accent);
+}
+#ring-container.speaking #waveform-path {
+  filter: drop-shadow(0 0 15px var(--accent-glow));
+}
+
+#ring-container.error #ring-outer path {
+  stroke: var(--error);
+}
+#ring-container.error #waveform-path {
+  filter: drop-shadow(0 0 12px rgba(239, 68, 68, 0.6));
 }
 
 #ring-inner {
-  width: 150px;
-  height: 150px;
-  opacity: 0.8;
-  animation: ring-rotate 15s linear infinite reverse;
+  width: 120px;
+  height: 120px;
+  border: none;  /* Override .ring dashed border */
+  background: radial-gradient(circle,
+    rgba(34, 211, 238, 0.25) 0%,
+    rgba(34, 211, 238, 0.08) 50%,
+    transparent 70%);
+  box-shadow:
+    0 0 25px rgba(34, 211, 238, 0.3),
+    0 0 50px rgba(34, 211, 238, 0.15),
+    inset 0 0 25px rgba(34, 211, 238, 0.08);
+  animation: core-pulse 3s ease-in-out infinite;
+  transition: all 100ms ease-out;
+}
+
+@keyframes core-pulse {
+  0%, 100% {
+    opacity: 0.6;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.9;
+    transform: scale(1.05);
+  }
 }
 
 @keyframes ring-rotate {
@@ -176,27 +260,57 @@ html, body {
   text-shadow: 0 0 20px var(--accent-glow);
 }
 
-/* State-based ring animations */
-#ring-container.listening .ring {
-  border-color: var(--success);
-  filter: drop-shadow(0 0 20px rgba(34, 197, 94, 0.6));
+/* FFT visualization - during recording, JS controls the rings */
+#ring-container.fft-active #ring-outer,
+#ring-container.fft-active #ring-inner {
+  animation: none !important;
+  transition: transform 50ms ease-out;
 }
 
-#ring-container.thinking .ring {
-  animation-duration: 2s;
-  border-color: var(--warning);
-  filter: drop-shadow(0 0 20px rgba(245, 158, 11, 0.6));
+/* State-based core colors */
+#ring-container.listening #ring-inner {
+  background: radial-gradient(circle,
+    rgba(34, 197, 94, 0.3) 0%,
+    rgba(34, 197, 94, 0.1) 50%,
+    transparent 70%);
+  box-shadow:
+    0 0 30px rgba(34, 197, 94, 0.35),
+    0 0 60px rgba(34, 197, 94, 0.2),
+    inset 0 0 25px rgba(34, 197, 94, 0.1);
 }
 
-#ring-container.speaking .ring {
-  animation-duration: 5s;
-  border-color: var(--accent);
-  filter: drop-shadow(0 0 30px var(--accent-glow));
+#ring-container.thinking #ring-inner {
+  background: radial-gradient(circle,
+    rgba(245, 158, 11, 0.3) 0%,
+    rgba(245, 158, 11, 0.1) 50%,
+    transparent 70%);
+  box-shadow:
+    0 0 30px rgba(245, 158, 11, 0.35),
+    0 0 60px rgba(245, 158, 11, 0.2),
+    inset 0 0 25px rgba(245, 158, 11, 0.1);
+  animation: core-pulse 1.5s ease-in-out infinite;
 }
 
-#ring-container.error .ring {
-  border-color: var(--error);
-  filter: drop-shadow(0 0 20px rgba(239, 68, 68, 0.6));
+#ring-container.speaking #ring-inner {
+  background: radial-gradient(circle,
+    rgba(34, 211, 238, 0.35) 0%,
+    rgba(34, 211, 238, 0.12) 50%,
+    transparent 70%);
+  box-shadow:
+    0 0 35px rgba(34, 211, 238, 0.4),
+    0 0 70px rgba(34, 211, 238, 0.2),
+    inset 0 0 30px rgba(34, 211, 238, 0.12);
+}
+
+#ring-container.error #ring-inner {
+  background: radial-gradient(circle,
+    rgba(239, 68, 68, 0.3) 0%,
+    rgba(239, 68, 68, 0.1) 50%,
+    transparent 70%);
+  box-shadow:
+    0 0 30px rgba(239, 68, 68, 0.35),
+    0 0 60px rgba(239, 68, 68, 0.2),
+    inset 0 0 25px rgba(239, 68, 68, 0.1);
 }
 
 /* =============================================================================
@@ -389,11 +503,30 @@ button:disabled {
   background-color: var(--bg-tertiary);
   color: var(--text-secondary);
   border: 1px solid var(--text-secondary);
+  min-width: 60px;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 #mic-btn:not(:disabled):hover {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+#mic-btn.recording {
+  background-color: var(--error);
+  color: white;
+  border-color: var(--error);
+  animation: pulse-recording 1s infinite;
+}
+
+@keyframes pulse-recording {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(239, 68, 68, 0);
+  }
 }
 
 /* =============================================================================
@@ -426,8 +559,8 @@ button:disabled {
   }
 
   #ring-inner {
-    width: 110px;
-    height: 110px;
+    width: 90px;
+    height: 90px;
   }
 
   #logo {

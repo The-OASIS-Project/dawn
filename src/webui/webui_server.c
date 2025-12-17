@@ -30,6 +30,11 @@
 #include <signal.h>
 #include <string.h>
 #include <sys/random.h>
+#include <unistd.h>
+
+#ifdef ENABLE_WEBUI_AUDIO
+#include "webui/webui_audio.h"
+#endif
 
 #include "config/dawn_config.h"
 #include "core/command_router.h"
@@ -77,6 +82,10 @@ typedef struct {
       struct {
          char *token;
       } session_token;
+      struct {
+         uint8_t *data;
+         size_t len;
+      } audio;
    };
 } ws_response_t;
 
@@ -178,6 +187,8 @@ typedef struct {
    uint8_t *audio_buffer;                       /* Phase 4: Opus audio accumulation */
    size_t audio_buffer_len;
    size_t audio_buffer_capacity;
+   bool in_binary_fragment; /* True if receiving fragmented binary frame */
+   uint8_t binary_msg_type; /* Message type from first fragment */
 } ws_connection_t;
 
 /* =============================================================================
@@ -283,6 +294,12 @@ static void free_response(ws_response_t *resp) {
       case WS_RESP_SESSION:
          free(resp->session_token.token);
          break;
+      case WS_RESP_AUDIO:
+         free(resp->audio.data);
+         break;
+      case WS_RESP_AUDIO_END:
+         /* No data to free */
+         break;
    }
 }
 
@@ -310,6 +327,55 @@ static int send_json_message(struct lws *wsi, const char *json) {
    }
 
    return 0;
+}
+
+static int send_binary_message(struct lws *wsi, uint8_t msg_type, const uint8_t *data, size_t len) {
+   if (!wsi) {
+      LOG_ERROR("WebUI: send_binary_message called with NULL wsi");
+      return -1;
+   }
+
+   /* Allocate buffer with LWS_PRE padding + 1 byte for type + data */
+   size_t total_len = 1 + len;
+   unsigned char *buf = malloc(LWS_PRE + total_len);
+   if (!buf) {
+      LOG_ERROR("WebUI: Failed to allocate binary send buffer (%zu bytes)", LWS_PRE + total_len);
+      return -1;
+   }
+
+   buf[LWS_PRE] = msg_type;
+   if (data && len > 0) {
+      memcpy(&buf[LWS_PRE + 1], data, len);
+   }
+
+   LOG_INFO("WebUI: Sending binary frame type=0x%02x len=%zu", msg_type, total_len);
+
+   int written = lws_write(wsi, &buf[LWS_PRE], total_len, LWS_WRITE_BINARY);
+   free(buf);
+
+   if (written < 0) {
+      LOG_ERROR("WebUI: lws_write binary failed with error %d", written);
+      return -1;
+   }
+
+   if (written < (int)total_len) {
+      LOG_ERROR("WebUI: lws_write binary partial write (%d of %zu)", written, total_len);
+      return -1;
+   }
+
+   LOG_INFO("WebUI: Binary frame sent successfully (%d bytes)", written);
+   return 0;
+}
+
+static void send_audio_impl(struct lws *wsi, const uint8_t *data, size_t len) {
+   int ret = send_binary_message(wsi, WS_BIN_AUDIO_OUT, data, len);
+   if (ret != 0) {
+      LOG_ERROR("WebUI: Failed to send audio chunk (%zu bytes)", len);
+   }
+}
+
+static void send_audio_end_impl(struct lws *wsi) {
+   send_binary_message(wsi, WS_BIN_AUDIO_OUT_END, NULL, 0);
 }
 
 static void send_state_impl(struct lws *wsi, const char *state) {
@@ -351,6 +417,13 @@ static void send_error_impl(struct lws *wsi, const char *code, const char *messa
 static void send_session_token_impl(struct lws *wsi, const char *token) {
    char json[256];
    snprintf(json, sizeof(json), "{\"type\":\"session\",\"payload\":{\"token\":\"%s\"}}", token);
+   send_json_message(wsi, json);
+}
+
+static void send_config_impl(struct lws *wsi) {
+   char json[256];
+   snprintf(json, sizeof(json), "{\"type\":\"config\",\"payload\":{\"audio_chunk_ms\":%d}}",
+            g_config.webui.audio_chunk_ms);
    send_json_message(wsi, json);
 }
 
@@ -412,60 +485,84 @@ static void send_history_impl(struct lws *wsi, session_t *session) {
 
 /* =============================================================================
  * Response Queue Processing (called from WebUI thread)
+ *
+ * IMPORTANT: libwebsockets only allows ONE lws_write() per writeable callback.
+ * This function processes only ONE response per call. If more responses are
+ * pending, it requests a writeable callback via lws_callback_on_writable().
  * ============================================================================= */
 
-static void process_response_queue(void) {
+static void process_one_response(void) {
    pthread_mutex_lock(&s_queue_mutex);
 
-   while (s_queue_head != s_queue_tail) {
-      ws_response_t resp = s_response_queue[s_queue_head];
-      s_queue_head = (s_queue_head + 1) % WEBUI_RESPONSE_QUEUE_SIZE;
+   if (s_queue_head == s_queue_tail) {
       pthread_mutex_unlock(&s_queue_mutex);
-
-      /* Find connection for this session */
-      if (!resp.session || resp.session->disconnected) {
-         /* Client disconnected - free response data and skip */
-         free_response(&resp);
-         pthread_mutex_lock(&s_queue_mutex);
-         continue;
-      }
-
-      ws_connection_t *conn = (ws_connection_t *)resp.session->client_data;
-      if (!conn || !conn->wsi) {
-         free_response(&resp);
-         pthread_mutex_lock(&s_queue_mutex);
-         continue;
-      }
-
-      /* Send via lws_write (safe - we're in WebUI thread) */
-      LOG_INFO("WebUI: Sending response type=%d to session %u", resp.type,
-               resp.session->session_id);
-
-      switch (resp.type) {
-         case WS_RESP_STATE:
-            send_state_impl(conn->wsi, resp.state.state);
-            free(resp.state.state);
-            break;
-         case WS_RESP_TRANSCRIPT:
-            send_transcript_impl(conn->wsi, resp.transcript.role, resp.transcript.text);
-            free(resp.transcript.role);
-            free(resp.transcript.text);
-            break;
-         case WS_RESP_ERROR:
-            send_error_impl(conn->wsi, resp.error.code, resp.error.message);
-            free(resp.error.code);
-            free(resp.error.message);
-            break;
-         case WS_RESP_SESSION:
-            send_session_token_impl(conn->wsi, resp.session_token.token);
-            free(resp.session_token.token);
-            break;
-      }
-
-      pthread_mutex_lock(&s_queue_mutex);
+      return;
    }
 
+   ws_response_t resp = s_response_queue[s_queue_head];
+   s_queue_head = (s_queue_head + 1) % WEBUI_RESPONSE_QUEUE_SIZE;
+   bool more_pending = (s_queue_head != s_queue_tail);
    pthread_mutex_unlock(&s_queue_mutex);
+
+   /* Find connection for this session */
+   if (!resp.session || resp.session->disconnected) {
+      free_response(&resp);
+      /* If more responses, schedule another callback */
+      if (more_pending && s_lws_context) {
+         lws_cancel_service(s_lws_context);
+      }
+      return;
+   }
+
+   ws_connection_t *conn = (ws_connection_t *)resp.session->client_data;
+   if (!conn || !conn->wsi) {
+      free_response(&resp);
+      if (more_pending && s_lws_context) {
+         lws_cancel_service(s_lws_context);
+      }
+      return;
+   }
+
+   /* Send via lws_write (one write per callback!) */
+   LOG_INFO("WebUI: Sending response type=%d to session %u", resp.type, resp.session->session_id);
+
+   switch (resp.type) {
+      case WS_RESP_STATE:
+         send_state_impl(conn->wsi, resp.state.state);
+         free(resp.state.state);
+         break;
+      case WS_RESP_TRANSCRIPT:
+         send_transcript_impl(conn->wsi, resp.transcript.role, resp.transcript.text);
+         free(resp.transcript.role);
+         free(resp.transcript.text);
+         break;
+      case WS_RESP_ERROR:
+         send_error_impl(conn->wsi, resp.error.code, resp.error.message);
+         free(resp.error.code);
+         free(resp.error.message);
+         break;
+      case WS_RESP_SESSION:
+         send_session_token_impl(conn->wsi, resp.session_token.token);
+         free(resp.session_token.token);
+         break;
+      case WS_RESP_AUDIO:
+         send_audio_impl(conn->wsi, resp.audio.data, resp.audio.len);
+         free(resp.audio.data);
+         break;
+      case WS_RESP_AUDIO_END:
+         send_audio_end_impl(conn->wsi);
+         break;
+   }
+
+   /* If more responses pending, request writeable callback for this connection */
+   if (more_pending) {
+      lws_callback_on_writable(conn->wsi);
+   }
+}
+
+/* Legacy name for backward compatibility */
+static void process_response_queue(void) {
+   process_one_response();
 }
 
 /* =============================================================================
@@ -551,6 +648,9 @@ static int callback_http(struct lws *wsi,
 
 static void handle_text_message(ws_connection_t *conn, const char *json_str, size_t len);
 static void handle_cancel_message(ws_connection_t *conn);
+#ifdef ENABLE_WEBUI_AUDIO
+static void handle_binary_message(ws_connection_t *conn, const uint8_t *data, size_t len);
+#endif
 
 static void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
    /* Null-terminate for JSON parsing */
@@ -625,8 +725,9 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
                   LOG_INFO("WebUI: Reconnected to session %u with token %.8s...",
                            existing->session_id, token);
 
-                  /* Send confirmation, history replay, and current state */
+                  /* Send confirmation, config, history replay, and current state */
                   send_session_token_impl(conn->wsi, token);
+                  send_config_impl(conn->wsi);
                   send_history_impl(conn->wsi, existing);
                   send_state_impl(conn->wsi, "idle");
                } else {
@@ -640,6 +741,7 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
                         generate_session_token(conn->session_token);
                         register_token(conn->session_token, conn->session->session_id);
                         send_session_token_impl(conn->wsi, conn->session_token);
+                        send_config_impl(conn->wsi);
                         send_state_impl(conn->wsi, "idle");
                      }
                   }
@@ -712,8 +814,9 @@ static int callback_websocket(struct lws *wsi,
          generate_session_token(conn->session_token);
          register_token(conn->session_token, conn->session->session_id);
 
-         /* Send token to client */
+         /* Send token and config to client */
          send_session_token_impl(wsi, conn->session_token);
+         send_config_impl(wsi);
 
          /* Send initial state */
          send_state_impl(wsi, "idle");
@@ -758,7 +861,7 @@ static int callback_websocket(struct lws *wsi,
          break;
       }
 
-      case LWS_CALLBACK_RECEIVE:
+      case LWS_CALLBACK_RECEIVE: {
          /* Message received from client */
          if (!conn->session) {
             LOG_WARNING("WebUI: Received message but no session");
@@ -767,17 +870,55 @@ static int callback_websocket(struct lws *wsi,
 
          session_touch(conn->session);
 
-         if (lws_frame_is_binary(wsi)) {
-            /* Binary message (audio data) - Phase 4 */
-            LOG_INFO("WebUI: Received binary message (%zu bytes) - audio not yet implemented", len);
+         int is_final = lws_is_final_fragment(wsi);
+         int is_binary = lws_frame_is_binary(wsi);
+
+         if (is_binary) {
+#ifdef ENABLE_WEBUI_AUDIO
+            /* Handle WebSocket frame fragmentation for binary messages */
+            if (conn->in_binary_fragment) {
+               /* Continuation of a fragmented message - append ALL bytes as payload */
+               const uint8_t *data = (const uint8_t *)in;
+               size_t data_len = len;
+
+               if (conn->binary_msg_type == WS_BIN_AUDIO_IN && data_len > 0) {
+                  /* Append continuation data to audio buffer */
+                  if (conn->audio_buffer &&
+                      conn->audio_buffer_len + data_len <= conn->audio_buffer_capacity) {
+                     memcpy(conn->audio_buffer + conn->audio_buffer_len, data, data_len);
+                     conn->audio_buffer_len += data_len;
+                     LOG_INFO("WebUI: Fragment continuation, added %zu bytes (total: %zu)",
+                              data_len, conn->audio_buffer_len);
+                  }
+               }
+
+               /* Check if this is the final fragment */
+               if (is_final) {
+                  conn->in_binary_fragment = false;
+               }
+            } else {
+               /* New message - parse type byte and handle */
+               handle_binary_message(conn, (const uint8_t *)in, len);
+
+               /* If not final, track that we're in a fragmented message */
+               if (!is_final && len > 0) {
+                  conn->in_binary_fragment = true;
+                  conn->binary_msg_type = ((const uint8_t *)in)[0];
+               }
+            }
+#else
+            LOG_WARNING("WebUI: Audio not enabled, ignoring binary message (%zu bytes)", len);
+#endif
          } else {
             /* Text message (JSON control) */
             handle_json_message(conn, (const char *)in, len);
          }
          break;
+      }
 
       case LWS_CALLBACK_SERVER_WRITEABLE:
-         /* Ready to send data to client - Phase 4 will use this for audio streaming */
+         /* Ready to send more data - process next queued response */
+         process_one_response();
          break;
 
       case LWS_CALLBACK_EVENT_WAIT_CANCELLED:
@@ -869,8 +1010,6 @@ int webui_server_init(int port, const char *www_path) {
    }
    s_www_path[sizeof(s_www_path) - 1] = '\0';
 
-   LOG_INFO("WebUI: Initializing server on port %d, serving from: %s", port, s_www_path);
-
    /* Configure libwebsockets context */
    memset(&info, 0, sizeof(info));
    info.port = port;
@@ -878,6 +1017,34 @@ int webui_server_init(int port, const char *www_path) {
    info.gid = -1;
    info.uid = -1;
    info.options = LWS_SERVER_OPTION_HTTP_HEADERS_SECURITY_BEST_PRACTICES_ENFORCE;
+
+   /* Configure HTTPS if enabled */
+   bool use_https = g_config.webui.https;
+   if (use_https) {
+      if (g_config.webui.ssl_cert_path[0] == '\0' || g_config.webui.ssl_key_path[0] == '\0') {
+         LOG_ERROR("WebUI: HTTPS enabled but ssl_cert_path or ssl_key_path not set");
+         return WEBUI_ERROR_SOCKET;
+      }
+
+      /* Verify certificate files exist */
+      if (access(g_config.webui.ssl_cert_path, R_OK) != 0) {
+         LOG_ERROR("WebUI: Cannot read SSL certificate: %s", g_config.webui.ssl_cert_path);
+         return WEBUI_ERROR_SOCKET;
+      }
+      if (access(g_config.webui.ssl_key_path, R_OK) != 0) {
+         LOG_ERROR("WebUI: Cannot read SSL private key: %s", g_config.webui.ssl_key_path);
+         return WEBUI_ERROR_SOCKET;
+      }
+
+      info.options |= LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
+      info.ssl_cert_filepath = g_config.webui.ssl_cert_path;
+      info.ssl_private_key_filepath = g_config.webui.ssl_key_path;
+
+      LOG_INFO("WebUI: HTTPS enabled with cert: %s", g_config.webui.ssl_cert_path);
+   }
+
+   LOG_INFO("WebUI: Initializing %s server on port %d, serving from: %s",
+            use_https ? "HTTPS" : "HTTP", port, s_www_path);
 
    /* Create context */
    s_lws_context = lws_create_context(&info);
@@ -890,9 +1057,19 @@ int webui_server_init(int port, const char *www_path) {
    s_running = 1;
    s_client_count = 0;
 
+   /* Initialize audio subsystem (optional - continues if not available) */
+#ifdef ENABLE_WEBUI_AUDIO
+   if (webui_audio_init() != WEBUI_AUDIO_SUCCESS) {
+      LOG_WARNING("WebUI: Audio subsystem not available, voice input disabled");
+   }
+#endif
+
    /* Start server thread */
    if (pthread_create(&s_webui_thread, NULL, webui_thread_func, NULL) != 0) {
       LOG_ERROR("WebUI: Failed to create server thread");
+#ifdef ENABLE_WEBUI_AUDIO
+      webui_audio_cleanup();
+#endif
       lws_context_destroy(s_lws_context);
       s_lws_context = NULL;
       s_running = 0;
@@ -927,6 +1104,11 @@ void webui_server_shutdown(void) {
       lws_context_destroy(s_lws_context);
       s_lws_context = NULL;
    }
+
+   /* Cleanup audio subsystem */
+#ifdef ENABLE_WEBUI_AUDIO
+   webui_audio_cleanup();
+#endif
 
    s_port = 0;
    s_client_count = 0;
@@ -1017,6 +1199,72 @@ void webui_send_error(session_t *session, const char *code, const char *message)
       LOG_ERROR("WebUI: Failed to allocate error response");
       return;
    }
+
+   queue_response(&resp);
+}
+
+/**
+ * @brief Queue audio data for sending to WebSocket client
+ *
+ * Copies the audio data to the response queue. The WebUI thread will
+ * send it as binary WebSocket frames. Large audio is chunked to avoid
+ * overwhelming libwebsockets with huge single writes.
+ *
+ * @param session WebSocket session
+ * @param data PCM audio data
+ * @param len Length of audio data
+ */
+#define AUDIO_CHUNK_SIZE \
+   8192 /* 8KB chunks for WebSocket frames - keep small for lws compatibility */
+
+static void webui_send_audio(session_t *session, const uint8_t *data, size_t len) {
+   if (!session || session->type != SESSION_TYPE_WEBSOCKET || !data || len == 0) {
+      return;
+   }
+
+   /* Send audio in chunks to avoid overwhelming lws_write with huge buffers */
+   size_t offset = 0;
+   int chunk_num = 0;
+
+   while (offset < len) {
+      size_t chunk_len = len - offset;
+      if (chunk_len > AUDIO_CHUNK_SIZE) {
+         chunk_len = AUDIO_CHUNK_SIZE;
+      }
+
+      uint8_t *chunk_copy = malloc(chunk_len);
+      if (!chunk_copy) {
+         LOG_ERROR("WebUI: Failed to allocate audio chunk buffer");
+         return;
+      }
+      memcpy(chunk_copy, data + offset, chunk_len);
+
+      ws_response_t resp = { .session = session,
+                             .type = WS_RESP_AUDIO,
+                             .audio = {
+                                 .data = chunk_copy,
+                                 .len = chunk_len,
+                             } };
+
+      queue_response(&resp);
+      offset += chunk_len;
+      chunk_num++;
+   }
+
+   LOG_INFO("WebUI: Queued %zu bytes audio in %d chunks", len, chunk_num);
+}
+
+/**
+ * @brief Queue end-of-audio marker for WebSocket client
+ *
+ * @param session WebSocket session
+ */
+static void webui_send_audio_end(session_t *session) {
+   if (!session || session->type != SESSION_TYPE_WEBSOCKET) {
+      return;
+   }
+
+   ws_response_t resp = { .session = session, .type = WS_RESP_AUDIO_END };
 
    queue_response(&resp);
 }
@@ -1199,16 +1447,19 @@ static char *webui_process_commands(const char *llm_response, session_t *session
       return NULL;
    }
 
-   combined_results[0] = '\0';
+   char *ptr = combined_results;
    for (int i = 0; i < num_results; i++) {
       if (tool_results[i]) {
-         strcat(combined_results, tool_results[i]);
+         size_t len = strlen(tool_results[i]);
+         memcpy(ptr, tool_results[i], len);
+         ptr += len;
          if (i < num_results - 1) {
-            strcat(combined_results, "\n");
+            *ptr++ = '\n';
          }
          free(tool_results[i]);
       }
    }
+   *ptr = '\0';
 
    LOG_INFO("WebUI: Sending tool results to LLM: %s", combined_results);
 
@@ -1265,6 +1516,9 @@ static void *text_worker_thread(void *arg) {
    /* Check if session is still valid */
    if (!session || session->disconnected) {
       LOG_INFO("WebUI: Session already disconnected, aborting text processing");
+      if (session) {
+         session_release(session);
+      }
       free(text);
       free(work);
       return NULL;
@@ -1285,6 +1539,7 @@ static void *text_worker_thread(void *arg) {
    if (session->disconnected) {
       /* Client disconnected during processing - don't try to send response */
       LOG_INFO("WebUI: Session %u disconnected during LLM call", session->session_id);
+      session_release(session);
       free(response);
       free(text);
       free(work);
@@ -1295,6 +1550,7 @@ static void *text_worker_thread(void *arg) {
       /* LLM call failed */
       webui_send_error(session, "LLM_ERROR", "Failed to get response from AI");
       webui_send_state(session, "idle");
+      session_release(session);
       free(text);
       free(work);
       return NULL;
@@ -1315,6 +1571,7 @@ static void *text_worker_thread(void *arg) {
          if (session->disconnected) {
             LOG_INFO("WebUI: Session %u disconnected during command processing",
                      session->session_id);
+            session_release(session);
             free(response);
             free(processed);
             free(text);
@@ -1360,6 +1617,9 @@ static void *text_worker_thread(void *arg) {
    /* Return to idle state */
    webui_send_state(session, "idle");
 
+   /* Release session reference (acquired in webui_process_text_input) */
+   session_release(session);
+
    free(text);
    free(work);
    return NULL;
@@ -1385,6 +1645,9 @@ int webui_process_text_input(session_t *session, const char *text) {
       return 1;
    }
 
+   /* Retain session for worker thread (worker will release when done) */
+   session_retain(session);
+
    /* Spawn detached worker thread */
    pthread_t thread;
    pthread_attr_t attr;
@@ -1396,6 +1659,7 @@ int webui_process_text_input(session_t *session, const char *text) {
 
    if (ret != 0) {
       LOG_ERROR("WebUI: Failed to create text worker thread");
+      session_release(session);
       free(work->text);
       free(work);
       return 1;
@@ -1423,3 +1687,323 @@ static void handle_text_message(ws_connection_t *conn, const char *text, size_t 
       send_error_impl(conn->wsi, "PROCESSING_ERROR", "Failed to process text input");
    }
 }
+
+#ifdef ENABLE_WEBUI_AUDIO
+/* =============================================================================
+ * Audio Processing (Binary WebSocket Messages)
+ *
+ * Protocol:
+ * - Client sends binary frames with 1-byte type prefix:
+ *   - WS_BIN_AUDIO_IN (0x01): Opus audio chunk (length-prefixed frames)
+ *   - WS_BIN_AUDIO_IN_END (0x02): End of utterance (triggers ASR + LLM + TTS)
+ *
+ * - Server responds with binary frames:
+ *   - WS_BIN_AUDIO_OUT (0x11): Opus audio chunk for playback
+ *   - WS_BIN_AUDIO_OUT_END (0x12): End of response audio
+ * ============================================================================= */
+
+typedef struct {
+   session_t *session;
+   uint8_t *audio_data;
+   size_t audio_len;
+} audio_work_t;
+
+/**
+ * @brief Audio worker thread - process voice input and generate response
+ */
+static void *audio_worker_thread(void *arg) {
+   audio_work_t *work = (audio_work_t *)arg;
+   session_t *session = work->session;
+   uint8_t *audio_data = work->audio_data;
+   size_t audio_len = work->audio_len;
+
+   if (!session || session->disconnected) {
+      LOG_INFO("WebUI: Audio session disconnected, aborting");
+      if (session) {
+         session_release(session);
+      }
+      free(audio_data);
+      free(work);
+      return NULL;
+   }
+
+   LOG_INFO("WebUI: Processing audio for session %u (%zu bytes)", session->session_id, audio_len);
+
+   /* Send "listening" state (ASR in progress) */
+   webui_send_state(session, "listening");
+
+   /* Transcribe audio (input is raw PCM: 16-bit signed, 16kHz, mono) */
+   char *transcript = NULL;
+   size_t pcm_samples = audio_len / sizeof(int16_t);
+   int ret = webui_audio_transcribe((const int16_t *)audio_data, pcm_samples, &transcript);
+   free(audio_data);
+   work->audio_data = NULL;
+
+   if (ret != WEBUI_AUDIO_SUCCESS || !transcript || strlen(transcript) == 0) {
+      LOG_WARNING("WebUI: Audio transcription failed or empty");
+      webui_send_error(session, "ASR_FAILED", "Could not understand audio");
+      webui_send_state(session, "idle");
+      session_release(session);
+      free(transcript);
+      free(work);
+      return NULL;
+   }
+
+   LOG_INFO("WebUI: Transcribed: \"%s\"", transcript);
+
+   /* Check disconnection */
+   if (session->disconnected) {
+      session_release(session);
+      free(transcript);
+      free(work);
+      return NULL;
+   }
+
+   /* Echo transcription as user message */
+   webui_send_transcript(session, "user", transcript);
+
+   /* Send "thinking" state (LLM processing) */
+   webui_send_state(session, "thinking");
+
+   /* Call LLM with conversation history */
+   char *response = session_llm_call(session, transcript);
+   free(transcript);
+
+   if (!response || session->disconnected) {
+      LOG_WARNING("WebUI: LLM call failed or session disconnected");
+      if (!session->disconnected) {
+         webui_send_error(session, "LLM_ERROR", "Failed to get response");
+      }
+      webui_send_state(session, "idle");
+      session_release(session);
+      free(response);
+      free(work);
+      return NULL;
+   }
+
+   /* Process commands if present (like text processing) */
+   char *final_response = response;
+   if (strstr(response, "<command>")) {
+      LOG_INFO("WebUI: Audio response contains commands");
+      webui_send_transcript(session, "assistant", response);
+
+      /* Extract and speak preamble text before first <command> tag */
+      char *cmd_start = strstr(response, "<command>");
+      if (cmd_start > response) {
+         size_t preamble_len = cmd_start - response;
+         char *preamble = malloc(preamble_len + 1);
+         if (preamble) {
+            memcpy(preamble, response, preamble_len);
+            preamble[preamble_len] = '\0';
+
+            /* Trim trailing whitespace */
+            while (preamble_len > 0 &&
+                   (preamble[preamble_len - 1] == ' ' || preamble[preamble_len - 1] == '\n' ||
+                    preamble[preamble_len - 1] == '\r' || preamble[preamble_len - 1] == '\t')) {
+               preamble[--preamble_len] = '\0';
+            }
+
+            /* Speak preamble if it has meaningful content (more than just whitespace) */
+            if (preamble_len > 0) {
+               LOG_INFO("WebUI: Speaking preamble before command: %s", preamble);
+               webui_send_state(session, "speaking");
+
+               int16_t *preamble_pcm = NULL;
+               size_t preamble_samples = 0;
+               int pret = webui_audio_text_to_pcm16k(preamble, &preamble_pcm, &preamble_samples);
+               if (pret == WEBUI_AUDIO_SUCCESS && preamble_pcm && preamble_samples > 0) {
+                  size_t preamble_bytes = preamble_samples * sizeof(int16_t);
+                  webui_send_audio(session, (const uint8_t *)preamble_pcm, preamble_bytes);
+                  webui_send_audio_end(session);
+                  free(preamble_pcm);
+               }
+
+               webui_send_state(session, "processing");
+            }
+            free(preamble);
+         }
+      }
+
+      char *processed = webui_process_commands(response, session);
+      if (processed && !session->disconnected) {
+         free(response);
+         final_response = processed;
+      }
+   }
+
+   /* Strip command tags */
+   strip_command_tags(final_response);
+
+   if (!final_response || strlen(final_response) == 0 || session->disconnected) {
+      webui_send_state(session, "idle");
+      session_release(session);
+      free(final_response);
+      free(work);
+      return NULL;
+   }
+
+   /* Send text response */
+   webui_send_transcript(session, "assistant", final_response);
+
+   /* Generate TTS audio as raw PCM (browser can play directly without decoder) */
+   webui_send_state(session, "speaking");
+
+   int16_t *tts_pcm = NULL;
+   size_t tts_samples = 0;
+   ret = webui_audio_text_to_pcm16k(final_response, &tts_pcm, &tts_samples);
+   free(final_response);
+
+   if (ret != WEBUI_AUDIO_SUCCESS || !tts_pcm || tts_samples == 0) {
+      LOG_WARNING("WebUI: TTS synthesis failed");
+      webui_send_state(session, "idle");
+      session_release(session);
+      free(tts_pcm);
+      free(work);
+      return NULL;
+   }
+
+   /* Send audio response via queue (worker thread can't call lws_write directly) */
+   size_t tts_bytes = tts_samples * sizeof(int16_t);
+   LOG_INFO("WebUI: Sending %zu bytes PCM audio (%zu samples) to client", tts_bytes, tts_samples);
+   webui_send_audio(session, (const uint8_t *)tts_pcm, tts_bytes);
+   webui_send_audio_end(session);
+   free(tts_pcm);
+
+   webui_send_state(session, "idle");
+
+   /* Release session reference (acquired before thread creation) */
+   session_release(session);
+
+   free(work);
+   return NULL;
+}
+
+/**
+ * @brief Handle binary WebSocket message (audio data)
+ *
+ * Binary message format:
+ * - Byte 0: Message type (WS_BIN_AUDIO_IN or WS_BIN_AUDIO_IN_END)
+ * - Bytes 1+: Opus audio data (for AUDIO_IN) or empty (for AUDIO_IN_END)
+ */
+static void handle_binary_message(ws_connection_t *conn, const uint8_t *data, size_t len) {
+   if (len < 1) {
+      LOG_WARNING("WebUI: Empty binary message");
+      return;
+   }
+
+   if (!conn->session) {
+      LOG_WARNING("WebUI: Binary message but no session");
+      return;
+   }
+
+   uint8_t msg_type = data[0];
+   const uint8_t *payload = data + 1;
+   size_t payload_len = len - 1;
+
+   switch (msg_type) {
+      case WS_BIN_AUDIO_IN: {
+         /* Accumulate audio data in connection buffer */
+         if (payload_len == 0) {
+            break;
+         }
+
+         /* Initialize buffer if needed */
+         if (!conn->audio_buffer) {
+            conn->audio_buffer_capacity = WEBUI_AUDIO_BUFFER_SIZE;
+            conn->audio_buffer = malloc(conn->audio_buffer_capacity);
+            if (!conn->audio_buffer) {
+               LOG_ERROR("WebUI: Failed to allocate audio buffer");
+               send_error_impl(conn->wsi, "BUFFER_ERROR", "Audio buffer allocation failed");
+               return;
+            }
+            conn->audio_buffer_len = 0;
+         }
+
+         /* Check if we have room */
+         if (conn->audio_buffer_len + payload_len > conn->audio_buffer_capacity) {
+            /* Expand buffer */
+            size_t new_capacity = conn->audio_buffer_capacity * 2;
+
+            /* Enforce maximum capacity to prevent OOM from malicious/long recordings */
+            if (new_capacity > WEBUI_AUDIO_MAX_CAPACITY) {
+               LOG_WARNING("WebUI: Audio buffer would exceed max capacity (%d bytes)",
+                           WEBUI_AUDIO_MAX_CAPACITY);
+               send_error_impl(conn->wsi, "BUFFER_FULL", "Recording too long");
+               return;
+            }
+
+            uint8_t *new_buffer = realloc(conn->audio_buffer, new_capacity);
+            if (!new_buffer) {
+               LOG_ERROR("WebUI: Failed to expand audio buffer");
+               send_error_impl(conn->wsi, "BUFFER_ERROR", "Audio buffer allocation failed");
+               return;
+            }
+            conn->audio_buffer = new_buffer;
+            conn->audio_buffer_capacity = new_capacity;
+         }
+
+         /* Append audio data */
+         memcpy(conn->audio_buffer + conn->audio_buffer_len, payload, payload_len);
+         conn->audio_buffer_len += payload_len;
+
+         LOG_INFO("WebUI: Accumulated %zu bytes audio (total: %zu)", payload_len,
+                  conn->audio_buffer_len);
+         break;
+      }
+
+      case WS_BIN_AUDIO_IN_END: {
+         /* End of utterance - process accumulated audio */
+         if (!conn->audio_buffer || conn->audio_buffer_len == 0) {
+            LOG_WARNING("WebUI: AUDIO_IN_END but no audio accumulated");
+            break;
+         }
+
+         LOG_INFO("WebUI: Audio end, processing %zu bytes", conn->audio_buffer_len);
+
+         /* Create work item for worker thread */
+         audio_work_t *work = malloc(sizeof(audio_work_t));
+         if (!work) {
+            LOG_ERROR("WebUI: Failed to allocate audio work");
+            free(conn->audio_buffer);
+            conn->audio_buffer = NULL;
+            conn->audio_buffer_len = 0;
+            send_error_impl(conn->wsi, "PROCESSING_ERROR", "Audio processing failed");
+            return;
+         }
+
+         work->session = conn->session;
+         work->audio_data = conn->audio_buffer;
+         work->audio_len = conn->audio_buffer_len;
+
+         /* Transfer ownership to worker */
+         conn->audio_buffer = NULL;
+         conn->audio_buffer_len = 0;
+
+         /* Retain session for worker thread (worker will release when done) */
+         session_retain(conn->session);
+
+         /* Spawn worker thread */
+         pthread_t thread;
+         pthread_attr_t attr;
+         pthread_attr_init(&attr);
+         pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+
+         int ret = pthread_create(&thread, &attr, audio_worker_thread, work);
+         pthread_attr_destroy(&attr);
+
+         if (ret != 0) {
+            LOG_ERROR("WebUI: Failed to create audio worker thread");
+            session_release(conn->session);
+            free(work->audio_data);
+            free(work);
+            send_error_impl(conn->wsi, "PROCESSING_ERROR", "Audio processing failed");
+         }
+         break;
+      }
+
+      default:
+         LOG_WARNING("WebUI: Unknown binary message type: 0x%02x", msg_type);
+         break;
+   }
+}
+#endif /* ENABLE_WEBUI_AUDIO */

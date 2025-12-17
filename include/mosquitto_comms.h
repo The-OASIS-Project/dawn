@@ -82,7 +82,7 @@ static const char *deviceTypeStrings[] = { "audio playback device",
                                            "weather",
                                            "calculator",
                                            "url",
-                                           "llm status" };
+                                           "llm" };
 
 /**
  * @brief Associates a device type with a callback function that processes actions for that device.

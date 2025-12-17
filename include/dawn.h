@@ -68,7 +68,8 @@
    "6. Device \"info\" supports ENABLE / DISABLE only—never use \"get\" with it.\n"             \
    "7. To mute playback after clarification, use "                                                \
    "<command>{\"device\":\"volume\",\"action\":\"set\",\"value\":0}</command>.\n"                 \
-   "8. Multiple commands can be sent in one response using multiple <command> tags.\n"
+   "8. Multiple commands can be sent in one response using multiple <command> tags.\n"            \
+   "9. Do not include URLs in responses unless the user explicitly asks for links.\n"
 
 // Vision rules (only if vision is enabled)
 #define AI_RULES_VISION                                                                    \
@@ -107,6 +108,13 @@
    "   <command>{\"device\":\"url\",\"action\":\"fetch\",\"value\":\"https://example.com\"}" \
    "</command>\n"
 
+// LLM control rules (always available - query and switch AI backend)
+#define AI_RULES_LLM_STATUS                                                        \
+   "LLM: Query or switch the AI model. Actions: 'get' (status), 'set' (switch).\n" \
+   "   get: <command>{\"device\":\"llm\",\"action\":\"get\"}</command>\n"          \
+   "   set: <command>{\"device\":\"llm\",\"action\":\"set\",\"value\":\"local\"}"  \
+   "</command> or \"cloud\"\n"
+
 // Core examples (always included)
 #define AI_EXAMPLES_CORE                                                         \
    "\n=== EXAMPLES ===\n"                                                        \
@@ -141,10 +149,10 @@
    "weather, boss!\n"
 
 // Legacy static version for backward compatibility (includes everything)
-#define AI_SYSTEM_INSTRUCTIONS                                                    \
-   AI_RULES_CORE "\n" AI_RULES_VISION "\n" AI_RULES_WEATHER "\n" AI_RULES_SEARCH  \
-                 "\n" AI_RULES_CALCULATOR "\n" AI_RULES_URL "\n" AI_EXAMPLES_CORE \
-                 "\n" AI_EXAMPLES_WEATHER "\n"
+#define AI_SYSTEM_INSTRUCTIONS                                                       \
+   AI_RULES_CORE "\n" AI_RULES_VISION "\n" AI_RULES_WEATHER "\n" AI_RULES_SEARCH     \
+                 "\n" AI_RULES_CALCULATOR "\n" AI_RULES_URL "\n" AI_RULES_LLM_STATUS \
+                 "\n" AI_EXAMPLES_CORE "\n" AI_EXAMPLES_WEATHER "\n"
 
 // Legacy macro for backward compatibility - combines persona + system instructions
 #define AI_DESCRIPTION AI_PERSONA "\n" AI_SYSTEM_INSTRUCTIONS

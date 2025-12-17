@@ -23,7 +23,14 @@
     <!-- Visualization container -->
     <div id="visualizer">
       <div id="ring-container">
-        <div id="ring-outer" class="ring"></div>
+        <svg id="ring-outer" class="ring" viewBox="0 0 240 240">
+          <path id="waveform-trail-5" class="waveform-trail" fill="none" stroke-width="2"/>
+          <path id="waveform-trail-4" class="waveform-trail" fill="none" stroke-width="2"/>
+          <path id="waveform-trail-3" class="waveform-trail" fill="none" stroke-width="2"/>
+          <path id="waveform-trail-2" class="waveform-trail" fill="none" stroke-width="2"/>
+          <path id="waveform-trail-1" class="waveform-trail" fill="none" stroke-width="2"/>
+          <path id="waveform-path" fill="none" stroke-width="2"/>
+        </svg>
         <div id="ring-inner" class="ring"></div>
         <div id="logo">FRIDAY</div>
       </div>
@@ -46,12 +53,12 @@
     <div id="input-area">
       <input type="text" id="text-input" placeholder="Type a message..." autocomplete="off">
       <button id="send-btn" title="Send message">Send</button>
-      <button id="mic-btn" title="Voice input (coming soon)" disabled>Mic</button>
+      <button id="mic-btn" title="Hold to speak" disabled>Mic</button>
     </div>
 
     <!-- Footer -->
     <footer id="footer">
-      <span>DAWN WebUI v1.0 | Phase 1</span>
+      <span>DAWN WebUI v1.0 | Phase 4</span>
     </footer>
   </div>
 

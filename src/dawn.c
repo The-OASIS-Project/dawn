@@ -2076,6 +2076,19 @@ int main(int argc, char *argv[]) {
 #ifdef ENABLE_WEBUI
    /* Initialize WebUI server if enabled */
    if (g_config.webui.enabled) {
+      /* WebUI audio needs worker pool for ASR. If network server didn't start
+       * (which initializes worker pool), we need to init it here for WebUI.
+       * Use only 1 worker for WebUI-only mode to save GPU memory. */
+      if (!enable_network_audio && !worker_pool_is_initialized()) {
+         LOG_INFO("Initializing worker pool for WebUI audio (1 worker)...");
+         int saved_workers = g_config.network.workers;
+         g_config.network.workers = 1; /* WebUI only needs 1 ASR context */
+         if (worker_pool_init(asr_engine, asr_model_path) != 0) {
+            LOG_WARNING("Failed to init worker pool - WebUI voice input disabled");
+         }
+         g_config.network.workers = saved_workers;
+      }
+
       LOG_INFO("Initializing WebUI server...");
       if (webui_server_init(0, NULL) == WEBUI_SUCCESS) {
          LOG_INFO("WebUI server started on port %d", webui_server_get_port());
@@ -3596,6 +3609,10 @@ int main(int argc, char *argv[]) {
    /* Shutdown WebUI server before metrics cleanup */
    if (webui_server_is_running()) {
       webui_server_shutdown();
+   }
+   /* Shutdown worker pool if we initialized it for WebUI (not network server) */
+   if (!enable_network_audio && worker_pool_is_initialized()) {
+      worker_pool_shutdown();
    }
 #endif
 

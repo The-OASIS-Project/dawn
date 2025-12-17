@@ -132,6 +132,38 @@ void worker_pool_shutdown(void);
 int worker_pool_assign_client(int client_fd, session_t *session);
 
 // =============================================================================
+// ASR Context Borrowing (for WebUI and other non-DAP clients)
+// =============================================================================
+
+/**
+ * @brief Borrow an idle worker's ASR context for direct use
+ *
+ * This allows WebUI and other clients to use the pre-initialized ASR contexts
+ * from the worker pool instead of creating their own (which wastes GPU memory).
+ *
+ * The worker is marked as BUSY while its ASR context is borrowed, preventing
+ * it from being assigned to DAP clients.
+ *
+ * @return Pointer to borrowed ASR context, or NULL if all workers busy
+ *
+ * @note Caller MUST call worker_pool_return_asr() when done
+ * @note Thread-safe (uses pool mutex)
+ */
+asr_context_t *worker_pool_borrow_asr(void);
+
+/**
+ * @brief Return a borrowed ASR context to the worker pool
+ *
+ * Marks the owning worker as IDLE, allowing it to accept new clients.
+ *
+ * @param ctx ASR context previously obtained from worker_pool_borrow_asr()
+ *
+ * @note Safe to call with NULL (no-op)
+ * @note Thread-safe (uses pool mutex)
+ */
+void worker_pool_return_asr(asr_context_t *ctx);
+
+// =============================================================================
 // Metrics
 // =============================================================================
 

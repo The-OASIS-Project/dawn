@@ -237,6 +237,17 @@ session_t *session_get(uint32_t session_id);
 session_t *session_get_for_reconnect(uint32_t session_id);
 
 /**
+ * @brief Retain session reference (increments ref_count)
+ *
+ * Use this when passing a session pointer to another thread or storing
+ * it for later use. Prevents session destruction while reference is held.
+ *
+ * @param session Session to retain
+ * @note Caller MUST call session_release() when done
+ */
+void session_retain(session_t *session);
+
+/**
  * @brief Release session reference (decrements ref_count)
  *
  * @param session Session to release

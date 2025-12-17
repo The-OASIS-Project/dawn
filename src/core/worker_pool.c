@@ -306,6 +306,68 @@ int worker_pool_assign_client(int client_fd, session_t *session) {
 }
 
 // =============================================================================
+// ASR Context Borrowing
+// =============================================================================
+
+asr_context_t *worker_pool_borrow_asr(void) {
+   if (!pool_initialized) {
+      LOG_ERROR("Cannot borrow ASR: worker pool not initialized");
+      return NULL;
+   }
+
+   pthread_mutex_lock(&pool_mutex);
+
+   // Find an idle worker
+   worker_context_t *available = NULL;
+   for (int i = 0; i < actual_worker_count; i++) {
+      if (workers[i].state == WORKER_STATE_IDLE) {
+         available = &workers[i];
+         break;
+      }
+   }
+
+   if (!available) {
+      pthread_mutex_unlock(&pool_mutex);
+      LOG_WARNING("All workers busy, cannot borrow ASR context");
+      return NULL;
+   }
+
+   // Mark worker as busy (but don't signal thread - we're using ASR directly)
+   pthread_mutex_lock(&available->mutex);
+   available->state = WORKER_STATE_BUSY;
+   pthread_mutex_unlock(&available->mutex);
+
+   asr_context_t *ctx = available->asr_ctx;
+
+   pthread_mutex_unlock(&pool_mutex);
+
+   LOG_INFO("Borrowed ASR context from worker %d", available->worker_id);
+   return ctx;
+}
+
+void worker_pool_return_asr(asr_context_t *ctx) {
+   if (!ctx || !pool_initialized) {
+      return;
+   }
+
+   pthread_mutex_lock(&pool_mutex);
+
+   // Find the worker that owns this ASR context
+   for (int i = 0; i < actual_worker_count; i++) {
+      if (workers[i].asr_ctx == ctx) {
+         pthread_mutex_lock(&workers[i].mutex);
+         workers[i].state = WORKER_STATE_IDLE;
+         pthread_mutex_unlock(&workers[i].mutex);
+
+         LOG_INFO("Returned ASR context to worker %d", i);
+         break;
+      }
+   }
+
+   pthread_mutex_unlock(&pool_mutex);
+}
+
+// =============================================================================
 // Metrics
 // =============================================================================
 
@@ -527,16 +589,19 @@ static char *process_commands_with_routing(const char *llm_response,
       return NULL;
    }
 
-   combined_results[0] = '\0';
+   char *ptr = combined_results;
    for (int i = 0; i < num_results; i++) {
       if (tool_results[i]) {
-         strcat(combined_results, tool_results[i]);
+         size_t len = strlen(tool_results[i]);
+         memcpy(ptr, tool_results[i], len);
+         ptr += len;
          if (i < num_results - 1) {
-            strcat(combined_results, "\n");
+            *ptr++ = '\n';
          }
          free(tool_results[i]);
       }
    }
+   *ptr = '\0';
 
    LOG_INFO("Worker %d: Sending tool results to LLM: %s", worker_id, combined_results);
 
