@@ -16,6 +16,12 @@
           <input type="checkbox" id="debug-mode">
           <span>Debug</span>
         </label>
+        <button id="settings-btn" title="Settings" aria-label="Open settings">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+          </svg>
+        </button>
         <span id="connection-status" class="disconnected">Disconnected</span>
       </div>
     </header>
@@ -58,8 +64,116 @@
 
     <!-- Footer -->
     <footer id="footer">
-      <span>DAWN WebUI v1.0 | Phase 4</span>
+      <span>DAWN WebUI v1.0 | Phase 5</span>
     </footer>
+
+    <!-- Settings Panel Overlay -->
+    <div id="settings-overlay" class="hidden"></div>
+
+    <!-- Settings Panel -->
+    <div id="settings-panel" class="hidden">
+      <div class="settings-header">
+        <h2>Settings</h2>
+        <button id="settings-close" aria-label="Close settings">&times;</button>
+      </div>
+
+      <div class="settings-content">
+        <div class="settings-paths">
+          <div class="config-path">
+            <span class="path-label">Config:</span>
+            <span id="config-path-display">Loading...</span>
+          </div>
+          <div class="secrets-path">
+            <span class="path-label">Secrets:</span>
+            <span id="secrets-path-display">Loading...</span>
+          </div>
+        </div>
+
+        <div class="settings-sections" id="settings-sections">
+          <!-- Settings sections will be dynamically generated -->
+          <div class="settings-loading">Loading configuration...</div>
+        </div>
+
+        <!-- Secrets Section (separate from config) -->
+        <div class="settings-section" id="secrets-section">
+          <h3 class="section-header" data-section="secrets">
+            <span class="section-icon">&#x1F511;</span>
+            API Keys & Secrets
+            <span class="section-toggle">&#9660;</span>
+          </h3>
+          <div class="section-content">
+            <div class="setting-item">
+              <label for="secret-openai">OpenAI API Key</label>
+              <div class="secret-input-wrapper">
+                <input type="password" id="secret-openai" class="secret-input" placeholder="Enter API key...">
+                <button class="secret-toggle" data-target="secret-openai" title="Show/hide">
+                  <svg class="eye-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                    <circle cx="12" cy="12" r="3"/>
+                  </svg>
+                </button>
+                <span class="secret-status" id="status-openai"></span>
+              </div>
+            </div>
+            <div class="setting-item">
+              <label for="secret-claude">Claude API Key</label>
+              <div class="secret-input-wrapper">
+                <input type="password" id="secret-claude" class="secret-input" placeholder="Enter API key...">
+                <button class="secret-toggle" data-target="secret-claude" title="Show/hide">
+                  <svg class="eye-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                    <circle cx="12" cy="12" r="3"/>
+                  </svg>
+                </button>
+                <span class="secret-status" id="status-claude"></span>
+              </div>
+            </div>
+            <div class="setting-item">
+              <label for="secret-mqtt-user">MQTT Username</label>
+              <div class="secret-input-wrapper">
+                <input type="password" id="secret-mqtt-user" class="secret-input" placeholder="Enter username...">
+                <button class="secret-toggle" data-target="secret-mqtt-user" title="Show/hide">
+                  <svg class="eye-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                    <circle cx="12" cy="12" r="3"/>
+                  </svg>
+                </button>
+                <span class="secret-status" id="status-mqtt-user"></span>
+              </div>
+            </div>
+            <div class="setting-item">
+              <label for="secret-mqtt-pass">MQTT Password</label>
+              <div class="secret-input-wrapper">
+                <input type="password" id="secret-mqtt-pass" class="secret-input" placeholder="Enter password...">
+                <button class="secret-toggle" data-target="secret-mqtt-pass" title="Show/hide">
+                  <svg class="eye-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                    <circle cx="12" cy="12" r="3"/>
+                  </svg>
+                </button>
+                <span class="secret-status" id="status-mqtt-pass"></span>
+              </div>
+            </div>
+            <button id="save-secrets-btn" class="save-btn">Save Secrets</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-footer">
+        <div class="settings-actions">
+          <button id="save-config-btn" class="save-btn primary">Save Configuration</button>
+          <button id="reset-config-btn" class="reset-btn">Reset to Defaults</button>
+        </div>
+        <div class="restart-notice hidden" id="restart-notice">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="12" y1="8" x2="12" y2="12"/>
+            <line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+          <span>Some changes require a restart to take effect</span>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script src="/js/dawn.js"></script>

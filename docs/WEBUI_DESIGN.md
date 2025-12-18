@@ -93,11 +93,11 @@ Phase 4 ensures that WebUI client disconnects don't leave workers stuck waiting 
 │  ╔════════════════╗      ╔════════════════╗  ...      ╔════════════════╗│    │
 │  ║   WORKER 0     ║      ║   WORKER 1     ║           ║   WORKER N     ║│    │
 │  ╠════════════════╣      ╠════════════════╣           ╠════════════════╣│    │
-│  ║ Opus decode    ║      ║ Opus decode    ║           ║ Opus decode    ║│    │
-│  ║ Vosk ASR       ║      ║ Vosk ASR       ║           ║ Vosk ASR       ║│    │
+│  ║ ASR context    ║      ║ ASR context    ║           ║ ASR context    ║│    │
+│  ║ (Vosk/Whisper) ║      ║ (Vosk/Whisper) ║           ║ (Vosk/Whisper) ║│    │
 │  ║ LLM call       ║      ║ LLM call       ║           ║ LLM call       ║│    │
 │  ║ Piper TTS      ║      ║ Piper TTS      ║           ║ Piper TTS      ║│    │
-│  ║ Opus encode    ║      ║ Opus encode    ║           ║ Opus encode    ║│    │
+│  ║ Response send  ║      ║ Response send  ║           ║ Response send  ║│    │
 │  ╚═══════╤════════╝      ╚═══════╤════════╝           ╚═══════╤════════╝│    │
 │          │                       │                            │         │    │
 │          └───────────────────────┴────────────────────────────┘         │    │
@@ -115,17 +115,80 @@ Phase 4 ensures that WebUI client disconnects don't leave workers stuck waiting 
 
 | Thread | Responsibility | Notes |
 |--------|---------------|-------|
-| Main Thread | Local audio, state machine | Unchanged from current |
-| WebUI Thread | HTTP serving, WebSocket I/O, audio chunk assembly | Dedicated thread with lws event loop |
-| Worker Threads | Full pipeline: Opus→ASR→LLM→TTS→Opus | Per-worker Opus codec contexts |
+| Main Thread | Local audio, state machine, dedicated ASR | Always available for local mic |
+| WebUI Thread | HTTP serving, WebSocket I/O, borrows ASR from pool | Dedicated thread with lws event loop |
+| Worker Threads | Per-worker ASR contexts for DAP clients | WebUI borrows idle worker's ASR |
 
 ### Audio Data Flow
 
-1. **Browser** → WebSocket binary frame (raw Opus packets from Web Audio API)
-2. **WebUI Thread** → Buffers Opus frames until end-of-utterance marker
-3. **WebUI Thread** → Assigns to worker via `worker_pool_assign_client()`
-4. **Worker Thread** → Decodes Opus (per-worker decoder), runs ASR/LLM/TTS, encodes response
-5. **Worker Thread** → Sends binary response back through WebSocket
+1. **Browser** → WebSocket binary frame (raw 16-bit PCM from Web Audio API)
+2. **WebUI Thread** → Buffers PCM until end-of-utterance marker
+3. **WebUI Thread** → Borrows ASR context from worker pool via `worker_pool_borrow_asr()`
+4. **WebUI Thread** → Runs ASR, LLM, TTS pipeline (detached pthread for text processing)
+5. **WebUI Thread** → Returns ASR context via `worker_pool_return_asr()`
+6. **WebUI Thread** → Streams TTS PCM response back through WebSocket
+
+### ASR Architecture
+
+ASR contexts are expensive (GPU memory for Whisper) and must not be shared across threads.
+The architecture efficiently distributes ASR resources:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          ASR Context Distribution                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  MAIN THREAD                     WORKER POOL (N workers)                    │
+│  ────────────                    ────────────────────────                   │
+│  ┌─────────────────┐            ┌───────────┬───────────┬───────────┐      │
+│  │ Local Mic ASR   │            │ Worker 0  │ Worker 1  │ Worker N  │      │
+│  │ (dedicated ctx) │            │ ASR ctx   │ ASR ctx   │ ASR ctx   │      │
+│  └─────────────────┘            └─────┬─────┴─────┬─────┴─────┬─────┘      │
+│         │                             │           │           │            │
+│         ▼                             ▼           ▼           ▼            │
+│  [Local microphone]            [DAP clients / WebUI borrow]                │
+│                                                                             │
+│  WebUI Thread                                                               │
+│  ─────────────                                                              │
+│  ┌─────────────────────────────────────────────────────────────┐           │
+│  │ NO dedicated ASR context                                     │           │
+│  │ Calls worker_pool_borrow_asr() to use idle worker's ctx      │           │
+│  │ Worker marked BUSY during borrow, returned when done         │           │
+│  └─────────────────────────────────────────────────────────────┘           │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key Design Decisions:**
+
+| Component | ASR Context | Rationale |
+|-----------|-------------|-----------|
+| Main Thread | Dedicated | Always available for local mic, no contention |
+| Worker Pool | Per-worker | Each worker owns its ASR context for DAP/WebUI clients |
+| WebUI | Borrows from pool | Saves GPU memory, fair scheduling with DAP clients |
+
+**Configurable Worker Count:**
+
+Both network and WebUI can configure their desired worker count:
+- `network.workers` (default: 4) - for DAP network clients
+- `webui.workers` (default: 1) - for WebUI voice input
+
+When both are enabled, the pool uses `max(network.workers, webui.workers)`.
+
+**ASR Context Borrowing (WebUI):**
+
+```c
+// WebUI audio transcription
+asr_context_t *ctx = worker_pool_borrow_asr();  // Marks worker BUSY
+if (!ctx) {
+   // All workers busy - return error to client
+   return WEBUI_AUDIO_ERROR_ASR;
+}
+asr_reset(ctx);
+asr_process_partial(ctx, pcm_data, pcm_samples);
+asr_result_t *result = asr_finalize(ctx);
+worker_pool_return_asr(ctx);  // Marks worker IDLE
+```
 
 ---
 
@@ -135,7 +198,7 @@ Phase 4 ensures that WebUI client disconnects don't leave workers stuck waiting 
 |-----------|--------|-----------|
 | HTTP + WebSocket | libwebsockets | Single library, unified event loop, HTTP + WS in one |
 | Frontend | Vanilla JS + CSS | Zero build step, <100KB total, no npm/webpack |
-| Audio Codec | Opus (libopus) | Browser-native encoding, excellent for voice (~64kbps) |
+| Audio Format | Raw PCM (16-bit, 16kHz) | Simple implementation, Opus planned for future |
 | Visualization | SVG + CSS | No Three.js dependency, hardware-accelerated |
 
 **Why libwebsockets-only?** Originally considered libmicrohttpd + libwebsockets, but:
@@ -1048,16 +1111,23 @@ for (int i = 0; i < pool_size; i++) {
 linking libopus when WebUI is disabled. DAP clients use raw PCM, so they don't need Opus.
 
 **Deliverables:**
-- [ ] Web Audio API + libopus.js integration (browser)
-- [ ] Binary WebSocket frame handling (no base64)
-- [ ] Per-worker Opus contexts (thread-safe)
-- [ ] Opus decode → PCM → Vosk ASR integration
-- [ ] Piper TTS → PCM → Opus encode
-- [ ] Binary audio streaming back to browser
-- [ ] Configurable chunk size (default 200ms)
-- [ ] FFT visualization (lazy init)
-- [ ] Push-to-talk button
-- [ ] VAD-based auto-stop (optional)
+- [x] Web Audio API integration (browser) ✅
+- [x] Binary WebSocket frame handling (raw PCM, no base64) ✅
+- [x] PCM audio capture → server → Vosk ASR ✅
+- [x] Piper TTS → PCM → binary streaming to browser ✅
+- [x] Audio playback in browser (Web Audio API) ✅
+- [x] Configurable chunk size (default 200ms) ✅
+- [x] FFT visualization with waveform trails and glowing core ✅
+- [x] Push-to-talk button (mouse + touch events) ✅
+
+**Implementation Notes (2025-12-17):**
+- **Raw PCM instead of Opus**: Simpler implementation, Opus moved to future enhancement
+- Browser sends 16-bit PCM directly (ScriptProcessorNode)
+- Server sends TTS as raw PCM (resampled 22050→16000Hz)
+- FFT visualization: logarithmic frequency scaling, 5 trailing echoes, state-based colors
+- Push-to-talk: mousedown/mouseup + touchstart/touchend for mobile
+
+**Phase 4 COMPLETE** (2025-12-17)
 
 ### Phase 5: Polish + Features (2-3 days)
 
@@ -1118,14 +1188,15 @@ class ReconnectingWebSocket {
 ```
 
 **Deliverables:**
-- [ ] Settings panel (volume, wake word toggle)
-- [ ] Mobile responsive layout
-- [ ] Connection status indicator
-- [ ] Reconnection with exponential backoff + jitter
-- [ ] Session token persistence (localStorage)
+- [x] Settings panel (all config options, API keys, save to file) ✅
+- [x] Mobile responsive layout (CSS @media queries at 600px) ✅
+- [x] Connection status indicator (header badge) ✅
+- [x] Reconnection with exponential backoff + jitter ✅
+- [x] Session token persistence (localStorage) ✅
 - [ ] Metrics display (optional debug panel)
-- [ ] Keyboard shortcuts (Enter to send, Escape to cancel)
-- [ ] Loading states and error handling
+- [x] Keyboard shortcut: Enter to send ✅
+- [x] Keyboard shortcut: Escape to close settings ✅
+- [x] Loading states and error handling (partial) ✅
 - [ ] Favicon and PWA manifest
 - [ ] Health check endpoint (`/health`)
 
@@ -1142,23 +1213,41 @@ port = 3000                        # "I love you 3000"
 max_clients = 4                    # Leave room for local + DAP clients
 www_path = "/var/lib/dawn/www"     # Optional, uses embedded if not set
 audio_chunk_ms = 200               # Audio chunk size (100-500ms, default 200)
-max_history_entries = 50           # Per-session conversation history limit (prevents unbounded growth)
-# bind_address = "127.0.0.1"       # Default: localhost only
-# ssl_cert = "/path/to/cert.pem"   # Future: HTTPS support
-# ssl_key = "/path/to/key.pem"
+workers = 1                        # ASR worker threads (1 to WORKER_POOL_MAX_SIZE, default: 1)
+https = true                       # Enable HTTPS (required for mic over LAN)
+ssl_cert_path = "certs/server.pem" # SSL certificate path
+ssl_key_path = "certs/server.key"  # SSL private key path
+# bind_address = "127.0.0.1"       # Default: 0.0.0.0
 ```
 
+**Worker Pool Configuration:**
+
+When both `[network]` and `[webui]` are enabled, the effective worker pool size is:
+```
+effective_workers = max(network.workers, webui.workers)
+```
+
+| Configuration | Worker Pool Size |
+|--------------|------------------|
+| Network only (default) | `network.workers` (default: 4) |
+| WebUI only | `webui.workers` (default: 1) |
+| Both enabled | `max(network.workers, webui.workers)` |
+| Neither enabled | No worker pool |
+
 ```c
-// include/config/dawn_config.h additions
+// include/config/dawn_config.h
 
 typedef struct {
    bool enabled;
    int port;
    int max_clients;              // WEBUI_MAX_CLIENTS default: 4
    int audio_chunk_ms;           // Audio chunk size (default: 200)
-   int max_history_entries;      // Per-session history limit (default: 50)
+   int workers;                  // ASR workers for voice input (default: 1)
    char www_path[CONFIG_PATH_MAX];
-   char bind_address[64];        // Default: "127.0.0.1"
+   char bind_address[64];        // Default: "0.0.0.0"
+   bool https;                   // Enable HTTPS
+   char ssl_cert_path[CONFIG_PATH_MAX];
+   char ssl_key_path[CONFIG_PATH_MAX];
 } webui_config_t;
 ```
 
@@ -1291,7 +1380,175 @@ typedef struct {
 
 ---
 
+## Application Restart Feature
+
+The WebUI settings panel supports restarting the DAWN application to apply configuration changes that require a restart (such as ASR model changes, network port changes, etc.).
+
+### Restart Mechanism
+
+DAWN implements a self-exec restart pattern using `execve()`:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          Restart Flow                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  1. User saves config with restart-required changes                          │
+│                              │                                               │
+│                              ▼                                               │
+│  2. Frontend shows confirmation dialog                                       │
+│     "Do you want to restart DAWN now?"                                       │
+│                              │                                               │
+│                              ▼ (user confirms)                               │
+│  3. Browser sends: { "type": "restart" }                                     │
+│                              │                                               │
+│                              ▼                                               │
+│  4. Server: dawn_request_restart()                                           │
+│     - Sets g_restart_requested = 1                                           │
+│     - Sets quit = 1 (triggers main loop exit)                                │
+│                              │                                               │
+│                              ▼                                               │
+│  5. Clean shutdown sequence                                                  │
+│     - Network audio cleanup                                                  │
+│     - TTS/VAD cleanup                                                        │
+│     - WebUI server shutdown (releases WebSocket sessions)                    │
+│     - Session manager cleanup                                                │
+│                              │                                               │
+│                              ▼                                               │
+│  6. execve("/proc/self/exe", saved_argv, environ)                            │
+│     - Replaces process image with fresh instance                             │
+│     - Same PID preserved (good for service managers)                         │
+│     - All state reset, config reloaded                                       │
+│                              │                                               │
+│                              ▼                                               │
+│  7. DAWN restarts with same command-line arguments                           │
+│     - Browser auto-reconnects via WebSocket                                  │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Implementation Details
+
+**Server-Side (C)**:
+
+```c
+// Static argv storage (8KB BSS) - preserved for execve()
+#define MAX_SAVED_ARGC 32
+#define MAX_SAVED_ARG_LEN 256
+static char *s_saved_argv[MAX_SAVED_ARGC + 1];
+static char s_saved_argv_storage[MAX_SAVED_ARGC][MAX_SAVED_ARG_LEN];
+
+// Called early in main() to save command-line arguments
+static void dawn_save_argv(int argc, char *argv[]);
+
+// Public API - called from WebUI handler
+void dawn_request_restart(void) {
+   g_restart_requested = 1;
+   quit = 1;  // Trigger main loop exit
+}
+
+// At end of main(), after cleanup:
+if (g_restart_requested && s_saved_argv[0] != NULL) {
+   execve("/proc/self/exe", s_saved_argv, environ);
+}
+```
+
+**WebSocket Protocol**:
+
+| Type | Direction | Description |
+|------|-----------|-------------|
+| `restart` | Client→Server | Request application restart |
+| `restart_response` | Server→Client | Confirmation before restart |
+
+**Frontend (JavaScript)**:
+
+```javascript
+// Check if changed fields require restart
+function getChangedRestartRequiredFields() {
+   const restartFields = [];
+   for (const field of changedFields) {
+      if (restartRequiredFields.includes(field)) {
+         restartFields.push(field);
+      }
+   }
+   return restartFields;
+}
+
+// Show confirmation dialog
+function showRestartConfirmation(changedRestartFields) {
+   const message = 'Configuration saved!\n\n' +
+      'The following changes require a restart:\n' +
+      changedRestartFields.map(f => '  • ' + f).join('\n') + '\n\n' +
+      'Do you want to restart DAWN now?';
+
+   if (confirm(message)) {
+      requestRestart();
+   }
+}
+```
+
+### Settings Requiring Restart
+
+The following configuration fields require an application restart:
+
+| Section | Field | Reason |
+|---------|-------|--------|
+| `audio` | `backend` | Audio backend initialized at startup |
+| `audio` | `capture_device` | Capture device opened at startup |
+| `audio` | `playback_device` | Playback device opened at startup |
+| `asr` | `model` | ASR model loaded at startup |
+| `asr` | `models_path` | Model path used during initialization |
+| `tts` | `models_path` | TTS model path used during initialization |
+| `tts` | `voice_model` | TTS voice model loaded at startup |
+| `network` | `enabled` | Network server started at initialization |
+| `network` | `host` | Socket bound at startup |
+| `network` | `port` | Socket bound at startup |
+| `network` | `workers` | Worker pool sized at startup |
+| `webui` | `port` | libwebsockets context created at startup |
+| `webui` | `max_clients` | Context configuration at startup |
+| `webui` | `workers` | Worker pool sizing |
+| `webui` | `bind_address` | Socket bound at startup |
+| `webui` | `https` | SSL context created at startup |
+| `webui` | `ssl_cert_path` | SSL certificate loaded at startup |
+| `webui` | `ssl_key_path` | SSL key loaded at startup |
+
+### Shutdown Order Considerations
+
+The shutdown sequence is carefully ordered to prevent hangs:
+
+1. **WebUI must shut down before session cleanup** - WebSocket sessions hold references that are only released when connections close
+2. **Session manager waits for LOCAL sessions** - Worker threads may be using local session
+3. **Session manager force-cleans non-local sessions** - WebSocket/DAP sessions may have ref_count > 0 due to reconnection support design
+
+```c
+// Correct shutdown order (in dawn.c):
+webui_server_shutdown();       // Closes WebSocket connections
+session_manager_cleanup();     // Now safe to clean up sessions
+```
+
+---
+
 ## Future Enhancements
+
+### Audio Pipeline Enhancements
+
+7. **Opus codec integration**: Reduce bandwidth ~70% vs raw PCM
+   - Browser: libopus.js or WebCodecs API for encoding
+   - Server: Per-worker Opus contexts (encoder + decoder)
+   - Enables mobile use over cellular networks
+   - AudioWorklet migration (replace deprecated ScriptProcessorNode)
+
+8. **VAD-based auto-stop**: Voice Activity Detection for hands-free operation
+   - Detect speech end automatically (no push-to-talk required)
+   - WebRTC VAD or Silero VAD integration
+   - Configurable silence threshold and timeout
+
+9. **Always-listening local interface**: Wake word detection in browser
+   - Lightweight wake word model (Porcupine or similar)
+   - Background listening with minimal CPU
+   - Automatic recording start on wake word
+
+### UI/UX Enhancements
 
 1. **Multi-room visualization**: Show all active satellites
 2. **Command history**: Browsable transcript history
@@ -1365,3 +1622,48 @@ typedef struct {
   - Added retry count to truncation log message for better debugging
   - Weather service: Added US state abbreviation expansion (e.g., "GA" → "Georgia") for geocoding
   - Session timeout: Changed default from 5 minutes to 30 minutes
+- 2025-12-17: **Phase 4 Complete + ASR Architecture Documentation**
+  - **Phase 4 marked complete**: Raw PCM implementation instead of Opus (simpler, works well on LAN)
+  - Added ASR Architecture section explaining context distribution:
+    - Main thread: Dedicated ASR context for local microphone
+    - Worker pool: Per-worker ASR contexts (DAP clients)
+    - WebUI: Borrows ASR from worker pool via `worker_pool_borrow_asr()`
+  - Updated Thread Responsibilities table to reflect ASR ownership
+  - Updated Audio Data Flow to show raw PCM and ASR borrowing
+  - Moved to Future Enhancements:
+    - Opus codec integration (bandwidth optimization)
+    - VAD-based auto-stop (hands-free operation)
+    - Always-listening local interface (wake word in browser)
+  - Updated Phase 5 deliverables with completed items:
+    - Mobile responsive layout ✅
+    - Connection status indicator ✅
+    - Reconnection with exponential backoff ✅
+    - Session token persistence ✅
+    - Enter to send keyboard shortcut ✅
+  - FFT visualization complete with waveform trails, glowing core, state-based colors
+  - Added `webui.workers` config option (default: 1, max: WORKER_POOL_MAX_SIZE)
+  - Worker pool uses `max(network.workers, webui.workers)` when both enabled
+  - Updated Configuration section with worker pool calculation table
+- 2025-12-17: **Settings Panel Implementation**
+  - Added slide-out settings panel with glass-morphism UI:
+    - Gear icon button in header
+    - Glass-morphism overlay and panel (backdrop-filter blur)
+    - All config options organized by section (General, Audio, VAD, ASR, TTS, LLM, etc.)
+    - Secrets section with password fields and show/hide toggles
+    - Status indicators for set/not-set API keys (never displays actual values)
+    - Restart badge for settings requiring restart
+    - Save/Reset buttons with confirmation dialogs
+  - Server-side config JSON serialization and TOML writing
+  - WebSocket handlers: get_config, set_config, set_secrets
+  - Backup files created before config modifications (.bak)
+  - Phase 5 Settings Panel marked complete
+- 2025-12-17: **Application Restart Feature**
+  - Implemented self-exec restart mechanism via `execve("/proc/self/exe", ...)`
+  - Static argv storage (8KB BSS) preserves command-line arguments for restart
+  - WebSocket `restart` message handler triggers clean shutdown then re-exec
+  - Frontend shows confirmation dialog listing which settings require restart
+  - Fixed shutdown order: WebUI must shut down before session_manager_cleanup()
+  - Fixed session cleanup: force-destroy non-local sessions instead of waiting for ref_count
+  - Fixed WebSocket disconnect: now calls session_release() to decrement ref_count
+  - LLM thread joined with 5-second timeout during shutdown (prevents hang if LLM processing)
+  - Documented in "Application Restart Feature" section

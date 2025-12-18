@@ -19,8 +19,12 @@
  * part of the project and are adopted by the project author(s).
  */
 
+/* Enable GNU extensions for pthread_timedjoin_np() */
+#define _GNU_SOURCE
+
 /* Std C */
 #include <assert.h>
+#include <errno.h>
 #include <getopt.h>
 #include <math.h>
 #include <pthread.h>
@@ -235,6 +239,74 @@ static int vision_ai_ready = 0;
  * it may be altered asynchronously by signal handling.
  */
 volatile sig_atomic_t quit = 0;
+
+/**
+ * @brief Flag to request application restart via self-exec
+ *
+ * When set to 1, the main loop will exit and re-execute the application
+ * using execve() to apply configuration changes that require a restart.
+ * The PID remains the same, but all state is reset.
+ */
+volatile sig_atomic_t g_restart_requested = 0;
+
+/* Saved command-line arguments for restart via execve()
+ * Using static allocation to avoid heap fragmentation on embedded systems.
+ * Limits: 32 arguments max, 256 chars per argument (8KB total in BSS). */
+#define MAX_SAVED_ARGC 32
+#define MAX_SAVED_ARG_LEN 256
+
+static int s_saved_argc = 0;
+static char *s_saved_argv[MAX_SAVED_ARGC + 1];  // Pointer array (NULL terminated)
+static char s_saved_argv_storage[MAX_SAVED_ARGC][MAX_SAVED_ARG_LEN];  // String storage
+
+/**
+ * @brief Save command-line arguments for restart via execve()
+ *
+ * This function must be called early in main() to preserve the original
+ * argv array. The arguments are copied into static storage to ensure they
+ * remain valid for the lifetime of the process.
+ *
+ * @param argc Argument count from main()
+ * @param argv Argument vector from main()
+ */
+static void dawn_save_argv(int argc, char *argv[]) {
+   if (argc > MAX_SAVED_ARGC) {
+      LOG_WARNING("Too many arguments (%d > %d), truncating for restart", argc, MAX_SAVED_ARGC);
+      argc = MAX_SAVED_ARGC;
+   }
+
+   s_saved_argc = argc;
+
+   // Copy each argument into static storage
+   for (int i = 0; i < argc; i++) {
+      size_t len = strlen(argv[i]);
+      if (len >= MAX_SAVED_ARG_LEN) {
+         LOG_WARNING("Argument %d too long (%zu >= %d), truncating", i, len, MAX_SAVED_ARG_LEN);
+         len = MAX_SAVED_ARG_LEN - 1;
+      }
+      memcpy(s_saved_argv_storage[i], argv[i], len);
+      s_saved_argv_storage[i][len] = '\0';
+      s_saved_argv[i] = s_saved_argv_storage[i];
+   }
+   s_saved_argv[argc] = NULL;  // NULL terminate for execve()
+
+   LOG_INFO("Saved %d command-line arguments for potential restart", argc);
+}
+
+/**
+ * @brief Request application restart via self-exec
+ *
+ * This function sets the restart flag which causes the main loop to exit
+ * and re-execute the application using execve(). This is used to apply
+ * configuration changes that require a full restart.
+ *
+ * Thread-safe: Uses sig_atomic_t for the flag.
+ */
+void dawn_request_restart(void) {
+   LOG_INFO("Restart requested - will restart after cleanup");
+   g_restart_requested = 1;
+   quit = 1;  // Trigger main loop exit
+}
 
 /* MQTT */
 static struct mosquitto *mosq;
@@ -1313,6 +1385,9 @@ int main(int argc, char *argv[]) {
             whisper_model);
    asr_model_path = whisper_full_path;
 
+   // Save argv early for potential restart via execve()
+   dawn_save_argv(argc, argv);
+
    LOG_INFO("%s Version %s: %s\n", APP_NAME, VERSION_NUMBER, GIT_SHA);
 
    // Initialize curl globally and register cleanup handler
@@ -2055,40 +2130,67 @@ int main(int argc, char *argv[]) {
       llm_set_type(LLM_LOCAL);
    }
 
-   if (enable_network_audio) {
-      LOG_INFO("Initializing network audio system...");
-      if (dawn_network_audio_init() != 0) {
-         LOG_ERROR("Failed to initialize network audio system");
-         enable_network_audio = 0;
+   /* Determine effective worker count for ASR pool.
+    * If both network and webui are enabled, use the larger of the two.
+    * Worker pool is shared between network clients and WebUI. */
+#ifdef ENABLE_WEBUI
+   bool webui_needs_workers = g_config.webui.enabled;
+#else
+   bool webui_needs_workers = false;
+#endif
+
+   if (enable_network_audio || webui_needs_workers) {
+      int effective_workers = 0;
+      if (enable_network_audio && webui_needs_workers) {
+         /* Both enabled: use max of the two */
+         effective_workers = (g_config.network.workers > g_config.webui.workers)
+                                 ? g_config.network.workers
+                                 : g_config.webui.workers;
+         LOG_INFO("Both network and WebUI enabled, using %d workers (max of network=%d, webui=%d)",
+                  effective_workers, g_config.network.workers, g_config.webui.workers);
+      } else if (enable_network_audio) {
+         effective_workers = g_config.network.workers;
       } else {
-         LOG_INFO("Starting DAWN network server (multi-client worker pool)...");
-         if (accept_thread_start(asr_engine, asr_model_path) != 0) {
-            LOG_ERROR("Failed to start accept thread - network audio disabled");
-            dawn_network_audio_cleanup();
+         effective_workers = g_config.webui.workers;
+      }
+
+      /* Temporarily override network.workers since worker_pool_init reads from there */
+      int saved_workers = g_config.network.workers;
+      g_config.network.workers = effective_workers;
+
+      if (enable_network_audio) {
+         LOG_INFO("Initializing network audio system...");
+         if (dawn_network_audio_init() != 0) {
+            LOG_ERROR("Failed to initialize network audio system");
             enable_network_audio = 0;
          } else {
-            LOG_INFO("DAWN network server started successfully on port 5000");
-            LOG_INFO("Network TTS will use existing Piper instance");
+            LOG_INFO("Starting DAWN network server (multi-client worker pool with %d workers)...",
+                     effective_workers);
+            if (accept_thread_start(asr_engine, asr_model_path) != 0) {
+               LOG_ERROR("Failed to start accept thread - network audio disabled");
+               dawn_network_audio_cleanup();
+               enable_network_audio = 0;
+            } else {
+               LOG_INFO("DAWN network server started successfully on port 5000");
+               LOG_INFO("Network TTS will use existing Piper instance");
+            }
          }
       }
+
+      /* If network didn't start but WebUI needs workers, init pool now */
+      if (!enable_network_audio && webui_needs_workers && !worker_pool_is_initialized()) {
+         LOG_INFO("Initializing worker pool for WebUI audio (%d workers)...", effective_workers);
+         if (worker_pool_init(asr_engine, asr_model_path) != 0) {
+            LOG_WARNING("Failed to init worker pool - WebUI voice input disabled");
+         }
+      }
+
+      g_config.network.workers = saved_workers;
    }
 
 #ifdef ENABLE_WEBUI
    /* Initialize WebUI server if enabled */
    if (g_config.webui.enabled) {
-      /* WebUI audio needs worker pool for ASR. If network server didn't start
-       * (which initializes worker pool), we need to init it here for WebUI.
-       * Use only 1 worker for WebUI-only mode to save GPU memory. */
-      if (!enable_network_audio && !worker_pool_is_initialized()) {
-         LOG_INFO("Initializing worker pool for WebUI audio (1 worker)...");
-         int saved_workers = g_config.network.workers;
-         g_config.network.workers = 1; /* WebUI only needs 1 ASR context */
-         if (worker_pool_init(asr_engine, asr_model_path) != 0) {
-            LOG_WARNING("Failed to init worker pool - WebUI voice input disabled");
-         }
-         g_config.network.workers = saved_workers;
-      }
-
       LOG_INFO("Initializing WebUI server...");
       if (webui_server_init(0, NULL) == WEBUI_SUCCESS) {
          LOG_INFO("WebUI server started on port %d", webui_server_get_port());
@@ -3519,6 +3621,30 @@ int main(int argc, char *argv[]) {
 
    LOG_INFO("Quit.\n");
 
+   // Ensure LLM thread is stopped before cleanup
+   // This prevents resource leaks if restart was requested during LLM processing
+   if (llm_processing) {
+      LOG_INFO("Waiting for LLM thread to complete...");
+      llm_request_interrupt();
+
+      // Wait for thread with timeout (5 seconds max for responsive restart)
+      struct timespec timeout;
+      clock_gettime(CLOCK_REALTIME, &timeout);
+      timeout.tv_sec += 5;
+
+      int join_result = pthread_timedjoin_np(llm_thread, NULL, &timeout);
+      if (join_result == 0) {
+         LOG_INFO("LLM thread completed");
+      } else if (join_result == ETIMEDOUT) {
+         LOG_WARNING("LLM thread did not complete within timeout, cancelling");
+         pthread_cancel(llm_thread);
+         pthread_join(llm_thread, NULL);
+      } else {
+         LOG_ERROR("Error joining LLM thread: %d", join_result);
+      }
+      llm_processing = 0;
+   }
+
    if (enable_network_audio) {
       LOG_INFO("Stopping network audio system...");
       accept_thread_stop();
@@ -3558,8 +3684,8 @@ int main(int argc, char *argv[]) {
    // Clear the global pointer before session cleanup to prevent use-after-free
    conversation_history = NULL;
 
-   // Cleanup session manager (frees local session and its conversation history)
-   session_manager_cleanup();
+   // NOTE: session_manager_cleanup() moved to after webui_server_shutdown()
+   // WebSocket sessions hold references that are only released when WebUI shuts down
 
    // Cleanup command router (after workers are stopped)
    command_router_shutdown();
@@ -3606,7 +3732,7 @@ int main(int argc, char *argv[]) {
    }
 
 #ifdef ENABLE_WEBUI
-   /* Shutdown WebUI server before metrics cleanup */
+   /* Shutdown WebUI server before session cleanup - WebSocket sessions hold references */
    if (webui_server_is_running()) {
       webui_server_shutdown();
    }
@@ -3615,6 +3741,9 @@ int main(int argc, char *argv[]) {
       worker_pool_shutdown();
    }
 #endif
+
+   /* Cleanup session manager AFTER WebUI shutdown so WebSocket sessions are released */
+   session_manager_cleanup();
 
    metrics_cleanup();
 
@@ -3630,5 +3759,26 @@ int main(int argc, char *argv[]) {
    // Close the log file properly
    close_logging();
 
+   // Check if restart was requested (e.g., from WebUI after config change)
+   // s_saved_argv[0] is set if dawn_save_argv() succeeded
+   if (g_restart_requested && s_saved_argv[0] != NULL) {
+      // Use /proc/self/exe for reliable path to current executable
+      // This handles cases where argv[0] might be relative or modified
+      extern char **environ;
+      printf("Restarting DAWN...\n");
+      fflush(stdout);
+
+      // execve() replaces the entire process image, so:
+      // - All memory (heap, stack, BSS) is released by the kernel
+      // - No need to free s_saved_argv or other resources
+      // - File descriptors without FD_CLOEXEC remain open (none expected here)
+      execve("/proc/self/exe", s_saved_argv, environ);
+
+      // If we get here, execve failed
+      perror("Failed to restart DAWN");
+      return 1;
+   }
+
+   // s_saved_argv uses static storage, no cleanup needed
    return 0;
 }

@@ -92,9 +92,10 @@ void config_set_defaults(dawn_config_t *config) {
 
    /* ASR */
    SAFE_COPY(config->asr.model, "base");
-   SAFE_COPY(config->asr.models_path, "../whisper.cpp/models");
+   SAFE_COPY(config->asr.models_path, "models/whisper.cpp");
 
    /* TTS */
+   SAFE_COPY(config->tts.models_path, "models");
    SAFE_COPY(config->tts.voice_model, "en_GB-alba-medium");
    config->tts.length_scale = 0.85f;
 
@@ -107,9 +108,10 @@ void config_set_defaults(dawn_config_t *config) {
 
    /* LLM Cloud */
    SAFE_COPY(config->llm.cloud.provider, "openai");
-   SAFE_COPY(config->llm.cloud.model, "gpt-4o"); /* OPENAI_MODEL from dawn.h */
-   config->llm.cloud.endpoint[0] = '\0';         /* Empty = use default */
-   config->llm.cloud.vision_enabled = true;      /* Cloud models typically support vision */
+   SAFE_COPY(config->llm.cloud.openai_model, "gpt-4o");
+   SAFE_COPY(config->llm.cloud.claude_model, "claude-sonnet-4-20250514");
+   config->llm.cloud.endpoint[0] = '\0'; /* Empty = use default */
+   config->llm.cloud.vision_enabled = true;
 
    /* LLM Local */
    SAFE_COPY(config->llm.local.endpoint, "http://127.0.0.1:8080");
@@ -156,6 +158,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->webui.port = 3000; /* "I love you 3000" */
    config->webui.max_clients = 4;
    config->webui.audio_chunk_ms = 200; /* 200ms chunks for streaming audio */
+   config->webui.workers = 1;          /* ASR workers for voice input (1 = minimal) */
    SAFE_COPY(config->webui.www_path, "www");
    SAFE_COPY(config->webui.bind_address, "0.0.0.0");
    config->webui.https = false;

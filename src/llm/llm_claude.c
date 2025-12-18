@@ -88,7 +88,7 @@ static json_object *convert_to_claude_format(struct json_object *openai_conversa
 
    // Model from config
    json_object_object_add(claude_request, "model",
-                          json_object_new_string(g_config.llm.cloud.model));
+                          json_object_new_string(g_config.llm.cloud.claude_model));
 
    // Max tokens from config
    json_object_object_add(claude_request, "max_tokens",

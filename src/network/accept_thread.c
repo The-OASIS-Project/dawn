@@ -97,14 +97,7 @@ int accept_thread_start(asr_engine_type_t engine_type, const char *model_path) {
       return 1;
    }
 
-   // Initialize session manager first
-   if (session_manager_init() != 0) {
-      LOG_ERROR("Failed to initialize session manager");
-      close(shutdown_pipe[0]);
-      close(shutdown_pipe[1]);
-      shutdown_pipe[0] = shutdown_pipe[1] = -1;
-      return 1;
-   }
+   // Session manager is already initialized by dawn.c before calling this function
 
    // Initialize worker pool (EAGER: creates ASR contexts now)
    if (worker_pool_init(engine_type, model_path) != 0) {

@@ -23,9 +23,14 @@
 
 #include "webui/webui_server.h"
 
+#include <arpa/inet.h>
+#include <dirent.h>
+#include <errno.h>
+#include <ifaddrs.h>
 #include <json-c/json.h>
 #include <libwebsockets.h>
 #include <mosquitto.h>
+#include <net/if.h>
 #include <pthread.h>
 #include <signal.h>
 #include <string.h>
@@ -36,6 +41,8 @@
 #include "webui/webui_audio.h"
 #endif
 
+#include "config/config_env.h"
+#include "config/config_parser.h"
 #include "config/dawn_config.h"
 #include "core/command_router.h"
 #include "core/session_manager.h"
@@ -55,6 +62,9 @@ static volatile int s_client_count = 0;
 static int s_port = 0;
 static char s_www_path[256] = { 0 };
 static pthread_mutex_t s_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Config modification mutex - protects against concurrent config reads during writes */
+static pthread_rwlock_t s_config_rwlock = PTHREAD_RWLOCK_INITIALIZER;
 
 /* =============================================================================
  * Response Queue (worker -> WebUI thread)
@@ -175,6 +185,39 @@ static session_t *lookup_session_by_token(const char *token) {
    pthread_mutex_unlock(&s_token_mutex);
    return NULL;
 }
+
+/* =============================================================================
+ * Model/Interface Cache (avoids repeated filesystem/network scans)
+ * ============================================================================= */
+
+#define MODEL_CACHE_TTL 60 /* Cache refresh interval in seconds */
+
+typedef struct {
+   json_object *models_response;     /* Cached list_models_response */
+   json_object *interfaces_response; /* Cached list_interfaces_response */
+   time_t models_cache_time;         /* When models were last scanned */
+   time_t interfaces_cache_time;     /* When interfaces were last enumerated */
+   pthread_mutex_t cache_mutex;      /* Protects cache access */
+} discovery_cache_t;
+
+static discovery_cache_t s_discovery_cache = { .models_response = NULL,
+                                               .interfaces_response = NULL,
+                                               .models_cache_time = 0,
+                                               .interfaces_cache_time = 0,
+                                               .cache_mutex = PTHREAD_MUTEX_INITIALIZER };
+
+/* =============================================================================
+ * Allowed Path Prefixes for Model Directory Scanning
+ *
+ * Security: Restricts which directories can be scanned for models.
+ * The current working directory is always allowed in addition to these.
+ * Modify this list to allow/disallow specific paths.
+ * ============================================================================= */
+
+static const char *s_allowed_path_prefixes[] = {
+   "/home/",      "/var/lib/", "/opt/", "/usr/local/share/",
+   "/usr/share/", NULL /* Sentinel - must be last */
+};
 
 /* =============================================================================
  * Per-WebSocket Connection Data
@@ -648,9 +691,997 @@ static int callback_http(struct lws *wsi,
 
 static void handle_text_message(ws_connection_t *conn, const char *json_str, size_t len);
 static void handle_cancel_message(ws_connection_t *conn);
+static void handle_get_config(ws_connection_t *conn);
+static void handle_set_config(ws_connection_t *conn, struct json_object *payload);
+static void handle_set_secrets(ws_connection_t *conn, struct json_object *payload);
+static void handle_get_audio_devices(ws_connection_t *conn, struct json_object *payload);
+static void handle_list_models(ws_connection_t *conn);
+static void send_json_response(struct lws *wsi, json_object *response);
+static void handle_list_interfaces(ws_connection_t *conn);
 #ifdef ENABLE_WEBUI_AUDIO
 static void handle_binary_message(ws_connection_t *conn, const uint8_t *data, size_t len);
 #endif
+
+/* Settings that require restart when changed */
+static const char *s_restart_required_fields[] = { "audio.backend",
+                                                   "audio.capture_device",
+                                                   "audio.playback_device",
+                                                   "asr.model",
+                                                   "asr.models_path",
+                                                   "tts.models_path",
+                                                   "tts.voice_model",
+                                                   "network.enabled",
+                                                   "network.host",
+                                                   "network.port",
+                                                   "network.workers",
+                                                   "webui.port",
+                                                   "webui.max_clients",
+                                                   "webui.workers",
+                                                   "webui.https",
+                                                   "webui.ssl_cert_path",
+                                                   "webui.ssl_key_path",
+                                                   "webui.bind_address",
+                                                   NULL };
+
+static void handle_get_config(ws_connection_t *conn) {
+   /* Build response with config, secrets status, and metadata */
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("get_config_response"));
+
+   json_object *payload = json_object_new_object();
+
+   /* Add config path */
+   const char *config_path = config_get_loaded_path();
+   json_object_object_add(payload, "config_path", json_object_new_string(config_path));
+
+   /* Add secrets path */
+   const char *secrets_path = config_get_secrets_path();
+   json_object_object_add(payload, "secrets_path", json_object_new_string(secrets_path));
+
+   /* Add full config as JSON */
+   json_object *config_json = config_to_json(config_get());
+   if (config_json) {
+      json_object_object_add(payload, "config", config_json);
+   }
+
+   /* Add secrets status (only is_set flags, never actual values) */
+   json_object *secrets_status = secrets_to_json_status(config_get_secrets());
+   if (secrets_status) {
+      json_object_object_add(payload, "secrets", secrets_status);
+   }
+
+   /* Add list of fields that require restart */
+   json_object *restart_fields = json_object_new_array();
+   for (int i = 0; s_restart_required_fields[i]; i++) {
+      json_object_array_add(restart_fields, json_object_new_string(s_restart_required_fields[i]));
+   }
+   json_object_object_add(payload, "requires_restart", restart_fields);
+
+   json_object_object_add(response, "payload", payload);
+
+   /* Send response */
+   const char *json_str = json_object_to_json_string(response);
+   size_t json_len = strlen(json_str);
+   unsigned char *buf = malloc(LWS_PRE + json_len);
+   if (buf) {
+      memcpy(buf + LWS_PRE, json_str, json_len);
+      lws_write(conn->wsi, buf + LWS_PRE, json_len, LWS_WRITE_TEXT);
+      free(buf);
+   }
+
+   json_object_put(response);
+   LOG_INFO("WebUI: Sent configuration to client");
+}
+
+/* Helper to safely copy string from JSON to config field */
+#define JSON_TO_CONFIG_STR(obj, key, dest)                \
+   do {                                                   \
+      struct json_object *_val;                           \
+      if (json_object_object_get_ex(obj, key, &_val)) {   \
+         const char *_str = json_object_get_string(_val); \
+         if (_str) {                                      \
+            strncpy(dest, _str, sizeof(dest) - 1);        \
+            dest[sizeof(dest) - 1] = '\0';                \
+         }                                                \
+      }                                                   \
+   } while (0)
+
+#define JSON_TO_CONFIG_INT(obj, key, dest)              \
+   do {                                                 \
+      struct json_object *_val;                         \
+      if (json_object_object_get_ex(obj, key, &_val)) { \
+         dest = json_object_get_int(_val);              \
+      }                                                 \
+   } while (0)
+
+#define JSON_TO_CONFIG_BOOL(obj, key, dest)             \
+   do {                                                 \
+      struct json_object *_val;                         \
+      if (json_object_object_get_ex(obj, key, &_val)) { \
+         dest = json_object_get_boolean(_val);          \
+      }                                                 \
+   } while (0)
+
+#define JSON_TO_CONFIG_DOUBLE(obj, key, dest)           \
+   do {                                                 \
+      struct json_object *_val;                         \
+      if (json_object_object_get_ex(obj, key, &_val)) { \
+         dest = (float)json_object_get_double(_val);    \
+      }                                                 \
+   } while (0)
+
+#define JSON_TO_CONFIG_SIZE_T(obj, key, dest)           \
+   do {                                                 \
+      struct json_object *_val;                         \
+      if (json_object_object_get_ex(obj, key, &_val)) { \
+         dest = (size_t)json_object_get_int64(_val);    \
+      }                                                 \
+   } while (0)
+
+static void apply_config_from_json(dawn_config_t *config, struct json_object *payload) {
+   struct json_object *section;
+
+   /* [general] */
+   if (json_object_object_get_ex(payload, "general", &section)) {
+      JSON_TO_CONFIG_STR(section, "ai_name", config->general.ai_name);
+      JSON_TO_CONFIG_STR(section, "log_file", config->general.log_file);
+   }
+
+   /* [persona] */
+   if (json_object_object_get_ex(payload, "persona", &section)) {
+      JSON_TO_CONFIG_STR(section, "description", config->persona.description);
+   }
+
+   /* [localization] */
+   if (json_object_object_get_ex(payload, "localization", &section)) {
+      JSON_TO_CONFIG_STR(section, "location", config->localization.location);
+      JSON_TO_CONFIG_STR(section, "timezone", config->localization.timezone);
+      JSON_TO_CONFIG_STR(section, "units", config->localization.units);
+   }
+
+   /* [audio] */
+   if (json_object_object_get_ex(payload, "audio", &section)) {
+      JSON_TO_CONFIG_STR(section, "backend", config->audio.backend);
+      JSON_TO_CONFIG_STR(section, "capture_device", config->audio.capture_device);
+      JSON_TO_CONFIG_STR(section, "playback_device", config->audio.playback_device);
+      JSON_TO_CONFIG_INT(section, "output_rate", config->audio.output_rate);
+      JSON_TO_CONFIG_INT(section, "output_channels", config->audio.output_channels);
+
+      struct json_object *bargein;
+      if (json_object_object_get_ex(section, "bargein", &bargein)) {
+         JSON_TO_CONFIG_BOOL(bargein, "enabled", config->audio.bargein.enabled);
+         JSON_TO_CONFIG_INT(bargein, "cooldown_ms", config->audio.bargein.cooldown_ms);
+         JSON_TO_CONFIG_INT(bargein, "startup_cooldown_ms",
+                            config->audio.bargein.startup_cooldown_ms);
+      }
+   }
+
+   /* [vad] */
+   if (json_object_object_get_ex(payload, "vad", &section)) {
+      JSON_TO_CONFIG_DOUBLE(section, "speech_threshold", config->vad.speech_threshold);
+      JSON_TO_CONFIG_DOUBLE(section, "speech_threshold_tts", config->vad.speech_threshold_tts);
+      JSON_TO_CONFIG_DOUBLE(section, "silence_threshold", config->vad.silence_threshold);
+      JSON_TO_CONFIG_DOUBLE(section, "end_of_speech_duration", config->vad.end_of_speech_duration);
+      JSON_TO_CONFIG_DOUBLE(section, "max_recording_duration", config->vad.max_recording_duration);
+      JSON_TO_CONFIG_INT(section, "preroll_ms", config->vad.preroll_ms);
+
+      struct json_object *chunking;
+      if (json_object_object_get_ex(section, "chunking", &chunking)) {
+         JSON_TO_CONFIG_BOOL(chunking, "enabled", config->vad.chunking.enabled);
+         JSON_TO_CONFIG_DOUBLE(chunking, "pause_duration", config->vad.chunking.pause_duration);
+         JSON_TO_CONFIG_DOUBLE(chunking, "min_duration", config->vad.chunking.min_duration);
+         JSON_TO_CONFIG_DOUBLE(chunking, "max_duration", config->vad.chunking.max_duration);
+      }
+   }
+
+   /* [asr] */
+   if (json_object_object_get_ex(payload, "asr", &section)) {
+      JSON_TO_CONFIG_STR(section, "model", config->asr.model);
+      JSON_TO_CONFIG_STR(section, "models_path", config->asr.models_path);
+   }
+
+   /* [tts] */
+   if (json_object_object_get_ex(payload, "tts", &section)) {
+      JSON_TO_CONFIG_STR(section, "models_path", config->tts.models_path);
+      JSON_TO_CONFIG_STR(section, "voice_model", config->tts.voice_model);
+      JSON_TO_CONFIG_DOUBLE(section, "length_scale", config->tts.length_scale);
+   }
+
+   /* [commands] */
+   if (json_object_object_get_ex(payload, "commands", &section)) {
+      JSON_TO_CONFIG_STR(section, "processing_mode", config->commands.processing_mode);
+   }
+
+   /* [llm] */
+   if (json_object_object_get_ex(payload, "llm", &section)) {
+      JSON_TO_CONFIG_STR(section, "type", config->llm.type);
+      JSON_TO_CONFIG_INT(section, "max_tokens", config->llm.max_tokens);
+
+      struct json_object *cloud;
+      if (json_object_object_get_ex(section, "cloud", &cloud)) {
+         JSON_TO_CONFIG_STR(cloud, "provider", config->llm.cloud.provider);
+         JSON_TO_CONFIG_STR(cloud, "openai_model", config->llm.cloud.openai_model);
+         JSON_TO_CONFIG_STR(cloud, "claude_model", config->llm.cloud.claude_model);
+         JSON_TO_CONFIG_STR(cloud, "endpoint", config->llm.cloud.endpoint);
+         JSON_TO_CONFIG_BOOL(cloud, "vision_enabled", config->llm.cloud.vision_enabled);
+      }
+
+      struct json_object *local;
+      if (json_object_object_get_ex(section, "local", &local)) {
+         JSON_TO_CONFIG_STR(local, "endpoint", config->llm.local.endpoint);
+         JSON_TO_CONFIG_STR(local, "model", config->llm.local.model);
+         JSON_TO_CONFIG_BOOL(local, "vision_enabled", config->llm.local.vision_enabled);
+      }
+   }
+
+   /* [search] */
+   if (json_object_object_get_ex(payload, "search", &section)) {
+      JSON_TO_CONFIG_STR(section, "engine", config->search.engine);
+      JSON_TO_CONFIG_STR(section, "endpoint", config->search.endpoint);
+
+      struct json_object *summarizer;
+      if (json_object_object_get_ex(section, "summarizer", &summarizer)) {
+         JSON_TO_CONFIG_STR(summarizer, "backend", config->search.summarizer.backend);
+         JSON_TO_CONFIG_SIZE_T(summarizer, "threshold_bytes",
+                               config->search.summarizer.threshold_bytes);
+         JSON_TO_CONFIG_SIZE_T(summarizer, "target_words", config->search.summarizer.target_words);
+      }
+   }
+
+   /* [mqtt] */
+   if (json_object_object_get_ex(payload, "mqtt", &section)) {
+      JSON_TO_CONFIG_BOOL(section, "enabled", config->mqtt.enabled);
+      JSON_TO_CONFIG_STR(section, "broker", config->mqtt.broker);
+      JSON_TO_CONFIG_INT(section, "port", config->mqtt.port);
+   }
+
+   /* [network] */
+   if (json_object_object_get_ex(payload, "network", &section)) {
+      JSON_TO_CONFIG_BOOL(section, "enabled", config->network.enabled);
+      JSON_TO_CONFIG_STR(section, "host", config->network.host);
+      JSON_TO_CONFIG_INT(section, "port", config->network.port);
+      JSON_TO_CONFIG_INT(section, "workers", config->network.workers);
+      JSON_TO_CONFIG_INT(section, "socket_timeout_sec", config->network.socket_timeout_sec);
+      JSON_TO_CONFIG_INT(section, "session_timeout_sec", config->network.session_timeout_sec);
+      JSON_TO_CONFIG_INT(section, "llm_timeout_ms", config->network.llm_timeout_ms);
+   }
+
+   /* [tui] */
+   if (json_object_object_get_ex(payload, "tui", &section)) {
+      JSON_TO_CONFIG_BOOL(section, "enabled", config->tui.enabled);
+   }
+
+   /* [webui] */
+   if (json_object_object_get_ex(payload, "webui", &section)) {
+      JSON_TO_CONFIG_BOOL(section, "enabled", config->webui.enabled);
+      JSON_TO_CONFIG_INT(section, "port", config->webui.port);
+      JSON_TO_CONFIG_INT(section, "max_clients", config->webui.max_clients);
+      JSON_TO_CONFIG_INT(section, "audio_chunk_ms", config->webui.audio_chunk_ms);
+      JSON_TO_CONFIG_INT(section, "workers", config->webui.workers);
+      JSON_TO_CONFIG_STR(section, "www_path", config->webui.www_path);
+      JSON_TO_CONFIG_STR(section, "bind_address", config->webui.bind_address);
+      JSON_TO_CONFIG_BOOL(section, "https", config->webui.https);
+      JSON_TO_CONFIG_STR(section, "ssl_cert_path", config->webui.ssl_cert_path);
+      JSON_TO_CONFIG_STR(section, "ssl_key_path", config->webui.ssl_key_path);
+   }
+
+   /* [debug] */
+   if (json_object_object_get_ex(payload, "debug", &section)) {
+      JSON_TO_CONFIG_BOOL(section, "mic_record", config->debug.mic_record);
+      JSON_TO_CONFIG_BOOL(section, "asr_record", config->debug.asr_record);
+      JSON_TO_CONFIG_BOOL(section, "aec_record", config->debug.aec_record);
+      JSON_TO_CONFIG_STR(section, "record_path", config->debug.record_path);
+   }
+
+   /* [paths] */
+   if (json_object_object_get_ex(payload, "paths", &section)) {
+      JSON_TO_CONFIG_STR(section, "music_dir", config->paths.music_dir);
+      JSON_TO_CONFIG_STR(section, "commands_config", config->paths.commands_config);
+   }
+}
+
+static void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("set_config_response"));
+   json_object *resp_payload = json_object_new_object();
+
+   /* Get the config file path */
+   const char *config_path = config_get_loaded_path();
+   if (!config_path || strcmp(config_path, "(none - using defaults)") == 0) {
+      /* No config file loaded - use default path */
+      config_path = "./dawn.toml";
+   }
+
+   /* Create backup before modifying */
+   if (config_backup_file(config_path) != 0) {
+      LOG_WARNING("WebUI: Failed to create config backup");
+      /* Continue anyway - backup is optional */
+   }
+
+   /* Apply changes to global config with mutex protection.
+    * The write lock ensures no other threads are reading config during modification. */
+   pthread_rwlock_wrlock(&s_config_rwlock);
+   dawn_config_t *mutable_config = (dawn_config_t *)config_get();
+   apply_config_from_json(mutable_config, payload);
+   pthread_rwlock_unlock(&s_config_rwlock);
+
+   /* Write to file (outside lock - file I/O shouldn't block config reads) */
+   int result = config_write_toml(mutable_config, config_path);
+
+   if (result == 0) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+      json_object_object_add(resp_payload, "message",
+                             json_object_new_string("Configuration saved successfully"));
+      LOG_INFO("WebUI: Configuration saved to %s", config_path);
+   } else {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Failed to write configuration file"));
+      LOG_ERROR("WebUI: Failed to save configuration");
+   }
+
+   json_object_object_add(response, "payload", resp_payload);
+
+   send_json_response(conn->wsi, response);
+   json_object_put(response);
+}
+
+static void handle_set_secrets(ws_connection_t *conn, struct json_object *payload) {
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("set_secrets_response"));
+   json_object *resp_payload = json_object_new_object();
+
+   /* Get secrets file path */
+   const char *secrets_path = config_get_secrets_path();
+   if (!secrets_path || strcmp(secrets_path, "(none)") == 0) {
+      /* No secrets file loaded - use default path */
+      secrets_path = "./secrets.toml";
+   }
+
+   /* Create backup before modifying */
+   config_backup_file(secrets_path);
+
+   /* Get mutable secrets config */
+   secrets_config_t *mutable_secrets = (secrets_config_t *)config_get_secrets();
+
+   /* Apply changes from payload - only update fields that are provided */
+   struct json_object *val;
+   if (json_object_object_get_ex(payload, "openai_api_key", &val)) {
+      const char *str = json_object_get_string(val);
+      if (str) {
+         strncpy(mutable_secrets->openai_api_key, str, sizeof(mutable_secrets->openai_api_key) - 1);
+         mutable_secrets->openai_api_key[sizeof(mutable_secrets->openai_api_key) - 1] = '\0';
+      }
+   }
+   if (json_object_object_get_ex(payload, "claude_api_key", &val)) {
+      const char *str = json_object_get_string(val);
+      if (str) {
+         strncpy(mutable_secrets->claude_api_key, str, sizeof(mutable_secrets->claude_api_key) - 1);
+         mutable_secrets->claude_api_key[sizeof(mutable_secrets->claude_api_key) - 1] = '\0';
+      }
+   }
+   if (json_object_object_get_ex(payload, "mqtt_username", &val)) {
+      const char *str = json_object_get_string(val);
+      if (str) {
+         strncpy(mutable_secrets->mqtt_username, str, sizeof(mutable_secrets->mqtt_username) - 1);
+         mutable_secrets->mqtt_username[sizeof(mutable_secrets->mqtt_username) - 1] = '\0';
+      }
+   }
+   if (json_object_object_get_ex(payload, "mqtt_password", &val)) {
+      const char *str = json_object_get_string(val);
+      if (str) {
+         strncpy(mutable_secrets->mqtt_password, str, sizeof(mutable_secrets->mqtt_password) - 1);
+         mutable_secrets->mqtt_password[sizeof(mutable_secrets->mqtt_password) - 1] = '\0';
+      }
+   }
+
+   /* Write to file */
+   int result = secrets_write_toml(mutable_secrets, secrets_path);
+
+   if (result == 0) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+      json_object_object_add(resp_payload, "message",
+                             json_object_new_string("Secrets saved successfully"));
+
+      /* Also update the secrets status */
+      json_object *secrets_status = secrets_to_json_status(mutable_secrets);
+      if (secrets_status) {
+         json_object_object_add(resp_payload, "secrets", secrets_status);
+      }
+
+      LOG_INFO("WebUI: Secrets saved to %s", secrets_path);
+   } else {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Failed to write secrets file"));
+      LOG_ERROR("WebUI: Failed to save secrets");
+   }
+
+   json_object_object_add(response, "payload", resp_payload);
+
+   send_json_response(conn->wsi, response);
+   json_object_put(response);
+}
+
+/**
+ * @brief Send a JSON response efficiently using stack buffer when possible
+ *
+ * Uses stack allocation for small responses (<2KB) to avoid heap fragmentation.
+ * Falls back to heap allocation for larger responses.
+ */
+#define MAX_STACK_RESPONSE 2048
+
+static void send_json_response(struct lws *wsi, json_object *response) {
+   const char *json_str = json_object_to_json_string(response);
+   size_t json_len = strlen(json_str);
+
+   if (json_len < MAX_STACK_RESPONSE - LWS_PRE) {
+      /* Use stack buffer for small responses */
+      unsigned char buf[LWS_PRE + MAX_STACK_RESPONSE];
+      memcpy(buf + LWS_PRE, json_str, json_len);
+      lws_write(wsi, buf + LWS_PRE, json_len, LWS_WRITE_TEXT);
+   } else {
+      /* Fall back to heap for large responses */
+      unsigned char *buf = malloc(LWS_PRE + json_len);
+      if (buf) {
+         memcpy(buf + LWS_PRE, json_str, json_len);
+         lws_write(wsi, buf + LWS_PRE, json_len, LWS_WRITE_TEXT);
+         free(buf);
+      } else {
+         LOG_ERROR("WebUI: Failed to allocate buffer for JSON response (%zu bytes)", json_len);
+      }
+   }
+}
+
+/**
+ * @brief Run a shell command and capture output
+ * @param cmd Command to run
+ * @param output Buffer to store output
+ * @param output_size Size of output buffer
+ * @return Number of bytes read on success, 0 on error (with empty output)
+ *
+ * SECURITY WARNING: This function uses popen() which invokes a shell. Only use
+ * with compile-time constant command strings. NEVER pass user-supplied or
+ * client-provided data as the cmd parameter to avoid command injection attacks.
+ */
+static size_t run_command(const char *cmd, char *output, size_t output_size) {
+   if (output_size > 0) {
+      output[0] = '\0';
+   }
+
+   FILE *fp = popen(cmd, "r");
+   if (!fp) {
+      LOG_WARNING("WebUI: popen failed for command");
+      return 0;
+   }
+
+   size_t total = 0;
+   char buf[256];
+   while (fgets(buf, sizeof(buf), fp) && total < output_size - 1) {
+      size_t len = strlen(buf);
+      if (total + len >= output_size) {
+         len = output_size - total - 1;
+      }
+      memcpy(output + total, buf, len);
+      total += len;
+   }
+   output[total] = '\0';
+
+   pclose(fp);
+   return total;
+}
+
+/**
+ * @brief Parse ALSA device list (arecord -L or aplay -L output)
+ */
+static void parse_alsa_devices(const char *output, json_object *arr) {
+   if (!output || !arr)
+      return;
+
+   /* ALSA -L output format:
+    * devicename
+    *     Description line
+    *     ...
+    * nextdevice
+    */
+   const char *line = output;
+   while (*line) {
+      /* Skip whitespace-prefixed description lines */
+      if (*line != ' ' && *line != '\t' && *line != '\n') {
+         /* This is a device name line */
+         const char *end = strchr(line, '\n');
+         size_t len = end ? (size_t)(end - line) : strlen(line);
+
+         if (len > 0 && len < 256) {
+            char device[256];
+            strncpy(device, line, len);
+            device[len] = '\0';
+
+            /* Skip null device and some internal devices */
+            if (strcmp(device, "null") != 0 && strncmp(device, "hw:", 3) != 0 &&
+                strncmp(device, "plughw:", 7) != 0) {
+               json_object_array_add(arr, json_object_new_string(device));
+            }
+         }
+      }
+
+      /* Move to next line */
+      const char *next = strchr(line, '\n');
+      if (!next)
+         break;
+      line = next + 1;
+   }
+}
+
+/**
+ * @brief Parse PulseAudio source/sink list (pactl list short output)
+ * @param output Command output to parse
+ * @param arr JSON array to add devices to
+ * @param filter_monitors If true, filter out .monitor devices (for sources only)
+ */
+static void parse_pulse_devices(const char *output, json_object *arr, bool filter_monitors) {
+   if (!output || !arr)
+      return;
+
+   /* pactl list sources/sinks short format:
+    * index\tname\tmodule\tsample_spec\tstate
+    */
+   const char *line = output;
+   while (*line) {
+      /* Find the name field (second column, tab-separated) */
+      const char *tab1 = strchr(line, '\t');
+      if (tab1) {
+         tab1++; /* Skip the tab */
+         const char *tab2 = strchr(tab1, '\t');
+         if (tab2) {
+            size_t len = (size_t)(tab2 - tab1);
+            if (len > 0 && len < 256) {
+               char device[256];
+               strncpy(device, tab1, len);
+               device[len] = '\0';
+
+               /* Filter out monitor sources if requested (they capture sink output, not mic input)
+                */
+               if (filter_monitors && strstr(device, ".monitor") != NULL) {
+                  /* Skip to next line */
+                  const char *next = strchr(line, '\n');
+                  if (!next)
+                     break;
+                  line = next + 1;
+                  continue;
+               }
+
+               /* Add device (PulseAudio names are usually descriptive) */
+               json_object_array_add(arr, json_object_new_string(device));
+            }
+         }
+      }
+
+      /* Move to next line */
+      const char *next = strchr(line, '\n');
+      if (!next)
+         break;
+      line = next + 1;
+   }
+}
+
+/* Audio device cache to avoid repeated popen() calls */
+#define AUDIO_DEVICE_CACHE_TTL_SEC 30
+#define AUDIO_DEVICE_BUFFER_SIZE 2048
+
+static struct {
+   time_t alsa_capture_time;
+   time_t alsa_playback_time;
+   time_t pulse_capture_time;
+   time_t pulse_playback_time;
+   char alsa_capture[AUDIO_DEVICE_BUFFER_SIZE];
+   char alsa_playback[AUDIO_DEVICE_BUFFER_SIZE];
+   char pulse_capture[AUDIO_DEVICE_BUFFER_SIZE];
+   char pulse_playback[AUDIO_DEVICE_BUFFER_SIZE];
+} s_device_cache = { 0 };
+
+static void handle_get_audio_devices(ws_connection_t *conn, struct json_object *payload) {
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("get_audio_devices_response"));
+   json_object *resp_payload = json_object_new_object();
+
+   /* Get backend from payload */
+   const char *backend = "auto";
+   if (payload) {
+      struct json_object *backend_obj;
+      if (json_object_object_get_ex(payload, "backend", &backend_obj)) {
+         backend = json_object_get_string(backend_obj);
+      }
+   }
+
+   json_object *capture_devices = json_object_new_array();
+   json_object *playback_devices = json_object_new_array();
+
+   /* Always add "default" as first option */
+   json_object_array_add(capture_devices, json_object_new_string("default"));
+   json_object_array_add(playback_devices, json_object_new_string("default"));
+
+   time_t now = time(NULL);
+
+   if (strcmp(backend, "alsa") == 0) {
+      /* Get ALSA devices (with caching) */
+      if (now - s_device_cache.alsa_capture_time > AUDIO_DEVICE_CACHE_TTL_SEC) {
+         if (run_command("arecord -L 2>/dev/null", s_device_cache.alsa_capture,
+                         sizeof(s_device_cache.alsa_capture)) > 0) {
+            s_device_cache.alsa_capture_time = now;
+         }
+      }
+      if (s_device_cache.alsa_capture[0]) {
+         parse_alsa_devices(s_device_cache.alsa_capture, capture_devices);
+      }
+
+      if (now - s_device_cache.alsa_playback_time > AUDIO_DEVICE_CACHE_TTL_SEC) {
+         if (run_command("aplay -L 2>/dev/null", s_device_cache.alsa_playback,
+                         sizeof(s_device_cache.alsa_playback)) > 0) {
+            s_device_cache.alsa_playback_time = now;
+         }
+      }
+      if (s_device_cache.alsa_playback[0]) {
+         parse_alsa_devices(s_device_cache.alsa_playback, playback_devices);
+      }
+   } else if (strcmp(backend, "pulse") == 0) {
+      /* Get PulseAudio devices (with caching) */
+      if (now - s_device_cache.pulse_capture_time > AUDIO_DEVICE_CACHE_TTL_SEC) {
+         if (run_command("pactl list sources short 2>/dev/null", s_device_cache.pulse_capture,
+                         sizeof(s_device_cache.pulse_capture)) > 0) {
+            s_device_cache.pulse_capture_time = now;
+         }
+      }
+      if (s_device_cache.pulse_capture[0]) {
+         parse_pulse_devices(s_device_cache.pulse_capture, capture_devices,
+                             true); /* Filter out .monitor sources */
+      }
+
+      if (now - s_device_cache.pulse_playback_time > AUDIO_DEVICE_CACHE_TTL_SEC) {
+         if (run_command("pactl list sinks short 2>/dev/null", s_device_cache.pulse_playback,
+                         sizeof(s_device_cache.pulse_playback)) > 0) {
+            s_device_cache.pulse_playback_time = now;
+         }
+      }
+      if (s_device_cache.pulse_playback[0]) {
+         parse_pulse_devices(s_device_cache.pulse_playback, playback_devices,
+                             false); /* Sinks don't need filtering */
+      }
+   }
+   /* For "auto", just return default - actual device selection happens at runtime */
+
+   json_object_object_add(resp_payload, "backend", json_object_new_string(backend));
+   json_object_object_add(resp_payload, "capture_devices", capture_devices);
+   json_object_object_add(resp_payload, "playback_devices", playback_devices);
+   json_object_object_add(response, "payload", resp_payload);
+
+   const char *json_str = json_object_to_json_string(response);
+   size_t json_len = strlen(json_str);
+   unsigned char *buf = malloc(LWS_PRE + json_len);
+   if (buf) {
+      memcpy(buf + LWS_PRE, json_str, json_len);
+      lws_write(conn->wsi, buf + LWS_PRE, json_len, LWS_WRITE_TEXT);
+      free(buf);
+   }
+
+   json_object_put(response);
+   LOG_INFO("WebUI: Sent audio devices for backend '%s'", backend);
+}
+
+/**
+ * @brief Validate that a resolved path is within allowed directories
+ *
+ * Prevents path traversal attacks by ensuring model paths are in expected locations.
+ */
+static bool is_path_allowed(const char *resolved_path) {
+   if (!resolved_path) {
+      return false;
+   }
+
+   /* Get current working directory as base - always allowed */
+   char cwd[CONFIG_PATH_MAX];
+   if (getcwd(cwd, sizeof(cwd)) != NULL) {
+      if (strncmp(resolved_path, cwd, strlen(cwd)) == 0) {
+         return true;
+      }
+   }
+
+   /* Check against allowed prefixes (defined at top of file) */
+   for (int i = 0; s_allowed_path_prefixes[i] != NULL; i++) {
+      if (strncmp(resolved_path, s_allowed_path_prefixes[i], strlen(s_allowed_path_prefixes[i])) ==
+          0) {
+         return true;
+      }
+   }
+
+   return false;
+}
+
+/**
+ * @brief Scan a directory for model files and build the response
+ *
+ * Internal helper that does the actual directory scanning.
+ */
+static json_object *scan_models_directory(void) {
+   const dawn_config_t *config = config_get();
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("list_models_response"));
+   json_object *payload = json_object_new_object();
+
+   json_object *asr_models = json_object_new_array();
+   json_object *tts_voices = json_object_new_array();
+
+   /* Resolve ASR models path - use dynamic realpath to avoid buffer overflow */
+   char asr_path[CONFIG_PATH_MAX];
+   char *resolved = realpath(config->asr.models_path, NULL); /* Dynamic allocation */
+   bool asr_valid = false;
+
+   if (resolved) {
+      asr_valid = is_path_allowed(resolved);
+      strncpy(asr_path, resolved, sizeof(asr_path) - 1);
+      asr_path[sizeof(asr_path) - 1] = '\0';
+      free(resolved);
+   } else {
+      /* realpath failed - use original path with validation */
+      strncpy(asr_path, config->asr.models_path, sizeof(asr_path) - 1);
+      asr_path[sizeof(asr_path) - 1] = '\0';
+      asr_valid = (asr_path[0] == '.' || is_path_allowed(asr_path));
+   }
+
+   if (!asr_valid) {
+      LOG_WARNING("WebUI: ASR models path outside allowed directories: %s", asr_path);
+   }
+
+   /* Scan ASR models directory for ggml-*.bin files */
+   if (asr_valid) {
+      DIR *asr_dir = opendir(asr_path);
+      if (asr_dir) {
+         struct dirent *entry;
+         while ((entry = readdir(asr_dir)) != NULL) {
+            /* Look for ggml-*.bin files */
+            if (entry->d_type == DT_REG || entry->d_type == DT_LNK || entry->d_type == DT_UNKNOWN) {
+               const char *name = entry->d_name;
+               if (strncmp(name, "ggml-", 5) == 0) {
+                  const char *ext = strrchr(name, '.');
+                  if (ext && strcmp(ext, ".bin") == 0) {
+                     /* Extract model name between "ggml-" and ".bin" */
+                     size_t model_len = ext - (name + 5);
+                     if (model_len > 0 && model_len < 64) {
+                        char model_name[64];
+                        strncpy(model_name, name + 5, model_len);
+                        model_name[model_len] = '\0';
+                        json_object_array_add(asr_models, json_object_new_string(model_name));
+                     }
+                  }
+               }
+            }
+         }
+         closedir(asr_dir);
+      } else {
+         LOG_WARNING("WebUI: Could not open ASR models path: %s", asr_path);
+      }
+   }
+
+   /* Resolve TTS models path - use dynamic realpath to avoid buffer overflow */
+   char tts_path[CONFIG_PATH_MAX];
+   resolved = realpath(config->tts.models_path, NULL); /* Dynamic allocation */
+   bool tts_valid = false;
+
+   if (resolved) {
+      tts_valid = is_path_allowed(resolved);
+      strncpy(tts_path, resolved, sizeof(tts_path) - 1);
+      tts_path[sizeof(tts_path) - 1] = '\0';
+      free(resolved);
+   } else {
+      /* realpath failed - use original path with validation */
+      strncpy(tts_path, config->tts.models_path, sizeof(tts_path) - 1);
+      tts_path[sizeof(tts_path) - 1] = '\0';
+      tts_valid = (tts_path[0] == '.' || is_path_allowed(tts_path));
+   }
+
+   if (!tts_valid) {
+      LOG_WARNING("WebUI: TTS models path outside allowed directories: %s", tts_path);
+   }
+
+   /* Scan TTS models directory for *.onnx files (excluding VAD models) */
+   if (tts_valid) {
+      DIR *tts_dir = opendir(tts_path);
+      if (tts_dir) {
+         struct dirent *entry;
+         while ((entry = readdir(tts_dir)) != NULL) {
+            if (entry->d_type == DT_REG || entry->d_type == DT_LNK || entry->d_type == DT_UNKNOWN) {
+               const char *name = entry->d_name;
+               const char *ext = strrchr(name, '.');
+               /* Check extension and skip VAD models in single pass */
+               if (ext && strcmp(ext, ".onnx") == 0 && strstr(name, "vad") == NULL &&
+                   strstr(name, "VAD") == NULL) {
+                  /* Extract voice name (filename without .onnx extension) */
+                  size_t voice_len = ext - name;
+                  if (voice_len > 0 && voice_len < 128) {
+                     char voice_name[128];
+                     strncpy(voice_name, name, voice_len);
+                     voice_name[voice_len] = '\0';
+                     json_object_array_add(tts_voices, json_object_new_string(voice_name));
+                  }
+               }
+            }
+         }
+         closedir(tts_dir);
+      } else {
+         LOG_WARNING("WebUI: Could not open TTS models path: %s", tts_path);
+      }
+   }
+
+   json_object_object_add(payload, "asr_models", asr_models);
+   json_object_object_add(payload, "tts_voices", tts_voices);
+   json_object_object_add(payload, "asr_path", json_object_new_string(config->asr.models_path));
+   json_object_object_add(payload, "tts_path", json_object_new_string(config->tts.models_path));
+   json_object_object_add(response, "payload", payload);
+
+   LOG_INFO("WebUI: Scanned models (%zu ASR, %zu TTS)", json_object_array_length(asr_models),
+            json_object_array_length(tts_voices));
+
+   return response;
+}
+
+/**
+ * @brief List available ASR and TTS models from configured paths
+ *
+ * Scans the configured model directories for:
+ * - ASR: ggml-*.bin files (Whisper models) - extracts model name (tiny, base, small, etc.)
+ * - TTS: *.onnx files (Piper voices) - returns full filename without extension
+ *
+ * Results are cached for MODEL_CACHE_TTL seconds to avoid repeated filesystem scans.
+ */
+static void handle_list_models(ws_connection_t *conn) {
+   time_t now = time(NULL);
+
+   pthread_mutex_lock(&s_discovery_cache.cache_mutex);
+
+   /* Check if cache is still valid */
+   if (s_discovery_cache.models_response &&
+       (now - s_discovery_cache.models_cache_time) < MODEL_CACHE_TTL) {
+      /* Return cached response */
+      send_json_response(conn->wsi, s_discovery_cache.models_response);
+      LOG_INFO("WebUI: Sent cached model list");
+      pthread_mutex_unlock(&s_discovery_cache.cache_mutex);
+      return;
+   }
+
+   /* Invalidate old cache */
+   if (s_discovery_cache.models_response) {
+      json_object_put(s_discovery_cache.models_response);
+      s_discovery_cache.models_response = NULL;
+   }
+
+   pthread_mutex_unlock(&s_discovery_cache.cache_mutex);
+
+   /* Build new response (outside lock to avoid blocking) */
+   json_object *response = scan_models_directory();
+
+   /* Update cache */
+   pthread_mutex_lock(&s_discovery_cache.cache_mutex);
+   s_discovery_cache.models_response = json_object_get(response); /* Increment refcount */
+   s_discovery_cache.models_cache_time = now;
+   pthread_mutex_unlock(&s_discovery_cache.cache_mutex);
+
+   /* Send response */
+   send_json_response(conn->wsi, response);
+   json_object_put(response);
+}
+
+/**
+ * @brief Scan network interfaces and build the response
+ *
+ * Internal helper that does the actual interface enumeration.
+ */
+static json_object *scan_network_interfaces(void) {
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("list_interfaces_response"));
+   json_object *payload = json_object_new_object();
+
+   json_object *addresses = json_object_new_array();
+
+   /* Track seen IPs efficiently without JSON library overhead */
+   char seen_ips[16][INET_ADDRSTRLEN];
+   int seen_count = 0;
+
+   /* Always include common options first */
+   json_object_array_add(addresses, json_object_new_string("0.0.0.0"));
+   strncpy(seen_ips[seen_count++], "0.0.0.0", INET_ADDRSTRLEN);
+   json_object_array_add(addresses, json_object_new_string("127.0.0.1"));
+   strncpy(seen_ips[seen_count++], "127.0.0.1", INET_ADDRSTRLEN);
+
+   /* Get actual interface addresses */
+   struct ifaddrs *ifaddr, *ifa;
+   if (getifaddrs(&ifaddr) == 0) {
+      for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+         if (ifa->ifa_addr == NULL)
+            continue;
+
+         /* Only IPv4 addresses */
+         if (ifa->ifa_addr->sa_family == AF_INET) {
+            /* Skip loopback (already added 127.0.0.1) */
+            if (ifa->ifa_flags & IFF_LOOPBACK)
+               continue;
+
+            struct sockaddr_in *addr = (struct sockaddr_in *)ifa->ifa_addr;
+            char ip_str[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, &addr->sin_addr, ip_str, sizeof(ip_str))) {
+               /* Check for duplicates using simple array (faster than JSON iteration) */
+               int duplicate = 0;
+               for (int j = 0; j < seen_count; j++) {
+                  if (strcmp(seen_ips[j], ip_str) == 0) {
+                     duplicate = 1;
+                     break;
+                  }
+               }
+               if (!duplicate && seen_count < 16) {
+                  strncpy(seen_ips[seen_count++], ip_str, INET_ADDRSTRLEN);
+                  json_object_array_add(addresses, json_object_new_string(ip_str));
+               }
+            }
+         }
+      }
+      freeifaddrs(ifaddr);
+   } else {
+      LOG_WARNING("WebUI: getifaddrs failed: %s", strerror(errno));
+      /* Continue with just 0.0.0.0 and 127.0.0.1 */
+   }
+
+   json_object_object_add(payload, "addresses", addresses);
+   json_object_object_add(response, "payload", payload);
+
+   LOG_INFO("WebUI: Scanned interfaces (%d addresses)", seen_count);
+   return response;
+}
+
+/**
+ * @brief List available network interfaces and their IP addresses
+ *
+ * Returns bind address options including:
+ * - 0.0.0.0 (all interfaces)
+ * - 127.0.0.1 (localhost)
+ * - Individual interface IPs (e.g., 192.168.1.100)
+ *
+ * Results are cached for MODEL_CACHE_TTL seconds to avoid repeated system calls.
+ */
+static void handle_list_interfaces(ws_connection_t *conn) {
+   time_t now = time(NULL);
+
+   pthread_mutex_lock(&s_discovery_cache.cache_mutex);
+
+   /* Check if cache is still valid */
+   if (s_discovery_cache.interfaces_response &&
+       (now - s_discovery_cache.interfaces_cache_time) < MODEL_CACHE_TTL) {
+      /* Return cached response */
+      send_json_response(conn->wsi, s_discovery_cache.interfaces_response);
+      LOG_INFO("WebUI: Sent cached interface list");
+      pthread_mutex_unlock(&s_discovery_cache.cache_mutex);
+      return;
+   }
+
+   /* Invalidate old cache */
+   if (s_discovery_cache.interfaces_response) {
+      json_object_put(s_discovery_cache.interfaces_response);
+      s_discovery_cache.interfaces_response = NULL;
+   }
+
+   pthread_mutex_unlock(&s_discovery_cache.cache_mutex);
+
+   /* Build new response (outside lock to avoid blocking) */
+   json_object *response = scan_network_interfaces();
+
+   /* Update cache */
+   pthread_mutex_lock(&s_discovery_cache.cache_mutex);
+   s_discovery_cache.interfaces_response = json_object_get(response); /* Increment refcount */
+   s_discovery_cache.interfaces_cache_time = now;
+   pthread_mutex_unlock(&s_discovery_cache.cache_mutex);
+
+   /* Send response */
+   send_json_response(conn->wsi, response);
+   json_object_put(response);
+}
 
 static void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
    /* Null-terminate for JSON parsing */
@@ -694,9 +1725,46 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
    } else if (strcmp(type, "cancel") == 0) {
       /* Cancel current operation */
       handle_cancel_message(conn);
-   } else if (strcmp(type, "config") == 0) {
-      /* Configuration update - Phase 5 */
-      LOG_INFO("WebUI: Config message received (not yet implemented)");
+   } else if (strcmp(type, "get_config") == 0) {
+      /* Request current configuration */
+      handle_get_config(conn);
+   } else if (strcmp(type, "set_config") == 0) {
+      /* Update configuration settings */
+      if (payload) {
+         handle_set_config(conn, payload);
+      }
+   } else if (strcmp(type, "set_secrets") == 0) {
+      /* Update secrets (API keys, credentials) */
+      if (payload) {
+         handle_set_secrets(conn, payload);
+      }
+   } else if (strcmp(type, "get_audio_devices") == 0) {
+      /* Request available audio devices for given backend */
+      handle_get_audio_devices(conn, payload);
+   } else if (strcmp(type, "list_models") == 0) {
+      /* Request available ASR and TTS models */
+      handle_list_models(conn);
+   } else if (strcmp(type, "list_interfaces") == 0) {
+      /* Request available network interfaces */
+      handle_list_interfaces(conn);
+   } else if (strcmp(type, "restart") == 0) {
+      /* Request application restart */
+      LOG_INFO("WebUI: Restart requested by client");
+
+      /* Send confirmation response before initiating restart */
+      struct json_object *response = json_object_new_object();
+      json_object_object_add(response, "type", json_object_new_string("restart_response"));
+      struct json_object *resp_payload = json_object_new_object();
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+      json_object_object_add(resp_payload, "message",
+                             json_object_new_string("DAWN is restarting..."));
+      json_object_object_add(response, "payload", resp_payload);
+
+      send_json_message(conn->wsi, json_object_to_json_string(response));
+      json_object_put(response);
+
+      /* Request restart - this will trigger clean shutdown and re-exec */
+      dawn_request_restart();
    } else if (strcmp(type, "reconnect") == 0) {
       /* Session reconnection with stored token */
       if (payload) {
@@ -784,6 +1852,9 @@ static int callback_websocket(struct lws *wsi,
             pthread_mutex_unlock(&s_mutex);
             LOG_WARNING("WebUI: Connection rejected - max clients reached (%d)",
                         g_config.webui.max_clients);
+            /* Send error message to inform client before closing */
+            send_error_impl(wsi, "MAX_CLIENTS",
+                            "Maximum WebUI clients reached. Please try again later.");
             return -1; /* Reject connection */
          }
          s_client_count++;
@@ -836,9 +1907,9 @@ static int callback_websocket(struct lws *wsi,
             conn->session->disconnected = true;
             conn->session->client_data = NULL;
 
-            /* Don't destroy session immediately - worker thread may still be using it.
-             * Session manager will clean it up on timeout or next connection from same client.
-             * Just unlink from this connection. */
+            /* Release our reference to the session.
+             * Session manager will clean it up when ref_count reaches 0. */
+            session_release(conn->session);
             conn->session = NULL;
          }
 

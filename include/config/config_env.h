@@ -26,6 +26,10 @@
 
 #include "config/dawn_config.h"
 
+/* Forward declaration for json-c */
+struct json_object;
+typedef struct json_object json_object;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -89,6 +93,50 @@ void config_dump_toml(const dawn_config_t *config);
 void config_dump_settings(const dawn_config_t *config,
                           const secrets_config_t *secrets,
                           const char *config_file_loaded);
+
+/**
+ * @brief Convert configuration to JSON object for WebUI
+ *
+ * Serializes the entire config structure to a json-c object.
+ * Caller must free the returned object with json_object_put().
+ *
+ * @param config Configuration to serialize
+ * @return json_object* JSON object (caller owns), or NULL on error
+ */
+json_object *config_to_json(const dawn_config_t *config);
+
+/**
+ * @brief Get secrets status as JSON (without revealing values)
+ *
+ * Returns a JSON object with boolean flags indicating which secrets are set.
+ * Never includes actual secret values.
+ *
+ * @param secrets Secrets to check
+ * @return json_object* JSON object with is_set flags, or NULL on error
+ */
+json_object *secrets_to_json_status(const secrets_config_t *secrets);
+
+/**
+ * @brief Write configuration to TOML file
+ *
+ * Writes the complete configuration to the specified path in TOML format.
+ *
+ * @param config Configuration to write
+ * @param path Output file path
+ * @return 0 on success, non-zero on error
+ */
+int config_write_toml(const dawn_config_t *config, const char *path);
+
+/**
+ * @brief Write secrets to TOML file
+ *
+ * Writes secrets to the specified path. Sets restrictive file permissions (0600).
+ *
+ * @param secrets Secrets to write
+ * @param path Output file path
+ * @return 0 on success, non-zero on error
+ */
+int secrets_write_toml(const secrets_config_t *secrets, const char *path);
 
 #ifdef __cplusplus
 }

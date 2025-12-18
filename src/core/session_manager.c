@@ -108,11 +108,8 @@ static void session_free(session_t *session) {
       session->conversation_history = NULL;
    }
 
-   // Free client-specific data if any
-   if (session->client_data) {
-      free(session->client_data);
-      session->client_data = NULL;
-   }
+   // Clear client_data pointer (don't free - WebSocket sessions use libwebsockets-managed memory)
+   session->client_data = NULL;
 
    // Destroy synchronization primitives
    pthread_cond_destroy(&session->ref_zero_cond);
@@ -198,13 +195,15 @@ void session_manager_cleanup(void) {
          // Mark as disconnected to abort any in-flight operations
          sessions[i]->disconnected = true;
 
-         // Wait for ref_count to reach 0 (or 1 for local session)
-         pthread_mutex_lock(&sessions[i]->ref_mutex);
-         int target_ref = (i == 0) ? 1 : 0;  // Local session has base ref of 1
-         while (sessions[i]->ref_count > target_ref) {
-            pthread_cond_wait(&sessions[i]->ref_zero_cond, &sessions[i]->ref_mutex);
+         // For LOCAL session, wait for ref_count to reach 1 (workers may be using it)
+         // For WebSocket/DAP sessions, force cleanup (ref_count is for reconnection support)
+         if (sessions[i]->type == SESSION_TYPE_LOCAL) {
+            pthread_mutex_lock(&sessions[i]->ref_mutex);
+            while (sessions[i]->ref_count > 1) {
+               pthread_cond_wait(&sessions[i]->ref_zero_cond, &sessions[i]->ref_mutex);
+            }
+            pthread_mutex_unlock(&sessions[i]->ref_mutex);
          }
-         pthread_mutex_unlock(&sessions[i]->ref_mutex);
 
          LOG_INFO("Destroying session %u (type=%s)", sessions[i]->session_id,
                   session_type_name(sessions[i]->type));

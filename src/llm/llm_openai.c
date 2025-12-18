@@ -97,7 +97,7 @@ char *llm_openai_chat_completion(struct json_object *conversation_history,
    root = json_object_new_object();
 
    // Model from config
-   json_object_object_add(root, "model", json_object_new_string(g_config.llm.cloud.model));
+   json_object_object_add(root, "model", json_object_new_string(g_config.llm.cloud.openai_model));
 
    // User message is now added by dawn.c before calling this function
    // If vision is provided, modify the last user message to include image
@@ -383,7 +383,7 @@ char *llm_openai_chat_completion_streaming(struct json_object *conversation_hist
    root = json_object_new_object();
 
    // Model from config
-   json_object_object_add(root, "model", json_object_new_string(g_config.llm.cloud.model));
+   json_object_object_add(root, "model", json_object_new_string(g_config.llm.cloud.openai_model));
 
    // Enable streaming with usage reporting
    json_object_object_add(root, "stream", json_object_new_boolean(1));

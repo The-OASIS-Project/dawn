@@ -76,7 +76,17 @@ static pthread_mutex_t pool_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct mosquitto *worker_mosq = NULL;
 
 // Shutdown timeout: 35 seconds (> 30s LLM timeout to allow graceful finish)
+// This is a safety net for worst-case scenarios. In practice, workers exit quickly
+// once they check pool_initialized flag. For restart scenarios, the main LLM thread
+// is already interrupted with a 5s timeout before we reach worker pool shutdown.
 #define SHUTDOWN_TIMEOUT_SEC 35
+
+// Timeout for borrowing ASR context (milliseconds)
+// WebUI clients will wait this long for a worker before failing
+#define WORKER_BORROW_TIMEOUT_MS 5000
+
+// Condition variable for signaling worker availability
+static pthread_cond_t pool_available_cond = PTHREAD_COND_INITIALIZER;
 
 // =============================================================================
 // Forward Declarations
@@ -196,6 +206,11 @@ void worker_pool_shutdown(void) {
    }
 
    LOG_INFO("Shutting down worker pool...");
+
+   // Wake any threads waiting to borrow ASR contexts so they can fail gracefully
+   pthread_mutex_lock(&pool_mutex);
+   pthread_cond_broadcast(&pool_available_cond);
+   pthread_mutex_unlock(&pool_mutex);
 
    // Phase 1: Signal all workers to shutdown
    for (int i = 0; i < actual_worker_count; i++) {
@@ -317,19 +332,49 @@ asr_context_t *worker_pool_borrow_asr(void) {
 
    pthread_mutex_lock(&pool_mutex);
 
-   // Find an idle worker
-   worker_context_t *available = NULL;
-   for (int i = 0; i < actual_worker_count; i++) {
-      if (workers[i].state == WORKER_STATE_IDLE) {
-         available = &workers[i];
-         break;
-      }
+   // Calculate absolute timeout
+   struct timespec timeout;
+   clock_gettime(CLOCK_REALTIME, &timeout);
+   timeout.tv_sec += WORKER_BORROW_TIMEOUT_MS / 1000;
+   timeout.tv_nsec += (WORKER_BORROW_TIMEOUT_MS % 1000) * 1000000;
+   if (timeout.tv_nsec >= 1000000000) {
+      timeout.tv_sec++;
+      timeout.tv_nsec -= 1000000000;
    }
 
-   if (!available) {
-      pthread_mutex_unlock(&pool_mutex);
-      LOG_WARNING("All workers busy, cannot borrow ASR context");
-      return NULL;
+   // Find an idle worker, waiting if necessary
+   worker_context_t *available = NULL;
+   while (!available) {
+      for (int i = 0; i < actual_worker_count; i++) {
+         if (workers[i].state == WORKER_STATE_IDLE) {
+            available = &workers[i];
+            break;
+         }
+      }
+
+      if (!available) {
+         // Wait for a worker to become available (with timeout)
+         LOG_INFO("All workers busy, waiting up to %dms for availability...",
+                  WORKER_BORROW_TIMEOUT_MS);
+         int wait_result = pthread_cond_timedwait(&pool_available_cond, &pool_mutex, &timeout);
+         if (wait_result == ETIMEDOUT) {
+            pthread_mutex_unlock(&pool_mutex);
+            LOG_WARNING("Timed out waiting for ASR worker (all busy for %dms)",
+                        WORKER_BORROW_TIMEOUT_MS);
+            return NULL;
+         } else if (wait_result != 0) {
+            pthread_mutex_unlock(&pool_mutex);
+            LOG_ERROR("Error waiting for ASR worker: %s", strerror(wait_result));
+            return NULL;
+         }
+         // Check if pool is shutting down (broadcast wakes us during shutdown)
+         if (!pool_initialized) {
+            pthread_mutex_unlock(&pool_mutex);
+            LOG_INFO("Worker pool shutting down, aborting ASR borrow");
+            return NULL;
+         }
+         // Loop back to check for available worker
+      }
    }
 
    // Mark worker as busy (but don't signal thread - we're using ASR directly)
@@ -360,6 +405,9 @@ void worker_pool_return_asr(asr_context_t *ctx) {
          pthread_mutex_unlock(&workers[i].mutex);
 
          LOG_INFO("Returned ASR context to worker %d", i);
+
+         // Signal any threads waiting for a worker
+         pthread_cond_signal(&pool_available_cond);
          break;
       }
    }
@@ -650,6 +698,18 @@ static void worker_cleanup_handler(void *arg) {
 
    // Reset state
    ctx->state = WORKER_STATE_IDLE;
+
+   // Signal any threads waiting for a worker.
+   // NOTE: Using trylock because we're in a pthread cancellation context where the
+   // thread may have been holding mutexes. If trylock fails (mutex held elsewhere),
+   // the signal is skipped. This is acceptable because:
+   // 1. Cancellation is only used during shutdown as a last resort
+   // 2. worker_pool_shutdown() broadcasts to all waiters before canceling threads
+   // 3. Borrowers have a 5-second timeout and will eventually wake up
+   if (pthread_mutex_trylock(&pool_mutex) == 0) {
+      pthread_cond_signal(&pool_available_cond);
+      pthread_mutex_unlock(&pool_mutex);
+   }
 }
 
 /**
@@ -714,6 +774,11 @@ static void *worker_thread(void *arg) {
       ctx->state = WORKER_STATE_IDLE;
 
       pthread_mutex_unlock(&ctx->mutex);
+
+      // Signal any threads waiting for a worker (e.g., WebUI ASR requests)
+      pthread_mutex_lock(&pool_mutex);
+      pthread_cond_signal(&pool_available_cond);
+      pthread_mutex_unlock(&pool_mutex);
 
       // Unregister cleanup handler (execute=0 since we did manual cleanup)
       pthread_cleanup_pop(0);

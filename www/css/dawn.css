@@ -571,11 +571,512 @@ button:disabled {
     flex-wrap: wrap;
   }
 
+  /* Force text input to its own row above buttons */
   #text-input {
-    width: 100%;
+    flex: 1 1 100%;
+    min-width: 0;
+    margin-bottom: 0.5rem;
   }
 
-  button {
+  /* Buttons share the second row */
+  #send-btn,
+  #mic-btn {
     flex: 1;
+  }
+}
+
+/* =============================================================================
+ * Settings Button
+ * ============================================================================= */
+#settings-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  background-color: transparent;
+  border: 1px solid var(--text-secondary);
+  border-radius: 50%;
+  color: var(--text-secondary);
+  transition: all var(--transition-fast);
+}
+
+#settings-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  transform: rotate(30deg);
+}
+
+#settings-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* =============================================================================
+ * Settings Panel Overlay
+ * ============================================================================= */
+#settings-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  z-index: 998;
+  opacity: 1;
+  transition: opacity var(--transition-medium);
+}
+
+#settings-overlay.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* =============================================================================
+ * Settings Panel
+ * ============================================================================= */
+#settings-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: 420px;
+  max-width: 90vw;
+  height: 100%;
+  background: rgba(18, 18, 26, 0.92);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-left: 1px solid rgba(34, 211, 238, 0.2);
+  box-shadow: -10px 0 40px rgba(0, 0, 0, 0.5);
+  z-index: 999;
+  display: flex;
+  flex-direction: column;
+  transform: translateX(0);
+  transition: transform var(--transition-medium) ease-out;
+}
+
+#settings-panel.hidden {
+  transform: translateX(100%);
+  pointer-events: none;
+}
+
+.settings-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1.25rem 1.5rem;
+  border-bottom: 1px solid rgba(34, 211, 238, 0.15);
+  background: rgba(10, 10, 15, 0.5);
+}
+
+.settings-header h2 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0.05em;
+}
+
+#settings-close {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid var(--text-secondary);
+  border-radius: 50%;
+  color: var(--text-secondary);
+  font-size: 1.25rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+#settings-close:hover {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+/* =============================================================================
+ * Settings Content
+ * ============================================================================= */
+.settings-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1rem 1.5rem;
+}
+
+.settings-paths {
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+  background: rgba(34, 211, 238, 0.08);
+  border-radius: var(--border-radius);
+  border: 1px solid rgba(34, 211, 238, 0.15);
+}
+
+.config-path, .secrets-path {
+  display: flex;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.config-path {
+  margin-bottom: 0.25rem;
+}
+
+.path-label {
+  font-weight: 600;
+  color: var(--accent);
+  min-width: 55px;
+}
+
+#config-path-display, #secrets-path-display {
+  font-family: 'Monaco', 'Menlo', monospace;
+  word-break: break-all;
+}
+
+.settings-loading {
+  text-align: center;
+  padding: 2rem;
+  color: var(--text-secondary);
+}
+
+/* =============================================================================
+ * Settings Sections
+ * ============================================================================= */
+.settings-section {
+  margin-bottom: 1rem;
+  background: rgba(26, 26, 36, 0.6);
+  border-radius: var(--border-radius);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  overflow: hidden;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.875rem 1rem;
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  background: rgba(34, 211, 238, 0.06);
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--transition-fast);
+}
+
+.section-header:hover {
+  background: rgba(34, 211, 238, 0.1);
+}
+
+.section-icon {
+  font-size: 1rem;
+}
+
+.section-toggle {
+  margin-left: auto;
+  font-size: 0.625rem;
+  color: var(--text-secondary);
+  transition: transform var(--transition-fast);
+}
+
+.section-header.collapsed .section-toggle {
+  transform: rotate(-90deg);
+}
+
+.section-content {
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.875rem;
+}
+
+.section-content.collapsed {
+  display: none;
+}
+
+.section-description {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  margin: 0 0 0.5rem 0;
+  padding: 0.5rem;
+  background: rgba(0, 255, 255, 0.05);
+  border-left: 2px solid var(--accent);
+  border-radius: 0 4px 4px 0;
+}
+
+/* =============================================================================
+ * Setting Items
+ * ============================================================================= */
+.setting-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.setting-item label {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.setting-item input[type="text"],
+.setting-item input[type="number"],
+.setting-item select {
+  padding: 0.625rem 0.875rem;
+  background: var(--bg-tertiary);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 0.875rem;
+  transition: border-color var(--transition-fast);
+}
+
+/* Style number input spinners to match dark theme */
+.setting-item input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+.setting-item input[type="number"]::-webkit-inner-spin-button,
+.setting-item input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0;
+}
+
+.setting-item input:focus,
+.setting-item select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.setting-item input:disabled,
+.setting-item select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: rgba(0, 0, 0, 0.3);
+  border-color: rgba(255, 255, 255, 0.05);
+}
+
+.setting-item input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.setting-item-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.setting-item-row label {
+  flex: 1;
+}
+
+.setting-item textarea {
+  padding: 0.625rem 0.875rem;
+  background: var(--bg-tertiary);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 0.875rem;
+  font-family: inherit;
+  resize: vertical;
+  min-height: 70px;
+  transition: border-color var(--transition-fast);
+}
+
+.setting-item textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* Setting groups (nested subsections) */
+.setting-group {
+  margin-top: 0.5rem;
+  padding: 0.75rem;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.setting-group .group-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 0.5rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Restart badge for settings that require restart */
+.restart-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.125rem 0.5rem;
+  font-size: 0.625rem;
+  font-weight: 600;
+  color: var(--warning);
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: 1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* =============================================================================
+ * Secret Input Fields
+ * ============================================================================= */
+.secret-input-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.secret-input {
+  flex: 1;
+  padding: 0.625rem 0.875rem;
+  background: var(--bg-tertiary);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 0.875rem;
+  font-family: 'Monaco', 'Menlo', monospace;
+  transition: border-color var(--transition-fast);
+}
+
+.secret-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.secret-toggle {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid var(--text-secondary);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.secret-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.secret-status {
+  font-size: 0.75rem;
+  padding: 0.125rem 0.5rem;
+  border-radius: 1rem;
+  white-space: nowrap;
+}
+
+.secret-status.is-set {
+  background: rgba(34, 197, 94, 0.2);
+  color: var(--success);
+}
+
+.secret-status.not-set {
+  background: rgba(136, 136, 136, 0.2);
+  color: var(--text-secondary);
+}
+
+/* =============================================================================
+ * Settings Footer
+ * ============================================================================= */
+.settings-footer {
+  padding: 1rem 1.5rem;
+  border-top: 1px solid rgba(34, 211, 238, 0.15);
+  background: rgba(10, 10, 15, 0.5);
+}
+
+.settings-actions {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.save-btn {
+  flex: 1;
+  padding: 0.75rem 1rem;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--accent);
+  border-radius: var(--border-radius);
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.save-btn:hover {
+  background: rgba(34, 211, 238, 0.15);
+}
+
+.save-btn.primary {
+  background: var(--accent);
+  color: var(--bg-primary);
+}
+
+.save-btn.primary:hover {
+  filter: brightness(1.1);
+}
+
+.reset-btn {
+  padding: 0.75rem 1rem;
+  background: transparent;
+  border: 1px solid var(--text-secondary);
+  border-radius: var(--border-radius);
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+
+.reset-btn:hover {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.restart-notice {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: var(--border-radius);
+  color: var(--warning);
+  font-size: 0.75rem;
+}
+
+.restart-notice.hidden {
+  display: none;
+}
+
+/* =============================================================================
+ * Settings Responsive
+ * ============================================================================= */
+@media (max-width: 500px) {
+  #settings-panel {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .settings-actions {
+    flex-direction: column;
+  }
+
+  .reset-btn {
+    order: 1;
   }
 }

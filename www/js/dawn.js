@@ -128,7 +128,12 @@
 
     ws.onclose = function(event) {
       console.log('WebSocket closed:', event.code, event.reason);
-      updateConnectionStatus('disconnected');
+      // Show close reason if available (e.g., "max clients reached")
+      if (event.reason) {
+        updateConnectionStatus('disconnected', event.reason);
+      } else {
+        updateConnectionStatus('disconnected');
+      }
       scheduleReconnect();
     };
 
@@ -194,6 +199,27 @@
             audioChunkMs = msg.payload.audio_chunk_ms;
             console.log('Audio chunk size set to:', audioChunkMs, 'ms');
           }
+          break;
+        case 'get_config_response':
+          handleGetConfigResponse(msg.payload);
+          break;
+        case 'set_config_response':
+          handleSetConfigResponse(msg.payload);
+          break;
+        case 'set_secrets_response':
+          handleSetSecretsResponse(msg.payload);
+          break;
+        case 'get_audio_devices_response':
+          handleGetAudioDevicesResponse(msg.payload);
+          break;
+        case 'list_models_response':
+          handleModelsListResponse(msg.payload);
+          break;
+        case 'list_interfaces_response':
+          handleInterfacesListResponse(msg.payload);
+          break;
+        case 'restart_response':
+          handleRestartResponse(msg.payload);
           break;
         default:
           console.log('Unknown message type:', msg.type);
@@ -830,12 +856,18 @@
   // =============================================================================
   // UI Updates
   // =============================================================================
-  function updateConnectionStatus(status) {
+  function updateConnectionStatus(status, reason) {
     elements.connectionStatus.className = status;
-    elements.connectionStatus.textContent =
-      status === 'connected' ? 'Connected' :
-      status === 'connecting' ? 'Connecting...' :
-      'Disconnected';
+    if (status === 'connected') {
+      elements.connectionStatus.textContent = 'Connected';
+    } else if (status === 'connecting') {
+      elements.connectionStatus.textContent = 'Connecting...';
+    } else {
+      // Show disconnect reason if available (truncate for display)
+      elements.connectionStatus.textContent = reason
+        ? 'Disconnected: ' + (reason.length > 30 ? reason.substring(0, 30) + '...' : reason)
+        : 'Disconnected';
+    }
   }
 
   function updateState(state) {
@@ -1105,6 +1137,10 @@
     // Draw default waveform shape (circle) on page load
     drawDefaultWaveform();
 
+    // Initialize settings panel
+    initSettingsElements();
+    initSettingsListeners();
+
     // Connect to WebSocket
     connect();
 
@@ -1116,6 +1152,1014 @@
     });
 
     console.log('DAWN WebUI initialized (audio:', audioResult.supported ? 'enabled' : 'disabled', ')');
+  }
+
+  // =============================================================================
+  // Settings Panel
+  // =============================================================================
+
+  // Settings state
+  let currentConfig = null;
+  let currentSecrets = null;
+  let restartRequiredFields = [];
+  let changedFields = new Set();
+  let dynamicOptions = { asr_models: [], tts_voices: [], bind_addresses: [] };
+
+  // Settings DOM elements (added after init)
+  const settingsElements = {};
+
+  // Settings schema for dynamic form generation
+  const SETTINGS_SCHEMA = {
+    general: {
+      label: 'General',
+      icon: '&#x2699;',
+      fields: {
+        ai_name: { type: 'text', label: 'AI Name / Wake Word', hint: 'Wake word to activate voice input' },
+        log_file: { type: 'text', label: 'Log File Path', placeholder: 'Leave empty for stdout', hint: 'Path to log file, or empty for console output' }
+      }
+    },
+    persona: {
+      label: 'Persona',
+      icon: '&#x1F464;',
+      fields: {
+        description: { type: 'textarea', label: 'AI Description', rows: 3, placeholder: 'Custom personality description', hint: 'Personality and behavior instructions for the AI. Changes apply to new conversations only.' }
+      }
+    },
+    localization: {
+      label: 'Localization',
+      icon: '&#x1F30D;',
+      fields: {
+        location: { type: 'text', label: 'Location', placeholder: 'e.g., San Francisco, CA', hint: 'Default location for weather and local queries' },
+        timezone: {
+          type: 'select',
+          label: 'Timezone',
+          hint: 'IANA timezone for time-related responses',
+          options: [
+            '', // System default
+            'America/New_York',
+            'America/Chicago',
+            'America/Denver',
+            'America/Phoenix',
+            'America/Los_Angeles',
+            'America/Anchorage',
+            'America/Honolulu',
+            'America/Toronto',
+            'America/Vancouver',
+            'America/Mexico_City',
+            'America/Sao_Paulo',
+            'America/Buenos_Aires',
+            'Europe/London',
+            'Europe/Paris',
+            'Europe/Berlin',
+            'Europe/Rome',
+            'Europe/Madrid',
+            'Europe/Amsterdam',
+            'Europe/Moscow',
+            'Asia/Tokyo',
+            'Asia/Shanghai',
+            'Asia/Hong_Kong',
+            'Asia/Singapore',
+            'Asia/Seoul',
+            'Asia/Mumbai',
+            'Asia/Dubai',
+            'Asia/Bangkok',
+            'Australia/Sydney',
+            'Australia/Melbourne',
+            'Australia/Perth',
+            'Pacific/Auckland',
+            'Pacific/Fiji',
+            'UTC'
+          ]
+        },
+        units: { type: 'select', label: 'Units', options: ['imperial', 'metric'], hint: 'Measurement system for weather and calculations' }
+      }
+    },
+    audio: {
+      label: 'Audio',
+      icon: '&#x1F50A;',
+      fields: {
+        backend: { type: 'select', label: 'Backend', options: ['auto', 'pulse', 'alsa'], restart: true, hint: 'Audio system: auto detects PulseAudio or falls back to ALSA' },
+        capture_device: { type: 'text', label: 'Capture Device', restart: true, hint: 'Microphone device name (e.g., default, hw:0,0)' },
+        playback_device: { type: 'text', label: 'Playback Device', restart: true, hint: 'Speaker device name (e.g., default, hw:0,0)' },
+        bargein: {
+          type: 'group',
+          label: 'Barge-In',
+          fields: {
+            enabled: { type: 'checkbox', label: 'Enable Barge-In', hint: 'Allow interrupting AI speech with new voice input' },
+            cooldown_ms: { type: 'number', label: 'Cooldown (ms)', min: 0, hint: 'Minimum time between barge-in events' }
+          }
+        }
+      }
+    },
+    vad: {
+      label: 'Voice Activity Detection',
+      icon: '&#x1F3A4;',
+      fields: {
+        speech_threshold: { type: 'number', label: 'Speech Threshold', min: 0, max: 1, step: 0.05, hint: 'VAD confidence to start listening (higher = less sensitive)' },
+        speech_threshold_tts: { type: 'number', label: 'Speech Threshold (TTS)', min: 0, max: 1, step: 0.05, hint: 'VAD threshold during TTS playback (higher to ignore echo)' },
+        silence_threshold: { type: 'number', label: 'Silence Threshold', min: 0, max: 1, step: 0.05, hint: 'VAD confidence to detect end of speech' },
+        end_of_speech_duration: { type: 'number', label: 'End of Speech (sec)', min: 0, step: 0.1, hint: 'Silence duration before processing speech' },
+        max_recording_duration: { type: 'number', label: 'Max Recording (sec)', min: 1, step: 1, hint: 'Maximum single utterance length' },
+        preroll_ms: { type: 'number', label: 'Preroll (ms)', min: 0, hint: 'Audio captured before VAD trigger (catches word beginnings)' }
+      }
+    },
+    asr: {
+      label: 'Speech Recognition',
+      icon: '&#x1F4DD;',
+      fields: {
+        models_path: { type: 'text', label: 'Models Path', restart: true, hint: 'Directory containing Whisper model files' },
+        model: { type: 'dynamic_select', label: 'Model', restart: true, hint: 'Whisper model size', dynamicKey: 'asr_models', allowCustom: true }
+      }
+    },
+    tts: {
+      label: 'Text-to-Speech',
+      icon: '&#x1F5E3;',
+      fields: {
+        models_path: { type: 'text', label: 'Models Path', restart: true, hint: 'Directory containing Piper voice model files' },
+        voice_model: { type: 'dynamic_select', label: 'Voice Model', restart: true, hint: 'Piper voice model', dynamicKey: 'tts_voices', allowCustom: true },
+        length_scale: { type: 'number', label: 'Speed (0.5-2.0)', min: 0.5, max: 2.0, step: 0.05, hint: 'Speaking rate: <1.0 = faster, >1.0 = slower' }
+      }
+    },
+    llm: {
+      label: 'Language Model',
+      icon: '&#x1F916;',
+      fields: {
+        type: { type: 'select', label: 'Type', options: ['cloud', 'local'], hint: 'Use cloud APIs or local llama-server' },
+        max_tokens: { type: 'number', label: 'Max Tokens', min: 100, hint: 'Maximum tokens in LLM response' },
+        cloud: {
+          type: 'group',
+          label: 'Cloud Settings',
+          fields: {
+            provider: { type: 'select', label: 'Provider', options: ['openai', 'claude'], hint: 'Cloud LLM provider' },
+            openai_model: { type: 'text', label: 'OpenAI Model', hint: 'e.g., gpt-4o, gpt-4-turbo, gpt-4o-mini' },
+            claude_model: { type: 'text', label: 'Claude Model', hint: 'e.g., claude-sonnet-4-20250514, claude-opus-4-20250514' },
+            endpoint: { type: 'text', label: 'Custom Endpoint', placeholder: 'Leave empty for default', hint: 'Override API endpoint (for proxies or compatible APIs)' },
+            vision_enabled: { type: 'checkbox', label: 'Enable Vision', hint: 'Allow image analysis with vision-capable models' }
+          }
+        },
+        local: {
+          type: 'group',
+          label: 'Local Settings',
+          fields: {
+            endpoint: { type: 'text', label: 'Endpoint', hint: 'llama-server URL (e.g., http://127.0.0.1:8080)' },
+            model: { type: 'text', label: 'Model', placeholder: 'Leave empty for server default', hint: 'Model name if server hosts multiple models' },
+            vision_enabled: { type: 'checkbox', label: 'Enable Vision', hint: 'Enable for multimodal models like LLaVA' }
+          }
+        }
+      }
+    },
+    search: {
+      label: 'Web Search',
+      icon: '&#x1F50D;',
+      fields: {
+        engine: { type: 'select', label: 'Engine', options: ['searxng', 'disabled'], hint: 'Search engine for web queries (SearXNG is privacy-focused)' },
+        endpoint: { type: 'text', label: 'Endpoint', hint: 'SearXNG instance URL (e.g., http://localhost:8888)' }
+      }
+    },
+    mqtt: {
+      label: 'MQTT',
+      icon: '&#x1F4E1;',
+      fields: {
+        enabled: { type: 'checkbox', label: 'Enable MQTT', hint: 'Connect to MQTT broker for smart home control' },
+        broker: { type: 'text', label: 'Broker Address', hint: 'MQTT broker hostname or IP address' },
+        port: { type: 'number', label: 'Port', min: 1, max: 65535, hint: 'MQTT broker port (default: 1883)' }
+      }
+    },
+    network: {
+      label: 'Network (DAP)',
+      description: 'Dawn Audio Protocol server for ESP32 and other remote voice clients',
+      icon: '&#x1F4F6;',
+      fields: {
+        enabled: { type: 'checkbox', label: 'Enable DAP Server', restart: true, hint: 'Accept connections from remote voice clients' },
+        host: { type: 'dynamic_select', label: 'Bind Address', restart: true, hint: 'Network interface to listen on', dynamicKey: 'bind_addresses' },
+        port: { type: 'number', label: 'Port', min: 1, max: 65535, restart: true, hint: 'TCP port for DAP connections (default: 5000)' },
+        workers: { type: 'number', label: 'Workers', min: 1, max: 8, restart: true, hint: 'Concurrent client processing threads' }
+      }
+    },
+    webui: {
+      label: 'WebUI',
+      icon: '&#x1F310;',
+      fields: {
+        enabled: { type: 'checkbox', label: 'Enable WebUI', hint: 'Browser-based interface for voice interaction' },
+        port: { type: 'number', label: 'Port', min: 1, max: 65535, restart: true, hint: 'HTTP/WebSocket port (default: 3000)' },
+        max_clients: { type: 'number', label: 'Max Clients', min: 1, restart: true, hint: 'Maximum concurrent browser connections' },
+        workers: { type: 'number', label: 'ASR Workers', min: 1, max: 8, restart: true, hint: 'Parallel speech recognition threads' },
+        bind_address: { type: 'dynamic_select', label: 'Bind Address', restart: true, hint: 'Network interface to listen on', dynamicKey: 'bind_addresses' },
+        https: { type: 'checkbox', label: 'Enable HTTPS', restart: true, hint: 'Required for microphone access on remote connections' }
+      }
+    },
+    debug: {
+      label: 'Debug',
+      icon: '&#x1F41B;',
+      fields: {
+        mic_record: { type: 'checkbox', label: 'Record Microphone' },
+        asr_record: { type: 'checkbox', label: 'Record ASR Input' },
+        aec_record: { type: 'checkbox', label: 'Record AEC' },
+        record_path: { type: 'text', label: 'Recording Path' }
+      }
+    }
+  };
+
+  /**
+   * Initialize settings panel elements
+   */
+  function initSettingsElements() {
+    settingsElements.panel = document.getElementById('settings-panel');
+    settingsElements.overlay = document.getElementById('settings-overlay');
+    settingsElements.closeBtn = document.getElementById('settings-close');
+    settingsElements.openBtn = document.getElementById('settings-btn');
+    settingsElements.configPath = document.getElementById('config-path-display');
+    settingsElements.secretsPath = document.getElementById('secrets-path-display');
+    settingsElements.sectionsContainer = document.getElementById('settings-sections');
+    settingsElements.saveConfigBtn = document.getElementById('save-config-btn');
+    settingsElements.saveSecretsBtn = document.getElementById('save-secrets-btn');
+    settingsElements.resetBtn = document.getElementById('reset-config-btn');
+    settingsElements.restartNotice = document.getElementById('restart-notice');
+
+    // Secret inputs
+    settingsElements.secretOpenai = document.getElementById('secret-openai');
+    settingsElements.secretClaude = document.getElementById('secret-claude');
+    settingsElements.secretMqttUser = document.getElementById('secret-mqtt-user');
+    settingsElements.secretMqttPass = document.getElementById('secret-mqtt-pass');
+
+    // Secret status indicators
+    settingsElements.statusOpenai = document.getElementById('status-openai');
+    settingsElements.statusClaude = document.getElementById('status-claude');
+    settingsElements.statusMqttUser = document.getElementById('status-mqtt-user');
+    settingsElements.statusMqttPass = document.getElementById('status-mqtt-pass');
+  }
+
+  /**
+   * Open settings panel and request config
+   */
+  function openSettings() {
+    if (!settingsElements.panel) return;
+
+    settingsElements.panel.classList.remove('hidden');
+    settingsElements.overlay.classList.remove('hidden');
+
+    // Request config, models, and interfaces from server
+    requestConfig();
+    requestModelsList();
+    requestInterfacesList();
+  }
+
+  /**
+   * Close settings panel
+   */
+  function closeSettings() {
+    if (!settingsElements.panel) return;
+
+    settingsElements.panel.classList.add('hidden');
+    settingsElements.overlay.classList.add('hidden');
+  }
+
+  /**
+   * Request current configuration from server
+   */
+  function requestConfig() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.error('WebSocket not connected');
+      return;
+    }
+
+    ws.send(JSON.stringify({ type: 'get_config' }));
+    console.log('Requested configuration from server');
+  }
+
+  /**
+   * Request available ASR/TTS models list from server
+   */
+  function requestModelsList() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    ws.send(JSON.stringify({ type: 'list_models' }));
+    console.log('Requested models list from server');
+  }
+
+  /**
+   * Handle models list response from server
+   */
+  function handleModelsListResponse(payload) {
+    if (payload.asr_models) {
+      dynamicOptions.asr_models = payload.asr_models;
+    }
+    if (payload.tts_voices) {
+      dynamicOptions.tts_voices = payload.tts_voices;
+    }
+    console.log('Received models list:', dynamicOptions);
+
+    // Update any already-rendered dynamic selects
+    updateDynamicSelects();
+  }
+
+  /**
+   * Request available network interfaces from server
+   */
+  function requestInterfacesList() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    ws.send(JSON.stringify({ type: 'list_interfaces' }));
+    console.log('Requested interfaces list from server');
+  }
+
+  /**
+   * Handle interfaces list response from server
+   */
+  function handleInterfacesListResponse(payload) {
+    if (payload.addresses) {
+      dynamicOptions.bind_addresses = payload.addresses;
+    }
+    console.log('Received interfaces list:', dynamicOptions.bind_addresses);
+
+    // Update any already-rendered dynamic selects
+    updateDynamicSelects();
+  }
+
+  /**
+   * Update dynamic select dropdowns with current options
+   */
+  function updateDynamicSelects() {
+    document.querySelectorAll('select[data-dynamic-key]').forEach(select => {
+      const key = select.dataset.dynamicKey;
+      const options = dynamicOptions[key] || [];
+      const currentValue = select.value;
+
+      // Clear existing options except the first (current value placeholder)
+      while (select.options.length > 1) {
+        select.remove(1);
+      }
+
+      // Add options from server (skip current value to avoid duplicate)
+      options.forEach(opt => {
+        if (opt === currentValue) return; // Skip - already in first option
+        const option = document.createElement('option');
+        option.value = opt;
+        option.textContent = opt;
+        select.appendChild(option);
+      });
+
+      // If current value isn't in options, mark it as "(current)"
+      if (currentValue && !options.includes(currentValue)) {
+        select.options[0].textContent = currentValue + ' (current)';
+      }
+    });
+  }
+
+  /**
+   * Handle config response from server
+   */
+  function handleGetConfigResponse(payload) {
+    console.log('Received config:', payload);
+
+    currentConfig = payload.config;
+    currentSecrets = payload.secrets;
+    restartRequiredFields = payload.requires_restart || [];
+    changedFields.clear();
+
+    // Update path displays
+    if (settingsElements.configPath) {
+      settingsElements.configPath.textContent = payload.config_path || 'Unknown';
+    }
+    if (settingsElements.secretsPath) {
+      settingsElements.secretsPath.textContent = payload.secrets_path || 'Unknown';
+    }
+
+    // Render settings sections
+    renderSettingsSections();
+
+    // Update secrets status
+    updateSecretsStatus(currentSecrets);
+
+    // Hide restart notice initially
+    if (settingsElements.restartNotice) {
+      settingsElements.restartNotice.classList.add('hidden');
+    }
+
+    // Initialize audio backend state (grey out or request devices)
+    const backendSelect = document.getElementById('setting-audio-backend');
+    if (backendSelect) {
+      // Add backend change listener
+      backendSelect.addEventListener('change', () => {
+        updateAudioBackendState(backendSelect.value);
+      });
+
+      // Initialize state based on current value
+      updateAudioBackendState(backendSelect.value);
+    }
+  }
+
+  /**
+   * Render settings sections dynamically from schema
+   */
+  function renderSettingsSections() {
+    if (!settingsElements.sectionsContainer || !currentConfig) return;
+
+    settingsElements.sectionsContainer.innerHTML = '';
+
+    for (const [sectionKey, sectionDef] of Object.entries(SETTINGS_SCHEMA)) {
+      const configSection = currentConfig[sectionKey] || {};
+      const sectionEl = createSettingsSection(sectionKey, sectionDef, configSection);
+      settingsElements.sectionsContainer.appendChild(sectionEl);
+    }
+  }
+
+  /**
+   * Create a settings section element
+   */
+  function createSettingsSection(key, def, configData) {
+    const section = document.createElement('div');
+    section.className = 'settings-section';
+    section.dataset.section = key;
+
+    // Header
+    const header = document.createElement('h3');
+    header.className = 'section-header';
+    header.innerHTML = `
+      <span class="section-icon">${def.icon}</span>
+      ${def.label}
+      <span class="section-toggle">&#9660;</span>
+    `;
+    header.addEventListener('click', () => {
+      header.classList.toggle('collapsed');
+      content.classList.toggle('collapsed');
+    });
+
+    // Content
+    const content = document.createElement('div');
+    content.className = 'section-content';
+
+    // Add section description if present
+    if (def.description) {
+      const desc = document.createElement('p');
+      desc.className = 'section-description';
+      desc.textContent = def.description;
+      content.appendChild(desc);
+    }
+
+    // Render fields
+    for (const [fieldKey, fieldDef] of Object.entries(def.fields)) {
+      const value = configData[fieldKey];
+      const fieldEl = createSettingField(key, fieldKey, fieldDef, value);
+      content.appendChild(fieldEl);
+    }
+
+    section.appendChild(header);
+    section.appendChild(content);
+
+    return section;
+  }
+
+  /**
+   * Create a setting field element
+   */
+  function createSettingField(sectionKey, fieldKey, def, value) {
+    const fullKey = `${sectionKey}.${fieldKey}`;
+
+    // Handle nested groups
+    if (def.type === 'group') {
+      const groupEl = document.createElement('div');
+      groupEl.className = 'setting-group';
+      groupEl.innerHTML = `<div class="group-label">${def.label}</div>`;
+
+      for (const [subKey, subDef] of Object.entries(def.fields)) {
+        const subValue = value ? value[subKey] : undefined;
+        const fieldEl = createSettingField(`${sectionKey}.${fieldKey}`, subKey, subDef, subValue);
+        groupEl.appendChild(fieldEl);
+      }
+
+      return groupEl;
+    }
+
+    const item = document.createElement('div');
+    item.className = def.type === 'checkbox' ? 'setting-item setting-item-row' : 'setting-item';
+
+    // Add tooltip hint if defined
+    if (def.hint) {
+      item.title = def.hint;
+    }
+
+    const needsRestart = def.restart || restartRequiredFields.includes(fullKey);
+    const restartBadge = needsRestart ? '<span class="restart-badge">restart</span>' : '';
+
+    let inputHtml = '';
+    const inputId = `setting-${sectionKey}-${fieldKey}`.replace(/\./g, '-');
+
+    switch (def.type) {
+      case 'text':
+        inputHtml = `<input type="text" id="${inputId}" value="${escapeAttr(value || '')}" placeholder="${def.placeholder || ''}" data-key="${fullKey}">`;
+        break;
+      case 'number':
+        const numAttrs = [
+          def.min !== undefined ? `min="${def.min}"` : '',
+          def.max !== undefined ? `max="${def.max}"` : '',
+          def.step !== undefined ? `step="${def.step}"` : ''
+        ].filter(Boolean).join(' ');
+        inputHtml = `<input type="number" id="${inputId}" value="${formatNumber(value)}" ${numAttrs} data-key="${fullKey}">`;
+        break;
+      case 'checkbox':
+        inputHtml = `<input type="checkbox" id="${inputId}" ${value ? 'checked' : ''} data-key="${fullKey}">`;
+        break;
+      case 'select':
+        const options = def.options.map(opt => {
+          const label = opt === '' ? '(System default)' : opt;
+          return `<option value="${opt}" ${value === opt ? 'selected' : ''}>${label}</option>`;
+        }).join('');
+        inputHtml = `<select id="${inputId}" data-key="${fullKey}">${options}</select>`;
+        break;
+      case 'dynamic_select':
+        // Dynamic select that gets options from server (e.g., model lists)
+        const dynKey = def.dynamicKey;
+        const dynOptions = dynamicOptions[dynKey] || [];
+        const currentVal = value || '';
+
+        // Start with current value as first option
+        let dynOptionsHtml = `<option value="${escapeAttr(currentVal)}" selected>${escapeHtml(currentVal) || '(none)'}</option>`;
+
+        // Add options from server if available
+        dynOptions.forEach(opt => {
+          if (opt !== currentVal) {
+            dynOptionsHtml += `<option value="${escapeAttr(opt)}">${escapeHtml(opt)}</option>`;
+          }
+        });
+
+        inputHtml = `<select id="${inputId}" data-key="${fullKey}" data-dynamic-key="${dynKey}">${dynOptionsHtml}</select>`;
+        break;
+      case 'textarea':
+        inputHtml = `<textarea id="${inputId}" rows="${def.rows || 3}" placeholder="${def.placeholder || ''}" data-key="${fullKey}">${escapeHtml(value || '')}</textarea>`;
+        break;
+    }
+
+    if (def.type === 'checkbox') {
+      item.innerHTML = `
+        ${inputHtml}
+        <label for="${inputId}">${def.label} ${restartBadge}</label>
+      `;
+    } else {
+      item.innerHTML = `
+        <label for="${inputId}">${def.label} ${restartBadge}</label>
+        ${inputHtml}
+      `;
+    }
+
+    // Add change listener
+    const input = item.querySelector('input, select, textarea');
+    if (input) {
+      input.addEventListener('change', () => handleSettingChange(fullKey, input));
+      input.addEventListener('input', () => handleSettingChange(fullKey, input));
+    }
+
+    return item;
+  }
+
+  /**
+   * Handle setting value change
+   */
+  function handleSettingChange(key, input) {
+    changedFields.add(key);
+
+    // Check if this field requires restart
+    if (restartRequiredFields.includes(key)) {
+      if (settingsElements.restartNotice) {
+        settingsElements.restartNotice.classList.remove('hidden');
+      }
+    }
+  }
+
+  /**
+   * Update secrets status indicators
+   */
+  function updateSecretsStatus(secrets) {
+    if (!secrets) return;
+
+    const updateStatus = (el, isSet) => {
+      if (!el) return;
+      el.textContent = isSet ? 'Set' : 'Not set';
+      el.className = `secret-status ${isSet ? 'is-set' : 'not-set'}`;
+    };
+
+    updateStatus(settingsElements.statusOpenai, secrets.openai_api_key);
+    updateStatus(settingsElements.statusClaude, secrets.claude_api_key);
+    updateStatus(settingsElements.statusMqttUser, secrets.mqtt_username);
+    updateStatus(settingsElements.statusMqttPass, secrets.mqtt_password);
+  }
+
+  /**
+   * Collect all config values from form
+   */
+  function collectConfigValues() {
+    const config = {};
+    const inputs = settingsElements.sectionsContainer.querySelectorAll('[data-key]');
+
+    inputs.forEach(input => {
+      const key = input.dataset.key;
+      const parts = key.split('.');
+
+      let value;
+      if (input.type === 'checkbox') {
+        value = input.checked;
+      } else if (input.type === 'number') {
+        value = input.value !== '' ? parseFloat(input.value) : null;
+      } else {
+        value = input.value;
+      }
+
+      // Build nested structure
+      let obj = config;
+      for (let i = 0; i < parts.length - 1; i++) {
+        if (!obj[parts[i]]) obj[parts[i]] = {};
+        obj = obj[parts[i]];
+      }
+      obj[parts[parts.length - 1]] = value;
+    });
+
+    // AI name should always be lowercase (for wake word detection)
+    if (config.general && config.general.ai_name) {
+      config.general.ai_name = config.general.ai_name.toLowerCase();
+    }
+
+    return config;
+  }
+
+  /**
+   * Save configuration to server
+   */
+  function saveConfig() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.error('WebSocket not connected');
+      alert('Cannot save: Not connected to server');
+      return;
+    }
+
+    const config = collectConfigValues();
+    console.log('Saving config:', config);
+
+    ws.send(JSON.stringify({
+      type: 'set_config',
+      payload: config
+    }));
+  }
+
+  /**
+   * Save secrets to server
+   */
+  function saveSecrets() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.error('WebSocket not connected');
+      alert('Cannot save: Not connected to server');
+      return;
+    }
+
+    const secrets = {};
+
+    // Only send non-empty values (don't overwrite with empty)
+    if (settingsElements.secretOpenai && settingsElements.secretOpenai.value) {
+      secrets.openai_api_key = settingsElements.secretOpenai.value;
+    }
+    if (settingsElements.secretClaude && settingsElements.secretClaude.value) {
+      secrets.claude_api_key = settingsElements.secretClaude.value;
+    }
+    if (settingsElements.secretMqttUser && settingsElements.secretMqttUser.value) {
+      secrets.mqtt_username = settingsElements.secretMqttUser.value;
+    }
+    if (settingsElements.secretMqttPass && settingsElements.secretMqttPass.value) {
+      secrets.mqtt_password = settingsElements.secretMqttPass.value;
+    }
+
+    if (Object.keys(secrets).length === 0) {
+      alert('No secrets entered to save');
+      return;
+    }
+
+    console.log('Saving secrets (keys only):', Object.keys(secrets));
+
+    ws.send(JSON.stringify({
+      type: 'set_secrets',
+      payload: secrets
+    }));
+
+    // Clear inputs after sending
+    if (settingsElements.secretOpenai) settingsElements.secretOpenai.value = '';
+    if (settingsElements.secretClaude) settingsElements.secretClaude.value = '';
+    if (settingsElements.secretMqttUser) settingsElements.secretMqttUser.value = '';
+    if (settingsElements.secretMqttPass) settingsElements.secretMqttPass.value = '';
+  }
+
+  /**
+   * Handle set_config response
+   */
+  function handleSetConfigResponse(payload) {
+    if (payload.success) {
+      console.log('Config saved successfully');
+
+      // Check if any changed fields require restart
+      const restartFields = getChangedRestartRequiredFields();
+      if (restartFields.length > 0) {
+        console.log('Restart required for fields:', restartFields);
+        showRestartConfirmation(restartFields);
+      } else {
+        alert('Configuration saved successfully!');
+      }
+
+      // Clear changed fields tracking
+      changedFields.clear();
+    } else {
+      console.error('Failed to save config:', payload.error);
+      alert('Failed to save configuration: ' + (payload.error || 'Unknown error'));
+    }
+  }
+
+  /**
+   * Get list of changed fields that require restart
+   */
+  function getChangedRestartRequiredFields() {
+    const restartFields = [];
+    for (const field of changedFields) {
+      if (restartRequiredFields.includes(field)) {
+        restartFields.push(field);
+      }
+    }
+    return restartFields;
+  }
+
+  /**
+   * Show restart confirmation dialog
+   */
+  function showRestartConfirmation(changedRestartFields) {
+    const fieldList = changedRestartFields.map(f => '  • ' + f).join('\n');
+    const message = 'Configuration saved successfully!\n\n' +
+      'The following changes require a restart to take effect:\n' +
+      fieldList + '\n\n' +
+      'Do you want to restart DAWN now?';
+
+    if (confirm(message)) {
+      requestRestart();
+    }
+  }
+
+  /**
+   * Request application restart
+   */
+  function requestRestart() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.error('WebSocket not connected');
+      alert('Cannot restart: Not connected to server');
+      return;
+    }
+
+    console.log('Requesting application restart');
+    ws.send(JSON.stringify({ type: 'restart' }));
+  }
+
+  /**
+   * Handle restart response
+   */
+  function handleRestartResponse(payload) {
+    if (payload.success) {
+      console.log('Restart initiated:', payload.message);
+      alert('DAWN is restarting. The page will attempt to reconnect automatically.');
+    } else {
+      console.error('Restart failed:', payload.error);
+      alert('Failed to restart: ' + (payload.error || 'Unknown error'));
+    }
+  }
+
+  /**
+   * Handle set_secrets response
+   */
+  function handleSetSecretsResponse(payload) {
+    if (payload.success) {
+      console.log('Secrets saved successfully');
+      alert('Secrets saved successfully!');
+
+      // Update status indicators
+      if (payload.secrets) {
+        updateSecretsStatus(payload.secrets);
+      }
+    } else {
+      console.error('Failed to save secrets:', payload.error);
+      alert('Failed to save secrets: ' + (payload.error || 'Unknown error'));
+    }
+  }
+
+  // Audio device state
+  let audioDevicesCache = { capture: [], playback: [] };
+
+  /**
+   * Request audio devices from server
+   */
+  function requestAudioDevices(backend) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.error('WebSocket not connected');
+      return;
+    }
+
+    console.log('Requesting audio devices for backend:', backend);
+    ws.send(JSON.stringify({
+      type: 'get_audio_devices',
+      payload: { backend: backend }
+    }));
+  }
+
+  /**
+   * Handle audio devices response
+   */
+  function handleGetAudioDevicesResponse(payload) {
+    console.log('Received audio devices:', payload);
+
+    audioDevicesCache.capture = payload.capture_devices || [];
+    audioDevicesCache.playback = payload.playback_devices || [];
+
+    // Update capture device field
+    updateAudioDeviceField('capture_device', audioDevicesCache.capture);
+    updateAudioDeviceField('playback_device', audioDevicesCache.playback);
+  }
+
+  /**
+   * Update an audio device field to a select with options
+   */
+  function updateAudioDeviceField(fieldName, devices) {
+    // ID matches how createSettingField generates it (underscores preserved)
+    const inputId = `setting-audio-${fieldName}`;
+    const input = document.getElementById(inputId);
+    console.log('updateAudioDeviceField:', fieldName, 'inputId:', inputId, 'input:', input, 'devices:', devices);
+    if (!input) return;
+
+    const currentValue = input.value || '';
+    const dataKey = input.dataset.key;
+    const parent = input.parentElement;
+
+    // Replace input with select
+    const select = document.createElement('select');
+    select.id = inputId;
+    select.dataset.key = dataKey;
+
+    // Add default option
+    const defaultOpt = document.createElement('option');
+    defaultOpt.value = '';
+    defaultOpt.textContent = 'Default';
+    select.appendChild(defaultOpt);
+
+    // Add device options (devices can be strings or {id, name} objects)
+    devices.forEach(device => {
+      const opt = document.createElement('option');
+      // Handle both string devices and object devices
+      const deviceId = typeof device === 'string' ? device : device.id;
+      const deviceName = typeof device === 'string' ? device : (device.name || device.id);
+      opt.value = deviceId;
+      opt.textContent = deviceName;
+      if (deviceId === currentValue) {
+        opt.selected = true;
+      }
+      select.appendChild(opt);
+    });
+
+    // Add change listener
+    select.addEventListener('change', () => handleSettingChange(dataKey, select));
+
+    // Replace input with select
+    parent.replaceChild(select, input);
+  }
+
+  /**
+   * Update audio device fields based on backend selection
+   */
+  function updateAudioBackendState(backend) {
+    // IDs match how createSettingField generates them (underscores preserved)
+    const captureInput = document.getElementById('setting-audio-capture_device');
+    const playbackInput = document.getElementById('setting-audio-playback_device');
+
+    console.log('updateAudioBackendState:', backend, 'captureInput:', captureInput, 'playbackInput:', playbackInput);
+
+    if (backend === 'auto') {
+      // Grey out device fields when auto
+      if (captureInput) {
+        captureInput.disabled = true;
+        captureInput.title = 'Device is auto-detected when backend is "auto"';
+      }
+      if (playbackInput) {
+        playbackInput.disabled = true;
+        playbackInput.title = 'Device is auto-detected when backend is "auto"';
+      }
+    } else {
+      // Enable device fields and request available devices
+      if (captureInput) {
+        captureInput.disabled = false;
+        captureInput.title = '';
+      }
+      if (playbackInput) {
+        playbackInput.disabled = false;
+        playbackInput.title = '';
+      }
+
+      // Request available devices for this backend
+      requestAudioDevices(backend);
+    }
+  }
+
+  /**
+   * Toggle secret visibility
+   */
+  function toggleSecretVisibility(targetId) {
+    const input = document.getElementById(targetId);
+    if (!input) return;
+
+    input.type = input.type === 'password' ? 'text' : 'password';
+  }
+
+  /**
+   * Escape attribute value
+   */
+  function escapeAttr(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
+  /**
+   * Format a number for display, removing floating-point precision artifacts.
+   * Rounds to 6 significant digits to clean up values like 0.9200000166893005 → 0.92
+   */
+  function formatNumber(value) {
+    if (value === undefined || value === null || value === '') return '';
+    const num = Number(value);
+    if (isNaN(num)) return '';
+    // Use toPrecision to limit significant digits, then parseFloat to remove trailing zeros
+    return parseFloat(num.toPrecision(6));
+  }
+
+  /**
+   * Initialize settings event listeners
+   */
+  function initSettingsListeners() {
+    // Open button
+    if (settingsElements.openBtn) {
+      settingsElements.openBtn.addEventListener('click', openSettings);
+    }
+
+    // Close button
+    if (settingsElements.closeBtn) {
+      settingsElements.closeBtn.addEventListener('click', closeSettings);
+    }
+
+    // Overlay click to close
+    if (settingsElements.overlay) {
+      settingsElements.overlay.addEventListener('click', closeSettings);
+    }
+
+    // Save config button
+    if (settingsElements.saveConfigBtn) {
+      settingsElements.saveConfigBtn.addEventListener('click', saveConfig);
+    }
+
+    // Save secrets button
+    if (settingsElements.saveSecretsBtn) {
+      settingsElements.saveSecretsBtn.addEventListener('click', saveSecrets);
+    }
+
+    // Reset button
+    if (settingsElements.resetBtn) {
+      settingsElements.resetBtn.addEventListener('click', () => {
+        if (confirm('Reset all settings to defaults? This will reload the current configuration.')) {
+          requestConfig();
+        }
+      });
+    }
+
+    // Secret toggle buttons
+    document.querySelectorAll('.secret-toggle').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const targetId = btn.dataset.target;
+        if (targetId) {
+          toggleSecretVisibility(targetId);
+        }
+      });
+    });
+
+    // Section header toggle
+    document.querySelectorAll('.section-header').forEach(header => {
+      header.addEventListener('click', () => {
+        header.classList.toggle('collapsed');
+        const content = header.nextElementSibling;
+        if (content) {
+          content.classList.toggle('collapsed');
+        }
+      });
+    });
+
+    // Escape key to close
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !settingsElements.panel.classList.contains('hidden')) {
+        closeSettings();
+      }
+    });
   }
 
   // Start when DOM is ready

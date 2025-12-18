@@ -42,6 +42,8 @@ DAWN integrates modern speech recognition, large language models, and text-to-sp
   - Real-time WebSocket communication
   - Session persistence across page refresh (30-minute timeout)
   - Debug mode for viewing commands and tool results
+  - **Settings panel** for live configuration editing
+  - **Application restart** from browser when settings require it
   - Mobile-friendly responsive design
 
 - **LLM Tools**
@@ -132,6 +134,10 @@ dawn/
 ├── services/                     # Systemd services (llama-server)
 ├── remote_dawn/                  # ESP32 client code
 ├── vosk-model-en-us-0.22/        # Vosk model (if using Vosk)
+├── setup_models.sh               # Model download and symlink setup
+├── format_code.sh                # Code formatting script
+├── install-git-hooks.sh          # Git hooks installer
+├── generate_ssl_cert.sh          # SSL certificate generator
 ├── commands_config_nuevo.json    # Device/action mappings
 ├── CMakeLists.txt                # Build configuration
 ├── CODING_STYLE_GUIDE.md         # Code formatting standards
@@ -348,27 +354,90 @@ unzip vosk-model-en-us-0.22.zip
 
 ### 5. Download Models
 
-#### TTS Model (Piper)
-The repository includes `en_GB-alba-medium` voice model in `models/`. Additional voices can be downloaded from:
+#### Quick Setup (Recommended)
+
+Use the setup script to download Whisper models and create required symlinks:
+
+```bash
+# Standard setup - Whisper base model
+./setup_models.sh
+
+# Use a smaller/faster Whisper model
+./setup_models.sh --whisper-model tiny
+
+# Include legacy Vosk ASR support (~1.8GB additional download)
+./setup_models.sh --vosk
+
+# See all options
+./setup_models.sh --help
+```
+
+The script will:
+- Download the Whisper ASR model to `whisper.cpp/models/` (if not present)
+- Create symlinks in `models/` directory
+- Create `build/models` symlink for runtime
+- Optionally download Vosk model
+
+Note: TTS (Piper) and VAD (Silero) models are already committed to git.
+
+#### Model Directory Structure
+
+After setup, the `models/` directory will look like:
+```
+models/
+├── en_GB-alba-medium.onnx       # Piper TTS voice (committed to git)
+├── en_GB-alba-medium.onnx.json  # TTS voice config (committed to git)
+├── silero_vad_16k_op15.onnx     # Silero VAD model (committed to git)
+├── whisper.cpp -> ../whisper.cpp/models  # Symlink to Whisper models
+└── vosk-model -> ../vosk-model-en-us-0.22  # Symlink (if Vosk installed)
+```
+
+#### Manual Download (Alternative)
+
+If you prefer to download models manually:
+
+**Whisper ASR:** (required download)
+```bash
+# Download to whisper.cpp/models/
+cd whisper.cpp/models
+./download-ggml-model.sh base  # Or use wget:
+# wget https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+
+# Create symlink
+cd ../../models
+ln -s ../whisper.cpp/models whisper.cpp
+
+# Create build symlink
+ln -s ../models build/models
+```
+
+**TTS and VAD:** (already committed to git - no download needed)
+
+The following models are already in the repository:
+- `models/en_GB-alba-medium.onnx` - Piper TTS voice
+- `models/silero_vad_16k_op15.onnx` - Silero VAD model
+
+**Additional TTS Voices:**
 ```bash
 # Browse available voices:
 # https://huggingface.co/rhasspy/piper-voices/tree/main/en
 
-# Example: Download a different voice
-cd models
+# Example: Download US English voice
 wget https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx
 wget https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json
 ```
 
-#### Whisper Model
-Whisper models are downloaded automatically by whisper.cpp on first use, or you can download manually:
-```bash
-# Models are stored in ~/.cache/whisper or ./models/
-# Recommended: base.en (best balance of speed/accuracy with GPU)
-```
+#### Model Size Reference
 
-#### VAD Model (Silero)
-The repository includes `silero_vad_16k_op15.onnx` in `models/`. No additional download needed.
+| Model | Size | Notes |
+|-------|------|-------|
+| Whisper tiny | ~75MB | Fastest, lower accuracy |
+| Whisper base | ~142MB | Recommended for Jetson GPU |
+| Whisper small | ~466MB | Better accuracy, slower |
+| Whisper medium | ~1.5GB | Best accuracy, slowest |
+| Piper alba-medium | ~63MB | Default TTS voice |
+| Silero VAD | ~1.3MB | Voice activity detection |
+| Vosk en-us-0.22 | ~1.8GB | Optional legacy ASR |
 
 ### 6. Create Configuration Files
 
@@ -404,7 +473,8 @@ model = "qwen3"
 
 [llm.cloud]
 provider = "openai"          # "openai" or "claude"
-model = "gpt-4o"
+openai_model = "gpt-4o"      # Model for OpenAI API
+claude_model = "claude-sonnet-4-20250514"  # Model for Claude API
 
 [mqtt]
 enabled = true
@@ -728,6 +798,16 @@ The Web UI provides a browser-based interface for interacting with DAWN:
 - **Session persistence** - Your conversation history persists across page refreshes (30-minute timeout)
 - **Debug mode** - Toggle debug view to see tool results, commands, and system messages
 - **Mobile friendly** - Responsive design works on phones and tablets
+
+**Settings Panel**:
+
+Click the gear icon in the header to access the settings panel. This provides a browser-based interface for editing DAWN's configuration without manually editing TOML files:
+
+- **All settings** from `dawn.toml` organized by section (General, Audio, LLM, ASR, etc.)
+- **API keys** with secure handling - password fields with show/hide toggle; only shows whether a key is set, never displays the actual value
+- **Restart indicators** - settings that require a restart show a badge; when changes require restart, a "Restart DAWN" button appears
+- **Live updates** - changes that don't require restart apply immediately
+- **Backup protection** - creates `.bak` files before modifying config files
 
 **How it works**:
 - HTTP serves static files from `www/` directory

@@ -23,10 +23,14 @@
 
 #include "config/config_env.h"
 
+#include <errno.h>
+#include <json-c/json.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
+#include "config/config_parser.h"
 #include "logging.h"
 
 /* =============================================================================
@@ -139,6 +143,7 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
    ENV_STRING("DAWN_ASR_MODELS_PATH", config->asr.models_path);
 
    /* [tts] */
+   ENV_STRING("DAWN_TTS_MODELS_PATH", config->tts.models_path);
    ENV_STRING("DAWN_TTS_VOICE_MODEL", config->tts.voice_model);
    ENV_FLOAT("DAWN_TTS_LENGTH_SCALE", config->tts.length_scale);
 
@@ -151,7 +156,8 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
 
    /* [llm.cloud] */
    ENV_STRING("DAWN_LLM_CLOUD_PROVIDER", config->llm.cloud.provider);
-   ENV_STRING("DAWN_LLM_CLOUD_MODEL", config->llm.cloud.model);
+   ENV_STRING("DAWN_LLM_CLOUD_OPENAI_MODEL", config->llm.cloud.openai_model);
+   ENV_STRING("DAWN_LLM_CLOUD_CLAUDE_MODEL", config->llm.cloud.claude_model);
    ENV_STRING("DAWN_LLM_CLOUD_ENDPOINT", config->llm.cloud.endpoint);
    ENV_BOOL("DAWN_LLM_CLOUD_VISION_ENABLED", config->llm.cloud.vision_enabled);
 
@@ -259,6 +265,7 @@ void config_dump(const dawn_config_t *config) {
    printf("  models_path = \"%s\"\n", config->asr.models_path);
 
    printf("\n[tts]\n");
+   printf("  models_path = \"%s\"\n", config->tts.models_path);
    printf("  voice_model = \"%s\"\n", config->tts.voice_model);
    printf("  length_scale = %.2f\n", config->tts.length_scale);
 
@@ -271,7 +278,8 @@ void config_dump(const dawn_config_t *config) {
 
    printf("\n[llm.cloud]\n");
    printf("  provider = \"%s\"\n", config->llm.cloud.provider);
-   printf("  model = \"%s\"\n", config->llm.cloud.model);
+   printf("  openai_model = \"%s\"\n", config->llm.cloud.openai_model);
+   printf("  claude_model = \"%s\"\n", config->llm.cloud.claude_model);
    printf("  endpoint = \"%s\"\n", config->llm.cloud.endpoint);
 
    printf("\n[llm.local]\n");
@@ -571,6 +579,9 @@ void config_dump_settings(const dawn_config_t *config,
 
    /* [tts] */
    printf("[tts]\n");
+   PRINT_SETTING_STR("models_path", config->tts.models_path, "DAWN_TTS_MODELS_PATH",
+                     detect_source_str(config->tts.models_path, defaults.tts.models_path,
+                                       "DAWN_TTS_MODELS_PATH"));
    PRINT_SETTING_STR("voice_model", config->tts.voice_model, "DAWN_TTS_VOICE_MODEL",
                      detect_source_str(config->tts.voice_model, defaults.tts.voice_model,
                                        "DAWN_TTS_VOICE_MODEL"));
@@ -599,9 +610,14 @@ void config_dump_settings(const dawn_config_t *config,
    PRINT_SETTING_STR("provider", config->llm.cloud.provider, "DAWN_LLM_CLOUD_PROVIDER",
                      detect_source_str(config->llm.cloud.provider, defaults.llm.cloud.provider,
                                        "DAWN_LLM_CLOUD_PROVIDER"));
-   PRINT_SETTING_STR("model", config->llm.cloud.model, "DAWN_LLM_CLOUD_MODEL",
-                     detect_source_str(config->llm.cloud.model, defaults.llm.cloud.model,
-                                       "DAWN_LLM_CLOUD_MODEL"));
+   PRINT_SETTING_STR("openai_model", config->llm.cloud.openai_model, "DAWN_LLM_CLOUD_OPENAI_MODEL",
+                     detect_source_str(config->llm.cloud.openai_model,
+                                       defaults.llm.cloud.openai_model,
+                                       "DAWN_LLM_CLOUD_OPENAI_MODEL"));
+   PRINT_SETTING_STR("claude_model", config->llm.cloud.claude_model, "DAWN_LLM_CLOUD_CLAUDE_MODEL",
+                     detect_source_str(config->llm.cloud.claude_model,
+                                       defaults.llm.cloud.claude_model,
+                                       "DAWN_LLM_CLOUD_CLAUDE_MODEL"));
    PRINT_SETTING_STR("endpoint", config->llm.cloud.endpoint, "DAWN_LLM_CLOUD_ENDPOINT",
                      detect_source_str(config->llm.cloud.endpoint, defaults.llm.cloud.endpoint,
                                        "DAWN_LLM_CLOUD_ENDPOINT"));
@@ -808,6 +824,7 @@ void config_dump_toml(const dawn_config_t *config) {
    printf("models_path = \"%s\"\n", config->asr.models_path);
 
    printf("\n[tts]\n");
+   printf("models_path = \"%s\"\n", config->tts.models_path);
    printf("voice_model = \"%s\"\n", config->tts.voice_model);
    printf("length_scale = %.2f\n", config->tts.length_scale);
 
@@ -820,7 +837,8 @@ void config_dump_toml(const dawn_config_t *config) {
 
    printf("\n[llm.cloud]\n");
    printf("provider = \"%s\"\n", config->llm.cloud.provider);
-   printf("model = \"%s\"\n", config->llm.cloud.model);
+   printf("openai_model = \"%s\"\n", config->llm.cloud.openai_model);
+   printf("claude_model = \"%s\"\n", config->llm.cloud.claude_model);
    if (config->llm.cloud.endpoint[0])
       printf("endpoint = \"%s\"\n", config->llm.cloud.endpoint);
 
@@ -861,4 +879,459 @@ void config_dump_toml(const dawn_config_t *config) {
    printf("\n[paths]\n");
    printf("music_dir = \"%s\"\n", config->paths.music_dir);
    printf("commands_config = \"%s\"\n", config->paths.commands_config);
+}
+
+/* =============================================================================
+ * JSON Serialization for WebUI
+ * ============================================================================= */
+
+json_object *config_to_json(const dawn_config_t *config) {
+   if (!config)
+      return NULL;
+
+   json_object *root = json_object_new_object();
+   if (!root)
+      return NULL;
+
+   /* [general] */
+   json_object *general = json_object_new_object();
+   json_object_object_add(general, "ai_name", json_object_new_string(config->general.ai_name));
+   json_object_object_add(general, "log_file", json_object_new_string(config->general.log_file));
+   json_object_object_add(root, "general", general);
+
+   /* [persona] */
+   json_object *persona = json_object_new_object();
+   json_object_object_add(persona, "description",
+                          json_object_new_string(config->persona.description));
+   json_object_object_add(root, "persona", persona);
+
+   /* [localization] */
+   json_object *localization = json_object_new_object();
+   json_object_object_add(localization, "location",
+                          json_object_new_string(config->localization.location));
+   json_object_object_add(localization, "timezone",
+                          json_object_new_string(config->localization.timezone));
+   json_object_object_add(localization, "units",
+                          json_object_new_string(config->localization.units));
+   json_object_object_add(root, "localization", localization);
+
+   /* [audio] */
+   json_object *audio = json_object_new_object();
+   json_object_object_add(audio, "backend", json_object_new_string(config->audio.backend));
+   json_object_object_add(audio, "capture_device",
+                          json_object_new_string(config->audio.capture_device));
+   json_object_object_add(audio, "playback_device",
+                          json_object_new_string(config->audio.playback_device));
+   json_object_object_add(audio, "output_rate", json_object_new_int(config->audio.output_rate));
+   json_object_object_add(audio, "output_channels",
+                          json_object_new_int(config->audio.output_channels));
+
+   /* [audio.bargein] */
+   json_object *bargein = json_object_new_object();
+   json_object_object_add(bargein, "enabled",
+                          json_object_new_boolean(config->audio.bargein.enabled));
+   json_object_object_add(bargein, "cooldown_ms",
+                          json_object_new_int(config->audio.bargein.cooldown_ms));
+   json_object_object_add(bargein, "startup_cooldown_ms",
+                          json_object_new_int(config->audio.bargein.startup_cooldown_ms));
+   json_object_object_add(audio, "bargein", bargein);
+   json_object_object_add(root, "audio", audio);
+
+   /* [vad] */
+   json_object *vad = json_object_new_object();
+   json_object_object_add(vad, "speech_threshold",
+                          json_object_new_double(config->vad.speech_threshold));
+   json_object_object_add(vad, "speech_threshold_tts",
+                          json_object_new_double(config->vad.speech_threshold_tts));
+   json_object_object_add(vad, "silence_threshold",
+                          json_object_new_double(config->vad.silence_threshold));
+   json_object_object_add(vad, "end_of_speech_duration",
+                          json_object_new_double(config->vad.end_of_speech_duration));
+   json_object_object_add(vad, "max_recording_duration",
+                          json_object_new_double(config->vad.max_recording_duration));
+   json_object_object_add(vad, "preroll_ms", json_object_new_int(config->vad.preroll_ms));
+
+   /* [vad.chunking] */
+   json_object *chunking = json_object_new_object();
+   json_object_object_add(chunking, "enabled",
+                          json_object_new_boolean(config->vad.chunking.enabled));
+   json_object_object_add(chunking, "pause_duration",
+                          json_object_new_double(config->vad.chunking.pause_duration));
+   json_object_object_add(chunking, "min_duration",
+                          json_object_new_double(config->vad.chunking.min_duration));
+   json_object_object_add(chunking, "max_duration",
+                          json_object_new_double(config->vad.chunking.max_duration));
+   json_object_object_add(vad, "chunking", chunking);
+   json_object_object_add(root, "vad", vad);
+
+   /* [asr] */
+   json_object *asr = json_object_new_object();
+   json_object_object_add(asr, "model", json_object_new_string(config->asr.model));
+   json_object_object_add(asr, "models_path", json_object_new_string(config->asr.models_path));
+   json_object_object_add(root, "asr", asr);
+
+   /* [tts] */
+   json_object *tts = json_object_new_object();
+   json_object_object_add(tts, "models_path", json_object_new_string(config->tts.models_path));
+   json_object_object_add(tts, "voice_model", json_object_new_string(config->tts.voice_model));
+   json_object_object_add(tts, "length_scale", json_object_new_double(config->tts.length_scale));
+   json_object_object_add(root, "tts", tts);
+
+   /* [commands] */
+   json_object *commands = json_object_new_object();
+   json_object_object_add(commands, "processing_mode",
+                          json_object_new_string(config->commands.processing_mode));
+   json_object_object_add(root, "commands", commands);
+
+   /* [llm] */
+   json_object *llm = json_object_new_object();
+   json_object_object_add(llm, "type", json_object_new_string(config->llm.type));
+   json_object_object_add(llm, "max_tokens", json_object_new_int(config->llm.max_tokens));
+
+   /* [llm.cloud] */
+   json_object *cloud = json_object_new_object();
+   json_object_object_add(cloud, "provider", json_object_new_string(config->llm.cloud.provider));
+   json_object_object_add(cloud, "openai_model",
+                          json_object_new_string(config->llm.cloud.openai_model));
+   json_object_object_add(cloud, "claude_model",
+                          json_object_new_string(config->llm.cloud.claude_model));
+   json_object_object_add(cloud, "endpoint", json_object_new_string(config->llm.cloud.endpoint));
+   json_object_object_add(cloud, "vision_enabled",
+                          json_object_new_boolean(config->llm.cloud.vision_enabled));
+   json_object_object_add(llm, "cloud", cloud);
+
+   /* [llm.local] */
+   json_object *local = json_object_new_object();
+   json_object_object_add(local, "endpoint", json_object_new_string(config->llm.local.endpoint));
+   json_object_object_add(local, "model", json_object_new_string(config->llm.local.model));
+   json_object_object_add(local, "vision_enabled",
+                          json_object_new_boolean(config->llm.local.vision_enabled));
+   json_object_object_add(llm, "local", local);
+   json_object_object_add(root, "llm", llm);
+
+   /* [search] */
+   json_object *search = json_object_new_object();
+   json_object_object_add(search, "engine", json_object_new_string(config->search.engine));
+   json_object_object_add(search, "endpoint", json_object_new_string(config->search.endpoint));
+
+   /* [search.summarizer] */
+   json_object *summarizer = json_object_new_object();
+   json_object_object_add(summarizer, "backend",
+                          json_object_new_string(config->search.summarizer.backend));
+   json_object_object_add(summarizer, "threshold_bytes",
+                          json_object_new_int64(
+                              (int64_t)config->search.summarizer.threshold_bytes));
+   json_object_object_add(summarizer, "target_words",
+                          json_object_new_int64((int64_t)config->search.summarizer.target_words));
+   json_object_object_add(search, "summarizer", summarizer);
+   json_object_object_add(root, "search", search);
+
+   /* [url_fetcher] */
+   json_object *url_fetcher = json_object_new_object();
+   json_object_object_add(url_fetcher, "whitelist_count",
+                          json_object_new_int(config->url_fetcher.whitelist_count));
+
+   /* URL whitelist array */
+   json_object *whitelist = json_object_new_array();
+   for (int i = 0; i < config->url_fetcher.whitelist_count; i++) {
+      json_object_array_add(whitelist, json_object_new_string(config->url_fetcher.whitelist[i]));
+   }
+   json_object_object_add(url_fetcher, "whitelist", whitelist);
+
+   /* [url_fetcher.flaresolverr] */
+   json_object *flaresolverr = json_object_new_object();
+   json_object_object_add(flaresolverr, "enabled",
+                          json_object_new_boolean(config->url_fetcher.flaresolverr.enabled));
+   json_object_object_add(flaresolverr, "endpoint",
+                          json_object_new_string(config->url_fetcher.flaresolverr.endpoint));
+   json_object_object_add(flaresolverr, "timeout_sec",
+                          json_object_new_int(config->url_fetcher.flaresolverr.timeout_sec));
+   json_object_object_add(flaresolverr, "max_response_bytes",
+                          json_object_new_int64(
+                              (int64_t)config->url_fetcher.flaresolverr.max_response_bytes));
+   json_object_object_add(url_fetcher, "flaresolverr", flaresolverr);
+   json_object_object_add(root, "url_fetcher", url_fetcher);
+
+   /* [mqtt] */
+   json_object *mqtt = json_object_new_object();
+   json_object_object_add(mqtt, "enabled", json_object_new_boolean(config->mqtt.enabled));
+   json_object_object_add(mqtt, "broker", json_object_new_string(config->mqtt.broker));
+   json_object_object_add(mqtt, "port", json_object_new_int(config->mqtt.port));
+   json_object_object_add(root, "mqtt", mqtt);
+
+   /* [network] */
+   json_object *network = json_object_new_object();
+   json_object_object_add(network, "enabled", json_object_new_boolean(config->network.enabled));
+   json_object_object_add(network, "host", json_object_new_string(config->network.host));
+   json_object_object_add(network, "port", json_object_new_int(config->network.port));
+   json_object_object_add(network, "workers", json_object_new_int(config->network.workers));
+   json_object_object_add(network, "socket_timeout_sec",
+                          json_object_new_int(config->network.socket_timeout_sec));
+   json_object_object_add(network, "session_timeout_sec",
+                          json_object_new_int(config->network.session_timeout_sec));
+   json_object_object_add(network, "llm_timeout_ms",
+                          json_object_new_int(config->network.llm_timeout_ms));
+   json_object_object_add(root, "network", network);
+
+   /* [tui] */
+   json_object *tui = json_object_new_object();
+   json_object_object_add(tui, "enabled", json_object_new_boolean(config->tui.enabled));
+   json_object_object_add(root, "tui", tui);
+
+   /* [webui] */
+   json_object *webui = json_object_new_object();
+   json_object_object_add(webui, "enabled", json_object_new_boolean(config->webui.enabled));
+   json_object_object_add(webui, "port", json_object_new_int(config->webui.port));
+   json_object_object_add(webui, "max_clients", json_object_new_int(config->webui.max_clients));
+   json_object_object_add(webui, "audio_chunk_ms",
+                          json_object_new_int(config->webui.audio_chunk_ms));
+   json_object_object_add(webui, "workers", json_object_new_int(config->webui.workers));
+   json_object_object_add(webui, "www_path", json_object_new_string(config->webui.www_path));
+   json_object_object_add(webui, "bind_address",
+                          json_object_new_string(config->webui.bind_address));
+   json_object_object_add(webui, "https", json_object_new_boolean(config->webui.https));
+   json_object_object_add(webui, "ssl_cert_path",
+                          json_object_new_string(config->webui.ssl_cert_path));
+   json_object_object_add(webui, "ssl_key_path",
+                          json_object_new_string(config->webui.ssl_key_path));
+   json_object_object_add(root, "webui", webui);
+
+   /* [debug] */
+   json_object *debug = json_object_new_object();
+   json_object_object_add(debug, "mic_record", json_object_new_boolean(config->debug.mic_record));
+   json_object_object_add(debug, "asr_record", json_object_new_boolean(config->debug.asr_record));
+   json_object_object_add(debug, "aec_record", json_object_new_boolean(config->debug.aec_record));
+   json_object_object_add(debug, "record_path", json_object_new_string(config->debug.record_path));
+   json_object_object_add(root, "debug", debug);
+
+   /* [paths] */
+   json_object *paths = json_object_new_object();
+   json_object_object_add(paths, "music_dir", json_object_new_string(config->paths.music_dir));
+   json_object_object_add(paths, "commands_config",
+                          json_object_new_string(config->paths.commands_config));
+   json_object_object_add(root, "paths", paths);
+
+   return root;
+}
+
+json_object *secrets_to_json_status(const secrets_config_t *secrets) {
+   json_object *obj = json_object_new_object();
+   if (!obj)
+      return NULL;
+
+   /* Only report whether secrets are set, never the actual values */
+   json_object_object_add(obj, "openai_api_key",
+                          json_object_new_boolean(secrets && secrets->openai_api_key[0]));
+   json_object_object_add(obj, "claude_api_key",
+                          json_object_new_boolean(secrets && secrets->claude_api_key[0]));
+   json_object_object_add(obj, "mqtt_username",
+                          json_object_new_boolean(secrets && secrets->mqtt_username[0]));
+   json_object_object_add(obj, "mqtt_password",
+                          json_object_new_boolean(secrets && secrets->mqtt_password[0]));
+
+   return obj;
+}
+
+/* =============================================================================
+ * TOML File Writing
+ * ============================================================================= */
+
+int config_write_toml(const dawn_config_t *config, const char *path) {
+   if (!config || !path)
+      return 1;
+
+   FILE *fp = fopen(path, "w");
+   if (!fp) {
+      LOG_ERROR("Failed to open config file for writing: %s (%s)", path, strerror(errno));
+      return 1;
+   }
+
+   fprintf(fp, "# DAWN Configuration\n");
+   fprintf(fp, "# Auto-generated by WebUI settings panel\n\n");
+
+   fprintf(fp, "[general]\n");
+   fprintf(fp, "ai_name = \"%s\"\n", config->general.ai_name);
+   if (config->general.log_file[0])
+      fprintf(fp, "log_file = \"%s\"\n", config->general.log_file);
+
+   if (config->persona.description[0]) {
+      fprintf(fp, "\n[persona]\n");
+      /* For multiline strings, use triple quotes in TOML */
+      if (strchr(config->persona.description, '\n')) {
+         fprintf(fp, "description = '''\n%s\n'''\n", config->persona.description);
+      } else {
+         fprintf(fp, "description = \"%s\"\n", config->persona.description);
+      }
+   }
+
+   fprintf(fp, "\n[localization]\n");
+   if (config->localization.location[0])
+      fprintf(fp, "location = \"%s\"\n", config->localization.location);
+   if (config->localization.timezone[0])
+      fprintf(fp, "timezone = \"%s\"\n", config->localization.timezone);
+   fprintf(fp, "units = \"%s\"\n", config->localization.units);
+
+   fprintf(fp, "\n[audio]\n");
+   fprintf(fp, "backend = \"%s\"\n", config->audio.backend);
+   fprintf(fp, "capture_device = \"%s\"\n", config->audio.capture_device);
+   fprintf(fp, "playback_device = \"%s\"\n", config->audio.playback_device);
+   fprintf(fp, "output_rate = %d\n", config->audio.output_rate);
+   fprintf(fp, "output_channels = %d\n", config->audio.output_channels);
+
+   fprintf(fp, "\n[audio.bargein]\n");
+   fprintf(fp, "enabled = %s\n", config->audio.bargein.enabled ? "true" : "false");
+   fprintf(fp, "cooldown_ms = %d\n", config->audio.bargein.cooldown_ms);
+   fprintf(fp, "startup_cooldown_ms = %d\n", config->audio.bargein.startup_cooldown_ms);
+
+   fprintf(fp, "\n[vad]\n");
+   fprintf(fp, "speech_threshold = %.2f\n", config->vad.speech_threshold);
+   fprintf(fp, "speech_threshold_tts = %.2f\n", config->vad.speech_threshold_tts);
+   fprintf(fp, "silence_threshold = %.2f\n", config->vad.silence_threshold);
+   fprintf(fp, "end_of_speech_duration = %.1f\n", config->vad.end_of_speech_duration);
+   fprintf(fp, "max_recording_duration = %.1f\n", config->vad.max_recording_duration);
+   fprintf(fp, "preroll_ms = %d\n", config->vad.preroll_ms);
+
+   fprintf(fp, "\n[vad.chunking]\n");
+   fprintf(fp, "enabled = %s\n", config->vad.chunking.enabled ? "true" : "false");
+   fprintf(fp, "pause_duration = %.2f\n", config->vad.chunking.pause_duration);
+   fprintf(fp, "min_duration = %.1f\n", config->vad.chunking.min_duration);
+   fprintf(fp, "max_duration = %.1f\n", config->vad.chunking.max_duration);
+
+   fprintf(fp, "\n[asr]\n");
+   fprintf(fp, "model = \"%s\"\n", config->asr.model);
+   fprintf(fp, "models_path = \"%s\"\n", config->asr.models_path);
+
+   fprintf(fp, "\n[tts]\n");
+   fprintf(fp, "models_path = \"%s\"\n", config->tts.models_path);
+   fprintf(fp, "voice_model = \"%s\"\n", config->tts.voice_model);
+   fprintf(fp, "length_scale = %.2f\n", config->tts.length_scale);
+
+   fprintf(fp, "\n[commands]\n");
+   fprintf(fp, "processing_mode = \"%s\"\n", config->commands.processing_mode);
+
+   fprintf(fp, "\n[llm]\n");
+   fprintf(fp, "type = \"%s\"\n", config->llm.type);
+   fprintf(fp, "max_tokens = %d\n", config->llm.max_tokens);
+
+   fprintf(fp, "\n[llm.cloud]\n");
+   fprintf(fp, "provider = \"%s\"\n", config->llm.cloud.provider);
+   fprintf(fp, "openai_model = \"%s\"\n", config->llm.cloud.openai_model);
+   fprintf(fp, "claude_model = \"%s\"\n", config->llm.cloud.claude_model);
+   if (config->llm.cloud.endpoint[0])
+      fprintf(fp, "endpoint = \"%s\"\n", config->llm.cloud.endpoint);
+   fprintf(fp, "vision_enabled = %s\n", config->llm.cloud.vision_enabled ? "true" : "false");
+
+   fprintf(fp, "\n[llm.local]\n");
+   fprintf(fp, "endpoint = \"%s\"\n", config->llm.local.endpoint);
+   if (config->llm.local.model[0])
+      fprintf(fp, "model = \"%s\"\n", config->llm.local.model);
+   fprintf(fp, "vision_enabled = %s\n", config->llm.local.vision_enabled ? "true" : "false");
+
+   fprintf(fp, "\n[search]\n");
+   fprintf(fp, "engine = \"%s\"\n", config->search.engine);
+   fprintf(fp, "endpoint = \"%s\"\n", config->search.endpoint);
+
+   fprintf(fp, "\n[search.summarizer]\n");
+   fprintf(fp, "backend = \"%s\"\n", config->search.summarizer.backend);
+   fprintf(fp, "threshold_bytes = %zu\n", config->search.summarizer.threshold_bytes);
+   fprintf(fp, "target_words = %zu\n", config->search.summarizer.target_words);
+
+   if (config->url_fetcher.whitelist_count > 0 || config->url_fetcher.flaresolverr.enabled) {
+      fprintf(fp, "\n[url_fetcher]\n");
+      if (config->url_fetcher.whitelist_count > 0) {
+         fprintf(fp, "whitelist = [\n");
+         for (int i = 0; i < config->url_fetcher.whitelist_count; i++) {
+            fprintf(fp, "    \"%s\"%s\n", config->url_fetcher.whitelist[i],
+                    i < config->url_fetcher.whitelist_count - 1 ? "," : "");
+         }
+         fprintf(fp, "]\n");
+      }
+
+      fprintf(fp, "\n[url_fetcher.flaresolverr]\n");
+      fprintf(fp, "enabled = %s\n", config->url_fetcher.flaresolverr.enabled ? "true" : "false");
+      fprintf(fp, "endpoint = \"%s\"\n", config->url_fetcher.flaresolverr.endpoint);
+      fprintf(fp, "timeout_sec = %d\n", config->url_fetcher.flaresolverr.timeout_sec);
+      fprintf(fp, "max_response_bytes = %zu\n",
+              config->url_fetcher.flaresolverr.max_response_bytes);
+   }
+
+   fprintf(fp, "\n[mqtt]\n");
+   fprintf(fp, "enabled = %s\n", config->mqtt.enabled ? "true" : "false");
+   fprintf(fp, "broker = \"%s\"\n", config->mqtt.broker);
+   fprintf(fp, "port = %d\n", config->mqtt.port);
+
+   fprintf(fp, "\n[network]\n");
+   fprintf(fp, "enabled = %s\n", config->network.enabled ? "true" : "false");
+   fprintf(fp, "host = \"%s\"\n", config->network.host);
+   fprintf(fp, "port = %d\n", config->network.port);
+   fprintf(fp, "workers = %d\n", config->network.workers);
+   fprintf(fp, "socket_timeout_sec = %d\n", config->network.socket_timeout_sec);
+   fprintf(fp, "session_timeout_sec = %d\n", config->network.session_timeout_sec);
+   fprintf(fp, "llm_timeout_ms = %d\n", config->network.llm_timeout_ms);
+
+   fprintf(fp, "\n[tui]\n");
+   fprintf(fp, "enabled = %s\n", config->tui.enabled ? "true" : "false");
+
+   fprintf(fp, "\n[webui]\n");
+   fprintf(fp, "enabled = %s\n", config->webui.enabled ? "true" : "false");
+   fprintf(fp, "port = %d\n", config->webui.port);
+   fprintf(fp, "max_clients = %d\n", config->webui.max_clients);
+   fprintf(fp, "audio_chunk_ms = %d\n", config->webui.audio_chunk_ms);
+   fprintf(fp, "workers = %d\n", config->webui.workers);
+   fprintf(fp, "www_path = \"%s\"\n", config->webui.www_path);
+   fprintf(fp, "bind_address = \"%s\"\n", config->webui.bind_address);
+   fprintf(fp, "https = %s\n", config->webui.https ? "true" : "false");
+   if (config->webui.ssl_cert_path[0])
+      fprintf(fp, "ssl_cert_path = \"%s\"\n", config->webui.ssl_cert_path);
+   if (config->webui.ssl_key_path[0])
+      fprintf(fp, "ssl_key_path = \"%s\"\n", config->webui.ssl_key_path);
+
+   fprintf(fp, "\n[debug]\n");
+   fprintf(fp, "mic_record = %s\n", config->debug.mic_record ? "true" : "false");
+   fprintf(fp, "asr_record = %s\n", config->debug.asr_record ? "true" : "false");
+   fprintf(fp, "aec_record = %s\n", config->debug.aec_record ? "true" : "false");
+   fprintf(fp, "record_path = \"%s\"\n", config->debug.record_path);
+
+   fprintf(fp, "\n[paths]\n");
+   fprintf(fp, "music_dir = \"%s\"\n", config->paths.music_dir);
+   fprintf(fp, "commands_config = \"%s\"\n", config->paths.commands_config);
+
+   fclose(fp);
+   LOG_INFO("Configuration written to %s", path);
+   return 0;
+}
+
+int secrets_write_toml(const secrets_config_t *secrets, const char *path) {
+   if (!secrets || !path)
+      return 1;
+
+   FILE *fp = fopen(path, "w");
+   if (!fp) {
+      LOG_ERROR("Failed to open secrets file for writing: %s (%s)", path, strerror(errno));
+      return 1;
+   }
+
+   fprintf(fp, "# DAWN Secrets Configuration\n");
+   fprintf(fp, "# Auto-generated by WebUI settings panel\n");
+   fprintf(fp, "# WARNING: This file contains sensitive information!\n\n");
+
+   fprintf(fp, "[secrets]\n");
+   if (secrets->openai_api_key[0])
+      fprintf(fp, "openai_api_key = \"%s\"\n", secrets->openai_api_key);
+   if (secrets->claude_api_key[0])
+      fprintf(fp, "claude_api_key = \"%s\"\n", secrets->claude_api_key);
+   if (secrets->mqtt_username[0])
+      fprintf(fp, "mqtt_username = \"%s\"\n", secrets->mqtt_username);
+   if (secrets->mqtt_password[0])
+      fprintf(fp, "mqtt_password = \"%s\"\n", secrets->mqtt_password);
+
+   fclose(fp);
+
+   /* Set restrictive permissions on secrets file */
+   if (chmod(path, 0600) != 0) {
+      LOG_WARNING("Failed to set permissions on secrets file: %s", strerror(errno));
+   }
+
+   LOG_INFO("Secrets written to %s", path);
+   return 0;
 }

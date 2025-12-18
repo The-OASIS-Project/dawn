@@ -30,6 +30,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "core/worker_pool.h"
 #include "logging.h"
 #include "tools/toml.h"
 
@@ -246,9 +247,10 @@ static void parse_tts(toml_table_t *table, tts_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = { "voice_model", "length_scale", NULL };
+   static const char *const known_keys[] = { "models_path", "voice_model", "length_scale", NULL };
    warn_unknown_keys(table, "tts", known_keys);
 
+   PARSE_STRING(table, "models_path", config->models_path);
    PARSE_STRING(table, "voice_model", config->voice_model);
    PARSE_DOUBLE(table, "length_scale", config->length_scale);
 }
@@ -267,14 +269,28 @@ static void parse_llm_cloud(toml_table_t *table, llm_cloud_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = { "provider", "model", "endpoint", "vision_enabled",
-                                             NULL };
+   static const char *const known_keys[] = { "provider", "openai_model",   "claude_model",
+                                             "model", /* legacy */
+                                             "endpoint", "vision_enabled", NULL };
    warn_unknown_keys(table, "llm.cloud", known_keys);
 
    PARSE_STRING(table, "provider", config->provider);
-   PARSE_STRING(table, "model", config->model);
+   PARSE_STRING(table, "openai_model", config->openai_model);
+   PARSE_STRING(table, "claude_model", config->claude_model);
    PARSE_STRING(table, "endpoint", config->endpoint);
    PARSE_BOOL(table, "vision_enabled", config->vision_enabled);
+
+   /* Backward compatibility: if legacy "model" is set but new fields aren't,
+    * copy it to the appropriate field based on provider */
+   toml_datum_t legacy = toml_string_in(table, "model");
+   if (legacy.ok && legacy.u.s[0] != '\0') {
+      if (strcmp(config->provider, "claude") == 0 && config->claude_model[0] == '\0') {
+         snprintf(config->claude_model, sizeof(config->claude_model), "%s", legacy.u.s);
+      } else if (config->openai_model[0] == '\0') {
+         snprintf(config->openai_model, sizeof(config->openai_model), "%s", legacy.u.s);
+      }
+      free(legacy.u.s);
+   }
 }
 
 static void parse_llm_local(toml_table_t *table, llm_local_config_t *config) {
@@ -423,16 +439,17 @@ static void parse_webui(toml_table_t *table, webui_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = {
-      "enabled",      "port",  "max_clients",   "audio_chunk_ms", "www_path",
-      "bind_address", "https", "ssl_cert_path", "ssl_key_path",   NULL
-   };
+   static const char *const known_keys[] = { "enabled",        "port",    "max_clients",
+                                             "audio_chunk_ms", "workers", "www_path",
+                                             "bind_address",   "https",   "ssl_cert_path",
+                                             "ssl_key_path",   NULL };
    warn_unknown_keys(table, "webui", known_keys);
 
    PARSE_BOOL(table, "enabled", config->enabled);
    PARSE_INT(table, "port", config->port);
    PARSE_INT(table, "max_clients", config->max_clients);
    PARSE_INT(table, "audio_chunk_ms", config->audio_chunk_ms);
+   PARSE_INT(table, "workers", config->workers);
    PARSE_STRING(table, "www_path", config->www_path);
    PARSE_STRING(table, "bind_address", config->bind_address);
    PARSE_BOOL(table, "https", config->https);
@@ -444,6 +461,13 @@ static void parse_webui(toml_table_t *table, webui_config_t *config) {
       config->audio_chunk_ms = 100;
    } else if (config->audio_chunk_ms > 500) {
       config->audio_chunk_ms = 500;
+   }
+
+   /* Clamp workers to valid range (1 to WORKER_POOL_MAX_SIZE) */
+   if (config->workers < 1) {
+      config->workers = 1;
+   } else if (config->workers > WORKER_POOL_MAX_SIZE) {
+      config->workers = WORKER_POOL_MAX_SIZE;
    }
 }
 
@@ -717,4 +741,60 @@ const char *config_get_secrets_path(void) {
    if (s_loaded_secrets_path[0] != '\0')
       return s_loaded_secrets_path;
    return "(none)";
+}
+
+int config_backup_file(const char *path) {
+   if (!path || path[0] == '\0')
+      return 1;
+
+   /* Check if original file exists */
+   struct stat st;
+   if (stat(path, &st) != 0) {
+      /* File doesn't exist, nothing to backup */
+      return 0;
+   }
+
+   /* Create backup path (.bak extension) */
+   char backup_path[CONFIG_PATH_MAX];
+   int len = snprintf(backup_path, sizeof(backup_path), "%s.bak", path);
+   if (len < 0 || (size_t)len >= sizeof(backup_path)) {
+      LOG_ERROR("Backup path too long for: %s", path);
+      return 1;
+   }
+
+   /* Read original file */
+   FILE *src = fopen(path, "rb");
+   if (!src) {
+      LOG_ERROR("Failed to open file for backup: %s", path);
+      return 1;
+   }
+
+   /* Create backup file */
+   FILE *dst = fopen(backup_path, "wb");
+   if (!dst) {
+      LOG_ERROR("Failed to create backup file: %s", backup_path);
+      fclose(src);
+      return 1;
+   }
+
+   /* Copy contents */
+   char buffer[4096];
+   size_t bytes;
+   while ((bytes = fread(buffer, 1, sizeof(buffer), src)) > 0) {
+      if (fwrite(buffer, 1, bytes, dst) != bytes) {
+         LOG_ERROR("Failed to write backup file: %s", backup_path);
+         fclose(src);
+         fclose(dst);
+         return 1;
+      }
+   }
+
+   fclose(src);
+   fclose(dst);
+
+   /* Preserve original file permissions */
+   chmod(backup_path, st.st_mode);
+
+   LOG_INFO("Created backup: %s", backup_path);
+   return 0;
 }

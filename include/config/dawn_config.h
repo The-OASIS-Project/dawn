@@ -122,8 +122,9 @@ typedef struct {
  * TTS (Text-to-Speech) Configuration
  * ============================================================================= */
 typedef struct {
-   char voice_model[128]; /* Piper voice model name */
-   float length_scale;    /* Speaking rate: <1.0 = faster, >1.0 = slower */
+   char models_path[CONFIG_PATH_MAX]; /* Path to TTS model files */
+   char voice_model[128];             /* Piper voice model name */
+   float length_scale;                /* Speaking rate: <1.0 = faster, >1.0 = slower */
 } tts_config_t;
 
 /* =============================================================================
@@ -137,10 +138,11 @@ typedef struct {
  * LLM (Large Language Model) Configuration
  * ============================================================================= */
 typedef struct {
-   char provider[16];              /* "openai" or "claude" */
-   char model[CONFIG_NAME_MAX];    /* Model name */
-   char endpoint[CONFIG_PATH_MAX]; /* Empty = default, or custom endpoint */
-   bool vision_enabled;            /* Model supports vision/image analysis */
+   char provider[16];                  /* "openai" or "claude" */
+   char openai_model[CONFIG_NAME_MAX]; /* Model for OpenAI API */
+   char claude_model[CONFIG_NAME_MAX]; /* Model for Claude API */
+   char endpoint[CONFIG_PATH_MAX];     /* Empty = default, or custom endpoint */
+   bool vision_enabled;                /* Model supports vision/image analysis */
 } llm_cloud_config_t;
 
 typedef struct {
@@ -224,6 +226,7 @@ typedef struct {
    int port;                            /* HTTP/WebSocket port (default: 3000) */
    int max_clients;                     /* Max concurrent WebSocket clients */
    int audio_chunk_ms;                  /* Audio chunk size in ms (100-500, default: 200) */
+   int workers;                         /* ASR worker threads for voice input (default: 1) */
    char www_path[CONFIG_PATH_MAX];      /* Path to static files */
    char bind_address[CONFIG_NAME_MAX];  /* Bind address (default: 127.0.0.1) */
    bool https;                          /* Enable HTTPS (required for mic on LAN) */

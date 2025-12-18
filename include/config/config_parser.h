@@ -106,6 +106,17 @@ const char *config_get_loaded_path(void);
  */
 const char *config_get_secrets_path(void);
 
+/**
+ * @brief Create a backup of a configuration file
+ *
+ * Creates a .bak copy of the specified file before modifications.
+ * If the file doesn't exist, returns success (nothing to backup).
+ *
+ * @param path Path to the file to backup
+ * @return 0 on success, 1 on failure
+ */
+int config_backup_file(const char *path);
+
 #ifdef __cplusplus
 }
 #endif

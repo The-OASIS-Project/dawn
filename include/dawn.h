@@ -226,6 +226,26 @@ sig_atomic_t get_quit(void);
  */
 int is_llm_processing(void);
 
+/**
+ * @brief Flag indicating a restart has been requested.
+ *
+ * This flag is set by dawn_request_restart() and checked at the end of main()
+ * to determine if the application should restart via execve().
+ */
+extern volatile sig_atomic_t g_restart_requested;
+
+/**
+ * @brief Request application restart via self-exec.
+ *
+ * Sets the restart flag and triggers main loop exit. After cleanup,
+ * the application will re-execute itself using execve(), preserving
+ * the same PID but resetting all state. Used to apply configuration
+ * changes that require a full restart.
+ *
+ * Thread-safe: Uses sig_atomic_t for the flag.
+ */
+void dawn_request_restart(void);
+
 #ifdef __cplusplus
 }
 #endif

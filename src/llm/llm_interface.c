@@ -120,18 +120,18 @@ static volatile sig_atomic_t llm_interrupt_requested = 0;
  * @param host Output buffer to store the extracted host (must be pre-allocated).
  * @param port Output buffer to store the extracted port (must be large enough for the port
  * number).
- * @return int Returns 0 on success, -1 on failure.
+ * @return int Returns 0 on success, 1 on failure.
  */
 static int extract_host_and_port(const char *url, char *host, char *port) {
    // Validate the input arguments
    if (url == NULL || host == NULL || port == NULL) {
       LOG_ERROR("Error: NULL argument passed to extract_host_and_port.");
-      return -1;
+      return 1;
    }
 
    if (strlen(url) == 0) {
       LOG_ERROR("Error: Empty URL provided.");
-      return -1;
+      return 1;
    }
 
    const char *start = url;
@@ -172,7 +172,7 @@ int llm_check_connection(const char *url, int timeout_seconds) {
    char port[6];
 
    // Extract host from the URL (ignores path and protocol)
-   if (extract_host_and_port(url, host, port) == -1) {
+   if (extract_host_and_port(url, host, port) != 0) {
       LOG_ERROR("Error: Invalid URL format");
       return 0;
    }
@@ -378,9 +378,11 @@ const char *llm_get_model_name(void) {
       return "local";
    }
 
-   // Cloud LLM - return model from config
-   if (current_cloud_provider != CLOUD_PROVIDER_NONE) {
-      return g_config.llm.cloud.model;
+   // Cloud LLM - return model from config based on active provider
+   if (current_cloud_provider == CLOUD_PROVIDER_OPENAI) {
+      return g_config.llm.cloud.openai_model;
+   } else if (current_cloud_provider == CLOUD_PROVIDER_CLAUDE) {
+      return g_config.llm.cloud.claude_model;
    }
    return "None";
 }
