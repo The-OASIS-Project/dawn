@@ -42,6 +42,7 @@
 #include "config/dawn_config.h"
 #include "conversation_manager.h"
 #include "core/command_router.h"
+#include "core/session_manager.h"
 #include "dawn.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_interface.h"
@@ -90,7 +91,8 @@ static deviceCallback deviceCallbackArray[] = { { AUDIO_PLAYBACK_DEVICE, setPcmP
                                                 { WEATHER, weatherCallback },
                                                 { CALCULATOR, calculatorCallback },
                                                 { URL_FETCH, urlFetchCallback },
-                                                { LLM_STATUS, llmStatusCallback } };
+                                                { LLM_STATUS, llmStatusCallback },
+                                                { CLOUD_PROVIDER, cloudProviderCallback } };
 
 static pthread_t music_thread = -1;
 static pthread_t voice_thread = -1;
@@ -604,6 +606,21 @@ static void execute_command_for_worker(struct json_object *parsed_json, const ch
    LOG_INFO("Executing command for worker: device=%s, action=%s, request_id=%s", deviceName,
             actionName, request_id);
 
+   // Get session_id if present (for per-session LLM config)
+   // Note: session_get() returns NULL for disconnected sessions, which means
+   // commands from disconnected clients fall back to global config. This is
+   // intentional - there's no value in changing config for a disconnected client,
+   // and they can't see the result anyway.
+   struct json_object *session_id_obj = NULL;
+   session_t *session = NULL;
+   if (json_object_object_get_ex(parsed_json, "session_id", &session_id_obj)) {
+      uint32_t session_id = (uint32_t)json_object_get_int(session_id_obj);
+      session = session_get(session_id);
+      if (session) {
+         session_set_command_context(session);
+      }
+   }
+
    // Loop through device names for device types and execute callback
    for (int i = 0; i < MAX_DEVICE_TYPES; i++) {
       if (strcmp(deviceName, deviceTypeStrings[i]) == 0) {
@@ -613,6 +630,12 @@ static void execute_command_for_worker(struct json_object *parsed_json, const ch
          }
          break;
       }
+   }
+
+   // Clear command context and release session reference
+   session_set_command_context(NULL);
+   if (session) {
+      session_release(session);
    }
 
    // Deliver result to waiting worker
@@ -1437,9 +1460,24 @@ char *volumeCallback(const char *actionName, char *value, int *should_respond) {
 
 char *localLLMCallback(const char *actionName, char *value, int *should_respond) {
    LOG_INFO("Setting AI to local LLM.");
-   int result = llm_set_type(LLM_LOCAL);
-
    *should_respond = 1;
+
+   session_t *session = session_get_command_context();
+   if (session) {
+      /* Per-session config */
+      session_llm_config_t config = { .override_enabled = true,
+                                      .type = LLM_LOCAL,
+                                      .cloud_provider = CLOUD_PROVIDER_NONE };
+      int result = session_set_llm_config(session, &config);
+      if (result != 0) {
+         return strdup("Failed to switch to local LLM");
+      }
+      LOG_INFO("Session %u switched to local LLM", session->session_id);
+      return strdup("AI switched to local LLM");
+   }
+
+   /* Fallback to global (shouldn't happen in normal use) */
+   int result = llm_set_type(LLM_LOCAL);
    if (result != 0) {
       return strdup("Failed to switch to local LLM");
    }
@@ -1448,9 +1486,26 @@ char *localLLMCallback(const char *actionName, char *value, int *should_respond)
 
 char *cloudLLMCallback(const char *actionName, char *value, int *should_respond) {
    LOG_INFO("Setting AI to cloud LLM.");
-   int result = llm_set_type(LLM_CLOUD);
-
    *should_respond = 1;
+
+   session_t *session = session_get_command_context();
+   if (session) {
+      /* Per-session config - use default cloud provider */
+      session_llm_config_t config = {
+         .override_enabled = true,
+         .type = LLM_CLOUD,
+         .cloud_provider = CLOUD_PROVIDER_NONE
+      }; /* Inherit provider */
+      int result = session_set_llm_config(session, &config);
+      if (result != 0) {
+         return strdup("Failed to switch to cloud LLM. API key not configured in secrets.toml.");
+      }
+      LOG_INFO("Session %u switched to cloud LLM", session->session_id);
+      return strdup("AI switched to cloud LLM");
+   }
+
+   /* Fallback to global */
+   int result = llm_set_type(LLM_CLOUD);
    if (result != 0) {
       return strdup("Failed to switch to cloud LLM. API key not configured in secrets.toml.");
    }
@@ -1461,33 +1516,104 @@ char *llmStatusCallback(const char *actionName, char *value, int *should_respond
    char *result = NULL;
    *should_respond = 1;
 
+   session_t *session = session_get_command_context();
+
    // Handle "set" action to switch LLM type
    if (actionName && strcmp(actionName, "set") == 0) {
       if (value && (strcasecmp(value, "local") == 0 || strcasecmp(value, "llama") == 0)) {
          LOG_INFO("Setting AI to local LLM via unified llm.set command.");
-         int rc = llm_set_type(LLM_LOCAL);
-         if (rc != 0) {
+         if (session) {
+            session_llm_config_t config = { .override_enabled = true,
+                                            .type = LLM_LOCAL,
+                                            .cloud_provider = CLOUD_PROVIDER_NONE };
+            if (session_set_llm_config(session, &config) != 0) {
+               return strdup("Failed to switch to local LLM");
+            }
+            return strdup("AI switched to local LLM");
+         }
+         if (llm_set_type(LLM_LOCAL) != 0) {
             return strdup("Failed to switch to local LLM");
          }
          return strdup("AI switched to local LLM");
-      } else if (value && (strcasecmp(value, "cloud") == 0 || strcasecmp(value, "openai") == 0 ||
-                           strcasecmp(value, "claude") == 0)) {
+      } else if (value && strcasecmp(value, "cloud") == 0) {
          LOG_INFO("Setting AI to cloud LLM via unified llm.set command.");
-         int rc = llm_set_type(LLM_CLOUD);
-         if (rc != 0) {
+         if (session) {
+            session_llm_config_t config = { .override_enabled = true,
+                                            .type = LLM_CLOUD,
+                                            .cloud_provider = CLOUD_PROVIDER_NONE };
+            if (session_set_llm_config(session, &config) != 0) {
+               return strdup("Failed to switch to cloud LLM. API key not configured.");
+            }
+            return strdup("AI switched to cloud LLM");
+         }
+         if (llm_set_type(LLM_CLOUD) != 0) {
             return strdup("Failed to switch to cloud LLM. API key not configured in secrets.toml.");
          }
          return strdup("AI switched to cloud LLM");
+      } else if (value && strcasecmp(value, "openai") == 0) {
+         LOG_INFO("Setting AI to OpenAI via unified llm.set command.");
+         if (session) {
+            session_llm_config_t config = { .override_enabled = true,
+                                            .type = LLM_CLOUD,
+                                            .cloud_provider = CLOUD_PROVIDER_OPENAI };
+            if (session_set_llm_config(session, &config) != 0) {
+               return strdup("Failed to switch to OpenAI. API key not configured.");
+            }
+            return strdup("AI switched to OpenAI");
+         }
+         if (llm_set_cloud_provider(CLOUD_PROVIDER_OPENAI) != 0) {
+            return strdup("Failed to switch to OpenAI. API key not configured in secrets.toml.");
+         }
+         if (llm_set_type(LLM_CLOUD) != 0) {
+            return strdup("Switched provider to OpenAI but failed to enable cloud mode.");
+         }
+         return strdup("AI switched to OpenAI");
+      } else if (value && strcasecmp(value, "claude") == 0) {
+         LOG_INFO("Setting AI to Claude via unified llm.set command.");
+         if (session) {
+            session_llm_config_t config = { .override_enabled = true,
+                                            .type = LLM_CLOUD,
+                                            .cloud_provider = CLOUD_PROVIDER_CLAUDE };
+            if (session_set_llm_config(session, &config) != 0) {
+               return strdup("Failed to switch to Claude. API key not configured.");
+            }
+            return strdup("AI switched to Claude");
+         }
+         if (llm_set_cloud_provider(CLOUD_PROVIDER_CLAUDE) != 0) {
+            return strdup("Failed to switch to Claude. API key not configured in secrets.toml.");
+         }
+         if (llm_set_type(LLM_CLOUD) != 0) {
+            return strdup("Switched provider to Claude but failed to enable cloud mode.");
+         }
+         return strdup("AI switched to Claude");
       } else {
-         return strdup("Invalid LLM type. Use 'local' or 'cloud'.");
+         return strdup("Invalid LLM type. Use 'local', 'cloud', 'openai', or 'claude'.");
       }
    }
 
    // Handle "get" action (or default) to return current status
-   llm_type_t current = llm_get_type();
+   // Use session's resolved config if available
+   llm_type_t current;
+   const char *provider;
+   const char *model;
+
+   if (session) {
+      session_llm_config_t session_config;
+      llm_resolved_config_t resolved;
+      session_get_llm_config(session, &session_config);
+      llm_resolve_config(&session_config, &resolved);
+      current = resolved.type;
+      provider = resolved.cloud_provider == CLOUD_PROVIDER_OPENAI   ? "OpenAI"
+                 : resolved.cloud_provider == CLOUD_PROVIDER_CLAUDE ? "Claude"
+                                                                    : "None";
+      model = resolved.model;
+   } else {
+      current = llm_get_type();
+      provider = llm_get_cloud_provider_name();
+      model = llm_get_model_name();
+   }
+
    const char *type_str = (current == LLM_LOCAL) ? "local" : "cloud";
-   const char *model = llm_get_model_name();
-   const char *provider = llm_get_cloud_provider_name();
 
    if (command_processing_mode == CMD_MODE_DIRECT_ONLY) {
       // Direct mode: use text-to-speech
@@ -1519,6 +1645,70 @@ char *llmStatusCallback(const char *actionName, char *value, int *should_respond
       }
       return result;
    }
+}
+
+char *cloudProviderCallback(const char *actionName, char *value, int *should_respond) {
+   *should_respond = 1;
+
+   session_t *session = session_get_command_context();
+
+   // Handle "set" action to switch cloud provider
+   if (actionName && strcmp(actionName, "set") == 0) {
+      if (value && strcasecmp(value, "openai") == 0) {
+         LOG_INFO("Setting cloud provider to OpenAI.");
+         if (session) {
+            session_llm_config_t config = { .override_enabled = true,
+                                            .type = LLM_CLOUD,
+                                            .cloud_provider = CLOUD_PROVIDER_OPENAI };
+            if (session_set_llm_config(session, &config) != 0) {
+               return strdup("Failed to switch to OpenAI. API key not configured.");
+            }
+            return strdup("Cloud provider switched to OpenAI");
+         }
+         int rc = llm_set_cloud_provider(CLOUD_PROVIDER_OPENAI);
+         if (rc != 0) {
+            return strdup("Failed to switch to OpenAI. API key not configured in secrets.toml.");
+         }
+         return strdup("Cloud provider switched to OpenAI");
+      } else if (value && strcasecmp(value, "claude") == 0) {
+         LOG_INFO("Setting cloud provider to Claude.");
+         if (session) {
+            session_llm_config_t config = { .override_enabled = true,
+                                            .type = LLM_CLOUD,
+                                            .cloud_provider = CLOUD_PROVIDER_CLAUDE };
+            if (session_set_llm_config(session, &config) != 0) {
+               return strdup("Failed to switch to Claude. API key not configured.");
+            }
+            return strdup("Cloud provider switched to Claude");
+         }
+         int rc = llm_set_cloud_provider(CLOUD_PROVIDER_CLAUDE);
+         if (rc != 0) {
+            return strdup("Failed to switch to Claude. API key not configured in secrets.toml.");
+         }
+         return strdup("Cloud provider switched to Claude");
+      } else {
+         return strdup("Invalid cloud provider. Use 'openai' or 'claude'.");
+      }
+   }
+
+   // Handle "get" action (or default) to return current provider
+   const char *provider;
+   if (session) {
+      session_llm_config_t session_config;
+      llm_resolved_config_t resolved;
+      session_get_llm_config(session, &session_config);
+      llm_resolve_config(&session_config, &resolved);
+      provider = resolved.cloud_provider == CLOUD_PROVIDER_OPENAI   ? "OpenAI"
+                 : resolved.cloud_provider == CLOUD_PROVIDER_CLAUDE ? "Claude"
+                                                                    : "None";
+   } else {
+      provider = llm_get_cloud_provider_name();
+   }
+   char *result = malloc(128);
+   if (result) {
+      snprintf(result, 128, "Current cloud provider is %s", provider);
+   }
+   return result;
 }
 
 char *resetConversationCallback(const char *actionName, char *value, int *should_respond) {

@@ -872,6 +872,34 @@ static void handle_get_config(ws_connection_t *conn) {
    }
    json_object_object_add(payload, "requires_restart", restart_fields);
 
+   /* Add session LLM status (resolved config for this session) */
+   json_object *llm_runtime = json_object_new_object();
+
+   /* Get session's resolved LLM config */
+   session_llm_config_t session_config = { 0 };
+   llm_resolved_config_t resolved = { 0 };
+   if (conn->session) {
+      session_get_llm_config(conn->session, &session_config);
+   }
+   llm_resolve_config(&session_config, &resolved);
+
+   json_object_object_add(llm_runtime, "type",
+                          json_object_new_string(resolved.type == LLM_LOCAL ? "local" : "cloud"));
+
+   const char *provider_name = resolved.cloud_provider == CLOUD_PROVIDER_OPENAI   ? "OpenAI"
+                               : resolved.cloud_provider == CLOUD_PROVIDER_CLAUDE ? "Claude"
+                                                                                  : "None";
+   json_object_object_add(llm_runtime, "provider", json_object_new_string(provider_name));
+   json_object_object_add(llm_runtime, "model",
+                          json_object_new_string(resolved.model ? resolved.model : ""));
+   json_object_object_add(llm_runtime, "openai_available",
+                          json_object_new_boolean(llm_has_openai_key()));
+   json_object_object_add(llm_runtime, "claude_available",
+                          json_object_new_boolean(llm_has_claude_key()));
+   json_object_object_add(llm_runtime, "override_enabled",
+                          json_object_new_boolean(session_config.override_enabled));
+   json_object_object_add(payload, "llm_runtime", llm_runtime);
+
    json_object_object_add(response, "payload", payload);
 
    /* Send response */
@@ -1965,6 +1993,184 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
 
       /* Request restart - this will trigger clean shutdown and re-exec */
       dawn_request_restart();
+   } else if (strcmp(type, "set_llm_runtime") == 0) {
+      /* Switch LLM type or provider at runtime (immediate effect, no restart) */
+      struct json_object *response = json_object_new_object();
+      json_object_object_add(response, "type", json_object_new_string("set_llm_runtime_response"));
+      struct json_object *resp_payload = json_object_new_object();
+
+      int success = 1;
+      const char *error_msg = NULL;
+
+      if (payload) {
+         struct json_object *type_obj, *provider_obj;
+
+         /* Handle LLM type change (local/cloud) */
+         if (json_object_object_get_ex(payload, "type", &type_obj)) {
+            const char *new_type = json_object_get_string(type_obj);
+            if (new_type) {
+               if (strcmp(new_type, "local") == 0) {
+                  llm_set_type(LLM_LOCAL);
+                  LOG_INFO("WebUI: Switched to local LLM");
+               } else if (strcmp(new_type, "cloud") == 0) {
+                  /* When switching to cloud, ensure we have a valid provider selected.
+                   * Prefer OpenAI if available, otherwise Claude. */
+                  if (llm_has_openai_key()) {
+                     llm_set_cloud_provider(CLOUD_PROVIDER_OPENAI);
+                  } else if (llm_has_claude_key()) {
+                     llm_set_cloud_provider(CLOUD_PROVIDER_CLAUDE);
+                  }
+                  int rc = llm_set_type(LLM_CLOUD);
+                  if (rc != 0) {
+                     success = 0;
+                     error_msg = "No cloud API key configured in secrets.toml";
+                  } else {
+                     LOG_INFO("WebUI: Switched to cloud LLM");
+                  }
+               }
+            }
+         }
+
+         /* Handle cloud provider change (openai/claude) */
+         if (success && json_object_object_get_ex(payload, "provider", &provider_obj)) {
+            const char *new_provider = json_object_get_string(provider_obj);
+            if (new_provider) {
+               int rc = 0;
+               if (strcmp(new_provider, "openai") == 0) {
+                  rc = llm_set_cloud_provider(CLOUD_PROVIDER_OPENAI);
+               } else if (strcmp(new_provider, "claude") == 0) {
+                  rc = llm_set_cloud_provider(CLOUD_PROVIDER_CLAUDE);
+               }
+               if (rc != 0) {
+                  success = 0;
+                  error_msg = "API key not configured for this provider";
+               } else {
+                  LOG_INFO("WebUI: Switched cloud provider to %s", new_provider);
+               }
+            }
+         }
+      }
+
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(success));
+      if (error_msg) {
+         json_object_object_add(resp_payload, "error", json_object_new_string(error_msg));
+      }
+
+      /* Return updated runtime state */
+      llm_type_t current_type = llm_get_type();
+      json_object_object_add(resp_payload, "type",
+                             json_object_new_string(current_type == LLM_LOCAL ? "local" : "cloud"));
+      json_object_object_add(resp_payload, "provider",
+                             json_object_new_string(llm_get_cloud_provider_name()));
+      json_object_object_add(resp_payload, "model", json_object_new_string(llm_get_model_name()));
+
+      /* Include API key availability so client can populate provider dropdown */
+      json_object_object_add(resp_payload, "openai_available",
+                             json_object_new_boolean(llm_has_openai_key()));
+      json_object_object_add(resp_payload, "claude_available",
+                             json_object_new_boolean(llm_has_claude_key()));
+
+      json_object_object_add(response, "payload", resp_payload);
+      send_json_response(conn->wsi, response);
+      json_object_put(response);
+   } else if (strcmp(type, "set_session_llm") == 0) {
+      /* Per-session LLM configuration (does NOT affect other clients) */
+      struct json_object *response = json_object_new_object();
+      json_object_object_add(response, "type", json_object_new_string("set_session_llm_response"));
+      struct json_object *resp_payload = json_object_new_object();
+
+      int success = 1;
+      const char *error_msg = NULL;
+
+      if (!conn->session) {
+         success = 0;
+         error_msg = "No active session";
+      } else if (payload) {
+         struct json_object *type_obj, *provider_obj;
+         session_llm_config_t config = { 0 };
+
+         /* Parse type (local/cloud) */
+         if (json_object_object_get_ex(payload, "type", &type_obj)) {
+            const char *new_type = json_object_get_string(type_obj);
+            if (new_type) {
+               config.override_enabled = true;
+               if (strcmp(new_type, "local") == 0) {
+                  config.type = LLM_LOCAL;
+               } else if (strcmp(new_type, "cloud") == 0) {
+                  config.type = LLM_CLOUD;
+               } else if (strcmp(new_type, "inherit") == 0) {
+                  config.type = LLM_UNDEFINED; /* Use global */
+               }
+            }
+         }
+
+         /* Parse provider (openai/claude) */
+         if (json_object_object_get_ex(payload, "provider", &provider_obj)) {
+            const char *new_provider = json_object_get_string(provider_obj);
+            if (new_provider) {
+               config.override_enabled = true;
+               if (strcmp(new_provider, "openai") == 0) {
+                  config.cloud_provider = CLOUD_PROVIDER_OPENAI;
+               } else if (strcmp(new_provider, "claude") == 0) {
+                  config.cloud_provider = CLOUD_PROVIDER_CLAUDE;
+               } else if (strcmp(new_provider, "inherit") == 0) {
+                  config.cloud_provider = CLOUD_PROVIDER_NONE; /* Use global */
+               }
+            }
+         }
+
+         /* Apply config or clear if nothing specified */
+         if (config.override_enabled) {
+            int rc = session_set_llm_config(conn->session, &config);
+            if (rc != 0) {
+               success = 0;
+               error_msg = "API key not configured for requested provider";
+            } else {
+               LOG_INFO("WebUI: Session %u LLM config updated (type=%d, provider=%d)",
+                        conn->session->session_id, config.type, config.cloud_provider);
+            }
+         } else {
+            /* No type/provider specified - clear override (revert to global) */
+            session_clear_llm_config(conn->session);
+            LOG_INFO("WebUI: Session %u LLM config cleared (using global)",
+                     conn->session->session_id);
+         }
+      }
+
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(success));
+      if (error_msg) {
+         json_object_object_add(resp_payload, "error", json_object_new_string(error_msg));
+      }
+
+      /* Return current session config for confirmation */
+      if (conn->session) {
+         session_llm_config_t current;
+         session_get_llm_config(conn->session, &current);
+
+         json_object_object_add(resp_payload, "override_enabled",
+                                json_object_new_boolean(current.override_enabled));
+         if (current.override_enabled) {
+            const char *type_str = current.type == LLM_LOCAL
+                                       ? "local"
+                                       : (current.type == LLM_CLOUD ? "cloud" : "inherit");
+            const char *provider_str = current.cloud_provider == CLOUD_PROVIDER_OPENAI ? "openai"
+                                       : current.cloud_provider == CLOUD_PROVIDER_CLAUDE
+                                           ? "claude"
+                                           : "inherit";
+            json_object_object_add(resp_payload, "type", json_object_new_string(type_str));
+            json_object_object_add(resp_payload, "provider", json_object_new_string(provider_str));
+         }
+      }
+
+      /* Include API key availability */
+      json_object_object_add(resp_payload, "openai_available",
+                             json_object_new_boolean(llm_has_openai_key()));
+      json_object_object_add(resp_payload, "claude_available",
+                             json_object_new_boolean(llm_has_claude_key()));
+
+      json_object_object_add(response, "payload", resp_payload);
+      send_json_response(conn->wsi, response);
+      json_object_put(response);
    } else if (strcmp(type, "reconnect") == 0) {
       /* Session reconnection with stored token */
       if (payload) {
@@ -2659,8 +2865,10 @@ static char *webui_process_commands(const char *llm_response, session_t *session
       const char *request_id = command_router_get_id(req);
       LOG_INFO("WebUI: Registered request %s", request_id);
 
-      /* Add request_id to command JSON */
+      /* Add request_id and session_id to command JSON */
       json_object_object_add(parsed_json, "request_id", json_object_new_string(request_id));
+      json_object_object_add(parsed_json, "session_id",
+                             json_object_new_int((int32_t)session->session_id));
       const char *cmd_with_id = json_object_to_json_string(parsed_json);
 
       /* Publish command via MQTT */

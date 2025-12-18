@@ -347,6 +347,79 @@ html, body {
 }
 
 /* =============================================================================
+ * LLM Quick Controls
+ * ============================================================================= */
+#llm-controls {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.5rem 1rem;
+  margin-bottom: 1rem;
+  background-color: var(--bg-secondary);
+  border-radius: var(--border-radius);
+  font-size: 0.875rem;
+}
+
+.llm-control-group {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.llm-control-group label {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.llm-control-group select {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: border-color var(--transition-fast);
+}
+
+.llm-control-group select:hover {
+  border-color: var(--accent);
+}
+
+.llm-control-group select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.llm-control-group select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.llm-control-group select option {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+#provider-group {
+  transition: opacity var(--transition-fast);
+}
+
+#llm-provider-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+#llm-model-display {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-style: italic;
+}
+
+/* =============================================================================
  * Transcript
  * ============================================================================= */
 #transcript {

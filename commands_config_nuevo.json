@@ -152,8 +152,13 @@
        "topic": "dawn"
     },
     "llm": {
-       "type": "getter",
-       "aliases": ["ai status", "current llm", "which llm", "what llm", "llm mode", "ai mode", "llm status"],
+       "type": "analog",
+       "aliases": ["ai", "ai status", "current llm", "which llm", "what llm", "llm mode", "ai mode", "llm status"],
+       "topic": "dawn"
+    },
+    "cloud provider": {
+       "type": "analog",
+       "aliases": ["cloud ai", "ai provider", "llm provider"],
        "topic": "dawn"
     },
     "viewing": {

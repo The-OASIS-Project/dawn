@@ -221,6 +221,9 @@
         case 'restart_response':
           handleRestartResponse(msg.payload);
           break;
+        case 'set_session_llm_response':
+          handleSetSessionLlmResponse(msg.payload);
+          break;
         default:
           console.log('Unknown message type:', msg.type);
       }
@@ -1559,6 +1562,11 @@
       // Initialize state based on current value
       updateAudioBackendState(backendSelect.value);
     }
+
+    // Update LLM runtime controls
+    if (payload.llm_runtime) {
+      updateLlmControls(payload.llm_runtime);
+    }
   }
 
   /**
@@ -2168,6 +2176,147 @@
         closeSettings();
       }
     });
+
+    // LLM quick controls event listeners
+    initLlmControls();
+  }
+
+  // =============================================================================
+  // LLM Runtime Controls
+  // =============================================================================
+
+  // Current LLM runtime state
+  let llmRuntimeState = {
+    type: 'cloud',
+    provider: 'openai',
+    model: '',
+    openai_available: false,
+    claude_available: false
+  };
+
+  /**
+   * Initialize LLM quick controls
+   */
+  function initLlmControls() {
+    const typeSelect = document.getElementById('llm-type-select');
+    const providerSelect = document.getElementById('llm-provider-select');
+
+    if (typeSelect) {
+      typeSelect.addEventListener('change', () => {
+        setSessionLlm({ type: typeSelect.value });
+      });
+    }
+
+    if (providerSelect) {
+      providerSelect.addEventListener('change', () => {
+        setSessionLlm({ provider: providerSelect.value });
+      });
+    }
+  }
+
+  /**
+   * Update LLM controls from server state
+   */
+  function updateLlmControls(runtime) {
+    llmRuntimeState = { ...llmRuntimeState, ...runtime };
+
+    const typeSelect = document.getElementById('llm-type-select');
+    const providerSelect = document.getElementById('llm-provider-select');
+    const providerGroup = document.getElementById('provider-group');
+    const modelDisplay = document.getElementById('llm-model-display');
+
+    if (typeSelect) {
+      typeSelect.value = runtime.type || 'cloud';
+    }
+
+    if (providerSelect) {
+      // Update available options based on API key availability
+      providerSelect.innerHTML = '';
+
+      if (runtime.openai_available) {
+        const opt = document.createElement('option');
+        opt.value = 'openai';
+        opt.textContent = 'OpenAI';
+        providerSelect.appendChild(opt);
+      }
+
+      if (runtime.claude_available) {
+        const opt = document.createElement('option');
+        opt.value = 'claude';
+        opt.textContent = 'Claude';
+        providerSelect.appendChild(opt);
+      }
+
+      // If no providers available, show disabled message
+      if (!runtime.openai_available && !runtime.claude_available) {
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = 'No API keys configured';
+        opt.disabled = true;
+        providerSelect.appendChild(opt);
+        providerSelect.disabled = true;
+      } else {
+        providerSelect.disabled = false;
+        // Set current value
+        const currentProvider = runtime.provider?.toLowerCase() || 'openai';
+        if (providerSelect.querySelector(`option[value="${currentProvider}"]`)) {
+          providerSelect.value = currentProvider;
+        }
+      }
+    }
+
+    // Enable/disable provider selector based on LLM type
+    // (Always visible, but disabled when local is selected)
+    if (providerSelect) {
+      if (runtime.type === 'local') {
+        providerSelect.disabled = true;
+        providerSelect.title = 'Provider selection not available for local LLM';
+      } else if (runtime.openai_available || runtime.claude_available) {
+        providerSelect.disabled = false;
+        providerSelect.title = 'Switch cloud provider';
+      }
+    }
+
+    // Update model display
+    if (modelDisplay) {
+      modelDisplay.textContent = runtime.model ? `(${runtime.model})` : '';
+    }
+
+    console.log('LLM controls updated:', runtime);
+  }
+
+  /**
+   * Send per-session LLM config change to server
+   */
+  function setSessionLlm(changes) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.error('WebSocket not connected');
+      return;
+    }
+
+    console.log('Setting session LLM:', changes);
+    ws.send(JSON.stringify({
+      type: 'set_session_llm',
+      payload: changes
+    }));
+  }
+
+  /**
+   * Handle per-session LLM config change response
+   */
+  function handleSetSessionLlmResponse(payload) {
+    if (payload.success) {
+      console.log('Session LLM updated:', payload);
+      updateLlmControls(payload);
+    } else {
+      console.error('Failed to update session LLM:', payload.error);
+      alert('Failed to switch LLM: ' + (payload.error || 'Unknown error'));
+
+      // Revert controls to actual state
+      if (llmRuntimeState) {
+        updateLlmControls(llmRuntimeState);
+      }
+    }
   }
 
   // Start when DOM is ready

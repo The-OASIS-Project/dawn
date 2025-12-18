@@ -40,6 +40,32 @@ static pthread_rwlock_t session_manager_rwlock = PTHREAD_RWLOCK_INITIALIZER;
 static uint32_t next_session_id = 1;  // 0 is reserved for local session
 static bool initialized = false;
 
+/**
+ * Thread-local command context - allows device callbacks to access the current session
+ *
+ * EXPECTED CALLERS:
+ *   - Main thread: for local voice commands (dawn.c parse_llm_response_for_commands)
+ *   - MQTT thread: for WebUI/DAP commands (mosquitto_comms.c execute_command_for_worker)
+ *
+ * THREAD SAFETY:
+ *   Each thread has its own copy of this pointer. Callers must:
+ *   1. Hold a session reference (via session_get/session_retain) while context is set
+ *   2. Set context before invoking callbacks
+ *   3. Clear context (set to NULL) after callbacks complete
+ *   4. Release session reference after clearing context
+ *
+ * CRITICAL ASSUMPTION:
+ *   This works because all paths that set/use this variable execute in the same thread:
+ *   - Local voice: main thread sets context, calls parse_llm_response_for_commands(),
+ *     callbacks execute in main thread, context cleared
+ *   - WebUI/DAP: MQTT on_message() callback sets context, executes device callback,
+ *     clears context - all in the single MQTT callback thread
+ *
+ *   Mosquitto must NOT be configured with MOSQ_OPT_THREADED or multiple event loops,
+ *   as this would cause context to be set in one thread and read in another.
+ */
+static __thread session_t *tl_command_context = NULL;
+
 // =============================================================================
 // Internal Helper Functions
 // =============================================================================
@@ -82,10 +108,8 @@ static session_t *session_alloc(void) {
       return NULL;
    }
 
-   // Initialize conversation history as empty JSON array
-   session->conversation_history = json_object_new_array();
-   if (!session->conversation_history) {
-      LOG_ERROR("Failed to create conversation history array");
+   if (pthread_mutex_init(&session->llm_config_mutex, NULL) != 0) {
+      LOG_ERROR("Failed to init llm_config_mutex");
       pthread_cond_destroy(&session->ref_zero_cond);
       pthread_mutex_destroy(&session->ref_mutex);
       pthread_mutex_destroy(&session->fd_mutex);
@@ -93,6 +117,25 @@ static session_t *session_alloc(void) {
       free(session);
       return NULL;
    }
+
+   // Initialize conversation history as empty JSON array
+   session->conversation_history = json_object_new_array();
+   if (!session->conversation_history) {
+      LOG_ERROR("Failed to create conversation history array");
+      pthread_mutex_destroy(&session->llm_config_mutex);
+      pthread_cond_destroy(&session->ref_zero_cond);
+      pthread_mutex_destroy(&session->ref_mutex);
+      pthread_mutex_destroy(&session->fd_mutex);
+      pthread_mutex_destroy(&session->history_mutex);
+      free(session);
+      return NULL;
+   }
+
+   // Initialize LLM config to use global settings (no override)
+   memset(&session->llm_config, 0, sizeof(session_llm_config_t));
+   session->llm_config.override_enabled = false;
+   session->llm_config.type = LLM_UNDEFINED;
+   session->llm_config.cloud_provider = CLOUD_PROVIDER_NONE;
 
    return session;
 }
@@ -115,6 +158,7 @@ static void session_free(session_t *session) {
    pthread_cond_destroy(&session->ref_zero_cond);
    pthread_mutex_destroy(&session->ref_mutex);
    pthread_mutex_destroy(&session->fd_mutex);
+   pthread_mutex_destroy(&session->llm_config_mutex);
    pthread_mutex_destroy(&session->history_mutex);
 
    free(session);
@@ -750,8 +794,16 @@ char *session_llm_call(session_t *session, const char *user_text) {
       return NULL;
    }
 
-   // Call LLM (non-streaming for network clients - we need complete response for TTS)
-   char *response = llm_chat_completion(history, llm_input, NULL, 0);
+   // Get session's LLM config (copy under mutex, then release)
+   session_llm_config_t session_config;
+   session_get_llm_config(session, &session_config);
+
+   // Resolve to final config (merges session override with global)
+   llm_resolved_config_t resolved_config;
+   llm_resolve_config(&session_config, &resolved_config);
+
+   // Call LLM with resolved config (non-streaming for network clients)
+   char *response = llm_chat_completion_with_config(history, llm_input, NULL, 0, &resolved_config);
 
    // Clean up
    json_object_put(history);
@@ -780,6 +832,65 @@ char *session_llm_call(session_t *session, const char *user_text) {
             strlen(response) > 50 ? "..." : "");
 
    return response;
+}
+
+// =============================================================================
+// Per-Session LLM Configuration
+// =============================================================================
+
+int session_set_llm_config(session_t *session, const session_llm_config_t *config) {
+   if (!session || !config) {
+      return 1;
+   }
+
+   // Validate that requested provider has API key (if cloud and specific provider requested)
+   if (config->override_enabled && config->type == LLM_CLOUD) {
+      if (config->cloud_provider == CLOUD_PROVIDER_OPENAI && !llm_has_openai_key()) {
+         LOG_WARNING("Session %u: Cannot set OpenAI provider - no API key configured",
+                     session->session_id);
+         return 1;
+      }
+      if (config->cloud_provider == CLOUD_PROVIDER_CLAUDE && !llm_has_claude_key()) {
+         LOG_WARNING("Session %u: Cannot set Claude provider - no API key configured",
+                     session->session_id);
+         return 1;
+      }
+   }
+
+   pthread_mutex_lock(&session->llm_config_mutex);
+   memcpy(&session->llm_config, config, sizeof(session_llm_config_t));
+   pthread_mutex_unlock(&session->llm_config_mutex);
+
+   LOG_INFO("Session %u: LLM config updated (override=%s, type=%d, provider=%d)",
+            session->session_id, config->override_enabled ? "true" : "false", config->type,
+            config->cloud_provider);
+
+   return 0;
+}
+
+void session_get_llm_config(session_t *session, session_llm_config_t *config) {
+   if (!session || !config) {
+      return;
+   }
+
+   pthread_mutex_lock(&session->llm_config_mutex);
+   memcpy(config, &session->llm_config, sizeof(session_llm_config_t));
+   pthread_mutex_unlock(&session->llm_config_mutex);
+}
+
+void session_clear_llm_config(session_t *session) {
+   if (!session) {
+      return;
+   }
+
+   pthread_mutex_lock(&session->llm_config_mutex);
+   memset(&session->llm_config, 0, sizeof(session_llm_config_t));
+   session->llm_config.override_enabled = false;
+   session->llm_config.type = LLM_UNDEFINED;
+   session->llm_config.cloud_provider = CLOUD_PROVIDER_NONE;
+   pthread_mutex_unlock(&session->llm_config_mutex);
+
+   LOG_INFO("Session %u: LLM config cleared (using global settings)", session->session_id);
 }
 
 // =============================================================================
@@ -829,4 +940,25 @@ const char *session_type_name(session_type_t type) {
       default:
          return "UNKNOWN";
    }
+}
+
+// =============================================================================
+// Command Context (Thread-Local)
+// =============================================================================
+
+void session_set_command_context(session_t *session) {
+   /* Debug logging for context transitions - helps trace command routing issues */
+#ifdef DEBUG_COMMAND_CONTEXT
+   if (session) {
+      LOG_INFO("Command context set: session %u (%s)", session->session_id,
+               session_type_name(session->type));
+   } else if (tl_command_context) {
+      LOG_INFO("Command context cleared (was session %u)", tl_command_context->session_id);
+   }
+#endif
+   tl_command_context = session;
+}
+
+session_t *session_get_command_context(void) {
+   return tl_command_context;
 }

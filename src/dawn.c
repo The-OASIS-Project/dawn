@@ -1210,12 +1210,21 @@ void *llm_worker_thread(void *arg) {
    // Clear interrupt flag before calling LLM
    llm_clear_interrupt();
 
-   // Call LLM (this can take 10+ seconds and blocks this thread, not main thread)
+   // Get local session's LLM config (for per-session LLM settings)
+   session_t *local_session = session_get_local();
+   session_llm_config_t session_config;
+   session_get_llm_config(local_session, &session_config);
+
+   // Resolve to final config (merges session override with global)
+   llm_resolved_config_t resolved_config;
+   llm_resolve_config(&session_config, &resolved_config);
+
+   // Call LLM with resolved config (this can take 10+ seconds)
    // Note: conversation_history is a global, but only main thread modifies it during setup
    // and we only read it here, so no mutex needed for conversation_history itself
-   char *response = llm_chat_completion_streaming_tts(conversation_history, request_text,
-                                                      vision_image, vision_image_size,
-                                                      dawn_tts_sentence_callback, NULL);
+   char *response = llm_chat_completion_streaming_tts_with_config(
+       conversation_history, request_text, vision_image, vision_image_size,
+       dawn_tts_sentence_callback, NULL, &resolved_config);
 
    // Free local copies
    if (request_text) {
@@ -2288,7 +2297,10 @@ int main(int argc, char *argv[]) {
             // Process any commands in the LLM response
             if (command_processing_mode == CMD_MODE_LLM_ONLY ||
                 command_processing_mode == CMD_MODE_DIRECT_FIRST) {
+               // Set command context so LLM callbacks use local session's config
+               session_set_command_context(session_get_local());
                int cmds_processed = parse_llm_response_for_commands(response_text, mosq);
+               session_set_command_context(NULL);  // Clear context
                if (cmds_processed > 0) {
                   LOG_INFO("Processed %d commands from LLM response", cmds_processed);
                }
@@ -3586,11 +3598,18 @@ int main(int argc, char *argv[]) {
             // The user message was already added in DAWN_STATE_PROCESS_COMMAND state
             // The vision image will be added by llm_claude.c/llm_openai.c to the last user message
             // Use streaming with TTS sentence buffering for immediate response
-            response_text = llm_chat_completion_streaming_tts(
+            // Use local session's LLM config for per-session settings
+            session_llm_config_t vision_session_config;
+            session_get_llm_config(local_session, &vision_session_config);
+            llm_resolved_config_t vision_resolved_config;
+            llm_resolve_config(&vision_session_config, &vision_resolved_config);
+
+            response_text = llm_chat_completion_streaming_tts_with_config(
                 conversation_history,
                 "Describe this image in detail. Ignore any overlay graphics unless specifically "
                 "asked.",
-                vision_ai_image, vision_ai_image_size, dawn_tts_sentence_callback, NULL);
+                vision_ai_image, vision_ai_image_size, dawn_tts_sentence_callback, NULL,
+                &vision_resolved_config);
             if (response_text != NULL) {
                // AI returned successfully
                LOG_WARNING("AI: %s\n", response_text);

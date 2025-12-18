@@ -470,9 +470,10 @@ endif()
 
 execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_SOURCE_DIR}/commands_config_nuevo.json ${CMAKE_BINARY_DIR}/commands_config_nuevo.json)
 
-# Optional: Build tests (enable with -DBUILD_TESTS=ON)
-option(BUILD_TESTS "Build test programs" OFF)
-if(BUILD_TESTS)
-   add_subdirectory(tests)
-endif()
+# =============================================================================
+# Tests (build with: make tests)
+# =============================================================================
+# Tests are not built by default. Run "make tests" to build all test executables.
+# Individual tests can be built with "make test_<name>" after running cmake.
+add_subdirectory(tests EXCLUDE_FROM_ALL)
 

@@ -48,6 +48,25 @@
       <span id="status-text">IDLE</span>
     </div>
 
+    <!-- LLM Quick Controls -->
+    <div id="llm-controls">
+      <div class="llm-control-group">
+        <label for="llm-type-select">Mode:</label>
+        <select id="llm-type-select" title="Switch between local and cloud LLM">
+          <option value="local">Local</option>
+          <option value="cloud">Cloud</option>
+        </select>
+      </div>
+      <div class="llm-control-group" id="provider-group">
+        <label for="llm-provider-select">Provider:</label>
+        <select id="llm-provider-select" title="Switch cloud provider">
+          <option value="openai">OpenAI</option>
+          <option value="claude">Claude</option>
+        </select>
+      </div>
+      <span id="llm-model-display" title="Current model"></span>
+    </div>
+
     <!-- Transcript display -->
     <div id="transcript">
       <div class="transcript-placeholder">

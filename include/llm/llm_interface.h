@@ -45,8 +45,38 @@ typedef enum {
 typedef enum {
    LLM_LOCAL,    /**< Local LLM server (e.g., llama.cpp) */
    LLM_CLOUD,    /**< Cloud LLM provider (OpenAI or Claude) */
-   LLM_UNDEFINED /**< Not yet initialized */
+   LLM_UNDEFINED /**< Not yet initialized / inherit from global */
 } llm_type_t;
+
+/**
+ * @brief Per-session LLM configuration override
+ *
+ * Allows each session (WebUI, DAP, local) to have independent LLM settings.
+ * When override_enabled is false, the session uses global settings.
+ * Use LLM_UNDEFINED for type and CLOUD_PROVIDER_NONE for cloud_provider
+ * to inherit specific fields from global config.
+ */
+typedef struct {
+   bool override_enabled;           /**< false = use global settings entirely */
+   llm_type_t type;                 /**< LLM_UNDEFINED = inherit from global */
+   cloud_provider_t cloud_provider; /**< CLOUD_PROVIDER_NONE = inherit */
+   char endpoint[128];              /**< Custom endpoint (empty = use default) */
+   char model[64];                  /**< Custom model (empty = use default) */
+} session_llm_config_t;
+
+/**
+ * @brief Resolved LLM configuration for making requests
+ *
+ * Created by llm_resolve_config() by merging session overrides with global config.
+ * Pointers reference static/config memory and are NOT owned by this struct.
+ */
+typedef struct {
+   llm_type_t type;                 /**< Resolved LLM type */
+   cloud_provider_t cloud_provider; /**< Resolved cloud provider */
+   const char *endpoint;            /**< Endpoint URL (not owned) */
+   const char *api_key;             /**< API key for cloud providers (not owned) */
+   const char *model;               /**< Model name (not owned) */
+} llm_resolved_config_t;
 
 /**
  * @brief Initialize the LLM system
@@ -252,5 +282,84 @@ bool llm_has_openai_key(void);
  * @return true if API key is available, false otherwise
  */
 bool llm_has_claude_key(void);
+
+/* ============================================================================
+ * Per-Session LLM Configuration Support
+ * ============================================================================ */
+
+/**
+ * @brief Resolve session LLM config to final request config
+ *
+ * Merges session override settings with global defaults. If session config
+ * specifies invalid settings (e.g., provider without API key), falls back
+ * to global config and logs a warning.
+ *
+ * @param session_config Session's LLM config (NULL = use global entirely)
+ * @param resolved Output: resolved configuration for LLM call
+ * @return 0 on success, 1 if fallback to global was needed
+ */
+int llm_resolve_config(const session_llm_config_t *session_config, llm_resolved_config_t *resolved);
+
+/**
+ * @brief Chat completion with explicit configuration (non-streaming)
+ *
+ * Same as llm_chat_completion() but uses provided config instead of global.
+ *
+ * @param conversation_history JSON array of conversation messages (OpenAI format)
+ * @param input_text User's input text
+ * @param vision_image Optional base64 image for vision models (NULL if not used)
+ * @param vision_image_size Size of vision image data (0 if not used)
+ * @param config Resolved LLM configuration to use
+ * @return Response text (caller must free), or NULL on error
+ */
+char *llm_chat_completion_with_config(struct json_object *conversation_history,
+                                      const char *input_text,
+                                      char *vision_image,
+                                      size_t vision_image_size,
+                                      const llm_resolved_config_t *config);
+
+/**
+ * @brief Chat completion with explicit configuration (streaming)
+ *
+ * Same as llm_chat_completion_streaming() but uses provided config.
+ *
+ * @param conversation_history JSON array of conversation messages (OpenAI format)
+ * @param input_text User's input text
+ * @param vision_image Optional base64 image for vision models (NULL if not used)
+ * @param vision_image_size Size of vision image data (0 if not used)
+ * @param chunk_callback Function to call for each text chunk
+ * @param callback_userdata User context passed to chunk_callback
+ * @param config Resolved LLM configuration to use
+ * @return Complete response text (caller must free), or NULL on error
+ */
+char *llm_chat_completion_streaming_with_config(struct json_object *conversation_history,
+                                                const char *input_text,
+                                                char *vision_image,
+                                                size_t vision_image_size,
+                                                llm_text_chunk_callback chunk_callback,
+                                                void *callback_userdata,
+                                                const llm_resolved_config_t *config);
+
+/**
+ * @brief Chat completion with explicit configuration (streaming TTS)
+ *
+ * Same as llm_chat_completion_streaming_tts() but uses provided config.
+ *
+ * @param conversation_history JSON array of conversation messages (OpenAI format)
+ * @param input_text User's input text
+ * @param vision_image Optional base64 image for vision models (NULL if not used)
+ * @param vision_image_size Size of vision image data (0 if not used)
+ * @param sentence_callback Function to call for each complete sentence
+ * @param callback_userdata User context passed to sentence_callback
+ * @param config Resolved LLM configuration to use
+ * @return Complete response text (caller must free), or NULL on error
+ */
+char *llm_chat_completion_streaming_tts_with_config(struct json_object *conversation_history,
+                                                    const char *input_text,
+                                                    char *vision_image,
+                                                    size_t vision_image_size,
+                                                    llm_sentence_callback sentence_callback,
+                                                    void *callback_userdata,
+                                                    const llm_resolved_config_t *config);
 
 #endif  // LLM_INTERFACE_H

@@ -32,6 +32,8 @@
 #include <stdint.h>
 #include <time.h>
 
+#include "llm/llm_interface.h"  // For session_llm_config_t
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -46,7 +48,8 @@ extern "C" {
  * Level 1: session_manager_rwlock (module-level, read or write)
  * Level 2: session->ref_mutex (per-session, protects ref_count)
  * Level 3: session->fd_mutex (per-session, protects client_fd during reconnect)
- * Level 4: session->history_mutex (per-session, protects conversation_history)
+ * Level 4: session->llm_config_mutex OR session->history_mutex
+ *          (per-session, never held together - copy-under-mutex pattern)
  *
  * CRITICAL: NEVER acquire locks in reverse order
  * CRITICAL: NEVER hold session_manager_rwlock when acquiring per-session locks
@@ -126,6 +129,10 @@ typedef struct session {
    int ref_count;
    pthread_mutex_t ref_mutex;
    pthread_cond_t ref_zero_cond;  // Signaled when ref_count reaches 0
+
+   // Per-session LLM configuration (allows different LLM for each client)
+   session_llm_config_t llm_config;
+   pthread_mutex_t llm_config_mutex;  // Protects llm_config (lock level 4)
 } session_t;
 
 // =============================================================================
@@ -349,8 +356,45 @@ void session_init_system_prompt(session_t *session, const char *system_prompt);
  * @note Adds user message before call, assistant response after call
  * @note Returns NULL if session->disconnected is set (cancel)
  * @note Prepends location context if session->identity.location is set
+ * @note Uses session's LLM config if override_enabled, otherwise global
  */
 char *session_llm_call(session_t *session, const char *user_text);
+
+// =============================================================================
+// Per-Session LLM Configuration
+// =============================================================================
+
+/**
+ * @brief Set per-session LLM configuration
+ *
+ * Validates that requested provider has API key before applying.
+ *
+ * @param session Session to configure
+ * @param config LLM configuration to apply
+ * @return 0 on success, 1 if requested provider lacks API key
+ *
+ * @locks session->llm_config_mutex
+ */
+int session_set_llm_config(session_t *session, const session_llm_config_t *config);
+
+/**
+ * @brief Get session's current LLM configuration
+ *
+ * @param session Session to query
+ * @param config Output: copy of session's LLM config
+ *
+ * @locks session->llm_config_mutex
+ */
+void session_get_llm_config(session_t *session, session_llm_config_t *config);
+
+/**
+ * @brief Clear session LLM override (revert to global settings)
+ *
+ * @param session Session to clear
+ *
+ * @locks session->llm_config_mutex
+ */
+void session_clear_llm_config(session_t *session);
 
 // =============================================================================
 // Utility Functions
@@ -377,6 +421,31 @@ int session_count(void);
  * @return Human-readable type name
  */
 const char *session_type_name(session_type_t type);
+
+// =============================================================================
+// Command Context (Thread-Local)
+// =============================================================================
+
+/**
+ * @brief Set the current command context session for this thread
+ *
+ * Call this before processing commands to establish which session's
+ * LLM config should be used by device callbacks (e.g., LLM switch commands).
+ * The context is thread-local and should be cleared after command processing.
+ *
+ * @param session Session to use for command context (NULL to clear)
+ */
+void session_set_command_context(session_t *session);
+
+/**
+ * @brief Get the current command context session for this thread
+ *
+ * Used by device callbacks (e.g., localLLMCallback) to get the session
+ * whose LLM config should be modified by the command.
+ *
+ * @return Current command context session, or NULL if not set
+ */
+session_t *session_get_command_context(void);
 
 #ifdef __cplusplus
 }
