@@ -29,7 +29,7 @@
  * Anthropic Claude Configuration
  *
  * Model, API version, and behavior settings for Claude provider.
- * Modify these to change behavior without touching secrets.h
+ * These are compile-time defaults; runtime config in dawn.toml takes precedence.
  */
 
 /* Default model for Claude */

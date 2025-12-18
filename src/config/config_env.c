@@ -1096,6 +1096,13 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_string(config->webui.ssl_key_path));
    json_object_object_add(root, "webui", webui);
 
+   /* [shutdown] */
+   json_object *shutdown = json_object_new_object();
+   json_object_object_add(shutdown, "enabled", json_object_new_boolean(config->shutdown.enabled));
+   json_object_object_add(shutdown, "passphrase",
+                          json_object_new_string(config->shutdown.passphrase));
+   json_object_object_add(root, "shutdown", shutdown);
+
    /* [debug] */
    json_object *debug = json_object_new_object();
    json_object_object_add(debug, "mic_record", json_object_new_boolean(config->debug.mic_record));

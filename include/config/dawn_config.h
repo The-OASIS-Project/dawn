@@ -41,7 +41,7 @@ extern "C" {
 #define CONFIG_NAME_MAX 64
 #define CONFIG_DEVICE_MAX 128
 #define CONFIG_DESCRIPTION_MAX 2048
-#define CONFIG_API_KEY_MAX 128
+#define CONFIG_API_KEY_MAX 256
 #define CONFIG_CREDENTIAL_MAX 64
 
 /* Maximum number of URL fetcher whitelist entries */
@@ -235,6 +235,14 @@ typedef struct {
 } webui_config_t;
 
 /* =============================================================================
+ * Shutdown Configuration
+ * ============================================================================= */
+typedef struct {
+   bool enabled;        /* Enable voice/command shutdown (default: false) */
+   char passphrase[64]; /* Required passphrase, empty = no passphrase required */
+} shutdown_config_t;
+
+/* =============================================================================
  * Debug Configuration
  * ============================================================================= */
 typedef struct {
@@ -281,6 +289,7 @@ typedef struct {
    network_config_t network;
    tui_config_t tui;
    webui_config_t webui;
+   shutdown_config_t shutdown;
    debug_config_t debug;
    paths_config_t paths;
 } dawn_config_t;

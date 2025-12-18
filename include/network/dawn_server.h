@@ -119,13 +119,13 @@
 #define MAGIC_BYTE_2 0xB2
 #define MAGIC_BYTE_3 0x2B
 
-// Return codes
+// Return codes (positive per project coding standards)
 #define DAWN_SUCCESS 0
-#define DAWN_ERROR -1
-#define DAWN_ERROR_MEMORY -2
-#define DAWN_ERROR_SOCKET -3
-#define DAWN_ERROR_PROTOCOL -4
-#define DAWN_ERROR_TIMEOUT -5
+#define DAWN_ERROR 1
+#define DAWN_ERROR_MEMORY 2
+#define DAWN_ERROR_SOCKET 3
+#define DAWN_ERROR_PROTOCOL 4
+#define DAWN_ERROR_TIMEOUT 5
 
 // === Packet Header Structure ===
 typedef struct {

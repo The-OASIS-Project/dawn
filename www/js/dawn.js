@@ -1348,6 +1348,14 @@
         https: { type: 'checkbox', label: 'Enable HTTPS', restart: true, hint: 'Required for microphone access on remote connections' }
       }
     },
+    shutdown: {
+      label: 'Shutdown',
+      icon: '&#x1F512;',
+      fields: {
+        enabled: { type: 'checkbox', label: 'Enable Voice Shutdown', hint: 'Allow system shutdown via voice command (disabled by default for security)' },
+        passphrase: { type: 'text', label: 'Passphrase', hint: 'Secret phrase required to authorize shutdown (leave empty for no passphrase)' }
+      }
+    },
     debug: {
       label: 'Debug',
       icon: '&#x1F41B;',

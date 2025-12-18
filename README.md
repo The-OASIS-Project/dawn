@@ -487,29 +487,16 @@ music_dir = "/Music"
 
 See `docs/CONFIG_FILE_DESIGN.md` for the complete configuration reference.
 
-#### secrets.toml (API keys - recommended)
+#### secrets.toml (API keys)
 
-Create `~/.config/dawn/secrets.toml` for API keys (more secure than compile-time):
+Create `secrets.toml` in the project root or `~/.config/dawn/secrets.toml` for API keys:
 
 ```toml
 openai_api_key = "sk-your-openai-key-here"
 claude_api_key = "sk-ant-your-claude-key-here"
 ```
 
-#### secrets.h (API keys - legacy/fallback)
-
-Alternatively, create `include/secrets.h` for compile-time API keys:
-```c
-#ifndef SECRETS_H
-#define SECRETS_H
-
-#define OPENAI_API_KEY "your-openai-key-here"
-#define CLAUDE_API_KEY "your-claude-key-here"
-
-#endif
-```
-
-**Important**: Add `secrets.h` and `secrets.toml` to `.gitignore`!
+**Note**: `secrets.toml` is already in `.gitignore` - never commit API keys!
 
 #### Environment Variables
 
@@ -873,7 +860,7 @@ cd build
 - **No audio capture**: Check ALSA device names with `arecord -L`
 - **No audio playback**: Check ALSA device names with `aplay -L`
 - **Wake word not detected**: Adjust microphone sensitivity, check `pactl` or `alsamixer` levels
-- **LLM timeout**: Check API keys in `secrets.h`, network connectivity
+- **LLM timeout**: Check API keys in `secrets.toml`, network connectivity
 - **Slow ASR**: Verify GPU acceleration enabled (check logs for CUDA messages)
 
 ### Network Protocol Issues

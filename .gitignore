@@ -1,7 +1,6 @@
 build*/
 libvosk.so
 vosk-model*/
-include/secrets.h
 
 # Runtime config files (user-specific, may contain secrets)
 dawn.toml

@@ -31,7 +31,7 @@ End-to-end test of LLM streaming with real API calls:
 - Raw chunk streaming
 - Sentence-buffered streaming for TTS
 
-**Note:** Requires valid API keys in `secrets.h`
+**Note:** Requires valid API keys in `secrets.toml`
 
 ## Building Tests
 

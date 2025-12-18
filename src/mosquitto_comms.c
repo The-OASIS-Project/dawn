@@ -1162,26 +1162,42 @@ char *voiceAmplifierCallback(const char *actionName, char *value, int *should_re
    return NULL;
 }
 
-// Shutdown callback
+// Shutdown callback - requires explicit enable in config for security
 char *shutdownCallback(const char *actionName, char *value, int *should_respond) {
    *should_respond = 1;
 
+   /* Security check 1: Must be explicitly enabled in config */
+   if (!g_config.shutdown.enabled) {
+      LOG_WARNING("Shutdown command rejected: shutdown.enabled = false in config");
+      return strdup("Shutdown command is disabled. Enable it in settings first.");
+   }
+
+   /* Security check 2: If passphrase is configured, it must match */
+   if (g_config.shutdown.passphrase[0] != '\0') {
+      if (value == NULL || strcasecmp(value, g_config.shutdown.passphrase) != 0) {
+         LOG_WARNING("Shutdown command rejected: incorrect or missing passphrase");
+         return strdup("Shutdown command rejected: incorrect passphrase.");
+      }
+      LOG_INFO("Shutdown passphrase verified");
+   }
+
+   /* All security checks passed - execute shutdown */
+   LOG_INFO("Shutdown command authorized, initiating system shutdown");
+
    if (command_processing_mode == CMD_MODE_DIRECT_ONLY) {
+      int local_should_respond = 0;
+      textToSpeechCallback(NULL, "Shutdown authorized. Goodbye.", &local_should_respond);
       int ret = system("sudo shutdown -h now");
       if (ret != 0) {
          LOG_ERROR("Shutdown command failed with return code: %d", ret);
       }
-      int local_should_respond = 0;
-      textToSpeechCallback(NULL, "Emergency shutdown initiated.", &local_should_respond);
       return NULL;
    } else {
-      // In AI modes, confirm before shutting down
-      // Still execute the shutdown
       int ret = system("sudo shutdown -h now");
       if (ret != 0) {
          LOG_ERROR("Shutdown command failed with return code: %d", ret);
       }
-      return strdup("Shutdown command received. Initiating emergency shutdown.");
+      return strdup("Shutdown authorized. Initiating system shutdown. Goodbye.");
    }
 }
 
@@ -1421,19 +1437,23 @@ char *volumeCallback(const char *actionName, char *value, int *should_respond) {
 
 char *localLLMCallback(const char *actionName, char *value, int *should_respond) {
    LOG_INFO("Setting AI to local LLM.");
-   llm_set_type(LLM_LOCAL);
+   int result = llm_set_type(LLM_LOCAL);
 
-   // Always return string for AI modes (ignored in DIRECT_ONLY)
    *should_respond = 1;
+   if (result != 0) {
+      return strdup("Failed to switch to local LLM");
+   }
    return strdup("AI switched to local LLM");
 }
 
 char *cloudLLMCallback(const char *actionName, char *value, int *should_respond) {
    LOG_INFO("Setting AI to cloud LLM.");
-   llm_set_type(LLM_CLOUD);
+   int result = llm_set_type(LLM_CLOUD);
 
-   // Always return string for AI modes (ignored in DIRECT_ONLY)
    *should_respond = 1;
+   if (result != 0) {
+      return strdup("Failed to switch to cloud LLM. API key not configured in secrets.toml.");
+   }
    return strdup("AI switched to cloud LLM");
 }
 
@@ -1445,12 +1465,18 @@ char *llmStatusCallback(const char *actionName, char *value, int *should_respond
    if (actionName && strcmp(actionName, "set") == 0) {
       if (value && (strcasecmp(value, "local") == 0 || strcasecmp(value, "llama") == 0)) {
          LOG_INFO("Setting AI to local LLM via unified llm.set command.");
-         llm_set_type(LLM_LOCAL);
+         int rc = llm_set_type(LLM_LOCAL);
+         if (rc != 0) {
+            return strdup("Failed to switch to local LLM");
+         }
          return strdup("AI switched to local LLM");
       } else if (value && (strcasecmp(value, "cloud") == 0 || strcasecmp(value, "openai") == 0 ||
                            strcasecmp(value, "claude") == 0)) {
          LOG_INFO("Setting AI to cloud LLM via unified llm.set command.");
-         llm_set_type(LLM_CLOUD);
+         int rc = llm_set_type(LLM_CLOUD);
+         if (rc != 0) {
+            return strdup("Failed to switch to cloud LLM. API key not configured in secrets.toml.");
+         }
          return strdup("AI switched to cloud LLM");
       } else {
          return strdup("Invalid LLM type. Use 'local' or 'cloud'.");

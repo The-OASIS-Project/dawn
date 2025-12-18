@@ -19,14 +19,15 @@ This guide shows you how to configure and use each option.
 
 **Best for:** Highest accuracy (100%), fastest response (3.1s total latency)
 
-1. Configure API key in `secrets.h`:
-```c
-#define OPENAI_API_KEY "sk-proj-..."
+1. Configure API key in `secrets.toml`:
+```toml
+openai_api_key = "sk-proj-..."
 ```
 
-2. Set model in `dawn.h`:
-```c
-#define OPENAI_MODEL "gpt-4o"
+2. Set model in `dawn.toml` (optional, defaults to gpt-4o):
+```toml
+[llm.cloud]
+openai_model = "gpt-4o"
 ```
 
 3. Build and run DAWN - it will automatically use GPT-4o
@@ -249,7 +250,7 @@ cudaMalloc failed: out of memory
 ### Cloud LLM Issues
 
 **Problem:** API errors (401 Unauthorized)
-- **Fix:** Check `OPENAI_API_KEY` in `secrets.h`
+- **Fix:** Check `openai_api_key` in `secrets.toml`
 
 **Problem:** Rate limiting (429 Too Many Requests)
 - **Fix:** Add retry logic or reduce request frequency

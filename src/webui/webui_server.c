@@ -21,6 +21,8 @@
  * WebUI Server Implementation - libwebsockets HTTP + WebSocket handling
  */
 
+#define _GNU_SOURCE /* For strcasestr */
+
 #include "webui/webui_server.h"
 
 #include <arpa/inet.h>
@@ -29,6 +31,7 @@
 #include <ifaddrs.h>
 #include <json-c/json.h>
 #include <libwebsockets.h>
+#include <limits.h>
 #include <mosquitto.h>
 #include <net/if.h>
 #include <pthread.h>
@@ -49,6 +52,7 @@
 #include "core/worker_pool.h"
 #include "dawn.h"
 #include "llm/llm_command_parser.h"
+#include "llm/llm_interface.h"
 #include "logging.h"
 
 /* =============================================================================
@@ -267,6 +271,102 @@ static const char *get_mime_type(const char *path) {
    return "application/octet-stream";
 }
 
+/**
+ * @brief Check if a path contains directory traversal patterns
+ *
+ * Checks for literal ".." as well as URL-encoded variants (%2e, %252e)
+ * to prevent path traversal attacks.
+ *
+ * @param path The URL path to check
+ * @return true if traversal pattern detected, false if path is safe
+ */
+static bool contains_path_traversal(const char *path) {
+   if (!path) {
+      return false;
+   }
+
+   /* Check for literal ".." */
+   if (strstr(path, "..") != NULL) {
+      return true;
+   }
+
+   /* Check for URL-encoded variants (case-insensitive) */
+   /* %2e = ".", so %2e%2e = ".." */
+   if (strcasestr(path, "%2e%2e") != NULL) {
+      return true;
+   }
+
+   /* Single encoded dot followed by literal dot or vice versa */
+   if (strcasestr(path, "%2e.") != NULL || strcasestr(path, ".%2e") != NULL) {
+      return true;
+   }
+
+   /* Double-encoded: %252e = "%2e" after first decode */
+   if (strcasestr(path, "%252e") != NULL) {
+      return true;
+   }
+
+   return false;
+}
+
+/**
+ * @brief Validate that a resolved path is within the allowed directory
+ *
+ * Uses realpath() to resolve symlinks and relative paths, then verifies
+ * the canonical path is within the www directory.
+ *
+ * @param filepath The filesystem path to validate
+ * @param www_path The allowed base directory (www path)
+ * @return true if path is safe (within www_path), false otherwise
+ */
+static bool is_path_within_www(const char *filepath, const char *www_path) {
+   char resolved_path[PATH_MAX];
+   char resolved_www[PATH_MAX];
+
+   /* Resolve the www base path */
+   if (realpath(www_path, resolved_www) == NULL) {
+      LOG_ERROR("WebUI: Cannot resolve www path: %s", www_path);
+      return false;
+   }
+
+   /* Resolve the requested file path */
+   if (realpath(filepath, resolved_path) == NULL) {
+      /* File doesn't exist - check parent directory instead */
+      /* This allows serving files that don't exist yet (404 handled elsewhere) */
+      char *filepath_copy = strdup(filepath);
+      if (!filepath_copy) {
+         return false;
+      }
+
+      /* Find last slash to get parent directory */
+      char *last_slash = strrchr(filepath_copy, '/');
+      if (last_slash && last_slash != filepath_copy) {
+         *last_slash = '\0';
+         if (realpath(filepath_copy, resolved_path) == NULL) {
+            free(filepath_copy);
+            return false;
+         }
+      } else {
+         free(filepath_copy);
+         return false;
+      }
+      free(filepath_copy);
+   }
+
+   /* Ensure resolved path starts with resolved www path */
+   size_t www_len = strlen(resolved_www);
+   if (strncmp(resolved_path, resolved_www, www_len) != 0) {
+      return false;
+   }
+
+   /* Ensure it's either exact match or followed by '/' */
+   if (resolved_path[www_len] != '\0' && resolved_path[www_len] != '/') {
+      return false;
+   }
+
+   return true;
+}
+
 /* =============================================================================
  * HTTP Session Data (minimal - just for lws requirements)
  * ============================================================================= */
@@ -279,18 +379,26 @@ struct http_session_data {
  * Session Token Generation
  * ============================================================================= */
 
-static void generate_session_token(char token_out[WEBUI_SESSION_TOKEN_LEN]) {
+/**
+ * @brief Generate a cryptographically secure session token
+ *
+ * @param token_out Buffer to store the hex-encoded token (must be WEBUI_SESSION_TOKEN_LEN)
+ * @return 0 on success, 1 on failure (token_out will be empty string)
+ */
+static int generate_session_token(char token_out[WEBUI_SESSION_TOKEN_LEN]) {
    uint8_t random_bytes[16];
    if (getrandom(random_bytes, 16, 0) != 16) {
-      /* Fallback to less secure random if getrandom fails */
-      for (int i = 0; i < 16; i++) {
-         random_bytes[i] = (uint8_t)(rand() & 0xFF);
-      }
+      /* Security: fail instead of using weak random - getrandom should never fail on modern Linux
+       */
+      LOG_ERROR("getrandom() failed - cannot generate secure session token");
+      token_out[0] = '\0';
+      return 1;
    }
    for (int i = 0; i < 16; i++) {
       snprintf(&token_out[i * 2], 3, "%02x", random_bytes[i]);
    }
    token_out[32] = '\0';
+   return 0;
 }
 
 /* =============================================================================
@@ -646,8 +754,8 @@ static int callback_http(struct lws *wsi,
             strncpy(path, "/index.html", sizeof(path) - 1);
          }
 
-         /* Prevent directory traversal */
-         if (strstr(path, "..") != NULL) {
+         /* Prevent directory traversal - check for patterns including URL-encoded */
+         if (contains_path_traversal(path)) {
             LOG_WARNING("WebUI: Directory traversal attempt blocked: %s", path);
             lws_return_http_status(wsi, HTTP_STATUS_FORBIDDEN, NULL);
             return -1;
@@ -655,6 +763,13 @@ static int callback_http(struct lws *wsi,
 
          /* Build full filesystem path */
          snprintf(filepath, sizeof(filepath), "%s%s", s_www_path, path);
+
+         /* Second layer: verify resolved path is within www directory */
+         if (!is_path_within_www(filepath, s_www_path)) {
+            LOG_WARNING("WebUI: Path escape attempt blocked: %s", filepath);
+            lws_return_http_status(wsi, HTTP_STATUS_FORBIDDEN, NULL);
+            return -1;
+         }
 
          /* Get MIME type */
          mime_type = get_mime_type(filepath);
@@ -965,6 +1080,12 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_STR(section, "ssl_key_path", config->webui.ssl_key_path);
    }
 
+   /* [shutdown] */
+   if (json_object_object_get_ex(payload, "shutdown", &section)) {
+      JSON_TO_CONFIG_BOOL(section, "enabled", config->shutdown.enabled);
+      JSON_TO_CONFIG_STR(section, "passphrase", config->shutdown.passphrase);
+   }
+
    /* [debug] */
    if (json_object_object_get_ex(payload, "debug", &section)) {
       JSON_TO_CONFIG_BOOL(section, "mic_record", config->debug.mic_record);
@@ -1013,6 +1134,51 @@ static void handle_set_config(ws_connection_t *conn, struct json_object *payload
       json_object_object_add(resp_payload, "message",
                              json_object_new_string("Configuration saved successfully"));
       LOG_INFO("WebUI: Configuration saved to %s", config_path);
+
+      /* Apply runtime changes for LLM type if it was updated */
+      struct json_object *llm_section = NULL;
+      struct json_object *llm_type_obj = NULL;
+      if (json_object_object_get_ex(payload, "llm", &llm_section) &&
+          json_object_object_get_ex(llm_section, "type", &llm_type_obj)) {
+         const char *new_type = json_object_get_string(llm_type_obj);
+         if (new_type) {
+            if (strcmp(new_type, "cloud") == 0) {
+               int rc = llm_set_type(LLM_CLOUD);
+               if (rc != 0) {
+                  /* Update response to indicate partial success */
+                  json_object_object_add(resp_payload, "warning",
+                                         json_object_new_string(
+                                             "Config saved but failed to switch to cloud LLM - "
+                                             "API key not configured"));
+               }
+            } else if (strcmp(new_type, "local") == 0) {
+               llm_set_type(LLM_LOCAL);
+            }
+         }
+      }
+
+      /* Apply runtime changes for cloud provider if it was updated */
+      struct json_object *cloud_section = NULL;
+      struct json_object *provider_obj = NULL;
+      if (json_object_object_get_ex(payload, "llm", &llm_section) &&
+          json_object_object_get_ex(llm_section, "cloud", &cloud_section) &&
+          json_object_object_get_ex(cloud_section, "provider", &provider_obj)) {
+         const char *new_provider = json_object_get_string(provider_obj);
+         if (new_provider) {
+            int rc = 0;
+            if (strcmp(new_provider, "openai") == 0) {
+               rc = llm_set_cloud_provider(CLOUD_PROVIDER_OPENAI);
+            } else if (strcmp(new_provider, "claude") == 0) {
+               rc = llm_set_cloud_provider(CLOUD_PROVIDER_CLAUDE);
+            }
+            if (rc != 0) {
+               json_object_object_add(resp_payload, "warning",
+                                      json_object_new_string(
+                                          "Config saved but failed to switch cloud provider - "
+                                          "API key not configured"));
+            }
+         }
+      }
    } else {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error",
@@ -1089,6 +1255,9 @@ static void handle_set_secrets(ws_connection_t *conn, struct json_object *payloa
          json_object_object_add(resp_payload, "secrets", secrets_status);
       }
 
+      /* Refresh LLM providers to pick up new API keys immediately */
+      llm_refresh_providers();
+
       LOG_INFO("WebUI: Secrets saved to %s", secrets_path);
    } else {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
@@ -1134,19 +1303,48 @@ static void send_json_response(struct lws *wsi, json_object *response) {
 }
 
 /**
- * @brief Run a shell command and capture output
- * @param cmd Command to run
+ * @brief Whitelisted shell commands for audio device enumeration
+ *
+ * SECURITY: Only these exact commands can be executed via run_whitelisted_command().
+ * This prevents command injection even if a caller mistakenly passes user input.
+ */
+static const char *const ALLOWED_COMMANDS[] = {
+   "arecord -L 2>/dev/null", "aplay -L 2>/dev/null", "pactl list sources short 2>/dev/null",
+   "pactl list sinks short 2>/dev/null", NULL /* Sentinel */
+};
+
+/**
+ * @brief Check if a command is in the whitelist
+ */
+static bool is_command_whitelisted(const char *cmd) {
+   for (int i = 0; ALLOWED_COMMANDS[i] != NULL; i++) {
+      if (strcmp(cmd, ALLOWED_COMMANDS[i]) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
+/**
+ * @brief Run a whitelisted shell command and capture output
+ * @param cmd Command to run (must be in ALLOWED_COMMANDS whitelist)
  * @param output Buffer to store output
  * @param output_size Size of output buffer
  * @return Number of bytes read on success, 0 on error (with empty output)
  *
- * SECURITY WARNING: This function uses popen() which invokes a shell. Only use
- * with compile-time constant command strings. NEVER pass user-supplied or
- * client-provided data as the cmd parameter to avoid command injection attacks.
+ * SECURITY: This function only executes commands that match the exact strings
+ * in ALLOWED_COMMANDS. Any other command is rejected. This prevents command
+ * injection even if caller accidentally passes user-controlled input.
  */
-static size_t run_command(const char *cmd, char *output, size_t output_size) {
+static size_t run_whitelisted_command(const char *cmd, char *output, size_t output_size) {
    if (output_size > 0) {
       output[0] = '\0';
+   }
+
+   /* Security check: only run whitelisted commands */
+   if (!is_command_whitelisted(cmd)) {
+      LOG_ERROR("WebUI: Blocked non-whitelisted command: %.50s...", cmd ? cmd : "(null)");
+      return 0;
    }
 
    FILE *fp = popen(cmd, "r");
@@ -1306,8 +1504,8 @@ static void handle_get_audio_devices(ws_connection_t *conn, struct json_object *
    if (strcmp(backend, "alsa") == 0) {
       /* Get ALSA devices (with caching) */
       if (now - s_device_cache.alsa_capture_time > AUDIO_DEVICE_CACHE_TTL_SEC) {
-         if (run_command("arecord -L 2>/dev/null", s_device_cache.alsa_capture,
-                         sizeof(s_device_cache.alsa_capture)) > 0) {
+         if (run_whitelisted_command("arecord -L 2>/dev/null", s_device_cache.alsa_capture,
+                                     sizeof(s_device_cache.alsa_capture)) > 0) {
             s_device_cache.alsa_capture_time = now;
          }
       }
@@ -1316,8 +1514,8 @@ static void handle_get_audio_devices(ws_connection_t *conn, struct json_object *
       }
 
       if (now - s_device_cache.alsa_playback_time > AUDIO_DEVICE_CACHE_TTL_SEC) {
-         if (run_command("aplay -L 2>/dev/null", s_device_cache.alsa_playback,
-                         sizeof(s_device_cache.alsa_playback)) > 0) {
+         if (run_whitelisted_command("aplay -L 2>/dev/null", s_device_cache.alsa_playback,
+                                     sizeof(s_device_cache.alsa_playback)) > 0) {
             s_device_cache.alsa_playback_time = now;
          }
       }
@@ -1327,8 +1525,9 @@ static void handle_get_audio_devices(ws_connection_t *conn, struct json_object *
    } else if (strcmp(backend, "pulse") == 0) {
       /* Get PulseAudio devices (with caching) */
       if (now - s_device_cache.pulse_capture_time > AUDIO_DEVICE_CACHE_TTL_SEC) {
-         if (run_command("pactl list sources short 2>/dev/null", s_device_cache.pulse_capture,
-                         sizeof(s_device_cache.pulse_capture)) > 0) {
+         if (run_whitelisted_command("pactl list sources short 2>/dev/null",
+                                     s_device_cache.pulse_capture,
+                                     sizeof(s_device_cache.pulse_capture)) > 0) {
             s_device_cache.pulse_capture_time = now;
          }
       }
@@ -1338,8 +1537,9 @@ static void handle_get_audio_devices(ws_connection_t *conn, struct json_object *
       }
 
       if (now - s_device_cache.pulse_playback_time > AUDIO_DEVICE_CACHE_TTL_SEC) {
-         if (run_command("pactl list sinks short 2>/dev/null", s_device_cache.pulse_playback,
-                         sizeof(s_device_cache.pulse_playback)) > 0) {
+         if (run_whitelisted_command("pactl list sinks short 2>/dev/null",
+                                     s_device_cache.pulse_playback,
+                                     sizeof(s_device_cache.pulse_playback)) > 0) {
             s_device_cache.pulse_playback_time = now;
          }
       }
@@ -1806,7 +2006,12 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
                      if (conn->session) {
                         session_init_system_prompt(conn->session, get_remote_command_prompt());
                         conn->session->client_data = conn;
-                        generate_session_token(conn->session_token);
+                        if (generate_session_token(conn->session_token) != 0) {
+                           LOG_ERROR("WebUI: Failed to generate session token");
+                           session_destroy(conn->session->session_id);
+                           conn->session = NULL;
+                           return;
+                        }
                         register_token(conn->session_token, conn->session->session_id);
                         send_session_token_impl(conn->wsi, conn->session_token);
                         send_config_impl(conn->wsi);
@@ -1882,7 +2087,15 @@ static int callback_websocket(struct lws *wsi,
          conn->session->client_data = conn;
 
          /* Generate session token and register mapping */
-         generate_session_token(conn->session_token);
+         if (generate_session_token(conn->session_token) != 0) {
+            LOG_ERROR("WebUI: Failed to generate session token, closing connection");
+            session_destroy(conn->session->session_id);
+            conn->session = NULL;
+            pthread_mutex_lock(&s_mutex);
+            s_client_count--;
+            pthread_mutex_unlock(&s_mutex);
+            return -1;
+         }
          register_token(conn->session_token, conn->session->session_id);
 
          /* Send token and config to client */

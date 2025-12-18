@@ -165,6 +165,10 @@ void config_set_defaults(dawn_config_t *config) {
    config->webui.ssl_cert_path[0] = '\0';
    config->webui.ssl_key_path[0] = '\0';
 
+   /* Shutdown - disabled by default for security */
+   config->shutdown.enabled = false;
+   config->shutdown.passphrase[0] = '\0';
+
    /* Debug */
    config->debug.mic_record = false;
    config->debug.asr_record = false;

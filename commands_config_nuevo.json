@@ -55,6 +55,14 @@
               "action_command": "{\"device\": \"%device_name%\", \"action\": \"trigger\"}"
            }
         }
+     },
+     "passphrase_trigger": {
+        "actions": {
+           "execute": {
+              "action_words": ["%device_name% %value%", "%device_name% with passphrase %value%", "%device_name% authorization %value%", "execute %device_name% %value%"],
+              "action_command": "{\"device\": \"%device_name%\", \"action\": \"execute\", \"value\": \"%value%\"}"
+           }
+        }
      }
   },
   "devices": {
@@ -162,9 +170,9 @@
        "aliases": ["voice output", "voice passthrough", "pa", "pa system", "p a", "p a system", "bull horn", "bullhorn"],
        "topic": "dawn"
     },
-    "shutdown alpha bravo charlie": {
-       "type": "boolean",
-       "aliases": ["shut down alpha bravo charlie"],
+    "shutdown": {
+       "type": "passphrase_trigger",
+       "aliases": ["shut down", "power off", "system shutdown"],
        "topic": "dawn"
     },
     "reset conversation": {

@@ -11,7 +11,7 @@ import sys
 import time
 from typing import Dict, List, Tuple
 
-# API Keys from secrets.h
+# API Keys - check environment first, then secrets.toml
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY") or ""
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or ""
 
@@ -531,24 +531,35 @@ def run_test_suite(provider: str, model: str):
 
 
 if __name__ == "__main__":
-    # Parse secrets.h for API keys
-    try:
-        with open("secrets.h", "r") as f:
-            content = f.read()
+    # Parse secrets.toml for API keys (try multiple locations)
+    secrets_paths = [
+        "secrets.toml",
+        "../secrets.toml",
+        "../../secrets.toml",
+        os.path.expanduser("~/.config/dawn/secrets.toml"),
+    ]
 
-            # Extract Anthropic key
-            match = re.search(r'#define\s+ANTHROPIC_API_KEY\s+"([^"]+)"', content)
-            if match:
-                ANTHROPIC_API_KEY = match.group(1)
-                os.environ["ANTHROPIC_API_KEY"] = ANTHROPIC_API_KEY
+    for secrets_path in secrets_paths:
+        if os.path.exists(secrets_path):
+            try:
+                with open(secrets_path, "r") as f:
+                    content = f.read()
 
-            # Extract OpenAI key
-            match = re.search(r'#define\s+OPENAI_API_KEY\s+"([^"]+)"', content)
-            if match:
-                OPENAI_API_KEY = match.group(1)
-                os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
-    except Exception as e:
-        print(f"Warning: Could not parse secrets.h: {e}")
+                    # Simple TOML parsing for key = "value" format
+                    match = re.search(r'claude_api_key\s*=\s*"([^"]+)"', content)
+                    if match and not ANTHROPIC_API_KEY:
+                        ANTHROPIC_API_KEY = match.group(1)
+                        os.environ["ANTHROPIC_API_KEY"] = ANTHROPIC_API_KEY
+
+                    match = re.search(r'openai_api_key\s*=\s*"([^"]+)"', content)
+                    if match and not OPENAI_API_KEY:
+                        OPENAI_API_KEY = match.group(1)
+                        os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+
+                print(f"Loaded API keys from {secrets_path}")
+                break
+            except Exception as e:
+                print(f"Warning: Could not parse {secrets_path}: {e}")
 
     # Test Claude
     if ANTHROPIC_API_KEY:

@@ -23,6 +23,7 @@
 
 #include "config/config_parser.h"
 
+#include <fcntl.h>
 #include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -87,6 +88,58 @@ static char s_loaded_secrets_path[CONFIG_PATH_MAX] = { 0 };
          dest = (size_t)d.u.i;                  \
       }                                         \
    } while (0)
+
+/* =============================================================================
+ * File Permission Security Check
+ * ============================================================================= */
+
+/**
+ * @brief Check if a sensitive file has overly permissive permissions
+ *
+ * Warns if the file is readable by group or others, which could expose
+ * sensitive data like API keys or password hashes.
+ *
+ * @param path Path to the file to check
+ * @param file_description Human-readable description for warning messages
+ */
+static void check_sensitive_file_permissions(const char *path, const char *file_description) {
+   if (!path)
+      return;
+
+   struct stat st;
+   if (stat(path, &st) != 0)
+      return; /* File doesn't exist or can't be read - other code handles this */
+
+   /* Check for world-readable/writable (most critical) */
+   if (st.st_mode & S_IROTH) {
+      LOG_WARNING("========================================");
+      LOG_WARNING("SECURITY WARNING: %s is world-readable!", file_description);
+      LOG_WARNING("File: %s", path);
+      LOG_WARNING("This exposes sensitive data to all users on the system.");
+      LOG_WARNING("Fix with: chmod 600 %s", path);
+      LOG_WARNING("========================================");
+   }
+
+   if (st.st_mode & S_IWOTH) {
+      LOG_WARNING("========================================");
+      LOG_WARNING("SECURITY WARNING: %s is world-writable!", file_description);
+      LOG_WARNING("File: %s", path);
+      LOG_WARNING("Any user on the system can modify this file!");
+      LOG_WARNING("Fix with: chmod 600 %s", path);
+      LOG_WARNING("========================================");
+   }
+
+   /* Check for group-readable/writable (less critical but still a concern) */
+   if (st.st_mode & S_IRGRP) {
+      LOG_WARNING("Security notice: %s is group-readable (%s)", file_description, path);
+      LOG_WARNING("Consider: chmod 600 %s", path);
+   }
+
+   if (st.st_mode & S_IWGRP) {
+      LOG_WARNING("Security notice: %s is group-writable (%s)", file_description, path);
+      LOG_WARNING("Consider: chmod 600 %s", path);
+   }
+}
 
 /* =============================================================================
  * Unknown Key Warning Helper
@@ -471,6 +524,17 @@ static void parse_webui(toml_table_t *table, webui_config_t *config) {
    }
 }
 
+static void parse_shutdown(toml_table_t *table, shutdown_config_t *config) {
+   if (!table)
+      return;
+
+   static const char *const known_keys[] = { "enabled", "passphrase", NULL };
+   warn_unknown_keys(table, "shutdown", known_keys);
+
+   PARSE_BOOL(table, "enabled", config->enabled);
+   PARSE_STRING(table, "passphrase", config->passphrase);
+}
+
 static void parse_debug(toml_table_t *table, debug_config_t *config) {
    if (!table)
       return;
@@ -555,6 +619,7 @@ int config_parse_file(const char *path, dawn_config_t *config) {
    parse_network(toml_table_in(root, "network"), &config->network);
    parse_tui(toml_table_in(root, "tui"), &config->tui);
    parse_webui(toml_table_in(root, "webui"), &config->webui);
+   parse_shutdown(toml_table_in(root, "shutdown"), &config->shutdown);
    parse_debug(toml_table_in(root, "debug"), &config->debug);
    parse_paths(toml_table_in(root, "paths"), &config->paths);
 
@@ -569,6 +634,9 @@ int config_parse_secrets(const char *path, secrets_config_t *secrets) {
       LOG_ERROR("config_parse_secrets: NULL argument");
       return FAILURE;
    }
+
+   /* Check file permissions before loading - warn if too permissive */
+   check_sensitive_file_permissions(path, "Secrets file");
 
    FILE *fp = fopen(path, "r");
    if (!fp) {
@@ -585,18 +653,32 @@ int config_parse_secrets(const char *path, secrets_config_t *secrets) {
       return FAILURE;
    }
 
-   /* Parse [api_keys] section */
-   toml_table_t *api_keys = toml_table_in(root, "api_keys");
-   if (api_keys) {
-      PARSE_STRING(api_keys, "openai", secrets->openai_api_key);
-      PARSE_STRING(api_keys, "claude", secrets->claude_api_key);
+   /* Parse [secrets] section (WebUI format) */
+   toml_table_t *secrets_section = toml_table_in(root, "secrets");
+   if (secrets_section) {
+      PARSE_STRING(secrets_section, "openai_api_key", secrets->openai_api_key);
+      PARSE_STRING(secrets_section, "claude_api_key", secrets->claude_api_key);
+      PARSE_STRING(secrets_section, "mqtt_username", secrets->mqtt_username);
+      PARSE_STRING(secrets_section, "mqtt_password", secrets->mqtt_password);
    }
 
-   /* Parse [mqtt] section for credentials */
+   /* Legacy: Parse [api_keys] section (old format) */
+   toml_table_t *api_keys = toml_table_in(root, "api_keys");
+   if (api_keys) {
+      /* Only parse if not already set from [secrets] */
+      if (secrets->openai_api_key[0] == '\0')
+         PARSE_STRING(api_keys, "openai", secrets->openai_api_key);
+      if (secrets->claude_api_key[0] == '\0')
+         PARSE_STRING(api_keys, "claude", secrets->claude_api_key);
+   }
+
+   /* Legacy: Parse [mqtt] section for credentials (old format) */
    toml_table_t *mqtt = toml_table_in(root, "mqtt");
    if (mqtt) {
-      PARSE_STRING(mqtt, "username", secrets->mqtt_username);
-      PARSE_STRING(mqtt, "password", secrets->mqtt_password);
+      if (secrets->mqtt_username[0] == '\0')
+         PARSE_STRING(mqtt, "username", secrets->mqtt_username);
+      if (secrets->mqtt_password[0] == '\0')
+         PARSE_STRING(mqtt, "password", secrets->mqtt_password);
    }
 
    toml_free(root);
@@ -769,10 +851,21 @@ int config_backup_file(const char *path) {
       return 1;
    }
 
-   /* Create backup file */
-   FILE *dst = fopen(backup_path, "wb");
-   if (!dst) {
+   /* Create backup file with restrictive permissions from the start.
+    * Use open() with explicit mode to avoid race condition where file
+    * is briefly world-readable before chmod(). Config/secrets backups
+    * should always be owner-only (0600) regardless of original perms. */
+   int fd = open(backup_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+   if (fd < 0) {
       LOG_ERROR("Failed to create backup file: %s", backup_path);
+      fclose(src);
+      return 1;
+   }
+
+   FILE *dst = fdopen(fd, "wb");
+   if (!dst) {
+      LOG_ERROR("Failed to open backup file stream: %s", backup_path);
+      close(fd);
       fclose(src);
       return 1;
    }
@@ -791,9 +884,6 @@ int config_backup_file(const char *path) {
 
    fclose(src);
    fclose(dst);
-
-   /* Preserve original file permissions */
-   chmod(backup_path, st.st_mode);
 
    LOG_INFO("Created backup: %s", backup_path);
    return 0;

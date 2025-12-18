@@ -1067,9 +1067,18 @@ static int check_and_process_input_queue(char **command_text_out,
    return 1;
 }
 
-/* Publish AI State. Only send state if it's changed. */
+/* Publish AI State. Only send state if it's changed.
+ * Note: If LLM is processing in background thread, we override the state
+ * to PROCESS_COMMAND so the HUD shows "thinking/working" status. */
 int publish_ai_state(dawn_state_t newState) {
    int rc = 0;
+
+   /* Override state to PROCESS_COMMAND while LLM thread is running.
+    * The main state machine returns to SILENCE for barge-in detection,
+    * but externally we want to show that the AI is "thinking". */
+   if (llm_processing && newState == DAWN_STATE_SILENCE) {
+      newState = DAWN_STATE_PROCESS_COMMAND;
+   }
 
    if (newState == currentState || newState == DAWN_STATE_INVALID) {
       return 0;
@@ -2004,6 +2013,13 @@ int main(int argc, char *argv[]) {
          } else {
             LOG_INFO("MQTT authentication configured for user: %s", g_secrets.mqtt_username);
          }
+      } else {
+         /* SECURITY WARNING: MQTT running without authentication */
+         LOG_WARNING("========================================");
+         LOG_WARNING("MQTT SECURITY WARNING: No authentication configured!");
+         LOG_WARNING("Anyone on the network can send commands to DAWN.");
+         LOG_WARNING("Configure mqtt_username/mqtt_password in secrets.toml");
+         LOG_WARNING("========================================");
       }
 
       /* Connect to MQTT server (broker from config). */

@@ -637,10 +637,76 @@ const char *get_remote_command_prompt(void) {
 }
 
 /**
+ * @brief Validate that a device exists in the commands config
+ *
+ * SECURITY: This prevents LLM prompt injection attacks from executing commands
+ * for non-existent or hallucinated devices. Only devices defined in
+ * commands_config_nuevo.json are allowed.
+ *
+ * @param device The device name to validate
+ * @param topic_out Output buffer for the device's topic (can be NULL)
+ * @param topic_out_size Size of topic_out buffer
+ * @return true if device exists and is valid, false otherwise
+ */
+static bool validate_device_in_config(const char *device, char *topic_out, size_t topic_out_size) {
+   if (!device || device[0] == '\0') {
+      return false;
+   }
+
+   bool device_found = false;
+
+   FILE *configFile = fopen(g_config.paths.commands_config, "r");
+   if (!configFile) {
+      LOG_ERROR("LLM command validation: Cannot open commands config");
+      return false;
+   }
+
+   char buffer[10 * 1024];
+   int bytes_read = fread(buffer, 1, sizeof(buffer) - 1, configFile);
+   fclose(configFile);
+
+   if (bytes_read <= 0) {
+      return false;
+   }
+   buffer[bytes_read] = '\0';
+
+   struct json_object *config_json = json_tokener_parse(buffer);
+   if (!config_json) {
+      return false;
+   }
+
+   struct json_object *devices_obj, *device_config_obj;
+   if (json_object_object_get_ex(config_json, "devices", &devices_obj) &&
+       json_object_object_get_ex(devices_obj, device, &device_config_obj)) {
+      device_found = true;
+
+      /* Extract topic if requested */
+      if (topic_out && topic_out_size > 0) {
+         struct json_object *topic_obj;
+         if (json_object_object_get_ex(device_config_obj, "topic", &topic_obj)) {
+            const char *topic = json_object_get_string(topic_obj);
+            strncpy(topic_out, topic, topic_out_size - 1);
+            topic_out[topic_out_size - 1] = '\0';
+         } else {
+            strncpy(topic_out, "dawn", topic_out_size - 1);
+            topic_out[topic_out_size - 1] = '\0';
+         }
+      }
+   }
+
+   json_object_put(config_json);
+   return device_found;
+}
+
+/**
  * @brief Parses an LLM response for commands and executes them
  *
  * This function looks for JSON commands enclosed in <command> tags in the LLM response,
- * extracts them, and sends them through the MQTT messaging system.
+ * extracts them, validates the device against the allowlist, and sends them through
+ * the MQTT messaging system.
+ *
+ * SECURITY: Commands are validated against commands_config_nuevo.json before execution.
+ * Unknown devices are rejected and logged for audit.
  *
  * @param llm_response The text response from the LLM
  * @param mosq The MQTT client instance
@@ -672,51 +738,38 @@ int parse_llm_response_for_commands(const char *llm_response, struct mosquitto *
             strncpy(command, cmd_start, cmd_len);
             command[cmd_len] = '\0';
 
-            LOG_INFO("Found command: %s", command);
+            LOG_INFO("LLM command extracted: %s", command);
 
             // Parse JSON
             struct json_object *cmd_json = json_tokener_parse(command);
             if (cmd_json) {
-               struct json_object *device_obj, *topic_obj;
-               const char *topic = "dawn";  // Default topic
+               struct json_object *device_obj;
 
-               // Find topic based on device
                if (json_object_object_get_ex(cmd_json, "device", &device_obj)) {
                   const char *device = json_object_get_string(device_obj);
+                  char topic[64] = "dawn";
 
-                  // Read config to get topic for device
-                  FILE *configFile = fopen(g_config.paths.commands_config, "r");
-                  if (configFile) {
-                     char buffer[10 * 1024];
-                     int bytes_read = fread(buffer, 1, sizeof(buffer), configFile);
-                     fclose(configFile);
-
-                     if (bytes_read > 0) {
-                        buffer[bytes_read] = '\0';
-                        struct json_object *config_json = json_tokener_parse(buffer);
-                        if (config_json) {
-                           struct json_object *devices_obj, *device_config_obj;
-
-                           if (json_object_object_get_ex(config_json, "devices", &devices_obj) &&
-                               json_object_object_get_ex(devices_obj, device, &device_config_obj) &&
-                               json_object_object_get_ex(device_config_obj, "topic", &topic_obj)) {
-                              topic = json_object_get_string(topic_obj);
-                           }
-
-                           json_object_put(config_json);
-                        }
+                  /* SECURITY: Validate device against allowlist before execution */
+                  if (validate_device_in_config(device, topic, sizeof(topic))) {
+                     /* Device is valid - execute command */
+                     int rc = mosquitto_publish(mosq, NULL, topic, strlen(command), command, 0,
+                                                false);
+                     if (rc != MOSQ_ERR_SUCCESS) {
+                        LOG_ERROR("Error publishing command: %s", mosquitto_strerror(rc));
+                     } else {
+                        LOG_INFO("LLM COMMAND EXECUTED: device=%s topic=%s", device, topic);
+                        metrics_log_activity("LLM CMD: %s", command);
+                        commands_found++;
                      }
-                  }
-
-                  // Publish command to MQTT
-                  int rc = mosquitto_publish(mosq, NULL, topic, strlen(command), command, 0, false);
-                  if (rc != MOSQ_ERR_SUCCESS) {
-                     LOG_ERROR("Error publishing command: %s", mosquitto_strerror(rc));
                   } else {
-                     // Log LLM-generated command to TUI activity
-                     metrics_log_activity("MQTT: %s", command);
-                     commands_found++;
+                     /* SECURITY AUDIT: Unknown device rejected - possible prompt injection */
+                     LOG_WARNING("LLM COMMAND REJECTED: Unknown device '%s' - not in allowlist",
+                                 device);
+                     LOG_WARNING("  Full command was: %s", command);
+                     metrics_log_activity("LLM CMD BLOCKED: %s", device);
                   }
+               } else {
+                  LOG_WARNING("LLM COMMAND REJECTED: No device field in command JSON");
                }
 
                json_object_put(cmd_json);

@@ -316,7 +316,9 @@ int dawn_receive_data_chunks(dawn_client_session_t *session, uint8_t **data_out,
          return DAWN_ERROR_PROTOCOL;
       }
 
-      if (total_received + header.data_length > MAX_DATA_SIZE) {
+      /* Overflow-safe check: avoid addition that could wrap around */
+      if (header.data_length > MAX_DATA_SIZE ||
+          total_received > MAX_DATA_SIZE - header.data_length) {
          LOG_WARNING("%s: Total data exceeds maximum", session->client_ip);
          dawn_send_nack(session->socket_fd);
          free(buffer);

@@ -39,7 +39,6 @@
 #include "dawn.h"
 #include "llm/sentence_buffer.h"
 #include "logging.h"
-#include "secrets.h"
 #include "tools/curl_buffer.h"
 #include "tts/text_to_speech.h"
 #include "ui/metrics.h"
@@ -53,31 +52,19 @@
 #define CLOUDAI_URL "https://api.openai.com"
 #define CLAUDE_URL "https://api.anthropic.com"
 
-// Helper functions to get API keys - prefer g_secrets over compile-time defines
+// Helper functions to get API keys from runtime config (secrets.toml)
 static const char *get_openai_api_key(void) {
-   // Prefer runtime config
    if (g_secrets.openai_api_key[0] != '\0') {
       return g_secrets.openai_api_key;
    }
-   // Fall back to compile-time define
-#ifdef OPENAI_API_KEY
-   return OPENAI_API_KEY;
-#else
    return NULL;
-#endif
 }
 
 static const char *get_claude_api_key(void) {
-   // Prefer runtime config
    if (g_secrets.claude_api_key[0] != '\0') {
       return g_secrets.claude_api_key;
    }
-   // Fall back to compile-time define
-#ifdef CLAUDE_API_KEY
-   return CLAUDE_API_KEY;
-#else
    return NULL;
-#endif
 }
 
 static bool is_openai_available(void) {
@@ -243,12 +230,12 @@ int llm_check_connection(const char *url, int timeout_seconds) {
 }
 
 void llm_init(const char *cloud_provider_override) {
-   // Detect available providers (from runtime config or compile-time defines)
+   // Detect available providers from runtime config (secrets.toml)
    bool openai_available = is_openai_available();
    bool claude_available = is_claude_available();
 
    if (!openai_available && !claude_available) {
-      LOG_WARNING("No cloud LLM providers configured (check secrets.toml or secrets.h)");
+      LOG_WARNING("No cloud LLM providers configured (check secrets.toml)");
       current_cloud_provider = CLOUD_PROVIDER_NONE;
       llm_set_type(LLM_LOCAL);
       return;
@@ -298,7 +285,54 @@ void llm_init(const char *cloud_provider_override) {
    // allowing proper TTS announcement after TTS is initialized.
 }
 
-void llm_set_type(llm_type_t type) {
+int llm_refresh_providers(void) {
+   bool openai_available = is_openai_available();
+   bool claude_available = is_claude_available();
+
+   if (!openai_available && !claude_available) {
+      LOG_INFO("LLM refresh: No cloud providers available");
+      current_cloud_provider = CLOUD_PROVIDER_NONE;
+      return 0;
+   }
+
+   // Check if current provider is still valid
+   if (current_cloud_provider == CLOUD_PROVIDER_OPENAI && !openai_available) {
+      // OpenAI key removed, switch to Claude if available
+      if (claude_available) {
+         current_cloud_provider = CLOUD_PROVIDER_CLAUDE;
+         LOG_INFO("LLM refresh: Switched to Claude (OpenAI key removed)");
+      } else {
+         current_cloud_provider = CLOUD_PROVIDER_NONE;
+         LOG_INFO("LLM refresh: No cloud providers available");
+         return 0;
+      }
+   } else if (current_cloud_provider == CLOUD_PROVIDER_CLAUDE && !claude_available) {
+      // Claude key removed, switch to OpenAI if available
+      if (openai_available) {
+         current_cloud_provider = CLOUD_PROVIDER_OPENAI;
+         LOG_INFO("LLM refresh: Switched to OpenAI (Claude key removed)");
+      } else {
+         current_cloud_provider = CLOUD_PROVIDER_NONE;
+         LOG_INFO("LLM refresh: No cloud providers available");
+         return 0;
+      }
+   } else if (current_cloud_provider == CLOUD_PROVIDER_NONE) {
+      // No provider was set, auto-detect (prefer OpenAI)
+      if (openai_available) {
+         current_cloud_provider = CLOUD_PROVIDER_OPENAI;
+         LOG_INFO("LLM refresh: OpenAI now available");
+      } else {
+         current_cloud_provider = CLOUD_PROVIDER_CLAUDE;
+         LOG_INFO("LLM refresh: Claude now available");
+      }
+   }
+
+   LOG_INFO("LLM refresh: Cloud provider ready (%s)",
+            current_cloud_provider == CLOUD_PROVIDER_OPENAI ? "OpenAI" : "Claude");
+   return 1;
+}
+
+int llm_set_type(llm_type_t type) {
    if (type == LLM_CLOUD) {
       // Check if API key is available for the current cloud provider
       int has_api_key = 0;
@@ -318,7 +352,7 @@ void llm_set_type(llm_type_t type) {
                      provider_name);
          text_to_speech("Cannot switch to cloud. API key not configured. Staying on local.");
          // Don't change current_type, stay on whatever we were using
-         return;
+         return 1; /* Failure - API key not configured */
       }
 
       // API key available, proceed with switch
@@ -350,6 +384,7 @@ void llm_set_type(llm_type_t type) {
 
    // Update metrics with current LLM configuration
    metrics_update_llm_config(current_type, current_cloud_provider);
+   return 0; /* Success */
 }
 
 llm_type_t llm_get_type(void) {
@@ -367,6 +402,45 @@ const char *llm_get_cloud_provider_name(void) {
       default:
          return "Unknown";
    }
+}
+
+int llm_set_cloud_provider(cloud_provider_t provider) {
+   if (provider == CLOUD_PROVIDER_OPENAI) {
+      if (!is_openai_available()) {
+         LOG_ERROR("Cannot switch to OpenAI: API key not configured");
+         return 1;
+      }
+      current_cloud_provider = CLOUD_PROVIDER_OPENAI;
+      // Update URL if we're currently in cloud mode
+      if (current_type == LLM_CLOUD) {
+         const char *cloud_endpoint = g_config.llm.cloud.endpoint[0] != '\0'
+                                          ? g_config.llm.cloud.endpoint
+                                          : CLOUDAI_URL;
+         snprintf(llm_url, sizeof(llm_url), "%s", cloud_endpoint);
+      }
+      LOG_INFO("Cloud provider set to OpenAI");
+      return 0;
+   } else if (provider == CLOUD_PROVIDER_CLAUDE) {
+      if (!is_claude_available()) {
+         LOG_ERROR("Cannot switch to Claude: API key not configured");
+         return 1;
+      }
+      current_cloud_provider = CLOUD_PROVIDER_CLAUDE;
+      // Update URL if we're currently in cloud mode
+      if (current_type == LLM_CLOUD) {
+         const char *cloud_endpoint = g_config.llm.cloud.endpoint[0] != '\0'
+                                          ? g_config.llm.cloud.endpoint
+                                          : CLAUDE_URL;
+         snprintf(llm_url, sizeof(llm_url), "%s", cloud_endpoint);
+      }
+      LOG_INFO("Cloud provider set to Claude");
+      return 0;
+   }
+   return 1;
+}
+
+cloud_provider_t llm_get_cloud_provider(void) {
+   return current_cloud_provider;
 }
 
 const char *llm_get_model_name(void) {

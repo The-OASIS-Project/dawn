@@ -913,19 +913,15 @@ cmake -DPLATFORM=RPI ..     # Force RPi (disables CUDA)
 
 ## Configuration Files
 
-### secrets.h (API Keys)
+### secrets.toml (API Keys)
 
-```c
-#ifndef SECRETS_H
-#define SECRETS_H
-
-#define OPENAI_API_KEY "sk-..."           // For GPT-4o
-#define ANTHROPIC_API_KEY "sk-ant-..."   // For Claude 4.5 Sonnet
-
-#endif
+```toml
+# Create in project root or ~/.config/dawn/secrets.toml
+openai_api_key = "sk-..."           # For GPT-4o
+claude_api_key = "sk-ant-..."       # For Claude 4.5 Sonnet
 ```
 
-**CRITICAL**: Add to `.gitignore`!
+**Note**: Already in `.gitignore` - never commit API keys!
 
 ### dawn.h (System Configuration)
 

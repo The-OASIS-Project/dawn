@@ -29,9 +29,9 @@
 /**
  * @brief Cloud provider types
  *
- * Automatically detected based on secrets.h API key definitions.
- * If both OPENAI_API_KEY and CLAUDE_API_KEY are defined, provider
- * can be selected via --cloud-provider command-line argument.
+ * Automatically detected based on API keys in secrets.toml.
+ * If both providers are configured, provider can be selected via
+ * --cloud-provider command-line argument or dawn.toml config.
  */
 typedef enum {
    CLOUD_PROVIDER_OPENAI, /**< OpenAI (GPT models) */
@@ -51,7 +51,7 @@ typedef enum {
 /**
  * @brief Initialize the LLM system
  *
- * Detects available cloud providers based on secrets.h API key definitions.
+ * Detects available cloud providers based on API keys in secrets.toml.
  * If command-line override provided, validates and uses it.
  * If both providers available and no override, defaults to OpenAI.
  *
@@ -59,6 +59,16 @@ typedef enum {
  *                                 ("openai", "claude", or NULL to auto-detect)
  */
 void llm_init(const char *cloud_provider_override);
+
+/**
+ * @brief Re-detect available cloud providers at runtime
+ *
+ * Call this after API keys are updated (e.g., via WebUI) to refresh
+ * provider availability without restarting. Safe to call at any time.
+ *
+ * @return 1 if at least one cloud provider is now available, 0 otherwise
+ */
+int llm_refresh_providers(void);
 
 /**
  * @brief Callback function type for streaming text chunks from LLM
@@ -150,8 +160,9 @@ char *llm_chat_completion_streaming_tts(struct json_object *conversation_history
  * @brief Switch between local and cloud LLM
  *
  * @param type LLM_LOCAL or LLM_CLOUD
+ * @return 0 on success, non-zero on failure (e.g., API key not configured)
  */
-void llm_set_type(llm_type_t type);
+int llm_set_type(llm_type_t type);
 
 /**
  * @brief Get current LLM type
@@ -166,6 +177,25 @@ llm_type_t llm_get_type(void);
  * @return String name of provider ("OpenAI", "Claude", "None")
  */
 const char *llm_get_cloud_provider_name(void);
+
+/**
+ * @brief Set the cloud provider at runtime
+ *
+ * Switches between OpenAI and Claude. Validates that the required API key
+ * is available before switching. Updates the endpoint URL if currently in cloud mode.
+ *
+ * @param provider CLOUD_PROVIDER_OPENAI or CLOUD_PROVIDER_CLAUDE
+ * @return 0 on success, 1 on failure (API key not configured)
+ */
+int llm_set_cloud_provider(cloud_provider_t provider);
+
+/**
+ * @brief Get current cloud provider enum value
+ *
+ * @return Current cloud provider (CLOUD_PROVIDER_OPENAI, CLOUD_PROVIDER_CLAUDE, or
+ * CLOUD_PROVIDER_NONE)
+ */
+cloud_provider_t llm_get_cloud_provider(void);
 
 /**
  * @brief Get current LLM model name (for display/logging)
@@ -208,7 +238,7 @@ int llm_is_interrupt_requested(void);
 /**
  * @brief Check if OpenAI API key is available
  *
- * Checks both runtime config (secrets.toml) and compile-time define (secrets.h)
+ * Checks runtime config (secrets.toml)
  *
  * @return true if API key is available, false otherwise
  */
@@ -217,7 +247,7 @@ bool llm_has_openai_key(void);
 /**
  * @brief Check if Claude API key is available
  *
- * Checks both runtime config (secrets.toml) and compile-time define (secrets.h)
+ * Checks runtime config (secrets.toml)
  *
  * @return true if API key is available, false otherwise
  */

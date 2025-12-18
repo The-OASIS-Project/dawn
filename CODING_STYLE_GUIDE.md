@@ -207,7 +207,7 @@ typedef enum {
  * before any other battery monitoring functions.
  * 
  * @param config Pointer to battery configuration structure
- * @return 0 on success, negative error code on failure
+ * @return 0 on success, positive error code on failure
  */
 int init_battery_monitor(battery_config_t *config);
 ```
