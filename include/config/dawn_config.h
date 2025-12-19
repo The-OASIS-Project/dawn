@@ -268,6 +268,14 @@ typedef struct {
    char claude_api_key[CONFIG_API_KEY_MAX];
    char mqtt_username[CONFIG_CREDENTIAL_MAX];
    char mqtt_password[CONFIG_CREDENTIAL_MAX];
+
+   /* SmartThings authentication (two modes supported):
+    * 1. Personal Access Token (PAT): Set access_token only - simpler, no refresh
+    * 2. OAuth2: Set client_id + client_secret - tokens stored in
+    *    ~/.config/dawn/smartthings_tokens.json and auto-refresh */
+   char smartthings_access_token[CONFIG_API_KEY_MAX]; /* PAT mode (preferred) */
+   char smartthings_client_id[CONFIG_CREDENTIAL_MAX]; /* OAuth2 mode */
+   char smartthings_client_secret[CONFIG_API_KEY_MAX];
 } secrets_config_t;
 
 /* =============================================================================

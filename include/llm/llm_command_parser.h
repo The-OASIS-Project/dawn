@@ -59,4 +59,13 @@ const char *get_system_instructions(void);
  */
 int is_vision_enabled_for_current_llm(void);
 
+/**
+ * @brief Invalidates cached system instructions, forcing rebuild on next call
+ *
+ * Call this when capabilities change at runtime (e.g., SmartThings
+ * authenticates, devices are loaded, etc.) so the next call to
+ * get_system_instructions() rebuilds the prompt with updated capabilities.
+ */
+void invalidate_system_instructions(void);
+
 #endif  // LLM_COMMAND_PARSER_H

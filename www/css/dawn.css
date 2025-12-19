@@ -502,6 +502,75 @@ html, body {
   color: #22d3ee;
 }
 
+/* System prompt styling (collapsible, yellow/gold theme) */
+.transcript-entry.debug.system-prompt {
+  background-color: rgba(234, 179, 8, 0.1);
+  border-left: 3px solid #eab308;
+  padding: 0;
+  margin-bottom: 1rem;
+}
+
+.system-prompt-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.system-prompt-header:hover {
+  background-color: rgba(234, 179, 8, 0.15);
+}
+
+.system-prompt-icon {
+  font-size: 1rem;
+  color: #eab308;
+}
+
+.system-prompt-title {
+  font-weight: 600;
+  color: #eab308;
+}
+
+.system-prompt-stats {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  margin-left: auto;
+}
+
+.system-prompt-toggle {
+  color: var(--text-secondary);
+  transition: transform var(--transition-fast);
+}
+
+.system-prompt.expanded .system-prompt-toggle {
+  transform: rotate(180deg);
+}
+
+.system-prompt-content {
+  display: none;
+  padding: 0 0.75rem 0.75rem;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.system-prompt.expanded .system-prompt-content {
+  display: block;
+}
+
+.system-prompt-content pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background-color: rgba(0, 0, 0, 0.2);
+  padding: 0.75rem;
+  border-radius: var(--border-radius);
+}
+
 .transcript-entry .role {
   font-size: 0.75rem;
   color: var(--text-secondary);
@@ -1152,4 +1221,232 @@ button:disabled {
   .reset-btn {
     order: 1;
   }
+}
+
+/* =============================================================================
+ * SmartThings Integration
+ * ============================================================================= */
+.smartthings-status {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 6px;
+  margin-bottom: 0.75rem;
+}
+
+.st-status-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.st-status-label {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  min-width: 60px;
+}
+
+.st-status-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0.75rem;
+  border-radius: 1rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+}
+
+.st-status-indicator.not-configured {
+  background: rgba(136, 136, 136, 0.2);
+  color: var(--text-secondary);
+}
+
+.st-status-indicator.configured {
+  background: rgba(245, 158, 11, 0.2);
+  color: var(--warning);
+}
+
+.st-status-indicator.connected {
+  background: rgba(34, 197, 94, 0.2);
+  color: var(--success);
+}
+
+.st-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+#st-devices-count {
+  font-size: 0.875rem;
+  color: var(--text-primary);
+}
+
+.st-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.st-btn {
+  padding: 0.625rem 1rem;
+  border-radius: 6px;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.st-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.st-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.st-btn-primary {
+  background: var(--accent);
+  color: var(--bg-primary);
+  border-color: var(--accent);
+}
+
+.st-btn-primary:hover:not(:disabled) {
+  filter: brightness(1.1);
+  color: var(--bg-primary);
+}
+
+.st-btn-danger {
+  background: transparent;
+  color: var(--error);
+  border-color: var(--error);
+}
+
+.st-btn-danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.st-info-box {
+  padding: 1rem;
+  background: rgba(34, 211, 238, 0.08);
+  border: 1px solid rgba(34, 211, 238, 0.15);
+  border-radius: 6px;
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+}
+
+.st-info-box p {
+  margin: 0 0 0.5rem 0;
+}
+
+.st-info-box p:last-child {
+  margin-bottom: 0;
+}
+
+.st-info-box code {
+  background: rgba(0, 0, 0, 0.3);
+  padding: 0.125rem 0.375rem;
+  border-radius: 3px;
+  font-family: 'Monaco', 'Menlo', monospace;
+  font-size: 0.75rem;
+  color: var(--accent);
+}
+
+.st-info-box pre {
+  background: rgba(0, 0, 0, 0.4);
+  padding: 0.75rem;
+  border-radius: 4px;
+  margin: 0.5rem 0;
+  overflow-x: auto;
+  font-family: 'Monaco', 'Menlo', monospace;
+  font-size: 0.75rem;
+  color: var(--text-primary);
+}
+
+.st-info-box a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.st-info-box a:hover {
+  text-decoration: underline;
+}
+
+.st-devices-list {
+  margin-top: 0.75rem;
+}
+
+.st-devices-header {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.5rem;
+}
+
+.st-device-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem 0.75rem;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 4px;
+  margin-bottom: 0.375rem;
+}
+
+.st-device-item:last-child {
+  margin-bottom: 0;
+}
+
+.st-device-name {
+  font-size: 0.875rem;
+  color: var(--text-primary);
+}
+
+.st-device-info {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.st-device-room {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.st-device-caps {
+  font-size: 0.875rem;
+}
+
+.st-no-devices {
+  padding: 1rem;
+  text-align: center;
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+/* SmartThings visibility helpers (CSP-compliant, no inline styles) */
+.st-hidden {
+  display: none !important;
+}
+
+.st-visible {
+  display: inline-block;
+}
+
+.st-visible-flex {
+  display: flex;
+}
+
+.st-visible-block {
+  display: block;
 }

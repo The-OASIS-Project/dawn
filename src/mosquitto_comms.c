@@ -50,6 +50,7 @@
 #include "mosquitto_comms.h"
 #include "tools/calculator.h"
 #include "tools/search_summarizer.h"
+#include "tools/smartthings_service.h"
 #include "tools/string_utils.h"
 #include "tools/url_fetcher.h"
 #include "tools/weather_service.h"
@@ -92,7 +93,8 @@ static deviceCallback deviceCallbackArray[] = { { AUDIO_PLAYBACK_DEVICE, setPcmP
                                                 { CALCULATOR, calculatorCallback },
                                                 { URL_FETCH, urlFetchCallback },
                                                 { LLM_STATUS, llmStatusCallback },
-                                                { CLOUD_PROVIDER, cloudProviderCallback } };
+                                                { CLOUD_PROVIDER, cloudProviderCallback },
+                                                { SMARTTHINGS, smartThingsCallback } };
 
 static pthread_t music_thread = -1;
 static pthread_t voice_thread = -1;
@@ -1990,4 +1992,387 @@ char *urlFetchCallback(const char *actionName, char *value, int *should_respond)
 
    return content;
 }
+
+/**
+ * @brief SmartThings home automation callback
+ *
+ * Handles all SmartThings device control actions. Parses the action name
+ * and value to determine what operation to perform.
+ *
+ * Actions:
+ * - list: Returns list of all devices
+ * - status: Get status of a device (value = device name)
+ * - on/off: Turn device on/off (value = device name)
+ * - brightness: Set brightness (value = "device name level")
+ * - color: Set color (value = "device name color_name" or "device hue sat")
+ * - temperature: Set thermostat (value = "device name temp")
+ * - lock/unlock: Lock operations (value = device name)
+ */
+char *smartThingsCallback(const char *actionName, char *value, int *should_respond) {
+   *should_respond = 1;
+
+   /* Check if service is configured */
+   if (!smartthings_is_configured()) {
+      return strdup("SmartThings is not configured. Please add client_id and client_secret to "
+                    "secrets.toml.");
+   }
+
+   /* Check if authenticated */
+   if (!smartthings_is_authenticated()) {
+      return strdup("SmartThings is not connected. Please authorize via the WebUI settings.");
+   }
+
+   /* Action: list - List all devices */
+   if (strcmp(actionName, "list") == 0) {
+      const st_device_list_t *devices;
+      st_error_t err = smartthings_list_devices(&devices);
+      if (err != ST_OK) {
+         char *msg = malloc(256);
+         snprintf(msg, 256, "Failed to list devices: %s", smartthings_error_str(err));
+         return msg;
+      }
+
+      /* Format device list for LLM */
+      char *buf = malloc(8192);
+      if (!buf)
+         return strdup("Memory allocation failed");
+
+      int len = snprintf(buf, 8192, "Found %d SmartThings devices:\n", devices->count);
+      for (int i = 0; i < devices->count && len < 8000; i++) {
+         const st_device_t *dev = &devices->devices[i];
+
+         /* Build capability string */
+         char caps[256] = "";
+         int caps_len = 0;
+         for (int j = 0; j < 15 && caps_len < 240; j++) {
+            st_capability_t cap = (st_capability_t)(1 << j);
+            if (dev->capabilities & cap) {
+               if (caps_len > 0)
+                  caps_len += snprintf(caps + caps_len, 256 - caps_len, ", ");
+               caps_len += snprintf(caps + caps_len, 256 - caps_len, "%s",
+                                    smartthings_capability_str(cap));
+            }
+         }
+
+         len += snprintf(buf + len, 8192 - len, "- %s (%s)\n", dev->label, caps);
+      }
+      return buf;
+   }
+
+   /* Action: status - Get device status */
+   if (strcmp(actionName, "status") == 0) {
+      if (!value || !value[0])
+         return strdup("Please specify a device name.");
+
+      const st_device_t *device;
+      st_error_t err = smartthings_find_device(value, &device);
+      if (err != ST_OK) {
+         char *msg = malloc(256);
+         snprintf(msg, 256, "Device '%s' not found", value);
+         return msg;
+      }
+
+      st_device_state_t state;
+      err = smartthings_get_device_status(device->id, &state);
+      if (err != ST_OK) {
+         char *msg = malloc(256);
+         snprintf(msg, 256, "Failed to get status: %s", smartthings_error_str(err));
+         return msg;
+      }
+
+      char *buf = malloc(1024);
+      int len = snprintf(buf, 1024, "Status of '%s':\n", device->label);
+
+      if (device->capabilities & ST_CAP_SWITCH) {
+         len += snprintf(buf + len, 1024 - len, "- Power: %s\n", state.switch_on ? "on" : "off");
+      }
+      if (device->capabilities & ST_CAP_SWITCH_LEVEL) {
+         len += snprintf(buf + len, 1024 - len, "- Brightness: %d%%\n", state.level);
+      }
+      if (device->capabilities & ST_CAP_COLOR_CONTROL) {
+         len += snprintf(buf + len, 1024 - len, "- Color: hue=%d, saturation=%d\n", state.hue,
+                         state.saturation);
+      }
+      if (device->capabilities & ST_CAP_COLOR_TEMP) {
+         len += snprintf(buf + len, 1024 - len, "- Color temp: %dK\n", state.color_temp);
+      }
+      if (device->capabilities & ST_CAP_TEMPERATURE) {
+         len += snprintf(buf + len, 1024 - len, "- Temperature: %.1f\n", state.temperature);
+      }
+      if (device->capabilities & ST_CAP_HUMIDITY) {
+         len += snprintf(buf + len, 1024 - len, "- Humidity: %.1f%%\n", state.humidity);
+      }
+      if (device->capabilities & ST_CAP_LOCK) {
+         len += snprintf(buf + len, 1024 - len, "- Lock: %s\n",
+                         state.locked ? "locked" : "unlocked");
+      }
+      if (device->capabilities & ST_CAP_BATTERY) {
+         len += snprintf(buf + len, 1024 - len, "- Battery: %d%%\n", state.battery);
+      }
+      if (device->capabilities & ST_CAP_MOTION) {
+         len += snprintf(buf + len, 1024 - len, "- Motion: %s\n",
+                         state.motion_active ? "detected" : "none");
+      }
+      if (device->capabilities & ST_CAP_CONTACT) {
+         len += snprintf(buf + len, 1024 - len, "- Contact: %s\n",
+                         state.contact_open ? "open" : "closed");
+      }
+      return buf;
+   }
+
+   /* Action: on - Turn device on */
+   if (strcmp(actionName, "on") == 0) {
+      if (!value || !value[0])
+         return strdup("Please specify a device name.");
+
+      const st_device_t *device;
+      st_error_t err = smartthings_find_device(value, &device);
+      if (err != ST_OK) {
+         char *msg = malloc(256);
+         snprintf(msg, 256, "Device '%s' not found", value);
+         return msg;
+      }
+
+      err = smartthings_switch_on(device->id);
+      if (err != ST_OK) {
+         char *msg = malloc(256);
+         snprintf(msg, 256, "Failed to turn on: %s", smartthings_error_str(err));
+         return msg;
+      }
+
+      char *msg = malloc(256);
+      snprintf(msg, 256, "Turned on '%s'", device->label);
+      return msg;
+   }
+
+   /* Action: off - Turn device off */
+   if (strcmp(actionName, "off") == 0) {
+      if (!value || !value[0])
+         return strdup("Please specify a device name.");
+
+      const st_device_t *device;
+      st_error_t err = smartthings_find_device(value, &device);
+      if (err != ST_OK) {
+         char *msg = malloc(256);
+         snprintf(msg, 256, "Device '%s' not found", value);
+         return msg;
+      }
+
+      err = smartthings_switch_off(device->id);
+      if (err != ST_OK) {
+         char *msg = malloc(256);
+         snprintf(msg, 256, "Failed to turn off: %s", smartthings_error_str(err));
+         return msg;
+      }
+
+      char *msg = malloc(256);
+      snprintf(msg, 256, "Turned off '%s'", device->label);
+      return msg;
+   }
+
+   /* Action: brightness - Set brightness level */
+   if (strcmp(actionName, "brightness") == 0) {
+      if (!value || !value[0])
+         return strdup("Please specify device name and brightness level (e.g., 'lamp 75').");
+
+      /* Parse "device_name level" from value */
+      char device_name[128];
+      int level = -1;
+
+      /* Find last number in string */
+      char *last_space = strrchr(value, ' ');
+      if (last_space && last_space[1]) {
+         level = atoi(last_space + 1);
+         size_t name_len = last_space - value;
+         if (name_len >= sizeof(device_name))
+            name_len = sizeof(device_name) - 1;
+         strncpy(device_name, value, name_len);
+         device_name[name_len] = '\0';
+      }
+
+      if (level < 0 || level > 100) {
+         return strdup("Please specify device name and brightness (0-100).");
+      }
+
+      const st_device_t *device;
+      st_error_t err = smartthings_find_device(device_name, &device);
+      if (err != ST_OK) {
+         char *msg = malloc(256);
+         snprintf(msg, 256, "Device '%s' not found", device_name);
+         return msg;
+      }
+
+      err = smartthings_set_level(device->id, level);
+      if (err != ST_OK) {
+         char *msg = malloc(256);
+         snprintf(msg, 256, "Failed to set brightness: %s", smartthings_error_str(err));
+         return msg;
+      }
+
+      char *msg = malloc(256);
+      snprintf(msg, 256, "Set '%s' brightness to %d%%", device->label, level);
+      return msg;
+   }
+
+   /* Action: color - Set color */
+   if (strcmp(actionName, "color") == 0) {
+      if (!value || !value[0])
+         return strdup("Please specify device name and color (e.g., 'lamp red' or 'lamp 50 100').");
+
+      /* Try to parse color name or hue/sat values */
+      char device_name[128];
+      int hue = -1, sat = -1;
+
+      /* Static color name to hue mappings (SmartThings uses 0-100 hue) */
+      static const struct {
+         const char *name;
+         int hue;
+         int sat;
+      } colors[] = { { "red", 0, 100 },     { "orange", 8, 100 }, { "yellow", 17, 100 },
+                     { "green", 33, 100 },  { "cyan", 50, 100 },  { "blue", 67, 100 },
+                     { "purple", 75, 100 }, { "pink", 92, 80 },   { "white", 0, 0 } };
+
+      /* Check for color name */
+      char *last_word = strrchr(value, ' ');
+      if (last_word) {
+         for (size_t i = 0; i < sizeof(colors) / sizeof(colors[0]); i++) {
+            if (strcasecmp(last_word + 1, colors[i].name) == 0) {
+               hue = colors[i].hue;
+               sat = colors[i].sat;
+               size_t name_len = last_word - value;
+               if (name_len >= sizeof(device_name))
+                  name_len = sizeof(device_name) - 1;
+               strncpy(device_name, value, name_len);
+               device_name[name_len] = '\0';
+               break;
+            }
+         }
+      }
+
+      if (hue < 0) {
+         return strdup(
+             "Unknown color. Try: red, orange, yellow, green, cyan, blue, purple, pink, white");
+      }
+
+      const st_device_t *device;
+      st_error_t err = smartthings_find_device(device_name, &device);
+      if (err != ST_OK) {
+         char *msg = malloc(256);
+         snprintf(msg, 256, "Device '%s' not found", device_name);
+         return msg;
+      }
+
+      err = smartthings_set_color(device->id, hue, sat);
+      if (err != ST_OK) {
+         char *msg = malloc(256);
+         snprintf(msg, 256, "Failed to set color: %s", smartthings_error_str(err));
+         return msg;
+      }
+
+      char *msg = malloc(256);
+      snprintf(msg, 256, "Set '%s' color", device->label);
+      return msg;
+   }
+
+   /* Action: temperature - Set thermostat */
+   if (strcmp(actionName, "temperature") == 0) {
+      if (!value || !value[0])
+         return strdup("Please specify device name and temperature (e.g., 'thermostat 72').");
+
+      char device_name[128];
+      double temp = -1;
+
+      char *last_space = strrchr(value, ' ');
+      if (last_space && last_space[1]) {
+         temp = atof(last_space + 1);
+         size_t name_len = last_space - value;
+         if (name_len >= sizeof(device_name))
+            name_len = sizeof(device_name) - 1;
+         strncpy(device_name, value, name_len);
+         device_name[name_len] = '\0';
+      }
+
+      if (temp < 50 || temp > 90) {
+         return strdup("Please specify a valid temperature (50-90F).");
+      }
+
+      const st_device_t *device;
+      st_error_t err = smartthings_find_device(device_name, &device);
+      if (err != ST_OK) {
+         char *msg = malloc(256);
+         snprintf(msg, 256, "Device '%s' not found", device_name);
+         return msg;
+      }
+
+      err = smartthings_set_thermostat(device->id, temp);
+      if (err != ST_OK) {
+         char *msg = malloc(256);
+         snprintf(msg, 256, "Failed to set temperature: %s", smartthings_error_str(err));
+         return msg;
+      }
+
+      char *msg = malloc(256);
+      snprintf(msg, 256, "Set '%s' to %.0f°F", device->label, temp);
+      return msg;
+   }
+
+   /* Action: lock - Lock a lock device */
+   if (strcmp(actionName, "lock") == 0) {
+      if (!value || !value[0])
+         return strdup("Please specify a lock device name.");
+
+      const st_device_t *device;
+      st_error_t err = smartthings_find_device(value, &device);
+      if (err != ST_OK) {
+         char *msg = malloc(256);
+         snprintf(msg, 256, "Device '%s' not found", value);
+         return msg;
+      }
+
+      err = smartthings_lock(device->id);
+      if (err != ST_OK) {
+         char *msg = malloc(256);
+         snprintf(msg, 256, "Failed to lock: %s", smartthings_error_str(err));
+         return msg;
+      }
+
+      char *msg = malloc(256);
+      snprintf(msg, 256, "Locked '%s'", device->label);
+      return msg;
+   }
+
+   /* Action: unlock - Unlock a lock device */
+   if (strcmp(actionName, "unlock") == 0) {
+      if (!value || !value[0])
+         return strdup("Please specify a lock device name.");
+
+      const st_device_t *device;
+      st_error_t err = smartthings_find_device(value, &device);
+      if (err != ST_OK) {
+         char *msg = malloc(256);
+         snprintf(msg, 256, "Device '%s' not found", value);
+         return msg;
+      }
+
+      err = smartthings_unlock(device->id);
+      if (err != ST_OK) {
+         char *msg = malloc(256);
+         snprintf(msg, 256, "Failed to unlock: %s", smartthings_error_str(err));
+         return msg;
+      }
+
+      char *msg = malloc(256);
+      snprintf(msg, 256, "Unlocked '%s'", device->label);
+      return msg;
+   }
+
+   /* Unknown action */
+   char *msg = malloc(256);
+   snprintf(msg, 256,
+            "Unknown SmartThings action '%s'. Supported: list, status, on, off, brightness, "
+            "color, temperature, lock, unlock",
+            actionName);
+   return msg;
+}
+
 /* End Mosquitto Stuff */

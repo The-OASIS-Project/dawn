@@ -334,6 +334,7 @@ set(DAWN_SOURCES
     # Tools subsystem (web search, weather, calculator, etc.)
     src/tools/web_search.c
     src/tools/weather_service.c
+    src/tools/smartthings_service.c
     src/tools/calculator.c
     src/tools/tinyexpr.c
     src/tools/search_summarizer.c

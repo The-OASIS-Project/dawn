@@ -660,6 +660,17 @@ int config_parse_secrets(const char *path, secrets_config_t *secrets) {
       PARSE_STRING(secrets_section, "claude_api_key", secrets->claude_api_key);
       PARSE_STRING(secrets_section, "mqtt_username", secrets->mqtt_username);
       PARSE_STRING(secrets_section, "mqtt_password", secrets->mqtt_password);
+
+      /* Parse [secrets.smartthings] sub-section for authentication
+       * Supports two modes:
+       * 1. PAT mode: access_token only (simpler, recommended)
+       * 2. OAuth2 mode: client_id + client_secret */
+      toml_table_t *smartthings = toml_table_in(secrets_section, "smartthings");
+      if (smartthings) {
+         PARSE_STRING(smartthings, "access_token", secrets->smartthings_access_token);
+         PARSE_STRING(smartthings, "client_id", secrets->smartthings_client_id);
+         PARSE_STRING(smartthings, "client_secret", secrets->smartthings_client_secret);
+      }
    }
 
    /* Legacy: Parse [api_keys] section (old format) */

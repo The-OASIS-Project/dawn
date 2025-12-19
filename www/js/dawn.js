@@ -224,6 +224,24 @@
         case 'set_session_llm_response':
           handleSetSessionLlmResponse(msg.payload);
           break;
+        case 'smartthings_status_response':
+          handleSmartThingsStatusResponse(msg.payload);
+          break;
+        case 'smartthings_auth_url_response':
+          handleSmartThingsAuthUrlResponse(msg.payload);
+          break;
+        case 'smartthings_exchange_code_response':
+          handleSmartThingsExchangeCodeResponse(msg.payload);
+          break;
+        case 'smartthings_disconnect_response':
+          handleSmartThingsDisconnectResponse(msg.payload);
+          break;
+        case 'smartthings_devices_response':
+          handleSmartThingsDevicesResponse(msg.payload);
+          break;
+        case 'system_prompt_response':
+          handleSystemPromptResponse(msg.payload);
+          break;
         default:
           console.log('Unknown message type:', msg.type);
       }
@@ -1122,6 +1140,11 @@
         entry.style.display = debugMode ? 'block' : 'none';
       });
 
+      // Request system prompt when debug is enabled
+      if (debugMode && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'get_system_prompt' }));
+      }
+
       // Scroll to bottom to see newly visible entries
       elements.transcript.scrollTop = elements.transcript.scrollHeight;
     });
@@ -1398,6 +1421,18 @@
     settingsElements.statusClaude = document.getElementById('status-claude');
     settingsElements.statusMqttUser = document.getElementById('status-mqtt-user');
     settingsElements.statusMqttPass = document.getElementById('status-mqtt-pass');
+
+    // SmartThings elements
+    settingsElements.stStatusIndicator = document.getElementById('st-status-indicator');
+    settingsElements.stStatusText = settingsElements.stStatusIndicator?.querySelector('.st-status-text');
+    settingsElements.stDevicesCountRow = document.getElementById('st-devices-count-row');
+    settingsElements.stDevicesCount = document.getElementById('st-devices-count');
+    settingsElements.stConnectBtn = document.getElementById('st-connect-btn');
+    settingsElements.stRefreshBtn = document.getElementById('st-refresh-btn');
+    settingsElements.stDisconnectBtn = document.getElementById('st-disconnect-btn');
+    settingsElements.stDevicesList = document.getElementById('st-devices-list');
+    settingsElements.stDevicesContainer = document.getElementById('st-devices-container');
+    settingsElements.stNotConfigured = document.getElementById('st-not-configured');
   }
 
   /**
@@ -1413,6 +1448,7 @@
     requestConfig();
     requestModelsList();
     requestInterfacesList();
+    requestSmartThingsStatus();
   }
 
   /**
@@ -1945,6 +1981,63 @@
   }
 
   /**
+   * Handle system prompt response - display at top of transcript in debug mode
+   */
+  function handleSystemPromptResponse(payload) {
+    if (!payload.success) {
+      console.warn('Failed to get system prompt:', payload.error);
+      return;
+    }
+
+    // Remove any existing system prompt entry
+    const existing = document.getElementById('system-prompt-entry');
+    if (existing) {
+      existing.remove();
+    }
+
+    // Create collapsible system prompt entry
+    const entry = document.createElement('div');
+    entry.id = 'system-prompt-entry';
+    entry.className = 'transcript-entry debug system-prompt';
+
+    const promptLength = payload.length || payload.prompt.length;
+    const tokenEstimate = Math.round(promptLength / 4); // Rough estimate
+
+    entry.innerHTML = `
+      <div class="system-prompt-header">
+        <span class="system-prompt-icon">&#x2699;</span>
+        <span class="system-prompt-title">System Prompt</span>
+        <span class="system-prompt-stats">${promptLength.toLocaleString()} chars (~${tokenEstimate.toLocaleString()} tokens)</span>
+        <span class="system-prompt-toggle">&#x25BC;</span>
+      </div>
+      <div class="system-prompt-content">
+        <pre>${escapeHtml(payload.prompt)}</pre>
+      </div>
+    `;
+
+    // Add click handler for expand/collapse
+    const header = entry.querySelector('.system-prompt-header');
+    header.addEventListener('click', function() {
+      entry.classList.toggle('expanded');
+    });
+
+    // Insert at the top of the transcript (after placeholder if present)
+    const placeholder = elements.transcript.querySelector('.transcript-placeholder');
+    if (placeholder) {
+      placeholder.after(entry);
+    } else {
+      elements.transcript.prepend(entry);
+    }
+
+    // Show only if debug mode is on
+    if (!debugMode) {
+      entry.style.display = 'none';
+    }
+
+    console.log(`System prompt loaded: ${promptLength} chars (~${tokenEstimate} tokens)`);
+  }
+
+  /**
    * Handle set_secrets response
    */
   function handleSetSecretsResponse(payload) {
@@ -2179,6 +2272,17 @@
 
     // LLM quick controls event listeners
     initLlmControls();
+
+    // SmartThings button listeners
+    if (settingsElements.stConnectBtn) {
+      settingsElements.stConnectBtn.addEventListener('click', startSmartThingsOAuth);
+    }
+    if (settingsElements.stRefreshBtn) {
+      settingsElements.stRefreshBtn.addEventListener('click', refreshSmartThingsDevices);
+    }
+    if (settingsElements.stDisconnectBtn) {
+      settingsElements.stDisconnectBtn.addEventListener('click', disconnectSmartThings);
+    }
   }
 
   // =============================================================================
@@ -2316,6 +2420,351 @@
       if (llmRuntimeState) {
         updateLlmControls(llmRuntimeState);
       }
+    }
+  }
+
+  // =============================================================================
+  // SmartThings Integration
+  // =============================================================================
+
+  // SmartThings state
+  let smartThingsState = {
+    configured: false,
+    authenticated: false,
+    devices_count: 0,
+    devices: [],
+    auth_mode: 'none' // 'none', 'pat', 'oauth2'
+  };
+
+  /**
+   * Request SmartThings status from server
+   */
+  function requestSmartThingsStatus() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    ws.send(JSON.stringify({ type: 'smartthings_status' }));
+    console.log('Requested SmartThings status');
+  }
+
+  /**
+   * Handle SmartThings status response
+   */
+  function handleSmartThingsStatusResponse(payload) {
+    console.log('SmartThings status:', payload);
+    smartThingsState.configured = payload.configured || false;
+    smartThingsState.authenticated = payload.authenticated || false;
+    smartThingsState.devices_count = payload.devices_count || 0;
+    smartThingsState.auth_mode = payload.auth_mode || 'none';
+
+    updateSmartThingsUI();
+
+    // If authenticated, also get device list
+    if (smartThingsState.authenticated) {
+      requestSmartThingsDevices();
+    }
+  }
+
+  /**
+   * Helper to show/hide elements using CSS classes (CSP-compliant)
+   */
+  function stShow(el, displayClass) {
+    if (!el) return;
+    el.classList.remove('st-hidden', 'st-visible', 'st-visible-flex', 'st-visible-block');
+    el.classList.add(displayClass || 'st-visible');
+  }
+
+  function stHide(el) {
+    if (!el) return;
+    el.classList.remove('st-visible', 'st-visible-flex', 'st-visible-block');
+    el.classList.add('st-hidden');
+  }
+
+  /**
+   * Update SmartThings UI based on current state
+   */
+  function updateSmartThingsUI() {
+    const indicator = settingsElements.stStatusIndicator;
+    const statusText = settingsElements.stStatusText;
+
+    if (!indicator || !statusText) return;
+
+    // Remove all status classes
+    indicator.classList.remove('not-configured', 'configured', 'connected');
+
+    if (!smartThingsState.configured) {
+      // Not configured - show setup instructions
+      indicator.classList.add('not-configured');
+      statusText.textContent = 'Not Configured';
+
+      stShow(settingsElements.stNotConfigured, 'st-visible-block');
+      stHide(settingsElements.stConnectBtn);
+      stHide(settingsElements.stRefreshBtn);
+      stHide(settingsElements.stDisconnectBtn);
+      stHide(settingsElements.stDevicesCountRow);
+      stHide(settingsElements.stDevicesList);
+
+    } else if (!smartThingsState.authenticated) {
+      // Configured but not authenticated
+      indicator.classList.add('configured');
+
+      if (smartThingsState.auth_mode === 'oauth2') {
+        // OAuth2 mode - show connect button
+        statusText.textContent = 'Not Connected';
+        stShow(settingsElements.stConnectBtn);
+      } else {
+        // PAT mode but not working - show error
+        statusText.textContent = 'Token Invalid';
+        stHide(settingsElements.stConnectBtn);
+      }
+
+      stHide(settingsElements.stNotConfigured);
+      stHide(settingsElements.stRefreshBtn);
+      stHide(settingsElements.stDisconnectBtn);
+      stHide(settingsElements.stDevicesCountRow);
+      stHide(settingsElements.stDevicesList);
+
+    } else {
+      // Authenticated - show connected state and devices
+      indicator.classList.add('connected');
+
+      if (smartThingsState.auth_mode === 'pat') {
+        statusText.textContent = 'Connected (PAT)';
+        // PAT is configured in secrets.toml, can't disconnect via UI
+        stHide(settingsElements.stDisconnectBtn);
+      } else {
+        statusText.textContent = 'Connected (OAuth2)';
+        stShow(settingsElements.stDisconnectBtn);
+      }
+
+      stHide(settingsElements.stNotConfigured);
+      stHide(settingsElements.stConnectBtn);
+      stShow(settingsElements.stRefreshBtn);
+      stShow(settingsElements.stDevicesCountRow, 'st-visible-flex');
+      settingsElements.stDevicesCount.textContent = smartThingsState.devices_count + ' device' + (smartThingsState.devices_count !== 1 ? 's' : '');
+
+      if (smartThingsState.devices.length > 0) {
+        stShow(settingsElements.stDevicesList, 'st-visible-block');
+      }
+    }
+  }
+
+  /**
+   * Start SmartThings OAuth flow
+   */
+  function startSmartThingsOAuth() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      alert('Not connected to server');
+      return;
+    }
+
+    // Get auth URL from server
+    const redirectUri = window.location.origin + '/smartthings/callback';
+    ws.send(JSON.stringify({
+      type: 'smartthings_get_auth_url',
+      payload: { redirect_uri: redirectUri }
+    }));
+    console.log('Requesting SmartThings auth URL');
+  }
+
+  /**
+   * Handle SmartThings auth URL response
+   */
+  function handleSmartThingsAuthUrlResponse(payload) {
+    if (payload.error) {
+      alert('Failed to get auth URL: ' + payload.error);
+      return;
+    }
+
+    if (payload.auth_url) {
+      console.log('Opening SmartThings authorization URL');
+      // Open in new window for OAuth flow
+      const authWindow = window.open(payload.auth_url, 'smartthings_auth', 'width=600,height=700');
+
+      // Listen for OAuth callback
+      window.addEventListener('message', function handleOAuthCallback(event) {
+        if (event.origin !== window.location.origin) return;
+        if (event.data && event.data.type === 'smartthings_oauth_callback') {
+          window.removeEventListener('message', handleOAuthCallback);
+          if (authWindow) authWindow.close();
+
+          if (event.data.code) {
+            // Exchange code for tokens (include state for CSRF protection)
+            exchangeSmartThingsCode(event.data.code, event.data.state);
+          } else if (event.data.error) {
+            alert('OAuth failed: ' + event.data.error);
+          }
+        }
+      });
+    }
+  }
+
+  /**
+   * Exchange OAuth code for tokens
+   * @param {string} code - Authorization code from OAuth callback
+   * @param {string} state - State parameter for CSRF protection
+   */
+  function exchangeSmartThingsCode(code, state) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    const redirectUri = window.location.origin + '/smartthings/callback';
+    const payload = { code: code, redirect_uri: redirectUri };
+    if (state) {
+      payload.state = state;
+    }
+    ws.send(JSON.stringify({
+      type: 'smartthings_exchange_code',
+      payload: payload
+    }));
+    console.log('Exchanging SmartThings auth code with CSRF state');
+  }
+
+  /**
+   * Handle SmartThings code exchange response
+   */
+  function handleSmartThingsExchangeCodeResponse(payload) {
+    if (payload.success) {
+      console.log('SmartThings connected successfully');
+      // Refresh status to show connected state
+      requestSmartThingsStatus();
+    } else {
+      alert('Failed to connect SmartThings: ' + (payload.error || 'Unknown error'));
+    }
+  }
+
+  /**
+   * Request SmartThings devices list
+   */
+  function requestSmartThingsDevices() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    ws.send(JSON.stringify({ type: 'smartthings_list_devices' }));
+    console.log('Requesting SmartThings devices');
+  }
+
+  /**
+   * Refresh SmartThings devices (force refresh from API)
+   */
+  function refreshSmartThingsDevices() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    settingsElements.stRefreshBtn.disabled = true;
+    settingsElements.stRefreshBtn.textContent = 'Refreshing...';
+
+    ws.send(JSON.stringify({ type: 'smartthings_refresh_devices' }));
+    console.log('Refreshing SmartThings devices');
+  }
+
+  /**
+   * Handle SmartThings devices response
+   */
+  function handleSmartThingsDevicesResponse(payload) {
+    // Re-enable refresh button
+    if (settingsElements.stRefreshBtn) {
+      settingsElements.stRefreshBtn.disabled = false;
+      settingsElements.stRefreshBtn.textContent = 'Refresh Devices';
+    }
+
+    if (payload.error) {
+      console.error('SmartThings devices error:', payload.error);
+      return;
+    }
+
+    if (payload.devices) {
+      smartThingsState.devices = payload.devices;
+      smartThingsState.devices_count = payload.devices.length;
+      renderSmartThingsDevices(payload.devices);
+      updateSmartThingsUI();
+    }
+  }
+
+  /**
+   * Render SmartThings devices list
+   */
+  function renderSmartThingsDevices(devices) {
+    const container = settingsElements.stDevicesContainer;
+    if (!container) return;
+
+    container.innerHTML = '';
+
+    if (devices.length === 0) {
+      container.innerHTML = '<div class="st-no-devices">No devices found</div>';
+      return;
+    }
+
+    devices.forEach(device => {
+      const deviceEl = document.createElement('div');
+      deviceEl.className = 'st-device-item';
+
+      // Get capability icons
+      const caps = getCapabilityIcons(device.capabilities);
+
+      deviceEl.innerHTML = `
+        <div class="st-device-name">${escapeHtml(device.label || device.name)}</div>
+        <div class="st-device-info">
+          <span class="st-device-room">${escapeHtml(device.room || 'No room')}</span>
+          <span class="st-device-caps">${caps}</span>
+        </div>
+      `;
+      container.appendChild(deviceEl);
+    });
+
+    settingsElements.stDevicesList.style.display = 'block';
+  }
+
+  /**
+   * Get capability icons for a device
+   */
+  function getCapabilityIcons(capabilities) {
+    const icons = [];
+    const capBits = capabilities || 0;
+
+    if (capBits & 0x0001) icons.push('&#x1F4A1;'); // Switch (lightbulb)
+    if (capBits & 0x0002) icons.push('&#x1F506;'); // Dimmer (brightness)
+    if (capBits & 0x0004) icons.push('&#x1F308;'); // Color
+    if (capBits & 0x0010) icons.push('&#x1F321;'); // Thermostat
+    if (capBits & 0x0020) icons.push('&#x1F510;'); // Lock
+    if (capBits & 0x0040) icons.push('&#x1F3C3;'); // Motion
+    if (capBits & 0x0080) icons.push('&#x1F6AA;'); // Contact (door)
+    if (capBits & 0x0100) icons.push('&#x1F321;'); // Temperature sensor
+    if (capBits & 0x0200) icons.push('&#x1F4A7;'); // Humidity
+    if (capBits & 0x2000) icons.push('&#x1FA9F;'); // Window shade
+
+    return icons.join(' ') || '&#x2699;'; // Default: gear
+  }
+
+  /**
+   * Disconnect SmartThings
+   */
+  function disconnectSmartThings() {
+    if (!confirm('Disconnect SmartThings? This will remove your saved tokens.')) {
+      return;
+    }
+
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    ws.send(JSON.stringify({ type: 'smartthings_disconnect' }));
+    console.log('Disconnecting SmartThings');
+  }
+
+  /**
+   * Handle SmartThings disconnect response
+   */
+  function handleSmartThingsDisconnectResponse(payload) {
+    if (payload.success) {
+      console.log('SmartThings disconnected');
+      smartThingsState.authenticated = false;
+      smartThingsState.devices = [];
+      smartThingsState.devices_count = 0;
+      updateSmartThingsUI();
+    } else {
+      alert('Failed to disconnect: ' + (payload.error || 'Unknown error'));
     }
   }
 

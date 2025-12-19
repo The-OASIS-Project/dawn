@@ -69,6 +69,7 @@
 #include "state_machine.h"
 #include "text_to_command_nuevo.h"
 #include "tools/search_summarizer.h"
+#include "tools/smartthings_service.h"
 #include "tts/text_to_speech.h"
 #include "tts/tts_preprocessing.h"
 #include "ui/metrics.h"
@@ -1993,6 +1994,14 @@ int main(int argc, char *argv[]) {
       LOG_INFO("Chunking disabled via config");
    }
 
+   /* SmartThings service initialization */
+   st_error_t st_err = smartthings_init();
+   if (st_err == ST_OK) {
+      LOG_INFO("SmartThings service initialized");
+   } else if (st_err != ST_ERR_NOT_CONFIGURED) {
+      LOG_WARNING("SmartThings init failed: %s", smartthings_error_str(st_err));
+   }
+
    /* MQTT Setup - conditionally enabled via config */
    if (g_config.mqtt.enabled) {
       LOG_INFO("Init mosquitto.");
@@ -3708,6 +3717,9 @@ int main(int argc, char *argv[]) {
    mosquitto_disconnect(mosq);
    mosquitto_loop_stop(mosq, false);
    mosquitto_lib_cleanup();
+
+   // Cleanup SmartThings service
+   smartthings_cleanup();
 
    // Save conversation history before cleanup
    // NOTE: conversation_history points to local session's history (owned by session_manager)

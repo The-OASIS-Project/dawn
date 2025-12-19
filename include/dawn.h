@@ -115,6 +115,24 @@
    "   set: <command>{\"device\":\"llm\",\"action\":\"set\",\"value\":\"local\"}"  \
    "</command> or \"cloud\"\n"
 
+// SmartThings home automation rules (only if SmartThings is authenticated)
+#define AI_RULES_SMARTTHINGS                                                                     \
+   "SMARTTHINGS: Control smart home devices. Actions: list, status, on, off, brightness, "       \
+   "color, temperature, lock, unlock.\n"                                                         \
+   "   list: <command>{\"device\":\"smartthings\",\"action\":\"list\"}</command>\n"              \
+   "   status: <command>{\"device\":\"smartthings\",\"action\":\"status\",\"value\":\"device "   \
+   "name\"}</command>\n"                                                                         \
+   "   on/off: <command>{\"device\":\"smartthings\",\"action\":\"on\",\"value\":\"living room "  \
+   "light\"}</command>\n"                                                                        \
+   "   brightness: <command>{\"device\":\"smartthings\",\"action\":\"brightness\","              \
+   "\"value\":\"lamp 75\"}</command> (0-100)\n"                                                  \
+   "   color: <command>{\"device\":\"smartthings\",\"action\":\"color\",\"value\":\"desk "       \
+   "light red\"}</command> (red,orange,yellow,green,cyan,blue,purple,pink,white)\n"              \
+   "   temperature: <command>{\"device\":\"smartthings\",\"action\":\"temperature\","            \
+   "\"value\":\"thermostat 72\"}</command> (50-90F)\n"                                           \
+   "   lock/unlock: <command>{\"device\":\"smartthings\",\"action\":\"lock\",\"value\":\"front " \
+   "door\"}</command>\n"
+
 // Core examples (always included)
 #define AI_EXAMPLES_CORE                                                         \
    "\n=== EXAMPLES ===\n"                                                        \

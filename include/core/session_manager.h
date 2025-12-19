@@ -342,6 +342,19 @@ void session_clear_history(session_t *session);
  */
 void session_init_system_prompt(session_t *session, const char *system_prompt);
 
+/**
+ * @brief Get the system prompt from a session
+ *
+ * Returns the content of the first "system" role message in the conversation
+ * history. Useful for debugging to see what instructions the LLM received.
+ *
+ * @param session Session to query
+ * @return System prompt string, or NULL if not found. Caller must free().
+ *
+ * @locks session->history_mutex
+ */
+char *session_get_system_prompt(session_t *session);
+
 // =============================================================================
 // LLM Integration
 // =============================================================================

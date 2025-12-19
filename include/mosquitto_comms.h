@@ -57,6 +57,7 @@ typedef enum {
    URL_FETCH,             /**< Fetch and extract content from a URL. */
    LLM_STATUS,            /**< Query current LLM status (local/cloud, model). */
    CLOUD_PROVIDER,        /**< Switch cloud provider (openai/claude). */
+   SMARTTHINGS,           /**< SmartThings home automation control. */
    MAX_DEVICE_TYPES       /**< Used to determine the number of device types. */
 } deviceType;
 
@@ -84,7 +85,8 @@ static const char *deviceTypeStrings[] = { "audio playback device",
                                            "calculator",
                                            "url",
                                            "llm",
-                                           "cloud provider" };
+                                           "cloud provider",
+                                           "smartthings" };
 
 /**
  * @brief Associates a device type with a callback function that processes actions for that device.
@@ -344,5 +346,19 @@ char *llmStatusCallback(const char *actionName, char *value, int *should_respond
  * @return Response string (caller must free), or NULL on error.
  */
 char *cloudProviderCallback(const char *actionName, char *value, int *should_respond);
+
+/**
+ * @brief Callback function for SmartThings home automation control.
+ *
+ * Controls SmartThings devices including lights, switches, locks, thermostats,
+ * and more. Supports actions: list, status, on, off, brightness, color,
+ * temperature, lock, unlock.
+ *
+ * @param actionName The action (e.g., "on", "off", "list", "status", "brightness").
+ * @param value      The device name or "device value" for actions with parameters.
+ * @param should_respond Should the callback return data to the AI.
+ * @return Response string (caller must free), or NULL on error.
+ */
+char *smartThingsCallback(const char *actionName, char *value, int *should_respond);
 
 #endif  // MOSQUITTO_COMMS_H

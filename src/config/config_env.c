@@ -190,6 +190,11 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
    ENV_STRING("MQTT_USERNAME", secrets->mqtt_username);
    ENV_STRING("MQTT_PASSWORD", secrets->mqtt_password);
 
+   /* SmartThings authentication (PAT or OAuth2) */
+   ENV_STRING("SMARTTHINGS_ACCESS_TOKEN", secrets->smartthings_access_token);
+   ENV_STRING("SMARTTHINGS_CLIENT_ID", secrets->smartthings_client_id);
+   ENV_STRING("SMARTTHINGS_CLIENT_SECRET", secrets->smartthings_client_secret);
+
    /* [network] */
    ENV_BOOL("DAWN_NETWORK_ENABLED", config->network.enabled);
    ENV_STRING("DAWN_NETWORK_HOST", config->network.host);
@@ -772,8 +777,14 @@ void config_dump_settings(const dawn_config_t *config,
           (secrets && secrets->claude_api_key[0]) ? "[set]" : "[not set]");
    printf("  MQTT_USERNAME                            %s\n",
           (secrets && secrets->mqtt_username[0]) ? "[set]" : "[not set]");
-   printf("  MQTT_PASSWORD                            %s\n\n",
+   printf("  MQTT_PASSWORD                            %s\n",
           (secrets && secrets->mqtt_password[0]) ? "[set]" : "[not set]");
+   printf("  SMARTTHINGS_ACCESS_TOKEN                 %s\n",
+          (secrets && secrets->smartthings_access_token[0]) ? "[set]" : "[not set]");
+   printf("  SMARTTHINGS_CLIENT_ID                    %s\n",
+          (secrets && secrets->smartthings_client_id[0]) ? "[set]" : "[not set]");
+   printf("  SMARTTHINGS_CLIENT_SECRET                %s\n\n",
+          (secrets && secrets->smartthings_client_secret[0]) ? "[set]" : "[not set]");
 }
 
 void config_dump_toml(const dawn_config_t *config) {
@@ -1135,6 +1146,11 @@ json_object *secrets_to_json_status(const secrets_config_t *secrets) {
                           json_object_new_boolean(secrets && secrets->mqtt_username[0]));
    json_object_object_add(obj, "mqtt_password",
                           json_object_new_boolean(secrets && secrets->mqtt_password[0]));
+   json_object_object_add(obj, "smartthings_client_id",
+                          json_object_new_boolean(secrets && secrets->smartthings_client_id[0]));
+   json_object_object_add(obj, "smartthings_client_secret",
+                          json_object_new_boolean(secrets &&
+                                                  secrets->smartthings_client_secret[0]));
 
    return obj;
 }
@@ -1331,6 +1347,15 @@ int secrets_write_toml(const secrets_config_t *secrets, const char *path) {
       fprintf(fp, "mqtt_username = \"%s\"\n", secrets->mqtt_username);
    if (secrets->mqtt_password[0])
       fprintf(fp, "mqtt_password = \"%s\"\n", secrets->mqtt_password);
+
+   /* SmartThings OAuth client credentials */
+   if (secrets->smartthings_client_id[0] || secrets->smartthings_client_secret[0]) {
+      fprintf(fp, "\n[secrets.smartthings]\n");
+      if (secrets->smartthings_client_id[0])
+         fprintf(fp, "client_id = \"%s\"\n", secrets->smartthings_client_id);
+      if (secrets->smartthings_client_secret[0])
+         fprintf(fp, "client_secret = \"%s\"\n", secrets->smartthings_client_secret);
+   }
 
    fclose(fp);
 

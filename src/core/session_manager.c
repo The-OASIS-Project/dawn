@@ -739,6 +739,41 @@ void session_init_system_prompt(session_t *session, const char *system_prompt) {
             strlen(system_prompt));
 }
 
+char *session_get_system_prompt(session_t *session) {
+   if (!session) {
+      return NULL;
+   }
+
+   char *result = NULL;
+
+   pthread_mutex_lock(&session->history_mutex);
+
+   if (session->conversation_history) {
+      int len = json_object_array_length(session->conversation_history);
+      for (int i = 0; i < len; i++) {
+         struct json_object *msg = json_object_array_get_idx(session->conversation_history, i);
+         struct json_object *role_obj;
+         if (json_object_object_get_ex(msg, "role", &role_obj)) {
+            const char *role = json_object_get_string(role_obj);
+            if (role && strcmp(role, "system") == 0) {
+               struct json_object *content_obj;
+               if (json_object_object_get_ex(msg, "content", &content_obj)) {
+                  const char *content = json_object_get_string(content_obj);
+                  if (content) {
+                     result = strdup(content);
+                  }
+               }
+               break;
+            }
+         }
+      }
+   }
+
+   pthread_mutex_unlock(&session->history_mutex);
+
+   return result;
+}
+
 // =============================================================================
 // LLM Integration
 // =============================================================================

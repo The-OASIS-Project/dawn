@@ -176,6 +176,55 @@
             <button id="save-secrets-btn" class="save-btn">Save Secrets</button>
           </div>
         </div>
+
+        <!-- SmartThings Integration Section -->
+        <div class="settings-section" id="smartthings-section">
+          <h3 class="section-header" data-section="smartthings">
+            <span class="section-icon">&#x1F3E0;</span>
+            SmartThings
+            <span class="section-toggle">&#9660;</span>
+          </h3>
+          <div class="section-content">
+            <div class="smartthings-status">
+              <div class="st-status-row">
+                <span class="st-status-label">Status:</span>
+                <span id="st-status-indicator" class="st-status-indicator not-configured">
+                  <span class="st-status-dot"></span>
+                  <span class="st-status-text">Not Configured</span>
+                </span>
+              </div>
+              <div class="st-status-row st-hidden" id="st-devices-count-row">
+                <span class="st-status-label">Devices:</span>
+                <span id="st-devices-count">0 devices</span>
+              </div>
+            </div>
+
+            <div class="st-actions">
+              <button id="st-connect-btn" class="st-btn st-btn-primary st-hidden">Connect SmartThings</button>
+              <button id="st-refresh-btn" class="st-btn st-hidden">Refresh Devices</button>
+              <button id="st-disconnect-btn" class="st-btn st-btn-danger st-hidden">Disconnect</button>
+            </div>
+
+            <div id="st-devices-list" class="st-devices-list st-hidden">
+              <div class="st-devices-header">Discovered Devices</div>
+              <div id="st-devices-container">
+                <!-- Devices will be populated dynamically -->
+              </div>
+            </div>
+
+            <div id="st-not-configured" class="st-info-box">
+              <p>SmartThings integration requires authentication.</p>
+              <p><strong>Option 1 (Recommended):</strong> Personal Access Token</p>
+              <pre>[secrets.smartthings]
+access_token = "your-pat-here"</pre>
+              <p>Generate a PAT at <a href="https://account.smartthings.com/tokens" target="_blank" rel="noopener">account.smartthings.com/tokens</a></p>
+              <p><strong>Option 2:</strong> OAuth2 (requires client credentials)</p>
+              <pre>[secrets.smartthings]
+client_id = "..."
+client_secret = "..."</pre>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="settings-footer">

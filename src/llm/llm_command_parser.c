@@ -31,6 +31,7 @@
 #include "logging.h"
 #include "mosquitto_comms.h"
 #include "text_to_command_nuevo.h"
+#include "tools/smartthings_service.h"
 #include "ui/metrics.h"
 
 // Static buffer for command prompt - make it static, make it large
@@ -98,6 +99,20 @@ int is_vision_enabled_for_current_llm(void) {
  *
  * @return Pointer to static buffer containing assembled instructions
  */
+/**
+ * @brief Invalidates cached system instructions, forcing rebuild on next call
+ *
+ * Call this when capabilities change at runtime (e.g., SmartThings
+ * authenticates, devices are loaded, etc.) so the next call to
+ * get_system_instructions() rebuilds the prompt with updated capabilities.
+ */
+void invalidate_system_instructions(void) {
+   system_instructions_initialized = 0;
+   prompt_initialized = 0;
+   remote_prompt_initialized = 0;
+   LOG_INFO("System instructions cache invalidated - will rebuild on next LLM call");
+}
+
 const char *get_system_instructions(void) {
    if (system_instructions_initialized) {
       return system_instructions_buffer;
@@ -139,6 +154,12 @@ const char *get_system_instructions(void) {
                       ", analyze images when asked what you see");
    }
 
+   // SmartThings if authenticated
+   if (smartthings_is_authenticated()) {
+      len += snprintf(system_instructions_buffer + len, remaining - len,
+                      ", control smart home devices via SmartThings");
+   }
+
    len += snprintf(system_instructions_buffer + len, remaining - len, ".\n\n");
 
    // Add feature-specific rules based on config
@@ -167,6 +188,38 @@ const char *get_system_instructions(void) {
 
    // LLM status always available
    len += snprintf(system_instructions_buffer + len, remaining - len, "%s\n", AI_RULES_LLM_STATUS);
+
+   // SmartThings only if authenticated
+   if (smartthings_is_authenticated()) {
+      len += snprintf(system_instructions_buffer + len, remaining - len, "%s\n",
+                      AI_RULES_SMARTTHINGS);
+
+      // Include device list so LLM knows what's available
+      const st_device_list_t *devices = NULL;
+      if (smartthings_list_devices(&devices) == ST_OK && devices && devices->count > 0) {
+         len += snprintf(system_instructions_buffer + len, remaining - len,
+                         "   Available devices (%d):\n", devices->count);
+         for (int i = 0; i < devices->count && i < 30; i++) { /* Limit to 30 devices */
+            const st_device_t *dev = &devices->devices[i];
+            len += snprintf(system_instructions_buffer + len, remaining - len, "   - %s",
+                            dev->label[0] ? dev->label : dev->name);
+            if (dev->room[0]) {
+               len += snprintf(system_instructions_buffer + len, remaining - len, " (%s)",
+                               dev->room);
+            }
+            len += snprintf(system_instructions_buffer + len, remaining - len, "\n");
+         }
+         if (devices->count > 30) {
+            len += snprintf(system_instructions_buffer + len, remaining - len,
+                            "   - ... and %d more devices\n", devices->count - 30);
+         }
+      }
+      LOG_INFO("System instructions: SmartThings rules included (%d devices)",
+               devices ? devices->count : 0);
+   } else if (smartthings_is_configured()) {
+      LOG_INFO(
+          "System instructions: SmartThings rules EXCLUDED (configured but not authenticated)");
+   }
 
    // Add examples
    len += snprintf(system_instructions_buffer + len, remaining - len, "%s", AI_EXAMPLES_CORE);
