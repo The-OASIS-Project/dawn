@@ -1107,6 +1107,11 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
          JSON_TO_CONFIG_STR(local, "model", config->llm.local.model);
          JSON_TO_CONFIG_BOOL(local, "vision_enabled", config->llm.local.vision_enabled);
       }
+
+      struct json_object *tools;
+      if (json_object_object_get_ex(section, "tools", &tools)) {
+         JSON_TO_CONFIG_BOOL(tools, "native_enabled", config->llm.tools.native_enabled);
+      }
    }
 
    /* [search] */
@@ -1120,6 +1125,19 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
          JSON_TO_CONFIG_SIZE_T(summarizer, "threshold_bytes",
                                config->search.summarizer.threshold_bytes);
          JSON_TO_CONFIG_SIZE_T(summarizer, "target_words", config->search.summarizer.target_words);
+      }
+   }
+
+   /* [url_fetcher] */
+   if (json_object_object_get_ex(payload, "url_fetcher", &section)) {
+      struct json_object *flaresolverr;
+      if (json_object_object_get_ex(section, "flaresolverr", &flaresolverr)) {
+         JSON_TO_CONFIG_BOOL(flaresolverr, "enabled", config->url_fetcher.flaresolverr.enabled);
+         JSON_TO_CONFIG_STR(flaresolverr, "endpoint", config->url_fetcher.flaresolverr.endpoint);
+         JSON_TO_CONFIG_INT(flaresolverr, "timeout_sec",
+                            config->url_fetcher.flaresolverr.timeout_sec);
+         JSON_TO_CONFIG_SIZE_T(flaresolverr, "max_response_bytes",
+                               config->url_fetcher.flaresolverr.max_response_bytes);
       }
    }
 

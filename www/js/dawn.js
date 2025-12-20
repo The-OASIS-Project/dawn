@@ -1272,9 +1272,17 @@
           label: 'Barge-In',
           fields: {
             enabled: { type: 'checkbox', label: 'Enable Barge-In', hint: 'Allow interrupting AI speech with new voice input' },
-            cooldown_ms: { type: 'number', label: 'Cooldown (ms)', min: 0, hint: 'Minimum time between barge-in events' }
+            cooldown_ms: { type: 'number', label: 'Cooldown (ms)', min: 0, hint: 'Minimum time between barge-in events' },
+            startup_cooldown_ms: { type: 'number', label: 'Startup Cooldown (ms)', min: 0, hint: 'Block barge-in when TTS first starts speaking' }
           }
         }
+      }
+    },
+    commands: {
+      label: 'Commands',
+      icon: '&#x2328;',
+      fields: {
+        processing_mode: { type: 'select', label: 'Processing Mode', options: ['direct_only', 'llm_only', 'direct_first'], restart: true, hint: 'direct_only: pattern matching only, llm_only: AI interprets all commands, direct_first: try patterns then AI' }
       }
     },
     vad: {
@@ -1331,6 +1339,13 @@
             model: { type: 'text', label: 'Model', placeholder: 'Leave empty for server default', hint: 'Model name if server hosts multiple models' },
             vision_enabled: { type: 'checkbox', label: 'Enable Vision', hint: 'Enable for multimodal models like LLaVA' }
           }
+        },
+        tools: {
+          type: 'group',
+          label: 'Tool Calling',
+          fields: {
+            native_enabled: { type: 'checkbox', label: 'Enable Native Tools', restart: true, hint: 'Use native function/tool calling instead of <command> tags (requires compatible LLM)' }
+          }
         }
       }
     },
@@ -1339,7 +1354,32 @@
       icon: '&#x1F50D;',
       fields: {
         engine: { type: 'select', label: 'Engine', options: ['searxng', 'disabled'], hint: 'Search engine for web queries (SearXNG is privacy-focused)' },
-        endpoint: { type: 'text', label: 'Endpoint', hint: 'SearXNG instance URL (e.g., http://localhost:8888)' }
+        endpoint: { type: 'text', label: 'Endpoint', hint: 'SearXNG instance URL (e.g., http://localhost:8888)' },
+        summarizer: {
+          type: 'group',
+          label: 'Result Summarizer',
+          fields: {
+            backend: { type: 'select', label: 'Backend', options: ['disabled', 'local', 'default'], hint: 'disabled: no summarization, local: use local LLM, default: use active LLM' },
+            threshold_bytes: { type: 'number', label: 'Threshold (bytes)', min: 0, step: 512, hint: 'Summarize results larger than this (0 = always summarize)' },
+            target_words: { type: 'number', label: 'Target Words', min: 50, step: 50, hint: 'Target word count for summarized output' }
+          }
+        }
+      }
+    },
+    url_fetcher: {
+      label: 'URL Fetcher',
+      icon: '&#x1F310;',
+      fields: {
+        flaresolverr: {
+          type: 'group',
+          label: 'FlareSolverr',
+          fields: {
+            enabled: { type: 'checkbox', label: 'Enable FlareSolverr', hint: 'Auto-fallback for sites with Cloudflare protection (requires FlareSolverr service)' },
+            endpoint: { type: 'text', label: 'Endpoint', hint: 'FlareSolverr API URL (e.g., http://localhost:8191/v1)' },
+            timeout_sec: { type: 'number', label: 'Timeout (sec)', min: 1, max: 120, hint: 'Request timeout for FlareSolverr' },
+            max_response_bytes: { type: 'number', label: 'Max Response (bytes)', min: 1024, step: 1024, hint: 'Maximum response size to accept' }
+          }
+        }
       }
     },
     mqtt: {
@@ -1390,6 +1430,21 @@
         asr_record: { type: 'checkbox', label: 'Record ASR Input' },
         aec_record: { type: 'checkbox', label: 'Record AEC' },
         record_path: { type: 'text', label: 'Recording Path' }
+      }
+    },
+    tui: {
+      label: 'Terminal UI',
+      icon: '&#x1F5A5;',
+      fields: {
+        enabled: { type: 'checkbox', label: 'Enable TUI', restart: true, hint: 'Show terminal dashboard with real-time metrics' }
+      }
+    },
+    paths: {
+      label: 'Paths',
+      icon: '&#x1F4C1;',
+      fields: {
+        music_dir: { type: 'text', label: 'Music Directory', hint: 'Path to music library for playback commands' },
+        commands_config: { type: 'text', label: 'Commands Config', restart: true, hint: 'Path to device/command mappings JSON file' }
       }
     }
   };

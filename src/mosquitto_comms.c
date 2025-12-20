@@ -96,6 +96,29 @@ static deviceCallback deviceCallbackArray[] = { { AUDIO_PLAYBACK_DEVICE, setPcmP
                                                 { CLOUD_PROVIDER, cloudProviderCallback },
                                                 { SMARTTHINGS, smartThingsCallback } };
 
+/**
+ * @brief Look up a callback function by device name string
+ *
+ * Searches deviceCallbackArray for a matching device name and returns
+ * the associated callback function pointer.
+ *
+ * @param device_name The device name string (e.g., "weather", "date", "search")
+ * @return Callback function pointer, or NULL if not found
+ */
+device_callback_fn get_device_callback(const char *device_name) {
+   if (!device_name) {
+      return NULL;
+   }
+
+   for (int i = 0; i < MAX_DEVICE_TYPES; i++) {
+      if (strcmp(device_name, deviceTypeStrings[i]) == 0) {
+         return deviceCallbackArray[i].callback;
+      }
+   }
+
+   return NULL;
+}
+
 static pthread_t music_thread = -1;
 static pthread_t voice_thread = -1;
 static char *pending_command_result = NULL;
@@ -608,6 +631,57 @@ static void execute_command_for_worker(struct json_object *parsed_json, const ch
    LOG_INFO("Executing command for worker: device=%s, action=%s, request_id=%s", deviceName,
             actionName, request_id);
 
+   /* OCP: Check status field for error responses */
+   struct json_object *status_obj = NULL;
+   if (json_object_object_get_ex(parsed_json, "status", &status_obj)) {
+      const char *status = json_object_get_string(status_obj);
+      if (status && strcmp(status, "error") == 0) {
+         /* Extract error details from error object */
+         struct json_object *error_obj = NULL;
+         const char *error_code = "UNKNOWN";
+         const char *error_message = "Unknown error occurred";
+
+         if (json_object_object_get_ex(parsed_json, "error", &error_obj)) {
+            struct json_object *code_obj = NULL;
+            struct json_object *msg_obj = NULL;
+
+            if (json_object_object_get_ex(error_obj, "code", &code_obj)) {
+               error_code = json_object_get_string(code_obj);
+            }
+            if (json_object_object_get_ex(error_obj, "message", &msg_obj)) {
+               error_message = json_object_get_string(msg_obj);
+            }
+         }
+
+         LOG_ERROR("OCP error response from %s: [%s] %s", deviceName, error_code, error_message);
+
+         /* Deliver error to waiting worker with formatted error string */
+         char error_result[512];
+         snprintf(error_result, sizeof(error_result), "ERROR: %s - %s", error_code, error_message);
+         command_router_deliver(request_id, error_result);
+         return;
+      }
+   }
+
+   /* Special handling for viewing responses with OCP inline data */
+   if (strcmp(deviceName, "viewing") == 0) {
+      struct json_object *data_obj = NULL;
+      if (json_object_object_get_ex(parsed_json, "data", &data_obj)) {
+         /* OCP inline data format: data.content contains base64 image */
+         struct json_object *content_obj = NULL;
+         if (json_object_object_get_ex(data_obj, "content", &content_obj)) {
+            const char *base64_content = json_object_get_string(content_obj);
+            if (base64_content && base64_content[0] != '\0') {
+               LOG_INFO("Viewing response contains inline data, delivering directly");
+               command_router_deliver(request_id, base64_content);
+               return;
+            }
+         }
+      }
+      /* Fall through to use file path if no inline data */
+      LOG_INFO("Viewing response using file path: %s", value ? value : "(null)");
+   }
+
    // Get session_id if present (for per-session LLM config)
    // Note: session_get() returns NULL for disconnected sessions, which means
    // commands from disconnected clients fall back to global config. This is
@@ -688,14 +762,39 @@ char *dateCallback(const char *actionName, char *value, int *should_respond) {
    char buffer[80];
    char *result = NULL;
    int choice;
+   char *old_tz = NULL;
 
    *should_respond = 1;  // Default to responding
 
    time(&current_time);
+
+   // Use configured timezone if set, otherwise use system default
+   if (g_config.localization.timezone[0] != '\0') {
+      // Save current TZ
+      const char *current_tz = getenv("TZ");
+      if (current_tz) {
+         old_tz = strdup(current_tz);
+      }
+      // Set configured timezone
+      setenv("TZ", g_config.localization.timezone, 1);
+      tzset();
+   }
+
    time_info = localtime(&current_time);
 
    // Format the date data
    strftime(buffer, sizeof(buffer), "%A, %B %d, %Y", time_info);
+
+   // Restore original TZ if we changed it
+   if (g_config.localization.timezone[0] != '\0') {
+      if (old_tz) {
+         setenv("TZ", old_tz, 1);
+         free(old_tz);
+      } else {
+         unsetenv("TZ");
+      }
+      tzset();
+   }
 
    if (command_processing_mode == CMD_MODE_DIRECT_ONLY) {
       // Direct mode: use text-to-speech with personality
@@ -744,14 +843,39 @@ char *timeCallback(const char *actionName, char *value, int *should_respond) {
    char buffer[80];
    char *result = NULL;
    int choice;
+   char *old_tz = NULL;
 
    *should_respond = 1;
 
    time(&current_time);
+
+   // Use configured timezone if set, otherwise use system default
+   if (g_config.localization.timezone[0] != '\0') {
+      // Save current TZ
+      const char *current_tz = getenv("TZ");
+      if (current_tz) {
+         old_tz = strdup(current_tz);
+      }
+      // Set configured timezone
+      setenv("TZ", g_config.localization.timezone, 1);
+      tzset();
+   }
+
    time_info = localtime(&current_time);
 
    // Format the time data with timezone
    strftime(buffer, sizeof(buffer), "%I:%M %p %Z", time_info);
+
+   // Restore original TZ if we changed it
+   if (g_config.localization.timezone[0] != '\0') {
+      if (old_tz) {
+         setenv("TZ", old_tz, 1);
+         free(old_tz);
+      } else {
+         unsetenv("TZ");
+      }
+      tzset();
+   }
 
    if (command_processing_mode == CMD_MODE_DIRECT_ONLY) {
       // Direct mode: use text-to-speech with personality
@@ -1984,6 +2108,27 @@ char *urlFetchCallback(const char *actionName, char *value, int *should_respond)
       content = summarized;
    }
    // If summarizer failed with no output, keep original content
+
+   // Hard limit on content size to prevent API errors (e.g., HTTP 400 from too-large requests)
+   // Most LLM APIs have context limits; 8000 chars is a safe limit for tool results
+   // This limit applies after summarization as a fallback safety measure
+#define URL_CONTENT_MAX_CHARS 8000
+   if (content && strlen(content) > URL_CONTENT_MAX_CHARS) {
+      LOG_WARNING("urlFetchCallback: Content too large (%zu bytes), truncating to %d",
+                  strlen(content), URL_CONTENT_MAX_CHARS);
+      // Allocate space for truncated content + truncation notice
+      char *truncated = malloc(URL_CONTENT_MAX_CHARS + 100);
+      if (truncated) {
+         strncpy(truncated, content, URL_CONTENT_MAX_CHARS - 50);
+         truncated[URL_CONTENT_MAX_CHARS - 50] = '\0';
+         strcat(truncated, "\n\n[Content truncated - original was too large]");
+         free(content);
+         content = truncated;
+      } else {
+         // If malloc fails, just truncate in place
+         content[URL_CONTENT_MAX_CHARS] = '\0';
+      }
+   }
 
    // Sanitize content to remove invalid UTF-8/control chars before sending to LLM
    if (content) {

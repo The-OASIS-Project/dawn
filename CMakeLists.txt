@@ -304,6 +304,7 @@ set(DAWN_SOURCES
     src/llm/llm_claude.c
     src/llm/llm_streaming.c
     src/llm/llm_command_parser.c
+    src/llm/llm_tools.c
     src/llm/sse_parser.c
     src/llm/sentence_buffer.c
 

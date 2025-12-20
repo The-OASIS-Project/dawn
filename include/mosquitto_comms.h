@@ -361,4 +361,16 @@ char *cloudProviderCallback(const char *actionName, char *value, int *should_res
  */
 char *smartThingsCallback(const char *actionName, char *value, int *should_respond);
 
+/**
+ * @brief Look up a callback function by device name string
+ *
+ * Searches deviceCallbackArray for a matching device name and returns
+ * the associated callback function pointer.
+ *
+ * @param device_name The device name string (e.g., "weather", "date", "search")
+ * @return Callback function pointer, or NULL if not found
+ */
+typedef char *(*device_callback_fn)(const char *actionName, char *value, int *should_respond);
+device_callback_fn get_device_callback(const char *device_name);
+
 #endif  // MOSQUITTO_COMMS_H

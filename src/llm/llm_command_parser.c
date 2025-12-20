@@ -28,6 +28,8 @@
 /* Local */
 #include "config/dawn_config.h"
 #include "dawn.h"
+#include "llm/llm_interface.h"
+#include "llm/llm_tools.h"
 #include "logging.h"
 #include "mosquitto_comms.h"
 #include "text_to_command_nuevo.h"
@@ -69,15 +71,17 @@ static int is_search_enabled(void) {
  * @brief Checks if vision is enabled for the current LLM type
  *
  * Vision availability is controlled by the vision_enabled setting for the
- * current LLM type (cloud or local). Cloud models typically support vision,
- * while local models may or may not (e.g., LLaVA, Qwen-VL support vision).
+ * RUNTIME LLM type (cloud or local), not the static config. This ensures
+ * that when the user switches LLMs at runtime, the vision check reflects
+ * the actual current LLM.
  *
  * @return 1 if vision is available, 0 otherwise
  */
 int is_vision_enabled_for_current_llm(void) {
-   if (strcmp(g_config.llm.type, "cloud") == 0) {
+   llm_type_t current = llm_get_type();
+   if (current == LLM_CLOUD) {
       return g_config.llm.cloud.vision_enabled;
-   } else if (strcmp(g_config.llm.type, "local") == 0) {
+   } else if (current == LLM_LOCAL) {
       return g_config.llm.local.vision_enabled;
    }
    return 0;
@@ -121,6 +125,24 @@ const char *get_system_instructions(void) {
    int len = 0;
    int remaining = SYSTEM_INSTRUCTIONS_BUFFER_SIZE;
 
+   // Check if native tool calling is enabled - use minimal prompt
+   if (llm_tools_enabled(NULL)) {
+      // Minimal rules when tools handle structured commands
+      len += snprintf(system_instructions_buffer + len, remaining - len,
+                      "RULES\n"
+                      "1. Keep responses concise - max 30 words unless asked to explain.\n"
+                      "2. Use available tools when the user requests actions or information.\n"
+                      "3. Do not include URLs unless explicitly asked.\n"
+                      "4. If a request is ambiguous, ask for clarification.\n"
+                      "5. After tool execution, provide a brief confirmation.\n\n");
+
+      // Note: Tool schemas are sent separately in the API request
+      LOG_INFO("Built MINIMAL system instructions for native tool calling (%d bytes)", len);
+      system_instructions_initialized = 1;
+      return system_instructions_buffer;
+   }
+
+   // Full prompt with <command> tag instructions for non-tool mode
    // Always include core rules
    len += snprintf(system_instructions_buffer + len, remaining - len, "%s\n", AI_RULES_CORE);
 
@@ -313,9 +335,25 @@ static void initialize_command_prompt(void) {
    struct json_object *typesObject = NULL;
    struct json_object *devicesObject = NULL;
 
-   // Start with persona, system instructions, localization context, then command intro
+   // Start with persona, system instructions, localization context
    // Persona is replaceable via config. System instructions are built dynamically based on
    // which features are enabled (search, vision, etc.)
+
+   // When native tool calling is enabled, skip the <command> tag instructions entirely
+   // since tools handle structured commands natively
+   if (llm_tools_enabled(NULL)) {
+      int prompt_len = snprintf(command_prompt, PROMPT_BUFFER_SIZE,
+                                "%s\n\n"  // Persona (from config or AI_PERSONA)
+                                "%s\n\n"  // System instructions (minimal for tools mode)
+                                "%s",     // Localization context
+                                get_persona_description(), get_system_instructions(),
+                                get_localization_context());
+      prompt_initialized = 1;
+      LOG_INFO("AI prompt initialized (native tools mode). Length: %d", prompt_len);
+      return;
+   }
+
+   // Legacy mode: include <command> tag instructions
    int prompt_len = snprintf(
        command_prompt, PROMPT_BUFFER_SIZE,
        "%s\n\n"  // Persona (from config or AI_PERSONA)
@@ -494,9 +532,25 @@ static void initialize_remote_command_prompt(void) {
    struct json_object *typesObject = NULL;
    struct json_object *devicesObject = NULL;
 
-   // Start with persona, system instructions, localization context, then command intro
+   // Start with persona, system instructions, localization context
    // Persona is replaceable via config. System instructions are built dynamically based on
    // which features are enabled (search, vision, etc.)
+
+   // When native tool calling is enabled, skip the <command> tag instructions entirely
+   // since tools handle structured commands natively
+   if (llm_tools_enabled(NULL)) {
+      int prompt_len = snprintf(remote_command_prompt, PROMPT_BUFFER_SIZE,
+                                "%s\n\n"  // Persona (from config or AI_PERSONA)
+                                "%s\n\n"  // System instructions (minimal for tools mode)
+                                "%s",     // Localization context
+                                get_persona_description(), get_system_instructions(),
+                                get_localization_context());
+      remote_prompt_initialized = 1;
+      LOG_INFO("Remote AI prompt initialized (native tools mode). Length: %d", prompt_len);
+      return;
+   }
+
+   // Legacy mode: include <command> tag instructions
    int prompt_len = snprintf(
        remote_command_prompt, PROMPT_BUFFER_SIZE,
        "%s\n\n"  // Persona (from config or AI_PERSONA)
@@ -701,7 +755,7 @@ const char *get_remote_command_prompt(void) {
  * @param topic_out_size Size of topic_out buffer
  * @return true if device exists and is valid, false otherwise
  */
-static bool validate_device_in_config(const char *device, char *topic_out, size_t topic_out_size) {
+bool validate_device_in_config(const char *device, char *topic_out, size_t topic_out_size) {
    if (!device || device[0] == '\0') {
       return false;
    }

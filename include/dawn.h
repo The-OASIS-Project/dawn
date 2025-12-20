@@ -358,6 +358,29 @@ char *findAudioPlaybackDevice(char *name);
 void process_vision_ai(const char *base64_image, size_t image_size);
 
 /**
+ * @brief Check if vision AI image is ready for processing
+ *
+ * @return 1 if vision image is ready, 0 otherwise
+ */
+int dawn_vision_is_ready(void);
+
+/**
+ * @brief Get the pending vision AI image
+ *
+ * @param size_out Output parameter for image size
+ * @return Base64-encoded image data, or NULL if not ready
+ */
+const char *dawn_vision_get_image(size_t *size_out);
+
+/**
+ * @brief Clear the vision AI image after it has been used
+ *
+ * Call this after consuming the vision image to free resources
+ * and allow new images to be captured.
+ */
+void dawn_vision_clear(void);
+
+/**
  * Callback function for text-to-speech commands.
  *
  * @param actionName The name of the action triggered this callback (unused in the current

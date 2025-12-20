@@ -26,6 +26,7 @@
 #include <string.h>
 #include <sys/time.h>
 
+#include "llm/llm_tools.h"
 #include "logging.h"
 #include "ui/metrics.h"
 
@@ -106,6 +107,7 @@ static int append_to_accumulated(llm_stream_context_t *ctx, const char *text) {
  * @brief Parse OpenAI/llama.cpp streaming chunk
  *
  * Format: {"choices":[{"delta":{"content":"text"}}]}
+ * Or for tool calls: {"choices":[{"delta":{"tool_calls":[...]}}]}
  * Or: [DONE]
  */
 static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data) {
@@ -122,7 +124,7 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
       return;
    }
 
-   // Extract choices[0].delta.content
+   // Extract choices[0].delta.content or tool_calls
    json_object *choices, *first_choice, *delta, *content;
 
    if (json_object_object_get_ex(chunk, "choices", &choices) &&
@@ -130,6 +132,7 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
       first_choice = json_object_array_get_idx(choices, 0);
 
       if (json_object_object_get_ex(first_choice, "delta", &delta)) {
+         // Check for text content
          if (json_object_object_get_ex(delta, "content", &content)) {
             const char *text = json_object_get_string(content);
             if (text && strlen(text) > 0) {
@@ -144,11 +147,82 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
             }
          }
 
-         // Check for finish_reason (stream may end without [DONE])
-         json_object *finish_reason;
-         if (json_object_object_get_ex(first_choice, "finish_reason", &finish_reason)) {
-            if (!json_object_is_type(finish_reason, json_type_null)) {
-               ctx->stream_complete = 1;
+         // Check for tool_calls (streaming tool calls)
+         json_object *tool_calls;
+         if (json_object_object_get_ex(delta, "tool_calls", &tool_calls) &&
+             json_object_get_type(tool_calls) == json_type_array) {
+            ctx->has_tool_calls = 1;
+
+            int tc_len = json_object_array_length(tool_calls);
+            for (int i = 0; i < tc_len; i++) {
+               json_object *tc = json_object_array_get_idx(tool_calls, i);
+               json_object *index_obj, *id_obj, *function_obj;
+
+               // Get index (which tool call this is part of)
+               int tc_index = 0;
+               if (json_object_object_get_ex(tc, "index", &index_obj)) {
+                  tc_index = json_object_get_int(index_obj);
+               }
+
+               if (tc_index >= LLM_TOOLS_MAX_PARALLEL_CALLS) {
+                  continue;
+               }
+
+               // First chunk for this tool call has id and function.name
+               if (json_object_object_get_ex(tc, "id", &id_obj)) {
+                  const char *id = json_object_get_string(id_obj);
+                  if (id) {
+                     strncpy(ctx->tool_calls.calls[tc_index].id, id, LLM_TOOLS_ID_LEN - 1);
+                     if (tc_index >= ctx->tool_calls.count) {
+                        ctx->tool_calls.count = tc_index + 1;
+                     }
+                  }
+               }
+
+               if (json_object_object_get_ex(tc, "function", &function_obj)) {
+                  json_object *name_obj, *args_obj;
+
+                  if (json_object_object_get_ex(function_obj, "name", &name_obj)) {
+                     const char *name = json_object_get_string(name_obj);
+                     if (name) {
+                        strncpy(ctx->tool_calls.calls[tc_index].name, name, LLM_TOOLS_NAME_LEN - 1);
+                     }
+                  }
+
+                  // Arguments come as deltas, accumulate them
+                  if (json_object_object_get_ex(function_obj, "arguments", &args_obj)) {
+                     const char *args_chunk = json_object_get_string(args_obj);
+                     if (args_chunk) {
+                        size_t cur_len = strlen(ctx->tool_args_buffer[tc_index]);
+                        size_t add_len = strlen(args_chunk);
+                        if (cur_len + add_len < LLM_TOOLS_ARGS_LEN - 1) {
+                           strcat(ctx->tool_args_buffer[tc_index], args_chunk);
+                        }
+                     }
+                  }
+               }
+            }
+         }
+      }
+
+      // Check for finish_reason
+      json_object *finish_reason;
+      if (json_object_object_get_ex(first_choice, "finish_reason", &finish_reason)) {
+         if (!json_object_is_type(finish_reason, json_type_null)) {
+            const char *reason = json_object_get_string(finish_reason);
+            if (reason) {
+               strncpy(ctx->finish_reason, reason, sizeof(ctx->finish_reason) - 1);
+               LOG_INFO("Stream finish_reason: %s", reason);
+            }
+            ctx->stream_complete = 1;
+
+            // Finalize tool call arguments
+            if (ctx->has_tool_calls) {
+               for (int i = 0; i < ctx->tool_calls.count; i++) {
+                  strncpy(ctx->tool_calls.calls[i].arguments, ctx->tool_args_buffer[i],
+                          LLM_TOOLS_ARGS_LEN - 1);
+               }
+               LOG_INFO("Stream completed with %d tool call(s)", ctx->tool_calls.count);
             }
          }
       }
@@ -226,8 +300,43 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
       }
    } else if (strcmp(type, "content_block_start") == 0) {
       ctx->content_block_active = 1;
+
+      // Check if this is a tool_use block
+      json_object *content_block, *block_type_obj;
+      if (json_object_object_get_ex(event, "content_block", &content_block)) {
+         if (json_object_object_get_ex(content_block, "type", &block_type_obj)) {
+            const char *block_type = json_object_get_string(block_type_obj);
+
+            if (strcmp(block_type, "tool_use") == 0) {
+               // Extract tool ID and name
+               json_object *id_obj, *name_obj, *index_obj;
+               ctx->claude_tool_block_active = 1;
+               ctx->claude_tool_args[0] = '\0';
+               ctx->claude_tool_args_len = 0;
+
+               if (json_object_object_get_ex(event, "index", &index_obj)) {
+                  ctx->claude_tool_index = json_object_get_int(index_obj);
+               }
+
+               if (json_object_object_get_ex(content_block, "id", &id_obj)) {
+                  strncpy(ctx->claude_tool_id, json_object_get_string(id_obj),
+                          LLM_TOOLS_ID_LEN - 1);
+                  ctx->claude_tool_id[LLM_TOOLS_ID_LEN - 1] = '\0';
+               }
+
+               if (json_object_object_get_ex(content_block, "name", &name_obj)) {
+                  strncpy(ctx->claude_tool_name, json_object_get_string(name_obj),
+                          LLM_TOOLS_NAME_LEN - 1);
+                  ctx->claude_tool_name[LLM_TOOLS_NAME_LEN - 1] = '\0';
+               }
+
+               LOG_INFO("Claude: Starting tool_use block: %s (id=%s)", ctx->claude_tool_name,
+                        ctx->claude_tool_id);
+            }
+         }
+      }
    } else if (strcmp(type, "content_block_delta") == 0) {
-      // Extract delta.text
+      // Extract delta
       json_object *delta, *delta_type_obj, *text_obj;
 
       if (json_object_object_get_ex(event, "delta", &delta)) {
@@ -250,13 +359,65 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
                      append_to_accumulated(ctx, text);
                   }
                }
+            } else if (strcmp(delta_type, "input_json_delta") == 0 &&
+                       ctx->claude_tool_block_active) {
+               // Accumulate partial_json for tool arguments
+               json_object *partial_json_obj;
+               if (json_object_object_get_ex(delta, "partial_json", &partial_json_obj)) {
+                  const char *partial = json_object_get_string(partial_json_obj);
+                  if (partial) {
+                     size_t partial_len = strlen(partial);
+                     if (ctx->claude_tool_args_len + partial_len < LLM_TOOLS_ARGS_LEN - 1) {
+                        memcpy(ctx->claude_tool_args + ctx->claude_tool_args_len, partial,
+                               partial_len);
+                        ctx->claude_tool_args_len += partial_len;
+                        ctx->claude_tool_args[ctx->claude_tool_args_len] = '\0';
+                     }
+                  }
+               }
             }
-            // Note: other delta types (input_json_delta, thinking_delta) are ignored
+            // Note: thinking_delta is ignored
          }
       }
    } else if (strcmp(type, "content_block_stop") == 0) {
+      // If we were in a tool_use block, finalize it
+      if (ctx->claude_tool_block_active) {
+         // Add to tool_calls list
+         if (ctx->tool_calls.count < LLM_TOOLS_MAX_PARALLEL_CALLS) {
+            int idx = ctx->tool_calls.count;
+            strncpy(ctx->tool_calls.calls[idx].id, ctx->claude_tool_id, LLM_TOOLS_ID_LEN - 1);
+            strncpy(ctx->tool_calls.calls[idx].name, ctx->claude_tool_name, LLM_TOOLS_NAME_LEN - 1);
+            strncpy(ctx->tool_calls.calls[idx].arguments, ctx->claude_tool_args,
+                    LLM_TOOLS_ARGS_LEN - 1);
+            ctx->tool_calls.count++;
+            ctx->has_tool_calls = 1;
+
+            LOG_INFO("Claude: Completed tool_use: %s with args: %.100s%s", ctx->claude_tool_name,
+                     ctx->claude_tool_args, strlen(ctx->claude_tool_args) > 100 ? "..." : "");
+         }
+
+         ctx->claude_tool_block_active = 0;
+         ctx->claude_tool_id[0] = '\0';
+         ctx->claude_tool_name[0] = '\0';
+         ctx->claude_tool_args[0] = '\0';
+         ctx->claude_tool_args_len = 0;
+      }
+
       ctx->content_block_active = 0;
    } else if (strcmp(type, "message_delta") == 0) {
+      // Extract stop_reason
+      json_object *delta_obj, *stop_reason_obj;
+      if (json_object_object_get_ex(event, "delta", &delta_obj)) {
+         if (json_object_object_get_ex(delta_obj, "stop_reason", &stop_reason_obj)) {
+            const char *stop_reason = json_object_get_string(stop_reason_obj);
+            if (stop_reason) {
+               strncpy(ctx->finish_reason, stop_reason, sizeof(ctx->finish_reason) - 1);
+               ctx->finish_reason[sizeof(ctx->finish_reason) - 1] = '\0';
+               LOG_INFO("Claude stream stop_reason: %s", stop_reason);
+            }
+         }
+      }
+
       // Extract output_tokens from usage
       json_object *usage_obj, *output_tokens_obj;
       if (json_object_object_get_ex(event, "usage", &usage_obj)) {
@@ -270,6 +431,11 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
       }
    } else if (strcmp(type, "message_stop") == 0) {
       ctx->stream_complete = 1;
+
+      // Log completion with tool calls if any
+      if (ctx->has_tool_calls) {
+         LOG_INFO("Claude stream completed with %d tool call(s)", ctx->tool_calls.count);
+      }
    }
    // Note: ping and error events are ignored
 
@@ -355,4 +521,20 @@ int llm_stream_is_complete(llm_stream_context_t *ctx) {
    }
 
    return ctx->stream_complete;
+}
+
+int llm_stream_has_tool_calls(llm_stream_context_t *ctx) {
+   if (!ctx) {
+      return 0;
+   }
+
+   return ctx->has_tool_calls && ctx->tool_calls.count > 0;
+}
+
+const tool_call_list_t *llm_stream_get_tool_calls(llm_stream_context_t *ctx) {
+   if (!ctx || !ctx->has_tool_calls || ctx->tool_calls.count == 0) {
+      return NULL;
+   }
+
+   return &ctx->tool_calls;
 }

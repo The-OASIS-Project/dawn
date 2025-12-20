@@ -166,6 +166,9 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
    ENV_STRING("DAWN_LLM_LOCAL_MODEL", config->llm.local.model);
    ENV_BOOL("DAWN_LLM_LOCAL_VISION_ENABLED", config->llm.local.vision_enabled);
 
+   /* [llm.tools] */
+   ENV_BOOL("DAWN_LLM_TOOLS_NATIVE_ENABLED", config->llm.tools.native_enabled);
+
    /* [search] */
    ENV_STRING("DAWN_SEARCH_ENGINE", config->search.engine);
    ENV_STRING("DAWN_SEARCH_ENDPOINT", config->search.endpoint);
@@ -646,6 +649,14 @@ void config_dump_settings(const dawn_config_t *config,
                                          defaults.llm.local.vision_enabled,
                                          "DAWN_LLM_LOCAL_VISION_ENABLED"));
 
+   /* [llm.tools] */
+   printf("[llm.tools]\n");
+   PRINT_SETTING_BOOL("native_enabled", config->llm.tools.native_enabled,
+                      "DAWN_LLM_TOOLS_NATIVE_ENABLED",
+                      detect_source_bool(config->llm.tools.native_enabled,
+                                         defaults.llm.tools.native_enabled,
+                                         "DAWN_LLM_TOOLS_NATIVE_ENABLED"));
+
    /* [search] */
    printf("[search]\n");
    PRINT_SETTING_STR("engine", config->search.engine, "DAWN_SEARCH_ENGINE",
@@ -1018,6 +1029,12 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object_object_add(local, "vision_enabled",
                           json_object_new_boolean(config->llm.local.vision_enabled));
    json_object_object_add(llm, "local", local);
+
+   /* [llm.tools] */
+   json_object *tools = json_object_new_object();
+   json_object_object_add(tools, "native_enabled",
+                          json_object_new_boolean(config->llm.tools.native_enabled));
+   json_object_object_add(llm, "tools", tools);
    json_object_object_add(root, "llm", llm);
 
    /* [search] */
@@ -1249,6 +1266,9 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    if (config->llm.local.model[0])
       fprintf(fp, "model = \"%s\"\n", config->llm.local.model);
    fprintf(fp, "vision_enabled = %s\n", config->llm.local.vision_enabled ? "true" : "false");
+
+   fprintf(fp, "\n[llm.tools]\n");
+   fprintf(fp, "native_enabled = %s\n", config->llm.tools.native_enabled ? "true" : "false");
 
    fprintf(fp, "\n[search]\n");
    fprintf(fp, "engine = \"%s\"\n", config->search.engine);

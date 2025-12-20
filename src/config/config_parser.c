@@ -358,22 +358,37 @@ static void parse_llm_local(toml_table_t *table, llm_local_config_t *config) {
    PARSE_BOOL(table, "vision_enabled", config->vision_enabled);
 }
 
+static void parse_llm_tools(toml_table_t *table, llm_tools_config_t *config) {
+   if (!table)
+      return;
+
+   static const char *const known_keys[] = { "native_enabled", NULL };
+   warn_unknown_keys(table, "llm.tools", known_keys);
+
+   PARSE_BOOL(table, "native_enabled", config->native_enabled);
+}
+
 static void parse_llm(toml_table_t *table, llm_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = { "type", "max_tokens", "cloud", "local", NULL };
+   static const char *const known_keys[] = {
+      "type", "max_tokens", "cloud", "local", "tools", NULL
+   };
    warn_unknown_keys(table, "llm", known_keys);
 
    PARSE_STRING(table, "type", config->type);
    PARSE_INT(table, "max_tokens", config->max_tokens);
 
-   /* Parse [llm.cloud] and [llm.local] sub-tables */
+   /* Parse [llm.cloud], [llm.local], and [llm.tools] sub-tables */
    toml_table_t *cloud = toml_table_in(table, "cloud");
    parse_llm_cloud(cloud, &config->cloud);
 
    toml_table_t *local = toml_table_in(table, "local");
    parse_llm_local(local, &config->local);
+
+   toml_table_t *tools = toml_table_in(table, "tools");
+   parse_llm_tools(tools, &config->tools);
 }
 
 static void parse_summarizer(toml_table_t *table, summarizer_file_config_t *config) {

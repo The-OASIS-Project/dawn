@@ -152,10 +152,15 @@ typedef struct {
 } llm_local_config_t;
 
 typedef struct {
+   bool native_enabled; /* Use native tool calling (default: false) */
+} llm_tools_config_t;
+
+typedef struct {
    char type[16];  /* "cloud" or "local" */
    int max_tokens; /* Max response tokens */
    llm_cloud_config_t cloud;
    llm_local_config_t local;
+   llm_tools_config_t tools; /* Native tool/function calling settings */
 } llm_config_t;
 
 /* =============================================================================

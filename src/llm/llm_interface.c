@@ -37,6 +37,7 @@
 
 #include "config/dawn_config.h"
 #include "dawn.h"
+#include "llm/llm_tools.h"
 #include "llm/sentence_buffer.h"
 #include "logging.h"
 #include "tools/curl_buffer.h"
@@ -283,6 +284,9 @@ void llm_init(const char *cloud_provider_override) {
 
    // Note: LLM type (local/cloud) is set by dawn.c after this function returns,
    // allowing proper TTS announcement after TTS is initialized.
+
+   // Initialize tool calling system (registers tools, checks capabilities)
+   llm_tools_init();
 }
 
 int llm_refresh_providers(void) {

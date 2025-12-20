@@ -30,6 +30,7 @@
 #include "dawn.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_streaming.h"
+#include "llm/llm_tools.h"
 #include "llm/sse_parser.h"
 #include "logging.h"
 #include "tools/curl_buffer.h"
@@ -66,6 +67,174 @@ static struct curl_slist *build_claude_headers(const char *api_key) {
    return headers;
 }
 
+/* =============================================================================
+ * Claude Format Conversion Helpers
+ * ============================================================================= */
+
+/**
+ * @brief Collect tool result IDs from conversation history
+ *
+ * Pre-scans conversation to find all tool call IDs that have matching results.
+ * Used to filter orphaned tool_use blocks.
+ *
+ * @param conversation OpenAI-format conversation history
+ * @param tool_result_ids Output array for tool IDs
+ * @param max_results Maximum number of results to collect
+ * @return Number of tool result IDs collected
+ */
+static int collect_tool_result_ids(struct json_object *conversation,
+                                   char tool_result_ids[][LLM_TOOLS_ID_LEN],
+                                   int max_results) {
+   int count = 0;
+   int conv_len = json_object_array_length(conversation);
+
+   for (int i = 0; i < conv_len && count < max_results; i++) {
+      json_object *msg = json_object_array_get_idx(conversation, i);
+      json_object *role_obj;
+      if (!json_object_object_get_ex(msg, "role", &role_obj)) {
+         continue;
+      }
+      const char *role = json_object_get_string(role_obj);
+
+      // OpenAI format: role="tool" with tool_call_id
+      if (strcmp(role, "tool") == 0) {
+         json_object *tool_call_id_obj;
+         if (json_object_object_get_ex(msg, "tool_call_id", &tool_call_id_obj)) {
+            const char *id = json_object_get_string(tool_call_id_obj);
+            if (id && count < max_results) {
+               strncpy(tool_result_ids[count], id, LLM_TOOLS_ID_LEN - 1);
+               tool_result_ids[count][LLM_TOOLS_ID_LEN - 1] = '\0';
+               count++;
+            }
+         }
+      }
+
+      // Claude format: role="user" with content array containing tool_result blocks
+      if (strcmp(role, "user") == 0) {
+         json_object *content_obj;
+         if (json_object_object_get_ex(msg, "content", &content_obj) &&
+             json_object_is_type(content_obj, json_type_array)) {
+            int content_len = json_object_array_length(content_obj);
+            for (int j = 0; j < content_len && count < max_results; j++) {
+               json_object *block = json_object_array_get_idx(content_obj, j);
+               json_object *type_obj;
+               if (json_object_object_get_ex(block, "type", &type_obj) &&
+                   strcmp(json_object_get_string(type_obj), "tool_result") == 0) {
+                  json_object *tool_use_id_obj;
+                  if (json_object_object_get_ex(block, "tool_use_id", &tool_use_id_obj)) {
+                     const char *id = json_object_get_string(tool_use_id_obj);
+                     if (id && count < max_results) {
+                        strncpy(tool_result_ids[count], id, LLM_TOOLS_ID_LEN - 1);
+                        tool_result_ids[count][LLM_TOOLS_ID_LEN - 1] = '\0';
+                        count++;
+                     }
+                  }
+               }
+            }
+         }
+      }
+   }
+   return count;
+}
+
+/**
+ * @brief Check if a tool ID has a matching result
+ */
+static bool has_matching_tool_result(const char *tool_id,
+                                     char tool_result_ids[][LLM_TOOLS_ID_LEN],
+                                     int count) {
+   for (int k = 0; k < count; k++) {
+      if (strcmp(tool_id, tool_result_ids[k]) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
+/**
+ * @brief Create a Claude-format image content block
+ */
+static json_object *create_claude_image_block(const char *vision_image) {
+   json_object *image_obj = json_object_new_object();
+   json_object_object_add(image_obj, "type", json_object_new_string("image"));
+
+   json_object *source_obj = json_object_new_object();
+   json_object_object_add(source_obj, "type", json_object_new_string("base64"));
+   json_object_object_add(source_obj, "media_type", json_object_new_string("image/jpeg"));
+   json_object_object_add(source_obj, "data", json_object_new_string(vision_image));
+   json_object_object_add(image_obj, "source", source_obj);
+
+   return image_obj;
+}
+
+/**
+ * @brief Add vision image to Claude messages array
+ *
+ * Either modifies the last user message to include the image, or creates
+ * a new user message if the last message isn't suitable.
+ *
+ * @param messages_array Claude messages array
+ * @param input_text Text to include with the image
+ * @param vision_image Base64-encoded image data
+ */
+static void add_vision_to_claude_messages(json_object *messages_array,
+                                          const char *input_text,
+                                          const char *vision_image) {
+   int msg_count = json_object_array_length(messages_array);
+   json_object *last_msg = msg_count > 0 ? json_object_array_get_idx(messages_array, msg_count - 1)
+                                         : NULL;
+   json_object *role_obj = NULL;
+   const char *last_role_str = NULL;
+
+   if (last_msg && json_object_object_get_ex(last_msg, "role", &role_obj)) {
+      last_role_str = json_object_get_string(role_obj);
+   }
+
+   // Check if last message is a user message with plain text content
+   json_object *last_content = NULL;
+   bool is_text_user_message = false;
+   if (last_msg && last_role_str && strcmp(last_role_str, "user") == 0) {
+      if (json_object_object_get_ex(last_msg, "content", &last_content)) {
+         if (json_object_is_type(last_content, json_type_string)) {
+            is_text_user_message = true;
+         }
+      }
+   }
+
+   if (is_text_user_message) {
+      // Last message is user message with text - add vision content
+      json_object *content_array = json_object_new_array();
+
+      json_object *text_obj = json_object_new_object();
+      json_object_object_add(text_obj, "type", json_object_new_string("text"));
+      json_object_object_add(text_obj, "text", json_object_new_string(input_text));
+      json_object_array_add(content_array, text_obj);
+
+      json_object_array_add(content_array, create_claude_image_block(vision_image));
+      json_object_object_add(last_msg, "content", content_array);
+   } else {
+      // Create a new user message with the vision image
+      LOG_INFO("Claude: Adding vision as new user message (last message not suitable)");
+
+      json_object *new_user_msg = json_object_new_object();
+      json_object_object_add(new_user_msg, "role", json_object_new_string("user"));
+
+      json_object *content_array = json_object_new_array();
+
+      json_object *text_obj = json_object_new_object();
+      json_object_object_add(text_obj, "type", json_object_new_string("text"));
+      json_object_object_add(text_obj, "text",
+                             json_object_new_string("Here is the captured image. "
+                                                    "Please describe what you see."));
+      json_object_array_add(content_array, text_obj);
+
+      json_object_array_add(content_array, create_claude_image_block(vision_image));
+      json_object_object_add(new_user_msg, "content", content_array);
+
+      json_object_array_add(messages_array, new_user_msg);
+   }
+}
+
 /**
  * @brief Convert OpenAI-format conversation to Claude format
  *
@@ -94,6 +263,15 @@ static json_object *convert_to_claude_format(struct json_object *openai_conversa
    json_object_object_add(claude_request, "max_tokens",
                           json_object_new_int(g_config.llm.max_tokens));
 
+   // Add tools if native tool calling is enabled
+   if (llm_tools_enabled(NULL)) {
+      struct json_object *tools = llm_tools_get_claude_format();
+      if (tools) {
+         json_object_object_add(claude_request, "tools", tools);
+         LOG_INFO("Claude: Added %d tools to request", llm_tools_get_enabled_count());
+      }
+   }
+
    // Extract system message and user/assistant messages
    json_object *system_array = json_object_new_array();
    json_object *messages_array = json_object_new_array();
@@ -101,6 +279,12 @@ static json_object *convert_to_claude_format(struct json_object *openai_conversa
    int conv_len = json_object_array_length(openai_conversation);
    const char *last_role = NULL;
    json_object *last_message = NULL;
+
+// Pre-scan to collect tool result IDs for orphaned tool_use filtering
+#define MAX_TRACKED_TOOL_RESULTS 16
+   char tool_result_ids[MAX_TRACKED_TOOL_RESULTS][LLM_TOOLS_ID_LEN];
+   int tool_result_count = collect_tool_result_ids(openai_conversation, tool_result_ids,
+                                                   MAX_TRACKED_TOOL_RESULTS);
 
    for (int i = 0; i < conv_len; i++) {
       json_object *msg = json_object_array_get_idx(openai_conversation, i);
@@ -112,6 +296,175 @@ static json_object *convert_to_claude_format(struct json_object *openai_conversa
       }
 
       const char *role = json_object_get_string(role_obj);
+
+      // Handle Claude-format assistant messages with tool_use content blocks
+      // These need to be filtered to remove orphaned tool_use blocks
+      if (strcmp(role, "assistant") == 0 && json_object_is_type(content_obj, json_type_array)) {
+         int content_len = json_object_array_length(content_obj);
+         json_object *filtered_content = json_object_new_array();
+         int has_tool_use = 0;
+
+         for (int j = 0; j < content_len; j++) {
+            json_object *block = json_object_array_get_idx(content_obj, j);
+            json_object *type_obj;
+
+            if (!json_object_object_get_ex(block, "type", &type_obj)) {
+               // Keep blocks without type
+               json_object_array_add(filtered_content, json_object_get(block));
+               continue;
+            }
+
+            const char *block_type = json_object_get_string(type_obj);
+
+            if (strcmp(block_type, "tool_use") == 0) {
+               // Check if this tool_use has a matching result
+               json_object *id_obj;
+               if (json_object_object_get_ex(block, "id", &id_obj)) {
+                  const char *tool_id = json_object_get_string(id_obj);
+                  if (has_matching_tool_result(tool_id, tool_result_ids, tool_result_count)) {
+                     json_object_array_add(filtered_content, json_object_get(block));
+                     has_tool_use = 1;
+                  } else {
+                     LOG_WARNING("Claude: Skipping orphaned tool_use %s", tool_id);
+                  }
+               }
+            } else {
+               // Keep text and other blocks
+               json_object_array_add(filtered_content, json_object_get(block));
+            }
+         }
+
+         // Only add if we have content
+         if (json_object_array_length(filtered_content) > 0) {
+            last_message = json_object_new_object();
+            json_object_object_add(last_message, "role", json_object_new_string("assistant"));
+            json_object_object_add(last_message, "content", filtered_content);
+            json_object_array_add(messages_array, last_message);
+            last_role = "assistant";
+         } else {
+            json_object_put(filtered_content);
+         }
+         continue;
+      }
+
+      // Convert assistant messages with tool_calls (OpenAI format) to Claude tool_use format
+      json_object *tool_calls_obj;
+      if (strcmp(role, "assistant") == 0 &&
+          json_object_object_get_ex(msg, "tool_calls", &tool_calls_obj)) {
+         // Build Claude content array with tool_use blocks
+         json_object *content_array = json_object_new_array();
+
+         // Include any text content first
+         const char *text_content = json_object_get_string(content_obj);
+         if (text_content && strlen(text_content) > 0) {
+            json_object *text_block = json_object_new_object();
+            json_object_object_add(text_block, "type", json_object_new_string("text"));
+            json_object_object_add(text_block, "text", json_object_new_string(text_content));
+            json_object_array_add(content_array, text_block);
+         }
+
+         // Convert each tool call to Claude tool_use format
+         // Only include tool calls that have matching results in the history
+         int num_calls = json_object_array_length(tool_calls_obj);
+         int added_tool_uses = 0;
+         for (int j = 0; j < num_calls; j++) {
+            json_object *call = json_object_array_get_idx(tool_calls_obj, j);
+            json_object *func_obj, *id_obj, *name_obj, *args_obj;
+
+            const char *call_id = "";
+            const char *name = "";
+            const char *args_str = "{}";
+
+            if (json_object_object_get_ex(call, "id", &id_obj)) {
+               call_id = json_object_get_string(id_obj);
+            }
+
+            // Check if this tool call has a matching result
+            if (!has_matching_tool_result(call_id, tool_result_ids, tool_result_count)) {
+               LOG_WARNING("Claude: Skipping tool_use %s (no matching tool_result)", call_id);
+               continue;
+            }
+
+            if (json_object_object_get_ex(call, "function", &func_obj)) {
+               if (json_object_object_get_ex(func_obj, "name", &name_obj)) {
+                  name = json_object_get_string(name_obj);
+               }
+               if (json_object_object_get_ex(func_obj, "arguments", &args_obj)) {
+                  args_str = json_object_get_string(args_obj);
+               }
+            }
+
+            // Create tool_use block
+            json_object *tool_use = json_object_new_object();
+            json_object_object_add(tool_use, "type", json_object_new_string("tool_use"));
+            json_object_object_add(tool_use, "id", json_object_new_string(call_id));
+            json_object_object_add(tool_use, "name", json_object_new_string(name));
+
+            // Parse args string to JSON object
+            json_object *input = json_tokener_parse(args_str);
+            if (input) {
+               json_object_object_add(tool_use, "input", input);
+            } else {
+               json_object_object_add(tool_use, "input", json_object_new_object());
+            }
+
+            json_object_array_add(content_array, tool_use);
+            added_tool_uses++;
+         }
+
+         // Only add assistant message if we have content (text or tool_use blocks)
+         if (json_object_array_length(content_array) > 0) {
+            last_message = json_object_new_object();
+            json_object_object_add(last_message, "role", json_object_new_string("assistant"));
+            json_object_object_add(last_message, "content", content_array);
+            json_object_array_add(messages_array, last_message);
+            last_role = "assistant";
+         } else {
+            json_object_put(content_array);  // Free unused array
+         }
+         continue;
+      }
+
+      // Convert tool role messages (OpenAI format) to Claude tool_result format
+      if (strcmp(role, "tool") == 0) {
+         json_object *tool_call_id_obj;
+         const char *tool_call_id = "";
+         const char *result_content = json_object_get_string(content_obj);
+
+         if (json_object_object_get_ex(msg, "tool_call_id", &tool_call_id_obj)) {
+            tool_call_id = json_object_get_string(tool_call_id_obj);
+         }
+
+         // Create tool_result block in a user message (Claude requirement)
+         json_object *result_array = json_object_new_array();
+         json_object *result_block = json_object_new_object();
+         json_object_object_add(result_block, "type", json_object_new_string("tool_result"));
+         json_object_object_add(result_block, "tool_use_id", json_object_new_string(tool_call_id));
+         json_object_object_add(result_block, "content",
+                                json_object_new_string(result_content ? result_content : ""));
+         json_object_array_add(result_array, result_block);
+
+         // Tool results must be in user messages for Claude
+         if (last_role != NULL && strcmp(last_role, "user") == 0 && last_message != NULL) {
+            // Append to existing user message content array
+            json_object *last_content;
+            if (json_object_object_get_ex(last_message, "content", &last_content) &&
+                json_object_is_type(last_content, json_type_array)) {
+               json_object_array_add(last_content, result_block);
+               json_object_put(result_array);  // Don't need the wrapper array
+            } else {
+               // Replace string content with array
+               json_object_object_add(last_message, "content", result_array);
+            }
+         } else {
+            last_message = json_object_new_object();
+            json_object_object_add(last_message, "role", json_object_new_string("user"));
+            json_object_object_add(last_message, "content", result_array);
+            json_object_array_add(messages_array, last_message);
+            last_role = "user";
+         }
+         continue;
+      }
 
       if (strcmp(role, "system") == 0) {
          // System message goes in separate "system" array with cache control
@@ -164,38 +517,9 @@ static json_object *convert_to_claude_format(struct json_object *openai_conversa
       json_object_put(system_array);
    }
 
-   // User message is now added by dawn.c before calling this function
-   // If vision is provided, modify the last user message to include image
+   // If vision is provided, add it to a user message
    if (vision_image != NULL && vision_image_size > 0) {
-      int msg_count = json_object_array_length(messages_array);
-      if (msg_count > 0) {
-         json_object *last_msg = json_object_array_get_idx(messages_array, msg_count - 1);
-         json_object *role_obj;
-         if (json_object_object_get_ex(last_msg, "role", &role_obj) &&
-             strcmp(json_object_get_string(role_obj), "user") == 0) {
-            // Last message is user message - add vision content in Claude format
-            json_object *content_array = json_object_new_array();
-
-            // Text content
-            json_object *text_obj = json_object_new_object();
-            json_object_object_add(text_obj, "type", json_object_new_string("text"));
-            json_object_object_add(text_obj, "text", json_object_new_string(input_text));
-            json_object_array_add(content_array, text_obj);
-
-            // Image content (Claude format)
-            json_object *image_obj = json_object_new_object();
-            json_object_object_add(image_obj, "type", json_object_new_string("image"));
-
-            json_object *source_obj = json_object_new_object();
-            json_object_object_add(source_obj, "type", json_object_new_string("base64"));
-            json_object_object_add(source_obj, "media_type", json_object_new_string("image/jpeg"));
-            json_object_object_add(source_obj, "data", json_object_new_string(vision_image));
-            json_object_object_add(image_obj, "source", source_obj);
-
-            json_object_array_add(content_array, image_obj);
-            json_object_object_add(last_msg, "content", content_array);
-         }
-      }
+      add_vision_to_claude_messages(messages_array, input_text, vision_image);
    }
 
    json_object_object_add(claude_request, "messages", messages_array);
@@ -414,13 +738,15 @@ char *llm_claude_chat_completion(struct json_object *conversation_history,
 typedef struct {
    sse_parser_t *sse_parser;
    llm_stream_context_t *stream_ctx;
+   curl_buffer_t raw_response; /**< Raw response for error logging */
 } claude_streaming_context_t;
 
 /**
  * @brief CURL write callback for streaming responses
  *
  * Feeds incoming SSE data to the SSE parser, which processes it
- * and calls the LLM streaming callbacks.
+ * and calls the LLM streaming callbacks. Also captures raw response
+ * for error debugging.
  */
 static size_t claude_streaming_write_callback(void *contents,
                                               size_t size,
@@ -428,6 +754,13 @@ static size_t claude_streaming_write_callback(void *contents,
                                               void *userp) {
    size_t realsize = size * nmemb;
    claude_streaming_context_t *ctx = (claude_streaming_context_t *)userp;
+
+   // Capture raw response for error debugging (limit to 4KB)
+   if (ctx->raw_response.size < 4096) {
+      size_t space = 4096 - ctx->raw_response.size;
+      size_t to_copy = realsize < space ? realsize : space;
+      curl_buffer_write_callback(contents, 1, to_copy, &ctx->raw_response);
+   }
 
    // Feed data to SSE parser
    sse_parser_feed(ctx->sse_parser, contents, realsize);
@@ -447,14 +780,21 @@ static void claude_sse_event_handler(const char *event_type,
    llm_stream_handle_event(ctx->stream_ctx, event_data);
 }
 
-char *llm_claude_chat_completion_streaming(struct json_object *conversation_history,
+/* Maximum tool call iterations to prevent infinite loops */
+#define MAX_TOOL_ITERATIONS 5
+
+/**
+ * @brief Internal streaming implementation with iteration tracking
+ */
+static char *llm_claude_streaming_internal(struct json_object *conversation_history,
                                            const char *input_text,
                                            char *vision_image,
                                            size_t vision_image_size,
                                            const char *base_url,
                                            const char *api_key,
                                            llm_claude_text_chunk_callback chunk_callback,
-                                           void *callback_userdata) {
+                                           void *callback_userdata,
+                                           int iteration) {
    CURL *curl_handle = NULL;
    CURLcode res = -1;
    struct curl_slist *headers = NULL;
@@ -516,12 +856,14 @@ char *llm_claude_chat_completion_streaming(struct json_object *conversation_hist
    // Setup streaming context
    streaming_ctx.sse_parser = sse_parser;
    streaming_ctx.stream_ctx = stream_ctx;
+   curl_buffer_init(&streaming_ctx.raw_response);
 
    curl_handle = curl_easy_init();
    if (!curl_handle) {
       LOG_ERROR("Failed to initialize CURL");
       sse_parser_free(sse_parser);
       llm_stream_free(stream_ctx);
+      curl_buffer_free(&streaming_ctx.raw_response);
       json_object_put(request);
       return NULL;
    }
@@ -564,6 +906,7 @@ char *llm_claude_chat_completion_streaming(struct json_object *conversation_hist
       json_object_put(request);
       sse_parser_free(sse_parser);
       llm_stream_free(stream_ctx);
+      curl_buffer_free(&streaming_ctx.raw_response);
       return NULL;
    }
 
@@ -580,6 +923,14 @@ char *llm_claude_chat_completion_streaming(struct json_object *conversation_hist
          LOG_ERROR("Claude API: Rate limit exceeded (HTTP 429)");
       } else if (http_code >= 500) {
          LOG_ERROR("Claude API: Server error (HTTP %ld)", http_code);
+      } else if (http_code == 400) {
+         LOG_ERROR("Claude API: Bad request (HTTP 400) - check tool format and message structure");
+         // Log the raw response which contains error details
+         if (streaming_ctx.raw_response.data && streaming_ctx.raw_response.size > 0) {
+            LOG_ERROR("Claude error response: %s", streaming_ctx.raw_response.data);
+         }
+         // Log a sample of the request for debugging
+         LOG_WARNING("Claude request payload (first 1000 chars): %.1000s", payload);
       } else if (http_code != 0) {
          LOG_ERROR("Claude API: Request failed (HTTP %ld)", http_code);
       }
@@ -588,12 +939,108 @@ char *llm_claude_chat_completion_streaming(struct json_object *conversation_hist
       json_object_put(request);
       sse_parser_free(sse_parser);
       llm_stream_free(stream_ctx);
+      curl_buffer_free(&streaming_ctx.raw_response);
       return NULL;
    }
 
    curl_easy_cleanup(curl_handle);
    curl_slist_free_all(headers);
-   json_object_put(request);
+   curl_buffer_free(&streaming_ctx.raw_response);
+
+   // Check for tool calls
+   if (llm_stream_has_tool_calls(stream_ctx)) {
+      const tool_call_list_t *tool_calls = llm_stream_get_tool_calls(stream_ctx);
+      if (tool_calls && tool_calls->count > 0) {
+         LOG_INFO("Claude streaming: Executing %d tool call(s)", tool_calls->count);
+
+         // Execute tools
+         tool_result_list_t results;
+         llm_tools_execute_all(tool_calls, &results);
+
+         // Add assistant message with tool_use blocks to conversation history
+         // Claude format: content is an array of content blocks
+         json_object *assistant_msg = json_object_new_object();
+         json_object_object_add(assistant_msg, "role", json_object_new_string("assistant"));
+
+         json_object *content_array = json_object_new_array();
+         for (int i = 0; i < tool_calls->count; i++) {
+            json_object *tool_use = json_object_new_object();
+            json_object_object_add(tool_use, "type", json_object_new_string("tool_use"));
+            json_object_object_add(tool_use, "id", json_object_new_string(tool_calls->calls[i].id));
+            json_object_object_add(tool_use, "name",
+                                   json_object_new_string(tool_calls->calls[i].name));
+
+            // Parse arguments JSON
+            json_object *args = json_tokener_parse(tool_calls->calls[i].arguments);
+            if (args) {
+               json_object_object_add(tool_use, "input", args);
+            } else {
+               json_object_object_add(tool_use, "input", json_object_new_object());
+            }
+
+            json_object_array_add(content_array, tool_use);
+         }
+         json_object_object_add(assistant_msg, "content", content_array);
+         json_object_array_add(conversation_history, assistant_msg);
+
+         // Add tool results to conversation history (Claude format)
+         llm_tools_add_results_claude(conversation_history, &results);
+
+         // Cleanup current stream context
+         sse_parser_free(sse_parser);
+         llm_stream_free(stream_ctx);
+         json_object_put(request);
+
+         // Check if we should skip follow-up (e.g., LLM was switched)
+         if (llm_tools_should_skip_followup(&results)) {
+            LOG_INFO("Claude streaming: Skipping follow-up call (tool requested no follow-up)");
+            char *direct_response = llm_tools_get_direct_response(&results);
+            // Send through chunk callback so TTS receives it
+            if (direct_response && chunk_callback) {
+               chunk_callback(direct_response, callback_userdata);
+            }
+            return direct_response;
+         }
+
+         // Check iteration limit
+         if (iteration >= MAX_TOOL_ITERATIONS) {
+            LOG_WARNING("Claude streaming: Max tool iterations (%d) reached, returning without "
+                        "final response",
+                        MAX_TOOL_ITERATIONS);
+            const char *error_msg = "I apologize, but I wasn't able to complete that request after "
+                                    "several attempts. Could you try rephrasing your question?";
+            // Send through chunk callback so TTS receives it
+            if (chunk_callback) {
+               chunk_callback(error_msg, callback_userdata);
+            }
+            return strdup(error_msg);
+         }
+
+         // Check for pending vision data (from viewing tool)
+         const char *pending_vision = NULL;
+         size_t pending_vision_size = 0;
+         if (llm_tools_has_pending_vision()) {
+            pending_vision = llm_tools_get_pending_vision(&pending_vision_size);
+            LOG_INFO("Claude streaming: Including pending vision (%zu bytes) in follow-up",
+                     pending_vision_size);
+         }
+
+         // Make another call to get final response
+         LOG_INFO("Claude streaming: Making follow-up call after tool execution (iteration %d/%d)",
+                  iteration + 1, MAX_TOOL_ITERATIONS);
+         char *result = llm_claude_streaming_internal(conversation_history, "",
+                                                      (char *)pending_vision, pending_vision_size,
+                                                      base_url, api_key, chunk_callback,
+                                                      callback_userdata, iteration + 1);
+
+         // Clear pending vision data after use
+         if (pending_vision) {
+            llm_tools_clear_pending_vision();
+         }
+
+         return result;
+      }
+   }
 
    // Get accumulated response
    response = llm_stream_get_response(stream_ctx);
@@ -601,6 +1048,20 @@ char *llm_claude_chat_completion_streaming(struct json_object *conversation_hist
    // Cleanup
    sse_parser_free(sse_parser);
    llm_stream_free(stream_ctx);
+   json_object_put(request);
 
    return response;
+}
+
+char *llm_claude_chat_completion_streaming(struct json_object *conversation_history,
+                                           const char *input_text,
+                                           char *vision_image,
+                                           size_t vision_image_size,
+                                           const char *base_url,
+                                           const char *api_key,
+                                           llm_claude_text_chunk_callback chunk_callback,
+                                           void *callback_userdata) {
+   return llm_claude_streaming_internal(conversation_history, input_text, vision_image,
+                                        vision_image_size, base_url, api_key, chunk_callback,
+                                        callback_userdata, 0);
 }

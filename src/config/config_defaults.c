@@ -118,6 +118,9 @@ void config_set_defaults(dawn_config_t *config) {
    config->llm.local.model[0] = '\0';        /* Server decides */
    config->llm.local.vision_enabled = false; /* Most local models don't support vision */
 
+   /* LLM Tools */
+   config->llm.tools.native_enabled = false; /* Default OFF for backward compatibility */
+
    /* Search */
    SAFE_COPY(config->search.engine, "searxng");
    SAFE_COPY(config->search.endpoint, "http://127.0.0.1:8384");

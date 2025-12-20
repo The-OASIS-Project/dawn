@@ -872,6 +872,46 @@ void process_vision_ai(const char *base64_image, size_t image_size) {
    vision_ai_ready = 1;
 }
 
+/**
+ * @brief Check if vision AI image is ready for processing
+ *
+ * @return 1 if vision image is ready, 0 otherwise
+ */
+int dawn_vision_is_ready(void) {
+   return vision_ai_ready;
+}
+
+/**
+ * @brief Get the pending vision AI image
+ *
+ * @param size_out Output parameter for image size
+ * @return Base64-encoded image data, or NULL if not ready
+ */
+const char *dawn_vision_get_image(size_t *size_out) {
+   if (!vision_ai_ready || !vision_ai_image) {
+      return NULL;
+   }
+   if (size_out) {
+      *size_out = vision_ai_image_size;
+   }
+   return vision_ai_image;
+}
+
+/**
+ * @brief Clear the vision AI image after it has been used
+ *
+ * Call this after consuming the vision image to free resources
+ * and allow new images to be captured.
+ */
+void dawn_vision_clear(void) {
+   if (vision_ai_image) {
+      free(vision_ai_image);
+      vision_ai_image = NULL;
+   }
+   vision_ai_image_size = 0;
+   vision_ai_ready = 0;
+}
+
 dawn_state_t currentState = DAWN_STATE_INVALID;
 
 /**
@@ -1880,6 +1920,10 @@ int main(int argc, char *argv[]) {
    LOG_INFO("Processed %d commands.", numCommands);
    //printCommands(commands, numCommands);
 
+   // Initialize LLM system early - must happen before prompt is built
+   // so llm_tools_enabled() returns correct value for native tool calling
+   llm_init(cloud_provider_override);
+
    // Force early initialization of system instructions before any threads start.
    // This ensures thread-safe access since the buffer is built once and cached.
    (void)get_system_instructions();
@@ -2144,9 +2188,6 @@ int main(int argc, char *argv[]) {
    if (metrics_init() != 0) {
       LOG_WARNING("Failed to initialize metrics system - continuing without metrics");
    }
-
-   // Initialize LLM system
-   llm_init(cloud_provider_override);
 
    // Initialize search summarizer
    search_summarizer_init(&summarizer_config);
