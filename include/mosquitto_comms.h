@@ -58,6 +58,7 @@ typedef enum {
    LLM_STATUS,            /**< Query current LLM status (local/cloud, model). */
    CLOUD_PROVIDER,        /**< Switch cloud provider (openai/claude). */
    SMARTTHINGS,           /**< SmartThings home automation control. */
+   SWITCH_LLM,            /**< Switch LLM mode/provider (local/cloud/openai/claude). */
    MAX_DEVICE_TYPES       /**< Used to determine the number of device types. */
 } deviceType;
 
@@ -86,7 +87,8 @@ static const char *deviceTypeStrings[] = { "audio playback device",
                                            "url",
                                            "llm",
                                            "cloud provider",
-                                           "smartthings" };
+                                           "smartthings",
+                                           "switch_llm" };
 
 /**
  * @brief Associates a device type with a callback function that processes actions for that device.

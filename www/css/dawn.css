@@ -502,6 +502,16 @@ html, body {
   color: #22d3ee;
 }
 
+/* Tool call specific styling (purple theme) */
+.transcript-entry.debug.tool-call {
+  background-color: rgba(168, 85, 247, 0.1);
+  border-left: 3px solid #a855f7;
+}
+
+.transcript-entry.debug.tool-call .role {
+  color: #a855f7;
+}
+
 /* System prompt styling (collapsible, yellow/gold theme) */
 .transcript-entry.debug.system-prompt {
   background-color: rgba(234, 179, 8, 0.1);

@@ -53,6 +53,8 @@
 #include "audio/audio_backend.h"
 #include "audio/audio_capture_thread.h"
 #include "audio/flac_playback.h"
+#include "core/command_executor.h"
+#include "core/command_registry.h"
 #include "core/command_router.h"
 #include "core/session_manager.h"
 #include "core/worker_pool.h"
@@ -60,6 +62,7 @@
 #include "input_queue.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_tools.h"
 #include "logging.h"
 #include "mosquitto_comms.h"
 #include "network/accept_thread.h"
@@ -208,26 +211,7 @@ pthread_t llm_thread;
 volatile int llm_processing = 0;     // Flag: 1 if LLM thread is running, 0 otherwise
 struct timeval pipeline_start_time;  // Track when pipeline processing starts
 
-/**
- * @var static char *vision_ai_image
- * Pointer to a buffer containing the latest image captured for vision AI processing.
- * Initially set to NULL and should be allocated when an image is captured.
- */
-static char *vision_ai_image = NULL;
-
-/**
- * @var static int vision_ai_image_size
- * Size of the buffer pointed to by vision_ai_image, representing the image size in bytes.
- * Initially set to 0 and updated upon capturing an image.
- */
-static int vision_ai_image_size = 0;
-
-/**
- * @var static int vision_ai_ready
- * Flag indicating whether the vision AI component is ready for image processing.
- * Set to 1 when ready, 0 otherwise.
- */
-static int vision_ai_ready = 0;
+/* Legacy vision_ai_image storage removed - now using llm_tools_*_pending_vision() */
 
 /**
  * @var volatile sig_atomic_t quit
@@ -855,62 +839,13 @@ int capture_buffer(audioControl *myAudioControls,
    return 0;  // Success
 }
 
-void process_vision_ai(const char *base64_image, size_t image_size) {
-   if (vision_ai_image != NULL) {
-      free(vision_ai_image);
-      vision_ai_image = NULL;
-   }
-
-   vision_ai_image = malloc(image_size);
-   if (!vision_ai_image) {
-      LOG_ERROR("Error: Memory allocation failed.\n");
-      return;
-   }
-   memcpy(vision_ai_image, base64_image, image_size);
-
-   vision_ai_image_size = image_size;
-   vision_ai_ready = 1;
-}
-
-/**
- * @brief Check if vision AI image is ready for processing
- *
- * @return 1 if vision image is ready, 0 otherwise
+/* Legacy vision functions removed - now using llm_tools_*_pending_vision()
+ * See llm_tools.h for the unified vision API:
+ * - llm_tools_has_pending_vision()
+ * - llm_tools_get_pending_vision()
+ * - llm_tools_clear_pending_vision()
+ * - llm_tools_process_vision_data()
  */
-int dawn_vision_is_ready(void) {
-   return vision_ai_ready;
-}
-
-/**
- * @brief Get the pending vision AI image
- *
- * @param size_out Output parameter for image size
- * @return Base64-encoded image data, or NULL if not ready
- */
-const char *dawn_vision_get_image(size_t *size_out) {
-   if (!vision_ai_ready || !vision_ai_image) {
-      return NULL;
-   }
-   if (size_out) {
-      *size_out = vision_ai_image_size;
-   }
-   return vision_ai_image;
-}
-
-/**
- * @brief Clear the vision AI image after it has been used
- *
- * Call this after consuming the vision image to free resources
- * and allow new images to be captured.
- */
-void dawn_vision_clear(void) {
-   if (vision_ai_image) {
-      free(vision_ai_image);
-      vision_ai_image = NULL;
-   }
-   vision_ai_image_size = 0;
-   vision_ai_ready = 0;
-}
 
 dawn_state_t currentState = DAWN_STATE_INVALID;
 
@@ -1260,12 +1195,18 @@ void *llm_worker_thread(void *arg) {
    llm_resolved_config_t resolved_config;
    llm_resolve_config(&session_config, &resolved_config);
 
+   // Set command context so tool callbacks (e.g., switch_llm) use local session's config
+   session_set_command_context(local_session);
+
    // Call LLM with resolved config (this can take 10+ seconds)
    // Note: conversation_history is a global, but only main thread modifies it during setup
    // and we only read it here, so no mutex needed for conversation_history itself
    char *response = llm_chat_completion_streaming_tts_with_config(
        conversation_history, request_text, vision_image, vision_image_size,
        dawn_tts_sentence_callback, NULL, &resolved_config);
+
+   // Clear command context
+   session_set_command_context(NULL);
 
    // Free local copies
    if (request_text) {
@@ -1314,7 +1255,7 @@ int main(int argc, char *argv[]) {
 
    // Command Configuration
    FILE *configFile = NULL;
-   char buffer[10 * 1024];
+   char buffer[32 * 1024]; /* 32KB - commands_config_nuevo.json is ~17KB */
    int bytes_read = 0;
 
    // Command Parsing
@@ -1920,6 +1861,11 @@ int main(int argc, char *argv[]) {
    LOG_INFO("Processed %d commands.", numCommands);
    //printCommands(commands, numCommands);
 
+   // Initialize command registry (unified command lookup)
+   if (command_registry_init() != 0) {
+      LOG_WARNING("Command registry init failed - commands will use legacy path");
+   }
+
    // Initialize LLM system early - must happen before prompt is built
    // so llm_tools_enabled() returns correct value for native tool calling
    llm_init(cloud_provider_override);
@@ -2290,7 +2236,7 @@ int main(int argc, char *argv[]) {
       }
 #endif
 
-      if (vision_ai_ready) {
+      if (llm_tools_has_pending_vision()) {
          recState = DAWN_STATE_VISION_AI_READY;
          // Reset VAD state at interaction boundary (vision AI entry)
          if (vad_ctx) {
@@ -3382,6 +3328,9 @@ int main(int argc, char *argv[]) {
 
             /* Process Commands before AI if LLM command processing is disabled */
             if (command_processing_mode != CMD_MODE_LLM_ONLY) {
+               /* Set command context so callbacks (e.g., switch_llm) use local session */
+               session_set_command_context(local_session);
+
                /* Process Commands before AI. */
                for (i = 0; i < numCommands; i++) {
                   if (searchString(commands[i].actionWordsWildcard, command_text) == 1) {
@@ -3431,19 +3380,39 @@ int main(int argc, char *argv[]) {
                      // Log direct match to TUI (command bypassed LLM)
                      metrics_log_activity("Direct match: %s", commands[i].actionWordsWildcard);
 
-                     rc = mosquitto_publish(mosq, NULL, commands[i].topic, strlen(thisCommand),
-                                            thisCommand, 0, false);
-                     if (rc != MOSQ_ERR_SUCCESS) {
-                        LOG_ERROR("Error publishing: %s\n", mosquitto_strerror(rc));
+                     /* Use unified command executor instead of raw MQTT publish */
+                     /* This enables callbacks for software commands (weather, search, etc.) */
+                     struct json_object *cmd_json = json_tokener_parse(thisCommand);
+                     if (cmd_json) {
+                        cmd_exec_result_t exec_result;
+                        rc = command_execute_json(cmd_json, mosq, &exec_result);
+                        json_object_put(cmd_json);
+
+                        if (rc != 0 || !exec_result.success) {
+                           LOG_ERROR("Command execution failed: %s",
+                                     exec_result.result ? exec_result.result : "unknown error");
+                        } else {
+                           metrics_log_activity("Executed: %s",
+                                                exec_result.result ? exec_result.result : "OK");
+                        }
+                        cmd_exec_result_free(&exec_result);
                      } else {
-                        // Log direct command to TUI activity
-                        metrics_log_activity("MQTT: %s", thisCommand);
+                        /* Fallback to raw MQTT for malformed JSON (shouldn't happen) */
+                        LOG_WARNING("Failed to parse command JSON, falling back to MQTT publish");
+                        rc = mosquitto_publish(mosq, NULL, commands[i].topic, strlen(thisCommand),
+                                               thisCommand, 0, false);
+                        if (rc != MOSQ_ERR_SUCCESS) {
+                           LOG_ERROR("Error publishing: %s\n", mosquitto_strerror(rc));
+                        }
                      }
 
                      direct_command_found = 1;
                      break;
                   }
                }
+
+               /* Clear command context */
+               session_set_command_context(NULL);
             }
 
             // Handle direct command found - transition back to listening state
@@ -3556,10 +3525,18 @@ int main(int argc, char *argv[]) {
                   llm_request_text = command_text;
                   command_text = NULL;  // Thread will free this
 
-                  // Pass vision data if available
-                  if (vision_ai_ready && vision_ai_image != NULL) {
-                     llm_vision_image = vision_ai_image;
-                     llm_vision_image_size = vision_ai_image_size;
+                  // Pass vision data if available (from unified pending vision storage)
+                  if (llm_tools_has_pending_vision()) {
+                     size_t pending_size = 0;
+                     const char *pending_vision = llm_tools_get_pending_vision(&pending_size);
+                     if (pending_vision && pending_size > 0) {
+                        llm_vision_image = (char *)pending_vision;
+                        llm_vision_image_size = pending_size;
+                        // Note: worker will call llm_tools_clear_pending_vision() when done
+                     } else {
+                        llm_vision_image = NULL;
+                        llm_vision_image_size = 0;
+                     }
                   } else {
                      llm_vision_image = NULL;
                      llm_vision_image_size = 0;
@@ -3654,12 +3631,22 @@ int main(int argc, char *argv[]) {
             llm_resolved_config_t vision_resolved_config;
             llm_resolve_config(&vision_session_config, &vision_resolved_config);
 
+            // Get pending vision data from unified storage
+            size_t pending_vision_size = 0;
+            const char *pending_vision_data = llm_tools_get_pending_vision(&pending_vision_size);
+
+            // Set command context so tool callbacks use local session's config
+            session_set_command_context(local_session);
+
             response_text = llm_chat_completion_streaming_tts_with_config(
                 conversation_history,
                 "Describe this image in detail. Ignore any overlay graphics unless specifically "
                 "asked.",
-                vision_ai_image, vision_ai_image_size, dawn_tts_sentence_callback, NULL,
+                pending_vision_data, pending_vision_size, dawn_tts_sentence_callback, NULL,
                 &vision_resolved_config);
+
+            // Clear command context
+            session_set_command_context(NULL);
             if (response_text != NULL) {
                // AI returned successfully
                LOG_WARNING("AI: %s\n", response_text);
@@ -3680,13 +3667,8 @@ int main(int argc, char *argv[]) {
                text_to_speech("I'm sorry but I'm currently unavailable boss.");
             }
 
-            // Cleanup the image
-            if (vision_ai_image != NULL) {
-               free(vision_ai_image);
-               vision_ai_image = NULL;
-            }
-            vision_ai_image_size = 0;
-            vision_ai_ready = 0;
+            // Cleanup vision data after use
+            llm_tools_clear_pending_vision();
 
             // Set the next listening state
             silenceNextState = DAWN_STATE_WAKEWORD_LISTEN;
@@ -3762,11 +3744,9 @@ int main(int argc, char *argv[]) {
    // Cleanup SmartThings service
    smartthings_cleanup();
 
-   // Save conversation history before cleanup
-   // NOTE: conversation_history points to local session's history (owned by session_manager)
-   if (conversation_history != NULL) {
-      save_conversation_history(conversation_history);
-   }
+   // Save all session conversation histories before cleanup
+   // This saves histories from all active sessions (local, WebUI, DAP, etc.)
+   session_manager_save_all_histories();
 
    // Don't json_object_put here - session_manager owns the history
    // Clear the global pointer before session cleanup to prevent use-after-free
@@ -3777,6 +3757,9 @@ int main(int argc, char *argv[]) {
 
    // Cleanup command router (after workers are stopped)
    command_router_shutdown();
+
+   // Cleanup command registry
+   command_registry_shutdown();
 
    // Cleanup chunking manager (if initialized)
    if (chunk_mgr) {

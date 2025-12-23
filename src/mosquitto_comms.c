@@ -46,6 +46,7 @@
 #include "dawn.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_tools.h"
 #include "logging.h"
 #include "mosquitto_comms.h"
 #include "tools/calculator.h"
@@ -62,6 +63,9 @@
 
 #define MAX_FILENAME_LENGTH 1024
 #define MAX_PLAYLIST_LENGTH 100
+
+/* Forward declaration for switchLlmCallback (defined later in file) */
+char *switchLlmCallback(const char *actionName, char *value, int *should_respond);
 
 /**
  * Array of device callbacks associating device types with their respective handling functions.
@@ -94,7 +98,8 @@ static deviceCallback deviceCallbackArray[] = { { AUDIO_PLAYBACK_DEVICE, setPcmP
                                                 { URL_FETCH, urlFetchCallback },
                                                 { LLM_STATUS, llmStatusCallback },
                                                 { CLOUD_PROVIDER, cloudProviderCallback },
-                                                { SMARTTHINGS, smartThingsCallback } };
+                                                { SMARTTHINGS, smartThingsCallback },
+                                                { SWITCH_LLM, switchLlmCallback } };
 
 /**
  * @brief Look up a callback function by device name string
@@ -390,7 +395,8 @@ static void executeJsonCommand(struct json_object *parsedJson, struct mosquitto 
    }
 
    if (pending_command_result == NULL) {
-      LOG_WARNING("pending_command_result is NULL. That probably shouldn't happen.");
+      // This is normal for commands that don't return data (e.g., TTS, volume, etc.)
+      // Only commands that set should_respond=1 will have pending results
       return;
    }
 
@@ -1479,9 +1485,6 @@ char *base64_encode(const unsigned char *buffer, size_t length) {
 }
 
 char *viewingCallback(const char *actionName, char *value, int *should_respond) {
-   size_t image_size = 0;
-   char *result = NULL;
-
    *should_respond = 1;  // Always respond for viewing
 
    /* Check if vision is available for the current LLM */
@@ -1491,37 +1494,25 @@ char *viewingCallback(const char *actionName, char *value, int *should_respond) 
                     "Switch to cloud or enable vision for your local model in the config.");
    }
 
-   LOG_INFO("Viewing image received: %s", value);
+   LOG_INFO("viewingCallback: Processing vision data: %.50s%s", value,
+            strlen(value) > 50 ? "..." : "");
 
-   // Read the image file into memory.
-   unsigned char *image_content = read_file(value, &image_size);
-   if (image_content != NULL) {
-      // Encode the image content into Base64.
-      char *base64_image = base64_encode(image_content, image_size);
-      if (base64_image) {
-         // Process the Base64-encoded image for vision AI tasks.
-         process_vision_ai(base64_image, strlen(base64_image) + 1);
-
-         free(base64_image);
-      }
-      free(image_content);
-
+   /* Use unified vision processing (handles both base64 and file paths) */
+   char error_buf[256];
+   if (llm_tools_process_vision_data(value, error_buf, sizeof(error_buf))) {
       if (command_processing_mode != CMD_MODE_DIRECT_ONLY) {
          return strdup("Image captured and ready for vision processing");
       }
-   } else {
-      LOG_ERROR("Error reading image file.");
-
-      if (command_processing_mode != CMD_MODE_DIRECT_ONLY) {
-         result = malloc(256);
-         if (result) {
-            snprintf(result, 256, "Failed to read image file: %s", value);
-         }
-         return result;
-      }
+      *should_respond = 0;  // In direct mode, no response needed
+      return NULL;
    }
 
-   *should_respond = 0;  // In direct mode, no response needed
+   /* Processing failed - return error */
+   if (command_processing_mode != CMD_MODE_DIRECT_ONLY) {
+      return strdup(error_buf);
+   }
+
+   *should_respond = 0;
    return NULL;
 }
 
@@ -1588,25 +1579,18 @@ char *localLLMCallback(const char *actionName, char *value, int *should_respond)
    LOG_INFO("Setting AI to local LLM.");
    *should_respond = 1;
 
+   /* Get session from command context, fall back to local session for external MQTT */
    session_t *session = session_get_command_context();
-   if (session) {
-      /* Per-session config */
-      session_llm_config_t config = { .override_enabled = true,
-                                      .type = LLM_LOCAL,
-                                      .cloud_provider = CLOUD_PROVIDER_NONE };
-      int result = session_set_llm_config(session, &config);
-      if (result != 0) {
-         return strdup("Failed to switch to local LLM");
-      }
-      LOG_INFO("Session %u switched to local LLM", session->session_id);
-      return strdup("AI switched to local LLM");
+   if (!session) {
+      session = session_get_local();
    }
 
-   /* Fallback to global (shouldn't happen in normal use) */
-   int result = llm_set_type(LLM_LOCAL);
+   session_llm_config_t config = { .type = LLM_LOCAL, .cloud_provider = CLOUD_PROVIDER_NONE };
+   int result = session_set_llm_config(session, &config);
    if (result != 0) {
       return strdup("Failed to switch to local LLM");
    }
+   LOG_INFO("Session %u switched to local LLM", session->session_id);
    return strdup("AI switched to local LLM");
 }
 
@@ -1614,27 +1598,29 @@ char *cloudLLMCallback(const char *actionName, char *value, int *should_respond)
    LOG_INFO("Setting AI to cloud LLM.");
    *should_respond = 1;
 
+   /* Get session from command context, fall back to local session for external MQTT */
    session_t *session = session_get_command_context();
-   if (session) {
-      /* Per-session config - use default cloud provider */
-      session_llm_config_t config = {
-         .override_enabled = true,
-         .type = LLM_CLOUD,
-         .cloud_provider = CLOUD_PROVIDER_NONE
-      }; /* Inherit provider */
-      int result = session_set_llm_config(session, &config);
-      if (result != 0) {
-         return strdup("Failed to switch to cloud LLM. API key not configured in secrets.toml.");
-      }
-      LOG_INFO("Session %u switched to cloud LLM", session->session_id);
-      return strdup("AI switched to cloud LLM");
+   if (!session) {
+      session = session_get_local();
    }
 
-   /* Fallback to global */
-   int result = llm_set_type(LLM_CLOUD);
+   /* Use session's current provider preference, just switch to cloud type */
+   session_llm_config_t config;
+   session_get_llm_config(session, &config);
+   config.type = LLM_CLOUD;
+
+   /* If no provider is set (e.g., was using local LLM), default to OpenAI */
+   if (config.cloud_provider == CLOUD_PROVIDER_NONE) {
+      config.cloud_provider = CLOUD_PROVIDER_OPENAI;
+      LOG_INFO("No cloud provider set, defaulting to OpenAI");
+   }
+
+   int result = session_set_llm_config(session, &config);
    if (result != 0) {
       return strdup("Failed to switch to cloud LLM. API key not configured in secrets.toml.");
    }
+   LOG_INFO("Session %u switched to cloud LLM (provider=%d)", session->session_id,
+            config.cloud_provider);
    return strdup("AI switched to cloud LLM");
 }
 
@@ -1642,74 +1628,46 @@ char *llmStatusCallback(const char *actionName, char *value, int *should_respond
    char *result = NULL;
    *should_respond = 1;
 
+   /* Get session from command context, fall back to local session for external MQTT */
    session_t *session = session_get_command_context();
+   if (!session) {
+      session = session_get_local();
+   }
 
    // Handle "set" action to switch LLM type
    if (actionName && strcmp(actionName, "set") == 0) {
+      session_llm_config_t config;
+      session_get_llm_config(session, &config);
+
       if (value && (strcasecmp(value, "local") == 0 || strcasecmp(value, "llama") == 0)) {
          LOG_INFO("Setting AI to local LLM via unified llm.set command.");
-         if (session) {
-            session_llm_config_t config = { .override_enabled = true,
-                                            .type = LLM_LOCAL,
-                                            .cloud_provider = CLOUD_PROVIDER_NONE };
-            if (session_set_llm_config(session, &config) != 0) {
-               return strdup("Failed to switch to local LLM");
-            }
-            return strdup("AI switched to local LLM");
-         }
-         if (llm_set_type(LLM_LOCAL) != 0) {
+         config.type = LLM_LOCAL;
+         config.cloud_provider = CLOUD_PROVIDER_NONE;
+         if (session_set_llm_config(session, &config) != 0) {
             return strdup("Failed to switch to local LLM");
          }
          return strdup("AI switched to local LLM");
       } else if (value && strcasecmp(value, "cloud") == 0) {
          LOG_INFO("Setting AI to cloud LLM via unified llm.set command.");
-         if (session) {
-            session_llm_config_t config = { .override_enabled = true,
-                                            .type = LLM_CLOUD,
-                                            .cloud_provider = CLOUD_PROVIDER_NONE };
-            if (session_set_llm_config(session, &config) != 0) {
-               return strdup("Failed to switch to cloud LLM. API key not configured.");
-            }
-            return strdup("AI switched to cloud LLM");
-         }
-         if (llm_set_type(LLM_CLOUD) != 0) {
-            return strdup("Failed to switch to cloud LLM. API key not configured in secrets.toml.");
+         config.type = LLM_CLOUD;
+         if (session_set_llm_config(session, &config) != 0) {
+            return strdup("Failed to switch to cloud LLM. API key not configured.");
          }
          return strdup("AI switched to cloud LLM");
       } else if (value && strcasecmp(value, "openai") == 0) {
          LOG_INFO("Setting AI to OpenAI via unified llm.set command.");
-         if (session) {
-            session_llm_config_t config = { .override_enabled = true,
-                                            .type = LLM_CLOUD,
-                                            .cloud_provider = CLOUD_PROVIDER_OPENAI };
-            if (session_set_llm_config(session, &config) != 0) {
-               return strdup("Failed to switch to OpenAI. API key not configured.");
-            }
-            return strdup("AI switched to OpenAI");
-         }
-         if (llm_set_cloud_provider(CLOUD_PROVIDER_OPENAI) != 0) {
-            return strdup("Failed to switch to OpenAI. API key not configured in secrets.toml.");
-         }
-         if (llm_set_type(LLM_CLOUD) != 0) {
-            return strdup("Switched provider to OpenAI but failed to enable cloud mode.");
+         config.type = LLM_CLOUD;
+         config.cloud_provider = CLOUD_PROVIDER_OPENAI;
+         if (session_set_llm_config(session, &config) != 0) {
+            return strdup("Failed to switch to OpenAI. API key not configured.");
          }
          return strdup("AI switched to OpenAI");
       } else if (value && strcasecmp(value, "claude") == 0) {
          LOG_INFO("Setting AI to Claude via unified llm.set command.");
-         if (session) {
-            session_llm_config_t config = { .override_enabled = true,
-                                            .type = LLM_CLOUD,
-                                            .cloud_provider = CLOUD_PROVIDER_CLAUDE };
-            if (session_set_llm_config(session, &config) != 0) {
-               return strdup("Failed to switch to Claude. API key not configured.");
-            }
-            return strdup("AI switched to Claude");
-         }
-         if (llm_set_cloud_provider(CLOUD_PROVIDER_CLAUDE) != 0) {
-            return strdup("Failed to switch to Claude. API key not configured in secrets.toml.");
-         }
-         if (llm_set_type(LLM_CLOUD) != 0) {
-            return strdup("Switched provider to Claude but failed to enable cloud mode.");
+         config.type = LLM_CLOUD;
+         config.cloud_provider = CLOUD_PROVIDER_CLAUDE;
+         if (session_set_llm_config(session, &config) != 0) {
+            return strdup("Failed to switch to Claude. API key not configured.");
          }
          return strdup("AI switched to Claude");
       } else {
@@ -1718,27 +1676,16 @@ char *llmStatusCallback(const char *actionName, char *value, int *should_respond
    }
 
    // Handle "get" action (or default) to return current status
-   // Use session's resolved config if available
-   llm_type_t current;
-   const char *provider;
-   const char *model;
+   session_llm_config_t session_config;
+   llm_resolved_config_t resolved;
+   session_get_llm_config(session, &session_config);
+   llm_resolve_config(&session_config, &resolved);
 
-   if (session) {
-      session_llm_config_t session_config;
-      llm_resolved_config_t resolved;
-      session_get_llm_config(session, &session_config);
-      llm_resolve_config(&session_config, &resolved);
-      current = resolved.type;
-      provider = resolved.cloud_provider == CLOUD_PROVIDER_OPENAI   ? "OpenAI"
-                 : resolved.cloud_provider == CLOUD_PROVIDER_CLAUDE ? "Claude"
-                                                                    : "None";
-      model = resolved.model;
-   } else {
-      current = llm_get_type();
-      provider = llm_get_cloud_provider_name();
-      model = llm_get_model_name();
-   }
-
+   llm_type_t current = resolved.type;
+   const char *provider = resolved.cloud_provider == CLOUD_PROVIDER_OPENAI   ? "OpenAI"
+                          : resolved.cloud_provider == CLOUD_PROVIDER_CLAUDE ? "Claude"
+                                                                             : "None";
+   const char *model = resolved.model;
    const char *type_str = (current == LLM_LOCAL) ? "local" : "cloud";
 
    if (command_processing_mode == CMD_MODE_DIRECT_ONLY) {
@@ -1776,40 +1723,30 @@ char *llmStatusCallback(const char *actionName, char *value, int *should_respond
 char *cloudProviderCallback(const char *actionName, char *value, int *should_respond) {
    *should_respond = 1;
 
+   /* Get session from command context, fall back to local session for external MQTT */
    session_t *session = session_get_command_context();
+   if (!session) {
+      session = session_get_local();
+   }
 
    // Handle "set" action to switch cloud provider
    if (actionName && strcmp(actionName, "set") == 0) {
+      session_llm_config_t config;
+      session_get_llm_config(session, &config);
+      config.type = LLM_CLOUD;  // Switching provider implies cloud mode
+
       if (value && strcasecmp(value, "openai") == 0) {
          LOG_INFO("Setting cloud provider to OpenAI.");
-         if (session) {
-            session_llm_config_t config = { .override_enabled = true,
-                                            .type = LLM_CLOUD,
-                                            .cloud_provider = CLOUD_PROVIDER_OPENAI };
-            if (session_set_llm_config(session, &config) != 0) {
-               return strdup("Failed to switch to OpenAI. API key not configured.");
-            }
-            return strdup("Cloud provider switched to OpenAI");
-         }
-         int rc = llm_set_cloud_provider(CLOUD_PROVIDER_OPENAI);
-         if (rc != 0) {
-            return strdup("Failed to switch to OpenAI. API key not configured in secrets.toml.");
+         config.cloud_provider = CLOUD_PROVIDER_OPENAI;
+         if (session_set_llm_config(session, &config) != 0) {
+            return strdup("Failed to switch to OpenAI. API key not configured.");
          }
          return strdup("Cloud provider switched to OpenAI");
       } else if (value && strcasecmp(value, "claude") == 0) {
          LOG_INFO("Setting cloud provider to Claude.");
-         if (session) {
-            session_llm_config_t config = { .override_enabled = true,
-                                            .type = LLM_CLOUD,
-                                            .cloud_provider = CLOUD_PROVIDER_CLAUDE };
-            if (session_set_llm_config(session, &config) != 0) {
-               return strdup("Failed to switch to Claude. API key not configured.");
-            }
-            return strdup("Cloud provider switched to Claude");
-         }
-         int rc = llm_set_cloud_provider(CLOUD_PROVIDER_CLAUDE);
-         if (rc != 0) {
-            return strdup("Failed to switch to Claude. API key not configured in secrets.toml.");
+         config.cloud_provider = CLOUD_PROVIDER_CLAUDE;
+         if (session_set_llm_config(session, &config) != 0) {
+            return strdup("Failed to switch to Claude. API key not configured.");
          }
          return strdup("Cloud provider switched to Claude");
       } else {
@@ -1818,23 +1755,69 @@ char *cloudProviderCallback(const char *actionName, char *value, int *should_res
    }
 
    // Handle "get" action (or default) to return current provider
-   const char *provider;
-   if (session) {
-      session_llm_config_t session_config;
-      llm_resolved_config_t resolved;
-      session_get_llm_config(session, &session_config);
-      llm_resolve_config(&session_config, &resolved);
-      provider = resolved.cloud_provider == CLOUD_PROVIDER_OPENAI   ? "OpenAI"
-                 : resolved.cloud_provider == CLOUD_PROVIDER_CLAUDE ? "Claude"
-                                                                    : "None";
-   } else {
-      provider = llm_get_cloud_provider_name();
-   }
+   session_llm_config_t session_config;
+   llm_resolved_config_t resolved;
+   session_get_llm_config(session, &session_config);
+   llm_resolve_config(&session_config, &resolved);
+
+   const char *provider = resolved.cloud_provider == CLOUD_PROVIDER_OPENAI   ? "OpenAI"
+                          : resolved.cloud_provider == CLOUD_PROVIDER_CLAUDE ? "Claude"
+                                                                             : "None";
    char *result = malloc(128);
    if (result) {
       snprintf(result, 128, "Current cloud provider is %s", provider);
    }
    return result;
+}
+
+/**
+ * @brief Unified callback for switching LLM mode/provider
+ *
+ * Routes to appropriate underlying callbacks based on action:
+ * - "local": Switch to local LLM
+ * - "cloud": Switch to cloud LLM (with current provider)
+ * - "openai": Switch to cloud LLM with OpenAI provider
+ * - "claude": Switch to cloud LLM with Claude provider
+ *
+ * This provides a single entry point for the switch_llm tool.
+ */
+char *switchLlmCallback(const char *actionName, char *value, int *should_respond) {
+   *should_respond = 1;
+
+   if (!actionName || actionName[0] == '\0') {
+      return strdup("Error: No target specified for switch_llm");
+   }
+
+   LOG_INFO("switchLlmCallback: Switching to '%s'", actionName);
+
+   if (strcmp(actionName, "local") == 0) {
+      /* Route to local LLM callback */
+      return localLLMCallback("switch", "", should_respond);
+   } else if (strcmp(actionName, "cloud") == 0) {
+      /* Route to cloud LLM callback with current provider */
+      return cloudLLMCallback("switch", "", should_respond);
+   } else if (strcmp(actionName, "openai") == 0) {
+      /* Set provider to OpenAI, then switch to cloud */
+      char *provider_result = cloudProviderCallback("set", "openai", should_respond);
+      if (provider_result) {
+         free(provider_result);
+      }
+      return cloudLLMCallback("switch", "", should_respond);
+   } else if (strcmp(actionName, "claude") == 0) {
+      /* Set provider to Claude, then switch to cloud */
+      char *provider_result = cloudProviderCallback("set", "claude", should_respond);
+      if (provider_result) {
+         free(provider_result);
+      }
+      return cloudLLMCallback("switch", "", should_respond);
+   } else {
+      char *result = malloc(128);
+      if (result) {
+         snprintf(result, 128, "Unknown LLM target: %s. Use local, cloud, openai, or claude.",
+                  actionName);
+      }
+      return result;
+   }
 }
 
 char *resetConversationCallback(const char *actionName, char *value, int *should_respond) {
@@ -1918,8 +1901,8 @@ char *searchCallback(const char *actionName, char *value, int *should_respond) {
       }
    }
 
-   // Determine search type from action name
-   if (strcmp(actionName, "web") == 0) {
+   // Determine search type from action name (default to "web" if not specified)
+   if (actionName == NULL || actionName[0] == '\0' || strcmp(actionName, "web") == 0) {
       return perform_search(value, SEARCH_TYPE_WEB, "web");
    } else if (strcmp(actionName, "news") == 0) {
       return perform_search(value, SEARCH_TYPE_NEWS, "news");
@@ -1935,7 +1918,9 @@ char *searchCallback(const char *actionName, char *value, int *should_respond) {
       return perform_search(value, SEARCH_TYPE_PAPERS, "papers");
    }
 
-   return strdup("Unknown search action.");
+   // Fallback to web search for unknown categories (rather than failing)
+   LOG_WARNING("searchCallback: Unknown category '%s', defaulting to web search", actionName);
+   return perform_search(value, SEARCH_TYPE_WEB, "web");
 }
 
 #define WEATHER_RESULT_BUFFER_SIZE 2048  // Increased for week forecast

@@ -53,6 +53,7 @@
 #include "dawn.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_tools.h"
 #include "logging.h"
 #include "tools/smartthings_service.h"
 
@@ -948,8 +949,6 @@ static void handle_get_config(ws_connection_t *conn) {
                           json_object_new_boolean(llm_has_openai_key()));
    json_object_object_add(llm_runtime, "claude_available",
                           json_object_new_boolean(llm_has_claude_key()));
-   json_object_object_add(llm_runtime, "override_enabled",
-                          json_object_new_boolean(session_config.override_enabled));
    json_object_object_add(payload, "llm_runtime", llm_runtime);
 
    json_object_object_add(response, "payload", payload);
@@ -2184,19 +2183,32 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
          error_msg = "No active session";
       } else if (payload) {
          struct json_object *type_obj, *provider_obj;
-         session_llm_config_t config = { 0 };
+
+         /* Get current session config as starting point */
+         session_llm_config_t config;
+         session_get_llm_config(conn->session, &config);
+         bool has_changes = false;
 
          /* Parse type (local/cloud) */
          if (json_object_object_get_ex(payload, "type", &type_obj)) {
             const char *new_type = json_object_get_string(type_obj);
             if (new_type) {
-               config.override_enabled = true;
+               has_changes = true;
                if (strcmp(new_type, "local") == 0) {
                   config.type = LLM_LOCAL;
                } else if (strcmp(new_type, "cloud") == 0) {
                   config.type = LLM_CLOUD;
-               } else if (strcmp(new_type, "inherit") == 0) {
-                  config.type = LLM_UNDEFINED; /* Use global */
+                  /* If no provider is set, default to OpenAI (same as cloudLLMCallback) */
+                  if (config.cloud_provider == CLOUD_PROVIDER_NONE) {
+                     config.cloud_provider = CLOUD_PROVIDER_OPENAI;
+                     LOG_INFO("WebUI: No cloud provider set, defaulting to OpenAI");
+                  }
+               } else if (strcmp(new_type, "reset") == 0) {
+                  /* Reset to defaults from dawn.toml */
+                  session_clear_llm_config(conn->session);
+                  LOG_INFO("WebUI: Session %u LLM config reset to defaults",
+                           conn->session->session_id);
+                  has_changes = false; /* Already handled */
                }
             }
          }
@@ -2205,19 +2217,17 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
          if (json_object_object_get_ex(payload, "provider", &provider_obj)) {
             const char *new_provider = json_object_get_string(provider_obj);
             if (new_provider) {
-               config.override_enabled = true;
+               has_changes = true;
                if (strcmp(new_provider, "openai") == 0) {
                   config.cloud_provider = CLOUD_PROVIDER_OPENAI;
                } else if (strcmp(new_provider, "claude") == 0) {
                   config.cloud_provider = CLOUD_PROVIDER_CLAUDE;
-               } else if (strcmp(new_provider, "inherit") == 0) {
-                  config.cloud_provider = CLOUD_PROVIDER_NONE; /* Use global */
                }
             }
          }
 
-         /* Apply config or clear if nothing specified */
-         if (config.override_enabled) {
+         /* Apply config if changes were made */
+         if (has_changes) {
             int rc = session_set_llm_config(conn->session, &config);
             if (rc != 0) {
                success = 0;
@@ -2226,11 +2236,6 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
                LOG_INFO("WebUI: Session %u LLM config updated (type=%d, provider=%d)",
                         conn->session->session_id, config.type, config.cloud_provider);
             }
-         } else {
-            /* No type/provider specified - clear override (revert to global) */
-            session_clear_llm_config(conn->session);
-            LOG_INFO("WebUI: Session %u LLM config cleared (using global)",
-                     conn->session->session_id);
          }
       }
 
@@ -2244,19 +2249,12 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
          session_llm_config_t current;
          session_get_llm_config(conn->session, &current);
 
-         json_object_object_add(resp_payload, "override_enabled",
-                                json_object_new_boolean(current.override_enabled));
-         if (current.override_enabled) {
-            const char *type_str = current.type == LLM_LOCAL
-                                       ? "local"
-                                       : (current.type == LLM_CLOUD ? "cloud" : "inherit");
-            const char *provider_str = current.cloud_provider == CLOUD_PROVIDER_OPENAI ? "openai"
-                                       : current.cloud_provider == CLOUD_PROVIDER_CLAUDE
-                                           ? "claude"
-                                           : "inherit";
-            json_object_object_add(resp_payload, "type", json_object_new_string(type_str));
-            json_object_object_add(resp_payload, "provider", json_object_new_string(provider_str));
-         }
+         const char *type_str = current.type == LLM_LOCAL ? "local" : "cloud";
+         const char *provider_str = current.cloud_provider == CLOUD_PROVIDER_OPENAI   ? "openai"
+                                    : current.cloud_provider == CLOUD_PROVIDER_CLAUDE ? "claude"
+                                                                                      : "none";
+         json_object_object_add(resp_payload, "type", json_object_new_string(type_str));
+         json_object_object_add(resp_payload, "provider", json_object_new_string(provider_str));
       }
 
       /* Include API key availability */
@@ -2781,6 +2779,92 @@ static void *webui_thread_func(void *arg) {
 }
 
 /* =============================================================================
+ * Tool Execution Callback (for debug display)
+ * ============================================================================= */
+
+/**
+ * @brief Callback for native tool execution notifications
+ *
+ * Sends tool call/result information to the WebUI for debug display.
+ * Called by llm_tools module when tools are executed.
+ */
+/**
+ * @brief Send LLM state update to WebSocket client
+ *
+ * Pushes the current LLM configuration to the client so it can update
+ * the UI controls dynamically (e.g., after switch_llm tool call).
+ */
+static void webui_send_llm_state_update(session_t *session) {
+   if (!session || session->type != SESSION_TYPE_WEBSOCKET) {
+      return;
+   }
+
+   /* Get session's current LLM config */
+   session_llm_config_t config;
+   session_get_llm_config(session, &config);
+
+   /* Build JSON response */
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("llm_state_update"));
+
+   json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "success", json_object_new_boolean(1));
+
+   const char *type_str = config.type == LLM_LOCAL ? "local" : "cloud";
+   const char *provider_str = config.cloud_provider == CLOUD_PROVIDER_OPENAI   ? "openai"
+                              : config.cloud_provider == CLOUD_PROVIDER_CLAUDE ? "claude"
+                                                                               : "none";
+
+   json_object_object_add(payload, "type", json_object_new_string(type_str));
+   json_object_object_add(payload, "provider", json_object_new_string(provider_str));
+   json_object_object_add(payload, "model", json_object_new_string(config.model));
+   json_object_object_add(payload, "openai_available",
+                          json_object_new_boolean(llm_has_openai_key()));
+   json_object_object_add(payload, "claude_available",
+                          json_object_new_boolean(llm_has_claude_key()));
+
+   json_object_object_add(response, "payload", payload);
+
+   /* Queue response for WebSocket send */
+   ws_response_t resp = { .session = session,
+                          .type = WS_RESP_TRANSCRIPT,
+                          .transcript = { .role = strdup("__llm_state__"),
+                                          .text = strdup(json_object_to_json_string(response)) } };
+
+   json_object_put(response);
+
+   if (resp.transcript.role && resp.transcript.text) {
+      queue_response(&resp);
+   } else {
+      free(resp.transcript.role);
+      free(resp.transcript.text);
+   }
+}
+
+static void webui_tool_execution_callback(void *session_ptr,
+                                          const char *tool_name,
+                                          const char *tool_args,
+                                          const char *result,
+                                          bool success) {
+   session_t *session = (session_t *)session_ptr;
+   if (!session || session->type != SESSION_TYPE_WEBSOCKET) {
+      return;
+   }
+
+   /* Format as debug entry matching <command> tag format for consistent display */
+   char debug_msg[LLM_TOOLS_RESULT_LEN + 256];
+   snprintf(debug_msg, sizeof(debug_msg), "[Tool Call: %s(%s) -> %s%s]", tool_name,
+            tool_args ? tool_args : "", success ? "" : "FAILED: ", result ? result : "no result");
+
+   webui_send_transcript(session, "assistant", debug_msg);
+
+   /* If this was a switch_llm call, send LLM state update to client */
+   if (success && strcmp(tool_name, "switch_llm") == 0) {
+      webui_send_llm_state_update(session);
+   }
+}
+
+/* =============================================================================
  * Public API
  * ============================================================================= */
 
@@ -2866,6 +2950,9 @@ int webui_server_init(int port, const char *www_path) {
       LOG_WARNING("WebUI: Audio subsystem not available, voice input disabled");
    }
 #endif
+
+   /* Register tool execution callback for debug display */
+   llm_tools_set_execution_callback(webui_tool_execution_callback);
 
    /* Start server thread */
    if (pthread_create(&s_webui_thread, NULL, webui_thread_func, NULL) != 0) {

@@ -36,6 +36,7 @@
 #include <unistd.h>
 
 #include "config/dawn_config.h"
+#include "core/session_manager.h"
 #include "dawn.h"
 #include "llm/llm_tools.h"
 #include "llm/sentence_buffer.h"
@@ -92,6 +93,65 @@ static char llm_url[2048] = "";
 
 // Global interrupt flag - set by main thread when wake word detected during LLM processing
 static volatile sig_atomic_t llm_interrupt_requested = 0;
+
+// Get current OpenAI-compatible credentials - session-aware
+// Used by tool execution loop to refresh credentials after switch_llm
+// Checks session context first (set during LLM streaming), falls back to global state
+void llm_get_current_openai_credentials(const char **url_out, const char **api_key_out) {
+   // Check for session context (set during streaming calls)
+   session_t *session = session_get_command_context();
+   if (session) {
+      // Get fresh credentials from session's config
+      session_llm_config_t session_config;
+      session_get_llm_config(session, &session_config);
+
+      llm_resolved_config_t resolved;
+      if (llm_resolve_config(&session_config, &resolved) == 0) {
+         if (url_out) {
+            *url_out = resolved.endpoint;
+         }
+         if (api_key_out) {
+            *api_key_out = resolved.api_key;
+         }
+         return;
+      }
+      // Fall through to global state if resolve failed
+   }
+
+   // Fallback to global state (for paths without session context)
+   if (url_out) {
+      *url_out = llm_url;
+   }
+   if (api_key_out) {
+      if (current_type == LLM_LOCAL) {
+         *api_key_out = NULL;  // Local LLM doesn't need API key
+      } else if (current_cloud_provider == CLOUD_PROVIDER_OPENAI) {
+         *api_key_out = get_openai_api_key();
+      } else {
+         *api_key_out = NULL;  // Claude uses different function
+      }
+   }
+}
+
+int llm_get_current_resolved_config(llm_resolved_config_t *config_out) {
+   if (!config_out) {
+      return 1;
+   }
+
+   // Check for session context (set during streaming calls)
+   session_t *session = session_get_command_context();
+   if (session) {
+      session_llm_config_t session_config;
+      session_get_llm_config(session, &session_config);
+
+      if (llm_resolve_config(&session_config, config_out) == 0) {
+         return 0;
+      }
+   }
+
+   // No session or resolve failed
+   return 1;
+}
 
 // Legacy compatibility: MemoryStruct is now implemented using curl_buffer_t from curl_buffer.h
 // The llm_openai.c and llm_claude.c files still use the old naming, so we provide this wrapper.
@@ -392,11 +452,30 @@ int llm_set_type(llm_type_t type) {
 }
 
 llm_type_t llm_get_type(void) {
+   /* Check session context first (set during streaming calls) */
+   session_t *session = session_get_command_context();
+   if (session) {
+      session_llm_config_t config;
+      session_get_llm_config(session, &config);
+      return config.type;
+   }
+
+   /* Fallback to global state for paths without session context */
    return current_type;
 }
 
 const char *llm_get_cloud_provider_name(void) {
-   switch (current_cloud_provider) {
+   cloud_provider_t provider = current_cloud_provider;
+
+   /* Check session context first (set during streaming calls) */
+   session_t *session = session_get_command_context();
+   if (session) {
+      session_llm_config_t config;
+      session_get_llm_config(session, &config);
+      provider = config.cloud_provider;
+   }
+
+   switch (provider) {
       case CLOUD_PROVIDER_OPENAI:
          return "OpenAI";
       case CLOUD_PROVIDER_CLAUDE:
@@ -444,22 +523,51 @@ int llm_set_cloud_provider(cloud_provider_t provider) {
 }
 
 cloud_provider_t llm_get_cloud_provider(void) {
+   /* Check session context first (set during streaming calls) */
+   session_t *session = session_get_command_context();
+   if (session) {
+      session_llm_config_t config;
+      session_get_llm_config(session, &config);
+      return config.cloud_provider;
+   }
+
+   /* Fallback to global state for paths without session context */
    return current_cloud_provider;
 }
 
 const char *llm_get_model_name(void) {
-   if (current_type == LLM_LOCAL) {
-      // Local LLM - return local model name if configured, or "local"
+   static char session_model_buf[256]; /* Static buffer for session model */
+   llm_type_t type = current_type;
+   cloud_provider_t provider = current_cloud_provider;
+
+   /* Check session context first (set during streaming calls) */
+   session_t *session = session_get_command_context();
+   if (session) {
+      session_llm_config_t config;
+      session_get_llm_config(session, &config);
+      type = config.type;
+      provider = config.cloud_provider;
+
+      /* If session has a custom model, copy to static buffer and return */
+      if (config.model[0] != '\0') {
+         strncpy(session_model_buf, config.model, sizeof(session_model_buf) - 1);
+         session_model_buf[sizeof(session_model_buf) - 1] = '\0';
+         return session_model_buf;
+      }
+   }
+
+   /* Return model name based on type and provider */
+   if (type == LLM_LOCAL) {
       if (g_config.llm.local.model[0] != '\0') {
          return g_config.llm.local.model;
       }
       return "local";
    }
 
-   // Cloud LLM - return model from config based on active provider
-   if (current_cloud_provider == CLOUD_PROVIDER_OPENAI) {
+   /* Cloud LLM - return model from config based on provider */
+   if (provider == CLOUD_PROVIDER_OPENAI) {
       return g_config.llm.cloud.openai_model;
-   } else if (current_cloud_provider == CLOUD_PROVIDER_CLAUDE) {
+   } else if (provider == CLOUD_PROVIDER_CLAUDE) {
       return g_config.llm.cloud.claude_model;
    }
    return "None";
@@ -513,22 +621,48 @@ char *llm_chat_completion(struct json_object *conversation_history,
                           char *vision_image,
                           size_t vision_image_size) {
    char *response = NULL;
+   llm_type_t type = current_type;
+   cloud_provider_t provider = current_cloud_provider;
+   const char *url = llm_url;
+   const char *api_key = NULL;
 
-   if (current_type == LLM_LOCAL) {
-      // Local LLM uses OpenAI-compatible API (no API key needed)
-      response = llm_openai_chat_completion(conversation_history, input_text, vision_image,
-                                            vision_image_size, llm_url, NULL);
+   /* Check session context first (set during streaming calls) */
+   session_t *session = session_get_command_context();
+   if (session) {
+      session_llm_config_t session_config;
+      session_get_llm_config(session, &session_config);
+
+      llm_resolved_config_t resolved;
+      if (llm_resolve_config(&session_config, &resolved) == 0) {
+         type = resolved.type;
+         provider = resolved.cloud_provider;
+         url = resolved.endpoint ? resolved.endpoint : llm_url;
+         api_key = resolved.api_key;
+      }
    } else {
-      // Route to cloud provider
-      switch (current_cloud_provider) {
+      /* Use global state for non-session context */
+      if (provider == CLOUD_PROVIDER_OPENAI) {
+         api_key = get_openai_api_key();
+      } else if (provider == CLOUD_PROVIDER_CLAUDE) {
+         api_key = get_claude_api_key();
+      }
+   }
+
+   if (type == LLM_LOCAL) {
+      /* Local LLM uses OpenAI-compatible API (no API key needed) */
+      response = llm_openai_chat_completion(conversation_history, input_text, vision_image,
+                                            vision_image_size, url, NULL);
+   } else {
+      /* Route to cloud provider */
+      switch (provider) {
          case CLOUD_PROVIDER_OPENAI:
             response = llm_openai_chat_completion(conversation_history, input_text, vision_image,
-                                                  vision_image_size, llm_url, get_openai_api_key());
+                                                  vision_image_size, url, api_key);
             break;
 
          case CLOUD_PROVIDER_CLAUDE:
             response = llm_claude_chat_completion(conversation_history, input_text, vision_image,
-                                                  vision_image_size, llm_url, get_claude_api_key());
+                                                  vision_image_size, url, api_key);
             break;
 
          default:
@@ -537,14 +671,14 @@ char *llm_chat_completion(struct json_object *conversation_history,
       }
    }
 
-   // If cloud LLM failed (but not interrupted by user), try falling back to local
-   if (response == NULL && current_type == LLM_CLOUD && !llm_is_interrupt_requested()) {
-      if (strcmp(CLOUDAI_URL, llm_url) == 0 || strcmp(CLAUDE_URL, llm_url) == 0) {
+   /* If cloud LLM failed (but not interrupted by user), try falling back to local */
+   if (response == NULL && type == LLM_CLOUD && !llm_is_interrupt_requested()) {
+      if (strcmp(CLOUDAI_URL, url) == 0 || strcmp(CLAUDE_URL, url) == 0) {
          LOG_WARNING("Falling back to local LLM due to connection failure.");
          text_to_speech("Unable to contact cloud LLM.");
          llm_set_type(LLM_LOCAL);
 
-         // Retry with local LLM (uses OpenAI-compatible API without auth)
+         /* Retry with local LLM (uses OpenAI-compatible API without auth) */
          response = llm_openai_chat_completion(conversation_history, input_text, vision_image,
                                                vision_image_size, llm_url, NULL);
       }
@@ -560,35 +694,60 @@ char *llm_chat_completion_streaming(struct json_object *conversation_history,
                                     llm_text_chunk_callback chunk_callback,
                                     void *callback_userdata) {
    char *response = NULL;
+   llm_type_t type = current_type;
+   cloud_provider_t provider = current_cloud_provider;
+   const char *url = llm_url;
+   const char *api_key = NULL;
 
-   // Track LLM total time
+   /* Check session context first (set during streaming calls) */
+   session_t *session = session_get_command_context();
+   if (session) {
+      session_llm_config_t session_config;
+      session_get_llm_config(session, &session_config);
+
+      llm_resolved_config_t resolved;
+      if (llm_resolve_config(&session_config, &resolved) == 0) {
+         type = resolved.type;
+         provider = resolved.cloud_provider;
+         url = resolved.endpoint ? resolved.endpoint : llm_url;
+         api_key = resolved.api_key;
+      }
+   } else {
+      /* Use global state for non-session context */
+      if (provider == CLOUD_PROVIDER_OPENAI) {
+         api_key = get_openai_api_key();
+      } else if (provider == CLOUD_PROVIDER_CLAUDE) {
+         api_key = get_claude_api_key();
+      }
+   }
+
+   /* Track LLM total time */
    struct timeval start_time, end_time;
    gettimeofday(&start_time, NULL);
 
-   // Record query metrics
-   metrics_record_llm_query(current_type);
+   /* Record query metrics */
+   metrics_record_llm_query(type);
 
-   if (current_type == LLM_LOCAL) {
-      // Local LLM uses OpenAI-compatible API (no API key needed)
+   if (type == LLM_LOCAL) {
+      /* Local LLM uses OpenAI-compatible API (no API key needed) */
       response = llm_openai_chat_completion_streaming(conversation_history, input_text,
-                                                      vision_image, vision_image_size, llm_url,
-                                                      NULL,  // No API key for local
+                                                      vision_image, vision_image_size, url, NULL,
                                                       chunk_callback, callback_userdata);
    } else {
-      // Route to cloud provider
-      switch (current_cloud_provider) {
+      /* Route to cloud provider */
+      switch (provider) {
          case CLOUD_PROVIDER_OPENAI:
             response = llm_openai_chat_completion_streaming(conversation_history, input_text,
-                                                            vision_image, vision_image_size,
-                                                            llm_url, get_openai_api_key(),
-                                                            chunk_callback, callback_userdata);
+                                                            vision_image, vision_image_size, url,
+                                                            api_key, chunk_callback,
+                                                            callback_userdata);
             break;
 
          case CLOUD_PROVIDER_CLAUDE:
             response = llm_claude_chat_completion_streaming(conversation_history, input_text,
-                                                            vision_image, vision_image_size,
-                                                            llm_url, get_claude_api_key(),
-                                                            chunk_callback, callback_userdata);
+                                                            vision_image, vision_image_size, url,
+                                                            api_key, chunk_callback,
+                                                            callback_userdata);
             break;
 
          default:
@@ -597,23 +756,23 @@ char *llm_chat_completion_streaming(struct json_object *conversation_history,
       }
    }
 
-   // If cloud LLM failed (but not interrupted by user), try falling back to local
-   if (response == NULL && current_type == LLM_CLOUD && !llm_is_interrupt_requested()) {
-      if (strcmp(CLOUDAI_URL, llm_url) == 0 || strcmp(CLAUDE_URL, llm_url) == 0) {
+   /* If cloud LLM failed (but not interrupted by user), try falling back to local */
+   if (response == NULL && type == LLM_CLOUD && !llm_is_interrupt_requested()) {
+      if (strcmp(CLOUDAI_URL, url) == 0 || strcmp(CLAUDE_URL, url) == 0) {
          LOG_WARNING("Falling back to local LLM due to connection failure.");
          text_to_speech("Unable to contact cloud LLM.");
          llm_set_type(LLM_LOCAL);
 
-         // Retry with local LLM (uses OpenAI-compatible API without auth)
+         /* Retry with local LLM (uses OpenAI-compatible API without auth) */
          response = llm_openai_chat_completion_streaming(conversation_history, input_text,
                                                          vision_image, vision_image_size, llm_url,
                                                          NULL, chunk_callback, callback_userdata);
-         // Record fallback event
+         /* Record fallback event */
          metrics_record_fallback();
       }
    }
 
-   // Record LLM total time
+   /* Record LLM total time */
    if (response != NULL) {
       gettimeofday(&end_time, NULL);
       double total_ms = (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
@@ -708,80 +867,72 @@ char *llm_chat_completion_streaming_tts(struct json_object *conversation_history
  * Per-Session LLM Configuration Support
  * ============================================================================ */
 
+void llm_get_default_config(session_llm_config_t *config) {
+   if (!config) {
+      return;
+   }
+
+   memset(config, 0, sizeof(*config));
+
+   // Determine default LLM type from g_config
+   if (strcmp(g_config.llm.type, "local") == 0) {
+      config->type = LLM_LOCAL;
+   } else {
+      config->type = LLM_CLOUD;
+   }
+
+   // Always set default cloud provider (used when switching from local to cloud)
+   if (strcasecmp(g_config.llm.cloud.provider, "claude") == 0) {
+      config->cloud_provider = CLOUD_PROVIDER_CLAUDE;
+   } else {
+      config->cloud_provider = CLOUD_PROVIDER_OPENAI;
+   }
+
+   // Endpoint and model are empty by default (resolved at call time from config)
+   config->endpoint[0] = '\0';
+   config->model[0] = '\0';
+
+   LOG_INFO("Default LLM config: type=%s, provider=%s",
+            config->type == LLM_LOCAL ? "local" : "cloud",
+            config->cloud_provider == CLOUD_PROVIDER_CLAUDE   ? "claude"
+            : config->cloud_provider == CLOUD_PROVIDER_OPENAI ? "openai"
+                                                              : "none");
+}
+
 int llm_resolve_config(const session_llm_config_t *session_config,
                        llm_resolved_config_t *resolved) {
-   if (!resolved) {
+   if (!resolved || !session_config) {
       return 1;
    }
 
-   int fallback_needed = 0;
-
-   // Start with global defaults
-   resolved->type = current_type;
-   resolved->cloud_provider = current_cloud_provider;
-   resolved->endpoint = llm_url;
+   // Use session config directly (sessions own their config)
+   resolved->type = session_config->type;
+   resolved->cloud_provider = session_config->cloud_provider;
+   resolved->endpoint = session_config->endpoint[0] != '\0' ? session_config->endpoint : NULL;
+   resolved->model = session_config->model[0] != '\0' ? session_config->model : NULL;
    resolved->api_key = NULL;
-   resolved->model = NULL;
 
-   // Apply session overrides if enabled
-   if (session_config && session_config->override_enabled) {
-      // Override LLM type if specified
-      if (session_config->type != LLM_UNDEFINED) {
-         resolved->type = session_config->type;
-      }
-
-      // Override cloud provider if specified
-      if (session_config->cloud_provider != CLOUD_PROVIDER_NONE) {
-         resolved->cloud_provider = session_config->cloud_provider;
-      }
-
-      // Override endpoint if specified
-      if (session_config->endpoint[0] != '\0') {
-         resolved->endpoint = session_config->endpoint;
-      }
-
-      // Override model if specified
-      if (session_config->model[0] != '\0') {
-         resolved->model = session_config->model;
-      }
-   }
-
-   // Validate and resolve final configuration
+   // Validate and get API key for cloud providers
    if (resolved->type == LLM_CLOUD) {
-      // Validate cloud provider has API key
       if (resolved->cloud_provider == CLOUD_PROVIDER_OPENAI) {
          if (!is_openai_available()) {
-            LOG_WARNING(
-                "Session requested OpenAI but no API key configured, falling back to global");
-            resolved->type = current_type;
-            resolved->cloud_provider = current_cloud_provider;
-            resolved->endpoint = llm_url;
-            fallback_needed = 1;
-         } else {
-            resolved->api_key = get_openai_api_key();
+            LOG_ERROR("Session config requests OpenAI but no API key configured");
+            return 1;
          }
+         resolved->api_key = get_openai_api_key();
       } else if (resolved->cloud_provider == CLOUD_PROVIDER_CLAUDE) {
          if (!is_claude_available()) {
-            LOG_WARNING(
-                "Session requested Claude but no API key configured, falling back to global");
-            resolved->type = current_type;
-            resolved->cloud_provider = current_cloud_provider;
-            resolved->endpoint = llm_url;
-            fallback_needed = 1;
-         } else {
-            resolved->api_key = get_claude_api_key();
+            LOG_ERROR("Session config requests Claude but no API key configured");
+            return 1;
          }
+         resolved->api_key = get_claude_api_key();
       } else {
-         // No provider specified for cloud - use current global provider
-         if (current_cloud_provider == CLOUD_PROVIDER_OPENAI) {
-            resolved->api_key = get_openai_api_key();
-         } else if (current_cloud_provider == CLOUD_PROVIDER_CLAUDE) {
-            resolved->api_key = get_claude_api_key();
-         }
+         LOG_ERROR("Session config requests cloud but no provider specified");
+         return 1;
       }
    }
 
-   // Resolve endpoint if still using defaults
+   // Resolve endpoint if not specified in session config
    if (resolved->endpoint == NULL || resolved->endpoint[0] == '\0') {
       if (resolved->type == LLM_LOCAL) {
          resolved->endpoint = g_config.llm.local.endpoint;
@@ -792,7 +943,7 @@ int llm_resolve_config(const session_llm_config_t *session_config,
       }
    }
 
-   // Resolve model if not specified
+   // Resolve model if not specified in session config
    if (resolved->model == NULL || resolved->model[0] == '\0') {
       if (resolved->type == LLM_LOCAL) {
          resolved->model = g_config.llm.local.model;
@@ -803,7 +954,7 @@ int llm_resolve_config(const session_llm_config_t *session_config,
       }
    }
 
-   return fallback_needed;
+   return 0;
 }
 
 char *llm_chat_completion_with_config(struct json_object *conversation_history,

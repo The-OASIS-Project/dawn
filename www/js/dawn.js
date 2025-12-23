@@ -183,7 +183,20 @@
           updateState(msg.payload.state);
           break;
         case 'transcript':
-          addTranscriptEntry(msg.payload.role, msg.payload.text);
+          // Check for special LLM state update (sent with role '__llm_state__')
+          if (msg.payload.role === '__llm_state__') {
+            try {
+              const stateMsg = JSON.parse(msg.payload.text);
+              if (stateMsg.type === 'llm_state_update' && stateMsg.payload) {
+                console.log('LLM state update received:', stateMsg.payload);
+                updateLlmControls(stateMsg.payload);
+              }
+            } catch (e) {
+              console.error('Failed to parse LLM state update:', e);
+            }
+          } else {
+            addTranscriptEntry(msg.payload.role, msg.payload.text);
+          }
           break;
         case 'error':
           console.error('Server error:', msg.payload);
@@ -984,6 +997,8 @@
       debugClass = 'debug command';
     } else if (label === 'tool result') {
       debugClass = 'debug tool-result';
+    } else if (label === 'tool call') {
+      debugClass = 'debug tool-call';
     }
 
     entry.className = `transcript-entry ${debugClass}`;
@@ -1017,10 +1032,15 @@
       placeholder.remove();
     }
 
-    // Special case: Tool results are sent as complete messages starting with [Tool Result:
+    // Special case: Tool calls/results are sent as complete messages
     // These can contain ] characters in the content, so don't try to parse with regex
     if (text.startsWith('[Tool Result:')) {
       addDebugEntry('tool result', text);
+      elements.transcript.scrollTop = elements.transcript.scrollHeight;
+      return;
+    }
+    if (text.startsWith('[Tool Call:')) {
+      addDebugEntry('tool call', text);
       elements.transcript.scrollTop = elements.transcript.scrollHeight;
       return;
     }

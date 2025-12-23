@@ -37,6 +37,7 @@
 #include <unistd.h>
 
 #include "conversation_manager.h"
+#include "core/session_manager.h"
 #include "input_queue.h"
 #include "llm/llm_interface.h"
 #include "logging.h"
@@ -1209,22 +1210,39 @@ int tui_handle_input(void) {
          break;
 
       case 'l':
-      case 'L':
-         /* Switch to Local LLM (session-only, not persisted across restarts) */
-         if (llm_get_type() != LLM_LOCAL) {
-            llm_set_type(LLM_LOCAL);
+      case 'L': {
+         /* Switch LOCAL session to Local LLM */
+         session_t *local_session = session_get_local();
+         session_llm_config_t config;
+         session_get_llm_config(local_session, &config);
+         if (config.type != LLM_LOCAL) {
+            config.type = LLM_LOCAL;
+            config.cloud_provider = CLOUD_PROVIDER_NONE;
+            session_set_llm_config(local_session, &config);
             metrics_log_activity("Switched to Local LLM");
          }
          break;
+      }
 
       case 'c':
-      case 'C':
-         /* Switch to Cloud LLM (session-only, not persisted across restarts) */
-         if (llm_get_type() != LLM_CLOUD) {
-            llm_set_type(LLM_CLOUD);
-            metrics_log_activity("Switched to Cloud LLM (%s)", llm_get_model_name());
+      case 'C': {
+         /* Switch LOCAL session to Cloud LLM */
+         session_t *local_session = session_get_local();
+         session_llm_config_t config;
+         session_get_llm_config(local_session, &config);
+         if (config.type != LLM_CLOUD) {
+            config.type = LLM_CLOUD;
+            if (session_set_llm_config(local_session, &config) == 0) {
+               llm_resolved_config_t resolved;
+               llm_resolve_config(&config, &resolved);
+               metrics_log_activity("Switched to Cloud LLM (%s)",
+                                    resolved.model ? resolved.model : "unknown");
+            } else {
+               metrics_log_activity("Failed to switch to Cloud LLM (no API key)");
+            }
          }
          break;
+      }
 
       default:
          break;

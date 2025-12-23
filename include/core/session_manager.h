@@ -369,7 +369,7 @@ char *session_get_system_prompt(session_t *session);
  * @note Adds user message before call, assistant response after call
  * @note Returns NULL if session->disconnected is set (cancel)
  * @note Prepends location context if session->identity.location is set
- * @note Uses session's LLM config if override_enabled, otherwise global
+ * @note Uses session's own LLM config (copied from defaults at session creation)
  */
 char *session_llm_call(session_t *session, const char *user_text);
 
@@ -401,9 +401,12 @@ int session_set_llm_config(session_t *session, const session_llm_config_t *confi
 void session_get_llm_config(session_t *session, session_llm_config_t *config);
 
 /**
- * @brief Clear session LLM override (revert to global settings)
+ * @brief Reset session LLM config to defaults from dawn.toml
  *
- * @param session Session to clear
+ * Resets session to use default settings from configuration file.
+ * Changes only affect this session, not others.
+ *
+ * @param session Session to reset
  *
  * @locks session->llm_config_mutex
  */
@@ -434,6 +437,17 @@ int session_count(void);
  * @return Human-readable type name
  */
 const char *session_type_name(session_type_t type);
+
+/**
+ * @brief Save all active sessions' conversation histories
+ *
+ * Iterates through all sessions and saves non-empty conversation histories
+ * to timestamped JSON files. Called during shutdown to preserve chat logs.
+ * Files are named: chat_history_session{id}_{type}_{timestamp}.json
+ *
+ * @note Thread-safe: acquires session_manager_rwlock (read)
+ */
+void session_manager_save_all_histories(void);
 
 // =============================================================================
 // Command Context (Thread-Local)

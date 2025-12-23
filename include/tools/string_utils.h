@@ -28,10 +28,36 @@
 #define STRING_UTILS_H
 
 #include <stddef.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/**
+ * @brief Safe string copy with guaranteed null-termination
+ *
+ * Unlike strncpy, this always null-terminates the destination buffer
+ * and doesn't waste cycles padding with zeros. This is a portable
+ * replacement for strlcpy which isn't available on all platforms.
+ *
+ * Thread Safety: This function is thread-safe (modifies only dest buffer).
+ *
+ * @param dest Destination buffer
+ * @param src Source string (must be null-terminated)
+ * @param size Size of destination buffer
+ */
+static inline void safe_strncpy(char *dest, const char *src, size_t size) {
+   if (size == 0) {
+      return;
+   }
+   size_t len = strlen(src);
+   if (len >= size) {
+      len = size - 1;
+   }
+   memcpy(dest, src, len);
+   dest[len] = '\0';
+}
 
 /**
  * @brief Sanitize string for safe use in JSON and LLM APIs

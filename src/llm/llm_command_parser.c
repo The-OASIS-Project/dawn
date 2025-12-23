@@ -27,6 +27,9 @@
 
 /* Local */
 #include "config/dawn_config.h"
+#include "core/command_executor.h"
+#include "core/command_registry.h"
+#include "core/session_manager.h"
 #include "dawn.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
@@ -71,13 +74,26 @@ static int is_search_enabled(void) {
  * @brief Checks if vision is enabled for the current LLM type
  *
  * Vision availability is controlled by the vision_enabled setting for the
- * RUNTIME LLM type (cloud or local), not the static config. This ensures
- * that when the user switches LLMs at runtime, the vision check reflects
- * the actual current LLM.
+ * session's LLM type (cloud or local). This ensures that when the user
+ * switches LLMs at runtime, the vision check reflects the session's config.
  *
  * @return 1 if vision is available, 0 otherwise
  */
 int is_vision_enabled_for_current_llm(void) {
+   /* Check session context first (set during streaming calls) */
+   session_t *session = session_get_command_context();
+   if (session) {
+      session_llm_config_t config;
+      session_get_llm_config(session, &config);
+      if (config.type == LLM_CLOUD) {
+         return g_config.llm.cloud.vision_enabled;
+      } else if (config.type == LLM_LOCAL) {
+         return g_config.llm.local.vision_enabled;
+      }
+      return 0;
+   }
+
+   /* Fallback to global state for paths without session context */
    llm_type_t current = llm_get_type();
    if (current == LLM_CLOUD) {
       return g_config.llm.cloud.vision_enabled;
@@ -744,68 +760,6 @@ const char *get_remote_command_prompt(void) {
 }
 
 /**
- * @brief Validate that a device exists in the commands config
- *
- * SECURITY: This prevents LLM prompt injection attacks from executing commands
- * for non-existent or hallucinated devices. Only devices defined in
- * commands_config_nuevo.json are allowed.
- *
- * @param device The device name to validate
- * @param topic_out Output buffer for the device's topic (can be NULL)
- * @param topic_out_size Size of topic_out buffer
- * @return true if device exists and is valid, false otherwise
- */
-bool validate_device_in_config(const char *device, char *topic_out, size_t topic_out_size) {
-   if (!device || device[0] == '\0') {
-      return false;
-   }
-
-   bool device_found = false;
-
-   FILE *configFile = fopen(g_config.paths.commands_config, "r");
-   if (!configFile) {
-      LOG_ERROR("LLM command validation: Cannot open commands config");
-      return false;
-   }
-
-   char buffer[10 * 1024];
-   int bytes_read = fread(buffer, 1, sizeof(buffer) - 1, configFile);
-   fclose(configFile);
-
-   if (bytes_read <= 0) {
-      return false;
-   }
-   buffer[bytes_read] = '\0';
-
-   struct json_object *config_json = json_tokener_parse(buffer);
-   if (!config_json) {
-      return false;
-   }
-
-   struct json_object *devices_obj, *device_config_obj;
-   if (json_object_object_get_ex(config_json, "devices", &devices_obj) &&
-       json_object_object_get_ex(devices_obj, device, &device_config_obj)) {
-      device_found = true;
-
-      /* Extract topic if requested */
-      if (topic_out && topic_out_size > 0) {
-         struct json_object *topic_obj;
-         if (json_object_object_get_ex(device_config_obj, "topic", &topic_obj)) {
-            const char *topic = json_object_get_string(topic_obj);
-            strncpy(topic_out, topic, topic_out_size - 1);
-            topic_out[topic_out_size - 1] = '\0';
-         } else {
-            strncpy(topic_out, "dawn", topic_out_size - 1);
-            topic_out[topic_out_size - 1] = '\0';
-         }
-      }
-   }
-
-   json_object_put(config_json);
-   return device_found;
-}
-
-/**
  * @brief Parses an LLM response for commands and executes them
  *
  * This function looks for JSON commands enclosed in <command> tags in the LLM response,
@@ -854,27 +808,29 @@ int parse_llm_response_for_commands(const char *llm_response, struct mosquitto *
 
                if (json_object_object_get_ex(cmd_json, "device", &device_obj)) {
                   const char *device = json_object_get_string(device_obj);
-                  char topic[64] = "dawn";
 
-                  /* SECURITY: Validate device against allowlist before execution */
-                  if (validate_device_in_config(device, topic, sizeof(topic))) {
-                     /* Device is valid - execute command */
-                     int rc = mosquitto_publish(mosq, NULL, topic, strlen(command), command, 0,
-                                                false);
-                     if (rc != MOSQ_ERR_SUCCESS) {
-                        LOG_ERROR("Error publishing command: %s", mosquitto_strerror(rc));
-                     } else {
-                        LOG_INFO("LLM COMMAND EXECUTED: device=%s topic=%s", device, topic);
-                        metrics_log_activity("LLM CMD: %s", command);
-                        commands_found++;
+                  /* Use unified command executor - handles callbacks AND MQTT */
+                  cmd_exec_result_t exec_result;
+                  int rc = command_execute_json(cmd_json, mosq, &exec_result);
+
+                  if (rc == 0 && exec_result.success) {
+                     LOG_INFO("LLM COMMAND EXECUTED: device=%s via unified executor", device);
+                     metrics_log_activity("LLM CMD: %s", command);
+                     commands_found++;
+
+                     /* If command returned data, log it (could be used for response) */
+                     if (exec_result.result && exec_result.should_respond) {
+                        LOG_INFO("  Command result: %.100s%s", exec_result.result,
+                                 strlen(exec_result.result) > 100 ? "..." : "");
                      }
                   } else {
-                     /* SECURITY AUDIT: Unknown device rejected - possible prompt injection */
-                     LOG_WARNING("LLM COMMAND REJECTED: Unknown device '%s' - not in allowlist",
-                                 device);
-                     LOG_WARNING("  Full command was: %s", command);
-                     metrics_log_activity("LLM CMD BLOCKED: %s", device);
+                     /* Command failed - could be unknown device or execution error */
+                     LOG_WARNING("LLM COMMAND FAILED: device='%s' - %s", device,
+                                 exec_result.result ? exec_result.result : "unknown error");
+                     metrics_log_activity("LLM CMD FAILED: %s", device);
                   }
+
+                  cmd_exec_result_free(&exec_result);
                } else {
                   LOG_WARNING("LLM COMMAND REJECTED: No device field in command JSON");
                }

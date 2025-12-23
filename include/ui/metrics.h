@@ -300,14 +300,20 @@ void metrics_record_llm_ttft(double ttft_ms);
 void metrics_record_llm_total_time(double total_ms);
 
 /**
- * @brief Record LLM token usage
+ * @brief Record LLM token usage and update last-used provider
+ *
+ * Also updates the "current" LLM configuration in metrics to reflect
+ * the last used provider. This ensures stats export shows accurate
+ * provider info even with per-session LLM configurations.
  *
  * @param type LLM_LOCAL or LLM_CLOUD
+ * @param cloud_provider Cloud provider (only used if type is LLM_CLOUD)
  * @param input_tokens Number of input tokens
  * @param output_tokens Number of output tokens
  * @param cached_tokens Number of cached tokens (0 if not applicable)
  */
 void metrics_record_llm_tokens(llm_type_t type,
+                               cloud_provider_t cloud_provider,
                                int input_tokens,
                                int output_tokens,
                                int cached_tokens);

@@ -49,19 +49,17 @@ typedef enum {
 } llm_type_t;
 
 /**
- * @brief Per-session LLM configuration override
+ * @brief Per-session LLM configuration
  *
- * Allows each session (WebUI, DAP, local) to have independent LLM settings.
- * When override_enabled is false, the session uses global settings.
- * Use LLM_UNDEFINED for type and CLOUD_PROVIDER_NONE for cloud_provider
- * to inherit specific fields from global config.
+ * Each session (WebUI, DAP, local) owns its own LLM settings.
+ * Sessions are initialized with a copy of defaults at creation time.
+ * Changes to one session's config do not affect other sessions.
  */
 typedef struct {
-   bool override_enabled;           /**< false = use global settings entirely */
-   llm_type_t type;                 /**< LLM_UNDEFINED = inherit from global */
-   cloud_provider_t cloud_provider; /**< CLOUD_PROVIDER_NONE = inherit */
-   char endpoint[128];              /**< Custom endpoint (empty = use default) */
-   char model[64];                  /**< Custom model (empty = use default) */
+   llm_type_t type;                 /**< LLM type (local or cloud) */
+   cloud_provider_t cloud_provider; /**< Cloud provider (OpenAI, Claude, etc.) */
+   char endpoint[128];              /**< Endpoint URL (empty = use provider default) */
+   char model[64];                  /**< Model name (empty = use provider default) */
 } session_llm_config_t;
 
 /**
@@ -290,15 +288,25 @@ bool llm_has_claude_key(void);
 /**
  * @brief Resolve session LLM config to final request config
  *
- * Merges session override settings with global defaults. If session config
- * specifies invalid settings (e.g., provider without API key), falls back
- * to global config and logs a warning.
+ * Resolves session config to final configuration with endpoints and API keys.
+ * If session config specifies invalid settings (e.g., provider without API key),
+ * returns error.
  *
- * @param session_config Session's LLM config (NULL = use global entirely)
+ * @param session_config Session's LLM config
  * @param resolved Output: resolved configuration for LLM call
- * @return 0 on success, 1 if fallback to global was needed
+ * @return 0 on success, 1 on error (invalid config)
  */
 int llm_resolve_config(const session_llm_config_t *session_config, llm_resolved_config_t *resolved);
+
+/**
+ * @brief Get default LLM configuration from dawn.toml settings
+ *
+ * Returns a session_llm_config_t populated with the default settings
+ * from the global configuration. Used to initialize new sessions.
+ *
+ * @param config Output: default configuration
+ */
+void llm_get_default_config(session_llm_config_t *config);
 
 /**
  * @brief Chat completion with explicit configuration (non-streaming)
@@ -361,5 +369,27 @@ char *llm_chat_completion_streaming_tts_with_config(struct json_object *conversa
                                                     llm_sentence_callback sentence_callback,
                                                     void *callback_userdata,
                                                     const llm_resolved_config_t *config);
+
+/**
+ * @brief Get current OpenAI-compatible endpoint and API key
+ *
+ * Returns the current URL and API key based on global LLM state.
+ * Used by tool execution loop to get fresh credentials after switch_llm.
+ *
+ * @param url_out Output: current endpoint URL (do not free)
+ * @param api_key_out Output: current API key or NULL for local (do not free)
+ */
+void llm_get_current_openai_credentials(const char **url_out, const char **api_key_out);
+
+/**
+ * @brief Get full resolved LLM config for current session
+ *
+ * Returns the complete resolved config including type, cloud_provider,
+ * endpoint, and API key. Used to detect provider changes after switch_llm.
+ *
+ * @param config_out Output: resolved config (caller owns, do not free strings)
+ * @return 0 on success, 1 on failure
+ */
+int llm_get_current_resolved_config(llm_resolved_config_t *config_out);
 
 #endif  // LLM_INTERFACE_H

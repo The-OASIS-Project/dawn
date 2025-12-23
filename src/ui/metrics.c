@@ -434,6 +434,7 @@ void metrics_record_llm_total_time(double total_ms) {
 }
 
 void metrics_record_llm_tokens(llm_type_t type,
+                               cloud_provider_t cloud_provider,
                                int input_tokens,
                                int output_tokens,
                                int cached_tokens) {
@@ -451,6 +452,11 @@ void metrics_record_llm_tokens(llm_type_t type,
       g_metrics.tokens_local_output += output_tokens;
    }
    g_metrics.tokens_cached += cached_tokens;
+
+   // Update current LLM config to reflect last used provider
+   // This ensures stats export shows accurate provider info
+   g_metrics.current_llm_type = type;
+   g_metrics.current_cloud_provider = cloud_provider;
 
    pthread_mutex_unlock(&g_metrics.mutex);
 }

@@ -85,17 +85,37 @@
       "type": "analog",
       "aliases": ["3d offset", "eye offset"],
       "unit": "pixels",
-      "topic": "hud"
+      "topic": "hud",
+      "tool": {
+        "name": "visual_offset",
+        "description": "Adjust the 3D visual offset for stereoscopic display alignment.",
+        "parameters": [
+          {"name": "pixels", "type": "integer", "description": "Offset in pixels (positive or negative)", "required": true, "maps_to": "value"}
+        ]
+      }
     },
     "hud": {
        "type": "analog",
        "aliases": ["display", "screen"],
-       "topic": "hud"
+       "topic": "hud",
+       "tool": {
+         "name": "hud_mode",
+         "description": "Switch the HUD display mode. Available modes: default, environmental, armor.",
+         "parameters": [
+           {"name": "mode", "type": "enum", "enum": ["default", "environmental", "armor"], "description": "The HUD mode to switch to", "required": true, "maps_to": "value"}
+         ]
+       }
     },
     "faceplate": {
        "type": "boolean",
        "aliases": ["face plate", "mask", "face mask", "helmet", "bucket", "facemask"],
-       "topic": "helmet"
+       "topic": "helmet",
+       "tool": {
+         "description": "Control the helmet faceplate/visor. Open or close the faceplate.",
+         "parameters": [
+           {"name": "action", "type": "enum", "enum": ["enable", "disable"], "description": "Whether to open or close the faceplate", "required": true, "maps_to": "action"}
+         ]
+       }
     },
     "info": {
        "type": "boolean",
@@ -139,22 +159,38 @@
     },
     "volume": {
        "type": "analog",
-       "topic": "dawn"
+       "topic": "dawn",
+       "tool": {
+         "description": "Set the audio volume level for TTS and music playback.",
+         "parameters": [
+           {"name": "level", "type": "integer", "description": "Volume level from 0 (silent) to 100 (maximum)", "required": true, "maps_to": "value"}
+         ]
+       }
     },
     "date": {
        "type": "getter",
        "aliases": ["current date", "today's date"],
-       "topic": "dawn"
+       "topic": "dawn",
+       "tool": {
+         "description": "Get the current date. Returns today's date formatted for the user."
+       }
     },
     "time": {
        "type": "getter",
        "aliases": ["current time", "hour", "time right now"],
-       "topic": "dawn"
+       "topic": "dawn",
+       "tool": {
+         "description": "Get the current time. Returns the current local time."
+       }
     },
     "llm": {
        "type": "analog",
        "aliases": ["ai", "ai status", "current llm", "which llm", "what llm", "llm mode", "ai mode", "llm status"],
-       "topic": "dawn"
+       "topic": "dawn",
+       "tool": {
+         "name": "llm_status",
+         "description": "Get information about the current LLM configuration. Returns whether using local or cloud LLM and the model name."
+       }
     },
     "cloud provider": {
        "type": "analog",
@@ -164,26 +200,151 @@
     "viewing": {
        "type": "getter",
        "aliases": ["looking at", "seeing"],
-       "topic": "hud"
+       "topic": "hud",
+       "sync_wait": true,
+       "tool": {
+         "description": "Analyze what the camera sees. Takes a photo and describes the scene, identifies objects, reads text, or answers questions about the view.",
+         "parameters": [
+           {"name": "query", "type": "string", "description": "What to look for or question about the view (e.g., 'what do you see?', 'read the text', 'is anyone there?')", "required": false, "maps_to": "value"}
+         ]
+       }
     },
     "flac": {
        "type": "music",
        "topic": "dawn"
     },
+    "music": {
+       "type": "music",
+       "topic": "dawn",
+       "tool": {
+         "description": "Control music playback. Can play, pause, stop, skip tracks, or play a specific song/artist.",
+         "parameters": [
+           {"name": "action", "type": "enum", "enum": ["play", "pause", "stop", "next", "previous", "shuffle"], "description": "The playback action", "required": true, "maps_to": "action"},
+           {"name": "query", "type": "string", "description": "Song/artist name to play (for 'play' action)", "required": false, "maps_to": "value"}
+         ]
+       }
+    },
     "voice amplifier": {
        "type": "boolean",
        "aliases": ["voice output", "voice passthrough", "pa", "pa system", "p a", "p a system", "bull horn", "bullhorn"],
-       "topic": "dawn"
+       "topic": "dawn",
+       "tool": {
+         "description": "Control the voice amplifier/PA system for projecting voice through external speakers.",
+         "parameters": [
+           {"name": "action", "type": "enum", "enum": ["enable", "disable"], "description": "Whether to enable or disable voice amplification", "required": true, "maps_to": "action"}
+         ]
+       }
     },
     "shutdown": {
        "type": "passphrase_trigger",
        "aliases": ["shut down", "power off", "system shutdown"],
-       "topic": "dawn"
+       "topic": "dawn",
+       "tool": {
+         "description": "Shutdown or restart the system. Only use when explicitly requested.",
+         "parameters": [
+           {"name": "action", "type": "enum", "enum": ["shutdown", "restart", "cancel"], "description": "The shutdown action", "required": true, "maps_to": "action"}
+         ]
+       }
     },
     "reset conversation": {
        "type": "trigger",
        "aliases": ["reset context", "clear conversation", "clear context", "start fresh", "new conversation", "fresh start"],
-       "topic": "dawn"
+       "topic": "dawn",
+       "tool": {
+         "name": "reset_conversation",
+         "description": "Clear the conversation history and start fresh. Use when the user wants to change topics completely or start a new conversation."
+       }
+    },
+    "weather": {
+       "type": "getter",
+       "topic": "dawn",
+       "tool": {
+         "description": "Get weather forecast. If no location specified, uses the user's default location. If no time specified, defaults to today.",
+         "parameters": [
+           {"name": "time", "type": "enum", "enum": ["today", "tomorrow", "week"], "description": "Forecast period: 'today' for current conditions, 'tomorrow' for next day, 'week' for 7-day forecast", "required": false, "maps_to": "action"},
+           {"name": "location", "type": "string", "description": "City and state/country (e.g., 'Atlanta, Georgia'). Optional - uses user's default if not specified.", "required": false, "maps_to": "value"}
+         ]
+       }
+    },
+    "search": {
+       "type": "getter",
+       "topic": "dawn",
+       "tool": {
+         "description": "Search the web for information. Returns relevant search results that can be used to answer questions about current events, facts, etc.",
+         "parameters": [
+           {"name": "query", "type": "string", "description": "The search query", "required": true, "maps_to": "value"},
+           {"name": "category", "type": "enum", "enum": ["web", "news", "science", "social"], "description": "Search category: 'web' for general search, 'news' for current events, 'science' for scientific topics, 'social' for social media posts and discussions", "required": false, "maps_to": "action"}
+         ]
+       }
+    },
+    "calculator": {
+       "type": "getter",
+       "topic": "dawn",
+       "tool": {
+         "description": "Perform calculations: evaluate math expressions, convert units, convert number bases, or generate random numbers.",
+         "parameters": [
+           {"name": "action", "type": "enum", "enum": ["evaluate", "convert", "base", "random"], "description": "The type of calculation to perform", "required": true, "maps_to": "action"},
+           {"name": "value", "type": "string", "description": "For 'evaluate': math expression (e.g., 'sqrt(144) + 2^8'). For 'convert': unit conversion (e.g., '5 miles to km'). For 'base': number base conversion (e.g., '255 to hex'). For 'random': range (e.g., '1 to 100').", "required": true, "maps_to": "value"}
+         ]
+       }
+    },
+    "url": {
+       "type": "getter",
+       "topic": "dawn",
+       "tool": {
+         "description": "Fetch and extract readable content from a URL. Returns the main text content of a webpage.",
+         "parameters": [
+           {"name": "url", "type": "string", "description": "The URL to fetch (must start with http:// or https://)", "required": true, "maps_to": "value"}
+         ]
+       }
+    },
+    "smartthings": {
+       "type": "analog",
+       "topic": "dawn",
+       "tool": {
+         "description": "Control SmartThings smart home devices. Can list devices, check status, and control lights, switches, locks, and thermostats.",
+         "parameters": [
+           {"name": "action", "type": "enum", "enum": ["list", "status", "on", "off", "brightness", "color", "temperature", "lock", "unlock"], "description": "The action to perform", "required": true, "maps_to": "action"},
+           {"name": "device", "type": "string", "description": "Device name (required for all actions except 'list')", "required": false, "maps_to": "value"},
+           {"name": "setting", "type": "string", "description": "Value for the action (brightness: 0-100, color: hex code, temperature: degrees)", "required": false, "maps_to": "custom:setting"}
+         ]
+       }
+    }
+  },
+  "tools": {
+    "_comment": "Meta-tools that aggregate multiple devices or have special handling",
+    "hud_control": {
+      "description": "Control HUD (Heads-Up Display) elements. Enable or disable display overlays like the armor display, minimap, object detection, or info panel.",
+      "device_map": {"armor_display": "armor_display", "detect": "detect", "map": "map", "info": "info"},
+      "topic": "hud",
+      "parameters": [
+        {"name": "element", "type": "enum", "enum": ["armor_display", "detect", "map", "info"], "description": "The HUD element to control", "required": true, "maps_to": "device"},
+        {"name": "action", "type": "enum", "enum": ["enable", "disable"], "description": "Whether to show or hide the element", "required": true, "maps_to": "action"}
+      ]
+    },
+    "switch_llm": {
+      "description": "Switch between local and cloud LLM, or change the cloud provider. Use 'local' to use the local LLM server, 'cloud' to use cloud AI, or specify a provider name like 'openai' or 'claude'.",
+      "parameters": [
+        {"name": "target", "type": "enum", "enum": ["local", "cloud", "openai", "claude"], "description": "The LLM target to switch to", "required": true, "maps_to": "action"}
+      ]
+    },
+    "recording": {
+      "description": "Control video recording and streaming. Start or stop recording, streaming, or both simultaneously.",
+      "device_map": {"record": "record", "stream": "stream", "record_and_stream": "record and stream"},
+      "topic": "hud",
+      "parameters": [
+        {"name": "mode", "type": "enum", "enum": ["record", "stream", "record_and_stream"], "description": "What to control", "required": true, "maps_to": "device"},
+        {"name": "action", "type": "enum", "enum": ["enable", "disable"], "description": "Whether to start or stop", "required": true, "maps_to": "action"}
+      ]
+    },
+    "audio_device": {
+      "description": "Switch audio input or output devices.",
+      "device_map": {"capture": "audio capture device", "playback": "audio playback device"},
+      "topic": "dawn",
+      "parameters": [
+        {"name": "type", "type": "enum", "enum": ["capture", "playback"], "description": "The type of audio device to change", "required": true, "maps_to": "device"},
+        {"name": "device", "type": "string", "description": "Device name (e.g., 'microphone', 'headphones', 'speakers')", "required": true, "maps_to": "value"}
+      ]
     }
   },
   "audio devices": {

@@ -69,18 +69,4 @@ int is_vision_enabled_for_current_llm(void);
  */
 void invalidate_system_instructions(void);
 
-/**
- * @brief Validate that a device exists in the commands config and get its topic
- *
- * SECURITY: This prevents prompt injection attacks from executing commands
- * for non-existent or hallucinated devices. Only devices defined in
- * commands_config_nuevo.json are allowed.
- *
- * @param device The device name to validate
- * @param topic_out Output buffer for the device's topic (can be NULL)
- * @param topic_out_size Size of topic_out buffer
- * @return true if device exists and is valid, false otherwise
- */
-bool validate_device_in_config(const char *device, char *topic_out, size_t topic_out_size);
-
 #endif  // LLM_COMMAND_PARSER_H

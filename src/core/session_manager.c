@@ -32,6 +32,23 @@
 #include "logging.h"
 
 // =============================================================================
+// Streaming Callbacks
+// =============================================================================
+
+/**
+ * @brief No-op streaming callback for text-only sessions
+ *
+ * Accumulates chunks internally (handled by llm_streaming.c).
+ * TODO: Replace with WebSocket streaming callback for real-time text delivery.
+ */
+static void session_text_chunk_callback(const char *chunk, void *userdata) {
+   (void)chunk;
+   (void)userdata;
+   // Chunks are accumulated by the streaming layer
+   // Future: send chunk to WebSocket for real-time display
+}
+
+// =============================================================================
 // Static Variables
 // =============================================================================
 
@@ -131,11 +148,8 @@ static session_t *session_alloc(void) {
       return NULL;
    }
 
-   // Initialize LLM config to use global settings (no override)
-   memset(&session->llm_config, 0, sizeof(session_llm_config_t));
-   session->llm_config.override_enabled = false;
-   session->llm_config.type = LLM_UNDEFINED;
-   session->llm_config.cloud_provider = CLOUD_PROVIDER_NONE;
+   // Initialize LLM config with defaults from dawn.toml
+   llm_get_default_config(&session->llm_config);
 
    return session;
 }
@@ -835,10 +849,27 @@ char *session_llm_call(session_t *session, const char *user_text) {
 
    // Resolve to final config (merges session override with global)
    llm_resolved_config_t resolved_config;
-   llm_resolve_config(&session_config, &resolved_config);
+   int resolve_rc = llm_resolve_config(&session_config, &resolved_config);
+   if (resolve_rc != 0) {
+      LOG_ERROR("Session %u: Failed to resolve LLM config (type=%d, provider=%d)",
+                session->session_id, session_config.type, session_config.cloud_provider);
+      json_object_put(history);
+      if (input_with_context) {
+         free(input_with_context);
+      }
+      return NULL;
+   }
 
-   // Call LLM with resolved config (non-streaming for network clients)
-   char *response = llm_chat_completion_with_config(history, llm_input, NULL, 0, &resolved_config);
+   // Set command context so tool callbacks (e.g., switch_llm) use this session's config
+   session_set_command_context(session);
+
+   // Call LLM with resolved config (streaming for tool calling support)
+   char *response = llm_chat_completion_streaming_with_config(history, llm_input, NULL, 0,
+                                                              session_text_chunk_callback, session,
+                                                              &resolved_config);
+
+   // Clear command context
+   session_set_command_context(NULL);
 
    // Clean up
    json_object_put(history);
@@ -878,8 +909,8 @@ int session_set_llm_config(session_t *session, const session_llm_config_t *confi
       return 1;
    }
 
-   // Validate that requested provider has API key (if cloud and specific provider requested)
-   if (config->override_enabled && config->type == LLM_CLOUD) {
+   // Validate that requested provider has API key
+   if (config->type == LLM_CLOUD) {
       if (config->cloud_provider == CLOUD_PROVIDER_OPENAI && !llm_has_openai_key()) {
          LOG_WARNING("Session %u: Cannot set OpenAI provider - no API key configured",
                      session->session_id);
@@ -896,9 +927,8 @@ int session_set_llm_config(session_t *session, const session_llm_config_t *confi
    memcpy(&session->llm_config, config, sizeof(session_llm_config_t));
    pthread_mutex_unlock(&session->llm_config_mutex);
 
-   LOG_INFO("Session %u: LLM config updated (override=%s, type=%d, provider=%d)",
-            session->session_id, config->override_enabled ? "true" : "false", config->type,
-            config->cloud_provider);
+   LOG_INFO("Session %u: LLM config updated (type=%d, provider=%d)", session->session_id,
+            config->type, config->cloud_provider);
 
    return 0;
 }
@@ -919,13 +949,10 @@ void session_clear_llm_config(session_t *session) {
    }
 
    pthread_mutex_lock(&session->llm_config_mutex);
-   memset(&session->llm_config, 0, sizeof(session_llm_config_t));
-   session->llm_config.override_enabled = false;
-   session->llm_config.type = LLM_UNDEFINED;
-   session->llm_config.cloud_provider = CLOUD_PROVIDER_NONE;
+   llm_get_default_config(&session->llm_config);
    pthread_mutex_unlock(&session->llm_config_mutex);
 
-   LOG_INFO("Session %u: LLM config cleared (using global settings)", session->session_id);
+   LOG_INFO("Session %u: LLM config reset to defaults", session->session_id);
 }
 
 // =============================================================================
@@ -996,4 +1023,62 @@ void session_set_command_context(session_t *session) {
 
 session_t *session_get_command_context(void) {
    return tl_command_context;
+}
+
+// =============================================================================
+// History Saving
+// =============================================================================
+
+void session_manager_save_all_histories(void) {
+   if (!initialized) {
+      return;
+   }
+
+   time_t current_time;
+   struct tm *time_info;
+   char filename[256];
+
+   time(&current_time);
+   time_info = localtime(&current_time);
+
+   pthread_rwlock_rdlock(&session_manager_rwlock);
+
+   for (int i = 0; i < MAX_SESSIONS; i++) {
+      session_t *session = sessions[i];
+      if (session == NULL) {
+         continue;
+      }
+
+      pthread_mutex_lock(&session->history_mutex);
+
+      // Only save if history has more than just the system message
+      int history_len = json_object_array_length(session->conversation_history);
+      if (history_len > 1) {
+         // Create unique filename with session ID and type
+         snprintf(filename, sizeof(filename), "chat_history_session%u_%s_%04d%02d%02d_%02d%02d%02d.json",
+                  session->session_id, session_type_name(session->type),
+                  time_info->tm_year + 1900, time_info->tm_mon + 1, time_info->tm_mday,
+                  time_info->tm_hour, time_info->tm_min, time_info->tm_sec);
+
+         FILE *chat_file = fopen(filename, "w");
+         if (chat_file != NULL) {
+            const char *json_string = json_object_to_json_string_ext(
+                session->conversation_history,
+                JSON_C_TO_STRING_PRETTY | JSON_C_TO_STRING_NOSLASHESCAPE);
+            if (json_string != NULL) {
+               fprintf(chat_file, "%s\n", json_string);
+               LOG_INFO("Saved conversation history for session %u (%s, %d messages) to: %s",
+                        session->session_id, session_type_name(session->type), history_len, filename);
+            }
+            fclose(chat_file);
+         } else {
+            LOG_ERROR("Failed to open chat history file for session %u: %s",
+                      session->session_id, filename);
+         }
+      }
+
+      pthread_mutex_unlock(&session->history_mutex);
+   }
+
+   pthread_rwlock_unlock(&session_manager_rwlock);
 }

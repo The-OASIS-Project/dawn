@@ -35,6 +35,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "core/command_registry.h"
 #include "llm/llm_interface.h"
 
 #ifdef __cplusplus
@@ -58,31 +59,21 @@ extern "C" {
 #define LLM_TOOLS_RESULT_LEN 8192
 
 /* =============================================================================
- * Tool Parameter Types
- * ============================================================================= */
-
-/**
- * @brief Parameter data types for tool definitions
- */
-typedef enum {
-   TOOL_PARAM_STRING,  /**< String parameter */
-   TOOL_PARAM_INTEGER, /**< Integer parameter */
-   TOOL_PARAM_NUMBER,  /**< Floating-point parameter */
-   TOOL_PARAM_BOOLEAN, /**< Boolean parameter */
-   TOOL_PARAM_ENUM     /**< Enumeration (string with allowed values) */
-} tool_param_type_t;
-
-/* =============================================================================
  * Tool Definition Structures
+ *
+ * Note: Parameter types use cmd_param_type_t from command_registry.h
  * ============================================================================= */
 
 /**
  * @brief Tool parameter definition
+ *
+ * Uses cmd_param_type_t from command_registry.h for type field to maintain
+ * a single source of truth for parameter types.
  */
 typedef struct {
    char name[LLM_TOOLS_NAME_LEN];                   /**< Parameter name */
    char description[256];                           /**< Parameter description */
-   tool_param_type_t type;                          /**< Parameter type */
+   cmd_param_type_t type;                           /**< Parameter type (from command_registry.h) */
    bool required;                                   /**< Is this parameter required? */
    char enum_values[LLM_TOOLS_MAX_ENUM_VALUES][64]; /**< Allowed values for ENUM type */
    int enum_count;                                  /**< Number of enum values */
@@ -139,7 +130,9 @@ typedef struct {
    char tool_call_id[LLM_TOOLS_ID_LEN]; /**< ID from original tool_call_t */
    char result[LLM_TOOLS_RESULT_LEN];   /**< Execution result text */
    bool success;                        /**< true if execution succeeded */
-   bool skip_followup; /**< If true, return result directly without LLM follow-up */
+   bool skip_followup;       /**< If true, return result directly without LLM follow-up */
+   char *vision_image;       /**< Base64 vision image (caller must free) */
+   size_t vision_image_size; /**< Size of vision image data */
 } tool_result_t;
 
 /**
@@ -406,36 +399,91 @@ typedef struct {
 void llm_tools_prepare_followup(const tool_result_list_t *results, tool_followup_context_t *ctx);
 
 /* =============================================================================
- * Pending Vision Data (for viewing tool)
+ * Tool Execution Notification Callback
  *
- * When the viewing tool is executed via native tool calling, the image data
- * is captured asynchronously via MQTT. These functions manage the pending
- * vision data that should be included in the LLM follow-up call.
+ * Allows external modules (like WebUI) to receive notifications when tools
+ * are executed. Used for debug display in UI.
+ * ============================================================================= */
+
+/**
+ * @brief Callback function type for tool execution notifications
+ *
+ * @param session Opaque session pointer (may be NULL)
+ * @param tool_name Name of the tool being executed
+ * @param tool_args JSON arguments string
+ * @param result Result of execution (after execution complete)
+ * @param success Whether execution succeeded
+ */
+typedef void (*tool_execution_callback_fn)(void *session,
+                                           const char *tool_name,
+                                           const char *tool_args,
+                                           const char *result,
+                                           bool success);
+
+/**
+ * @brief Register a callback for tool execution notifications
+ *
+ * @param callback Function to call when tools are executed
+ */
+void llm_tools_set_execution_callback(tool_execution_callback_fn callback);
+
+/* =============================================================================
+ * Pending Vision Data (DEPRECATED for multi-session use)
+ *
+ * These global pending vision functions are DEPRECATED for new code.
+ * They exist only for the voice command path (viewingCallback -> dawn.c main loop).
+ *
+ * For session-isolated vision handling, use tool_result_t.vision_image instead.
+ * The native tool path (execute_viewing_sync) stores vision directly in tool results.
  * ============================================================================= */
 
 /**
  * @brief Check if pending vision data is available
- *
+ * @deprecated Use tool_result_t.vision_image for session isolation
  * @return true if vision data was captured and is waiting to be sent to LLM
  */
 bool llm_tools_has_pending_vision(void);
 
 /**
  * @brief Get pending vision data for LLM follow-up
- *
+ * @deprecated Use tool_result_t.vision_image for session isolation
  * @param size_out Output: size of vision data
  * @return Base64-encoded image data, or NULL if none pending
- *
  * @note Does NOT clear the pending data - call llm_tools_clear_pending_vision()
  */
 const char *llm_tools_get_pending_vision(size_t *size_out);
 
 /**
  * @brief Clear pending vision data after it has been used
- *
- * Call after the LLM follow-up has included the vision data.
+ * @deprecated Use tool_result_t.vision_image for session isolation
  */
 void llm_tools_clear_pending_vision(void);
+
+/**
+ * @brief Set pending vision data from external source
+ * @deprecated Use tool_result_t.vision_image for session isolation
+ *
+ * Used by viewingCallback for voice command path only.
+ *
+ * @param base64_image Base64-encoded image data (will be copied)
+ * @param size Size of the base64 data including null terminator
+ * @return true on success, false on allocation failure
+ */
+bool llm_tools_set_pending_vision(const char *base64_image, size_t size);
+
+/**
+ * @brief Process vision data from either base64 or file path
+ * @deprecated Use tool_result_t.vision_image for session isolation
+ *
+ * Used by viewingCallback for voice command path only.
+ * Stores result in global pending vision (not session-isolated).
+ *
+ * @param data Vision data - either base64-encoded image or a file path
+ * @param error_buf Output buffer for error messages (can be NULL)
+ * @param error_len Size of error buffer
+ * @return true on success (image stored in pending vision), false on failure
+ */
+bool llm_tools_process_vision_data(const char *data, char *error_buf, size_t error_len);
 
 #ifdef __cplusplus
 }

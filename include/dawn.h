@@ -338,49 +338,6 @@ char *setPcmCaptureDevice(const char *actioName, char *value, int *should_respon
 char *findAudioPlaybackDevice(char *name);
 
 /**
- * Stores a base64 encoded image for vision AI processing, including the null terminator.
- * Updates global variables to indicate readiness for processing.
- *
- * @param base64_image Null-terminated base64 encoded image data.
- * @param image_size Length of the base64 image data, including the null terminator.
- *
- * Preconditions:
- * - vision_ai_image is freed if previously allocated to avoid memory leaks.
- *
- * Postconditions:
- * - vision_ai_image contains the base64 image data, ready for AI processing.
- * - vision_ai_image_size reflects the size of the data including the null terminator.
- * - vision_ai_ready is set, indicating AI processing can proceed.
- *
- * Error Handling:
- * - If memory allocation fails, an error is logged, and the function exits early.
- */
-void process_vision_ai(const char *base64_image, size_t image_size);
-
-/**
- * @brief Check if vision AI image is ready for processing
- *
- * @return 1 if vision image is ready, 0 otherwise
- */
-int dawn_vision_is_ready(void);
-
-/**
- * @brief Get the pending vision AI image
- *
- * @param size_out Output parameter for image size
- * @return Base64-encoded image data, or NULL if not ready
- */
-const char *dawn_vision_get_image(size_t *size_out);
-
-/**
- * @brief Clear the vision AI image after it has been used
- *
- * Call this after consuming the vision image to free resources
- * and allow new images to be captured.
- */
-void dawn_vision_clear(void);
-
-/**
  * Callback function for text-to-speech commands.
  *
  * @param actionName The name of the action triggered this callback (unused in the current

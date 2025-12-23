@@ -28,6 +28,8 @@
 
 #include "config/dawn_config.h"
 #include "dawn.h"
+#include "llm/llm_claude.h"
+#include "llm/llm_command_parser.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_streaming.h"
 #include "llm/llm_tools.h"
@@ -158,6 +160,90 @@ static int convert_claude_tool_to_summary(struct json_object *msg,
 }
 
 /**
+ * @brief Convert Claude image content block to OpenAI image_url format
+ *
+ * Claude format: {"type": "image", "source": {"type": "base64", "media_type": "...", "data":
+ * "..."}} OpenAI format: {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
+ *
+ * @param block Content block to convert (or copy if not Claude image)
+ * @return New json_object in OpenAI format (caller must json_object_put), or NULL on error
+ */
+static struct json_object *convert_content_block_to_openai(struct json_object *block) {
+   if (!block) {
+      return NULL;
+   }
+
+   struct json_object *type_obj;
+   if (!json_object_object_get_ex(block, "type", &type_obj)) {
+      // No type field - just copy the block
+      return json_object_get(block);
+   }
+
+   const char *block_type = json_object_get_string(type_obj);
+   if (!block_type || strcmp(block_type, "image") != 0) {
+      // Not Claude image format - just copy the block
+      return json_object_get(block);
+   }
+
+   // This is a Claude image block - convert to OpenAI format
+   struct json_object *source_obj;
+   if (!json_object_object_get_ex(block, "source", &source_obj)) {
+      LOG_WARNING("OpenAI: Claude image block missing source field");
+      return NULL;
+   }
+
+   struct json_object *media_type_obj, *data_obj;
+   const char *media_type = "image/jpeg";  // default
+   const char *data = NULL;
+
+   if (json_object_object_get_ex(source_obj, "media_type", &media_type_obj)) {
+      media_type = json_object_get_string(media_type_obj);
+   }
+   if (json_object_object_get_ex(source_obj, "data", &data_obj)) {
+      data = json_object_get_string(data_obj);
+   }
+
+   if (!data) {
+      LOG_WARNING("OpenAI: Claude image block missing data");
+      return NULL;
+   }
+
+   // Build data URL
+   size_t url_len = strlen("data:") + strlen(media_type) + strlen(";base64,") + strlen(data) + 1;
+   char *data_url = malloc(url_len);
+   if (!data_url) {
+      return NULL;
+   }
+   snprintf(data_url, url_len, "data:%s;base64,%s", media_type, data);
+
+   // Create OpenAI-format image_url block
+   struct json_object *image_obj = json_object_new_object();
+   json_object_object_add(image_obj, "type", json_object_new_string("image_url"));
+
+   struct json_object *url_obj = json_object_new_object();
+   json_object_object_add(url_obj, "url", json_object_new_string(data_url));
+   json_object_object_add(image_obj, "image_url", url_obj);
+
+   free(data_url);
+
+   LOG_INFO("OpenAI: Converted Claude image to OpenAI image_url (media_type=%s)", media_type);
+   return image_obj;
+}
+
+/**
+ * @brief Check if a content block is a vision/image block (any format)
+ */
+static bool is_vision_content_block(struct json_object *block) {
+   struct json_object *type_obj;
+   if (!json_object_object_get_ex(block, "type", &type_obj)) {
+      return false;
+   }
+   const char *type_str = json_object_get_string(type_obj);
+   // OpenAI format: "image_url", Claude format: "image"
+   return (strcmp(type_str, "image_url") == 0 || strcmp(type_str, "image") == 0);
+}
+
+/**
  * @brief Convert conversation history, summarizing Claude-format tool messages
  *
  * Creates a new array with Claude tool messages converted to text summaries.
@@ -166,25 +252,39 @@ static int convert_claude_tool_to_summary(struct json_object *msg,
  * @param history Original conversation history
  * @return Converted conversation history (new object, caller frees)
  */
+
+/**
+ * @brief Check if a content block is a Claude-format image that needs conversion
+ */
+static bool is_claude_image_block(struct json_object *block) {
+   struct json_object *type_obj;
+   if (!json_object_object_get_ex(block, "type", &type_obj)) {
+      return false;
+   }
+   const char *type_str = json_object_get_string(type_obj);
+   return (strcmp(type_str, "image") == 0);
+}
+
 static struct json_object *convert_claude_tool_messages(struct json_object *history) {
    int len = json_object_array_length(history);
 
    // Early-exit: check if any messages need conversion
-   // This avoids creating new objects when no Claude tool messages are present
+   // This avoids creating new objects when no Claude-specific content is present
    bool needs_conversion = false;
    for (int i = 0; i < len && !needs_conversion; i++) {
       struct json_object *msg = json_object_array_get_idx(history, i);
       struct json_object *content_obj;
       if (json_object_object_get_ex(msg, "content", &content_obj) &&
           json_object_get_type(content_obj) == json_type_array) {
-         // Check if array contains tool_use or tool_result blocks
+         // Check if array contains tool_use, tool_result, or Claude image blocks
          int arr_len = json_object_array_length(content_obj);
          for (int j = 0; j < arr_len; j++) {
             struct json_object *elem = json_object_array_get_idx(content_obj, j);
             struct json_object *type_obj;
             if (json_object_object_get_ex(elem, "type", &type_obj)) {
                const char *type_str = json_object_get_string(type_obj);
-               if (strcmp(type_str, "tool_use") == 0 || strcmp(type_str, "tool_result") == 0) {
+               if (strcmp(type_str, "tool_use") == 0 || strcmp(type_str, "tool_result") == 0 ||
+                   strcmp(type_str, "image") == 0) {
                   needs_conversion = true;
                   break;
                }
@@ -216,12 +316,164 @@ static struct json_object *convert_claude_tool_messages(struct json_object *hist
          json_object_object_add(new_msg, "content", json_object_new_string(summary));
          json_object_array_add(converted, new_msg);
       } else {
-         // Copy message as-is (increment refcount)
-         json_object_array_add(converted, json_object_get(msg));
+         // Check if message has array content that may contain Claude images
+         struct json_object *content_obj;
+         if (json_object_object_get_ex(msg, "content", &content_obj) &&
+             json_object_get_type(content_obj) == json_type_array) {
+            // Check if any blocks need conversion
+            int arr_len = json_object_array_length(content_obj);
+            bool has_claude_images = false;
+            for (int j = 0; j < arr_len && !has_claude_images; j++) {
+               struct json_object *elem = json_object_array_get_idx(content_obj, j);
+               if (is_claude_image_block(elem)) {
+                  has_claude_images = true;
+               }
+            }
+
+            if (has_claude_images) {
+               // Create new message with converted content
+               struct json_object *new_msg = json_object_new_object();
+               struct json_object *role_obj;
+               if (json_object_object_get_ex(msg, "role", &role_obj)) {
+                  json_object_object_add(new_msg, "role", json_object_get(role_obj));
+               }
+
+               // Convert content array
+               struct json_object *new_content = json_object_new_array();
+               for (int j = 0; j < arr_len; j++) {
+                  struct json_object *elem = json_object_array_get_idx(content_obj, j);
+                  struct json_object *converted_elem = convert_content_block_to_openai(elem);
+                  if (converted_elem) {
+                     json_object_array_add(new_content, converted_elem);
+                  }
+               }
+               json_object_object_add(new_msg, "content", new_content);
+               json_object_array_add(converted, new_msg);
+            } else {
+               // No Claude images, copy as-is
+               json_object_array_add(converted, json_object_get(msg));
+            }
+         } else {
+            // Not array content, copy as-is
+            json_object_array_add(converted, json_object_get(msg));
+         }
       }
    }
 
    return converted;
+}
+
+/**
+ * @brief Strip vision (image_url) content from conversation history
+ *
+ * When switching from a vision-capable LLM to one without vision support,
+ * the history may contain image_url entries that would cause errors.
+ * This function replaces image content with text placeholders.
+ *
+ * @param history Conversation history (already converted)
+ * @return Sanitized history with vision content removed (new object, caller frees)
+ */
+static struct json_object *strip_vision_content(struct json_object *history) {
+   int len = json_object_array_length(history);
+
+   /* Check if any messages have image content (OpenAI or Claude format) */
+   bool has_vision = false;
+   for (int i = 0; i < len && !has_vision; i++) {
+      struct json_object *msg = json_object_array_get_idx(history, i);
+      struct json_object *content_obj;
+      if (json_object_object_get_ex(msg, "content", &content_obj) &&
+          json_object_get_type(content_obj) == json_type_array) {
+         int arr_len = json_object_array_length(content_obj);
+         for (int j = 0; j < arr_len; j++) {
+            struct json_object *elem = json_object_array_get_idx(content_obj, j);
+            if (is_vision_content_block(elem)) {
+               has_vision = true;
+               break;
+            }
+         }
+      }
+   }
+
+   /* If no vision content, return original with incremented refcount */
+   if (!has_vision) {
+      return json_object_get(history);
+   }
+
+   LOG_INFO("Stripping vision content from history (target LLM doesn't support vision)");
+
+   struct json_object *sanitized = json_object_new_array();
+
+   for (int i = 0; i < len; i++) {
+      struct json_object *msg = json_object_array_get_idx(history, i);
+      struct json_object *content_obj;
+
+      /* Check if this message has array content with images */
+      if (json_object_object_get_ex(msg, "content", &content_obj) &&
+          json_object_get_type(content_obj) == json_type_array) {
+         /* Extract text parts, skip image parts (both OpenAI and Claude formats) */
+         int arr_len = json_object_array_length(content_obj);
+         char text_buffer[8192] = "";
+         size_t text_len = 0;
+         bool found_image = false;
+
+         for (int j = 0; j < arr_len; j++) {
+            struct json_object *elem = json_object_array_get_idx(content_obj, j);
+            struct json_object *type_obj;
+            if (json_object_object_get_ex(elem, "type", &type_obj)) {
+               const char *type_str = json_object_get_string(type_obj);
+               if (strcmp(type_str, "text") == 0) {
+                  struct json_object *text_obj;
+                  if (json_object_object_get_ex(elem, "text", &text_obj)) {
+                     const char *text = json_object_get_string(text_obj);
+                     if (text && text_len < sizeof(text_buffer) - 1) {
+                        if (text_len > 0) {
+                           text_buffer[text_len++] = ' ';
+                        }
+                        size_t copy_len = strlen(text);
+                        if (text_len + copy_len >= sizeof(text_buffer)) {
+                           copy_len = sizeof(text_buffer) - text_len - 1;
+                        }
+                        memcpy(text_buffer + text_len, text, copy_len);
+                        text_len += copy_len;
+                        text_buffer[text_len] = '\0';
+                     }
+                  }
+               } else if (is_vision_content_block(elem)) {
+                  found_image = true;
+               }
+            }
+         }
+
+         /* Create new message with text content only */
+         struct json_object *new_msg = json_object_new_object();
+         struct json_object *role_obj;
+         if (json_object_object_get_ex(msg, "role", &role_obj)) {
+            json_object_object_add(new_msg, "role", json_object_get(role_obj));
+         }
+
+         /* Add placeholder if image was removed */
+         if (found_image) {
+            if (text_len > 0) {
+               char combined[8300];
+               snprintf(combined, sizeof(combined), "%s [An image was shared earlier]",
+                        text_buffer);
+               json_object_object_add(new_msg, "content", json_object_new_string(combined));
+            } else {
+               json_object_object_add(new_msg, "content",
+                                      json_object_new_string("[An image was shared here]"));
+            }
+         } else {
+            json_object_object_add(new_msg, "content", json_object_new_string(text_buffer));
+         }
+
+         json_object_array_add(sanitized, new_msg);
+      } else {
+         /* Message doesn't have array content, copy as-is */
+         json_object_array_add(sanitized, json_object_get(msg));
+      }
+   }
+
+   return sanitized;
 }
 
 /**
@@ -277,6 +529,13 @@ char *llm_openai_chat_completion(struct json_object *conversation_history,
 
    // Convert Claude-format tool messages to text summaries
    json_object *converted_history = convert_claude_tool_messages(conversation_history);
+
+   // Strip vision content if target LLM doesn't support vision
+   if (!is_vision_enabled_for_current_llm()) {
+      json_object *sanitized = strip_vision_content(converted_history);
+      json_object_put(converted_history);
+      converted_history = sanitized;
+   }
 
    // Root JSON Container
    root = json_object_new_object();
@@ -487,8 +746,10 @@ char *llm_openai_chat_completion(struct json_object *conversation_history,
          }
       }
 
-      // Record metrics
-      metrics_record_llm_tokens(LLM_CLOUD, input_tokens, output_tokens, cached_tokens);
+      // Record metrics - determine type based on whether we have an API key
+      llm_type_t token_type = (api_key != NULL) ? LLM_CLOUD : LLM_LOCAL;
+      metrics_record_llm_tokens(token_type, CLOUD_PROVIDER_OPENAI, input_tokens, output_tokens,
+                                cached_tokens);
    }
 
    // Duplicate the response content string safely
@@ -521,17 +782,30 @@ char *llm_openai_chat_completion(struct json_object *conversation_history,
 typedef struct {
    sse_parser_t *sse_parser;
    llm_stream_context_t *stream_ctx;
+   char *raw_buffer;    /* Captures raw response for error debugging */
+   size_t raw_size;     /* Current size of raw buffer */
+   size_t raw_capacity; /* Allocated capacity */
 } openai_streaming_context_t;
 
 /**
  * @brief CURL write callback for streaming responses
  *
  * Feeds incoming SSE data to the SSE parser, which processes it
- * and calls the LLM streaming callbacks.
+ * and calls the LLM streaming callbacks. Also captures raw data
+ * for error debugging.
  */
 static size_t streaming_write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
    size_t realsize = size * nmemb;
    openai_streaming_context_t *ctx = (openai_streaming_context_t *)userp;
+
+   // Also capture raw data for error debugging (limit to first 4KB)
+   if (ctx->raw_buffer && ctx->raw_size < ctx->raw_capacity - 1) {
+      size_t space_left = ctx->raw_capacity - ctx->raw_size - 1;
+      size_t to_copy = realsize < space_left ? realsize : space_left;
+      memcpy(ctx->raw_buffer + ctx->raw_size, contents, to_copy);
+      ctx->raw_size += to_copy;
+      ctx->raw_buffer[ctx->raw_size] = '\0';
+   }
 
    // Feed data to SSE parser
    sse_parser_feed(ctx->sse_parser, contents, realsize);
@@ -583,6 +857,13 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
 
    // Convert Claude-format tool messages to text summaries
    json_object *converted_history = convert_claude_tool_messages(conversation_history);
+
+   // Strip vision content if target LLM doesn't support vision
+   if (!is_vision_enabled_for_current_llm()) {
+      json_object *sanitized = strip_vision_content(converted_history);
+      json_object_put(converted_history);
+      converted_history = sanitized;
+   }
 
    // Root JSON Container
    root = json_object_new_object();
@@ -645,7 +926,7 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
             json_object_object_add(text_obj, "type", json_object_new_string("text"));
             json_object_object_add(text_obj, "text",
                                    json_object_new_string("Here is the captured image. "
-                                                          "Please describe what you see."));
+                                                          "Please respond to the user's request."));
             json_object_array_add(content_array, text_obj);
 
             /* Add the image */
@@ -692,6 +973,10 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
    payload = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN |
                                                       JSON_C_TO_STRING_NOSLASHESCAPE);
 
+   // Log request details for debugging
+   LOG_INFO("OpenAI streaming iter %d: url=%s model=%s api_key=%s", iteration, base_url,
+            g_config.llm.cloud.openai_model, api_key ? "(present)" : "(null)");
+
    // Debug: Log conversation state on follow-up iterations
    if (iteration > 0) {
       int msg_count = json_object_array_length(converted_history);
@@ -728,7 +1013,9 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
    }
 
    // Create streaming context
-   stream_ctx = llm_stream_create(LLM_CLOUD, CLOUD_PROVIDER_OPENAI, chunk_callback,
+   // Determine LLM type based on whether we have an API key (cloud) or not (local)
+   llm_type_t stream_llm_type = (api_key != NULL) ? LLM_CLOUD : LLM_LOCAL;
+   stream_ctx = llm_stream_create(stream_llm_type, CLOUD_PROVIDER_OPENAI, chunk_callback,
                                   callback_userdata);
    if (!stream_ctx) {
       LOG_ERROR("Failed to create LLM stream context");
@@ -748,6 +1035,12 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
    // Setup streaming context
    streaming_ctx.sse_parser = sse_parser;
    streaming_ctx.stream_ctx = stream_ctx;
+   streaming_ctx.raw_capacity = 4096; /* 4KB for error debugging */
+   streaming_ctx.raw_buffer = malloc(streaming_ctx.raw_capacity);
+   streaming_ctx.raw_size = 0;
+   if (streaming_ctx.raw_buffer) {
+      streaming_ctx.raw_buffer[0] = '\0';
+   }
 
    curl_handle = curl_easy_init();
    if (curl_handle) {
@@ -790,6 +1083,7 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
          sse_parser_free(sse_parser);
          llm_stream_free(stream_ctx);
          json_object_put(root);
+         free(streaming_ctx.raw_buffer);
          return NULL;
       }
 
@@ -809,11 +1103,16 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
          } else if (http_code != 0) {
             LOG_ERROR("OpenAI API: Request failed (HTTP %ld)", http_code);
          }
+         // Log raw response body for debugging errors (especially 400)
+         if (streaming_ctx.raw_buffer && streaming_ctx.raw_size > 0) {
+            LOG_ERROR("OpenAI API error response: %s", streaming_ctx.raw_buffer);
+         }
          curl_easy_cleanup(curl_handle);
          curl_slist_free_all(headers);
          sse_parser_free(sse_parser);
          llm_stream_free(stream_ctx);
          json_object_put(root);
+         free(streaming_ctx.raw_buffer);
          return NULL;
       }
 
@@ -868,14 +1167,35 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
          sse_parser_free(sse_parser);
          llm_stream_free(stream_ctx);
          json_object_put(root);
+         free(streaming_ctx.raw_buffer);
 
          // Check if we should skip follow-up (e.g., LLM was switched)
          if (llm_tools_should_skip_followup(&results)) {
             LOG_INFO("OpenAI streaming: Skipping follow-up call (tool requested no follow-up)");
             char *direct_response = llm_tools_get_direct_response(&results);
+
+            // Add synthetic assistant message to complete the tool call sequence
+            // This prevents HTTP 400 on subsequent requests due to incomplete history
+            if (direct_response) {
+               json_object *closing_msg = json_object_new_object();
+               json_object_object_add(closing_msg, "role", json_object_new_string("assistant"));
+               json_object_object_add(closing_msg, "content",
+                                      json_object_new_string(direct_response));
+               json_object_array_add(conversation_history, closing_msg);
+               LOG_INFO("OpenAI streaming: Added closing assistant message to complete history");
+            }
+
             // Send through chunk callback so TTS receives it
             if (direct_response && chunk_callback) {
                chunk_callback(direct_response, callback_userdata);
+            }
+
+            // Free any vision data from tool results
+            for (int i = 0; i < results.count; i++) {
+               if (results.results[i].vision_image) {
+                  free(results.results[i].vision_image);
+                  results.results[i].vision_image = NULL;
+               }
             }
             return direct_response;
          }
@@ -890,6 +1210,13 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
             // Send through chunk callback so TTS receives it
             if (chunk_callback) {
                chunk_callback(error_msg, callback_userdata);
+            }
+            // Free any vision data from tool results
+            for (int i = 0; i < results.count; i++) {
+               if (results.results[i].vision_image) {
+                  free(results.results[i].vision_image);
+                  results.results[i].vision_image = NULL;
+               }
             }
             return strdup(error_msg);
          }
@@ -906,23 +1233,59 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
                      strlen(results.results[i].result) > 200 ? "..." : "");
          }
 
-         // Check for pending vision data (from viewing tool)
-         const char *pending_vision = NULL;
-         size_t pending_vision_size = 0;
-         if (llm_tools_has_pending_vision()) {
-            pending_vision = llm_tools_get_pending_vision(&pending_vision_size);
-            LOG_INFO("OpenAI streaming: Including pending vision (%zu bytes) in follow-up",
-                     pending_vision_size);
+         // Check for vision data in tool results (session-isolated)
+         const char *result_vision = NULL;
+         size_t result_vision_size = 0;
+         for (int i = 0; i < results.count; i++) {
+            if (results.results[i].vision_image && results.results[i].vision_image_size > 0) {
+               result_vision = results.results[i].vision_image;
+               result_vision_size = results.results[i].vision_image_size;
+               LOG_INFO("OpenAI streaming: Including vision from tool result (%zu bytes)",
+                        result_vision_size);
+               break;
+            }
          }
 
-         char *result = llm_openai_streaming_internal(conversation_history, "",
-                                                      (char *)pending_vision, pending_vision_size,
-                                                      base_url, api_key, chunk_callback,
-                                                      callback_userdata, iteration + 1);
+         // Check if provider changed (e.g., switch_llm was called)
+         llm_resolved_config_t current_config;
+         char *result = NULL;
 
-         // Clear pending vision data after use
-         if (pending_vision) {
-            llm_tools_clear_pending_vision();
+         if (llm_get_current_resolved_config(&current_config) == 0 &&
+             current_config.cloud_provider == CLOUD_PROVIDER_CLAUDE) {
+            // Provider switched to Claude - hand off to Claude code path
+            LOG_INFO("OpenAI streaming: Provider switched to Claude, handing off");
+
+            // Convert conversation history from OpenAI to Claude format
+            // Claude will handle the vision data if present
+            result = llm_claude_chat_completion_streaming(
+                conversation_history, "", (char *)result_vision, result_vision_size,
+                current_config.endpoint, current_config.api_key,
+                (llm_claude_text_chunk_callback)chunk_callback, callback_userdata);
+         } else {
+            // Still OpenAI-compatible (local or OpenAI cloud) - refresh credentials and continue
+            const char *fresh_url = base_url;
+            const char *fresh_api_key = api_key;
+
+            if (llm_get_current_resolved_config(&current_config) == 0) {
+               fresh_url = current_config.endpoint;
+               fresh_api_key = current_config.api_key;
+               if (fresh_url != base_url) {
+                  LOG_INFO("OpenAI streaming: Credentials refreshed to %s", fresh_url);
+               }
+            }
+
+            result = llm_openai_streaming_internal(conversation_history, "", (char *)result_vision,
+                                                   result_vision_size, fresh_url, fresh_api_key,
+                                                   chunk_callback, callback_userdata,
+                                                   iteration + 1);
+         }
+
+         // Free vision data from tool results after use
+         for (int i = 0; i < results.count; i++) {
+            if (results.results[i].vision_image) {
+               free(results.results[i].vision_image);
+               results.results[i].vision_image = NULL;
+            }
          }
 
          return result;
@@ -936,6 +1299,7 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
    sse_parser_free(sse_parser);
    llm_stream_free(stream_ctx);
    json_object_put(root);
+   free(streaming_ctx.raw_buffer);
 
    return response;
 }

@@ -151,7 +151,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->network.workers = 4;
    config->network.socket_timeout_sec = 30;
    config->network.session_timeout_sec = 1800;  // 30 minutes
-   config->network.llm_timeout_ms = 30000;
+   config->network.llm_timeout_ms = 60000;      // 60 seconds for LLM requests
 
    /* TUI */
    config->tui.enabled = false;

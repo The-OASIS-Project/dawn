@@ -292,6 +292,8 @@ set(DAWN_SOURCES
     src/core/session_manager.c
     src/core/worker_pool.c
     src/core/command_router.c
+    src/core/command_registry.c
+    src/core/command_executor.c
 
     # ASR subsystem
     src/asr/asr_interface.c
