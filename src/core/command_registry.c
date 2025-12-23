@@ -248,6 +248,13 @@ static int parse_devices(struct json_object *devices_obj) {
          cmd->mqtt_only = json_object_get_boolean(flag_obj);
       }
 
+      /* Check device type (getter vs setter) */
+      struct json_object *type_obj = NULL;
+      if (json_object_object_get_ex(device_obj, "type", &type_obj)) {
+         const char *type_str = json_object_get_string(type_obj);
+         cmd->is_getter = (type_str && strcmp(type_str, "getter") == 0);
+      }
+
       /* Parse tool definition if present */
       struct json_object *tool_obj = NULL;
       if (json_object_object_get_ex(device_obj, "tool", &tool_obj)) {
@@ -600,6 +607,12 @@ int command_registry_init(void) {
    const char *config_path = g_config.paths.commands_config;
    if (!config_path || config_path[0] == '\0') {
       config_path = "commands_config_nuevo.json";
+   }
+
+   /* Security: reject path traversal attempts */
+   if (strstr(config_path, "..") != NULL) {
+      LOG_ERROR("command_registry: Path traversal rejected in config path: %s", config_path);
+      return 1;
    }
 
    if (load_config_file(config_path) != 0) {

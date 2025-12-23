@@ -474,6 +474,42 @@ void session_set_command_context(session_t *session);
  */
 session_t *session_get_command_context(void);
 
+/* =============================================================================
+ * Command Context Scope Guard (GCC/Clang cleanup attribute)
+ *
+ * Provides automatic cleanup of command context when a scope exits, even on
+ * early returns. Uses __attribute__((cleanup)) for RAII-style safety in C.
+ *
+ * Usage:
+ *   {
+ *      SESSION_SCOPED_COMMAND_CONTEXT(my_session);
+ *      // ... do work with command context set ...
+ *      // Context automatically cleared when scope exits
+ *   }
+ * ============================================================================= */
+
+/**
+ * @brief Cleanup function for scope guard - clears command context
+ * @param ctx Pointer to session pointer (unused, just for cleanup signature)
+ */
+static inline void session_command_context_cleanup(session_t **ctx) {
+   (void)ctx;
+   session_set_command_context(NULL);
+}
+
+/**
+ * @brief Scope guard macro for command context
+ *
+ * Sets the command context and ensures it's cleared when the current scope exits.
+ * This prevents context leaks on early returns or exceptions.
+ *
+ * @param session Session to use for command context
+ */
+#define SESSION_SCOPED_COMMAND_CONTEXT(session)                                       \
+   session_t *_scoped_ctx_##__LINE__                                                  \
+       __attribute__((cleanup(session_command_context_cleanup), unused)) = (session); \
+   session_set_command_context(session)
+
 #ifdef __cplusplus
 }
 #endif

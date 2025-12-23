@@ -427,61 +427,17 @@ typedef void (*tool_execution_callback_fn)(void *session,
  */
 void llm_tools_set_execution_callback(tool_execution_callback_fn callback);
 
-/* =============================================================================
- * Pending Vision Data (DEPRECATED for multi-session use)
- *
- * These global pending vision functions are DEPRECATED for new code.
- * They exist only for the voice command path (viewingCallback -> dawn.c main loop).
- *
- * For session-isolated vision handling, use tool_result_t.vision_image instead.
- * The native tool path (execute_viewing_sync) stores vision directly in tool results.
- * ============================================================================= */
-
 /**
- * @brief Check if pending vision data is available
- * @deprecated Use tool_result_t.vision_image for session isolation
- * @return true if vision data was captured and is waiting to be sent to LLM
- */
-bool llm_tools_has_pending_vision(void);
-
-/**
- * @brief Get pending vision data for LLM follow-up
- * @deprecated Use tool_result_t.vision_image for session isolation
- * @param size_out Output: size of vision data
- * @return Base64-encoded image data, or NULL if none pending
- * @note Does NOT clear the pending data - call llm_tools_clear_pending_vision()
- */
-const char *llm_tools_get_pending_vision(size_t *size_out);
-
-/**
- * @brief Clear pending vision data after it has been used
- * @deprecated Use tool_result_t.vision_image for session isolation
- */
-void llm_tools_clear_pending_vision(void);
-
-/**
- * @brief Set pending vision data from external source
- * @deprecated Use tool_result_t.vision_image for session isolation
+ * @brief Process vision data from MQTT callback (DEPRECATED)
  *
- * Used by viewingCallback for voice command path only.
+ * This function is deprecated. Vision is now handled by native tool calling -
+ * the viewing tool captures images and streaming code passes vision data to
+ * recursive LLM calls automatically (session-isolated via tool_result_t.vision_image).
  *
- * @param base64_image Base64-encoded image data (will be copied)
- * @param size Size of the base64 data including null terminator
- * @return true on success, false on allocation failure
- */
-bool llm_tools_set_pending_vision(const char *base64_image, size_t size);
-
-/**
- * @brief Process vision data from either base64 or file path
- * @deprecated Use tool_result_t.vision_image for session isolation
- *
- * Used by viewingCallback for voice command path only.
- * Stores result in global pending vision (not session-isolated).
- *
- * @param data Vision data - either base64-encoded image or a file path
- * @param error_buf Output buffer for error messages (can be NULL)
+ * @param data Ignored
+ * @param error_buf Output buffer for deprecation message
  * @param error_len Size of error buffer
- * @return true on success (image stored in pending vision), false on failure
+ * @return Always returns false (deprecated)
  */
 bool llm_tools_process_vision_data(const char *data, char *error_buf, size_t error_len);
 

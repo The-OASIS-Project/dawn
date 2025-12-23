@@ -975,7 +975,7 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
 
    // Log request details for debugging
    LOG_INFO("OpenAI streaming iter %d: url=%s model=%s api_key=%s", iteration, base_url,
-            g_config.llm.cloud.openai_model, api_key ? "(present)" : "(null)");
+            g_config.llm.cloud.openai_model, LOG_CREDENTIAL_STATUS(api_key));
 
    // Debug: Log conversation state on follow-up iterations
    if (iteration > 0) {
@@ -1247,11 +1247,12 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
          }
 
          // Check if provider changed (e.g., switch_llm was called)
+         // Resolve config once and reuse for both provider check and credentials
          llm_resolved_config_t current_config;
          char *result = NULL;
+         bool config_valid = (llm_get_current_resolved_config(&current_config) == 0);
 
-         if (llm_get_current_resolved_config(&current_config) == 0 &&
-             current_config.cloud_provider == CLOUD_PROVIDER_CLAUDE) {
+         if (config_valid && current_config.cloud_provider == CLOUD_PROVIDER_CLAUDE) {
             // Provider switched to Claude - hand off to Claude code path
             LOG_INFO("OpenAI streaming: Provider switched to Claude, handing off");
 
@@ -1262,16 +1263,12 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
                 current_config.endpoint, current_config.api_key,
                 (llm_claude_text_chunk_callback)chunk_callback, callback_userdata);
          } else {
-            // Still OpenAI-compatible (local or OpenAI cloud) - refresh credentials and continue
-            const char *fresh_url = base_url;
-            const char *fresh_api_key = api_key;
+            // Still OpenAI-compatible (local or OpenAI cloud) - use resolved config or fallback
+            const char *fresh_url = config_valid ? current_config.endpoint : base_url;
+            const char *fresh_api_key = config_valid ? current_config.api_key : api_key;
 
-            if (llm_get_current_resolved_config(&current_config) == 0) {
-               fresh_url = current_config.endpoint;
-               fresh_api_key = current_config.api_key;
-               if (fresh_url != base_url) {
-                  LOG_INFO("OpenAI streaming: Credentials refreshed to %s", fresh_url);
-               }
+            if (config_valid && fresh_url != base_url) {
+               LOG_INFO("OpenAI streaming: Credentials refreshed to %s", fresh_url);
             }
 
             result = llm_openai_streaming_internal(conversation_history, "", (char *)result_vision,

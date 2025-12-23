@@ -196,7 +196,9 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
                         size_t cur_len = strlen(ctx->tool_args_buffer[tc_index]);
                         size_t add_len = strlen(args_chunk);
                         if (cur_len + add_len < LLM_TOOLS_ARGS_LEN - 1) {
-                           strcat(ctx->tool_args_buffer[tc_index], args_chunk);
+                           // Use memcpy instead of strcat to avoid O(n^2) scanning
+                           memcpy(ctx->tool_args_buffer[tc_index] + cur_len, args_chunk, add_len);
+                           ctx->tool_args_buffer[tc_index][cur_len + add_len] = '\0';
                         }
                      }
                   }

@@ -1055,10 +1055,11 @@ void session_manager_save_all_histories(void) {
       int history_len = json_object_array_length(session->conversation_history);
       if (history_len > 1) {
          // Create unique filename with session ID and type
-         snprintf(filename, sizeof(filename), "chat_history_session%u_%s_%04d%02d%02d_%02d%02d%02d.json",
-                  session->session_id, session_type_name(session->type),
-                  time_info->tm_year + 1900, time_info->tm_mon + 1, time_info->tm_mday,
-                  time_info->tm_hour, time_info->tm_min, time_info->tm_sec);
+         snprintf(filename, sizeof(filename),
+                  "chat_history_session%u_%s_%04d%02d%02d_%02d%02d%02d.json", session->session_id,
+                  session_type_name(session->type), time_info->tm_year + 1900,
+                  time_info->tm_mon + 1, time_info->tm_mday, time_info->tm_hour, time_info->tm_min,
+                  time_info->tm_sec);
 
          FILE *chat_file = fopen(filename, "w");
          if (chat_file != NULL) {
@@ -1068,12 +1069,13 @@ void session_manager_save_all_histories(void) {
             if (json_string != NULL) {
                fprintf(chat_file, "%s\n", json_string);
                LOG_INFO("Saved conversation history for session %u (%s, %d messages) to: %s",
-                        session->session_id, session_type_name(session->type), history_len, filename);
+                        session->session_id, session_type_name(session->type), history_len,
+                        filename);
             }
             fclose(chat_file);
          } else {
-            LOG_ERROR("Failed to open chat history file for session %u: %s",
-                      session->session_id, filename);
+            LOG_ERROR("Failed to open chat history file for session %u: %s", session->session_id,
+                      filename);
          }
       }
 

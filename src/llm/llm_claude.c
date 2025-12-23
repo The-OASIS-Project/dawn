@@ -1232,9 +1232,11 @@ static char *llm_claude_streaming_internal(struct json_object *conversation_hist
          LOG_INFO("Claude streaming: Making follow-up call after tool execution (iteration %d/%d)",
                   iteration + 1, MAX_TOOL_ITERATIONS);
 
-         if (llm_get_current_resolved_config(&current_config) == 0 &&
-             (current_config.type == LLM_LOCAL ||
-              current_config.cloud_provider == CLOUD_PROVIDER_OPENAI)) {
+         // Resolve config once and reuse for both provider check and credentials
+         bool config_valid = (llm_get_current_resolved_config(&current_config) == 0);
+
+         if (config_valid && (current_config.type == LLM_LOCAL ||
+                              current_config.cloud_provider == CLOUD_PROVIDER_OPENAI)) {
             // Provider switched to OpenAI or local - hand off to OpenAI code path
             LOG_INFO("Claude streaming: Provider switched to OpenAI/local, handing off");
 
@@ -1244,14 +1246,9 @@ static char *llm_claude_streaming_internal(struct json_object *conversation_hist
                 current_config.endpoint, current_config.api_key,
                 (llm_openai_text_chunk_callback)chunk_callback, callback_userdata);
          } else {
-            // Still Claude - refresh credentials and continue
-            const char *fresh_url = base_url;
-            const char *fresh_api_key = api_key;
-
-            if (llm_get_current_resolved_config(&current_config) == 0) {
-               fresh_url = current_config.endpoint;
-               fresh_api_key = current_config.api_key;
-            }
+            // Still Claude - use resolved config or fallback to original
+            const char *fresh_url = config_valid ? current_config.endpoint : base_url;
+            const char *fresh_api_key = config_valid ? current_config.api_key : api_key;
 
             result = llm_claude_streaming_internal(conversation_history, "", (char *)result_vision,
                                                    result_vision_size, fresh_url, fresh_api_key,

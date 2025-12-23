@@ -400,15 +400,6 @@ static void executeJsonCommand(struct json_object *parsedJson, struct mosquitto 
       return;
    }
 
-   // Skip LLM call for viewing - it will be handled in VISION_AI_READY state with the image
-   if (strcmp(deviceName, "viewing") == 0) {
-      LOG_INFO(
-          "Viewing command completed - skipping LLM call, will process in VISION_AI_READY state");
-      free(pending_command_result);
-      pending_command_result = NULL;
-      return;
-   }
-
    // Format system data with clear instruction to speak it to the user
    // Using "system" role so LLM knows this is data to relay, not user input
    snprintf(gpt_response, sizeof(gpt_response),
@@ -2049,10 +2040,10 @@ char *urlFetchCallback(const char *actionName, char *value, int *should_respond)
       return strdup("Please provide a URL to fetch.");
    }
 
-   // Only support "fetch" action
-   if (strcmp(actionName, "fetch") != 0) {
+   // Only accept "get" action (standard for getter-type tools)
+   if (strcmp(actionName, "get") != 0) {
       LOG_WARNING("urlFetchCallback: Unknown action '%s'", actionName);
-      return strdup("Unknown URL action. Use: fetch");
+      return strdup("Unknown URL action. Use: get");
    }
 
    LOG_INFO("urlFetchCallback: Fetching URL '%s'", value);

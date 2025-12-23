@@ -739,11 +739,8 @@ int metrics_export_json(const char *filepath) {
            (long)snapshot.state_time[DAWN_STATE_WAKEWORD_LISTEN]);
    fprintf(fp, "    \"COMMAND_RECORDING\": %ld,\n",
            (long)snapshot.state_time[DAWN_STATE_COMMAND_RECORDING]);
-   fprintf(fp, "    \"PROCESS_COMMAND\": %ld,\n",
+   fprintf(fp, "    \"PROCESS_COMMAND\": %ld\n",
            (long)snapshot.state_time[DAWN_STATE_PROCESS_COMMAND]);
-   fprintf(fp, "    \"VISION_AI_READY\": %ld\n",
-           (long)snapshot.state_time[DAWN_STATE_VISION_AI_READY]);
-   // NOTE: NETWORK_PROCESSING removed - handled by worker threads
    fprintf(fp, "  },\n");
 
    const char *llm_type_str = (snapshot.current_llm_type == LLM_LOCAL)

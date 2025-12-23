@@ -159,4 +159,16 @@ void logging_suppress_console(int suppress);
  */
 #define LOG_ERROR(fmt, ...) log_message(LOG_ERROR, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
 
+/**
+ * @brief Macro for safely logging credential/API key status
+ *
+ * This macro prevents accidental logging of actual credentials by converting
+ * any non-NULL pointer to a safe status string. Use this instead of directly
+ * logging API keys or tokens.
+ *
+ * @param key  Pointer to credential (API key, token, etc.)
+ * @return     "(configured)" if key is non-NULL, "(not configured)" otherwise
+ */
+#define LOG_CREDENTIAL_STATUS(key) ((key) ? "(configured)" : "(not configured)")
+
 #endif  // LOGGING_H

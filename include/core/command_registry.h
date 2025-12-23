@@ -123,6 +123,7 @@ typedef struct {
    bool skip_followup;                     /**< Skip LLM follow-up after execution */
    bool enabled;                           /**< Runtime enable/disable */
    bool is_meta_tool;                      /**< true if this is a meta-tool (aggregates devices) */
+   bool is_getter;                         /**< true if type="getter" (reads data, doesn't set) */
    cmd_param_t parameters[CMD_MAX_PARAMS]; /**< Parameter definitions */
    int param_count;                        /**< Number of parameters */
    cmd_device_map_t device_map[CMD_MAX_DEVICE_MAP]; /**< Device mapping for meta-tools */

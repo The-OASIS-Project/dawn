@@ -65,14 +65,6 @@ static int s_enabled_count = 0; /* Cached enabled count, updated by llm_tools_re
 static bool s_initialized = false;
 
 /* =============================================================================
- * Pending Vision Data (for viewing tool)
- * ============================================================================= */
-
-static char *s_pending_vision_image = NULL;
-static size_t s_pending_vision_size = 0;
-static pthread_mutex_t s_pending_vision_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-/* =============================================================================
  * Tool Execution Notification Callback
  * ============================================================================= */
 
@@ -95,9 +87,6 @@ static void notify_tool_execution(const char *tool_name,
       s_execution_callback((void *)session, tool_name, tool_args, result, success);
    }
 }
-
-/* Forward declaration for atomic pending vision update */
-static void set_pending_vision_locked(char *image, size_t size);
 
 /* =============================================================================
  * Security Helpers
@@ -168,110 +157,6 @@ static bool is_base64_image_data(const char *str) {
    }
 
    return false;
-}
-
-/* =============================================================================
- * Vision Processing
- *
- * There are TWO vision data paths for session isolation:
- *
- * 1. NATIVE TOOL PATH (session-isolated):
- *    - execute_viewing_sync() stores vision in tool_result_t.vision_image
- *    - LLM streaming code (llm_openai.c, llm_claude.c) picks it up from results
- *    - Each session's tool results are isolated from other sessions
- *    - Caller must free tool_result_t.vision_image after use
- *
- * 2. VOICE COMMAND PATH (global, single-session):
- *    - viewingCallback in mosquitto_comms.c calls llm_tools_process_vision_data()
- *    - Vision stored in global s_pending_vision_image (mutex-protected)
- *    - dawn.c main loop picks it up via llm_tools_get_pending_vision()
- *    - This path is single-session so global state is acceptable
- *    - Consumer MUST call llm_tools_clear_pending_vision() after use
- *
- * The global pending vision functions are DEPRECATED for multi-session use.
- * New code should use tool_result_t.vision_image for session isolation.
- * ============================================================================= */
-
-/**
- * @brief Process vision data from either base64 or file path
- *
- * This is the unified handler for vision data from any source (native tools,
- * callbacks, MQTT responses). It detects the data type and stores in pending vision.
- *
- * @param data Vision data - either base64-encoded image or a file path
- * @param error_buf Output buffer for error messages (can be NULL)
- * @param error_len Size of error buffer
- * @return true on success (image stored in pending vision), false on failure
- */
-static bool process_vision_data(const char *data, char *error_buf, size_t error_len) {
-   if (!data || data[0] == '\0') {
-      if (error_buf) {
-         snprintf(error_buf, error_len, "Error: No vision data provided");
-      }
-      return false;
-   }
-
-   /* Check if data is an error response */
-   if (strncmp(data, "ERROR:", 6) == 0) {
-      if (error_buf) {
-         snprintf(error_buf, error_len, "%s", data);
-      }
-      return false;
-   }
-
-   char *base64_image = NULL;
-
-   if (is_base64_image_data(data)) {
-      /* Data is already base64-encoded image */
-      LOG_INFO("Vision data is inline base64 (%zu bytes)", strlen(data));
-      base64_image = strdup(data);
-      if (!base64_image) {
-         if (error_buf) {
-            snprintf(error_buf, error_len, "Error: Memory allocation failed");
-         }
-         return false;
-      }
-   } else {
-      /* Data is a file path - validate, read, and encode */
-      LOG_INFO("Vision data is file path: %s", data);
-
-      /* Validate path for security */
-      if (!validate_file_path(data)) {
-         if (error_buf) {
-            snprintf(error_buf, error_len, "Error: Invalid or unsafe file path: %s", data);
-         }
-         return false;
-      }
-
-      /* Read file */
-      size_t file_size = 0;
-      unsigned char *file_content = read_file(data, &file_size);
-      if (!file_content) {
-         if (error_buf) {
-            snprintf(error_buf, error_len, "Error: Could not read image file: %s", data);
-         }
-         return false;
-      }
-
-      /* Encode to base64 */
-      base64_image = base64_encode(file_content, file_size);
-      free(file_content);
-
-      if (!base64_image) {
-         if (error_buf) {
-            snprintf(error_buf, error_len, "Error: Could not encode image to base64");
-         }
-         return false;
-      }
-      LOG_INFO("Image file encoded: %zu bytes base64", strlen(base64_image));
-   }
-
-   /* Store in pending vision (takes ownership of base64_image) */
-   size_t image_size = strlen(base64_image) + 1;
-   set_pending_vision_locked(base64_image, image_size);
-
-   LOG_INFO("Vision image stored in pending vision: %zu bytes", image_size);
-   return true;
 }
 
 /**
@@ -456,9 +341,9 @@ static int extract_params_from_registry(const cmd_definition_t *cmd,
       return 1;
    }
 
-   /* Set defaults */
+   /* Set defaults - action based on tool type (getter reads, setter writes) */
    device[0] = '\0';
-   strcpy(action, "get"); /* Default action */
+   strcpy(action, cmd->is_getter ? "get" : "set");
    value[0] = '\0';
 
    /* For meta-tools, start with the tool's device_string as device */
@@ -566,29 +451,6 @@ static int extract_params_from_registry(const cmd_definition_t *cmd,
                }
             }
             break;
-      }
-   }
-
-   /* If a value was set but action is still default "get", change to "set"
-    * This handles tools like hud_mode where only a value parameter is provided.
-    *
-    * IMPORTANT: Only apply this conversion if the tool doesn't have an explicit
-    * action parameter (maps_to == CMD_MAPS_TO_ACTION). Tools like weather have
-    * an enum parameter that maps to action (today/tomorrow/week) - when no time
-    * is specified, action stays "get" which weatherCallback interprets as "today".
-    * We must NOT override this to "set" just because a location value was given.
-    */
-   if (value[0] != '\0' && strcmp(action, "get") == 0) {
-      bool has_action_param = false;
-      for (int i = 0; i < cmd->param_count; i++) {
-         if (cmd->parameters[i].maps_to == CMD_MAPS_TO_ACTION) {
-            has_action_param = true;
-            break;
-         }
-      }
-      /* Only convert to "set" for tools without explicit action parameters */
-      if (!has_action_param) {
-         strcpy(action, "set");
       }
    }
 
@@ -1155,7 +1017,13 @@ int llm_tools_parse_openai_response(struct json_object *response, tool_call_list
       tool_call_t *call = &out->calls[out->count++];
       safe_strncpy(call->id, json_object_get_string(id_obj), LLM_TOOLS_ID_LEN);
       safe_strncpy(call->name, json_object_get_string(name_obj), LLM_TOOLS_NAME_LEN);
-      safe_strncpy(call->arguments, json_object_get_string(args_obj), LLM_TOOLS_ARGS_LEN);
+
+      const char *args_str = json_object_get_string(args_obj);
+      if (args_str && strlen(args_str) >= LLM_TOOLS_ARGS_LEN) {
+         LOG_WARNING("Tool '%s' arguments truncated from %zu to %d bytes", call->name,
+                     strlen(args_str), LLM_TOOLS_ARGS_LEN - 1);
+      }
+      safe_strncpy(call->arguments, args_str ? args_str : "", LLM_TOOLS_ARGS_LEN);
    }
 
    return out->count > 0 ? 0 : 1;
@@ -1308,79 +1176,19 @@ void llm_tools_prepare_followup(const tool_result_list_t *results, tool_followup
 }
 
 /* =============================================================================
- * Pending Vision Data Functions
+ * Legacy MQTT Vision Support (deprecated)
+ *
+ * Vision is now handled by native tool calling - the viewing tool captures
+ * images and streaming code passes vision data to recursive LLM calls.
  * ============================================================================= */
 
-bool llm_tools_has_pending_vision(void) {
-   pthread_mutex_lock(&s_pending_vision_mutex);
-   bool result = s_pending_vision_image != NULL && s_pending_vision_size > 0;
-   pthread_mutex_unlock(&s_pending_vision_mutex);
-   return result;
-}
-
-const char *llm_tools_get_pending_vision(size_t *size_out) {
-   pthread_mutex_lock(&s_pending_vision_mutex);
-   if (size_out) {
-      *size_out = s_pending_vision_size;
-   }
-   const char *result = s_pending_vision_image;
-   pthread_mutex_unlock(&s_pending_vision_mutex);
-   return result;
-}
-
-void llm_tools_clear_pending_vision(void) {
-   pthread_mutex_lock(&s_pending_vision_mutex);
-   if (s_pending_vision_image) {
-      free(s_pending_vision_image);
-      s_pending_vision_image = NULL;
-   }
-   s_pending_vision_size = 0;
-   pthread_mutex_unlock(&s_pending_vision_mutex);
-}
-
-bool llm_tools_set_pending_vision(const char *base64_image, size_t size) {
-   if (!base64_image || size == 0) {
-      return false;
-   }
-
-   char *copy = malloc(size);
-   if (!copy) {
-      LOG_ERROR("llm_tools_set_pending_vision: malloc failed");
-      return false;
-   }
-   memcpy(copy, base64_image, size);
-
-   pthread_mutex_lock(&s_pending_vision_mutex);
-   if (s_pending_vision_image) {
-      free(s_pending_vision_image);
-   }
-   s_pending_vision_image = copy;
-   s_pending_vision_size = size;
-   pthread_mutex_unlock(&s_pending_vision_mutex);
-
-   LOG_INFO("llm_tools_set_pending_vision: stored %zu bytes", size);
-   return true;
-}
-
 bool llm_tools_process_vision_data(const char *data, char *error_buf, size_t error_len) {
-   return process_vision_data(data, error_buf, error_len);
-}
-
-/**
- * @brief Atomically set pending vision data (internal, takes ownership)
- *
- * Clears any existing pending vision and sets new data.
- * Takes ownership of the image pointer (caller should not free).
- *
- * @param image Base64-encoded image data (takes ownership)
- * @param size Size of image data
- */
-static void set_pending_vision_locked(char *image, size_t size) {
-   pthread_mutex_lock(&s_pending_vision_mutex);
-   if (s_pending_vision_image) {
-      free(s_pending_vision_image);
+   (void)data;
+   LOG_WARNING("llm_tools_process_vision_data: MQTT vision path deprecated - use native tool "
+               "calling instead");
+   if (error_buf && error_len > 0) {
+      snprintf(error_buf, error_len,
+               "MQTT vision deprecated - use 'what do you see?' to trigger viewing tool");
    }
-   s_pending_vision_image = image;
-   s_pending_vision_size = size;
-   pthread_mutex_unlock(&s_pending_vision_mutex);
+   return false;
 }

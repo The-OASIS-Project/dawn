@@ -105,7 +105,7 @@
 // URL fetcher rules (always available - basic HTTP fetch)
 #define AI_RULES_URL                                                                         \
    "URL: Fetch and read content from a URL. Use when you need to read a specific webpage.\n" \
-   "   <command>{\"device\":\"url\",\"action\":\"fetch\",\"value\":\"https://example.com\"}" \
+   "   <command>{\"device\":\"url\",\"action\":\"get\",\"value\":\"https://example.com\"}"   \
    "</command>\n"
 
 // LLM control rules (always available - query and switch AI backend)

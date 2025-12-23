@@ -211,7 +211,8 @@ pthread_t llm_thread;
 volatile int llm_processing = 0;     // Flag: 1 if LLM thread is running, 0 otherwise
 struct timeval pipeline_start_time;  // Track when pipeline processing starts
 
-/* Legacy vision_ai_image storage removed - now using llm_tools_*_pending_vision() */
+/* Vision is handled by native tool calling - viewing tool captures and streaming code
+ * passes vision data to recursive LLM calls automatically (session-isolated). */
 
 /**
  * @var volatile sig_atomic_t quit
@@ -357,10 +358,10 @@ static int g_bargein_disabled = 1;       // Start disabled until after boot cali
 static int g_bargein_user_disabled = 0;  // Set by --no-bargein CLI option
 
 // Shared buffers for LLM thread communication (protected by llm_mutex)
-static char *llm_request_text = NULL;     // Input: command text for LLM
-static char *llm_response_text = NULL;    // Output: LLM response
-static char *llm_vision_image = NULL;     // Input: vision image data
-static size_t llm_vision_image_size = 0;  // Input: vision image size
+static char *llm_request_text = NULL;   // Input: command text for LLM
+static char *llm_response_text = NULL;  // Output: LLM response
+// Note: Vision is handled by native tool calling - viewing tool captures image
+// and streaming code passes it to recursive LLM calls automatically
 
 /**
  * @brief Callback for streaming LLM responses with TTS
@@ -839,13 +840,7 @@ int capture_buffer(audioControl *myAudioControls,
    return 0;  // Success
 }
 
-/* Legacy vision functions removed - now using llm_tools_*_pending_vision()
- * See llm_tools.h for the unified vision API:
- * - llm_tools_has_pending_vision()
- * - llm_tools_get_pending_vision()
- * - llm_tools_clear_pending_vision()
- * - llm_tools_process_vision_data()
- */
+/* Vision is handled by native tool calling (viewing tool) - no legacy global state needed */
 
 dawn_state_t currentState = DAWN_STATE_INVALID;
 
@@ -1172,14 +1167,8 @@ void *llm_worker_thread(void *arg) {
    // Lock mutex to access shared data
    pthread_mutex_lock(&llm_mutex);
 
-   // Copy request data to local variables (minimize time holding mutex)
+   // Copy request data to local variable (minimize time holding mutex)
    char *request_text = llm_request_text ? strdup(llm_request_text) : NULL;
-   char *vision_image = llm_vision_image ? malloc(llm_vision_image_size) : NULL;
-   size_t vision_image_size = llm_vision_image_size;
-
-   if (vision_image && llm_vision_image) {
-      memcpy(vision_image, llm_vision_image, llm_vision_image_size);
-   }
 
    pthread_mutex_unlock(&llm_mutex);
 
@@ -1196,24 +1185,22 @@ void *llm_worker_thread(void *arg) {
    llm_resolve_config(&session_config, &resolved_config);
 
    // Set command context so tool callbacks (e.g., switch_llm) use local session's config
-   session_set_command_context(local_session);
+   // Uses scope guard to ensure cleanup even on early returns
+   SESSION_SCOPED_COMMAND_CONTEXT(local_session);
 
    // Call LLM with resolved config (this can take 10+ seconds)
    // Note: conversation_history is a global, but only main thread modifies it during setup
    // and we only read it here, so no mutex needed for conversation_history itself
-   char *response = llm_chat_completion_streaming_tts_with_config(
-       conversation_history, request_text, vision_image, vision_image_size,
-       dawn_tts_sentence_callback, NULL, &resolved_config);
+   // Vision is handled by native tool calling - viewing tool captures image internally
+   char *response = llm_chat_completion_streaming_tts_with_config(conversation_history,
+                                                                  request_text, NULL, 0,
+                                                                  dawn_tts_sentence_callback, NULL,
+                                                                  &resolved_config);
+   // Command context auto-cleared by scope guard
 
-   // Clear command context
-   session_set_command_context(NULL);
-
-   // Free local copies
+   // Free local copy
    if (request_text) {
       free(request_text);
-   }
-   if (vision_image) {
-      free(vision_image);
    }
 
    // Lock mutex to store response
@@ -1863,7 +1850,8 @@ int main(int argc, char *argv[]) {
 
    // Initialize command registry (unified command lookup)
    if (command_registry_init() != 0) {
-      LOG_WARNING("Command registry init failed - commands will use legacy path");
+      LOG_ERROR("Command registry init failed - cannot continue safely");
+      return 1;
    }
 
    // Initialize LLM system early - must happen before prompt is built
@@ -2236,14 +2224,6 @@ int main(int argc, char *argv[]) {
       }
 #endif
 
-      if (llm_tools_has_pending_vision()) {
-         recState = DAWN_STATE_VISION_AI_READY;
-         // Reset VAD state at interaction boundary (vision AI entry)
-         if (vad_ctx) {
-            vad_silero_reset(vad_ctx);
-         }
-      }
-
       // NOTE: Network audio handling removed - will be handled by worker threads (Phase 3/4)
       // Legacy network client support via dawn_server is disabled until worker pipeline is
       // complete.
@@ -2293,10 +2273,12 @@ int main(int argc, char *argv[]) {
             // Process any commands in the LLM response
             if (command_processing_mode == CMD_MODE_LLM_ONLY ||
                 command_processing_mode == CMD_MODE_DIRECT_FIRST) {
-               // Set command context so LLM callbacks use local session's config
-               session_set_command_context(session_get_local());
-               int cmds_processed = parse_llm_response_for_commands(response_text, mosq);
-               session_set_command_context(NULL);  // Clear context
+               int cmds_processed;
+               {
+                  // Set command context so LLM callbacks use local session's config
+                  SESSION_SCOPED_COMMAND_CONTEXT(session_get_local());
+                  cmds_processed = parse_llm_response_for_commands(response_text, mosq);
+               }
                if (cmds_processed > 0) {
                   LOG_INFO("Processed %d commands from LLM response", cmds_processed);
                }
@@ -3328,8 +3310,8 @@ int main(int argc, char *argv[]) {
 
             /* Process Commands before AI if LLM command processing is disabled */
             if (command_processing_mode != CMD_MODE_LLM_ONLY) {
-               /* Set command context so callbacks (e.g., switch_llm) use local session */
-               session_set_command_context(local_session);
+               /* Set command context so callbacks use local session (auto-cleared on scope exit) */
+               SESSION_SCOPED_COMMAND_CONTEXT(local_session);
 
                /* Process Commands before AI. */
                for (i = 0; i < numCommands; i++) {
@@ -3410,9 +3392,7 @@ int main(int argc, char *argv[]) {
                      break;
                   }
                }
-
-               /* Clear command context */
-               session_set_command_context(NULL);
+               /* Command context auto-cleared by scope guard */
             }
 
             // Handle direct command found - transition back to listening state
@@ -3525,23 +3505,6 @@ int main(int argc, char *argv[]) {
                   llm_request_text = command_text;
                   command_text = NULL;  // Thread will free this
 
-                  // Pass vision data if available (from unified pending vision storage)
-                  if (llm_tools_has_pending_vision()) {
-                     size_t pending_size = 0;
-                     const char *pending_vision = llm_tools_get_pending_vision(&pending_size);
-                     if (pending_vision && pending_size > 0) {
-                        llm_vision_image = (char *)pending_vision;
-                        llm_vision_image_size = pending_size;
-                        // Note: worker will call llm_tools_clear_pending_vision() when done
-                     } else {
-                        llm_vision_image = NULL;
-                        llm_vision_image_size = 0;
-                     }
-                  } else {
-                     llm_vision_image = NULL;
-                     llm_vision_image_size = 0;
-                  }
-
                   // Mark LLM as processing and record pipeline start time
                   llm_processing = 1;
                   gettimeofday(&pipeline_start_time, NULL);
@@ -3578,109 +3541,6 @@ int main(int argc, char *argv[]) {
             }
 
             break;  // DAWN_STATE_PROCESS_COMMAND case end
-         case DAWN_STATE_VISION_AI_READY:
-            pthread_mutex_lock(&tts_mutex);
-            if (tts_playback_state == TTS_PLAYBACK_PAUSE) {
-               tts_playback_state = TTS_PLAYBACK_PLAY;
-               pthread_cond_signal(&tts_cond);
-            }
-            pthread_mutex_unlock(&tts_mutex);
-
-            // Remove assistant's viewing command and replace user's trigger phrase
-            // (otherwise LLM sees "what am I looking at?" and Rule #3 triggers again)
-            size_t history_len = json_object_array_length(conversation_history);
-
-            // Remove assistant's command response (should be last message)
-            if (history_len > 0) {
-               struct json_object *last_msg = json_object_array_get_idx(conversation_history,
-                                                                        history_len - 1);
-               struct json_object *role_obj;
-               if (json_object_object_get_ex(last_msg, "role", &role_obj)) {
-                  const char *role = json_object_get_string(role_obj);
-                  if (strcmp(role, "assistant") == 0) {
-                     json_object_array_del_idx(conversation_history, history_len - 1, 1);
-                     history_len--;  // Update length after deletion
-                  }
-               }
-            }
-
-            // Replace user's vision request with neutral prompt (avoids Rule #3 trigger)
-            if (history_len > 0) {
-               struct json_object *last_msg = json_object_array_get_idx(conversation_history,
-                                                                        history_len - 1);
-               struct json_object *role_obj;
-               if (json_object_object_get_ex(last_msg, "role", &role_obj)) {
-                  const char *role = json_object_get_string(role_obj);
-                  if (strcmp(role, "user") == 0) {
-                     // Replace the content with a neutral vision description request
-                     json_object_object_del(last_msg, "content");
-                     json_object_object_add(last_msg, "content",
-                                            json_object_new_string(
-                                                "Please describe this captured image."));
-                  }
-               }
-            }
-
-            // Get the AI response using the image recognition.
-            // The user message was already added in DAWN_STATE_PROCESS_COMMAND state
-            // The vision image will be added by llm_claude.c/llm_openai.c to the last user message
-            // Use streaming with TTS sentence buffering for immediate response
-            // Use local session's LLM config for per-session settings
-            session_llm_config_t vision_session_config;
-            session_get_llm_config(local_session, &vision_session_config);
-            llm_resolved_config_t vision_resolved_config;
-            llm_resolve_config(&vision_session_config, &vision_resolved_config);
-
-            // Get pending vision data from unified storage
-            size_t pending_vision_size = 0;
-            const char *pending_vision_data = llm_tools_get_pending_vision(&pending_vision_size);
-
-            // Set command context so tool callbacks use local session's config
-            session_set_command_context(local_session);
-
-            response_text = llm_chat_completion_streaming_tts_with_config(
-                conversation_history,
-                "Describe this image in detail. Ignore any overlay graphics unless specifically "
-                "asked.",
-                pending_vision_data, pending_vision_size, dawn_tts_sentence_callback, NULL,
-                &vision_resolved_config);
-
-            // Clear command context
-            session_set_command_context(NULL);
-            if (response_text != NULL) {
-               // AI returned successfully
-               LOG_WARNING("AI: %s\n", response_text);
-               metrics_set_last_ai_response(response_text);
-               // TTS already handled by streaming callback
-
-               // Add the successful AI response to the conversation.
-               struct json_object *ai_message = json_object_new_object();
-               json_object_object_add(ai_message, "role", json_object_new_string("assistant"));
-               json_object_object_add(ai_message, "content", json_object_new_string(response_text));
-               json_object_array_add(conversation_history, ai_message);
-
-               free(response_text);
-            } else {
-               // Error on AI response
-               LOG_ERROR("GPT error.\n");
-               metrics_record_error();
-               text_to_speech("I'm sorry but I'm currently unavailable boss.");
-            }
-
-            // Cleanup vision data after use
-            llm_tools_clear_pending_vision();
-
-            // Set the next listening state
-            silenceNextState = DAWN_STATE_WAKEWORD_LISTEN;
-            recState = DAWN_STATE_SILENCE;
-
-            // Reset all subsystems for new utterance (vision AI complete)
-            reset_for_new_utterance(vad_ctx, asr_ctx, chunk_mgr, &silence_duration,
-                                    &speech_duration, &recording_duration, &preroll_write_pos,
-                                    &preroll_valid_bytes);
-
-            break;
-         // NOTE: DAWN_STATE_NETWORK_PROCESSING removed - worker threads handle network clients
          default:
             LOG_ERROR("I really shouldn't be here.\n");
       }
