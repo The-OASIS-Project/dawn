@@ -89,6 +89,8 @@
       "tool": {
         "name": "visual_offset",
         "description": "Adjust the 3D visual offset for stereoscopic display alignment.",
+        "default_remote": false,
+        "armor_feature": true,
         "parameters": [
           {"name": "pixels", "type": "integer", "description": "Offset in pixels (positive or negative)", "required": true, "maps_to": "value"}
         ]
@@ -101,6 +103,8 @@
        "tool": {
          "name": "hud_mode",
          "description": "Switch the HUD display mode. Available modes: default, environmental, armor.",
+         "default_remote": false,
+         "armor_feature": true,
          "parameters": [
            {"name": "mode", "type": "enum", "enum": ["default", "environmental", "armor"], "description": "The HUD mode to switch to", "required": true, "maps_to": "value"}
          ]
@@ -112,6 +116,8 @@
        "topic": "helmet",
        "tool": {
          "description": "Control the helmet faceplate/visor. Open or close the faceplate.",
+         "default_remote": false,
+         "armor_feature": true,
          "parameters": [
            {"name": "action", "type": "enum", "enum": ["enable", "disable"], "description": "Whether to open or close the faceplate", "required": true, "maps_to": "action"}
          ]
@@ -162,6 +168,7 @@
        "topic": "dawn",
        "tool": {
          "description": "Set the audio volume level for TTS and music playback.",
+         "default_remote": false,
          "parameters": [
            {"name": "level", "type": "integer", "description": "Volume level from 0 (silent) to 100 (maximum)", "required": true, "maps_to": "value"}
          ]
@@ -204,6 +211,7 @@
        "sync_wait": true,
        "tool": {
          "description": "Analyze what the camera sees. Takes a photo and describes the scene, identifies objects, reads text, or answers questions about the view.",
+         "default_remote": false,
          "parameters": [
            {"name": "query", "type": "string", "description": "What to look for or question about the view (e.g., 'what do you see?', 'read the text', 'is anyone there?')", "required": false, "maps_to": "value"}
          ]
@@ -218,6 +226,7 @@
        "topic": "dawn",
        "tool": {
          "description": "Control music playback. Can play, pause, stop, skip tracks, or play a specific song/artist.",
+         "default_remote": false,
          "parameters": [
            {"name": "action", "type": "enum", "enum": ["play", "pause", "stop", "next", "previous", "shuffle"], "description": "The playback action", "required": true, "maps_to": "action"},
            {"name": "query", "type": "string", "description": "Song/artist name to play (for 'play' action)", "required": false, "maps_to": "value"}
@@ -230,6 +239,8 @@
        "topic": "dawn",
        "tool": {
          "description": "Control the voice amplifier/PA system for projecting voice through external speakers.",
+         "default_remote": false,
+         "armor_feature": true,
          "parameters": [
            {"name": "action", "type": "enum", "enum": ["enable", "disable"], "description": "Whether to enable or disable voice amplification", "required": true, "maps_to": "action"}
          ]
@@ -317,6 +328,8 @@
       "description": "Control HUD (Heads-Up Display) elements. Enable or disable display overlays like the armor display, minimap, object detection, or info panel.",
       "device_map": {"armor_display": "armor_display", "detect": "detect", "map": "map", "info": "info"},
       "topic": "hud",
+      "default_remote": false,
+      "armor_feature": true,
       "parameters": [
         {"name": "element", "type": "enum", "enum": ["armor_display", "detect", "map", "info"], "description": "The HUD element to control", "required": true, "maps_to": "device"},
         {"name": "action", "type": "enum", "enum": ["enable", "disable"], "description": "Whether to show or hide the element", "required": true, "maps_to": "action"}
@@ -332,6 +345,8 @@
       "description": "Control video recording and streaming. Start or stop recording, streaming, or both simultaneously.",
       "device_map": {"record": "record", "stream": "stream", "record_and_stream": "record and stream"},
       "topic": "hud",
+      "default_remote": false,
+      "armor_feature": true,
       "parameters": [
         {"name": "mode", "type": "enum", "enum": ["record", "stream", "record_and_stream"], "description": "What to control", "required": true, "maps_to": "device"},
         {"name": "action", "type": "enum", "enum": ["enable", "disable"], "description": "Whether to start or stop", "required": true, "maps_to": "action"}
@@ -341,6 +356,7 @@
       "description": "Switch audio input or output devices.",
       "device_map": {"capture": "audio capture device", "playback": "audio playback device"},
       "topic": "dawn",
+      "default_remote": false,
       "parameters": [
         {"name": "type", "type": "enum", "enum": ["capture", "playback"], "description": "The type of audio device to change", "required": true, "maps_to": "device"},
         {"name": "device", "type": "string", "description": "Device name (e.g., 'microphone', 'headphones', 'speakers')", "required": true, "maps_to": "value"}

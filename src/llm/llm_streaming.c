@@ -26,6 +26,7 @@
 #include <string.h>
 #include <sys/time.h>
 
+#include "llm/llm_context.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
 #include "ui/metrics.h"
@@ -257,6 +258,10 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
          llm_type_t type = (ctx->llm_type == LLM_LOCAL) ? LLM_LOCAL : LLM_CLOUD;
          metrics_record_llm_tokens(type, ctx->cloud_provider, input_tokens, output_tokens,
                                    cached_tokens);
+
+         // Update context usage tracking (session 0 = local session)
+         llm_context_update_usage(0, input_tokens, output_tokens, cached_tokens);
+
          LOG_INFO("Stream usage: %d input, %d output, %d cached tokens", input_tokens,
                   output_tokens, cached_tokens);
       }
@@ -429,6 +434,10 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
             // Record token metrics (input was captured in message_start)
             metrics_record_llm_tokens(LLM_CLOUD, CLOUD_PROVIDER_CLAUDE, ctx->claude_input_tokens,
                                       output_tokens, 0);
+
+            // Update context usage tracking (session 0 = local session)
+            llm_context_update_usage(0, ctx->claude_input_tokens, output_tokens, 0);
+
             LOG_INFO("Claude usage: %d input, %d output tokens", ctx->claude_input_tokens,
                      output_tokens);
          }

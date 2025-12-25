@@ -91,6 +91,7 @@ typedef enum {
    WS_RESP_SESSION,    /* Session token for client */
    WS_RESP_AUDIO,      /* Binary audio data (Opus encoded) */
    WS_RESP_AUDIO_END,  /* End of audio stream marker */
+   WS_RESP_CONTEXT,    /* Context/token usage update */
 } ws_response_type_t;
 
 /* =============================================================================
@@ -181,6 +182,21 @@ void webui_send_transcript(struct session *session, const char *role, const char
  * @note Thread-safe - can be called from any thread
  */
 void webui_send_state(struct session *session, const char *state);
+
+/**
+ * @brief Send context/token usage update to WebSocket client
+ *
+ * @param session Session to send to (must be SESSION_TYPE_WEBSOCKET), or NULL for all
+ * @param current_tokens Current tokens used
+ * @param max_tokens Maximum context size
+ * @param threshold Compaction threshold (0.0-1.0)
+ *
+ * @note Thread-safe - can be called from any thread
+ */
+void webui_send_context(struct session *session,
+                        int current_tokens,
+                        int max_tokens,
+                        float threshold);
 
 /**
  * @brief Send error message to WebSocket client

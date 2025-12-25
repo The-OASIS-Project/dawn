@@ -33,6 +33,7 @@
 
 #include "core/worker_pool.h"
 #include "logging.h"
+#include "tools/string_utils.h"
 #include "tools/toml.h"
 
 #define SUCCESS 0
@@ -362,10 +363,41 @@ static void parse_llm_tools(toml_table_t *table, llm_tools_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = { "native_enabled", NULL };
+   static const char *const known_keys[] = { "native_enabled", "local_enabled", "remote_enabled",
+                                             NULL };
    warn_unknown_keys(table, "llm.tools", known_keys);
 
    PARSE_BOOL(table, "native_enabled", config->native_enabled);
+
+   /* Parse local_enabled array */
+   toml_array_t *local_arr = toml_array_in(table, "local_enabled");
+   if (local_arr) {
+      config->local_enabled_count = 0;
+      for (int i = 0; i < toml_array_nelem(local_arr) && i < LLM_TOOLS_MAX_CONFIGURED; i++) {
+         toml_datum_t val = toml_string_at(local_arr, i);
+         if (val.ok) {
+            safe_strncpy(config->local_enabled[config->local_enabled_count++], val.u.s,
+                         LLM_TOOL_NAME_MAX);
+            free(val.u.s);
+         }
+      }
+      LOG_INFO("Parsed %d tools in llm.tools.local_enabled", config->local_enabled_count);
+   }
+
+   /* Parse remote_enabled array */
+   toml_array_t *remote_arr = toml_array_in(table, "remote_enabled");
+   if (remote_arr) {
+      config->remote_enabled_count = 0;
+      for (int i = 0; i < toml_array_nelem(remote_arr) && i < LLM_TOOLS_MAX_CONFIGURED; i++) {
+         toml_datum_t val = toml_string_at(remote_arr, i);
+         if (val.ok) {
+            safe_strncpy(config->remote_enabled[config->remote_enabled_count++], val.u.s,
+                         LLM_TOOL_NAME_MAX);
+            free(val.u.s);
+         }
+      }
+      LOG_INFO("Parsed %d tools in llm.tools.remote_enabled", config->remote_enabled_count);
+   }
 }
 
 static void parse_llm(toml_table_t *table, llm_config_t *config) {
@@ -373,12 +405,15 @@ static void parse_llm(toml_table_t *table, llm_config_t *config) {
       return;
 
    static const char *const known_keys[] = {
-      "type", "max_tokens", "cloud", "local", "tools", NULL
+      "type",  "max_tokens", "summarize_threshold", "conversation_logging", "cloud", "local",
+      "tools", NULL
    };
    warn_unknown_keys(table, "llm", known_keys);
 
    PARSE_STRING(table, "type", config->type);
    PARSE_INT(table, "max_tokens", config->max_tokens);
+   PARSE_DOUBLE(table, "summarize_threshold", config->summarize_threshold);
+   PARSE_BOOL(table, "conversation_logging", config->conversation_logging);
 
    /* Parse [llm.cloud], [llm.local], and [llm.tools] sub-tables */
    toml_table_t *cloud = toml_table_in(table, "cloud");

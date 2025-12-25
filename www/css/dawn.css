@@ -347,6 +347,67 @@ html, body {
 }
 
 /* =============================================================================
+ * Context Usage Display
+ * ============================================================================= */
+.context-display {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 0.5rem 1rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.75rem;
+}
+
+.context-display.hidden {
+  display: none;
+}
+
+.context-label {
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.context-bar-container {
+  position: relative;
+  width: 120px;
+  height: 8px;
+  background-color: var(--bg-secondary);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.context-bar {
+  height: 100%;
+  background-color: var(--success);
+  border-radius: 4px;
+  transition: width 0.3s ease, background-color 0.3s ease;
+}
+
+.context-bar.warning {
+  background-color: var(--warning);
+}
+
+.context-bar.danger {
+  background-color: var(--error);
+}
+
+.context-threshold {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  width: 2px;
+  background-color: var(--text-secondary);
+  opacity: 0.5;
+}
+
+.context-text {
+  color: var(--text-secondary);
+  min-width: 100px;
+}
+
+/* =============================================================================
  * LLM Quick Controls
  * ============================================================================= */
 #llm-controls {
@@ -1459,4 +1520,139 @@ button:disabled {
 
 .st-visible-block {
   display: block;
+}
+
+/* =============================================================================
+ * LLM Tools Configuration Section
+ * ============================================================================= */
+.tools-info {
+  margin-bottom: 1rem;
+}
+
+.tools-info p {
+  margin: 0 0 0.5rem 0;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+.tools-token-estimate {
+  display: flex;
+  gap: 1rem;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  padding: 0.5rem;
+  border-radius: 4px;
+  margin-top: 0.5rem;
+}
+
+.tools-token-estimate span:first-child {
+  color: var(--text-primary);
+}
+
+.tools-header-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 50px 50px;
+  padding: 0.4rem 0.5rem;
+  background: var(--bg-tertiary);
+  border-radius: 4px 4px 0 0;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  gap: 0.25rem;
+}
+
+.tools-header-local,
+.tools-header-remote {
+  text-align: center;
+}
+
+.tools-list {
+  max-height: 300px;
+  overflow-y: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 0 0 4px 4px;
+  margin-bottom: 1rem;
+}
+
+.tools-loading {
+  padding: 1rem;
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.tool-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 50px 50px;
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid var(--border-color);
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.tool-item:last-child {
+  border-bottom: none;
+}
+
+.tool-item:hover {
+  background: var(--bg-secondary);
+}
+
+.tool-item.disabled {
+  opacity: 0.5;
+}
+
+.tool-info {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.tool-name {
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.armor-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-muted);
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
+.armor-icon svg {
+  display: block;
+}
+
+.tool-description {
+  display: none;
+}
+
+.tool-checkbox {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.tool-checkbox input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: var(--accent-color);
+}
+
+.tool-checkbox input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+}
+
+#save-tools-btn {
+  margin-top: 0.5rem;
 }

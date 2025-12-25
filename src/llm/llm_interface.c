@@ -38,6 +38,7 @@
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
 #include "dawn.h"
+#include "llm/llm_context.h"
 #include "llm/llm_tools.h"
 #include "llm/sentence_buffer.h"
 #include "logging.h"
@@ -347,6 +348,22 @@ void llm_init(const char *cloud_provider_override) {
 
    // Initialize tool calling system (registers tools, checks capabilities)
    llm_tools_init();
+
+   // Apply per-tool enable config from TOML
+   if (g_config.llm.tools.local_enabled_count > 0 || g_config.llm.tools.remote_enabled_count > 0) {
+      const char *local_list[LLM_TOOLS_MAX_CONFIGURED];
+      const char *remote_list[LLM_TOOLS_MAX_CONFIGURED];
+
+      for (int i = 0; i < g_config.llm.tools.local_enabled_count; i++) {
+         local_list[i] = g_config.llm.tools.local_enabled[i];
+      }
+      for (int i = 0; i < g_config.llm.tools.remote_enabled_count; i++) {
+         remote_list[i] = g_config.llm.tools.remote_enabled[i];
+      }
+
+      llm_tools_apply_config(local_list, g_config.llm.tools.local_enabled_count, remote_list,
+                             g_config.llm.tools.remote_enabled_count);
+   }
 }
 
 int llm_refresh_providers(void) {
@@ -721,6 +738,10 @@ char *llm_chat_completion_streaming(struct json_object *conversation_history,
       }
    }
 
+   /* Auto-compact conversation if approaching context limit */
+   uint32_t session_id = session ? session->session_id : 0;
+   llm_context_auto_compact(conversation_history, session_id);
+
    /* Track LLM total time */
    struct timeval start_time, end_time;
    gettimeofday(&start_time, NULL);
@@ -1013,6 +1034,11 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
    }
 
    char *response = NULL;
+
+   // Auto-compact conversation if approaching context limit
+   session_t *session = session_get_command_context();
+   uint32_t session_id = session ? session->session_id : 0;
+   llm_context_auto_compact(conversation_history, session_id);
 
    // Track LLM total time
    struct timeval start_time, end_time;

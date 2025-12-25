@@ -45,6 +45,7 @@
 #include "core/session_manager.h"
 #include "dawn.h"
 #include "llm/llm_command_parser.h"
+#include "llm/llm_context.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
@@ -1773,6 +1774,7 @@ char *cloudProviderCallback(const char *actionName, char *value, int *should_res
  * This provides a single entry point for the switch_llm tool.
  */
 char *switchLlmCallback(const char *actionName, char *value, int *should_respond) {
+   extern struct json_object *conversation_history;
    *should_respond = 1;
 
    if (!actionName || actionName[0] == '\0') {
@@ -1780,6 +1782,47 @@ char *switchLlmCallback(const char *actionName, char *value, int *should_respond
    }
 
    LOG_INFO("switchLlmCallback: Switching to '%s'", actionName);
+
+   /* Determine target LLM type and provider for pre-switch compaction check */
+   llm_type_t target_type = LLM_LOCAL;
+   cloud_provider_t target_provider = CLOUD_PROVIDER_OPENAI;
+   const char *target_model = NULL;
+
+   if (strcmp(actionName, "local") == 0) {
+      target_type = LLM_LOCAL;
+      target_model = g_config.llm.local.model;
+   } else if (strcmp(actionName, "cloud") == 0 || strcmp(actionName, "openai") == 0) {
+      target_type = LLM_CLOUD;
+      target_provider = CLOUD_PROVIDER_OPENAI;
+      target_model = g_config.llm.cloud.openai_model;
+   } else if (strcmp(actionName, "claude") == 0) {
+      target_type = LLM_CLOUD;
+      target_provider = CLOUD_PROVIDER_CLAUDE;
+      target_model = g_config.llm.cloud.claude_model;
+   }
+
+   /* Check if we need to compact before switching (especially cloud->local) */
+   if (conversation_history &&
+       llm_context_needs_compaction_for_switch(0, conversation_history, target_type,
+                                               target_provider, target_model)) {
+      /* Get current LLM settings to perform compaction */
+      session_t *session = session_get_command_context();
+      if (!session) {
+         session = session_get_local();
+      }
+      session_llm_config_t current_config;
+      session_get_llm_config(session, &current_config);
+
+      llm_compaction_result_t compact_result;
+      int rc = llm_context_compact_for_switch(0, conversation_history, current_config.type,
+                                              current_config.cloud_provider, NULL, target_type,
+                                              target_provider, target_model, &compact_result);
+      if (rc == 0 && compact_result.performed) {
+         LOG_INFO("Pre-switch compaction: %d messages summarized, %d -> %d tokens",
+                  compact_result.messages_summarized, compact_result.tokens_before,
+                  compact_result.tokens_after);
+      }
+   }
 
    if (strcmp(actionName, "local") == 0) {
       /* Route to local LLM callback */

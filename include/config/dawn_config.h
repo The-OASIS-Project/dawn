@@ -151,8 +151,17 @@ typedef struct {
    bool vision_enabled;            /* Model supports vision (e.g., LLaVA, Qwen-VL) */
 } llm_local_config_t;
 
+#define LLM_TOOLS_MAX_CONFIGURED 32
+#define LLM_TOOL_NAME_MAX 64
+
 typedef struct {
    bool native_enabled; /* Use native tool calling (default: false) */
+
+   /* Per-tool enable lists (empty = all enabled) */
+   char local_enabled[LLM_TOOLS_MAX_CONFIGURED][LLM_TOOL_NAME_MAX];
+   int local_enabled_count;
+   char remote_enabled[LLM_TOOLS_MAX_CONFIGURED][LLM_TOOL_NAME_MAX];
+   int remote_enabled_count;
 } llm_tools_config_t;
 
 typedef struct {
@@ -160,7 +169,9 @@ typedef struct {
    int max_tokens; /* Max response tokens */
    llm_cloud_config_t cloud;
    llm_local_config_t local;
-   llm_tools_config_t tools; /* Native tool/function calling settings */
+   llm_tools_config_t tools;  /* Native tool/function calling settings */
+   float summarize_threshold; /* Compact conversation at this % of context (default: 0.80) */
+   bool conversation_logging; /* Save chat history to log files (default: true) */
 } llm_config_t;
 
 /* =============================================================================

@@ -61,6 +61,7 @@
 #include "dawn.h"
 #include "input_queue.h"
 #include "llm/llm_command_parser.h"
+#include "llm/llm_context.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
@@ -1857,6 +1858,9 @@ int main(int argc, char *argv[]) {
    // Initialize LLM system early - must happen before prompt is built
    // so llm_tools_enabled() returns correct value for native tool calling
    llm_init(cloud_provider_override);
+
+   // Initialize context management (token tracking, auto-summarization)
+   llm_context_init();
 
    // Force early initialization of system instructions before any threads start.
    // This ensures thread-safe access since the buffer is built once and cached.

@@ -90,9 +90,24 @@ typedef struct {
    char description[LLM_TOOLS_DESC_LEN];          /**< Tool description for LLM */
    tool_param_t parameters[LLM_TOOLS_MAX_PARAMS]; /**< Parameter definitions */
    int param_count;                               /**< Number of parameters */
-   bool enabled;                                  /**< Runtime enable/disable */
+   bool enabled;                                  /**< Runtime enable (capability available) */
+   bool enabled_local;                            /**< Enabled for local sessions */
+   bool enabled_remote;                           /**< Enabled for remote sessions */
+   bool armor_feature;                            /**< OASIS armor-specific feature */
    const char *device_name;                       /**< Mapped device name for callback */
 } tool_definition_t;
+
+/**
+ * @brief Tool info for WebUI configuration display
+ */
+typedef struct {
+   char name[LLM_TOOLS_NAME_LEN];
+   char description[LLM_TOOLS_DESC_LEN];
+   bool enabled;        /**< Capability available (based on auth/config) */
+   bool enabled_local;  /**< User setting for local sessions */
+   bool enabled_remote; /**< User setting for remote sessions */
+   bool armor_feature;  /**< OASIS armor-specific feature */
+} tool_info_t;
 
 /* =============================================================================
  * Tool Call Structures (from LLM response)
@@ -216,6 +231,14 @@ void llm_tools_cleanup(void);
 struct json_object *llm_tools_get_openai_format(void);
 
 /**
+ * @brief Generate tools array in OpenAI format, filtered by session type
+ *
+ * @param is_remote_session true for WebUI/satellite sessions, false for local mic
+ * @return JSON array (caller must json_object_put), or NULL if no tools
+ */
+struct json_object *llm_tools_get_openai_format_filtered(bool is_remote_session);
+
+/**
  * @brief Generate tools array in Claude format
  *
  * Creates a JSON array suitable for the Claude API "tools" parameter.
@@ -237,6 +260,78 @@ struct json_object *llm_tools_get_openai_format(void);
  * ]
  */
 struct json_object *llm_tools_get_claude_format(void);
+
+/**
+ * @brief Generate tools array in Claude format, filtered by session type
+ *
+ * @param is_remote_session true for WebUI/satellite sessions, false for local mic
+ * @return JSON array (caller must json_object_put), or NULL if no tools
+ */
+struct json_object *llm_tools_get_claude_format_filtered(bool is_remote_session);
+
+/* =============================================================================
+ * Tool Configuration API (for WebUI)
+ * ============================================================================= */
+
+/**
+ * @brief Get all tools with their current enable states
+ *
+ * Populates an array of tool_info_t with name, description, and enable flags.
+ *
+ * @param out Output array (caller allocates)
+ * @param max_tools Maximum entries to return
+ * @return Number of tools populated
+ */
+int llm_tools_get_all(tool_info_t *out, int max_tools);
+
+/**
+ * @brief Set enable state for a specific tool
+ *
+ * Thread-safe. Invalidates cached token estimates.
+ *
+ * @param tool_name Name of the tool to configure
+ * @param enabled_local Enable for local sessions
+ * @param enabled_remote Enable for remote sessions
+ * @return 0 on success, 1 on failure (tool not found or not initialized)
+ */
+int llm_tools_set_enabled(const char *tool_name, bool enabled_local, bool enabled_remote);
+
+/**
+ * @brief Apply tool configuration from TOML arrays
+ *
+ * WHITELIST SEMANTIC: If a list is NULL or count is 0, ALL tools are enabled
+ * for that session type. If a list is provided, ONLY listed tools are enabled.
+ * This overrides JSON defaults (default_remote: false) when TOML specifies a list.
+ *
+ * Thread-safe. Must be called after llm_tools_init().
+ *
+ * @param local_list Array of tool names enabled for local
+ * @param local_count Number of entries (0 = enable all)
+ * @param remote_list Array of tool names enabled for remote
+ * @param remote_count Number of entries (0 = enable all)
+ */
+void llm_tools_apply_config(const char **local_list,
+                            int local_count,
+                            const char **remote_list,
+                            int remote_count);
+
+/**
+ * @brief Get count of enabled tools for a session type
+ *
+ * @param is_remote_session true for remote, false for local
+ * @return Number of enabled tools
+ */
+int llm_tools_get_enabled_count_filtered(bool is_remote_session);
+
+/**
+ * @brief Estimate token count for enabled tools
+ *
+ * Provides a rough estimate based on JSON size (~4 chars/token).
+ *
+ * @param is_remote_session true for remote, false for local
+ * @return Estimated token count
+ */
+int llm_tools_estimate_tokens(bool is_remote_session);
 
 /* =============================================================================
  * Tool Execution

@@ -64,6 +64,13 @@ static int s_tool_count = 0;
 static int s_enabled_count = 0; /* Cached enabled count, updated by llm_tools_refresh() */
 static bool s_initialized = false;
 
+/* Thread safety for tool state modifications */
+static pthread_mutex_t s_tools_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Cached token estimates (-1 = needs recalculation) */
+static int s_token_estimate_local = -1;
+static int s_token_estimate_remote = -1;
+
 /* =============================================================================
  * Tool Execution Notification Callback
  * ============================================================================= */
@@ -487,6 +494,9 @@ static void generate_tool_from_cmd(const cmd_definition_t *cmd, void *user_data)
    safe_strncpy(t->description, cmd->description, LLM_TOOLS_DESC_LEN);
    t->device_name = cmd->device_string;
    t->enabled = cmd->enabled;
+   t->enabled_local = cmd->default_local;
+   t->enabled_remote = cmd->default_remote;
+   t->armor_feature = cmd->armor_feature;
 
    /* Copy parameters (types are now unified - cmd_param_type_t used in both) */
    for (int i = 0; i < cmd->param_count && i < LLM_TOOLS_MAX_PARAMS; i++) {
@@ -552,7 +562,7 @@ void llm_tools_refresh(void) {
    for (int i = 0; i < s_tool_count; i++) {
       tool_definition_t *t = &s_tools[i];
 
-      /* Default all tools to enabled */
+      /* Default: capability enabled (local/remote defaults set during init from JSON) */
       t->enabled = true;
 
       /* SmartThings requires authentication */
@@ -567,7 +577,7 @@ void llm_tools_refresh(void) {
       }
    }
 
-   /* Update cached enabled count */
+   /* Update cached enabled count (total capability-enabled) */
    s_enabled_count = 0;
    for (int i = 0; i < s_tool_count; i++) {
       if (s_tools[i].enabled) {
@@ -718,6 +728,236 @@ struct json_object *llm_tools_get_claude_format(void) {
    }
 
    return tools_array;
+}
+
+/* =============================================================================
+ * Schema Generation - Filtered by Session Type
+ * ============================================================================= */
+
+/**
+ * @brief Check if a tool is enabled for a given session type
+ */
+static bool is_tool_enabled_for_session(const tool_definition_t *t, bool is_remote) {
+   if (!t->enabled) {
+      return false; /* Capability not available */
+   }
+   return is_remote ? t->enabled_remote : t->enabled_local;
+}
+
+struct json_object *llm_tools_get_openai_format_filtered(bool is_remote_session) {
+   if (!s_initialized || s_tool_count == 0) {
+      return NULL;
+   }
+
+   /* Single pass: build array and count simultaneously */
+   struct json_object *tools_array = json_object_new_array();
+   int added = 0;
+
+   for (int i = 0; i < s_tool_count; i++) {
+      const tool_definition_t *t = &s_tools[i];
+      if (!is_tool_enabled_for_session(t, is_remote_session)) {
+         continue;
+      }
+
+      struct json_object *tool_obj = json_object_new_object();
+      json_object_object_add(tool_obj, "type", json_object_new_string("function"));
+
+      struct json_object *function = json_object_new_object();
+      json_object_object_add(function, "name", json_object_new_string(t->name));
+      json_object_object_add(function, "description", json_object_new_string(t->description));
+      json_object_object_add(function, "parameters", build_parameters_schema(t));
+
+      json_object_object_add(tool_obj, "function", function);
+      json_object_array_add(tools_array, tool_obj);
+      added++;
+   }
+
+   if (added == 0) {
+      json_object_put(tools_array);
+      return NULL;
+   }
+
+   return tools_array;
+}
+
+struct json_object *llm_tools_get_claude_format_filtered(bool is_remote_session) {
+   if (!s_initialized || s_tool_count == 0) {
+      return NULL;
+   }
+
+   /* Single pass: build array and count simultaneously */
+   struct json_object *tools_array = json_object_new_array();
+   int added = 0;
+
+   for (int i = 0; i < s_tool_count; i++) {
+      const tool_definition_t *t = &s_tools[i];
+      if (!is_tool_enabled_for_session(t, is_remote_session)) {
+         continue;
+      }
+
+      struct json_object *tool_obj = json_object_new_object();
+      json_object_object_add(tool_obj, "name", json_object_new_string(t->name));
+      json_object_object_add(tool_obj, "description", json_object_new_string(t->description));
+      json_object_object_add(tool_obj, "input_schema", build_parameters_schema(t));
+
+      json_object_array_add(tools_array, tool_obj);
+      added++;
+   }
+
+   if (added == 0) {
+      json_object_put(tools_array);
+      return NULL;
+   }
+
+   return tools_array;
+}
+
+/* =============================================================================
+ * Tool Configuration API
+ * ============================================================================= */
+
+int llm_tools_get_all(tool_info_t *out, int max_tools) {
+   if (!out || max_tools <= 0 || !s_initialized) {
+      return 0;
+   }
+
+   int count = 0;
+   for (int i = 0; i < s_tool_count && count < max_tools; i++) {
+      const tool_definition_t *t = &s_tools[i];
+      tool_info_t *info = &out[count++];
+
+      safe_strncpy(info->name, t->name, LLM_TOOLS_NAME_LEN);
+      safe_strncpy(info->description, t->description, LLM_TOOLS_DESC_LEN);
+      info->enabled = t->enabled;
+      info->enabled_local = t->enabled_local;
+      info->enabled_remote = t->enabled_remote;
+      info->armor_feature = t->armor_feature;
+   }
+
+   return count;
+}
+
+int llm_tools_set_enabled(const char *tool_name, bool enabled_local, bool enabled_remote) {
+   if (!tool_name || !s_initialized) {
+      return 1; /* FAILURE - invalid args or not initialized */
+   }
+
+   pthread_mutex_lock(&s_tools_mutex);
+   for (int i = 0; i < s_tool_count; i++) {
+      if (strcmp(s_tools[i].name, tool_name) == 0) {
+         s_tools[i].enabled_local = enabled_local;
+         s_tools[i].enabled_remote = enabled_remote;
+
+         /* Invalidate token estimate cache */
+         s_token_estimate_local = -1;
+         s_token_estimate_remote = -1;
+
+         pthread_mutex_unlock(&s_tools_mutex);
+         LOG_INFO("Tool '%s' enable state updated: local=%d, remote=%d", tool_name, enabled_local,
+                  enabled_remote);
+         return 0; /* SUCCESS */
+      }
+   }
+   pthread_mutex_unlock(&s_tools_mutex);
+
+   LOG_WARNING("Tool '%s' not found", tool_name);
+   return 1; /* FAILURE - tool not found */
+}
+
+void llm_tools_apply_config(const char **local_list,
+                            int local_count,
+                            const char **remote_list,
+                            int remote_count) {
+   if (!s_initialized) {
+      LOG_WARNING("llm_tools_apply_config called before initialization - config ignored");
+      return;
+   }
+
+   /*
+    * WHITELIST SEMANTIC: If a list is empty/NULL, ALL tools are enabled for that
+    * session type. If a list is provided, ONLY the listed tools are enabled.
+    * This means JSON defaults (default_remote: false) are overridden when TOML
+    * config specifies an explicit list.
+    */
+   bool enable_all_local = (local_list == NULL || local_count == 0);
+   bool enable_all_remote = (remote_list == NULL || remote_count == 0);
+
+   /* Build lookup sets for O(n+m) instead of O(n*m) */
+   bool local_set[LLM_TOOLS_MAX_TOOLS] = { 0 };
+   bool remote_set[LLM_TOOLS_MAX_TOOLS] = { 0 };
+
+   if (!enable_all_local) {
+      for (int j = 0; j < local_count; j++) {
+         for (int i = 0; i < s_tool_count; i++) {
+            if (strcmp(s_tools[i].name, local_list[j]) == 0) {
+               local_set[i] = true;
+               break;
+            }
+         }
+      }
+   }
+
+   if (!enable_all_remote) {
+      for (int j = 0; j < remote_count; j++) {
+         for (int i = 0; i < s_tool_count; i++) {
+            if (strcmp(s_tools[i].name, remote_list[j]) == 0) {
+               remote_set[i] = true;
+               break;
+            }
+         }
+      }
+   }
+
+   /* Single pass to apply with mutex protection */
+   pthread_mutex_lock(&s_tools_mutex);
+   for (int i = 0; i < s_tool_count; i++) {
+      s_tools[i].enabled_local = enable_all_local || local_set[i];
+      s_tools[i].enabled_remote = enable_all_remote || remote_set[i];
+   }
+
+   /* Invalidate token estimate cache */
+   s_token_estimate_local = -1;
+   s_token_estimate_remote = -1;
+   pthread_mutex_unlock(&s_tools_mutex);
+
+   LOG_INFO("Applied tool config: local=%d tools, remote=%d tools",
+            llm_tools_get_enabled_count_filtered(false),
+            llm_tools_get_enabled_count_filtered(true));
+}
+
+int llm_tools_get_enabled_count_filtered(bool is_remote_session) {
+   if (!s_initialized) {
+      return 0;
+   }
+
+   int count = 0;
+   for (int i = 0; i < s_tool_count; i++) {
+      if (is_tool_enabled_for_session(&s_tools[i], is_remote_session)) {
+         count++;
+      }
+   }
+   return count;
+}
+
+int llm_tools_estimate_tokens(bool is_remote_session) {
+   /* Use cached value if available */
+   int *cache = is_remote_session ? &s_token_estimate_remote : &s_token_estimate_local;
+   if (*cache >= 0) {
+      return *cache;
+   }
+
+   /* Compute and cache */
+   struct json_object *tools = llm_tools_get_openai_format_filtered(is_remote_session);
+   if (!tools) {
+      *cache = 0;
+      return 0;
+   }
+
+   const char *json_str = json_object_to_json_string(tools);
+   *cache = strlen(json_str) / 4; /* Rough estimate: ~4 chars per token */
+
+   json_object_put(tools);
+   return *cache;
 }
 
 /* =============================================================================

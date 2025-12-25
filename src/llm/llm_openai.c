@@ -27,9 +27,11 @@
 #include <string.h>
 
 #include "config/dawn_config.h"
+#include "core/session_manager.h"
 #include "dawn.h"
 #include "llm/llm_claude.h"
 #include "llm/llm_command_parser.h"
+#include "llm/llm_context.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_streaming.h"
 #include "llm/llm_tools.h"
@@ -44,6 +46,21 @@ extern int llm_curl_progress_callback(void *clientp,
                                       curl_off_t dlnow,
                                       curl_off_t ultotal,
                                       curl_off_t ulnow);
+
+/**
+ * @brief Check if current session is remote (WebUI, DAP, etc.)
+ *
+ * Used to select the appropriate filtered tool set.
+ * Local = SESSION_TYPE_LOCAL (helmet mic)
+ * Remote = all other session types (WebSocket, DAP, etc.)
+ */
+static bool is_current_session_remote(void) {
+   session_t *session = session_get_command_context();
+   if (!session) {
+      return false; /* No session context = local */
+   }
+   return (session->type != SESSION_TYPE_LOCAL);
+}
 
 /**
  * @brief Convert Claude-format tool content to text summary
@@ -587,16 +604,21 @@ char *llm_openai_chat_completion(struct json_object *conversation_history,
 
    // Add tools if native tool calling is enabled
    if (llm_tools_enabled(NULL)) {
-      struct json_object *tools = llm_tools_get_openai_format();
+      bool is_remote = is_current_session_remote();
+      struct json_object *tools = llm_tools_get_openai_format_filtered(is_remote);
       if (tools) {
          json_object_object_add(root, "tools", tools);
          json_object_object_add(root, "tool_choice", json_object_new_string("auto"));
-         LOG_INFO("OpenAI: Added %d tools to request", llm_tools_get_enabled_count());
+         LOG_INFO("OpenAI: Added %d tools to request (%s session)",
+                  llm_tools_get_enabled_count_filtered(is_remote), is_remote ? "remote" : "local");
       }
    }
 
    payload = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN |
                                                       JSON_C_TO_STRING_NOSLASHESCAPE);
+
+   LOG_INFO("OpenAI request payload: %zu bytes (~%zu tokens est)", strlen(payload),
+            strlen(payload) / 4);
 
    curl_buffer_init(&chunk);
 
@@ -750,6 +772,9 @@ char *llm_openai_chat_completion(struct json_object *conversation_history,
       llm_type_t token_type = (api_key != NULL) ? LLM_CLOUD : LLM_LOCAL;
       metrics_record_llm_tokens(token_type, CLOUD_PROVIDER_OPENAI, input_tokens, output_tokens,
                                 cached_tokens);
+
+      // Update context usage tracking (session 0 = local session)
+      llm_context_update_usage(0, input_tokens, output_tokens, cached_tokens);
    }
 
    // Duplicate the response content string safely
@@ -962,16 +987,21 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
 
    // Add tools if native tool calling is enabled
    if (llm_tools_enabled(NULL)) {
-      struct json_object *tools = llm_tools_get_openai_format();
+      bool is_remote = is_current_session_remote();
+      struct json_object *tools = llm_tools_get_openai_format_filtered(is_remote);
       if (tools) {
          json_object_object_add(root, "tools", tools);
          json_object_object_add(root, "tool_choice", json_object_new_string("auto"));
-         LOG_INFO("OpenAI streaming: Added %d tools to request", llm_tools_get_enabled_count());
+         LOG_INFO("OpenAI streaming: Added %d tools to request (%s session)",
+                  llm_tools_get_enabled_count_filtered(is_remote), is_remote ? "remote" : "local");
       }
    }
 
    payload = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN |
                                                       JSON_C_TO_STRING_NOSLASHESCAPE);
+
+   LOG_INFO("OpenAI streaming request payload: %zu bytes (~%zu tokens est)", strlen(payload),
+            strlen(payload) / 4);
 
    // Log request details for debugging
    LOG_INFO("OpenAI streaming iter %d: url=%s model=%s api_key=%s", iteration, base_url,

@@ -114,7 +114,7 @@
       reconnectAttempts = 0;
       updateConnectionStatus('connected');
 
-      // Try to reconnect with existing session token
+      // Try to reconnect with existing session token, or request new session
       const savedToken = localStorage.getItem('dawn_session_token');
       if (savedToken) {
         console.log('Attempting session reconnect with token:', savedToken.substring(0, 8) + '...');
@@ -122,8 +122,14 @@
           type: 'reconnect',
           payload: { token: savedToken }
         }));
+      } else {
+        // No saved token - request a new session
+        console.log('No saved token, requesting new session');
+        ws.send(JSON.stringify({
+          type: 'init',
+          payload: {}
+        }));
       }
-      // Server will send state update after processing reconnect or creating new session
     };
 
     ws.onclose = function(event) {
@@ -254,6 +260,15 @@
           break;
         case 'system_prompt_response':
           handleSystemPromptResponse(msg.payload);
+          break;
+        case 'get_tools_config_response':
+          handleGetToolsConfigResponse(msg.payload);
+          break;
+        case 'set_tools_config_response':
+          handleSetToolsConfigResponse(msg.payload);
+          break;
+        case 'context':
+          updateContextDisplay(msg.payload);
           break;
         default:
           console.log('Unknown message type:', msg.type);
@@ -923,6 +938,51 @@
   }
 
   /**
+   * Update context/token usage display
+   * @param {Object} payload - Context info {current, max, usage, threshold}
+   */
+  function updateContextDisplay(payload) {
+    const contextDisplay = document.getElementById('context-display');
+    const contextBar = document.getElementById('context-bar');
+    const contextThreshold = document.getElementById('context-threshold');
+    const contextText = document.getElementById('context-text');
+
+    if (!contextDisplay || !contextBar || !contextText) {
+      console.warn('Context display elements not found');
+      return;
+    }
+
+    const { current, max, usage, threshold } = payload;
+
+    // Show the display
+    contextDisplay.classList.remove('hidden');
+
+    // Update the progress bar
+    const usagePercent = Math.min(usage, 100);
+    contextBar.style.width = `${usagePercent}%`;
+
+    // Set color based on usage level
+    contextBar.classList.remove('warning', 'danger');
+    if (usage >= threshold) {
+      contextBar.classList.add('danger');
+    } else if (usage >= threshold * 0.75) {
+      contextBar.classList.add('warning');
+    }
+
+    // Position the threshold marker
+    if (contextThreshold) {
+      contextThreshold.style.left = `${threshold}%`;
+    }
+
+    // Update text
+    const currentK = (current / 1000).toFixed(1);
+    const maxK = (max / 1000).toFixed(0);
+    contextText.textContent = `${currentK}k/${maxK}k (${usage.toFixed(0)}%)`;
+
+    console.log(`Context update: ${current}/${max} tokens (${usage.toFixed(1)}%), threshold: ${threshold}%`);
+  }
+
+  /**
    * Check if text contains command tags
    */
   function containsCommandTags(text) {
@@ -1186,6 +1246,7 @@
     // Initialize settings panel
     initSettingsElements();
     initSettingsListeners();
+    initToolsSection();
 
     // Connect to WebSocket
     connect();
@@ -2840,6 +2901,185 @@
       updateSmartThingsUI();
     } else {
       alert('Failed to disconnect: ' + (payload.error || 'Unknown error'));
+    }
+  }
+
+  /* =============================================================================
+   * LLM Tools Configuration
+   * ============================================================================= */
+
+  let toolsConfig = [];
+
+  /**
+   * Request tools configuration from server
+   */
+  function requestToolsConfig() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'get_tools_config' }));
+      console.log('Requesting tools config');
+    }
+  }
+
+  /**
+   * Handle get_tools_config response
+   */
+  function handleGetToolsConfigResponse(payload) {
+    console.log('Tools config received:', payload);
+
+    if (!payload.tools) {
+      console.warn('No tools in response');
+      return;
+    }
+
+    // Sort tools: non-armor first, then armor tools at bottom, alphabetically within each group
+    toolsConfig = payload.tools.sort((a, b) => {
+      const aArmor = a.armor_feature ? 1 : 0;
+      const bArmor = b.armor_feature ? 1 : 0;
+      if (aArmor !== bArmor) return aArmor - bArmor;
+      return a.name.localeCompare(b.name);
+    });
+    renderToolsList();
+    updateToolsTokenEstimates(payload.token_estimate);
+  }
+
+  /**
+   * Handle set_tools_config response
+   */
+  function handleSetToolsConfigResponse(payload) {
+    console.log('Set tools config response:', payload);
+
+    const saveBtn = document.getElementById('save-tools-btn');
+    if (payload.success) {
+      saveBtn.textContent = 'Saved!';
+      saveBtn.classList.add('saved');
+      setTimeout(() => {
+        saveBtn.textContent = 'Save Tool Settings';
+        saveBtn.classList.remove('saved');
+      }, 2000);
+
+      // Update token estimates with new values
+      if (payload.token_estimate) {
+        updateToolsTokenEstimates(payload.token_estimate);
+      }
+    } else {
+      saveBtn.textContent = 'Error!';
+      setTimeout(() => {
+        saveBtn.textContent = 'Save Tool Settings';
+      }, 2000);
+      console.error('Failed to save tools config:', payload.error);
+    }
+  }
+
+  /**
+   * Render the tools list with checkboxes
+   */
+  function renderToolsList() {
+    const container = document.getElementById('tools-list');
+    if (!container) return;
+
+    if (toolsConfig.length === 0) {
+      container.innerHTML = '<div class="tools-loading">No tools available</div>';
+      return;
+    }
+
+    container.innerHTML = toolsConfig.map(tool => {
+      const disabledClass = !tool.available ? 'disabled' : '';
+      const disabledAttr = !tool.available ? 'disabled' : '';
+      // Arc reactor SVG for armor features - circle with inverted triangle
+      // Equilateral triangle inscribed in circle (center 12,12, radius 10)
+      const armorIcon = tool.armor_feature ? `<span class="armor-icon" title="OASIS armor feature">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="12" cy="12" r="10"/>
+          <polygon points="12,22 3.34,7 20.66,7" stroke-linejoin="round"/>
+        </svg>
+      </span>` : '';
+
+      return `
+        <div class="tool-item ${disabledClass}" data-tool="${tool.name}" title="${tool.description}">
+          <div class="tool-info">
+            <div class="tool-name">${tool.name}${armorIcon}</div>
+          </div>
+          <div class="tool-checkbox">
+            <input type="checkbox" id="tool-local-${tool.name}"
+                   ${tool.local ? 'checked' : ''} ${disabledAttr}
+                   data-tool="${tool.name}" data-type="local">
+          </div>
+          <div class="tool-checkbox">
+            <input type="checkbox" id="tool-remote-${tool.name}"
+                   ${tool.remote ? 'checked' : ''} ${disabledAttr}
+                   data-tool="${tool.name}" data-type="remote">
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  /**
+   * Update the token estimate display
+   */
+  function updateToolsTokenEstimates(estimates) {
+    if (!estimates) return;
+
+    const localEl = document.getElementById('tools-tokens-local');
+    const remoteEl = document.getElementById('tools-tokens-remote');
+
+    if (localEl) {
+      localEl.textContent = `Local: ${estimates.local || 0} tokens`;
+    }
+    if (remoteEl) {
+      remoteEl.textContent = `Remote: ${estimates.remote || 0} tokens`;
+    }
+  }
+
+  /**
+   * Save tools configuration
+   */
+  function saveToolsConfig() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.error('WebSocket not connected');
+      return;
+    }
+
+    const tools = [];
+    const container = document.getElementById('tools-list');
+    const items = container.querySelectorAll('.tool-item');
+
+    items.forEach(item => {
+      const name = item.dataset.tool;
+      const localCb = item.querySelector(`input[data-type="local"]`);
+      const remoteCb = item.querySelector(`input[data-type="remote"]`);
+
+      tools.push({
+        name: name,
+        local: localCb ? localCb.checked : false,
+        remote: remoteCb ? remoteCb.checked : false
+      });
+    });
+
+    ws.send(JSON.stringify({
+      type: 'set_tools_config',
+      payload: { tools: tools }
+    }));
+
+    console.log('Saving tools config:', tools);
+  }
+
+  /**
+   * Initialize tools section
+   */
+  function initToolsSection() {
+    const saveBtn = document.getElementById('save-tools-btn');
+    if (saveBtn) {
+      saveBtn.addEventListener('click', saveToolsConfig);
+    }
+
+    // Request tools config when settings panel opens
+    const settingsBtn = document.getElementById('settings-btn');
+    if (settingsBtn) {
+      settingsBtn.addEventListener('click', () => {
+        // Small delay to let other things initialize
+        setTimeout(requestToolsConfig, 100);
+      });
     }
   }
 

@@ -52,10 +52,12 @@
 #include "core/worker_pool.h"
 #include "dawn.h"
 #include "llm/llm_command_parser.h"
+#include "llm/llm_context.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
 #include "tools/smartthings_service.h"
+#include "tools/string_utils.h"
 
 /* =============================================================================
  * Module State
@@ -102,6 +104,11 @@ typedef struct {
          uint8_t *data;
          size_t len;
       } audio;
+      struct {
+         int current_tokens;
+         int max_tokens;
+         float threshold;
+      } context;
    };
 } ws_response_t;
 
@@ -453,6 +460,9 @@ static void free_response(ws_response_t *resp) {
       case WS_RESP_AUDIO_END:
          /* No data to free */
          break;
+      case WS_RESP_CONTEXT:
+         /* No data to free - all inline values */
+         break;
    }
 }
 
@@ -580,6 +590,19 @@ static void send_config_impl(struct lws *wsi) {
    send_json_message(wsi, json);
 }
 
+static void send_context_impl(struct lws *wsi,
+                              int current_tokens,
+                              int max_tokens,
+                              float threshold) {
+   char json[256];
+   float usage_pct = (max_tokens > 0) ? (float)current_tokens / (float)max_tokens * 100.0f : 0;
+   snprintf(json, sizeof(json),
+            "{\"type\":\"context\",\"payload\":{\"current\":%d,\"max\":%d,\"usage\":%.1f,"
+            "\"threshold\":%.0f}}",
+            current_tokens, max_tokens, usage_pct, threshold * 100.0f);
+   send_json_message(wsi, json);
+}
+
 /**
  * @brief Send conversation history to client on reconnect
  *
@@ -704,6 +727,10 @@ static void process_one_response(void) {
          break;
       case WS_RESP_AUDIO_END:
          send_audio_end_impl(conn->wsi);
+         break;
+      case WS_RESP_CONTEXT:
+         send_context_impl(conn->wsi, resp.context.current_tokens, resp.context.max_tokens,
+                           resp.context.threshold);
          break;
    }
 
@@ -866,6 +893,8 @@ static void handle_get_audio_devices(ws_connection_t *conn, struct json_object *
 static void handle_list_models(ws_connection_t *conn);
 static void send_json_response(struct lws *wsi, json_object *response);
 static void handle_list_interfaces(ws_connection_t *conn);
+static void handle_get_tools_config(ws_connection_t *conn);
+static void handle_set_tools_config(ws_connection_t *conn, struct json_object *payload);
 #ifdef ENABLE_WEBUI_AUDIO
 static void handle_binary_message(ws_connection_t *conn, const uint8_t *data, size_t len);
 #endif
@@ -1111,6 +1140,10 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       if (json_object_object_get_ex(section, "tools", &tools)) {
          JSON_TO_CONFIG_BOOL(tools, "native_enabled", config->llm.tools.native_enabled);
       }
+
+      /* Context management settings */
+      JSON_TO_CONFIG_DOUBLE(section, "summarize_threshold", config->llm.summarize_threshold);
+      JSON_TO_CONFIG_BOOL(section, "conversation_logging", config->llm.conversation_logging);
    }
 
    /* [search] */
@@ -1980,6 +2013,173 @@ static void handle_list_interfaces(ws_connection_t *conn) {
    json_object_put(response);
 }
 
+/* =============================================================================
+ * Tool Configuration Handlers
+ * ============================================================================= */
+
+static void handle_get_tools_config(ws_connection_t *conn) {
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("get_tools_config_response"));
+
+   json_object *payload = json_object_new_object();
+   json_object *tools_array = json_object_new_array();
+
+   /* Get all tools with their enable states */
+   tool_info_t tools[LLM_TOOLS_MAX_TOOLS];
+   int count = llm_tools_get_all(tools, LLM_TOOLS_MAX_TOOLS);
+
+   for (int i = 0; i < count; i++) {
+      json_object *tool_obj = json_object_new_object();
+      json_object_object_add(tool_obj, "name", json_object_new_string(tools[i].name));
+      json_object_object_add(tool_obj, "description", json_object_new_string(tools[i].description));
+      json_object_object_add(tool_obj, "available", json_object_new_boolean(tools[i].enabled));
+      json_object_object_add(tool_obj, "local", json_object_new_boolean(tools[i].enabled_local));
+      json_object_object_add(tool_obj, "remote", json_object_new_boolean(tools[i].enabled_remote));
+      json_object_object_add(tool_obj, "armor_feature",
+                             json_object_new_boolean(tools[i].armor_feature));
+      json_object_array_add(tools_array, tool_obj);
+   }
+
+   json_object_object_add(payload, "tools", tools_array);
+
+   /* Add token estimates */
+   json_object *estimates = json_object_new_object();
+   json_object_object_add(estimates, "local",
+                          json_object_new_int(llm_tools_estimate_tokens(false)));
+   json_object_object_add(estimates, "remote",
+                          json_object_new_int(llm_tools_estimate_tokens(true)));
+   json_object_object_add(payload, "token_estimate", estimates);
+
+   json_object_object_add(response, "payload", payload);
+   send_json_response(conn->wsi, response);
+   json_object_put(response);
+
+   LOG_INFO("WebUI: Sent tools config (%d tools)", count);
+}
+
+/**
+ * @brief Validate a tool name for safe processing.
+ *
+ * Tool names must be non-empty, under LLM_TOOL_NAME_MAX length,
+ * and contain only alphanumeric characters, underscores, and hyphens.
+ *
+ * @param name The tool name to validate
+ * @return true if valid, false otherwise
+ */
+static bool is_valid_tool_name(const char *name) {
+   if (!name || name[0] == '\0') {
+      return false;
+   }
+
+   size_t len = strlen(name);
+   if (len >= LLM_TOOL_NAME_MAX) {
+      return false;
+   }
+
+   for (size_t i = 0; i < len; i++) {
+      char c = name[i];
+      if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+            c == '_' || c == '-')) {
+         return false;
+      }
+   }
+
+   return true;
+}
+
+static void handle_set_tools_config(ws_connection_t *conn, struct json_object *payload) {
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("set_tools_config_response"));
+   json_object *resp_payload = json_object_new_object();
+
+   json_object *tools_array;
+   if (!json_object_object_get_ex(payload, "tools", &tools_array)) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Missing 'tools' array"));
+      json_object_object_add(response, "payload", resp_payload);
+      send_json_response(conn->wsi, response);
+      json_object_put(response);
+      return;
+   }
+
+   int updated = 0;
+   int skipped = 0;
+   int len = json_object_array_length(tools_array);
+   for (int i = 0; i < len; i++) {
+      json_object *tool_obj = json_object_array_get_idx(tools_array, i);
+
+      json_object *name_obj, *local_obj, *remote_obj;
+      if (json_object_object_get_ex(tool_obj, "name", &name_obj) &&
+          json_object_object_get_ex(tool_obj, "local", &local_obj) &&
+          json_object_object_get_ex(tool_obj, "remote", &remote_obj)) {
+         const char *name = json_object_get_string(name_obj);
+
+         /* Validate tool name before processing */
+         if (!is_valid_tool_name(name)) {
+            LOG_WARNING("WebUI: Skipping invalid tool name: '%s'", name ? name : "(null)");
+            skipped++;
+            continue;
+         }
+
+         bool local = json_object_get_boolean(local_obj);
+         bool remote = json_object_get_boolean(remote_obj);
+
+         if (llm_tools_set_enabled(name, local, remote) == 0) {
+            updated++;
+         }
+      }
+   }
+
+   /* Update config arrays for persistence - requires write lock on g_config */
+   tool_info_t tools[LLM_TOOLS_MAX_TOOLS];
+   int count = llm_tools_get_all(tools, LLM_TOOLS_MAX_TOOLS);
+
+   pthread_rwlock_wrlock(&s_config_rwlock);
+
+   g_config.llm.tools.local_enabled_count = 0;
+   g_config.llm.tools.remote_enabled_count = 0;
+
+   for (int i = 0; i < count; i++) {
+      if (tools[i].enabled_local &&
+          g_config.llm.tools.local_enabled_count < LLM_TOOLS_MAX_CONFIGURED) {
+         safe_strncpy(g_config.llm.tools.local_enabled[g_config.llm.tools.local_enabled_count++],
+                      tools[i].name, LLM_TOOL_NAME_MAX);
+      }
+      if (tools[i].enabled_remote &&
+          g_config.llm.tools.remote_enabled_count < LLM_TOOLS_MAX_CONFIGURED) {
+         safe_strncpy(g_config.llm.tools.remote_enabled[g_config.llm.tools.remote_enabled_count++],
+                      tools[i].name, LLM_TOOL_NAME_MAX);
+      }
+   }
+
+   /* Save to TOML */
+   const char *config_path = config_get_loaded_path();
+   if (!config_path || strcmp(config_path, "(none - using defaults)") == 0) {
+      config_path = "./dawn.toml";
+   }
+   config_write_toml(&g_config, config_path);
+
+   pthread_rwlock_unlock(&s_config_rwlock);
+
+   json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+   json_object_object_add(resp_payload, "updated", json_object_new_int(updated));
+
+   /* Include updated token estimates */
+   json_object *estimates = json_object_new_object();
+   json_object_object_add(estimates, "local",
+                          json_object_new_int(llm_tools_estimate_tokens(false)));
+   json_object_object_add(estimates, "remote",
+                          json_object_new_int(llm_tools_estimate_tokens(true)));
+   json_object_object_add(resp_payload, "token_estimate", estimates);
+
+   json_object_object_add(response, "payload", resp_payload);
+   send_json_response(conn->wsi, response);
+   json_object_put(response);
+
+   LOG_INFO("WebUI: Updated %d tool enable states", updated);
+}
+
 static void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
    /* Null-terminate for JSON parsing */
    char *json_str = strndup(data, len);
@@ -2539,6 +2739,12 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
       json_object_object_add(response, "payload", resp_payload);
       send_json_response(conn->wsi, response);
       json_object_put(response);
+   } else if (strcmp(type, "get_tools_config") == 0) {
+      handle_get_tools_config(conn);
+   } else if (strcmp(type, "set_tools_config") == 0) {
+      if (payload) {
+         handle_set_tools_config(conn, payload);
+      }
    } else {
       LOG_WARNING("WebUI: Unknown message type: %s", type);
    }
@@ -2568,62 +2774,17 @@ static int callback_websocket(struct lws *wsi,
 
    switch (reason) {
       case LWS_CALLBACK_ESTABLISHED: {
-         /* New WebSocket connection - check client limit */
-         pthread_mutex_lock(&s_mutex);
-         if (s_client_count >= g_config.webui.max_clients) {
-            pthread_mutex_unlock(&s_mutex);
-            LOG_WARNING("WebUI: Connection rejected - max clients reached (%d)",
-                        g_config.webui.max_clients);
-            /* Send error message to inform client before closing */
-            send_error_impl(wsi, "MAX_CLIENTS",
-                            "Maximum WebUI clients reached. Please try again later.");
-            return -1; /* Reject connection */
-         }
-         s_client_count++;
-         pthread_mutex_unlock(&s_mutex);
-
-         /* Initialize connection structure */
+         /*
+          * New WebSocket connection - defer session creation until init message.
+          * This allows reconnecting clients (with valid token) to reuse their
+          * existing session without counting against max_clients during the
+          * brief overlap when refreshing a browser page.
+          */
          memset(conn, 0, sizeof(*conn));
          conn->wsi = wsi;
+         conn->session = NULL; /* Will be created/assigned on init message */
 
-         /* Create session */
-         conn->session = session_create(SESSION_TYPE_WEBSOCKET, -1);
-         if (!conn->session) {
-            LOG_ERROR("WebUI: Failed to create session (limit reached)");
-            send_error_impl(wsi, "SESSION_LIMIT", "Maximum sessions reached");
-            pthread_mutex_lock(&s_mutex);
-            s_client_count--;
-            pthread_mutex_unlock(&s_mutex);
-            return -1;
-         }
-
-         /* Initialize session with system prompt (Friday persona) */
-         session_init_system_prompt(conn->session, get_remote_command_prompt());
-
-         /* Link session to connection for response routing */
-         conn->session->client_data = conn;
-
-         /* Generate session token and register mapping */
-         if (generate_session_token(conn->session_token) != 0) {
-            LOG_ERROR("WebUI: Failed to generate session token, closing connection");
-            session_destroy(conn->session->session_id);
-            conn->session = NULL;
-            pthread_mutex_lock(&s_mutex);
-            s_client_count--;
-            pthread_mutex_unlock(&s_mutex);
-            return -1;
-         }
-         register_token(conn->session_token, conn->session->session_id);
-
-         /* Send token and config to client */
-         send_session_token_impl(wsi, conn->session_token);
-         send_config_impl(wsi);
-
-         /* Send initial state */
-         send_state_impl(wsi, "idle");
-
-         LOG_INFO("WebUI: WebSocket client connected (session %u, token %.8s..., total: %d)",
-                  conn->session->session_id, conn->session_token, s_client_count);
+         LOG_INFO("WebUI: WebSocket connection established, awaiting init message");
          break;
       }
 
@@ -2631,6 +2792,8 @@ static int callback_websocket(struct lws *wsi,
          /* WebSocket disconnected */
          LOG_INFO("WebUI: WebSocket client disconnecting (session %u)",
                   conn->session ? conn->session->session_id : 0);
+
+         bool had_session = (conn->session != NULL);
 
          if (conn->session) {
             /* Mark session as disconnected (aborts any pending LLM calls) */
@@ -2652,11 +2815,15 @@ static int callback_websocket(struct lws *wsi,
             conn->audio_buffer = NULL;
          }
 
-         pthread_mutex_lock(&s_mutex);
-         if (s_client_count > 0) {
-            s_client_count--;
+         /* Only decrement client count if this connection had a session
+          * (i.e., completed the init handshake) */
+         if (had_session) {
+            pthread_mutex_lock(&s_mutex);
+            if (s_client_count > 0) {
+               s_client_count--;
+            }
+            pthread_mutex_unlock(&s_mutex);
          }
-         pthread_mutex_unlock(&s_mutex);
 
          LOG_INFO("WebUI: WebSocket client disconnected (total: %d)", s_client_count);
          break;
@@ -2665,8 +2832,121 @@ static int callback_websocket(struct lws *wsi,
       case LWS_CALLBACK_RECEIVE: {
          /* Message received from client */
          if (!conn->session) {
-            LOG_WARNING("WebUI: Received message but no session");
-            break;
+            /*
+             * No session yet - this must be the init/reconnect message.
+             * Parse it to determine if we're reconnecting with a token or
+             * need a new session. Check client limits here.
+             */
+            char *json_str = strndup((const char *)in, len);
+            if (!json_str) {
+               LOG_ERROR("WebUI: Failed to allocate init message buffer");
+               return -1;
+            }
+
+            struct json_object *root = json_tokener_parse(json_str);
+            free(json_str);
+
+            if (!root) {
+               LOG_WARNING("WebUI: Invalid JSON in init message");
+               return -1;
+            }
+
+            struct json_object *type_obj;
+            const char *type = NULL;
+            if (json_object_object_get_ex(root, "type", &type_obj)) {
+               type = json_object_get_string(type_obj);
+            }
+
+            struct json_object *payload = NULL;
+            json_object_object_get_ex(root, "payload", &payload);
+
+            bool is_reconnect = false;
+            session_t *existing_session = NULL;
+
+            /* Check for reconnection token */
+            if (type && strcmp(type, "reconnect") == 0 && payload) {
+               struct json_object *token_obj;
+               if (json_object_object_get_ex(payload, "token", &token_obj)) {
+                  const char *token = json_object_get_string(token_obj);
+                  if (token && strlen(token) > 0) {
+                     existing_session = lookup_session_by_token(token);
+                     if (existing_session) {
+                        is_reconnect = true;
+                        conn->session = existing_session;
+                        existing_session->client_data = conn;
+                        existing_session->disconnected = false;
+                        strncpy(conn->session_token, token, WEBUI_SESSION_TOKEN_LEN - 1);
+                        conn->session_token[WEBUI_SESSION_TOKEN_LEN - 1] = '\0';
+
+                        /* Reconnections still count against client limit */
+                        pthread_mutex_lock(&s_mutex);
+                        s_client_count++;
+                        pthread_mutex_unlock(&s_mutex);
+
+                        LOG_INFO("WebUI: Reconnected to session %u with token %.8s... (total: %d)",
+                                 existing_session->session_id, token, s_client_count);
+
+                        /* Send confirmation */
+                        send_session_token_impl(conn->wsi, token);
+                        send_config_impl(conn->wsi);
+                        send_history_impl(conn->wsi, existing_session);
+                        send_state_impl(conn->wsi, "idle");
+                     }
+                  }
+               }
+            }
+
+            /* If not reconnecting, create new session (with client limit check) */
+            if (!is_reconnect) {
+               pthread_mutex_lock(&s_mutex);
+               if (s_client_count >= g_config.webui.max_clients) {
+                  pthread_mutex_unlock(&s_mutex);
+                  LOG_WARNING("WebUI: Connection rejected - max clients reached (%d)",
+                              g_config.webui.max_clients);
+                  send_error_impl(wsi, "MAX_CLIENTS",
+                                  "Maximum WebUI clients reached. Please try again later.");
+                  json_object_put(root);
+                  return -1;
+               }
+               s_client_count++;
+               pthread_mutex_unlock(&s_mutex);
+
+               conn->session = session_create(SESSION_TYPE_WEBSOCKET, -1);
+               if (!conn->session) {
+                  LOG_ERROR("WebUI: Failed to create session");
+                  send_error_impl(wsi, "SESSION_LIMIT", "Maximum sessions reached");
+                  pthread_mutex_lock(&s_mutex);
+                  s_client_count--;
+                  pthread_mutex_unlock(&s_mutex);
+                  json_object_put(root);
+                  return -1;
+               }
+
+               session_init_system_prompt(conn->session, get_remote_command_prompt());
+               conn->session->client_data = conn;
+
+               if (generate_session_token(conn->session_token) != 0) {
+                  LOG_ERROR("WebUI: Failed to generate session token");
+                  session_destroy(conn->session->session_id);
+                  conn->session = NULL;
+                  pthread_mutex_lock(&s_mutex);
+                  s_client_count--;
+                  pthread_mutex_unlock(&s_mutex);
+                  json_object_put(root);
+                  return -1;
+               }
+               register_token(conn->session_token, conn->session->session_id);
+
+               LOG_INFO("WebUI: New session %u created (token %.8s..., total: %d)",
+                        conn->session->session_id, conn->session_token, s_client_count);
+
+               send_session_token_impl(conn->wsi, conn->session_token);
+               send_config_impl(conn->wsi);
+               send_state_impl(conn->wsi, "idle");
+            }
+
+            json_object_put(root);
+            break; /* Don't process this message further - it was just the init */
          }
 
          session_touch(conn->session);
@@ -3067,6 +3347,28 @@ void webui_send_state(session_t *session, const char *state) {
       LOG_ERROR("WebUI: Failed to allocate state response");
       return;
    }
+
+   queue_response(&resp);
+}
+
+void webui_send_context(session_t *session, int current_tokens, int max_tokens, float threshold) {
+   /* If session is NULL, broadcast to all WebSocket sessions */
+   if (!session) {
+      /* Get local session as default */
+      session = session_get_local();
+   }
+
+   if (!session || session->type != SESSION_TYPE_WEBSOCKET) {
+      return;
+   }
+
+   ws_response_t resp = { .session = session,
+                          .type = WS_RESP_CONTEXT,
+                          .context = {
+                              .current_tokens = current_tokens,
+                              .max_tokens = max_tokens,
+                              .threshold = threshold,
+                          } };
 
    queue_response(&resp);
 }
@@ -3506,6 +3808,16 @@ static void *text_worker_thread(void *arg) {
    /* Free the final response (either original response or processed copy) */
    free(final_response);
 
+   /* Send context usage update to WebUI */
+   {
+      int current_tokens, max_tokens;
+      float threshold;
+      llm_context_get_last_usage(&current_tokens, &max_tokens, &threshold);
+      if (max_tokens > 0) {
+         webui_send_context(session, current_tokens, max_tokens, threshold);
+      }
+   }
+
    /* Return to idle state */
    webui_send_state(session, "idle");
 
@@ -3760,6 +4072,16 @@ static void *audio_worker_thread(void *arg) {
    webui_send_audio(session, (const uint8_t *)tts_pcm, tts_bytes);
    webui_send_audio_end(session);
    free(tts_pcm);
+
+   /* Send context usage update to WebUI */
+   {
+      int current_tokens, max_tokens;
+      float threshold;
+      llm_context_get_last_usage(&current_tokens, &max_tokens, &threshold);
+      if (max_tokens > 0) {
+         webui_send_context(session, current_tokens, max_tokens, threshold);
+      }
+   }
 
    webui_send_state(session, "idle");
 

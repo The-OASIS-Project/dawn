@@ -48,6 +48,16 @@
       <span id="status-text">IDLE</span>
     </div>
 
+    <!-- Context Usage Display -->
+    <div id="context-display" class="context-display hidden">
+      <span class="context-label">Context:</span>
+      <div class="context-bar-container">
+        <div id="context-bar" class="context-bar"></div>
+        <div id="context-threshold" class="context-threshold"></div>
+      </div>
+      <span id="context-text" class="context-text">0/0 (0%)</span>
+    </div>
+
     <!-- LLM Quick Controls -->
     <div id="llm-controls">
       <div class="llm-control-group">
@@ -223,6 +233,35 @@ access_token = "your-pat-here"</pre>
 client_id = "..."
 client_secret = "..."</pre>
             </div>
+          </div>
+        </div>
+
+        <!-- LLM Tools Configuration Section -->
+        <div class="settings-section" id="tools-section">
+          <h3 class="section-header" data-section="tools">
+            <span class="section-icon">&#x1F527;</span>
+            LLM Tools
+            <span class="section-toggle">&#9660;</span>
+          </h3>
+          <div class="section-content">
+            <div class="tools-info">
+              <p>Configure which tools are available for LLM function calling.</p>
+              <div class="tools-token-estimate">
+                <span>Estimated tokens:</span>
+                <span id="tools-tokens-local">Local: --</span>
+                <span id="tools-tokens-remote">Remote: --</span>
+              </div>
+            </div>
+            <div class="tools-header-row">
+              <span class="tools-header-name">Tool</span>
+              <span class="tools-header-local">Local</span>
+              <span class="tools-header-remote">Remote</span>
+            </div>
+            <div id="tools-list" class="tools-list">
+              <!-- Tools will be populated dynamically -->
+              <div class="tools-loading">Loading tools...</div>
+            </div>
+            <button id="save-tools-btn" class="save-btn">Save Tool Settings</button>
           </div>
         </div>
       </div>

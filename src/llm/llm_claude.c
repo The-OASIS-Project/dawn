@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include "config/dawn_config.h"
+#include "core/session_manager.h"
 #include "dawn.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_openai.h"
@@ -43,6 +44,17 @@ extern int llm_curl_progress_callback(void *clientp,
                                       curl_off_t dlnow,
                                       curl_off_t ultotal,
                                       curl_off_t ulnow);
+
+/**
+ * @brief Check if current session is remote (WebUI, DAP, etc.)
+ */
+static bool is_current_session_remote(void) {
+   session_t *session = session_get_command_context();
+   if (!session) {
+      return false; /* No session context = local */
+   }
+   return (session->type != SESSION_TYPE_LOCAL);
+}
 
 /**
  * @brief Build HTTP headers for Claude API request
@@ -354,10 +366,12 @@ static json_object *convert_to_claude_format(struct json_object *openai_conversa
 
    // Add tools if native tool calling is enabled
    if (llm_tools_enabled(NULL)) {
-      struct json_object *tools = llm_tools_get_claude_format();
+      bool is_remote = is_current_session_remote();
+      struct json_object *tools = llm_tools_get_claude_format_filtered(is_remote);
       if (tools) {
          json_object_object_add(claude_request, "tools", tools);
-         LOG_INFO("Claude: Added %d tools to request", llm_tools_get_enabled_count());
+         LOG_INFO("Claude: Added %d tools to request (%s session)",
+                  llm_tools_get_enabled_count_filtered(is_remote), is_remote ? "remote" : "local");
       }
    }
 

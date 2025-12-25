@@ -149,6 +149,8 @@ static cmd_definition_t *register_command(const char *name, const char *topic) {
    safe_strncpy(cmd->device_string, name, CMD_NAME_LEN); /* Default: same as name */
    safe_strncpy(cmd->topic, topic, CMD_TOPIC_LEN);
    cmd->enabled = true;
+   cmd->default_local = true;  /* Default: enabled for local sessions */
+   cmd->default_remote = true; /* Default: enabled for remote sessions */
 
    /* Check if this device has a callback */
    device_callback_fn callback = get_device_callback(name);
@@ -358,6 +360,18 @@ static int parse_devices(struct json_object *devices_obj) {
                cmd->param_count++;
             }
          }
+
+         /* Parse default enable states for local/remote sessions */
+         struct json_object *default_obj = NULL;
+         if (json_object_object_get_ex(tool_obj, "default_local", &default_obj)) {
+            cmd->default_local = json_object_get_boolean(default_obj);
+         }
+         if (json_object_object_get_ex(tool_obj, "default_remote", &default_obj)) {
+            cmd->default_remote = json_object_get_boolean(default_obj);
+         }
+         if (json_object_object_get_ex(tool_obj, "armor_feature", &default_obj)) {
+            cmd->armor_feature = json_object_get_boolean(default_obj);
+         }
       }
 
       json_object_iter_next(&it);
@@ -528,6 +542,18 @@ static int parse_tools(struct json_object *tools_obj) {
 
             cmd->param_count++;
          }
+      }
+
+      /* Parse default enable states for local/remote sessions */
+      struct json_object *default_obj = NULL;
+      if (json_object_object_get_ex(tool_obj, "default_local", &default_obj)) {
+         cmd->default_local = json_object_get_boolean(default_obj);
+      }
+      if (json_object_object_get_ex(tool_obj, "default_remote", &default_obj)) {
+         cmd->default_remote = json_object_get_boolean(default_obj);
+      }
+      if (json_object_object_get_ex(tool_obj, "armor_feature", &default_obj)) {
+         cmd->armor_feature = json_object_get_boolean(default_obj);
       }
 
       json_object_iter_next(&it);

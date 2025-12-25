@@ -121,6 +121,10 @@ void config_set_defaults(dawn_config_t *config) {
    /* LLM Tools */
    config->llm.tools.native_enabled = false; /* Default OFF for backward compatibility */
 
+   /* LLM Context Management */
+   config->llm.summarize_threshold = 0.80f; /* Compact at 80% of context limit */
+   config->llm.conversation_logging = true; /* Save chat logs by default */
+
    /* Search */
    SAFE_COPY(config->search.engine, "searxng");
    SAFE_COPY(config->search.endpoint, "http://127.0.0.1:8384");
