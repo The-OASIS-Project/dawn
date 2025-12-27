@@ -32,6 +32,7 @@
 
 #include "core/command_registry.h"
 #include "core/command_router.h"
+#include "core/ocp_helpers.h"
 #include "logging.h"
 #include "mosquitto_comms.h"
 #include "tools/string_utils.h"
@@ -72,7 +73,7 @@ int command_execute_sync(const char *device,
    }
    const char *request_id = command_router_get_id(req);
 
-   /* Build the JSON command with request_id (OCP format) */
+   /* Build the JSON command with request_id and timestamp (OCP format) */
    struct json_object *cmd = json_object_new_object();
    json_object_object_add(cmd, "device", json_object_new_string(device));
    json_object_object_add(cmd, "action", json_object_new_string(action ? action : "get"));
@@ -80,6 +81,9 @@ int command_execute_sync(const char *device,
       json_object_object_add(cmd, "value", json_object_new_string(value));
    }
    json_object_object_add(cmd, "request_id", json_object_new_string(request_id));
+
+   /* Add timestamp (OCP v1.1) */
+   json_object_object_add(cmd, "timestamp", json_object_new_int64(ocp_get_timestamp_ms()));
 
    const char *cmd_str = json_object_to_json_string(cmd);
    int rc = mosquitto_publish(mosq, NULL, topic, strlen(cmd_str), cmd_str, 0, false);

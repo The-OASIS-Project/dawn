@@ -35,6 +35,7 @@ The OASIS Communications Protocol defines a consistent message format for reques
 | `request_id` | No* | Unique identifier for correlating response. *Required if response needed |
 | `session_id` | No | Client session ID for per-session context |
 | `data` | No | Binary/structured data payload (see Data Transport section) |
+| `timestamp` | No | Unix milliseconds when message was created (for debugging/ordering) |
 
 ### Response Message
 
@@ -57,6 +58,8 @@ The OASIS Communications Protocol defines a consistent message format for reques
 | `status` | No | "success" or "error" (assumed "success" if omitted) |
 | `error` | No | Error details if status is "error" |
 | `data` | No | Binary/structured data payload (see Data Transport section) |
+| `timestamp` | No | Unix milliseconds when response was created |
+| `checksum` | No | SHA256 hash when `value` contains a file path |
 
 ### Error Response
 
@@ -87,9 +90,15 @@ Use `value` field with a file path. Suitable when components share filesystem ac
   "action": "completed",
   "value": "/home/jetson/recordings/snapshot-20231220_143052.jpg",
   "request_id": "dawn_worker0_1",
-  "status": "success"
+  "status": "success",
+  "checksum": "a1b2c3d4e5f6..."
 }
 ```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `value` | Yes | File path to the data |
+| `checksum` | No | SHA256 hash of file contents (hex-encoded, lowercase) |
 
 **Pros**: Small message size, efficient for large files
 **Cons**: Requires shared filesystem, tight coupling
@@ -115,10 +124,18 @@ Use `data` field with encoding specification. Suitable for decoupled or remote c
 | Data Field | Required | Description |
 |------------|----------|-------------|
 | `type` | Yes | MIME type (e.g., "image/jpeg", "audio/wav", "application/json") |
-| `encoding` | Yes | "base64" for binary, "utf8" for text, "none" for JSON objects |
+| `encoding` | Yes | Encoding used for content (see Supported Encodings below) |
 | `content` | Yes | The encoded data |
-| `size` | No | Original size in bytes (for validation) |
-| `checksum` | No | MD5 or SHA256 hash (for integrity) |
+| `size` | No | Original size in bytes before encoding (for validation) |
+| `checksum` | No | SHA256 hash of original data (hex-encoded, lowercase) |
+
+### Supported Encodings
+
+| Encoding | Use Case | Description |
+|----------|----------|-------------|
+| `base64` | Binary data | Standard base64 encoding (RFC 4648) |
+| `utf8` | Text data | UTF-8 encoded text string |
+| `none` | JSON objects | Content is a raw JSON object/array (no encoding) |
 
 ### Data Type Examples
 
@@ -347,7 +364,6 @@ These fields are reserved for future use:
 | Field | Purpose |
 |-------|---------|
 | `ocp_version` | Protocol version for breaking changes |
-| `timestamp` | Unix milliseconds for timing/ordering |
 | `reply_to` | Explicit response topic override |
 | `msg_type` | "request", "response", "progress", "event" |
 | `correlation_id` | For multi-message sequences |
@@ -357,19 +373,24 @@ These fields are reserved for future use:
 ## Implementation Checklist
 
 ### Mirage (HUD)
-- [ ] Extract `request_id` from incoming commands
-- [ ] Pass `request_id` through command processing chain
-- [ ] Echo `request_id` in all response messages
-- [ ] Add `status` field to responses
-- [ ] Send error responses instead of silence on failure
-- [ ] Support `inline_response` flag for returning base64 data
+- [x] Extract `request_id` from incoming commands
+- [x] Pass `request_id` through command processing chain
+- [x] Echo `request_id` in all response messages
+- [x] Add `status` field to responses
+- [x] Send error responses instead of silence on failure
+- [x] Support inline base64 data responses (config-driven via `Vision Inline Data`)
+- [x] Add `timestamp` to outbound response messages
+- [x] Add `checksum` to file reference responses
+- [x] Add `checksum` to inline data responses
 
 ### Dawn
-- [ ] Use `command_router` as single path for correlated requests
-- [ ] Remove duplicate vision data paths
-- [ ] Add `status` and `error` handling to response parsing
-- [ ] Remove polling workarounds once Mirage supports `request_id`
-- [ ] Support receiving both reference and inline data
+- [x] Use `command_router` as single path for correlated requests
+- [x] Generate unique `request_id` for outbound commands
+- [x] Add `status` and `error` handling to response parsing
+- [x] Support receiving both reference and inline data (viewing responses)
+- [x] Add `timestamp` to outbound request messages
+- [x] Validate `checksum` when present in file reference responses
+- [x] Validate `checksum` when present in inline data responses
 
 ### Future Components
 - [ ] Implement OCP request/response handling from the start
@@ -382,3 +403,4 @@ These fields are reserved for future use:
 | Version | Date | Changes |
 |---------|------|---------|
 | 1.0 | 2024-12-20 | Initial specification |
+| 1.1 | 2025-12-27 | Added `timestamp` field (optional, for debugging). Standardized checksum to SHA256. Added `checksum` to file reference and inline data responses. Defined supported encodings: base64, utf8, none. Implemented in both Dawn (validation) and Mirage (generation). |

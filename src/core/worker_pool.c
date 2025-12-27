@@ -51,6 +51,7 @@
 #include "asr/asr_interface.h"
 #include "config/dawn_config.h"
 #include "core/command_router.h"
+#include "core/ocp_helpers.h"
 #include "core/session_manager.h"
 #include "dawn.h"
 #include "llm/llm_command_parser.h"
@@ -560,8 +561,10 @@ static char *process_commands_with_routing(const char *llm_response,
       const char *request_id = command_router_get_id(req);
       LOG_INFO("Worker %d: Registered request %s", worker_id, request_id);
 
-      // Add request_id to command JSON
+      // Add request_id and timestamp to command JSON (OCP v1.1)
       json_object_object_add(parsed_json, "request_id", json_object_new_string(request_id));
+      json_object_object_add(parsed_json, "timestamp",
+                             json_object_new_int64(ocp_get_timestamp_ms()));
       const char *cmd_with_id = json_object_to_json_string(parsed_json);
 
       // Publish command via MQTT (must use APPLICATION_NAME topic to match subscription)

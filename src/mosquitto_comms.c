@@ -24,6 +24,7 @@
 #include <fnmatch.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,6 +43,7 @@
 #include "config/dawn_config.h"
 #include "conversation_manager.h"
 #include "core/command_router.h"
+#include "core/ocp_helpers.h"
 #include "core/session_manager.h"
 #include "dawn.h"
 #include "llm/llm_command_parser.h"
@@ -670,13 +672,47 @@ static void execute_command_for_worker(struct json_object *parsed_json, const ch
          if (json_object_object_get_ex(data_obj, "content", &content_obj)) {
             const char *base64_content = json_object_get_string(content_obj);
             if (base64_content && base64_content[0] != '\0') {
+               /* OCP v1.1: Validate checksum if provided */
+               struct json_object *checksum_obj = NULL;
+               struct json_object *encoding_obj = NULL;
+               const char *checksum = NULL;
+               const char *encoding = "base64"; /* Default for images */
+
+               if (json_object_object_get_ex(data_obj, "checksum", &checksum_obj)) {
+                  checksum = json_object_get_string(checksum_obj);
+               }
+               if (json_object_object_get_ex(data_obj, "encoding", &encoding_obj)) {
+                  encoding = json_object_get_string(encoding_obj);
+               }
+
+               /* OCP v1.1: Validate checksum - fail-closed policy */
+               if (!ocp_validate_inline_checksum(base64_content, encoding, checksum)) {
+                  LOG_ERROR("OCP: Rejecting viewing response due to checksum mismatch");
+                  command_router_deliver(request_id, "");
+                  return;
+               }
+
                LOG_INFO("Viewing response contains inline data, delivering directly");
                command_router_deliver(request_id, base64_content);
                return;
             }
          }
       }
+
       /* Fall through to use file path if no inline data */
+      /* OCP v1.1: Validate checksum for file reference if provided */
+      if (value && value[0] != '\0') {
+         struct json_object *checksum_obj = NULL;
+         if (json_object_object_get_ex(parsed_json, "checksum", &checksum_obj)) {
+            const char *checksum = json_object_get_string(checksum_obj);
+            /* Validate checksum - fail-closed policy, no path restriction for viewing */
+            if (!ocp_validate_file_checksum(value, checksum, NULL)) {
+               LOG_ERROR("OCP: Rejecting viewing response due to file checksum mismatch");
+               command_router_deliver(request_id, "");
+               return;
+            }
+         }
+      }
       LOG_INFO("Viewing response using file path: %s", value ? value : "(null)");
    }
 
@@ -1393,6 +1429,10 @@ unsigned char *read_file(const char *filename, size_t *length) {
    fclose(file);
    return content;
 }
+
+/* =============================================================================
+ * Base64 Encoding
+ * ============================================================================= */
 
 /**
  * Encodes data using Base64 encoding.

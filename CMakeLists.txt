@@ -294,6 +294,7 @@ set(DAWN_SOURCES
     src/core/command_router.c
     src/core/command_registry.c
     src/core/command_executor.c
+    src/core/ocp_helpers.c
 
     # ASR subsystem
     src/asr/asr_interface.c
