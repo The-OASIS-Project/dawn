@@ -227,45 +227,6 @@ sudo apt install libwebsockets-dev libopus-dev
 
 ---
 
-## Jarvis Analysis (Reference Implementation)
-
-The Jarvis project (~/code/Jarvis/Jarvis-main) provides a visually impressive voice assistant UI.
-Analysis of what to borrow vs. avoid:
-
-### Borrow from Jarvis
-
-1. **FFT Visualization Approach**
-   - SVG-based circular FFT bars
-   - CSS transforms for ring rotation
-   - Smooth animation via requestAnimationFrame
-   - Color scheme: Cyan (#22d3ee) on dark background
-
-2. **State Machine UI Pattern**
-   - States: idle → listening → active → error
-   - Visual indicators for each state
-   - Graceful transitions
-
-3. **Ring Animation CSS**
-   ```css
-   /* Adapted from JarvisAssistant.tsx */
-   .ring {
-     filter: drop-shadow(0 0 20px rgba(34, 211, 238, 0.6));
-     transition: opacity 300ms, transform 200ms;
-   }
-   ```
-
-### Don't Use from Jarvis
-
-| Jarvis Feature | Why Not | DAWN Alternative |
-|----------------|---------|------------------|
-| Node.js/Next.js | 80+ MB runtime, overkill | libmicrohttpd (~50KB) |
-| OpenAI Realtime API | Cloud-only, no offline | Local Vosk + Piper |
-| WebRTC data channels | Complex for our use case | Simple WebSocket |
-| React + TailwindCSS | Build step required | Vanilla JS + CSS |
-| Three.js | Heavy for simple visualization | SVG + CSS animations |
-
----
-
 ## WebSocket Protocol
 
 ### Message Format: Hybrid Binary/Text
