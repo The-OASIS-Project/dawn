@@ -1193,12 +1193,14 @@ class ReconnectingWebSocket {
 - [x] Connection status indicator (header badge) ✅
 - [x] Reconnection with exponential backoff + jitter ✅
 - [x] Session token persistence (localStorage) ✅
-- [ ] Metrics display (optional debug panel)
+- [x] Metrics display (real-time metrics panel) ✅
 - [x] Keyboard shortcut: Enter to send ✅
 - [x] Keyboard shortcut: Escape to close settings ✅
 - [x] Loading states and error handling (partial) ✅
-- [ ] Favicon and PWA manifest
-- [ ] Health check endpoint (`/health`)
+- [x] Favicon and PWA manifest ✅
+- [x] Health check endpoint (`/health`) ✅
+
+**Phase 5 COMPLETE** (2025-12-27)
 
 ---
 
@@ -1667,3 +1669,11 @@ session_manager_cleanup();     // Now safe to clean up sessions
   - Fixed WebSocket disconnect: now calls session_release() to decrement ref_count
   - LLM thread joined with 5-second timeout during shutdown (prevents hang if LLM processing)
   - Documented in "Application Restart Feature" section
+- 2025-12-27: **Phase 5 Complete**
+  - Added `/health` HTTP endpoint returning JSON system status (version, uptime, state, queries)
+  - Added real-time metrics panel with session stats, tokens, pipeline timing (auto-refresh 2s)
+  - Added favicon.svg (arc reactor design: circle with inscribed inverted triangle)
+  - Added PWA manifest.json for installable web app
+  - Converted debug checkbox to icon button (bug icon) for consistent header UI
+  - Added TTS notification before context compaction for local session
+  - All Phase 5 deliverables complete
