@@ -153,19 +153,29 @@ void accept_thread_stop(void) {
 
    // Write to shutdown pipe to wake up select() immediately
    if (shutdown_pipe[1] >= 0) {
+      LOG_INFO("Writing to shutdown pipe (fd=%d)...", shutdown_pipe[1]);
       char byte = 1;
       ssize_t written = write(shutdown_pipe[1], &byte, 1);
-      (void)written;  // Ignore result, we're shutting down anyway
+      if (written != 1) {
+         LOG_ERROR("Shutdown pipe write failed: %s", strerror(errno));
+      } else {
+         LOG_INFO("Shutdown pipe write successful");
+      }
+   } else {
+      LOG_ERROR("Shutdown pipe write end is closed!");
    }
 
    // Close listening socket as backup
    if (listen_fd >= 0) {
+      LOG_INFO("Closing listen socket (fd=%d)...", listen_fd);
       close(listen_fd);
       listen_fd = -1;
    }
 
    // Wait for accept thread to exit
+   LOG_INFO("Waiting for accept thread to join...");
    pthread_join(accept_thread, NULL);
+   LOG_INFO("Accept thread joined successfully");
    thread_running = false;
 
    // Close shutdown pipe
@@ -235,7 +245,7 @@ uint32_t accept_thread_connections_rejected(void) {
 static void *accept_thread_func(void *arg) {
    (void)arg;
 
-   LOG_INFO("Accept thread running");
+   LOG_INFO("Accept thread running (pipe_fd=%d, listen_fd=%d)", shutdown_pipe[0], listen_fd);
 
    while (!shutdown_requested) {
       // Capture fds locally to avoid race with shutdown
@@ -244,6 +254,8 @@ static void *accept_thread_func(void *arg) {
 
       // Check if socket was closed (shutdown in progress)
       if (fd < 0 || pipe_fd < 0 || shutdown_requested) {
+         LOG_INFO("Accept thread: exit condition (fd=%d, pipe_fd=%d, shutdown=%d)", fd, pipe_fd,
+                  shutdown_requested);
          break;
       }
 
@@ -264,6 +276,8 @@ static void *accept_thread_func(void *arg) {
       if (result < 0) {
          if (errno == EINTR || errno == EBADF || shutdown_requested) {
             // Interrupted, fd closed, or shutdown - check shutdown flag
+            LOG_INFO("Accept thread: select interrupted (errno=%d, shutdown=%d)", errno,
+                     shutdown_requested);
             continue;
          }
          LOG_ERROR("Accept select() failed: %s", strerror(errno));
@@ -278,7 +292,7 @@ static void *accept_thread_func(void *arg) {
 
       // Check if shutdown was signaled via pipe
       if (FD_ISSET(pipe_fd, &read_fds)) {
-         LOG_INFO("Accept thread received shutdown signal");
+         LOG_INFO("Accept thread received shutdown signal via pipe");
          break;
       }
 
@@ -301,7 +315,7 @@ static void *accept_thread_func(void *arg) {
       }
    }
 
-   LOG_INFO("Accept thread exiting");
+   LOG_INFO("Accept thread exiting (shutdown_requested=%d)", shutdown_requested);
    return NULL;
 }
 

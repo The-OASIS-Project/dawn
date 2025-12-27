@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="glow" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#22d3ee"/>
+      <stop offset="100%" style="stop-color:#0891b2"/>
+    </linearGradient>
+    <filter id="blur">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="2"/>
+    </filter>
+  </defs>
+  <!-- Outer glow -->
+  <circle cx="32" cy="32" r="26" fill="none" stroke="url(#glow)" stroke-width="4" opacity="0.3" filter="url(#blur)"/>
+  <!-- Main circle -->
+  <circle cx="32" cy="32" r="26" fill="none" stroke="url(#glow)" stroke-width="2.5"/>
+  <!-- Inverted equilateral triangle inscribed in circle (r=26, center=32,32) -->
+  <!-- Bottom: (32, 32+26) = (32, 58) -->
+  <!-- Top-left: (32 - 26*cos(30°), 32 - 26*sin(60°)) = (32 - 22.52, 32 - 13) = (9.48, 19) -->
+  <!-- Top-right: (32 + 22.52, 19) = (54.52, 19) -->
+  <polygon points="32,58 9.48,19 54.52,19" fill="none" stroke="#22d3ee" stroke-width="2" stroke-linejoin="round" opacity="0.9"/>
+  <!-- Inner glow triangle -->
+  <polygon points="32,58 9.48,19 54.52,19" fill="none" stroke="#22d3ee" stroke-width="4" stroke-linejoin="round" opacity="0.2" filter="url(#blur)"/>
+</svg>

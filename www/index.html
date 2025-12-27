@@ -3,7 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#22d3ee">
+  <meta name="description" content="DAWN - Voice-controlled AI assistant">
   <title>DAWN - Voice Assistant</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="manifest" href="/manifest.json">
   <link rel="stylesheet" href="/css/dawn.css">
 </head>
 <body>
@@ -12,10 +16,19 @@
     <header id="header">
       <h1>D.A.W.N.</h1>
       <div id="header-controls">
-        <label id="debug-toggle" title="Show command/tool call details">
-          <input type="checkbox" id="debug-mode">
-          <span>Debug</span>
-        </label>
+        <button id="debug-btn" title="Show command/tool call details" aria-label="Toggle debug mode">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 4l1.5 2m4.5-2l-1.5 2"/>
+            <rect x="7" y="6" width="10" height="14" rx="5"/>
+            <path d="M4 11h3m10 0h3M4 16h3m10 0h3"/>
+          </svg>
+        </button>
+        <button id="metrics-btn" title="Show metrics panel" aria-label="Toggle metrics">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 3v18h18"/>
+            <path d="M7 16l4-4 4 4 5-6"/>
+          </svg>
+        </button>
         <button id="settings-btn" title="Settings" aria-label="Open settings">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="3"/>
@@ -278,6 +291,60 @@ client_secret = "..."</pre>
             <line x1="12" y1="16" x2="12.01" y2="16"/>
           </svg>
           <span>Some changes require a restart to take effect</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Metrics Panel -->
+    <div id="metrics-panel" class="metrics-panel hidden">
+      <div class="metrics-header">
+        <span>System Metrics</span>
+        <button id="metrics-close" class="metrics-close" aria-label="Close metrics">&times;</button>
+      </div>
+      <div class="metrics-content">
+        <div class="metrics-section">
+          <h4>Session</h4>
+          <div class="metrics-grid">
+            <div class="metric"><span class="metric-label">Uptime</span><span id="m-uptime" class="metric-value">--</span></div>
+            <div class="metric"><span class="metric-label">Queries</span><span id="m-queries" class="metric-value">--</span></div>
+            <div class="metric"><span class="metric-label">Errors</span><span id="m-errors" class="metric-value">--</span></div>
+            <div class="metric"><span class="metric-label">Barge-ins</span><span id="m-bargeins" class="metric-value">--</span></div>
+          </div>
+        </div>
+        <div class="metrics-section">
+          <h4>Tokens</h4>
+          <div class="metrics-grid">
+            <div class="metric"><span class="metric-label">Cloud In/Out</span><span id="m-tokens-cloud" class="metric-value">--</span></div>
+            <div class="metric"><span class="metric-label">Local In/Out</span><span id="m-tokens-local" class="metric-value">--</span></div>
+            <div class="metric"><span class="metric-label">Cached</span><span id="m-tokens-cached" class="metric-value">--</span></div>
+          </div>
+        </div>
+        <div class="metrics-section">
+          <h4>Last Pipeline</h4>
+          <div class="metrics-pipeline">
+            <span class="pipeline-step">ASR <b id="m-last-asr">--</b></span>
+            <span class="pipeline-arrow">&rarr;</span>
+            <span class="pipeline-step">LLM <b id="m-last-llm">--</b></span>
+            <span class="pipeline-arrow">&rarr;</span>
+            <span class="pipeline-step">TTS <b id="m-last-tts">--</b></span>
+          </div>
+        </div>
+        <div class="metrics-section">
+          <h4>Averages</h4>
+          <div class="metrics-pipeline">
+            <span class="pipeline-step">ASR <b id="m-avg-asr">--</b></span>
+            <span class="pipeline-arrow">&rarr;</span>
+            <span class="pipeline-step">LLM <b id="m-avg-llm">--</b></span>
+            <span class="pipeline-arrow">&rarr;</span>
+            <span class="pipeline-step">TTS <b id="m-avg-tts">--</b></span>
+          </div>
+        </div>
+        <div class="metrics-section">
+          <h4>System</h4>
+          <div class="metrics-grid">
+            <div class="metric"><span class="metric-label">VAD</span><span id="m-vad" class="metric-value">--</span></div>
+            <div class="metric"><span class="metric-label">AEC</span><span id="m-aec" class="metric-value">--</span></div>
+          </div>
         </div>
       </div>
     </div>

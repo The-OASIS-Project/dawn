@@ -56,8 +56,11 @@
 #include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
+#include "state_machine.h"
 #include "tools/smartthings_service.h"
 #include "tools/string_utils.h"
+#include "ui/metrics.h"
+#include "version.h"
 
 /* =============================================================================
  * Module State
@@ -829,6 +832,48 @@ static int callback_http(struct lws *wsi,
             return -1; /* Close connection after response */
          }
 
+         /* Health check endpoint - returns JSON status */
+         if (strcmp(path, "/health") == 0) {
+            dawn_metrics_t snapshot;
+            metrics_get_snapshot(&snapshot);
+
+            /* Build JSON response */
+            char json_body[512];
+            snprintf(json_body, sizeof(json_body),
+                     "{\"status\":\"ok\",\"version\":\"%s\",\"git_sha\":\"%s\","
+                     "\"uptime_seconds\":%ld,\"state\":\"%s\",\"queries\":%u,"
+                     "\"active_sessions\":%d}",
+                     VERSION_NUMBER, GIT_SHA, (long)metrics_get_uptime(),
+                     dawn_state_name(snapshot.current_state), snapshot.queries_total,
+                     s_client_count);
+
+            size_t body_len = strlen(json_body);
+            unsigned char buffer[LWS_PRE + 512];
+            unsigned char *start = &buffer[LWS_PRE];
+            unsigned char *p = start;
+            unsigned char *end = &buffer[sizeof(buffer) - 1];
+
+            if (lws_add_http_header_status(wsi, HTTP_STATUS_OK, &p, end))
+               return -1;
+            if (lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_CONTENT_TYPE,
+                                             (unsigned char *)"application/json", 16, &p, end))
+               return -1;
+            if (lws_add_http_header_content_length(wsi, body_len, &p, end))
+               return -1;
+            if (lws_finalize_http_header(wsi, &p, end))
+               return -1;
+
+            n = lws_write(wsi, start, p - start, LWS_WRITE_HTTP_HEADERS);
+            if (n < 0)
+               return -1;
+
+            n = lws_write(wsi, (unsigned char *)json_body, body_len, LWS_WRITE_HTTP);
+            if (n < 0)
+               return -1;
+
+            return -1; /* Close connection after response */
+         }
+
          /* Default to index.html for root */
          if (strcmp(path, "/") == 0) {
             strncpy(path, "/index.html", sizeof(path) - 1);
@@ -895,6 +940,7 @@ static void send_json_response(struct lws *wsi, json_object *response);
 static void handle_list_interfaces(ws_connection_t *conn);
 static void handle_get_tools_config(ws_connection_t *conn);
 static void handle_set_tools_config(ws_connection_t *conn, struct json_object *payload);
+static void handle_get_metrics(ws_connection_t *conn);
 #ifdef ENABLE_WEBUI_AUDIO
 static void handle_binary_message(ws_connection_t *conn, const uint8_t *data, size_t len);
 #endif
@@ -2057,6 +2103,99 @@ static void handle_get_tools_config(ws_connection_t *conn) {
    LOG_INFO("WebUI: Sent tools config (%d tools)", count);
 }
 
+/* =============================================================================
+ * Metrics Handler
+ * ============================================================================= */
+
+static void handle_get_metrics(ws_connection_t *conn) {
+   dawn_metrics_t snapshot;
+   metrics_get_snapshot(&snapshot);
+
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("get_metrics_response"));
+
+   json_object *payload = json_object_new_object();
+
+   /* Session statistics */
+   json_object *session = json_object_new_object();
+   json_object_object_add(session, "uptime_seconds", json_object_new_int64(metrics_get_uptime()));
+   json_object_object_add(session, "queries_total", json_object_new_int(snapshot.queries_total));
+   json_object_object_add(session, "queries_cloud", json_object_new_int(snapshot.queries_cloud));
+   json_object_object_add(session, "queries_local", json_object_new_int(snapshot.queries_local));
+   json_object_object_add(session, "errors", json_object_new_int(snapshot.errors_count));
+   json_object_object_add(session, "fallbacks", json_object_new_int(snapshot.fallbacks_count));
+   json_object_object_add(session, "bargeins", json_object_new_int(snapshot.bargein_count));
+   json_object_object_add(payload, "session", session);
+
+   /* Token usage */
+   json_object *tokens = json_object_new_object();
+   json_object_object_add(tokens, "cloud_input",
+                          json_object_new_int64(snapshot.tokens_cloud_input));
+   json_object_object_add(tokens, "cloud_output",
+                          json_object_new_int64(snapshot.tokens_cloud_output));
+   json_object_object_add(tokens, "local_input",
+                          json_object_new_int64(snapshot.tokens_local_input));
+   json_object_object_add(tokens, "local_output",
+                          json_object_new_int64(snapshot.tokens_local_output));
+   json_object_object_add(tokens, "cached", json_object_new_int64(snapshot.tokens_cached));
+   json_object_object_add(payload, "tokens", tokens);
+
+   /* Last query timing */
+   json_object *last = json_object_new_object();
+   json_object_object_add(last, "vad_ms", json_object_new_double(snapshot.last_vad_time_ms));
+   json_object_object_add(last, "asr_ms", json_object_new_double(snapshot.last_asr_time_ms));
+   json_object_object_add(last, "asr_rtf", json_object_new_double(snapshot.last_asr_rtf));
+   json_object_object_add(last, "llm_ttft_ms", json_object_new_double(snapshot.last_llm_ttft_ms));
+   json_object_object_add(last, "llm_total_ms", json_object_new_double(snapshot.last_llm_total_ms));
+   json_object_object_add(last, "tts_ms", json_object_new_double(snapshot.last_tts_time_ms));
+   json_object_object_add(last, "pipeline_ms",
+                          json_object_new_double(snapshot.last_total_pipeline_ms));
+   json_object_object_add(payload, "last", last);
+
+   /* Average timing */
+   json_object *avg = json_object_new_object();
+   json_object_object_add(avg, "vad_ms", json_object_new_double(snapshot.avg_vad_ms));
+   json_object_object_add(avg, "asr_ms", json_object_new_double(snapshot.avg_asr_ms));
+   json_object_object_add(avg, "asr_rtf", json_object_new_double(snapshot.avg_asr_rtf));
+   json_object_object_add(avg, "llm_ttft_ms", json_object_new_double(snapshot.avg_llm_ttft_ms));
+   json_object_object_add(avg, "llm_total_ms", json_object_new_double(snapshot.avg_llm_total_ms));
+   json_object_object_add(avg, "tts_ms", json_object_new_double(snapshot.avg_tts_ms));
+   json_object_object_add(avg, "pipeline_ms",
+                          json_object_new_double(snapshot.avg_total_pipeline_ms));
+   json_object_object_add(payload, "averages", avg);
+
+   /* Real-time state */
+   json_object *state = json_object_new_object();
+   json_object_object_add(state, "current",
+                          json_object_new_string(dawn_state_name(snapshot.current_state)));
+   json_object_object_add(state, "vad_probability",
+                          json_object_new_double(snapshot.current_vad_probability));
+   json_object_object_add(state, "audio_buffer_fill",
+                          json_object_new_double(snapshot.audio_buffer_fill_pct));
+   json_object_object_add(payload, "state", state);
+
+   /* AEC status */
+   json_object *aec = json_object_new_object();
+   json_object_object_add(aec, "enabled", json_object_new_boolean(snapshot.aec_enabled));
+   json_object_object_add(aec, "calibrated", json_object_new_boolean(snapshot.aec_calibrated));
+   json_object_object_add(aec, "delay_ms", json_object_new_int(snapshot.aec_delay_ms));
+   json_object_object_add(aec, "correlation", json_object_new_double(snapshot.aec_correlation));
+   json_object_object_add(payload, "aec", aec);
+
+   /* Summarizer stats */
+   json_object *summarizer = json_object_new_object();
+   json_object_object_add(summarizer, "backend",
+                          json_object_new_string(snapshot.summarizer_backend));
+   json_object_object_add(summarizer, "threshold",
+                          json_object_new_int64(snapshot.summarizer_threshold));
+   json_object_object_add(summarizer, "calls", json_object_new_int(snapshot.summarizer_call_count));
+   json_object_object_add(payload, "summarizer", summarizer);
+
+   json_object_object_add(response, "payload", payload);
+   send_json_response(conn->wsi, response);
+   json_object_put(response);
+}
+
 /**
  * @brief Validate a tool name for safe processing.
  *
@@ -2745,6 +2884,8 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
       if (payload) {
          handle_set_tools_config(conn, payload);
       }
+   } else if (strcmp(type, "get_metrics") == 0) {
+      handle_get_metrics(conn);
    } else {
       LOG_WARNING("WebUI: Unknown message type: %s", type);
    }

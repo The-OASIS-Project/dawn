@@ -1,0 +1,17 @@
+{
+  "name": "DAWN Assistant",
+  "short_name": "DAWN",
+  "description": "Voice-controlled AI assistant",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0f",
+  "theme_color": "#22d3ee",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

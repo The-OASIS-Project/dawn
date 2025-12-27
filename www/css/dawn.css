@@ -100,25 +100,24 @@ html, body {
   gap: 1rem;
 }
 
-#debug-toggle {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: 0.75rem;
+#debug-btn {
+  background: none;
+  border: none;
   color: var(--text-secondary);
   cursor: pointer;
-  user-select: none;
+  padding: 0.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color var(--transition-fast);
 }
 
-#debug-toggle input[type="checkbox"] {
-  width: 14px;
-  height: 14px;
-  accent-color: var(--accent);
-  cursor: pointer;
+#debug-btn:hover {
+  color: var(--accent);
 }
 
-#debug-toggle:hover {
-  color: var(--text-primary);
+#debug-btn.active {
+  color: var(--accent);
 }
 
 /* =============================================================================
@@ -1655,4 +1654,157 @@ button:disabled {
 
 #save-tools-btn {
   margin-top: 0.5rem;
+}
+
+/* =============================================================================
+ * Metrics Panel
+ * ============================================================================= */
+.metrics-panel {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--accent-dim);
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.5);
+  z-index: 100;
+  max-height: 50vh;
+  overflow-y: auto;
+  transition: transform var(--transition-medium) ease;
+}
+
+.metrics-panel.hidden {
+  transform: translateY(100%);
+}
+
+.metrics-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 1rem;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--accent-dim);
+  position: sticky;
+  top: 0;
+}
+
+.metrics-header span {
+  font-weight: 600;
+  color: var(--accent);
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.metrics-close {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 1.5rem;
+  cursor: pointer;
+  line-height: 1;
+  padding: 0 0.25rem;
+}
+
+.metrics-close:hover {
+  color: var(--text-primary);
+}
+
+.metrics-content {
+  padding: 1rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+}
+
+.metrics-section {
+  background: var(--bg-tertiary);
+  border-radius: var(--border-radius);
+  padding: 0.75rem;
+}
+
+.metrics-section h4 {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  margin-bottom: 0.5rem;
+  letter-spacing: 0.05em;
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.5rem;
+}
+
+.metric {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.metric-label {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+}
+
+.metric-value {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+}
+
+.metrics-pipeline {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.pipeline-step {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.pipeline-step b {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.pipeline-arrow {
+  color: var(--text-secondary);
+  opacity: 0.5;
+}
+
+#metrics-btn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color var(--transition-fast);
+}
+
+#metrics-btn:hover {
+  color: var(--accent);
+}
+
+#metrics-btn.active {
+  color: var(--accent);
+}
+
+/* Mobile adjustments for metrics */
+@media (max-width: 600px) {
+  .metrics-content {
+    grid-template-columns: 1fr;
+  }
+
+  .metrics-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
 }

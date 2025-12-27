@@ -37,6 +37,7 @@
 #include "llm/llm_interface.h"
 #include "logging.h"
 #include "tools/string_utils.h"
+#include "tts/text_to_speech.h"
 #include "webui/webui_server.h"
 
 /* =============================================================================
@@ -781,6 +782,11 @@ int llm_context_auto_compact(struct json_object *history, uint32_t session_id) {
    }
 
    LOG_WARNING("llm_context: Auto-compacting conversation before LLM call");
+
+   /* Notify local user via TTS before compaction (can take a few seconds) */
+   if (session_id == 0) {
+      text_to_speech((char *)"Compacting my memory. Just a moment.");
+   }
 
    /* Perform compaction */
    llm_compaction_result_t result;
