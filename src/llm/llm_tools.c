@@ -1414,21 +1414,3 @@ void llm_tools_prepare_followup(const tool_result_list_t *results, tool_followup
       }
    }
 }
-
-/* =============================================================================
- * Legacy MQTT Vision Support (deprecated)
- *
- * Vision is now handled by native tool calling - the viewing tool captures
- * images and streaming code passes vision data to recursive LLM calls.
- * ============================================================================= */
-
-bool llm_tools_process_vision_data(const char *data, char *error_buf, size_t error_len) {
-   (void)data;
-   LOG_WARNING("llm_tools_process_vision_data: MQTT vision path deprecated - use native tool "
-               "calling instead");
-   if (error_buf && error_len > 0) {
-      snprintf(error_buf, error_len,
-               "MQTT vision deprecated - use 'what do you see?' to trigger viewing tool");
-   }
-   return false;
-}

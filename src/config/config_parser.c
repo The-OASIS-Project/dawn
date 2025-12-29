@@ -733,15 +733,6 @@ int config_parse_secrets(const char *path, secrets_config_t *secrets) {
          PARSE_STRING(api_keys, "claude", secrets->claude_api_key);
    }
 
-   /* Legacy: Parse [mqtt] section for credentials (old format) */
-   toml_table_t *mqtt = toml_table_in(root, "mqtt");
-   if (mqtt) {
-      if (secrets->mqtt_username[0] == '\0')
-         PARSE_STRING(mqtt, "username", secrets->mqtt_username);
-      if (secrets->mqtt_password[0] == '\0')
-         PARSE_STRING(mqtt, "password", secrets->mqtt_password);
-   }
-
    toml_free(root);
 
    LOG_INFO("Loaded secrets from: %s", path);

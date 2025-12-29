@@ -155,7 +155,7 @@ typedef struct {
 #define LLM_TOOL_NAME_MAX 64
 
 typedef struct {
-   bool native_enabled; /* Use native tool calling (default: false) */
+   bool native_enabled; /* Use native tool calling (default: true) */
 
    /* Per-tool enable lists (empty = all enabled) */
    char local_enabled[LLM_TOOLS_MAX_CONFIGURED][LLM_TOOL_NAME_MAX];

@@ -119,7 +119,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->llm.local.vision_enabled = false; /* Most local models don't support vision */
 
    /* LLM Tools */
-   config->llm.tools.native_enabled = false; /* Default OFF for backward compatibility */
+   config->llm.tools.native_enabled = true; /* Native tool calling enabled by default */
 
    /* LLM Context Management */
    config->llm.summarize_threshold = 0.80f; /* Compact at 80% of context limit */

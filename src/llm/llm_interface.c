@@ -95,45 +95,6 @@ static char llm_url[2048] = "";
 // Global interrupt flag - set by main thread when wake word detected during LLM processing
 static volatile sig_atomic_t llm_interrupt_requested = 0;
 
-// Get current OpenAI-compatible credentials - session-aware
-// Used by tool execution loop to refresh credentials after switch_llm
-// Checks session context first (set during LLM streaming), falls back to global state
-void llm_get_current_openai_credentials(const char **url_out, const char **api_key_out) {
-   // Check for session context (set during streaming calls)
-   session_t *session = session_get_command_context();
-   if (session) {
-      // Get fresh credentials from session's config
-      session_llm_config_t session_config;
-      session_get_llm_config(session, &session_config);
-
-      llm_resolved_config_t resolved;
-      if (llm_resolve_config(&session_config, &resolved) == 0) {
-         if (url_out) {
-            *url_out = resolved.endpoint;
-         }
-         if (api_key_out) {
-            *api_key_out = resolved.api_key;
-         }
-         return;
-      }
-      // Fall through to global state if resolve failed
-   }
-
-   // Fallback to global state (for paths without session context)
-   if (url_out) {
-      *url_out = llm_url;
-   }
-   if (api_key_out) {
-      if (current_type == LLM_LOCAL) {
-         *api_key_out = NULL;  // Local LLM doesn't need API key
-      } else if (current_cloud_provider == CLOUD_PROVIDER_OPENAI) {
-         *api_key_out = get_openai_api_key();
-      } else {
-         *api_key_out = NULL;  // Claude uses different function
-      }
-   }
-}
-
 int llm_get_current_resolved_config(llm_resolved_config_t *config_out) {
    if (!config_out) {
       return 1;

@@ -55,33 +55,59 @@ typedef struct {
    int context_size;         /* Context size in tokens */
 } model_context_entry_t;
 
-/* OpenAI models */
+/* OpenAI models (updated December 2025) */
 static const model_context_entry_t s_openai_models[] = {
+   /* GPT-5.x family (400K context) */
+   { "gpt-5.2", 400000 },
+   { "gpt-5.1", 400000 },
+   { "gpt-5-mini", 400000 },
+   { "gpt-5-nano", 400000 },
+   { "gpt-5", 400000 },
+   /* GPT-4.1 family (1M context) */
+   { "gpt-4.1", 1000000 },
+   { "gpt-4.1-mini", 1000000 },
+   { "gpt-4.1-nano", 1000000 },
+   /* O-series reasoning models */
+   { "o3-pro", 200000 },
+   { "o3-mini", 200000 },
+   { "o3", 200000 },
+   { "o1-pro", 200000 },
+   { "o1-mini", 128000 },
+   { "o1-preview", 128000 },
+   { "o1", 200000 },
+   /* GPT-4o family */
+   { "gpt-4o-mini", 128000 },
    { "gpt-4o", 128000 },
+   /* GPT-4 Turbo */
    { "gpt-4-turbo", 128000 },
    { "gpt-4-0125", 128000 },
    { "gpt-4-1106", 128000 },
+   /* Legacy GPT-4 */
    { "gpt-4-32k", 32768 },
    { "gpt-4", 8192 },
+   /* Legacy GPT-3.5 */
    { "gpt-3.5-turbo-16k", 16384 },
    { "gpt-3.5-turbo", 16384 },
-   { "o1-preview", 128000 },
-   { "o1-mini", 128000 },
    { NULL, 0 } /* Sentinel */
 };
 
-/* Claude models */
+/* Claude models (updated December 2025) */
 static const model_context_entry_t s_claude_models[] = {
-   { "claude-3-5", 200000 },
+   /* Claude 4.x family */
+   { "claude-opus-4.5", 200000 },
+   { "claude-sonnet-4.5", 200000 },
+   { "claude-opus-4.1", 200000 },
+   { "claude-sonnet-4.1", 200000 },
+   { "claude-opus-4", 200000 },
+   { "claude-sonnet-4", 200000 },
+   /* Claude 3.5 family */
+   { "claude-3-5-sonnet", 200000 },
+   { "claude-3-5-haiku", 200000 },
+   { "claude-3.5", 200000 },
+   /* Claude 3 family (some deprecated) */
    { "claude-3-opus", 200000 },
    { "claude-3-sonnet", 200000 },
    { "claude-3-haiku", 200000 },
-   { "claude-2.1", 200000 },
-   { "claude-2.0", 100000 },
-   { "claude-2", 100000 },
-   { "claude-instant", 100000 },
-   { "claude-opus-4", 200000 },
-   { "claude-sonnet-4", 200000 },
    { NULL, 0 } /* Sentinel */
 };
 

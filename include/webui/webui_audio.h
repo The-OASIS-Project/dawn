@@ -55,8 +55,8 @@ extern "C" {
 #define WEBUI_OPUS_FRAME_SAMPLES (WEBUI_OPUS_SAMPLE_RATE * WEBUI_OPUS_FRAME_MS / 1000)
 
 /* Buffer sizes */
-#define WEBUI_OPUS_MAX_FRAME_SIZE 1276 /* Max Opus frame size */
-#define WEBUI_PCM_MAX_SAMPLES 48000    /* 3 seconds @ 16kHz */
+#define WEBUI_OPUS_MAX_FRAME_SIZE 1276                     /* Max Opus frame size */
+#define WEBUI_PCM_MAX_SAMPLES (WEBUI_OPUS_SAMPLE_RATE * 3) /* 3 seconds */
 
 /* Error codes */
 #define WEBUI_AUDIO_SUCCESS 0

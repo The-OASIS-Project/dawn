@@ -217,19 +217,6 @@ char *voiceAmplifierCallback(const char *actionName, char *value, int *should_re
 char *shutdownCallback(const char *actionName, char *value, int *should_respond);
 
 /**
- * @brief Callback function to handle the viewing of an image.
- *
- * Reads the specified image file, encodes its content into Base64,
- * and passes the encoded data for vision AI processing.
- *
- * @param actionName The name of the action triggering this callback. Not used in this function,
- *                   but included to match expected callback signature.
- * @param value      The file path to the image to be viewed and processed.
- * @param should_respond Should the callback return data to the AI or just handle it.
- */
-char *viewingCallback(const char *actionName, char *value, int *should_respond);
-
-/**
  * @brief Adjusts music volume based on user input.
  *
  * Sets the music playback volume to a value between 0.0 (silence) and 2.0 (maximum).

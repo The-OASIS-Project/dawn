@@ -90,7 +90,6 @@ static deviceCallback deviceCallbackArray[] = { { AUDIO_PLAYBACK_DEVICE, setPcmP
                                                 { MUSIC, musicCallback },
                                                 { VOICE_AMPLIFIER, voiceAmplifierCallback },
                                                 { SHUTDOWN, shutdownCallback },
-                                                { VIEWING, viewingCallback },
                                                 { VOLUME, volumeCallback },
                                                 { LOCAL_LLM_SWITCH, localLLMCallback },
                                                 { CLOUD_LLM_SWITCH, cloudLLMCallback },
@@ -1514,38 +1513,6 @@ char *base64_encode(const unsigned char *buffer, size_t length) {
    BIO_free_all(bio);
 
    return b64text;
-}
-
-char *viewingCallback(const char *actionName, char *value, int *should_respond) {
-   *should_respond = 1;  // Always respond for viewing
-
-   /* Check if vision is available for the current LLM */
-   if (!is_vision_enabled_for_current_llm()) {
-      LOG_WARNING("Vision command received but vision is not enabled for current LLM type");
-      return strdup("Vision isn't available with the current AI model. "
-                    "Switch to cloud or enable vision for your local model in the config.");
-   }
-
-   LOG_INFO("viewingCallback: Processing vision data: %.50s%s", value,
-            strlen(value) > 50 ? "..." : "");
-
-   /* Use unified vision processing (handles both base64 and file paths) */
-   char error_buf[256];
-   if (llm_tools_process_vision_data(value, error_buf, sizeof(error_buf))) {
-      if (command_processing_mode != CMD_MODE_DIRECT_ONLY) {
-         return strdup("Image captured and ready for vision processing");
-      }
-      *should_respond = 0;  // In direct mode, no response needed
-      return NULL;
-   }
-
-   /* Processing failed - return error */
-   if (command_processing_mode != CMD_MODE_DIRECT_ONLY) {
-      return strdup(error_buf);
-   }
-
-   *should_respond = 0;
-   return NULL;
 }
 
 char *volumeCallback(const char *actionName, char *value, int *should_respond) {

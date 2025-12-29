@@ -522,20 +522,6 @@ typedef void (*tool_execution_callback_fn)(void *session,
  */
 void llm_tools_set_execution_callback(tool_execution_callback_fn callback);
 
-/**
- * @brief Process vision data from MQTT callback (DEPRECATED)
- *
- * This function is deprecated. Vision is now handled by native tool calling -
- * the viewing tool captures images and streaming code passes vision data to
- * recursive LLM calls automatically (session-isolated via tool_result_t.vision_image).
- *
- * @param data Ignored
- * @param error_buf Output buffer for deprecation message
- * @param error_len Size of error buffer
- * @return Always returns false (deprecated)
- */
-bool llm_tools_process_vision_data(const char *data, char *error_buf, size_t error_len);
-
 #ifdef __cplusplus
 }
 #endif

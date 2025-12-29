@@ -371,17 +371,6 @@ char *llm_chat_completion_streaming_tts_with_config(struct json_object *conversa
                                                     const llm_resolved_config_t *config);
 
 /**
- * @brief Get current OpenAI-compatible endpoint and API key
- *
- * Returns the current URL and API key based on global LLM state.
- * Used by tool execution loop to get fresh credentials after switch_llm.
- *
- * @param url_out Output: current endpoint URL (do not free)
- * @param api_key_out Output: current API key or NULL for local (do not free)
- */
-void llm_get_current_openai_credentials(const char **url_out, const char **api_key_out);
-
-/**
  * @brief Get full resolved LLM config for current session
  *
  * Returns the complete resolved config including type, cloud_provider,

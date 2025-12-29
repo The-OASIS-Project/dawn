@@ -39,6 +39,181 @@
 #include "tools/smartthings_service.h"
 #include "ui/metrics.h"
 
+/* =============================================================================
+ * System Prompt Strings
+ * =============================================================================
+ * These prompts define the AI's behavior rules. There are two modes:
+ *
+ * 1. NATIVE TOOL CALLING (default): Uses NATIVE_TOOLS_RULES - a minimal prompt
+ *    since the LLM receives tool schemas via API (OpenAI function calling /
+ *    Claude tool_use).
+ *
+ * 2. LEGACY <command> TAG MODE: Uses LEGACY_RULES_* prompts that instruct the
+ *    LLM to emit <command>{"device":"x","action":"y"}</command> JSON tags.
+ *
+ * See get_system_instructions() for the branching logic.
+ * ============================================================================= */
+
+// clang-format off
+
+/* Rules for native tool calling mode (default) */
+static const char *NATIVE_TOOLS_RULES =
+   "RULES\n"
+   "1. Keep responses concise - max 30 words unless asked to explain.\n"
+   "2. Use available tools when the user requests actions or information.\n"
+   "3. Do not include URLs unless explicitly asked.\n"
+   "4. If a request is ambiguous, ask for clarification.\n"
+   "5. After tool execution, provide a brief confirmation.\n";
+
+/* Core behavior rules for <command> tag mode (legacy) */
+static const char *LEGACY_RULES_CORE =
+   "Do not use thinking mode. Respond directly without internal reasoning.\n"
+   "Max 30 words plus <command> tags unless the user says \"explain in detail\".\n"
+   "\n"
+   "RULES\n"
+   "1. For Boolean / Analog / Music actions: one sentence, then the JSON tag(s). No prose after "
+   "the tag block.\n"
+   "2. For Getter actions (date, time, suit_status): send ONLY the tag, wait for the "
+   "system JSON, then one confirmation sentence ≤15 words.\n"
+   "3. Use only the devices and actions listed below; never invent new ones.\n"
+   "4. If a request is ambiguous (e.g., \"Mute it\"), ask one-line clarification.\n"
+   "5. If the user wants information that has no matching getter yet, answer verbally with no "
+   "tags.\n"
+   "6. Device \"info\" supports ENABLE / DISABLE only—never use \"get\" with it.\n"
+   "7. To mute playback after clarification, use "
+   "<command>{\"device\":\"volume\",\"action\":\"set\",\"value\":0}</command>.\n"
+   "8. Multiple commands can be sent in one response using multiple <command> tags.\n"
+   "9. Do not include URLs in responses unless the user explicitly asks for links.\n";
+
+/* Vision rules (only if vision is enabled) */
+static const char *LEGACY_RULES_VISION =
+   "VISION: When user asks what they're looking at, send ONLY "
+   "<command>{\"device\":\"viewing\",\"action\":\"get\"}</command>. When the system then "
+   "provides an image, describe what you see in detail.\n";
+
+/* Weather rules (always available - uses Open-Meteo free API) */
+static const char *LEGACY_RULES_WEATHER =
+   "WEATHER: Use action 'today' (current), 'tomorrow' (2-day), or 'week' (7-day forecast).\n"
+   "   Example: <command>{\"device\":\"weather\",\"action\":\"week\",\"value\":\"City, State\"}"
+   "</command>. If user provides location, use it directly. Only ask for location if not "
+   "specified. Choose action based on user's question (e.g., 'this weekend' -> week, "
+   "'right now' -> today).\n";
+
+/* Search rules (only if SearXNG endpoint is configured) */
+static const char *LEGACY_RULES_SEARCH =
+   "SEARCH: <command>{\"device\":\"search\",\"action\":\"ACTION\",\"value\":\"query\"}</command> "
+   "Actions: web, news, science, tech, social, define, papers. No URLs aloud.\n";
+
+/* Calculator rules (always available - local computation) */
+static const char *LEGACY_RULES_CALCULATOR =
+   "CALCULATOR: Actions: 'evaluate' (math), 'convert' (units), 'base' (hex/bin), 'random'.\n"
+   "   evaluate: <command>{\"device\":\"calculator\",\"action\":\"evaluate\",\"value\":\"2+3*4\"}"
+   "</command>\n"
+   "   convert: <command>{\"device\":\"calculator\",\"action\":\"convert\",\"value\":\"5 miles "
+   "to km\"}</command>\n"
+   "   base: <command>{\"device\":\"calculator\",\"action\":\"base\",\"value\":\"255 to hex\"}"
+   "</command>\n"
+   "   random: <command>{\"device\":\"calculator\",\"action\":\"random\",\"value\":\"1 to 100\"}"
+   "</command>\n";
+
+/* URL fetcher rules (always available - basic HTTP fetch) */
+static const char *LEGACY_RULES_URL =
+   "URL: Fetch and read content from a URL. Use when you need to read a specific webpage.\n"
+   "   <command>{\"device\":\"url\",\"action\":\"get\",\"value\":\"https://example.com\"}"
+   "</command>\n";
+
+/* LLM control rules (always available - query and switch AI backend) */
+static const char *LEGACY_RULES_LLM_STATUS =
+   "LLM: Query or switch the AI model. Actions: 'get' (status), 'set' (switch).\n"
+   "   get: <command>{\"device\":\"llm\",\"action\":\"get\"}</command>\n"
+   "   set: <command>{\"device\":\"llm\",\"action\":\"set\",\"value\":\"local\"}"
+   "</command> or \"cloud\"\n";
+
+/* SmartThings home automation rules (only if SmartThings is authenticated) */
+static const char *LEGACY_RULES_SMARTTHINGS =
+   "SMARTTHINGS: Control smart home devices. Actions: list, status, on, off, brightness, "
+   "color, temperature, lock, unlock.\n"
+   "   list: <command>{\"device\":\"smartthings\",\"action\":\"list\"}</command>\n"
+   "   status: <command>{\"device\":\"smartthings\",\"action\":\"status\",\"value\":\"device "
+   "name\"}</command>\n"
+   "   on/off: <command>{\"device\":\"smartthings\",\"action\":\"on\",\"value\":\"living room "
+   "light\"}</command>\n"
+   "   brightness: <command>{\"device\":\"smartthings\",\"action\":\"brightness\","
+   "\"value\":\"lamp 75\"}</command> (0-100)\n"
+   "   color: <command>{\"device\":\"smartthings\",\"action\":\"color\",\"value\":\"desk "
+   "light red\"}</command> (red,orange,yellow,green,cyan,blue,purple,pink,white)\n"
+   "   temperature: <command>{\"device\":\"smartthings\",\"action\":\"temperature\","
+   "\"value\":\"thermostat 72\"}</command> (50-90F)\n"
+   "   lock/unlock: <command>{\"device\":\"smartthings\",\"action\":\"lock\",\"value\":\"front "
+   "door\"}</command>\n";
+
+/* Core examples (always included in legacy mode) */
+static const char *LEGACY_EXAMPLES_CORE =
+   "\n=== EXAMPLES ===\n"
+   "User: Turn on the armor display.\n"
+   "FRIDAY: HUD online, boss. "
+   "<command>{\"device\":\"armor_display\",\"action\":\"enable\"}</command>\n"
+   "System-> {\"response\":\"armor display enabled\"}\n"
+   "FRIDAY: Display confirmed, sir.\n"
+   "\n"
+   "User: What time is it?\n"
+   "FRIDAY: <command>{\"device\":\"time\",\"action\":\"get\"}</command>\n"
+   "System-> {\"response\":\"The time is 4:07 PM.\"}\n"
+   "FRIDAY: Time confirmed, sir.\n"
+   "\n"
+   "User: Mute it.\n"
+   "FRIDAY: Need specifics, sir—audio playback or mic?\n"
+   "\n"
+   "User: Mute playback.\n"
+   "FRIDAY: Volume to zero, boss. "
+   "<command>{\"device\":\"volume\",\"action\":\"set\",\"value\":0}</command>\n"
+   "System-> {\"response\":\"volume set\"}\n"
+   "FRIDAY: Muted, sir.\n";
+
+/* Weather example (only if weather is enabled) */
+static const char *LEGACY_EXAMPLES_WEATHER =
+   "\nUser: What's the weather in Atlanta?\n"
+   "FRIDAY: <command>{\"device\":\"weather\",\"action\":\"today\",\"value\":\"Atlanta, Georgia\"}"
+   "</command>\n"
+   "System-> {\"location\":\"Atlanta, Georgia, US\",\"current\":{\"temperature_f\":52.3,...},"
+   "\"forecast\":[{\"date\":\"2025-01-15\",\"high_f\":58,...}]}\n"
+   "FRIDAY: Atlanta right now: 52°F, partly cloudy. Today's high 58°F, low 42°F. Light jacket "
+   "weather, boss!\n";
+
+/* Command response format instructions for LOCAL interface (includes HUD-specific hints) */
+static const char *LEGACY_LOCAL_COMMAND_INSTRUCTIONS =
+   "When I ask for an action that matches one of these commands, respond with both:\n"
+   "1. A conversational response (e.g., \"I'll turn that on for you, sir.\")\n"
+   "2. The exact JSON command enclosed in <command> tags\n\n"
+   "For example: \"Let me turn on the map for you, sir. <command>{\"device\": \"map\", "
+   "\"action\": \"enable\"}</command>\"\n\n"
+   "The very next message I send you will be an automated response from the system. You should "
+   "use that information then to "
+   "reply with the information I requested or information on whether the command was "
+   "successful.\n"
+   "Command hints:\n"
+   "The \"viewing\" command will return an image to you so you can visually answer a query.\n"
+   "When running \"play\", the value is a simple string to search the media files for.\n"
+   "Current HUD names are \"default\", \"environmental\", and \"armor\".\n";
+
+/* Command response format instructions for REMOTE interface (no HUD-specific hints) */
+static const char *LEGACY_REMOTE_COMMAND_INSTRUCTIONS =
+   "When I ask for an action that matches one of these commands, respond with both:\n"
+   "1. A conversational response (e.g., \"I'll get that for you, sir.\")\n"
+   "2. The exact JSON command enclosed in <command> tags\n\n"
+   "For example: \"The current time is 3:45 PM. <command>{\"device\": \"time\", "
+   "\"action\": \"get\"}</command>\"\n\n"
+   "The very next message I send you will be an automated response from the system. You should "
+   "use that information then to "
+   "reply with the information I requested or information on whether the command was "
+   "successful.\n";
+
+// clang-format on
+
+/* =============================================================================
+ * End Legacy Prompt Strings
+ * ============================================================================= */
+
 // Static buffer for command prompt - make it static, make it large
 #define PROMPT_BUFFER_SIZE 65536
 static char command_prompt[PROMPT_BUFFER_SIZE];
@@ -107,7 +282,7 @@ int is_vision_enabled_for_current_llm(void) {
 /**
  * @brief Builds dynamic system instructions based on enabled features
  *
- * Assembles AI_RULES_CORE plus feature-specific rules based on config.
+ * Assembles LEGACY_RULES_CORE plus feature-specific rules based on config.
  * This ensures the LLM only sees instructions for features that are available.
  *
  * Features checked:
@@ -143,24 +318,18 @@ const char *get_system_instructions(void) {
 
    // Check if native tool calling is enabled - use minimal prompt
    if (llm_tools_enabled(NULL)) {
-      // Minimal rules when tools handle structured commands
-      len += snprintf(system_instructions_buffer + len, remaining - len,
-                      "RULES\n"
-                      "1. Keep responses concise - max 30 words unless asked to explain.\n"
-                      "2. Use available tools when the user requests actions or information.\n"
-                      "3. Do not include URLs unless explicitly asked.\n"
-                      "4. If a request is ambiguous, ask for clarification.\n"
-                      "5. After tool execution, provide a brief confirmation.\n\n");
+      len += snprintf(system_instructions_buffer + len, remaining - len, "%s\n",
+                      NATIVE_TOOLS_RULES);
 
       // Note: Tool schemas are sent separately in the API request
-      LOG_INFO("Built MINIMAL system instructions for native tool calling (%d bytes)", len);
+      LOG_INFO("Built system instructions for native tool calling (%d bytes)", len);
       system_instructions_initialized = 1;
       return system_instructions_buffer;
    }
 
    // Full prompt with <command> tag instructions for non-tool mode
    // Always include core rules
-   len += snprintf(system_instructions_buffer + len, remaining - len, "%s\n", AI_RULES_CORE);
+   len += snprintf(system_instructions_buffer + len, remaining - len, "%s\n", LEGACY_RULES_CORE);
 
    // Build capabilities list based on what's enabled
    len += snprintf(system_instructions_buffer + len, remaining - len, "\nCAPABILITIES: You CAN ");
@@ -202,16 +371,18 @@ const char *get_system_instructions(void) {
 
    // Add feature-specific rules based on config
    if (is_vision_enabled_for_current_llm()) {
-      len += snprintf(system_instructions_buffer + len, remaining - len, "%s\n", AI_RULES_VISION);
+      len += snprintf(system_instructions_buffer + len, remaining - len, "%s\n",
+                      LEGACY_RULES_VISION);
       LOG_INFO("System instructions: Vision rules included (cloud LLM with vision support)");
    }
 
    // Weather always available
-   len += snprintf(system_instructions_buffer + len, remaining - len, "%s\n", AI_RULES_WEATHER);
+   len += snprintf(system_instructions_buffer + len, remaining - len, "%s\n", LEGACY_RULES_WEATHER);
 
    // Search only if endpoint configured
    if (is_search_enabled()) {
-      len += snprintf(system_instructions_buffer + len, remaining - len, "%s\n", AI_RULES_SEARCH);
+      len += snprintf(system_instructions_buffer + len, remaining - len, "%s\n",
+                      LEGACY_RULES_SEARCH);
       LOG_INFO("System instructions: Search rules included (SearXNG endpoint: %s)",
                g_config.search.endpoint);
    } else {
@@ -219,18 +390,20 @@ const char *get_system_instructions(void) {
    }
 
    // Calculator always available
-   len += snprintf(system_instructions_buffer + len, remaining - len, "%s\n", AI_RULES_CALCULATOR);
+   len += snprintf(system_instructions_buffer + len, remaining - len, "%s\n",
+                   LEGACY_RULES_CALCULATOR);
 
    // URL fetcher always available
-   len += snprintf(system_instructions_buffer + len, remaining - len, "%s\n", AI_RULES_URL);
+   len += snprintf(system_instructions_buffer + len, remaining - len, "%s\n", LEGACY_RULES_URL);
 
    // LLM status always available
-   len += snprintf(system_instructions_buffer + len, remaining - len, "%s\n", AI_RULES_LLM_STATUS);
+   len += snprintf(system_instructions_buffer + len, remaining - len, "%s\n",
+                   LEGACY_RULES_LLM_STATUS);
 
    // SmartThings only if authenticated
    if (smartthings_is_authenticated()) {
       len += snprintf(system_instructions_buffer + len, remaining - len, "%s\n",
-                      AI_RULES_SMARTTHINGS);
+                      LEGACY_RULES_SMARTTHINGS);
 
       // Include device list so LLM knows what's available
       const st_device_list_t *devices = NULL;
@@ -260,10 +433,11 @@ const char *get_system_instructions(void) {
    }
 
    // Add examples
-   len += snprintf(system_instructions_buffer + len, remaining - len, "%s", AI_EXAMPLES_CORE);
+   len += snprintf(system_instructions_buffer + len, remaining - len, "%s", LEGACY_EXAMPLES_CORE);
 
    // Weather example always included
-   len += snprintf(system_instructions_buffer + len, remaining - len, "%s\n", AI_EXAMPLES_WEATHER);
+   len += snprintf(system_instructions_buffer + len, remaining - len, "%s\n",
+                   LEGACY_EXAMPLES_WEATHER);
 
    system_instructions_initialized = 1;
    LOG_INFO("Built dynamic system instructions (%d bytes)", len);
@@ -494,9 +668,9 @@ static void initialize_command_prompt(void) {
       json_object_iter_next(&type_it);
    }
 
-   // Add response format instructions (from dawn.h)
+   // Add response format instructions (legacy <command> tag mode)
    prompt_len += snprintf(command_prompt + prompt_len, PROMPT_BUFFER_SIZE - prompt_len, "%s",
-                          AI_LOCAL_COMMAND_INSTRUCTIONS);
+                          LEGACY_LOCAL_COMMAND_INSTRUCTIONS);
 
    json_object_put(parsedJson);
    prompt_initialized = 1;
@@ -734,9 +908,9 @@ static void initialize_remote_command_prompt(void) {
       json_object_iter_next(&type_it);
    }
 
-   // Add response format instructions (from dawn.h)
+   // Add response format instructions (legacy <command> tag mode)
    prompt_len += snprintf(remote_command_prompt + prompt_len, PROMPT_BUFFER_SIZE - prompt_len, "%s",
-                          AI_REMOTE_COMMAND_INSTRUCTIONS);
+                          LEGACY_REMOTE_COMMAND_INSTRUCTIONS);
 
    json_object_put(parsedJson);
    remote_prompt_initialized = 1;
