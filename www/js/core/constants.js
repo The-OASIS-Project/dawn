@@ -29,6 +29,10 @@
    const WS_BIN_AUDIO_OUT = 0x11;
    const WS_BIN_AUDIO_SEGMENT_END = 0x12; // Play accumulated audio segment now
 
+   // Music streaming binary types (0x20-0x2F range)
+   const WS_BIN_MUSIC_DATA = 0x20; // Server -> Client: Opus music audio chunk
+   const WS_BIN_MUSIC_SEGMENT_END = 0x21; // Server -> Client: End of buffered segment
+
    // Context/token limits
    // Default context window size - used when model-specific limit is unknown
    // TODO: Make this dynamic based on selected model (GPT-4o: 128k, Claude: 200k, Gemini: 1M+)
@@ -53,6 +57,10 @@
       WS_BIN_AUDIO_IN_END: WS_BIN_AUDIO_IN_END,
       WS_BIN_AUDIO_OUT: WS_BIN_AUDIO_OUT,
       WS_BIN_AUDIO_SEGMENT_END: WS_BIN_AUDIO_SEGMENT_END,
+
+      // Music streaming binary types
+      WS_BIN_MUSIC_DATA: WS_BIN_MUSIC_DATA,
+      WS_BIN_MUSIC_SEGMENT_END: WS_BIN_MUSIC_SEGMENT_END,
 
       // Context limits
       DEFAULT_CONTEXT_MAX: DEFAULT_CONTEXT_MAX,

@@ -447,7 +447,7 @@ static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
        * to prevent timing attacks that could enumerate valid usernames */
       (void)auth_verify_password(DUMMY_PASSWORD_HASH, password);
       json_object_put(req);
-      LOG_WARNING("WebUI: Login failed - user not found: %s", username);
+      LOG_WARNING("WebUI: Login failed - user not found: %s from %s", username, client_ip);
       auth_db_log_attempt(normalized_ip, username, false);
       snprintf(response, sizeof(response), "{\"success\":false,\"error\":\"Invalid credentials\"}");
       send_auth_response(wsi, HTTP_STATUS_UNAUTHORIZED, response, NULL, 0);
@@ -458,7 +458,7 @@ static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
    time_t now = time(NULL);
    if (user.lockout_until > now) {
       json_object_put(req);
-      LOG_WARNING("WebUI: Login failed - account locked: %s", username);
+      LOG_WARNING("WebUI: Login failed - account locked: %s from %s", username, client_ip);
       auth_db_log_attempt(normalized_ip, username, false);
       snprintf(response, sizeof(response),
                "{\"success\":false,\"error\":\"Account temporarily locked\"}");
@@ -490,7 +490,7 @@ static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
          }
       }
 
-      LOG_WARNING("WebUI: Login failed - wrong password: %s", username);
+      LOG_WARNING("WebUI: Login failed - wrong password: %s from %s", username, client_ip);
       snprintf(response, sizeof(response), "{\"success\":false,\"error\":\"Invalid credentials\"}");
       send_auth_response(wsi, HTTP_STATUS_UNAUTHORIZED, response, NULL, 0);
       return -1;

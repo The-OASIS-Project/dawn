@@ -38,10 +38,17 @@
 #include "audio/flac_playback.h"
 #include "audio/music_db.h"
 #include "config/dawn_config.h"
+#include "core/session_manager.h"
 #include "dawn.h"
 #include "logging.h"
 #include "mosquitto_comms.h"
 #include "tools/tool_registry.h"
+
+/* WebUI music integration - route commands to browser when originating from WebUI */
+#ifdef ENABLE_WEBUI
+#include "webui/webui_internal.h"
+#include "webui/webui_music.h"
+#endif
 
 /* ========== Constants ========== */
 
@@ -351,6 +358,41 @@ static char *music_tool_callback(const char *action, char *value, int *should_re
 
    /* Get command processing mode from global */
    bool direct_mode = (command_processing_mode == CMD_MODE_DIRECT_ONLY);
+
+#ifdef ENABLE_WEBUI
+   /* Check if request originated from WebUI session - route to browser streaming */
+   session_t *session = session_get_command_context();
+   if (session && session->client_data) {
+      ws_connection_t *conn = (ws_connection_t *)session->client_data;
+
+      /* Try WebUI music handler for playback actions */
+      char *webui_result = NULL;
+      int ret = webui_music_execute_tool(conn, action, value, &webui_result);
+
+      if (ret == 0) {
+         /* WebUI handled successfully */
+         LOG_INFO("Music: Routed '%s' to WebUI session", action);
+         if (direct_mode) {
+            *should_respond = 0;
+            free(webui_result);
+            return NULL;
+         }
+         return webui_result ? webui_result : strdup("OK");
+      } else if (ret > 0) {
+         /* WebUI handler returned error */
+         LOG_WARNING("Music: WebUI handler failed for '%s'", action);
+         if (direct_mode) {
+            *should_respond = 0;
+            free(webui_result);
+            return NULL;
+         }
+         return webui_result ? webui_result : strdup("Music playback failed");
+      }
+      /* ret == -1 means not handled, fall through to local handler */
+      free(webui_result);
+      LOG_INFO("Music: WebUI deferred '%s' to local handler", action);
+   }
+#endif
 
    if (strcmp(action, "play") == 0) {
       /* Early validation - check before doing any work */

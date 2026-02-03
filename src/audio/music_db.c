@@ -113,6 +113,41 @@ static const char *SQL_LIST_ALBUMS = "SELECT DISTINCT album FROM music_metadata 
                                      "ORDER BY album "
                                      "LIMIT ?";
 
+/* List artists with stats (album count, track count) */
+static const char *SQL_LIST_ARTISTS_WITH_STATS =
+    "SELECT artist, "
+    "       COUNT(DISTINCT CASE WHEN album != '' THEN album END) as album_count, "
+    "       COUNT(*) as track_count "
+    "FROM music_metadata "
+    "WHERE artist != '' "
+    "GROUP BY artist "
+    "ORDER BY artist "
+    "LIMIT ?";
+
+/* List albums with stats (track count, artist) - uses MAX(artist) instead of correlated subquery */
+static const char *SQL_LIST_ALBUMS_WITH_STATS = "SELECT album, "
+                                                "       COUNT(*) as track_count, "
+                                                "       MAX(artist) as artist "
+                                                "FROM music_metadata "
+                                                "WHERE album != '' "
+                                                "GROUP BY album "
+                                                "ORDER BY album "
+                                                "LIMIT ?";
+
+/* Get tracks by artist */
+static const char *SQL_GET_BY_ARTIST = "SELECT path, title, artist, album, duration_sec "
+                                       "FROM music_metadata "
+                                       "WHERE artist = ? "
+                                       "ORDER BY album, title "
+                                       "LIMIT ?";
+
+/* Get tracks by album */
+static const char *SQL_GET_BY_ALBUM = "SELECT path, title, artist, album, duration_sec "
+                                      "FROM music_metadata "
+                                      "WHERE album = ? "
+                                      "ORDER BY path "
+                                      "LIMIT ?";
+
 /* =============================================================================
  * Module State
  * ============================================================================= */
@@ -869,6 +904,197 @@ int music_db_list_albums(char (*albums)[AUDIO_METADATA_STRING_MAX], int max_albu
          safe_strncpy(albums[count], album, AUDIO_METADATA_STRING_MAX);
          count++;
       }
+   }
+
+   sqlite3_finalize(stmt);
+   pthread_mutex_unlock(&g_db_mutex);
+
+   return count;
+}
+
+int music_db_list_artists_with_stats(music_artist_info_t *artists, int max_artists) {
+   if (!artists || max_artists <= 0) {
+      return -1;
+   }
+
+   pthread_mutex_lock(&g_db_mutex);
+
+   if (!g_initialized) {
+      pthread_mutex_unlock(&g_db_mutex);
+      return -1;
+   }
+
+   sqlite3_stmt *stmt = NULL;
+   int rc = sqlite3_prepare_v2(g_db, SQL_LIST_ARTISTS_WITH_STATS, -1, &stmt, NULL);
+   if (rc != SQLITE_OK) {
+      LOG_ERROR("music_db_list_artists_with_stats: prepare failed: %s", sqlite3_errmsg(g_db));
+      pthread_mutex_unlock(&g_db_mutex);
+      return -1;
+   }
+
+   sqlite3_bind_int(stmt, 1, max_artists);
+
+   int count = 0;
+   while (sqlite3_step(stmt) == SQLITE_ROW && count < max_artists) {
+      const char *name = (const char *)sqlite3_column_text(stmt, 0);
+      if (name) {
+         safe_strncpy(artists[count].name, name, AUDIO_METADATA_STRING_MAX);
+         artists[count].album_count = sqlite3_column_int(stmt, 1);
+         artists[count].track_count = sqlite3_column_int(stmt, 2);
+         count++;
+      }
+   }
+
+   sqlite3_finalize(stmt);
+   pthread_mutex_unlock(&g_db_mutex);
+
+   return count;
+}
+
+int music_db_list_albums_with_stats(music_album_info_t *albums, int max_albums) {
+   if (!albums || max_albums <= 0) {
+      return -1;
+   }
+
+   pthread_mutex_lock(&g_db_mutex);
+
+   if (!g_initialized) {
+      pthread_mutex_unlock(&g_db_mutex);
+      return -1;
+   }
+
+   sqlite3_stmt *stmt = NULL;
+   int rc = sqlite3_prepare_v2(g_db, SQL_LIST_ALBUMS_WITH_STATS, -1, &stmt, NULL);
+   if (rc != SQLITE_OK) {
+      LOG_ERROR("music_db_list_albums_with_stats: prepare failed: %s", sqlite3_errmsg(g_db));
+      pthread_mutex_unlock(&g_db_mutex);
+      return -1;
+   }
+
+   sqlite3_bind_int(stmt, 1, max_albums);
+
+   int count = 0;
+   while (sqlite3_step(stmt) == SQLITE_ROW && count < max_albums) {
+      const char *name = (const char *)sqlite3_column_text(stmt, 0);
+      if (name) {
+         safe_strncpy(albums[count].name, name, AUDIO_METADATA_STRING_MAX);
+         albums[count].track_count = sqlite3_column_int(stmt, 1);
+         const char *artist = (const char *)sqlite3_column_text(stmt, 2);
+         if (artist) {
+            safe_strncpy(albums[count].artist, artist, AUDIO_METADATA_STRING_MAX);
+         } else {
+            albums[count].artist[0] = '\0';
+         }
+         count++;
+      }
+   }
+
+   sqlite3_finalize(stmt);
+   pthread_mutex_unlock(&g_db_mutex);
+
+   return count;
+}
+
+int music_db_get_by_artist(const char *artist, music_search_result_t *results, int max_results) {
+   if (!artist || !results || max_results <= 0) {
+      return -1;
+   }
+
+   pthread_mutex_lock(&g_db_mutex);
+
+   if (!g_initialized) {
+      pthread_mutex_unlock(&g_db_mutex);
+      return -1;
+   }
+
+   sqlite3_stmt *stmt = NULL;
+   int rc = sqlite3_prepare_v2(g_db, SQL_GET_BY_ARTIST, -1, &stmt, NULL);
+   if (rc != SQLITE_OK) {
+      LOG_ERROR("music_db_get_by_artist: prepare failed: %s", sqlite3_errmsg(g_db));
+      pthread_mutex_unlock(&g_db_mutex);
+      return -1;
+   }
+
+   sqlite3_bind_text(stmt, 1, artist, -1, SQLITE_STATIC);
+   sqlite3_bind_int(stmt, 2, max_results);
+
+   int count = 0;
+   while (sqlite3_step(stmt) == SQLITE_ROW && count < max_results) {
+      music_search_result_t *r = &results[count];
+      memset(r, 0, sizeof(*r));
+
+      const char *path = (const char *)sqlite3_column_text(stmt, 0);
+      const char *title = (const char *)sqlite3_column_text(stmt, 1);
+      const char *art = (const char *)sqlite3_column_text(stmt, 2);
+      const char *album = (const char *)sqlite3_column_text(stmt, 3);
+      int duration = sqlite3_column_int(stmt, 4);
+
+      if (path)
+         safe_strncpy(r->path, path, sizeof(r->path));
+      if (title)
+         safe_strncpy(r->title, title, sizeof(r->title));
+      if (art)
+         safe_strncpy(r->artist, art, sizeof(r->artist));
+      if (album)
+         safe_strncpy(r->album, album, sizeof(r->album));
+      r->duration_sec = (uint32_t)duration;
+
+      build_display_name(r);
+      count++;
+   }
+
+   sqlite3_finalize(stmt);
+   pthread_mutex_unlock(&g_db_mutex);
+
+   return count;
+}
+
+int music_db_get_by_album(const char *album, music_search_result_t *results, int max_results) {
+   if (!album || !results || max_results <= 0) {
+      return -1;
+   }
+
+   pthread_mutex_lock(&g_db_mutex);
+
+   if (!g_initialized) {
+      pthread_mutex_unlock(&g_db_mutex);
+      return -1;
+   }
+
+   sqlite3_stmt *stmt = NULL;
+   int rc = sqlite3_prepare_v2(g_db, SQL_GET_BY_ALBUM, -1, &stmt, NULL);
+   if (rc != SQLITE_OK) {
+      LOG_ERROR("music_db_get_by_album: prepare failed: %s", sqlite3_errmsg(g_db));
+      pthread_mutex_unlock(&g_db_mutex);
+      return -1;
+   }
+
+   sqlite3_bind_text(stmt, 1, album, -1, SQLITE_STATIC);
+   sqlite3_bind_int(stmt, 2, max_results);
+
+   int count = 0;
+   while (sqlite3_step(stmt) == SQLITE_ROW && count < max_results) {
+      music_search_result_t *r = &results[count];
+      memset(r, 0, sizeof(*r));
+
+      const char *path = (const char *)sqlite3_column_text(stmt, 0);
+      const char *title = (const char *)sqlite3_column_text(stmt, 1);
+      const char *artist = (const char *)sqlite3_column_text(stmt, 2);
+      const char *alb = (const char *)sqlite3_column_text(stmt, 3);
+      int duration = sqlite3_column_int(stmt, 4);
+
+      if (path)
+         safe_strncpy(r->path, path, sizeof(r->path));
+      if (title)
+         safe_strncpy(r->title, title, sizeof(r->title));
+      if (artist)
+         safe_strncpy(r->artist, artist, sizeof(r->artist));
+      if (alb)
+         safe_strncpy(r->album, alb, sizeof(r->album));
+      r->duration_sec = (uint32_t)duration;
+
+      build_display_name(r);
+      count++;
    }
 
    sqlite3_finalize(stmt);

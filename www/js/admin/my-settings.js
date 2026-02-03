@@ -255,6 +255,7 @@
       if (form) {
          form.addEventListener('submit', (e) => {
             e.preventDefault();
+
             const settings = {
                persona_description: document.getElementById('my-persona')?.value || '',
                persona_mode:

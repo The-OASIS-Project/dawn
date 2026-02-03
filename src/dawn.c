@@ -92,6 +92,7 @@
 #include "ui/tui.h"
 #endif
 #ifdef ENABLE_WEBUI
+#include "webui/webui_music_server.h"
 #include "webui/webui_server.h"
 #endif
 #ifdef ENABLE_AUTH
@@ -2254,6 +2255,13 @@ int main(int argc, char *argv[]) {
       LOG_INFO("Initializing WebUI server...");
       if (webui_server_init(0, NULL) == WEBUI_SUCCESS) {
          LOG_INFO("WebUI server started on port %d", webui_server_get_port());
+
+         /* Start dedicated music streaming server (port = main + 1) */
+         if (webui_music_server_init(0) == 0) {
+            LOG_INFO("Music streaming server started on port %d", webui_music_server_get_port());
+         } else {
+            LOG_WARNING("Failed to start music streaming server - music will use main socket");
+         }
       } else {
          LOG_WARNING("Failed to start WebUI server - continuing without WebUI");
       }
@@ -3785,6 +3793,10 @@ int main(int argc, char *argv[]) {
     * File-based dawn_stats_*.json export has been removed. */
 
 #ifdef ENABLE_WEBUI
+   /* Shutdown music streaming server first */
+   if (webui_music_server_is_running()) {
+      webui_music_server_shutdown();
+   }
    /* Shutdown WebUI server before session cleanup - WebSocket sessions hold references */
    if (webui_server_is_running()) {
       webui_server_shutdown();

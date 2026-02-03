@@ -1238,6 +1238,7 @@ json_object *config_to_json(const dawn_config_t *config) {
 
    /* [paths] */
    json_object *paths = json_object_new_object();
+   json_object_object_add(paths, "data_dir", json_object_new_string(config->paths.data_dir));
    json_object_object_add(paths, "music_dir", json_object_new_string(config->paths.music_dir));
    json_object_object_add(root, "paths", paths);
 
@@ -1248,6 +1249,20 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object_object_add(images, "max_size_mb", json_object_new_int(config->images.max_size_mb));
    json_object_object_add(images, "max_per_user", json_object_new_int(config->images.max_per_user));
    json_object_object_add(root, "images", images);
+
+   /* Music configuration (music.streaming) */
+   json_object *music = json_object_new_object();
+   json_object_object_add(music, "scan_interval_minutes",
+                          json_object_new_int(config->music.scan_interval_minutes));
+   json_object *music_streaming = json_object_new_object();
+   json_object_object_add(music_streaming, "enabled",
+                          json_object_new_boolean(config->music.streaming_enabled));
+   json_object_object_add(music_streaming, "default_quality",
+                          json_object_new_string(config->music.streaming_quality));
+   json_object_object_add(music_streaming, "bitrate_mode",
+                          json_object_new_string(config->music.streaming_bitrate_mode));
+   json_object_object_add(music, "streaming", music_streaming);
+   json_object_object_add(root, "music", music);
 
    return root;
 }
@@ -1614,12 +1629,23 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "record_path = \"%s\"\n", config->debug.record_path);
 
    fprintf(fp, "\n[paths]\n");
+   if (config->paths.data_dir[0] != '\0') {
+      fprintf(fp, "data_dir = \"%s\"\n", config->paths.data_dir);
+   }
    fprintf(fp, "music_dir = \"%s\"\n", config->paths.music_dir);
 
    fprintf(fp, "\n[images]\n");
    fprintf(fp, "retention_days = %d\n", config->images.retention_days);
    fprintf(fp, "max_size_mb = %d\n", config->images.max_size_mb);
    fprintf(fp, "max_per_user = %d\n", config->images.max_per_user);
+
+   fprintf(fp, "\n[music]\n");
+   fprintf(fp, "scan_interval_minutes = %d\n", config->music.scan_interval_minutes);
+
+   fprintf(fp, "\n[music.streaming]\n");
+   fprintf(fp, "enabled = %s\n", config->music.streaming_enabled ? "true" : "false");
+   fprintf(fp, "default_quality = \"%s\"\n", config->music.streaming_quality);
+   fprintf(fp, "bitrate_mode = \"%s\"\n", config->music.streaming_bitrate_mode);
 
    fclose(fp);
    LOG_INFO("Configuration written to %s", path);

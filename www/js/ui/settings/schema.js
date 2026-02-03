@@ -770,12 +770,6 @@
                label: 'Music Directory',
                hint: 'Path to music library for playback commands',
             },
-            commands_config: {
-               type: 'text',
-               label: 'Commands Config',
-               restart: true,
-               hint: 'Path to device/command mappings JSON file',
-            },
          },
       },
       images: {
@@ -803,6 +797,51 @@
                min: 1,
                max: 10000,
                hint: 'Maximum stored images per user account (1-10,000)',
+            },
+         },
+      },
+      music: {
+         label: 'Music Streaming',
+         icon: '&#x1F3B5;',
+         adminOnly: true,
+         description: 'Settings for WebUI music streaming to browsers',
+         fields: {
+            scan_interval_minutes: {
+               type: 'number',
+               label: 'Library Rescan Interval (minutes)',
+               min: 0,
+               hint: 'Minutes between automatic library rescans (0 = disabled)',
+            },
+            streaming: {
+               type: 'group',
+               label: 'Streaming',
+               fields: {
+                  enabled: {
+                     type: 'checkbox',
+                     label: 'Enable Music Streaming',
+                     hint: 'Allow streaming music to WebUI browsers',
+                  },
+                  default_quality: {
+                     type: 'select',
+                     label: 'Default Quality',
+                     options: [
+                        { value: 'voice', label: 'Voice (48 kbps)' },
+                        { value: 'standard', label: 'Standard (96 kbps)' },
+                        { value: 'high', label: 'High (128 kbps)' },
+                        { value: 'hifi', label: 'Hi-Fi (256 kbps)' },
+                     ],
+                     hint: 'Default audio quality for music streaming',
+                  },
+                  bitrate_mode: {
+                     type: 'select',
+                     label: 'Bitrate Mode',
+                     options: [
+                        { value: 'vbr', label: 'VBR (Variable)' },
+                        { value: 'cbr', label: 'CBR (Constant)' },
+                     ],
+                     hint: 'VBR optimizes quality, CBR ensures consistent bandwidth',
+                  },
+               },
             },
          },
       },

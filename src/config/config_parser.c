@@ -993,10 +993,22 @@ static void parse_music(toml_table_t *table, music_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = { "scan_interval_minutes", NULL };
+   static const char *const known_keys[] = { "scan_interval_minutes", "streaming", NULL };
    warn_unknown_keys(table, "music", known_keys);
 
    PARSE_INT(table, "scan_interval_minutes", config->scan_interval_minutes);
+
+   /* Parse music.streaming subtable */
+   toml_table_t *streaming = toml_table_in(table, "streaming");
+   if (streaming) {
+      static const char *const streaming_keys[] = { "enabled", "default_quality", "bitrate_mode",
+                                                    NULL };
+      warn_unknown_keys(streaming, "music.streaming", streaming_keys);
+
+      PARSE_BOOL(streaming, "enabled", config->streaming_enabled);
+      PARSE_STRING(streaming, "default_quality", config->streaming_quality);
+      PARSE_STRING(streaming, "bitrate_mode", config->streaming_bitrate_mode);
+   }
 }
 
 /* =============================================================================

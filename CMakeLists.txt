@@ -476,6 +476,8 @@ if(ENABLE_WEBUI)
     )
     if(OPUS_FOUND)
         list(APPEND DAWN_SOURCES src/webui/webui_audio.c)
+        list(APPEND DAWN_SOURCES src/webui/webui_music.c)
+        list(APPEND DAWN_SOURCES src/webui/webui_music_server.c)
     endif()
 endif()
 

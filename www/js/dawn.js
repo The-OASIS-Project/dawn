@@ -371,6 +371,17 @@
                DawnHistory.startNewChat();
                DawnToast.show('Conversation reset', 'info');
                break;
+            // Music streaming messages
+            case 'music_state':
+            case 'music_position':
+            case 'music_error':
+            case 'music_search_response':
+            case 'music_library_response':
+            case 'music_queue_response':
+               if (typeof DawnMusicPlayback !== 'undefined') {
+                  DawnMusicPlayback.handleJsonMessage(msg);
+               }
+               break;
             default:
                console.log('Unknown message type:', msg.type);
          }
@@ -438,6 +449,14 @@
                      DawnAudioPlayback.queueAudio(combined);
                      DawnAudioPlayback.play();
                   }
+               }
+               break;
+
+            case DawnConfig.WS_BIN_MUSIC_DATA:
+            case DawnConfig.WS_BIN_MUSIC_SEGMENT_END:
+               // Music streaming messages - route to music playback handler
+               if (typeof DawnMusicPlayback !== 'undefined') {
+                  DawnMusicPlayback.handleBinaryMessage(data);
                }
                break;
 
@@ -1089,6 +1108,11 @@
 
       // Initialize vision module (image upload/paste/drag-drop)
       DawnVision.init();
+
+      // Initialize music player UI
+      if (typeof DawnMusicUI !== 'undefined') {
+         DawnMusicUI.init();
+      }
 
       // Set up WebSocket callbacks and connect
       initWebSocketCallbacks();

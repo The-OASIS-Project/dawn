@@ -39,6 +39,7 @@
 @import url('components/transcript.css');
 @import url('components/users.css');
 @import url('components/visualizer.css');
+@import url('components/music.css');
 
 /* =============================================================================
  * Responsive Overrides (load last to override component styles)

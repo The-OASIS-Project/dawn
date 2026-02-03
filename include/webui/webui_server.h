@@ -81,6 +81,10 @@ extern "C" {
 #define WS_BIN_AUDIO_OUT 0x11         /* Server -> Client: TTS audio chunk */
 #define WS_BIN_AUDIO_SEGMENT_END 0x12 /* Server -> Client: Play this audio segment now */
 
+/* Music streaming binary types (0x20-0x2F range) */
+#define WS_BIN_MUSIC_DATA 0x20        /* Server -> Client: Opus music audio chunk */
+#define WS_BIN_MUSIC_SEGMENT_END 0x21 /* Server -> Client: End of buffered segment */
+
 /* =============================================================================
  * Buffer Size Constants
  * ============================================================================= */
@@ -108,6 +112,7 @@ typedef enum {
    WS_RESP_SESSION,    /* Session token for client */
    WS_RESP_AUDIO,      /* Binary audio data (Opus encoded) */
    WS_RESP_AUDIO_END,  /* End of audio stream marker */
+   WS_RESP_MUSIC_DATA, /* Binary music audio data (Opus encoded) */
    WS_RESP_CONTEXT,    /* Context/token usage update */
 
    /* LLM streaming types (ChatGPT-style real-time text) */
@@ -124,7 +129,10 @@ typedef enum {
    WS_RESP_REASONING_SUMMARY, /* OpenAI o-series reasoning token summary (no content) */
 
    /* Tool-initiated events */
-   WS_RESP_CONVERSATION_RESET /* Conversation was reset via tool */
+   WS_RESP_CONVERSATION_RESET, /* Conversation was reset via tool */
+
+   /* Music streaming */
+   WS_RESP_MUSIC_POSITION /* Music playback position update */
 } ws_response_type_t;
 
 /* =============================================================================
@@ -195,6 +203,19 @@ int webui_server_get_port(void);
  * @note Thread-safe
  */
 void webui_clear_login_rate_limit(const char *ip_address);
+
+/**
+ * @brief Get response queue fill level (0-100)
+ *
+ * Returns the current queue utilization as a percentage.
+ * Used by high-frequency senders (e.g., music streaming) to implement
+ * backpressure and avoid starving low-frequency control messages.
+ *
+ * @return Queue fill percentage (0 = empty, 100 = full)
+ *
+ * @note Thread-safe
+ */
+int webui_get_queue_fill_pct(void);
 
 /* =============================================================================
  * Worker-Callable Response Functions (Thread-Safe)

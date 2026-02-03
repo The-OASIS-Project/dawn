@@ -220,6 +220,62 @@ int music_db_list_artists(char (*artists)[AUDIO_METADATA_STRING_MAX], int max_ar
  */
 int music_db_list_albums(char (*albums)[AUDIO_METADATA_STRING_MAX], int max_albums);
 
+/**
+ * @brief Artist info with statistics
+ */
+typedef struct {
+   char name[AUDIO_METADATA_STRING_MAX]; /**< Artist name */
+   int album_count;                      /**< Number of albums */
+   int track_count;                      /**< Number of tracks */
+} music_artist_info_t;
+
+/**
+ * @brief Album info with statistics
+ */
+typedef struct {
+   char name[AUDIO_METADATA_STRING_MAX];   /**< Album name */
+   char artist[AUDIO_METADATA_STRING_MAX]; /**< Primary artist */
+   int track_count;                        /**< Number of tracks */
+} music_album_info_t;
+
+/**
+ * @brief List artists with statistics (album count, track count)
+ *
+ * @param artists Output array for artist info
+ * @param max_artists Maximum number of artists to return
+ * @return Number of artists found, or -1 on error
+ */
+int music_db_list_artists_with_stats(music_artist_info_t *artists, int max_artists);
+
+/**
+ * @brief List albums with statistics (track count, artist)
+ *
+ * @param albums Output array for album info
+ * @param max_albums Maximum number of albums to return
+ * @return Number of albums found, or -1 on error
+ */
+int music_db_list_albums_with_stats(music_album_info_t *albums, int max_albums);
+
+/**
+ * @brief Get all tracks by a specific artist
+ *
+ * @param artist Artist name (exact match)
+ * @param results Output array for results
+ * @param max_results Maximum number of results
+ * @return Number of tracks found, or -1 on error
+ */
+int music_db_get_by_artist(const char *artist, music_search_result_t *results, int max_results);
+
+/**
+ * @brief Get all tracks in a specific album
+ *
+ * @param album Album name (exact match)
+ * @param results Output array for results
+ * @param max_results Maximum number of results
+ * @return Number of tracks found, or -1 on error
+ */
+int music_db_get_by_album(const char *album, music_search_result_t *results, int max_results);
+
 #ifdef __cplusplus
 }
 #endif

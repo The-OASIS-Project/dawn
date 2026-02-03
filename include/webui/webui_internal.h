@@ -119,6 +119,9 @@ typedef struct {
    /* Active conversation tracking (for memory extraction on switch) */
    int64_t active_conversation_id;
    bool active_conversation_private; /* If true, skip memory extraction */
+
+   /* Music streaming state (per-session, owned by webui_music.c) */
+   void *music_state; /* session_music_state_t*, NULL if not initialized */
 } ws_connection_t;
 
 /* =============================================================================
@@ -185,6 +188,10 @@ typedef struct {
          int messages_summarized;
          char *summary;
       } compaction;
+      struct {
+         double position_sec;
+         uint32_t duration_sec;
+      } music_position;
    };
 } ws_response_t;
 
@@ -705,6 +712,40 @@ void handle_set_tools_config(ws_connection_t *conn, struct json_object *payload)
  */
 void handle_binary_message(ws_connection_t *conn, const uint8_t *data, size_t len);
 #endif
+
+/* =============================================================================
+ * Music Handler Functions (defined in webui_music.c)
+ * ============================================================================= */
+
+/**
+ * @brief Handle music_subscribe message
+ */
+void handle_music_subscribe(ws_connection_t *conn, struct json_object *payload);
+
+/**
+ * @brief Handle music_unsubscribe message
+ */
+void handle_music_unsubscribe(ws_connection_t *conn);
+
+/**
+ * @brief Handle music_control message
+ */
+void handle_music_control(ws_connection_t *conn, struct json_object *payload);
+
+/**
+ * @brief Handle music_search message
+ */
+void handle_music_search(ws_connection_t *conn, struct json_object *payload);
+
+/**
+ * @brief Handle music_library message
+ */
+void handle_music_library(ws_connection_t *conn, struct json_object *payload);
+
+/**
+ * @brief Handle music_queue message
+ */
+void handle_music_queue(ws_connection_t *conn, struct json_object *payload);
 
 /* =============================================================================
  * Audio Send Functions (defined in webui_server.c, used by webui_audio.c)

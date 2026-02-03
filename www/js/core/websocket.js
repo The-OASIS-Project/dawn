@@ -249,6 +249,15 @@
       if (cbs.getTtsEnabled) callbacks.getTtsEnabled = cbs.getTtsEnabled;
    }
 
+   /**
+    * Get the current session token
+    * Used by dedicated music server for authentication
+    * @returns {string|null} Session token or null if not available
+    */
+   function getSessionToken() {
+      return localStorage.getItem('dawn_session_token');
+   }
+
    // Expose globally
    global.DawnWS = {
       connect: connect,
@@ -261,5 +270,6 @@
       setMaxClientsReached: setMaxClientsReached,
       setCapabilitiesSynced: setCapabilitiesSynced,
       getCapabilitiesSynced: getCapabilitiesSynced,
+      getSessionToken: getSessionToken,
    };
 })(window);

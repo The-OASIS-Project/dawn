@@ -589,6 +589,7 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
 
    /* [paths] */
    if (json_object_object_get_ex(payload, "paths", &section)) {
+      JSON_TO_CONFIG_STR(section, "data_dir", config->paths.data_dir);
       JSON_TO_CONFIG_STR(section, "music_dir", config->paths.music_dir);
    }
 
@@ -597,6 +598,19 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_INT(section, "retention_days", config->images.retention_days);
       JSON_TO_CONFIG_INT(section, "max_size_mb", config->images.max_size_mb);
       JSON_TO_CONFIG_INT(section, "max_per_user", config->images.max_per_user);
+   }
+
+   /* [music] */
+   if (json_object_object_get_ex(payload, "music", &section)) {
+      JSON_TO_CONFIG_INT(section, "scan_interval_minutes", config->music.scan_interval_minutes);
+
+      /* [music.streaming] */
+      struct json_object *streaming = NULL;
+      if (json_object_object_get_ex(section, "streaming", &streaming)) {
+         JSON_TO_CONFIG_BOOL(streaming, "enabled", config->music.streaming_enabled);
+         JSON_TO_CONFIG_STR(streaming, "default_quality", config->music.streaming_quality);
+         JSON_TO_CONFIG_STR(streaming, "bitrate_mode", config->music.streaming_bitrate_mode);
+      }
    }
 }
 

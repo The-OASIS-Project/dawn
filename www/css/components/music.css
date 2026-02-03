@@ -1,0 +1,995 @@
+/*
+ * DAWN Music Panel - Popover Style (matches Memory panel)
+ *
+ * Features:
+ * - Fixed position popover in bottom-right
+ * - Glass panel with backdrop blur
+ * - LCD-style monospace text with glow
+ * - Pulsing LED indicators
+ * - Responsive mobile design
+ */
+
+/* =============================================================================
+ * Music Button (in toolbar)
+ * ============================================================================= */
+#music-btn {
+   background: none;
+   border: none;
+   color: var(--text-secondary);
+   cursor: pointer;
+   padding: 0.4rem;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   transition: color var(--transition-fast);
+   position: relative;
+}
+
+#music-btn:hover {
+   color: var(--accent);
+}
+
+#music-btn.active {
+   color: var(--accent);
+}
+
+#music-btn svg {
+   width: 20px;
+   height: 20px;
+}
+
+#music-btn .music-playing-indicator {
+   position: absolute;
+   top: -2px;
+   right: -2px;
+   width: 8px;
+   height: 8px;
+   background: var(--accent);
+   border-radius: 50%;
+   animation: led-pulse 1s ease-in-out infinite;
+   display: none;
+}
+
+#music-btn.playing .music-playing-indicator {
+   display: block;
+}
+
+/* =============================================================================
+ * Music Panel Container (Popover style like Memory)
+ * ============================================================================= */
+#music-panel {
+   position: fixed;
+   bottom: 60px;
+   right: 60px;
+   width: 360px;
+   max-height: 70vh;
+   background: rgba(18, 18, 26, 0.98);
+   backdrop-filter: blur(20px);
+   -webkit-backdrop-filter: blur(20px);
+   border: 1px solid var(--accent-border);
+   border-radius: 12px;
+   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+   z-index: 1000;
+   display: flex;
+   flex-direction: column;
+   opacity: 1;
+   transform: translateY(0);
+   transition:
+      opacity 0.15s ease,
+      transform 0.15s ease;
+}
+
+#music-panel.hidden {
+   opacity: 0;
+   transform: translateY(8px);
+   pointer-events: none;
+}
+
+/* Arrow pointing to trigger button */
+.music-popover-arrow {
+   position: absolute;
+   bottom: -6px;
+   right: 30px;
+   width: 12px;
+   height: 12px;
+   background: rgba(18, 18, 26, 0.98);
+   border-right: 1px solid var(--accent-border);
+   border-bottom: 1px solid var(--accent-border);
+   transform: rotate(45deg);
+}
+
+/* =============================================================================
+ * Panel Header
+ * ============================================================================= */
+.music-header {
+   display: flex;
+   justify-content: space-between;
+   align-items: center;
+   padding: 0.875rem 1rem;
+   border-bottom: 1px solid var(--accent-border);
+   background: rgba(10, 10, 15, 0.5);
+   border-radius: 12px 12px 0 0;
+}
+
+.music-header h2 {
+   font-size: 1rem;
+   font-weight: 600;
+   color: var(--accent);
+   letter-spacing: 0.03em;
+   margin: 0;
+   display: flex;
+   align-items: center;
+   gap: 0.5rem;
+}
+
+.music-header-actions {
+   display: flex;
+   gap: 8px;
+   align-items: center;
+}
+
+#music-close {
+   width: 28px;
+   height: 28px;
+   padding: 0;
+   background: transparent;
+   border: 1px solid var(--text-secondary);
+   border-radius: 50%;
+   color: var(--text-secondary);
+   font-size: 1.1rem;
+   line-height: 1;
+   cursor: pointer;
+   transition: all var(--transition-fast);
+   display: flex;
+   align-items: center;
+   justify-content: center;
+}
+
+#music-close:hover {
+   border-color: var(--accent);
+   color: var(--accent);
+}
+
+/* =============================================================================
+ * Tab Navigation
+ * ============================================================================= */
+.music-tabs {
+   display: flex;
+   gap: 0;
+   padding: 0 0.75rem;
+   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+   background: rgba(0, 0, 0, 0.15);
+}
+
+.music-tab {
+   flex: 1;
+   padding: 0.625rem 0.5rem;
+   background: transparent;
+   border: none;
+   border-bottom: 2px solid transparent;
+   color: var(--text-secondary);
+   font-size: 0.8rem;
+   font-weight: 500;
+   cursor: pointer;
+   transition: all var(--transition-fast);
+}
+
+.music-tab:hover {
+   color: var(--text-primary);
+   background: rgba(255, 255, 255, 0.03);
+}
+
+.music-tab.active {
+   color: var(--accent);
+   border-bottom-color: var(--accent);
+}
+
+/* =============================================================================
+ * Content Area
+ * ============================================================================= */
+.music-content {
+   flex: 1;
+   overflow: hidden;
+   display: flex;
+   flex-direction: column;
+   min-height: 0;
+}
+
+.music-tab-content {
+   display: none;
+   flex: 1;
+   overflow-y: auto;
+   padding: 0.75rem;
+   /* Fixed height ensures all tabs are same size as Playing tab */
+   height: 400px;
+   min-height: 400px;
+   max-height: 400px;
+}
+
+.music-tab-content.active {
+   display: flex;
+   flex-direction: column;
+}
+
+/* =============================================================================
+ * Now Playing Tab
+ * ============================================================================= */
+
+/* Album Art / Visualizer Container */
+.music-artwork-container {
+   position: relative;
+   width: 100%;
+   aspect-ratio: 16/9;
+   max-height: 150px;
+   background: rgba(0, 0, 0, 0.3);
+   border-radius: 6px;
+   overflow: hidden;
+   box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.5);
+   margin-bottom: 0.75rem;
+}
+
+.music-artwork {
+   width: 100%;
+   height: 100%;
+   object-fit: cover;
+   display: none;
+}
+
+.music-artwork.visible {
+   display: block;
+}
+
+.music-visualizer {
+   width: 100%;
+   height: 100%;
+   display: flex;
+   align-items: flex-end;
+   justify-content: center;
+   padding: 12px;
+   gap: 2px;
+}
+
+.music-visualizer.hidden {
+   display: none;
+}
+
+.music-viz-bar {
+   flex: 1;
+   max-width: 6px;
+   background: linear-gradient(to top, var(--accent), var(--accent-glow, var(--accent)));
+   border-radius: 2px 2px 0 0;
+   transition: height 0.05s ease;
+   min-height: 2px;
+}
+
+/* Track Info */
+.music-track-info {
+   text-align: center;
+   margin-bottom: 0.75rem;
+}
+
+.music-track-title {
+   font-size: 0.95rem;
+   font-weight: 600;
+   color: var(--text-primary);
+   margin: 0 0 2px 0;
+   white-space: nowrap;
+   overflow: hidden;
+   text-overflow: ellipsis;
+}
+
+.music-track-artist {
+   font-size: 0.85rem;
+   color: var(--text-secondary);
+   margin: 0 0 2px 0;
+}
+
+.music-track-album {
+   font-size: 0.75rem;
+   color: var(--text-tertiary, var(--text-secondary));
+   margin: 0;
+   opacity: 0.7;
+}
+
+/* Progress Bar */
+.music-progress-container {
+   margin-bottom: 0.75rem;
+}
+
+.music-progress-bar {
+   width: 100%;
+   height: 6px;
+   background: var(--border-color);
+   border-radius: 3px;
+   cursor: pointer;
+   box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.3);
+   /* Expand touch target to 44px while keeping visual height at 6px */
+   padding: 19px 0;
+   margin: -19px 0;
+   background-clip: content-box;
+   box-sizing: content-box;
+}
+
+.music-progress-fill {
+   height: 6px;
+   background: var(--accent);
+   border-radius: 3px;
+   width: 0%;
+   transition:
+      width 0.1s linear,
+      box-shadow 0.15s ease;
+}
+
+.music-progress-bar:hover .music-progress-fill {
+   box-shadow: 0 0 8px var(--accent);
+}
+
+.music-progress-bar:focus {
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+}
+
+.music-progress-times {
+   display: flex;
+   justify-content: space-between;
+   margin-top: 4px;
+   font-family: 'IBM Plex Mono', monospace;
+   font-size: 0.7rem;
+   color: var(--text-secondary);
+}
+
+/* Transport Controls */
+.music-transport {
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   gap: 12px;
+   margin-bottom: 0.75rem;
+}
+
+.music-transport-btn {
+   background: var(--bg-tertiary);
+   border: 1px solid var(--border-color);
+   border-radius: var(--border-radius);
+   color: var(--text-secondary);
+   cursor: pointer;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   transition: all var(--transition-fast);
+}
+
+.music-transport-btn:hover {
+   border-color: var(--accent);
+   color: var(--accent);
+}
+
+.music-transport-btn:active {
+   transform: scale(0.95);
+}
+
+.music-transport-btn.small {
+   width: 36px;
+   height: 36px;
+   font-size: 14px;
+}
+
+.music-transport-btn.large {
+   width: 48px;
+   height: 48px;
+   font-size: 20px;
+   background: var(--accent);
+   color: white;
+   border-color: var(--accent);
+   box-shadow: 0 0 12px var(--accent);
+}
+
+.music-transport-btn.large:hover {
+   background: var(--accent-hover, var(--accent));
+   border-color: var(--accent-hover, var(--accent));
+   box-shadow: 0 0 16px var(--accent);
+}
+
+/* Secondary Controls */
+.music-secondary-controls {
+   display: flex;
+   align-items: center;
+   justify-content: space-between;
+   padding: 0.5rem 0;
+   border-top: 1px solid rgba(255, 255, 255, 0.05);
+   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+   margin-bottom: 0.5rem;
+}
+
+.music-volume-control {
+   display: flex;
+   align-items: center;
+   gap: 6px;
+   flex: 1;
+}
+
+.music-volume-icon {
+   background: none;
+   border: none;
+   padding: 4px;
+   color: var(--text-secondary);
+   cursor: pointer;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   transition: color var(--transition-fast);
+}
+
+.music-volume-icon:hover {
+   color: var(--accent);
+}
+
+.music-volume-icon svg {
+   width: 18px;
+   height: 18px;
+}
+
+.music-volume-icon.muted .volume-wave-1,
+.music-volume-icon.muted .volume-wave-2 {
+   display: none;
+}
+
+.music-volume-icon.low .volume-wave-2 {
+   display: none;
+}
+
+.music-volume-slider {
+   flex: 1;
+   max-width: 80px;
+   height: 3px;
+   -webkit-appearance: none;
+   background: var(--border-color);
+   border-radius: 2px;
+   outline: none;
+}
+
+.music-volume-slider::-webkit-slider-thumb {
+   -webkit-appearance: none;
+   width: 12px;
+   height: 12px;
+   background: var(--accent);
+   border-radius: 50%;
+   cursor: pointer;
+}
+
+.music-volume-slider::-moz-range-thumb {
+   width: 12px;
+   height: 12px;
+   background: var(--accent);
+   border-radius: 50%;
+   border: none;
+   cursor: pointer;
+}
+
+.music-mode-controls {
+   display: flex;
+   gap: 4px;
+}
+
+.music-mode-btn {
+   background: transparent;
+   border: 1px solid transparent;
+   border-radius: var(--border-radius);
+   padding: 6px;
+   width: 32px;
+   height: 32px;
+   color: var(--text-secondary);
+   cursor: pointer;
+   transition: all var(--transition-fast);
+   display: flex;
+   align-items: center;
+   justify-content: center;
+}
+
+.music-mode-btn svg {
+   width: 18px;
+   height: 18px;
+}
+
+.music-mode-btn:hover {
+   border-color: var(--border-color);
+   color: var(--accent);
+}
+
+.music-mode-btn.active {
+   background: var(--accent);
+   border-color: var(--accent);
+   color: white;
+   box-shadow: 0 0 8px var(--accent);
+}
+
+/* Repeat-one mode indicator */
+.music-mode-btn.repeat-one {
+   position: relative;
+}
+
+.music-mode-btn.repeat-one::after {
+   content: '1';
+   position: absolute;
+   top: -4px;
+   right: -4px;
+   background: var(--accent);
+   color: white;
+   font-size: 9px;
+   font-weight: bold;
+   width: 14px;
+   height: 14px;
+   border-radius: 50%;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   line-height: 1;
+}
+
+/* Status Bar */
+.music-status-bar {
+   display: flex;
+   justify-content: space-between;
+   font-family: 'IBM Plex Mono', monospace;
+   font-size: 0.65rem;
+   color: var(--text-secondary);
+   padding: 0.5rem 0;
+}
+
+.music-status-item {
+   display: flex;
+   align-items: center;
+   gap: 4px;
+}
+
+.music-status-led {
+   width: 5px;
+   height: 5px;
+   border-radius: 50%;
+   background: var(--text-secondary);
+}
+
+.music-status-led.active {
+   background: var(--accent);
+   box-shadow: 0 0 6px var(--accent);
+   animation: led-pulse 1s ease-in-out infinite;
+}
+
+@keyframes led-pulse {
+   0%,
+   100% {
+      opacity: 1;
+   }
+   50% {
+      opacity: 0.6;
+   }
+}
+
+/* =============================================================================
+ * Queue Tab
+ * ============================================================================= */
+.music-queue-list {
+   list-style: none;
+   margin: 0;
+   padding: 0;
+}
+
+.music-queue-item {
+   display: flex;
+   align-items: center;
+   gap: 8px;
+   padding: 0.5rem;
+   border-radius: 4px;
+   cursor: pointer;
+   transition: background var(--transition-fast);
+}
+
+.music-queue-item:hover {
+   background: var(--accent-subtle, rgba(255, 255, 255, 0.03));
+}
+
+.music-queue-item.playing {
+   background: rgba(var(--accent-rgb, 99, 102, 241), 0.1);
+   border-left: 2px solid var(--accent);
+}
+
+.music-queue-item-number {
+   font-family: 'IBM Plex Mono', monospace;
+   font-size: 0.7rem;
+   color: var(--text-secondary);
+   width: 20px;
+   text-align: center;
+}
+
+.music-queue-item-info {
+   flex: 1;
+   min-width: 0;
+}
+
+.music-queue-item-title {
+   font-size: 0.8rem;
+   color: var(--text-primary);
+   white-space: nowrap;
+   overflow: hidden;
+   text-overflow: ellipsis;
+}
+
+.music-queue-item-artist {
+   font-size: 0.7rem;
+   color: var(--text-secondary);
+}
+
+.music-queue-item-duration {
+   font-family: 'IBM Plex Mono', monospace;
+   font-size: 0.7rem;
+   color: var(--text-secondary);
+}
+
+.music-queue-item-actions {
+   display: flex;
+   gap: 4px;
+   opacity: 0;
+   transition: opacity var(--transition-fast);
+}
+
+.music-queue-item:hover .music-queue-item-actions {
+   opacity: 1;
+}
+
+.music-queue-action-btn {
+   background: none;
+   border: none;
+   padding: 4px;
+   color: var(--text-secondary);
+   cursor: pointer;
+   font-size: 10px;
+}
+
+.music-queue-action-btn:hover {
+   color: var(--error, #ef4444);
+}
+
+.music-queue-empty {
+   text-align: center;
+   padding: 2rem 1rem;
+   color: var(--text-secondary);
+   font-style: italic;
+   font-size: 0.85rem;
+}
+
+/* Queue header with clear button */
+.music-queue-header {
+   display: flex;
+   justify-content: space-between;
+   align-items: center;
+   margin-bottom: 0.5rem;
+   padding-bottom: 0.5rem;
+   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.music-queue-title {
+   font-size: 0.75rem;
+   font-weight: 600;
+   color: var(--text-secondary);
+   text-transform: uppercase;
+   letter-spacing: 0.05em;
+}
+
+.music-clear-btn {
+   padding: 0.25rem 0.5rem;
+   background: rgba(239, 68, 68, 0.1);
+   border: 1px solid rgba(239, 68, 68, 0.3);
+   border-radius: 4px;
+   color: var(--error, #ef4444);
+   font-size: 0.7rem;
+   cursor: pointer;
+   transition: all var(--transition-fast);
+}
+
+.music-clear-btn:hover {
+   background: rgba(239, 68, 68, 0.2);
+   border-color: rgba(239, 68, 68, 0.5);
+}
+
+/* Queue remove button */
+.music-queue-remove-btn {
+   background: none;
+   border: 1px solid transparent;
+   border-radius: 4px;
+   padding: 2px 6px;
+   color: var(--text-secondary);
+   cursor: pointer;
+   font-size: 14px;
+   font-weight: bold;
+   opacity: 0;
+   transition: all var(--transition-fast);
+}
+
+.music-queue-item:hover .music-queue-remove-btn {
+   opacity: 1;
+}
+
+.music-queue-remove-btn:hover {
+   color: var(--error, #ef4444);
+   border-color: rgba(239, 68, 68, 0.3);
+   background: rgba(239, 68, 68, 0.1);
+}
+
+/* =============================================================================
+ * Library Tab
+ * ============================================================================= */
+.music-library-search {
+   margin-bottom: 0.75rem;
+}
+
+.music-search-input {
+   width: 100%;
+   padding: 0.5rem 0.75rem;
+   background: rgba(0, 0, 0, 0.3);
+   border: 1px solid var(--accent-focus, rgba(255, 255, 255, 0.1));
+   border-radius: 6px;
+   color: var(--text-primary);
+   font-size: 0.85rem;
+   outline: none;
+   transition: all var(--transition-fast);
+}
+
+.music-search-input:focus {
+   border-color: var(--accent);
+   box-shadow: 0 0 0 2px var(--accent-border, rgba(99, 102, 241, 0.2));
+}
+
+.music-search-input::placeholder {
+   color: var(--text-secondary);
+}
+
+.music-library-stats {
+   display: flex;
+   justify-content: space-around;
+   padding: 0.625rem;
+   background: rgba(0, 0, 0, 0.2);
+   border-radius: 6px;
+   margin-bottom: 0.75rem;
+}
+
+.music-library-stat {
+   text-align: center;
+   cursor: pointer;
+   padding: 0.5rem;
+   border-radius: 6px;
+   transition: all var(--transition-fast);
+}
+
+.music-library-stat:hover {
+   background: rgba(255, 255, 255, 0.05);
+}
+
+.music-library-stat:hover .music-library-stat-value {
+   color: var(--accent);
+   text-shadow: 0 0 8px var(--accent);
+}
+
+.music-library-stat-value {
+   font-size: 1.1rem;
+   font-weight: 600;
+   color: var(--accent);
+   font-family: 'IBM Plex Mono', monospace;
+}
+
+.music-library-stat-label {
+   font-size: 0.65rem;
+   color: var(--text-secondary);
+   text-transform: uppercase;
+   letter-spacing: 0.03em;
+}
+
+.music-library-section {
+   margin-bottom: 0.75rem;
+}
+
+.music-library-section-header {
+   font-size: 0.7rem;
+   font-weight: 600;
+   color: var(--text-secondary);
+   text-transform: uppercase;
+   letter-spacing: 0.05em;
+   margin-bottom: 0.5rem;
+}
+
+.music-library-list {
+   list-style: none;
+   margin: 0;
+   padding: 0;
+}
+
+.music-library-item {
+   display: flex;
+   align-items: center;
+   gap: 8px;
+   padding: 0.5rem;
+   border-radius: 4px;
+   cursor: pointer;
+   transition: background var(--transition-fast);
+}
+
+.music-library-item:hover {
+   background: var(--accent-subtle, rgba(255, 255, 255, 0.03));
+}
+
+.music-library-item-title {
+   flex: 1;
+   font-size: 0.8rem;
+   color: var(--text-primary);
+   white-space: nowrap;
+   overflow: hidden;
+   text-overflow: ellipsis;
+}
+
+.music-library-item-artist {
+   font-size: 0.7rem;
+   color: var(--text-secondary);
+}
+
+.music-library-item-count {
+   font-size: 0.7rem;
+   color: var(--text-secondary);
+}
+
+/* Search Results */
+.music-search-results {
+   margin-top: 0.75rem;
+}
+
+.music-search-results.hidden,
+.music-library-section.hidden {
+   display: none;
+}
+
+.music-search-results-header {
+   font-size: 0.75rem;
+   color: var(--text-secondary);
+   margin-bottom: 0.5rem;
+}
+
+.music-library-item-info {
+   flex: 1;
+   min-width: 0;
+}
+
+.music-library-item-info .music-library-item-title {
+   margin-bottom: 2px;
+}
+
+.music-library-item-info .music-library-item-artist {
+   font-size: 0.7rem;
+   color: var(--text-secondary);
+}
+
+/* Search result duration and add button */
+.music-library-item-duration {
+   font-family: 'IBM Plex Mono', monospace;
+   font-size: 0.7rem;
+   color: var(--text-secondary);
+   margin-right: 0.5rem;
+}
+
+.music-search-add-btn {
+   background: none;
+   border: 1px solid var(--accent);
+   border-radius: 4px;
+   padding: 2px 8px;
+   color: var(--accent);
+   cursor: pointer;
+   font-size: 14px;
+   font-weight: bold;
+   opacity: 0;
+   transition: all var(--transition-fast);
+   min-width: 28px;
+}
+
+.music-library-item:hover .music-search-add-btn {
+   opacity: 1;
+}
+
+.music-search-add-btn:hover {
+   background: var(--accent);
+   color: white;
+}
+
+/* =============================================================================
+ * Panel Footer
+ * ============================================================================= */
+.music-footer {
+   display: flex;
+   justify-content: space-between;
+   align-items: center;
+   padding: 0.5rem 0.75rem;
+   border-top: 1px solid var(--accent-border);
+   background: rgba(10, 10, 15, 0.5);
+   border-radius: 0 0 12px 12px;
+   font-size: 0.7rem;
+   color: var(--text-secondary);
+}
+
+/* =============================================================================
+ * Mobile Responsive - Bottom Sheet Style
+ * ============================================================================= */
+@media (max-width: 480px) {
+   #music-panel {
+      position: fixed;
+      top: auto;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      width: 100%;
+      max-height: 85vh;
+      border-radius: 16px 16px 0 0;
+      transform: translateY(0);
+   }
+
+   #music-panel.hidden {
+      transform: translateY(100%);
+   }
+
+   .music-popover-arrow {
+      display: none;
+   }
+
+   .music-header {
+      border-radius: 16px 16px 0 0;
+   }
+
+   .music-footer {
+      border-radius: 0;
+      padding-bottom: 1.25rem;
+   }
+
+   .music-tab-content {
+      /* On mobile, use calculated height but still fixed for all tabs */
+      height: calc(85vh - 200px);
+      min-height: calc(85vh - 200px);
+      max-height: calc(85vh - 200px);
+   }
+
+   .music-transport-btn.large {
+      width: 56px;
+      height: 56px;
+   }
+
+   .music-transport-btn.small {
+      width: 44px;
+      height: 44px;
+   }
+
+   .music-search-input {
+      font-size: 16px; /* Prevent iOS zoom */
+   }
+
+   /* Larger touch targets for volume slider on mobile */
+   .music-volume-slider {
+      height: 6px;
+   }
+
+   .music-volume-slider::-webkit-slider-thumb {
+      width: 24px;
+      height: 24px;
+   }
+
+   .music-volume-slider::-moz-range-thumb {
+      width: 24px;
+      height: 24px;
+   }
+}
+
+/* Small screens */
+@media (min-width: 481px) and (max-width: 768px) {
+   #music-panel {
+      width: 340px;
+      right: 10px;
+      bottom: 50px;
+   }
+
+   .music-popover-arrow {
+      display: none;
+   }
+}

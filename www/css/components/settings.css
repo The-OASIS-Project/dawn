@@ -314,6 +314,48 @@
 }
 
 /* =============================================================================
+ * Toggle Button Group (VBR/CBR, etc.)
+ * ============================================================================= */
+.toggle-group {
+   display: flex;
+   gap: 0.5rem;
+}
+
+.toggle-btn {
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   min-width: 4rem;
+   padding: 0.5rem 1rem;
+   background: var(--bg-tertiary);
+   border: 1px solid var(--ring-inactive);
+   border-radius: 4px;
+   color: var(--text-secondary);
+   font-family: 'IBM Plex Mono', monospace;
+   font-size: 0.8125rem;
+   letter-spacing: 0.03em;
+   cursor: pointer;
+   transition: all var(--transition-fast);
+}
+
+.toggle-btn:hover {
+   background: var(--accent-subtle);
+   border-color: var(--accent-border);
+   color: var(--text-primary);
+}
+
+.toggle-btn.active {
+   background: var(--accent-subtle);
+   border-color: var(--accent);
+   color: var(--accent);
+}
+
+.toggle-btn:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+}
+
+/* =============================================================================
  * Settings Form Groups (My Settings)
  * ============================================================================= */
 .settings-group {

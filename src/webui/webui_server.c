@@ -69,6 +69,7 @@
 #include "tts/tts_preprocessing.h"
 #include "ui/metrics.h"
 #include "version.h"
+#include "webui/webui_music.h"
 
 #ifdef ENABLE_AUTH
 #include "auth/auth_crypto.h"
@@ -159,6 +160,25 @@ static void unregister_connection(ws_connection_t *conn) {
    pthread_mutex_unlock(&s_conn_registry_mutex);
 }
 
+/**
+ * @brief Constant-time string comparison to prevent timing attacks
+ *
+ * Unlike strcmp(), this always compares all bytes regardless of where
+ * differences occur, making it safe for comparing secrets like session tokens.
+ *
+ * @param a First string
+ * @param b Second string
+ * @param len Length to compare
+ * @return true if strings match, false otherwise
+ */
+static bool secure_token_compare(const char *a, const char *b, size_t len) {
+   volatile unsigned char result = 0;
+   for (size_t i = 0; i < len; i++) {
+      result |= (unsigned char)a[i] ^ (unsigned char)b[i];
+   }
+   return result == 0;
+}
+
 void register_token(const char *token, uint32_t session_id) {
    pthread_mutex_lock(&s_token_mutex);
 
@@ -201,10 +221,16 @@ void register_token(const char *token, uint32_t session_id) {
 }
 
 session_t *lookup_session_by_token(const char *token) {
+   if (!token) {
+      return NULL;
+   }
+
    pthread_mutex_lock(&s_token_mutex);
 
    for (int i = 0; i < MAX_TOKEN_MAPPINGS; i++) {
-      if (s_token_map[i].in_use && strcmp(s_token_map[i].token, token) == 0) {
+      /* Use constant-time comparison to prevent timing attacks */
+      if (s_token_map[i].in_use &&
+          secure_token_compare(s_token_map[i].token, token, WEBUI_SESSION_TOKEN_LEN - 1)) {
          uint32_t session_id = s_token_map[i].session_id;
          pthread_mutex_unlock(&s_token_mutex);
 
@@ -626,6 +652,12 @@ void free_response(ws_response_t *resp) {
       case WS_RESP_CONVERSATION_RESET:
          /* No data to free */
          break;
+      case WS_RESP_MUSIC_DATA:
+         free(resp->audio.data);
+         break;
+      case WS_RESP_MUSIC_POSITION:
+         /* No data to free - all inline values */
+         break;
    }
 }
 
@@ -806,6 +838,22 @@ static void send_conversation_reset_impl(struct lws *wsi) {
    struct json_object *obj = json_object_new_object();
 
    json_object_object_add(obj, "type", json_object_new_string("conversation_reset"));
+
+   const char *json_str = json_object_to_json_string(obj);
+   send_json_message(wsi, json_str);
+   json_object_put(obj);
+}
+
+static void send_music_position_impl(struct lws *wsi, double position_sec, uint32_t duration_sec) {
+   struct json_object *obj = json_object_new_object();
+
+   json_object_object_add(obj, "type", json_object_new_string("music_position"));
+
+   struct json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "position_sec", json_object_new_double(position_sec));
+   json_object_object_add(payload, "duration_sec", json_object_new_int(duration_sec));
+
+   json_object_object_add(obj, "payload", payload);
 
    const char *json_str = json_object_to_json_string(obj);
    send_json_message(wsi, json_str);
@@ -1186,6 +1234,10 @@ static void process_one_response(void) {
       case WS_RESP_AUDIO_END:
          send_audio_end_impl(conn->wsi);
          break;
+      case WS_RESP_MUSIC_DATA:
+         send_binary_message(conn->wsi, WS_BIN_MUSIC_DATA, resp.audio.data, resp.audio.len);
+         free(resp.audio.data);
+         break;
       case WS_RESP_CONTEXT:
          send_context_impl(conn->wsi, resp.context.current_tokens, resp.context.max_tokens,
                            resp.context.threshold);
@@ -1232,11 +1284,20 @@ static void process_one_response(void) {
       case WS_RESP_CONVERSATION_RESET:
          send_conversation_reset_impl(conn->wsi);
          break;
+      case WS_RESP_MUSIC_POSITION:
+         send_music_position_impl(conn->wsi, resp.music_position.position_sec,
+                                  resp.music_position.duration_sec);
+         break;
    }
 
-   /* If more responses pending, request writeable callback for this connection */
+   /* If more responses pending, ensure they get processed.
+    * lws_callback_on_writable() handles responses for THIS connection.
+    * lws_cancel_service() wakes the main loop for responses to OTHER connections. */
    if (more_pending) {
       lws_callback_on_writable(conn->wsi);
+      if (s_lws_context) {
+         lws_cancel_service(s_lws_context);
+      }
    }
 }
 
@@ -2595,6 +2656,42 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
                      conn->session ? conn->session->session_id : 0);
          }
       }
+   }
+   /* Music streaming (per-connection) */
+   else if (strcmp(type, "music_subscribe") == 0) {
+      if (!conn_require_auth(conn)) {
+         return;
+      }
+      handle_music_subscribe(conn, payload);
+   } else if (strcmp(type, "music_unsubscribe") == 0) {
+      if (!conn_require_auth(conn)) {
+         return;
+      }
+      handle_music_unsubscribe(conn);
+   } else if (strcmp(type, "music_control") == 0) {
+      if (!conn_require_auth(conn)) {
+         return;
+      }
+      if (payload) {
+         handle_music_control(conn, payload);
+      }
+   } else if (strcmp(type, "music_search") == 0) {
+      if (!conn_require_auth(conn)) {
+         return;
+      }
+      handle_music_search(conn, payload);
+   } else if (strcmp(type, "music_library") == 0) {
+      if (!conn_require_auth(conn)) {
+         return;
+      }
+      handle_music_library(conn, payload);
+   } else if (strcmp(type, "music_queue") == 0) {
+      if (!conn_require_auth(conn)) {
+         return;
+      }
+      if (payload) {
+         handle_music_queue(conn, payload);
+      }
    } else {
       LOG_WARNING("WebUI: Unknown message type: %s", type);
    }
@@ -2705,6 +2802,9 @@ static int callback_websocket(struct lws *wsi,
             conn->text_buffer_len = 0;
             conn->text_buffer_cap = 0;
          }
+
+         /* Clean up music streaming state */
+         webui_music_session_cleanup(conn);
 
          /* Only decrement client count if this connection had a session
           * (i.e., completed the init handshake) */
@@ -3015,10 +3115,12 @@ static void *webui_thread_func(void *arg) {
    LOG_INFO("WebUI: Server thread started");
 
    while (s_running) {
-      /* Process events with 50ms timeout */
-      lws_service(s_lws_context, 50);
+      /* Process events with 5ms timeout (fast for music streaming ~50fps).
+       * lws_cancel_service() interrupts the wait when responses are queued. */
+      lws_service(s_lws_context, 5);
 
-      /* Process any pending responses from worker threads */
+      /* Process one pending response per iteration.
+       * The writeable callback chain handles additional responses. */
       process_response_queue();
    }
 
@@ -3425,12 +3527,18 @@ int webui_server_init(int port, const char *www_path) {
    }
 #endif
 
+   /* Initialize music streaming subsystem (optional) */
+   if (webui_music_init() != 0) {
+      LOG_WARNING("WebUI: Music streaming subsystem not available");
+   }
+
    /* Register tool execution callback for debug display */
    llm_tools_set_execution_callback(webui_tool_execution_callback);
 
    /* Start server thread */
    if (pthread_create(&s_webui_thread, NULL, webui_thread_func, NULL) != 0) {
       LOG_ERROR("WebUI: Failed to create server thread");
+      webui_music_cleanup();
 #ifdef ENABLE_WEBUI_AUDIO
       webui_audio_cleanup();
 #endif
@@ -3484,6 +3592,9 @@ void webui_server_shutdown(void) {
       s_lws_context = NULL;
    }
 
+   /* Cleanup music streaming subsystem */
+   webui_music_cleanup();
+
    /* Cleanup audio subsystem */
 #ifdef ENABLE_WEBUI_AUDIO
    webui_audio_cleanup();
@@ -3513,6 +3624,18 @@ int webui_server_client_count(void) {
 
 int webui_server_get_port(void) {
    return s_port;
+}
+
+int webui_get_queue_fill_pct(void) {
+   pthread_mutex_lock(&s_queue_mutex);
+   int count;
+   if (s_queue_tail >= s_queue_head) {
+      count = s_queue_tail - s_queue_head;
+   } else {
+      count = WEBUI_RESPONSE_QUEUE_SIZE - s_queue_head + s_queue_tail;
+   }
+   pthread_mutex_unlock(&s_queue_mutex);
+   return (count * 100) / WEBUI_RESPONSE_QUEUE_SIZE;
 }
 
 /* webui_clear_login_rate_limit moved to webui_http.c */

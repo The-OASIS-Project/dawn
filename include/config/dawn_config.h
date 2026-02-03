@@ -392,6 +392,11 @@ typedef struct {
  * ============================================================================= */
 typedef struct {
    int scan_interval_minutes; /* Minutes between rescans (0 = disabled, default: 60) */
+
+   /* Streaming settings (music.streaming section) */
+   bool streaming_enabled;         /* Enable WebUI music streaming (default: true) */
+   char streaming_quality[16];     /* Default quality: voice/standard/high/hifi */
+   char streaming_bitrate_mode[8]; /* vbr or cbr */
 } music_config_t;
 
 /* =============================================================================

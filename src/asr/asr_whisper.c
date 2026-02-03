@@ -206,6 +206,18 @@ asr_result_t *asr_whisper_finalize(void *ctx) {
       return result;
    }
 
+   /* Whisper requires minimum 100ms of audio (1600 samples at 16kHz).
+    * Pad with silence if needed to avoid "input is too short" warning. */
+   const size_t min_samples = (WHISPER_SAMPLE_RATE / 10); /* 100ms */
+   if (wctx->buffer_size < min_samples && wctx->buffer_size < wctx->buffer_capacity) {
+      size_t pad_samples = min_samples - wctx->buffer_size;
+      if (wctx->buffer_size + pad_samples > wctx->buffer_capacity) {
+         pad_samples = wctx->buffer_capacity - wctx->buffer_size;
+      }
+      memset(wctx->audio_buffer + wctx->buffer_size, 0, pad_samples * sizeof(float));
+      wctx->buffer_size += pad_samples;
+   }
+
    struct timeval start, end;
    gettimeofday(&start, NULL);
 
