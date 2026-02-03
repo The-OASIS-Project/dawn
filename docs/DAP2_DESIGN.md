@@ -1,8 +1,8 @@
 # Dawn Audio Protocol 2.0 (DAP 2) Design Document
 
-**Status**: Draft
-**Version**: 0.1
-**Date**: November 2025
+**Status**: Implementation In Progress (Phase 0-2 Complete)
+**Version**: 0.3
+**Date**: February 2026
 
 ## Executive Summary
 
@@ -13,22 +13,26 @@ DAP 2.0 represents a fundamental architectural shift from the "dumb satellite" m
 - **Offline resilience**: Basic functionality without network
 - **Scalability**: Central daemon only handles LLM orchestration
 
+**Key Architecture Decision**: Tier 1 satellites (RPi) use **WebSocket** transport, leveraging the existing WebUI infrastructure. This simplifies implementation significantly - the WebUI has already solved multi-client support, session management, streaming, and reconnection. A custom binary protocol is reserved for Tier 2 (ESP32) where WebSocket overhead matters.
+
 ---
 
 ## Table of Contents
 
 1. [Problem Statement](#1-problem-statement)
 2. [Architecture Comparison](#2-architecture-comparison)
-3. [DAP 2.0 Architecture](#3-dap-20-architecture)
-4. [Satellite Tiers](#4-satellite-tiers)
-5. [Protocol Specification](#5-protocol-specification)
-6. [Common Code Architecture](#6-common-code-architecture)
-7. [Implementation Phases](#7-implementation-phases)
-8. [Platform Considerations](#8-platform-considerations)
-9. [Security Architecture](#9-security-architecture)
-10. [Network Reliability](#10-network-reliability)
-11. [Performance Validation](#11-performance-validation)
-12. [Open Questions](#12-open-questions)
+3. [WebUI Architecture Leverage](#3-webui-architecture-leverage)
+4. [DAP 2.0 Architecture](#4-dap-20-architecture)
+5. [Satellite Tiers](#5-satellite-tiers)
+6. [Protocol Specification](#6-protocol-specification)
+7. [Common Code Architecture](#7-common-code-architecture)
+8. [Implementation Phases](#8-implementation-phases)
+9. [Platform Considerations](#9-platform-considerations)
+10. [Security Architecture](#10-security-architecture)
+11. [Network Reliability](#11-network-reliability)
+12. [Performance Validation](#12-performance-validation)
+13. [Memory System Integration](#13-memory-system-integration)
+14. [Open Questions](#14-open-questions)
 
 ---
 
@@ -89,11 +93,11 @@ DAP 2.0 represents a fundamental architectural shift from the "dumb satellite" m
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### DAP 2.0 Architecture (Proposed)
+### DAP 2.0 Architecture (Revised)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                     DAWN Satellite (RPi/ESP32-S3)                    │
+│                     DAWN Tier 1 Satellite (RPi)                      │
 │                                                                      │
 │  ┌──────────────────────────────────────────────────────────────┐   │
 │  │                    Local Processing Pipeline                   │   │
@@ -107,8 +111,8 @@ DAP 2.0 represents a fundamental architectural shift from the "dumb satellite" m
 │  │                                           ▼ (text: "turn on   │   │
 │  │                                              the lights")     │   │
 │  │  ┌────────┐  ┌────────┐  ┌────────────────────────────┐      │   │
-│  │  │ Audio  │<─│  TTS   │<─│      DAP 2.0 Client        │      │   │
-│  │  │Playback│  │(Piper) │  │ (send text, receive text)  │      │   │
+│  │  │ Audio  │<─│  TTS   │<─│    WebSocket Client        │      │   │
+│  │  │Playback│  │(Piper) │  │ (reuses WebUI protocol)    │      │   │
 │  │  └────────┘  └────────┘  └────────────────────────────┘      │   │
 │  │                                                                │   │
 │  └──────────────────────────────────────────────────────────────┘   │
@@ -116,18 +120,18 @@ DAP 2.0 represents a fundamental architectural shift from the "dumb satellite" m
 │  Local-only fallback: "I can't reach the server right now"          │
 └─────────────────────────────────────────────────────────────────────┘
          │                                      ▲
-         │ ~100-500 bytes (text)                │ ~100-2000 bytes (text)
+         │ ~100-500 bytes (JSON/text)           │ ~100-2000 bytes (JSON/text)
          ▼                                      │
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        DAWN Central Daemon                           │
 │                                                                      │
 │  ┌─────────────────────────────────────────────────────────────┐    │
-│  │                    LLM Orchestration Layer                    │    │
+│  │              WebUI Server (Extended for Satellites)          │    │
 │  │                                                               │    │
 │  │  ┌───────────┐  ┌───────────┐  ┌───────────┐                │    │
 │  │  │  Session  │  │    LLM    │  │  Command  │                │    │
 │  │  │  Manager  │─>│ Interface │─>│  Parser   │                │    │
-│  │  │(per-sat)  │  │           │  │           │                │    │
+│  │  │(extended) │  │           │  │           │                │    │
 │  │  └───────────┘  └───────────┘  └───────────┘                │    │
 │  │        │                             │                        │    │
 │  │        ▼                             ▼                        │    │
@@ -138,110 +142,143 @@ DAP 2.0 represents a fundamental architectural shift from the "dumb satellite" m
 │  │                                                               │    │
 │  └─────────────────────────────────────────────────────────────┘    │
 │                                                                      │
-│  Worker thread per satellite - non-blocking                          │
+│  Thread-per-client - non-blocking (existing WebUI model)             │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. DAP 2.0 Architecture
+## 3. WebUI Architecture Leverage
 
-### Core Principles
+### What WebUI Already Has
 
-1. **Text-First Protocol**: Satellites send transcribed text, not raw audio
-2. **Local Intelligence**: ASR, VAD, wake word, and TTS run on satellite
-3. **Stateless Messages**: Each request is self-contained; server maintains state
-4. **Streaming Support**: LLM responses streamed sentence-by-sentence
-5. **Fallback Modes**: Graceful degradation when network unavailable
+The WebUI has already solved many infrastructure problems. Tier 1 satellites should leverage this:
 
-### Message Types
+| Feature | WebUI Status | DAP2 Benefit |
+|---------|--------------|--------------|
+| Multi-client support | ✅ Implemented | Satellites are just another client type |
+| Session management | ✅ JWT tokens, reconnection | Extend with SESSION_TYPE_SATELLITE |
+| Opus codec | ✅ 48kHz, quality tiers | Available if audio streaming needed |
+| Streaming protocol | ✅ Binary message types | Reuse for response streaming |
+| Response queue pattern | ✅ Thread-safe | Already proven |
+| Per-client state | ✅ Music has per-session state | Same pattern for satellites |
+| Keepalive/heartbeat | ✅ WebSocket ping/pong | Built into WebSocket |
+| TLS/SSL | ✅ Optional | Security built-in |
 
-| Type | Direction | Purpose |
-|------|-----------|---------|
-| `QUERY` | Satellite → Daemon | User's transcribed command |
-| `RESPONSE` | Daemon → Satellite | LLM response text (may be streamed) |
-| `RESPONSE_END` | Daemon → Satellite | End of streamed response |
-| `COMMAND` | Daemon → Satellite | Direct command for satellite (e.g., play sound) |
-| `STATUS` | Bidirectional | Health check, capabilities exchange |
-| `REGISTER` | Satellite → Daemon | Initial registration with capabilities |
-| `ACK` | Bidirectional | Acknowledgment |
+### Why WebSocket for Tier 1?
 
-### Connection Model: TCP-First (UDP Optional)
+| Aspect | Custom Protocol | WebSocket |
+|--------|----------------|-----------|
+| Implementation | Write from scratch | libwebsockets (proven) |
+| Framing | Manual | Built-in |
+| Fragmentation | Manual | Built-in |
+| TLS | Manual | Built-in |
+| Debugging | Custom tools | Browser dev tools, wscat |
+| Firewall | Port 5000 | Port 443 (HTTPS) |
+| Reconnection | Manual | Library support |
+| Existing code | None | WebUI infrastructure |
 
-DAP 2.0 uses a **phased transport model** - starting with TCP-only for simplicity, with UDP as a later optimization if measurements justify it.
+**Decision**: Tier 1 (RPi) uses WebSocket. Reserve custom binary protocol for Tier 2 (ESP32) where WebSocket overhead matters.
 
-#### Phase 1-3: TCP Only
+### What DAP2 Adds Beyond WebUI
 
-All communication (control AND audio) uses TCP:
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        Satellite                             │
-│                                                              │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │                    TCP Client                          │  │
-│  │         (control messages + audio streaming)           │  │
-│  └───────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              │ TCP :5000
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                      DAWN Daemon                             │
-│                                                              │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │                    TCP Server                          │  │
-│  │         (control messages + audio streaming)           │  │
-│  └───────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-```
-
-**Why TCP-first?**
-- Simpler implementation (single socket, built-in ordering/reliability)
-- Home WiFi has <0.1% packet loss (TCP overhead is minimal)
-- Validate protocol correctness before adding complexity
-- Measure actual latency to justify UDP optimization
-
-#### Phase 4+: Optional UDP for Audio (If Needed)
-
-Add UDP channel only if latency measurements show >100ms p95 benefit:
+The **text-first protocol** for Tier 1 is the key differentiator:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        Satellite                             │
-│                                                              │
-│  ┌─────────────┐                    ┌─────────────────────┐ │
-│  │ TCP Client  │ ◄──── Control ────►│  UDP Client         │ │
-│  │ (text msgs) │                    │  (audio streaming)  │ │
-│  └─────────────┘                    └─────────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
-         │                                      │
-         │ TCP :5000                            │ UDP :5001
-         ▼                                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│                      DAWN Daemon                             │
-│                                                              │
-│  ┌─────────────┐                    ┌─────────────────────┐ │
-│  │ TCP Server  │                    │  UDP Server         │ │
-│  │ (control)   │                    │  (audio)            │ │
-│  └─────────────┘                    └─────────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
+WebUI (browser):
+User speaks → Audio sent to server → ASR → LLM → TTS → Audio sent back
+
+DAP2 Tier 1 (satellite):
+User speaks → [LOCAL: VAD → Wake Word → ASR] → Text sent to daemon → LLM → Text returned → [LOCAL: TTS]
 ```
 
-**When to add UDP?**
-- Latency measurements show TCP p95 > 150ms for audio
-- Deployment on lossy networks (not typical home WiFi)
-- Multiple concurrent audio streams causing TCP head-of-line blocking
+**Why text-first matters for JARVIS vision:**
+- **Latency**: ~100 bytes vs ~960KB per interaction
+- **Offline**: Satellite can say "I can't reach the server" locally
+- **Wake word**: Always listening without streaming audio 24/7
+- **Privacy**: Audio never leaves the room unless needed
+- **Bandwidth**: Multiple satellites don't saturate WiFi
 
 ---
 
-## 4. Satellite Tiers
+## 4. DAP 2.0 Architecture
+
+### Core Principles
+
+1. **Text-First Protocol**: Tier 1 satellites send transcribed text, not raw audio
+2. **Local Intelligence**: ASR, VAD, wake word, and TTS run on Tier 1 satellite
+3. **WebSocket Transport**: Tier 1 uses WebSocket (extends WebUI); Tier 2 uses custom protocol
+4. **Unified Session Model**: Extend existing session_manager, not separate system
+5. **Streaming Support**: LLM responses streamed sentence-by-sentence
+6. **Fallback Modes**: Graceful degradation when network unavailable
+
+### Unified Session Model
+
+Instead of separate DAP2 session management, extend the existing session system:
+
+```
+                    ┌─────────────────────────┐
+                    │    Session Manager      │
+                    │  (conversation history) │
+                    └───────────┬─────────────┘
+                                │
+        ┌───────────────────────┼───────────────────────┐
+        │                       │                       │
+        ▼                       ▼                       ▼
+┌───────────────┐     ┌───────────────┐     ┌───────────────┐
+│ Local Session │     │ WebUI Session │     │ DAP2 Session  │
+│  (dawn.c)     │     │  (browser)    │     │  (satellite)  │
+└───────────────┘     └───────────────┘     └───────────────┘
+```
+
+```c
+// Extend include/core/session_manager.h
+typedef enum {
+   SESSION_TYPE_LOCAL,      // Main daemon (microphone)
+   SESSION_TYPE_WEBSOCKET,  // Browser WebUI
+   SESSION_TYPE_SATELLITE,  // DAP2 satellite (Tier 1 or Tier 2)
+} session_type_t;
+
+typedef struct {
+   session_type_t type;
+   char uuid[64];           // Satellite UUID
+   char name[64];           // "Kitchen Assistant"
+   char location[32];       // "kitchen"
+   int tier;                // 1 or 2
+   bool local_asr;          // Tier 1: true, Tier 2: false
+   bool local_tts;          // Tier 1: true, Tier 2: false
+   // ... existing session fields
+} session_t;
+```
+
+### Transport Abstraction
+
+Create transport-agnostic message handling:
+
+```c
+// Transport interface
+typedef struct {
+   void (*send_text)(void *ctx, const char *text);
+   void (*send_audio)(void *ctx, const uint8_t *data, size_t len);
+   void (*send_state)(void *ctx, const char *state);
+} transport_ops_t;
+
+// Implementations
+static transport_ops_t websocket_ops = { ... };  // WebUI + Tier 1
+static transport_ops_t dap2_t2_ops = { ... };    // Tier 2 (custom protocol)
+```
+
+---
+
+## 5. Satellite Tiers
 
 DAP 2.0 supports **two satellite tiers** based on hardware capabilities:
 
 ### Tier 1: Full Satellite (Raspberry Pi 4/5, Orange Pi 5)
 
 Runs the complete local pipeline - only LLM queries go to the daemon. **Follows the same interaction model as the DAWN daemon** for a seamless user experience.
+
+**Interaction Model**: Hands-free, VAD-based (no push button, no indicator LEDs). Users interact via voice only, identical to the main daemon experience.
 
 | Component | Implementation | Memory | Notes |
 |-----------|---------------|--------|-------|
@@ -257,7 +294,7 @@ Runs the complete local pipeline - only LLM queries go to the daemon. **Follows 
 2. On speech detection, run Whisper on audio chunk
 3. Check transcript for wake word ("Friday")
 4. If found, transition to command recording state
-5. Uses same state machine: `SILENCE → WAKEWORD_LISTEN → COMMAND_RECORDING → PROCESSING`
+5. Uses same state machine: `SILENCE → WAKEWORD_LISTEN → COMMAND_RECORDING → PROCESSING → SPEAKING`
 
 **Capabilities**:
 - Hands-free wake word activation ("Friday") - same feel as talking to main daemon
@@ -265,7 +302,7 @@ Runs the complete local pipeline - only LLM queries go to the daemon. **Follows 
 - Local TTS - receives **text** from daemon
 - Offline fallback: TTS "I can't reach the server right now"
 
-**Communication**: TCP only (text-based messages)
+**Communication**: WebSocket (reuses WebUI infrastructure)
 
 ```
 User: "Friday, turn on the lights"
@@ -273,10 +310,10 @@ User: "Friday, turn on the lights"
   ▼ (local processing)
 Satellite: VAD → Wake Word → ASR → "turn on the lights"
   │
-  ▼ (TCP: ~100 bytes)
+  ▼ (WebSocket JSON: ~100 bytes)
 Daemon: LLM → "I'll turn on the lights for you"
   │
-  ▼ (TCP: ~200 bytes)
+  ▼ (WebSocket JSON: ~200 bytes)
 Satellite: TTS → Audio playback
 ```
 
@@ -284,13 +321,17 @@ Satellite: TTS → Audio playback
 
 Button-activated with audio streaming - follows the DAP 1.1 interaction model with improved protocol.
 
+**Interaction Model**: Push-to-talk with optional visual feedback via NeoPixel LEDs. Users press a button to record, and LEDs indicate state (listening, processing, speaking).
+
 | Component | Implementation | Memory | Notes |
 |-----------|---------------|--------|-------|
 | Audio Capture | I2S ADC | ~64 KB | Button-activated |
 | VAD | Energy-based | ~1 KB | Silence detection (end of speech) |
 | Audio Codec | ADPCM | ~8 KB | 4:1 compression, low CPU |
 | Audio Playback | I2S DAC | ~64 KB | Streaming from daemon |
-| Network Buffers | TCP/UDP | ~100 KB | WiFi stack + protocol |
+| Network Buffers | TCP | ~100 KB | WiFi stack + protocol |
+| GPIO Button | libgpiod | ~1 KB | Push-to-talk activation |
+| NeoPixel LEDs | SPI driver | ~4 KB | State indicators (optional) |
 | **Total** | | **~250-300 KB** | Requires ESP32-S3 with PSRAM |
 
 **Hardware Requirement**: ESP32-S3 with 8MB PSRAM (standard on most dev boards)
@@ -301,15 +342,15 @@ Button-activated with audio streaming - follows the DAP 1.1 interaction model wi
 - ADPCM-compressed audio upload
 - Streaming audio playback
 
-**Communication**: TCP (Phase 1-3), UDP audio streaming (Phase 4+)
+**Communication**: Custom binary protocol (TCP)
 
 ```
 User: [presses button] "Turn on the lights" [releases or silence detected]
   │
-  ▼ (UDP: ~30KB ADPCM audio)
+  ▼ (TCP: ~30KB ADPCM audio)
 Daemon: ASR → LLM → TTS → audio stream
   │
-  ▼ (UDP: ~50KB ADPCM audio)
+  ▼ (TCP: ~50KB ADPCM audio)
 Satellite: Audio playback
 ```
 
@@ -344,28 +385,43 @@ Satellites self-identify on connection with a structured identity that enables:
 - Location-aware responses ("the kitchen lights")
 - Logging and debugging
 
-**Registration Message**:
+**Tier 1 Registration (WebSocket JSON)**:
 
 ```json
 {
-  "type": "REGISTER",
-  "identity": {
+  "type": "satellite_register",
+  "payload": {
     "uuid": "550e8400-e29b-41d4-a716-446655440000",
     "name": "Kitchen Assistant",
     "location": "kitchen",
-    "hardware_id": "rpi5-sn-12345678"
-  },
-  "tier": 1,
-  "capabilities": {
-    "local_asr": true,
-    "local_tts": true,
-    "wake_word": true
-  },
-  "hardware": {
-    "platform": "rpi5",
-    "memory_mb": 4096
-  },
-  "protocol_version": "2.0"
+    "tier": 1,
+    "capabilities": {
+      "local_asr": true,
+      "local_tts": true,
+      "wake_word": true
+    },
+    "hardware": {
+      "platform": "rpi5",
+      "memory_mb": 4096
+    },
+    "protocol_version": "2.0"
+  }
+}
+```
+
+**Registration Response**:
+
+```json
+{
+  "type": "satellite_register_ack",
+  "payload": {
+    "session_id": "sess-abc123",
+    "daemon_name": "DAWN Central",
+    "conversation_restored": true,
+    "conversation_age_seconds": 120,
+    "memory_enabled": true,
+    "memory_user": "krisk"
+  }
 }
 ```
 
@@ -382,51 +438,84 @@ Satellites self-identify on connection with a structured identity that enables:
 - Tier 1 (RPi): Generate UUID v4 on first boot, store in `/etc/dawn-satellite-id`
 - Tier 2 (ESP32): Derive UUID v5 from MAC address using DAWN namespace
 
-**Tier 2 UUID v5 Generation**:
-```c
-// DAWN namespace UUID (randomly generated, fixed)
-static const uint8_t DAWN_NAMESPACE_UUID[16] = {
-   0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1,
-   0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8
-};
+---
 
-// ESP32 implementation:
-// 1. Get MAC: uint8_t mac[6]; esp_read_mac(mac, ESP_MAC_WIFI_STA);
-// 2. Create name string: "AA:BB:CC:DD:EE:FF"
-// 3. SHA-1 hash: SHA1(namespace_uuid + mac_string)
-// 4. Format as UUID v5: set version (0x50) and variant (0x80) bits
-//
-// Result: deterministic UUID like "f47ac10b-58cc-5372-8567-0e02b2c3d479"
-//         Same MAC always produces same UUID (survives reflash)
-```
+## 6. Protocol Specification
 
-**Why UUID v5?**
-- Deterministic: Same MAC → same UUID (no storage needed on ESP32)
-- Standard: RFC 4122 compliant
-- Collision-free: SHA-1 hash provides uniqueness
-- Survives firmware updates (derived from hardware, not stored)
+### 6.1 Tier 1: WebSocket Protocol
 
-**Registration Response**:
+Tier 1 satellites use WebSocket with JSON messages, extending the existing WebUI protocol.
+
+**Message Types**:
+
+| Type | Direction | Purpose |
+|------|-----------|---------|
+| `satellite_register` | S→D | Initial registration with capabilities |
+| `satellite_register_ack` | D→S | Registration confirmation |
+| `satellite_query` | S→D | User's transcribed command |
+| `satellite_response` | D→S | Complete LLM response (non-streaming) |
+| `satellite_response_stream` | D→S | Partial LLM response (streaming) |
+| `satellite_response_end` | D→S | End of streamed response |
+| `satellite_status` | Both | Health check, metrics exchange |
+
+**Query Message**:
 
 ```json
 {
-  "type": "REGISTER_ACK",
-  "session_id": "sess-abc123",
-  "daemon_name": "DAWN Central",
-  "conversation_restored": true,
-  "conversation_age_seconds": 120
+  "type": "satellite_query",
+  "payload": {
+    "text": "turn on the lights"
+  }
 }
 ```
 
-**Daemon Behavior by Tier**:
-- **Tier 1**: Expects text QUERY, sends text RESPONSE
-- **Tier 2**: Expects audio QUERY_AUDIO, sends audio RESPONSE_AUDIO
+**Streaming Response**:
 
----
+```json
+{"type": "satellite_response_stream", "payload": {"delta": "I'll turn "}}
+{"type": "satellite_response_stream", "payload": {"delta": "on the lights "}}
+{"type": "satellite_response_stream", "payload": {"delta": "for you."}}
+{"type": "satellite_response_end", "payload": {}}
+```
 
-## 5. Protocol Specification
+**Example Flow (Tier 1)**:
 
-### 5.1 Packet Format
+```
+Satellite                                    Daemon
+    │                                           │
+    │──── WS Connect ──────────────────────────>│
+    │                                           │
+    │──── satellite_register ──────────────────>│
+    │                                           │
+    │<─── satellite_register_ack ──────────────│
+    │                                           │
+    │  [User says "Friday, turn on the lights"] │
+    │  [Local: VAD → Wake Word → ASR]           │
+    │                                           │
+    │──── satellite_query ─────────────────────>│
+    │     {"text": "turn on the lights"}        │
+    │                                           │
+    │              [Daemon: LLM processing]     │
+    │                                           │
+    │<─── satellite_response_stream ───────────│
+    │     {"delta": "I'll turn"}                │
+    │                                           │
+    │  [Satellite: TTS "I'll turn"]             │
+    │                                           │
+    │<─── satellite_response_stream ───────────│
+    │     {"delta": " on the lights for you."}  │
+    │                                           │
+    │  [Satellite: TTS " on the lights..."]     │
+    │                                           │
+    │<─── satellite_response_end ──────────────│
+    │                                           │
+```
+
+### 6.2 Tier 2: Custom Binary Protocol
+
+Tier 2 satellites use a custom binary protocol optimized for ESP32 resource constraints.
+
+**Packet Format**:
 
 ```
 ┌────────────────┬────────────────┬────────────────┬────────────────┐
@@ -442,7 +531,7 @@ static const uint8_t DAWN_NAMESPACE_UUID[16] = {
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-**Total Header Size**: 14 bytes (vs 8 bytes in DAP 1.0)
+**Total Header Size**: 14 bytes
 
 | Field | Size | Description |
 |-------|------|-------------|
@@ -454,96 +543,33 @@ static const uint8_t DAWN_NAMESPACE_UUID[16] = {
 | Sequence Number | 4B | Message sequence (for ordering/ack) |
 | Checksum | 2B | CRC-16 of header + payload |
 
-### 5.2 Message Types
+**Message Types (Tier 2)**:
 
 | Value | Name | Direction | Payload |
 |-------|------|-----------|---------|
 | 0x01 | REGISTER | S→D | JSON capabilities |
 | 0x02 | REGISTER_ACK | D→S | JSON session config |
-| 0x10 | QUERY | S→D | UTF-8 text (transcribed command) |
-| 0x11 | QUERY_AUDIO | S→D | Compressed audio (Tier 2/3 only) |
-| 0x20 | RESPONSE | D→S | UTF-8 text (LLM response) |
-| 0x21 | RESPONSE_STREAM | D→S | UTF-8 text chunk (streaming) |
+| 0x11 | QUERY_AUDIO | S→D | ADPCM audio |
+| 0x23 | RESPONSE_AUDIO | D→S | ADPCM audio chunk |
 | 0x22 | RESPONSE_END | D→S | Empty (end of stream) |
-| 0x23 | RESPONSE_AUDIO | D→S | Audio chunk (Tier 2/3 only) |
-| 0x30 | COMMAND | D→S | JSON command for satellite |
 | 0x40 | STATUS | Both | JSON status/health |
 | 0x50 | ACK | Both | Sequence number being acked |
-| 0x51 | NACK | Both | Sequence number + error code |
 | 0xF0 | PING | Both | Empty |
 | 0xF1 | PONG | Both | Empty |
 
-### 5.3 Flags
+**Flags**:
 
 | Bit | Name | Description |
 |-----|------|-------------|
 | 0 | STREAMING | This is part of a stream (more to come) |
-| 1 | COMPRESSED | Payload is compressed (Opus for audio, gzip for text) |
+| 1 | COMPRESSED | Payload is ADPCM compressed |
 | 2 | REQUIRES_ACK | Sender expects ACK for this message |
-| 3 | PRIORITY | High-priority message (interrupt handling) |
+| 3 | PRIORITY | High-priority message |
 | 4-7 | Reserved | Future use |
-
-### 5.4 Example Flows
-
-#### Tier 1 Satellite (Full Local Processing)
-
-```
-Satellite                                    Daemon
-    │                                           │
-    │──── REGISTER {local_asr:true} ──────────>│
-    │                                           │
-    │<─── REGISTER_ACK {session_id:xxx} ───────│
-    │                                           │
-    │  [User says "Friday, turn on the lights"] │
-    │  [Local: VAD → Wake Word → ASR]           │
-    │                                           │
-    │──── QUERY "turn on the lights" ─────────>│
-    │                                           │
-    │              [Daemon: LLM processing]     │
-    │                                           │
-    │<─── RESPONSE_STREAM "I'll turn" ─────────│
-    │                                           │
-    │  [Satellite: TTS "I'll turn"]             │
-    │                                           │
-    │<─── RESPONSE_STREAM " on the lights" ────│
-    │                                           │
-    │  [Satellite: TTS " on the lights"]        │
-    │                                           │
-    │<─── RESPONSE_END ────────────────────────│
-    │                                           │
-    │──── ACK ─────────────────────────────────>│
-    │                                           │
-```
-
-#### Tier 2 Satellite (Audio Upload)
-
-```
-Satellite                                    Daemon
-    │                                           │
-    │──── REGISTER {local_asr:false} ─────────>│
-    │                                           │
-    │<─── REGISTER_ACK {session_id:xxx} ───────│
-    │                                           │
-    │  [User presses button, speaks]            │
-    │  [Local: VAD detects silence]             │
-    │                                           │
-    │──── QUERY_AUDIO <opus_data> ────────────>│
-    │                                           │
-    │              [Daemon: ASR → LLM]          │
-    │                                           │
-    │<─── RESPONSE_AUDIO <opus_chunk> ─────────│
-    │                                           │
-    │  [Satellite: decode and play]             │
-    │                                           │
-    │<─── RESPONSE_AUDIO <opus_chunk> ─────────│
-    │                                           │
-    │<─── RESPONSE_END ────────────────────────│
-    │                                           │
-```
 
 ---
 
-## 6. Common Code Architecture
+## 7. Common Code Architecture
 
 ### Monorepo Structure
 
@@ -555,60 +581,61 @@ dawn/
 │   ├── include/
 │   │   ├── audio/
 │   │   │   └── ring_buffer.h
-│   │   ├── asr/
-│   │   │   ├── vad_silero.h
-│   │   │   ├── asr_whisper.h
-│   │   │   └── chunking_manager.h
-│   │   ├── tts/
-│   │   │   ├── text_to_speech.h
-│   │   │   └── sentence_buffer.h
-│   │   ├── protocol/
-│   │   │   └── dap2.h             # DAP 2.0 protocol definitions
-│   │   └── logging.h
+│   │   ├── utils/
+│   │   │   ├── sentence_buffer.h
+│   │   │   └── string_utils.h
+│   │   └── logging_common.h       # Callback-based logging
 │   ├── src/
 │   │   ├── audio/
 │   │   │   └── ring_buffer.c
-│   │   ├── asr/
-│   │   │   ├── vad_silero.c
-│   │   │   ├── asr_whisper.c
-│   │   │   └── chunking_manager.c
-│   │   ├── tts/
-│   │   │   ├── text_to_speech.cpp
-│   │   │   ├── piper.cpp
-│   │   │   └── sentence_buffer.c
-│   │   ├── protocol/
-│   │   │   └── dap2_common.c      # Packet encoding/decoding
-│   │   └── logging.c
+│   │   ├── utils/
+│   │   │   ├── sentence_buffer.c
+│   │   │   └── string_utils.c
+│   │   └── logging_common.c
 │   └── CMakeLists.txt             # Builds libdawn_common.a
 │
 ├── src/                           # DAEMON-SPECIFIC CODE
 │   ├── dawn.c                     # Main daemon entry point
+│   ├── logging_bridge.c           # Bridges common/ logging to daemon
 │   ├── llm/                       # LLM integration (daemon only)
-│   ├── network/
-│   │   ├── dawn_server.c          # DAP 1.0 server (legacy)
-│   │   ├── dap2_server.c          # DAP 2.0 server (NEW)
-│   │   └── dap2_session.c         # Per-satellite session management
+│   ├── webui/
+│   │   ├── webui_server.c         # Extended for satellite support
+│   │   └── webui_satellite.c      # Satellite message handlers
+│   ├── core/
+│   │   └── session_manager.c      # Extended with SESSION_TYPE_DAP2
 │   └── ...
 │
-├── satellite/                     # SATELLITE-SPECIFIC CODE
-│   ├── tier1/                     # Raspberry Pi satellite
-│   │   ├── src/
-│   │   │   ├── satellite_main.c   # Entry point + state machine
-│   │   │   ├── dap2_client.c      # DAP 2.0 client
-│   │   │   ├── wake_word.c        # Wake word detection
-│   │   │   └── audio_capture.c    # ALSA capture (satellite-specific)
-│   │   ├── include/
-│   │   └── CMakeLists.txt         # Links libdawn_common.a
-│   │
-│   └── tier2/                     # ESP32-S3 satellite
-│       ├── main/
-│       │   ├── satellite_main.c
-│       │   ├── dap2_client.c
-│       │   ├── adpcm_codec.c      # ADPCM encode/decode
-│       │   └── i2s_audio.c        # I2S capture/playback
-│       ├── components/
-│       │   └── dap2_common/       # Subset of common code (C only)
-│       └── CMakeLists.txt         # ESP-IDF build
+├── dawn_satellite/                # TIER 1 SATELLITE (Raspberry Pi)
+│   ├── src/
+│   │   ├── main.c                 # Entry point + state machine
+│   │   ├── ws_client.c            # libwebsockets WebSocket client
+│   │   ├── audio_capture.c        # ALSA capture
+│   │   ├── audio_playback.c       # ALSA playback
+│   │   ├── satellite_state.c      # State machine logic
+│   │   ├── satellite_config.c     # TOML configuration loader
+│   │   └── toml.c                 # tomlc99 parser
+│   ├── include/
+│   │   ├── ws_client.h
+│   │   ├── audio_capture.h
+│   │   ├── audio_playback.h
+│   │   ├── satellite_state.h
+│   │   ├── satellite_config.h
+│   │   └── toml.h
+│   ├── config/
+│   │   └── satellite.toml         # Default configuration
+│   └── CMakeLists.txt             # Links libdawn_common.a
+│
+├── satellite_tier2/               # TIER 2 SATELLITE (ESP32-S3, Phase 4)
+│   ├── main/
+│   │   ├── satellite_main.c
+│   │   ├── dap2_client.c          # Custom binary protocol
+│   │   ├── adpcm_codec.c          # ADPCM encode/decode
+│   │   ├── i2s_audio.c            # I2S capture/playback
+│   │   ├── button_handler.c       # Push-to-talk button
+│   │   └── neopixel.c             # LED state indicators
+│   ├── components/
+│   │   └── dap2_common/           # Subset of common code (C only)
+│   └── CMakeLists.txt             # ESP-IDF build
 │
 ├── models/                        # Shared models
 │   ├── silero_vad_16k_op15.onnx
@@ -627,14 +654,12 @@ dawn/
 | **ASR (Whisper)** | `common/` | Identical, just different model sizes |
 | **TTS (Piper)** | `common/` | Identical implementation |
 | **Sentence Buffer** | `common/` | Identical implementation |
-| **Logging** | `common/` | Identical implementation |
-| **DAP 2.0 Protocol** | `common/` | Packet format, encode/decode |
+| **Logging** | `common/` | Callback-based abstraction |
 | **Audio Capture** | `specific/` | ALSA (daemon/RPi) vs I2S (ESP32) |
 | **Audio Playback** | `specific/` | Platform-specific |
 | **LLM Interface** | `daemon only` | Satellites don't call LLM |
-| **DAP Server** | `daemon only` | Only daemon accepts connections |
-| **DAP Client** | `satellite only` | Only satellites connect out |
-| **Wake Word Logic** | `satellite only` | Daemon uses main state machine |
+| **WebSocket Server** | `daemon only` | Only daemon accepts connections |
+| **WebSocket Client** | `satellite only` | Only satellites connect out |
 
 ### Build Configuration
 
@@ -645,11 +670,11 @@ add_library(dawn_common STATIC
     src/asr/vad_silero.c
     src/asr/asr_whisper.c
     src/asr/chunking_manager.c
+    src/tts/tts_interface.cpp
     src/tts/text_to_speech.cpp
     src/tts/piper.cpp
     src/tts/sentence_buffer.c
-    src/protocol/dap2_common.c
-    src/logging.c
+    src/logging_common.c
 )
 
 target_include_directories(dawn_common PUBLIC include)
@@ -657,68 +682,46 @@ target_include_directories(dawn_common PUBLIC include)
 # satellite/tier1/CMakeLists.txt
 add_executable(dawn_satellite
     src/satellite_main.c
-    src/dap2_client.c
-    src/wake_word.c
+    src/websocket_client.c
     src/audio_capture.c
+    src/audio_playback.c
 )
 
 target_link_libraries(dawn_satellite
     dawn_common          # Shared code
     whisper              # Whisper.cpp
     onnxruntime          # ONNX for VAD + TTS
+    websockets           # libwebsockets
     asound               # ALSA
     pthread
 )
 ```
 
-### ESP32 Considerations
-
-The ESP32-S3 (Tier 2) cannot use C++ or ONNX runtime. For Tier 2:
-
-- **No Whisper/VAD/TTS** - all processing on daemon
-- **Subset of common code**: Only `ring_buffer.c`, `dap2_common.c`, `logging.c`
-- **ADPCM codec**: ESP-IDF native or simple C implementation
-- **Energy-based VAD**: Simple threshold on audio amplitude (not Silero)
-
 ---
 
-## 7. Implementation Phases
+## 8. Implementation Phases
 
 ### Phase 0: Code Refactoring (Foundation)
 
+**Status**: ✅ **COMPLETE**
+
 **Goal**: Extract shared code to `common/` library without breaking daemon
 
-This phase addresses the architecture reviewer's critical finding: existing code has tight coupling to daemon-specific infrastructure (logging, metrics, AEC). Must decouple before any DAP 2.0 work.
+This phase addresses the architecture reviewer's critical finding: existing code has tight coupling to daemon-specific infrastructure (logging, metrics, AEC). Must decouple before any satellite work.
 
-**Code Standards**: All new code in `common/` MUST follow existing `.clang-format` rules. Run `./format_code.sh` before committing. Install pre-commit hook via `./install-git-hooks.sh`.
+**Code Standards**: All new code in `common/` MUST follow existing `.clang-format` rules. Run `./format_code.sh` before committing.
 
 1. **Create logging abstraction**:
    ```c
    // common/include/logging_common.h
-   typedef void (*log_callback_t)(int level, const char *fmt, ...);
+   typedef void (*log_callback_t)(int level, const char *fmt, va_list args);
    void dawn_common_set_logger(log_callback_t callback);
 
-   // Daemon provides its logger, satellite provides its own
+   // Macros that use the callback
+   #define LOG_COMMON_INFO(fmt, ...) dawn_common_log(LOG_LEVEL_INFO, fmt, ##__VA_ARGS__)
    ```
 
-2. **Create metrics abstraction**:
-   ```c
-   // common/include/metrics_common.h
-   typedef void (*metrics_callback_t)(const char *name, double value);
-   void dawn_common_set_metrics_callback(metrics_callback_t callback);
-
-   // Optional: satellite can ignore metrics, daemon feeds to TUI
-   ```
-
-3. **Decouple TTS from daemon-specific features**:
-   - Remove AEC reference feed (daemon-only)
-   - Remove command callback integration (daemon-only)
-   - Keep mutex-protected synthesis as core functionality
-
-4. **TTS C/C++ Interface Boundary**:
-
-   Since TTS uses C++ (Piper, ONNX) but satellites may be C-based, create clean C interface:
-
+2. **Create TTS C interface** (for satellite use):
    ```c
    // common/include/tts/tts_interface.h
    #ifdef __cplusplus
@@ -727,7 +730,6 @@ This phase addresses the architecture reviewer's critical finding: existing code
 
    typedef struct TTSContext TTSContext;
 
-   // Core TTS functions (go to common/)
    TTSContext *tts_init(const char *model_path);
    int tts_synthesize(TTSContext *ctx, const char *text, int16_t **audio, size_t *samples);
    void tts_cleanup(TTSContext *ctx);
@@ -737,21 +739,12 @@ This phase addresses the architecture reviewer's critical finding: existing code
    #endif
    ```
 
-   **What goes to `common/`**:
-   - `tts_interface.c/h` - C-compatible wrapper (NEW)
-   - `text_to_speech.cpp` - Core synthesis (refactored)
-   - `piper.cpp` - Piper integration (unchanged)
-   - `sentence_buffer.c` - Text buffering (unchanged)
+3. **Decouple TTS from daemon-specific features**:
+   - Remove AEC reference feed (daemon-only)
+   - Remove command callback integration (daemon-only)
+   - Keep mutex-protected synthesis as core functionality
 
-   **What stays daemon-specific**:
-   - AEC reference signal feeding
-   - Command callback integration (`text_to_command_nuevo.c`)
-   - TUI metrics reporting (uses callback abstraction)
-
-   **Tier 1 Satellite**: Links C++ TTS via `extern "C"` interface (RPi supports C++)
-   **Tier 2 Satellite**: No TTS (audio streaming from daemon)
-
-5. **Create `common/` directory structure**:
+4. **Create `common/` directory structure**:
    - Move: ring_buffer, vad_silero, asr_whisper, asr_interface, chunking_manager
    - Move: text_to_speech, piper, sentence_buffer
    - Move: logging (with abstraction)
@@ -759,83 +752,128 @@ This phase addresses the architecture reviewer's critical finding: existing code
 
 5. **Update daemon to use common library**:
    - Update daemon CMakeLists.txt to link `libdawn_common.a`
-   - Provide daemon-specific callbacks for logging/metrics
-   - **Verify daemon still builds and passes all tests**
+   - Provide daemon-specific callbacks for logging
+   - **Verify daemon still builds and runs correctly**
 
 **Deliverables**:
 - `common/` directory with abstracted shared code
 - `libdawn_common.a` static library
 - `tts_interface.h` with C-compatible TTS API
 - Daemon fully functional (no behavior change)
-- Unit tests for:
-  - Logging abstraction (callback registration, log levels)
-  - Metrics abstraction (callback registration, optional metrics)
-  - TTS C interface:
-    - `tts_init()`: valid model path, invalid path (returns NULL), missing file
-    - `tts_synthesize()`: single sentence, multiple sentences, empty string, long text (>1000 chars)
-    - `tts_cleanup()`: normal cleanup, double-free protection, NULL context
-    - Thread safety: multiple contexts in parallel, concurrent synthesize calls
-    - Memory: no leaks on repeated init/synthesize/cleanup cycles (valgrind)
 
 **Exit Criteria**:
 - Daemon builds, runs, and behaves identically to pre-refactor
-- All unit tests pass
-- TTS synthesis works through new C interface
 
 ---
 
-### Phase 1: DAP 2.0 Protocol Foundation
+### Phase 1: WebSocket Satellite Protocol
 
-**Goal**: Define and implement DAP 2.0 protocol (TCP-only)
+**Status**: ✅ **COMPLETE**
 
-1. **Finalize protocol specification** (this document)
-2. **Implement protocol library** in `common/`:
-   - `dap2_common.c` - packet encode/decode
-   - `dap2_common.h` - message types, structures
-   - Unit tests for encoding/decoding
+**Goal**: Extend WebUI server for satellite connections
 
-3. **Implement DAP 2.0 server** in daemon:
-   - TCP server on port 5000
-   - REGISTER → session creation
-   - QUERY (text) → LLM → RESPONSE (text)
-   - Session management per satellite (by UUID)
+1. **Add satellite message types** to WebUI:
+   ```c
+   // src/webui/webui_satellite.c
+   int handle_satellite_register(ws_client_t *client, cJSON *payload);
+   int handle_satellite_query(ws_client_t *client, cJSON *payload);
+   void send_satellite_response_stream(ws_client_t *client, const char *delta);
+   void send_satellite_response_end(ws_client_t *client);
+   ```
 
-4. **Python test client**:
-   - Verify protocol works end-to-end
-   - Test: REGISTER, QUERY, RESPONSE, PING/PONG
-   - Simulate Tier 1 satellite behavior
+2. **Extend session manager**:
+   ```c
+   // include/core/session_manager.h
+   typedef enum {
+      SESSION_TYPE_LOCAL,
+      SESSION_TYPE_WEBSOCKET,
+      SESSION_TYPE_SATELLITE,  // NEW
+   } session_type_t;
+   ```
+
+3. **Wire up LLM integration**:
+   - Route `satellite_query` to existing LLM pipeline
+   - Stream responses back via WebSocket
+   - Execute commands via existing MQTT/tool system
+
+4. **Test with wscat or Python client**:
+   ```bash
+   # Test satellite registration
+   wscat -c ws://localhost:8080
+   > {"type": "satellite_register", "payload": {"uuid": "test-123", "name": "Test", "location": "office", "tier": 1, "capabilities": {"local_asr": true, "local_tts": true}}}
+   < {"type": "satellite_register_ack", "payload": {"session_id": "sess-abc"}}
+   > {"type": "satellite_query", "payload": {"text": "what time is it"}}
+   < {"type": "satellite_response_stream", "payload": {"delta": "The current time is "}}
+   < {"type": "satellite_response_stream", "payload": {"delta": "3:45 PM."}}
+   < {"type": "satellite_response_end", "payload": {}}
+   ```
 
 **Deliverables**:
-- `common/src/protocol/dap2_common.c`
-- `src/network/dap2_server.c`
-- `src/network/dap2_session.c`
-- Python test client
-- Protocol unit tests
+- `src/webui/webui_satellite.c` - Satellite message handlers
+- Extended `session_manager.h/c` - SESSION_TYPE_SATELLITE
+- Python test client for protocol validation
+
+**Exit Criteria**: Text query via WebSocket returns streamed LLM response
 
 ---
 
-### Phase 2: Tier 1 Satellite (Raspberry Pi)
+### Phase 2: Tier 1 Satellite Binary
+
+**Status**: ✅ **IMPLEMENTED** (WebSocket client and config system complete)
 
 **Goal**: Full satellite with local ASR/TTS that feels identical to talking to the daemon
 
-1. **Create `satellite/tier1/` directory**
+1. **Create `dawn_satellite/` directory** ✅
 2. **Implement satellite state machine** (mirrors daemon):
    ```
    SILENCE → WAKEWORD_LISTEN → COMMAND_RECORDING → PROCESSING → SPEAKING
    ```
-3. **Implement DAP 2.0 client** (TCP)
-4. **Implement wake word detection** (same as daemon: VAD + Whisper)
-5. **Implement offline fallback**:
+3. **Implement WebSocket client** (libwebsockets) ✅
+4. **Implement wake word detection** (same as daemon: VAD + Whisper) - *pending integration*
+5. **Implement local TTS playback** - *pending integration*
+6. **Implement offline fallback**:
    - On network error: TTS "I can't reach the server right now"
-6. **Integration testing** on RPi 4/5
+7. **Configuration file support** (`satellite.toml`) ✅:
+   ```toml
+   [identity]
+   uuid = ""  # Auto-generated if empty
+   name = "Kitchen Assistant"
+   location = "kitchen"
+
+   [server]
+   host = "192.168.1.100"
+   port = 8080
+   ssl = false
+
+   [audio]
+   capture_device = "plughw:0,0"
+   playback_device = "plughw:0,0"
+   sample_rate = 16000
+
+   [vad]
+   enabled = true
+   silence_duration_ms = 800
+   threshold = 0.5
+
+   [wake_word]
+   enabled = true
+   word = "friday"
+   sensitivity = 0.5
+   ```
 
 **Deliverables**:
-- `satellite/tier1/` with working code
-- `dawn_satellite` binary for RPi
-- Config file support (`/etc/dawn-satellite.conf`)
-- User documentation
+- `dawn_satellite/` with working code ✅
+- `dawn_satellite` binary for RPi ✅
+- TOML config file support ✅
+- User documentation (see `docs/DAP2_SATELLITE.md`) ✅
 
 **Exit Criteria**: User cannot distinguish satellite from daemon interaction
+
+**Target Latencies**:
+- Wake word detection: <500ms
+- ASR transcription: <2s (Whisper tiny on RPi 5)
+- Network round-trip: <100ms
+- TTS first audio: <500ms
 
 ---
 
@@ -843,19 +881,23 @@ This phase addresses the architecture reviewer's critical finding: existing code
 
 **Goal**: Stream LLM responses sentence-by-sentence for lower perceived latency
 
-1. **Modify daemon** to send RESPONSE_STREAM messages
-2. **Modify satellite** to:
-   - Buffer incoming text
+1. **Implement sentence buffering** on satellite:
+   - Buffer incoming `satellite_response_stream` deltas
    - TTS each complete sentence immediately
    - Continue receiving while speaking
+
+2. **Verify streaming works end-to-end**:
+   - First audio plays while LLM still generating
+   - No gaps between sentences
+
 3. **Implement metrics collection**:
-   - Track wake_word_latency, asr_latency, tts_latency
-   - Report via STATUS messages
+   - Track wake_word_latency, asr_latency, tts_latency, network_rtt
+   - Report via `satellite_status` messages
 
 **Deliverables**:
 - Streaming protocol working end-to-end
 - Latency measurements documented
-- Metrics visible in daemon TUI
+- Metrics visible in daemon logs
 
 **Exit Criteria**: First audio plays <1.5s after query (p95)
 
@@ -863,10 +905,10 @@ This phase addresses the architecture reviewer's critical finding: existing code
 
 ### Phase 4: Tier 2 Satellite (ESP32-S3)
 
-**Goal**: Button-activated satellite following DAP 1.1 interaction model
+**Goal**: Button-activated satellite with ADPCM audio streaming
 
 1. **Create `satellite/tier2/` directory** (ESP-IDF project)
-2. **Port DAP 2.0 client** to ESP32-S3
+2. **Implement custom binary protocol** client
 3. **Implement ADPCM codec**:
    - Encode: recorded audio → ADPCM
    - Decode: ADPCM response → PCM playback
@@ -879,18 +921,6 @@ This phase addresses the architecture reviewer's critical finding: existing code
 - Working ESP32-S3 firmware
 - ADPCM streaming working over TCP
 
-**ADPCM Quality Validation**:
-- Round-trip test: record → encode → transmit → decode → play
-- Subjective quality: speech clearly intelligible, no artifacts
-- Objective metrics (if tooling available):
-  - PESQ score >3.0 (good quality) or POLQA >3.5
-  - SNR degradation <6dB vs. raw PCM
-- Performance targets:
-  - ESP32 CPU usage <20% for encode+decode at 16kHz
-  - Encode latency <10ms per 16ms audio block
-  - Decode latency <10ms per 16ms audio block
-  - No audible glitches at sustained 16kHz streaming
-
 **Exit Criteria**: Button-to-response <4s (p95)
 
 ---
@@ -899,39 +929,12 @@ This phase addresses the architecture reviewer's critical finding: existing code
 
 **Goal**: Production-ready multi-satellite support
 
-1. **Worker thread pool** in daemon (see `dawn_multi_client_architecture.md`):
-   - Handle multiple concurrent satellites
-   - Per-satellite LLM context
-   - Reference implementation: one worker thread per satellite
-2. **Session persistence**:
-   - Save/restore conversation history
-   - Handle reconnections gracefully
-   - Storage format: JSON files in `/var/lib/dawn/sessions/`
-   ```json
-   // /var/lib/dawn/sessions/{uuid}.json
-   {
-     "uuid": "f47ac10b-58cc-5372-8567-0e02b2c3d479",
-     "name": "Kitchen Assistant",
-     "location": "kitchen",
-     "tier": 1,
-     "conversation": [
-       {"role": "user", "content": "turn on the lights", "timestamp": "2025-11-29T10:30:00Z"},
-       {"role": "assistant", "content": "I'll turn on the lights for you.", "timestamp": "2025-11-29T10:30:02Z"}
-     ],
-     "last_active": "2025-11-29T10:30:02Z",
-     "created": "2025-11-29T08:00:00Z"
-   }
-   ```
-   - Load on REGISTER (if UUID matches and file exists)
-   - Save after each completed interaction
-   - Prune conversations older than 24 hours on daemon startup
-3. **Load testing**:
-   - 5+ simultaneous satellites
-   - Measure resource usage
-4. **Documentation**:
+1. **Load testing**: 5+ simultaneous satellites
+2. **Session persistence**: Conversation history survives daemon restart
+3. **Documentation**:
    - User guide for satellite setup
    - Troubleshooting guide
-   - API documentation
+   - Hardware recommendations
 
 **Deliverables**:
 - Multi-client support verified
@@ -940,25 +943,17 @@ This phase addresses the architecture reviewer's critical finding: existing code
 
 ---
 
-### Phase 6: Optional Enhancements
+### Phase 6: Optional Enhancements (Deferred)
 
-**Goal**: Optimizations based on real-world measurements
+Based on real-world measurements and user feedback:
 
-1. **UDP audio streaming** (if TCP latency >150ms p95):
-   - Add UDP channel for Tier 2 audio
-   - Implement jitter buffer
-2. **mDNS discovery**:
-   - Daemon advertises `_dawn._tcp.local`
-   - Satellites auto-discover daemon
-3. **TLS encryption** (Phase 2+ security):
-   - Certificate-based authentication
-   - Encrypted connections
-
-**Deliverables**: Based on Phase 5 measurements and user feedback
+1. **mDNS discovery**: Daemon advertises `_dawn._tcp.local`
+2. **TLS encryption**: Certificate-based authentication
+3. **UDP audio streaming**: Only if TCP latency >150ms p95
 
 ---
 
-## 8. Platform Considerations
+## 9. Platform Considerations
 
 ### Tier 1 Platforms
 
@@ -990,17 +985,6 @@ This phase addresses the architecture reviewer's critical finding: existing code
 - ASR (Whisper tiny): ~3-4s for 5s audio
 - TTS (Piper): ~300-700ms per sentence
 
-#### Orange Pi 5 (Supported)
-
-| Requirement | Available | Sufficient? |
-|-------------|-----------|-------------|
-| RAM | 4-16 GB | ✅ Yes |
-| CPU | RK3588S (4x A76 + 4x A55) | ✅ Yes (faster than RPi 5) |
-| Storage | eMMC or SD | ✅ Yes |
-| Audio | USB mic + 3.5mm out | ✅ Yes |
-
-**Note**: NPU not used (would require RKNN model conversion)
-
 ### Tier 2 Platforms
 
 #### ESP32-S3 (Recommended)
@@ -1018,159 +1002,46 @@ This phase addresses the architecture reviewer's critical finding: existing code
 - ADPCM encode/decode
 - Cannot run Whisper or Piper locally
 
-#### ESP32 Classic (Limited Support)
-
-| Requirement | Available | Notes |
-|-------------|-----------|-------|
-| RAM | 520 KB (no PSRAM on most) | ⚠️ Very tight |
-| CPU | Xtensa LX6 240 MHz | ✅ OK for ADPCM |
-
-**Limitations**:
-- May need smaller audio buffers
-- No PSRAM limits recording duration
-- Consider ESP32-S3 instead
-
 ---
 
-## 9. Security Architecture
-
-### Threat Model
-
-| Threat | Impact | Phase 1 Mitigation | Phase 2+ Mitigation |
-|--------|--------|-------------------|---------------------|
-| **Eavesdropping** | Voice commands exposed | Network isolation (VLAN) | TLS 1.3 encryption |
-| **Impersonation** | Unauthorized satellite | Trusted network only | Certificate-based auth |
-| **Man-in-the-middle** | Command injection | Trusted network only | Mutual TLS (mTLS) |
-| **Replay attacks** | Duplicate commands | Sequence numbers | Timestamps + nonce |
-| **DoS attacks** | Service disruption | None | Rate limiting |
+## 10. Security Architecture
 
 ### Phase 1: Network Isolation (MVP)
 
 For initial deployment, rely on network-level security:
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Home Network                              │
-│                                                              │
-│  ┌─────────────────────────────────────────────────────────┐│
-│  │              DAWN VLAN (isolated)                        ││
-│  │                                                          ││
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐              ││
-│  │  │  DAWN    │  │ Satellite│  │ Satellite│              ││
-│  │  │  Daemon  │  │  (RPi)   │  │  (ESP32) │              ││
-│  │  └──────────┘  └──────────┘  └──────────┘              ││
-│  │                                                          ││
-│  └─────────────────────────────────────────────────────────┘│
-│                                                              │
-│  ┌─────────────────────────────────────────────────────────┐│
-│  │              Regular VLAN (untrusted)                    ││
-│  │  Phones, laptops, IoT devices, guests                   ││
-│  └─────────────────────────────────────────────────────────┘│
-└─────────────────────────────────────────────────────────────┘
-```
-
 **Phase 1 Requirements**:
 - Document security limitations in user guide
 - Recommend VLAN isolation for DAWN devices
 - No authentication (trusted network assumption)
-- No encryption (local network only)
-
-**Example VLAN Setup** (UniFi/OpenWrt):
-```
-# OpenWrt: Create DAWN VLAN (ID 10)
-uci set network.dawn_vlan=interface
-uci set network.dawn_vlan.proto='static'
-uci set network.dawn_vlan.ipaddr='192.168.10.1'
-uci set network.dawn_vlan.netmask='255.255.255.0'
-uci set network.dawn_vlan.device='br-lan.10'
-uci commit network
-
-# Firewall: Isolate DAWN VLAN from main network
-uci add firewall zone
-uci set firewall.@zone[-1].name='dawn'
-uci set firewall.@zone[-1].input='ACCEPT'
-uci set firewall.@zone[-1].output='ACCEPT'
-uci set firewall.@zone[-1].forward='REJECT'
-uci set firewall.@zone[-1].network='dawn_vlan'
-uci commit firewall
-
-# Result:
-#   DAWN devices: 192.168.10.0/24 (can only talk to each other)
-#   Main network: 192.168.1.0/24 (isolated from DAWN)
-#   Daemon port 5000 only accessible from DAWN VLAN
-```
-
-**Alternative: WiFi SSID Isolation**:
-- Create separate "DAWN-Satellites" SSID on VLAN 10
-- Simpler for most home users
-- ESP32 and RPi satellites connect to dedicated SSID
+- WebSocket connection (can use WSS for encryption)
 
 ### Phase 2+: TLS and Authentication
 
 **TLS 1.3 for All Connections**:
-```c
-// Server-side (daemon)
-SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
-SSL_CTX_use_certificate_file(ctx, "/etc/dawn/daemon.crt", SSL_FILETYPE_PEM);
-SSL_CTX_use_PrivateKey_file(ctx, "/etc/dawn/daemon.key", SSL_FILETYPE_PEM);
-
-// Client-side (satellite)
-SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
-SSL_CTX_load_verify_locations(ctx, "/etc/dawn/ca.crt", NULL);
-```
-
-**Certificate-Based Authentication**:
-- Daemon has CA certificate, issues satellite certificates
-- Satellites present certificate on REGISTER
-- Daemon validates certificate before accepting connection
-- Revocation via certificate revocation list (CRL)
-
-**Best Practices Applied**:
-- TLS 1.3 only (no fallback to older versions)
-- Strong cipher suites (AES-256-GCM, ChaCha20-Poly1305)
-- Certificate pinning on satellites
-- Regular certificate rotation (yearly)
+- WebSocket Secure (WSS) for Tier 1
+- TLS for Tier 2 custom protocol
+- Certificate-based authentication optional
 
 ---
 
-## 10. Network Reliability
+## 11. Network Reliability
 
-### Connection Management
+### Connection Management (Tier 1 WebSocket)
 
-Following DAP 1.1 patterns and MQTT best practices:
+WebSocket provides built-in reliability features:
+- Ping/pong heartbeat (configurable interval)
+- Automatic reconnection (libwebsockets handles this)
+- Connection state tracking
 
-**Keepalive Mechanism**:
+**Satellite Reconnection Strategy**:
 ```
-┌───────────┐                              ┌───────────┐
-│ Satellite │                              │  Daemon   │
-└─────┬─────┘                              └─────┬─────┘
-      │                                          │
-      │──────────── PING ───────────────────────>│
-      │                                          │
-      │<─────────── PONG ────────────────────────│
-      │                                          │
-      │         (60 seconds later)               │
-      │                                          │
-      │──────────── PING ───────────────────────>│
-      │                                          │
-      │         (no PONG received)               │
-      │                                          │
-      │──────────── PING (retry 1) ─────────────>│
-      │                                          │
-      │         (still no PONG)                  │
-      │                                          │
-      │──────────── PING (retry 2) ─────────────>│
-      │                                          │
-      │         [3 missed → disconnect]          │
+1. Detect disconnect (socket error or missed pongs)
+2. Exponential backoff: 1s, 2s, 4s, 8s, 16s, max 30s
+3. On reconnect: send satellite_register with same UUID
+4. Daemon restores conversation if available
+5. During reconnection: TTS "I've lost connection to the server"
 ```
-
-**Keepalive Parameters** (following MQTT conventions):
-| Parameter | Value | Rationale |
-|-----------|-------|-----------|
-| Ping interval | 60 seconds | Balance between detection speed and overhead |
-| Pong timeout | 10 seconds | Allow for network latency |
-| Max missed pongs | 3 | Avoid false disconnects on transient issues |
-| Disconnect threshold | 90 seconds (1.5x interval) | MQTT standard |
 
 ### Session Recovery
 
@@ -1180,97 +1051,19 @@ Following DAP 1.1 patterns and MQTT best practices:
 3. Satellite UUID used to match reconnection
 
 **On Satellite Reconnect**:
-1. Satellite sends REGISTER with same UUID
+1. Satellite sends `satellite_register` with same UUID
 2. Daemon matches UUID to existing session
 3. Returns `conversation_restored: true` if history available
 4. Satellite continues conversation seamlessly
 
-**Session Cleanup**:
-- Idle timeout: 10 minutes (no queries)
-- Disconnect timeout: 5 minutes (no reconnection)
-- Memory cleanup on session expiration
-
-### Reconnection Strategy
-
-**Satellite Responsibility**: The satellite (client) implements reconnection logic. The daemon (server) does NOT attempt to reconnect to satellites.
-
-**On Satellite Disconnect** (network failure or timeout):
-```
-┌───────────────────────────────────────────────────────────────┐
-│                    Satellite Reconnection                      │
-├───────────────────────────────────────────────────────────────┤
-│  1. Detect disconnect:                                         │
-│     - TCP socket error (send/receive fails)                    │
-│     - 3 consecutive missed PONGs (90s timeout)                 │
-│                                                                │
-│  2. Enter reconnection loop:                                   │
-│     ┌─────────────────────────────────────────────────────┐   │
-│     │  Attempt 1: wait 1s  → connect + REGISTER           │   │
-│     │  Attempt 2: wait 2s  → connect + REGISTER           │   │
-│     │  Attempt 3: wait 4s  → connect + REGISTER           │   │
-│     │  Attempt 4: wait 8s  → connect + REGISTER           │   │
-│     │  Attempt 5: wait 16s → connect + REGISTER           │   │
-│     │  Attempt 6+: wait 30s (max) → connect + REGISTER    │   │
-│     └─────────────────────────────────────────────────────┘   │
-│                                                                │
-│  3. On REGISTER_ACK received:                                  │
-│     - Reset backoff timer to 1s                                │
-│     - Resume normal operation                                  │
-│     - If conversation_restored=true, continue context          │
-│                                                                │
-│  4. During reconnection:                                       │
-│     - Tier 1: TTS "I've lost connection to the server"        │
-│     - Tier 2: LED indicator (blinking = reconnecting)          │
-└───────────────────────────────────────────────────────────────┘
-```
-
-**Daemon Behavior During Satellite Disconnect**:
-- Marks session as "disconnected" (not deleted)
-- Preserves conversation history for 10 minutes
-- Accepts reconnection via new TCP connection + REGISTER
-- Matches reconnecting satellite by UUID
-
-**Why Exponential Backoff?**
-- Prevents "thundering herd" if daemon restarts
-- Reduces network congestion during outages
-- 30s max cap ensures reasonable recovery time
-- Industry standard pattern (TCP, MQTT, gRPC)
-
-### Packet Reliability (TCP Mode)
-
-Since Phase 1-3 uses TCP only, reliability is built-in:
-- Automatic retransmission
-- In-order delivery
-- Congestion control
-
-**Application-Level Reliability**:
-- Sequence numbers in packets (for logging/debugging)
-- ACK messages for request/response correlation
-- Timeout handling (30 seconds for LLM responses)
-
-### Future: UDP Reliability (Phase 4+)
-
-If UDP is added for audio streaming:
-
-**Jitter Buffer**:
-- Size: 50-100ms (adaptive)
-- Reorder window: 5 packets
-- Late packet policy: Discard if >100ms late
-
-**Packet Loss Handling**:
-- Accept glitches (no retransmission for audio)
-- Sequence numbers for gap detection
-- Interpolation for single lost packets (PLC)
-
 ---
 
-## 11. Performance Validation
+## 12. Performance Validation
 
 ### Metrics Collection
 
-Extend the existing DAWN daemon metrics infrastructure to satellites and network clients:
-
 **Satellite Metrics** (collected locally, reported to daemon):
+
 | Metric | Description | Target |
 |--------|-------------|--------|
 | `wake_word_latency_ms` | Time from speech end to wake word detection | <500ms p95 |
@@ -1278,158 +1071,23 @@ Extend the existing DAWN daemon metrics infrastructure to satellites and network
 | `tts_latency_ms` | Time to synthesize first audio | <500ms p95 |
 | `network_rtt_ms` | Round-trip time to daemon | <50ms p95 |
 
-**Daemon Metrics** (per satellite):
-| Metric | Description | Target |
-|--------|-------------|--------|
-| `llm_ttft_ms` | Time to first LLM token | <500ms p95 |
-| `llm_total_ms` | Total LLM response time | <3000ms p95 |
-| `e2e_latency_ms` | Query received → response sent | <4000ms p95 |
-| `active_satellites` | Current connected satellites | N/A |
-| `queries_per_minute` | Query rate per satellite | N/A |
-
 **End-to-End Targets** (user-perceived):
+
 | Interaction | Target | Measurement |
 |-------------|--------|-------------|
 | Wake word → acknowledgment | <1.5s | First TTS audio plays |
 | Command → first response audio | <2.5s | Streaming response starts |
 | Total interaction | <8s | Response audio completes |
 
-### Metrics Reporting
-
-**Satellite → Daemon** (periodic STATUS message):
-```json
-{
-  "type": "STATUS",
-  "metrics": {
-    "wake_word_latency_p95_ms": 420,
-    "asr_latency_p95_ms": 1800,
-    "tts_latency_p95_ms": 380,
-    "uptime_seconds": 86400,
-    "queries_total": 142
-  }
-}
-```
-
-**Daemon Logging** (compatible with existing TUI):
-```c
-// Extend metrics.h for satellite tracking
-typedef struct {
-   char satellite_id[64];
-   char satellite_name[64];
-   char satellite_location[32];
-   uint32_t queries_total;
-   uint32_t avg_latency_ms;
-   time_t last_query_time;
-   bool connected;
-} satellite_metrics_t;
-```
-
 ### Validation Plan
 
-**Pre-Implementation Benchmarks**:
-1. Measure Whisper tiny on RPi 4, RPi 5, Orange Pi 5
-2. Measure Piper TTS latency per sentence length
-3. Measure TCP round-trip on typical home WiFi
-
 **Phase Completion Criteria**:
+
 | Phase | Metric | Pass Criteria |
 |-------|--------|---------------|
 | Phase 2 | Tier 1 wake-to-response | <3s p95 |
 | Phase 3 | Streaming first audio | <1.5s p95 |
 | Phase 4 | Tier 2 button-to-response | <4s p95 |
-
----
-
-## 12. Open Questions
-
-### Decided
-
-| Question | Decision | Rationale |
-|----------|----------|-----------|
-| **Transport** | TCP-first, UDP optional (Phase 6) | Simpler implementation; home WiFi doesn't need UDP |
-| **Audio Codec** | ADPCM only (Tier 2) | Simpler, lower resources; Opus adds 240KB to ESP32 |
-| **Wake Word (Tier 1)** | Same as daemon (VAD + Whisper) | Seamless UX, code reuse |
-| **Wake Word (Tier 2)** | None (button-activated, DAP 1.1 style) | ESP32 can't run Whisper |
-| **Offline Mode** | TTS "I can't reach the server" | Simple, clear user feedback |
-| **Code Sharing** | Monorepo with `common/` | Single source of truth, easy builds |
-| **Tiers** | 2 tiers only | RPi (full local) and ESP32 (audio upload) |
-| **Satellite Identity** | UUID + name + location | Session tracking, conversation history |
-| **Session Timeout** | 10 min idle, 60s keepalive | MQTT best practices |
-| **Security (Phase 1)** | Network isolation (VLAN) | Document limitations, recommend isolation |
-| **Security (Phase 2+)** | TLS 1.3 + certificates | Best practices for production |
-| **Refactoring Phase** | Phase 0 before protocol work | Decouple logging/metrics first |
-| **Reconnection Backoff** | Exponential: 1s, 2s, 4s, 8s, max 30s | Industry standard, prevents thundering herd |
-
-### Research-Based Decisions
-
-#### 1. Streaming Granularity: **Sentence-level**
-
-**Decision**: Stream at sentence boundaries (`.`, `?`, `!`, `;`, `\n`)
-
-**Research**: Analysis of Alexa, Google Assistant, and Siri shows they "almost exclusively respond in full sentences" ([ACM CHI 2022](https://dl.acm.org/doi/fullHtml/10.1145/3491102.3517684)). Voice assistant best practices recommend 40-90 spoken words per response, with sub-1.5s end-to-end latency targets.
-
-**Rationale**:
-- Matches our existing `sentence_buffer.c` implementation
-- Natural pauses between sentences sound better than mid-word cuts
-- Simpler buffering logic than word/token level
-- Token-level streaming sounds choppy with TTS
-
-#### 2. Session Timeout: **10 minutes with keepalive**
-
-**Decision**:
-- Conversation history: 10 minute idle timeout
-- TCP keepalive: 60 second PING/PONG interval
-- Disconnect after: 1.5x keepalive (90 seconds) without response
-
-**Research**: MQTT protocol uses 1.5x keepalive as disconnect threshold ([HiveMQ](https://www.hivemq.com/blog/mqtt-essentials-part-10-alive-client-take-over/)). AWS IoT recommends minimum 4 minute timeout for IoT devices. Smart home devices use keepalive to confirm connectivity during idle periods.
-
-**Rationale**:
-- 10 min matches `dawn_multi_client_architecture.md`
-- 60s keepalive catches network drops quickly without excessive traffic
-- 1.5x multiplier is industry standard (MQTT)
-
-#### 3. Satellite Configuration: **Config file + future mDNS**
-
-**Decision**: Config file initially, with mDNS discovery as Phase 2+ enhancement
-
-**Config file** (`/etc/dawn-satellite.conf`):
-```ini
-[daemon]
-host = 192.168.1.100
-tcp_port = 5000
-udp_port = 5001
-
-[satellite]
-id = kitchen-pi
-tier = 1
-```
-
-**Future: mDNS/DNS-SD Discovery**:
-- Daemon advertises `_dawn._tcp.local`
-- Satellites auto-discover without config
-- Similar to: Chromecast, AirPlay, Home Assistant
-- Protocols: Avahi (Linux), Bonjour (Apple)
-
-#### 4. UDP Packet Loss (Phase 6, if needed)
-
-**Decision**: TCP-first approach; UDP only added if measurements show benefit
-
-If UDP is added in Phase 6, follow WebRTC best practices ([GetStream](https://getstream.io/resources/projects/webrtc/advanced/media-resilience/)):
-
-| Technique | How it works | When to use |
-|-----------|--------------|-------------|
-| **Sequence numbers** | Order packets, detect gaps | Always |
-| **Jitter buffer** | 50-100ms buffer before playback | Always |
-| **Accept glitches** | Don't retransmit lost audio | Home WiFi (<0.1% loss) |
-| **PLC** | Decoder interpolates missing audio | Optional enhancement |
-
-**Note**: Since we're using ADPCM only (no Opus), FEC is not available. This is acceptable for home WiFi deployments.
-
-### Still Open (Minor)
-
-1. **LLM context per satellite**: Should each satellite have independent conversation history?
-   - Current plan: Yes, per-satellite context identified by UUID
-   - Open: Maximum context length per satellite?
 
 ---
 
@@ -1466,20 +1124,38 @@ name = "Guest Room"
 - **Registration response** includes memory status:
   ```json
   {
-    "type": "REGISTER_ACK",
-    "session_id": "sess-abc123",
-    "memory_enabled": true,
-    "memory_user": "krisk"
+    "type": "satellite_register_ack",
+    "payload": {
+      "session_id": "sess-abc123",
+      "memory_enabled": true,
+      "memory_user": "krisk"
+    }
   }
   ```
 
-**Why not auto-create users for satellites?**
-- Security: Prevents unauthorized memory accumulation
-- Privacy: Explicit opt-in for memory features
-- Simplicity: Reuses existing auth user database
-- Future: Speaker identification will provide automatic user resolution
+---
 
-See `MEMORY_SYSTEM_DESIGN.md` for full memory system specification.
+## 14. Open Questions
+
+### Decided
+
+| Question | Decision | Rationale |
+|----------|----------|-----------|
+| **Transport (Tier 1)** | WebSocket | Leverage existing WebUI infrastructure |
+| **Transport (Tier 2)** | Custom TCP protocol | WebSocket overhead matters on ESP32 |
+| **Audio Codec (Tier 2)** | ADPCM only | Simpler, lower resources |
+| **Wake Word (Tier 1)** | Same as daemon (VAD + Whisper) | Seamless UX, code reuse |
+| **Wake Word (Tier 2)** | None (button-activated) | ESP32 can't run Whisper |
+| **Session Management** | Extend existing session_manager | Unified architecture |
+| **Offline Mode** | TTS "I can't reach the server" | Simple, clear user feedback |
+| **Code Sharing** | Monorepo with `common/` | Single source of truth |
+| **Satellite Identity** | UUID + name + location | Session tracking, conversation history |
+
+### Still Open (Minor)
+
+1. **LLM context per satellite**: Should conversation history have a maximum length per satellite?
+2. **Model distribution**: How to push model updates to satellites?
+3. **Metrics aggregation**: Should daemon aggregate satellite metrics for monitoring?
 
 ---
 
@@ -1487,16 +1163,16 @@ See `MEMORY_SYSTEM_DESIGN.md` for full memory system specification.
 
 | Aspect | DAP 1.0 | DAP 2.0 |
 |--------|---------|---------|
-| **Primary payload** | Audio (WAV) | Text (UTF-8) |
-| **Header size** | 8 bytes | 14 bytes |
-| **Message types** | 6 | 12+ |
+| **Primary payload** | Audio (WAV) | Text (Tier 1) / ADPCM (Tier 2) |
+| **Transport (Tier 1)** | Custom TCP | WebSocket |
+| **Transport (Tier 2)** | Custom TCP | Custom TCP |
 | **Streaming** | No | Yes |
-| **Wake word** | No (button) | Yes (local) |
+| **Wake word** | No (button) | Yes (Tier 1) |
 | **VAD** | No (button) | Yes (local) |
 | **ASR location** | Server only | Server or local |
 | **TTS location** | Server only | Server or local |
 | **Offline mode** | No | Yes (Tier 1) |
-| **Bandwidth** | ~1 MB/interaction | ~1 KB/interaction (Tier 1) |
+| **Bandwidth** | ~1 MB/interaction | ~1 KB (Tier 1) / ~100 KB (Tier 2) |
 
 ## Appendix B: Related Documents
 
@@ -1504,8 +1180,11 @@ See `MEMORY_SYSTEM_DESIGN.md` for full memory system specification.
 - `dawn_multi_client_architecture.md` - Multi-client threading design
 - `ARCHITECTURE.md` - DAWN system architecture
 - `LLM_INTEGRATION_GUIDE.md` - LLM setup and configuration
+- `WEBUI_DESIGN.md` - WebUI architecture
 
 ---
 
 **Document History**:
 - v0.1 (Nov 2025): Initial draft
+- v0.2 (Feb 2026): Revised to use WebSocket for Tier 1, extend existing session manager
+- v0.3 (Feb 2026): Updated to reflect implementation (Phase 0-2 complete), clarified Tier 1 is VAD-only (no button/NeoPixels), Tier 2 retains button and NeoPixel support

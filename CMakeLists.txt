@@ -62,6 +62,12 @@ add_definitions(-DVERSION_NUMBER=\"${VERSION_NUMBER}\")
 # Include directories for new source layout
 include_directories(include)
 
+# =============================================================================
+# Common Library (shared between daemon and satellites)
+# =============================================================================
+# Must be added early so that dawn_common target is available for linking
+add_subdirectory(common)
+
 # HTTP connections (AI and such)
 find_package(CURL REQUIRED)
 include_directories(${CURL_INCLUDE_DIRS})
@@ -377,6 +383,7 @@ set(DAWN_SOURCES
     src/dawn.c
     src/input_queue.c
     src/logging.c
+    src/logging_bridge.c
     src/mosquitto_comms.c
     src/text_to_command_nuevo.c
     src/word_to_number.c
@@ -473,6 +480,7 @@ if(ENABLE_WEBUI)
         src/webui/webui_settings.c
         src/webui/webui_tools.c
         src/webui/webui_images.c
+        src/webui/webui_satellite.c
     )
     if(OPUS_FOUND)
         list(APPEND DAWN_SOURCES src/webui/webui_audio.c)
@@ -563,6 +571,7 @@ if(AEC_ENABLED)
 endif()
 
 target_link_libraries(dawn
+                      dawn_common
                       piper
                       piper_phonemize
                       espeak-ng

@@ -1,0 +1,135 @@
+# DAWN Satellite Configuration
+#
+# This file configures a DAP2 (Tier 1) satellite device.
+# Deploy the same hardware config to all identical satellites,
+# then customize [identity] per device.
+
+# =============================================================================
+# Identity - UNIQUE PER SATELLITE
+# =============================================================================
+[identity]
+# Unique identifier (auto-generated if empty)
+# Use: uuidgen | tr '[:upper:]' '[:lower:]'
+uuid = ""
+
+# Human-readable name shown in daemon logs and WebUI
+name = "Satellite"
+
+# Room/location for context-aware responses
+# e.g., "kitchen", "bedroom", "living_room", "office"
+location = ""
+
+# =============================================================================
+# Server Connection
+# =============================================================================
+[server]
+# DAWN daemon hostname or IP address
+host = "localhost"
+
+# WebUI port (where WebSocket server runs)
+port = 8080
+
+# Use secure WebSocket (wss://) - requires SSL cert on daemon
+ssl = false
+
+# Reconnect settings
+reconnect_delay_ms = 5000
+max_reconnect_attempts = 0  # 0 = infinite
+
+# =============================================================================
+# Audio Configuration
+# =============================================================================
+[audio]
+# ALSA device names - use 'arecord -l' and 'aplay -l' to list devices
+#
+# Common devices:
+#   "plughw:0,0"     - Default sound card
+#   "plughw:1,0"     - USB sound card (typical for ReSpeaker)
+#   "plughw:2,0"     - Second USB device
+#   "default"        - PulseAudio default (if running)
+
+capture_device = "plughw:0,0"
+playback_device = "plughw:0,0"
+
+# Sample rate (must match daemon expectations)
+sample_rate = 16000
+
+# Maximum recording time in seconds (safety limit)
+max_record_seconds = 30
+
+# =============================================================================
+# Hardware - GPIO Button (optional, for Tier 2 or development)
+# =============================================================================
+[gpio]
+# Tier 1 uses VAD + wake word, not push-to-talk
+# Enable only for development/testing or Tier 2 devices
+enabled = false
+
+# GPIO chip (usually "gpiochip0" on RPi)
+chip = "gpiochip0"
+
+# Button GPIO pin number (BCM numbering)
+button_pin = 17
+button_active_low = true
+
+# =============================================================================
+# Hardware - NeoPixel/WS2812 LEDs (optional, for Tier 2 or custom builds)
+# =============================================================================
+[neopixel]
+# Tier 1 RPi satellites typically don't use indicator LEDs
+# Enable for custom builds with LED feedback
+enabled = false
+
+spi_device = "/dev/spidev0.0"
+num_leds = 3
+brightness = 64
+
+# =============================================================================
+# Hardware - SPI Display (optional)
+# =============================================================================
+[display]
+# Enable SPI display (ST7735, ILI9341, etc.)
+enabled = false
+
+# Framebuffer device
+device = "/dev/fb1"
+
+# =============================================================================
+# Voice Activity Detection (VAD)
+# =============================================================================
+[vad]
+# VAD is used to detect end-of-speech after wake word
+# Model: Silero VAD (same as main daemon)
+enabled = true
+
+# Silence duration (ms) to trigger end-of-speech
+silence_duration_ms = 800
+
+# Minimum speech duration (ms) before accepting
+min_speech_ms = 250
+
+# VAD threshold (0.0-1.0, higher = more strict)
+threshold = 0.5
+
+# =============================================================================
+# Wake Word Detection
+# =============================================================================
+[wake_word]
+# Enable always-on wake word detection
+enabled = true
+
+# Wake word (matches main daemon)
+word = "friday"
+
+# Sensitivity (0.0-1.0, higher = more sensitive but more false positives)
+sensitivity = 0.5
+
+# =============================================================================
+# Logging
+# =============================================================================
+[logging]
+# Log level: "error", "warning", "info", "debug"
+level = "info"
+
+# Log to syslog instead of stdout
+use_syslog = false

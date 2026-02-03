@@ -1,0 +1,454 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * DAWN Satellite Configuration - Implementation
+ */
+
+#include "satellite_config.h"
+
+#include <errno.h>
+#include <pwd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "toml.h"
+
+/* =============================================================================
+ * Private Data
+ * ============================================================================= */
+
+static char g_config_path[CONFIG_PATH_SIZE] = { 0 };
+
+/* =============================================================================
+ * Helper Functions
+ * ============================================================================= */
+
+static void safe_strcpy(char *dest, const char *src, size_t dest_size) {
+   if (!dest || !src || dest_size == 0)
+      return;
+   strncpy(dest, src, dest_size - 1);
+   dest[dest_size - 1] = '\0';
+}
+
+static bool file_exists(const char *path) {
+   struct stat st;
+   return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static void expand_home_path(const char *path, char *expanded, size_t size) {
+   if (path[0] == '~' && path[1] == '/') {
+      const char *home = getenv("HOME");
+      if (!home) {
+         struct passwd *pw = getpwuid(getuid());
+         if (pw)
+            home = pw->pw_dir;
+      }
+      if (home) {
+         snprintf(expanded, size, "%s%s", home, path + 1);
+         return;
+      }
+   }
+   safe_strcpy(expanded, path, size);
+}
+
+static const char *toml_string_or(toml_table_t *table, const char *key, const char *def) {
+   toml_datum_t d = toml_string_in(table, key);
+   if (d.ok) {
+      /* Note: caller must handle memory - we return the allocated string */
+      return d.u.s;
+   }
+   return def;
+}
+
+static int64_t toml_int_or(toml_table_t *table, const char *key, int64_t def) {
+   toml_datum_t d = toml_int_in(table, key);
+   return d.ok ? d.u.i : def;
+}
+
+static bool toml_bool_or(toml_table_t *table, const char *key, bool def) {
+   toml_datum_t d = toml_bool_in(table, key);
+   return d.ok ? d.u.b : def;
+}
+
+/* =============================================================================
+ * Public Functions
+ * ============================================================================= */
+
+void satellite_config_init_defaults(satellite_config_t *config) {
+   if (!config)
+      return;
+
+   memset(config, 0, sizeof(satellite_config_t));
+
+   /* Identity defaults */
+   /* UUID intentionally empty - will be generated if not set */
+   safe_strcpy(config->identity.name, "Satellite", CONFIG_NAME_SIZE);
+   /* Location intentionally empty */
+
+   /* Server defaults */
+   safe_strcpy(config->server.host, "localhost", CONFIG_HOST_SIZE);
+   config->server.port = 8080;
+   config->server.ssl = false;
+   config->server.reconnect_delay_ms = 5000;
+   config->server.max_reconnect_attempts = 0; /* infinite */
+
+   /* Audio defaults */
+   safe_strcpy(config->audio.capture_device, "plughw:0,0", CONFIG_DEVICE_SIZE);
+   safe_strcpy(config->audio.playback_device, "plughw:0,0", CONFIG_DEVICE_SIZE);
+   config->audio.sample_rate = 16000;
+   config->audio.max_record_seconds = 30;
+
+   /* GPIO defaults (disabled) */
+   config->gpio.enabled = false;
+   safe_strcpy(config->gpio.chip, "gpiochip0", CONFIG_DEVICE_SIZE);
+   config->gpio.button_pin = 17;
+   config->gpio.button_active_low = true;
+   config->gpio.led_red_pin = -1;
+   config->gpio.led_green_pin = -1;
+   config->gpio.led_blue_pin = -1;
+
+   /* NeoPixel defaults (disabled for Tier 1) */
+   config->neopixel.enabled = false;
+   safe_strcpy(config->neopixel.spi_device, "/dev/spidev0.0", CONFIG_PATH_SIZE);
+   config->neopixel.num_leds = 3;
+   config->neopixel.brightness = 64;
+
+   /* Display defaults (disabled) */
+   config->display.enabled = false;
+   safe_strcpy(config->display.device, "/dev/fb1", CONFIG_PATH_SIZE);
+
+   /* Logging defaults */
+   safe_strcpy(config->logging.level, "info", sizeof(config->logging.level));
+   config->logging.use_syslog = false;
+}
+
+int satellite_config_load(satellite_config_t *config, const char *path) {
+   if (!config)
+      return -1;
+
+   /* Find config file */
+   char resolved_path[CONFIG_PATH_SIZE];
+   const char *search_paths[] = {
+      CONFIG_PATH_LOCAL,
+      CONFIG_PATH_ETC,
+      CONFIG_PATH_HOME,
+   };
+
+   if (path) {
+      expand_home_path(path, resolved_path, sizeof(resolved_path));
+      if (!file_exists(resolved_path)) {
+         fprintf(stderr, "[CONFIG] Config file not found: %s\n", resolved_path);
+         return -1;
+      }
+   } else {
+      /* Search standard locations */
+      bool found = false;
+      for (size_t i = 0; i < sizeof(search_paths) / sizeof(search_paths[0]); i++) {
+         expand_home_path(search_paths[i], resolved_path, sizeof(resolved_path));
+         if (file_exists(resolved_path)) {
+            found = true;
+            break;
+         }
+      }
+      if (!found) {
+         /* No config file found - use defaults */
+         return -1;
+      }
+   }
+
+   /* Open and parse TOML file */
+   FILE *fp = fopen(resolved_path, "r");
+   if (!fp) {
+      fprintf(stderr, "[CONFIG] Cannot open config file: %s (%s)\n", resolved_path,
+              strerror(errno));
+      return -1;
+   }
+
+   char errbuf[256];
+   toml_table_t *root = toml_parse_file(fp, errbuf, sizeof(errbuf));
+   fclose(fp);
+
+   if (!root) {
+      fprintf(stderr, "[CONFIG] Parse error in %s: %s\n", resolved_path, errbuf);
+      return 1;
+   }
+
+   /* Save path for later reference */
+   safe_strcpy(g_config_path, resolved_path, sizeof(g_config_path));
+
+   /* Parse [identity] section */
+   toml_table_t *identity = toml_table_in(root, "identity");
+   if (identity) {
+      const char *s;
+
+      s = toml_string_or(identity, "uuid", NULL);
+      if (s && s[0]) {
+         safe_strcpy(config->identity.uuid, s, CONFIG_UUID_SIZE);
+         free((void *)s);
+      }
+
+      s = toml_string_or(identity, "name", NULL);
+      if (s) {
+         safe_strcpy(config->identity.name, s, CONFIG_NAME_SIZE);
+         free((void *)s);
+      }
+
+      s = toml_string_or(identity, "location", NULL);
+      if (s) {
+         safe_strcpy(config->identity.location, s, CONFIG_LOCATION_SIZE);
+         free((void *)s);
+      }
+   }
+
+   /* Parse [server] section */
+   toml_table_t *server = toml_table_in(root, "server");
+   if (server) {
+      const char *s = toml_string_or(server, "host", NULL);
+      if (s) {
+         safe_strcpy(config->server.host, s, CONFIG_HOST_SIZE);
+         free((void *)s);
+      }
+
+      config->server.port = (uint16_t)toml_int_or(server, "port", config->server.port);
+      config->server.ssl = toml_bool_or(server, "ssl", config->server.ssl);
+      config->server.reconnect_delay_ms = (uint32_t)toml_int_or(server, "reconnect_delay_ms",
+                                                                config->server.reconnect_delay_ms);
+      config->server.max_reconnect_attempts = (uint32_t)toml_int_or(
+          server, "max_reconnect_attempts", config->server.max_reconnect_attempts);
+   }
+
+   /* Parse [audio] section */
+   toml_table_t *audio = toml_table_in(root, "audio");
+   if (audio) {
+      const char *s;
+
+      s = toml_string_or(audio, "capture_device", NULL);
+      if (s) {
+         safe_strcpy(config->audio.capture_device, s, CONFIG_DEVICE_SIZE);
+         free((void *)s);
+      }
+
+      s = toml_string_or(audio, "playback_device", NULL);
+      if (s) {
+         safe_strcpy(config->audio.playback_device, s, CONFIG_DEVICE_SIZE);
+         free((void *)s);
+      }
+
+      config->audio.sample_rate = (uint32_t)toml_int_or(audio, "sample_rate",
+                                                        config->audio.sample_rate);
+      config->audio.max_record_seconds = (uint32_t)toml_int_or(audio, "max_record_seconds",
+                                                               config->audio.max_record_seconds);
+   }
+
+   /* Parse [gpio] section */
+   toml_table_t *gpio = toml_table_in(root, "gpio");
+   if (gpio) {
+      config->gpio.enabled = toml_bool_or(gpio, "enabled", config->gpio.enabled);
+
+      const char *s = toml_string_or(gpio, "chip", NULL);
+      if (s) {
+         safe_strcpy(config->gpio.chip, s, CONFIG_DEVICE_SIZE);
+         free((void *)s);
+      }
+
+      config->gpio.button_pin = (int)toml_int_or(gpio, "button_pin", config->gpio.button_pin);
+      config->gpio.button_active_low = toml_bool_or(gpio, "button_active_low",
+                                                    config->gpio.button_active_low);
+      config->gpio.led_red_pin = (int)toml_int_or(gpio, "led_red_pin", config->gpio.led_red_pin);
+      config->gpio.led_green_pin = (int)toml_int_or(gpio, "led_green_pin",
+                                                    config->gpio.led_green_pin);
+      config->gpio.led_blue_pin = (int)toml_int_or(gpio, "led_blue_pin", config->gpio.led_blue_pin);
+   }
+
+   /* Parse [neopixel] section */
+   toml_table_t *neopixel = toml_table_in(root, "neopixel");
+   if (neopixel) {
+      config->neopixel.enabled = toml_bool_or(neopixel, "enabled", config->neopixel.enabled);
+
+      const char *s = toml_string_or(neopixel, "spi_device", NULL);
+      if (s) {
+         safe_strcpy(config->neopixel.spi_device, s, CONFIG_PATH_SIZE);
+         free((void *)s);
+      }
+
+      config->neopixel.num_leds = (int)toml_int_or(neopixel, "num_leds", config->neopixel.num_leds);
+      config->neopixel.brightness = (uint8_t)toml_int_or(neopixel, "brightness",
+                                                         config->neopixel.brightness);
+   }
+
+   /* Parse [display] section */
+   toml_table_t *display = toml_table_in(root, "display");
+   if (display) {
+      config->display.enabled = toml_bool_or(display, "enabled", config->display.enabled);
+
+      const char *s = toml_string_or(display, "device", NULL);
+      if (s) {
+         safe_strcpy(config->display.device, s, CONFIG_PATH_SIZE);
+         free((void *)s);
+      }
+   }
+
+   /* Parse [logging] section */
+   toml_table_t *logging = toml_table_in(root, "logging");
+   if (logging) {
+      const char *s = toml_string_or(logging, "level", NULL);
+      if (s) {
+         safe_strcpy(config->logging.level, s, sizeof(config->logging.level));
+         free((void *)s);
+      }
+
+      config->logging.use_syslog = toml_bool_or(logging, "use_syslog", config->logging.use_syslog);
+   }
+
+   toml_free(root);
+
+   printf("[CONFIG] Loaded configuration from %s\n", resolved_path);
+   return 0;
+}
+
+void satellite_config_apply_overrides(satellite_config_t *config,
+                                      const char *server,
+                                      uint16_t port,
+                                      int ssl,
+                                      const char *name,
+                                      const char *location,
+                                      const char *capture_device,
+                                      const char *playback_device,
+                                      int num_leds,
+                                      bool keyboard_mode) {
+   if (!config)
+      return;
+
+   if (server && server[0]) {
+      safe_strcpy(config->server.host, server, CONFIG_HOST_SIZE);
+   }
+
+   if (port > 0) {
+      config->server.port = port;
+   }
+
+   if (ssl >= 0) {
+      config->server.ssl = (ssl != 0);
+   }
+
+   if (name && name[0]) {
+      safe_strcpy(config->identity.name, name, CONFIG_NAME_SIZE);
+   }
+
+   if (location && location[0]) {
+      safe_strcpy(config->identity.location, location, CONFIG_LOCATION_SIZE);
+   }
+
+   if (capture_device && capture_device[0]) {
+      safe_strcpy(config->audio.capture_device, capture_device, CONFIG_DEVICE_SIZE);
+   }
+
+   if (playback_device && playback_device[0]) {
+      safe_strcpy(config->audio.playback_device, playback_device, CONFIG_DEVICE_SIZE);
+   }
+
+   if (num_leds > 0) {
+      config->neopixel.num_leds = num_leds;
+   }
+
+   if (keyboard_mode) {
+      config->gpio.enabled = false;
+   }
+}
+
+void satellite_config_ensure_uuid(satellite_config_t *config) {
+   if (!config)
+      return;
+
+   /* If UUID is already set, keep it */
+   if (config->identity.uuid[0] != '\0')
+      return;
+
+   /* Generate a random UUID v4 */
+   unsigned char bytes[16];
+
+   /* Use /dev/urandom for random bytes */
+   FILE *fp = fopen("/dev/urandom", "rb");
+   if (fp) {
+      if (fread(bytes, 1, 16, fp) != 16) {
+         /* Fallback to time-based if read fails */
+         srand((unsigned int)time(NULL) ^ (unsigned int)getpid());
+         for (int i = 0; i < 16; i++) {
+            bytes[i] = (unsigned char)(rand() & 0xFF);
+         }
+      }
+      fclose(fp);
+   } else {
+      /* Fallback to time-based */
+      srand((unsigned int)time(NULL) ^ (unsigned int)getpid());
+      for (int i = 0; i < 16; i++) {
+         bytes[i] = (unsigned char)(rand() & 0xFF);
+      }
+   }
+
+   /* Set version (4) and variant (RFC 4122) bits */
+   bytes[6] = (bytes[6] & 0x0F) | 0x40; /* Version 4 */
+   bytes[8] = (bytes[8] & 0x3F) | 0x80; /* Variant RFC 4122 */
+
+   /* Format as UUID string */
+   snprintf(config->identity.uuid, CONFIG_UUID_SIZE,
+            "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", bytes[0],
+            bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8],
+            bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]);
+
+   printf("[CONFIG] Generated UUID: %s\n", config->identity.uuid);
+}
+
+void satellite_config_print(const satellite_config_t *config) {
+   if (!config)
+      return;
+
+   printf("\n=== Satellite Configuration ===\n");
+
+   printf("\n[identity]\n");
+   printf("  uuid     = \"%s\"\n", config->identity.uuid);
+   printf("  name     = \"%s\"\n", config->identity.name);
+   printf("  location = \"%s\"\n", config->identity.location);
+
+   printf("\n[server]\n");
+   printf("  host = \"%s\"\n", config->server.host);
+   printf("  port = %u\n", config->server.port);
+   printf("  ssl  = %s\n", config->server.ssl ? "true" : "false");
+
+   printf("\n[audio]\n");
+   printf("  capture_device  = \"%s\"\n", config->audio.capture_device);
+   printf("  playback_device = \"%s\"\n", config->audio.playback_device);
+
+   printf("\n[gpio]\n");
+   printf("  enabled    = %s\n", config->gpio.enabled ? "true" : "false");
+   printf("  button_pin = %d\n", config->gpio.button_pin);
+
+   printf("\n[neopixel]\n");
+   printf("  enabled    = %s\n", config->neopixel.enabled ? "true" : "false");
+   printf("  num_leds   = %d\n", config->neopixel.num_leds);
+   printf("  brightness = %u\n", config->neopixel.brightness);
+
+   printf("\n[display]\n");
+   printf("  enabled = %s\n", config->display.enabled ? "true" : "false");
+
+   printf("\n===============================\n\n");
+}
+
+const char *satellite_config_get_path(void) {
+   return g_config_path[0] ? g_config_path : NULL;
+}

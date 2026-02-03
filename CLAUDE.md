@@ -208,6 +208,19 @@ The network protocol for ESP32 clients uses a custom binary protocol:
 
 See `remote_dawn/protocol_specification.md` for complete protocol details.
 
+### DAP2 Satellite System (Tier 1)
+
+DAP2 is a text-based WebSocket protocol for "JARVIS in every room" satellite devices (Raspberry Pi, etc.):
+- Satellites handle ASR/TTS locally, send only text to daemon
+- WebSocket connection to same port as WebUI (default 8080)
+- JSON message protocol: `satellite_register`, `satellite_query`, `satellite_ping`
+- Streaming responses via `stream_start`, `stream_delta`, `stream_end`
+- TOML configuration with per-satellite identity (UUID, name, location)
+
+**Satellite binary**: `dawn_satellite/` - standalone C application using libwebsockets
+
+See `docs/DAP2_SATELLITE.md` for complete protocol details, configuration, and deployment.
+
 ### Multi-Client Architecture
 
 **Current limitation**: Server processes one network client at a time, blocking the main loop during LLM processing (10-15 seconds).
@@ -407,6 +420,14 @@ Currently no automated test framework. Manual testing involves:
 - `www/js/core/`: Core JS modules (constants, websocket, audio)
 - `www/js/ui/`: UI JS modules (settings, history, themes)
 - `docs/WEBUI_DESIGN.md`: WebUI architecture and feature documentation
+
+**Satellite (DAP2):**
+- `dawn_satellite/`: Standalone satellite binary for Raspberry Pi
+- `dawn_satellite/config/satellite.toml`: Default satellite configuration
+- `dawn_satellite/src/ws_client.c`: WebSocket client for daemon communication
+- `dawn_satellite/src/satellite_config.c`: TOML configuration loader
+- `src/webui/webui_satellite.c`: Daemon-side satellite message handlers
+- `docs/DAP2_SATELLITE.md`: Satellite architecture and deployment guide
 
 ## Known Issues and TODOs
 

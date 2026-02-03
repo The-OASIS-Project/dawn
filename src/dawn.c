@@ -70,6 +70,7 @@
 #include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
+#include "logging_bridge.h"
 #include "mosquitto_comms.h"
 #include "tools/music_tool.h"
 #include "tools/tool_registry.h"
@@ -1807,6 +1808,9 @@ int main(int argc, char *argv[]) {
          return 1;
       }
    }
+
+   // Initialize logging bridge for common library
+   logging_bridge_init();
 
 #ifdef ENABLE_TUI
    // Initialize TUI if enabled

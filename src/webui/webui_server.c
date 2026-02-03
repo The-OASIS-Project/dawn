@@ -2692,6 +2692,18 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
       if (payload) {
          handle_music_queue(conn, payload);
       }
+   }
+   /* Satellite (DAP2 Tier 1) messages */
+   else if (strcmp(type, "satellite_register") == 0) {
+      if (payload) {
+         handle_satellite_register(conn, payload);
+      }
+   } else if (strcmp(type, "satellite_query") == 0) {
+      if (payload) {
+         handle_satellite_query(conn, payload);
+      }
+   } else if (strcmp(type, "satellite_ping") == 0) {
+      handle_satellite_ping(conn);
    } else {
       LOG_WARNING("WebUI: Unknown message type: %s", type);
    }
@@ -3685,7 +3697,8 @@ void webui_send_transcript(session_t *session, const char *role, const char *tex
 }
 
 void webui_send_state_with_detail(session_t *session, const char *state, const char *detail) {
-   if (!session || session->type != SESSION_TYPE_WEBSOCKET) {
+   if (!session ||
+       (session->type != SESSION_TYPE_WEBSOCKET && session->type != SESSION_TYPE_DAP2)) {
       return;
    }
 
@@ -3743,7 +3756,8 @@ void webui_send_context(session_t *session, int current_tokens, int max_tokens, 
 }
 
 void webui_send_error(session_t *session, const char *code, const char *message) {
-   if (!session || session->type != SESSION_TYPE_WEBSOCKET) {
+   if (!session ||
+       (session->type != SESSION_TYPE_WEBSOCKET && session->type != SESSION_TYPE_DAP2)) {
       return;
    }
 
@@ -3862,7 +3876,8 @@ void webui_send_audio_end(session_t *session) {
  * ============================================================================= */
 
 void webui_send_stream_start(session_t *session) {
-   if (!session || session->type != SESSION_TYPE_WEBSOCKET) {
+   if (!session ||
+       (session->type != SESSION_TYPE_WEBSOCKET && session->type != SESSION_TYPE_DAP2)) {
       return;
    }
 
@@ -3962,7 +3977,8 @@ int webui_filter_command_tags(session_t *session,
  * Automatically starts the stream on first content. Thread-safe per session.
  */
 void webui_send_stream_delta(session_t *session, const char *text) {
-   if (!session || session->type != SESSION_TYPE_WEBSOCKET) {
+   if (!session ||
+       (session->type != SESSION_TYPE_WEBSOCKET && session->type != SESSION_TYPE_DAP2)) {
       return;
    }
 
@@ -3993,7 +4009,8 @@ void webui_send_stream_delta(session_t *session, const char *text) {
 }
 
 void webui_send_stream_end(session_t *session, const char *reason) {
-   if (!session || session->type != SESSION_TYPE_WEBSOCKET) {
+   if (!session ||
+       (session->type != SESSION_TYPE_WEBSOCKET && session->type != SESSION_TYPE_DAP2)) {
       return;
    }
 

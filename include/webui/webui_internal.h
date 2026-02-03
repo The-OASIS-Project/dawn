@@ -748,6 +748,25 @@ void handle_music_library(ws_connection_t *conn, struct json_object *payload);
 void handle_music_queue(ws_connection_t *conn, struct json_object *payload);
 
 /* =============================================================================
+ * Satellite Handler Functions (defined in webui_satellite.c)
+ * ============================================================================= */
+
+/**
+ * @brief Handle satellite_register message
+ */
+void handle_satellite_register(ws_connection_t *conn, struct json_object *payload);
+
+/**
+ * @brief Handle satellite_query message
+ */
+void handle_satellite_query(ws_connection_t *conn, struct json_object *payload);
+
+/**
+ * @brief Handle satellite_ping message
+ */
+void handle_satellite_ping(ws_connection_t *conn);
+
+/* =============================================================================
  * Audio Send Functions (defined in webui_server.c, used by webui_audio.c)
  * ============================================================================= */
 
