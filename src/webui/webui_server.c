@@ -2865,6 +2865,8 @@ static int callback_websocket(struct lws *wsi,
             struct json_object *payload = NULL;
             json_object_object_get_ex(root, "payload", &payload);
 
+            LOG_INFO("WebUI: Init message received, type=%s", type ? type : "(null)");
+
             bool is_reconnect = false;
             session_t *existing_session = NULL;
 
@@ -2910,6 +2912,41 @@ static int callback_websocket(struct lws *wsi,
                      }
                   }
                }
+            }
+
+            /* Check for satellite registration (DAP2 Tier 1) */
+            if (type && strcmp(type, "satellite_register") == 0 && payload) {
+               pthread_mutex_lock(&s_mutex);
+               if (s_client_count >= g_config.webui.max_clients) {
+                  pthread_mutex_unlock(&s_mutex);
+                  LOG_WARNING("WebUI: Satellite rejected - max clients reached (%d)",
+                              g_config.webui.max_clients);
+                  send_error_impl(wsi, "MAX_CLIENTS",
+                                  "Maximum clients reached. Please try again later.");
+                  json_object_put(root);
+                  return -1;
+               }
+               s_client_count++;
+               pthread_mutex_unlock(&s_mutex);
+
+               /* Create satellite session and handle registration */
+               conn->session = session_create(SESSION_TYPE_DAP2, -1);
+               if (!conn->session) {
+                  LOG_ERROR("WebUI: Failed to create satellite session");
+                  send_error_impl(wsi, "SESSION_LIMIT", "Maximum sessions reached");
+                  pthread_mutex_lock(&s_mutex);
+                  s_client_count--;
+                  pthread_mutex_unlock(&s_mutex);
+                  json_object_put(root);
+                  return -1;
+               }
+               conn->session->client_data = conn;
+               conn->is_satellite = true;
+
+               /* Delegate to satellite handler for full registration */
+               handle_satellite_register(conn, payload);
+               json_object_put(root);
+               break;
             }
 
             /* If not reconnecting, create new session (with client limit check) */

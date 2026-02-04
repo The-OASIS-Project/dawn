@@ -903,6 +903,130 @@ This phase addresses the architecture reviewer's critical finding: existing code
 
 ---
 
+### Phase 3.5: Touchscreen UI (SDL2)
+
+**Goal**: Premium touchscreen interface for Tier 1 satellites with attached displays
+
+**Platform**: Pi OS Lite with SDL2 KMSDRM backend (no X11, direct GPU rendering)
+
+**Display Support**: 3.5" to 7" TFT touchscreens (primary target: 7" 1024x600)
+
+#### Core Components
+
+1. **Visualization (ported from WebUI)**:
+   - Core orb with radial gradient glow (pre-rendered frames for performance)
+   - Three-ring system: outer (status), middle (throughput), inner (waveform)
+   - State-based colors matching WebUI: idle (gray), listening (green), thinking (amber), speaking (cyan)
+   - Smooth transitions with easing functions
+
+2. **Transcript Display**:
+   - Scrollable conversation history
+   - Auto-scroll during active conversation
+   - Touch to pause scroll, swipe to navigate history
+
+3. **Quick Actions Bar**:
+   - 4-6 configurable touch shortcuts (music, lights, thermostat, timer, settings)
+   - 48x48 minimum touch targets
+   - Accent color highlight when active
+
+4. **Media Player Overlay**:
+   - Slide-in panel matching WebUI music.css aesthetic
+   - Visualizer bars, transport controls, progress bar
+   - Compact mode when minimized
+
+5. **Screensaver/Ambient Mode**:
+   - Photo frame with Ken Burns effect (slow pan/zoom)
+   - Cross-fade transitions between images
+   - Clock display option (digital or analog)
+   - Ambient orb mode (breathing animation, "always ready" indicator)
+   - Wake on touch or wake word
+
+#### Touch Interactions
+
+| Gesture | Action |
+|---------|--------|
+| Tap orb | Manual wake (bypass wake word) |
+| Long press orb | Cancel/stop current operation |
+| Swipe up from bottom | Reveal quick actions |
+| Swipe down from top | Settings/notifications |
+| Swipe left/right | Navigate conversation history |
+| Tap anywhere (screensaver) | Wake display |
+
+#### Layout Recommendations
+
+**3.5" (480x320)**: Portrait, 160x160 orb, 4 quick actions, compact transcript
+**7" (1024x600)**: Landscape, side-by-side (320px orb panel + 664px transcript), full visualization
+
+#### Memory Budget (Pi Zero 2 W)
+
+| Resource | Allocation |
+|----------|------------|
+| Texture cache | ~10 MB (glow frames, icons, font atlas) |
+| Photo buffer | ~4 MB (2x scaled images for crossfade) |
+| Frame rate | 30 FPS active, 15 FPS screensaver, 10 FPS idle |
+
+#### Color Palette (matching WebUI variables.css)
+
+```c
+// Backgrounds
+COLOR_BG_PRIMARY   = #121417
+COLOR_BG_SECONDARY = #1b1f24
+COLOR_BG_TERTIARY  = #242a31
+
+// Text
+COLOR_TEXT_PRIMARY   = #e6e6e6
+COLOR_TEXT_SECONDARY = #7b8794
+
+// States
+COLOR_ACCENT  = #2dd4bf  // Cyan (theme default)
+COLOR_SUCCESS = #22c55e  // Green (listening)
+COLOR_WARNING = #f0b429  // Amber (thinking)
+COLOR_ERROR   = #ef4444  // Red
+```
+
+#### File Structure
+
+```
+dawn_satellite/
+├── src/
+│   ├── ui/
+│   │   ├── ui_main.c            # SDL init, render loop
+│   │   ├── ui_state.c           # UI state machine
+│   │   ├── visualization.c      # Orb and rings
+│   │   ├── transcript.c         # Conversation display
+│   │   ├── quick_actions.c      # Action bar
+│   │   ├── media_player.c       # Music overlay
+│   │   ├── screensaver.c        # Ambient modes
+│   │   └── colors.h             # Palette definitions
+│   ├── input/
+│   │   └── touch.c              # Gesture detection
+│   └── render/
+│       ├── textures.c           # Texture management
+│       └── fonts.c              # SDL_ttf wrapper
+├── assets/
+│   ├── fonts/                   # IBM Plex Mono (matching WebUI)
+│   └── icons/                   # Monochrome icon set
+└── CMakeLists.txt
+```
+
+#### Dependencies
+
+```bash
+sudo apt install libsdl2-dev libsdl2-ttf-dev libsdl2-image-dev libdrm-dev
+sudo usermod -aG video,render $USER
+```
+
+**Deliverables**:
+- `dawn_satellite/src/ui/` with SDL2 implementation
+- Touch gesture system
+- Screensaver with photo frame mode
+- Media player overlay
+- Theme support (cyan, purple, terminal green)
+
+**Exit Criteria**: UI indistinguishable from premium smart home device, <16ms frame time
+
+---
+
 ### Phase 4: Tier 2 Satellite (ESP32-S3)
 
 **Goal**: Button-activated satellite with ADPCM audio streaming

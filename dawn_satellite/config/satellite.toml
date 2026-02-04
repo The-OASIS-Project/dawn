@@ -27,10 +27,10 @@ location = ""
 host = "localhost"
 
 # WebUI port (where WebSocket server runs)
-port = 8080
+port = 3000
 
 # Use secure WebSocket (wss://) - requires SSL cert on daemon
-ssl = false
+ssl = true
 
 # Reconnect settings
 reconnect_delay_ms = 5000

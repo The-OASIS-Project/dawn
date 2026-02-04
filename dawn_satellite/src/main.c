@@ -591,7 +591,9 @@ int main(int argc, char *argv[]) {
    satellite_ctx_t ctx;
    satellite_config_t config;
    int use_keyboard = 0;
+#ifdef ENABLE_DISPLAY
    int no_display = 0;
+#endif
    int verbose = 0;
 
    /* Command-line override values (NULL/0/-1 = not specified) */
@@ -656,7 +658,9 @@ int main(int argc, char *argv[]) {
             use_keyboard = 1;
             break;
          case 'd':
+#ifdef ENABLE_DISPLAY
             no_display = 1;
+#endif
             break;
          case 'n':
             cli_num_leds = atoi(optarg);

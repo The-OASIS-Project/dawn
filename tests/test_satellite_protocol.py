@@ -90,7 +90,7 @@ def on_message(ws, message):
 
         elif msg_type == "stream_delta":
             payload = data.get("payload", {})
-            text = payload.get("text", "")
+            text = payload.get("delta", "")  # Server sends "delta" not "text"
             print(text, end="", flush=True)
 
         elif msg_type == "stream_end":
@@ -136,7 +136,7 @@ def on_open(ws):
     print("[Connected to DAWN daemon]")
 
 
-def run_interactive(ws):
+def run_interactive(ws, auto_registered=False):
     """Run interactive satellite test session."""
     print("\n" + "=" * 60)
     print("DAP2 Satellite Protocol Test Client")
@@ -149,7 +149,7 @@ def run_interactive(ws):
     print("  <text>                      - Send query (shortcut)")
     print("=" * 60)
 
-    registered = False
+    registered = auto_registered
 
     while True:
         try:
@@ -246,14 +246,16 @@ def main():
         sys.exit(1)
 
     # Auto-register if requested
+    auto_registered = False
     if args.auto_register:
         print(f"\nAuto-registering as '{args.name}' in '{args.location}'...")
         ws.send(create_register_message(args.name, args.location))
+        auto_registered = True
         time.sleep(0.5)
 
     # Run interactive session
     try:
-        run_interactive(ws)
+        run_interactive(ws, auto_registered)
     finally:
         ws.close()
 

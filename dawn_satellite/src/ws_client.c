@@ -104,12 +104,15 @@ static int send_json(ws_client_t *client, struct json_object *obj);
 
 static const struct lws_protocols protocols[] = {
    {
-       .name = "dawn-satellite",
+       .name = "dawn-1.0", /* Must match server's expected subprotocol */
        .callback = callback_ws,
        .per_session_data_size = sizeof(void *),
        .rx_buffer_size = WS_RX_BUFFER_SIZE,
+       .id = 0,
+       .user = NULL,
+       .tx_packet_size = 0,
    },
-   { NULL, NULL, 0, 0 } /* terminator */
+   { 0 } /* terminator - zero init all fields */
 };
 
 /* =============================================================================
@@ -299,9 +302,9 @@ static void handle_message(ws_client_t *client, const char *msg, size_t len) {
       LOG_DEBUG("Stream start");
    } else if (strcmp(type, "stream_delta") == 0) {
       if (payload) {
-         struct json_object *text_obj;
-         if (json_object_object_get_ex(payload, "text", &text_obj)) {
-            const char *text = json_object_get_string(text_obj);
+         struct json_object *delta_obj;
+         if (json_object_object_get_ex(payload, "delta", &delta_obj)) {
+            const char *text = json_object_get_string(delta_obj);
 
             if (client->stream_cb && text) {
                pthread_mutex_unlock(&client->mutex);

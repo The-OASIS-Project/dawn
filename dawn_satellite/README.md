@@ -1,265 +1,644 @@
-# DAWN Satellite
+# DAWN Satellite (Tier 1)
 
-Push-to-talk voice satellite client for DAWN voice assistant server.
-Designed for Raspberry Pi Zero 2 W with I2S audio hardware.
+A smart voice satellite client for the DAWN voice assistant system. Runs on Raspberry Pi with local ASR, TTS, VAD, and wake word detection. Connects to the central DAWN daemon via WebSocket for LLM queries.
 
-## Overview
+**Protocol**: DAP2 (Dawn Audio Protocol 2.0) - Text-first WebSocket
 
-The DAWN Satellite is a lightweight client that:
-- Captures audio from an I2S MEMS microphone
-- Sends audio to the DAWN server via DAP (DAWN Audio Protocol)
-- Receives AI-generated TTS responses
-- Plays responses through an I2S amplifier
-- Provides visual feedback via SPI display and RGB LEDs
+## Features
+
+- **Hands-free activation** - Wake word detection ("Hey Friday")
+- **Local speech processing** - Whisper ASR + Piper TTS on device
+- **Text-first protocol** - Only text sent to daemon, not audio (~100 bytes vs ~1MB)
+- **Offline fallback** - Local TTS "I can't reach the server"
+- **Touchscreen UI** - SDL2-based interface with KMSDRM (no X11)
+- **Full tool support** - Same capabilities as main daemon
+- **Low latency** - <3s wake-to-response target
 
 ## Hardware Requirements
 
-### Recommended Hardware
+### Minimum (Headless)
 
-| Component | Model | Notes |
-|-----------|-------|-------|
+| Component | Recommended | Notes |
+|-----------|-------------|-------|
 | SBC | Raspberry Pi Zero 2 W | 512MB RAM, WiFi |
-| Microphone | INMP441 or SPH0645 | I2S MEMS microphone |
-| Amplifier | MAX98357A | I2S Class D amplifier |
-| Speaker | 3W 4Ω or 8Ω | Small speaker |
-| Display | ST7789 or ILI9341 | SPI TFT display (optional) |
-| Button | Momentary pushbutton | PTT trigger |
-| LEDs | WS2812/NeoPixel | Status indicator via SPI (optional) |
+| Microphone | USB mic or INMP441 | I2S or USB |
+| Speaker | 3.5mm or MAX98357A | Built-in jack or I2S DAC |
+| Storage | 16GB+ microSD | Class 10 or better |
 
-### GPIO Pinout (BCM)
+### Recommended (With Display)
 
-```
-                 Pi Zero 2 W
-                 +---------+
-        3V3  [1] | o     o | [2]  5V
-      GPIO2  [3] | o     o | [4]  5V
-      GPIO3  [5] | o     o | [6]  GND
-      GPIO4  [7] | o     o | [8]  GPIO14
-        GND  [9] | o     o | [10] GPIO15
-     GPIO17 [11] | o     o | [12] GPIO18 (I2S BCLK)
-     GPIO27 [13] | o     o | [14] GND
-     GPIO22 [15] | o     o | [16] GPIO23
-        3V3 [17] | o     o | [18] GPIO24
-     GPIO10 [19] | o     o | [20] GND
-      GPIO9 [21] | o     o | [22] GPIO25
-     GPIO11 [23] | o     o | [24] GPIO8
-        GND [25] | o     o | [26] GPIO7
-      GPIO0 [27] | o     o | [28] GPIO1
-      GPIO5 [29] | o     o | [30] GND
-      GPIO6 [31] | o     o | [32] GPIO12
-     GPIO13 [33] | o     o | [34] GND
-     GPIO19 [35] | o     o | [36] GPIO16
-     GPIO26 [37] | o     o | [38] GPIO20
-        GND [39] | o     o | [40] GPIO21 (I2S DOUT)
-                 +---------+
-```
+| Component | Recommended | Notes |
+|-----------|-------------|-------|
+| SBC | Raspberry Pi 4/5 | 2GB+ RAM recommended |
+| Display | 7" 1024x600 TFT | Touchscreen, HDMI or DSI |
+| Microphone | ReSpeaker 2-mic HAT | Or USB microphone |
+| Speaker | 3W amplified speaker | Built-in or external |
+| Storage | 32GB+ microSD | For models and photos |
 
-### Wiring
+### Memory Budget (Pi Zero 2 W)
 
-#### I2S Microphone (INMP441)
-| Mic Pin | Pi GPIO | Notes |
-|---------|---------|-------|
-| VDD | 3V3 | Power |
-| GND | GND | Ground |
-| SD | GPIO20 | I2S Data In |
-| WS | GPIO19 | I2S Word Select (LRCLK) |
-| SCK | GPIO18 | I2S Bit Clock (BCLK) |
-| L/R | GND | Left channel (or 3V3 for right) |
+| Component | RAM Usage |
+|-----------|-----------|
+| Pi OS Lite | ~100 MB |
+| Whisper tiny | ~77 MB |
+| Piper TTS | ~60 MB |
+| Silero VAD | ~2 MB |
+| Satellite app | ~20 MB |
+| SDL2 UI | ~15 MB |
+| **Available** | ~238 MB |
 
-#### I2S Amplifier (MAX98357A)
-| Amp Pin | Pi GPIO | Notes |
-|---------|---------|-------|
-| VIN | 5V | Power (5V for more volume) |
-| GND | GND | Ground |
-| DIN | GPIO21 | I2S Data Out |
-| BCLK | GPIO18 | I2S Bit Clock |
-| LRC | GPIO19 | I2S Word Select |
-| GAIN | - | Leave floating for 9dB |
-| SD | 3V3 | Enable (or GPIO for mute control) |
+## Quick Start
 
-#### Button
-| Component | Pi GPIO | Notes |
-|-----------|---------|-------|
-| Button | GPIO17 | Active low (internal pull-up) |
+### 1. Flash Pi OS Lite (64-bit)
 
-#### NeoPixel LEDs (WS2812)
-| NeoPixel Pin | Pi GPIO | Notes |
-|--------------|---------|-------|
-| VCC | 5V | Power (5V recommended) |
-| GND | GND | Ground |
-| DIN | GPIO10 (MOSI) | SPI data output |
+Use [Raspberry Pi Imager](https://www.raspberrypi.com/software/) to flash **Pi OS Lite (64-bit)**.
 
-Note: NeoPixels use SPI0 MOSI for data. If using both NeoPixels and SPI display,
-connect NeoPixels to a separate SPI bus or use GPIO bit-banging for the display.
+> **Important**: Use Pi OS **Lite** (no desktop) for KMSDRM display support.
 
-#### SPI Display (ST7789)
-| Display Pin | Pi GPIO | Notes |
-|-------------|---------|-------|
-| VCC | 3V3 | Power |
-| GND | GND | Ground |
-| SCL | GPIO11 (SCLK) | SPI Clock |
-| SDA | GPIO10 (MOSI) | SPI Data |
-| RES | GPIO25 | Reset |
-| DC | GPIO24 | Data/Command |
-| CS | GPIO8 (CE0) | Chip Select |
-| BLK | 3V3 or GPIO | Backlight |
+In the imager settings (gear icon), configure:
+- Hostname: `dawn-satellite`
+- Enable SSH
+- Set username/password
+- Configure WiFi credentials
 
-## Software Setup
-
-### 1. Enable I2S on Raspberry Pi
-
-Edit `/boot/config.txt`:
-```bash
-# Enable I2S
-dtparam=i2s=on
-
-# I2S microphone overlay
-dtoverlay=i2s-mmap
-dtoverlay=googlevoicehat-soundcard
-
-# SPI display (optional - depends on your display)
-dtoverlay=spi0-1cs
-```
-
-Reboot after changes.
-
-### 2. Install Dependencies
+### 2. First Boot Setup
 
 ```bash
-sudo apt update
+# SSH into the Pi
+ssh pi@dawn-satellite.local
+
+# Update system
+sudo apt update && sudo apt full-upgrade -y
+
+# Add user to required groups
+sudo usermod -aG video,render,audio,input,spi,gpio $USER
+
+# Reboot to apply group changes
+sudo reboot
+```
+
+### 3. Install Dependencies
+
+```bash
+# Core build dependencies
 sudo apt install -y \
     build-essential \
     cmake \
-    libasound2-dev \
-    libgpiod-dev
+    git \
+    pkg-config
+
+# Audio dependencies
+sudo apt install -y \
+    libasound2-dev
+
+# WebSocket client and JSON parsing
+sudo apt install -y \
+    libwebsockets-dev \
+    libjson-c-dev
+
+# SDL2 dependencies (for touchscreen UI)
+sudo apt install -y \
+    libsdl2-dev \
+    libsdl2-ttf-dev \
+    libsdl2-image-dev \
+    libdrm-dev
+
+# Optional: GPIO button support (Tier 2 style, not needed for Tier 1)
+# sudo apt install -y libgpiod-dev
 ```
 
-### 3. Build the Satellite
+### 4. Build the Common Library
+
+```bash
+# Clone the repository
+git clone https://github.com/The-OASIS-Project/dawn.git
+cd dawn
+
+# Build the common library
+cd common
+mkdir build && cd build
+cmake ..
+make -j$(nproc)
+sudo make install
+cd ../..
+```
+
+### 5. Build the Satellite
 
 ```bash
 cd dawn_satellite
 mkdir build && cd build
 cmake ..
-make -j4
+make -j$(nproc)
 ```
 
-Build options:
-- `-DENABLE_NEOPIXEL=ON` (default) - Enable NeoPixel LED support via SPI
-- `-DENABLE_DISPLAY=OFF` (default) - Enable SPI display support
+#### Build Options
 
-Example with display enabled:
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-DENABLE_UI=ON` | ON | SDL2 touchscreen UI |
+| `-DENABLE_DAP2=ON` | ON | WebSocket protocol (vs legacy DAP1) |
+| `-DCMAKE_BUILD_TYPE=Release` | Release | Optimization level |
+
+Example with UI disabled (headless):
 ```bash
-cmake -DENABLE_DISPLAY=ON ..
+cmake -DENABLE_UI=OFF ..
 ```
 
-### 4. Configure
+### 6. Configure
 
-Copy and edit the configuration file:
 ```bash
+# Create config directory
 sudo mkdir -p /etc/dawn
-sudo cp config/satellite.conf /etc/dawn/
-sudo nano /etc/dawn/satellite.conf
+
+# Copy default config
+sudo cp ../config/satellite.toml /etc/dawn/satellite.toml
+
+# Edit configuration
+sudo nano /etc/dawn/satellite.toml
 ```
 
-Update `server_ip` to match your DAWN server.
+**Essential settings to configure:**
 
-### 5. Run
+```toml
+[identity]
+name = "Living Room"        # Human-readable name for logs/WebUI
+location = "living_room"    # Room identifier for context
+
+[server]
+host = "192.168.1.100"      # Your DAWN daemon IP address
+port = 8080                 # WebUI port (where WebSocket runs)
+
+[audio]
+capture_device = "plughw:1,0"   # Your microphone (run 'arecord -l')
+playback_device = "plughw:0,0" # Your speaker (run 'aplay -l')
+```
+
+### 7. Test Run
 
 ```bash
-./dawn_satellite --server 192.168.1.100
+# Run manually to test
+./dawn_satellite --config /etc/dawn/satellite.toml
+
+# Expected output:
+# [INFO] DAWN Satellite v0.1.0 starting...
+# [INFO] Loading config from /etc/dawn/satellite.toml
+# [INFO] Connecting to ws://192.168.1.100:8080
+# [INFO] WebSocket connected
+# [INFO] Registered as "Living Room" (location: living_room)
+# [INFO] Ready - say "Hey Friday" to activate
 ```
 
-Or with keyboard control (for testing without GPIO):
+### 8. Install as System Service
+
 ```bash
-./dawn_satellite --server 192.168.1.100 --keyboard
+# Create systemd service
+sudo tee /etc/systemd/system/dawn-satellite.service << 'EOF'
+[Unit]
+Description=DAWN Voice Satellite
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+ExecStart=/usr/local/bin/dawn_satellite --config /etc/dawn/satellite.toml
+Restart=always
+RestartSec=5
+Environment=SDL_VIDEODRIVER=KMSDRM
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Install binary
+sudo cp dawn_satellite /usr/local/bin/
+
+# Enable and start
+sudo systemctl daemon-reload
+sudo systemctl enable dawn-satellite
+sudo systemctl start dawn-satellite
+
+# Check status
+sudo systemctl status dawn-satellite
+
+# View logs
+journalctl -u dawn-satellite -f
 ```
 
-## Usage
+## Configuration Reference
 
-### Push-to-Talk Operation
+See `config/satellite.toml` for the full configuration file with comments.
 
-1. Press and hold the button (or SPACE key)
-2. Speak your command
-3. Release the button
-4. Wait for the AI response
-5. Response plays through the speaker
+### Key Sections
 
-### LED Status Indicators (NeoPixel)
-
-| Color | State |
-|-------|-------|
-| Rainbow cycling | Idle, ready |
-| Blue | Recording audio |
-| Yellow | Connecting/Sending/Waiting |
-| Green | Playing response |
-| Red | Error |
-
-### Command Line Options
-
+#### [identity]
+```toml
+uuid = ""                    # Auto-generated UUID on first run
+name = "Kitchen Assistant"   # Display name in daemon logs/WebUI
+location = "kitchen"         # Room for context-aware responses
 ```
--s, --server IP      DAWN server IP address
--p, --port PORT      DAWN server port (default: 5000)
--c, --capture DEV    ALSA capture device
--o, --playback DEV   ALSA playback device
--k, --keyboard       Use keyboard instead of GPIO button
--d, --no-display     Disable display output
--n, --num-leds N     Number of NeoPixel LEDs (default: 3, max: 16)
--v, --verbose        Enable verbose logging
--h, --help           Show help message
+
+#### [server]
+```toml
+host = "192.168.1.100"       # DAWN daemon IP or hostname
+port = 8080                  # WebUI port
+ssl = false                  # Use wss:// (requires daemon SSL config)
+reconnect_delay_ms = 5000    # Reconnection backoff
+max_reconnect_attempts = 0   # 0 = retry forever
+```
+
+#### [audio]
+```toml
+capture_device = "plughw:1,0"   # ALSA capture device
+playback_device = "plughw:0,0" # ALSA playback device
+sample_rate = 16000            # Must be 16kHz for Whisper
+max_record_seconds = 30        # Safety timeout
+```
+
+#### [vad]
+```toml
+enabled = true
+silence_duration_ms = 800    # Silence before end-of-speech
+min_speech_ms = 250          # Minimum valid utterance
+threshold = 0.5              # 0.0-1.0, higher = stricter
+```
+
+#### [wake_word]
+```toml
+enabled = true
+word = "friday"              # Wake word (matches daemon)
+sensitivity = 0.5            # 0.0-1.0, higher = more false positives
+```
+
+#### [display]
+```toml
+enabled = true               # Enable SDL2 UI
+width = 1024                 # Display width
+height = 600                 # Display height
+fullscreen = true            # KMSDRM fullscreen mode
+screensaver_timeout_sec = 300  # Screensaver after 5 min idle
+```
+
+## Audio Device Setup
+
+### Find Your Devices
+
+```bash
+# List capture devices (microphones)
+arecord -l
+
+# List playback devices (speakers)
+aplay -l
+
+# Example output:
+# card 1: Device [USB Audio Device], device 0: USB Audio [USB Audio]
+#   Subdevices: 1/1
+#   Subdevice #0: subdevice #0
+```
+
+The device name format is `plughw:CARD,DEVICE`, e.g., `plughw:1,0`.
+
+### Test Audio
+
+```bash
+# Record 5 seconds
+arecord -D plughw:1,0 -f S16_LE -r 16000 -c 1 -d 5 /tmp/test.wav
+
+# Play it back
+aplay -D plughw:0,0 /tmp/test.wav
+```
+
+### Common Device Configurations
+
+| Hardware | Capture Device | Playback Device |
+|----------|----------------|-----------------|
+| USB sound card | `plughw:1,0` | `plughw:1,0` |
+| ReSpeaker 2-mic | `plughw:1,0` | `plughw:0,0` (3.5mm) |
+| I2S mic + DAC | `plughw:0,0` | `plughw:0,0` |
+| HDMI + USB mic | `plughw:1,0` | `plughw:0,0` |
+
+### I2S Audio Setup
+
+For I2S microphone (INMP441) and DAC (MAX98357A), add to `/boot/config.txt`:
+
+```ini
+# Enable I2S
+dtparam=i2s=on
+
+# I2S microphone
+dtoverlay=googlevoicehat-soundcard
+# or for generic I2S mic:
+# dtoverlay=i2s-mmap
+
+# I2S DAC (if using MAX98357A)
+dtoverlay=hifiberry-dac
+```
+
+Reboot after changes.
+
+## Touchscreen Display Setup
+
+### Requirements
+
+- Pi OS **Lite** (no desktop environment)
+- User in `video` and `render` groups
+- SDL2 with KMSDRM backend
+
+### Verify DRM Access
+
+```bash
+# Check DRM devices exist
+ls -la /dev/dri/
+# Should show: card0, card1, renderD128
+
+# Check group membership
+groups
+# Should include: video render
+```
+
+### Official Raspberry Pi 7" Display
+
+Works automatically. If needed, add to `/boot/config.txt`:
+
+```ini
+dtoverlay=vc4-kms-v3d
+max_framebuffers=2
+```
+
+### HDMI Touchscreen (1024x600)
+
+Add to `/boot/config.txt`:
+
+```ini
+# Force HDMI output
+hdmi_force_hotplug=1
+
+# Custom resolution
+hdmi_group=2
+hdmi_mode=87
+hdmi_cvt=1024 600 60 3 0 0 0
+
+# Enable KMS driver
+dtoverlay=vc4-kms-v3d
+```
+
+### Touch Input Calibration
+
+```bash
+# Install calibration tools
+sudo apt install libts-bin
+
+# Run calibration
+sudo ts_calibrate
+
+# Test touch
+ts_test
+```
+
+### Test SDL2 KMSDRM
+
+```bash
+# Force KMSDRM backend
+export SDL_VIDEODRIVER=KMSDRM
+
+# Run satellite
+./dawn_satellite --config /etc/dawn/satellite.toml
 ```
 
 ## Troubleshooting
 
-### No Audio Input
+### Connection Issues
 
-1. Check I2S is enabled: `arecord -l`
-2. Verify microphone wiring
-3. Test with: `arecord -D plughw:0,0 -f S16_LE -r 16000 -c 1 test.wav`
+| Symptom | Solution |
+|---------|----------|
+| "Connection refused" | Check daemon is running, verify IP/port |
+| "Connection timeout" | Check network, firewall (port 8080) |
+| "WebSocket error" | Ensure daemon WebUI is enabled |
 
-### No Audio Output
+```bash
+# Test connectivity
+ping 192.168.1.100
+curl -v http://192.168.1.100:8080/
 
-1. Check amplifier connections
-2. Test with: `aplay -D plughw:0,0 test.wav`
-3. Try `speaker-test -D plughw:0,0 -c 2`
+# Test WebSocket (install wscat: npm install -g wscat)
+wscat -c ws://192.168.1.100:8080
+```
 
-### Connection Failed
+### Audio Issues
 
-1. Verify DAWN server is running
-2. Check network connectivity: `ping <server_ip>`
-3. Ensure firewall allows port 5000
+| Symptom | Solution |
+|---------|----------|
+| "Cannot open capture device" | Check device name with `arecord -l` |
+| No sound output | Check `alsamixer`, unmute channels |
+| Distorted audio | Reduce volume, check sample rate |
 
-### GPIO Not Working
+```bash
+# Check ALSA mixer levels
+alsamixer
 
-1. Check `libgpiod` is installed
-2. Verify permissions: add user to `gpio` group
-3. Test with: `gpioinfo`
+# List all audio controls
+amixer contents
+```
 
-### NeoPixels Not Working
+### Display Issues
 
-1. Ensure SPI is enabled: `ls /dev/spidev*`
-2. Check wiring: DIN connects to GPIO10 (MOSI)
-3. Verify 5V power supply can handle LED current (~60mA per LED at full white)
-4. Test SPI permissions: add user to `spi` group
-5. Try fewer LEDs with `--num-leds 1` to rule out power issues
+| Symptom | Solution |
+|---------|----------|
+| "No available video device" | Add user to `video` group, reboot |
+| Black screen | Check HDMI connection, `/boot/config.txt` |
+| "DRM: permission denied" | Add user to `render` group |
+| Touch not working | Check `/dev/input/event*`, add to `input` group |
 
-## Cross-Compilation
+```bash
+# Check video group
+groups | grep -E "video|render"
 
-To build on a different machine for Pi Zero 2 W:
+# List input devices
+ls -la /dev/input/
+
+# Test touch events
+evtest /dev/input/event0
+```
+
+### Service Issues
+
+```bash
+# Check service status
+sudo systemctl status dawn-satellite
+
+# View recent logs
+journalctl -u dawn-satellite -n 50
+
+# Follow logs live
+journalctl -u dawn-satellite -f
+
+# Restart service
+sudo systemctl restart dawn-satellite
+```
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      DAWN Satellite (Tier 1)                    │
+│                                                                 │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │                 Local Processing Pipeline                  │ │
+│  │                                                            │ │
+│  │  ┌────────┐  ┌────────┐  ┌──────────┐  ┌────────┐        │ │
+│  │  │ Audio  │─▶│  VAD   │─▶│ Wake Word│─▶│  ASR   │        │ │
+│  │  │Capture │  │(Silero)│  │(Whisper) │  │(Whisper│        │ │
+│  │  └────────┘  └────────┘  └──────────┘  └───┬────┘        │ │
+│  │                                             │ text        │ │
+│  │  ┌────────┐  ┌────────┐                    ▼             │ │
+│  │  │ Audio  │◀─│  TTS   │◀───────────[satellite_query]     │ │
+│  │  │Playback│  │(Piper) │                                   │ │
+│  │  └────────┘  └────────┘◀───────────[satellite_response]   │ │
+│  │                                                            │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                              │                                  │
+│                              │ WebSocket (JSON, ~100 bytes)     │
+│                              ▼                                  │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │                     ws_client.c                            │ │
+│  │  satellite_register ──▶                                    │ │
+│  │  satellite_query ─────▶        ◀── satellite_response      │ │
+│  │                                ◀── stream_delta (streaming)│ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                              │                                  │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │              SDL2 Touchscreen UI (Optional)                │ │
+│  │                                                            │ │
+│  │  ┌──────────┐ ┌─────────────┐ ┌────────────┐ ┌──────────┐│ │
+│  │  │   Orb    │ │ Transcript  │ │   Quick    │ │  Media   ││ │
+│  │  │Visualize │ │  Display    │ │  Actions   │ │  Player  ││ │
+│  │  └──────────┘ └─────────────┘ └────────────┘ └──────────┘│ │
+│  │                                                            │ │
+│  │  Screensaver: Photo Frame │ Clock │ Ambient Orb            │ │
+│  └───────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+                               │
+                               │ WiFi
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                         DAWN Daemon                             │
+│                                                                 │
+│    LLM Processing │ Tool Execution │ Conversation History       │
+│    Command Parser │ MQTT Control   │ Memory System              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Protocol Reference
+
+### Message Types (WebSocket JSON)
+
+| Type | Direction | Purpose |
+|------|-----------|---------|
+| `satellite_register` | Satellite → Daemon | Initial registration |
+| `satellite_register_ack` | Daemon → Satellite | Registration confirmed |
+| `satellite_query` | Satellite → Daemon | User's transcribed text |
+| `stream_start` | Daemon → Satellite | Response streaming begins |
+| `stream_delta` | Daemon → Satellite | Partial response text |
+| `stream_end` | Daemon → Satellite | Response complete |
+| `satellite_status` | Both | Health check, metrics |
+
+### Example Flow
+
+```
+Satellite                              Daemon
+    │                                     │
+    │──── satellite_register ────────────▶│
+    │     {uuid, name, location, tier:1}  │
+    │                                     │
+    │◀─── satellite_register_ack ─────────│
+    │     {session_id, memory_enabled}    │
+    │                                     │
+    │  [User: "Hey Friday, lights on"]    │
+    │  [Local: VAD → Wake → ASR]          │
+    │                                     │
+    │──── satellite_query ───────────────▶│
+    │     {text: "lights on"}             │
+    │                                     │
+    │◀─── stream_start ───────────────────│
+    │◀─── stream_delta ───────────────────│
+    │     {delta: "I'll turn"}            │
+    │  [TTS: "I'll turn"]                 │
+    │◀─── stream_delta ───────────────────│
+    │     {delta: " on the lights."}      │
+    │  [TTS: " on the lights."]           │
+    │◀─── stream_end ─────────────────────│
+    │                                     │
+```
+
+## Development
+
+### Debug Build
+
+```bash
+cmake -DCMAKE_BUILD_TYPE=Debug ..
+make -j$(nproc)
+
+# Run with verbose logging
+./dawn_satellite --config satellite.toml --verbose
+```
+
+### Protocol Testing
+
+```bash
+# Python test client
+python3 ../tests/test_satellite_protocol.py --host 192.168.1.100 --port 8080
+```
+
+### Cross-Compilation (from x86_64)
 
 ```bash
 # Install cross-compiler
-sudo apt install gcc-aarch64-linux-gnu
+sudo apt install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
 # Build
 mkdir build-cross && cd build-cross
-cmake -DCMAKE_TOOLCHAIN_FILE=../toolchain-aarch64.cmake ..
+cmake -DCMAKE_TOOLCHAIN_FILE=../cmake/toolchain-aarch64.cmake ..
 make -j$(nproc)
+
+# Copy to Pi
+scp dawn_satellite pi@dawn-satellite.local:/home/pi/
+```
+
+## UI Customization
+
+### Screensaver Photos
+
+Place images in `/etc/dawn/photos/` or configure path in `satellite.toml`:
+
+```toml
+[display]
+photos_path = "/home/pi/photos"
+photo_interval_sec = 30
+```
+
+Supported formats: JPEG, PNG (will be scaled to display resolution).
+
+### Theme Colors
+
+The UI uses the same color palette as the DAWN WebUI. To customize, edit `src/ui/colors.h`:
+
+```c
+// Accent color (default: cyan)
+static const dawn_color_t COLOR_ACCENT = {0x2D, 0xD4, 0xBF, 0xFF};  // #2dd4bf
+
+// Alternative themes available:
+// Purple: {0xA8, 0x55, 0xF7, 0xFF}  // #a855f7
+// Green:  {0x7F, 0xFF, 0x7F, 0xFF}  // #7fff7f (terminal)
 ```
 
 ## License
 
-GPLv3 - See LICENSE file for details.
+GPLv3 or later. See LICENSE file in repository root.
 
-## Contributing
+## See Also
 
-Contributions welcome! See the main DAWN repository for guidelines.
+- [DAP2_DESIGN.md](../docs/DAP2_DESIGN.md) - Protocol specification
+- [DAP2_SATELLITE.md](../docs/DAP2_SATELLITE.md) - Implementation details
+- [DAWN WebUI](../www/) - Web interface (shares visual design)

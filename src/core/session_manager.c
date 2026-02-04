@@ -63,9 +63,10 @@ static void session_text_chunk_callback(const char *chunk, void *userdata) {
    }
 
    /* Chunks are accumulated by the streaming layer (llm_streaming.c)
-    * and also sent to WebSocket for real-time display */
+    * and also sent to WebSocket/satellite for real-time display */
 #ifdef ENABLE_WEBUI
-   if (session->type == SESSION_TYPE_WEBSOCKET && chunk && chunk[0] != '\0') {
+   if ((session->type == SESSION_TYPE_WEBSOCKET || session->type == SESSION_TYPE_DAP2) && chunk &&
+       chunk[0] != '\0') {
       uint64_t now_ms = get_time_ms();
 
       /* Track timing for first token (TTFT) - based on LLM output, not filtering */
@@ -77,27 +78,29 @@ static void session_text_chunk_callback(const char *chunk, void *userdata) {
       session->stream_token_count++;
       session->last_token_ms = now_ms;
 
-      /* Calculate metrics */
-      int ttft_ms = 0;
-      float token_rate = 0.0f;
+      /* Calculate metrics (WebSocket only - satellites don't need browser metrics) */
+      if (session->type == SESSION_TYPE_WEBSOCKET) {
+         int ttft_ms = 0;
+         float token_rate = 0.0f;
 
-      if (session->stream_start_ms > 0) {
-         ttft_ms = (int)(session->first_token_ms - session->stream_start_ms);
+         if (session->stream_start_ms > 0) {
+            ttft_ms = (int)(session->first_token_ms - session->stream_start_ms);
 
-         /* Calculate tokens per second based on elapsed time since first token */
-         uint64_t streaming_duration_ms = now_ms - session->first_token_ms;
-         if (streaming_duration_ms > 0 && session->stream_token_count > 1) {
-            token_rate = (float)(session->stream_token_count - 1) * 1000.0f /
-                         (float)streaming_duration_ms;
+            /* Calculate tokens per second based on elapsed time since first token */
+            uint64_t streaming_duration_ms = now_ms - session->first_token_ms;
+            if (streaming_duration_ms > 0 && session->stream_token_count > 1) {
+               token_rate = (float)(session->stream_token_count - 1) * 1000.0f /
+                            (float)streaming_duration_ms;
+            }
+         }
+
+         /* Send metrics update periodically (every 5 tokens to avoid flooding) */
+         if (session->stream_token_count % 5 == 0 || session->stream_token_count == 1) {
+            webui_send_metrics_update(session, "thinking", ttft_ms, token_rate, -1);
          }
       }
 
-      /* Send metrics update periodically (every 5 tokens to avoid flooding) */
-      if (session->stream_token_count % 5 == 0 || session->stream_token_count == 1) {
-         webui_send_metrics_update(session, "thinking", ttft_ms, token_rate, -1);
-      }
-
-      /* Send to WebUI - filtering and stream_start handled internally */
+      /* Send to WebUI/satellite - filtering and stream_start handled internally */
       webui_send_stream_delta(session, chunk);
    }
 #endif

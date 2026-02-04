@@ -41,8 +41,10 @@ static char g_config_path[CONFIG_PATH_SIZE] = { 0 };
 static void safe_strcpy(char *dest, const char *src, size_t dest_size) {
    if (!dest || !src || dest_size == 0)
       return;
-   strncpy(dest, src, dest_size - 1);
-   dest[dest_size - 1] = '\0';
+   size_t src_len = strlen(src);
+   size_t copy_len = src_len < dest_size - 1 ? src_len : dest_size - 1;
+   memcpy(dest, src, copy_len);
+   dest[copy_len] = '\0';
 }
 
 static bool file_exists(const char *path) {

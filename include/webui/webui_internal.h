@@ -100,6 +100,7 @@ typedef struct {
    uint8_t binary_msg_type; /* Message type from first fragment */
    bool use_opus;           /* True if client supports Opus codec */
    bool tts_enabled;        /* True if TTS output enabled for this connection */
+   bool is_satellite;       /* True if this is a DAP2 satellite connection */
 
    /* Text message fragmentation support (for large JSON payloads) */
    char *text_buffer;      /* Accumulation buffer for fragmented text messages */
