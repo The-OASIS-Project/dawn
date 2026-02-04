@@ -124,8 +124,11 @@ static int callback_ws(struct lws *wsi,
                        void *user,
                        void *in,
                        size_t len) {
-   ws_client_t **client_ptr = (ws_client_t **)user;
-   ws_client_t *client = client_ptr ? *client_ptr : NULL;
+   (void)user; /* Per-session data not used, we use context user instead */
+
+   /* Get client from context user data */
+   struct lws_context *ctx = lws_get_context(wsi);
+   ws_client_t *client = ctx ? (ws_client_t *)lws_context_user(ctx) : NULL;
 
    switch (reason) {
       case LWS_CALLBACK_CLIENT_ESTABLISHED:
@@ -458,6 +461,7 @@ int ws_client_connect(ws_client_t *client) {
    ctx_info.port = CONTEXT_PORT_NO_LISTEN;
    ctx_info.protocols = protocols;
    ctx_info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
+   ctx_info.user = client; /* Store client pointer for callback access */
 
    client->lws_ctx = lws_create_context(&ctx_info);
    if (!client->lws_ctx) {
@@ -474,7 +478,6 @@ int ws_client_connect(ws_client_t *client) {
    conn_info.host = client->host;
    conn_info.origin = client->host;
    conn_info.protocol = protocols[0].name;
-   conn_info.userdata = &client;
 
    if (client->use_ssl) {
       conn_info.ssl_connection = LCCSCF_USE_SSL | LCCSCF_ALLOW_SELFSIGNED |
