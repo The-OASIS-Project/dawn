@@ -205,6 +205,8 @@ def main():
     parser.add_argument("--host", default="localhost", help="DAWN daemon host")
     parser.add_argument("--port", type=int, default=8080, help="WebUI port")
     parser.add_argument("--ssl", action="store_true", help="Use wss:// (SSL)")
+    parser.add_argument("--insecure", action="store_true",
+                        help="Skip SSL certificate verification (for self-signed certs)")
     parser.add_argument("--auto-register", action="store_true",
                         help="Automatically register on connect")
     parser.add_argument("--name", default="Test Satellite", help="Satellite name")
@@ -226,7 +228,13 @@ def main():
 
     # Run WebSocket in a thread
     import threading
-    ws_thread = threading.Thread(target=ws.run_forever, daemon=True)
+    import ssl
+
+    sslopt = None
+    if args.ssl and args.insecure:
+        sslopt = {"cert_reqs": ssl.CERT_NONE, "check_hostname": False}
+
+    ws_thread = threading.Thread(target=lambda: ws.run_forever(sslopt=sslopt), daemon=True)
     ws_thread.start()
 
     # Wait for connection
