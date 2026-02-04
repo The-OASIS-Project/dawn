@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -133,7 +134,8 @@ static void print_usage(const char *prog) {
    printf("\n");
 }
 
-/* Check if key is pressed (non-blocking) */
+#ifndef ENABLE_DAP2
+/* Check if key is pressed (non-blocking) - used by DAP mode only */
 static int kbhit(void) {
    struct termios oldt, newt;
    int ch;
@@ -159,7 +161,7 @@ static int kbhit(void) {
    return 0;
 }
 
-/* Get pressed key */
+/* Get pressed key - used by DAP mode only */
 static int getch(void) {
    struct termios oldt, newt;
    int ch;
@@ -173,6 +175,7 @@ static int getch(void) {
 
    return ch;
 }
+#endif /* !ENABLE_DAP2 */
 
 #ifdef ENABLE_DAP2
 /* =============================================================================
@@ -255,8 +258,10 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
    printf("\n");
 
    if (use_keyboard) {
-      printf("Press SPACE to simulate voice input, or type a message and press Enter\n");
-      printf("Press 'q' to quit\n\n");
+      printf("Type a message and press Enter to send\n");
+      printf("Type 'quit' or press Ctrl+C to exit\n\n");
+      printf("> ");
+      fflush(stdout);
    } else {
       printf("Press GPIO button to speak\n");
       printf("Press Ctrl+C to exit\n\n");
@@ -267,44 +272,34 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
    ws_client_set_state_callback(ws, on_state_callback, ctx);
 
    char input_buffer[1024] = { 0 };
-   int input_pos = 0;
 
    while (ctx->running && ws_client_is_connected(ws)) {
-      /* Process WebSocket events */
-      ws_client_service(ws, 50);
+      /* Check for keyboard input using select() for non-blocking check */
+      if (use_keyboard) {
+         fd_set fds;
+         struct timeval tv = { 0, 50000 }; /* 50ms timeout */
 
-      /* Check for keyboard input */
-      if (use_keyboard && kbhit()) {
-         int ch = getch();
+         FD_ZERO(&fds);
+         FD_SET(STDIN_FILENO, &fds);
 
-         if (ch == 'q' || ch == 'Q') {
-            ctx->running = 0;
-            break;
-         } else if (ch == ' ') {
-            /* Simulate voice input - in real implementation, this would:
-             * 1. Capture audio
-             * 2. Run local ASR
-             * 3. Send transcribed text */
-            printf("\n[Simulated voice input]\n");
-            printf("Enter text (simulating ASR result): ");
-            fflush(stdout);
+         int ready = select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv);
 
-            /* Read line in blocking mode */
-            struct termios oldt, newt;
-            tcgetattr(STDIN_FILENO, &oldt);
-            newt = oldt;
-            newt.c_lflag |= (ICANON | ECHO);
-            tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-
+         if (ready > 0 && FD_ISSET(STDIN_FILENO, &fds)) {
             if (fgets(input_buffer, sizeof(input_buffer), stdin)) {
                /* Remove newline */
                size_t len = strlen(input_buffer);
                if (len > 0 && input_buffer[len - 1] == '\n') {
                   input_buffer[len - 1] = '\0';
+                  len--;
                }
 
-               if (input_buffer[0]) {
-                  printf("\n[Sending]: %s\n", input_buffer);
+               /* Check for quit command */
+               if (strcmp(input_buffer, "quit") == 0 || strcmp(input_buffer, "exit") == 0) {
+                  ctx->running = 0;
+                  break;
+               }
+
+               if (len > 0) {
 #ifdef ENABLE_NEOPIXEL
                   update_neopixel_for_state(STATE_SENDING);
 #endif
@@ -336,50 +331,18 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
                      update_neopixel_for_state(STATE_IDLE);
 #endif
                   }
-               }
-            }
 
-            tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-            input_buffer[0] = '\0';
-            input_pos = 0;
-
-         } else if (ch == '\n' || ch == '\r') {
-            /* Direct text input */
-            if (input_pos > 0) {
-               input_buffer[input_pos] = '\0';
-               printf("\n[Sending]: %s\n", input_buffer);
-
-               g_response_buffer[0] = '\0';
-               g_response_len = 0;
-               g_response_complete = 0;
-
-               if (ws_client_send_query(ws, input_buffer) != 0) {
-                  printf("Failed to send query: %s\n", ws_client_get_error(ws));
-               } else {
-                  printf("[Response]: ");
+                  printf("\n> ");
                   fflush(stdout);
-
-                  while (!g_response_complete && ctx->running && ws_client_is_connected(ws)) {
-                     ws_client_service(ws, 100);
-                  }
                }
-
-               input_buffer[0] = '\0';
-               input_pos = 0;
             }
-         } else if (ch == 127 || ch == '\b') {
-            /* Backspace */
-            if (input_pos > 0) {
-               input_pos--;
-               printf("\b \b");
-               fflush(stdout);
-            }
-         } else if (ch >= 32 && ch < 127 && input_pos < (int)sizeof(input_buffer) - 1) {
-            /* Regular character */
-            input_buffer[input_pos++] = (char)ch;
-            printf("%c", ch);
-            fflush(stdout);
+         } else {
+            /* No keyboard input, just service WebSocket */
+            ws_client_service(ws, 50);
          }
+      } else {
+         /* Non-keyboard mode - just service WebSocket */
+         ws_client_service(ws, 50);
       }
 
 #ifdef HAVE_GPIOD
