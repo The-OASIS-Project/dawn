@@ -43,14 +43,23 @@
 #define LOG_ERROR(fmt, ...) fprintf(stderr, "[STATE ERROR] " fmt "\n", ##__VA_ARGS__)
 
 /* State names for logging */
-static const char *state_names[] = { "IDLE",    "RECORDING", "CONNECTING", "SENDING",
-                                     "WAITING", "RECEIVING", "PLAYING",    "ERROR" };
+static const char *state_names[] = {
+   /* Button-triggered states */
+   "IDLE", "RECORDING", "CONNECTING", "SENDING", "WAITING", "RECEIVING", "PLAYING", "ERROR",
+   /* Local processing states */
+   "SILENCE", "WAKEWORD_LISTEN", "COMMAND_RECORDING", "PROCESSING", "SPEAKING"
+};
 
 /* Event names for logging */
-static const char *event_names[] = { "BUTTON_PRESS",    "BUTTON_RELEASE", "RECORD_COMPLETE",
-                                     "CONNECT_SUCCESS", "CONNECT_FAIL",   "SEND_COMPLETE",
-                                     "SEND_FAIL",       "RESPONSE_READY", "RESPONSE_FAIL",
-                                     "PLAYBACK_DONE",   "ERROR",          "TIMEOUT" };
+static const char *event_names[] = {
+   /* Button-triggered events */
+   "BUTTON_PRESS", "BUTTON_RELEASE", "RECORD_COMPLETE", "CONNECT_SUCCESS", "CONNECT_FAIL",
+   "SEND_COMPLETE", "SEND_FAIL", "RESPONSE_READY", "RESPONSE_FAIL", "PLAYBACK_DONE", "ERROR",
+   "TIMEOUT",
+   /* Local processing events */
+   "SPEECH_START", "SPEECH_END", "WAKEWORD_MATCH", "ASR_COMPLETE", "LLM_RESPONSE", "TTS_COMPLETE",
+   "INTERRUPT"
+};
 
 const char *satellite_state_name(satellite_state_t state) {
    if (state >= 0 && state < sizeof(state_names) / sizeof(state_names[0])) {
@@ -303,12 +312,80 @@ satellite_state_t satellite_process_event(satellite_ctx_t *ctx, satellite_event_
       case STATE_ERROR:
          /* Any button press returns to idle */
          if (event == EVENT_BUTTON_PRESS) {
-            new_state = STATE_IDLE;
+            new_state = ctx->mode == MODE_VOICE_ACTIVATED ? STATE_SILENCE : STATE_IDLE;
          }
          /* Auto-return to idle after timeout */
          if (event == EVENT_TIMEOUT) {
-            new_state = STATE_IDLE;
+            new_state = ctx->mode == MODE_VOICE_ACTIVATED ? STATE_SILENCE : STATE_IDLE;
          }
+         break;
+
+      /* Local processing states (voice-activated mode) */
+      case STATE_SILENCE:
+         if (event == EVENT_SPEECH_START) {
+            new_state = STATE_WAKEWORD_LISTEN;
+         } else if (event == EVENT_BUTTON_PRESS) {
+            /* Manual trigger in voice mode */
+            new_state = STATE_COMMAND_RECORDING;
+         } else if (event == EVENT_ERROR) {
+            new_state = STATE_ERROR;
+         }
+         break;
+
+      case STATE_WAKEWORD_LISTEN:
+         if (event == EVENT_WAKEWORD_MATCH) {
+            /* Wake word detected, start recording command */
+            new_state = STATE_COMMAND_RECORDING;
+         } else if (event == EVENT_SPEECH_END) {
+            /* Speech ended without wake word, return to silence */
+            new_state = STATE_SILENCE;
+         } else if (event == EVENT_TIMEOUT) {
+            /* Listening timeout, return to silence */
+            new_state = STATE_SILENCE;
+         } else if (event == EVENT_ERROR) {
+            new_state = STATE_ERROR;
+         }
+         break;
+
+      case STATE_COMMAND_RECORDING:
+         if (event == EVENT_SPEECH_END || event == EVENT_ASR_COMPLETE) {
+            /* Command recording complete, process */
+            new_state = STATE_PROCESSING;
+         } else if (event == EVENT_TIMEOUT) {
+            /* Recording timeout, process what we have */
+            new_state = STATE_PROCESSING;
+         } else if (event == EVENT_ERROR) {
+            new_state = STATE_ERROR;
+         }
+         break;
+
+      case STATE_PROCESSING:
+         if (event == EVENT_LLM_RESPONSE) {
+            /* Got LLM response, speak it */
+            new_state = STATE_SPEAKING;
+         } else if (event == EVENT_RESPONSE_FAIL || event == EVENT_TIMEOUT) {
+            new_state = STATE_ERROR;
+         } else if (event == EVENT_ERROR) {
+            new_state = STATE_ERROR;
+         }
+         break;
+
+      case STATE_SPEAKING:
+         if (event == EVENT_TTS_COMPLETE || event == EVENT_PLAYBACK_DONE) {
+            /* TTS complete, return to listening */
+            new_state = STATE_SILENCE;
+         } else if (event == EVENT_INTERRUPT || event == EVENT_SPEECH_START) {
+            /* Barge-in: user spoke during TTS */
+            ctx->stop_playback = 1;
+            new_state = STATE_WAKEWORD_LISTEN;
+         } else if (event == EVENT_ERROR) {
+            new_state = STATE_ERROR;
+         }
+         break;
+
+      default:
+         LOG_ERROR("Unknown state: %d", old_state);
+         new_state = STATE_ERROR;
          break;
    }
 
@@ -397,18 +474,23 @@ void satellite_update_leds(satellite_ctx_t *ctx) {
 
    switch (ctx->state) {
       case STATE_IDLE:
+      case STATE_SILENCE:
          led_state = LED_STATE_IDLE;
          break;
       case STATE_RECORDING:
+      case STATE_WAKEWORD_LISTEN:
+      case STATE_COMMAND_RECORDING:
          led_state = LED_STATE_RECORDING;
          break;
       case STATE_CONNECTING:
       case STATE_SENDING:
       case STATE_WAITING:
       case STATE_RECEIVING:
+      case STATE_PROCESSING:
          led_state = LED_STATE_PROCESSING;
          break;
       case STATE_PLAYING:
+      case STATE_SPEAKING:
          led_state = LED_STATE_PLAYING;
          break;
       case STATE_ERROR:
@@ -420,4 +502,157 @@ void satellite_update_leds(satellite_ctx_t *ctx) {
 #else
    (void)ctx;
 #endif
+}
+
+void satellite_set_mode(satellite_ctx_t *ctx, satellite_mode_t mode) {
+   if (!ctx)
+      return;
+
+   ctx->mode = mode;
+
+   /* Set initial state based on mode */
+   if (mode == MODE_VOICE_ACTIVATED) {
+      ctx->state = STATE_SILENCE;
+   } else {
+      ctx->state = STATE_IDLE;
+   }
+
+   LOG_INFO("Mode set to %s, initial state: %s",
+            mode == MODE_VOICE_ACTIVATED ? "VOICE_ACTIVATED" : "BUTTON_TRIGGERED",
+            satellite_state_name(ctx->state));
+}
+
+void satellite_set_local_models(satellite_ctx_t *ctx,
+                                const char *vad_model,
+                                const char *asr_model,
+                                const char *tts_model,
+                                const char *tts_config,
+                                const char *espeak_data) {
+   if (!ctx)
+      return;
+
+   if (vad_model) {
+      strncpy(ctx->vad_model_path, vad_model, sizeof(ctx->vad_model_path) - 1);
+   }
+   if (asr_model) {
+      strncpy(ctx->asr_model_path, asr_model, sizeof(ctx->asr_model_path) - 1);
+   }
+   if (tts_model) {
+      strncpy(ctx->tts_model_path, tts_model, sizeof(ctx->tts_model_path) - 1);
+   }
+   if (tts_config) {
+      strncpy(ctx->tts_config_path, tts_config, sizeof(ctx->tts_config_path) - 1);
+   }
+   if (espeak_data) {
+      strncpy(ctx->espeak_data_path, espeak_data, sizeof(ctx->espeak_data_path) - 1);
+   }
+
+   LOG_INFO("Local models configured");
+}
+
+void satellite_set_wake_word(satellite_ctx_t *ctx, const char *wake_word) {
+   if (!ctx || !wake_word)
+      return;
+
+   strncpy(ctx->wake_word, wake_word, sizeof(ctx->wake_word) - 1);
+   LOG_INFO("Wake word set to: %s", ctx->wake_word);
+}
+
+/* Local processing initialization and cleanup */
+#ifdef ENABLE_LOCAL_VAD
+#include "asr/vad_silero.h"
+#endif
+
+#ifdef ENABLE_LOCAL_ASR
+#include "asr/asr_whisper.h"
+#endif
+
+#ifdef ENABLE_LOCAL_TTS
+#include "tts/tts_piper.h"
+#endif
+
+int satellite_init_local_processing(satellite_ctx_t *ctx) {
+   if (!ctx)
+      return -1;
+
+   LOG_INFO("Initializing local processing...");
+
+#ifdef ENABLE_LOCAL_VAD
+   if (ctx->vad_model_path[0]) {
+      ctx->vad_ctx = vad_silero_init(ctx->vad_model_path, NULL);
+      if (!ctx->vad_ctx) {
+         LOG_ERROR("Failed to initialize VAD");
+         return -1;
+      }
+      ctx->vad_threshold = 0.5f; /* Default threshold */
+      LOG_INFO("VAD initialized: %s", ctx->vad_model_path);
+   }
+#endif
+
+#ifdef ENABLE_LOCAL_ASR
+   if (ctx->asr_model_path[0]) {
+      asr_whisper_config_t asr_config = asr_whisper_default_config();
+      asr_config.model_path = ctx->asr_model_path;
+      asr_config.use_gpu = 0; /* CPU only for Pi */
+      asr_config.n_threads = 4;
+
+      ctx->asr_ctx = asr_whisper_init(&asr_config);
+      if (!ctx->asr_ctx) {
+         LOG_ERROR("Failed to initialize ASR");
+         satellite_cleanup_local_processing(ctx);
+         return -1;
+      }
+      LOG_INFO("ASR initialized: %s", ctx->asr_model_path);
+   }
+#endif
+
+#ifdef ENABLE_LOCAL_TTS
+   if (ctx->tts_model_path[0] && ctx->tts_config_path[0]) {
+      tts_piper_config_t tts_config = tts_piper_default_config();
+      tts_config.model_path = ctx->tts_model_path;
+      tts_config.model_config_path = ctx->tts_config_path;
+      tts_config.espeak_data_path = ctx->espeak_data_path[0] ? ctx->espeak_data_path
+                                                             : "/usr/share/espeak-ng-data";
+      tts_config.use_cuda = 0; /* CPU only for Pi */
+
+      ctx->tts_ctx = tts_piper_init(&tts_config);
+      if (!ctx->tts_ctx) {
+         LOG_ERROR("Failed to initialize TTS");
+         satellite_cleanup_local_processing(ctx);
+         return -1;
+      }
+      LOG_INFO("TTS initialized: %s", ctx->tts_model_path);
+   }
+#endif
+
+   LOG_INFO("Local processing initialized successfully");
+   return 0;
+}
+
+void satellite_cleanup_local_processing(satellite_ctx_t *ctx) {
+   if (!ctx)
+      return;
+
+#ifdef ENABLE_LOCAL_VAD
+   if (ctx->vad_ctx) {
+      vad_silero_cleanup(ctx->vad_ctx);
+      ctx->vad_ctx = NULL;
+   }
+#endif
+
+#ifdef ENABLE_LOCAL_ASR
+   if (ctx->asr_ctx) {
+      asr_whisper_cleanup(ctx->asr_ctx);
+      ctx->asr_ctx = NULL;
+   }
+#endif
+
+#ifdef ENABLE_LOCAL_TTS
+   if (ctx->tts_ctx) {
+      tts_piper_cleanup(ctx->tts_ctx);
+      ctx->tts_ctx = NULL;
+   }
+#endif
+
+   LOG_INFO("Local processing cleaned up");
 }

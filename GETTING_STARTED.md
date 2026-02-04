@@ -43,8 +43,8 @@ Four libraries are required. See [README.md](README.md#2-install-core-dependenci
 |---------|---------------|-------|
 | spdlog | Yes (`libspdlog-dev`) | Logging library |
 | espeak-ng | **No** - need rhasspy fork | Phoneme backend for TTS |
-| piper-phonemize | **No** | TTS frontend |
 | ONNX Runtime | **No** | Inference engine for TTS/VAD |
+| piper-phonemize | **No** | TTS frontend (requires ONNX + espeak-ng) |
 
 **Step 1: Install spdlog from apt**
 ```bash
@@ -60,14 +60,7 @@ make -j$(nproc) && sudo make LIBDIR=/usr/lib/$(dpkg-architecture -qDEB_HOST_MULT
 cd ..
 ```
 
-**Step 3: Build piper-phonemize**
-```bash
-git clone https://github.com/rhasspy/piper-phonemize.git && cd piper-phonemize
-mkdir build && cd build && cmake .. && make -j$(nproc) && sudo make install
-cd ../..
-```
-
-**Step 4: Install ONNX Runtime**
+**Step 3: Install ONNX Runtime**
 
 ONNX Runtime build varies by platform. See [README.md](README.md#onnx-runtime-with-cuda-support-for-jetson) for:
 - Jetson with CUDA acceleration
@@ -75,6 +68,22 @@ ONNX Runtime build varies by platform. See [README.md](README.md#onnx-runtime-wi
 - x86-64 systems
 
 > **Tip**: Pre-built packages may be available at [ONNX Runtime releases](https://github.com/microsoft/onnxruntime/releases).
+
+**Step 4: Build piper-phonemize**
+```bash
+git clone https://github.com/rhasspy/piper-phonemize.git && cd piper-phonemize
+mkdir build && cd build
+cmake .. -DONNXRUNTIME_DIR=/usr/local -DESPEAK_NG_DIR=/usr
+make -j$(nproc)
+
+# Manual install (piper's make install has broken rules for system deps)
+sudo cp -a libpiper_phonemize.so* /usr/local/lib/
+sudo mkdir -p /usr/local/include/piper-phonemize
+sudo cp ../src/*.hpp /usr/local/include/piper-phonemize/
+sudo cp ../src/uni_algo.h /usr/local/include/piper-phonemize/
+sudo ldconfig
+cd ../..
+```
 
 ## 3. Clone and Build
 

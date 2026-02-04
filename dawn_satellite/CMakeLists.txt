@@ -1,9 +1,11 @@
 cmake_minimum_required(VERSION 3.10)
 
-project(dawn_satellite LANGUAGES C)
+project(dawn_satellite LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Build type
 if(NOT CMAKE_BUILD_TYPE)
@@ -22,6 +24,12 @@ find_package(PkgConfig REQUIRED)
 # DAP = Original audio streaming (Tier 2)
 # DAP2 = WebSocket text protocol (Tier 1, requires local ASR/TTS)
 option(ENABLE_DAP2 "Enable DAP2 WebSocket protocol (Tier 1)" ON)
+
+# Local processing (Phase 2-3): VAD, ASR, TTS on the satellite
+# This enables fully local wake word detection and speech processing
+option(ENABLE_LOCAL_VAD "Enable local VAD (Silero)" OFF)
+option(ENABLE_LOCAL_ASR "Enable local ASR (Whisper)" OFF)
+option(ENABLE_LOCAL_TTS "Enable local TTS (Piper)" OFF)
 
 # ALSA for audio
 pkg_check_modules(ALSA REQUIRED alsa)
@@ -104,12 +112,36 @@ endif()
 # Include directories
 include_directories(include)
 
+# Include whisper.cpp for local ASR (must be before dawn_common so target exists)
+if(ENABLE_LOCAL_ASR)
+    set(WHISPER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../whisper.cpp")
+    if(EXISTS "${WHISPER_DIR}/CMakeLists.txt")
+        # Configure whisper.cpp for CPU (Pi Zero 2 W has no CUDA)
+        set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        set(GGML_CUDA OFF CACHE BOOL "" FORCE)
+        set(GGML_METAL OFF CACHE BOOL "" FORCE)
+        add_subdirectory("${WHISPER_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/whisper.cpp")
+        message(STATUS "whisper.cpp: ENABLED (CPU mode)")
+    else()
+        message(FATAL_ERROR "whisper.cpp not found at ${WHISPER_DIR} - required for local ASR")
+    endif()
+endif()
+
 # Include dawn_common library from parent project
 # This provides ring_buffer, sentence_buffer, string_utils, logging_common
+# Optional: dawn_common_vad, dawn_common_asr, dawn_common_tts
 set(DAWN_COMMON_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../common")
 if(EXISTS "${DAWN_COMMON_DIR}/CMakeLists.txt")
+    # Configure common library options based on satellite options
+    set(DAWN_COMMON_WITH_VAD ${ENABLE_LOCAL_VAD} CACHE BOOL "" FORCE)
+    set(DAWN_COMMON_WITH_ASR ${ENABLE_LOCAL_ASR} CACHE BOOL "" FORCE)
+    set(DAWN_COMMON_WITH_TTS ${ENABLE_LOCAL_TTS} CACHE BOOL "" FORCE)
+
     add_subdirectory("${DAWN_COMMON_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/dawn_common")
     include_directories("${DAWN_COMMON_DIR}/include")
+    # Also include main project's include for piper.hpp, json.hpp etc
+    include_directories("${CMAKE_CURRENT_SOURCE_DIR}/../include")
     message(STATUS "Using dawn_common library from parent project")
 else()
     message(WARNING "dawn_common not found - some features may not work")
@@ -130,6 +162,25 @@ if(TARGET dawn_common)
     target_link_libraries(dawn_satellite dawn_common)
 endif()
 
+# Link optional VAD/ASR/TTS libraries
+if(ENABLE_LOCAL_VAD AND TARGET dawn_common_vad)
+    target_link_libraries(dawn_satellite dawn_common_vad)
+    target_compile_definitions(dawn_satellite PRIVATE ENABLE_LOCAL_VAD)
+    message(STATUS "Local VAD: ENABLED")
+endif()
+
+if(ENABLE_LOCAL_ASR AND TARGET dawn_common_asr)
+    target_link_libraries(dawn_satellite dawn_common_asr)
+    target_compile_definitions(dawn_satellite PRIVATE ENABLE_LOCAL_ASR)
+    message(STATUS "Local ASR: ENABLED")
+endif()
+
+if(ENABLE_LOCAL_TTS AND TARGET dawn_common_tts)
+    target_link_libraries(dawn_satellite dawn_common_tts)
+    target_compile_definitions(dawn_satellite PRIVATE ENABLE_LOCAL_TTS)
+    message(STATUS "Local TTS: ENABLED")
+endif()
+
 if(GPIOD_FOUND)
     target_link_libraries(dawn_satellite ${GPIOD_LIBRARIES})
 endif()
@@ -147,4 +198,7 @@ message(STATUS "")
 message(STATUS "=== DAWN Satellite Configuration ===")
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Target: ${CMAKE_SYSTEM_PROCESSOR}")
+message(STATUS "Local VAD: ${ENABLE_LOCAL_VAD}")
+message(STATUS "Local ASR: ${ENABLE_LOCAL_ASR}")
+message(STATUS "Local TTS: ${ENABLE_LOCAL_TTS}")
 message(STATUS "=====================================")

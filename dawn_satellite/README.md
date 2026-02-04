@@ -107,23 +107,86 @@ sudo apt install -y \
 # sudo apt install -y libgpiod-dev
 ```
 
-### 4. Build the Common Library
+### 4. Local Processing Dependencies (Optional)
+
+For Tier 1 satellites with local VAD, ASR, and TTS, install these additional dependencies.
+
+> **Note:** These are only needed if you enable `ENABLE_LOCAL_VAD`, `ENABLE_LOCAL_ASR`, or `ENABLE_LOCAL_TTS`. Skip this section for basic WebSocket-only mode.
+
+#### ONNX Runtime (required for VAD and TTS)
+
+For Raspberry Pi (ARM64 CPU-only):
 
 ```bash
-# Clone the repository
-git clone https://github.com/The-OASIS-Project/dawn.git
-cd dawn
+# Download pre-built ARM64 release (recommended)
+# Check https://github.com/microsoft/onnxruntime/releases for latest version
+wget https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-linux-aarch64-1.16.3.tgz
+tar xzf onnxruntime-linux-aarch64-1.16.3.tgz
+cd onnxruntime-linux-aarch64-1.16.3
 
-# Build the common library
-cd common
+# Install
+sudo cp -a lib/libonnxruntime.so* /usr/local/lib/
+sudo cp include/*.h /usr/local/include/
+sudo ldconfig
+cd ..
+```
+
+Alternatively, build from source (takes longer on Pi):
+```bash
+git clone --recursive https://github.com/microsoft/onnxruntime
+cd onnxruntime
+./build.sh --config MinSizeRel --update --build --parallel --build_shared_lib
+sudo cp -a build/Linux/MinSizeRel/libonnxruntime.so* /usr/local/lib/
+sudo cp include/onnxruntime/core/session/*.h /usr/local/include/
+sudo ldconfig
+cd ..
+```
+
+#### espeak-ng (required for TTS - must use rhasspy fork)
+
+```bash
+# Remove apt version if installed (won't work with Piper)
+sudo apt purge -y espeak-ng-data libespeak-ng1 2>/dev/null || true
+
+# Install build dependencies
+sudo apt install -y autoconf automake libtool
+
+# Build rhasspy fork
+git clone https://github.com/rhasspy/espeak-ng.git
+cd espeak-ng
+./autogen.sh && ./configure --prefix=/usr
+make -j$(nproc) && sudo make LIBDIR=/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH) install
+cd ..
+```
+
+#### piper-phonemize (required for TTS)
+
+```bash
+git clone https://github.com/rhasspy/piper-phonemize.git
+cd piper-phonemize
 mkdir build && cd build
-cmake ..
+cmake .. -DONNXRUNTIME_DIR=/usr/local -DESPEAK_NG_DIR=/usr
 make -j$(nproc)
-sudo make install
+
+# Manual install (piper's make install has broken rules for system deps)
+sudo cp -a libpiper_phonemize.so* /usr/local/lib/
+sudo mkdir -p /usr/local/include/piper-phonemize
+sudo cp ../src/*.hpp /usr/local/include/piper-phonemize/
+sudo cp ../src/uni_algo.h /usr/local/include/piper-phonemize/
+sudo ldconfig
 cd ../..
 ```
 
-### 5. Build the Satellite
+### 5. Clone Repository
+
+```bash
+git clone --recursive https://github.com/The-OASIS-Project/dawn.git
+cd dawn
+```
+
+> **Note:** The `--recursive` flag is important to fetch the whisper.cpp submodule for local ASR.
+
+### 6. Build the Satellite
 
 ```bash
 cd dawn_satellite
@@ -132,20 +195,30 @@ cmake ..
 make -j$(nproc)
 ```
 
+> The common library is built automatically as part of the satellite build process.
+
 #### Build Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-DENABLE_UI=ON` | ON | SDL2 touchscreen UI |
 | `-DENABLE_DAP2=ON` | ON | WebSocket protocol (vs legacy DAP1) |
+| `-DENABLE_LOCAL_VAD=OFF` | OFF | Local Silero VAD (requires ONNX Runtime) |
+| `-DENABLE_LOCAL_ASR=OFF` | OFF | Local Whisper ASR (uses whisper.cpp submodule) |
+| `-DENABLE_LOCAL_TTS=OFF` | OFF | Local Piper TTS (requires ONNX + piper-phonemize) |
 | `-DCMAKE_BUILD_TYPE=Release` | Release | Optimization level |
+
+Example with local processing enabled (Tier 1):
+```bash
+cmake -DENABLE_LOCAL_VAD=ON -DENABLE_LOCAL_ASR=ON -DENABLE_LOCAL_TTS=ON ..
+```
 
 Example with UI disabled (headless):
 ```bash
 cmake -DENABLE_UI=OFF ..
 ```
 
-### 6. Configure
+### 7. Configure
 
 ```bash
 # Create config directory
@@ -174,7 +247,7 @@ capture_device = "plughw:1,0"   # Your microphone (run 'arecord -l')
 playback_device = "plughw:0,0" # Your speaker (run 'aplay -l')
 ```
 
-### 7. Test Run
+### 8. Test Run
 
 ```bash
 # Run manually to test
@@ -189,7 +262,7 @@ playback_device = "plughw:0,0" # Your speaker (run 'aplay -l')
 # [INFO] Ready - say "Hey Friday" to activate
 ```
 
-### 8. Install as System Service
+### 9. Install as System Service
 
 ```bash
 # Create systemd service

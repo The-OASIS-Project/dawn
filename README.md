@@ -299,8 +299,7 @@ cd onnxruntime
 
 # Install
 sudo cp -a build/Linux/MinSizeRel/libonnxruntime.so* /usr/local/lib/
-sudo mkdir -p /usr/local/include/onnxruntime
-sudo cp include/onnxruntime/core/session/*.h /usr/local/include/onnxruntime
+sudo cp include/onnxruntime/core/session/*.h /usr/local/include/
 sudo ldconfig
 ```
 
@@ -309,9 +308,15 @@ sudo ldconfig
 git clone https://github.com/rhasspy/piper-phonemize.git
 cd piper-phonemize
 mkdir build && cd build
-cmake ..
+cmake .. -DONNXRUNTIME_DIR=/usr/local -DESPEAK_NG_DIR=/usr
 make -j8
-sudo make install
+
+# Manual install (piper's make install has broken rules for system deps)
+sudo cp -a libpiper_phonemize.so* /usr/local/lib/
+sudo mkdir -p /usr/local/include/piper-phonemize
+sudo cp ../src/*.hpp /usr/local/include/piper-phonemize/
+sudo cp ../src/uni_algo.h /usr/local/include/piper-phonemize/
+sudo ldconfig
 ```
 
 ### 3. Install ASR Engine (Whisper)

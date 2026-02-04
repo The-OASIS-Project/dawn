@@ -60,18 +60,23 @@ static void update_neopixel_for_state(satellite_state_t state) {
 
    switch (state) {
       case STATE_IDLE:
+      case STATE_SILENCE:
          neopixel_set_mode(g_neopixel, NEO_IDLE_CYCLING);
          break;
       case STATE_RECORDING:
+      case STATE_WAKEWORD_LISTEN:
+      case STATE_COMMAND_RECORDING:
          neopixel_set_mode(g_neopixel, NEO_RECORDING);
          break;
       case STATE_CONNECTING:
       case STATE_SENDING:
       case STATE_WAITING:
       case STATE_RECEIVING:
+      case STATE_PROCESSING:
          neopixel_set_mode(g_neopixel, NEO_WAITING);
          break;
       case STATE_PLAYING:
+      case STATE_SPEAKING:
          neopixel_set_mode(g_neopixel, NEO_PLAYING);
          break;
       case STATE_ERROR:
