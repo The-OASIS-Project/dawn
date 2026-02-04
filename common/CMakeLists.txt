@@ -168,31 +168,52 @@ if(DAWN_COMMON_WITH_TTS)
         HINTS /usr/local/lib /usr/lib
     )
 
-    # Check if piper headers exist in parent project
-    set(PIPER_HEADER_DIR "")
-    if(EXISTS "${CMAKE_SOURCE_DIR}/include/tts/piper.hpp")
-        set(PIPER_HEADER_DIR "${CMAKE_SOURCE_DIR}/include")
-    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../include/tts/piper.hpp")
-        set(PIPER_HEADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+    # Find spdlog (required by piper.cpp)
+    find_package(PkgConfig QUIET)
+    if(PKG_CONFIG_FOUND)
+        pkg_check_modules(SPDLOG spdlog)
     endif()
 
-    if(ONNXRUNTIME_LIBRARY AND PIPER_PHONEMIZE_LIBRARY AND PIPER_HEADER_DIR)
+    # Check if piper source exists in parent project
+    set(PIPER_HEADER_DIR "")
+    set(PIPER_SOURCE_FILE "")
+    if(EXISTS "${CMAKE_SOURCE_DIR}/include/tts/piper.hpp")
+        set(PIPER_HEADER_DIR "${CMAKE_SOURCE_DIR}/include")
+        set(PIPER_SOURCE_FILE "${CMAKE_SOURCE_DIR}/src/tts/piper.cpp")
+    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../include/tts/piper.hpp")
+        set(PIPER_HEADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+        set(PIPER_SOURCE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../src/tts/piper.cpp")
+    endif()
+
+    if(ONNXRUNTIME_LIBRARY AND PIPER_PHONEMIZE_LIBRARY AND PIPER_HEADER_DIR AND EXISTS "${PIPER_SOURCE_FILE}")
         message(STATUS "Found ONNX Runtime for TTS: ${ONNXRUNTIME_LIBRARY}")
         message(STATUS "Found piper-phonemize: ${PIPER_PHONEMIZE_LIBRARY}")
-        message(STATUS "Found Piper headers: ${PIPER_HEADER_DIR}")
+        message(STATUS "Found Piper source: ${PIPER_SOURCE_FILE}")
 
-        # Create TTS library (C++)
+        # Create piper library (same pattern as main build)
+        add_library(piper STATIC ${PIPER_SOURCE_FILE})
+        target_include_directories(piper PUBLIC
+            ${PIPER_HEADER_DIR}
+            ${ONNXRUNTIME_INCLUDE_DIR}
+            ${PIPER_PHONEMIZE_INCLUDE_DIR}
+            ${SPDLOG_INCLUDE_DIRS}
+        )
+        target_link_libraries(piper PUBLIC ${ONNXRUNTIME_LIBRARY})
+
+        # Create TTS wrapper library (C interface)
         add_library(dawn_common_tts STATIC src/tts/tts_piper.cpp)
         target_include_directories(dawn_common_tts PUBLIC
             ${CMAKE_CURRENT_SOURCE_DIR}/include
             ${PIPER_HEADER_DIR}
             ${ONNXRUNTIME_INCLUDE_DIR}
             ${PIPER_PHONEMIZE_INCLUDE_DIR}
+            ${SPDLOG_INCLUDE_DIRS}
         )
         target_link_libraries(dawn_common_tts PUBLIC
             dawn_common
-            ${ONNXRUNTIME_LIBRARY}
+            piper
             ${PIPER_PHONEMIZE_LIBRARY}
+            ${SPDLOG_LIBRARIES}
         )
         if(ESPEAK_NG_LIBRARY)
             target_link_libraries(dawn_common_tts PUBLIC ${ESPEAK_NG_LIBRARY})
@@ -207,6 +228,9 @@ if(DAWN_COMMON_WITH_TTS)
         endif()
         if(NOT PIPER_HEADER_DIR)
             message(WARNING "Piper headers not found - TTS support disabled")
+        endif()
+        if(NOT EXISTS "${PIPER_SOURCE_FILE}")
+            message(WARNING "Piper source (piper.cpp) not found - TTS support disabled")
         endif()
         set(DAWN_COMMON_WITH_TTS OFF)
     endif()

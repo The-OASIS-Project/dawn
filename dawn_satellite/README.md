@@ -113,6 +113,11 @@ For Tier 1 satellites with local VAD, ASR, and TTS, install these additional dep
 
 > **Note:** These are only needed if you enable `ENABLE_LOCAL_VAD`, `ENABLE_LOCAL_ASR`, or `ENABLE_LOCAL_TTS`. Skip this section for basic WebSocket-only mode.
 
+```bash
+# spdlog (required for TTS)
+sudo apt install -y libspdlog-dev
+```
+
 #### ONNX Runtime (required for VAD and TTS)
 
 For Raspberry Pi (ARM64 CPU-only):
