@@ -223,7 +223,8 @@ def main():
         on_open=on_open,
         on_message=on_message,
         on_error=on_error,
-        on_close=on_close
+        on_close=on_close,
+        subprotocols=["dawn-1.0"]
     )
 
     # Run WebSocket in a thread
