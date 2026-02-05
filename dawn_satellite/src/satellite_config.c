@@ -420,7 +420,7 @@ int satellite_config_load(satellite_config_t *config, const char *path) {
 
       const char *s = toml_string_or(vad, "model_path", NULL);
       if (s) {
-         safe_strcpy(config->vad.model_path, s, CONFIG_PATH_SIZE);
+         expand_home_path(s, config->vad.model_path, CONFIG_PATH_SIZE);
          free((void *)s);
       }
 
@@ -453,7 +453,7 @@ int satellite_config_load(satellite_config_t *config, const char *path) {
 
       s = toml_string_or(asr, "model_path", NULL);
       if (s) {
-         safe_strcpy(config->asr.model_path, s, CONFIG_PATH_SIZE);
+         expand_home_path(s, config->asr.model_path, CONFIG_PATH_SIZE);
          free((void *)s);
       }
 
@@ -475,13 +475,13 @@ int satellite_config_load(satellite_config_t *config, const char *path) {
 
       s = toml_string_or(tts, "model_path", NULL);
       if (s) {
-         safe_strcpy(config->tts.model_path, s, CONFIG_PATH_SIZE);
+         expand_home_path(s, config->tts.model_path, CONFIG_PATH_SIZE);
          free((void *)s);
       }
 
       s = toml_string_or(tts, "config_path", NULL);
       if (s) {
-         safe_strcpy(config->tts.config_path, s, CONFIG_PATH_SIZE);
+         expand_home_path(s, config->tts.config_path, CONFIG_PATH_SIZE);
          free((void *)s);
       }
 

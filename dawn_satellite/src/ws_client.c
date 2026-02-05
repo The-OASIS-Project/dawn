@@ -670,12 +670,14 @@ int ws_client_register(ws_client_t *client,
 
    LOG_INFO("Registration sent for '%s'", identity->name);
 
-   /* Wait for registration response */
+   /* Wait for registration response
+    * NOTE: Don't call lws_service() here - the background service thread
+    * is already doing that. Just poll the registered flag with a sleep. */
    int timeout_ms = 5000;
    int elapsed = 0;
    while (!client->registered && elapsed < timeout_ms && client->state == WS_STATE_CONNECTED) {
-      lws_service(client->lws_ctx, 100);
-      elapsed += 100;
+      usleep(50000); /* 50ms */
+      elapsed += 50;
    }
 
    if (!client->registered) {

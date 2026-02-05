@@ -375,9 +375,10 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
                      printf("[Response]: ");
                      fflush(stdout);
 
-                     /* Wait for response */
+                     /* Wait for response
+                      * NOTE: Don't call ws_client_service() - background thread handles it */
                      while (!g_response_complete && ctx->running && ws_client_is_connected(ws)) {
-                        ws_client_service(ws, 100);
+                        usleep(50000); /* 50ms */
                      }
 
                      /* In real implementation, we would:
@@ -395,14 +396,10 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
                   fflush(stdout);
                }
             }
-         } else {
-            /* No keyboard input, just service WebSocket */
-            ws_client_service(ws, 50);
          }
-      } else {
-         /* Non-keyboard mode - just service WebSocket */
-         ws_client_service(ws, 50);
+         /* No keyboard input - background thread handles WebSocket */
       }
+      /* WebSocket servicing handled by background thread in ws_client */
 
 #ifdef HAVE_GPIOD
       /* TODO: Handle GPIO button for real voice input */
