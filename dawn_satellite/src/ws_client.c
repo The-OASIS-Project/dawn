@@ -49,6 +49,7 @@ struct ws_client {
    char host[256];
    uint16_t port;
    bool use_ssl;
+   bool ssl_verify; /* Verify SSL certificates (default: true) */
 
    /* State */
    ws_state_t state;
@@ -84,6 +85,10 @@ struct ws_client {
 
    /* Thread safety */
    pthread_mutex_t mutex;
+
+   /* Background service thread */
+   pthread_t service_thread;
+   volatile bool service_running;
 };
 
 /* =============================================================================
@@ -275,6 +280,21 @@ static void handle_message(ws_client_t *client, const char *msg, size_t len) {
             client->registered = true;
             client->session_id = session_id;
             client->state = WS_STATE_REGISTERED;
+
+            /* Extract and store reconnect secret for future reconnections
+             * SECURITY: Client MUST save this secret persistently */
+            struct json_object *secret_obj;
+            if (json_object_object_get_ex(payload, "reconnect_secret", &secret_obj)) {
+               const char *secret = json_object_get_string(secret_obj);
+               if (secret && secret[0]) {
+                  strncpy(client->identity.reconnect_secret, secret,
+                          sizeof(client->identity.reconnect_secret) - 1);
+                  client->identity.reconnect_secret[sizeof(client->identity.reconnect_secret) - 1] =
+                      '\0';
+                  LOG_INFO("Received reconnect secret: %.8s...", secret);
+               }
+            }
+
             LOG_INFO("Registered successfully, session_id=%u", session_id);
          } else {
             struct json_object *msg_obj;
@@ -400,7 +420,7 @@ static int send_json(ws_client_t *client, struct json_object *obj) {
  * Public API - Lifecycle
  * ============================================================================= */
 
-ws_client_t *ws_client_create(const char *host, uint16_t port, bool use_ssl) {
+ws_client_t *ws_client_create(const char *host, uint16_t port, bool use_ssl, bool ssl_verify) {
    if (!host) {
       return NULL;
    }
@@ -413,6 +433,7 @@ ws_client_t *ws_client_create(const char *host, uint16_t port, bool use_ssl) {
    strncpy(client->host, host, sizeof(client->host) - 1);
    client->port = port > 0 ? port : 8080;
    client->use_ssl = use_ssl;
+   client->ssl_verify = ssl_verify;
    client->state = WS_STATE_DISCONNECTED;
 
    /* Allocate receive buffer */
@@ -444,6 +465,24 @@ void ws_client_destroy(ws_client_t *client) {
 }
 
 /* =============================================================================
+ * Background Service Thread
+ * ============================================================================= */
+
+static void *ws_service_thread(void *arg) {
+   ws_client_t *client = (ws_client_t *)arg;
+
+   LOG_INFO("WebSocket service thread started");
+
+   while (client->service_running && client->lws_ctx) {
+      /* Service with 100ms timeout - this blocks but doesn't affect main voice loop */
+      lws_service(client->lws_ctx, 100);
+   }
+
+   LOG_INFO("WebSocket service thread stopped");
+   return NULL;
+}
+
+/* =============================================================================
  * Public API - Connection
  * ============================================================================= */
 
@@ -463,6 +502,12 @@ int ws_client_connect(ws_client_t *client) {
    ctx_info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
    ctx_info.user = client; /* Store client pointer for callback access */
 
+   /* Disable keepalive to prevent 1-second blocking in lws_service */
+   ctx_info.ka_time = 0;
+   ctx_info.ka_probes = 0;
+   ctx_info.ka_interval = 0;
+   ctx_info.timeout_secs = 0;
+
    client->lws_ctx = lws_create_context(&ctx_info);
    if (!client->lws_ctx) {
       LOG_ERROR("Failed to create lws context");
@@ -480,8 +525,16 @@ int ws_client_connect(ws_client_t *client) {
    conn_info.protocol = protocols[0].name;
 
    if (client->use_ssl) {
-      conn_info.ssl_connection = LCCSCF_USE_SSL | LCCSCF_ALLOW_SELFSIGNED |
-                                 LCCSCF_SKIP_SERVER_CERT_HOSTNAME_CHECK;
+      if (client->ssl_verify) {
+         /* Production mode: enforce certificate validation */
+         conn_info.ssl_connection = LCCSCF_USE_SSL;
+         LOG_INFO("SSL enabled with certificate verification");
+      } else {
+         /* Development mode: skip verification (NOT FOR PRODUCTION) */
+         conn_info.ssl_connection = LCCSCF_USE_SSL | LCCSCF_ALLOW_SELFSIGNED |
+                                    LCCSCF_SKIP_SERVER_CERT_HOSTNAME_CHECK;
+         LOG_ERROR("WARNING: SSL certificate verification DISABLED - NOT FOR PRODUCTION");
+      }
    }
 
    client->state = WS_STATE_CONNECTING;
@@ -514,12 +567,29 @@ int ws_client_connect(ws_client_t *client) {
       return -1;
    }
 
+   /* Start background service thread */
+   client->service_running = true;
+   if (pthread_create(&client->service_thread, NULL, ws_service_thread, client) != 0) {
+      LOG_ERROR("Failed to create WebSocket service thread");
+      lws_context_destroy(client->lws_ctx);
+      client->lws_ctx = NULL;
+      client->wsi = NULL;
+      client->state = WS_STATE_DISCONNECTED;
+      return -1;
+   }
+
    return 0;
 }
 
 void ws_client_disconnect(ws_client_t *client) {
    if (!client) {
       return;
+   }
+
+   /* Stop service thread first */
+   if (client->service_running) {
+      client->service_running = false;
+      pthread_join(client->service_thread, NULL);
    }
 
    if (client->wsi) {
@@ -573,6 +643,14 @@ int ws_client_register(ws_client_t *client,
    json_object_object_add(payload, "name", json_object_new_string(identity->name));
    json_object_object_add(payload, "location", json_object_new_string(identity->location));
    json_object_object_add(payload, "tier", json_object_new_int(1)); /* Tier 1 */
+
+   /* Include reconnect_secret if we have one (for session reclamation)
+    * SECURITY: This allows the server to verify we own this session */
+   if (identity->reconnect_secret[0]) {
+      json_object_object_add(payload, "reconnect_secret",
+                             json_object_new_string(identity->reconnect_secret));
+      LOG_INFO("Sending reconnect_secret for session reclamation");
+   }
 
    struct json_object *caps_obj = json_object_new_object();
    json_object_object_add(caps_obj, "local_asr", json_object_new_boolean(caps->local_asr));
@@ -710,4 +788,23 @@ void ws_client_generate_uuid(char *uuid) {
 
 const char *ws_client_get_error(ws_client_t *client) {
    return client && client->error_msg[0] ? client->error_msg : NULL;
+}
+
+const char *ws_client_get_reconnect_secret(ws_client_t *client) {
+   if (!client || client->identity.reconnect_secret[0] == '\0') {
+      return NULL;
+   }
+   return client->identity.reconnect_secret;
+}
+
+void ws_client_set_reconnect_secret(ws_client_t *client, const char *secret) {
+   if (!client || !secret) {
+      return;
+   }
+
+   pthread_mutex_lock(&client->mutex);
+   strncpy(client->identity.reconnect_secret, secret,
+           sizeof(client->identity.reconnect_secret) - 1);
+   client->identity.reconnect_secret[sizeof(client->identity.reconnect_secret) - 1] = '\0';
+   pthread_mutex_unlock(&client->mutex);
 }

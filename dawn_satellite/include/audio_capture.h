@@ -1,5 +1,5 @@
 /*
- * DAWN Satellite - ALSA Audio Capture
+ * DAWN Satellite - ALSA Audio Capture with Thread
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -13,6 +13,9 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Uses a dedicated capture thread that reads from ALSA and writes to a
+ * ring buffer. The main thread reads from the ring buffer (non-blocking).
  */
 
 #ifndef AUDIO_CAPTURE_H
@@ -52,49 +55,73 @@ typedef struct __attribute__((packed)) {
 } wav_header_t;
 
 /**
- * Audio capture context
+ * Audio capture context (opaque)
  */
-typedef struct {
-   void *handle;             /* ALSA PCM handle */
-   char device[64];          /* Device name */
-   unsigned int sample_rate; /* Actual sample rate */
-   unsigned int channels;    /* Number of channels */
-   size_t period_size;       /* ALSA period size in frames */
-   int initialized;          /* Initialization state */
-} audio_capture_t;
+typedef struct audio_capture audio_capture_t;
 
 /**
- * Initialize audio capture
+ * Initialize audio capture with dedicated capture thread
  *
- * @param ctx Pointer to capture context
+ * Creates a capture thread that continuously reads from ALSA and
+ * writes to an internal ring buffer. Use audio_capture_read() to
+ * read from the ring buffer (non-blocking).
+ *
+ * @param ctx_out Pointer to receive allocated context
  * @param device ALSA device name (NULL for default)
  * @return 0 on success, -1 on error
  */
-int audio_capture_init(audio_capture_t *ctx, const char *device);
+int audio_capture_init(audio_capture_t **ctx_out, const char *device);
 
 /**
  * Clean up audio capture
  *
- * @param ctx Pointer to capture context
+ * Stops capture thread and frees all resources.
+ *
+ * @param ctx Capture context
  */
 void audio_capture_cleanup(audio_capture_t *ctx);
 
 /**
- * Record audio to buffer
+ * Read audio from ring buffer (non-blocking)
  *
- * Records audio until stop_flag is set or max_samples reached.
- * Returns PCM samples (16-bit signed mono).
+ * Reads up to max_samples from the internal ring buffer.
+ * Returns immediately with available data (may be 0 if buffer empty).
  *
- * @param ctx Pointer to capture context
+ * @param ctx Capture context
  * @param buffer Output buffer for PCM samples
- * @param max_samples Maximum number of samples to record
- * @param stop_flag Pointer to flag that stops recording when non-zero
- * @return Number of samples recorded, or -1 on error
+ * @param max_samples Maximum number of samples to read
+ * @return Number of samples read, 0 if no data available, -1 on error
  */
-ssize_t audio_capture_record(audio_capture_t *ctx,
-                             int16_t *buffer,
-                             size_t max_samples,
-                             volatile int *stop_flag);
+ssize_t audio_capture_read(audio_capture_t *ctx, int16_t *buffer, size_t max_samples);
+
+/**
+ * Wait for audio data to become available
+ *
+ * Blocks until at least min_samples are available or timeout occurs.
+ *
+ * @param ctx Capture context
+ * @param min_samples Minimum samples to wait for
+ * @param timeout_ms Timeout in milliseconds (0 = wait forever)
+ * @return Number of samples available, or 0 on timeout
+ */
+size_t audio_capture_wait_for_data(audio_capture_t *ctx, size_t min_samples, int timeout_ms);
+
+/**
+ * Get number of samples currently available in ring buffer
+ *
+ * @param ctx Capture context
+ * @return Number of samples available to read
+ */
+size_t audio_capture_bytes_available(audio_capture_t *ctx);
+
+/**
+ * Clear all data from ring buffer
+ *
+ * Useful after playing TTS to discard any captured audio from playback.
+ *
+ * @param ctx Capture context
+ */
+void audio_capture_clear(audio_capture_t *ctx);
 
 /**
  * Create WAV file from PCM samples

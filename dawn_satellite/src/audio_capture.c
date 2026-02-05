@@ -1,5 +1,5 @@
 /*
- * DAWN Satellite - ALSA Audio Capture
+ * DAWN Satellite - ALSA Audio Capture with Thread
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -13,34 +13,125 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Uses a dedicated capture thread that reads from ALSA and writes to a
+ * ring buffer. The main thread reads from the ring buffer (non-blocking).
  */
 
 #include "audio_capture.h"
 
 #include <alsa/asoundlib.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+#include "audio/ring_buffer.h"
 
 #define LOG_INFO(fmt, ...) fprintf(stdout, "[CAPTURE] " fmt "\n", ##__VA_ARGS__)
 #define LOG_ERROR(fmt, ...) fprintf(stderr, "[CAPTURE ERROR] " fmt "\n", ##__VA_ARGS__)
 
-int audio_capture_init(audio_capture_t *ctx, const char *device) {
-   if (!ctx)
+/* Ring buffer size: 2 seconds of 16kHz mono audio */
+#define RING_BUFFER_SIZE (AUDIO_SAMPLE_RATE * 2 * sizeof(int16_t))
+
+/* Capture thread context */
+struct audio_capture {
+   char device[64];
+   snd_pcm_t *handle;
+   unsigned int sample_rate;
+   unsigned int channels;
+   size_t period_size;
+   int initialized;
+
+   /* Thread and ring buffer */
+   pthread_t thread;
+   atomic_bool running;
+   ring_buffer_t *ring_buffer;
+};
+
+/**
+ * @brief Capture thread function
+ *
+ * Continuously reads from ALSA and writes to ring buffer.
+ */
+static void *capture_thread_func(void *arg) {
+   audio_capture_t *ctx = (audio_capture_t *)arg;
+
+   /* Allocate capture buffer (one period) */
+   size_t buffer_bytes = ctx->period_size * ctx->channels * sizeof(int16_t);
+   int16_t *buffer = (int16_t *)malloc(buffer_bytes);
+   if (!buffer) {
+      LOG_ERROR("Failed to allocate capture buffer");
+      atomic_store(&ctx->running, false);
+      return NULL;
+   }
+
+   LOG_INFO("Capture thread started (period=%zu frames, buffer=%zu bytes)", ctx->period_size,
+            buffer_bytes);
+
+   static int debug_count = 0;
+   while (atomic_load(&ctx->running)) {
+      /* Read one period from ALSA (blocking) */
+      snd_pcm_sframes_t frames = snd_pcm_readi(ctx->handle, buffer, ctx->period_size);
+
+      if (frames > 0) {
+         /* Write to ring buffer */
+         size_t bytes = frames * ctx->channels * sizeof(int16_t);
+         ring_buffer_write(ctx->ring_buffer, (char *)buffer, bytes);
+
+         /* Debug: log periodically */
+         debug_count++;
+         if (debug_count % 100 == 0) {
+            LOG_INFO("Captured %d frames (total %d periods)", (int)frames, debug_count);
+         }
+      } else if (frames < 0) {
+         if (frames == -EPIPE) {
+            /* Buffer overrun - recover */
+            LOG_ERROR("Capture overrun, recovering...");
+            snd_pcm_prepare(ctx->handle);
+         } else if (frames == -EAGAIN) {
+            /* No data available (shouldn't happen in blocking mode) */
+            usleep(1000);
+         } else if (frames == -ESTRPIPE) {
+            /* Suspended - wait for resume */
+            LOG_ERROR("Capture suspended, waiting...");
+            while (snd_pcm_resume(ctx->handle) == -EAGAIN) {
+               usleep(100000);
+            }
+            snd_pcm_prepare(ctx->handle);
+         } else {
+            LOG_ERROR("Read error: %s", snd_strerror(frames));
+            usleep(10000);
+         }
+      }
+   }
+
+   free(buffer);
+   LOG_INFO("Capture thread stopped");
+   return NULL;
+}
+
+int audio_capture_init(audio_capture_t **ctx_out, const char *device) {
+   if (!ctx_out)
       return -1;
 
-   memset(ctx, 0, sizeof(audio_capture_t));
+   audio_capture_t *ctx = calloc(1, sizeof(audio_capture_t));
+   if (!ctx)
+      return -1;
 
    const char *dev = device ? device : AUDIO_DEFAULT_CAPTURE_DEVICE;
    strncpy(ctx->device, dev, sizeof(ctx->device) - 1);
 
-   snd_pcm_t *handle;
    int err;
 
-   /* Open PCM device for capture */
-   err = snd_pcm_open(&handle, ctx->device, SND_PCM_STREAM_CAPTURE, 0);
+   /* Open PCM device for capture (blocking mode for thread) */
+   err = snd_pcm_open(&ctx->handle, ctx->device, SND_PCM_STREAM_CAPTURE, 0);
    if (err < 0) {
       LOG_ERROR("Cannot open capture device '%s': %s", ctx->device, snd_strerror(err));
+      free(ctx);
       return -1;
    }
 
@@ -48,44 +139,39 @@ int audio_capture_init(audio_capture_t *ctx, const char *device) {
    snd_pcm_hw_params_t *hw_params;
    snd_pcm_hw_params_alloca(&hw_params);
 
-   err = snd_pcm_hw_params_any(handle, hw_params);
+   err = snd_pcm_hw_params_any(ctx->handle, hw_params);
    if (err < 0) {
       LOG_ERROR("Cannot initialize hw params: %s", snd_strerror(err));
-      snd_pcm_close(handle);
-      return -1;
+      goto error;
    }
 
    /* Set access type - interleaved */
-   err = snd_pcm_hw_params_set_access(handle, hw_params, SND_PCM_ACCESS_RW_INTERLEAVED);
+   err = snd_pcm_hw_params_set_access(ctx->handle, hw_params, SND_PCM_ACCESS_RW_INTERLEAVED);
    if (err < 0) {
       LOG_ERROR("Cannot set access type: %s", snd_strerror(err));
-      snd_pcm_close(handle);
-      return -1;
+      goto error;
    }
 
    /* Set format - 16-bit signed little-endian */
-   err = snd_pcm_hw_params_set_format(handle, hw_params, SND_PCM_FORMAT_S16_LE);
+   err = snd_pcm_hw_params_set_format(ctx->handle, hw_params, SND_PCM_FORMAT_S16_LE);
    if (err < 0) {
       LOG_ERROR("Cannot set format: %s", snd_strerror(err));
-      snd_pcm_close(handle);
-      return -1;
+      goto error;
    }
 
    /* Set channels - mono */
-   err = snd_pcm_hw_params_set_channels(handle, hw_params, AUDIO_CHANNELS);
+   err = snd_pcm_hw_params_set_channels(ctx->handle, hw_params, AUDIO_CHANNELS);
    if (err < 0) {
       LOG_ERROR("Cannot set channels: %s", snd_strerror(err));
-      snd_pcm_close(handle);
-      return -1;
+      goto error;
    }
 
    /* Set sample rate */
    unsigned int rate = AUDIO_SAMPLE_RATE;
-   err = snd_pcm_hw_params_set_rate_near(handle, hw_params, &rate, 0);
+   err = snd_pcm_hw_params_set_rate_near(ctx->handle, hw_params, &rate, 0);
    if (err < 0) {
       LOG_ERROR("Cannot set sample rate: %s", snd_strerror(err));
-      snd_pcm_close(handle);
-      return -1;
+      goto error;
    }
 
    if (rate != AUDIO_SAMPLE_RATE) {
@@ -94,118 +180,127 @@ int audio_capture_init(audio_capture_t *ctx, const char *device) {
    ctx->sample_rate = rate;
    ctx->channels = AUDIO_CHANNELS;
 
-   /* Set period size for low latency */
-   snd_pcm_uframes_t period_size = 512; /* ~32ms at 16kHz */
-   err = snd_pcm_hw_params_set_period_size_near(handle, hw_params, &period_size, 0);
+   /* Set period size for low latency (~32ms at 16kHz) */
+   snd_pcm_uframes_t period_size = 512;
+   err = snd_pcm_hw_params_set_period_size_near(ctx->handle, hw_params, &period_size, 0);
    if (err < 0) {
       LOG_ERROR("Cannot set period size: %s", snd_strerror(err));
-      snd_pcm_close(handle);
-      return -1;
+      goto error;
    }
    ctx->period_size = period_size;
 
-   /* Set buffer size */
+   /* Set buffer size (4 periods) */
    snd_pcm_uframes_t buffer_size = period_size * 4;
-   err = snd_pcm_hw_params_set_buffer_size_near(handle, hw_params, &buffer_size);
+   err = snd_pcm_hw_params_set_buffer_size_near(ctx->handle, hw_params, &buffer_size);
    if (err < 0) {
       LOG_ERROR("Cannot set buffer size: %s", snd_strerror(err));
-      snd_pcm_close(handle);
-      return -1;
+      goto error;
    }
 
    /* Apply hardware parameters */
-   err = snd_pcm_hw_params(handle, hw_params);
+   err = snd_pcm_hw_params(ctx->handle, hw_params);
    if (err < 0) {
       LOG_ERROR("Cannot apply hw params: %s", snd_strerror(err));
-      snd_pcm_close(handle);
-      return -1;
+      goto error;
+   }
+
+   /* Create ring buffer */
+   ctx->ring_buffer = ring_buffer_create(RING_BUFFER_SIZE);
+   if (!ctx->ring_buffer) {
+      LOG_ERROR("Failed to create ring buffer");
+      goto error;
    }
 
    /* Prepare the device */
-   err = snd_pcm_prepare(handle);
+   err = snd_pcm_prepare(ctx->handle);
    if (err < 0) {
       LOG_ERROR("Cannot prepare device: %s", snd_strerror(err));
-      snd_pcm_close(handle);
-      return -1;
+      ring_buffer_free(ctx->ring_buffer);
+      goto error;
    }
 
-   ctx->handle = handle;
+   /* Start capture thread */
+   atomic_init(&ctx->running, true);
+   if (pthread_create(&ctx->thread, NULL, capture_thread_func, ctx) != 0) {
+      LOG_ERROR("Failed to create capture thread");
+      ring_buffer_free(ctx->ring_buffer);
+      goto error;
+   }
+
    ctx->initialized = 1;
 
-   LOG_INFO("Capture initialized: %s @ %u Hz, %zu frame periods", ctx->device, ctx->sample_rate,
-            ctx->period_size);
+   LOG_INFO("Capture initialized: %s @ %u Hz, %zu frame periods (threaded)", ctx->device,
+            ctx->sample_rate, ctx->period_size);
+   LOG_INFO("Ring buffer at %p (capacity %zu bytes)", (void *)ctx->ring_buffer, RING_BUFFER_SIZE);
 
+   *ctx_out = ctx;
    return 0;
+
+error:
+   snd_pcm_close(ctx->handle);
+   free(ctx);
+   return -1;
 }
 
 void audio_capture_cleanup(audio_capture_t *ctx) {
-   if (ctx && ctx->handle) {
-      snd_pcm_drop((snd_pcm_t *)ctx->handle);
-      snd_pcm_close((snd_pcm_t *)ctx->handle);
-      ctx->handle = NULL;
-      ctx->initialized = 0;
-      LOG_INFO("Capture cleaned up");
+   if (!ctx)
+      return;
+
+   /* Stop capture thread */
+   if (ctx->initialized) {
+      atomic_store(&ctx->running, false);
+      pthread_join(ctx->thread, NULL);
    }
+
+   /* Close ALSA */
+   if (ctx->handle) {
+      snd_pcm_drop(ctx->handle);
+      snd_pcm_close(ctx->handle);
+   }
+
+   /* Free ring buffer */
+   if (ctx->ring_buffer) {
+      ring_buffer_free(ctx->ring_buffer);
+   }
+
+   free(ctx);
+   LOG_INFO("Capture cleaned up");
 }
 
-ssize_t audio_capture_record(audio_capture_t *ctx,
-                             int16_t *buffer,
-                             size_t max_samples,
-                             volatile int *stop_flag) {
-   if (!ctx || !ctx->initialized || !buffer) {
+ssize_t audio_capture_read(audio_capture_t *ctx, int16_t *buffer, size_t max_samples) {
+   if (!ctx || !ctx->initialized || !buffer || !ctx->ring_buffer) {
       return -1;
    }
 
-   snd_pcm_t *handle = (snd_pcm_t *)ctx->handle;
-   size_t total_samples = 0;
-   snd_pcm_sframes_t frames;
+   /* Read from ring buffer (non-blocking) */
+   size_t bytes_wanted = max_samples * sizeof(int16_t);
+   size_t bytes_read = ring_buffer_read(ctx->ring_buffer, (char *)buffer, bytes_wanted);
 
-   /* Ensure device is ready */
-   int err = snd_pcm_prepare(handle);
-   if (err < 0) {
-      LOG_ERROR("Cannot prepare for recording: %s", snd_strerror(err));
-      return -1;
+   return (ssize_t)(bytes_read / sizeof(int16_t));
+}
+
+size_t audio_capture_wait_for_data(audio_capture_t *ctx, size_t min_samples, int timeout_ms) {
+   if (!ctx || !ctx->ring_buffer) {
+      return 0;
    }
 
-   LOG_INFO("Recording started (max %zu samples)...", max_samples);
+   size_t min_bytes = min_samples * sizeof(int16_t);
+   size_t bytes = ring_buffer_wait_for_data(ctx->ring_buffer, min_bytes, timeout_ms);
+   return bytes / sizeof(int16_t);
+}
 
-   while (total_samples < max_samples) {
-      /* Check stop flag */
-      if (stop_flag && *stop_flag) {
-         LOG_INFO("Recording stopped by flag");
-         break;
-      }
-
-      /* Calculate how many frames we can read */
-      size_t remaining = max_samples - total_samples;
-      size_t to_read = (remaining > ctx->period_size) ? ctx->period_size : remaining;
-
-      /* Read audio frames */
-      frames = snd_pcm_readi(handle, buffer + total_samples, to_read);
-
-      if (frames < 0) {
-         /* Handle buffer overrun */
-         if (frames == -EPIPE) {
-            LOG_ERROR("Buffer overrun, recovering...");
-            snd_pcm_prepare(handle);
-            continue;
-         } else if (frames == -EAGAIN) {
-            /* No data available, wait a bit */
-            usleep(1000);
-            continue;
-         } else {
-            LOG_ERROR("Read error: %s", snd_strerror(frames));
-            return -1;
-         }
-      }
-
-      total_samples += frames;
+size_t audio_capture_bytes_available(audio_capture_t *ctx) {
+   if (!ctx || !ctx->ring_buffer) {
+      return 0;
    }
+   return ring_buffer_bytes_available(ctx->ring_buffer);
+}
 
-   LOG_INFO("Recording complete: %zu samples (%.2f seconds)", total_samples,
-            (float)total_samples / ctx->sample_rate);
-
-   return (ssize_t)total_samples;
+void audio_capture_clear(audio_capture_t *ctx) {
+   if (!ctx || !ctx->ring_buffer) {
+      return;
+   }
+   ring_buffer_clear(ctx->ring_buffer);
 }
 
 int audio_create_wav(const int16_t *samples,

@@ -129,10 +129,11 @@ typedef enum {
  * @brief DAP2 satellite identity (from REGISTER message)
  */
 typedef struct {
-   char uuid[37];         // UUID string (e.g., "550e8400-e29b-41d4-a716-446655440000")
-   char name[64];         // Human-readable name (e.g., "Kitchen Assistant")
-   char location[32];     // Room/area (e.g., "kitchen") - used for context
-   char hardware_id[64];  // Optional hardware serial
+   char uuid[37];              // UUID string (e.g., "550e8400-e29b-41d4-a716-446655440000")
+   char name[64];              // Human-readable name (e.g., "Kitchen Assistant")
+   char location[32];          // Room/area (e.g., "kitchen") - used for context
+   char hardware_id[64];       // Optional hardware serial
+   char reconnect_secret[65];  // 32 bytes hex-encoded (prevents session hijacking)
 } dap2_identity_t;
 
 /**
@@ -187,6 +188,7 @@ typedef struct session {
    uint64_t first_token_ms;      // Timestamp of first token (0 if none yet)
    uint64_t last_token_ms;       // Timestamp of most recent token
    uint32_t stream_token_count;  // Token count for current stream
+   char stream_last_char;        // Last character sent (for sentence spacing fix)
 
    // Per-session metrics (saved to database after each query)
    session_metrics_tracker_t metrics;
@@ -260,20 +262,30 @@ session_t *session_create(session_type_t type, int client_fd);
  * @param tier DAP2_TIER_1 (text) or DAP2_TIER_2 (audio)
  * @param identity Satellite identity (UUID, name, location)
  * @param capabilities Satellite capabilities (local ASR/TTS/wake word)
- * @return New session, or existing session if UUID matches (reconnection)
+ * @return New session, or existing session if UUID+secret matches (reconnection)
  *
  * @locks session_manager_rwlock (write) for entire operation (atomic check-and-create)
- * @note If UUID matches an existing session:
- *       1. Acquires session->fd_mutex
- *       2. Updates client_fd (old socket is invalid after reconnect)
- *       3. Clears disconnected flag
- *       4. Releases fd_mutex
- *       5. Returns existing session with preserved conversation history
+ * @note For NEW sessions: generates reconnect_secret in session->identity
+ * @note For RECONNECTION (UUID matches existing session):
+ *       - If identity->reconnect_secret matches existing: reclaims session
+ *       - If secret is empty or doesn't match: creates NEW session (security)
+ *       - On reclaim: updates client_fd, clears disconnected, returns existing
  */
 session_t *session_create_dap2(int client_fd,
                                dap2_tier_t tier,
                                const dap2_identity_t *identity,
                                const dap2_capabilities_t *capabilities);
+
+/**
+ * @brief Get the reconnect secret for a session
+ *
+ * Returns the secret that must be included in reconnection requests.
+ * Caller must free the returned string.
+ *
+ * @param session Session to query
+ * @return Allocated secret string (caller frees), or NULL if not a DAP2 session
+ */
+char *session_get_reconnect_secret(session_t *session);
 
 /**
  * @brief Get or create DAP1 session by client IP (legacy protocol)

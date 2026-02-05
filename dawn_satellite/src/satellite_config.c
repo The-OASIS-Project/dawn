@@ -87,6 +87,53 @@ static bool toml_bool_or(toml_table_t *table, const char *key, bool def) {
    return d.ok ? d.u.b : def;
 }
 
+static double toml_double_or(toml_table_t *table, const char *key, double def) {
+   toml_datum_t d = toml_double_in(table, key);
+   return d.ok ? d.u.d : def;
+}
+
+/**
+ * @brief Validate that a path is safe (no path traversal or special files)
+ *
+ * Security check to prevent path traversal attacks via malicious config.
+ * Rejects paths containing "..", special file systems, and URL-encoded variants.
+ *
+ * @param path Path to validate
+ * @param name Path name for logging (e.g., "VAD model")
+ * @return true if path is safe, false if potentially malicious
+ */
+static bool validate_model_path(const char *path, const char *name) {
+   if (!path || !path[0]) {
+      return true; /* Empty path is fine - will be caught by existence check */
+   }
+
+   /* Check for path traversal patterns */
+   if (strstr(path, "..") != NULL) {
+      fprintf(stderr, "[CONFIG] SECURITY: Path traversal detected in %s: %s\n", name, path);
+      return false;
+   }
+
+   /* Reject /dev/ paths (could cause hangs or resource exhaustion) */
+   if (strncmp(path, "/dev/", 5) == 0) {
+      fprintf(stderr, "[CONFIG] SECURITY: /dev/ path rejected for %s: %s\n", name, path);
+      return false;
+   }
+
+   /* Reject /proc/ paths (could leak sensitive information) */
+   if (strncmp(path, "/proc/", 6) == 0) {
+      fprintf(stderr, "[CONFIG] SECURITY: /proc/ path rejected for %s: %s\n", name, path);
+      return false;
+   }
+
+   /* Reject /sys/ paths */
+   if (strncmp(path, "/sys/", 5) == 0) {
+      fprintf(stderr, "[CONFIG] SECURITY: /sys/ path rejected for %s: %s\n", name, path);
+      return false;
+   }
+
+   return true;
+}
+
 /* =============================================================================
  * Public Functions
  * ============================================================================= */
@@ -97,15 +144,20 @@ void satellite_config_init_defaults(satellite_config_t *config) {
 
    memset(config, 0, sizeof(satellite_config_t));
 
+   /* General defaults */
+   safe_strcpy(config->general.ai_name, "friday", CONFIG_NAME_SIZE);
+
    /* Identity defaults */
    /* UUID intentionally empty - will be generated if not set */
    safe_strcpy(config->identity.name, "Satellite", CONFIG_NAME_SIZE);
    /* Location intentionally empty */
+   /* reconnect_secret intentionally empty - set by server */
 
    /* Server defaults */
    safe_strcpy(config->server.host, "localhost", CONFIG_HOST_SIZE);
    config->server.port = 8080;
    config->server.ssl = false;
+   config->server.ssl_verify = true; /* Default: verify certificates in production */
    config->server.reconnect_delay_ms = 5000;
    config->server.max_reconnect_attempts = 0; /* infinite */
 
@@ -114,6 +166,33 @@ void satellite_config_init_defaults(satellite_config_t *config) {
    safe_strcpy(config->audio.playback_device, "plughw:0,0", CONFIG_DEVICE_SIZE);
    config->audio.sample_rate = 16000;
    config->audio.max_record_seconds = 30;
+
+   /* VAD defaults */
+   config->vad.enabled = true;
+   safe_strcpy(config->vad.model_path, "models/silero_vad_16k_op15.onnx", CONFIG_PATH_SIZE);
+   config->vad.threshold = 0.5f;
+   config->vad.silence_duration_ms = 800;
+   config->vad.min_speech_ms = 250;
+
+   /* Wake word defaults */
+   config->wake_word.enabled = true;
+   safe_strcpy(config->wake_word.word, "friday", CONFIG_NAME_SIZE);
+   config->wake_word.sensitivity = 0.5f;
+
+   /* ASR defaults - 15s max for efficiency (not 60s default) */
+   safe_strcpy(config->asr.model_path, "models/whisper.cpp/ggml-tiny.bin", CONFIG_PATH_SIZE);
+   safe_strcpy(config->asr.language, "en", sizeof(config->asr.language));
+   config->asr.n_threads = 2;          /* Pi Zero 2 W has 4 cores */
+   config->asr.max_audio_seconds = 15; /* 960KB buffer, not 3.84MB */
+
+   /* TTS defaults */
+   safe_strcpy(config->tts.model_path, "models/en_GB-alba-medium.onnx", CONFIG_PATH_SIZE);
+   safe_strcpy(config->tts.config_path, "models/en_GB-alba-medium.onnx.json", CONFIG_PATH_SIZE);
+   safe_strcpy(config->tts.espeak_data, "/usr/share/espeak-ng-data", CONFIG_PATH_SIZE);
+   config->tts.length_scale = 0.85f;
+
+   /* Processing defaults */
+   config->processing.mode = PROCESSING_MODE_TEXT_ONLY; /* Safe default */
 
    /* GPIO defaults (disabled) */
    config->gpio.enabled = false;
@@ -193,6 +272,16 @@ int satellite_config_load(satellite_config_t *config, const char *path) {
    /* Save path for later reference */
    safe_strcpy(g_config_path, resolved_path, sizeof(g_config_path));
 
+   /* Parse [general] section */
+   toml_table_t *general = toml_table_in(root, "general");
+   if (general) {
+      const char *s = toml_string_or(general, "ai_name", NULL);
+      if (s) {
+         safe_strcpy(config->general.ai_name, s, CONFIG_NAME_SIZE);
+         free((void *)s);
+      }
+   }
+
    /* Parse [identity] section */
    toml_table_t *identity = toml_table_in(root, "identity");
    if (identity) {
@@ -215,6 +304,12 @@ int satellite_config_load(satellite_config_t *config, const char *path) {
          safe_strcpy(config->identity.location, s, CONFIG_LOCATION_SIZE);
          free((void *)s);
       }
+
+      s = toml_string_or(identity, "reconnect_secret", NULL);
+      if (s) {
+         safe_strcpy(config->identity.reconnect_secret, s, CONFIG_SECRET_SIZE);
+         free((void *)s);
+      }
    }
 
    /* Parse [server] section */
@@ -228,6 +323,7 @@ int satellite_config_load(satellite_config_t *config, const char *path) {
 
       config->server.port = (uint16_t)toml_int_or(server, "port", config->server.port);
       config->server.ssl = toml_bool_or(server, "ssl", config->server.ssl);
+      config->server.ssl_verify = toml_bool_or(server, "ssl_verify", config->server.ssl_verify);
       config->server.reconnect_delay_ms = (uint32_t)toml_int_or(server, "reconnect_delay_ms",
                                                                 config->server.reconnect_delay_ms);
       config->server.max_reconnect_attempts = (uint32_t)toml_int_or(
@@ -317,6 +413,102 @@ int satellite_config_load(satellite_config_t *config, const char *path) {
       config->logging.use_syslog = toml_bool_or(logging, "use_syslog", config->logging.use_syslog);
    }
 
+   /* Parse [vad] section */
+   toml_table_t *vad = toml_table_in(root, "vad");
+   if (vad) {
+      config->vad.enabled = toml_bool_or(vad, "enabled", config->vad.enabled);
+
+      const char *s = toml_string_or(vad, "model_path", NULL);
+      if (s) {
+         safe_strcpy(config->vad.model_path, s, CONFIG_PATH_SIZE);
+         free((void *)s);
+      }
+
+      config->vad.threshold = (float)toml_double_or(vad, "threshold", config->vad.threshold);
+      config->vad.silence_duration_ms = (uint32_t)toml_int_or(vad, "silence_duration_ms",
+                                                              config->vad.silence_duration_ms);
+      config->vad.min_speech_ms = (uint32_t)toml_int_or(vad, "min_speech_ms",
+                                                        config->vad.min_speech_ms);
+   }
+
+   /* Parse [wake_word] section */
+   toml_table_t *wake_word = toml_table_in(root, "wake_word");
+   if (wake_word) {
+      config->wake_word.enabled = toml_bool_or(wake_word, "enabled", config->wake_word.enabled);
+
+      const char *s = toml_string_or(wake_word, "word", NULL);
+      if (s) {
+         safe_strcpy(config->wake_word.word, s, CONFIG_NAME_SIZE);
+         free((void *)s);
+      }
+
+      config->wake_word.sensitivity = (float)toml_double_or(wake_word, "sensitivity",
+                                                            config->wake_word.sensitivity);
+   }
+
+   /* Parse [asr] section */
+   toml_table_t *asr = toml_table_in(root, "asr");
+   if (asr) {
+      const char *s;
+
+      s = toml_string_or(asr, "model_path", NULL);
+      if (s) {
+         safe_strcpy(config->asr.model_path, s, CONFIG_PATH_SIZE);
+         free((void *)s);
+      }
+
+      s = toml_string_or(asr, "language", NULL);
+      if (s) {
+         safe_strcpy(config->asr.language, s, sizeof(config->asr.language));
+         free((void *)s);
+      }
+
+      config->asr.n_threads = (int)toml_int_or(asr, "n_threads", config->asr.n_threads);
+      config->asr.max_audio_seconds = (int)toml_int_or(asr, "max_audio_seconds",
+                                                       config->asr.max_audio_seconds);
+   }
+
+   /* Parse [tts] section */
+   toml_table_t *tts = toml_table_in(root, "tts");
+   if (tts) {
+      const char *s;
+
+      s = toml_string_or(tts, "model_path", NULL);
+      if (s) {
+         safe_strcpy(config->tts.model_path, s, CONFIG_PATH_SIZE);
+         free((void *)s);
+      }
+
+      s = toml_string_or(tts, "config_path", NULL);
+      if (s) {
+         safe_strcpy(config->tts.config_path, s, CONFIG_PATH_SIZE);
+         free((void *)s);
+      }
+
+      s = toml_string_or(tts, "espeak_data", NULL);
+      if (s) {
+         safe_strcpy(config->tts.espeak_data, s, CONFIG_PATH_SIZE);
+         free((void *)s);
+      }
+
+      config->tts.length_scale = (float)toml_double_or(tts, "length_scale",
+                                                       config->tts.length_scale);
+   }
+
+   /* Parse [processing] section */
+   toml_table_t *processing = toml_table_in(root, "processing");
+   if (processing) {
+      const char *s = toml_string_or(processing, "mode", NULL);
+      if (s) {
+         if (strcmp(s, "voice_activated") == 0) {
+            config->processing.mode = PROCESSING_MODE_VOICE_ACTIVATED;
+         } else {
+            config->processing.mode = PROCESSING_MODE_TEXT_ONLY;
+         }
+         free((void *)s);
+      }
+   }
+
    toml_free(root);
 
    printf("[CONFIG] Loaded configuration from %s\n", resolved_path);
@@ -327,6 +519,7 @@ void satellite_config_apply_overrides(satellite_config_t *config,
                                       const char *server,
                                       uint16_t port,
                                       int ssl,
+                                      int ssl_verify,
                                       const char *name,
                                       const char *location,
                                       const char *capture_device,
@@ -346,6 +539,10 @@ void satellite_config_apply_overrides(satellite_config_t *config,
 
    if (ssl >= 0) {
       config->server.ssl = (ssl != 0);
+   }
+
+   if (ssl_verify >= 0) {
+      config->server.ssl_verify = (ssl_verify != 0);
    }
 
    if (name && name[0]) {
@@ -373,11 +570,54 @@ void satellite_config_apply_overrides(satellite_config_t *config,
    }
 }
 
+/* Load persisted identity (UUID + reconnect_secret) from file */
+static void load_persisted_identity(satellite_config_t *config) {
+   const char *home = getenv("HOME");
+   char identity_path[512];
+   if (home) {
+      snprintf(identity_path, sizeof(identity_path), "%s/.dawn_satellite_identity", home);
+   } else {
+      snprintf(identity_path, sizeof(identity_path), ".dawn_satellite_identity");
+   }
+
+   FILE *f = fopen(identity_path, "r");
+   if (!f)
+      return;
+
+   char line[256];
+   while (fgets(line, sizeof(line), f)) {
+      /* Skip comments and empty lines */
+      if (line[0] == '#' || line[0] == '\n')
+         continue;
+
+      char key[64], value[128];
+      /* Parse simple key = "value" format */
+      if (sscanf(line, " %63[^=] = \"%127[^\"]\"", key, value) == 2) {
+         /* Trim trailing whitespace from key */
+         char *end = key + strlen(key) - 1;
+         while (end > key && (*end == ' ' || *end == '\t'))
+            *end-- = '\0';
+
+         if (strcmp(key, "uuid") == 0 && config->identity.uuid[0] == '\0') {
+            safe_strcpy(config->identity.uuid, value, CONFIG_UUID_SIZE);
+            printf("[CONFIG] Loaded UUID from identity file: %s\n", value);
+         } else if (strcmp(key, "reconnect_secret") == 0) {
+            safe_strcpy(config->identity.reconnect_secret, value, CONFIG_SECRET_SIZE);
+            printf("[CONFIG] Loaded reconnect_secret from identity file\n");
+         }
+      }
+   }
+   fclose(f);
+}
+
 void satellite_config_ensure_uuid(satellite_config_t *config) {
    if (!config)
       return;
 
-   /* If UUID is already set, keep it */
+   /* Try to load persisted identity first */
+   load_persisted_identity(config);
+
+   /* If UUID is already set (from config or identity file), keep it */
    if (config->identity.uuid[0] != '\0')
       return;
 
@@ -422,10 +662,14 @@ void satellite_config_print(const satellite_config_t *config) {
 
    printf("\n=== Satellite Configuration ===\n");
 
+   printf("\n[general]\n");
+   printf("  ai_name = \"%s\"\n", config->general.ai_name);
+
    printf("\n[identity]\n");
    printf("  uuid     = \"%s\"\n", config->identity.uuid);
    printf("  name     = \"%s\"\n", config->identity.name);
    printf("  location = \"%s\"\n", config->identity.location);
+   printf("  secret   = %s\n", config->identity.reconnect_secret[0] ? "(set)" : "(empty)");
 
    printf("\n[server]\n");
    printf("  host = \"%s\"\n", config->server.host);
@@ -435,6 +679,35 @@ void satellite_config_print(const satellite_config_t *config) {
    printf("\n[audio]\n");
    printf("  capture_device  = \"%s\"\n", config->audio.capture_device);
    printf("  playback_device = \"%s\"\n", config->audio.playback_device);
+
+   printf("\n[vad]\n");
+   printf("  enabled            = %s\n", config->vad.enabled ? "true" : "false");
+   printf("  model_path         = \"%s\"\n", config->vad.model_path);
+   printf("  threshold          = %.2f\n", config->vad.threshold);
+   printf("  silence_duration   = %u ms\n", config->vad.silence_duration_ms);
+   printf("  min_speech         = %u ms\n", config->vad.min_speech_ms);
+
+   printf("\n[wake_word]\n");
+   printf("  enabled     = %s\n", config->wake_word.enabled ? "true" : "false");
+   printf("  word        = \"%s\"\n", config->wake_word.word);
+   printf("  sensitivity = %.2f\n", config->wake_word.sensitivity);
+
+   printf("\n[asr]\n");
+   printf("  model_path        = \"%s\"\n", config->asr.model_path);
+   printf("  language          = \"%s\"\n", config->asr.language);
+   printf("  n_threads         = %d\n", config->asr.n_threads);
+   printf("  max_audio_seconds = %d\n", config->asr.max_audio_seconds);
+
+   printf("\n[tts]\n");
+   printf("  model_path   = \"%s\"\n", config->tts.model_path);
+   printf("  config_path  = \"%s\"\n", config->tts.config_path);
+   printf("  espeak_data  = \"%s\"\n", config->tts.espeak_data);
+   printf("  length_scale = %.2f\n", config->tts.length_scale);
+
+   printf("\n[processing]\n");
+   printf("  mode = %s\n", config->processing.mode == PROCESSING_MODE_VOICE_ACTIVATED
+                               ? "voice_activated"
+                               : "text_only");
 
    printf("\n[gpio]\n");
    printf("  enabled    = %s\n", config->gpio.enabled ? "true" : "false");
@@ -453,4 +726,102 @@ void satellite_config_print(const satellite_config_t *config) {
 
 const char *satellite_config_get_path(void) {
    return g_config_path[0] ? g_config_path : NULL;
+}
+
+void satellite_config_set_reconnect_secret(satellite_config_t *config, const char *secret) {
+   if (!config || !secret)
+      return;
+
+   safe_strcpy(config->identity.reconnect_secret, secret, CONFIG_SECRET_SIZE);
+
+   /* Persist identity (UUID + secret) to file for reconnection after restart */
+   const char *home = getenv("HOME");
+   char identity_path[512];
+   if (home) {
+      snprintf(identity_path, sizeof(identity_path), "%s/.dawn_satellite_identity", home);
+   } else {
+      snprintf(identity_path, sizeof(identity_path), ".dawn_satellite_identity");
+   }
+
+   FILE *f = fopen(identity_path, "w");
+   if (f) {
+      /* Set restrictive permissions BEFORE writing sensitive data (0600 = owner read/write only)
+       * This prevents session hijacking via identity file theft on multi-user systems */
+      int fd = fileno(f);
+      if (fchmod(fd, S_IRUSR | S_IWUSR) != 0) {
+         fprintf(stderr, "[CONFIG] Warning: Could not set permissions on %s\n", identity_path);
+      }
+      fprintf(f, "# DAWN Satellite Identity (auto-generated, do not edit)\n");
+      fprintf(f, "uuid = \"%s\"\n", config->identity.uuid);
+      fprintf(f, "reconnect_secret = \"%s\"\n", secret);
+      fclose(f);
+      printf("[CONFIG] Identity saved to %s (mode 0600)\n", identity_path);
+   } else {
+      fprintf(stderr, "[CONFIG] Warning: Could not save identity to %s\n", identity_path);
+   }
+}
+
+bool satellite_config_path_valid(const char *path) {
+   if (!path || path[0] == '\0')
+      return false;
+
+   return access(path, R_OK) == 0;
+}
+
+void satellite_config_validate_paths(satellite_config_t *config) {
+   if (!config)
+      return;
+
+   /* Security check: validate all paths for traversal attacks before use */
+   if (!validate_model_path(config->vad.model_path, "VAD model")) {
+      config->vad.enabled = false;
+      config->vad.model_path[0] = '\0';
+   }
+   if (!validate_model_path(config->asr.model_path, "ASR model")) {
+      config->processing.mode = PROCESSING_MODE_TEXT_ONLY;
+      config->asr.model_path[0] = '\0';
+   }
+   if (!validate_model_path(config->tts.model_path, "TTS model")) {
+      config->tts.model_path[0] = '\0';
+   }
+   if (!validate_model_path(config->tts.config_path, "TTS config")) {
+      config->tts.config_path[0] = '\0';
+   }
+   if (!validate_model_path(config->tts.espeak_data, "espeak data")) {
+      config->tts.espeak_data[0] = '\0';
+   }
+
+   /* Validate VAD model path */
+   if (config->vad.enabled && !satellite_config_path_valid(config->vad.model_path)) {
+      fprintf(stderr, "[CONFIG] WARNING: VAD model not found: %s - disabling VAD\n",
+              config->vad.model_path);
+      config->vad.enabled = false;
+   } else if (config->vad.enabled) {
+      printf("[CONFIG] VAD model: %s\n", config->vad.model_path);
+   }
+
+   /* Validate ASR model path */
+   if (!satellite_config_path_valid(config->asr.model_path)) {
+      fprintf(stderr, "[CONFIG] WARNING: ASR model not found: %s - voice input disabled\n",
+              config->asr.model_path);
+      /* Force text-only mode if ASR is unavailable */
+      config->processing.mode = PROCESSING_MODE_TEXT_ONLY;
+   } else {
+      printf("[CONFIG] ASR model: %s (max %ds)\n", config->asr.model_path,
+             config->asr.max_audio_seconds);
+   }
+
+   /* Validate TTS model path */
+   if (!satellite_config_path_valid(config->tts.model_path)) {
+      fprintf(stderr, "[CONFIG] WARNING: TTS model not found: %s - TTS disabled\n",
+              config->tts.model_path);
+   } else {
+      printf("[CONFIG] TTS model: %s\n", config->tts.model_path);
+   }
+
+   /* Validate espeak data path */
+   if (!satellite_config_path_valid(config->tts.espeak_data)) {
+      fprintf(stderr, "[CONFIG] WARNING: espeak data not found: %s - TTS may fail\n",
+              config->tts.espeak_data);
+   }
 }

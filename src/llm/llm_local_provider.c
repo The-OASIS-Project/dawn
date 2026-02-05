@@ -666,7 +666,7 @@ int llm_local_list_models(const char *endpoint,
    /* Detect provider */
    local_provider_t provider = llm_local_detect_provider(endpoint);
 
-   char url[512];
+   char url[544]; /* base_url + "/v1/models" suffix */
    curl_buffer_t response;
    int result;
    int count = -1;

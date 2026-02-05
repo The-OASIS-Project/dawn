@@ -25,11 +25,15 @@ find_package(PkgConfig REQUIRED)
 # DAP2 = WebSocket text protocol (Tier 1, requires local ASR/TTS)
 option(ENABLE_DAP2 "Enable DAP2 WebSocket protocol (Tier 1)" ON)
 
-# Local processing (Phase 2-3): VAD, ASR, TTS on the satellite
+# Local voice processing: VAD + ASR + TTS on the satellite
 # This enables fully local wake word detection and speech processing
-option(ENABLE_LOCAL_VAD "Enable local VAD (Silero)" OFF)
-option(ENABLE_LOCAL_ASR "Enable local ASR (Whisper)" OFF)
-option(ENABLE_LOCAL_TTS "Enable local TTS (Piper)" OFF)
+# Default ON for production builds; use -DENABLE_VOICE=OFF for text-only debugging
+option(ENABLE_VOICE "Enable local voice processing (VAD + ASR + TTS)" ON)
+
+# Set individual flags from the unified option
+set(ENABLE_LOCAL_VAD ${ENABLE_VOICE})
+set(ENABLE_LOCAL_ASR ${ENABLE_VOICE})
+set(ENABLE_LOCAL_TTS ${ENABLE_VOICE})
 
 # ALSA for audio
 pkg_check_modules(ALSA REQUIRED alsa)
@@ -92,6 +96,8 @@ set(SATELLITE_SOURCES
 # Protocol-specific sources
 if(ENABLE_DAP2)
     list(APPEND SATELLITE_SOURCES src/ws_client.c)
+    # Voice processing requires DAP2 (text-based protocol)
+    list(APPEND SATELLITE_SOURCES src/voice_processing.c)
 else()
     list(APPEND SATELLITE_SOURCES src/dap_client.c)
 endif()
@@ -112,17 +118,40 @@ endif()
 # Include directories
 include_directories(include)
 
+# Platform-specific CUDA configuration (same as main server)
+set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-12.6")
+find_library(CUDA_LIBRARIES NAMES cuda HINTS ${CUDA_TOOLKIT_ROOT_DIR}/targets/aarch64-linux/lib)
+if(CUDA_LIBRARIES)
+    set(ENABLE_WHISPER_CUDA ON)
+    find_library(CUDART_LIBRARIES NAMES cudart HINTS ${CUDA_TOOLKIT_ROOT_DIR}/targets/aarch64-linux/lib)
+    find_library(CUSPARSE_LIBRARIES NAMES cusparse HINTS ${CUDA_TOOLKIT_ROOT_DIR}/targets/aarch64-linux/lib)
+    find_library(CUBLAS_LIBRARIES NAMES cublas HINTS ${CUDA_TOOLKIT_ROOT_DIR}/targets/aarch64-linux/lib)
+    find_library(CUSOLVER_LIBRARIES NAMES cusolver HINTS ${CUDA_TOOLKIT_ROOT_DIR}/targets/aarch64-linux/lib)
+    find_library(CURAND_LIBRARIES NAMES curand HINTS ${CUDA_TOOLKIT_ROOT_DIR}/targets/aarch64-linux/lib)
+    message(STATUS "CUDA support: ENABLED")
+else()
+    set(ENABLE_WHISPER_CUDA OFF)
+    message(STATUS "CUDA support: DISABLED (not found)")
+endif()
+
 # Include whisper.cpp for local ASR (must be before dawn_common so target exists)
 if(ENABLE_LOCAL_ASR)
     set(WHISPER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../whisper.cpp")
     if(EXISTS "${WHISPER_DIR}/CMakeLists.txt")
-        # Configure whisper.cpp for CPU (Pi Zero 2 W has no CUDA)
         set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
         set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-        set(GGML_CUDA OFF CACHE BOOL "" FORCE)
         set(GGML_METAL OFF CACHE BOOL "" FORCE)
+
+        # Enable CUDA if available
+        if(ENABLE_WHISPER_CUDA)
+            set(GGML_CUDA ON CACHE BOOL "" FORCE)
+            message(STATUS "whisper.cpp: ENABLED (CUDA mode)")
+        else()
+            set(GGML_CUDA OFF CACHE BOOL "" FORCE)
+            message(STATUS "whisper.cpp: ENABLED (CPU mode)")
+        endif()
+
         add_subdirectory("${WHISPER_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/whisper.cpp")
-        message(STATUS "whisper.cpp: ENABLED (CPU mode)")
     else()
         message(FATAL_ERROR "whisper.cpp not found at ${WHISPER_DIR} - required for local ASR")
     endif()
@@ -137,6 +166,10 @@ if(EXISTS "${DAWN_COMMON_DIR}/CMakeLists.txt")
     set(DAWN_COMMON_WITH_VAD ${ENABLE_LOCAL_VAD} CACHE BOOL "" FORCE)
     set(DAWN_COMMON_WITH_ASR ${ENABLE_LOCAL_ASR} CACHE BOOL "" FORCE)
     set(DAWN_COMMON_WITH_TTS ${ENABLE_LOCAL_TTS} CACHE BOOL "" FORCE)
+
+    # Reduce sentence buffer limit for Pi Zero 2 W (256KB instead of 10MB)
+    # Prevents OOM on memory-constrained satellite devices
+    set(DAWN_SENTENCE_BUFFER_MAX_SIZE 262144 CACHE STRING "" FORCE)
 
     add_subdirectory("${DAWN_COMMON_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/dawn_common")
     include_directories("${DAWN_COMMON_DIR}/include")
@@ -165,19 +198,31 @@ endif()
 # Link optional VAD/ASR/TTS libraries
 if(ENABLE_LOCAL_VAD AND TARGET dawn_common_vad)
     target_link_libraries(dawn_satellite dawn_common_vad)
-    target_compile_definitions(dawn_satellite PRIVATE ENABLE_LOCAL_VAD)
+    target_compile_definitions(dawn_satellite PRIVATE ENABLE_LOCAL_VAD HAVE_VAD_SILERO)
     message(STATUS "Local VAD: ENABLED")
 endif()
 
 if(ENABLE_LOCAL_ASR AND TARGET dawn_common_asr)
     target_link_libraries(dawn_satellite dawn_common_asr)
-    target_compile_definitions(dawn_satellite PRIVATE ENABLE_LOCAL_ASR)
+    target_compile_definitions(dawn_satellite PRIVATE ENABLE_LOCAL_ASR HAVE_ASR_WHISPER)
     message(STATUS "Local ASR: ENABLED")
+
+    # Link CUDA libraries if available (must be after ASR library for linker order)
+    if(ENABLE_WHISPER_CUDA)
+        target_link_libraries(dawn_satellite
+            ${CUDA_LIBRARIES}
+            ${CUDART_LIBRARIES}
+            ${CUSPARSE_LIBRARIES}
+            ${CUBLAS_LIBRARIES}
+            ${CUSOLVER_LIBRARIES}
+            ${CURAND_LIBRARIES})
+        message(STATUS "Linking CUDA libraries for ASR")
+    endif()
 endif()
 
 if(ENABLE_LOCAL_TTS AND TARGET dawn_common_tts)
     target_link_libraries(dawn_satellite dawn_common_tts)
-    target_compile_definitions(dawn_satellite PRIVATE ENABLE_LOCAL_TTS)
+    target_compile_definitions(dawn_satellite PRIVATE ENABLE_LOCAL_TTS HAVE_TTS_PIPER)
     message(STATUS "Local TTS: ENABLED")
 endif()
 

@@ -5,6 +5,13 @@
 # then customize [identity] per device.
 
 # =============================================================================
+# General Settings
+# =============================================================================
+[general]
+# AI name - must match server dawn.toml
+ai_name = "friday"
+
+# =============================================================================
 # Identity - UNIQUE PER SATELLITE
 # =============================================================================
 [identity]
@@ -31,6 +38,11 @@ port = 3000
 
 # Use secure WebSocket (wss://) - requires SSL cert on daemon
 ssl = true
+
+# Verify SSL certificates (default: true)
+# Set to false ONLY for development with self-signed certificates
+# WARNING: Disabling this in production enables man-in-the-middle attacks!
+ssl_verify = true
 
 # Reconnect settings
 reconnect_delay_ms = 5000
@@ -102,6 +114,9 @@ device = "/dev/fb1"
 # Model: Silero VAD (same as main daemon)
 enabled = true
 
+# Path to Silero VAD ONNX model
+model_path = "models/silero_vad_16k_op15.onnx"
+
 # Silence duration (ms) to trigger end-of-speech
 silence_duration_ms = 800
 
@@ -123,6 +138,48 @@ word = "friday"
 
 # Sensitivity (0.0-1.0, higher = more sensitive but more false positives)
 sensitivity = 0.5
+
+# =============================================================================
+# Automatic Speech Recognition (ASR)
+# =============================================================================
+[asr]
+# Whisper model for speech-to-text
+# Smaller models: ggml-tiny.bin (75MB), ggml-base.bin (142MB)
+# Larger models: ggml-small.bin (466MB), ggml-medium.bin (1.5GB)
+model_path = "models/whisper.cpp/ggml-tiny.bin"
+
+# Language code (en, es, fr, de, etc.)
+language = "en"
+
+# Number of processing threads (Pi Zero 2 W has 4 cores)
+n_threads = 2
+
+# Maximum recording duration in seconds
+# Lower = less memory. 15s uses 960KB buffer (not 3.84MB at 60s)
+max_audio_seconds = 15
+
+# =============================================================================
+# Text-to-Speech (TTS)
+# =============================================================================
+[tts]
+# Piper voice model
+model_path = "models/en_GB-alba-medium.onnx"
+config_path = "models/en_GB-alba-medium.onnx.json"
+
+# espeak-ng data path for phonemization
+espeak_data = "/usr/share/espeak-ng-data"
+
+# Speech speed (1.0 = normal, 0.85 = faster)
+length_scale = 0.85
+
+# =============================================================================
+# Processing Mode
+# =============================================================================
+[processing]
+# Processing mode:
+#   "text_only"       - Current: keyboard input, useful for testing
+#   "voice_activated" - Production: VAD + wake word + ASR + TTS
+mode = "text_only"
 
 # =============================================================================
 # Logging

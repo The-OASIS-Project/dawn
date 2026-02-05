@@ -123,16 +123,15 @@ int satellite_init(satellite_ctx_t *ctx) {
    memset(ctx->dap_client, 0, sizeof(dap_client_t));
 #endif
 
-   ctx->audio_capture = malloc(sizeof(audio_capture_t));
-   ctx->audio_playback = malloc(sizeof(audio_playback_t));
+   /* audio_capture is allocated by audio_capture_init (opaque type) */
+   ctx->audio_capture = NULL;
 
-   if (!ctx->audio_capture || !ctx->audio_playback) {
-      satellite_set_error(ctx, -1, "Failed to allocate subsystem contexts");
+   ctx->audio_playback = malloc(sizeof(audio_playback_t));
+   if (!ctx->audio_playback) {
+      satellite_set_error(ctx, -1, "Failed to allocate audio playback context");
       satellite_cleanup(ctx);
       return -1;
    }
-
-   memset(ctx->audio_capture, 0, sizeof(audio_capture_t));
    memset(ctx->audio_playback, 0, sizeof(audio_playback_t));
 
 #ifdef ENABLE_DISPLAY
@@ -172,7 +171,8 @@ void satellite_cleanup(satellite_ctx_t *ctx) {
 
    if (ctx->audio_capture) {
       audio_capture_cleanup((audio_capture_t *)ctx->audio_capture);
-      free(ctx->audio_capture);
+      /* audio_capture_cleanup frees the context */
+      ctx->audio_capture = NULL;
    }
 
    if (ctx->audio_playback) {

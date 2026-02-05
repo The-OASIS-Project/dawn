@@ -3926,6 +3926,9 @@ void webui_send_stream_start(session_t *session) {
    session->cmd_tag_filter.nesting_depth = 0;
    session->cmd_tag_filter.len = 0;
 
+   /* Reset sentence spacing tracker */
+   session->stream_last_char = '\0';
+
    /* Cache whether to bypass filtering (native tools enabled) */
    session->cmd_tag_filter_bypass = llm_tools_enabled(NULL);
 
@@ -3944,6 +3947,66 @@ void webui_send_stream_start(session_t *session) {
 /* Command tag filter uses shared constants from core/text_filter.h */
 
 /**
+ * @brief Check if character is a sentence terminator
+ */
+static inline bool is_sentence_terminator(char c) {
+   return c == '.' || c == '!' || c == '?' || c == ':';
+}
+
+/**
+ * @brief Check and fix sentence spacing for streaming text
+ *
+ * LLM streaming sometimes omits spaces after sentence terminators.
+ * This function detects when the previous chunk ended with a terminator
+ * and the new chunk starts with a letter, prepending a space if needed.
+ *
+ * @param session Session with stream_last_char tracking
+ * @param text Input text
+ * @param out_buf Output buffer (can overlap with text if no space needed)
+ * @param out_size Size of output buffer
+ * @return Pointer to text to send (either out_buf with space, or original text)
+ */
+static const char *fix_sentence_spacing(session_t *session,
+                                        const char *text,
+                                        char *out_buf,
+                                        size_t out_size) {
+   if (!session || !text || !text[0] || !out_buf || out_size < 2) {
+      return text;
+   }
+
+   /* Check if we need to add a space:
+    * - Previous chunk ended with sentence terminator
+    * - This chunk starts with a letter */
+   char first = text[0];
+   bool needs_space = is_sentence_terminator(session->stream_last_char) &&
+                      ((first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z'));
+
+   if (needs_space) {
+      /* Prepend space to the text */
+      size_t text_len = strlen(text);
+      if (text_len + 2 <= out_size) {
+         out_buf[0] = ' ';
+         memcpy(out_buf + 1, text, text_len + 1); /* Include null terminator */
+         return out_buf;
+      }
+   }
+
+   return text;
+}
+
+/**
+ * @brief Update the last character tracker after sending text
+ */
+static inline void update_stream_last_char(session_t *session, const char *text) {
+   if (session && text) {
+      size_t len = strlen(text);
+      if (len > 0) {
+         session->stream_last_char = text[len - 1];
+      }
+   }
+}
+
+/**
  * @brief Output callback for WebUI streaming (adapter for text_filter API)
  *
  * This callback adapts the shared text_filter's signature to WebUI needs.
@@ -3960,17 +4023,26 @@ static void webui_filter_output(const char *text, size_t len, void *ctx) {
       webui_send_stream_start(session);
    }
 
+   /* Null-terminate the input for processing */
+   char temp_buf[4096];
+   size_t safe_len = len < sizeof(temp_buf) - 1 ? len : sizeof(temp_buf) - 1;
+   memcpy(temp_buf, text, safe_len);
+   temp_buf[safe_len] = '\0';
+
+   /* Fix sentence spacing (LLM sometimes omits space after period) */
+   char spaced_buf[4098]; /* Extra room for prepended space */
+   const char *fixed_text = fix_sentence_spacing(session, temp_buf, spaced_buf, sizeof(spaced_buf));
+
    ws_response_t resp = { .session = session,
                           .type = WS_RESP_STREAM_DELTA,
                           .stream = {
                               .stream_id = session->current_stream_id,
                           } };
 
-   size_t copy_len = len < sizeof(resp.stream.text) - 1 ? len : sizeof(resp.stream.text) - 1;
-   memcpy(resp.stream.text, text, copy_len);
-   resp.stream.text[copy_len] = '\0';
+   snprintf(resp.stream.text, sizeof(resp.stream.text), "%s", fixed_text);
 
    session->stream_had_content = true;
+   update_stream_last_char(session, resp.stream.text);
    queue_response(&resp);
 }
 
@@ -4029,14 +4101,18 @@ void webui_send_stream_delta(session_t *session, const char *text) {
          webui_send_stream_start(session);
       }
 
+      /* Fix sentence spacing (LLM sometimes omits space after period) */
+      char spaced_buf[4098];
+      const char *fixed_text = fix_sentence_spacing(session, text, spaced_buf, sizeof(spaced_buf));
+
       ws_response_t resp = { .session = session,
                              .type = WS_RESP_STREAM_DELTA,
                              .stream = {
                                  .stream_id = session->current_stream_id,
                              } };
-      strncpy(resp.stream.text, text, sizeof(resp.stream.text) - 1);
-      resp.stream.text[sizeof(resp.stream.text) - 1] = '\0';
+      snprintf(resp.stream.text, sizeof(resp.stream.text), "%s", fixed_text);
       session->stream_had_content = true;
+      update_stream_last_char(session, resp.stream.text);
       queue_response(&resp);
       return;
    }

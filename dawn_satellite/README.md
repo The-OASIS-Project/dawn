@@ -77,6 +77,26 @@ sudo usermod -aG video,render,audio,input,spi,gpio $USER
 sudo reboot
 ```
 
+### 2.1 Add Swap Space (Required for Pi Zero 2 W)
+
+The Pi Zero 2 W has only 512MB RAM. Compiling piper.cpp and whisper.cpp requires more memory. Add swap space before building:
+
+```bash
+# Create 1GB swap file
+sudo fallocate -l 1G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+
+# Make permanent
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+
+# Verify swap is active
+free -h
+```
+
+> **Note:** Even with swap, use `make -j1` on Pi Zero 2 W to avoid OOM issues. Pi 4/5 with 2GB+ RAM can use `make -j$(nproc)`.
+
 ### 3. Install Dependencies
 
 ```bash
@@ -160,7 +180,7 @@ sudo apt install -y autoconf automake libtool
 git clone https://github.com/rhasspy/espeak-ng.git
 cd espeak-ng
 ./autogen.sh && ./configure --prefix=/usr
-make -j$(nproc) && sudo make LIBDIR=/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH) install
+make -j1 && sudo make LIBDIR=/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH) install
 cd ..
 ```
 
@@ -171,7 +191,7 @@ git clone https://github.com/rhasspy/piper-phonemize.git
 cd piper-phonemize
 mkdir build && cd build
 cmake .. -DONNXRUNTIME_DIR=/usr/local -DESPEAK_NG_DIR=/usr
-make -j$(nproc)
+make -j1
 
 # Manual install (piper's make install has broken rules for system deps)
 sudo cp -a libpiper_phonemize.so* /usr/local/lib/
@@ -191,13 +211,44 @@ cd dawn
 
 > **Note:** The `--recursive` flag is important to fetch the whisper.cpp submodule for local ASR.
 
+### 5.1 Download Models (For Local Processing)
+
+If enabling local VAD, ASR, or TTS, download the required models:
+
+```bash
+# Download Whisper tiny model for ASR (~75MB)
+./setup_models.sh --whisper-model tiny
+```
+
+The VAD and TTS models are already included in the repository:
+
+| Model | Path | Purpose |
+|-------|------|---------|
+| Silero VAD | `models/silero_vad_16k_op15.onnx` | Voice activity detection |
+| Alba voice | `models/en_GB-alba-medium.onnx` | TTS (Friday persona) |
+| Northern English Male | `models/en_GB-northern_english_male-medium.onnx` | TTS (Jarvis persona) |
+
+Configure the model paths in your `satellite.toml`:
+
+```toml
+[vad]
+model_path = "/home/pi/dawn/models/silero_vad_16k_op15.onnx"
+
+[asr]
+model_path = "/home/pi/dawn/models/whisper.cpp/ggml-tiny.bin"
+
+[tts]
+model_path = "/home/pi/dawn/models/en_GB-alba-medium.onnx"
+config_path = "/home/pi/dawn/models/en_GB-alba-medium.onnx.json"
+```
+
 ### 6. Build the Satellite
 
 ```bash
 cd dawn_satellite
 mkdir build && cd build
 cmake ..
-make -j$(nproc)
+make -j1  # Use -j1 on Pi Zero 2 W; Pi 4/5 can use -j$(nproc)
 ```
 
 > The common library is built automatically as part of the satellite build process.
@@ -206,21 +257,20 @@ make -j$(nproc)
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `-DENABLE_UI=ON` | ON | SDL2 touchscreen UI |
 | `-DENABLE_DAP2=ON` | ON | WebSocket protocol (vs legacy DAP1) |
-| `-DENABLE_LOCAL_VAD=OFF` | OFF | Local Silero VAD (requires ONNX Runtime) |
-| `-DENABLE_LOCAL_ASR=OFF` | OFF | Local Whisper ASR (uses whisper.cpp submodule) |
-| `-DENABLE_LOCAL_TTS=OFF` | OFF | Local Piper TTS (requires ONNX + piper-phonemize) |
+| `-DENABLE_VOICE=ON` | ON | Local voice processing (VAD + ASR + TTS) |
+| `-DENABLE_DISPLAY=OFF` | OFF | SPI display support via framebuffer |
+| `-DENABLE_NEOPIXEL=ON` | ON | NeoPixel/WS2812 LED support via SPI |
 | `-DCMAKE_BUILD_TYPE=Release` | Release | Optimization level |
 
-Example with local processing enabled (Tier 1):
+Example with voice processing disabled (text-only mode):
 ```bash
-cmake -DENABLE_LOCAL_VAD=ON -DENABLE_LOCAL_ASR=ON -DENABLE_LOCAL_TTS=ON ..
+cmake -DENABLE_VOICE=OFF ..
 ```
 
-Example with UI disabled (headless):
+Example headless with no LEDs:
 ```bash
-cmake -DENABLE_UI=OFF ..
+cmake -DENABLE_NEOPIXEL=OFF ..
 ```
 
 ### 7. Configure
@@ -245,7 +295,7 @@ location = "living_room"    # Room identifier for context
 
 [server]
 host = "192.168.1.100"      # Your DAWN daemon IP address
-port = 8080                 # WebUI port (where WebSocket runs)
+port = 3000                 # WebUI port (where WebSocket runs)
 
 [audio]
 capture_device = "plughw:1,0"   # Your microphone (run 'arecord -l')
@@ -261,7 +311,7 @@ playback_device = "plughw:0,0" # Your speaker (run 'aplay -l')
 # Expected output:
 # [INFO] DAWN Satellite v0.1.0 starting...
 # [INFO] Loading config from /etc/dawn/satellite.toml
-# [INFO] Connecting to ws://192.168.1.100:8080
+# [INFO] Connecting to wss://192.168.1.100:3000
 # [INFO] WebSocket connected
 # [INFO] Registered as "Living Room" (location: living_room)
 # [INFO] Ready - say "Hey Friday" to activate
@@ -321,8 +371,9 @@ location = "kitchen"         # Room for context-aware responses
 #### [server]
 ```toml
 host = "192.168.1.100"       # DAWN daemon IP or hostname
-port = 8080                  # WebUI port
-ssl = false                  # Use wss:// (requires daemon SSL config)
+port = 3000                  # WebUI port
+ssl = true                   # Use wss:// (requires daemon SSL config)
+ssl_verify = true            # Verify SSL certs (set false for self-signed)
 reconnect_delay_ms = 5000    # Reconnection backoff
 max_reconnect_attempts = 0   # 0 = retry forever
 ```
@@ -492,16 +543,16 @@ export SDL_VIDEODRIVER=KMSDRM
 | Symptom | Solution |
 |---------|----------|
 | "Connection refused" | Check daemon is running, verify IP/port |
-| "Connection timeout" | Check network, firewall (port 8080) |
+| "Connection timeout" | Check network, firewall (port 3000 or configured port) |
 | "WebSocket error" | Ensure daemon WebUI is enabled |
 
 ```bash
 # Test connectivity
 ping 192.168.1.100
-curl -v http://192.168.1.100:8080/
+curl -v http://192.168.1.100:3000/
 
 # Test WebSocket (install wscat: npm install -g wscat)
-wscat -c ws://192.168.1.100:8080
+wscat -c ws://192.168.1.100:3000
 ```
 
 ### Audio Issues
@@ -666,7 +717,7 @@ make -j$(nproc)
 
 ```bash
 # Python test client
-python3 ../tests/test_satellite_protocol.py --host 192.168.1.100 --port 8080
+python3 ../tests/test_satellite_protocol.py --host 192.168.1.100 --port 3000
 ```
 
 ### Cross-Compilation (from x86_64)

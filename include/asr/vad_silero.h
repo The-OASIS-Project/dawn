@@ -62,6 +62,31 @@ extern "C" {
 typedef struct silero_vad_context silero_vad_context_t;
 
 /**
+ * @brief Callback type for VAD probability updates
+ *
+ * Optional callback for UI/metrics updates after each inference.
+ * Set via vad_silero_set_probability_callback().
+ *
+ * @param probability Speech probability (0.0-1.0)
+ * @param user_data User-provided context
+ */
+typedef void (*vad_probability_callback_t)(float probability, void *user_data);
+
+/**
+ * @brief Set optional callback for VAD probability updates
+ *
+ * The callback is invoked after each successful inference with the
+ * speech probability value. Useful for UI/metrics updates.
+ *
+ * @param ctx VAD context from vad_silero_init()
+ * @param callback Callback function, or NULL to disable
+ * @param user_data User-provided context passed to callback
+ */
+void vad_silero_set_probability_callback(silero_vad_context_t *ctx,
+                                         vad_probability_callback_t callback,
+                                         void *user_data);
+
+/**
  * @brief Initialize Silero VAD system
  *
  * Loads the ONNX model and initializes the ONNX Runtime session.

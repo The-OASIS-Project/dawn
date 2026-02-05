@@ -39,6 +39,13 @@ extern "C" {
 #define CONFIG_HOST_SIZE 256
 #define CONFIG_DEVICE_SIZE 64
 #define CONFIG_PATH_SIZE 256
+#define CONFIG_SECRET_SIZE 65 /* 32 bytes hex-encoded + null */
+
+/* Processing modes */
+typedef enum {
+   PROCESSING_MODE_TEXT_ONLY = 0,   /* Current behavior: keyboard input */
+   PROCESSING_MODE_VOICE_ACTIVATED, /* VAD + wake word + ASR + TTS */
+} processing_mode_t;
 
 /* Default config file locations (searched in order) */
 #define CONFIG_PATH_LOCAL "./satellite.toml"
@@ -52,12 +59,18 @@ extern "C" {
 /**
  * @brief Complete satellite configuration
  */
-typedef struct {
+typedef struct satellite_config {
+   /* General settings */
+   struct {
+      char ai_name[CONFIG_NAME_SIZE]; /* Must match server dawn.toml (e.g., "friday") */
+   } general;
+
    /* Identity - unique per satellite */
    struct {
       char uuid[CONFIG_UUID_SIZE];
       char name[CONFIG_NAME_SIZE];
       char location[CONFIG_LOCATION_SIZE];
+      char reconnect_secret[CONFIG_SECRET_SIZE]; /* Session secret for secure reconnection */
    } identity;
 
    /* Server connection */
@@ -65,6 +78,7 @@ typedef struct {
       char host[CONFIG_HOST_SIZE];
       uint16_t port;
       bool ssl;
+      bool ssl_verify; /* Verify SSL certificates (default: true for production) */
       uint32_t reconnect_delay_ms;
       uint32_t max_reconnect_attempts;
    } server;
@@ -76,6 +90,43 @@ typedef struct {
       uint32_t sample_rate;
       uint32_t max_record_seconds;
    } audio;
+
+   /* Voice Activity Detection (VAD) */
+   struct {
+      bool enabled;
+      char model_path[CONFIG_PATH_SIZE];
+      float threshold;              /* 0.0-1.0, higher = stricter */
+      uint32_t silence_duration_ms; /* Silence to trigger end-of-speech */
+      uint32_t min_speech_ms;       /* Minimum speech before accepting */
+   } vad;
+
+   /* Wake Word Detection */
+   struct {
+      bool enabled;
+      char word[CONFIG_NAME_SIZE]; /* Wake word (e.g., "friday") */
+      float sensitivity;           /* 0.0-1.0, higher = more sensitive */
+   } wake_word;
+
+   /* Automatic Speech Recognition (ASR) */
+   struct {
+      char model_path[CONFIG_PATH_SIZE];
+      char language[8];      /* e.g., "en" */
+      int n_threads;         /* Processing threads */
+      int max_audio_seconds; /* Max buffer size (15s recommended for efficiency) */
+   } asr;
+
+   /* Text-to-Speech (TTS) */
+   struct {
+      char model_path[CONFIG_PATH_SIZE];
+      char config_path[CONFIG_PATH_SIZE];
+      char espeak_data[CONFIG_PATH_SIZE];
+      float length_scale; /* Speech speed (0.85 = faster) */
+   } tts;
+
+   /* Processing mode */
+   struct {
+      processing_mode_t mode;
+   } processing;
 
    /* GPIO button/LED configuration */
    struct {
@@ -147,6 +198,7 @@ int satellite_config_load(satellite_config_t *config, const char *path);
  * @param server Server hostname override
  * @param port Port override (0 to skip)
  * @param ssl SSL override (-1 to skip, 0=off, 1=on)
+ * @param ssl_verify SSL cert verification (-1 to skip, 0=disable, 1=enable)
  * @param name Satellite name override
  * @param location Location override
  * @param capture_device Capture device override
@@ -158,6 +210,7 @@ void satellite_config_apply_overrides(satellite_config_t *config,
                                       const char *server,
                                       uint16_t port,
                                       int ssl,
+                                      int ssl_verify,
                                       const char *name,
                                       const char *location,
                                       const char *capture_device,
@@ -189,6 +242,36 @@ void satellite_config_print(const satellite_config_t *config);
  * @return Path to loaded config file, or NULL if none loaded
  */
 const char *satellite_config_get_path(void);
+
+/**
+ * @brief Save reconnect secret to identity config
+ *
+ * Stores the session secret received from server during registration.
+ * This secret is required for secure reconnection without session hijacking.
+ *
+ * @param config Pointer to config structure
+ * @param secret Session secret (64 hex chars)
+ */
+void satellite_config_set_reconnect_secret(satellite_config_t *config, const char *secret);
+
+/**
+ * @brief Check if a model path exists and is readable
+ *
+ * @param path Path to check
+ * @return true if path exists and is readable
+ */
+bool satellite_config_path_valid(const char *path);
+
+/**
+ * @brief Validate all model paths and disable features with missing models
+ *
+ * Checks each model path (VAD, ASR, TTS) and disables the corresponding
+ * feature if the model file is missing or unreadable. Logs warnings for
+ * missing models.
+ *
+ * @param config Pointer to config structure
+ */
+void satellite_config_validate_paths(satellite_config_t *config);
 
 #ifdef __cplusplus
 }

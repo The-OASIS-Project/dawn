@@ -27,6 +27,13 @@ option(DAWN_COMMON_WITH_VAD "Build with Silero VAD support (requires ONNX Runtim
 option(DAWN_COMMON_WITH_ASR "Build with Whisper ASR support (requires whisper.cpp)" ON)
 option(DAWN_COMMON_WITH_TTS "Build with Piper TTS support (requires ONNX Runtime)" ON)
 
+# Sentence buffer max size (bytes)
+# Daemon (server): 10MB (10485760) - plenty of memory
+# Satellite (Pi Zero 2 W): 256KB (262144) - prevent OOM on constrained devices
+if(NOT DEFINED DAWN_SENTENCE_BUFFER_MAX_SIZE)
+    set(DAWN_SENTENCE_BUFFER_MAX_SIZE 10485760 CACHE STRING "Maximum sentence buffer size in bytes")
+endif()
+
 # Core source files (no external dependencies beyond pthreads)
 set(DAWN_COMMON_SOURCES
     src/logging_common.c
@@ -54,6 +61,12 @@ target_compile_options(dawn_common PRIVATE
     -Werror=return-type
     -Werror=implicit-function-declaration
 )
+
+# Sentence buffer size limit
+target_compile_definitions(dawn_common PRIVATE
+    SENTENCE_BUFFER_MAX_SIZE=${DAWN_SENTENCE_BUFFER_MAX_SIZE}
+)
+message(STATUS "Sentence buffer max size: ${DAWN_SENTENCE_BUFFER_MAX_SIZE} bytes")
 
 # --------------------------------------------------------------------------
 # Optional: Silero VAD (requires ONNX Runtime)
@@ -190,18 +203,26 @@ if(DAWN_COMMON_WITH_TTS)
         message(STATUS "Found piper-phonemize: ${PIPER_PHONEMIZE_LIBRARY}")
         message(STATUS "Found Piper source: ${PIPER_SOURCE_FILE}")
 
-        # Create piper library (same pattern as main build)
-        add_library(piper STATIC ${PIPER_SOURCE_FILE})
-        target_include_directories(piper PUBLIC
-            ${PIPER_HEADER_DIR}
-            ${ONNXRUNTIME_INCLUDE_DIR}
-            ${PIPER_PHONEMIZE_INCLUDE_DIR}
-            ${SPDLOG_INCLUDE_DIRS}
-        )
-        target_link_libraries(piper PUBLIC ${ONNXRUNTIME_LIBRARY})
+        # Check if piper target already exists (created by parent project)
+        if(NOT TARGET piper)
+            # Create piper library (same pattern as main build)
+            add_library(piper STATIC ${PIPER_SOURCE_FILE})
+            target_include_directories(piper PUBLIC
+                ${PIPER_HEADER_DIR}
+                ${ONNXRUNTIME_INCLUDE_DIR}
+                ${PIPER_PHONEMIZE_INCLUDE_DIR}
+                ${SPDLOG_INCLUDE_DIRS}
+            )
+            target_link_libraries(piper PUBLIC ${ONNXRUNTIME_LIBRARY})
+        else()
+            message(STATUS "Using piper target from parent project")
+        endif()
 
-        # Create TTS wrapper library (C interface)
-        add_library(dawn_common_tts STATIC src/tts/tts_piper.cpp)
+        # Create TTS wrapper library (C interface + preprocessing)
+        add_library(dawn_common_tts STATIC
+            src/tts/tts_piper.cpp
+            src/tts/tts_preprocessing.cpp
+        )
         target_include_directories(dawn_common_tts PUBLIC
             ${CMAKE_CURRENT_SOURCE_DIR}/include
             ${PIPER_HEADER_DIR}

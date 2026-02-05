@@ -71,16 +71,6 @@ void satellite_send_response(session_t *session, const char *text);
 void satellite_send_stream_start(session_t *session);
 
 /**
- * @brief Send streaming delta to satellite
- *
- * Sends partial text as it arrives from LLM.
- *
- * @param session DAP2 session
- * @param text Delta text
- */
-void satellite_send_stream_delta(session_t *session, const char *text);
-
-/**
  * @brief End streaming response to satellite
  *
  * @param session DAP2 session

@@ -29,7 +29,16 @@
 #include "utils/string_utils.h"
 
 #define DEFAULT_CAPACITY 512
-#define MAX_BUFFER_SIZE (10 * 1024 * 1024) /* 10MB hard limit for sentence buffering */
+
+/* Maximum buffer size - configurable at compile time
+ * Daemon (server): 10MB is fine (plenty of memory)
+ * Satellite (Pi Zero 2 W): 256KB to prevent OOM
+ * Override via -DSENTENCE_BUFFER_MAX_SIZE=N in CMakeLists.txt
+ */
+#ifndef SENTENCE_BUFFER_MAX_SIZE
+#define SENTENCE_BUFFER_MAX_SIZE (10 * 1024 * 1024) /* 10MB default for daemon */
+#endif
+#define MAX_BUFFER_SIZE SENTENCE_BUFFER_MAX_SIZE
 
 /**
  * @brief Ensure buffer has enough capacity
@@ -236,4 +245,16 @@ void sentence_buffer_flush(sentence_buffer_t *buf) {
    /* Clear buffer */
    buf->size = 0;
    buf->buffer[0] = '\0';
+}
+
+void sentence_buffer_clear(sentence_buffer_t *buf) {
+   if (!buf) {
+      return;
+   }
+
+   /* Clear buffer without invoking callback */
+   buf->size = 0;
+   if (buf->buffer) {
+      buf->buffer[0] = '\0';
+   }
 }

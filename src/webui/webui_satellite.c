@@ -23,10 +23,75 @@
 
 #include <pthread.h>
 #include <string.h>
+#include <time.h>
 
 #include "core/session_manager.h"
 #include "logging.h"
 #include "webui/webui_internal.h"
+
+/* =============================================================================
+ * Rate Limiting for Satellite Registration
+ *
+ * Prevents DoS attacks by limiting registration attempts per IP address.
+ * Uses a simple hash table with IP-based tracking.
+ * ============================================================================= */
+
+#define RATE_LIMIT_BUCKETS 256
+#define RATE_LIMIT_MAX_REGISTRATIONS 5
+#define RATE_LIMIT_WINDOW_SEC 60
+
+typedef struct {
+   uint32_t ip_hash;
+   time_t window_start;
+   int count;
+} rate_limit_entry_t;
+
+static rate_limit_entry_t g_rate_limits[RATE_LIMIT_BUCKETS] = { 0 };
+static pthread_mutex_t g_rate_limit_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/**
+ * Check if registration is rate-limited for given IP address.
+ * Returns true if request should be denied, false if allowed.
+ */
+static bool is_rate_limited(const char *client_ip) {
+   if (!client_ip)
+      return false;
+
+   /* Simple FNV-1a hash of IP string */
+   uint32_t hash = 2166136261u;
+   for (const char *p = client_ip; *p; p++) {
+      hash ^= (unsigned char)*p;
+      hash *= 16777619u;
+   }
+
+   int bucket = hash % RATE_LIMIT_BUCKETS;
+   time_t now = time(NULL);
+
+   pthread_mutex_lock(&g_rate_limit_mutex);
+
+   rate_limit_entry_t *entry = &g_rate_limits[bucket];
+
+   /* Check if this is a different IP (hash collision) or window expired */
+   if (entry->ip_hash != hash || (now - entry->window_start) >= RATE_LIMIT_WINDOW_SEC) {
+      /* Start new window */
+      entry->ip_hash = hash;
+      entry->window_start = now;
+      entry->count = 1;
+      pthread_mutex_unlock(&g_rate_limit_mutex);
+      return false;
+   }
+
+   /* Same IP within window - check count */
+   if (++entry->count > RATE_LIMIT_MAX_REGISTRATIONS) {
+      pthread_mutex_unlock(&g_rate_limit_mutex);
+      LOG_WARNING("Rate limit exceeded for IP %s (bucket %d): %d registrations in %lds", client_ip,
+                  bucket, entry->count, (long)(now - entry->window_start));
+      return true;
+   }
+
+   pthread_mutex_unlock(&g_rate_limit_mutex);
+   return false;
+}
 
 /* =============================================================================
  * Satellite Response Queue Functions
@@ -79,33 +144,6 @@ void satellite_send_stream_start(session_t *session) {
    queue_response(&resp);
    LOG_INFO("Satellite: Stream start id=%u for session %u (satellite %s)",
             session->current_stream_id, session->session_id, session->identity.name);
-}
-
-void satellite_send_stream_delta(session_t *session, const char *text) {
-   if (!session || session->type != SESSION_TYPE_DAP2) {
-      return;
-   }
-
-   if (!text || text[0] == '\0') {
-      return;
-   }
-
-   /* Start stream on first content if not already started */
-   if (!session->llm_streaming_active) {
-      satellite_send_stream_start(session);
-   }
-
-   ws_response_t resp = { .session = session,
-                          .type = WS_RESP_STREAM_DELTA,
-                          .stream = {
-                              .stream_id = session->current_stream_id,
-                          } };
-
-   strncpy(resp.stream.text, text, sizeof(resp.stream.text) - 1);
-   resp.stream.text[sizeof(resp.stream.text) - 1] = '\0';
-   session->stream_had_content = true;
-
-   queue_response(&resp);
 }
 
 void satellite_send_stream_end(session_t *session, const char *reason) {
@@ -340,6 +378,13 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
       return;
    }
 
+   /* Rate limiting check - prevent DoS via registration spam */
+   if (is_rate_limited(conn->client_ip)) {
+      send_error_impl(conn->wsi, "RATE_LIMITED",
+                      "Too many registration attempts. Try again in 60 seconds.");
+      return;
+   }
+
    /* Extract registration fields */
    struct json_object *uuid_obj, *name_obj, *location_obj, *tier_obj, *caps_obj;
 
@@ -390,12 +435,24 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
       }
    }
 
+   /* Check for reconnect_secret (provided during reconnection attempts) */
+   const char *reconnect_secret = "";
+   struct json_object *secret_obj;
+   if (json_object_object_get_ex(payload, "reconnect_secret", &secret_obj)) {
+      reconnect_secret = json_object_get_string(secret_obj);
+   }
+
    /* Build identity */
    dap2_identity_t identity;
    memset(&identity, 0, sizeof(identity));
    strncpy(identity.uuid, uuid, sizeof(identity.uuid) - 1);
    strncpy(identity.name, name, sizeof(identity.name) - 1);
    strncpy(identity.location, location, sizeof(identity.location) - 1);
+
+   /* Include reconnect_secret if client provided one (for session reclamation) */
+   if (reconnect_secret && reconnect_secret[0]) {
+      strncpy(identity.reconnect_secret, reconnect_secret, sizeof(identity.reconnect_secret) - 1);
+   }
 
    /* Create or reconnect session */
    dap2_tier_t dap2_tier = (tier == 1) ? DAP2_TIER_1 : DAP2_TIER_2;
@@ -411,16 +468,29 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
    conn->session = session;
    session->client_data = conn;
 
+   /* Get reconnect secret for client to save */
+   char *session_secret = session_get_reconnect_secret(session);
+
    LOG_INFO("Satellite: Registered '%s' (%s) tier=%d location='%s' session=%u", identity.name,
             identity.uuid, tier, identity.location, session->session_id);
 
-   /* Send registration acknowledgment */
+   /* Send registration acknowledgment with reconnect secret
+    * SECURITY: Client MUST save this secret and provide it on reconnection.
+    * Without the correct secret, reconnection attempts create new sessions. */
    struct json_object *response = json_object_new_object();
    json_object_object_add(response, "type", json_object_new_string("satellite_register_ack"));
 
    struct json_object *resp_payload = json_object_new_object();
    json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
    json_object_object_add(resp_payload, "session_id", json_object_new_int(session->session_id));
+
+   /* Include reconnect_secret for secure session reclamation */
+   if (session_secret) {
+      json_object_object_add(resp_payload, "reconnect_secret",
+                             json_object_new_string(session_secret));
+      free(session_secret);
+   }
+
    json_object_object_add(resp_payload, "message",
                           json_object_new_string("Satellite registered successfully"));
 

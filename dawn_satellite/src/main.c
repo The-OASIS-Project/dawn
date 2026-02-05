@@ -26,6 +26,7 @@
 #include "audio_playback.h"
 #include "satellite_config.h"
 #include "satellite_state.h"
+#include "voice_processing.h"
 
 #ifdef ENABLE_DAP2
 #include "ws_client.h"
@@ -49,6 +50,7 @@
 
 /* Global context for signal handler */
 static satellite_ctx_t *g_ctx = NULL;
+static voice_ctx_t *g_voice_ctx = NULL;
 
 #ifdef ENABLE_NEOPIXEL
 static neopixel_t *g_neopixel = NULL;
@@ -94,6 +96,9 @@ static void signal_handler(int sig) {
       g_ctx->stop_recording = 1;
       g_ctx->stop_playback = 1;
    }
+   if (g_voice_ctx) {
+      voice_processing_stop(g_voice_ctx);
+   }
 }
 
 /* Print usage */
@@ -111,6 +116,7 @@ static void print_usage(const char *prog) {
 #ifdef ENABLE_DAP2
    printf("  -p, --port PORT      WebUI port (default: 8080)\n");
    printf("  -S, --ssl            Use secure WebSocket (wss://)\n");
+   printf("  -I, --no-ssl-verify  Disable SSL certificate verification (dev only!)\n");
    printf("  -N, --name NAME      Satellite name (default: Satellite)\n");
    printf("  -L, --location LOC   Satellite location (default: unset)\n");
 #else
@@ -126,11 +132,14 @@ static void print_usage(const char *prog) {
 #endif
    printf("  -d, --no-display     Disable framebuffer display\n");
    printf("  -v, --verbose        Enable verbose logging\n");
+#ifdef ENABLE_DAP2
+   printf("  -V, --voice          Enable voice-activated mode (VAD + wake word + ASR + TTS)\n");
+#endif
    printf("  -h, --help           Show this help message\n");
    printf("\n");
    printf("Operation:\n");
 #ifdef ENABLE_DAP2
-   printf("  Production: Wake word (\"Hey Friday\") activates, VAD detects end-of-speech\n");
+   printf("  Production (-V): Wake word (\"Hey Friday\") activates, VAD detects end-of-speech\n");
    printf("  Testing (-k): Type text at prompt to simulate transcribed speech\n");
 #else
    printf("  GPIO button or SPACE: Press and hold to record, release to send\n");
@@ -234,15 +243,22 @@ static void on_state_callback(const char *state, void *user_data) {
 static int dap2_main_loop(satellite_ctx_t *ctx,
                           ws_client_t *ws,
                           int use_keyboard,
-                          const char *name,
-                          const char *location) {
-   /* Register with daemon */
+                          satellite_config_t *config) {
+   /* Build identity from config */
    ws_identity_t identity;
-   ws_client_generate_uuid(identity.uuid);
-   strncpy(identity.name, name, sizeof(identity.name) - 1);
-   identity.name[sizeof(identity.name) - 1] = '\0';
-   strncpy(identity.location, location, sizeof(identity.location) - 1);
-   identity.location[sizeof(identity.location) - 1] = '\0';
+   memset(&identity, 0, sizeof(identity));
+
+   /* Use UUID from config (already ensured) */
+   snprintf(identity.uuid, sizeof(identity.uuid), "%s", config->identity.uuid);
+   snprintf(identity.name, sizeof(identity.name), "%s", config->identity.name);
+   snprintf(identity.location, sizeof(identity.location), "%s", config->identity.location);
+
+   /* Load reconnect_secret from config (if we have one from previous session) */
+   if (config->identity.reconnect_secret[0]) {
+      snprintf(identity.reconnect_secret, sizeof(identity.reconnect_secret), "%s",
+               config->identity.reconnect_secret);
+      printf("Attempting reconnection with saved session secret...\n");
+   }
 
    ws_capabilities_t caps = { .local_asr = true, /* Will have local ASR */
                               .local_tts = true, /* Will have local TTS */
@@ -254,6 +270,13 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
       return 1;
    }
 
+   /* Save the reconnect_secret received from server for future reconnections */
+   const char *new_secret = ws_client_get_reconnect_secret(ws);
+   if (new_secret && new_secret[0]) {
+      satellite_config_set_reconnect_secret(config, new_secret);
+      printf("Session secret saved for future reconnections\n");
+   }
+
    printf("\n=== DAWN Satellite Ready (DAP2 Mode) ===\n");
    printf("UUID: %s\n", identity.uuid);
    printf("Name: %s\n", identity.name);
@@ -262,13 +285,44 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
    }
    printf("\n");
 
+   /* Check processing mode - voice mode uses VAD, doesn't need GPIO */
+   if (config->processing.mode == PROCESSING_MODE_VOICE_ACTIVATED) {
+      printf("Say '%s' to activate\n", config->wake_word.word);
+      printf("Press Ctrl+C to exit\n\n");
+
+      /* Initialize voice processing */
+      voice_ctx_t *voice_ctx = voice_processing_init(config);
+      if (!voice_ctx) {
+         fprintf(stderr, "Failed to initialize voice processing\n");
+         return 1;
+      }
+
+      /* Set global for signal handler */
+      g_voice_ctx = voice_ctx;
+
+      /* Speak welcome greeting */
+      voice_processing_speak_greeting(voice_ctx, ctx);
+
+      /* Run voice-activated loop */
+      int result = voice_processing_loop(voice_ctx, ctx, ws, config);
+
+      /* Check if loop exited due to disconnection (not user-requested stop) */
+      if (!ws_client_is_connected(ws) && ctx->running) {
+         /* Connection lost - speak offline message */
+         voice_processing_speak_offline(voice_ctx, ctx);
+      }
+
+      voice_processing_cleanup(voice_ctx);
+      return result;
+   }
+
    if (use_keyboard) {
       printf("Type a message and press Enter to send\n");
       printf("Type 'quit' or press Ctrl+C to exit\n\n");
       printf("> ");
       fflush(stdout);
    } else {
-      printf("Press GPIO button to speak\n");
+      printf("Voice mode not active. Use -V flag or set mode = \"voice_activated\" in config\n");
       printf("Press Ctrl+C to exit\n\n");
    }
 
@@ -559,6 +613,7 @@ int main(int argc, char *argv[]) {
    satellite_ctx_t ctx;
    satellite_config_t config;
    int use_keyboard = 0;
+   int voice_mode = 0; /* -V flag overrides config processing mode */
 #ifdef ENABLE_DISPLAY
    int no_display = 0;
 #endif
@@ -569,6 +624,7 @@ int main(int argc, char *argv[]) {
    const char *cli_server = NULL;
    uint16_t cli_port = 0;
    int cli_ssl = -1;
+   int cli_ssl_verify = -1; /* -1=default, 0=disable, 1=enable */
    const char *cli_capture = NULL;
    const char *cli_playback = NULL;
    const char *cli_name = NULL;
@@ -593,13 +649,15 @@ int main(int argc, char *argv[]) {
                                            { "help", no_argument, 0, 'h' },
 #ifdef ENABLE_DAP2
                                            { "ssl", no_argument, 0, 'S' },
+                                           { "no-ssl-verify", no_argument, 0, 'I' },
                                            { "name", required_argument, 0, 'N' },
                                            { "location", required_argument, 0, 'L' },
+                                           { "voice", no_argument, 0, 'V' },
 #endif
                                            { 0, 0, 0, 0 } };
 
 #ifdef ENABLE_DAP2
-   const char *optstring = "C:s:p:c:o:kdn:vhSN:L:";
+   const char *optstring = "C:s:p:c:o:kdn:vhSIN:L:V";
 #else
    const char *optstring = "C:s:p:c:o:kdn:vh";
 #endif
@@ -647,11 +705,17 @@ int main(int argc, char *argv[]) {
          case 'S':
             cli_ssl = 1;
             break;
+         case 'I':
+            cli_ssl_verify = 0; /* Disable SSL verification (for development only) */
+            break;
          case 'N':
             cli_name = optarg;
             break;
          case 'L':
             cli_location = optarg;
+            break;
+         case 'V':
+            voice_mode = 1;
             break;
 #endif
          default:
@@ -671,11 +735,22 @@ int main(int argc, char *argv[]) {
    }
 
    /* Apply command-line overrides */
-   satellite_config_apply_overrides(&config, cli_server, cli_port, cli_ssl, cli_name, cli_location,
-                                    cli_capture, cli_playback, cli_num_leds, use_keyboard);
+   satellite_config_apply_overrides(&config, cli_server, cli_port, cli_ssl, cli_ssl_verify,
+                                    cli_name, cli_location, cli_capture, cli_playback, cli_num_leds,
+                                    use_keyboard);
 
    /* Ensure we have a UUID */
    satellite_config_ensure_uuid(&config);
+
+#ifdef ENABLE_DAP2
+   /* -V flag overrides config processing mode */
+   if (voice_mode) {
+      config.processing.mode = PROCESSING_MODE_VOICE_ACTIVATED;
+   }
+
+   /* Validate model paths (warns if missing, disables features gracefully) */
+   satellite_config_validate_paths(&config);
+#endif
 
    if (verbose) {
 #ifdef ENABLE_DAP2
@@ -714,20 +789,25 @@ int main(int argc, char *argv[]) {
    signal(SIGINT, signal_handler);
    signal(SIGTERM, signal_handler);
 
-   /* Initialize audio capture */
-   printf("Initializing audio capture...\n");
-   if (audio_capture_init((audio_capture_t *)ctx.audio_capture, ctx.capture_device) != 0) {
-      fprintf(stderr, "Failed to initialize audio capture\n");
-      satellite_cleanup(&ctx);
-      return 1;
-   }
+   /* Initialize audio only for voice-activated mode */
+   if (config.processing.mode == PROCESSING_MODE_VOICE_ACTIVATED) {
+      printf("Initializing audio capture...\n");
+      audio_capture_t *capture = NULL;
+      if (audio_capture_init(&capture, ctx.capture_device) != 0) {
+         fprintf(stderr, "Failed to initialize audio capture\n");
+         satellite_cleanup(&ctx);
+         return 1;
+      }
+      ctx.audio_capture = capture;
 
-   /* Initialize audio playback */
-   printf("Initializing audio playback...\n");
-   if (audio_playback_init((audio_playback_t *)ctx.audio_playback, ctx.playback_device) != 0) {
-      fprintf(stderr, "Failed to initialize audio playback\n");
-      satellite_cleanup(&ctx);
-      return 1;
+      printf("Initializing audio playback...\n");
+      if (audio_playback_init((audio_playback_t *)ctx.audio_playback, ctx.playback_device) != 0) {
+         fprintf(stderr, "Failed to initialize audio playback\n");
+         satellite_cleanup(&ctx);
+         return 1;
+      }
+   } else {
+      printf("Text-only mode: audio devices not initialized\n");
    }
 
 #ifdef ENABLE_DISPLAY
@@ -774,7 +854,8 @@ int main(int argc, char *argv[]) {
 
 #ifdef ENABLE_DAP2
    /* Connect to daemon */
-   ws_client_t *ws = ws_client_create(config.server.host, config.server.port, config.server.ssl);
+   ws_client_t *ws = ws_client_create(config.server.host, config.server.port, config.server.ssl,
+                                      config.server.ssl_verify);
    if (!ws) {
       fprintf(stderr, "Failed to create WebSocket client\n");
       satellite_cleanup(&ctx);
@@ -789,7 +870,7 @@ int main(int argc, char *argv[]) {
       return 1;
    }
 
-   result = dap2_main_loop(&ctx, ws, use_keyboard, config.identity.name, config.identity.location);
+   result = dap2_main_loop(&ctx, ws, use_keyboard, &config);
    ws_client_destroy(ws);
 #else
    printf("\n=== DAWN Satellite Ready (DAP Mode) ===\n");

@@ -94,6 +94,15 @@ void sentence_buffer_feed(sentence_buffer_t *buf, const char *chunk);
  */
 void sentence_buffer_flush(sentence_buffer_t *buf);
 
+/**
+ * @brief Clear the buffer without invoking callback
+ *
+ * Discards any buffered text. Use when starting a new stream.
+ *
+ * @param buf Sentence buffer
+ */
+void sentence_buffer_clear(sentence_buffer_t *buf);
+
 #ifdef __cplusplus
 }
 #endif

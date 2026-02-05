@@ -474,7 +474,9 @@ static char *memory_action_forget(int user_id, const char *fact_text) {
    if (result == MEMORY_DB_SUCCESS) {
       char *msg = malloc(256);
       if (msg) {
-         snprintf(msg, 256, "Forgotten: \"%s\"", facts[0].fact_text);
+         /* Truncate fact_text to fit in message buffer */
+         snprintf(msg, 256, "Forgotten: \"%.200s%s\"", facts[0].fact_text,
+                  strlen(facts[0].fact_text) > 200 ? "..." : "");
          return msg;
       }
       return strdup("Fact forgotten successfully.");

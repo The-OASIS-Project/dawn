@@ -1936,7 +1936,7 @@ int main(int argc, char *argv[]) {
 
    // Initialize music metadata database for search by artist/title/album
    // Construct path: {data_dir}/music.db
-   char music_db_path[CONFIG_PATH_MAX];
+   char music_db_path[CONFIG_PATH_MAX + 16];
    snprintf(music_db_path, sizeof(music_db_path), "%s/music.db", g_config.paths.data_dir);
    if (music_db_init(music_db_path) == 0) {
       // Start background scanner to index music library
@@ -2277,7 +2277,7 @@ int main(int argc, char *argv[]) {
     * This prevents race conditions where CREATE_USER arrives before auth_db is ready.
     * Order: crypto -> database -> admin socket (per architecture review) */
    char expanded_data_dir[CONFIG_PATH_MAX];
-   char auth_db_path[CONFIG_PATH_MAX];
+   char auth_db_path[CONFIG_PATH_MAX + 16];
    if (!path_expand_tilde(g_config.paths.data_dir, expanded_data_dir, sizeof(expanded_data_dir))) {
       LOG_ERROR("Failed to expand data_dir path: %s", g_config.paths.data_dir);
    }

@@ -38,8 +38,9 @@ extern "C" {
 
 #define WS_CLIENT_UUID_SIZE 37   /* UUID string with null terminator */
 #define WS_CLIENT_NAME_SIZE 64   /* Satellite name max length */
-#define WS_CLIENT_LOC_SIZE 32    /* Location max length */
+#define WS_CLIENT_LOC_SIZE 64    /* Location max length (matches CONFIG_LOCATION_SIZE) */
 #define WS_CLIENT_TEXT_SIZE 4096 /* Max text response chunk */
+#define WS_CLIENT_SECRET_SIZE 65 /* 32 bytes hex-encoded + null */
 
 /* Connection states */
 typedef enum {
@@ -74,6 +75,7 @@ typedef struct {
    char uuid[WS_CLIENT_UUID_SIZE];
    char name[WS_CLIENT_NAME_SIZE];
    char location[WS_CLIENT_LOC_SIZE];
+   char reconnect_secret[WS_CLIENT_SECRET_SIZE]; /* Set by server, send back for reconnection */
 } ws_identity_t;
 
 /**
@@ -151,9 +153,10 @@ typedef struct ws_client ws_client_t;
  * @param host Daemon hostname or IP
  * @param port Daemon WebUI port (default 8080)
  * @param use_ssl Use wss:// instead of ws://
+ * @param ssl_verify Verify SSL certificates (default: true for production)
  * @return Client context or NULL on failure
  */
-ws_client_t *ws_client_create(const char *host, uint16_t port, bool use_ssl);
+ws_client_t *ws_client_create(const char *host, uint16_t port, bool use_ssl, bool ssl_verify);
 
 /**
  * @brief Destroy WebSocket client
@@ -298,6 +301,22 @@ void ws_client_generate_uuid(char *uuid);
  * @return Error message or NULL
  */
 const char *ws_client_get_error(ws_client_t *client);
+
+/**
+ * @brief Get the reconnect secret received from server
+ *
+ * @param client Client context
+ * @return Secret string or NULL if not set
+ */
+const char *ws_client_get_reconnect_secret(ws_client_t *client);
+
+/**
+ * @brief Set the reconnect secret (load from saved config)
+ *
+ * @param client Client context
+ * @param secret Secret string (64 hex chars)
+ */
+void ws_client_set_reconnect_secret(ws_client_t *client, const char *secret);
 
 #ifdef __cplusplus
 }

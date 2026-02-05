@@ -61,6 +61,7 @@ add_definitions(-DVERSION_NUMBER=\"${VERSION_NUMBER}\")
 
 # Include directories for new source layout
 include_directories(include)
+include_directories(common/include)
 
 # =============================================================================
 # Common Library (shared between daemon and satellites)
@@ -245,9 +246,11 @@ endif()
 #    pkg_check_modules(LIBSNDFILE_PKGCONF sndfile)
 #endif(PKG_CONFIG_FOUND)
 
-# Text to Speech
-add_library(piper STATIC src/tts/piper.cpp)
-target_link_libraries(piper onnxruntime)
+# Text to Speech - check if target already exists (may be created by common/)
+if(NOT TARGET piper)
+    add_library(piper STATIC src/tts/piper.cpp)
+    target_link_libraries(piper onnxruntime)
+endif()
 
 # Audio Backend - Runtime Selectable (both ALSA and PulseAudio supported)
 # The backend can be selected at runtime via config file: [audio] backend = "auto|alsa|pulse"
@@ -416,7 +419,7 @@ set(DAWN_SOURCES
 
     # TTS subsystem
     src/tts/text_to_speech.cpp
-    src/tts/tts_preprocessing.cpp
+    common/src/tts/tts_preprocessing.cpp
 
     # Audio subsystem
     src/audio/audio_capture_thread.c

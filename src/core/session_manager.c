@@ -23,9 +23,11 @@
 
 #include "core/session_manager.h"
 
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
@@ -144,6 +146,70 @@ static __thread session_t *tl_command_context = NULL;
 // =============================================================================
 // Internal Helper Functions
 // =============================================================================
+
+/**
+ * @brief Generate cryptographic random bytes as hex string
+ *
+ * Uses /dev/urandom for cryptographic randomness. Falls back to
+ * time-based random if urandom is unavailable (with a warning).
+ *
+ * @param buf Output buffer (must be at least num_bytes*2 + 1)
+ * @param num_bytes Number of random bytes (output is 2x this)
+ */
+static void generate_crypto_random_hex(char *buf, size_t num_bytes) {
+   unsigned char bytes[32];
+   if (num_bytes > sizeof(bytes)) {
+      num_bytes = sizeof(bytes);
+   }
+
+   int fd = open("/dev/urandom", O_RDONLY);
+   if (fd >= 0) {
+      ssize_t n = read(fd, bytes, num_bytes);
+      close(fd);
+      if (n == (ssize_t)num_bytes) {
+         for (size_t i = 0; i < num_bytes; i++) {
+            sprintf(buf + i * 2, "%02x", bytes[i]);
+         }
+         return;
+      }
+   }
+
+   /* Fallback to weak randomness (should never happen on Linux) */
+   LOG_WARNING("Using weak randomness for session secret - /dev/urandom unavailable");
+   srand((unsigned int)time(NULL) ^ (unsigned int)getpid());
+   for (size_t i = 0; i < num_bytes; i++) {
+      bytes[i] = (unsigned char)(rand() & 0xFF);
+   }
+   for (size_t i = 0; i < num_bytes; i++) {
+      sprintf(buf + i * 2, "%02x", bytes[i]);
+   }
+}
+
+/**
+ * @brief Constant-time string comparison to prevent timing attacks
+ *
+ * @param a First string
+ * @param b Second string
+ * @return true if strings are equal, false otherwise
+ */
+static bool constant_time_compare(const char *a, const char *b) {
+   if (!a || !b) {
+      return a == b;
+   }
+
+   size_t len_a = strlen(a);
+   size_t len_b = strlen(b);
+
+   /* Compare in constant time even if lengths differ */
+   volatile unsigned char result = (unsigned char)(len_a ^ len_b);
+   size_t compare_len = len_a < len_b ? len_a : len_b;
+
+   for (size_t i = 0; i < compare_len; i++) {
+      result |= (unsigned char)((unsigned char)a[i] ^ (unsigned char)b[i]);
+   }
+
+   return result == 0;
+}
 
 static session_t *session_alloc(void) {
    session_t *session = calloc(1, sizeof(session_t));
@@ -425,33 +491,59 @@ session_t *session_create_dap2(int client_fd,
 
    pthread_rwlock_wrlock(&session_manager_rwlock);
 
-   // Check for existing session with same UUID (reconnection)
+   /* Check for existing session with same UUID (potential reconnection)
+    *
+    * SECURITY: Reconnection requires BOTH UUID match AND secret match.
+    * Without this, an attacker knowing a UUID could hijack sessions.
+    * The secret is generated server-side and sent to client on first registration.
+    */
    session_t *existing = find_session_by_uuid_unlocked(identity->uuid);
-   if (existing && !existing->disconnected) {
-      // Reconnection: update socket and clear disconnected flag
-      pthread_mutex_lock(&existing->fd_mutex);
-      existing->client_fd = client_fd;
-      existing->disconnected = false;
-      existing->last_activity = time(NULL);
-      pthread_mutex_unlock(&existing->fd_mutex);
+   if (existing) {
+      /* Check if client provided a valid reconnect secret */
+      bool has_valid_secret = identity->reconnect_secret[0] != '\0' &&
+                              existing->identity.reconnect_secret[0] != '\0' &&
+                              constant_time_compare(identity->reconnect_secret,
+                                                    existing->identity.reconnect_secret);
 
-      // Increment ref count
-      pthread_mutex_lock(&existing->ref_mutex);
-      existing->ref_count++;
-      pthread_mutex_unlock(&existing->ref_mutex);
+      if (has_valid_secret && existing->disconnected) {
+         /* SECURE RECONNECTION: UUID + secret match, and session was disconnected */
+         pthread_mutex_lock(&existing->fd_mutex);
+         existing->client_fd = client_fd;
+         existing->disconnected = false;
+         existing->last_activity = time(NULL);
+         pthread_mutex_unlock(&existing->fd_mutex);
 
-      // Capture session_id while holding rwlock (safe access)
-      uint32_t session_id = existing->session_id;
+         /* Increment ref count */
+         pthread_mutex_lock(&existing->ref_mutex);
+         existing->ref_count++;
+         pthread_mutex_unlock(&existing->ref_mutex);
 
-      pthread_rwlock_unlock(&session_manager_rwlock);
+         uint32_t session_id = existing->session_id;
+         int history_len = json_object_array_length(existing->conversation_history);
 
-      LOG_INFO("DAP2 reconnection: session %u (uuid=%s, name=%s)", session_id, identity->uuid,
-               identity->name);
+         pthread_rwlock_unlock(&session_manager_rwlock);
 
-      return existing;
+         LOG_INFO("DAP2 secure reconnection: session %u (uuid=%s, name=%s, history=%d msgs)",
+                  session_id, identity->uuid, identity->name, history_len);
+
+         return existing;
+      } else if (!has_valid_secret && !existing->disconnected) {
+         /* Existing active session, but client has no/wrong secret
+          * This could be: (1) client restart without saved secret, or (2) hijack attempt
+          * Create new session - old session will timeout eventually */
+         LOG_WARNING("DAP2: UUID %s has active session but client lacks valid secret - "
+                     "creating new session (possible restart or hijack attempt)",
+                     identity->uuid);
+      } else if (!has_valid_secret && existing->disconnected) {
+         /* Session disconnected but client has no/wrong secret - reject hijack */
+         LOG_WARNING("DAP2: UUID %s has disconnected session but client lacks valid secret - "
+                     "creating new session to prevent hijacking",
+                     identity->uuid);
+      }
+      /* Fall through to create new session */
    }
 
-   // New session
+   /* NEW SESSION */
    int slot = find_free_slot();
    if (slot < 0) {
       pthread_rwlock_unlock(&session_manager_rwlock);
@@ -472,24 +564,42 @@ session_t *session_create_dap2(int client_fd,
    session->client_fd = client_fd;
    session->ref_count = 1;
 
-   // DAP2-specific fields
+   /* DAP2-specific fields */
    session->tier = tier;
    memcpy(&session->identity, identity, sizeof(dap2_identity_t));
    if (capabilities) {
       memcpy(&session->capabilities, capabilities, sizeof(dap2_capabilities_t));
    }
 
+   /* SECURITY: Generate cryptographic reconnect secret for this session
+    * This secret MUST be returned to the client in registration_ack
+    * and provided by client on reconnection attempts */
+   generate_crypto_random_hex(session->identity.reconnect_secret, 32);
+
    sessions[slot] = session;
 
    pthread_rwlock_unlock(&session_manager_rwlock);
 
-   // Initialize with remote command prompt (excludes HUD/helmet commands)
+   /* Initialize with remote command prompt (excludes HUD/helmet commands) */
    session_init_system_prompt(session, get_remote_command_prompt());
 
-   LOG_INFO("Created DAP2 session %u (tier=%d, uuid=%s, name=%s, location=%s)", session->session_id,
-            tier, identity->uuid, identity->name, identity->location);
+   LOG_INFO("Created DAP2 session %u (tier=%d, uuid=%s, name=%s, location=%s, secret=%.8s...)",
+            session->session_id, tier, identity->uuid, identity->name, identity->location,
+            session->identity.reconnect_secret);
 
    return session;
+}
+
+char *session_get_reconnect_secret(session_t *session) {
+   if (!session || session->type != SESSION_TYPE_DAP2) {
+      return NULL;
+   }
+
+   if (session->identity.reconnect_secret[0] == '\0') {
+      return NULL;
+   }
+
+   return strdup(session->identity.reconnect_secret);
 }
 
 session_t *session_get_or_create_dap(int client_fd, const char *client_ip) {
