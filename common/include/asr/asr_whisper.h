@@ -46,20 +46,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "asr/asr_common.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /** @brief Expected sample rate for Whisper (16kHz) */
 #define WHISPER_SAMPLE_RATE 16000
-
-/** @brief Return codes for ASR operations */
-#define ASR_SUCCESS 0
-#define ASR_FAILURE 1
-#define ASR_ERR_INVALID_PARAM 2
-#define ASR_ERR_MODEL_LOAD 3
-#define ASR_ERR_OUT_OF_MEMORY 4
-#define ASR_ERR_PROCESSING 5
 
 /**
  * @brief Opaque Whisper ASR context
@@ -69,28 +63,11 @@ extern "C" {
 typedef struct whisper_asr_context whisper_asr_context_t;
 
 /**
- * @brief ASR result structure
+ * @brief Whisper-specific result type (alias for common asr_result_t)
  *
- * Contains transcription text and metadata from ASR processing.
- * Caller owns this structure and must call asr_whisper_result_free().
+ * Kept as a typedef for backward compatibility with existing code.
  */
-typedef struct {
-   char *text;             /**< Transcribed text (caller must free) */
-   float confidence;       /**< Confidence score (0.0-1.0, or -1.0 if unavailable) */
-   int is_partial;         /**< 1 if partial result, 0 if final */
-   double processing_time; /**< Processing time in milliseconds */
-} asr_whisper_result_t;
-
-/**
- * @brief Callback type for ASR timing metrics
- *
- * Optional callback invoked after finalize() with processing statistics.
- *
- * @param processing_time_ms Time spent in Whisper inference (milliseconds)
- * @param rtf Real-time factor (processing_time / audio_duration)
- * @param user_data User-provided context
- */
-typedef void (*asr_timing_callback_t)(double processing_time_ms, double rtf, void *user_data);
+typedef asr_result_t asr_whisper_result_t;
 
 /**
  * @brief Whisper initialization options

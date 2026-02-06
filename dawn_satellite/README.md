@@ -7,20 +7,35 @@ A smart voice satellite client for the DAWN voice assistant system. Runs on Rasp
 ## Features
 
 - **Hands-free activation** - Wake word detection ("Hey Friday")
-- **Local speech processing** - Whisper ASR + Piper TTS on device
+- **Local speech processing** - Vosk ASR (streaming) + Piper TTS on device
+- **Near-instant ASR** - Vosk decodes audio incrementally during recording, ~0s finalize
 - **Text-first protocol** - Only text sent to daemon, not audio (~100 bytes vs ~1MB)
 - **Offline fallback** - Local TTS "I can't reach the server"
-- **Touchscreen UI** - SDL2-based interface with KMSDRM (no X11)
 - **Full tool support** - Same capabilities as main daemon
-- **Low latency** - <3s wake-to-response target
+- **Dual ASR engines** - Vosk (default, streaming) or Whisper (batch, higher accuracy)
+
+## ASR Engine Comparison
+
+| Feature | Vosk (default) | Whisper |
+|---------|---------------|---------|
+| Mode | Streaming (incremental) | Batch (all-at-once) |
+| Finalize latency | ~0s (already decoded) | ~4s on Pi 4 (tiny model) |
+| Model size | ~40MB (small-en-us-0.15) | ~30MB (tiny.en-q5_1) |
+| Accuracy | Good for commands | Slightly better |
+| RAM usage | ~100MB | ~270MB |
+| Dependencies | libvosk, json-c | whisper.cpp (compiled) |
+
+**Vosk is the default** because the ~4s Whisper inference time on Pi hardware creates a noticeable delay between speaking and response. Vosk processes audio incrementally during recording, so when silence is detected the transcription is available instantly.
+
+To use Whisper instead, set `engine = "whisper"` in `satellite.toml` and rebuild with the Whisper model path.
 
 ## Hardware Requirements
 
-### Minimum (Headless)
+### Minimum (Headless Voice Satellite)
 
 | Component | Recommended | Notes |
 |-----------|-------------|-------|
-| SBC | Raspberry Pi Zero 2 W | 512MB RAM, WiFi |
+| SBC | Raspberry Pi 4 (2GB+) | Cortex-A72, minimum for local ASR/TTS |
 | Microphone | USB mic or INMP441 | I2S or USB |
 | Speaker | 3.5mm or MAX98357A | Built-in jack or I2S DAC |
 | Storage | 16GB+ microSD | Class 10 or better |
@@ -29,23 +44,24 @@ A smart voice satellite client for the DAWN voice assistant system. Runs on Rasp
 
 | Component | Recommended | Notes |
 |-----------|-------------|-------|
-| SBC | Raspberry Pi 4/5 | 2GB+ RAM recommended |
+| SBC | Raspberry Pi 4/5 (4GB+) | Extra RAM for display + models |
 | Display | 7" 1024x600 TFT | Touchscreen, HDMI or DSI |
 | Microphone | ReSpeaker 2-mic HAT | Or USB microphone |
 | Speaker | 3W amplified speaker | Built-in or external |
 | Storage | 32GB+ microSD | For models and photos |
 
-### Memory Budget (Pi Zero 2 W)
+> **Note:** The Pi Zero 2 W (512MB, Cortex-A53) does not have enough RAM or CPU for simultaneous ASR + Piper TTS. Use a Pi 4 or better for Tier 1 satellites.
+
+### Memory Budget (Pi 4, 2GB)
 
 | Component | RAM Usage |
 |-----------|-----------|
 | Pi OS Lite | ~100 MB |
-| Whisper tiny | ~77 MB |
+| Vosk model + recognizer | ~100 MB |
 | Piper TTS | ~60 MB |
 | Silero VAD | ~2 MB |
 | Satellite app | ~20 MB |
-| SDL2 UI | ~15 MB |
-| **Available** | ~238 MB |
+| **Available** | ~1,720 MB |
 
 ## Quick Start
 
@@ -77,26 +93,6 @@ sudo usermod -aG video,render,audio,input,spi,gpio $USER
 sudo reboot
 ```
 
-### 2.1 Add Swap Space (Required for Pi Zero 2 W)
-
-The Pi Zero 2 W has only 512MB RAM. Compiling piper.cpp and whisper.cpp requires more memory. Add swap space before building:
-
-```bash
-# Create 1GB swap file
-sudo fallocate -l 1G /swapfile
-sudo chmod 600 /swapfile
-sudo mkswap /swapfile
-sudo swapon /swapfile
-
-# Make permanent
-echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
-
-# Verify swap is active
-free -h
-```
-
-> **Note:** Even with swap, use `make -j1` on Pi Zero 2 W to avoid OOM issues. Pi 4/5 with 2GB+ RAM can use `make -j$(nproc)`.
-
 ### 3. Install Dependencies
 
 ```bash
@@ -105,7 +101,8 @@ sudo apt install -y \
     build-essential \
     cmake \
     git \
-    pkg-config
+    pkg-config \
+    libspdlog-dev
 
 # Audio dependencies
 sudo apt install -y \
@@ -116,27 +113,38 @@ sudo apt install -y \
     libwebsockets-dev \
     libjson-c-dev
 
-# SDL2 dependencies (for touchscreen UI)
-sudo apt install -y \
-    libsdl2-dev \
-    libsdl2-ttf-dev \
-    libsdl2-image-dev \
-    libdrm-dev
+# Optional: SDL2 dependencies (for future touchscreen UI)
+# sudo apt install -y libsdl2-dev libsdl2-ttf-dev libsdl2-image-dev libdrm-dev
 
 # Optional: GPIO button support (Tier 2 style, not needed for Tier 1)
 # sudo apt install -y libgpiod-dev
 ```
 
-### 4. Local Processing Dependencies (Optional)
+### 4. Voice Processing Dependencies
 
-For Tier 1 satellites with local VAD, ASR, and TTS, install these additional dependencies.
+Tier 1 satellites run local VAD, ASR, and TTS. Install these dependencies for voice processing.
 
-> **Note:** These are only needed if you enable `ENABLE_LOCAL_VAD`, `ENABLE_LOCAL_ASR`, or `ENABLE_LOCAL_TTS`. Skip this section for basic WebSocket-only mode.
+#### Vosk (default ASR engine - streaming)
+
+Vosk is the default ASR engine for Tier 1 satellites. It processes audio incrementally during recording, so transcription is available near-instantly when silence is detected.
 
 ```bash
-# spdlog (required for TTS)
-sudo apt install -y libspdlog-dev
+# Download pre-built ARM64 libvosk
+# Check https://alphacephei.com/vosk/install for latest version
+wget https://github.com/alphacep/vosk-api/releases/download/v0.3.45/vosk-linux-aarch64-0.3.45.zip
+unzip vosk-linux-aarch64-0.3.45.zip
+cd vosk-linux-aarch64-0.3.45
+
+# Install library and header
+sudo cp libvosk.so /usr/local/lib/
+sudo cp vosk_api.h /usr/local/include/
+sudo ldconfig
+cd ..
 ```
+
+> **Note:** If the pre-built binary isn't available for your platform, Vosk can also be built from source. See https://alphacephei.com/vosk/install for instructions.
+
+json-c is also required (already installed in step 3 above via `libjson-c-dev`).
 
 #### ONNX Runtime (required for VAD and TTS)
 
@@ -180,7 +188,7 @@ sudo apt install -y autoconf automake libtool
 git clone https://github.com/rhasspy/espeak-ng.git
 cd espeak-ng
 ./autogen.sh && ./configure --prefix=/usr
-make -j1 && sudo make LIBDIR=/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH) install
+make -j$(nproc) && sudo make LIBDIR=/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH) install
 cd ..
 ```
 
@@ -191,7 +199,7 @@ git clone https://github.com/rhasspy/piper-phonemize.git
 cd piper-phonemize
 mkdir build && cd build
 cmake .. -DONNXRUNTIME_DIR=/usr/local -DESPEAK_NG_DIR=/usr
-make -j1
+make -j$(nproc)
 
 # Manual install (piper's make install has broken rules for system deps)
 sudo cp -a libpiper_phonemize.so* /usr/local/lib/
@@ -209,16 +217,46 @@ git clone --recursive https://github.com/The-OASIS-Project/dawn.git
 cd dawn
 ```
 
-> **Note:** The `--recursive` flag is important to fetch the whisper.cpp submodule for local ASR.
+> **Note:** The `--recursive` flag is important to fetch the whisper.cpp submodule (needed even if using Vosk, as the build system requires it).
 
-### 5.1 Download Models (For Local Processing)
+### 5.1 Download Models
 
-If enabling local VAD, ASR, or TTS, download the required models:
+#### Vosk Model (default ASR)
 
 ```bash
-# Download Whisper tiny model for ASR (~75MB)
-./setup_models.sh --whisper-model tiny
+cd models
+
+# Recommended: small English model (~40MB, good for voice commands)
+wget https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
+unzip vosk-model-small-en-us-0.15.zip
+
+# Alternative: large English model (~1.8GB, better accuracy)
+# wget https://alphacephei.com/vosk/models/vosk-model-en-us-0.22.zip
+# unzip vosk-model-en-us-0.22.zip
+
+cd ..
 ```
+
+> **Vosk model recommendations for Pi 4:**
+> - `vosk-model-small-en-us-0.15` (~40MB) - Recommended, fast and accurate for voice commands
+> - `vosk-model-en-us-0.22` (~1.8GB) - Best accuracy, higher RAM usage
+
+#### Whisper Model (alternative ASR)
+
+Only needed if you set `engine = "whisper"` in config:
+
+```bash
+cd models/whisper.cpp
+../../whisper.cpp/models/download-ggml-model.sh tiny.en-q5_1
+cd ../..
+```
+
+> **Whisper model recommendations for Pi 4:**
+> - `tiny.en-q5_1` (~30MB) - Fastest, but ~4s inference on Pi 4
+> - `tiny.en` (~77MB) - Slightly more accurate, ~5s inference
+> - `small.en` (~466MB) - Best accuracy but ~15-25s inference, not recommended
+
+#### VAD and TTS Models
 
 The VAD and TTS models are already included in the repository:
 
@@ -228,18 +266,19 @@ The VAD and TTS models are already included in the repository:
 | Alba voice | `models/en_GB-alba-medium.onnx` | TTS (Friday persona) |
 | Northern English Male | `models/en_GB-northern_english_male-medium.onnx` | TTS (Jarvis persona) |
 
-Configure the model paths in your `satellite.toml`:
+Configure the model paths in your `satellite.toml` (supports `~/` paths):
 
 ```toml
 [vad]
-model_path = "/home/pi/dawn/models/silero_vad_16k_op15.onnx"
+model_path = "~/dawn/models/silero_vad_16k_op15.onnx"
 
 [asr]
-model_path = "/home/pi/dawn/models/whisper.cpp/ggml-tiny.bin"
+engine = "vosk"
+model_path = "~/dawn/models/vosk-model-small-en-us-0.15"
 
 [tts]
-model_path = "/home/pi/dawn/models/en_GB-alba-medium.onnx"
-config_path = "/home/pi/dawn/models/en_GB-alba-medium.onnx.json"
+model_path = "~/dawn/models/en_GB-alba-medium.onnx"
+config_path = "~/dawn/models/en_GB-alba-medium.onnx.json"
 ```
 
 ### 6. Build the Satellite
@@ -248,10 +287,12 @@ config_path = "/home/pi/dawn/models/en_GB-alba-medium.onnx.json"
 cd dawn_satellite
 mkdir build && cd build
 cmake ..
-make -j1  # Use -j1 on Pi Zero 2 W; Pi 4/5 can use -j$(nproc)
+make -j$(nproc)
 ```
 
 > The common library is built automatically as part of the satellite build process.
+
+This builds with the default configuration: **Vosk ASR + Whisper ASR** (both engines, runtime selectable via config). The `engine` field in `satellite.toml` selects which one is used.
 
 #### Build Options
 
@@ -259,13 +300,21 @@ make -j1  # Use -j1 on Pi Zero 2 W; Pi 4/5 can use -j$(nproc)
 |--------|---------|-------------|
 | `-DENABLE_DAP2=ON` | ON | WebSocket protocol (vs legacy DAP1) |
 | `-DENABLE_VOICE=ON` | ON | Local voice processing (VAD + ASR + TTS) |
+| `-DENABLE_VOSK_ASR=ON` | ON | Vosk ASR engine (streaming, near-instant) |
 | `-DENABLE_DISPLAY=OFF` | OFF | SPI display support via framebuffer |
 | `-DENABLE_NEOPIXEL=ON` | ON | NeoPixel/WS2812 LED support via SPI |
 | `-DCMAKE_BUILD_TYPE=Release` | Release | Optimization level |
 
+Example: Vosk only (no Whisper, smaller binary, no whisper.cpp compile):
+```bash
+cmake -DENABLE_VOICE=OFF -DENABLE_VOSK_ASR=ON ..
+```
+
+> **Note:** `ENABLE_VOICE` controls Whisper + VAD + TTS. Disabling it while keeping `ENABLE_VOSK_ASR=ON` gives you Vosk without Whisper, but you still need VAD and TTS for a functional satellite, so this is mainly useful for reducing compile time during development.
+
 Example with voice processing disabled (text-only mode):
 ```bash
-cmake -DENABLE_VOICE=OFF ..
+cmake -DENABLE_VOICE=OFF -DENABLE_VOSK_ASR=OFF ..
 ```
 
 Example headless with no LEDs:
@@ -311,6 +360,7 @@ playback_device = "plughw:0,0" # Your speaker (run 'aplay -l')
 # Expected output:
 # [INFO] DAWN Satellite v0.1.0 starting...
 # [INFO] Loading config from /etc/dawn/satellite.toml
+# [INFO] ASR engine: vosk, model: models/vosk-model-small-en-us-0.15
 # [INFO] Connecting to wss://192.168.1.100:3000
 # [INFO] WebSocket connected
 # [INFO] Registered as "Living Room" (location: living_room)
@@ -361,6 +411,11 @@ See `config/satellite.toml` for the full configuration file with comments.
 
 ### Key Sections
 
+#### [general]
+```toml
+ai_name = "friday"           # Must match server dawn.toml
+```
+
 #### [identity]
 ```toml
 uuid = ""                    # Auto-generated UUID on first run
@@ -381,14 +436,15 @@ max_reconnect_attempts = 0   # 0 = retry forever
 #### [audio]
 ```toml
 capture_device = "plughw:1,0"   # ALSA capture device
-playback_device = "plughw:0,0" # ALSA playback device
-sample_rate = 16000            # Must be 16kHz for Whisper
-max_record_seconds = 30        # Safety timeout
+playback_device = "plughw:0,0"  # ALSA playback device
+sample_rate = 16000             # Must be 16kHz
+max_record_seconds = 30         # Safety timeout
 ```
 
 #### [vad]
 ```toml
 enabled = true
+model_path = "models/silero_vad_16k_op15.onnx"
 silence_duration_ms = 800    # Silence before end-of-speech
 min_speech_ms = 250          # Minimum valid utterance
 threshold = 0.5              # 0.0-1.0, higher = stricter
@@ -397,17 +453,36 @@ threshold = 0.5              # 0.0-1.0, higher = stricter
 #### [wake_word]
 ```toml
 enabled = true
-word = "friday"              # Wake word (matches daemon)
+word = "friday"              # Wake word (matches daemon ai_name)
 sensitivity = 0.5            # 0.0-1.0, higher = more false positives
 ```
 
-#### [display]
+#### [asr]
 ```toml
-enabled = true               # Enable SDL2 UI
-width = 1024                 # Display width
-height = 600                 # Display height
-fullscreen = true            # KMSDRM fullscreen mode
-screensaver_timeout_sec = 300  # Screensaver after 5 min idle
+engine = "vosk"              # "vosk" (streaming, default) or "whisper" (batch)
+model_path = "models/vosk-model-small-en-us-0.15"  # Vosk model directory
+language = "en"              # Language code (Whisper only)
+n_threads = 4                # Processing threads (Whisper only)
+max_audio_seconds = 15       # Max recording duration
+```
+
+#### [tts]
+```toml
+model_path = "models/en_GB-alba-medium.onnx"
+config_path = "models/en_GB-alba-medium.onnx.json"
+espeak_data = "/usr/share/espeak-ng-data"
+length_scale = 0.85          # Speech speed (1.0 = normal, lower = faster)
+```
+
+#### [processing]
+```toml
+mode = "voice_activated"     # "voice_activated" or "text_only"
+```
+
+#### [logging]
+```toml
+level = "info"               # "error", "warning", "info", "debug"
+use_syslog = false           # Log to syslog instead of stdout
 ```
 
 ## Audio Device Setup
@@ -571,6 +646,23 @@ alsamixer
 amixer contents
 ```
 
+### ASR Issues
+
+| Symptom | Solution |
+|---------|----------|
+| "Failed to load model" | Check model path in config, verify file exists |
+| Empty transcriptions | Check microphone level, try recording a test WAV |
+| "Unsupported engine type" | Rebuild with the correct ASR engine enabled |
+
+```bash
+# Verify Vosk model exists
+ls -la models/vosk-model-small-en-us-0.15/
+
+# Test microphone input
+arecord -D plughw:1,0 -f S16_LE -r 16000 -c 1 -d 3 /tmp/test.wav
+aplay /tmp/test.wav  # Should hear your voice clearly
+```
+
 ### Display Issues
 
 | Symptom | Solution |
@@ -610,53 +702,54 @@ sudo systemctl restart dawn-satellite
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                      DAWN Satellite (Tier 1)                    │
-│                                                                 │
-│  ┌───────────────────────────────────────────────────────────┐ │
-│  │                 Local Processing Pipeline                  │ │
-│  │                                                            │ │
-│  │  ┌────────┐  ┌────────┐  ┌──────────┐  ┌────────┐        │ │
-│  │  │ Audio  │─▶│  VAD   │─▶│ Wake Word│─▶│  ASR   │        │ │
-│  │  │Capture │  │(Silero)│  │(Whisper) │  │(Whisper│        │ │
-│  │  └────────┘  └────────┘  └──────────┘  └───┬────┘        │ │
-│  │                                             │ text        │ │
-│  │  ┌────────┐  ┌────────┐                    ▼             │ │
-│  │  │ Audio  │◀─│  TTS   │◀───────────[satellite_query]     │ │
-│  │  │Playback│  │(Piper) │                                   │ │
-│  │  └────────┘  └────────┘◀───────────[satellite_response]   │ │
-│  │                                                            │ │
-│  └───────────────────────────────────────────────────────────┘ │
-│                              │                                  │
-│                              │ WebSocket (JSON, ~100 bytes)     │
-│                              ▼                                  │
-│  ┌───────────────────────────────────────────────────────────┐ │
-│  │                     ws_client.c                            │ │
-│  │  satellite_register ──▶                                    │ │
-│  │  satellite_query ─────▶        ◀── satellite_response      │ │
-│  │                                ◀── stream_delta (streaming)│ │
-│  └───────────────────────────────────────────────────────────┘ │
-│                              │                                  │
-│  ┌───────────────────────────────────────────────────────────┐ │
-│  │              SDL2 Touchscreen UI (Optional)                │ │
-│  │                                                            │ │
-│  │  ┌──────────┐ ┌─────────────┐ ┌────────────┐ ┌──────────┐│ │
-│  │  │   Orb    │ │ Transcript  │ │   Quick    │ │  Media   ││ │
-│  │  │Visualize │ │  Display    │ │  Actions   │ │  Player  ││ │
-│  │  └──────────┘ └─────────────┘ └────────────┘ └──────────┘│ │
-│  │                                                            │ │
-│  │  Screensaver: Photo Frame │ Clock │ Ambient Orb            │ │
-│  └───────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────┘
-                               │
-                               │ WiFi
-                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                         DAWN Daemon                             │
-│                                                                 │
-│    LLM Processing │ Tool Execution │ Conversation History       │
-│    Command Parser │ MQTT Control   │ Memory System              │
-└─────────────────────────────────────────────────────────────────┘
++------------------------------------------------------------------+
+|                      DAWN Satellite (Tier 1)                      |
+|                                                                   |
+|  +-------------------------------------------------------------+ |
+|  |                 Local Processing Pipeline                    | |
+|  |                                                              | |
+|  |  +--------+  +--------+  +----------+  +---------+          | |
+|  |  | Audio  |->|  VAD   |->| Wake Word|->|   ASR   |          | |
+|  |  |Capture |  |(Silero)|  |  (ASR)   |  |  (Vosk  |          | |
+|  |  +--------+  +--------+  +----------+  |streaming)|         | |
+|  |                                         +----+----+          | |
+|  |                                              | text          | |
+|  |  +--------+  +--------+                     v               | |
+|  |  | Audio  |<-|  TTS   |<-----------[satellite_query]        | |
+|  |  |Playback|  |(Piper) |                                     | |
+|  |  +--------+  +--------+<-----------[satellite_response]     | |
+|  |                                                              | |
+|  +-------------------------------------------------------------+ |
+|                              |                                    |
+|                              | WebSocket (JSON, ~100 bytes)       |
+|                              v                                    |
+|  +-------------------------------------------------------------+ |
+|  |                     ws_client.c                              | |
+|  |  satellite_register -->                                      | |
+|  |  satellite_query ------>        <-- satellite_response       | |
+|  |                                 <-- stream_delta (streaming) | |
+|  +-------------------------------------------------------------+ |
+|                              |                                    |
+|  +-------------------------------------------------------------+ |
+|  |              SDL2 Touchscreen UI (Optional)                  | |
+|  |                                                              | |
+|  |  +----------+ +-------------+ +------------+ +----------+   | |
+|  |  |   Orb    | | Transcript  | |   Quick    | |  Media   |   | |
+|  |  |Visualize | |  Display    | |  Actions   | |  Player  |   | |
+|  |  +----------+ +-------------+ +------------+ +----------+   | |
+|  |                                                              | |
+|  |  Screensaver: Photo Frame | Clock | Ambient Orb              | |
+|  +-------------------------------------------------------------+ |
++------------------------------------------------------------------+
+                               |
+                               | WiFi
+                               v
++------------------------------------------------------------------+
+|                         DAWN Daemon                               |
+|                                                                   |
+|    LLM Processing | Tool Execution | Conversation History        |
+|    Command Parser | MQTT Control   | Memory System                |
++------------------------------------------------------------------+
 ```
 
 ## Protocol Reference
@@ -665,40 +758,40 @@ sudo systemctl restart dawn-satellite
 
 | Type | Direction | Purpose |
 |------|-----------|---------|
-| `satellite_register` | Satellite → Daemon | Initial registration |
-| `satellite_register_ack` | Daemon → Satellite | Registration confirmed |
-| `satellite_query` | Satellite → Daemon | User's transcribed text |
-| `stream_start` | Daemon → Satellite | Response streaming begins |
-| `stream_delta` | Daemon → Satellite | Partial response text |
-| `stream_end` | Daemon → Satellite | Response complete |
+| `satellite_register` | Satellite -> Daemon | Initial registration |
+| `satellite_register_ack` | Daemon -> Satellite | Registration confirmed |
+| `satellite_query` | Satellite -> Daemon | User's transcribed text |
+| `stream_start` | Daemon -> Satellite | Response streaming begins |
+| `stream_delta` | Daemon -> Satellite | Partial response text |
+| `stream_end` | Daemon -> Satellite | Response complete |
 | `satellite_status` | Both | Health check, metrics |
 
 ### Example Flow
 
 ```
 Satellite                              Daemon
-    │                                     │
-    │──── satellite_register ────────────▶│
-    │     {uuid, name, location, tier:1}  │
-    │                                     │
-    │◀─── satellite_register_ack ─────────│
-    │     {session_id, memory_enabled}    │
-    │                                     │
-    │  [User: "Hey Friday, lights on"]    │
-    │  [Local: VAD → Wake → ASR]          │
-    │                                     │
-    │──── satellite_query ───────────────▶│
-    │     {text: "lights on"}             │
-    │                                     │
-    │◀─── stream_start ───────────────────│
-    │◀─── stream_delta ───────────────────│
-    │     {delta: "I'll turn"}            │
-    │  [TTS: "I'll turn"]                 │
-    │◀─── stream_delta ───────────────────│
-    │     {delta: " on the lights."}      │
-    │  [TTS: " on the lights."]           │
-    │◀─── stream_end ─────────────────────│
-    │                                     │
+    |                                     |
+    |---- satellite_register ------------>|
+    |     {uuid, name, location, tier:1}  |
+    |                                     |
+    |<--- satellite_register_ack ---------|
+    |     {session_id, memory_enabled}    |
+    |                                     |
+    |  [User: "Hey Friday, lights on"]    |
+    |  [Local: VAD -> Wake -> ASR (Vosk)] |
+    |                                     |
+    |---- satellite_query --------------->|
+    |     {text: "lights on"}             |
+    |                                     |
+    |<--- stream_start -------------------|
+    |<--- stream_delta -------------------|
+    |     {delta: "I'll turn"}            |
+    |  [TTS: "I'll turn"]                 |
+    |<--- stream_delta -------------------|
+    |     {delta: " on the lights."}      |
+    |  [TTS: " on the lights."]           |
+    |<--- stream_end ---------------------|
+    |                                     |
 ```
 
 ## Development

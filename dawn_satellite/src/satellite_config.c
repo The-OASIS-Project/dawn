@@ -179,8 +179,9 @@ void satellite_config_init_defaults(satellite_config_t *config) {
    safe_strcpy(config->wake_word.word, "friday", CONFIG_NAME_SIZE);
    config->wake_word.sensitivity = 0.5f;
 
-   /* ASR defaults - 15s max for efficiency (not 60s default) */
-   safe_strcpy(config->asr.model_path, "models/whisper.cpp/ggml-tiny.bin", CONFIG_PATH_SIZE);
+   /* ASR defaults - Vosk is the default for Tier 1 satellites (streaming, near-instant) */
+   safe_strcpy(config->asr.engine, "vosk", sizeof(config->asr.engine));
+   safe_strcpy(config->asr.model_path, "models/vosk-model-small-en-us-0.15", CONFIG_PATH_SIZE);
    safe_strcpy(config->asr.language, "en", sizeof(config->asr.language));
    config->asr.n_threads = 2;          /* Pi Zero 2 W has 4 cores */
    config->asr.max_audio_seconds = 15; /* 960KB buffer, not 3.84MB */
@@ -451,6 +452,17 @@ int satellite_config_load(satellite_config_t *config, const char *path) {
    if (asr) {
       const char *s;
 
+      s = toml_string_or(asr, "engine", NULL);
+      if (s) {
+         if (strcmp(s, "whisper") == 0 || strcmp(s, "vosk") == 0) {
+            safe_strcpy(config->asr.engine, s, sizeof(config->asr.engine));
+         } else {
+            fprintf(stderr, "[CONFIG] WARNING: Unknown ASR engine '%s', using default '%s'\n", s,
+                    config->asr.engine);
+         }
+         free((void *)s);
+      }
+
       s = toml_string_or(asr, "model_path", NULL);
       if (s) {
          expand_home_path(s, config->asr.model_path, CONFIG_PATH_SIZE);
@@ -693,6 +705,7 @@ void satellite_config_print(const satellite_config_t *config) {
    printf("  sensitivity = %.2f\n", config->wake_word.sensitivity);
 
    printf("\n[asr]\n");
+   printf("  engine            = \"%s\"\n", config->asr.engine);
    printf("  model_path        = \"%s\"\n", config->asr.model_path);
    printf("  language          = \"%s\"\n", config->asr.language);
    printf("  n_threads         = %d\n", config->asr.n_threads);
@@ -807,8 +820,8 @@ void satellite_config_validate_paths(satellite_config_t *config) {
       /* Force text-only mode if ASR is unavailable */
       config->processing.mode = PROCESSING_MODE_TEXT_ONLY;
    } else {
-      printf("[CONFIG] ASR model: %s (max %ds)\n", config->asr.model_path,
-             config->asr.max_audio_seconds);
+      printf("[CONFIG] ASR engine: %s, model: %s (max %ds)\n", config->asr.engine,
+             config->asr.model_path, config->asr.max_audio_seconds);
    }
 
    /* Validate TTS model path */

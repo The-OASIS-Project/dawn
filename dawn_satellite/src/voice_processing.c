@@ -37,7 +37,9 @@
 #include "asr/vad_silero.h"
 #endif
 
-#ifdef HAVE_ASR_WHISPER
+#ifdef HAVE_ASR_ENGINE
+#include "asr/asr_engine.h"
+#elif defined(HAVE_ASR_WHISPER)
 #include "asr/asr_whisper.h"
 #endif
 
@@ -117,7 +119,7 @@ struct voice_ctx {
 #ifdef HAVE_VAD_SILERO
    silero_vad_context_t *vad;
 #else
-   void *vad;          /* Placeholder */
+   void *vad; /* Placeholder */
 #endif
    float vad_threshold;
    int speech_frame_count;
@@ -135,12 +137,15 @@ struct voice_ctx {
    size_t audio_buffer_len;
 
    /* ASR */
-#ifdef HAVE_ASR_WHISPER
+#ifdef HAVE_ASR_ENGINE
+   asr_engine_context_t *asr;
+#elif defined(HAVE_ASR_WHISPER)
    whisper_asr_context_t *asr;
 #else
-   void *asr;          /* Placeholder */
+   void *asr; /* Placeholder */
 #endif
    bool asr_loaded;
+   char asr_engine_name[16]; /* "whisper" or "vosk" */
    char asr_model_path[256];
    char asr_language[8];
    int asr_n_threads;
@@ -254,7 +259,39 @@ static void on_state_callback(const char *state, void *user_data) {
  * Lazy Model Loading
  * ============================================================================= */
 
-#ifdef HAVE_ASR_WHISPER
+#ifdef HAVE_ASR_ENGINE
+static bool ensure_asr_loaded(voice_ctx_t *ctx) {
+   if (ctx->asr_loaded)
+      return true;
+
+   LOG_INFO("Loading ASR model (%s): %s", ctx->asr_engine_name, ctx->asr_model_path);
+
+   asr_engine_type_t engine_type = ASR_ENGINE_WHISPER;
+   if (strcmp(ctx->asr_engine_name, "vosk") == 0) {
+      engine_type = ASR_ENGINE_VOSK;
+   }
+
+   asr_engine_config_t asr_config = {
+      .engine = engine_type,
+      .model_path = ctx->asr_model_path,
+      .sample_rate = SAMPLE_RATE,
+      .use_gpu = 1, /* Enable GPU if available (Jetson, etc.) */
+      .n_threads = ctx->asr_n_threads,
+      .language = ctx->asr_language,
+      .max_audio_seconds = 15,
+   };
+
+   ctx->asr = asr_engine_init(&asr_config);
+   if (!ctx->asr) {
+      LOG_ERROR("Failed to load ASR model");
+      return false;
+   }
+
+   ctx->asr_loaded = true;
+   LOG_INFO("ASR model loaded (%s)", asr_engine_name(engine_type));
+   return true;
+}
+#elif defined(HAVE_ASR_WHISPER)
 static bool ensure_asr_loaded(voice_ctx_t *ctx) {
    if (ctx->asr_loaded)
       return true;
@@ -281,7 +318,7 @@ static bool ensure_asr_loaded(voice_ctx_t *ctx) {
 #else
 static bool ensure_asr_loaded(voice_ctx_t *ctx) {
    (void)ctx;
-   LOG_ERROR("ASR not available (built without HAVE_ASR_WHISPER)");
+   LOG_ERROR("ASR not available (built without ASR support)");
    return false;
 }
 #endif
@@ -540,6 +577,7 @@ voice_ctx_t *voice_processing_init(const satellite_config_t *config) {
    ctx->running = true;
 
    /* Store config for model initialization */
+   snprintf(ctx->asr_engine_name, sizeof(ctx->asr_engine_name), "%s", config->asr.engine);
    snprintf(ctx->asr_model_path, sizeof(ctx->asr_model_path), "%s", config->asr.model_path);
    snprintf(ctx->asr_language, sizeof(ctx->asr_language), "%s", config->asr.language);
    ctx->asr_n_threads = config->asr.n_threads;
@@ -610,9 +648,9 @@ voice_ctx_t *voice_processing_init(const satellite_config_t *config) {
 #endif
 
    /* Load all models at startup for predictable latency (no lazy loading) */
-#ifdef HAVE_ASR_WHISPER
+#if defined(HAVE_ASR_ENGINE) || defined(HAVE_ASR_WHISPER)
    if (config->asr.model_path[0]) {
-      LOG_INFO("Loading ASR model: %s", ctx->asr_model_path);
+      LOG_INFO("Loading ASR model (%s): %s", ctx->asr_engine_name, ctx->asr_model_path);
       if (!ensure_asr_loaded(ctx)) {
          LOG_ERROR("Failed to load ASR model - voice processing unavailable");
          sentence_buffer_free(ctx->sentence_buf);
@@ -630,7 +668,10 @@ voice_ctx_t *voice_processing_init(const satellite_config_t *config) {
       LOG_INFO("Loading TTS model: %s", ctx->tts_model_path);
       if (!ensure_tts_loaded(ctx)) {
          LOG_ERROR("Failed to load TTS model - voice processing unavailable");
-#ifdef HAVE_ASR_WHISPER
+#ifdef HAVE_ASR_ENGINE
+         if (ctx->asr)
+            asr_engine_cleanup(ctx->asr);
+#elif defined(HAVE_ASR_WHISPER)
          if (ctx->asr)
             asr_whisper_cleanup(ctx->asr);
 #endif
@@ -663,7 +704,11 @@ void voice_processing_cleanup(voice_ctx_t *ctx) {
    }
 #endif
 
-#ifdef HAVE_ASR_WHISPER
+#ifdef HAVE_ASR_ENGINE
+   if (ctx->asr) {
+      asr_engine_cleanup(ctx->asr);
+   }
+#elif defined(HAVE_ASR_WHISPER)
    if (ctx->asr) {
       asr_whisper_cleanup(ctx->asr);
    }
@@ -912,6 +957,19 @@ int voice_processing_loop(voice_ctx_t *ctx,
                      /* Reset pre-roll for next time */
                      ctx->preroll_write_pos = 0;
                      ctx->preroll_valid = 0;
+
+#ifdef HAVE_ASR_ENGINE
+                     /* For streaming engines (Vosk): feed pre-roll buffer so it starts decoding */
+                     if (ctx->asr_loaded && ctx->asr &&
+                         asr_engine_get_type(ctx->asr) == ASR_ENGINE_VOSK &&
+                         ctx->audio_buffer_len > 0) {
+                        asr_result_t *preroll_partial = asr_engine_process(ctx->asr,
+                                                                           ctx->audio_buffer,
+                                                                           ctx->audio_buffer_len);
+                        if (preroll_partial)
+                           asr_engine_result_free(preroll_partial);
+                     }
+#endif
                   }
                } else {
                   ctx->speech_frame_count = 0;
@@ -924,6 +982,16 @@ int voice_processing_loop(voice_ctx_t *ctx,
                          samples * sizeof(int16_t));
                   ctx->audio_buffer_len += samples;
                }
+
+#ifdef HAVE_ASR_ENGINE
+               /* For streaming engines (Vosk): feed each frame for incremental decoding */
+               if (ctx->asr_loaded && ctx->asr &&
+                   asr_engine_get_type(ctx->asr) == ASR_ENGINE_VOSK) {
+                  asr_result_t *partial = asr_engine_process(ctx->asr, frame_buffer, samples);
+                  if (partial)
+                     asr_engine_result_free(partial);
+               }
+#endif
 
                /* Check for end of speech */
                if (!is_speech) {
@@ -950,11 +1018,19 @@ int voice_processing_loop(voice_ctx_t *ctx,
                            continue;
                         }
 
-#ifdef HAVE_ASR_WHISPER
+#if defined(HAVE_ASR_ENGINE) || defined(HAVE_ASR_WHISPER)
                         /* Feed audio and get transcription */
                         LOG_INFO("Running ASR on %zu samples...", ctx->audio_buffer_len);
+#ifdef HAVE_ASR_ENGINE
+                        /* For Whisper: feed entire buffer (Vosk already got it incrementally) */
+                        if (asr_engine_get_type(ctx->asr) == ASR_ENGINE_WHISPER) {
+                           asr_engine_process(ctx->asr, ctx->audio_buffer, ctx->audio_buffer_len);
+                        }
+                        asr_result_t *result = asr_engine_finalize(ctx->asr);
+#else
                         asr_whisper_process(ctx->asr, ctx->audio_buffer, ctx->audio_buffer_len);
                         asr_whisper_result_t *result = asr_whisper_finalize(ctx->asr);
+#endif
                         LOG_INFO("ASR complete: result=%p, text=%s", (void *)result,
                                  result && result->text ? result->text : "(null)");
                         if (result && result->text && result->text[0]) {
@@ -996,13 +1072,25 @@ int voice_processing_loop(voice_ctx_t *ctx,
                               LOG_DEBUG("No wake word, returning to silence");
                               ctx->state = VOICE_STATE_SILENCE;
                            }
+#ifdef HAVE_ASR_ENGINE
+                           asr_engine_result_free(result);
+#else
                            asr_whisper_result_free(result);
+#endif
                         } else {
                            ctx->state = VOICE_STATE_SILENCE;
                            if (result)
+#ifdef HAVE_ASR_ENGINE
+                              asr_engine_result_free(result);
+#else
                               asr_whisper_result_free(result);
+#endif
                         }
+#ifdef HAVE_ASR_ENGINE
+                        asr_engine_reset(ctx->asr);
+#else
                         asr_whisper_reset(ctx->asr);
+#endif
 #else
                         ctx->state = VOICE_STATE_SILENCE;
 #endif
@@ -1011,10 +1099,17 @@ int voice_processing_loop(voice_ctx_t *ctx,
                         LOG_INFO("Command complete, transcribing...");
                         ctx->state = VOICE_STATE_PROCESSING;
 
-#ifdef HAVE_ASR_WHISPER
+#if defined(HAVE_ASR_ENGINE) || defined(HAVE_ASR_WHISPER)
                         /* Feed audio and get transcription */
+#ifdef HAVE_ASR_ENGINE
+                        if (asr_engine_get_type(ctx->asr) == ASR_ENGINE_WHISPER) {
+                           asr_engine_process(ctx->asr, ctx->audio_buffer, ctx->audio_buffer_len);
+                        }
+                        asr_result_t *cmd_result = asr_engine_finalize(ctx->asr);
+#else
                         asr_whisper_process(ctx->asr, ctx->audio_buffer, ctx->audio_buffer_len);
                         asr_whisper_result_t *cmd_result = asr_whisper_finalize(ctx->asr);
+#endif
                         if (cmd_result && cmd_result->text && cmd_result->text[0]) {
                            printf("\n>>> Command: %s\n\n", cmd_result->text);
                            fflush(stdout);
@@ -1033,14 +1128,26 @@ int voice_processing_loop(voice_ctx_t *ctx,
                            /* Send query */
                            ctx->state = VOICE_STATE_WAITING;
                            ws_client_send_query(ws, cmd_result->text);
+#ifdef HAVE_ASR_ENGINE
+                           asr_engine_result_free(cmd_result);
+#else
                            asr_whisper_result_free(cmd_result);
+#endif
                         } else {
                            LOG_INFO("Empty transcription, returning to silence");
                            ctx->state = VOICE_STATE_SILENCE;
                            if (cmd_result)
+#ifdef HAVE_ASR_ENGINE
+                              asr_engine_result_free(cmd_result);
+#else
                               asr_whisper_result_free(cmd_result);
+#endif
                         }
+#ifdef HAVE_ASR_ENGINE
+                        asr_engine_reset(ctx->asr);
+#else
                         asr_whisper_reset(ctx->asr);
+#endif
 #else
                         ctx->state = VOICE_STATE_SILENCE;
 #endif

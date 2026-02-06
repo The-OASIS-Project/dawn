@@ -143,16 +143,25 @@ sensitivity = 0.5
 # Automatic Speech Recognition (ASR)
 # =============================================================================
 [asr]
-# Whisper model for speech-to-text
-# Smaller models: ggml-tiny.bin (75MB), ggml-base.bin (142MB)
-# Larger models: ggml-small.bin (466MB), ggml-medium.bin (1.5GB)
-model_path = "models/whisper.cpp/ggml-tiny.bin"
+# ASR engine: "whisper" (batch, higher accuracy) or "vosk" (streaming, near-instant)
+# Whisper: accumulates audio, runs inference at end (~4s on Pi 4 for tiny model)
+# Vosk: processes audio incrementally, finalize() returns near-instantly
+engine = "vosk"
+
+# Model path depends on engine:
+#   Whisper: path to .bin model file
+#     Recommended: ggml-tiny.en-q5_1.bin (~30MB, fastest for Pi 4)
+#     Alternative: ggml-tiny.en.bin (~77MB), ggml-tiny.bin (~75MB, multilingual)
+#   Vosk: path to model directory
+#     Recommended: vosk-model-small-en-us-0.15 (~40MB)
+#     Alternative: vosk-model-en-us-0.22 (~1.8GB, better accuracy)
+model_path = "models/vosk-model-small-en-us-0.15"
 
 # Language code (en, es, fr, de, etc.)
 language = "en"
 
-# Number of processing threads (Pi Zero 2 W has 4 cores)
-n_threads = 2
+# Number of processing threads (Pi 4 has 4 cores)
+n_threads = 4
 
 # Maximum recording duration in seconds
 # Lower = less memory. 15s uses 960KB buffer (not 3.84MB at 60s)
@@ -179,7 +188,7 @@ length_scale = 0.85
 # Processing mode:
 #   "text_only"       - Current: keyboard input, useful for testing
 #   "voice_activated" - Production: VAD + wake word + ASR + TTS
-mode = "text_only"
+mode = "voice_activated"
 
 # =============================================================================
 # Logging

@@ -109,6 +109,7 @@ typedef struct satellite_config {
 
    /* Automatic Speech Recognition (ASR) */
    struct {
+      char engine[16]; /* "whisper" or "vosk" */
       char model_path[CONFIG_PATH_SIZE];
       char language[8];      /* e.g., "en" */
       int n_threads;         /* Processing threads */

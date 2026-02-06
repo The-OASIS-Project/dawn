@@ -25,6 +25,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Options for optional components
 option(DAWN_COMMON_WITH_VAD "Build with Silero VAD support (requires ONNX Runtime)" ON)
 option(DAWN_COMMON_WITH_ASR "Build with Whisper ASR support (requires whisper.cpp)" ON)
+option(DAWN_COMMON_WITH_ASR_VOSK "Build with Vosk ASR support (requires libvosk + json-c)" OFF)
 option(DAWN_COMMON_WITH_TTS "Build with Piper TTS support (requires ONNX Runtime)" ON)
 
 # Sentence buffer max size (bytes)
@@ -151,6 +152,68 @@ if(DAWN_COMMON_WITH_ASR)
 
         target_compile_definitions(dawn_common_asr PUBLIC DAWN_HAS_ASR)
     endif()
+endif()
+
+# --------------------------------------------------------------------------
+# Optional: Vosk ASR (requires libvosk + json-c)
+# --------------------------------------------------------------------------
+if(DAWN_COMMON_WITH_ASR_VOSK)
+    find_library(VOSK_LIBRARY NAMES vosk
+        HINTS /usr/local/lib /usr/lib ${CMAKE_SOURCE_DIR}
+    )
+
+    # Ensure PkgConfig is available for json-c
+    find_package(PkgConfig QUIET)
+    if(PKG_CONFIG_FOUND AND NOT JSONC_FOUND)
+        pkg_check_modules(JSONC json-c)
+    endif()
+
+    if(VOSK_LIBRARY AND JSONC_FOUND)
+        message(STATUS "Found libvosk: ${VOSK_LIBRARY}")
+        message(STATUS "Found json-c: ${JSONC_LIBRARIES}")
+
+        # Create Vosk ASR library
+        add_library(dawn_common_asr_vosk STATIC src/asr/asr_vosk.c)
+        target_include_directories(dawn_common_asr_vosk PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${JSONC_INCLUDE_DIRS}
+        )
+        target_link_libraries(dawn_common_asr_vosk PUBLIC
+            dawn_common
+            ${VOSK_LIBRARY}
+            ${JSONC_LIBRARIES}
+        )
+        target_compile_definitions(dawn_common_asr_vosk PUBLIC DAWN_HAS_ASR_VOSK)
+    else()
+        if(NOT VOSK_LIBRARY)
+            message(WARNING "libvosk not found - Vosk ASR support disabled")
+        endif()
+        if(NOT JSONC_FOUND)
+            message(WARNING "json-c not found - Vosk ASR support disabled")
+        endif()
+        set(DAWN_COMMON_WITH_ASR_VOSK OFF)
+    endif()
+endif()
+
+# --------------------------------------------------------------------------
+# Optional: Unified ASR Engine (built if ANY ASR backend is available)
+# --------------------------------------------------------------------------
+if(DAWN_COMMON_WITH_ASR OR DAWN_COMMON_WITH_ASR_VOSK)
+    add_library(dawn_common_asr_engine STATIC src/asr/asr_engine.c)
+    target_include_directories(dawn_common_asr_engine PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_link_libraries(dawn_common_asr_engine PUBLIC dawn_common)
+
+    if(TARGET dawn_common_asr)
+        target_link_libraries(dawn_common_asr_engine PUBLIC dawn_common_asr)
+    endif()
+    if(TARGET dawn_common_asr_vosk)
+        target_link_libraries(dawn_common_asr_engine PUBLIC dawn_common_asr_vosk)
+    endif()
+
+    target_compile_definitions(dawn_common_asr_engine PUBLIC DAWN_HAS_ASR_ENGINE)
+    message(STATUS "Unified ASR engine: ENABLED (Whisper=${DAWN_COMMON_WITH_ASR}, Vosk=${DAWN_COMMON_WITH_ASR_VOSK})")
 endif()
 
 # --------------------------------------------------------------------------

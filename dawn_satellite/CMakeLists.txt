@@ -30,6 +30,10 @@ option(ENABLE_DAP2 "Enable DAP2 WebSocket protocol (Tier 1)" ON)
 # Default ON for production builds; use -DENABLE_VOICE=OFF for text-only debugging
 option(ENABLE_VOICE "Enable local voice processing (VAD + ASR + TTS)" ON)
 
+# Optional: Vosk ASR engine (streaming, near-instant finalize)
+# Requires libvosk + json-c. Can be enabled alongside Whisper for runtime switching.
+option(ENABLE_VOSK_ASR "Enable Vosk ASR (requires libvosk + json-c)" ON)
+
 # Set individual flags from the unified option
 set(ENABLE_LOCAL_VAD ${ENABLE_VOICE})
 set(ENABLE_LOCAL_ASR ${ENABLE_VOICE})
@@ -165,6 +169,7 @@ if(EXISTS "${DAWN_COMMON_DIR}/CMakeLists.txt")
     # Configure common library options based on satellite options
     set(DAWN_COMMON_WITH_VAD ${ENABLE_LOCAL_VAD} CACHE BOOL "" FORCE)
     set(DAWN_COMMON_WITH_ASR ${ENABLE_LOCAL_ASR} CACHE BOOL "" FORCE)
+    set(DAWN_COMMON_WITH_ASR_VOSK ${ENABLE_VOSK_ASR} CACHE BOOL "" FORCE)
     set(DAWN_COMMON_WITH_TTS ${ENABLE_LOCAL_TTS} CACHE BOOL "" FORCE)
 
     # Reduce sentence buffer limit for Pi Zero 2 W (256KB instead of 10MB)
@@ -205,7 +210,7 @@ endif()
 if(ENABLE_LOCAL_ASR AND TARGET dawn_common_asr)
     target_link_libraries(dawn_satellite dawn_common_asr)
     target_compile_definitions(dawn_satellite PRIVATE ENABLE_LOCAL_ASR HAVE_ASR_WHISPER)
-    message(STATUS "Local ASR: ENABLED")
+    message(STATUS "Local ASR (Whisper): ENABLED")
 
     # Link CUDA libraries if available (must be after ASR library for linker order)
     if(ENABLE_WHISPER_CUDA)
@@ -218,6 +223,19 @@ if(ENABLE_LOCAL_ASR AND TARGET dawn_common_asr)
             ${CURAND_LIBRARIES})
         message(STATUS "Linking CUDA libraries for ASR")
     endif()
+endif()
+
+if(ENABLE_VOSK_ASR AND TARGET dawn_common_asr_vosk)
+    target_link_libraries(dawn_satellite dawn_common_asr_vosk)
+    target_compile_definitions(dawn_satellite PRIVATE HAVE_ASR_VOSK)
+    message(STATUS "Local ASR (Vosk): ENABLED")
+endif()
+
+# Unified ASR engine (available if any ASR backend is built)
+if(TARGET dawn_common_asr_engine)
+    target_link_libraries(dawn_satellite dawn_common_asr_engine)
+    target_compile_definitions(dawn_satellite PRIVATE HAVE_ASR_ENGINE)
+    message(STATUS "Unified ASR engine: ENABLED")
 endif()
 
 if(ENABLE_LOCAL_TTS AND TARGET dawn_common_tts)
@@ -244,6 +262,7 @@ message(STATUS "=== DAWN Satellite Configuration ===")
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Target: ${CMAKE_SYSTEM_PROCESSOR}")
 message(STATUS "Local VAD: ${ENABLE_LOCAL_VAD}")
-message(STATUS "Local ASR: ${ENABLE_LOCAL_ASR}")
+message(STATUS "Local ASR (Whisper): ${ENABLE_LOCAL_ASR}")
+message(STATUS "Local ASR (Vosk): ${ENABLE_VOSK_ASR}")
 message(STATUS "Local TTS: ${ENABLE_LOCAL_TTS}")
 message(STATUS "=====================================")

@@ -68,21 +68,24 @@ show_help() {
     echo ""
     echo "Options:"
     echo "  --vosk               Include Vosk model download (~1.8GB)"
-    echo "  --whisper-model SIZE Whisper model size: tiny, base, small, medium"
-    echo "                       (default: base, recommended for Jetson)"
+    echo "  --whisper-model SIZE Whisper model (default: base)"
+    echo "                       Accepts: tiny, base, small, medium"
+    echo "                       Quantized: tiny-q5_1, base-q5_1, etc."
     echo "  --help               Show this help message"
     echo ""
     echo "Examples:"
-    echo "  $0                           # Standard setup (Whisper base)"
-    echo "  $0 --whisper-model tiny      # Use smaller/faster Whisper model"
-    echo "  $0 --vosk                    # Include legacy Vosk ASR"
+    echo "  $0                               # Standard setup (Whisper base)"
+    echo "  $0 --whisper-model tiny-q5_1     # Quantized tiny (best for Pi 4)"
+    echo "  $0 --whisper-model tiny          # Tiny English-only"
+    echo "  $0 --vosk                        # Include legacy Vosk ASR"
     echo ""
-    echo "Model Sizes (approximate):"
-    echo "  Whisper tiny:   ~75MB   (fastest, lower accuracy)"
-    echo "  Whisper base:   ~142MB  (recommended for Jetson GPU)"
-    echo "  Whisper small:  ~466MB  (better accuracy, slower)"
-    echo "  Whisper medium: ~1.5GB  (best accuracy, slowest)"
-    echo "  Vosk en-us:     ~1.8GB  (optional legacy ASR)"
+    echo "Model Sizes (approximate, English-only):"
+    echo "  Whisper tiny-q5_1: ~30MB   (fastest, recommended for Pi 4)"
+    echo "  Whisper tiny:      ~75MB   (fast, good for short commands)"
+    echo "  Whisper base:      ~142MB  (recommended for Jetson GPU)"
+    echo "  Whisper small:     ~466MB  (better accuracy, slower)"
+    echo "  Whisper medium:    ~1.5GB  (best accuracy, slowest)"
+    echo "  Vosk en-us:        ~1.8GB  (optional legacy ASR)"
     echo ""
     echo "Note: TTS (Piper) and VAD (Silero) models are committed to git."
     echo ""
@@ -111,15 +114,36 @@ parse_args() {
         esac
     done
 
-    # Validate whisper model
-    case $WHISPER_MODEL in
+    # Parse whisper model: split "tiny-q5_1" into base="tiny" quant="-q5_1"
+    WHISPER_BASE="${WHISPER_MODEL%%-q*}"
+    if [ "$WHISPER_BASE" != "$WHISPER_MODEL" ]; then
+        WHISPER_QUANT="-${WHISPER_MODEL#*-}"
+    else
+        WHISPER_QUANT=""
+    fi
+
+    # Validate base model size
+    case $WHISPER_BASE in
         tiny|base|small|medium) ;;
         *)
             print_error "Invalid Whisper model: $WHISPER_MODEL"
-            echo "Valid options: tiny, base, small, medium"
+            echo "Valid base sizes: tiny, base, small, medium"
+            echo "Quantized variants: tiny-q5_1, tiny-q5_0, tiny-q8_0, etc."
             exit 1
             ;;
     esac
+
+    # Validate quantization suffix if present
+    if [ -n "$WHISPER_QUANT" ]; then
+        case $WHISPER_QUANT in
+            -q5_0|-q5_1|-q8_0) ;;
+            *)
+                print_error "Invalid quantization: $WHISPER_QUANT"
+                echo "Valid quantizations: q5_0, q5_1, q8_0"
+                exit 1
+                ;;
+        esac
+    fi
 }
 
 check_dependencies() {
@@ -162,25 +186,25 @@ setup_whisper() {
     # Create models directory in whisper.cpp if needed
     mkdir -p "$WHISPER_DIR/models"
 
-    # Check for existing model (both .bin and .en.bin variants)
-    local model_file="$WHISPER_DIR/models/ggml-${WHISPER_MODEL}.bin"
-    local model_file_en="$WHISPER_DIR/models/ggml-${WHISPER_MODEL}.en.bin"
+    # Build the model filename
+    # Format: ggml-{base}.en{-quant}.bin  (e.g., ggml-tiny.en-q5_1.bin)
+    local model_filename="ggml-${WHISPER_BASE}.en${WHISPER_QUANT}.bin"
+    local model_file="$WHISPER_DIR/models/$model_filename"
 
     if [ -f "$model_file" ]; then
-        print_success "Whisper $WHISPER_MODEL model already exists: ggml-${WHISPER_MODEL}.bin"
-    elif [ -f "$model_file_en" ]; then
-        print_success "Whisper $WHISPER_MODEL model already exists: ggml-${WHISPER_MODEL}.en.bin"
+        print_success "Whisper $WHISPER_MODEL model already exists: $model_filename"
     else
-        print_step "Downloading Whisper $WHISPER_MODEL model (English-only)..."
+        print_step "Downloading Whisper $WHISPER_MODEL model ($model_filename)..."
 
-        local model_url="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${WHISPER_MODEL}.en.bin"
+        local model_url="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$model_filename"
 
-        wget -q --show-progress -O "$model_file_en" "$model_url" || {
-            print_error "Failed to download Whisper model"
+        wget -q --show-progress -O "$model_file" "$model_url" || {
+            print_error "Failed to download Whisper model from $model_url"
+            rm -f "$model_file"
             return 1
         }
 
-        print_success "Whisper $WHISPER_MODEL model downloaded"
+        print_success "Whisper $WHISPER_MODEL model downloaded: $model_filename"
     fi
 
     # Create symlink in models directory
