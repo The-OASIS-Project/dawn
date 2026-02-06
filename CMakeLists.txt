@@ -385,8 +385,6 @@ set(DAWN_SOURCES
     # Core files
     src/dawn.c
     src/input_queue.c
-    src/logging.c
-    src/logging_bridge.c
     src/mosquitto_comms.c
     src/text_to_command_nuevo.c
     src/word_to_number.c

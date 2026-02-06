@@ -54,17 +54,8 @@
 #include "utils/sentence_buffer.h"
 #endif
 
-/* =============================================================================
- * Logging
- * ============================================================================= */
-
-#define LOG_INFO(fmt, ...) fprintf(stdout, "[VOICE] " fmt "\n", ##__VA_ARGS__)
-#define LOG_ERROR(fmt, ...) fprintf(stderr, "[VOICE ERROR] " fmt "\n", ##__VA_ARGS__)
-#define LOG_DEBUG(fmt, ...)                                         \
-   do {                                                             \
-      if (getenv("VOICE_DEBUG"))                                    \
-         fprintf(stdout, "[VOICE DEBUG] " fmt "\n", ##__VA_ARGS__); \
-   } while (0)
+/* Shared logging (same format as daemon) */
+#include "logging.h"
 
 /* =============================================================================
  * Constants
@@ -650,7 +641,6 @@ voice_ctx_t *voice_processing_init(const satellite_config_t *config) {
    /* Load all models at startup for predictable latency (no lazy loading) */
 #if defined(HAVE_ASR_ENGINE) || defined(HAVE_ASR_WHISPER)
    if (config->asr.model_path[0]) {
-      LOG_INFO("Loading ASR model (%s): %s", ctx->asr_engine_name, ctx->asr_model_path);
       if (!ensure_asr_loaded(ctx)) {
          LOG_ERROR("Failed to load ASR model - voice processing unavailable");
          sentence_buffer_free(ctx->sentence_buf);

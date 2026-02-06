@@ -30,9 +30,7 @@
 #include <unistd.h>
 
 #include "audio/ring_buffer.h"
-
-#define LOG_INFO(fmt, ...) fprintf(stdout, "[CAPTURE] " fmt "\n", ##__VA_ARGS__)
-#define LOG_ERROR(fmt, ...) fprintf(stderr, "[CAPTURE ERROR] " fmt "\n", ##__VA_ARGS__)
+#include "logging.h"
 
 /* Ring buffer size: 2 seconds of 16kHz mono audio */
 #define RING_BUFFER_SIZE (AUDIO_SAMPLE_RATE * 2 * sizeof(int16_t))

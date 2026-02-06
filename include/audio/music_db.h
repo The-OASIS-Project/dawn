@@ -203,10 +203,10 @@ int music_db_list(music_search_result_t *results, int max_results);
  *
  * @param artists Output array of artist name buffers
  * @param max_artists Maximum number of artists to return
- * @param artist_buf_size Size of each artist name buffer
+ * @param offset Number of artists to skip (for pagination, 0 = start)
  * @return Number of artists found, or -1 on error
  */
-int music_db_list_artists(char (*artists)[AUDIO_METADATA_STRING_MAX], int max_artists);
+int music_db_list_artists(char (*artists)[AUDIO_METADATA_STRING_MAX], int max_artists, int offset);
 
 /**
  * @brief List unique albums in the database
@@ -215,10 +215,10 @@ int music_db_list_artists(char (*artists)[AUDIO_METADATA_STRING_MAX], int max_ar
  *
  * @param albums Output array of album name buffers
  * @param max_albums Maximum number of albums to return
- * @param album_buf_size Size of each album name buffer
+ * @param offset Number of albums to skip (for pagination, 0 = start)
  * @return Number of albums found, or -1 on error
  */
-int music_db_list_albums(char (*albums)[AUDIO_METADATA_STRING_MAX], int max_albums);
+int music_db_list_albums(char (*albums)[AUDIO_METADATA_STRING_MAX], int max_albums, int offset);
 
 /**
  * @brief Artist info with statistics

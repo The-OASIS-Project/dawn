@@ -221,40 +221,29 @@ cd dawn
 
 ### 5.1 Download Models
 
-#### Vosk Model (default ASR)
+Use the setup script from the project root to download ASR models:
 
 ```bash
-cd models
+# Recommended: Vosk small model (~40MB, satellite default) + Whisper base
+./setup_models.sh --vosk-small
 
-# Recommended: small English model (~40MB, good for voice commands)
-wget https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
-unzip vosk-model-small-en-us-0.15.zip
+# Or: Vosk small + Whisper tiny (best for Pi 4)
+./setup_models.sh --vosk-small --whisper-model tiny-q5_1
 
-# Alternative: large English model (~1.8GB, better accuracy)
-# wget https://alphacephei.com/vosk/models/vosk-model-en-us-0.22.zip
-# unzip vosk-model-en-us-0.22.zip
+# Or: Large Vosk model (~1.8GB, better accuracy) + Whisper base
+./setup_models.sh --vosk
 
-cd ..
+# See all options
+./setup_models.sh --help
 ```
 
 > **Vosk model recommendations for Pi 4:**
 > - `vosk-model-small-en-us-0.15` (~40MB) - Recommended, fast and accurate for voice commands
 > - `vosk-model-en-us-0.22` (~1.8GB) - Best accuracy, higher RAM usage
 
-#### Whisper Model (alternative ASR)
-
-Only needed if you set `engine = "whisper"` in config:
-
-```bash
-cd models/whisper.cpp
-../../whisper.cpp/models/download-ggml-model.sh tiny.en-q5_1
-cd ../..
-```
-
-> **Whisper model recommendations for Pi 4:**
+> **Whisper model recommendations for Pi 4** (only needed if `engine = "whisper"`):
 > - `tiny.en-q5_1` (~30MB) - Fastest, but ~4s inference on Pi 4
 > - `tiny.en` (~77MB) - Slightly more accurate, ~5s inference
-> - `small.en` (~466MB) - Best accuracy but ~15-25s inference, not recommended
 
 #### VAD and TTS Models
 

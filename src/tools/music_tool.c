@@ -120,6 +120,15 @@ static const treg_param_t music_params[] = {
        .maps_to = TOOL_MAPS_TO_CUSTOM,
        .field_name = "limit",
    },
+   {
+       .name = "page",
+       .description = "For 'library': page number for pagination (1-based, default 1). "
+                      "Each page returns up to 50 items. Use with 'artists' or 'albums'.",
+       .type = TOOL_PARAM_TYPE_NUMBER,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "page",
+   },
 };
 
 /* ========== Tool Metadata ========== */
@@ -136,7 +145,7 @@ static const tool_metadata_t music_metadata = {
                   "'next'/'previous' (skip tracks), 'list' (show playlist), "
                   "'select' (jump to track N), 'search' (find without playing).",
    .params = music_params,
-   .param_count = 3,
+   .param_count = 4,
 
    .device_type = TOOL_DEVICE_TYPE_MUSIC,
    .capabilities = TOOL_CAP_FILESYSTEM,
@@ -795,32 +804,54 @@ static char *music_tool_callback(const char *action, char *value, int *should_re
          return strdup("Music database not available");
       }
 
-      /* Default: show stats and list of artists */
-      if (!value || !*value || strcasecmp(value, "stats") == 0) {
+      /* Extract page parameter (1-based, default 1) */
+      int page = 1;
+      char page_str[16] = "";
+      if (extract_custom_param(value, "page", page_str, sizeof(page_str))) {
+         char *endptr;
+         long parsed = strtol(page_str, &endptr, 10);
+         if (endptr != page_str && *endptr == '\0' && parsed >= 1) {
+            page = (int)parsed;
+         }
+      }
+
+      int per_page = 50;
+      int db_offset = (page - 1) * per_page;
+
+      /* Extract base query (strip ::page::N suffix) */
+      char lib_query[64] = "";
+      if (value && *value) {
+         extract_base_value(value, lib_query, sizeof(lib_query));
+      }
+
+      /* Default: show stats and first page of artists */
+      if (!lib_query[0] || strcasecmp(lib_query, "stats") == 0) {
          music_db_stats_t stats;
          if (music_db_get_stats(&stats) != 0) {
             return strdup("Failed to get music library stats");
          }
 
-         /* Also get a sample of artists */
-         char artists[20][AUDIO_METADATA_STRING_MAX];
-         int artist_count = music_db_list_artists(artists, 20);
+         char artists[50][AUDIO_METADATA_STRING_MAX];
+         int artist_count = music_db_list_artists(artists, per_page, db_offset);
 
-         size_t buf_size = 2048;
+         size_t buf_size = 4096;
          result = malloc(buf_size);
          if (!result)
             return strdup("Memory allocation failed");
 
-         int offset = snprintf(result, buf_size,
-                               "Music library: %d tracks, %d artists, %d albums\n\nArtists:\n",
-                               stats.track_count, stats.artist_count, stats.album_count);
+         int total_pages = (stats.artist_count + per_page - 1) / per_page;
+         int off = snprintf(result, buf_size,
+                            "Music library: %d tracks, %d artists, %d albums\n\n"
+                            "Artists (page %d of %d, showing %d-%d of %d):\n",
+                            stats.track_count, stats.artist_count, stats.album_count, page,
+                            total_pages, db_offset + 1, db_offset + artist_count,
+                            stats.artist_count);
 
-         for (int i = 0; i < artist_count && offset < (int)buf_size - 128; i++) {
-            offset += snprintf(result + offset, buf_size - offset, "- %s\n", artists[i]);
+         for (int i = 0; i < artist_count && off < (int)buf_size - 128; i++) {
+            off += snprintf(result + off, buf_size - off, "- %s\n", artists[i]);
          }
-         if (stats.artist_count > 20) {
-            snprintf(result + offset, buf_size - offset, "... and %d more artists",
-                     stats.artist_count - 20);
+         if (page < total_pages) {
+            snprintf(result + off, buf_size - off, "\nUse page=%d to see more artists.", page + 1);
          }
 
          if (direct_mode) {
@@ -830,22 +861,36 @@ static char *music_tool_callback(const char *action, char *value, int *should_re
          }
          return result;
 
-      } else if (strcasecmp(value, "artists") == 0) {
-         char artists[50][AUDIO_METADATA_STRING_MAX];
-         int count = music_db_list_artists(artists, 50);
+      } else if (strcasecmp(lib_query, "artists") == 0) {
+         music_db_stats_t stats;
+         if (music_db_get_stats(&stats) != 0) {
+            return strdup("Failed to get music library stats");
+         }
 
-         if (count <= 0) {
+         char artists[50][AUDIO_METADATA_STRING_MAX];
+         int count = music_db_list_artists(artists, per_page, db_offset);
+
+         if (count <= 0 && page == 1) {
             return strdup("No artists found in library");
          }
+         if (count <= 0) {
+            return strdup("No more artists (past last page)");
+         }
 
-         size_t buf_size = count * 128 + 64;
+         int total_pages = (stats.artist_count + per_page - 1) / per_page;
+         size_t buf_size = count * 128 + 256;
          result = malloc(buf_size);
          if (!result)
             return strdup("Memory allocation failed");
 
-         int offset = snprintf(result, buf_size, "Artists in library (%d):\n", count);
-         for (int i = 0; i < count && offset < (int)buf_size - 128; i++) {
-            offset += snprintf(result + offset, buf_size - offset, "- %s\n", artists[i]);
+         int off = snprintf(result, buf_size,
+                            "Artists (page %d of %d, showing %d-%d of %d total):\n", page,
+                            total_pages, db_offset + 1, db_offset + count, stats.artist_count);
+         for (int i = 0; i < count && off < (int)buf_size - 128; i++) {
+            off += snprintf(result + off, buf_size - off, "- %s\n", artists[i]);
+         }
+         if (page < total_pages) {
+            snprintf(result + off, buf_size - off, "\nUse page=%d to see more artists.", page + 1);
          }
 
          if (direct_mode) {
@@ -855,22 +900,36 @@ static char *music_tool_callback(const char *action, char *value, int *should_re
          }
          return result;
 
-      } else if (strcasecmp(value, "albums") == 0) {
-         char albums[50][AUDIO_METADATA_STRING_MAX];
-         int count = music_db_list_albums(albums, 50);
-
-         if (count <= 0) {
-            return strdup("No albums found in library");
+      } else if (strcasecmp(lib_query, "albums") == 0) {
+         music_db_stats_t stats;
+         if (music_db_get_stats(&stats) != 0) {
+            return strdup("Failed to get music library stats");
          }
 
-         size_t buf_size = count * 128 + 64;
+         char albums[50][AUDIO_METADATA_STRING_MAX];
+         int count = music_db_list_albums(albums, per_page, db_offset);
+
+         if (count <= 0 && page == 1) {
+            return strdup("No albums found in library");
+         }
+         if (count <= 0) {
+            return strdup("No more albums (past last page)");
+         }
+
+         int total_pages = (stats.album_count + per_page - 1) / per_page;
+         size_t buf_size = count * 128 + 256;
          result = malloc(buf_size);
          if (!result)
             return strdup("Memory allocation failed");
 
-         int offset = snprintf(result, buf_size, "Albums in library (%d):\n", count);
-         for (int i = 0; i < count && offset < (int)buf_size - 128; i++) {
-            offset += snprintf(result + offset, buf_size - offset, "- %s\n", albums[i]);
+         int off = snprintf(result, buf_size,
+                            "Albums (page %d of %d, showing %d-%d of %d total):\n", page,
+                            total_pages, db_offset + 1, db_offset + count, stats.album_count);
+         for (int i = 0; i < count && off < (int)buf_size - 128; i++) {
+            off += snprintf(result + off, buf_size - off, "- %s\n", albums[i]);
+         }
+         if (page < total_pages) {
+            snprintf(result + off, buf_size - off, "\nUse page=%d to see more albums.", page + 1);
          }
 
          if (direct_mode) {

@@ -22,10 +22,13 @@
 #include "logging.h"
 
 #include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
+
+#include "logging_common.h"
 
 // Global variable for the log file
 static FILE *log_file = NULL;
@@ -158,6 +161,32 @@ void log_message(log_level_t level,
    va_end(args);
 }
 
+// Bridge callback: routes DAWN_LOG_* from common library to log_message()
+static void logging_bridge_callback(dawn_log_level_t level,
+                                    const char *file,
+                                    int line,
+                                    const char *func,
+                                    const char *fmt,
+                                    va_list args) {
+   log_level_t mapped_level;
+   switch (level) {
+      case DAWN_LOG_WARNING:
+         mapped_level = LOG_WARNING;
+         break;
+      case DAWN_LOG_ERROR:
+         mapped_level = LOG_ERROR;
+         break;
+      case DAWN_LOG_INFO:
+      default:
+         mapped_level = LOG_INFO;
+         break;
+   }
+
+   char message[MAX_LOG_LENGTH];
+   vsnprintf(message, sizeof(message), fmt, args);
+   log_message(mapped_level, file, line, func, "%s", message);
+}
+
 // Initialization function implementation
 int init_logging(const char *filename, int to_file) {
    // Close the previous log file if open
@@ -178,6 +207,9 @@ int init_logging(const char *filename, int to_file) {
          return -1;
       }
    }
+
+   // Automatically bridge common library logging (DAWN_LOG_*) to log_message()
+   dawn_common_set_logger(logging_bridge_callback);
 
    return 0;
 }

@@ -25,17 +25,8 @@
 #include <string.h>
 #include <time.h>
 
-/* =============================================================================
- * Logging
- * ============================================================================= */
-
-#define LOG_INFO(fmt, ...) fprintf(stdout, "[WS] " fmt "\n", ##__VA_ARGS__)
-#define LOG_ERROR(fmt, ...) fprintf(stderr, "[WS ERROR] " fmt "\n", ##__VA_ARGS__)
-#define LOG_DEBUG(fmt, ...)                                      \
-   do {                                                          \
-      if (getenv("WS_DEBUG"))                                    \
-         fprintf(stdout, "[WS DEBUG] " fmt "\n", ##__VA_ARGS__); \
-   } while (0)
+/* Shared logging (same format as daemon) */
+#include "logging.h"
 
 /* =============================================================================
  * Internal Structures

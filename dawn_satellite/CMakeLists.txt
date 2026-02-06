@@ -25,19 +25,38 @@ find_package(PkgConfig REQUIRED)
 # DAP2 = WebSocket text protocol (Tier 1, requires local ASR/TTS)
 option(ENABLE_DAP2 "Enable DAP2 WebSocket protocol (Tier 1)" ON)
 
-# Local voice processing: VAD + ASR + TTS on the satellite
-# This enables fully local wake word detection and speech processing
-# Default ON for production builds; use -DENABLE_VOICE=OFF for text-only debugging
-option(ENABLE_VOICE "Enable local voice processing (VAD + ASR + TTS)" ON)
+# Voice processing components (individually configurable)
+#
+# Default build: VAD + Vosk ASR + TTS (no Whisper compile, fastest build)
+#   cmake ..
+#
+# With Whisper instead:
+#   cmake .. -DENABLE_WHISPER_ASR=ON -DENABLE_VOSK_ASR=OFF
+#
+# With both engines (runtime switching via config):
+#   cmake .. -DENABLE_WHISPER_ASR=ON
+#
+# Text-only debugging (no voice):
+#   cmake .. -DENABLE_VOICE=OFF
+#
+option(ENABLE_VOICE "Master switch: enable all voice processing" ON)
+option(ENABLE_VAD "Enable VAD (Silero, requires ONNX Runtime)" ${ENABLE_VOICE})
+option(ENABLE_WHISPER_ASR "Enable Whisper ASR (requires whisper.cpp)" OFF)
+option(ENABLE_VOSK_ASR "Enable Vosk ASR (requires libvosk + json-c)" ${ENABLE_VOICE})
+option(ENABLE_TTS "Enable TTS (Piper, requires ONNX Runtime)" ${ENABLE_VOICE})
 
-# Optional: Vosk ASR engine (streaming, near-instant finalize)
-# Requires libvosk + json-c. Can be enabled alongside Whisper for runtime switching.
-option(ENABLE_VOSK_ASR "Enable Vosk ASR (requires libvosk + json-c)" ON)
+# ENABLE_VOICE=OFF disables everything regardless of individual settings
+if(NOT ENABLE_VOICE)
+    set(ENABLE_VAD OFF)
+    set(ENABLE_WHISPER_ASR OFF)
+    set(ENABLE_VOSK_ASR OFF)
+    set(ENABLE_TTS OFF)
+endif()
 
-# Set individual flags from the unified option
-set(ENABLE_LOCAL_VAD ${ENABLE_VOICE})
-set(ENABLE_LOCAL_ASR ${ENABLE_VOICE})
-set(ENABLE_LOCAL_TTS ${ENABLE_VOICE})
+# Map to internal names used by common library and compile definitions
+set(ENABLE_LOCAL_VAD ${ENABLE_VAD})
+set(ENABLE_LOCAL_ASR ${ENABLE_WHISPER_ASR})
+set(ENABLE_LOCAL_TTS ${ENABLE_TTS})
 
 # ALSA for audio
 pkg_check_modules(ALSA REQUIRED alsa)
@@ -138,8 +157,8 @@ else()
     message(STATUS "CUDA support: DISABLED (not found)")
 endif()
 
-# Include whisper.cpp for local ASR (must be before dawn_common so target exists)
-if(ENABLE_LOCAL_ASR)
+# Include whisper.cpp for Whisper ASR (must be before dawn_common so target exists)
+if(ENABLE_WHISPER_ASR)
     set(WHISPER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../whisper.cpp")
     if(EXISTS "${WHISPER_DIR}/CMakeLists.txt")
         set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -157,7 +176,9 @@ if(ENABLE_LOCAL_ASR)
 
         add_subdirectory("${WHISPER_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/whisper.cpp")
     else()
-        message(FATAL_ERROR "whisper.cpp not found at ${WHISPER_DIR} - required for local ASR")
+        message(WARNING "whisper.cpp not found at ${WHISPER_DIR} - Whisper ASR disabled")
+        set(ENABLE_WHISPER_ASR OFF)
+        set(ENABLE_LOCAL_ASR OFF)
     endif()
 endif()
 
@@ -261,8 +282,8 @@ message(STATUS "")
 message(STATUS "=== DAWN Satellite Configuration ===")
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Target: ${CMAKE_SYSTEM_PROCESSOR}")
-message(STATUS "Local VAD: ${ENABLE_LOCAL_VAD}")
-message(STATUS "Local ASR (Whisper): ${ENABLE_LOCAL_ASR}")
-message(STATUS "Local ASR (Vosk): ${ENABLE_VOSK_ASR}")
-message(STATUS "Local TTS: ${ENABLE_LOCAL_TTS}")
+message(STATUS "VAD (Silero): ${ENABLE_VAD}")
+message(STATUS "ASR (Whisper): ${ENABLE_WHISPER_ASR}")
+message(STATUS "ASR (Vosk): ${ENABLE_VOSK_ASR}")
+message(STATUS "TTS (Piper): ${ENABLE_TTS}")
 message(STATUS "=====================================")

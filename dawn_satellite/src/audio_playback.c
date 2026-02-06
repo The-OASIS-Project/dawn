@@ -24,9 +24,7 @@
 #include <string.h>
 
 #include "audio_capture.h" /* For wav_header_t and audio_parse_wav */
-
-#define LOG_INFO(fmt, ...) fprintf(stdout, "[PLAYBACK] " fmt "\n", ##__VA_ARGS__)
-#define LOG_ERROR(fmt, ...) fprintf(stderr, "[PLAYBACK ERROR] " fmt "\n", ##__VA_ARGS__)
+#include "logging.h"
 
 int audio_playback_init(audio_playback_t *ctx, const char *device) {
    if (!ctx)

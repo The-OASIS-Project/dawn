@@ -26,8 +26,7 @@
 #include <gpiod.h>
 #endif
 
-#define LOG_INFO(fmt, ...) fprintf(stdout, "[GPIO] " fmt "\n", ##__VA_ARGS__)
-#define LOG_ERROR(fmt, ...) fprintf(stderr, "[GPIO ERROR] " fmt "\n", ##__VA_ARGS__)
+#include "logging.h"
 
 #ifdef HAVE_GPIOD
 

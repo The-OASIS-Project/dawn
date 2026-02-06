@@ -160,6 +160,17 @@ void logging_suppress_console(int suppress);
 #define LOG_ERROR(fmt, ...) log_message(LOG_ERROR, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
 
 /**
+ * @brief Macro for logging debug messages (only in debug builds).
+ */
+#ifdef DEBUG
+#define LOG_DEBUG(fmt, ...) log_message(LOG_INFO, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
+#else
+#define LOG_DEBUG(fmt, ...) \
+   do {                     \
+   } while (0)
+#endif
+
+/**
  * @brief Macro for safely logging credential/API key status
  *
  * This macro prevents accidental logging of actual credentials by converting

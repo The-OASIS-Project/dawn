@@ -26,8 +26,8 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-#define LOG_INFO(fmt, ...) fprintf(stdout, "[DISPLAY] " fmt "\n", ##__VA_ARGS__)
-#define LOG_ERROR(fmt, ...) fprintf(stderr, "[DISPLAY ERROR] " fmt "\n", ##__VA_ARGS__)
+/* Shared logging (same format as daemon) */
+#include "logging.h"
 
 /* Simple 8x8 font data (ASCII 32-127) */
 static const uint8_t font_8x8[][8] = {

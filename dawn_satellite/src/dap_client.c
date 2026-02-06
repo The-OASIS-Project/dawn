@@ -29,14 +29,8 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-/* Logging macros */
-#define LOG_INFO(fmt, ...) fprintf(stdout, "[DAP] " fmt "\n", ##__VA_ARGS__)
-#define LOG_ERROR(fmt, ...) fprintf(stderr, "[DAP ERROR] " fmt "\n", ##__VA_ARGS__)
-#define LOG_DEBUG(fmt, ...)                                       \
-   do {                                                           \
-      if (getenv("DAP_DEBUG"))                                    \
-         fprintf(stdout, "[DAP DEBUG] " fmt "\n", ##__VA_ARGS__); \
-   } while (0)
+/* Shared logging (same format as daemon) */
+#include "logging.h"
 
 /* Internal functions */
 static int dap_set_socket_timeout(int fd, int timeout_sec);

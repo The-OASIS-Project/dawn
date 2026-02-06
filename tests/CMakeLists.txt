@@ -23,18 +23,20 @@ include_directories(${SRC_ROOT}/include)
 add_executable(test_sse_parser
                test_sse_parser.c
                ${SRC_ROOT}/src/llm/sse_parser.c
-               ${SRC_ROOT}/src/logging.c)
+)
 
 target_link_libraries(test_sse_parser
+                      dawn_common
                       ${JSONC_LIBRARIES})
 
 # Test: Sentence Buffer
 add_executable(test_sentence_buffer
                test_sentence_buffer.c
                ${SRC_ROOT}/src/llm/sentence_buffer.c
-               ${SRC_ROOT}/src/logging.c)
+)
 
 target_link_libraries(test_sentence_buffer
+                      dawn_common
                       ${JSONC_LIBRARIES})
 
 # Test: End-to-End Streaming
@@ -51,9 +53,10 @@ add_executable(test_streaming
                ${SRC_ROOT}/src/config/config_env.c
                ${SRC_ROOT}/src/tools/toml.c
                ${SRC_ROOT}/src/ui/metrics.c
-               ${SRC_ROOT}/src/logging.c)
+)
 
 target_link_libraries(test_streaming
+                      dawn_common
                       ${CURL_LIBRARIES}
                       ${JSONC_LIBRARIES}
                       OpenSSL::SSL
@@ -65,12 +68,13 @@ add_executable(asr_benchmark
                ${SRC_ROOT}/src/asr/asr_interface.c
                ${SRC_ROOT}/src/asr/asr_vosk.c
                ${SRC_ROOT}/src/asr/asr_whisper.c
-               ${SRC_ROOT}/src/logging.c)
+)
 
 target_include_directories(asr_benchmark PRIVATE
                            ${SRC_ROOT}/whisper.cpp/include)
 
 target_link_libraries(asr_benchmark
+                      dawn_common
                       vosk
                       whisper
                       sndfile
@@ -91,11 +95,12 @@ target_link_libraries(test_vad_models onnxruntime m)
 add_executable(test_vad_api
                test_vad_api.c
                ${SRC_ROOT}/src/asr/vad_silero.c
-               ${SRC_ROOT}/src/logging.c)
+)
 
 target_include_directories(test_vad_api PRIVATE /usr/local/include/onnxruntime)
 
 target_link_libraries(test_vad_api
+                      dawn_common
                       onnxruntime
                       m
                       ${JSONC_LIBRARIES})
@@ -107,12 +112,13 @@ add_executable(test_asr_concurrent
                ${SRC_ROOT}/src/asr/asr_interface.c
                ${SRC_ROOT}/src/asr/asr_whisper.c
                ${SRC_ROOT}/src/ui/metrics.c
-               ${SRC_ROOT}/src/logging.c)
+)
 
 target_include_directories(test_asr_concurrent PRIVATE
                            ${SRC_ROOT}/whisper.cpp/include)
 
 target_link_libraries(test_asr_concurrent
+                      dawn_common
                       whisper
                       pthread
                       m
@@ -145,9 +151,10 @@ add_executable(test_summarizer_quality
                ${SRC_ROOT}/src/config/config_defaults.c
                ${SRC_ROOT}/src/config/config_env.c
                ${SRC_ROOT}/src/tools/toml.c
-               ${SRC_ROOT}/src/logging.c)
+)
 
 target_link_libraries(test_summarizer_quality
+                      dawn_common
                       ${CURL_LIBRARIES}
                       ${JSONC_LIBRARIES}
                       m)

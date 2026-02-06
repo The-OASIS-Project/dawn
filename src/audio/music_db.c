@@ -105,13 +105,13 @@ static const char *SQL_LIST = "SELECT path, title, artist, album, duration_sec "
 static const char *SQL_LIST_ARTISTS = "SELECT DISTINCT artist FROM music_metadata "
                                       "WHERE artist != '' "
                                       "ORDER BY artist "
-                                      "LIMIT ?";
+                                      "LIMIT ? OFFSET ?";
 
 /* List unique albums */
 static const char *SQL_LIST_ALBUMS = "SELECT DISTINCT album FROM music_metadata "
                                      "WHERE album != '' "
                                      "ORDER BY album "
-                                     "LIMIT ?";
+                                     "LIMIT ? OFFSET ?";
 
 /* List artists with stats (album count, track count) */
 static const char *SQL_LIST_ARTISTS_WITH_STATS =
@@ -838,10 +838,12 @@ int music_db_list(music_search_result_t *results, int max_results) {
    return count;
 }
 
-int music_db_list_artists(char (*artists)[AUDIO_METADATA_STRING_MAX], int max_artists) {
+int music_db_list_artists(char (*artists)[AUDIO_METADATA_STRING_MAX], int max_artists, int offset) {
    if (!artists || max_artists <= 0) {
       return -1;
    }
+   if (offset < 0)
+      offset = 0;
 
    pthread_mutex_lock(&g_db_mutex);
 
@@ -859,6 +861,7 @@ int music_db_list_artists(char (*artists)[AUDIO_METADATA_STRING_MAX], int max_ar
    }
 
    sqlite3_bind_int(stmt, 1, max_artists);
+   sqlite3_bind_int(stmt, 2, offset);
 
    int count = 0;
    while (sqlite3_step(stmt) == SQLITE_ROW && count < max_artists) {
@@ -875,10 +878,12 @@ int music_db_list_artists(char (*artists)[AUDIO_METADATA_STRING_MAX], int max_ar
    return count;
 }
 
-int music_db_list_albums(char (*albums)[AUDIO_METADATA_STRING_MAX], int max_albums) {
+int music_db_list_albums(char (*albums)[AUDIO_METADATA_STRING_MAX], int max_albums, int offset) {
    if (!albums || max_albums <= 0) {
       return -1;
    }
+   if (offset < 0)
+      offset = 0;
 
    pthread_mutex_lock(&g_db_mutex);
 
@@ -896,6 +901,7 @@ int music_db_list_albums(char (*albums)[AUDIO_METADATA_STRING_MAX], int max_albu
    }
 
    sqlite3_bind_int(stmt, 1, max_albums);
+   sqlite3_bind_int(stmt, 2, offset);
 
    int count = 0;
    while (sqlite3_step(stmt) == SQLITE_ROW && count < max_albums) {

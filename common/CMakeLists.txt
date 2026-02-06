@@ -37,6 +37,7 @@ endif()
 
 # Core source files (no external dependencies beyond pthreads)
 set(DAWN_COMMON_SOURCES
+    src/logging.c
     src/logging_common.c
     src/audio/ring_buffer.c
     src/utils/string_utils.c

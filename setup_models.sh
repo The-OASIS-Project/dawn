@@ -12,7 +12,8 @@
 # Usage: ./setup_models.sh [options]
 #
 # Options:
-#   --vosk            Include Vosk model (large download ~1.8GB)
+#   --vosk            Include large Vosk model (~1.8GB, higher accuracy)
+#   --vosk-small      Include small Vosk model (~40MB, recommended for satellite)
 #   --whisper-model   Whisper model size: tiny, base, small, medium (default: base)
 #   --help            Show this help message
 #
@@ -29,6 +30,7 @@ NC='\033[0m' # No Color
 # Default options
 WHISPER_MODEL="base"
 INCLUDE_VOSK=false
+VOSK_VARIANT=""
 
 # Project root (where this script lives)
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,7 +38,8 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Model directories
 MODELS_DIR="$PROJECT_ROOT/models"
 WHISPER_DIR="$PROJECT_ROOT/whisper.cpp"
-VOSK_DIR="$PROJECT_ROOT/vosk-model-en-us-0.22"
+VOSK_LARGE_DIR="$PROJECT_ROOT/vosk-model-en-us-0.22"
+VOSK_SMALL_DIR="$PROJECT_ROOT/vosk-model-small-en-us-0.15"
 
 print_header() {
     echo -e "${BLUE}========================================${NC}"
@@ -67,7 +70,8 @@ show_help() {
     echo "Usage: $0 [options]"
     echo ""
     echo "Options:"
-    echo "  --vosk               Include Vosk model download (~1.8GB)"
+    echo "  --vosk-small         Include small Vosk model (~40MB, satellite default)"
+    echo "  --vosk               Include large Vosk model (~1.8GB, higher accuracy)"
     echo "  --whisper-model SIZE Whisper model (default: base)"
     echo "                       Accepts: tiny, base, small, medium"
     echo "                       Quantized: tiny-q5_1, base-q5_1, etc."
@@ -75,9 +79,10 @@ show_help() {
     echo ""
     echo "Examples:"
     echo "  $0                               # Standard setup (Whisper base)"
+    echo "  $0 --vosk-small                  # Add Vosk small (satellite default)"
     echo "  $0 --whisper-model tiny-q5_1     # Quantized tiny (best for Pi 4)"
     echo "  $0 --whisper-model tiny          # Tiny English-only"
-    echo "  $0 --vosk                        # Include legacy Vosk ASR"
+    echo "  $0 --vosk                        # Include large Vosk model"
     echo ""
     echo "Model Sizes (approximate, English-only):"
     echo "  Whisper tiny-q5_1: ~30MB   (fastest, recommended for Pi 4)"
@@ -85,7 +90,8 @@ show_help() {
     echo "  Whisper base:      ~142MB  (recommended for Jetson GPU)"
     echo "  Whisper small:     ~466MB  (better accuracy, slower)"
     echo "  Whisper medium:    ~1.5GB  (best accuracy, slowest)"
-    echo "  Vosk en-us:        ~1.8GB  (optional legacy ASR)"
+    echo "  Vosk small-en-us:  ~40MB   (streaming, recommended for satellite)"
+    echo "  Vosk en-us:        ~1.8GB  (streaming, higher accuracy)"
     echo ""
     echo "Note: TTS (Piper) and VAD (Silero) models are committed to git."
     echo ""
@@ -94,8 +100,14 @@ show_help() {
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case $1 in
+            --vosk-small)
+                INCLUDE_VOSK=true
+                VOSK_VARIANT="small"
+                shift
+                ;;
             --vosk)
                 INCLUDE_VOSK=true
+                VOSK_VARIANT="large"
                 shift
                 ;;
             --whisper-model)
@@ -227,18 +239,35 @@ setup_vosk() {
         return 0
     fi
 
-    print_step "Setting up Vosk ASR (optional)..."
+    local vosk_model_name
+    local vosk_dir
+    local vosk_url
+    local vosk_size
 
-    if [ -d "$VOSK_DIR" ]; then
-        print_success "Vosk model already exists"
+    if [ "$VOSK_VARIANT" = "small" ]; then
+        vosk_model_name="vosk-model-small-en-us-0.15"
+        vosk_dir="$VOSK_SMALL_DIR"
+        vosk_url="https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
+        vosk_size="~40MB"
     else
-        print_step "Downloading Vosk model (~1.8GB, this may take a while)..."
+        vosk_model_name="vosk-model-en-us-0.22"
+        vosk_dir="$VOSK_LARGE_DIR"
+        vosk_url="https://alphacephei.com/vosk/models/vosk-model-en-us-0.22.zip"
+        vosk_size="~1.8GB"
+    fi
 
-        local vosk_url="https://alphacephei.com/vosk/models/vosk-model-en-us-0.22.zip"
-        local vosk_zip="$PROJECT_ROOT/vosk-model-en-us-0.22.zip"
+    print_step "Setting up Vosk ASR ($vosk_model_name, $vosk_size)..."
+
+    if [ -d "$vosk_dir" ]; then
+        print_success "Vosk model already exists: $vosk_model_name"
+    else
+        print_step "Downloading Vosk model ($vosk_size, this may take a while)..."
+
+        local vosk_zip="$PROJECT_ROOT/${vosk_model_name}.zip"
 
         wget -q --show-progress -O "$vosk_zip" "$vosk_url" || {
             print_error "Failed to download Vosk model"
+            rm -f "$vosk_zip"
             return 1
         }
 
@@ -250,16 +279,16 @@ setup_vosk() {
     fi
 
     # Create symlink in models directory
-    local symlink="$MODELS_DIR/vosk-model"
+    local symlink="$MODELS_DIR/$vosk_model_name"
 
     if [ -L "$symlink" ]; then
-        print_success "Symlink already exists: models/vosk-model"
+        print_success "Symlink already exists: models/$vosk_model_name"
     elif [ -e "$symlink" ]; then
         print_error "$symlink exists but is not a symlink. Please remove manually."
         return 1
     else
-        ln -s "../vosk-model-en-us-0.22" "$symlink"
-        print_success "Created symlink: models/vosk-model -> ../vosk-model-en-us-0.22"
+        ln -s "../$vosk_model_name" "$symlink"
+        print_success "Created symlink: models/$vosk_model_name -> ../$vosk_model_name"
     fi
 }
 
@@ -326,7 +355,8 @@ print_summary() {
 
     if [ "$INCLUDE_VOSK" != true ]; then
         echo "Note: Vosk was not installed. To add Vosk support later:"
-        echo "  ./setup_models.sh --vosk"
+        echo "  ./setup_models.sh --vosk-small   # ~40MB, recommended for satellite"
+        echo "  ./setup_models.sh --vosk         # ~1.8GB, higher accuracy"
         echo ""
     fi
 }
@@ -339,7 +369,7 @@ main() {
 
     echo "Configuration:"
     echo "  Whisper model: $WHISPER_MODEL"
-    echo "  Include Vosk:  $INCLUDE_VOSK"
+    echo "  Include Vosk:  $INCLUDE_VOSK${VOSK_VARIANT:+ ($VOSK_VARIANT)}"
     echo ""
 
     check_dependencies

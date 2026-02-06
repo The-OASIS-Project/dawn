@@ -24,6 +24,7 @@
 
 #include "audio_capture.h"
 #include "audio_playback.h"
+#include "logging.h"
 #include "satellite_config.h"
 #include "satellite_state.h"
 #include "voice_processing.h"
@@ -243,7 +244,8 @@ static void on_state_callback(const char *state, void *user_data) {
 static int dap2_main_loop(satellite_ctx_t *ctx,
                           ws_client_t *ws,
                           int use_keyboard,
-                          satellite_config_t *config) {
+                          satellite_config_t *config,
+                          voice_ctx_t *voice_ctx) {
    /* Build identity from config */
    ws_identity_t identity;
    memset(&identity, 0, sizeof(identity));
@@ -286,16 +288,9 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
    printf("\n");
 
    /* Check processing mode - voice mode uses VAD, doesn't need GPIO */
-   if (config->processing.mode == PROCESSING_MODE_VOICE_ACTIVATED) {
+   if (config->processing.mode == PROCESSING_MODE_VOICE_ACTIVATED && voice_ctx) {
       printf("Say '%s' to activate\n", config->wake_word.word);
       printf("Press Ctrl+C to exit\n\n");
-
-      /* Initialize voice processing */
-      voice_ctx_t *voice_ctx = voice_processing_init(config);
-      if (!voice_ctx) {
-         fprintf(stderr, "Failed to initialize voice processing\n");
-         return 1;
-      }
 
       /* Set global for signal handler */
       g_voice_ctx = voice_ctx;
@@ -312,7 +307,6 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
          voice_processing_speak_offline(voice_ctx, ctx);
       }
 
-      voice_processing_cleanup(voice_ctx);
       return result;
    }
 
@@ -721,6 +715,9 @@ int main(int argc, char *argv[]) {
       }
    }
 
+   /* Initialize logging (console mode, bridges DAWN_LOG_* from common library) */
+   init_logging(NULL, LOG_TO_CONSOLE);
+
    /* Initialize config with defaults */
    satellite_config_init_defaults(&config);
 
@@ -849,12 +846,30 @@ int main(int argc, char *argv[]) {
 
    int result = 0;
 
+   /* Load voice models BEFORE connecting to daemon.
+    * Models can take several seconds to load (especially on Pi).
+    * We don't want the satellite appearing "ready" while still loading. */
+   voice_ctx_t *voice_ctx = NULL;
+   if (config.processing.mode == PROCESSING_MODE_VOICE_ACTIVATED) {
+      printf("Loading voice models...\n");
+      voice_ctx = voice_processing_init(&config);
+      if (!voice_ctx) {
+         fprintf(stderr, "Failed to initialize voice processing\n");
+         satellite_cleanup(&ctx);
+         return 1;
+      }
+      g_voice_ctx = voice_ctx;
+      printf("Voice models loaded\n");
+   }
+
 #ifdef ENABLE_DAP2
-   /* Connect to daemon */
+   /* Connect to daemon (models already loaded) */
    ws_client_t *ws = ws_client_create(config.server.host, config.server.port, config.server.ssl,
                                       config.server.ssl_verify);
    if (!ws) {
       fprintf(stderr, "Failed to create WebSocket client\n");
+      if (voice_ctx)
+         voice_processing_cleanup(voice_ctx);
       satellite_cleanup(&ctx);
       return 1;
    }
@@ -863,11 +878,15 @@ int main(int argc, char *argv[]) {
    if (ws_client_connect(ws) != 0) {
       fprintf(stderr, "Failed to connect: %s\n", ws_client_get_error(ws));
       ws_client_destroy(ws);
+      if (voice_ctx)
+         voice_processing_cleanup(voice_ctx);
       satellite_cleanup(&ctx);
       return 1;
    }
 
-   result = dap2_main_loop(&ctx, ws, use_keyboard, &config);
+   result = dap2_main_loop(&ctx, ws, use_keyboard, &config, voice_ctx);
+   if (voice_ctx)
+      voice_processing_cleanup(voice_ctx);
    ws_client_destroy(ws);
 #else
    printf("\n=== DAWN Satellite Ready (DAP Mode) ===\n");
@@ -888,6 +907,7 @@ int main(int argc, char *argv[]) {
 #endif
 
    satellite_cleanup(&ctx);
+   close_logging();
    printf("Goodbye!\n");
 
    return result;

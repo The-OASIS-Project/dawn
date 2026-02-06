@@ -70,7 +70,7 @@
 #include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
-#include "logging_bridge.h"
+/* logging_bridge is now built into init_logging() in common/src/logging.c */
 #include "mosquitto_comms.h"
 #include "tools/music_tool.h"
 #include "tools/tool_registry.h"
@@ -1809,8 +1809,7 @@ int main(int argc, char *argv[]) {
       }
    }
 
-   // Initialize logging bridge for common library
-   logging_bridge_init();
+   // Note: init_logging() automatically bridges DAWN_LOG_* from common library
 
 #ifdef ENABLE_TUI
    // Initialize TUI if enabled

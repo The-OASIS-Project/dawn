@@ -30,8 +30,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define LOG_INFO(fmt, ...) fprintf(stdout, "[NEOPIXEL] " fmt "\n", ##__VA_ARGS__)
-#define LOG_ERROR(fmt, ...) fprintf(stderr, "[NEOPIXEL ERROR] " fmt "\n", ##__VA_ARGS__)
+#include "logging.h"
 
 /* SPI configuration for WS2812 */
 #define SPI_SPEED_HZ 2400000 /* 2.4 MHz for WS2812 timing */

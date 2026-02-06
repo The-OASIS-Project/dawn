@@ -39,8 +39,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define LOG_INFO(fmt, ...) fprintf(stdout, "[STATE] " fmt "\n", ##__VA_ARGS__)
-#define LOG_ERROR(fmt, ...) fprintf(stderr, "[STATE ERROR] " fmt "\n", ##__VA_ARGS__)
+#include "logging.h"
 
 /* State names for logging */
 static const char *state_names[] = {
