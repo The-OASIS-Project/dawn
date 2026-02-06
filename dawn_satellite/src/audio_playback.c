@@ -242,8 +242,12 @@ int audio_playback_play(audio_playback_t *ctx,
 
    free(out_buf);
 
-   /* Drain remaining audio */
-   snd_pcm_drain(handle);
+   /* Drain remaining audio (skip if stopped - drain blocks until buffer empties) */
+   if (stop_flag && *stop_flag) {
+      snd_pcm_drop(handle);
+   } else {
+      snd_pcm_drain(handle);
+   }
 
    LOG_INFO("Playback complete: %zu frames", produced);
    return 0;

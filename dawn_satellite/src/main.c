@@ -860,6 +860,15 @@ int main(int argc, char *argv[]) {
       }
       g_voice_ctx = voice_ctx;
       printf("Voice models loaded\n");
+
+      /* Check if Ctrl+C was pressed during model loading */
+      if (!ctx.running) {
+         printf("\nInterrupted during model loading\n");
+         voice_processing_cleanup(voice_ctx);
+         satellite_cleanup(&ctx);
+         close_logging();
+         return 0;
+      }
    }
 
 #ifdef ENABLE_DAP2
@@ -882,6 +891,17 @@ int main(int argc, char *argv[]) {
          voice_processing_cleanup(voice_ctx);
       satellite_cleanup(&ctx);
       return 1;
+   }
+
+   /* Check if Ctrl+C was pressed during connection */
+   if (!ctx.running) {
+      printf("\nInterrupted during connection\n");
+      ws_client_destroy(ws);
+      if (voice_ctx)
+         voice_processing_cleanup(voice_ctx);
+      satellite_cleanup(&ctx);
+      close_logging();
+      return 0;
    }
 
    result = dap2_main_loop(&ctx, ws, use_keyboard, &config, voice_ctx);

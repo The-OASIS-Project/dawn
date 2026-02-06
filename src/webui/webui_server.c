@@ -2929,22 +2929,20 @@ static int callback_websocket(struct lws *wsi,
                s_client_count++;
                pthread_mutex_unlock(&s_mutex);
 
-               /* Create satellite session and handle registration */
-               conn->session = session_create(SESSION_TYPE_DAP2, -1);
+               /* Delegate to satellite handler for full registration
+                * (session_create_dap2 handles both new sessions and reconnection) */
+               conn->is_satellite = true;
+               handle_satellite_register(conn, payload);
+
+               /* If registration failed, session won't be set */
                if (!conn->session) {
                   LOG_ERROR("WebUI: Failed to create satellite session");
-                  send_error_impl(wsi, "SESSION_LIMIT", "Maximum sessions reached");
                   pthread_mutex_lock(&s_mutex);
                   s_client_count--;
                   pthread_mutex_unlock(&s_mutex);
                   json_object_put(root);
                   return -1;
                }
-               conn->session->client_data = conn;
-               conn->is_satellite = true;
-
-               /* Delegate to satellite handler for full registration */
-               handle_satellite_register(conn, payload);
                json_object_put(root);
                break;
             }

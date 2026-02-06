@@ -727,6 +727,7 @@ voice_state_t voice_processing_get_state(const voice_ctx_t *ctx) {
 void voice_processing_stop(voice_ctx_t *ctx) {
    if (ctx) {
       ctx->running = false;
+      ctx->tts_stop_flag = 1; /* Interrupt any in-progress TTS playback */
    }
 }
 

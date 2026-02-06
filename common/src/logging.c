@@ -86,6 +86,7 @@ void log_message(log_level_t level,
                  const char *func,
                  const char *fmt,
                  ...) {
+   (void)func;  // Available for future use in log format
    // If console is suppressed and no log file, skip logging entirely
    if (g_suppress_console && !log_file) {
       return;
