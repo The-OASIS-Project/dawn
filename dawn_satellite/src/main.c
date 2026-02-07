@@ -39,6 +39,10 @@
 #include "display.h"
 #endif
 
+#ifdef ENABLE_SDL_UI
+#include "sdl_ui.h"
+#endif
+
 #ifdef ENABLE_NEOPIXEL
 #include "neopixel.h"
 #endif
@@ -52,6 +56,9 @@
 /* Global context for signal handler */
 static satellite_ctx_t *g_ctx = NULL;
 static voice_ctx_t *g_voice_ctx = NULL;
+#ifdef ENABLE_SDL_UI
+static sdl_ui_t *g_sdl_ui = NULL;
+#endif
 
 #ifdef ENABLE_NEOPIXEL
 static neopixel_t *g_neopixel = NULL;
@@ -100,6 +107,11 @@ static void signal_handler(int sig) {
    if (g_voice_ctx) {
       voice_processing_stop(g_voice_ctx);
    }
+#ifdef ENABLE_SDL_UI
+   if (g_sdl_ui) {
+      sdl_ui_stop(g_sdl_ui);
+   }
+#endif
 }
 
 /* Print usage */
@@ -295,6 +307,27 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
       /* Set global for signal handler */
       g_voice_ctx = voice_ctx;
 
+#ifdef ENABLE_SDL_UI
+      /* Start SDL2 UI render thread (before voice loop) */
+      sdl_ui_t *ui = NULL;
+      if (config->sdl_ui.enabled) {
+         sdl_ui_config_t ui_config = {
+            .width = config->sdl_ui.width,
+            .height = config->sdl_ui.height,
+            .font_dir = config->sdl_ui.font_dir,
+            .ai_name = config->general.ai_name,
+            .voice_ctx = voice_ctx,
+         };
+         ui = sdl_ui_init(&ui_config);
+         if (ui) {
+            g_sdl_ui = ui;
+            sdl_ui_start(ui);
+         } else {
+            printf("SDL UI init failed, continuing headless\n");
+         }
+      }
+#endif
+
       /* Speak welcome greeting */
       voice_processing_speak_greeting(voice_ctx, ctx);
 
@@ -306,6 +339,14 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
          /* Connection lost - speak offline message */
          voice_processing_speak_offline(voice_ctx, ctx);
       }
+
+#ifdef ENABLE_SDL_UI
+      if (ui) {
+         sdl_ui_stop(ui);
+         sdl_ui_cleanup(ui);
+         g_sdl_ui = NULL;
+      }
+#endif
 
       return result;
    }

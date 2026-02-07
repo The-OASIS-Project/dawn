@@ -107,6 +107,22 @@ enabled = false
 device = "/dev/fb1"
 
 # =============================================================================
+# SDL2 Touchscreen UI (optional, for Pi with 7" display)
+# =============================================================================
+[sdl_ui]
+# Enable SDL2 orb visualization + transcript panel
+# Requires: libsdl2-dev libsdl2-ttf-dev, build with -DENABLE_SDL_UI=ON
+enabled = false
+
+# Display resolution (default: 1024x600 for 7" touchscreen)
+width = 1024
+height = 600
+
+# Path to TTF font files (default: assets/fonts/)
+# Requires: IBMPlexMono-Regular.ttf, SourceSans3-Regular.ttf
+font_dir = "assets/fonts"
+
+# =============================================================================
 # Voice Activity Detection (VAD)
 # =============================================================================
 [vad]

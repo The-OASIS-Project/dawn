@@ -1,0 +1,412 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s). Contributions include any modifications,
+ * enhancements, or additions to the project. These contributions become
+ * part of the project and are adopted by the project author(s).
+ *
+ * Orb Visualization - Core, glow, ring segments, and animations
+ */
+
+#include "ui/ui_orb.h"
+
+#include <SDL2/SDL.h>
+#include <math.h>
+#include <string.h>
+
+/* =============================================================================
+ * Constants
+ * ============================================================================= */
+
+#define PI 3.14159265358979323846
+
+/* Orb core */
+#define ORB_CORE_RADIUS 50
+
+/* Glow layers (concentric circles with decreasing alpha) */
+#define GLOW_LAYERS 4
+static const int glow_offsets[GLOW_LAYERS] = { 10, 25, 45, 70 };
+static const float glow_alphas[GLOW_LAYERS] = { 0.3f, 0.2f, 0.12f, 0.05f };
+
+/* Ring system */
+#define RING_SEGMENTS 64
+#define RING_GAP_DEG 1.0f       /* Gap between segments in degrees */
+#define RING_ANGLE_STEPS 10     /* Points per segment arc */
+#define RING_MAX_WIDTH_LINES 13 /* Max width lines for scaled segments */
+#define RING_INNER_R 100
+#define RING_INNER_W 6
+#define RING_MIDDLE_R 145
+#define RING_MIDDLE_W 4
+#define RING_OUTER_R 178
+#define RING_OUTER_W 5
+
+/* Max points per ring: segments * steps * max_width */
+#define RING_MAX_POINTS (RING_SEGMENTS * RING_ANGLE_STEPS * RING_MAX_WIDTH_LINES)
+
+/* Glow texture dimensions */
+#define GLOW_TEX_SIZE 400
+
+/* Color transition */
+#define COLOR_TRANSITION_MS 300.0
+
+/* =============================================================================
+ * Shared Read-Only Trig Table (computed once, safe to share)
+ * ============================================================================= */
+
+static float ring_cos_table[RING_SEGMENTS * RING_ANGLE_STEPS];
+static float ring_sin_table[RING_SEGMENTS * RING_ANGLE_STEPS];
+static bool trig_table_initialized = false;
+
+static void init_ring_trig_table(void) {
+   if (trig_table_initialized)
+      return;
+
+   float seg_deg = 360.0f / RING_SEGMENTS;
+   float gap = RING_GAP_DEG;
+
+   for (int seg = 0; seg < RING_SEGMENTS; seg++) {
+      float start_deg = seg * seg_deg + gap / 2.0f;
+      float end_deg = (seg + 1) * seg_deg - gap / 2.0f;
+      float start_rad = start_deg * (float)PI / 180.0f;
+      float end_rad = end_deg * (float)PI / 180.0f;
+
+      for (int step = 0; step < RING_ANGLE_STEPS; step++) {
+         float angle = start_rad + (end_rad - start_rad) * step / (float)(RING_ANGLE_STEPS - 1);
+         int idx = seg * RING_ANGLE_STEPS + step;
+         ring_cos_table[idx] = cosf(angle);
+         ring_sin_table[idx] = sinf(angle);
+      }
+   }
+
+   trig_table_initialized = true;
+}
+
+/* =============================================================================
+ * Glow Texture Generation
+ * ============================================================================= */
+
+static SDL_Texture *create_glow_texture(SDL_Renderer *renderer, ui_color_t color) {
+   SDL_Texture *tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888,
+                                        SDL_TEXTUREACCESS_TARGET, GLOW_TEX_SIZE, GLOW_TEX_SIZE);
+   if (!tex)
+      return NULL;
+
+   SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+   SDL_SetRenderTarget(renderer, tex);
+
+   /* Clear to transparent */
+   SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
+   SDL_RenderClear(renderer);
+
+   int cx = GLOW_TEX_SIZE / 2;
+   int cy = GLOW_TEX_SIZE / 2;
+
+   /* Draw glow layers from outermost to innermost */
+   for (int layer = GLOW_LAYERS - 1; layer >= 0; layer--) {
+      int radius = ORB_CORE_RADIUS + glow_offsets[layer];
+      uint8_t alpha = (uint8_t)(glow_alphas[layer] * 255);
+
+      SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, alpha);
+
+      /* Filled circle using horizontal lines */
+      for (int y = -radius; y <= radius; y++) {
+         int dx = (int)sqrtf((float)(radius * radius - y * y));
+         SDL_RenderDrawLine(renderer, cx - dx, cy + y, cx + dx, cy + y);
+      }
+   }
+
+   /* Draw solid core */
+   SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 255);
+   for (int y = -ORB_CORE_RADIUS; y <= ORB_CORE_RADIUS; y++) {
+      int dx = (int)sqrtf((float)(ORB_CORE_RADIUS * ORB_CORE_RADIUS - y * y));
+      SDL_RenderDrawLine(renderer, cx - dx, cy + y, cx + dx, cy + y);
+   }
+
+   SDL_SetRenderTarget(renderer, NULL);
+   return tex;
+}
+
+/* =============================================================================
+ * Ring Segment Drawing (batched)
+ * ============================================================================= */
+
+static void draw_ring(SDL_Renderer *renderer,
+                      int cx,
+                      int cy,
+                      int radius,
+                      int width,
+                      int active_segments,
+                      ui_color_t active_color,
+                      float segment_scale) {
+   SDL_Point active_pts[RING_MAX_POINTS];
+   SDL_Point inactive_pts[RING_MAX_POINTS];
+   int active_count = 0;
+   int inactive_count = 0;
+
+   for (int seg = 0; seg < RING_SEGMENTS; seg++) {
+      bool active = (seg < active_segments);
+
+      int seg_width = width;
+      if (segment_scale != 1.0f && active) {
+         seg_width = (int)(width * segment_scale);
+         if (seg_width < 1)
+            seg_width = 1;
+      }
+
+      SDL_Point *pts = active ? active_pts : inactive_pts;
+      int *count = active ? &active_count : &inactive_count;
+      int half_w = seg_width / 2;
+
+      for (int w = -half_w; w <= half_w; w++) {
+         int r_offset = radius + w;
+         for (int step = 0; step < RING_ANGLE_STEPS; step++) {
+            int idx = seg * RING_ANGLE_STEPS + step;
+            if (*count < RING_MAX_POINTS) {
+               pts[*count].x = cx + (int)(r_offset * ring_cos_table[idx]);
+               pts[*count].y = cy + (int)(r_offset * ring_sin_table[idx]);
+               (*count)++;
+            }
+         }
+      }
+   }
+
+   if (active_count > 0) {
+      SDL_SetRenderDrawColor(renderer, active_color.r, active_color.g, active_color.b, 200);
+      SDL_RenderDrawPoints(renderer, active_pts, active_count);
+   }
+   if (inactive_count > 0) {
+      SDL_SetRenderDrawColor(renderer, COLOR_IDLE_R, COLOR_IDLE_G, COLOR_IDLE_B, 100);
+      SDL_RenderDrawPoints(renderer, inactive_pts, inactive_count);
+   }
+}
+
+/* =============================================================================
+ * Animation Helpers
+ * ============================================================================= */
+
+static float breathing_scale(double time_sec) {
+   /* Breathing: scale 0.95-1.05, 3-second period */
+   return 1.0f + 0.05f * sinf((float)(time_sec * 2.0 * PI / 3.0));
+}
+
+static float thinking_scale(double time_sec) {
+   /* Faster pulse: 1.5-second period */
+   return 1.0f + 0.04f * sinf((float)(time_sec * 2.0 * PI / 1.5));
+}
+
+static float speaking_scale(double time_sec) {
+   /* Subtle pulse: 2-second period */
+   return 1.0f + 0.015f * sinf((float)(time_sec * 2.0 * PI / 2.0));
+}
+
+/* =============================================================================
+ * Public API
+ * ============================================================================= */
+
+void ui_orb_init(ui_orb_ctx_t *ctx, SDL_Renderer *renderer) {
+   if (!ctx || !renderer)
+      return;
+
+   memset(ctx, 0, sizeof(*ctx));
+
+   /* Pre-compute trig lookup table (shared, computed once) */
+   init_ring_trig_table();
+
+   /* Pre-render glow textures for each state color */
+   ctx->glow_colors[0] = UI_COLOR_IDLE;
+   ctx->glow_colors[1] = UI_COLOR_LISTENING;
+   ctx->glow_colors[2] = UI_COLOR_THINKING;
+   ctx->glow_colors[3] = UI_COLOR_SPEAKING;
+   ctx->glow_colors[4] = UI_COLOR_ERROR;
+
+   for (int i = 0; i < NUM_GLOW_TEXTURES; i++) {
+      ctx->glow_textures[i] = create_glow_texture(renderer, ctx->glow_colors[i]);
+   }
+
+   ctx->current_color = UI_COLOR_IDLE;
+   ctx->target_color = UI_COLOR_IDLE;
+   ctx->color_transitioning = false;
+}
+
+void ui_orb_cleanup(ui_orb_ctx_t *ctx) {
+   if (!ctx)
+      return;
+
+   for (int i = 0; i < NUM_GLOW_TEXTURES; i++) {
+      if (ctx->glow_textures[i]) {
+         SDL_DestroyTexture(ctx->glow_textures[i]);
+         ctx->glow_textures[i] = NULL;
+      }
+   }
+}
+
+void ui_orb_render(ui_orb_ctx_t *ctx,
+                   SDL_Renderer *renderer,
+                   int cx,
+                   int cy,
+                   voice_state_t state,
+                   float vad_prob,
+                   double time_sec) {
+   if (!ctx || !renderer)
+      return;
+
+   /* Update color target */
+   ui_color_t state_color = ui_color_for_state(state);
+   if (state_color.r != ctx->target_color.r || state_color.g != ctx->target_color.g ||
+       state_color.b != ctx->target_color.b) {
+      ctx->target_color = state_color;
+      ctx->color_transition_start = time_sec;
+      ctx->color_transitioning = true;
+   }
+
+   /* Interpolate color during transition */
+   if (ctx->color_transitioning) {
+      float t = (float)((time_sec - ctx->color_transition_start) * 1000.0 / COLOR_TRANSITION_MS);
+      if (t >= 1.0f) {
+         ctx->current_color = ctx->target_color;
+         ctx->color_transitioning = false;
+      } else {
+         ctx->current_color = ui_color_lerp(ctx->current_color, ctx->target_color, t);
+      }
+   }
+
+   /* Calculate animation scale */
+   float scale = 1.0f;
+   float glow_alpha_mult = 1.0f;
+
+   switch (state) {
+      case VOICE_STATE_SILENCE:
+         scale = breathing_scale(time_sec);
+         glow_alpha_mult = 0.2f + 0.15f * sinf((float)(time_sec * 2.0 * PI / 3.0));
+         break;
+      case VOICE_STATE_WAKEWORD_LISTEN:
+      case VOICE_STATE_COMMAND_RECORDING:
+         /* VAD-driven glow */
+         scale = 1.0f + vad_prob * 0.03f;
+         glow_alpha_mult = 0.3f + vad_prob * 0.5f;
+         break;
+      case VOICE_STATE_PROCESSING:
+      case VOICE_STATE_WAITING:
+         scale = thinking_scale(time_sec);
+         glow_alpha_mult = 0.4f + 0.3f * (0.5f + 0.5f * sinf((float)(time_sec * 2.0 * PI / 1.5)));
+         break;
+      case VOICE_STATE_SPEAKING:
+         scale = speaking_scale(time_sec);
+         glow_alpha_mult = 0.5f;
+         break;
+      default:
+         break;
+   }
+
+   /* Find closest pre-rendered glow texture for current state */
+   int glow_idx = 0;
+   switch (state) {
+      case VOICE_STATE_SILENCE:
+         glow_idx = 0;
+         break;
+      case VOICE_STATE_WAKEWORD_LISTEN:
+      case VOICE_STATE_COMMAND_RECORDING:
+         glow_idx = 1;
+         break;
+      case VOICE_STATE_PROCESSING:
+      case VOICE_STATE_WAITING:
+         glow_idx = 2;
+         break;
+      case VOICE_STATE_SPEAKING:
+         glow_idx = 3;
+         break;
+      default:
+         glow_idx = 0;
+         break;
+   }
+
+   /* Render glow texture (scaled + alpha modulated) */
+   if (ctx->glow_textures[glow_idx]) {
+      int tex_size = (int)(GLOW_TEX_SIZE * scale);
+      SDL_Rect dst = { cx - tex_size / 2, cy - tex_size / 2, tex_size, tex_size };
+      int alpha_i = (int)(glow_alpha_mult * 255);
+      if (alpha_i > 255)
+         alpha_i = 255;
+      uint8_t alpha = (uint8_t)alpha_i;
+      SDL_SetTextureAlphaMod(ctx->glow_textures[glow_idx], alpha);
+      SDL_RenderCopy(renderer, ctx->glow_textures[glow_idx], NULL, &dst);
+   }
+
+   /* Render ring segments */
+
+   /* Outer ring: all segments lit in state color */
+   draw_ring(renderer, cx, cy, RING_OUTER_R, RING_OUTER_W, RING_SEGMENTS, ctx->current_color, 1.0f);
+
+   /* Middle ring: activity level (fill segments based on state) */
+   int middle_active = 0;
+   switch (state) {
+      case VOICE_STATE_SILENCE:
+         middle_active = 8; /* Minimal activity */
+         break;
+      case VOICE_STATE_WAKEWORD_LISTEN:
+      case VOICE_STATE_COMMAND_RECORDING:
+         middle_active = 16 + (int)(vad_prob * 48); /* VAD-proportional */
+         break;
+      case VOICE_STATE_PROCESSING:
+      case VOICE_STATE_WAITING: {
+         /* Rotating fill for processing animation */
+         float cycle = (float)fmod(time_sec * 1.5, 1.0);
+         middle_active = 16 + (int)(cycle * 48);
+         break;
+      }
+      case VOICE_STATE_SPEAKING:
+         middle_active = RING_SEGMENTS; /* Full */
+         break;
+      default:
+         break;
+   }
+   if (middle_active > RING_SEGMENTS)
+      middle_active = RING_SEGMENTS;
+   draw_ring(renderer, cx, cy, RING_MIDDLE_R, RING_MIDDLE_W, middle_active, ctx->current_color,
+             1.0f);
+
+   /* Inner ring: VAD waveform visualization */
+   int inner_active = 0;
+   float inner_scale = 1.0f;
+   switch (state) {
+      case VOICE_STATE_SILENCE: {
+         /* Gentle idle animation */
+         inner_active = RING_SEGMENTS;
+         inner_scale = 0.5f + 0.2f * sinf((float)(time_sec * 2.0 * PI / 4.0));
+         break;
+      }
+      case VOICE_STATE_WAKEWORD_LISTEN:
+      case VOICE_STATE_COMMAND_RECORDING:
+         inner_active = RING_SEGMENTS;
+         inner_scale = 0.5f + vad_prob * 1.5f; /* VAD modulates width */
+         break;
+      case VOICE_STATE_PROCESSING:
+      case VOICE_STATE_WAITING:
+         inner_active = RING_SEGMENTS;
+         inner_scale = 0.7f;
+         break;
+      case VOICE_STATE_SPEAKING:
+         inner_active = RING_SEGMENTS;
+         inner_scale = 1.0f + 0.15f * sinf((float)(time_sec * 2.0 * PI / 0.8));
+         break;
+      default:
+         inner_active = RING_SEGMENTS;
+         inner_scale = 0.5f;
+         break;
+   }
+   draw_ring(renderer, cx, cy, RING_INNER_R, RING_INNER_W, inner_active, ctx->current_color,
+             inner_scale);
+}

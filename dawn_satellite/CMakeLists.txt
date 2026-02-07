@@ -106,6 +106,25 @@ else()
     message(STATUS "NeoPixel support: DISABLED")
 endif()
 
+# Optional: SDL2 touchscreen UI (orb visualization + transcript)
+# Requires: libsdl2-dev libsdl2-ttf-dev
+# Target: 7" touchscreen (1024x600) on Pi OS Lite with KMSDRM backend
+option(ENABLE_SDL_UI "Enable SDL2 touchscreen UI" OFF)
+if(ENABLE_SDL_UI)
+    pkg_check_modules(SDL2 sdl2)
+    pkg_check_modules(SDL2_TTF SDL2_ttf)
+    if(SDL2_FOUND AND SDL2_TTF_FOUND)
+        include_directories(${SDL2_INCLUDE_DIRS} ${SDL2_TTF_INCLUDE_DIRS})
+        add_definitions(-DENABLE_SDL_UI)
+        message(STATUS "SDL2 UI: ENABLED")
+    else()
+        message(WARNING "SDL2 or SDL2_ttf not found - SDL UI disabled")
+        set(ENABLE_SDL_UI OFF)
+    endif()
+else()
+    message(STATUS "SDL2 UI: DISABLED (use -DENABLE_SDL_UI=ON to enable)")
+endif()
+
 # Source files - common
 set(SATELLITE_SOURCES
     src/main.c
@@ -136,6 +155,16 @@ endif()
 
 if(ENABLE_NEOPIXEL)
     list(APPEND SATELLITE_SOURCES src/neopixel.c)
+endif()
+
+if(ENABLE_SDL_UI)
+    list(APPEND SATELLITE_SOURCES
+        src/ui/sdl_ui.c
+        src/ui/ui_orb.c
+        src/ui/ui_transcript.c
+    )
+    # Add src/ to include path for ui/ headers
+    include_directories(src)
 endif()
 
 # Include directories
@@ -273,6 +302,11 @@ if(ENABLE_DAP2)
     target_link_libraries(dawn_satellite ${LWS_LIBRARIES} ${JSONC_LIBRARIES})
 endif()
 
+if(ENABLE_SDL_UI)
+    target_link_libraries(dawn_satellite ${SDL2_LIBRARIES} ${SDL2_TTF_LIBRARIES})
+    target_compile_definitions(dawn_satellite PRIVATE ENABLE_SDL_UI)
+endif()
+
 # Installation
 install(TARGETS dawn_satellite DESTINATION bin)
 install(FILES config/satellite.toml DESTINATION etc/dawn)
@@ -286,4 +320,5 @@ message(STATUS "VAD (Silero): ${ENABLE_VAD}")
 message(STATUS "ASR (Whisper): ${ENABLE_WHISPER_ASR}")
 message(STATUS "ASR (Vosk): ${ENABLE_VOSK_ASR}")
 message(STATUS "TTS (Piper): ${ENABLE_TTS}")
+message(STATUS "SDL2 UI: ${ENABLE_SDL_UI}")
 message(STATUS "=====================================")

@@ -23,6 +23,7 @@
 #define VOICE_PROCESSING_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* Forward declarations - matching actual struct names */
@@ -112,6 +113,40 @@ const char *voice_state_name(voice_state_t state);
  * @param ctx Voice processing context
  */
 void voice_processing_stop(voice_ctx_t *ctx);
+
+/**
+ * @brief Get current VAD speech probability
+ *
+ * Returns the most recent speech probability from VAD processing.
+ * Safe to call from any thread (volatile float, atomic on ARM).
+ *
+ * @param ctx Voice processing context
+ * @return Speech probability 0.0-1.0, or 0.0 if ctx is NULL
+ */
+float voice_processing_get_vad_probability(const voice_ctx_t *ctx);
+
+/**
+ * @brief Copy current response text to caller buffer
+ *
+ * Thread-safe: acquires response_mutex internally.
+ *
+ * @param ctx Voice processing context
+ * @param buf Destination buffer
+ * @param buf_size Size of destination buffer
+ * @return Number of bytes copied (excluding null terminator)
+ */
+size_t voice_processing_get_response_text(voice_ctx_t *ctx, char *buf, size_t buf_size);
+
+/**
+ * @brief Check if the response is complete
+ *
+ * Thread-safe atomic read. Returns true when the voice processing loop
+ * has finished receiving a complete response from the server.
+ *
+ * @param ctx Voice processing context
+ * @return true if response is complete
+ */
+bool voice_processing_is_response_complete(voice_ctx_t *ctx);
 
 /**
  * @brief Speak a time-of-day greeting via TTS

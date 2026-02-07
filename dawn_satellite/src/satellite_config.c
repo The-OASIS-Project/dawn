@@ -214,6 +214,12 @@ void satellite_config_init_defaults(satellite_config_t *config) {
    config->display.enabled = false;
    safe_strcpy(config->display.device, "/dev/fb1", CONFIG_PATH_SIZE);
 
+   /* SDL2 UI defaults (disabled) */
+   config->sdl_ui.enabled = false;
+   config->sdl_ui.width = 1024;
+   config->sdl_ui.height = 600;
+   safe_strcpy(config->sdl_ui.font_dir, "assets/fonts", CONFIG_PATH_SIZE);
+
    /* Logging defaults */
    safe_strcpy(config->logging.level, "info", sizeof(config->logging.level));
    config->logging.use_syslog = false;
@@ -398,6 +404,20 @@ int satellite_config_load(satellite_config_t *config, const char *path) {
       const char *s = toml_string_or(display, "device", NULL);
       if (s) {
          safe_strcpy(config->display.device, s, CONFIG_PATH_SIZE);
+         free((void *)s);
+      }
+   }
+
+   /* Parse [sdl_ui] section */
+   toml_table_t *sdl_ui = toml_table_in(root, "sdl_ui");
+   if (sdl_ui) {
+      config->sdl_ui.enabled = toml_bool_or(sdl_ui, "enabled", config->sdl_ui.enabled);
+      config->sdl_ui.width = (int)toml_int_or(sdl_ui, "width", config->sdl_ui.width);
+      config->sdl_ui.height = (int)toml_int_or(sdl_ui, "height", config->sdl_ui.height);
+
+      const char *s = toml_string_or(sdl_ui, "font_dir", NULL);
+      if (s) {
+         safe_strcpy(config->sdl_ui.font_dir, s, CONFIG_PATH_SIZE);
          free((void *)s);
       }
    }
@@ -733,6 +753,12 @@ void satellite_config_print(const satellite_config_t *config) {
 
    printf("\n[display]\n");
    printf("  enabled = %s\n", config->display.enabled ? "true" : "false");
+
+   printf("\n[sdl_ui]\n");
+   printf("  enabled = %s\n", config->sdl_ui.enabled ? "true" : "false");
+   printf("  width = %d\n", config->sdl_ui.width);
+   printf("  height = %d\n", config->sdl_ui.height);
+   printf("  font_dir = %s\n", config->sdl_ui.font_dir);
 
    printf("\n===============================\n\n");
 }

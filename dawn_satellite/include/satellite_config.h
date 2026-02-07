@@ -148,11 +148,19 @@ typedef struct satellite_config {
       uint8_t brightness;
    } neopixel;
 
-   /* Display configuration */
+   /* Display configuration (legacy SPI framebuffer) */
    struct {
       bool enabled;
       char device[CONFIG_PATH_SIZE];
    } display;
+
+   /* SDL2 touchscreen UI */
+   struct {
+      bool enabled;
+      int width;
+      int height;
+      char font_dir[CONFIG_PATH_SIZE];
+   } sdl_ui;
 
    /* Logging configuration */
    struct {

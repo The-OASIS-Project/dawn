@@ -113,8 +113,8 @@ sudo apt install -y \
     libwebsockets-dev \
     libjson-c-dev
 
-# Optional: SDL2 dependencies (for future touchscreen UI)
-# sudo apt install -y libsdl2-dev libsdl2-ttf-dev libsdl2-image-dev libdrm-dev
+# Optional: SDL2 dependencies (for touchscreen UI - orb + transcript)
+sudo apt install -y libsdl2-dev libsdl2-ttf-dev libdrm-dev
 
 # Optional: GPIO button support (Tier 2 style, not needed for Tier 1)
 # sudo apt install -y libgpiod-dev
@@ -291,6 +291,7 @@ This builds with the default configuration: **Vosk ASR + Whisper ASR** (both eng
 | `-DENABLE_VOICE=ON` | ON | Local voice processing (VAD + ASR + TTS) |
 | `-DENABLE_VOSK_ASR=ON` | ON | Vosk ASR engine (streaming, near-instant) |
 | `-DENABLE_DISPLAY=OFF` | OFF | SPI display support via framebuffer |
+| `-DENABLE_SDL_UI=OFF` | OFF | SDL2 touchscreen UI (orb + transcript) |
 | `-DENABLE_NEOPIXEL=ON` | ON | NeoPixel/WS2812 LED support via SPI |
 | `-DCMAKE_BUILD_TYPE=Release` | Release | Optimization level |
 
@@ -304,6 +305,11 @@ cmake -DENABLE_VOICE=OFF -DENABLE_VOSK_ASR=ON ..
 Example with voice processing disabled (text-only mode):
 ```bash
 cmake -DENABLE_VOICE=OFF -DENABLE_VOSK_ASR=OFF ..
+```
+
+Example with SDL2 touchscreen UI:
+```bash
+cmake -DENABLE_SDL_UI=ON ..
 ```
 
 Example headless with no LEDs:
@@ -461,6 +467,14 @@ model_path = "models/en_GB-alba-medium.onnx"
 config_path = "models/en_GB-alba-medium.onnx.json"
 espeak_data = "/usr/share/espeak-ng-data"
 length_scale = 0.85          # Speech speed (1.0 = normal, lower = faster)
+```
+
+#### [sdl_ui]
+```toml
+enabled = false              # Enable SDL2 orb + transcript UI
+width = 1024                 # Display width (default: 1024)
+height = 600                 # Display height (default: 600)
+font_dir = "assets/fonts"    # Path to TTF font files
 ```
 
 #### [processing]
@@ -833,15 +847,18 @@ Supported formats: JPEG, PNG (will be scaled to display resolution).
 
 ### Theme Colors
 
-The UI uses the same color palette as the DAWN WebUI. To customize, edit `src/ui/colors.h`:
+The UI uses the same color palette as the DAWN WebUI. To customize, edit `src/ui/ui_colors.h`:
 
 ```c
-// Accent color (default: cyan)
-static const dawn_color_t COLOR_ACCENT = {0x2D, 0xD4, 0xBF, 0xFF};  // #2dd4bf
+/* State colors */
+#define COLOR_SPEAKING_R 0x2D  /* Accent/cyan #2dd4bf */
+#define COLOR_SPEAKING_G 0xD4
+#define COLOR_SPEAKING_B 0xBF
 
-// Alternative themes available:
-// Purple: {0xA8, 0x55, 0xF7, 0xFF}  // #a855f7
-// Green:  {0x7F, 0xFF, 0x7F, 0xFF}  // #7fff7f (terminal)
+/* Alternative accent themes:
+ * Purple: 0xA8, 0x55, 0xF7   #a855f7
+ * Green:  0x7F, 0xFF, 0x7F   #7fff7f (terminal)
+ */
 ```
 
 ## License

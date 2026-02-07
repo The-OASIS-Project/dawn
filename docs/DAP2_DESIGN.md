@@ -1,7 +1,7 @@
 # Dawn Audio Protocol 2.0 (DAP 2) Design Document
 
-**Status**: Implementation In Progress (Phase 0-2 Complete)
-**Version**: 0.3
+**Status**: Implementation In Progress (Phase 0-3 Complete, Phase 3.5 Planning)
+**Version**: 0.4
 **Date**: February 2026
 
 ## Executive Summary
@@ -453,10 +453,13 @@ Tier 1 satellites use WebSocket with JSON messages, extending the existing WebUI
 | `satellite_register` | S→D | Initial registration with capabilities |
 | `satellite_register_ack` | D→S | Registration confirmation |
 | `satellite_query` | S→D | User's transcribed command |
-| `satellite_response` | D→S | Complete LLM response (non-streaming) |
-| `satellite_response_stream` | D→S | Partial LLM response (streaming) |
-| `satellite_response_end` | D→S | End of streamed response |
-| `satellite_status` | Both | Health check, metrics exchange |
+| `satellite_ping` | S→D | Keepalive |
+| `satellite_pong` | D→S | Keepalive response |
+| `stream_start` | D→S | Begin streaming LLM response |
+| `stream_delta` | D→S | Partial LLM response text |
+| `stream_end` | D→S | End of streamed response |
+| `state` | D→S | State update (thinking, idle) |
+| `error` | D→S | Error notification |
 
 **Query Message**:
 
@@ -472,10 +475,10 @@ Tier 1 satellites use WebSocket with JSON messages, extending the existing WebUI
 **Streaming Response**:
 
 ```json
-{"type": "satellite_response_stream", "payload": {"delta": "I'll turn "}}
-{"type": "satellite_response_stream", "payload": {"delta": "on the lights "}}
-{"type": "satellite_response_stream", "payload": {"delta": "for you."}}
-{"type": "satellite_response_end", "payload": {}}
+{"type": "stream_start", "payload": {"stream_id": 1}}
+{"type": "stream_delta", "payload": {"stream_id": 1, "text": "I'll turn on the lights "}}
+{"type": "stream_delta", "payload": {"stream_id": 1, "text": "for you."}}
+{"type": "stream_end", "payload": {"stream_id": 1, "reason": "complete"}}
 ```
 
 **Example Flow (Tier 1)**:
@@ -497,17 +500,21 @@ Satellite                                    Daemon
     │                                           │
     │              [Daemon: LLM processing]     │
     │                                           │
-    │<─── satellite_response_stream ───────────│
-    │     {"delta": "I'll turn"}                │
+    │<─── stream_start ─────────────────────────│
+    │     {"stream_id": 1}                      │
     │                                           │
-    │  [Satellite: TTS "I'll turn"]             │
+    │<─── stream_delta ─────────────────────────│
+    │     {"text": "I'll turn on the lights. "} │
     │                                           │
-    │<─── satellite_response_stream ───────────│
-    │     {"delta": " on the lights for you."}  │
+    │  [Satellite: TTS sentence 1]              │
     │                                           │
-    │  [Satellite: TTS " on the lights..."]     │
+    │<─── stream_delta ─────────────────────────│
+    │     {"text": "They should be on now."}    │
     │                                           │
-    │<─── satellite_response_end ──────────────│
+    │  [Satellite: TTS sentence 2]              │
+    │                                           │
+    │<─── stream_end ───────────────────────────│
+    │     {"reason": "complete"}                │
     │                                           │
 ```
 
@@ -579,24 +586,42 @@ Both the DAWN daemon and satellites share common code via a `common/` directory.
 dawn/
 ├── common/                        # SHARED CODE (daemon + satellites)
 │   ├── include/
+│   │   ├── asr/
+│   │   │   ├── asr_engine.h       # Unified ASR abstraction
+│   │   │   ├── asr_vosk.h         # Vosk streaming backend
+│   │   │   ├── asr_whisper.h      # Whisper batch backend
+│   │   │   ├── vad_silero.h       # Silero VAD
+│   │   │   └── vosk_api.h         # Vosk C API (third-party)
 │   │   ├── audio/
-│   │   │   └── ring_buffer.h
+│   │   │   └── ring_buffer.h      # Thread-safe ring buffer
+│   │   ├── tts/
+│   │   │   ├── tts_piper.h        # Piper TTS
+│   │   │   └── tts_preprocessing.h
 │   │   ├── utils/
-│   │   │   ├── sentence_buffer.h
+│   │   │   ├── sentence_buffer.h  # Sentence boundary detection
 │   │   │   └── string_utils.h
-│   │   └── logging_common.h       # Callback-based logging
+│   │   ├── logging.h              # Shared logging (daemon + satellite)
+│   │   └── logging_common.h       # Callback-based logging for common lib
 │   ├── src/
+│   │   ├── asr/
+│   │   │   ├── asr_engine.c       # Engine dispatch (Whisper/Vosk)
+│   │   │   ├── asr_vosk.c         # Vosk streaming
+│   │   │   ├── asr_whisper.c      # Whisper batch
+│   │   │   └── vad_silero.c       # Silero ONNX VAD
 │   │   ├── audio/
 │   │   │   └── ring_buffer.c
+│   │   ├── tts/
+│   │   │   ├── tts_piper.cpp
+│   │   │   └── tts_preprocessing.cpp
 │   │   ├── utils/
 │   │   │   ├── sentence_buffer.c
 │   │   │   └── string_utils.c
+│   │   ├── logging.c              # Logging impl + bridge callback
 │   │   └── logging_common.c
-│   └── CMakeLists.txt             # Builds libdawn_common.a
+│   └── CMakeLists.txt             # Builds libdawn_common.a + optional libs
 │
 ├── src/                           # DAEMON-SPECIFIC CODE
 │   ├── dawn.c                     # Main daemon entry point
-│   ├── logging_bridge.c           # Bridges common/ logging to daemon
 │   ├── llm/                       # LLM integration (daemon only)
 │   ├── webui/
 │   │   ├── webui_server.c         # Extended for satellite support
@@ -607,40 +632,28 @@ dawn/
 │
 ├── dawn_satellite/                # TIER 1 SATELLITE (Raspberry Pi)
 │   ├── src/
-│   │   ├── main.c                 # Entry point + state machine
-│   │   ├── ws_client.c            # libwebsockets WebSocket client
-│   │   ├── audio_capture.c        # ALSA capture
-│   │   ├── audio_playback.c       # ALSA playback
+│   │   ├── main.c                 # Entry point, model loading, startup
+│   │   ├── voice_processing.c     # Voice pipeline (~1100 lines)
+│   │   ├── ws_client.c            # libwebsockets client + background thread
+│   │   ├── audio_capture.c        # ALSA capture with ring buffer
+│   │   ├── audio_playback.c       # ALSA playback with resampling
+│   │   ├── satellite_config.c     # TOML config + identity persistence
 │   │   ├── satellite_state.c      # State machine logic
-│   │   ├── satellite_config.c     # TOML configuration loader
+│   │   ├── dap_client.c           # DAP (Tier 2) TCP client
+│   │   ├── display.c              # Framebuffer display (optional)
+│   │   ├── gpio_control.c         # GPIO input (optional)
+│   │   ├── neopixel.c             # NeoPixel LEDs (optional)
 │   │   └── toml.c                 # tomlc99 parser
-│   ├── include/
-│   │   ├── ws_client.h
-│   │   ├── audio_capture.h
-│   │   ├── audio_playback.h
-│   │   ├── satellite_state.h
-│   │   ├── satellite_config.h
-│   │   └── toml.h
+│   ├── include/                   # Headers for all above
 │   ├── config/
 │   │   └── satellite.toml         # Default configuration
-│   └── CMakeLists.txt             # Links libdawn_common.a
-│
-├── satellite_tier2/               # TIER 2 SATELLITE (ESP32-S3, Phase 4)
-│   ├── main/
-│   │   ├── satellite_main.c
-│   │   ├── dap2_client.c          # Custom binary protocol
-│   │   ├── adpcm_codec.c          # ADPCM encode/decode
-│   │   ├── i2s_audio.c            # I2S capture/playback
-│   │   ├── button_handler.c       # Push-to-talk button
-│   │   └── neopixel.c             # LED state indicators
-│   ├── components/
-│   │   └── dap2_common/           # Subset of common code (C only)
-│   └── CMakeLists.txt             # ESP-IDF build
+│   └── CMakeLists.txt             # Links common libs
 │
 ├── models/                        # Shared models
 │   ├── silero_vad_16k_op15.onnx
-│   ├── ggml-tiny.en.bin
-│   └── en_GB-alba-medium.onnx
+│   ├── ggml-tiny.en.bin           # Whisper (optional)
+│   ├── vosk-model-small-en-us/    # Vosk (default)
+│   └── en_GB-alba-medium.onnx*    # Piper TTS voice
 │
 └── CMakeLists.txt                 # Top-level build
 ```
@@ -651,50 +664,42 @@ dawn/
 |-----------|----------|--------|
 | **Ring Buffer** | `common/` | Identical implementation |
 | **VAD (Silero)** | `common/` | Identical implementation |
-| **ASR (Whisper)** | `common/` | Identical, just different model sizes |
+| **ASR Engine** | `common/` | Unified dispatch (Whisper/Vosk) |
+| **ASR Whisper** | `common/` | Identical, just different model sizes |
+| **ASR Vosk** | `common/` | Streaming backend |
 | **TTS (Piper)** | `common/` | Identical implementation |
 | **Sentence Buffer** | `common/` | Identical implementation |
-| **Logging** | `common/` | Callback-based abstraction |
+| **Logging** | `common/` | Shared logging with bridge callback |
 | **Audio Capture** | `specific/` | ALSA (daemon/RPi) vs I2S (ESP32) |
 | **Audio Playback** | `specific/` | Platform-specific |
+| **Voice Processing** | `satellite only` | VAD + wake word + ASR + TTS loop |
 | **LLM Interface** | `daemon only` | Satellites don't call LLM |
 | **WebSocket Server** | `daemon only` | Only daemon accepts connections |
 | **WebSocket Client** | `satellite only` | Only satellites connect out |
 
 ### Build Configuration
 
+The common library builds as multiple static libraries with optional components:
+
 ```cmake
-# common/CMakeLists.txt
-add_library(dawn_common STATIC
-    src/audio/ring_buffer.c
-    src/asr/vad_silero.c
-    src/asr/asr_whisper.c
-    src/asr/chunking_manager.c
-    src/tts/tts_interface.cpp
-    src/tts/text_to_speech.cpp
-    src/tts/piper.cpp
-    src/tts/sentence_buffer.c
-    src/logging_common.c
-)
+# common/CMakeLists.txt - builds multiple libraries
+dawn_common           # Core: ring_buffer, sentence_buffer, string_utils, logging
+dawn_common_vad       # Optional: Silero VAD (requires ONNX Runtime)
+dawn_common_asr       # Optional: Whisper ASR (requires whisper.cpp)
+dawn_common_asr_vosk  # Optional: Vosk ASR (requires libvosk)
+dawn_common_asr_engine # Optional: Unified ASR dispatch
+dawn_common_tts       # Optional: Piper TTS (requires ONNX Runtime, piper-phonemize)
+```
 
-target_include_directories(dawn_common PUBLIC include)
+Satellite CMake options control which components are built:
 
-# satellite/tier1/CMakeLists.txt
-add_executable(dawn_satellite
-    src/satellite_main.c
-    src/websocket_client.c
-    src/audio_capture.c
-    src/audio_playback.c
-)
-
-target_link_libraries(dawn_satellite
-    dawn_common          # Shared code
-    whisper              # Whisper.cpp
-    onnxruntime          # ONNX for VAD + TTS
-    websockets           # libwebsockets
-    asound               # ALSA
-    pthread
-)
+```cmake
+# dawn_satellite/CMakeLists.txt
+option(ENABLE_VOICE       "Enable voice processing"     ON)
+option(ENABLE_VAD         "Enable Silero VAD"            ON)
+option(ENABLE_VOSK_ASR    "Enable Vosk streaming ASR"    ON)   # Default for satellite
+option(ENABLE_WHISPER_ASR "Enable Whisper batch ASR"     OFF)  # Optional
+option(ENABLE_TTS         "Enable Piper TTS"             ON)
 ```
 
 ---
@@ -819,21 +824,24 @@ This phase addresses the architecture reviewer's critical finding: existing code
 
 ### Phase 2: Tier 1 Satellite Binary
 
-**Status**: ✅ **IMPLEMENTED** (WebSocket client and config system complete)
+**Status**: ✅ **COMPLETE**
 
 **Goal**: Full satellite with local ASR/TTS that feels identical to talking to the daemon
 
 1. **Create `dawn_satellite/` directory** ✅
-2. **Implement satellite state machine** (mirrors daemon):
+2. **Implement satellite state machine** (mirrors daemon) ✅:
    ```
    SILENCE → WAKEWORD_LISTEN → COMMAND_RECORDING → PROCESSING → SPEAKING
    ```
 3. **Implement WebSocket client** (libwebsockets) ✅
-4. **Implement wake word detection** (same as daemon: VAD + Whisper) - *pending integration*
-5. **Implement local TTS playback** - *pending integration*
-6. **Implement offline fallback**:
+4. **Implement wake word detection** (VAD + ASR transcript check) ✅
+5. **Implement local ASR** (Vosk streaming default, Whisper optional) ✅
+6. **Implement local TTS playback** (Piper with sentence-level streaming) ✅
+7. **Implement offline fallback** ✅:
    - On network error: TTS "I can't reach the server right now"
-7. **Configuration file support** (`satellite.toml`) ✅:
+8. **Time-of-day greeting** on startup ✅
+9. **Clean Ctrl+C shutdown** across all states ✅
+10. **Configuration file support** (`satellite.toml`) ✅:
    ```toml
    [identity]
    uuid = ""  # Auto-generated if empty
@@ -879,37 +887,41 @@ This phase addresses the architecture reviewer's critical finding: existing code
 
 ### Phase 3: Streaming Responses
 
+**Status**: ✅ **COMPLETE**
+
 **Goal**: Stream LLM responses sentence-by-sentence for lower perceived latency
 
-1. **Implement sentence buffering** on satellite:
-   - Buffer incoming `satellite_response_stream` deltas
-   - TTS each complete sentence immediately
-   - Continue receiving while speaking
+1. **Sentence buffering on satellite** ✅:
+   - `stream_delta` messages fed to sentence buffer
+   - `on_sentence_complete` callback fires TTS per sentence
+   - TTS plays while more deltas still arriving
 
-2. **Verify streaming works end-to-end**:
+2. **Streaming works end-to-end** ✅:
    - First audio plays while LLM still generating
-   - No gaps between sentences
+   - 150ms pause between sentences for natural rhythm
 
-3. **Implement metrics collection**:
-   - Track wake_word_latency, asr_latency, tts_latency, network_rtt
-   - Report via `satellite_status` messages
+3. **Unified logging** ✅:
+   - `logging.h`/`logging.c` shared between daemon and satellite
+   - Identical format (timestamps, colors, file:line)
 
 **Deliverables**:
-- Streaming protocol working end-to-end
-- Latency measurements documented
-- Metrics visible in daemon logs
+- Streaming protocol working end-to-end ✅
+- Sentence-level TTS during streaming ✅
+- Unified logging ✅
 
-**Exit Criteria**: First audio plays <1.5s after query (p95)
+**Exit Criteria**: First audio plays during LLM generation ✅
 
 ---
 
 ### Phase 3.5: Touchscreen UI (SDL2)
 
+**Status**: 📋 **PLANNING**
+
 **Goal**: Premium touchscreen interface for Tier 1 satellites with attached displays
 
 **Platform**: Pi OS Lite with SDL2 KMSDRM backend (no X11, direct GPU rendering)
 
-**Display Support**: 3.5" to 7" TFT touchscreens (primary target: 7" 1024x600)
+**Display Support**: 7" TFT touchscreen (primary target: 1024x600)
 
 #### Core Components
 
@@ -952,9 +964,8 @@ This phase addresses the architecture reviewer's critical finding: existing code
 | Swipe left/right | Navigate conversation history |
 | Tap anywhere (screensaver) | Wake display |
 
-#### Layout Recommendations
+#### Layout
 
-**3.5" (480x320)**: Portrait, 160x160 orb, 4 quick actions, compact transcript
 **7" (1024x600)**: Landscape, side-by-side (320px orb panel + 664px transcript), full visualization
 
 #### Memory Budget (Pi Zero 2 W)
@@ -1312,3 +1323,4 @@ name = "Guest Room"
 - v0.1 (Nov 2025): Initial draft
 - v0.2 (Feb 2026): Revised to use WebSocket for Tier 1, extend existing session manager
 - v0.3 (Feb 2026): Updated to reflect implementation (Phase 0-2 complete), clarified Tier 1 is VAD-only (no button/NeoPixels), Tier 2 retains button and NeoPixel support
+- v0.4 (Feb 2026): Phase 0-3 complete. Updated protocol messages to match implementation (stream_start/delta/end). Updated common/ structure (ASR engine, Vosk, unified logging). Phase 3.5 touchscreen UI in planning.

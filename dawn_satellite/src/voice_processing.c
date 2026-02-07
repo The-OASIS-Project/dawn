@@ -102,9 +102,9 @@ static const char *offline_message = "I'm sorry, I can't reach the server right 
  * ============================================================================= */
 
 struct voice_ctx {
-   /* State */
-   voice_state_t state;
-   volatile bool running;
+   /* State (read from render thread, written from voice thread) */
+   _Atomic voice_state_t state;
+   atomic_bool running;
 
    /* VAD */
 #ifdef HAVE_VAD_SILERO
@@ -113,6 +113,7 @@ struct voice_ctx {
    void *vad; /* Placeholder */
 #endif
    float vad_threshold;
+   volatile float last_speech_prob; /* Most recent VAD probability (updated every ~32ms frame) */
    int speech_frame_count;
    int silence_frame_count;
    int silence_end_frames; /* Configurable from config */
@@ -731,6 +732,25 @@ void voice_processing_stop(voice_ctx_t *ctx) {
    }
 }
 
+float voice_processing_get_vad_probability(const voice_ctx_t *ctx) {
+   return ctx ? ctx->last_speech_prob : 0.0f;
+}
+
+bool voice_processing_is_response_complete(voice_ctx_t *ctx) {
+   return ctx ? atomic_load(&ctx->response_complete) : false;
+}
+
+size_t voice_processing_get_response_text(voice_ctx_t *ctx, char *buf, size_t buf_size) {
+   if (!ctx || !buf || buf_size == 0)
+      return 0;
+   pthread_mutex_lock(&ctx->response_mutex);
+   size_t len = ctx->response_len < buf_size - 1 ? ctx->response_len : buf_size - 1;
+   memcpy(buf, ctx->response_buffer, len);
+   buf[len] = '\0';
+   pthread_mutex_unlock(&ctx->response_mutex);
+   return len;
+}
+
 void voice_processing_speak_greeting(voice_ctx_t *ctx, satellite_ctx_t *sat_ctx) {
    if (!ctx || !sat_ctx)
       return;
@@ -882,6 +902,7 @@ int voice_processing_loop(voice_ctx_t *ctx,
                speech_prob = vad_silero_process(ctx->vad, frame_buffer, samples);
             }
 #endif
+            ctx->last_speech_prob = speech_prob;
 
             bool is_speech = speech_prob >= ctx->vad_threshold;
 

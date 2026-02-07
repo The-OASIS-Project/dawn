@@ -194,23 +194,12 @@ DAP2 uses JSON messages over WebSocket, connecting to the same port as the WebUI
 }
 ```
 
-**Streaming Response**:
+**Streaming Response** (sentence-level TTS happens as deltas arrive):
 ```json
 {"type": "stream_start", "payload": {"stream_id": 1}}
-{"type": "stream_delta", "payload": {"text": "I'll turn "}}
-{"type": "stream_delta", "payload": {"text": "on the lights."}}
-{"type": "stream_end", "payload": {"reason": "complete"}}
-```
-
-**Complete Response** (for TTS):
-```json
-{
-  "type": "transcript",
-  "payload": {
-    "role": "satellite_response",
-    "text": "I'll turn on the kitchen lights."
-  }
-}
+{"type": "stream_delta", "payload": {"stream_id": 1, "text": "I'll turn on the lights. "}}
+{"type": "stream_delta", "payload": {"stream_id": 1, "text": "They should be on now."}}
+{"type": "stream_end", "payload": {"stream_id": 1, "reason": "complete"}}
 ```
 
 **Pong**:
@@ -236,24 +225,67 @@ DAP2 uses JSON messages over WebSocket, connecting to the same port as the WebUI
 ```
 dawn_satellite/
 ├── config/
-│   └── satellite.toml      # Default configuration
+│   └── satellite.toml          # Default configuration
 ├── include/
-│   ├── audio_capture.h     # ALSA audio capture
-│   ├── audio_playback.h    # ALSA audio playback
-│   ├── neopixel.h          # WS2812 LED support
-│   ├── satellite_config.h  # TOML configuration
-│   ├── satellite_state.h   # State machine
-│   ├── toml.h              # TOML parser (tomlc99)
-│   └── ws_client.h         # WebSocket client API
+│   ├── audio_capture.h         # ALSA audio capture (ring buffer + thread)
+│   ├── audio_playback.h        # ALSA audio playback
+│   ├── dap_client.h            # DAP (Tier 2) TCP client
+│   ├── display.h               # Framebuffer display (optional)
+│   ├── gpio_control.h          # GPIO button support (optional)
+│   ├── neopixel.h              # WS2812 LED support (optional)
+│   ├── satellite_config.h      # TOML configuration
+│   ├── satellite_state.h       # State machine
+│   ├── toml.h                  # TOML parser (tomlc99)
+│   ├── voice_processing.h      # Voice pipeline (VAD + wake word + ASR + TTS)
+│   └── ws_client.h             # WebSocket client API
 ├── src/
-│   ├── main.c              # Entry point, CLI parsing
-│   ├── audio_capture.c     # ALSA capture implementation
-│   ├── audio_playback.c    # ALSA playback implementation
-│   ├── neopixel.c          # SPI-based NeoPixel driver
-│   ├── satellite_config.c  # Config file loading
-│   ├── satellite_state.c   # State machine logic
-│   ├── toml.c              # TOML parser
-│   └── ws_client.c         # libwebsockets client
+│   ├── main.c                  # Entry point, CLI parsing, model loading
+│   ├── audio_capture.c         # ALSA capture with ring buffer
+│   ├── audio_playback.c        # ALSA playback with resampling
+│   ├── dap_client.c            # DAP (Tier 2) TCP client
+│   ├── display.c               # Framebuffer display driver
+│   ├── gpio_control.c          # libgpiod GPIO input
+│   ├── neopixel.c              # SPI-based NeoPixel driver
+│   ├── satellite_config.c      # TOML config + identity persistence
+│   ├── satellite_state.c       # State machine logic
+│   ├── toml.c                  # TOML parser
+│   ├── voice_processing.c      # Voice pipeline (~1100 lines)
+│   └── ws_client.c             # libwebsockets client + background thread
+└── CMakeLists.txt
+
+common/                          # Shared library (daemon + satellite)
+├── include/
+│   ├── asr/
+│   │   ├── asr_engine.h         # Unified ASR abstraction
+│   │   ├── asr_vosk.h           # Vosk streaming backend
+│   │   ├── asr_whisper.h        # Whisper batch backend
+│   │   ├── vad_silero.h         # Silero VAD
+│   │   └── vosk_api.h           # Vosk C API (third-party)
+│   ├── audio/
+│   │   └── ring_buffer.h        # Thread-safe ring buffer
+│   ├── tts/
+│   │   ├── tts_piper.h          # Piper TTS
+│   │   └── tts_preprocessing.h  # Text preprocessing for TTS
+│   ├── utils/
+│   │   ├── sentence_buffer.h    # Sentence boundary detection
+│   │   └── string_utils.h       # String utilities
+│   ├── logging.h                # Shared logging (daemon + satellite)
+│   └── logging_common.h         # Callback-based logging for common lib
+├── src/
+│   ├── asr/
+│   │   ├── asr_engine.c         # Engine dispatch (Whisper/Vosk)
+│   │   ├── asr_vosk.c           # Vosk streaming implementation
+│   │   ├── asr_whisper.c        # Whisper batch implementation
+│   │   └── vad_silero.c         # Silero ONNX VAD
+│   ├── audio/ring_buffer.c
+│   ├── tts/
+│   │   ├── tts_piper.cpp        # Piper synthesis
+│   │   └── tts_preprocessing.cpp
+│   ├── utils/
+│   │   ├── sentence_buffer.c
+│   │   └── string_utils.c
+│   ├── logging.c                # Logging impl + bridge callback
+│   └── logging_common.c
 └── CMakeLists.txt
 ```
 
@@ -396,7 +428,7 @@ Command-line arguments override config file values:
 
 ### Step 1: Raspberry Pi OS Setup
 
-**Flash Raspberry Pi OS Lite (64-bit)** - no desktop needed for headless satellite.
+**Flash Raspberry Pi OS Lite (64-bit)** - or Desktop if using a touchscreen display.
 
 ```bash
 # Use Raspberry Pi Imager or:
@@ -506,10 +538,17 @@ This installs:
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `ENABLE_VOICE` | ON | Master switch for voice processing |
+| `ENABLE_VAD` | ON | Silero VAD (requires ENABLE_VOICE) |
+| `ENABLE_VOSK_ASR` | ON | Vosk streaming ASR (default, lightweight) |
+| `ENABLE_WHISPER_ASR` | OFF | Whisper batch ASR (heavier, more accurate) |
+| `ENABLE_TTS` | ON | Piper TTS |
 | `ENABLE_DAP2` | ON | WebSocket text protocol (Tier 1) |
-| `ENABLE_NEOPIXEL` | OFF | NeoPixel LED support (disabled for Tier 1) |
-| `ENABLE_DISPLAY` | OFF | SPI display support |
+| `ENABLE_NEOPIXEL` | OFF | NeoPixel LED support (optional) |
+| `ENABLE_DISPLAY` | OFF | Framebuffer display support (optional) |
 | `CMAKE_BUILD_TYPE` | Release | Use `Debug` for development |
+
+Default `cmake ..` gives: VAD + Vosk + TTS (no Whisper compile).
 
 ### Cross-Compilation (Optional)
 
@@ -699,26 +738,27 @@ wscat -c ws://localhost:8080
 # Say "Hey Friday" to activate, speak your query
 ```
 
-## Current Limitations
+## Current Status
 
-### Not Yet Implemented
+### Implemented
 
-1. **Local ASR** - Whisper integration placeholder exists but not connected
-2. **Local TTS** - Piper integration placeholder exists but not connected
-3. **Wake Word Detection** - State machine supports it, detector not integrated
-4. **VAD Integration** - Silero VAD code exists in common/, needs wiring
-5. **Reconnection** - Basic reconnect logic exists, needs hardening
+1. **Local VAD** - Silero ONNX model for real-time speech detection
+2. **Wake Word Detection** - VAD + ASR transcription checked for wake word ("Hey Friday")
+3. **Local ASR** - Vosk streaming (default, near-instant) or Whisper batch
+4. **Local TTS** - Piper with sentence-level streaming during LLM response
+5. **Session Reconnection** - Cryptographic reconnect secrets, conversation history preserved
+6. **Offline Fallback** - TTS "I can't reach the server right now" on connection loss
+7. **Time-of-Day Greeting** - Spoken on startup
+8. **Unified Logging** - Same format as daemon (timestamps, colors, file:line)
+9. **Clean Shutdown** - Ctrl+C responsive in all states (model loading, TTS playback, idle)
+10. **Music Library Pagination** - Browse full library via voice (50 items per page)
 
-### Planned Features (Priority Order)
+### Planned Features
 
-1. [ ] **VAD integration** - Wire Silero VAD for end-of-speech detection
-2. [ ] **Wake word detection** - OpenWakeWord or Porcupine for "Hey Friday"
-3. [ ] **Whisper.cpp integration** - Local ASR on RPi 4/5
-4. [ ] **Piper integration** - Local TTS on RPi 4/5
-5. [ ] Automatic reconnection with exponential backoff
-6. [ ] Per-satellite conversation context
-7. [ ] Room-aware responses ("the kitchen lights are now on")
-8. [ ] Barge-in support (interrupt TTS with new wake word)
+1. [ ] **Barge-in support** - Interrupt TTS by speaking (stubbed, not connected)
+2. [ ] **SDL2 touchscreen UI** - Visual interface for satellites with displays
+3. [ ] **Multi-satellite routing** - Daemon routes by location
+4. [ ] **Speaker identification** - Personalized responses per user
 
 ## Troubleshooting
 

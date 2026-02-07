@@ -1,0 +1,350 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s). Contributions include any modifications,
+ * enhancements, or additions to the project. These contributions become
+ * part of the project and are adopted by the project author(s).
+ *
+ * Transcript Panel Rendering
+ */
+
+#include "ui/ui_transcript.h"
+
+#include <stdio.h>
+#include <string.h>
+
+#include "logging.h"
+#include "ui/ui_colors.h"
+
+/* =============================================================================
+ * Constants
+ * ============================================================================= */
+
+#define LABEL_FONT_SIZE 18
+#define BODY_FONT_SIZE 22
+#define ROLE_FONT_SIZE 18
+#define PADDING 20
+#define LABEL_HEIGHT 36
+#define ENTRY_SPACING 12
+#define ROLE_SPACING 4
+
+/* Fallback font paths if font_dir not specified */
+#define FALLBACK_MONO_FONT "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+#define FALLBACK_BODY_FONT "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
+/* =============================================================================
+ * Font Loading Helper
+ * ============================================================================= */
+
+static TTF_Font *try_load_font(const char *font_dir,
+                               const char *filename,
+                               const char *fallback,
+                               int size) {
+   TTF_Font *font = NULL;
+   char path[512];
+
+   /* Try specified font_dir first */
+   if (font_dir && font_dir[0]) {
+      snprintf(path, sizeof(path), "%s/%s", font_dir, filename);
+      font = TTF_OpenFont(path, size);
+      if (font)
+         return font;
+   }
+
+   /* Try relative to executable */
+   snprintf(path, sizeof(path), "assets/fonts/%s", filename);
+   font = TTF_OpenFont(path, size);
+   if (font)
+      return font;
+
+   /* Try fallback system font */
+   if (fallback) {
+      font = TTF_OpenFont(fallback, size);
+      if (font)
+         return font;
+   }
+
+   return NULL;
+}
+
+/* =============================================================================
+ * Texture Cache Helpers
+ * ============================================================================= */
+
+static void invalidate_entry_cache(transcript_entry_t *entry) {
+   if (entry->cached_texture) {
+      SDL_DestroyTexture(entry->cached_texture);
+      entry->cached_texture = NULL;
+   }
+   if (entry->cached_role_tex) {
+      SDL_DestroyTexture(entry->cached_role_tex);
+      entry->cached_role_tex = NULL;
+   }
+   entry->cached_w = 0;
+   entry->cached_h = 0;
+   entry->cached_role_w = 0;
+   entry->cached_role_h = 0;
+}
+
+static void ensure_entry_cached(ui_transcript_t *t, transcript_entry_t *entry) {
+   if (!t->renderer || !t->body_font)
+      return;
+
+   /* Cache body text texture */
+   if (!entry->cached_texture && entry->text[0]) {
+      SDL_Color text_color = { COLOR_TEXT_PRIMARY_R, COLOR_TEXT_PRIMARY_G, COLOR_TEXT_PRIMARY_B,
+                               255 };
+      SDL_Surface *surface = TTF_RenderUTF8_Blended_Wrapped(t->body_font, entry->text, text_color,
+                                                            t->wrap_width);
+      if (surface) {
+         entry->cached_texture = SDL_CreateTextureFromSurface(t->renderer, surface);
+         entry->cached_w = surface->w;
+         entry->cached_h = surface->h;
+         SDL_FreeSurface(surface);
+      }
+   }
+
+   /* Cache role label texture */
+   if (!entry->cached_role_tex && entry->role[0] && t->label_font) {
+      SDL_Color role_color;
+      if (entry->is_user) {
+         role_color = (SDL_Color){ COLOR_LISTENING_R, COLOR_LISTENING_G, COLOR_LISTENING_B, 255 };
+      } else {
+         role_color = (SDL_Color){ COLOR_SPEAKING_R, COLOR_SPEAKING_G, COLOR_SPEAKING_B, 255 };
+      }
+      char role_label[40];
+      snprintf(role_label, sizeof(role_label), "%s:", entry->role);
+      SDL_Surface *surface = TTF_RenderUTF8_Blended(t->label_font, role_label, role_color);
+      if (surface) {
+         entry->cached_role_tex = SDL_CreateTextureFromSurface(t->renderer, surface);
+         entry->cached_role_w = surface->w;
+         entry->cached_role_h = surface->h;
+         SDL_FreeSurface(surface);
+      }
+   }
+}
+
+/* =============================================================================
+ * Public API
+ * ============================================================================= */
+
+int ui_transcript_init(ui_transcript_t *t,
+                       SDL_Renderer *renderer,
+                       int panel_x,
+                       int panel_y,
+                       int panel_w,
+                       int panel_h,
+                       const char *font_dir,
+                       const char *ai_name) {
+   if (!t)
+      return 1;
+
+   memset(t, 0, sizeof(*t));
+   pthread_mutex_init(&t->mutex, NULL);
+
+   t->renderer = renderer;
+   t->panel_x = panel_x;
+   t->panel_y = panel_y;
+   t->panel_w = panel_w;
+   t->panel_h = panel_h;
+   t->padding = PADDING;
+   t->wrap_width = panel_w - 2 * PADDING;
+   snprintf(t->ai_name, sizeof(t->ai_name), "%s", ai_name ? ai_name : "DAWN");
+
+   /* Load fonts */
+   t->label_font = try_load_font(font_dir, "IBMPlexMono-Regular.ttf", FALLBACK_MONO_FONT,
+                                 LABEL_FONT_SIZE);
+   t->body_font = try_load_font(font_dir, "SourceSans3-Regular.ttf", FALLBACK_BODY_FONT,
+                                BODY_FONT_SIZE);
+
+   if (!t->label_font) {
+      LOG_WARNING("Failed to load label font, transcript text disabled");
+   }
+   if (!t->body_font) {
+      LOG_WARNING("Failed to load body font, transcript text disabled");
+   }
+
+   return 0;
+}
+
+void ui_transcript_cleanup(ui_transcript_t *t) {
+   if (!t)
+      return;
+
+   /* Destroy cached textures */
+   for (int i = 0; i < TRANSCRIPT_MAX_ENTRIES; i++) {
+      invalidate_entry_cache(&t->entries[i]);
+   }
+
+   if (t->label_font) {
+      TTF_CloseFont(t->label_font);
+      t->label_font = NULL;
+   }
+   if (t->body_font) {
+      TTF_CloseFont(t->body_font);
+      t->body_font = NULL;
+   }
+
+   pthread_mutex_destroy(&t->mutex);
+}
+
+void ui_transcript_add(ui_transcript_t *t, const char *role, const char *text, bool is_user) {
+   if (!t || !role || !text)
+      return;
+
+   pthread_mutex_lock(&t->mutex);
+
+   transcript_entry_t *entry = &t->entries[t->write_index];
+
+   /* Invalidate old cached textures before reusing slot */
+   invalidate_entry_cache(entry);
+
+   snprintf(entry->role, sizeof(entry->role), "%s", role);
+   snprintf(entry->text, sizeof(entry->text), "%s", text);
+   entry->is_user = is_user;
+
+   t->write_index = (t->write_index + 1) % TRANSCRIPT_MAX_ENTRIES;
+   if (t->entry_count < TRANSCRIPT_MAX_ENTRIES) {
+      t->entry_count++;
+   }
+
+   pthread_mutex_unlock(&t->mutex);
+}
+
+void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_state_t state) {
+   if (!t || !renderer)
+      return;
+
+   /* Draw panel background */
+   SDL_Rect panel = { t->panel_x, t->panel_y, t->panel_w, t->panel_h };
+   SDL_SetRenderDrawColor(renderer, COLOR_BG_SECONDARY_R, COLOR_BG_SECONDARY_G,
+                          COLOR_BG_SECONDARY_B, 255);
+   SDL_RenderFillRect(renderer, &panel);
+
+   int x = t->panel_x + t->padding;
+   int label_y = t->panel_y + t->padding;
+
+   /* Render state label at top */
+   if (t->label_font) {
+      ui_color_t state_color = ui_color_for_state(state);
+      SDL_Color label_sdl = { state_color.r, state_color.g, state_color.b, 255 };
+
+      char label_text[32];
+      snprintf(label_text, sizeof(label_text), "[%s]", ui_state_label(state));
+
+      /* State label changes frequently so we don't cache it */
+      SDL_Surface *label_surface = TTF_RenderUTF8_Blended(t->label_font, label_text, label_sdl);
+      if (label_surface) {
+         SDL_Texture *label_tex = SDL_CreateTextureFromSurface(renderer, label_surface);
+         if (label_tex) {
+            SDL_Rect dst = { x, label_y, label_surface->w, label_surface->h };
+            SDL_RenderCopy(renderer, label_tex, NULL, &dst);
+            SDL_DestroyTexture(label_tex);
+         }
+         SDL_FreeSurface(label_surface);
+      }
+   }
+
+   /* Transcript content area (below label, above bottom padding) */
+   int content_top = t->panel_y + t->padding + LABEL_HEIGHT + ENTRY_SPACING;
+   int content_bottom = t->panel_y + t->panel_h - t->padding;
+
+   if (!t->body_font || t->entry_count == 0)
+      return;
+
+   pthread_mutex_lock(&t->mutex);
+
+   /* Snapshot entry data under lock, then release before rendering */
+   int count = t->entry_count;
+   int start_idx;
+   if (count < TRANSCRIPT_MAX_ENTRIES) {
+      start_idx = 0;
+   } else {
+      start_idx = t->write_index; /* Oldest entry */
+   }
+
+   /* Ensure all entries have cached textures (under lock since we read entry data) */
+   for (int i = 0; i < count; i++) {
+      int idx = (start_idx + i) % TRANSCRIPT_MAX_ENTRIES;
+      ensure_entry_cached(t, &t->entries[idx]);
+   }
+
+   /* Calculate total height of all entries to determine scroll offset */
+   int total_height = 0;
+   for (int i = 0; i < count; i++) {
+      int idx = (start_idx + i) % TRANSCRIPT_MAX_ENTRIES;
+      transcript_entry_t *entry = &t->entries[idx];
+      if (entry->cached_role_tex)
+         total_height += entry->cached_role_h + ROLE_SPACING;
+      if (entry->cached_texture)
+         total_height += entry->cached_h;
+      if (i < count - 1)
+         total_height += ENTRY_SPACING;
+   }
+
+   /* Auto-scroll: if content exceeds panel, offset so newest entry is at bottom */
+   int avail_height = content_bottom - content_top;
+   int y;
+   if (total_height <= avail_height) {
+      y = content_top; /* Content fits, render from top */
+   } else {
+      y = content_bottom - total_height; /* Scroll so newest is visible */
+   }
+
+   /* Render entries top-to-bottom (oldest to newest) with clipping */
+   SDL_Rect clip = { t->panel_x, content_top, t->panel_w, avail_height };
+   SDL_RenderSetClipRect(renderer, &clip);
+
+   for (int i = 0; i < count; i++) {
+      int idx = (start_idx + i) % TRANSCRIPT_MAX_ENTRIES;
+      transcript_entry_t *entry = &t->entries[idx];
+
+      /* Skip entries entirely above the visible area */
+      int entry_height = 0;
+      if (entry->cached_role_tex)
+         entry_height += entry->cached_role_h + ROLE_SPACING;
+      if (entry->cached_texture)
+         entry_height += entry->cached_h;
+
+      if (y + entry_height < content_top) {
+         y += entry_height + ENTRY_SPACING;
+         continue;
+      }
+
+      /* Stop if we're past the bottom */
+      if (y >= content_bottom)
+         break;
+
+      /* Render role label from cache */
+      if (entry->cached_role_tex) {
+         SDL_Rect dst = { x, y, entry->cached_role_w, entry->cached_role_h };
+         SDL_RenderCopy(renderer, entry->cached_role_tex, NULL, &dst);
+         y += entry->cached_role_h + ROLE_SPACING;
+      }
+
+      /* Render body text from cache */
+      if (entry->cached_texture) {
+         SDL_Rect dst = { x, y, entry->cached_w, entry->cached_h };
+         SDL_RenderCopy(renderer, entry->cached_texture, NULL, &dst);
+         y += entry->cached_h;
+      }
+
+      y += ENTRY_SPACING;
+   }
+
+   SDL_RenderSetClipRect(renderer, NULL);
+   pthread_mutex_unlock(&t->mutex);
+}
