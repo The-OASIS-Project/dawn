@@ -528,7 +528,7 @@ aplay -D plughw:0,0 /tmp/test.wav
 
 ### I2S Audio Setup
 
-For I2S microphone (INMP441) and DAC (MAX98357A), add to `/boot/config.txt`:
+For I2S microphone (INMP441) and DAC (MAX98357A), add to `/boot/firmware/config.txt`:
 
 ```ini
 # Enable I2S
@@ -567,7 +567,7 @@ groups
 
 ### Official Raspberry Pi 7" Display
 
-Works automatically. If needed, add to `/boot/config.txt`:
+Works automatically. If needed, add to `/boot/firmware/config.txt`:
 
 ```ini
 dtoverlay=vc4-kms-v3d
@@ -576,7 +576,7 @@ max_framebuffers=2
 
 ### HDMI Touchscreen (1024x600)
 
-Add to `/boot/config.txt`:
+Add to `/boot/firmware/config.txt`:
 
 ```ini
 # Force HDMI output
@@ -671,7 +671,7 @@ aplay /tmp/test.wav  # Should hear your voice clearly
 | Symptom | Solution |
 |---------|----------|
 | "No available video device" | Add user to `video` group, reboot |
-| Black screen | Check HDMI connection, `/boot/config.txt` |
+| Black screen | Check HDMI connection, `/boot/firmware/config.txt` |
 | "DRM: permission denied" | Add user to `render` group |
 | Touch not working | Check `/dev/input/event*`, add to `input` group |
 

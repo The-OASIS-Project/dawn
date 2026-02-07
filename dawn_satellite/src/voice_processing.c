@@ -240,11 +240,10 @@ static void on_stream_callback(const char *text, bool is_end, void *user_data) {
    }
 }
 
-static void on_state_callback(const char *state, void *user_data) {
-   voice_ctx_t *ctx = (voice_ctx_t *)user_data;
-   (void)ctx;
-
-   LOG_DEBUG("Server state: %s", state);
+static void on_state_callback(const char *state_str, void *user_data) {
+   (void)user_data;
+   (void)state_str;
+   LOG_DEBUG("Server state: %s", state_str);
 }
 
 /* =============================================================================

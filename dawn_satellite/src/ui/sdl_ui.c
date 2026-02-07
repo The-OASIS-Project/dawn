@@ -19,6 +19,10 @@
  * part of the project and are adopted by the project author(s).
  *
  * SDL2 UI - Main render thread and lifecycle management
+ *
+ * All SDL operations (init, window, renderer, events, rendering, cleanup)
+ * happen on the render thread. KMSDRM ties the DRM master and EGL context
+ * to the initializing thread, so cross-thread rendering silently fails.
  */
 
 #include "sdl_ui.h"
@@ -53,13 +57,14 @@
  * ============================================================================= */
 
 struct sdl_ui {
-   /* SDL resources */
+   /* SDL resources (created/destroyed on render thread only) */
    SDL_Window *window;
    SDL_Renderer *renderer;
 
    /* Render thread */
    pthread_t render_thread;
    atomic_bool running;
+   atomic_int init_result; /* 0=pending, 1=success, -1=failure */
    bool thread_started;
 
    /* Voice context for state polling */
@@ -99,6 +104,113 @@ static double get_time_sec(void) {
 }
 
 /* =============================================================================
+ * SDL Initialization (called on render thread)
+ * ============================================================================= */
+
+static int sdl_init_on_thread(sdl_ui_t *ui) {
+   /* Hint KMSDRM backend for Pi OS Lite (no X11) */
+   SDL_SetHint("SDL_VIDEO_DRIVER", "kmsdrm,x11,wayland");
+
+   /* Initialize SDL */
+   if (SDL_Init(SDL_INIT_VIDEO) < 0) {
+      LOG_ERROR("SDL_Init failed: %s", SDL_GetError());
+      return -1;
+   }
+
+   /* Initialize SDL_ttf */
+   if (TTF_Init() < 0) {
+      LOG_ERROR("TTF_Init failed: %s", TTF_GetError());
+      SDL_Quit();
+      return -1;
+   }
+
+   /* KMSDRM needs SDL_WINDOW_FULLSCREEN (sets video mode to requested resolution).
+    * FULLSCREEN_DESKTOP doesn't work reliably with KMSDRM since there's no desktop. */
+   const char *driver = SDL_GetCurrentVideoDriver();
+   Uint32 fs_flag = SDL_WINDOW_FULLSCREEN_DESKTOP;
+   if (driver && strcmp(driver, "KMSDRM") == 0) {
+      fs_flag = SDL_WINDOW_FULLSCREEN;
+      LOG_INFO("SDL UI: KMSDRM detected, using SDL_WINDOW_FULLSCREEN (%dx%d)", ui->width,
+               ui->height);
+   }
+
+   ui->window = SDL_CreateWindow("DAWN Satellite", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+                                 ui->width, ui->height, fs_flag);
+   if (!ui->window) {
+      LOG_WARNING("Fullscreen failed, trying windowed: %s", SDL_GetError());
+      ui->window = SDL_CreateWindow("DAWN Satellite", SDL_WINDOWPOS_CENTERED,
+                                    SDL_WINDOWPOS_CENTERED, ui->width, ui->height, 0);
+   }
+   if (!ui->window) {
+      LOG_ERROR("SDL_CreateWindow failed: %s", SDL_GetError());
+      TTF_Quit();
+      SDL_Quit();
+      return -1;
+   }
+
+   /* Hide cursor for kiosk mode */
+   SDL_ShowCursor(SDL_DISABLE);
+
+   /* Create hardware-accelerated renderer */
+   ui->renderer = SDL_CreateRenderer(ui->window, -1, SDL_RENDERER_ACCELERATED);
+   if (!ui->renderer) {
+      LOG_WARNING("HW renderer failed, trying software: %s", SDL_GetError());
+      ui->renderer = SDL_CreateRenderer(ui->window, -1, SDL_RENDERER_SOFTWARE);
+   }
+   if (!ui->renderer) {
+      LOG_ERROR("SDL_CreateRenderer failed: %s", SDL_GetError());
+      SDL_DestroyWindow(ui->window);
+      TTF_Quit();
+      SDL_Quit();
+      return -1;
+   }
+
+   /* Enable alpha blending */
+   SDL_SetRenderDrawBlendMode(ui->renderer, SDL_BLENDMODE_BLEND);
+
+   /* Initialize orb rendering (pre-generate glow textures) */
+   ui_orb_init(&ui->orb, ui->renderer);
+
+   /* Initialize transcript panel (right side) */
+   int transcript_x = ORB_PANEL_WIDTH + 1;
+   int transcript_w = ui->width - transcript_x;
+   if (ui_transcript_init(&ui->transcript, ui->renderer, transcript_x, 0, transcript_w, ui->height,
+                          ui->font_dir, ui->ai_name) != 0) {
+      LOG_WARNING("Transcript init failed, continuing without text");
+   }
+
+   ui->last_state = VOICE_STATE_SILENCE;
+   ui->last_state_change_time = get_time_sec();
+
+   LOG_INFO("SDL UI initialized (%dx%d, driver=%s)", ui->width, ui->height,
+            SDL_GetCurrentVideoDriver());
+
+   return 0;
+}
+
+/* =============================================================================
+ * SDL Cleanup (called on render thread)
+ * ============================================================================= */
+
+static void sdl_cleanup_on_thread(sdl_ui_t *ui) {
+   ui_transcript_cleanup(&ui->transcript);
+   ui_orb_cleanup(&ui->orb);
+
+   if (ui->renderer) {
+      SDL_DestroyRenderer(ui->renderer);
+      ui->renderer = NULL;
+   }
+   if (ui->window) {
+      SDL_DestroyWindow(ui->window);
+      ui->window = NULL;
+   }
+
+   TTF_Quit();
+   SDL_Quit();
+   LOG_INFO("SDL UI cleaned up");
+}
+
+/* =============================================================================
  * Render Thread
  * ============================================================================= */
 
@@ -111,7 +223,6 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
 
    /* Track state changes for idle timeout and transcript management */
    if (state != ui->last_state) {
-      /* Transitioning to WAITING means a new query was sent */
       if (state == VOICE_STATE_WAITING) {
          ui->response_added = false;
          ui->last_response_len = 0;
@@ -156,9 +267,6 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
    int orb_cy = ui->height / 2;
    ui_orb_render(&ui->orb, r, orb_cx, orb_cy, state, vad_prob, time_sec);
 
-   /* Render state label below orb */
-   /* (Handled by transcript panel's state label rendering) */
-
    /* Render transcript in right panel */
    ui_transcript_render(&ui->transcript, r, state);
 
@@ -167,9 +275,16 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
 
 static void *render_thread_func(void *arg) {
    sdl_ui_t *ui = (sdl_ui_t *)arg;
-   double start_time = get_time_sec();
+
+   /* Initialize all SDL resources on this thread */
+   if (sdl_init_on_thread(ui) != 0) {
+      atomic_store(&ui->init_result, -1);
+      return NULL;
+   }
+   atomic_store(&ui->init_result, 1);
 
    LOG_INFO("SDL UI render thread started");
+   double start_time = get_time_sec();
 
    while (ui->running) {
       double frame_start = get_time_sec();
@@ -201,6 +316,10 @@ static void *render_thread_func(void *arg) {
    }
 
    LOG_INFO("SDL UI render thread exiting");
+
+   /* Cleanup all SDL resources on this thread */
+   sdl_cleanup_on_thread(ui);
+
    return NULL;
 }
 
@@ -220,6 +339,7 @@ sdl_ui_t *sdl_ui_init(const sdl_ui_config_t *config) {
       return NULL;
    }
 
+   /* Store configuration (SDL init deferred to render thread) */
    ui->width = config->width > 0 ? config->width : 1024;
    ui->height = config->height > 0 ? config->height : 600;
    ui->voice_ctx = config->voice_ctx;
@@ -227,79 +347,6 @@ sdl_ui_t *sdl_ui_init(const sdl_ui_config_t *config) {
    if (config->font_dir) {
       snprintf(ui->font_dir, sizeof(ui->font_dir), "%s", config->font_dir);
    }
-
-   /* Hint KMSDRM backend for Pi OS Lite (no X11) */
-   SDL_SetHint("SDL_VIDEO_DRIVER", "kmsdrm,x11,wayland");
-
-   /* Initialize SDL */
-   if (SDL_Init(SDL_INIT_VIDEO) < 0) {
-      LOG_ERROR("SDL_Init failed: %s", SDL_GetError());
-      free(ui);
-      return NULL;
-   }
-
-   /* Initialize SDL_ttf */
-   if (TTF_Init() < 0) {
-      LOG_ERROR("TTF_Init failed: %s", TTF_GetError());
-      SDL_Quit();
-      free(ui);
-      return NULL;
-   }
-
-   /* Create fullscreen window */
-   ui->window = SDL_CreateWindow("DAWN Satellite", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-                                 ui->width, ui->height, SDL_WINDOW_FULLSCREEN_DESKTOP);
-   if (!ui->window) {
-      /* Fallback: try non-fullscreen */
-      LOG_WARNING("Fullscreen failed, trying windowed: %s", SDL_GetError());
-      ui->window = SDL_CreateWindow("DAWN Satellite", SDL_WINDOWPOS_CENTERED,
-                                    SDL_WINDOWPOS_CENTERED, ui->width, ui->height, 0);
-   }
-   if (!ui->window) {
-      LOG_ERROR("SDL_CreateWindow failed: %s", SDL_GetError());
-      TTF_Quit();
-      SDL_Quit();
-      free(ui);
-      return NULL;
-   }
-
-   /* Hide cursor for kiosk mode */
-   SDL_ShowCursor(SDL_DISABLE);
-
-   /* Create hardware-accelerated renderer */
-   ui->renderer = SDL_CreateRenderer(ui->window, -1, SDL_RENDERER_ACCELERATED);
-   if (!ui->renderer) {
-      LOG_WARNING("HW renderer failed, trying software: %s", SDL_GetError());
-      ui->renderer = SDL_CreateRenderer(ui->window, -1, SDL_RENDERER_SOFTWARE);
-   }
-   if (!ui->renderer) {
-      LOG_ERROR("SDL_CreateRenderer failed: %s", SDL_GetError());
-      SDL_DestroyWindow(ui->window);
-      TTF_Quit();
-      SDL_Quit();
-      free(ui);
-      return NULL;
-   }
-
-   /* Enable alpha blending */
-   SDL_SetRenderDrawBlendMode(ui->renderer, SDL_BLENDMODE_BLEND);
-
-   /* Initialize orb rendering (pre-generate glow textures) */
-   ui_orb_init(&ui->orb, ui->renderer);
-
-   /* Initialize transcript panel (right side) */
-   int transcript_x = ORB_PANEL_WIDTH + 1; /* +1 for divider */
-   int transcript_w = ui->width - transcript_x;
-   if (ui_transcript_init(&ui->transcript, ui->renderer, transcript_x, 0, transcript_w, ui->height,
-                          ui->font_dir, ui->ai_name) != 0) {
-      LOG_WARNING("Transcript init failed, continuing without text");
-   }
-
-   ui->last_state = VOICE_STATE_SILENCE;
-   ui->last_state_change_time = get_time_sec();
-
-   LOG_INFO("SDL UI initialized (%dx%d, driver=%s)", ui->width, ui->height,
-            SDL_GetCurrentVideoDriver());
 
    return ui;
 }
@@ -309,13 +356,29 @@ int sdl_ui_start(sdl_ui_t *ui) {
       return 1;
 
    ui->running = true;
+   atomic_store(&ui->init_result, 0);
+
    if (pthread_create(&ui->render_thread, NULL, render_thread_func, ui) != 0) {
       LOG_ERROR("Failed to create render thread");
       ui->running = false;
       return 1;
    }
-
    ui->thread_started = true;
+
+   /* Wait for SDL init to complete on render thread */
+   while (atomic_load(&ui->init_result) == 0) {
+      struct timespec ts = { 0, 10000000 }; /* 10ms */
+      nanosleep(&ts, NULL);
+   }
+
+   if (atomic_load(&ui->init_result) < 0) {
+      LOG_ERROR("SDL UI: init failed on render thread");
+      ui->running = false;
+      pthread_join(ui->render_thread, NULL);
+      ui->thread_started = false;
+      return 1;
+   }
+
    return 0;
 }
 
@@ -329,30 +392,14 @@ void sdl_ui_cleanup(sdl_ui_t *ui) {
    if (!ui)
       return;
 
-   /* Stop and join render thread */
+   /* Stop and join render thread (SDL cleanup happens on that thread) */
    ui->running = false;
    if (ui->thread_started) {
       pthread_join(ui->render_thread, NULL);
       ui->thread_started = false;
    }
 
-   /* Cleanup subsystems */
-   ui_transcript_cleanup(&ui->transcript);
-   ui_orb_cleanup(&ui->orb);
-
-   /* Destroy SDL resources */
-   if (ui->renderer) {
-      SDL_DestroyRenderer(ui->renderer);
-   }
-   if (ui->window) {
-      SDL_DestroyWindow(ui->window);
-   }
-
-   TTF_Quit();
-   SDL_Quit();
-
    free(ui);
-   LOG_INFO("SDL UI cleaned up");
 }
 
 void sdl_ui_add_transcript(sdl_ui_t *ui, const char *role, const char *text) {

@@ -50,23 +50,26 @@ typedef struct {
 } sdl_ui_config_t;
 
 /**
- * @brief Initialize SDL2 UI
+ * @brief Initialize SDL2 UI configuration
  *
- * Sets up SDL2 with KMSDRM backend, creates fullscreen window and renderer.
- * Does NOT start the render thread - call sdl_ui_start() for that.
+ * Stores configuration only. SDL initialization is deferred to the render
+ * thread (sdl_ui_start) because KMSDRM ties the DRM master and EGL context
+ * to the initializing thread.
  *
  * @param config UI configuration
- * @return Allocated UI context, or NULL on failure (continues headless)
+ * @return Allocated UI context, or NULL on failure
  */
 sdl_ui_t *sdl_ui_init(const sdl_ui_config_t *config);
 
 /**
  * @brief Start the render thread
  *
- * Spawns a dedicated thread for rendering at 30 FPS (active) / 10 FPS (idle).
+ * Spawns a dedicated thread that initializes SDL, creates the window and
+ * renderer, and renders at 30 FPS (active) / 10 FPS (idle). Blocks until
+ * SDL initialization completes on the render thread.
  *
  * @param ui UI context
- * @return 0 on success, non-zero on failure
+ * @return 0 on success, non-zero on failure (continues headless)
  */
 int sdl_ui_start(sdl_ui_t *ui);
 
