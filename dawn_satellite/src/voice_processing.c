@@ -1204,9 +1204,11 @@ int voice_processing_loop(voice_ctx_t *ctx,
             break;
 
          case VOICE_STATE_SPEAKING:
-            /* Playing TTS - check for barge-in */
-            /* TODO: Implement non-blocking playback with barge-in detection */
-            ctx->state = VOICE_STATE_SILENCE;
+            /* TTS playback is driven by on_sentence_complete on WS thread.
+             * It sets SPEAKING before audio_playback_play (blocking) and
+             * reverts to WAITING when each sentence finishes.  We just
+             * sleep here to avoid a busy-loop. */
+            usleep(10000); /* 10ms */
             break;
 
          default:

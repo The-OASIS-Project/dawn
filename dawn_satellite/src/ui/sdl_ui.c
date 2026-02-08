@@ -49,7 +49,7 @@
 #define FRAME_MS_ACTIVE (1000 / FPS_ACTIVE)
 #define FRAME_MS_IDLE (1000 / FPS_IDLE)
 #define IDLE_TIMEOUT_SEC 5.0 /* Drop to idle FPS after this long in SILENCE */
-#define RESPONSE_POLL_MS 500 /* How often to poll response text */
+#define RESPONSE_POLL_MS 100 /* How often to poll response text */
 #define ORB_PANEL_WIDTH 400  /* Left panel for orb */
 
 /* =============================================================================
@@ -224,7 +224,10 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
 
    /* Track state changes for idle timeout and transcript management */
    if (state != ui->last_state) {
-      if (state == VOICE_STATE_WAITING) {
+      /* Only reset response tracking on the initial transition into WAITING
+       * (from PROCESSING), not on SPEAKING→WAITING which happens between
+       * sentences during streaming TTS. */
+      if (state == VOICE_STATE_WAITING && ui->last_state != VOICE_STATE_SPEAKING) {
          ui->response_added = false;
          ui->last_response_len = 0;
          ui->last_response[0] = '\0';
