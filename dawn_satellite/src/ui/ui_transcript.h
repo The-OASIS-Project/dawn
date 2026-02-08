@@ -104,6 +104,18 @@ void ui_transcript_cleanup(ui_transcript_t *t);
 void ui_transcript_add(ui_transcript_t *t, const char *role, const char *text, bool is_user);
 
 /**
+ * @brief Update the most recent non-user entry with new text (thread-safe)
+ *
+ * Used for streaming: updates the AI response text as it arrives,
+ * invalidating the cached texture so it re-renders next frame.
+ * If no AI entry exists yet, creates one.
+ */
+void ui_transcript_update_live(ui_transcript_t *t,
+                               const char *role,
+                               const char *text,
+                               size_t text_len);
+
+/**
  * @brief Render the transcript panel
  */
 void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_state_t state);

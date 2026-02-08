@@ -219,6 +219,16 @@ int audio_playback_play(audio_playback_t *ctx,
          pos += step;
       }
 
+      /* Compute RMS amplitude for visualization (mono channel only) */
+      {
+         float sum_sq = 0.0f;
+         for (size_t j = 0; j < n; j++) {
+            float s = out_buf[2 * j] / 32768.0f;
+            sum_sq += s * s;
+         }
+         ctx->amplitude = sqrtf(sum_sq / (float)n);
+      }
+
       /* Write to ALSA */
       snd_pcm_sframes_t frames = snd_pcm_writei(handle, out_buf, n);
 
@@ -249,6 +259,7 @@ int audio_playback_play(audio_playback_t *ctx,
       snd_pcm_drain(handle);
    }
 
+   ctx->amplitude = 0.0f;
    LOG_INFO("Playback complete: %zu frames", produced);
    return 0;
 }

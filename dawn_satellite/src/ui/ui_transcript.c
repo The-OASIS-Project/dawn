@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include "logging.h"
+#include "tts/tts_preprocessing.h"
 #include "ui/ui_colors.h"
 
 /* =============================================================================
@@ -214,11 +215,57 @@ void ui_transcript_add(ui_transcript_t *t, const char *role, const char *text, b
 
    snprintf(entry->role, sizeof(entry->role), "%s", role);
    snprintf(entry->text, sizeof(entry->text), "%s", text);
+   remove_emojis(entry->text);
    entry->is_user = is_user;
 
    t->write_index = (t->write_index + 1) % TRANSCRIPT_MAX_ENTRIES;
    if (t->entry_count < TRANSCRIPT_MAX_ENTRIES) {
       t->entry_count++;
+   }
+
+   pthread_mutex_unlock(&t->mutex);
+}
+
+void ui_transcript_update_live(ui_transcript_t *t,
+                               const char *role,
+                               const char *text,
+                               size_t text_len) {
+   if (!t || !role || !text || text_len == 0)
+      return;
+
+   pthread_mutex_lock(&t->mutex);
+
+   /* Find the most recent AI entry to update, or create one */
+   transcript_entry_t *target = NULL;
+
+   if (t->entry_count > 0) {
+      int last_idx = (t->write_index - 1 + TRANSCRIPT_MAX_ENTRIES) % TRANSCRIPT_MAX_ENTRIES;
+      transcript_entry_t *last = &t->entries[last_idx];
+      if (!last->is_user) {
+         target = last;
+      }
+   }
+
+   if (!target) {
+      /* No AI entry yet — create one (same as ui_transcript_add but without advancing) */
+      target = &t->entries[t->write_index];
+      invalidate_entry_cache(target);
+      snprintf(target->role, sizeof(target->role), "%s", role);
+      target->text[0] = '\0';
+      target->is_user = false;
+
+      t->write_index = (t->write_index + 1) % TRANSCRIPT_MAX_ENTRIES;
+      if (t->entry_count < TRANSCRIPT_MAX_ENTRIES) {
+         t->entry_count++;
+      }
+   }
+
+   /* Update text if it has changed (compare lengths to avoid strcmp on every poll) */
+   if (text_len != strlen(target->text)) {
+      snprintf(target->text, sizeof(target->text), "%s", text);
+      remove_emojis(target->text);
+      /* Invalidate cached texture so it re-renders with new text */
+      invalidate_entry_cache(target);
    }
 
    pthread_mutex_unlock(&t->mutex);

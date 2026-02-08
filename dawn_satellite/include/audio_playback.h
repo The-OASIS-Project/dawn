@@ -38,6 +38,7 @@ typedef struct {
    unsigned int channels;    /* Number of channels */
    size_t period_size;       /* ALSA period size in frames */
    int initialized;          /* Initialization state */
+   volatile float amplitude; /* Current RMS amplitude 0.0-1.0 (updated per chunk) */
 } audio_playback_t;
 
 /**

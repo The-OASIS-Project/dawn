@@ -220,6 +220,7 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
    /* Poll voice state */
    voice_state_t state = voice_processing_get_state(ui->voice_ctx);
    float vad_prob = voice_processing_get_vad_probability(ui->voice_ctx);
+   float audio_amp = voice_processing_get_playback_amplitude(ui->voice_ctx);
 
    /* Track state changes for idle timeout and transcript management */
    if (state != ui->last_state) {
@@ -233,22 +234,26 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
       ui->last_state_change_time = time_sec;
    }
 
-   /* Check response_complete flag (avoids missed transitions) */
+   /* Check response_complete flag — finalize the live transcript entry */
    if (!ui->response_added && voice_processing_is_response_complete(ui->voice_ctx)) {
       size_t len = voice_processing_get_response_text(ui->voice_ctx, ui->last_response,
                                                       sizeof(ui->last_response));
       if (len > 0) {
-         ui_transcript_add(&ui->transcript, ui->ai_name, ui->last_response, false);
-         ui->response_added = true;
+         /* Final update to live entry with complete text */
+         ui_transcript_update_live(&ui->transcript, ui->ai_name, ui->last_response, len);
       }
+      ui->response_added = true;
    }
 
-   /* Poll response text periodically during WAITING state */
-   if ((state == VOICE_STATE_WAITING || state == VOICE_STATE_SPEAKING) &&
+   /* Poll response text and stream into transcript during WAITING/SPEAKING */
+   if (!ui->response_added && (state == VOICE_STATE_WAITING || state == VOICE_STATE_SPEAKING) &&
        (time_sec - ui->last_poll_time) * 1000.0 >= RESPONSE_POLL_MS) {
       ui->last_poll_time = time_sec;
-      voice_processing_get_response_text(ui->voice_ctx, ui->last_response,
-                                         sizeof(ui->last_response));
+      size_t len = voice_processing_get_response_text(ui->voice_ctx, ui->last_response,
+                                                      sizeof(ui->last_response));
+      if (len > 0) {
+         ui_transcript_update_live(&ui->transcript, ui->ai_name, ui->last_response, len);
+      }
    }
 
    /* Clear screen with primary background */
@@ -265,7 +270,7 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
    /* Render orb in left panel */
    int orb_cx = ORB_PANEL_WIDTH / 2;
    int orb_cy = ui->height / 2;
-   ui_orb_render(&ui->orb, r, orb_cx, orb_cy, state, vad_prob, time_sec);
+   ui_orb_render(&ui->orb, r, orb_cx, orb_cy, state, vad_prob, audio_amp, time_sec);
 
    /* Render transcript in right panel */
    ui_transcript_render(&ui->transcript, r, state);

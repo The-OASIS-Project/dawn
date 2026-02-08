@@ -207,11 +207,6 @@ static float thinking_scale(double time_sec) {
    return 1.0f + 0.04f * sinf((float)(time_sec * 2.0 * PI / 1.5));
 }
 
-static float speaking_scale(double time_sec) {
-   /* Subtle pulse: 2-second period */
-   return 1.0f + 0.015f * sinf((float)(time_sec * 2.0 * PI / 2.0));
-}
-
 /* =============================================================================
  * Public API
  * ============================================================================= */
@@ -259,6 +254,7 @@ void ui_orb_render(ui_orb_ctx_t *ctx,
                    int cy,
                    voice_state_t state,
                    float vad_prob,
+                   float audio_amp,
                    double time_sec) {
    if (!ctx || !renderer)
       return;
@@ -304,8 +300,9 @@ void ui_orb_render(ui_orb_ctx_t *ctx,
          glow_alpha_mult = 0.4f + 0.3f * (0.5f + 0.5f * sinf((float)(time_sec * 2.0 * PI / 1.5)));
          break;
       case VOICE_STATE_SPEAKING:
-         scale = speaking_scale(time_sec);
-         glow_alpha_mult = 0.5f;
+         /* Audio amplitude drives core pulse and glow (mirrors WebUI EQ feel) */
+         scale = 1.0f + audio_amp * 0.25f;          /* 1.0-1.25x scale like WebUI */
+         glow_alpha_mult = 0.4f + audio_amp * 0.5f; /* 0.4-0.9 glow tracks volume */
          break;
       default:
          break;
@@ -368,7 +365,8 @@ void ui_orb_render(ui_orb_ctx_t *ctx,
          break;
       }
       case VOICE_STATE_SPEAKING:
-         middle_active = RING_SEGMENTS; /* Full */
+         /* Amplitude-proportional fill (like WebUI throughput ring) */
+         middle_active = 16 + (int)(audio_amp * 48);
          break;
       default:
          break;
@@ -400,7 +398,8 @@ void ui_orb_render(ui_orb_ctx_t *ctx,
          break;
       case VOICE_STATE_SPEAKING:
          inner_active = RING_SEGMENTS;
-         inner_scale = 1.0f + 0.15f * sinf((float)(time_sec * 2.0 * PI / 0.8));
+         /* Audio amplitude modulates inner ring width (like WebUI bar heights) */
+         inner_scale = 0.5f + audio_amp * 2.0f;
          break;
       default:
          inner_active = RING_SEGMENTS;

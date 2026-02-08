@@ -138,6 +138,17 @@ float voice_processing_get_vad_probability(const voice_ctx_t *ctx);
 size_t voice_processing_get_response_text(voice_ctx_t *ctx, char *buf, size_t buf_size);
 
 /**
+ * @brief Get current audio playback amplitude
+ *
+ * Returns the RMS amplitude of the most recent playback chunk.
+ * Safe to call from any thread (volatile float read).
+ *
+ * @param ctx Voice processing context
+ * @return Amplitude 0.0-1.0, or 0.0 if not playing
+ */
+float voice_processing_get_playback_amplitude(const voice_ctx_t *ctx);
+
+/**
  * @brief Check if the response is complete
  *
  * Thread-safe atomic read. Returns true when the voice processing loop

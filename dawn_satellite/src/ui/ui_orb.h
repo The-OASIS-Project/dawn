@@ -75,6 +75,7 @@ void ui_orb_cleanup(ui_orb_ctx_t *ctx);
  * @param cy Center Y of orb
  * @param state Current voice processing state
  * @param vad_prob Current VAD speech probability (0.0-1.0)
+ * @param audio_amp Current audio playback amplitude (0.0-1.0, for SPEAKING state)
  * @param time_sec Monotonic time for animation
  */
 void ui_orb_render(ui_orb_ctx_t *ctx,
@@ -83,6 +84,7 @@ void ui_orb_render(ui_orb_ctx_t *ctx,
                    int cy,
                    voice_state_t state,
                    float vad_prob,
+                   float audio_amp,
                    double time_sec);
 
 #ifdef __cplusplus

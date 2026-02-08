@@ -499,6 +499,9 @@ static void on_sentence_complete(const char *sentence, void *userdata) {
 
    LOG_INFO("Speaking sentence: %.60s%s", tts_text, strlen(tts_text) > 60 ? "..." : "");
 
+   /* Set SPEAKING state so UI shows cyan orb during TTS playback */
+   ctx->state = VOICE_STATE_SPEAKING;
+
    /* Synthesize and play this sentence */
    int16_t *audio = NULL;
    size_t audio_len = 0;
@@ -515,6 +518,10 @@ static void on_sentence_complete(const char *sentence, void *userdata) {
          usleep(150000); /* 150ms pause */
       }
    }
+
+   /* Return to WAITING (more sentences may follow; main loop transitions to SILENCE
+    * when response_complete fires) */
+   ctx->state = VOICE_STATE_WAITING;
 #else
    LOG_DEBUG("Sentence (TTS disabled): %s", sentence);
 #endif
@@ -733,6 +740,10 @@ void voice_processing_stop(voice_ctx_t *ctx) {
 
 float voice_processing_get_vad_probability(const voice_ctx_t *ctx) {
    return ctx ? ctx->last_speech_prob : 0.0f;
+}
+
+float voice_processing_get_playback_amplitude(const voice_ctx_t *ctx) {
+   return (ctx && ctx->playback) ? ctx->playback->amplitude : 0.0f;
 }
 
 bool voice_processing_is_response_complete(voice_ctx_t *ctx) {
