@@ -37,6 +37,9 @@ extern "C" {
 /* Pre-rendered glow textures - one per state color */
 #define NUM_GLOW_TEXTURES 5
 
+/* Spectrum bar trail history depth */
+#define SPECTRUM_TRAIL_FRAMES 4
+
 /**
  * @brief Orb rendering context (all state is instance-local)
  */
@@ -47,6 +50,12 @@ typedef struct {
    ui_color_t target_color;
    double color_transition_start;
    bool color_transitioning;
+
+   /* Spectrum bar visualization (SPEAKING state) */
+   float smoothed_spectrum[SPECTRUM_BINS];                     /* Temporally smoothed values */
+   float spectrum_trail[SPECTRUM_TRAIL_FRAMES][SPECTRUM_BINS]; /* Trail history circular buffer */
+   int trail_write_idx;                                        /* Next write position in trail */
+   int trail_frame_counter;                                    /* Frames since last trail sample */
 } ui_orb_ctx_t;
 
 /**
@@ -86,6 +95,17 @@ void ui_orb_render(ui_orb_ctx_t *ctx,
                    float vad_prob,
                    float audio_amp,
                    double time_sec);
+
+/**
+ * @brief Set spectrum data for bar visualization (context setter)
+ *
+ * Call before ui_orb_render() each frame. Keeps render signature stable.
+ *
+ * @param ctx Orb context
+ * @param spectrum Array of SPECTRUM_BINS magnitude values (0.0-1.0)
+ * @param count Number of values in array
+ */
+void ui_orb_set_spectrum(ui_orb_ctx_t *ctx, const float *spectrum, int count);
 
 #ifdef __cplusplus
 }

@@ -62,6 +62,18 @@ static const float glow_alphas[GLOW_LAYERS] = { 0.3f, 0.2f, 0.12f, 0.05f };
 /* Color transition */
 #define COLOR_TRANSITION_MS 300.0
 
+/* Spectrum bar visualization */
+#define BAR_COUNT SPECTRUM_BINS
+#define BAR_INNER_R 75
+#define BAR_MAX_OUTER_R 135
+#define BAR_MIN_EXTENSION 6                               /* Always-visible resting ring */
+#define BAR_MAX_EXTENSION (BAR_MAX_OUTER_R - BAR_INNER_R) /* 60px */
+#define BAR_WIDTH_CURRENT 3                               /* Current frame bar width */
+#define BAR_WIDTH_TRAIL 1                                 /* Trail frame bar width */
+#define TRAIL_SAMPLE_INTERVAL 5   /* Frames between trail samples (~167ms at 30 FPS) */
+#define SPECTRUM_SMOOTH_NEW 0.45f /* Snappy response */
+#define SPECTRUM_SMOOTH_OLD 0.55f /* Complement */
+
 /* =============================================================================
  * Shared Read-Only Trig Table (computed once, safe to share)
  * ============================================================================= */
@@ -92,6 +104,23 @@ static void init_ring_trig_table(void) {
    }
 
    trig_table_initialized = true;
+}
+
+/* Pre-computed bar angle trig tables (one cos/sin per bar, evenly spaced around circle) */
+static float bar_cos[BAR_COUNT];
+static float bar_sin[BAR_COUNT];
+static bool bar_trig_initialized = false;
+
+static void init_bar_trig_table(void) {
+   if (bar_trig_initialized)
+      return;
+
+   for (int i = 0; i < BAR_COUNT; i++) {
+      float angle = (float)(2.0 * PI * i) / (float)BAR_COUNT;
+      bar_cos[i] = cosf(angle);
+      bar_sin[i] = sinf(angle);
+   }
+   bar_trig_initialized = true;
 }
 
 /* =============================================================================
@@ -208,6 +237,123 @@ static float thinking_scale(double time_sec) {
 }
 
 /* =============================================================================
+ * Spectrum Bar Rendering (SPEAKING state only)
+ * ============================================================================= */
+
+/**
+ * Compute per-bar color: cyan (#22d3ee) → amber (#f59e0b) based on magnitude.
+ * Derived from WebUI visualization.js gradient.
+ */
+static void bar_color(float mag, uint8_t *r, uint8_t *g, uint8_t *b) {
+   if (mag < 0.0f)
+      mag = 0.0f;
+   if (mag > 1.0f)
+      mag = 1.0f;
+   *r = (uint8_t)(34.0f + 211.0f * mag);  /* 34→245 */
+   *g = (uint8_t)(211.0f - 53.0f * mag);  /* 211→158 */
+   *b = (uint8_t)(238.0f - 227.0f * mag); /* 238→11 */
+}
+
+/**
+ * Draw a single radial bar as a rotated filled rectangle using SDL_RenderFillRect.
+ * Since SDL2 doesn't support rotated rects natively, we draw the bar as a series
+ * of small rects along the radial direction.
+ */
+static void draw_radial_bar(SDL_Renderer *renderer,
+                            int cx,
+                            int cy,
+                            int bar_idx,
+                            int inner_r,
+                            int length,
+                            int width,
+                            uint8_t r,
+                            uint8_t g,
+                            uint8_t b,
+                            uint8_t a) {
+   SDL_SetRenderDrawColor(renderer, r, g, b, a);
+
+   float cos_a = bar_cos[bar_idx];
+   float sin_a = bar_sin[bar_idx];
+   int half_w = width / 2;
+
+   /* Draw filled rect along the radial direction, stepping outward */
+   for (int d = 0; d < length; d++) {
+      int dist = inner_r + d;
+      int px = cx + (int)(dist * cos_a);
+      int py = cy + (int)(dist * sin_a);
+
+      /* Small rect perpendicular to the radial direction */
+      SDL_Rect rect = { px - half_w, py - half_w, width, width };
+      SDL_RenderFillRect(renderer, &rect);
+   }
+}
+
+static void draw_spectrum_bars(ui_orb_ctx_t *ctx, SDL_Renderer *renderer, int cx, int cy) {
+   /* Trail opacities (oldest to newest, higher than WebUI for SDL2 visibility) */
+   static const float trail_opacities[SPECTRUM_TRAIL_FRAMES] = { 0.25f, 0.35f, 0.50f, 0.70f };
+
+   /* Smoothing already applied in ui_orb_set_spectrum() */
+
+   /* Push to trail circular buffer every TRAIL_SAMPLE_INTERVAL frames */
+   ctx->trail_frame_counter++;
+   if (ctx->trail_frame_counter >= TRAIL_SAMPLE_INTERVAL) {
+      ctx->trail_frame_counter = 0;
+      memcpy(ctx->spectrum_trail[ctx->trail_write_idx], ctx->smoothed_spectrum,
+             sizeof(float) * BAR_COUNT);
+      ctx->trail_write_idx = (ctx->trail_write_idx + 1) % SPECTRUM_TRAIL_FRAMES;
+   }
+
+   /* Render trail frames (oldest first) */
+   for (int t = 0; t < SPECTRUM_TRAIL_FRAMES; t++) {
+      /* Read from oldest to newest in circular buffer */
+      int trail_idx = (ctx->trail_write_idx + t) % SPECTRUM_TRAIL_FRAMES;
+      float opacity = trail_opacities[t];
+      uint8_t alpha = (uint8_t)(opacity * 255.0f);
+
+      for (int k = 0; k < BAR_COUNT; k++) {
+         float mag = ctx->spectrum_trail[trail_idx][k];
+         int extension = (int)(mag * BAR_MAX_EXTENSION);
+         if (extension < BAR_MIN_EXTENSION)
+            extension = BAR_MIN_EXTENSION;
+
+         uint8_t r, g, b;
+         bar_color(mag, &r, &g, &b);
+         draw_radial_bar(renderer, cx, cy, k, BAR_INNER_R, extension, BAR_WIDTH_TRAIL, r, g, b,
+                         alpha);
+      }
+   }
+
+   /* Render current frame (on top) */
+   uint8_t current_alpha = (uint8_t)(0.90f * 255.0f);
+   for (int k = 0; k < BAR_COUNT; k++) {
+      float mag = ctx->smoothed_spectrum[k];
+      int extension = (int)(mag * BAR_MAX_EXTENSION);
+      if (extension < BAR_MIN_EXTENSION)
+         extension = BAR_MIN_EXTENSION;
+
+      uint8_t r, g, b;
+      bar_color(mag, &r, &g, &b);
+      draw_radial_bar(renderer, cx, cy, k, BAR_INNER_R, extension, BAR_WIDTH_CURRENT, r, g, b,
+                      current_alpha);
+   }
+}
+
+void ui_orb_set_spectrum(ui_orb_ctx_t *ctx, const float *spectrum, int count) {
+   if (!ctx || !spectrum)
+      return;
+   int n = count < SPECTRUM_BINS ? count : SPECTRUM_BINS;
+
+   /* Apply temporal smoothing: blend new data with previous smoothed values */
+   for (int k = 0; k < n; k++) {
+      ctx->smoothed_spectrum[k] = SPECTRUM_SMOOTH_NEW * spectrum[k] +
+                                  SPECTRUM_SMOOTH_OLD * ctx->smoothed_spectrum[k];
+   }
+   for (int k = n; k < SPECTRUM_BINS; k++) {
+      ctx->smoothed_spectrum[k] *= SPECTRUM_SMOOTH_OLD;
+   }
+}
+
+/* =============================================================================
  * Public API
  * ============================================================================= */
 
@@ -217,8 +363,9 @@ void ui_orb_init(ui_orb_ctx_t *ctx, SDL_Renderer *renderer) {
 
    memset(ctx, 0, sizeof(*ctx));
 
-   /* Pre-compute trig lookup table (shared, computed once) */
+   /* Pre-compute trig lookup tables (shared, computed once) */
    init_ring_trig_table();
+   init_bar_trig_table();
 
    /* Pre-render glow textures for each state color */
    ctx->glow_colors[0] = UI_COLOR_IDLE;
@@ -376,36 +523,36 @@ void ui_orb_render(ui_orb_ctx_t *ctx,
    draw_ring(renderer, cx, cy, RING_MIDDLE_R, RING_MIDDLE_W, middle_active, ctx->current_color,
              1.0f);
 
-   /* Inner ring: VAD waveform visualization */
-   int inner_active = 0;
-   float inner_scale = 1.0f;
-   switch (state) {
-      case VOICE_STATE_SILENCE: {
-         /* Gentle idle animation */
-         inner_active = RING_SEGMENTS;
-         inner_scale = 0.5f + 0.2f * sinf((float)(time_sec * 2.0 * PI / 4.0));
-         break;
+   /* Inner ring: spectrum bars during SPEAKING, ring segments otherwise */
+   if (state == VOICE_STATE_SPEAKING) {
+      /* Draw radial spectrum bars instead of inner ring */
+      draw_spectrum_bars(ctx, renderer, cx, cy);
+   } else {
+      int inner_active = 0;
+      float inner_scale = 1.0f;
+      switch (state) {
+         case VOICE_STATE_SILENCE: {
+            /* Gentle idle animation */
+            inner_active = RING_SEGMENTS;
+            inner_scale = 0.5f + 0.2f * sinf((float)(time_sec * 2.0 * PI / 4.0));
+            break;
+         }
+         case VOICE_STATE_WAKEWORD_LISTEN:
+         case VOICE_STATE_COMMAND_RECORDING:
+            inner_active = RING_SEGMENTS;
+            inner_scale = 0.5f + vad_prob * 1.5f; /* VAD modulates width */
+            break;
+         case VOICE_STATE_PROCESSING:
+         case VOICE_STATE_WAITING:
+            inner_active = RING_SEGMENTS;
+            inner_scale = 0.7f;
+            break;
+         default:
+            inner_active = RING_SEGMENTS;
+            inner_scale = 0.5f;
+            break;
       }
-      case VOICE_STATE_WAKEWORD_LISTEN:
-      case VOICE_STATE_COMMAND_RECORDING:
-         inner_active = RING_SEGMENTS;
-         inner_scale = 0.5f + vad_prob * 1.5f; /* VAD modulates width */
-         break;
-      case VOICE_STATE_PROCESSING:
-      case VOICE_STATE_WAITING:
-         inner_active = RING_SEGMENTS;
-         inner_scale = 0.7f;
-         break;
-      case VOICE_STATE_SPEAKING:
-         inner_active = RING_SEGMENTS;
-         /* Audio amplitude modulates inner ring width (like WebUI bar heights) */
-         inner_scale = 0.5f + audio_amp * 2.0f;
-         break;
-      default:
-         inner_active = RING_SEGMENTS;
-         inner_scale = 0.5f;
-         break;
+      draw_ring(renderer, cx, cy, RING_INNER_R, RING_INNER_W, inner_active, ctx->current_color,
+                inner_scale);
    }
-   draw_ring(renderer, cx, cy, RING_INNER_R, RING_INNER_W, inner_active, ctx->current_color,
-             inner_scale);
 }

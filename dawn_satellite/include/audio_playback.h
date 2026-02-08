@@ -21,6 +21,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "spectrum_defs.h" /* For SPECTRUM_BINS */
+
 /* Default playback device - I2S amp on Pi Zero 2 */
 #define AUDIO_DEFAULT_PLAYBACK_DEVICE "plughw:0,0"
 
@@ -32,13 +34,14 @@
  * Audio playback context
  */
 typedef struct {
-   void *handle;             /* ALSA PCM handle */
-   char device[64];          /* Device name */
-   unsigned int sample_rate; /* Actual sample rate */
-   unsigned int channels;    /* Number of channels */
-   size_t period_size;       /* ALSA period size in frames */
-   int initialized;          /* Initialization state */
-   volatile float amplitude; /* Current RMS amplitude 0.0-1.0 (updated per chunk) */
+   void *handle;                           /* ALSA PCM handle */
+   char device[64];                        /* Device name */
+   unsigned int sample_rate;               /* Actual sample rate */
+   unsigned int channels;                  /* Number of channels */
+   size_t period_size;                     /* ALSA period size in frames */
+   int initialized;                        /* Initialization state */
+   volatile float amplitude;               /* Current RMS amplitude 0.0-1.0 (updated per chunk) */
+   volatile float spectrum[SPECTRUM_BINS]; /* FFT magnitude bins 0.0-1.0 (updated per chunk) */
 } audio_playback_t;
 
 /**

@@ -91,6 +91,9 @@ struct sdl_ui {
    size_t last_response_len;
    bool response_added; /* True after adding completed response to transcript */
    double last_poll_time;
+
+   /* Spectrum data buffer for orb visualization */
+   float spectrum[SPECTRUM_BINS];
 };
 
 /* =============================================================================
@@ -221,6 +224,12 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
    voice_state_t state = voice_processing_get_state(ui->voice_ctx);
    float vad_prob = voice_processing_get_vad_probability(ui->voice_ctx);
    float audio_amp = voice_processing_get_playback_amplitude(ui->voice_ctx);
+
+   /* Poll spectrum data only during SPEAKING (avoid unnecessary copies) */
+   if (state == VOICE_STATE_SPEAKING) {
+      voice_processing_get_playback_spectrum(ui->voice_ctx, ui->spectrum, SPECTRUM_BINS);
+      ui_orb_set_spectrum(&ui->orb, ui->spectrum, SPECTRUM_BINS);
+   }
 
    /* Track state changes for idle timeout and transcript management */
    if (state != ui->last_state) {

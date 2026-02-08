@@ -746,6 +746,23 @@ float voice_processing_get_playback_amplitude(const voice_ctx_t *ctx) {
    return (ctx && ctx->playback) ? ctx->playback->amplitude : 0.0f;
 }
 
+void voice_processing_get_playback_spectrum(const voice_ctx_t *ctx, float *out, int count) {
+   if (!ctx || !out || count <= 0)
+      return;
+   if (!ctx->playback) {
+      memset(out, 0, count * sizeof(float));
+      return;
+   }
+   /* Volatile read — torn reads are acceptable for visualization */
+   int n = count < SPECTRUM_BINS ? count : SPECTRUM_BINS;
+   for (int i = 0; i < n; i++) {
+      out[i] = ctx->playback->spectrum[i];
+   }
+   for (int i = n; i < count; i++) {
+      out[i] = 0.0f;
+   }
+}
+
 bool voice_processing_is_response_complete(voice_ctx_t *ctx) {
    return ctx ? atomic_load(&ctx->response_complete) : false;
 }

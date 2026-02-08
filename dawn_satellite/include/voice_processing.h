@@ -26,6 +26,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "spectrum_defs.h" /* SPECTRUM_BINS shared between audio and UI */
+
 /* Forward declarations - matching actual struct names */
 struct satellite_config;
 struct satellite_ctx;
@@ -180,6 +182,18 @@ void voice_processing_speak_greeting(voice_ctx_t *ctx, struct satellite_ctx *sat
  * @param sat_ctx Satellite context (for audio playback)
  */
 void voice_processing_speak_offline(voice_ctx_t *ctx, struct satellite_ctx *sat_ctx);
+
+/**
+ * @brief Copy current playback spectrum data to caller buffer
+ *
+ * Copies the most recent FFT magnitude bins from playback audio.
+ * Volatile array — torn reads accepted for visualization purposes.
+ *
+ * @param ctx Voice processing context
+ * @param out Destination buffer (at least count floats)
+ * @param count Number of bins to copy (max SPECTRUM_BINS)
+ */
+void voice_processing_get_playback_spectrum(const voice_ctx_t *ctx, float *out, int count);
 
 #ifdef __cplusplus
 }
