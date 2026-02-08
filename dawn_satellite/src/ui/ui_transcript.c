@@ -23,8 +23,10 @@
 
 #include "ui/ui_transcript.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "logging.h"
 #include "tts/tts_preprocessing.h"
@@ -45,6 +47,44 @@
 /* Fallback font paths if font_dir not specified */
 #define FALLBACK_MONO_FONT "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 #define FALLBACK_BODY_FONT "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
+/* =============================================================================
+ * WiFi Signal Quality Reader
+ * ============================================================================= */
+
+/**
+ * @brief Read WiFi link quality from /proc/net/wireless
+ * @return 0-100 quality, or -1 if no wireless interface
+ */
+static int read_wifi_quality(void) {
+   FILE *f = fopen("/proc/net/wireless", "r");
+   if (!f)
+      return -1;
+
+   char line[256];
+   int quality = -1;
+
+   /* Skip 2 header lines */
+   if (!fgets(line, sizeof(line), f) || !fgets(line, sizeof(line), f)) {
+      fclose(f);
+      return -1;
+   }
+
+   /* Parse first interface line: "wlan0: 0000 70. -40. ..." */
+   if (fgets(line, sizeof(line), f)) {
+      float link_quality;
+      if (sscanf(line, "%*s %*d %f", &link_quality) == 1) {
+         quality = (int)link_quality;
+         if (quality < 0)
+            quality = 0;
+         if (quality > 100)
+            quality = 100;
+      }
+   }
+
+   fclose(f);
+   return quality;
+}
 
 /* =============================================================================
  * Font Loading Helper
@@ -128,6 +168,10 @@ static void ensure_entry_cached(ui_transcript_t *t, transcript_entry_t *entry) {
       }
       char role_label[40];
       snprintf(role_label, sizeof(role_label), "%s:", entry->role);
+      if (!entry->is_user) {
+         for (char *p = role_label; *p && *p != ':'; p++)
+            *p = toupper((unsigned char)*p);
+      }
       SDL_Surface *surface = TTF_RenderUTF8_Blended(t->label_font, role_label, role_color);
       if (surface) {
          entry->cached_role_tex = SDL_CreateTextureFromSurface(t->renderer, surface);
@@ -286,7 +330,7 @@ void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_stat
 
    /* Render state label at top */
    if (t->label_font) {
-      ui_color_t state_color = ui_color_for_state(state);
+      ui_color_t state_color = ui_label_color_for_state(state);
       SDL_Color label_sdl = { state_color.r, state_color.g, state_color.b, 255 };
 
       char label_text[32];
@@ -305,8 +349,94 @@ void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_stat
       }
    }
 
-   /* Transcript content area (below label, above bottom padding) */
-   int content_top = t->panel_y + t->padding + LABEL_HEIGHT + ENTRY_SPACING;
+   /* Render date/time top-right */
+   if (t->label_font) {
+      time_t now = time(NULL);
+      struct tm *tm_info = localtime(&now);
+      char time_str[40];
+      strftime(time_str, sizeof(time_str), "%a %b %-d  %-I:%M %p", tm_info);
+
+      SDL_Color time_color = { COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
+                               COLOR_TEXT_SECONDARY_B, 255 };
+      SDL_Surface *time_surface = TTF_RenderUTF8_Blended(t->label_font, time_str, time_color);
+      if (time_surface) {
+         int time_x = t->panel_x + t->panel_w - t->padding - time_surface->w;
+         SDL_Texture *time_tex = SDL_CreateTextureFromSurface(renderer, time_surface);
+         if (time_tex) {
+            SDL_Rect dst = { time_x, label_y, time_surface->w, time_surface->h };
+            SDL_RenderCopy(renderer, time_tex, NULL, &dst);
+            SDL_DestroyTexture(time_tex);
+         }
+
+         /* WiFi signal indicator (4 bars to the left of date/time) */
+         if (now != t->last_wifi_poll) {
+            t->last_wifi_poll = now;
+            t->wifi_quality = read_wifi_quality();
+         }
+
+         if (t->wifi_quality >= 0) {
+            int wifi_bars;
+            if (t->wifi_quality >= 70)
+               wifi_bars = 4;
+            else if (t->wifi_quality >= 50)
+               wifi_bars = 3;
+            else if (t->wifi_quality >= 30)
+               wifi_bars = 2;
+            else if (t->wifi_quality >= 10)
+               wifi_bars = 1;
+            else
+               wifi_bars = 0;
+
+            int bar_gap = 3;
+            int bar_w = 4;
+            int wifi_total_w = 4 * bar_w + 3 * bar_gap;
+            int wifi_x = time_x - wifi_total_w - 12;
+            int wifi_base_y = label_y + time_surface->h - 2;
+
+            for (int b = 0; b < 4; b++) {
+               int bar_h = 4 + b * 4; /* Heights: 4, 8, 12, 16 */
+               int bx = wifi_x + b * (bar_w + bar_gap);
+               int by = wifi_base_y - bar_h;
+
+               if (b < wifi_bars) {
+                  SDL_SetRenderDrawColor(renderer, COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
+                                         COLOR_TEXT_SECONDARY_B, 255);
+               } else {
+                  SDL_SetRenderDrawColor(renderer, COLOR_BG_TERTIARY_R, COLOR_BG_TERTIARY_G,
+                                         COLOR_BG_TERTIARY_B, 255);
+               }
+
+               SDL_Rect bar_rect = { bx, by, bar_w, bar_h };
+               SDL_RenderFillRect(renderer, &bar_rect);
+            }
+         }
+
+         SDL_FreeSurface(time_surface);
+      }
+   }
+
+   /* Render status detail below state label (tool calls, thinking info) */
+   int detail_height = 0;
+   if (t->label_font && t->status_detail[0]) {
+      SDL_Color detail_color = { COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
+                                 COLOR_TEXT_SECONDARY_B, 255 };
+      SDL_Surface *detail_surface = TTF_RenderUTF8_Blended(t->label_font, t->status_detail,
+                                                           detail_color);
+      if (detail_surface) {
+         SDL_Texture *detail_tex = SDL_CreateTextureFromSurface(renderer, detail_surface);
+         if (detail_tex) {
+            int detail_y = label_y + LABEL_HEIGHT - 4;
+            SDL_Rect dst = { x, detail_y, detail_surface->w, detail_surface->h };
+            SDL_RenderCopy(renderer, detail_tex, NULL, &dst);
+            SDL_DestroyTexture(detail_tex);
+            detail_height = detail_surface->h + 4;
+         }
+         SDL_FreeSurface(detail_surface);
+      }
+   }
+
+   /* Transcript content area (below label + optional detail, above bottom padding) */
+   int content_top = t->panel_y + t->padding + LABEL_HEIGHT + detail_height + ENTRY_SPACING;
    int content_bottom = t->panel_y + t->panel_h - t->padding;
 
    if (!t->body_font || t->entry_count == 0)

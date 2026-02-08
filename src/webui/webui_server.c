@@ -4425,6 +4425,9 @@ char *webui_process_commands(const char *llm_response, session_t *session) {
                              json_object_new_int64(ocp_get_timestamp_ms()));
       const char *cmd_with_id = json_object_to_json_string(parsed_json);
 
+      /* Send tool call status to UI (works for both WebUI and satellites) */
+      webui_send_state_with_detail(session, "tool_call", device_name);
+
       /* Publish command via MQTT */
       int rc = mosquitto_publish(mosq, NULL, APPLICATION_NAME, strlen(cmd_with_id), cmd_with_id, 0,
                                  false);

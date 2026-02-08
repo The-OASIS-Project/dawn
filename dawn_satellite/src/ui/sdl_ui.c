@@ -284,6 +284,10 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
    int orb_cy = ui->height / 2;
    ui_orb_render(&ui->orb, r, orb_cx, orb_cy, state, vad_prob, audio_amp, time_sec);
 
+   /* Poll status detail for transcript display */
+   voice_processing_get_status_detail(ui->voice_ctx, ui->transcript.status_detail,
+                                      sizeof(ui->transcript.status_detail));
+
    /* Render transcript in right panel */
    ui_transcript_render(&ui->transcript, r, state);
 

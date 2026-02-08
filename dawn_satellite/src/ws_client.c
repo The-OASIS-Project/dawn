@@ -74,6 +74,9 @@ struct ws_client {
    /* Error message */
    char error_msg[256];
 
+   /* Status detail from daemon (tool calls, thinking info) */
+   char status_detail[128];
+
    /* Thread safety */
    pthread_mutex_t mutex;
 
@@ -300,10 +303,23 @@ static void handle_message(ws_client_t *client, const char *msg, size_t len) {
       LOG_DEBUG("Pong received");
    } else if (strcmp(type, "state") == 0) {
       if (payload) {
-         struct json_object *state_obj;
+         struct json_object *state_obj, *detail_obj;
          if (json_object_object_get_ex(payload, "state", &state_obj)) {
             const char *state = json_object_get_string(state_obj);
             LOG_DEBUG("State: %s", state);
+
+            /* Store detail if present, clear on idle */
+            if (json_object_object_get_ex(payload, "detail", &detail_obj)) {
+               const char *detail = json_object_get_string(detail_obj);
+               if (detail) {
+                  strncpy(client->status_detail, detail, sizeof(client->status_detail) - 1);
+                  client->status_detail[sizeof(client->status_detail) - 1] = '\0';
+               } else {
+                  client->status_detail[0] = '\0';
+               }
+            } else {
+               client->status_detail[0] = '\0';
+            }
 
             if (client->state_cb) {
                pthread_mutex_unlock(&client->mutex);
@@ -800,4 +816,22 @@ void ws_client_set_reconnect_secret(ws_client_t *client, const char *secret) {
            sizeof(client->identity.reconnect_secret) - 1);
    client->identity.reconnect_secret[sizeof(client->identity.reconnect_secret) - 1] = '\0';
    pthread_mutex_unlock(&client->mutex);
+}
+
+size_t ws_client_get_status_detail(ws_client_t *client, char *buf, size_t buf_size) {
+   if (!client || !buf || buf_size == 0)
+      return 0;
+
+   pthread_mutex_lock(&client->mutex);
+   size_t len = strlen(client->status_detail);
+   if (len > 0) {
+      size_t copy_len = len < buf_size - 1 ? len : buf_size - 1;
+      memcpy(buf, client->status_detail, copy_len);
+      buf[copy_len] = '\0';
+      len = copy_len;
+   } else {
+      buf[0] = '\0';
+   }
+   pthread_mutex_unlock(&client->mutex);
+   return len;
 }

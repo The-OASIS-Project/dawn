@@ -79,6 +79,13 @@ typedef struct {
 
    /* AI name for display */
    char ai_name[32];
+
+   /* WiFi signal quality (polled once per second) */
+   time_t last_wifi_poll;
+   int wifi_quality; /* 0-100, or -1 if no wireless */
+
+   /* Status detail from daemon (tool calls, thinking info) */
+   char status_detail[128];
 } ui_transcript_t;
 
 /**

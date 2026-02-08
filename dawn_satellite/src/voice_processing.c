@@ -175,6 +175,9 @@ struct voice_ctx {
    /* Audio playback handle for sentence-level TTS (set during loop) */
    audio_playback_t *playback;
    volatile int tts_stop_flag;
+
+   /* WebSocket client for status detail access */
+   ws_client_t *ws;
 };
 
 /* =============================================================================
@@ -778,6 +781,12 @@ size_t voice_processing_get_response_text(voice_ctx_t *ctx, char *buf, size_t bu
    return len;
 }
 
+size_t voice_processing_get_status_detail(voice_ctx_t *ctx, char *buf, size_t buf_size) {
+   if (!ctx || !ctx->ws || !buf || buf_size == 0)
+      return 0;
+   return ws_client_get_status_detail(ctx->ws, buf, buf_size);
+}
+
 void voice_processing_speak_greeting(voice_ctx_t *ctx, satellite_ctx_t *sat_ctx) {
    if (!ctx || !sat_ctx)
       return;
@@ -861,6 +870,7 @@ int voice_processing_loop(voice_ctx_t *ctx,
    /* Store playback handle for sentence-level TTS callback */
    ctx->playback = playback;
    ctx->tts_stop_flag = 0;
+   ctx->ws = ws;
 
    /* Set up WebSocket callbacks */
    ws_client_set_stream_callback(ws, on_stream_callback, ctx);

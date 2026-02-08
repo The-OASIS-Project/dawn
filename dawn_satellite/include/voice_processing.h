@@ -184,6 +184,18 @@ void voice_processing_speak_greeting(voice_ctx_t *ctx, struct satellite_ctx *sat
 void voice_processing_speak_offline(voice_ctx_t *ctx, struct satellite_ctx *sat_ctx);
 
 /**
+ * @brief Copy current status detail from WebSocket client
+ *
+ * Thread-safe: delegates to ws_client_get_status_detail().
+ *
+ * @param ctx Voice processing context
+ * @param buf Destination buffer
+ * @param buf_size Size of destination buffer
+ * @return Number of bytes copied (excluding null terminator)
+ */
+size_t voice_processing_get_status_detail(voice_ctx_t *ctx, char *buf, size_t buf_size);
+
+/**
  * @brief Copy current playback spectrum data to caller buffer
  *
  * Copies the most recent FFT magnitude bins from playback audio.

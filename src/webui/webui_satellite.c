@@ -268,8 +268,8 @@ static void *satellite_worker_thread(void *arg) {
 
    LOG_INFO("Satellite: Processing query from %s: %s", session->identity.name, text);
 
-   /* Send "thinking" state */
-   satellite_send_state(session, "thinking");
+   /* Send "thinking" state with detail */
+   webui_send_state_with_detail(session, "thinking", "Processing your request...");
 
    /* Add user message to history */
    session_add_message(session, "user", text);

@@ -116,7 +116,7 @@ static void init_bar_trig_table(void) {
       return;
 
    for (int i = 0; i < BAR_COUNT; i++) {
-      float angle = (float)(2.0 * PI * i) / (float)BAR_COUNT;
+      float angle = (float)(2.0 * PI * i) / (float)BAR_COUNT - (float)(PI / 2.0);
       bar_cos[i] = cosf(angle);
       bar_sin[i] = sinf(angle);
    }

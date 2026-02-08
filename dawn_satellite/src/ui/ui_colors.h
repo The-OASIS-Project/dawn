@@ -149,6 +149,23 @@ static inline const char *ui_state_label(voice_state_t state) {
 }
 
 /* =============================================================================
+ * Label Color Override (brighter for SILENCE so [READY] is visible)
+ * ============================================================================= */
+
+/**
+ * @brief Get label color for a voice state
+ *
+ * Same as ui_color_for_state() except SILENCE returns a brighter color
+ * so the [READY] label is readable on the dark background.
+ */
+static inline ui_color_t ui_label_color_for_state(voice_state_t state) {
+   if (state == VOICE_STATE_SILENCE) {
+      return (ui_color_t){ COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G, COLOR_TEXT_SECONDARY_B };
+   }
+   return ui_color_for_state(state);
+}
+
+/* =============================================================================
  * Color Interpolation
  * ============================================================================= */
 

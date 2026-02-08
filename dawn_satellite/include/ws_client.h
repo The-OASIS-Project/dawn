@@ -303,6 +303,18 @@ void ws_client_generate_uuid(char *uuid);
 const char *ws_client_get_error(ws_client_t *client);
 
 /**
+ * @brief Get current status detail (tool calls, thinking info)
+ *
+ * Thread-safe: acquires mutex internally.
+ *
+ * @param client Client context
+ * @param buf Destination buffer
+ * @param buf_size Size of destination buffer
+ * @return Number of bytes copied (excluding null terminator)
+ */
+size_t ws_client_get_status_detail(ws_client_t *client, char *buf, size_t buf_size);
+
+/**
  * @brief Get the reconnect secret received from server
  *
  * @param client Client context
