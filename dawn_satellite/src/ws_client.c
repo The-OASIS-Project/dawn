@@ -474,14 +474,24 @@ void ws_client_destroy(ws_client_t *client) {
  * Background Service Thread
  * ============================================================================= */
 
+#define WS_PING_INTERVAL_SEC 10
+
 static void *ws_service_thread(void *arg) {
    ws_client_t *client = (ws_client_t *)arg;
+   time_t last_ping = time(NULL);
 
    LOG_INFO("WebSocket service thread started");
 
    while (client->service_running && client->lws_ctx) {
       /* Service with 100ms timeout - this blocks but doesn't affect main voice loop */
       lws_service(client->lws_ctx, 100);
+
+      /* Send application-level ping to keep connection alive during TTS playback */
+      time_t now = time(NULL);
+      if (now - last_ping >= WS_PING_INTERVAL_SEC && client->registered) {
+         ws_client_ping(client);
+         last_ping = now;
+      }
    }
 
    LOG_INFO("WebSocket service thread stopped");
@@ -513,7 +523,6 @@ int ws_client_connect(ws_client_t *client) {
    ctx_info.ka_probes = 0;
    ctx_info.ka_interval = 0;
    ctx_info.timeout_secs = 0;
-   ctx_info.ws_ping_pong_interval = 10; /* WebSocket ping every 10s during TTS playback */
 
    client->lws_ctx = lws_create_context(&ctx_info);
    if (!client->lws_ctx) {
