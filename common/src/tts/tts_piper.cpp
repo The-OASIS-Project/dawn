@@ -151,7 +151,7 @@ int tts_piper_synthesize(tts_piper_context_t *ctx,
 
    try {
       std::vector<int16_t> audioBuffer;
-      piper::SynthesisResult synthResult;
+      piper::SynthesisResult synthResult = {};
       std::atomic<bool> stopFlag(false);
 
       /* Synthesize audio (nullptr callback to keep all samples in buffer) */

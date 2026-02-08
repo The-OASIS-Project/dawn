@@ -3518,6 +3518,7 @@ int webui_server_init(int port, const char *www_path) {
    /* Increase service buffer for large WebSocket messages (conversation history).
     * Default is ~4KB which causes OVERSIZED_PAYLOAD errors on HTTP/2 connections. */
    info.pt_serv_buf_size = 128 * 1024; /* 128KB - enough for large conversation loads */
+   info.ws_ping_pong_interval = 10;    /* WebSocket ping every 10s to keep connections alive */
    /* Note: Not using LWS_SERVER_OPTION_HTTP_HEADERS_SECURITY_BEST_PRACTICES_ENFORCE
     * because it sets CSP: default-src 'none' which blocks WebAssembly for Opus codec.
     * Security headers are added via index.html meta tags instead. */
@@ -4426,7 +4427,9 @@ char *webui_process_commands(const char *llm_response, session_t *session) {
       const char *cmd_with_id = json_object_to_json_string(parsed_json);
 
       /* Send tool call status to UI (works for both WebUI and satellites) */
-      webui_send_state_with_detail(session, "tool_call", device_name);
+      char tool_detail[128];
+      snprintf(tool_detail, sizeof(tool_detail), "Calling %s...", device_name);
+      webui_send_state_with_detail(session, "tool_call", tool_detail);
 
       /* Publish command via MQTT */
       int rc = mosquitto_publish(mosq, NULL, APPLICATION_NAME, strlen(cmd_with_id), cmd_with_id, 0,

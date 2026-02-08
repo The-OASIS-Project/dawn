@@ -308,16 +308,15 @@ static void handle_message(ws_client_t *client, const char *msg, size_t len) {
             const char *state = json_object_get_string(state_obj);
             LOG_DEBUG("State: %s", state);
 
-            /* Store detail if present, clear on idle */
+            /* Store detail if present; clear only on idle (not on every state) */
             if (json_object_object_get_ex(payload, "detail", &detail_obj)) {
                const char *detail = json_object_get_string(detail_obj);
                if (detail) {
                   strncpy(client->status_detail, detail, sizeof(client->status_detail) - 1);
                   client->status_detail[sizeof(client->status_detail) - 1] = '\0';
-               } else {
-                  client->status_detail[0] = '\0';
                }
-            } else {
+            }
+            if (strcmp(state, "idle") == 0) {
                client->status_detail[0] = '\0';
             }
 
@@ -509,11 +508,12 @@ int ws_client_connect(ws_client_t *client) {
    ctx_info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
    ctx_info.user = client; /* Store client pointer for callback access */
 
-   /* Disable keepalive to prevent 1-second blocking in lws_service */
+   /* Disable TCP keepalive to prevent 1-second blocking in lws_service */
    ctx_info.ka_time = 0;
    ctx_info.ka_probes = 0;
    ctx_info.ka_interval = 0;
    ctx_info.timeout_secs = 0;
+   ctx_info.ws_ping_pong_interval = 10; /* WebSocket ping every 10s during TTS playback */
 
    client->lws_ctx = lws_create_context(&ctx_info);
    if (!client->lws_ctx) {

@@ -444,6 +444,10 @@ void textToAudio(PiperConfig &config,
                  SynthesisResult &result,
                  std::atomic<bool> &tts_stop_processing,
                  const std::function<void()> &audioCallback) {
+   result.inferSeconds = 0.0;
+   result.audioSeconds = 0.0;
+   result.realTimeFactor = 0.0;
+
    std::size_t sentenceSilenceSamples = 0;
    if (voice.synthesisConfig.sentenceSilenceSeconds > 0) {
       sentenceSilenceSamples = (std::size_t)(voice.synthesisConfig.sentenceSilenceSeconds *
