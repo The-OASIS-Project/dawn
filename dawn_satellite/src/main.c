@@ -860,7 +860,6 @@ int main(int argc, char *argv[]) {
    satellite_update_leds(&ctx);
 
    int result = 0;
-   time_t process_start_time = time(NULL);
 
    /* Load voice models BEFORE connecting to daemon.
     * Models can take several seconds to load (especially on Pi).
@@ -899,7 +898,7 @@ int main(int argc, char *argv[]) {
          .ai_name = config.general.ai_name,
          .voice_ctx = voice_ctx,
          .satellite_name = config.identity.name,
-         .start_time = process_start_time,
+         .satellite_location = config.identity.location,
       };
       sdl_ui = sdl_ui_init(&ui_config);
       if (sdl_ui) {

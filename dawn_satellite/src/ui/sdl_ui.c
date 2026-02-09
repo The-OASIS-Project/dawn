@@ -35,6 +35,7 @@
 #include <net/if.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
@@ -93,7 +94,7 @@ struct sdl_ui {
    char ai_name[32];
    char font_dir[256];
    char satellite_name[64];
-   time_t start_time;
+   char satellite_location[64];
 
    /* Timing */
    voice_state_t last_state;
@@ -110,6 +111,7 @@ struct sdl_ui {
 
    /* Touch gesture state */
    ui_touch_state_t touch;
+   bool scrolling_transcript; /* True when finger drag is scrolling transcript */
 
    /* Cached panel label textures (lazy-initialized on first render) */
    struct {
@@ -140,6 +142,10 @@ struct sdl_ui {
    /* Cached local IP address (refreshed every 60s) */
    char local_ip[46]; /* INET6_ADDRSTRLEN */
    time_t local_ip_last_poll;
+
+   /* Cached system uptime (refreshed every 5s) */
+   time_t cached_uptime;
+   time_t uptime_last_poll;
 
    /* Slide-in panels (each tracks own animation independently) */
    struct {
@@ -418,6 +424,26 @@ static void render_panel_actions(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
    }
 }
 
+/** @brief Get system uptime from /proc/uptime (cached with 5s TTL) */
+static time_t get_system_uptime(sdl_ui_t *ui) {
+   time_t now = time(NULL);
+   if (ui->cached_uptime > 0 && now >= ui->uptime_last_poll && (now - ui->uptime_last_poll) < 5) {
+      return ui->cached_uptime;
+   }
+
+   double uptime_sec = 0.0;
+   FILE *fp = fopen("/proc/uptime", "r");
+   if (fp) {
+      if (fscanf(fp, "%lf", &uptime_sec) != 1)
+         uptime_sec = 0.0;
+      fclose(fp);
+   }
+
+   ui->cached_uptime = (time_t)uptime_sec;
+   ui->uptime_last_poll = now;
+   return ui->cached_uptime;
+}
+
 /** @brief Format a duration in seconds into human-readable "2d 5h 14m" string */
 static void format_duration(time_t seconds, char *buf, size_t size) {
    if (seconds <= 0 || size == 0) {
@@ -537,7 +563,7 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
    int text_x = 30;
    int text_y = panel_y + 24;
    int value_x_offset = 90; /* Aligns all values to same column */
-   int row_spacing = 14;    /* Touch-friendly spacing between info rows */
+   int row_spacing = 10;
 
    /* AI Name (cached, uses body_font for hierarchy) */
    if (ui->panel_cache.ai_name) {
@@ -574,7 +600,7 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
    }
 
    /* Info rows: Server, Device, IP, Uptime, Session */
-   char buf[128];
+   char buf[192];
    time_t now = time(NULL);
 
    /* Server */
@@ -583,16 +609,20 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
    }
    text_y += render_info_row(ui, r, 0, buf, text_x, text_y, value_x_offset) + row_spacing;
 
-   /* Device (satellite name) */
-   text_y += render_info_row(ui, r, 1, ui->satellite_name, text_x, text_y, value_x_offset) +
-             row_spacing;
+   /* Device (satellite name + location) */
+   if (ui->satellite_location[0]) {
+      snprintf(buf, sizeof(buf), "%s (%s)", ui->satellite_name, ui->satellite_location);
+   } else {
+      snprintf(buf, sizeof(buf), "%s", ui->satellite_name);
+   }
+   text_y += render_info_row(ui, r, 1, buf, text_x, text_y, value_x_offset) + row_spacing;
 
    /* IP */
    text_y += render_info_row(ui, r, 2, get_local_ip(ui), text_x, text_y, value_x_offset) +
              row_spacing;
 
-   /* Uptime (since process start) */
-   format_duration(now - ui->start_time, buf, sizeof(buf));
+   /* Uptime (system/OS uptime from /proc/uptime, cached 5s TTL) */
+   format_duration(get_system_uptime(ui), buf, sizeof(buf));
    text_y += render_info_row(ui, r, 3, buf, text_x, text_y, value_x_offset) + row_spacing;
 
    /* Session (since WS connect) */
@@ -951,17 +981,24 @@ static void *render_thread_func(void *arg) {
             ui->running = false;
             break;
          }
+         /* Track transcript scrolling to suppress conflicting swipe gestures */
+         if (event.type == SDL_FINGERDOWN) {
+            int fx = (int)(event.tfinger.x * ui->width);
+            ui->scrolling_transcript = (fx > ORB_PANEL_WIDTH);
+         } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+            ui->scrolling_transcript = (event.button.x > ORB_PANEL_WIDTH);
+         }
+
          /* Scroll transcript panel on vertical finger drag (right side of screen) */
          if (event.type == SDL_FINGERMOTION) {
-            int fx = (int)(event.tfinger.x * ui->width);
-            if (fx > ORB_PANEL_WIDTH) {
+            if (ui->scrolling_transcript) {
                int dy = (int)(event.tfinger.dy * ui->height);
                if (dy != 0) {
                   ui_transcript_scroll(&ui->transcript, -dy);
                }
             }
          } else if (event.type == SDL_MOUSEMOTION && (event.motion.state & SDL_BUTTON_LMASK)) {
-            if (event.motion.x > ORB_PANEL_WIDTH) {
+            if (ui->scrolling_transcript) {
                int dy = event.motion.yrel;
                if (dy != 0) {
                   ui_transcript_scroll(&ui->transcript, -dy);
@@ -969,7 +1006,16 @@ static void *render_thread_func(void *arg) {
             }
          }
 
+         /* Clear scroll flag on finger-up */
+         if (event.type == SDL_FINGERUP || event.type == SDL_MOUSEBUTTONUP) {
+            ui->scrolling_transcript = false;
+         }
+
          touch_gesture_t gesture = ui_touch_process_event(&ui->touch, &event, time_sec);
+         /* Suppress swipe gestures that originated on the transcript side */
+         if (gesture.type >= TOUCH_GESTURE_SWIPE_UP && gesture.x > ORB_PANEL_WIDTH) {
+            gesture.type = TOUCH_GESTURE_NONE;
+         }
          handle_gesture(ui, gesture, time_sec);
       }
 
@@ -1028,7 +1074,10 @@ sdl_ui_t *sdl_ui_init(const sdl_ui_config_t *config) {
    if (config->satellite_name) {
       snprintf(ui->satellite_name, sizeof(ui->satellite_name), "%s", config->satellite_name);
    }
-   ui->start_time = config->start_time;
+   if (config->satellite_location) {
+      snprintf(ui->satellite_location, sizeof(ui->satellite_location), "%s",
+               config->satellite_location);
+   }
 
    return ui;
 }

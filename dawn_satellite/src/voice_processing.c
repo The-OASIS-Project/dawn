@@ -46,6 +46,7 @@
 #ifdef HAVE_TTS_PIPER
 #include "tts/tts_piper.h"
 #include "tts/tts_preprocessing.h"
+#include "tts_playback_queue.h"
 #endif
 
 /* These are always available from common library */
@@ -179,6 +180,9 @@ struct voice_ctx {
    /* Audio playback handle for sentence-level TTS (set during loop) */
    audio_playback_t *playback;
    atomic_int tts_stop_flag; /* Written from UI thread (cancel), read by playback */
+#ifdef HAVE_TTS_PIPER
+   tts_playback_queue_t *tts_queue; /* Pipelined TTS: synthesize while playing */
+#endif
 
    /* WebSocket client for status detail access */
    ws_client_t *ws;
@@ -514,12 +518,9 @@ static void on_sentence_complete(const char *sentence, void *userdata) {
       return;
    }
 
-   LOG_INFO("Speaking sentence: %.60s%s", tts_text, strlen(tts_text) > 60 ? "..." : "");
+   LOG_INFO("TTS synth: %.60s%s", tts_text, strlen(tts_text) > 60 ? "..." : "");
 
-   /* Set SPEAKING state so UI shows cyan orb during TTS playback */
-   ctx->state = VOICE_STATE_SPEAKING;
-
-   /* Synthesize and play this sentence */
+   /* Synthesize audio on WS thread (fast: ~50-100ms on Pi 4) */
    int16_t *audio = NULL;
    size_t audio_len = 0;
    tts_piper_result_t tts_result;
@@ -527,18 +528,15 @@ static void on_sentence_complete(const char *sentence, void *userdata) {
    if (tts_piper_synthesize(ctx->tts, tts_text, &audio, &audio_len, &tts_result) == 0 && audio &&
        audio_len > 0) {
       int sample_rate = tts_piper_get_sample_rate(ctx->tts);
-      audio_playback_play(ctx->playback, audio, audio_len, sample_rate, &ctx->tts_stop_flag);
-      free(audio);
-
-      /* Small pause between sentences for natural rhythm */
-      if (!atomic_load(&ctx->tts_stop_flag)) {
-         usleep(150000); /* 150ms pause */
+      /* Enqueue for playback thread — returns immediately (audio ownership transferred) */
+      if (ctx->tts_queue) {
+         tts_playback_queue_push(ctx->tts_queue, audio, audio_len, sample_rate);
+      } else {
+         /* Fallback: blocking playback on WS thread */
+         audio_playback_play(ctx->playback, audio, audio_len, sample_rate, &ctx->tts_stop_flag);
+         free(audio);
       }
    }
-
-   /* Return to WAITING (more sentences may follow; main loop transitions to SILENCE
-    * when response_complete fires) */
-   ctx->state = VOICE_STATE_WAITING;
 #else
    LOG_DEBUG("Sentence (TTS disabled): %s", sentence);
 #endif
@@ -738,6 +736,13 @@ void voice_processing_cleanup(voice_ctx_t *ctx) {
 
    free(ctx->audio_buffer);
 
+#ifdef HAVE_TTS_PIPER
+   if (ctx->tts_queue) {
+      tts_playback_queue_destroy(ctx->tts_queue);
+      ctx->tts_queue = NULL;
+   }
+#endif
+
    /* Destroy thread synchronization */
    pthread_mutex_destroy(&ctx->response_mutex);
 
@@ -754,6 +759,11 @@ void voice_processing_stop(voice_ctx_t *ctx) {
    if (ctx) {
       ctx->running = false;
       atomic_store(&ctx->tts_stop_flag, 1); /* Interrupt any in-progress TTS playback */
+#ifdef HAVE_TTS_PIPER
+      if (ctx->tts_queue) {
+         tts_playback_queue_flush(ctx->tts_queue);
+      }
+#endif
    }
 }
 
@@ -859,6 +869,13 @@ void voice_processing_speak_greeting(voice_ctx_t *ctx, satellite_ctx_t *sat_ctx)
       return;
    }
 
+   /* Ensure playback handle and queue are available for single-shot speech */
+   if (!ctx->playback && sat_ctx->audio_playback) {
+      ctx->playback = (audio_playback_t *)sat_ctx->audio_playback;
+      atomic_store(&ctx->tts_stop_flag, 0);
+      ctx->tts_queue = tts_playback_queue_create(ctx->playback, &ctx->tts_stop_flag);
+   }
+
    const char *greeting = time_of_day_greeting();
    LOG_INFO("Speaking greeting: %s", greeting);
 
@@ -868,11 +885,19 @@ void voice_processing_speak_greeting(voice_ctx_t *ctx, satellite_ctx_t *sat_ctx)
 
    if (tts_piper_synthesize(ctx->tts, greeting, &audio, &audio_len, &tts_result) == 0 && audio &&
        audio_len > 0) {
-      audio_playback_t *playback = (audio_playback_t *)sat_ctx->audio_playback;
       int sample_rate = tts_piper_get_sample_rate(ctx->tts);
-      atomic_int stop_flag = 0;
-      audio_playback_play(playback, audio, audio_len, sample_rate, &stop_flag);
-      free(audio);
+      if (ctx->tts_queue) {
+         tts_playback_queue_reset(ctx->tts_queue);
+         tts_playback_queue_push(ctx->tts_queue, audio, audio_len, sample_rate);
+         tts_playback_queue_finish(ctx->tts_queue);
+         while (tts_playback_queue_is_active(ctx->tts_queue))
+            usleep(10000);
+      } else {
+         audio_playback_t *playback = (audio_playback_t *)sat_ctx->audio_playback;
+         atomic_int stop_flag = 0;
+         audio_playback_play(playback, audio, audio_len, sample_rate, &stop_flag);
+         free(audio);
+      }
       LOG_INFO("Greeting playback complete");
    } else {
       LOG_ERROR("Failed to synthesize greeting");
@@ -902,11 +927,19 @@ void voice_processing_speak_offline(voice_ctx_t *ctx, satellite_ctx_t *sat_ctx) 
 
    if (tts_piper_synthesize(ctx->tts, offline_message, &audio, &audio_len, &tts_result) == 0 &&
        audio && audio_len > 0) {
-      audio_playback_t *playback = (audio_playback_t *)sat_ctx->audio_playback;
       int sample_rate = tts_piper_get_sample_rate(ctx->tts);
-      atomic_int stop_flag = 0;
-      audio_playback_play(playback, audio, audio_len, sample_rate, &stop_flag);
-      free(audio);
+      if (ctx->tts_queue) {
+         tts_playback_queue_reset(ctx->tts_queue);
+         tts_playback_queue_push(ctx->tts_queue, audio, audio_len, sample_rate);
+         tts_playback_queue_finish(ctx->tts_queue);
+         while (tts_playback_queue_is_active(ctx->tts_queue))
+            usleep(10000);
+      } else {
+         audio_playback_t *playback = (audio_playback_t *)sat_ctx->audio_playback;
+         atomic_int stop_flag = 0;
+         audio_playback_play(playback, audio, audio_len, sample_rate, &stop_flag);
+         free(audio);
+      }
    } else {
       LOG_ERROR("Failed to synthesize offline message");
    }
@@ -933,6 +966,16 @@ int voice_processing_loop(voice_ctx_t *ctx,
    ctx->playback = playback;
    atomic_store(&ctx->tts_stop_flag, 0);
    ctx->ws = ws;
+
+#ifdef HAVE_TTS_PIPER
+   /* Create pipelined TTS playback queue (synthesize while playing) */
+   if (!ctx->tts_queue && playback) {
+      ctx->tts_queue = tts_playback_queue_create(playback, &ctx->tts_stop_flag);
+      if (ctx->tts_queue) {
+         LOG_INFO("TTS playback queue created (pipelined mode)");
+      }
+   }
+#endif
 
    /* Set up WebSocket callbacks */
    ws_client_set_stream_callback(ws, on_stream_callback, ctx);
@@ -972,6 +1015,11 @@ int voice_processing_loop(voice_ctx_t *ctx,
          if (ctx->state != VOICE_STATE_SILENCE) {
             LOG_INFO("Cancel requested from UI (was %s)", voice_state_name(ctx->state));
             atomic_store(&ctx->tts_stop_flag, 1);
+#ifdef HAVE_TTS_PIPER
+            if (ctx->tts_queue) {
+               tts_playback_queue_flush(ctx->tts_queue);
+            }
+#endif
             ctx->speech_frame_count = 0;
             ctx->silence_frame_count = 0;
             ctx->awaiting_speech = false;
@@ -1199,6 +1247,11 @@ int voice_processing_loop(voice_ctx_t *ctx,
                                     sentence_buffer_clear(ctx->sentence_buf);
                                  }
 #endif
+#ifdef HAVE_TTS_PIPER
+                                 if (ctx->tts_queue) {
+                                    tts_playback_queue_reset(ctx->tts_queue);
+                                 }
+#endif
                                  /* Send query */
                                  ctx->state = VOICE_STATE_WAITING;
                                  ctx->waiting_start = time(NULL);
@@ -1272,6 +1325,11 @@ int voice_processing_loop(voice_ctx_t *ctx,
                               sentence_buffer_clear(ctx->sentence_buf);
                            }
 #endif
+#ifdef HAVE_TTS_PIPER
+                           if (ctx->tts_queue) {
+                              tts_playback_queue_reset(ctx->tts_queue);
+                           }
+#endif
                            /* Send query */
                            ctx->state = VOICE_STATE_WAITING;
                            ctx->waiting_start = time(NULL);
@@ -1309,16 +1367,33 @@ int voice_processing_loop(voice_ctx_t *ctx,
          }
 
          case VOICE_STATE_WAITING: {
+            /* Check if playback queue is active → show SPEAKING state for UI */
+#ifdef HAVE_TTS_PIPER
+            if (ctx->tts_queue && tts_playback_queue_is_active(ctx->tts_queue)) {
+               ctx->state = VOICE_STATE_SPEAKING;
+               break;
+            }
+#endif
+
             /* Wait for response - TTS happens via sentence callback as chunks stream in */
             if (atomic_load(&ctx->response_complete)) {
+#ifdef HAVE_TTS_PIPER
+               /* Signal queue that no more sentences are coming */
+               if (ctx->tts_queue) {
+                  tts_playback_queue_finish(ctx->tts_queue);
+               }
+               /* Wait for queue to drain before returning to silence */
+               if (ctx->tts_queue && tts_playback_queue_is_active(ctx->tts_queue)) {
+                  ctx->state = VOICE_STATE_SPEAKING;
+                  break;
+               }
+#endif
                /* Log response (protected access to buffer) */
                pthread_mutex_lock(&ctx->response_mutex);
                LOG_INFO("Response complete: %.100s%s", ctx->response_buffer,
                         ctx->response_len > 100 ? "..." : "");
                pthread_mutex_unlock(&ctx->response_mutex);
 
-               /* TTS already handled by on_sentence_complete callback during streaming */
-               /* Just log and return to silence */
                ctx->state = VOICE_STATE_SILENCE;
                ctx->speech_frame_count = 0;
                ctx->silence_frame_count = 0;
@@ -1349,13 +1424,18 @@ int voice_processing_loop(voice_ctx_t *ctx,
             break;
          }
 
-         case VOICE_STATE_SPEAKING:
-            /* TTS playback is driven by on_sentence_complete on WS thread.
-             * It sets SPEAKING before audio_playback_play (blocking) and
-             * reverts to WAITING when each sentence finishes.  We just
-             * sleep here to avoid a busy-loop. */
+         case VOICE_STATE_SPEAKING: {
+            /* Playback queue drives audio output on its own thread.
+             * Transition back to WAITING when queue drains (more data may arrive). */
+#ifdef HAVE_TTS_PIPER
+            if (ctx->tts_queue && !tts_playback_queue_is_active(ctx->tts_queue)) {
+               ctx->state = VOICE_STATE_WAITING;
+               break;
+            }
+#endif
             usleep(10000); /* 10ms */
             break;
+         }
 
          default:
             ctx->state = VOICE_STATE_SILENCE;
