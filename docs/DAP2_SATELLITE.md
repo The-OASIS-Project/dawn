@@ -771,23 +771,25 @@ wscat -c ws://localhost:8080
 
 11. **Orb visualization** - Animated orb with state-driven colors (idle/listening/thinking/speaking)
 12. **FFT spectrum bars** - Real-time frequency visualization around orb during speech playback
-13. **Streaming transcript** - Live-updating conversation history with user and AI messages
+13. **Streaming transcript** - Live-updating conversation history (40 entries, 4KB per entry)
 14. **Inline markdown rendering** - Bold, italic, code spans, and bullet points in AI responses
-15. **Scrollable transcript** - Touch-drag and mouse-drag scrolling through conversation history
+15. **Touch-drag scrolling** - Finger and mouse scrolling with auto-scroll on new messages
 16. **User transcription display** - Shows "You: ..." after ASR completes
 17. **Touch gestures** - Tap orb to cancel/listen, drag to scroll, swipe for panels
 18. **Status bar** - WiFi signal quality, connection status, tool call info, date/time
 19. **KMSDRM backend** - Direct rendering without X11, suitable for headless Pi setups
 20. **UI persists across reconnections** - SDL lifecycle independent of WebSocket connection
+21. **Settings panel** - Pull-down panel with server address, connection status, device name, IP, uptime, session duration
+22. **TTS playback queue** - Producer-consumer pipeline: synthesize sentence N+1 while playing sentence N
 
 ### Implemented — Reliability & Bug Fixes
 
-21. **App-level keep-alive** - `satellite_ping` every 10s (WS-level pings disabled for lws 4.3.5 compat)
-22. **Ping-query race fix** - `ws_client_ping()` skips if tx_buffer already has pending data
-23. **Response timeout** - Returns to idle after 30s (no data) or 120s (streaming stalled)
-24. **Sentence breaking** - Breaks on `.!?`, bullets (`\n-`, `\n*`), numbered lists, paragraphs, `:\n`
-25. **TTS emoji stripping** - Expanded Unicode coverage to prevent TTS reading symbols
-26. **Atomic init guards** - Thread-safe `_Atomic bool` with `atomic_exchange()` for lookup tables
+23. **App-level keep-alive** - `satellite_ping` every 10s (WS-level pings disabled for lws 4.3.5 compat)
+24. **Ping-query race fix** - `ws_client_ping()` skips if tx_buffer already has pending data
+25. **Response timeout** - Returns to idle after 30s (no data) or 120s (streaming stalled)
+26. **Sentence breaking** - Breaks on `.!?`, bullets (`\n-`, `\n*`), numbered lists, paragraphs, `:\n`
+27. **Emoji stripping** - Full SMP coverage (0x1F000-0x1FFFF) for both TTS and display rendering
+28. **Atomic init guards** - Thread-safe `_Atomic bool` with `atomic_exchange()` for lookup tables
 
 ### Planned Features
 

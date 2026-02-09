@@ -915,7 +915,7 @@ This phase addresses the architecture reviewer's critical finding: existing code
 
 ### Phase 3.5: Touchscreen UI (SDL2)
 
-**Status**: 🔨 **IN PROGRESS** (core visualization + transcript complete, touch gestures + overlays remaining)
+**Status**: 🔨 **IN PROGRESS** (visualization, transcript, touch scroll, settings panel complete; overlays remaining)
 
 **Goal**: Premium touchscreen interface for Tier 1 satellites with attached displays
 
@@ -933,16 +933,17 @@ This phase addresses the architecture reviewer's critical finding: existing code
    - FFT spectrum bars during SPEAKING (Goertzel analysis, 64 bins, radial layout)
    - Spectrum oriented from 12 o'clock
 
-2. **Transcript Display**: ✅ CORE COMPLETE (touch scroll pending)
-   - Scrollable conversation history with cached text rendering
-   - Auto-scroll during active conversation
+2. **Transcript Display**: ✅ COMPLETE
+   - Scrollable conversation history with cached text rendering (40 entries, 4KB per entry)
+   - Touch-drag scrolling with auto-scroll on new messages, manual scroll disables auto-scroll
+   - Mouse-drag fallback for desktop testing
    - Streaming live transcript during LLM response
-   - AI name in ALL CAPS, emoji stripping
+   - Inline markdown rendering (bold, italic, code spans, bullet points)
+   - AI name in ALL CAPS, emoji stripping (font lacks emoji support)
    - Date/time display (top-right, 12h format)
    - WiFi signal strength bars (polled from /proc/net/wireless)
    - Status detail line (tool calls, thinking info from daemon)
-   - Touch to pause scroll — NOT YET DONE
-   - Swipe to navigate history — NOT YET DONE
+   - User transcription display ("You: ..." after ASR completes)
 
 3. **Quick Actions Bar**: ❌ NOT STARTED
    - 4-6 configurable touch shortcuts (music, lights, thermostat, timer, settings)
@@ -961,16 +962,17 @@ This phase addresses the architecture reviewer's critical finding: existing code
    - Ambient orb mode (breathing animation, "always ready" indicator)
    - Wake on touch or wake word
 
-#### Touch Interactions — ❌ NOT STARTED
+#### Touch Interactions — 🔨 PARTIALLY COMPLETE
 
-| Gesture | Action |
-|---------|--------|
-| Tap orb | Manual wake (bypass wake word) |
-| Long press orb | Cancel/stop current operation |
-| Swipe up from bottom | Reveal quick actions |
-| Swipe down from top | Settings/notifications |
-| Swipe left/right | Navigate conversation history |
-| Tap anywhere (screensaver) | Wake display |
+| Gesture | Action | Status |
+|---------|--------|--------|
+| Tap orb | Manual wake (bypass wake word) | ✅ |
+| Long press orb | Cancel/stop current operation | ✅ |
+| Drag transcript | Scroll conversation history | ✅ |
+| Swipe down from top | Settings panel (server info, connection, uptime) | ✅ |
+| Swipe up from bottom | Quick actions | ❌ Stubbed |
+| Swipe left/right | Navigate conversation history | ❌ |
+| Tap anywhere (screensaver) | Wake display | ❌ |
 
 #### Layout
 
@@ -1003,29 +1005,20 @@ COLOR_WARNING = #f0b429  // Amber (thinking)
 COLOR_ERROR   = #ef4444  // Red
 ```
 
-#### File Structure
+#### File Structure (Actual Implementation)
 
 ```
-dawn_satellite/
-├── src/
-│   ├── ui/
-│   │   ├── ui_main.c            # SDL init, render loop
-│   │   ├── ui_state.c           # UI state machine
-│   │   ├── visualization.c      # Orb and rings
-│   │   ├── transcript.c         # Conversation display
-│   │   ├── quick_actions.c      # Action bar
-│   │   ├── media_player.c       # Music overlay
-│   │   ├── screensaver.c        # Ambient modes
-│   │   └── colors.h             # Palette definitions
-│   ├── input/
-│   │   └── touch.c              # Gesture detection
-│   └── render/
-│       ├── textures.c           # Texture management
-│       └── fonts.c              # SDL_ttf wrapper
-├── assets/
-│   ├── fonts/                   # IBM Plex Mono (matching WebUI)
-│   └── icons/                   # Monochrome icon set
-└── CMakeLists.txt
+dawn_satellite/src/ui/
+├── sdl_ui.c            # UI lifecycle, event loop, panel rendering (settings/quick actions)
+├── ui_orb.c            # Orb visualization + FFT spectrum bars
+├── ui_orb.h            # Orb context and API
+├── ui_transcript.c     # Scrollable transcript with texture caching
+├── ui_transcript.h     # Transcript panel types and API
+├── ui_markdown.c       # Inline markdown renderer (bold/italic/code)
+├── ui_markdown.h       # Markdown font set and render API
+├── ui_touch.c          # Touch gesture recognition (tap/long-press/swipe)
+├── ui_touch.h          # Touch state types
+└── ui_colors.h         # Color constants (matching WebUI variables.css)
 ```
 
 #### Dependencies
@@ -1333,3 +1326,4 @@ name = "Guest Room"
 - v0.3 (Feb 2026): Updated to reflect implementation (Phase 0-2 complete), clarified Tier 1 is VAD-only (no button/NeoPixels), Tier 2 retains button and NeoPixel support
 - v0.4 (Feb 2026): Phase 0-3 complete. Updated protocol messages to match implementation (stream_start/delta/end). Updated common/ structure (ASR engine, Vosk, unified logging). Phase 3.5 touchscreen UI in planning.
 - v0.5 (Feb 2026): Phase 3.5 in progress. Core visualization complete (orb, rings, FFT spectrum bars, KMSDRM). Transcript panel complete (streaming, date/time, WiFi, status detail). Touch gestures and overlays remaining.
+- v0.6 (Feb 2026): Touch scroll complete (drag-to-scroll with auto-scroll management). Settings panel complete (server info, connection status, device identity, IP, uptime, session duration). TTS playback queue (producer-consumer pipelining). Emoji stripping unified (display + TTS, full SMP coverage 0x1F000-0x1FFFF). Transcript capacity increased (40 entries, 4KB text).
