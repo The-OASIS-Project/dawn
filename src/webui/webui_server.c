@@ -3931,6 +3931,9 @@ void webui_send_stream_start(session_t *session) {
    /* Cache whether to bypass filtering (native tools enabled) */
    session->cmd_tag_filter_bypass = llm_tools_enabled(NULL);
 
+   /* Transition to "speaking" state when streaming begins */
+   webui_send_state(session, "speaking");
+
    ws_response_t resp = { .session = session,
                           .type = WS_RESP_STREAM_START,
                           .stream = {

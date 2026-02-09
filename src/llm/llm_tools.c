@@ -1319,6 +1319,12 @@ int llm_tools_execute_all(const tool_call_list_t *calls, tool_result_list_t *res
          failures++;
       }
       results->count = 1;
+
+      /* Transition from "tool_call" to "thinking" for the follow-up LLM call */
+      if (status_session) {
+         webui_send_state_with_detail(status_session, "thinking", "Processing results...");
+      }
+
       return failures > 0 ? 1 : 0;
    }
 
@@ -1403,6 +1409,11 @@ int llm_tools_execute_all(const tool_call_list_t *calls, tool_result_list_t *res
    }
 
    results->count = total_calls;
+
+   /* Transition from "tool_call" to "thinking" for the follow-up LLM call */
+   if (status_session) {
+      webui_send_state_with_detail(status_session, "thinking", "Processing results...");
+   }
 
    clock_gettime(CLOCK_MONOTONIC, &end_time);
    long elapsed_ms = (end_time.tv_sec - start_time.tv_sec) * 1000 +

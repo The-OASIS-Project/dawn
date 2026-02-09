@@ -913,42 +913,68 @@ int main(int argc, char *argv[]) {
    }
 
 #ifdef ENABLE_DAP2
-   /* Connect to daemon (models already loaded) */
-   ws_client_t *ws = ws_client_create(config.server.host, config.server.port, config.server.ssl,
-                                      config.server.ssl_verify);
-   if (!ws) {
-      fprintf(stderr, "Failed to create WebSocket client\n");
-      if (voice_ctx)
-         voice_processing_cleanup(voice_ctx);
-      satellite_cleanup(&ctx);
-      return 1;
+   /* Connection loop with automatic reconnection */
+   {
+      uint32_t delay_ms = config.server.reconnect_delay_ms;
+      uint32_t max_attempts = config.server.max_reconnect_attempts;
+      uint32_t attempt = 0;
+
+      while (ctx.running) {
+         /* Create WebSocket client */
+         ws_client_t *ws = ws_client_create(config.server.host, config.server.port,
+                                            config.server.ssl, config.server.ssl_verify);
+         if (!ws) {
+            fprintf(stderr, "Failed to create WebSocket client\n");
+            break;
+         }
+
+         /* Attempt connection */
+         printf("Connecting to daemon at %s:%d...\n", config.server.host, config.server.port);
+         if (ws_client_connect(ws) != 0) {
+            fprintf(stderr, "Connection failed: %s\n", ws_client_get_error(ws));
+            ws_client_destroy(ws);
+
+            attempt++;
+            if (max_attempts > 0 && attempt >= max_attempts) {
+               fprintf(stderr, "Max reconnect attempts (%u) reached\n", max_attempts);
+               break;
+            }
+
+            /* Exponential backoff: delay doubles each attempt, caps at 60s */
+            uint32_t backoff = delay_ms * (1u << (attempt < 5 ? attempt : 5));
+            if (backoff > 60000)
+               backoff = 60000;
+            printf("Retrying in %u ms (attempt %u)...\n", backoff, attempt);
+            usleep(backoff * 1000);
+            continue;
+         }
+
+         /* Check if interrupted during connection */
+         if (!ctx.running) {
+            ws_client_destroy(ws);
+            break;
+         }
+
+         /* Connected — reset attempt counter */
+         attempt = 0;
+
+         /* Run main loop (returns when disconnected or user exits) */
+         result = dap2_main_loop(&ctx, ws, use_keyboard, &config, voice_ctx);
+         ws_client_destroy(ws);
+
+         /* If user requested exit, don't reconnect */
+         if (!ctx.running) {
+            break;
+         }
+
+         /* Connection lost — retry */
+         printf("Connection lost, reconnecting in %u ms...\n", delay_ms);
+         usleep(delay_ms * 1000);
+      }
    }
 
-   printf("Connecting to daemon...\n");
-   if (ws_client_connect(ws) != 0) {
-      fprintf(stderr, "Failed to connect: %s\n", ws_client_get_error(ws));
-      ws_client_destroy(ws);
-      if (voice_ctx)
-         voice_processing_cleanup(voice_ctx);
-      satellite_cleanup(&ctx);
-      return 1;
-   }
-
-   /* Check if Ctrl+C was pressed during connection */
-   if (!ctx.running) {
-      printf("\nInterrupted during connection\n");
-      ws_client_destroy(ws);
-      if (voice_ctx)
-         voice_processing_cleanup(voice_ctx);
-      satellite_cleanup(&ctx);
-      close_logging();
-      return 0;
-   }
-
-   result = dap2_main_loop(&ctx, ws, use_keyboard, &config, voice_ctx);
    if (voice_ctx)
       voice_processing_cleanup(voice_ctx);
-   ws_client_destroy(ws);
 #else
    printf("\n=== DAWN Satellite Ready (DAP Mode) ===\n");
    if (use_keyboard) {

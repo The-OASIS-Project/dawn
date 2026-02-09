@@ -37,7 +37,7 @@
  * ============================================================================= */
 
 #define LABEL_FONT_SIZE 18
-#define BODY_FONT_SIZE 22
+#define BODY_FONT_SIZE 24
 #define ROLE_FONT_SIZE 18
 #define PADDING 20
 #define LABEL_HEIGHT 36
@@ -151,7 +151,8 @@ static void ensure_entry_cached(ui_transcript_t *t, transcript_entry_t *entry) {
 
       /* AI entries with completed streaming get markdown rendering */
       if (!entry->is_user && !entry->is_streaming && t->md_fonts.fonts[0]) {
-         SDL_Color bold_color = { 0xF0, 0xF0, 0xF0, 255 };
+         SDL_Color bold_color = { COLOR_TEXT_PRIMARY_R, COLOR_TEXT_PRIMARY_G, COLOR_TEXT_PRIMARY_B,
+                                  255 };
          entry->cached_texture = md_render_text(t->renderer, &t->md_fonts, entry->text, text_color,
                                                 bold_color, t->wrap_width, &entry->cached_w,
                                                 &entry->cached_h);
@@ -224,7 +225,7 @@ int ui_transcript_init(ui_transcript_t *t,
    /* Load fonts */
    t->label_font = try_load_font(font_dir, "IBMPlexMono-Regular.ttf", FALLBACK_MONO_FONT,
                                  LABEL_FONT_SIZE);
-   t->body_font = try_load_font(font_dir, "SourceSans3-Regular.ttf", FALLBACK_BODY_FONT,
+   t->body_font = try_load_font(font_dir, "SourceSans3-Medium.ttf", FALLBACK_BODY_FONT,
                                 BODY_FONT_SIZE);
 
    if (!t->label_font) {

@@ -102,8 +102,11 @@ int md_fonts_init(md_fonts_t *fonts, const char *font_dir, int body_size) {
 
    memset(fonts, 0, sizeof(*fonts));
 
-   /* Regular — must succeed */
-   fonts->fonts[MD_STYLE_NORMAL] = try_load_font(font_dir, "SourceSans3-Regular.ttf", body_size);
+   /* Regular (Medium weight for readability on embedded displays) */
+   fonts->fonts[MD_STYLE_NORMAL] = try_load_font(font_dir, "SourceSans3-Medium.ttf", body_size);
+   if (!fonts->fonts[MD_STYLE_NORMAL]) {
+      fonts->fonts[MD_STYLE_NORMAL] = try_load_font(font_dir, "SourceSans3-Regular.ttf", body_size);
+   }
    if (!fonts->fonts[MD_STYLE_NORMAL]) {
       fonts->fonts[MD_STYLE_NORMAL] = TTF_OpenFont(FALLBACK_BODY_FONT, body_size);
    }
