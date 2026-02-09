@@ -27,6 +27,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -313,6 +314,26 @@ const char *ws_client_get_error(ws_client_t *client);
  * @return Number of bytes copied (excluding null terminator)
  */
 size_t ws_client_get_status_detail(ws_client_t *client, char *buf, size_t buf_size);
+
+/**
+ * @brief Get server address as "host:port" string
+ *
+ * @param client Client context
+ * @param buf Destination buffer
+ * @param buf_size Size of destination buffer
+ * @return Number of bytes written (excluding null terminator), 0 on error
+ */
+size_t ws_client_get_server_info(ws_client_t *client, char *buf, size_t buf_size);
+
+/**
+ * @brief Get wall-clock time of current connection establishment
+ *
+ * Thread-safe: acquires mutex internally.
+ *
+ * @param client Client context
+ * @return time_t of connection, or 0 if not connected
+ */
+time_t ws_client_get_connect_time(ws_client_t *client);
 
 /**
  * @brief Get the reconnect secret received from server

@@ -25,6 +25,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>
 
 #include "spectrum_defs.h" /* SPECTRUM_BINS shared between audio and UI */
 
@@ -227,6 +228,32 @@ void voice_processing_speak_offline(voice_ctx_t *ctx, struct satellite_ctx *sat_
  * @return Number of bytes copied (excluding null terminator)
  */
 size_t voice_processing_get_status_detail(voice_ctx_t *ctx, char *buf, size_t buf_size);
+
+/**
+ * @brief Check if WebSocket is connected to daemon
+ *
+ * @param ctx Voice processing context
+ * @return true if WS connection is active
+ */
+bool voice_processing_is_ws_connected(voice_ctx_t *ctx);
+
+/**
+ * @brief Get server address as "host:port" string
+ *
+ * @param ctx Voice processing context
+ * @param buf Destination buffer
+ * @param buf_size Size of destination buffer
+ * @return Number of bytes written (excluding null terminator)
+ */
+size_t voice_processing_get_server_info(voice_ctx_t *ctx, char *buf, size_t buf_size);
+
+/**
+ * @brief Get wall-clock time of current WebSocket connection
+ *
+ * @param ctx Voice processing context
+ * @return time_t of connection, or 0 if not connected
+ */
+time_t voice_processing_get_connect_time(voice_ctx_t *ctx);
 
 /**
  * @brief Copy current playback spectrum data to caller buffer

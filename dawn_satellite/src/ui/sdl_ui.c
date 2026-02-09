@@ -29,7 +29,10 @@
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
+#include <arpa/inet.h>
+#include <ifaddrs.h>
 #include <math.h>
+#include <net/if.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <string.h>
@@ -54,8 +57,9 @@
 #define ORB_PANEL_WIDTH 400  /* Left panel for orb */
 
 /* Touch / panel constants */
-#define PANEL_HEIGHT 240
+#define PANEL_HEIGHT 300
 #define PANEL_ANIM_SEC 0.25
+#define INFO_ROW_COUNT 5      /* Server, Device, IP, Uptime, Session */
 #define ORB_HIT_RADIUS 180    /* Tap/long-press detection radius around orb center */
 #define SWIPE_ZONE_FRAC 0.20f /* Top/bottom 20% of screen for swipe triggers */
 
@@ -88,6 +92,8 @@ struct sdl_ui {
    int height;
    char ai_name[32];
    char font_dir[256];
+   char satellite_name[64];
+   time_t start_time;
 
    /* Timing */
    voice_state_t last_state;
@@ -112,10 +118,28 @@ struct sdl_ui {
       int box_label_w[5];
       int box_label_h[5];
       int title_w, title_h;
-      SDL_Texture *ai_name; /* AI name (upper case) */
+      SDL_Texture *ai_name; /* AI name (upper case, body_font) */
       int ai_name_w, ai_name_h;
+      /* Settings panel info labels (label_font, WCAG AA color) */
+      SDL_Texture *info_labels[INFO_ROW_COUNT];
+      int info_label_w[INFO_ROW_COUNT];
+      int info_label_h[INFO_ROW_COUNT];
+      /* Settings panel cached value textures (invalidated on string change) */
+      SDL_Texture *info_values[INFO_ROW_COUNT];
+      int info_value_w[INFO_ROW_COUNT];
+      int info_value_h[INFO_ROW_COUNT];
+      char info_value_str[INFO_ROW_COUNT][128];
+      /* Pre-rendered connection status texts */
+      SDL_Texture *connected_tex;
+      SDL_Texture *disconnected_tex;
+      int connected_w, connected_h;
+      int disconnected_w, disconnected_h;
       bool initialized;
    } panel_cache;
+
+   /* Cached local IP address (refreshed every 60s) */
+   char local_ip[46]; /* INET6_ADDRSTRLEN */
+   time_t local_ip_last_poll;
 
    /* Slide-in panels (each tracks own animation independently) */
    struct {
@@ -248,18 +272,48 @@ static void panel_cache_init(sdl_ui_t *ui) {
       }
    }
 
-   /* AI name (upper case) */
+   /* AI name (upper case) — use body_font for visual hierarchy */
    char name_upper[32];
    int ni = 0;
    for (const char *p = ui->ai_name; *p && ni < 31; p++, ni++) {
       name_upper[ni] = (*p >= 'a' && *p <= 'z') ? *p - 32 : *p;
    }
    name_upper[ni] = '\0';
-   surf = TTF_RenderText_Blended(font, name_upper, primary);
+   TTF_Font *name_font = ui->transcript.body_font ? ui->transcript.body_font : font;
+   surf = TTF_RenderText_Blended(name_font, name_upper, primary);
    if (surf) {
       ui->panel_cache.ai_name = SDL_CreateTextureFromSurface(r, surf);
       ui->panel_cache.ai_name_w = surf->w;
       ui->panel_cache.ai_name_h = surf->h;
+      SDL_FreeSurface(surf);
+   }
+
+   /* Settings panel info labels — brighter than secondary for WCAG AA on #1B1F24 */
+   SDL_Color info_dim = { 0x8E, 0x99, 0xA4, 255 };
+   static const char *info_labels[] = { "Server", "Device", "IP", "Uptime", "Session" };
+   for (int i = 0; i < INFO_ROW_COUNT; i++) {
+      surf = TTF_RenderText_Blended(font, info_labels[i], info_dim);
+      if (surf) {
+         ui->panel_cache.info_labels[i] = SDL_CreateTextureFromSurface(r, surf);
+         ui->panel_cache.info_label_w[i] = surf->w;
+         ui->panel_cache.info_label_h[i] = surf->h;
+         SDL_FreeSurface(surf);
+      }
+   }
+
+   /* Pre-render connection status texts */
+   surf = TTF_RenderText_Blended(font, "Connected", info_dim);
+   if (surf) {
+      ui->panel_cache.connected_tex = SDL_CreateTextureFromSurface(r, surf);
+      ui->panel_cache.connected_w = surf->w;
+      ui->panel_cache.connected_h = surf->h;
+      SDL_FreeSurface(surf);
+   }
+   surf = TTF_RenderText_Blended(font, "Disconnected", info_dim);
+   if (surf) {
+      ui->panel_cache.disconnected_tex = SDL_CreateTextureFromSurface(r, surf);
+      ui->panel_cache.disconnected_w = surf->w;
+      ui->panel_cache.disconnected_h = surf->h;
       SDL_FreeSurface(surf);
    }
 
@@ -274,8 +328,18 @@ static void panel_cache_cleanup(sdl_ui_t *ui) {
       if (ui->panel_cache.box_labels[i])
          SDL_DestroyTexture(ui->panel_cache.box_labels[i]);
    }
+   for (int i = 0; i < INFO_ROW_COUNT; i++) {
+      if (ui->panel_cache.info_labels[i])
+         SDL_DestroyTexture(ui->panel_cache.info_labels[i]);
+      if (ui->panel_cache.info_values[i])
+         SDL_DestroyTexture(ui->panel_cache.info_values[i]);
+   }
    if (ui->panel_cache.ai_name)
       SDL_DestroyTexture(ui->panel_cache.ai_name);
+   if (ui->panel_cache.connected_tex)
+      SDL_DestroyTexture(ui->panel_cache.connected_tex);
+   if (ui->panel_cache.disconnected_tex)
+      SDL_DestroyTexture(ui->panel_cache.disconnected_tex);
    memset(&ui->panel_cache, 0, sizeof(ui->panel_cache));
 }
 
@@ -354,6 +418,103 @@ static void render_panel_actions(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
    }
 }
 
+/** @brief Format a duration in seconds into human-readable "2d 5h 14m" string */
+static void format_duration(time_t seconds, char *buf, size_t size) {
+   if (seconds <= 0 || size == 0) {
+      if (size > 0)
+         buf[0] = '\0';
+      return;
+   }
+   int days = (int)(seconds / 86400);
+   int hours = (int)((seconds % 86400) / 3600);
+   int mins = (int)((seconds % 3600) / 60);
+
+   if (days > 0) {
+      snprintf(buf, size, "%dd %dh %dm", days, hours, mins);
+   } else if (hours > 0) {
+      snprintf(buf, size, "%dh %dm", hours, mins);
+   } else if (mins > 0) {
+      snprintf(buf, size, "%dm", mins);
+   } else {
+      snprintf(buf, size, "%ds", (int)seconds);
+   }
+}
+
+/** @brief Get first non-loopback IPv4 address (cached with 60s TTL) */
+static const char *get_local_ip(sdl_ui_t *ui) {
+   time_t now = time(NULL);
+   if (ui->local_ip[0] && now >= ui->local_ip_last_poll && (now - ui->local_ip_last_poll) < 60) {
+      return ui->local_ip;
+   }
+
+   ui->local_ip[0] = '\0';
+   ui->local_ip_last_poll = now;
+
+   struct ifaddrs *ifaddr = NULL;
+   if (getifaddrs(&ifaddr) == -1) {
+      return "unknown";
+   }
+
+   for (struct ifaddrs *ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+      if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET)
+         continue;
+      if (ifa->ifa_flags & IFF_LOOPBACK)
+         continue;
+      struct sockaddr_in *addr = (struct sockaddr_in *)ifa->ifa_addr;
+      inet_ntop(AF_INET, &addr->sin_addr, ui->local_ip, sizeof(ui->local_ip));
+      break;
+   }
+   freeifaddrs(ifaddr);
+
+   return ui->local_ip[0] ? ui->local_ip : "unknown";
+}
+
+/** @brief Render a single label/value row; returns the y advance.
+ *  Value textures are cached and only re-rendered when the string changes. */
+static int render_info_row(sdl_ui_t *ui,
+                           SDL_Renderer *r,
+                           int label_idx,
+                           const char *value,
+                           int x,
+                           int y,
+                           int value_x_offset) {
+   TTF_Font *font = ui->transcript.label_font;
+   SDL_Color primary_clr = { COLOR_TEXT_PRIMARY_R, COLOR_TEXT_PRIMARY_G, COLOR_TEXT_PRIMARY_B,
+                             255 };
+
+   /* Draw cached label */
+   if (ui->panel_cache.info_labels[label_idx]) {
+      SDL_Rect dst = { x, y, ui->panel_cache.info_label_w[label_idx],
+                       ui->panel_cache.info_label_h[label_idx] };
+      SDL_RenderCopy(r, ui->panel_cache.info_labels[label_idx], NULL, &dst);
+   }
+
+   /* Draw value — cached texture, invalidated on string change */
+   if (value && value[0] && font) {
+      if (strcmp(ui->panel_cache.info_value_str[label_idx], value) != 0) {
+         if (ui->panel_cache.info_values[label_idx])
+            SDL_DestroyTexture(ui->panel_cache.info_values[label_idx]);
+         snprintf(ui->panel_cache.info_value_str[label_idx],
+                  sizeof(ui->panel_cache.info_value_str[label_idx]), "%s", value);
+         SDL_Surface *surf = TTF_RenderText_Blended(font, value, primary_clr);
+         if (surf) {
+            ui->panel_cache.info_values[label_idx] = SDL_CreateTextureFromSurface(r, surf);
+            ui->panel_cache.info_value_w[label_idx] = surf->w;
+            ui->panel_cache.info_value_h[label_idx] = surf->h;
+            SDL_FreeSurface(surf);
+         }
+      }
+      if (ui->panel_cache.info_values[label_idx]) {
+         SDL_Rect dst = { x + value_x_offset, y, ui->panel_cache.info_value_w[label_idx],
+                          ui->panel_cache.info_value_h[label_idx] };
+         SDL_RenderCopy(r, ui->panel_cache.info_values[label_idx], NULL, &dst);
+      }
+   }
+
+   return ui->panel_cache.info_label_h[label_idx] > 0 ? ui->panel_cache.info_label_h[label_idx]
+                                                      : 18;
+}
+
 /** @brief Render Settings/Info panel (slides down from top) */
 static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
    panel_cache_init(ui);
@@ -373,23 +534,21 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
    if (!ui->transcript.label_font)
       return;
 
-   SDL_Color secondary_clr = { COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
-                               COLOR_TEXT_SECONDARY_B, 255 };
+   int text_x = 30;
+   int text_y = panel_y + 24;
+   int value_x_offset = 90; /* Aligns all values to same column */
+   int row_spacing = 14;    /* Touch-friendly spacing between info rows */
 
-   int text_x = 30, text_y = panel_y + 30;
-
-   /* AI Name (cached) */
+   /* AI Name (cached, uses body_font for hierarchy) */
    if (ui->panel_cache.ai_name) {
       SDL_Rect dst = { text_x, text_y, ui->panel_cache.ai_name_w, ui->panel_cache.ai_name_h };
       SDL_RenderCopy(r, ui->panel_cache.ai_name, NULL, &dst);
       text_y += ui->panel_cache.ai_name_h + 20;
    }
 
-   /* Connection status with colored dot */
-   bool connected = ui->voice_ctx
-                        ? (voice_processing_get_state(ui->voice_ctx) != VOICE_STATE_SILENCE)
-                        : false;
-   /* Draw status dot */
+   /* Connection status with colored dot — uses real WS connectivity */
+   bool connected = ui->voice_ctx ? voice_processing_is_ws_connected(ui->voice_ctx) : false;
+
    int dot_r = 5;
    int dot_cx = text_x + dot_r;
    int dot_cy = text_y + 8;
@@ -403,32 +562,55 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
       SDL_RenderDrawLine(r, dot_cx - dx, dot_cy + y, dot_cx + dx, dot_cy + y);
    }
 
-   SDL_Surface *surf = TTF_RenderText_Blended(ui->transcript.label_font,
-                                              connected ? "Connected" : "Disconnected",
-                                              secondary_clr);
-   if (surf) {
-      SDL_Texture *tex = SDL_CreateTextureFromSurface(r, surf);
-      SDL_Rect dst = { text_x + 20, text_y, surf->w, surf->h };
-      SDL_RenderCopy(r, tex, NULL, &dst);
-      text_y += surf->h + 15;
-      SDL_DestroyTexture(tex);
-      SDL_FreeSurface(surf);
+   /* Connection status text (pre-rendered, no per-frame texture churn) */
+   SDL_Texture *status_tex = connected ? ui->panel_cache.connected_tex
+                                       : ui->panel_cache.disconnected_tex;
+   int status_w = connected ? ui->panel_cache.connected_w : ui->panel_cache.disconnected_w;
+   int status_h = connected ? ui->panel_cache.connected_h : ui->panel_cache.disconnected_h;
+   if (status_tex) {
+      SDL_Rect dst = { text_x + 20, text_y, status_w, status_h };
+      SDL_RenderCopy(r, status_tex, NULL, &dst);
+      text_y += status_h + 18; /* Group break after connection status */
    }
 
-   /* Date/time */
+   /* Info rows: Server, Device, IP, Uptime, Session */
+   char buf[128];
    time_t now = time(NULL);
-   struct tm tm_buf;
-   struct tm *tm = localtime_r(&now, &tm_buf);
-   char timebuf[64];
-   strftime(timebuf, sizeof(timebuf), "%Y-%m-%d  %H:%M", tm);
-   surf = TTF_RenderText_Blended(ui->transcript.label_font, timebuf, secondary_clr);
-   if (surf) {
-      SDL_Texture *tex = SDL_CreateTextureFromSurface(r, surf);
-      SDL_Rect dst = { text_x, text_y, surf->w, surf->h };
-      SDL_RenderCopy(r, tex, NULL, &dst);
-      SDL_DestroyTexture(tex);
-      SDL_FreeSurface(surf);
+
+   /* Server */
+   if (voice_processing_get_server_info(ui->voice_ctx, buf, sizeof(buf)) == 0) {
+      snprintf(buf, sizeof(buf), "\xe2\x80\x94"); /* em-dash UTF-8 */
    }
+   text_y += render_info_row(ui, r, 0, buf, text_x, text_y, value_x_offset) + row_spacing;
+
+   /* Device (satellite name) */
+   text_y += render_info_row(ui, r, 1, ui->satellite_name, text_x, text_y, value_x_offset) +
+             row_spacing;
+
+   /* IP */
+   text_y += render_info_row(ui, r, 2, get_local_ip(ui), text_x, text_y, value_x_offset) +
+             row_spacing;
+
+   /* Uptime (since process start) */
+   format_duration(now - ui->start_time, buf, sizeof(buf));
+   text_y += render_info_row(ui, r, 3, buf, text_x, text_y, value_x_offset) + row_spacing;
+
+   /* Session (since WS connect) */
+   time_t connect_time = voice_processing_get_connect_time(ui->voice_ctx);
+   if (connect_time > 0) {
+      format_duration(now - connect_time, buf, sizeof(buf));
+   } else {
+      snprintf(buf, sizeof(buf), "\xe2\x80\x94"); /* em-dash UTF-8 */
+   }
+   render_info_row(ui, r, 4, buf, text_x, text_y, value_x_offset);
+
+   /* Dismiss pill indicator (swipe-up-to-close affordance) */
+   int pill_w = 40, pill_h = 4;
+   int pill_x = ui->width / 2 - pill_w / 2;
+   int pill_y = panel_y + PANEL_HEIGHT - 14;
+   SDL_SetRenderDrawColor(r, 0x55, 0x55, 0x55, 180);
+   SDL_Rect pill = { pill_x, pill_y, pill_w, pill_h };
+   SDL_RenderFillRect(r, &pill);
 }
 
 /** @brief Draw subtle swipe indicators at screen edges */
@@ -843,6 +1025,10 @@ sdl_ui_t *sdl_ui_init(const sdl_ui_config_t *config) {
    if (config->font_dir) {
       snprintf(ui->font_dir, sizeof(ui->font_dir), "%s", config->font_dir);
    }
+   if (config->satellite_name) {
+      snprintf(ui->satellite_name, sizeof(ui->satellite_name), "%s", config->satellite_name);
+   }
+   ui->start_time = config->start_time;
 
    return ui;
 }

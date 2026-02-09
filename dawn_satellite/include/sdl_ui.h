@@ -27,6 +27,8 @@
 #ifndef SDL_UI_H
 #define SDL_UI_H
 
+#include <time.h>
+
 #include "voice_processing.h"
 
 #ifdef __cplusplus
@@ -42,11 +44,13 @@ typedef struct sdl_ui sdl_ui_t;
  * @brief SDL UI configuration
  */
 typedef struct {
-   int width;              /* Display width (default: 1024) */
-   int height;             /* Display height (default: 600) */
-   const char *font_dir;   /* Path to fonts directory */
-   const char *ai_name;    /* AI name for display (e.g., "DAWN") */
-   voice_ctx_t *voice_ctx; /* Voice processing context for state polling */
+   int width;                  /* Display width (default: 1024) */
+   int height;                 /* Display height (default: 600) */
+   const char *font_dir;       /* Path to fonts directory */
+   const char *ai_name;        /* AI name for display (e.g., "DAWN") */
+   voice_ctx_t *voice_ctx;     /* Voice processing context for state polling */
+   const char *satellite_name; /* Satellite identity name (e.g., "Kitchen Assistant") */
+   time_t start_time;          /* Process start time for uptime calculation */
 } sdl_ui_config_t;
 
 /**

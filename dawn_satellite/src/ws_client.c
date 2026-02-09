@@ -77,6 +77,9 @@ struct ws_client {
    /* Status detail from daemon (tool calls, thinking info) */
    char status_detail[128];
 
+   /* Connection timing */
+   time_t connected_at; /* Wall-clock time of last successful connection (0 = not connected) */
+
    /* Thread safety */
    pthread_mutex_t mutex;
 
@@ -135,6 +138,7 @@ static int callback_ws(struct lws *wsi,
          if (client) {
             pthread_mutex_lock(&client->mutex);
             client->state = WS_STATE_CONNECTED;
+            client->connected_at = time(NULL);
             pthread_mutex_unlock(&client->mutex);
          }
          break;
@@ -220,6 +224,7 @@ static int callback_ws(struct lws *wsi,
             client->state = WS_STATE_DISCONNECTED;
             client->registered = false;
             client->wsi = NULL;
+            client->connected_at = 0;
             pthread_mutex_unlock(&client->mutex);
          }
          break;
@@ -855,4 +860,22 @@ size_t ws_client_get_status_detail(ws_client_t *client, char *buf, size_t buf_si
    }
    pthread_mutex_unlock(&client->mutex);
    return len;
+}
+
+size_t ws_client_get_server_info(ws_client_t *client, char *buf, size_t buf_size) {
+   if (!client || !buf || buf_size == 0)
+      return 0;
+   pthread_mutex_lock(&client->mutex);
+   int n = snprintf(buf, buf_size, "%s:%u", client->host, client->port);
+   pthread_mutex_unlock(&client->mutex);
+   return (n > 0 && (size_t)n < buf_size) ? (size_t)n : 0;
+}
+
+time_t ws_client_get_connect_time(ws_client_t *client) {
+   if (!client)
+      return 0;
+   pthread_mutex_lock(&client->mutex);
+   time_t t = client->connected_at;
+   pthread_mutex_unlock(&client->mutex);
+   return t;
 }

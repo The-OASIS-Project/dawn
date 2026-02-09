@@ -831,6 +831,24 @@ size_t voice_processing_get_status_detail(voice_ctx_t *ctx, char *buf, size_t bu
    return ws_client_get_status_detail(ctx->ws, buf, buf_size);
 }
 
+bool voice_processing_is_ws_connected(voice_ctx_t *ctx) {
+   if (!ctx || !ctx->ws)
+      return false;
+   return ws_client_is_connected(ctx->ws);
+}
+
+size_t voice_processing_get_server_info(voice_ctx_t *ctx, char *buf, size_t buf_size) {
+   if (!ctx || !ctx->ws || !buf || buf_size == 0)
+      return 0;
+   return ws_client_get_server_info(ctx->ws, buf, buf_size);
+}
+
+time_t voice_processing_get_connect_time(voice_ctx_t *ctx) {
+   if (!ctx || !ctx->ws)
+      return 0;
+   return ws_client_get_connect_time(ctx->ws);
+}
+
 void voice_processing_speak_greeting(voice_ctx_t *ctx, satellite_ctx_t *sat_ctx) {
    if (!ctx || !sat_ctx)
       return;
