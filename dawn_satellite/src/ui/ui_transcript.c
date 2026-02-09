@@ -29,7 +29,6 @@
 #include <time.h>
 
 #include "logging.h"
-#include "tts/tts_preprocessing.h"
 #include "ui/ui_colors.h"
 
 /* =============================================================================
@@ -281,7 +280,6 @@ void ui_transcript_add(ui_transcript_t *t, const char *role, const char *text, b
 
    snprintf(entry->role, sizeof(entry->role), "%s", role);
    snprintf(entry->text, sizeof(entry->text), "%s", text);
-   remove_emojis(entry->text);
    entry->is_user = is_user;
 
    t->write_index = (t->write_index + 1) % TRANSCRIPT_MAX_ENTRIES;
@@ -334,7 +332,6 @@ void ui_transcript_update_live(ui_transcript_t *t,
    /* Update text if it has changed (compare lengths to avoid strcmp on every poll) */
    if (text_len != strlen(target->text)) {
       snprintf(target->text, sizeof(target->text), "%s", text);
-      remove_emojis(target->text);
       /* Invalidate cached texture so it re-renders with new text */
       invalidate_entry_cache(target);
    }

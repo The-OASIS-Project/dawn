@@ -111,7 +111,10 @@ struct sdl_ui {
 
    /* Touch gesture state */
    ui_touch_state_t touch;
-   bool scrolling_transcript; /* True when finger drag is scrolling transcript */
+
+   /* Manual finger tracking for transcript scroll (more reliable than tfinger.dy) */
+   bool finger_scrolling;
+   int finger_last_y;
 
    /* Cached panel label textures (lazy-initialized on first render) */
    struct {
@@ -736,6 +739,9 @@ static int sdl_init_on_thread(sdl_ui_t *ui) {
    /* Hint KMSDRM backend for Pi OS Lite (no X11) */
    SDL_SetHint("SDL_VIDEO_DRIVER", "kmsdrm,x11,wayland");
 
+   /* Disable synthetic mouse events from touch — prevents double-processing scroll */
+   SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
+
    /* Initialize SDL */
    if (SDL_Init(SDL_INIT_VIDEO) < 0) {
       LOG_ERROR("SDL_Init failed: %s", SDL_GetError());
@@ -981,24 +987,30 @@ static void *render_thread_func(void *arg) {
             ui->running = false;
             break;
          }
-         /* Track transcript scrolling to suppress conflicting swipe gestures */
+
+         /* Transcript scroll via manual finger position tracking.
+          * Using absolute positions instead of tfinger.dy for reliability
+          * across different touch drivers (KMSDRM, evdev, etc.). */
          if (event.type == SDL_FINGERDOWN) {
             int fx = (int)(event.tfinger.x * ui->width);
-            ui->scrolling_transcript = (fx > ORB_PANEL_WIDTH);
-         } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
-            ui->scrolling_transcript = (event.button.x > ORB_PANEL_WIDTH);
-         }
-
-         /* Scroll transcript panel on vertical finger drag (right side of screen) */
-         if (event.type == SDL_FINGERMOTION) {
-            if (ui->scrolling_transcript) {
-               int dy = (int)(event.tfinger.dy * ui->height);
-               if (dy != 0) {
-                  ui_transcript_scroll(&ui->transcript, -dy);
-               }
+            if (fx > ORB_PANEL_WIDTH && !panel_any_open(ui)) {
+               ui->finger_scrolling = true;
+               ui->finger_last_y = (int)(event.tfinger.y * ui->height);
+            } else {
+               ui->finger_scrolling = false;
             }
+         } else if (event.type == SDL_FINGERMOTION && ui->finger_scrolling) {
+            int new_y = (int)(event.tfinger.y * ui->height);
+            int dy = new_y - ui->finger_last_y;
+            ui->finger_last_y = new_y;
+            if (dy != 0) {
+               ui_transcript_scroll(&ui->transcript, -dy);
+            }
+         } else if (event.type == SDL_FINGERUP) {
+            ui->finger_scrolling = false;
          } else if (event.type == SDL_MOUSEMOTION && (event.motion.state & SDL_BUTTON_LMASK)) {
-            if (ui->scrolling_transcript) {
+            /* Mouse fallback for desktop testing */
+            if (event.motion.x > ORB_PANEL_WIDTH && !panel_any_open(ui)) {
                int dy = event.motion.yrel;
                if (dy != 0) {
                   ui_transcript_scroll(&ui->transcript, -dy);
@@ -1006,16 +1018,7 @@ static void *render_thread_func(void *arg) {
             }
          }
 
-         /* Clear scroll flag on finger-up */
-         if (event.type == SDL_FINGERUP || event.type == SDL_MOUSEBUTTONUP) {
-            ui->scrolling_transcript = false;
-         }
-
          touch_gesture_t gesture = ui_touch_process_event(&ui->touch, &event, time_sec);
-         /* Suppress swipe gestures that originated on the transcript side */
-         if (gesture.type >= TOUCH_GESTURE_SWIPE_UP && gesture.x > ORB_PANEL_WIDTH) {
-            gesture.type = TOUCH_GESTURE_NONE;
-         }
          handle_gesture(ui, gesture, time_sec);
       }
 

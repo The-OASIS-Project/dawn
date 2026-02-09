@@ -142,8 +142,13 @@ bool is_emoji(unsigned int codepoint) {
           (codepoint >= 0x25A0 && codepoint <= 0x25FF) ||    // Geometric Shapes
           (codepoint >= 0x2600 && codepoint <= 0x26FF) ||    // Miscellaneous Symbols
           (codepoint >= 0x2700 && codepoint <= 0x27BF) ||    // Dingbats
+          (codepoint >= 0x2B00 && codepoint <= 0x2BFF) ||    // Misc Symbols and Arrows (⭐⬆⬇)
+          (codepoint >= 0x3030 && codepoint <= 0x3030) ||    // Wavy Dash
+          (codepoint >= 0x303D && codepoint <= 0x303D) ||    // Part Alternation Mark
+          (codepoint >= 0x3297 && codepoint <= 0x3299) ||    // CJK enclosed ideographs
           (codepoint >= 0xFE00 && codepoint <= 0xFE0F) ||    // Variation Selectors
           (codepoint >= 0x200D && codepoint <= 0x200D) ||    // Zero Width Joiner
+          (codepoint >= 0x200B && codepoint <= 0x200B) ||    // Zero Width Space
           (codepoint >= 0x20E3 && codepoint <= 0x20E3) ||    // Combining Enclosing Keycap
           (codepoint >= 0xE0000 && codepoint <= 0xE007F);    // Tags block (flag sequences)
 }
