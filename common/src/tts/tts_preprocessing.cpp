@@ -127,14 +127,7 @@ void remove_chars(char *str, const char *chars_to_remove) {
 
 bool is_emoji(unsigned int codepoint) {
    // Emoji and symbol ranges that TTS engines cannot pronounce
-   return (codepoint >= 0x1F600 && codepoint <= 0x1F64F) ||  // Emoticons
-          (codepoint >= 0x1F300 &&
-           codepoint <= 0x1F5FF) ||  // Miscellaneous Symbols and Pictographs
-          (codepoint >= 0x1F680 && codepoint <= 0x1F6FF) ||  // Transport and Map Symbols
-          (codepoint >= 0x1F900 && codepoint <= 0x1F9FF) ||  // Supplemental Symbols and Pictographs
-          (codepoint >= 0x1F1E0 && codepoint <= 0x1F1FF) ||  // Regional Indicator Symbols (flags)
-          (codepoint >= 0x1FA00 && codepoint <= 0x1FA6F) ||  // Chess, Extended-A symbols
-          (codepoint >= 0x1FA70 && codepoint <= 0x1FAFF) ||  // Symbols and Pictographs Extended-A
+   return (codepoint >= 0x1F000 && codepoint <= 0x1FFFF) ||  // All SMP emoji/symbol blocks
           (codepoint >= 0x2300 && codepoint <= 0x23FF) ||    // Miscellaneous Technical
           (codepoint >= 0x2460 && codepoint <= 0x24FF) ||    // Enclosed Alphanumerics
           (codepoint >= 0x2500 && codepoint <= 0x257F) ||    // Box Drawing

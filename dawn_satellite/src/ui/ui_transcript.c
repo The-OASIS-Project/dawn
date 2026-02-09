@@ -364,7 +364,8 @@ void ui_transcript_scroll(ui_transcript_t *t, int delta_y) {
    t->scroll_offset += delta_y;
    if (t->scroll_offset < 0)
       t->scroll_offset = 0;
-   t->auto_scroll = (t->scroll_offset == 0);
+   /* User is manually scrolling — disable auto-scroll until next interaction */
+   t->auto_scroll = false;
 }
 
 void ui_transcript_scroll_to_bottom(ui_transcript_t *t) {
@@ -532,7 +533,9 @@ void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_stat
    }
    t->total_height = total_height;
 
-   /* Clamp scroll_offset to valid range */
+   /* Clamp scroll_offset to valid range.
+    * scroll_offset = 0 → at bottom (newest visible)
+    * scroll_offset = max_scroll → at top (oldest visible) */
    int avail_height = content_bottom - content_top;
    int max_scroll = total_height > avail_height ? total_height - avail_height : 0;
    if (t->scroll_offset > max_scroll)
@@ -542,10 +545,10 @@ void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_stat
    int y;
    if (total_height <= avail_height) {
       y = content_top; /* Content fits, render from top */
-   } else if (t->auto_scroll || t->scroll_offset == 0) {
+   } else if (t->auto_scroll) {
       y = content_bottom - total_height; /* Auto-scroll: newest at bottom */
    } else {
-      y = content_bottom - total_height + (max_scroll - t->scroll_offset);
+      y = content_bottom - total_height + t->scroll_offset;
    }
 
    /* Render entries top-to-bottom (oldest to newest) with clipping */

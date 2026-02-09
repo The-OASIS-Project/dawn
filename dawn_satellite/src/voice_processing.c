@@ -511,12 +511,10 @@ static void on_sentence_complete(const char *sentence, void *userdata) {
    /* Preprocess the sentence for TTS */
    char preprocessed[4096];
    int preproc_len = preprocess_text_for_tts_c(sentence, preprocessed, sizeof(preprocessed));
-   const char *tts_text = (preproc_len > 0) ? preprocessed : sentence;
-
-   /* Skip empty sentences after preprocessing */
-   if (!tts_text[0]) {
-      return;
+   if (preproc_len <= 0) {
+      return; /* All content was emoji/symbols - nothing to speak */
    }
+   const char *tts_text = preprocessed;
 
    LOG_INFO("TTS synth: %.60s%s", tts_text, strlen(tts_text) > 60 ? "..." : "");
 
