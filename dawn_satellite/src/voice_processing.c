@@ -182,6 +182,9 @@ struct voice_ctx {
    /* Touch-triggered flags (set from UI thread, consumed in voice loop) */
    atomic_bool manual_wake_requested;
    atomic_bool cancel_requested;
+
+   /* Manual wake: don't count silence until user starts speaking */
+   bool awaiting_speech;
 };
 
 /* =============================================================================
@@ -914,10 +917,11 @@ int voice_processing_loop(voice_ctx_t *ctx,
       /* Check UI-triggered flags before state machine */
       if (atomic_exchange(&ctx->manual_wake_requested, false)) {
          if (ctx->state == VOICE_STATE_SILENCE) {
-            LOG_INFO("Manual wake triggered from UI");
+            LOG_INFO("Manual wake triggered from UI — awaiting speech");
             ctx->audio_buffer_len = 0;
             ctx->speech_frame_count = 0;
             ctx->silence_frame_count = 0;
+            ctx->awaiting_speech = true;
             ctx->state = VOICE_STATE_COMMAND_RECORDING;
             continue;
          }
@@ -929,6 +933,7 @@ int voice_processing_loop(voice_ctx_t *ctx,
             atomic_store(&ctx->tts_stop_flag, 1);
             ctx->speech_frame_count = 0;
             ctx->silence_frame_count = 0;
+            ctx->awaiting_speech = false;
             ctx->state = VOICE_STATE_SILENCE;
          }
       }
@@ -1082,8 +1087,15 @@ int voice_processing_loop(voice_ctx_t *ctx,
                }
 #endif
 
-               /* Check for end of speech */
-               if (!is_speech) {
+               /* Clear awaiting_speech once VAD detects the user talking */
+               if (ctx->awaiting_speech && is_speech) {
+                  ctx->awaiting_speech = false;
+                  ctx->silence_frame_count = 0;
+                  LOG_INFO("Speech detected after manual wake");
+               }
+
+               /* Check for end of speech (skip while awaiting initial speech) */
+               if (!is_speech && !ctx->awaiting_speech) {
                   ctx->silence_frame_count++;
                   if (ctx->silence_frame_count >= ctx->silence_end_frames) {
                      if (ctx->state == VOICE_STATE_WAKEWORD_LISTEN) {

@@ -51,6 +51,7 @@
 #include "tools/hud_discovery.h"
 #include "tools/string_utils.h"
 #include "tools/tool_registry.h"
+#include "webui/webui_server.h"
 
 /* Forward declarations for utility functions from mosquitto_comms.c */
 extern unsigned char *read_file(const char *filename, size_t *length);
@@ -1300,6 +1301,16 @@ int llm_tools_execute_all(const tool_call_list_t *calls, tool_result_list_t *res
 
    if (total_calls == 0) {
       return 0;
+   }
+
+   /* Send tool call state to connected clients (WebUI + satellites) */
+   session_t *status_session = session_get_command_context();
+   if (status_session) {
+      for (int i = 0; i < total_calls; i++) {
+         char tool_detail[128];
+         snprintf(tool_detail, sizeof(tool_detail), "Calling %s...", calls->calls[i].name);
+         webui_send_state_with_detail(status_session, "tool_call", tool_detail);
+      }
    }
 
    /* Single tool - no threading overhead needed, skip timing */

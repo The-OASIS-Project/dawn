@@ -403,8 +403,9 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
       SDL_RenderDrawLine(r, dot_cx - dx, dot_cy + y, dot_cx + dx, dot_cy + y);
    }
 
-   SDL_Surface *surf = TTF_RenderText_Blended(
-       ui->transcript.label_font, connected ? "Connected" : "Disconnected", secondary_clr);
+   SDL_Surface *surf = TTF_RenderText_Blended(ui->transcript.label_font,
+                                              connected ? "Connected" : "Disconnected",
+                                              secondary_clr);
    if (surf) {
       SDL_Texture *tex = SDL_CreateTextureFromSurface(r, surf);
       SDL_Rect dst = { text_x + 20, text_y, surf->w, surf->h };

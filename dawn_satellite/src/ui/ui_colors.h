@@ -48,9 +48,9 @@
  * Text Colors
  * ============================================================================= */
 
-#define COLOR_TEXT_PRIMARY_R 0xE6
-#define COLOR_TEXT_PRIMARY_G 0xE6
-#define COLOR_TEXT_PRIMARY_B 0xE6
+#define COLOR_TEXT_PRIMARY_R 0xEE
+#define COLOR_TEXT_PRIMARY_G 0xEE
+#define COLOR_TEXT_PRIMARY_B 0xEE
 
 #define COLOR_TEXT_SECONDARY_R 0x7B
 #define COLOR_TEXT_SECONDARY_G 0x87
