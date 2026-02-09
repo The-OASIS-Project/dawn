@@ -33,7 +33,7 @@
  * ============================================================================= */
 
 static float goertzel_coeff[SPECTRUM_BINS]; /* 2*cos(omega) per bin */
-static bool goertzel_initialized = false;
+static _Atomic bool goertzel_initialized = false;
 
 /**
  * Pre-compute Goertzel coefficients for the given sample rate.
@@ -41,7 +41,7 @@ static bool goertzel_initialized = false;
  * ~1 bin (fundamental) to Nyquist/2, covering the speech-relevant range.
  */
 static void init_goertzel_tables(unsigned int sample_rate) {
-   if (goertzel_initialized)
+   if (atomic_exchange(&goertzel_initialized, true))
       return;
 
    for (int k = 0; k < SPECTRUM_BINS; k++) {
@@ -51,8 +51,6 @@ static void init_goertzel_tables(unsigned int sample_rate) {
       float omega = 2.0f * (float)M_PI * freq / (float)sample_rate;
       goertzel_coeff[k] = 2.0f * cosf(omega);
    }
-
-   goertzel_initialized = true;
 }
 
 /**

@@ -25,6 +25,7 @@
 
 #include <SDL2/SDL.h>
 #include <math.h>
+#include <stdatomic.h>
 #include <string.h>
 
 /* =============================================================================
@@ -80,10 +81,10 @@ static const float glow_alphas[GLOW_LAYERS] = { 0.3f, 0.2f, 0.12f, 0.05f };
 
 static float ring_cos_table[RING_SEGMENTS * RING_ANGLE_STEPS];
 static float ring_sin_table[RING_SEGMENTS * RING_ANGLE_STEPS];
-static bool trig_table_initialized = false;
+static _Atomic bool trig_table_initialized = false;
 
 static void init_ring_trig_table(void) {
-   if (trig_table_initialized)
+   if (atomic_exchange(&trig_table_initialized, true))
       return;
 
    float seg_deg = 360.0f / RING_SEGMENTS;
@@ -102,17 +103,15 @@ static void init_ring_trig_table(void) {
          ring_sin_table[idx] = sinf(angle);
       }
    }
-
-   trig_table_initialized = true;
 }
 
 /* Pre-computed bar angle trig tables (one cos/sin per bar, evenly spaced around circle) */
 static float bar_cos[BAR_COUNT];
 static float bar_sin[BAR_COUNT];
-static bool bar_trig_initialized = false;
+static _Atomic bool bar_trig_initialized = false;
 
 static void init_bar_trig_table(void) {
-   if (bar_trig_initialized)
+   if (atomic_exchange(&bar_trig_initialized, true))
       return;
 
    for (int i = 0; i < BAR_COUNT; i++) {
@@ -120,7 +119,6 @@ static void init_bar_trig_table(void) {
       bar_cos[i] = cosf(angle);
       bar_sin[i] = sinf(angle);
    }
-   bar_trig_initialized = true;
 }
 
 /* =============================================================================

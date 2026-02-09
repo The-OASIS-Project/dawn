@@ -399,6 +399,24 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
       return;
    }
 
+   /* Validate UUID format: 8-4-4-4-12 hex pattern (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx) */
+   {
+      static const int dash_pos[] = { 8, 13, 18, 23 };
+      bool valid = true;
+      for (int i = 0; i < 36 && valid; i++) {
+         if (i == dash_pos[0] || i == dash_pos[1] || i == dash_pos[2] || i == dash_pos[3]) {
+            valid = (uuid[i] == '-');
+         } else {
+            char c = uuid[i];
+            valid = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+         }
+      }
+      if (!valid) {
+         send_error_impl(conn->wsi, "INVALID_MESSAGE", "UUID must be hex with dashes (8-4-4-4-12)");
+         return;
+      }
+   }
+
    /* Optional fields with defaults */
    const char *name = "Satellite";
    if (json_object_object_get_ex(payload, "name", &name_obj)) {

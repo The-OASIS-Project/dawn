@@ -417,7 +417,8 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
 
    /* Date/time */
    time_t now = time(NULL);
-   struct tm *tm = localtime(&now);
+   struct tm tm_buf;
+   struct tm *tm = localtime_r(&now, &tm_buf);
    char timebuf[64];
    strftime(timebuf, sizeof(timebuf), "%Y-%m-%d  %H:%M", tm);
    surf = TTF_RenderText_Blended(ui->transcript.label_font, timebuf, secondary_clr);

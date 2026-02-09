@@ -90,9 +90,9 @@ static const char *wakeWordPrefixes[] = { "hello ",    "okay ",         "alright
 #define NUM_WAKE_WORDS (sizeof(wakeWordPrefixes) / sizeof(wakeWordPrefixes[0]))
 
 /* Time-of-day greetings */
-static const char *morning_greeting = "Good morning.";
-static const char *day_greeting = "Good day.";
-static const char *evening_greeting = "Good evening.";
+static const char *morning_greeting = "Good morning boss.";
+static const char *day_greeting = "Good day Sir.";
+static const char *evening_greeting = "Good evening Sir.";
 
 /* Offline fallback message */
 static const char *offline_message = "I'm sorry, I can't reach the server right now.";

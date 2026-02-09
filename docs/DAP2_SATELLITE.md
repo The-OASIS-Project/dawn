@@ -224,24 +224,27 @@ DAP2 uses JSON messages over WebSocket, connecting to the same port as the WebUI
 
 ```
 dawn_satellite/
+├── assets/
+│   └── fonts/                  # TTF fonts (Source Sans 3, IBM Plex Mono)
 ├── config/
 │   └── satellite.toml          # Default configuration
 ├── include/
 │   ├── audio_capture.h         # ALSA audio capture (ring buffer + thread)
-│   ├── audio_playback.h        # ALSA audio playback
+│   ├── audio_playback.h        # ALSA audio playback + Goertzel spectrum
 │   ├── dap_client.h            # DAP (Tier 2) TCP client
 │   ├── display.h               # Framebuffer display (optional)
 │   ├── gpio_control.h          # GPIO button support (optional)
 │   ├── neopixel.h              # WS2812 LED support (optional)
 │   ├── satellite_config.h      # TOML configuration
 │   ├── satellite_state.h       # State machine
+│   ├── sdl_ui.h                # SDL2 UI entry point
 │   ├── toml.h                  # TOML parser (tomlc99)
 │   ├── voice_processing.h      # Voice pipeline (VAD + wake word + ASR + TTS)
 │   └── ws_client.h             # WebSocket client API
 ├── src/
 │   ├── main.c                  # Entry point, CLI parsing, model loading
 │   ├── audio_capture.c         # ALSA capture with ring buffer
-│   ├── audio_playback.c        # ALSA playback with resampling
+│   ├── audio_playback.c        # ALSA playback with resampling + spectrum
 │   ├── dap_client.c            # DAP (Tier 2) TCP client
 │   ├── display.c               # Framebuffer display driver
 │   ├── gpio_control.c          # libgpiod GPIO input
@@ -250,7 +253,18 @@ dawn_satellite/
 │   ├── satellite_state.c       # State machine logic
 │   ├── toml.c                  # TOML parser
 │   ├── voice_processing.c      # Voice pipeline (~1100 lines)
-│   └── ws_client.c             # libwebsockets client + background thread
+│   ├── ws_client.c             # libwebsockets client + background thread
+│   └── ui/                     # SDL2 touchscreen UI (optional, ENABLE_SDL_UI)
+│       ├── sdl_ui.c            # UI lifecycle, event loop, panel rendering
+│       ├── ui_orb.c            # Orb visualization + FFT spectrum bars
+│       ├── ui_orb.h            # Orb context and API
+│       ├── ui_transcript.c     # Scrollable transcript with caching
+│       ├── ui_transcript.h     # Transcript panel types and API
+│       ├── ui_markdown.c       # Inline markdown renderer (bold/italic/code)
+│       ├── ui_markdown.h       # Markdown font set and render API
+│       ├── ui_touch.c          # Touch gesture recognition
+│       ├── ui_touch.h          # Touch state types
+│       └── ui_colors.h         # Color constants
 └── CMakeLists.txt
 
 common/                          # Shared library (daemon + satellite)
@@ -740,7 +754,7 @@ wscat -c ws://localhost:8080
 
 ## Current Status
 
-### Implemented
+### Implemented — Core Voice Pipeline
 
 1. **Local VAD** - Silero ONNX model for real-time speech detection
 2. **Wake Word Detection** - VAD + ASR transcription checked for wake word ("Hey Friday")
@@ -748,17 +762,41 @@ wscat -c ws://localhost:8080
 4. **Local TTS** - Piper with sentence-level streaming during LLM response
 5. **Session Reconnection** - Cryptographic reconnect secrets, conversation history preserved
 6. **Offline Fallback** - TTS "I can't reach the server right now" on connection loss
-7. **Time-of-Day Greeting** - Spoken on startup
+7. **Time-of-Day Greeting** - Spoken on startup/reconnection (morning/day/evening)
 8. **Unified Logging** - Same format as daemon (timestamps, colors, file:line)
 9. **Clean Shutdown** - Ctrl+C responsive in all states (model loading, TTS playback, idle)
 10. **Music Library Pagination** - Browse full library via voice (50 items per page)
 
+### Implemented — SDL2 Touchscreen UI
+
+11. **Orb visualization** - Animated orb with state-driven colors (idle/listening/thinking/speaking)
+12. **FFT spectrum bars** - Real-time frequency visualization around orb during speech playback
+13. **Streaming transcript** - Live-updating conversation history with user and AI messages
+14. **Inline markdown rendering** - Bold, italic, code spans, and bullet points in AI responses
+15. **Scrollable transcript** - Touch-drag and mouse-drag scrolling through conversation history
+16. **User transcription display** - Shows "You: ..." after ASR completes
+17. **Touch gestures** - Tap orb to cancel/listen, drag to scroll, swipe for panels
+18. **Status bar** - WiFi signal quality, connection status, tool call info, date/time
+19. **KMSDRM backend** - Direct rendering without X11, suitable for headless Pi setups
+20. **UI persists across reconnections** - SDL lifecycle independent of WebSocket connection
+
+### Implemented — Reliability & Bug Fixes
+
+21. **App-level keep-alive** - `satellite_ping` every 10s (WS-level pings disabled for lws 4.3.5 compat)
+22. **Ping-query race fix** - `ws_client_ping()` skips if tx_buffer already has pending data
+23. **Response timeout** - Returns to idle after 30s (no data) or 120s (streaming stalled)
+24. **Sentence breaking** - Breaks on `.!?`, bullets (`\n-`, `\n*`), numbered lists, paragraphs, `:\n`
+25. **TTS emoji stripping** - Expanded Unicode coverage to prevent TTS reading symbols
+26. **Atomic init guards** - Thread-safe `_Atomic bool` with `atomic_exchange()` for lookup tables
+
 ### Planned Features
 
 1. [ ] **Barge-in support** - Interrupt TTS by speaking (stubbed, not connected)
-2. [x] **SDL2 touchscreen UI** - Core visualization + transcript complete (KMSDRM, orb, FFT spectrum, streaming transcript, date/time, WiFi, status detail). Touch gestures, quick actions, media overlay, and screensaver remaining.
-3. [ ] **Multi-satellite routing** - Daemon routes by location
-4. [ ] **Speaker identification** - Personalized responses per user
+2. [ ] **Quick actions panel** - Tap-accessible shortcuts (stubbed, "Coming Soon")
+3. [ ] **Media overlay** - Now-playing display for music streaming
+4. [ ] **Screensaver / idle dimming** - Power saving when inactive
+5. [ ] **Multi-satellite routing** - Daemon routes by location
+6. [ ] **Speaker identification** - Personalized responses per user
 
 ## Troubleshooting
 
