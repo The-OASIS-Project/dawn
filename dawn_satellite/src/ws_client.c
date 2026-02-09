@@ -779,6 +779,15 @@ int ws_client_ping(ws_client_t *client) {
       return -1;
    }
 
+   /* Skip ping if there's already a pending message (query, registration, etc.)
+    * to prevent pings from overwriting real data in the single tx_buffer. */
+   pthread_mutex_lock(&client->mutex);
+   bool busy = client->tx_pending;
+   pthread_mutex_unlock(&client->mutex);
+   if (busy) {
+      return 0;
+   }
+
    struct json_object *msg = json_object_new_object();
    json_object_object_add(msg, "type", json_object_new_string("satellite_ping"));
 

@@ -187,6 +187,9 @@ struct voice_ctx {
    atomic_bool manual_wake_requested;
    atomic_bool cancel_requested;
 
+   /* Response timeout tracking */
+   time_t waiting_start;
+
    /* Manual wake: don't count silence until user starts speaking */
    bool awaiting_speech;
 };
@@ -1180,6 +1183,7 @@ int voice_processing_loop(voice_ctx_t *ctx,
 #endif
                                  /* Send query */
                                  ctx->state = VOICE_STATE_WAITING;
+                                 ctx->waiting_start = time(NULL);
                                  ws_client_send_query(ws, command_text);
                                  free(command_text);
                               } else {
@@ -1252,6 +1256,7 @@ int voice_processing_loop(voice_ctx_t *ctx,
 #endif
                            /* Send query */
                            ctx->state = VOICE_STATE_WAITING;
+                           ctx->waiting_start = time(NULL);
                            ws_client_send_query(ws, cmd_result->text);
 #ifdef HAVE_ASR_ENGINE
                            asr_engine_result_free(cmd_result);
@@ -1285,7 +1290,7 @@ int voice_processing_loop(voice_ctx_t *ctx,
             break;
          }
 
-         case VOICE_STATE_WAITING:
+         case VOICE_STATE_WAITING: {
             /* Wait for response - TTS happens via sentence callback as chunks stream in */
             if (atomic_load(&ctx->response_complete)) {
                /* Log response (protected access to buffer) */
@@ -1301,10 +1306,30 @@ int voice_processing_loop(voice_ctx_t *ctx,
                ctx->silence_frame_count = 0;
                atomic_store(&ctx->tts_stop_flag, 0); /* Reset for next interaction */
             } else {
-               /* Still waiting - small sleep to avoid busy loop */
-               usleep(10000); /* 10ms */
+               /* Check for response timeout (no streaming data received) */
+               time_t now = time(NULL);
+               int elapsed = (int)(now - ctx->waiting_start);
+               bool has_partial = false;
+               pthread_mutex_lock(&ctx->response_mutex);
+               has_partial = (ctx->response_len > 0);
+               pthread_mutex_unlock(&ctx->response_mutex);
+
+               /* Timeout: 30s if no data at all, 120s if streaming has started */
+               int timeout_sec = has_partial ? 120 : 30;
+               if (elapsed >= timeout_sec) {
+                  LOG_WARNING("Response timeout after %ds (partial=%s), returning to silence",
+                              elapsed, has_partial ? "yes" : "no");
+                  ctx->state = VOICE_STATE_SILENCE;
+                  ctx->speech_frame_count = 0;
+                  ctx->silence_frame_count = 0;
+                  atomic_store(&ctx->tts_stop_flag, 0);
+               } else {
+                  /* Still waiting - small sleep to avoid busy loop */
+                  usleep(10000); /* 10ms */
+               }
             }
             break;
+         }
 
          case VOICE_STATE_SPEAKING:
             /* TTS playback is driven by on_sentence_complete on WS thread.
