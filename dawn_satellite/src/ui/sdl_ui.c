@@ -1004,7 +1004,7 @@ static void *render_thread_func(void *arg) {
             int dy = new_y - ui->finger_last_y;
             ui->finger_last_y = new_y;
             if (dy != 0) {
-               ui_transcript_scroll(&ui->transcript, -dy);
+               ui_transcript_scroll(&ui->transcript, dy);
             }
          } else if (event.type == SDL_FINGERUP) {
             ui->finger_scrolling = false;
@@ -1013,7 +1013,7 @@ static void *render_thread_func(void *arg) {
             if (event.motion.x > ORB_PANEL_WIDTH && !panel_any_open(ui)) {
                int dy = event.motion.yrel;
                if (dy != 0) {
-                  ui_transcript_scroll(&ui->transcript, -dy);
+                  ui_transcript_scroll(&ui->transcript, dy);
                }
             }
          }
