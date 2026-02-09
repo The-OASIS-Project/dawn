@@ -416,8 +416,11 @@ static int send_json(ws_client_t *client, struct json_object *obj) {
 
    pthread_mutex_unlock(&client->mutex);
 
-   /* Request write callback */
+   /* Request write callback and wake service thread.
+    * lws_cancel_service is needed because lws_callback_on_writable may not
+    * wake a blocked lws_service() call from a different thread on older lws. */
    lws_callback_on_writable(client->wsi);
+   lws_cancel_service(client->lws_ctx);
 
    return 0;
 }
