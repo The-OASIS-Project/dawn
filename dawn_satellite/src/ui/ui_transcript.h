@@ -89,6 +89,11 @@ typedef struct {
 
    /* Status detail from daemon (tool calls, thinking info) */
    char status_detail[128];
+
+   /* Scroll state */
+   int scroll_offset; /* Pixels scrolled back from bottom (0 = auto-scroll to newest) */
+   int total_height;  /* Total rendered content height (for scroll bounds) */
+   bool auto_scroll;  /* True when following newest content */
 } ui_transcript_t;
 
 /**
@@ -132,6 +137,16 @@ void ui_transcript_update_live(ui_transcript_t *t,
  * re-renders with full markdown styling on the next frame.
  */
 void ui_transcript_finalize_live(ui_transcript_t *t);
+
+/**
+ * @brief Scroll the transcript by a delta (positive = scroll up into history)
+ */
+void ui_transcript_scroll(ui_transcript_t *t, int delta_y);
+
+/**
+ * @brief Snap transcript back to auto-scroll mode (follow newest)
+ */
+void ui_transcript_scroll_to_bottom(ui_transcript_t *t);
 
 /**
  * @brief Render the transcript panel

@@ -257,7 +257,8 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
                           ws_client_t *ws,
                           int use_keyboard,
                           satellite_config_t *config,
-                          voice_ctx_t *voice_ctx) {
+                          voice_ctx_t *voice_ctx,
+                          bool first_connect) {
    /* Build identity from config */
    ws_identity_t identity;
    memset(&identity, 0, sizeof(identity));
@@ -307,29 +308,10 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
       /* Set global for signal handler */
       g_voice_ctx = voice_ctx;
 
-#ifdef ENABLE_SDL_UI
-      /* Start SDL2 UI render thread (before voice loop) */
-      sdl_ui_t *ui = NULL;
-      if (config->sdl_ui.enabled) {
-         sdl_ui_config_t ui_config = {
-            .width = config->sdl_ui.width,
-            .height = config->sdl_ui.height,
-            .font_dir = config->sdl_ui.font_dir,
-            .ai_name = config->general.ai_name,
-            .voice_ctx = voice_ctx,
-         };
-         ui = sdl_ui_init(&ui_config);
-         if (ui) {
-            g_sdl_ui = ui;
-            sdl_ui_start(ui);
-         } else {
-            printf("SDL UI init failed, continuing headless\n");
-         }
+      /* Speak welcome greeting on first connect only */
+      if (first_connect) {
+         voice_processing_speak_greeting(voice_ctx, ctx);
       }
-#endif
-
-      /* Speak welcome greeting */
-      voice_processing_speak_greeting(voice_ctx, ctx);
 
       /* Run voice-activated loop */
       int result = voice_processing_loop(voice_ctx, ctx, ws, config);
@@ -339,14 +321,6 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
          /* Connection lost - speak offline message */
          voice_processing_speak_offline(voice_ctx, ctx);
       }
-
-#ifdef ENABLE_SDL_UI
-      if (ui) {
-         sdl_ui_stop(ui);
-         sdl_ui_cleanup(ui);
-         g_sdl_ui = NULL;
-      }
-#endif
 
       return result;
    }
@@ -913,11 +887,33 @@ int main(int argc, char *argv[]) {
    }
 
 #ifdef ENABLE_DAP2
+#ifdef ENABLE_SDL_UI
+   /* Start SDL2 UI BEFORE connection loop — persists across reconnections */
+   sdl_ui_t *sdl_ui = NULL;
+   if (config.sdl_ui.enabled && voice_ctx) {
+      sdl_ui_config_t ui_config = {
+         .width = config.sdl_ui.width,
+         .height = config.sdl_ui.height,
+         .font_dir = config.sdl_ui.font_dir,
+         .ai_name = config.general.ai_name,
+         .voice_ctx = voice_ctx,
+      };
+      sdl_ui = sdl_ui_init(&ui_config);
+      if (sdl_ui) {
+         g_sdl_ui = sdl_ui;
+         sdl_ui_start(sdl_ui);
+      } else {
+         printf("SDL UI init failed, continuing headless\n");
+      }
+   }
+#endif
+
    /* Connection loop with automatic reconnection */
    {
       uint32_t delay_ms = config.server.reconnect_delay_ms;
       uint32_t max_attempts = config.server.max_reconnect_attempts;
       uint32_t attempt = 0;
+      bool first_connect = true;
 
       while (ctx.running) {
          /* Create WebSocket client */
@@ -959,7 +955,8 @@ int main(int argc, char *argv[]) {
          attempt = 0;
 
          /* Run main loop (returns when disconnected or user exits) */
-         result = dap2_main_loop(&ctx, ws, use_keyboard, &config, voice_ctx);
+         result = dap2_main_loop(&ctx, ws, use_keyboard, &config, voice_ctx, first_connect);
+         first_connect = false;
          ws_client_destroy(ws);
 
          /* If user requested exit, don't reconnect */
@@ -972,6 +969,14 @@ int main(int argc, char *argv[]) {
          usleep(delay_ms * 1000);
       }
    }
+
+#ifdef ENABLE_SDL_UI
+   if (sdl_ui) {
+      sdl_ui_stop(sdl_ui);
+      sdl_ui_cleanup(sdl_ui);
+      g_sdl_ui = NULL;
+   }
+#endif
 
    if (voice_ctx)
       voice_processing_cleanup(voice_ctx);

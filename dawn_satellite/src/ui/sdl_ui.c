@@ -660,6 +660,15 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
       ui->last_state_change_time = time_sec;
    }
 
+   /* Check for new user transcription and add to transcript */
+   {
+      char user_buf[512];
+      size_t ulen = voice_processing_get_user_text(ui->voice_ctx, user_buf, sizeof(user_buf));
+      if (ulen > 0) {
+         ui_transcript_add(&ui->transcript, "You", user_buf, true);
+      }
+   }
+
    /* Check response_complete flag — finalize the live transcript entry */
    if (!ui->response_added && voice_processing_is_response_complete(ui->voice_ctx)) {
       size_t len = voice_processing_get_response_text(ui->voice_ctx, ui->last_response,
@@ -759,6 +768,24 @@ static void *render_thread_func(void *arg) {
             ui->running = false;
             break;
          }
+         /* Scroll transcript panel on vertical finger drag (right side of screen) */
+         if (event.type == SDL_FINGERMOTION) {
+            int fx = (int)(event.tfinger.x * ui->width);
+            if (fx > ORB_PANEL_WIDTH) {
+               int dy = (int)(event.tfinger.dy * ui->height);
+               if (dy != 0) {
+                  ui_transcript_scroll(&ui->transcript, -dy);
+               }
+            }
+         } else if (event.type == SDL_MOUSEMOTION && (event.motion.state & SDL_BUTTON_LMASK)) {
+            if (event.motion.x > ORB_PANEL_WIDTH) {
+               int dy = event.motion.yrel;
+               if (dy != 0) {
+                  ui_transcript_scroll(&ui->transcript, -dy);
+               }
+            }
+         }
+
          touch_gesture_t gesture = ui_touch_process_event(&ui->touch, &event, time_sec);
          handle_gesture(ui, gesture, time_sec);
       }

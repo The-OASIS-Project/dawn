@@ -3518,7 +3518,7 @@ int webui_server_init(int port, const char *www_path) {
    /* Increase service buffer for large WebSocket messages (conversation history).
     * Default is ~4KB which causes OVERSIZED_PAYLOAD errors on HTTP/2 connections. */
    info.pt_serv_buf_size = 128 * 1024; /* 128KB - enough for large conversation loads */
-   info.ws_ping_pong_interval = 60;    /* WebSocket ping every 60s to keep connections alive */
+   info.ws_ping_pong_interval = 0;     /* Disabled: satellites use app-level pings instead */
    /* Note: Not using LWS_SERVER_OPTION_HTTP_HEADERS_SECURITY_BEST_PRACTICES_ENFORCE
     * because it sets CSP: default-src 'none' which blocks WebAssembly for Opus codec.
     * Security headers are added via index.html meta tags instead. */

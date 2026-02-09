@@ -146,22 +146,55 @@ void sentence_buffer_feed(sentence_buffer_t *buf, const char *chunk) {
       size_t terminator_pos = 0;
 
       for (i = search_start; i < buf->size; i++) {
-         /* Look for sentence terminators (input should be pre-filtered of command tags) */
+         /* Standard sentence terminators (.!?) followed by space/newline */
          if (str_is_sentence_terminator(buf->buffer[i])) {
-            /* Found a terminator - check if followed by space/newline/end */
             if (i + 1 >= buf->size) {
-               /* At end of buffer - not complete yet (might get more text) */
-               break;
+               break; /* At end - might get more text */
             } else if (buf->buffer[i + 1] == ' ' || buf->buffer[i + 1] == '\n' ||
                        buf->buffer[i + 1] == '\r') {
-               /* Check if this is an abbreviation (only for periods) */
                if (buf->buffer[i] == '.' && str_is_abbreviation(buf->buffer, &buf->buffer[i])) {
-                  /* This is an abbreviation, keep looking */
                   continue;
                }
-               /* Complete sentence found */
                found_boundary = 1;
-               terminator_pos = i + 1; /* Include the space/newline */
+               terminator_pos = i + 1;
+               break;
+            }
+         }
+
+         /* Newline-based boundaries for bullet points and paragraphs */
+         if (buf->buffer[i] == '\n' && i > search_start) {
+            if (i + 1 >= buf->size)
+               break; /* Incomplete - wait for more */
+
+            char next = buf->buffer[i + 1];
+
+            /* Paragraph break: \n\n */
+            if (next == '\n') {
+               found_boundary = 1;
+               terminator_pos = i;
+               break;
+            }
+
+            /* Bullet: \n followed by - or * (with optional space) */
+            if (next == '-' || next == '*') {
+               found_boundary = 1;
+               terminator_pos = i;
+               break;
+            }
+
+            /* Numbered list: \n followed by digit */
+            if (next >= '1' && next <= '9') {
+               found_boundary = 1;
+               terminator_pos = i;
+               break;
+            }
+         }
+
+         /* Colon followed by newline (list introduction) */
+         if (buf->buffer[i] == ':' && i > search_start) {
+            if (i + 1 < buf->size && buf->buffer[i + 1] == '\n') {
+               found_boundary = 1;
+               terminator_pos = i + 1;
                break;
             }
          }

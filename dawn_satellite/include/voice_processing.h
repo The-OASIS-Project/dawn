@@ -160,6 +160,19 @@ float voice_processing_get_vad_probability(const voice_ctx_t *ctx);
 size_t voice_processing_get_response_text(voice_ctx_t *ctx, char *buf, size_t buf_size);
 
 /**
+ * @brief Get user transcription text if new text is available
+ *
+ * Thread-safe: reads atomically-flagged user text.
+ * Returns the user's ASR transcription and clears the "new" flag.
+ *
+ * @param ctx Voice processing context
+ * @param buf Destination buffer
+ * @param buf_size Size of destination buffer
+ * @return Number of bytes copied, or 0 if no new text
+ */
+size_t voice_processing_get_user_text(voice_ctx_t *ctx, char *buf, size_t buf_size);
+
+/**
  * @brief Get current audio playback amplitude
  *
  * Returns the RMS amplitude of the most recent playback chunk.

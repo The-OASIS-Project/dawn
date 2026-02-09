@@ -37,7 +37,7 @@
  * ============================================================================= */
 
 #define LABEL_FONT_SIZE 18
-#define BODY_FONT_SIZE 24
+#define BODY_FONT_SIZE 22
 #define ROLE_FONT_SIZE 18
 #define PADDING 20
 #define LABEL_HEIGHT 36
@@ -221,6 +221,8 @@ int ui_transcript_init(ui_transcript_t *t,
    t->padding = PADDING;
    t->wrap_width = panel_w - 2 * PADDING;
    snprintf(t->ai_name, sizeof(t->ai_name), "%s", ai_name ? ai_name : "DAWN");
+   t->auto_scroll = true;
+   t->scroll_offset = 0;
 
    /* Load fonts */
    t->label_font = try_load_font(font_dir, "IBMPlexMono-Regular.ttf", FALLBACK_MONO_FONT,
@@ -286,6 +288,10 @@ void ui_transcript_add(ui_transcript_t *t, const char *role, const char *text, b
    if (t->entry_count < TRANSCRIPT_MAX_ENTRIES) {
       t->entry_count++;
    }
+
+   /* New entry: snap to bottom */
+   t->scroll_offset = 0;
+   t->auto_scroll = true;
 
    pthread_mutex_unlock(&t->mutex);
 }
@@ -353,6 +359,22 @@ void ui_transcript_finalize_live(ui_transcript_t *t) {
    }
 
    pthread_mutex_unlock(&t->mutex);
+}
+
+void ui_transcript_scroll(ui_transcript_t *t, int delta_y) {
+   if (!t)
+      return;
+   t->scroll_offset += delta_y;
+   if (t->scroll_offset < 0)
+      t->scroll_offset = 0;
+   t->auto_scroll = (t->scroll_offset == 0);
+}
+
+void ui_transcript_scroll_to_bottom(ui_transcript_t *t) {
+   if (!t)
+      return;
+   t->scroll_offset = 0;
+   t->auto_scroll = true;
 }
 
 void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_state_t state) {
@@ -499,7 +521,7 @@ void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_stat
       ensure_entry_cached(t, &t->entries[idx]);
    }
 
-   /* Calculate total height of all entries to determine scroll offset */
+   /* Calculate total height of all entries */
    int total_height = 0;
    for (int i = 0; i < count; i++) {
       int idx = (start_idx + i) % TRANSCRIPT_MAX_ENTRIES;
@@ -511,14 +533,22 @@ void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_stat
       if (i < count - 1)
          total_height += ENTRY_SPACING;
    }
+   t->total_height = total_height;
 
-   /* Auto-scroll: if content exceeds panel, offset so newest entry is at bottom */
+   /* Clamp scroll_offset to valid range */
    int avail_height = content_bottom - content_top;
+   int max_scroll = total_height > avail_height ? total_height - avail_height : 0;
+   if (t->scroll_offset > max_scroll)
+      t->scroll_offset = max_scroll;
+
+   /* Calculate y start position */
    int y;
    if (total_height <= avail_height) {
       y = content_top; /* Content fits, render from top */
+   } else if (t->auto_scroll || t->scroll_offset == 0) {
+      y = content_bottom - total_height; /* Auto-scroll: newest at bottom */
    } else {
-      y = content_bottom - total_height; /* Scroll so newest is visible */
+      y = content_bottom - total_height + (max_scroll - t->scroll_offset);
    }
 
    /* Render entries top-to-bottom (oldest to newest) with clipping */

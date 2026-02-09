@@ -165,6 +165,10 @@ struct voice_ctx {
    size_t response_len;
    atomic_bool response_complete; /* Atomic flag for thread-safe signaling */
 
+   /* User transcription for UI display (protected by response_mutex) */
+   char user_text[512];
+   atomic_bool user_text_new; /* True when new user text is available for UI */
+
    /* Sentence buffer for streaming TTS */
 #ifdef HAVE_VAD_SILERO
    sentence_buffer_t *sentence_buf;
@@ -802,6 +806,22 @@ size_t voice_processing_get_response_text(voice_ctx_t *ctx, char *buf, size_t bu
    return len;
 }
 
+size_t voice_processing_get_user_text(voice_ctx_t *ctx, char *buf, size_t buf_size) {
+   if (!ctx || !buf || buf_size == 0)
+      return 0;
+   if (!atomic_load(&ctx->user_text_new))
+      return 0;
+   pthread_mutex_lock(&ctx->response_mutex);
+   size_t len = strlen(ctx->user_text);
+   if (len >= buf_size)
+      len = buf_size - 1;
+   memcpy(buf, ctx->user_text, len);
+   buf[len] = '\0';
+   atomic_store(&ctx->user_text_new, false);
+   pthread_mutex_unlock(&ctx->response_mutex);
+   return len;
+}
+
 size_t voice_processing_get_status_detail(voice_ctx_t *ctx, char *buf, size_t buf_size) {
    if (!ctx || !ctx->ws || !buf || buf_size == 0)
       return 0;
@@ -1215,8 +1235,12 @@ int voice_processing_loop(voice_ctx_t *ctx,
                            printf("\n>>> Command: %s\n\n", cmd_result->text);
                            fflush(stdout);
 
-                           /* Reset for new response (lock for buffer access) */
+                           /* Store user text for UI display */
                            pthread_mutex_lock(&ctx->response_mutex);
+                           snprintf(ctx->user_text, sizeof(ctx->user_text), "%s", cmd_result->text);
+                           atomic_store(&ctx->user_text_new, true);
+
+                           /* Reset for new response */
                            ctx->response_buffer[0] = '\0';
                            ctx->response_len = 0;
                            pthread_mutex_unlock(&ctx->response_mutex);
