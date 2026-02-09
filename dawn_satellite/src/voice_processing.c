@@ -174,10 +174,14 @@ struct voice_ctx {
 
    /* Audio playback handle for sentence-level TTS (set during loop) */
    audio_playback_t *playback;
-   volatile int tts_stop_flag;
+   atomic_int tts_stop_flag; /* Written from UI thread (cancel), read by playback */
 
    /* WebSocket client for status detail access */
    ws_client_t *ws;
+
+   /* Touch-triggered flags (set from UI thread, consumed in voice loop) */
+   atomic_bool manual_wake_requested;
+   atomic_bool cancel_requested;
 };
 
 /* =============================================================================
@@ -517,7 +521,7 @@ static void on_sentence_complete(const char *sentence, void *userdata) {
       free(audio);
 
       /* Small pause between sentences for natural rhythm */
-      if (!ctx->tts_stop_flag) {
+      if (!atomic_load(&ctx->tts_stop_flag)) {
          usleep(150000); /* 150ms pause */
       }
    }
@@ -573,6 +577,8 @@ voice_ctx_t *voice_processing_init(const satellite_config_t *config) {
    /* Initialize thread synchronization for response buffer */
    pthread_mutex_init(&ctx->response_mutex, NULL);
    atomic_store(&ctx->response_complete, false);
+   atomic_store(&ctx->manual_wake_requested, false);
+   atomic_store(&ctx->cancel_requested, false);
 
    ctx->state = VOICE_STATE_SILENCE;
    ctx->running = true;
@@ -737,7 +743,19 @@ voice_state_t voice_processing_get_state(const voice_ctx_t *ctx) {
 void voice_processing_stop(voice_ctx_t *ctx) {
    if (ctx) {
       ctx->running = false;
-      ctx->tts_stop_flag = 1; /* Interrupt any in-progress TTS playback */
+      atomic_store(&ctx->tts_stop_flag, 1); /* Interrupt any in-progress TTS playback */
+   }
+}
+
+void voice_processing_trigger_wake(voice_ctx_t *ctx) {
+   if (ctx)
+      atomic_store(&ctx->manual_wake_requested, true);
+}
+
+void voice_processing_cancel(voice_ctx_t *ctx) {
+   if (ctx) {
+      atomic_store(&ctx->cancel_requested, true);
+      atomic_store(&ctx->tts_stop_flag, 1);
    }
 }
 
@@ -808,7 +826,7 @@ void voice_processing_speak_greeting(voice_ctx_t *ctx, satellite_ctx_t *sat_ctx)
        audio_len > 0) {
       audio_playback_t *playback = (audio_playback_t *)sat_ctx->audio_playback;
       int sample_rate = tts_piper_get_sample_rate(ctx->tts);
-      volatile int stop_flag = 0;
+      atomic_int stop_flag = 0;
       audio_playback_play(playback, audio, audio_len, sample_rate, &stop_flag);
       free(audio);
       LOG_INFO("Greeting playback complete");
@@ -842,7 +860,7 @@ void voice_processing_speak_offline(voice_ctx_t *ctx, satellite_ctx_t *sat_ctx) 
        audio && audio_len > 0) {
       audio_playback_t *playback = (audio_playback_t *)sat_ctx->audio_playback;
       int sample_rate = tts_piper_get_sample_rate(ctx->tts);
-      volatile int stop_flag = 0;
+      atomic_int stop_flag = 0;
       audio_playback_play(playback, audio, audio_len, sample_rate, &stop_flag);
       free(audio);
    } else {
@@ -869,7 +887,7 @@ int voice_processing_loop(voice_ctx_t *ctx,
 
    /* Store playback handle for sentence-level TTS callback */
    ctx->playback = playback;
-   ctx->tts_stop_flag = 0;
+   atomic_store(&ctx->tts_stop_flag, 0);
    ctx->ws = ws;
 
    /* Set up WebSocket callbacks */
@@ -892,6 +910,28 @@ int voice_processing_loop(voice_ctx_t *ctx,
    while (ctx->running && ws_client_is_connected(ws)) {
       /* Debug: confirm loop is running */
       debug_frame_count++;
+
+      /* Check UI-triggered flags before state machine */
+      if (atomic_exchange(&ctx->manual_wake_requested, false)) {
+         if (ctx->state == VOICE_STATE_SILENCE) {
+            LOG_INFO("Manual wake triggered from UI");
+            ctx->audio_buffer_len = 0;
+            ctx->speech_frame_count = 0;
+            ctx->silence_frame_count = 0;
+            ctx->state = VOICE_STATE_COMMAND_RECORDING;
+            continue;
+         }
+      }
+
+      if (atomic_exchange(&ctx->cancel_requested, false)) {
+         if (ctx->state != VOICE_STATE_SILENCE) {
+            LOG_INFO("Cancel requested from UI (was %s)", voice_state_name(ctx->state));
+            atomic_store(&ctx->tts_stop_flag, 1);
+            ctx->speech_frame_count = 0;
+            ctx->silence_frame_count = 0;
+            ctx->state = VOICE_STATE_SILENCE;
+         }
+      }
 
       struct timespec t0, t1, t2;
       clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -1223,7 +1263,7 @@ int voice_processing_loop(voice_ctx_t *ctx,
                ctx->state = VOICE_STATE_SILENCE;
                ctx->speech_frame_count = 0;
                ctx->silence_frame_count = 0;
-               ctx->tts_stop_flag = 0; /* Reset for next interaction */
+               atomic_store(&ctx->tts_stop_flag, 0); /* Reset for next interaction */
             } else {
                /* Still waiting - small sleep to avoid busy loop */
                usleep(10000); /* 10ms */

@@ -18,6 +18,7 @@
 #ifndef AUDIO_PLAYBACK_H
 #define AUDIO_PLAYBACK_H
 
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -77,7 +78,7 @@ int audio_playback_play(audio_playback_t *ctx,
                         const int16_t *samples,
                         size_t num_samples,
                         unsigned int sample_rate,
-                        volatile int *stop_flag);
+                        atomic_int *stop_flag);
 
 /**
  * Play WAV data directly
@@ -93,7 +94,7 @@ int audio_playback_play(audio_playback_t *ctx,
 int audio_playback_play_wav(audio_playback_t *ctx,
                             const uint8_t *wav_data,
                             size_t wav_size,
-                            volatile int *stop_flag);
+                            atomic_int *stop_flag);
 
 /**
  * Stop any ongoing playback

@@ -19,6 +19,7 @@
 
 #include <alsa/asoundlib.h>
 #include <math.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -226,7 +227,7 @@ int audio_playback_play(audio_playback_t *ctx,
                         const int16_t *samples,
                         size_t num_samples,
                         unsigned int sample_rate,
-                        volatile int *stop_flag) {
+                        atomic_int *stop_flag) {
    if (!ctx || !ctx->initialized || !samples || num_samples == 0) {
       return -1;
    }
@@ -264,7 +265,7 @@ int audio_playback_play(audio_playback_t *ctx,
 
    while (produced < out_frames) {
       /* Check stop flag */
-      if (stop_flag && *stop_flag) {
+      if (stop_flag && atomic_load(stop_flag)) {
          LOG_INFO("Playback stopped by flag");
          break;
       }
@@ -331,7 +332,7 @@ int audio_playback_play(audio_playback_t *ctx,
    free(out_buf);
 
    /* Drain remaining audio (skip if stopped - drain blocks until buffer empties) */
-   if (stop_flag && *stop_flag) {
+   if (stop_flag && atomic_load(stop_flag)) {
       snd_pcm_drop(handle);
    } else {
       snd_pcm_drain(handle);
@@ -348,7 +349,7 @@ int audio_playback_play(audio_playback_t *ctx,
 int audio_playback_play_wav(audio_playback_t *ctx,
                             const uint8_t *wav_data,
                             size_t wav_size,
-                            volatile int *stop_flag) {
+                            atomic_int *stop_flag) {
    if (!ctx || !wav_data || wav_size == 0) {
       return -1;
    }

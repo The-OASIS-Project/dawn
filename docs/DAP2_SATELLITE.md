@@ -756,7 +756,7 @@ wscat -c ws://localhost:8080
 ### Planned Features
 
 1. [ ] **Barge-in support** - Interrupt TTS by speaking (stubbed, not connected)
-2. [ ] **SDL2 touchscreen UI** - Visual interface for satellites with displays
+2. [x] **SDL2 touchscreen UI** - Core visualization + transcript complete (KMSDRM, orb, FFT spectrum, streaming transcript, date/time, WiFi, status detail). Touch gestures, quick actions, media overlay, and screensaver remaining.
 3. [ ] **Multi-satellite routing** - Daemon routes by location
 4. [ ] **Speaker identification** - Personalized responses per user
 

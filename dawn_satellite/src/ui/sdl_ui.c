@@ -38,6 +38,7 @@
 #include "logging.h"
 #include "ui/ui_colors.h"
 #include "ui/ui_orb.h"
+#include "ui/ui_touch.h"
 #include "ui/ui_transcript.h"
 
 /* =============================================================================
@@ -51,6 +52,12 @@
 #define IDLE_TIMEOUT_SEC 5.0 /* Drop to idle FPS after this long in SILENCE */
 #define RESPONSE_POLL_MS 100 /* How often to poll response text */
 #define ORB_PANEL_WIDTH 400  /* Left panel for orb */
+
+/* Touch / panel constants */
+#define PANEL_HEIGHT 240
+#define PANEL_ANIM_SEC 0.25
+#define ORB_HIT_RADIUS 180    /* Tap/long-press detection radius around orb center */
+#define SWIPE_ZONE_FRAC 0.20f /* Top/bottom 20% of screen for swipe triggers */
 
 /* =============================================================================
  * Internal Structure
@@ -94,6 +101,28 @@ struct sdl_ui {
 
    /* Spectrum data buffer for orb visualization */
    float spectrum[SPECTRUM_BINS];
+
+   /* Touch gesture state */
+   ui_touch_state_t touch;
+
+   /* Cached panel label textures (lazy-initialized on first render) */
+   struct {
+      SDL_Texture *quick_actions_title; /* "QUICK ACTIONS" */
+      SDL_Texture *box_labels[5];       /* "Music", "Lights", ... */
+      int box_label_w[5];
+      int box_label_h[5];
+      int title_w, title_h;
+      SDL_Texture *ai_name; /* AI name (upper case) */
+      int ai_name_w, ai_name_h;
+      bool initialized;
+   } panel_cache;
+
+   /* Slide-in panels (each tracks own animation independently) */
+   struct {
+      bool visible;
+      bool closing;
+      double anim_start;
+   } panel_actions, panel_settings;
 };
 
 /* =============================================================================
@@ -104,6 +133,385 @@ static double get_time_sec(void) {
    struct timespec ts;
    clock_gettime(CLOCK_MONOTONIC, &ts);
    return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+/* =============================================================================
+ * Panel Animation Helpers
+ * ============================================================================= */
+
+static float ease_out_cubic(float t) {
+   float f = t - 1.0f;
+   return f * f * f + 1.0f;
+}
+
+/** @brief Get panel slide offset (0.0 = hidden, 1.0 = fully visible) */
+static float panel_offset(double anim_start, bool closing, double time_sec) {
+   float t = (float)((time_sec - anim_start) / PANEL_ANIM_SEC);
+   if (t < 0.0f)
+      t = 0.0f;
+   if (t > 1.0f)
+      t = 1.0f;
+   float eased = ease_out_cubic(t);
+   return closing ? 1.0f - eased : eased;
+}
+
+static bool panel_any_open(const sdl_ui_t *ui) {
+   return ui->panel_actions.visible || ui->panel_settings.visible;
+}
+
+static void panel_open(sdl_ui_t *ui, bool is_actions, double time_sec) {
+   /* Close the other panel if open */
+   if (is_actions && ui->panel_settings.visible) {
+      ui->panel_settings.closing = true;
+      ui->panel_settings.anim_start = time_sec;
+   } else if (!is_actions && ui->panel_actions.visible) {
+      ui->panel_actions.closing = true;
+      ui->panel_actions.anim_start = time_sec;
+   }
+
+   if (is_actions) {
+      ui->panel_actions.visible = true;
+      ui->panel_actions.closing = false;
+      ui->panel_actions.anim_start = time_sec;
+   } else {
+      ui->panel_settings.visible = true;
+      ui->panel_settings.closing = false;
+      ui->panel_settings.anim_start = time_sec;
+   }
+}
+
+static void panel_close(sdl_ui_t *ui, bool is_actions, double time_sec) {
+   if (is_actions) {
+      if (ui->panel_actions.visible && !ui->panel_actions.closing) {
+         ui->panel_actions.closing = true;
+         ui->panel_actions.anim_start = time_sec;
+      }
+   } else {
+      if (ui->panel_settings.visible && !ui->panel_settings.closing) {
+         ui->panel_settings.closing = true;
+         ui->panel_settings.anim_start = time_sec;
+      }
+   }
+}
+
+/** @brief Finalize panels whose close animation is done */
+static void panel_tick(sdl_ui_t *ui, double time_sec) {
+   if (ui->panel_actions.closing) {
+      float t = (float)((time_sec - ui->panel_actions.anim_start) / PANEL_ANIM_SEC);
+      if (t >= 1.0f) {
+         ui->panel_actions.visible = false;
+         ui->panel_actions.closing = false;
+      }
+   }
+   if (ui->panel_settings.closing) {
+      float t = (float)((time_sec - ui->panel_settings.anim_start) / PANEL_ANIM_SEC);
+      if (t >= 1.0f) {
+         ui->panel_settings.visible = false;
+         ui->panel_settings.closing = false;
+      }
+   }
+}
+
+/* =============================================================================
+ * Panel Rendering
+ * ============================================================================= */
+
+/** @brief Lazy-init cached panel label textures (called on render thread) */
+static void panel_cache_init(sdl_ui_t *ui) {
+   if (ui->panel_cache.initialized || !ui->transcript.label_font)
+      return;
+
+   SDL_Renderer *r = ui->renderer;
+   TTF_Font *font = ui->transcript.label_font;
+   SDL_Color primary = { COLOR_TEXT_PRIMARY_R, COLOR_TEXT_PRIMARY_G, COLOR_TEXT_PRIMARY_B, 255 };
+   SDL_Color secondary = { COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G, COLOR_TEXT_SECONDARY_B,
+                           255 };
+
+   /* "QUICK ACTIONS" title */
+   SDL_Surface *surf = TTF_RenderText_Blended(font, "QUICK ACTIONS", primary);
+   if (surf) {
+      ui->panel_cache.quick_actions_title = SDL_CreateTextureFromSurface(r, surf);
+      ui->panel_cache.title_w = surf->w;
+      ui->panel_cache.title_h = surf->h;
+      SDL_FreeSurface(surf);
+   }
+
+   /* Box labels */
+   static const char *labels[] = { "Music", "Lights", "Thermostat", "Timer", "Settings" };
+   for (int i = 0; i < 5; i++) {
+      surf = TTF_RenderText_Blended(font, labels[i], secondary);
+      if (surf) {
+         ui->panel_cache.box_labels[i] = SDL_CreateTextureFromSurface(r, surf);
+         ui->panel_cache.box_label_w[i] = surf->w;
+         ui->panel_cache.box_label_h[i] = surf->h;
+         SDL_FreeSurface(surf);
+      }
+   }
+
+   /* AI name (upper case) */
+   char name_upper[32];
+   int ni = 0;
+   for (const char *p = ui->ai_name; *p && ni < 31; p++, ni++) {
+      name_upper[ni] = (*p >= 'a' && *p <= 'z') ? *p - 32 : *p;
+   }
+   name_upper[ni] = '\0';
+   surf = TTF_RenderText_Blended(font, name_upper, primary);
+   if (surf) {
+      ui->panel_cache.ai_name = SDL_CreateTextureFromSurface(r, surf);
+      ui->panel_cache.ai_name_w = surf->w;
+      ui->panel_cache.ai_name_h = surf->h;
+      SDL_FreeSurface(surf);
+   }
+
+   ui->panel_cache.initialized = true;
+}
+
+/** @brief Cleanup cached panel label textures */
+static void panel_cache_cleanup(sdl_ui_t *ui) {
+   if (ui->panel_cache.quick_actions_title)
+      SDL_DestroyTexture(ui->panel_cache.quick_actions_title);
+   for (int i = 0; i < 5; i++) {
+      if (ui->panel_cache.box_labels[i])
+         SDL_DestroyTexture(ui->panel_cache.box_labels[i]);
+   }
+   if (ui->panel_cache.ai_name)
+      SDL_DestroyTexture(ui->panel_cache.ai_name);
+   memset(&ui->panel_cache, 0, sizeof(ui->panel_cache));
+}
+
+/** @brief Draw semi-transparent scrim overlay behind panels */
+static void render_scrim(sdl_ui_t *ui, SDL_Renderer *r, float max_offset) {
+   uint8_t alpha = (uint8_t)(max_offset * 150); /* 59% at full */
+   SDL_SetRenderDrawColor(r, COLOR_BG_PRIMARY_R, COLOR_BG_PRIMARY_G, COLOR_BG_PRIMARY_B, alpha);
+   SDL_Rect full = { 0, 0, ui->width, ui->height };
+   SDL_RenderFillRect(r, &full);
+}
+
+/** @brief Render Quick Actions panel (slides up from bottom) */
+static void render_panel_actions(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
+   panel_cache_init(ui);
+   int panel_y = ui->height - (int)(offset * PANEL_HEIGHT);
+
+   /* Panel background */
+   SDL_SetRenderDrawColor(r, COLOR_BG_SECONDARY_R, COLOR_BG_SECONDARY_G, COLOR_BG_SECONDARY_B, 240);
+   SDL_Rect bg = { 0, panel_y, ui->width, PANEL_HEIGHT };
+   SDL_RenderFillRect(r, &bg);
+
+   /* Top edge highlight */
+   SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R + 0x20, COLOR_BG_TERTIARY_G + 0x20,
+                          COLOR_BG_TERTIARY_B + 0x20, 255);
+   SDL_RenderDrawLine(r, 0, panel_y, ui->width, panel_y);
+
+   /* Title (cached) + "Coming Soon" subtitle */
+   if (ui->panel_cache.quick_actions_title) {
+      SDL_Rect dst = { 20, panel_y + 15, ui->panel_cache.title_w, ui->panel_cache.title_h };
+      SDL_RenderCopy(r, ui->panel_cache.quick_actions_title, NULL, &dst);
+
+      /* Dim subtitle next to title */
+      if (ui->transcript.label_font) {
+         SDL_Color dim = { COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G, COLOR_TEXT_SECONDARY_B,
+                           140 };
+         SDL_Surface *sub = TTF_RenderText_Blended(ui->transcript.label_font, "Coming Soon", dim);
+         if (sub) {
+            SDL_Texture *stx = SDL_CreateTextureFromSurface(r, sub);
+            SDL_SetTextureAlphaMod(stx, 140);
+            SDL_Rect sdst = { 20 + ui->panel_cache.title_w + 12, panel_y + 15, sub->w, sub->h };
+            SDL_RenderCopy(r, stx, NULL, &sdst);
+            SDL_DestroyTexture(stx);
+            SDL_FreeSurface(sub);
+         }
+      }
+   }
+
+   /* Action boxes (dimmed — not yet functional) */
+   int box_w = 180, box_h = 120;
+   int total_w = 5 * box_w + 4 * 15;
+   int start_x = (ui->width - total_w) / 2;
+   int box_y = panel_y + 55;
+
+   for (int i = 0; i < 5; i++) {
+      int bx = start_x + i * (box_w + 15);
+      SDL_Rect box = { bx, box_y, box_w, box_h };
+
+      /* Box fill (dimmed) */
+      SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R, COLOR_BG_TERTIARY_G, COLOR_BG_TERTIARY_B, 120);
+      SDL_RenderFillRect(r, &box);
+
+      /* Box border */
+      SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R + 0x15, COLOR_BG_TERTIARY_G + 0x15,
+                             COLOR_BG_TERTIARY_B + 0x15, 180);
+      SDL_RenderDrawRect(r, &box);
+
+      /* Label text (cached, centered in box, dimmed) */
+      if (ui->panel_cache.box_labels[i]) {
+         SDL_SetTextureAlphaMod(ui->panel_cache.box_labels[i], 140);
+         int lw = ui->panel_cache.box_label_w[i];
+         int lh = ui->panel_cache.box_label_h[i];
+         SDL_Rect dst = { bx + (box_w - lw) / 2, box_y + (box_h - lh) / 2, lw, lh };
+         SDL_RenderCopy(r, ui->panel_cache.box_labels[i], NULL, &dst);
+         SDL_SetTextureAlphaMod(ui->panel_cache.box_labels[i], 255);
+      }
+   }
+}
+
+/** @brief Render Settings/Info panel (slides down from top) */
+static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
+   panel_cache_init(ui);
+   int panel_y = -PANEL_HEIGHT + (int)(offset * PANEL_HEIGHT);
+
+   /* Panel background */
+   SDL_SetRenderDrawColor(r, COLOR_BG_SECONDARY_R, COLOR_BG_SECONDARY_G, COLOR_BG_SECONDARY_B, 240);
+   SDL_Rect bg = { 0, panel_y, ui->width, PANEL_HEIGHT };
+   SDL_RenderFillRect(r, &bg);
+
+   /* Bottom edge highlight */
+   int edge_y = panel_y + PANEL_HEIGHT - 1;
+   SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R + 0x20, COLOR_BG_TERTIARY_G + 0x20,
+                          COLOR_BG_TERTIARY_B + 0x20, 255);
+   SDL_RenderDrawLine(r, 0, edge_y, ui->width, edge_y);
+
+   if (!ui->transcript.label_font)
+      return;
+
+   SDL_Color secondary_clr = { COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
+                               COLOR_TEXT_SECONDARY_B, 255 };
+
+   int text_x = 30, text_y = panel_y + 30;
+
+   /* AI Name (cached) */
+   if (ui->panel_cache.ai_name) {
+      SDL_Rect dst = { text_x, text_y, ui->panel_cache.ai_name_w, ui->panel_cache.ai_name_h };
+      SDL_RenderCopy(r, ui->panel_cache.ai_name, NULL, &dst);
+      text_y += ui->panel_cache.ai_name_h + 20;
+   }
+
+   /* Connection status with colored dot */
+   bool connected = ui->voice_ctx
+                        ? (voice_processing_get_state(ui->voice_ctx) != VOICE_STATE_SILENCE)
+                        : false;
+   /* Draw status dot */
+   int dot_r = 5;
+   int dot_cx = text_x + dot_r;
+   int dot_cy = text_y + 8;
+   if (connected) {
+      SDL_SetRenderDrawColor(r, COLOR_LISTENING_R, COLOR_LISTENING_G, COLOR_LISTENING_B, 255);
+   } else {
+      SDL_SetRenderDrawColor(r, COLOR_ERROR_R, COLOR_ERROR_G, COLOR_ERROR_B, 255);
+   }
+   for (int y = -dot_r; y <= dot_r; y++) {
+      int dx = (int)sqrtf((float)(dot_r * dot_r - y * y));
+      SDL_RenderDrawLine(r, dot_cx - dx, dot_cy + y, dot_cx + dx, dot_cy + y);
+   }
+
+   SDL_Surface *surf = TTF_RenderText_Blended(
+       ui->transcript.label_font, connected ? "Connected" : "Disconnected", secondary_clr);
+   if (surf) {
+      SDL_Texture *tex = SDL_CreateTextureFromSurface(r, surf);
+      SDL_Rect dst = { text_x + 20, text_y, surf->w, surf->h };
+      SDL_RenderCopy(r, tex, NULL, &dst);
+      text_y += surf->h + 15;
+      SDL_DestroyTexture(tex);
+      SDL_FreeSurface(surf);
+   }
+
+   /* Date/time */
+   time_t now = time(NULL);
+   struct tm *tm = localtime(&now);
+   char timebuf[64];
+   strftime(timebuf, sizeof(timebuf), "%Y-%m-%d  %H:%M", tm);
+   surf = TTF_RenderText_Blended(ui->transcript.label_font, timebuf, secondary_clr);
+   if (surf) {
+      SDL_Texture *tex = SDL_CreateTextureFromSurface(r, surf);
+      SDL_Rect dst = { text_x, text_y, surf->w, surf->h };
+      SDL_RenderCopy(r, tex, NULL, &dst);
+      SDL_DestroyTexture(tex);
+      SDL_FreeSurface(surf);
+   }
+}
+
+/** @brief Draw subtle swipe indicators at screen edges */
+static void render_swipe_indicators(sdl_ui_t *ui, SDL_Renderer *r) {
+   /* Bottom center: upward chevron (^) */
+   int cx = ui->width / 2;
+   int by = ui->height - 12;
+   SDL_SetRenderDrawColor(r, COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G, COLOR_TEXT_SECONDARY_B,
+                          60);
+   SDL_RenderDrawLine(r, cx - 12, by, cx, by - 8);
+   SDL_RenderDrawLine(r, cx, by - 8, cx + 12, by);
+
+   /* Top center: three horizontal lines (hamburger) */
+   int ty = 10;
+   for (int i = 0; i < 3; i++) {
+      SDL_RenderDrawLine(r, cx - 10, ty + i * 5, cx + 10, ty + i * 5);
+   }
+}
+
+/* =============================================================================
+ * Gesture Dispatch
+ * ============================================================================= */
+
+static void handle_gesture(sdl_ui_t *ui, touch_gesture_t gesture, double time_sec) {
+   if (gesture.type == TOUCH_GESTURE_NONE)
+      return;
+
+   int orb_cx = ORB_PANEL_WIDTH / 2;
+   int orb_cy = ui->height / 2;
+   int dx = gesture.x - orb_cx;
+   int dy = gesture.y - orb_cy;
+   int dist_sq = dx * dx + dy * dy;
+   bool in_orb = (dist_sq < ORB_HIT_RADIUS * ORB_HIT_RADIUS);
+
+   switch (gesture.type) {
+      case TOUCH_GESTURE_TAP:
+         if (panel_any_open(ui)) {
+            /* Tap outside panels dismisses them */
+            bool in_actions = (ui->panel_actions.visible && gesture.y > ui->height - PANEL_HEIGHT);
+            bool in_settings = (ui->panel_settings.visible && gesture.y < PANEL_HEIGHT);
+            if (!in_actions && !in_settings) {
+               panel_close(ui, true, time_sec);
+               panel_close(ui, false, time_sec);
+            }
+         } else if (in_orb) {
+            voice_state_t state = voice_processing_get_state(ui->voice_ctx);
+            if (state == VOICE_STATE_SILENCE) {
+               voice_processing_trigger_wake(ui->voice_ctx);
+               ui->orb.tap_pulse_time = time_sec;
+               LOG_INFO("UI: Orb tapped — manual wake");
+            }
+         }
+         break;
+
+      case TOUCH_GESTURE_LONG_PRESS:
+         if (in_orb) {
+            voice_state_t state = voice_processing_get_state(ui->voice_ctx);
+            if (state == VOICE_STATE_WAITING || state == VOICE_STATE_SPEAKING ||
+                state == VOICE_STATE_PROCESSING) {
+               voice_processing_cancel(ui->voice_ctx);
+               ui->orb.cancel_flash_time = time_sec;
+               LOG_INFO("UI: Orb long-pressed — cancel");
+            }
+         }
+         break;
+
+      case TOUCH_GESTURE_SWIPE_UP:
+         if (ui->panel_settings.visible && !ui->panel_settings.closing) {
+            panel_close(ui, false, time_sec);
+         } else if ((float)gesture.y > (float)ui->height * (1.0f - SWIPE_ZONE_FRAC)) {
+            panel_open(ui, true, time_sec);
+         }
+         break;
+
+      case TOUCH_GESTURE_SWIPE_DOWN:
+         if (ui->panel_actions.visible && !ui->panel_actions.closing) {
+            panel_close(ui, true, time_sec);
+         } else if ((float)gesture.y < (float)ui->height * SWIPE_ZONE_FRAC) {
+            panel_open(ui, false, time_sec);
+         }
+         break;
+
+      default:
+         break;
+   }
 }
 
 /* =============================================================================
@@ -185,6 +593,10 @@ static int sdl_init_on_thread(sdl_ui_t *ui) {
    ui->last_state = VOICE_STATE_SILENCE;
    ui->last_state_change_time = get_time_sec();
 
+   /* Initialize touch gesture detection */
+   ui_touch_init(&ui->touch, ui->width, ui->height);
+   memset(&ui->panel_actions, 0, sizeof(ui->panel_actions));
+   memset(&ui->panel_settings, 0, sizeof(ui->panel_settings));
    LOG_INFO("SDL UI initialized (%dx%d, driver=%s)", ui->width, ui->height,
             SDL_GetCurrentVideoDriver());
 
@@ -196,6 +608,7 @@ static int sdl_init_on_thread(sdl_ui_t *ui) {
  * ============================================================================= */
 
 static void sdl_cleanup_on_thread(sdl_ui_t *ui) {
+   panel_cache_cleanup(ui);
    ui_transcript_cleanup(&ui->transcript);
    ui_orb_cleanup(&ui->orb);
 
@@ -254,6 +667,8 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
          /* Final update to live entry with complete text */
          ui_transcript_update_live(&ui->transcript, ui->ai_name, ui->last_response, len);
       }
+      /* Mark streaming complete — triggers markdown re-render on next frame */
+      ui_transcript_finalize_live(&ui->transcript);
       ui->response_added = true;
    }
 
@@ -291,6 +706,31 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
    /* Render transcript in right panel */
    ui_transcript_render(&ui->transcript, r, state);
 
+   /* Slide-in panels: update animation, render scrim + panels */
+   panel_tick(ui, time_sec);
+   float act_off = ui->panel_actions.visible ? panel_offset(ui->panel_actions.anim_start,
+                                                            ui->panel_actions.closing, time_sec)
+                                             : 0.0f;
+   float set_off = ui->panel_settings.visible ? panel_offset(ui->panel_settings.anim_start,
+                                                             ui->panel_settings.closing, time_sec)
+                                              : 0.0f;
+
+   float max_off = act_off > set_off ? act_off : set_off;
+   if (max_off > 0.001f) {
+      render_scrim(ui, r, max_off);
+   }
+   if (act_off > 0.001f) {
+      render_panel_actions(ui, r, act_off);
+   }
+   if (set_off > 0.001f) {
+      render_panel_settings(ui, r, set_off);
+   }
+
+   /* Swipe indicators (only when no panel visible) */
+   if (act_off < 0.001f && set_off < 0.001f) {
+      render_swipe_indicators(ui, r);
+   }
+
    SDL_RenderPresent(r);
 }
 
@@ -311,14 +751,20 @@ static void *render_thread_func(void *arg) {
       double frame_start = get_time_sec();
       double time_sec = frame_start - start_time;
 
-      /* Process SDL events (required even without input handling) */
+      /* Process SDL events including touch/mouse input */
       SDL_Event event;
       while (SDL_PollEvent(&event)) {
          if (event.type == SDL_QUIT) {
             ui->running = false;
             break;
          }
+         touch_gesture_t gesture = ui_touch_process_event(&ui->touch, &event, time_sec);
+         handle_gesture(ui, gesture, time_sec);
       }
+
+      /* Per-frame long press check */
+      touch_gesture_t lp = ui_touch_check_long_press(&ui->touch, time_sec);
+      handle_gesture(ui, lp, time_sec);
 
       render_frame(ui, time_sec);
 

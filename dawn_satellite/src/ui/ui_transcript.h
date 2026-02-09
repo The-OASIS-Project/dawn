@@ -29,6 +29,7 @@
 #include <pthread.h>
 #include <stdbool.h>
 
+#include "ui/ui_markdown.h"
 #include "voice_processing.h"
 
 #ifdef __cplusplus
@@ -45,6 +46,7 @@ typedef struct {
    char role[32];                  /* "You" or AI name */
    char text[TRANSCRIPT_MAX_TEXT]; /* Message content */
    bool is_user;                   /* true = user, false = AI */
+   bool is_streaming;              /* true = still receiving streamed text */
    SDL_Texture *cached_texture;    /* Cached rendered text (NULL = needs re-render) */
    int cached_w;                   /* Width of cached texture */
    int cached_h;                   /* Height of cached texture */
@@ -65,6 +67,7 @@ typedef struct {
    /* Fonts */
    TTF_Font *label_font; /* State label (IBM Plex Mono, 14px) */
    TTF_Font *body_font;  /* Transcript body (Source Sans 3, 18px) */
+   md_fonts_t md_fonts;  /* Markdown font set (regular/bold/italic/code) */
 
    /* Layout */
    int panel_x;    /* Left edge of transcript panel */
@@ -121,6 +124,14 @@ void ui_transcript_update_live(ui_transcript_t *t,
                                const char *role,
                                const char *text,
                                size_t text_len);
+
+/**
+ * @brief Mark the most recent AI entry as finalized (streaming complete)
+ *
+ * Clears the is_streaming flag and invalidates the cache so the entry
+ * re-renders with full markdown styling on the next frame.
+ */
+void ui_transcript_finalize_live(ui_transcript_t *t);
 
 /**
  * @brief Render the transcript panel

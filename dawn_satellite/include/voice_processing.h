@@ -117,6 +117,26 @@ const char *voice_state_name(voice_state_t state);
 void voice_processing_stop(voice_ctx_t *ctx);
 
 /**
+ * @brief Trigger manual wake (bypass wake word)
+ *
+ * Thread-safe: sets atomic flag checked by voice loop next iteration (~32ms).
+ * Only effective when in SILENCE state.
+ *
+ * @param ctx Voice processing context
+ */
+void voice_processing_trigger_wake(voice_ctx_t *ctx);
+
+/**
+ * @brief Cancel current operation and return to SILENCE
+ *
+ * Thread-safe: sets atomic flag and immediately sets tts_stop_flag.
+ * State reset happens on next loop iteration.
+ *
+ * @param ctx Voice processing context
+ */
+void voice_processing_cancel(voice_ctx_t *ctx);
+
+/**
  * @brief Get current VAD speech probability
  *
  * Returns the most recent speech probability from VAD processing.

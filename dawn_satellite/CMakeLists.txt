@@ -160,7 +160,9 @@ endif()
 if(ENABLE_SDL_UI)
     list(APPEND SATELLITE_SOURCES
         src/ui/sdl_ui.c
+        src/ui/ui_markdown.c
         src/ui/ui_orb.c
+        src/ui/ui_touch.c
         src/ui/ui_transcript.c
     )
     # Add src/ to include path for ui/ headers

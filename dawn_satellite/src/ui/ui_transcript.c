@@ -148,13 +148,25 @@ static void ensure_entry_cached(ui_transcript_t *t, transcript_entry_t *entry) {
    if (!entry->cached_texture && entry->text[0]) {
       SDL_Color text_color = { COLOR_TEXT_PRIMARY_R, COLOR_TEXT_PRIMARY_G, COLOR_TEXT_PRIMARY_B,
                                255 };
-      SDL_Surface *surface = TTF_RenderUTF8_Blended_Wrapped(t->body_font, entry->text, text_color,
-                                                            t->wrap_width);
-      if (surface) {
-         entry->cached_texture = SDL_CreateTextureFromSurface(t->renderer, surface);
-         entry->cached_w = surface->w;
-         entry->cached_h = surface->h;
-         SDL_FreeSurface(surface);
+
+      /* AI entries with completed streaming get markdown rendering */
+      if (!entry->is_user && !entry->is_streaming && t->md_fonts.fonts[0]) {
+         SDL_Color bold_color = { 0xF0, 0xF0, 0xF0, 255 };
+         entry->cached_texture = md_render_text(t->renderer, &t->md_fonts, entry->text, text_color,
+                                                bold_color, t->wrap_width, &entry->cached_w,
+                                                &entry->cached_h);
+      }
+
+      /* User entries and streaming AI entries: plain text (fast path) */
+      if (!entry->cached_texture) {
+         SDL_Surface *surface = TTF_RenderUTF8_Blended_Wrapped(t->body_font, entry->text,
+                                                               text_color, t->wrap_width);
+         if (surface) {
+            entry->cached_texture = SDL_CreateTextureFromSurface(t->renderer, surface);
+            entry->cached_w = surface->w;
+            entry->cached_h = surface->h;
+            SDL_FreeSurface(surface);
+         }
       }
    }
 
@@ -222,6 +234,11 @@ int ui_transcript_init(ui_transcript_t *t,
       LOG_WARNING("Failed to load body font, transcript text disabled");
    }
 
+   /* Initialize markdown font set for styled AI responses */
+   if (md_fonts_init(&t->md_fonts, font_dir, BODY_FONT_SIZE) != 0) {
+      LOG_WARNING("Markdown fonts init failed, AI responses will render as plain text");
+   }
+
    return 0;
 }
 
@@ -242,6 +259,8 @@ void ui_transcript_cleanup(ui_transcript_t *t) {
       TTF_CloseFont(t->body_font);
       t->body_font = NULL;
    }
+
+   md_fonts_cleanup(&t->md_fonts);
 
    pthread_mutex_destroy(&t->mutex);
 }
@@ -297,6 +316,7 @@ void ui_transcript_update_live(ui_transcript_t *t,
       snprintf(target->role, sizeof(target->role), "%s", role);
       target->text[0] = '\0';
       target->is_user = false;
+      target->is_streaming = true;
 
       t->write_index = (t->write_index + 1) % TRANSCRIPT_MAX_ENTRIES;
       if (t->entry_count < TRANSCRIPT_MAX_ENTRIES) {
@@ -310,6 +330,25 @@ void ui_transcript_update_live(ui_transcript_t *t,
       remove_emojis(target->text);
       /* Invalidate cached texture so it re-renders with new text */
       invalidate_entry_cache(target);
+   }
+
+   pthread_mutex_unlock(&t->mutex);
+}
+
+void ui_transcript_finalize_live(ui_transcript_t *t) {
+   if (!t)
+      return;
+
+   pthread_mutex_lock(&t->mutex);
+
+   if (t->entry_count > 0) {
+      int last_idx = (t->write_index - 1 + TRANSCRIPT_MAX_ENTRIES) % TRANSCRIPT_MAX_ENTRIES;
+      transcript_entry_t *last = &t->entries[last_idx];
+      if (!last->is_user && last->is_streaming) {
+         last->is_streaming = false;
+         /* Invalidate cache so next frame re-renders with markdown styling */
+         invalidate_entry_cache(last);
+      }
    }
 
    pthread_mutex_unlock(&t->mutex);

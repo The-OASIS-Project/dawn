@@ -56,6 +56,10 @@ typedef struct {
    float spectrum_trail[SPECTRUM_TRAIL_FRAMES][SPECTRUM_BINS]; /* Trail history circular buffer */
    int trail_write_idx;                                        /* Next write position in trail */
    int trail_frame_counter;                                    /* Frames since last trail sample */
+
+   /* Touch feedback (set externally by sdl_ui gesture handler) */
+   double tap_pulse_time;    /* Time of last tap — orb renders brief white pulse */
+   double cancel_flash_time; /* Time of last cancel — orb renders brief red flash */
 } ui_orb_ctx_t;
 
 /**

@@ -381,6 +381,9 @@ void ui_orb_init(ui_orb_ctx_t *ctx, SDL_Renderer *renderer) {
    ctx->current_color = UI_COLOR_IDLE;
    ctx->target_color = UI_COLOR_IDLE;
    ctx->color_transitioning = false;
+
+   ctx->tap_pulse_time = -1.0;
+   ctx->cancel_flash_time = -1.0;
 }
 
 void ui_orb_cleanup(ui_orb_ctx_t *ctx) {
@@ -554,5 +557,34 @@ void ui_orb_render(ui_orb_ctx_t *ctx,
       }
       draw_ring(renderer, cx, cy, RING_INNER_R, RING_INNER_W, inner_active, ctx->current_color,
                 inner_scale);
+   }
+
+   /* Touch feedback: tap pulse (white flash expanding outward, 0.3s) */
+   if (ctx->tap_pulse_time > 0.0) {
+      double dt = time_sec - ctx->tap_pulse_time;
+      if (dt >= 0.0 && dt < 0.3) {
+         float t = (float)(dt / 0.3);
+         uint8_t alpha = (uint8_t)((1.0f - t) * 120);
+         int radius = ORB_CORE_RADIUS + (int)(t * 30);
+         SDL_SetRenderDrawColor(renderer, 255, 255, 255, alpha);
+         for (int y = -radius; y <= radius; y++) {
+            int dx = (int)sqrtf((float)(radius * radius - y * y));
+            SDL_RenderDrawLine(renderer, cx - dx, cy + y, cx + dx, cy + y);
+         }
+      }
+   }
+
+   /* Touch feedback: cancel red flash (0.4s) */
+   if (ctx->cancel_flash_time > 0.0) {
+      double dt = time_sec - ctx->cancel_flash_time;
+      if (dt >= 0.0 && dt < 0.4) {
+         float t = (float)(dt / 0.4);
+         uint8_t alpha = (uint8_t)((1.0f - t) * 180);
+         SDL_SetRenderDrawColor(renderer, COLOR_ERROR_R, COLOR_ERROR_G, COLOR_ERROR_B, alpha);
+         for (int y = -ORB_CORE_RADIUS; y <= ORB_CORE_RADIUS; y++) {
+            int dx = (int)sqrtf((float)(ORB_CORE_RADIUS * ORB_CORE_RADIUS - y * y));
+            SDL_RenderDrawLine(renderer, cx - dx, cy + y, cx + dx, cy + y);
+         }
+      }
    }
 }

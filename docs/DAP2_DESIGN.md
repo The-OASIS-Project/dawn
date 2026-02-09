@@ -1,7 +1,7 @@
 # Dawn Audio Protocol 2.0 (DAP 2) Design Document
 
-**Status**: Implementation In Progress (Phase 0-3 Complete, Phase 3.5 Planning)
-**Version**: 0.4
+**Status**: Implementation In Progress (Phase 0-3 Complete, Phase 3.5 In Progress)
+**Version**: 0.5
 **Date**: February 2026
 
 ## Executive Summary
@@ -915,7 +915,7 @@ This phase addresses the architecture reviewer's critical finding: existing code
 
 ### Phase 3.5: Touchscreen UI (SDL2)
 
-**Status**: 📋 **PLANNING**
+**Status**: 🔨 **IN PROGRESS** (core visualization + transcript complete, touch gestures + overlays remaining)
 
 **Goal**: Premium touchscreen interface for Tier 1 satellites with attached displays
 
@@ -925,35 +925,43 @@ This phase addresses the architecture reviewer's critical finding: existing code
 
 #### Core Components
 
-1. **Visualization (ported from WebUI)**:
-   - Core orb with radial gradient glow (pre-rendered frames for performance)
+1. **Visualization (ported from WebUI)**: ✅ COMPLETE
+   - Core orb with radial gradient glow (pre-rendered texture)
    - Three-ring system: outer (status), middle (throughput), inner (waveform)
    - State-based colors matching WebUI: idle (gray), listening (green), thinking (amber), speaking (cyan)
    - Smooth transitions with easing functions
+   - FFT spectrum bars during SPEAKING (Goertzel analysis, 64 bins, radial layout)
+   - Spectrum oriented from 12 o'clock
 
-2. **Transcript Display**:
-   - Scrollable conversation history
+2. **Transcript Display**: ✅ CORE COMPLETE (touch scroll pending)
+   - Scrollable conversation history with cached text rendering
    - Auto-scroll during active conversation
-   - Touch to pause scroll, swipe to navigate history
+   - Streaming live transcript during LLM response
+   - AI name in ALL CAPS, emoji stripping
+   - Date/time display (top-right, 12h format)
+   - WiFi signal strength bars (polled from /proc/net/wireless)
+   - Status detail line (tool calls, thinking info from daemon)
+   - Touch to pause scroll — NOT YET DONE
+   - Swipe to navigate history — NOT YET DONE
 
-3. **Quick Actions Bar**:
+3. **Quick Actions Bar**: ❌ NOT STARTED
    - 4-6 configurable touch shortcuts (music, lights, thermostat, timer, settings)
    - 48x48 minimum touch targets
    - Accent color highlight when active
 
-4. **Media Player Overlay**:
+4. **Media Player Overlay**: ❌ NOT STARTED
    - Slide-in panel matching WebUI music.css aesthetic
    - Visualizer bars, transport controls, progress bar
    - Compact mode when minimized
 
-5. **Screensaver/Ambient Mode**:
+5. **Screensaver/Ambient Mode**: ❌ NOT STARTED
    - Photo frame with Ken Burns effect (slow pan/zoom)
    - Cross-fade transitions between images
    - Clock display option (digital or analog)
    - Ambient orb mode (breathing animation, "always ready" indicator)
    - Wake on touch or wake word
 
-#### Touch Interactions
+#### Touch Interactions — ❌ NOT STARTED
 
 | Gesture | Action |
 |---------|--------|
@@ -1324,3 +1332,4 @@ name = "Guest Room"
 - v0.2 (Feb 2026): Revised to use WebSocket for Tier 1, extend existing session manager
 - v0.3 (Feb 2026): Updated to reflect implementation (Phase 0-2 complete), clarified Tier 1 is VAD-only (no button/NeoPixels), Tier 2 retains button and NeoPixel support
 - v0.4 (Feb 2026): Phase 0-3 complete. Updated protocol messages to match implementation (stream_start/delta/end). Updated common/ structure (ASR engine, Vosk, unified logging). Phase 3.5 touchscreen UI in planning.
+- v0.5 (Feb 2026): Phase 3.5 in progress. Core visualization complete (orb, rings, FFT spectrum bars, KMSDRM). Transcript panel complete (streaming, date/time, WiFi, status detail). Touch gestures and overlays remaining.
