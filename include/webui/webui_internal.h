@@ -403,6 +403,17 @@ bool check_opus_capability(struct json_object *payload);
  * ============================================================================= */
 
 /**
+ * @brief Check if connection is a registered satellite session.
+ *
+ * Use this alongside conn_require_auth() at endpoints that satellites
+ * should be allowed to access (e.g., music handlers). Check this FIRST
+ * to avoid conn_require_auth()'s side-effect of sending an UNAUTHORIZED error.
+ */
+static inline bool conn_is_satellite_session(ws_connection_t *conn) {
+   return conn->is_satellite && conn->session != NULL;
+}
+
+/**
  * @brief Check if WebSocket connection is authenticated
  *
  * Re-validates session against database. Sends error if not authenticated.

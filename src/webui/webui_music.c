@@ -917,7 +917,7 @@ void webui_music_session_cleanup(ws_connection_t *conn) {
  * ============================================================================= */
 
 void handle_music_subscribe(ws_connection_t *conn, struct json_object *payload) {
-   if (!conn_require_auth(conn)) {
+   if (!conn_is_satellite_session(conn) && !conn_require_auth(conn)) {
       return;
    }
 
@@ -988,7 +988,7 @@ void handle_music_subscribe(ws_connection_t *conn, struct json_object *payload) 
 }
 
 void handle_music_unsubscribe(ws_connection_t *conn) {
-   if (!conn_require_auth(conn)) {
+   if (!conn_is_satellite_session(conn) && !conn_require_auth(conn)) {
       return;
    }
 
@@ -1009,7 +1009,7 @@ void handle_music_unsubscribe(ws_connection_t *conn) {
 }
 
 void handle_music_control(ws_connection_t *conn, struct json_object *payload) {
-   if (!conn_require_auth(conn)) {
+   if (!conn_is_satellite_session(conn) && !conn_require_auth(conn)) {
       return;
    }
 
@@ -1469,7 +1469,7 @@ void handle_music_control(ws_connection_t *conn, struct json_object *payload) {
 }
 
 void handle_music_search(ws_connection_t *conn, struct json_object *payload) {
-   if (!conn_require_auth(conn)) {
+   if (!conn_is_satellite_session(conn) && !conn_require_auth(conn)) {
       return;
    }
 
@@ -1534,7 +1534,7 @@ void handle_music_search(ws_connection_t *conn, struct json_object *payload) {
 }
 
 void handle_music_library(ws_connection_t *conn, struct json_object *payload) {
-   if (!conn_require_auth(conn)) {
+   if (!conn_is_satellite_session(conn) && !conn_require_auth(conn)) {
       return;
    }
 
@@ -1705,7 +1705,7 @@ void handle_music_library(ws_connection_t *conn, struct json_object *payload) {
 }
 
 void handle_music_queue(ws_connection_t *conn, struct json_object *payload) {
-   if (!conn_require_auth(conn)) {
+   if (!conn_is_satellite_session(conn) && !conn_require_auth(conn)) {
       return;
    }
 

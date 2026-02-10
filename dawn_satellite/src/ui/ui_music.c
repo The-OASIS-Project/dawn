@@ -179,6 +179,8 @@ static void ensure_track_cached(ui_music_t *m) {
 
 /* Size of shuffle/repeat icon drawing area (pixels) */
 #define TOGGLE_ICON_DIM 22
+/* Size of transport icon drawing area (pixels) */
+#define TRANSPORT_ICON_DIM 24
 
 static SDL_Texture *build_white_tex(SDL_Renderer *r,
                                     TTF_Font *font,
@@ -198,7 +200,151 @@ static SDL_Texture *build_white_tex(SDL_Renderer *r,
    return tex;
 }
 
-/* --- SDL primitive drawing helpers for toggle icons --- */
+/* --- SDL primitive drawing helpers for transport/toggle icons --- */
+
+/* --- Transport icon builders (render-to-texture, white on transparent) --- */
+
+/** Previous track: vertical bar + two left-pointing triangles */
+static SDL_Texture *build_prev_icon(SDL_Renderer *r, int sz) {
+   SDL_Texture *tex = SDL_CreateTexture(r, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET, sz,
+                                        sz);
+   if (!tex)
+      return NULL;
+   SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+   SDL_SetRenderTarget(r, tex);
+   SDL_SetRenderDrawColor(r, 0, 0, 0, 0);
+   SDL_RenderClear(r);
+   SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
+
+   int cy = sz / 2;
+   int bar_w = 2;
+   int bar_h = sz * 2 / 3;
+   int bar_x = 2;
+
+   /* Vertical bar on left */
+   SDL_Rect bar = { bar_x, cy - bar_h / 2, bar_w, bar_h };
+   SDL_RenderFillRect(r, &bar);
+
+   /* Two left-pointing filled triangles */
+   int tri_h = sz / 2;       /* Half-height of each triangle */
+   int tri_w = (sz - 6) / 2; /* Width of each triangle */
+   int tri1_tip = bar_x + bar_w + 1;
+   int tri2_tip = tri1_tip + tri_w;
+
+   /* First triangle (leftmost) */
+   for (int col = 0; col < tri_w; col++) {
+      int h = tri_h * (tri_w - col) / tri_w;
+      SDL_RenderDrawLine(r, tri1_tip + col, cy - h, tri1_tip + col, cy + h);
+   }
+
+   /* Second triangle */
+   for (int col = 0; col < tri_w; col++) {
+      int h = tri_h * (tri_w - col) / tri_w;
+      SDL_RenderDrawLine(r, tri2_tip + col, cy - h, tri2_tip + col, cy + h);
+   }
+
+   SDL_SetRenderTarget(r, NULL);
+   return tex;
+}
+
+/** Play: right-pointing filled triangle, centered */
+static SDL_Texture *build_play_icon(SDL_Renderer *r, int sz) {
+   SDL_Texture *tex = SDL_CreateTexture(r, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET, sz,
+                                        sz);
+   if (!tex)
+      return NULL;
+   SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+   SDL_SetRenderTarget(r, tex);
+   SDL_SetRenderDrawColor(r, 0, 0, 0, 0);
+   SDL_RenderClear(r);
+   SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
+
+   int cy = sz / 2;
+   int tri_h = sz * 2 / 5; /* Half-height */
+   int left = sz / 4;
+   int right = sz - sz / 4;
+   int tri_w = right - left;
+
+   /* Right-pointing triangle via vertical scanlines */
+   for (int col = 0; col < tri_w; col++) {
+      int h = tri_h * (tri_w - col) / tri_w;
+      SDL_RenderDrawLine(r, left + col, cy - h, left + col, cy + h);
+   }
+
+   SDL_SetRenderTarget(r, NULL);
+   return tex;
+}
+
+/** Pause: two vertical bars */
+static SDL_Texture *build_pause_icon(SDL_Renderer *r, int sz) {
+   SDL_Texture *tex = SDL_CreateTexture(r, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET, sz,
+                                        sz);
+   if (!tex)
+      return NULL;
+   SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+   SDL_SetRenderTarget(r, tex);
+   SDL_SetRenderDrawColor(r, 0, 0, 0, 0);
+   SDL_RenderClear(r);
+   SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
+
+   int bar_w = sz / 5;
+   int bar_h = sz * 7 / 10;
+   int gap = sz / 5;
+   int total_w = bar_w * 2 + gap;
+   int x0 = (sz - total_w) / 2;
+   int y0 = (sz - bar_h) / 2;
+
+   SDL_Rect bar1 = { x0, y0, bar_w, bar_h };
+   SDL_Rect bar2 = { x0 + bar_w + gap, y0, bar_w, bar_h };
+   SDL_RenderFillRect(r, &bar1);
+   SDL_RenderFillRect(r, &bar2);
+
+   SDL_SetRenderTarget(r, NULL);
+   return tex;
+}
+
+/** Next track: two right-pointing triangles + vertical bar on right */
+static SDL_Texture *build_next_icon(SDL_Renderer *r, int sz) {
+   SDL_Texture *tex = SDL_CreateTexture(r, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET, sz,
+                                        sz);
+   if (!tex)
+      return NULL;
+   SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+   SDL_SetRenderTarget(r, tex);
+   SDL_SetRenderDrawColor(r, 0, 0, 0, 0);
+   SDL_RenderClear(r);
+   SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
+
+   int cy = sz / 2;
+   int bar_w = 2;
+   int bar_h = sz * 2 / 3;
+   int bar_x = sz - 2 - bar_w;
+
+   /* Vertical bar on right */
+   SDL_Rect bar = { bar_x, cy - bar_h / 2, bar_w, bar_h };
+   SDL_RenderFillRect(r, &bar);
+
+   /* Two right-pointing filled triangles */
+   int tri_h = sz / 2;
+   int tri_w = (sz - 6) / 2;
+   int tri1_left = 1;
+   int tri2_left = tri1_left + tri_w;
+
+   /* First triangle */
+   for (int col = 0; col < tri_w; col++) {
+      int h = tri_h * col / tri_w;
+      SDL_RenderDrawLine(r, tri1_left + col, cy - h, tri1_left + col, cy + h);
+   }
+
+   /* Second triangle */
+   for (int col = 0; col < tri_w; col++) {
+      int h = tri_h * col / tri_w;
+      SDL_RenderDrawLine(r, tri2_left + col, cy - h, tri2_left + col, cy + h);
+   }
+
+   SDL_SetRenderTarget(r, NULL);
+   return tex;
+}
 
 /** Draw a 2px thick line (offsets perpendicular to the line direction) */
 static void draw_thick_line(SDL_Renderer *r, int x1, int y1, int x2, int y2) {
@@ -225,7 +371,9 @@ static void fill_arrow_left(SDL_Renderer *r, int tip_x, int tip_y, int sz) {
 }
 
 /**
- * Build shuffle icon: two crossing arrows drawn with SDL primitives.
+ * Build shuffle icon: two crossing arrows (SVG-style X-pattern).
+ * Matches web UI: two diagonal lines crossing in center with arrowheads
+ * at top-right and bottom-right corners.
  * Rendered white on transparent RGBA texture for later color-modding.
  */
 static SDL_Texture *build_shuffle_icon(SDL_Renderer *r) {
@@ -241,32 +389,36 @@ static SDL_Texture *build_shuffle_icon(SDL_Renderer *r) {
    SDL_RenderClear(r);
    SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
 
-   int cy = sz / 2;  /* vertical center */
-   int gap = sz / 5; /* vertical gap between the two paths (≈4px) */
-   int ah = 3;       /* arrowhead size */
-   int left = 1;
-   int right = sz - 2;
-   int cl = sz / 2 - 3; /* cross zone left */
-   int cr = sz / 2 + 3; /* cross zone right */
+   int mg = 2;            /* margin */
+   int ah = 3;            /* arrowhead size */
+   int top = mg + 2;      /* top path y */
+   int bot = sz - mg - 3; /* bottom path y */
+   int left = mg;
+   int right = sz - mg - 1;
 
-   /* Path 1: top-left → diagonal cross → bottom-right with arrowhead */
-   draw_thick_line(r, left, cy - gap, cl, cy - gap);
-   draw_thick_line(r, cl, cy - gap, cr, cy + gap);
-   draw_thick_line(r, cr, cy + gap, right - ah, cy + gap);
-   fill_arrow_right(r, right, cy + gap, ah);
+   /* Path 1: bottom-left → top-right (full diagonal) */
+   draw_thick_line(r, left, bot, right - ah, top);
 
-   /* Path 2: bottom-left → diagonal cross → top-right with arrowhead */
-   draw_thick_line(r, left, cy + gap, cl, cy + gap);
-   draw_thick_line(r, cl, cy + gap, cr, cy - gap);
-   draw_thick_line(r, cr, cy - gap, right - ah, cy - gap);
-   fill_arrow_right(r, right, cy - gap, ah);
+   /* Path 2: top-left → bottom-right, split into two halves with gap at cross */
+   int mid_x = sz / 2;
+   int mid_y = (top + bot) / 2;
+   draw_thick_line(r, left, top, mid_x - 2, mid_y - 1);
+   draw_thick_line(r, mid_x + 2, mid_y + 1, right - ah, bot);
+
+   /* Top-right arrowhead (L-shaped polyline: down-left to tip, tip to left) */
+   fill_arrow_right(r, right, top, ah);
+
+   /* Bottom-right arrowhead */
+   fill_arrow_right(r, right, bot, ah);
 
    SDL_SetRenderTarget(r, NULL);
    return tex;
 }
 
 /**
- * Build repeat icon: rectangular loop with two opposing arrowheads.
+ * Build repeat icon: rounded loop with two opposing arrowheads (SVG-style).
+ * Top path goes left-to-right with rounded left corner, arrow at right.
+ * Bottom path goes right-to-left with rounded right corner, arrow at left.
  * If one_mode is true, a "1" is rendered in the center.
  */
 static SDL_Texture *build_repeat_icon(SDL_Renderer *r, TTF_Font *font, bool one_mode) {
@@ -282,24 +434,35 @@ static SDL_Texture *build_repeat_icon(SDL_Renderer *r, TTF_Font *font, bool one_
    SDL_RenderClear(r);
    SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
 
-   int mg = 2;             /* margin */
-   int ah = 3;             /* arrowhead size */
-   int top = mg + ah;      /* top line y (leave room for arrowhead) */
-   int bot = sz - mg - ah; /* bottom line y */
+   int mg = 2;
+   int ah = 3; /* arrowhead size */
+   int cr = 3; /* corner radius (approx with diagonals) */
+
+   int top = mg + ah;      /* top horizontal line y */
+   int bot = sz - mg - ah; /* bottom horizontal line y */
    int lt = mg;            /* left edge */
    int rt = sz - mg - 1;   /* right edge */
 
-   /* Top line (left → right) */
-   draw_thick_line(r, lt, top, rt - ah, top);
-   /* Right side (top → bottom) */
-   draw_thick_line(r, rt, top, rt, bot);
-   /* Bottom line (right → left) */
-   draw_thick_line(r, rt, bot, lt + ah, bot);
-   /* Left side (bottom → top) */
-   draw_thick_line(r, lt, bot, lt, top);
-
-   /* Arrowheads */
+   /* Top path: rounded left corner going up, then horizontal to right arrow */
+   /* Left vertical segment (going up from bottom-ish to near top) */
+   draw_thick_line(r, lt, bot - cr, lt, top + cr);
+   /* Rounded top-left corner (3 short diagonal segments) */
+   draw_thick_line(r, lt, top + cr, lt + 1, top + 1);
+   draw_thick_line(r, lt + 1, top + 1, lt + cr, top);
+   /* Top horizontal line */
+   draw_thick_line(r, lt + cr, top, rt - ah, top);
+   /* Right arrow */
    fill_arrow_right(r, rt, top, ah);
+
+   /* Bottom path: rounded right corner going down, then horizontal to left arrow */
+   /* Right vertical segment */
+   draw_thick_line(r, rt, top + cr, rt, bot - cr);
+   /* Rounded bottom-right corner */
+   draw_thick_line(r, rt, bot - cr, rt - 1, bot - 1);
+   draw_thick_line(r, rt - 1, bot - 1, rt - cr, bot);
+   /* Bottom horizontal line */
+   draw_thick_line(r, rt - cr, bot, lt + ah, bot);
+   /* Left arrow */
    fill_arrow_left(r, lt, bot, ah);
 
    /* Repeat-one: draw "1" in center */
@@ -340,15 +503,15 @@ static void build_static_caches(ui_music_t *m) {
                                       &m->tab_tex_h[i]);
    }
 
-   /* Transport icons: 0=prev, 1=play, 2=pause, 3=next */
-   m->transport_tex[0] = build_white_tex(m->renderer, m->label_font, "\xE2\x8F\xAE",
-                                         &m->transport_tex_w[0], &m->transport_tex_h[0]);
-   m->transport_tex[1] = build_white_tex(m->renderer, m->label_font, "\xE2\x96\xB6",
-                                         &m->transport_tex_w[1], &m->transport_tex_h[1]);
-   m->transport_tex[2] = build_white_tex(m->renderer, m->label_font, "\xE2\x8F\xB8",
-                                         &m->transport_tex_w[2], &m->transport_tex_h[2]);
-   m->transport_tex[3] = build_white_tex(m->renderer, m->label_font, "\xE2\x8F\xAD",
-                                         &m->transport_tex_w[3], &m->transport_tex_h[3]);
+   /* Transport icons: 0=prev, 1=play, 2=pause, 3=next (SDL primitives) */
+   m->transport_tex[0] = build_prev_icon(m->renderer, TRANSPORT_ICON_DIM);
+   m->transport_tex_w[0] = m->transport_tex_h[0] = TRANSPORT_ICON_DIM;
+   m->transport_tex[1] = build_play_icon(m->renderer, TRANSPORT_ICON_DIM);
+   m->transport_tex_w[1] = m->transport_tex_h[1] = TRANSPORT_ICON_DIM;
+   m->transport_tex[2] = build_pause_icon(m->renderer, TRANSPORT_ICON_DIM);
+   m->transport_tex_w[2] = m->transport_tex_h[2] = TRANSPORT_ICON_DIM;
+   m->transport_tex[3] = build_next_icon(m->renderer, TRANSPORT_ICON_DIM);
+   m->transport_tex_w[3] = m->transport_tex_h[3] = TRANSPORT_ICON_DIM;
 
    /* Toggle icons: shuffle + repeat (SDL primitives, not emoji) */
    m->shuffle_icon_tex = build_shuffle_icon(m->renderer);

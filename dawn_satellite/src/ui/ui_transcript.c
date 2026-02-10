@@ -24,6 +24,7 @@
 #include "ui/ui_transcript.h"
 
 #include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -382,6 +383,66 @@ void ui_transcript_scroll_to_bottom(ui_transcript_t *t) {
    t->auto_scroll = true;
 }
 
+/* =============================================================================
+ * Music Note Icon (SDL primitive, no font dependency)
+ * ============================================================================= */
+
+#define MUSIC_NOTE_DIM 18
+
+/** Build double-note music icon: two stems, beam, two filled note heads */
+static SDL_Texture *build_music_note_icon(SDL_Renderer *r, int sz) {
+   SDL_Texture *tex = SDL_CreateTexture(r, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET, sz,
+                                        sz);
+   if (!tex)
+      return NULL;
+   SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+   SDL_SetRenderTarget(r, tex);
+   SDL_SetRenderDrawColor(r, 0, 0, 0, 0);
+   SDL_RenderClear(r);
+   SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
+
+   /* Note head radius and positions (scaled to sz) */
+   int head_r = sz / 6;
+   if (head_r < 2)
+      head_r = 2;
+
+   /* Left note: head center at (head_r + 1, sz - head_r - 1) */
+   int lhx = head_r + 1;
+   int lhy = sz - head_r - 1;
+
+   /* Right note: head center at (sz - head_r - 1, sz - head_r - 3) (slightly higher) */
+   int rhx = sz - head_r - 1;
+   int rhy = sz - head_r - 3;
+
+   /* Left stem: from top of left head up to near top */
+   int lstem_x = lhx + head_r;
+   int lstem_top = 2;
+   int lstem_bot = lhy - head_r / 2;
+   SDL_RenderDrawLine(r, lstem_x, lstem_top, lstem_x, lstem_bot);
+   SDL_RenderDrawLine(r, lstem_x + 1, lstem_top, lstem_x + 1, lstem_bot);
+
+   /* Right stem: from top of right head up, slightly lower top */
+   int rstem_x = rhx + head_r;
+   int rstem_top = 4;
+   int rstem_bot = rhy - head_r / 2;
+   SDL_RenderDrawLine(r, rstem_x, rstem_top, rstem_x, rstem_bot);
+   SDL_RenderDrawLine(r, rstem_x + 1, rstem_top, rstem_x + 1, rstem_bot);
+
+   /* Beam connecting tops of stems (angled) */
+   SDL_RenderDrawLine(r, lstem_x, lstem_top, rstem_x + 1, rstem_top);
+   SDL_RenderDrawLine(r, lstem_x, lstem_top + 1, rstem_x + 1, rstem_top + 1);
+
+   /* Filled note heads (circles via scanline) */
+   for (int dy = -head_r; dy <= head_r; dy++) {
+      int dx = (int)sqrtf((float)(head_r * head_r - dy * dy));
+      SDL_RenderDrawLine(r, lhx - dx, lhy + dy, lhx + dx, lhy + dy);
+      SDL_RenderDrawLine(r, rhx - dx, rhy + dy, rhx + dx, rhy + dy);
+   }
+
+   SDL_SetRenderTarget(r, NULL);
+   return tex;
+}
+
 void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_state_t state) {
    if (!t || !renderer)
       return;
@@ -483,16 +544,11 @@ void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_stat
 
          /* Music icon button (left of WiFi bars) */
          {
-            /* Build cached white glyph on first use */
-            if (!t->music_icon_tex && t->label_font) {
-               SDL_Color white = { 255, 255, 255, 255 };
-               SDL_Surface *ms = TTF_RenderUTF8_Blended(t->label_font, "\xE2\x99\xAA", white);
-               if (ms) {
-                  t->music_icon_tex = SDL_CreateTextureFromSurface(renderer, ms);
-                  t->music_icon_w = ms->w;
-                  t->music_icon_h = ms->h;
-                  SDL_FreeSurface(ms);
-               }
+            /* Build cached SDL primitive icon on first use */
+            if (!t->music_icon_tex) {
+               t->music_icon_tex = build_music_note_icon(renderer, MUSIC_NOTE_DIM);
+               t->music_icon_w = MUSIC_NOTE_DIM;
+               t->music_icon_h = MUSIC_NOTE_DIM;
             }
             if (t->music_icon_tex) {
                if (t->music_playing) {
