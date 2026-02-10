@@ -246,6 +246,10 @@ static int queue_music_data(ws_connection_t *conn, const uint8_t *data, size_t l
    int queue_fill = webui_get_queue_fill_pct();
    if (queue_fill > 75) {
       /* Queue is > 75% full - skip this frame to let it drain */
+      static int drop_count = 0;
+      if (++drop_count % 50 == 1)
+         LOG_WARNING("WebUI music: Backpressure dropping frames (queue %d%%, dropped %d)",
+                     queue_fill, drop_count);
       return 0; /* Not an error, just backpressure */
    }
 
@@ -2196,7 +2200,19 @@ void webui_music_set_stream_wsi(session_t *session, struct lws *wsi) {
       return;
 
    ws_connection_t *conn = (ws_connection_t *)session->client_data;
-   if (!conn || !conn->music_state)
+   if (!conn)
+      return;
+
+   /* Lazily initialize music state if needed (music stream may connect
+    * before any music_subscribe/control message arrives from the client) */
+   if (!conn->music_state && wsi) {
+      if (webui_music_session_init(conn) != 0) {
+         LOG_ERROR("WebUI music: Failed to init session for stream wsi");
+         return;
+      }
+   }
+
+   if (!conn->music_state)
       return;
 
    session_music_state_t *state = (session_music_state_t *)conn->music_state;
