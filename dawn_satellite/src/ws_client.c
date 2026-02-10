@@ -28,6 +28,10 @@
 /* Shared logging (same format as daemon) */
 #include "logging.h"
 
+#ifdef HAVE_OPUS
+#include "music_playback.h"
+#endif
+
 /* =============================================================================
  * Internal Structures
  * ============================================================================= */
@@ -81,6 +85,11 @@ struct ws_client {
 
    /* Session token for music WebSocket auth (32 hex chars + null) */
    char session_token[33];
+
+#ifdef HAVE_OPUS
+   /* Music playback engine for binary audio fallback on main WS (not owned) */
+   music_playback_t *music_pb;
+#endif
 
    /* Error message */
    char error_msg[256];
@@ -164,6 +173,29 @@ static int callback_ws(struct lws *wsi,
 
       case LWS_CALLBACK_CLIENT_RECEIVE:
          if (client && in && len > 0) {
+            /* Handle binary frames (music audio fallback from main WS) */
+            if (lws_frame_is_binary(wsi)) {
+#ifdef HAVE_OPUS
+               if (client->music_pb && len >= 1) {
+                  const uint8_t *data = (const uint8_t *)in;
+                  if (data[0] == 0x20) { /* WS_BIN_MUSIC_DATA */
+                     /* Parse opus frames: [0x20][2-byte LE len][opus]... */
+                     size_t offset = 1;
+                     while (offset + 2 <= len) {
+                        uint16_t frame_len = (uint16_t)data[offset] |
+                                             ((uint16_t)data[offset + 1] << 8);
+                        offset += 2;
+                        if (frame_len == 0 || frame_len > 1500 || offset + frame_len > len)
+                           break;
+                        music_playback_push_opus(client->music_pb, data + offset, (int)frame_len);
+                        offset += frame_len;
+                     }
+                  }
+               }
+#endif
+               break;
+            }
+
             pthread_mutex_lock(&client->mutex);
 
             /* Expand buffer if needed (capped to prevent OOM from rogue messages).
@@ -1165,7 +1197,12 @@ int ws_client_send_music_control(ws_client_t *client, const char *action, const 
    struct json_object *payload = json_object_new_object();
    json_object_object_add(payload, "action", json_object_new_string(action));
    if (path) {
-      json_object_object_add(payload, "path", json_object_new_string(path));
+      if (strcmp(action, "play_index") == 0) {
+         /* play_index expects "index" as integer */
+         json_object_object_add(payload, "index", json_object_new_int(atoi(path)));
+      } else {
+         json_object_object_add(payload, "path", json_object_new_string(path));
+      }
    }
    json_object_object_add(msg, "payload", payload);
 
@@ -1306,6 +1343,16 @@ const char *ws_client_get_session_token(ws_client_t *client) {
       return NULL;
    }
    return client->session_token;
+}
+
+void ws_client_set_music_playback(ws_client_t *client, void *music_pb) {
+   if (!client)
+      return;
+#ifdef HAVE_OPUS
+   client->music_pb = (music_playback_t *)music_pb;
+#else
+   (void)music_pb;
+#endif
 }
 
 int ws_client_send_music_subscribe(ws_client_t *client) {

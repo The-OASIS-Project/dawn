@@ -453,6 +453,18 @@ int ws_client_send_music_queue_bulk(ws_client_t *client, const char *action, con
 const char *ws_client_get_session_token(ws_client_t *client);
 
 /**
+ * @brief Set music playback engine for binary audio fallback on main WS
+ *
+ * When the dedicated music stream (port+1) is unavailable, the daemon
+ * sends Opus audio as binary frames on the main WebSocket. This setter
+ * allows the main WS client to feed those frames to the playback engine.
+ *
+ * @param client Client context
+ * @param music_pb Music playback context (cast to void* for header portability)
+ */
+void ws_client_set_music_playback(ws_client_t *client, void *music_pb);
+
+/**
  * @brief Subscribe to music state updates from daemon
  *
  * @param client Client context

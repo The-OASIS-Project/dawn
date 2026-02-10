@@ -1794,8 +1794,13 @@ bool ui_music_handle_tap(ui_music_t *m, int x, int y) {
          if (m->ws) {
             if (m->playing && !m->paused) {
                ws_client_send_music_control(m->ws, "pause", NULL);
-            } else {
+            } else if (m->paused) {
                ws_client_send_music_control(m->ws, "play", NULL);
+            } else if (m->queue_count > 0) {
+               /* Not playing, not paused, but queue has items — start from current index */
+               char idx_str[16];
+               snprintf(idx_str, sizeof(idx_str), "%d", m->queue_index);
+               ws_client_send_music_control(m->ws, "play_index", idx_str);
             }
          }
          handled = true;
