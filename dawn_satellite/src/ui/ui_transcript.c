@@ -542,8 +542,8 @@ void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_stat
             }
          }
 
-         /* Music icon button (left of WiFi bars) */
-         {
+         /* Music icon button (left of WiFi bars) — only when Opus is available */
+         if (t->show_music_btn) {
             /* Build cached SDL primitive icon on first use */
             if (!t->music_icon_tex) {
                t->music_icon_tex = build_music_note_icon(renderer, MUSIC_NOTE_DIM);

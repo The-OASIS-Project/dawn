@@ -734,8 +734,9 @@ static void handle_gesture(sdl_ui_t *ui, touch_gesture_t gesture, double time_se
             bool in_music_panel = (ui->panel_music.visible && !ui->panel_music.closing &&
                                    mx >= ui->width - MUSIC_PANEL_WIDTH);
             ui_transcript_t *t = &ui->transcript;
-            if (!in_music_panel && mx >= t->music_btn_x && mx < t->music_btn_x + t->music_btn_w &&
-                my >= t->music_btn_y && my < t->music_btn_y + t->music_btn_h) {
+            if (!in_music_panel && t->show_music_btn && mx >= t->music_btn_x &&
+                mx < t->music_btn_x + t->music_btn_w && my >= t->music_btn_y &&
+                my < t->music_btn_y + t->music_btn_h) {
                if (ui->panel_music.visible && !ui->panel_music.closing) {
                   panel_close_music(ui, time_sec);
                } else {
@@ -1348,6 +1349,7 @@ void sdl_ui_set_ws_client(sdl_ui_t *ui, struct ws_client *client) {
 void sdl_ui_set_music_playback(sdl_ui_t *ui, struct music_playback *pb) {
    if (!ui)
       return;
+   ui->transcript.show_music_btn = true;
    ui_music_set_playback(&ui->music, pb);
 }
 #endif

@@ -116,6 +116,9 @@ sudo apt install -y \
 # Optional: SDL2 dependencies (for touchscreen UI - orb + transcript)
 sudo apt install -y libsdl2-dev libsdl2-ttf-dev libdrm-dev
 
+# Optional: Music streaming support (Opus audio playback from daemon)
+sudo apt install -y libopus-dev
+
 # Optional: GPIO button support (Tier 2 style, not needed for Tier 1)
 # sudo apt install -y libgpiod-dev
 ```
@@ -294,6 +297,7 @@ This builds with the default configuration: **Vosk ASR + Whisper ASR** (both eng
 | `-DENABLE_SDL_UI=OFF` | OFF | SDL2 touchscreen UI (orb + transcript) |
 | `-DENABLE_NEOPIXEL=ON` | ON | NeoPixel/WS2812 LED support via SPI |
 | `-DCMAKE_BUILD_TYPE=Release` | Release | Optimization level |
+| *(auto-detected)* | — | Music streaming via Opus (requires `libopus-dev`) |
 
 Example: Vosk only (no Whisper, smaller binary, no whisper.cpp compile):
 ```bash

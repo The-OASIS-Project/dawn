@@ -446,7 +446,21 @@ int audio_playback_play_stereo(audio_playback_t *ctx,
       pthread_mutex_lock(&ctx->alsa_mutex);
       snd_pcm_sframes_t frames = snd_pcm_writei(handle, buf, n);
       if (frames == -EPIPE) {
-         LOG_ERROR("Stereo playback underrun, recovering...");
+         LOG_WARNING("Stereo playback underrun, recovering...");
+         snd_pcm_prepare(handle);
+         pthread_mutex_unlock(&ctx->alsa_mutex);
+         continue;
+      }
+      if (frames == -EBADFD) {
+         LOG_WARNING("Stereo playback: bad state, re-preparing");
+         snd_pcm_prepare(handle);
+         pthread_mutex_unlock(&ctx->alsa_mutex);
+         continue;
+      }
+      if (frames == -ESTRPIPE) {
+         LOG_WARNING("Stereo playback: suspended, resuming");
+         while (snd_pcm_resume(handle) == -EAGAIN)
+            usleep(100000);
          snd_pcm_prepare(handle);
          pthread_mutex_unlock(&ctx->alsa_mutex);
          continue;
