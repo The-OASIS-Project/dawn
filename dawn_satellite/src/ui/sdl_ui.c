@@ -725,12 +725,16 @@ static void handle_gesture(sdl_ui_t *ui, touch_gesture_t gesture, double time_se
 
    switch (gesture.type) {
       case TOUCH_GESTURE_TAP:
-         /* Music button tap (check first, works even when no panel open) */
+         /* Music button tap (check first, works even when no panel open).
+          * Skip if tap is inside the open music panel — let the panel's
+          * own tab handler process it instead. */
          if (!ui->panel_actions.visible && !ui->panel_settings.visible) {
             int mx = gesture.x;
             int my = gesture.y;
+            bool in_music_panel = (ui->panel_music.visible && !ui->panel_music.closing &&
+                                   mx >= ui->width - MUSIC_PANEL_WIDTH);
             ui_transcript_t *t = &ui->transcript;
-            if (mx >= t->music_btn_x && mx < t->music_btn_x + t->music_btn_w &&
+            if (!in_music_panel && mx >= t->music_btn_x && mx < t->music_btn_x + t->music_btn_w &&
                 my >= t->music_btn_y && my < t->music_btn_y + t->music_btn_h) {
                if (ui->panel_music.visible && !ui->panel_music.closing) {
                   panel_close_music(ui, time_sec);
@@ -790,6 +794,9 @@ static void handle_gesture(sdl_ui_t *ui, touch_gesture_t gesture, double time_se
          break;
 
       case TOUCH_GESTURE_SWIPE_UP:
+         if (ui->panel_music.visible && !ui->panel_music.closing) {
+            break; /* Swipe consumed by music panel scrolling */
+         }
          if (ui->panel_settings.visible && !ui->panel_settings.closing) {
             panel_close(ui, false, time_sec);
          } else if ((float)gesture.y > (float)ui->height * (1.0f - SWIPE_ZONE_FRAC)) {
@@ -798,6 +805,9 @@ static void handle_gesture(sdl_ui_t *ui, touch_gesture_t gesture, double time_se
          break;
 
       case TOUCH_GESTURE_SWIPE_DOWN:
+         if (ui->panel_music.visible && !ui->panel_music.closing) {
+            break; /* Swipe consumed by music panel scrolling */
+         }
          if (ui->panel_actions.visible && !ui->panel_actions.closing) {
             panel_close(ui, true, time_sec);
          } else if ((float)gesture.y < (float)ui->height * SWIPE_ZONE_FRAC) {

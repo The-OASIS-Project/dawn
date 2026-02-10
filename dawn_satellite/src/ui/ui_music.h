@@ -142,6 +142,10 @@ struct ui_music {
    /* Tap debounce */
    uint32_t last_tap_ms;
 
+   /* Add-to-queue flash feedback */
+   int add_flash_row;     /* Row index that was just added (-1 = none) */
+   uint32_t add_flash_ms; /* SDL_GetTicks() when flash started */
+
    /* WS client for sending commands */
    struct ws_client *ws;
 };
