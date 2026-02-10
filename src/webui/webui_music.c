@@ -447,6 +447,7 @@ static void *music_stream_thread(void *arg) {
    uint64_t stream_start_time = 0;
    uint64_t frames_sent = 0;
    const uint64_t frame_duration_us = (WEBUI_MUSIC_FRAME_SAMPLES * 1000000ULL) / OPUS_SAMPLE_RATE;
+   bool was_sending = false; /* Diagnostic: track state transitions for logging */
 
    while (!atomic_load(&state->stop_requested)) {
       /* Quick check without lock first */
@@ -475,9 +476,18 @@ static void *music_stream_thread(void *arg) {
       /* Brief lock to check state and mark decoder busy */
       pthread_mutex_lock(&state->state_mutex);
       if (!state->decoder || !state->playing || state->paused) {
+         if (was_sending) {
+            LOG_INFO("WebUI music: Streaming paused (decoder=%p playing=%d paused=%d)",
+                     (void *)state->decoder, state->playing, state->paused);
+            was_sending = false;
+         }
          pthread_mutex_unlock(&state->state_mutex);
          usleep(50000); /* 50ms idle sleep */
          continue;
+      }
+      if (!was_sending) {
+         LOG_INFO("WebUI music: Streaming resumed");
+         was_sending = true;
       }
 
       /* Mark decoder busy and grab what we need */
@@ -596,6 +606,12 @@ static void *music_stream_thread(void *arg) {
 
       /* Encode and send while we have enough samples (960 stereo frames = 1920 samples) */
       while (state->resample_accum_count >= WEBUI_MUSIC_FRAME_SAMPLES * 2) {
+         /* Check pause/stop in inner loop too — the outer loop only checks at the
+          * top of each iteration, and audio_decoder_read + resampling may accumulate
+          * enough samples for many frames between checks. */
+         if (state->paused || !state->playing || atomic_load(&state->stop_requested))
+            break;
+
          /* Initialize stream timing on first frame */
          if (stream_start_time == 0) {
             struct timespec ts;

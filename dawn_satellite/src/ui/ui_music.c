@@ -2221,27 +2221,32 @@ void ui_music_on_library(ui_music_t *m, const music_library_update_t *lib) {
       m->browse_items_total = lib->total_count;
    }
 
-   /* Track pagination: append if offset > 0, replace if offset == 0 */
-   if (lib->offset > 0 && lib->track_count > 0 && m->browse_tracks) {
-      /* Append mode — add new tracks after existing ones */
-      int space = m->browse_tracks_cap - m->browse_track_count;
-      int to_copy = lib->track_count < space ? lib->track_count : space;
-      if (to_copy > 0) {
-         memcpy(m->browse_tracks + m->browse_track_count, lib->tracks,
-                to_copy * sizeof(music_track_t));
-         m->browse_track_count += to_copy;
+   /* Track pagination: append if offset > 0, replace if offset == 0.
+    * Only touch track state when the response actually carries tracks;
+    * artist/album page-2+ responses have track_count == 0 and must NOT
+    * reset scroll_offset. */
+   if (lib->track_count > 0 || lib->browse_type == MUSIC_BROWSE_TRACKS) {
+      if (lib->offset > 0 && lib->track_count > 0 && m->browse_tracks) {
+         /* Append mode — add new tracks after existing ones */
+         int space = m->browse_tracks_cap - m->browse_track_count;
+         int to_copy = lib->track_count < space ? lib->track_count : space;
+         if (to_copy > 0) {
+            memcpy(m->browse_tracks + m->browse_track_count, lib->tracks,
+                   to_copy * sizeof(music_track_t));
+            m->browse_track_count += to_copy;
+         }
+         /* Don't reset scroll on append */
+      } else {
+         /* Replace mode — new browse or first page */
+         int to_copy = lib->track_count;
+         if (to_copy > m->browse_tracks_cap)
+            to_copy = m->browse_tracks_cap;
+         m->browse_track_count = to_copy;
+         if (to_copy > 0 && m->browse_tracks) {
+            memcpy(m->browse_tracks, lib->tracks, to_copy * sizeof(music_track_t));
+         }
+         m->scroll_offset = 0;
       }
-      /* Don't reset scroll on append */
-   } else {
-      /* Replace mode — new browse or first page */
-      int to_copy = lib->track_count;
-      if (to_copy > m->browse_tracks_cap)
-         to_copy = m->browse_tracks_cap;
-      m->browse_track_count = to_copy;
-      if (to_copy > 0 && m->browse_tracks) {
-         memcpy(m->browse_tracks, lib->tracks, to_copy * sizeof(music_track_t));
-      }
-      m->scroll_offset = 0;
    }
 
    m->browse_total_count = lib->total_count;
@@ -2282,11 +2287,13 @@ void ui_music_update_spectrum(ui_music_t *m, const volatile float *spectrum64) {
     * below 4kHz, so linear mapping leaves bars 16-31 nearly empty.
     *
     * WebUI: logT = pow(t, 0.6) — lower frequencies get proportionally more bars.
-    * We replicate this by sampling the 64-bin spectrum with log-spaced indices,
-    * then re-normalize per-frame so bars span the full 0..1 range.
+    * We replicate this by sampling the 64-bin spectrum with log-spaced indices.
+    *
+    * NOTE: compute_spectrum() already applies peak normalization, noise floor
+    * subtraction (0.05), and sqrt gamma — do NOT re-normalize here or the
+    * loudest bar will always pin to 1.0.
     */
    float bars[MUSIC_VIZ_BAR_COUNT];
-   float peak = 0.0f;
 
    for (int i = 0; i < MUSIC_VIZ_BAR_COUNT; i++) {
       float t = (float)i / (float)MUSIC_VIZ_BAR_COUNT;
@@ -2307,26 +2314,14 @@ void ui_music_update_spectrum(ui_music_t *m, const volatile float *spectrum64) {
          sum += spectrum64[bin + 1];
          count++;
       }
-      bars[i] = sum / (float)count;
-      if (bars[i] > peak)
-         peak = bars[i];
+      float v = sum / (float)count;
+      if (v > 1.0f)
+         v = 1.0f;
+      bars[i] = v;
    }
 
-   /* Per-frame peak normalization + noise floor + gamma (matches WebUI) */
-   float noise_floor = 0.05f;
    pthread_mutex_lock(&m->mutex);
-   if (peak > noise_floor) {
-      float inv = 1.0f / (peak - noise_floor);
-      for (int i = 0; i < MUSIC_VIZ_BAR_COUNT; i++) {
-         float v = (bars[i] - noise_floor) * inv;
-         if (v < 0.0f)
-            v = 0.0f;
-         /* Gamma 0.7 (matches WebUI) — less aggressive than sqrt (0.5) */
-         m->viz_targets[i] = powf(v, 0.7f);
-      }
-   } else {
-      for (int i = 0; i < MUSIC_VIZ_BAR_COUNT; i++)
-         m->viz_targets[i] = 0.0f;
-   }
+   for (int i = 0; i < MUSIC_VIZ_BAR_COUNT; i++)
+      m->viz_targets[i] = bars[i];
    pthread_mutex_unlock(&m->mutex);
 }

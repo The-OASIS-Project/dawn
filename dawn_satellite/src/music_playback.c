@@ -291,6 +291,12 @@ int music_playback_push_opus(music_playback_t *ctx, const uint8_t *opus_data, in
    if (!ctx || !opus_data || opus_len <= 0)
       return -1;
 
+   /* Silently drop frames while paused — the ring buffer isn't draining
+    * so we'd just time out waiting for space and log false "decode errors". */
+   int st = atomic_load(&ctx->state);
+   if (st == MUSIC_PB_PAUSED)
+      return 0; /* 0 = dropped, not an error */
+
    /* Decode Opus frame to PCM */
    int16_t pcm[OPUS_DECODE_BUF_SAMPLES];
    int frames = opus_decode(ctx->decoder, opus_data, opus_len, pcm, OPUS_MAX_FRAME_SAMPLES, 0);
@@ -329,7 +335,7 @@ int music_playback_push_opus(music_playback_t *ctx, const uint8_t *opus_data, in
    ring_write(ctx, pcm, n_samples);
 
    /* Transition from IDLE to BUFFERING on first data */
-   int st = atomic_load(&ctx->state);
+   st = atomic_load(&ctx->state);
    if (st == MUSIC_PB_IDLE) {
       atomic_store(&ctx->state, MUSIC_PB_BUFFERING);
    }
