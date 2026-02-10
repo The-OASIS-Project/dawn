@@ -595,10 +595,8 @@ static void render_tabs(ui_music_t *m, SDL_Renderer *r) {
  * ============================================================================= */
 
 static void update_visualizer(ui_music_t *m) {
-   uint32_t now = SDL_GetTicks();
-   if (now - m->viz_last_update < VIZ_UPDATE_MS)
-      return;
-   m->viz_last_update = now;
+   /* Remove 50ms gate - read spectrum every frame for lower latency.
+    * Audio computes spectrum every ~53ms, but UI should poll as fast as possible. */
 
 #ifdef HAVE_OPUS
    if (m->music_pb) {
@@ -613,7 +611,13 @@ static void update_visualizer(ui_music_t *m) {
    }
 #endif
 
-   /* Fallback: random visualizer when no playback engine (Phase 1 mode) */
+   /* Fallback: random visualizer when no playback engine (Phase 1 mode).
+    * Gate random updates to 50ms to avoid CPU waste. */
+   uint32_t now = SDL_GetTicks();
+   if (now - m->viz_last_update < VIZ_UPDATE_MS)
+      return;
+   m->viz_last_update = now;
+
    if (m->playing && !m->paused) {
       for (int i = 0; i < VIZ_BAR_COUNT; i++) {
          m->viz_targets[i] = 0.15f + ((float)(rand() % 85)) / 100.0f;
@@ -2181,6 +2185,8 @@ void ui_music_on_library(ui_music_t *m, const music_library_update_t *lib) {
          memcpy(m->browse_items + m->browse_count, lib->items,
                 to_copy * sizeof(music_browse_item_t));
          m->browse_count += to_copy;
+         /* Update list height immediately so scroll knows the list grew */
+         m->total_list_height = m->browse_count * LIST_ROW_HEIGHT;
       }
       /* Don't reset scroll on append */
    } else {
@@ -2189,8 +2195,10 @@ void ui_music_on_library(ui_music_t *m, const music_library_update_t *lib) {
       if (lib->item_count > 0) {
          memcpy(m->browse_items, lib->items, lib->item_count * sizeof(music_browse_item_t));
       }
+      /* Reset scroll only in replace mode (new browse or first page) */
       if (lib->browse_type == MUSIC_BROWSE_ARTISTS || lib->browse_type == MUSIC_BROWSE_ALBUMS) {
          m->scroll_offset = 0;
+         m->total_list_height = m->browse_count * LIST_ROW_HEIGHT;
       }
    }
 

@@ -43,8 +43,8 @@
 #define RING_SAMPLES (RING_FRAMES * 2)
 #define RING_BYTES (RING_SAMPLES * sizeof(int16_t))
 
-/* Start playback after 250ms of data buffered (12000 frames) for network jitter tolerance */
-#define BUFFER_THRESHOLD_FRAMES 12000
+/* Start playback after 500ms of data buffered (24000 frames) for network jitter tolerance */
+#define BUFFER_THRESHOLD_FRAMES 24000
 
 /* Max Opus frame: 960 samples per channel at 48kHz/20ms */
 #define OPUS_MAX_FRAME_SAMPLES 960
