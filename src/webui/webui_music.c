@@ -1615,14 +1615,34 @@ void handle_music_library(ws_connection_t *conn, struct json_object *payload) {
       free(tracks);
 
    } else if (strcmp(browse_type, "artists") == 0) {
-      /* List artists with stats (album count, track count) */
-      music_artist_info_t *artists = malloc(200 * sizeof(music_artist_info_t));
+      /* Paginated artist listing (default limit=50, max=200) */
+      int limit = 50;
+      int offset = 0;
+
+      struct json_object *limit_obj, *offset_obj;
+      if (payload && json_object_object_get_ex(payload, "limit", &limit_obj))
+         limit = json_object_get_int(limit_obj);
+      if (payload && json_object_object_get_ex(payload, "offset", &offset_obj))
+         offset = json_object_get_int(offset_obj);
+
+      if (limit < 1)
+         limit = 1;
+      if (limit > 200)
+         limit = 200;
+      if (offset < 0)
+         offset = 0;
+
+      music_artist_info_t *artists = malloc(limit * sizeof(music_artist_info_t));
       if (!artists) {
          webui_music_send_error(conn, "MEMORY_ERROR", "Failed to allocate artist list");
          json_object_put(response);
          return;
       }
-      int count = music_db_list_artists_with_stats(artists, 200);
+      int count = music_db_list_artists_with_stats(artists, limit, offset);
+
+      /* Include total count for pagination */
+      music_db_stats_t stats;
+      music_db_get_stats(&stats);
 
       struct json_object *artists_arr = json_object_new_array();
       for (int i = 0; i < count; i++) {
@@ -1634,17 +1654,39 @@ void handle_music_library(ws_connection_t *conn, struct json_object *payload) {
       }
       json_object_object_add(resp_payload, "artists", artists_arr);
       json_object_object_add(resp_payload, "count", json_object_new_int(count));
+      json_object_object_add(resp_payload, "total_count", json_object_new_int(stats.artist_count));
+      json_object_object_add(resp_payload, "offset", json_object_new_int(offset));
       free(artists);
 
    } else if (strcmp(browse_type, "albums") == 0) {
-      /* List albums with stats (track count, artist) */
-      music_album_info_t *albums = malloc(200 * sizeof(music_album_info_t));
+      /* Paginated album listing (default limit=50, max=200) */
+      int limit = 50;
+      int offset = 0;
+
+      struct json_object *limit_obj, *offset_obj;
+      if (payload && json_object_object_get_ex(payload, "limit", &limit_obj))
+         limit = json_object_get_int(limit_obj);
+      if (payload && json_object_object_get_ex(payload, "offset", &offset_obj))
+         offset = json_object_get_int(offset_obj);
+
+      if (limit < 1)
+         limit = 1;
+      if (limit > 200)
+         limit = 200;
+      if (offset < 0)
+         offset = 0;
+
+      music_album_info_t *albums = malloc(limit * sizeof(music_album_info_t));
       if (!albums) {
          webui_music_send_error(conn, "MEMORY_ERROR", "Failed to allocate album list");
          json_object_put(response);
          return;
       }
-      int count = music_db_list_albums_with_stats(albums, 200);
+      int count = music_db_list_albums_with_stats(albums, limit, offset);
+
+      /* Include total count for pagination */
+      music_db_stats_t stats;
+      music_db_get_stats(&stats);
 
       struct json_object *albums_arr = json_object_new_array();
       for (int i = 0; i < count; i++) {
@@ -1656,6 +1698,8 @@ void handle_music_library(ws_connection_t *conn, struct json_object *payload) {
       }
       json_object_object_add(resp_payload, "albums", albums_arr);
       json_object_object_add(resp_payload, "count", json_object_new_int(count));
+      json_object_object_add(resp_payload, "total_count", json_object_new_int(stats.album_count));
+      json_object_object_add(resp_payload, "offset", json_object_new_int(offset));
       free(albums);
 
    } else if (strcmp(browse_type, "tracks_by_artist") == 0) {

@@ -638,6 +638,8 @@ static void parse_music_library(struct json_object *payload, music_library_updat
 
    } else if (strcmp(browse_type, "artists") == 0) {
       lib->browse_type = MUSIC_BROWSE_ARTISTS;
+      lib->total_count = json_get_int(payload, "total_count");
+      lib->offset = json_get_int(payload, "offset");
       struct json_object *arr;
       if (json_object_object_get_ex(payload, "artists", &arr) &&
           json_object_is_type(arr, json_type_array)) {
@@ -657,6 +659,8 @@ static void parse_music_library(struct json_object *payload, music_library_updat
 
    } else if (strcmp(browse_type, "albums") == 0) {
       lib->browse_type = MUSIC_BROWSE_ALBUMS;
+      lib->total_count = json_get_int(payload, "total_count");
+      lib->offset = json_get_int(payload, "offset");
       struct json_object *arr;
       if (json_object_object_get_ex(payload, "albums", &arr) &&
           json_object_is_type(arr, json_type_array)) {

@@ -127,7 +127,7 @@ static const char *SQL_LIST_ARTISTS_WITH_STATS =
     "WHERE artist != '' "
     "GROUP BY artist "
     "ORDER BY artist "
-    "LIMIT ?";
+    "LIMIT ? OFFSET ?";
 
 /* List albums with stats (track count, artist) - uses MAX(artist) instead of correlated subquery */
 static const char *SQL_LIST_ALBUMS_WITH_STATS = "SELECT album, "
@@ -137,7 +137,7 @@ static const char *SQL_LIST_ALBUMS_WITH_STATS = "SELECT album, "
                                                 "WHERE album != '' "
                                                 "GROUP BY album "
                                                 "ORDER BY album "
-                                                "LIMIT ?";
+                                                "LIMIT ? OFFSET ?";
 
 /* Get tracks by artist */
 static const char *SQL_GET_BY_ARTIST = "SELECT path, title, artist, album, duration_sec "
@@ -976,10 +976,12 @@ int music_db_list_albums(char (*albums)[AUDIO_METADATA_STRING_MAX], int max_albu
    return count;
 }
 
-int music_db_list_artists_with_stats(music_artist_info_t *artists, int max_artists) {
+int music_db_list_artists_with_stats(music_artist_info_t *artists, int max_artists, int offset) {
    if (!artists || max_artists <= 0) {
       return -1;
    }
+   if (offset < 0)
+      offset = 0;
 
    pthread_mutex_lock(&g_db_mutex);
 
@@ -997,6 +999,7 @@ int music_db_list_artists_with_stats(music_artist_info_t *artists, int max_artis
    }
 
    sqlite3_bind_int(stmt, 1, max_artists);
+   sqlite3_bind_int(stmt, 2, offset);
 
    int count = 0;
    while (sqlite3_step(stmt) == SQLITE_ROW && count < max_artists) {
@@ -1015,10 +1018,12 @@ int music_db_list_artists_with_stats(music_artist_info_t *artists, int max_artis
    return count;
 }
 
-int music_db_list_albums_with_stats(music_album_info_t *albums, int max_albums) {
+int music_db_list_albums_with_stats(music_album_info_t *albums, int max_albums, int offset) {
    if (!albums || max_albums <= 0) {
       return -1;
    }
+   if (offset < 0)
+      offset = 0;
 
    pthread_mutex_lock(&g_db_mutex);
 
@@ -1036,6 +1041,7 @@ int music_db_list_albums_with_stats(music_album_info_t *albums, int max_albums) 
    }
 
    sqlite3_bind_int(stmt, 1, max_albums);
+   sqlite3_bind_int(stmt, 2, offset);
 
    int count = 0;
    while (sqlite3_step(stmt) == SQLITE_ROW && count < max_albums) {

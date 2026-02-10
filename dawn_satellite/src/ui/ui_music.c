@@ -1788,8 +1788,20 @@ bool ui_music_handle_tap(ui_music_t *m, int x, int y) {
          if (m->music_pb)
             music_playback_flush(m->music_pb);
 #endif
-         if (m->ws)
-            ws_client_send_music_control(m->ws, "prev", NULL);
+         if (m->ws) {
+            if (m->shuffle && m->queue_count > 1) {
+               /* Shuffle: pick random track (excluding current) */
+               int new_index;
+               do {
+                  new_index = rand() % m->queue_count;
+               } while (new_index == m->queue_index && m->queue_count > 1);
+               char idx_str[16];
+               snprintf(idx_str, sizeof(idx_str), "%d", new_index);
+               ws_client_send_music_control(m->ws, "play_index", idx_str);
+            } else {
+               ws_client_send_music_control(m->ws, "previous", NULL);
+            }
+         }
          handled = true;
       }
       /* Play/Pause button (expanded) */
@@ -1819,8 +1831,20 @@ bool ui_music_handle_tap(ui_music_t *m, int x, int y) {
          if (m->music_pb)
             music_playback_flush(m->music_pb);
 #endif
-         if (m->ws)
-            ws_client_send_music_control(m->ws, "next", NULL);
+         if (m->ws) {
+            if (m->shuffle && m->queue_count > 1) {
+               /* Shuffle: pick random track (excluding current) */
+               int new_index;
+               do {
+                  new_index = rand() % m->queue_count;
+               } while (new_index == m->queue_index && m->queue_count > 1);
+               char idx_str[16];
+               snprintf(idx_str, sizeof(idx_str), "%d", new_index);
+               ws_client_send_music_control(m->ws, "play_index", idx_str);
+            } else {
+               ws_client_send_music_control(m->ws, "next", NULL);
+            }
+         }
          handled = true;
       }
 
@@ -1904,9 +1928,9 @@ bool ui_music_handle_tap(ui_music_t *m, int x, int y) {
             if (x >= box_x && x < box_x + box_w) {
                ws_client_send_music_library_paged(m->ws, "tracks", NULL, 0, MUSIC_MAX_RESULTS);
             } else if (x >= box_x + box_w + 8 && x < box_x + 2 * box_w + 8) {
-               ws_client_send_music_library(m->ws, "artists", NULL);
+               ws_client_send_music_library_paged(m->ws, "artists", NULL, 0, MUSIC_MAX_RESULTS);
             } else if (x >= box_x + 2 * (box_w + 8) && x < box_x + 3 * box_w + 16) {
-               ws_client_send_music_library(m->ws, "albums", NULL);
+               ws_client_send_music_library_paged(m->ws, "albums", NULL, 0, MUSIC_MAX_RESULTS);
             }
          }
          handled = true;
@@ -1999,17 +2023,32 @@ void ui_music_scroll(ui_music_t *m, int dy) {
    if (m->scroll_offset > max_scroll)
       m->scroll_offset = max_scroll;
 
-   /* Load more tracks when scrolling near the bottom */
-   if (m->active_tab == MUSIC_TAB_LIBRARY && m->browse_type == MUSIC_BROWSE_TRACKS && m->ws &&
-       !m->browse_loading_more && m->browse_track_count < m->browse_total_count &&
-       m->browse_track_count < m->browse_tracks_cap) {
+   /* Load more when scrolling near the bottom (tracks, artists, albums) */
+   if (m->active_tab == MUSIC_TAB_LIBRARY && m->ws && !m->browse_loading_more) {
       int visible_h = m->panel_h - TAB_HEIGHT - 44;
       int bottom_visible = m->scroll_offset + visible_h;
       int load_trigger = m->total_list_height - visible_h; /* One screen from bottom */
+
       if (bottom_visible >= load_trigger && load_trigger > 0) {
-         m->browse_loading_more = true;
-         ws_client_send_music_library_paged(m->ws, "tracks", NULL, m->browse_track_count,
-                                            MUSIC_MAX_RESULTS);
+         if (m->browse_type == MUSIC_BROWSE_TRACKS &&
+             m->browse_track_count < m->browse_total_count &&
+             m->browse_track_count < m->browse_tracks_cap) {
+            m->browse_loading_more = true;
+            ws_client_send_music_library_paged(m->ws, "tracks", NULL, m->browse_track_count,
+                                               MUSIC_MAX_RESULTS);
+         } else if (m->browse_type == MUSIC_BROWSE_ARTISTS &&
+                    m->browse_count < m->browse_total_count &&
+                    m->browse_count < MUSIC_MAX_RESULTS) {
+            m->browse_loading_more = true;
+            ws_client_send_music_library_paged(m->ws, "artists", NULL, m->browse_count,
+                                               MUSIC_MAX_RESULTS);
+         } else if (m->browse_type == MUSIC_BROWSE_ALBUMS &&
+                    m->browse_count < m->browse_total_count &&
+                    m->browse_count < MUSIC_MAX_RESULTS) {
+            m->browse_loading_more = true;
+            ws_client_send_music_library_paged(m->ws, "albums", NULL, m->browse_count,
+                                               MUSIC_MAX_RESULTS);
+         }
       }
    }
 }
@@ -2046,6 +2085,29 @@ void ui_music_on_state(ui_music_t *m, const music_state_update_t *state) {
       invalidate_track_cache(m);
    }
 
+   /* Detect end-of-track for repeat handling (client-side like WebUI) */
+   bool now_playing = state->playing && !state->paused;
+   bool trigger_repeat = false;
+   int repeat_index = -1;
+
+   if (m->was_playing && !now_playing && m->queue_count > 0) {
+      /* Track ended — check repeat mode */
+      if (m->repeat_mode == 2) {
+         /* Repeat one — replay current track */
+         trigger_repeat = true;
+         repeat_index = m->queue_index;
+      } else if (m->repeat_mode == 1 && m->queue_index == 0 && !state->playing) {
+         /* Repeat all — end of queue, loop back to start */
+         trigger_repeat = true;
+         if (m->shuffle && m->queue_count > 1) {
+            repeat_index = rand() % m->queue_count;
+         } else {
+            repeat_index = 0;
+         }
+      }
+   }
+   m->was_playing = now_playing;
+
    pthread_mutex_unlock(&m->mutex);
 
    /* Sync local playback engine with daemon state.
@@ -2065,6 +2127,13 @@ void ui_music_on_state(ui_music_t *m, const music_state_update_t *state) {
       }
    }
 #endif
+
+   /* Trigger repeat if end-of-track was detected and repeat mode is on */
+   if (trigger_repeat && repeat_index >= 0 && m->ws) {
+      char idx_str[16];
+      snprintf(idx_str, sizeof(idx_str), "%d", repeat_index);
+      ws_client_send_music_control(m->ws, "play_index", idx_str);
+   }
 }
 
 void ui_music_on_position(ui_music_t *m, float position_sec) {
@@ -2102,9 +2171,27 @@ void ui_music_on_library(ui_music_t *m, const music_library_update_t *lib) {
       m->stat_albums = lib->stat_albums;
    }
 
-   m->browse_count = lib->item_count;
-   if (lib->item_count > 0) {
-      memcpy(m->browse_items, lib->items, lib->item_count * sizeof(music_browse_item_t));
+   /* Artist/Album pagination: append if offset > 0, replace if offset == 0 */
+   if (lib->offset > 0 && lib->item_count > 0 &&
+       (lib->browse_type == MUSIC_BROWSE_ARTISTS || lib->browse_type == MUSIC_BROWSE_ALBUMS)) {
+      /* Append mode — add new items after existing ones */
+      int space = MUSIC_MAX_RESULTS - m->browse_count;
+      int to_copy = lib->item_count < space ? lib->item_count : space;
+      if (to_copy > 0) {
+         memcpy(m->browse_items + m->browse_count, lib->items,
+                to_copy * sizeof(music_browse_item_t));
+         m->browse_count += to_copy;
+      }
+      /* Don't reset scroll on append */
+   } else {
+      /* Replace mode — new browse or first page */
+      m->browse_count = lib->item_count;
+      if (lib->item_count > 0) {
+         memcpy(m->browse_items, lib->items, lib->item_count * sizeof(music_browse_item_t));
+      }
+      if (lib->browse_type == MUSIC_BROWSE_ARTISTS || lib->browse_type == MUSIC_BROWSE_ALBUMS) {
+         m->scroll_offset = 0;
+      }
    }
 
    /* Track pagination: append if offset > 0, replace if offset == 0 */

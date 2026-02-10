@@ -255,18 +255,20 @@ typedef struct {
  *
  * @param artists Output array for artist info
  * @param max_artists Maximum number of artists to return
+ * @param offset Number of artists to skip (for pagination)
  * @return Number of artists found, or -1 on error
  */
-int music_db_list_artists_with_stats(music_artist_info_t *artists, int max_artists);
+int music_db_list_artists_with_stats(music_artist_info_t *artists, int max_artists, int offset);
 
 /**
  * @brief List albums with statistics (track count, artist)
  *
  * @param albums Output array for album info
  * @param max_albums Maximum number of albums to return
+ * @param offset Number of albums to skip (for pagination)
  * @return Number of albums found, or -1 on error
  */
-int music_db_list_albums_with_stats(music_album_info_t *albums, int max_albums);
+int music_db_list_albums_with_stats(music_album_info_t *albums, int max_albums, int offset);
 
 /**
  * @brief Get all tracks by a specific artist

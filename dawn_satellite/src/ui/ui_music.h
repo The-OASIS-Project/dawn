@@ -97,7 +97,8 @@ struct ui_music {
 
    /* Shuffle / Repeat */
    bool shuffle;
-   int repeat_mode; /* 0=none, 1=all, 2=one */
+   int repeat_mode;  /* 0=none, 1=all, 2=one */
+   bool was_playing; /* Track previous playing state for repeat end-of-track detection */
 
    /* Texture cache (invalidated on state change) */
    SDL_Texture *title_tex;
