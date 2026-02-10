@@ -36,6 +36,10 @@
 #include "ui/ui_colors.h"
 #include "ws_client.h"
 
+#ifdef HAVE_OPUS
+#include "music_playback.h"
+#endif
+
 /* =============================================================================
  * Constants
  * ============================================================================= */
@@ -596,6 +600,20 @@ static void update_visualizer(ui_music_t *m) {
       return;
    m->viz_last_update = now;
 
+#ifdef HAVE_OPUS
+   if (m->music_pb) {
+      /* Real spectrum data arrives via ui_music_update_spectrum().
+       * When paused/stopped, decay bars to near-zero. */
+      if (!m->playing || m->paused) {
+         for (int i = 0; i < VIZ_BAR_COUNT; i++) {
+            m->viz_targets[i] = 0.03f;
+         }
+      }
+      return;
+   }
+#endif
+
+   /* Fallback: random visualizer when no playback engine (Phase 1 mode) */
    if (m->playing && !m->paused) {
       for (int i = 0; i < VIZ_BAR_COUNT; i++) {
          m->viz_targets[i] = 0.15f + ((float)(rand() % 85)) / 100.0f;
@@ -1299,18 +1317,52 @@ static void render_library(ui_music_t *m, SDL_Renderer *r) {
                             m->panel_x + m->panel_w - 16, row_y + LIST_ROW_HEIGHT - 1);
 
          if (m->label_font) {
-            /* Name */
+            /* "+" button (add all tracks by this artist/album) */
+            int add_x = m->panel_x + m->panel_w - 16 - ADD_BTN_SIZE;
+            int add_y = row_y + (LIST_ROW_HEIGHT - ADD_BTN_SIZE) / 2;
+
+            bool flash = (m->add_flash_row == i && SDL_GetTicks() - m->add_flash_ms < 300);
+            if (flash) {
+               SDL_SetRenderDrawColor(r, ACCENT_R, ACCENT_G, ACCENT_B, 200);
+            } else {
+               SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R + 0x10, COLOR_BG_TERTIARY_G + 0x10,
+                                      COLOR_BG_TERTIARY_B + 0x10, 255);
+            }
+            SDL_Rect abtn = { add_x, add_y, ADD_BTN_SIZE, ADD_BTN_SIZE };
+            SDL_RenderFillRect(r, &abtn);
+
+            if (m->slabel_tex[SLABEL_PLUS]) {
+               if (flash) {
+                  SDL_SetTextureColorMod(m->slabel_tex[SLABEL_PLUS], COLOR_BG_PRIMARY_R,
+                                         COLOR_BG_PRIMARY_G, COLOR_BG_PRIMARY_B);
+               } else {
+                  SDL_SetTextureColorMod(m->slabel_tex[SLABEL_PLUS], ACCENT_R, ACCENT_G, ACCENT_B);
+               }
+               int pw = m->slabel_w[SLABEL_PLUS];
+               int ph = m->slabel_h[SLABEL_PLUS];
+               SDL_Rect pdst = { add_x + (ADD_BTN_SIZE - pw) / 2, add_y + (ADD_BTN_SIZE - ph) / 2,
+                                 pw, ph };
+               SDL_RenderCopy(r, m->slabel_tex[SLABEL_PLUS], NULL, &pdst);
+            }
+
+            /* Name + track count (vertically centered, truncated before "+" btn) */
+            int text_left = m->panel_x + 16;
+            int max_w = add_x - 8 - text_left;
+            if (max_w < 40)
+               max_w = 40;
+
             SDL_Color nc = { COLOR_TEXT_PRIMARY_R, COLOR_TEXT_PRIMARY_G, COLOR_TEXT_PRIMARY_B,
                              255 };
             SDL_Surface *ns = TTF_RenderUTF8_Blended(m->label_font, item->name, nc);
             if (ns) {
                SDL_Texture *ntex = SDL_CreateTextureFromSurface(r, ns);
-               int nw = ns->w;
-               int max_w = m->panel_w - 80;
-               if (nw > max_w)
-                  nw = max_w;
+               int nw = ns->w < max_w ? ns->w : max_w;
+
+               int block_h = ns->h + ns->h;
+               int block_y = row_y + (LIST_ROW_HEIGHT - block_h) / 2;
+
                SDL_Rect nsrc = { 0, 0, nw, ns->h };
-               SDL_Rect ndst = { m->panel_x + 16, row_y + 4, nw, ns->h };
+               SDL_Rect ndst = { text_left, block_y, nw, ns->h };
                SDL_RenderCopy(r, ntex, &nsrc, &ndst);
                SDL_DestroyTexture(ntex);
 
@@ -1322,8 +1374,10 @@ static void render_library(ui_music_t *m, SDL_Renderer *r) {
                SDL_Surface *ss = TTF_RenderUTF8_Blended(m->label_font, sub, sc);
                if (ss) {
                   SDL_Texture *stex = SDL_CreateTextureFromSurface(r, ss);
-                  SDL_Rect sdst = { m->panel_x + 16, row_y + 4 + ns->h, ss->w, ss->h };
-                  SDL_RenderCopy(r, stex, NULL, &sdst);
+                  int sw = ss->w < max_w ? ss->w : max_w;
+                  SDL_Rect ssrc = { 0, 0, sw, ss->h };
+                  SDL_Rect sdst = { text_left, block_y + ns->h, sw, ss->h };
+                  SDL_RenderCopy(r, stex, &ssrc, &sdst);
                   SDL_DestroyTexture(stex);
                   SDL_FreeSurface(ss);
                }
@@ -1703,6 +1757,10 @@ bool ui_music_handle_tap(ui_music_t *m, int x, int y) {
 
       /* Prev button (expanded) */
       if (x >= prev_x && x < prev_right && y >= btn_y && y < btn_y + TRANSPORT_PLAY_SIZE) {
+#ifdef HAVE_OPUS
+         if (m->music_pb)
+            music_playback_flush(m->music_pb);
+#endif
          if (m->ws)
             ws_client_send_music_control(m->ws, "prev", NULL);
          handled = true;
@@ -1721,6 +1779,10 @@ bool ui_music_handle_tap(ui_music_t *m, int x, int y) {
       /* Next button (expanded) */
       else if (x >= next_left && x < next_x + TRANSPORT_BTN_SIZE && y >= btn_y &&
                y < btn_y + TRANSPORT_PLAY_SIZE) {
+#ifdef HAVE_OPUS
+         if (m->music_pb)
+            music_playback_flush(m->music_pb);
+#endif
          if (m->ws)
             ws_client_send_music_control(m->ws, "next", NULL);
          handled = true;
@@ -1752,6 +1814,10 @@ bool ui_music_handle_tap(ui_music_t *m, int x, int y) {
             if (frac > 1.0f)
                frac = 1.0f;
             float seek_pos = frac * m->duration_sec;
+#ifdef HAVE_OPUS
+            if (m->music_pb)
+               music_playback_flush(m->music_pb);
+#endif
             if (m->ws)
                ws_client_send_music_seek(m->ws, seek_pos);
             handled = true;
@@ -1777,6 +1843,10 @@ bool ui_music_handle_tap(ui_music_t *m, int x, int y) {
       if (y >= list_y && !handled) {
          int row_idx = (y - list_y + m->scroll_offset) / LIST_ROW_HEIGHT;
          if (row_idx >= 0 && row_idx < m->queue_count && m->ws) {
+#ifdef HAVE_OPUS
+            if (m->music_pb)
+               music_playback_flush(m->music_pb);
+#endif
             /* Send play_index command */
             char idx_str[16];
             snprintf(idx_str, sizeof(idx_str), "%d", row_idx);
@@ -1823,14 +1893,34 @@ bool ui_music_handle_tap(ui_music_t *m, int x, int y) {
 
             if (m->browse_type == MUSIC_BROWSE_ARTISTS && row_idx >= 0 &&
                 row_idx < m->browse_count && m->ws) {
-               ws_client_send_music_library(m->ws, "tracks_by_artist",
-                                            m->browse_items[row_idx].name);
-               m->scroll_offset = 0;
+               int add_x = m->panel_x + m->panel_w - 16 - ADD_BTN_SIZE;
+               if (x >= add_x) {
+                  /* "+" tapped — add all tracks by this artist */
+                  ws_client_send_music_queue_bulk(m->ws, "add_artist",
+                                                  m->browse_items[row_idx].name);
+                  m->add_flash_row = row_idx;
+                  m->add_flash_ms = SDL_GetTicks();
+               } else {
+                  /* Row tapped — drill into artist tracks */
+                  ws_client_send_music_library(m->ws, "tracks_by_artist",
+                                               m->browse_items[row_idx].name);
+                  m->scroll_offset = 0;
+               }
             } else if (m->browse_type == MUSIC_BROWSE_ALBUMS && row_idx >= 0 &&
                        row_idx < m->browse_count && m->ws) {
-               ws_client_send_music_library(m->ws, "tracks_by_album",
-                                            m->browse_items[row_idx].name);
-               m->scroll_offset = 0;
+               int add_x = m->panel_x + m->panel_w - 16 - ADD_BTN_SIZE;
+               if (x >= add_x) {
+                  /* "+" tapped — add all tracks from this album */
+                  ws_client_send_music_queue_bulk(m->ws, "add_album",
+                                                  m->browse_items[row_idx].name);
+                  m->add_flash_row = row_idx;
+                  m->add_flash_ms = SDL_GetTicks();
+               } else {
+                  /* Row tapped — drill into album tracks */
+                  ws_client_send_music_library(m->ws, "tracks_by_album",
+                                               m->browse_items[row_idx].name);
+                  m->scroll_offset = 0;
+               }
             } else if ((m->browse_type == MUSIC_BROWSE_TRACKS ||
                         m->browse_type == MUSIC_BROWSE_BY_ARTIST ||
                         m->browse_type == MUSIC_BROWSE_BY_ALBUM) &&
@@ -1967,4 +2057,23 @@ bool ui_music_is_playing(ui_music_t *m) {
    if (!m)
       return false;
    return m->playing && !m->paused;
+}
+
+void ui_music_set_playback(ui_music_t *m, struct music_playback *pb) {
+   if (!m)
+      return;
+   m->music_pb = pb;
+   m->volume = 80;
+}
+
+void ui_music_update_spectrum(ui_music_t *m, const volatile float *spectrum64) {
+   if (!m || !spectrum64)
+      return;
+
+   pthread_mutex_lock(&m->mutex);
+   for (int i = 0; i < MUSIC_VIZ_BAR_COUNT; i++) {
+      /* Average pairs of adjacent bins for 32 bars from 64 spectrum bins */
+      m->viz_targets[i] = (spectrum64[i * 2] + spectrum64[i * 2 + 1]) / 2.0f;
+   }
+   pthread_mutex_unlock(&m->mutex);
 }

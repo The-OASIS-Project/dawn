@@ -79,6 +79,9 @@ struct ws_client {
    ws_music_library_cb_t music_library_cb;
    void *music_cb_data;
 
+   /* Session token for music WebSocket auth (32 hex chars + null) */
+   char session_token[33];
+
    /* Error message */
    char error_msg[256];
 
@@ -315,6 +318,17 @@ static void handle_message(ws_client_t *client, const char *msg, size_t len) {
                   client->identity.reconnect_secret[sizeof(client->identity.reconnect_secret) - 1] =
                       '\0';
                   LOG_INFO("Received reconnect secret: %.8s...", secret);
+               }
+            }
+
+            /* Extract session token for music WebSocket auth */
+            struct json_object *token_obj;
+            if (json_object_object_get_ex(payload, "session_token", &token_obj)) {
+               const char *token = json_object_get_string(token_obj);
+               if (token && token[0]) {
+                  strncpy(client->session_token, token, sizeof(client->session_token) - 1);
+                  client->session_token[sizeof(client->session_token) - 1] = '\0';
+                  LOG_INFO("Received session token: %.8s...", token);
                }
             }
 
@@ -1229,6 +1243,35 @@ int ws_client_send_music_queue(ws_client_t *client,
 
    LOG_INFO("Music queue: %s", action);
    return ret;
+}
+
+int ws_client_send_music_queue_bulk(ws_client_t *client, const char *action, const char *name) {
+   if (!client || !action || !name || !client->registered)
+      return -1;
+
+   struct json_object *msg = json_object_new_object();
+   json_object_object_add(msg, "type", json_object_new_string("music_queue"));
+
+   struct json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "action", json_object_new_string(action));
+
+   /* add_artist expects "artist", add_album expects "album" */
+   const char *key = (strcmp(action, "add_artist") == 0) ? "artist" : "album";
+   json_object_object_add(payload, key, json_object_new_string(name));
+   json_object_object_add(msg, "payload", payload);
+
+   int ret = send_json(client, msg);
+   json_object_put(msg);
+
+   LOG_INFO("Music queue: %s '%s'", action, name);
+   return ret;
+}
+
+const char *ws_client_get_session_token(ws_client_t *client) {
+   if (!client || client->session_token[0] == '\0') {
+      return NULL;
+   }
+   return client->session_token;
 }
 
 int ws_client_send_music_subscribe(ws_client_t *client) {

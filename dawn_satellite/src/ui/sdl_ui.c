@@ -1074,6 +1074,14 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
       int full_x = ui->width - MUSIC_PANEL_WIDTH;
       int anim_x = ui->width - (int)(mus_off * MUSIC_PANEL_WIDTH);
       ui->music.panel_x = anim_x > full_x ? anim_x : full_x;
+
+      /* Feed spectrum from ALSA playback to music visualizer while music plays.
+       * audio_playback_t::spectrum[] is updated per-chunk by play_stereo(). */
+      if (ui_music_is_playing(&ui->music) && ui->voice_ctx) {
+         float spectrum[SPECTRUM_BINS];
+         voice_processing_get_playback_spectrum(ui->voice_ctx, spectrum, SPECTRUM_BINS);
+         ui_music_update_spectrum(&ui->music, spectrum);
+      }
       ui_music_render(&ui->music, r);
    }
 
@@ -1335,3 +1343,11 @@ void sdl_ui_set_ws_client(sdl_ui_t *ui, struct ws_client *client) {
    ws_client_set_music_callbacks(client, music_state_cb, music_position_cb, music_queue_cb,
                                  music_library_cb, ui);
 }
+
+#ifdef HAVE_OPUS
+void sdl_ui_set_music_playback(sdl_ui_t *ui, struct music_playback *pb) {
+   if (!ui)
+      return;
+   ui_music_set_playback(&ui->music, pb);
+}
+#endif

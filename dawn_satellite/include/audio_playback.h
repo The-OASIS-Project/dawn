@@ -18,6 +18,7 @@
 #ifndef AUDIO_PLAYBACK_H
 #define AUDIO_PLAYBACK_H
 
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -43,6 +44,7 @@ typedef struct {
    int initialized;                        /* Initialization state */
    volatile float amplitude;               /* Current RMS amplitude 0.0-1.0 (updated per chunk) */
    volatile float spectrum[SPECTRUM_BINS]; /* FFT magnitude bins 0.0-1.0 (updated per chunk) */
+   pthread_mutex_t alsa_mutex;             /* Guards all snd_pcm_* calls */
 } audio_playback_t;
 
 /**
@@ -95,6 +97,25 @@ int audio_playback_play_wav(audio_playback_t *ctx,
                             const uint8_t *wav_data,
                             size_t wav_size,
                             atomic_int *stop_flag);
+
+/**
+ * Play stereo PCM audio at native rate (48kHz)
+ *
+ * Takes interleaved stereo int16 at 48kHz — no resampling, no mono conversion.
+ * Does NOT call snd_pcm_prepare() — caller must prepare once; only re-prepares
+ * on underrun recovery. Acquires alsa_mutex for each period write.
+ * Updates spectrum and amplitude for visualizer.
+ *
+ * @param ctx Pointer to playback context
+ * @param stereo_samples Interleaved stereo int16 samples at 48kHz
+ * @param num_frames Number of frames (each frame = 2 samples L+R)
+ * @param stop_flag Optional flag to stop playback when set
+ * @return Number of frames written, or -1 on error
+ */
+int audio_playback_play_stereo(audio_playback_t *ctx,
+                               const int16_t *stereo_samples,
+                               size_t num_frames,
+                               atomic_int *stop_flag);
 
 /**
  * Stop any ongoing playback

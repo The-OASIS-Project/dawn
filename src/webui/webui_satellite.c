@@ -509,6 +509,16 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
       free(session_secret);
    }
 
+   /* Generate session token for music WebSocket auth (same pattern as WebUI init).
+    * Satellites need this to authenticate to the music streaming port (main_port + 1). */
+   char music_token[WEBUI_SESSION_TOKEN_LEN];
+   if (generate_session_token(music_token) == 0) {
+      register_token(music_token, session->session_id);
+      strncpy(conn->session_token, music_token, WEBUI_SESSION_TOKEN_LEN - 1);
+      conn->session_token[WEBUI_SESSION_TOKEN_LEN - 1] = '\0';
+      json_object_object_add(resp_payload, "session_token", json_object_new_string(music_token));
+   }
+
    json_object_object_add(resp_payload, "message",
                           json_object_new_string("Satellite registered successfully"));
 

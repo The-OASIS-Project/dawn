@@ -267,6 +267,21 @@ time_t voice_processing_get_connect_time(voice_ctx_t *ctx);
  */
 void voice_processing_get_playback_spectrum(const voice_ctx_t *ctx, float *out, int count);
 
+#ifdef HAVE_OPUS
+struct music_playback;
+
+/**
+ * @brief Set music playback for TTS arbitration
+ *
+ * When set, voice processing will pause music playback during TTS output
+ * and resume it when returning to silence.
+ *
+ * @param ctx Voice processing context
+ * @param pb Music playback engine (not owned)
+ */
+void voice_processing_set_music_playback(voice_ctx_t *ctx, struct music_playback *pb);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

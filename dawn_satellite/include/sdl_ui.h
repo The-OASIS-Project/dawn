@@ -118,6 +118,21 @@ void sdl_ui_add_transcript(sdl_ui_t *ui, const char *role, const char *text);
  */
 void sdl_ui_set_ws_client(sdl_ui_t *ui, struct ws_client *client);
 
+#ifdef HAVE_OPUS
+struct music_playback;
+
+/**
+ * @brief Set music playback engine on the SDL UI
+ *
+ * Wires music playback into the music panel for volume control,
+ * buffer flush on transport actions, and visualizer spectrum.
+ *
+ * @param ui UI context
+ * @param pb Music playback engine
+ */
+void sdl_ui_set_music_playback(sdl_ui_t *ui, struct music_playback *pb);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

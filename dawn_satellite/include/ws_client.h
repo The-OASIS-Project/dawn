@@ -417,6 +417,26 @@ int ws_client_send_music_queue(ws_client_t *client,
                                int index);
 
 /**
+ * @brief Send add_artist or add_album queue command
+ *
+ * @param client Client context
+ * @param action "add_artist" or "add_album"
+ * @param name Artist or album name
+ * @return 0 on success, -1 on failure
+ */
+int ws_client_send_music_queue_bulk(ws_client_t *client, const char *action, const char *name);
+
+/**
+ * @brief Get session token received from daemon during registration
+ *
+ * Used to authenticate to the music streaming WebSocket (port+1).
+ *
+ * @param client Client context
+ * @return Session token string (32 hex chars) or NULL if not available
+ */
+const char *ws_client_get_session_token(ws_client_t *client);
+
+/**
  * @brief Subscribe to music state updates from daemon
  *
  * @param client Client context

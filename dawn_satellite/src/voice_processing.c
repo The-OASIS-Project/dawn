@@ -32,6 +32,10 @@
 #include "satellite_state.h"
 #include "ws_client.h"
 
+#ifdef HAVE_OPUS
+#include "music_playback.h"
+#endif
+
 /* Common library includes (only when local processing enabled) */
 #ifdef HAVE_VAD_SILERO
 #include "asr/vad_silero.h"
@@ -186,6 +190,12 @@ struct voice_ctx {
 
    /* WebSocket client for status detail access */
    ws_client_t *ws;
+
+   /* Music playback for TTS arbitration (pause/resume around TTS) */
+#ifdef HAVE_OPUS
+   struct music_playback *music_pb;
+   bool music_was_playing; /* True if music was paused for TTS */
+#endif
 
    /* Touch-triggered flags (set from UI thread, consumed in voice loop) */
    atomic_bool manual_wake_requested;
@@ -802,6 +812,15 @@ void voice_processing_get_playback_spectrum(const voice_ctx_t *ctx, float *out, 
    }
 }
 
+#ifdef HAVE_OPUS
+void voice_processing_set_music_playback(voice_ctx_t *ctx, struct music_playback *pb) {
+   if (ctx) {
+      ctx->music_pb = pb;
+      ctx->music_was_playing = false;
+   }
+}
+#endif
+
 bool voice_processing_is_response_complete(voice_ctx_t *ctx) {
    return ctx ? atomic_load(&ctx->response_complete) : false;
 }
@@ -1032,6 +1051,22 @@ int voice_processing_loop(voice_ctx_t *ctx,
        * We no longer call ws_client_service() here - callbacks happen asynchronously */
 
       clock_gettime(CLOCK_MONOTONIC, &t1);
+
+#ifdef HAVE_OPUS
+      /* Music/TTS arbitration: pause music when TTS is about to play,
+       * resume when returning to silence. Checked every iteration. */
+      if (ctx->music_pb) {
+         bool tts_active = (ctx->state == VOICE_STATE_WAITING ||
+                            ctx->state == VOICE_STATE_SPEAKING);
+         if (tts_active && !ctx->music_was_playing && music_playback_is_playing(ctx->music_pb)) {
+            music_playback_pause(ctx->music_pb);
+            ctx->music_was_playing = true;
+         } else if (!tts_active && ctx->music_was_playing) {
+            music_playback_resume(ctx->music_pb);
+            ctx->music_was_playing = false;
+         }
+      }
+#endif
 
       switch (ctx->state) {
          case VOICE_STATE_SILENCE:

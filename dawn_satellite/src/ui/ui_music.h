@@ -37,8 +37,9 @@
 extern "C" {
 #endif
 
-/* Forward declaration for ws_client */
+/* Forward declarations */
 struct ws_client;
+struct music_playback;
 
 /* Visualizer bar count (used in struct definition) */
 #define MUSIC_VIZ_BAR_COUNT 32
@@ -148,6 +149,10 @@ struct ui_music {
 
    /* WS client for sending commands */
    struct ws_client *ws;
+
+   /* Music playback engine (for volume, flush, visualizer) */
+   struct music_playback *music_pb;
+   int volume;
 };
 
 typedef struct ui_music ui_music_t;
@@ -200,6 +205,17 @@ void ui_music_set_ws_client(ui_music_t *m, struct ws_client *client);
  * @brief Check if music is currently playing (for icon color in status bar)
  */
 bool ui_music_is_playing(ui_music_t *m);
+
+/**
+ * @brief Set music playback engine for volume, flush, and visualizer
+ */
+void ui_music_set_playback(ui_music_t *m, struct music_playback *pb);
+
+/**
+ * @brief Update visualizer spectrum from playback engine
+ * Call from SDL render loop when music is playing.
+ */
+void ui_music_update_spectrum(ui_music_t *m, const volatile float *spectrum64);
 
 #ifdef __cplusplus
 }

@@ -194,6 +194,7 @@ int audio_playback_init(audio_playback_t *ctx, const char *device) {
 
    ctx->handle = handle;
    ctx->initialized = 1;
+   pthread_mutex_init(&ctx->alsa_mutex, NULL);
 
    /* Pre-compute Goertzel DFT coefficients for spectrum visualization */
    init_goertzel_tables(ctx->sample_rate);
@@ -206,18 +207,23 @@ int audio_playback_init(audio_playback_t *ctx, const char *device) {
 
 void audio_playback_cleanup(audio_playback_t *ctx) {
    if (ctx && ctx->handle) {
+      pthread_mutex_lock(&ctx->alsa_mutex);
       snd_pcm_drain((snd_pcm_t *)ctx->handle);
       snd_pcm_close((snd_pcm_t *)ctx->handle);
       ctx->handle = NULL;
       ctx->initialized = 0;
+      pthread_mutex_unlock(&ctx->alsa_mutex);
+      pthread_mutex_destroy(&ctx->alsa_mutex);
       LOG_INFO("Playback cleaned up");
    }
 }
 
 void audio_playback_stop(audio_playback_t *ctx) {
    if (ctx && ctx->handle) {
+      pthread_mutex_lock(&ctx->alsa_mutex);
       snd_pcm_drop((snd_pcm_t *)ctx->handle);
       snd_pcm_prepare((snd_pcm_t *)ctx->handle);
+      pthread_mutex_unlock(&ctx->alsa_mutex);
    }
 }
 
@@ -233,7 +239,9 @@ int audio_playback_play(audio_playback_t *ctx,
    snd_pcm_t *handle = (snd_pcm_t *)ctx->handle;
 
    /* Prepare device */
+   pthread_mutex_lock(&ctx->alsa_mutex);
    int err = snd_pcm_prepare(handle);
+   pthread_mutex_unlock(&ctx->alsa_mutex);
    if (err < 0) {
       LOG_ERROR("Cannot prepare for playback: %s", snd_strerror(err));
       return -1;
@@ -306,15 +314,19 @@ int audio_playback_play(audio_playback_t *ctx,
          compute_spectrum(ctx, mono_float, n);
       }
 
-      /* Write to ALSA */
+      /* Write to ALSA (mutex protects PCM handle) */
+      pthread_mutex_lock(&ctx->alsa_mutex);
       snd_pcm_sframes_t frames = snd_pcm_writei(handle, out_buf, n);
+      if (frames == -EPIPE) {
+         LOG_ERROR("Buffer underrun, recovering...");
+         snd_pcm_prepare(handle);
+         pthread_mutex_unlock(&ctx->alsa_mutex);
+         continue;
+      }
+      pthread_mutex_unlock(&ctx->alsa_mutex);
 
       if (frames < 0) {
-         if (frames == -EPIPE) {
-            LOG_ERROR("Buffer underrun, recovering...");
-            snd_pcm_prepare(handle);
-            continue;
-         } else if (frames == -EAGAIN) {
+         if (frames == -EAGAIN) {
             usleep(1000);
             continue;
          } else {
@@ -330,11 +342,13 @@ int audio_playback_play(audio_playback_t *ctx,
    free(out_buf);
 
    /* Drain remaining audio (skip if stopped - drain blocks until buffer empties) */
+   pthread_mutex_lock(&ctx->alsa_mutex);
    if (stop_flag && atomic_load(stop_flag)) {
       snd_pcm_drop(handle);
    } else {
       snd_pcm_drain(handle);
    }
+   pthread_mutex_unlock(&ctx->alsa_mutex);
 
    ctx->amplitude = 0.0f;
    for (int k = 0; k < SPECTRUM_BINS; k++) {
@@ -386,4 +400,70 @@ int audio_playback_play_wav(audio_playback_t *ctx,
    }
 
    return audio_playback_play(ctx, pcm_data, num_samples, sample_rate, stop_flag);
+}
+
+int audio_playback_play_stereo(audio_playback_t *ctx,
+                               const int16_t *stereo_samples,
+                               size_t num_frames,
+                               atomic_int *stop_flag) {
+   if (!ctx || !ctx->initialized || !stereo_samples || num_frames == 0) {
+      return -1;
+   }
+
+   snd_pcm_t *handle = (snd_pcm_t *)ctx->handle;
+   size_t chunk = ctx->period_size;
+   size_t written = 0;
+
+   while (written < num_frames) {
+      if (stop_flag && atomic_load(stop_flag)) {
+         break;
+      }
+
+      size_t n = (num_frames - written > chunk) ? chunk : (num_frames - written);
+      const int16_t *buf = stereo_samples + written * 2;
+
+      /* Compute spectrum from left channel for visualizer.
+       * Decimate: only compute every SPECTRUM_DECIMATE periods (~100ms)
+       * to avoid wasting CPU — UI only consumes at ~8 Hz (VIZ_UPDATE_MS=120). */
+      {
+         static unsigned int spectrum_counter = 0;
+#define SPECTRUM_DECIMATE 9 /* ~96ms at 512 frames / 48kHz period */
+         if (++spectrum_counter >= SPECTRUM_DECIMATE) {
+            spectrum_counter = 0;
+            float mono_float[n]; /* VLA — period_size typically 512 */
+            float sum_sq = 0.0f;
+            for (size_t j = 0; j < n; j++) {
+               float s = buf[2 * j] / 32768.0f;
+               mono_float[j] = s;
+               sum_sq += s * s;
+            }
+            ctx->amplitude = sqrtf(sum_sq / (float)n);
+            compute_spectrum(ctx, mono_float, n);
+         }
+      }
+
+      /* Write to ALSA (mutex protects PCM handle) */
+      pthread_mutex_lock(&ctx->alsa_mutex);
+      snd_pcm_sframes_t frames = snd_pcm_writei(handle, buf, n);
+      if (frames == -EPIPE) {
+         LOG_ERROR("Stereo playback underrun, recovering...");
+         snd_pcm_prepare(handle);
+         pthread_mutex_unlock(&ctx->alsa_mutex);
+         continue;
+      }
+      pthread_mutex_unlock(&ctx->alsa_mutex);
+
+      if (frames < 0) {
+         if (frames == -EAGAIN) {
+            usleep(1000);
+            continue;
+         }
+         LOG_ERROR("Stereo write error: %s", snd_strerror(frames));
+         return -1;
+      }
+
+      written += (size_t)frames;
+   }
+
+   return (int)written;
 }

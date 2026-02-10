@@ -43,6 +43,11 @@
 #include "sdl_ui.h"
 #endif
 
+#ifdef HAVE_OPUS
+#include "music_playback.h"
+#include "music_stream.h"
+#endif
+
 #ifdef ENABLE_NEOPIXEL
 #include "neopixel.h"
 #endif
@@ -292,6 +297,41 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
       printf("Session secret saved for future reconnections\n");
    }
 
+#ifdef HAVE_OPUS
+   /* Create music playback + streaming after successful registration */
+   music_playback_t *music_pb = NULL;
+   music_stream_t *music_ws = NULL;
+   if (ctx->audio_playback && ((audio_playback_t *)ctx->audio_playback)->initialized) {
+      const char *stok = ws_client_get_session_token(ws);
+      if (stok) {
+         music_pb = music_playback_create((audio_playback_t *)ctx->audio_playback);
+         if (music_pb) {
+            music_ws = music_stream_create(config->server.host, config->server.port,
+                                           config->server.ssl, config->server.ssl_verify, stok,
+                                           music_pb);
+            if (music_ws) {
+               if (music_stream_connect(music_ws) == 0) {
+                  printf("Music streaming connected\n");
+               } else {
+                  printf("Music streaming connection failed (will retry)\n");
+               }
+            }
+#ifdef ENABLE_SDL_UI
+            if (g_sdl_ui && music_pb) {
+               sdl_ui_set_music_playback(g_sdl_ui, music_pb);
+            }
+#endif
+            /* Wire music into voice processing for TTS arbitration */
+            if (voice_ctx && music_pb) {
+               voice_processing_set_music_playback(voice_ctx, music_pb);
+            }
+         }
+      } else {
+         printf("No session token received — music streaming disabled\n");
+      }
+   }
+#endif
+
    printf("\n=== DAWN Satellite Ready (DAP2 Mode) ===\n");
    printf("UUID: %s\n", identity.uuid);
    printf("Name: %s\n", identity.name);
@@ -322,6 +362,12 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
          voice_processing_speak_offline(voice_ctx, ctx);
       }
 
+#ifdef HAVE_OPUS
+      if (music_ws)
+         music_stream_destroy(music_ws);
+      if (music_pb)
+         music_playback_destroy(music_pb);
+#endif
       return result;
    }
 
@@ -421,6 +467,12 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
       usleep(10000); /* 10ms */
    }
 
+#ifdef HAVE_OPUS
+   if (music_ws)
+      music_stream_destroy(music_ws);
+   if (music_pb)
+      music_playback_destroy(music_pb);
+#endif
    return 0;
 }
 
