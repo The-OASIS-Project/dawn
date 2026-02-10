@@ -403,6 +403,22 @@ int ws_client_send_music_seek(ws_client_t *client, float position_sec);
 int ws_client_send_music_library(ws_client_t *client, const char *type, const char *filter);
 
 /**
+ * @brief Send paginated music library browse request
+ *
+ * @param client Client context
+ * @param type Browse type (typically "tracks")
+ * @param filter Filter value (artist name, album name, or NULL)
+ * @param offset Number of items to skip (0 = start)
+ * @param limit Maximum items to return
+ * @return 0 on success, -1 on failure
+ */
+int ws_client_send_music_library_paged(ws_client_t *client,
+                                       const char *type,
+                                       const char *filter,
+                                       int offset,
+                                       int limit);
+
+/**
  * @brief Send music queue command (list, add, remove, clear)
  *
  * @param client Client context

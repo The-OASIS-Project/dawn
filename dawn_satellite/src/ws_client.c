@@ -585,6 +585,9 @@ static void parse_music_library(struct json_object *payload, music_library_updat
       else
          lib->browse_type = MUSIC_BROWSE_BY_ALBUM;
 
+      lib->total_count = json_get_int(payload, "total_count");
+      lib->offset = json_get_int(payload, "offset");
+
       struct json_object *arr;
       if (json_object_object_get_ex(payload, "tracks", &arr) &&
           json_object_is_type(arr, json_type_array)) {
@@ -1218,6 +1221,37 @@ int ws_client_send_music_library(ws_client_t *client, const char *type, const ch
    return ret;
 }
 
+int ws_client_send_music_library_paged(ws_client_t *client,
+                                       const char *type,
+                                       const char *filter,
+                                       int offset,
+                                       int limit) {
+   if (!client || !type || !client->registered)
+      return -1;
+
+   struct json_object *msg = json_object_new_object();
+   json_object_object_add(msg, "type", json_object_new_string("music_library"));
+
+   struct json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "type", json_object_new_string(type));
+   json_object_object_add(payload, "offset", json_object_new_int(offset));
+   json_object_object_add(payload, "limit", json_object_new_int(limit));
+   if (filter) {
+      if (strcmp(type, "tracks_by_artist") == 0) {
+         json_object_object_add(payload, "artist", json_object_new_string(filter));
+      } else if (strcmp(type, "tracks_by_album") == 0) {
+         json_object_object_add(payload, "album", json_object_new_string(filter));
+      }
+   }
+   json_object_object_add(msg, "payload", payload);
+
+   int ret = send_json(client, msg);
+   json_object_put(msg);
+
+   LOG_INFO("Music library browse: %s (offset=%d limit=%d)", type, offset, limit);
+   return ret;
+}
+
 int ws_client_send_music_queue(ws_client_t *client,
                                const char *action,
                                const char *path,
@@ -1250,7 +1284,7 @@ int ws_client_send_music_queue_bulk(ws_client_t *client, const char *action, con
       return -1;
 
    struct json_object *msg = json_object_new_object();
-   json_object_object_add(msg, "type", json_object_new_string("music_queue"));
+   json_object_object_add(msg, "type", json_object_new_string("music_control"));
 
    struct json_object *payload = json_object_new_object();
    json_object_object_add(payload, "action", json_object_new_string(action));

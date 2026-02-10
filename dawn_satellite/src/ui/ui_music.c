@@ -1476,10 +1476,22 @@ static void render_library(ui_music_t *m, SDL_Renderer *r) {
                SDL_RenderCopy(r, ttex, &tsrc, &tdst);
                SDL_DestroyTexture(ttex);
 
-               /* Artist */
+               /* Artist - Album subtitle line */
+               char subtitle[540];
+               bool has_artist = track->artist[0] != '\0';
+               bool has_album = track->album[0] != '\0';
+               if (has_artist && has_album)
+                  snprintf(subtitle, sizeof(subtitle), "%s - %s", track->artist, track->album);
+               else if (has_artist)
+                  snprintf(subtitle, sizeof(subtitle), "%s", track->artist);
+               else if (has_album)
+                  snprintf(subtitle, sizeof(subtitle), "%s", track->album);
+               else
+                  snprintf(subtitle, sizeof(subtitle), "Unknown");
+
                SDL_Color ac = { COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
                                 COLOR_TEXT_SECONDARY_B, 255 };
-               SDL_Surface *as = TTF_RenderUTF8_Blended(m->label_font, track->artist, ac);
+               SDL_Surface *as = TTF_RenderUTF8_Blended(m->label_font, subtitle, ac);
                if (as) {
                   SDL_Texture *atex = SDL_CreateTextureFromSurface(r, as);
                   int aw = as->w < max_w ? as->w : max_w;
@@ -1525,6 +1537,14 @@ int ui_music_init(ui_music_t *m,
    m->panel_h = h;
    m->active_tab = MUSIC_TAB_PLAYING;
    m->add_flash_row = -1;
+
+   /* Allocate browse track buffer (supports pagination up to 500 tracks) */
+   m->browse_tracks_cap = 500;
+   m->browse_tracks = calloc(m->browse_tracks_cap, sizeof(music_track_t));
+   if (!m->browse_tracks) {
+      LOG_ERROR("Music panel: failed to allocate browse tracks buffer");
+      return 1;
+   }
 
    m->label_font = load_font(font_dir, "IBMPlexMono-Regular.ttf", FALLBACK_MONO_FONT,
                              LABEL_FONT_SIZE);
@@ -1585,6 +1605,10 @@ void ui_music_cleanup(ui_music_t *m) {
       TTF_CloseFont(m->body_font);
       m->body_font = NULL;
    }
+
+   free(m->browse_tracks);
+   m->browse_tracks = NULL;
+   m->browse_tracks_cap = 0;
 
    pthread_mutex_destroy(&m->mutex);
 }
@@ -1771,7 +1795,7 @@ bool ui_music_handle_tap(ui_music_t *m, int x, int y) {
             if (m->playing && !m->paused) {
                ws_client_send_music_control(m->ws, "pause", NULL);
             } else {
-               ws_client_send_music_control(m->ws, "resume", NULL);
+               ws_client_send_music_control(m->ws, "play", NULL);
             }
          }
          handled = true;
@@ -1866,7 +1890,7 @@ bool ui_music_handle_tap(ui_music_t *m, int x, int y) {
 
          if (y >= stats_y && y < stats_y + box_h && m->ws) {
             if (x >= box_x && x < box_x + box_w) {
-               ws_client_send_music_library(m->ws, "tracks", NULL);
+               ws_client_send_music_library_paged(m->ws, "tracks", NULL, 0, MUSIC_MAX_RESULTS);
             } else if (x >= box_x + box_w + 8 && x < box_x + 2 * box_w + 8) {
                ws_client_send_music_library(m->ws, "artists", NULL);
             } else if (x >= box_x + 2 * (box_w + 8) && x < box_x + 3 * box_w + 16) {
@@ -1962,6 +1986,20 @@ void ui_music_scroll(ui_music_t *m, int dy) {
       max_scroll = 0;
    if (m->scroll_offset > max_scroll)
       m->scroll_offset = max_scroll;
+
+   /* Load more tracks when scrolling near the bottom */
+   if (m->active_tab == MUSIC_TAB_LIBRARY && m->browse_type == MUSIC_BROWSE_TRACKS && m->ws &&
+       !m->browse_loading_more && m->browse_track_count < m->browse_total_count &&
+       m->browse_track_count < m->browse_tracks_cap) {
+      int visible_h = m->panel_h - TAB_HEIGHT - 44;
+      int bottom_visible = m->scroll_offset + visible_h;
+      int load_trigger = m->total_list_height - visible_h; /* One screen from bottom */
+      if (bottom_visible >= load_trigger && load_trigger > 0) {
+         m->browse_loading_more = true;
+         ws_client_send_music_library_paged(m->ws, "tracks", NULL, m->browse_track_count,
+                                            MUSIC_MAX_RESULTS);
+      }
+   }
 }
 
 /* =============================================================================
@@ -2033,12 +2071,31 @@ void ui_music_on_library(ui_music_t *m, const music_library_update_t *lib) {
       memcpy(m->browse_items, lib->items, lib->item_count * sizeof(music_browse_item_t));
    }
 
-   m->browse_track_count = lib->track_count;
-   if (lib->track_count > 0) {
-      memcpy(m->browse_tracks, lib->tracks, lib->track_count * sizeof(music_track_t));
+   /* Track pagination: append if offset > 0, replace if offset == 0 */
+   if (lib->offset > 0 && lib->track_count > 0 && m->browse_tracks) {
+      /* Append mode — add new tracks after existing ones */
+      int space = m->browse_tracks_cap - m->browse_track_count;
+      int to_copy = lib->track_count < space ? lib->track_count : space;
+      if (to_copy > 0) {
+         memcpy(m->browse_tracks + m->browse_track_count, lib->tracks,
+                to_copy * sizeof(music_track_t));
+         m->browse_track_count += to_copy;
+      }
+      /* Don't reset scroll on append */
+   } else {
+      /* Replace mode — new browse or first page */
+      int to_copy = lib->track_count;
+      if (to_copy > m->browse_tracks_cap)
+         to_copy = m->browse_tracks_cap;
+      m->browse_track_count = to_copy;
+      if (to_copy > 0 && m->browse_tracks) {
+         memcpy(m->browse_tracks, lib->tracks, to_copy * sizeof(music_track_t));
+      }
+      m->scroll_offset = 0;
    }
 
-   m->scroll_offset = 0;
+   m->browse_total_count = lib->total_count;
+   m->browse_loading_more = false;
 
    pthread_mutex_unlock(&m->mutex);
 }

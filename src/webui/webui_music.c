@@ -1565,14 +1565,34 @@ void handle_music_library(ws_connection_t *conn, struct json_object *payload) {
       json_object_object_add(resp_payload, "album_count", json_object_new_int(stats.album_count));
 
    } else if (strcmp(browse_type, "tracks") == 0) {
-      /* List all tracks (limit 200, use search for larger libraries) */
-      music_search_result_t *tracks = malloc(200 * sizeof(music_search_result_t));
+      /* Paginated track listing (default limit=50, max=200) */
+      int limit = 50;
+      int offset = 0;
+
+      struct json_object *limit_obj, *offset_obj;
+      if (payload && json_object_object_get_ex(payload, "limit", &limit_obj))
+         limit = json_object_get_int(limit_obj);
+      if (payload && json_object_object_get_ex(payload, "offset", &offset_obj))
+         offset = json_object_get_int(offset_obj);
+
+      if (limit < 1)
+         limit = 1;
+      if (limit > 200)
+         limit = 200;
+      if (offset < 0)
+         offset = 0;
+
+      music_search_result_t *tracks = malloc(limit * sizeof(music_search_result_t));
       if (!tracks) {
          webui_music_send_error(conn, "MEMORY_ERROR", "Failed to allocate track list");
          json_object_put(response);
          return;
       }
-      int count = music_db_list(tracks, 200);
+      int count = music_db_list_paged(tracks, limit, offset);
+
+      /* Include total count for pagination */
+      music_db_stats_t stats;
+      music_db_get_stats(&stats);
 
       struct json_object *tracks_arr = json_object_new_array();
       for (int i = 0; i < count; i++) {
@@ -1586,6 +1606,8 @@ void handle_music_library(ws_connection_t *conn, struct json_object *payload) {
       }
       json_object_object_add(resp_payload, "tracks", tracks_arr);
       json_object_object_add(resp_payload, "count", json_object_new_int(count));
+      json_object_object_add(resp_payload, "total_count", json_object_new_int(stats.track_count));
+      json_object_object_add(resp_payload, "offset", json_object_new_int(offset));
       free(tracks);
 
    } else if (strcmp(browse_type, "artists") == 0) {

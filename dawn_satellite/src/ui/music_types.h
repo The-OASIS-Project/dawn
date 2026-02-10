@@ -103,6 +103,8 @@ typedef struct {
    int item_count;
    music_track_t tracks[MUSIC_MAX_RESULTS];
    int track_count;
+   int total_count; /* Total tracks in DB (for pagination) */
+   int offset;      /* Offset of this page */
 } music_library_update_t;
 
 #ifdef __cplusplus

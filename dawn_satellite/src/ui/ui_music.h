@@ -74,8 +74,11 @@ struct ui_music {
    music_browse_type_t browse_type;
    music_browse_item_t browse_items[MUSIC_MAX_RESULTS];
    int browse_count;
-   music_track_t browse_tracks[MUSIC_MAX_RESULTS];
+   music_track_t *browse_tracks; /* Dynamically allocated, capacity = browse_tracks_cap */
    int browse_track_count;
+   int browse_tracks_cap;
+   int browse_total_count;   /* Total tracks available on server */
+   bool browse_loading_more; /* Prevent duplicate load-more requests */
 
    /* Library stats */
    int stat_tracks;

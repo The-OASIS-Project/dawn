@@ -197,6 +197,18 @@ int music_db_get_by_path(const char *path, music_search_result_t *result);
 int music_db_list(music_search_result_t *results, int max_results);
 
 /**
+ * @brief List tracks with pagination
+ *
+ * Returns tracks ordered by artist, album, title with offset support.
+ *
+ * @param results Output array for results
+ * @param max_results Maximum number of results to return
+ * @param offset Number of tracks to skip (for pagination, 0 = start)
+ * @return Number of results found, or -1 on error
+ */
+int music_db_list_paged(music_search_result_t *results, int max_results, int offset);
+
+/**
  * @brief List unique artists in the database
  *
  * Returns distinct artist names, ordered alphabetically.
