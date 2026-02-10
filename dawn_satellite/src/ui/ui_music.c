@@ -45,9 +45,9 @@
  * ============================================================================= */
 
 #define TAB_HEIGHT 44
-#define VIZ_HEIGHT 120
+#define VIZ_HEIGHT 180
 #define VIZ_BAR_COUNT MUSIC_VIZ_BAR_COUNT
-#define VIZ_UPDATE_MS 120
+#define VIZ_UPDATE_MS 50
 #define TRANSPORT_BTN_SIZE 48
 #define TRANSPORT_PLAY_SIZE 56
 #define TOGGLE_BTN_SIZE 44
@@ -628,12 +628,15 @@ static void update_visualizer(ui_music_t *m) {
 static void render_visualizer(ui_music_t *m, SDL_Renderer *r, int y) {
    update_visualizer(m);
 
-   /* Smooth transitions (frame-rate independent via delta time) */
+   /* Smooth transitions (frame-rate independent via delta time).
+    * Use viz_last_render (previous frame) for dt — NOT viz_last_update
+    * which resets every VIZ_UPDATE_MS and causes sawtooth jitter. */
    uint32_t now = SDL_GetTicks();
-   float dt = (now > m->viz_last_update && m->viz_last_update > 0)
-                  ? (float)(now - m->viz_last_update) / 1000.0f
+   float dt = (now > m->viz_last_render && m->viz_last_render > 0)
+                  ? (float)(now - m->viz_last_render) / 1000.0f
                   : 1.0f / 30.0f;
-   float alpha = 1.0f - powf(0.001f, dt); /* ~0.3 at 30fps, scales with frame time */
+   m->viz_last_render = now;
+   float alpha = 1.0f - powf(0.05f, dt); /* ~0.22 at 30fps — smooth rise/fall */
    for (int i = 0; i < VIZ_BAR_COUNT; i++) {
       float diff = m->viz_targets[i] - m->viz_bars[i];
       m->viz_bars[i] += diff * alpha;
@@ -1794,13 +1797,17 @@ bool ui_music_handle_tap(ui_music_t *m, int x, int y) {
          if (m->ws) {
             if (m->playing && !m->paused) {
                ws_client_send_music_control(m->ws, "pause", NULL);
+               /* Optimistic update: prevent rapid tap from sending conflicting command */
+               m->paused = true;
             } else if (m->paused) {
                ws_client_send_music_control(m->ws, "play", NULL);
+               m->paused = false;
             } else if (m->queue_count > 0) {
                /* Not playing, not paused, but queue has items — start from current index */
                char idx_str[16];
                snprintf(idx_str, sizeof(idx_str), "%d", m->queue_index);
                ws_client_send_music_control(m->ws, "play_index", idx_str);
+               m->playing = true;
             }
          }
          handled = true;
@@ -2029,11 +2036,35 @@ void ui_music_on_state(ui_music_t *m, const music_state_update_t *state) {
    m->bitrate = state->bitrate;
    snprintf(m->bitrate_mode, sizeof(m->bitrate_mode), "%s", state->bitrate_mode);
 
+   /* Sync queue metadata so play button works without fetching full queue */
+   if (state->queue_length >= 0)
+      m->queue_count = state->queue_length;
+   if (state->queue_index >= 0)
+      m->queue_index = state->queue_index;
+
    if (track_changed) {
       invalidate_track_cache(m);
    }
 
    pthread_mutex_unlock(&m->mutex);
+
+   /* Sync local playback engine with daemon state.
+    * Done after releasing UI mutex since pause() can block up to 200ms. */
+#ifdef HAVE_OPUS
+   if (m->music_pb) {
+      if (!state->playing || (state->playing && state->paused)) {
+         /* Daemon says stopped or paused — pause local engine if it's playing */
+         music_pb_state_t pb_st = music_playback_get_state(m->music_pb);
+         if (pb_st == MUSIC_PB_PLAYING || pb_st == MUSIC_PB_BUFFERING)
+            music_playback_pause(m->music_pb);
+      } else if (state->playing && !state->paused) {
+         /* Daemon says playing — resume local engine if paused */
+         music_pb_state_t pb_st = music_playback_get_state(m->music_pb);
+         if (pb_st == MUSIC_PB_PAUSED)
+            music_playback_resume(m->music_pb);
+      }
+   }
+#endif
 }
 
 void ui_music_on_position(ui_music_t *m, float position_sec) {

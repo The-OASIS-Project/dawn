@@ -427,7 +427,7 @@ int audio_playback_play_stereo(audio_playback_t *ctx,
        * to avoid wasting CPU — UI only consumes at ~8 Hz (VIZ_UPDATE_MS=120). */
       {
          static unsigned int spectrum_counter = 0;
-#define SPECTRUM_DECIMATE 9 /* ~96ms at 512 frames / 48kHz period */
+#define SPECTRUM_DECIMATE 5 /* ~53ms at 512 frames / 48kHz period */
          if (++spectrum_counter >= SPECTRUM_DECIMATE) {
             spectrum_counter = 0;
             float mono_float[n]; /* VLA — period_size typically 512 */

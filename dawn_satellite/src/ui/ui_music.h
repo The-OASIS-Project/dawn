@@ -92,7 +92,8 @@ struct ui_music {
    /* Visualizer */
    float viz_bars[MUSIC_VIZ_BAR_COUNT];
    float viz_targets[MUSIC_VIZ_BAR_COUNT];
-   uint32_t viz_last_update;
+   uint32_t viz_last_update; /* Last target update (for decay gating) */
+   uint32_t viz_last_render; /* Last render frame (for smoothing dt) */
 
    /* Shuffle / Repeat */
    bool shuffle;

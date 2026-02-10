@@ -1186,10 +1186,12 @@ static void *render_thread_func(void *arg) {
 
       render_frame(ui, time_sec);
 
-      /* Adaptive frame rate */
+      /* Adaptive frame rate — stay active when voice is active or music is playing */
       voice_state_t state = voice_processing_get_state(ui->voice_ctx);
       double since_change = frame_start - ui->last_state_change_time;
-      int target_ms = (state == VOICE_STATE_SILENCE && since_change > IDLE_TIMEOUT_SEC)
+      bool music_active = ui_music_is_playing(&ui->music);
+      int target_ms = (state == VOICE_STATE_SILENCE && since_change > IDLE_TIMEOUT_SEC &&
+                       !music_active)
                           ? FRAME_MS_IDLE
                           : FRAME_MS_ACTIVE;
 

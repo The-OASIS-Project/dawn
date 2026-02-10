@@ -574,6 +574,8 @@ static void parse_music_state(struct json_object *payload, music_state_update_t 
    state->bitrate = json_get_int(payload, "bitrate");
    snprintf(state->bitrate_mode, sizeof(state->bitrate_mode), "%s",
             json_get_string(payload, "bitrate_mode"));
+   state->queue_length = json_get_int(payload, "queue_length");
+   state->queue_index = json_get_int(payload, "queue_index");
 }
 
 static void parse_music_queue(struct json_object *payload, music_queue_update_t *queue) {
