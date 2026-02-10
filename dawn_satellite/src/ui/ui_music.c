@@ -640,10 +640,16 @@ static void render_visualizer(ui_music_t *m, SDL_Renderer *r, int y) {
                   ? (float)(now - m->viz_last_render) / 1000.0f
                   : 1.0f / 30.0f;
    m->viz_last_render = now;
-   float alpha = 1.0f - powf(0.05f, dt); /* ~0.22 at 30fps — smooth rise/fall */
+   /* Match WebUI AnalyserNode smoothingTimeConstant=0.6 (at 60fps reference rate).
+    * Formula: alpha = 1 - 0.6^(60*dt) gives ~0.64 at 30fps, ~0.40 at 60fps.
+    * Use asymmetric: faster rise (snappy attack), moderate fall (smooth decay). */
+   float rise_alpha = 1.0f - powf(0.4f, 60.0f * dt);  /* Fast rise: ~0.84 at 30fps */
+   float fall_alpha = 1.0f - powf(0.65f, 60.0f * dt); /* Moderate fall: ~0.58 at 30fps */
    for (int i = 0; i < VIZ_BAR_COUNT; i++) {
-      float diff = m->viz_targets[i] - m->viz_bars[i];
-      m->viz_bars[i] += diff * alpha;
+      float target = m->viz_targets[i];
+      float current = m->viz_bars[i];
+      float alpha = (target > current) ? rise_alpha : fall_alpha;
+      m->viz_bars[i] += (target - current) * alpha;
    }
 
    int viz_x = m->panel_x + 16;
