@@ -253,6 +253,10 @@ void ui_transcript_cleanup(ui_transcript_t *t) {
    for (int i = 0; i < TRANSCRIPT_MAX_ENTRIES; i++) {
       invalidate_entry_cache(&t->entries[i]);
    }
+   if (t->music_icon_tex) {
+      SDL_DestroyTexture(t->music_icon_tex);
+      t->music_icon_tex = NULL;
+   }
 
    if (t->label_font) {
       TTF_CloseFont(t->label_font);
@@ -437,6 +441,8 @@ void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_stat
             t->wifi_quality = read_wifi_quality();
          }
 
+         int wifi_left_edge = time_x; /* Track leftmost WiFi element */
+
          if (t->wifi_quality >= 0) {
             int wifi_bars;
             if (t->wifi_quality >= 70)
@@ -455,6 +461,7 @@ void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_stat
             int wifi_total_w = 4 * bar_w + 3 * bar_gap;
             int wifi_x = time_x - wifi_total_w - 12;
             int wifi_base_y = label_y + time_surface->h - 2;
+            wifi_left_edge = wifi_x;
 
             for (int b = 0; b < 4; b++) {
                int bar_h = 4 + b * 4; /* Heights: 4, 8, 12, 16 */
@@ -471,6 +478,39 @@ void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_stat
 
                SDL_Rect bar_rect = { bx, by, bar_w, bar_h };
                SDL_RenderFillRect(renderer, &bar_rect);
+            }
+         }
+
+         /* Music icon button (left of WiFi bars) */
+         {
+            /* Build cached white glyph on first use */
+            if (!t->music_icon_tex && t->label_font) {
+               SDL_Color white = { 255, 255, 255, 255 };
+               SDL_Surface *ms = TTF_RenderUTF8_Blended(t->label_font, "\xE2\x99\xAA", white);
+               if (ms) {
+                  t->music_icon_tex = SDL_CreateTextureFromSurface(renderer, ms);
+                  t->music_icon_w = ms->w;
+                  t->music_icon_h = ms->h;
+                  SDL_FreeSurface(ms);
+               }
+            }
+            if (t->music_icon_tex) {
+               if (t->music_playing) {
+                  SDL_SetTextureColorMod(t->music_icon_tex, 0x2D, 0xD4, 0xBF);
+               } else {
+                  SDL_SetTextureColorMod(t->music_icon_tex, COLOR_TEXT_SECONDARY_R,
+                                         COLOR_TEXT_SECONDARY_G, COLOR_TEXT_SECONDARY_B);
+               }
+               int icon_x = wifi_left_edge - t->music_icon_w - 14;
+               int icon_y = label_y + (time_surface->h - t->music_icon_h) / 2;
+               SDL_Rect mdst = { icon_x, icon_y, t->music_icon_w, t->music_icon_h };
+               SDL_RenderCopy(renderer, t->music_icon_tex, NULL, &mdst);
+
+               /* Store 48x48 hit area centered on the glyph */
+               t->music_btn_w = 48;
+               t->music_btn_h = 48;
+               t->music_btn_x = icon_x + t->music_icon_w / 2 - t->music_btn_w / 2;
+               t->music_btn_y = icon_y + t->music_icon_h / 2 - t->music_btn_h / 2;
             }
          }
 

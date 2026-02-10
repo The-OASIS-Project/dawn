@@ -41,9 +41,11 @@
 
 #include "logging.h"
 #include "ui/ui_colors.h"
+#include "ui/ui_music.h"
 #include "ui/ui_orb.h"
 #include "ui/ui_touch.h"
 #include "ui/ui_transcript.h"
+#include "ws_client.h"
 
 /* =============================================================================
  * Constants
@@ -63,6 +65,9 @@
 #define INFO_ROW_COUNT 5      /* Server, Device, IP, Uptime, Session */
 #define ORB_HIT_RADIUS 180    /* Tap/long-press detection radius around orb center */
 #define SWIPE_ZONE_FRAC 0.20f /* Top/bottom 20% of screen for swipe triggers */
+/* Music panel width = screen width (1024) minus orb area (401) = 623px.
+ * Matches transcript panel width so the music overlay covers the same region. */
+#define MUSIC_PANEL_WIDTH 623
 
 /* =============================================================================
  * Internal Structure
@@ -155,7 +160,11 @@ struct sdl_ui {
       bool visible;
       bool closing;
       double anim_start;
-   } panel_actions, panel_settings;
+   } panel_actions, panel_settings, panel_music;
+
+   /* Music panel */
+   ui_music_t music;
+   ws_client_t *ws_client; /* WS client for music commands */
 };
 
 /* =============================================================================
@@ -189,7 +198,7 @@ static float panel_offset(double anim_start, bool closing, double time_sec) {
 }
 
 static bool panel_any_open(const sdl_ui_t *ui) {
-   return ui->panel_actions.visible || ui->panel_settings.visible;
+   return ui->panel_actions.visible || ui->panel_settings.visible || ui->panel_music.visible;
 }
 
 static void panel_open(sdl_ui_t *ui, bool is_actions, double time_sec) {
@@ -202,6 +211,12 @@ static void panel_open(sdl_ui_t *ui, bool is_actions, double time_sec) {
       ui->panel_actions.anim_start = time_sec;
    }
 
+   /* Close music panel when opening other panels */
+   if (ui->panel_music.visible && !ui->panel_music.closing) {
+      ui->panel_music.closing = true;
+      ui->panel_music.anim_start = time_sec;
+   }
+
    if (is_actions) {
       ui->panel_actions.visible = true;
       ui->panel_actions.closing = false;
@@ -210,6 +225,29 @@ static void panel_open(sdl_ui_t *ui, bool is_actions, double time_sec) {
       ui->panel_settings.visible = true;
       ui->panel_settings.closing = false;
       ui->panel_settings.anim_start = time_sec;
+   }
+}
+
+static void panel_open_music(sdl_ui_t *ui, double time_sec) {
+   /* Close other panels */
+   if (ui->panel_actions.visible && !ui->panel_actions.closing) {
+      ui->panel_actions.closing = true;
+      ui->panel_actions.anim_start = time_sec;
+   }
+   if (ui->panel_settings.visible && !ui->panel_settings.closing) {
+      ui->panel_settings.closing = true;
+      ui->panel_settings.anim_start = time_sec;
+   }
+
+   ui->panel_music.visible = true;
+   ui->panel_music.closing = false;
+   ui->panel_music.anim_start = time_sec;
+}
+
+static void panel_close_music(sdl_ui_t *ui, double time_sec) {
+   if (ui->panel_music.visible && !ui->panel_music.closing) {
+      ui->panel_music.closing = true;
+      ui->panel_music.anim_start = time_sec;
    }
 }
 
@@ -241,6 +279,13 @@ static void panel_tick(sdl_ui_t *ui, double time_sec) {
       if (t >= 1.0f) {
          ui->panel_settings.visible = false;
          ui->panel_settings.closing = false;
+      }
+   }
+   if (ui->panel_music.closing) {
+      float t = (float)((time_sec - ui->panel_music.anim_start) / PANEL_ANIM_SEC);
+      if (t >= 1.0f) {
+         ui->panel_music.visible = false;
+         ui->panel_music.closing = false;
       }
    }
 }
@@ -680,7 +725,41 @@ static void handle_gesture(sdl_ui_t *ui, touch_gesture_t gesture, double time_se
 
    switch (gesture.type) {
       case TOUCH_GESTURE_TAP:
+         /* Music button tap (check first, works even when no panel open) */
+         if (!ui->panel_actions.visible && !ui->panel_settings.visible) {
+            int mx = gesture.x;
+            int my = gesture.y;
+            ui_transcript_t *t = &ui->transcript;
+            if (mx >= t->music_btn_x && mx < t->music_btn_x + t->music_btn_w &&
+                my >= t->music_btn_y && my < t->music_btn_y + t->music_btn_h) {
+               if (ui->panel_music.visible && !ui->panel_music.closing) {
+                  panel_close_music(ui, time_sec);
+               } else {
+                  panel_open_music(ui, time_sec);
+                  /* Request queue data on open; library stats are fetched
+                   * when the Library tab is tapped (avoids tx_buffer overwrite
+                   * since ws_client supports only one pending message). */
+                  if (ui->ws_client) {
+                     ws_client_send_music_queue(ui->ws_client, "list", NULL, -1);
+                  }
+               }
+               break;
+            }
+         }
+
          if (panel_any_open(ui)) {
+            /* Music panel tap handling */
+            if (ui->panel_music.visible && !ui->panel_music.closing) {
+               int music_panel_x = ui->width - MUSIC_PANEL_WIDTH;
+               if (gesture.x >= music_panel_x) {
+                  ui_music_handle_tap(&ui->music, gesture.x, gesture.y);
+                  break;
+               }
+               /* Tap outside music panel - close it */
+               panel_close_music(ui, time_sec);
+               break;
+            }
+
             /* Tap outside panels dismisses them */
             bool in_actions = (ui->panel_actions.visible && gesture.y > ui->height - PANEL_HEIGHT);
             bool in_settings = (ui->panel_settings.visible && gesture.y < PANEL_HEIGHT);
@@ -723,6 +802,12 @@ static void handle_gesture(sdl_ui_t *ui, touch_gesture_t gesture, double time_se
             panel_close(ui, true, time_sec);
          } else if ((float)gesture.y < (float)ui->height * SWIPE_ZONE_FRAC) {
             panel_open(ui, false, time_sec);
+         }
+         break;
+
+      case TOUCH_GESTURE_SWIPE_RIGHT:
+         if (ui->panel_music.visible && !ui->panel_music.closing) {
+            panel_close_music(ui, time_sec);
          }
          break;
 
@@ -813,10 +898,21 @@ static int sdl_init_on_thread(sdl_ui_t *ui) {
    ui->last_state = VOICE_STATE_SILENCE;
    ui->last_state_change_time = get_time_sec();
 
+   /* Initialize music panel (right-side overlay on transcript area) */
+   int music_x = ui->width - MUSIC_PANEL_WIDTH;
+   if (ui_music_init(&ui->music, ui->renderer, music_x, 0, MUSIC_PANEL_WIDTH, ui->height,
+                     ui->font_dir) != 0) {
+      LOG_WARNING("Music panel init failed, continuing without music UI");
+   }
+   if (ui->ws_client) {
+      ui_music_set_ws_client(&ui->music, ui->ws_client);
+   }
+
    /* Initialize touch gesture detection */
    ui_touch_init(&ui->touch, ui->width, ui->height);
    memset(&ui->panel_actions, 0, sizeof(ui->panel_actions));
    memset(&ui->panel_settings, 0, sizeof(ui->panel_settings));
+   memset(&ui->panel_music, 0, sizeof(ui->panel_music));
    LOG_INFO("SDL UI initialized (%dx%d, driver=%s)", ui->width, ui->height,
             SDL_GetCurrentVideoDriver());
 
@@ -829,6 +925,7 @@ static int sdl_init_on_thread(sdl_ui_t *ui) {
 
 static void sdl_cleanup_on_thread(sdl_ui_t *ui) {
    panel_cache_cleanup(ui);
+   ui_music_cleanup(&ui->music);
    ui_transcript_cleanup(&ui->transcript);
    ui_orb_cleanup(&ui->orb);
 
@@ -935,6 +1032,9 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
    /* Render transcript in right panel */
    ui_transcript_render(&ui->transcript, r, state);
 
+   /* Update music playing state for transcript icon color */
+   ui->transcript.music_playing = ui_music_is_playing(&ui->music);
+
    /* Slide-in panels: update animation, render scrim + panels */
    panel_tick(ui, time_sec);
    float act_off = ui->panel_actions.visible ? panel_offset(ui->panel_actions.anim_start,
@@ -943,8 +1043,13 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
    float set_off = ui->panel_settings.visible ? panel_offset(ui->panel_settings.anim_start,
                                                              ui->panel_settings.closing, time_sec)
                                               : 0.0f;
+   float mus_off = ui->panel_music.visible
+                       ? panel_offset(ui->panel_music.anim_start, ui->panel_music.closing, time_sec)
+                       : 0.0f;
 
    float max_off = act_off > set_off ? act_off : set_off;
+   if (mus_off > max_off)
+      max_off = mus_off;
    if (max_off > 0.001f) {
       render_scrim(ui, r, max_off);
    }
@@ -954,9 +1059,16 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
    if (set_off > 0.001f) {
       render_panel_settings(ui, r, set_off);
    }
+   if (mus_off > 0.001f) {
+      /* Music panel slides in from right */
+      int full_x = ui->width - MUSIC_PANEL_WIDTH;
+      int anim_x = ui->width - (int)(mus_off * MUSIC_PANEL_WIDTH);
+      ui->music.panel_x = anim_x > full_x ? anim_x : full_x;
+      ui_music_render(&ui->music, r);
+   }
 
    /* Swipe indicators (only when no panel visible) */
-   if (act_off < 0.001f && set_off < 0.001f) {
+   if (act_off < 0.001f && set_off < 0.001f && mus_off < 0.001f) {
       render_swipe_indicators(ui, r);
    }
 
@@ -993,24 +1105,51 @@ static void *render_thread_func(void *arg) {
           * across different touch drivers (KMSDRM, evdev, etc.). */
          if (event.type == SDL_FINGERDOWN) {
             int fx = (int)(event.tfinger.x * ui->width);
-            if (fx > ORB_PANEL_WIDTH && !panel_any_open(ui)) {
+            int fy = (int)(event.tfinger.y * ui->height);
+
+            if (ui->panel_music.visible && !ui->panel_music.closing && fx >= ui->music.panel_x) {
+               /* Finger in music panel — scroll music lists */
                ui->finger_scrolling = true;
-               ui->finger_last_y = (int)(event.tfinger.y * ui->height);
+               ui->finger_last_y = fy;
+               ui_music_handle_finger_down(&ui->music, fx, fy);
+            } else if (fx > ORB_PANEL_WIDTH && !panel_any_open(ui)) {
+               ui->finger_scrolling = true;
+               ui->finger_last_y = fy;
             } else {
                ui->finger_scrolling = false;
             }
-         } else if (event.type == SDL_FINGERMOTION && ui->finger_scrolling) {
+         } else if (event.type == SDL_FINGERMOTION) {
+            int new_x = (int)(event.tfinger.x * ui->width);
             int new_y = (int)(event.tfinger.y * ui->height);
-            int dy = new_y - ui->finger_last_y;
-            ui->finger_last_y = new_y;
-            if (dy != 0) {
-               ui_transcript_scroll(&ui->transcript, dy);
+
+            /* Drag-to-seek takes priority over scroll */
+            if (ui->panel_music.visible && !ui->panel_music.closing) {
+               ui_music_handle_finger_motion(&ui->music, new_x, new_y);
+            }
+
+            if (ui->finger_scrolling) {
+               int dy = new_y - ui->finger_last_y;
+               ui->finger_last_y = new_y;
+               if (dy != 0) {
+                  if (ui->panel_music.visible && !ui->panel_music.closing) {
+                     ui_music_scroll(&ui->music, dy);
+                  } else {
+                     ui_transcript_scroll(&ui->transcript, dy);
+                  }
+               }
             }
          } else if (event.type == SDL_FINGERUP) {
             ui->finger_scrolling = false;
+            ui_music_handle_finger_up(&ui->music);
          } else if (event.type == SDL_MOUSEMOTION && (event.motion.state & SDL_BUTTON_LMASK)) {
             /* Mouse fallback for desktop testing */
-            if (event.motion.x > ORB_PANEL_WIDTH && !panel_any_open(ui)) {
+            if (ui->panel_music.visible && !ui->panel_music.closing &&
+                event.motion.x >= ui->music.panel_x) {
+               int dy = event.motion.yrel;
+               if (dy != 0) {
+                  ui_music_scroll(&ui->music, dy);
+               }
+            } else if (event.motion.x > ORB_PANEL_WIDTH && !panel_any_open(ui)) {
                int dy = event.motion.yrel;
                if (dy != 0) {
                   ui_transcript_scroll(&ui->transcript, dy);
@@ -1126,6 +1265,13 @@ void sdl_ui_cleanup(sdl_ui_t *ui) {
    if (!ui)
       return;
 
+   /* Deregister music callbacks before freeing (prevents use-after-free) */
+   if (ui->ws_client) {
+      ws_client_set_music_callbacks(ui->ws_client, NULL, NULL, NULL, NULL, NULL);
+      ui_music_set_ws_client(&ui->music, NULL);
+      ui->ws_client = NULL;
+   }
+
    /* Stop and join render thread (SDL cleanup happens on that thread) */
    ui->running = false;
    if (ui->thread_started) {
@@ -1142,4 +1288,40 @@ void sdl_ui_add_transcript(sdl_ui_t *ui, const char *role, const char *text) {
 
    bool is_user = (strcmp(role, "You") == 0);
    ui_transcript_add(&ui->transcript, role, text, is_user);
+}
+
+/* =============================================================================
+ * Music Callback Bridges (called from WS thread -> updates UI state)
+ * ============================================================================= */
+
+static void music_state_cb(const music_state_update_t *state, void *user_data) {
+   sdl_ui_t *ui = (sdl_ui_t *)user_data;
+   ui_music_on_state(&ui->music, state);
+}
+
+static void music_position_cb(float position_sec, void *user_data) {
+   sdl_ui_t *ui = (sdl_ui_t *)user_data;
+   ui_music_on_position(&ui->music, position_sec);
+}
+
+static void music_queue_cb(const music_queue_update_t *queue, void *user_data) {
+   sdl_ui_t *ui = (sdl_ui_t *)user_data;
+   ui_music_on_queue(&ui->music, queue);
+}
+
+static void music_library_cb(const music_library_update_t *lib, void *user_data) {
+   sdl_ui_t *ui = (sdl_ui_t *)user_data;
+   ui_music_on_library(&ui->music, lib);
+}
+
+void sdl_ui_set_ws_client(sdl_ui_t *ui, struct ws_client *client) {
+   if (!ui || !client)
+      return;
+
+   ui->ws_client = client;
+   ui_music_set_ws_client(&ui->music, client);
+
+   /* Register music callbacks so ws_client routes parsed data to our UI */
+   ws_client_set_music_callbacks(client, music_state_cb, music_position_cb, music_queue_cb,
+                                 music_library_cb, ui);
 }

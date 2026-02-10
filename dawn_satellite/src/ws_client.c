@@ -33,6 +33,7 @@
  * ============================================================================= */
 
 #define WS_RX_BUFFER_SIZE 65536
+#define WS_RX_BUFFER_MAX (2 * 1024 * 1024) /* 2MB cap to prevent OOM */
 #define WS_TX_BUFFER_SIZE 4096
 
 struct ws_client {
@@ -71,6 +72,13 @@ struct ws_client {
    ws_state_callback_t state_cb;
    void *state_cb_data;
 
+   /* Music callbacks */
+   ws_music_state_cb_t music_state_cb;
+   ws_music_position_cb_t music_position_cb;
+   ws_music_queue_cb_t music_queue_cb;
+   ws_music_library_cb_t music_library_cb;
+   void *music_cb_data;
+
    /* Error message */
    char error_msg[256];
 
@@ -99,6 +107,14 @@ static int callback_ws(struct lws *wsi,
                        size_t len);
 static void handle_message(ws_client_t *client, const char *msg, size_t len);
 static int send_json(ws_client_t *client, struct json_object *obj);
+static const char *json_get_string(struct json_object *obj, const char *key);
+static int json_get_int(struct json_object *obj, const char *key);
+static double json_get_double(struct json_object *obj, const char *key);
+static bool json_get_bool(struct json_object *obj, const char *key);
+static void parse_track(struct json_object *obj, music_track_t *track);
+static void parse_music_state(struct json_object *payload, music_state_update_t *state);
+static void parse_music_queue(struct json_object *payload, music_queue_update_t *queue);
+static void parse_music_library(struct json_object *payload, music_library_update_t *lib);
 
 /* =============================================================================
  * libwebsockets Protocol
@@ -147,7 +163,15 @@ static int callback_ws(struct lws *wsi,
          if (client && in && len > 0) {
             pthread_mutex_lock(&client->mutex);
 
-            /* Expand buffer if needed */
+            /* Expand buffer if needed (capped to prevent OOM from rogue messages).
+             * Overflow-safe check: use subtraction to avoid size_t wraparound. */
+            if (client->rx_len > WS_RX_BUFFER_MAX - len - 1) {
+               LOG_ERROR("Message too large (%zu + %zu bytes > %d max), dropping", client->rx_len,
+                         len, WS_RX_BUFFER_MAX);
+               client->rx_len = 0;
+               pthread_mutex_unlock(&client->mutex);
+               return -1;
+            }
             size_t needed = client->rx_len + len + 1;
             if (needed > client->rx_capacity) {
                size_t new_cap = client->rx_capacity * 2;
@@ -385,11 +409,219 @@ static void handle_message(ws_client_t *client, const char *msg, size_t len) {
             }
          }
       }
+   } else if (strcmp(type, "music_state") == 0) {
+      if (payload && client->music_state_cb) {
+         music_state_update_t update;
+         parse_music_state(payload, &update);
+         ws_music_state_cb_t cb = client->music_state_cb;
+         void *ud = client->music_cb_data;
+         pthread_mutex_unlock(&client->mutex);
+         cb(&update, ud);
+         pthread_mutex_lock(&client->mutex);
+      }
+   } else if (strcmp(type, "music_position") == 0) {
+      if (payload && client->music_position_cb) {
+         float pos = (float)json_get_double(payload, "position_sec");
+         ws_music_position_cb_t cb = client->music_position_cb;
+         void *ud = client->music_cb_data;
+         pthread_mutex_unlock(&client->mutex);
+         cb(pos, ud);
+         pthread_mutex_lock(&client->mutex);
+      }
+   } else if (strcmp(type, "music_queue_response") == 0) {
+      if (payload && client->music_queue_cb) {
+         /* Static to avoid ~175KB on thread stack (100 tracks × 1.8KB each).
+          * Safe: handle_message() is single-threaded under client->mutex. */
+         static music_queue_update_t queue_update;
+         parse_music_queue(payload, &queue_update);
+         ws_music_queue_cb_t cb = client->music_queue_cb;
+         void *ud = client->music_cb_data;
+         pthread_mutex_unlock(&client->mutex);
+         cb(&queue_update, ud);
+         pthread_mutex_lock(&client->mutex);
+      }
+   } else if (strcmp(type, "music_library_response") == 0) {
+      if (payload && client->music_library_cb) {
+         /* Static to avoid ~100KB on thread stack (50 tracks + 50 items).
+          * Safe: handle_message() is single-threaded under client->mutex. */
+         static music_library_update_t lib_update;
+         parse_music_library(payload, &lib_update);
+         ws_music_library_cb_t cb = client->music_library_cb;
+         void *ud = client->music_cb_data;
+         pthread_mutex_unlock(&client->mutex);
+         cb(&lib_update, ud);
+         pthread_mutex_lock(&client->mutex);
+      }
+   } else if (strcmp(type, "music_error") == 0) {
+      if (payload) {
+         LOG_WARNING("Music error: %s", json_get_string(payload, "message"));
+      }
    } else {
       LOG_DEBUG("Unknown message type: %s", type);
    }
 
    json_object_put(root);
+}
+
+/* =============================================================================
+ * Music JSON Parsing Helpers
+ * ============================================================================= */
+
+static const char *json_get_string(struct json_object *obj, const char *key) {
+   struct json_object *val;
+   if (json_object_object_get_ex(obj, key, &val)) {
+      return json_object_get_string(val);
+   }
+   return "";
+}
+
+static int json_get_int(struct json_object *obj, const char *key) {
+   struct json_object *val;
+   if (json_object_object_get_ex(obj, key, &val)) {
+      return json_object_get_int(val);
+   }
+   return 0;
+}
+
+static double json_get_double(struct json_object *obj, const char *key) {
+   struct json_object *val;
+   if (json_object_object_get_ex(obj, key, &val)) {
+      return json_object_get_double(val);
+   }
+   return 0.0;
+}
+
+static bool json_get_bool(struct json_object *obj, const char *key) {
+   struct json_object *val;
+   if (json_object_object_get_ex(obj, key, &val)) {
+      return json_object_get_boolean(val);
+   }
+   return false;
+}
+
+static void parse_track(struct json_object *obj, music_track_t *track) {
+   snprintf(track->path, MUSIC_MAX_PATH, "%s", json_get_string(obj, "path"));
+   snprintf(track->title, MUSIC_MAX_TITLE, "%s", json_get_string(obj, "title"));
+   snprintf(track->artist, MUSIC_MAX_ARTIST, "%s", json_get_string(obj, "artist"));
+   snprintf(track->album, MUSIC_MAX_ALBUM, "%s", json_get_string(obj, "album"));
+   track->duration_sec = (uint32_t)json_get_int(obj, "duration_sec");
+}
+
+static void parse_music_state(struct json_object *payload, music_state_update_t *state) {
+   memset(state, 0, sizeof(*state));
+   state->playing = json_get_bool(payload, "playing");
+   state->paused = json_get_bool(payload, "paused");
+   state->duration_sec = (float)json_get_double(payload, "duration_sec");
+
+   struct json_object *track_obj;
+   if (json_object_object_get_ex(payload, "track", &track_obj) && track_obj &&
+       !json_object_is_type(track_obj, json_type_null)) {
+      parse_track(track_obj, &state->track);
+      /* Prefer track's own duration if available */
+      if (state->track.duration_sec > 0)
+         state->duration_sec = (float)state->track.duration_sec;
+   }
+
+   snprintf(state->source_format, sizeof(state->source_format), "%s",
+            json_get_string(payload, "source_format"));
+   state->source_rate = json_get_int(payload, "source_rate");
+   state->bitrate = json_get_int(payload, "bitrate");
+   snprintf(state->bitrate_mode, sizeof(state->bitrate_mode), "%s",
+            json_get_string(payload, "bitrate_mode"));
+}
+
+static void parse_music_queue(struct json_object *payload, music_queue_update_t *queue) {
+   memset(queue, 0, sizeof(*queue));
+   queue->current_index = json_get_int(payload, "current_index");
+
+   struct json_object *queue_arr;
+   if (json_object_object_get_ex(payload, "queue", &queue_arr) &&
+       json_object_is_type(queue_arr, json_type_array)) {
+      int len = json_object_array_length(queue_arr);
+      if (len > MUSIC_MAX_QUEUE)
+         len = MUSIC_MAX_QUEUE;
+      queue->count = len;
+      for (int i = 0; i < len; i++) {
+         struct json_object *item = json_object_array_get_idx(queue_arr, i);
+         if (item) {
+            parse_track(item, &queue->tracks[i]);
+         }
+      }
+   }
+}
+
+static void parse_music_library(struct json_object *payload, music_library_update_t *lib) {
+   memset(lib, 0, sizeof(*lib));
+
+   const char *browse_type = json_get_string(payload, "browse_type");
+
+   if (strcmp(browse_type, "stats") == 0) {
+      lib->browse_type = MUSIC_BROWSE_NONE;
+      lib->stat_tracks = json_get_int(payload, "track_count");
+      lib->stat_artists = json_get_int(payload, "artist_count");
+      lib->stat_albums = json_get_int(payload, "album_count");
+
+   } else if (strcmp(browse_type, "tracks") == 0 || strcmp(browse_type, "tracks_by_artist") == 0 ||
+              strcmp(browse_type, "tracks_by_album") == 0) {
+      /* All three share the same "tracks" array parsing */
+      if (strcmp(browse_type, "tracks") == 0)
+         lib->browse_type = MUSIC_BROWSE_TRACKS;
+      else if (strcmp(browse_type, "tracks_by_artist") == 0)
+         lib->browse_type = MUSIC_BROWSE_BY_ARTIST;
+      else
+         lib->browse_type = MUSIC_BROWSE_BY_ALBUM;
+
+      struct json_object *arr;
+      if (json_object_object_get_ex(payload, "tracks", &arr) &&
+          json_object_is_type(arr, json_type_array)) {
+         int len = json_object_array_length(arr);
+         if (len > MUSIC_MAX_RESULTS)
+            len = MUSIC_MAX_RESULTS;
+         lib->track_count = len;
+         for (int i = 0; i < len; i++) {
+            struct json_object *item = json_object_array_get_idx(arr, i);
+            if (item)
+               parse_track(item, &lib->tracks[i]);
+         }
+      }
+
+   } else if (strcmp(browse_type, "artists") == 0) {
+      lib->browse_type = MUSIC_BROWSE_ARTISTS;
+      struct json_object *arr;
+      if (json_object_object_get_ex(payload, "artists", &arr) &&
+          json_object_is_type(arr, json_type_array)) {
+         int len = json_object_array_length(arr);
+         if (len > MUSIC_MAX_RESULTS)
+            len = MUSIC_MAX_RESULTS;
+         lib->item_count = len;
+         for (int i = 0; i < len; i++) {
+            struct json_object *item = json_object_array_get_idx(arr, i);
+            if (item) {
+               snprintf(lib->items[i].name, MUSIC_MAX_TITLE, "%s", json_get_string(item, "name"));
+               lib->items[i].track_count = json_get_int(item, "track_count");
+               lib->items[i].album_count = json_get_int(item, "album_count");
+            }
+         }
+      }
+
+   } else if (strcmp(browse_type, "albums") == 0) {
+      lib->browse_type = MUSIC_BROWSE_ALBUMS;
+      struct json_object *arr;
+      if (json_object_object_get_ex(payload, "albums", &arr) &&
+          json_object_is_type(arr, json_type_array)) {
+         int len = json_object_array_length(arr);
+         if (len > MUSIC_MAX_RESULTS)
+            len = MUSIC_MAX_RESULTS;
+         lib->item_count = len;
+         for (int i = 0; i < len; i++) {
+            struct json_object *item = json_object_array_get_idx(arr, i);
+            if (item) {
+               snprintf(lib->items[i].name, MUSIC_MAX_TITLE, "%s", json_get_string(item, "name"));
+               lib->items[i].track_count = json_get_int(item, "track_count");
+            }
+         }
+      }
+   }
 }
 
 /* =============================================================================
@@ -709,6 +941,11 @@ int ws_client_register(ws_client_t *client,
       return -1;
    }
 
+   /* Auto-subscribe to music state updates after successful registration */
+   if (client->music_state_cb) {
+      ws_client_send_music_subscribe(client);
+   }
+
    return 0;
 }
 
@@ -878,4 +1115,132 @@ time_t ws_client_get_connect_time(ws_client_t *client) {
    time_t t = client->connected_at;
    pthread_mutex_unlock(&client->mutex);
    return t;
+}
+
+/* =============================================================================
+ * Public API - Music
+ * ============================================================================= */
+
+void ws_client_set_music_callbacks(ws_client_t *client,
+                                   ws_music_state_cb_t state_cb,
+                                   ws_music_position_cb_t position_cb,
+                                   ws_music_queue_cb_t queue_cb,
+                                   ws_music_library_cb_t library_cb,
+                                   void *user_data) {
+   if (!client)
+      return;
+   pthread_mutex_lock(&client->mutex);
+   client->music_state_cb = state_cb;
+   client->music_position_cb = position_cb;
+   client->music_queue_cb = queue_cb;
+   client->music_library_cb = library_cb;
+   client->music_cb_data = user_data;
+   pthread_mutex_unlock(&client->mutex);
+}
+
+int ws_client_send_music_control(ws_client_t *client, const char *action, const char *path) {
+   if (!client || !action || !client->registered)
+      return -1;
+
+   struct json_object *msg = json_object_new_object();
+   json_object_object_add(msg, "type", json_object_new_string("music_control"));
+
+   struct json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "action", json_object_new_string(action));
+   if (path) {
+      json_object_object_add(payload, "path", json_object_new_string(path));
+   }
+   json_object_object_add(msg, "payload", payload);
+
+   int ret = send_json(client, msg);
+   json_object_put(msg);
+
+   LOG_INFO("Music control: %s", action);
+   return ret;
+}
+
+int ws_client_send_music_seek(ws_client_t *client, float position_sec) {
+   if (!client || !client->registered)
+      return -1;
+
+   struct json_object *msg = json_object_new_object();
+   json_object_object_add(msg, "type", json_object_new_string("music_control"));
+
+   struct json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "action", json_object_new_string("seek"));
+   json_object_object_add(payload, "position_sec", json_object_new_double((double)position_sec));
+   json_object_object_add(msg, "payload", payload);
+
+   int ret = send_json(client, msg);
+   json_object_put(msg);
+
+   LOG_INFO("Music seek: %.1fs", position_sec);
+   return ret;
+}
+
+int ws_client_send_music_library(ws_client_t *client, const char *type, const char *filter) {
+   if (!client || !type || !client->registered)
+      return -1;
+
+   struct json_object *msg = json_object_new_object();
+   json_object_object_add(msg, "type", json_object_new_string("music_library"));
+
+   struct json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "type", json_object_new_string(type));
+   if (filter) {
+      /* Determine filter key based on browse type */
+      if (strcmp(type, "tracks_by_artist") == 0) {
+         json_object_object_add(payload, "artist", json_object_new_string(filter));
+      } else if (strcmp(type, "tracks_by_album") == 0) {
+         json_object_object_add(payload, "album", json_object_new_string(filter));
+      }
+   }
+   json_object_object_add(msg, "payload", payload);
+
+   int ret = send_json(client, msg);
+   json_object_put(msg);
+
+   LOG_INFO("Music library browse: %s", type);
+   return ret;
+}
+
+int ws_client_send_music_queue(ws_client_t *client,
+                               const char *action,
+                               const char *path,
+                               int index) {
+   if (!client || !action || !client->registered)
+      return -1;
+
+   struct json_object *msg = json_object_new_object();
+   json_object_object_add(msg, "type", json_object_new_string("music_queue"));
+
+   struct json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "action", json_object_new_string(action));
+   if (path) {
+      json_object_object_add(payload, "path", json_object_new_string(path));
+   }
+   if (index >= 0) {
+      json_object_object_add(payload, "index", json_object_new_int(index));
+   }
+   json_object_object_add(msg, "payload", payload);
+
+   int ret = send_json(client, msg);
+   json_object_put(msg);
+
+   LOG_INFO("Music queue: %s", action);
+   return ret;
+}
+
+int ws_client_send_music_subscribe(ws_client_t *client) {
+   if (!client || !client->registered)
+      return -1;
+
+   struct json_object *msg = json_object_new_object();
+   json_object_object_add(msg, "type", json_object_new_string("music_subscribe"));
+
+   int ret = send_json(client, msg);
+   json_object_put(msg);
+
+   LOG_INFO("Music subscribe sent");
+   return ret;
 }

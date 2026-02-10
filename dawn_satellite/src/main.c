@@ -956,6 +956,14 @@ int main(int argc, char *argv[]) {
          /* Connected — reset attempt counter */
          attempt = 0;
 
+#ifdef ENABLE_SDL_UI
+         /* Wire WS client to SDL UI for music controls before registration
+          * (so music_subscribe auto-fires in ws_client_register) */
+         if (sdl_ui) {
+            sdl_ui_set_ws_client(sdl_ui, ws);
+         }
+#endif
+
          /* Run main loop (returns when disconnected or user exits) */
          result = dap2_main_loop(&ctx, ws, use_keyboard, &config, voice_ctx, first_connect);
          first_connect = false;

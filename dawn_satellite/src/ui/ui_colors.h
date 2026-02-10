@@ -56,6 +56,12 @@
 #define COLOR_TEXT_SECONDARY_G 0x87
 #define COLOR_TEXT_SECONDARY_B 0x94
 
+/* Tertiary text - dimmed labels, album names (#6B7785)
+ * Lightened from #555F6B to meet WCAG AA (4.5:1 against #1B1F24) */
+#define COLOR_TEXT_TERTIARY_R 0x6B
+#define COLOR_TEXT_TERTIARY_G 0x77
+#define COLOR_TEXT_TERTIARY_B 0x85
+
 /* =============================================================================
  * Voice State Colors
  * ============================================================================= */

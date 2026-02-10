@@ -29,6 +29,8 @@
 #include <stdint.h>
 #include <time.h>
 
+#include "ui/music_types.h" /* For music_state_update_t, etc. (no SDL deps) */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -350,6 +352,77 @@ const char *ws_client_get_reconnect_secret(ws_client_t *client);
  * @param secret Secret string (64 hex chars)
  */
 void ws_client_set_reconnect_secret(ws_client_t *client, const char *secret);
+
+/* =============================================================================
+ * Music Callbacks (typed — ws_client parses JSON, passes structs to UI)
+ * ============================================================================= */
+
+typedef void (*ws_music_state_cb_t)(const music_state_update_t *state, void *user_data);
+typedef void (*ws_music_position_cb_t)(float position_sec, void *user_data);
+typedef void (*ws_music_queue_cb_t)(const music_queue_update_t *queue, void *user_data);
+typedef void (*ws_music_library_cb_t)(const music_library_update_t *lib, void *user_data);
+
+/**
+ * @brief Set callbacks for music state/position/queue/library updates
+ */
+void ws_client_set_music_callbacks(ws_client_t *client,
+                                   ws_music_state_cb_t state_cb,
+                                   ws_music_position_cb_t position_cb,
+                                   ws_music_queue_cb_t queue_cb,
+                                   ws_music_library_cb_t library_cb,
+                                   void *user_data);
+
+/**
+ * @brief Send music control command (play, pause, next, prev, seek, etc.)
+ *
+ * @param client Client context
+ * @param action Control action string
+ * @param path Optional track path (NULL if not needed)
+ * @return 0 on success, -1 on failure
+ */
+int ws_client_send_music_control(ws_client_t *client, const char *action, const char *path);
+
+/**
+ * @brief Send music seek command
+ *
+ * @param client Client context
+ * @param position_sec Position to seek to in seconds
+ * @return 0 on success, -1 on failure
+ */
+int ws_client_send_music_seek(ws_client_t *client, float position_sec);
+
+/**
+ * @brief Send music library browse request
+ *
+ * @param client Client context
+ * @param type Browse type ("stats", "tracks", "artists", "albums",
+ *             "tracks_by_artist", "tracks_by_album")
+ * @param filter Filter value (artist name, album name, or NULL)
+ * @return 0 on success, -1 on failure
+ */
+int ws_client_send_music_library(ws_client_t *client, const char *type, const char *filter);
+
+/**
+ * @brief Send music queue command (list, add, remove, clear)
+ *
+ * @param client Client context
+ * @param action Queue action string
+ * @param path Track path for "add" (NULL otherwise)
+ * @param index Track index for "remove" (-1 otherwise)
+ * @return 0 on success, -1 on failure
+ */
+int ws_client_send_music_queue(ws_client_t *client,
+                               const char *action,
+                               const char *path,
+                               int index);
+
+/**
+ * @brief Subscribe to music state updates from daemon
+ *
+ * @param client Client context
+ * @return 0 on success, -1 on failure
+ */
+int ws_client_send_music_subscribe(ws_client_t *client);
 
 #ifdef __cplusplus
 }

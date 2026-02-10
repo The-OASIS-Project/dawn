@@ -94,6 +94,12 @@ typedef struct {
    int scroll_offset; /* Pixels scrolled back from bottom (0 = auto-scroll to newest) */
    int total_height;  /* Total rendered content height (for scroll bounds) */
    bool auto_scroll;  /* True when following newest content */
+
+   /* Music button in status bar (hit area for sdl_ui.c tap detection) */
+   int music_btn_x, music_btn_y, music_btn_w, music_btn_h;
+   bool music_playing;          /* Controls icon color: accent when playing, secondary otherwise */
+   SDL_Texture *music_icon_tex; /* White "♪" glyph, tinted via SDL_SetTextureColorMod */
+   int music_icon_w, music_icon_h;
 } ui_transcript_t;
 
 /**

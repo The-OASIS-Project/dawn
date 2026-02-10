@@ -1327,6 +1327,17 @@ static void process_response_queue(void) {
  * @param conn WebSocket connection
  * @return true if authenticated with valid session, false otherwise (error sent)
  */
+/**
+ * @brief Check if connection is a registered satellite session.
+ *
+ * Use this alongside conn_require_auth() at endpoints that satellites
+ * should be allowed to access (e.g., music handlers). This keeps the
+ * satellite permission scope explicit and auditable.
+ */
+static inline bool conn_is_satellite_session(ws_connection_t *conn) {
+   return conn->is_satellite && conn->session != NULL;
+}
+
 bool conn_require_auth(ws_connection_t *conn) {
    if (!conn->authenticated) {
       send_error_impl(conn->wsi, "UNAUTHORIZED", "Authentication required");
@@ -2657,45 +2668,50 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
          }
       }
    }
-   /* Music streaming (per-connection) */
+   /* Music streaming — accessible to authenticated users AND registered satellites */
    else if (strcmp(type, "music_subscribe") == 0) {
-      if (!conn_require_auth(conn)) {
+      if (!conn_require_auth(conn) && !conn_is_satellite_session(conn)) {
          return;
       }
       handle_music_subscribe(conn, payload);
    } else if (strcmp(type, "music_unsubscribe") == 0) {
-      if (!conn_require_auth(conn)) {
+      if (!conn_require_auth(conn) && !conn_is_satellite_session(conn)) {
          return;
       }
       handle_music_unsubscribe(conn);
    } else if (strcmp(type, "music_control") == 0) {
-      if (!conn_require_auth(conn)) {
+      if (!conn_require_auth(conn) && !conn_is_satellite_session(conn)) {
          return;
       }
       if (payload) {
          handle_music_control(conn, payload);
       }
    } else if (strcmp(type, "music_search") == 0) {
-      if (!conn_require_auth(conn)) {
+      if (!conn_require_auth(conn) && !conn_is_satellite_session(conn)) {
          return;
       }
       handle_music_search(conn, payload);
    } else if (strcmp(type, "music_library") == 0) {
-      if (!conn_require_auth(conn)) {
+      if (!conn_require_auth(conn) && !conn_is_satellite_session(conn)) {
          return;
       }
       handle_music_library(conn, payload);
    } else if (strcmp(type, "music_queue") == 0) {
-      if (!conn_require_auth(conn)) {
+      if (!conn_require_auth(conn) && !conn_is_satellite_session(conn)) {
          return;
       }
       if (payload) {
          handle_music_queue(conn, payload);
       }
    }
-   /* Satellite (DAP2 Tier 1) messages */
+   /* Satellite (DAP2 Tier 1) messages — only accept from existing satellites.
+    * Initial registration is handled in the init block above (line ~2924).
+    * Re-registration is rejected to prevent identity spoofing. */
    else if (strcmp(type, "satellite_register") == 0) {
-      if (payload) {
+      if (conn->is_satellite && conn->session) {
+         send_error_impl(conn->wsi, "ALREADY_REGISTERED",
+                         "Satellite already registered on this connection");
+      } else if (conn->is_satellite && payload) {
          handle_satellite_register(conn, payload);
       }
    } else if (strcmp(type, "satellite_query") == 0) {

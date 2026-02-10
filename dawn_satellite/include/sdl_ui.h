@@ -29,6 +29,9 @@
 
 #include "voice_processing.h"
 
+/* Forward declarations */
+struct ws_client;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -103,6 +106,17 @@ void sdl_ui_cleanup(sdl_ui_t *ui);
  * @param text Message text
  */
 void sdl_ui_add_transcript(sdl_ui_t *ui, const char *role, const char *text);
+
+/**
+ * @brief Set WebSocket client for music control
+ *
+ * Must be called before sdl_ui_start() so the music panel can send commands.
+ * Also registers music callbacks on the ws_client.
+ *
+ * @param ui UI context
+ * @param client WebSocket client
+ */
+void sdl_ui_set_ws_client(sdl_ui_t *ui, struct ws_client *client);
 
 #ifdef __cplusplus
 }
