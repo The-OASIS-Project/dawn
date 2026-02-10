@@ -175,8 +175,8 @@ int audio_playback_init(audio_playback_t *ctx, const char *device) {
    }
    ctx->period_size = period_size;
 
-   /* Set buffer size */
-   snd_pcm_uframes_t buffer_size = period_size * 4;
+   /* Set buffer size (8 periods = ~85ms at 48kHz — enough headroom for music streaming) */
+   snd_pcm_uframes_t buffer_size = period_size * 8;
    err = snd_pcm_hw_params_set_buffer_size_near(handle, hw_params, &buffer_size);
    if (err < 0) {
       LOG_ERROR("Cannot set buffer size: %s", snd_strerror(err));
