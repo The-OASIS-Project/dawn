@@ -41,17 +41,23 @@ static _Atomic bool goertzel_initialized = false;
 
 /**
  * Pre-compute Goertzel coefficients for the given sample rate.
- * Called once from audio_playback_init(). Bins are linearly spaced from
- * ~1 bin (fundamental) to Nyquist/2, covering the speech-relevant range.
+ * Called once from audio_playback_init(). Bins are logarithmically spaced
+ * from 30Hz to 16kHz, matching the WebUI's perceptual frequency emphasis.
+ * Log spacing gives more bins to bass/mids where musical energy concentrates.
  */
 static void init_goertzel_tables(unsigned int sample_rate) {
    if (atomic_exchange(&goertzel_initialized, true))
       return;
 
+   float freq_lo = 30.0f;
+   float freq_hi = 16000.0f;
    for (int k = 0; k < SPECTRUM_BINS; k++) {
-      /* Map bin k to a frequency: spread across 0..Nyquist/2
-       * Bin 0 → ~low frequency, bin 63 → ~sample_rate/4 */
-      float freq = (float)(k + 1) * ((float)sample_rate / 4.0f) / (float)SPECTRUM_BINS;
+      /* Logarithmic spacing: freq = 30 * (16000/30)^(k/63) */
+      float t = (float)k / (float)(SPECTRUM_BINS - 1);
+      float freq = freq_lo * powf(freq_hi / freq_lo, t);
+      float nyquist = (float)sample_rate / 2.0f;
+      if (freq > nyquist)
+         freq = nyquist;
       float omega = 2.0f * (float)M_PI * freq / (float)sample_rate;
       goertzel_coeff[k] = 2.0f * cosf(omega);
    }

@@ -65,11 +65,13 @@ typedef struct {
    TTF_Font *date_font;  /* ~24pt for date + watermark */
    SDL_Texture *time_tex, *date_tex;
    int time_w, time_h, date_w, date_h;
-   SDL_Texture *watermark_tex; /* "D.A.W.N." corner watermark */
+   SDL_Texture *watermark_tex; /* "D.A.W.N." corner watermark (bold, 32pt) */
    int watermark_w, watermark_h;
-   char cached_time[8];  /* "HH:MM" - re-render on change */
-   char cached_date[32]; /* "Tuesday, Feb 11" */
-   time_t cached_epoch;  /* Gate time()/localtime() to once per second */
+   int watermark_corner;     /* 0=TL, 1=TR, 2=BL, 3=BR — randomized each cycle */
+   int watermark_last_cycle; /* Last completed pulse cycle (for corner switching) */
+   char cached_time[8];      /* "HH:MM" - re-render on change */
+   char cached_date[32];     /* "Tuesday, Feb 11" */
+   time_t cached_epoch;      /* Gate time()/localtime() to once per second */
    char ai_name[32];
    float drift_x, drift_y; /* Lissajous burn-in prevention */
 

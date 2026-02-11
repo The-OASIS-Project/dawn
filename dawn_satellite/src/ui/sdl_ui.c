@@ -911,7 +911,7 @@ static int sdl_init_on_thread(sdl_ui_t *ui) {
  * Mute Button (lower-center of orb panel)
  * ============================================================================= */
 
-#define MUTE_ICON_SIZE 28
+#define MUTE_ICON_SIZE 32
 #define MUTE_HIT_SIZE 56
 #define MUTE_BTN_Y 548 /* Center Y of button (below orb, above screen edge) */
 #define MUTE_FLASH_SEC 0.15
@@ -1271,6 +1271,10 @@ static void *render_thread_func(void *arg) {
                const char *action = ui_screensaver_handle_tap(&ui->screensaver, tx, ty,
                                                               music_active);
                if (action && ui->ws_client) {
+#ifdef HAVE_OPUS
+                  if (ui->music.music_pb)
+                     music_playback_flush(ui->music.music_pb);
+#endif
                   ws_client_send_music_control(ui->ws_client, action, NULL);
                } else {
                   /* No transport hit — dismiss screensaver */

@@ -29,6 +29,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -44,6 +45,7 @@
 /* Clock mode */
 #define CLOCK_FONT_SIZE 80
 #define DATE_FONT_SIZE 24
+#define WATERMARK_FONT_SIZE 32  /* Bold, 35% larger than date font */
 #define TRACK_FONT_SIZE 36      /* Track title in visualizer pill */
 #define DRIFT_RANGE_X 40.0f     /* +/- horizontal drift in pixels */
 #define DRIFT_RANGE_Y 25.0f     /* +/- vertical drift in pixels */
@@ -191,13 +193,23 @@ static void render_clock(ui_screensaver_t *ss, SDL_Renderer *r, double time_sec,
       SDL_RenderCopy(r, ss->date_tex, NULL, &dst);
    }
 
-   /* "D.A.W.N." watermark fading in/out in each corner */
+   /* "D.A.W.N." watermark — one random corner, switches each pulse cycle */
    if (ss->watermark_tex) {
       /* Smooth sine pulse: oscillates between min and max alpha */
       float pulse = sinf((float)(time_sec / WATERMARK_PERIOD) * 2.0f * (float)M_PI);
       float wm_alpha_f = (float)WATERMARK_MIN_ALPHA +
                          (float)(WATERMARK_MAX_ALPHA - WATERMARK_MIN_ALPHA) * (0.5f + 0.5f * pulse);
       uint8_t wm_alpha = (uint8_t)(wm_alpha_f * (float)alpha / 255.0f);
+
+      /* Pick a new random corner each pulse cycle (at the dimmest point) */
+      int cycle = (int)(time_sec / WATERMARK_PERIOD);
+      if (cycle != ss->watermark_last_cycle) {
+         ss->watermark_last_cycle = cycle;
+         int prev = ss->watermark_corner;
+         do {
+            ss->watermark_corner = rand() % 4;
+         } while (ss->watermark_corner == prev);
+      }
 
       SDL_SetTextureAlphaMod(ss->watermark_tex, wm_alpha);
       SDL_SetTextureColorMod(ss->watermark_tex, COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
@@ -206,18 +218,10 @@ static void render_clock(ui_screensaver_t *ss, SDL_Renderer *r, double time_sec,
       int pad = WATERMARK_PADDING;
       int ww = ss->watermark_w;
       int wh = ss->watermark_h;
-      /* Top-left */
-      SDL_Rect tl = { pad, pad, ww, wh };
-      SDL_RenderCopy(r, ss->watermark_tex, NULL, &tl);
-      /* Top-right */
-      SDL_Rect tr = { ss->screen_w - ww - pad, pad, ww, wh };
-      SDL_RenderCopy(r, ss->watermark_tex, NULL, &tr);
-      /* Bottom-left */
-      SDL_Rect bl = { pad, ss->screen_h - wh - pad, ww, wh };
-      SDL_RenderCopy(r, ss->watermark_tex, NULL, &bl);
-      /* Bottom-right */
-      SDL_Rect br = { ss->screen_w - ww - pad, ss->screen_h - wh - pad, ww, wh };
-      SDL_RenderCopy(r, ss->watermark_tex, NULL, &br);
+      int wx = (ss->watermark_corner & 1) ? (ss->screen_w - ww - pad) : pad;
+      int wy = (ss->watermark_corner & 2) ? (ss->screen_h - wh - pad) : pad;
+      SDL_Rect dst = { wx, wy, ww, wh };
+      SDL_RenderCopy(r, ss->watermark_tex, NULL, &dst);
    }
 }
 
@@ -420,25 +424,43 @@ static void render_rainbow_viz(ui_screensaver_t *ss,
       }
    }
 
-   /* Track info — lower-left, always visible, left-aligned */
+   /* Track info — lower-left, always visible, with shadow backdrop */
    if (ss->track_title_tex) {
       int line_gap = 4;
+      int pad_x = 14, pad_y = 10;
+      int content_w = ss->track_title_w;
+      int content_h = ss->track_title_h;
+      bool has_sub = (ss->track_sub_tex != NULL);
+      if (has_sub) {
+         if (ss->track_sub_w > content_w)
+            content_w = ss->track_sub_w;
+         content_h += line_gap + ss->track_sub_h;
+      }
+
+      int box_w = content_w + 2 * pad_x;
+      int box_h = content_h + 2 * pad_y;
+      int box_x = TRACK_INFO_MARGIN - pad_x;
+      int box_y = ss->screen_h - TRACK_INFO_MARGIN - content_h - pad_y;
+
+      /* Semi-transparent shadow backdrop */
+      uint8_t bg_alpha = (uint8_t)((float)alpha * 0.45f);
+      SDL_SetRenderDrawColor(r, 0, 0, 0, bg_alpha);
+      SDL_Rect bg_rect = { box_x, box_y, box_w, box_h };
+      SDL_RenderFillRect(r, &bg_rect);
+
       int tx = TRACK_INFO_MARGIN;
-      int ty = ss->screen_h - TRACK_INFO_MARGIN - ss->track_title_h;
-      if (ss->track_sub_tex)
-         ty -= (line_gap + ss->track_sub_h);
+      int ty = box_y + pad_y;
 
       /* Title (large, bold, white) */
       SDL_SetTextureAlphaMod(ss->track_title_tex, alpha);
       SDL_Rect title_dst = { tx, ty, ss->track_title_w, ss->track_title_h };
       SDL_RenderCopy(r, ss->track_title_tex, NULL, &title_dst);
 
-      /* Album / Artist subtitle (smaller, slightly dimmed) */
-      if (ss->track_sub_tex) {
+      /* Album / Artist subtitle (brighter) */
+      if (has_sub) {
          int sy = ty + ss->track_title_h + line_gap;
-         uint8_t sub_alpha = (uint8_t)((float)alpha * 0.75f);
-         SDL_SetTextureAlphaMod(ss->track_sub_tex, sub_alpha);
-         SDL_SetTextureColorMod(ss->track_sub_tex, 200, 200, 200);
+         SDL_SetTextureAlphaMod(ss->track_sub_tex, alpha);
+         SDL_SetTextureColorMod(ss->track_sub_tex, 230, 230, 230);
          SDL_Rect sub_dst = { tx, sy, ss->track_sub_w, ss->track_sub_h };
          SDL_RenderCopy(r, ss->track_sub_tex, NULL, &sub_dst);
       }
@@ -511,10 +533,17 @@ int ui_screensaver_init(ui_screensaver_t *ss,
       LOG_WARNING("Screensaver: Failed to load clock font");
    }
 
-   /* Pre-render "D.A.W.N." watermark texture (static, never changes) */
-   if (ss->date_font) {
-      ss->watermark_tex = build_white_tex(renderer, ss->date_font, "D.A.W.N.", &ss->watermark_w,
-                                          &ss->watermark_h);
+   /* Pre-render "D.A.W.N." watermark texture (bold, 32pt, static) */
+   {
+      TTF_Font *wm_font = load_font(font_dir, "SourceSans3-Bold.ttf", FALLBACK_BODY_FONT,
+                                    WATERMARK_FONT_SIZE);
+      if (wm_font) {
+         ss->watermark_tex = build_white_tex(renderer, wm_font, "D.A.W.N.", &ss->watermark_w,
+                                             &ss->watermark_h);
+         TTF_CloseFont(wm_font);
+      }
+      ss->watermark_corner = rand() % 4;
+      ss->watermark_last_cycle = -1;
    }
 
    /* Build transport control icons for visualizer mode */
@@ -764,25 +793,17 @@ void ui_screensaver_update_spectrum(ui_screensaver_t *ss, const float *spectrum,
    float rise_alpha = 1.0f - powf(SMOOTH_RISE_BASE, 60.0f * dt);
    float fall_alpha = 1.0f - powf(SMOOTH_FALL_BASE, 60.0f * dt);
 
-   for (int i = 0; i < SPECTRUM_BINS; i++) {
-      /* Log-frequency mapping: concentrate lower bars on bass/mids.
-       * Raw Goertzel bins are linear 0..12kHz — without this, upper bars are sparse.
-       * Matches ui_music.c: powf(t, 0.6) */
-      float t = (float)i / (float)SPECTRUM_BINS;
-      float log_t = powf(t, 0.6f);
-      int bin = (int)(log_t * (float)(n - 1));
-      if (bin >= n)
-         bin = n - 1;
-
-      /* 3-bin neighbor average for smoothness (matches ui_music.c) */
-      float sum = spectrum[bin];
+   for (int i = 0; i < n; i++) {
+      /* Goertzel bins are already log-spaced (30Hz-16kHz), use directly.
+       * 3-bin neighbor average for smoothness. */
+      float sum = spectrum[i];
       int avg_count = 1;
-      if (bin > 0) {
-         sum += spectrum[bin - 1];
+      if (i > 0) {
+         sum += spectrum[i - 1];
          avg_count++;
       }
-      if (bin < n - 1) {
-         sum += spectrum[bin + 1];
+      if (i < n - 1) {
+         sum += spectrum[i + 1];
          avg_count++;
       }
       float target = sum / (float)avg_count;

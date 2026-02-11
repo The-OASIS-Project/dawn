@@ -2295,39 +2295,18 @@ void ui_music_update_spectrum(ui_music_t *m, const volatile float *spectrum64) {
    if (!m || !spectrum64)
       return;
 
-   /* Apply log-frequency mapping like the WebUI does (processFFTDataForBars).
-    * Raw Goertzel bins are linearly spaced 0..12kHz.  Most music energy is
-    * below 4kHz, so linear mapping leaves bars 16-31 nearly empty.
-    *
-    * WebUI: logT = pow(t, 0.6) — lower frequencies get proportionally more bars.
-    * We replicate this by sampling the 64-bin spectrum with log-spaced indices.
-    *
-    * NOTE: compute_spectrum() already applies peak normalization, noise floor
-    * subtraction (0.05), and sqrt gamma — do NOT re-normalize here or the
-    * loudest bar will always pin to 1.0.
-    */
+   /* Goertzel bins are already log-spaced (30Hz-16kHz), so each pair of
+    * adjacent bins maps naturally to one display bar (64 bins → 32 bars).
+    * Average each pair with neighbor smoothing for visual coherence. */
    float bars[MUSIC_VIZ_BAR_COUNT];
 
    for (int i = 0; i < MUSIC_VIZ_BAR_COUNT; i++) {
-      float t = (float)i / (float)MUSIC_VIZ_BAR_COUNT;
-      /* Log-frequency mapping: concentrate lower bars on bass/mids */
-      float log_t = powf(t, 0.6f);
-      int bin = (int)(log_t * 63.0f); /* 0..63 */
-      if (bin > 63)
-         bin = 63;
-
-      /* Average with neighbors for smoothness (like WebUI's 3-bin average) */
-      float sum = spectrum64[bin];
-      int count = 1;
-      if (bin > 0) {
-         sum += spectrum64[bin - 1];
-         count++;
-      }
-      if (bin < 63) {
-         sum += spectrum64[bin + 1];
-         count++;
-      }
-      float v = sum / (float)count;
+      /* Average 2 adjacent Goertzel bins per display bar */
+      int b0 = i * 2;
+      int b1 = b0 + 1;
+      if (b1 > 63)
+         b1 = 63;
+      float v = (spectrum64[b0] + spectrum64[b1]) * 0.5f;
       if (v > 1.0f)
          v = 1.0f;
       bars[i] = v;

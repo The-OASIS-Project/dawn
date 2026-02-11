@@ -53,9 +53,9 @@
 #define COLOR_TEXT_PRIMARY_G 0xEE
 #define COLOR_TEXT_PRIMARY_B 0xEE
 
-#define COLOR_TEXT_SECONDARY_R 0x7B
-#define COLOR_TEXT_SECONDARY_G 0x87
-#define COLOR_TEXT_SECONDARY_B 0x94
+#define COLOR_TEXT_SECONDARY_R 0x8C
+#define COLOR_TEXT_SECONDARY_G 0x99
+#define COLOR_TEXT_SECONDARY_B 0xA7
 
 /* Tertiary text - dimmed labels, album names (#6B7785)
  * Lightened from #555F6B to meet WCAG AA (4.5:1 against #1B1F24) */
