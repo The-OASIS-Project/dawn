@@ -219,6 +219,8 @@ void satellite_config_init_defaults(satellite_config_t *config) {
    config->sdl_ui.width = 1024;
    config->sdl_ui.height = 600;
    safe_strcpy(config->sdl_ui.font_dir, "assets/fonts", CONFIG_PATH_SIZE);
+   config->sdl_ui.brightness_pct = 100;
+   config->sdl_ui.volume_pct = 80;
 
    /* Logging defaults */
    safe_strcpy(config->logging.level, "info", sizeof(config->logging.level));
@@ -420,6 +422,13 @@ int satellite_config_load(satellite_config_t *config, const char *path) {
          safe_strcpy(config->sdl_ui.font_dir, s, CONFIG_PATH_SIZE);
          free((void *)s);
       }
+
+      int bri = (int)toml_int_or(sdl_ui, "brightness", config->sdl_ui.brightness_pct);
+      if (bri >= 10 && bri <= 100)
+         config->sdl_ui.brightness_pct = bri;
+      int vol = (int)toml_int_or(sdl_ui, "volume", config->sdl_ui.volume_pct);
+      if (vol >= 0 && vol <= 100)
+         config->sdl_ui.volume_pct = vol;
    }
 
    /* Parse [logging] section */
@@ -759,6 +768,8 @@ void satellite_config_print(const satellite_config_t *config) {
    printf("  width = %d\n", config->sdl_ui.width);
    printf("  height = %d\n", config->sdl_ui.height);
    printf("  font_dir = %s\n", config->sdl_ui.font_dir);
+   printf("  brightness = %d\n", config->sdl_ui.brightness_pct);
+   printf("  volume = %d\n", config->sdl_ui.volume_pct);
 
    printf("\n===============================\n\n");
 }
@@ -798,6 +809,135 @@ void satellite_config_set_reconnect_secret(satellite_config_t *config, const cha
    } else {
       fprintf(stderr, "[CONFIG] Warning: Could not save identity to %s\n", identity_path);
    }
+}
+
+void satellite_config_save_ui_prefs(const satellite_config_t *config) {
+   const char *path = satellite_config_get_path();
+   if (!path || !config) {
+      fprintf(stderr, "[CONFIG] Cannot save UI prefs: no config path\n");
+      return;
+   }
+
+   /* Read existing file into memory */
+   FILE *fp = fopen(path, "r");
+   if (!fp) {
+      fprintf(stderr, "[CONFIG] Cannot open %s for reading\n", path);
+      return;
+   }
+
+   /* Read all lines */
+   enum {
+      MAX_LINES = 400
+   };
+   char lines[MAX_LINES][256];
+   int line_count = 0;
+   while (line_count < MAX_LINES && fgets(lines[line_count], sizeof(lines[0]), fp)) {
+      line_count++;
+   }
+   if (line_count == MAX_LINES && !feof(fp)) {
+      fprintf(stderr, "[CONFIG] Warning: config exceeds %d lines, save may truncate\n", MAX_LINES);
+   }
+   fclose(fp);
+
+   /* Track which keys we've updated */
+   bool found_brightness = false;
+   bool found_volume = false;
+   bool in_sdl_ui = false;
+   bool ever_in_sdl_ui = false;
+   int sdl_ui_end = -1; /* Last line of [sdl_ui] section for appending */
+
+   for (int i = 0; i < line_count; i++) {
+      char trimmed[256];
+      strncpy(trimmed, lines[i], sizeof(trimmed) - 1);
+      trimmed[sizeof(trimmed) - 1] = '\0';
+
+      /* Strip leading whitespace */
+      char *p = trimmed;
+      while (*p == ' ' || *p == '\t')
+         p++;
+
+      /* Detect section headers */
+      if (*p == '[') {
+         if (in_sdl_ui) {
+            sdl_ui_end = i; /* Leaving [sdl_ui], mark boundary */
+         }
+         in_sdl_ui = (strncmp(p, "[sdl_ui]", 8) == 0);
+         if (in_sdl_ui)
+            ever_in_sdl_ui = true;
+         continue;
+      }
+
+      if (in_sdl_ui) {
+         sdl_ui_end = i + 1;
+         if (strncmp(p, "brightness", 10) == 0 && (p[10] == ' ' || p[10] == '=')) {
+            snprintf(lines[i], sizeof(lines[0]), "brightness = %d\n",
+                     config->sdl_ui.brightness_pct);
+            found_brightness = true;
+         } else if (strncmp(p, "volume", 6) == 0 && (p[6] == ' ' || p[6] == '=')) {
+            snprintf(lines[i], sizeof(lines[0]), "volume = %d\n", config->sdl_ui.volume_pct);
+            found_volume = true;
+         }
+      }
+   }
+
+   /* If [sdl_ui] was the last section, mark end at EOF */
+   if (in_sdl_ui) {
+      sdl_ui_end = line_count;
+   }
+
+   /* Write to temp file, then atomic rename to prevent corruption on power loss */
+   char tmp_path[512];
+   snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+
+   fp = fopen(tmp_path, "w");
+   if (!fp) {
+      fprintf(stderr, "[CONFIG] Cannot open %s for writing\n", tmp_path);
+      return;
+   }
+
+   for (int i = 0; i < line_count; i++) {
+      /* Append missing keys at end of [sdl_ui] section */
+      if (i == sdl_ui_end) {
+         if (!found_brightness) {
+            fprintf(fp, "brightness = %d\n", config->sdl_ui.brightness_pct);
+            found_brightness = true;
+         }
+         if (!found_volume) {
+            fprintf(fp, "volume = %d\n", config->sdl_ui.volume_pct);
+            found_volume = true;
+         }
+      }
+      fputs(lines[i], fp);
+   }
+
+   /* If [sdl_ui] was the last section, append at EOF */
+   if (sdl_ui_end == line_count) {
+      if (!found_brightness) {
+         fprintf(fp, "brightness = %d\n", config->sdl_ui.brightness_pct);
+      }
+      if (!found_volume) {
+         fprintf(fp, "volume = %d\n", config->sdl_ui.volume_pct);
+      }
+   }
+
+   /* No [sdl_ui] section at all — create one at EOF */
+   if (!ever_in_sdl_ui) {
+      fprintf(fp, "\n[sdl_ui]\nbrightness = %d\nvolume = %d\n", config->sdl_ui.brightness_pct,
+              config->sdl_ui.volume_pct);
+   }
+
+   /* Flush and sync before atomic rename */
+   fflush(fp);
+   fsync(fileno(fp));
+   fclose(fp);
+
+   if (rename(tmp_path, path) != 0) {
+      fprintf(stderr, "[CONFIG] Failed to rename %s -> %s: %s\n", tmp_path, path, strerror(errno));
+      return;
+   }
+
+   printf("[CONFIG] UI prefs saved (brightness=%d, volume=%d)\n", config->sdl_ui.brightness_pct,
+          config->sdl_ui.volume_pct);
 }
 
 bool satellite_config_path_valid(const char *path) {

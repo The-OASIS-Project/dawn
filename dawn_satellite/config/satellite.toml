@@ -122,6 +122,11 @@ height = 600
 # Requires: IBMPlexMono-Regular.ttf, SourceSans3-Regular.ttf
 font_dir = "assets/fonts"
 
+# Saved slider values (10-100 brightness, 0-100 volume)
+# Automatically updated when sliders are adjusted via the UI
+brightness = 100
+volume = 80
+
 # =============================================================================
 # Voice Activity Detection (VAD)
 # =============================================================================

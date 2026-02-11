@@ -160,6 +160,8 @@ typedef struct satellite_config {
       int width;
       int height;
       char font_dir[CONFIG_PATH_SIZE];
+      int brightness_pct; /* 10-100, persisted across restarts */
+      int volume_pct;     /* 0-100, persisted across restarts */
    } sdl_ui;
 
    /* Logging configuration */
@@ -262,6 +264,15 @@ const char *satellite_config_get_path(void);
  * @param secret Session secret (64 hex chars)
  */
 void satellite_config_set_reconnect_secret(satellite_config_t *config, const char *secret);
+
+/**
+ * @brief Save UI preferences (brightness, volume) to TOML config file
+ *
+ * Updates the [sdl_ui] section in-place if keys exist, otherwise appends them.
+ *
+ * @param config Pointer to config structure with current values
+ */
+void satellite_config_save_ui_prefs(const satellite_config_t *config);
 
 /**
  * @brief Check if a model path exists and is readable

@@ -45,6 +45,8 @@ typedef struct sdl_ui sdl_ui_t;
 /**
  * @brief SDL UI configuration
  */
+typedef struct satellite_config satellite_config_t;
+
 typedef struct {
    int width;                      /* Display width (default: 1024) */
    int height;                     /* Display height (default: 600) */
@@ -53,6 +55,7 @@ typedef struct {
    voice_ctx_t *voice_ctx;         /* Voice processing context for state polling */
    const char *satellite_name;     /* Satellite identity name (e.g., "Kitchen Assistant") */
    const char *satellite_location; /* Satellite location (e.g., "kitchen") */
+   satellite_config_t *sat_config; /* For persisting UI prefs (brightness, volume) */
 } sdl_ui_config_t;
 
 /**

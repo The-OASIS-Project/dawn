@@ -953,6 +953,7 @@ int main(int argc, char *argv[]) {
          .voice_ctx = voice_ctx,
          .satellite_name = config.identity.name,
          .satellite_location = config.identity.location,
+         .sat_config = &config,
       };
       sdl_ui = sdl_ui_init(&ui_config);
       if (sdl_ui) {

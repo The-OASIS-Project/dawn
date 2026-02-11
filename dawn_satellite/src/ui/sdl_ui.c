@@ -41,6 +41,7 @@
 
 #include "audio_playback.h"
 #include "logging.h"
+#include "satellite_config.h"
 #include "ui/backlight.h"
 #include "ui/ui_colors.h"
 #include "ui/ui_music.h"
@@ -177,7 +178,8 @@ struct sdl_ui {
    ui_slider_t brightness_slider;
    ui_slider_t volume_slider;
    bool sliders_initialized;
-   audio_playback_t *audio_pb; /* For master volume control */
+   audio_playback_t *audio_pb;     /* For master volume control */
+   satellite_config_t *sat_config; /* For persisting UI prefs */
 };
 
 /* =============================================================================
@@ -984,14 +986,18 @@ static int sdl_init_on_thread(sdl_ui_t *ui) {
       ui->brightness_slider.min_value = 0.10f;
       if (backlight_available()) {
          ui->brightness_slider.value = (float)backlight_get() / 100.0f;
+      } else if (ui->sat_config && ui->sat_config->sdl_ui.brightness_pct >= 10) {
+         ui->brightness_slider.value = (float)ui->sat_config->sdl_ui.brightness_pct / 100.0f;
       } else {
-         ui->brightness_slider.value = 1.0f; /* No dimming by default on HDMI */
+         ui->brightness_slider.value = 1.0f;
       }
 
       ui_slider_init(&ui->volume_slider, ui->renderer, slider_track_x, 0, slider_track_w,
                      COLOR_SPEAKING_R, COLOR_SPEAKING_G, COLOR_SPEAKING_B, "VOLUME",
                      ui->transcript.label_font);
-      if (ui->audio_pb) {
+      if (ui->sat_config && ui->sat_config->sdl_ui.volume_pct >= 0) {
+         ui->volume_slider.value = (float)ui->sat_config->sdl_ui.volume_pct / 100.0f;
+      } else if (ui->audio_pb) {
          ui->volume_slider.value = (float)audio_playback_get_volume(ui->audio_pb) / 100.0f;
       } else {
          ui->volume_slider.value = 0.8f;
@@ -1268,6 +1274,15 @@ static void *render_thread_func(void *arg) {
             }
          } else if (event.type == SDL_FINGERUP) {
             ui->finger_scrolling = false;
+
+            /* Persist slider values to config on release */
+            if ((ui->brightness_slider.dragging || ui->volume_slider.dragging) && ui->sat_config) {
+               ui->sat_config->sdl_ui.brightness_pct = (int)(ui->brightness_slider.value * 100.0f +
+                                                             0.5f);
+               ui->sat_config->sdl_ui.volume_pct = (int)(ui->volume_slider.value * 100.0f + 0.5f);
+               satellite_config_save_ui_prefs(ui->sat_config);
+            }
+
             ui_slider_finger_up(&ui->brightness_slider);
             ui_slider_finger_up(&ui->volume_slider);
             ui_music_handle_finger_up(&ui->music);
@@ -1352,6 +1367,7 @@ sdl_ui_t *sdl_ui_init(const sdl_ui_config_t *config) {
       snprintf(ui->satellite_location, sizeof(ui->satellite_location), "%s",
                config->satellite_location);
    }
+   ui->sat_config = config->sat_config;
 
    return ui;
 }
@@ -1462,6 +1478,12 @@ void sdl_ui_set_audio_playback(sdl_ui_t *ui, struct audio_playback *pb) {
    if (!ui)
       return;
    ui->audio_pb = (audio_playback_t *)pb;
+
+   /* Apply saved volume from config */
+   if (pb && ui->sliders_initialized) {
+      int vol = (int)(ui->volume_slider.value * 100.0f + 0.5f);
+      set_master_volume(ui, vol);
+   }
 }
 
 #ifdef HAVE_OPUS
