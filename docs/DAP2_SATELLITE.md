@@ -269,7 +269,9 @@ dawn_satellite/
 │       ├── ui_slider.h         # Slider types and API
 │       ├── ui_touch.c          # Touch gesture recognition
 │       ├── ui_touch.h          # Touch state types
-│       ├── ui_colors.h         # Color constants
+│       ├── ui_screensaver.c    # Screensaver (clock + fullscreen visualizer)
+│       ├── ui_screensaver.h    # Screensaver types and API
+│       ├── ui_colors.h         # Color constants + HSV/easing utilities
 │       ├── backlight.c         # Display brightness control
 │       └── backlight.h         # Backlight API (sysfs + software fallback)
 └── CMakeLists.txt
@@ -397,6 +399,13 @@ brightness = 64  # 0-255
 [display]
 enabled = false
 device = "/dev/fb1"
+
+# =============================================================================
+# Screensaver / Ambient Mode
+# =============================================================================
+[screensaver]
+enabled = true   # Activate after idle timeout
+timeout = 120    # Seconds of inactivity before activation (30-600)
 
 # =============================================================================
 # Logging
@@ -805,6 +814,17 @@ wscat -c ws://localhost:8080
 32. **Volume slider** - ALSA mixer control from settings panel
 33. **Persistent settings** - Brightness and volume saved to config file across restarts
 
+### Implemented — Screensaver / Ambient Mode
+
+34. **Clock mode** - Time and date centered with Lissajous drift for burn-in prevention
+35. **"D.A.W.N." watermarks** - Corner watermarks with sine-pulse fade animation
+36. **Fullscreen rainbow visualizer** - 64-bin Goertzel FFT spectrum with HSV color cycling, peak hold, gradient reflections
+37. **Track info pill** - Two-line display (large title, smaller album/artist) with fade-in/out on track change
+38. **dB-scale spectrum** - Matches WebUI's getByteFrequencyData approach (60dB range, 0.7 gamma)
+39. **Auto-activation** - Configurable idle timeout (default 120s), panels block timer
+40. **Manual trigger** - Tap music panel visualizer to enter fullscreen mode
+41. **Wake word dismissal** - Only dismissed by wake word detection, not simple VAD
+
 ### Implemented — Reliability & Bug Fixes
 
 23. **App-level keep-alive** - `satellite_ping` every 10s (WS-level pings disabled for lws 4.3.5 compat)
@@ -818,7 +838,7 @@ wscat -c ws://localhost:8080
 
 1. [ ] **Barge-in support** - Interrupt TTS by speaking (stubbed, not connected)
 2. [x] ~~**Quick actions panel**~~ - Replaced by status bar icon pattern (icons appear in transcript header as features ship)
-3. [ ] **Screensaver / ambient mode** - Photo frame with Ken Burns effect, clock display, ambient orb
+3. [x] ~~**Screensaver / ambient mode**~~ - Clock with Lissajous drift + fullscreen rainbow FFT visualizer
 4. [ ] **TTS ducking during music** - Lower music volume during speech output
 5. [ ] **Multi-satellite routing** - Daemon routes by location
 6. [ ] **Speaker identification** - Personalized responses per user

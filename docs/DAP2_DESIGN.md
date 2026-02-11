@@ -1,7 +1,7 @@
 # Dawn Audio Protocol 2.0 (DAP 2) Design Document
 
 **Status**: Implementation In Progress (Phase 0-3 Complete, Phase 3.5 In Progress)
-**Version**: 0.8
+**Version**: 0.9
 **Date**: February 2026
 
 ## Executive Summary
@@ -970,7 +970,7 @@ This phase addresses the architecture reviewer's critical finding: existing code
 
 ### Phase 3.5: Touchscreen UI (SDL2)
 
-**Status**: 🔨 **IN PROGRESS** (visualization, transcript, touch scroll, settings panel, music panel complete; screensaver/ambient remaining)
+**Status**: 🔨 **IN PROGRESS** (visualization, transcript, touch scroll, settings panel, music panel, screensaver complete; theme support remaining)
 
 **Goal**: Premium touchscreen interface for Tier 1 satellites with attached displays
 
@@ -1022,12 +1022,16 @@ This phase addresses the architecture reviewer's critical finding: existing code
    - Volume slider (ALSA mixer control)
    - Persistent brightness/volume across restarts (saved to config)
 
-6. **Screensaver/Ambient Mode**: ❌ NOT STARTED
-   - Photo frame with Ken Burns effect (slow pan/zoom)
-   - Cross-fade transitions between images
-   - Clock display option (digital or analog)
-   - Ambient orb mode (breathing animation, "always ready" indicator)
-   - Wake on touch or wake word
+6. **Screensaver/Ambient Mode**: ✅ COMPLETE
+   - **Clock mode**: Time (80pt mono) and date (24pt cyan) centered with Lissajous drift for burn-in prevention
+   - **"D.A.W.N." watermarks**: All four corners with sine-pulse fade animation (8s period)
+   - **Fullscreen rainbow visualizer**: 64-bin Goertzel FFT with HSV color cycling (precomputed LUT), peak hold indicators, gradient reflections
+   - **Track info pill**: Two-line layout — large title (36pt) above smaller album/artist (24pt) with bullet separator, fade-in on track change, fade-out after 5s
+   - **dB-scale spectrum processing**: Matches WebUI (60dB range, 0.7 gamma curve)
+   - **Auto mode switching**: Clock when idle, visualizer when music plays; manual trigger via tap on music panel visualizer
+   - **Configurable idle timeout**: 30-600s (default 120s), `[screensaver]` config section
+   - **Wake word dismissal**: Only dismissed by wake word detection (SILENCE→non-SILENCE), not simple VAD
+   - **Frame rate management**: 30 FPS visualizer, 10 FPS clock, main scene skipped when screensaver opaque
 
 #### Touch Interactions — 🔨 MOSTLY COMPLETE
 
@@ -1038,9 +1042,10 @@ This phase addresses the architecture reviewer's critical finding: existing code
 | Drag transcript | Scroll conversation history | ✅ |
 | Swipe down from top | Settings panel (server info, connection, uptime, brightness/volume) | ✅ |
 | Tap music icon | Open music player panel | ✅ |
+| Tap music visualizer | Fullscreen rainbow visualizer (closes music panel) | ✅ |
+| Tap during screensaver | Dismiss screensaver (first touch swallowed) | ✅ |
 | Swipe up from bottom | Unassigned (reserved) | Closes settings if open, otherwise no-op |
 | Swipe left/right | Navigate conversation history | ❌ |
-| Tap anywhere (screensaver) | Wake display | ❌ |
 
 #### Layout
 
@@ -1052,7 +1057,7 @@ This phase addresses the architecture reviewer's critical finding: existing code
 |----------|------------|
 | Texture cache | ~10 MB (glow frames, icons, font atlas) |
 | Photo buffer | ~4 MB (2x scaled images for crossfade) |
-| Frame rate | 30 FPS active, 15 FPS screensaver, 10 FPS idle |
+| Frame rate | 30 FPS active/visualizer, 10 FPS clock screensaver, 10 FPS idle |
 
 #### Color Palette (matching WebUI variables.css)
 
@@ -1091,7 +1096,9 @@ dawn_satellite/src/ui/
 ├── ui_slider.h         # Slider types and API
 ├── ui_touch.c          # Touch gesture recognition (tap/long-press/swipe)
 ├── ui_touch.h          # Touch state types
-├── ui_colors.h         # Color constants (matching WebUI variables.css)
+├── ui_screensaver.c    # Screensaver (clock + fullscreen rainbow visualizer)
+├── ui_screensaver.h    # Screensaver types and API
+├── ui_colors.h         # Color constants, HSV conversion, easing utilities
 ├── backlight.c         # Display brightness (sysfs + software dimming fallback)
 └── backlight.h         # Backlight control API
 ```
@@ -1104,10 +1111,10 @@ sudo usermod -aG video,render $USER
 ```
 
 **Deliverables**:
-- `dawn_satellite/src/ui/` with SDL2 implementation
-- Touch gesture system
-- Screensaver with photo frame mode
-- Media player overlay
+- `dawn_satellite/src/ui/` with SDL2 implementation ✅
+- Touch gesture system ✅
+- Screensaver with clock + fullscreen rainbow visualizer ✅
+- Media player panel (Playing/Queue/Library) ✅
 - Theme support (cyan, purple, terminal green)
 
 **Exit Criteria**: UI indistinguishable from premium smart home device, <16ms frame time
@@ -1411,3 +1418,4 @@ name = "Guest Room"
 - v0.6 (Feb 2026): Touch scroll complete (drag-to-scroll with auto-scroll management). Settings panel complete (server info, connection status, device identity, IP, uptime, session duration). TTS playback queue (producer-consumer pipelining). Emoji stripping unified (display + TTS, full SMP coverage 0x1F000-0x1FFFF). Transcript capacity increased (40 entries, 4KB text).
 - v0.7 (Feb 2026): Music player panel complete (Playing/Queue/Library tabs, transport controls, visualizer, Opus audio streaming). Brightness and volume sliders in settings panel. Software dimming fallback for HDMI displays (sysfs backlight + SDL overlay). Paginated library browsing (50 items/page). Daemon-side satellite auth whitelist for music message handlers. Persistent brightness/volume settings across restarts.
 - v0.8 (Feb 2026): **Major architecture change** — Tier 2 (ESP32) now uses WebSocket + PCM audio instead of custom binary protocol. This completely eliminates DAP1. Both tiers connect to the same WebUI WebSocket port. Tier 2 reuses the WebUI's existing audio pipeline (binary message types 0x01/0x02/0x11/0x12, audio buffer, worker threads, sentence-level TTS streaming). Raw PCM at 16kHz for v1 (ADPCM optional for future v2). No music on Tier 2 v1.
+- v0.9 (Feb 2026): Screensaver/ambient mode complete. Two modes: clock (time/date with Lissajous drift, D.A.W.N. corner watermarks) and fullscreen rainbow FFT visualizer (64 Goertzel bins, dB-scale matching WebUI, peak hold, gradient reflections, two-line track info pill). Configurable idle timeout, manual trigger via visualizer tap, wake-word-only dismissal.

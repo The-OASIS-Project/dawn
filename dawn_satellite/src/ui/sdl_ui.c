@@ -179,6 +179,15 @@ struct sdl_ui {
 
    /* Screensaver / ambient mode */
    ui_screensaver_t screensaver;
+
+   /* Mute button (lower-center of orb panel) */
+   struct {
+      SDL_Texture *mic_on_tex;  /* Unmuted icon (white, 28x28) */
+      SDL_Texture *mic_off_tex; /* Muted icon with slash (white, 28x28) */
+      int icon_w, icon_h;
+      int hit_x, hit_y, hit_w, hit_h; /* Touch target */
+      double tap_time;                /* For flash feedback */
+   } mute_btn;
 };
 
 /* =============================================================================
@@ -629,6 +638,18 @@ static void handle_gesture(sdl_ui_t *ui, touch_gesture_t gesture, double time_se
 
    switch (gesture.type) {
       case TOUCH_GESTURE_TAP:
+         /* Mute button (always accessible when no panel is open) */
+         if (!panel_any_open(ui) && gesture.x >= ui->mute_btn.hit_x &&
+             gesture.x < ui->mute_btn.hit_x + ui->mute_btn.hit_w &&
+             gesture.y >= ui->mute_btn.hit_y &&
+             gesture.y < ui->mute_btn.hit_y + ui->mute_btn.hit_h) {
+            bool muted = !voice_processing_is_muted(ui->voice_ctx);
+            voice_processing_set_mute(ui->voice_ctx, muted);
+            ui->mute_btn.tap_time = time_sec;
+            LOG_INFO("UI: Mic %s", muted ? "muted" : "unmuted");
+            break;
+         }
+
          /* Music button tap (check first, works even when no panel open).
           * Skip if tap is inside the open music panel — let the panel's
           * own tab handler process it instead. */
@@ -887,10 +908,120 @@ static int sdl_init_on_thread(sdl_ui_t *ui) {
 }
 
 /* =============================================================================
+ * Mute Button (lower-center of orb panel)
+ * ============================================================================= */
+
+#define MUTE_ICON_SIZE 28
+#define MUTE_HIT_SIZE 56
+#define MUTE_BTN_Y 548 /* Center Y of button (below orb, above screen edge) */
+#define MUTE_FLASH_SEC 0.15
+
+/** @brief Build a microphone icon as a white render-target texture */
+static SDL_Texture *build_mic_icon(SDL_Renderer *r, int sz, bool muted) {
+   SDL_Texture *tex = SDL_CreateTexture(r, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET, sz,
+                                        sz);
+   if (!tex)
+      return NULL;
+   SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+   SDL_SetRenderTarget(r, tex);
+   SDL_SetRenderDrawColor(r, 0, 0, 0, 0);
+   SDL_RenderClear(r);
+   SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
+
+   int cx = sz / 2; /* 14 */
+
+   /* Capsule body (rounded rect) */
+   int cap_w = 8, cap_top = 2, cap_bot = 13;
+   SDL_Rect cap = { cx - cap_w / 2, cap_top + 3, cap_w, cap_bot - cap_top - 3 };
+   SDL_RenderFillRect(r, &cap);
+   /* Round top */
+   int cap_r = cap_w / 2;
+   for (int dy = -cap_r; dy <= 0; dy++) {
+      int dx = (int)sqrtf((float)(cap_r * cap_r - dy * dy));
+      SDL_RenderDrawLine(r, cx - dx, cap_top + cap_r + dy, cx + dx, cap_top + cap_r + dy);
+   }
+   /* Round bottom */
+   for (int dy = 0; dy <= cap_r; dy++) {
+      int dx = (int)sqrtf((float)(cap_r * cap_r - dy * dy));
+      SDL_RenderDrawLine(r, cx - dx, cap_bot - cap_r + dy, cx + dx, cap_bot - cap_r + dy);
+   }
+
+   /* Cradle (U-shape) */
+   int cr = 7, cy = 13;
+   SDL_RenderDrawLine(r, cx - cr, 9, cx - cr, cy);
+   SDL_RenderDrawLine(r, cx - cr + 1, 9, cx - cr + 1, cy);
+   SDL_RenderDrawLine(r, cx + cr, 9, cx + cr, cy);
+   SDL_RenderDrawLine(r, cx + cr - 1, 9, cx + cr - 1, cy);
+   for (int dy = 0; dy <= cr; dy++) {
+      int dx = (int)sqrtf((float)(cr * cr - dy * dy));
+      SDL_RenderDrawLine(r, cx - dx, cy + dy, cx + dx, cy + dy);
+   }
+
+   /* Stem */
+   SDL_Rect stem = { cx - 1, cy + cr, 2, 4 };
+   SDL_RenderFillRect(r, &stem);
+
+   /* Base */
+   SDL_Rect base = { cx - 5, cy + cr + 4, 10, 2 };
+   SDL_RenderFillRect(r, &base);
+
+   /* Diagonal slash (muted only) */
+   if (muted) {
+      for (int off = -1; off <= 1; off++) {
+         SDL_RenderDrawLine(r, sz - 4 + off, 1, 3 + off, sz - 2);
+      }
+   }
+
+   SDL_SetRenderTarget(r, NULL);
+   return tex;
+}
+
+static void render_mute_button(sdl_ui_t *ui, SDL_Renderer *r, double time_sec) {
+   /* Lazy-init textures on first frame */
+   if (!ui->mute_btn.mic_on_tex) {
+      ui->mute_btn.mic_on_tex = build_mic_icon(r, MUTE_ICON_SIZE, false);
+      ui->mute_btn.mic_off_tex = build_mic_icon(r, MUTE_ICON_SIZE, true);
+      ui->mute_btn.icon_w = MUTE_ICON_SIZE;
+      ui->mute_btn.icon_h = MUTE_ICON_SIZE;
+      ui->mute_btn.hit_w = MUTE_HIT_SIZE;
+      ui->mute_btn.hit_h = MUTE_HIT_SIZE;
+      ui->mute_btn.hit_x = ORB_PANEL_WIDTH / 2 - MUTE_HIT_SIZE / 2;
+      ui->mute_btn.hit_y = MUTE_BTN_Y - MUTE_HIT_SIZE / 2;
+      ui->mute_btn.tap_time = -1.0;
+   }
+
+   bool muted = voice_processing_is_muted(ui->voice_ctx);
+   SDL_Texture *tex = muted ? ui->mute_btn.mic_off_tex : ui->mute_btn.mic_on_tex;
+   if (!tex)
+      return;
+
+   /* Color: white flash on tap, red when muted, secondary when unmuted */
+   double since_tap = time_sec - ui->mute_btn.tap_time;
+   if (since_tap >= 0.0 && since_tap < MUTE_FLASH_SEC) {
+      SDL_SetTextureColorMod(tex, 0xEE, 0xEE, 0xEE);
+   } else if (muted) {
+      SDL_SetTextureColorMod(tex, COLOR_ERROR_R, COLOR_ERROR_G, COLOR_ERROR_B);
+   } else {
+      SDL_SetTextureColorMod(tex, COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
+                             COLOR_TEXT_SECONDARY_B);
+   }
+
+   /* Center icon within hit area */
+   int icon_x = ui->mute_btn.hit_x + (ui->mute_btn.hit_w - ui->mute_btn.icon_w) / 2;
+   int icon_y = ui->mute_btn.hit_y + (ui->mute_btn.hit_h - ui->mute_btn.icon_h) / 2;
+   SDL_Rect dst = { icon_x, icon_y, ui->mute_btn.icon_w, ui->mute_btn.icon_h };
+   SDL_RenderCopy(r, tex, NULL, &dst);
+}
+
+/* =============================================================================
  * SDL Cleanup (called on render thread)
  * ============================================================================= */
 
 static void sdl_cleanup_on_thread(sdl_ui_t *ui) {
+   if (ui->mute_btn.mic_on_tex)
+      SDL_DestroyTexture(ui->mute_btn.mic_on_tex);
+   if (ui->mute_btn.mic_off_tex)
+      SDL_DestroyTexture(ui->mute_btn.mic_off_tex);
    ui_screensaver_cleanup(&ui->screensaver);
    ui_slider_cleanup(&ui->brightness_slider);
    ui_slider_cleanup(&ui->volume_slider);
@@ -1004,6 +1135,9 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
       int orb_cy = ui->height / 2;
       ui_orb_render(&ui->orb, r, orb_cx, orb_cy, state, vad_prob, audio_amp, time_sec);
 
+      /* Mute button below orb */
+      render_mute_button(ui, r, time_sec);
+
       /* Poll status detail for transcript display */
       voice_processing_get_status_detail(ui->voice_ctx, ui->transcript.status_detail,
                                          sizeof(ui->transcript.status_detail));
@@ -1013,6 +1147,7 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
 
       /* Update music playing state for transcript icon color */
       ui->transcript.music_playing = ui_music_is_playing(&ui->music);
+      ui->transcript.mic_muted = voice_processing_is_muted(ui->voice_ctx);
 
       /* Slide-in panels: update animation, render scrim + panels */
       panel_tick(ui, time_sec);

@@ -459,21 +459,57 @@ void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_stat
    /* Render state label at top */
    if (t->label_font) {
       ui_color_t state_color = ui_label_color_for_state(state);
-      SDL_Color label_sdl = { state_color.r, state_color.g, state_color.b, 255 };
 
-      char label_text[32];
-      snprintf(label_text, sizeof(label_text), "[%s]", ui_state_label(state));
+      char label_text[48];
+      if (t->mic_muted) {
+         snprintf(label_text, sizeof(label_text), "[%s]  [MUTED]", ui_state_label(state));
+      } else {
+         snprintf(label_text, sizeof(label_text), "[%s]", ui_state_label(state));
+      }
 
       /* State label changes frequently so we don't cache it */
-      SDL_Surface *label_surface = TTF_RenderUTF8_Blended(t->label_font, label_text, label_sdl);
-      if (label_surface) {
-         SDL_Texture *label_tex = SDL_CreateTextureFromSurface(renderer, label_surface);
-         if (label_tex) {
-            SDL_Rect dst = { x, label_y, label_surface->w, label_surface->h };
-            SDL_RenderCopy(renderer, label_tex, NULL, &dst);
-            SDL_DestroyTexture(label_tex);
+      /* Render state portion in state color, then muted indicator in red */
+      if (!t->mic_muted) {
+         SDL_Color label_sdl = { state_color.r, state_color.g, state_color.b, 255 };
+         SDL_Surface *label_surface = TTF_RenderUTF8_Blended(t->label_font, label_text, label_sdl);
+         if (label_surface) {
+            SDL_Texture *label_tex = SDL_CreateTextureFromSurface(renderer, label_surface);
+            if (label_tex) {
+               SDL_Rect dst = { x, label_y, label_surface->w, label_surface->h };
+               SDL_RenderCopy(renderer, label_tex, NULL, &dst);
+               SDL_DestroyTexture(label_tex);
+            }
+            SDL_FreeSurface(label_surface);
          }
-         SDL_FreeSurface(label_surface);
+      } else {
+         /* Render state label */
+         char state_str[32];
+         snprintf(state_str, sizeof(state_str), "[%s]", ui_state_label(state));
+         SDL_Color label_sdl = { state_color.r, state_color.g, state_color.b, 255 };
+         SDL_Surface *state_surface = TTF_RenderUTF8_Blended(t->label_font, state_str, label_sdl);
+         if (state_surface) {
+            SDL_Texture *state_tex = SDL_CreateTextureFromSurface(renderer, state_surface);
+            if (state_tex) {
+               SDL_Rect dst = { x, label_y, state_surface->w, state_surface->h };
+               SDL_RenderCopy(renderer, state_tex, NULL, &dst);
+               SDL_DestroyTexture(state_tex);
+            }
+            int muted_x = x + state_surface->w + 8;
+            SDL_FreeSurface(state_surface);
+
+            /* Render [MUTED] in red */
+            SDL_Color red = { COLOR_ERROR_R, COLOR_ERROR_G, COLOR_ERROR_B, 255 };
+            SDL_Surface *muted_surface = TTF_RenderUTF8_Blended(t->label_font, "[MUTED]", red);
+            if (muted_surface) {
+               SDL_Texture *muted_tex = SDL_CreateTextureFromSurface(renderer, muted_surface);
+               if (muted_tex) {
+                  SDL_Rect dst = { muted_x, label_y, muted_surface->w, muted_surface->h };
+                  SDL_RenderCopy(renderer, muted_tex, NULL, &dst);
+                  SDL_DestroyTexture(muted_tex);
+               }
+               SDL_FreeSurface(muted_surface);
+            }
+         }
       }
    }
 

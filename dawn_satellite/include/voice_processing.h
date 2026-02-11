@@ -138,6 +138,27 @@ void voice_processing_trigger_wake(voice_ctx_t *ctx);
 void voice_processing_cancel(voice_ctx_t *ctx);
 
 /**
+ * @brief Set microphone mute state
+ *
+ * Thread-safe: uses atomic flag, effective within ~32ms (one voice loop
+ * iteration). When muted, captured audio is zeroed before VAD processing,
+ * preventing wake word detection and voice activation.
+ * Music playback is unaffected.
+ *
+ * @param ctx Voice processing context
+ * @param muted true to mute microphone, false to unmute
+ */
+void voice_processing_set_mute(voice_ctx_t *ctx, bool muted);
+
+/**
+ * @brief Get current microphone mute state
+ *
+ * @param ctx Voice processing context
+ * @return true if microphone is muted
+ */
+bool voice_processing_is_muted(const voice_ctx_t *ctx);
+
+/**
  * @brief Get current VAD speech probability
  *
  * Returns the most recent speech probability from VAD processing.

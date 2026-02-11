@@ -200,6 +200,7 @@ struct voice_ctx {
    /* Touch-triggered flags (set from UI thread, consumed in voice loop) */
    atomic_bool manual_wake_requested;
    atomic_bool cancel_requested;
+   atomic_bool mic_muted; /* Mic mute: zeroes audio before VAD */
 
    /* Response timeout tracking */
    time_t waiting_start;
@@ -595,6 +596,7 @@ voice_ctx_t *voice_processing_init(const satellite_config_t *config) {
    atomic_store(&ctx->response_complete, false);
    atomic_store(&ctx->manual_wake_requested, false);
    atomic_store(&ctx->cancel_requested, false);
+   atomic_store(&ctx->mic_muted, false);
 
    ctx->state = VOICE_STATE_SILENCE;
    ctx->running = true;
@@ -785,6 +787,15 @@ void voice_processing_cancel(voice_ctx_t *ctx) {
       atomic_store(&ctx->cancel_requested, true);
       atomic_store(&ctx->tts_stop_flag, 1);
    }
+}
+
+void voice_processing_set_mute(voice_ctx_t *ctx, bool muted) {
+   if (ctx)
+      atomic_store(&ctx->mic_muted, muted);
+}
+
+bool voice_processing_is_muted(const voice_ctx_t *ctx) {
+   return ctx ? atomic_load(&ctx->mic_muted) : false;
 }
 
 float voice_processing_get_vad_probability(const voice_ctx_t *ctx) {
@@ -1017,7 +1028,7 @@ int voice_processing_loop(voice_ctx_t *ctx,
 
       /* Check UI-triggered flags before state machine */
       if (atomic_exchange(&ctx->manual_wake_requested, false)) {
-         if (ctx->state == VOICE_STATE_SILENCE) {
+         if (ctx->state == VOICE_STATE_SILENCE && !atomic_load(&ctx->mic_muted)) {
             LOG_INFO("Manual wake triggered from UI — awaiting speech");
             ctx->audio_buffer_len = 0;
             ctx->speech_frame_count = 0;
@@ -1097,6 +1108,11 @@ int voice_processing_loop(voice_ctx_t *ctx,
                LOG_ERROR("audio_capture_read returned %zd after wait reported %zu available",
                          samples, available);
                continue;
+            }
+
+            /* Zero audio when mic is muted (VAD sees silence, no wake word) */
+            if (atomic_load(&ctx->mic_muted)) {
+               memset(frame_buffer, 0, (size_t)samples * sizeof(int16_t));
             }
 
             /* Run VAD */
