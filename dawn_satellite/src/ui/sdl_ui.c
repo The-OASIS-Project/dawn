@@ -968,7 +968,9 @@ static int sdl_init_on_thread(sdl_ui_t *ui) {
 
    /* Probe sysfs backlight for brightness slider */
    if (backlight_init() == 0) {
-      LOG_INFO("SDL UI: Backlight control available");
+      LOG_INFO("SDL UI: Backlight control available (sysfs)");
+   } else {
+      LOG_INFO("SDL UI: No sysfs backlight, using software dimming overlay");
    }
 
    /* Initialize settings panel sliders (renderer + fonts are ready) */
@@ -983,7 +985,7 @@ static int sdl_init_on_thread(sdl_ui_t *ui) {
       if (backlight_available()) {
          ui->brightness_slider.value = (float)backlight_get() / 100.0f;
       } else {
-         ui->brightness_slider.value = 0.7f;
+         ui->brightness_slider.value = 1.0f; /* No dimming by default on HDMI */
       }
 
       ui_slider_init(&ui->volume_slider, ui->renderer, slider_track_x, 0, slider_track_w,
@@ -1165,6 +1167,17 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
    /* Swipe indicators (only when no panel visible) */
    if (act_off < 0.001f && set_off < 0.001f && mus_off < 0.001f) {
       render_swipe_indicators(ui, r);
+   }
+
+   /* Software dimming overlay for HDMI displays without sysfs backlight.
+    * Draws a semi-transparent black rect over everything to simulate
+    * brightness reduction. At 100% brightness the alpha is 0 (no-op). */
+   if (!backlight_available() && ui->sliders_initialized && ui->brightness_slider.value < 0.99f) {
+      uint8_t alpha = (uint8_t)(255.0f * (1.0f - ui->brightness_slider.value));
+      SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+      SDL_SetRenderDrawColor(r, 0, 0, 0, alpha);
+      SDL_Rect dim = { 0, 0, ui->width, ui->height };
+      SDL_RenderFillRect(r, &dim);
    }
 
    SDL_RenderPresent(r);
