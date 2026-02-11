@@ -31,8 +31,8 @@
 #define SLIDER_TRACK_H 8
 #define SLIDER_THUMB_W 18
 #define SLIDER_THUMB_H 36
-#define SLIDER_TOUCH_PAD 20  /* Vertical touch padding above/below track */
-#define SLIDER_LABEL_COL 150 /* Fixed label column width for left-alignment */
+#define SLIDER_TOUCH_PAD 20 /* Vertical touch padding above/below track */
+/* SLIDER_LABEL_COL defined in ui_slider.h */
 
 void ui_slider_init(ui_slider_t *s,
                     SDL_Renderer *renderer,

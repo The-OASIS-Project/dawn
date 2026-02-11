@@ -162,6 +162,7 @@ typedef struct satellite_config {
       char font_dir[CONFIG_PATH_SIZE];
       int brightness_pct; /* 10-100, persisted across restarts */
       int volume_pct;     /* 0-100, persisted across restarts */
+      bool time_24h;      /* 12h/24h time format, persisted across restarts */
    } sdl_ui;
 
    /* Screensaver / ambient mode */

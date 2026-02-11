@@ -745,10 +745,21 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
 
    y += 16;
 
-   /* Progress bar */
+   /* Progress bar — compensate for local audio buffer latency so the
+    * displayed position matches what the speaker is actually outputting.
+    * Server reports decode position which is ahead by ring_buffer + ALSA depth. */
    if (m->label_font) {
+      float display_pos = m->position_sec;
+#ifdef HAVE_OPUS
+      if (m->music_pb && m->playing && !m->paused && !m->seeking) {
+         int buffered_ms = music_playback_get_buffered_ms(m->music_pb);
+         display_pos -= (float)buffered_ms / 1000.0f;
+         if (display_pos < 0.0f)
+            display_pos = 0.0f;
+      }
+#endif
       char time_cur[16], time_dur[16];
-      format_time(m->position_sec, time_cur, sizeof(time_cur));
+      format_time(display_pos, time_cur, sizeof(time_cur));
       format_time(m->duration_sec, time_dur, sizeof(time_dur));
 
       SDL_Color tc = { COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G, COLOR_TEXT_SECONDARY_B,
@@ -788,7 +799,7 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
          SDL_RenderFillRect(r, &track_rect);
 
          /* Fill */
-         float progress = (m->duration_sec > 0.0f) ? (m->position_sec / m->duration_sec) : 0.0f;
+         float progress = (m->duration_sec > 0.0f) ? (display_pos / m->duration_sec) : 0.0f;
          if (progress > 1.0f)
             progress = 1.0f;
          if (progress < 0.0f)
@@ -2180,7 +2191,10 @@ void ui_music_on_position(ui_music_t *m, float position_sec) {
    if (!m)
       return;
    pthread_mutex_lock(&m->mutex);
-   m->position_sec = position_sec;
+   /* Don't overwrite user's drag position during seek — the server hasn't
+    * processed the seek yet and would snap the slider back to the old pos. */
+   if (!m->seeking)
+      m->position_sec = position_sec;
    pthread_mutex_unlock(&m->mutex);
 }
 

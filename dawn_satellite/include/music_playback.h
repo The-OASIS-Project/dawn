@@ -111,6 +111,12 @@ music_pb_state_t music_playback_get_state(music_playback_t *ctx);
  */
 bool music_playback_is_playing(music_playback_t *ctx);
 
+/**
+ * Get total buffered audio in milliseconds (ring buffer + ALSA output buffer).
+ * Used to compensate server-reported position for accurate display.
+ */
+int music_playback_get_buffered_ms(music_playback_t *ctx);
+
 #ifdef __cplusplus
 }
 #endif

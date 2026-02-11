@@ -524,3 +524,14 @@ void audio_playback_set_volume(audio_playback_t *ctx, int volume) {
 int audio_playback_get_volume(audio_playback_t *ctx) {
    return ctx ? atomic_load(&ctx->volume) : 80;
 }
+
+long audio_playback_get_delay_frames(audio_playback_t *ctx) {
+   if (!ctx || !ctx->handle)
+      return 0;
+   snd_pcm_sframes_t delay = 0;
+   pthread_mutex_lock(&ctx->alsa_mutex);
+   if (snd_pcm_delay((snd_pcm_t *)ctx->handle, &delay) < 0)
+      delay = 0;
+   pthread_mutex_unlock(&ctx->alsa_mutex);
+   return delay > 0 ? (long)delay : 0;
+}

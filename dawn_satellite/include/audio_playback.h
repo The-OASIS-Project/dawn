@@ -136,4 +136,10 @@ void audio_playback_set_volume(audio_playback_t *ctx, int volume);
  */
 int audio_playback_get_volume(audio_playback_t *ctx);
 
+/**
+ * Get ALSA output delay in frames (buffered in hardware awaiting playback).
+ * Returns 0 if device is not active or query fails.
+ */
+long audio_playback_get_delay_frames(audio_playback_t *ctx);
+
 #endif /* AUDIO_PLAYBACK_H */

@@ -136,9 +136,13 @@ static void update_clock_textures(ui_screensaver_t *ss, SDL_Renderer *r) {
    ss->cached_epoch = now;
    struct tm *tm = localtime(&now);
 
-   /* Time: "HH:MM" — re-render only on minute change */
+   /* Time: re-render only on minute change */
    char time_str[8];
-   snprintf(time_str, sizeof(time_str), "%02d:%02d", tm->tm_hour, tm->tm_min);
+   if (ss->time_24h)
+      snprintf(time_str, sizeof(time_str), "%02d:%02d", tm->tm_hour, tm->tm_min);
+   else
+      snprintf(time_str, sizeof(time_str), "%d:%02d", tm->tm_hour % 12 ? tm->tm_hour % 12 : 12,
+               tm->tm_min);
    if (strcmp(time_str, ss->cached_time) != 0 && ss->clock_font) {
       snprintf(ss->cached_time, sizeof(ss->cached_time), "%s", time_str);
       if (ss->time_tex)

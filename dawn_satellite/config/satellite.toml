@@ -126,6 +126,7 @@ font_dir = "assets/fonts"
 # Automatically updated when sliders are adjusted via the UI
 brightness = 100
 volume = 80
+time_24h = false
 
 # =============================================================================
 # Screensaver / Ambient Mode

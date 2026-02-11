@@ -518,7 +518,10 @@ void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_stat
       time_t now = time(NULL);
       struct tm *tm_info = localtime(&now);
       char time_str[40];
-      strftime(time_str, sizeof(time_str), "%a %b %-d  %-I:%M %p", tm_info);
+      if (t->time_24h)
+         strftime(time_str, sizeof(time_str), "%a %b %-d  %H:%M", tm_info);
+      else
+         strftime(time_str, sizeof(time_str), "%a %b %-d  %-I:%M %p", tm_info);
 
       SDL_Color time_color = { COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
                                COLOR_TEXT_SECONDARY_B, 255 };

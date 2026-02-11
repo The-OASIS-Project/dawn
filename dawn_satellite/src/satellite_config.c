@@ -221,6 +221,7 @@ void satellite_config_init_defaults(satellite_config_t *config) {
    safe_strcpy(config->sdl_ui.font_dir, "assets/fonts", CONFIG_PATH_SIZE);
    config->sdl_ui.brightness_pct = 100;
    config->sdl_ui.volume_pct = 80;
+   config->sdl_ui.time_24h = false;
 
    /* Screensaver defaults */
    config->screensaver.enabled = true;
@@ -433,6 +434,7 @@ int satellite_config_load(satellite_config_t *config, const char *path) {
       int vol = (int)toml_int_or(sdl_ui, "volume", config->sdl_ui.volume_pct);
       if (vol >= 0 && vol <= 100)
          config->sdl_ui.volume_pct = vol;
+      config->sdl_ui.time_24h = toml_bool_or(sdl_ui, "time_24h", config->sdl_ui.time_24h);
    }
 
    /* Parse [screensaver] section */
@@ -787,6 +789,7 @@ void satellite_config_print(const satellite_config_t *config) {
    printf("  font_dir = %s\n", config->sdl_ui.font_dir);
    printf("  brightness = %d\n", config->sdl_ui.brightness_pct);
    printf("  volume = %d\n", config->sdl_ui.volume_pct);
+   printf("  time_24h = %s\n", config->sdl_ui.time_24h ? "true" : "false");
 
    printf("\n[screensaver]\n");
    printf("  enabled = %s\n", config->screensaver.enabled ? "true" : "false");
@@ -863,6 +866,7 @@ void satellite_config_save_ui_prefs(const satellite_config_t *config) {
    /* Track which keys we've updated */
    bool found_brightness = false;
    bool found_volume = false;
+   bool found_time_24h = false;
    bool in_sdl_ui = false;
    bool ever_in_sdl_ui = false;
    int sdl_ui_end = -1; /* Last line of [sdl_ui] section for appending */
@@ -897,6 +901,10 @@ void satellite_config_save_ui_prefs(const satellite_config_t *config) {
          } else if (strncmp(p, "volume", 6) == 0 && (p[6] == ' ' || p[6] == '=')) {
             snprintf(lines[i], sizeof(lines[0]), "volume = %d\n", config->sdl_ui.volume_pct);
             found_volume = true;
+         } else if (strncmp(p, "time_24h", 8) == 0 && (p[8] == ' ' || p[8] == '=')) {
+            snprintf(lines[i], sizeof(lines[0]), "time_24h = %s\n",
+                     config->sdl_ui.time_24h ? "true" : "false");
+            found_time_24h = true;
          }
       }
    }
@@ -927,6 +935,10 @@ void satellite_config_save_ui_prefs(const satellite_config_t *config) {
             fprintf(fp, "volume = %d\n", config->sdl_ui.volume_pct);
             found_volume = true;
          }
+         if (!found_time_24h) {
+            fprintf(fp, "time_24h = %s\n", config->sdl_ui.time_24h ? "true" : "false");
+            found_time_24h = true;
+         }
       }
       fputs(lines[i], fp);
    }
@@ -939,12 +951,16 @@ void satellite_config_save_ui_prefs(const satellite_config_t *config) {
       if (!found_volume) {
          fprintf(fp, "volume = %d\n", config->sdl_ui.volume_pct);
       }
+      if (!found_time_24h) {
+         fprintf(fp, "time_24h = %s\n", config->sdl_ui.time_24h ? "true" : "false");
+      }
    }
 
    /* No [sdl_ui] section at all — create one at EOF */
    if (!ever_in_sdl_ui) {
-      fprintf(fp, "\n[sdl_ui]\nbrightness = %d\nvolume = %d\n", config->sdl_ui.brightness_pct,
-              config->sdl_ui.volume_pct);
+      fprintf(fp, "\n[sdl_ui]\nbrightness = %d\nvolume = %d\ntime_24h = %s\n",
+              config->sdl_ui.brightness_pct, config->sdl_ui.volume_pct,
+              config->sdl_ui.time_24h ? "true" : "false");
    }
 
    /* Flush and sync before atomic rename */
@@ -957,8 +973,9 @@ void satellite_config_save_ui_prefs(const satellite_config_t *config) {
       return;
    }
 
-   printf("[CONFIG] UI prefs saved (brightness=%d, volume=%d)\n", config->sdl_ui.brightness_pct,
-          config->sdl_ui.volume_pct);
+   printf("[CONFIG] UI prefs saved (brightness=%d, volume=%d, time_24h=%s)\n",
+          config->sdl_ui.brightness_pct, config->sdl_ui.volume_pct,
+          config->sdl_ui.time_24h ? "true" : "false");
 }
 
 bool satellite_config_path_valid(const char *path) {

@@ -29,6 +29,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define SLIDER_LABEL_COL 150 /* Fixed label column width for left-alignment */
+
 typedef struct {
    int track_x, track_y; /* Top-left of track */
    int track_w, track_h; /* Track dimensions */

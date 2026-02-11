@@ -177,6 +177,16 @@ struct sdl_ui {
    audio_playback_t *audio_pb;     /* For master volume control */
    satellite_config_t *sat_config; /* For persisting UI prefs */
 
+   /* 12/24h time format toggle */
+   bool time_24h;
+   float knob_anim;             /* 0.0=12h, 1.0=24h, animated toward target */
+   SDL_Texture *time_label_tex; /* "TIME" — white, colormod */
+   SDL_Texture *t12h_tex;       /* "12H" — white, colormod */
+   SDL_Texture *t24h_tex;       /* "24H" — white, colormod */
+   int time_label_w, time_label_h;
+   int t12h_w, t12h_h, t24h_w, t24h_h;
+   int time_toggle_row_y; /* Updated each frame for hit testing */
+
    /* Screensaver / ambient mode */
    ui_screensaver_t screensaver;
 
@@ -295,6 +305,25 @@ static void set_master_volume(sdl_ui_t *ui, int pct) {
 /* =============================================================================
  * Panel Rendering
  * ============================================================================= */
+
+/** @brief Build a white text texture for later tinting via SDL_SetTextureColorMod */
+static SDL_Texture *build_white_label(SDL_Renderer *r,
+                                      TTF_Font *font,
+                                      const char *text,
+                                      int *w,
+                                      int *h) {
+   SDL_Color white = { 255, 255, 255, 255 };
+   SDL_Surface *surf = TTF_RenderText_Blended(font, text, white);
+   if (!surf)
+      return NULL;
+   SDL_Texture *tex = SDL_CreateTextureFromSurface(r, surf);
+   if (tex) {
+      *w = surf->w;
+      *h = surf->h;
+   }
+   SDL_FreeSurface(surf);
+   return tex;
+}
 
 /** @brief Lazy-init cached panel label textures (called on render thread) */
 static void panel_cache_init(sdl_ui_t *ui) {
@@ -591,12 +620,95 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
 
    /* ---- Right-side sliders (brightness + volume) ---- */
    if (ui->sliders_initialized) {
-      /* Update track_y each frame for panel animation offset */
-      ui->brightness_slider.track_y = panel_y + 95;
-      ui->volume_slider.track_y = panel_y + 170;
+      /* Update track_y each frame for panel animation offset (72px rhythm) */
+      ui->brightness_slider.track_y = panel_y + 94;
+      ui->volume_slider.track_y = panel_y + 166;
 
       ui_slider_render(&ui->brightness_slider, r, ui->transcript.label_font);
       ui_slider_render(&ui->volume_slider, r, ui->transcript.label_font);
+   }
+
+   /* 12/24h time format toggle (72px below volume slider) */
+   if (ui->time_label_tex) {
+      int row_y = panel_y + 238;
+      ui->time_toggle_row_y = row_y;
+      int slider_track_x = 620;
+      int slider_track_w = 300;
+
+      /* "TIME" label — same column as BRIGHTNESS/VOLUME */
+      SDL_SetTextureColorMod(ui->time_label_tex, COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
+                             COLOR_TEXT_SECONDARY_B);
+      SDL_Rect lbl_dst = { slider_track_x - SLIDER_LABEL_COL, row_y - ui->time_label_h / 2,
+                           ui->time_label_w, ui->time_label_h };
+      SDL_RenderCopy(r, ui->time_label_tex, NULL, &lbl_dst);
+
+      /* Animate knob position: ease-out toward target with epsilon snap */
+      float target = ui->time_24h ? 1.0f : 0.0f;
+      float delta = target - ui->knob_anim;
+      if (fabsf(delta) < 0.01f)
+         ui->knob_anim = target;
+      else
+         ui->knob_anim += delta * 0.3f;
+
+      /* Toggle track (pill-shaped, 44x24) centered in slider area */
+      int toggle_w = 44, toggle_h = 24;
+      int toggle_cx = slider_track_x + slider_track_w / 2;
+      int toggle_x = toggle_cx - toggle_w / 2;
+      int toggle_y = row_y - toggle_h / 2;
+      int radius = toggle_h / 2;
+
+      /* Lerp track color between tertiary (#2F323C) and accent (#4FC3F7) */
+      float t = ui->knob_anim;
+      uint8_t tr_r = (uint8_t)(0x2F + t * (0x4F - 0x2F));
+      uint8_t tr_g = (uint8_t)(0x32 + t * (0xC3 - 0x32));
+      uint8_t tr_b = (uint8_t)(0x3C + t * (0xF7 - 0x3C));
+      SDL_SetRenderDrawColor(r, tr_r, tr_g, tr_b, 255);
+
+      /* Center rectangle */
+      SDL_Rect trk_center = { toggle_x + radius, toggle_y, toggle_w - 2 * radius, toggle_h };
+      SDL_RenderFillRect(r, &trk_center);
+      /* Left + right caps (half-circles, merged to halve sqrtf calls) */
+      for (int dy = -radius; dy <= radius; dy++) {
+         int dx = (int)sqrtf((float)(radius * radius - dy * dy));
+         int cy = toggle_y + radius + dy;
+         SDL_RenderDrawLine(r, toggle_x + radius - dx, cy, toggle_x + radius, cy);
+         SDL_RenderDrawLine(r, toggle_x + toggle_w - radius, cy, toggle_x + toggle_w - radius + dx,
+                            cy);
+      }
+
+      /* Knob (white filled circle, 20px diameter, 2px inset) */
+      int knob_r = 10;
+      int knob_x_min = toggle_x + 2 + knob_r;
+      int knob_x_max = toggle_x + toggle_w - 2 - knob_r;
+      int knob_cx = knob_x_min + (int)(ui->knob_anim * (float)(knob_x_max - knob_x_min));
+      int knob_cy = toggle_y + toggle_h / 2;
+      SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
+      for (int dy = -knob_r; dy <= knob_r; dy++) {
+         int dx = (int)sqrtf((float)(knob_r * knob_r - dy * dy));
+         SDL_RenderDrawLine(r, knob_cx - dx, knob_cy + dy, knob_cx + dx, knob_cy + dy);
+      }
+
+      /* "12H" label (left of toggle) — accent when active, secondary when inactive */
+      if (ui->t12h_tex) {
+         if (ui->time_24h)
+            SDL_SetTextureColorMod(ui->t12h_tex, 0x8C, 0x99, 0xA7);
+         else
+            SDL_SetTextureColorMod(ui->t12h_tex, 0x4F, 0xC3, 0xF7);
+         int t12_x = toggle_x - 10 - ui->t12h_w;
+         SDL_Rect t12_dst = { t12_x, row_y - ui->t12h_h / 2, ui->t12h_w, ui->t12h_h };
+         SDL_RenderCopy(r, ui->t12h_tex, NULL, &t12_dst);
+      }
+
+      /* "24H" label (right of toggle) */
+      if (ui->t24h_tex) {
+         if (ui->time_24h)
+            SDL_SetTextureColorMod(ui->t24h_tex, 0x4F, 0xC3, 0xF7);
+         else
+            SDL_SetTextureColorMod(ui->t24h_tex, 0x8C, 0x99, 0xA7);
+         int t24_x = toggle_x + toggle_w + 10;
+         SDL_Rect t24_dst = { t24_x, row_y - ui->t24h_h / 2, ui->t24h_w, ui->t24h_h };
+         SDL_RenderCopy(r, ui->t24h_tex, NULL, &t24_dst);
+      }
    }
 
    /* Dismiss pill indicator (swipe-up-to-close affordance) */
@@ -888,6 +1000,21 @@ static int sdl_init_on_thread(sdl_ui_t *ui) {
       ui->sliders_initialized = true;
    }
 
+   /* 12/24h time format toggle */
+   if (ui->sat_config) {
+      ui->time_24h = ui->sat_config->sdl_ui.time_24h;
+   }
+   ui->knob_anim = ui->time_24h ? 1.0f : 0.0f;
+   ui->transcript.time_24h = ui->time_24h;
+   if (ui->transcript.label_font) {
+      ui->time_label_tex = build_white_label(ui->renderer, ui->transcript.label_font, "TIME",
+                                             &ui->time_label_w, &ui->time_label_h);
+      ui->t12h_tex = build_white_label(ui->renderer, ui->transcript.label_font, "12H", &ui->t12h_w,
+                                       &ui->t12h_h);
+      ui->t24h_tex = build_white_label(ui->renderer, ui->transcript.label_font, "24H", &ui->t24h_w,
+                                       &ui->t24h_h);
+   }
+
    /* Initialize screensaver (after fonts/renderer ready) */
    {
       bool ss_enabled = true;
@@ -899,6 +1026,7 @@ static int sdl_init_on_thread(sdl_ui_t *ui) {
       ui_screensaver_init(&ui->screensaver, ui->renderer, ui->width, ui->height, ui->font_dir,
                           ui->ai_name, ss_enabled, ss_timeout);
       ui->screensaver.idle_start = get_time_sec();
+      ui->screensaver.time_24h = ui->time_24h;
    }
 
    LOG_INFO("SDL UI initialized (%dx%d, driver=%s)", ui->width, ui->height,
@@ -1025,6 +1153,12 @@ static void sdl_cleanup_on_thread(sdl_ui_t *ui) {
    ui_screensaver_cleanup(&ui->screensaver);
    ui_slider_cleanup(&ui->brightness_slider);
    ui_slider_cleanup(&ui->volume_slider);
+   if (ui->time_label_tex)
+      SDL_DestroyTexture(ui->time_label_tex);
+   if (ui->t12h_tex)
+      SDL_DestroyTexture(ui->t12h_tex);
+   if (ui->t24h_tex)
+      SDL_DestroyTexture(ui->t24h_tex);
    panel_cache_cleanup(ui);
    ui_music_cleanup(&ui->music);
    ui_transcript_cleanup(&ui->transcript);
@@ -1300,6 +1434,19 @@ static void *render_thread_func(void *arg) {
                   ui->finger_scrolling = false;
                } else if (ui_slider_finger_down(&ui->volume_slider, fx, fy)) {
                   set_master_volume(ui, (int)(ui->volume_slider.value * 100.0f + 0.5f));
+                  ui->finger_scrolling = false;
+               } else if (fy >= ui->time_toggle_row_y - 22 && fy <= ui->time_toggle_row_y + 22 &&
+                          fx >= 470 && fx <= 920) {
+                  /* Time format toggle tap */
+                  ui->time_24h = !ui->time_24h;
+                  ui->transcript.time_24h = ui->time_24h;
+                  ui->screensaver.time_24h = ui->time_24h;
+                  ui->screensaver.cached_time[0] = '\0';
+                  ui->screensaver.cached_epoch = 0;
+                  if (ui->sat_config) {
+                     ui->sat_config->sdl_ui.time_24h = ui->time_24h;
+                     satellite_config_save_ui_prefs(ui->sat_config);
+                  }
                   ui->finger_scrolling = false;
                }
             } else if (ui->panel_music.visible && !ui->panel_music.closing &&

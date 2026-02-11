@@ -441,3 +441,17 @@ music_pb_state_t music_playback_get_state(music_playback_t *ctx) {
 bool music_playback_is_playing(music_playback_t *ctx) {
    return ctx && atomic_load(&ctx->state) == MUSIC_PB_PLAYING;
 }
+
+int music_playback_get_buffered_ms(music_playback_t *ctx) {
+   if (!ctx)
+      return 0;
+
+   pthread_mutex_lock(&ctx->mutex);
+   size_t ring_frames = ctx->ring_count / 2; /* stereo samples → frames */
+   pthread_mutex_unlock(&ctx->mutex);
+
+   long alsa_frames = audio_playback_get_delay_frames(ctx->audio);
+
+   long total_frames = (long)ring_frames + alsa_frames;
+   return (int)(total_frames * 1000 / 48000);
+}

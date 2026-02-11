@@ -102,6 +102,7 @@ typedef struct {
    bool mic_muted;              /* True when mic is muted (shows red dot in status bar) */
    SDL_Texture *music_icon_tex; /* White "♪" glyph, tinted via SDL_SetTextureColorMod */
    int music_icon_w, music_icon_h;
+   bool time_24h; /* Use 24-hour time format */
 } ui_transcript_t;
 
 /**

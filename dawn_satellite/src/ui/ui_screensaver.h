@@ -73,6 +73,7 @@ typedef struct {
    char cached_date[32];     /* "Tuesday, Feb 11" */
    time_t cached_epoch;      /* Gate time()/localtime() to once per second */
    char ai_name[32];
+   bool time_24h;          /* Use 24-hour time format */
    float drift_x, drift_y; /* Lissajous burn-in prevention */
 
    /* Visualizer mode */
