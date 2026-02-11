@@ -4,7 +4,7 @@
 
 **In plain English:** DAWN is a voice-controlled AI assistant that runs on embedded hardware. Talk to it, and it understands you (speech recognition), thinks about what you said (LLM), and talks back (text-to-speech). It can control your smart home, answer questions, search the web, and more — all by voice, without sending your data to the cloud if you run a local LLM.
 
-DAWN is designed for embedded Linux platforms (Jetson, Raspberry Pi) and supports multiple interfaces: a local microphone, a browser-based Web UI with voice and text input, and ESP32 satellite clients that can be placed throughout your home.
+DAWN is designed for embedded Linux platforms (Jetson, Raspberry Pi) and supports multiple interfaces: a local microphone, a browser-based Web UI with voice and text input, and DAP2 satellite devices (Raspberry Pi or ESP32) that can be placed throughout your home.
 
 > **New to DAWN?** See **[GETTING_STARTED.md](GETTING_STARTED.md)** for a 10-minute quickstart guide.
 
@@ -45,11 +45,19 @@ DAWN is designed for embedded Linux platforms (Jetson, Raspberry Pi) and support
   - **Metadata search** - Search by artist, title, or album (not just filename)
   - **Background indexing** - SQLite metadata cache with configurable scan interval
   - **Resume playback** - Pause saves position, resume continues from there
+  - **Opus streaming** - Stream music to WebUI and DAP2 satellites via WebSocket
+  - **Paginated library** - Browse artists/albums/tracks with 50-item pages
 
-- **Network Audio Processing**
-  - Custom Dawn Audio Protocol (DAP) for ESP32 clients
-  - Reliable binary protocol with checksums and retries
-  - Remote voice command processing
+- **DAP2 Satellite System**
+  - Unified WebSocket protocol for all satellite tiers (same port as WebUI)
+  - **Tier 1** (RPi): Text-first — local ASR/TTS, hands-free with wake word
+  - **Tier 2** (ESP32): Audio path — streams raw PCM, server-side ASR/TTS, push-to-talk
+  - Capability-based routing: daemon auto-selects text or audio path per satellite
+  - SDL2 touchscreen UI with KMSDRM backend (no X11 required)
+  - Music streaming via Opus audio over a dedicated WebSocket (Tier 1)
+  - Goertzel FFT visualizer driven by live audio stream
+  - Brightness and volume sliders with sysfs backlight + software dimming fallback
+  - See [dawn_satellite/README.md](dawn_satellite/README.md) for details
 
 - **MQTT Integration**
   - Device command/control system
@@ -101,6 +109,7 @@ DAWN is designed for embedded Linux platforms (Jetson, Raspberry Pi) and support
 - **Persistent Memory System**
   - DAWN remembers facts and preferences about users across sessions
   - **Memory Tool** - "Remember that I'm vegetarian", "What do you know about me?"
+  - **Tokenized Search** - Multi-word queries match per-word with dedup and rank-by-match-count
   - **Recent Query** - Retrieve memories by time period (e.g., "24h", "7d", "1w")
   - **Automated Extraction** - Facts automatically extracted at session end
   - **Context Injection** - User facts loaded into system prompt at session start
@@ -129,7 +138,7 @@ dawn/
 │   ├── llm/                # LLM integration (OpenAI, Claude, Gemini, local)
 │   ├── memory/             # Persistent memory system
 │   ├── tts/                # Text-to-speech (Piper)
-│   ├── network/            # DAP server for ESP32 clients
+│   ├── network/            # Legacy DAP1 server (deprecated, retained for reference)
 │   ├── audio/              # Audio capture, playback, music
 │   ├── tools/              # Modular LLM tools (search, weather, calculator, etc.)
 │   └── webui/              # Web UI server
@@ -138,7 +147,9 @@ dawn/
 ├── www/                    # Web UI static files (HTML, CSS, JS)
 ├── models/                 # ML models (TTS voices, VAD)
 ├── whisper.cpp/            # Whisper ASR engine (git submodule)
-├── remote_dawn/            # ESP32 satellite client code
+├── common/                 # Shared library (VAD, ASR, TTS, logging) for daemon + satellite
+├── dawn_satellite/         # DAP2 Tier 1 satellite (Raspberry Pi, SDL2 UI)
+├── remote_dawn/            # Legacy DAP1 ESP32 client (deprecated, retained for reference)
 ├── services/               # Systemd service files
 ├── tests/                  # Test programs
 ├── llm_testing/            # LLM benchmarking tools
@@ -696,12 +707,10 @@ make -j8
 
 DAWN supports 4 deployment modes with different feature sets:
 
-| Mode | Local Mic | DAP Clients | WebUI | Use Case |
-|------|-----------|-------------|-------|----------|
-| **1** | ✓ | ✗ | ✗ | Embedded / armor suit - no network |
-| **2** | ✓ | ✓ | ✗ | Headless IoT server with ESP32 clients |
-| **3** | ✓ | ✗ | ✓ | Desktop / development with web interface |
-| **4** | ✓ | ✓ | ✓ | Full deployment - all features |
+| Mode | Local Mic | WebUI + Satellites | Use Case |
+|------|-----------|-------------------|----------|
+| **1** | ✓ | ✗ | Embedded / armor suit - no network |
+| **2** | ✓ | ✓ | Full deployment - WebUI, Tier 1 + Tier 2 satellites |
 
 #### Using CMake Presets (Recommended)
 
@@ -711,10 +720,7 @@ cmake --list-presets
 
 # Configure with a preset
 cmake --preset mode1-local    # Mode 1: Local only (smallest binary)
-cmake --preset mode2-dap      # Mode 2: DAP only (headless IoT)
-cmake --preset mode3-webui    # Mode 3: WebUI only (desktop/dev)
-cmake --preset mode4-full     # Mode 4: Full (all features)
-cmake --preset default        # Same as mode4-full
+cmake --preset default        # Mode 2: Full (WebUI + satellites)
 
 # Build
 cmake --build --preset mode1-local
@@ -724,23 +730,17 @@ cmake --build --preset mode1-local
 
 ```bash
 # Mode 1: Local only (no network features)
-cmake -DENABLE_DAP=OFF -DENABLE_WEBUI=OFF ..
+cmake -DENABLE_WEBUI=OFF ..
 
-# Mode 2: DAP only (ESP32 clients, no WebUI)
-cmake -DENABLE_DAP=ON -DENABLE_WEBUI=OFF ..
-
-# Mode 3: WebUI only (no DAP clients)
-cmake -DENABLE_DAP=OFF -DENABLE_WEBUI=ON ..
-
-# Mode 4: Full (default)
-cmake -DENABLE_DAP=ON -DENABLE_WEBUI=ON ..
+# Mode 2: Full (default) - WebUI + all satellite support
+cmake -DENABLE_WEBUI=ON ..
 # or just: cmake ..
 ```
 
 **Notes:**
-- `ENABLE_DAP`: Controls DAP (Dawn Audio Protocol) server for ESP32 satellite clients
-- `ENABLE_WEBUI`: Controls the web interface on port 3000
-- `ENABLE_AUTH`: Automatically enabled when either DAP or WebUI is active
+- `ENABLE_WEBUI`: Controls the WebUI server on port 3000 (also serves DAP2 satellites via WebSocket)
+- `ENABLE_AUTH`: Automatically enabled when WebUI is active
+- All satellite communication (Tier 1 RPi + Tier 2 ESP32) uses the WebUI WebSocket port — no separate DAP server needed
 
 #### Build tests
 ```bash
@@ -867,16 +867,14 @@ client_secret = "your-client-secret"
 
 The system listens for the wake word ("friday" by default), then captures your command, processes it through ASR → LLM → TTS, and speaks the response.
 
-### Network Mode (ESP32 clients)
+### Satellite Mode (DAP2)
 
-DAWN includes a network server that accepts connections from ESP32 clients using the Dawn Audio Protocol (DAP).
+DAWN supports satellite devices that extend voice assistant capabilities to multiple rooms. All satellites connect via WebSocket to the same port as the WebUI (default 3000).
 
-1. Build and flash the ESP32 client (`remote_dawn/remote_dawn.ino`)
-2. Configure WiFi credentials and DAWN server IP
-3. Run DAWN server (same `./dawn` command)
-4. ESP32 client connects and sends voice commands over WiFi
+- **Tier 1 (Raspberry Pi)**: Handles ASR/TTS locally, sends only text to daemon. See [dawn_satellite/README.md](dawn_satellite/README.md)
+- **Tier 2 (ESP32)**: Streams raw PCM audio, daemon handles ASR/TTS server-side. See [docs/DAP2_DESIGN.md](docs/DAP2_DESIGN.md)
 
-See `remote_dawn/protocol_specification.md` for protocol details.
+See [docs/DAP2_SATELLITE.md](docs/DAP2_SATELLITE.md) for deployment guide.
 
 ### Web UI Mode
 
@@ -930,7 +928,7 @@ See `docs/WEBUI_DESIGN.md` for technical architecture details.
 
 ### User Management (dawn-admin)
 
-When authentication is enabled (DAP or WebUI modes), you'll need to create user accounts before logging in. The `dawn-admin` CLI tool handles user management:
+When authentication is enabled (WebUI mode), you'll need to create user accounts before logging in. The `dawn-admin` CLI tool handles user management:
 
 ```bash
 # First-time setup: create initial admin account (requires setup token shown in DAWN console)
@@ -983,10 +981,10 @@ See `docs/USER_AUTH_DESIGN.md` for complete authentication system documentation.
 - **LLM timeout**: Check API keys in `secrets.toml`, network connectivity
 - **Slow ASR**: Verify GPU acceleration enabled (check logs for CUDA messages)
 
-### Network Protocol Issues
-- **Client can't connect**: Check firewall, DAWN server IP/port
-- **Checksum errors**: Verify client and server use same `PACKET_MAX_SIZE` (8192)
-- **Timeout errors**: Check network latency, adjust retry settings
+### Satellite Connection Issues
+- **Satellite can't connect**: Check firewall, DAWN server IP/port (default 3000)
+- **WebSocket errors**: Check `libwebsockets` version, verify daemon is running
+- **Timeout errors**: Check network latency, verify satellite_ping/pong (10s interval)
 
 ## Documentation
 
@@ -996,7 +994,9 @@ See `docs/USER_AUTH_DESIGN.md` for complete authentication system documentation.
 - **docs/MEMORY_SYSTEM_DESIGN.md** - Memory system architecture and design
 - **services/llama-server/README.md** - Local LLM service setup
 - **llm_testing/docs/** - LLM optimization research
-- **remote_dawn/protocol_specification.md** - Network protocol spec
+- **docs/DAP2_SATELLITE.md** - DAP2 satellite architecture and deployment
+- **dawn_satellite/README.md** - Satellite build, config, and usage guide
+- **docs/DAP2_DESIGN.md** - DAP2 protocol specification (Tier 1 + Tier 2)
 - **test_recordings/BENCHMARK_RESULTS.md** - ASR performance benchmarks
 
 ## Development
@@ -1053,4 +1053,4 @@ See individual dependencies for their respective licenses.
 
 ---
 
-**Note**: This README reflects the reorganized codebase structure (as of January 2026, including modular CSS/JS and Prettier formatting). For historical reference, see git history before commit hash in `ARCHITECTURE.md`.
+**Note**: This README reflects the reorganized codebase structure (as of February 2026, including modular CSS/JS, Prettier formatting, and DAP2 satellite system). For historical reference, see git history before commit hash in `ARCHITECTURE.md`.

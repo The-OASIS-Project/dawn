@@ -9,7 +9,7 @@ D.A.W.N. (part of The OASIS Project) is a voice-controlled AI assistant system w
 - Text-to-speech (Piper with ONNX runtime)
 - LLM integration (OpenAI, Claude, Ollama, or llama.cpp local models)
 - MQTT command/control system
-- Network audio processing for remote clients (ESP32 devices)
+- DAP2 satellite system for distributed voice assistants (Raspberry Pi + ESP32)
 - Vision AI capabilities
 - Extended thinking/reasoning mode support
 
@@ -117,16 +117,12 @@ This ensures code is formatted before every commit.
 - Manages conversation history
 - Controls application lifecycle
 
-**dawn_server.c/h**: Network audio server for remote clients
-- Implements custom Dawn Audio Protocol (DAP) for reliable audio transmission
-- Handles TCP connections from ESP32 clients
-- Currently single-threaded (blocks main loop during processing)
-- See `remote_dawn/protocol_specification.md` for protocol details
+**dawn_server.c/h**: Legacy DAP1 network audio server (DEPRECATED)
+- Retained for historical reference only — all satellite communication now uses WebSocket via `webui_server`
+- See `src/webui/webui_satellite.c` for DAP2 satellite message handling
 
-**dawn_network_audio.c/h**: Network audio processing
-- Extracts PCM data from network WAV files
-- Processes remote audio through ASR → LLM → TTS pipeline
-- Returns WAV responses to clients
+**dawn_network_audio.c/h**: Legacy network audio processing (DEPRECATED)
+- Superseded by `webui_audio.c` which handles WebSocket binary audio for both WebUI and Tier 2 satellites
 
 **mosquitto_comms.c/h**: MQTT integration
 - Publishes/subscribes to MQTT topics for device control
@@ -178,7 +174,7 @@ This ensures code is formatted before every commit.
 - `[asr]`: Speech recognition settings, model path, language
 - `[tts]`: Text-to-speech settings, voice model, sample rate
 - `[audio]`: Backend (auto/pulse/alsa), device selection
-- `[dap]`: Dawn Audio Protocol server settings
+- `[dap]`: Legacy DAP server settings (deprecated — satellites now use WebUI WebSocket)
 - `[webui]`: Web interface bind address, port, SSL settings
 - `[mqtt]`: MQTT broker connection settings
 - See `docs/archive/CONFIG_FILE_DESIGN.md` for full schema
@@ -197,29 +193,18 @@ claude_api_key = "sk-ant-..."
 
 **commands_config_nuevo.json**: Device/action mappings for command system
 
-### Dawn Audio Protocol (DAP)
+### DAP2 Satellite System
 
-The network protocol for ESP32 clients uses a custom binary protocol:
-- 8-byte header: data_length (4) + protocol_version (1) + packet_type (1) + checksum (2)
-- Packet types: HANDSHAKE, DATA, DATA_END, ACK, NACK, RETRY
-- Fletcher-16 checksums for integrity
-- Sequence numbers for ordered delivery
-- **CRITICAL**: Client and server MUST use identical `PACKET_MAX_SIZE` (reference: 8192 bytes)
+DAP2 is the unified WebSocket protocol for all satellite devices ("JARVIS in every room"). All tiers connect via WebSocket on the same port as WebUI (default 3000):
+- **Tier 1** (RPi): Text-first — local ASR/TTS, sends only transcribed text to daemon
+- **Tier 2** (ESP32): Audio path — streams raw PCM, server handles ASR/TTS (reuses WebUI audio pipeline in `webui_audio.c`)
+- Capability-based routing: daemon inspects registration capabilities to choose text vs audio path
 
-See `remote_dawn/protocol_specification.md` for complete protocol details.
-
-### DAP2 Satellite System (Tier 1)
-
-DAP2 is a text-based WebSocket protocol for "JARVIS in every room" satellite devices (Raspberry Pi, etc.):
-- Satellites handle ASR/TTS locally, send only text to daemon
-- WebSocket connection to same port as WebUI (default 8080)
-- JSON message protocol: `satellite_register`, `satellite_query`, `satellite_ping`
-- Streaming responses via `stream_start`, `stream_delta`, `stream_end`
-- TOML configuration with per-satellite identity (UUID, name, location)
+DAP1 (the original TCP binary protocol) has been eliminated. The code in `src/network/` and `remote_dawn/` is retained for historical reference only.
 
 **Satellite binary**: `dawn_satellite/` - standalone C application using libwebsockets
 
-See `docs/DAP2_SATELLITE.md` for complete protocol details, configuration, and deployment.
+See `docs/DAP2_DESIGN.md` for the protocol specification and `docs/DAP2_SATELLITE.md` for Tier 1 build/config/deployment.
 
 ### Multi-Client Architecture
 
@@ -368,27 +353,18 @@ deviceCallback callbacks[] = {
 };
 ```
 
-## Remote Client Development
+## Satellite Development
 
-ESP32 client implementation (`remote_dawn/remote_dawn.ino`) demonstrates:
-- WiFi connection management
-- DAP protocol implementation
-- Audio recording and transmission
-- Response playback
+**Tier 1 (Raspberry Pi)**: Full satellite binary in `dawn_satellite/`. See `docs/DAP2_SATELLITE.md`.
 
-**Key requirements**:
-- Must use same `PACKET_MAX_SIZE` as server (8192 bytes)
-- Must use same `PROTOCOL_VERSION` (0x01)
-- Implement proper handshake before data transfer
-- Handle retries with exponential backoff
-- Validate checksums on all packets
+**Tier 2 (ESP32)**: Uses `esp_websocket_client` (built into ESP-IDF) to connect via WebSocket. Streams raw PCM audio (16-bit, 16kHz, mono) using binary message types 0x01/0x02 (audio in) and receives TTS audio via 0x11/0x12 (audio out). See `docs/DAP2_DESIGN.md` for protocol details.
 
 ## Testing
 
 Currently no automated test framework. Manual testing involves:
 - Local microphone wake word detection
 - Voice command processing
-- Network client connections (ESP32)
+- WebUI and satellite connections
 - MQTT command execution
 - Vision AI processing
 

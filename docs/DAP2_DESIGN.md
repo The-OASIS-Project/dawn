@@ -1,7 +1,7 @@
 # Dawn Audio Protocol 2.0 (DAP 2) Design Document
 
 **Status**: Implementation In Progress (Phase 0-3 Complete, Phase 3.5 In Progress)
-**Version**: 0.5
+**Version**: 0.8
 **Date**: February 2026
 
 ## Executive Summary
@@ -13,7 +13,7 @@ DAP 2.0 represents a fundamental architectural shift from the "dumb satellite" m
 - **Offline resilience**: Basic functionality without network
 - **Scalability**: Central daemon only handles LLM orchestration
 
-**Key Architecture Decision**: Tier 1 satellites (RPi) use **WebSocket** transport, leveraging the existing WebUI infrastructure. This simplifies implementation significantly - the WebUI has already solved multi-client support, session management, streaming, and reconnection. A custom binary protocol is reserved for Tier 2 (ESP32) where WebSocket overhead matters.
+**Key Architecture Decision**: All satellite tiers use **WebSocket** transport on the same port as the WebUI. The WebUI has already solved multi-client support, session management, streaming, reconnection, and bidirectional audio. Tier 1 (RPi) sends text (local ASR/TTS). Tier 2 (ESP32) sends PCM audio using the same binary message types as the WebUI (server-side ASR/TTS). DAP1 is fully eliminated — no custom binary protocol, no separate TCP server.
 
 ---
 
@@ -178,7 +178,7 @@ The WebUI has already solved many infrastructure problems. Tier 1 satellites sho
 | Reconnection | Manual | Library support |
 | Existing code | None | WebUI infrastructure |
 
-**Decision**: Tier 1 (RPi) uses WebSocket. Reserve custom binary protocol for Tier 2 (ESP32) where WebSocket overhead matters.
+**Decision**: All tiers use WebSocket. ESP32 can run the `esp_websocket_client` library (built into ESP-IDF) with minimal overhead (~100-200KB flash). This eliminates DAP1 entirely and unifies all satellite communication on a single port.
 
 ### What DAP2 Adds Beyond WebUI
 
@@ -205,11 +205,11 @@ User speaks → [LOCAL: VAD → Wake Word → ASR] → Text sent to daemon → L
 
 ### Core Principles
 
-1. **Text-First Protocol**: Tier 1 satellites send transcribed text, not raw audio
-2. **Local Intelligence**: ASR, VAD, wake word, and TTS run on Tier 1 satellite
-3. **WebSocket Transport**: Tier 1 uses WebSocket (extends WebUI); Tier 2 uses custom protocol
+1. **Capability-Based Routing**: Daemon routes based on `local_asr`/`local_tts` flags — text path for Tier 1, audio path for Tier 2
+2. **Local Intelligence Where Possible**: ASR, VAD, wake word, and TTS run locally on Tier 1; server handles these for Tier 2
+3. **Unified WebSocket Transport**: All tiers use WebSocket on the WebUI port — no separate servers or protocols
 4. **Unified Session Model**: Extend existing session_manager, not separate system
-5. **Streaming Support**: LLM responses streamed sentence-by-sentence
+5. **Streaming Support**: LLM responses streamed as text (Tier 1) or sentence-level TTS audio (Tier 2)
 6. **Fallback Modes**: Graceful degradation when network unavailable
 
 ### Unified Session Model
@@ -251,22 +251,22 @@ typedef struct {
 } session_t;
 ```
 
-### Transport Abstraction
+### Capability-Based Routing
 
-Create transport-agnostic message handling:
+The daemon routes messages based on satellite capabilities declared at registration:
 
 ```c
-// Transport interface
-typedef struct {
-   void (*send_text)(void *ctx, const char *text);
-   void (*send_audio)(void *ctx, const uint8_t *data, size_t len);
-   void (*send_state)(void *ctx, const char *state);
-} transport_ops_t;
-
-// Implementations
-static transport_ops_t websocket_ops = { ... };  // WebUI + Tier 1
-static transport_ops_t dap2_t2_ops = { ... };    // Tier 2 (custom protocol)
+// Routing based on capabilities
+if (session->local_asr) {
+   // Tier 1: expect satellite_query with text
+   // Response: stream_delta text messages
+} else {
+   // Tier 2: expect binary audio frames (0x01/0x02)
+   // Response: binary TTS audio frames (0x11/0x12) — same as WebUI
+}
 ```
+
+Both tiers share the same WebSocket connection, response queue, and session management. The only difference is whether the payload is text (JSON) or audio (binary frames).
 
 ---
 
@@ -319,63 +319,71 @@ Satellite: TTS → Audio playback
 
 ### Tier 2: Audio Satellite (ESP32-S3)
 
-Button-activated with audio streaming - follows the DAP 1.1 interaction model with improved protocol.
+Button-activated with server-side ASR/TTS — reuses the WebUI audio infrastructure over WebSocket.
 
 **Interaction Model**: Push-to-talk with optional visual feedback via NeoPixel LEDs. Users press a button to record, and LEDs indicate state (listening, processing, speaking).
 
 | Component | Implementation | Memory | Notes |
 |-----------|---------------|--------|-------|
-| Audio Capture | I2S ADC | ~64 KB | Button-activated |
+| Audio Capture | I2S ADC | ~64 KB | Button-activated, 16kHz mono |
 | VAD | Energy-based | ~1 KB | Silence detection (end of speech) |
-| Audio Codec | ADPCM | ~8 KB | 4:1 compression, low CPU |
-| Audio Playback | I2S DAC | ~64 KB | Streaming from daemon |
-| Network Buffers | TCP | ~100 KB | WiFi stack + protocol |
+| Audio Playback | I2S DAC | ~64 KB | Streaming TTS from daemon |
+| WebSocket Client | esp_websocket_client | ~100-200 KB | Built into ESP-IDF |
+| Network Buffers | WiFi stack | ~50 KB | WebSocket framing |
 | GPIO Button | libgpiod | ~1 KB | Push-to-talk activation |
 | NeoPixel LEDs | SPI driver | ~4 KB | State indicators (optional) |
-| **Total** | | **~250-300 KB** | Requires ESP32-S3 with PSRAM |
+| **Total** | | **~300-400 KB** | Requires ESP32-S3 with PSRAM |
 
 **Hardware Requirement**: ESP32-S3 with 8MB PSRAM (standard on most dev boards)
 
 **Capabilities**:
-- Button-to-talk activation (no wake word - follows DAP 1.1 model)
-- Local silence detection (knows when you stopped speaking)
-- ADPCM-compressed audio upload
-- Streaming audio playback
+- Button-to-talk activation (no wake word — ESP32 can't run Whisper)
+- Local silence detection (energy-based VAD knows when you stopped speaking)
+- Raw PCM audio upload over WebSocket (same binary framing as WebUI)
+- Streaming TTS audio playback from daemon (sentence-level, plays while LLM generates)
+- No music streaming in v1
 
-**Communication**: Custom binary protocol (TCP)
+**Communication**: WebSocket (same port as WebUI, same binary message types)
 
 ```
 User: [presses button] "Turn on the lights" [releases or silence detected]
   │
-  ▼ (TCP: ~30KB ADPCM audio)
-Daemon: ASR → LLM → TTS → audio stream
+  ▼ (WebSocket binary: ~320KB raw PCM for 10s @ 16kHz)
+Daemon: ASR (Whisper) → LLM → TTS (Piper) → PCM audio
   │
-  ▼ (TCP: ~50KB ADPCM audio)
-Satellite: Audio playback
+  ▼ (WebSocket binary: sentence-level TTS audio chunks)
+Satellite: Audio playback (streams while LLM still generating)
 ```
 
-### Audio Codec (Tier 2): ADPCM
+**Why WebSocket instead of custom binary protocol?**
+- `esp_websocket_client` is built into ESP-IDF — zero external dependencies
+- Reuses 100% of the daemon's WebUI audio pipeline (decode, ASR, TTS, encode, response queue)
+- Eliminates DAP1 TCP server entirely — one fewer server thread, one fewer port
+- WebSocket framing handles fragmentation, keepalive, and reconnection
+- Same session management, authentication, and logging as all other clients
 
-Tier 2 satellites use **ADPCM exclusively** for audio compression. This simplifies implementation and minimizes resource usage on ESP32.
+### Audio Codec (Tier 2 v1): Raw PCM
 
-| Codec | Bitrate | CPU | Quality | ESP32 Support |
-|-------|---------|-----|---------|---------------|
-| Raw PCM | 256 kbps | None | Perfect | Trivial |
-| **ADPCM** | 32 kbps | Very Low | Good | Built into ESP-IDF |
+Tier 2 v1 uses **raw 16-bit PCM at 16kHz** — the simplest possible approach.
 
-**Why ADPCM only (not Opus)?**
-- **Simpler implementation**: No codec negotiation needed
-- **Lower resource usage**: Opus library adds ~180KB flash + ~60KB RAM
-- **Sufficient quality**: ADPCM is designed for speech, not music
-- **ESP-IDF native**: Built-in support, no external library
-- **Home WiFi reality**: <0.1% packet loss means Opus FEC provides no benefit
+| Codec | Bandwidth (10s) | ESP32 Effort | Server Effort |
+|-------|-----------------|--------------|---------------|
+| **Raw PCM 16kHz** | 320 KB | Zero | Skip resample (already 16kHz) |
+| ADPCM (future v2) | 80 KB | Low (ESP-IDF built-in) | ~50 lines decode |
+| Opus (not planned) | 30-40 KB | High (~200KB flash) | Already implemented |
 
-**ADPCM Specifications**:
-- Algorithm: IMA ADPCM (standard)
-- Compression ratio: 4:1
-- Input: 16-bit PCM @ 16kHz mono
-- Output: 4-bit ADPCM @ 32 kbps
-- Block size: 256 samples (16ms per block)
+**Why raw PCM for v1?**
+- **Zero codec work** on ESP32 — just capture I2S samples and send
+- **Server already supports it** — WebUI has PCM fallback when Opus unavailable
+- **320KB for 10s** is fine on home WiFi (takes <0.5s to transmit)
+- **Simpler debugging** — raw audio is trivially inspectable
+- ADPCM can be added later if bandwidth becomes a concern with many satellites
+
+**PCM Format**:
+- Sample rate: 16kHz
+- Bit depth: 16-bit signed, little-endian
+- Channels: Mono
+- No header — raw samples in WebSocket binary frames
 
 ### Satellite Registration and Identification
 
@@ -437,6 +445,34 @@ Satellites self-identify on connection with a structured identity that enables:
 **UUID Generation**:
 - Tier 1 (RPi): Generate UUID v4 on first boot, store in `/etc/dawn-satellite-id`
 - Tier 2 (ESP32): Derive UUID v5 from MAC address using DAWN namespace
+
+**Tier 2 Registration (WebSocket JSON)**:
+
+```json
+{
+  "type": "satellite_register",
+  "payload": {
+    "uuid": "esp32-aabbccddeeff",
+    "name": "Hallway Speaker",
+    "location": "hallway",
+    "tier": 2,
+    "capabilities": {
+      "local_asr": false,
+      "local_tts": false,
+      "wake_word": false,
+      "push_to_talk": true,
+      "audio_codecs": ["pcm"]
+    },
+    "hardware": {
+      "platform": "esp32s3",
+      "memory_mb": 8
+    },
+    "protocol_version": "2.0"
+  }
+}
+```
+
+The daemon inspects `local_asr: false` and `audio_codecs` to route this client through the WebUI audio pipeline (binary PCM frames) instead of the text query path.
 
 ---
 
@@ -518,61 +554,82 @@ Satellite                                    Daemon
     │                                           │
 ```
 
-### 6.2 Tier 2: Custom Binary Protocol
+### 6.2 Tier 2: WebSocket Audio Protocol
 
-Tier 2 satellites use a custom binary protocol optimized for ESP32 resource constraints.
+Tier 2 satellites use the **same WebSocket connection and binary message types** as the WebUI browser client. This eliminates the need for a custom protocol — the daemon's existing audio pipeline handles everything.
 
-**Packet Format**:
-
-```
-┌────────────────┬────────────────┬────────────────┬────────────────┐
-│  Magic (2B)    │  Version (1B)  │  Type (1B)     │  Flags (1B)    │
-├────────────────┴────────────────┴────────────────┴────────────────┤
-│                        Payload Length (4B)                         │
-├────────────────────────────────────────────────────────────────────┤
-│                        Sequence Number (4B)                        │
-├────────────────────────────────────────────────────────────────────┤
-│                        Checksum (2B)                               │
-├────────────────────────────────────────────────────────────────────┤
-│                        Payload (variable)                          │
-└────────────────────────────────────────────────────────────────────┘
-```
-
-**Total Header Size**: 14 bytes
-
-| Field | Size | Description |
-|-------|------|-------------|
-| Magic | 2B | `0xDA 0x02` (Dawn Audio v2) |
-| Version | 1B | Protocol version (0x02) |
-| Type | 1B | Message type (see below) |
-| Flags | 1B | Bit flags (streaming, compressed, etc.) |
-| Payload Length | 4B | Length of payload in bytes |
-| Sequence Number | 4B | Message sequence (for ordering/ack) |
-| Checksum | 2B | CRC-16 of header + payload |
-
-**Message Types (Tier 2)**:
+**Binary Message Types** (shared with WebUI, defined in `webui_server.h`):
 
 | Value | Name | Direction | Payload |
 |-------|------|-----------|---------|
-| 0x01 | REGISTER | S→D | JSON capabilities |
-| 0x02 | REGISTER_ACK | D→S | JSON session config |
-| 0x11 | QUERY_AUDIO | S→D | ADPCM audio |
-| 0x23 | RESPONSE_AUDIO | D→S | ADPCM audio chunk |
-| 0x22 | RESPONSE_END | D→S | Empty (end of stream) |
-| 0x40 | STATUS | Both | JSON status/health |
-| 0x50 | ACK | Both | Sequence number being acked |
-| 0xF0 | PING | Both | Empty |
-| 0xF1 | PONG | Both | Empty |
+| `0x01` | `WS_BIN_AUDIO_IN` | S→D | Raw PCM audio chunk |
+| `0x02` | `WS_BIN_AUDIO_IN_END` | S→D | End of recording (triggers ASR) |
+| `0x11` | `WS_BIN_AUDIO_OUT` | D→S | TTS audio chunk (PCM) |
+| `0x12` | `WS_BIN_AUDIO_SEGMENT_END` | D→S | End of TTS sentence (play now) |
 
-**Flags**:
+**Text Message Types** (JSON, shared with Tier 1):
 
-| Bit | Name | Description |
-|-----|------|-------------|
-| 0 | STREAMING | This is part of a stream (more to come) |
-| 1 | COMPRESSED | Payload is ADPCM compressed |
-| 2 | REQUIRES_ACK | Sender expects ACK for this message |
-| 3 | PRIORITY | High-priority message |
-| 4-7 | Reserved | Future use |
+| Type | Direction | Purpose |
+|------|-----------|---------|
+| `satellite_register` | S→D | Registration with `local_asr: false`, `audio_codecs: ["pcm"]` |
+| `satellite_register_ack` | D→S | Session ID, capabilities confirmed |
+| `satellite_ping` | S→D | Keepalive (10s interval) |
+| `state` | D→S | State updates (listening, thinking, speaking, idle) |
+| `error` | D→S | Error notification |
+
+**Example Flow (Tier 2)**:
+
+```
+Satellite                                    Daemon
+    │                                           │
+    │──── WS Connect (port 3000) ──────────────>│
+    │                                           │
+    │──── satellite_register ──────────────────>│
+    │     {tier: 2, local_asr: false,           │
+    │      audio_codecs: ["pcm"]}               │
+    │                                           │
+    │<─── satellite_register_ack ──────────────│
+    │     {session_id, use_opus: false}         │
+    │                                           │
+    │  [User presses button]                    │
+    │                                           │
+    │──── 0x01 [PCM audio chunk] ──────────────>│  (accumulates in audio buffer)
+    │──── 0x01 [PCM audio chunk] ──────────────>│
+    │──── 0x01 [PCM audio chunk] ──────────────>│
+    │──── 0x02 [end of recording] ─────────────>│  (spawns audio worker thread)
+    │                                           │
+    │<─── state: "thinking" ────────────────────│  (ASR + LLM processing)
+    │                                           │
+    │<─── state: "speaking" ────────────────────│
+    │<─── 0x11 [TTS audio: sentence 1] ────────│  (plays immediately)
+    │<─── 0x12 [segment end] ──────────────────│
+    │                                           │
+    │<─── 0x11 [TTS audio: sentence 2] ────────│  (plays while LLM continues)
+    │<─── 0x12 [segment end] ──────────────────│
+    │                                           │
+    │<─── state: "idle" ────────────────────────│
+    │                                           │
+```
+
+**Audio Pipeline on Daemon** (reused from WebUI, `webui_audio.c`):
+
+```
+ESP32 → WS binary 0x01 → accumulate in audio buffer
+                            ↓ (on 0x02)
+                     spawn audio_worker_thread()
+                            ↓
+                     PCM @ 16kHz (skip resample — already 16kHz)
+                            ↓
+                     Whisper ASR → transcript
+                            ↓
+                     LLM processing (streaming)
+                            ↓
+                     sentence callback → TTS (Piper) → PCM
+                            ↓
+                     WS binary 0x11 → ESP32 playback
+```
+
+**Key difference from WebUI**: The WebUI sends Opus @ 48kHz (resampled to 16kHz on server). Tier 2 sends raw PCM @ 16kHz, so the server skips the Opus decode and resample steps entirely.
 
 ---
 
@@ -639,7 +696,6 @@ dawn/
 │   │   ├── audio_playback.c       # ALSA playback with resampling
 │   │   ├── satellite_config.c     # TOML config + identity persistence
 │   │   ├── satellite_state.c      # State machine logic
-│   │   ├── dap_client.c           # DAP (Tier 2) TCP client
 │   │   ├── display.c              # Framebuffer display (optional)
 │   │   ├── gpio_control.c         # GPIO input (optional)
 │   │   ├── neopixel.c             # NeoPixel LEDs (optional)
@@ -695,7 +751,6 @@ Satellite CMake options control which components are built:
 
 ```cmake
 # dawn_satellite/CMakeLists.txt
-option(ENABLE_VOICE       "Enable voice processing"     ON)
 option(ENABLE_VAD         "Enable Silero VAD"            ON)
 option(ENABLE_VOSK_ASR    "Enable Vosk streaming ASR"    ON)   # Default for satellite
 option(ENABLE_WHISPER_ASR "Enable Whisper batch ASR"     OFF)  # Optional
@@ -915,7 +970,7 @@ This phase addresses the architecture reviewer's critical finding: existing code
 
 ### Phase 3.5: Touchscreen UI (SDL2)
 
-**Status**: 🔨 **IN PROGRESS** (visualization, transcript, touch scroll, settings panel complete; overlays remaining)
+**Status**: 🔨 **IN PROGRESS** (visualization, transcript, touch scroll, settings panel, music panel complete; screensaver/ambient remaining)
 
 **Goal**: Premium touchscreen interface for Tier 1 satellites with attached displays
 
@@ -945,32 +1000,45 @@ This phase addresses the architecture reviewer's critical finding: existing code
    - Status detail line (tool calls, thinking info from daemon)
    - User transcription display ("You: ..." after ASR completes)
 
-3. **Quick Actions Bar**: ❌ NOT STARTED
-   - 4-6 configurable touch shortcuts (music, lights, thermostat, timer, settings)
-   - 48x48 minimum touch targets
-   - Accent color highlight when active
+3. **Quick Actions Bar**: REMOVED (replaced by status bar icon pattern)
+   - Features are accessed via icons in the transcript status bar instead
+   - Icons appear only when features are available (no placeholders)
+   - Currently: music icon (note glyph) toggles music panel
+   - Future icons added as features ship (e.g., lights, thermostat)
 
-4. **Media Player Overlay**: ❌ NOT STARTED
-   - Slide-in panel matching WebUI music.css aesthetic
-   - Visualizer bars, transport controls, progress bar
-   - Compact mode when minimized
+4. **Media Player Panel**: ✅ COMPLETE
+   - Three-tab design: Playing (transport + visualizer), Queue, Library (artists/albums/tracks)
+   - Transport controls: play/pause, prev/next, shuffle/repeat toggles
+   - Progress bar with drag-to-seek, elapsed/remaining time
+   - Opus audio streaming from daemon with ALSA playback
+   - Goertzel FFT visualizer from live audio stream (not simulated)
+   - Library browsing with pagination (50 items/page, next/prev navigation)
+   - Artist → tracks and album → tracks drill-down
+   - SDL primitive icons (no image assets needed)
+   - Touch-optimized with 44px minimum targets
 
-5. **Screensaver/Ambient Mode**: ❌ NOT STARTED
+5. **Settings Enhancements**: ✅ COMPLETE
+   - Brightness slider (sysfs backlight or SDL software dimming fallback for HDMI)
+   - Volume slider (ALSA mixer control)
+   - Persistent brightness/volume across restarts (saved to config)
+
+6. **Screensaver/Ambient Mode**: ❌ NOT STARTED
    - Photo frame with Ken Burns effect (slow pan/zoom)
    - Cross-fade transitions between images
    - Clock display option (digital or analog)
    - Ambient orb mode (breathing animation, "always ready" indicator)
    - Wake on touch or wake word
 
-#### Touch Interactions — 🔨 PARTIALLY COMPLETE
+#### Touch Interactions — 🔨 MOSTLY COMPLETE
 
 | Gesture | Action | Status |
 |---------|--------|--------|
 | Tap orb | Manual wake (bypass wake word) | ✅ |
 | Long press orb | Cancel/stop current operation | ✅ |
 | Drag transcript | Scroll conversation history | ✅ |
-| Swipe down from top | Settings panel (server info, connection, uptime) | ✅ |
-| Swipe up from bottom | Quick actions | ❌ Stubbed |
+| Swipe down from top | Settings panel (server info, connection, uptime, brightness/volume) | ✅ |
+| Tap music icon | Open music player panel | ✅ |
+| Swipe up from bottom | Unassigned (reserved) | Closes settings if open, otherwise no-op |
 | Swipe left/right | Navigate conversation history | ❌ |
 | Tap anywhere (screensaver) | Wake display | ❌ |
 
@@ -1016,9 +1084,16 @@ dawn_satellite/src/ui/
 ├── ui_transcript.h     # Transcript panel types and API
 ├── ui_markdown.c       # Inline markdown renderer (bold/italic/code)
 ├── ui_markdown.h       # Markdown font set and render API
+├── ui_music.c          # Music player panel (Playing/Queue/Library tabs)
+├── ui_music.h          # Music panel types and API
+├── music_types.h       # Shared music data structures
+├── ui_slider.c         # Brightness/volume slider widgets
+├── ui_slider.h         # Slider types and API
 ├── ui_touch.c          # Touch gesture recognition (tap/long-press/swipe)
 ├── ui_touch.h          # Touch state types
-└── ui_colors.h         # Color constants (matching WebUI variables.css)
+├── ui_colors.h         # Color constants (matching WebUI variables.css)
+├── backlight.c         # Display brightness (sysfs + software dimming fallback)
+└── backlight.h         # Backlight control API
 ```
 
 #### Dependencies
@@ -1041,21 +1116,26 @@ sudo usermod -aG video,render $USER
 
 ### Phase 4: Tier 2 Satellite (ESP32-S3)
 
-**Goal**: Button-activated satellite with ADPCM audio streaming
+**Goal**: Button-activated satellite using WebSocket + PCM audio (reuses WebUI audio pipeline)
 
+**Daemon-side changes** (minimal):
+1. **Route binary audio from satellite connections**: In `webui_server.c`, allow binary audio messages from `is_satellite` connections (currently only processed for WebUI clients)
+2. **Handle 16kHz PCM input**: In `webui_audio.c`, detect when input is already 16kHz (Tier 2) and skip the 48→16kHz resample step
+3. **Send PCM TTS output**: When `use_opus: false`, send raw PCM TTS audio via `0x11` frames (already supported as WebUI fallback)
+
+**ESP32-side** (new ESP-IDF project):
 1. **Create `satellite/tier2/` directory** (ESP-IDF project)
-2. **Implement custom binary protocol** client
-3. **Implement ADPCM codec**:
-   - Encode: recorded audio → ADPCM
-   - Decode: ADPCM response → PCM playback
-4. **Implement energy-based VAD** (silence detection)
-5. **Daemon support** for QUERY_AUDIO / RESPONSE_AUDIO:
-   - Receive ADPCM → decode → ASR → LLM → TTS → encode → send ADPCM
+2. **Implement WebSocket client** using `esp_websocket_client` (built into ESP-IDF)
+3. **Send `satellite_register`** with `local_asr: false`, `audio_codecs: ["pcm"]`
+4. **Button → record → send PCM**: I2S capture @ 16kHz → send as `0x01` binary frames → `0x02` on silence/release
+5. **Receive TTS audio**: Listen for `0x11` frames → I2S DAC playback → `0x12` marks segment end
+6. **Energy-based VAD** for silence detection (end-of-speech)
+7. **NeoPixel LED feedback**: State colors matching Tier 1 (idle, listening, thinking, speaking)
 
 **Deliverables**:
 - `satellite/tier2/` ESP-IDF project
-- Working ESP32-S3 firmware
-- ADPCM streaming working over TCP
+- Working ESP32-S3 firmware with WebSocket audio
+- No custom binary protocol — 100% reuse of WebUI audio path
 
 **Exit Criteria**: Button-to-response <4s (p95)
 
@@ -1135,7 +1215,8 @@ Based on real-world measurements and user feedback:
 **Capabilities**:
 - Button-activated recording
 - Energy-based VAD (silence detection)
-- ADPCM encode/decode
+- WebSocket client (esp_websocket_client, built into ESP-IDF)
+- Raw PCM audio streaming (16kHz, 16-bit) — server handles ASR/TTS
 - Cannot run Whisper or Piper locally
 
 ---
@@ -1155,9 +1236,9 @@ For initial deployment, rely on network-level security:
 ### Phase 2+: TLS and Authentication
 
 **TLS 1.3 for All Connections**:
-- WebSocket Secure (WSS) for Tier 1
-- TLS for Tier 2 custom protocol
+- WebSocket Secure (WSS) for all tiers (Tier 1 and Tier 2)
 - Certificate-based authentication optional
+- ESP32 supports TLS via mbedTLS (built into ESP-IDF)
 
 ---
 
@@ -1278,8 +1359,8 @@ name = "Guest Room"
 | Question | Decision | Rationale |
 |----------|----------|-----------|
 | **Transport (Tier 1)** | WebSocket | Leverage existing WebUI infrastructure |
-| **Transport (Tier 2)** | Custom TCP protocol | WebSocket overhead matters on ESP32 |
-| **Audio Codec (Tier 2)** | ADPCM only | Simpler, lower resources |
+| **Transport (Tier 2)** | WebSocket | Reuse WebUI audio pipeline; esp_websocket_client built into ESP-IDF |
+| **Audio Codec (Tier 2 v1)** | Raw PCM 16kHz | Zero ESP32 effort; ADPCM optional in v2 |
 | **Wake Word (Tier 1)** | Same as daemon (VAD + Whisper) | Seamless UX, code reuse |
 | **Wake Word (Tier 2)** | None (button-activated) | ESP32 can't run Whisper |
 | **Session Management** | Extend existing session_manager | Unified architecture |
@@ -1297,22 +1378,23 @@ name = "Guest Room"
 
 ## Appendix A: Comparison with DAP 1.0
 
-| Aspect | DAP 1.0 | DAP 2.0 |
+| Aspect | DAP 1.0 (Eliminated) | DAP 2.0 |
 |--------|---------|---------|
-| **Primary payload** | Audio (WAV) | Text (Tier 1) / ADPCM (Tier 2) |
-| **Transport (Tier 1)** | Custom TCP | WebSocket |
-| **Transport (Tier 2)** | Custom TCP | Custom TCP |
-| **Streaming** | No | Yes |
-| **Wake word** | No (button) | Yes (Tier 1) |
-| **VAD** | No (button) | Yes (local) |
-| **ASR location** | Server only | Server or local |
-| **TTS location** | Server only | Server or local |
-| **Offline mode** | No | Yes (Tier 1) |
-| **Bandwidth** | ~1 MB/interaction | ~1 KB (Tier 1) / ~100 KB (Tier 2) |
+| **Primary payload** | Audio (WAV) | Text (Tier 1) / PCM audio (Tier 2) |
+| **Transport** | Custom TCP binary | WebSocket (all tiers, same port as WebUI) |
+| **Streaming** | No | Yes (text deltas for Tier 1, TTS audio for Tier 2) |
+| **Wake word** | No (button) | Yes (Tier 1) / No (Tier 2, button) |
+| **VAD** | No (button) | Silero (Tier 1) / Energy-based (Tier 2) |
+| **ASR location** | Server only | Local (Tier 1) / Server (Tier 2) |
+| **TTS location** | Server only | Local (Tier 1) / Server (Tier 2) |
+| **Offline mode** | No | Yes (Tier 1) / No (Tier 2) |
+| **Bandwidth** | ~1 MB/interaction | ~1 KB (Tier 1) / ~320 KB (Tier 2) |
+| **Server threads** | Dedicated TCP server | Shared WebUI WebSocket (no extra server) |
+| **Music** | Not supported | Opus streaming (Tier 1) / Not in v1 (Tier 2) |
 
 ## Appendix B: Related Documents
 
-- `protocol_specification.md` - DAP 1.0 specification
+- `remote_dawn/protocol_specification.md` - DAP 1.0 specification (historical, protocol eliminated)
 - `dawn_multi_client_architecture.md` - Multi-client threading design
 - `ARCHITECTURE.md` - DAWN system architecture
 - `LLM_INTEGRATION_GUIDE.md` - LLM setup and configuration
@@ -1327,3 +1409,5 @@ name = "Guest Room"
 - v0.4 (Feb 2026): Phase 0-3 complete. Updated protocol messages to match implementation (stream_start/delta/end). Updated common/ structure (ASR engine, Vosk, unified logging). Phase 3.5 touchscreen UI in planning.
 - v0.5 (Feb 2026): Phase 3.5 in progress. Core visualization complete (orb, rings, FFT spectrum bars, KMSDRM). Transcript panel complete (streaming, date/time, WiFi, status detail). Touch gestures and overlays remaining.
 - v0.6 (Feb 2026): Touch scroll complete (drag-to-scroll with auto-scroll management). Settings panel complete (server info, connection status, device identity, IP, uptime, session duration). TTS playback queue (producer-consumer pipelining). Emoji stripping unified (display + TTS, full SMP coverage 0x1F000-0x1FFFF). Transcript capacity increased (40 entries, 4KB text).
+- v0.7 (Feb 2026): Music player panel complete (Playing/Queue/Library tabs, transport controls, visualizer, Opus audio streaming). Brightness and volume sliders in settings panel. Software dimming fallback for HDMI displays (sysfs backlight + SDL overlay). Paginated library browsing (50 items/page). Daemon-side satellite auth whitelist for music message handlers. Persistent brightness/volume settings across restarts.
+- v0.8 (Feb 2026): **Major architecture change** — Tier 2 (ESP32) now uses WebSocket + PCM audio instead of custom binary protocol. This completely eliminates DAP1. Both tiers connect to the same WebUI WebSocket port. Tier 2 reuses the WebUI's existing audio pipeline (binary message types 0x01/0x02/0x11/0x12, audio buffer, worker threads, sentence-level TTS streaming). Raw PCM at 16kHz for v1 (ADPCM optional for future v2). No music on Tier 2 v1.

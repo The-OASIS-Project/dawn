@@ -4,7 +4,7 @@ This document describes the architecture of the D.A.W.N. (Digital Assistant for 
 
 **D.A.W.N.** is the central intelligence layer of the OASIS ecosystem, responsible for interpreting user intent, fusing data from every subsystem, and routing commands. At its core, DAWN performs neural-inference to understand context and drive decision-making, acting as OASIS's orchestration hub for MIRAGE, AURA, SPARK, STAT, and any future modules.
 
-**Last Updated**: January 31, 2026 (added Module Dependency Hierarchy section)
+**Last Updated**: February 11, 2026 (DAP1 eliminated, unified DAP2 WebSocket for all satellites)
 
 ## Table of Contents
 
@@ -14,6 +14,7 @@ This document describes the architecture of the D.A.W.N. (Digital Assistant for 
 - [Threading Model](#threading-model)
 - [State Machine](#state-machine)
 - [Network Protocol](#network-protocol)
+- [DAP2 Satellite Protocol](#dap2-satellite-protocol)
 - [Command Processing Architecture](#command-processing-architecture)
 - [Component Interactions](#component-interactions)
 - [Memory Management](#memory-management)
@@ -32,17 +33,17 @@ D.A.W.N. is a modular voice assistant system that processes voice commands throu
 │   → PROCESSING)                                             │
 └────────┬──────────────────────────────┬─────────────────────┘
          │                              │
-         │ Local Audio                  │ Network Audio
+         │ Local Audio                  │ WebSocket (WebUI + Satellites)
          │                              │
     ┌────▼─────────┐            ┌───────▼──────────┐
-    │ Audio Capture│            │  Network Server  │
-    │ Thread       │            │  (dawn_server)   │
-    │ + Ring Buffer│            │  Single-threaded │
+    │ Audio Capture│            │  WebUI Server    │
+    │ Thread       │            │ (libwebsockets)  │
+    │ + Ring Buffer│            │ Multi-client     │
     └────┬─────────┘            └───────┬──────────┘
          │                              │
     ┌────▼──────────┐           ┌───────▼──────────┐
-    │  VAD (Silero) │           │ Network Audio    │
-    │  Speech/Noise │           │ Processing       │
+    │  VAD (Silero) │           │ Session Manager  │
+    │  Speech/Noise │           │ + Audio Workers  │
     └────┬──────────┘           └───────┬──────────┘
          │                              │
     ┌────▼──────────┐                   │
@@ -303,13 +304,11 @@ TTS is protected by a global mutex (`tts_mutex`) to prevent concurrent access fr
 - Network server thread (remote audio)
 - Streaming LLM sentence buffer
 
-### 5. Network Subsystem (`src/network/`, `include/network/`)
+### 5. Network Subsystem (`src/network/`, `include/network/`) — DEPRECATED
 
-**Purpose**: Network audio server for remote ESP32 clients
+**Purpose**: Legacy DAP1 network audio server for ESP32 clients
 
-#### Architecture: **Single-Threaded Server** (currently)
-
-**Note**: Multi-client support is planned (see `remote_dawn/dawn_multi_client_architecture.md`) but not yet implemented.
+**Status**: **DEPRECATED** — DAP1 is eliminated. All satellite communication (including ESP32 Tier 2) now uses WebSocket via the WebUI server. See [Section 5b: DAP2 Satellite Subsystem](#5b-dap2-satellite-subsystem) for the unified replacement. The code in `src/network/` and `remote_dawn/` is retained for historical reference only.
 
 #### Key Components
 
@@ -371,6 +370,150 @@ ESP32 Client → TCP Connection → Handshake → Audio Stream (DAP packets)
                                                     ↓
                                             ESP32 Playback
 ```
+
+### 5b. DAP2 Satellite Subsystem (`dawn_satellite/`, `common/`, `src/webui/webui_satellite.c`)
+
+**Purpose**: Text-first WebSocket protocol for Tier 1 satellite devices (Raspberry Pi 4+)
+
+**Design Documents**: [DAP2_DESIGN.md](docs/DAP2_DESIGN.md) | [DAP2_SATELLITE.md](docs/DAP2_SATELLITE.md)
+
+#### Architecture: **Local ASR/TTS + Remote LLM**
+
+Unlike DAP1 (which streams raw audio to the daemon), DAP2 satellites handle speech recognition and text-to-speech locally and send only text to the daemon over WebSocket.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    DAWN Satellite (Tier 1)                    │
+│                                                              │
+│  Audio Capture → VAD (Silero) → Wake Word → ASR (Vosk)      │
+│                                                   │ text     │
+│  Audio Playback ← TTS (Piper) ← sentence_buffer ←│          │
+│                                                              │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │  SDL2 Touchscreen UI (Optional, KMSDRM backend)       │  │
+│  │  Orb Visualizer | Transcript | Music Panel | Settings  │  │
+│  └────────────────────────────────────────────────────────┘  │
+│                                                              │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │  Music Stream (separate WebSocket)                     │  │
+│  │  Opus decode → ALSA playback → Goertzel FFT visualizer │  │
+│  └────────────────────────────────────────────────────────┘  │
+└──────────────────────────┬───────────────────────────────────┘
+                           │ WebSocket JSON (control)
+                           │ WebSocket binary (Opus music audio)
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                       DAWN Daemon                            │
+│  webui_satellite.c: register, query, streaming response      │
+│  webui_music.c: music control, library browse, Opus stream   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### Key Components
+
+**Satellite side** (`dawn_satellite/`):
+
+- **ws_client.c/h**: WebSocket client for daemon communication
+  - JSON message protocol over existing WebUI port
+  - Reconnection with exponential backoff
+  - App-level ping/pong keep-alive (10s interval)
+  - Music subscribe/control/library/queue messages
+
+- **voice_processing.c/h**: Local voice pipeline
+  - VAD → wake word → ASR → send text query
+  - Receive streaming response → sentence buffer → TTS
+  - Producer-consumer TTS playback queue (synthesize N+1 while playing N)
+
+- **music_stream.c/h**: Dedicated Opus audio WebSocket
+  - Separate connection for music audio streaming
+  - Opus decode → ALSA playback
+  - Goertzel FFT analysis on live audio for visualizer
+
+- **sdl_ui.c/h**: Touchscreen UI coordinator (SDL2 + KMSDRM)
+  - Animated orb visualizer with state-driven colors
+  - Scrollable markdown transcript with word-wrap
+  - Touch gesture system (swipe, tap, long-press)
+  - Status bar icon pattern for feature access (see below)
+
+- **ui_music.c/h**: Music control panel
+  - Three-tab layout: Playing / Queue / Library
+  - Transport controls, seek bar, FFT visualizer
+  - Paginated library browsing with artist/album drill-down
+
+- **backlight.c/h**: Display brightness control
+  - sysfs backlight control for DSI displays
+  - Software dimming fallback for HDMI displays
+
+**Daemon side** (`src/webui/`):
+
+- **webui_satellite.c**: Satellite message handlers
+  - Registration, query routing, streaming response relay
+  - Session management with UUID-based identification
+  - Satellite auth whitelist for music WebSocket messages
+
+**Shared** (`common/`):
+
+- **common/src/asr/**: ASR engine abstraction (Whisper batch, Vosk streaming)
+- **common/src/tts/**: Piper TTS with preprocessing and emoji stripping
+- **common/src/vad/**: Silero VAD with ONNX runtime
+- **common/src/logging/**: `DAWN_LOG_INFO/ERROR/WARNING` macros
+
+#### DAP2 Protocol Messages
+
+| Type | Direction | Purpose |
+|------|-----------|---------|
+| `satellite_register` | Satellite → Daemon | Registration with UUID, name, location |
+| `satellite_register_ack` | Daemon → Satellite | Session ID, memory enabled flag |
+| `satellite_query` | Satellite → Daemon | User's transcribed text |
+| `stream_start` | Daemon → Satellite | Streaming response begins |
+| `stream_delta` | Daemon → Satellite | Partial response text |
+| `stream_end` | Daemon → Satellite | Response complete |
+| `satellite_ping` | Satellite → Daemon | App-level keep-alive |
+| `music_control` | Satellite → Daemon | Play/pause/stop/next/prev/seek |
+| `music_library` | Satellite → Daemon | Browse artists/albums/tracks (paginated) |
+| `music_state` | Daemon → Satellite | Playback state update |
+
+#### Data Flow (Satellite Voice Command)
+
+```
+1. Satellite: Microphone → VAD → Wake Word Detection → ASR (Vosk streaming)
+   ↓
+2. satellite_query {text: "turn on the lights"} → WebSocket → Daemon
+   ↓
+3. Daemon: LLM processing → Tool execution → Streaming response
+   ↓
+4. stream_delta {delta: "I'll turn on"} → WebSocket → Satellite
+   ↓
+5. Satellite: Sentence buffer → TTS (Piper) → ALSA playback
+   ↓
+6. stream_end → Satellite marks response complete
+```
+
+#### Satellite UI Design Patterns
+
+**Status Bar Icon Pattern**: Features are accessed via small icons in the
+transcript status bar (top-right area), not via a dedicated quick actions panel.
+This mirrors the WebUI's icon-bar approach.
+
+- Icons sit inline in the existing status bar alongside WiFi and date/time
+- Each icon is an 18x18 SDL primitive texture with a 48x48 hit area (Apple HIG
+  minimum for touch)
+- Default color: secondary text color; active state: cyan accent
+- Rendering technique: build icon as a **white texture**, then tint at draw time
+  via `SDL_SetTextureColorMod()` — one cached texture serves both idle and active
+  color states without re-rendering
+- Icons only appear when the feature is available (e.g., music icon requires
+  Opus support). No placeholder or "coming soon" icons.
+- Tapping an icon toggles its associated slide-in panel (e.g., music panel
+  slides in from the right)
+
+**Current icons**: Music (note glyph, toggles music panel)
+
+**Panel system**: Two panel types remain:
+- Settings panel: swipe down from top edge (hamburger indicator)
+- Music panel: tap music icon in status bar (slides from right)
+
+Swipe-up from the bottom edge is currently unassigned (reserved for future use).
 
 ### 6. Audio Subsystem (`src/audio/`, `include/audio/`)
 
@@ -434,9 +577,11 @@ ESP32 Client → TCP Connection → Handshake → Audio Stream (DAP packets)
 
 ### 7. WebUI Audio Subsystem
 
-**Purpose**: Browser-based voice input/output with low-latency audio streaming
+**Purpose**: Bidirectional audio streaming for WebUI browsers and Tier 2 (ESP32) satellites
 
-#### Architecture: **Opus Codec + WebCodecs API**
+This subsystem handles all server-side audio: decode incoming audio, run ASR, generate TTS, encode outgoing audio. The WebUI browser connects with **Opus** (48kHz); Tier 2 satellites connect with **raw PCM** (16kHz, skipping codec/resample). Both use the same binary WebSocket message types (0x01/0x02 audio in, 0x11/0x12 audio out) and the same worker thread pipeline in `webui_audio.c`. See [DAP2_DESIGN.md](docs/DAP2_DESIGN.md) Section 6.2 for the Tier 2 audio protocol details.
+
+#### Architecture: **Opus Codec + WebCodecs API** (WebUI Browser Path)
 
 The WebUI uses Opus audio compression for efficient bidirectional audio streaming between browser and server.
 
@@ -890,28 +1035,30 @@ struct tool_metadata;  // Forward declaration
 16. State Machine Transition (PROCESSING → SILENCE)
 ```
 
-### Network Voice Command Flow
+### Remote Voice Command Flow (WebSocket Clients)
 
 ```
-1. ESP32 Client Connection (TCP)
+1. Client connects via WebSocket (WebUI browser, Tier 1 or Tier 2 satellite)
    ↓
-2. DAP Handshake (establish protocol version)
+2. Session registration (satellite_register with capabilities)
    ↓
-3. Audio Stream Reception (DAP packets with checksums)
-   ↓
-4. WAV Assembly (from packets)
-   ↓
-5. PCM Extraction (from WAV)
-   ↓
-6. ASR Processing (Whisper/Vosk)
-   ↓
-7. LLM Processing (same as local flow)
-   ↓
-8. TTS Synthesis (generate response WAV)
-   ↓
-9. WAV Transmission (DAP packets to ESP32)
-   ↓
-10. ESP32 Playback
+   ┌─────────── Tier 1 (Text Path) ────────────┐  ┌──── Tier 2 / WebUI (Audio Path) ────┐
+   │ 3a. Local ASR on satellite                 │  │ 3b. Binary audio frames (0x01)       │
+   │ 4a. satellite_query {text: "..."}          │  │ 4b. Audio end marker (0x02)          │
+   │                                            │  │ 5b. Server-side ASR (Whisper/Vosk)   │
+   └────────────────────┬───────────────────────┘  └──────────────────┬───────────────────┘
+                        │                                             │
+                        └──────────────┬──────────────────────────────┘
+                                       ↓
+   6. LLM Processing (same as local flow)
+      ↓
+   7. Streaming response (stream_start → stream_delta → stream_end)
+      ↓
+   ┌─────────── Tier 1 (Text Path) ────────────┐  ┌──── Tier 2 / WebUI (Audio Path) ────┐
+   │ 8a. Satellite receives text deltas         │  │ 8b. Server-side TTS (Piper)          │
+   │ 9a. Local TTS synthesis (Piper)            │  │ 9b. Binary audio frames (0x11/0x12)  │
+   │ 10a. Local playback                        │  │ 10b. Client playback                 │
+   └────────────────────────────────────────────┘  └──────────────────────────────────────┘
 ```
 
 ---
@@ -1010,6 +1157,11 @@ The main application (`src/dawn.c`) implements a state machine for local voice p
 
 ## Network Protocol
 
+> **Note**: DAP1 (the original TCP binary protocol for ESP32 clients) has been **eliminated**. All client communication — WebUI browsers, Tier 1 satellites (Raspberry Pi), and Tier 2 satellites (ESP32) — now uses **WebSocket** via the unified WebUI server on port 3000. The DAP1 packet format below is retained for historical reference only. See [DAP2 Satellite Protocol](#dap2-satellite-protocol) for the current design.
+
+<details>
+<summary>DAP1 Packet Format (Historical Reference — Eliminated)</summary>
+
 ### Dawn Audio Protocol (DAP) v1.1
 
 **Design Goals**:
@@ -1101,6 +1253,27 @@ Client ← ACK ← Server
 - `PROTOCOL_VERSION` (0x01)
 
 Mismatch causes connection failure or data corruption.
+
+</details>
+
+---
+
+## DAP2 Satellite Protocol
+
+**Status**: ✅ **Implemented** (January–February 2026)
+
+DAP2 is the unified WebSocket protocol for all satellite devices. Every satellite connects to the same WebSocket port as the WebUI (default 3000) and registers with its capabilities. The daemon uses **capability-based routing** to choose the appropriate path:
+
+| Tier | Hardware | What it sends | Server does | Use Case |
+|------|----------|---------------|-------------|----------|
+| **Tier 1** | RPi 4/5 | JSON text (`satellite_query`) | LLM only | Hands-free (local ASR/TTS) |
+| **Tier 2** | ESP32-S3 | Binary PCM audio (0x01/0x02) | ASR + LLM + TTS | Push-to-talk (server ASR/TTS) |
+
+**Tier 2 audio reuses the WebUI audio subsystem** ([Section 7](#7-webui-audio-subsystem)) — same binary message types, same `webui_audio.c` worker threads, same ASR→LLM→TTS pipeline. The only difference is raw PCM at 16kHz instead of Opus at 48kHz (no codec or resample step on server). Music streaming (Opus over a dedicated WebSocket) is Tier 1 only.
+
+For connection lifecycle diagrams, message format details, and the complete protocol specification, see:
+- **[DAP2_DESIGN.md](docs/DAP2_DESIGN.md)** — Protocol spec (both tiers, audio framing, registration, codec details)
+- **[DAP2_SATELLITE.md](docs/DAP2_SATELLITE.md)** — Tier 1 implementation guide (build, config, deployment)
 
 ---
 
@@ -1678,31 +1851,33 @@ The WebUI settings panel (`www/js/ui/settings.js`) defines a `SETTINGS_SCHEMA` t
 
 ## Future Improvements
 
+### Completed
+
+1. ✅ **Multi-Client Network Server** — Worker thread pool, per-client sessions, non-blocking main loop
+2. ✅ **Conversation Persistence** — SQLite-backed conversation history with search/rename/delete
+3. ✅ **DAP2 Satellite System** — Text-first WebSocket protocol, Tier 1 RPi satellite with SDL2 UI
+4. ✅ **Music Streaming to Satellites** — Opus audio over dedicated WebSocket, Goertzel FFT visualizer
+
 ### Planned Features
 
-1. **Multi-Client Network Server** (see `remote_dawn/dawn_multi_client_architecture.md`)
-   - Worker thread pool for concurrent clients
-   - Per-client conversation history
-   - Non-blocking main loop
-
-2. **Conversation Persistence**
-   - Save conversation history to disk
-   - Resume conversations across restarts
-
-3. **Improved Error Recovery**
+1. **Improved Error Recovery**
    - Auto-reconnect for MQTT
    - Network protocol timeout tuning
    - ASR fallback on GPU failure
 
-4. **CI/CD Pipeline**
+2. **CI/CD Pipeline**
    - GitHub Actions for automated builds
    - Regression testing
    - Code quality checks
 
-5. **Enhanced Testing**
+3. **Enhanced Testing**
    - Integration tests (end-to-end)
    - Stress tests (concurrent clients, memory leaks)
    - Automated regression tests
+
+4. **DAP Device Token Authentication** (Phase 4.3)
+   - Certificate-based satellite authentication
+   - Replace session-based auth for headless devices
 
 ---
 
@@ -1717,8 +1892,8 @@ The WebUI settings panel (`www/js/ui/settings.js`) defines a `SETTINGS_SCHEMA` t
 
 ---
 
-**Document Version**: 1.6
-**Last Updated**: January 31, 2026 (added Module Dependency Hierarchy section)
+**Document Version**: 1.8
+**Last Updated**: February 11, 2026 (DAP1 eliminated, unified DAP2 WebSocket for all satellites)
 **Reorganization Commit**: [Git SHA to be added after commit]
 
 ### LLM Threading Architecture (Post-Interrupt Implementation)

@@ -53,9 +53,9 @@ sudo systemctl start dawn-satellite
 
 ## Overview
 
-DAP2 enables lightweight satellite devices (Raspberry Pi, etc.) to extend DAWN's voice assistant capabilities to multiple rooms. Unlike the original DAP protocol which streams audio, DAP2 uses a **text-first approach**: satellites handle speech recognition and synthesis locally, sending only text to the daemon.
+DAP2 enables satellite devices to extend DAWN's voice assistant capabilities to multiple rooms. All satellites use **WebSocket** on the same port as the WebUI (default 8080). This document covers **Tier 1** (Raspberry Pi) satellites, which handle ASR/TTS locally and send only text to the daemon. For the complete protocol spec (both tiers) and Tier 2 (ESP32 audio path), see [DAP2_DESIGN.md](DAP2_DESIGN.md).
 
-**Tier 1 satellites are fully hands-free** - wake word detection triggers listening, VAD detects end-of-speech, and responses are spoken via local TTS. No buttons or LEDs required.
+Tier 1 satellites are **fully hands-free** — wake word detection triggers listening, VAD detects end-of-speech, and responses are spoken via local TTS. No buttons or LEDs required.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -87,15 +87,6 @@ DAP2 enables lightweight satellite devices (Raspberry Pi, etc.) to extend DAWN's
 
 ## Architecture
 
-### Tier System
-
-| Tier | Hardware | Local Processing | Protocol | Use Case |
-|------|----------|------------------|----------|----------|
-| **Tier 1** | RPi 4/5, Jetson | Wake Word, VAD, ASR, TTS | DAP2 (WebSocket, text) | Hands-free room extension |
-| **Tier 2** | ESP32-S3 | Button + silence detection | DAP (TCP, audio) | Budget push-to-talk |
-
-This implementation focuses on **Tier 1** satellites.
-
 ### Tier 1 Voice Flow
 
 ```
@@ -117,14 +108,16 @@ This implementation focuses on **Tier 1** satellites.
 
 ### Why Text-First?
 
-| Aspect | Audio Streaming (DAP/Tier 2) | Text Protocol (DAP2/Tier 1) |
+| Aspect | Audio Path (Tier 2, ESP32) | Text Path (Tier 1, RPi) |
 |--------|------------------------------|------------------------------|
+| Transport | WebSocket binary PCM | WebSocket JSON |
 | Bandwidth | ~960KB per interaction | ~100 bytes |
 | Latency | Network + server ASR | Local ASR only |
 | Offline | No response possible | "I can't reach the server" |
 | Privacy | Audio leaves room | Text only over network |
-| Wake Word | Push-to-talk or stream 24/7 | Always listening locally |
+| Wake Word | Push-to-talk (button) | Always listening locally |
 | Interaction | Button press required | Fully hands-free |
+| Music | Not supported (v1) | Opus streaming via dedicated WS |
 
 ## Protocol Specification
 
@@ -231,27 +224,34 @@ dawn_satellite/
 ├── include/
 │   ├── audio_capture.h         # ALSA audio capture (ring buffer + thread)
 │   ├── audio_playback.h        # ALSA audio playback + Goertzel spectrum
-│   ├── dap_client.h            # DAP (Tier 2) TCP client
+│   ├── dap_client.h            # (reserved for Tier 2 WebSocket audio)
 │   ├── display.h               # Framebuffer display (optional)
 │   ├── gpio_control.h          # GPIO button support (optional)
+│   ├── music_playback.h        # Opus music decode + ALSA output
+│   ├── music_stream.h          # Music WebSocket message handling
 │   ├── neopixel.h              # WS2812 LED support (optional)
 │   ├── satellite_config.h      # TOML configuration
 │   ├── satellite_state.h       # State machine
 │   ├── sdl_ui.h                # SDL2 UI entry point
+│   ├── spectrum_defs.h         # Shared FFT spectrum constants
 │   ├── toml.h                  # TOML parser (tomlc99)
+│   ├── tts_playback_queue.h    # Producer-consumer TTS pipeline
 │   ├── voice_processing.h      # Voice pipeline (VAD + wake word + ASR + TTS)
 │   └── ws_client.h             # WebSocket client API
 ├── src/
 │   ├── main.c                  # Entry point, CLI parsing, model loading
 │   ├── audio_capture.c         # ALSA capture with ring buffer
 │   ├── audio_playback.c        # ALSA playback with resampling + spectrum
-│   ├── dap_client.c            # DAP (Tier 2) TCP client
+│   ├── dap_client.c            # (reserved for Tier 2 WebSocket audio)
 │   ├── display.c               # Framebuffer display driver
 │   ├── gpio_control.c          # libgpiod GPIO input
+│   ├── music_playback.c        # Opus decode + ALSA music output
+│   ├── music_stream.c          # Music WS message parsing + state
 │   ├── neopixel.c              # SPI-based NeoPixel driver
 │   ├── satellite_config.c      # TOML config + identity persistence
 │   ├── satellite_state.c       # State machine logic
 │   ├── toml.c                  # TOML parser
+│   ├── tts_playback_queue.c    # Queued TTS synthesis + playback
 │   ├── voice_processing.c      # Voice pipeline (~1100 lines)
 │   ├── ws_client.c             # libwebsockets client + background thread
 │   └── ui/                     # SDL2 touchscreen UI (optional, ENABLE_SDL_UI)
@@ -262,9 +262,16 @@ dawn_satellite/
 │       ├── ui_transcript.h     # Transcript panel types and API
 │       ├── ui_markdown.c       # Inline markdown renderer (bold/italic/code)
 │       ├── ui_markdown.h       # Markdown font set and render API
+│       ├── ui_music.c          # Music player panel (Playing/Queue/Library)
+│       ├── ui_music.h          # Music panel types and API
+│       ├── music_types.h       # Shared music data structures
+│       ├── ui_slider.c         # Brightness/volume slider widgets
+│       ├── ui_slider.h         # Slider types and API
 │       ├── ui_touch.c          # Touch gesture recognition
 │       ├── ui_touch.h          # Touch state types
-│       └── ui_colors.h         # Color constants
+│       ├── ui_colors.h         # Color constants
+│       ├── backlight.c         # Display brightness control
+│       └── backlight.h         # Backlight API (sysfs + software fallback)
 └── CMakeLists.txt
 
 common/                          # Shared library (daemon + satellite)
@@ -365,7 +372,7 @@ word = "friday"             # Must match daemon's AI_NAME
 sensitivity = 0.5           # 0.0-1.0, higher = more false positives
 
 # =============================================================================
-# GPIO (optional - for Tier 2 or development)
+# GPIO (optional - for Tier 2 push-to-talk or development)
 # =============================================================================
 [gpio]
 # Tier 1 uses VAD + wake word, not push-to-talk
@@ -497,7 +504,7 @@ sudo apt install -y \
   libwebsockets-dev \
   libjson-c-dev
 
-# Optional: GPIO support (for development/Tier 2)
+# Optional: GPIO support (for Tier 2 push-to-talk or development)
 sudo apt install -y libgpiod-dev
 ```
 
@@ -552,11 +559,10 @@ This installs:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `ENABLE_VOICE` | ON | Master switch for voice processing |
-| `ENABLE_VAD` | ON | Silero VAD (requires ENABLE_VOICE) |
+| `ENABLE_VAD` | ON | Silero VAD (requires ONNX Runtime) |
 | `ENABLE_VOSK_ASR` | ON | Vosk streaming ASR (default, lightweight) |
 | `ENABLE_WHISPER_ASR` | OFF | Whisper batch ASR (heavier, more accurate) |
-| `ENABLE_TTS` | ON | Piper TTS |
+| `ENABLE_TTS` | ON | Piper TTS (requires ONNX Runtime) |
 | `ENABLE_DAP2` | ON | WebSocket text protocol (Tier 1) |
 | `ENABLE_NEOPIXEL` | OFF | NeoPixel LED support (optional) |
 | `ENABLE_DISPLAY` | OFF | Framebuffer display support (optional) |
@@ -782,6 +788,23 @@ wscat -c ws://localhost:8080
 21. **Settings panel** - Pull-down panel with server address, connection status, device name, IP, uptime, session duration
 22. **TTS playback queue** - Producer-consumer pipeline: synthesize sentence N+1 while playing sentence N
 
+### Implemented — Music Player
+
+23. **Music player panel** - Three-tab design: Playing (transport + visualizer), Queue, Library
+24. **Transport controls** - Play/pause, prev/next, shuffle/repeat toggles, progress bar with drag-to-seek
+25. **Opus audio streaming** - Daemon streams music via Opus over WebSocket, satellite decodes to ALSA
+26. **Live FFT visualizer** - Goertzel analysis on audio stream (not simulated), 16 radial bars
+27. **Library browsing** - Artists, albums, and tracks with paginated navigation (50 items/page)
+28. **Artist/album drill-down** - Tap artist to see tracks, tap album to see tracks
+29. **SDL primitive icons** - All UI icons drawn with SDL (no image assets needed)
+30. **Daemon satellite auth** - Per-handler whitelist allows satellite access to music endpoints
+
+### Implemented — Settings & Display
+
+31. **Brightness slider** - sysfs backlight control for DSI displays, software dimming fallback for HDMI
+32. **Volume slider** - ALSA mixer control from settings panel
+33. **Persistent settings** - Brightness and volume saved to config file across restarts
+
 ### Implemented — Reliability & Bug Fixes
 
 23. **App-level keep-alive** - `satellite_ping` every 10s (WS-level pings disabled for lws 4.3.5 compat)
@@ -794,9 +817,9 @@ wscat -c ws://localhost:8080
 ### Planned Features
 
 1. [ ] **Barge-in support** - Interrupt TTS by speaking (stubbed, not connected)
-2. [ ] **Quick actions panel** - Tap-accessible shortcuts (stubbed, "Coming Soon")
-3. [ ] **Media overlay** - Now-playing display for music streaming
-4. [ ] **Screensaver / idle dimming** - Power saving when inactive
+2. [x] ~~**Quick actions panel**~~ - Replaced by status bar icon pattern (icons appear in transcript header as features ship)
+3. [ ] **Screensaver / ambient mode** - Photo frame with Ken Burns effect, clock display, ambient orb
+4. [ ] **TTS ducking during music** - Lower music volume during speech output
 5. [ ] **Multi-satellite routing** - Daemon routes by location
 6. [ ] **Speaker identification** - Personalized responses per user
 
@@ -880,6 +903,6 @@ sudo ufw status  # On daemon machine
 
 ## Related Documentation
 
-- `docs/DAP2_DESIGN.md` - Original design proposal and rationale
-- `remote_dawn/protocol_specification.md` - DAP (Tier 2) protocol spec
+- `docs/DAP2_DESIGN.md` - Protocol design specification (Tier 1 + Tier 2)
+- `ARCHITECTURE.md` - System architecture with DAP2 protocol overview
 - `CODING_STYLE_GUIDE.md` - Code style requirements

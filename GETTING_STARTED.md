@@ -269,7 +269,7 @@ For fetching content from sites that block simple requests, DAWN supports [Flare
 
 - **Full configuration**: See [README.md](README.md#configuration)
 - **Local LLM setup**: [llama.cpp](https://github.com/ggerganov/llama.cpp) or [Ollama](https://ollama.ai)
-- **ESP32 satellite clients**: See [remote_dawn/README.md](remote_dawn/README.md)
+- **Satellite devices**: See [docs/DAP2_SATELLITE.md](docs/DAP2_SATELLITE.md) for Tier 1 (RPi) and [docs/DAP2_DESIGN.md](docs/DAP2_DESIGN.md) for Tier 2 (ESP32)
 - **System architecture**: See [ARCHITECTURE.md](ARCHITECTURE.md)
 
 ---

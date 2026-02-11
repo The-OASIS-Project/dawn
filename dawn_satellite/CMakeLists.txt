@@ -30,28 +30,19 @@ option(ENABLE_DAP2 "Enable DAP2 WebSocket protocol (Tier 1)" ON)
 # Default build: VAD + Vosk ASR + TTS (no Whisper compile, fastest build)
 #   cmake ..
 #
-# With Whisper instead:
+# With Whisper instead of Vosk:
 #   cmake .. -DENABLE_WHISPER_ASR=ON -DENABLE_VOSK_ASR=OFF
 #
-# With both engines (runtime switching via config):
+# With both ASR engines (runtime switching via config):
 #   cmake .. -DENABLE_WHISPER_ASR=ON
 #
-# Text-only debugging (no voice):
-#   cmake .. -DENABLE_VOICE=OFF
+# Text-only debugging (keyboard input, no mic/speaker):
+#   cmake .. -DENABLE_VAD=OFF -DENABLE_VOSK_ASR=OFF -DENABLE_TTS=OFF
 #
-option(ENABLE_VOICE "Master switch: enable all voice processing" ON)
-option(ENABLE_VAD "Enable VAD (Silero, requires ONNX Runtime)" ${ENABLE_VOICE})
+option(ENABLE_VAD "Enable VAD (Silero, requires ONNX Runtime)" ON)
 option(ENABLE_WHISPER_ASR "Enable Whisper ASR (requires whisper.cpp)" OFF)
-option(ENABLE_VOSK_ASR "Enable Vosk ASR (requires libvosk + json-c)" ${ENABLE_VOICE})
-option(ENABLE_TTS "Enable TTS (Piper, requires ONNX Runtime)" ${ENABLE_VOICE})
-
-# ENABLE_VOICE=OFF disables everything regardless of individual settings
-if(NOT ENABLE_VOICE)
-    set(ENABLE_VAD OFF)
-    set(ENABLE_WHISPER_ASR OFF)
-    set(ENABLE_VOSK_ASR OFF)
-    set(ENABLE_TTS OFF)
-endif()
+option(ENABLE_VOSK_ASR "Enable Vosk ASR (requires libvosk + json-c)" ON)
+option(ENABLE_TTS "Enable TTS (Piper, requires ONNX Runtime)" ON)
 
 # Map to internal names used by common library and compile definitions
 set(ENABLE_LOCAL_VAD ${ENABLE_VAD})

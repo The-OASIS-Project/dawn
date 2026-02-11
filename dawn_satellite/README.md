@@ -13,6 +13,9 @@ A smart voice satellite client for the DAWN voice assistant system. Runs on Rasp
 - **Offline fallback** - Local TTS "I can't reach the server"
 - **Full tool support** - Same capabilities as main daemon
 - **Dual ASR engines** - Vosk (default, streaming) or Whisper (batch, higher accuracy)
+- **Music streaming** - Opus audio from daemon with ALSA playback and live FFT visualizer
+- **Touchscreen UI** - SDL2 orb visualization, scrollable transcript, music player panel, settings
+- **Brightness/volume control** - Sliders in settings panel, sysfs backlight + software dimming fallback
 
 ## ASR Engine Comparison
 
@@ -290,25 +293,25 @@ This builds with the default configuration: **Vosk ASR + Whisper ASR** (both eng
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `-DENABLE_DAP2=ON` | ON | WebSocket protocol (vs legacy DAP1) |
-| `-DENABLE_VOICE=ON` | ON | Local voice processing (VAD + ASR + TTS) |
+| `-DENABLE_DAP2=ON` | ON | WebSocket protocol for daemon communication |
+| `-DENABLE_VAD=ON` | ON | Voice Activity Detection (Silero, requires ONNX Runtime) |
 | `-DENABLE_VOSK_ASR=ON` | ON | Vosk ASR engine (streaming, near-instant) |
+| `-DENABLE_WHISPER_ASR=OFF` | OFF | Whisper ASR engine (requires whisper.cpp submodule) |
+| `-DENABLE_TTS=ON` | ON | Piper TTS (requires ONNX Runtime) |
 | `-DENABLE_DISPLAY=OFF` | OFF | SPI display support via framebuffer |
-| `-DENABLE_SDL_UI=OFF` | OFF | SDL2 touchscreen UI (orb + transcript) |
+| `-DENABLE_SDL_UI=OFF` | OFF | SDL2 touchscreen UI (orb + transcript + music player) |
 | `-DENABLE_NEOPIXEL=ON` | ON | NeoPixel/WS2812 LED support via SPI |
 | `-DCMAKE_BUILD_TYPE=Release` | Release | Optimization level |
 | *(auto-detected)* | — | Music streaming via Opus (requires `libopus-dev`) |
 
-Example: Vosk only (no Whisper, smaller binary, no whisper.cpp compile):
+Example: Add Whisper alongside Vosk (runtime switching via config):
 ```bash
-cmake -DENABLE_VOICE=OFF -DENABLE_VOSK_ASR=ON ..
+cmake -DENABLE_WHISPER_ASR=ON ..
 ```
 
-> **Note:** `ENABLE_VOICE` controls Whisper + VAD + TTS. Disabling it while keeping `ENABLE_VOSK_ASR=ON` gives you Vosk without Whisper, but you still need VAD and TTS for a functional satellite, so this is mainly useful for reducing compile time during development.
-
-Example with voice processing disabled (text-only mode):
+Example: Text-only mode (keyboard input, no mic/speaker — for debugging):
 ```bash
-cmake -DENABLE_VOICE=OFF -DENABLE_VOSK_ASR=OFF ..
+cmake -DENABLE_VAD=OFF -DENABLE_VOSK_ASR=OFF -DENABLE_TTS=OFF ..
 ```
 
 Example with SDL2 touchscreen UI:
@@ -475,10 +478,12 @@ length_scale = 0.85          # Speech speed (1.0 = normal, lower = faster)
 
 #### [sdl_ui]
 ```toml
-enabled = false              # Enable SDL2 orb + transcript UI
+enabled = false              # Enable SDL2 orb + transcript + music UI
 width = 1024                 # Display width (default: 1024)
 height = 600                 # Display height (default: 600)
 font_dir = "assets/fonts"    # Path to TTF font files
+brightness = 255             # Display brightness 0-255 (persisted across restarts)
+volume = 80                  # System volume 0-100 (persisted across restarts)
 ```
 
 #### [processing]
@@ -741,21 +746,27 @@ sudo systemctl restart dawn-satellite
 |  |              SDL2 Touchscreen UI (Optional)                  | |
 |  |                                                              | |
 |  |  +----------+ +-------------+ +------------+ +----------+   | |
-|  |  |   Orb    | | Transcript  | |   Quick    | |  Media   |   | |
-|  |  |Visualize | |  Display    | |  Actions   | |  Player  |   | |
+|  |  |   Orb    | | Transcript  | |   Quick    | |  Music   |   | |
+|  |  |Visualize | |  Display    | |  Actions   | |  Panel   |   | |
 |  |  +----------+ +-------------+ +------------+ +----------+   | |
 |  |                                                              | |
-|  |  Screensaver: Photo Frame | Clock | Ambient Orb              | |
+|  |  Settings: Brightness/Volume  |  Screensaver (future)        | |
+|  +-------------------------------------------------------------+ |
+|                              |                                    |
+|  +-------------------------------------------------------------+ |
+|  |                   music_stream.c                             | |
+|  |  Opus audio WebSocket (separate connection)                  | |
+|  |  Opus decode -> ALSA playback -> Goertzel FFT visualizer    | |
 |  +-------------------------------------------------------------+ |
 +------------------------------------------------------------------+
                                |
-                               | WiFi
+                               | WiFi (JSON control + Opus audio)
                                v
 +------------------------------------------------------------------+
 |                         DAWN Daemon                               |
 |                                                                   |
 |    LLM Processing | Tool Execution | Conversation History        |
-|    Command Parser | MQTT Control   | Memory System                |
+|    Command Parser | MQTT Control   | Music / Opus Streaming      |
 +------------------------------------------------------------------+
 ```
 
@@ -772,6 +783,15 @@ sudo systemctl restart dawn-satellite
 | `stream_delta` | Daemon -> Satellite | Partial response text |
 | `stream_end` | Daemon -> Satellite | Response complete |
 | `satellite_status` | Both | Health check, metrics |
+| `music_subscribe` | Satellite -> Daemon | Subscribe to music state updates |
+| `music_control` | Satellite -> Daemon | Transport commands (play/pause/stop/next/prev/seek) |
+| `music_library` | Satellite -> Daemon | Browse library (artists/albums/tracks, paginated) |
+| `music_queue` | Satellite -> Daemon | Queue operations (add/remove/clear) |
+| `music_state` | Daemon -> Satellite | Playback state update (track, position, status) |
+| `music_position` | Daemon -> Satellite | Periodic position update during playback |
+| `music_queue_response` | Daemon -> Satellite | Current queue contents |
+| `music_library_response` | Daemon -> Satellite | Library browse results (paginated) |
+| `music_error` | Daemon -> Satellite | Music operation error |
 
 ### Example Flow
 
