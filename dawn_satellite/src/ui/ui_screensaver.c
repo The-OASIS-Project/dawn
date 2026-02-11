@@ -20,7 +20,7 @@
  *
  * Screensaver / Ambient Mode Implementation
  *
- * Clock mode: time/date/AI name with Lissajous drift for burn-in prevention.
+ * Clock mode: time/date with Lissajous drift, "D.A.W.N." corner watermarks.
  * Visualizer mode: fullscreen 64-bar rainbow FFT spectrum with peak hold.
  * Fade transitions through black overlay (matches software dimming pattern).
  */
@@ -44,11 +44,16 @@
 /* Clock mode */
 #define CLOCK_FONT_SIZE 80
 #define DATE_FONT_SIZE 24
-#define DRIFT_RANGE_X 40.0f  /* +/- horizontal drift in pixels */
-#define DRIFT_RANGE_Y 25.0f  /* +/- vertical drift in pixels */
-#define DRIFT_PERIOD_X 297.0 /* Lissajous X period (seconds, ~5 min) */
-#define DRIFT_PERIOD_Y 371.0 /* Lissajous Y period (seconds, ~6 min, coprime) */
-#define CLOCK_ALPHA 180      /* Dimmed text (0-255) */
+#define TRACK_FONT_SIZE 36     /* Track title in visualizer pill */
+#define DRIFT_RANGE_X 40.0f    /* +/- horizontal drift in pixels */
+#define DRIFT_RANGE_Y 25.0f    /* +/- vertical drift in pixels */
+#define DRIFT_PERIOD_X 297.0   /* Lissajous X period (seconds, ~5 min) */
+#define DRIFT_PERIOD_Y 371.0   /* Lissajous Y period (seconds, ~6 min, coprime) */
+#define CLOCK_ALPHA 180        /* Dimmed text (0-255) */
+#define WATERMARK_PADDING 20   /* Corner padding for "D.A.W.N." */
+#define WATERMARK_PERIOD 8.0   /* Seconds for one full fade cycle */
+#define WATERMARK_MIN_ALPHA 30 /* Minimum alpha (never fully invisible) */
+#define WATERMARK_MAX_ALPHA 90 /* Maximum alpha (subtle, not distracting) */
 
 /* Visualizer mode */
 #define VIZ_BAR_GAP 2
@@ -159,9 +164,9 @@ static void render_clock(ui_screensaver_t *ss, SDL_Renderer *r, double time_sec,
    int cx = ss->screen_w / 2 + (int)ss->drift_x;
    int cy = ss->screen_h / 2 + (int)ss->drift_y;
 
-   /* Vertical stack: time, date, AI name */
+   /* Vertical stack: time + date */
    int spacing = 12;
-   int total_h = ss->time_h + spacing + ss->date_h + spacing + ss->name_h;
+   int total_h = ss->time_h + spacing + ss->date_h;
    int top_y = cy - total_h / 2;
 
    uint8_t dim_alpha = (uint8_t)((int)alpha * CLOCK_ALPHA / 255);
@@ -176,23 +181,41 @@ static void render_clock(ui_screensaver_t *ss, SDL_Renderer *r, double time_sec,
       top_y += ss->time_h + spacing;
    }
 
-   /* Date */
+   /* Date — cyan (speaking color) for brightness and visual identity */
    if (ss->date_tex) {
-      SDL_SetTextureAlphaMod(ss->date_tex, dim_alpha);
-      SDL_SetTextureColorMod(ss->date_tex, COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
-                             COLOR_TEXT_SECONDARY_B);
+      SDL_SetTextureAlphaMod(ss->date_tex, alpha);
+      SDL_SetTextureColorMod(ss->date_tex, COLOR_SPEAKING_R, COLOR_SPEAKING_G, COLOR_SPEAKING_B);
       SDL_Rect dst = { cx - ss->date_w / 2, top_y, ss->date_w, ss->date_h };
       SDL_RenderCopy(r, ss->date_tex, NULL, &dst);
-      top_y += ss->date_h + spacing;
    }
 
-   /* AI Name — secondary color for better visibility on dark background */
-   if (ss->name_tex) {
-      SDL_SetTextureAlphaMod(ss->name_tex, dim_alpha);
-      SDL_SetTextureColorMod(ss->name_tex, COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
+   /* "D.A.W.N." watermark fading in/out in each corner */
+   if (ss->watermark_tex) {
+      /* Smooth sine pulse: oscillates between min and max alpha */
+      float pulse = sinf((float)(time_sec / WATERMARK_PERIOD) * 2.0f * (float)M_PI);
+      float wm_alpha_f = (float)WATERMARK_MIN_ALPHA +
+                         (float)(WATERMARK_MAX_ALPHA - WATERMARK_MIN_ALPHA) * (0.5f + 0.5f * pulse);
+      uint8_t wm_alpha = (uint8_t)(wm_alpha_f * (float)alpha / 255.0f);
+
+      SDL_SetTextureAlphaMod(ss->watermark_tex, wm_alpha);
+      SDL_SetTextureColorMod(ss->watermark_tex, COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
                              COLOR_TEXT_SECONDARY_B);
-      SDL_Rect dst = { cx - ss->name_w / 2, top_y, ss->name_w, ss->name_h };
-      SDL_RenderCopy(r, ss->name_tex, NULL, &dst);
+
+      int pad = WATERMARK_PADDING;
+      int ww = ss->watermark_w;
+      int wh = ss->watermark_h;
+      /* Top-left */
+      SDL_Rect tl = { pad, pad, ww, wh };
+      SDL_RenderCopy(r, ss->watermark_tex, NULL, &tl);
+      /* Top-right */
+      SDL_Rect tr = { ss->screen_w - ww - pad, pad, ww, wh };
+      SDL_RenderCopy(r, ss->watermark_tex, NULL, &tr);
+      /* Bottom-left */
+      SDL_Rect bl = { pad, ss->screen_h - wh - pad, ww, wh };
+      SDL_RenderCopy(r, ss->watermark_tex, NULL, &bl);
+      /* Bottom-right */
+      SDL_Rect br = { ss->screen_w - ww - pad, ss->screen_h - wh - pad, ww, wh };
+      SDL_RenderCopy(r, ss->watermark_tex, NULL, &br);
    }
 }
 
@@ -283,13 +306,12 @@ static void render_rainbow_viz(ui_screensaver_t *ss,
       }
    }
 
-   /* Track info pill at bottom center */
-   if (ss->track_tex) {
+   /* Track info pill at bottom center (title large, album/artist small) */
+   if (ss->track_title_tex) {
       double since_change = time_sec - ss->track_change_time;
       float pill_alpha = 0.0f;
 
       if (since_change < TRACK_PILL_FADE_IN) {
-         /* Ease-out cubic for smooth fade-in */
          float t = (float)(since_change / TRACK_PILL_FADE_IN);
          pill_alpha = ui_ease_out_cubic(t);
       } else if (since_change < TRACK_PILL_FADE_IN + TRACK_PILL_VISIBLE) {
@@ -301,28 +323,37 @@ static void render_rainbow_viz(ui_screensaver_t *ss,
 
       if (pill_alpha > 0.01f) {
          uint8_t pa = (uint8_t)(alpha_f * pill_alpha * 220.0f);
-         int px = ss->screen_w / 2 - ss->track_tex_w / 2;
-         int py = ss->screen_h - TRACK_PILL_Y_OFFSET;
 
-         /* Rounded pill background (circles at corners + rects for body) */
-         int pad_x = 16, pad_y = 6;
-         int bg_x = px - pad_x, bg_y = py - pad_y;
-         int bg_w = ss->track_tex_w + 2 * pad_x, bg_h = ss->track_tex_h + 2 * pad_y;
+         /* Calculate content dimensions */
+         int content_w = ss->track_title_w;
+         int content_h = ss->track_title_h;
+         int line_gap = 4;
+         bool has_sub = (ss->track_sub_tex != NULL);
+         if (has_sub) {
+            if (ss->track_sub_w > content_w)
+               content_w = ss->track_sub_w;
+            content_h += line_gap + ss->track_sub_h;
+         }
+
+         int pad_x = 20, pad_y = 10;
+         int bg_w = content_w + 2 * pad_x;
+         int bg_h = content_h + 2 * pad_y;
+         int bg_x = ss->screen_w / 2 - bg_w / 2;
+         int bg_y = ss->screen_h - TRACK_PILL_Y_OFFSET - bg_h;
+
+         /* Rounded pill background */
          int rad = TRACK_PILL_RADIUS;
          if (rad > bg_h / 2)
             rad = bg_h / 2;
          uint8_t bg_alpha = (uint8_t)(pa * 0.6f);
          SDL_SetRenderDrawColor(r, 0, 0, 0, bg_alpha);
 
-         /* Center rect (full width, reduced height) */
          SDL_Rect center = { bg_x, bg_y + rad, bg_w, bg_h - 2 * rad };
          SDL_RenderFillRect(r, &center);
-         /* Top/bottom rects (reduced width) */
-         SDL_Rect top = { bg_x + rad, bg_y, bg_w - 2 * rad, rad };
-         SDL_RenderFillRect(r, &top);
-         SDL_Rect bot = { bg_x + rad, bg_y + bg_h - rad, bg_w - 2 * rad, rad };
-         SDL_RenderFillRect(r, &bot);
-         /* Four corner circles */
+         SDL_Rect top_r = { bg_x + rad, bg_y, bg_w - 2 * rad, rad };
+         SDL_RenderFillRect(r, &top_r);
+         SDL_Rect bot_r = { bg_x + rad, bg_y + bg_h - rad, bg_w - 2 * rad, rad };
+         SDL_RenderFillRect(r, &bot_r);
          int corners[4][2] = {
             { bg_x + rad, bg_y + rad },
             { bg_x + bg_w - rad - 1, bg_y + rad },
@@ -337,10 +368,23 @@ static void render_rainbow_viz(ui_screensaver_t *ss,
             }
          }
 
-         /* Track text */
-         SDL_SetTextureAlphaMod(ss->track_tex, pa);
-         SDL_Rect dst = { px, py, ss->track_tex_w, ss->track_tex_h };
-         SDL_RenderCopy(r, ss->track_tex, NULL, &dst);
+         /* Title (large, centered, white) */
+         int ty = bg_y + pad_y;
+         int tx = ss->screen_w / 2 - ss->track_title_w / 2;
+         SDL_SetTextureAlphaMod(ss->track_title_tex, pa);
+         SDL_Rect title_dst = { tx, ty, ss->track_title_w, ss->track_title_h };
+         SDL_RenderCopy(r, ss->track_title_tex, NULL, &title_dst);
+
+         /* Album / Artist subtitle (smaller, centered, dimmed) */
+         if (has_sub) {
+            int sy = ty + ss->track_title_h + line_gap;
+            int sx = ss->screen_w / 2 - ss->track_sub_w / 2;
+            uint8_t sub_alpha = (uint8_t)(pa * 0.7f);
+            SDL_SetTextureAlphaMod(ss->track_sub_tex, sub_alpha);
+            SDL_SetTextureColorMod(ss->track_sub_tex, 180, 180, 180);
+            SDL_Rect sub_dst = { sx, sy, ss->track_sub_w, ss->track_sub_h };
+            SDL_RenderCopy(r, ss->track_sub_tex, NULL, &sub_dst);
+         }
       }
    }
 }
@@ -374,12 +418,7 @@ int ui_screensaver_init(ui_screensaver_t *ss,
    }
 
    if (ai_name) {
-      /* Store upper-case AI name */
-      int ni = 0;
-      for (const char *p = ai_name; *p && ni < 31; p++, ni++) {
-         ss->ai_name[ni] = (*p >= 'a' && *p <= 'z') ? *p - 32 : *p;
-      }
-      ss->ai_name[ni] = '\0';
+      snprintf(ss->ai_name, sizeof(ss->ai_name), "%s", ai_name);
    }
 
    /* Load fonts for clock mode — mono font for time creates visual hierarchy */
@@ -387,15 +426,17 @@ int ui_screensaver_init(ui_screensaver_t *ss,
                               CLOCK_FONT_SIZE);
    ss->date_font = load_font(font_dir, "SourceSans3-Regular.ttf", FALLBACK_BODY_FONT,
                              DATE_FONT_SIZE);
+   ss->track_font = load_font(font_dir, "SourceSans3-Regular.ttf", FALLBACK_BODY_FONT,
+                              TRACK_FONT_SIZE);
 
    if (!ss->clock_font) {
       LOG_WARNING("Screensaver: Failed to load clock font");
    }
 
-   /* Pre-render AI name texture (static, never changes) */
-   if (ss->date_font && ss->ai_name[0]) {
-      ss->name_tex = build_white_tex(renderer, ss->date_font, ss->ai_name, &ss->name_w,
-                                     &ss->name_h);
+   /* Pre-render "D.A.W.N." watermark texture (static, never changes) */
+   if (ss->date_font) {
+      ss->watermark_tex = build_white_tex(renderer, ss->date_font, "D.A.W.N.", &ss->watermark_w,
+                                          &ss->watermark_h);
    }
 
    /* Initialize cached strings to force first render */
@@ -415,21 +456,27 @@ void ui_screensaver_cleanup(ui_screensaver_t *ss) {
       TTF_CloseFont(ss->clock_font);
    if (ss->date_font)
       TTF_CloseFont(ss->date_font);
+   if (ss->track_font)
+      TTF_CloseFont(ss->track_font);
    if (ss->time_tex)
       SDL_DestroyTexture(ss->time_tex);
    if (ss->date_tex)
       SDL_DestroyTexture(ss->date_tex);
-   if (ss->name_tex)
-      SDL_DestroyTexture(ss->name_tex);
-   if (ss->track_tex)
-      SDL_DestroyTexture(ss->track_tex);
+   if (ss->watermark_tex)
+      SDL_DestroyTexture(ss->watermark_tex);
+   if (ss->track_title_tex)
+      SDL_DestroyTexture(ss->track_title_tex);
+   if (ss->track_sub_tex)
+      SDL_DestroyTexture(ss->track_sub_tex);
 
    ss->clock_font = NULL;
    ss->date_font = NULL;
+   ss->track_font = NULL;
    ss->time_tex = NULL;
    ss->date_tex = NULL;
-   ss->name_tex = NULL;
-   ss->track_tex = NULL;
+   ss->watermark_tex = NULL;
+   ss->track_title_tex = NULL;
+   ss->track_sub_tex = NULL;
 }
 
 void ui_screensaver_activity(ui_screensaver_t *ss, double time_sec) {
@@ -526,21 +573,42 @@ void ui_screensaver_tick(ui_screensaver_t *ss,
    }
 }
 
-/** @brief Rebuild track texture if dirty (must be called on render thread) */
+/** @brief Rebuild track textures if dirty (must be called on render thread) */
 static void rebuild_track_texture(ui_screensaver_t *ss) {
-   if (!ss->track_dirty || !ss->date_font || !ss->renderer)
+   if (!ss->track_dirty || !ss->renderer)
       return;
 
-   char track_str[280];
-   if (ss->track_artist[0]) {
-      snprintf(track_str, sizeof(track_str), "%s - %s", ss->track_artist, ss->track_title);
-   } else {
-      snprintf(track_str, sizeof(track_str), "%s", ss->track_title);
+   /* Title line (large font) */
+   if (ss->track_title_tex)
+      SDL_DestroyTexture(ss->track_title_tex);
+   ss->track_title_tex = NULL;
+   if (ss->track_title[0] && ss->track_font) {
+      ss->track_title_tex = build_white_tex(ss->renderer, ss->track_font, ss->track_title,
+                                            &ss->track_title_w, &ss->track_title_h);
    }
-   if (ss->track_tex)
-      SDL_DestroyTexture(ss->track_tex);
-   ss->track_tex = build_white_tex(ss->renderer, ss->date_font, track_str, &ss->track_tex_w,
-                                   &ss->track_tex_h);
+
+   /* Subtitle line: "Album - Artist" or just one (small font) */
+   if (ss->track_sub_tex)
+      SDL_DestroyTexture(ss->track_sub_tex);
+   ss->track_sub_tex = NULL;
+   if (ss->date_font) {
+      char sub_str[280];
+      if (ss->track_album[0] && ss->track_artist[0]) {
+         snprintf(sub_str, sizeof(sub_str), "%s  \xE2\x80\xA2  %s", ss->track_album,
+                  ss->track_artist);
+      } else if (ss->track_album[0]) {
+         snprintf(sub_str, sizeof(sub_str), "%s", ss->track_album);
+      } else if (ss->track_artist[0]) {
+         snprintf(sub_str, sizeof(sub_str), "%s", ss->track_artist);
+      } else {
+         sub_str[0] = '\0';
+      }
+      if (sub_str[0]) {
+         ss->track_sub_tex = build_white_tex(ss->renderer, ss->date_font, sub_str, &ss->track_sub_w,
+                                             &ss->track_sub_h);
+      }
+   }
+
    ss->track_dirty = false;
 }
 
@@ -626,12 +694,14 @@ void ui_screensaver_update_spectrum(ui_screensaver_t *ss, const float *spectrum,
 void ui_screensaver_update_track(ui_screensaver_t *ss,
                                  const char *artist,
                                  const char *title,
+                                 const char *album,
                                  double time_sec) {
    if (!ss || !title)
       return;
 
    /* Check if track actually changed */
-   if (strcmp(ss->track_title, title) == 0 && (!artist || strcmp(ss->track_artist, artist) == 0)) {
+   if (strcmp(ss->track_title, title) == 0 && (!artist || strcmp(ss->track_artist, artist) == 0) &&
+       (!album || strcmp(ss->track_album, album) == 0)) {
       return;
    }
 
@@ -640,6 +710,10 @@ void ui_screensaver_update_track(ui_screensaver_t *ss,
    else
       ss->track_artist[0] = '\0';
    snprintf(ss->track_title, sizeof(ss->track_title), "%s", title);
+   if (album)
+      snprintf(ss->track_album, sizeof(ss->track_album), "%s", album);
+   else
+      ss->track_album[0] = '\0';
 
    ss->track_dirty = true;
    ss->track_change_time = time_sec;

@@ -28,6 +28,10 @@
 #include "audio_capture.h" /* For wav_header_t and audio_parse_wav */
 #include "logging.h"
 
+/* ALSA buffer sizing: more periods = more resilience to scheduler jitter */
+#define ALSA_PERIOD_SIZE 512
+#define ALSA_BUFFER_PERIODS 16 /* 16 × 512 = 8192 frames ≈ 170ms at 48kHz */
+
 /* =============================================================================
  * Goertzel DFT - Pre-computed coefficients for spectrum visualization
  * ============================================================================= */
@@ -83,16 +87,28 @@ static void compute_spectrum(audio_playback_t *ctx, const float *mono_buf, size_
          peak = mag;
    }
 
-   /* Normalize by peak, apply noise floor and gamma (sqrtf ≈ pow(x,0.5)) */
+   /* Convert to dB scale relative to peak, matching WebUI's getByteFrequencyData behavior.
+    * Linear magnitudes let bass dominate (10-50x louder); dB scale compresses the
+    * dynamic range so treble bins are visible alongside bass. */
    float inv_peak = (peak > 1e-6f) ? (1.0f / peak) : 0.0f;
    for (int k = 0; k < SPECTRUM_BINS; k++) {
       float normalized = raw[k] * inv_peak;
+      if (normalized < 1e-6f) {
+         ctx->spectrum[k] = 0.0f;
+         continue;
+      }
+      /* dB relative to peak: 0dB = peak, negative = quieter.
+       * Map [-60dB, 0dB] → [0.0, 1.0], floor below -60dB. */
+      float db = 20.0f * log10f(normalized);
+      float val = 1.0f + db / 60.0f;
+      if (val < 0.0f)
+         val = 0.0f;
       /* Subtract noise floor */
-      normalized = normalized - 0.05f;
-      if (normalized < 0.0f)
-         normalized = 0.0f;
-      /* Gamma correction via sqrtf (single NEON instruction on ARM) */
-      ctx->spectrum[k] = sqrtf(normalized);
+      val -= 0.05f;
+      if (val < 0.0f)
+         val = 0.0f;
+      /* Gamma correction matching WebUI (pow 0.7) */
+      ctx->spectrum[k] = powf(val, 0.7f);
    }
 }
 
@@ -166,7 +182,7 @@ int audio_playback_init(audio_playback_t *ctx, const char *device) {
    ctx->channels = AUDIO_PLAYBACK_CHANNELS;
 
    /* Set period size */
-   snd_pcm_uframes_t period_size = 512;
+   snd_pcm_uframes_t period_size = ALSA_PERIOD_SIZE;
    err = snd_pcm_hw_params_set_period_size_near(handle, hw_params, &period_size, 0);
    if (err < 0) {
       LOG_ERROR("Cannot set period size: %s", snd_strerror(err));
@@ -175,8 +191,8 @@ int audio_playback_init(audio_playback_t *ctx, const char *device) {
    }
    ctx->period_size = period_size;
 
-   /* Set buffer size (8 periods = ~85ms at 48kHz — enough headroom for music streaming) */
-   snd_pcm_uframes_t buffer_size = period_size * 8;
+   /* Set buffer size (periods × size — headroom for scheduler jitter) */
+   snd_pcm_uframes_t buffer_size = period_size * ALSA_BUFFER_PERIODS;
    err = snd_pcm_hw_params_set_buffer_size_near(handle, hw_params, &buffer_size);
    if (err < 0) {
       LOG_ERROR("Cannot set buffer size: %s", snd_strerror(err));

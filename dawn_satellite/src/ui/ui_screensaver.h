@@ -21,11 +21,11 @@
  * Screensaver / Ambient Mode for SDL2 UI
  *
  * Two modes:
- * - Clock: time/date/AI name centered with Lissajous drift (burn-in prevention)
+ * - Clock: time/date centered with Lissajous drift, "D.A.W.N." corner watermarks
  * - Visualizer: fullscreen rainbow FFT spectrum using all 64 Goertzel bins
  *
  * Activates after idle timeout (no touch/voice). Visualizer mode also
- * triggerable manually via long-press on music icon.
+ * triggerable manually via tap on music panel visualizer.
  */
 
 #ifndef UI_SCREENSAVER_H
@@ -62,9 +62,11 @@ typedef struct {
 
    /* Clock mode */
    TTF_Font *clock_font; /* ~80pt for time */
-   TTF_Font *date_font;  /* ~24pt for date + AI name */
-   SDL_Texture *time_tex, *date_tex, *name_tex;
-   int time_w, time_h, date_w, date_h, name_w, name_h;
+   TTF_Font *date_font;  /* ~24pt for date + watermark */
+   SDL_Texture *time_tex, *date_tex;
+   int time_w, time_h, date_w, date_h;
+   SDL_Texture *watermark_tex; /* "D.A.W.N." corner watermark */
+   int watermark_w, watermark_h;
    char cached_time[8];  /* "HH:MM" - re-render on change */
    char cached_date[32]; /* "Tuesday, Feb 11" */
    time_t cached_epoch;  /* Gate time()/localtime() to once per second */
@@ -78,11 +80,15 @@ typedef struct {
    float hue_offset;               /* Slowly rotating rainbow offset */
    ui_color_t hsv_lut[360];        /* Precomputed rainbow palette */
 
-   /* Track info pill */
+   /* Track info pill (two-line: title large, album/artist small) */
+   TTF_Font *track_font; /* ~36pt for track title */
    char track_artist[128];
    char track_title[128];
-   SDL_Texture *track_tex;
-   int track_tex_w, track_tex_h;
+   char track_album[128];
+   SDL_Texture *track_title_tex; /* Large title line */
+   SDL_Texture *track_sub_tex;   /* Smaller "Album - Artist" line */
+   int track_title_w, track_title_h;
+   int track_sub_w, track_sub_h;
    double track_change_time; /* When track info last changed */
    bool track_dirty;
 
@@ -139,6 +145,7 @@ void ui_screensaver_update_spectrum(ui_screensaver_t *ss, const float *spectrum,
 void ui_screensaver_update_track(ui_screensaver_t *ss,
                                  const char *artist,
                                  const char *title,
+                                 const char *album,
                                  double time_sec);
 
 /**

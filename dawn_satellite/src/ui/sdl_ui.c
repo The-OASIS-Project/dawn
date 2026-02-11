@@ -934,8 +934,11 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
 
    /* Track state changes for idle timeout and transcript management */
    if (state != ui->last_state) {
-      /* Voice activity resets screensaver idle timer */
-      ui_screensaver_activity(&ui->screensaver, time_sec);
+      /* Only dismiss screensaver on wake word detection (leaving SILENCE),
+       * not on intermediate state changes like PROCESSING→SPEAKING */
+      if (ui->last_state == VOICE_STATE_SILENCE && state != VOICE_STATE_SILENCE) {
+         ui_screensaver_activity(&ui->screensaver, time_sec);
+      }
 
       /* Only reset response tracking on the initial transition into WAITING
        * (from PROCESSING), not on SPEAKING→WAITING which happens between
@@ -1078,7 +1081,8 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
          /* Update track info from music panel state */
          if (ui->screensaver.visualizer_mode && music_active) {
             ui_screensaver_update_track(&ui->screensaver, ui->music.current_track.artist,
-                                        ui->music.current_track.title, time_sec);
+                                        ui->music.current_track.title,
+                                        ui->music.current_track.album, time_sec);
          }
 
          ui_screensaver_render(&ui->screensaver, r, time_sec);
