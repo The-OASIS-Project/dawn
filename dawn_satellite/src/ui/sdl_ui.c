@@ -1203,6 +1203,7 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
    /* Screensaver renders OVER everything including dimming overlay */
    {
       bool music_active = ui_music_is_playing(&ui->music);
+      ui->screensaver.music_playing = music_active;
       ui_screensaver_tick(&ui->screensaver, time_sec, music_active, panel_any_open(ui));
 
       if (ui_screensaver_is_active(&ui->screensaver)) {
@@ -1252,12 +1253,32 @@ static void *render_thread_func(void *arg) {
             break;
          }
 
-         /* Reset screensaver idle timer on any touch; swallow first touch if active */
+         /* Screensaver touch handling: transport buttons pass through, others dismiss */
          if (event.type == SDL_FINGERDOWN || event.type == SDL_MOUSEBUTTONDOWN) {
-            ui_screensaver_activity(&ui->screensaver, time_sec);
             if (ui_screensaver_is_active(&ui->screensaver)) {
-               continue; /* Swallow touch — dismiss screensaver only */
+               /* Convert touch coordinates */
+               int tx, ty;
+               if (event.type == SDL_FINGERDOWN) {
+                  tx = (int)(event.tfinger.x * ui->width);
+                  ty = (int)(event.tfinger.y * ui->height);
+               } else {
+                  tx = event.button.x;
+                  ty = event.button.y;
+               }
+
+               /* Check transport buttons in visualizer mode */
+               bool music_active = ui_music_is_playing(&ui->music);
+               const char *action = ui_screensaver_handle_tap(&ui->screensaver, tx, ty,
+                                                              music_active);
+               if (action && ui->ws_client) {
+                  ws_client_send_music_control(ui->ws_client, action, NULL);
+               } else {
+                  /* No transport hit — dismiss screensaver */
+                  ui_screensaver_activity(&ui->screensaver, time_sec);
+               }
+               continue; /* Swallow all touches while screensaver active */
             }
+            ui_screensaver_activity(&ui->screensaver, time_sec);
          }
 
          /* Transcript scroll via manual finger position tracking.
@@ -1543,5 +1564,9 @@ void sdl_ui_set_music_playback(sdl_ui_t *ui, struct music_playback *pb) {
       return;
    ui->transcript.show_music_btn = true;
    ui_music_set_playback(&ui->music, pb);
+
+   /* Apply saved volume from config */
+   if (pb && ui->sliders_initialized)
+      music_playback_set_volume(pb, (int)(ui->volume_slider.value * 100.0f + 0.5f));
 }
 #endif

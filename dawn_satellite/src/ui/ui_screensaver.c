@@ -44,16 +44,16 @@
 /* Clock mode */
 #define CLOCK_FONT_SIZE 80
 #define DATE_FONT_SIZE 24
-#define TRACK_FONT_SIZE 36     /* Track title in visualizer pill */
-#define DRIFT_RANGE_X 40.0f    /* +/- horizontal drift in pixels */
-#define DRIFT_RANGE_Y 25.0f    /* +/- vertical drift in pixels */
-#define DRIFT_PERIOD_X 297.0   /* Lissajous X period (seconds, ~5 min) */
-#define DRIFT_PERIOD_Y 371.0   /* Lissajous Y period (seconds, ~6 min, coprime) */
-#define CLOCK_ALPHA 180        /* Dimmed text (0-255) */
-#define WATERMARK_PADDING 20   /* Corner padding for "D.A.W.N." */
-#define WATERMARK_PERIOD 8.0   /* Seconds for one full fade cycle */
-#define WATERMARK_MIN_ALPHA 30 /* Minimum alpha (never fully invisible) */
-#define WATERMARK_MAX_ALPHA 90 /* Maximum alpha (subtle, not distracting) */
+#define TRACK_FONT_SIZE 36      /* Track title in visualizer pill */
+#define DRIFT_RANGE_X 40.0f     /* +/- horizontal drift in pixels */
+#define DRIFT_RANGE_Y 25.0f     /* +/- vertical drift in pixels */
+#define DRIFT_PERIOD_X 297.0    /* Lissajous X period (seconds, ~5 min) */
+#define DRIFT_PERIOD_Y 371.0    /* Lissajous Y period (seconds, ~6 min, coprime) */
+#define CLOCK_ALPHA 180         /* Dimmed text (0-255) */
+#define WATERMARK_PADDING 20    /* Corner padding for "D.A.W.N." */
+#define WATERMARK_PERIOD 8.0    /* Seconds for one full fade cycle */
+#define WATERMARK_MIN_ALPHA 120 /* Minimum alpha (always clearly visible) */
+#define WATERMARK_MAX_ALPHA 200 /* Maximum alpha (prominent but not harsh) */
 
 /* Visualizer mode */
 #define VIZ_BAR_GAP 2
@@ -66,16 +66,18 @@
 #define VIZ_PEAK_HOLD_SEC 0.3f      /* Hold time before decay */
 #define VIZ_PEAK_DECAY_RATE 2.0f
 
-/* Smoothing (asymmetric rise/fall, delta-time independent) */
-#define SMOOTH_RISE 0.84f /* At 30fps reference */
-#define SMOOTH_FALL 0.58f
+/* Smoothing (asymmetric rise/fall, frame-rate independent via powf) */
+#define SMOOTH_RISE_BASE 0.4f  /* Match ui_music.c: powf(0.4, 60*dt) */
+#define SMOOTH_FALL_BASE 0.65f /* Match ui_music.c: powf(0.65, 60*dt) */
 
-/* Track info pill */
-#define TRACK_PILL_FADE_IN 0.5
-#define TRACK_PILL_VISIBLE 5.0
-#define TRACK_PILL_FADE_OUT 1.0
-#define TRACK_PILL_Y_OFFSET 40 /* Pixels from bottom */
-#define TRACK_PILL_RADIUS 8    /* Corner radius for rounded pill */
+/* Track info (lower-left, always visible) */
+#define TRACK_INFO_MARGIN 24 /* Padding from screen edges */
+
+/* Transport controls (lower-right) */
+#define TRANSPORT_ICON_SZ 40 /* Icon texture size */
+#define TRANSPORT_HIT_SZ 56  /* Touch target (>44px minimum) */
+#define TRANSPORT_GAP 20     /* Gap between buttons */
+#define TRANSPORT_MARGIN 24  /* Padding from screen edges */
 
 /* Fallback fonts */
 #define FALLBACK_MONO_FONT "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
@@ -220,6 +222,118 @@ static void render_clock(ui_screensaver_t *ss, SDL_Renderer *r, double time_sec,
 }
 
 /* =============================================================================
+ * Transport Icon Building (white textures, tinted at render time)
+ * ============================================================================= */
+
+/** @brief Build all 4 transport textures: prev, play, pause, next */
+static void build_transport_icons(ui_screensaver_t *ss, SDL_Renderer *r) {
+   int sz = TRANSPORT_ICON_SZ;
+   ss->transport_sz = sz;
+
+   /* Previous: vertical bar + two left-pointing triangles */
+   {
+      SDL_Texture *tex = SDL_CreateTexture(r, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET,
+                                           sz, sz);
+      if (tex) {
+         SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+         SDL_SetRenderTarget(r, tex);
+         SDL_SetRenderDrawColor(r, 0, 0, 0, 0);
+         SDL_RenderClear(r);
+         SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
+         int cy = sz / 2;
+         int bar_w = 2, bar_h = sz * 2 / 3;
+         SDL_Rect bar = { 2, cy - bar_h / 2, bar_w, bar_h };
+         SDL_RenderFillRect(r, &bar);
+         int tri_h = sz / 2, tri_w = (sz - 6) / 2;
+         int t1 = 2 + bar_w + 1, t2 = t1 + tri_w;
+         for (int col = 0; col < tri_w; col++) {
+            int h = tri_h * col / tri_w;
+            SDL_RenderDrawLine(r, t1 + col, cy - h, t1 + col, cy + h);
+         }
+         for (int col = 0; col < tri_w; col++) {
+            int h = tri_h * col / tri_w;
+            SDL_RenderDrawLine(r, t2 + col, cy - h, t2 + col, cy + h);
+         }
+         SDL_SetRenderTarget(r, NULL);
+      }
+      ss->transport_tex[0] = tex;
+   }
+
+   /* Play: right-pointing filled triangle */
+   {
+      SDL_Texture *tex = SDL_CreateTexture(r, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET,
+                                           sz, sz);
+      if (tex) {
+         SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+         SDL_SetRenderTarget(r, tex);
+         SDL_SetRenderDrawColor(r, 0, 0, 0, 0);
+         SDL_RenderClear(r);
+         SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
+         int cy = sz / 2, tri_h = sz * 2 / 5;
+         int left = sz / 4, right = sz - sz / 4, tw = right - left;
+         for (int col = 0; col < tw; col++) {
+            int h = tri_h * (tw - col) / tw;
+            SDL_RenderDrawLine(r, left + col, cy - h, left + col, cy + h);
+         }
+         SDL_SetRenderTarget(r, NULL);
+      }
+      ss->transport_tex[1] = tex;
+   }
+
+   /* Pause: two vertical bars */
+   {
+      SDL_Texture *tex = SDL_CreateTexture(r, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET,
+                                           sz, sz);
+      if (tex) {
+         SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+         SDL_SetRenderTarget(r, tex);
+         SDL_SetRenderDrawColor(r, 0, 0, 0, 0);
+         SDL_RenderClear(r);
+         SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
+         int bw = sz / 5, bh = sz * 7 / 10, gap = sz / 5;
+         int total = bw * 2 + gap;
+         int x0 = (sz - total) / 2, y0 = (sz - bh) / 2;
+         SDL_Rect b1 = { x0, y0, bw, bh };
+         SDL_Rect b2 = { x0 + bw + gap, y0, bw, bh };
+         SDL_RenderFillRect(r, &b1);
+         SDL_RenderFillRect(r, &b2);
+         SDL_SetRenderTarget(r, NULL);
+      }
+      ss->transport_tex[2] = tex;
+   }
+
+   /* Next: two right-pointing triangles + vertical bar */
+   {
+      SDL_Texture *tex = SDL_CreateTexture(r, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET,
+                                           sz, sz);
+      if (tex) {
+         SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+         SDL_SetRenderTarget(r, tex);
+         SDL_SetRenderDrawColor(r, 0, 0, 0, 0);
+         SDL_RenderClear(r);
+         SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
+         int cy = sz / 2;
+         int bar_w = 2, bar_h = sz * 2 / 3;
+         int bar_x = sz - 2 - bar_w;
+         SDL_Rect bar = { bar_x, cy - bar_h / 2, bar_w, bar_h };
+         SDL_RenderFillRect(r, &bar);
+         int tri_h = sz / 2, tri_w = (sz - 6) / 2;
+         int t1 = 1, t2 = t1 + tri_w;
+         for (int col = 0; col < tri_w; col++) {
+            int h = tri_h * (tri_w - col) / tri_w;
+            SDL_RenderDrawLine(r, t1 + col, cy - h, t1 + col, cy + h);
+         }
+         for (int col = 0; col < tri_w; col++) {
+            int h = tri_h * (tri_w - col) / tri_w;
+            SDL_RenderDrawLine(r, t2 + col, cy - h, t2 + col, cy + h);
+         }
+         SDL_SetRenderTarget(r, NULL);
+      }
+      ss->transport_tex[3] = tex;
+   }
+}
+
+/* =============================================================================
  * Visualizer Rendering
  * ============================================================================= */
 
@@ -306,85 +420,49 @@ static void render_rainbow_viz(ui_screensaver_t *ss,
       }
    }
 
-   /* Track info pill at bottom center (title large, album/artist small) */
+   /* Track info — lower-left, always visible, left-aligned */
    if (ss->track_title_tex) {
-      double since_change = time_sec - ss->track_change_time;
-      float pill_alpha = 0.0f;
+      int line_gap = 4;
+      int tx = TRACK_INFO_MARGIN;
+      int ty = ss->screen_h - TRACK_INFO_MARGIN - ss->track_title_h;
+      if (ss->track_sub_tex)
+         ty -= (line_gap + ss->track_sub_h);
 
-      if (since_change < TRACK_PILL_FADE_IN) {
-         float t = (float)(since_change / TRACK_PILL_FADE_IN);
-         pill_alpha = ui_ease_out_cubic(t);
-      } else if (since_change < TRACK_PILL_FADE_IN + TRACK_PILL_VISIBLE) {
-         pill_alpha = 1.0f;
-      } else if (since_change < TRACK_PILL_FADE_IN + TRACK_PILL_VISIBLE + TRACK_PILL_FADE_OUT) {
-         float t = (float)(since_change - TRACK_PILL_FADE_IN - TRACK_PILL_VISIBLE);
-         pill_alpha = 1.0f - t / (float)TRACK_PILL_FADE_OUT;
+      /* Title (large, bold, white) */
+      SDL_SetTextureAlphaMod(ss->track_title_tex, alpha);
+      SDL_Rect title_dst = { tx, ty, ss->track_title_w, ss->track_title_h };
+      SDL_RenderCopy(r, ss->track_title_tex, NULL, &title_dst);
+
+      /* Album / Artist subtitle (smaller, slightly dimmed) */
+      if (ss->track_sub_tex) {
+         int sy = ty + ss->track_title_h + line_gap;
+         uint8_t sub_alpha = (uint8_t)((float)alpha * 0.75f);
+         SDL_SetTextureAlphaMod(ss->track_sub_tex, sub_alpha);
+         SDL_SetTextureColorMod(ss->track_sub_tex, 200, 200, 200);
+         SDL_Rect sub_dst = { tx, sy, ss->track_sub_w, ss->track_sub_h };
+         SDL_RenderCopy(r, ss->track_sub_tex, NULL, &sub_dst);
       }
+   }
 
-      if (pill_alpha > 0.01f) {
-         uint8_t pa = (uint8_t)(alpha_f * pill_alpha * 220.0f);
+   /* Transport controls — lower-right: [prev] [play/pause] [next] */
+   {
+      int btn_count = 3;
+      int total_w = btn_count * TRANSPORT_HIT_SZ + (btn_count - 1) * TRANSPORT_GAP;
+      int base_x = ss->screen_w - TRANSPORT_MARGIN - total_w;
+      int base_y = ss->screen_h - TRANSPORT_MARGIN - TRANSPORT_HIT_SZ;
+      int icon_off = (TRANSPORT_HIT_SZ - ss->transport_sz) / 2;
 
-         /* Calculate content dimensions */
-         int content_w = ss->track_title_w;
-         int content_h = ss->track_title_h;
-         int line_gap = 4;
-         bool has_sub = (ss->track_sub_tex != NULL);
-         if (has_sub) {
-            if (ss->track_sub_w > content_w)
-               content_w = ss->track_sub_w;
-            content_h += line_gap + ss->track_sub_h;
-         }
-
-         int pad_x = 20, pad_y = 10;
-         int bg_w = content_w + 2 * pad_x;
-         int bg_h = content_h + 2 * pad_y;
-         int bg_x = ss->screen_w / 2 - bg_w / 2;
-         int bg_y = ss->screen_h - TRACK_PILL_Y_OFFSET - bg_h;
-
-         /* Rounded pill background */
-         int rad = TRACK_PILL_RADIUS;
-         if (rad > bg_h / 2)
-            rad = bg_h / 2;
-         uint8_t bg_alpha = (uint8_t)(pa * 0.6f);
-         SDL_SetRenderDrawColor(r, 0, 0, 0, bg_alpha);
-
-         SDL_Rect center = { bg_x, bg_y + rad, bg_w, bg_h - 2 * rad };
-         SDL_RenderFillRect(r, &center);
-         SDL_Rect top_r = { bg_x + rad, bg_y, bg_w - 2 * rad, rad };
-         SDL_RenderFillRect(r, &top_r);
-         SDL_Rect bot_r = { bg_x + rad, bg_y + bg_h - rad, bg_w - 2 * rad, rad };
-         SDL_RenderFillRect(r, &bot_r);
-         int corners[4][2] = {
-            { bg_x + rad, bg_y + rad },
-            { bg_x + bg_w - rad - 1, bg_y + rad },
-            { bg_x + rad, bg_y + bg_h - rad - 1 },
-            { bg_x + bg_w - rad - 1, bg_y + bg_h - rad - 1 },
-         };
-         for (int c = 0; c < 4; c++) {
-            int ccx = corners[c][0], ccy = corners[c][1];
-            for (int cy = -rad; cy <= rad; cy++) {
-               int cdx = (int)sqrtf((float)(rad * rad - cy * cy));
-               SDL_RenderDrawLine(r, ccx - cdx, ccy + cy, ccx + cdx, ccy + cy);
-            }
-         }
-
-         /* Title (large, centered, white) */
-         int ty = bg_y + pad_y;
-         int tx = ss->screen_w / 2 - ss->track_title_w / 2;
-         SDL_SetTextureAlphaMod(ss->track_title_tex, pa);
-         SDL_Rect title_dst = { tx, ty, ss->track_title_w, ss->track_title_h };
-         SDL_RenderCopy(r, ss->track_title_tex, NULL, &title_dst);
-
-         /* Album / Artist subtitle (smaller, centered, dimmed) */
-         if (has_sub) {
-            int sy = ty + ss->track_title_h + line_gap;
-            int sx = ss->screen_w / 2 - ss->track_sub_w / 2;
-            uint8_t sub_alpha = (uint8_t)(pa * 0.7f);
-            SDL_SetTextureAlphaMod(ss->track_sub_tex, sub_alpha);
-            SDL_SetTextureColorMod(ss->track_sub_tex, 180, 180, 180);
-            SDL_Rect sub_dst = { sx, sy, ss->track_sub_w, ss->track_sub_h };
-            SDL_RenderCopy(r, ss->track_sub_tex, NULL, &sub_dst);
-         }
+      /* Indices: 0=prev, 1=play, 2=pause, 3=next */
+      int icons[3] = { 0, ss->music_playing ? 2 : 1, 3 };
+      for (int b = 0; b < btn_count; b++) {
+         int bx = base_x + b * (TRANSPORT_HIT_SZ + TRANSPORT_GAP);
+         SDL_Texture *tex = ss->transport_tex[icons[b]];
+         if (!tex)
+            continue;
+         SDL_SetTextureAlphaMod(tex, alpha);
+         SDL_SetTextureColorMod(tex, 220, 220, 220);
+         SDL_Rect dst = { bx + icon_off, base_y + icon_off, ss->transport_sz, ss->transport_sz };
+         SDL_RenderCopy(r, tex, NULL, &dst);
       }
    }
 }
@@ -426,7 +504,7 @@ int ui_screensaver_init(ui_screensaver_t *ss,
                               CLOCK_FONT_SIZE);
    ss->date_font = load_font(font_dir, "SourceSans3-Regular.ttf", FALLBACK_BODY_FONT,
                              DATE_FONT_SIZE);
-   ss->track_font = load_font(font_dir, "SourceSans3-Regular.ttf", FALLBACK_BODY_FONT,
+   ss->track_font = load_font(font_dir, "SourceSans3-Bold.ttf", FALLBACK_BODY_FONT,
                               TRACK_FONT_SIZE);
 
    if (!ss->clock_font) {
@@ -438,6 +516,9 @@ int ui_screensaver_init(ui_screensaver_t *ss,
       ss->watermark_tex = build_white_tex(renderer, ss->date_font, "D.A.W.N.", &ss->watermark_w,
                                           &ss->watermark_h);
    }
+
+   /* Build transport control icons for visualizer mode */
+   build_transport_icons(ss, renderer);
 
    /* Initialize cached strings to force first render */
    ss->cached_time[0] = '\0';
@@ -468,6 +549,10 @@ void ui_screensaver_cleanup(ui_screensaver_t *ss) {
       SDL_DestroyTexture(ss->track_title_tex);
    if (ss->track_sub_tex)
       SDL_DestroyTexture(ss->track_sub_tex);
+   for (int i = 0; i < 4; i++) {
+      if (ss->transport_tex[i])
+         SDL_DestroyTexture(ss->transport_tex[i]);
+   }
 
    ss->clock_font = NULL;
    ss->date_font = NULL;
@@ -477,6 +562,7 @@ void ui_screensaver_cleanup(ui_screensaver_t *ss) {
    ss->watermark_tex = NULL;
    ss->track_title_tex = NULL;
    ss->track_sub_tex = NULL;
+   memset(ss->transport_tex, 0, sizeof(ss->transport_tex));
 }
 
 void ui_screensaver_activity(ui_screensaver_t *ss, double time_sec) {
@@ -666,17 +752,47 @@ void ui_screensaver_update_spectrum(ui_screensaver_t *ss, const float *spectrum,
 
    int n = count < SPECTRUM_BINS ? count : SPECTRUM_BINS;
 
-   /* Asymmetric smoothing at ~30fps reference rate.
-    * Called once per frame, so dt is implicitly 1/30s. */
-   static const float dt = 1.0f / 30.0f;
+   /* Frame-rate independent dt (match ui_music.c approach) */
+   uint32_t now = SDL_GetTicks();
+   float dt = (now > ss->viz_last_render && ss->viz_last_render > 0)
+                  ? (float)(now - ss->viz_last_render) / 1000.0f
+                  : 1.0f / 30.0f;
+   ss->viz_last_render = now;
 
-   for (int i = 0; i < n; i++) {
-      float target = spectrum[i];
+   /* Frame-rate independent smoothing: alpha = 1 - base^(60*dt)
+    * At 30fps: rise ~0.84, fall ~0.58. Scales naturally to other rates. */
+   float rise_alpha = 1.0f - powf(SMOOTH_RISE_BASE, 60.0f * dt);
+   float fall_alpha = 1.0f - powf(SMOOTH_FALL_BASE, 60.0f * dt);
+
+   for (int i = 0; i < SPECTRUM_BINS; i++) {
+      /* Log-frequency mapping: concentrate lower bars on bass/mids.
+       * Raw Goertzel bins are linear 0..12kHz — without this, upper bars are sparse.
+       * Matches ui_music.c: powf(t, 0.6) */
+      float t = (float)i / (float)SPECTRUM_BINS;
+      float log_t = powf(t, 0.6f);
+      int bin = (int)(log_t * (float)(n - 1));
+      if (bin >= n)
+         bin = n - 1;
+
+      /* 3-bin neighbor average for smoothness (matches ui_music.c) */
+      float sum = spectrum[bin];
+      int avg_count = 1;
+      if (bin > 0) {
+         sum += spectrum[bin - 1];
+         avg_count++;
+      }
+      if (bin < n - 1) {
+         sum += spectrum[bin + 1];
+         avg_count++;
+      }
+      float target = sum / (float)avg_count;
+      if (target > 1.0f)
+         target = 1.0f;
+
+      /* Asymmetric rise/fall smoothing */
       float current = ss->viz_bars[i];
-
-      /* Asymmetric rise/fall */
-      float factor = (target > current) ? SMOOTH_RISE : SMOOTH_FALL;
-      ss->viz_bars[i] = current + (target - current) * factor;
+      float alpha = (target > current) ? rise_alpha : fall_alpha;
+      ss->viz_bars[i] = current + (target - current) * alpha;
 
       /* Peak hold tracking */
       ss->peak_age[i] += dt;
@@ -744,6 +860,38 @@ void ui_screensaver_toggle_manual(ui_screensaver_t *ss, double time_sec) {
       ss->manual = false;
       LOG_INFO("Screensaver: manual visualizer deactivated");
    }
+}
+
+const char *ui_screensaver_handle_tap(const ui_screensaver_t *ss, int x, int y, bool playing) {
+   if (!ss || !ss->visualizer_mode)
+      return NULL;
+
+   /* Transport button layout mirrors render_rainbow_viz transport section */
+   int btn_count = 3;
+   int total_w = btn_count * TRANSPORT_HIT_SZ + (btn_count - 1) * TRANSPORT_GAP;
+   int base_x = ss->screen_w - TRANSPORT_MARGIN - total_w;
+   int base_y = ss->screen_h - TRANSPORT_MARGIN - TRANSPORT_HIT_SZ;
+
+   /* Check if tap is within the transport row bounding box */
+   if (y < base_y || y > base_y + TRANSPORT_HIT_SZ)
+      return NULL;
+   if (x < base_x || x > base_x + total_w)
+      return NULL;
+
+   /* Determine which button was hit */
+   for (int b = 0; b < btn_count; b++) {
+      int bx = base_x + b * (TRANSPORT_HIT_SZ + TRANSPORT_GAP);
+      if (x >= bx && x < bx + TRANSPORT_HIT_SZ) {
+         if (b == 0)
+            return "previous";
+         if (b == 1)
+            return playing ? "pause" : "play";
+         if (b == 2)
+            return "next";
+      }
+   }
+
+   return NULL;
 }
 
 int ui_screensaver_frame_ms(const ui_screensaver_t *ss) {

@@ -79,9 +79,10 @@ typedef struct {
    float peak_age[SPECTRUM_BINS];  /* Seconds since peak was set */
    float hue_offset;               /* Slowly rotating rainbow offset */
    ui_color_t hsv_lut[360];        /* Precomputed rainbow palette */
+   uint32_t viz_last_render;       /* SDL_GetTicks() for frame-rate independent smoothing */
 
-   /* Track info pill (two-line: title large, album/artist small) */
-   TTF_Font *track_font; /* ~36pt for track title */
+   /* Track info (two-line: title bold, album/artist below, lower-left) */
+   TTF_Font *track_font; /* ~36pt bold for track title */
    char track_artist[128];
    char track_title[128];
    char track_album[128];
@@ -91,6 +92,11 @@ typedef struct {
    int track_sub_w, track_sub_h;
    double track_change_time; /* When track info last changed */
    bool track_dirty;
+
+   /* Transport controls (visualizer mode, lower-right) */
+   SDL_Texture *transport_tex[4]; /* 0=prev, 1=play, 2=pause, 3=next */
+   int transport_sz;              /* Icon size (built once) */
+   bool music_playing;            /* Cached: play vs pause icon selection */
 
    /* Manual trigger (independent of idle timer) */
    bool manual;
@@ -157,6 +163,21 @@ bool ui_screensaver_is_active(const ui_screensaver_t *ss);
  * @brief Toggle manual fullscreen visualizer (long-press music icon)
  */
 void ui_screensaver_toggle_manual(ui_screensaver_t *ss, double time_sec);
+
+/**
+ * @brief Handle tap during active visualizer screensaver
+ *
+ * Checks if tap hits a transport control button (prev/play-pause/next).
+ * Returns the action string for ws_client_send_music_control, or NULL
+ * if the tap didn't hit any button (caller should dismiss screensaver).
+ *
+ * @param ss Screensaver context
+ * @param x Tap X coordinate
+ * @param y Tap Y coordinate
+ * @param playing True if music is currently playing (for play/pause toggle)
+ * @return "previous", "play", "pause", "next", or NULL
+ */
+const char *ui_screensaver_handle_tap(const ui_screensaver_t *ss, int x, int y, bool playing);
 
 /**
  * @brief Get target frame interval based on screensaver state

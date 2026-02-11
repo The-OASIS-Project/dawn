@@ -669,6 +669,11 @@
             // Mute immediately when pausing/stopping
             gainNode.gain.setValueAtTime(0, audioContext.currentTime);
          } else if (isPlaying && !wasPlaying) {
+            // Clear stale audio from ring buffer before resuming —
+            // buffer holds pre-pause audio at the wrong position
+            if (workletNode) {
+               workletNode.port.postMessage({ type: 'clear' });
+            }
             // Restore volume when resuming
             gainNode.gain.setValueAtTime(state.volume, audioContext.currentTime);
          }
