@@ -72,6 +72,7 @@ OPTIONS:
    -v, --verbose       Show detailed output
    -c, --config FILE   Use alternate config file (default: .clang-format)
    --check             Check if files are formatted (exit 1 if not)
+   --changed           Only format files changed since last commit or staged
 
 EXAMPLES:
    $0                  Format all files in current directory
@@ -79,6 +80,7 @@ EXAMPLES:
    $0 www/             Format all JS/CSS/HTML files in www/ directory
    $0 --dry-run        Show what would be changed without formatting
    $0 --check          Check if code is properly formatted (CI mode)
+   $0 --changed        Format only uncommitted/staged files (fast)
 
 NOTE: Prettier formatting requires 'npm install' to be run first.
       If Prettier is not available, only C/C++ files are formatted.
@@ -328,6 +330,120 @@ format_web_files() {
    return $result
 }
 
+format_changed_files() {
+   local dry_run=$1
+   local check_mode=$2
+   local verbose=$3
+   local prettier_available=$4
+
+   # Get changed C/C++ and web files (staged + unstaged + untracked)
+   local c_files=()
+   local web_files=()
+
+   while IFS= read -r file; do
+      [[ -z "$file" || ! -f "$file" ]] && continue
+      if is_c_file "$file" || is_cpp_file "$file"; then
+         should_exclude_file "$file" && continue
+         # Check if file is inside an excluded directory
+         local skip=0
+         for dir in "${EXCLUDE_DIRS[@]}"; do
+            if [[ "$file" == *"/$dir/"* || "$file" == "$dir/"* ]]; then
+               skip=1
+               break
+            fi
+         done
+         [[ $skip -eq 1 ]] && continue
+         c_files+=("$file")
+      fi
+      local ext="${file##*.}"
+      for e in "${WEB_EXTENSIONS[@]}"; do
+         if [[ "$ext" == "$e" ]]; then
+            web_files+=("$file")
+            break
+         fi
+      done
+   done < <(git diff --name-only HEAD 2>/dev/null; git diff --name-only --cached 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null)
+
+   # Deduplicate
+   local -A seen
+   local unique_c=()
+   for f in "${c_files[@]}"; do
+      if [[ -z "${seen[$f]:-}" ]]; then
+         seen[$f]=1
+         unique_c+=("$f")
+      fi
+   done
+   local -A seen_web
+   local unique_web=()
+   for f in "${web_files[@]}"; do
+      if [[ -z "${seen_web[$f]:-}" ]]; then
+         seen_web[$f]=1
+         unique_web+=("$f")
+      fi
+   done
+
+   local overall_result=0
+
+   # Format C/C++ files
+   echo "=== Formatting C/C++ (changed files) ==="
+   if [[ ${#unique_c[@]} -eq 0 ]]; then
+      log_info "No changed C/C++ files"
+   else
+      local count=0
+      local failed=0
+      for file in "${unique_c[@]}"; do
+         if format_file "$file" "$dry_run" "$check_mode" "$verbose"; then
+            ((count++))
+         else
+            ((failed++))
+         fi
+      done
+      echo ""
+      if [[ $check_mode -eq 1 ]]; then
+         if [[ $failed -eq 0 ]]; then
+            log_success "All $count changed files are properly formatted"
+         else
+            log_error "$failed of $count changed files need formatting"
+            overall_result=1
+         fi
+      elif [[ $dry_run -eq 1 ]]; then
+         log_info "Dry run complete. Checked $count changed files."
+      else
+         if [[ $failed -eq 0 ]]; then
+            log_success "Successfully formatted $count changed files"
+         else
+            log_error "Failed to format $failed of $count changed files"
+            overall_result=1
+         fi
+      fi
+   fi
+
+   # Format changed web files
+   if [[ $prettier_available -eq 1 && ${#unique_web[@]} -gt 0 ]]; then
+      echo ""
+      echo "=== Formatting JS/CSS/HTML (changed files) ==="
+      if [[ $check_mode -eq 1 ]]; then
+         if npx prettier --check "${unique_web[@]}" 2>/dev/null; then
+            log_success "All changed web files are properly formatted"
+         else
+            log_error "Some changed web files need formatting"
+            overall_result=1
+         fi
+      elif [[ $dry_run -eq 1 ]]; then
+         npx prettier --list-different "${unique_web[@]}" 2>/dev/null || true
+      else
+         if npx prettier --write "${unique_web[@]}" 2>/dev/null; then
+            log_success "Changed web files formatted"
+         else
+            log_error "Failed to format changed web files"
+            overall_result=1
+         fi
+      fi
+   fi
+
+   return $overall_result
+}
+
 ###############################################################################
 # Main
 ###############################################################################
@@ -337,7 +453,8 @@ main() {
    local dry_run=0
    local check_mode=0
    local verbose=0
-   
+   local changed_only=0
+
    # Parse arguments
    while [[ $# -gt 0 ]]; do
       case $1 in
@@ -351,6 +468,10 @@ main() {
             ;;
          --check)
             check_mode=1
+            shift
+            ;;
+         --changed)
+            changed_only=1
             shift
             ;;
          -v|--verbose)
@@ -396,7 +517,9 @@ main() {
    fi
 
    # Show what we're doing
-   if [[ $dry_run -eq 1 ]]; then
+   if [[ $changed_only -eq 1 ]]; then
+      log_info "CHANGED MODE: Formatting only uncommitted/staged files"
+   elif [[ $dry_run -eq 1 ]]; then
       log_info "DRY RUN: Checking what would be formatted in: $target_dir"
    elif [[ $check_mode -eq 1 ]]; then
       log_info "CHECK MODE: Verifying formatting in: $target_dir"
@@ -409,6 +532,13 @@ main() {
 
    # Track overall result
    local overall_result=0
+
+   if [[ $changed_only -eq 1 ]]; then
+      if ! format_changed_files "$dry_run" "$check_mode" "$verbose" "$prettier_available"; then
+         overall_result=1
+      fi
+      exit $overall_result
+   fi
 
    # Format C/C++ files
    echo "=== Formatting C/C++ ==="
