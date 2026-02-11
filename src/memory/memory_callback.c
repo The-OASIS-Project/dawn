@@ -266,6 +266,42 @@ static void format_time_ago(time_t timestamp, char *buf, size_t buf_size) {
 }
 
 /* =============================================================================
+ * Helper: Tokenize search query into individual words
+ *
+ * Splits keywords on whitespace/punctuation, lowercases each token,
+ * and skips single-character tokens (noise). Returns token count.
+ * ============================================================================= */
+
+#define MAX_SEARCH_TOKENS 8
+
+static int tokenize_query(const char *keywords, char tokens[][64], int max_tokens) {
+   if (!keywords || max_tokens <= 0) {
+      return 0;
+   }
+
+   char buf[512];
+   strncpy(buf, keywords, sizeof(buf) - 1);
+   buf[sizeof(buf) - 1] = '\0';
+
+   for (size_t i = 0; buf[i]; i++) {
+      buf[i] = tolower((unsigned char)buf[i]);
+   }
+
+   int count = 0;
+   char *saveptr = NULL;
+   char *tok = strtok_r(buf, " \t\n\r,.;:!?\"'()[]{}/-", &saveptr);
+   while (tok && count < max_tokens) {
+      if (strlen(tok) > 1) {
+         strncpy(tokens[count], tok, 63);
+         tokens[count][63] = '\0';
+         count++;
+      }
+      tok = strtok_r(NULL, " \t\n\r,.;:!?\"'()[]{}/-", &saveptr);
+   }
+   return count;
+}
+
+/* =============================================================================
  * Action: Search
  * ============================================================================= */
 
@@ -283,9 +319,71 @@ static char *memory_action_search(int user_id, const char *keywords) {
    result[0] = '\0';
    size_t offset = 0;
 
+   /* Tokenize query for per-word matching */
+   char tokens[MAX_SEARCH_TOKENS][64];
+   int token_count = tokenize_query(keywords, tokens, MAX_SEARCH_TOKENS);
+
    /* Search facts */
    memory_fact_t facts[10];
-   int fact_count = memory_db_fact_search(user_id, keywords, facts, 10);
+   int fact_count = 0;
+
+   if (token_count <= 1) {
+      /* Single word or empty: use original single-call path */
+      fact_count = memory_db_fact_search(user_id, keywords, facts, 10);
+   } else {
+      /* Multi-word: search per token, dedup by ID, rank by match count */
+      int64_t seen_ids[50];
+      int seen_scores[50];
+      memory_fact_t seen_facts[50];
+      int seen_count = 0;
+
+      for (int t = 0; t < token_count; t++) {
+         memory_fact_t token_results[10];
+         int n = memory_db_fact_search(user_id, tokens[t], token_results, 10);
+         for (int j = 0; j < n; j++) {
+            int found = -1;
+            for (int k = 0; k < seen_count; k++) {
+               if (seen_ids[k] == token_results[j].id) {
+                  found = k;
+                  break;
+               }
+            }
+            if (found >= 0) {
+               seen_scores[found]++;
+            } else if (seen_count < 50) {
+               seen_ids[seen_count] = token_results[j].id;
+               seen_scores[seen_count] = 1;
+               seen_facts[seen_count] = token_results[j];
+               seen_count++;
+            }
+         }
+      }
+
+      /* Insertion sort by score desc, then confidence desc */
+      for (int i = 1; i < seen_count; i++) {
+         int64_t tmp_id = seen_ids[i];
+         int tmp_score = seen_scores[i];
+         memory_fact_t tmp_fact = seen_facts[i];
+         int j = i - 1;
+         while (j >= 0 &&
+                (seen_scores[j] < tmp_score ||
+                 (seen_scores[j] == tmp_score && seen_facts[j].confidence < tmp_fact.confidence))) {
+            seen_ids[j + 1] = seen_ids[j];
+            seen_scores[j + 1] = seen_scores[j];
+            seen_facts[j + 1] = seen_facts[j];
+            j--;
+         }
+         seen_ids[j + 1] = tmp_id;
+         seen_scores[j + 1] = tmp_score;
+         seen_facts[j + 1] = tmp_fact;
+      }
+
+      /* Take top 10 */
+      fact_count = (seen_count > 10) ? 10 : seen_count;
+      for (int i = 0; i < fact_count; i++) {
+         facts[i] = seen_facts[i];
+      }
+   }
 
    if (fact_count > 0) {
       offset += snprintf(result + offset, buf_size - offset, "FACTS (%d):\n", fact_count);
@@ -305,50 +403,92 @@ static char *memory_action_search(int user_id, const char *keywords) {
    int pref_count = memory_db_pref_list(user_id, prefs, 10);
 
    if (pref_count > 0) {
-      /* Filter prefs that match keywords */
+      /* Filter prefs that match any query token */
       int matches = 0;
-      char *lower_keywords = strdup(keywords);
-      if (lower_keywords) {
-         for (size_t i = 0; i < strlen(lower_keywords); i++) {
-            lower_keywords[i] = tolower((unsigned char)lower_keywords[i]);
+
+      /* Precompute lowercase keywords for single-token fallback */
+      char lower_kw[256];
+      strncpy(lower_kw, keywords, sizeof(lower_kw) - 1);
+      lower_kw[sizeof(lower_kw) - 1] = '\0';
+      for (size_t ci = 0; lower_kw[ci]; ci++) {
+         lower_kw[ci] = tolower((unsigned char)lower_kw[ci]);
+      }
+
+      if (offset > 0 && offset < buf_size - 20) {
+         offset += snprintf(result + offset, buf_size - offset, "\n");
+      }
+
+      for (int i = 0; i < pref_count && offset < buf_size - 100; i++) {
+         char lower_cat[MEMORY_CATEGORY_MAX];
+         strncpy(lower_cat, prefs[i].category, MEMORY_CATEGORY_MAX - 1);
+         lower_cat[MEMORY_CATEGORY_MAX - 1] = '\0';
+         for (size_t j = 0; j < strlen(lower_cat); j++) {
+            lower_cat[j] = tolower((unsigned char)lower_cat[j]);
          }
 
-         if (offset > 0 && offset < buf_size - 20) {
-            offset += snprintf(result + offset, buf_size - offset, "\n");
+         char lower_val[MEMORY_PREF_VALUE_MAX];
+         strncpy(lower_val, prefs[i].value, MEMORY_PREF_VALUE_MAX - 1);
+         lower_val[MEMORY_PREF_VALUE_MAX - 1] = '\0';
+         for (size_t j = 0; j < strlen(lower_val); j++) {
+            lower_val[j] = tolower((unsigned char)lower_val[j]);
          }
 
-         for (int i = 0; i < pref_count && offset < buf_size - 100; i++) {
-            char lower_cat[MEMORY_CATEGORY_MAX];
-            strncpy(lower_cat, prefs[i].category, MEMORY_CATEGORY_MAX - 1);
-            lower_cat[MEMORY_CATEGORY_MAX - 1] = '\0';
-            for (size_t j = 0; j < strlen(lower_cat); j++) {
-               lower_cat[j] = tolower((unsigned char)lower_cat[j]);
-            }
-
-            char lower_val[MEMORY_PREF_VALUE_MAX];
-            strncpy(lower_val, prefs[i].value, MEMORY_PREF_VALUE_MAX - 1);
-            lower_val[MEMORY_PREF_VALUE_MAX - 1] = '\0';
-            for (size_t j = 0; j < strlen(lower_val); j++) {
-               lower_val[j] = tolower((unsigned char)lower_val[j]);
-            }
-
-            if (strstr(lower_cat, lower_keywords) || strstr(lower_val, lower_keywords)) {
-               if (matches == 0) {
-                  offset += snprintf(result + offset, buf_size - offset, "PREFERENCES:\n");
+         bool matched = false;
+         if (token_count >= 2) {
+            /* Multi-word: match if ANY token appears in category or value */
+            for (int t = 0; t < token_count && !matched; t++) {
+               if (strstr(lower_cat, tokens[t]) || strstr(lower_val, tokens[t])) {
+                  matched = true;
                }
-               offset += snprintf(result + offset, buf_size - offset,
-                                  "- %s: %s (reinforced %d times)\n", prefs[i].category,
-                                  prefs[i].value, prefs[i].reinforcement_count);
-               matches++;
             }
+         } else {
+            /* Single/no tokens: original full-keyword match */
+            matched = strstr(lower_cat, lower_kw) || strstr(lower_val, lower_kw);
          }
-         free(lower_keywords);
+
+         if (matched) {
+            if (matches == 0) {
+               offset += snprintf(result + offset, buf_size - offset, "PREFERENCES:\n");
+            }
+            offset += snprintf(result + offset, buf_size - offset,
+                               "- %s: %s (reinforced %d times)\n", prefs[i].category,
+                               prefs[i].value, prefs[i].reinforcement_count);
+            matches++;
+         }
       }
    }
 
    /* Search summaries */
    memory_summary_t summaries[5];
-   int summary_count = memory_db_summary_search(user_id, keywords, summaries, 5);
+   int summary_count = 0;
+
+   if (token_count <= 1) {
+      summary_count = memory_db_summary_search(user_id, keywords, summaries, 5);
+   } else {
+      /* Multi-word: search per token, dedup by ID */
+      int64_t seen_sum_ids[20];
+      int seen_sum_count = 0;
+
+      for (int t = 0; t < token_count && summary_count < 5; t++) {
+         memory_summary_t token_results[5];
+         int n = memory_db_summary_search(user_id, tokens[t], token_results, 5);
+         for (int j = 0; j < n && summary_count < 5; j++) {
+            bool dup = false;
+            for (int k = 0; k < seen_sum_count; k++) {
+               if (seen_sum_ids[k] == token_results[j].id) {
+                  dup = true;
+                  break;
+               }
+            }
+            if (!dup) {
+               if (seen_sum_count < 20) {
+                  seen_sum_ids[seen_sum_count++] = token_results[j].id;
+               }
+               summaries[summary_count++] = token_results[j];
+            }
+         }
+      }
+   }
 
    if (summary_count > 0 && offset < buf_size - 100) {
       if (offset > 0) {
@@ -460,15 +600,75 @@ static char *memory_action_forget(int user_id, const char *fact_text) {
       return strdup("Please specify what to forget.");
    }
 
+   /* Tokenize query for per-word matching */
+   char tokens[MAX_SEARCH_TOKENS][64];
+   int token_count = tokenize_query(fact_text, tokens, MAX_SEARCH_TOKENS);
+
    /* Search for matching facts */
    memory_fact_t facts[5];
-   int count = memory_db_fact_search(user_id, fact_text, facts, 5);
+   int count = 0;
+
+   if (token_count <= 1) {
+      count = memory_db_fact_search(user_id, fact_text, facts, 5);
+   } else {
+      /* Multi-word: search per token, dedup, pick best match */
+      int64_t seen_ids[30];
+      int seen_scores[30];
+      memory_fact_t seen_facts[30];
+      int seen_count = 0;
+
+      for (int t = 0; t < token_count; t++) {
+         memory_fact_t token_results[5];
+         int n = memory_db_fact_search(user_id, tokens[t], token_results, 5);
+         for (int j = 0; j < n; j++) {
+            int found = -1;
+            for (int k = 0; k < seen_count; k++) {
+               if (seen_ids[k] == token_results[j].id) {
+                  found = k;
+                  break;
+               }
+            }
+            if (found >= 0) {
+               seen_scores[found]++;
+            } else if (seen_count < 30) {
+               seen_ids[seen_count] = token_results[j].id;
+               seen_scores[seen_count] = 1;
+               seen_facts[seen_count] = token_results[j];
+               seen_count++;
+            }
+         }
+      }
+
+      /* Insertion sort by score desc, then confidence desc */
+      for (int i = 1; i < seen_count; i++) {
+         int64_t tmp_id = seen_ids[i];
+         int tmp_score = seen_scores[i];
+         memory_fact_t tmp_fact = seen_facts[i];
+         int j = i - 1;
+         while (j >= 0 &&
+                (seen_scores[j] < tmp_score ||
+                 (seen_scores[j] == tmp_score && seen_facts[j].confidence < tmp_fact.confidence))) {
+            seen_ids[j + 1] = seen_ids[j];
+            seen_scores[j + 1] = seen_scores[j];
+            seen_facts[j + 1] = seen_facts[j];
+            j--;
+         }
+         seen_ids[j + 1] = tmp_id;
+         seen_scores[j + 1] = tmp_score;
+         seen_facts[j + 1] = tmp_fact;
+      }
+
+      count = (seen_count > 5) ? 5 : seen_count;
+      for (int i = 0; i < count; i++) {
+         facts[i] = seen_facts[i];
+      }
+   }
 
    if (count == 0) {
       return strdup("No matching facts found to forget.");
    }
 
-   /* Delete the most relevant match */
+   /* Delete the most relevant match (highest word-match count) */
    int result = memory_db_fact_delete(facts[0].id, user_id);
 
    if (result == MEMORY_DB_SUCCESS) {
