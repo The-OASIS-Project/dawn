@@ -1793,6 +1793,13 @@ bool ui_music_handle_tap(ui_music_t *m, int x, int y) {
    bool handled = false;
 
    if (m->active_tab == MUSIC_TAB_PLAYING) {
+      /* Tap on visualizer area → request fullscreen visualizer */
+      int viz_top = m->panel_y + TAB_HEIGHT + 12;
+      if (y >= viz_top && y < viz_top + VIZ_HEIGHT && m->playing) {
+         m->fullscreen_viz_requested = true;
+         handled = true;
+      }
+
       int center_x = m->panel_x + m->panel_w / 2;
       int btn_y = m->transport_btn_y; /* Set during render */
 

@@ -128,6 +128,17 @@ brightness = 100
 volume = 80
 
 # =============================================================================
+# Screensaver / Ambient Mode
+# =============================================================================
+[screensaver]
+# Enable screensaver after idle timeout (no touch or voice activity)
+# Clock mode when no music, rainbow visualizer when music is playing
+enabled = true
+
+# Idle timeout in seconds before screensaver activates (30-600)
+timeout = 120
+
+# =============================================================================
 # Voice Activity Detection (VAD)
 # =============================================================================
 [vad]

@@ -164,6 +164,12 @@ typedef struct satellite_config {
       int volume_pct;     /* 0-100, persisted across restarts */
    } sdl_ui;
 
+   /* Screensaver / ambient mode */
+   struct {
+      bool enabled;
+      int timeout_sec; /* 30-600, default 120 */
+   } screensaver;
+
    /* Logging configuration */
    struct {
       char level[16];

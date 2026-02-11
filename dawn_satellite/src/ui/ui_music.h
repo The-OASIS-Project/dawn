@@ -94,8 +94,9 @@ struct ui_music {
    /* Visualizer */
    float viz_bars[MUSIC_VIZ_BAR_COUNT];
    float viz_targets[MUSIC_VIZ_BAR_COUNT];
-   uint32_t viz_last_update; /* Last target update (for decay gating) */
-   uint32_t viz_last_render; /* Last render frame (for smoothing dt) */
+   uint32_t viz_last_update;      /* Last target update (for decay gating) */
+   uint32_t viz_last_render;      /* Last render frame (for smoothing dt) */
+   bool fullscreen_viz_requested; /* Set by tap on visualizer, consumed by sdl_ui */
 
    /* Shuffle / Repeat */
    bool shuffle;

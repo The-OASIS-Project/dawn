@@ -222,6 +222,10 @@ void satellite_config_init_defaults(satellite_config_t *config) {
    config->sdl_ui.brightness_pct = 100;
    config->sdl_ui.volume_pct = 80;
 
+   /* Screensaver defaults */
+   config->screensaver.enabled = true;
+   config->screensaver.timeout_sec = 120;
+
    /* Logging defaults */
    safe_strcpy(config->logging.level, "info", sizeof(config->logging.level));
    config->logging.use_syslog = false;
@@ -429,6 +433,19 @@ int satellite_config_load(satellite_config_t *config, const char *path) {
       int vol = (int)toml_int_or(sdl_ui, "volume", config->sdl_ui.volume_pct);
       if (vol >= 0 && vol <= 100)
          config->sdl_ui.volume_pct = vol;
+   }
+
+   /* Parse [screensaver] section */
+   toml_table_t *screensaver = toml_table_in(root, "screensaver");
+   if (screensaver) {
+      config->screensaver.enabled = toml_bool_or(screensaver, "enabled",
+                                                 config->screensaver.enabled);
+      int timeout = (int)toml_int_or(screensaver, "timeout", config->screensaver.timeout_sec);
+      if (timeout < 30)
+         timeout = 30;
+      if (timeout > 600)
+         timeout = 600;
+      config->screensaver.timeout_sec = timeout;
    }
 
    /* Parse [logging] section */
@@ -770,6 +787,10 @@ void satellite_config_print(const satellite_config_t *config) {
    printf("  font_dir = %s\n", config->sdl_ui.font_dir);
    printf("  brightness = %d\n", config->sdl_ui.brightness_pct);
    printf("  volume = %d\n", config->sdl_ui.volume_pct);
+
+   printf("\n[screensaver]\n");
+   printf("  enabled = %s\n", config->screensaver.enabled ? "true" : "false");
+   printf("  timeout = %d\n", config->screensaver.timeout_sec);
 
    printf("\n===============================\n\n");
 }

@@ -46,6 +46,7 @@
 #include "ui/ui_colors.h"
 #include "ui/ui_music.h"
 #include "ui/ui_orb.h"
+#include "ui/ui_screensaver.h"
 #include "ui/ui_slider.h"
 #include "ui/ui_touch.h"
 #include "ui/ui_transcript.h"
@@ -175,6 +176,9 @@ struct sdl_ui {
    bool sliders_initialized;
    audio_playback_t *audio_pb;     /* For master volume control */
    satellite_config_t *sat_config; /* For persisting UI prefs */
+
+   /* Screensaver / ambient mode */
+   ui_screensaver_t screensaver;
 };
 
 /* =============================================================================
@@ -191,11 +195,6 @@ static double get_time_sec(void) {
  * Panel Animation Helpers
  * ============================================================================= */
 
-static float ease_out_cubic(float t) {
-   float f = t - 1.0f;
-   return f * f * f + 1.0f;
-}
-
 /** @brief Get panel slide offset (0.0 = hidden, 1.0 = fully visible) */
 static float panel_offset(double anim_start, bool closing, double time_sec) {
    float t = (float)((time_sec - anim_start) / PANEL_ANIM_SEC);
@@ -203,7 +202,7 @@ static float panel_offset(double anim_start, bool closing, double time_sec) {
       t = 0.0f;
    if (t > 1.0f)
       t = 1.0f;
-   float eased = ease_out_cubic(t);
+   float eased = ui_ease_out_cubic(t);
    return closing ? 1.0f - eased : eased;
 }
 
@@ -663,6 +662,12 @@ static void handle_gesture(sdl_ui_t *ui, touch_gesture_t gesture, double time_se
                int music_panel_x = ui->width - MUSIC_PANEL_WIDTH;
                if (gesture.x >= music_panel_x) {
                   ui_music_handle_tap(&ui->music, gesture.x, gesture.y);
+                  /* Check if tap was on the visualizer → go fullscreen */
+                  if (ui->music.fullscreen_viz_requested) {
+                     ui->music.fullscreen_viz_requested = false;
+                     panel_close_music(ui, time_sec);
+                     ui_screensaver_toggle_manual(&ui->screensaver, time_sec);
+                  }
                   break;
                }
                /* Tap outside music panel - close it */
@@ -862,6 +867,19 @@ static int sdl_init_on_thread(sdl_ui_t *ui) {
       ui->sliders_initialized = true;
    }
 
+   /* Initialize screensaver (after fonts/renderer ready) */
+   {
+      bool ss_enabled = true;
+      float ss_timeout = 120.0f;
+      if (ui->sat_config) {
+         ss_enabled = ui->sat_config->screensaver.enabled;
+         ss_timeout = (float)ui->sat_config->screensaver.timeout_sec;
+      }
+      ui_screensaver_init(&ui->screensaver, ui->renderer, ui->width, ui->height, ui->font_dir,
+                          ui->ai_name, ss_enabled, ss_timeout);
+      ui->screensaver.idle_start = get_time_sec();
+   }
+
    LOG_INFO("SDL UI initialized (%dx%d, driver=%s)", ui->width, ui->height,
             SDL_GetCurrentVideoDriver());
 
@@ -873,6 +891,7 @@ static int sdl_init_on_thread(sdl_ui_t *ui) {
  * ============================================================================= */
 
 static void sdl_cleanup_on_thread(sdl_ui_t *ui) {
+   ui_screensaver_cleanup(&ui->screensaver);
    ui_slider_cleanup(&ui->brightness_slider);
    ui_slider_cleanup(&ui->volume_slider);
    panel_cache_cleanup(ui);
@@ -906,14 +925,18 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
    float vad_prob = voice_processing_get_vad_probability(ui->voice_ctx);
    float audio_amp = voice_processing_get_playback_amplitude(ui->voice_ctx);
 
-   /* Poll spectrum data only during SPEAKING (avoid unnecessary copies) */
-   if (state == VOICE_STATE_SPEAKING) {
+   /* Poll spectrum data only during SPEAKING and when screensaver isn't fully covering */
+   bool ss_opaque = (ui->screensaver.state == SCREENSAVER_ACTIVE);
+   if (state == VOICE_STATE_SPEAKING && !ss_opaque) {
       voice_processing_get_playback_spectrum(ui->voice_ctx, ui->spectrum, SPECTRUM_BINS);
       ui_orb_set_spectrum(&ui->orb, ui->spectrum, SPECTRUM_BINS);
    }
 
    /* Track state changes for idle timeout and transcript management */
    if (state != ui->last_state) {
+      /* Voice activity resets screensaver idle timer */
+      ui_screensaver_activity(&ui->screensaver, time_sec);
+
       /* Only reset response tracking on the initial transition into WAITING
        * (from PROCESSING), not on SPEAKING→WAITING which happens between
        * sentences during streaming TTS. */
@@ -964,74 +987,102 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
    SDL_SetRenderDrawColor(r, COLOR_BG_PRIMARY_R, COLOR_BG_PRIMARY_G, COLOR_BG_PRIMARY_B, 255);
    SDL_RenderClear(r);
 
-   /* Draw divider between panels (2px with gradient) */
-   SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R + 0x10, COLOR_BG_TERTIARY_G + 0x10,
-                          COLOR_BG_TERTIARY_B + 0x10, 255);
-   SDL_RenderDrawLine(r, ORB_PANEL_WIDTH, 0, ORB_PANEL_WIDTH, ui->height);
-   SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R, COLOR_BG_TERTIARY_G, COLOR_BG_TERTIARY_B, 180);
-   SDL_RenderDrawLine(r, ORB_PANEL_WIDTH + 1, 0, ORB_PANEL_WIDTH + 1, ui->height);
+   /* Skip main scene rendering when screensaver fully covers the screen */
+   if (!ss_opaque) {
+      /* Draw divider between panels (2px with gradient) */
+      SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R + 0x10, COLOR_BG_TERTIARY_G + 0x10,
+                             COLOR_BG_TERTIARY_B + 0x10, 255);
+      SDL_RenderDrawLine(r, ORB_PANEL_WIDTH, 0, ORB_PANEL_WIDTH, ui->height);
+      SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R, COLOR_BG_TERTIARY_G, COLOR_BG_TERTIARY_B, 180);
+      SDL_RenderDrawLine(r, ORB_PANEL_WIDTH + 1, 0, ORB_PANEL_WIDTH + 1, ui->height);
 
-   /* Render orb in left panel */
-   int orb_cx = ORB_PANEL_WIDTH / 2;
-   int orb_cy = ui->height / 2;
-   ui_orb_render(&ui->orb, r, orb_cx, orb_cy, state, vad_prob, audio_amp, time_sec);
+      /* Render orb in left panel */
+      int orb_cx = ORB_PANEL_WIDTH / 2;
+      int orb_cy = ui->height / 2;
+      ui_orb_render(&ui->orb, r, orb_cx, orb_cy, state, vad_prob, audio_amp, time_sec);
 
-   /* Poll status detail for transcript display */
-   voice_processing_get_status_detail(ui->voice_ctx, ui->transcript.status_detail,
-                                      sizeof(ui->transcript.status_detail));
+      /* Poll status detail for transcript display */
+      voice_processing_get_status_detail(ui->voice_ctx, ui->transcript.status_detail,
+                                         sizeof(ui->transcript.status_detail));
 
-   /* Render transcript in right panel */
-   ui_transcript_render(&ui->transcript, r, state);
+      /* Render transcript in right panel */
+      ui_transcript_render(&ui->transcript, r, state);
 
-   /* Update music playing state for transcript icon color */
-   ui->transcript.music_playing = ui_music_is_playing(&ui->music);
+      /* Update music playing state for transcript icon color */
+      ui->transcript.music_playing = ui_music_is_playing(&ui->music);
 
-   /* Slide-in panels: update animation, render scrim + panels */
-   panel_tick(ui, time_sec);
-   float set_off = ui->panel_settings.visible ? panel_offset(ui->panel_settings.anim_start,
-                                                             ui->panel_settings.closing, time_sec)
+      /* Slide-in panels: update animation, render scrim + panels */
+      panel_tick(ui, time_sec);
+      float set_off = ui->panel_settings.visible
+                          ? panel_offset(ui->panel_settings.anim_start, ui->panel_settings.closing,
+                                         time_sec)
+                          : 0.0f;
+      float mus_off = ui->panel_music.visible ? panel_offset(ui->panel_music.anim_start,
+                                                             ui->panel_music.closing, time_sec)
                                               : 0.0f;
-   float mus_off = ui->panel_music.visible
-                       ? panel_offset(ui->panel_music.anim_start, ui->panel_music.closing, time_sec)
-                       : 0.0f;
 
-   float max_off = set_off > mus_off ? set_off : mus_off;
-   if (max_off > 0.001f) {
-      render_scrim(ui, r, max_off);
-   }
-   if (set_off > 0.001f) {
-      render_panel_settings(ui, r, set_off);
-   }
-   if (mus_off > 0.001f) {
-      /* Music panel slides in from right */
-      int full_x = ui->width - MUSIC_PANEL_WIDTH;
-      int anim_x = ui->width - (int)(mus_off * MUSIC_PANEL_WIDTH);
-      ui->music.panel_x = anim_x > full_x ? anim_x : full_x;
-
-      /* Feed spectrum from ALSA playback to music visualizer while music plays.
-       * audio_playback_t::spectrum[] is updated per-chunk by play_stereo(). */
-      if (ui_music_is_playing(&ui->music) && ui->voice_ctx) {
-         float spectrum[SPECTRUM_BINS];
-         voice_processing_get_playback_spectrum(ui->voice_ctx, spectrum, SPECTRUM_BINS);
-         ui_music_update_spectrum(&ui->music, spectrum);
+      float max_off = set_off > mus_off ? set_off : mus_off;
+      if (max_off > 0.001f) {
+         render_scrim(ui, r, max_off);
       }
-      ui_music_render(&ui->music, r);
+      if (set_off > 0.001f) {
+         render_panel_settings(ui, r, set_off);
+      }
+      if (mus_off > 0.001f) {
+         /* Music panel slides in from right */
+         int full_x = ui->width - MUSIC_PANEL_WIDTH;
+         int anim_x = ui->width - (int)(mus_off * MUSIC_PANEL_WIDTH);
+         ui->music.panel_x = anim_x > full_x ? anim_x : full_x;
+
+         /* Feed spectrum from ALSA playback to music visualizer while music plays.
+          * audio_playback_t::spectrum[] is updated per-chunk by play_stereo(). */
+         if (ui_music_is_playing(&ui->music) && ui->voice_ctx) {
+            float spectrum[SPECTRUM_BINS];
+            voice_processing_get_playback_spectrum(ui->voice_ctx, spectrum, SPECTRUM_BINS);
+            ui_music_update_spectrum(&ui->music, spectrum);
+         }
+         ui_music_render(&ui->music, r);
+      }
+
+      /* Swipe indicators (only when no panel visible) */
+      if (set_off < 0.001f && mus_off < 0.001f) {
+         render_swipe_indicators(ui, r);
+      }
+
+      /* Software dimming overlay for HDMI displays without sysfs backlight.
+       * Draws a semi-transparent black rect over everything to simulate
+       * brightness reduction. At 100% brightness the alpha is 0 (no-op). */
+      if (!backlight_available() && ui->sliders_initialized &&
+          ui->brightness_slider.value < 0.99f) {
+         uint8_t alpha = (uint8_t)(255.0f * (1.0f - ui->brightness_slider.value));
+         SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+         SDL_SetRenderDrawColor(r, 0, 0, 0, alpha);
+         SDL_Rect dim = { 0, 0, ui->width, ui->height };
+         SDL_RenderFillRect(r, &dim);
+      }
    }
 
-   /* Swipe indicators (only when no panel visible) */
-   if (set_off < 0.001f && mus_off < 0.001f) {
-      render_swipe_indicators(ui, r);
-   }
+   /* Screensaver renders OVER everything including dimming overlay */
+   {
+      bool music_active = ui_music_is_playing(&ui->music);
+      ui_screensaver_tick(&ui->screensaver, time_sec, music_active, panel_any_open(ui));
 
-   /* Software dimming overlay for HDMI displays without sysfs backlight.
-    * Draws a semi-transparent black rect over everything to simulate
-    * brightness reduction. At 100% brightness the alpha is 0 (no-op). */
-   if (!backlight_available() && ui->sliders_initialized && ui->brightness_slider.value < 0.99f) {
-      uint8_t alpha = (uint8_t)(255.0f * (1.0f - ui->brightness_slider.value));
-      SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-      SDL_SetRenderDrawColor(r, 0, 0, 0, alpha);
-      SDL_Rect dim = { 0, 0, ui->width, ui->height };
-      SDL_RenderFillRect(r, &dim);
+      if (ui_screensaver_is_active(&ui->screensaver)) {
+         /* Feed spectrum data to screensaver visualizer */
+         if (ui->screensaver.visualizer_mode && music_active && ui->voice_ctx) {
+            float spectrum[SPECTRUM_BINS];
+            voice_processing_get_playback_spectrum(ui->voice_ctx, spectrum, SPECTRUM_BINS);
+            ui_screensaver_update_spectrum(&ui->screensaver, spectrum, SPECTRUM_BINS);
+         }
+
+         /* Update track info from music panel state */
+         if (ui->screensaver.visualizer_mode && music_active) {
+            ui_screensaver_update_track(&ui->screensaver, ui->music.current_track.artist,
+                                        ui->music.current_track.title, time_sec);
+         }
+
+         ui_screensaver_render(&ui->screensaver, r, time_sec);
+      }
    }
 
    SDL_RenderPresent(r);
@@ -1060,6 +1111,14 @@ static void *render_thread_func(void *arg) {
          if (event.type == SDL_QUIT) {
             ui->running = false;
             break;
+         }
+
+         /* Reset screensaver idle timer on any touch; swallow first touch if active */
+         if (event.type == SDL_FINGERDOWN || event.type == SDL_MOUSEBUTTONDOWN) {
+            ui_screensaver_activity(&ui->screensaver, time_sec);
+            if (ui_screensaver_is_active(&ui->screensaver)) {
+               continue; /* Swallow touch — dismiss screensaver only */
+            }
          }
 
          /* Transcript scroll via manual finger position tracking.
@@ -1168,6 +1227,11 @@ static void *render_thread_func(void *arg) {
                        !music_active)
                           ? FRAME_MS_IDLE
                           : FRAME_MS_ACTIVE;
+
+      /* Screensaver overrides frame rate when active */
+      int ss_ms = ui_screensaver_frame_ms(&ui->screensaver);
+      if (ss_ms > 0 && ss_ms < target_ms)
+         target_ms = ss_ms;
 
       double elapsed_ms = (get_time_sec() - frame_start) * 1000.0;
       int delay = target_ms - (int)elapsed_ms;

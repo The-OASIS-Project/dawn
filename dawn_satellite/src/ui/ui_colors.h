@@ -25,6 +25,7 @@
 #define UI_COLORS_H
 
 #include <SDL2/SDL.h>
+#include <math.h>
 
 #include "voice_processing.h"
 
@@ -193,6 +194,67 @@ static inline ui_color_t ui_color_lerp(ui_color_t a, ui_color_t b, float t) {
    result.g = (uint8_t)((1.0f - t) * a.g + t * b.g);
    result.b = (uint8_t)((1.0f - t) * a.b + t * b.b);
    return result;
+}
+
+/* =============================================================================
+ * Animation Easing
+ * ============================================================================= */
+
+/**
+ * @brief Cubic ease-out curve (decelerating)
+ *
+ * @param t Progress (0.0 to 1.0)
+ * @return Eased value
+ */
+static inline float ui_ease_out_cubic(float t) {
+   float f = t - 1.0f;
+   return f * f * f + 1.0f;
+}
+
+/* =============================================================================
+ * HSV to RGB Conversion
+ * ============================================================================= */
+
+/**
+ * @brief Convert HSV color to RGB
+ *
+ * @param h Hue (0-360 degrees)
+ * @param s Saturation (0.0-1.0)
+ * @param v Value/brightness (0.0-1.0)
+ * @return RGB color
+ */
+static inline ui_color_t ui_color_from_hsv(float h, float s, float v) {
+   float c = v * s;
+   float x = c * (1.0f - fabsf(fmodf(h / 60.0f, 2.0f) - 1.0f));
+   float m = v - c;
+   float r, g, b;
+   if (h < 60) {
+      r = c;
+      g = x;
+      b = 0;
+   } else if (h < 120) {
+      r = x;
+      g = c;
+      b = 0;
+   } else if (h < 180) {
+      r = 0;
+      g = c;
+      b = x;
+   } else if (h < 240) {
+      r = 0;
+      g = x;
+      b = c;
+   } else if (h < 300) {
+      r = x;
+      g = 0;
+      b = c;
+   } else {
+      r = c;
+      g = 0;
+      b = x;
+   }
+   return (ui_color_t){ (uint8_t)((r + m) * 255), (uint8_t)((g + m) * 255),
+                        (uint8_t)((b + m) * 255) };
 }
 
 #endif /* UI_COLORS_H */
