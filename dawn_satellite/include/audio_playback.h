@@ -45,6 +45,7 @@ typedef struct {
    volatile float amplitude;               /* Current RMS amplitude 0.0-1.0 (updated per chunk) */
    volatile float spectrum[SPECTRUM_BINS]; /* FFT magnitude bins 0.0-1.0 (updated per chunk) */
    pthread_mutex_t alsa_mutex;             /* Guards all snd_pcm_* calls */
+   atomic_int volume;                      /* Master volume 0-100, default 80 */
 } audio_playback_t;
 
 /**
@@ -123,5 +124,16 @@ int audio_playback_play_stereo(audio_playback_t *ctx,
  * @param ctx Pointer to playback context
  */
 void audio_playback_stop(audio_playback_t *ctx);
+
+/**
+ * Set master volume (0-100). Applies to TTS playback path.
+ * Default is 80.
+ */
+void audio_playback_set_volume(audio_playback_t *ctx, int volume);
+
+/**
+ * Get current master volume (0-100).
+ */
+int audio_playback_get_volume(audio_playback_t *ctx);
 
 #endif /* AUDIO_PLAYBACK_H */

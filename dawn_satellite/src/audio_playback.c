@@ -194,6 +194,7 @@ int audio_playback_init(audio_playback_t *ctx, const char *device) {
 
    ctx->handle = handle;
    ctx->initialized = 1;
+   atomic_store(&ctx->volume, 80);
    pthread_mutex_init(&ctx->alsa_mutex, NULL);
 
    /* Pre-compute Goertzel DFT coefficients for spectrum visualization */
@@ -298,6 +299,17 @@ int audio_playback_play(audio_playback_t *ctx,
          out_buf[2 * j + 1] = s; /* Right */
 
          pos += step;
+      }
+
+      /* Apply master volume scaling (Q15 fixed-point to avoid per-sample division) */
+      {
+         int vol = atomic_load(&ctx->volume);
+         if (vol < 100) {
+            int vol_fp = (vol << 15) / 100; /* Q15: 0..32767 maps to 0.0..~1.0 */
+            for (size_t j = 0; j < n * 2; j++) {
+               out_buf[j] = (int16_t)(((int32_t)out_buf[j] * vol_fp) >> 15);
+            }
+         }
       }
 
       /* Compute RMS amplitude and spectrum for visualization (mono channel only).
@@ -480,4 +492,18 @@ int audio_playback_play_stereo(audio_playback_t *ctx,
    }
 
    return (int)written;
+}
+
+void audio_playback_set_volume(audio_playback_t *ctx, int volume) {
+   if (!ctx)
+      return;
+   if (volume < 0)
+      volume = 0;
+   if (volume > 100)
+      volume = 100;
+   atomic_store(&ctx->volume, volume);
+}
+
+int audio_playback_get_volume(audio_playback_t *ctx) {
+   return ctx ? atomic_load(&ctx->volume) : 80;
 }

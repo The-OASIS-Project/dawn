@@ -39,13 +39,20 @@
 #include <string.h>
 #include <time.h>
 
+#include "audio_playback.h"
 #include "logging.h"
+#include "ui/backlight.h"
 #include "ui/ui_colors.h"
 #include "ui/ui_music.h"
 #include "ui/ui_orb.h"
+#include "ui/ui_slider.h"
 #include "ui/ui_touch.h"
 #include "ui/ui_transcript.h"
 #include "ws_client.h"
+
+#ifdef HAVE_OPUS
+#include "music_playback.h"
+#endif
 
 /* =============================================================================
  * Constants
@@ -165,6 +172,12 @@ struct sdl_ui {
    /* Music panel */
    ui_music_t music;
    ws_client_t *ws_client; /* WS client for music commands */
+
+   /* Settings panel sliders */
+   ui_slider_t brightness_slider;
+   ui_slider_t volume_slider;
+   bool sliders_initialized;
+   audio_playback_t *audio_pb; /* For master volume control */
 };
 
 /* =============================================================================
@@ -206,6 +219,7 @@ static void panel_open(sdl_ui_t *ui, bool is_actions, double time_sec) {
    if (is_actions && ui->panel_settings.visible) {
       ui->panel_settings.closing = true;
       ui->panel_settings.anim_start = time_sec;
+      backlight_close();
    } else if (!is_actions && ui->panel_actions.visible) {
       ui->panel_actions.closing = true;
       ui->panel_actions.anim_start = time_sec;
@@ -225,6 +239,7 @@ static void panel_open(sdl_ui_t *ui, bool is_actions, double time_sec) {
       ui->panel_settings.visible = true;
       ui->panel_settings.closing = false;
       ui->panel_settings.anim_start = time_sec;
+      backlight_open();
    }
 }
 
@@ -237,6 +252,7 @@ static void panel_open_music(sdl_ui_t *ui, double time_sec) {
    if (ui->panel_settings.visible && !ui->panel_settings.closing) {
       ui->panel_settings.closing = true;
       ui->panel_settings.anim_start = time_sec;
+      backlight_close();
    }
 
    ui->panel_music.visible = true;
@@ -261,6 +277,7 @@ static void panel_close(sdl_ui_t *ui, bool is_actions, double time_sec) {
       if (ui->panel_settings.visible && !ui->panel_settings.closing) {
          ui->panel_settings.closing = true;
          ui->panel_settings.anim_start = time_sec;
+         backlight_close();
       }
    }
 }
@@ -288,6 +305,20 @@ static void panel_tick(sdl_ui_t *ui, double time_sec) {
          ui->panel_music.closing = false;
       }
    }
+}
+
+/* =============================================================================
+ * Volume Helper
+ * ============================================================================= */
+
+/** @brief Set master volume on both TTS and music playback (if available) */
+static void set_master_volume(sdl_ui_t *ui, int pct) {
+   if (ui->audio_pb)
+      audio_playback_set_volume(ui->audio_pb, pct);
+#ifdef HAVE_OPUS
+   if (ui->music.music_pb)
+      music_playback_set_volume(ui->music.music_pb, pct);
+#endif
 }
 
 /* =============================================================================
@@ -682,6 +713,16 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
    }
    render_info_row(ui, r, 4, buf, text_x, text_y, value_x_offset);
 
+   /* ---- Right-side sliders (brightness + volume) ---- */
+   if (ui->sliders_initialized) {
+      /* Update track_y each frame for panel animation offset */
+      ui->brightness_slider.track_y = panel_y + 95;
+      ui->volume_slider.track_y = panel_y + 170;
+
+      ui_slider_render(&ui->brightness_slider, r, ui->transcript.label_font);
+      ui_slider_render(&ui->volume_slider, r, ui->transcript.label_font);
+   }
+
    /* Dismiss pill indicator (swipe-up-to-close affordance) */
    int pill_w = 40, pill_h = 4;
    int pill_x = ui->width / 2 - pill_w / 2;
@@ -924,6 +965,39 @@ static int sdl_init_on_thread(sdl_ui_t *ui) {
    memset(&ui->panel_actions, 0, sizeof(ui->panel_actions));
    memset(&ui->panel_settings, 0, sizeof(ui->panel_settings));
    memset(&ui->panel_music, 0, sizeof(ui->panel_music));
+
+   /* Probe sysfs backlight for brightness slider */
+   if (backlight_init() == 0) {
+      LOG_INFO("SDL UI: Backlight control available");
+   }
+
+   /* Initialize settings panel sliders (renderer + fonts are ready) */
+   if (ui->transcript.label_font) {
+      int slider_track_x = 620;
+      int slider_track_w = 300;
+
+      ui_slider_init(&ui->brightness_slider, ui->renderer, slider_track_x, 0, slider_track_w,
+                     COLOR_THINKING_R, COLOR_THINKING_G, COLOR_THINKING_B, "BRIGHTNESS",
+                     ui->transcript.label_font);
+      ui->brightness_slider.min_value = 0.10f;
+      if (backlight_available()) {
+         ui->brightness_slider.value = (float)backlight_get() / 100.0f;
+      } else {
+         ui->brightness_slider.value = 0.7f;
+      }
+
+      ui_slider_init(&ui->volume_slider, ui->renderer, slider_track_x, 0, slider_track_w,
+                     COLOR_SPEAKING_R, COLOR_SPEAKING_G, COLOR_SPEAKING_B, "VOLUME",
+                     ui->transcript.label_font);
+      if (ui->audio_pb) {
+         ui->volume_slider.value = (float)audio_playback_get_volume(ui->audio_pb) / 100.0f;
+      } else {
+         ui->volume_slider.value = 0.8f;
+      }
+
+      ui->sliders_initialized = true;
+   }
+
    LOG_INFO("SDL UI initialized (%dx%d, driver=%s)", ui->width, ui->height,
             SDL_GetCurrentVideoDriver());
 
@@ -935,6 +1009,8 @@ static int sdl_init_on_thread(sdl_ui_t *ui) {
  * ============================================================================= */
 
 static void sdl_cleanup_on_thread(sdl_ui_t *ui) {
+   ui_slider_cleanup(&ui->brightness_slider);
+   ui_slider_cleanup(&ui->volume_slider);
    panel_cache_cleanup(ui);
    ui_music_cleanup(&ui->music);
    ui_transcript_cleanup(&ui->transcript);
@@ -1126,7 +1202,18 @@ static void *render_thread_func(void *arg) {
             int fx = (int)(event.tfinger.x * ui->width);
             int fy = (int)(event.tfinger.y * ui->height);
 
-            if (ui->panel_music.visible && !ui->panel_music.closing && fx >= ui->music.panel_x) {
+            /* Settings panel sliders take priority when visible */
+            if (ui->panel_settings.visible && !ui->panel_settings.closing && fy < PANEL_HEIGHT &&
+                ui->sliders_initialized) {
+               if (ui_slider_finger_down(&ui->brightness_slider, fx, fy)) {
+                  backlight_set((int)(ui->brightness_slider.value * 100.0f + 0.5f));
+                  ui->finger_scrolling = false;
+               } else if (ui_slider_finger_down(&ui->volume_slider, fx, fy)) {
+                  set_master_volume(ui, (int)(ui->volume_slider.value * 100.0f + 0.5f));
+                  ui->finger_scrolling = false;
+               }
+            } else if (ui->panel_music.visible && !ui->panel_music.closing &&
+                       fx >= ui->music.panel_x) {
                /* Finger in music panel — scroll music lists */
                ui->finger_scrolling = true;
                ui->finger_last_y = fy;
@@ -1140,6 +1227,15 @@ static void *render_thread_func(void *arg) {
          } else if (event.type == SDL_FINGERMOTION) {
             int new_x = (int)(event.tfinger.x * ui->width);
             int new_y = (int)(event.tfinger.y * ui->height);
+
+            /* Settings panel slider drag */
+            if (ui->sliders_initialized) {
+               if (ui_slider_finger_motion(&ui->brightness_slider, new_x)) {
+                  backlight_set((int)(ui->brightness_slider.value * 100.0f + 0.5f));
+               } else if (ui_slider_finger_motion(&ui->volume_slider, new_x)) {
+                  set_master_volume(ui, (int)(ui->volume_slider.value * 100.0f + 0.5f));
+               }
+            }
 
             /* Drag-to-seek takes priority over scroll */
             if (ui->panel_music.visible && !ui->panel_music.closing) {
@@ -1159,6 +1255,8 @@ static void *render_thread_func(void *arg) {
             }
          } else if (event.type == SDL_FINGERUP) {
             ui->finger_scrolling = false;
+            ui_slider_finger_up(&ui->brightness_slider);
+            ui_slider_finger_up(&ui->volume_slider);
             ui_music_handle_finger_up(&ui->music);
          } else if (event.type == SDL_MOUSEMOTION && (event.motion.state & SDL_BUTTON_LMASK)) {
             /* Mouse fallback for desktop testing */
@@ -1345,6 +1443,12 @@ void sdl_ui_set_ws_client(sdl_ui_t *ui, struct ws_client *client) {
    /* Register music callbacks so ws_client routes parsed data to our UI */
    ws_client_set_music_callbacks(client, music_state_cb, music_position_cb, music_queue_cb,
                                  music_library_cb, ui);
+}
+
+void sdl_ui_set_audio_playback(sdl_ui_t *ui, struct audio_playback *pb) {
+   if (!ui)
+      return;
+   ui->audio_pb = (audio_playback_t *)pb;
 }
 
 #ifdef HAVE_OPUS

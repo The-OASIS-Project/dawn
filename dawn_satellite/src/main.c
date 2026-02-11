@@ -958,6 +958,10 @@ int main(int argc, char *argv[]) {
       if (sdl_ui) {
          g_sdl_ui = sdl_ui;
          sdl_ui_start(sdl_ui);
+         /* Wire TTS audio playback for master volume slider */
+         if (ctx.audio_playback) {
+            sdl_ui_set_audio_playback(sdl_ui, (struct audio_playback *)ctx.audio_playback);
+         }
       } else {
          printf("SDL UI init failed, continuing headless\n");
       }

@@ -31,6 +31,7 @@
 
 /* Forward declarations */
 struct ws_client;
+struct audio_playback;
 
 #ifdef __cplusplus
 extern "C" {
@@ -117,6 +118,17 @@ void sdl_ui_add_transcript(sdl_ui_t *ui, const char *role, const char *text);
  * @param client WebSocket client
  */
 void sdl_ui_set_ws_client(sdl_ui_t *ui, struct ws_client *client);
+
+/**
+ * @brief Set audio playback context for master volume control
+ *
+ * Links the TTS audio playback to the UI volume slider so both TTS
+ * and music volumes can be controlled from the settings panel.
+ *
+ * @param ui UI context
+ * @param pb Audio playback context (TTS path)
+ */
+void sdl_ui_set_audio_playback(sdl_ui_t *ui, struct audio_playback *pb);
 
 #ifdef HAVE_OPUS
 struct music_playback;

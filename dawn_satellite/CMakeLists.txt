@@ -179,8 +179,10 @@ if(ENABLE_SDL_UI)
         src/ui/ui_markdown.c
         src/ui/ui_music.c
         src/ui/ui_orb.c
+        src/ui/ui_slider.c
         src/ui/ui_touch.c
         src/ui/ui_transcript.c
+        src/ui/backlight.c
     )
     # Add src/ to include path for ui/ headers
     include_directories(src)
