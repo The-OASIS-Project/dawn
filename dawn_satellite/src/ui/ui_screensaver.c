@@ -54,8 +54,7 @@
 #define CLOCK_ALPHA 180         /* Dimmed text (0-255) */
 #define WATERMARK_PADDING 20    /* Corner padding for "D.A.W.N." */
 #define WATERMARK_PERIOD 8.0    /* Seconds for one full fade cycle */
-#define WATERMARK_MIN_ALPHA 120 /* Minimum alpha (always clearly visible) */
-#define WATERMARK_MAX_ALPHA 200 /* Maximum alpha (prominent but not harsh) */
+#define WATERMARK_MAX_ALPHA 200 /* Peak alpha at full fade-in */
 
 /* Visualizer mode */
 #define VIZ_BAR_GAP 2
@@ -193,15 +192,15 @@ static void render_clock(ui_screensaver_t *ss, SDL_Renderer *r, double time_sec,
       SDL_RenderCopy(r, ss->date_tex, NULL, &dst);
    }
 
-   /* "D.A.W.N." watermark — one random corner, switches each pulse cycle */
+   /* "D.A.W.N." watermark — fades fully in/out, switches corner when invisible */
    if (ss->watermark_tex) {
-      /* Smooth sine pulse: oscillates between min and max alpha */
-      float pulse = sinf((float)(time_sec / WATERMARK_PERIOD) * 2.0f * (float)M_PI);
-      float wm_alpha_f = (float)WATERMARK_MIN_ALPHA +
-                         (float)(WATERMARK_MAX_ALPHA - WATERMARK_MIN_ALPHA) * (0.5f + 0.5f * pulse);
+      /* Sine pulse 0 → max → 0 (half-wave rectified for clean fade to zero) */
+      float phase = fmodf((float)(time_sec / WATERMARK_PERIOD), 1.0f);
+      float pulse = sinf(phase * (float)M_PI); /* 0→1→0 over one period */
+      float wm_alpha_f = (float)WATERMARK_MAX_ALPHA * pulse;
       uint8_t wm_alpha = (uint8_t)(wm_alpha_f * (float)alpha / 255.0f);
 
-      /* Pick a new random corner each pulse cycle (at the dimmest point) */
+      /* Switch to a new random corner when faded out (start of each cycle) */
       int cycle = (int)(time_sec / WATERMARK_PERIOD);
       if (cycle != ss->watermark_last_cycle) {
          ss->watermark_last_cycle = cycle;
@@ -211,17 +210,19 @@ static void render_clock(ui_screensaver_t *ss, SDL_Renderer *r, double time_sec,
          } while (ss->watermark_corner == prev);
       }
 
-      SDL_SetTextureAlphaMod(ss->watermark_tex, wm_alpha);
-      SDL_SetTextureColorMod(ss->watermark_tex, COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
-                             COLOR_TEXT_SECONDARY_B);
+      if (wm_alpha > 0) {
+         SDL_SetTextureAlphaMod(ss->watermark_tex, wm_alpha);
+         SDL_SetTextureColorMod(ss->watermark_tex, COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
+                                COLOR_TEXT_SECONDARY_B);
 
-      int pad = WATERMARK_PADDING;
-      int ww = ss->watermark_w;
-      int wh = ss->watermark_h;
-      int wx = (ss->watermark_corner & 1) ? (ss->screen_w - ww - pad) : pad;
-      int wy = (ss->watermark_corner & 2) ? (ss->screen_h - wh - pad) : pad;
-      SDL_Rect dst = { wx, wy, ww, wh };
-      SDL_RenderCopy(r, ss->watermark_tex, NULL, &dst);
+         int pad = WATERMARK_PADDING;
+         int ww = ss->watermark_w;
+         int wh = ss->watermark_h;
+         int wx = (ss->watermark_corner & 1) ? (ss->screen_w - ww - pad) : pad;
+         int wy = (ss->watermark_corner & 2) ? (ss->screen_h - wh - pad) : pad;
+         SDL_Rect dst = { wx, wy, ww, wh };
+         SDL_RenderCopy(r, ss->watermark_tex, NULL, &dst);
+      }
    }
 }
 

@@ -93,24 +93,19 @@ static void compute_spectrum(audio_playback_t *ctx, const float *mono_buf, size_
          peak = mag;
    }
 
-   /* Convert to dB scale relative to peak, matching WebUI's getByteFrequencyData behavior.
-    * Linear magnitudes let bass dominate (10-50x louder); dB scale compresses the
-    * dynamic range so treble bins are visible alongside bass. */
-   float inv_peak = (peak > 1e-6f) ? (1.0f / peak) : 0.0f;
+   /* Convert to absolute dB scale, matching WebUI's getByteFrequencyData behavior.
+    * Uses fixed reference (N/2 = max Goertzel magnitude for full-scale sine)
+    * so quiet passages produce genuinely low values instead of being peak-normalized. */
+   float ref = (float)n * 0.5f; /* Max magnitude for a full-scale sine at bin freq */
    for (int k = 0; k < SPECTRUM_BINS; k++) {
-      float normalized = raw[k] * inv_peak;
-      if (normalized < 1e-6f) {
+      if (raw[k] < 1e-6f) {
          ctx->spectrum[k] = 0.0f;
          continue;
       }
-      /* dB relative to peak: 0dB = peak, negative = quieter.
+      /* Absolute dB: 0dB = full-scale sine, negative = quieter.
        * Map [-60dB, 0dB] → [0.0, 1.0], floor below -60dB. */
-      float db = 20.0f * log10f(normalized);
+      float db = 20.0f * log10f(raw[k] / ref);
       float val = 1.0f + db / 60.0f;
-      if (val < 0.0f)
-         val = 0.0f;
-      /* Subtract noise floor */
-      val -= 0.05f;
       if (val < 0.0f)
          val = 0.0f;
       /* Gamma correction matching WebUI (pow 0.7) */

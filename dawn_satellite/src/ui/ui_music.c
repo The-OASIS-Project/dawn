@@ -2113,6 +2113,12 @@ void ui_music_on_state(ui_music_t *m, const music_state_update_t *state) {
 
    if (track_changed) {
       invalidate_track_cache(m);
+#ifdef HAVE_OPUS
+      /* Flush stale audio from ring buffer so old track doesn't bleed through.
+       * Covers all track-change sources: queue tap, WebUI, auto-advance, repeat. */
+      if (m->music_pb)
+         music_playback_flush(m->music_pb);
+#endif
    }
 
    /* Detect end-of-track for repeat handling (client-side like WebUI) */
@@ -2160,6 +2166,10 @@ void ui_music_on_state(ui_music_t *m, const music_state_update_t *state) {
 
    /* Trigger repeat if end-of-track was detected and repeat mode is on */
    if (trigger_repeat && repeat_index >= 0 && m->ws) {
+#ifdef HAVE_OPUS
+      if (m->music_pb)
+         music_playback_flush(m->music_pb);
+#endif
       char idx_str[16];
       snprintf(idx_str, sizeof(idx_str), "%d", repeat_index);
       ws_client_send_music_control(m->ws, "play_index", idx_str);
