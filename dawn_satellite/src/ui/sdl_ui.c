@@ -72,7 +72,7 @@
 #define PANEL_ANIM_SEC 0.25
 #define INFO_ROW_COUNT 5      /* Server, Device, IP, Uptime, Session */
 #define ORB_HIT_RADIUS 180    /* Tap/long-press detection radius around orb center */
-#define SWIPE_ZONE_FRAC 0.20f /* Top/bottom 20% of screen for swipe triggers */
+#define SWIPE_ZONE_FRAC 0.20f /* Top 20% of screen for swipe-down trigger */
 /* Music panel width = screen width (1024) minus orb area (401) = 623px.
  * Matches transcript panel width so the music overlay covers the same region. */
 #define MUSIC_PANEL_WIDTH 623
@@ -131,11 +131,6 @@ struct sdl_ui {
 
    /* Cached panel label textures (lazy-initialized on first render) */
    struct {
-      SDL_Texture *quick_actions_title; /* "QUICK ACTIONS" */
-      SDL_Texture *box_labels[5];       /* "Music", "Lights", ... */
-      int box_label_w[5];
-      int box_label_h[5];
-      int title_w, title_h;
       SDL_Texture *ai_name; /* AI name (upper case, body_font) */
       int ai_name_w, ai_name_h;
       /* Settings panel info labels (label_font, WCAG AA color) */
@@ -168,7 +163,7 @@ struct sdl_ui {
       bool visible;
       bool closing;
       double anim_start;
-   } panel_actions, panel_settings, panel_music;
+   } panel_settings, panel_music;
 
    /* Music panel */
    ui_music_t music;
@@ -213,44 +208,24 @@ static float panel_offset(double anim_start, bool closing, double time_sec) {
 }
 
 static bool panel_any_open(const sdl_ui_t *ui) {
-   return ui->panel_actions.visible || ui->panel_settings.visible || ui->panel_music.visible;
+   return ui->panel_settings.visible || ui->panel_music.visible;
 }
 
-static void panel_open(sdl_ui_t *ui, bool is_actions, double time_sec) {
-   /* Close the other panel if open */
-   if (is_actions && ui->panel_settings.visible) {
-      ui->panel_settings.closing = true;
-      ui->panel_settings.anim_start = time_sec;
-      backlight_close();
-   } else if (!is_actions && ui->panel_actions.visible) {
-      ui->panel_actions.closing = true;
-      ui->panel_actions.anim_start = time_sec;
-   }
-
-   /* Close music panel when opening other panels */
+static void panel_open_settings(sdl_ui_t *ui, double time_sec) {
+   /* Close music panel when opening settings */
    if (ui->panel_music.visible && !ui->panel_music.closing) {
       ui->panel_music.closing = true;
       ui->panel_music.anim_start = time_sec;
    }
 
-   if (is_actions) {
-      ui->panel_actions.visible = true;
-      ui->panel_actions.closing = false;
-      ui->panel_actions.anim_start = time_sec;
-   } else {
-      ui->panel_settings.visible = true;
-      ui->panel_settings.closing = false;
-      ui->panel_settings.anim_start = time_sec;
-      backlight_open();
-   }
+   ui->panel_settings.visible = true;
+   ui->panel_settings.closing = false;
+   ui->panel_settings.anim_start = time_sec;
+   backlight_open();
 }
 
 static void panel_open_music(sdl_ui_t *ui, double time_sec) {
-   /* Close other panels */
-   if (ui->panel_actions.visible && !ui->panel_actions.closing) {
-      ui->panel_actions.closing = true;
-      ui->panel_actions.anim_start = time_sec;
-   }
+   /* Close settings panel */
    if (ui->panel_settings.visible && !ui->panel_settings.closing) {
       ui->panel_settings.closing = true;
       ui->panel_settings.anim_start = time_sec;
@@ -269,30 +244,16 @@ static void panel_close_music(sdl_ui_t *ui, double time_sec) {
    }
 }
 
-static void panel_close(sdl_ui_t *ui, bool is_actions, double time_sec) {
-   if (is_actions) {
-      if (ui->panel_actions.visible && !ui->panel_actions.closing) {
-         ui->panel_actions.closing = true;
-         ui->panel_actions.anim_start = time_sec;
-      }
-   } else {
-      if (ui->panel_settings.visible && !ui->panel_settings.closing) {
-         ui->panel_settings.closing = true;
-         ui->panel_settings.anim_start = time_sec;
-         backlight_close();
-      }
+static void panel_close_settings(sdl_ui_t *ui, double time_sec) {
+   if (ui->panel_settings.visible && !ui->panel_settings.closing) {
+      ui->panel_settings.closing = true;
+      ui->panel_settings.anim_start = time_sec;
+      backlight_close();
    }
 }
 
 /** @brief Finalize panels whose close animation is done */
 static void panel_tick(sdl_ui_t *ui, double time_sec) {
-   if (ui->panel_actions.closing) {
-      float t = (float)((time_sec - ui->panel_actions.anim_start) / PANEL_ANIM_SEC);
-      if (t >= 1.0f) {
-         ui->panel_actions.visible = false;
-         ui->panel_actions.closing = false;
-      }
-   }
    if (ui->panel_settings.closing) {
       float t = (float)((time_sec - ui->panel_settings.anim_start) / PANEL_ANIM_SEC);
       if (t >= 1.0f) {
@@ -335,31 +296,9 @@ static void panel_cache_init(sdl_ui_t *ui) {
    SDL_Renderer *r = ui->renderer;
    TTF_Font *font = ui->transcript.label_font;
    SDL_Color primary = { COLOR_TEXT_PRIMARY_R, COLOR_TEXT_PRIMARY_G, COLOR_TEXT_PRIMARY_B, 255 };
-   SDL_Color secondary = { COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G, COLOR_TEXT_SECONDARY_B,
-                           255 };
-
-   /* "QUICK ACTIONS" title */
-   SDL_Surface *surf = TTF_RenderText_Blended(font, "QUICK ACTIONS", primary);
-   if (surf) {
-      ui->panel_cache.quick_actions_title = SDL_CreateTextureFromSurface(r, surf);
-      ui->panel_cache.title_w = surf->w;
-      ui->panel_cache.title_h = surf->h;
-      SDL_FreeSurface(surf);
-   }
-
-   /* Box labels */
-   static const char *labels[] = { "Music", "Lights", "Thermostat", "Timer", "Settings" };
-   for (int i = 0; i < 5; i++) {
-      surf = TTF_RenderText_Blended(font, labels[i], secondary);
-      if (surf) {
-         ui->panel_cache.box_labels[i] = SDL_CreateTextureFromSurface(r, surf);
-         ui->panel_cache.box_label_w[i] = surf->w;
-         ui->panel_cache.box_label_h[i] = surf->h;
-         SDL_FreeSurface(surf);
-      }
-   }
 
    /* AI name (upper case) — use body_font for visual hierarchy */
+   SDL_Surface *surf;
    char name_upper[32];
    int ni = 0;
    for (const char *p = ui->ai_name; *p && ni < 31; p++, ni++) {
@@ -409,12 +348,6 @@ static void panel_cache_init(sdl_ui_t *ui) {
 
 /** @brief Cleanup cached panel label textures */
 static void panel_cache_cleanup(sdl_ui_t *ui) {
-   if (ui->panel_cache.quick_actions_title)
-      SDL_DestroyTexture(ui->panel_cache.quick_actions_title);
-   for (int i = 0; i < 5; i++) {
-      if (ui->panel_cache.box_labels[i])
-         SDL_DestroyTexture(ui->panel_cache.box_labels[i]);
-   }
    for (int i = 0; i < INFO_ROW_COUNT; i++) {
       if (ui->panel_cache.info_labels[i])
          SDL_DestroyTexture(ui->panel_cache.info_labels[i]);
@@ -436,73 +369,6 @@ static void render_scrim(sdl_ui_t *ui, SDL_Renderer *r, float max_offset) {
    SDL_SetRenderDrawColor(r, COLOR_BG_PRIMARY_R, COLOR_BG_PRIMARY_G, COLOR_BG_PRIMARY_B, alpha);
    SDL_Rect full = { 0, 0, ui->width, ui->height };
    SDL_RenderFillRect(r, &full);
-}
-
-/** @brief Render Quick Actions panel (slides up from bottom) */
-static void render_panel_actions(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
-   panel_cache_init(ui);
-   int panel_y = ui->height - (int)(offset * PANEL_HEIGHT);
-
-   /* Panel background */
-   SDL_SetRenderDrawColor(r, COLOR_BG_SECONDARY_R, COLOR_BG_SECONDARY_G, COLOR_BG_SECONDARY_B, 240);
-   SDL_Rect bg = { 0, panel_y, ui->width, PANEL_HEIGHT };
-   SDL_RenderFillRect(r, &bg);
-
-   /* Top edge highlight */
-   SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R + 0x20, COLOR_BG_TERTIARY_G + 0x20,
-                          COLOR_BG_TERTIARY_B + 0x20, 255);
-   SDL_RenderDrawLine(r, 0, panel_y, ui->width, panel_y);
-
-   /* Title (cached) + "Coming Soon" subtitle */
-   if (ui->panel_cache.quick_actions_title) {
-      SDL_Rect dst = { 20, panel_y + 15, ui->panel_cache.title_w, ui->panel_cache.title_h };
-      SDL_RenderCopy(r, ui->panel_cache.quick_actions_title, NULL, &dst);
-
-      /* Dim subtitle next to title */
-      if (ui->transcript.label_font) {
-         SDL_Color dim = { COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G, COLOR_TEXT_SECONDARY_B,
-                           140 };
-         SDL_Surface *sub = TTF_RenderText_Blended(ui->transcript.label_font, "Coming Soon", dim);
-         if (sub) {
-            SDL_Texture *stx = SDL_CreateTextureFromSurface(r, sub);
-            SDL_SetTextureAlphaMod(stx, 140);
-            SDL_Rect sdst = { 20 + ui->panel_cache.title_w + 12, panel_y + 15, sub->w, sub->h };
-            SDL_RenderCopy(r, stx, NULL, &sdst);
-            SDL_DestroyTexture(stx);
-            SDL_FreeSurface(sub);
-         }
-      }
-   }
-
-   /* Action boxes (dimmed — not yet functional) */
-   int box_w = 180, box_h = 120;
-   int total_w = 5 * box_w + 4 * 15;
-   int start_x = (ui->width - total_w) / 2;
-   int box_y = panel_y + 55;
-
-   for (int i = 0; i < 5; i++) {
-      int bx = start_x + i * (box_w + 15);
-      SDL_Rect box = { bx, box_y, box_w, box_h };
-
-      /* Box fill (dimmed) */
-      SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R, COLOR_BG_TERTIARY_G, COLOR_BG_TERTIARY_B, 120);
-      SDL_RenderFillRect(r, &box);
-
-      /* Box border */
-      SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R + 0x15, COLOR_BG_TERTIARY_G + 0x15,
-                             COLOR_BG_TERTIARY_B + 0x15, 180);
-      SDL_RenderDrawRect(r, &box);
-
-      /* Label text (cached, centered in box, dimmed) */
-      if (ui->panel_cache.box_labels[i]) {
-         SDL_SetTextureAlphaMod(ui->panel_cache.box_labels[i], 140);
-         int lw = ui->panel_cache.box_label_w[i];
-         int lh = ui->panel_cache.box_label_h[i];
-         SDL_Rect dst = { bx + (box_w - lw) / 2, box_y + (box_h - lh) / 2, lw, lh };
-         SDL_RenderCopy(r, ui->panel_cache.box_labels[i], NULL, &dst);
-         SDL_SetTextureAlphaMod(ui->panel_cache.box_labels[i], 255);
-      }
-   }
 }
 
 /** @brief Get system uptime from /proc/uptime (cached with 5s TTL) */
@@ -734,17 +600,13 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
    SDL_RenderFillRect(r, &pill);
 }
 
-/** @brief Draw subtle swipe indicators at screen edges */
+/** @brief Draw subtle swipe indicator at top edge */
 static void render_swipe_indicators(sdl_ui_t *ui, SDL_Renderer *r) {
-   /* Bottom center: upward chevron (^) */
    int cx = ui->width / 2;
-   int by = ui->height - 12;
    SDL_SetRenderDrawColor(r, COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G, COLOR_TEXT_SECONDARY_B,
                           60);
-   SDL_RenderDrawLine(r, cx - 12, by, cx, by - 8);
-   SDL_RenderDrawLine(r, cx, by - 8, cx + 12, by);
 
-   /* Top center: three horizontal lines (hamburger) */
+   /* Top center: three horizontal lines (hamburger) — settings pull-down */
    int ty = 10;
    for (int i = 0; i < 3; i++) {
       SDL_RenderDrawLine(r, cx - 10, ty + i * 5, cx + 10, ty + i * 5);
@@ -771,7 +633,7 @@ static void handle_gesture(sdl_ui_t *ui, touch_gesture_t gesture, double time_se
          /* Music button tap (check first, works even when no panel open).
           * Skip if tap is inside the open music panel — let the panel's
           * own tab handler process it instead. */
-         if (!ui->panel_actions.visible && !ui->panel_settings.visible) {
+         if (!ui->panel_settings.visible) {
             int mx = gesture.x;
             int my = gesture.y;
             bool in_music_panel = (ui->panel_music.visible && !ui->panel_music.closing &&
@@ -808,12 +670,10 @@ static void handle_gesture(sdl_ui_t *ui, touch_gesture_t gesture, double time_se
                break;
             }
 
-            /* Tap outside panels dismisses them */
-            bool in_actions = (ui->panel_actions.visible && gesture.y > ui->height - PANEL_HEIGHT);
+            /* Tap outside settings panel dismisses it */
             bool in_settings = (ui->panel_settings.visible && gesture.y < PANEL_HEIGHT);
-            if (!in_actions && !in_settings) {
-               panel_close(ui, true, time_sec);
-               panel_close(ui, false, time_sec);
+            if (!in_settings) {
+               panel_close_settings(ui, time_sec);
             }
          } else if (in_orb) {
             voice_state_t state = voice_processing_get_state(ui->voice_ctx);
@@ -842,20 +702,17 @@ static void handle_gesture(sdl_ui_t *ui, touch_gesture_t gesture, double time_se
             break; /* Swipe consumed by music panel scrolling */
          }
          if (ui->panel_settings.visible && !ui->panel_settings.closing) {
-            panel_close(ui, false, time_sec);
-         } else if ((float)gesture.y > (float)ui->height * (1.0f - SWIPE_ZONE_FRAC)) {
-            panel_open(ui, true, time_sec);
+            panel_close_settings(ui, time_sec);
          }
+         /* Intentionally unassigned when no panel open — reserved for future use */
          break;
 
       case TOUCH_GESTURE_SWIPE_DOWN:
          if (ui->panel_music.visible && !ui->panel_music.closing) {
             break; /* Swipe consumed by music panel scrolling */
          }
-         if (ui->panel_actions.visible && !ui->panel_actions.closing) {
-            panel_close(ui, true, time_sec);
-         } else if ((float)gesture.y < (float)ui->height * SWIPE_ZONE_FRAC) {
-            panel_open(ui, false, time_sec);
+         if ((float)gesture.y < (float)ui->height * SWIPE_ZONE_FRAC) {
+            panel_open_settings(ui, time_sec);
          }
          break;
 
@@ -964,7 +821,6 @@ static int sdl_init_on_thread(sdl_ui_t *ui) {
 
    /* Initialize touch gesture detection */
    ui_touch_init(&ui->touch, ui->width, ui->height);
-   memset(&ui->panel_actions, 0, sizeof(ui->panel_actions));
    memset(&ui->panel_settings, 0, sizeof(ui->panel_settings));
    memset(&ui->panel_music, 0, sizeof(ui->panel_music));
 
@@ -1132,9 +988,6 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
 
    /* Slide-in panels: update animation, render scrim + panels */
    panel_tick(ui, time_sec);
-   float act_off = ui->panel_actions.visible ? panel_offset(ui->panel_actions.anim_start,
-                                                            ui->panel_actions.closing, time_sec)
-                                             : 0.0f;
    float set_off = ui->panel_settings.visible ? panel_offset(ui->panel_settings.anim_start,
                                                              ui->panel_settings.closing, time_sec)
                                               : 0.0f;
@@ -1142,14 +995,9 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
                        ? panel_offset(ui->panel_music.anim_start, ui->panel_music.closing, time_sec)
                        : 0.0f;
 
-   float max_off = act_off > set_off ? act_off : set_off;
-   if (mus_off > max_off)
-      max_off = mus_off;
+   float max_off = set_off > mus_off ? set_off : mus_off;
    if (max_off > 0.001f) {
       render_scrim(ui, r, max_off);
-   }
-   if (act_off > 0.001f) {
-      render_panel_actions(ui, r, act_off);
    }
    if (set_off > 0.001f) {
       render_panel_settings(ui, r, set_off);
@@ -1171,7 +1019,7 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
    }
 
    /* Swipe indicators (only when no panel visible) */
-   if (act_off < 0.001f && set_off < 0.001f && mus_off < 0.001f) {
+   if (set_off < 0.001f && mus_off < 0.001f) {
       render_swipe_indicators(ui, r);
    }
 

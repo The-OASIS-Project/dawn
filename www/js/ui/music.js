@@ -232,6 +232,20 @@
                }
             }
          });
+
+         // Clear search results when input is emptied (native X button, backspace, etc.)
+         elements.searchInput.addEventListener('input', () => {
+            if (!elements.searchInput.value.trim()) {
+               clearSearchResults();
+            }
+         });
+
+         // Also handle the 'search' event (fired by native clear button on some browsers)
+         elements.searchInput.addEventListener('search', () => {
+            if (!elements.searchInput.value.trim()) {
+               clearSearchResults();
+            }
+         });
       }
 
       // Clear queue button
@@ -713,6 +727,18 @@
       console.error('Music UI: Error', code, message);
       if (typeof DawnToast !== 'undefined') {
          DawnToast.show(message || `Music error: ${code}`, 'error');
+      }
+   }
+
+   /**
+    * Clear search results and return to browse view
+    */
+   function clearSearchResults() {
+      if (elements.searchResults) {
+         elements.searchResults.classList.add('hidden');
+      }
+      if (elements.browseSection) {
+         elements.browseSection.classList.remove('hidden');
       }
    }
 
