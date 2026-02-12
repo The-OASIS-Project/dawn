@@ -819,6 +819,7 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
          int thumb_r = 6;
 #ifdef HAVE_SDL2_GFX
          filledCircleRGBA(r, thumb_x, thumb_y, thumb_r, ac.r, ac.g, ac.b, 255);
+         SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
 #else
          for (int dy = -thumb_r; dy <= thumb_r; dy++) {
             int dx = (int)sqrtf((float)(thumb_r * thumb_r - dy * dy));
@@ -871,6 +872,7 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
       int radius = TRANSPORT_PLAY_SIZE / 2;
 #ifdef HAVE_SDL2_GFX
       filledCircleRGBA(r, cx, cy, radius, ar, ag, ab, 255);
+      SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
 #else
       SDL_SetRenderDrawColor(r, ar, ag, ab, 255);
       for (int dy = -radius; dy <= radius; dy++) {
@@ -1650,6 +1652,9 @@ void ui_music_cleanup(ui_music_t *m) {
 void ui_music_render(ui_music_t *m, SDL_Renderer *renderer) {
    if (!m || !renderer)
       return;
+   /* Belt-and-suspenders: ensure blend mode is BLEND at panel entry. Each gfx
+    * call site restores inline, but prior panel gfx calls could leak state. */
+   SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
    ui_color_t bg1 = ui_theme_bg(1), bg2 = ui_theme_bg(2);
 
    /* Panel background */

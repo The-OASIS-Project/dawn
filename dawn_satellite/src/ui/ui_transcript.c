@@ -439,6 +439,7 @@ static SDL_Texture *build_music_note_icon(SDL_Renderer *r, int sz) {
 #ifdef HAVE_SDL2_GFX
    filledCircleRGBA(r, lhx, lhy, head_r, 255, 255, 255, 255);
    filledCircleRGBA(r, rhx, rhy, head_r, 255, 255, 255, 255);
+   SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
 #else
    for (int dy = -head_r; dy <= head_r; dy++) {
       int dx = (int)sqrtf((float)(head_r * head_r - dy * dy));

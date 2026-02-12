@@ -604,6 +604,7 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
    }
 #ifdef HAVE_SDL2_GFX
    filledCircleRGBA(r, dot_cx, dot_cy, dot_r, dot_cr, dot_cg, dot_cb, 255);
+   SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
 #else
    SDL_SetRenderDrawColor(r, dot_cr, dot_cg, dot_cb, 255);
    for (int y = -dot_r; y <= dot_r; y++) {
@@ -708,6 +709,7 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
 #ifdef HAVE_SDL2_GFX
       roundedBoxRGBA(r, toggle_x, toggle_y, toggle_x + toggle_w - 1, toggle_y + toggle_h - 1,
                      radius, tr_r, tr_g, tr_b, 255);
+      SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
 #else
       /* Center rectangle */
       SDL_Rect trk_center = { toggle_x + radius, toggle_y, toggle_w - 2 * radius, toggle_h };
@@ -730,6 +732,7 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
       int knob_cy = toggle_y + toggle_h / 2;
 #ifdef HAVE_SDL2_GFX
       filledCircleRGBA(r, knob_cx, knob_cy, knob_r, 255, 255, 255, 255);
+      SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
 #else
       SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
       for (int dy = -knob_r; dy <= knob_r; dy++) {
@@ -790,6 +793,7 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
             int ring_r = THEME_DOT_RADIUS + 2;
 #ifdef HAVE_SDL2_GFX
             filledCircleRGBA(r, dcx, dcy, ring_r, 255, 255, 255, 255);
+            SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
 #else
             SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
             for (int dy = -ring_r; dy <= ring_r; dy++) {
@@ -803,6 +807,7 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
 #ifdef HAVE_SDL2_GFX
          filledCircleRGBA(r, dcx, dcy, THEME_DOT_RADIUS, def->accent.r, def->accent.g,
                           def->accent.b, 255);
+         SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
 #else
          SDL_SetRenderDrawColor(r, def->accent.r, def->accent.g, def->accent.b, 255);
          for (int dy = -THEME_DOT_RADIUS; dy <= THEME_DOT_RADIUS; dy++) {
@@ -1384,6 +1389,10 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
       ui_color_t bg0 = ui_theme_bg(0);
       SDL_SetRenderDrawColor(r, bg0.r, bg0.g, bg0.b, 255);
       SDL_RenderClear(r);
+      /* SDL2_gfx primitives clobber the draw blend mode (BLENDMODE_NONE when
+       * alpha=255). Each gfx call site restores BLEND inline; this is a
+       * belt-and-suspenders fallback for frame boundaries. */
+      SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
    }
 
    /* Skip main scene rendering when screensaver fully covers the screen */

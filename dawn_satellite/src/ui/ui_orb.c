@@ -151,6 +151,7 @@ static SDL_Texture *create_glow_texture(SDL_Renderer *renderer, ui_color_t color
 
 #ifdef HAVE_SDL2_GFX
       filledCircleRGBA(renderer, cx, cy, radius, color.r, color.g, color.b, alpha);
+      SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 #else
       SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, alpha);
       for (int y = -radius; y <= radius; y++) {
@@ -163,6 +164,7 @@ static SDL_Texture *create_glow_texture(SDL_Renderer *renderer, ui_color_t color
    /* Draw solid core */
 #ifdef HAVE_SDL2_GFX
    filledCircleRGBA(renderer, cx, cy, ORB_CORE_RADIUS, color.r, color.g, color.b, 255);
+   SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 #else
    SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 255);
    for (int y = -ORB_CORE_RADIUS; y <= ORB_CORE_RADIUS; y++) {
@@ -575,6 +577,7 @@ void ui_orb_render(ui_orb_ctx_t *ctx,
          int radius = ORB_CORE_RADIUS + (int)(t * 30);
 #ifdef HAVE_SDL2_GFX
          filledCircleRGBA(renderer, cx, cy, radius, 255, 255, 255, alpha);
+         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 #else
          SDL_SetRenderDrawColor(renderer, 255, 255, 255, alpha);
          for (int y = -radius; y <= radius; y++) {
@@ -594,6 +597,7 @@ void ui_orb_render(ui_orb_ctx_t *ctx,
 #ifdef HAVE_SDL2_GFX
          filledCircleRGBA(renderer, cx, cy, ORB_CORE_RADIUS, COLOR_ERROR_R, COLOR_ERROR_G,
                           COLOR_ERROR_B, alpha);
+         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 #else
          SDL_SetRenderDrawColor(renderer, COLOR_ERROR_R, COLOR_ERROR_G, COLOR_ERROR_B, alpha);
          for (int y = -ORB_CORE_RADIUS; y <= ORB_CORE_RADIUS; y++) {
