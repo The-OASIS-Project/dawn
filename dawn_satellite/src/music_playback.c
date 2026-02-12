@@ -245,19 +245,36 @@ music_playback_t *music_playback_create(audio_playback_t *audio) {
    pthread_cond_init(&ctx->space_ready, NULL);
    pthread_cond_init(&ctx->pause_ack_cond, NULL);
 
-   /* Start consumer thread */
+   /* Start consumer thread with elevated priority to prevent ALSA underruns.
+    * SCHED_FIFO priority 50 keeps it above normal threads but below kernel
+    * real-time tasks. Falls back to default scheduling if unprivileged. */
    ctx->running = true;
-   if (pthread_create(&ctx->thread, NULL, consumer_thread, ctx) != 0) {
-      LOG_ERROR("Music playback: failed to create consumer thread");
-      free(ctx->ring);
-      opus_decoder_destroy(ctx->decoder);
-      pthread_mutex_destroy(&ctx->mutex);
-      pthread_cond_destroy(&ctx->data_ready);
-      pthread_cond_destroy(&ctx->space_ready);
-      pthread_cond_destroy(&ctx->pause_ack_cond);
-      free(ctx);
-      return NULL;
+   pthread_attr_t attr;
+   pthread_attr_init(&attr);
+   struct sched_param sp = { .sched_priority = 50 };
+   if (pthread_attr_setschedpolicy(&attr, SCHED_FIFO) == 0 &&
+       pthread_attr_setschedparam(&attr, &sp) == 0) {
+      pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED);
    }
+   if (pthread_create(&ctx->thread, &attr, consumer_thread, ctx) != 0) {
+      /* Retry without RT priority */
+      pthread_attr_destroy(&attr);
+      pthread_attr_init(&attr);
+      if (pthread_create(&ctx->thread, &attr, consumer_thread, ctx) != 0) {
+         LOG_ERROR("Music playback: failed to create consumer thread");
+         pthread_attr_destroy(&attr);
+         free(ctx->ring);
+         opus_decoder_destroy(ctx->decoder);
+         pthread_mutex_destroy(&ctx->mutex);
+         pthread_cond_destroy(&ctx->data_ready);
+         pthread_cond_destroy(&ctx->space_ready);
+         pthread_cond_destroy(&ctx->pause_ack_cond);
+         free(ctx);
+         return NULL;
+      }
+      LOG_WARNING("Music consumer: RT priority unavailable, using default scheduling");
+   }
+   pthread_attr_destroy(&attr);
 
    LOG_INFO("Music playback engine created (ring=%zu KB, threshold=%d ms)", RING_BYTES / 1024,
             BUFFER_THRESHOLD_FRAMES * 1000 / 48000);

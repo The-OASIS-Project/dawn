@@ -163,6 +163,7 @@ typedef struct satellite_config {
       int brightness_pct; /* 10-100, persisted across restarts */
       int volume_pct;     /* 0-100, persisted across restarts */
       bool time_24h;      /* 12h/24h time format, persisted across restarts */
+      char theme[16];     /* Theme name: cyan/purple/green/blue/terminal */
    } sdl_ui;
 
    /* Screensaver / ambient mode */

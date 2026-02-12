@@ -127,6 +127,7 @@ font_dir = "assets/fonts"
 brightness = 100
 volume = 80
 time_24h = false
+theme = "cyan"
 
 # =============================================================================
 # Screensaver / Ambient Mode

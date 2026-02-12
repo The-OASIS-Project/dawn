@@ -35,6 +35,7 @@
 
 #include "logging.h"
 #include "ui/ui_colors.h"
+#include "ui/ui_theme.h"
 
 /* =============================================================================
  * Constants
@@ -181,17 +182,18 @@ static void render_clock(ui_screensaver_t *ss, SDL_Renderer *r, double time_sec,
    /* Time */
    if (ss->time_tex) {
       SDL_SetTextureAlphaMod(ss->time_tex, dim_alpha);
-      SDL_SetTextureColorMod(ss->time_tex, COLOR_TEXT_PRIMARY_R, COLOR_TEXT_PRIMARY_G,
-                             COLOR_TEXT_PRIMARY_B);
+      ui_color_t txt0 = ui_theme_text(0);
+      SDL_SetTextureColorMod(ss->time_tex, txt0.r, txt0.g, txt0.b);
       SDL_Rect dst = { cx - ss->time_w / 2, top_y, ss->time_w, ss->time_h };
       SDL_RenderCopy(r, ss->time_tex, NULL, &dst);
       top_y += ss->time_h + spacing;
    }
 
-   /* Date — cyan (speaking color) for brightness and visual identity */
+   /* Date — accent color for brightness and visual identity */
    if (ss->date_tex) {
+      ui_color_t ac = ui_theme_accent();
       SDL_SetTextureAlphaMod(ss->date_tex, alpha);
-      SDL_SetTextureColorMod(ss->date_tex, COLOR_SPEAKING_R, COLOR_SPEAKING_G, COLOR_SPEAKING_B);
+      SDL_SetTextureColorMod(ss->date_tex, ac.r, ac.g, ac.b);
       SDL_Rect dst = { cx - ss->date_w / 2, top_y, ss->date_w, ss->date_h };
       SDL_RenderCopy(r, ss->date_tex, NULL, &dst);
    }
@@ -216,8 +218,8 @@ static void render_clock(ui_screensaver_t *ss, SDL_Renderer *r, double time_sec,
 
       if (wm_alpha > 0) {
          SDL_SetTextureAlphaMod(ss->watermark_tex, wm_alpha);
-         SDL_SetTextureColorMod(ss->watermark_tex, COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
-                                COLOR_TEXT_SECONDARY_B);
+         ui_color_t txt1 = ui_theme_text(1);
+         SDL_SetTextureColorMod(ss->watermark_tex, txt1.r, txt1.g, txt1.b);
 
          int pad = WATERMARK_PADDING;
          int ww = ss->watermark_w;

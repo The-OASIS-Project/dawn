@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include "ui/ui_colors.h"
+#include "ui/ui_theme.h"
 
 #define SLIDER_TRACK_H 8
 #define SLIDER_THUMB_W 18
@@ -57,8 +58,7 @@ void ui_slider_init(ui_slider_t *s,
 
    /* Pre-render label texture */
    if (font && label && renderer) {
-      SDL_Color clr = { COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G, COLOR_TEXT_SECONDARY_B,
-                        255 };
+      SDL_Color clr = { 255, 255, 255, 255 }; /* White — tinted via colormod for theme */
       SDL_Surface *surf = TTF_RenderText_Blended(font, label, clr);
       if (surf) {
          s->label_tex = SDL_CreateTextureFromSurface(renderer, surf);
@@ -77,6 +77,8 @@ void ui_slider_render(ui_slider_t *s, SDL_Renderer *renderer, TTF_Font *font) {
 
    /* Label (left-aligned to fixed column before track) */
    if (s->label_tex) {
+      ui_color_t lbl_clr = ui_theme_text(1);
+      SDL_SetTextureColorMod(s->label_tex, lbl_clr.r, lbl_clr.g, lbl_clr.b);
       int label_x = tx - SLIDER_LABEL_COL;
       int ly = ty + (th - s->label_h) / 2;
       SDL_Rect dst = { label_x, ly, s->label_w, s->label_h };
@@ -84,8 +86,8 @@ void ui_slider_render(ui_slider_t *s, SDL_Renderer *renderer, TTF_Font *font) {
    }
 
    /* Track background (tertiary for visibility against panel bg) */
-   SDL_SetRenderDrawColor(renderer, COLOR_BG_TERTIARY_R, COLOR_BG_TERTIARY_G, COLOR_BG_TERTIARY_B,
-                          255);
+   ui_color_t bg2 = ui_theme_bg(2);
+   SDL_SetRenderDrawColor(renderer, bg2.r, bg2.g, bg2.b, 255);
    SDL_Rect track_bg = { tx, ty, tw, th };
    SDL_RenderFillRect(renderer, &track_bg);
 

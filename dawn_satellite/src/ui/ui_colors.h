@@ -29,6 +29,10 @@
 
 #include "voice_processing.h"
 
+/* NOTE: Accent colors are now runtime-switchable via ui_theme.h.
+ * The macros below define fixed palette values used as defaults and for
+ * state colors (listening/thinking/speaking/error) which never change. */
+
 /* =============================================================================
  * Background Colors (from www/css/base/variables.css)
  * ============================================================================= */

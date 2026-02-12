@@ -222,6 +222,7 @@ void satellite_config_init_defaults(satellite_config_t *config) {
    config->sdl_ui.brightness_pct = 100;
    config->sdl_ui.volume_pct = 80;
    config->sdl_ui.time_24h = false;
+   safe_strcpy(config->sdl_ui.theme, "cyan", sizeof(config->sdl_ui.theme));
 
    /* Screensaver defaults */
    config->screensaver.enabled = true;
@@ -435,6 +436,18 @@ int satellite_config_load(satellite_config_t *config, const char *path) {
       if (vol >= 0 && vol <= 100)
          config->sdl_ui.volume_pct = vol;
       config->sdl_ui.time_24h = toml_bool_or(sdl_ui, "time_24h", config->sdl_ui.time_24h);
+
+      const char *theme_s = toml_string_or(sdl_ui, "theme", NULL);
+      if (theme_s) {
+         /* NOTE: This validation mirrors the THEMES table in ui_theme.c.
+          * Kept here for decoupling (config does not include ui_theme.h). */
+         if (strcmp(theme_s, "cyan") == 0 || strcmp(theme_s, "purple") == 0 ||
+             strcmp(theme_s, "green") == 0 || strcmp(theme_s, "blue") == 0 ||
+             strcmp(theme_s, "terminal") == 0) {
+            safe_strcpy(config->sdl_ui.theme, theme_s, sizeof(config->sdl_ui.theme));
+         }
+         free((void *)theme_s);
+      }
    }
 
    /* Parse [screensaver] section */
@@ -790,6 +803,7 @@ void satellite_config_print(const satellite_config_t *config) {
    printf("  brightness = %d\n", config->sdl_ui.brightness_pct);
    printf("  volume = %d\n", config->sdl_ui.volume_pct);
    printf("  time_24h = %s\n", config->sdl_ui.time_24h ? "true" : "false");
+   printf("  theme = \"%s\"\n", config->sdl_ui.theme);
 
    printf("\n[screensaver]\n");
    printf("  enabled = %s\n", config->screensaver.enabled ? "true" : "false");
@@ -867,6 +881,7 @@ void satellite_config_save_ui_prefs(const satellite_config_t *config) {
    bool found_brightness = false;
    bool found_volume = false;
    bool found_time_24h = false;
+   bool found_theme = false;
    bool in_sdl_ui = false;
    bool ever_in_sdl_ui = false;
    int sdl_ui_end = -1; /* Last line of [sdl_ui] section for appending */
@@ -905,6 +920,9 @@ void satellite_config_save_ui_prefs(const satellite_config_t *config) {
             snprintf(lines[i], sizeof(lines[0]), "time_24h = %s\n",
                      config->sdl_ui.time_24h ? "true" : "false");
             found_time_24h = true;
+         } else if (strncmp(p, "theme", 5) == 0 && (p[5] == ' ' || p[5] == '=')) {
+            snprintf(lines[i], sizeof(lines[0]), "theme = \"%s\"\n", config->sdl_ui.theme);
+            found_theme = true;
          }
       }
    }
@@ -939,6 +957,10 @@ void satellite_config_save_ui_prefs(const satellite_config_t *config) {
             fprintf(fp, "time_24h = %s\n", config->sdl_ui.time_24h ? "true" : "false");
             found_time_24h = true;
          }
+         if (!found_theme) {
+            fprintf(fp, "theme = \"%s\"\n", config->sdl_ui.theme);
+            found_theme = true;
+         }
       }
       fputs(lines[i], fp);
    }
@@ -954,13 +976,16 @@ void satellite_config_save_ui_prefs(const satellite_config_t *config) {
       if (!found_time_24h) {
          fprintf(fp, "time_24h = %s\n", config->sdl_ui.time_24h ? "true" : "false");
       }
+      if (!found_theme) {
+         fprintf(fp, "theme = \"%s\"\n", config->sdl_ui.theme);
+      }
    }
 
    /* No [sdl_ui] section at all — create one at EOF */
    if (!ever_in_sdl_ui) {
-      fprintf(fp, "\n[sdl_ui]\nbrightness = %d\nvolume = %d\ntime_24h = %s\n",
+      fprintf(fp, "\n[sdl_ui]\nbrightness = %d\nvolume = %d\ntime_24h = %s\ntheme = \"%s\"\n",
               config->sdl_ui.brightness_pct, config->sdl_ui.volume_pct,
-              config->sdl_ui.time_24h ? "true" : "false");
+              config->sdl_ui.time_24h ? "true" : "false", config->sdl_ui.theme);
    }
 
    /* Flush and sync before atomic rename */
@@ -973,9 +998,9 @@ void satellite_config_save_ui_prefs(const satellite_config_t *config) {
       return;
    }
 
-   printf("[CONFIG] UI prefs saved (brightness=%d, volume=%d, time_24h=%s)\n",
+   printf("[CONFIG] UI prefs saved (brightness=%d, volume=%d, time_24h=%s, theme=%s)\n",
           config->sdl_ui.brightness_pct, config->sdl_ui.volume_pct,
-          config->sdl_ui.time_24h ? "true" : "false");
+          config->sdl_ui.time_24h ? "true" : "false", config->sdl_ui.theme);
 }
 
 bool satellite_config_path_valid(const char *path) {

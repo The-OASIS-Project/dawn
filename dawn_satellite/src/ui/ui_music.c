@@ -34,6 +34,7 @@
 
 #include "logging.h"
 #include "ui/ui_colors.h"
+#include "ui/ui_theme.h"
 #include "ws_client.h"
 
 #ifdef HAVE_OPUS
@@ -58,10 +59,6 @@
 #define INSET_BG_R 0x0D
 #define INSET_BG_G 0x0F
 #define INSET_BG_B 0x12
-#define ACCENT_R 0x2D
-#define ACCENT_G 0xD4
-#define ACCENT_B 0xBF
-
 /* Font sizes */
 #define LABEL_FONT_SIZE 18
 #define BODY_FONT_SIZE 22
@@ -142,8 +139,8 @@ static void ensure_track_cached(ui_music_t *m) {
       if (strcmp(m->cached_title, m->current_track.title) != 0) {
          snprintf(m->cached_title, sizeof(m->cached_title), "%s", m->current_track.title);
       }
-      SDL_Color c = { COLOR_TEXT_PRIMARY_R, COLOR_TEXT_PRIMARY_G, COLOR_TEXT_PRIMARY_B, 255 };
-      SDL_Surface *s = TTF_RenderUTF8_Blended(m->body_font, m->current_track.title, c);
+      SDL_Color white = { 255, 255, 255, 255 };
+      SDL_Surface *s = TTF_RenderUTF8_Blended(m->body_font, m->current_track.title, white);
       if (s) {
          m->title_tex = SDL_CreateTextureFromSurface(m->renderer, s);
          m->title_w = s->w;
@@ -154,8 +151,8 @@ static void ensure_track_cached(ui_music_t *m) {
 
    /* Artist */
    if (!m->artist_tex && m->current_track.artist[0] && m->label_font) {
-      SDL_Color c = { COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G, COLOR_TEXT_SECONDARY_B, 255 };
-      SDL_Surface *s = TTF_RenderUTF8_Blended(m->label_font, m->current_track.artist, c);
+      SDL_Color white = { 255, 255, 255, 255 };
+      SDL_Surface *s = TTF_RenderUTF8_Blended(m->label_font, m->current_track.artist, white);
       if (s) {
          m->artist_tex = SDL_CreateTextureFromSurface(m->renderer, s);
          m->artist_w = s->w;
@@ -166,8 +163,8 @@ static void ensure_track_cached(ui_music_t *m) {
 
    /* Album */
    if (!m->album_tex && m->current_track.album[0] && m->label_font) {
-      SDL_Color c = { COLOR_TEXT_TERTIARY_R, COLOR_TEXT_TERTIARY_G, COLOR_TEXT_TERTIARY_B, 255 };
-      SDL_Surface *s = TTF_RenderUTF8_Blended(m->label_font, m->current_track.album, c);
+      SDL_Color white = { 255, 255, 255, 255 };
+      SDL_Surface *s = TTF_RenderUTF8_Blended(m->label_font, m->current_track.album, white);
       if (s) {
          m->album_tex = SDL_CreateTextureFromSurface(m->renderer, s);
          m->album_w = s->w;
@@ -548,6 +545,9 @@ static void build_static_caches(ui_music_t *m) {
  * ============================================================================= */
 
 static void render_tabs(ui_music_t *m, SDL_Renderer *r) {
+   ui_color_t ac = ui_theme_accent();
+   ui_color_t bg1 = ui_theme_bg(1), bg2 = ui_theme_bg(2);
+   ui_color_t txt1 = ui_theme_text(1);
    build_static_caches(m);
 
    int tab_w = m->panel_w / 3;
@@ -558,11 +558,9 @@ static void render_tabs(ui_music_t *m, SDL_Renderer *r) {
 
       /* Tab background */
       if (i == (int)m->active_tab) {
-         SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R, COLOR_BG_TERTIARY_G, COLOR_BG_TERTIARY_B,
-                                255);
+         SDL_SetRenderDrawColor(r, bg2.r, bg2.g, bg2.b, 255);
       } else {
-         SDL_SetRenderDrawColor(r, COLOR_BG_SECONDARY_R, COLOR_BG_SECONDARY_G, COLOR_BG_SECONDARY_B,
-                                255);
+         SDL_SetRenderDrawColor(r, bg1.r, bg1.g, bg1.b, 255);
       }
       SDL_Rect tab_rect = { tx, y, tab_w, TAB_HEIGHT };
       SDL_RenderFillRect(r, &tab_rect);
@@ -570,10 +568,9 @@ static void render_tabs(ui_music_t *m, SDL_Renderer *r) {
       /* Tab label from cache (white texture, color-modulated) */
       if (m->tab_tex[i]) {
          if (i == (int)m->active_tab) {
-            SDL_SetTextureColorMod(m->tab_tex[i], ACCENT_R, ACCENT_G, ACCENT_B);
+            SDL_SetTextureColorMod(m->tab_tex[i], ac.r, ac.g, ac.b);
          } else {
-            SDL_SetTextureColorMod(m->tab_tex[i], COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
-                                   COLOR_TEXT_SECONDARY_B);
+            SDL_SetTextureColorMod(m->tab_tex[i], txt1.r, txt1.g, txt1.b);
          }
          SDL_Rect dst = { tx + (tab_w - m->tab_tex_w[i]) / 2,
                           y + (TAB_HEIGHT - m->tab_tex_h[i]) / 2, m->tab_tex_w[i],
@@ -583,7 +580,7 @@ static void render_tabs(ui_music_t *m, SDL_Renderer *r) {
 
       /* Active tab underline */
       if (i == (int)m->active_tab) {
-         SDL_SetRenderDrawColor(r, ACCENT_R, ACCENT_G, ACCENT_B, 255);
+         SDL_SetRenderDrawColor(r, ac.r, ac.g, ac.b, 255);
          SDL_Rect underline = { tx + 8, y + TAB_HEIGHT - 3, tab_w - 16, 3 };
          SDL_RenderFillRect(r, &underline);
       }
@@ -630,6 +627,7 @@ static void update_visualizer(ui_music_t *m) {
 }
 
 static void render_visualizer(ui_music_t *m, SDL_Renderer *r, int y) {
+   ui_color_t ac = ui_theme_accent();
    update_visualizer(m);
 
    /* Smooth transitions (frame-rate independent via delta time).
@@ -677,9 +675,9 @@ static void render_visualizer(ui_music_t *m, SDL_Renderer *r, int y) {
 
       /* Gradient: accent at top, darker at bottom */
       float t = (float)i / (float)VIZ_BAR_COUNT;
-      uint8_t gr = (uint8_t)(ACCENT_R * (0.5f + 0.5f * t));
-      uint8_t gg = (uint8_t)(ACCENT_G * (0.5f + 0.5f * t));
-      uint8_t gb = (uint8_t)(ACCENT_B * (0.5f + 0.5f * t));
+      uint8_t gr = (uint8_t)(ac.r * (0.5f + 0.5f * t));
+      uint8_t gg = (uint8_t)(ac.g * (0.5f + 0.5f * t));
+      uint8_t gb = (uint8_t)(ac.b * (0.5f + 0.5f * t));
 
       SDL_SetRenderDrawColor(r, gr, gg, gb, 220);
       SDL_Rect bar = { bx, by, bar_w, bar_h };
@@ -692,6 +690,9 @@ static void render_visualizer(ui_music_t *m, SDL_Renderer *r, int y) {
  * ============================================================================= */
 
 static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
+   ui_color_t ac = ui_theme_accent();
+   ui_color_t bg0 = ui_theme_bg(0), bg2 = ui_theme_bg(2);
+   ui_color_t txt0 = ui_theme_text(0), txt1 = ui_theme_text(1), txt2 = ui_theme_text(2);
    int y = m->panel_y + TAB_HEIGHT + 12;
 
    /* Visualizer */
@@ -705,6 +706,7 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
       int max_w = m->panel_w - 32; /* 16px padding each side */
       int draw_w = m->title_w < max_w ? m->title_w : max_w;
       int tx = m->panel_x + (m->panel_w - draw_w) / 2;
+      SDL_SetTextureColorMod(m->title_tex, txt0.r, txt0.g, txt0.b);
       SDL_Rect src = { 0, 0, draw_w, m->title_h };
       SDL_Rect dst = { tx, y, draw_w, m->title_h };
       SDL_RenderCopy(r, m->title_tex, &src, &dst);
@@ -712,8 +714,7 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
    } else {
       /* "No track" placeholder */
       if (m->slabel_tex[SLABEL_NO_TRACK]) {
-         SDL_SetTextureColorMod(m->slabel_tex[SLABEL_NO_TRACK], COLOR_TEXT_SECONDARY_R,
-                                COLOR_TEXT_SECONDARY_G, COLOR_TEXT_SECONDARY_B);
+         SDL_SetTextureColorMod(m->slabel_tex[SLABEL_NO_TRACK], txt1.r, txt1.g, txt1.b);
          int tw = m->slabel_w[SLABEL_NO_TRACK];
          int th = m->slabel_h[SLABEL_NO_TRACK];
          int tx = m->panel_x + (m->panel_w - tw) / 2;
@@ -727,6 +728,7 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
       int max_w = m->panel_w - 32;
       int draw_w = m->artist_w < max_w ? m->artist_w : max_w;
       int tx = m->panel_x + (m->panel_w - draw_w) / 2;
+      SDL_SetTextureColorMod(m->artist_tex, txt1.r, txt1.g, txt1.b);
       SDL_Rect src = { 0, 0, draw_w, m->artist_h };
       SDL_Rect dst = { tx, y, draw_w, m->artist_h };
       SDL_RenderCopy(r, m->artist_tex, &src, &dst);
@@ -737,6 +739,7 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
       int max_w = m->panel_w - 32;
       int draw_w = m->album_w < max_w ? m->album_w : max_w;
       int tx = m->panel_x + (m->panel_w - draw_w) / 2;
+      SDL_SetTextureColorMod(m->album_tex, txt2.r, txt2.g, txt2.b);
       SDL_Rect src = { 0, 0, draw_w, m->album_h };
       SDL_Rect dst = { tx, y, draw_w, m->album_h };
       SDL_RenderCopy(r, m->album_tex, &src, &dst);
@@ -762,8 +765,7 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
       format_time(display_pos, time_cur, sizeof(time_cur));
       format_time(m->duration_sec, time_dur, sizeof(time_dur));
 
-      SDL_Color tc = { COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G, COLOR_TEXT_SECONDARY_B,
-                       255 };
+      SDL_Color tc = { txt1.r, txt1.g, txt1.b, 255 };
 
       /* Current time label */
       SDL_Surface *cur_s = TTF_RenderUTF8_Blended(m->label_font, time_cur, tc);
@@ -793,8 +795,7 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
          m->progress_bar_w = bar_w;
 
          /* Track background */
-         SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R, COLOR_BG_TERTIARY_G, COLOR_BG_TERTIARY_B,
-                                255);
+         SDL_SetRenderDrawColor(r, bg2.r, bg2.g, bg2.b, 255);
          SDL_Rect track_rect = { bar_x, bar_y, bar_w, PROGRESS_BAR_HEIGHT };
          SDL_RenderFillRect(r, &track_rect);
 
@@ -805,7 +806,7 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
          if (progress < 0.0f)
             progress = 0.0f;
          int fill_w = (int)(bar_w * progress);
-         SDL_SetRenderDrawColor(r, ACCENT_R, ACCENT_G, ACCENT_B, 255);
+         SDL_SetRenderDrawColor(r, ac.r, ac.g, ac.b, 255);
          SDL_Rect fill_rect = { bar_x, bar_y, fill_w, PROGRESS_BAR_HEIGHT };
          SDL_RenderFillRect(r, &fill_rect);
 
@@ -835,14 +836,12 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
    {
       bool pressed = (m->btn_pressed && m->btn_pressed_id == 0);
       uint8_t alpha = pressed ? 180 : 255;
-      SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R, COLOR_BG_TERTIARY_G, COLOR_BG_TERTIARY_B,
-                             alpha);
+      SDL_SetRenderDrawColor(r, bg2.r, bg2.g, bg2.b, alpha);
       SDL_Rect br = { prev_x, btn_y, TRANSPORT_BTN_SIZE, TRANSPORT_BTN_SIZE };
       SDL_RenderFillRect(r, &br);
 
       if (m->transport_tex[0]) {
-         SDL_SetTextureColorMod(m->transport_tex[0], COLOR_TEXT_PRIMARY_R, COLOR_TEXT_PRIMARY_G,
-                                COLOR_TEXT_PRIMARY_B);
+         SDL_SetTextureColorMod(m->transport_tex[0], txt0.r, txt0.g, txt0.b);
          SDL_SetTextureAlphaMod(m->transport_tex[0], alpha);
          SDL_Rect dst = { prev_x + (TRANSPORT_BTN_SIZE - m->transport_tex_w[0]) / 2,
                           btn_y + (TRANSPORT_BTN_SIZE - m->transport_tex_h[0]) / 2,
@@ -855,9 +854,9 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
    int play_x = center_x - TRANSPORT_PLAY_SIZE / 2;
    {
       bool pressed = (m->btn_pressed && m->btn_pressed_id == 1);
-      uint8_t ar = pressed ? (uint8_t)(ACCENT_R * 0.8f) : ACCENT_R;
-      uint8_t ag = pressed ? (uint8_t)(ACCENT_G * 0.8f) : ACCENT_G;
-      uint8_t ab = pressed ? (uint8_t)(ACCENT_B * 0.8f) : ACCENT_B;
+      uint8_t ar = pressed ? (uint8_t)(ac.r * 0.8f) : ac.r;
+      uint8_t ag = pressed ? (uint8_t)(ac.g * 0.8f) : ac.g;
+      uint8_t ab = pressed ? (uint8_t)(ac.b * 0.8f) : ac.b;
 
       /* Filled circle */
       int cx = play_x + TRANSPORT_PLAY_SIZE / 2;
@@ -871,8 +870,7 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
 
       int idx = (m->playing && !m->paused) ? 2 : 1; /* 2=pause, 1=play */
       if (m->transport_tex[idx]) {
-         SDL_SetTextureColorMod(m->transport_tex[idx], COLOR_BG_PRIMARY_R, COLOR_BG_PRIMARY_G,
-                                COLOR_BG_PRIMARY_B);
+         SDL_SetTextureColorMod(m->transport_tex[idx], bg0.r, bg0.g, bg0.b);
          SDL_Rect dst = { cx - m->transport_tex_w[idx] / 2, cy - m->transport_tex_h[idx] / 2,
                           m->transport_tex_w[idx], m->transport_tex_h[idx] };
          SDL_RenderCopy(r, m->transport_tex[idx], NULL, &dst);
@@ -884,14 +882,12 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
    {
       bool pressed = (m->btn_pressed && m->btn_pressed_id == 2);
       uint8_t alpha = pressed ? 180 : 255;
-      SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R, COLOR_BG_TERTIARY_G, COLOR_BG_TERTIARY_B,
-                             alpha);
+      SDL_SetRenderDrawColor(r, bg2.r, bg2.g, bg2.b, alpha);
       SDL_Rect br = { next_x, btn_y, TRANSPORT_BTN_SIZE, TRANSPORT_BTN_SIZE };
       SDL_RenderFillRect(r, &br);
 
       if (m->transport_tex[3]) {
-         SDL_SetTextureColorMod(m->transport_tex[3], COLOR_TEXT_PRIMARY_R, COLOR_TEXT_PRIMARY_G,
-                                COLOR_TEXT_PRIMARY_B);
+         SDL_SetTextureColorMod(m->transport_tex[3], txt0.r, txt0.g, txt0.b);
          SDL_SetTextureAlphaMod(m->transport_tex[3], alpha);
          SDL_Rect dst = { next_x + (TRANSPORT_BTN_SIZE - m->transport_tex_w[3]) / 2,
                           btn_y + (TRANSPORT_BTN_SIZE - m->transport_tex_h[3]) / 2,
@@ -911,21 +907,18 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
    /* Shuffle button */
    {
       if (m->shuffle) {
-         SDL_SetRenderDrawColor(r, ACCENT_R, ACCENT_G, ACCENT_B, 200);
+         SDL_SetRenderDrawColor(r, ac.r, ac.g, ac.b, 200);
       } else {
-         SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R, COLOR_BG_TERTIARY_G, COLOR_BG_TERTIARY_B,
-                                255);
+         SDL_SetRenderDrawColor(r, bg2.r, bg2.g, bg2.b, 255);
       }
       SDL_Rect br = { shuf_x, tog_y, TOGGLE_BTN_SIZE, TOGGLE_BTN_SIZE };
       SDL_RenderFillRect(r, &br);
 
       if (m->shuffle_icon_tex) {
          if (m->shuffle) {
-            SDL_SetTextureColorMod(m->shuffle_icon_tex, COLOR_BG_PRIMARY_R, COLOR_BG_PRIMARY_G,
-                                   COLOR_BG_PRIMARY_B);
+            SDL_SetTextureColorMod(m->shuffle_icon_tex, bg0.r, bg0.g, bg0.b);
          } else {
-            SDL_SetTextureColorMod(m->shuffle_icon_tex, COLOR_TEXT_SECONDARY_R,
-                                   COLOR_TEXT_SECONDARY_G, COLOR_TEXT_SECONDARY_B);
+            SDL_SetTextureColorMod(m->shuffle_icon_tex, txt1.r, txt1.g, txt1.b);
          }
          SDL_Rect dst = { shuf_x + (TOGGLE_BTN_SIZE - TOGGLE_ICON_DIM) / 2,
                           tog_y + (TOGGLE_BTN_SIZE - TOGGLE_ICON_DIM) / 2, TOGGLE_ICON_DIM,
@@ -938,10 +931,9 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
    {
       bool active = (m->repeat_mode > 0);
       if (active) {
-         SDL_SetRenderDrawColor(r, ACCENT_R, ACCENT_G, ACCENT_B, 200);
+         SDL_SetRenderDrawColor(r, ac.r, ac.g, ac.b, 200);
       } else {
-         SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R, COLOR_BG_TERTIARY_G, COLOR_BG_TERTIARY_B,
-                                255);
+         SDL_SetRenderDrawColor(r, bg2.r, bg2.g, bg2.b, 255);
       }
       SDL_Rect br = { rep_x, tog_y, TOGGLE_BTN_SIZE, TOGGLE_BTN_SIZE };
       SDL_RenderFillRect(r, &br);
@@ -949,11 +941,9 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
       SDL_Texture *rep_tex = (m->repeat_mode == 2) ? m->repeat_one_icon_tex : m->repeat_icon_tex;
       if (rep_tex) {
          if (active) {
-            SDL_SetTextureColorMod(rep_tex, COLOR_BG_PRIMARY_R, COLOR_BG_PRIMARY_G,
-                                   COLOR_BG_PRIMARY_B);
+            SDL_SetTextureColorMod(rep_tex, bg0.r, bg0.g, bg0.b);
          } else {
-            SDL_SetTextureColorMod(rep_tex, COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
-                                   COLOR_TEXT_SECONDARY_B);
+            SDL_SetTextureColorMod(rep_tex, txt1.r, txt1.g, txt1.b);
          }
          SDL_Rect dst = { rep_x + (TOGGLE_BTN_SIZE - TOGGLE_ICON_DIM) / 2,
                           tog_y + (TOGGLE_BTN_SIZE - TOGGLE_ICON_DIM) / 2, TOGGLE_ICON_DIM,
@@ -975,7 +965,7 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
          snprintf(status, sizeof(status), "%s %dk", m->source_format, m->source_rate / 1000);
       }
 
-      SDL_Color c = { COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G, COLOR_TEXT_SECONDARY_B, 180 };
+      SDL_Color c = { txt1.r, txt1.g, txt1.b, 180 };
       SDL_Surface *s = TTF_RenderUTF8_Blended(m->label_font, status, c);
       if (s) {
          SDL_Texture *tex = SDL_CreateTextureFromSurface(r, s);
@@ -1003,6 +993,7 @@ static void render_scroll_indicator(SDL_Renderer *r,
                                     uint32_t last_scroll_ms) {
    if (total_height <= h)
       return; /* No scrollbar needed */
+   ui_color_t txt1 = ui_theme_text(1);
 
    /* Fade: full opacity during scroll, fade out over 500ms after 1s idle */
    uint32_t elapsed = SDL_GetTicks() - last_scroll_ms;
@@ -1028,8 +1019,7 @@ static void render_scroll_indicator(SDL_Renderer *r,
    int thumb_y = y + (int)(frac * (h - thumb_h));
 
    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-   SDL_SetRenderDrawColor(r, COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G, COLOR_TEXT_SECONDARY_B,
-                          alpha);
+   SDL_SetRenderDrawColor(r, txt1.r, txt1.g, txt1.b, alpha);
    SDL_Rect thumb = { bar_x, thumb_y, bar_w, thumb_h };
    SDL_RenderFillRect(r, &thumb);
 }
@@ -1039,12 +1029,15 @@ static void render_scroll_indicator(SDL_Renderer *r,
  * ============================================================================= */
 
 static void render_queue(ui_music_t *m, SDL_Renderer *r) {
+   ui_color_t ac = ui_theme_accent();
+   ui_color_t bg2 = ui_theme_bg(2);
+   ui_color_t txt0 = ui_theme_text(0), txt1 = ui_theme_text(1), txt2 = ui_theme_text(2);
    int y = m->panel_y + TAB_HEIGHT;
    int content_h = m->panel_h - TAB_HEIGHT;
 
    /* Header */
    int header_h = 44;
-   SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R, COLOR_BG_TERTIARY_G, COLOR_BG_TERTIARY_B, 200);
+   SDL_SetRenderDrawColor(r, bg2.r, bg2.g, bg2.b, 200);
    SDL_Rect hdr = { m->panel_x, y, m->panel_w, header_h };
    SDL_RenderFillRect(r, &hdr);
 
@@ -1052,7 +1045,7 @@ static void render_queue(ui_music_t *m, SDL_Renderer *r) {
       /* Title */
       char title[64];
       snprintf(title, sizeof(title), "PLAYBACK QUEUE (%d)", m->queue_count);
-      SDL_Color tc = { COLOR_TEXT_PRIMARY_R, COLOR_TEXT_PRIMARY_G, COLOR_TEXT_PRIMARY_B, 255 };
+      SDL_Color tc = { txt0.r, txt0.g, txt0.b, 255 };
       SDL_Surface *s = TTF_RenderUTF8_Blended(m->label_font, title, tc);
       if (s) {
          SDL_Texture *tex = SDL_CreateTextureFromSurface(r, s);
@@ -1095,18 +1088,18 @@ static void render_queue(ui_music_t *m, SDL_Renderer *r) {
 
       /* Row background */
       if (is_current) {
-         SDL_SetRenderDrawColor(r, ACCENT_R, ACCENT_G, ACCENT_B, 30);
+         SDL_SetRenderDrawColor(r, ac.r, ac.g, ac.b, 30);
          SDL_Rect row = { m->panel_x, row_y, m->panel_w, LIST_ROW_HEIGHT };
          SDL_RenderFillRect(r, &row);
 
          /* Left accent border */
-         SDL_SetRenderDrawColor(r, ACCENT_R, ACCENT_G, ACCENT_B, 255);
+         SDL_SetRenderDrawColor(r, ac.r, ac.g, ac.b, 255);
          SDL_Rect border = { m->panel_x, row_y, 3, LIST_ROW_HEIGHT };
          SDL_RenderFillRect(r, &border);
       }
 
       /* Row separator */
-      SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R, COLOR_BG_TERTIARY_G, COLOR_BG_TERTIARY_B, 100);
+      SDL_SetRenderDrawColor(r, bg2.r, bg2.g, bg2.b, 100);
       SDL_RenderDrawLine(r, m->panel_x + 16, row_y + LIST_ROW_HEIGHT - 1,
                          m->panel_x + m->panel_w - 16, row_y + LIST_ROW_HEIGHT - 1);
 
@@ -1114,8 +1107,7 @@ static void render_queue(ui_music_t *m, SDL_Renderer *r) {
          /* Index number */
          char idx_str[16];
          snprintf(idx_str, sizeof(idx_str), "%d", i + 1);
-         SDL_Color ic = { COLOR_TEXT_TERTIARY_R, COLOR_TEXT_TERTIARY_G, COLOR_TEXT_TERTIARY_B,
-                          255 };
+         SDL_Color ic = { txt2.r, txt2.g, txt2.b, 255 };
          SDL_Surface *is = TTF_RenderUTF8_Blended(m->label_font, idx_str, ic);
          if (is) {
             SDL_Texture *itex = SDL_CreateTextureFromSurface(r, is);
@@ -1129,8 +1121,7 @@ static void render_queue(ui_music_t *m, SDL_Renderer *r) {
          /* Duration (render first to compute text budget) */
          char dur[16];
          format_time((float)track->duration_sec, dur, sizeof(dur));
-         SDL_Color dc = { COLOR_TEXT_TERTIARY_R, COLOR_TEXT_TERTIARY_G, COLOR_TEXT_TERTIARY_B,
-                          255 };
+         SDL_Color dc = { txt2.r, txt2.g, txt2.b, 255 };
          SDL_Surface *ds = TTF_RenderUTF8_Blended(m->label_font, dur, dc);
          int dur_w = ds ? ds->w : 50;
          int dur_right = m->panel_x + m->panel_w - 16;
@@ -1149,9 +1140,8 @@ static void render_queue(ui_music_t *m, SDL_Renderer *r) {
          if (max_w < 40)
             max_w = 40;
 
-         SDL_Color tc = is_current ? (SDL_Color){ ACCENT_R, ACCENT_G, ACCENT_B, 255 }
-                                   : (SDL_Color){ COLOR_TEXT_PRIMARY_R, COLOR_TEXT_PRIMARY_G,
-                                                  COLOR_TEXT_PRIMARY_B, 255 };
+         SDL_Color tc = is_current ? (SDL_Color){ ac.r, ac.g, ac.b, 255 }
+                                   : (SDL_Color){ txt0.r, txt0.g, txt0.b, 255 };
          SDL_Surface *ts = TTF_RenderUTF8_Blended(m->label_font, track->title, tc);
          if (ts) {
             SDL_Texture *ttex = SDL_CreateTextureFromSurface(r, ts);
@@ -1166,8 +1156,7 @@ static void render_queue(ui_music_t *m, SDL_Renderer *r) {
             SDL_DestroyTexture(ttex);
 
             /* Artist (below title) */
-            SDL_Color ac = { COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G, COLOR_TEXT_SECONDARY_B,
-                             255 };
+            SDL_Color ac = { txt1.r, txt1.g, txt1.b, 255 };
             SDL_Surface *as = TTF_RenderUTF8_Blended(m->label_font, track->artist, ac);
             if (as) {
                SDL_Texture *atex = SDL_CreateTextureFromSurface(r, as);
@@ -1201,14 +1190,16 @@ static void render_stat_box(ui_music_t *m,
                             int h,
                             int count,
                             const char *label) {
+   ui_color_t ac = ui_theme_accent();
+   ui_color_t bg2 = ui_theme_bg(2);
+   ui_color_t txt1 = ui_theme_text(1);
    /* Box background */
-   SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R, COLOR_BG_TERTIARY_G, COLOR_BG_TERTIARY_B, 200);
+   SDL_SetRenderDrawColor(r, bg2.r, bg2.g, bg2.b, 200);
    SDL_Rect box = { x, y, w, h };
    SDL_RenderFillRect(r, &box);
 
    /* Border */
-   SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R + 0x15, COLOR_BG_TERTIARY_G + 0x15,
-                          COLOR_BG_TERTIARY_B + 0x15, 255);
+   SDL_SetRenderDrawColor(r, bg2.r + 0x15, bg2.g + 0x15, bg2.b + 0x15, 255);
    SDL_RenderDrawRect(r, &box);
 
    if (!m->body_font || !m->label_font)
@@ -1217,7 +1208,7 @@ static void render_stat_box(ui_music_t *m,
    /* Count number */
    char num[32];
    snprintf(num, sizeof(num), "%d", count);
-   SDL_Color nc = { ACCENT_R, ACCENT_G, ACCENT_B, 255 };
+   SDL_Color nc = { ac.r, ac.g, ac.b, 255 };
    SDL_Surface *ns = TTF_RenderUTF8_Blended(m->body_font, num, nc);
    if (ns) {
       SDL_Texture *ntex = SDL_CreateTextureFromSurface(r, ns);
@@ -1228,7 +1219,7 @@ static void render_stat_box(ui_music_t *m,
    }
 
    /* Label */
-   SDL_Color lc = { COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G, COLOR_TEXT_SECONDARY_B, 255 };
+   SDL_Color lc = { txt1.r, txt1.g, txt1.b, 255 };
    SDL_Surface *ls = TTF_RenderUTF8_Blended(m->label_font, label, lc);
    if (ls) {
       SDL_Texture *ltex = SDL_CreateTextureFromSurface(r, ls);
@@ -1240,6 +1231,9 @@ static void render_stat_box(ui_music_t *m,
 }
 
 static void render_library(ui_music_t *m, SDL_Renderer *r) {
+   ui_color_t ac = ui_theme_accent();
+   ui_color_t bg0 = ui_theme_bg(0), bg2 = ui_theme_bg(2);
+   ui_color_t txt0 = ui_theme_text(0), txt1 = ui_theme_text(1), txt2 = ui_theme_text(2);
    int y = m->panel_y + TAB_HEIGHT + 12;
 
    /* Stats grid (when browse_type == NONE) */
@@ -1256,8 +1250,7 @@ static void render_library(ui_music_t *m, SDL_Renderer *r) {
 
       /* Hint text */
       if (m->slabel_tex[SLABEL_BROWSE_HINT]) {
-         SDL_SetTextureColorMod(m->slabel_tex[SLABEL_BROWSE_HINT], COLOR_TEXT_TERTIARY_R,
-                                COLOR_TEXT_TERTIARY_G, COLOR_TEXT_TERTIARY_B);
+         SDL_SetTextureColorMod(m->slabel_tex[SLABEL_BROWSE_HINT], txt2.r, txt2.g, txt2.b);
          int tw = m->slabel_w[SLABEL_BROWSE_HINT];
          int th = m->slabel_h[SLABEL_BROWSE_HINT];
          int tx = m->panel_x + (m->panel_w - tw) / 2;
@@ -1269,14 +1262,14 @@ static void render_library(ui_music_t *m, SDL_Renderer *r) {
 
    /* Browse header with back button */
    int header_h = 44;
-   SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R, COLOR_BG_TERTIARY_G, COLOR_BG_TERTIARY_B, 200);
+   SDL_SetRenderDrawColor(r, bg2.r, bg2.g, bg2.b, 200);
    SDL_Rect hdr = { m->panel_x, y, m->panel_w, header_h };
    SDL_RenderFillRect(r, &hdr);
 
    if (m->label_font) {
       /* Back arrow */
       if (m->slabel_tex[SLABEL_BACK]) {
-         SDL_SetTextureColorMod(m->slabel_tex[SLABEL_BACK], ACCENT_R, ACCENT_G, ACCENT_B);
+         SDL_SetTextureColorMod(m->slabel_tex[SLABEL_BACK], ac.r, ac.g, ac.b);
          int bw = m->slabel_w[SLABEL_BACK];
          int bh = m->slabel_h[SLABEL_BACK];
          SDL_Rect bdst = { m->panel_x + 12, y + (header_h - bh) / 2, bw, bh };
@@ -1304,7 +1297,7 @@ static void render_library(ui_music_t *m, SDL_Renderer *r) {
          default:
             break;
       }
-      SDL_Color tc = { COLOR_TEXT_PRIMARY_R, COLOR_TEXT_PRIMARY_G, COLOR_TEXT_PRIMARY_B, 255 };
+      SDL_Color tc = { txt0.r, txt0.g, txt0.b, 255 };
       SDL_Surface *ts = TTF_RenderUTF8_Blended(m->label_font, type_label, tc);
       if (ts) {
          SDL_Texture *ttex = SDL_CreateTextureFromSurface(r, ts);
@@ -1335,8 +1328,7 @@ static void render_library(ui_music_t *m, SDL_Renderer *r) {
          music_browse_item_t *item = &m->browse_items[i];
 
          /* Separator */
-         SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R, COLOR_BG_TERTIARY_G, COLOR_BG_TERTIARY_B,
-                                100);
+         SDL_SetRenderDrawColor(r, bg2.r, bg2.g, bg2.b, 100);
          SDL_RenderDrawLine(r, m->panel_x + 16, row_y + LIST_ROW_HEIGHT - 1,
                             m->panel_x + m->panel_w - 16, row_y + LIST_ROW_HEIGHT - 1);
 
@@ -1347,20 +1339,18 @@ static void render_library(ui_music_t *m, SDL_Renderer *r) {
 
             bool flash = (m->add_flash_row == i && SDL_GetTicks() - m->add_flash_ms < 300);
             if (flash) {
-               SDL_SetRenderDrawColor(r, ACCENT_R, ACCENT_G, ACCENT_B, 200);
+               SDL_SetRenderDrawColor(r, ac.r, ac.g, ac.b, 200);
             } else {
-               SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R + 0x10, COLOR_BG_TERTIARY_G + 0x10,
-                                      COLOR_BG_TERTIARY_B + 0x10, 255);
+               SDL_SetRenderDrawColor(r, bg2.r + 0x10, bg2.g + 0x10, bg2.b + 0x10, 255);
             }
             SDL_Rect abtn = { add_x, add_y, ADD_BTN_SIZE, ADD_BTN_SIZE };
             SDL_RenderFillRect(r, &abtn);
 
             if (m->slabel_tex[SLABEL_PLUS]) {
                if (flash) {
-                  SDL_SetTextureColorMod(m->slabel_tex[SLABEL_PLUS], COLOR_BG_PRIMARY_R,
-                                         COLOR_BG_PRIMARY_G, COLOR_BG_PRIMARY_B);
+                  SDL_SetTextureColorMod(m->slabel_tex[SLABEL_PLUS], bg0.r, bg0.g, bg0.b);
                } else {
-                  SDL_SetTextureColorMod(m->slabel_tex[SLABEL_PLUS], ACCENT_R, ACCENT_G, ACCENT_B);
+                  SDL_SetTextureColorMod(m->slabel_tex[SLABEL_PLUS], ac.r, ac.g, ac.b);
                }
                int pw = m->slabel_w[SLABEL_PLUS];
                int ph = m->slabel_h[SLABEL_PLUS];
@@ -1375,8 +1365,7 @@ static void render_library(ui_music_t *m, SDL_Renderer *r) {
             if (max_w < 40)
                max_w = 40;
 
-            SDL_Color nc = { COLOR_TEXT_PRIMARY_R, COLOR_TEXT_PRIMARY_G, COLOR_TEXT_PRIMARY_B,
-                             255 };
+            SDL_Color nc = { txt0.r, txt0.g, txt0.b, 255 };
             SDL_Surface *ns = TTF_RenderUTF8_Blended(m->label_font, item->name, nc);
             if (ns) {
                SDL_Texture *ntex = SDL_CreateTextureFromSurface(r, ns);
@@ -1393,8 +1382,7 @@ static void render_library(ui_music_t *m, SDL_Renderer *r) {
                /* Track count */
                char sub[32];
                snprintf(sub, sizeof(sub), "%d tracks", item->track_count);
-               SDL_Color sc = { COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
-                                COLOR_TEXT_SECONDARY_B, 255 };
+               SDL_Color sc = { txt1.r, txt1.g, txt1.b, 255 };
                SDL_Surface *ss = TTF_RenderUTF8_Blended(m->label_font, sub, sc);
                if (ss) {
                   SDL_Texture *stex = SDL_CreateTextureFromSurface(r, ss);
@@ -1426,8 +1414,7 @@ static void render_library(ui_music_t *m, SDL_Renderer *r) {
          music_track_t *track = &m->browse_tracks[i];
 
          /* Separator */
-         SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R, COLOR_BG_TERTIARY_G, COLOR_BG_TERTIARY_B,
-                                100);
+         SDL_SetRenderDrawColor(r, bg2.r, bg2.g, bg2.b, 100);
          SDL_RenderDrawLine(r, m->panel_x + 16, row_y + LIST_ROW_HEIGHT - 1,
                             m->panel_x + m->panel_w - 16, row_y + LIST_ROW_HEIGHT - 1);
 
@@ -1439,20 +1426,18 @@ static void render_library(ui_music_t *m, SDL_Renderer *r) {
             /* Flash feedback: accent bg briefly after add */
             bool flash = (m->add_flash_row == i && SDL_GetTicks() - m->add_flash_ms < 300);
             if (flash) {
-               SDL_SetRenderDrawColor(r, ACCENT_R, ACCENT_G, ACCENT_B, 200);
+               SDL_SetRenderDrawColor(r, ac.r, ac.g, ac.b, 200);
             } else {
-               SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R + 0x10, COLOR_BG_TERTIARY_G + 0x10,
-                                      COLOR_BG_TERTIARY_B + 0x10, 255);
+               SDL_SetRenderDrawColor(r, bg2.r + 0x10, bg2.g + 0x10, bg2.b + 0x10, 255);
             }
             SDL_Rect abtn = { add_x, add_y, ADD_BTN_SIZE, ADD_BTN_SIZE };
             SDL_RenderFillRect(r, &abtn);
 
             if (m->slabel_tex[SLABEL_PLUS]) {
                if (flash) {
-                  SDL_SetTextureColorMod(m->slabel_tex[SLABEL_PLUS], COLOR_BG_PRIMARY_R,
-                                         COLOR_BG_PRIMARY_G, COLOR_BG_PRIMARY_B);
+                  SDL_SetTextureColorMod(m->slabel_tex[SLABEL_PLUS], bg0.r, bg0.g, bg0.b);
                } else {
-                  SDL_SetTextureColorMod(m->slabel_tex[SLABEL_PLUS], ACCENT_R, ACCENT_G, ACCENT_B);
+                  SDL_SetTextureColorMod(m->slabel_tex[SLABEL_PLUS], ac.r, ac.g, ac.b);
                }
                int pw = m->slabel_w[SLABEL_PLUS];
                int ph = m->slabel_h[SLABEL_PLUS];
@@ -1464,8 +1449,7 @@ static void render_library(ui_music_t *m, SDL_Renderer *r) {
             /* Duration (right-aligned, left of "+" button) */
             char dur[16];
             format_time((float)track->duration_sec, dur, sizeof(dur));
-            SDL_Color dc = { COLOR_TEXT_TERTIARY_R, COLOR_TEXT_TERTIARY_G, COLOR_TEXT_TERTIARY_B,
-                             255 };
+            SDL_Color dc = { txt2.r, txt2.g, txt2.b, 255 };
             int dur_right = add_x - 8; /* right edge of duration text */
             SDL_Surface *ds = TTF_RenderUTF8_Blended(m->label_font, dur, dc);
             int dur_w = ds ? ds->w : 50; /* estimate if render fails */
@@ -1484,8 +1468,7 @@ static void render_library(ui_music_t *m, SDL_Renderer *r) {
             if (max_w < 40)
                max_w = 40;
 
-            SDL_Color tc = { COLOR_TEXT_PRIMARY_R, COLOR_TEXT_PRIMARY_G, COLOR_TEXT_PRIMARY_B,
-                             255 };
+            SDL_Color tc = { txt0.r, txt0.g, txt0.b, 255 };
             SDL_Surface *ts = TTF_RenderUTF8_Blended(m->label_font, track->title, tc);
             if (ts) {
                SDL_Texture *ttex = SDL_CreateTextureFromSurface(r, ts);
@@ -1513,8 +1496,7 @@ static void render_library(ui_music_t *m, SDL_Renderer *r) {
                else
                   snprintf(subtitle, sizeof(subtitle), "Unknown");
 
-               SDL_Color ac = { COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
-                                COLOR_TEXT_SECONDARY_B, 255 };
+               SDL_Color ac = { txt1.r, txt1.g, txt1.b, 255 };
                SDL_Surface *as = TTF_RenderUTF8_Blended(m->label_font, subtitle, ac);
                if (as) {
                   SDL_Texture *atex = SDL_CreateTextureFromSurface(r, as);
@@ -1657,16 +1639,15 @@ void ui_music_cleanup(ui_music_t *m) {
 void ui_music_render(ui_music_t *m, SDL_Renderer *renderer) {
    if (!m || !renderer)
       return;
+   ui_color_t bg1 = ui_theme_bg(1), bg2 = ui_theme_bg(2);
 
    /* Panel background */
-   SDL_SetRenderDrawColor(renderer, COLOR_BG_SECONDARY_R, COLOR_BG_SECONDARY_G,
-                          COLOR_BG_SECONDARY_B, 255);
+   SDL_SetRenderDrawColor(renderer, bg1.r, bg1.g, bg1.b, 255);
    SDL_Rect bg = { m->panel_x, m->panel_y, m->panel_w, m->panel_h };
    SDL_RenderFillRect(renderer, &bg);
 
    /* Left edge highlight */
-   SDL_SetRenderDrawColor(renderer, COLOR_BG_TERTIARY_R + 0x20, COLOR_BG_TERTIARY_G + 0x20,
-                          COLOR_BG_TERTIARY_B + 0x20, 255);
+   SDL_SetRenderDrawColor(renderer, bg2.r + 0x20, bg2.g + 0x20, bg2.b + 0x20, 255);
    SDL_RenderDrawLine(renderer, m->panel_x, m->panel_y, m->panel_x, m->panel_y + m->panel_h);
 
    /* Lock for entire render pass — WS callbacks modify state from another thread */

@@ -32,6 +32,7 @@
 #include "logging.h"
 #include "tts/tts_preprocessing.h"
 #include "ui/ui_colors.h"
+#include "ui/ui_theme.h"
 
 /* =============================================================================
  * Constants
@@ -145,15 +146,13 @@ static void ensure_entry_cached(ui_transcript_t *t, transcript_entry_t *entry) {
    if (!t->renderer || !t->body_font)
       return;
 
-   /* Cache body text texture */
+   /* Cache body text texture as white — tinted at render time for theme support */
    if (!entry->cached_texture && entry->text[0]) {
-      SDL_Color text_color = { COLOR_TEXT_PRIMARY_R, COLOR_TEXT_PRIMARY_G, COLOR_TEXT_PRIMARY_B,
-                               255 };
+      SDL_Color text_color = { 255, 255, 255, 255 };
 
       /* AI entries with completed streaming get markdown rendering */
       if (!entry->is_user && !entry->is_streaming && t->md_fonts.fonts[0]) {
-         SDL_Color bold_color = { COLOR_TEXT_PRIMARY_R, COLOR_TEXT_PRIMARY_G, COLOR_TEXT_PRIMARY_B,
-                                  255 };
+         SDL_Color bold_color = { 255, 255, 255, 255 };
          entry->cached_texture = md_render_text(t->renderer, &t->md_fonts, entry->text, text_color,
                                                 bold_color, t->wrap_width, &entry->cached_w,
                                                 &entry->cached_h);
@@ -178,7 +177,8 @@ static void ensure_entry_cached(ui_transcript_t *t, transcript_entry_t *entry) {
       if (entry->is_user) {
          role_color = (SDL_Color){ COLOR_LISTENING_R, COLOR_LISTENING_G, COLOR_LISTENING_B, 255 };
       } else {
-         role_color = (SDL_Color){ COLOR_SPEAKING_R, COLOR_SPEAKING_G, COLOR_SPEAKING_B, 255 };
+         ui_color_t ac = ui_theme_accent();
+         role_color = (SDL_Color){ ac.r, ac.g, ac.b, 255 };
       }
       char role_label[40];
       snprintf(role_label, sizeof(role_label), "%s:", entry->role);
@@ -446,11 +446,12 @@ static SDL_Texture *build_music_note_icon(SDL_Renderer *r, int sz) {
 void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_state_t state) {
    if (!t || !renderer)
       return;
+   ui_color_t bg1 = ui_theme_bg(1), bg2 = ui_theme_bg(2);
+   ui_color_t txt0 = ui_theme_text(0), txt1 = ui_theme_text(1);
 
    /* Draw panel background */
    SDL_Rect panel = { t->panel_x, t->panel_y, t->panel_w, t->panel_h };
-   SDL_SetRenderDrawColor(renderer, COLOR_BG_SECONDARY_R, COLOR_BG_SECONDARY_G,
-                          COLOR_BG_SECONDARY_B, 255);
+   SDL_SetRenderDrawColor(renderer, bg1.r, bg1.g, bg1.b, 255);
    SDL_RenderFillRect(renderer, &panel);
 
    int x = t->panel_x + t->padding;
@@ -523,8 +524,7 @@ void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_stat
       else
          strftime(time_str, sizeof(time_str), "%a %b %-d  %-I:%M %p", tm_info);
 
-      SDL_Color time_color = { COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
-                               COLOR_TEXT_SECONDARY_B, 255 };
+      SDL_Color time_color = { txt1.r, txt1.g, txt1.b, 255 };
       SDL_Surface *time_surface = TTF_RenderUTF8_Blended(t->label_font, time_str, time_color);
       if (time_surface) {
          int time_x = t->panel_x + t->panel_w - t->padding - time_surface->w;
@@ -569,11 +569,9 @@ void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_stat
                int by = wifi_base_y - bar_h;
 
                if (b < wifi_bars) {
-                  SDL_SetRenderDrawColor(renderer, COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
-                                         COLOR_TEXT_SECONDARY_B, 255);
+                  SDL_SetRenderDrawColor(renderer, txt1.r, txt1.g, txt1.b, 255);
                } else {
-                  SDL_SetRenderDrawColor(renderer, COLOR_BG_TERTIARY_R, COLOR_BG_TERTIARY_G,
-                                         COLOR_BG_TERTIARY_B, 255);
+                  SDL_SetRenderDrawColor(renderer, bg2.r, bg2.g, bg2.b, 255);
                }
 
                SDL_Rect bar_rect = { bx, by, bar_w, bar_h };
@@ -591,10 +589,10 @@ void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_stat
             }
             if (t->music_icon_tex) {
                if (t->music_playing) {
-                  SDL_SetTextureColorMod(t->music_icon_tex, 0x2D, 0xD4, 0xBF);
+                  ui_color_t mac = ui_theme_accent();
+                  SDL_SetTextureColorMod(t->music_icon_tex, mac.r, mac.g, mac.b);
                } else {
-                  SDL_SetTextureColorMod(t->music_icon_tex, COLOR_TEXT_SECONDARY_R,
-                                         COLOR_TEXT_SECONDARY_G, COLOR_TEXT_SECONDARY_B);
+                  SDL_SetTextureColorMod(t->music_icon_tex, txt1.r, txt1.g, txt1.b);
                }
                int icon_x = wifi_left_edge - t->music_icon_w - 14;
                int icon_y = label_y + (time_surface->h - t->music_icon_h) / 2;
@@ -616,8 +614,7 @@ void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_stat
    /* Render status detail below state label (tool calls, thinking info) */
    int detail_height = 0;
    if (t->label_font && t->status_detail[0]) {
-      SDL_Color detail_color = { COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
-                                 COLOR_TEXT_SECONDARY_B, 255 };
+      SDL_Color detail_color = { txt1.r, txt1.g, txt1.b, 255 };
       SDL_Surface *detail_surface = TTF_RenderUTF8_Blended(t->label_font, t->status_detail,
                                                            detail_color);
       if (detail_surface) {
@@ -720,8 +717,9 @@ void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_stat
          y += entry->cached_role_h + ROLE_SPACING;
       }
 
-      /* Render body text from cache */
+      /* Render body text from cache (white texture, tinted for theme) */
       if (entry->cached_texture) {
+         SDL_SetTextureColorMod(entry->cached_texture, txt0.r, txt0.g, txt0.b);
          SDL_Rect dst = { x, y, entry->cached_w, entry->cached_h };
          SDL_RenderCopy(renderer, entry->cached_texture, NULL, &dst);
          y += entry->cached_h;

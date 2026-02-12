@@ -48,6 +48,7 @@
 #include "ui/ui_orb.h"
 #include "ui/ui_screensaver.h"
 #include "ui/ui_slider.h"
+#include "ui/ui_theme.h"
 #include "ui/ui_touch.h"
 #include "ui/ui_transcript.h"
 #include "ws_client.h"
@@ -69,8 +70,19 @@
 #define ORB_PANEL_WIDTH 400  /* Left panel for orb */
 
 /* Touch / panel constants */
-#define PANEL_HEIGHT 300
+#define PANEL_HEIGHT 350
 #define PANEL_ANIM_SEC 0.25
+
+/* Theme dot picker constants (shared between render and touch) */
+#define THEME_DOT_RADIUS 14
+#define THEME_DOT_GAP 16
+#define THEME_DOTS_CX 770 /* Center X in slider track area */
+#define THEME_DOT_HIT 24  /* Touch hit half-width (48px meets Material Design 48dp) */
+
+/* Pre-computed scanline half-widths for radius=14 dot fill.
+ * dx[dy] = (int)sqrtf(14*14 - dy*dy) for dy=0..14.
+ * Eliminates ~145 sqrtf calls per frame while settings panel is open. */
+static const int DOT_DX[15] = { 14, 14, 14, 13, 13, 12, 12, 11, 10, 9, 8, 7, 5, 3, 0 };
 #define INFO_ROW_COUNT 5      /* Server, Device, IP, Uptime, Session */
 #define ORB_HIT_RADIUS 180    /* Tap/long-press detection radius around orb center */
 #define SWIPE_ZONE_FRAC 0.20f /* Top 20% of screen for swipe-down trigger */
@@ -186,6 +198,11 @@ struct sdl_ui {
    int time_label_w, time_label_h;
    int t12h_w, t12h_h, t24h_w, t24h_h;
    int time_toggle_row_y; /* Updated each frame for hit testing */
+
+   /* Theme picker */
+   SDL_Texture *theme_label_tex; /* "THEME" — white, colormod */
+   int theme_label_w, theme_label_h;
+   int theme_dots_row_y; /* Updated each frame for hit testing */
 
    /* Screensaver / ambient mode */
    ui_screensaver_t screensaver;
@@ -332,7 +349,7 @@ static void panel_cache_init(sdl_ui_t *ui) {
 
    SDL_Renderer *r = ui->renderer;
    TTF_Font *font = ui->transcript.label_font;
-   SDL_Color primary = { COLOR_TEXT_PRIMARY_R, COLOR_TEXT_PRIMARY_G, COLOR_TEXT_PRIMARY_B, 255 };
+   SDL_Color primary = { 255, 255, 255, 255 }; /* White — tinted at render time for theme */
 
    /* AI name (upper case) — use body_font for visual hierarchy */
    SDL_Surface *surf;
@@ -403,7 +420,8 @@ static void panel_cache_cleanup(sdl_ui_t *ui) {
 /** @brief Draw semi-transparent scrim overlay behind panels */
 static void render_scrim(sdl_ui_t *ui, SDL_Renderer *r, float max_offset) {
    uint8_t alpha = (uint8_t)(max_offset * 150); /* 59% at full */
-   SDL_SetRenderDrawColor(r, COLOR_BG_PRIMARY_R, COLOR_BG_PRIMARY_G, COLOR_BG_PRIMARY_B, alpha);
+   ui_color_t bg0 = ui_theme_bg(0);
+   SDL_SetRenderDrawColor(r, bg0.r, bg0.g, bg0.b, alpha);
    SDL_Rect full = { 0, 0, ui->width, ui->height };
    SDL_RenderFillRect(r, &full);
 }
@@ -489,11 +507,13 @@ static int render_info_row(sdl_ui_t *ui,
                            int y,
                            int value_x_offset) {
    TTF_Font *font = ui->transcript.label_font;
-   SDL_Color primary_clr = { COLOR_TEXT_PRIMARY_R, COLOR_TEXT_PRIMARY_G, COLOR_TEXT_PRIMARY_B,
-                             255 };
+   SDL_Color primary_clr = { 255, 255, 255, 255 }; /* White — tinted via colormod for theme */
 
-   /* Draw cached label */
+   /* Draw cached label (white texture, tinted for theme) */
+   ui_color_t txt1_clr = ui_theme_text(1);
    if (ui->panel_cache.info_labels[label_idx]) {
+      SDL_SetTextureColorMod(ui->panel_cache.info_labels[label_idx], txt1_clr.r, txt1_clr.g,
+                             txt1_clr.b);
       SDL_Rect dst = { x, y, ui->panel_cache.info_label_w[label_idx],
                        ui->panel_cache.info_label_h[label_idx] };
       SDL_RenderCopy(r, ui->panel_cache.info_labels[label_idx], NULL, &dst);
@@ -515,6 +535,9 @@ static int render_info_row(sdl_ui_t *ui,
          }
       }
       if (ui->panel_cache.info_values[label_idx]) {
+         ui_color_t txt0_clr = ui_theme_text(0);
+         SDL_SetTextureColorMod(ui->panel_cache.info_values[label_idx], txt0_clr.r, txt0_clr.g,
+                                txt0_clr.b);
          SDL_Rect dst = { x + value_x_offset, y, ui->panel_cache.info_value_w[label_idx],
                           ui->panel_cache.info_value_h[label_idx] };
          SDL_RenderCopy(r, ui->panel_cache.info_values[label_idx], NULL, &dst);
@@ -531,14 +554,18 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
    int panel_y = -PANEL_HEIGHT + (int)(offset * PANEL_HEIGHT);
 
    /* Panel background */
-   SDL_SetRenderDrawColor(r, COLOR_BG_SECONDARY_R, COLOR_BG_SECONDARY_G, COLOR_BG_SECONDARY_B, 240);
+   ui_color_t bg1 = ui_theme_bg(1);
+   SDL_SetRenderDrawColor(r, bg1.r, bg1.g, bg1.b, 240);
    SDL_Rect bg = { 0, panel_y, ui->width, PANEL_HEIGHT };
    SDL_RenderFillRect(r, &bg);
 
    /* Bottom edge highlight */
    int edge_y = panel_y + PANEL_HEIGHT - 1;
-   SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R + 0x20, COLOR_BG_TERTIARY_G + 0x20,
-                          COLOR_BG_TERTIARY_B + 0x20, 255);
+   ui_color_t bg2 = ui_theme_bg(2);
+   uint8_t edge_r = (uint8_t)(bg2.r + 0x20 < 255 ? bg2.r + 0x20 : 255);
+   uint8_t edge_g = (uint8_t)(bg2.g + 0x20 < 255 ? bg2.g + 0x20 : 255);
+   uint8_t edge_b = (uint8_t)(bg2.b + 0x20 < 255 ? bg2.b + 0x20 : 255);
+   SDL_SetRenderDrawColor(r, edge_r, edge_g, edge_b, 255);
    SDL_RenderDrawLine(r, 0, edge_y, ui->width, edge_y);
 
    if (!ui->transcript.label_font)
@@ -636,8 +663,8 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
       int slider_track_w = 300;
 
       /* "TIME" label — same column as BRIGHTNESS/VOLUME */
-      SDL_SetTextureColorMod(ui->time_label_tex, COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
-                             COLOR_TEXT_SECONDARY_B);
+      ui_color_t txt1 = ui_theme_text(1);
+      SDL_SetTextureColorMod(ui->time_label_tex, txt1.r, txt1.g, txt1.b);
       SDL_Rect lbl_dst = { slider_track_x - SLIDER_LABEL_COL, row_y - ui->time_label_h / 2,
                            ui->time_label_w, ui->time_label_h };
       SDL_RenderCopy(r, ui->time_label_tex, NULL, &lbl_dst);
@@ -657,11 +684,12 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
       int toggle_y = row_y - toggle_h / 2;
       int radius = toggle_h / 2;
 
-      /* Lerp track color between tertiary (#2F323C) and accent (#4FC3F7) */
+      /* Lerp track color between tertiary and accent */
+      ui_color_t ac = ui_theme_accent();
       float t = ui->knob_anim;
-      uint8_t tr_r = (uint8_t)(0x2F + t * (0x4F - 0x2F));
-      uint8_t tr_g = (uint8_t)(0x32 + t * (0xC3 - 0x32));
-      uint8_t tr_b = (uint8_t)(0x3C + t * (0xF7 - 0x3C));
+      uint8_t tr_r = (uint8_t)(0x2F + t * (ac.r - 0x2F));
+      uint8_t tr_g = (uint8_t)(0x32 + t * (ac.g - 0x32));
+      uint8_t tr_b = (uint8_t)(0x3C + t * (ac.b - 0x3C));
       SDL_SetRenderDrawColor(r, tr_r, tr_g, tr_b, 255);
 
       /* Center rectangle */
@@ -691,9 +719,9 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
       /* "12H" label (left of toggle) — accent when active, secondary when inactive */
       if (ui->t12h_tex) {
          if (ui->time_24h)
-            SDL_SetTextureColorMod(ui->t12h_tex, 0x8C, 0x99, 0xA7);
+            SDL_SetTextureColorMod(ui->t12h_tex, txt1.r, txt1.g, txt1.b);
          else
-            SDL_SetTextureColorMod(ui->t12h_tex, 0x4F, 0xC3, 0xF7);
+            SDL_SetTextureColorMod(ui->t12h_tex, ac.r, ac.g, ac.b);
          int t12_x = toggle_x - 10 - ui->t12h_w;
          SDL_Rect t12_dst = { t12_x, row_y - ui->t12h_h / 2, ui->t12h_w, ui->t12h_h };
          SDL_RenderCopy(r, ui->t12h_tex, NULL, &t12_dst);
@@ -702,12 +730,55 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
       /* "24H" label (right of toggle) */
       if (ui->t24h_tex) {
          if (ui->time_24h)
-            SDL_SetTextureColorMod(ui->t24h_tex, 0x4F, 0xC3, 0xF7);
+            SDL_SetTextureColorMod(ui->t24h_tex, ac.r, ac.g, ac.b);
          else
-            SDL_SetTextureColorMod(ui->t24h_tex, 0x8C, 0x99, 0xA7);
+            SDL_SetTextureColorMod(ui->t24h_tex, txt1.r, txt1.g, txt1.b);
          int t24_x = toggle_x + toggle_w + 10;
          SDL_Rect t24_dst = { t24_x, row_y - ui->t24h_h / 2, ui->t24h_w, ui->t24h_h };
          SDL_RenderCopy(r, ui->t24h_tex, NULL, &t24_dst);
+      }
+   }
+
+   /* Theme dot picker (72px below time toggle) */
+   if (ui->theme_label_tex) {
+      int tdot_row_y = panel_y + 310;
+      ui->theme_dots_row_y = tdot_row_y;
+      int slider_track_x = 620;
+
+      /* "THEME" label */
+      ui_color_t ttxt = ui_theme_text(1);
+      SDL_SetTextureColorMod(ui->theme_label_tex, ttxt.r, ttxt.g, ttxt.b);
+      SDL_Rect tlbl = { slider_track_x - SLIDER_LABEL_COL, tdot_row_y - ui->theme_label_h / 2,
+                        ui->theme_label_w, ui->theme_label_h };
+      SDL_RenderCopy(r, ui->theme_label_tex, NULL, &tlbl);
+
+      /* 5 dots centered in slider track area */
+      int dot_stride = THEME_DOT_RADIUS * 2 + THEME_DOT_GAP;
+      int total_dots_w = THEME_COUNT * THEME_DOT_RADIUS * 2 + (THEME_COUNT - 1) * THEME_DOT_GAP;
+      int dots_start_x = THEME_DOTS_CX - total_dots_w / 2 + THEME_DOT_RADIUS;
+      ui_theme_id_t current_id = ui_theme_current_id();
+
+      for (int d = 0; d < THEME_COUNT; d++) {
+         int dcx = dots_start_x + d * dot_stride;
+         int dcy = tdot_row_y;
+         const ui_theme_def_t *def = ui_theme_get_def((ui_theme_id_t)d);
+
+         /* Active dot: white ring (2px wider than fill) */
+         if ((ui_theme_id_t)d == current_id) {
+            int ring_r = THEME_DOT_RADIUS + 2;
+            SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
+            for (int dy = -ring_r; dy <= ring_r; dy++) {
+               int dx = (int)sqrtf((float)(ring_r * ring_r - dy * dy));
+               SDL_RenderDrawLine(r, dcx - dx, dcy + dy, dcx + dx, dcy + dy);
+            }
+         }
+
+         /* Filled dot with theme's accent color (pre-computed scanlines) */
+         SDL_SetRenderDrawColor(r, def->accent.r, def->accent.g, def->accent.b, 255);
+         for (int dy = -THEME_DOT_RADIUS; dy <= THEME_DOT_RADIUS; dy++) {
+            int dx = DOT_DX[dy < 0 ? -dy : dy];
+            SDL_RenderDrawLine(r, dcx - dx, dcy + dy, dcx + dx, dcy + dy);
+         }
       }
    }
 
@@ -723,8 +794,8 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
 /** @brief Draw subtle swipe indicator at top edge */
 static void render_swipe_indicators(sdl_ui_t *ui, SDL_Renderer *r) {
    int cx = ui->width / 2;
-   SDL_SetRenderDrawColor(r, COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G, COLOR_TEXT_SECONDARY_B,
-                          60);
+   ui_color_t swipe_clr = ui_theme_text(1);
+   SDL_SetRenderDrawColor(r, swipe_clr.r, swipe_clr.g, swipe_clr.b, 60);
 
    /* Top center: three horizontal lines (hamburger) — settings pull-down */
    int ty = 10;
@@ -974,6 +1045,8 @@ static int sdl_init_on_thread(sdl_ui_t *ui) {
       int slider_track_x = 620;
       int slider_track_w = 300;
 
+      /* Brightness uses fixed amber (#F0B429) — intentionally not theme-aware.
+       * It is a system-level control, distinct from the media volume slider. */
       ui_slider_init(&ui->brightness_slider, ui->renderer, slider_track_x, 0, slider_track_w,
                      COLOR_THINKING_R, COLOR_THINKING_G, COLOR_THINKING_B, "BRIGHTNESS",
                      ui->transcript.label_font);
@@ -1013,6 +1086,28 @@ static int sdl_init_on_thread(sdl_ui_t *ui) {
                                        &ui->t12h_h);
       ui->t24h_tex = build_white_label(ui->renderer, ui->transcript.label_font, "24H", &ui->t24h_w,
                                        &ui->t24h_h);
+   }
+
+   /* Initialize theme system from config */
+   if (ui->sat_config) {
+      ui_theme_init(ui_theme_id_from_name(ui->sat_config->sdl_ui.theme));
+   } else {
+      ui_theme_init(THEME_CYAN);
+   }
+
+   /* Build "THEME" label for settings panel */
+   if (ui->transcript.label_font) {
+      ui->theme_label_tex = build_white_label(ui->renderer, ui->transcript.label_font, "THEME",
+                                              &ui->theme_label_w, &ui->theme_label_h);
+   }
+
+   /* Sync volume slider fill color with initial theme accent */
+   if (ui->sliders_initialized) {
+      ui_color_t ac = ui_theme_accent();
+      ui->volume_slider.fill_r = ac.r;
+      ui->volume_slider.fill_g = ac.g;
+      ui->volume_slider.fill_b = ac.b;
+      ui->volume_slider.cached_pct = -1;
    }
 
    /* Initialize screensaver (after fonts/renderer ready) */
@@ -1130,8 +1225,8 @@ static void render_mute_button(sdl_ui_t *ui, SDL_Renderer *r, double time_sec) {
    } else if (muted) {
       SDL_SetTextureColorMod(tex, COLOR_ERROR_R, COLOR_ERROR_G, COLOR_ERROR_B);
    } else {
-      SDL_SetTextureColorMod(tex, COLOR_TEXT_SECONDARY_R, COLOR_TEXT_SECONDARY_G,
-                             COLOR_TEXT_SECONDARY_B);
+      ui_color_t mute_clr = ui_theme_text(1);
+      SDL_SetTextureColorMod(tex, mute_clr.r, mute_clr.g, mute_clr.b);
    }
 
    /* Center icon within hit area */
@@ -1159,6 +1254,8 @@ static void sdl_cleanup_on_thread(sdl_ui_t *ui) {
       SDL_DestroyTexture(ui->t12h_tex);
    if (ui->t24h_tex)
       SDL_DestroyTexture(ui->t24h_tex);
+   if (ui->theme_label_tex)
+      SDL_DestroyTexture(ui->theme_label_tex);
    panel_cache_cleanup(ui);
    ui_music_cleanup(&ui->music);
    ui_transcript_cleanup(&ui->transcript);
@@ -1252,17 +1349,25 @@ static void render_frame(sdl_ui_t *ui, double time_sec) {
    }
 
    /* Clear screen with primary background */
-   SDL_SetRenderDrawColor(r, COLOR_BG_PRIMARY_R, COLOR_BG_PRIMARY_G, COLOR_BG_PRIMARY_B, 255);
-   SDL_RenderClear(r);
+   {
+      ui_color_t bg0 = ui_theme_bg(0);
+      SDL_SetRenderDrawColor(r, bg0.r, bg0.g, bg0.b, 255);
+      SDL_RenderClear(r);
+   }
 
    /* Skip main scene rendering when screensaver fully covers the screen */
    if (!ss_opaque) {
       /* Draw divider between panels (2px with gradient) */
-      SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R + 0x10, COLOR_BG_TERTIARY_G + 0x10,
-                             COLOR_BG_TERTIARY_B + 0x10, 255);
-      SDL_RenderDrawLine(r, ORB_PANEL_WIDTH, 0, ORB_PANEL_WIDTH, ui->height);
-      SDL_SetRenderDrawColor(r, COLOR_BG_TERTIARY_R, COLOR_BG_TERTIARY_G, COLOR_BG_TERTIARY_B, 180);
-      SDL_RenderDrawLine(r, ORB_PANEL_WIDTH + 1, 0, ORB_PANEL_WIDTH + 1, ui->height);
+      {
+         ui_color_t bg2 = ui_theme_bg(2);
+         uint8_t div_r = (uint8_t)(bg2.r + 0x10 < 255 ? bg2.r + 0x10 : 255);
+         uint8_t div_g = (uint8_t)(bg2.g + 0x10 < 255 ? bg2.g + 0x10 : 255);
+         uint8_t div_b = (uint8_t)(bg2.b + 0x10 < 255 ? bg2.b + 0x10 : 255);
+         SDL_SetRenderDrawColor(r, div_r, div_g, div_b, 255);
+         SDL_RenderDrawLine(r, ORB_PANEL_WIDTH, 0, ORB_PANEL_WIDTH, ui->height);
+         SDL_SetRenderDrawColor(r, bg2.r, bg2.g, bg2.b, 180);
+         SDL_RenderDrawLine(r, ORB_PANEL_WIDTH + 1, 0, ORB_PANEL_WIDTH + 1, ui->height);
+      }
 
       /* Render orb in left panel */
       int orb_cx = ORB_PANEL_WIDTH / 2;
@@ -1448,6 +1553,27 @@ static void *render_thread_func(void *arg) {
                      satellite_config_save_ui_prefs(ui->sat_config);
                   }
                   ui->finger_scrolling = false;
+               } else if (fy >= ui->theme_dots_row_y - THEME_DOT_HIT &&
+                          fy <= ui->theme_dots_row_y + THEME_DOT_HIT) {
+                  /* Theme dot picker tap */
+                  int dot_stride = THEME_DOT_RADIUS * 2 + THEME_DOT_GAP;
+                  int total_dots_w = THEME_COUNT * THEME_DOT_RADIUS * 2 +
+                                     (THEME_COUNT - 1) * THEME_DOT_GAP;
+                  int dots_start_x = THEME_DOTS_CX - total_dots_w / 2 + THEME_DOT_RADIUS;
+                  for (int d = 0; d < THEME_COUNT; d++) {
+                     int dcx = dots_start_x + d * dot_stride;
+                     if (fx >= dcx - THEME_DOT_HIT && fx <= dcx + THEME_DOT_HIT) {
+                        ui_theme_set((ui_theme_id_t)d);
+                        if (ui->sat_config) {
+                           snprintf(ui->sat_config->sdl_ui.theme,
+                                    sizeof(ui->sat_config->sdl_ui.theme), "%s",
+                                    ui_theme_name((ui_theme_id_t)d));
+                           satellite_config_save_ui_prefs(ui->sat_config);
+                        }
+                        break;
+                     }
+                  }
+                  ui->finger_scrolling = false;
                }
             } else if (ui->panel_music.visible && !ui->panel_music.closing &&
                        fx >= ui->music.panel_x) {
@@ -1527,6 +1653,19 @@ static void *render_thread_func(void *arg) {
       /* Per-frame long press check */
       touch_gesture_t lp = ui_touch_check_long_press(&ui->touch, time_sec);
       handle_gesture(ui, lp, time_sec);
+
+      /* Advance theme transition and sync slider colors */
+      ui_theme_tick(frame_start);
+      if (ui->sliders_initialized) {
+         ui_color_t ac = ui_theme_accent();
+         if (ui->volume_slider.fill_r != ac.r || ui->volume_slider.fill_g != ac.g ||
+             ui->volume_slider.fill_b != ac.b) {
+            ui->volume_slider.fill_r = ac.r;
+            ui->volume_slider.fill_g = ac.g;
+            ui->volume_slider.fill_b = ac.b;
+            ui->volume_slider.cached_pct = -1;
+         }
+      }
 
       render_frame(ui, time_sec);
 
