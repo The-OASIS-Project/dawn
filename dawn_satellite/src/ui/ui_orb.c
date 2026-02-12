@@ -24,6 +24,9 @@
 #include "ui/ui_orb.h"
 
 #include <SDL2/SDL.h>
+#ifdef HAVE_SDL2_GFX
+#include <SDL2/SDL2_gfxPrimitives.h>
+#endif
 #include <math.h>
 #include <stdatomic.h>
 #include <string.h>
@@ -146,21 +149,27 @@ static SDL_Texture *create_glow_texture(SDL_Renderer *renderer, ui_color_t color
       int radius = ORB_CORE_RADIUS + glow_offsets[layer];
       uint8_t alpha = (uint8_t)(glow_alphas[layer] * 255);
 
+#ifdef HAVE_SDL2_GFX
+      filledCircleRGBA(renderer, cx, cy, radius, color.r, color.g, color.b, alpha);
+#else
       SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, alpha);
-
-      /* Filled circle using horizontal lines */
       for (int y = -radius; y <= radius; y++) {
          int dx = (int)sqrtf((float)(radius * radius - y * y));
          SDL_RenderDrawLine(renderer, cx - dx, cy + y, cx + dx, cy + y);
       }
+#endif
    }
 
    /* Draw solid core */
+#ifdef HAVE_SDL2_GFX
+   filledCircleRGBA(renderer, cx, cy, ORB_CORE_RADIUS, color.r, color.g, color.b, 255);
+#else
    SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 255);
    for (int y = -ORB_CORE_RADIUS; y <= ORB_CORE_RADIUS; y++) {
       int dx = (int)sqrtf((float)(ORB_CORE_RADIUS * ORB_CORE_RADIUS - y * y));
       SDL_RenderDrawLine(renderer, cx - dx, cy + y, cx + dx, cy + y);
    }
+#endif
 
    SDL_SetRenderTarget(renderer, NULL);
    return tex;
@@ -564,11 +573,15 @@ void ui_orb_render(ui_orb_ctx_t *ctx,
          float t = (float)(dt / 0.3);
          uint8_t alpha = (uint8_t)((1.0f - t) * 120);
          int radius = ORB_CORE_RADIUS + (int)(t * 30);
+#ifdef HAVE_SDL2_GFX
+         filledCircleRGBA(renderer, cx, cy, radius, 255, 255, 255, alpha);
+#else
          SDL_SetRenderDrawColor(renderer, 255, 255, 255, alpha);
          for (int y = -radius; y <= radius; y++) {
             int dx = (int)sqrtf((float)(radius * radius - y * y));
             SDL_RenderDrawLine(renderer, cx - dx, cy + y, cx + dx, cy + y);
          }
+#endif
       }
    }
 
@@ -578,11 +591,16 @@ void ui_orb_render(ui_orb_ctx_t *ctx,
       if (dt >= 0.0 && dt < 0.4) {
          float t = (float)(dt / 0.4);
          uint8_t alpha = (uint8_t)((1.0f - t) * 180);
+#ifdef HAVE_SDL2_GFX
+         filledCircleRGBA(renderer, cx, cy, ORB_CORE_RADIUS, COLOR_ERROR_R, COLOR_ERROR_G,
+                          COLOR_ERROR_B, alpha);
+#else
          SDL_SetRenderDrawColor(renderer, COLOR_ERROR_R, COLOR_ERROR_G, COLOR_ERROR_B, alpha);
          for (int y = -ORB_CORE_RADIUS; y <= ORB_CORE_RADIUS; y++) {
             int dx = (int)sqrtf((float)(ORB_CORE_RADIUS * ORB_CORE_RADIUS - y * y));
             SDL_RenderDrawLine(renderer, cx - dx, cy + y, cx + dx, cy + y);
          }
+#endif
       }
    }
 }

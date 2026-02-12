@@ -31,6 +31,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef HAVE_SDL2_GFX
+#include <SDL2/SDL2_gfxPrimitives.h>
+#endif
 
 #include "logging.h"
 #include "ui/ui_colors.h"
@@ -814,10 +817,14 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
          int thumb_x = bar_x + fill_w;
          int thumb_y = bar_y + PROGRESS_BAR_HEIGHT / 2;
          int thumb_r = 6;
+#ifdef HAVE_SDL2_GFX
+         filledCircleRGBA(r, thumb_x, thumb_y, thumb_r, ac.r, ac.g, ac.b, 255);
+#else
          for (int dy = -thumb_r; dy <= thumb_r; dy++) {
             int dx = (int)sqrtf((float)(thumb_r * thumb_r - dy * dy));
             SDL_RenderDrawLine(r, thumb_x - dx, thumb_y + dy, thumb_x + dx, thumb_y + dy);
          }
+#endif
 
          y += cur_s->h;
          SDL_FreeSurface(cur_s);
@@ -862,11 +869,15 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
       int cx = play_x + TRANSPORT_PLAY_SIZE / 2;
       int cy = btn_y + TRANSPORT_PLAY_SIZE / 2;
       int radius = TRANSPORT_PLAY_SIZE / 2;
+#ifdef HAVE_SDL2_GFX
+      filledCircleRGBA(r, cx, cy, radius, ar, ag, ab, 255);
+#else
       SDL_SetRenderDrawColor(r, ar, ag, ab, 255);
       for (int dy = -radius; dy <= radius; dy++) {
          int dx = (int)sqrtf((float)(radius * radius - dy * dy));
          SDL_RenderDrawLine(r, cx - dx, cy + dy, cx + dx, cy + dy);
       }
+#endif
 
       int idx = (m->playing && !m->paused) ? 2 : 1; /* 2=pause, 1=play */
       if (m->transport_tex[idx]) {

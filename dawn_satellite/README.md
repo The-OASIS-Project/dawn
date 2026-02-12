@@ -117,7 +117,7 @@ sudo apt install -y \
     libjson-c-dev
 
 # Optional: SDL2 dependencies (for touchscreen UI - orb + transcript)
-sudo apt install -y libsdl2-dev libsdl2-ttf-dev libdrm-dev
+sudo apt install -y libsdl2-dev libsdl2-ttf-dev libsdl2-gfx-dev libdrm-dev
 
 # Optional: Music streaming support (Opus audio playback from daemon)
 sudo apt install -y libopus-dev
@@ -871,19 +871,19 @@ Supported formats: JPEG, PNG (will be scaled to display resolution).
 
 ### Theme Colors
 
-The UI uses the same color palette as the DAWN WebUI. To customize, edit `src/ui/ui_colors.h`:
+The UI ships with 5 switchable themes, selectable from the settings panel dot picker. The active theme is persisted in `satellite.toml` under `[sdl_ui] theme = "cyan"`.
 
-```c
-/* State colors */
-#define COLOR_SPEAKING_R 0x2D  /* Accent/cyan #2dd4bf */
-#define COLOR_SPEAKING_G 0xD4
-#define COLOR_SPEAKING_B 0xBF
+| Theme | Accent | Description |
+|-------|--------|-------------|
+| Cyan | `#2DD4BF` | Default — matches DAWN WebUI |
+| Purple | `#A855F7` | Vibrant purple accent |
+| Green | `#4ADE80` | Green accent (distinct from Listening state) |
+| Blue | `#3B82F6` | Cool blue accent |
+| Terminal | `#7FFF7F` | CRT-green with darker backgrounds and muted text |
 
-/* Alternative accent themes:
- * Purple: 0xA8, 0x55, 0xF7   #a855f7
- * Green:  0x7F, 0xFF, 0x7F   #7fff7f (terminal)
- */
-```
+Theme changes apply to all accent-colored elements (orb tint, music controls, progress bars, tab underlines, transcript labels) with a 200ms ease-out crossfade. State colors (listening/thinking/speaking/error) are fixed and never change with theme.
+
+See `src/ui/ui_theme.h` for the theme API and `src/ui/ui_colors.h` for fixed state colors.
 
 ## License
 

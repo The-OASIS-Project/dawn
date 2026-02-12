@@ -995,7 +995,7 @@ This phase addresses the architecture reviewer's critical finding: existing code
    - Streaming live transcript during LLM response
    - Inline markdown rendering (bold, italic, code spans, bullet points)
    - AI name in ALL CAPS, emoji stripping (font lacks emoji support)
-   - Date/time display (top-right, 12h format)
+   - Date/time display (top-right, configurable 12h/24h format)
    - WiFi signal strength bars (polled from /proc/net/wireless)
    - Status detail line (tool calls, thinking info from daemon)
    - User transcription display ("You: ..." after ASR completes)
@@ -1020,7 +1020,8 @@ This phase addresses the architecture reviewer's critical finding: existing code
 5. **Settings Enhancements**: ✅ COMPLETE
    - Brightness slider (sysfs backlight or SDL software dimming fallback for HDMI)
    - Volume slider (ALSA mixer control)
-   - Persistent brightness/volume across restarts (saved to config)
+   - 12/24-hour time format toggle (animated pill switch, updates transcript + screensaver clocks)
+   - Persistent brightness/volume/time format across restarts (saved to config)
 
 6. **Screensaver/Ambient Mode**: ✅ COMPLETE
    - **Clock mode**: Time (80pt mono) and date (24pt cyan) centered with Lissajous drift for burn-in prevention
@@ -1419,3 +1420,4 @@ name = "Guest Room"
 - v0.7 (Feb 2026): Music player panel complete (Playing/Queue/Library tabs, transport controls, visualizer, Opus audio streaming). Brightness and volume sliders in settings panel. Software dimming fallback for HDMI displays (sysfs backlight + SDL overlay). Paginated library browsing (50 items/page). Daemon-side satellite auth whitelist for music message handlers. Persistent brightness/volume settings across restarts.
 - v0.8 (Feb 2026): **Major architecture change** — Tier 2 (ESP32) now uses WebSocket + PCM audio instead of custom binary protocol. This completely eliminates DAP1. Both tiers connect to the same WebUI WebSocket port. Tier 2 reuses the WebUI's existing audio pipeline (binary message types 0x01/0x02/0x11/0x12, audio buffer, worker threads, sentence-level TTS streaming). Raw PCM at 16kHz for v1 (ADPCM optional for future v2). No music on Tier 2 v1.
 - v0.9 (Feb 2026): Screensaver/ambient mode complete. Two modes: clock (time/date with Lissajous drift, D.A.W.N. corner watermarks) and fullscreen rainbow FFT visualizer (64 Goertzel bins, dB-scale matching WebUI, peak hold, gradient reflections, two-line track info pill). Configurable idle timeout, manual trigger via visualizer tap, wake-word-only dismissal.
+- v1.0 (Feb 2026): Settings toggle for 12/24-hour time format (persisted, updates both clocks). Music progress bar now compensates for ring buffer + ALSA output latency (~680ms) so displayed position matches speaker output. Seek slider no longer snaps back during drag (incoming server position updates suppressed while seeking).

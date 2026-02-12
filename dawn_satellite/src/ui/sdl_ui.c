@@ -29,6 +29,9 @@
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
+#ifdef HAVE_SDL2_GFX
+#include <SDL2/SDL2_gfxPrimitives.h>
+#endif
 #include <arpa/inet.h>
 #include <ifaddrs.h>
 #include <math.h>
@@ -79,10 +82,10 @@
 #define THEME_DOTS_CX 770 /* Center X in slider track area */
 #define THEME_DOT_HIT 24  /* Touch hit half-width (48px meets Material Design 48dp) */
 
-/* Pre-computed scanline half-widths for radius=14 dot fill.
- * dx[dy] = (int)sqrtf(14*14 - dy*dy) for dy=0..14.
- * Eliminates ~145 sqrtf calls per frame while settings panel is open. */
-static const int DOT_DX[15] = { 14, 14, 14, 13, 13, 12, 12, 11, 10, 9, 8, 7, 5, 3, 0 };
+/* Fallback scanline half-widths for radius=14 dot fill (used without SDL2_gfx) */
+#ifndef HAVE_SDL2_GFX
+static const int DOT_DX[15] = { 14, 13, 13, 13, 13, 13, 12, 12, 11, 10, 9, 8, 7, 5, 0 };
+#endif
 #define INFO_ROW_COUNT 5      /* Server, Device, IP, Uptime, Session */
 #define ORB_HIT_RADIUS 180    /* Tap/long-press detection radius around orb center */
 #define SWIPE_ZONE_FRAC 0.20f /* Top 20% of screen for swipe-down trigger */
@@ -589,15 +592,25 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
    int dot_r = 5;
    int dot_cx = text_x + dot_r;
    int dot_cy = text_y + 8;
+   uint8_t dot_cr, dot_cg, dot_cb;
    if (connected) {
-      SDL_SetRenderDrawColor(r, COLOR_LISTENING_R, COLOR_LISTENING_G, COLOR_LISTENING_B, 255);
+      dot_cr = COLOR_LISTENING_R;
+      dot_cg = COLOR_LISTENING_G;
+      dot_cb = COLOR_LISTENING_B;
    } else {
-      SDL_SetRenderDrawColor(r, COLOR_ERROR_R, COLOR_ERROR_G, COLOR_ERROR_B, 255);
+      dot_cr = COLOR_ERROR_R;
+      dot_cg = COLOR_ERROR_G;
+      dot_cb = COLOR_ERROR_B;
    }
+#ifdef HAVE_SDL2_GFX
+   filledCircleRGBA(r, dot_cx, dot_cy, dot_r, dot_cr, dot_cg, dot_cb, 255);
+#else
+   SDL_SetRenderDrawColor(r, dot_cr, dot_cg, dot_cb, 255);
    for (int y = -dot_r; y <= dot_r; y++) {
       int dx = (int)sqrtf((float)(dot_r * dot_r - y * y));
       SDL_RenderDrawLine(r, dot_cx - dx, dot_cy + y, dot_cx + dx, dot_cy + y);
    }
+#endif
 
    /* Connection status text (pre-rendered, no per-frame texture churn) */
    SDL_Texture *status_tex = connected ? ui->panel_cache.connected_tex
@@ -692,6 +705,10 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
       uint8_t tr_b = (uint8_t)(0x3C + t * (ac.b - 0x3C));
       SDL_SetRenderDrawColor(r, tr_r, tr_g, tr_b, 255);
 
+#ifdef HAVE_SDL2_GFX
+      roundedBoxRGBA(r, toggle_x, toggle_y, toggle_x + toggle_w - 1, toggle_y + toggle_h - 1,
+                     radius, tr_r, tr_g, tr_b, 255);
+#else
       /* Center rectangle */
       SDL_Rect trk_center = { toggle_x + radius, toggle_y, toggle_w - 2 * radius, toggle_h };
       SDL_RenderFillRect(r, &trk_center);
@@ -703,6 +720,7 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
          SDL_RenderDrawLine(r, toggle_x + toggle_w - radius, cy, toggle_x + toggle_w - radius + dx,
                             cy);
       }
+#endif
 
       /* Knob (white filled circle, 20px diameter, 2px inset) */
       int knob_r = 10;
@@ -710,11 +728,15 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
       int knob_x_max = toggle_x + toggle_w - 2 - knob_r;
       int knob_cx = knob_x_min + (int)(ui->knob_anim * (float)(knob_x_max - knob_x_min));
       int knob_cy = toggle_y + toggle_h / 2;
+#ifdef HAVE_SDL2_GFX
+      filledCircleRGBA(r, knob_cx, knob_cy, knob_r, 255, 255, 255, 255);
+#else
       SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
       for (int dy = -knob_r; dy <= knob_r; dy++) {
          int dx = (int)sqrtf((float)(knob_r * knob_r - dy * dy));
          SDL_RenderDrawLine(r, knob_cx - dx, knob_cy + dy, knob_cx + dx, knob_cy + dy);
       }
+#endif
 
       /* "12H" label (left of toggle) — accent when active, secondary when inactive */
       if (ui->t12h_tex) {
@@ -766,19 +788,28 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
          /* Active dot: white ring (2px wider than fill) */
          if ((ui_theme_id_t)d == current_id) {
             int ring_r = THEME_DOT_RADIUS + 2;
+#ifdef HAVE_SDL2_GFX
+            filledCircleRGBA(r, dcx, dcy, ring_r, 255, 255, 255, 255);
+#else
             SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
             for (int dy = -ring_r; dy <= ring_r; dy++) {
                int dx = (int)sqrtf((float)(ring_r * ring_r - dy * dy));
                SDL_RenderDrawLine(r, dcx - dx, dcy + dy, dcx + dx, dcy + dy);
             }
+#endif
          }
 
-         /* Filled dot with theme's accent color (pre-computed scanlines) */
+         /* Filled dot with theme's accent color */
+#ifdef HAVE_SDL2_GFX
+         filledCircleRGBA(r, dcx, dcy, THEME_DOT_RADIUS, def->accent.r, def->accent.g,
+                          def->accent.b, 255);
+#else
          SDL_SetRenderDrawColor(r, def->accent.r, def->accent.g, def->accent.b, 255);
          for (int dy = -THEME_DOT_RADIUS; dy <= THEME_DOT_RADIUS; dy++) {
             int dx = DOT_DX[dy < 0 ? -dy : dy];
             SDL_RenderDrawLine(r, dcx - dx, dcy + dy, dcx + dx, dcy + dy);
          }
+#endif
       }
    }
 

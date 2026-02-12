@@ -408,6 +408,17 @@ enabled = true   # Activate after idle timeout
 timeout = 120    # Seconds of inactivity before activation (30-600)
 
 # =============================================================================
+# SDL2 Touchscreen UI
+# =============================================================================
+[sdl_ui]
+enabled = false       # Requires libsdl2-dev libsdl2-ttf-dev, build with -DENABLE_SDL_UI=ON
+width = 1024          # Display resolution
+height = 600
+brightness = 100      # Saved brightness (10-100)
+volume_pct = 80       # Saved volume (0-100)
+time_24h = false      # 12-hour (false) or 24-hour (true) clock format
+
+# =============================================================================
 # Logging
 # =============================================================================
 [logging]
@@ -515,6 +526,9 @@ sudo apt install -y \
 
 # Optional: GPIO support (for Tier 2 push-to-talk or development)
 sudo apt install -y libgpiod-dev
+
+# Optional: SDL2 touchscreen UI (7" display with settings panel, themes)
+sudo apt install -y libsdl2-dev libsdl2-ttf-dev libsdl2-gfx-dev
 ```
 
 **Dependency versions (Raspberry Pi OS Bookworm):**
@@ -524,6 +538,9 @@ sudo apt install -y libgpiod-dev
 | libwebsockets | 4.3+ | WebSocket client |
 | libjson-c | 0.16+ | JSON parsing |
 | libasound2 | 1.2+ | ALSA audio |
+| libsdl2 | 2.0.20+ | Optional: touchscreen UI |
+| libsdl2-ttf | 2.0.18+ | Optional: UI text rendering |
+| libsdl2-gfx | 1.0.4+ | Optional: smooth circle primitives (fallback: scanline fill) |
 
 ### Step 3: Clone and Build
 
@@ -574,6 +591,7 @@ This installs:
 | `ENABLE_TTS` | ON | Piper TTS (requires ONNX Runtime) |
 | `ENABLE_DAP2` | ON | WebSocket text protocol (Tier 1) |
 | `ENABLE_NEOPIXEL` | OFF | NeoPixel LED support (optional) |
+| `ENABLE_SDL_UI` | OFF | SDL2 touchscreen UI (requires libsdl2-dev, libsdl2-ttf-dev; libsdl2-gfx-dev optional for smooth circles) |
 | `ENABLE_DISPLAY` | OFF | Framebuffer display support (optional) |
 | `CMAKE_BUILD_TYPE` | Release | Use `Debug` for development |
 
@@ -812,18 +830,20 @@ wscat -c ws://localhost:8080
 
 31. **Brightness slider** - sysfs backlight control for DSI displays, software dimming fallback for HDMI
 32. **Volume slider** - ALSA mixer control from settings panel
-33. **Persistent settings** - Brightness and volume saved to config file across restarts
+33. **Persistent settings** - Brightness, volume, and time format saved to config file across restarts
+34. **12/24-hour time toggle** - Animated toggle in settings panel; applies to both main clock and screensaver
+35. **Buffer-compensated position** - Music progress bar subtracts ring buffer + ALSA delay for accurate display
 
 ### Implemented — Screensaver / Ambient Mode
 
-34. **Clock mode** - Time and date centered with Lissajous drift for burn-in prevention
-35. **"D.A.W.N." watermarks** - Corner watermarks with sine-pulse fade animation
-36. **Fullscreen rainbow visualizer** - 64-bin Goertzel FFT spectrum with HSV color cycling, peak hold, gradient reflections
-37. **Track info pill** - Two-line display (large title, smaller album/artist) with fade-in/out on track change
-38. **dB-scale spectrum** - Matches WebUI's getByteFrequencyData approach (60dB range, 0.7 gamma)
-39. **Auto-activation** - Configurable idle timeout (default 120s), panels block timer
-40. **Manual trigger** - Tap music panel visualizer to enter fullscreen mode
-41. **Wake word dismissal** - Only dismissed by wake word detection, not simple VAD
+36. **Clock mode** - Time and date centered with Lissajous drift for burn-in prevention
+37. **"D.A.W.N." watermarks** - Corner watermarks with sine-pulse fade animation
+38. **Fullscreen rainbow visualizer** - 64-bin Goertzel FFT spectrum with HSV color cycling, peak hold, gradient reflections
+39. **Track info pill** - Two-line display (large title, smaller album/artist) with fade-in/out on track change
+40. **dB-scale spectrum** - Matches WebUI's getByteFrequencyData approach (60dB range, 0.7 gamma)
+41. **Auto-activation** - Configurable idle timeout (default 120s), panels block timer
+42. **Manual trigger** - Tap music panel visualizer to enter fullscreen mode
+43. **Wake word dismissal** - Only dismissed by wake word detection, not simple VAD
 
 ### Implemented — Reliability & Bug Fixes
 

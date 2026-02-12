@@ -28,6 +28,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#ifdef HAVE_SDL2_GFX
+#include <SDL2/SDL2_gfxPrimitives.h>
+#endif
 
 #include "logging.h"
 #include "tts/tts_preprocessing.h"
@@ -432,12 +435,17 @@ static SDL_Texture *build_music_note_icon(SDL_Renderer *r, int sz) {
    SDL_RenderDrawLine(r, lstem_x, lstem_top, rstem_x + 1, rstem_top);
    SDL_RenderDrawLine(r, lstem_x, lstem_top + 1, rstem_x + 1, rstem_top + 1);
 
-   /* Filled note heads (circles via scanline) */
+   /* Filled note heads */
+#ifdef HAVE_SDL2_GFX
+   filledCircleRGBA(r, lhx, lhy, head_r, 255, 255, 255, 255);
+   filledCircleRGBA(r, rhx, rhy, head_r, 255, 255, 255, 255);
+#else
    for (int dy = -head_r; dy <= head_r; dy++) {
       int dx = (int)sqrtf((float)(head_r * head_r - dy * dy));
       SDL_RenderDrawLine(r, lhx - dx, lhy + dy, lhx + dx, lhy + dy);
       SDL_RenderDrawLine(r, rhx - dx, rhy + dy, rhx + dx, rhy + dy);
    }
+#endif
 
    SDL_SetRenderTarget(r, NULL);
    return tex;
