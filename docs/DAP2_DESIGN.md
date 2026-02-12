@@ -970,7 +970,7 @@ This phase addresses the architecture reviewer's critical finding: existing code
 
 ### Phase 3.5: Touchscreen UI (SDL2)
 
-**Status**: 🔨 **IN PROGRESS** (visualization, transcript, touch scroll, settings panel, music panel, screensaver complete; theme support remaining)
+**Status**: ✅ **COMPLETE**
 
 **Goal**: Premium touchscreen interface for Tier 1 satellites with attached displays
 
@@ -1023,6 +1023,16 @@ This phase addresses the architecture reviewer's critical finding: existing code
    - 12/24-hour time format toggle (animated pill switch, updates transcript + screensaver clocks)
    - Persistent brightness/volume/time format across restarts (saved to config)
 
+6. **Theme System**: ✅ COMPLETE
+   - 5 runtime-switchable themes: Cyan (default), Purple, Blue, Green, Terminal
+   - Dot picker in settings panel for theme selection
+   - 200ms ease-out cubic crossfade transitions between themes
+   - Per-theme accent, accent_dim, background (3 levels), and text (3 levels) colors
+   - Terminal theme has distinct darker backgrounds and muted text for CRT aesthetic
+   - State colors (listening/thinking/speaking/error) are fixed and never change with theme
+   - Active theme persisted to `satellite.toml` under `[sdl_ui] theme = "cyan"`
+   - All accent-colored elements update: orb tint, music controls, progress bars, tab underlines, transcript labels, slider fills, screensaver elements
+
 6. **Screensaver/Ambient Mode**: ✅ COMPLETE
    - **Clock mode**: Time (80pt mono) and date (24pt cyan) centered with Lissajous drift for burn-in prevention
    - **"D.A.W.N." watermarks**: All four corners with sine-pulse fade animation (8s period)
@@ -1034,7 +1044,7 @@ This phase addresses the architecture reviewer's critical finding: existing code
    - **Wake word dismissal**: Only dismissed by wake word detection (SILENCE→non-SILENCE), not simple VAD
    - **Frame rate management**: 30 FPS visualizer, 10 FPS clock, main scene skipped when screensaver opaque
 
-#### Touch Interactions — 🔨 MOSTLY COMPLETE
+#### Touch Interactions — ✅ COMPLETE
 
 | Gesture | Action | Status |
 |---------|--------|--------|
@@ -1099,6 +1109,8 @@ dawn_satellite/src/ui/
 ├── ui_touch.h          # Touch state types
 ├── ui_screensaver.c    # Screensaver (clock + fullscreen rainbow visualizer)
 ├── ui_screensaver.h    # Screensaver types and API
+├── ui_theme.c          # 5-theme table with 200ms crossfade transitions
+├── ui_theme.h          # Theme system API (set, tick, accessors)
 ├── ui_colors.h         # Color constants, HSV conversion, easing utilities
 ├── backlight.c         # Display brightness (sysfs + software dimming fallback)
 └── backlight.h         # Backlight control API
@@ -1107,7 +1119,7 @@ dawn_satellite/src/ui/
 #### Dependencies
 
 ```bash
-sudo apt install libsdl2-dev libsdl2-ttf-dev libsdl2-image-dev libdrm-dev
+sudo apt install libsdl2-dev libsdl2-ttf-dev libsdl2-gfx-dev libdrm-dev
 sudo usermod -aG video,render $USER
 ```
 
@@ -1116,9 +1128,9 @@ sudo usermod -aG video,render $USER
 - Touch gesture system ✅
 - Screensaver with clock + fullscreen rainbow visualizer ✅
 - Media player panel (Playing/Queue/Library) ✅
-- Theme support (cyan, purple, terminal green)
+- 5-theme system with dot picker, crossfade transitions, and TOML persistence ✅
 
-**Exit Criteria**: UI indistinguishable from premium smart home device, <16ms frame time
+**Exit Criteria**: UI indistinguishable from premium smart home device, <16ms frame time ✅
 
 ---
 
@@ -1421,3 +1433,4 @@ name = "Guest Room"
 - v0.8 (Feb 2026): **Major architecture change** — Tier 2 (ESP32) now uses WebSocket + PCM audio instead of custom binary protocol. This completely eliminates DAP1. Both tiers connect to the same WebUI WebSocket port. Tier 2 reuses the WebUI's existing audio pipeline (binary message types 0x01/0x02/0x11/0x12, audio buffer, worker threads, sentence-level TTS streaming). Raw PCM at 16kHz for v1 (ADPCM optional for future v2). No music on Tier 2 v1.
 - v0.9 (Feb 2026): Screensaver/ambient mode complete. Two modes: clock (time/date with Lissajous drift, D.A.W.N. corner watermarks) and fullscreen rainbow FFT visualizer (64 Goertzel bins, dB-scale matching WebUI, peak hold, gradient reflections, two-line track info pill). Configurable idle timeout, manual trigger via visualizer tap, wake-word-only dismissal.
 - v1.0 (Feb 2026): Settings toggle for 12/24-hour time format (persisted, updates both clocks). Music progress bar now compensates for ring buffer + ALSA output latency (~680ms) so displayed position matches speaker output. Seek slider no longer snaps back during drag (incoming server position updates suppressed while seeking).
+- v1.1 (Feb 2026): **Phase 3.5 COMPLETE.** 5-theme system (Cyan, Purple, Green, Blue, Terminal) with dot picker in settings, 200ms ease-out crossfade, per-theme accent/background/text colors, TOML persistence. SDL2_gfx circle primitives for smoother orb rendering. Music playback architecture replaced: lock-free SPSC ring buffer with LWS-thread drain eliminates relay thread and fixes underruns. ALSA start_threshold prevents initial underruns.

@@ -84,6 +84,12 @@ chip = "gpiochip0"
 button_pin = 17
 button_active_low = true
 
+# Discrete RGB LED pins (BCM numbering, -1 = disabled)
+# For custom builds with individual R/G/B indicator LEDs
+led_red_pin = -1
+led_green_pin = -1
+led_blue_pin = -1
+
 # =============================================================================
 # Hardware - NeoPixel/WS2812 LEDs (optional, for Tier 2 or custom builds)
 # =============================================================================

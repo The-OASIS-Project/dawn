@@ -13,8 +13,10 @@ A smart voice satellite client for the DAWN voice assistant system. Runs on Rasp
 - **Offline fallback** - Local TTS "I can't reach the server"
 - **Full tool support** - Same capabilities as main daemon
 - **Dual ASR engines** - Vosk (default, streaming) or Whisper (batch, higher accuracy)
-- **Music streaming** - Opus audio from daemon with ALSA playback and live FFT visualizer
-- **Touchscreen UI** - SDL2 orb visualization, scrollable transcript, music player panel, settings
+- **Music streaming** - Opus audio from daemon with lock-free ring buffer + LWS-thread drain playback
+- **Touchscreen UI** - SDL2 orb visualization, scrollable transcript, music player, screensaver, 5 themes
+- **5 color themes** - Cyan, Purple, Green, Blue, Terminal with dot picker, crossfade, and TOML persistence
+- **Screensaver** - Clock mode with Lissajous drift + fullscreen rainbow FFT visualizer
 - **Brightness/volume control** - Sliders in settings panel, sysfs backlight + software dimming fallback
 
 ## ASR Engine Comparison
@@ -484,6 +486,7 @@ height = 600                 # Display height (default: 600)
 font_dir = "assets/fonts"    # Path to TTF font files
 brightness = 255             # Display brightness 0-255 (persisted across restarts)
 volume = 80                  # System volume 0-100 (persisted across restarts)
+theme = "cyan"               # Color theme: cyan, purple, green, blue, terminal
 ```
 
 #### [processing]
@@ -745,18 +748,18 @@ sudo systemctl restart dawn-satellite
 |  +-------------------------------------------------------------+ |
 |  |              SDL2 Touchscreen UI (Optional)                  | |
 |  |                                                              | |
-|  |  +----------+ +-------------+ +------------+ +----------+   | |
-|  |  |   Orb    | | Transcript  | |   Quick    | |  Music   |   | |
-|  |  |Visualize | |  Display    | |  Actions   | |  Panel   |   | |
-|  |  +----------+ +-------------+ +------------+ +----------+   | |
+|  |  +----------+ +-------------+ +----------+ +-----------+    | |
+|  |  |   Orb    | | Transcript  | |  Music   | |Screensaver|    | |
+|  |  |Visualize | |  Display    | |  Panel   | |Clock+FFT  |    | |
+|  |  +----------+ +-------------+ +----------+ +-----------+    | |
 |  |                                                              | |
-|  |  Settings: Brightness/Volume  |  Screensaver (future)        | |
+|  |  Settings: Brightness/Volume/Theme | 5 Themes + Dot Picker  | |
 |  +-------------------------------------------------------------+ |
 |                              |                                    |
 |  +-------------------------------------------------------------+ |
-|  |                   music_stream.c                             | |
-|  |  Opus audio WebSocket (separate connection)                  | |
-|  |  Opus decode -> ALSA playback -> Goertzel FFT visualizer    | |
+|  |             music_playback.c + music_stream.c               | |
+|  |  Opus decode -> SPSC ring buffer -> LWS-thread ALSA drain  | |
+|  |  Goertzel FFT visualizer from live audio stream             | |
 |  +-------------------------------------------------------------+ |
 +------------------------------------------------------------------+
                                |

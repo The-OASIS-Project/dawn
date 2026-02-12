@@ -294,8 +294,9 @@ struct music_playback;
 /**
  * @brief Set music playback for TTS arbitration
  *
- * When set, voice processing will pause music playback during TTS output
- * and resume it when returning to silence.
+ * When set, voice processing will duck music volume to 30% during voice
+ * detection (wake word, command recording, processing) and pause music
+ * during TTS output. Volume restores after 2s of silence.
  *
  * @param ctx Voice processing context
  * @param pb Music playback engine (not owned)

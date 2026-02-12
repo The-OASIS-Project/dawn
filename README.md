@@ -54,8 +54,10 @@ DAWN is designed for embedded Linux platforms (Jetson, Raspberry Pi) and support
   - **Tier 2** (ESP32): Audio path — streams raw PCM, server-side ASR/TTS, push-to-talk
   - Capability-based routing: daemon auto-selects text or audio path per satellite
   - SDL2 touchscreen UI with KMSDRM backend (no X11 required)
-  - Music streaming via Opus audio over a dedicated WebSocket (Tier 1)
+  - **5 color themes** — Cyan, Purple, Green, Blue, Terminal with dot picker and crossfade transitions
+  - Music streaming via Opus with lock-free ring buffer + LWS-thread drain (Tier 1)
   - Goertzel FFT visualizer driven by live audio stream
+  - Screensaver/ambient mode: clock with Lissajous drift + fullscreen rainbow FFT visualizer
   - Brightness and volume sliders with sysfs backlight + software dimming fallback
   - See [dawn_satellite/README.md](dawn_satellite/README.md) for details
 

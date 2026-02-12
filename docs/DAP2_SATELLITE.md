@@ -271,6 +271,8 @@ dawn_satellite/
 │       ├── ui_touch.h          # Touch state types
 │       ├── ui_screensaver.c    # Screensaver (clock + fullscreen visualizer)
 │       ├── ui_screensaver.h    # Screensaver types and API
+│       ├── ui_theme.c          # 5-theme system with crossfade transitions
+│       ├── ui_theme.h          # Theme API (set, tick, accessors)
 │       ├── ui_colors.h         # Color constants + HSV/easing utilities
 │       ├── backlight.c         # Display brightness control
 │       └── backlight.h         # Backlight API (sysfs + software fallback)
@@ -417,6 +419,7 @@ height = 600
 brightness = 100      # Saved brightness (10-100)
 volume_pct = 80       # Saved volume (0-100)
 time_24h = false      # 12-hour (false) or 24-hour (true) clock format
+theme = "cyan"        # UI color theme: cyan, purple, green, blue, terminal
 
 # =============================================================================
 # Logging
@@ -527,7 +530,7 @@ sudo apt install -y \
 # Optional: GPIO support (for Tier 2 push-to-talk or development)
 sudo apt install -y libgpiod-dev
 
-# Optional: SDL2 touchscreen UI (7" display with settings panel, themes)
+# Optional: SDL2 touchscreen UI (7" display with themes, music, screensaver)
 sudo apt install -y libsdl2-dev libsdl2-ttf-dev libsdl2-gfx-dev
 ```
 
@@ -591,7 +594,7 @@ This installs:
 | `ENABLE_TTS` | ON | Piper TTS (requires ONNX Runtime) |
 | `ENABLE_DAP2` | ON | WebSocket text protocol (Tier 1) |
 | `ENABLE_NEOPIXEL` | OFF | NeoPixel LED support (optional) |
-| `ENABLE_SDL_UI` | OFF | SDL2 touchscreen UI (requires libsdl2-dev, libsdl2-ttf-dev; libsdl2-gfx-dev optional for smooth circles) |
+| `ENABLE_SDL_UI` | OFF | SDL2 touchscreen UI with 5-theme system (requires libsdl2-dev, libsdl2-ttf-dev; libsdl2-gfx-dev optional for smooth circles) |
 | `ENABLE_DISPLAY` | OFF | Framebuffer display support (optional) |
 | `CMAKE_BUILD_TYPE` | Release | Use `Debug` for development |
 
@@ -830,9 +833,12 @@ wscat -c ws://localhost:8080
 
 31. **Brightness slider** - sysfs backlight control for DSI displays, software dimming fallback for HDMI
 32. **Volume slider** - ALSA mixer control from settings panel
-33. **Persistent settings** - Brightness, volume, and time format saved to config file across restarts
+33. **Persistent settings** - Brightness, volume, time format, and theme saved to config file across restarts
 34. **12/24-hour time toggle** - Animated toggle in settings panel; applies to both main clock and screensaver
 35. **Buffer-compensated position** - Music progress bar subtracts ring buffer + ALSA delay for accurate display
+36. **5-theme system** - Cyan, Purple, Green, Blue, Terminal with dot picker, 200ms crossfade, TOML persistence
+37. **SDL2_gfx circle primitives** - Smooth anti-aliased circles for orb rendering (fallback to scanline fill without library)
+38. **Lock-free music playback** - SPSC ring buffer with LWS-thread drain eliminates relay thread and playback underruns
 
 ### Implemented — Screensaver / Ambient Mode
 
@@ -859,9 +865,10 @@ wscat -c ws://localhost:8080
 1. [ ] **Barge-in support** - Interrupt TTS by speaking (stubbed, not connected)
 2. [x] ~~**Quick actions panel**~~ - Replaced by status bar icon pattern (icons appear in transcript header as features ship)
 3. [x] ~~**Screensaver / ambient mode**~~ - Clock with Lissajous drift + fullscreen rainbow FFT visualizer
-4. [ ] **TTS ducking during music** - Lower music volume during speech output
-5. [ ] **Multi-satellite routing** - Daemon routes by location
-6. [ ] **Speaker identification** - Personalized responses per user
+4. [x] ~~**Theme support**~~ - 5-theme system (Cyan, Purple, Green, Blue, Terminal) with dot picker, crossfade, TOML persistence
+5. [x] ~~**TTS ducking during music**~~ - Volume ducks to 30% during voice activity (wake word, recording, processing), hard-pauses during TTS
+6. [ ] **Multi-satellite routing** - Daemon routes by location
+7. [ ] **Speaker identification** - Personalized responses per user
 
 ## Troubleshooting
 

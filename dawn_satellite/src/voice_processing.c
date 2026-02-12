@@ -78,6 +78,10 @@
 /* Barge-in threshold (interrupt TTS playback) */
 #define BARGEIN_THRESHOLD 0.7f
 
+/* Music ducking during voice activity */
+#define MUSIC_DUCK_FACTOR 0.3f        /* Reduce to 30% during voice activity */
+#define MUSIC_DUCK_RESTORE_DELAY 2.0f /* Seconds of silence before restoring */
+
 /* Maximum audio buffer (15s * 16kHz * 2 bytes = 480KB) */
 #define MAX_AUDIO_BUFFER_SAMPLES (15 * SAMPLE_RATE)
 
@@ -194,7 +198,10 @@ struct voice_ctx {
    /* Music playback for TTS arbitration (pause/resume around TTS) */
 #ifdef HAVE_OPUS
    struct music_playback *music_pb;
-   bool music_was_playing; /* True if music was paused for TTS */
+   bool music_was_playing;           /* True if music was paused for TTS */
+   bool music_ducked;                /* True if volume is currently ducked */
+   int music_pre_duck_volume;        /* Volume (0-100) before ducking */
+   struct timespec music_last_voice; /* Last voice activity timestamp */
 #endif
 
    /* Touch-triggered flags (set from UI thread, consumed in voice loop) */
@@ -828,6 +835,8 @@ void voice_processing_set_music_playback(voice_ctx_t *ctx, struct music_playback
    if (ctx) {
       ctx->music_pb = pb;
       ctx->music_was_playing = false;
+      ctx->music_ducked = false;
+      ctx->music_pre_duck_volume = 0;
    }
 }
 #endif
@@ -1048,6 +1057,19 @@ int voice_processing_loop(voice_ctx_t *ctx,
                tts_playback_queue_flush(ctx->tts_queue);
             }
 #endif
+#ifdef HAVE_OPUS
+            /* Immediately restore music on cancel (no 2s cooldown) */
+            if (ctx->music_pb) {
+               if (ctx->music_ducked) {
+                  music_playback_set_volume(ctx->music_pb, ctx->music_pre_duck_volume);
+                  ctx->music_ducked = false;
+               }
+               if (ctx->music_was_playing) {
+                  music_playback_resume(ctx->music_pb);
+                  ctx->music_was_playing = false;
+               }
+            }
+#endif
             ctx->speech_frame_count = 0;
             ctx->silence_frame_count = 0;
             ctx->awaiting_speech = false;
@@ -1064,17 +1086,71 @@ int voice_processing_loop(voice_ctx_t *ctx,
       clock_gettime(CLOCK_MONOTONIC, &t1);
 
 #ifdef HAVE_OPUS
-      /* Music/TTS arbitration: pause music when TTS is about to play,
-       * resume when returning to silence. Checked every iteration. */
+      /* Music/voice arbitration: duck volume during voice activity,
+       * hard-pause during TTS, restore after 2s of silence. */
       if (ctx->music_pb) {
+         bool playing = music_playback_is_playing(ctx->music_pb);
          bool tts_active = (ctx->state == VOICE_STATE_WAITING ||
                             ctx->state == VOICE_STATE_SPEAKING);
-         if (tts_active && !ctx->music_was_playing && music_playback_is_playing(ctx->music_pb)) {
+         /* State-based trigger (not raw VAD): ducking activates once the state
+          * machine confirms voice activity, avoiding false triggers from ambient
+          * noise. This differs from the daemon which ducks on per-frame VAD. */
+         bool voice_active = (ctx->state == VOICE_STATE_WAKEWORD_LISTEN ||
+                              ctx->state == VOICE_STATE_COMMAND_RECORDING ||
+                              ctx->state == VOICE_STATE_PROCESSING);
+
+         if ((voice_active || tts_active) && playing) {
+            /* Update last-active timestamp (restore timer starts from here) */
+            ctx->music_last_voice = t1;
+            if (!ctx->music_ducked) {
+               ctx->music_pre_duck_volume = music_playback_get_volume(ctx->music_pb);
+               int ducked = (int)(ctx->music_pre_duck_volume * MUSIC_DUCK_FACTOR);
+               if (ducked < 1)
+                  ducked = 1;
+               music_playback_set_volume(ctx->music_pb, ducked);
+               ctx->music_ducked = true;
+               LOG_INFO("Music ducked: %d -> %d", ctx->music_pre_duck_volume, ducked);
+            }
+         }
+
+         /* Pause for TTS (after ducking, so volume is already low) */
+         if (tts_active && !ctx->music_was_playing && playing) {
             music_playback_pause(ctx->music_pb);
             ctx->music_was_playing = true;
-         } else if (!tts_active && ctx->music_was_playing) {
-            music_playback_resume(ctx->music_pb);
-            ctx->music_was_playing = false;
+         }
+
+         /* Resume + restore when back in SILENCE */
+         if (ctx->state == VOICE_STATE_SILENCE) {
+            if (ctx->music_was_playing) {
+               music_playback_resume(ctx->music_pb);
+               ctx->music_was_playing = false;
+            }
+            if (ctx->music_ducked) {
+               double elapsed = (t1.tv_sec - ctx->music_last_voice.tv_sec) +
+                                (t1.tv_nsec - ctx->music_last_voice.tv_nsec) / 1e9;
+               if (elapsed >= MUSIC_DUCK_RESTORE_DELAY) {
+                  /* Only restore if volume wasn't changed externally (e.g. slider) */
+                  int current = music_playback_get_volume(ctx->music_pb);
+                  int expected = (int)(ctx->music_pre_duck_volume * MUSIC_DUCK_FACTOR);
+                  if (expected < 1)
+                     expected = 1;
+                  if (current == expected) {
+                     music_playback_set_volume(ctx->music_pb, ctx->music_pre_duck_volume);
+                     LOG_INFO("Music restored: %d (%.1fs)", ctx->music_pre_duck_volume, elapsed);
+                  } else {
+                     LOG_INFO("Music duck restore skipped: volume changed externally (%d != %d)",
+                              current, expected);
+                  }
+                  ctx->music_ducked = false;
+               }
+            }
+         }
+
+         /* Cleanup: music stopped externally while ducked.
+          * Also handles the TOCTOU race where is_playing() returned true
+          * above but music stopped before set_volume() executed. */
+         if (ctx->music_ducked && !playing && !ctx->music_was_playing) {
+            ctx->music_ducked = false;
          }
       }
 #endif
