@@ -18,7 +18,7 @@
  * enhancements, or additions to the project. These contributions become
  * part of the project and are adopted by the project author(s).
  *
- * Music Playback Engine - Opus decode + PCM ring buffer + ALSA output
+ * Music Playback Engine - Linear Opus decode to ALSA
  */
 
 #ifndef MUSIC_PLAYBACK_H
@@ -45,7 +45,7 @@ typedef struct music_playback music_playback_t;
 
 /**
  * Create music playback context.
- * Allocates OpusDecoder (48kHz stereo), ring buffer, and starts consumer thread.
+ * Allocates OpusDecoder (48kHz stereo). No threads or buffers are created.
  *
  * @param audio Shared ALSA playback context (not owned, must outlive this object)
  * @return New context, or NULL on failure
@@ -53,14 +53,15 @@ typedef struct music_playback music_playback_t;
 music_playback_t *music_playback_create(audio_playback_t *audio);
 
 /**
- * Destroy music playback context. Stops consumer thread, frees all resources.
+ * Destroy music playback context. Frees all resources.
  */
 void music_playback_destroy(music_playback_t *ctx);
 
 /**
  * Push an Opus frame for decoding and playback.
- * Decodes to PCM and pushes into ring buffer. Thread-safe.
- * Blocks if ring buffer is full (backpressure to network).
+ * Decodes to PCM and writes directly to ALSA via play_stereo.
+ * Blocks until ALSA hardware buffer has space (~10ms per period).
+ * Auto-starts playback on first frame (IDLE → PLAYING).
  *
  * @param ctx Playback context
  * @param opus_data Raw Opus frame bytes
@@ -70,19 +71,18 @@ void music_playback_destroy(music_playback_t *ctx);
 int music_playback_push_opus(music_playback_t *ctx, const uint8_t *opus_data, int opus_len);
 
 /**
- * Stop playback and flush ring buffer. Transitions to IDLE.
+ * Stop playback and flush ALSA. Transitions to IDLE.
  */
 void music_playback_stop(music_playback_t *ctx);
 
 /**
- * Flush ring buffer without stopping (for seek/skip).
- * Consumer thread continues running but ring is cleared.
+ * Flush ALSA without changing state (for seek/skip).
+ * Resets Opus decoder for clean decode at new position.
  */
 void music_playback_flush(music_playback_t *ctx);
 
 /**
- * Pause playback (consumer thread stops draining to ALSA).
- * Ring buffer continues accumulating from network.
+ * Pause playback. Incoming Opus frames are dropped until resume.
  */
 void music_playback_pause(music_playback_t *ctx);
 
@@ -112,7 +112,7 @@ music_pb_state_t music_playback_get_state(music_playback_t *ctx);
 bool music_playback_is_playing(music_playback_t *ctx);
 
 /**
- * Get total buffered audio in milliseconds (ring buffer + ALSA output buffer).
+ * Get buffered audio in milliseconds (ALSA output buffer).
  * Used to compensate server-reported position for accurate display.
  */
 int music_playback_get_buffered_ms(music_playback_t *ctx);

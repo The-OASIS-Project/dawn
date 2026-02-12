@@ -119,6 +119,13 @@ int audio_playback_play_stereo(audio_playback_t *ctx,
                                atomic_int *stop_flag);
 
 /**
+ * Re-prepare ALSA device (e.g. after pause/TTS interruption).
+ *
+ * @param ctx Pointer to playback context
+ */
+void audio_playback_prepare(audio_playback_t *ctx);
+
+/**
  * Stop any ongoing playback
  *
  * @param ctx Pointer to playback context

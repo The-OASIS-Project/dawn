@@ -236,6 +236,14 @@ void audio_playback_cleanup(audio_playback_t *ctx) {
    }
 }
 
+void audio_playback_prepare(audio_playback_t *ctx) {
+   if (ctx && ctx->handle) {
+      pthread_mutex_lock(&ctx->alsa_mutex);
+      snd_pcm_prepare((snd_pcm_t *)ctx->handle);
+      pthread_mutex_unlock(&ctx->alsa_mutex);
+   }
+}
+
 void audio_playback_stop(audio_playback_t *ctx) {
    if (ctx && ctx->handle) {
       pthread_mutex_lock(&ctx->alsa_mutex);

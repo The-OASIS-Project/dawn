@@ -62,7 +62,7 @@
 #define VIZ_MARGIN 8
 #define VIZ_MAX_HEIGHT 500
 #define VIZ_HUE_SPEED 15.0f         /* Degrees per second */
-#define VIZ_REFLECTION_ALPHA 0.18f  /* Reflection base opacity */
+#define VIZ_REFLECTION_ALPHA 0.35f  /* Reflection base opacity */
 #define VIZ_REFLECTION_HEIGHT 0.30f /* Reflection height ratio */
 #define VIZ_REFLECTION_STRIPS 4     /* Gradient fade strips */
 #define VIZ_PEAK_HOLD_SEC 0.3f      /* Hold time before decay */
@@ -900,26 +900,23 @@ const char *ui_screensaver_handle_tap(const ui_screensaver_t *ss, int x, int y, 
    int base_x = ss->screen_w - TRANSPORT_MARGIN - total_w;
    int base_y = ss->screen_h - TRANSPORT_MARGIN - TRANSPORT_HIT_SZ;
 
-   /* Check if tap is within the transport row bounding box */
-   if (y < base_y || y > base_y + TRANSPORT_HIT_SZ)
+   /* Expand vertical hit area by 12px each side for fat-finger tolerance */
+   if (y < base_y - 12 || y > base_y + TRANSPORT_HIT_SZ + 12)
       return NULL;
    if (x < base_x || x > base_x + total_w)
       return NULL;
 
-   /* Determine which button was hit */
-   for (int b = 0; b < btn_count; b++) {
-      int bx = base_x + b * (TRANSPORT_HIT_SZ + TRANSPORT_GAP);
-      if (x >= bx && x < bx + TRANSPORT_HIT_SZ) {
-         if (b == 0)
-            return "previous";
-         if (b == 1)
-            return playing ? "pause" : "play";
-         if (b == 2)
-            return "next";
-      }
-   }
+   /* Divide row into equal zones (no dead gaps between buttons) */
+   int zone_w = total_w / btn_count;
+   int b = (x - base_x) / zone_w;
+   if (b >= btn_count)
+      b = btn_count - 1;
 
-   return NULL;
+   if (b == 0)
+      return "previous";
+   if (b == 1)
+      return playing ? "pause" : "play";
+   return "next";
 }
 
 int ui_screensaver_frame_ms(const ui_screensaver_t *ss) {

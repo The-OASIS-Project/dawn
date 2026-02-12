@@ -265,7 +265,7 @@ static void *music_service_thread(void *arg) {
 
    while (atomic_load(&stream->service_running)) {
       if (stream->lws_ctx) {
-         lws_service(stream->lws_ctx, 50);
+         lws_service(stream->lws_ctx, 10);
       }
 
       /* Auto-reconnect logic */
