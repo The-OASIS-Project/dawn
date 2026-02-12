@@ -209,6 +209,17 @@ int audio_playback_init(audio_playback_t *ctx, const char *device) {
       return -1;
    }
 
+   /* Set start threshold: don't start hardware until half the buffer is filled.
+    * Prevents underruns at playback start by accumulating ~85ms before draining. */
+   snd_pcm_sw_params_t *sw_params;
+   snd_pcm_sw_params_alloca(&sw_params);
+   snd_pcm_sw_params_current(handle, sw_params);
+   snd_pcm_sw_params_set_start_threshold(handle, sw_params, buffer_size / 2);
+   err = snd_pcm_sw_params(handle, sw_params);
+   if (err < 0) {
+      LOG_WARNING("Cannot set sw params: %s (using defaults)", snd_strerror(err));
+   }
+
    ctx->handle = handle;
    ctx->initialized = 1;
    atomic_store(&ctx->volume, 80);
