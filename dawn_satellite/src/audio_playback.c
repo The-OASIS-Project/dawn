@@ -554,3 +554,16 @@ long audio_playback_get_delay_frames(audio_playback_t *ctx) {
    pthread_mutex_unlock(&ctx->alsa_mutex);
    return delay > 0 ? (long)delay : 0;
 }
+
+long audio_playback_get_avail_frames(audio_playback_t *ctx) {
+   if (!ctx || !ctx->handle)
+      return 0;
+   pthread_mutex_lock(&ctx->alsa_mutex);
+   snd_pcm_sframes_t avail = snd_pcm_avail((snd_pcm_t *)ctx->handle);
+   if (avail == -EPIPE) {
+      snd_pcm_prepare((snd_pcm_t *)ctx->handle);
+      avail = snd_pcm_avail((snd_pcm_t *)ctx->handle);
+   }
+   pthread_mutex_unlock(&ctx->alsa_mutex);
+   return avail > 0 ? (long)avail : 0;
+}

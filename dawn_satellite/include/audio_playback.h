@@ -149,4 +149,10 @@ int audio_playback_get_volume(audio_playback_t *ctx);
  */
 long audio_playback_get_delay_frames(audio_playback_t *ctx);
 
+/**
+ * Get writable space in ALSA output buffer (frames that can be written without blocking).
+ * Recovers from underrun (EPIPE) automatically. Returns 0 on error or inactive device.
+ */
+long audio_playback_get_avail_frames(audio_playback_t *ctx);
+
 #endif /* AUDIO_PLAYBACK_H */

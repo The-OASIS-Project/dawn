@@ -176,7 +176,8 @@ static int callback_ws(struct lws *wsi,
             /* Handle binary frames (music audio fallback from main WS) */
             if (lws_frame_is_binary(wsi)) {
 #ifdef HAVE_OPUS
-               if (client->music_pb && len >= 1) {
+               if (client->music_pb && len >= 1 &&
+                   !music_playback_has_dedicated_producer(client->music_pb)) {
                   const uint8_t *data = (const uint8_t *)in;
                   if (data[0] == 0x20) { /* WS_BIN_MUSIC_DATA */
                      /* Parse opus frames: [0x20][2-byte LE len][opus]... */

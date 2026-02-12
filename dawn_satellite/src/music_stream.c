@@ -187,6 +187,7 @@ static int callback_music_ws(struct lws *wsi,
                   const char *type = json_object_get_string(type_obj);
                   if (type && strcmp(type, "auth_ok") == 0) {
                      atomic_store(&stream->authenticated, true);
+                     music_playback_set_dedicated_producer(stream->playback, true);
                      LOG_INFO("Music stream: authenticated");
                   } else if (type && strcmp(type, "auth_failed") == 0) {
                      LOG_ERROR("Music stream: authentication failed");
@@ -230,6 +231,7 @@ static int callback_music_ws(struct lws *wsi,
          if (stream) {
             atomic_store(&stream->connected, false);
             atomic_store(&stream->authenticated, false);
+            music_playback_set_dedicated_producer(stream->playback, false);
             stream->last_disconnect = time(NULL);
          }
          break;
@@ -240,6 +242,7 @@ static int callback_music_ws(struct lws *wsi,
          if (stream) {
             atomic_store(&stream->connected, false);
             atomic_store(&stream->authenticated, false);
+            music_playback_set_dedicated_producer(stream->playback, false);
             stream->wsi = NULL;
             stream->last_disconnect = time(NULL);
          }
@@ -267,6 +270,9 @@ static void *music_service_thread(void *arg) {
       if (stream->lws_ctx) {
          lws_service(stream->lws_ctx, 10);
       }
+
+      /* Drain ring buffer into ALSA after each service iteration */
+      music_playback_drain(stream->playback);
 
       /* Auto-reconnect logic */
       if (atomic_load(&stream->service_running) && atomic_load(&stream->reconnect_enabled) &&
