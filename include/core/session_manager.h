@@ -502,6 +502,19 @@ int64_t session_save_voice_conversation(session_t *session);
 void session_init_system_prompt(session_t *session, const char *system_prompt);
 
 /**
+ * @brief Append room context to session's system prompt
+ *
+ * Appends "\nRoom=<room>." to the existing system prompt so the LLM knows
+ * which room the voice command originates from. No-op if room is NULL or empty.
+ *
+ * @param session Session to update
+ * @param room Room name (e.g., "kitchen", "office")
+ *
+ * @locks session->history_mutex (via session_get/update_system_prompt)
+ */
+void session_append_room_context(session_t *session, const char *room);
+
+/**
  * @brief Update the system prompt without clearing conversation history
  *
  * Finds the existing system message in the conversation history and updates
@@ -545,7 +558,7 @@ char *session_get_system_prompt(session_t *session);
  *
  * @note Adds user message before call, assistant response after call
  * @note Returns NULL if session->disconnected is set (cancel)
- * @note Prepends location context if session->identity.location is set
+ * @note Room context is in the system prompt (not prepended to user text)
  * @note Uses session's own LLM config (copied from defaults at session creation)
  */
 char *session_llm_call(session_t *session, const char *user_text);

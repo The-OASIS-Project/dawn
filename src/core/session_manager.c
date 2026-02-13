@@ -475,6 +475,32 @@ session_t *session_create(session_type_t type, int client_fd) {
    return session;
 }
 
+void session_append_room_context(session_t *session, const char *room) {
+   if (!session || !room || room[0] == '\0') {
+      return;
+   }
+
+   char *base = session_get_system_prompt(session);
+   if (!base) {
+      return;
+   }
+
+   /* Guard against double-append (e.g., reconnection without prompt reset) */
+   if (strstr(base, "\nRoom=")) {
+      free(base);
+      return;
+   }
+
+   size_t len = strlen(base) + strlen(room) + 16;
+   char *with_room = malloc(len);
+   if (with_room) {
+      snprintf(with_room, len, "%s\nRoom=%s.", base, room);
+      session_update_system_prompt(session, with_room);
+      free(with_room);
+   }
+   free(base);
+}
+
 session_t *session_create_dap2(int client_fd,
                                dap2_tier_t tier,
                                const dap2_identity_t *identity,
@@ -582,6 +608,9 @@ session_t *session_create_dap2(int client_fd,
 
    /* Initialize with remote command prompt (excludes HUD/helmet commands) */
    session_init_system_prompt(session, get_remote_command_prompt());
+
+   /* Append satellite room to system prompt so LLM knows the room context */
+   session_append_room_context(session, identity->location);
 
    LOG_INFO("Created DAP2 session %u (tier=%d, uuid=%s, name=%s, location=%s, secret=%.8s...)",
             session->session_id, tier, identity->uuid, identity->name, identity->location,
@@ -1335,7 +1364,6 @@ char *session_get_system_prompt(session_t *session) {
  */
 typedef struct {
    struct json_object *history;
-   char *input_with_context;
    const char *llm_input;
    llm_resolved_config_t resolved_config;
    char model_buf[LLM_MODEL_NAME_MAX]; /* Buffer for model name (outlives stack) */
@@ -1369,16 +1397,7 @@ static int llm_call_prepare(session_t *session,
       return 1;
    }
 
-   // Prepare location context for DAP2 sessions
-   if (session->type == SESSION_TYPE_DAP2 && strlen(session->identity.location) > 0) {
-      size_t context_len = strlen(user_text) + strlen(session->identity.location) + 64;
-      ctx->input_with_context = malloc(context_len);
-      if (ctx->input_with_context) {
-         snprintf(ctx->input_with_context, context_len, "[Location: %s] %s",
-                  session->identity.location, user_text);
-      }
-   }
-   ctx->llm_input = ctx->input_with_context ? ctx->input_with_context : user_text;
+   ctx->llm_input = user_text;
 
    // Check for cancellation before LLM call
    if (session->disconnected) {
@@ -1428,9 +1447,6 @@ static void llm_call_cleanup(llm_call_ctx_t *ctx) {
    session_set_command_context(NULL);
    if (ctx->history) {
       json_object_put(ctx->history);
-   }
-   if (ctx->input_with_context) {
-      free(ctx->input_with_context);
    }
 }
 

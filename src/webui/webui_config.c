@@ -267,6 +267,7 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
    if (json_object_object_get_ex(payload, "general", &section)) {
       JSON_TO_CONFIG_STR(section, "ai_name", config->general.ai_name);
       JSON_TO_CONFIG_STR(section, "log_file", config->general.log_file);
+      JSON_TO_CONFIG_STR(section, "room", config->general.room);
    }
 
    /* [persona] */

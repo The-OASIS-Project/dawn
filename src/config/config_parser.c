@@ -185,11 +185,12 @@ static void parse_general(toml_table_t *table, general_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = { "ai_name", "log_file", NULL };
+   static const char *const known_keys[] = { "ai_name", "log_file", "room", NULL };
    warn_unknown_keys(table, "general", known_keys);
 
    PARSE_STRING(table, "ai_name", config->ai_name);
    PARSE_STRING(table, "log_file", config->log_file);
+   PARSE_STRING(table, "room", config->room);
 }
 
 static void parse_persona(toml_table_t *table, persona_config_t *config) {

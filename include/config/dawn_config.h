@@ -59,6 +59,7 @@ extern "C" {
 typedef struct {
    char ai_name[CONFIG_NAME_MAX];  /* Wake word (lowercase) */
    char log_file[CONFIG_PATH_MAX]; /* Empty = stdout, or path */
+   char room[64];                  /* Room name for local voice context (e.g. "office") */
 } general_config_t;
 
 /* =============================================================================

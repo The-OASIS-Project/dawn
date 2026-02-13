@@ -869,6 +869,7 @@ wscat -c ws://localhost:8080
 5. [x] ~~**TTS ducking during music**~~ - Volume ducks to 30% during voice activity (wake word, recording, processing), hard-pauses during TTS
 6. [ ] **Multi-satellite routing** - Daemon routes by location
 7. [ ] **Speaker identification** - Personalized responses per user
+8. [x] ~~**Location-aware queries**~~ - Room context injected into system prompt: local session via `Room=X` in `get_localization_context()` (from `dawn.toml` `room`), DAP2 sessions via `session_append_room_context()` (from satellite `location` field)
 
 ## Troubleshooting
 

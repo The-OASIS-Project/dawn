@@ -510,7 +510,7 @@ static const char *get_localization_context(void) {
 
    // Check if any localization fields are set
    if (g_config.localization.location[0] != '\0' || g_config.localization.units[0] != '\0' ||
-       g_config.localization.timezone[0] != '\0') {
+       g_config.localization.timezone[0] != '\0' || g_config.general.room[0] != '\0') {
       offset = snprintf(localization_context, LOCALIZATION_BUFFER_SIZE,
                         "TOOL DEFAULTS (for tool calls only, do not mention in conversation):");
       has_context = 1;
@@ -519,6 +519,11 @@ static const char *get_localization_context(void) {
    if (g_config.localization.location[0] != '\0') {
       offset += snprintf(localization_context + offset, LOCALIZATION_BUFFER_SIZE - offset,
                          " Location=%s.", g_config.localization.location);
+   }
+
+   if (g_config.general.room[0] != '\0') {
+      offset += snprintf(localization_context + offset, LOCALIZATION_BUFFER_SIZE - offset,
+                         " Room=%s.", g_config.general.room);
    }
 
    if (g_config.localization.units[0] != '\0') {

@@ -316,7 +316,7 @@ void session_add_message(session_t *session, const char *role, const char *conte
  * @return LLM response (caller must free), or NULL on error/cancel
  * @note Adds user message before call, assistant response after call
  * @note Returns NULL if session->disconnected is set (cancel)
- * @note Prepends location context if session->identity.location is set
+ * @note Room context is in the system prompt (not prepended to user text)
  */
 char *session_llm_call(session_t *session, const char *user_text);
 

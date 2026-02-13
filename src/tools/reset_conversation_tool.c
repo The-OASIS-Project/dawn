@@ -91,10 +91,16 @@ static char *reset_conversation_tool_callback(const char *action,
    if (is_local) {
       reset_conversation();
    } else {
-      /* For remote sessions, reset with basic system prompt
+      /* For remote sessions, reset with appropriate system prompt
        * Note: WebUI sessions will have memory context rebuilt on next message */
-      const char *system_prompt = get_local_command_prompt();
+      const char *system_prompt = (session->type == SESSION_TYPE_DAP2) ? get_remote_command_prompt()
+                                                                       : get_local_command_prompt();
       session_init_system_prompt(session, system_prompt);
+
+      /* Re-append room context for DAP2 satellites */
+      if (session->type == SESSION_TYPE_DAP2) {
+         session_append_room_context(session, session->identity.location);
+      }
    }
 
    /* For WebUI sessions, send notification to clear the frontend display */

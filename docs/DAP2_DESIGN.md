@@ -439,7 +439,7 @@ Satellites self-identify on connection with a structured identity that enables:
 |-------|----------|-------------|---------|
 | `uuid` | Yes | Unique identifier (persists across reboots) | UUID v4 or MAC-based |
 | `name` | Yes | Human-readable name | "Kitchen Assistant" |
-| `location` | Yes | Room/area for context | "kitchen", "bedroom", "office" |
+| `location` | Yes | Room/area — appended to system prompt as `Room=X` so LLM knows command origin | "kitchen", "bedroom", "office" |
 | `hardware_id` | No | Hardware serial number | For inventory tracking |
 
 **UUID Generation**:

@@ -45,6 +45,12 @@
                placeholder: 'Leave empty for stdout',
                hint: 'Path to log file, or empty for console output',
             },
+            room: {
+               type: 'text',
+               label: 'Room Name',
+               placeholder: 'e.g., office, kitchen, bedroom',
+               hint: 'Room where this device is located (for voice command context)',
+            },
          },
       },
       persona: {
