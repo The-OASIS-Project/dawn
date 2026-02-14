@@ -813,8 +813,26 @@ void webui_sentence_audio_callback(const char *sentence, void *userdata) {
             }
             free(opus);
          }
+      } else if (session->type == SESSION_TYPE_DAP2 && session->tier == DAP2_TIER_2) {
+         /* Tier 2 satellite: send TTS at native rate (22050Hz) — skip 48kHz resample.
+          * The ESP32 resamples locally, halving data over the wire and queue pressure. */
+         int16_t *tts_pcm = NULL;
+         size_t tts_samples = 0;
+         uint32_t tts_rate = 0;
+         int ret = text_to_speech_to_pcm(cleaned, &tts_pcm, &tts_samples, &tts_rate);
+
+         if (ret == 0 && tts_pcm && tts_samples > 0) {
+            LOG_INFO("WebUI audio: Tier 2 TTS %zu samples at %uHz (native, no resample)",
+                     tts_samples, tts_rate);
+            if (conn->tts_enabled) {
+               size_t bytes = tts_samples * sizeof(int16_t);
+               webui_send_audio(session, (const uint8_t *)tts_pcm, bytes);
+               webui_send_audio_end(session);
+            }
+            free(tts_pcm);
+         }
       } else {
-         /* Send raw PCM for legacy clients */
+         /* WebUI browser: send resampled 48kHz PCM */
          int16_t *pcm = NULL;
          size_t samples = 0;
          int ret = webui_audio_text_to_pcm(cleaned, &pcm, &samples);
@@ -875,8 +893,41 @@ static void *audio_worker_thread(void *arg) {
       ret = webui_audio_opus_to_text(audio_data, audio_len, &transcript);
       free(audio_data);
       work->audio_data = NULL;
+   } else if (session->type == SESSION_TYPE_DAP2 && session->tier == DAP2_TIER_2) {
+      /* Tier 2 satellite: raw PCM is already 16kHz — transcribe directly */
+
+      /* Validate length is a multiple of 2 (16-bit samples) */
+      if (audio_len % sizeof(int16_t) != 0) {
+         LOG_WARNING("WebUI: Tier 2 audio length %zu is not a multiple of 2", audio_len);
+         webui_send_error(session, "INVALID_AUDIO", "Audio length must be a multiple of 2 bytes");
+         webui_send_state(session, "idle");
+         session_release(session);
+         free(audio_data);
+         free(work);
+         return NULL;
+      }
+
+      size_t pcm_samples = audio_len / sizeof(int16_t);
+
+      /* Enforce maximum duration to prevent DoS (30 seconds at 16kHz) */
+      const size_t max_samples_16k = (size_t)WEBUI_MAX_RECORDING_SECONDS * 16000;
+      if (pcm_samples > max_samples_16k) {
+         LOG_WARNING("WebUI: Tier 2 audio too long: %zu samples (max %zu)", pcm_samples,
+                     max_samples_16k);
+         webui_send_error(session, "AUDIO_TOO_LONG", "Recording exceeds 30 second limit");
+         webui_send_state(session, "idle");
+         session_release(session);
+         free(audio_data);
+         free(work);
+         return NULL;
+      }
+
+      LOG_INFO("WebUI: Tier 2 audio: %zu samples at 16kHz (no resample needed)", pcm_samples);
+      ret = webui_audio_transcribe((const int16_t *)audio_data, pcm_samples, &transcript);
+      free(audio_data);
+      work->audio_data = NULL;
    } else {
-      /* Raw PCM: 16-bit signed, 48kHz, mono - resample to 16kHz for ASR */
+      /* WebUI browser: raw PCM is 48kHz — resample to 16kHz for ASR */
       size_t pcm_samples = audio_len / sizeof(int16_t);
       ret = webui_audio_pcm48k_to_text((const int16_t *)audio_data, pcm_samples, &transcript);
       free(audio_data);

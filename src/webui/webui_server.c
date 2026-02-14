@@ -590,8 +590,9 @@ void queue_response(ws_response_t *resp) {
 
    int next_tail = (s_queue_tail + 1) % WEBUI_RESPONSE_QUEUE_SIZE;
    if (next_tail == s_queue_head) {
-      /* Queue full - drop oldest */
+      /* Queue full - free oldest entry's heap allocations, then drop it */
       LOG_WARNING("WebUI: Response queue full, dropping oldest entry");
+      free_response(&s_response_queue[s_queue_head]);
       s_queue_head = (s_queue_head + 1) % WEBUI_RESPONSE_QUEUE_SIZE;
    }
 
@@ -1180,7 +1181,52 @@ static void process_one_response(void) {
       return;
    }
 
-   ws_response_t resp = s_response_queue[s_queue_head];
+   /* Scan forward from head to find the first entry whose socket isn't choked.
+    * This prevents a slow client (e.g. ESP32 Tier 2 over WiFi/SSL) from
+    * blocking the entire response queue for all other sessions (WebUI, Tier 1).
+    * Per-session FIFO ordering is preserved: if Session A is choked, ALL entries
+    * for Session A are skipped (since choke is per-socket, not per-message). */
+   int queue_len = (s_queue_tail >= s_queue_head)
+                       ? (s_queue_tail - s_queue_head)
+                       : (WEBUI_RESPONSE_QUEUE_SIZE - s_queue_head + s_queue_tail);
+
+   int found_offset = -1;
+   for (int i = 0; i < queue_len; i++) {
+      int idx = (s_queue_head + i) % WEBUI_RESPONSE_QUEUE_SIZE;
+      ws_response_t *candidate = &s_response_queue[idx];
+
+      /* Disconnected sessions can be dequeued immediately (freed below) */
+      if (!candidate->session || candidate->session->disconnected) {
+         found_offset = i;
+         break;
+      }
+
+      /* Check flow control — skip choked sockets, schedule writeable retry */
+      ws_connection_t *cand_conn = (ws_connection_t *)candidate->session->client_data;
+      if (cand_conn && cand_conn->wsi && lws_send_pipe_choked(cand_conn->wsi)) {
+         lws_callback_on_writable(cand_conn->wsi);
+         continue;
+      }
+
+      found_offset = i;
+      break;
+   }
+
+   if (found_offset < 0) {
+      /* All queued entries are for choked sockets — nothing to send now */
+      pthread_mutex_unlock(&s_queue_mutex);
+      return;
+   }
+
+   /* Dequeue the found entry. Shift earlier (choked) entries forward to fill
+    * the gap, then advance head. Preserves FIFO ordering for all sessions. */
+   int found_idx = (s_queue_head + found_offset) % WEBUI_RESPONSE_QUEUE_SIZE;
+   ws_response_t resp = s_response_queue[found_idx];
+   for (int i = found_offset; i > 0; i--) {
+      int dst = (s_queue_head + i) % WEBUI_RESPONSE_QUEUE_SIZE;
+      int src = (s_queue_head + i - 1) % WEBUI_RESPONSE_QUEUE_SIZE;
+      s_response_queue[dst] = s_response_queue[src];
+   }
    s_queue_head = (s_queue_head + 1) % WEBUI_RESPONSE_QUEUE_SIZE;
    bool more_pending = (s_queue_head != s_queue_tail);
    pthread_mutex_unlock(&s_queue_mutex);
@@ -3039,8 +3085,32 @@ static int callback_websocket(struct lws *wsi,
                size_t data_len = len;
 
                if (conn->binary_msg_type == WS_BIN_AUDIO_IN && data_len > 0) {
-                  /* Append continuation data to audio buffer */
+                  /* Append continuation data to audio buffer — expand if needed
+                   * (mirrors the realloc logic in handle_binary_message) */
                   if (conn->audio_buffer &&
+                      conn->audio_buffer_len + data_len > conn->audio_buffer_capacity) {
+                     size_t new_capacity = conn->audio_buffer_capacity * 2;
+                     while (new_capacity < conn->audio_buffer_len + data_len)
+                        new_capacity *= 2;
+                     if (new_capacity > WEBUI_AUDIO_MAX_CAPACITY) {
+                        LOG_WARNING("WebUI: Fragment would exceed max audio capacity (%d bytes)",
+                                    WEBUI_AUDIO_MAX_CAPACITY);
+                        send_error_impl(conn->wsi, "BUFFER_FULL", "Recording too long");
+                        conn->in_binary_fragment = false;
+                     } else {
+                        uint8_t *new_buffer = realloc(conn->audio_buffer, new_capacity);
+                        if (!new_buffer) {
+                           LOG_ERROR("WebUI: Failed to expand audio buffer in fragment");
+                           send_error_impl(conn->wsi, "BUFFER_ERROR",
+                                           "Audio buffer allocation failed");
+                           conn->in_binary_fragment = false;
+                        } else {
+                           conn->audio_buffer = new_buffer;
+                           conn->audio_buffer_capacity = new_capacity;
+                        }
+                     }
+                  }
+                  if (conn->audio_buffer && conn->in_binary_fragment &&
                       conn->audio_buffer_len + data_len <= conn->audio_buffer_capacity) {
                      memcpy(conn->audio_buffer + conn->audio_buffer_len, data, data_len);
                      conn->audio_buffer_len += data_len;
@@ -3857,7 +3927,10 @@ void webui_send_compaction_complete(session_t *session,
    8192 /* 8KB chunks for WebSocket frames - keep small for lws compatibility */
 
 void webui_send_audio(session_t *session, const uint8_t *data, size_t len) {
-   if (!session || session->type != SESSION_TYPE_WEBSOCKET || !data || len == 0) {
+   if (!session || !data || len == 0) {
+      return;
+   }
+   if (session->type != SESSION_TYPE_WEBSOCKET && session->type != SESSION_TYPE_DAP2) {
       return;
    }
 
@@ -3897,7 +3970,8 @@ void webui_send_audio(session_t *session, const uint8_t *data, size_t len) {
  * @param session WebSocket session
  */
 void webui_send_audio_end(session_t *session) {
-   if (!session || session->type != SESSION_TYPE_WEBSOCKET) {
+   if (!session ||
+       (session->type != SESSION_TYPE_WEBSOCKET && session->type != SESSION_TYPE_DAP2)) {
       return;
    }
 

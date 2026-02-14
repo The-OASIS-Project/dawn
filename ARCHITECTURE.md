@@ -4,7 +4,7 @@ This document describes the architecture of the D.A.W.N. (Digital Assistant for 
 
 **D.A.W.N.** is the central intelligence layer of the OASIS ecosystem, responsible for interpreting user intent, fusing data from every subsystem, and routing commands. At its core, DAWN performs neural-inference to understand context and drive decision-making, acting as OASIS's orchestration hub for MIRAGE, AURA, SPARK, STAT, and any future modules.
 
-**Last Updated**: February 11, 2026 (DAP1 eliminated, unified DAP2 WebSocket for all satellites)
+**Last Updated**: February 13, 2026 (Phase 4 complete: Tier 2 ESP32-S3 satellite in dawn_satellite_arduino/)
 
 ## Table of Contents
 
@@ -1262,18 +1262,24 @@ Mismatch causes connection failure or data corruption.
 
 **Status**: ✅ **Implemented** (January–February 2026)
 
-DAP2 is the unified WebSocket protocol for all satellite devices. Every satellite connects to the same WebSocket port as the WebUI (default 3000) and registers with its capabilities. The daemon uses **capability-based routing** to choose the appropriate path:
+DAP2 is the unified WebSocket protocol for all remote access to the DAWN daemon. **A single WebSocket server on port 3000 serves all three client types** — browser WebUI, Tier 1 satellites (Raspberry Pi), and Tier 2 satellites (ESP32). There are no separate servers or additional ports. Each client connects to the same endpoint, registers its capabilities, and the daemon routes messages accordingly:
 
-| Tier | Hardware | What it sends | Server does | Use Case |
-|------|----------|---------------|-------------|----------|
+| Client | Hardware | Transport | Server does | Use Case |
+|--------|----------|-----------|-------------|----------|
+| **WebUI** | Browser | Opus audio (48kHz) + JSON | ASR + LLM + TTS | Browser voice/text interface |
 | **Tier 1** | RPi 4/5 | JSON text (`satellite_query`) | LLM only | Hands-free (local ASR/TTS) |
-| **Tier 2** | ESP32-S3 | Binary PCM audio (0x01/0x02) | ASR + LLM + TTS | Push-to-talk (server ASR/TTS) |
+| **Tier 2** | ESP32-S3 | Binary PCM audio (16kHz) | ASR + LLM + TTS | Push-to-talk (server ASR/TTS) |
 
-**Tier 2 audio reuses the WebUI audio subsystem** ([Section 7](#7-webui-audio-subsystem)) — same binary message types, same `webui_audio.c` worker threads, same ASR→LLM→TTS pipeline. The only difference is raw PCM at 16kHz instead of Opus at 48kHz (no codec or resample step on server). Music streaming (Opus over a dedicated WebSocket) is Tier 1 only.
+This unified architecture means the session manager, response queue, LLM pipeline, tool system, and conversation history are shared infrastructure — adding a new client type requires only a registration handler and a routing decision, not a new server.
+
+**Tier 2 audio reuses the WebUI audio subsystem** ([Section 7](#7-webui-audio-subsystem)) — same binary message types, same `webui_audio.c` worker threads, same ASR→LLM→TTS pipeline. The only difference is raw PCM at 16kHz instead of Opus at 48kHz (no codec or resample step on server). TTS audio is sent at native Piper rate (22050Hz); the ESP32 resamples to 48kHz for I2S output. Music streaming (Opus over a dedicated WebSocket) is Tier 1 only.
+
+**Tier 2 implementation**: `dawn_satellite_arduino/` — Arduino sketch for Adafruit ESP32-S3 TFT Feather. Uses arduinoWebSockets (Links2004), power-of-two ring buffer in PSRAM with spinlock producer/consumer, NVS-persistent UUID and reconnect_secret, TFT status display, NeoPixel state feedback. Credentials in gitignored `arduino_secrets.h`.
 
 For connection lifecycle diagrams, message format details, and the complete protocol specification, see:
 - **[DAP2_DESIGN.md](docs/DAP2_DESIGN.md)** — Protocol spec (both tiers, audio framing, registration, codec details)
-- **[DAP2_SATELLITE.md](docs/DAP2_SATELLITE.md)** — Tier 1 implementation guide (build, config, deployment)
+- **[DAP2_SATELLITE.md](docs/DAP2_SATELLITE.md)** — Tier 1 build/config/deployment + Tier 2 quick reference
+- **[dawn_satellite_arduino/README.md](dawn_satellite_arduino/README.md)** — Tier 2 Arduino sketch setup and usage
 
 ---
 
@@ -1893,7 +1899,7 @@ The WebUI settings panel (`www/js/ui/settings.js`) defines a `SETTINGS_SCHEMA` t
 ---
 
 **Document Version**: 1.8
-**Last Updated**: February 11, 2026 (DAP1 eliminated, unified DAP2 WebSocket for all satellites)
+**Last Updated**: February 13, 2026 (Phase 4 complete: Tier 2 ESP32-S3 satellite in dawn_satellite_arduino/)
 **Reorganization Commit**: [Git SHA to be added after commit]
 
 ### LLM Threading Architecture (Post-Interrupt Implementation)

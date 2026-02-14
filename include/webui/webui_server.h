@@ -95,7 +95,7 @@ extern "C" {
 #define WEBUI_AUDIO_MAX_CAPACITY                                    \
    (WEBUI_MAX_RECORDING_SECONDS * 16000 * 2) /* @ 16kHz mono 16-bit \
                                               */
-#define WEBUI_RESPONSE_QUEUE_SIZE 512        /* Pending responses for sentence streaming */
+#define WEBUI_RESPONSE_QUEUE_SIZE 2048       /* Pending responses for sentence streaming */
 
 /* Forward declarations */
 struct lws;

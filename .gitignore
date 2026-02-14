@@ -13,3 +13,6 @@ asr_*.wav
 
 __pycache__/
 node_modules/
+
+# Arduino secrets (WiFi credentials, server IP)
+dawn_satellite_arduino/arduino_secrets.h

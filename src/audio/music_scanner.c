@@ -76,14 +76,22 @@ static void *scanner_thread_func(void *arg) {
       pthread_mutex_unlock(&g_scanner_mutex);
 
       LOG_INFO("Starting music library scan: %s", g_music_dir);
+      struct timespec scan_start, scan_end;
+      clock_gettime(CLOCK_MONOTONIC, &scan_start);
+
       music_db_scan_stats_t stats;
       int result = music_db_scan(g_music_dir, &stats);
+
+      clock_gettime(CLOCK_MONOTONIC, &scan_end);
+      double scan_secs = (scan_end.tv_sec - scan_start.tv_sec) +
+                         (scan_end.tv_nsec - scan_start.tv_nsec) / 1e9;
 
       pthread_mutex_lock(&g_scanner_mutex);
 
       if (result == 0) {
          g_initial_scan_complete = true;
-         LOG_INFO("Music scan complete: %d tracks indexed", music_db_get_track_count());
+         LOG_INFO("Music scan complete: %d tracks indexed (%.2fs)", music_db_get_track_count(),
+                  scan_secs);
       } else {
          LOG_ERROR("Music scan failed");
       }

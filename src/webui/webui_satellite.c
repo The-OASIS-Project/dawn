@@ -438,7 +438,7 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
       return;
    }
 
-   /* Parse capabilities */
+   /* Parse capabilities (defaults match Tier 1: local ASR + TTS) */
    dap2_capabilities_t caps = { .local_asr = true, .local_tts = true, .wake_word = true };
    if (json_object_object_get_ex(payload, "capabilities", &caps_obj)) {
       struct json_object *asr_obj, *tts_obj, *ww_obj;
@@ -451,6 +451,16 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
       if (json_object_object_get_ex(caps_obj, "wake_word", &ww_obj)) {
          caps.wake_word = json_object_get_boolean(ww_obj);
       }
+   }
+
+   /* Validate tier matches declared capabilities to prevent resource abuse.
+    * Tier 2 relies on server-side ASR+TTS, so must NOT claim local capabilities. */
+   if (tier == 2 && (caps.local_asr || caps.local_tts)) {
+      LOG_WARNING("Satellite: Tier 2 registration rejected — claims local_asr=%d local_tts=%d",
+                  caps.local_asr, caps.local_tts);
+      send_error_impl(conn->wsi, "INVALID_MESSAGE",
+                      "Tier 2 satellites must not declare local_asr or local_tts");
+      return;
    }
 
    /* Check for reconnect_secret (provided during reconnection attempts) */
@@ -485,6 +495,12 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
    /* Attach session to WebSocket connection */
    conn->session = session;
    session->client_data = conn;
+
+   /* Tier 2 satellites rely on server-side TTS — enable audio output.
+    * Tier 1 does local TTS so leave tts_enabled at its default (false). */
+   if (tier == 2) {
+      conn->tts_enabled = true;
+   }
 
    /* Get reconnect secret for client to save */
    char *session_secret = session_get_reconnect_secret(session);

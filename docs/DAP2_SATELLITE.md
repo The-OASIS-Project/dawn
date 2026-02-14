@@ -867,7 +867,7 @@ wscat -c ws://localhost:8080
 3. [x] ~~**Screensaver / ambient mode**~~ - Clock with Lissajous drift + fullscreen rainbow FFT visualizer
 4. [x] ~~**Theme support**~~ - 5-theme system (Cyan, Purple, Green, Blue, Terminal) with dot picker, crossfade, TOML persistence
 5. [x] ~~**TTS ducking during music**~~ - Volume ducks to 30% during voice activity (wake word, recording, processing), hard-pauses during TTS
-6. [ ] **Multi-satellite routing** - Daemon routes by location
+6. [x] ~~**Multi-satellite routing**~~ - Per-session room context in system prompt; daemon knows which room each query originates from
 7. [ ] **Speaker identification** - Personalized responses per user
 8. [x] ~~**Location-aware queries**~~ - Room context injected into system prompt: local session via `Room=X` in `get_localization_context()` (from `dawn.toml` `room`), DAP2 sessions via `session_append_room_context()` (from satellite `location` field)
 
@@ -949,8 +949,50 @@ nc -zv 192.168.1.100 8080  # Test port
 sudo ufw status  # On daemon machine
 ```
 
+## Tier 2 Satellite (ESP32-S3)
+
+Tier 2 satellites are push-to-talk devices with server-side ASR and TTS. The implementation lives in `dawn_satellite_arduino/` as an Arduino sketch (not ESP-IDF).
+
+### Hardware
+
+| Component | Part | Notes |
+|-----------|------|-------|
+| MCU | Adafruit ESP32-S3 TFT Feather | Built-in 240x135 TFT + NeoPixels, 2MB OPI PSRAM |
+| Speaker amp | MAX98357 I2S breakout | 3.3V logic, mono, 48kHz stereo output |
+| Microphone | Analog electret mic module | Connected to ADC pin (GPIO 1) |
+| Button | Momentary push button | Push-to-talk trigger (GPIO 18) |
+
+### Quick Start
+
+1. Install the Arduino IDE with ESP32 board support (see `dawn_satellite_arduino/README.md`)
+2. Copy `arduino_secrets.h.example` to `arduino_secrets.h` and fill in WiFi/server credentials
+3. Select board "Adafruit Feather ESP32-S3 TFT" with OPI PSRAM enabled
+4. Upload and open Serial Monitor at 115200 baud
+
+### How It Works
+
+```
+User presses button → ADC samples at 16kHz → PCM chunks sent via WS binary 0x01
+User releases button → End marker 0x02 sent
+Daemon: Whisper ASR → LLM → Piper TTS → 22050Hz PCM via WS binary 0x11/0x12
+ESP32: Ring buffer → 22050→48kHz resample → I2S stereo → Speaker
+```
+
+### Key Implementation Details
+
+- **Ring buffer**: 524,288-sample power-of-two buffer in PSRAM (~1MB), spinlock-protected
+- **Resampling**: 22050→48000Hz linear interpolation with cross-boundary carry sample
+- **TCP backpressure**: Skips `webSocket.loop()` when ring buffer >50% full
+- **NVS persistence**: Random UUID v4 and reconnect_secret survive power cycles
+- **Credentials**: `arduino_secrets.h` is gitignored; template in `.h.example`
+- **I2S channel**: Created once in `setup()`, enable/disable per playback (avoids DMA descriptor fragmentation)
+- **NeoPixels**: Mode-change detection — static modes (recording/playing/waiting) only call `strip.show()` once on transition
+
+For full details, see `dawn_satellite_arduino/README.md` and `docs/DAP2_DESIGN.md` Phase 4.
+
 ## Related Documentation
 
 - `docs/DAP2_DESIGN.md` - Protocol design specification (Tier 1 + Tier 2)
+- `dawn_satellite_arduino/README.md` - Tier 2 Arduino sketch setup and usage
 - `ARCHITECTURE.md` - System architecture with DAP2 protocol overview
 - `CODING_STYLE_GUIDE.md` - Code style requirements

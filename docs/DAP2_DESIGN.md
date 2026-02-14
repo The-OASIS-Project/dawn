@@ -444,7 +444,7 @@ Satellites self-identify on connection with a structured identity that enables:
 
 **UUID Generation**:
 - Tier 1 (RPi): Generate UUID v4 on first boot, store in `/etc/dawn-satellite-id`
-- Tier 2 (ESP32): Derive UUID v5 from MAC address using DAWN namespace
+- Tier 2 (ESP32): Generate random UUID v4 on first boot (`esp_fill_random`), persist in NVS flash (avoids MAC-derived UUIDs which are predictable from WiFi sniffing)
 
 **Tier 2 Registration (WebSocket JSON)**:
 
@@ -452,22 +452,22 @@ Satellites self-identify on connection with a structured identity that enables:
 {
   "type": "satellite_register",
   "payload": {
-    "uuid": "esp32-aabbccddeeff",
-    "name": "Hallway Speaker",
-    "location": "hallway",
+    "uuid": "a3f1c9b2-7d4e-4a8f-b612-3c5d7e9f0a1b",
+    "name": "Office Speaker",
+    "location": "office",
     "tier": 2,
     "capabilities": {
       "local_asr": false,
       "local_tts": false,
       "wake_word": false,
-      "push_to_talk": true,
-      "audio_codecs": ["pcm"]
+      "push_to_talk": true
     },
     "hardware": {
       "platform": "esp32s3",
-      "memory_mb": 8
+      "memory_mb": 2
     },
-    "protocol_version": "2.0"
+    "protocol_version": "2.0",
+    "reconnect_secret": "previously-issued-secret-if-any"
   }
 }
 ```
@@ -1136,26 +1136,38 @@ sudo usermod -aG video,render $USER
 
 ### Phase 4: Tier 2 Satellite (ESP32-S3)
 
+**Status**: ✅ **COMPLETE**
+
 **Goal**: Button-activated satellite using WebSocket + PCM audio (reuses WebUI audio pipeline)
 
-**Daemon-side changes** (minimal):
-1. **Route binary audio from satellite connections**: In `webui_server.c`, allow binary audio messages from `is_satellite` connections (currently only processed for WebUI clients)
-2. **Handle 16kHz PCM input**: In `webui_audio.c`, detect when input is already 16kHz (Tier 2) and skip the 48→16kHz resample step
-3. **Send PCM TTS output**: When `use_opus: false`, send raw PCM TTS audio via `0x11` frames (already supported as WebUI fallback)
+**Hardware**: Adafruit ESP32-S3 TFT Feather (built-in 240x135 TFT + NeoPixels, 2MB OPI PSRAM) with MAX98357 I2S speaker amp, analog electret mic on ADC, push-to-talk button. See `dawn_satellite_arduino/README.md` for pin assignments and Arduino IDE setup.
 
-**ESP32-side** (new ESP-IDF project):
-1. **Create `satellite/tier2/` directory** (ESP-IDF project)
-2. **Implement WebSocket client** using `esp_websocket_client` (built into ESP-IDF)
-3. **Send `satellite_register`** with `local_asr: false`, `audio_codecs: ["pcm"]`
-4. **Button → record → send PCM**: I2S capture @ 16kHz → send as `0x01` binary frames → `0x02` on silence/release
-5. **Receive TTS audio**: Listen for `0x11` frames → I2S DAC playback → `0x12` marks segment end
-6. **Energy-based VAD** for silence detection (end-of-speech)
-7. **NeoPixel LED feedback**: State colors matching Tier 1 (idle, listening, thinking, speaking)
+**Platform**: Arduino IDE with arduinoWebSockets (Links2004), ArduinoJson v7+, Adafruit GFX/ST7789/NeoPixel libraries. Uses the Arduino ESP32 core (Espressif), not raw ESP-IDF, for faster development.
+
+**Daemon-side changes** ✅:
+1. **Route binary audio from satellite connections**: `webui_server.c` allows binary audio from `is_satellite` connections
+2. **Handle 16kHz PCM input**: `webui_audio.c` skips resample when input is already 16kHz
+3. **Send PCM TTS output**: Raw 22050Hz PCM via `0x11` frames (native Piper rate, satellite resamples to 48kHz for I2S)
+4. **Queue head-of-line blocking fix**: Response queue scans forward past choked clients instead of blocking on head
+5. **Fragment buffer expansion**: Continuation frames use realloc (matching initial frame path) instead of silently dropping data
+
+**ESP32-side** ✅:
+1. **`dawn_satellite_arduino/` directory** (Arduino sketch, not ESP-IDF)
+2. **WebSocket client** using arduinoWebSockets (Links2004) with WSS (self-signed cert)
+3. **`satellite_register`** with `local_asr: false`, `push_to_talk: true`, persistent UUID
+4. **Button → record → send PCM**: ADC sampling @ 16kHz → `0x01` binary frames → `0x02` on release
+5. **TTS ring buffer playback**: 524,288-sample power-of-two ring buffer in PSRAM (~1MB), spinlock-protected producer/consumer, 22050→48000Hz linear interpolation with cross-boundary carry
+6. **TCP backpressure**: Skip `webSocket.loop()` when ring buffer >50% full, backs up TCP window
+7. **NeoPixel LED feedback**: Idle cycling (HSV crossfade), red=recording, yellow=waiting, green=playing, pulsing orange=WiFi connecting; mode-change detection avoids redundant `strip.show()` on static modes
+8. **TFT status display**: Large centered text (size 3) for status with partial `fillRect` redraws, scrolling log for setup
+9. **NVS persistence**: Random UUID v4 (`esp_fill_random`) and reconnect_secret stored in ESP32 flash
+10. **Credentials management**: WiFi SSID/password, server IP/port, satellite name/location in gitignored `arduino_secrets.h`
 
 **Deliverables**:
-- `satellite/tier2/` ESP-IDF project
-- Working ESP32-S3 firmware with WebSocket audio
-- No custom binary protocol — 100% reuse of WebUI audio path
+- `dawn_satellite_arduino/` Arduino sketch with complete README ✅
+- Working ESP32-S3 firmware with WebSocket audio ✅
+- No custom binary protocol — 100% reuse of WebUI audio path ✅
+- Daemon queue and fragment handling hardened ✅
 
 **Exit Criteria**: Button-to-response <4s (p95)
 
@@ -1434,3 +1446,4 @@ name = "Guest Room"
 - v0.9 (Feb 2026): Screensaver/ambient mode complete. Two modes: clock (time/date with Lissajous drift, D.A.W.N. corner watermarks) and fullscreen rainbow FFT visualizer (64 Goertzel bins, dB-scale matching WebUI, peak hold, gradient reflections, two-line track info pill). Configurable idle timeout, manual trigger via visualizer tap, wake-word-only dismissal.
 - v1.0 (Feb 2026): Settings toggle for 12/24-hour time format (persisted, updates both clocks). Music progress bar now compensates for ring buffer + ALSA output latency (~680ms) so displayed position matches speaker output. Seek slider no longer snaps back during drag (incoming server position updates suppressed while seeking).
 - v1.1 (Feb 2026): **Phase 3.5 COMPLETE.** 5-theme system (Cyan, Purple, Green, Blue, Terminal) with dot picker in settings, 200ms ease-out crossfade, per-theme accent/background/text colors, TOML persistence. SDL2_gfx circle primitives for smoother orb rendering. Music playback architecture replaced: lock-free SPSC ring buffer with LWS-thread drain eliminates relay thread and fixes underruns. ALSA start_threshold prevents initial underruns.
+- v1.2 (Feb 2026): **Phase 4 COMPLETE.** Tier 2 ESP32-S3 satellite implemented as Arduino sketch (`dawn_satellite_arduino/`). Adafruit ESP32-S3 TFT Feather with MAX98357 I2S amp, analog mic, push button, NeoPixels. Power-of-two ring buffer with spinlock, 22050→48kHz resampling, TCP backpressure via webSocket.loop() gating, NVS-persistent UUID and reconnect_secret, TFT centered status display, gitignored arduino_secrets.h for credentials. Daemon hardened: queue head-of-line blocking fix, fragment buffer realloc, memory leak on queue-full.

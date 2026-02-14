@@ -49,9 +49,9 @@ DAWN is designed for embedded Linux platforms (Jetson, Raspberry Pi) and support
   - **Paginated library** - Browse artists/albums/tracks with 50-item pages
 
 - **DAP2 Satellite System**
-  - Unified WebSocket protocol for all satellite tiers (same port as WebUI)
+  - **One server, one port, three client types**: The WebUI server on port 3000 is the single entry point for all remote access — browser clients (WebUI), Raspberry Pi satellites (Tier 1), and ESP32 satellites (Tier 2) all connect to the same WebSocket endpoint. The daemon inspects each client's capabilities at registration and routes accordingly: text for Tier 1, Opus audio for browsers, raw PCM for Tier 2. No separate servers, no extra ports.
   - **Tier 1** (RPi): Text-first — local ASR/TTS, hands-free with wake word
-  - **Tier 2** (ESP32): Audio path — streams raw PCM, server-side ASR/TTS, push-to-talk
+  - **Tier 2** (ESP32-S3): Audio path — streams raw PCM, server-side ASR/TTS, push-to-talk. See [dawn_satellite_arduino/README.md](dawn_satellite_arduino/README.md)
   - Capability-based routing: daemon auto-selects text or audio path per satellite
   - SDL2 touchscreen UI with KMSDRM backend (no X11 required)
   - **5 color themes** — Cyan, Purple, Green, Blue, Terminal with dot picker and crossfade transitions
@@ -151,6 +151,7 @@ dawn/
 ├── whisper.cpp/            # Whisper ASR engine (git submodule)
 ├── common/                 # Shared library (VAD, ASR, TTS, logging) for daemon + satellite
 ├── dawn_satellite/         # DAP2 Tier 1 satellite (Raspberry Pi, SDL2 UI)
+├── dawn_satellite_arduino/ # DAP2 Tier 2 satellite (ESP32-S3, Arduino sketch)
 ├── remote_dawn/            # Legacy DAP1 ESP32 client (deprecated, retained for reference)
 ├── services/               # Systemd service files
 ├── tests/                  # Test programs
@@ -874,7 +875,7 @@ The system listens for the wake word ("friday" by default), then captures your c
 DAWN supports satellite devices that extend voice assistant capabilities to multiple rooms. All satellites connect via WebSocket to the same port as the WebUI (default 3000).
 
 - **Tier 1 (Raspberry Pi)**: Handles ASR/TTS locally, sends only text to daemon. See [dawn_satellite/README.md](dawn_satellite/README.md)
-- **Tier 2 (ESP32)**: Streams raw PCM audio, daemon handles ASR/TTS server-side. See [docs/DAP2_DESIGN.md](docs/DAP2_DESIGN.md)
+- **Tier 2 (ESP32-S3)**: Streams raw PCM audio, daemon handles ASR/TTS server-side. See [dawn_satellite_arduino/README.md](dawn_satellite_arduino/README.md)
 
 See [docs/DAP2_SATELLITE.md](docs/DAP2_SATELLITE.md) for deployment guide.
 
@@ -997,7 +998,8 @@ See `docs/USER_AUTH_DESIGN.md` for complete authentication system documentation.
 - **services/llama-server/README.md** - Local LLM service setup
 - **llm_testing/docs/** - LLM optimization research
 - **docs/DAP2_SATELLITE.md** - DAP2 satellite architecture and deployment
-- **dawn_satellite/README.md** - Satellite build, config, and usage guide
+- **dawn_satellite/README.md** - Tier 1 satellite build, config, and usage guide
+- **dawn_satellite_arduino/README.md** - Tier 2 ESP32-S3 satellite (Arduino) setup
 - **docs/DAP2_DESIGN.md** - DAP2 protocol specification (Tier 1 + Tier 2)
 - **test_recordings/BENCHMARK_RESULTS.md** - ASR performance benchmarks
 
