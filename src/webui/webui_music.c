@@ -488,6 +488,10 @@ static void *music_stream_thread(void *arg) {
       if (!was_sending) {
          LOG_INFO("WebUI music: Streaming resumed");
          was_sending = true;
+         /* Reset pacing so we don't fast-forward after a pause */
+         stream_start_time = 0;
+         frames_sent = 0;
+         state->resample_accum_count = 0;
       }
 
       /* Mark decoder busy and grab what we need */
