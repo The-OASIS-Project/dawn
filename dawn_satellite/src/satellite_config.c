@@ -18,6 +18,7 @@
 #include "satellite_config.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -366,6 +367,11 @@ int satellite_config_load(satellite_config_t *config, const char *path) {
                                                         config->audio.sample_rate);
       config->audio.max_record_seconds = (uint32_t)toml_int_or(audio, "max_record_seconds",
                                                                config->audio.max_record_seconds);
+      /* Clamp to sane range (1-120 seconds) */
+      if (config->audio.max_record_seconds < 1)
+         config->audio.max_record_seconds = 1;
+      if (config->audio.max_record_seconds > 120)
+         config->audio.max_record_seconds = 120;
    }
 
    /* Parse [gpio] section */
@@ -537,6 +543,11 @@ int satellite_config_load(satellite_config_t *config, const char *path) {
       }
 
       config->asr.n_threads = (int)toml_int_or(asr, "n_threads", config->asr.n_threads);
+      /* Clamp to sane range (1-8 threads) */
+      if (config->asr.n_threads < 1)
+         config->asr.n_threads = 1;
+      if (config->asr.n_threads > 8)
+         config->asr.n_threads = 8;
       config->asr.max_audio_seconds = (int)toml_int_or(asr, "max_audio_seconds",
                                                        config->asr.max_audio_seconds);
    }
@@ -831,14 +842,10 @@ void satellite_config_set_reconnect_secret(satellite_config_t *config, const cha
       snprintf(identity_path, sizeof(identity_path), ".dawn_satellite_identity");
    }
 
-   FILE *f = fopen(identity_path, "w");
+   /* Open with restrictive permissions from the start (no race window) */
+   int fd = open(identity_path, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+   FILE *f = fd >= 0 ? fdopen(fd, "w") : NULL;
    if (f) {
-      /* Set restrictive permissions BEFORE writing sensitive data (0600 = owner read/write only)
-       * This prevents session hijacking via identity file theft on multi-user systems */
-      int fd = fileno(f);
-      if (fchmod(fd, S_IRUSR | S_IWUSR) != 0) {
-         fprintf(stderr, "[CONFIG] Warning: Could not set permissions on %s\n", identity_path);
-      }
       fprintf(f, "# DAWN Satellite Identity (auto-generated, do not edit)\n");
       fprintf(f, "uuid = \"%s\"\n", config->identity.uuid);
       fprintf(f, "reconnect_secret = \"%s\"\n", secret);
@@ -863,11 +870,11 @@ void satellite_config_save_ui_prefs(const satellite_config_t *config) {
       return;
    }
 
-   /* Read all lines */
+   /* Read all lines (static to avoid ~100KB on stack — called single-threaded from UI) */
    enum {
       MAX_LINES = 400
    };
-   char lines[MAX_LINES][256];
+   static char lines[MAX_LINES][256];
    int line_count = 0;
    while (line_count < MAX_LINES && fgets(lines[line_count], sizeof(lines[0]), fp)) {
       line_count++;

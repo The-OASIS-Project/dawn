@@ -126,7 +126,7 @@ static deviceCallback deviceCallbackArray[] = { { AUDIO_PLAYBACK_DEVICE, setPcmP
 static void send_status_detail(const char *state, const char *detail) {
 #ifdef ENABLE_WEBUI
    session_t *session = session_get_command_context();
-   if (session && session->type == SESSION_TYPE_WEBSOCKET) {
+   if (session && session->type == SESSION_TYPE_WEBUI) {
       webui_send_state_with_detail(session, state, detail);
    }
 #else

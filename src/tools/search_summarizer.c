@@ -431,7 +431,7 @@ static void notify_summarization_starting(void) {
       text_to_speech((char *)"Summarizing the results, please standby.");
    }
 #ifdef ENABLE_WEBUI
-   else if (session->type == SESSION_TYPE_WEBSOCKET) {
+   else if (session->type == SESSION_TYPE_WEBUI) {
       /* WebUI session - send status update */
       webui_send_state_with_detail(session, "summarizing", "Processing search results...");
    }

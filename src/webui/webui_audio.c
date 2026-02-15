@@ -48,8 +48,13 @@ static OpusDecoder *s_decoder = NULL;
 static OpusEncoder *s_encoder = NULL;
 static resampler_t *s_input_resampler = NULL; /* 48000Hz → 16000Hz for ASR */
 static resampler_t *s_tts_resampler = NULL;   /* 22050Hz → 48000Hz for TTS output */
-static pthread_mutex_t s_audio_mutex = PTHREAD_MUTEX_INITIALIZER;
-static bool s_initialized = false;
+
+/* Split mutexes: decoder+input_resampler vs encoder+tts_resampler operate independently.
+ * This allows concurrent encode (TTS output) and decode (ASR input) across sessions. */
+static pthread_mutex_t s_decode_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t s_encode_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t s_audio_mutex = PTHREAD_MUTEX_INITIALIZER; /* lifecycle only */
+static atomic_bool s_initialized = false;
 
 /* Note: ASR contexts are borrowed from worker pool (no local ASR context)
  * This avoids loading Whisper model twice and saves GPU memory */
@@ -169,11 +174,7 @@ void webui_audio_cleanup(void) {
 }
 
 bool webui_audio_is_initialized(void) {
-   bool result;
-   pthread_mutex_lock(&s_audio_mutex);
-   result = s_initialized;
-   pthread_mutex_unlock(&s_audio_mutex);
-   return result;
+   return atomic_load(&s_initialized);
 }
 
 /* =============================================================================
@@ -188,20 +189,28 @@ int webui_opus_decode_stream(const uint8_t *opus_data,
       return WEBUI_AUDIO_ERROR;
    }
 
-   pthread_mutex_lock(&s_audio_mutex);
-
-   if (!s_initialized || !s_decoder) {
-      pthread_mutex_unlock(&s_audio_mutex);
+   if (!atomic_load(&s_initialized)) {
       return WEBUI_AUDIO_ERROR_NOT_INITIALIZED;
    }
 
-   /* Pre-allocate PCM buffer for worst case (assume all frames are max duration)
-    * Each Opus frame can decode to at most 120ms of audio at 16kHz = 1920 samples */
-   size_t max_output_samples = WEBUI_PCM_MAX_SAMPLES;
+   /* Heuristic buffer sizing: typical Opus expansion ratio is ~120x (bytes → samples).
+    * Clamp between a reasonable minimum and WEBUI_PCM_MAX_SAMPLES. */
+   size_t est_samples = opus_len * 120;
+   if (est_samples < 48000)
+      est_samples = 48000; /* minimum 1 second */
+   size_t max_output_samples = (est_samples < WEBUI_PCM_MAX_SAMPLES) ? est_samples
+                                                                     : WEBUI_PCM_MAX_SAMPLES;
    int16_t *pcm_buffer = malloc(max_output_samples * sizeof(int16_t));
    if (!pcm_buffer) {
-      pthread_mutex_unlock(&s_audio_mutex);
       return WEBUI_AUDIO_ERROR_ALLOC;
+   }
+
+   pthread_mutex_lock(&s_decode_mutex);
+
+   if (!s_decoder) {
+      pthread_mutex_unlock(&s_decode_mutex);
+      free(pcm_buffer);
+      return WEBUI_AUDIO_ERROR_NOT_INITIALIZED;
    }
 
    size_t total_samples = 0;
@@ -249,7 +258,7 @@ int webui_opus_decode_stream(const uint8_t *opus_data,
       }
    }
 
-   pthread_mutex_unlock(&s_audio_mutex);
+   pthread_mutex_unlock(&s_decode_mutex);
 
    if (total_samples == 0) {
       free(pcm_buffer);
@@ -273,16 +282,20 @@ int webui_opus_decode_frame(const uint8_t *opus_frame,
       return -1;
    }
 
-   pthread_mutex_lock(&s_audio_mutex);
+   if (!atomic_load(&s_initialized)) {
+      return -1;
+   }
 
-   if (!s_initialized || !s_decoder) {
-      pthread_mutex_unlock(&s_audio_mutex);
+   pthread_mutex_lock(&s_decode_mutex);
+
+   if (!s_decoder) {
+      pthread_mutex_unlock(&s_decode_mutex);
       return -1;
    }
 
    int decoded = opus_decode(s_decoder, opus_frame, (int)opus_len, pcm_out, max_samples, 0);
 
-   pthread_mutex_unlock(&s_audio_mutex);
+   pthread_mutex_unlock(&s_decode_mutex);
 
    return decoded;
 }
@@ -299,10 +312,14 @@ int webui_opus_encode_stream(const int16_t *pcm_data,
       return WEBUI_AUDIO_ERROR;
    }
 
-   pthread_mutex_lock(&s_audio_mutex);
+   if (!atomic_load(&s_initialized)) {
+      return WEBUI_AUDIO_ERROR_NOT_INITIALIZED;
+   }
 
-   if (!s_initialized || !s_encoder) {
-      pthread_mutex_unlock(&s_audio_mutex);
+   pthread_mutex_lock(&s_encode_mutex);
+
+   if (!s_encoder) {
+      pthread_mutex_unlock(&s_encode_mutex);
       return WEBUI_AUDIO_ERROR_NOT_INITIALIZED;
    }
 
@@ -360,7 +377,7 @@ int webui_opus_encode_stream(const int16_t *pcm_data,
       input_offset += frame_samples;
    }
 
-   pthread_mutex_unlock(&s_audio_mutex);
+   pthread_mutex_unlock(&s_encode_mutex);
 
    if (output_offset == 0) {
       free(output);
@@ -385,7 +402,7 @@ int webui_audio_transcribe(const int16_t *pcm_data, size_t pcm_samples, char **t
       return WEBUI_AUDIO_ERROR;
    }
 
-   if (!s_initialized) {
+   if (!atomic_load(&s_initialized)) {
       return WEBUI_AUDIO_ERROR_NOT_INITIALIZED;
    }
 
@@ -427,6 +444,64 @@ int webui_audio_transcribe(const int16_t *pcm_data, size_t pcm_samples, char **t
    return WEBUI_AUDIO_SUCCESS;
 }
 
+/**
+ * @brief Resample 48kHz PCM to 16kHz for ASR (shared helper for opus_to_text and pcm48k_to_text)
+ */
+static int resample_48k_to_16k(const int16_t *pcm_in,
+                               size_t in_samples,
+                               int16_t **pcm_out,
+                               size_t *out_samples) {
+   if (!atomic_load(&s_initialized)) {
+      return WEBUI_AUDIO_ERROR_NOT_INITIALIZED;
+   }
+
+   pthread_mutex_lock(&s_decode_mutex);
+   if (!s_input_resampler) {
+      pthread_mutex_unlock(&s_decode_mutex);
+      return WEBUI_AUDIO_ERROR_NOT_INITIALIZED;
+   }
+
+   /* Pre-allocate with 10% margin to avoid reallocs during chunked processing */
+   size_t output_size = resampler_get_output_size(s_input_resampler, in_samples);
+   output_size = (output_size * 11) / 10;
+   int16_t *resampled = malloc(output_size * sizeof(int16_t));
+   if (!resampled) {
+      pthread_mutex_unlock(&s_decode_mutex);
+      return WEBUI_AUDIO_ERROR_ALLOC;
+   }
+
+   size_t total_resampled = 0;
+   size_t chunk_size = RESAMPLER_MAX_SAMPLES;
+   size_t offset = 0;
+
+   while (offset < in_samples) {
+      size_t remaining = in_samples - offset;
+      size_t to_process = (remaining < chunk_size) ? remaining : chunk_size;
+      size_t available_output = output_size - total_resampled;
+
+      size_t resampled_chunk = resampler_process(s_input_resampler, pcm_in + offset, to_process,
+                                                 resampled + total_resampled, available_output);
+
+      if (resampled_chunk == 0) {
+         LOG_ERROR("WebUI audio: 48k→16k resampling failed at offset %zu", offset);
+         break;
+      }
+
+      total_resampled += resampled_chunk;
+      offset += to_process;
+   }
+   pthread_mutex_unlock(&s_decode_mutex);
+
+   if (total_resampled == 0) {
+      free(resampled);
+      return WEBUI_AUDIO_ERROR;
+   }
+
+   *pcm_out = resampled;
+   *out_samples = total_resampled;
+   return WEBUI_AUDIO_SUCCESS;
+}
+
 int webui_audio_opus_to_text(const uint8_t *opus_data, size_t opus_len, char **text_out) {
    int16_t *pcm = NULL;
    size_t pcm_samples = 0;
@@ -438,50 +513,12 @@ int webui_audio_opus_to_text(const uint8_t *opus_data, size_t opus_len, char **t
    }
 
    /* Resample 48kHz → 16kHz for ASR */
-   pthread_mutex_lock(&s_audio_mutex);
-   if (!s_input_resampler) {
-      pthread_mutex_unlock(&s_audio_mutex);
-      free(pcm);
-      return WEBUI_AUDIO_ERROR_NOT_INITIALIZED;
-   }
-
-   /* Pre-allocate with 10% margin to avoid reallocs during chunked processing */
-   size_t output_size = resampler_get_output_size(s_input_resampler, pcm_samples);
-   output_size = (output_size * 11) / 10;
-   int16_t *resampled = malloc(output_size * sizeof(int16_t));
-   if (!resampled) {
-      pthread_mutex_unlock(&s_audio_mutex);
-      free(pcm);
-      return WEBUI_AUDIO_ERROR_ALLOC;
-   }
-
-   /* Process resampling in chunks */
+   int16_t *resampled = NULL;
    size_t total_resampled = 0;
-   size_t chunk_size = RESAMPLER_MAX_SAMPLES;
-   size_t offset = 0;
-
-   while (offset < pcm_samples) {
-      size_t remaining = pcm_samples - offset;
-      size_t to_process = (remaining < chunk_size) ? remaining : chunk_size;
-      size_t available_output = output_size - total_resampled;
-
-      size_t resampled_chunk = resampler_process(s_input_resampler, pcm + offset, to_process,
-                                                 resampled + total_resampled, available_output);
-
-      if (resampled_chunk == 0) {
-         LOG_ERROR("WebUI audio: Input resampling failed at offset %zu", offset);
-         break;
-      }
-
-      total_resampled += resampled_chunk;
-      offset += to_process;
-   }
-   pthread_mutex_unlock(&s_audio_mutex);
+   int resample_ret = resample_48k_to_16k(pcm, pcm_samples, &resampled, &total_resampled);
    free(pcm);
-
-   if (total_resampled == 0) {
-      free(resampled);
-      return WEBUI_AUDIO_ERROR;
+   if (resample_ret != WEBUI_AUDIO_SUCCESS) {
+      return resample_ret;
    }
 
    LOG_INFO("WebUI audio: Resampled %zu → %zu samples (48kHz → 16kHz)", pcm_samples,
@@ -500,47 +537,11 @@ int webui_audio_pcm48k_to_text(const int16_t *pcm_data, size_t pcm_samples, char
    }
 
    /* Resample 48kHz → 16kHz for ASR */
-   pthread_mutex_lock(&s_audio_mutex);
-   if (!s_initialized || !s_input_resampler) {
-      pthread_mutex_unlock(&s_audio_mutex);
-      return WEBUI_AUDIO_ERROR_NOT_INITIALIZED;
-   }
-
-   /* Pre-allocate with 10% margin to avoid reallocs during chunked processing */
-   size_t output_size = resampler_get_output_size(s_input_resampler, pcm_samples);
-   output_size = (output_size * 11) / 10;
-   int16_t *resampled = malloc(output_size * sizeof(int16_t));
-   if (!resampled) {
-      pthread_mutex_unlock(&s_audio_mutex);
-      return WEBUI_AUDIO_ERROR_ALLOC;
-   }
-
-   /* Process resampling in chunks */
+   int16_t *resampled = NULL;
    size_t total_resampled = 0;
-   size_t chunk_size = RESAMPLER_MAX_SAMPLES;
-   size_t offset = 0;
-
-   while (offset < pcm_samples) {
-      size_t remaining = pcm_samples - offset;
-      size_t to_process = (remaining < chunk_size) ? remaining : chunk_size;
-      size_t available_output = output_size - total_resampled;
-
-      size_t resampled_chunk = resampler_process(s_input_resampler, pcm_data + offset, to_process,
-                                                 resampled + total_resampled, available_output);
-
-      if (resampled_chunk == 0) {
-         LOG_ERROR("WebUI audio: PCM48k resampling failed at offset %zu", offset);
-         break;
-      }
-
-      total_resampled += resampled_chunk;
-      offset += to_process;
-   }
-   pthread_mutex_unlock(&s_audio_mutex);
-
-   if (total_resampled == 0) {
-      free(resampled);
-      return WEBUI_AUDIO_ERROR;
+   int resample_ret = resample_48k_to_16k(pcm_data, pcm_samples, &resampled, &total_resampled);
+   if (resample_ret != WEBUI_AUDIO_SUCCESS) {
+      return resample_ret;
    }
 
    LOG_INFO("WebUI audio: PCM48k resampled %zu → %zu samples (48kHz → 16kHz)", pcm_samples,
@@ -575,10 +576,10 @@ int webui_audio_text_to_opus(const char *text, uint8_t **opus_out, size_t *opus_
 
    LOG_INFO("WebUI audio: TTS generated %zu samples at %uHz", tts_samples, tts_rate);
 
-   pthread_mutex_lock(&s_audio_mutex);
+   pthread_mutex_lock(&s_encode_mutex);
 
-   if (!s_initialized || !s_tts_resampler) {
-      pthread_mutex_unlock(&s_audio_mutex);
+   if (!s_tts_resampler) {
+      pthread_mutex_unlock(&s_encode_mutex);
       free(tts_pcm);
       return WEBUI_AUDIO_ERROR_NOT_INITIALIZED;
    }
@@ -589,7 +590,7 @@ int webui_audio_text_to_opus(const char *text, uint8_t **opus_out, size_t *opus_
    output_size = (output_size * 11) / 10;
    int16_t *resampled = malloc(output_size * sizeof(int16_t));
    if (!resampled) {
-      pthread_mutex_unlock(&s_audio_mutex);
+      pthread_mutex_unlock(&s_encode_mutex);
       free(tts_pcm);
       return WEBUI_AUDIO_ERROR_ALLOC;
    }
@@ -616,7 +617,7 @@ int webui_audio_text_to_opus(const char *text, uint8_t **opus_out, size_t *opus_
       offset += to_process;
    }
 
-   pthread_mutex_unlock(&s_audio_mutex);
+   pthread_mutex_unlock(&s_encode_mutex);
    free(tts_pcm);
 
    if (total_resampled == 0) {
@@ -652,10 +653,10 @@ int webui_audio_text_to_pcm(const char *text, int16_t **pcm_out, size_t *pcm_sam
 
    LOG_INFO("WebUI audio: TTS generated %zu samples at %uHz", tts_samples, tts_rate);
 
-   pthread_mutex_lock(&s_audio_mutex);
+   pthread_mutex_lock(&s_encode_mutex);
 
-   if (!s_initialized || !s_tts_resampler) {
-      pthread_mutex_unlock(&s_audio_mutex);
+   if (!s_tts_resampler) {
+      pthread_mutex_unlock(&s_encode_mutex);
       free(tts_pcm);
       return WEBUI_AUDIO_ERROR_NOT_INITIALIZED;
    }
@@ -666,7 +667,7 @@ int webui_audio_text_to_pcm(const char *text, int16_t **pcm_out, size_t *pcm_sam
    output_size = (output_size * 11) / 10;
    int16_t *resampled = malloc(output_size * sizeof(int16_t));
    if (!resampled) {
-      pthread_mutex_unlock(&s_audio_mutex);
+      pthread_mutex_unlock(&s_encode_mutex);
       free(tts_pcm);
       return WEBUI_AUDIO_ERROR_ALLOC;
    }
@@ -693,7 +694,7 @@ int webui_audio_text_to_pcm(const char *text, int16_t **pcm_out, size_t *pcm_sam
       offset += to_process;
    }
 
-   pthread_mutex_unlock(&s_audio_mutex);
+   pthread_mutex_unlock(&s_encode_mutex);
    free(tts_pcm);
 
    if (total_resampled == 0) {
@@ -756,29 +757,29 @@ void webui_sentence_audio_callback(const char *sentence, void *userdata) {
       return;
    }
 
-   /* Make a copy for cleaning (same pattern as dawn_tts_sentence_callback) */
-   char *cleaned = strdup(sentence);
-   if (!cleaned) {
-      return;
-   }
+   /* Fast path: skip strdup + 4 string scans if sentence has no special content */
+   bool needs_cleaning = (strstr(sentence, "<command>") != NULL ||
+                          strstr(sentence, "<end_of_turn>") != NULL ||
+                          strchr(sentence, '*') != NULL);
 
-   /* Remove command tags (they'll be processed from the full response later) */
-   char *cmd_start, *cmd_end;
-   while ((cmd_start = strstr(cleaned, "<command>")) != NULL) {
-      cmd_end = strstr(cmd_start, "</command>");
-      if (cmd_end) {
-         cmd_end += strlen("</command>");
-         memmove(cmd_start, cmd_end, strlen(cmd_end) + 1);
-      } else {
-         /* Incomplete command tag - strip from <command> to end */
-         *cmd_start = '\0';
-         break;
-      }
-   }
+   char *cleaned;
+   if (needs_cleaning) {
+      cleaned = strdup(sentence);
+      if (!cleaned)
+         return;
 
-   /* Remove special characters that cause TTS issues */
-   remove_chars(cleaned, "*");
-   remove_emojis(cleaned);
+      /* Remove command tags (they'll be processed from the full response later) */
+      strip_command_tags(cleaned);
+
+      /* Remove special characters that cause TTS issues */
+      remove_chars(cleaned, "*");
+      remove_emojis(cleaned);
+   } else {
+      cleaned = strdup(sentence);
+      if (!cleaned)
+         return;
+      remove_emojis(cleaned);
+   }
 
    /* Trim whitespace */
    size_t len = strlen(cleaned);
@@ -786,6 +787,13 @@ void webui_sentence_audio_callback(const char *sentence, void *userdata) {
                       cleaned[len - 1] == '\n' || cleaned[len - 1] == '\r')) {
       cleaned[--len] = '\0';
    }
+
+   /* Re-check: session may have disconnected during cleanup above (client_data freed) */
+   if (session->disconnected || !session->client_data) {
+      free(cleaned);
+      return;
+   }
+   conn = (ws_connection_t *)session->client_data;
 
    /* Only generate TTS if there's actual content and TTS still enabled.
     * Re-check tts_enabled before expensive encoding (user may have disabled during cleanup). */
@@ -806,8 +814,9 @@ void webui_sentence_audio_callback(const char *sentence, void *userdata) {
          int ret = webui_audio_text_to_opus(cleaned, &opus, &opus_len);
 
          if (ret == WEBUI_AUDIO_SUCCESS && opus && opus_len > 0) {
-            /* Re-check TTS enabled after encoding (user may have disabled mid-synthesis) */
-            if (conn->tts_enabled) {
+            /* Re-check: session may have disconnected during TTS synthesis */
+            if (!session->disconnected && session->client_data &&
+                ((ws_connection_t *)session->client_data)->tts_enabled) {
                webui_send_audio(session, opus, opus_len);
                webui_send_audio_end(session);
             }
@@ -824,7 +833,9 @@ void webui_sentence_audio_callback(const char *sentence, void *userdata) {
          if (ret == 0 && tts_pcm && tts_samples > 0) {
             LOG_INFO("WebUI audio: Tier 2 TTS %zu samples at %uHz (native, no resample)",
                      tts_samples, tts_rate);
-            if (conn->tts_enabled) {
+            /* Re-check: session may have disconnected during TTS synthesis */
+            if (!session->disconnected && session->client_data &&
+                ((ws_connection_t *)session->client_data)->tts_enabled) {
                size_t bytes = tts_samples * sizeof(int16_t);
                webui_send_audio(session, (const uint8_t *)tts_pcm, bytes);
                webui_send_audio_end(session);
@@ -838,8 +849,9 @@ void webui_sentence_audio_callback(const char *sentence, void *userdata) {
          int ret = webui_audio_text_to_pcm(cleaned, &pcm, &samples);
 
          if (ret == WEBUI_AUDIO_SUCCESS && pcm && samples > 0) {
-            /* Re-check TTS enabled after encoding (user may have disabled mid-synthesis) */
-            if (conn->tts_enabled) {
+            /* Re-check: session may have disconnected during TTS synthesis */
+            if (!session->disconnected && session->client_data &&
+                ((ws_connection_t *)session->client_data)->tts_enabled) {
                size_t bytes = samples * sizeof(int16_t);
                webui_send_audio(session, (const uint8_t *)pcm, bytes);
                webui_send_audio_end(session);
@@ -1017,6 +1029,9 @@ static void *audio_worker_thread(void *arg) {
 
    webui_send_state(session, "idle");
 
+   /* Mark interaction complete for conversation idle timeout tracking */
+   session_update_interaction_complete(session);
+
    /* Release session reference (acquired before thread creation) */
    session_release(session);
 
@@ -1092,8 +1107,8 @@ void handle_binary_message(ws_connection_t *conn, const uint8_t *data, size_t le
          memcpy(conn->audio_buffer + conn->audio_buffer_len, payload, payload_len);
          conn->audio_buffer_len += payload_len;
 
-         LOG_INFO("WebUI: Accumulated %zu bytes audio (total: %zu)", payload_len,
-                  conn->audio_buffer_len);
+         LOG_DEBUG("WebUI: Accumulated %zu bytes audio (total: %zu)", payload_len,
+                   conn->audio_buffer_len);
          break;
       }
 

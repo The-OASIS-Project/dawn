@@ -246,10 +246,11 @@ static int queue_music_data(ws_connection_t *conn, const uint8_t *data, size_t l
    int queue_fill = webui_get_queue_fill_pct();
    if (queue_fill > 75) {
       /* Queue is > 75% full - skip this frame to let it drain */
-      static int drop_count = 0;
-      if (++drop_count % 50 == 1)
+      static _Atomic int drop_count = 0;
+      int drops = atomic_fetch_add(&drop_count, 1) + 1;
+      if (drops % 50 == 1)
          LOG_WARNING("WebUI music: Backpressure dropping frames (queue %d%%, dropped %d)",
-                     queue_fill, drop_count);
+                     queue_fill, drops);
       return 0; /* Not an error, just backpressure */
    }
 
@@ -1557,6 +1558,27 @@ void handle_music_search(ws_connection_t *conn, struct json_object *payload) {
    free(results);
 }
 
+/**
+ * @brief Extract and clamp pagination parameters from JSON payload
+ */
+static void parse_pagination(struct json_object *payload, int *limit, int *offset) {
+   *limit = 50;
+   *offset = 0;
+
+   struct json_object *limit_obj, *offset_obj;
+   if (payload && json_object_object_get_ex(payload, "limit", &limit_obj))
+      *limit = json_object_get_int(limit_obj);
+   if (payload && json_object_object_get_ex(payload, "offset", &offset_obj))
+      *offset = json_object_get_int(offset_obj);
+
+   if (*limit < 1)
+      *limit = 1;
+   if (*limit > 200)
+      *limit = 200;
+   if (*offset < 0)
+      *offset = 0;
+}
+
 void handle_music_library(ws_connection_t *conn, struct json_object *payload) {
    if (!conn_is_satellite_session(conn) && !conn_require_auth(conn)) {
       return;
@@ -1589,22 +1611,9 @@ void handle_music_library(ws_connection_t *conn, struct json_object *payload) {
       json_object_object_add(resp_payload, "album_count", json_object_new_int(stats.album_count));
 
    } else if (strcmp(browse_type, "tracks") == 0) {
-      /* Paginated track listing (default limit=50, max=200) */
-      int limit = 50;
-      int offset = 0;
-
-      struct json_object *limit_obj, *offset_obj;
-      if (payload && json_object_object_get_ex(payload, "limit", &limit_obj))
-         limit = json_object_get_int(limit_obj);
-      if (payload && json_object_object_get_ex(payload, "offset", &offset_obj))
-         offset = json_object_get_int(offset_obj);
-
-      if (limit < 1)
-         limit = 1;
-      if (limit > 200)
-         limit = 200;
-      if (offset < 0)
-         offset = 0;
+      /* Paginated track listing */
+      int limit, offset;
+      parse_pagination(payload, &limit, &offset);
 
       music_search_result_t *tracks = malloc(limit * sizeof(music_search_result_t));
       if (!tracks) {
@@ -1635,22 +1644,9 @@ void handle_music_library(ws_connection_t *conn, struct json_object *payload) {
       free(tracks);
 
    } else if (strcmp(browse_type, "artists") == 0) {
-      /* Paginated artist listing (default limit=50, max=200) */
-      int limit = 50;
-      int offset = 0;
-
-      struct json_object *limit_obj, *offset_obj;
-      if (payload && json_object_object_get_ex(payload, "limit", &limit_obj))
-         limit = json_object_get_int(limit_obj);
-      if (payload && json_object_object_get_ex(payload, "offset", &offset_obj))
-         offset = json_object_get_int(offset_obj);
-
-      if (limit < 1)
-         limit = 1;
-      if (limit > 200)
-         limit = 200;
-      if (offset < 0)
-         offset = 0;
+      /* Paginated artist listing */
+      int limit, offset;
+      parse_pagination(payload, &limit, &offset);
 
       music_artist_info_t *artists = malloc(limit * sizeof(music_artist_info_t));
       if (!artists) {
@@ -1679,22 +1675,9 @@ void handle_music_library(ws_connection_t *conn, struct json_object *payload) {
       free(artists);
 
    } else if (strcmp(browse_type, "albums") == 0) {
-      /* Paginated album listing (default limit=50, max=200) */
-      int limit = 50;
-      int offset = 0;
-
-      struct json_object *limit_obj, *offset_obj;
-      if (payload && json_object_object_get_ex(payload, "limit", &limit_obj))
-         limit = json_object_get_int(limit_obj);
-      if (payload && json_object_object_get_ex(payload, "offset", &offset_obj))
-         offset = json_object_get_int(offset_obj);
-
-      if (limit < 1)
-         limit = 1;
-      if (limit > 200)
-         limit = 200;
-      if (offset < 0)
-         offset = 0;
+      /* Paginated album listing */
+      int limit, offset;
+      parse_pagination(payload, &limit, &offset);
 
       music_album_info_t *albums = malloc(limit * sizeof(music_album_info_t));
       if (!albums) {

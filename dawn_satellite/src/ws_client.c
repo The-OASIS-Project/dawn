@@ -39,6 +39,12 @@
 #define WS_RX_BUFFER_SIZE 65536
 #define WS_RX_BUFFER_MAX (2 * 1024 * 1024) /* 2MB cap to prevent OOM */
 #define WS_TX_BUFFER_SIZE 4096
+#define WS_TX_QUEUE_SIZE 8 /* Ring buffer for pending TX messages */
+
+typedef struct {
+   char *data;
+   size_t len;
+} ws_tx_entry_t;
 
 struct ws_client {
    /* Connection info */
@@ -65,10 +71,11 @@ struct ws_client {
    size_t rx_len;
    size_t rx_capacity;
 
-   /* Pending send */
-   char *tx_buffer;
-   size_t tx_len;
-   bool tx_pending;
+   /* Pending send queue (ring buffer) */
+   ws_tx_entry_t tx_queue[WS_TX_QUEUE_SIZE];
+   int tx_head;  /* Next to send */
+   int tx_tail;  /* Next to write */
+   int tx_count; /* Number of pending entries */
 
    /* Callbacks */
    ws_stream_callback_t stream_cb;
@@ -239,14 +246,27 @@ static int callback_ws(struct lws *wsi,
          break;
 
       case LWS_CALLBACK_CLIENT_WRITEABLE:
-         if (client && client->tx_pending && client->tx_buffer && client->tx_len > 0) {
+         if (client) {
             pthread_mutex_lock(&client->mutex);
+            if (client->tx_count == 0) {
+               pthread_mutex_unlock(&client->mutex);
+               break;
+            }
+
+            /* Dequeue next entry */
+            ws_tx_entry_t entry = client->tx_queue[client->tx_head];
+            client->tx_queue[client->tx_head].data = NULL;
+            client->tx_queue[client->tx_head].len = 0;
+            client->tx_head = (client->tx_head + 1) % WS_TX_QUEUE_SIZE;
+            client->tx_count--;
+            bool more_pending = (client->tx_count > 0);
+            pthread_mutex_unlock(&client->mutex);
 
             /* Allocate buffer with LWS_PRE padding */
-            unsigned char *buf = malloc(LWS_PRE + client->tx_len);
+            unsigned char *buf = malloc(LWS_PRE + entry.len);
             if (buf) {
-               memcpy(buf + LWS_PRE, client->tx_buffer, client->tx_len);
-               int n = lws_write(wsi, buf + LWS_PRE, client->tx_len, LWS_WRITE_TEXT);
+               memcpy(buf + LWS_PRE, entry.data, entry.len);
+               int n = lws_write(wsi, buf + LWS_PRE, entry.len, LWS_WRITE_TEXT);
                free(buf);
 
                if (n < 0) {
@@ -256,12 +276,12 @@ static int callback_ws(struct lws *wsi,
                }
             }
 
-            free(client->tx_buffer);
-            client->tx_buffer = NULL;
-            client->tx_len = 0;
-            client->tx_pending = false;
+            free(entry.data);
 
-            pthread_mutex_unlock(&client->mutex);
+            /* If more messages queued, request another writable callback */
+            if (more_pending) {
+               lws_callback_on_writable(wsi);
+            }
          }
          break;
 
@@ -350,7 +370,7 @@ static void handle_message(ws_client_t *client, const char *msg, size_t len) {
                           sizeof(client->identity.reconnect_secret) - 1);
                   client->identity.reconnect_secret[sizeof(client->identity.reconnect_secret) - 1] =
                       '\0';
-                  LOG_INFO("Received reconnect secret: %.8s...", secret);
+                  LOG_INFO("Received reconnect secret (stored)");
                }
             }
 
@@ -396,9 +416,12 @@ static void handle_message(ws_client_t *client, const char *msg, size_t len) {
                client->status_detail[0] = '\0';
             }
 
-            if (client->state_cb) {
+            /* Copy callback pointers before unlock to prevent UAF */
+            ws_state_callback_t state_cb = client->state_cb;
+            void *state_cb_data = client->state_cb_data;
+            if (state_cb) {
                pthread_mutex_unlock(&client->mutex);
-               client->state_cb(state, client->state_cb_data);
+               state_cb(state, state_cb_data);
                pthread_mutex_lock(&client->mutex);
             }
          }
@@ -411,18 +434,22 @@ static void handle_message(ws_client_t *client, const char *msg, size_t len) {
          if (json_object_object_get_ex(payload, "delta", &delta_obj)) {
             const char *text = json_object_get_string(delta_obj);
 
-            if (client->stream_cb && text) {
+            ws_stream_callback_t stream_cb = client->stream_cb;
+            void *stream_cb_data = client->stream_cb_data;
+            if (stream_cb && text) {
                pthread_mutex_unlock(&client->mutex);
-               client->stream_cb(text, false, client->stream_cb_data);
+               stream_cb(text, false, stream_cb_data);
                pthread_mutex_lock(&client->mutex);
             }
          }
       }
    } else if (strcmp(type, "stream_end") == 0) {
       LOG_DEBUG("Stream end");
-      if (client->stream_cb) {
+      ws_stream_callback_t stream_cb = client->stream_cb;
+      void *stream_cb_data = client->stream_cb_data;
+      if (stream_cb) {
          pthread_mutex_unlock(&client->mutex);
-         client->stream_cb("", true, client->stream_cb_data);
+         stream_cb("", true, stream_cb_data);
          pthread_mutex_lock(&client->mutex);
       }
    } else if (strcmp(type, "error") == 0) {
@@ -449,9 +476,11 @@ static void handle_message(ws_client_t *client, const char *msg, size_t len) {
             const char *role = json_object_get_string(role_obj);
             const char *text = json_object_get_string(text_obj);
 
-            if (strcmp(role, "satellite_response") == 0 && client->stream_cb && text) {
+            ws_stream_callback_t scb = client->stream_cb;
+            void *scb_data = client->stream_cb_data;
+            if (strcmp(role, "satellite_response") == 0 && scb && text) {
                pthread_mutex_unlock(&client->mutex);
-               client->stream_cb(text, true, client->stream_cb_data);
+               scb(text, true, scb_data);
                pthread_mutex_lock(&client->mutex);
             }
          }
@@ -698,14 +727,19 @@ static int send_json(ws_client_t *client, struct json_object *obj) {
 
    pthread_mutex_lock(&client->mutex);
 
-   /* Free any pending send */
-   if (client->tx_buffer) {
-      free(client->tx_buffer);
+   if (client->tx_count >= WS_TX_QUEUE_SIZE) {
+      /* Queue full — drop oldest message to make room */
+      LOG_WARNING("TX queue full, dropping oldest message");
+      free(client->tx_queue[client->tx_head].data);
+      client->tx_queue[client->tx_head].data = NULL;
+      client->tx_head = (client->tx_head + 1) % WS_TX_QUEUE_SIZE;
+      client->tx_count--;
    }
 
-   client->tx_buffer = strdup(str);
-   client->tx_len = len;
-   client->tx_pending = true;
+   client->tx_queue[client->tx_tail].data = strdup(str);
+   client->tx_queue[client->tx_tail].len = len;
+   client->tx_tail = (client->tx_tail + 1) % WS_TX_QUEUE_SIZE;
+   client->tx_count++;
 
    pthread_mutex_unlock(&client->mutex);
 
@@ -762,7 +796,10 @@ void ws_client_destroy(ws_client_t *client) {
    pthread_mutex_destroy(&client->mutex);
 
    free(client->rx_buffer);
-   free(client->tx_buffer);
+   /* Free any queued TX messages */
+   for (int i = 0; i < WS_TX_QUEUE_SIZE; i++) {
+      free(client->tx_queue[i].data);
+   }
    free(client);
 }
 
@@ -1077,10 +1114,9 @@ int ws_client_ping(ws_client_t *client) {
       return -1;
    }
 
-   /* Skip ping if there's already a pending message (query, registration, etc.)
-    * to prevent pings from overwriting real data in the single tx_buffer. */
+   /* Skip ping if the TX queue is nearly full — leave room for real messages */
    pthread_mutex_lock(&client->mutex);
-   bool busy = client->tx_pending;
+   bool busy = (client->tx_count >= WS_TX_QUEUE_SIZE - 1);
    pthread_mutex_unlock(&client->mutex);
    if (busy) {
       return 0;

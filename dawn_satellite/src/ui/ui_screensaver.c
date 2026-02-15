@@ -519,6 +519,9 @@ int ui_screensaver_init(ui_screensaver_t *ss,
    ss->screen_h = h;
    ss->renderer = renderer;
 
+   /* Seed random for watermark corner selection */
+   srand((unsigned int)time(NULL));
+
    /* Precompute 360-entry HSV rainbow lookup table */
    for (int i = 0; i < 360; i++) {
       ss->hsv_lut[i] = ui_color_from_hsv((float)i, 0.85f, 0.95f);
@@ -797,8 +800,11 @@ void ui_screensaver_update_spectrum(ui_screensaver_t *ss, const float *spectrum,
 
    /* Frame-rate independent smoothing: alpha = 1 - base^(60*dt)
     * At 30fps: rise ~0.84, fall ~0.58. Scales naturally to other rates. */
-   float rise_alpha = 1.0f - powf(SMOOTH_RISE_BASE, 60.0f * dt);
-   float fall_alpha = 1.0f - powf(SMOOTH_FALL_BASE, 60.0f * dt);
+   /* powf(base, x) = expf(x * logf(base)). Precompute log constants to avoid powf. */
+   static const float LOG_RISE = -0.916291f; /* logf(SMOOTH_RISE_BASE=0.4) */
+   static const float LOG_FALL = -0.431364f; /* logf(SMOOTH_FALL_BASE=0.65) */
+   float rise_alpha = 1.0f - expf(60.0f * dt * LOG_RISE);
+   float fall_alpha = 1.0f - expf(60.0f * dt * LOG_FALL);
 
    for (int i = 0; i < n; i++) {
       /* Goertzel bins are already log-spaced (30Hz-16kHz), use directly.

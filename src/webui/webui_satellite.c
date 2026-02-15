@@ -22,12 +22,19 @@
  */
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <time.h>
 
 #include "core/session_manager.h"
 #include "logging.h"
 #include "webui/webui_internal.h"
+
+/* Maximum concurrent satellite worker threads (LLM calls).
+ * request_generation prevents stale results, but each thread still holds
+ * ~8MB stack until it checks the generation counter after the LLM call. */
+#define MAX_SATELLITE_WORKERS 8
+atomic_int g_active_satellite_workers = 0;
 
 /* =============================================================================
  * Rate Limiting for Satellite Registration
@@ -36,12 +43,13 @@
  * Uses a simple hash table with IP-based tracking.
  * ============================================================================= */
 
-#define RATE_LIMIT_BUCKETS 256
+#define RATE_LIMIT_BUCKETS 64
 #define RATE_LIMIT_MAX_REGISTRATIONS 5
 #define RATE_LIMIT_WINDOW_SEC 60
 
 typedef struct {
    uint32_t ip_hash;
+   char ip_str[46]; /* Store actual IP for collision detection (IPv6 max 45 + null) */
    time_t window_start;
    int count;
 } rate_limit_entry_t;
@@ -71,10 +79,13 @@ static bool is_rate_limited(const char *client_ip) {
 
    rate_limit_entry_t *entry = &g_rate_limits[bucket];
 
-   /* Check if this is a different IP (hash collision) or window expired */
-   if (entry->ip_hash != hash || (now - entry->window_start) >= RATE_LIMIT_WINDOW_SEC) {
+   /* Check if this is a different IP (hash collision + string mismatch) or window expired */
+   if (entry->ip_hash != hash || strcmp(entry->ip_str, client_ip) != 0 ||
+       (now - entry->window_start) >= RATE_LIMIT_WINDOW_SEC) {
       /* Start new window */
       entry->ip_hash = hash;
+      strncpy(entry->ip_str, client_ip, sizeof(entry->ip_str) - 1);
+      entry->ip_str[sizeof(entry->ip_str) - 1] = '\0';
       entry->window_start = now;
       entry->count = 1;
       pthread_mutex_unlock(&g_rate_limit_mutex);
@@ -127,8 +138,8 @@ void satellite_send_stream_start(session_t *session) {
       return;
    }
 
-   atomic_fetch_add(&session->current_stream_id, 1);
-   session->llm_streaming_active = true;
+   uint32_t sid = atomic_fetch_add(&session->current_stream_id, 1) + 1;
+   atomic_store(&session->llm_streaming_active, true);
 
    /* Reset command tag filter state for new stream */
    session->cmd_tag_filter.nesting_depth = 0;
@@ -137,13 +148,13 @@ void satellite_send_stream_start(session_t *session) {
    ws_response_t resp = { .session = session,
                           .type = WS_RESP_STREAM_START,
                           .stream = {
-                              .stream_id = session->current_stream_id,
+                              .stream_id = sid,
                               .text = "",
                           } };
 
    queue_response(&resp);
-   LOG_INFO("Satellite: Stream start id=%u for session %u (satellite %s)",
-            session->current_stream_id, session->session_id, session->identity.name);
+   LOG_INFO("Satellite: Stream start id=%u for session %u (satellite %s)", sid, session->session_id,
+            session->identity.name);
 }
 
 void satellite_send_stream_end(session_t *session, const char *reason) {
@@ -151,7 +162,7 @@ void satellite_send_stream_end(session_t *session, const char *reason) {
       return;
    }
 
-   session->llm_streaming_active = false;
+   atomic_store(&session->llm_streaming_active, false);
 
    ws_response_t resp = { .session = session,
                           .type = WS_RESP_STREAM_END,
@@ -225,9 +236,9 @@ typedef struct {
 } satellite_work_t;
 
 /**
- * @brief Strip command tags from text in-place
+ * @brief Strip command tags from text in-place (shared by satellite + audio workers)
  */
-static void strip_satellite_command_tags(char *text) {
+void strip_command_tags(char *text) {
    if (!text)
       return;
 
@@ -254,19 +265,17 @@ static void *satellite_worker_thread(void *arg) {
    session_t *session = work->session;
    char *text = work->text;
    unsigned int expected_gen = work->request_gen;
+   char *response = NULL;
+
+   /* Worker count already incremented in handle_satellite_query before pthread_create */
 
    /* Check if session is still valid or if this request was superseded */
    if (!session || REQUEST_SUPERSEDED(session, expected_gen)) {
       LOG_INFO("Satellite: Session disconnected or request superseded, aborting");
-      if (session) {
-         session_release(session);
-      }
-      free(text);
-      free(work);
-      return NULL;
+      goto cleanup;
    }
 
-   LOG_INFO("Satellite: Processing query from %s: %s", session->identity.name, text);
+   LOG_INFO("Satellite: Processing query from %s (len=%zu)", session->identity.name, strlen(text));
 
    /* Send "thinking" state with detail */
    webui_send_state_with_detail(session, "thinking", "Processing your request...");
@@ -274,57 +283,38 @@ static void *satellite_worker_thread(void *arg) {
    /* Add user message to history */
    session_add_message(session, "user", text);
 
-   /* Call LLM - streaming will happen automatically via webui_send_stream_delta
-    * since we've extended it to support SESSION_TYPE_DAP2 */
-   char *response = session_llm_call_with_tts_vision_no_add(session, text, NULL, NULL, NULL, 0,
-                                                            NULL, /* No TTS callback */
-                                                            NULL);
+   /* Call LLM with TTS callback for Tier 2 satellites (server-side TTS).
+    * Tier 1 satellites have local TTS and only need the text response, but
+    * Tier 2 devices need the daemon to synthesize speech and send PCM audio. */
+   bool needs_server_tts = !session->capabilities.local_tts;
+   response = session_llm_call_with_tts_vision_no_add(
+       session, text, NULL, NULL, NULL, 0, needs_server_tts ? webui_sentence_audio_callback : NULL,
+       needs_server_tts ? session : NULL);
 
    /* Check if request was superseded during LLM call */
    if (REQUEST_SUPERSEDED(session, expected_gen)) {
       LOG_INFO("Satellite: Request superseded during LLM call");
-      session_release(session);
-      free(response);
-      free(text);
-      free(work);
-      return NULL;
+      goto cleanup;
    }
 
    if (!response) {
       satellite_send_error(session, "LLM_ERROR", "Failed to get response from AI");
       satellite_send_state(session, "idle");
-      session_release(session);
-      free(text);
-      free(work);
-      return NULL;
+      goto cleanup;
    }
 
    /* Check for command tags and process them using the existing infrastructure */
-   char *final_response = response;
    if (strstr(response, "<command>")) {
       LOG_INFO("Satellite: Response contains commands, processing...");
 
-      /* Process commands using shared infrastructure */
       char *processed = webui_process_commands(response, session);
-      if (processed) {
-         /* Check if request was superseded after command processing */
-         if (REQUEST_SUPERSEDED(session, expected_gen)) {
-            LOG_INFO("Satellite: Request superseded during command processing");
-            session_release(session);
-            free(response);
-            free(processed);
-            free(text);
-            free(work);
-            return NULL;
-         }
-
+      if (processed && !REQUEST_SUPERSEDED(session, expected_gen)) {
          /* Recursively process if the follow-up also contains commands */
          int iterations = 0;
          const int MAX_ITERATIONS = 5;
 
          while (strstr(processed, "<command>") && !REQUEST_SUPERSEDED(session, expected_gen)) {
-            iterations++;
-            if (iterations > MAX_ITERATIONS) {
+            if (++iterations > MAX_ITERATIONS) {
                LOG_WARNING("Satellite: Command loop limit reached (%d iterations)", MAX_ITERATIONS);
                break;
             }
@@ -343,28 +333,37 @@ static void *satellite_worker_thread(void *arg) {
 
          if (processed) {
             free(response);
-            final_response = processed;
-         } else {
-            final_response = response;
+            response = processed;
          }
+      } else {
+         free(processed);
       }
    }
 
+   if (REQUEST_SUPERSEDED(session, expected_gen))
+      goto cleanup;
+
    /* Strip any remaining command tags from final response */
-   strip_satellite_command_tags(final_response);
+   strip_command_tags(response);
 
    /* Send stream end if streaming was active */
-   if (session->llm_streaming_active) {
+   if (atomic_load(&session->llm_streaming_active)) {
       satellite_send_stream_end(session, "complete");
    }
 
    /* Return to idle state */
    satellite_send_state(session, "idle");
 
-   session_release(session);
-   free(final_response);
+   /* Mark interaction complete for conversation idle timeout tracking */
+   session_update_interaction_complete(session);
+
+cleanup:
+   if (session)
+      session_release(session);
+   free(response);
    free(text);
    free(work);
+   atomic_fetch_sub(&g_active_satellite_workers, 1);
    return NULL;
 }
 
@@ -417,15 +416,19 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
       }
    }
 
-   /* Optional fields with defaults */
+   /* Optional fields with defaults (null-check for non-string JSON types) */
    const char *name = "Satellite";
    if (json_object_object_get_ex(payload, "name", &name_obj)) {
-      name = json_object_get_string(name_obj);
+      const char *n = json_object_get_string(name_obj);
+      if (n)
+         name = n;
    }
 
    const char *location = "";
    if (json_object_object_get_ex(payload, "location", &location_obj)) {
-      location = json_object_get_string(location_obj);
+      const char *l = json_object_get_string(location_obj);
+      if (l)
+         location = l;
    }
 
    int tier = 1; /* Default to Tier 1 */
@@ -467,7 +470,9 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
    const char *reconnect_secret = "";
    struct json_object *secret_obj;
    if (json_object_object_get_ex(payload, "reconnect_secret", &secret_obj)) {
-      reconnect_secret = json_object_get_string(secret_obj);
+      const char *s = json_object_get_string(secret_obj);
+      if (s)
+         reconnect_secret = s;
    }
 
    /* Build identity */
@@ -476,6 +481,16 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
    strncpy(identity.uuid, uuid, sizeof(identity.uuid) - 1);
    strncpy(identity.name, name, sizeof(identity.name) - 1);
    strncpy(identity.location, location, sizeof(identity.location) - 1);
+
+   /* Sanitize name/location: strip non-printable chars to prevent log injection */
+   for (char *p = identity.name; *p; p++) {
+      if ((unsigned char)*p < 0x20 || (unsigned char)*p > 0x7E)
+         *p = '_';
+   }
+   for (char *p = identity.location; *p; p++) {
+      if ((unsigned char)*p < 0x20 || (unsigned char)*p > 0x7E)
+         *p = '_';
+   }
 
    /* Include reconnect_secret if client provided one (for session reclamation) */
    if (reconnect_secret && reconnect_secret[0]) {
@@ -570,6 +585,12 @@ void handle_satellite_query(ws_connection_t *conn, struct json_object *payload) 
       return;
    }
 
+   /* Cap query length to prevent resource exhaustion (memory + LLM API cost) */
+   if (strlen(text) > 8192) {
+      send_error_impl(conn->wsi, "INVALID_MESSAGE", "Query text too long (max 8192 chars)");
+      return;
+   }
+
    /* Increment request generation (supersedes any pending request) */
    atomic_fetch_add(&session->request_generation, 1);
 
@@ -592,16 +613,32 @@ void handle_satellite_query(ws_connection_t *conn, struct json_object *payload) 
       return;
    }
 
-   /* Launch worker thread */
+   /* Atomically claim a worker slot (prevents TOCTOU race on the limit check) */
+   int prev = atomic_fetch_add(&g_active_satellite_workers, 1);
+   if (prev >= MAX_SATELLITE_WORKERS) {
+      atomic_fetch_sub(&g_active_satellite_workers, 1);
+      LOG_WARNING("Satellite: Worker limit reached (%d), rejecting query from %s",
+                  MAX_SATELLITE_WORKERS, session->identity.name);
+      send_error_impl(conn->wsi, "BUSY", "Server busy processing other requests");
+      session_release(session);
+      free(work->text);
+      free(work);
+      return;
+   }
+
+   /* Launch worker thread (512KB stack — worker does HTTP LLM call, tool execution
+    * including memory search with ~30KB stack arrays, and string processing) */
    pthread_t thread;
    pthread_attr_t attr;
    pthread_attr_init(&attr);
    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+   pthread_attr_setstacksize(&attr, 512 * 1024);
 
    int ret = pthread_create(&thread, &attr, satellite_worker_thread, work);
    pthread_attr_destroy(&attr);
 
    if (ret != 0) {
+      atomic_fetch_sub(&g_active_satellite_workers, 1);
       LOG_ERROR("Satellite: Failed to create worker thread: %d", ret);
       session_release(session);
       free(work->text);

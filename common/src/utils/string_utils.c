@@ -102,6 +102,32 @@ void sanitize_utf8_for_json(char *str) {
    *dst = '\0';
 }
 
+void extract_url_host(const char *url, char *out, size_t out_size) {
+   if (!url || !out || out_size == 0) {
+      if (out && out_size > 0) {
+         out[0] = '\0';
+      }
+      return;
+   }
+
+   /* Skip protocol (http:// or https://) */
+   const char *p = strstr(url, "://");
+   p = p ? p + 3 : url;
+
+   /* Find end of hostname (stop at /, :, ?, or end) */
+   const char *end = p;
+   while (*end && *end != '/' && *end != ':' && *end != '?') {
+      end++;
+   }
+
+   size_t len = (size_t)(end - p);
+   if (len >= out_size) {
+      len = out_size - 1;
+   }
+   memcpy(out, p, len);
+   out[len] = '\0';
+}
+
 const char *strcasestr_portable(const char *haystack, const char *needle) {
    if (!haystack || !needle)
       return NULL;

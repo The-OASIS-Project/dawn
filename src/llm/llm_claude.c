@@ -514,7 +514,7 @@ static char *llm_claude_streaming_internal(struct json_object *conversation_hist
       /* Send error to WebUI client if connected (except for user cancellation) */
       if (error_msg) {
          session_t *session = session_get_command_context();
-         if (session && session->type == SESSION_TYPE_WEBSOCKET) {
+         if (session && session->type == SESSION_TYPE_WEBUI) {
             webui_send_error(session, error_code, error_msg);
          }
       }
@@ -565,7 +565,7 @@ static char *llm_claude_streaming_internal(struct json_object *conversation_hist
 #ifdef ENABLE_WEBUI
       /* Send error to WebUI client if connected */
       session_t *session = session_get_command_context();
-      if (session && session->type == SESSION_TYPE_WEBSOCKET) {
+      if (session && session->type == SESSION_TYPE_WEBUI) {
          const char *error_msg = parse_claude_error_message(streaming_ctx.raw_response.data,
                                                             http_code);
          webui_send_error(session, error_code, error_msg);

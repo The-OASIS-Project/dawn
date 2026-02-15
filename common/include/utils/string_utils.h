@@ -109,31 +109,7 @@ const char *strcasestr_portable(const char *haystack, const char *needle);
  * @param out Output buffer for hostname
  * @param out_size Size of output buffer (hostname will be truncated if needed)
  */
-static inline void extract_url_host(const char *url, char *out, size_t out_size) {
-   if (!url || !out || out_size == 0) {
-      if (out && out_size > 0) {
-         out[0] = '\0';
-      }
-      return;
-   }
-
-   /* Skip protocol (http:// or https://) */
-   const char *p = strstr(url, "://");
-   p = p ? p + 3 : url;
-
-   /* Find end of hostname (stop at /, :, ?, or end) */
-   const char *end = p;
-   while (*end && *end != '/' && *end != ':' && *end != '?') {
-      end++;
-   }
-
-   size_t len = (size_t)(end - p);
-   if (len >= out_size) {
-      len = out_size - 1;
-   }
-   memcpy(out, p, len);
-   out[len] = '\0';
-}
+void extract_url_host(const char *url, char *out, size_t out_size);
 
 /**
  * @brief Check if a period is part of an abbreviation
@@ -156,10 +132,14 @@ bool str_is_abbreviation(const char *text, const char *period_pos);
 /**
  * @brief Check if a character is a sentence terminator
  *
+ * Note: Colon (':') is NOT included — it causes over-segmentation on times
+ * (3:00) and lists. Colon-newline boundaries are handled separately by
+ * sentence_buffer_feed().
+ *
  * Thread Safety: This function is thread-safe.
  *
  * @param c Character to check
- * @return true if c is '.', '!', '?', or ':'
+ * @return true if c is '.', '!', or '?'
  */
 bool str_is_sentence_terminator(char c);
 

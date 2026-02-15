@@ -189,7 +189,7 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
 
    // Cache session lookup for WebUI notifications (avoids repeated lookups)
    session_t *ws_session = session_get_command_context();
-   int has_ws_session = (ws_session && ws_session->type == SESSION_TYPE_WEBSOCKET);
+   int has_ws_session = (ws_session && ws_session->type == SESSION_TYPE_WEBUI);
 
    // Extract choices[0].delta.content or tool_calls
    json_object *choices, *first_choice, *delta, *content;
@@ -535,7 +535,7 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
 
    // Cache session lookup for WebUI notifications (avoids repeated lookups)
    session_t *ws_session = session_get_command_context();
-   int has_ws_session = (ws_session && ws_session->type == SESSION_TYPE_WEBSOCKET);
+   int has_ws_session = (ws_session && ws_session->type == SESSION_TYPE_WEBUI);
 
    if (strcmp(type, "message_start") == 0) {
       ctx->provider.claude.message_started = 1;

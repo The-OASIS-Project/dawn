@@ -162,27 +162,28 @@ void log_message(log_level_t level,
    va_end(args);
 }
 
-// Bridge callback: routes DAWN_LOG_* from common library to log_message()
+/**
+ * @brief Bridge callback: routes DAWN_LOG_* from common library to log_message().
+ *
+ * Receives a va_list from dawn_common_log(), formats once into a stack buffer,
+ * then passes the pre-formatted string directly to log_message() with "%s" format
+ * to avoid double-formatting (log_message does its own vsnprintf internally).
+ */
 static void logging_bridge_callback(dawn_log_level_t level,
                                     const char *file,
                                     int line,
                                     const char *func,
                                     const char *fmt,
                                     va_list args) {
-   log_level_t mapped_level;
-   switch (level) {
-      case DAWN_LOG_WARNING:
-         mapped_level = LOG_WARNING;
-         break;
-      case DAWN_LOG_ERROR:
-         mapped_level = LOG_ERROR;
-         break;
-      case DAWN_LOG_INFO:
-      default:
-         mapped_level = LOG_INFO;
-         break;
-   }
+   /* Map common library log levels to daemon log levels (same values, different enums) */
+   static const log_level_t level_map[] = {
+      [DAWN_LOG_INFO] = LOG_INFO,
+      [DAWN_LOG_WARNING] = LOG_WARNING,
+      [DAWN_LOG_ERROR] = LOG_ERROR,
+   };
+   log_level_t mapped_level = (level <= DAWN_LOG_ERROR) ? level_map[level] : LOG_INFO;
 
+   /* Format once and pass pre-formatted string to avoid double vsnprintf */
    char message[MAX_LOG_LENGTH];
    vsnprintf(message, sizeof(message), fmt, args);
    log_message(mapped_level, file, line, func, "%s", message);
@@ -201,7 +202,7 @@ int init_logging(const char *filename, int to_file) {
          log_file = fopen(filename, "w");
          if (!log_file) {
             fprintf(stderr, "Failed to open log file: %s\n", filename);
-            return -1;
+            return 1;
          }
       } else {
          fprintf(stderr, "Filename cannot be NULL when mode is LOG_TO_FILE\n");

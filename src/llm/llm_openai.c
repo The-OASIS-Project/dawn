@@ -1575,7 +1575,7 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
          /* Send error to WebUI client if connected (except for user cancellation) */
          if (error_msg) {
             session_t *session = session_get_command_context();
-            if (session && session->type == SESSION_TYPE_WEBSOCKET) {
+            if (session && session->type == SESSION_TYPE_WEBUI) {
                webui_send_error(session, error_code, error_msg);
             }
          }
@@ -1622,7 +1622,7 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
 #ifdef ENABLE_WEBUI
          /* Send error to WebUI client if connected */
          session_t *session = session_get_command_context();
-         if (session && session->type == SESSION_TYPE_WEBSOCKET) {
+         if (session && session->type == SESSION_TYPE_WEBUI) {
             const char *error_msg = parse_api_error_message(streaming_ctx.raw_buffer, http_code);
             webui_send_error(session, error_code, error_msg);
          }
@@ -1896,7 +1896,7 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
 #ifdef ENABLE_WEBUI
    if (stream_ctx->reasoning_tokens > 0) {
       session_t *ws_session = session_get_command_context();
-      if (ws_session && ws_session->type == SESSION_TYPE_WEBSOCKET) {
+      if (ws_session && ws_session->type == SESSION_TYPE_WEBUI) {
          webui_send_reasoning_summary(ws_session, stream_ctx->reasoning_tokens);
       }
    }

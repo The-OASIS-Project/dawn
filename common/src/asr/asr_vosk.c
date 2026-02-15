@@ -26,6 +26,7 @@
 #include "asr/asr_vosk.h"
 
 #include <json-c/json.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
@@ -36,12 +37,21 @@
 /**
  * @brief Vosk ASR context structure
  */
+/**
+ * @brief How often to parse partial results (every Nth process() call).
+ * At 16kHz/512-sample chunks = ~31 calls/sec, N=10 means ~3 updates/sec
+ * which is plenty for UI display. Avoids JSON parsing overhead on every chunk.
+ */
+#define VOSK_PARTIAL_PARSE_INTERVAL 10
+
 struct vosk_asr_context {
    VoskModel *model;
    VoskRecognizer *recognizer;
    int sample_rate;
    asr_timing_callback_t timing_cb;
    void *timing_cb_data;
+   int process_count;            /**< Calls since last partial parse */
+   asr_result_t *cached_partial; /**< Cached partial result between parses */
 };
 
 /**
@@ -175,29 +185,37 @@ asr_result_t *asr_vosk_process(vosk_asr_context_t *ctx, const int16_t *audio, si
       return NULL;
    }
 
-   struct timeval start, end;
-   gettimeofday(&start, NULL);
+   /* Feed audio to Vosk (int16_t → short for Vosk API).
+    * Clamp samples to INT_MAX to prevent truncation on cast to int. */
+   size_t safe_samples = samples > (size_t)INT_MAX ? (size_t)INT_MAX : samples;
+   vosk_recognizer_accept_waveform_s(ctx->recognizer, (const short *)audio, (int)safe_samples);
 
-   /* Feed audio to Vosk (int16_t → short for Vosk API) */
-   vosk_recognizer_accept_waveform_s(ctx->recognizer, (const short *)audio, (int)samples);
+   /* Only parse partial results every Nth call to avoid JSON overhead (~31 calls/sec).
+    * Return cached result on skipped iterations. */
+   ctx->process_count++;
+   if (ctx->process_count < VOSK_PARTIAL_PARSE_INTERVAL && ctx->cached_partial) {
+      return ctx->cached_partial;
+   }
+   ctx->process_count = 0;
 
-   /* Get partial result */
+   /* Get and parse partial result */
    const char *json_result = vosk_recognizer_partial_result(ctx->recognizer);
    if (!json_result) {
       DAWN_LOG_ERROR("Vosk: vosk_recognizer_partial_result() returned NULL");
       return NULL;
    }
 
-   gettimeofday(&end, NULL);
-   double processing_time = (end.tv_sec - start.tv_sec) * 1000.0 +
-                            (end.tv_usec - start.tv_usec) / 1000.0;
-
-   /* Parse JSON to extract text */
    char *text = NULL;
    float confidence = -1.0f;
    if (parse_vosk_json(json_result, 1, &text, &confidence) != ASR_SUCCESS) {
       DAWN_LOG_ERROR("Vosk: Failed to parse partial result JSON");
       return NULL;
+   }
+
+   /* Free previous cached partial and replace */
+   if (ctx->cached_partial) {
+      free(ctx->cached_partial->text);
+      free(ctx->cached_partial);
    }
 
    asr_result_t *result = (asr_result_t *)calloc(1, sizeof(asr_result_t));
@@ -210,8 +228,9 @@ asr_result_t *asr_vosk_process(vosk_asr_context_t *ctx, const int16_t *audio, si
    result->text = text;
    result->confidence = confidence;
    result->is_partial = 1;
-   result->processing_time = processing_time;
+   result->processing_time = 0.0;
 
+   ctx->cached_partial = result;
    return result;
 }
 
@@ -274,12 +293,18 @@ int asr_vosk_reset(vosk_asr_context_t *ctx) {
    }
 
    vosk_recognizer_reset(ctx->recognizer);
+   ctx->process_count = 0;
+   if (ctx->cached_partial) {
+      free(ctx->cached_partial->text);
+      free(ctx->cached_partial);
+      ctx->cached_partial = NULL;
+   }
    return ASR_SUCCESS;
 }
 
 void asr_vosk_result_free(asr_result_t *result) {
-   if (!result)
-      return;
+   if (!result || result->is_partial)
+      return; /* Partial results are cached internally; only free final results */
    free(result->text);
    free(result);
 }
@@ -288,6 +313,10 @@ void asr_vosk_cleanup(vosk_asr_context_t *ctx) {
    if (!ctx)
       return;
 
+   if (ctx->cached_partial) {
+      free(ctx->cached_partial->text);
+      free(ctx->cached_partial);
+   }
    if (ctx->recognizer) {
       vosk_recognizer_free(ctx->recognizer);
    }

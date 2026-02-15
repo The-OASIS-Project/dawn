@@ -410,7 +410,7 @@ bool check_opus_capability(struct json_object *payload);
  * to avoid conn_require_auth()'s side-effect of sending an UNAUTHORIZED error.
  */
 static inline bool conn_is_satellite_session(ws_connection_t *conn) {
-   return conn->is_satellite && conn->session != NULL;
+   return conn && conn->is_satellite && conn->session != NULL;
 }
 
 /**
@@ -762,6 +762,13 @@ void handle_music_queue(ws_connection_t *conn, struct json_object *payload);
 /* =============================================================================
  * Satellite Handler Functions (defined in webui_satellite.c)
  * ============================================================================= */
+
+/**
+ * @brief Strip <command>...</command> and <end_of_turn> tags from text in-place
+ *
+ * Shared utility used by satellite worker and audio sentence callback.
+ */
+void strip_command_tags(char *text);
 
 /**
  * @brief Handle satellite_register message

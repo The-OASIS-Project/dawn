@@ -70,7 +70,6 @@ static void *capture_thread_func(void *arg) {
    LOG_INFO("Capture thread started (period=%zu frames, buffer=%zu bytes)", ctx->period_size,
             buffer_bytes);
 
-   static int debug_count = 0;
    while (atomic_load(&ctx->running)) {
       /* Read one period from ALSA (blocking) */
       snd_pcm_sframes_t frames = snd_pcm_readi(ctx->handle, buffer, ctx->period_size);
@@ -79,12 +78,6 @@ static void *capture_thread_func(void *arg) {
          /* Write to ring buffer */
          size_t bytes = frames * ctx->channels * sizeof(int16_t);
          ring_buffer_write(ctx->ring_buffer, (char *)buffer, bytes);
-
-         /* Debug: log periodically */
-         debug_count++;
-         if (debug_count % 100 == 0) {
-            LOG_INFO("Captured %d frames (total %d periods)", (int)frames, debug_count);
-         }
       } else if (frames < 0) {
          if (frames == -EPIPE) {
             /* Buffer overrun - recover */

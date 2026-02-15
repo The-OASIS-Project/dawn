@@ -374,16 +374,33 @@ static inline bool is_valid_abbrev_before(const char *src, size_t pos) {
 // ============================================================================
 
 /**
- * @brief Look up state full name by 2-letter abbreviation
+ * @brief O(1) lookup table indexed by (first_letter - 'A', second_letter - 'A').
+ * Built once at startup via build_state_lookup_table().
+ */
+static const state_entry_t *state_lookup[26][26] = {};
+static bool state_lookup_built = false;
+
+static void build_state_lookup_table() {
+   if (state_lookup_built)
+      return;
+   for (size_t i = 0; i < STATE_COUNT; i++) {
+      unsigned char c1 = (unsigned char)state_abbreviations[i].abbrev[0];
+      unsigned char c2 = (unsigned char)state_abbreviations[i].abbrev[1];
+      if (c1 >= 'A' && c1 <= 'Z' && c2 >= 'A' && c2 <= 'Z') {
+         state_lookup[c1 - 'A'][c2 - 'A'] = &state_abbreviations[i];
+      }
+   }
+   state_lookup_built = true;
+}
+
+/**
+ * @brief Look up state full name by 2-letter abbreviation (O(1) via direct index)
  * @return Pointer to state entry, or nullptr if not found
  */
 static inline const state_entry_t *lookup_state(char c1, char c2) {
-   for (size_t i = 0; i < STATE_COUNT; i++) {
-      if (state_abbreviations[i].abbrev[0] == c1 && state_abbreviations[i].abbrev[1] == c2) {
-         return &state_abbreviations[i];
-      }
-   }
-   return nullptr;
+   if (c1 < 'A' || c1 > 'Z' || c2 < 'A' || c2 > 'Z')
+      return nullptr;
+   return state_lookup[(unsigned char)(c1 - 'A')][(unsigned char)(c2 - 'A')];
 }
 
 /**
@@ -781,6 +798,8 @@ static inline size_t generate_output(const char *src, size_t len, char *out) {
 // ============================================================================
 
 std::string preprocess_text_for_tts(const std::string &input) {
+   build_state_lookup_table();
+
    if (input.empty())
       return input;
 

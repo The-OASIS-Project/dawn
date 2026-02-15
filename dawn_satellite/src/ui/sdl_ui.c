@@ -200,7 +200,8 @@ struct sdl_ui {
    SDL_Texture *t24h_tex;       /* "24H" — white, colormod */
    int time_label_w, time_label_h;
    int t12h_w, t12h_h, t24h_w, t24h_h;
-   int time_toggle_row_y; /* Updated each frame for hit testing */
+   int time_toggle_row_y;                    /* Updated each frame for hit testing */
+   int time_toggle_hit_x, time_toggle_hit_w; /* Computed from render geometry */
 
    /* Theme picker */
    SDL_Texture *theme_label_tex; /* "THEME" — white, colormod */
@@ -371,34 +372,21 @@ static void panel_cache_init(sdl_ui_t *ui) {
       SDL_FreeSurface(surf);
    }
 
-   /* Settings panel info labels — brighter than secondary for WCAG AA on #1B1F24 */
-   SDL_Color info_dim = { 0x8E, 0x99, 0xA4, 255 };
+   /* Settings panel info labels — rendered white, tinted per theme via SDL_SetTextureColorMod */
    static const char *info_labels[] = { "Server", "Device", "IP", "Uptime", "Session" };
    for (int i = 0; i < INFO_ROW_COUNT; i++) {
-      surf = TTF_RenderText_Blended(font, info_labels[i], info_dim);
-      if (surf) {
-         ui->panel_cache.info_labels[i] = SDL_CreateTextureFromSurface(r, surf);
-         ui->panel_cache.info_label_w[i] = surf->w;
-         ui->panel_cache.info_label_h[i] = surf->h;
-         SDL_FreeSurface(surf);
-      }
+      ui->panel_cache.info_labels[i] = build_white_label(r, font, info_labels[i],
+                                                         &ui->panel_cache.info_label_w[i],
+                                                         &ui->panel_cache.info_label_h[i]);
    }
 
-   /* Pre-render connection status texts */
-   surf = TTF_RenderText_Blended(font, "Connected", info_dim);
-   if (surf) {
-      ui->panel_cache.connected_tex = SDL_CreateTextureFromSurface(r, surf);
-      ui->panel_cache.connected_w = surf->w;
-      ui->panel_cache.connected_h = surf->h;
-      SDL_FreeSurface(surf);
-   }
-   surf = TTF_RenderText_Blended(font, "Disconnected", info_dim);
-   if (surf) {
-      ui->panel_cache.disconnected_tex = SDL_CreateTextureFromSurface(r, surf);
-      ui->panel_cache.disconnected_w = surf->w;
-      ui->panel_cache.disconnected_h = surf->h;
-      SDL_FreeSurface(surf);
-   }
+   /* Pre-render connection status texts (white, tinted at render time) */
+   ui->panel_cache.connected_tex = build_white_label(r, font, "Connected",
+                                                     &ui->panel_cache.connected_w,
+                                                     &ui->panel_cache.connected_h);
+   ui->panel_cache.disconnected_tex = build_white_label(r, font, "Disconnected",
+                                                        &ui->panel_cache.disconnected_w,
+                                                        &ui->panel_cache.disconnected_h);
 
    ui->panel_cache.initialized = true;
 }
@@ -589,7 +577,7 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
    /* Connection status with colored dot — uses real WS connectivity */
    bool connected = ui->voice_ctx ? voice_processing_is_ws_connected(ui->voice_ctx) : false;
 
-   int dot_r = 5;
+   int dot_r = 7;
    int dot_cx = text_x + dot_r;
    int dot_cy = text_y + 8;
    uint8_t dot_cr, dot_cg, dot_cb;
@@ -619,6 +607,8 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
    int status_w = connected ? ui->panel_cache.connected_w : ui->panel_cache.disconnected_w;
    int status_h = connected ? ui->panel_cache.connected_h : ui->panel_cache.disconnected_h;
    if (status_tex) {
+      ui_color_t st_clr = ui_theme_text(1);
+      SDL_SetTextureColorMod(status_tex, st_clr.r, st_clr.g, st_clr.b);
       SDL_Rect dst = { text_x + 20, text_y, status_w, status_h };
       SDL_RenderCopy(r, status_tex, NULL, &dst);
       text_y += status_h + 18; /* Group break after connection status */
@@ -675,6 +665,8 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
       ui->time_toggle_row_y = row_y;
       int slider_track_x = 620;
       int slider_track_w = 300;
+      ui->time_toggle_hit_x = slider_track_x - SLIDER_LABEL_COL;
+      ui->time_toggle_hit_w = SLIDER_LABEL_COL + slider_track_w;
 
       /* "TIME" label — same column as BRIGHTNESS/VOLUME */
       ui_color_t txt1 = ui_theme_text(1);
@@ -827,17 +819,23 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
    SDL_RenderFillRect(r, &pill);
 }
 
-/** @brief Draw subtle swipe indicator at top edge */
+/** @brief Draw subtle swipe-down handle at top edge */
 static void render_swipe_indicators(sdl_ui_t *ui, SDL_Renderer *r) {
-   int cx = ui->width / 2;
-   ui_color_t swipe_clr = ui_theme_text(1);
-   SDL_SetRenderDrawColor(r, swipe_clr.r, swipe_clr.g, swipe_clr.b, 60);
+   /* Top center pill handle — mirrors the dismiss pill in the settings panel */
+   int pill_w = 36, pill_h = 4;
+   int pill_x = ui->width / 2 - pill_w / 2;
+   int pill_y = 6;
+   ui_color_t clr = ui_theme_text(2);
+   SDL_SetRenderDrawColor(r, clr.r, clr.g, clr.b, 100);
+   SDL_Rect pill = { pill_x, pill_y, pill_w, pill_h };
+   SDL_RenderFillRect(r, &pill);
 
-   /* Top center: three horizontal lines (hamburger) — settings pull-down */
-   int ty = 10;
-   for (int i = 0; i < 3; i++) {
-      SDL_RenderDrawLine(r, cx - 10, ty + i * 5, cx + 10, ty + i * 5);
-   }
+   /* Small chevron below the pill: two angled lines forming a "v" */
+   int cx = ui->width / 2;
+   int chev_y = pill_y + pill_h + 4;
+   SDL_SetRenderDrawColor(r, clr.r, clr.g, clr.b, 70);
+   SDL_RenderDrawLine(r, cx - 6, chev_y, cx, chev_y + 4);
+   SDL_RenderDrawLine(r, cx, chev_y + 4, cx + 6, chev_y);
 }
 
 /* =============================================================================
@@ -1581,7 +1579,8 @@ static void *render_thread_func(void *arg) {
                   set_master_volume(ui, (int)(ui->volume_slider.value * 100.0f + 0.5f));
                   ui->finger_scrolling = false;
                } else if (fy >= ui->time_toggle_row_y - 22 && fy <= ui->time_toggle_row_y + 22 &&
-                          fx >= 470 && fx <= 920) {
+                          fx >= ui->time_toggle_hit_x &&
+                          fx <= ui->time_toggle_hit_x + ui->time_toggle_hit_w) {
                   /* Time format toggle tap */
                   ui->time_24h = !ui->time_24h;
                   ui->transcript.time_24h = ui->time_24h;
@@ -1595,22 +1594,29 @@ static void *render_thread_func(void *arg) {
                   ui->finger_scrolling = false;
                } else if (fy >= ui->theme_dots_row_y - THEME_DOT_HIT &&
                           fy <= ui->theme_dots_row_y + THEME_DOT_HIT) {
-                  /* Theme dot picker tap */
+                  /* Theme dot picker tap — find closest dot by distance */
                   int dot_stride = THEME_DOT_RADIUS * 2 + THEME_DOT_GAP;
                   int total_dots_w = THEME_COUNT * THEME_DOT_RADIUS * 2 +
                                      (THEME_COUNT - 1) * THEME_DOT_GAP;
                   int dots_start_x = THEME_DOTS_CX - total_dots_w / 2 + THEME_DOT_RADIUS;
+                  int best_d = -1;
+                  int best_dist_sq = THEME_DOT_HIT * THEME_DOT_HIT;
                   for (int d = 0; d < THEME_COUNT; d++) {
                      int dcx = dots_start_x + d * dot_stride;
-                     if (fx >= dcx - THEME_DOT_HIT && fx <= dcx + THEME_DOT_HIT) {
-                        ui_theme_set((ui_theme_id_t)d);
-                        if (ui->sat_config) {
-                           snprintf(ui->sat_config->sdl_ui.theme,
-                                    sizeof(ui->sat_config->sdl_ui.theme), "%s",
-                                    ui_theme_name((ui_theme_id_t)d));
-                           satellite_config_save_ui_prefs(ui->sat_config);
-                        }
-                        break;
+                     int ddx = fx - dcx;
+                     int ddy = fy - ui->theme_dots_row_y;
+                     int dist_sq = ddx * ddx + ddy * ddy;
+                     if (dist_sq < best_dist_sq) {
+                        best_dist_sq = dist_sq;
+                        best_d = d;
+                     }
+                  }
+                  if (best_d >= 0) {
+                     ui_theme_set((ui_theme_id_t)best_d);
+                     if (ui->sat_config) {
+                        snprintf(ui->sat_config->sdl_ui.theme, sizeof(ui->sat_config->sdl_ui.theme),
+                                 "%s", ui_theme_name((ui_theme_id_t)best_d));
+                        satellite_config_save_ui_prefs(ui->sat_config);
                      }
                   }
                   ui->finger_scrolling = false;

@@ -26,8 +26,8 @@
  * callback at initialization.
  */
 
-#ifndef LOGGING_COMMON_H
-#define LOGGING_COMMON_H
+#ifndef DAWN_COMMON_LOGGING_COMMON_H
+#define DAWN_COMMON_LOGGING_COMMON_H
 
 #include <stdarg.h>
 
@@ -120,4 +120,4 @@ void dawn_common_log(dawn_log_level_t level,
 }
 #endif
 
-#endif /* LOGGING_COMMON_H */
+#endif /* DAWN_COMMON_LOGGING_COMMON_H */

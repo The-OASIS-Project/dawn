@@ -230,7 +230,7 @@ int webui_get_queue_fill_pct(void);
  * Queues a transcript response for the session's WebSocket client.
  * The message will be delivered as JSON: {"type":"transcript","payload":{...}}
  *
- * @param session Session to send to (must be SESSION_TYPE_WEBSOCKET)
+ * @param session Session to send to (must be SESSION_TYPE_WEBUI)
  * @param role Message role ("user" or "assistant")
  * @param text Transcript text
  *
@@ -242,7 +242,7 @@ void webui_send_transcript(struct session *session, const char *role, const char
 /**
  * @brief Send state update to WebSocket client
  *
- * @param session Session to send to (must be SESSION_TYPE_WEBSOCKET)
+ * @param session Session to send to (must be SESSION_TYPE_WEBUI)
  * @param state State name ("idle", "thinking", "speaking", "error")
  *
  * @note Thread-safe - can be called from any thread
@@ -256,7 +256,7 @@ void webui_send_state(struct session *session, const char *state);
  * "thinking" state with detail "Fetching URL..." or "Summarizing content...".
  * The detail is shown alongside the state in the UI.
  *
- * @param session Session to send to (must be SESSION_TYPE_WEBSOCKET)
+ * @param session Session to send to (must be SESSION_TYPE_WEBUI)
  * @param state State name ("idle", "thinking", "speaking", "error", "summarizing")
  * @param detail Optional detail message (NULL for no detail)
  *
@@ -267,7 +267,7 @@ void webui_send_state_with_detail(struct session *session, const char *state, co
 /**
  * @brief Send context/token usage update to WebSocket client
  *
- * @param session Session to send to (must be SESSION_TYPE_WEBSOCKET), or NULL for all
+ * @param session Session to send to (must be SESSION_TYPE_WEBUI), or NULL for all
  * @param current_tokens Current tokens used
  * @param max_tokens Maximum context size
  * @param threshold Compaction threshold (0.0-1.0)
@@ -282,7 +282,7 @@ void webui_send_context(struct session *session,
 /**
  * @brief Send error message to WebSocket client
  *
- * @param session Session to send to (must be SESSION_TYPE_WEBSOCKET)
+ * @param session Session to send to (must be SESSION_TYPE_WEBUI)
  * @param code Error code (e.g., "LLM_TIMEOUT", "ASR_FAILED")
  * @param message Human-readable error message
  *
@@ -296,7 +296,7 @@ void webui_send_error(struct session *session, const char *code, const char *mes
  * Sent after auto-compaction completes. The client can use this to trigger
  * conversation continuation in the database (archive old, create new with summary).
  *
- * @param session Session to send to (must be SESSION_TYPE_WEBSOCKET)
+ * @param session Session to send to (must be SESSION_TYPE_WEBUI)
  * @param tokens_before Token count before compaction
  * @param tokens_after Token count after compaction
  * @param messages_summarized Number of messages that were summarized
@@ -328,7 +328,7 @@ void webui_send_compaction_complete(struct session *session,
  * Signals the client to create a new assistant transcript entry and prepare
  * for incremental text updates. Increments session's stream_id.
  *
- * @param session Session to send to (must be SESSION_TYPE_WEBSOCKET)
+ * @param session Session to send to (must be SESSION_TYPE_WEBUI)
  *
  * @note Thread-safe - can be called from any thread
  * @note Sets session->llm_streaming_active = true
@@ -341,7 +341,7 @@ void webui_send_stream_start(struct session *session);
  * Appends text to the current streaming entry on the client. Should only
  * be called between stream_start and stream_end.
  *
- * @param session Session to send to (must be SESSION_TYPE_WEBSOCKET)
+ * @param session Session to send to (must be SESSION_TYPE_WEBUI)
  * @param text Text chunk to append
  *
  * @note Thread-safe - can be called from any thread
@@ -375,7 +375,7 @@ int webui_filter_command_tags(struct session *session,
  *
  * Signals the client to finalize the current assistant entry.
  *
- * @param session Session to send to (must be SESSION_TYPE_WEBSOCKET)
+ * @param session Session to send to (must be SESSION_TYPE_WEBUI)
  * @param reason End reason: "complete", "cancelled", or "error"
  *
  * @note Thread-safe - can be called from any thread
@@ -389,7 +389,7 @@ void webui_send_stream_end(struct session *session, const char *reason);
  * Signals the client that extended thinking content is about to stream.
  * Creates a collapsible thinking block in the UI.
  *
- * @param session Session to send to (must be SESSION_TYPE_WEBSOCKET)
+ * @param session Session to send to (must be SESSION_TYPE_WEBUI)
  * @param provider LLM provider name ("claude", "local", "openai")
  *
  * @note Thread-safe
@@ -401,7 +401,7 @@ void webui_send_thinking_start(struct session *session, const char *provider);
  *
  * Appends thinking text to the current thinking block on the client.
  *
- * @param session Session to send to (must be SESSION_TYPE_WEBSOCKET)
+ * @param session Session to send to (must be SESSION_TYPE_WEBUI)
  * @param text Thinking text chunk to append
  *
  * @note Thread-safe
@@ -414,7 +414,7 @@ void webui_send_thinking_delta(struct session *session, const char *text);
  * Signals the client that thinking content is complete.
  * Causes the thinking block to auto-collapse in the UI.
  *
- * @param session Session to send to (must be SESSION_TYPE_WEBSOCKET)
+ * @param session Session to send to (must be SESSION_TYPE_WEBUI)
  * @param has_content true if thinking content was received, false otherwise
  *
  * @note Thread-safe
@@ -427,7 +427,7 @@ void webui_send_thinking_end(struct session *session, bool has_content);
  * Used for OpenAI o-series models where we don't have access to reasoning
  * content, but we know how many tokens were used for internal reasoning.
  *
- * @param session Session to send to (must be SESSION_TYPE_WEBSOCKET)
+ * @param session Session to send to (must be SESSION_TYPE_WEBUI)
  * @param reasoning_tokens Number of reasoning tokens used
  *
  * @note Thread-safe
@@ -441,7 +441,7 @@ void webui_send_reasoning_summary(struct session *session, int reasoning_tokens)
  * reset_conversation tool). The frontend should save the current conversation
  * and clear the chat display.
  *
- * @param session Session to send to (must be SESSION_TYPE_WEBSOCKET)
+ * @param session Session to send to (must be SESSION_TYPE_WEBUI)
  *
  * @note Thread-safe
  */
@@ -479,7 +479,7 @@ int webui_process_text_input(struct session *session, const char *text);
  * - Token chunk events (during streaming)
  * - Periodic heartbeat (1Hz when idle)
  *
- * @param session Session to send to (must be SESSION_TYPE_WEBSOCKET)
+ * @param session Session to send to (must be SESSION_TYPE_WEBUI)
  * @param state Current state ("idle", "listening", "thinking", "speaking", "error")
  * @param ttft_ms Time to first token in milliseconds (0 if N/A)
  * @param token_rate Tokens per second (0 if not streaming)

@@ -465,7 +465,7 @@ static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
    case LWS_CALLBACK_ESTABLISHED:
       // New WebSocket connection - create session
       conn->wsi = wsi;
-      conn->session = session_create(SESSION_TYPE_WEBSOCKET, -1);  // fd=-1 for WS
+      conn->session = session_create(SESSION_TYPE_WEBUI, -1);  // fd=-1 for WS
       if (!conn->session) {
          // Session limit reached
          webui_send_error_immediate(wsi, "SESSION_LIMIT", "Max sessions reached");
@@ -708,7 +708,7 @@ void webui_send_audio(session_t *session, const uint8_t *opus_data, size_t len, 
 
 **Deliverables:**
 - [x] WebSocket connection lifecycle (LWS_CALLBACK_ESTABLISHED/CLOSED) ✅
-- [x] Session binding: `session_create(SESSION_TYPE_WEBSOCKET, -1)` with `wsi` in `client_data` ✅
+- [x] Session binding: `session_create(SESSION_TYPE_WEBUI, -1)` with `wsi` in `client_data` ✅
 - [x] Session token generation (128-bit random, hex-encoded) and lookup ✅
 - [x] Binary message parsing (audio) and text message parsing (JSON) ✅ (text only)
 - [ ] Audio buffer accumulation with ownership transfer on `AUDIO_IN_END` *(Phase 4)*

@@ -763,7 +763,7 @@ int llm_context_compact(uint32_t session_id,
 #ifdef ENABLE_WEBUI
       /* Notify WebUI session about compaction failure */
       session_t *session = session_get(session_id);
-      if (session && session->type == SESSION_TYPE_WEBSOCKET) {
+      if (session && session->type == SESSION_TYPE_WEBUI) {
          webui_send_error(session, "COMPACTION_FAILED",
                           "Context compaction failed. Response may be truncated.");
       }
@@ -918,7 +918,7 @@ int llm_context_auto_compact_with_config(struct json_object *history,
    else {
       /* Notify WebUI session */
       session_t *session = session_get(session_id);
-      if (session && session->type == SESSION_TYPE_WEBSOCKET) {
+      if (session && session->type == SESSION_TYPE_WEBUI) {
          webui_send_state_with_detail(session, "thinking", "Compacting context...");
       }
    }
@@ -936,7 +936,7 @@ int llm_context_auto_compact_with_config(struct json_object *history,
       /* Notify WebUI about compaction completion (for database continuation) */
       if (session_id != 0) {
          session_t *session = session_get(session_id);
-         if (session && session->type == SESSION_TYPE_WEBSOCKET) {
+         if (session && session->type == SESSION_TYPE_WEBUI) {
             webui_send_compaction_complete(session, result.tokens_before, result.tokens_after,
                                            result.messages_summarized, result.summary);
          }

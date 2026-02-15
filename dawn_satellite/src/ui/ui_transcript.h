@@ -103,6 +103,23 @@ typedef struct {
    SDL_Texture *music_icon_tex; /* White "♪" glyph, tinted via SDL_SetTextureColorMod */
    int music_icon_w, music_icon_h;
    bool time_24h; /* Use 24-hour time format */
+
+   /* Cached header textures (white, tinted via SDL_SetTextureColorMod) */
+   SDL_Texture *cached_state_tex; /* "[LISTENING]" etc. */
+   int cached_state_w, cached_state_h;
+   voice_state_t cached_state_val; /* Key: which state was rendered */
+   bool cached_state_muted;        /* Key: muted flag at render time */
+
+   SDL_Texture *cached_muted_tex; /* "[MUTED]" label (static, rendered once) */
+   int cached_muted_w, cached_muted_h;
+
+   SDL_Texture *cached_time_tex; /* "Mon Feb 15  14:30" etc. */
+   int cached_time_w, cached_time_h;
+   int cached_time_min; /* Key: minute of hour (invalidate on change) */
+
+   SDL_Texture *cached_detail_tex; /* Status detail text */
+   int cached_detail_w, cached_detail_h;
+   char cached_detail_str[128]; /* Key: previous detail string */
 } ui_transcript_t;
 
 /**

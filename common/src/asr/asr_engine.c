@@ -50,7 +50,6 @@ struct asr_engine_context {
    asr_result_t *(*finalize)(void *ctx);
    int (*reset)(void *ctx);
    void (*cleanup)(void *ctx);
-   void (*result_free)(asr_result_t *result);
 };
 
 /* ============================================================================
@@ -73,10 +72,6 @@ static int whisper_reset_adapter(void *ctx) {
 static void whisper_cleanup_adapter(void *ctx) {
    asr_whisper_cleanup((whisper_asr_context_t *)ctx);
 }
-
-static void whisper_result_free_adapter(asr_result_t *result) {
-   asr_whisper_result_free((asr_whisper_result_t *)result);
-}
 #endif
 
 /* ============================================================================
@@ -98,10 +93,6 @@ static int vosk_reset_adapter(void *ctx) {
 
 static void vosk_cleanup_adapter(void *ctx) {
    asr_vosk_cleanup((vosk_asr_context_t *)ctx);
-}
-
-static void vosk_result_free_adapter(asr_result_t *result) {
-   asr_vosk_result_free(result);
 }
 #endif
 
@@ -148,7 +139,6 @@ asr_engine_context_t *asr_engine_init(const asr_engine_config_t *config) {
          ctx->finalize = whisper_finalize_adapter;
          ctx->reset = whisper_reset_adapter;
          ctx->cleanup = whisper_cleanup_adapter;
-         ctx->result_free = whisper_result_free_adapter;
          break;
       }
 #endif
@@ -173,7 +163,6 @@ asr_engine_context_t *asr_engine_init(const asr_engine_config_t *config) {
          ctx->finalize = vosk_finalize_adapter;
          ctx->reset = vosk_reset_adapter;
          ctx->cleanup = vosk_cleanup_adapter;
-         ctx->result_free = vosk_result_free_adapter;
          break;
       }
 #endif
@@ -216,7 +205,8 @@ int asr_engine_reset(asr_engine_context_t *ctx) {
 void asr_engine_result_free(asr_result_t *result) {
    if (!result)
       return;
-   /* All backends use the same layout: free text then struct */
+   /* All backends allocate result via calloc + text via strdup/malloc,
+    * so a single free(text) + free(result) is sufficient for all engines. */
    free(result->text);
    free(result);
 }

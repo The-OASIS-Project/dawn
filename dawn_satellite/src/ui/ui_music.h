@@ -161,6 +161,25 @@ struct ui_music {
    /* Music playback engine (for volume, flush, visualizer) */
    struct music_playback *music_pb;
    int volume;
+
+   /* Progress time caches (invalidate per-second for cur, per-track for dur) */
+   SDL_Texture *time_cur_tex;
+   int time_cur_w, time_cur_h;
+   int time_cur_sec; /* Key: truncated seconds of position */
+
+   SDL_Texture *time_dur_tex;
+   int time_dur_w, time_dur_h;
+   int time_dur_sec; /* Key: truncated seconds of duration */
+
+   /* Status format line cache (changes on track change) */
+   SDL_Texture *status_line_tex;
+   int status_line_w, status_line_h;
+   char cached_status_line[128]; /* Key: previous format string */
+
+   /* Queue header title cache */
+   SDL_Texture *queue_hdr_tex;
+   int queue_hdr_w, queue_hdr_h;
+   int cached_queue_count; /* Key: previous queue count */
 };
 
 typedef struct ui_music ui_music_t;

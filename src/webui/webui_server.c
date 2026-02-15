@@ -599,6 +599,15 @@ void queue_response(ws_response_t *resp) {
    s_response_queue[s_queue_tail] = *resp;
    s_queue_tail = next_tail;
 
+   /* Warn when queue utilization exceeds 75% — indicates potential drain bottleneck */
+   int count = (s_queue_tail >= s_queue_head)
+                   ? (s_queue_tail - s_queue_head)
+                   : (WEBUI_RESPONSE_QUEUE_SIZE - s_queue_head + s_queue_tail);
+   if (count > (WEBUI_RESPONSE_QUEUE_SIZE * 3 / 4) && (count % 128 == 0)) {
+      LOG_WARNING("WebUI: Response queue at %d%% (%d/%d entries)",
+                  (count * 100) / WEBUI_RESPONSE_QUEUE_SIZE, count, WEBUI_RESPONSE_QUEUE_SIZE);
+   }
+
    pthread_mutex_unlock(&s_queue_mutex);
 
    /* Wake up lws_service() to process queue */
@@ -1190,8 +1199,11 @@ static void process_one_response(void) {
                        ? (s_queue_tail - s_queue_head)
                        : (WEBUI_RESPONSE_QUEUE_SIZE - s_queue_head + s_queue_tail);
 
+   /* Cap scan to first 64 entries to bound mutex hold time. If all 64 are
+    * choked, we'll retry on the next writable callback. */
+   int scan_limit = queue_len < 64 ? queue_len : 64;
    int found_offset = -1;
-   for (int i = 0; i < queue_len; i++) {
+   for (int i = 0; i < scan_limit; i++) {
       int idx = (s_queue_head + i) % WEBUI_RESPONSE_QUEUE_SIZE;
       ws_response_t *candidate = &s_response_queue[idx];
 
@@ -1227,6 +1239,9 @@ static void process_one_response(void) {
       int src = (s_queue_head + i - 1) % WEBUI_RESPONSE_QUEUE_SIZE;
       s_response_queue[dst] = s_response_queue[src];
    }
+   /* Zero the vacated head slot to prevent double-free: the shift copied
+    * pointer members forward, so the old head still holds stale pointers. */
+   memset(&s_response_queue[s_queue_head], 0, sizeof(ws_response_t));
    s_queue_head = (s_queue_head + 1) % WEBUI_RESPONSE_QUEUE_SIZE;
    bool more_pending = (s_queue_head != s_queue_tail);
    pthread_mutex_unlock(&s_queue_mutex);
@@ -2284,7 +2299,7 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
                   /* Token not found or session expired - create new session */
                   LOG_INFO("WebUI: Token %.8s... not found, creating new session", token);
                   if (!conn->session) {
-                     conn->session = session_create(SESSION_TYPE_WEBSOCKET, -1);
+                     conn->session = session_create(SESSION_TYPE_WEBUI, -1);
                      if (conn->session) {
                         /* Set user_id for metrics and memory extraction */
                         session_set_metrics_user(conn->session, conn->auth_user_id);
@@ -2752,11 +2767,13 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
          handle_satellite_register(conn, payload);
       }
    } else if (strcmp(type, "satellite_query") == 0) {
-      if (payload) {
+      if (conn->is_satellite && payload) {
          handle_satellite_query(conn, payload);
       }
    } else if (strcmp(type, "satellite_ping") == 0) {
-      handle_satellite_ping(conn);
+      if (conn->is_satellite) {
+         handle_satellite_ping(conn);
+      }
    } else {
       LOG_WARNING("WebUI: Unknown message type: %s", type);
    }
@@ -3015,7 +3032,7 @@ static int callback_websocket(struct lws *wsi,
                s_client_count++;
                pthread_mutex_unlock(&s_mutex);
 
-               conn->session = session_create(SESSION_TYPE_WEBSOCKET, -1);
+               conn->session = session_create(SESSION_TYPE_WEBUI, -1);
                if (!conn->session) {
                   LOG_ERROR("WebUI: Failed to create session");
                   send_error_impl(wsi, "SESSION_LIMIT", "Maximum sessions reached");
@@ -3269,7 +3286,7 @@ static void *webui_thread_func(void *arg) {
  * the UI controls dynamically (e.g., after switch_llm tool call).
  */
 static void webui_send_llm_state_update(session_t *session) {
-   if (!session || session->type != SESSION_TYPE_WEBSOCKET) {
+   if (!session || session->type != SESSION_TYPE_WEBUI) {
       return;
    }
 
@@ -3410,7 +3427,7 @@ static bool session_remove_active_tool(session_t *session, const char *tool_name
  * @brief Send state update with current active tools
  */
 static void send_state_with_tools(session_t *session, const char *state) {
-   if (!session || session->type != SESSION_TYPE_WEBSOCKET) {
+   if (!session || session->type != SESSION_TYPE_WEBUI) {
       return;
    }
 
@@ -3510,7 +3527,7 @@ static void webui_tool_execution_callback(void *session_ptr,
                                           const char *result,
                                           bool success) {
    session_t *session = (session_t *)session_ptr;
-   if (!session || session->type != SESSION_TYPE_WEBSOCKET) {
+   if (!session || session->type != SESSION_TYPE_WEBUI) {
       return;
    }
 
@@ -3688,6 +3705,22 @@ void webui_server_shutdown(void) {
    s_running = 0;
    pthread_mutex_unlock(&s_mutex);
 
+   /* Wait for satellite worker threads to finish (max 5 seconds) */
+   {
+      extern atomic_int g_active_satellite_workers;
+      int wait_ms = 0;
+      while (atomic_load(&g_active_satellite_workers) > 0 && wait_ms < 5000) {
+         if (wait_ms == 0)
+            LOG_INFO("WebUI: Waiting for %d satellite workers to finish...",
+                     atomic_load(&g_active_satellite_workers));
+         usleep(50000); /* 50ms */
+         wait_ms += 50;
+      }
+      int remaining = atomic_load(&g_active_satellite_workers);
+      if (remaining > 0)
+         LOG_WARNING("WebUI: %d satellite workers still active after 5s timeout", remaining);
+   }
+
    /* Wake up lws_service() to process shutdown */
    if (s_lws_context) {
       lws_cancel_service(s_lws_context);
@@ -3788,7 +3821,7 @@ int webui_get_queue_fill_pct(void) {
  * @param text    Message content
  */
 void webui_send_transcript(session_t *session, const char *role, const char *text) {
-   if (!session || session->type != SESSION_TYPE_WEBSOCKET) {
+   if (!session || session->type != SESSION_TYPE_WEBUI) {
       return;
    }
 
@@ -3810,8 +3843,7 @@ void webui_send_transcript(session_t *session, const char *role, const char *tex
 }
 
 void webui_send_state_with_detail(session_t *session, const char *state, const char *detail) {
-   if (!session ||
-       (session->type != SESSION_TYPE_WEBSOCKET && session->type != SESSION_TYPE_DAP2)) {
+   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_DAP2)) {
       return;
    }
 
@@ -3853,7 +3885,7 @@ void webui_send_context(session_t *session, int current_tokens, int max_tokens, 
       session = session_get_local();
    }
 
-   if (!session || session->type != SESSION_TYPE_WEBSOCKET) {
+   if (!session || session->type != SESSION_TYPE_WEBUI) {
       return;
    }
 
@@ -3869,8 +3901,7 @@ void webui_send_context(session_t *session, int current_tokens, int max_tokens, 
 }
 
 void webui_send_error(session_t *session, const char *code, const char *message) {
-   if (!session ||
-       (session->type != SESSION_TYPE_WEBSOCKET && session->type != SESSION_TYPE_DAP2)) {
+   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_DAP2)) {
       return;
    }
 
@@ -3896,7 +3927,7 @@ void webui_send_compaction_complete(session_t *session,
                                     int tokens_after,
                                     int messages_summarized,
                                     const char *summary) {
-   if (!session || session->type != SESSION_TYPE_WEBSOCKET) {
+   if (!session || session->type != SESSION_TYPE_WEBUI) {
       return;
    }
 
@@ -3930,7 +3961,7 @@ void webui_send_audio(session_t *session, const uint8_t *data, size_t len) {
    if (!session || !data || len == 0) {
       return;
    }
-   if (session->type != SESSION_TYPE_WEBSOCKET && session->type != SESSION_TYPE_DAP2) {
+   if (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_DAP2) {
       return;
    }
 
@@ -3970,8 +4001,7 @@ void webui_send_audio(session_t *session, const uint8_t *data, size_t len) {
  * @param session WebSocket session
  */
 void webui_send_audio_end(session_t *session) {
-   if (!session ||
-       (session->type != SESSION_TYPE_WEBSOCKET && session->type != SESSION_TYPE_DAP2)) {
+   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_DAP2)) {
       return;
    }
 
@@ -3993,14 +4023,13 @@ void webui_send_audio_end(session_t *session) {
  * ============================================================================= */
 
 void webui_send_stream_start(session_t *session) {
-   if (!session ||
-       (session->type != SESSION_TYPE_WEBSOCKET && session->type != SESSION_TYPE_DAP2)) {
+   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_DAP2)) {
       return;
    }
 
    /* Increment stream ID and mark streaming active */
-   atomic_fetch_add(&session->current_stream_id, 1);
-   session->llm_streaming_active = true;
+   uint32_t sid = atomic_fetch_add(&session->current_stream_id, 1) + 1;
+   atomic_store(&session->llm_streaming_active, true);
 
    /* Reset command tag filter state for new stream */
    session->cmd_tag_filter.nesting_depth = 0;
@@ -4018,13 +4047,12 @@ void webui_send_stream_start(session_t *session) {
    ws_response_t resp = { .session = session,
                           .type = WS_RESP_STREAM_START,
                           .stream = {
-                              .stream_id = session->current_stream_id,
+                              .stream_id = sid,
                               .text = "",
                           } };
 
    queue_response(&resp);
-   LOG_INFO("WebUI: Stream start id=%u for session %u", session->current_stream_id,
-            session->session_id);
+   LOG_INFO("WebUI: Stream start id=%u for session %u", sid, session->session_id);
 }
 
 /* Command tag filter uses shared constants from core/text_filter.h */
@@ -4169,8 +4197,7 @@ int webui_filter_command_tags(session_t *session,
  * Automatically starts the stream on first content. Thread-safe per session.
  */
 void webui_send_stream_delta(session_t *session, const char *text) {
-   if (!session ||
-       (session->type != SESSION_TYPE_WEBSOCKET && session->type != SESSION_TYPE_DAP2)) {
+   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_DAP2)) {
       return;
    }
 
@@ -4205,18 +4232,17 @@ void webui_send_stream_delta(session_t *session, const char *text) {
 }
 
 void webui_send_stream_end(session_t *session, const char *reason) {
-   if (!session ||
-       (session->type != SESSION_TYPE_WEBSOCKET && session->type != SESSION_TYPE_DAP2)) {
+   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_DAP2)) {
       return;
    }
 
    /* Mark streaming inactive */
-   session->llm_streaming_active = false;
+   atomic_store(&session->llm_streaming_active, false);
 
    ws_response_t resp = { .session = session,
                           .type = WS_RESP_STREAM_END,
                           .stream = {
-                              .stream_id = session->current_stream_id,
+                              .stream_id = atomic_load(&session->current_stream_id),
                           } };
 
    /* Copy reason into fixed buffer (no malloc/free churn) */
@@ -4234,7 +4260,7 @@ void webui_send_stream_end(session_t *session, const char *reason) {
  * ============================================================================= */
 
 void webui_send_thinking_start(session_t *session, const char *provider) {
-   if (!session || session->type != SESSION_TYPE_WEBSOCKET) {
+   if (!session || session->type != SESSION_TYPE_WEBUI) {
       return;
    }
 
@@ -4255,7 +4281,7 @@ void webui_send_thinking_start(session_t *session, const char *provider) {
 }
 
 void webui_send_thinking_delta(session_t *session, const char *text) {
-   if (!session || session->type != SESSION_TYPE_WEBSOCKET) {
+   if (!session || session->type != SESSION_TYPE_WEBUI) {
       return;
    }
 
@@ -4276,7 +4302,7 @@ void webui_send_thinking_delta(session_t *session, const char *text) {
 }
 
 void webui_send_thinking_end(session_t *session, bool has_content) {
-   if (!session || session->type != SESSION_TYPE_WEBSOCKET) {
+   if (!session || session->type != SESSION_TYPE_WEBUI) {
       return;
    }
 
@@ -4296,7 +4322,7 @@ void webui_send_thinking_end(session_t *session, bool has_content) {
 }
 
 void webui_send_reasoning_summary(session_t *session, int reasoning_tokens) {
-   if (!session || session->type != SESSION_TYPE_WEBSOCKET) {
+   if (!session || session->type != SESSION_TYPE_WEBUI) {
       return;
    }
 
@@ -4319,7 +4345,7 @@ void webui_send_reasoning_summary(session_t *session, int reasoning_tokens) {
 }
 
 void webui_send_conversation_reset(session_t *session) {
-   if (!session || session->type != SESSION_TYPE_WEBSOCKET) {
+   if (!session || session->type != SESSION_TYPE_WEBUI) {
       return;
    }
 
@@ -4343,7 +4369,7 @@ void webui_send_metrics_update(session_t *session,
                                int ttft_ms,
                                float token_rate,
                                int context_percent) {
-   if (!session || session->type != SESSION_TYPE_WEBSOCKET) {
+   if (!session || session->type != SESSION_TYPE_WEBUI) {
       return;
    }
 
@@ -4615,34 +4641,7 @@ char *webui_process_commands(const char *llm_response, session_t *session) {
    return final_response;
 }
 
-/**
- * @brief Strip command tags from response text
- *
- * Removes all <command>...</command> blocks from the text.
- *
- * @param text Text to modify in place
- */
-static void strip_command_tags(char *text) {
-   if (!text)
-      return;
-
-   char *cmd_start, *cmd_end;
-   while ((cmd_start = strstr(text, "<command>")) != NULL) {
-      cmd_end = strstr(cmd_start, "</command>");
-      if (cmd_end) {
-         cmd_end += strlen("</command>");
-         memmove(cmd_start, cmd_end, strlen(cmd_end) + 1);
-      } else {
-         break;
-      }
-   }
-
-   /* Also remove <end_of_turn> tags (local AI models) */
-   char *match = strstr(text, "<end_of_turn>");
-   if (match) {
-      *match = '\0';
-   }
-}
+/* strip_command_tags() is shared across webui modules — see webui_satellite.c */
 
 /* REQUEST_SUPERSEDED macro now defined in webui_internal.h */
 
@@ -4848,6 +4847,9 @@ static void *text_worker_thread(void *arg) {
 
    /* Return to idle state */
    webui_send_state(session, "idle");
+
+   /* Mark interaction complete for conversation idle timeout tracking */
+   session_update_interaction_complete(session);
 
    /* Release session reference (acquired in webui_process_text_input) */
    session_release(session);

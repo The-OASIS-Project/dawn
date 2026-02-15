@@ -39,8 +39,8 @@
  * @note C++ code can use either the C wrapper or preprocess_text_for_tts().
  */
 
-#ifndef TTS_PREPROCESSING_H
-#define TTS_PREPROCESSING_H
+#ifndef DAWN_COMMON_TTS_PREPROCESSING_H
+#define DAWN_COMMON_TTS_PREPROCESSING_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -130,4 +130,4 @@ std::string preprocess_text_for_tts(const std::string &input);
 
 #endif  // __cplusplus
 
-#endif  // TTS_PREPROCESSING_H
+#endif /* DAWN_COMMON_TTS_PREPROCESSING_H */

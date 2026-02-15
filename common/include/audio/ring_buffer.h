@@ -22,7 +22,6 @@
 #ifndef DAWN_COMMON_RING_BUFFER_H
 #define DAWN_COMMON_RING_BUFFER_H
 
-#include <pthread.h>
 #include <stddef.h>
 
 #ifdef __cplusplus
@@ -30,21 +29,13 @@ extern "C" {
 #endif
 
 /**
- * @brief Thread-safe ring buffer for audio data
+ * @brief Thread-safe ring buffer for audio data (opaque type)
  *
  * A circular buffer designed for producer-consumer pattern where
  * the audio capture thread writes data and the main thread reads it.
  * Implements overflow policy: oldest data is dropped when buffer fills.
  */
-typedef struct {
-   char *buffer;          /**< Buffer storage */
-   size_t capacity;       /**< Total buffer size in bytes */
-   size_t head;           /**< Write position (producer) */
-   size_t tail;           /**< Read position (consumer) */
-   size_t count;          /**< Current bytes in buffer */
-   pthread_mutex_t mutex; /**< Mutex for thread safety */
-   pthread_cond_t cond;   /**< Condition variable to signal data available */
-} ring_buffer_t;
+typedef struct ring_buffer ring_buffer_t;
 
 /**
  * @brief Create a new ring buffer

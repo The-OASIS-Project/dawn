@@ -22,11 +22,23 @@
 #include "utils/sentence_buffer.h"
 
 #include <ctype.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "logging_common.h"
 #include "utils/string_utils.h"
+
+/**
+ * @brief Sentence buffer internal structure
+ */
+struct sentence_buffer {
+   char *buffer;               /**< Accumulated text buffer */
+   size_t size;                /**< Current size of buffered text */
+   size_t capacity;            /**< Total capacity of buffer */
+   sentence_callback callback; /**< Callback for complete sentences */
+   void *callback_userdata;    /**< User context passed to callback */
+};
 
 #define DEFAULT_CAPACITY 512
 
@@ -56,8 +68,12 @@ static int ensure_capacity(sentence_buffer_t *buf, size_t required) {
       return 0;
    }
 
-   size_t new_capacity = buf->capacity * 2;
+   size_t new_capacity = buf->capacity;
    while (new_capacity < required) {
+      if (new_capacity > SIZE_MAX / 2) {
+         new_capacity = required; /* Can't double without overflow */
+         break;
+      }
       new_capacity *= 2;
    }
 
@@ -119,11 +135,14 @@ void sentence_buffer_free(sentence_buffer_t *buf) {
 }
 
 void sentence_buffer_feed(sentence_buffer_t *buf, const char *chunk) {
-   if (!buf || !chunk || strlen(chunk) == 0) {
+   if (!buf || !chunk) {
       return;
    }
 
    size_t chunk_len = strlen(chunk);
+   if (chunk_len == 0) {
+      return;
+   }
    size_t needed = buf->size + chunk_len + 1;
 
    /* Ensure capacity */

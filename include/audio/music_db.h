@@ -172,7 +172,7 @@ int music_db_get_stats(music_db_stats_t *stats);
  * @param pattern Search pattern (wildcards: % for any chars, _ for single char)
  * @param results Output array for results
  * @param max_results Maximum number of results to return
- * @return Number of results found, or -1 on error
+ * @return Number of results found (0 on error or empty)
  */
 int music_db_search(const char *pattern, music_search_result_t *results, int max_results);
 
@@ -192,7 +192,7 @@ int music_db_get_by_path(const char *path, music_search_result_t *result);
  *
  * @param results Output array for results
  * @param max_results Maximum number of results to return
- * @return Number of results found, or -1 on error
+ * @return Number of results found (0 on error or empty)
  */
 int music_db_list(music_search_result_t *results, int max_results);
 
@@ -204,7 +204,7 @@ int music_db_list(music_search_result_t *results, int max_results);
  * @param results Output array for results
  * @param max_results Maximum number of results to return
  * @param offset Number of tracks to skip (for pagination, 0 = start)
- * @return Number of results found, or -1 on error
+ * @return Number of results found (0 on error or empty)
  */
 int music_db_list_paged(music_search_result_t *results, int max_results, int offset);
 

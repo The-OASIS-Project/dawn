@@ -30,6 +30,7 @@
 #include <unistd.h>
 
 #include "auth/auth_db.h"
+#include "core/session_manager.h"
 #include "image_store.h"
 #include "logging.h"
 
@@ -83,6 +84,13 @@ static void *maintenance_thread_func(void *arg) {
       if (checkpoint_result != AUTH_DB_SUCCESS) {
          LOG_WARNING("auth_maintenance: checkpoint failed");
       }
+
+      /* Save and clear idle session conversations (satellites, WebUI) */
+      session_check_idle_conversations();
+
+      /* Clean up expired sessions (normally done by accept_thread, but that
+       * only runs when [network] is enabled — WebUI satellites need this too) */
+      session_cleanup_expired();
    }
 
    LOG_INFO("auth_maintenance: thread stopped");

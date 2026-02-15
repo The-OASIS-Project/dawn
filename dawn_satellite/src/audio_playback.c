@@ -21,6 +21,7 @@
 #include <math.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -64,6 +65,50 @@ static void init_goertzel_tables(unsigned int sample_rate) {
 }
 
 /**
+ * Fast log2 approximation using IEEE 754 float bit manipulation.
+ * Max error ~3% — sufficient for visualizer dB conversion.
+ */
+static inline float fast_log2f(float x) {
+   union {
+      float f;
+      uint32_t i;
+   } u = { x };
+   float log2 = (float)(int32_t)(u.i >> 23) - 127.0f;
+   u.i = (u.i & 0x007FFFFF) | 0x3F800000; /* Extract mantissa as [1,2) */
+   log2 += u.f - 1.0f;                    /* Linear approx of log2(mantissa) */
+   return log2;
+}
+
+/** Fast log10f via fast_log2f: log10(x) = log2(x) / log2(10) */
+static inline float fast_log10f(float x) {
+   return fast_log2f(x) * 0.30103f; /* 1/log2(10) */
+}
+
+/**
+ * Fast pow(x, 0.7) approximation via exp2(0.7 * log2(x)).
+ * Uses same IEEE 754 trick for exp2 with a linear approximation.
+ */
+static inline float fast_pow07f(float x) {
+   if (x <= 0.0f)
+      return 0.0f;
+   float y = 0.7f * fast_log2f(x);
+   /* Fast exp2: reverse the log2 bit trick */
+   union {
+      float f;
+      uint32_t i;
+   } u;
+   int32_t intpart = (int32_t)y;
+   float frac = y - (float)intpart;
+   if (frac < 0.0f) {
+      intpart--;
+      frac += 1.0f;
+   }
+   u.i = (uint32_t)((intpart + 127) << 23);
+   u.f *= (1.0f + frac); /* Linear approx of 2^frac */
+   return u.f;
+}
+
+/**
  * Compute spectrum magnitudes using Goertzel algorithm.
  * Runs in the ALSA playback hot path (~30-50µs on Cortex-A76).
  *
@@ -104,12 +149,12 @@ static void compute_spectrum(audio_playback_t *ctx, const float *mono_buf, size_
       }
       /* Absolute dB: 0dB = full-scale sine, negative = quieter.
        * Map [-60dB, 0dB] → [0.0, 1.0], floor below -60dB. */
-      float db = 20.0f * log10f(raw[k] / ref);
+      float db = 20.0f * fast_log10f(raw[k] / ref);
       float val = 1.0f + db / 60.0f;
       if (val < 0.0f)
          val = 0.0f;
       /* Gamma correction matching WebUI (pow 0.7) */
-      ctx->spectrum[k] = powf(val, 0.7f);
+      ctx->spectrum[k] = fast_pow07f(val);
    }
 }
 

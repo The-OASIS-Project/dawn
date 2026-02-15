@@ -111,10 +111,10 @@ extern "C" {
  * @brief Session type enumeration
  */
 typedef enum {
-   SESSION_TYPE_LOCAL,      // Local microphone
-   SESSION_TYPE_DAP,        // ESP32 satellite (DAP protocol)
-   SESSION_TYPE_DAP2,       // DAP 2.0 satellite (Tier 1 or Tier 2)
-   SESSION_TYPE_WEBSOCKET,  // WebUI client
+   SESSION_TYPE_LOCAL,  // Local microphone
+   SESSION_TYPE_DAP,    // ESP32 satellite (DAP protocol)
+   SESSION_TYPE_DAP2,   // DAP 2.0 satellite (Tier 1 or Tier 2)
+   SESSION_TYPE_WEBUI,  // WebUI browser client
 } session_type_t;
 
 /**
@@ -387,6 +387,15 @@ void session_destroy(uint32_t session_id);
  * SESSION_TIMEOUT_SEC without activity.
  */
 void session_cleanup_expired(void);
+
+/**
+ * @brief Check all sessions for idle conversation timeout
+ *
+ * Iterates non-local sessions and saves+clears conversation history
+ * for any session that has been idle longer than conversation_idle_timeout_min.
+ * Called periodically from auth_maintenance thread.
+ */
+void session_check_idle_conversations(void);
 #endif /* ENABLE_MULTI_CLIENT */
 
 // =============================================================================
@@ -907,6 +916,9 @@ static inline void session_manager_cleanup(void) {
 }
 
 static inline void session_cleanup_expired(void) {
+}
+
+static inline void session_check_idle_conversations(void) {
 }
 
 static inline int session_count(void) {

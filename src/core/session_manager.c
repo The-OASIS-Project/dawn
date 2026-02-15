@@ -67,7 +67,7 @@ static void session_text_chunk_callback(const char *chunk, void *userdata) {
    /* Chunks are accumulated by the streaming layer (llm_streaming.c)
     * and also sent to WebSocket/satellite for real-time display */
 #ifdef ENABLE_WEBUI
-   if ((session->type == SESSION_TYPE_WEBSOCKET || session->type == SESSION_TYPE_DAP2) && chunk &&
+   if ((session->type == SESSION_TYPE_WEBUI || session->type == SESSION_TYPE_DAP2) && chunk &&
        chunk[0] != '\0') {
       uint64_t now_ms = get_time_ms();
 
@@ -81,7 +81,7 @@ static void session_text_chunk_callback(const char *chunk, void *userdata) {
       session->last_token_ms = now_ms;
 
       /* Calculate metrics (WebSocket only - satellites don't need browser metrics) */
-      if (session->type == SESSION_TYPE_WEBSOCKET) {
+      if (session->type == SESSION_TYPE_WEBUI) {
          int ttft_ms = 0;
          float token_rate = 0.0f;
 
@@ -174,37 +174,29 @@ static void generate_crypto_random_hex(char *buf, size_t num_bytes) {
       }
    }
 
-   /* Fallback to weak randomness (should never happen on Linux) */
-   LOG_WARNING("Using weak randomness for session secret - /dev/urandom unavailable");
-   srand((unsigned int)time(NULL) ^ (unsigned int)getpid());
-   for (size_t i = 0; i < num_bytes; i++) {
-      bytes[i] = (unsigned char)(rand() & 0xFF);
-   }
-   for (size_t i = 0; i < num_bytes; i++) {
-      sprintf(buf + i * 2, "%02x", bytes[i]);
-   }
+   /* Fail closed: refuse to generate a secret with weak randomness */
+   LOG_ERROR("Cannot generate secure session secret - /dev/urandom unavailable");
+   buf[0] = '\0';
 }
 
 /**
- * @brief Constant-time string comparison to prevent timing attacks
+ * @brief Constant-time comparison for fixed-length reconnect secrets (64 hex chars)
  *
- * @param a First string
- * @param b Second string
+ * Uses a known fixed length to avoid timing leaks from strlen().
+ *
+ * @param a First string (must be at least RECONNECT_SECRET_LEN chars)
+ * @param b Second string (must be at least RECONNECT_SECRET_LEN chars)
  * @return true if strings are equal, false otherwise
  */
+#define RECONNECT_SECRET_LEN 64 /* 32 bytes * 2 hex chars */
+
 static bool constant_time_compare(const char *a, const char *b) {
    if (!a || !b) {
-      return a == b;
+      return false;
    }
 
-   size_t len_a = strlen(a);
-   size_t len_b = strlen(b);
-
-   /* Compare in constant time even if lengths differ */
-   volatile unsigned char result = (unsigned char)(len_a ^ len_b);
-   size_t compare_len = len_a < len_b ? len_a : len_b;
-
-   for (size_t i = 0; i < compare_len; i++) {
+   volatile unsigned char result = 0;
+   for (size_t i = 0; i < RECONNECT_SECRET_LEN; i++) {
       result |= (unsigned char)((unsigned char)a[i] ^ (unsigned char)b[i]);
    }
 
@@ -553,6 +545,30 @@ session_t *session_create_dap2(int client_fd,
                   session_id, identity->uuid, identity->name, history_len);
 
          return existing;
+      } else if (has_valid_secret && !existing->disconnected) {
+         /* SECURE RECONNECTION (still-active): Client proved identity but old session
+          * hasn't been marked disconnected yet (common with flaky WiFi where TCP
+          * dropped but server hasn't detected timeout). Reclaim the session. */
+         pthread_mutex_lock(&existing->fd_mutex);
+         existing->client_fd = client_fd;
+         existing->last_activity = time(NULL);
+         pthread_mutex_unlock(&existing->fd_mutex);
+
+         /* Increment ref count */
+         pthread_mutex_lock(&existing->ref_mutex);
+         existing->ref_count++;
+         pthread_mutex_unlock(&existing->ref_mutex);
+
+         uint32_t session_id = existing->session_id;
+         int history_len = json_object_array_length(existing->conversation_history);
+
+         pthread_rwlock_unlock(&session_manager_rwlock);
+
+         LOG_INFO("DAP2 secure reconnection (active): session %u reclaimed "
+                  "(uuid=%s, name=%s, history=%d msgs)",
+                  session_id, identity->uuid, identity->name, history_len);
+
+         return existing;
       } else if (!has_valid_secret && !existing->disconnected) {
          /* Existing active session, but client has no/wrong secret
           * This could be: (1) client restart without saved secret, or (2) hijack attempt
@@ -612,9 +628,8 @@ session_t *session_create_dap2(int client_fd,
    /* Append satellite room to system prompt so LLM knows the room context */
    session_append_room_context(session, identity->location);
 
-   LOG_INFO("Created DAP2 session %u (tier=%d, uuid=%s, name=%s, location=%s, secret=%.8s...)",
-            session->session_id, tier, identity->uuid, identity->name, identity->location,
-            session->identity.reconnect_secret);
+   LOG_INFO("Created DAP2 session %u (tier=%d, uuid=%s, name=%s, location=%s)", session->session_id,
+            tier, identity->uuid, identity->name, identity->location);
 
    return session;
 }
@@ -886,7 +901,7 @@ void session_destroy(uint32_t session_id) {
    pthread_mutex_unlock(&session->metrics_mutex);
 
    /* Trigger memory extraction for authenticated WebSocket sessions with queries */
-   if (session->type == SESSION_TYPE_WEBSOCKET && session->metrics.user_id > 0 &&
+   if (session->type == SESSION_TYPE_WEBUI && session->metrics.user_id > 0 &&
        session->metrics.queries_total > 0 && g_config.memory.enabled) {
       /* Copy conversation history reference while we still have it */
       pthread_mutex_lock(&session->history_mutex);
@@ -942,6 +957,57 @@ void session_cleanup_expired(void) {
       LOG_INFO("Session %u expired (idle > %d seconds)", expired_ids[i],
                g_config.network.session_timeout_sec);
       session_destroy(expired_ids[i]);
+   }
+}
+
+void session_check_idle_conversations(void) {
+   if (!initialized || !g_config.memory.enabled ||
+       g_config.memory.conversation_idle_timeout_min <= 0) {
+      return;
+   }
+
+   time_t now = time(NULL);
+   time_t timeout_sec = g_config.memory.conversation_idle_timeout_min * 60;
+
+   /* Collect idle sessions and retain them under rwlock.
+    * Can't call session_save_voice_conversation while holding rwlock (it takes
+    * history_mutex and does DB I/O), so we retain and process outside the lock.
+    * Uses direct retain instead of session_get() because we also want to save
+    * conversations on disconnected sessions before they get destroyed. */
+   session_t *idle_sessions[MAX_SESSIONS];
+   int idle_count = 0;
+
+   pthread_rwlock_rdlock(&session_manager_rwlock);
+
+   for (int i = 1; i < MAX_SESSIONS; i++) { /* Skip local session (i=0) */
+      session_t *s = sessions[i];
+      if (!s || s->last_interaction_complete == 0) {
+         continue;
+      }
+      /* WebUI sessions preserve history — users see chat on screen and expect
+       * continuity. They have explicit "New Conversation" for manual reset. */
+      if (s->type == SESSION_TYPE_WEBUI) {
+         continue;
+      }
+      time_t idle_sec = now - s->last_interaction_complete;
+      if (idle_sec >= timeout_sec && session_has_messages(s)) {
+         session_retain(s);
+         idle_sessions[idle_count++] = s;
+      }
+   }
+
+   pthread_rwlock_unlock(&session_manager_rwlock);
+
+   /* Save and clear idle conversations */
+   for (int i = 0; i < idle_count; i++) {
+      session_t *s = idle_sessions[i];
+      LOG_INFO("Session %u: Idle timeout after %d minutes, saving conversation", s->session_id,
+               g_config.memory.conversation_idle_timeout_min);
+      int64_t conv_id = session_save_voice_conversation(s);
+      if (conv_id > 0) {
+         LOG_INFO("Session %u: Saved as conversation %lld", s->session_id, (long long)conv_id);
+      }
+      session_release(s);
    }
 }
 
@@ -1432,7 +1498,7 @@ static int llm_call_prepare(session_t *session,
    session_set_command_context(session);
 
    // Reset streaming filter state for WebSocket sessions
-   if (session->type == SESSION_TYPE_WEBSOCKET) {
+   if (session->type == SESSION_TYPE_WEBUI) {
       session->cmd_tag_filter.nesting_depth = 0;
       session->stream_had_content = false;
    }
@@ -1458,7 +1524,7 @@ static void llm_call_cleanup(llm_call_ctx_t *ctx) {
 static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_t *ctx) {
 #ifdef ENABLE_WEBUI
    // End WebSocket streaming
-   if (session->type == SESSION_TYPE_WEBSOCKET) {
+   if (session->type == SESSION_TYPE_WEBUI) {
       // Send idle state update (rate is calculated accurately by streaming layer from usage stats)
       // Only send if we had streaming activity
       if (session->stream_token_count > 0 && session->first_token_ms > 0) {
@@ -1621,7 +1687,7 @@ static void combined_chunk_callback(const char *chunk, void *userdata) {
    if (len > 0) {
 #ifdef ENABLE_WEBUI
       // 1. Send filtered text to WebUI for real-time display
-      if (session->type == SESSION_TYPE_WEBSOCKET) {
+      if (session->type == SESSION_TYPE_WEBUI) {
          /* Calculate metrics */
          int ttft_ms = 0;
          float token_rate = 0.0f;
@@ -1902,8 +1968,8 @@ const char *session_type_name(session_type_t type) {
          return "DAP";
       case SESSION_TYPE_DAP2:
          return "DAP2";
-      case SESSION_TYPE_WEBSOCKET:
-         return "WEBSOCKET";
+      case SESSION_TYPE_WEBUI:
+         return "WEBUI";
       default:
          return "UNKNOWN";
    }

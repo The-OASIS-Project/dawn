@@ -22,7 +22,7 @@
  * Push-to-talk voice client using WebSocket protocol.
  *
  * Hardware: Adafruit ESP32-S3 TFT Feather with NeoPixels,
- *           I2S speaker (MAX98357), analog microphone, push button.
+ *           I2S speaker (MAX98357), analog microphone (MAX9814), push button.
  *
  * Libraries required:
  *   - arduinoWebSockets (Links2004)
@@ -65,7 +65,7 @@ const char *SATELLITE_LOCATION = SECRET_SATELLITE_LOCATION;
 /* ── NeoPixel configuration ────────────────────────────────────────────────── */
 #define NEOPIXEL_PIN 17
 #define NEOPIXEL_COUNT 3
-#define NEOPIXEL_TYPE NEO_GRB + NEO_KHZ800
+#define NEOPIXEL_TYPE (NEO_GRB | NEO_KHZ800) /* #20: bitwise OR, not addition */
 
 /* ── TFT Display ───────────────────────────────────────────────────────────── */
 #define TFT_BACKLIGHT 45
@@ -75,6 +75,7 @@ const char *SATELLITE_LOCATION = SECRET_SATELLITE_LOCATION;
 #define BITS_PER_SAMPLE 16
 #define RECORD_TIME 15
 #define BUFFER_SIZE (SAMPLE_RATE * RECORD_TIME)
+#define SAMPLE_INTERVAL_US 63 /* #21: 1000000/16000 = 62.5, rounded up */
 
 /* ── DAP2 binary message types ─────────────────────────────────────────────── */
 #define WS_BIN_AUDIO_IN 0x01
@@ -85,6 +86,10 @@ const char *SATELLITE_LOCATION = SECRET_SATELLITE_LOCATION;
 /* ── Audio streaming ───────────────────────────────────────────────────────── */
 #define AUDIO_SEND_CHUNK_SAMPLES 1600 /* 100ms of 16kHz audio */
 #define AUDIO_SEND_CHUNK_BYTES (AUDIO_SEND_CHUNK_SAMPLES * 2 + 1)
+
+/* #16: Compile-time safety check for send buffer sizing */
+static_assert(AUDIO_SEND_CHUNK_BYTES >= AUDIO_SEND_CHUNK_SAMPLES * 2 + 1,
+              "Send buffer too small for chunk size");
 
 /* ── TTS ring buffer ──────────────────────────────────────────────────────── */
 #define TTS_SAMPLE_RATE 22050                /* Daemon sends TTS at native Piper rate */
@@ -107,6 +112,12 @@ const char *SATELLITE_LOCATION = SECRET_SATELLITE_LOCATION;
 /* ── Debug output control ─────────────────────────────────────────────────── */
 #define DEBUG_VERBOSE 0 /* Set to 1 to print UUIDs, session IDs, secrets to Serial */
 
+/* #10: Maximum length for server-provided display strings */
+#define MAX_DISPLAY_STRING 100
+
+/* ── JSON buffer size ─────────────────────────────────────────────────────── */
+#define MAX_JSON_SIZE 1024 /* #15: reduced from 4096 — DAP2 messages are typically <512 bytes */
+
 /* ── Debounce ──────────────────────────────────────────────────────────────── */
 #define DEBOUNCE_TIME 50
 unsigned long lastDebounceTime = 0;
@@ -120,8 +131,6 @@ bool isRecording = false;
 size_t lastSentSample = 0;
 
 uint32_t recStartUs = 0, recEndUs = 0, nextSampleTime = 0;
-float recFs = SAMPLE_RATE;
-const uint32_t sampleInterval_us = (uint32_t)((1000000ULL + SAMPLE_RATE / 2) / SAMPLE_RATE);
 
 /* ── TTS ring buffer ──────────────────────────────────────────────────────── */
 int16_t *ttsBuffer = NULL;
@@ -130,6 +139,7 @@ volatile size_t ttsReadPos = 0;
 volatile size_t ttsAvailable = 0;
 volatile bool ttsPlaying = false;
 volatile bool ttsComplete = false;
+volatile bool ttsDiscarding = false; /* Discard stale TTS after barge-in */
 
 /* ── WebSocket client ──────────────────────────────────────────────────────── */
 WebSocketsClient webSocket;
@@ -185,9 +195,28 @@ struct ColorState {
 };
 
 ColorState globalColorState;
-volatile NeoPixelMode currentNeoMode = NEO_IDLE_CYCLING;
-volatile uint32_t lastIdleActivity = 0;
-volatile uint32_t errorStartTime = 0;
+
+/* #13: Use atomic intrinsics for cross-core state (Core 1 writes, Core 0 reads) */
+static volatile NeoPixelMode currentNeoMode = NEO_IDLE_CYCLING;
+static volatile uint32_t lastIdleActivity = 0;
+static volatile uint32_t errorStartTime = 0;
+
+static inline void atomicSetNeoMode(NeoPixelMode mode) {
+   __atomic_store_n(&currentNeoMode, mode, __ATOMIC_RELEASE);
+}
+
+static inline NeoPixelMode atomicGetNeoMode() {
+   return __atomic_load_n(&currentNeoMode, __ATOMIC_ACQUIRE);
+}
+
+static inline void atomicSetU32(volatile uint32_t *ptr, uint32_t val) {
+   __atomic_store_n(ptr, val, __ATOMIC_RELEASE);
+}
+
+static inline uint32_t atomicGetU32(volatile uint32_t *ptr) {
+   return __atomic_load_n(ptr, __ATOMIC_ACQUIRE);
+}
+
 const uint32_t IDLE_TIMEOUT_MS = 60000;
 const uint32_t ERROR_DISPLAY_MS = 3000;
 
@@ -198,11 +227,11 @@ TaskHandle_t neoPixelTaskHandle = NULL;
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 void setNeoPixelMode(NeoPixelMode mode) {
-   currentNeoMode = mode;
+   atomicSetNeoMode(mode);
    if (mode == NEO_ERROR) {
-      errorStartTime = millis();
+      atomicSetU32(&errorStartTime, millis());
    } else if (mode == NEO_IDLE_CYCLING) {
-      lastIdleActivity = millis();
+      atomicSetU32(&lastIdleActivity, millis());
    }
 }
 
@@ -236,7 +265,7 @@ void neoPixelTask(void *pvParameters) {
    globalColorState.transitioning = true;
 
    uint32_t lastColorChange = millis();
-   lastIdleActivity = millis();
+   atomicSetU32(&lastIdleActivity, millis());
 
    /* Track previous mode to detect transitions — static modes (RECORDING, PLAYING,
     * WAITING) only need strip.show() once on entry, not every 50ms tick. */
@@ -244,13 +273,13 @@ void neoPixelTask(void *pvParameters) {
 
    while (1) {
       uint32_t currentTime = millis();
-      NeoPixelMode mode = currentNeoMode; /* snapshot volatile once per tick */
+      NeoPixelMode mode = atomicGetNeoMode(); /* #13: atomic read from Core 0 */
       bool modeChanged = (mode != prevMode);
 
       switch (mode) {
          case NEO_IDLE_CYCLING: {
-            if (currentTime - lastIdleActivity >= IDLE_TIMEOUT_MS) {
-               currentNeoMode = NEO_OFF;
+            if (currentTime - atomicGetU32(&lastIdleActivity) >= IDLE_TIMEOUT_MS) {
+               atomicSetNeoMode(NEO_OFF);
                turnOffNeoPixels();
                break;
             }
@@ -320,9 +349,9 @@ void neoPixelTask(void *pvParameters) {
 
          case NEO_ERROR:
             if (modeChanged) setNeoPixelColor(255, 0, 0);
-            if (currentTime - errorStartTime >= ERROR_DISPLAY_MS) {
-               currentNeoMode = NEO_IDLE_CYCLING;
-               lastIdleActivity = millis();
+            if (currentTime - atomicGetU32(&errorStartTime) >= ERROR_DISPLAY_MS) {
+               atomicSetNeoMode(NEO_IDLE_CYCLING);
+               atomicSetU32(&lastIdleActivity, millis());
             }
             break;
 
@@ -356,6 +385,7 @@ void neoPixelTask(void *pvParameters) {
  */
 void updateTFTStatus(const char *message, uint16_t color, bool clearScreen = false) {
    static int statusLine = 0;
+   static bool lastWasCentered = false;
 
    if (clearScreen) {
       /* Large centered status — partial redraw of status area only */
@@ -363,25 +393,61 @@ void updateTFTStatus(const char *message, uint16_t color, bool clearScreen = fal
       tft.setTextSize(TEXT_SIZE_STATUS);
       tft.setTextColor(color);
 
-      /* Measure text bounds for centering.
-       * Each char at size 3 = 18px wide, 24px tall (6x8 base * 3). */
-      int16_t x1, y1;
-      uint16_t tw, th;
-      tft.getTextBounds(message, 0, 0, &x1, &y1, &tw, &th);
-      int16_t cx = (tft.width() - (int16_t)tw) / 2;
-      int16_t cy = (STATUS_AREA_H - (int16_t)th) / 2;
-      if (cx < 0) cx = 0;
-      if (cy < 0) cy = 0;
-      tft.setCursor(cx, cy);
-      tft.print(message);
+      /* At size 3, each char = 18px wide. Screen is 240px = 13 chars max.
+       * If text fits on one line, center it. Otherwise word-wrap into two
+       * lines, breaking at the last space that fits, and center each line. */
+      const int charW = 6 * TEXT_SIZE_STATUS; /* 18px */
+      const int charH = 8 * TEXT_SIZE_STATUS; /* 24px */
+      const int maxChars = tft.width() / charW;
+      int len = strlen(message);
+
+      if (len <= maxChars) {
+         /* Single line — center horizontally and vertically */
+         int16_t cx = (tft.width() - len * charW) / 2;
+         int16_t cy = (STATUS_AREA_H - charH) / 2;
+         tft.setCursor(cx, cy);
+         tft.print(message);
+      } else {
+         /* Two lines — find word break point */
+         int breakAt = maxChars;
+         for (int i = maxChars; i > 0; i--) {
+            if (message[i] == ' ') {
+               breakAt = i;
+               break;
+            }
+         }
+         /* Line 1 */
+         int16_t cy = (STATUS_AREA_H - charH * 2 - 4) / 2;
+         if (cy < 0) cy = 0;
+         int16_t cx1 = (tft.width() - breakAt * charW) / 2;
+         if (cx1 < 0) cx1 = 0;
+         tft.setCursor(cx1, cy);
+         for (int i = 0; i < breakAt; i++) tft.print(message[i]);
+         /* Line 2 — skip the space */
+         int line2Start = breakAt;
+         while (message[line2Start] == ' ') line2Start++;
+         int line2Len = len - line2Start;
+         int16_t cx2 = (tft.width() - line2Len * charW) / 2;
+         if (cx2 < 0) cx2 = 0;
+         tft.setCursor(cx2, cy + charH + 4);
+         tft.print(&message[line2Start]);
+      }
 
       /* Restore small text size for any subsequent log lines */
       tft.setTextSize(TEXT_SIZE);
       statusLine = 0;
+      lastWasCentered = true;
       return;
    }
 
-   /* Scrolling log line mode (setup sequence) */
+   /* Scrolling log line mode (setup sequence).
+    * Clear first if previous call was centered — otherwise the large
+    * centered text (e.g. "DAWN" at y=43) remains visible behind log lines. */
+   if (lastWasCentered) {
+      tft.fillRect(0, 0, tft.width(), MAX_STATUS_LINES * STATUS_LINE_HEIGHT, ST77XX_BLACK);
+      statusLine = 0;
+      lastWasCentered = false;
+   }
    if (statusLine >= MAX_STATUS_LINES) {
       tft.fillRect(0, 0, tft.width(), MAX_STATUS_LINES * STATUS_LINE_HEIGHT, ST77XX_BLACK);
       statusLine = 0;
@@ -465,6 +531,24 @@ void loadReconnectSecret() {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * Helper: truncate server string for safe display
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * @brief Safely copy a server-provided string, truncating to MAX_DISPLAY_STRING.
+ * #10: Prevents unbounded strings from consuming CPU in TFT/Serial output.
+ */
+static void safeDisplayString(char *dst, size_t dst_size, const char *src) {
+   if (!src) {
+      dst[0] = '\0';
+      return;
+   }
+   size_t max_len = (dst_size - 1 < MAX_DISPLAY_STRING) ? dst_size - 1 : MAX_DISPLAY_STRING;
+   strncpy(dst, src, max_len);
+   dst[max_len] = '\0';
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * DAP2 WebSocket Functions
  * ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -493,7 +577,13 @@ void sendRegistration() {
       payload["reconnect_secret"] = reconnectSecret;
    }
 
-   char msg[512];
+   /* #17: Measure JSON size and use adequately-sized buffer */
+   char msg[768];
+   size_t needed = measureJson(doc);
+   if (needed >= sizeof(msg)) {
+      Serial.printf("DAP2: Registration message too large (%zu bytes)!\n", needed);
+      return;
+   }
    size_t len = serializeJson(doc, msg, sizeof(msg));
    webSocket.sendTXT((uint8_t *)msg, len);
 #if DEBUG_VERBOSE
@@ -504,7 +594,6 @@ void sendRegistration() {
 }
 
 void handleTextMessage(uint8_t *payload, size_t length) {
-   const size_t MAX_JSON_SIZE = 4096;
    if (length > MAX_JSON_SIZE) {
       Serial.printf("DAP2: JSON message too large (%zu bytes), ignoring\n", length);
       return;
@@ -541,7 +630,7 @@ void handleTextMessage(uint8_t *payload, size_t length) {
             }
          }
          setNeoPixelMode(NEO_IDLE_CYCLING);
-         updateTFTStatus("Registered!", ST77XX_GREEN);
+         updateTFTStatus("Ready", ST77XX_WHITE, true);
 #if DEBUG_VERBOSE
          Serial.printf("DAP2: Registered (session=%u)\n", sessionId);
 #else
@@ -549,8 +638,11 @@ void handleTextMessage(uint8_t *payload, size_t length) {
 #endif
       } else {
          const char *msg = p["message"] | "Registration failed";
-         Serial.printf("DAP2: Registration failed: %s\n", msg);
-         updateTFTStatus("Reg failed!", ST77XX_RED);
+         /* #10: truncate for Serial */
+         char safeBuf[MAX_DISPLAY_STRING + 1];
+         safeDisplayString(safeBuf, sizeof(safeBuf), msg);
+         Serial.printf("DAP2: Registration failed: %s\n", safeBuf);
+         updateTFTStatus("Register failed!", ST77XX_RED);
          setNeoPixelMode(NEO_ERROR);
       }
    } else if (strcmp(type, "satellite_pong") == 0) {
@@ -559,38 +651,41 @@ void handleTextMessage(uint8_t *payload, size_t length) {
       const char *state = doc["payload"]["state"];
       if (!state) return;
 
-      /* Extract detail string if present (tool names, status info) */
-      const char *detail = doc["payload"]["detail"] | (const char *)NULL;
+      /* #10: Extract and truncate detail string if present */
+      const char *rawDetail = doc["payload"]["detail"] | (const char *)NULL;
+      char detail[MAX_DISPLAY_STRING + 1];
+      bool hasDetail = (rawDetail != NULL);
+      if (hasDetail) {
+         safeDisplayString(detail, sizeof(detail), rawDetail);
+      }
+
+      /* Any server state change for a new request means old TTS is stale */
+      if (ttsDiscarding && (strcmp(state, "thinking") == 0 || strcmp(state, "processing") == 0 ||
+                            strcmp(state, "idle") == 0)) {
+         ttsDiscarding = false;
+      }
 
       if (strcmp(state, "listening") == 0) {
          setNeoPixelMode(NEO_WAITING);
          updateTFTStatus("Listening...", ST77XX_CYAN, true);
       } else if (strcmp(state, "thinking") == 0) {
          setNeoPixelMode(NEO_WAITING);
-         if (detail) {
-            updateTFTStatus(detail, ST77XX_YELLOW, true);
-         } else {
-            updateTFTStatus("Thinking...", ST77XX_YELLOW, true);
-         }
+         updateTFTStatus(hasDetail ? detail : "Thinking...", ST77XX_YELLOW, true);
       } else if (strcmp(state, "tool_call") == 0) {
          setNeoPixelMode(NEO_WAITING);
-         if (detail) {
-            updateTFTStatus(detail, ST77XX_MAGENTA, true);
-         } else {
-            updateTFTStatus("Calling tool...", ST77XX_MAGENTA, true);
-         }
+         updateTFTStatus(hasDetail ? detail : "Using tool...", ST77XX_MAGENTA, true);
       } else if (strcmp(state, "processing") == 0) {
          setNeoPixelMode(NEO_WAITING);
-         if (detail) {
-            updateTFTStatus(detail, ST77XX_YELLOW, true);
-         } else {
-            updateTFTStatus("Processing...", ST77XX_YELLOW, true);
-         }
+         updateTFTStatus(hasDetail ? detail : "Processing...", ST77XX_YELLOW, true);
       } else if (strcmp(state, "speaking") == 0) {
          setNeoPixelMode(NEO_PLAYING);
       } else if (strcmp(state, "idle") == 0) {
+         /* #2: Protect ttsComplete/ttsPlaying access with spinlock */
+         portENTER_CRITICAL(&tts_spinlock);
          ttsComplete = true;
-         if (!ttsPlaying) {
+         bool playing = ttsPlaying;
+         portEXIT_CRITICAL(&tts_spinlock);
+         if (!playing) {
             setNeoPixelMode(NEO_IDLE_CYCLING);
             updateTFTStatus("Ready", ST77XX_WHITE, true);
          }
@@ -598,9 +693,14 @@ void handleTextMessage(uint8_t *payload, size_t length) {
    } else if (strcmp(type, "error") == 0) {
       const char *code = doc["payload"]["code"] | "UNKNOWN";
       const char *msg = doc["payload"]["message"] | "";
-      Serial.printf("DAP2: Error %s: %s\n", code, msg);
-      char errBuf[64];
-      snprintf(errBuf, sizeof(errBuf), "Err: %s", code);
+      /* #10: truncate both strings */
+      char safeCode[32];
+      char safeMsg[MAX_DISPLAY_STRING + 1];
+      safeDisplayString(safeCode, sizeof(safeCode), code);
+      safeDisplayString(safeMsg, sizeof(safeMsg), msg);
+      Serial.printf("DAP2: Error %s: %s\n", safeCode, safeMsg);
+      char errBuf[40]; /* "Err: " + 31 char code + NUL */
+      snprintf(errBuf, sizeof(errBuf), "Err: %s", safeCode);
       updateTFTStatus(errBuf, ST77XX_RED);
       setNeoPixelMode(NEO_ERROR);
    }
@@ -611,6 +711,10 @@ void handleBinaryMessage(uint8_t *payload, size_t length) {
    uint8_t msgType = payload[0];
 
    if (msgType == WS_BIN_AUDIO_OUT && length > 1) {
+      /* After barge-in, discard stale TTS from the previous response until the
+       * server starts a new response cycle (cleared on "thinking"/"processing"). */
+      if (ttsDiscarding) return;
+
       /* TTS audio chunk: 22050Hz 16-bit mono PCM from daemon (native Piper rate).
        * Copy through aligned temp buffer (payload+1 is odd-aligned — direct
        * int16_t* cast risks Xtensa LoadStoreAlignment exceptions). Bulk memcpy
@@ -626,6 +730,10 @@ void handleBinaryMessage(uint8_t *payload, size_t length) {
          /* Copy from potentially-unaligned WS buffer into aligned SRAM temp */
          memcpy(tts_rx_buf, payload + 1 + offset * 2, chunk * sizeof(int16_t));
 
+         /* #7: Minimize spinlock hold time — only protect index/counter updates
+          * and the memcpy. On ESP32-S3, producer (WS callback) and consumer
+          * (playTTSStream) both run on Core 1 within the same cooperative loop,
+          * so contention is minimal. */
          portENTER_CRITICAL(&tts_spinlock);
          size_t space = TTS_BUFFER_SAMPLES - ttsAvailable;
          size_t to_write = (chunk < space) ? chunk : space;
@@ -639,6 +747,11 @@ void handleBinaryMessage(uint8_t *payload, size_t length) {
          }
          ttsWritePos = (ttsWritePos + to_write) & TTS_BUFFER_MASK;
          ttsAvailable += to_write;
+
+         /* #2: Start playback once we have 500ms buffered — set flag under spinlock */
+         if (!ttsPlaying && ttsAvailable >= (TTS_SAMPLE_RATE / 2)) {
+            ttsPlaying = true;
+         }
          portEXIT_CRITICAL(&tts_spinlock);
 
          if (to_write < chunk) total_dropped += (chunk - to_write);
@@ -647,11 +760,6 @@ void handleBinaryMessage(uint8_t *payload, size_t length) {
 
       if (total_dropped > 0) {
          Serial.printf("TTS: Dropped %zu/%zu samples (buffer full)\n", total_dropped, total_samples);
-      }
-
-      /* Start playback once we have 500ms buffered */
-      if (!ttsPlaying && ttsAvailable >= (TTS_SAMPLE_RATE / 2)) {
-         ttsPlaying = true;
       }
    } else if (msgType == WS_BIN_AUDIO_SEGMENT_END) {
       /* Segment complete — keep playing, more may follow.
@@ -665,16 +773,19 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
          wsConnected = true;
          registered = false;
          Serial.println("DAP2: WebSocket connected");
-         updateTFTStatus("WS connected", ST77XX_GREEN, true);
+         updateTFTStatus("Connecting...", ST77XX_GREEN, true);
          sendRegistration();
          break;
 
       case WStype_DISCONNECTED:
          wsConnected = false;
          registered = false;
+         ttsDiscarding = false;
          Serial.println("DAP2: WebSocket disconnected");
-         updateTFTStatus("WS disconnected", ST77XX_RED, true);
+         updateTFTStatus("Disconnected", ST77XX_RED, true);
          setNeoPixelMode(NEO_ERROR);
+         /* #24: Add jitter to reconnect interval to prevent thundering herd */
+         webSocket.setReconnectInterval(3000 + (esp_random() % 2000));
          break;
 
       case WStype_TEXT:
@@ -722,8 +833,6 @@ void stopRecording() {
    recEndUs = micros();
    uint32_t elapsed_us = recEndUs - recStartUs;
    if (elapsed_us == 0) elapsed_us = 1;
-   recFs = (float)sampleCount * 1e6f / (float)elapsed_us;
-   Serial.printf("Effective sample rate: %.2f Hz\n", recFs);
    Serial.printf("Recorded %d samples (%.1f seconds)\n", sampleCount,
                  (float)sampleCount / SAMPLE_RATE);
 
@@ -735,7 +844,30 @@ void stopRecording() {
       return;
    }
 
-   /* Send any remaining unsent audio in chunks (wsSendBuf fits one chunk) */
+   /* Silence detection: compute average absolute amplitude over the recording.
+    * Skip sending if the audio is just noise from an accidental button press.
+    * Sample every 16th value to keep this fast (~15K iterations for 15s). */
+   if (sampleCount > 0) {
+      uint32_t sum = 0;
+      size_t step = 16;
+      size_t count = 0;
+      for (size_t i = 0; i < sampleCount; i += step) {
+         sum += abs(audioBuffer[i]);
+         count++;
+      }
+      uint16_t avgAmp = sum / count;
+      Serial.printf("Audio avg amplitude: %u\n", avgAmp);
+      if (avgAmp < 80) {
+         Serial.println("Silence detected, skipping send");
+         updateTFTStatus("Ready", ST77XX_WHITE, true);
+         setNeoPixelMode(NEO_IDLE_CYCLING);
+         return;
+      }
+   }
+
+   /* #6: Send remaining audio in chunks with yield() between sends
+    * to prevent watchdog triggers on long recordings. */
+   int chunksSent = 0;
    while (lastSentSample < sampleCount) {
       size_t remaining = sampleCount - lastSentSample;
       size_t chunk = (remaining > AUDIO_SEND_CHUNK_SAMPLES) ? AUDIO_SEND_CHUNK_SAMPLES : remaining;
@@ -743,6 +875,12 @@ void stopRecording() {
       memcpy(wsSendBuf + 1, &audioBuffer[lastSentSample], chunk * 2);
       webSocket.sendBIN(wsSendBuf, chunk * 2 + 1);
       lastSentSample += chunk;
+
+      /* Yield every 10 chunks to feed the watchdog and let WiFi stack breathe */
+      if (++chunksSent % 10 == 0) {
+         yield();
+         webSocket.loop();
+      }
    }
 
    /* Send end-of-utterance marker */
@@ -846,10 +984,11 @@ void playAudioSamples(int16_t *samples, size_t numSamples, float sourceSampleRat
  * Daemon sends 22050Hz 16-bit mono PCM via WS binary frames. This function
  * drains the ring buffer, resamples to 48kHz stereo, and writes to I2S.
  * Calls webSocket.loop() between writes to keep receiving data.
+ * #9: Polls button to allow user to interrupt long TTS responses.
  */
 void playTTSStream() {
    Serial.println("TTS: Starting streaming playback...");
-   updateTFTStatus("Playing...", ST77XX_GREEN, true);
+   updateTFTStatus("Speaking...", ST77XX_GREEN, true);
 
    ESP_ERROR_CHECK(i2s_channel_enable(g_i2s_tx));
    delay(3);
@@ -869,6 +1008,15 @@ void playTTSStream() {
    int16_t prevSample = 0;  /* Last sample of previous chunk for cross-boundary interpolation */
 
    while (true) {
+      /* #9: Check button for barge-in (interrupt playback to start new recording) */
+      int reading = digitalRead(BUTTON_PIN);
+      if (reading == LOW && buttonState == HIGH &&
+          (millis() - lastDebounceTime) > DEBOUNCE_TIME) {
+         Serial.println("TTS: Interrupted by button press (barge-in)");
+         ttsDiscarding = true; /* Drop stale audio until server starts new response */
+         break;
+      }
+
       /* Flow control: only receive more data if ring buffer has room.
        * When buffer is nearly full, skip webSocket.loop() — this backs up the TCP
        * receive window, creating natural backpressure to the server via
@@ -886,7 +1034,11 @@ void playTTSStream() {
       }
 
       if (avail == 0) {
-         if (ttsComplete) break;
+         /* #2: Check ttsComplete under spinlock */
+         portENTER_CRITICAL(&tts_spinlock);
+         bool complete = ttsComplete;
+         portEXIT_CRITICAL(&tts_spinlock);
+         if (complete) break;
          /* Timeout: if no data for 10 seconds and not explicitly complete, stop.
           * Needs to be generous — LLM thinking + TTS synthesis can take seconds. */
          if (millis() - lastDataTime > 10000) {
@@ -970,22 +1122,22 @@ void playTTSStream() {
 
 void reportMemoryUsage() {
    Serial.println("=== Memory Usage Report ===");
-   Serial.printf("Total PSRAM: %d bytes\n", ESP.getPsramSize());
-   Serial.printf("Free PSRAM: %d bytes\n", ESP.getFreePsram());
-   Serial.printf("Used PSRAM: %d bytes\n", ESP.getPsramSize() - ESP.getFreePsram());
+   Serial.printf("Total PSRAM: %lu bytes\n", (unsigned long)ESP.getPsramSize());
+   Serial.printf("Free PSRAM: %lu bytes\n", (unsigned long)ESP.getFreePsram());
+   Serial.printf("Used PSRAM: %lu bytes\n", (unsigned long)(ESP.getPsramSize() - ESP.getFreePsram()));
 
    size_t audioSize = BUFFER_SIZE * sizeof(int16_t);
    size_t ttsSize = TTS_BUFFER_SAMPLES * sizeof(int16_t);
    size_t sendBufSize = AUDIO_SEND_CHUNK_BYTES;
    size_t totalAllocation = audioSize + ttsSize + sendBufSize;
 
-   Serial.printf("Audio buffer: %d bytes\n", audioSize);
-   Serial.printf("TTS buffer: %d bytes\n", ttsSize);
-   Serial.printf("Send buffer: %d bytes\n", sendBufSize);
-   Serial.printf("Total static allocation: %d bytes\n", totalAllocation);
+   Serial.printf("Audio buffer: %lu bytes\n", (unsigned long)audioSize);
+   Serial.printf("TTS buffer: %lu bytes\n", (unsigned long)ttsSize);
+   Serial.printf("Send buffer: %lu bytes\n", (unsigned long)sendBufSize);
+   Serial.printf("Total static allocation: %lu bytes\n", (unsigned long)totalAllocation);
 
-   Serial.printf("Heap free: %d bytes\n", ESP.getFreeHeap());
-   Serial.printf("Heap total: %d bytes\n", ESP.getHeapSize());
+   Serial.printf("Heap free: %lu bytes\n", (unsigned long)ESP.getFreeHeap());
+   Serial.printf("Heap total: %lu bytes\n", (unsigned long)ESP.getHeapSize());
    Serial.println("=============================");
 }
 
@@ -1007,30 +1159,31 @@ void setup() {
    tft.fillScreen(ST77XX_BLACK);
    tft.setTextSize(TEXT_SIZE);
    tft.setTextWrap(true);
-   updateTFTStatus("Dawn Satellite", ST77XX_BLUE, true);
+   updateTFTStatus("DAWN", ST77XX_BLUE, true);
 
    /* Initialize NeoPixel strip */
    strip.begin();
    strip.clear();
    strip.show();
-   updateTFTStatus("NeoPixels: OK", ST77XX_GREEN);
+   updateTFTStatus("LEDs ready", ST77XX_GREEN);
 
    /* Initialize PSRAM */
    if (psramFound()) {
       Serial.println("PSRAM found and initialized");
-      updateTFTStatus("PSRAM: OK", ST77XX_GREEN);
+      updateTFTStatus("Memory OK", ST77XX_GREEN);
    } else {
       Serial.println("PSRAM not found! Enable PSRAM in board config.");
-      updateTFTStatus("PSRAM: ERROR", ST77XX_RED);
+      updateTFTStatus("Memory error!", ST77XX_RED);
       while (1)
          ;
    }
 
-   /* Allocate buffers in PSRAM */
+   /* Allocate buffers in PSRAM — no memset needed, buffers are always
+    * written before read (sampleCount / ttsAvailable track valid data). #19 */
    audioBuffer = (int16_t *)ps_malloc(BUFFER_SIZE * sizeof(int16_t));
    if (!audioBuffer) {
       Serial.println("Failed to allocate audio buffer!");
-      updateTFTStatus("Audio buf failed!", ST77XX_RED);
+      updateTFTStatus("Audio alloc fail!", ST77XX_RED);
       while (1)
          ;
    }
@@ -1039,7 +1192,7 @@ void setup() {
    ttsBuffer = (int16_t *)ps_malloc(TTS_BUFFER_SAMPLES * sizeof(int16_t));
    if (!ttsBuffer) {
       Serial.println("Failed to allocate TTS buffer!");
-      updateTFTStatus("TTS buf failed!", ST77XX_RED);
+      updateTFTStatus("TTS alloc fail!", ST77XX_RED);
       while (1)
          ;
    }
@@ -1048,15 +1201,12 @@ void setup() {
    wsSendBuf = (uint8_t *)ps_malloc(AUDIO_SEND_CHUNK_BYTES);
    if (!wsSendBuf) {
       Serial.println("Failed to allocate send buffer!");
-      updateTFTStatus("Send buf failed!", ST77XX_RED);
+      updateTFTStatus("Send alloc fail!", ST77XX_RED);
       while (1)
          ;
    }
 
-   memset(audioBuffer, 0, BUFFER_SIZE * sizeof(int16_t));
-   memset(ttsBuffer, 0, TTS_BUFFER_SAMPLES * sizeof(int16_t));
-
-   updateTFTStatus("Buffers allocated", ST77XX_GREEN);
+   updateTFTStatus("Buffers OK", ST77XX_GREEN);
 
    /* Load persistent UUID and reconnect secret from NVS flash */
    loadOrCreateUUID();
@@ -1070,7 +1220,7 @@ void setup() {
    /* Connect to WiFi — pulse orange on NeoPixels during connection.
     * NeoPixel task hasn't started yet, so we drive the strip directly. */
    WiFi.begin(ssid, password);
-   updateTFTStatus("WiFi connecting...", ST77XX_YELLOW);
+   updateTFTStatus("Connecting WiFi...", ST77XX_YELLOW);
    Serial.print("Connecting to WiFi");
    int attempts = 0;
    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
@@ -1087,31 +1237,32 @@ void setup() {
 
    if (WiFi.status() == WL_CONNECTED) {
       Serial.println("\nWiFi connected");
-      Serial.print("IP address: ");
-      Serial.println(WiFi.localIP());
+      /* #25: Format IP without temporary Arduino String heap allocation */
+      IPAddress ip = WiFi.localIP();
+      char ipBuf[32];
+      snprintf(ipBuf, sizeof(ipBuf), "WiFi: %d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+      Serial.println(ipBuf);
       /* Brief green flash on NeoPixels */
       setNeoPixelColor(0, 200, 0);
-      char ipBuf[32];
-      snprintf(ipBuf, sizeof(ipBuf), "WiFi: %s", WiFi.localIP().toString().c_str());
       updateTFTStatus(ipBuf, ST77XX_GREEN);
    } else {
       Serial.println("\nWiFi connection failed!");
       setNeoPixelColor(255, 0, 0);
-      updateTFTStatus("WiFi: FAILED", ST77XX_RED);
+      updateTFTStatus("WiFi failed!", ST77XX_RED);
       while (1)
          ;
    }
 
    /* Initialize persistent I2S channel (create once, enable/disable per playback) */
    initI2S();
-   updateTFTStatus("I2S: OK", ST77XX_GREEN);
+   updateTFTStatus("Speaker ready", ST77XX_GREEN);
 
    /* Create NeoPixel task on Core 0 */
    xTaskCreatePinnedToCore(neoPixelTask, "NeoPixel Task", 4096, NULL, 1, &neoPixelTaskHandle, 0);
    if (neoPixelTaskHandle != NULL) {
-      updateTFTStatus("NeoPixel task: OK", ST77XX_GREEN);
+      updateTFTStatus("LED task ready", ST77XX_GREEN);
    } else {
-      updateTFTStatus("NeoPixel task: FAIL", ST77XX_RED);
+      updateTFTStatus("LED task fail!", ST77XX_RED);
    }
 
    /* Initialize WebSocket connection (WSS — daemon uses self-signed cert) */
@@ -1122,7 +1273,7 @@ void setup() {
 
    reportMemoryUsage();
 
-   updateTFTStatus("Press button to talk", ST77XX_WHITE);
+   updateTFTStatus("Press button to talk", ST77XX_WHITE, true);
    Serial.println("Setup complete. Press the button to start recording.");
    setNeoPixelMode(NEO_IDLE_CYCLING);
 }
@@ -1132,6 +1283,25 @@ void setup() {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 void loop() {
+   /* #14: Check WiFi connection and reconnect if needed */
+   if (WiFi.status() != WL_CONNECTED && !isRecording) {
+      Serial.println("WiFi: Connection lost, reconnecting...");
+      updateTFTStatus("Reconnecting", ST77XX_YELLOW, true);
+      WiFi.reconnect();
+      unsigned long reconnStart = millis();
+      while (WiFi.status() != WL_CONNECTED && (millis() - reconnStart) < 10000) {
+         delay(500);
+      }
+      if (WiFi.status() == WL_CONNECTED) {
+         Serial.println("WiFi: Reconnected");
+         updateTFTStatus("Reconnected!", ST77XX_GREEN, true);
+      } else {
+         Serial.println("WiFi: Reconnect failed, will retry");
+         updateTFTStatus("No WiFi", ST77XX_RED, true);
+         setNeoPixelMode(NEO_ERROR);
+      }
+   }
+
    /* Service WebSocket — skip during recording to keep ADC timing tight.
     * SSL processing in webSocket.loop() can take 10-50ms, which causes the
     * timer-based ADC sampler to fall behind and produce distorted catch-up bursts.
@@ -1164,7 +1334,7 @@ void loop() {
           (int32_t)(micros() - nextSampleTime) >= 0) {
       int adcVal = analogRead(MIC_ADC_PIN);
       audioBuffer[sampleCount++] = (int16_t)((adcVal - 2048) << 4);
-      nextSampleTime += sampleInterval_us;
+      nextSampleTime += SAMPLE_INTERVAL_US;
    }
 
    /* ── Recording progress display ──────────────────────────────────────── */
@@ -1172,8 +1342,8 @@ void loop() {
    if (isRecording && millis() - lastProgressUpdate >= 500) {
       int percentage = (sampleCount * 100) / BUFFER_SIZE;
       updateProgressBar(percentage, ST77XX_RED);
-      float seconds = (float)sampleCount / SAMPLE_RATE;
-      Serial.printf("Recording: %.1f seconds, %d samples\n", seconds, sampleCount);
+      Serial.printf("Recording: %.1f seconds, %d samples\n",
+                    (float)sampleCount / SAMPLE_RATE, sampleCount);
       lastProgressUpdate = millis();
       drawRecordingIndicator(true);
    }
@@ -1192,8 +1362,13 @@ void loop() {
       stopRecording();
    }
 
-   /* ── TTS playback (blocks until done) ────────────────────────────────── */
-   if (ttsPlaying && !isRecording) {
+   /* ── TTS playback (blocks until done or interrupted) ──────────────────── */
+   /* #2: Check ttsPlaying under spinlock for consistency with producer */
+   bool shouldPlay = false;
+   portENTER_CRITICAL(&tts_spinlock);
+   shouldPlay = ttsPlaying;
+   portEXIT_CRITICAL(&tts_spinlock);
+   if (shouldPlay && !isRecording) {
       playTTSStream();
    }
 

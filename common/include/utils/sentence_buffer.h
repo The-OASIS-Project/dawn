@@ -39,7 +39,7 @@ extern "C" {
 typedef void (*sentence_callback)(const char *sentence, void *userdata);
 
 /**
- * @brief Sentence buffer structure
+ * @brief Sentence buffer (opaque type)
  *
  * Accumulates text chunks and extracts complete sentences based on
  * punctuation boundaries (., !, ?, :) followed by space or end of input.
@@ -47,13 +47,7 @@ typedef void (*sentence_callback)(const char *sentence, void *userdata);
  * Note: Callers should pre-filter any content (e.g., <command> tags)
  * before feeding to this buffer.
  */
-typedef struct {
-   char *buffer;               /**< Accumulated text buffer */
-   size_t size;                /**< Current size of buffered text */
-   size_t capacity;            /**< Total capacity of buffer */
-   sentence_callback callback; /**< Callback for complete sentences */
-   void *callback_userdata;    /**< User context passed to callback */
-} sentence_buffer_t;
+typedef struct sentence_buffer sentence_buffer_t;
 
 /**
  * @brief Create a new sentence buffer

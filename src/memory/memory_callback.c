@@ -273,6 +273,82 @@ static void format_time_ago(time_t timestamp, char *buf, size_t buf_size) {
  * ============================================================================= */
 
 #define MAX_SEARCH_TOKENS 8
+#define MAX_DEDUP_RESULTS 30 /* Max intermediate results during multi-token dedup */
+
+/**
+ * @brief Multi-token fact search with dedup and relevance ranking
+ *
+ * Searches for each token independently, deduplicates results by fact ID,
+ * scores by number of matching tokens, and returns top results sorted by
+ * score (desc) then confidence (desc).
+ *
+ * @param user_id User to search for
+ * @param tokens Tokenized search terms
+ * @param token_count Number of tokens
+ * @param per_token_limit Max results per individual token search
+ * @param results Output array for top results
+ * @param max_results Maximum results to return
+ * @return Number of results found
+ */
+static int multi_token_fact_search(int user_id,
+                                   char tokens[][64],
+                                   int token_count,
+                                   int per_token_limit,
+                                   memory_fact_t *results,
+                                   int max_results) {
+   int64_t seen_ids[MAX_DEDUP_RESULTS];
+   int seen_scores[MAX_DEDUP_RESULTS];
+   memory_fact_t seen_facts[MAX_DEDUP_RESULTS];
+   int seen_count = 0;
+
+   for (int t = 0; t < token_count; t++) {
+      memory_fact_t token_results[10];
+      int limit = per_token_limit > 10 ? 10 : per_token_limit;
+      int n = memory_db_fact_search(user_id, tokens[t], token_results, limit);
+      for (int j = 0; j < n; j++) {
+         int found = -1;
+         for (int k = 0; k < seen_count; k++) {
+            if (seen_ids[k] == token_results[j].id) {
+               found = k;
+               break;
+            }
+         }
+         if (found >= 0) {
+            seen_scores[found]++;
+         } else if (seen_count < MAX_DEDUP_RESULTS) {
+            seen_ids[seen_count] = token_results[j].id;
+            seen_scores[seen_count] = 1;
+            seen_facts[seen_count] = token_results[j];
+            seen_count++;
+         }
+      }
+   }
+
+   /* Insertion sort by score desc, then confidence desc */
+   for (int i = 1; i < seen_count; i++) {
+      int64_t tmp_id = seen_ids[i];
+      int tmp_score = seen_scores[i];
+      memory_fact_t tmp_fact = seen_facts[i];
+      int j = i - 1;
+      while (j >= 0 &&
+             (seen_scores[j] < tmp_score ||
+              (seen_scores[j] == tmp_score && seen_facts[j].confidence < tmp_fact.confidence))) {
+         seen_ids[j + 1] = seen_ids[j];
+         seen_scores[j + 1] = seen_scores[j];
+         seen_facts[j + 1] = seen_facts[j];
+         j--;
+      }
+      seen_ids[j + 1] = tmp_id;
+      seen_scores[j + 1] = tmp_score;
+      seen_facts[j + 1] = tmp_fact;
+   }
+
+   int count = (seen_count > max_results) ? max_results : seen_count;
+   for (int i = 0; i < count; i++) {
+      results[i] = seen_facts[i];
+   }
+   return count;
+}
 
 static int tokenize_query(const char *keywords, char tokens[][64], int max_tokens) {
    if (!keywords || max_tokens <= 0) {
@@ -292,8 +368,7 @@ static int tokenize_query(const char *keywords, char tokens[][64], int max_token
    char *tok = strtok_r(buf, " \t\n\r,.;:!?\"'()[]{}/-", &saveptr);
    while (tok && count < max_tokens) {
       if (strlen(tok) > 1) {
-         strncpy(tokens[count], tok, 63);
-         tokens[count][63] = '\0';
+         snprintf(tokens[count], 64, "%s", tok);
          count++;
       }
       tok = strtok_r(NULL, " \t\n\r,.;:!?\"'()[]{}/-", &saveptr);
@@ -332,57 +407,7 @@ static char *memory_action_search(int user_id, const char *keywords) {
       fact_count = memory_db_fact_search(user_id, keywords, facts, 10);
    } else {
       /* Multi-word: search per token, dedup by ID, rank by match count */
-      int64_t seen_ids[50];
-      int seen_scores[50];
-      memory_fact_t seen_facts[50];
-      int seen_count = 0;
-
-      for (int t = 0; t < token_count; t++) {
-         memory_fact_t token_results[10];
-         int n = memory_db_fact_search(user_id, tokens[t], token_results, 10);
-         for (int j = 0; j < n; j++) {
-            int found = -1;
-            for (int k = 0; k < seen_count; k++) {
-               if (seen_ids[k] == token_results[j].id) {
-                  found = k;
-                  break;
-               }
-            }
-            if (found >= 0) {
-               seen_scores[found]++;
-            } else if (seen_count < 50) {
-               seen_ids[seen_count] = token_results[j].id;
-               seen_scores[seen_count] = 1;
-               seen_facts[seen_count] = token_results[j];
-               seen_count++;
-            }
-         }
-      }
-
-      /* Insertion sort by score desc, then confidence desc */
-      for (int i = 1; i < seen_count; i++) {
-         int64_t tmp_id = seen_ids[i];
-         int tmp_score = seen_scores[i];
-         memory_fact_t tmp_fact = seen_facts[i];
-         int j = i - 1;
-         while (j >= 0 &&
-                (seen_scores[j] < tmp_score ||
-                 (seen_scores[j] == tmp_score && seen_facts[j].confidence < tmp_fact.confidence))) {
-            seen_ids[j + 1] = seen_ids[j];
-            seen_scores[j + 1] = seen_scores[j];
-            seen_facts[j + 1] = seen_facts[j];
-            j--;
-         }
-         seen_ids[j + 1] = tmp_id;
-         seen_scores[j + 1] = tmp_score;
-         seen_facts[j + 1] = tmp_fact;
-      }
-
-      /* Take top 10 */
-      fact_count = (seen_count > 10) ? 10 : seen_count;
-      for (int i = 0; i < fact_count; i++) {
-         facts[i] = seen_facts[i];
-      }
+      fact_count = multi_token_fact_search(user_id, tokens, token_count, 10, facts, 10);
    }
 
    if (fact_count > 0) {
@@ -422,14 +447,14 @@ static char *memory_action_search(int user_id, const char *keywords) {
          char lower_cat[MEMORY_CATEGORY_MAX];
          strncpy(lower_cat, prefs[i].category, MEMORY_CATEGORY_MAX - 1);
          lower_cat[MEMORY_CATEGORY_MAX - 1] = '\0';
-         for (size_t j = 0; j < strlen(lower_cat); j++) {
+         for (size_t j = 0; lower_cat[j]; j++) {
             lower_cat[j] = tolower((unsigned char)lower_cat[j]);
          }
 
          char lower_val[MEMORY_PREF_VALUE_MAX];
          strncpy(lower_val, prefs[i].value, MEMORY_PREF_VALUE_MAX - 1);
          lower_val[MEMORY_PREF_VALUE_MAX - 1] = '\0';
-         for (size_t j = 0; j < strlen(lower_val); j++) {
+         for (size_t j = 0; lower_val[j]; j++) {
             lower_val[j] = tolower((unsigned char)lower_val[j]);
          }
 
@@ -612,56 +637,7 @@ static char *memory_action_forget(int user_id, const char *fact_text) {
       count = memory_db_fact_search(user_id, fact_text, facts, 5);
    } else {
       /* Multi-word: search per token, dedup, pick best match */
-      int64_t seen_ids[30];
-      int seen_scores[30];
-      memory_fact_t seen_facts[30];
-      int seen_count = 0;
-
-      for (int t = 0; t < token_count; t++) {
-         memory_fact_t token_results[5];
-         int n = memory_db_fact_search(user_id, tokens[t], token_results, 5);
-         for (int j = 0; j < n; j++) {
-            int found = -1;
-            for (int k = 0; k < seen_count; k++) {
-               if (seen_ids[k] == token_results[j].id) {
-                  found = k;
-                  break;
-               }
-            }
-            if (found >= 0) {
-               seen_scores[found]++;
-            } else if (seen_count < 30) {
-               seen_ids[seen_count] = token_results[j].id;
-               seen_scores[seen_count] = 1;
-               seen_facts[seen_count] = token_results[j];
-               seen_count++;
-            }
-         }
-      }
-
-      /* Insertion sort by score desc, then confidence desc */
-      for (int i = 1; i < seen_count; i++) {
-         int64_t tmp_id = seen_ids[i];
-         int tmp_score = seen_scores[i];
-         memory_fact_t tmp_fact = seen_facts[i];
-         int j = i - 1;
-         while (j >= 0 &&
-                (seen_scores[j] < tmp_score ||
-                 (seen_scores[j] == tmp_score && seen_facts[j].confidence < tmp_fact.confidence))) {
-            seen_ids[j + 1] = seen_ids[j];
-            seen_scores[j + 1] = seen_scores[j];
-            seen_facts[j + 1] = seen_facts[j];
-            j--;
-         }
-         seen_ids[j + 1] = tmp_id;
-         seen_scores[j + 1] = tmp_score;
-         seen_facts[j + 1] = tmp_fact;
-      }
-
-      count = (seen_count > 5) ? 5 : seen_count;
-      for (int i = 0; i < count; i++) {
-         facts[i] = seen_facts[i];
-      }
+      count = multi_token_fact_search(user_id, tokens, token_count, 5, facts, 5);
    }
 
    if (count == 0) {

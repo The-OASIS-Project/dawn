@@ -104,7 +104,7 @@ static char *reset_conversation_tool_callback(const char *action,
    }
 
    /* For WebUI sessions, send notification to clear the frontend display */
-   if (session && session->type == SESSION_TYPE_WEBSOCKET) {
+   if (session && session->type == SESSION_TYPE_WEBUI) {
       webui_send_conversation_reset(session);
    }
 

@@ -600,7 +600,7 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
          /* Send notification to WebUI about thinking being disabled (once per session) */
          static uint32_t last_notified_session = 0;
          session_t *session = session_get_command_context();
-         if (session && session->type == SESSION_TYPE_WEBSOCKET &&
+         if (session && session->type == SESSION_TYPE_WEBUI &&
              session->session_id != last_notified_session) {
             last_notified_session = session->session_id;
             LOG_INFO("Claude: Auto-disabled thinking for session %u (incompatible history)",

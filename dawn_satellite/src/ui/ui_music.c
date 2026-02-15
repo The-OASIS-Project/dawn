@@ -644,8 +644,11 @@ static void render_visualizer(ui_music_t *m, SDL_Renderer *r, int y) {
    /* Match WebUI AnalyserNode smoothingTimeConstant=0.6 (at 60fps reference rate).
     * Formula: alpha = 1 - 0.6^(60*dt) gives ~0.64 at 30fps, ~0.40 at 60fps.
     * Use asymmetric: faster rise (snappy attack), moderate fall (smooth decay). */
-   float rise_alpha = 1.0f - powf(0.4f, 60.0f * dt);  /* Fast rise: ~0.84 at 30fps */
-   float fall_alpha = 1.0f - powf(0.65f, 60.0f * dt); /* Moderate fall: ~0.58 at 30fps */
+   /* powf(base, x) = expf(x * logf(base)). Precompute log constants to avoid powf. */
+   static const float LOG_RISE_BASE = -0.916291f;              /* logf(0.4f) */
+   static const float LOG_FALL_BASE = -0.431364f;              /* logf(0.65f) */
+   float rise_alpha = 1.0f - expf(60.0f * dt * LOG_RISE_BASE); /* Fast rise: ~0.84 at 30fps */
+   float fall_alpha = 1.0f - expf(60.0f * dt * LOG_FALL_BASE); /* Moderate fall: ~0.58 at 30fps */
    for (int i = 0; i < VIZ_BAR_COUNT; i++) {
       float target = m->viz_targets[i];
       float current = m->viz_bars[i];
@@ -768,29 +771,42 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
       format_time(display_pos, time_cur, sizeof(time_cur));
       format_time(m->duration_sec, time_dur, sizeof(time_dur));
 
-      SDL_Color tc = { txt1.r, txt1.g, txt1.b, 255 };
+      /* Current time label (cached, invalidates per second) */
+      int cur_sec = (int)display_pos;
+      if (!m->time_cur_tex || m->time_cur_sec != cur_sec) {
+         if (m->time_cur_tex)
+            SDL_DestroyTexture(m->time_cur_tex);
+         m->time_cur_tex = build_white_tex(r, m->label_font, time_cur, &m->time_cur_w,
+                                           &m->time_cur_h);
+         m->time_cur_sec = cur_sec;
+      }
 
-      /* Current time label */
-      SDL_Surface *cur_s = TTF_RenderUTF8_Blended(m->label_font, time_cur, tc);
-      if (cur_s) {
-         SDL_Texture *tex = SDL_CreateTextureFromSurface(r, cur_s);
-         SDL_Rect dst = { m->panel_x + 16, y, cur_s->w, cur_s->h };
-         SDL_RenderCopy(r, tex, NULL, &dst);
-         SDL_DestroyTexture(tex);
+      /* Duration label (cached, invalidates on track change) */
+      int dur_sec = (int)m->duration_sec;
+      if (!m->time_dur_tex || m->time_dur_sec != dur_sec) {
+         if (m->time_dur_tex)
+            SDL_DestroyTexture(m->time_dur_tex);
+         m->time_dur_tex = build_white_tex(r, m->label_font, time_dur, &m->time_dur_w,
+                                           &m->time_dur_h);
+         m->time_dur_sec = dur_sec;
+      }
 
-         /* Duration label */
-         SDL_Surface *dur_s = TTF_RenderUTF8_Blended(m->label_font, time_dur, tc);
-         if (dur_s) {
-            SDL_Texture *dtex = SDL_CreateTextureFromSurface(r, dur_s);
-            SDL_Rect ddst = { m->panel_x + m->panel_w - 16 - dur_s->w, y, dur_s->w, dur_s->h };
-            SDL_RenderCopy(r, dtex, NULL, &ddst);
-            SDL_DestroyTexture(dtex);
-            SDL_FreeSurface(dur_s);
-         }
+      if (m->time_cur_tex) {
+         SDL_SetTextureColorMod(m->time_cur_tex, txt1.r, txt1.g, txt1.b);
+         SDL_Rect dst = { m->panel_x + 16, y, m->time_cur_w, m->time_cur_h };
+         SDL_RenderCopy(r, m->time_cur_tex, NULL, &dst);
+      }
+      if (m->time_dur_tex) {
+         SDL_SetTextureColorMod(m->time_dur_tex, txt1.r, txt1.g, txt1.b);
+         SDL_Rect ddst = { m->panel_x + m->panel_w - 16 - m->time_dur_w, y, m->time_dur_w,
+                           m->time_dur_h };
+         SDL_RenderCopy(r, m->time_dur_tex, NULL, &ddst);
+      }
 
-         int bar_x = m->panel_x + 16 + cur_s->w + 8;
-         int bar_w = m->panel_w - 32 - cur_s->w * 2 - 16;
-         int bar_y = y + cur_s->h / 2 - PROGRESS_BAR_HEIGHT / 2;
+      if (m->time_cur_tex) {
+         int bar_x = m->panel_x + 16 + m->time_cur_w + 8;
+         int bar_w = m->panel_w - 32 - m->time_cur_w * 2 - 16;
+         int bar_y = y + m->time_cur_h / 2 - PROGRESS_BAR_HEIGHT / 2;
 
          /* Store for touch handler */
          m->progress_bar_y = bar_y;
@@ -827,8 +843,7 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
          }
 #endif
 
-         y += cur_s->h;
-         SDL_FreeSurface(cur_s);
+         y += m->time_cur_h;
       }
    }
 
@@ -967,7 +982,7 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
 
    y += TOGGLE_BTN_SIZE + 12;
 
-   /* Status line */
+   /* Status line (cached, changes only on track change) */
    if (m->label_font && m->source_format[0]) {
       char status[128];
       if (m->bitrate > 0) {
@@ -978,15 +993,20 @@ static void render_now_playing(ui_music_t *m, SDL_Renderer *r) {
          snprintf(status, sizeof(status), "%s %dk", m->source_format, m->source_rate / 1000);
       }
 
-      SDL_Color c = { txt1.r, txt1.g, txt1.b, 180 };
-      SDL_Surface *s = TTF_RenderUTF8_Blended(m->label_font, status, c);
-      if (s) {
-         SDL_Texture *tex = SDL_CreateTextureFromSurface(r, s);
-         int tx = m->panel_x + (m->panel_w - s->w) / 2;
-         SDL_Rect dst = { tx, y, s->w, s->h };
-         SDL_RenderCopy(r, tex, NULL, &dst);
-         SDL_DestroyTexture(tex);
-         SDL_FreeSurface(s);
+      if (!m->status_line_tex || strcmp(m->cached_status_line, status) != 0) {
+         if (m->status_line_tex)
+            SDL_DestroyTexture(m->status_line_tex);
+         m->status_line_tex = build_white_tex(r, m->label_font, status, &m->status_line_w,
+                                              &m->status_line_h);
+         strncpy(m->cached_status_line, status, sizeof(m->cached_status_line) - 1);
+         m->cached_status_line[sizeof(m->cached_status_line) - 1] = '\0';
+      }
+      if (m->status_line_tex) {
+         SDL_SetTextureColorMod(m->status_line_tex, txt1.r, txt1.g, txt1.b);
+         SDL_SetTextureAlphaMod(m->status_line_tex, 180);
+         int tx = m->panel_x + (m->panel_w - m->status_line_w) / 2;
+         SDL_Rect dst = { tx, y, m->status_line_w, m->status_line_h };
+         SDL_RenderCopy(r, m->status_line_tex, NULL, &dst);
       }
    }
 }
@@ -1055,17 +1075,21 @@ static void render_queue(ui_music_t *m, SDL_Renderer *r) {
    SDL_RenderFillRect(r, &hdr);
 
    if (m->label_font) {
-      /* Title */
-      char title[64];
-      snprintf(title, sizeof(title), "PLAYBACK QUEUE (%d)", m->queue_count);
-      SDL_Color tc = { txt0.r, txt0.g, txt0.b, 255 };
-      SDL_Surface *s = TTF_RenderUTF8_Blended(m->label_font, title, tc);
-      if (s) {
-         SDL_Texture *tex = SDL_CreateTextureFromSurface(r, s);
-         SDL_Rect dst = { m->panel_x + 16, y + (header_h - s->h) / 2, s->w, s->h };
-         SDL_RenderCopy(r, tex, NULL, &dst);
-         SDL_DestroyTexture(tex);
-         SDL_FreeSurface(s);
+      /* Title (cached, invalidates when queue count changes) */
+      if (!m->queue_hdr_tex || m->cached_queue_count != m->queue_count) {
+         if (m->queue_hdr_tex)
+            SDL_DestroyTexture(m->queue_hdr_tex);
+         char title[64];
+         snprintf(title, sizeof(title), "PLAYBACK QUEUE (%d)", m->queue_count);
+         m->queue_hdr_tex = build_white_tex(r, m->label_font, title, &m->queue_hdr_w,
+                                            &m->queue_hdr_h);
+         m->cached_queue_count = m->queue_count;
+      }
+      if (m->queue_hdr_tex) {
+         SDL_SetTextureColorMod(m->queue_hdr_tex, txt0.r, txt0.g, txt0.b);
+         SDL_Rect dst = { m->panel_x + 16, y + (header_h - m->queue_hdr_h) / 2, m->queue_hdr_w,
+                          m->queue_hdr_h };
+         SDL_RenderCopy(r, m->queue_hdr_tex, NULL, &dst);
       }
 
       /* Clear button */
@@ -1624,6 +1648,24 @@ void ui_music_cleanup(ui_music_t *m) {
       }
    }
    m->static_cache_ready = false;
+
+   /* Destroy dynamic caches */
+   if (m->time_cur_tex) {
+      SDL_DestroyTexture(m->time_cur_tex);
+      m->time_cur_tex = NULL;
+   }
+   if (m->time_dur_tex) {
+      SDL_DestroyTexture(m->time_dur_tex);
+      m->time_dur_tex = NULL;
+   }
+   if (m->status_line_tex) {
+      SDL_DestroyTexture(m->status_line_tex);
+      m->status_line_tex = NULL;
+   }
+   if (m->queue_hdr_tex) {
+      SDL_DestroyTexture(m->queue_hdr_tex);
+      m->queue_hdr_tex = NULL;
+   }
 
    if (m->label_font) {
       TTF_CloseFont(m->label_font);

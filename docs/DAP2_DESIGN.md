@@ -235,7 +235,7 @@ Instead of separate DAP2 session management, extend the existing session system:
 // Extend include/core/session_manager.h
 typedef enum {
    SESSION_TYPE_LOCAL,      // Main daemon (microphone)
-   SESSION_TYPE_WEBSOCKET,  // Browser WebUI
+   SESSION_TYPE_WEBUI,  // Browser WebUI
    SESSION_TYPE_SATELLITE,  // DAP2 satellite (Tier 1 or Tier 2)
 } session_type_t;
 
@@ -846,7 +846,7 @@ This phase addresses the architecture reviewer's critical finding: existing code
    // include/core/session_manager.h
    typedef enum {
       SESSION_TYPE_LOCAL,
-      SESSION_TYPE_WEBSOCKET,
+      SESSION_TYPE_WEBUI,
       SESSION_TYPE_SATELLITE,  // NEW
    } session_type_t;
    ```

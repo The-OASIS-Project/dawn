@@ -158,6 +158,21 @@ void asr_whisper_set_timing_callback(whisper_asr_context_t *ctx,
    ctx->timing_callback_user_data = user_data;
 }
 
+/**
+ * @brief Static sentinel result for process() — avoids heap allocation per audio chunk.
+ *
+ * Whisper is batch-only: process() just accumulates audio, always returning an empty partial.
+ * This sentinel eliminates ~62 mallocs/sec at 16kHz/512-sample chunks.
+ * The text field points to a string literal (caller must NOT free sentinel results).
+ * Callers using asr_engine_result_free() or asr_whisper_result_free() handle NULL-text safely.
+ */
+static asr_whisper_result_t s_empty_partial = {
+   .text = NULL,
+   .confidence = -1.0f,
+   .is_partial = 1,
+   .processing_time = 0.0,
+};
+
 asr_whisper_result_t *asr_whisper_process(whisper_asr_context_t *ctx,
                                           const int16_t *audio,
                                           size_t samples) {
@@ -172,16 +187,7 @@ asr_whisper_result_t *asr_whisper_process(whisper_asr_context_t *ctx,
                        ctx->buffer_size, ctx->buffer_capacity, samples);
       samples = ctx->buffer_capacity - ctx->buffer_size;
       if (samples == 0) {
-         /* Buffer completely full */
-         asr_whisper_result_t *result = (asr_whisper_result_t *)calloc(
-             1, sizeof(asr_whisper_result_t));
-         if (result) {
-            result->text = strdup("");
-            result->confidence = -1.0f;
-            result->is_partial = 1;
-            result->processing_time = 0.0;
-         }
-         return result;
+         return &s_empty_partial;
       }
    }
 
@@ -189,19 +195,8 @@ asr_whisper_result_t *asr_whisper_process(whisper_asr_context_t *ctx,
    convert_int16_to_float(audio, ctx->audio_buffer + ctx->buffer_size, samples);
    ctx->buffer_size += samples;
 
-   /* Return empty partial result (Whisper doesn't support streaming) */
-   asr_whisper_result_t *result = (asr_whisper_result_t *)calloc(1, sizeof(asr_whisper_result_t));
-   if (!result) {
-      DAWN_LOG_ERROR("asr_whisper_process: Failed to allocate result");
-      return NULL;
-   }
-
-   result->text = strdup("");
-   result->confidence = -1.0f;
-   result->is_partial = 1;
-   result->processing_time = 0.0;
-
-   return result;
+   /* Return static empty partial (Whisper doesn't support streaming) */
+   return &s_empty_partial;
 }
 
 asr_whisper_result_t *asr_whisper_finalize(whisper_asr_context_t *ctx) {
@@ -273,18 +268,24 @@ asr_whisper_result_t *asr_whisper_finalize(whisper_asr_context_t *ctx) {
       }
    }
 
-   char *full_text = (char *)calloc(total_length + 1, sizeof(char));
+   char *full_text = (char *)malloc(total_length + 1);
    if (!full_text) {
       DAWN_LOG_ERROR("asr_whisper_finalize: Failed to allocate text buffer");
       return NULL;
    }
 
+   size_t offset = 0;
    for (int i = 0; i < n_segments; i++) {
       const char *segment_text = whisper_full_get_segment_text(ctx->ctx, i);
       if (segment_text) {
-         strcat(full_text, segment_text);
+         size_t seg_len = strlen(segment_text);
+         if (offset + seg_len > total_length)
+            break; /* Safety guard against segment text changing between passes */
+         memcpy(full_text + offset, segment_text, seg_len);
+         offset += seg_len;
       }
    }
+   full_text[offset] = '\0';
 
    /* Create result structure */
    asr_whisper_result_t *result = (asr_whisper_result_t *)calloc(1, sizeof(asr_whisper_result_t));
@@ -320,19 +321,17 @@ int asr_whisper_reset(whisper_asr_context_t *ctx) {
    }
 
    ctx->buffer_size = 0;
-   memset(ctx->audio_buffer, 0, ctx->buffer_capacity * sizeof(float));
+   /* No memset needed - buffer_size gates all reads, old data is overwritten by new audio */
 
    DAWN_LOG_INFO("asr_whisper_reset: Reset for new utterance");
    return ASR_SUCCESS;
 }
 
 void asr_whisper_result_free(asr_whisper_result_t *result) {
-   if (!result)
+   if (!result || result == &s_empty_partial)
       return;
 
-   if (result->text) {
-      free(result->text);
-   }
+   free(result->text);
    free(result);
 }
 

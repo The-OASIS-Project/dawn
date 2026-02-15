@@ -28,8 +28,8 @@
  * line number, and function name.
  */
 
-#ifndef LOGGING_H
-#define LOGGING_H
+#ifndef DAWN_COMMON_LOGGING_H
+#define DAWN_COMMON_LOGGING_H
 
 #include <stdarg.h> /* For va_list */
 #include <stdio.h>  /* For FILE */
@@ -182,4 +182,4 @@ void logging_suppress_console(int suppress);
  */
 #define LOG_CREDENTIAL_STATUS(key) ((key) ? "(configured)" : "(not configured)")
 
-#endif  // LOGGING_H
+#endif /* DAWN_COMMON_LOGGING_H */

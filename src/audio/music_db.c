@@ -791,67 +791,18 @@ int music_db_get_by_path(const char *path, music_search_result_t *result) {
 }
 
 int music_db_list(music_search_result_t *results, int max_results) {
-   if (!results || max_results <= 0) {
-      return -1;
-   }
-
-   pthread_mutex_lock(&g_db_mutex);
-
-   if (!g_initialized) {
-      pthread_mutex_unlock(&g_db_mutex);
-      return -1;
-   }
-
-   sqlite3_stmt *stmt = NULL;
-   int rc = sqlite3_prepare_v2(g_db, SQL_LIST, -1, &stmt, NULL);
-   if (rc != SQLITE_OK) {
-      LOG_ERROR("music_db_list: prepare failed: %s", sqlite3_errmsg(g_db));
-      pthread_mutex_unlock(&g_db_mutex);
-      return -1;
-   }
-
-   sqlite3_bind_int(stmt, 1, max_results);
-
-   int count = 0;
-   while (sqlite3_step(stmt) == SQLITE_ROW && count < max_results) {
-      music_search_result_t *r = &results[count];
-      memset(r, 0, sizeof(*r));
-
-      const char *path = (const char *)sqlite3_column_text(stmt, 0);
-      const char *title = (const char *)sqlite3_column_text(stmt, 1);
-      const char *artist = (const char *)sqlite3_column_text(stmt, 2);
-      const char *album = (const char *)sqlite3_column_text(stmt, 3);
-      int duration = sqlite3_column_int(stmt, 4);
-
-      if (path)
-         safe_strncpy(r->path, path, sizeof(r->path));
-      if (title)
-         safe_strncpy(r->title, title, sizeof(r->title));
-      if (artist)
-         safe_strncpy(r->artist, artist, sizeof(r->artist));
-      if (album)
-         safe_strncpy(r->album, album, sizeof(r->album));
-      r->duration_sec = (uint32_t)duration;
-
-      build_display_name(r);
-      count++;
-   }
-
-   sqlite3_finalize(stmt);
-   pthread_mutex_unlock(&g_db_mutex);
-
-   return count;
+   return music_db_list_paged(results, max_results, 0);
 }
 
 int music_db_list_paged(music_search_result_t *results, int max_results, int offset) {
    if (!results || max_results <= 0)
-      return -1;
+      return 0;
 
    pthread_mutex_lock(&g_db_mutex);
 
    if (!g_initialized) {
       pthread_mutex_unlock(&g_db_mutex);
-      return -1;
+      return 0;
    }
 
    sqlite3_stmt *stmt = NULL;
@@ -859,7 +810,7 @@ int music_db_list_paged(music_search_result_t *results, int max_results, int off
    if (rc != SQLITE_OK) {
       LOG_ERROR("music_db_list_paged: prepare failed: %s", sqlite3_errmsg(g_db));
       pthread_mutex_unlock(&g_db_mutex);
-      return -1;
+      return 0;
    }
 
    sqlite3_bind_int(stmt, 1, max_results);

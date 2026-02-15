@@ -54,6 +54,28 @@
 #define FALLBACK_BODY_FONT "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
 /* =============================================================================
+ * Texture Caching Helper
+ * ============================================================================= */
+
+static SDL_Texture *build_white_tex(SDL_Renderer *r,
+                                    TTF_Font *font,
+                                    const char *text,
+                                    int *out_w,
+                                    int *out_h) {
+   SDL_Color white = { 255, 255, 255, 255 };
+   SDL_Surface *s = TTF_RenderUTF8_Blended(font, text, white);
+   if (!s)
+      return NULL;
+   SDL_Texture *tex = SDL_CreateTextureFromSurface(r, s);
+   if (out_w)
+      *out_w = s->w;
+   if (out_h)
+      *out_h = s->h;
+   SDL_FreeSurface(s);
+   return tex;
+}
+
+/* =============================================================================
  * WiFi Signal Quality Reader
  * ============================================================================= */
 
@@ -261,6 +283,22 @@ void ui_transcript_cleanup(ui_transcript_t *t) {
       SDL_DestroyTexture(t->music_icon_tex);
       t->music_icon_tex = NULL;
    }
+   if (t->cached_state_tex) {
+      SDL_DestroyTexture(t->cached_state_tex);
+      t->cached_state_tex = NULL;
+   }
+   if (t->cached_muted_tex) {
+      SDL_DestroyTexture(t->cached_muted_tex);
+      t->cached_muted_tex = NULL;
+   }
+   if (t->cached_time_tex) {
+      SDL_DestroyTexture(t->cached_time_tex);
+      t->cached_time_tex = NULL;
+   }
+   if (t->cached_detail_tex) {
+      SDL_DestroyTexture(t->cached_detail_tex);
+      t->cached_detail_tex = NULL;
+   }
 
    if (t->label_font) {
       TTF_CloseFont(t->label_font);
@@ -466,83 +504,70 @@ void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_stat
    int x = t->panel_x + t->padding;
    int label_y = t->panel_y + t->padding;
 
-   /* Render state label at top */
+   /* Render state label at top (cached white texture + color mod) */
    if (t->label_font) {
       ui_color_t state_color = ui_label_color_for_state(state);
 
-      char label_text[48];
-      if (t->mic_muted) {
-         snprintf(label_text, sizeof(label_text), "[%s]  [MUTED]", ui_state_label(state));
-      } else {
-         snprintf(label_text, sizeof(label_text), "[%s]", ui_state_label(state));
-      }
-
-      /* State label changes frequently so we don't cache it */
-      /* Render state portion in state color, then muted indicator in red */
-      if (!t->mic_muted) {
-         SDL_Color label_sdl = { state_color.r, state_color.g, state_color.b, 255 };
-         SDL_Surface *label_surface = TTF_RenderUTF8_Blended(t->label_font, label_text, label_sdl);
-         if (label_surface) {
-            SDL_Texture *label_tex = SDL_CreateTextureFromSurface(renderer, label_surface);
-            if (label_tex) {
-               SDL_Rect dst = { x, label_y, label_surface->w, label_surface->h };
-               SDL_RenderCopy(renderer, label_tex, NULL, &dst);
-               SDL_DestroyTexture(label_tex);
-            }
-            SDL_FreeSurface(label_surface);
-         }
-      } else {
-         /* Render state label */
+      /* Rebuild state texture only when state or muted flag changes */
+      if (!t->cached_state_tex || t->cached_state_val != state ||
+          t->cached_state_muted != t->mic_muted) {
+         if (t->cached_state_tex)
+            SDL_DestroyTexture(t->cached_state_tex);
          char state_str[32];
          snprintf(state_str, sizeof(state_str), "[%s]", ui_state_label(state));
-         SDL_Color label_sdl = { state_color.r, state_color.g, state_color.b, 255 };
-         SDL_Surface *state_surface = TTF_RenderUTF8_Blended(t->label_font, state_str, label_sdl);
-         if (state_surface) {
-            SDL_Texture *state_tex = SDL_CreateTextureFromSurface(renderer, state_surface);
-            if (state_tex) {
-               SDL_Rect dst = { x, label_y, state_surface->w, state_surface->h };
-               SDL_RenderCopy(renderer, state_tex, NULL, &dst);
-               SDL_DestroyTexture(state_tex);
-            }
-            int muted_x = x + state_surface->w + 8;
-            SDL_FreeSurface(state_surface);
+         t->cached_state_tex = build_white_tex(renderer, t->label_font, state_str,
+                                               &t->cached_state_w, &t->cached_state_h);
+         t->cached_state_val = state;
+         t->cached_state_muted = t->mic_muted;
+      }
 
-            /* Render [MUTED] in red */
-            SDL_Color red = { COLOR_ERROR_R, COLOR_ERROR_G, COLOR_ERROR_B, 255 };
-            SDL_Surface *muted_surface = TTF_RenderUTF8_Blended(t->label_font, "[MUTED]", red);
-            if (muted_surface) {
-               SDL_Texture *muted_tex = SDL_CreateTextureFromSurface(renderer, muted_surface);
-               if (muted_tex) {
-                  SDL_Rect dst = { muted_x, label_y, muted_surface->w, muted_surface->h };
-                  SDL_RenderCopy(renderer, muted_tex, NULL, &dst);
-                  SDL_DestroyTexture(muted_tex);
-               }
-               SDL_FreeSurface(muted_surface);
-            }
+      /* Draw state label with state-specific color */
+      if (t->cached_state_tex) {
+         SDL_SetTextureColorMod(t->cached_state_tex, state_color.r, state_color.g, state_color.b);
+         SDL_Rect dst = { x, label_y, t->cached_state_w, t->cached_state_h };
+         SDL_RenderCopy(renderer, t->cached_state_tex, NULL, &dst);
+      }
+
+      /* Draw [MUTED] indicator in red (cached, rarely changes) */
+      if (t->mic_muted) {
+         if (!t->cached_muted_tex) {
+            t->cached_muted_tex = build_white_tex(renderer, t->label_font, "[MUTED]",
+                                                  &t->cached_muted_w, &t->cached_muted_h);
+         }
+         if (t->cached_muted_tex) {
+            SDL_SetTextureColorMod(t->cached_muted_tex, COLOR_ERROR_R, COLOR_ERROR_G,
+                                   COLOR_ERROR_B);
+            int muted_x = x + t->cached_state_w + 8;
+            SDL_Rect dst = { muted_x, label_y, t->cached_muted_w, t->cached_muted_h };
+            SDL_RenderCopy(renderer, t->cached_muted_tex, NULL, &dst);
          }
       }
    }
 
-   /* Render date/time top-right */
+   /* Render date/time top-right (cached, invalidates once per minute) */
    if (t->label_font) {
       time_t now = time(NULL);
       struct tm *tm_info = localtime(&now);
-      char time_str[40];
-      if (t->time_24h)
-         strftime(time_str, sizeof(time_str), "%a %b %-d  %H:%M", tm_info);
-      else
-         strftime(time_str, sizeof(time_str), "%a %b %-d  %-I:%M %p", tm_info);
 
-      SDL_Color time_color = { txt1.r, txt1.g, txt1.b, 255 };
-      SDL_Surface *time_surface = TTF_RenderUTF8_Blended(t->label_font, time_str, time_color);
-      if (time_surface) {
-         int time_x = t->panel_x + t->panel_w - t->padding - time_surface->w;
-         SDL_Texture *time_tex = SDL_CreateTextureFromSurface(renderer, time_surface);
-         if (time_tex) {
-            SDL_Rect dst = { time_x, label_y, time_surface->w, time_surface->h };
-            SDL_RenderCopy(renderer, time_tex, NULL, &dst);
-            SDL_DestroyTexture(time_tex);
-         }
+      /* Rebuild time texture only when minute changes */
+      if (!t->cached_time_tex || t->cached_time_min != tm_info->tm_min) {
+         if (t->cached_time_tex)
+            SDL_DestroyTexture(t->cached_time_tex);
+         char time_str[40];
+         if (t->time_24h)
+            strftime(time_str, sizeof(time_str), "%a %b %-d  %H:%M", tm_info);
+         else
+            strftime(time_str, sizeof(time_str), "%a %b %-d  %-I:%M %p", tm_info);
+         t->cached_time_tex = build_white_tex(renderer, t->label_font, time_str, &t->cached_time_w,
+                                              &t->cached_time_h);
+         t->cached_time_min = tm_info->tm_min;
+      }
+
+      if (t->cached_time_tex) {
+         SDL_SetTextureColorMod(t->cached_time_tex, txt1.r, txt1.g, txt1.b);
+         int time_x = t->panel_x + t->panel_w - t->padding - t->cached_time_w;
+         SDL_Rect dst = { time_x, label_y, t->cached_time_w, t->cached_time_h };
+         SDL_RenderCopy(renderer, t->cached_time_tex, NULL, &dst);
 
          /* WiFi signal indicator (4 bars to the left of date/time) */
          if (now != t->last_wifi_poll) {
@@ -569,7 +594,7 @@ void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_stat
             int bar_w = 4;
             int wifi_total_w = 4 * bar_w + 3 * bar_gap;
             int wifi_x = time_x - wifi_total_w - 12;
-            int wifi_base_y = label_y + time_surface->h - 2;
+            int wifi_base_y = label_y + t->cached_time_h - 2;
             wifi_left_edge = wifi_x;
 
             for (int b = 0; b < 4; b++) {
@@ -604,7 +629,7 @@ void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_stat
                   SDL_SetTextureColorMod(t->music_icon_tex, txt1.r, txt1.g, txt1.b);
                }
                int icon_x = wifi_left_edge - t->music_icon_w - 14;
-               int icon_y = label_y + (time_surface->h - t->music_icon_h) / 2;
+               int icon_y = label_y + (t->cached_time_h - t->music_icon_h) / 2;
                SDL_Rect mdst = { icon_x, icon_y, t->music_icon_w, t->music_icon_h };
                SDL_RenderCopy(renderer, t->music_icon_tex, NULL, &mdst);
 
@@ -615,28 +640,33 @@ void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_stat
                t->music_btn_y = icon_y + t->music_icon_h / 2 - t->music_btn_h / 2;
             }
          }
-
-         SDL_FreeSurface(time_surface);
       }
    }
 
-   /* Render status detail below state label (tool calls, thinking info) */
+   /* Render status detail below state label (cached, invalidates on text change) */
    int detail_height = 0;
    if (t->label_font && t->status_detail[0]) {
-      SDL_Color detail_color = { txt1.r, txt1.g, txt1.b, 255 };
-      SDL_Surface *detail_surface = TTF_RenderUTF8_Blended(t->label_font, t->status_detail,
-                                                           detail_color);
-      if (detail_surface) {
-         SDL_Texture *detail_tex = SDL_CreateTextureFromSurface(renderer, detail_surface);
-         if (detail_tex) {
-            int detail_y = label_y + LABEL_HEIGHT - 4;
-            SDL_Rect dst = { x, detail_y, detail_surface->w, detail_surface->h };
-            SDL_RenderCopy(renderer, detail_tex, NULL, &dst);
-            SDL_DestroyTexture(detail_tex);
-            detail_height = detail_surface->h + 4;
-         }
-         SDL_FreeSurface(detail_surface);
+      /* Rebuild detail texture only when text changes */
+      if (!t->cached_detail_tex || strcmp(t->cached_detail_str, t->status_detail) != 0) {
+         if (t->cached_detail_tex)
+            SDL_DestroyTexture(t->cached_detail_tex);
+         t->cached_detail_tex = build_white_tex(renderer, t->label_font, t->status_detail,
+                                                &t->cached_detail_w, &t->cached_detail_h);
+         strncpy(t->cached_detail_str, t->status_detail, sizeof(t->cached_detail_str) - 1);
+         t->cached_detail_str[sizeof(t->cached_detail_str) - 1] = '\0';
       }
+      if (t->cached_detail_tex) {
+         SDL_SetTextureColorMod(t->cached_detail_tex, txt1.r, txt1.g, txt1.b);
+         int detail_y = label_y + LABEL_HEIGHT - 4;
+         SDL_Rect dst = { x, detail_y, t->cached_detail_w, t->cached_detail_h };
+         SDL_RenderCopy(renderer, t->cached_detail_tex, NULL, &dst);
+         detail_height = t->cached_detail_h + 4;
+      }
+   } else if (!t->status_detail[0] && t->cached_detail_tex) {
+      /* Detail cleared — free the cached texture */
+      SDL_DestroyTexture(t->cached_detail_tex);
+      t->cached_detail_tex = NULL;
+      t->cached_detail_str[0] = '\0';
    }
 
    /* Transcript content area (below label + optional detail, above bottom padding) */

@@ -21,13 +21,32 @@
 
 #include "audio/ring_buffer.h"
 
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
 
 #include "logging_common.h"
 
+/**
+ * @brief Ring buffer internal structure
+ */
+struct ring_buffer {
+   char *buffer;          /**< Buffer storage */
+   size_t capacity;       /**< Total buffer size in bytes */
+   size_t head;           /**< Write position (producer) */
+   size_t tail;           /**< Read position (consumer) */
+   size_t count;          /**< Current bytes in buffer */
+   pthread_mutex_t mutex; /**< Mutex for thread safety */
+   pthread_cond_t cond;   /**< Condition variable to signal data available */
+};
+
 ring_buffer_t *ring_buffer_create(size_t capacity) {
+   if (capacity == 0) {
+      DAWN_LOG_ERROR("Ring buffer capacity must be > 0");
+      return NULL;
+   }
+
    ring_buffer_t *rb = (ring_buffer_t *)calloc(1, sizeof(ring_buffer_t));
    if (!rb) {
       DAWN_LOG_ERROR("Failed to allocate ring buffer structure");
