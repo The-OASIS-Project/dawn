@@ -31,9 +31,9 @@
 #include "config/dawn_config.h"
 #include "logging.h"
 #include "tools/search_summarizer.h"
-#include "tools/string_utils.h"
 #include "tools/tool_registry.h"
 #include "tools/web_search.h"
+#include "utils/string_utils.h"
 
 /* ========== Constants ========== */
 

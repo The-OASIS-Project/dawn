@@ -58,7 +58,6 @@
 #include "tools/hud_discovery.h"
 #include "tools/search_summarizer.h"
 #include "tools/smartthings_service.h"
-#include "tools/string_utils.h"
 #include "tools/tool_registry.h"
 #include "tools/url_fetcher.h"
 #include "tools/weather_service.h"
@@ -66,6 +65,7 @@
 #include "tts/text_to_speech.h"
 #include "tts/tts_preprocessing.h"
 #include "ui/metrics.h"
+#include "utils/string_utils.h"
 #ifdef ENABLE_WEBUI
 #include "webui/webui_server.h"
 #endif

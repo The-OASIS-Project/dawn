@@ -39,8 +39,8 @@
 #include "llm/llm_tools.h"
 #include "logging.h"
 #include "tools/curl_buffer.h"
-#include "tools/string_utils.h"
 #include "tts/text_to_speech.h"
+#include "utils/string_utils.h"
 #ifdef ENABLE_WEBUI
 #include "webui/webui_server.h"
 #endif

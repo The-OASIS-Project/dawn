@@ -41,7 +41,7 @@
 #include "config/dawn_config.h"
 #include "logging.h"
 #include "tools/curl_buffer.h"
-#include "tools/string_utils.h"
+#include "utils/string_utils.h"
 
 // =============================================================================
 // Module State (thread-safe with mutex protection)

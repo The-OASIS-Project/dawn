@@ -33,8 +33,8 @@
 
 #include "llm/llm_tools.h"
 #include "logging.h"
-#include "tools/string_utils.h"
 #include "tools/tool_registry.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Default Values

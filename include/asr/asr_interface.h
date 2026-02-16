@@ -26,6 +26,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "asr/asr_common.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -54,34 +56,12 @@ extern "C" {
  */
 
 /**
- * @brief Return codes for ASR operations
- */
-#define ASR_SUCCESS 0           /**< Operation completed successfully */
-#define ASR_FAILURE 1           /**< Generic failure */
-#define ASR_ERR_INVALID_PARAM 2 /**< Invalid parameter provided */
-#define ASR_ERR_MODEL_LOAD 3    /**< Failed to load model */
-#define ASR_ERR_OUT_OF_MEMORY 4 /**< Memory allocation failed */
-#define ASR_ERR_PROCESSING 5    /**< ASR processing error */
-
-/**
  * @brief ASR engine types
  */
 typedef enum {
    ASR_ENGINE_VOSK = 0,   /**< Vosk ASR engine (Kaldi-based, supports streaming) */
    ASR_ENGINE_WHISPER = 1 /**< Whisper ASR engine (OpenAI, batch processing) */
 } asr_engine_type_t;
-
-/**
- * @brief ASR result structure
- *
- * Contains transcription text and metadata from ASR processing.
- */
-typedef struct {
-   char *text;             /**< Transcribed text (caller must free) */
-   float confidence;       /**< Confidence score (0.0-1.0, or -1.0 if unavailable) */
-   int is_partial;         /**< 1 if partial result, 0 if final */
-   double processing_time; /**< Processing time in milliseconds */
-} asr_result_t;
 
 /**
  * @brief Opaque ASR context handle

@@ -32,7 +32,7 @@
 #include <string.h>
 
 #include "logging.h"
-#include "tools/string_utils.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Constants

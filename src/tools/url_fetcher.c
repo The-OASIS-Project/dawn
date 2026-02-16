@@ -39,7 +39,7 @@
 #include "logging.h"
 #include "tools/curl_buffer.h"
 #include "tools/html_parser.h"
-#include "tools/string_utils.h"
+#include "utils/string_utils.h"
 
 // =============================================================================
 // Constants

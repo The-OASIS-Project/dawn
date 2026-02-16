@@ -66,8 +66,8 @@ include_directories(common/include)
 # =============================================================================
 # Common Library (shared between daemon and satellites)
 # =============================================================================
-# Must be added early so that dawn_common target is available for linking
-add_subdirectory(common)
+# Added after whisper.cpp so that dawn_common_asr can find the whisper target.
+# See the add_subdirectory(common) call after the whisper.cpp block below.
 
 # HTTP connections (AI and such)
 find_package(CURL REQUIRED)
@@ -369,6 +369,9 @@ else()
     message(STATUS "Skipping Whisper build (Vosk enabled)")
 endif()
 
+# Common library added here (after whisper.cpp) so dawn_common_asr can link whisper
+add_subdirectory(common)
+
 link_directories(${CMAKE_SOURCE_DIR})
 
 # Base source files (always compiled)
@@ -390,7 +393,6 @@ set(DAWN_SOURCES
 
     # ASR subsystem
     src/asr/asr_interface.c
-    src/asr/vad_silero.c
     src/asr/chunking_manager.c
 
     # LLM subsystem
@@ -404,7 +406,6 @@ set(DAWN_SOURCES
     src/llm/llm_context.c
     src/llm/llm_local_provider.c
     src/llm/sse_parser.c
-    src/llm/sentence_buffer.c
 
     # TTS subsystem
     src/tts/text_to_speech.cpp
@@ -412,7 +413,6 @@ set(DAWN_SOURCES
 
     # Audio subsystem
     src/audio/audio_capture_thread.c
-    src/audio/ring_buffer.c
     src/audio/audio_decoder.c
     src/audio/flac_decoder.c
     src/audio/flac_playback.c
@@ -441,7 +441,6 @@ set(DAWN_SOURCES
     src/tools/tfidf_summarizer.c
     src/tools/url_fetcher.c
     src/tools/html_parser.c
-    src/tools/string_utils.c
     src/tools/toml.c
 
     # Config subsystem
@@ -529,8 +528,8 @@ if(ENABLE_VOSK)
     add_definitions(-DENABLE_VOSK)
     message(STATUS "ASR Engine: Vosk")
 else()
-    list(APPEND DAWN_SOURCES src/asr/asr_whisper.c)
-    message(STATUS "ASR Engine: Whisper")
+    # Whisper ASR comes from dawn_common_asr (linked below)
+    message(STATUS "ASR Engine: Whisper (via dawn_common_asr)")
 endif()
 
 # Conditionally add MP3 decoder source file
@@ -558,6 +557,8 @@ endif()
 
 target_link_libraries(dawn
                       dawn_common
+                      dawn_common_vad
+                      dawn_common_asr
                       piper
                       piper_phonemize
                       espeak-ng

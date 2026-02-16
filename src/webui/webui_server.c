@@ -65,9 +65,9 @@
 #include "logging.h"
 #include "state_machine.h"
 #include "tools/smartthings_service.h"
-#include "tools/string_utils.h"
 #include "tts/tts_preprocessing.h"
 #include "ui/metrics.h"
+#include "utils/string_utils.h"
 #include "version.h"
 #include "webui/webui_music.h"
 

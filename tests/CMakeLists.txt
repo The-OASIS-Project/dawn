@@ -32,7 +32,6 @@ target_link_libraries(test_sse_parser
 # Test: Sentence Buffer
 add_executable(test_sentence_buffer
                test_sentence_buffer.c
-               ${SRC_ROOT}/src/llm/sentence_buffer.c
 )
 
 target_link_libraries(test_sentence_buffer
@@ -46,7 +45,6 @@ add_executable(test_streaming
                ${SRC_ROOT}/src/llm/llm_openai.c
                ${SRC_ROOT}/src/llm/llm_claude.c
                ${SRC_ROOT}/src/llm/llm_streaming.c
-               ${SRC_ROOT}/src/llm/sentence_buffer.c
                ${SRC_ROOT}/src/llm/sse_parser.c
                ${SRC_ROOT}/src/config/config_parser.c
                ${SRC_ROOT}/src/config/config_defaults.c
@@ -67,14 +65,13 @@ add_executable(asr_benchmark
                asr_benchmark.c
                ${SRC_ROOT}/src/asr/asr_interface.c
                ${SRC_ROOT}/src/asr/asr_vosk.c
-               ${SRC_ROOT}/src/asr/asr_whisper.c
 )
 
 target_include_directories(asr_benchmark PRIVATE
                            ${SRC_ROOT}/whisper.cpp/include)
 
 target_link_libraries(asr_benchmark
-                      dawn_common
+                      dawn_common_asr
                       vosk
                       whisper
                       sndfile
@@ -94,13 +91,12 @@ target_link_libraries(test_vad_models onnxruntime m)
 # Test: VAD API Unit Test
 add_executable(test_vad_api
                test_vad_api.c
-               ${SRC_ROOT}/src/asr/vad_silero.c
 )
 
 target_include_directories(test_vad_api PRIVATE /usr/local/include/onnxruntime)
 
 target_link_libraries(test_vad_api
-                      dawn_common
+                      dawn_common_vad
                       onnxruntime
                       m
                       ${JSONC_LIBRARIES})
@@ -110,7 +106,6 @@ target_link_libraries(test_vad_api
 add_executable(test_asr_concurrent
                test_asr_concurrent.c
                ${SRC_ROOT}/src/asr/asr_interface.c
-               ${SRC_ROOT}/src/asr/asr_whisper.c
                ${SRC_ROOT}/src/ui/metrics.c
 )
 
@@ -118,7 +113,7 @@ target_include_directories(test_asr_concurrent PRIVATE
                            ${SRC_ROOT}/whisper.cpp/include)
 
 target_link_libraries(test_asr_concurrent
-                      dawn_common
+                      dawn_common_asr
                       whisper
                       pthread
                       m
@@ -146,7 +141,6 @@ add_executable(test_summarizer_quality
                ${SRC_ROOT}/src/tools/tfidf_summarizer.c
                ${SRC_ROOT}/src/tools/url_fetcher.c
                ${SRC_ROOT}/src/tools/html_parser.c
-               ${SRC_ROOT}/src/tools/string_utils.c
                ${SRC_ROOT}/src/config/config_parser.c
                ${SRC_ROOT}/src/config/config_defaults.c
                ${SRC_ROOT}/src/config/config_env.c

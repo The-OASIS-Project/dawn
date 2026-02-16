@@ -36,6 +36,7 @@
 #include "asr/asr_whisper.h"
 #endif
 #include "logging.h"
+#include "ui/metrics.h"
 
 // ============================================================================
 // Audio Normalization for ASR
@@ -385,22 +386,27 @@ static float normalize_audio_for_asr(norm_state_t *state,
    return avg_gain;
 }
 
+/* Timing callback adapter: common lib signature -> daemon metrics */
+#ifndef ENABLE_VOSK
+static void whisper_timing_callback(double processing_time_ms, double rtf, void *user_data) {
+   (void)user_data;
+   metrics_record_asr_timing(processing_time_ms, rtf);
+}
+#endif
+
 /**
  * @brief ASR context structure
  *
- * Holds engine-specific context and function pointers for polymorphic dispatch.
+ * Engine selection is compile-time (#ifdef ENABLE_VOSK), so dispatch
+ * is direct calls rather than function pointers.
  */
 struct asr_context {
    asr_engine_type_t engine_type;
-   void *engine_context;  // Opaque pointer to engine-specific context
-
-   // Function pointers for polymorphic dispatch
-   asr_result_t *(*process_partial)(void *ctx, const int16_t *audio, size_t samples);
-   asr_result_t *(*finalize)(void *ctx);
-   int (*reset)(void *ctx);
-   void (*cleanup)(void *ctx);
-
-   // Per-context normalization state (thread-safe for multi-client)
+#ifdef ENABLE_VOSK
+   void *engine_context;
+#else
+   whisper_asr_context_t *whisper_ctx;
+#endif
    norm_state_t norm_state;
 };
 
@@ -429,26 +435,26 @@ asr_context_t *asr_init(asr_engine_type_t engine_type, const char *model_path, i
             free(ctx);
             return NULL;
          }
-         ctx->process_partial = asr_vosk_process_partial;
-         ctx->finalize = asr_vosk_finalize;
-         ctx->reset = asr_vosk_reset;
-         ctx->cleanup = asr_vosk_cleanup;
          break;
 #else
-      case ASR_ENGINE_WHISPER:
+      case ASR_ENGINE_WHISPER: {
          LOG_INFO("ASR: Initializing Whisper engine (model: %s, sample_rate: %d)", model_path,
                   sample_rate);
-         ctx->engine_context = asr_whisper_init(model_path, sample_rate);
-         if (!ctx->engine_context) {
+         asr_whisper_config_t wcfg = asr_whisper_default_config();
+         wcfg.model_path = model_path;
+         wcfg.sample_rate = sample_rate;
+#ifdef HAVE_CUDA_GPU
+         wcfg.use_gpu = 1;
+#endif
+         ctx->whisper_ctx = asr_whisper_init(&wcfg);
+         if (!ctx->whisper_ctx) {
             LOG_ERROR("ASR: Whisper initialization failed");
             free(ctx);
             return NULL;
          }
-         ctx->process_partial = asr_whisper_process_partial;
-         ctx->finalize = asr_whisper_finalize;
-         ctx->reset = asr_whisper_reset;
-         ctx->cleanup = asr_whisper_cleanup;
+         asr_whisper_set_timing_callback(ctx->whisper_ctx, whisper_timing_callback, NULL);
          break;
+      }
 #endif
 
       default:
@@ -491,7 +497,11 @@ asr_result_t *asr_process_partial(asr_context_t *ctx,
    // Record post-normalization audio (if recording enabled)
    asr_record_post_samples(normalized_audio, num_samples);
 
-   return ctx->process_partial(ctx->engine_context, normalized_audio, num_samples);
+#ifdef ENABLE_VOSK
+   return asr_vosk_process_partial(ctx->engine_context, normalized_audio, num_samples);
+#else
+   return asr_whisper_process(ctx->whisper_ctx, normalized_audio, num_samples);
+#endif
 }
 
 asr_result_t *asr_finalize(asr_context_t *ctx) {
@@ -500,7 +510,11 @@ asr_result_t *asr_finalize(asr_context_t *ctx) {
       return NULL;
    }
 
-   asr_result_t *result = ctx->finalize(ctx->engine_context);
+#ifdef ENABLE_VOSK
+   asr_result_t *result = asr_vosk_finalize(ctx->engine_context);
+#else
+   asr_result_t *result = asr_whisper_finalize(ctx->whisper_ctx);
+#endif
 
    // Stop recording after finalize to create complete per-utterance WAV files
    if (asr_is_recording()) {
@@ -530,7 +544,11 @@ int asr_reset(asr_context_t *ctx) {
    ctx->norm_state.current_gain = 1.0f;
    ctx->norm_state.envelope = 0.0f;
 
-   return ctx->reset(ctx->engine_context);
+#ifdef ENABLE_VOSK
+   return asr_vosk_reset(ctx->engine_context);
+#else
+   return asr_whisper_reset(ctx->whisper_ctx);
+#endif
 }
 
 void asr_result_free(asr_result_t *result) {
@@ -552,9 +570,15 @@ void asr_cleanup(asr_context_t *ctx) {
 
    LOG_INFO("ASR: Cleaning up %s engine", asr_engine_name(ctx->engine_type));
 
-   if (ctx->cleanup && ctx->engine_context) {
-      ctx->cleanup(ctx->engine_context);
+#ifdef ENABLE_VOSK
+   if (ctx->engine_context) {
+      asr_vosk_cleanup(ctx->engine_context);
    }
+#else
+   if (ctx->whisper_ctx) {
+      asr_whisper_cleanup(ctx->whisper_ctx);
+   }
+#endif
 
    free(ctx);
 }

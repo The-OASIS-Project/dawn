@@ -33,10 +33,10 @@
 #include "config/dawn_config.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_interface.h"
-#include "llm/sentence_buffer.h"
 #include "logging.h"
 #include "memory/memory_extraction.h"
 #include "tools/time_utils.h"
+#include "utils/sentence_buffer.h"
 #ifdef ENABLE_WEBUI
 #include "webui/webui_server.h"
 #endif

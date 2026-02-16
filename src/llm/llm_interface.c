@@ -41,11 +41,11 @@
 #include "dawn.h"
 #include "llm/llm_context.h"
 #include "llm/llm_tools.h"
-#include "llm/sentence_buffer.h"
 #include "logging.h"
 #include "tools/curl_buffer.h"
 #include "tts/text_to_speech.h"
 #include "ui/metrics.h"
+#include "utils/sentence_buffer.h"
 
 // Provider implementations - include if compile-time keys exist OR if we might have runtime keys
 // Note: The actual provider files (llm_openai.c, llm_claude.c) are always compiled

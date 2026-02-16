@@ -127,6 +127,12 @@
 #define VAD_SAMPLE_SIZE 512       // Silero VAD requires 512 samples (32ms at 16kHz)
 #define VAD_TTS_DEBOUNCE_COUNT 3  // Consecutive detections required during TTS playback
 
+/* Adapter: common lib VAD callback signature -> daemon metrics function */
+static void vad_metrics_callback(float probability, void *user_data) {
+   (void)user_data;
+   metrics_update_vad_probability(probability);
+}
+
 // VAD thresholds and timing now come from g_config.vad.* and g_config.audio.bargein.*
 // See config/dawn_config.h for the config struct definitions
 
@@ -2075,6 +2081,7 @@ int main(int argc, char *argv[]) {
       if (!vad_ctx) {
          LOG_WARNING("Failed to initialize Silero VAD - proceeding without VAD");
       } else {
+         vad_silero_set_probability_callback(vad_ctx, vad_metrics_callback, NULL);
          LOG_INFO("Silero VAD initialized successfully (opset15 model, 0.311ms inference)");
       }
    } else {

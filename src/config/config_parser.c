@@ -34,8 +34,8 @@
 
 #include "core/worker_pool.h"
 #include "logging.h"
-#include "tools/string_utils.h"
 #include "tools/toml.h"
+#include "utils/string_utils.h"
 
 #define SUCCESS 0
 #define FAILURE 1

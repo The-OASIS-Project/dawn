@@ -36,8 +36,8 @@
 #include "core/device_types.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
-#include "tools/string_utils.h"
 #include "tools/toml.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Module State

@@ -34,8 +34,8 @@
 #include "core/ocp_helpers.h"
 #include "logging.h"
 #include "mosquitto_comms.h"
-#include "tools/string_utils.h"
 #include "tools/tool_registry.h"
+#include "utils/string_utils.h"
 
 /* Default timeout for sync_wait commands (e.g., viewing) */
 #define DEFAULT_SYNC_TIMEOUT_MS 10000

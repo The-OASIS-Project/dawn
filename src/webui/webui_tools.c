@@ -33,7 +33,7 @@
 #include "llm/llm_command_parser.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
-#include "tools/string_utils.h"
+#include "utils/string_utils.h"
 #include "webui/webui_internal.h"
 
 void handle_get_tools_config(ws_connection_t *conn) {

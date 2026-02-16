@@ -49,8 +49,8 @@
 #include "logging.h"
 #include "mosquitto_comms.h"
 #include "tools/hud_discovery.h"
-#include "tools/string_utils.h"
 #include "tools/tool_registry.h"
+#include "utils/string_utils.h"
 #include "webui/webui_server.h"
 
 /* Forward declarations for utility functions from mosquitto_comms.c */

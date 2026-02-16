@@ -13,7 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../vad_silero.h"
+#include "asr/vad_silero.h"
 
 #define VAD_SAMPLE_SIZE 512
 #define TEST_PASS "\033[32m[PASS]\033[0m"
