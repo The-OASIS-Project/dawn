@@ -33,7 +33,14 @@
 #include <stdint.h>
 #include <time.h>
 
+#ifdef ENABLE_AUTH
 #include "auth/auth_crypto.h"
+#else
+/* When auth is disabled, define constants directly so structs compile
+ * without libsodium. Values match auth_crypto.h definitions. */
+#define AUTH_HASH_LEN 128 /* crypto_pwhash_STRBYTES */
+#define AUTH_TOKEN_LEN 65 /* 32 bytes hex + null */
+#endif
 
 /**
  * @brief Default database path

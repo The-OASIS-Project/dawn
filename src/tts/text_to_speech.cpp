@@ -44,10 +44,7 @@ static time_t g_last_resample_warning = 0;
 // releasing mutex and completing audio write.
 static std::atomic<uint32_t> g_tts_discard_sequence{ 0 };
 #endif
-#ifdef ENABLE_DAP
-#include "network/dawn_wav_utils.h"
-#else
-// WAV header for local TTS use (when network support is disabled)
+// WAV header for TTS output
 typedef struct __attribute__((packed)) {
    char riff_header[4];
    uint32_t wav_size;
@@ -63,7 +60,6 @@ typedef struct __attribute__((packed)) {
    char data_header[4];
    uint32_t data_bytes;
 } WAVHeader;
-#endif
 #include "text_to_command_nuevo.h"
 #include "tts/piper.hpp"
 #include "tts/tts_preprocessing.h"
@@ -972,54 +968,6 @@ int text_to_speech_to_wav(const char *text, uint8_t **wav_data_out, size_t *wav_
 
    return 0;
 }
-
-#ifdef ENABLE_DAP
-uint8_t *error_to_wav(const char *error_message, size_t *tts_size_out) {
-   uint8_t *tts_wav_data = NULL;
-   size_t tts_wav_size = 0;
-
-   LOG_INFO("Generating error TTS: \"%s\"", error_message);
-
-   int tts_result = text_to_speech_to_wav(error_message, &tts_wav_data, &tts_wav_size);
-   if (tts_result == 0 && tts_wav_data && tts_wav_size > 0) {
-      // Apply same size/truncation logic as normal TTS
-      if (!check_response_size_limit(tts_wav_size)) {
-         uint8_t *truncated_data = NULL;
-         size_t truncated_size = 0;
-
-         if (truncate_wav_response(tts_wav_data, tts_wav_size, &truncated_data, &truncated_size) ==
-             0) {
-            if (truncated_data != NULL) {
-               // Actual truncation occurred
-               free(tts_wav_data);
-               *tts_size_out = truncated_size;
-               return truncated_data;
-            }
-            // Edge case: truncation succeeded but returned NULL
-            // This shouldn't happen since we verified it needs truncation
-            LOG_ERROR("Truncation logic error: succeeded but no data returned");
-         } else {
-            // Truncation failed - free and return NULL
-            free(tts_wav_data);
-            LOG_ERROR("Failed to truncate error TTS");
-            *tts_size_out = 0;
-            return NULL;
-         }
-      } else {
-         // Fits in buffer, return original
-         *tts_size_out = tts_wav_size;
-         return tts_wav_data;
-      }
-   }
-   if (tts_wav_data != NULL) {
-      free(tts_wav_data);
-   }
-
-   LOG_ERROR("Failed to generate error TTS WAV");
-   *tts_size_out = 0;
-   return NULL;
-}
-#endif /* ENABLE_DAP */
 
 /**
  * @brief Wait for TTS queue to empty and playback to complete

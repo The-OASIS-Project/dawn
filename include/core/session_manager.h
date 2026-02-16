@@ -862,7 +862,7 @@ static inline void session_command_context_cleanup(session_t **ctx) {
 /* =============================================================================
  * Stub Implementations for Local-Only Mode (no network features)
  *
- * When both ENABLE_DAP and ENABLE_WEBUI are disabled, session_manager.c
+ * When ENABLE_WEBUI is disabled, session_manager.c
  * is not compiled. These inline stubs provide the minimal API needed by
  * code that calls session functions unconditionally.
  * ============================================================================= */

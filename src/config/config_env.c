@@ -212,11 +212,7 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
    ENV_STRING("SMARTTHINGS_CLIENT_SECRET", secrets->smartthings_client_secret);
 
    /* [network] */
-   ENV_BOOL("DAWN_NETWORK_ENABLED", config->network.enabled);
-   ENV_STRING("DAWN_NETWORK_HOST", config->network.host);
-   ENV_INT("DAWN_NETWORK_PORT", config->network.port);
    ENV_INT("DAWN_NETWORK_WORKERS", config->network.workers);
-   ENV_INT("DAWN_NETWORK_SOCKET_TIMEOUT_SEC", config->network.socket_timeout_sec);
    ENV_INT("DAWN_NETWORK_SESSION_TIMEOUT_SEC", config->network.session_timeout_sec);
    ENV_INT("DAWN_NETWORK_LLM_TIMEOUT_MS", config->network.llm_timeout_ms);
 
@@ -332,11 +328,7 @@ void config_dump(const dawn_config_t *config) {
    printf("  port = %d\n", config->mqtt.port);
 
    printf("\n[network]\n");
-   printf("  enabled = %s\n", config->network.enabled ? "true" : "false");
-   printf("  host = \"%s\"\n", config->network.host);
-   printf("  port = %d\n", config->network.port);
    printf("  workers = %d\n", config->network.workers);
-   printf("  socket_timeout_sec = %d\n", config->network.socket_timeout_sec);
    printf("  session_timeout_sec = %d\n", config->network.session_timeout_sec);
    printf("  llm_timeout_ms = %d\n", config->network.llm_timeout_ms);
 
@@ -742,23 +734,9 @@ void config_dump_settings(const dawn_config_t *config,
 
    /* [network] */
    printf("[network]\n");
-   PRINT_SETTING_BOOL("enabled", config->network.enabled, "DAWN_NETWORK_ENABLED",
-                      detect_source_bool(config->network.enabled, defaults.network.enabled,
-                                         "DAWN_NETWORK_ENABLED"));
-   PRINT_SETTING_STR("host", config->network.host, "DAWN_NETWORK_HOST",
-                     detect_source_str(config->network.host, defaults.network.host,
-                                       "DAWN_NETWORK_HOST"));
-   PRINT_SETTING_INT("port", config->network.port, "DAWN_NETWORK_PORT",
-                     detect_source_int(config->network.port, defaults.network.port,
-                                       "DAWN_NETWORK_PORT"));
    PRINT_SETTING_INT("workers", config->network.workers, "DAWN_NETWORK_WORKERS",
                      detect_source_int(config->network.workers, defaults.network.workers,
                                        "DAWN_NETWORK_WORKERS"));
-   PRINT_SETTING_INT("socket_timeout_sec", config->network.socket_timeout_sec,
-                     "DAWN_NETWORK_SOCKET_TIMEOUT_SEC",
-                     detect_source_int(config->network.socket_timeout_sec,
-                                       defaults.network.socket_timeout_sec,
-                                       "DAWN_NETWORK_SOCKET_TIMEOUT_SEC"));
    PRINT_SETTING_INT("session_timeout_sec", config->network.session_timeout_sec,
                      "DAWN_NETWORK_SESSION_TIMEOUT_SEC",
                      detect_source_int(config->network.session_timeout_sec,
@@ -907,9 +885,6 @@ void config_dump_toml(const dawn_config_t *config) {
    printf("port = %d\n", config->mqtt.port);
 
    printf("\n[network]\n");
-   printf("enabled = %s\n", config->network.enabled ? "true" : "false");
-   printf("host = \"%s\"\n", config->network.host);
-   printf("port = %d\n", config->network.port);
    printf("workers = %d\n", config->network.workers);
 
    printf("\n[tui]\n");
@@ -1163,12 +1138,7 @@ json_object *config_to_json(const dawn_config_t *config) {
 
    /* [network] */
    json_object *network = json_object_new_object();
-   json_object_object_add(network, "enabled", json_object_new_boolean(config->network.enabled));
-   json_object_object_add(network, "host", json_object_new_string(config->network.host));
-   json_object_object_add(network, "port", json_object_new_int(config->network.port));
    json_object_object_add(network, "workers", json_object_new_int(config->network.workers));
-   json_object_object_add(network, "socket_timeout_sec",
-                          json_object_new_int(config->network.socket_timeout_sec));
    json_object_object_add(network, "session_timeout_sec",
                           json_object_new_int(config->network.session_timeout_sec));
    json_object_object_add(network, "llm_timeout_ms",
@@ -1584,11 +1554,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "port = %d\n", config->mqtt.port);
 
    fprintf(fp, "\n[network]\n");
-   fprintf(fp, "enabled = %s\n", config->network.enabled ? "true" : "false");
-   fprintf(fp, "host = \"%s\"\n", config->network.host);
-   fprintf(fp, "port = %d\n", config->network.port);
    fprintf(fp, "workers = %d\n", config->network.workers);
-   fprintf(fp, "socket_timeout_sec = %d\n", config->network.socket_timeout_sec);
    fprintf(fp, "session_timeout_sec = %d\n", config->network.session_timeout_sec);
    fprintf(fp, "llm_timeout_ms = %d\n", config->network.llm_timeout_ms);
 

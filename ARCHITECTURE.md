@@ -304,82 +304,15 @@ TTS is protected by a global mutex (`tts_mutex`) to prevent concurrent access fr
 - Network server thread (remote audio)
 - Streaming LLM sentence buffer
 
-### 5. Network Subsystem (`src/network/`, `include/network/`) — DEPRECATED
+### 5. DAP2 Satellite Subsystem (`dawn_satellite/`, `common/`, `src/webui/webui_satellite.c`)
 
-**Purpose**: Legacy DAP1 network audio server for ESP32 clients
-
-**Status**: **DEPRECATED** — DAP1 is eliminated. All satellite communication (including ESP32 Tier 2) now uses WebSocket via the WebUI server. See [Section 5b: DAP2 Satellite Subsystem](#5b-dap2-satellite-subsystem) for the unified replacement. The code in `src/network/` and `remote_dawn/` is retained for historical reference only.
-
-#### Key Components
-
-- **dawn_server.c/h**: Network audio server
-  - TCP server listening on configurable port (default: 8080)
-  - Implements Dawn Audio Protocol (DAP v1.1)
-  - Single client at a time (blocks main loop during processing)
-  - Handles handshake, data reception, ACK/NACK, retries
-
-- **dawn_network_audio.c/h**: Network audio processing
-  - Extracts PCM data from received WAV files
-  - Processes audio through ASR → LLM → TTS pipeline
-  - Generates WAV response for client playback
-
-- **dawn_wav_utils.c/h**: WAV file utilities
-  - WAV header parsing and generation
-  - Format validation
-  - PCM data extraction
-
-#### Dawn Audio Protocol (DAP)
-
-**Version**: 1.1
-**Type**: Binary protocol with reliability features
-
-**Packet Structure**:
-```
-┌────────────┬─────────────┬──────────────┬───────────┬─────────────┐
-│ Data Length│  Protocol   │ Packet Type  │  Checksum │  Payload    │
-│  (4 bytes) │ Version (1) │     (1)      │ (2 bytes) │ (variable)  │
-└────────────┴─────────────┴──────────────┴───────────┴─────────────┘
-```
-
-**Packet Types**:
-- `HANDSHAKE` (0x01): Connection establishment
-- `DATA` (0x02): Audio data chunk
-- `DATA_END` (0x03): End of audio stream
-- `ACK` (0x04): Acknowledgment
-- `NACK` (0x05): Negative acknowledgment
-- `RETRY` (0x06): Retransmission request
-
-**Reliability Features**:
-- Fletcher-16 checksums for data integrity
-- Sequence numbers for ordered delivery
-- ACK/NACK handshake for each packet
-- Configurable retry logic with exponential backoff
-
-**Critical Requirement**: Client and server MUST use identical `PACKET_MAX_SIZE` (default: 8192 bytes)
-
-#### Data Flow (Network Client)
-
-```
-ESP32 Client → TCP Connection → Handshake → Audio Stream (DAP packets)
-                                                    ↓
-                                            Server Validates
-                                                    ↓
-                                            ASR → LLM → TTS
-                                                    ↓
-                                            WAV Response → ESP32
-                                                    ↓
-                                            ESP32 Playback
-```
-
-### 5b. DAP2 Satellite Subsystem (`dawn_satellite/`, `common/`, `src/webui/webui_satellite.c`)
-
-**Purpose**: Text-first WebSocket protocol for Tier 1 satellite devices (Raspberry Pi 4+)
+**Purpose**: WebSocket protocol for satellite devices (Raspberry Pi Tier 1, ESP32 Tier 2)
 
 **Design Documents**: [DAP2_DESIGN.md](docs/DAP2_DESIGN.md) | [DAP2_SATELLITE.md](docs/DAP2_SATELLITE.md)
 
-#### Architecture: **Local ASR/TTS + Remote LLM**
+#### Architecture: **Local ASR/TTS + Remote LLM** (Tier 1)
 
-Unlike DAP1 (which streams raw audio to the daemon), DAP2 satellites handle speech recognition and text-to-speech locally and send only text to the daemon over WebSocket.
+DAP2 Tier 1 satellites handle speech recognition and text-to-speech locally and send only text to the daemon over WebSocket. Tier 2 satellites stream raw audio to the daemon for server-side processing.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -1096,14 +1029,6 @@ D.A.W.N. uses a **minimal threading model** for simplicity on embedded systems:
 - **TTS Mutex** (`tts_mutex`): Protects TTS engine from concurrent access
 - **No locks in main loop**: State machine is single-threaded
 
-### Planned Improvements (Multi-Client Architecture)
-
-See `remote_dawn/dawn_multi_client_architecture.md` for details:
-
-- **Worker Thread Pool**: Handle multiple network clients concurrently
-- **Per-Client Session**: Separate conversation history and state
-- **Non-Blocking Main Loop**: Local audio processing not blocked by network clients
-
 ---
 
 ## State Machine
@@ -1152,109 +1077,6 @@ The main application (`src/dawn.c`) implements a state machine for local voice p
 | WAKEWORD_LISTEN   | Timeout / false alarm    | SILENCE           |
 | COMMAND_RECORDING | VAD detects silence      | PROCESSING        |
 | PROCESSING        | Pipeline complete        | SILENCE           |
-
----
-
-## Network Protocol
-
-> **Note**: DAP1 (the original TCP binary protocol for ESP32 clients) has been **eliminated**. All client communication — WebUI browsers, Tier 1 satellites (Raspberry Pi), and Tier 2 satellites (ESP32) — now uses **WebSocket** via the unified WebUI server on port 3000. The DAP1 packet format below is retained for historical reference only. See [DAP2 Satellite Protocol](#dap2-satellite-protocol) for the current design.
-
-<details>
-<summary>DAP1 Packet Format (Historical Reference — Eliminated)</summary>
-
-### Dawn Audio Protocol (DAP) v1.1
-
-**Design Goals**:
-- Reliable audio transmission over potentially lossy networks
-- Simple implementation on resource-constrained ESP32
-- Minimal overhead for embedded systems
-
-### Packet Format
-
-```
-Byte Offset:   0       4        5        6          8      ...
-             ┌────────┬────────┬────────┬──────────┬─────────────┐
-             │ Length │ Ver    │ Type   │ Checksum │  Payload    │
-             │ (4B)   │ (1B)   │ (1B)   │ (2B)     │  (variable) │
-             └────────┴────────┴────────┴──────────┴─────────────┘
-
-Length:   uint32_t - Payload length (little-endian)
-Version:  uint8_t  - Protocol version (0x01)
-Type:     uint8_t  - Packet type (see below)
-Checksum: uint16_t - Fletcher-16 checksum of payload
-Payload:  uint8_t[] - Packet data (length specified in header)
-```
-
-### Packet Types
-
-```c
-#define PACKET_TYPE_HANDSHAKE  0x01  // Connection establishment
-#define PACKET_TYPE_DATA       0x02  // Audio data chunk
-#define PACKET_TYPE_DATA_END   0x03  // End of audio stream
-#define PACKET_TYPE_ACK        0x04  // Acknowledgment
-#define PACKET_TYPE_NACK       0x05  // Negative acknowledgment
-#define PACKET_TYPE_RETRY      0x06  // Retransmission request
-```
-
-### Connection Flow
-
-```
-Client                                Server
-  │                                      │
-  │─────── HANDSHAKE ───────────────────>│
-  │                                      │
-  │<─────────── ACK ─────────────────────│
-  │                                      │
-  │─────── DATA (chunk 1) ──────────────>│
-  │                                      │
-  │<─────────── ACK ─────────────────────│
-  │                                      │
-  │─────── DATA (chunk 2) ──────────────>│
-  │                                      │
-  │<─────────── ACK ─────────────────────│
-  │                                      │
-  │           ... (more chunks)          │
-  │                                      │
-  │─────── DATA_END ────────────────────>│
-  │                                      │
-  │<─────────── ACK ─────────────────────│
-  │                                      │
-  │         (server processing...)       │
-  │                                      │
-  │<────── DATA (response WAV) ──────────│
-  │                                      │
-  │─────────── ACK ─────────────────────>│
-  │                                      │
-  │<────── DATA_END ─────────────────────│
-  │                                      │
-  │─────────── ACK ─────────────────────>│
-  │                                      │
-```
-
-### Error Handling
-
-**Checksum Mismatch**:
-```
-Client → DATA (bad checksum) → Server
-Client ← NACK ← Server
-Client → RETRY (resend) → Server
-Client ← ACK ← Server
-```
-
-**Timeout**:
-- Client waits up to 5 seconds for ACK
-- After 3 failed retries, connection terminates
-- Server waits up to 30 seconds for client data
-
-### Configuration Requirements
-
-**CRITICAL**: Client and server MUST agree on:
-- `PACKET_MAX_SIZE` (default: 8192 bytes)
-- `PROTOCOL_VERSION` (0x01)
-
-Mismatch causes connection failure or data corruption.
-
-</details>
 
 ---
 

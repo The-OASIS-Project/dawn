@@ -117,13 +117,6 @@ This ensures code is formatted before every commit.
 - Manages conversation history
 - Controls application lifecycle
 
-**dawn_server.c/h**: Legacy DAP1 network audio server (DEPRECATED)
-- Retained for historical reference only — all satellite communication now uses WebSocket via `webui_server`
-- See `src/webui/webui_satellite.c` for DAP2 satellite message handling
-
-**dawn_network_audio.c/h**: Legacy network audio processing (DEPRECATED)
-- Superseded by `webui_audio.c` which handles WebSocket binary audio for both WebUI and Tier 2 satellites
-
 **mosquitto_comms.c/h**: MQTT integration
 - Publishes/subscribes to MQTT topics for device control
 - Device callback system for handling commands
@@ -174,7 +167,7 @@ This ensures code is formatted before every commit.
 - `[asr]`: Speech recognition settings, model path, language
 - `[tts]`: Text-to-speech settings, voice model, sample rate
 - `[audio]`: Backend (auto/pulse/alsa), device selection
-- `[dap]`: Legacy DAP server settings (deprecated — satellites now use WebUI WebSocket)
+- `[network]`: Network settings (session timeout, LLM timeout, worker count)
 - `[webui]`: Web interface bind address, port, SSL settings
 - `[mqtt]`: MQTT broker connection settings
 - See `docs/archive/CONFIG_FILE_DESIGN.md` for full schema
@@ -200,21 +193,9 @@ DAP2 is the unified WebSocket protocol for all satellite devices ("JARVIS in eve
 - **Tier 2** (ESP32): Audio path — streams raw PCM, server handles ASR/TTS (reuses WebUI audio pipeline in `webui_audio.c`)
 - Capability-based routing: daemon inspects registration capabilities to choose text vs audio path
 
-DAP1 (the original TCP binary protocol) has been eliminated. The code in `src/network/` and `remote_dawn/` is retained for historical reference only.
-
 **Satellite binary**: `dawn_satellite/` - standalone C application using libwebsockets
 
 See `docs/DAP2_DESIGN.md` for the protocol specification and `docs/DAP2_SATELLITE.md` for Tier 1 build/config/deployment.
-
-### Multi-Client Architecture
-
-**Current limitation**: Server processes one network client at a time, blocking the main loop during LLM processing (10-15 seconds).
-
-**Planned improvement** (see `remote_dawn/dawn_multi_client_architecture.md`):
-- Main thread handles local audio (state machine)
-- Worker thread pool for concurrent network clients
-- Per-client session management with conversation history
-- Session timeout and cleanup
 
 ## Development Guidelines
 

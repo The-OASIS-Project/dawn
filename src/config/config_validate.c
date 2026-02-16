@@ -118,7 +118,6 @@ int config_validate(const dawn_config_t *config,
 
    /* ===== Port Numbers (1 - 65535) ===== */
    VALIDATE_RANGE_INT("mqtt.port", config->mqtt.port, 1, 65535);
-   VALIDATE_RANGE_INT("network.port", config->network.port, 1, 65535);
 
    /* ===== Commands Processing Mode (enum) ===== */
    {
@@ -183,17 +182,12 @@ int config_validate(const dawn_config_t *config,
    }
 
    /* ===== Network Workers (1-64) ===== */
-   if (config->network.enabled) {
-      VALIDATE_RANGE_INT("network.workers", config->network.workers, 1, 64);
-      if (config->network.socket_timeout_sec <= 0) {
-         ADD_ERROR("network.socket_timeout_sec", "must be positive");
-      }
-      if (config->network.session_timeout_sec <= 0) {
-         ADD_ERROR("network.session_timeout_sec", "must be positive");
-      }
-      if (config->network.llm_timeout_ms <= 0) {
-         ADD_ERROR("network.llm_timeout_ms", "must be positive");
-      }
+   VALIDATE_RANGE_INT("network.workers", config->network.workers, 1, 64);
+   if (config->network.session_timeout_sec <= 0) {
+      ADD_ERROR("network.session_timeout_sec", "must be positive");
+   }
+   if (config->network.llm_timeout_ms <= 0) {
+      ADD_ERROR("network.llm_timeout_ms", "must be positive");
    }
 
    /* ===== FlareSolverr (if enabled) ===== */

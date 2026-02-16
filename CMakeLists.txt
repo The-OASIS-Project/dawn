@@ -134,15 +134,6 @@ if(ENABLE_TUI)
     endif()
 endif()
 
-# DAP subsystem (Dawn Audio Protocol server for ESP32 satellite clients)
-option(ENABLE_DAP "Enable DAP server for ESP32 satellite clients" ON)
-if(ENABLE_DAP)
-    add_definitions(-DENABLE_DAP)
-    message(STATUS "DAP server: ENABLED")
-else()
-    message(STATUS "DAP server: DISABLED")
-endif()
-
 # WebUI (libwebsockets + libopus)
 option(ENABLE_WEBUI "Enable WebUI server" ON)
 if(ENABLE_WEBUI)
@@ -167,9 +158,9 @@ if(ENABLE_WEBUI)
     endif()
 endif()
 
-# Authentication subsystem (required if DAP or WebUI is enabled)
+# Authentication subsystem (required if WebUI is enabled)
 # This is a derived option - not directly configurable
-if(ENABLE_DAP OR ENABLE_WEBUI)
+if(ENABLE_WEBUI)
     set(ENABLE_AUTH ON)
     add_definitions(-DENABLE_AUTH)
     message(STATUS "Authentication: ENABLED (network features active)")
@@ -209,9 +200,9 @@ if(NOT SQLITE3_FOUND)
     message(STATUS "SQLite3: Found (${SQLITE3_VERSION}) - required for music metadata")
 endif()
 
-# Multi-client session support (required if DAP or WebUI is enabled)
+# Multi-client session support (required if WebUI is enabled)
 # Provides session manager and worker pool for concurrent client handling
-if(ENABLE_DAP OR ENABLE_WEBUI)
+if(ENABLE_WEBUI)
     add_definitions(-DENABLE_MULTI_CLIENT)
     message(STATUS "Multi-client: ENABLED (session manager + worker pool)")
 endif()
@@ -491,7 +482,7 @@ if(ENABLE_WEBUI)
 endif()
 
 # Conditionally add session/worker pool (needed for multi-client support)
-if(ENABLE_DAP OR ENABLE_WEBUI)
+if(ENABLE_WEBUI)
     list(APPEND DAWN_SOURCES
         src/core/session_manager.c
         src/core/worker_pool.c
@@ -500,11 +491,20 @@ if(ENABLE_DAP OR ENABLE_WEBUI)
     )
 endif()
 
-# Conditionally add auth subsystem (admin socket, database, crypto)
+# Database core + memory subsystem (always compiled — memory works in all modes)
+list(APPEND DAWN_SOURCES
+    src/auth/auth_db_core.c
+    src/memory/memory_db.c
+    src/memory/memory_context.c
+    src/memory/memory_callback.c
+    src/memory/memory_extraction.c
+    src/memory/memory_similarity.c
+)
+
+# Auth subsystem (admin socket, user management, crypto — requires WebUI)
 if(ENABLE_AUTH)
     list(APPEND DAWN_SOURCES
         src/auth/admin_socket.c
-        src/auth/auth_db_core.c
         src/auth/auth_db_user.c
         src/auth/auth_db_settings.c
         src/auth/auth_db_session.c
@@ -516,21 +516,6 @@ if(ENABLE_AUTH)
         src/auth/auth_crypto.c
         src/auth/auth_maintenance.c
         src/image_store.c
-        src/memory/memory_db.c
-        src/memory/memory_context.c
-        src/memory/memory_callback.c
-        src/memory/memory_extraction.c
-        src/memory/memory_similarity.c
-    )
-endif()
-
-# Conditionally add DAP server source files
-if(ENABLE_DAP)
-    list(APPEND DAWN_SOURCES
-        src/network/dawn_server.c
-        src/network/dawn_network_audio.c
-        src/network/dawn_wav_utils.c
-        src/network/accept_thread.c
     )
 endif()
 
@@ -684,7 +669,7 @@ add_subdirectory(tests EXCLUDE_FROM_ALL)
 # =============================================================================
 # Admin CLI Tool (dawn-admin)
 # =============================================================================
-# Only built when authentication is enabled (DAP or WebUI)
+# Only built when authentication is enabled (WebUI)
 if(ENABLE_AUTH)
     add_subdirectory(dawn-admin)
 endif()

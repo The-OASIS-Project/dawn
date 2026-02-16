@@ -97,16 +97,20 @@ static char *reset_conversation_tool_callback(const char *action,
                                                                        : get_local_command_prompt();
       session_init_system_prompt(session, system_prompt);
 
+#ifdef ENABLE_MULTI_CLIENT
       /* Re-append room context for DAP2 satellites */
       if (session->type == SESSION_TYPE_DAP2) {
          session_append_room_context(session, session->identity.location);
       }
+#endif
    }
 
+#ifdef ENABLE_WEBUI
    /* For WebUI sessions, send notification to clear the frontend display */
    if (session && session->type == SESSION_TYPE_WEBUI) {
       webui_send_conversation_reset(session);
    }
+#endif
 
    *should_respond = 1;
    return strdup("Conversation context has been reset. Starting fresh.");

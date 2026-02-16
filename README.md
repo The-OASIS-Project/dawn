@@ -140,7 +140,6 @@ dawn/
 │   ├── llm/                # LLM integration (OpenAI, Claude, Gemini, local)
 │   ├── memory/             # Persistent memory system
 │   ├── tts/                # Text-to-speech (Piper)
-│   ├── network/            # Legacy DAP1 server (deprecated, retained for reference)
 │   ├── audio/              # Audio capture, playback, music
 │   ├── tools/              # Modular LLM tools (search, weather, calculator, etc.)
 │   └── webui/              # Web UI server
@@ -152,7 +151,6 @@ dawn/
 ├── common/                 # Shared library (VAD, ASR, TTS, logging) for daemon + satellite
 ├── dawn_satellite/         # DAP2 Tier 1 satellite (Raspberry Pi, SDL2 UI)
 ├── dawn_satellite_arduino/ # DAP2 Tier 2 satellite (ESP32-S3, Arduino sketch)
-├── remote_dawn/            # Legacy DAP1 ESP32 client (deprecated, retained for reference)
 ├── services/               # Systemd service files
 ├── tests/                  # Test programs
 ├── llm_testing/            # LLM benchmarking tools

@@ -103,8 +103,6 @@ int text_to_speech_to_pcm(const char *text,
  */
 int text_to_speech_to_wav(const char *text, uint8_t **wav_data_out, size_t *wav_size_out);
 
-uint8_t *error_to_wav(const char *error_message, size_t *tts_size_out);
-
 /**
  * @brief Speaks the greeting with AEC delay calibration
  *

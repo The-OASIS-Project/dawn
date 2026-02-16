@@ -72,20 +72,14 @@
 #include "logging.h"
 /* logging_bridge is now built into init_logging() in common/src/logging.c */
 #include "mosquitto_comms.h"
-#include "tools/music_tool.h"
-#include "tools/tool_registry.h"
-#include "tools/tools_init.h"
-#ifdef ENABLE_DAP
-#include "network/accept_thread.h"
-#include "network/dawn_network_audio.h"
-#include "network/dawn_server.h"
-#include "network/dawn_wav_utils.h"
-#endif
 #include "state_machine.h"
 #include "text_to_command_nuevo.h"
+#include "tools/music_tool.h"
 #include "tools/search_summarizer.h"
 #include "tools/smartthings_service.h"
 #include "tools/tfidf_summarizer.h"
+#include "tools/tool_registry.h"
+#include "tools/tools_init.h"
 #include "tts/text_to_speech.h"
 #include "tts/tts_preprocessing.h"
 #include "ui/metrics.h"
@@ -96,10 +90,10 @@
 #include "webui/webui_music_server.h"
 #include "webui/webui_server.h"
 #endif
+#include "auth/auth_db.h"
 #ifdef ENABLE_AUTH
 #include "auth/admin_socket.h"
 #include "auth/auth_crypto.h"
-#include "auth/auth_db.h"
 #include "auth/auth_maintenance.h"
 #include "image_store.h"
 #endif
@@ -313,24 +307,11 @@ void dawn_request_restart(void) {
 /* MQTT */
 static struct mosquitto *mosq;
 
-#ifdef ENABLE_DAP
-// Is remote DAWN enabled
-static int enable_network_audio = 0;
-#endif
-
 #ifdef ENABLE_TUI
 // TUI configuration
 static int enable_tui = 0;
 static tui_theme_t tui_theme = TUI_THEME_GREEN;  // Default: Apple ][ green
 #endif
-pthread_mutex_t processing_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t processing_done = PTHREAD_COND_INITIALIZER;
-uint8_t *processing_result_data = NULL;
-size_t processing_result_size = 0;
-int processing_complete = 0;
-
-// NetworkPCMData struct is defined in network/dawn_wav_utils.h
-// NOTE: Network audio is now handled by worker threads (see worker_pool.c)
 
 // Global variable for command processing mode
 command_processing_mode_t command_processing_mode = CMD_MODE_DIRECT_ONLY;
@@ -1133,7 +1114,6 @@ void display_help(int argc, char *argv[]) {
    printf("  -c, --capture DEVICE   Specify the PCM capture device.\n");
    printf("  -d, --playback DEVICE  Specify the PCM playback device.\n");
    printf("  -l, --logfile LOGFILE  Specify the log filename instead of stdout/stderr.\n");
-   printf("  -N, --network-audio    Enable network audio processing server\n");
    printf("  -h, --help             Display this help message and exit.\n");
    printf("\nConfiguration:\n");
    printf("  --config PATH          Load configuration from PATH (default: search order).\n");
@@ -1307,7 +1287,6 @@ int main(int argc, char *argv[]) {
       { "llm-only", no_argument, NULL, 'L' },                 // LLM handles everything
       { "llm-commands", no_argument, NULL, 'C' },             // Commands first, then LLM
       { "commands-only", no_argument, NULL, 'D' },            // Direct commands only (explicit)
-      { "network-audio", no_argument, NULL, 'N' },            // Start server for remote DAWN access
       { "llm", required_argument, NULL, 'm' },                // Set default LLM type (local/cloud)
       { "cloud-provider", required_argument, NULL, 'P' },     // Cloud provider (openai/claude)
       { "asr-engine", required_argument, NULL, 'A' },         // ASR engine (vosk/whisper)
@@ -1363,7 +1342,6 @@ int main(int argc, char *argv[]) {
       CLI_OVERRIDE_COMMAND_MODE = (1 << 0),
       CLI_OVERRIDE_WHISPER_MODEL = (1 << 1),
       CLI_OVERRIDE_WHISPER_PATH = (1 << 2),
-      CLI_OVERRIDE_NETWORK_AUDIO = (1 << 3),
       CLI_OVERRIDE_LOG_FILE = (1 << 4),
       CLI_OVERRIDE_MIC_RECORD = (1 << 5),
       CLI_OVERRIDE_ASR_RECORD = (1 << 6),
@@ -1394,16 +1372,16 @@ int main(int argc, char *argv[]) {
    atexit(curl_global_cleanup);
 
 #if defined(ENABLE_TUI) && defined(ENABLE_AEC)
-   while ((opt = getopt_long(argc, argv, "c:d:hl:LCDNm:P:A:W:w:M:r::a::R::Tt:B", long_options,
+   while ((opt = getopt_long(argc, argv, "c:d:hl:LCDm:P:A:W:w:M:r::a::R::Tt:B", long_options,
                              &option_index)) != -1) {
 #elif defined(ENABLE_TUI)
-   while ((opt = getopt_long(argc, argv, "c:d:hl:LCDNm:P:A:W:w:M:r::a::Tt:B", long_options,
+   while ((opt = getopt_long(argc, argv, "c:d:hl:LCDm:P:A:W:w:M:r::a::Tt:B", long_options,
                              &option_index)) != -1) {
 #elif defined(ENABLE_AEC)
-   while ((opt = getopt_long(argc, argv, "c:d:hl:LCDNm:P:A:W:w:M:r::a::R::B", long_options,
+   while ((opt = getopt_long(argc, argv, "c:d:hl:LCDm:P:A:W:w:M:r::a::R::B", long_options,
                              &option_index)) != -1) {
 #else
-   while ((opt = getopt_long(argc, argv, "c:d:hl:LCDNm:P:A:W:w:M:r::a::B", long_options,
+   while ((opt = getopt_long(argc, argv, "c:d:hl:LCDm:P:A:W:w:M:r::a::B", long_options,
                              &option_index)) != -1) {
 #endif
       switch (opt) {
@@ -1437,13 +1415,6 @@ int main(int argc, char *argv[]) {
             cli_overrides |= CLI_OVERRIDE_COMMAND_MODE;
             LOG_INFO("Direct commands only mode enabled (CLI override)");
             break;
-#ifdef ENABLE_DAP
-         case 'N':
-            enable_network_audio = 1;
-            cli_overrides |= CLI_OVERRIDE_NETWORK_AUDIO;
-            LOG_INFO("Network audio enabled (CLI override)");
-            break;
-#endif
          case 'm':
             if (strcasecmp(optarg, "cloud") == 0) {
                llm_type_override = LLM_CLOUD;
@@ -1645,14 +1616,6 @@ int main(int argc, char *argv[]) {
                whisper_model);
       asr_model_path = whisper_full_path;
    }
-
-#ifdef ENABLE_DAP
-   // Apply network config (CLI overrides take precedence)
-   if (!(cli_overrides & CLI_OVERRIDE_NETWORK_AUDIO) && g_config.network.enabled) {
-      enable_network_audio = 1;
-      LOG_INFO("Network audio enabled from config");
-   }
-#endif
 
 #ifdef ENABLE_TUI
    // Apply TUI config (CLI overrides take precedence)
@@ -1881,8 +1844,7 @@ int main(int argc, char *argv[]) {
    // This ensures thread-safe access since the buffer is built once and cached.
    (void)get_system_instructions();
 
-   // Initialize session manager first (creates local session)
-   // NOTE: accept_thread_start() will skip re-initialization since it's already done
+   // Initialize session manager (creates local session)
    if (session_manager_init() != 0) {
       LOG_ERROR("Failed to initialize session manager");
       return 1;
@@ -2184,73 +2146,22 @@ int main(int argc, char *argv[]) {
       llm_set_type(LLM_LOCAL);
    }
 
-   /* Determine effective worker count for ASR pool.
-    * If both network and webui are enabled, use the larger of the two.
-    * Worker pool is shared between network clients and WebUI. */
+   /* Initialize worker pool for WebUI satellite audio processing */
 #ifdef ENABLE_WEBUI
-   bool webui_needs_workers = g_config.webui.enabled;
-#else
-   bool webui_needs_workers = false;
-#endif
-
-#ifdef ENABLE_DAP
-   bool network_enabled = enable_network_audio;
-#else
-   bool network_enabled = false;
-#endif
-
-   if (network_enabled || webui_needs_workers) {
-      int effective_workers = 0;
-      if (network_enabled && webui_needs_workers) {
-         /* Both enabled: use max of the two */
-         effective_workers = (g_config.network.workers > g_config.webui.workers)
-                                 ? g_config.network.workers
-                                 : g_config.webui.workers;
-         LOG_INFO("Both network and WebUI enabled, using %d workers (max of network=%d, webui=%d)",
-                  effective_workers, g_config.network.workers, g_config.webui.workers);
-      } else if (network_enabled) {
-         effective_workers = g_config.network.workers;
-      } else {
-         effective_workers = g_config.webui.workers;
-      }
-
-      /* Temporarily override network.workers since worker_pool_init reads from there */
+   if (g_config.webui.enabled) {
+      int effective_workers = g_config.webui.workers;
+      /* worker_pool_init reads from g_config.network.workers */
       int saved_workers = g_config.network.workers;
       g_config.network.workers = effective_workers;
 
-#ifdef ENABLE_DAP
-      if (enable_network_audio) {
-         LOG_INFO("Initializing network audio system...");
-         if (dawn_network_audio_init() != 0) {
-            LOG_ERROR("Failed to initialize network audio system");
-            enable_network_audio = 0;
-            network_enabled = false;
-         } else {
-            LOG_INFO("Starting DAWN network server (multi-client worker pool with %d workers)...",
-                     effective_workers);
-            if (accept_thread_start(asr_engine, asr_model_path) != 0) {
-               LOG_ERROR("Failed to start accept thread - network audio disabled");
-               dawn_network_audio_cleanup();
-               enable_network_audio = 0;
-               network_enabled = false;
-            } else {
-               LOG_INFO("DAWN network server started successfully on port 5000");
-               LOG_INFO("Network TTS will use existing Piper instance");
-            }
-         }
-      }
-#endif
-
-      /* If network didn't start but WebUI needs workers, init pool now */
-      if (!network_enabled && webui_needs_workers && !worker_pool_is_initialized()) {
-         LOG_INFO("Initializing worker pool for WebUI audio (%d workers)...", effective_workers);
-         if (worker_pool_init(asr_engine, asr_model_path) != 0) {
-            LOG_WARNING("Failed to init worker pool - WebUI voice input disabled");
-         }
+      LOG_INFO("Initializing worker pool for WebUI audio (%d workers)...", effective_workers);
+      if (worker_pool_init(asr_engine, asr_model_path) != 0) {
+         LOG_WARNING("Failed to init worker pool - WebUI voice input disabled");
       }
 
       g_config.network.workers = saved_workers;
    }
+#endif
 
 #ifdef ENABLE_WEBUI
    /* Initialize WebUI server if enabled */
@@ -2271,21 +2182,22 @@ int main(int argc, char *argv[]) {
    }
 #endif
 
-#ifdef ENABLE_AUTH
-   /* Initialize auth subsystem BEFORE admin socket starts its listener thread.
-    * This prevents race conditions where CREATE_USER arrives before auth_db is ready.
-    * Order: crypto -> database -> admin socket (per architecture review) */
+   /* Initialize database (needed for memory system in all modes) */
    char expanded_data_dir[CONFIG_PATH_MAX];
    char auth_db_path[CONFIG_PATH_MAX + 16];
    if (!path_expand_tilde(g_config.paths.data_dir, expanded_data_dir, sizeof(expanded_data_dir))) {
       LOG_ERROR("Failed to expand data_dir path: %s", g_config.paths.data_dir);
    }
    snprintf(auth_db_path, sizeof(auth_db_path), "%s/auth.db", expanded_data_dir);
+   if (auth_db_init(auth_db_path) != AUTH_DB_SUCCESS) {
+      LOG_ERROR("Failed to initialize database - memory system disabled");
+   }
+
+#ifdef ENABLE_AUTH
+   /* Initialize auth subsystem AFTER database is ready.
+    * Order: crypto -> admin socket -> maintenance (per architecture review) */
    if (auth_crypto_init() != AUTH_CRYPTO_SUCCESS) {
       LOG_ERROR("Failed to initialize auth crypto - authentication disabled");
-   } else if (auth_db_init(auth_db_path) != AUTH_DB_SUCCESS) {
-      LOG_ERROR("Failed to initialize auth database - authentication disabled");
-      auth_crypto_shutdown();
    } else {
       /* Initialize image storage (depends on auth_db for metadata) */
       image_store_config_t img_config = {
@@ -2295,19 +2207,16 @@ int main(int argc, char *argv[]) {
       };
       if (image_store_init(&img_config) != IMAGE_STORE_SUCCESS) {
          LOG_WARNING("Failed to initialize image store - vision uploads disabled");
-         /* Non-fatal - continue without image storage */
       }
 
       /* Initialize admin socket for dawn-admin CLI communication */
       if (admin_socket_init() != 0) {
          LOG_WARNING("Failed to initialize admin socket - CLI management disabled");
-         /* Graceful degradation - don't prevent daemon startup */
       }
 
       /* Start background maintenance thread for auth database cleanup */
       if (auth_maintenance_start() != 0) {
          LOG_WARNING("Failed to start auth maintenance thread");
-         /* Non-fatal - cleanup will happen on next startup */
       }
    }
 #endif
@@ -2326,10 +2235,6 @@ int main(int argc, char *argv[]) {
          }
       }
 #endif
-
-      // NOTE: Network audio handling removed - will be handled by worker threads (Phase 3/4)
-      // Legacy network client support via dawn_server is disabled until worker pipeline is
-      // complete.
 
       // Check if LLM thread has completed (non-blocking check)
       static int prev_llm_processing = 0;  // Track previous state
@@ -2446,8 +2351,10 @@ int main(int argc, char *argv[]) {
             free(tts_response);
             free(history_response);
 
+#ifdef ENABLE_MULTI_CLIENT
             /* Mark successful interaction complete for idle timeout tracking */
             session_update_interaction_complete(local_session);
+#endif
          } else {
             // Response is NULL but not interrupted - error case
             pthread_mutex_lock(&tts_mutex);
@@ -2478,6 +2385,7 @@ int main(int argc, char *argv[]) {
                break;
             }
 
+#ifdef ENABLE_MULTI_CLIENT
             /* Check voice conversation idle timeout (only when not processing LLM) */
             if (!llm_processing && g_config.memory.enabled &&
                 g_config.memory.conversation_idle_timeout_min > 0) {
@@ -2498,6 +2406,7 @@ int main(int argc, char *argv[]) {
                   }
                }
             }
+#endif
 
             capture_buffer(&myAudioControls, max_buff, max_buff_size, &buff_size);
 
@@ -3681,6 +3590,7 @@ int main(int argc, char *argv[]) {
       llm_processing = 0;
    }
 
+#ifdef ENABLE_MULTI_CLIENT
    /* Save any non-empty voice conversation before shutdown */
    if (local_session && session_has_messages(local_session)) {
       LOG_INFO("Shutdown: Saving Session 0 voice conversation");
@@ -3689,34 +3599,16 @@ int main(int argc, char *argv[]) {
          LOG_INFO("Shutdown: Saved as conversation %lld", (long long)conv_id);
       }
    }
+#endif
 
 #ifdef ENABLE_AUTH
-   /* Shutdown auth subsystem in reverse initialization order:
-    * maintenance_thread -> admin_socket -> image_store -> auth_db -> auth_crypto */
+   /* Shutdown auth subsystem in reverse initialization order */
    auth_maintenance_stop();
    admin_socket_shutdown();
    image_store_shutdown();
-   auth_db_shutdown();
    auth_crypto_shutdown();
 #endif
-
-#ifdef ENABLE_DAP
-   if (enable_network_audio) {
-      LOG_INFO("Stopping network audio system...");
-      accept_thread_stop();
-      dawn_network_audio_cleanup();
-
-      // Cleanup IPC resources
-      pthread_mutex_lock(&processing_mutex);
-      if (processing_result_data) {
-         free(processing_result_data);
-         processing_result_data = NULL;
-         processing_complete = 0;
-      }
-      pthread_mutex_unlock(&processing_mutex);
-      // NOTE: Network audio resources are now cleaned up by worker threads
-   }
-#endif
+   auth_db_shutdown();
 
    cleanup_text_to_speech();
 
@@ -3804,13 +3696,8 @@ int main(int argc, char *argv[]) {
    if (webui_server_is_running()) {
       webui_server_shutdown();
    }
-   /* Shutdown worker pool if we initialized it for WebUI (not network server) */
-#ifdef ENABLE_DAP
-   bool network_audio_active = enable_network_audio;
-#else
-   bool network_audio_active = false;
-#endif
-   if (!network_audio_active && worker_pool_is_initialized()) {
+   /* Shutdown worker pool */
+   if (worker_pool_is_initialized()) {
       worker_pool_shutdown();
    }
 #endif

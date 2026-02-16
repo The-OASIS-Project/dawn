@@ -259,20 +259,12 @@
 #       or use env vars: MQTT_USERNAME, MQTT_PASSWORD
 
 # =============================================================================
-# Network Audio Server (ESP32 Clients)
+# Network (shared settings for sessions, workers, LLM timeouts)
 # =============================================================================
 
 [network]
-# enabled = false                 # Enable DAP server for ESP32 satellite clients
-                                  # Env: DAWN_NETWORK_ENABLED
-# host = "0.0.0.0"                # Bind address (0.0.0.0 = all interfaces)
-                                  # Env: DAWN_NETWORK_HOST
-# port = 5000                     # Listen port for DAP protocol
-                                  # Env: DAWN_NETWORK_PORT
 # workers = 4                     # Concurrent processing threads
                                   # Env: DAWN_NETWORK_WORKERS
-# socket_timeout_sec = 30         # Client socket timeout
-                                  # Env: DAWN_NETWORK_SOCKET_TIMEOUT_SEC
 # session_timeout_sec = 1800      # Idle session expiry (30 minutes)
                                   # Env: DAWN_NETWORK_SESSION_TIMEOUT_SEC
 # llm_timeout_ms = 60000          # Per-request LLM timeout (60 seconds)

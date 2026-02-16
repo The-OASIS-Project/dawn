@@ -777,17 +777,11 @@ static void parse_network(toml_table_t *table, network_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = {
-      "enabled",        "host", "port", "workers", "socket_timeout_sec", "session_timeout_sec",
-      "llm_timeout_ms", NULL
-   };
+   static const char *const known_keys[] = { "workers", "session_timeout_sec", "llm_timeout_ms",
+                                             NULL };
    warn_unknown_keys(table, "network", known_keys);
 
-   PARSE_BOOL(table, "enabled", config->enabled);
-   PARSE_STRING(table, "host", config->host);
-   PARSE_INT(table, "port", config->port);
    PARSE_INT(table, "workers", config->workers);
-   PARSE_INT(table, "socket_timeout_sec", config->socket_timeout_sec);
    PARSE_INT(table, "session_timeout_sec", config->session_timeout_sec);
    PARSE_INT(table, "llm_timeout_ms", config->llm_timeout_ms);
 }

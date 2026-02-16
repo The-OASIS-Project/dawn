@@ -298,16 +298,12 @@ typedef struct {
 } mqtt_config_t;
 
 /* =============================================================================
- * Network Audio Server Configuration
+ * Network Configuration (shared settings for sessions, workers, LLM timeouts)
  * ============================================================================= */
 typedef struct {
-   bool enabled;               /* Enable network audio server */
-   char host[CONFIG_NAME_MAX]; /* Bind address */
-   int port;                   /* Listen port */
-   int workers;                /* Concurrent processing threads */
-   int socket_timeout_sec;     /* Client timeout */
-   int session_timeout_sec;    /* Idle session expiry */
-   int llm_timeout_ms;         /* Per-request LLM timeout */
+   int workers;             /* Concurrent processing threads */
+   int session_timeout_sec; /* Idle session expiry */
+   int llm_timeout_ms;      /* Per-request LLM timeout */
 } network_config_t;
 
 /* =============================================================================

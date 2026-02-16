@@ -191,11 +191,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->mqtt.port = 1883;                    /* MQTT_PORT */
 
    /* Network */
-   config->network.enabled = false;
-   SAFE_COPY(config->network.host, "0.0.0.0");
-   config->network.port = 5000;
    config->network.workers = 4;
-   config->network.socket_timeout_sec = 30;
    config->network.session_timeout_sec = 1800;  // 30 minutes
    config->network.llm_timeout_ms = 60000;      // 60 seconds for LLM requests
 

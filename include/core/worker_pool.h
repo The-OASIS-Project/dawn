@@ -222,7 +222,7 @@ struct mosquitto *worker_pool_get_mosq(void);
 /* =============================================================================
  * Stub Implementations for Local-Only Mode (no network features)
  *
- * When both ENABLE_DAP and ENABLE_WEBUI are disabled, worker_pool.c
+ * When ENABLE_WEBUI is disabled, worker_pool.c
  * is not compiled. These inline stubs provide the minimal API needed by
  * code that calls worker_pool functions unconditionally.
  * ============================================================================= */

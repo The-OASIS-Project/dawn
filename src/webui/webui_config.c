@@ -70,25 +70,12 @@ static const char *s_allowed_path_prefixes[] = {
  * ============================================================================= */
 
 /* Settings that require restart when changed */
-static const char *s_restart_required_fields[] = { "audio.backend",
-                                                   "audio.capture_device",
-                                                   "audio.playback_device",
-                                                   "asr.model",
-                                                   "asr.models_path",
-                                                   "tts.models_path",
-                                                   "tts.voice_model",
-                                                   "network.enabled",
-                                                   "network.host",
-                                                   "network.port",
-                                                   "network.workers",
-                                                   "webui.port",
-                                                   "webui.max_clients",
-                                                   "webui.workers",
-                                                   "webui.https",
-                                                   "webui.ssl_cert_path",
-                                                   "webui.ssl_key_path",
-                                                   "webui.bind_address",
-                                                   NULL };
+static const char *s_restart_required_fields[] = {
+   "audio.backend",       "audio.capture_device", "audio.playback_device", "asr.model",
+   "asr.models_path",     "tts.models_path",      "tts.voice_model",       "network.workers",
+   "webui.port",          "webui.max_clients",    "webui.workers",         "webui.https",
+   "webui.ssl_cert_path", "webui.ssl_key_path",   "webui.bind_address",    NULL
+};
 
 void handle_get_config(ws_connection_t *conn) {
    /* Build response with config, secrets status, and metadata */
@@ -517,11 +504,7 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
 
    /* [network] */
    if (json_object_object_get_ex(payload, "network", &section)) {
-      JSON_TO_CONFIG_BOOL(section, "enabled", config->network.enabled);
-      JSON_TO_CONFIG_STR(section, "host", config->network.host);
-      JSON_TO_CONFIG_INT(section, "port", config->network.port);
       JSON_TO_CONFIG_INT(section, "workers", config->network.workers);
-      JSON_TO_CONFIG_INT(section, "socket_timeout_sec", config->network.socket_timeout_sec);
       JSON_TO_CONFIG_INT(section, "session_timeout_sec", config->network.session_timeout_sec);
       JSON_TO_CONFIG_INT(section, "llm_timeout_ms", config->network.llm_timeout_ms);
    }

@@ -92,27 +92,29 @@ char *switchLlmCallback(const char *actionName, char *value, int *should_respond
 /* Forward declaration for memoryCallback (defined in memory_callback.c) */
 char *memoryCallback(const char *actionName, char *value, int *should_respond);
 
-static deviceCallback deviceCallbackArray[] = { { AUDIO_PLAYBACK_DEVICE, setPcmPlaybackDevice },
-                                                { AUDIO_CAPTURE_DEVICE, setPcmCaptureDevice },
-                                                { TEXT_TO_SPEECH, textToSpeechCallback },
-                                                { DATE, dateCallback },
-                                                { TIME, timeCallback },
-                                                { MUSIC, musicCallback },
-                                                { VOICE_AMPLIFIER, voiceAmplifierCallback },
-                                                { SHUTDOWN, shutdownCallback },
-                                                { VOLUME, volumeCallback },
-                                                { LOCAL_LLM_SWITCH, localLLMCallback },
-                                                { CLOUD_LLM_SWITCH, cloudLLMCallback },
-                                                { RESET_CONVERSATION, resetConversationCallback },
-                                                { SEARCH, searchCallback },
-                                                { WEATHER, weatherCallback },
-                                                { CALCULATOR, calculatorCallback },
-                                                { URL_FETCH, urlFetchCallback },
-                                                { LLM_STATUS, llmStatusCallback },
-                                                { CLOUD_PROVIDER, cloudProviderCallback },
-                                                { SMARTTHINGS, smartThingsCallback },
-                                                { SWITCH_LLM, switchLlmCallback },
-                                                { MEMORY, memoryCallback } };
+static deviceCallback deviceCallbackArray[] = {
+   { AUDIO_PLAYBACK_DEVICE, setPcmPlaybackDevice },
+   { AUDIO_CAPTURE_DEVICE, setPcmCaptureDevice },
+   { TEXT_TO_SPEECH, textToSpeechCallback },
+   { DATE, dateCallback },
+   { TIME, timeCallback },
+   { MUSIC, musicCallback },
+   { VOICE_AMPLIFIER, voiceAmplifierCallback },
+   { SHUTDOWN, shutdownCallback },
+   { VOLUME, volumeCallback },
+   { LOCAL_LLM_SWITCH, localLLMCallback },
+   { CLOUD_LLM_SWITCH, cloudLLMCallback },
+   { RESET_CONVERSATION, resetConversationCallback },
+   { SEARCH, searchCallback },
+   { WEATHER, weatherCallback },
+   { CALCULATOR, calculatorCallback },
+   { URL_FETCH, urlFetchCallback },
+   { LLM_STATUS, llmStatusCallback },
+   { CLOUD_PROVIDER, cloudProviderCallback },
+   { SMARTTHINGS, smartThingsCallback },
+   { SWITCH_LLM, switchLlmCallback },
+   { MEMORY, memoryCallback },
+};
 
 /**
  * @brief Send a status detail update to the WebUI (if connected)

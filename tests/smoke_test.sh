@@ -18,10 +18,8 @@ NC='\033[0m' # No Color
 
 # Build presets to test
 PRESETS=(
-    "mode1-local"
-    "mode2-dap"
-    "mode3-webui"
-    "mode4-full"
+    "local"
+    "full"
     "debug"
 )
 
@@ -53,11 +51,9 @@ log_header() {
 get_build_dir() {
     local preset=$1
     case "$preset" in
-        mode1-local) echo "build-mode1" ;;
-        mode2-dap)   echo "build-mode2" ;;
-        mode3-webui) echo "build-mode3" ;;
-        mode4-full)  echo "build-mode4" ;;
-        debug)       echo "build-debug" ;;
+        local) echo "build-local" ;;
+        full)  echo "build-full" ;;
+        debug) echo "build-debug" ;;
         *)           echo "build-${preset}" ;;
     esac
 }

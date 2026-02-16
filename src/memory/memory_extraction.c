@@ -31,7 +31,6 @@
 #include <string.h>
 #include <time.h>
 
-#include "auth/auth_db.h"
 #include "config/dawn_config.h"
 #include "llm/llm_interface.h"
 #include "logging.h"
@@ -565,6 +564,7 @@ int memory_trigger_extraction(int user_id,
       return 1;
    }
 
+#ifdef ENABLE_AUTH
    /* Re-check privacy status from database (prevents race condition with set_private) */
    if (conversation_id > 0) {
       int is_private = conv_db_is_private(conversation_id, user_id);
@@ -575,6 +575,7 @@ int memory_trigger_extraction(int user_id,
       }
       /* is_private == -1 means error or not found, proceed with extraction */
    }
+#endif
 
    /* Skip if too few messages */
    if (message_count < 2) {
