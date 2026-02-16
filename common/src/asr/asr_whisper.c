@@ -159,14 +159,6 @@ void asr_whisper_set_timing_callback(whisper_asr_context_t *ctx,
 }
 
 /**
- * @brief Static sentinel result for process() — avoids heap allocation per audio chunk.
- *
- * Whisper is batch-only: process() just accumulates audio, always returning an empty partial.
- * This sentinel eliminates ~62 mallocs/sec at 16kHz/512-sample chunks.
- * The text field points to a string literal (caller must NOT free sentinel results).
- * Callers using asr_engine_result_free() or asr_whisper_result_free() handle NULL-text safely.
- */
-/**
  * @brief Allocate an empty partial result (Whisper doesn't support streaming)
  *
  * Returns a heap-allocated result so callers can always free() uniformly.
