@@ -1167,10 +1167,10 @@ int voice_processing_loop(voice_ctx_t *ctx,
 
             /* Timing debug every 100 iterations (~3 seconds) */
             if (debug_frame_count % 100 == 0) {
-               long ws_ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
-               long wait_ms = (t2.tv_sec - t1.tv_sec) * 1000 + (t2.tv_nsec - t1.tv_nsec) / 1000000;
-               LOG_DEBUG("Loop %d: ws=%ldms, wait=%ldms, avail=%zu", debug_frame_count, ws_ms,
-                         wait_ms, available);
+               LOG_DEBUG("Loop %d: ws=%ldms, wait=%ldms, avail=%zu", debug_frame_count,
+                         (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000,
+                         (t2.tv_sec - t1.tv_sec) * 1000 + (t2.tv_nsec - t1.tv_nsec) / 1000000,
+                         available);
             }
 
             if (available < VAD_FRAME_SAMPLES) {

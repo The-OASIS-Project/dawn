@@ -166,12 +166,21 @@ void asr_whisper_set_timing_callback(whisper_asr_context_t *ctx,
  * The text field points to a string literal (caller must NOT free sentinel results).
  * Callers using asr_engine_result_free() or asr_whisper_result_free() handle NULL-text safely.
  */
-static asr_whisper_result_t s_empty_partial = {
-   .text = NULL,
-   .confidence = -1.0f,
-   .is_partial = 1,
-   .processing_time = 0.0,
-};
+/**
+ * @brief Allocate an empty partial result (Whisper doesn't support streaming)
+ *
+ * Returns a heap-allocated result so callers can always free() uniformly.
+ * Previously used a static sentinel, but asr_engine_result_free() in
+ * asr_engine.c calls free() unconditionally, causing double-free crashes.
+ */
+static asr_whisper_result_t *alloc_empty_partial(void) {
+   asr_whisper_result_t *r = (asr_whisper_result_t *)calloc(1, sizeof(asr_whisper_result_t));
+   if (r) {
+      r->confidence = -1.0f;
+      r->is_partial = 1;
+   }
+   return r;
+}
 
 asr_whisper_result_t *asr_whisper_process(whisper_asr_context_t *ctx,
                                           const int16_t *audio,
@@ -187,7 +196,7 @@ asr_whisper_result_t *asr_whisper_process(whisper_asr_context_t *ctx,
                        ctx->buffer_size, ctx->buffer_capacity, samples);
       samples = ctx->buffer_capacity - ctx->buffer_size;
       if (samples == 0) {
-         return &s_empty_partial;
+         return alloc_empty_partial();
       }
    }
 
@@ -196,7 +205,7 @@ asr_whisper_result_t *asr_whisper_process(whisper_asr_context_t *ctx,
    ctx->buffer_size += samples;
 
    /* Return static empty partial (Whisper doesn't support streaming) */
-   return &s_empty_partial;
+   return alloc_empty_partial();
 }
 
 asr_whisper_result_t *asr_whisper_finalize(whisper_asr_context_t *ctx) {
@@ -328,7 +337,7 @@ int asr_whisper_reset(whisper_asr_context_t *ctx) {
 }
 
 void asr_whisper_result_free(asr_whisper_result_t *result) {
-   if (!result || result == &s_empty_partial)
+   if (!result)
       return;
 
    free(result->text);
