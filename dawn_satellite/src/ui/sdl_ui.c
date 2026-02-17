@@ -1316,10 +1316,16 @@ static void sdl_cleanup_on_thread(sdl_ui_t *ui) {
 static void render_frame(sdl_ui_t *ui, double time_sec) {
    SDL_Renderer *r = ui->renderer;
 
-   /* Poll voice state */
+   /* Poll voice state and connection status */
    voice_state_t state = voice_processing_get_state(ui->voice_ctx);
+   bool ws_connected = voice_processing_is_ws_connected(ui->voice_ctx);
    float vad_prob = voice_processing_get_vad_probability(ui->voice_ctx);
    float audio_amp = voice_processing_get_playback_amplitude(ui->voice_ctx);
+
+   /* When offline, force orb idle and pass connection status to transcript */
+   if (!ws_connected)
+      state = VOICE_STATE_SILENCE;
+   ui->transcript.connected = ws_connected;
 
    /* Poll spectrum data only during SPEAKING and when screensaver isn't fully covering */
    bool ss_opaque = (ui->screensaver.state == SCREENSAVER_ACTIVE);

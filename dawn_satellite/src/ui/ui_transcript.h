@@ -102,13 +102,15 @@ typedef struct {
    bool mic_muted;              /* True when mic is muted (shows red dot in status bar) */
    SDL_Texture *music_icon_tex; /* White "♪" glyph, tinted via SDL_SetTextureColorMod */
    int music_icon_w, music_icon_h;
-   bool time_24h; /* Use 24-hour time format */
+   bool time_24h;  /* Use 24-hour time format */
+   bool connected; /* WebSocket connection to daemon (false = show OFFLINE) */
 
    /* Cached header textures (white, tinted via SDL_SetTextureColorMod) */
    SDL_Texture *cached_state_tex; /* "[LISTENING]" etc. */
    int cached_state_w, cached_state_h;
    voice_state_t cached_state_val; /* Key: which state was rendered */
    bool cached_state_muted;        /* Key: muted flag at render time */
+   bool cached_state_connected;    /* Key: connection status at render time */
 
    SDL_Texture *cached_muted_tex; /* "[MUTED]" label (static, rendered once) */
    int cached_muted_w, cached_muted_h;

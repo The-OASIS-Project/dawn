@@ -1569,6 +1569,9 @@ int voice_processing_loop(voice_ctx_t *ctx,
       /* Note: No manual timing - audio_capture_wait_for_data() provides pacing */
    }
 
+   /* Reset to silence so UI doesn't show stale active state while offline */
+   ctx->state = VOICE_STATE_SILENCE;
+
    LOG_INFO("Voice processing loop ended");
    return 0;
 }

@@ -506,19 +506,27 @@ void ui_transcript_render(ui_transcript_t *t, SDL_Renderer *renderer, voice_stat
 
    /* Render state label at top (cached white texture + color mod) */
    if (t->label_font) {
-      ui_color_t state_color = ui_label_color_for_state(state);
+      /* When disconnected, override to show [OFFLINE] in red */
+      bool show_offline = !t->connected;
+      ui_color_t state_color = show_offline
+                                   ? (ui_color_t){ COLOR_ERROR_R, COLOR_ERROR_G, COLOR_ERROR_B }
+                                   : ui_label_color_for_state(state);
 
-      /* Rebuild state texture only when state or muted flag changes */
+      /* Rebuild state texture when state, muted, or connection status changes */
       if (!t->cached_state_tex || t->cached_state_val != state ||
-          t->cached_state_muted != t->mic_muted) {
+          t->cached_state_muted != t->mic_muted || t->cached_state_connected != t->connected) {
          if (t->cached_state_tex)
             SDL_DestroyTexture(t->cached_state_tex);
          char state_str[32];
-         snprintf(state_str, sizeof(state_str), "[%s]", ui_state_label(state));
+         if (show_offline)
+            snprintf(state_str, sizeof(state_str), "[OFFLINE]");
+         else
+            snprintf(state_str, sizeof(state_str), "[%s]", ui_state_label(state));
          t->cached_state_tex = build_white_tex(renderer, t->label_font, state_str,
                                                &t->cached_state_w, &t->cached_state_h);
          t->cached_state_val = state;
          t->cached_state_muted = t->mic_muted;
+         t->cached_state_connected = t->connected;
       }
 
       /* Draw state label with state-specific color */
