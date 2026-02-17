@@ -311,6 +311,28 @@ static int md_parse_and_split(const char *text, const md_fonts_t *fonts) {
             at_line_start = false;
             continue;
          }
+
+         /* Check for headers: #, ##, ### at line start */
+         if (*p == '#') {
+            int hashes = 0;
+            const char *hp = p;
+            while (*hp == '#')
+               hashes++, hp++;
+            if (hashes <= 3 && *hp == ' ') {
+               hp++; /* skip space after # */
+               const char *line_start = hp;
+               while (*hp && *hp != '\n')
+                  hp++;
+               int hlen = (int)(hp - line_start);
+               if (hlen > 0) {
+                  wc = emit_word(line_start, hlen, MD_STYLE_BOLD, fonts, &soff, wc, true, 0);
+               }
+               p = hp;
+               at_line_start = false;
+               continue;
+            }
+         }
+
          at_line_start = false;
       }
 
@@ -357,12 +379,14 @@ static int md_parse_and_split(const char *text, const md_fonts_t *fonts) {
                style = MD_STYLE_BOLD;
             continue;
          } else if (stars == 1) {
-            /* Single * — check if this looks like italic (not standalone) */
-            if (*p && *p != ' ') {
-               if (style == MD_STYLE_ITALIC)
-                  style = MD_STYLE_NORMAL;
-               else
-                  style = MD_STYLE_ITALIC;
+            if (style == MD_STYLE_ITALIC) {
+               /* Closing italic — always accept */
+               style = MD_STYLE_NORMAL;
+               continue;
+            }
+            /* Opening italic — must be followed by non-space content */
+            if (*p && *p != ' ' && *p != '\n') {
+               style = MD_STYLE_ITALIC;
                continue;
             }
             /* Standalone * — treat as literal text */

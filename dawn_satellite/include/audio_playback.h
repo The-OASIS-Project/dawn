@@ -20,8 +20,8 @@
 
 #include <pthread.h>
 #include <stdatomic.h>
-#include <stddef.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "spectrum_defs.h" /* For SPECTRUM_BINS */

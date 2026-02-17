@@ -175,15 +175,15 @@ static void ensure_entry_cached(ui_transcript_t *t, transcript_entry_t *entry) {
    if (!entry->cached_texture && entry->text[0]) {
       SDL_Color text_color = { 255, 255, 255, 255 };
 
-      /* AI entries with completed streaming get markdown rendering */
-      if (!entry->is_user && !entry->is_streaming && t->md_fonts.fonts[0]) {
+      /* AI entries get markdown rendering (cache only rebuilt on dirty flag) */
+      if (!entry->is_user && t->md_fonts.fonts[0]) {
          SDL_Color bold_color = { 255, 255, 255, 255 };
          entry->cached_texture = md_render_text(t->renderer, &t->md_fonts, entry->text, text_color,
                                                 bold_color, t->wrap_width, &entry->cached_w,
                                                 &entry->cached_h);
       }
 
-      /* User entries and streaming AI entries: plain text (fast path) */
+      /* User entries: plain text (fast path); also fallback if md_render fails */
       if (!entry->cached_texture) {
          SDL_Surface *surface = TTF_RenderUTF8_Blended_Wrapped(t->body_font, entry->text,
                                                                text_color, t->wrap_width);

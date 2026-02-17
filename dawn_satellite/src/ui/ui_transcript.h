@@ -37,7 +37,7 @@ extern "C" {
 #endif
 
 #define TRANSCRIPT_MAX_ENTRIES 40
-#define TRANSCRIPT_MAX_TEXT 4096
+#define TRANSCRIPT_MAX_TEXT 8192
 
 /**
  * @brief Single conversation entry

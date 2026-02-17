@@ -550,7 +550,7 @@ static void on_sentence_complete(const char *sentence, void *userdata) {
       } else {
          /* Fallback: blocking playback on WS thread */
          audio_playback_play(ctx->playback, audio, audio_len, sample_rate, &ctx->tts_stop_flag,
-                            true);
+                             true);
          free(audio);
       }
    }
