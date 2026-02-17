@@ -308,12 +308,13 @@ static void *satellite_worker_thread(void *arg) {
       LOG_INFO("Satellite: Response contains commands, processing...");
 
       char *processed = webui_process_commands(response, session);
-      if (processed && !REQUEST_SUPERSEDED(session, expected_gen)) {
+      if (processed && !REQUEST_SUPERSEDED(session, expected_gen) && !session->disconnected) {
          /* Recursively process if the follow-up also contains commands */
          int iterations = 0;
          const int MAX_ITERATIONS = 5;
 
-         while (strstr(processed, "<command>") && !REQUEST_SUPERSEDED(session, expected_gen)) {
+         while (strstr(processed, "<command>") && !REQUEST_SUPERSEDED(session, expected_gen) &&
+                !session->disconnected) {
             if (++iterations > MAX_ITERATIONS) {
                LOG_WARNING("Satellite: Command loop limit reached (%d iterations)", MAX_ITERATIONS);
                break;

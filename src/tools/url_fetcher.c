@@ -57,7 +57,7 @@
 #define FLARESOLVERR_ENDPOINT "http://127.0.0.1:8191/v1"
 #endif
 #ifndef FLARESOLVERR_TIMEOUT_SEC
-#define FLARESOLVERR_TIMEOUT_SEC 60
+#define FLARESOLVERR_TIMEOUT_SEC 30
 #endif
 #ifndef FLARESOLVERR_MAX_RESPONSE
 // 4MB max response - intentionally large to support fetching academic papers,

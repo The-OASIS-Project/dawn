@@ -1497,9 +1497,10 @@ static int llm_call_prepare(session_t *session,
    // Set command context for tool callbacks
    session_set_command_context(session);
 
-   // Reset streaming filter state for WebSocket sessions
-   if (session->type == SESSION_TYPE_WEBUI) {
+   // Reset streaming filter state for WebSocket and satellite sessions
+   if (session->type == SESSION_TYPE_WEBUI || session->type == SESSION_TYPE_DAP2) {
       session->cmd_tag_filter.nesting_depth = 0;
+      session->cmd_tag_filter.len = 0;
       session->stream_had_content = false;
    }
 

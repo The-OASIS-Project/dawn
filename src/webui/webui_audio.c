@@ -746,14 +746,10 @@ void webui_sentence_audio_callback(const char *sentence, void *userdata) {
       return;
    }
 
-   /* Skip TTS if disabled for this connection.
-    * Defensive check: client_data must be a valid ws_connection_t pointer.
-    * This is guaranteed for WebUI sessions but guards against misuse. */
-   if (!session->client_data) {
-      return;
-   }
+   /* Snapshot client_data ONCE to avoid TOCTOU race with LWS disconnect handler
+    * (which sets client_data = NULL from the LWS thread while we run on the worker thread) */
    ws_connection_t *conn = (ws_connection_t *)session->client_data;
-   if (!conn->tts_enabled) {
+   if (!conn || !conn->tts_enabled) {
       return;
    }
 
@@ -788,15 +784,14 @@ void webui_sentence_audio_callback(const char *sentence, void *userdata) {
       cleaned[--len] = '\0';
    }
 
-   /* Re-check: session may have disconnected during cleanup above (client_data freed) */
-   if (session->disconnected || !session->client_data) {
+   /* Re-check disconnected (client_data snapshot from above is still valid for field reads
+    * since the ws_connection_t is owned by lws and only freed after the service loop exits) */
+   if (session->disconnected) {
       free(cleaned);
       return;
    }
-   conn = (ws_connection_t *)session->client_data;
 
-   /* Only generate TTS if there's actual content and TTS still enabled.
-    * Re-check tts_enabled before expensive encoding (user may have disabled during cleanup). */
+   /* Only generate TTS if there's actual content and TTS still enabled */
    if (len > 0 && conn->tts_enabled) {
       /* Switch to "speaking" state when first audio is ready */
       webui_send_state(session, "speaking");

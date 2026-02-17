@@ -1698,9 +1698,18 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
                                                  callback_userdata, MAX_TOOL_ITERATIONS);
          }
 
-         // Execute tools
-         tool_result_list_t results;
-         llm_tools_execute_all(tool_calls, &results);
+         // Execute tools (heap-allocated: ~66KB, too large for 512KB satellite worker stack
+         // with up to MAX_TOOL_ITERATIONS levels of recursion)
+         tool_result_list_t *results = calloc(1, sizeof(tool_result_list_t));
+         if (!results) {
+            LOG_ERROR("OpenAI streaming: Failed to allocate tool results");
+            sse_parser_free(sse_parser);
+            llm_stream_free(stream_ctx);
+            json_object_put(root);
+            free(streaming_ctx.raw_buffer);
+            return NULL;
+         }
+         llm_tools_execute_all(tool_calls, results);
 
          // Add assistant message with tool_calls to conversation history
          json_object *assistant_msg = json_object_new_object();
@@ -1739,7 +1748,7 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
          json_object_array_add(conversation_history, assistant_msg);
 
          // Add tool results to conversation history
-         llm_tools_add_results_openai(conversation_history, &results);
+         llm_tools_add_results_openai(conversation_history, results);
 
          // Cleanup current stream context
          sse_parser_free(sse_parser);
@@ -1748,9 +1757,9 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
          free(streaming_ctx.raw_buffer);
 
          // Check if we should skip follow-up (e.g., LLM was switched)
-         if (llm_tools_should_skip_followup(&results)) {
+         if (llm_tools_should_skip_followup(results)) {
             LOG_INFO("OpenAI streaming: Skipping follow-up call (tool requested no follow-up)");
-            char *direct_response = llm_tools_get_direct_response(&results);
+            char *direct_response = llm_tools_get_direct_response(results);
 
             // Add synthetic assistant message to complete the tool call sequence
             // This prevents HTTP 400 on subsequent requests due to incomplete history
@@ -1769,12 +1778,13 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
             }
 
             // Free any vision data from tool results
-            for (int i = 0; i < results.count; i++) {
-               if (results.results[i].vision_image) {
-                  free(results.results[i].vision_image);
-                  results.results[i].vision_image = NULL;
+            for (int i = 0; i < results->count; i++) {
+               if (results->results[i].vision_image) {
+                  free(results->results[i].vision_image);
+                  results->results[i].vision_image = NULL;
                }
             }
+            free(results);
             return direct_response;
          }
 
@@ -1790,12 +1800,13 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
                chunk_callback(error_msg, callback_userdata);
             }
             // Free any vision data from tool results
-            for (int i = 0; i < results.count; i++) {
-               if (results.results[i].vision_image) {
-                  free(results.results[i].vision_image);
-                  results.results[i].vision_image = NULL;
+            for (int i = 0; i < results->count; i++) {
+               if (results->results[i].vision_image) {
+                  free(results->results[i].vision_image);
+                  results->results[i].vision_image = NULL;
                }
             }
+            free(results);
             return strdup(error_msg);
          }
 
@@ -1805,19 +1816,19 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
 
          // Debug: Log tool results that were added
          LOG_INFO("OpenAI streaming: Tool results added to history:");
-         for (int i = 0; i < results.count; i++) {
-            LOG_INFO("  [%d] id=%s result=%.200s%s", i, results.results[i].tool_call_id,
-                     results.results[i].result,
-                     strlen(results.results[i].result) > 200 ? "..." : "");
+         for (int i = 0; i < results->count; i++) {
+            LOG_INFO("  [%d] id=%s result=%.200s%s", i, results->results[i].tool_call_id,
+                     results->results[i].result,
+                     strlen(results->results[i].result) > 200 ? "..." : "");
          }
 
          // Check for vision data in tool results (session-isolated)
          const char *result_vision = NULL;
          size_t result_vision_size = 0;
-         for (int i = 0; i < results.count; i++) {
-            if (results.results[i].vision_image && results.results[i].vision_image_size > 0) {
-               result_vision = results.results[i].vision_image;
-               result_vision_size = results.results[i].vision_image_size;
+         for (int i = 0; i < results->count; i++) {
+            if (results->results[i].vision_image && results->results[i].vision_image_size > 0) {
+               result_vision = results->results[i].vision_image;
+               result_vision_size = results->results[i].vision_image_size;
                LOG_INFO("OpenAI streaming: Including vision from tool result (%zu bytes)",
                         result_vision_size);
                break;
@@ -1878,12 +1889,13 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
          }
 
          // Free vision data from tool results after use
-         for (int i = 0; i < results.count; i++) {
-            if (results.results[i].vision_image) {
-               free(results.results[i].vision_image);
-               results.results[i].vision_image = NULL;
+         for (int i = 0; i < results->count; i++) {
+            if (results->results[i].vision_image) {
+               free(results->results[i].vision_image);
+               results->results[i].vision_image = NULL;
             }
          }
+         free(results);
 
          return result;
       }

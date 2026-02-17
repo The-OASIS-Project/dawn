@@ -4425,6 +4425,11 @@ char *webui_process_commands(const char *llm_response, session_t *session) {
       return NULL;
    }
 
+   /* Bail early if satellite/client already disconnected — avoid wasting LLM API calls */
+   if (session->disconnected) {
+      return NULL;
+   }
+
    struct mosquitto *mosq = worker_pool_get_mosq();
    if (!mosq) {
       LOG_WARNING("WebUI: No MQTT connection, cannot process commands");

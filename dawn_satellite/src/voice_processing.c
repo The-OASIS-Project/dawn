@@ -211,6 +211,7 @@ struct voice_ctx {
 
    /* Response timeout tracking */
    time_t waiting_start;
+   time_t last_server_activity; /* Updated on every incoming server message */
 
    /* Manual wake: don't count silence until user starts speaking */
    bool awaiting_speech;
@@ -248,6 +249,8 @@ static void on_stream_callback(const char *text, bool is_end, void *user_data) {
    if (!ctx)
       return;
 
+   ctx->last_server_activity = time(NULL);
+
    if (text && text[0]) {
       /* Append to response buffer (for logging/history) - protected by mutex */
       pthread_mutex_lock(&ctx->response_mutex);
@@ -280,8 +283,10 @@ static void on_stream_callback(const char *text, bool is_end, void *user_data) {
 }
 
 static void on_state_callback(const char *state_str, void *user_data) {
-   (void)user_data;
-   (void)state_str;
+   voice_ctx_t *ctx = (voice_ctx_t *)user_data;
+   if (ctx) {
+      ctx->last_server_activity = time(NULL);
+   }
    LOG_DEBUG("Server state: %s", state_str);
 }
 
@@ -1381,6 +1386,7 @@ int voice_processing_loop(voice_ctx_t *ctx,
                                  /* Send query */
                                  ctx->state = VOICE_STATE_WAITING;
                                  ctx->waiting_start = time(NULL);
+                                 ctx->last_server_activity = ctx->waiting_start;
                                  ws_client_send_query(ws, command_text);
                                  free(command_text);
                               } else {
@@ -1459,6 +1465,7 @@ int voice_processing_loop(voice_ctx_t *ctx,
                            /* Send query */
                            ctx->state = VOICE_STATE_WAITING;
                            ctx->waiting_start = time(NULL);
+                           ctx->last_server_activity = ctx->waiting_start;
                            ws_client_send_query(ws, cmd_result->text);
 #ifdef HAVE_ASR_ENGINE
                            asr_engine_result_free(cmd_result);
@@ -1525,19 +1532,23 @@ int voice_processing_loop(voice_ctx_t *ctx,
                ctx->silence_frame_count = 0;
                atomic_store(&ctx->tts_stop_flag, 0); /* Reset for next interaction */
             } else {
-               /* Check for response timeout (no streaming data received) */
+               /* Check for response timeout based on time since last server activity.
+                * This covers long tool calls (e.g. FlareSolverr 40s) where the server
+                * sends state updates between tool iterations. 50s covers the longest
+                * common tool timeout (FlareSolverr 40s) with margin. */
                time_t now = time(NULL);
-               int elapsed = (int)(now - ctx->waiting_start);
+               int since_last_msg = (int)(now - ctx->last_server_activity);
                bool has_partial = false;
                pthread_mutex_lock(&ctx->response_mutex);
                has_partial = (ctx->response_len > 0);
                pthread_mutex_unlock(&ctx->response_mutex);
 
-               /* Timeout: 30s if no data at all, 120s if streaming has started */
-               int timeout_sec = has_partial ? 120 : 30;
-               if (elapsed >= timeout_sec) {
-                  LOG_WARNING("Response timeout after %ds (partial=%s), returning to silence",
-                              elapsed, has_partial ? "yes" : "no");
+               int timeout_sec = 50;
+               if (since_last_msg >= timeout_sec) {
+                  int total_elapsed = (int)(now - ctx->waiting_start);
+                  LOG_WARNING("Response timeout: %ds since last server message (%ds total, "
+                              "partial=%s), returning to silence",
+                              since_last_msg, total_elapsed, has_partial ? "yes" : "no");
                   ctx->state = VOICE_STATE_SILENCE;
                   ctx->speech_frame_count = 0;
                   ctx->silence_frame_count = 0;

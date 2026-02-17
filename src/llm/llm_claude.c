@@ -597,9 +597,17 @@ static char *llm_claude_streaming_internal(struct json_object *conversation_hist
       if (tool_calls && tool_calls->count > 0) {
          LOG_INFO("Claude streaming: Executing %d tool call(s)", tool_calls->count);
 
-         // Execute tools
-         tool_result_list_t results;
-         llm_tools_execute_all(tool_calls, &results);
+         // Execute tools (heap-allocated: ~66KB, too large for 512KB satellite worker stack
+         // with up to MAX_TOOL_ITERATIONS levels of recursion)
+         tool_result_list_t *results = calloc(1, sizeof(tool_result_list_t));
+         if (!results) {
+            LOG_ERROR("Claude streaming: Failed to allocate tool results");
+            sse_parser_free(sse_parser);
+            llm_stream_free(stream_ctx);
+            json_object_put(request);
+            return NULL;
+         }
+         llm_tools_execute_all(tool_calls, results);
 
          // Add assistant message with tool_use blocks to conversation history
          // Claude format: content is an array of content blocks
@@ -649,7 +657,7 @@ static char *llm_claude_streaming_internal(struct json_object *conversation_hist
          json_object_array_add(conversation_history, assistant_msg);
 
          // Add tool results to conversation history (Claude format)
-         llm_tools_add_results_claude(conversation_history, &results);
+         llm_tools_add_results_claude(conversation_history, results);
 
          // Cleanup current stream context
          sse_parser_free(sse_parser);
@@ -657,9 +665,9 @@ static char *llm_claude_streaming_internal(struct json_object *conversation_hist
          json_object_put(request);
 
          // Check if we should skip follow-up (e.g., LLM was switched)
-         if (llm_tools_should_skip_followup(&results)) {
+         if (llm_tools_should_skip_followup(results)) {
             LOG_INFO("Claude streaming: Skipping follow-up call (tool requested no follow-up)");
-            char *direct_response = llm_tools_get_direct_response(&results);
+            char *direct_response = llm_tools_get_direct_response(results);
 
             // Add synthetic assistant message to complete the tool call sequence
             // This prevents errors on subsequent requests due to incomplete history
@@ -683,12 +691,13 @@ static char *llm_claude_streaming_internal(struct json_object *conversation_hist
             }
 
             // Free any vision data from tool results
-            for (int i = 0; i < results.count; i++) {
-               if (results.results[i].vision_image) {
-                  free(results.results[i].vision_image);
-                  results.results[i].vision_image = NULL;
+            for (int i = 0; i < results->count; i++) {
+               if (results->results[i].vision_image) {
+                  free(results->results[i].vision_image);
+                  results->results[i].vision_image = NULL;
                }
             }
+            free(results);
             return direct_response;
          }
 
@@ -704,22 +713,23 @@ static char *llm_claude_streaming_internal(struct json_object *conversation_hist
                chunk_callback(error_msg, callback_userdata);
             }
             // Free any vision data from tool results
-            for (int i = 0; i < results.count; i++) {
-               if (results.results[i].vision_image) {
-                  free(results.results[i].vision_image);
-                  results.results[i].vision_image = NULL;
+            for (int i = 0; i < results->count; i++) {
+               if (results->results[i].vision_image) {
+                  free(results->results[i].vision_image);
+                  results->results[i].vision_image = NULL;
                }
             }
+            free(results);
             return strdup(error_msg);
          }
 
          // Check for vision data in tool results (session-isolated)
          const char *result_vision = NULL;
          size_t result_vision_size = 0;
-         for (int i = 0; i < results.count; i++) {
-            if (results.results[i].vision_image && results.results[i].vision_image_size > 0) {
-               result_vision = results.results[i].vision_image;
-               result_vision_size = results.results[i].vision_image_size;
+         for (int i = 0; i < results->count; i++) {
+            if (results->results[i].vision_image && results->results[i].vision_image_size > 0) {
+               result_vision = results->results[i].vision_image;
+               result_vision_size = results->results[i].vision_image_size;
                LOG_INFO("Claude streaming: Including vision from tool result (%zu bytes)",
                         result_vision_size);
                break;
@@ -773,12 +783,13 @@ static char *llm_claude_streaming_internal(struct json_object *conversation_hist
          }
 
          // Free vision data from tool results after use
-         for (int i = 0; i < results.count; i++) {
-            if (results.results[i].vision_image) {
-               free(results.results[i].vision_image);
-               results.results[i].vision_image = NULL;
+         for (int i = 0; i < results->count; i++) {
+            if (results->results[i].vision_image) {
+               free(results->results[i].vision_image);
+               results->results[i].vision_image = NULL;
             }
          }
+         free(results);
 
          return result;
       }
