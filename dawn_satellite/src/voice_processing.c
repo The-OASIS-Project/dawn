@@ -106,6 +106,9 @@ static const char *evening_greeting = "Good evening Sir.";
 /* Offline fallback message */
 static const char *offline_message = "I'm sorry, I can't reach the server right now.";
 
+/* Reconnect notification */
+static const char *reconnect_message = "Connection re-established. I'm back online.";
+
 /* =============================================================================
  * Internal Structures
  * ============================================================================= */
@@ -902,31 +905,34 @@ time_t voice_processing_get_connect_time(voice_ctx_t *ctx) {
    return ws_client_get_connect_time(ctx->ws);
 }
 
-void voice_processing_speak_greeting(voice_ctx_t *ctx, satellite_ctx_t *sat_ctx) {
-   if (!ctx || !sat_ctx)
-      return;
-
+/**
+ * @brief Synthesize and play a single TTS message, blocking until complete
+ *
+ * Shared helper for greeting, offline, and reconnect notifications.
+ *
+ * @param ctx   Voice context (must have TTS loaded)
+ * @param sat_ctx Satellite context (for audio playback fallback)
+ * @param message Text to synthesize
+ * @param label  Short label for log messages (e.g. "greeting", "offline")
+ * @return 0 on success, -1 on failure
+ */
+static int speak_single_message(voice_ctx_t *ctx,
+                                satellite_ctx_t *sat_ctx,
+                                const char *message,
+                                const char *label) {
 #ifdef HAVE_TTS_PIPER
    if (!ctx->tts) {
-      LOG_ERROR("TTS not loaded, cannot speak greeting");
-      return;
+      LOG_ERROR("TTS not loaded, cannot speak %s", label);
+      return -1;
    }
 
-   /* Ensure playback handle and queue are available for single-shot speech */
-   if (!ctx->playback && sat_ctx->audio_playback) {
-      ctx->playback = (audio_playback_t *)sat_ctx->audio_playback;
-      atomic_store(&ctx->tts_stop_flag, 0);
-      ctx->tts_queue = tts_playback_queue_create(ctx->playback, &ctx->tts_stop_flag);
-   }
-
-   const char *greeting = time_of_day_greeting();
-   LOG_INFO("Speaking greeting: %s", greeting);
+   LOG_INFO("Speaking %s: %s", label, message);
 
    int16_t *audio = NULL;
    size_t audio_len = 0;
    tts_piper_result_t tts_result;
 
-   if (tts_piper_synthesize(ctx->tts, greeting, &audio, &audio_len, &tts_result) == 0 && audio &&
+   if (tts_piper_synthesize(ctx->tts, message, &audio, &audio_len, &tts_result) == 0 && audio &&
        audio_len > 0) {
       int sample_rate = tts_piper_get_sample_rate(ctx->tts);
       if (ctx->tts_queue) {
@@ -941,56 +947,48 @@ void voice_processing_speak_greeting(voice_ctx_t *ctx, satellite_ctx_t *sat_ctx)
          audio_playback_play(playback, audio, audio_len, sample_rate, &stop_flag, true);
          free(audio);
       }
-      LOG_INFO("Greeting playback complete");
-   } else {
-      LOG_ERROR("Failed to synthesize greeting");
+      return 0;
    }
+
+   LOG_ERROR("Failed to synthesize %s", label);
+   return -1;
 #else
    (void)ctx;
    (void)sat_ctx;
-   LOG_INFO("TTS not available, skipping greeting");
+   (void)message;
+   LOG_INFO("TTS not available, cannot speak %s", label);
+   return -1;
 #endif
+}
+
+void voice_processing_speak_greeting(voice_ctx_t *ctx, satellite_ctx_t *sat_ctx) {
+   if (!ctx || !sat_ctx)
+      return;
+
+#ifdef HAVE_TTS_PIPER
+   /* Ensure playback handle and queue are available for single-shot speech */
+   if (!ctx->playback && sat_ctx->audio_playback) {
+      ctx->playback = (audio_playback_t *)sat_ctx->audio_playback;
+      atomic_store(&ctx->tts_stop_flag, 0);
+      ctx->tts_queue = tts_playback_queue_create(ctx->playback, &ctx->tts_stop_flag);
+   }
+#endif
+
+   speak_single_message(ctx, sat_ctx, time_of_day_greeting(), "greeting");
 }
 
 void voice_processing_speak_offline(voice_ctx_t *ctx, satellite_ctx_t *sat_ctx) {
    if (!ctx || !sat_ctx)
       return;
 
-#ifdef HAVE_TTS_PIPER
-   if (!ctx->tts) {
-      LOG_ERROR("TTS not loaded, cannot speak offline message");
+   speak_single_message(ctx, sat_ctx, offline_message, "offline message");
+}
+
+void voice_processing_speak_reconnect(voice_ctx_t *ctx, satellite_ctx_t *sat_ctx) {
+   if (!ctx || !sat_ctx)
       return;
-   }
 
-   LOG_INFO("Speaking offline message: %s", offline_message);
-
-   int16_t *audio = NULL;
-   size_t audio_len = 0;
-   tts_piper_result_t tts_result;
-
-   if (tts_piper_synthesize(ctx->tts, offline_message, &audio, &audio_len, &tts_result) == 0 &&
-       audio && audio_len > 0) {
-      int sample_rate = tts_piper_get_sample_rate(ctx->tts);
-      if (ctx->tts_queue) {
-         tts_playback_queue_reset(ctx->tts_queue);
-         tts_playback_queue_push(ctx->tts_queue, audio, audio_len, sample_rate);
-         tts_playback_queue_finish(ctx->tts_queue);
-         while (tts_playback_queue_is_active(ctx->tts_queue))
-            usleep(10000);
-      } else {
-         audio_playback_t *playback = (audio_playback_t *)sat_ctx->audio_playback;
-         atomic_int stop_flag = 0;
-         audio_playback_play(playback, audio, audio_len, sample_rate, &stop_flag, true);
-         free(audio);
-      }
-   } else {
-      LOG_ERROR("Failed to synthesize offline message");
-   }
-#else
-   (void)ctx;
-   (void)sat_ctx;
-   LOG_INFO("TTS not available, cannot speak offline message");
-#endif
+   speak_single_message(ctx, sat_ctx, reconnect_message, "reconnect message");
 }
 
 int voice_processing_loop(voice_ctx_t *ctx,
@@ -1066,6 +1064,7 @@ int voice_processing_loop(voice_ctx_t *ctx,
 #ifdef HAVE_OPUS
             /* Immediately restore music on cancel (no 2s cooldown) */
             if (ctx->music_pb) {
+               music_playback_set_tts_hold(ctx->music_pb, false);
                if (ctx->music_ducked) {
                   music_playback_set_volume(ctx->music_pb, ctx->music_pre_duck_volume);
                   ctx->music_ducked = false;
@@ -1119,6 +1118,11 @@ int voice_processing_loop(voice_ctx_t *ctx,
             }
          }
 
+         /* Set TTS hold on transition to tts_active (once, gated by music_was_playing) */
+         if (tts_active && !ctx->music_was_playing) {
+            music_playback_set_tts_hold(ctx->music_pb, true);
+         }
+
          /* Pause for TTS (after ducking, so volume is already low) */
          if (tts_active && !ctx->music_was_playing && playing) {
             music_playback_pause(ctx->music_pb);
@@ -1127,6 +1131,9 @@ int voice_processing_loop(voice_ctx_t *ctx,
 
          /* Resume + restore when back in SILENCE */
          if (ctx->state == VOICE_STATE_SILENCE) {
+            /* Release TTS hold — deferred resume fires if music arrived during TTS */
+            music_playback_set_tts_hold(ctx->music_pb, false);
+
             if (ctx->music_was_playing) {
                music_playback_resume(ctx->music_pb);
                ctx->music_was_playing = false;

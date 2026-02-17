@@ -92,30 +92,33 @@ static const char *SQL_SEARCH = "SELECT path, title, artist, album, duration_sec
                                 "FROM music_metadata "
                                 "WHERE title LIKE ? OR artist LIKE ? OR album LIKE ? "
                                 "   OR path LIKE ? "
-                                "ORDER BY artist, album, title "
+                                "ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, "
+                                "title COLLATE NOCASE "
                                 "LIMIT ?";
 
 /* List query: return all tracks ordered by artist/album/title */
 static const char *SQL_LIST = "SELECT path, title, artist, album, duration_sec "
                               "FROM music_metadata "
-                              "ORDER BY artist, album, title "
+                              "ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, "
+                              "title COLLATE NOCASE "
                               "LIMIT ?";
 
-static const char *SQL_LIST_PAGED = "SELECT path, title, artist, album, duration_sec "
-                                    "FROM music_metadata "
-                                    "ORDER BY artist, album, title "
-                                    "LIMIT ? OFFSET ?";
+static const char *SQL_LIST_PAGED =
+    "SELECT path, title, artist, album, duration_sec "
+    "FROM music_metadata "
+    "ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, title COLLATE NOCASE "
+    "LIMIT ? OFFSET ?";
 
 /* List unique artists */
 static const char *SQL_LIST_ARTISTS = "SELECT DISTINCT artist FROM music_metadata "
                                       "WHERE artist != '' "
-                                      "ORDER BY artist "
+                                      "ORDER BY artist COLLATE NOCASE "
                                       "LIMIT ? OFFSET ?";
 
 /* List unique albums */
 static const char *SQL_LIST_ALBUMS = "SELECT DISTINCT album FROM music_metadata "
                                      "WHERE album != '' "
-                                     "ORDER BY album "
+                                     "ORDER BY album COLLATE NOCASE "
                                      "LIMIT ? OFFSET ?";
 
 /* List artists with stats (album count, track count) */
@@ -126,7 +129,7 @@ static const char *SQL_LIST_ARTISTS_WITH_STATS =
     "FROM music_metadata "
     "WHERE artist != '' "
     "GROUP BY artist "
-    "ORDER BY artist "
+    "ORDER BY artist COLLATE NOCASE "
     "LIMIT ? OFFSET ?";
 
 /* List albums with stats (track count, artist) - uses MAX(artist) instead of correlated subquery */
@@ -136,14 +139,14 @@ static const char *SQL_LIST_ALBUMS_WITH_STATS = "SELECT album, "
                                                 "FROM music_metadata "
                                                 "WHERE album != '' "
                                                 "GROUP BY album "
-                                                "ORDER BY album "
+                                                "ORDER BY album COLLATE NOCASE "
                                                 "LIMIT ? OFFSET ?";
 
 /* Get tracks by artist */
 static const char *SQL_GET_BY_ARTIST = "SELECT path, title, artist, album, duration_sec "
                                        "FROM music_metadata "
                                        "WHERE artist = ? "
-                                       "ORDER BY album, title "
+                                       "ORDER BY album COLLATE NOCASE, title COLLATE NOCASE "
                                        "LIMIT ?";
 
 /* Get tracks by album */

@@ -66,6 +66,10 @@ struct music_playback {
    /* When true, a dedicated music_stream producer is active on its own thread.
     * The ws_client fallback path must not call push_opus concurrently. */
    atomic_bool dedicated_producer;
+
+   /* TTS hold: defer resume() and push_opus() auto-start while TTS is active */
+   atomic_bool tts_hold;
+   atomic_bool deferred_resume;
 };
 
 /* =============================================================================
@@ -146,6 +150,8 @@ music_playback_t *music_playback_create(audio_playback_t *audio) {
    atomic_store(&ctx->ring_head, 0);
    atomic_store(&ctx->ring_tail, 0);
    atomic_store(&ctx->dedicated_producer, false);
+   atomic_store(&ctx->tts_hold, false);
+   atomic_store(&ctx->deferred_resume, false);
 
    LOG_INFO("Music playback engine created (ring buffer + LWS drain, %.1fs capacity)",
             (float)RING_SIZE / (48000.0f * 2));
@@ -190,8 +196,8 @@ int music_playback_push_opus(music_playback_t *ctx, const uint8_t *opus_data, in
 
    ring_write(ctx, pcm, n_samples);
 
-   /* First frame auto-starts playback */
-   if (st == MUSIC_PB_IDLE)
+   /* First frame auto-starts playback (deferred during TTS hold) */
+   if (st == MUSIC_PB_IDLE && !atomic_load(&ctx->tts_hold))
       atomic_store(&ctx->state, MUSIC_PB_PLAYING);
 
    return frames;
@@ -281,6 +287,7 @@ void music_playback_pause(music_playback_t *ctx) {
 
    atomic_store(&ctx->stop_flag, 1);
    atomic_store(&ctx->state, MUSIC_PB_PAUSED);
+   atomic_store(&ctx->deferred_resume, false); /* Clear stale deferred resume */
    audio_playback_stop(ctx->audio);
    atomic_store(&ctx->stop_flag, 0);
 
@@ -293,6 +300,13 @@ void music_playback_resume(music_playback_t *ctx) {
 
    if (atomic_load(&ctx->state) != MUSIC_PB_PAUSED)
       return;
+
+   /* Defer resume while TTS is active — fires when hold is released */
+   if (atomic_load(&ctx->tts_hold)) {
+      atomic_store(&ctx->deferred_resume, true);
+      LOG_INFO("Music resume deferred (TTS hold active)");
+      return;
+   }
 
    audio_playback_prepare(ctx->audio);
    atomic_store(&ctx->state, MUSIC_PB_PLAYING);
@@ -330,6 +344,18 @@ int music_playback_get_buffered_ms(music_playback_t *ctx) {
    size_t ring_frames = ring_count(ctx) / 2;
    long alsa_frames = audio_playback_get_delay_frames(ctx->audio);
    return (int)((ring_frames + (size_t)alsa_frames) * 1000 / 48000);
+}
+
+void music_playback_set_tts_hold(music_playback_t *ctx, bool hold) {
+   if (!ctx)
+      return;
+
+   atomic_store(&ctx->tts_hold, hold);
+
+   if (!hold && atomic_exchange(&ctx->deferred_resume, false)) {
+      /* tts_hold is already false — resume() runs normally */
+      music_playback_resume(ctx);
+   }
 }
 
 void music_playback_set_dedicated_producer(music_playback_t *ctx, bool active) {

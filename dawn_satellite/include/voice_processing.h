@@ -239,6 +239,17 @@ void voice_processing_speak_greeting(voice_ctx_t *ctx, struct satellite_ctx *sat
 void voice_processing_speak_offline(voice_ctx_t *ctx, struct satellite_ctx *sat_ctx);
 
 /**
+ * @brief Speak reconnect notification via TTS
+ *
+ * Plays "Connection re-established. I'm back online."
+ * Should be called when connection to daemon is restored after a disconnection.
+ *
+ * @param ctx Voice processing context (with TTS loaded)
+ * @param sat_ctx Satellite context (for audio playback)
+ */
+void voice_processing_speak_reconnect(voice_ctx_t *ctx, struct satellite_ctx *sat_ctx);
+
+/**
  * @brief Copy current status detail from WebSocket client
  *
  * Thread-safe: delegates to ws_client_get_status_detail().

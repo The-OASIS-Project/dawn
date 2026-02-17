@@ -11,6 +11,9 @@
 (function (global) {
    'use strict';
 
+   // Constants
+   const BROWSE_PAGE_SIZE = 50;
+
    // UI state
    let isOpen = false;
    let activeTab = 'playing';
@@ -58,6 +61,7 @@
       // Library
       searchInput: null,
       libraryStats: null,
+      libraryTab: null,
       artistsList: null,
       albumsList: null,
    };
@@ -71,6 +75,10 @@
       lastQueueLength: -1, // Track queue changes for auto-refresh
       lastQueueIndex: -1,
       queueRestored: false, // Track if we've restored saved queue
+      browseOffset: 0,
+      browseTotalCount: 0,
+      browseCurrentType: null, // 'tracks', 'artists', 'albums'
+      browseLoading: false,
    };
 
    /**
@@ -164,6 +172,7 @@
       // Library
       elements.searchInput = document.getElementById('music-search');
       elements.libraryStats = document.querySelector('.music-library-stats');
+      elements.libraryTab = document.querySelector('.music-tab-content[data-tab="library"]');
       elements.searchResults = document.getElementById('music-search-results');
       elements.searchResultsList = document.getElementById('music-results-list');
       elements.browseSection = document.getElementById('music-browse-section');
@@ -253,6 +262,11 @@
          clearQueueBtn.addEventListener('click', () => {
             DawnMusicPlayback.control('clear_queue');
          });
+      }
+
+      // Library infinite scroll
+      if (elements.libraryTab) {
+         elements.libraryTab.addEventListener('scroll', handleLibraryScroll);
       }
 
       // Keyboard shortcuts
@@ -789,6 +803,45 @@
    }
 
    /**
+    * Handle scroll on the library tab for infinite loading
+    */
+   function handleLibraryScroll() {
+      if (localState.browseLoading) return;
+      if (!localState.browseCurrentType) return;
+      if (localState.browseOffset + BROWSE_PAGE_SIZE >= localState.browseTotalCount) return;
+      if (!elements.libraryTab) return;
+
+      const distanceFromBottom =
+         elements.libraryTab.scrollHeight -
+         elements.libraryTab.scrollTop -
+         elements.libraryTab.clientHeight;
+      if (distanceFromBottom < 200) {
+         loadNextBrowsePage();
+      }
+   }
+
+   /**
+    * Load the next page of browse results
+    */
+   function loadNextBrowsePage() {
+      localState.browseLoading = true;
+      localState.browseOffset += BROWSE_PAGE_SIZE;
+      DawnWS.send({
+         type: 'music_library',
+         payload: {
+            type: localState.browseCurrentType,
+            offset: localState.browseOffset,
+            limit: BROWSE_PAGE_SIZE,
+         },
+      });
+
+      // Safety timeout: reset loading flag if response never arrives
+      setTimeout(() => {
+         localState.browseLoading = false;
+      }, 5000);
+   }
+
+   /**
     * Handle library response
     * @param {object} payload - Library data payload
     */
@@ -797,7 +850,16 @@
       const browseSection = document.getElementById('music-browse-section');
       const sectionHeader = browseSection?.querySelector('.music-library-section-header');
 
+      // Determine if this is an appended page (offset > 0)
+      const isAppend = (payload.offset || 0) > 0;
+
       if (payload.browse_type === 'stats' && elements.libraryStats) {
+         // Reset pagination state when returning to stats view
+         localState.browseCurrentType = null;
+         localState.browseOffset = 0;
+         localState.browseTotalCount = 0;
+         localState.browseLoading = false;
+
          // Update library stats with clickable items
          const html = `
             <div class="music-library-stat" data-browse="tracks" style="cursor: pointer;">
@@ -829,24 +891,56 @@
             browseList.innerHTML =
                '<li class="music-library-item"><span class="music-library-item-title">Click on Tracks, Artists, or Albums above to browse</span></li>';
       } else if (payload.browse_type === 'tracks' && browseList) {
-         // Show all tracks
-         if (sectionHeader) sectionHeader.textContent = `All Tracks (${payload.count || 0})`;
-         renderTrackList(browseList, payload.tracks || []);
+         const total = payload.total_count || payload.count || 0;
+         if (sectionHeader) sectionHeader.textContent = `All Tracks (${total})`;
+         if (isAppend) {
+            renderTrackList(browseList, payload.tracks || [], false, true);
+         } else {
+            localState.browseCurrentType = 'tracks';
+            localState.browseOffset = 0;
+            localState.browseTotalCount = total;
+            renderTrackList(browseList, payload.tracks || []);
+         }
+         localState.browseLoading = false;
       } else if (payload.browse_type === 'artists' && browseList) {
-         // Show artists with stats
-         if (sectionHeader) sectionHeader.textContent = `Artists (${payload.count || 0})`;
-         renderArtistList(browseList, payload.artists || []);
+         const total = payload.total_count || payload.count || 0;
+         if (sectionHeader) sectionHeader.textContent = `Artists (${total})`;
+         if (isAppend) {
+            renderArtistList(browseList, payload.artists || [], true);
+         } else {
+            localState.browseCurrentType = 'artists';
+            localState.browseOffset = 0;
+            localState.browseTotalCount = total;
+            renderArtistList(browseList, payload.artists || []);
+         }
+         localState.browseLoading = false;
       } else if (payload.browse_type === 'albums' && browseList) {
-         // Show albums with stats
-         if (sectionHeader) sectionHeader.textContent = `Albums (${payload.count || 0})`;
-         renderAlbumList(browseList, payload.albums || []);
+         const total = payload.total_count || payload.count || 0;
+         if (sectionHeader) sectionHeader.textContent = `Albums (${total})`;
+         if (isAppend) {
+            renderAlbumList(browseList, payload.albums || [], true);
+         } else {
+            localState.browseCurrentType = 'albums';
+            localState.browseOffset = 0;
+            localState.browseTotalCount = total;
+            renderAlbumList(browseList, payload.albums || []);
+         }
+         localState.browseLoading = false;
       } else if (payload.browse_type === 'tracks_by_artist' && browseList) {
-         // Show tracks for a specific artist
+         // Not paginated — reset state
+         localState.browseCurrentType = null;
+         localState.browseOffset = 0;
+         localState.browseTotalCount = 0;
+         localState.browseLoading = false;
          if (sectionHeader)
             sectionHeader.textContent = `${payload.artist} (${payload.count || 0} tracks)`;
          renderTrackList(browseList, payload.tracks || [], true);
       } else if (payload.browse_type === 'tracks_by_album' && browseList) {
-         // Show tracks for a specific album
+         // Not paginated — reset state
+         localState.browseCurrentType = null;
+         localState.browseOffset = 0;
+         localState.browseTotalCount = 0;
+         localState.browseLoading = false;
          if (sectionHeader)
             sectionHeader.textContent = `${payload.album} (${payload.count || 0} tracks)`;
          renderTrackList(browseList, payload.tracks || [], true);
@@ -855,9 +949,13 @@
 
    /**
     * Render a list of tracks with play/add buttons
+    * @param {HTMLElement} container - List container
+    * @param {Array} tracks - Track data array
+    * @param {boolean} [isSubList=false] - Whether this is a sub-list (artist/album tracks)
+    * @param {boolean} [append=false] - Append to existing list instead of replacing
     */
-   function renderTrackList(container, tracks) {
-      if (tracks.length === 0) {
+   function renderTrackList(container, tracks, isSubList, append) {
+      if (tracks.length === 0 && !append) {
          container.innerHTML =
             '<li class="music-library-item"><span class="music-library-item-title">No tracks found</span></li>';
          return;
@@ -878,15 +976,26 @@
          )
          .join('');
 
-      container.innerHTML = html;
-      bindTrackListEvents(container);
+      if (append) {
+         container.insertAdjacentHTML('beforeend', html);
+         // Bind events only on newly added items
+         const allItems = container.querySelectorAll('.music-library-item[data-path]');
+         const newItems = Array.from(allItems).slice(-tracks.length);
+         bindTrackListItemEvents(newItems);
+      } else {
+         container.innerHTML = html;
+         bindTrackListEvents(container);
+      }
    }
 
    /**
     * Render a list of artists with album/track counts
+    * @param {HTMLElement} container - List container
+    * @param {Array} artists - Artist data array
+    * @param {boolean} [append=false] - Append to existing list instead of replacing
     */
-   function renderArtistList(container, artists) {
-      if (artists.length === 0) {
+   function renderArtistList(container, artists, append) {
+      if (artists.length === 0 && !append) {
          container.innerHTML =
             '<li class="music-library-item"><span class="music-library-item-title">No artists found</span></li>';
          return;
@@ -906,10 +1015,23 @@
          )
          .join('');
 
-      container.innerHTML = html;
+      if (append) {
+         container.insertAdjacentHTML('beforeend', html);
+         const allItems = container.querySelectorAll('.music-library-item[data-artist]');
+         const newItems = Array.from(allItems).slice(-artists.length);
+         bindArtistListItemEvents(newItems);
+      } else {
+         container.innerHTML = html;
+         bindArtistListItemEvents(container.querySelectorAll('.music-library-item[data-artist]'));
+      }
+   }
 
-      // Artist click handlers
-      container.querySelectorAll('.music-library-item[data-artist]').forEach((item) => {
+   /**
+    * Bind events for artist list items
+    * @param {NodeList|Array} items - Artist list items to bind
+    */
+   function bindArtistListItemEvents(items) {
+      items.forEach((item) => {
          const artistName = item.dataset.artist;
 
          // Double-click to show artist's tracks
@@ -938,9 +1060,12 @@
 
    /**
     * Render a list of albums with track counts
+    * @param {HTMLElement} container - List container
+    * @param {Array} albums - Album data array
+    * @param {boolean} [append=false] - Append to existing list instead of replacing
     */
-   function renderAlbumList(container, albums) {
-      if (albums.length === 0) {
+   function renderAlbumList(container, albums, append) {
+      if (albums.length === 0 && !append) {
          container.innerHTML =
             '<li class="music-library-item"><span class="music-library-item-title">No albums found</span></li>';
          return;
@@ -960,10 +1085,23 @@
          )
          .join('');
 
-      container.innerHTML = html;
+      if (append) {
+         container.insertAdjacentHTML('beforeend', html);
+         const allItems = container.querySelectorAll('.music-library-item[data-album]');
+         const newItems = Array.from(allItems).slice(-albums.length);
+         bindAlbumListItemEvents(newItems);
+      } else {
+         container.innerHTML = html;
+         bindAlbumListItemEvents(container.querySelectorAll('.music-library-item[data-album]'));
+      }
+   }
 
-      // Album click handlers
-      container.querySelectorAll('.music-library-item[data-album]').forEach((item) => {
+   /**
+    * Bind events for album list items
+    * @param {NodeList|Array} items - Album list items to bind
+    */
+   function bindAlbumListItemEvents(items) {
+      items.forEach((item) => {
          const albumName = item.dataset.album;
 
          // Double-click to show album's tracks
@@ -991,10 +1129,18 @@
    }
 
    /**
-    * Bind events for track list items
+    * Bind events for track list items in a container
     */
    function bindTrackListEvents(container) {
-      container.querySelectorAll('.music-library-item[data-path]').forEach((item) => {
+      bindTrackListItemEvents(container.querySelectorAll('.music-library-item[data-path]'));
+   }
+
+   /**
+    * Bind events for individual track list items
+    * @param {NodeList|Array} items - Track list items to bind
+    */
+   function bindTrackListItemEvents(items) {
+      items.forEach((item) => {
          const path = item.dataset.path;
          if (!path) return;
 

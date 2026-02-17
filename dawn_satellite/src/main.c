@@ -350,9 +350,11 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
       /* Set global for signal handler */
       g_voice_ctx = voice_ctx;
 
-      /* Speak welcome greeting on first connect only */
+      /* Speak welcome greeting on first connect, reconnect message on subsequent */
       if (first_connect) {
          voice_processing_speak_greeting(voice_ctx, ctx);
+      } else {
+         voice_processing_speak_reconnect(voice_ctx, ctx);
       }
 
       /* Run voice-activated loop */
