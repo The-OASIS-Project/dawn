@@ -21,6 +21,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stddef.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "spectrum_defs.h" /* For SPECTRUM_BINS */
@@ -75,13 +76,17 @@ void audio_playback_cleanup(audio_playback_t *ctx);
  * @param num_samples Number of samples
  * @param sample_rate Sample rate of input audio
  * @param stop_flag Optional flag to stop playback when set
+ * @param drain If true, drain/drop ALSA buffer after writing (blocks until
+ *              hardware finishes). Pass false when streaming consecutive
+ *              sentences to avoid DAC restart transients between them.
  * @return 0 on success, -1 on error
  */
 int audio_playback_play(audio_playback_t *ctx,
                         const int16_t *samples,
                         size_t num_samples,
                         unsigned int sample_rate,
-                        atomic_int *stop_flag);
+                        atomic_int *stop_flag,
+                        bool drain);
 
 /**
  * Play WAV data directly
@@ -117,6 +122,17 @@ int audio_playback_play_stereo(audio_playback_t *ctx,
                                const int16_t *stereo_samples,
                                size_t num_frames,
                                atomic_int *stop_flag);
+
+/**
+ * Drain ALSA playback buffer (blocks until hardware finishes playing).
+ *
+ * Call after the last sentence when using audio_playback_play() with drain=false,
+ * to ensure all queued audio reaches the speakers before moving on.
+ *
+ * @param ctx Pointer to playback context
+ * @param stop_flag Optional flag — if set, drops audio immediately instead of draining
+ */
+void audio_playback_drain(audio_playback_t *ctx, atomic_int *stop_flag);
 
 /**
  * Re-prepare ALSA device (e.g. after pause/TTS interruption).

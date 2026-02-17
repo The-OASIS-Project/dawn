@@ -549,7 +549,8 @@ static void on_sentence_complete(const char *sentence, void *userdata) {
          tts_playback_queue_push(ctx->tts_queue, audio, audio_len, sample_rate);
       } else {
          /* Fallback: blocking playback on WS thread */
-         audio_playback_play(ctx->playback, audio, audio_len, sample_rate, &ctx->tts_stop_flag);
+         audio_playback_play(ctx->playback, audio, audio_len, sample_rate, &ctx->tts_stop_flag,
+                            true);
          free(audio);
       }
    }
@@ -932,7 +933,7 @@ void voice_processing_speak_greeting(voice_ctx_t *ctx, satellite_ctx_t *sat_ctx)
       } else {
          audio_playback_t *playback = (audio_playback_t *)sat_ctx->audio_playback;
          atomic_int stop_flag = 0;
-         audio_playback_play(playback, audio, audio_len, sample_rate, &stop_flag);
+         audio_playback_play(playback, audio, audio_len, sample_rate, &stop_flag, true);
          free(audio);
       }
       LOG_INFO("Greeting playback complete");
@@ -974,7 +975,7 @@ void voice_processing_speak_offline(voice_ctx_t *ctx, satellite_ctx_t *sat_ctx) 
       } else {
          audio_playback_t *playback = (audio_playback_t *)sat_ctx->audio_playback;
          atomic_int stop_flag = 0;
-         audio_playback_play(playback, audio, audio_len, sample_rate, &stop_flag);
+         audio_playback_play(playback, audio, audio_len, sample_rate, &stop_flag, true);
          free(audio);
       }
    } else {

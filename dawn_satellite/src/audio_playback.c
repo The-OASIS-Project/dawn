@@ -292,6 +292,18 @@ void audio_playback_cleanup(audio_playback_t *ctx) {
    }
 }
 
+void audio_playback_drain(audio_playback_t *ctx, atomic_int *stop_flag) {
+   if (!ctx || !ctx->handle)
+      return;
+   pthread_mutex_lock(&ctx->alsa_mutex);
+   if (stop_flag && atomic_load(stop_flag)) {
+      snd_pcm_drop((snd_pcm_t *)ctx->handle);
+   } else {
+      snd_pcm_drain((snd_pcm_t *)ctx->handle);
+   }
+   pthread_mutex_unlock(&ctx->alsa_mutex);
+}
+
 void audio_playback_prepare(audio_playback_t *ctx) {
    if (ctx && ctx->handle) {
       pthread_mutex_lock(&ctx->alsa_mutex);
@@ -313,21 +325,28 @@ int audio_playback_play(audio_playback_t *ctx,
                         const int16_t *samples,
                         size_t num_samples,
                         unsigned int sample_rate,
-                        atomic_int *stop_flag) {
+                        atomic_int *stop_flag,
+                        bool drain) {
    if (!ctx || !ctx->initialized || !samples || num_samples == 0) {
       return -1;
    }
 
    snd_pcm_t *handle = (snd_pcm_t *)ctx->handle;
 
-   /* Prepare device */
+   /* Prepare device only if not already in a usable state.
+    * Calling snd_pcm_prepare() unconditionally resets the hardware ring buffer,
+    * causing DAC restart transients (pops/distortion) between sentences. */
    pthread_mutex_lock(&ctx->alsa_mutex);
-   int err = snd_pcm_prepare(handle);
-   pthread_mutex_unlock(&ctx->alsa_mutex);
-   if (err < 0) {
-      LOG_ERROR("Cannot prepare for playback: %s", snd_strerror(err));
-      return -1;
+   snd_pcm_state_t pcm_state = snd_pcm_state(handle);
+   if (pcm_state != SND_PCM_STATE_PREPARED && pcm_state != SND_PCM_STATE_RUNNING) {
+      int err = snd_pcm_prepare(handle);
+      if (err < 0) {
+         pthread_mutex_unlock(&ctx->alsa_mutex);
+         LOG_ERROR("Cannot prepare for playback: %s", snd_strerror(err));
+         return -1;
+      }
    }
+   pthread_mutex_unlock(&ctx->alsa_mutex);
 
    /* Calculate resampling parameters */
    double out_rate = (double)ctx->sample_rate;
@@ -434,14 +453,18 @@ int audio_playback_play(audio_playback_t *ctx,
 
    free(out_buf);
 
-   /* Drain remaining audio (skip if stopped - drain blocks until buffer empties) */
-   pthread_mutex_lock(&ctx->alsa_mutex);
+   /* Drain/drop remaining audio, or leave running for seamless next sentence */
    if (stop_flag && atomic_load(stop_flag)) {
+      pthread_mutex_lock(&ctx->alsa_mutex);
       snd_pcm_drop(handle);
-   } else {
+      pthread_mutex_unlock(&ctx->alsa_mutex);
+   } else if (drain) {
+      pthread_mutex_lock(&ctx->alsa_mutex);
       snd_pcm_drain(handle);
+      pthread_mutex_unlock(&ctx->alsa_mutex);
    }
-   pthread_mutex_unlock(&ctx->alsa_mutex);
+   /* When drain=false and not stopped, leave PCM in RUNNING state so the next
+    * sentence can write directly without a prepare/restart cycle. */
 
    ctx->amplitude = 0.0f;
    for (int k = 0; k < SPECTRUM_BINS; k++) {
@@ -487,12 +510,12 @@ int audio_playback_play_wav(audio_playback_t *ctx,
          mono[i] = pcm_data[i * 2]; /* Left channel */
       }
 
-      int ret = audio_playback_play(ctx, mono, num_samples / 2, sample_rate, stop_flag);
+      int ret = audio_playback_play(ctx, mono, num_samples / 2, sample_rate, stop_flag, true);
       free(mono);
       return ret;
    }
 
-   return audio_playback_play(ctx, pcm_data, num_samples, sample_rate, stop_flag);
+   return audio_playback_play(ctx, pcm_data, num_samples, sample_rate, stop_flag, true);
 }
 
 int audio_playback_play_stereo(audio_playback_t *ctx,

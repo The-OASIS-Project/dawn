@@ -98,8 +98,10 @@ static void *playback_thread_func(void *arg) {
          continue;
       }
 
-      /* Play this sentence (blocking) */
-      audio_playback_play(q->playback, entry.audio, entry.len, entry.sample_rate, q->stop_flag);
+      /* Play this sentence without draining — keeps ALSA in RUNNING state so the
+       * next sentence streams seamlessly without a DAC restart transient. */
+      audio_playback_play(q->playback, entry.audio, entry.len, entry.sample_rate, q->stop_flag,
+                          false);
       free(entry.audio);
 
       pthread_mutex_lock(&q->mutex);
@@ -111,6 +113,10 @@ static void *playback_thread_func(void *arg) {
          usleep(SENTENCE_PAUSE_US);
       }
    }
+
+   /* Drain after final sentence so remaining audio in the hardware buffer
+    * plays out fully before returning (or drop immediately if stopped). */
+   audio_playback_drain(q->playback, q->stop_flag);
 
    return NULL;
 }
