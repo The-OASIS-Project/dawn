@@ -1064,13 +1064,12 @@ int voice_processing_loop(voice_ctx_t *ctx,
 #ifdef HAVE_OPUS
             /* Immediately restore music on cancel (no 2s cooldown) */
             if (ctx->music_pb) {
-               music_playback_set_tts_hold(ctx->music_pb, false);
                if (ctx->music_ducked) {
                   music_playback_set_volume(ctx->music_pb, ctx->music_pre_duck_volume);
                   ctx->music_ducked = false;
                }
                if (ctx->music_was_playing) {
-                  music_playback_resume(ctx->music_pb);
+                  ws_client_send_music_control(ctx->ws, "play", NULL);
                   ctx->music_was_playing = false;
                }
             }
@@ -1118,20 +1117,21 @@ int voice_processing_loop(voice_ctx_t *ctx,
             }
          }
 
-         /* Pause for TTS (after ducking, so volume is already low) */
+         /* Pause daemon music for TTS (after ducking, so volume is already low).
+          * Tells the daemon to stop sending Opus frames — avoids ALSA contention. */
          if (tts_active && !ctx->music_was_playing && playing) {
-            music_playback_pause(ctx->music_pb);
+            ws_client_send_music_control(ctx->ws, "pause", NULL);
+            music_playback_stop(ctx->music_pb);
             ctx->music_was_playing = true;
+            LOG_INFO("Music paused on daemon for TTS");
          }
 
-         /* Resume + restore when back in SILENCE */
+         /* Resume daemon music when back in SILENCE */
          if (ctx->state == VOICE_STATE_SILENCE) {
-            /* Release TTS hold — deferred resume fires if music arrived during TTS */
-            music_playback_set_tts_hold(ctx->music_pb, false);
-
             if (ctx->music_was_playing) {
-               music_playback_resume(ctx->music_pb);
+               ws_client_send_music_control(ctx->ws, "play", NULL);
                ctx->music_was_playing = false;
+               LOG_INFO("Music resumed on daemon after TTS");
             }
             if (ctx->music_ducked) {
                double elapsed = (t1.tv_sec - ctx->music_last_voice.tv_sec) +
@@ -1385,13 +1385,8 @@ int voice_processing_loop(voice_ctx_t *ctx,
                                     tts_playback_queue_reset(ctx->tts_queue);
                                  }
 #endif
-                                 /* Send query — set TTS hold BEFORE sending so Opus
-                                  * frames that arrive with the response don't auto-start */
+                                 /* Send query */
                                  ctx->state = VOICE_STATE_WAITING;
-#ifdef HAVE_OPUS
-                                 if (ctx->music_pb)
-                                    music_playback_set_tts_hold(ctx->music_pb, true);
-#endif
                                  ctx->waiting_start = time(NULL);
                                  ctx->last_server_activity = ctx->waiting_start;
                                  ws_client_send_query(ws, command_text);
@@ -1469,13 +1464,8 @@ int voice_processing_loop(voice_ctx_t *ctx,
                               tts_playback_queue_reset(ctx->tts_queue);
                            }
 #endif
-                           /* Send query — set TTS hold BEFORE sending so Opus
-                            * frames that arrive with the response don't auto-start */
+                           /* Send query */
                            ctx->state = VOICE_STATE_WAITING;
-#ifdef HAVE_OPUS
-                           if (ctx->music_pb)
-                              music_playback_set_tts_hold(ctx->music_pb, true);
-#endif
                            ctx->waiting_start = time(NULL);
                            ctx->last_server_activity = ctx->waiting_start;
                            ws_client_send_query(ws, cmd_result->text);

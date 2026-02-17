@@ -141,12 +141,6 @@ void music_playback_set_dedicated_producer(music_playback_t *ctx, bool active);
  */
 bool music_playback_has_dedicated_producer(music_playback_t *ctx);
 
-/**
- * Set TTS hold state. While held, resume() and push_opus() auto-start are
- * deferred. When released, any deferred resume fires automatically.
- * Call with true before TTS starts, false after TTS finishes.
- */
-void music_playback_set_tts_hold(music_playback_t *ctx, bool hold);
 
 #ifdef __cplusplus
 }

@@ -301,6 +301,10 @@ void audio_playback_drain(audio_playback_t *ctx, atomic_int *stop_flag) {
    } else {
       snd_pcm_drain((snd_pcm_t *)ctx->handle);
    }
+   /* Re-prepare so the device is immediately usable by the next consumer
+    * (e.g. music drain after TTS finishes). Without this, PCM stays in
+    * SND_PCM_STATE_SETUP and snd_pcm_avail() returns an error. */
+   snd_pcm_prepare((snd_pcm_t *)ctx->handle);
    pthread_mutex_unlock(&ctx->alsa_mutex);
 }
 
