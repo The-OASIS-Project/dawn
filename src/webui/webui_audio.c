@@ -331,7 +331,7 @@ int webui_opus_encode_stream(const int16_t *pcm_data,
    size_t max_output_size = num_frames * (2 + WEBUI_OPUS_MAX_FRAME_SIZE);
    uint8_t *output = malloc(max_output_size);
    if (!output) {
-      pthread_mutex_unlock(&s_audio_mutex);
+      pthread_mutex_unlock(&s_encode_mutex);
       return WEBUI_AUDIO_ERROR_ALLOC;
    }
 
@@ -809,9 +809,9 @@ void webui_sentence_audio_callback(const char *sentence, void *userdata) {
          int ret = webui_audio_text_to_opus(cleaned, &opus, &opus_len);
 
          if (ret == WEBUI_AUDIO_SUCCESS && opus && opus_len > 0) {
-            /* Re-check: session may have disconnected during TTS synthesis */
-            if (!session->disconnected && session->client_data &&
-                ((ws_connection_t *)session->client_data)->tts_enabled) {
+            /* Re-check: session may have disconnected during TTS synthesis.
+             * Use snapshotted conn (not session->client_data) to avoid TOCTOU race. */
+            if (!session->disconnected && conn->tts_enabled) {
                webui_send_audio(session, opus, opus_len);
                webui_send_audio_end(session);
             }
@@ -828,9 +828,9 @@ void webui_sentence_audio_callback(const char *sentence, void *userdata) {
          if (ret == 0 && tts_pcm && tts_samples > 0) {
             LOG_INFO("WebUI audio: Tier 2 TTS %zu samples at %uHz (native, no resample)",
                      tts_samples, tts_rate);
-            /* Re-check: session may have disconnected during TTS synthesis */
-            if (!session->disconnected && session->client_data &&
-                ((ws_connection_t *)session->client_data)->tts_enabled) {
+            /* Re-check: session may have disconnected during TTS synthesis.
+             * Use snapshotted conn (not session->client_data) to avoid TOCTOU race. */
+            if (!session->disconnected && conn->tts_enabled) {
                size_t bytes = tts_samples * sizeof(int16_t);
                webui_send_audio(session, (const uint8_t *)tts_pcm, bytes);
                webui_send_audio_end(session);
@@ -844,9 +844,9 @@ void webui_sentence_audio_callback(const char *sentence, void *userdata) {
          int ret = webui_audio_text_to_pcm(cleaned, &pcm, &samples);
 
          if (ret == WEBUI_AUDIO_SUCCESS && pcm && samples > 0) {
-            /* Re-check: session may have disconnected during TTS synthesis */
-            if (!session->disconnected && session->client_data &&
-                ((ws_connection_t *)session->client_data)->tts_enabled) {
+            /* Re-check: session may have disconnected during TTS synthesis.
+             * Use snapshotted conn (not session->client_data) to avoid TOCTOU race. */
+            if (!session->disconnected && conn->tts_enabled) {
                size_t bytes = samples * sizeof(int16_t);
                webui_send_audio(session, (const uint8_t *)pcm, bytes);
                webui_send_audio_end(session);

@@ -448,6 +448,129 @@ static const char *TEMP_DEGREES = " degrees";
 static const uint8_t TEMP_DEGREES_LEN = 8;
 
 // ============================================================================
+// Currency Expansion Tables
+// ============================================================================
+
+struct currency_info_t {
+   const char *singular;
+   const char *plural;
+   uint8_t singular_len;
+   uint8_t plural_len;
+};
+
+// Indexed by a simple switch on the symbol/codepoint
+static const currency_info_t CURRENCY_DOLLAR = { "dollar", "dollars", 6, 7 };
+static const currency_info_t CURRENCY_POUND = { "pound", "pounds", 5, 6 };
+static const currency_info_t CURRENCY_EURO = { "euro", "euros", 4, 5 };
+static const currency_info_t CURRENCY_YEN = { "yen", "yen", 3, 3 };
+
+struct magnitude_info_t {
+   const char *word;
+   uint8_t len;
+};
+
+static const magnitude_info_t MAGNITUDE_K = { " thousand", 9 };
+static const magnitude_info_t MAGNITUDE_M = { " million", 8 };
+static const magnitude_info_t MAGNITUDE_B = { " billion", 8 };
+static const magnitude_info_t MAGNITUDE_T = { " trillion", 9 };
+
+/**
+ * @brief Result of scanning digits after a currency symbol
+ */
+struct currency_scan_t {
+   size_t num_len;    ///< Length of digit portion (including commas/decimal point)
+   char magnitude;    ///< 'K', 'M', 'B', 'T', or '\0' if none
+   bool is_singular;  ///< true if number is exactly "1" (no decimal, no commas)
+};
+
+/**
+ * @brief Scan a number following a currency symbol
+ *
+ * Accepts: digits, commas within digits, optional decimal point + digits,
+ * optional trailing K/M/B/T magnitude suffix.
+ *
+ * @param src Source string
+ * @param start Position of first character after currency symbol
+ * @param len Total length of source string
+ * @return Scan result; num_len == 0 means no digits found
+ */
+static currency_scan_t scan_currency_number(const char *src, size_t start, size_t len) {
+   currency_scan_t result = { 0, '\0', false };
+   size_t pos = start;
+
+   // Scan integer part: digits and commas
+   bool has_digits = false;
+   while (pos < len) {
+      char c = src[pos];
+      if (c >= '0' && c <= '9') {
+         has_digits = true;
+         pos++;
+      } else if (c == ',' && has_digits && pos + 1 < len && src[pos + 1] >= '0' &&
+                 src[pos + 1] <= '9') {
+         // Comma within number (e.g., 1,000)
+         pos++;
+      } else {
+         break;
+      }
+   }
+
+   if (!has_digits)
+      return result;
+
+   // Optional decimal part
+   if (pos < len && src[pos] == '.' && pos + 1 < len && src[pos + 1] >= '0' &&
+       src[pos + 1] <= '9') {
+      pos++;  // skip '.'
+      while (pos < len && src[pos] >= '0' && src[pos] <= '9') {
+         pos++;
+      }
+   }
+
+   result.num_len = pos - start;
+
+   // Check for magnitude suffix (K/M/B/T)
+   if (pos < len) {
+      char c = src[pos];
+      if (c == 'K' || c == 'k' || c == 'M' || c == 'm' || c == 'B' || c == 'b' || c == 'T' ||
+          c == 't') {
+         // Only treat as magnitude if followed by word boundary
+         bool at_boundary = (pos + 1 >= len) || src[pos + 1] == ' ' || src[pos + 1] == ',' ||
+                            src[pos + 1] == '.' || src[pos + 1] == '\n' || src[pos + 1] == '\t' ||
+                            src[pos + 1] == ')' || src[pos + 1] == '"' || src[pos + 1] == '\'' ||
+                            src[pos + 1] == '!' || src[pos + 1] == '?' || src[pos + 1] == ':' ||
+                            src[pos + 1] == ';';
+         if (at_boundary) {
+            result.magnitude = (char)std::toupper((unsigned char)c);
+         }
+      }
+   }
+
+   // Singular: number portion is exactly "1" with no magnitude suffix
+   result.is_singular = (result.num_len == 1 && src[start] == '1' && result.magnitude == '\0');
+
+   return result;
+}
+
+/**
+ * @brief Get magnitude expansion for a suffix character
+ * @return Pointer to magnitude info, or nullptr if not a valid suffix
+ */
+static inline const magnitude_info_t *get_magnitude(char suffix) {
+   switch (suffix) {
+      case 'K':
+         return &MAGNITUDE_K;
+      case 'M':
+         return &MAGNITUDE_M;
+      case 'B':
+         return &MAGNITUDE_B;
+      case 'T':
+         return &MAGNITUDE_T;
+      default:
+         return nullptr;
+   }
+}
+
+// ============================================================================
 // URL Processing Helpers
 // ============================================================================
 
@@ -582,6 +705,46 @@ enum class PassMode {
 };
 
 /**
+ * @brief Emit currency expansion: digits + magnitude + space + currency name
+ *
+ * Shared helper used by both the ASCII ($) and UTF-8 (£/€/¥) currency handlers
+ * to avoid duplicating the emit logic in the two-pass template.
+ */
+template<PassMode mode> static inline void emit_currency(char *out,
+                                                         size_t &out_pos,
+                                                         const char *src,
+                                                         size_t digit_start,
+                                                         const currency_scan_t &scan,
+                                                         const currency_info_t *cur) {
+   if constexpr (mode == PassMode::GenerateOutput) {
+      std::memcpy(out + out_pos, src + digit_start, scan.num_len);
+   }
+   out_pos += scan.num_len;
+
+   if (scan.magnitude != '\0') {
+      const magnitude_info_t *mag = get_magnitude(scan.magnitude);
+      if (mag) {
+         if constexpr (mode == PassMode::GenerateOutput) {
+            std::memcpy(out + out_pos, mag->word, mag->len);
+         }
+         out_pos += mag->len;
+      }
+   }
+
+   if constexpr (mode == PassMode::GenerateOutput) {
+      out[out_pos] = ' ';
+   }
+   out_pos++;
+
+   const char *name = scan.is_singular ? cur->singular : cur->plural;
+   uint8_t name_len = scan.is_singular ? cur->singular_len : cur->plural_len;
+   if constexpr (mode == PassMode::GenerateOutput) {
+      std::memcpy(out + out_pos, name, name_len);
+   }
+   out_pos += name_len;
+}
+
+/**
  * @brief Unified text processing implementation for both passes
  *
  * This template function handles both size calculation (Pass 1) and output
@@ -693,6 +856,16 @@ template<PassMode mode> static size_t process_text_impl(const char *src, size_t 
             }
          }
 
+         // Currency: $ followed by digits
+         if (byte == '$' && i + 1 < len && src[i + 1] >= '0' && src[i + 1] <= '9') {
+            currency_scan_t scan = scan_currency_number(src, i + 1, len);
+            if (scan.num_len > 0) {
+               emit_currency<mode>(out, out_pos, src, i + 1, scan, &CURRENCY_DOLLAR);
+               i += 1 + scan.num_len + (scan.magnitude != '\0' ? 1 : 0);
+               continue;
+            }
+         }
+
          // Regular ASCII character - copy
          if constexpr (mode == PassMode::GenerateOutput) {
             out[out_pos] = byte;
@@ -771,6 +944,22 @@ template<PassMode mode> static size_t process_text_impl(const char *src, size_t 
          out_pos += TEMP_DEGREES_LEN;
          i += 2;
          continue;
+      }
+
+      // Currency symbols: £ (U+00A3), ¥ (U+00A5), € (U+20AC)
+      if (codepoint == 0x00A3 || codepoint == 0x00A5 || codepoint == 0x20AC) {
+         size_t after_symbol = i + char_bytes;
+         if (after_symbol < len && src[after_symbol] >= '0' && src[after_symbol] <= '9') {
+            currency_scan_t scan = scan_currency_number(src, after_symbol, len);
+            if (scan.num_len > 0) {
+               const currency_info_t *cur = (codepoint == 0x00A3)   ? &CURRENCY_POUND
+                                            : (codepoint == 0x20AC) ? &CURRENCY_EURO
+                                                                    : &CURRENCY_YEN;
+               emit_currency<mode>(out, out_pos, src, after_symbol, scan, cur);
+               i = after_symbol + scan.num_len + (scan.magnitude != '\0' ? 1 : 0);
+               continue;
+            }
+         }
       }
 
       // Regular UTF-8 character - copy

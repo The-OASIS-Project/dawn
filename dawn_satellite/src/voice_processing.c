@@ -1581,6 +1581,16 @@ int voice_processing_loop(voice_ctx_t *ctx,
       /* Note: No manual timing - audio_capture_wait_for_data() provides pacing */
    }
 
+   /* Stop any in-progress TTS playback and flush the queue before returning.
+    * The caller destroys the ws_client after we return, so the playback thread
+    * must not be mid-write when that happens. */
+   atomic_store(&ctx->tts_stop_flag, 1);
+#ifdef HAVE_TTS_PIPER
+   if (ctx->tts_queue) {
+      tts_playback_queue_flush(ctx->tts_queue);
+   }
+#endif
+
    /* Reset to silence so UI doesn't show stale active state while offline.
     * NULL ws so voice_processing_is_ws_connected() returns false safely
     * (the ws_client will be destroyed by main after we return). */

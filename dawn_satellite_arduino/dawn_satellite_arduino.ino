@@ -837,6 +837,7 @@ void stopRecording() {
                  (float)sampleCount / SAMPLE_RATE);
 
    drawRecordingIndicator(false);
+   updateProgressBar(0, ST77XX_BLACK);
 
    if (!wsConnected || !registered) {
       updateTFTStatus("Not connected!", ST77XX_RED);

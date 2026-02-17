@@ -344,7 +344,7 @@ static void claude_sse_event_handler(const char *event_type,
  * The returned string is static and should not be freed.
  */
 static const char *parse_claude_error_message(const char *response_body, long http_code) {
-   static char error_msg[512];
+   static _Thread_local char error_msg[512];
 
    if (!response_body || response_body[0] == '\0') {
       snprintf(error_msg, sizeof(error_msg), "API request failed (HTTP %ld)", http_code);

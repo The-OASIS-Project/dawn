@@ -31,6 +31,8 @@
  * - US state abbreviation expansion (CA -> California)
  * - Day of week abbreviation expansion (Mon -> Monday)
  * - Month abbreviation expansion (Jan -> January)
+ * - Currency symbol expansion ($5 -> "5 dollars", €50 -> "50 euros")
+ * - Currency magnitude suffixes ($1M -> "1 million dollars")
  *
  * The module provides both C-compatible functions for in-place string
  * manipulation and C++ std::string functions for more complex transformations.
@@ -92,6 +94,7 @@ void remove_emojis(char *str);
  * 4. Expands temperature units to spoken words
  * 5. Expands US state abbreviations to full names
  * 6. Expands day and month abbreviations to full names
+ * 7. Expands currency symbols to spoken form ($5 -> "5 dollars")
  *
  * @param input The null-terminated input string
  * @param output Buffer to receive preprocessed text (must be large enough)
@@ -119,6 +122,7 @@ int preprocess_text_for_tts_c(const char *input, char *output, size_t output_siz
  * - Expands US state abbreviations to full names
  * - Expands day of week abbreviations (Mon, Tue, etc.)
  * - Expands month abbreviations (Jan, Feb, etc.)
+ * - Expands currency symbols ($, £, €, ¥) with magnitude suffixes (K/M/B/T)
  *
  * Uses a two-pass architecture: Pass 1 calculates exact output size,
  * Pass 2 generates output into a single preallocated buffer.
