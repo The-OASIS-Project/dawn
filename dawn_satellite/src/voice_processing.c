@@ -1569,8 +1569,11 @@ int voice_processing_loop(voice_ctx_t *ctx,
       /* Note: No manual timing - audio_capture_wait_for_data() provides pacing */
    }
 
-   /* Reset to silence so UI doesn't show stale active state while offline */
+   /* Reset to silence so UI doesn't show stale active state while offline.
+    * NULL ws so voice_processing_is_ws_connected() returns false safely
+    * (the ws_client will be destroyed by main after we return). */
    ctx->state = VOICE_STATE_SILENCE;
+   ctx->ws = NULL;
 
    LOG_INFO("Voice processing loop ended");
    return 0;
