@@ -66,11 +66,10 @@
    const localState = {
       volume: parseFloat(localStorage.getItem('musicVolume') || '0.8'),
       muted: localStorage.getItem('musicMuted') === 'true',
-      shuffle: localStorage.getItem('musicShuffle') === 'true',
-      repeat: localStorage.getItem('musicRepeat') || 'none', // none, one, all
+      shuffle: localStorage.getItem('musicShuffle') === 'true', // Display hint until server syncs
+      repeat: localStorage.getItem('musicRepeat') || 'none', // Display hint until server syncs
       lastQueueLength: -1, // Track queue changes for auto-refresh
       lastQueueIndex: -1,
-      wasPlaying: false, // Track playing state for repeat detection
       queueRestored: false, // Track if we've restored saved queue
    };
 
@@ -443,57 +442,37 @@
    }
 
    /**
-    * Handle next button - respects shuffle mode
+    * Handle next button — server handles shuffle/repeat logic
     */
    function handleNext() {
-      const playbackState = DawnMusicPlayback.getState();
-      if (localState.shuffle && playbackState.queueLength > 1) {
-         // Pick random track (excluding current)
-         let newIndex;
-         do {
-            newIndex = Math.floor(Math.random() * playbackState.queueLength);
-         } while (newIndex === playbackState.queueIndex && playbackState.queueLength > 1);
-         DawnMusicPlayback.control('play_index', { index: newIndex });
-      } else {
-         DawnMusicPlayback.control('next');
-      }
+      DawnMusicPlayback.control('next');
    }
 
    /**
-    * Handle previous button - respects shuffle mode
+    * Handle previous button — server handles shuffle/repeat logic
     */
    function handlePrevious() {
-      const playbackState = DawnMusicPlayback.getState();
-      if (localState.shuffle && playbackState.queueLength > 1) {
-         // Pick random track (excluding current)
-         let newIndex;
-         do {
-            newIndex = Math.floor(Math.random() * playbackState.queueLength);
-         } while (newIndex === playbackState.queueIndex && playbackState.queueLength > 1);
-         DawnMusicPlayback.control('play_index', { index: newIndex });
-      } else {
-         DawnMusicPlayback.control('previous');
-      }
+      DawnMusicPlayback.control('previous');
    }
 
    /**
-    * Toggle shuffle mode
+    * Toggle shuffle mode (server-side, optimistic update)
     */
    function toggleShuffle() {
       localState.shuffle = !localState.shuffle;
-      localStorage.setItem('musicShuffle', localState.shuffle);
       updateModeButtons();
+      DawnMusicPlayback.control('toggle_shuffle');
    }
 
    /**
-    * Cycle repeat mode
+    * Cycle repeat mode (server-side, optimistic update)
     */
    function cycleRepeat() {
-      const modes = ['none', 'one', 'all'];
+      const modes = ['none', 'all', 'one'];
       const currentIndex = modes.indexOf(localState.repeat);
       localState.repeat = modes[(currentIndex + 1) % modes.length];
-      localStorage.setItem('musicRepeat', localState.repeat);
       updateModeButtons();
+      DawnMusicPlayback.control('cycle_repeat');
    }
 
    /**
@@ -658,26 +637,13 @@
          localState.queueRestored = true; // Mark as restored if server already has queue
       }
 
-      // Handle repeat mode when playback stops
-      if (localState.wasPlaying && !state.playing && state.queueLength > 0) {
-         if (localState.repeat === 'one') {
-            // Repeat current track
-            setTimeout(() => {
-               DawnMusicPlayback.control('play_index', { index: state.queueIndex });
-            }, 100);
-         } else if (localState.repeat === 'all' && state.queueIndex === 0) {
-            // End of queue reached, loop back (server resets to 0 when done)
-            setTimeout(() => {
-               if (localState.shuffle) {
-                  const newIndex = Math.floor(Math.random() * state.queueLength);
-                  DawnMusicPlayback.control('play_index', { index: newIndex });
-               } else {
-                  DawnMusicPlayback.control('play_index', { index: 0 });
-               }
-            }, 100);
-         }
-      }
-      localState.wasPlaying = state.playing && !state.paused;
+      // Sync shuffle/repeat from server state (persist as display hint for next page load)
+      localState.shuffle = state.shuffle || false;
+      const repeatMap = { 0: 'none', 1: 'all', 2: 'one' };
+      localState.repeat = repeatMap[state.repeatMode] || 'none';
+      localStorage.setItem('musicShuffle', localState.shuffle);
+      localStorage.setItem('musicRepeat', localState.repeat);
+      updateModeButtons();
 
       // Start/stop visualizer
       if (state.playing && !state.paused && isOpen) {

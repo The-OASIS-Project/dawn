@@ -31,7 +31,7 @@
 
 /* ALSA buffer sizing: more periods = more resilience to scheduler jitter */
 #define ALSA_PERIOD_SIZE 512
-#define ALSA_BUFFER_PERIODS 16 /* 16 × 512 = 8192 frames ≈ 170ms at 48kHz */
+#define ALSA_BUFFER_PERIODS 24 /* 24 × 512 = 12288 frames ≈ 256ms at 48kHz */
 
 /* =============================================================================
  * Goertzel DFT - Pre-computed coefficients for spectrum visualization

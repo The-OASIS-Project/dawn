@@ -34,6 +34,7 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "audio/audio_decoder.h"
@@ -85,6 +86,20 @@ const char *QUALITY_NAMES[MUSIC_QUALITY_COUNT] = {
 #define OPUS_MAX_FRAME_SIZE 1276
 
 /* Types (music_queue_entry_t, session_music_state_t) are in webui_music_internal.h */
+
+/**
+ * @brief Pick a random queue index different from the current one.
+ *
+ * Uses rand_r() with the session's shuffle_seed for thread-safety.
+ * Must be called with state->state_mutex held.
+ */
+static int pick_random_different(session_music_state_t *state) {
+   int idx;
+   do {
+      idx = rand_r(&state->shuffle_seed) % state->queue_length;
+   } while (idx == state->queue_index);
+   return idx;
+}
 
 /* =============================================================================
  * Module State
@@ -372,8 +387,29 @@ void webui_music_send_state(ws_connection_t *conn, session_music_state_t *state)
                           json_object_new_string(state->bitrate_mode == MUSIC_BITRATE_VBR ? "vbr"
                                                                                           : "cbr"));
 
+   /* Playback modes */
+   json_object_object_add(payload, "shuffle", json_object_new_boolean(state->shuffle));
+   json_object_object_add(payload, "repeat_mode", json_object_new_int(state->repeat_mode));
+
    json_object_object_add(response, "payload", payload);
-   send_json_response(conn->wsi, response);
+
+   /* Thread-safe: serialize to string and enqueue for the LWS service thread.
+    * This function is called from the LWS thread (handle_music_control), the
+    * music streaming thread (track transitions), and the LLM tool worker thread
+    * (webui_music_execute_tool). lws_write() may only be called from the LWS
+    * service thread, so we always go through the response queue. */
+   const char *json_str = json_object_to_json_string(response);
+   char *json_copy = strdup(json_str);
+   if (!json_copy) {
+      LOG_ERROR("WebUI music: strdup failed for state update");
+      json_object_put(response);
+      return;
+   }
+   ws_response_t resp = { .session = conn->session,
+                          .type = WS_RESP_MUSIC_STATE,
+                          .music_json = { .json = json_copy } };
+   queue_response(&resp);
+
    json_object_put(response);
 }
 
@@ -403,7 +439,9 @@ static void send_position_update(ws_connection_t *conn, session_music_state_t *s
 }
 
 /**
- * @brief Send music error to client
+ * @brief Send music error to client (thread-safe)
+ *
+ * Uses the response queue — safe to call from any thread.
  */
 void webui_music_send_error(ws_connection_t *conn, const char *code, const char *message) {
    struct json_object *response = json_object_new_object();
@@ -414,7 +452,19 @@ void webui_music_send_error(ws_connection_t *conn, const char *code, const char 
    json_object_object_add(payload, "message", json_object_new_string(message));
 
    json_object_object_add(response, "payload", payload);
-   send_json_response(conn->wsi, response);
+
+   const char *json_str = json_object_to_json_string(response);
+   char *json_copy = strdup(json_str);
+   if (!json_copy) {
+      LOG_ERROR("WebUI music: strdup failed for error message");
+      json_object_put(response);
+      return;
+   }
+   ws_response_t resp = { .session = conn->session,
+                          .type = WS_RESP_MUSIC_ERROR,
+                          .music_json = { .json = json_copy } };
+   queue_response(&resp);
+
    json_object_put(response);
 }
 
@@ -427,6 +477,12 @@ void webui_music_send_error(ws_connection_t *conn, const char *code, const char 
  *
  * Reads audio from decoder, resamples to 48kHz, encodes to Opus,
  * and sends to client via WebSocket.
+ *
+ * NOTE: This runs on its own thread, NOT the LWS service thread.
+ * All WebSocket sends must use thread-safe paths: queue_response(),
+ * webui_music_send_state(), webui_music_send_error(), or
+ * queue_music_direct(). Never call send_json_response() or
+ * lws_write() directly from here.
  */
 static void *music_stream_thread(void *arg) {
    session_music_state_t *state = (session_music_state_t *)arg;
@@ -516,17 +572,27 @@ static void *music_stream_thread(void *arg) {
          audio_decoder_close(state->decoder);
          state->decoder = NULL;
 
-         /* Move to next track in queue */
-         state->queue_index++;
-         if (state->queue_index >= state->queue_length) {
-            /* End of queue */
-            state->playing = false;
-            state->queue_index = 0;
-            pthread_mutex_unlock(&state->state_mutex);
-
-            /* Send final state update */
-            webui_music_send_state(conn, state);
-            continue;
+         /* Advance to next track based on shuffle/repeat mode */
+         if (state->repeat_mode == MUSIC_REPEAT_ONE) {
+            /* Repeat one — replay same track (index stays) */
+         } else if (state->shuffle) {
+            /* Shuffle — pick random different track */
+            if (state->queue_length > 1)
+               state->queue_index = pick_random_different(state);
+         } else {
+            state->queue_index++;
+            if (state->queue_index >= state->queue_length) {
+               if (state->repeat_mode == MUSIC_REPEAT_ALL) {
+                  state->queue_index = 0; /* Repeat all — wrap */
+               } else {
+                  /* No repeat — stop */
+                  state->playing = false;
+                  state->queue_index = 0;
+                  pthread_mutex_unlock(&state->state_mutex);
+                  webui_music_send_state(conn, state);
+                  continue;
+               }
+            }
          }
 
          /* Open next track */
@@ -872,6 +938,7 @@ int webui_music_session_init(ws_connection_t *conn) {
    state->conn = conn;
    state->quality = s_config.default_quality;
    state->bitrate_mode = s_config.bitrate_mode;
+   state->shuffle_seed = (unsigned int)time(NULL) ^ (unsigned int)(uintptr_t)state;
    state->music_wsi = NULL;
    state->write_pending_len = 0;
 
@@ -1213,12 +1280,22 @@ void handle_music_control(ws_connection_t *conn, struct json_object *payload) {
 
    } else if (strcmp(action, "next") == 0) {
       pthread_mutex_lock(&state->state_mutex);
-      if (state->queue_index < state->queue_length - 1) {
-         state->queue_index++;
+      bool can_advance = false;
+      if (state->queue_length > 0) {
+         if (state->shuffle && state->queue_length > 1) {
+            state->queue_index = pick_random_different(state);
+            can_advance = true;
+         } else if (state->queue_index < state->queue_length - 1) {
+            state->queue_index++;
+            can_advance = true;
+         } else if (state->repeat_mode == MUSIC_REPEAT_ALL) {
+            state->queue_index = 0;
+            can_advance = true;
+         }
+      }
+      if (can_advance) {
          const char *path = state->queue[state->queue_index].path;
          pthread_mutex_unlock(&state->state_mutex);
-
-         /* Start next track (handles decoder close with wait) */
          webui_music_start_playback(state, path);
       } else {
          pthread_mutex_unlock(&state->state_mutex);
@@ -1230,18 +1307,40 @@ void handle_music_control(ws_connection_t *conn, struct json_object *payload) {
 
    } else if (strcmp(action, "previous") == 0) {
       pthread_mutex_lock(&state->state_mutex);
-      if (state->queue_index > 0) {
-         state->queue_index--;
+      bool can_go_back = false;
+      if (state->queue_length > 0) {
+         if (state->shuffle && state->queue_length > 1) {
+            state->queue_index = pick_random_different(state);
+            can_go_back = true;
+         } else if (state->queue_index > 0) {
+            state->queue_index--;
+            can_go_back = true;
+         } else if (state->repeat_mode == MUSIC_REPEAT_ALL) {
+            state->queue_index = state->queue_length - 1;
+            can_go_back = true;
+         }
+      }
+      if (can_go_back) {
          const char *path = state->queue[state->queue_index].path;
          pthread_mutex_unlock(&state->state_mutex);
-
-         /* Start previous track (handles decoder close with wait) */
          webui_music_start_playback(state, path);
       } else {
          pthread_mutex_unlock(&state->state_mutex);
       }
 
       pthread_mutex_lock(&state->state_mutex);
+      webui_music_send_state(conn, state);
+      pthread_mutex_unlock(&state->state_mutex);
+
+   } else if (strcmp(action, "toggle_shuffle") == 0) {
+      pthread_mutex_lock(&state->state_mutex);
+      state->shuffle = !state->shuffle;
+      webui_music_send_state(conn, state);
+      pthread_mutex_unlock(&state->state_mutex);
+
+   } else if (strcmp(action, "cycle_repeat") == 0) {
+      pthread_mutex_lock(&state->state_mutex);
+      state->repeat_mode = (music_repeat_mode_t)((state->repeat_mode + 1) % 3);
       webui_music_send_state(conn, state);
       pthread_mutex_unlock(&state->state_mutex);
 
@@ -1970,6 +2069,12 @@ int webui_music_set_config(const webui_music_config_t *config) {
 
 /* =============================================================================
  * LLM Tool Integration
+ *
+ * IMPORTANT: webui_music_execute_tool() runs on the LLM worker thread,
+ * NOT the LWS service thread. All WebSocket sends in this function must
+ * go through thread-safe paths (webui_music_send_state/send_error use
+ * queue_response() internally). Never call send_json_response() or
+ * lws_write() directly from here.
  * ============================================================================= */
 
 int webui_music_execute_tool(ws_connection_t *conn,
@@ -2129,14 +2234,23 @@ int webui_music_execute_tool(ws_connection_t *conn,
 
    } else if (strcmp(action, "next") == 0) {
       pthread_mutex_lock(&state->state_mutex);
-      if (state->queue_index < state->queue_length - 1) {
-         if (state->decoder) {
-            audio_decoder_close(state->decoder);
-            state->decoder = NULL;
+      bool can_advance = false;
+      const char *next_title = NULL;
+      if (state->queue_length > 0) {
+         if (state->shuffle && state->queue_length > 1) {
+            state->queue_index = pick_random_different(state);
+            can_advance = true;
+         } else if (state->queue_index < state->queue_length - 1) {
+            state->queue_index++;
+            can_advance = true;
+         } else if (state->repeat_mode == MUSIC_REPEAT_ALL) {
+            state->queue_index = 0;
+            can_advance = true;
          }
-         state->queue_index++;
+      }
+      if (can_advance) {
          const char *next_path = state->queue[state->queue_index].path;
-         const char *next_title = state->queue[state->queue_index].title;
+         next_title = state->queue[state->queue_index].title;
          pthread_mutex_unlock(&state->state_mutex);
 
          webui_music_start_playback(state, next_path);
@@ -2160,14 +2274,23 @@ int webui_music_execute_tool(ws_connection_t *conn,
 
    } else if (strcmp(action, "previous") == 0) {
       pthread_mutex_lock(&state->state_mutex);
-      if (state->queue_index > 0) {
-         if (state->decoder) {
-            audio_decoder_close(state->decoder);
-            state->decoder = NULL;
+      bool can_go_back = false;
+      const char *prev_title = NULL;
+      if (state->queue_length > 0) {
+         if (state->shuffle && state->queue_length > 1) {
+            state->queue_index = pick_random_different(state);
+            can_go_back = true;
+         } else if (state->queue_index > 0) {
+            state->queue_index--;
+            can_go_back = true;
+         } else if (state->repeat_mode == MUSIC_REPEAT_ALL) {
+            state->queue_index = state->queue_length - 1;
+            can_go_back = true;
          }
-         state->queue_index--;
+      }
+      if (can_go_back) {
          const char *prev_path = state->queue[state->queue_index].path;
-         const char *prev_title = state->queue[state->queue_index].title;
+         prev_title = state->queue[state->queue_index].title;
          pthread_mutex_unlock(&state->state_mutex);
 
          webui_music_start_playback(state, prev_path);
@@ -2187,6 +2310,31 @@ int webui_music_execute_tool(ws_connection_t *conn,
          if (result_out) {
             *result_out = strdup("Already at start of queue");
          }
+      }
+      return 0;
+
+   } else if (strcmp(action, "shuffle") == 0) {
+      pthread_mutex_lock(&state->state_mutex);
+      state->shuffle = !state->shuffle;
+      bool shuffle_on = state->shuffle;
+      webui_music_send_state(conn, state);
+      pthread_mutex_unlock(&state->state_mutex);
+
+      if (result_out) {
+         *result_out = strdup(shuffle_on ? "Shuffle enabled" : "Shuffle disabled");
+      }
+      return 0;
+
+   } else if (strcmp(action, "repeat") == 0) {
+      pthread_mutex_lock(&state->state_mutex);
+      state->repeat_mode = (music_repeat_mode_t)((state->repeat_mode + 1) % 3);
+      const char *modes[] = { "Repeat off", "Repeat all", "Repeat one" };
+      const char *mode_str = modes[state->repeat_mode];
+      webui_music_send_state(conn, state);
+      pthread_mutex_unlock(&state->state_mutex);
+
+      if (result_out) {
+         *result_out = strdup(mode_str);
       }
       return 0;
 

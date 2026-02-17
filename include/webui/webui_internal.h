@@ -193,6 +193,9 @@ typedef struct {
          double position_sec;
          uint32_t duration_sec;
       } music_position;
+      struct {
+         char *json; /* Pre-serialized JSON string (heap-allocated) */
+      } music_json;
    };
 } ws_response_t;
 
@@ -284,11 +287,22 @@ void register_token(const char *token, uint32_t session_id);
 session_t *lookup_session_by_token(const char *token);
 
 /* =============================================================================
- * WebSocket Send Helpers (called from WebUI thread only)
+ * WebSocket Send Helpers — LWS SERVICE THREAD ONLY
+ *
+ * IMPORTANT: These functions call lws_write() directly, which is NOT thread-safe.
+ * libwebsockets requires that lws_write() is only called from the LWS service
+ * thread (i.e., within an LWS callback or from process_one_response()).
+ *
+ * If you need to send a WebSocket message from a worker thread, the LLM tool
+ * thread, or the music streaming thread, you MUST use queue_response() instead.
+ * See send_position_update() in webui_music.c for a correct example.
  * ============================================================================= */
 
 /**
  * @brief Send JSON text message to WebSocket client
+ *
+ * WARNING: LWS service thread only — do NOT call from worker/tool threads.
+ * Use queue_response() with an appropriate WS_RESP_* type instead.
  *
  * @param wsi WebSocket instance
  * @param json JSON string to send
@@ -298,6 +312,8 @@ int send_json_message(struct lws *wsi, const char *json);
 
 /**
  * @brief Send binary message with type byte prefix
+ *
+ * WARNING: LWS service thread only — do NOT call from worker/tool threads.
  *
  * @param wsi WebSocket instance
  * @param msg_type Message type (WS_BIN_* constant)
@@ -437,6 +453,10 @@ bool conn_require_admin(ws_connection_t *conn);
  * @brief Send JSON response to WebSocket client
  *
  * Handles both small (stack) and large (heap) responses.
+ *
+ * WARNING: LWS service thread only. Do NOT call from worker threads,
+ * LLM tool threads, or the music streaming thread. Use queue_response()
+ * with a WS_RESP_* type to send from non-LWS threads.
  */
 void send_json_response(struct lws *wsi, json_object *response);
 

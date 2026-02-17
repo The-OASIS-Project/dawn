@@ -132,7 +132,9 @@ typedef enum {
    WS_RESP_CONVERSATION_RESET, /* Conversation was reset via tool */
 
    /* Music streaming */
-   WS_RESP_MUSIC_POSITION /* Music playback position update */
+   WS_RESP_MUSIC_POSITION, /* Music playback position update */
+   WS_RESP_MUSIC_STATE,    /* Music state update (JSON) */
+   WS_RESP_MUSIC_ERROR,    /* Music error notification (JSON) */
 } ws_response_type_t;
 
 /* =============================================================================

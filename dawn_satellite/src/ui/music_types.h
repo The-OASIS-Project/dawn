@@ -88,6 +88,8 @@ typedef struct {
    char bitrate_mode[8];
    int queue_length; /* Mirrors daemon's queue_length so UI knows count */
    int queue_index;  /* Mirrors daemon's queue_index for play button */
+   bool shuffle;
+   int repeat_mode; /* 0=none, 1=all, 2=one */
 } music_state_update_t;
 
 typedef struct {

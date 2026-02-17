@@ -668,11 +668,23 @@ void free_response(ws_response_t *resp) {
       case WS_RESP_MUSIC_POSITION:
          /* No data to free - all inline values */
          break;
+      case WS_RESP_MUSIC_STATE:
+      case WS_RESP_MUSIC_ERROR:
+         free(resp->music_json.json);
+         break;
    }
 }
 
 /* =============================================================================
- * WebSocket Send Helpers (called from WebUI thread only)
+ * WebSocket Send Helpers — LWS SERVICE THREAD ONLY
+ *
+ * These functions call lws_write() directly. libwebsockets is NOT thread-safe
+ * for writes — lws_write() must only be called from within an LWS callback
+ * (the service thread) or from process_one_response() which runs on that thread.
+ *
+ * To send from other threads (LLM workers, music streaming, tool execution),
+ * use queue_response() to enqueue a ws_response_t. The LWS service thread
+ * will dequeue and send it via process_one_response().
  * ============================================================================= */
 
 /* LWS requires LWS_PRE bytes before the buffer for protocol framing.
@@ -1349,6 +1361,15 @@ static void process_one_response(void) {
          send_music_position_impl(conn->wsi, resp.music_position.position_sec,
                                   resp.music_position.duration_sec);
          break;
+      case WS_RESP_MUSIC_STATE:
+      case WS_RESP_MUSIC_ERROR:
+         /* Pre-serialized JSON from webui_music.c — just send the string */
+         if (resp.music_json.json) {
+            send_json_message(conn->wsi, resp.music_json.json);
+            free(resp.music_json.json);
+            resp.music_json.json = NULL;
+         }
+         break;
    }
 
    /* If more responses pending, ensure they get processed.
@@ -1623,6 +1644,8 @@ static void handle_get_metrics(ws_connection_t *conn);
  */
 #define MAX_STACK_RESPONSE 2048
 
+/* WARNING: LWS service thread only. Calls lws_write() directly.
+ * For thread-safe sending, serialize to string and use queue_response(). */
 void send_json_response(struct lws *wsi, json_object *response) {
    const char *json_str = json_object_to_json_string(response);
    size_t json_len = strlen(json_str);

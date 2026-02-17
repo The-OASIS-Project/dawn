@@ -1869,18 +1869,7 @@ bool ui_music_handle_tap(ui_music_t *m, int x, int y) {
             music_playback_flush(m->music_pb);
 #endif
          if (m->ws) {
-            if (m->shuffle && m->queue_count > 1) {
-               /* Shuffle: pick random track (excluding current) */
-               int new_index;
-               do {
-                  new_index = rand() % m->queue_count;
-               } while (new_index == m->queue_index && m->queue_count > 1);
-               char idx_str[16];
-               snprintf(idx_str, sizeof(idx_str), "%d", new_index);
-               ws_client_send_music_control(m->ws, "play_index", idx_str);
-            } else {
-               ws_client_send_music_control(m->ws, "previous", NULL);
-            }
+            ws_client_send_music_control(m->ws, "previous", NULL);
          }
          handled = true;
       }
@@ -1912,18 +1901,7 @@ bool ui_music_handle_tap(ui_music_t *m, int x, int y) {
             music_playback_flush(m->music_pb);
 #endif
          if (m->ws) {
-            if (m->shuffle && m->queue_count > 1) {
-               /* Shuffle: pick random track (excluding current) */
-               int new_index;
-               do {
-                  new_index = rand() % m->queue_count;
-               } while (new_index == m->queue_index && m->queue_count > 1);
-               char idx_str[16];
-               snprintf(idx_str, sizeof(idx_str), "%d", new_index);
-               ws_client_send_music_control(m->ws, "play_index", idx_str);
-            } else {
-               ws_client_send_music_control(m->ws, "next", NULL);
-            }
+            ws_client_send_music_control(m->ws, "next", NULL);
          }
          handled = true;
       }
@@ -1935,11 +1913,17 @@ bool ui_music_handle_tap(ui_music_t *m, int x, int y) {
 
       if (x >= shuf_x && x < shuf_x + TOGGLE_BTN_SIZE && y >= tog_y &&
           y < tog_y + TOGGLE_BTN_SIZE) {
-         m->shuffle = !m->shuffle;
+         if (m->ws) {
+            m->shuffle = !m->shuffle; /* Optimistic — server confirms */
+            ws_client_send_music_control(m->ws, "toggle_shuffle", NULL);
+         }
          handled = true;
       } else if (x >= rep_x && x < rep_x + TOGGLE_BTN_SIZE && y >= tog_y &&
                  y < tog_y + TOGGLE_BTN_SIZE) {
-         m->repeat_mode = (m->repeat_mode + 1) % 3;
+         if (m->ws) {
+            m->repeat_mode = (m->repeat_mode + 1) % 3; /* Optimistic — server confirms */
+            ws_client_send_music_control(m->ws, "cycle_repeat", NULL);
+         }
          handled = true;
       }
 
@@ -2161,6 +2145,10 @@ void ui_music_on_state(ui_music_t *m, const music_state_update_t *state) {
    if (state->queue_index >= 0)
       m->queue_index = state->queue_index;
 
+   /* Sync shuffle/repeat from server (server is source of truth) */
+   m->shuffle = state->shuffle;
+   m->repeat_mode = state->repeat_mode;
+
    if (track_changed) {
       invalidate_track_cache(m);
 #ifdef HAVE_OPUS
@@ -2170,29 +2158,6 @@ void ui_music_on_state(ui_music_t *m, const music_state_update_t *state) {
          music_playback_flush(m->music_pb);
 #endif
    }
-
-   /* Detect end-of-track for repeat handling (client-side like WebUI) */
-   bool now_playing = state->playing && !state->paused;
-   bool trigger_repeat = false;
-   int repeat_index = -1;
-
-   if (m->was_playing && !now_playing && m->queue_count > 0) {
-      /* Track ended — check repeat mode */
-      if (m->repeat_mode == 2) {
-         /* Repeat one — replay current track */
-         trigger_repeat = true;
-         repeat_index = m->queue_index;
-      } else if (m->repeat_mode == 1 && m->queue_index == 0 && !state->playing) {
-         /* Repeat all — end of queue, loop back to start */
-         trigger_repeat = true;
-         if (m->shuffle && m->queue_count > 1) {
-            repeat_index = rand() % m->queue_count;
-         } else {
-            repeat_index = 0;
-         }
-      }
-   }
-   m->was_playing = now_playing;
 
    pthread_mutex_unlock(&m->mutex);
 
@@ -2213,17 +2178,6 @@ void ui_music_on_state(ui_music_t *m, const music_state_update_t *state) {
       }
    }
 #endif
-
-   /* Trigger repeat if end-of-track was detected and repeat mode is on */
-   if (trigger_repeat && repeat_index >= 0 && m->ws) {
-#ifdef HAVE_OPUS
-      if (m->music_pb)
-         music_playback_flush(m->music_pb);
-#endif
-      char idx_str[16];
-      snprintf(idx_str, sizeof(idx_str), "%d", repeat_index);
-      ws_client_send_music_control(m->ws, "play_index", idx_str);
-   }
 }
 
 void ui_music_on_position(ui_music_t *m, float position_sec) {

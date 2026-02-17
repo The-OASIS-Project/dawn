@@ -38,6 +38,10 @@
       bitrate: 96000,
       bitrateMode: 'vbr',
 
+      // Playback modes
+      shuffle: false,
+      repeatMode: 0, // 0=none, 1=all, 2=one
+
       // Subscription state
       subscribed: false,
 
@@ -648,6 +652,8 @@
       state.quality = payload.quality || 'standard';
       state.bitrate = payload.bitrate || 96000;
       state.bitrateMode = payload.bitrate_mode || 'vbr';
+      state.shuffle = payload.shuffle || false;
+      state.repeatMode = payload.repeat_mode || 0;
 
       if (state.track) {
          state.durationSec = state.track.duration_sec || 0;

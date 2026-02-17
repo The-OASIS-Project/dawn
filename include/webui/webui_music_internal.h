@@ -58,6 +58,15 @@ extern const char *QUALITY_NAMES[MUSIC_QUALITY_COUNT];
  * ============================================================================= */
 
 /**
+ * @brief Repeat mode for music playback
+ */
+typedef enum {
+   MUSIC_REPEAT_NONE = 0,
+   MUSIC_REPEAT_ALL = 1,
+   MUSIC_REPEAT_ONE = 2,
+} music_repeat_mode_t;
+
+/**
  * @brief Queue entry for a music track
  */
 typedef struct {
@@ -110,6 +119,11 @@ typedef struct {
    music_queue_entry_t queue[WEBUI_MUSIC_MAX_QUEUE];
    int queue_length;
    int queue_index; /**< Current track in queue */
+
+   /* Playback modes */
+   bool shuffle;
+   music_repeat_mode_t repeat_mode;
+   unsigned int shuffle_seed; /**< Per-session PRNG seed for rand_r() */
 
    /* Settings */
    music_quality_t quality;

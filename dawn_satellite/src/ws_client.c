@@ -606,6 +606,8 @@ static void parse_music_state(struct json_object *payload, music_state_update_t 
             json_get_string(payload, "bitrate_mode"));
    state->queue_length = json_get_int(payload, "queue_length");
    state->queue_index = json_get_int(payload, "queue_index");
+   state->shuffle = json_get_bool(payload, "shuffle");
+   state->repeat_mode = json_get_int(payload, "repeat_mode");
 }
 
 static void parse_music_queue(struct json_object *payload, music_queue_update_t *queue) {

@@ -95,13 +95,15 @@ static const treg_param_t music_params[] = {
                       "'list' (show current playback queue - empty if nothing playing), "
                       "'select' (jump to track N in queue), "
                       "'search' (find music without playing), "
-                      "'library' (browse music collection - list artists/albums/stats)",
+                      "'library' (browse music collection - list artists/albums/stats), "
+                      "'shuffle' (toggle shuffle mode on/off), "
+                      "'repeat' (cycle repeat: none -> all -> one -> none)",
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
        .enum_values = { "play", "stop", "pause", "resume", "next", "previous", "list", "select",
-                        "search", "library" },
-       .enum_count = 10,
+                        "search", "library", "shuffle", "repeat" },
+       .enum_count = 12,
    },
    {
        .name = "query",
@@ -143,7 +145,8 @@ static const tool_metadata_t music_metadata = {
    .description = "Control music playback. Actions: 'play' (search and play), 'stop' (halt), "
                   "'pause' (halt keeping position), 'resume' (restart current), "
                   "'next'/'previous' (skip tracks), 'list' (show playlist), "
-                  "'select' (jump to track N), 'search' (find without playing).",
+                  "'select' (jump to track N), 'search' (find without playing), "
+                  "'shuffle' (toggle shuffle), 'repeat' (cycle repeat mode).",
    .params = music_params,
    .param_count = 4,
 

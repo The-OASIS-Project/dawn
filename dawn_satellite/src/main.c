@@ -365,6 +365,19 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
       }
 
 #ifdef HAVE_OPUS
+      /* Clear all references to music_pb before destroying it.
+       * The WS service thread may still call callbacks (e.g. music_state)
+       * that access music_pb via the UI, so we must NULL out all
+       * pointers first to prevent use-after-free on reconnection. */
+      if (music_pb) {
+#ifdef ENABLE_SDL_UI
+         if (g_sdl_ui)
+            sdl_ui_set_music_playback(g_sdl_ui, NULL);
+#endif
+         if (voice_ctx)
+            voice_processing_set_music_playback(voice_ctx, NULL);
+         ws_client_set_music_playback(ws, NULL);
+      }
       if (music_ws)
          music_stream_destroy(music_ws);
       if (music_pb)
@@ -470,6 +483,16 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
    }
 
 #ifdef HAVE_OPUS
+   /* Clear all references before destroying (same pattern as voice mode) */
+   if (music_pb) {
+#ifdef ENABLE_SDL_UI
+      if (g_sdl_ui)
+         sdl_ui_set_music_playback(g_sdl_ui, NULL);
+#endif
+      if (voice_ctx)
+         voice_processing_set_music_playback(voice_ctx, NULL);
+      ws_client_set_music_playback(ws, NULL);
+   }
    if (music_ws)
       music_stream_destroy(music_ws);
    if (music_pb)
