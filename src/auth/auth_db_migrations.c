@@ -2658,6 +2658,19 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       errmsg = NULL;
    }
 
+   /* v64 — mcp_user_access (coding-harness MCP bridge per-user allowlist).
+    * Idempotent table creation via a split helper (keeps the migration ladder
+    * DDL-free).  NOT gated on DAWN_ENABLE_MCP_BRIDGE_TOOL: schema versioning is
+    * global and must advance uniformly across build configs. */
+   bool v64_ok = (current_version >= 64);
+   if (current_version < 64) {
+      if (auth_db_migrations_v64(s_db.db) == AUTH_DB_SUCCESS) {
+         v64_ok = true;
+      } else {
+         OLOG_ERROR("auth_db: v64 migration (mcp_user_access) failed");
+      }
+   }
+
    /* Log migration if upgrading from an older version */
    if (current_version > 0 && current_version < AUTH_DB_SCHEMA_VERSION) {
       OLOG_INFO("auth_db: migrated schema from v%d to v%d", current_version,
@@ -2678,7 +2691,7 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
     * Never downgrade — prevents old code from corrupting a newer DB. */
    const bool ready_to_bump = v48_ok && v49_ok && v50_ok && v51_ok && v52_ok && v53_ok && v54_ok &&
                               v55_ok && v56_ok && v57_ok && v58_ok && v59_ok && v60_ok && v61_ok &&
-                              v62_ok && v63_ok;
+                              v62_ok && v63_ok && v64_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

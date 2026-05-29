@@ -49,7 +49,7 @@
  * ============================================================================= */
 
 /* Current schema version */
-#define AUTH_DB_SCHEMA_VERSION 63
+#define AUTH_DB_SCHEMA_VERSION 64
 
 /* Retention periods */
 #define LOGIN_ATTEMPT_RETENTION_SEC (7 * 24 * 60 * 60) /* 7 days */
@@ -465,6 +465,22 @@ int auth_db_internal_create_parent_dir(const char *path);
  * @return AUTH_DB_SUCCESS on success, AUTH_DB_FAILURE on any error.
  */
 int auth_db_create_schema(const char *db_path);
+
+/**
+ * @brief v64 migration: create the mcp_user_access table (coding-harness MCP
+ *        bridge per-user allowlist).
+ *
+ * Split into its own helper (called from auth_db_apply_migrations) to avoid
+ * growing the migration ladder with DDL. Runs idempotently (CREATE TABLE IF NOT
+ * EXISTS) for both fresh installs and upgrades. Intentionally NOT gated on
+ * DAWN_ENABLE_MCP_BRIDGE_TOOL: schema versioning is global and must advance
+ * uniformly across build configs.
+ *
+ * @param db Open database handle (caller holds any needed lock; called during
+ *           schema creation where no other thread touches the handle).
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int auth_db_migrations_v64(sqlite3 *db);
 
 /**
  * @brief Prepare every cached sqlite3_stmt* in s_db.

@@ -93,6 +93,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_core.c
     ${SRC_ROOT}/src/auth/auth_db_schema.c
     ${SRC_ROOT}/src/auth/auth_db_migrations.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v64.c
     ${SRC_ROOT}/src/auth/auth_db_statements.c
     ${SRC_ROOT}/src/auth/auth_db_user.c
     ${SRC_ROOT}/src/auth/auth_db_session.c
@@ -129,6 +130,59 @@ dawn_add_unit_test(test_sse_parser
    SOURCES test_sse_parser.c
            ${SRC_ROOT}/src/llm/sse_parser.c
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# MCP HTTP+SSE transport — exercised against an in-test loopback HTTP+SSE
+# server (no external network), so it is CI-safe.
+dawn_add_unit_test(test_mcp_transport
+   SOURCES test_mcp_transport.c
+           ${SRC_ROOT}/src/tools/mcp_transport_http_sse.c
+           ${SRC_ROOT}/src/llm/sse_parser.c
+   LIBS    dawn_common unity ${CURL_LIBRARIES} pthread
+   LABEL   ci)
+
+# MCP JSON-RPC client — exercised against an in-test auto-responding mock MCP
+# server (HTTP+SSE, no external network), so it is CI-safe.
+dawn_add_unit_test(test_mcp_client
+   SOURCES test_mcp_client.c
+           ${SRC_ROOT}/src/tools/mcp_client.c
+           ${SRC_ROOT}/src/tools/mcp_transport_http_sse.c
+           ${SRC_ROOT}/src/llm/sse_parser.c
+   LIBS    dawn_common unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES} pthread
+   LABEL   ci)
+
+# MCP JSON Schema -> treg_param_t translator (pure functions, no network).
+dawn_add_unit_test(test_mcp_bridge_schema
+   SOURCES test_mcp_bridge_schema.c
+           ${SRC_ROOT}/src/tools/mcp_bridge_schema.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# Schema v64 mcp_user_access migration + per-user grant/revoke/check API.
+dawn_add_unit_test(test_auth_db_mcp
+   SOURCES test_auth_db_mcp.c
+           ${AUTH_DB_SOURCES}
+           ${SRC_ROOT}/src/auth/auth_db_mcp.c
+   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LABEL   ci)
+
+# MCP bridge: registration + dispatch + auth + dangerous-tool denylist.
+# Reuses test_tool_registry_stub.c for tool_registry.c's config/toml deps and an
+# in-test mock MCP server; no external network.
+dawn_add_unit_test(test_mcp_bridge
+   SOURCES test_mcp_bridge.c
+           test_tool_registry_stub.c
+           ${SRC_ROOT}/src/tools/tool_registry.c
+           ${SRC_ROOT}/src/tools/mcp_bridge_tool.c
+           ${SRC_ROOT}/src/tools/mcp_bridge_schema.c
+           ${SRC_ROOT}/src/tools/mcp_client.c
+           ${SRC_ROOT}/src/tools/mcp_transport_http_sse.c
+           ${SRC_ROOT}/src/llm/sse_parser.c
+           ${SRC_ROOT}/src/auth/auth_db_mcp.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer
+           ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
+   DEFINES ENABLE_MULTI_CLIENT
    LABEL   ci)
 
 dawn_add_unit_test(test_sentence_buffer

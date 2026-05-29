@@ -699,6 +699,10 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_core.c
     src/auth/auth_db_schema.c
     src/auth/auth_db_migrations.c
+    # v64 mcp_user_access migration helper: unconditional (schema versioning is
+    # global, not gated on DAWN_ENABLE_MCP_BRIDGE_TOOL). Called by
+    # auth_db_apply_migrations() in auth_db_migrations.c.
+    src/auth/auth_db_migrations_v64.c
     src/auth/auth_db_statements.c
     # DB-layer tables depended on by the always-compiled memory / OTA / tool
     # subsystems (extraction, summaries, history, satellite OTA, image tools), so
@@ -801,6 +805,16 @@ if(AEC_ENABLED)
 endif()
 
 add_executable(dawn ${DAWN_SOURCES})
+
+# Coding-harness CI invariant: forbid process-management primitives in the MCP
+# bridge / code-project sources (bridge is socket-only; git is in-process via
+# libgit2). Runs on every dawn build; passes trivially until harness files
+# exist. Scope is harness files only -- see docs/CODING_HARNESS_DESIGN.md.
+add_custom_target(no_process_mgmt_check
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/check_no_process_mgmt.sh
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Checking coding-harness invariant: no process-management calls")
+add_dependencies(dawn no_process_mgmt_check)
 
 # AEC compile definitions (target-specific to avoid rebuilding whisper/ggml)
 if(AEC_ENABLED)
