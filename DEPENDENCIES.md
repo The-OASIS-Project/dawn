@@ -43,6 +43,7 @@ This document tracks all third-party dependencies used by the DAWN project.
 | harfbuzz | MIT | MuPDF text shaping dependency |
 | libmujs-dev, libgumbo-dev, libopenjp2-7-dev, libjbig2dec0-dev | Various (MIT/LGPL/BSD) | MuPDF static link dependencies |
 | libstemmer (Snowball) | BSD-3-Clause | Porter2 stemming for BM25 keyword indexing (`src/memory/memory_stem.c`). Install: `sudo apt install libstemmer-dev`. |
+| libgit2 (≥ 1.6) | GPLv2-with-linking-exception (GPL-compatible) | In-process git client for the coding-harness code-projects feature (`DAWN_ENABLE_CODE_PROJECTS`, default OFF). **Jammy apt ships 1.1 — too old**; build from source with the OpenSSL HTTPS backend (SSH off) via `INSTALL_LIBGIT2=true ./scripts/install.sh` (see `install_libgit2` in `scripts/lib/libs.sh`). Only required when the code-projects feature is enabled. |
 | mosquitto | EPL/EDL | MQTT broker (runtime dependency) |
 
 ### Audio Processing

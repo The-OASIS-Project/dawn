@@ -49,9 +49,10 @@
 #define MCP_BRIDGE_MAX_SLOTS 64
 
 /**
- * @brief Initialize the bridge. Phase 1 (config-agnostic core) is a no-op that
- *        returns success; config-driven server/tool wiring lands in Step 7.
- * @return SUCCESS always (in this phase).
+ * @brief Initialize the bridge: connect to every enabled server in [[mcp.server]]
+ *        and register their tools. A missing/unreachable server is logged and
+ *        skipped (non-fatal). No-op (returns SUCCESS) when [mcp] is disabled.
+ * @return SUCCESS.
  */
 int mcp_bridge_init(void);
 
@@ -78,5 +79,39 @@ int mcp_bridge_register_tool(mcp_client_t *client,
                              const char *description,
                              mcp_param_set_t *params,
                              bool dangerous);
+
+/**
+ * @brief Write a human-readable summary of connected servers (alias, tool
+ *        count) into @p out. Used by the admin `mcp list/status` commands.
+ * @param bytes_written_out If non-NULL, set to bytes written (excluding NUL).
+ * @return SUCCESS or FAILURE.
+ */
+int mcp_bridge_status_text(char *out, size_t out_len, int *bytes_written_out);
+
+/**
+ * @brief Clear DISABLED state on all server clients and re-attempt connection
+ *        (admin `mcp reset`).
+ * @param connected_out If non-NULL, set to the number of servers now connected.
+ * @return SUCCESS or FAILURE.
+ */
+int mcp_bridge_reconnect(int *connected_out);
+
+/**
+ * @brief Invoke an upstream tool on a connected server programmatically (bypasses
+ *        the LLM dispatch path; used by the code-graph provider).
+ *
+ * Wraps the call as MCP `tools/call` {name, arguments}. NO per-user auth check —
+ * this is a trusted internal call path, not an LLM-initiated one.
+ *
+ * @param args_json  Arguments object as JSON (may be NULL → {}).
+ * @param timeout_ms Per-call timeout (0 = client default).
+ * @param result_out On SUCCESS, malloc'd result JSON (caller frees); may be NULL.
+ * @return SUCCESS or FAILURE.
+ */
+int mcp_bridge_call_tool(const char *server_alias,
+                         const char *tool_name,
+                         const char *args_json,
+                         long timeout_ms,
+                         char **result_out);
 
 #endif /* MCP_BRIDGE_H */

@@ -42,6 +42,7 @@
 
 #include "auth/auth_db.h"
 #include "auth/auth_db_mcp.h"
+#include "config/dawn_config.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "tools/mcp_bridge.h"
@@ -61,6 +62,14 @@ void session_set_command_context(session_t *session) {
 session_t *session_get_command_context(void) {
    return s_test_cmd_ctx;
 }
+
+/* llm_tools.c is not linked here; the test drives the callback directly with
+ * JSON in `value`, so the raw-args hook reports "no executor context". */
+const char *llm_tools_current_raw_args(void) {
+   return NULL;
+}
+/* config_get() (referenced by the unused mcp_bridge_init) is provided by
+ * test_tool_registry_stub.c, which this test already links. */
 
 /* --------------------------------------------------------------------------
  * Mock MCP server (handles initialize / tools/list / tools/call)
@@ -216,7 +225,7 @@ static int mock_start(mock_t *s) {
    pthread_mutex_init(&s->mtx, NULL);
    s->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
    if (s->listen_fd < 0) {
-      return -1;
+      return FAILURE;
    }
    int yes = 1;
    setsockopt(s->listen_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
@@ -228,12 +237,12 @@ static int mock_start(mock_t *s) {
    if (bind(s->listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
        listen(s->listen_fd, 8) < 0) {
       close(s->listen_fd);
-      return -1;
+      return FAILURE;
    }
    socklen_t alen = sizeof(addr);
    getsockname(s->listen_fd, (struct sockaddr *)&addr, &alen);
    s->port = ntohs(addr.sin_port);
-   return pthread_create(&s->thread, NULL, mock_main, s) == 0 ? 0 : -1;
+   return pthread_create(&s->thread, NULL, mock_main, s) == 0 ? SUCCESS : FAILURE;
 }
 
 static void mock_stop(mock_t *s) {
@@ -262,14 +271,14 @@ static int64_t g_admin_uid;
 void setUp(void) {
    TEST_ASSERT_EQUAL_INT(SUCCESS, tool_registry_init());
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(":memory:"));
-   /* First user -> id 1, admin. tool_get_current_user_id() returns 1 when no
-    * session context is set, so this is the default caller. */
+   /* First user -> id 1, admin. Dispatch fails closed without a session (sec-S1),
+    * so tests push an explicit session context via push_session(). */
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_create_user("admin", "h", true));
    auth_user_t u;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_get_user("admin", &u));
    g_admin_uid = u.id;
 
-   TEST_ASSERT_EQUAL_INT(0, mock_start(&g_srv));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, mock_start(&g_srv));
    snprintf(g_url, sizeof(g_url), "http://127.0.0.1:%d/sse", g_srv.port);
 
    mcp_client_opts_t opts = {
@@ -303,6 +312,18 @@ static mcp_param_set_t empty_params(void) {
    return p;
 }
 
+/* Make @p uid the current caller via a minimal session context. Dispatch now
+ * fails closed without a session (sec-S1), so tests set one explicitly. Returns
+ * a heap session the caller must clear + free. */
+static session_t *push_session(int64_t uid) {
+   session_t *s = calloc(1, sizeof(session_t));
+   if (s != NULL) {
+      s->metrics.user_id = uid;
+      session_set_command_context(s);
+   }
+   return s;
+}
+
 /* --------------------------------------------------------------------------
  * Tests
  * -------------------------------------------------------------------------- */
@@ -332,6 +353,8 @@ static void test_dispatch_forwards_toolscall(void) {
    const tool_metadata_t *meta = tool_registry_find("cbm_search_graph");
    TEST_ASSERT_NOT_NULL(meta);
 
+   session_t *s = push_session(g_admin_uid);
+   TEST_ASSERT_NOT_NULL(s);
    int should_respond = 0;
    char *result = meta->callback(NULL, "{\"query\":\"mqtt\"}", &should_respond);
    TEST_ASSERT_NOT_NULL(result);
@@ -339,6 +362,8 @@ static void test_dispatch_forwards_toolscall(void) {
    TEST_ASSERT_TRUE(mock_toolscall_count(&g_srv) >= 1);
    TEST_ASSERT_NOT_NULL(strstr(result, "search_graph")); /* server echoed the name */
    free(result);
+   session_set_command_context(NULL);
+   free(s);
 }
 
 /* Without a grant, dispatch denies and never forwards. */
@@ -349,10 +374,31 @@ static void test_dispatch_denies_without_grant(void) {
                          mcp_bridge_register_tool(g_client, "cbm", "search_graph",
                                                   "cbm_search_graph", "desc", &params, false));
    const tool_metadata_t *meta = tool_registry_find("cbm_search_graph");
+   session_t *s = push_session(g_admin_uid);
+   TEST_ASSERT_NOT_NULL(s);
    int should_respond = 0;
    char *result = meta->callback(NULL, "{}", &should_respond);
    TEST_ASSERT_NOT_NULL(result);
    TEST_ASSERT_NOT_NULL(strstr(result, "not enabled"));
+   TEST_ASSERT_EQUAL_INT(0, mock_toolscall_count(&g_srv));
+   free(result);
+   session_set_command_context(NULL);
+   free(s);
+}
+
+/* No session context -> dispatch fails closed and never forwards (sec-S1). */
+static void test_dispatch_denies_without_session(void) {
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_mcp_grant(g_admin_uid, "cbm"));
+   mcp_param_set_t params = empty_params();
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         mcp_bridge_register_tool(g_client, "cbm", "search_graph",
+                                                  "cbm_search_graph", "desc", &params, false));
+   const tool_metadata_t *meta = tool_registry_find("cbm_search_graph");
+   session_set_command_context(NULL); /* no authenticated caller */
+   int should_respond = 0;
+   char *result = meta->callback(NULL, "{}", &should_respond);
+   TEST_ASSERT_NOT_NULL(result);
+   TEST_ASSERT_NOT_NULL(strstr(result, "authenticated"));
    TEST_ASSERT_EQUAL_INT(0, mock_toolscall_count(&g_srv));
    free(result);
 }
@@ -404,6 +450,7 @@ int main(void) {
    RUN_TEST(test_register_into_registry);
    RUN_TEST(test_dispatch_forwards_toolscall);
    RUN_TEST(test_dispatch_denies_without_grant);
+   RUN_TEST(test_dispatch_denies_without_session);
    RUN_TEST(test_dangerous_tool_marked);
    RUN_TEST(test_dangerous_tool_blocks_non_admin);
    return UNITY_END();

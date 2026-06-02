@@ -351,6 +351,43 @@ else()
     message(STATUS "DAWN: Image Search tool DISABLED")
 endif()
 
+# MCP Bridge (coding harness — HTTP+SSE client to operator-launched MCP servers)
+option(DAWN_ENABLE_MCP_BRIDGE_TOOL "Enable MCP bridge tool (Phase 1: HTTP+SSE only)" OFF)
+if(DAWN_ENABLE_MCP_BRIDGE_TOOL)
+    add_definitions(-DDAWN_ENABLE_MCP_BRIDGE_TOOL)
+    list(APPEND TOOL_SOURCES
+        src/tools/mcp_bridge_tool.c
+        src/tools/mcp_client.c
+        src/tools/mcp_transport_http_sse.c
+        src/tools/mcp_bridge_schema.c
+        src/auth/auth_db_mcp.c
+        src/auth/admin_socket_mcp.c)
+    message(STATUS "DAWN: MCP bridge tool ENABLED")
+else()
+    message(STATUS "DAWN: MCP bridge tool DISABLED")
+endif()
+
+# Code Projects (coding harness — clone + index repos via libgit2 + MCP bridge)
+option(DAWN_ENABLE_CODE_PROJECTS "Enable code projects subsystem (requires MCP bridge + libgit2)" OFF)
+if(DAWN_ENABLE_CODE_PROJECTS)
+    if(NOT DAWN_ENABLE_MCP_BRIDGE_TOOL)
+        message(FATAL_ERROR "DAWN_ENABLE_CODE_PROJECTS requires DAWN_ENABLE_MCP_BRIDGE_TOOL")
+    endif()
+    add_definitions(-DDAWN_ENABLE_CODE_PROJECTS)
+    list(APPEND TOOL_SOURCES
+        src/tools/code_graph_provider_cbm.c
+        src/tools/code_project_db.c
+        src/tools/code_project_git.c
+        src/tools/code_project_service.c
+        src/tools/code_project_tool.c
+        src/auth/admin_socket_code_project.c)
+    # libgit2 link + remaining sources (db/git/service/tool/webui) added in
+    # later steps; CMakeLists.txt links ${LIBGIT2_LIBRARIES} when this is ON.
+    message(STATUS "DAWN: Code projects subsystem ENABLED")
+else()
+    message(STATUS "DAWN: Code projects subsystem DISABLED")
+endif()
+
 # =============================================================================
 # Summary
 # =============================================================================

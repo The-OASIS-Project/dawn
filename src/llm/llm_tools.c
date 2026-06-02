@@ -1199,6 +1199,15 @@ void llm_tools_invalidate_cache(void) {
    OLOG_INFO("LLM tools schema cache invalidated");
 }
 
+/* Raw JSON args of the in-flight tool call, exposed to the callback for the
+ * duration of its invocation (see llm_tools.h). Thread-local, like the session
+ * command context. */
+static __thread const char *s_current_raw_args = NULL;
+
+const char *llm_tools_current_raw_args(void) {
+   return s_current_raw_args;
+}
+
 /* =============================================================================
  * Tool Execution
  * ============================================================================= */
@@ -1412,8 +1421,13 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
    /* Call the tool's callback directly */
    if (meta->callback) {
       int should_respond = 0;
+      /* Expose the raw LLM args to the callback (thread-local) so bridged tools
+       * can recover the original typed JSON that (action, value) packing flattens
+       * lossily. Cleared immediately after the call. */
+      s_current_raw_args = call->arguments;
       char *cb_result = meta->callback(action_name[0] ? action_name : "get",
                                        value_buf[0] ? value_buf : NULL, &should_respond);
+      s_current_raw_args = NULL;
 
       /* Strip the opt-in tool error-marker (this native-tool path invokes the
        * callback directly, bypassing command_execute's strip). */

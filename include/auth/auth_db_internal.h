@@ -48,8 +48,15 @@
  * Constants
  * ============================================================================= */
 
-/* Current schema version */
-#define AUTH_DB_SCHEMA_VERSION 64
+/* Current schema version.
+ * NOTE: the schema version is GLOBAL and must advance uniformly across every
+ * build config. The v64 (mcp_user_access) and v65 (code_projects) migrations run
+ * UNCONDITIONALLY — their helpers are compiled into the unconditional
+ * DAWN_SOURCES block and called from auth_db_apply_migrations(), never behind
+ * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
+ * feature flag would fork the schema timeline across binaries; do not do it.
+ * (arch-A2) */
+#define AUTH_DB_SCHEMA_VERSION 65
 
 /* Retention periods */
 #define LOGIN_ATTEMPT_RETENTION_SEC (7 * 24 * 60 * 60) /* 7 days */
@@ -481,6 +488,13 @@ int auth_db_create_schema(const char *db_path);
  * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
  */
 int auth_db_migrations_v64(sqlite3 *db);
+
+/**
+ * @brief v65 migration: create the code_projects table (coding-harness imported
+ *        repositories). Like v64, idempotent and NOT gated on a feature flag.
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int auth_db_migrations_v65(sqlite3 *db);
 
 /**
  * @brief Prepare every cached sqlite3_stmt* in s_db.

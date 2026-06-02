@@ -2437,6 +2437,30 @@ static int handle_client(int client_fd) {
       case ADMIN_MSG_OTA_ROLLOUT_ABORT:
          return handle_ota_rollout_abort_cmd(client_fd);
 
+#ifdef DAWN_ENABLE_MCP_BRIDGE_TOOL
+      case ADMIN_MSG_MCP_LIST:
+         return handle_mcp_list(client_fd, payload, header.payload_len);
+      case ADMIN_MSG_MCP_STATUS:
+         return handle_mcp_status(client_fd, payload, header.payload_len);
+      case ADMIN_MSG_MCP_GRANT:
+         return handle_mcp_grant(client_fd, payload, header.payload_len);
+      case ADMIN_MSG_MCP_REVOKE:
+         return handle_mcp_revoke(client_fd, payload, header.payload_len);
+      case ADMIN_MSG_MCP_RESET:
+         return handle_mcp_reset(client_fd, payload, header.payload_len);
+#endif
+
+#ifdef DAWN_ENABLE_CODE_PROJECTS
+      case ADMIN_MSG_CODE_PROJ_LIST:
+         return handle_code_proj_list(client_fd, payload, header.payload_len);
+      case ADMIN_MSG_CODE_PROJ_IMPORT:
+         return handle_code_proj_import(client_fd, payload, header.payload_len);
+      case ADMIN_MSG_CODE_PROJ_REFRESH:
+         return handle_code_proj_refresh(client_fd, payload, header.payload_len);
+      case ADMIN_MSG_CODE_PROJ_DELETE:
+         return handle_code_proj_delete(client_fd, payload, header.payload_len);
+#endif
+
       default:
          OLOG_WARNING("Unknown message type: 0x%02x", header.msg_type);
          send_response(client_fd, ADMIN_RESP_FAILURE);

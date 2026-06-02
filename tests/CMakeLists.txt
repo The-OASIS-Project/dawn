@@ -94,6 +94,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_schema.c
     ${SRC_ROOT}/src/auth/auth_db_migrations.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v64.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v65.c
     ${SRC_ROOT}/src/auth/auth_db_statements.c
     ${SRC_ROOT}/src/auth/auth_db_user.c
     ${SRC_ROOT}/src/auth/auth_db_session.c
@@ -166,6 +167,24 @@ dawn_add_unit_test(test_auth_db_mcp
    LIBS    dawn_common unity sqlite3 pthread m stemmer
    LABEL   ci)
 
+# Schema v56 code_projects migration + code_project_db CRUD/visibility/CASCADE.
+dawn_add_unit_test(test_code_project_db
+   SOURCES test_code_project_db.c
+           ${AUTH_DB_SOURCES}
+           ${SRC_ROOT}/src/tools/code_project_db.c
+   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LABEL   ci)
+
+# libgit2 clone wrapper — only when code projects (and thus libgit2) are enabled.
+if(DAWN_ENABLE_CODE_PROJECTS)
+   dawn_add_unit_test(test_code_project_git
+      SOURCES test_code_project_git.c
+              ${SRC_ROOT}/src/tools/code_project_git.c
+      LIBS     dawn_common unity ${LIBGIT2_LIBRARIES} pthread
+      INCLUDES ${LIBGIT2_INCLUDE_DIRS}
+      LABEL    ci)
+endif()
+
 # MCP bridge: registration + dispatch + auth + dangerous-tool denylist.
 # Reuses test_tool_registry_stub.c for tool_registry.c's config/toml deps and an
 # in-test mock MCP server; no external network.
@@ -179,6 +198,9 @@ dawn_add_unit_test(test_mcp_bridge
            ${SRC_ROOT}/src/tools/mcp_transport_http_sse.c
            ${SRC_ROOT}/src/llm/sse_parser.c
            ${SRC_ROOT}/src/auth/auth_db_mcp.c
+           # code_project_db: the bridge auto-fill (#ifdef DAWN_ENABLE_CODE_PROJECTS,
+           # active via the global define) references code_project_db_check_visible.
+           ${SRC_ROOT}/src/tools/code_project_db.c
            ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer
            ${CURL_LIBRARIES} ${JSONC_LIBRARIES}

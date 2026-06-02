@@ -90,6 +90,12 @@
 #include "tools/tfidf_summarizer.h"
 #include "tools/tool_registry.h"
 #include "tools/tools_init.h"
+#ifdef DAWN_ENABLE_MCP_BRIDGE_TOOL
+#include "tools/mcp_bridge.h"
+#endif
+#ifdef DAWN_ENABLE_CODE_PROJECTS
+#include "tools/code_project_service.h"
+#endif
 #include "tts/text_to_speech.h"
 #include "tts/tts_preprocessing.h"
 #include "ui/metrics.h"
@@ -3950,6 +3956,15 @@ server_shutdown:
 
    OLOG_INFO("Shutdown: llm_rate_limit");
    llm_rate_limit_cleanup();
+
+#ifdef DAWN_ENABLE_CODE_PROJECTS
+   OLOG_INFO("Shutdown: code_project_service");
+   code_project_service_shutdown(); /* join the import worker before registry teardown */
+#endif
+#ifdef DAWN_ENABLE_MCP_BRIDGE_TOOL
+   OLOG_INFO("Shutdown: mcp_bridge");
+   mcp_bridge_shutdown(); /* disconnect MCP clients + free slot table */
+#endif
 
    OLOG_INFO("Shutdown: tool_registry");
    tool_registry_shutdown();

@@ -994,6 +994,52 @@ typedef struct {
 } ota_config_t;
 
 /* =============================================================================
+ * MCP bridge (coding-harness) — [mcp] + [[mcp.server]]
+ * ============================================================================= */
+#define MCP_SERVERS_MAX 16
+#define MCP_SERVER_ALIAS_MAX 64
+
+typedef struct {
+   char alias[MCP_SERVER_ALIAS_MAX]; /* server id, used as a tool-name prefix */
+   char url[CONFIG_PATH_MAX];        /* SSE endpoint URL */
+   char transport[16];               /* "http+sse" (Phase 1) */
+   bool enabled;
+   char capabilities[16]; /* "dangerous" (default) | "read_only" */
+   int request_timeout_seconds;
+   int idle_close_seconds;
+   bool tls_verify; /* false requires [mcp] dev_mode = true */
+   /* Bearer token: env-var name is the Phase-1 source (auth_bearer_env). The
+    * secrets.toml key is reserved — resolving it needs a generic by-name secret
+    * lookup that the fixed-field secrets parser does not yet provide. */
+   char auth_bearer_env[CONFIG_NAME_MAX];
+   char auth_bearer_token_secret[CONFIG_NAME_MAX];
+} mcp_server_config_t;
+
+typedef struct {
+   bool enabled;
+   bool dev_mode; /* gate: required true to permit any tls_verify = false server */
+   int server_count;
+   mcp_server_config_t servers[MCP_SERVERS_MAX];
+} mcp_config_t;
+
+/* =============================================================================
+ * Code projects (coding harness) — [code_projects]
+ * ============================================================================= */
+typedef struct {
+   bool enabled;
+   char source_root[CONFIG_PATH_MAX]; /* where repos are cloned */
+   char default_index_mode[16];       /* "full" */
+   bool default_global;
+   char import_user_required[16]; /* "" or "admin" */
+   int max_repo_size_mb;
+   int max_file_count;
+   int max_path_depth;
+   int clone_depth;                /* 0 = full, 1 = shallow */
+   char allowed_host_pattern[256]; /* POSIX ERE for the clone host allowlist */
+   char default_active[64];        /* fallback active project name */
+} code_projects_config_t;
+
+/* =============================================================================
  * Main Configuration Struct
  * ============================================================================= */
 typedef struct {
@@ -1024,6 +1070,8 @@ typedef struct {
    calendar_config_t calendar;
    messaging_config_t messaging;
    ota_config_t ota;
+   mcp_config_t mcp;
+   code_projects_config_t code_projects;
 } dawn_config_t;
 
 /* =============================================================================

@@ -408,10 +408,15 @@ mcp_transport_t *mcp_transport_http_sse_create(const mcp_transport_opts_t *opts)
    if (opts->bearer_token != NULL && opts->bearer_token[0] != '\0') {
       size_t n = strlen("Authorization: Bearer ") + strlen(opts->bearer_token) + 1;
       t->auth_header = malloc(n);
-      if (t->auth_header != NULL) {
-         snprintf(t->auth_header, n, "Authorization: Bearer %s", opts->bearer_token);
-         t->sse_headers = curl_slist_append(t->sse_headers, t->auth_header);
+      if (t->auth_header == NULL) {
+         /* A token was explicitly requested; failing silently would start an
+          * unauthenticated connection that the server rejects (sec-S8). */
+         OLOG_ERROR("MCP transport: failed to allocate auth header");
+         http_sse_destroy((mcp_transport_t *)t);
+         return NULL;
       }
+      snprintf(t->auth_header, n, "Authorization: Bearer %s", opts->bearer_token);
+      t->sse_headers = curl_slist_append(t->sse_headers, t->auth_header);
    }
 
    return (mcp_transport_t *)t;

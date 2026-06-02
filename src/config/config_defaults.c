@@ -564,6 +564,17 @@ void config_set_defaults(dawn_config_t *config) {
    config->ota.download_token_ttl_sec = 120; /* 2 min: enough to start the pull */
    config->ota.require_tls = true;           /* never serve OTA over plaintext */
 
+   /* Code projects (coding harness) — disabled by default; secure-by-default caps. */
+   SAFE_COPY(config->code_projects.source_root, "/var/lib/dawn/source");
+   SAFE_COPY(config->code_projects.default_index_mode, "full");
+   SAFE_COPY(config->code_projects.import_user_required, "admin");
+   config->code_projects.max_repo_size_mb = 2048;
+   config->code_projects.max_file_count = 200000;
+   config->code_projects.max_path_depth = 20;
+   config->code_projects.clone_depth = 0;
+   SAFE_COPY(config->code_projects.allowed_host_pattern,
+             "^([a-z0-9-]+\\.)?(github\\.com|gitlab\\.com|codeberg\\.org|bitbucket\\.org)$");
+
    /* Music - streaming settings */
    config->music.streaming_enabled = true;
    strncpy(config->music.streaming_quality, "standard",

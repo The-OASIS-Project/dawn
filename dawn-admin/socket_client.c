@@ -1815,8 +1815,24 @@ admin_resp_code_t admin_client_ota_list(int fd, char *response, size_t resp_len)
    return recv_text_response(fd, response, resp_len);
 }
 
+/* ===== MCP bridge (0xB0-0xB4) ===== */
+
+admin_resp_code_t admin_client_mcp_list(int fd, char *response, size_t resp_len) {
+   if (send_message(fd, ADMIN_MSG_MCP_LIST, NULL, 0) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
 admin_resp_code_t admin_client_ota_rescan(int fd, char *response, size_t resp_len) {
    if (send_message(fd, ADMIN_MSG_OTA_RESCAN, NULL, 0) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
+admin_resp_code_t admin_client_mcp_reset(int fd, char *response, size_t resp_len) {
+   if (send_message(fd, ADMIN_MSG_MCP_RESET, NULL, 0) != 0) {
       return ADMIN_RESP_SERVICE_ERROR;
    }
    return recv_text_response(fd, response, resp_len);
@@ -1851,6 +1867,32 @@ admin_resp_code_t admin_client_ota_push(int fd,
    return recv_text_response(fd, response, resp_len);
 }
 
+/* Wire format for grant/revoke: "<username>\0<alias>". */
+static admin_resp_code_t mcp_grant_revoke(int fd,
+                                          uint8_t opcode,
+                                          const char *username,
+                                          const char *alias,
+                                          char *response,
+                                          size_t resp_len) {
+   if (!username || !username[0] || !alias || !alias[0]) {
+      return ADMIN_RESP_FAILURE;
+   }
+   size_t ul = strlen(username);
+   size_t al = strlen(alias);
+   char buf[256];
+   if (ul + 1 + al > sizeof(buf)) {
+      return ADMIN_RESP_FAILURE;
+   }
+   memcpy(buf, username, ul);
+   buf[ul] = '\0';
+   memcpy(buf + ul + 1, alias, al);
+   uint16_t total = (uint16_t)(ul + 1 + al);
+   if (send_message(fd, opcode, buf, total) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
 admin_resp_code_t admin_client_ota_push_all(int fd,
                                             int tier,
                                             const char *version,
@@ -1877,8 +1919,73 @@ admin_resp_code_t admin_client_ota_push_all(int fd,
    return recv_text_response(fd, response, resp_len);
 }
 
+admin_resp_code_t admin_client_mcp_grant(int fd,
+                                         const char *username,
+                                         const char *alias,
+                                         char *response,
+                                         size_t resp_len) {
+   return mcp_grant_revoke(fd, ADMIN_MSG_MCP_GRANT, username, alias, response, resp_len);
+}
+
+admin_resp_code_t admin_client_mcp_revoke(int fd,
+                                          const char *username,
+                                          const char *alias,
+                                          char *response,
+                                          size_t resp_len) {
+   return mcp_grant_revoke(fd, ADMIN_MSG_MCP_REVOKE, username, alias, response, resp_len);
+}
+
+/* ===== Code projects (0xB5-0xB8) ===== */
+
+admin_resp_code_t admin_client_code_proj_list(int fd, char *response, size_t resp_len) {
+   if (send_message(fd, ADMIN_MSG_CODE_PROJ_LIST, NULL, 0) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
+admin_resp_code_t admin_client_code_proj_import(int fd,
+                                                const char *url,
+                                                const char *name,
+                                                bool global,
+                                                char *response,
+                                                size_t resp_len) {
+   if (!url || !url[0] || !name || !name[0]) {
+      return ADMIN_RESP_FAILURE;
+   }
+   size_t nl = strlen(name);
+   size_t ul = strlen(url);
+   uint8_t buf[1024];
+   if (1 + nl + 1 + ul > sizeof(buf)) {
+      return ADMIN_RESP_FAILURE;
+   }
+   buf[0] = (uint8_t)(global ? 0x01 : 0x00);
+   memcpy(buf + 1, name, nl);
+   buf[1 + nl] = '\0';
+   memcpy(buf + 1 + nl + 1, url, ul);
+   uint16_t total = (uint16_t)(1 + nl + 1 + ul);
+   if (send_message(fd, ADMIN_MSG_CODE_PROJ_IMPORT, (const char *)buf, total) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
 admin_resp_code_t admin_client_ota_rollout_status(int fd, char *response, size_t resp_len) {
    if (send_message(fd, ADMIN_MSG_OTA_ROLLOUT_STATUS, NULL, 0) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
+static admin_resp_code_t code_proj_by_name(int fd,
+                                           uint8_t opcode,
+                                           const char *name,
+                                           char *response,
+                                           size_t resp_len) {
+   if (!name || !name[0]) {
+      return ADMIN_RESP_FAILURE;
+   }
+   if (send_message(fd, opcode, name, (uint16_t)strlen(name)) != 0) {
       return ADMIN_RESP_SERVICE_ERROR;
    }
    return recv_text_response(fd, response, resp_len);
@@ -1889,4 +1996,18 @@ admin_resp_code_t admin_client_ota_rollout_abort(int fd, char *response, size_t 
       return ADMIN_RESP_SERVICE_ERROR;
    }
    return recv_text_response(fd, response, resp_len);
+}
+
+admin_resp_code_t admin_client_code_proj_refresh(int fd,
+                                                 const char *name,
+                                                 char *response,
+                                                 size_t resp_len) {
+   return code_proj_by_name(fd, ADMIN_MSG_CODE_PROJ_REFRESH, name, response, resp_len);
+}
+
+admin_resp_code_t admin_client_code_proj_delete(int fd,
+                                                const char *name,
+                                                char *response,
+                                                size_t resp_len) {
+   return code_proj_by_name(fd, ADMIN_MSG_CODE_PROJ_DELETE, name, response, resp_len);
 }

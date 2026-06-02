@@ -236,7 +236,7 @@ static int mock_start(mock_t *s) {
    pthread_mutex_init(&s->mtx, NULL);
    s->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
    if (s->listen_fd < 0) {
-      return -1;
+      return FAILURE;
    }
    int yes = 1;
    setsockopt(s->listen_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
@@ -248,16 +248,16 @@ static int mock_start(mock_t *s) {
    if (bind(s->listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
        listen(s->listen_fd, 8) < 0) {
       close(s->listen_fd);
-      return -1;
+      return FAILURE;
    }
    socklen_t alen = sizeof(addr);
    getsockname(s->listen_fd, (struct sockaddr *)&addr, &alen);
    s->port = ntohs(addr.sin_port);
    if (pthread_create(&s->thread, NULL, mock_main, s) != 0) {
       close(s->listen_fd);
-      return -1;
+      return FAILURE;
    }
-   return 0;
+   return SUCCESS;
 }
 
 static void mock_stop(mock_t *s) {
@@ -302,7 +302,7 @@ void setUp(void) {
    g_last_progress_msg[0] = '\0';
    pthread_mutex_unlock(&g_pmtx);
 
-   TEST_ASSERT_EQUAL_INT(0, mock_start(&g_srv));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, mock_start(&g_srv));
    snprintf(g_url, sizeof(g_url), "http://127.0.0.1:%d/sse", g_srv.port);
 }
 

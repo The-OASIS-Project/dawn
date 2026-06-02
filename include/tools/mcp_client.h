@@ -103,6 +103,14 @@ void mcp_client_shutdown(mcp_client_t *c);
 mcp_client_state_t mcp_client_state(mcp_client_t *c);
 
 /**
+ * @brief Clear a DISABLED state so the next call/connect retries.
+ *
+ * The repeated-failure backstop latches a client to DISABLED; this is the
+ * operator escape hatch (admin `mcp reset`). No-op unless DISABLED.
+ */
+void mcp_client_reset(mcp_client_t *c);
+
+/**
  * @brief Issue a JSON-RPC request and wait for the response.
  *
  * Auto-connects if currently DISCONNECTED. The JSON-RPC response arrives

@@ -366,6 +366,19 @@ endif()
 include_directories(${SAMPLERATE_INCLUDE_DIRS})
 message(STATUS "libsamplerate: Found (${SAMPLERATE_VERSION})")
 
+# libgit2 (coding-harness code-projects: in-process git client). Built from
+# source >= 1.6 (jammy apt is 1.1). See scripts/lib/libs.sh install_libgit2.
+if(DAWN_ENABLE_CODE_PROJECTS)
+    pkg_check_modules(LIBGIT2 REQUIRED libgit2)
+    if(LIBGIT2_VERSION VERSION_LESS "1.6")
+        message(FATAL_ERROR
+            "libgit2 ${LIBGIT2_VERSION} too old (need >= 1.6).\n"
+            "Build from source: INSTALL_LIBGIT2=true ./scripts/install.sh")
+    endif()
+    include_directories(${LIBGIT2_INCLUDE_DIRS})
+    message(STATUS "libgit2: Found (${LIBGIT2_VERSION}) for code projects")
+endif()
+
 # =============================================================================
 # AEC Support (Acoustic Echo Cancellation) - WebRTC AEC3
 # =============================================================================
@@ -699,10 +712,11 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_core.c
     src/auth/auth_db_schema.c
     src/auth/auth_db_migrations.c
-    # v64 mcp_user_access migration helper: unconditional (schema versioning is
-    # global, not gated on DAWN_ENABLE_MCP_BRIDGE_TOOL). Called by
+    # v64/v65 migration helpers: unconditional (schema versioning is global, not
+    # gated on the coding-harness feature flags). Called by
     # auth_db_apply_migrations() in auth_db_migrations.c.
     src/auth/auth_db_migrations_v64.c
+    src/auth/auth_db_migrations_v65.c
     src/auth/auth_db_statements.c
     # DB-layer tables depended on by the always-compiled memory / OTA / tool
     # subsystems (extraction, summaries, history, satellite OTA, image tools), so
@@ -815,6 +829,11 @@ add_custom_target(no_process_mgmt_check
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     COMMENT "Checking coding-harness invariant: no process-management calls")
 add_dependencies(dawn no_process_mgmt_check)
+
+# libgit2 link for the code-projects subsystem (detected above).
+if(DAWN_ENABLE_CODE_PROJECTS)
+    target_link_libraries(dawn ${LIBGIT2_LIBRARIES})
+endif()
 
 # AEC compile definitions (target-specific to avoid rebuilding whisper/ggml)
 if(AEC_ENABLED)

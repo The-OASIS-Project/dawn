@@ -921,4 +921,35 @@ admin_resp_code_t admin_client_ota_push(int fd,
                                         char *response,
                                         size_t resp_len);
 
+/* MCP bridge (coding harness) operator commands. */
+admin_resp_code_t admin_client_mcp_list(int fd, char *response, size_t resp_len);
+admin_resp_code_t admin_client_mcp_reset(int fd, char *response, size_t resp_len);
+admin_resp_code_t admin_client_mcp_grant(int fd,
+                                         const char *username,
+                                         const char *alias,
+                                         char *response,
+                                         size_t resp_len);
+admin_resp_code_t admin_client_mcp_revoke(int fd,
+                                          const char *username,
+                                          const char *alias,
+                                          char *response,
+                                          size_t resp_len);
+
+/* Code projects (coding harness) operator commands. */
+admin_resp_code_t admin_client_code_proj_list(int fd, char *response, size_t resp_len);
+admin_resp_code_t admin_client_code_proj_import(int fd,
+                                                const char *url,
+                                                const char *name,
+                                                bool global,
+                                                char *response,
+                                                size_t resp_len);
+admin_resp_code_t admin_client_code_proj_refresh(int fd,
+                                                 const char *name,
+                                                 char *response,
+                                                 size_t resp_len);
+admin_resp_code_t admin_client_code_proj_delete(int fd,
+                                                const char *name,
+                                                char *response,
+                                                size_t resp_len);
+
 #endif /* DAWN_ADMIN_SOCKET_CLIENT_H */

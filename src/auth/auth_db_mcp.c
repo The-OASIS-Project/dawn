@@ -145,3 +145,28 @@ int auth_db_mcp_user_is_admin(int64_t user_id, bool *is_admin_out) {
 
    return result;
 }
+
+int auth_db_mcp_grant_all_admins(const char *server_alias) {
+   if (server_alias == NULL) {
+      return AUTH_DB_FAILURE;
+   }
+
+   const char *sql =
+       "INSERT OR IGNORE INTO mcp_user_access (user_id, server_alias, enabled, updated_at) "
+       "SELECT id, ?, 1, ? FROM users WHERE is_admin = 1";
+
+   pthread_mutex_lock(&s_db.mutex);
+   sqlite3_stmt *st = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL) != SQLITE_OK) {
+      OLOG_ERROR("auth_db_mcp: grant_all_admins prepare failed: %s", sqlite3_errmsg(s_db.db));
+      pthread_mutex_unlock(&s_db.mutex);
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_text(st, 1, server_alias, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int64(st, 2, (sqlite3_int64)time(NULL));
+   int rc = sqlite3_step(st);
+   sqlite3_finalize(st);
+   pthread_mutex_unlock(&s_db.mutex);
+
+   return rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+}

@@ -404,6 +404,13 @@ typedef struct session {
    session_llm_config_t llm_config;
    pthread_mutex_t llm_config_mutex;  // Protects llm_config (lock level 4)
 
+   // Coding harness: per-session active code project (set via the
+   // code_project_set_active tool or the WebUI). The bridge auto-fills cbm
+   // tool calls with this project. Protected by llm_config_mutex (a per-session
+   // LLM-scoped override, like the other fields under that lock). 0 = none.
+   int64_t active_project_id;
+   char active_project_name[64];
+
    // Phase 1f: per-turn focus-injection dedup state.  Shares history_mutex —
    // dedup state is conceptually attached to conversation history (lives or
    // dies with it) and the never-hold-two-L4-locks rule keeps us out of a

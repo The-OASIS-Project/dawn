@@ -417,6 +417,16 @@ int llm_tools_estimate_tokens(bool is_remote_session);
  */
 void llm_tools_invalidate_cache(void);
 
+/**
+ * @brief Raw JSON arguments of the tool call currently being dispatched.
+ *
+ * Set by the executor (thread-local) only for the duration of a tool callback,
+ * so a callback can recover the original, un-flattened LLM arguments object that
+ * the (action, value) packing cannot losslessly represent. Used by the MCP
+ * bridge to forward typed args upstream. Returns NULL outside a callback.
+ */
+const char *llm_tools_current_raw_args(void);
+
 /* =============================================================================
  * Tool Execution
  * ============================================================================= */

@@ -23,7 +23,17 @@
 
 #include "tools/tools_init.h"
 
+#include "dawn_error.h"
 #include "logging.h"
+
+#ifdef DAWN_ENABLE_MCP_BRIDGE_TOOL
+#include "tools/mcp_bridge.h"
+#endif
+
+#ifdef DAWN_ENABLE_CODE_PROJECTS
+#include "tools/code_project_service.h"
+#include "tools/code_project_tool.h"
+#endif
 
 /* ========== Tool Headers (conditionally included) ========== */
 
@@ -322,6 +332,23 @@ int tools_register_all(void) {
    }
 #endif
 
+#ifdef DAWN_ENABLE_MCP_BRIDGE_TOOL
+   /* Connect to configured MCP servers and register their tools. Non-fatal:
+    * a missing/unreachable server is logged and skipped. */
+   if (mcp_bridge_init() != 0) {
+      OLOG_WARNING("MCP bridge init failed; continuing without bridged tools");
+   }
+#endif
+
+#ifdef DAWN_ENABLE_CODE_PROJECTS
+   if (code_project_service_init() != 0) {
+      OLOG_WARNING("Code project service init failed");
+   }
+   if (code_project_tool_register() != 0) {
+      OLOG_WARNING("Failed to register code_project tool");
+   }
+#endif
+
    OLOG_INFO("Tool registration complete");
-   return 0;
+   return SUCCESS;
 }

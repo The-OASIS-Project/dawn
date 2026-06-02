@@ -221,6 +221,22 @@ typedef enum {
 
    /* Next free messaging opcode: 0xA5.  (Range ends 0xAF.) */
 
+   /* Phase 8: MCP bridge (coding harness).  Range 0xB0..0xBF reserved for the
+    * coding harness; 0xB5+ reserved for code-projects (Step 16). */
+   ADMIN_MSG_MCP_LIST = 0xB0,   /**< List connected servers + tool counts */
+   ADMIN_MSG_MCP_STATUS = 0xB1, /**< Detailed bridge status (same payload as LIST) */
+   ADMIN_MSG_MCP_GRANT = 0xB2,  /**< Grant MCP access; payload "<username>\0<alias>" */
+   ADMIN_MSG_MCP_REVOKE = 0xB3, /**< Revoke MCP access; payload "<username>\0<alias>" */
+   ADMIN_MSG_MCP_RESET = 0xB4,  /**< Clear DISABLED + reconnect all servers */
+
+   /* Phase 9: code projects (coding harness). */
+   ADMIN_MSG_CODE_PROJ_LIST = 0xB5,    /**< List all projects */
+   ADMIN_MSG_CODE_PROJ_IMPORT = 0xB6,  /**< Import a repo; payload flags(1) + "name\0url" */
+   ADMIN_MSG_CODE_PROJ_REFRESH = 0xB7, /**< Re-index a project; payload: name */
+   ADMIN_MSG_CODE_PROJ_DELETE = 0xB8,  /**< Delete a project; payload: name */
+
+   /* Next free opcode: 0xB9. */
+
    /* OTA updates (operator surface for the server→satellite OTA system; the
     * #11 operator-surface follow-ups, see docs/OTA_DESIGN.md).  Opcode range
     * 0xC0..0xCF is reserved for OTA (0xB0 band belongs to the coding harness).

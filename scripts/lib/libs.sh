@@ -298,6 +298,59 @@ install_libvosk() {
 # Library path setup (ensures /usr/local/lib is in ldconfig)
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# libgit2 — in-process git client for the coding-harness code-projects feature.
+# Jammy apt ships 1.1; we need >= 1.6, so build from source with the OpenSSL
+# HTTPS backend (matches DAWN's TLS stack) and SSH disabled (Phase 1 is HTTPS
+# public clone only). Opt-in: only built when INSTALL_LIBGIT2=true, since the
+# code-projects feature is OFF by default (DAWN_ENABLE_CODE_PROJECTS).
+# ─────────────────────────────────────────────────────────────────────────────
+
+install_libgit2() {
+   local libgit2_version="1.8.1"  # >= 1.6 required; pinned stable
+
+   if has_lib "libgit2.so"; then
+      local ver
+      ver=$(pkg-config --modversion libgit2 2>/dev/null || echo "0")
+      if dpkg --compare-versions "$ver" ge "1.6.0" 2>/dev/null; then
+         log "libgit2: already installed (v$ver)"
+         return 0
+      fi
+      log "libgit2: found v$ver (< 1.6) — building v${libgit2_version} from source"
+   fi
+
+   log "Building libgit2 v${libgit2_version} (OpenSSL backend, SSH off)..."
+   sudo_begin_phase "libgit2"
+   run_sudo apt-get install -y libssl-dev zlib1g-dev pkg-config 2>/dev/null || true
+
+   local tmpdir
+   tmpdir=$(mktemp -d)
+   register_cleanup "$tmpdir"
+
+   git clone --depth 1 --branch "v${libgit2_version}" https://github.com/libgit2/libgit2.git \
+      "$tmpdir/libgit2" || error "Failed to clone libgit2 v${libgit2_version}"
+   mkdir -p "$tmpdir/libgit2/build"
+   cd "$tmpdir/libgit2/build" || return
+
+   # USE_HTTPS=OpenSSL pins the TLS backend (eff-16); USE_SSH=OFF avoids a
+   # libssh2 dependency we don't need; tests off for build speed.
+   cmake .. \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_SHARED_LIBS=ON \
+      -DUSE_HTTPS=OpenSSL \
+      -DUSE_SSH=OFF \
+      -DBUILD_TESTS=OFF \
+      -DCMAKE_INSTALL_PREFIX=/usr/local || error "libgit2 cmake failed"
+   make -j"$(nproc)" || error "libgit2 build failed"
+
+   run_sudo make install || error "libgit2 install failed"
+   sudo_keepalive
+   run_sudo ldconfig
+
+   cd "$PROJECT_ROOT" || return
+   log "libgit2: installed successfully (v${libgit2_version}, OpenSSL backend)"
+}
+
 setup_library_path() {
    local ld_conf="/etc/ld.so.conf.d/dawn.conf"
    if [ -f "$ld_conf" ] && grep -q "/usr/local/lib" "$ld_conf"; then
@@ -326,6 +379,11 @@ run_libs() {
    install_onnxruntime
    sudo_keepalive
    install_piper_phonemize
+   # Coding-harness code-projects dependency; opt-in (feature OFF by default).
+   if [ "${INSTALL_LIBGIT2:-false}" = "true" ]; then
+      sudo_keepalive
+      install_libgit2
+   fi
    setup_library_path
 
    # Final verification
@@ -340,6 +398,9 @@ run_libs() {
    fi
    has_lib "libonnxruntime.so" || [ -f /usr/local/lib/libonnxruntime.so.1 ] || failed+=("onnxruntime")
    has_lib "libpiper_phonemize.so" || failed+=("piper-phonemize")
+   if [ "${INSTALL_LIBGIT2:-false}" = "true" ]; then
+      has_lib "libgit2.so" || failed+=("libgit2")
+   fi
 
    if [ ${#failed[@]} -gt 0 ]; then
       error "Core libraries missing after install: ${failed[*]}"

@@ -36,12 +36,20 @@
 
 #include "auth/auth_db.h"
 #include "auth/auth_db_mcp.h"
+#include "config/dawn_config.h"
+#include "core/session_manager.h"
 #include "dawn_error.h"
+#include "llm/llm_tools.h"
 #include "logging.h"
 #include "tools/mcp_bridge.h"
 #include "tools/mcp_bridge_schema.h"
 #include "tools/mcp_client.h"
+#include "tools/mcp_transport_http_sse.h"
 #include "tools/tool_registry.h"
+
+#ifdef DAWN_ENABLE_CODE_PROJECTS
+#include "tools/code_project_db.h"
+#endif
 
 /* One registered bridged tool. `enabled` MUST be first: it doubles as the
  * tool's config struct so dangerous-tool registry validation passes (std-H2). */
@@ -60,6 +68,16 @@ typedef struct {
 static mcp_slot_t s_slots[MCP_BRIDGE_MAX_SLOTS];
 static int s_slot_count;
 static pthread_mutex_t s_slots_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* One connected upstream server; owns the client for the bridge's lifetime. */
+typedef struct {
+   char alias[MCP_SERVER_ALIAS_MAX];
+   mcp_client_t *client;
+   bool in_use;
+} mcp_server_entry_t;
+
+static mcp_server_entry_t s_servers[MCP_SERVERS_MAX];
+static int s_server_count;
 
 static char *mcp_bridge_dispatch(mcp_slot_t *slot,
                                  const char *action,
@@ -127,24 +145,32 @@ static char *dispatch_error(int *should_respond, const char *msg) {
 /*
  * Forward one LLM tool call to the upstream MCP server via tools/call.
  *
- * ARG DELIVERY (deferred seam): `value` is treated as the JSON arguments object.
- * The executor's (action, value) packing does not yet deliver clean typed JSON
- * for arbitrary MCP params; the executor-integration step (Step 7+) wires a
- * raw-args hook so `value` carries the original arguments JSON. Until then this
- * dispatch is exercised by the unit test passing JSON directly in `value`.
+ * ARG DELIVERY: prefer the executor's raw-args hook (the original typed JSON the
+ * LLM sent), which the (action, value) packing flattens lossily. Fall back to
+ * `value` when there is no executor context (e.g. the unit test invokes the
+ * callback directly with JSON in `value`).
  */
 static char *mcp_bridge_dispatch(mcp_slot_t *slot,
                                  const char *action,
                                  char *value,
                                  int *should_respond) {
-   (void)action; /* MCP tools/call has no separate action; all args are in value */
+   (void)action; /* MCP tools/call has no separate action; all args are in the JSON object */
 
    if (slot == NULL || !slot->in_use || slot->client == NULL) {
       return dispatch_error(should_respond, "MCP tool is not available.");
    }
 
+   /* Fail closed: bridged MCP tools require an authenticated user session. The
+    * registry's tool_get_current_user_id() invents uid 1 (admin) when no session
+    * context is set, which would let any non-session caller bypass both gates
+    * below (sec-S1). */
+   session_t *cmd_sess = session_get_command_context();
+   if (cmd_sess == NULL || cmd_sess->metrics.user_id <= 0) {
+      return dispatch_error(should_respond, "MCP tools require an authenticated user session.");
+   }
+   int64_t uid = cmd_sess->metrics.user_id;
+
    /* Per-call MCP access re-check (sec-H4): visibility can change mid-session. */
-   int64_t uid = tool_get_current_user_id();
    bool allowed = false;
    if (auth_db_mcp_check_access(uid, slot->server_alias, &allowed) != AUTH_DB_SUCCESS || !allowed) {
       OLOG_WARNING("MCP bridge: user %lld denied access to server '%s'", (long long)uid,
@@ -162,21 +188,44 @@ static char *mcp_bridge_dispatch(mcp_slot_t *slot,
       }
    }
 
-   /* HOOK (Step 14): auto-fill `project` from the session's active project when
-    * the LLM omits it for a code-graph tool. Deferred until the code-projects
-    * layer exists. */
-
    /* Build tools/call params: { "name": <upstream>, "arguments": <args> }. */
+   const char *args_json = llm_tools_current_raw_args();
+   if (args_json == NULL) {
+      args_json = value; /* no executor context (unit test path) */
+   }
    struct json_object *p = json_object_new_object();
    json_object_object_add(p, "name", json_object_new_string(slot->upstream_tool_name));
-   struct json_object *args = (value != NULL && value[0] != '\0') ? json_tokener_parse(value)
-                                                                  : NULL;
+   struct json_object *args = (args_json != NULL && args_json[0] != '\0')
+                                  ? json_tokener_parse(args_json)
+                                  : NULL;
    if (args == NULL || !json_object_is_type(args, json_type_object)) {
       if (args != NULL) {
          json_object_put(args);
       }
       args = json_object_new_object();
    }
+
+#ifdef DAWN_ENABLE_CODE_PROJECTS
+   /* Auto-fill `project` from the session's active project for cbm tools when the
+    * LLM omitted it, after re-checking the user can still see that project
+    * (sec-H4 per-call visibility). NOTE: assumes cbm accepts/ignores a "project"
+    * arg — verify against the cbm tool schema. */
+   if (strcmp(slot->server_alias, "cbm") == 0) {
+      struct json_object *existing = NULL;
+      if (!json_object_object_get_ex(args, "project", &existing)) {
+         char active[64] = { 0 };
+         pthread_mutex_lock(&cmd_sess->llm_config_mutex);
+         snprintf(active, sizeof(active), "%s", cmd_sess->active_project_name);
+         pthread_mutex_unlock(&cmd_sess->llm_config_mutex);
+         bool visible = false;
+         if (active[0] != '\0' &&
+             code_project_db_check_visible(uid, active, &visible) == AUTH_DB_SUCCESS && visible) {
+            json_object_object_add(args, "project", json_object_new_string(active));
+         }
+      }
+   }
+#endif
+
    json_object_object_add(p, "arguments", args);
 
    char *result = NULL;
@@ -248,7 +297,7 @@ int mcp_bridge_register_tool(mcp_client_t *client,
    meta.config_size = sizeof(*slot);
    meta.config_parser = mcp_slot_noop_parser;
 
-   if (tool_registry_register(&meta) != 0) {
+   if (tool_registry_register(&meta) != SUCCESS) {
       OLOG_ERROR("MCP bridge: failed to register tool '%s'", dawn_tool_name);
       free(slot->description);
       slot->description = NULL;
@@ -275,9 +324,131 @@ int mcp_bridge_register_tool(mcp_client_t *client,
  * Lifecycle
  * -------------------------------------------------------------------------- */
 
+/* cbm mutating-tool denylist (sec-M1): registered TOOL_CAP_DANGEROUS + admin-only
+ * invocation. Matched on the upstream tool name. */
+static bool is_dangerous_tool(const char *upstream_name) {
+   static const char *const denylist[] = { "index_repository", "delete_project", "manage_adr",
+                                           NULL };
+   for (int i = 0; denylist[i] != NULL; i++) {
+      if (strcmp(upstream_name, denylist[i]) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
+/* Register every tool from a connected server's cached tools/list result. */
+static void register_server_tools(const char *alias, mcp_client_t *client) {
+   const char *tools_json = mcp_client_tools_json(client);
+   if (tools_json == NULL) {
+      OLOG_WARNING("MCP bridge: server '%s' returned no tools", alias);
+      return;
+   }
+   struct json_object *root = json_tokener_parse(tools_json);
+   struct json_object *tools = NULL;
+   if (root == NULL || !json_object_object_get_ex(root, "tools", &tools) ||
+       !json_object_is_type(tools, json_type_array)) {
+      OLOG_WARNING("MCP bridge: server '%s' tools/list payload not understood", alias);
+      if (root != NULL) {
+         json_object_put(root);
+      }
+      return;
+   }
+
+   int registered = 0;
+   int n = json_object_array_length(tools);
+   for (int i = 0; i < n; i++) {
+      struct json_object *tool = json_object_array_get_idx(tools, i);
+      struct json_object *name_obj = NULL;
+      if (tool == NULL || !json_object_object_get_ex(tool, "name", &name_obj)) {
+         continue;
+      }
+      const char *upstream = json_object_get_string(name_obj);
+      if (upstream == NULL || upstream[0] == '\0') {
+         continue;
+      }
+      struct json_object *desc_obj = NULL;
+      const char *description = json_object_object_get_ex(tool, "description", &desc_obj)
+                                    ? json_object_get_string(desc_obj)
+                                    : "";
+      struct json_object *schema = NULL;
+      json_object_object_get_ex(tool, "inputSchema", &schema);
+
+      mcp_param_set_t params = { 0 };
+      if (mcp_schema_translate(schema, upstream, &params) != SUCCESS) {
+         OLOG_WARNING("MCP bridge: skipping tool '%s/%s' (schema rejected)", alias, upstream);
+         continue;
+      }
+
+      char dawn_name[TOOL_NAME_MAX];
+      snprintf(dawn_name, sizeof(dawn_name), "%s_%s", alias, upstream);
+
+      if (mcp_bridge_register_tool(client, alias, upstream, dawn_name, description, &params,
+                                   is_dangerous_tool(upstream)) == SUCCESS) {
+         registered++;
+      } else {
+         mcp_param_set_free(&params); /* register failed: reclaim (move didn't happen) */
+      }
+   }
+   json_object_put(root);
+   OLOG_INFO("MCP bridge: registered %d tool(s) from server '%s'", registered, alias);
+}
+
 int mcp_bridge_init(void) {
-   /* Config-agnostic core: nothing to wire until config-driven server setup
-    * lands (Step 7). Servers + their tools are registered there. */
+   const dawn_config_t *cfg = config_get();
+   if (cfg == NULL || !cfg->mcp.enabled) {
+      return SUCCESS; /* bridge disabled */
+   }
+
+   for (int i = 0; i < cfg->mcp.server_count && i < MCP_SERVERS_MAX; i++) {
+      const mcp_server_config_t *srv = &cfg->mcp.servers[i];
+      if (!srv->enabled) {
+         continue;
+      }
+      if (s_server_count >= MCP_SERVERS_MAX) {
+         break;
+      }
+
+      /* Bearer token from the env var named in config (Phase 1 source). */
+      const char *token = (srv->auth_bearer_env[0] != '\0') ? getenv(srv->auth_bearer_env) : NULL;
+
+      mcp_client_opts_t opts = {
+         .name = srv->alias,
+         .transport_factory = mcp_transport_http_sse_create,
+         .url = srv->url,
+         .bearer_token = token,
+         .tls_verify = srv->tls_verify,
+         .connect_timeout_seconds = srv->request_timeout_seconds,
+         .idle_close_seconds = srv->idle_close_seconds,
+         .request_timeout_ms = (srv->request_timeout_seconds > 0 ? srv->request_timeout_seconds
+                                                                 : 30) *
+                               1000L,
+         .client_name = "DAWN",
+         .client_version = "1.0",
+      };
+      mcp_client_t *client = mcp_client_create(&opts);
+      if (client == NULL) {
+         OLOG_WARNING("MCP bridge: failed to create client for server '%s'", srv->alias);
+         continue;
+      }
+      if (mcp_client_connect(client) != SUCCESS) {
+         OLOG_WARNING("MCP bridge: could not connect to server '%s' (%s); skipping", srv->alias,
+                      srv->url);
+         mcp_client_destroy(client);
+         continue;
+      }
+
+      snprintf(s_servers[s_server_count].alias, sizeof(s_servers[s_server_count].alias), "%s",
+               srv->alias);
+      s_servers[s_server_count].client = client;
+      s_servers[s_server_count].in_use = true;
+      s_server_count++;
+
+      register_server_tools(srv->alias, client);
+      auth_db_mcp_grant_all_admins(srv->alias); /* operators have access out of the box */
+   }
+
+   OLOG_INFO("MCP bridge: initialized with %d connected server(s)", s_server_count);
    return SUCCESS;
 }
 
@@ -295,4 +466,133 @@ void mcp_bridge_shutdown(void) {
    }
    s_slot_count = 0;
    pthread_mutex_unlock(&s_slots_mutex);
+
+   /* Shut down + free the clients the bridge owns (registered tools that still
+    * reference them are torn down with the registry at process exit). Held under
+    * the slots mutex so a concurrent call_tool/reconnect can't read a freed
+    * client pointer from the table (sec-S4). */
+   pthread_mutex_lock(&s_slots_mutex);
+   for (int i = 0; i < s_server_count; i++) {
+      if (s_servers[i].in_use && s_servers[i].client != NULL) {
+         mcp_client_destroy(s_servers[i].client);
+         s_servers[i].client = NULL;
+         s_servers[i].in_use = false;
+      }
+   }
+   s_server_count = 0;
+   pthread_mutex_unlock(&s_slots_mutex);
+}
+
+int mcp_bridge_status_text(char *out, size_t out_len, int *bytes_written_out) {
+   if (out == NULL || out_len == 0) {
+      return FAILURE;
+   }
+   int off = 0;
+   pthread_mutex_lock(&s_slots_mutex);
+   if (s_server_count == 0) {
+      off = snprintf(out, out_len, "MCP bridge: no servers connected.\n");
+   } else {
+      for (int i = 0; i < s_server_count && off < (int)out_len; i++) {
+         int tools = 0;
+         for (int j = 0; j < s_slot_count; j++) {
+            if (s_slots[j].in_use && strcmp(s_slots[j].server_alias, s_servers[i].alias) == 0) {
+               tools++;
+            }
+         }
+         const char *state;
+         switch (mcp_client_state(s_servers[i].client)) {
+            case MCP_STATE_CONNECTED:
+               state = "connected";
+               break;
+            case MCP_STATE_DISABLED:
+               state = "disabled";
+               break;
+            case MCP_STATE_DISCONNECTED:
+               state = "disconnected";
+               break;
+            default:
+               state = "connecting";
+               break;
+         }
+         off += snprintf(out + off, out_len - off, "%s: %s, %d tool(s)\n", s_servers[i].alias,
+                         state, tools);
+      }
+   }
+   pthread_mutex_unlock(&s_slots_mutex);
+   if (bytes_written_out != NULL) {
+      *bytes_written_out = off;
+   }
+   return SUCCESS;
+}
+
+int mcp_bridge_reconnect(int *connected_out) {
+   /* Snapshot the client pointers under the lock so a concurrent shutdown or
+    * call_tool can't tear the table out from under us (sec-S4), then run the
+    * blocking reset/connect without holding the lock. */
+   mcp_client_t *clients[MCP_SERVERS_MAX];
+   int n = 0;
+   pthread_mutex_lock(&s_slots_mutex);
+   for (int i = 0; i < s_server_count; i++) {
+      if (s_servers[i].in_use && s_servers[i].client != NULL) {
+         clients[n++] = s_servers[i].client;
+      }
+   }
+   pthread_mutex_unlock(&s_slots_mutex);
+
+   int connected = 0;
+   for (int i = 0; i < n; i++) {
+      mcp_client_reset(clients[i]);
+      if (mcp_client_connect(clients[i]) == SUCCESS) {
+         connected++;
+      }
+   }
+   if (connected_out != NULL) {
+      *connected_out = connected;
+   }
+   return SUCCESS;
+}
+
+int mcp_bridge_call_tool(const char *server_alias,
+                         const char *tool_name,
+                         const char *args_json,
+                         long timeout_ms,
+                         char **result_out) {
+   if (result_out != NULL) {
+      *result_out = NULL;
+   }
+   if (server_alias == NULL || tool_name == NULL) {
+      return FAILURE;
+   }
+
+   mcp_client_t *client = NULL;
+   pthread_mutex_lock(&s_slots_mutex);
+   for (int i = 0; i < s_server_count; i++) {
+      if (s_servers[i].in_use && strcmp(s_servers[i].alias, server_alias) == 0) {
+         client = s_servers[i].client;
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_slots_mutex);
+   if (client == NULL) {
+      OLOG_WARNING("MCP bridge: no connected server '%s' for tool '%s'", server_alias, tool_name);
+      return FAILURE;
+   }
+
+   struct json_object *p = json_object_new_object();
+   json_object_object_add(p, "name", json_object_new_string(tool_name));
+   struct json_object *args = (args_json != NULL && args_json[0] != '\0')
+                                  ? json_tokener_parse(args_json)
+                                  : NULL;
+   if (args == NULL || !json_object_is_type(args, json_type_object)) {
+      if (args != NULL) {
+         json_object_put(args);
+      }
+      args = json_object_new_object();
+   }
+   json_object_object_add(p, "arguments", args);
+
+   int rc = mcp_client_call(client, "tools/call", json_object_to_json_string(p), timeout_ms, NULL,
+                            NULL, result_out);
+   json_object_put(p);
+   return rc == SUCCESS ? SUCCESS : FAILURE;
 }

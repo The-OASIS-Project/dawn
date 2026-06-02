@@ -1757,6 +1757,98 @@ int config_file_readable(const char *path) {
    return 1;
 }
 
+static void parse_mcp_server(toml_table_t *table, mcp_server_config_t *server) {
+   /* Secure-by-default per-server values (the array slot is already zeroed). */
+   safe_strncpy(server->transport, "http+sse", sizeof(server->transport));
+   safe_strncpy(server->capabilities, "dangerous", sizeof(server->capabilities));
+   server->enabled = true;
+   server->tls_verify = true;
+   server->request_timeout_seconds = 30;
+   server->idle_close_seconds = 600;
+
+   static const char *const known_keys[] = { "alias",
+                                             "url",
+                                             "transport",
+                                             "enabled",
+                                             "capabilities",
+                                             "request_timeout_seconds",
+                                             "idle_close_seconds",
+                                             "tls_verify",
+                                             "auth_bearer_env",
+                                             "auth_bearer_token_secret",
+                                             NULL };
+   warn_unknown_keys(table, "mcp.server", known_keys);
+
+   PARSE_STRING(table, "alias", server->alias);
+   PARSE_STRING(table, "url", server->url);
+   PARSE_STRING(table, "transport", server->transport);
+   PARSE_BOOL(table, "enabled", server->enabled);
+   PARSE_STRING(table, "capabilities", server->capabilities);
+   PARSE_INT(table, "request_timeout_seconds", server->request_timeout_seconds);
+   PARSE_INT(table, "idle_close_seconds", server->idle_close_seconds);
+   PARSE_BOOL(table, "tls_verify", server->tls_verify);
+   PARSE_STRING(table, "auth_bearer_env", server->auth_bearer_env);
+   PARSE_STRING(table, "auth_bearer_token_secret", server->auth_bearer_token_secret);
+}
+
+static void parse_mcp(toml_table_t *table, mcp_config_t *config) {
+   if (!table)
+      return;
+
+   static const char *const known_keys[] = { "enabled", "dev_mode", "server", NULL };
+   warn_unknown_keys(table, "mcp", known_keys);
+
+   PARSE_BOOL(table, "enabled", config->enabled);
+   PARSE_BOOL(table, "dev_mode", config->dev_mode);
+
+   toml_array_t *servers = toml_array_in(table, "server");
+   if (servers) {
+      config->server_count = 0;
+      int n = toml_array_nelem(servers);
+      for (int i = 0; i < n && i < MCP_SERVERS_MAX; i++) {
+         toml_table_t *srv = toml_table_at(servers, i);
+         if (!srv)
+            continue;
+         parse_mcp_server(srv, &config->servers[config->server_count]);
+         config->server_count++;
+      }
+      if (config->server_count > 0) {
+         OLOG_INFO("Parsed %d MCP server(s) from config", config->server_count);
+      }
+   }
+}
+
+static void parse_code_projects(toml_table_t *table, code_projects_config_t *config) {
+   if (!table)
+      return;
+
+   static const char *const known_keys[] = { "enabled",
+                                             "source_root",
+                                             "default_index_mode",
+                                             "default_global",
+                                             "import_user_required",
+                                             "max_repo_size_mb",
+                                             "max_file_count",
+                                             "max_path_depth",
+                                             "clone_depth",
+                                             "allowed_host_pattern",
+                                             "default_active",
+                                             NULL };
+   warn_unknown_keys(table, "code_projects", known_keys);
+
+   PARSE_BOOL(table, "enabled", config->enabled);
+   PARSE_STRING(table, "source_root", config->source_root);
+   PARSE_STRING(table, "default_index_mode", config->default_index_mode);
+   PARSE_BOOL(table, "default_global", config->default_global);
+   PARSE_STRING(table, "import_user_required", config->import_user_required);
+   PARSE_INT(table, "max_repo_size_mb", config->max_repo_size_mb);
+   PARSE_INT(table, "max_file_count", config->max_file_count);
+   PARSE_INT(table, "max_path_depth", config->max_path_depth);
+   PARSE_INT(table, "clone_depth", config->clone_depth);
+   PARSE_STRING(table, "allowed_host_pattern", config->allowed_host_pattern);
+   PARSE_STRING(table, "default_active", config->default_active);
+}
+
 int config_parse_file(const char *path, dawn_config_t *config) {
    if (!path || !config) {
       OLOG_ERROR("config_parse_file: NULL argument");
@@ -1806,6 +1898,8 @@ int config_parse_file(const char *path, dawn_config_t *config) {
    parse_calendar(toml_table_in(root, "calendar"), &config->calendar);
    parse_messaging(toml_table_in(root, "messaging"), &config->messaging);
    parse_ota(toml_table_in(root, "ota"), &config->ota);
+   parse_mcp(toml_table_in(root, "mcp"), &config->mcp);
+   parse_code_projects(toml_table_in(root, "code_projects"), &config->code_projects);
 
    toml_free(root);
 

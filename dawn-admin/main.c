@@ -143,6 +143,12 @@ static void print_usage(const char *prog) {
            "  ota list                               List available OTA releases.\n"
            "  ota push --uuid <uuid> --version <v> [--allow-downgrade]\n"
            "                                       Offer an update to one online satellite.\n");
+   fprintf(stderr, "\nMCP Bridge (coding harness):\n");
+   fprintf(stderr,
+           "  mcp list                             List connected MCP servers + tool counts\n"
+           "  mcp grant <user> <alias>             Grant a user access to an MCP server\n"
+           "  mcp revoke <user> <alias>            Revoke a user's access\n"
+           "  mcp reset                            Clear DISABLED + reconnect all servers\n");
    fprintf(stderr, "\n");
    fprintf(stderr, "Options:\n");
    fprintf(stderr, "  --yes, -y    Skip confirmation prompts\n");
@@ -2381,6 +2387,118 @@ int main(int argc, char *argv[]) {
 
       fprintf(stderr, "Error: Unknown ota subcommand: %s\n", subcmd);
       fprintf(stderr, "Available: list, rescan, push, push-all, rollout-status, rollout-abort\n");
+      return 1;
+   }
+
+   if (strcmp(cmd, "mcp") == 0) {
+      if (argc < 3) {
+         fprintf(stderr,
+                 "Usage: %s mcp {list|status|reset|grant <user> <alias>|revoke <user> <alias>}\n",
+                 argv[0]);
+         return 1;
+      }
+      const char *subcmd = argv[2];
+      int fd = admin_client_connect();
+      if (fd < 0) {
+         return 1;
+      }
+      char response[2048];
+      admin_resp_code_t resp;
+      if (strcmp(subcmd, "list") == 0 || strcmp(subcmd, "status") == 0) {
+         resp = admin_client_mcp_list(fd, response, sizeof(response));
+      } else if (strcmp(subcmd, "reset") == 0) {
+         resp = admin_client_mcp_reset(fd, response, sizeof(response));
+      } else if (strcmp(subcmd, "grant") == 0 || strcmp(subcmd, "revoke") == 0) {
+         if (argc < 5) {
+            admin_client_disconnect(fd);
+            fprintf(stderr, "Usage: %s mcp %s <user> <alias>\n", argv[0], subcmd);
+            return 1;
+         }
+         resp = (strcmp(subcmd, "grant") == 0)
+                    ? admin_client_mcp_grant(fd, argv[3], argv[4], response, sizeof(response))
+                    : admin_client_mcp_revoke(fd, argv[3], argv[4], response, sizeof(response));
+      } else {
+         admin_client_disconnect(fd);
+         fprintf(stderr, "Error: Unknown mcp subcommand: %s\n", subcmd);
+         return 1;
+      }
+      admin_client_disconnect(fd);
+      if (resp == ADMIN_RESP_SUCCESS) {
+         printf("%s\n", response);
+         return 0;
+      }
+      fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
+      return 1;
+   }
+
+   if (strcmp(cmd, "code-project") == 0) {
+      if (argc < 3) {
+         fprintf(stderr,
+                 "Usage: %s code-project {list | import <url> [--name n] [--global] | "
+                 "refresh <name> | delete <name>}\n",
+                 argv[0]);
+         return 1;
+      }
+      const char *subcmd = argv[2];
+      int fd = admin_client_connect();
+      if (fd < 0) {
+         return 1;
+      }
+      char response[3072];
+      admin_resp_code_t resp;
+      if (strcmp(subcmd, "list") == 0) {
+         resp = admin_client_code_proj_list(fd, response, sizeof(response));
+      } else if (strcmp(subcmd, "import") == 0) {
+         const char *url = NULL;
+         const char *name = NULL;
+         bool global = false;
+         for (int i = 3; i < argc; i++) {
+            if (strcmp(argv[i], "--name") == 0 && i + 1 < argc) {
+               name = argv[++i];
+            } else if (strcmp(argv[i], "--global") == 0) {
+               global = true;
+            } else if (argv[i][0] != '-') {
+               url = argv[i];
+            }
+         }
+         if (url == NULL) {
+            admin_client_disconnect(fd);
+            fprintf(stderr, "Usage: %s code-project import <url> [--name n] [--global]\n", argv[0]);
+            return 1;
+         }
+         /* Derive name from the URL's last path component (strip .git) if absent. */
+         char derived[64] = { 0 };
+         if (name == NULL) {
+            const char *slash = strrchr(url, '/');
+            const char *base = slash ? slash + 1 : url;
+            snprintf(derived, sizeof(derived), "%s", base);
+            char *dot = strstr(derived, ".git");
+            if (dot != NULL) {
+               *dot = '\0';
+            }
+            name = derived;
+         }
+         resp = admin_client_code_proj_import(fd, url, name, global, response, sizeof(response));
+      } else if (strcmp(subcmd, "refresh") == 0 || strcmp(subcmd, "delete") == 0) {
+         if (argc < 4) {
+            admin_client_disconnect(fd);
+            fprintf(stderr, "Usage: %s code-project %s <name>\n", argv[0], subcmd);
+            return 1;
+         }
+         resp = (strcmp(subcmd, "refresh") == 0)
+                    ? admin_client_code_proj_refresh(fd, argv[3], response, sizeof(response))
+                    : admin_client_code_proj_delete(fd, argv[3], response, sizeof(response));
+      } else {
+         admin_client_disconnect(fd);
+         fprintf(stderr, "Error: Unknown code-project subcommand: %s\n", subcmd);
+         return 1;
+      }
+      admin_client_disconnect(fd);
+      if (resp == ADMIN_RESP_SUCCESS) {
+         printf("%s\n", response);
+         return 0;
+      }
+      fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
       return 1;
    }
 

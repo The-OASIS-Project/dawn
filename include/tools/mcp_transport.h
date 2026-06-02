@@ -112,7 +112,7 @@ static inline void mcp_transport_stop(mcp_transport_t *t) {
 }
 
 static inline void mcp_transport_destroy(mcp_transport_t *t) {
-   if (t) {
+   if (t != NULL) {
       t->vt->destroy(t);
    }
 }

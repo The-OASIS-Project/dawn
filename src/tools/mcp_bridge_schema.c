@@ -246,6 +246,9 @@ static int translate_one(const char *key,
    p->name = strdup(key);
    p->maps_to = TOOL_MAPS_TO_CUSTOM;
    p->field_name = strdup(key);
+   if (p->name == NULL || p->field_name == NULL) {
+      return FAILURE; /* caller's free_param reclaims the partial entry */
+   }
 
    struct json_object *d = NULL;
    const char *desc = json_object_object_get_ex(val, "description", &d) ? json_object_get_string(d)
@@ -253,6 +256,9 @@ static int translate_one(const char *key,
    char dbuf[TOOL_DESC_MAX];
    sanitize_into(dbuf, sizeof(dbuf), desc != NULL ? desc : "", sizeof(dbuf) - 1);
    p->description = strdup(dbuf);
+   if (p->description == NULL) {
+      return FAILURE;
+   }
 
    if (schema_contains_ref(val, MCP_SCHEMA_REF_SCAN_BUDGET)) {
       OLOG_WARNING("MCP schema: tool '%s' param '%s' uses $ref -> rejected", tool_name, key);
@@ -281,6 +287,10 @@ static int translate_one(const char *key,
          for (int i = 0; i < ec; i++) {
             const char *ev = json_object_get_string(json_object_array_get_idx(en, i));
             p->enum_values[i] = strdup(ev != NULL ? ev : "");
+            if (p->enum_values[i] == NULL) {
+               p->enum_count = i; /* free_param reclaims [0,i) */
+               return FAILURE;
+            }
          }
          p->enum_count = ec;
       } else {

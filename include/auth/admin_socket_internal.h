@@ -63,6 +63,25 @@ int handle_memory_rebuild_document_fts(int client_fd, const char *payload, uint1
 int handle_memory_reextract(int client_fd, const char *payload, uint16_t payload_len);
 int handle_memory_reextract_status(int client_fd, const char *payload, uint16_t payload_len);
 
+/* MCP bridge handlers (admin_socket_mcp.c).  Dispatched from handle_client()
+ * against ADMIN_MSG_MCP_* opcodes 0xB0-0xB4.  Compiled only when the MCP bridge
+ * tool is enabled. */
+#ifdef DAWN_ENABLE_MCP_BRIDGE_TOOL
+int handle_mcp_list(int client_fd, const char *payload, uint16_t payload_len);
+int handle_mcp_status(int client_fd, const char *payload, uint16_t payload_len);
+int handle_mcp_grant(int client_fd, const char *payload, uint16_t payload_len);
+int handle_mcp_revoke(int client_fd, const char *payload, uint16_t payload_len);
+int handle_mcp_reset(int client_fd, const char *payload, uint16_t payload_len);
+#endif
+
+/* Code-projects handlers (admin_socket_code_project.c), opcodes 0xB5-0xB8. */
+#ifdef DAWN_ENABLE_CODE_PROJECTS
+int handle_code_proj_list(int client_fd, const char *payload, uint16_t payload_len);
+int handle_code_proj_import(int client_fd, const char *payload, uint16_t payload_len);
+int handle_code_proj_refresh(int client_fd, const char *payload, uint16_t payload_len);
+int handle_code_proj_delete(int client_fd, const char *payload, uint16_t payload_len);
+#endif
+
 /* Messaging-channels handlers (admin_socket_messaging.c).  Dispatched from
  * handle_client() in admin_socket.c against ADMIN_MSG_MESSAGING_* opcodes. */
 int handle_messaging_generate_link_code(int client_fd, const char *payload, uint16_t payload_len);

@@ -23,6 +23,7 @@
 
 #include "config/config_validate.h"
 
+#include <regex.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -448,6 +449,72 @@ int config_validate(const dawn_config_t *config,
       VALIDATE_RANGE_INT("ota.download_token_ttl_sec", config->ota.download_token_ttl_sec, 5, 3600);
       if (config->ota.release_dir[0] == '\0') {
          ADD_ERROR("ota.release_dir", "must be set when ota.enabled = true");
+      }
+   }
+
+   /* ===== MCP bridge servers ===== */
+   for (int i = 0; i < config->mcp.server_count && i < MCP_SERVERS_MAX; i++) {
+      const mcp_server_config_t *srv = &config->mcp.servers[i];
+      if (strcmp(srv->transport, "http+sse") != 0) {
+         ADD_ERROR("mcp.server.transport", "server '%s' transport must be 'http+sse' (got '%s')",
+                   srv->alias, srv->transport);
+      }
+      if (strcmp(srv->capabilities, "dangerous") != 0 &&
+          strcmp(srv->capabilities, "read_only") != 0) {
+         ADD_ERROR("mcp.server.capabilities",
+                   "server '%s' capabilities must be 'dangerous' or 'read_only' (got '%s')",
+                   srv->alias, srv->capabilities);
+      }
+      /* 0 = use the built-in default (30s request, no idle close). */
+      VALIDATE_RANGE_INT("mcp.server.request_timeout_seconds", srv->request_timeout_seconds, 0,
+                         3600);
+      VALIDATE_RANGE_INT("mcp.server.idle_close_seconds", srv->idle_close_seconds, 0, 86400);
+      /* tls_verify=false is only permitted when [mcp] dev_mode = true (sec-M5). */
+      if (!srv->tls_verify && !config->mcp.dev_mode) {
+         ADD_ERROR("mcp.server.tls_verify",
+                   "server '%s' has tls_verify=false but [mcp] dev_mode is not true", srv->alias);
+      }
+      if (srv->enabled) {
+         if (srv->alias[0] == '\0') {
+            ADD_ERROR("mcp.server.alias", "enabled MCP server at index %d has no alias", i);
+         }
+         if (srv->url[0] == '\0') {
+            ADD_ERROR("mcp.server.url", "enabled MCP server '%s' has no url", srv->alias);
+         }
+      }
+   }
+
+   /* ===== Code projects (coding harness) — only when enabled ===== */
+   if (config->code_projects.enabled) {
+      VALIDATE_RANGE_INT("code_projects.max_repo_size_mb", config->code_projects.max_repo_size_mb,
+                         1, 1024 * 1024);
+      VALIDATE_RANGE_INT("code_projects.max_file_count", config->code_projects.max_file_count, 1,
+                         100000000);
+      VALIDATE_RANGE_INT("code_projects.max_path_depth", config->code_projects.max_path_depth, 1,
+                         255);
+      VALIDATE_RANGE_INT("code_projects.clone_depth", config->code_projects.clone_depth, 0, 1);
+      if (config->code_projects.source_root[0] == '\0') {
+         ADD_ERROR("code_projects.source_root", "must be set when code_projects is enabled");
+      }
+      if (config->code_projects.import_user_required[0] != '\0' &&
+          strcmp(config->code_projects.import_user_required, "admin") != 0) {
+         ADD_ERROR("code_projects.import_user_required", "must be empty or 'admin' (got '%s')",
+                   config->code_projects.import_user_required);
+      }
+      if (config->code_projects.default_index_mode[0] != '\0' &&
+          strcmp(config->code_projects.default_index_mode, "full") != 0) {
+         ADD_ERROR("code_projects.default_index_mode", "must be 'full' (got '%s')",
+                   config->code_projects.default_index_mode);
+      }
+      if (config->code_projects.allowed_host_pattern[0] != '\0') {
+         regex_t re;
+         int rerr = regcomp(&re, config->code_projects.allowed_host_pattern,
+                            REG_EXTENDED | REG_NOSUB);
+         if (rerr != 0) {
+            ADD_ERROR("code_projects.allowed_host_pattern", "is not a valid POSIX extended regex");
+         } else {
+            regfree(&re);
+         }
       }
    }
 

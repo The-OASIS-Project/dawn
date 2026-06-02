@@ -960,6 +960,51 @@
 # rate_limit_sms_per_day = 30       # UX rate limit: max SMS per day
 
 # =============================================================================
+# MCP Bridge (coding harness) — requires building with
+# -DDAWN_ENABLE_MCP_BRIDGE_TOOL=ON. DAWN is a pure MCP *client*; the operator
+# launches each MCP server (systemd/tmux/docker). Transport is HTTP+SSE only.
+# =============================================================================
+# [mcp]
+# enabled = false                    # master switch for the bridge
+# dev_mode = false                   # required true to allow any tls_verify=false server
+#
+# [[mcp.server]]
+# alias = "cbm"                      # tool-name prefix, e.g. cbm_search_graph
+# url = "http://localhost:9000/sse"  # SSE endpoint of the operator-launched server
+# transport = "http+sse"
+# enabled = true
+# capabilities = "read_only"         # "dangerous" (default) or "read_only"
+# request_timeout_seconds = 30
+# idle_close_seconds = 600
+# tls_verify = true                  # false requires [mcp] dev_mode = true
+# auth_bearer_env = "CBM_TOKEN"      # env var holding the bearer token (Phase 1 source)
+# # auth_bearer_token_secret = "cbm_token"  # reserved: secrets.toml named-key (not yet wired)
+
+# =============================================================================
+# Code Projects (coding harness) — [code_projects]
+# =============================================================================
+# Import GitHub-style repos (in-process libgit2 clone) and index them through the
+# cbm MCP server for code Q&A. Requires the MCP bridge above AND a build with
+# -DDAWN_ENABLE_MCP_BRIDGE_TOOL=ON -DDAWN_ENABLE_CODE_PROJECTS=ON. Disabled by
+# default; the caps below are secure-by-default.
+#
+# [code_projects]
+# enabled = false                       # master switch (also needs the build flags)
+# source_root = "/var/lib/dawn/source"  # where imported repos are cloned
+# default_index_mode = "full"           # only "full" is supported today
+# default_global = false                # imports default to per-user, not shared
+# import_user_required = "admin"        # "" (any user) or "admin" (operator-only import)
+# max_repo_size_mb = 2048               # working-tree size cap (enforced post-clone)
+# max_file_count = 200000               # working-tree file-count cap
+# max_path_depth = 20                   # reject clones nesting deeper than this
+# clone_depth = 0                       # 0 = full history, 1 = shallow
+# # Host allowlist: POSIX ERE matched against the clone URL host. Auto-anchored
+# # (wrapped in ^(...)$), so do NOT add ^ or $ yourself. https:// is required and
+# # URLs with embedded credentials are rejected.
+# allowed_host_pattern = "([a-z0-9-]+\\.)?(github\\.com|gitlab\\.com|codeberg\\.org|bitbucket\\.org)"
+# default_active = ""                   # fallback active project name for new sessions
+
+# =============================================================================
 # Secrets (separate file)
 # =============================================================================
 # API keys and credentials should go in secrets.toml (mode 600 recommended)

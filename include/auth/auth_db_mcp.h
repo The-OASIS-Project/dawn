@@ -55,4 +55,13 @@ int auth_db_mcp_check_access(int64_t user_id, const char *server_alias, bool *al
  */
 int auth_db_mcp_user_is_admin(int64_t user_id, bool *is_admin_out);
 
+/**
+ * @brief Bootstrap: grant every admin user access to @p server_alias.
+ *
+ * Idempotent (INSERT OR IGNORE). Called at bridge init for each configured
+ * server so operators have access out of the box.
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int auth_db_mcp_grant_all_admins(const char *server_alias);
+
 #endif /* AUTH_DB_MCP_H */

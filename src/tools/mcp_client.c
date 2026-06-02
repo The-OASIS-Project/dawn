@@ -136,14 +136,17 @@ static mcp_pending_t *pending_add(mcp_client_t *c, uint64_t id, mcp_progress_fn 
    return p;
 }
 
-static int pending_index(mcp_client_t *c, uint64_t id) {
+/* Binary search the (id-sorted) pending table. On a hit, writes the slot index
+ * to *idx_out and returns SUCCESS; returns FAILURE when not found. */
+static int pending_index(mcp_client_t *c, uint64_t id, int *idx_out) {
    int lo = 0;
    int hi = c->pending_count - 1;
    while (lo <= hi) {
       int mid = lo + (hi - lo) / 2;
       uint64_t mid_id = c->pending[mid]->id;
       if (mid_id == id) {
-         return mid;
+         *idx_out = mid;
+         return SUCCESS;
       }
       if (mid_id < id) {
          lo = mid + 1;
@@ -151,12 +154,12 @@ static int pending_index(mcp_client_t *c, uint64_t id) {
          hi = mid - 1;
       }
    }
-   return -1;
+   return FAILURE;
 }
 
 static void pending_remove(mcp_client_t *c, mcp_pending_t *p) {
-   int idx = pending_index(c, p->id);
-   if (idx < 0) {
+   int idx = 0;
+   if (pending_index(c, p->id, &idx) != SUCCESS) {
       return;
    }
    for (int i = idx; i < c->pending_count - 1; i++) {
@@ -194,8 +197,8 @@ static void fail_all_pending(mcp_client_t *c, int status) {
 
 static void deliver_response(mcp_client_t *c, uint64_t id, char *payload, int status) {
    pthread_mutex_lock(&c->pending_mtx);
-   int idx = pending_index(c, id);
-   if (idx >= 0) {
+   int idx = 0;
+   if (pending_index(c, id, &idx) == SUCCESS) {
       mcp_pending_t *p = c->pending[idx];
       pthread_mutex_lock(&p->mtx);
       if (!p->done) {
@@ -215,8 +218,8 @@ static void dispatch_progress(mcp_client_t *c, uint64_t token, int percent, cons
    mcp_progress_fn cb = NULL;
    void *user = NULL;
    pthread_mutex_lock(&c->pending_mtx);
-   int idx = pending_index(c, token);
-   if (idx >= 0) {
+   int idx = 0;
+   if (pending_index(c, token, &idx) == SUCCESS) {
       cb = c->pending[idx]->progress_cb;
       user = c->pending[idx]->progress_user;
    }
@@ -253,6 +256,11 @@ static void handle_progress_notification(mcp_client_t *c, struct json_object *pa
    }
 
    int percent = (total_val > 0.0) ? (int)((progress / total_val) * 100.0) : (int)progress;
+   if (percent < 0) {
+      percent = 0; /* clamp server-controlled doubles (sec-S8) */
+   } else if (percent > 100) {
+      percent = 100;
+   }
    dispatch_progress(c, token, percent, message);
 }
 
@@ -592,6 +600,19 @@ mcp_client_state_t mcp_client_state(mcp_client_t *c) {
    mcp_client_state_t s = c->state;
    pthread_mutex_unlock(&c->state_mtx);
    return s;
+}
+
+void mcp_client_reset(mcp_client_t *c) {
+   if (c == NULL) {
+      return;
+   }
+   pthread_mutex_lock(&c->state_mtx);
+   if (c->state == MCP_STATE_DISABLED) {
+      c->state = MCP_STATE_DISCONNECTED;
+      memset(c->fail_ts, 0, sizeof(c->fail_ts));
+      pthread_cond_broadcast(&c->state_cv);
+   }
+   pthread_mutex_unlock(&c->state_mtx);
 }
 
 int mcp_client_call(mcp_client_t *c,
