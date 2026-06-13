@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "config/dawn_config.h"
 #include "core/embedding_engine.h"
@@ -39,6 +40,16 @@
 #include "memory/memory_stem.h"
 #include "tools/document_chunker.h"
 #include "tools/document_db.h"
+
+/* Briefly yield the CPU every N chunks during the embed pass so latency-
+ * sensitive threads (notably the single WebSocket service thread) get
+ * scheduled.  A long synchronous local-embedding burst would otherwise starve
+ * them: observed 2026-06-13, a ~93s index of 323 chunks dropped and reconnected
+ * a connected satellite mid-pass because its app-level keepalive lapsed.  The
+ * cost is trivial (a few hundred ms across a multi-second index) and only
+ * applies to the embed loop. */
+#define DOC_INDEX_YIELD_INTERVAL_CHUNKS 8
+#define DOC_INDEX_YIELD_MS 5
 
 /* =============================================================================
  * Helpers
@@ -200,6 +211,12 @@ int document_index_text(int user_id,
             (void)document_db_chunk_index_fts(chunk_id, label_stems, body_stems);
          } else {
             failed_count++;
+         }
+
+         /* Yield a CPU window to other threads between embed batches (no lock is
+          * held here — embedding_engine_embed releases s_embed_mutex internally). */
+         if ((i + 1) % DOC_INDEX_YIELD_INTERVAL_CHUNKS == 0) {
+            usleep((useconds_t)DOC_INDEX_YIELD_MS * 1000u);
          }
       }
       free(emb_buf);
