@@ -1658,6 +1658,48 @@ int auth_db_prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   /* doc_chunk_read_range: window a document's chunks by chunk_index value (NOT
+    * row offset).  The index pipeline can skip a chunk_index on embed failure, so
+    * OFFSET N != chunk at index N — this BETWEEN form fetches the true neighbors
+    * for context expansion around a search/grep hit. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT chunk_index, text FROM document_chunks "
+                           "WHERE document_id = ? AND chunk_index BETWEEN ? AND ? "
+                           "ORDER BY chunk_index",
+                           -1, &s_db.stmt_doc_chunk_read_range, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare doc_chunk_read_range failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   /* doc_chunk_grep (literal substring, permission-scoped).  Two shapes share the
+    * same projection + paging: case-insensitive uses LIKE (ASCII-case-insensitive
+    * by default; the needle is wildcard-escaped + wrapped in %..% by the caller),
+    * case-sensitive uses instr() (literal, no escaping). LIMIT is bound to page+1
+    * so the caller can detect "more matches exist" without a COUNT. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT c.chunk_index, c.document_id, d.filename, d.num_chunks "
+                           "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
+                           "WHERE (d.user_id = ? OR d.is_global = 1) "
+                           "AND c.text LIKE ? ESCAPE '\\' "
+                           "ORDER BY c.document_id, c.chunk_index LIMIT ? OFFSET ?",
+                           -1, &s_db.stmt_doc_chunk_grep_ci, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare doc_chunk_grep_ci failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT c.chunk_index, c.document_id, d.filename, d.num_chunks "
+                           "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
+                           "WHERE (d.user_id = ? OR d.is_global = 1) "
+                           "AND instr(c.text, ?) > 0 "
+                           "ORDER BY c.document_id, c.chunk_index LIMIT ? OFFSET ?",
+                           -1, &s_db.stmt_doc_chunk_grep_cs, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare doc_chunk_grep_cs failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
    /* === v61: document_chunks_fts (BM25 lexical channel) ===
     * Soft-fail (WARNING + NULL) like the memory_facts_fts statements: these
     * depend on the v61 virtual table, so a DB on which the migration hasn't yet
@@ -2485,6 +2527,12 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_doc_find_by_name);
    if (s_db.stmt_doc_chunk_read)
       sqlite3_finalize(s_db.stmt_doc_chunk_read);
+   if (s_db.stmt_doc_chunk_read_range)
+      sqlite3_finalize(s_db.stmt_doc_chunk_read_range);
+   if (s_db.stmt_doc_chunk_grep_ci)
+      sqlite3_finalize(s_db.stmt_doc_chunk_grep_ci);
+   if (s_db.stmt_doc_chunk_grep_cs)
+      sqlite3_finalize(s_db.stmt_doc_chunk_grep_cs);
    if (s_db.stmt_doc_update_global)
       sqlite3_finalize(s_db.stmt_doc_update_global);
    if (s_db.stmt_doc_chunk_fts_insert)

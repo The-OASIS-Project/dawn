@@ -178,6 +178,36 @@ static int prepare_statements(void) {
    if (rc != SQLITE_OK)
       return -1;
 
+   /* Mirror the production statements (auth_db_statements.c) so the new
+    * range/grep primitives are exercised under the test harness. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT chunk_index, text FROM document_chunks "
+                           "WHERE document_id = ? AND chunk_index BETWEEN ? AND ? "
+                           "ORDER BY chunk_index",
+                           -1, &s_db.stmt_doc_chunk_read_range, NULL);
+   if (rc != SQLITE_OK)
+      return -1;
+
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT c.chunk_index, c.document_id, d.filename, d.num_chunks "
+                           "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
+                           "WHERE (d.user_id = ? OR d.is_global = 1) "
+                           "AND c.text LIKE ? ESCAPE '\\' "
+                           "ORDER BY c.document_id, c.chunk_index LIMIT ? OFFSET ?",
+                           -1, &s_db.stmt_doc_chunk_grep_ci, NULL);
+   if (rc != SQLITE_OK)
+      return -1;
+
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT c.chunk_index, c.document_id, d.filename, d.num_chunks "
+                           "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
+                           "WHERE (d.user_id = ? OR d.is_global = 1) "
+                           "AND instr(c.text, ?) > 0 "
+                           "ORDER BY c.document_id, c.chunk_index LIMIT ? OFFSET ?",
+                           -1, &s_db.stmt_doc_chunk_grep_cs, NULL);
+   if (rc != SQLITE_OK)
+      return -1;
+
    return 0;
 }
 
@@ -235,6 +265,12 @@ static void teardown_db(void) {
       sqlite3_finalize(s_db.stmt_doc_find_by_name);
    if (s_db.stmt_doc_chunk_read)
       sqlite3_finalize(s_db.stmt_doc_chunk_read);
+   if (s_db.stmt_doc_chunk_read_range)
+      sqlite3_finalize(s_db.stmt_doc_chunk_read_range);
+   if (s_db.stmt_doc_chunk_grep_ci)
+      sqlite3_finalize(s_db.stmt_doc_chunk_grep_ci);
+   if (s_db.stmt_doc_chunk_grep_cs)
+      sqlite3_finalize(s_db.stmt_doc_chunk_grep_cs);
 
    if (s_db.db) {
       sqlite3_close(s_db.db);
@@ -562,6 +598,123 @@ static void test_chunk_create_and_read(void) {
 }
 
 /* ============================================================================
+ * Test: chunk_read_range — window by chunk_index VALUE, gap-safe
+ * ============================================================================ */
+
+static void test_chunk_read_range(void) {
+   printf("\n--- test_chunk_read_range ---\n");
+
+   int64_t doc_id = 0;
+   document_db_create(1, "ranged.txt", "ranged.txt", "txt", "range_hash_000000000000000000000000",
+                      5, false, &doc_id);
+   TEST_ASSERT_TRUE_MESSAGE(doc_id > 0, "create doc for range test");
+
+   /* Create chunks at indices 0,1,3,4 — SKIP index 2 to simulate an embed
+    * failure gap. This is exactly the case where OFFSET != chunk_index. */
+   float emb[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+   int64_t cid = 0;
+   document_db_chunk_create(doc_id, 0, "idx0", emb, 4, 1.0f, 0, &cid);
+   document_db_chunk_create(doc_id, 1, "idx1", emb, 4, 1.0f, 0, &cid);
+   document_db_chunk_create(doc_id, 3, "idx3", emb, 4, 1.0f, 0, &cid);
+   document_db_chunk_create(doc_id, 4, "idx4", emb, 4, 1.0f, 0, &cid);
+
+   document_chunk_t chunks[8];
+   int count = -1;
+
+   /* Range [1,3] over indices {0,1,3,4} must return exactly indices 1 and 3. */
+   TEST_ASSERT_TRUE_MESSAGE(
+       document_db_chunk_read_range(doc_id, 1, 3, chunks, 8, &count) == SUCCESS, "range read ok");
+   TEST_ASSERT_TRUE_MESSAGE(count == 2, "range [1,3] returns 2 chunks (gap at 2 skipped)");
+   TEST_ASSERT_TRUE_MESSAGE(chunks[0].chunk_index == 1, "first is index 1");
+   TEST_ASSERT_TRUE_MESSAGE(chunks[1].chunk_index == 3, "second is index 3 (NOT offset-based 2)");
+
+   /* Range [2,3] must return ONLY index 3 (index 2 doesn't exist). */
+   document_db_chunk_read_range(doc_id, 2, 3, chunks, 8, &count);
+   TEST_ASSERT_TRUE_MESSAGE(count == 1, "range [2,3] returns only the existing index 3");
+   TEST_ASSERT_TRUE_MESSAGE(chunks[0].chunk_index == 3, "the one chunk is index 3");
+
+   /* Negative lo is clamped to 0; hi past the end is fine. */
+   document_db_chunk_read_range(doc_id, -2, 100, chunks, 8, &count);
+   TEST_ASSERT_TRUE_MESSAGE(count == 4, "full clamped range returns all 4 chunks");
+
+   /* Empty range (hi < lo) is success with 0 results, not an error. */
+   TEST_ASSERT_TRUE_MESSAGE(document_db_chunk_read_range(doc_id, 3, 2, chunks, 8, &count) ==
+                                SUCCESS,
+                            "inverted range is not an error");
+   TEST_ASSERT_TRUE_MESSAGE(count == 0, "inverted range returns 0 chunks");
+}
+
+/* ============================================================================
+ * Test: chunk_grep — literal match, permission scoping, case, pagination
+ * ============================================================================ */
+
+static void test_chunk_grep(void) {
+   printf("\n--- test_chunk_grep ---\n");
+
+   float emb[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
+   int64_t cid = 0;
+
+   /* User 1 private doc with a distinctive literal string. */
+   int64_t priv = 0;
+   document_db_create(1, "priv.txt", "priv.txt", "txt", "grep_priv_hash_0000000000000000000", 1,
+                      false, &priv);
+   document_db_chunk_create(priv, 0, "the Zebra_Quux_42 marker is here", emb, 4, 1.0f, 0, &cid);
+
+   /* Global doc visible to everyone. */
+   int64_t glob = 0;
+   document_db_create(1, "glob.txt", "glob.txt", "txt", "grep_glob_hash_0000000000000000000", 1,
+                      true, &glob);
+   document_db_chunk_create(glob, 0, "a Public_Token_99 lives here", emb, 4, 1.0f, 0, &cid);
+
+   doc_grep_hit_t hits[8];
+   int n = -1;
+   bool more = true;
+
+   /* Owner finds the private literal; coordinates populated. */
+   TEST_ASSERT_TRUE_MESSAGE(document_db_chunk_grep(1, "Zebra_Quux_42", false, 0, hits, 8, &n,
+                                                   &more) == SUCCESS,
+                            "grep ok");
+   TEST_ASSERT_TRUE_MESSAGE(n == 1, "owner finds 1 match for private literal");
+   TEST_ASSERT_TRUE_MESSAGE(hits[0].document_id == priv, "hit carries the document_id");
+   TEST_ASSERT_TRUE_MESSAGE(hits[0].chunk_index == 0, "hit carries chunk_index");
+   TEST_ASSERT_TRUE_MESSAGE(hits[0].num_chunks == 1, "hit carries num_chunks");
+   TEST_ASSERT_TRUE_MESSAGE(more == false, "no more pages for a single match");
+
+   /* Permission: a different user must NOT see the private doc's content. */
+   document_db_chunk_grep(2, "Zebra_Quux_42", false, 0, hits, 8, &n, &more);
+   TEST_ASSERT_TRUE_MESSAGE(n == 0, "other user cannot grep a private doc (permission scoped)");
+
+   /* Global content is visible to a different user. */
+   document_db_chunk_grep(2, "Public_Token_99", false, 0, hits, 8, &n, &more);
+   TEST_ASSERT_TRUE_MESSAGE(n == 1, "other user CAN grep a global doc");
+   TEST_ASSERT_TRUE_MESSAGE(hits[0].document_id == glob, "global hit document_id");
+
+   /* Case sensitivity. */
+   document_db_chunk_grep(1, "zebra_quux_42", false, 0, hits, 8, &n, &more);
+   TEST_ASSERT_TRUE_MESSAGE(n == 1, "case-insensitive (default) matches different case");
+   document_db_chunk_grep(1, "zebra_quux_42", true, 0, hits, 8, &n, &more);
+   TEST_ASSERT_TRUE_MESSAGE(n == 0, "case-sensitive does not match different case");
+   document_db_chunk_grep(1, "Zebra_Quux_42", true, 0, hits, 8, &n, &more);
+   TEST_ASSERT_TRUE_MESSAGE(n == 1, "case-sensitive matches exact case");
+
+   /* LIKE wildcards in the needle are treated literally (escaped). */
+   document_db_chunk_grep(1, "100%_real", false, 0, hits, 8, &n, &more);
+   TEST_ASSERT_TRUE_MESSAGE(n == 0, "wildcard chars are literal, not patterns");
+
+   /* Pagination: a common literal across many chunks, small page. */
+   int64_t many = 0;
+   document_db_chunk_create(priv, 1, "Public_Token_99 again", emb, 4, 1.0f, 0, &many);
+   document_db_chunk_create(priv, 2, "Public_Token_99 thrice", emb, 4, 1.0f, 0, &many);
+   /* user 1 sees its own priv (2 hits) + the global (1 hit) = 3 total. */
+   document_db_chunk_grep(1, "Public_Token_99", false, 0, hits, 2, &n, &more);
+   TEST_ASSERT_TRUE_MESSAGE(n == 2, "page size 2 returns 2 hits");
+   TEST_ASSERT_TRUE_MESSAGE(more == true, "more=true when matches exceed the page");
+   document_db_chunk_grep(1, "Public_Token_99", false, 2, hits, 2, &n, &more);
+   TEST_ASSERT_TRUE_MESSAGE(n == 1, "offset=2 returns the remaining 1 hit");
+   TEST_ASSERT_TRUE_MESSAGE(more == false, "no more pages after the last");
+}
+
+/* ============================================================================
  * Test: NULL / Invalid Parameters
  * ============================================================================ */
 
@@ -650,6 +803,8 @@ int main(void) {
    RUN_TEST(test_global_visibility);
    RUN_TEST(test_find_by_name);
    RUN_TEST(test_chunk_create_and_read);
+   RUN_TEST(test_chunk_read_range);
+   RUN_TEST(test_chunk_grep);
    RUN_TEST(test_invalid_params);
    RUN_TEST(test_cascade_delete);
    return UNITY_END();

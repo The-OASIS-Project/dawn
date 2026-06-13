@@ -102,6 +102,16 @@ typedef struct {
    char text[DOC_CHUNK_TEXT_MAX];
 } doc_bm25_hit_t;
 
+/* One literal-grep hit: just the coordinates needed to fetch a context window
+ * (the matching text comes from document_db_chunk_read_range, not duplicated
+ * here — keeps the hit array small when paging through many matches). */
+typedef struct {
+   int chunk_index;
+   int64_t document_id;
+   char filename[DOC_FILENAME_MAX]; /* for the citation */
+   int num_chunks;                  /* parent doc chunk count — clamps the context window */
+} doc_grep_hit_t;
+
 /* =============================================================================
  * Document CRUD
  * ============================================================================= */
@@ -470,6 +480,54 @@ int document_db_chunk_read(int64_t document_id,
                            int max_count,
                            int start_chunk,
                            int *count_out);
+
+/**
+ * @brief Read a document's chunks whose chunk_index is in [lo_idx, hi_idx], in order.
+ *
+ * Windows by chunk_index VALUE, not row offset — gap-safe when the index pipeline
+ * skipped an index on embed failure.  Only chunk_index and text are populated.
+ * Used to expand context around a search/grep hit.
+ *
+ * @param document_id Document ID
+ * @param lo_idx Lowest chunk_index to include (clamped to >= 0 by the caller)
+ * @param hi_idx Highest chunk_index to include
+ * @param chunks Output array (caller allocates)
+ * @param max_count Capacity of @p chunks
+ * @param[out] count_out Number of chunks read (must not be NULL)
+ * @return SUCCESS (0) on success, FAILURE (1) on error
+ */
+int document_db_chunk_read_range(int64_t document_id,
+                                 int lo_idx,
+                                 int hi_idx,
+                                 document_chunk_t *chunks,
+                                 int max_count,
+                                 int *count_out);
+
+/**
+ * @brief Literal substring search over chunk text, scoped to the user's docs + global.
+ *
+ * Deterministic "grep" — no embeddings, no ranking. Results are ordered by
+ * (document_id, chunk_index). Supports paging via @p offset; @p more_out reports
+ * whether matches exist beyond this page (detected by fetching one extra row).
+ *
+ * @param user_id User scope (own docs + global)
+ * @param needle Literal substring to match (not a pattern; wildcards are literal)
+ * @param case_sensitive false = ASCII case-insensitive, true = exact
+ * @param offset Number of leading matches to skip (pagination)
+ * @param hits Output array (caller allocates)
+ * @param max_count Capacity of @p hits (page size)
+ * @param[out] count_out Number of hits returned (must not be NULL)
+ * @param[out] more_out Set true if more matches exist past this page (must not be NULL)
+ * @return SUCCESS (0) on success, FAILURE (1) on error
+ */
+int document_db_chunk_grep(int user_id,
+                           const char *needle,
+                           bool case_sensitive,
+                           int offset,
+                           doc_grep_hit_t *hits,
+                           int max_count,
+                           int *count_out,
+                           bool *more_out);
 
 /**
  * @brief Load all chunks accessible to a user for vector search

@@ -398,6 +398,116 @@ int document_db_chunk_read(int64_t document_id,
    return SUCCESS;
 }
 
+int document_db_chunk_read_range(int64_t document_id,
+                                 int lo_idx,
+                                 int hi_idx,
+                                 document_chunk_t *chunks,
+                                 int max_count,
+                                 int *count_out) {
+   if (!chunks || max_count <= 0 || !count_out)
+      return FAILURE;
+
+   *count_out = 0;
+   if (hi_idx < lo_idx)
+      return SUCCESS; /* empty range — not an error */
+   if (lo_idx < 0)
+      lo_idx = 0;
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   sqlite3_stmt *stmt = s_db.stmt_doc_chunk_read_range;
+   sqlite3_reset(stmt);
+   sqlite3_bind_int64(stmt, 1, document_id);
+   sqlite3_bind_int(stmt, 2, lo_idx);
+   sqlite3_bind_int(stmt, 3, hi_idx);
+
+   int count = 0;
+   while (count < max_count && sqlite3_step(stmt) == SQLITE_ROW) {
+      document_chunk_t *c = &chunks[count];
+      memset(c, 0, sizeof(*c));
+      c->chunk_index = sqlite3_column_int(stmt, 0);
+      col_text_copy(c->text, sizeof(c->text), stmt, 1);
+      c->document_id = document_id;
+      count++;
+   }
+
+   sqlite3_reset(stmt);
+   AUTH_DB_UNLOCK();
+   *count_out = count;
+   return SUCCESS;
+}
+
+int document_db_chunk_grep(int user_id,
+                           const char *needle,
+                           bool case_sensitive,
+                           int offset,
+                           doc_grep_hit_t *hits,
+                           int max_count,
+                           int *count_out,
+                           bool *more_out) {
+   if (!needle || needle[0] == '\0' || !hits || max_count <= 0 || !count_out || !more_out)
+      return FAILURE;
+   if (offset < 0)
+      offset = 0;
+
+   *count_out = 0;
+   *more_out = false;
+
+   /* For the case-insensitive (LIKE) path, escape wildcards and wrap in %..%.
+    * The case-sensitive (instr) path binds the needle literally. */
+   char pattern[DOC_CHUNK_TEXT_MAX * 2 + 3];
+   if (!case_sensitive) {
+      size_t nlen = strlen(needle);
+      char escaped[DOC_CHUNK_TEXT_MAX * 2];
+      size_t esc_len = 0;
+      for (size_t i = 0; i < nlen && esc_len + 2 < sizeof(escaped); i++) {
+         if (needle[i] == '%' || needle[i] == '_' || needle[i] == '\\')
+            escaped[esc_len++] = '\\';
+         escaped[esc_len++] = needle[i];
+      }
+      escaped[esc_len] = '\0';
+      if (esc_len + 2 >= sizeof(pattern))
+         return FAILURE;
+      pattern[0] = '%';
+      memcpy(pattern + 1, escaped, esc_len);
+      pattern[esc_len + 1] = '%';
+      pattern[esc_len + 2] = '\0';
+   }
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   sqlite3_stmt *stmt = case_sensitive ? s_db.stmt_doc_chunk_grep_cs : s_db.stmt_doc_chunk_grep_ci;
+   sqlite3_reset(stmt);
+   sqlite3_bind_int(stmt, 1, user_id);
+   if (case_sensitive)
+      sqlite3_bind_text(stmt, 2, needle, -1, SQLITE_TRANSIENT);
+   else
+      sqlite3_bind_text(stmt, 2, pattern, -1, SQLITE_TRANSIENT);
+   /* Fetch one extra row to detect "more matches exist" without a COUNT(*). */
+   sqlite3_bind_int(stmt, 3, max_count + 1);
+   sqlite3_bind_int(stmt, 4, offset);
+
+   int count = 0;
+   while (sqlite3_step(stmt) == SQLITE_ROW) {
+      if (count >= max_count) {
+         *more_out = true; /* the (max_count+1)th row — there are more */
+         break;
+      }
+      doc_grep_hit_t *h = &hits[count];
+      memset(h, 0, sizeof(*h));
+      h->chunk_index = sqlite3_column_int(stmt, 0);
+      h->document_id = sqlite3_column_int64(stmt, 1);
+      col_text_copy(h->filename, sizeof(h->filename), stmt, 2);
+      h->num_chunks = sqlite3_column_int(stmt, 3);
+      count++;
+   }
+
+   sqlite3_reset(stmt);
+   AUTH_DB_UNLOCK();
+   *count_out = count;
+   return SUCCESS;
+}
+
 /* =============================================================================
  * Chunk CRUD
  * ============================================================================= */

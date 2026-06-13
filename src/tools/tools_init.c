@@ -85,6 +85,7 @@
 #include "tools/sfx_tool.h"
 #endif
 #ifdef DAWN_ENABLE_DOCUMENT_SEARCH_TOOL
+#include "tools/document_grep.h"
 #include "tools/document_index_tool.h"
 #include "tools/document_manage.h"
 #include "tools/document_read.h"
@@ -254,6 +255,9 @@ int tools_register_all(void) {
 #ifdef DAWN_ENABLE_DOCUMENT_SEARCH_TOOL
    if (document_search_tool_register() != 0) {
       OLOG_WARNING("Failed to register document_search tool");
+   }
+   if (document_grep_tool_register() != 0) {
+      OLOG_WARNING("Failed to register document_grep tool");
    }
    if (document_read_tool_register() != 0) {
       OLOG_WARNING("Failed to register document_read tool");

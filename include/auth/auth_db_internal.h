@@ -270,6 +270,9 @@ typedef struct {
    sqlite3_stmt *stmt_doc_chunk_search;
    sqlite3_stmt *stmt_doc_find_by_name;
    sqlite3_stmt *stmt_doc_chunk_read;
+   sqlite3_stmt *stmt_doc_chunk_read_range; /* window by chunk_index (gap-safe, no OFFSET) */
+   sqlite3_stmt *stmt_doc_chunk_grep_ci;    /* literal substring, case-insensitive (LIKE) */
+   sqlite3_stmt *stmt_doc_chunk_grep_cs;    /* literal substring, case-sensitive (instr) */
    sqlite3_stmt *stmt_doc_list_all;
    sqlite3_stmt *stmt_doc_update_global;
    /* v61 — document_chunks_fts (BM25 lexical channel) + stable-id note edit. */
