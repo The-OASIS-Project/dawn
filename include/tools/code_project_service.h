@@ -63,4 +63,14 @@ int code_project_delete(int64_t project_id);
  */
 void code_project_broadcast_status_changed(int64_t project_id);
 
+/**
+ * @brief Failure hook for a pending import rejected before any row is created
+ *        (repo not found/unreachable, or a duplicate that raced the pre-check).
+ *
+ * Overridden (strong symbol) by the WebUI to toast the requesting user; default
+ * weak no-op when WebUI is absent. @p name and @p reason are short, caller-owned
+ * strings valid only for the duration of the call.
+ */
+void code_project_broadcast_import_failed(int64_t user_id, const char *name, const char *reason);
+
 #endif /* CODE_PROJECT_SERVICE_H */

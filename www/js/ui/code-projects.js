@@ -13,6 +13,7 @@
    let isOpen = false;
    let triggerElement = null;
    let focusTrapCleanup = null;
+   let featureEnabled = false; /* [code_projects].enabled from server config */
    const callbacks = { trapFocus: null, showConfirmModal: null };
 
    /* ---- escaping -------------------------------------------------------- */
@@ -205,8 +206,10 @@
    function handleImportResponse(payload) {
       if (!payload) return;
       setStatus('');
-      toast(payload.message || (payload.ok ? 'Import started' : 'Import failed'),
-            payload.ok ? 'success' : 'error');
+      toast(
+         payload.message || (payload.ok ? 'Import started' : 'Import failed'),
+         payload.ok ? 'success' : 'error'
+      );
       if (payload.ok) {
          if (el.urlInput) el.urlInput.value = '';
          if (el.nameInput) el.nameInput.value = '';
@@ -227,16 +230,38 @@
       if (isOpen) requestList();
    }
 
+   /* Broadcast: a pending import was rejected by the worker before any row was
+    * created (repo not found/unreachable, or a duplicate). No list change to
+    * make — just surface why, and clear the "Checking…" status. */
+   function handleImportFailed(payload) {
+      if (!payload) return;
+      setStatus('');
+      const name = payload.name ? "'" + payload.name + "' " : '';
+      const reason = payload.reason || 'Repository not found or unreachable.';
+      toast('Import of ' + name + 'failed: ' + reason, 'error');
+   }
+
    /* ---- visibility (auth-gated) --------------------------------------- */
    function updateVisibility(authState) {
       if (!el.btn) return;
       const st = authState || (typeof DawnState !== 'undefined' ? DawnState.authState : null);
       const authed = !!(st && st.authenticated);
-      el.btn.classList.toggle('hidden', !authed);
-      if (!authed) close();
+      /* Hide the button entirely unless the subsystem is enabled in config — an
+       * always-visible button that only ever reports "disabled" is confusing. */
+      const show = authed && featureEnabled;
+      el.btn.classList.toggle('hidden', !show);
+      if (!show) close();
       if (el.globalLabel) {
          el.globalLabel.classList.toggle('hidden', !(st && st.isAdmin));
       }
+   }
+
+   /* Called from dawn.js on get_config_response (fires at connect and after every
+    * settings save), so toggling "Enable Code Projects" reveals/hides the button
+    * without a reload. */
+   function setEnabled(enabled) {
+      featureEnabled = !!enabled;
+      updateVisibility();
    }
 
    /* ---- init ----------------------------------------------------------- */
@@ -275,9 +300,11 @@
       close: close,
       toggle: toggle,
       updateVisibility: updateVisibility,
+      setEnabled: setEnabled,
       handleListResponse: handleListResponse,
       handleImportResponse: handleImportResponse,
       handleActionResponse: handleActionResponse,
       handleStatusChanged: handleStatusChanged,
+      handleImportFailed: handleImportFailed,
    };
 })();

@@ -142,6 +142,35 @@ static int sweep_cb(const char *path, const struct stat *sb, int typeflag, struc
  * at service start/stop instead (sec-S6). */
 void code_project_git_global_init(void) {
    git_libgit2_init();
+   /* Bound network ops so a hung/slow git server can't pin the import worker
+    * (the probe + clone both run there). */
+   git_libgit2_opts(GIT_OPT_SET_SERVER_CONNECT_TIMEOUT, 10000); /* ms */
+   git_libgit2_opts(GIT_OPT_SET_SERVER_TIMEOUT, 30000);         /* ms */
+}
+
+/* Lightweight "does this repo exist / is it reachable" check — the in-process
+ * equivalent of `git ls-remote`: negotiate refs without transferring objects or
+ * touching disk. Redirects are disabled (same SSRF stance as the clone), so a
+ * validated host can't bounce us to an internal target. Returns SUCCESS when the
+ * remote is reachable and advertises refs, FAILURE for not-found / unreachable /
+ * auth-required (Phase 1 is public repos). */
+int code_project_git_remote_probe(const char *url) {
+   if (url == NULL || url[0] == '\0') {
+      return FAILURE;
+   }
+   git_remote *remote = NULL;
+   if (git_remote_create_detached(&remote, url) != 0) {
+      return FAILURE;
+   }
+   git_remote_connect_options opts;
+   git_remote_connect_options_init(&opts, GIT_REMOTE_CONNECT_OPTIONS_VERSION);
+   opts.follow_redirects = GIT_REMOTE_REDIRECT_NONE;
+   int rc = git_remote_connect_ext(remote, GIT_DIRECTION_FETCH, &opts);
+   if (rc == 0) {
+      git_remote_disconnect(remote);
+   }
+   git_remote_free(remote);
+   return (rc == 0) ? SUCCESS : FAILURE;
 }
 
 void code_project_git_global_shutdown(void) {

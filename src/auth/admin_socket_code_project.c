@@ -82,15 +82,17 @@ int handle_code_proj_import(int client_fd, const char *payload, uint16_t payload
    snprintf(url, sizeof(url), "%.*s", (int)(body_len - sep - 1), body + sep + 1);
 
    bool global = (flags & CP_IMPORT_FLAG_GLOBAL) != 0;
-   int64_t id = 0;
-   /* requester 0: operator import (imported_by recorded as NULL). */
+   int64_t id = 0; /* unused: the row is created by the worker after it validates */
+   /* requester 0: operator import (imported_by recorded as NULL). The remote is
+    * probed on the worker thread before a row is created, so no id is returned
+    * here — the project appears in `list` once the repo is confirmed to exist. */
    if (code_project_import(0, url, name, global, &id) != SUCCESS) {
       return send_text_response(client_fd, ADMIN_RESP_FAILURE,
-                                "Import failed (invalid name/URL, duplicate, or disabled)");
+                                "Import rejected (invalid name/URL, duplicate, or disabled)");
    }
    char msg[160];
-   snprintf(msg, sizeof(msg), "Importing '%s' (id %lld); clone + index queued.", name,
-            (long long)id);
+   snprintf(msg, sizeof(msg),
+            "Checking '%s'; if the repo exists it will be cloned + indexed (run `list`).", name);
    return send_text_response(client_fd, ADMIN_RESP_SUCCESS, msg);
 }
 

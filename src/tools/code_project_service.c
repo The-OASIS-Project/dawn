@@ -49,12 +49,18 @@
 #define CP_INDEX_MODE_DEFAULT "full"
 
 typedef enum {
-   CP_JOB_IMPORT,
-   CP_JOB_REFRESH
+   CP_JOB_IMPORT, /* pending import: probe → create row → clone → index */
+   CP_JOB_REFRESH /* existing row: re-index */
 } cp_job_op_t;
 typedef struct {
-   int64_t project_id;
    cp_job_op_t op;
+   int64_t project_id; /* REFRESH: the existing row */
+   /* IMPORT carries its params until the worker validates the repo and creates
+    * the row (so a nonexistent URL never produces a phantom row). */
+   char source_url[CODE_PROJECT_URL_MAX];
+   char name[CODE_PROJECT_NAME_MAX];
+   int64_t user_id; /* requester; also the project owner unless global */
+   bool global;
 } cp_job_t;
 
 static cp_job_t s_jobs[CP_JOB_QUEUE_MAX];
@@ -72,12 +78,23 @@ void code_project_broadcast_status_changed(int64_t project_id) {
    (void)project_id;
 }
 
+/* Weak default; the WebUI strong override toasts the requesting user when a
+ * pending import is rejected before any row is created. */
+void code_project_broadcast_import_failed(int64_t user_id, const char *name, const char *reason)
+    __attribute__((weak));
+void code_project_broadcast_import_failed(int64_t user_id, const char *name, const char *reason) {
+   (void)user_id;
+   (void)name;
+   (void)reason;
+}
+
 /* --------------------------------------------------------------------------
  * Validation
  * -------------------------------------------------------------------------- */
 
-/* Name charset: ^[a-z0-9][a-z0-9_-]{0,62}$ (also blocks '/' and "..", so the
- * derived local_path stays inside source_root). */
+/* Name charset: ^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$ (also blocks '/' and "..", so
+ * the derived local_path stays inside source_root). Mixed case is allowed so
+ * repo names like "Hello-World" import without mangling. */
 static bool valid_name(const char *name) {
    if (name == NULL) {
       return false;
@@ -86,12 +103,12 @@ static bool valid_name(const char *name) {
    if (n == 0 || n > 63) {
       return false;
    }
-   if (!(islower((unsigned char)name[0]) || isdigit((unsigned char)name[0]))) {
+   if (!isalnum((unsigned char)name[0])) {
       return false;
    }
    for (size_t i = 1; i < n; i++) {
       char c = name[i];
-      if (!(islower((unsigned char)c) || isdigit((unsigned char)c) || c == '_' || c == '-')) {
+      if (!(isalnum((unsigned char)c) || c == '_' || c == '-')) {
          return false;
       }
    }
@@ -184,16 +201,54 @@ static void worker_do_clone(const code_project_t *p) {
    worker_do_index(p);
 }
 
+/* Pending import (no row yet): confirm the remote exists, then create the row and
+ * clone+index it. A nonexistent/unreachable repo is rejected with no phantom row
+ * left behind (a failure toast is pushed instead). A repo that exists but whose
+ * clone is later rejected (size/depth caps) keeps its error row — that's a
+ * settings problem the user can fix and refresh. */
+static void worker_do_import(const cp_job_t *job) {
+   if (code_project_git_remote_probe(job->source_url) != SUCCESS) {
+      OLOG_WARNING("code_project: import rejected — repo not found/unreachable");
+      code_project_broadcast_import_failed(job->user_id, job->name,
+                                           "Repository not found or unreachable.");
+      return;
+   }
+
+   const dawn_config_t *cfg = config_get();
+   code_project_t p;
+   memset(&p, 0, sizeof(p));
+   snprintf(p.name, sizeof(p.name), "%s", job->name);
+   snprintf(p.source_url, sizeof(p.source_url), "%s", job->source_url);
+   snprintf(p.local_path, sizeof(p.local_path), "%s/%s", cfg->code_projects.source_root, job->name);
+   p.user_id = job->global ? 0 : job->user_id;
+   p.is_global = job->global;
+   p.imported_by = job->user_id;
+   snprintf(p.status, sizeof(p.status), "cloning");
+
+   int64_t id = 0;
+   /* UNIQUE(name) is the authoritative guard against a duplicate that slipped
+    * past the pre-enqueue check (concurrent import of the same name). */
+   if (code_project_db_create(&p, &id) != AUTH_DB_SUCCESS) {
+      OLOG_WARNING("code_project: create failed (duplicate name '%s'?)", job->name);
+      code_project_broadcast_import_failed(job->user_id, job->name,
+                                           "A project with that name already exists.");
+      return;
+   }
+   p.id = id;
+   code_project_broadcast_status_changed(id); /* row is now visible (cloning) */
+   worker_do_clone(&p);
+}
+
 static void process_job(const cp_job_t *job) {
+   if (job->op == CP_JOB_IMPORT) {
+      worker_do_import(job);
+      return;
+   }
    code_project_t p;
    if (code_project_db_get(job->project_id, &p) != AUTH_DB_SUCCESS) {
       return;
    }
-   if (job->op == CP_JOB_IMPORT) {
-      worker_do_clone(&p);
-   } else {
-      worker_do_index(&p); /* refresh re-indexes the existing clone */
-   }
+   worker_do_index(&p); /* refresh re-indexes the existing clone */
 }
 
 static void *worker_main(void *arg) {
@@ -220,16 +275,15 @@ static void *worker_main(void *arg) {
    return NULL;
 }
 
-static int enqueue(int64_t project_id, cp_job_op_t op) {
+static int enqueue_job(const cp_job_t *job) {
    pthread_mutex_lock(&s_job_mtx);
    if (s_job_count >= CP_JOB_QUEUE_MAX) {
       pthread_mutex_unlock(&s_job_mtx);
-      OLOG_ERROR("code_project: import queue full");
+      OLOG_ERROR("code_project: job queue full");
       return FAILURE;
    }
    int tail = (s_job_head + s_job_count) % CP_JOB_QUEUE_MAX;
-   s_jobs[tail].project_id = project_id;
-   s_jobs[tail].op = op;
+   s_jobs[tail] = *job;
    s_job_count++;
    pthread_cond_signal(&s_job_cv);
    pthread_mutex_unlock(&s_job_mtx);
@@ -280,6 +334,9 @@ int code_project_import(int64_t requester_user_id,
                         const char *desired_name,
                         bool global,
                         int64_t *project_id_out) {
+   if (project_id_out != NULL) {
+      *project_id_out = 0; /* no row exists until the worker confirms the repo */
+   }
    const dawn_config_t *cfg = config_get();
    if (cfg == NULL || !cfg->code_projects.enabled) {
       return FAILURE;
@@ -291,34 +348,26 @@ int code_project_import(int64_t requester_user_id,
    if (!valid_url(source_url, cfg->code_projects.allowed_host_pattern)) {
       return FAILURE;
    }
-
-   code_project_t p;
-   memset(&p, 0, sizeof(p));
-   snprintf(p.name, sizeof(p.name), "%s", desired_name);
-   snprintf(p.source_url, sizeof(p.source_url), "%s", source_url);
-   snprintf(p.local_path, sizeof(p.local_path), "%s/%s", cfg->code_projects.source_root,
-            desired_name);
-   p.user_id = global ? 0 : requester_user_id;
-   p.is_global = global;
-   p.imported_by = requester_user_id;
-   snprintf(p.status, sizeof(p.status), "cloning");
-
-   int64_t id = 0;
-   /* The UNIQUE(name) constraint rejects a concurrent duplicate import. */
-   if (code_project_db_create(&p, &id) != AUTH_DB_SUCCESS) {
-      OLOG_WARNING("code_project: create failed (duplicate name '%s'?)", desired_name);
+   /* Fast-path duplicate check for immediate feedback; the worker's db_create
+    * UNIQUE(name) is the authoritative guard against a concurrent duplicate. */
+   code_project_t existing;
+   if (code_project_db_get_by_name(desired_name, &existing) == AUTH_DB_SUCCESS) {
+      OLOG_WARNING("code_project: duplicate name '%s'", desired_name);
       return FAILURE;
    }
-   if (project_id_out != NULL) {
-      *project_id_out = id;
-   }
-   code_project_broadcast_status_changed(id);
 
-   if (enqueue(id, CP_JOB_IMPORT) != SUCCESS) {
-      set_status(id, "error", "queue full");
-      return FAILURE;
-   }
-   return SUCCESS;
+   /* Defer the remote-existence probe + clone to the worker thread. The caller
+    * here is the WebUI lws service thread, which carries live audio and must not
+    * block on the network. The DB row is created only once the worker confirms
+    * the repo exists (so a typo'd URL leaves no phantom error row). */
+   cp_job_t job;
+   memset(&job, 0, sizeof(job));
+   job.op = CP_JOB_IMPORT;
+   snprintf(job.source_url, sizeof(job.source_url), "%s", source_url);
+   snprintf(job.name, sizeof(job.name), "%s", desired_name);
+   job.user_id = requester_user_id;
+   job.global = global;
+   return enqueue_job(&job);
 }
 
 int code_project_refresh(int64_t project_id) {
@@ -326,7 +375,11 @@ int code_project_refresh(int64_t project_id) {
    if (code_project_db_get(project_id, &p) != AUTH_DB_SUCCESS) {
       return FAILURE;
    }
-   return enqueue(project_id, CP_JOB_REFRESH);
+   cp_job_t job;
+   memset(&job, 0, sizeof(job));
+   job.op = CP_JOB_REFRESH;
+   job.project_id = project_id;
+   return enqueue_job(&job);
 }
 
 int code_project_delete(int64_t project_id) {

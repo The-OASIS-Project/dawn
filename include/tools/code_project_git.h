@@ -67,4 +67,16 @@ void code_project_git_global_init(void);
 /** @brief Tear down libgit2's process-global state. Call once at service stop. */
 void code_project_git_global_shutdown(void);
 
+/**
+ * @brief Probe whether a remote repository exists and is reachable, without
+ *        cloning (in-process libgit2 ref negotiation; redirects disabled).
+ *
+ * Used to validate an import before a DB row is created, so a nonexistent or
+ * unreachable URL is rejected rather than left as a phantom error row.
+ *
+ * @return SUCCESS if the remote advertises refs; FAILURE on not-found,
+ *         unreachable, or auth-required (Phase 1 targets public repos).
+ */
+int code_project_git_remote_probe(const char *url);
+
 #endif /* CODE_PROJECT_GIT_H */

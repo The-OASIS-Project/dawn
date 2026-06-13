@@ -16,6 +16,13 @@
    position: relative;
 }
 
+/* ID+class override so `.hidden` actually wins over the `display: flex` above
+ * (a bare `.hidden` is lower specificity than `#coding-btn`). Mirrors
+ * #doc-library-btn.hidden. */
+#coding-btn.hidden {
+   display: none;
+}
+
 #coding-btn:hover {
    color: var(--text-primary);
 }
@@ -41,7 +48,9 @@
    flex-direction: column;
    opacity: 1;
    transform: translateY(0);
-   transition: opacity 0.15s ease, transform 0.15s ease;
+   transition:
+      opacity 0.15s ease,
+      transform 0.15s ease;
    overflow: hidden;
 }
 

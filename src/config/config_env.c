@@ -2424,6 +2424,44 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "download_token_ttl_sec = %d\n", config->ota.download_token_ttl_sec);
    fprintf(fp, "require_tls = %s\n", config->ota.require_tls ? "true" : "false");
 
+   /* [mcp] + [[mcp.server]] (coding harness) — round-trips so a settings save
+    * can't drop a manually-configured bridge server. */
+   fprintf(fp, "\n[mcp]\n");
+   fprintf(fp, "enabled = %s\n", config->mcp.enabled ? "true" : "false");
+   fprintf(fp, "dev_mode = %s\n", config->mcp.dev_mode ? "true" : "false");
+   for (int i = 0; i < config->mcp.server_count && i < MCP_SERVERS_MAX; i++) {
+      const mcp_server_config_t *srv = &config->mcp.servers[i];
+      fprintf(fp, "\n[[mcp.server]]\n");
+      fprintf(fp, "alias = \"%s\"\n", srv->alias);
+      fprintf(fp, "url = \"%s\"\n", srv->url);
+      fprintf(fp, "transport = \"%s\"\n", srv->transport);
+      fprintf(fp, "enabled = %s\n", srv->enabled ? "true" : "false");
+      fprintf(fp, "capabilities = \"%s\"\n", srv->capabilities);
+      fprintf(fp, "request_timeout_seconds = %d\n", srv->request_timeout_seconds);
+      fprintf(fp, "idle_close_seconds = %d\n", srv->idle_close_seconds);
+      fprintf(fp, "tls_verify = %s\n", srv->tls_verify ? "true" : "false");
+      fprintf(fp, "auth_bearer_env = \"%s\"\n", srv->auth_bearer_env);
+      if (srv->auth_bearer_token_secret[0] != '\0') {
+         fprintf(fp, "auth_bearer_token_secret = \"%s\"\n", srv->auth_bearer_token_secret);
+      }
+   }
+
+   /* [code_projects] (coding harness) — round-trips. allowed_host_pattern is a
+    * TOML literal string (single quotes) so the regex backslashes are not
+    * interpreted as escapes on the next read. */
+   fprintf(fp, "\n[code_projects]\n");
+   fprintf(fp, "enabled = %s\n", config->code_projects.enabled ? "true" : "false");
+   fprintf(fp, "source_root = \"%s\"\n", config->code_projects.source_root);
+   fprintf(fp, "default_index_mode = \"%s\"\n", config->code_projects.default_index_mode);
+   fprintf(fp, "default_global = %s\n", config->code_projects.default_global ? "true" : "false");
+   fprintf(fp, "import_user_required = \"%s\"\n", config->code_projects.import_user_required);
+   fprintf(fp, "max_repo_size_mb = %d\n", config->code_projects.max_repo_size_mb);
+   fprintf(fp, "max_file_count = %d\n", config->code_projects.max_file_count);
+   fprintf(fp, "max_path_depth = %d\n", config->code_projects.max_path_depth);
+   fprintf(fp, "clone_depth = %d\n", config->code_projects.clone_depth);
+   fprintf(fp, "allowed_host_pattern = '%s'\n", config->code_projects.allowed_host_pattern);
+   fprintf(fp, "default_active = \"%s\"\n", config->code_projects.default_active);
+
    /* Write tool-owned config sections (e.g. [home_assistant], [shutdown]) */
    tool_registry_write_configs(fp);
 

@@ -305,6 +305,11 @@
                if (msg.payload.config) {
                   DawnVision.checkVisionSupport(msg.payload.config);
                }
+               // Gate the Coding popover button on [code_projects].enabled (fires
+               // at connect and after every settings save).
+               if (typeof DawnCodeProjects !== 'undefined') {
+                  DawnCodeProjects.setEnabled(msg.payload.config?.code_projects?.enabled === true);
+               }
                // Set known context_max from current model (for gauge fallback)
                if (msg.payload.llm_runtime && msg.payload.llm_runtime.context_max) {
                   DawnHistory.setKnownContextMax(msg.payload.llm_runtime.context_max);
@@ -726,6 +731,10 @@
             case 'code_project_status_changed':
                if (typeof DawnCodeProjects !== 'undefined')
                   DawnCodeProjects.handleStatusChanged(msg.payload);
+               break;
+            case 'code_project_import_failed':
+               if (typeof DawnCodeProjects !== 'undefined')
+                  DawnCodeProjects.handleImportFailed(msg.payload);
                break;
             // Calendar account management
             case 'calendar_list_accounts_response':
