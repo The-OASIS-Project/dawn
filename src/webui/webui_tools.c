@@ -166,24 +166,59 @@ void handle_set_tools_config(ws_connection_t *conn, struct json_object *payload)
 
    pthread_rwlock_wrlock(&s_config_rwlock);
 
-   /* Mark both as explicitly configured (even if empty - empty means none enabled) */
-   g_config.llm.tools.local_enabled_configured = true;
-   g_config.llm.tools.remote_enabled_configured = true;
+   /* Re-snapshot the live tool flags into the persisted config, preserving the
+    * model the operator chose per surface (set at load):
+    *   - BLOCKLIST (a *_disabled list is configured): persist the DISABLED
+    *     non-dangerous set; the enable list keeps only dangerous-tool opt-ins.
+    *   - WHITELIST (legacy): persist the ENABLED set.
+    * Without this, a blocklist deployment's WebUI toggles would be written to
+    * *_enabled (which the blocklist ignores) and silently revert on reload. */
+   const bool local_block = g_config.llm.tools.local_disabled_configured;
+   const bool remote_block = g_config.llm.tools.remote_disabled_configured;
    g_config.llm.tools.local_enabled_count = 0;
    g_config.llm.tools.remote_enabled_count = 0;
+   g_config.llm.tools.local_disabled_count = 0;
+   g_config.llm.tools.remote_disabled_count = 0;
 
    for (int i = 0; i < count; i++) {
-      if (tools[i].enabled_local &&
-          g_config.llm.tools.local_enabled_count < LLM_TOOLS_MAX_CONFIGURED) {
-         safe_strncpy(g_config.llm.tools.local_enabled[g_config.llm.tools.local_enabled_count++],
-                      tools[i].name, LLM_TOOL_NAME_MAX);
+      llm_tools_config_t *tc = &g_config.llm.tools;
+      /* local surface */
+      if (local_block) {
+         if (!tools[i].dangerous && !tools[i].enabled_local &&
+             tc->local_disabled_count < LLM_TOOLS_MAX_CONFIGURED)
+            safe_strncpy(tc->local_disabled[tc->local_disabled_count++], tools[i].name,
+                         LLM_TOOL_NAME_MAX);
+         else if (tools[i].dangerous && tools[i].enabled_local &&
+                  tc->local_enabled_count < LLM_TOOLS_MAX_CONFIGURED)
+            safe_strncpy(tc->local_enabled[tc->local_enabled_count++], tools[i].name,
+                         LLM_TOOL_NAME_MAX);
+      } else if (tools[i].enabled_local && tc->local_enabled_count < LLM_TOOLS_MAX_CONFIGURED) {
+         safe_strncpy(tc->local_enabled[tc->local_enabled_count++], tools[i].name,
+                      LLM_TOOL_NAME_MAX);
       }
-      if (tools[i].enabled_remote &&
-          g_config.llm.tools.remote_enabled_count < LLM_TOOLS_MAX_CONFIGURED) {
-         safe_strncpy(g_config.llm.tools.remote_enabled[g_config.llm.tools.remote_enabled_count++],
-                      tools[i].name, LLM_TOOL_NAME_MAX);
+      /* remote surface */
+      if (remote_block) {
+         if (!tools[i].dangerous && !tools[i].enabled_remote &&
+             tc->remote_disabled_count < LLM_TOOLS_MAX_CONFIGURED)
+            safe_strncpy(tc->remote_disabled[tc->remote_disabled_count++], tools[i].name,
+                         LLM_TOOL_NAME_MAX);
+         else if (tools[i].dangerous && tools[i].enabled_remote &&
+                  tc->remote_enabled_count < LLM_TOOLS_MAX_CONFIGURED)
+            safe_strncpy(tc->remote_enabled[tc->remote_enabled_count++], tools[i].name,
+                         LLM_TOOL_NAME_MAX);
+      } else if (tools[i].enabled_remote && tc->remote_enabled_count < LLM_TOOLS_MAX_CONFIGURED) {
+         safe_strncpy(tc->remote_enabled[tc->remote_enabled_count++], tools[i].name,
+                      LLM_TOOL_NAME_MAX);
       }
    }
+
+   /* Whitelist surfaces persist the enable list (configured even if empty = none).
+    * Blocklist surfaces keep *_disabled configured; their enable list is configured
+    * only when it carries a dangerous opt-in (else it stays absent on write). */
+   g_config.llm.tools.local_enabled_configured = !local_block ||
+                                                 g_config.llm.tools.local_enabled_count > 0;
+   g_config.llm.tools.remote_enabled_configured = !remote_block ||
+                                                  g_config.llm.tools.remote_enabled_count > 0;
 
    /* Save to TOML */
    const char *config_path = config_get_loaded_path();

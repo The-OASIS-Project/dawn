@@ -266,16 +266,29 @@ typedef struct {
 #define LLM_TOOLS_MAX_CONFIGURED 32
 #define LLM_TOOL_NAME_MAX 64
 
-typedef struct {
+typedef struct llm_tools_config {
    char mode[16]; /* "native", "command_tags", or "disabled" (default: native) */
 
-   /* Per-tool enable lists (empty + configured = none enabled) */
+   /* Per-tool enable lists — WHITELIST (legacy): only listed (non-dangerous) tools
+    * are enabled. Also the opt-in mechanism for TOOL_CAP_DANGEROUS tools under
+    * either model. Empty + configured = none enabled. */
    char local_enabled[LLM_TOOLS_MAX_CONFIGURED][LLM_TOOL_NAME_MAX];
    int local_enabled_count;
    bool local_enabled_configured; /* true if explicitly set in config (even if empty) */
    char remote_enabled[LLM_TOOLS_MAX_CONFIGURED][LLM_TOOL_NAME_MAX];
    int remote_enabled_count;
    bool remote_enabled_configured; /* true if explicitly set in config (even if empty) */
+
+   /* Per-tool disable lists — BLOCKLIST (default-on): when set, all non-dangerous
+    * tools are enabled EXCEPT those listed (so a newly-added tool is on by
+    * default). Takes precedence over the enable list for non-dangerous tools.
+    * Dangerous tools still require explicit enable-list opt-in regardless. */
+   char local_disabled[LLM_TOOLS_MAX_CONFIGURED][LLM_TOOL_NAME_MAX];
+   int local_disabled_count;
+   bool local_disabled_configured;
+   char remote_disabled[LLM_TOOLS_MAX_CONFIGURED][LLM_TOOL_NAME_MAX];
+   int remote_disabled_count;
+   bool remote_disabled_configured;
 } llm_tools_config_t;
 
 /* Default token budget levels for reasoning_effort dropdown */

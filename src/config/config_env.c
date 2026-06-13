@@ -2003,6 +2003,36 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
          fprintf(fp, "remote_enabled = []\n");
       }
    }
+   /* Write local_disabled array (blocklist) if configured */
+   if (config->llm.tools.local_disabled_configured) {
+      if (config->llm.tools.local_disabled_count > 0) {
+         fprintf(fp, "local_disabled = [\n");
+         for (int i = 0; i < config->llm.tools.local_disabled_count; i++) {
+            char *escaped = toml_escape_string(config->llm.tools.local_disabled[i]);
+            fprintf(fp, "    \"%s\"%s\n", escaped ? escaped : config->llm.tools.local_disabled[i],
+                    i < config->llm.tools.local_disabled_count - 1 ? "," : "");
+            free(escaped);
+         }
+         fprintf(fp, "]\n");
+      } else {
+         fprintf(fp, "local_disabled = []\n");
+      }
+   }
+   /* Write remote_disabled array (blocklist) if configured */
+   if (config->llm.tools.remote_disabled_configured) {
+      if (config->llm.tools.remote_disabled_count > 0) {
+         fprintf(fp, "remote_disabled = [\n");
+         for (int i = 0; i < config->llm.tools.remote_disabled_count; i++) {
+            char *escaped = toml_escape_string(config->llm.tools.remote_disabled[i]);
+            fprintf(fp, "    \"%s\"%s\n", escaped ? escaped : config->llm.tools.remote_disabled[i],
+                    i < config->llm.tools.remote_disabled_count - 1 ? "," : "");
+            free(escaped);
+         }
+         fprintf(fp, "]\n");
+      } else {
+         fprintf(fp, "remote_disabled = []\n");
+      }
+   }
 
    fprintf(fp, "\n[llm.thinking]\n");
    fprintf(fp, "mode = \"%s\"\n", config->llm.thinking.mode);

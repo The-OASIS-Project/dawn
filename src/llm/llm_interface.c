@@ -368,25 +368,14 @@ void llm_init(const char *cloud_provider_override) {
    // Initialize rate limiter (pass 0 to disable)
    llm_rate_limit_init(g_config.llm.rate_limit_enabled ? g_config.llm.rate_limit_rpm : 0);
 
-   // Apply per-tool enable config from TOML (do this early too)
-   // Check if either list was explicitly configured (even if empty = all disabled)
+   // Apply per-tool enable/disable config from TOML (do this early too).
+   // Apply when ANY of the four lists (enable/disable × local/remote) is set;
+   // otherwise leave registration defaults (all non-dangerous on) in place.
    if (g_config.llm.tools.local_enabled_configured ||
-       g_config.llm.tools.remote_enabled_configured || g_config.llm.tools.local_enabled_count > 0 ||
-       g_config.llm.tools.remote_enabled_count > 0) {
-      const char *local_list[LLM_TOOLS_MAX_CONFIGURED];
-      const char *remote_list[LLM_TOOLS_MAX_CONFIGURED];
-
-      for (int i = 0; i < g_config.llm.tools.local_enabled_count; i++) {
-         local_list[i] = g_config.llm.tools.local_enabled[i];
-      }
-      for (int i = 0; i < g_config.llm.tools.remote_enabled_count; i++) {
-         remote_list[i] = g_config.llm.tools.remote_enabled[i];
-      }
-
-      llm_tools_apply_config(local_list, g_config.llm.tools.local_enabled_count,
-                             g_config.llm.tools.local_enabled_configured, remote_list,
-                             g_config.llm.tools.remote_enabled_count,
-                             g_config.llm.tools.remote_enabled_configured);
+       g_config.llm.tools.remote_enabled_configured ||
+       g_config.llm.tools.local_disabled_configured ||
+       g_config.llm.tools.remote_disabled_configured) {
+      llm_tools_apply_config(&g_config.llm.tools);
    }
 
    /* CLI alias: "-P openrouter" enables the gateway by flipping the config bool,

@@ -1077,64 +1077,73 @@ bool llm_tools_is_device_enabled(const char *device_name, bool is_remote) {
    return false;
 }
 
-void llm_tools_apply_config(const char **local_list,
-                            int local_count,
-                            bool local_configured,
-                            const char **remote_list,
-                            int remote_count,
-                            bool remote_configured) {
+/* Mark set[i]=true for each registered tool named in names[0..count). */
+static void build_tool_set(bool *set, const char names[][LLM_TOOL_NAME_MAX], int count) {
+   for (int j = 0; j < count; j++) {
+      for (int i = 0; i < s_tool_count; i++) {
+         if (strcmp(s_tools[i].name, names[j]) == 0) {
+            set[i] = true;
+            break;
+         }
+      }
+   }
+}
+
+/* Resolve one tool's enabled state for one surface (local OR remote).
+ *
+ * - DANGEROUS tools are NEVER auto-enabled: they require explicit membership in
+ *   the enable (whitelist) list under either model.
+ * - Otherwise, if a DISABLE list is configured → BLOCKLIST: on unless listed
+ *   (so a newly-added tool is on by default). Takes precedence over the enable
+ *   list for non-dangerous tools.
+ * - Else if an ENABLE list is configured → WHITELIST (legacy): on only if listed.
+ * - Else (this surface unconfigured) → on (all non-dangerous enabled).
+ */
+static bool resolve_tool_enabled(bool dangerous,
+                                 bool in_enable,
+                                 bool in_disable,
+                                 bool enable_cfg,
+                                 bool disable_cfg) {
+   if (dangerous)
+      return in_enable;
+   if (disable_cfg)
+      return !in_disable;
+   if (enable_cfg)
+      return in_enable;
+   return true;
+}
+
+void llm_tools_apply_config(const llm_tools_config_t *cfg) {
    if (!s_initialized) {
       OLOG_WARNING("llm_tools_apply_config called before initialization - config ignored");
       return;
    }
+   if (!cfg)
+      return;
 
-   /*
-    * WHITELIST SEMANTIC:
-    * - If not configured: enable ALL tools (default behavior)
-    * - If configured but empty: enable NONE (user explicitly disabled all)
-    * - If configured with items: enable ONLY listed tools
-    */
-   bool enable_all_local = !local_configured;
-   bool enable_all_remote = !remote_configured;
+   /* Build membership sets for each of the four lists (O(n*m), tiny m). Reads
+    * s_tool_count / s_tools[].name OUTSIDE s_tools_mutex: safe because this runs
+    * once at startup (single caller in llm_interface.c, before worker/session
+    * threads exist) and name/count are init-time-immutable. A future runtime
+    * re-apply from a request thread would need to take the lock here. */
+   bool en_local[LLM_TOOLS_MAX_TOOLS] = { 0 };
+   bool en_remote[LLM_TOOLS_MAX_TOOLS] = { 0 };
+   bool dis_local[LLM_TOOLS_MAX_TOOLS] = { 0 };
+   bool dis_remote[LLM_TOOLS_MAX_TOOLS] = { 0 };
+   build_tool_set(en_local, cfg->local_enabled, cfg->local_enabled_count);
+   build_tool_set(en_remote, cfg->remote_enabled, cfg->remote_enabled_count);
+   build_tool_set(dis_local, cfg->local_disabled, cfg->local_disabled_count);
+   build_tool_set(dis_remote, cfg->remote_disabled, cfg->remote_disabled_count);
 
-   /* Build lookup sets for O(n+m) instead of O(n*m) */
-   bool local_set[LLM_TOOLS_MAX_TOOLS] = { 0 };
-   bool remote_set[LLM_TOOLS_MAX_TOOLS] = { 0 };
-
-   if (!enable_all_local) {
-      for (int j = 0; j < local_count; j++) {
-         for (int i = 0; i < s_tool_count; i++) {
-            if (strcmp(s_tools[i].name, local_list[j]) == 0) {
-               local_set[i] = true;
-               break;
-            }
-         }
-      }
-   }
-
-   if (!enable_all_remote) {
-      for (int j = 0; j < remote_count; j++) {
-         for (int i = 0; i < s_tool_count; i++) {
-            if (strcmp(s_tools[i].name, remote_list[j]) == 0) {
-               remote_set[i] = true;
-               break;
-            }
-         }
-      }
-   }
-
-   /* Single pass to apply with mutex protection */
    pthread_mutex_lock(&s_tools_mutex);
    for (int i = 0; i < s_tool_count; i++) {
-      /* Dangerous tools require explicit opt-in — don't auto-enable them
-       * when no config whitelist exists. They must appear in the whitelist. */
-      if (s_tools[i].dangerous) {
-         s_tools[i].enabled_local = local_set[i];
-         s_tools[i].enabled_remote = remote_set[i];
-      } else {
-         s_tools[i].enabled_local = enable_all_local || local_set[i];
-         s_tools[i].enabled_remote = enable_all_remote || remote_set[i];
-      }
+      s_tools[i].enabled_local = resolve_tool_enabled(s_tools[i].dangerous, en_local[i],
+                                                      dis_local[i], cfg->local_enabled_configured,
+                                                      cfg->local_disabled_configured);
+      s_tools[i].enabled_remote = resolve_tool_enabled(s_tools[i].dangerous, en_remote[i],
+                                                       dis_remote[i],
+                                                       cfg->remote_enabled_configured,
+                                                       cfg->remote_disabled_configured);
    }
 
    /* Invalidate token estimate cache */

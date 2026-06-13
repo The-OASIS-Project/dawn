@@ -219,9 +219,24 @@
                                   # "command_tags": Extract JSON from <command> tags (legacy)
                                   # "disabled": No tool calling
                                   # Env: DAWN_LLM_TOOLS_MODE
-# local_enabled = []              # Tools enabled for local voice interface (empty = all)
-                                  # Example: ["weather", "search", "calculator"]
-# remote_enabled = []             # Tools enabled for WebUI/remote clients (empty = all)
+# Per-tool gating — two models, chosen per surface (local = voice mic, remote =
+# WebUI/satellite). DANGEROUS tools (shutdown, email, phone, document_manage)
+# are NEVER auto-enabled under either model; list them in *_enabled to opt in.
+#
+# BLOCKLIST (recommended): all non-dangerous tools on EXCEPT those listed, so a
+# newly-added tool works without editing config. When a *_disabled list is set,
+# the matching *_enabled list governs ONLY dangerous-tool opt-in for that surface
+# (it no longer controls non-dangerous tools — the blocklist does).
+# local_disabled  = ["voice_amplifier"]                 # all non-dangerous on except these
+# remote_disabled = ["hud_control", "faceplate", "tts"] # e.g. hide local-hardware tools remotely
+#
+# WHITELIST (legacy): only the listed (non-dangerous) tools are enabled. A new
+# tool is OFF until you add it. Used when only *_enabled is set (no *_disabled).
+# local_enabled  = []             # empty = none; absent = all on
+# remote_enabled = []
+#
+# To opt a dangerous tool in (under either model), list it in *_enabled:
+# remote_enabled = ["email", "phone"]
 
 [llm.thinking]
 # Extended thinking/reasoning mode for complex queries

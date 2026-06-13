@@ -38,6 +38,11 @@
 #include "llm/llm_interface.h"
 #include "tools/tool_registry.h"
 
+/* Forward-declared (not #include "config/dawn_config.h") to avoid dragging the
+ * global g_config declaration into every llm_tools.h consumer. The full
+ * definition is in config/dawn_config.h, which llm_tools.c includes. */
+typedef struct llm_tools_config llm_tools_config_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -370,27 +375,21 @@ int llm_tools_set_enabled(const char *tool_name, bool enabled_local, bool enable
 bool llm_tools_is_device_enabled(const char *device_name, bool is_remote);
 
 /**
- * @brief Apply tool configuration from TOML arrays
+ * @brief Apply per-tool enable/disable configuration (per local + remote surface).
  *
- * WHITELIST SEMANTIC: If a list is NULL or count is 0, ALL tools are enabled
- * for that session type. If a list is provided, ONLY listed tools are enabled.
- * This overrides JSON defaults (default_remote: false) when TOML specifies a list.
+ * Two models, chosen per surface by which list is configured:
+ * - DISABLE list configured → BLOCKLIST: all non-dangerous tools on EXCEPT those
+ *   listed (a newly-added tool is on by default). Precedence over the enable list.
+ * - ENABLE list configured (no disable list) → WHITELIST (legacy): on only if listed.
+ * - Neither configured → all non-dangerous tools on.
+ * TOOL_CAP_DANGEROUS tools are NEVER auto-enabled under any model — they require
+ * explicit membership in the enable list.
  *
  * Thread-safe. Must be called after llm_tools_init().
  *
- * @param local_list Array of tool names enabled for local
- * @param local_count Number of entries
- * @param local_configured true if list was explicitly configured (even if empty)
- * @param remote_list Array of tool names enabled for remote
- * @param remote_count Number of entries
- * @param remote_configured true if list was explicitly configured (even if empty)
+ * @param cfg The [llm.tools] config (enable + disable lists for both surfaces).
  */
-void llm_tools_apply_config(const char **local_list,
-                            int local_count,
-                            bool local_configured,
-                            const char **remote_list,
-                            int remote_count,
-                            bool remote_configured);
+void llm_tools_apply_config(const llm_tools_config_t *cfg);
 
 /**
  * @brief Get count of enabled tools for a session type

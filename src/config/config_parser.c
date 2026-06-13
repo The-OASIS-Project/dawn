@@ -550,8 +550,13 @@ static void parse_llm_tools(toml_table_t *table, llm_tools_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = { "mode", "native_enabled", "local_enabled",
-                                             "remote_enabled", NULL };
+   static const char *const known_keys[] = { "mode",
+                                             "native_enabled",
+                                             "local_enabled",
+                                             "remote_enabled",
+                                             "local_disabled",
+                                             "remote_disabled",
+                                             NULL };
    warn_unknown_keys(table, "llm.tools", known_keys);
 
    /* Parse mode (preferred) or fall back to native_enabled for backwards compatibility */
@@ -603,6 +608,46 @@ static void parse_llm_tools(toml_table_t *table, llm_tools_config_t *config) {
          }
       }
       OLOG_INFO("Parsed %d tools in llm.tools.remote_enabled", config->remote_enabled_count);
+   }
+
+   /* Parse local_disabled array (blocklist) */
+   toml_array_t *local_dis = toml_array_in(table, "local_disabled");
+   if (local_dis) {
+      config->local_disabled_configured = true;
+      config->local_disabled_count = 0;
+      if (toml_array_nelem(local_dis) > LLM_TOOLS_MAX_CONFIGURED)
+         OLOG_WARNING("llm.tools.local_disabled has %d entries; only %d honored (blocklist fails "
+                      "OPEN — dropped tools stay ENABLED)",
+                      toml_array_nelem(local_dis), LLM_TOOLS_MAX_CONFIGURED);
+      for (int i = 0; i < toml_array_nelem(local_dis) && i < LLM_TOOLS_MAX_CONFIGURED; i++) {
+         toml_datum_t val = toml_string_at(local_dis, i);
+         if (val.ok) {
+            safe_strncpy(config->local_disabled[config->local_disabled_count++], val.u.s,
+                         LLM_TOOL_NAME_MAX);
+            free(val.u.s);
+         }
+      }
+      OLOG_INFO("Parsed %d tools in llm.tools.local_disabled", config->local_disabled_count);
+   }
+
+   /* Parse remote_disabled array (blocklist) */
+   toml_array_t *remote_dis = toml_array_in(table, "remote_disabled");
+   if (remote_dis) {
+      config->remote_disabled_configured = true;
+      config->remote_disabled_count = 0;
+      if (toml_array_nelem(remote_dis) > LLM_TOOLS_MAX_CONFIGURED)
+         OLOG_WARNING("llm.tools.remote_disabled has %d entries; only %d honored (blocklist fails "
+                      "OPEN — dropped tools stay ENABLED)",
+                      toml_array_nelem(remote_dis), LLM_TOOLS_MAX_CONFIGURED);
+      for (int i = 0; i < toml_array_nelem(remote_dis) && i < LLM_TOOLS_MAX_CONFIGURED; i++) {
+         toml_datum_t val = toml_string_at(remote_dis, i);
+         if (val.ok) {
+            safe_strncpy(config->remote_disabled[config->remote_disabled_count++], val.u.s,
+                         LLM_TOOL_NAME_MAX);
+            free(val.u.s);
+         }
+      }
+      OLOG_INFO("Parsed %d tools in llm.tools.remote_disabled", config->remote_disabled_count);
    }
 }
 
