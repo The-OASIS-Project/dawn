@@ -256,6 +256,12 @@ static inline void curl_apply_dawn_defaults(CURL *curl,
    if (!curl) {
       return;
    }
+   /* CURLOPT_NOSIGNAL is mandatory for libcurl used from worker/listener threads:
+    * without it libcurl may use signals (SIGALRM for timeouts) and a TLS write to
+    * a peer-closed socket can raise SIGPIPE on the calling thread. The daemon also
+    * ignores SIGPIPE process-wide (dawn.c), but NOSIGNAL is the documented
+    * thread-safe setting. Requires a threadsafe resolver (libcurl's default). */
+   curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
    curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
    curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_2);
    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);

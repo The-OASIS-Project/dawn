@@ -2302,6 +2302,12 @@ mqtt_disabled:
       exit(EXIT_FAILURE);
    }
 
+   // Ignore SIGPIPE process-wide: a write to a peer-closed socket (TLS via curl
+   // on the messaging listener threads, libwebsockets, mosquitto) must return
+   // EPIPE to the caller, not terminate the daemon. Disposition is process-wide,
+   // so this covers every thread.
+   signal(SIGPIPE, SIG_IGN);
+
    // Initialize metrics system (before LLM so config is tracked)
    if (metrics_init() != 0) {
       OLOG_WARNING("Failed to initialize metrics system - continuing without metrics");
