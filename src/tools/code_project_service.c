@@ -171,6 +171,15 @@ static void set_status(int64_t id, const char *status, const char *msg) {
 }
 
 static void worker_do_index(const code_project_t *p) {
+   /* Distinguish "no code server connected" from a real index failure: without
+    * this, a clone with cbm-mcp absent reports a bare "indexing failed" that
+    * reads like a bug rather than a missing backend. */
+   if (code_graph_provider_cbm.is_available != NULL &&
+       code_graph_provider_cbm.is_available() != SUCCESS) {
+      set_status(p->id, "error",
+                 "clone ready, but no code server connected — start cbm-mcp, then re-index");
+      return;
+   }
    set_status(p->id, "indexing", "");
    int64_t job_id = 0;
    if (code_graph_provider_cbm.index_start(p->name, p->local_path, CP_INDEX_MODE_DEFAULT,

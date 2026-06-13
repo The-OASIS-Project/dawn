@@ -114,4 +114,15 @@ int mcp_bridge_call_tool(const char *server_alias,
                          long timeout_ms,
                          char **result_out);
 
+/**
+ * @brief Report whether an upstream server is registered and fully connected
+ *        (handshake complete), without attempting a call or a reconnect.
+ *
+ * Lets callers distinguish "no code server configured/connected" from a genuine
+ * tool failure before invoking @ref mcp_bridge_call_tool.
+ *
+ * @return SUCCESS if the alias is connected; FAILURE otherwise.
+ */
+int mcp_bridge_server_connected(const char *server_alias);
+
 #endif /* MCP_BRIDGE_H */

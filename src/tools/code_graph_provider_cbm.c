@@ -102,9 +102,14 @@ static int cbm_delete_project(const char *project_name) {
    return rc;
 }
 
+static int cbm_is_available(void) {
+   return mcp_bridge_server_connected(CBM_ALIAS);
+}
+
 const code_graph_provider_t code_graph_provider_cbm = {
    .name = "cbm",
    .index_start = cbm_index_start,
    .index_poll_status = cbm_index_poll_status,
    .delete_project = cbm_delete_project,
+   .is_available = cbm_is_available,
 };

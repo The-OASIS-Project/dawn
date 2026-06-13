@@ -552,6 +552,24 @@ int mcp_bridge_reconnect(int *connected_out) {
    return SUCCESS;
 }
 
+int mcp_bridge_server_connected(const char *server_alias) {
+   if (server_alias == NULL) {
+      return FAILURE;
+   }
+   int connected = FAILURE;
+   pthread_mutex_lock(&s_slots_mutex);
+   for (int i = 0; i < s_server_count; i++) {
+      if (s_servers[i].in_use && strcmp(s_servers[i].alias, server_alias) == 0) {
+         if (mcp_client_state(s_servers[i].client) == MCP_STATE_CONNECTED) {
+            connected = SUCCESS;
+         }
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_slots_mutex);
+   return connected;
+}
+
 int mcp_bridge_call_tool(const char *server_alias,
                          const char *tool_name,
                          const char *args_json,

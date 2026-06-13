@@ -58,6 +58,12 @@ typedef struct code_graph_provider {
 
    /** Remove a project from the graph backend (best-effort). */
    int (*delete_project)(const char *project_name);
+
+   /** Report whether the backend is reachable right now (e.g. the cbm server is
+    *  connected). Lets the orchestrator give a "no code server connected" status
+    *  instead of a generic indexing failure. Optional; NULL means "assume up".
+    *  @return SUCCESS if available, FAILURE otherwise. */
+   int (*is_available)(void);
 } code_graph_provider_t;
 
 /** Phase 1 provider backed by cbm-mcp via the MCP bridge. */
