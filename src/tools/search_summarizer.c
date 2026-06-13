@@ -46,7 +46,7 @@
 // Module State
 // =============================================================================
 
-static summarizer_config_t g_config;
+static summarizer_config_t s_summarizer_config;
 static int g_initialized = 0;
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -167,30 +167,30 @@ int search_summarizer_init(const summarizer_config_t *config) {
 
    // Apply configuration or defaults
    if (config) {
-      g_config = *config;
+      s_summarizer_config = *config;
    } else {
-      g_config.backend = SUMMARIZER_BACKEND_DISABLED;
-      g_config.failure_policy = SUMMARIZER_ON_FAILURE_PASSTHROUGH;
-      g_config.threshold_bytes = SUMMARIZER_DEFAULT_THRESHOLD;
-      g_config.target_summary_words = SUMMARIZER_DEFAULT_TARGET_WORDS;
-      g_config.target_ratio = TFIDF_DEFAULT_RATIO;
+      s_summarizer_config.backend = SUMMARIZER_BACKEND_DISABLED;
+      s_summarizer_config.failure_policy = SUMMARIZER_ON_FAILURE_PASSTHROUGH;
+      s_summarizer_config.threshold_bytes = SUMMARIZER_DEFAULT_THRESHOLD;
+      s_summarizer_config.target_summary_words = SUMMARIZER_DEFAULT_TARGET_WORDS;
+      s_summarizer_config.target_ratio = TFIDF_DEFAULT_RATIO;
    }
 
    g_initialized = 1;
    pthread_mutex_unlock(&g_mutex);
 
    // Update metrics with config
-   metrics_set_summarizer_config(search_summarizer_backend_name(g_config.backend),
-                                 g_config.threshold_bytes);
+   metrics_set_summarizer_config(search_summarizer_backend_name(s_summarizer_config.backend),
+                                 s_summarizer_config.threshold_bytes);
 
-   if (g_config.backend == SUMMARIZER_BACKEND_TFIDF) {
+   if (s_summarizer_config.backend == SUMMARIZER_BACKEND_TFIDF) {
       OLOG_INFO("search_summarizer: Initialized (backend=%s, threshold=%zu, target_ratio=%.2f)",
-                search_summarizer_backend_name(g_config.backend), g_config.threshold_bytes,
-                g_config.target_ratio);
+                search_summarizer_backend_name(s_summarizer_config.backend),
+                s_summarizer_config.threshold_bytes, s_summarizer_config.target_ratio);
    } else {
       OLOG_INFO("search_summarizer: Initialized (backend=%s, threshold=%zu, target_words=%zu)",
-                search_summarizer_backend_name(g_config.backend), g_config.threshold_bytes,
-                g_config.target_summary_words);
+                search_summarizer_backend_name(s_summarizer_config.backend),
+                s_summarizer_config.threshold_bytes, s_summarizer_config.target_summary_words);
    }
 
    return SUMMARIZER_SUCCESS;
@@ -211,7 +211,7 @@ const summarizer_config_t *search_summarizer_get_config(void) {
    if (!g_initialized) {
       return NULL;
    }
-   return &g_config;
+   return &s_summarizer_config;
 }
 
 const char *search_summarizer_backend_name(summarizer_backend_t backend) {
@@ -468,7 +468,7 @@ int search_summarizer_process(const char *search_results,
    size_t input_size = strlen(search_results);
 
    // If disabled or under threshold, pass through
-   if (g_config.backend == SUMMARIZER_BACKEND_DISABLED) {
+   if (s_summarizer_config.backend == SUMMARIZER_BACKEND_DISABLED) {
       *out_result = strdup(search_results);
       if (!*out_result) {
          return SUMMARIZER_ERROR_ALLOC;
@@ -476,9 +476,9 @@ int search_summarizer_process(const char *search_results,
       return SUMMARIZER_SUCCESS;
    }
 
-   if (input_size <= g_config.threshold_bytes) {
+   if (input_size <= s_summarizer_config.threshold_bytes) {
       OLOG_INFO("search_summarizer: Input %zu bytes under threshold %zu, passing through",
-                input_size, g_config.threshold_bytes);
+                input_size, s_summarizer_config.threshold_bytes);
       *out_result = strdup(search_results);
       if (!*out_result) {
          return SUMMARIZER_ERROR_ALLOC;
@@ -488,7 +488,8 @@ int search_summarizer_process(const char *search_results,
 
    OLOG_INFO(
        "search_summarizer: Input %zu bytes exceeds threshold %zu, summarizing with %s backend",
-       input_size, g_config.threshold_bytes, search_summarizer_backend_name(g_config.backend));
+       input_size, s_summarizer_config.threshold_bytes,
+       search_summarizer_backend_name(s_summarizer_config.backend));
 
    // Notify user that summarization is starting (may take a while for local LLM)
    notify_summarization_starting();
@@ -497,8 +498,8 @@ int search_summarizer_process(const char *search_results,
    char *summary = NULL;
 
    // Handle TF-IDF backend specially - it doesn't need an LLM prompt
-   if (g_config.backend == SUMMARIZER_BACKEND_TFIDF) {
-      result = tfidf_summarize(search_results, &summary, g_config.target_ratio,
+   if (s_summarizer_config.backend == SUMMARIZER_BACKEND_TFIDF) {
+      result = tfidf_summarize(search_results, &summary, s_summarizer_config.target_ratio,
                                TFIDF_MIN_SENTENCES);
 
       if (result != TFIDF_SUCCESS) {
@@ -516,7 +517,7 @@ int search_summarizer_process(const char *search_results,
                            input_size + 32; /* Extra for word count */
       char *prompt = malloc(prompt_size);
       if (!prompt) {
-         if (g_config.failure_policy == SUMMARIZER_ON_FAILURE_PASSTHROUGH) {
+         if (s_summarizer_config.failure_policy == SUMMARIZER_ON_FAILURE_PASSTHROUGH) {
             if (input_size > SUMMARIZER_MAX_PASSTHROUGH_BYTES) {
                OLOG_WARNING("search_summarizer: Allocation failed, truncating for passthrough");
                *out_result = truncate_with_notice(search_results, SUMMARIZER_MAX_PASSTHROUGH_BYTES,
@@ -531,10 +532,10 @@ int search_summarizer_process(const char *search_results,
       }
 
       snprintf(prompt, prompt_size, SUMMARIZER_PROMPT_TEMPLATE, original_query,
-               g_config.target_summary_words, search_results);
+               s_summarizer_config.target_summary_words, search_results);
 
       // Call appropriate LLM backend
-      if (g_config.backend == SUMMARIZER_BACKEND_LOCAL) {
+      if (s_summarizer_config.backend == SUMMARIZER_BACKEND_LOCAL) {
          result = summarize_with_local_llm(prompt, &summary);
       } else {
          result = summarize_with_default_llm(prompt, &summary);
@@ -544,7 +545,7 @@ int search_summarizer_process(const char *search_results,
    }
 
    if (result != SUMMARIZER_SUCCESS) {
-      if (g_config.failure_policy == SUMMARIZER_ON_FAILURE_PASSTHROUGH) {
+      if (s_summarizer_config.failure_policy == SUMMARIZER_ON_FAILURE_PASSTHROUGH) {
          if (input_size > SUMMARIZER_MAX_PASSTHROUGH_BYTES) {
             OLOG_WARNING(
                 "search_summarizer: Backend failed, truncating %zu bytes to %d for passthrough",
@@ -566,7 +567,7 @@ int search_summarizer_process(const char *search_results,
    char *final_result = malloc(summary_len + header_len);
    if (!final_result) {
       free(summary);
-      if (g_config.failure_policy == SUMMARIZER_ON_FAILURE_PASSTHROUGH) {
+      if (s_summarizer_config.failure_policy == SUMMARIZER_ON_FAILURE_PASSTHROUGH) {
          if (input_size > SUMMARIZER_MAX_PASSTHROUGH_BYTES) {
             *out_result = truncate_with_notice(search_results, SUMMARIZER_MAX_PASSTHROUGH_BYTES,
                                                input_size);
