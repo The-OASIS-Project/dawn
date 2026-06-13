@@ -1,0 +1,251 @@
+/*
+ * Code Projects popover (coding harness). Mirrors the doc-library popover
+ * geometry/treatment so the two header panels feel consistent.
+ */
+
+#coding-btn {
+   background: none;
+   border: none;
+   color: var(--text-secondary);
+   cursor: pointer;
+   padding: 0.25rem;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   transition: color var(--transition-fast);
+   position: relative;
+}
+
+#coding-btn:hover {
+   color: var(--text-primary);
+}
+
+#coding-btn.active {
+   color: var(--accent);
+}
+
+#code-projects-popover {
+   position: fixed;
+   top: 50px;
+   right: 60px;
+   width: 360px;
+   max-height: 70vh;
+   background: rgba(18, 18, 26, 0.98);
+   backdrop-filter: blur(20px);
+   -webkit-backdrop-filter: blur(20px);
+   border: 1px solid var(--accent-border);
+   border-radius: 12px;
+   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+   z-index: 997;
+   display: flex;
+   flex-direction: column;
+   opacity: 1;
+   transform: translateY(0);
+   transition: opacity 0.15s ease, transform 0.15s ease;
+   overflow: hidden;
+}
+
+#code-projects-popover.hidden {
+   opacity: 0;
+   transform: translateY(-8px);
+   pointer-events: none;
+}
+
+.code-projects-header {
+   display: flex;
+   align-items: center;
+   justify-content: space-between;
+   padding: 0.75rem 1rem;
+   border-bottom: 1px solid var(--accent-border);
+}
+
+.code-projects-header h3 {
+   margin: 0;
+   font-size: 1rem;
+   color: var(--text-primary);
+}
+
+#code-projects-close {
+   background: none;
+   border: none;
+   color: var(--text-secondary);
+   font-size: 1.4rem;
+   line-height: 1;
+   cursor: pointer;
+}
+
+#code-projects-close:hover {
+   color: var(--text-primary);
+}
+
+.code-projects-import {
+   padding: 0.75rem 1rem;
+   border-bottom: 1px solid var(--accent-border);
+   display: flex;
+   flex-direction: column;
+   gap: 0.5rem;
+}
+
+.code-projects-import input[type='text'] {
+   width: 100%;
+   box-sizing: border-box;
+}
+
+.code-projects-global-toggle {
+   display: flex;
+   align-items: center;
+   gap: 0.4rem;
+   font-size: 0.8rem;
+   color: var(--text-secondary);
+}
+
+.code-projects-import .form-error {
+   color: var(--error, #e06c75);
+   font-size: 0.8rem;
+   min-height: 0;
+}
+
+.code-projects-import .form-error:empty {
+   display: none;
+}
+
+.code-projects-list {
+   flex: 1 1 auto;
+   overflow-y: auto;
+   padding: 0.5rem 0.5rem;
+}
+
+.code-projects-empty {
+   color: var(--text-secondary);
+   text-align: center;
+   padding: 1.5rem 0.5rem;
+   font-size: 0.85rem;
+}
+
+.code-project-row {
+   display: flex;
+   align-items: flex-start;
+   justify-content: space-between;
+   gap: 0.5rem;
+   padding: 0.5rem;
+   border-radius: 8px;
+}
+
+.code-project-row:hover {
+   background: rgba(255, 255, 255, 0.04);
+}
+
+.code-project-main {
+   min-width: 0;
+   flex: 1 1 auto;
+}
+
+.code-project-name {
+   color: var(--text-primary);
+   font-weight: 600;
+   font-size: 0.9rem;
+   white-space: nowrap;
+   overflow: hidden;
+   text-overflow: ellipsis;
+}
+
+.code-project-global {
+   font-size: 0.7rem;
+   color: var(--accent);
+   border: 1px solid var(--accent-border);
+   border-radius: 4px;
+   padding: 0 0.3rem;
+   vertical-align: middle;
+}
+
+.code-project-meta {
+   margin-top: 0.2rem;
+   font-size: 0.78rem;
+}
+
+.code-project-badge {
+   display: inline-block;
+   border-radius: 4px;
+   padding: 0 0.35rem;
+   font-size: 0.72rem;
+   text-transform: uppercase;
+   letter-spacing: 0.02em;
+}
+
+.code-project-badge.ready {
+   background: rgba(34, 197, 94, 0.18);
+   color: var(--success, #22c55e);
+}
+
+.code-project-badge.error {
+   background: rgba(239, 68, 68, 0.18);
+   color: var(--error, #ef4444);
+}
+
+.code-project-badge.pending {
+   background: rgba(255, 255, 255, 0.1);
+   color: var(--text-secondary);
+}
+
+.code-project-msg {
+   color: var(--text-secondary);
+}
+
+.code-project-src {
+   margin-top: 0.2rem;
+   font-size: 0.72rem;
+   color: var(--text-secondary);
+   white-space: nowrap;
+   overflow: hidden;
+   text-overflow: ellipsis;
+}
+
+.code-project-actions {
+   display: flex;
+   gap: 0.25rem;
+   flex: 0 0 auto;
+}
+
+.code-project-actions .btn-link {
+   font-size: 1rem;
+   line-height: 1;
+   padding: 0.15rem 0.35rem;
+}
+
+/* Keyboard focus rings — parity with the doc-library popover controls. */
+.code-project-actions .btn-link:focus-visible,
+#code-projects-close:focus-visible,
+#coding-btn:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+   border-radius: 4px;
+}
+
+.code-projects-status {
+   padding: 0.4rem 1rem;
+   font-size: 0.78rem;
+   color: var(--text-secondary);
+   min-height: 0;
+}
+
+.code-projects-status:empty {
+   display: none;
+}
+
+/* Narrow viewports: bottom sheet, matching the doc-library popover pattern. */
+@media (max-width: 480px) {
+   #code-projects-popover {
+      top: auto;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      width: 100%;
+      max-height: 80vh;
+      border-radius: 16px 16px 0 0;
+      transform: translateY(0);
+   }
+
+   #code-projects-popover.hidden {
+      transform: translateY(100%);
+   }
+}

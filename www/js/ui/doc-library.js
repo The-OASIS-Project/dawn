@@ -338,6 +338,7 @@
       // Close competing header popovers that share this top-right slot
       if (typeof DawnMemory !== 'undefined') DawnMemory.close();
       if (typeof DawnSchedulerQueue !== 'undefined') DawnSchedulerQueue.close();
+      if (typeof DawnCodeProjects !== 'undefined') DawnCodeProjects.close();
 
       triggerElement = document.activeElement;
       el.popover.classList.remove('hidden');

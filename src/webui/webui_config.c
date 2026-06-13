@@ -1100,6 +1100,30 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
                           config->scheduler.briefing_speak_aloud_on_webui_source);
    }
 
+   /* [mcp] — coding-harness MCP bridge. Only the scalars are settings-editable;
+    * the [[mcp.server]] array is TOML-managed and intentionally not applied here. */
+   if (json_object_object_get_ex(payload, "mcp", &section)) {
+      JSON_TO_CONFIG_BOOL(section, "enabled", config->mcp.enabled);
+      JSON_TO_CONFIG_BOOL(section, "dev_mode", config->mcp.dev_mode);
+   }
+
+   /* [code_projects] — coding-harness imported repositories. */
+   if (json_object_object_get_ex(payload, "code_projects", &section)) {
+      JSON_TO_CONFIG_BOOL(section, "enabled", config->code_projects.enabled);
+      JSON_TO_CONFIG_STR(section, "source_root", config->code_projects.source_root);
+      JSON_TO_CONFIG_STR(section, "default_index_mode", config->code_projects.default_index_mode);
+      JSON_TO_CONFIG_BOOL(section, "default_global", config->code_projects.default_global);
+      JSON_TO_CONFIG_STR(section, "import_user_required",
+                         config->code_projects.import_user_required);
+      JSON_TO_CONFIG_INT(section, "max_repo_size_mb", config->code_projects.max_repo_size_mb);
+      JSON_TO_CONFIG_INT(section, "max_file_count", config->code_projects.max_file_count);
+      JSON_TO_CONFIG_INT(section, "max_path_depth", config->code_projects.max_path_depth);
+      JSON_TO_CONFIG_INT(section, "clone_depth", config->code_projects.clone_depth);
+      JSON_TO_CONFIG_STR(section, "allowed_host_pattern",
+                         config->code_projects.allowed_host_pattern);
+      JSON_TO_CONFIG_STR(section, "default_active", config->code_projects.default_active);
+   }
+
    /* [calendar] */
    if (json_object_object_get_ex(payload, "calendar", &section)) {
       JSON_TO_CONFIG_BOOL(section, "enabled", config->calendar.enabled);

@@ -1261,6 +1261,7 @@
       // Close the doc-library panel if it's open — it shares this top-right slot
       // but is sticky (no outside-click close), so it must be closed explicitly.
       if (typeof DawnDocLibrary !== 'undefined') DawnDocLibrary.close();
+      if (typeof DawnCodeProjects !== 'undefined') DawnCodeProjects.close();
       state.triggerEl = document.activeElement;
       els.popover.classList.remove('hidden');
       if (els.btn) els.btn.setAttribute('aria-expanded', 'true');

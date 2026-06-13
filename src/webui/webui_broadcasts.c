@@ -934,3 +934,39 @@ void scheduler_broadcast_events_changed(int user_id) {
                 sent);
    }
 }
+
+#ifdef DAWN_ENABLE_CODE_PROJECTS
+#include "tools/code_project_service.h"
+
+/* Strong override of the weak code_project_broadcast_status_changed stub in
+ * code_project_service.c. Pushes a lightweight ping to every authenticated
+ * browser so each re-fetches its own (access-scoped) project list; the opaque
+ * project id carries nothing sensitive. Called from the import worker thread and
+ * from import/delete, so it must use the thread-safe response queue. */
+void code_project_broadcast_status_changed(int64_t project_id) {
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("code_project_status_changed"));
+   json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "project_id", json_object_new_int64(project_id));
+   json_object_object_add(root, "payload", payload);
+   const char *json_str = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      ws_connection_t *conn = s_active_connections[i];
+      if (!conn || !conn->session || !conn->authenticated) {
+         continue;
+      }
+      char *json_copy = strdup(json_str);
+      if (!json_copy) {
+         continue;
+      }
+      ws_response_t resp = { .session = conn->session,
+                             .type = WS_RESP_JSON,
+                             .generic_json = { .json = json_copy } };
+      queue_response(&resp);
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+   json_object_put(root);
+}
+#endif /* DAWN_ENABLE_CODE_PROJECTS */

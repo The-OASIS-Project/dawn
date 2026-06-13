@@ -2105,6 +2105,102 @@
          },
       },
       /* Home Assistant config is managed by its dedicated admin panel section */
+
+      mcp: {
+         label: 'MCP Bridge',
+         icon: '&#x1F50C;',
+         fields: {
+            enabled: {
+               type: 'checkbox',
+               label: 'Enable MCP Bridge',
+               hint: 'Connect to operator-launched MCP servers and expose their tools (requires restart). Servers are configured in dawn.toml.',
+               restart: true,
+            },
+            dev_mode: {
+               type: 'checkbox',
+               label: 'Allow Insecure TLS (dev mode)',
+               hint: 'Permit MCP servers with tls_verify = false. Leave off in production.',
+               advanced: true,
+            },
+         },
+      },
+
+      code_projects: {
+         label: 'Code Projects',
+         icon: '&#x1F4BB;',
+         fields: {
+            enabled: {
+               type: 'checkbox',
+               label: 'Enable Code Projects',
+               hint: 'Import GitHub-style repos and index them via the MCP bridge for code Q&A (requires the MCP bridge).',
+            },
+            source_root: {
+               type: 'text',
+               label: 'Source Root',
+               hint: 'Filesystem directory where imported repos are cloned.',
+               advanced: true,
+            },
+            import_user_required: {
+               type: 'select',
+               label: 'Who Can Import',
+               options: [
+                  { value: 'admin', label: 'Admins only' },
+                  { value: '', label: 'Any authenticated user' },
+               ],
+               hint: 'Restrict who may import new projects.',
+            },
+            default_global: {
+               type: 'checkbox',
+               label: 'Default New Projects to Global',
+               hint: 'New imports are shared with all users instead of private to the importer.',
+               advanced: true,
+            },
+            max_repo_size_mb: {
+               type: 'number',
+               label: 'Max Repo Size (MB)',
+               min: 1,
+               max: 1048576,
+               hint: 'Reject clones whose working tree exceeds this size.',
+               advanced: true,
+            },
+            max_file_count: {
+               type: 'number',
+               label: 'Max File Count',
+               min: 1,
+               max: 100000000,
+               hint: 'Reject clones with more files than this.',
+               advanced: true,
+            },
+            max_path_depth: {
+               type: 'number',
+               label: 'Max Path Depth',
+               min: 1,
+               max: 255,
+               hint: 'Reject clones nesting deeper than this.',
+               advanced: true,
+            },
+            clone_depth: {
+               type: 'number',
+               label: 'Clone Depth',
+               min: 0,
+               max: 1,
+               hint: '0 = full history, 1 = shallow clone.',
+               advanced: true,
+            },
+            allowed_host_pattern: {
+               type: 'text',
+               label: 'Allowed Host Pattern',
+               hint: 'POSIX regex matched against the clone URL host (auto-anchored). Blank = allow any HTTPS host.',
+               advanced: true,
+            },
+            default_active: {
+               type: 'text',
+               label: 'Default Active Project',
+               hint: 'Fallback active project name for new sessions.',
+               advanced: true,
+            },
+         },
+      },
    };
 
    /**
@@ -2135,6 +2231,12 @@
          label: 'Tools & Extensions',
          icon: '&#x1F527;',
          sections: ['tool_calling', 'search', 'url_fetcher'],
+      },
+      {
+         id: 'coding',
+         label: 'Coding',
+         icon: '&#x1F4BB;',
+         sections: ['mcp', 'code_projects'],
       },
       {
          id: 'memory',

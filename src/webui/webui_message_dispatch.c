@@ -56,6 +56,9 @@
 #include "webui/webui_always_on.h"
 #include "webui/webui_contacts.h"
 #include "webui/webui_doc_library.h"
+#ifdef DAWN_ENABLE_CODE_PROJECTS
+#include "webui/webui_code_projects.h"
+#endif
 #include "webui/webui_email.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_oauth.h"
@@ -1091,6 +1094,18 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
          handle_doc_library_version_restore(conn, payload);
       }
    }
+#ifdef DAWN_ENABLE_CODE_PROJECTS
+   /* Code projects (coding harness) */
+   else if (strcmp(type, "code_projects_list") == 0) {
+      handle_code_projects_list(conn, payload);
+   } else if (strcmp(type, "code_projects_import") == 0) {
+      handle_code_projects_import(conn, payload);
+   } else if (strcmp(type, "code_projects_refresh") == 0) {
+      handle_code_projects_refresh(conn, payload);
+   } else if (strcmp(type, "code_projects_delete") == 0) {
+      handle_code_projects_delete(conn, payload);
+   }
+#endif
    /* OAuth flow (shared by calendar and email) */
 #if defined(DAWN_ENABLE_CALENDAR_TOOL) || defined(DAWN_ENABLE_EMAIL_TOOL)
    else if (strcmp(type, "oauth_get_auth_url") == 0) {

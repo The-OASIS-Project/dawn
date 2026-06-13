@@ -381,8 +381,13 @@ if(DAWN_ENABLE_CODE_PROJECTS)
         src/tools/code_project_service.c
         src/tools/code_project_tool.c
         src/auth/admin_socket_code_project.c)
-    # libgit2 link + remaining sources (db/git/service/tool/webui) added in
-    # later steps; CMakeLists.txt links ${LIBGIT2_LIBRARIES} when this is ON.
+    # WebUI handlers for the Coding popover (needs the WebUI layer). The strong
+    # code_project_broadcast_status_changed override lives in webui_broadcasts.c
+    # (always compiled with the WebUI), gated there by DAWN_ENABLE_CODE_PROJECTS.
+    if(ENABLE_WEBUI)
+        list(APPEND TOOL_SOURCES src/webui/webui_code_projects.c)
+    endif()
+    # CMakeLists.txt links ${LIBGIT2_LIBRARIES} when this is ON.
     message(STATUS "DAWN: Code projects subsystem ENABLED")
 else()
     message(STATUS "DAWN: Code projects subsystem DISABLED")

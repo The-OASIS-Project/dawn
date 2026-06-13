@@ -1268,6 +1268,57 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object_object_add(search, "title_filters", title_filters);
    json_object_object_add(root, "search", search);
 
+   /* [mcp] + [[mcp.server]] (coding harness MCP bridge). Servers are serialized
+    * read-only for visibility; they are configured via TOML, not the settings
+    * panel, so the apply path (webui_config.c) only round-trips the scalars. */
+   json_object *mcp = json_object_new_object();
+   json_object_object_add(mcp, "enabled", json_object_new_boolean(config->mcp.enabled));
+   json_object_object_add(mcp, "dev_mode", json_object_new_boolean(config->mcp.dev_mode));
+   json_object *mcp_servers = json_object_new_array();
+   for (int i = 0; i < config->mcp.server_count && i < MCP_SERVERS_MAX; i++) {
+      const mcp_server_config_t *srv = &config->mcp.servers[i];
+      json_object *s = json_object_new_object();
+      json_object_object_add(s, "alias", json_object_new_string(srv->alias));
+      json_object_object_add(s, "url", json_object_new_string(srv->url));
+      json_object_object_add(s, "transport", json_object_new_string(srv->transport));
+      json_object_object_add(s, "enabled", json_object_new_boolean(srv->enabled));
+      json_object_object_add(s, "capabilities", json_object_new_string(srv->capabilities));
+      json_object_object_add(s, "request_timeout_seconds",
+                             json_object_new_int(srv->request_timeout_seconds));
+      json_object_object_add(s, "idle_close_seconds", json_object_new_int(srv->idle_close_seconds));
+      json_object_object_add(s, "tls_verify", json_object_new_boolean(srv->tls_verify));
+      json_object_object_add(s, "auth_bearer_env", json_object_new_string(srv->auth_bearer_env));
+      json_object_array_add(mcp_servers, s);
+   }
+   json_object_object_add(mcp, "servers", mcp_servers);
+   json_object_object_add(root, "mcp", mcp);
+
+   /* [code_projects] (coding harness imported repositories) */
+   json_object *code_projects = json_object_new_object();
+   json_object_object_add(code_projects, "enabled",
+                          json_object_new_boolean(config->code_projects.enabled));
+   json_object_object_add(code_projects, "source_root",
+                          json_object_new_string(config->code_projects.source_root));
+   json_object_object_add(code_projects, "default_index_mode",
+                          json_object_new_string(config->code_projects.default_index_mode));
+   json_object_object_add(code_projects, "default_global",
+                          json_object_new_boolean(config->code_projects.default_global));
+   json_object_object_add(code_projects, "import_user_required",
+                          json_object_new_string(config->code_projects.import_user_required));
+   json_object_object_add(code_projects, "max_repo_size_mb",
+                          json_object_new_int(config->code_projects.max_repo_size_mb));
+   json_object_object_add(code_projects, "max_file_count",
+                          json_object_new_int(config->code_projects.max_file_count));
+   json_object_object_add(code_projects, "max_path_depth",
+                          json_object_new_int(config->code_projects.max_path_depth));
+   json_object_object_add(code_projects, "clone_depth",
+                          json_object_new_int(config->code_projects.clone_depth));
+   json_object_object_add(code_projects, "allowed_host_pattern",
+                          json_object_new_string(config->code_projects.allowed_host_pattern));
+   json_object_object_add(code_projects, "default_active",
+                          json_object_new_string(config->code_projects.default_active));
+   json_object_object_add(root, "code_projects", code_projects);
+
    /* [url_fetcher] */
    json_object *url_fetcher = json_object_new_object();
    json_object_object_add(url_fetcher, "whitelist_count",

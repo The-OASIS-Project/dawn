@@ -710,6 +710,23 @@
                if (typeof DawnDocLibrary !== 'undefined')
                   DawnDocLibrary.handleDeletedListResponse(msg.payload);
                break;
+            // Code projects (coding harness)
+            case 'code_projects_list_response':
+               if (typeof DawnCodeProjects !== 'undefined')
+                  DawnCodeProjects.handleListResponse(msg.payload);
+               break;
+            case 'code_projects_import_response':
+               if (typeof DawnCodeProjects !== 'undefined')
+                  DawnCodeProjects.handleImportResponse(msg.payload);
+               break;
+            case 'code_projects_action_response':
+               if (typeof DawnCodeProjects !== 'undefined')
+                  DawnCodeProjects.handleActionResponse(msg.payload);
+               break;
+            case 'code_project_status_changed':
+               if (typeof DawnCodeProjects !== 'undefined')
+                  DawnCodeProjects.handleStatusChanged(msg.payload);
+               break;
             // Calendar account management
             case 'calendar_list_accounts_response':
                if (typeof DawnCalendarAccounts !== 'undefined')
@@ -1798,6 +1815,10 @@
                   DawnSchedulerQueue.refresh();
                }
             }
+            // Coding popover shares the same auth-gated reveal lifecycle.
+            if (window.DawnCodeProjects) {
+               DawnCodeProjects.updateVisibility(DawnState.authState);
+            }
          },
          restoreHistorySidebarState: DawnHistory.restoreSidebarState,
       });
@@ -1892,6 +1913,14 @@
       // Initialize document library (RAG)
       if (typeof DawnDocLibrary !== 'undefined') {
          DawnDocLibrary.init({
+            trapFocus: DawnSettings.trapFocus,
+            showConfirmModal: DawnSettings.showConfirmModal,
+         });
+      }
+
+      // Initialize code projects (coding harness)
+      if (typeof DawnCodeProjects !== 'undefined') {
+         DawnCodeProjects.init({
             trapFocus: DawnSettings.trapFocus,
             showConfirmModal: DawnSettings.showConfirmModal,
          });

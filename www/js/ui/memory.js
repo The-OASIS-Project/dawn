@@ -1136,6 +1136,7 @@
 
       // Close doc library if open
       if (typeof DawnDocLibrary !== 'undefined') DawnDocLibrary.close();
+      if (typeof DawnCodeProjects !== 'undefined') DawnCodeProjects.close();
 
       // Store trigger element for focus restoration
       triggerElement = document.activeElement;
