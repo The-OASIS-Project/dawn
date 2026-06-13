@@ -28,6 +28,7 @@
 
 #include <ctype.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -282,6 +283,174 @@ static int split_paragraphs(const char *text,
 }
 
 /* =============================================================================
+ * Structure-aware chunking (one record per chunk)
+ *
+ * Size-based prose chunking splits a structured doc (YAML/CSV) mid-record, so a
+ * retrieval/grep hit lands on a fragment with the surrounding fields in other
+ * chunks.  When the content is *clearly* a top-level YAML sequence or a CSV
+ * table, split per record instead so each chunk is one self-contained record.
+ * Detection is deliberately conservative — prose must never be mis-split — so
+ * we trigger only on strong structural signals and otherwise fall through to the
+ * prose path.  Content-sniffed (not filetype-gated) so it works for pasted text
+ * and for the common case where the stored filetype is wrong (e.g. a .yaml URL
+ * indexed as .txt).
+ * ============================================================================= */
+
+#define STRUCT_YAML_MIN_ITEMS 3  /* min top-level "- " items to treat as a YAML sequence */
+#define STRUCT_CSV_MIN_ROWS 3    /* min rows (incl. header) to treat as CSV */
+#define STRUCT_CSV_MAX_ROWS 2000 /* above this, fall back to prose (avoid chunk explosion) */
+#define STRUCT_YAML_INDENT_FRAC \
+   0.7 /* frac of non-blank lines that must be a "- " item or indented */
+
+/* End of the line starting at p (points at the '\n' or the NUL). */
+static const char *line_end(const char *p, const char *end) {
+   while (p < end && *p != '\n')
+      p++;
+   return p;
+}
+
+static bool line_blank(const char *p, const char *e) {
+   for (; p < e; p++) {
+      if (*p != ' ' && *p != '\t' && *p != '\r')
+         return false;
+   }
+   return true;
+}
+
+static int count_ch(const char *p, const char *e, char ch) {
+   int n = 0;
+   for (; p < e; p++) {
+      if (*p == ch)
+         n++;
+   }
+   return n;
+}
+
+/* Emit [start,stop) as one chunk, hard-splitting at line boundaries if it
+ * exceeds max_chars (a single huge record) so it survives the read-back text cap. */
+static int struct_emit(chunk_result_t *out, const char *start, const char *stop, int max_chars) {
+   /* Trim trailing whitespace/newlines. */
+   while (stop > start && (stop[-1] == '\n' || stop[-1] == '\r' || stop[-1] == ' '))
+      stop--;
+   int len = (int)(stop - start);
+   if (len <= 0)
+      return SUCCESS;
+   if (len <= max_chars)
+      return result_add(out, start, len);
+
+   /* Oversized record: split on line boundaries into <= max_chars pieces. */
+   const char *p = start;
+   while (p < stop) {
+      const char *piece_end = p;
+      while (piece_end < stop) {
+         const char *le = line_end(piece_end, stop);
+         if (le > piece_end && (int)(le - p) > max_chars && piece_end > p)
+            break; /* adding this line would overflow — cut here */
+         piece_end = (le < stop) ? le + 1 : stop;
+      }
+      if (piece_end == p)
+         piece_end = (p + max_chars < stop) ? p + max_chars : stop; /* one giant line */
+      if (result_add(out, p, (int)(piece_end - p)) != SUCCESS)
+         return FAILURE;
+      p = piece_end;
+   }
+   return SUCCESS;
+}
+
+/* Try to chunk `text` as a structured format. Returns true (and fills out) if it
+ * recognized one; false to fall through to prose chunking. */
+static bool chunk_structured(const char *text, int text_len, int max_chars, chunk_result_t *out) {
+   const char *end = text + text_len;
+
+   /* ---- Pass 1: classify lines ---- */
+   int nonblank = 0, top_dash = 0, indented = 0;
+   int csv_rows = 0, csv_commas = -1, csv_consistent = 0;
+   const char *p = text;
+   while (p < end) {
+      const char *le = line_end(p, end);
+      if (!line_blank(p, le)) {
+         nonblank++;
+         if (p[0] == '-' && (p + 1 == le || p[1] == ' '))
+            top_dash++;
+         else if (p[0] == ' ' || p[0] == '\t')
+            indented++;
+         int commas = count_ch(p, le, ',');
+         if (csv_rows == 0)
+            csv_commas = commas;
+         csv_rows++;
+         if (commas == csv_commas)
+            csv_consistent++;
+      }
+      p = (le < end) ? le + 1 : end;
+   }
+   if (nonblank == 0)
+      return false;
+
+   /* ---- YAML sequence: many top-level "- " records, mostly structured lines ---- */
+   if (top_dash >= STRUCT_YAML_MIN_ITEMS &&
+       (double)(top_dash + indented) >= (double)nonblank * STRUCT_YAML_INDENT_FRAC) {
+      if (result_init(out) != SUCCESS)
+         return false;
+      const char *rec = NULL;
+      p = text;
+      while (p < end) {
+         const char *le = line_end(p, end);
+         bool is_item = (p[0] == '-' && (p + 1 == le || p[1] == ' '));
+         if (is_item) {
+            if (rec && struct_emit(out, rec, p, max_chars) != SUCCESS) {
+               chunk_result_free(out);
+               return false;
+            }
+            rec = p; /* start of a new record */
+         } else if (!rec && !line_blank(p, le)) {
+            rec = p; /* preamble before the first "- " (rare) starts the first chunk */
+         }
+         p = (le < end) ? le + 1 : end;
+      }
+      if (rec && struct_emit(out, rec, end, max_chars) != SUCCESS) {
+         chunk_result_free(out);
+         return false;
+      }
+      return out->count > 0;
+   }
+
+   /* ---- CSV: consistent comma counts, header + one row per chunk ---- */
+   if (csv_commas >= 1 && csv_rows >= STRUCT_CSV_MIN_ROWS && csv_rows <= STRUCT_CSV_MAX_ROWS &&
+       (double)csv_consistent >= (double)csv_rows * 0.9) {
+      if (result_init(out) != SUCCESS)
+         return false;
+      /* Capture the header line. */
+      const char *hdr = text;
+      while (hdr < end && line_blank(hdr, line_end(hdr, end)))
+         hdr = line_end(hdr, end) + 1;
+      const char *hdr_end = line_end(hdr, end);
+      int hdr_len = (int)(hdr_end - hdr);
+
+      p = (hdr_end < end) ? hdr_end + 1 : end;
+      char buf[8192];
+      while (p < end) {
+         const char *le = line_end(p, end);
+         if (!line_blank(p, le)) {
+            int row_len = (int)(le - p);
+            /* chunk = "header\nrow" so each record is self-describing. */
+            int n = snprintf(buf, sizeof(buf), "%.*s\n%.*s", hdr_len, hdr, row_len, p);
+            if (n > 0) {
+               if (result_add(out, buf, n < (int)sizeof(buf) ? n : (int)sizeof(buf) - 1) !=
+                   SUCCESS) {
+                  chunk_result_free(out);
+                  return false;
+               }
+            }
+         }
+         p = (le < end) ? le + 1 : end;
+      }
+      return out->count > 0;
+   }
+
+   return false;
+}
+
+/* =============================================================================
  * Public API
  * ============================================================================= */
 
@@ -305,6 +474,11 @@ int document_chunk_text(const char *text, const chunk_config_t *config, chunk_re
    int target_chars = cfg.target_tokens * 4;
    int max_chars = cfg.max_tokens * 4;
    int overlap_chars = cfg.overlap_tokens * 4;
+
+   /* Structured formats (YAML sequence / CSV) get one record per chunk so a hit
+    * doesn't land mid-record. Falls through to prose chunking when not detected. */
+   if (chunk_structured(text, text_len, max_chars, out))
+      return SUCCESS;
 
    /* Step 1: Split into paragraphs */
    text_span_t *paragraphs = NULL;

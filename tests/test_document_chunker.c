@@ -21,10 +21,12 @@
  * Unit tests for document_chunker.c
  */
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "dawn_error.h"
 #include "tools/document_chunker.h"
 #include "unity.h"
 
@@ -225,6 +227,79 @@ static void test_single_long_word(void) {
 }
 
 /* =============================================================================
+ * Structure-aware chunking
+ * ============================================================================= */
+
+static bool chunk_contains(const chunk_result_t *r, int i, const char *needle) {
+   return i < r->count && strstr(r->chunks[i], needle) != NULL;
+}
+
+static void test_yaml_sequence_one_record_per_chunk(void) {
+   const char *yaml = "- id:\n"
+                      "    bioguide: A000001\n"
+                      "  name:\n"
+                      "    first: Alice\n"
+                      "    last: Adams\n"
+                      "  bio:\n"
+                      "    birthday: '1975-01-01'\n"
+                      "- id:\n"
+                      "    bioguide: B000002\n"
+                      "  name:\n"
+                      "    first: Bob\n"
+                      "    last: Brown\n"
+                      "  bio:\n"
+                      "    birthday: '1980-05-05'\n"
+                      "- id:\n"
+                      "    bioguide: C000003\n"
+                      "  name:\n"
+                      "    first: Carol\n"
+                      "    last: Clark\n"
+                      "  bio:\n"
+                      "    birthday: '1965-09-09'\n";
+   chunk_result_t r;
+   TEST_ASSERT_EQUAL(SUCCESS, document_chunk_text(yaml, NULL, &r));
+   TEST_ASSERT_EQUAL_MESSAGE(3, r.count, "one chunk per YAML record");
+   /* Each chunk holds exactly one person's name AND birthday together. */
+   TEST_ASSERT_TRUE_MESSAGE(chunk_contains(&r, 0, "Adams") && chunk_contains(&r, 0, "1975"),
+                            "record 0 has name + birthday in one chunk");
+   TEST_ASSERT_TRUE_MESSAGE(chunk_contains(&r, 2, "Clark") && chunk_contains(&r, 2, "1965"),
+                            "record 2 has name + birthday in one chunk");
+   TEST_ASSERT_FALSE_MESSAGE(chunk_contains(&r, 0, "Brown"), "record 0 does not bleed into Bob");
+   chunk_result_free(&r);
+}
+
+static void test_csv_header_plus_row_per_chunk(void) {
+   const char *csv = "name,year,party\n"
+                     "Alice,1975,D\n"
+                     "Bob,1980,R\n"
+                     "Carol,1965,I\n";
+   chunk_result_t r;
+   TEST_ASSERT_EQUAL(SUCCESS, document_chunk_text(csv, NULL, &r));
+   TEST_ASSERT_EQUAL_MESSAGE(3, r.count, "one chunk per CSV data row (header excluded as a row)");
+   /* Each chunk is self-describing: carries the header + its row. */
+   TEST_ASSERT_TRUE_MESSAGE(chunk_contains(&r, 0, "name,year,party") &&
+                                chunk_contains(&r, 0, "Alice"),
+                            "row chunk carries header + values");
+   TEST_ASSERT_TRUE_MESSAGE(chunk_contains(&r, 2, "Carol") && chunk_contains(&r, 2, "1965"),
+                            "last row present");
+   chunk_result_free(&r);
+}
+
+static void test_prose_with_bullets_not_mis_split(void) {
+   /* Two bullets is below the YAML threshold (>=3) and prose-dominated — must
+    * fall through to prose chunking, NOT one-chunk-per-dash. */
+   const char *prose = "Here is my short shopping list for the week.\n"
+                       "- milk\n"
+                       "- eggs\n";
+   chunk_result_t r;
+   TEST_ASSERT_EQUAL(SUCCESS, document_chunk_text(prose, NULL, &r));
+   TEST_ASSERT_EQUAL_MESSAGE(1, r.count, "small prose stays a single chunk, not split per bullet");
+   TEST_ASSERT_TRUE_MESSAGE(chunk_contains(&r, 0, "milk") && chunk_contains(&r, 0, "eggs"),
+                            "both bullets in the same chunk");
+   chunk_result_free(&r);
+}
+
+/* =============================================================================
  * Main
  * ============================================================================= */
 
@@ -240,5 +315,8 @@ int main(void) {
    RUN_TEST(test_token_estimation);
    RUN_TEST(test_whitespace_only);
    RUN_TEST(test_single_long_word);
+   RUN_TEST(test_yaml_sequence_one_record_per_chunk);
+   RUN_TEST(test_csv_header_plus_row_per_chunk);
+   RUN_TEST(test_prose_with_bullets_not_mis_split);
    return UNITY_END();
 }
