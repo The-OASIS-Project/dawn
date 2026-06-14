@@ -369,6 +369,23 @@ static bool is_dangerous_tool(const char *upstream_name) {
    return false;
 }
 
+/* Tools intentionally NOT exposed to the LLM because a native DAWN tool already
+ * covers them with cleaner output. cbm's list_projects duplicates the native
+ * `code_project list` (clean names + per-user visibility scoping), so hide it to
+ * avoid the dual-tool confusion. Internal callers (e.g. the namemap capture) use
+ * mcp_bridge_call_tool, which bypasses the registry, so they are unaffected. */
+static bool is_hidden_tool(const char *alias, const char *upstream_name) {
+#ifdef DAWN_ENABLE_CODE_PROJECTS
+   if (strcmp(alias, "cbm") == 0 && strcmp(upstream_name, "list_projects") == 0) {
+      return true;
+   }
+#else
+   (void)alias;
+   (void)upstream_name;
+#endif
+   return false;
+}
+
 /* Register every tool from a connected server's cached tools/list result. */
 static void register_server_tools(const char *alias, mcp_client_t *client) {
    const char *tools_json = mcp_client_tools_json(client);
@@ -397,6 +414,11 @@ static void register_server_tools(const char *alias, mcp_client_t *client) {
       }
       const char *upstream = json_object_get_string(name_obj);
       if (upstream == NULL || upstream[0] == '\0') {
+         continue;
+      }
+      if (is_hidden_tool(alias, upstream)) {
+         OLOG_INFO("MCP bridge: hiding '%s/%s' from the LLM (covered by native code_project)",
+                   alias, upstream);
          continue;
       }
       struct json_object *desc_obj = NULL;
