@@ -1,0 +1,12 @@
+/var/log/dawn/cbm-mcp.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    # copytruncate (not HUP): mcp-proxy/uvicorn does not reopen its log on SIGHUP
+    # the way the dawn daemon does, so truncate-in-place after copying.
+    copytruncate
+    create 0640 dawn dawn
+}

@@ -1,0 +1,49 @@
+[Unit]
+Description=Codebase Memory (cbm) MCP server via mcp-proxy SSE bridge for DAWN
+Documentation=https://github.com/DeusData/codebase-memory-mcp
+After=network.target
+
+[Service]
+Type=simple
+User=dawn
+Group=dawn
+WorkingDirectory=/var/lib/dawn
+
+Environment="HOME=/var/lib/dawn"
+EnvironmentFile=/usr/local/etc/cbm-mcp/cbm-mcp.conf
+
+# mcp-proxy runs the stdio cbm binary as its OWN child and re-exposes it over SSE
+# on ${HOST}:${PORT}/sse — the transport DAWN's MCP bridge connects to. (DAWN
+# never spawns cbm itself; the adapter owns that child.) cbm's own settings
+# (cache dir, log level, optional worker count) are forwarded to the child via -e.
+# The /bin/sh wrapper expands the EnvironmentFile vars and supports the optional
+# CBM_WORKERS arg, mirroring services/llama-server/llama-server.service.
+ExecStart=/bin/sh -c 'exec "${MCP_PROXY}" \
+  --host "${HOST}" \
+  --port "${PORT}" \
+  -e CBM_CACHE_DIR "${CBM_CACHE_DIR}" \
+  -e CBM_LOG_LEVEL "${CBM_LOG_LEVEL}" \
+  ${CBM_WORKERS:+-e CBM_WORKERS "${CBM_WORKERS}"} \
+  -- "${CBM_BIN}"'
+
+# Logging (shares /var/log/dawn with dawn-server; rotated by cbm-mcp logrotate)
+StandardOutput=append:/var/log/dawn/cbm-mcp.log
+StandardError=append:/var/log/dawn/cbm-mcp.log
+
+# Restart policy
+Restart=on-failure
+RestartSec=10s
+StartLimitInterval=5min
+StartLimitBurst=3
+
+# Security hardening. cbm only READS the clone tree (/var/lib/dawn/source) and
+# WRITES its graph cache; ProtectSystem=strict leaves the whole FS read-only
+# except the explicitly listed ReadWritePaths.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/dawn/cbm-cache /var/log/dawn
+
+[Install]
+WantedBy=multi-user.target
