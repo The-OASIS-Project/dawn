@@ -378,6 +378,7 @@ if(DAWN_ENABLE_CODE_PROJECTS)
         src/tools/code_graph_provider_cbm.c
         src/tools/code_project_db.c
         src/tools/code_project_git.c
+        src/tools/code_project_namemap.c
         src/tools/code_project_service.c
         src/tools/code_project_tool.c
         src/auth/admin_socket_code_project.c)

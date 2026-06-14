@@ -91,6 +91,7 @@
 #include "tools/tool_registry.h"
 #include "tools/tools_init.h"
 #ifdef DAWN_ENABLE_MCP_BRIDGE_TOOL
+#include "auth/auth_db_mcp.h"
 #include "tools/mcp_bridge.h"
 #endif
 #ifdef DAWN_ENABLE_CODE_PROJECTS
@@ -2373,10 +2374,25 @@ mqtt_disabled:
       OLOG_ERROR("Failed to expand data_dir path: %s", g_config.paths.data_dir);
    }
    snprintf(auth_db_path, sizeof(auth_db_path), "%s/auth.db", expanded_data_dir);
-   if (auth_db_init(auth_db_path) != AUTH_DB_SUCCESS) {
+   bool auth_db_ready = (auth_db_init(auth_db_path) == AUTH_DB_SUCCESS);
+   if (!auth_db_ready) {
       OLOG_ERROR("Failed to initialize database - memory system disabled");
       OLOG_ERROR("  Hint: Check file permissions on %s", expanded_data_dir);
    }
+
+#ifdef DAWN_ENABLE_MCP_BRIDGE_TOOL
+   /* Bootstrap MCP access: grant every admin access to each CONFIGURED MCP server
+    * so operators have the bridged tools out of the box. This must run AFTER
+    * auth_db_init (the DB has to be open) — the bridge init in tools_register_all()
+    * runs much earlier in startup, so the grant cannot live there. Keying on
+    * configured (not merely connected) servers means admin access doesn't depend
+    * on whether the server was up at boot. */
+   if (auth_db_ready) {
+      for (int i = 0; i < g_config.mcp.server_count; i++) {
+         auth_db_mcp_grant_all_admins(g_config.mcp.servers[i].alias);
+      }
+   }
+#endif
 
    /* OTA subsystem (after the DB is ready — it reconciles device state).
     * Non-fatal: a failure just leaves OTA serving disabled. */

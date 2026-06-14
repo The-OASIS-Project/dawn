@@ -49,6 +49,23 @@
 
 #ifdef DAWN_ENABLE_CODE_PROJECTS
 #include "tools/code_project_db.h"
+#include "tools/code_project_namemap.h"
+
+/* Translate one clean identifier arg (LLM namespace) to cbm's path-derived graph
+ * namespace in place. Only `project` and `qualified_name` carry the slug; bare
+ * symbol names (function_name) and search patterns are left untouched. */
+static void namemap_translate_arg(struct json_object *args, const char *key) {
+   struct json_object *v = NULL;
+   if (!json_object_object_get_ex(args, key, &v) || !json_object_is_type(v, json_type_string)) {
+      return;
+   }
+   const char *clean = json_object_get_string(v);
+   char graph[CONFIG_PATH_MAX];
+   code_project_namemap_to_graph(clean, graph, sizeof(graph));
+   if (graph[0] != '\0' && strcmp(graph, clean) != 0) {
+      json_object_object_add(args, key, json_object_new_string(graph)); /* replaces existing key */
+   }
+}
 #endif
 
 /* One registered bridged tool. `enabled` MUST be first: it doubles as the
@@ -208,8 +225,9 @@ static char *mcp_bridge_dispatch(mcp_slot_t *slot,
 #ifdef DAWN_ENABLE_CODE_PROJECTS
    /* Auto-fill `project` from the session's active project for cbm tools when the
     * LLM omitted it, after re-checking the user can still see that project
-    * (sec-H4 per-call visibility). NOTE: assumes cbm accepts/ignores a "project"
-    * arg — verify against the cbm tool schema. */
+    * (sec-H4 per-call visibility). Then translate the LLM's clean identifiers
+    * into cbm's path-derived namespace so the on-disk slug/paths never have to be
+    * known (or seen) by the LLM (the result is scrubbed symmetrically below). */
    if (strcmp(slot->server_alias, "cbm") == 0) {
       struct json_object *existing = NULL;
       if (!json_object_object_get_ex(args, "project", &existing)) {
@@ -223,6 +241,8 @@ static char *mcp_bridge_dispatch(mcp_slot_t *slot,
             json_object_object_add(args, "project", json_object_new_string(active));
          }
       }
+      namemap_translate_arg(args, "project");
+      namemap_translate_arg(args, "qualified_name");
    }
 #endif
 
@@ -237,6 +257,18 @@ static char *mcp_bridge_dispatch(mcp_slot_t *slot,
       *should_respond = 1;
    }
    if (rc == SUCCESS && result != NULL) {
+#ifdef DAWN_ENABLE_CODE_PROJECTS
+      /* Strip cbm's graph-name prefix and absolute source_root paths out of the
+       * result so no slug or filesystem layout reaches the LLM (symmetric with
+       * the outbound translation above). */
+      if (strcmp(slot->server_alias, "cbm") == 0) {
+         char *scrubbed = code_project_namemap_scrub(result);
+         if (scrubbed != NULL) {
+            free(result);
+            result = scrubbed;
+         }
+      }
+#endif
       return result;
    }
    free(result);
@@ -445,10 +477,21 @@ int mcp_bridge_init(void) {
       s_server_count++;
 
       register_server_tools(srv->alias, client);
-      auth_db_mcp_grant_all_admins(srv->alias); /* operators have access out of the box */
+      /* Admin access bootstrap (auth_db_mcp_grant_all_admins) intentionally does
+       * NOT run here: mcp_bridge_init() executes during tools_register_all(),
+       * before auth_db_init(), so the grant would hit a closed DB. dawn.c runs it
+       * after auth_db_init() for every configured server instead. */
    }
 
    OLOG_INFO("MCP bridge: initialized with %d connected server(s)", s_server_count);
+
+#ifdef DAWN_ENABLE_CODE_PROJECTS
+   /* Capture cbm's path-derived graph-name prefix now that the client is
+    * connected, so the name-translation boundary works on the first cbm tool
+    * call after a restart (projects already indexed). Refreshed post-index. */
+   code_project_namemap_capture();
+#endif
+
    return SUCCESS;
 }
 

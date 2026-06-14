@@ -43,6 +43,7 @@
 #include "tools/code_graph_provider.h"
 #include "tools/code_project_db.h"
 #include "tools/code_project_git.h"
+#include "tools/code_project_namemap.h"
 #include "tools/url_fetcher.h"
 
 #define CP_JOB_QUEUE_MAX 32
@@ -188,6 +189,9 @@ static void worker_do_index(const code_project_t *p) {
       return;
    }
    code_project_db_set_indexed_at(p->id, time(NULL));
+   /* Refresh the cbm name-translation prefix: this may be the first indexed
+    * project, in which case the bridge had nothing to capture from at startup. */
+   code_project_namemap_capture();
    set_status(p->id, "ready", "");
 }
 

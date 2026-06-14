@@ -198,9 +198,11 @@ dawn_add_unit_test(test_mcp_bridge
            ${SRC_ROOT}/src/tools/mcp_transport_http_sse.c
            ${SRC_ROOT}/src/llm/sse_parser.c
            ${SRC_ROOT}/src/auth/auth_db_mcp.c
-           # code_project_db: the bridge auto-fill (#ifdef DAWN_ENABLE_CODE_PROJECTS,
-           # active via the global define) references code_project_db_check_visible.
+           # code_project_db + code_project_namemap: the bridge's cbm path
+           # (#ifdef DAWN_ENABLE_CODE_PROJECTS, active via the global define)
+           # references code_project_db_check_visible and the namemap translation.
            ${SRC_ROOT}/src/tools/code_project_db.c
+           ${SRC_ROOT}/src/tools/code_project_namemap.c
            ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer
            ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
