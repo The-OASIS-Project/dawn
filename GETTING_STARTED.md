@@ -638,6 +638,15 @@ home_assistant_token = "your-long-lived-access-token"
 
 Then configure the HA connection URL in the WebUI admin panel (Settings → Home Assistant).
 
+### Code Projects (Coding Harness)
+
+Let the assistant answer questions about your source code by indexing repositories
+into a code graph. Requires the external **cbm** (`codebase-memory-mcp`) server
+running alongside DAWN, the `DAWN_ENABLE_CODE_PROJECTS` build flag, and
+`[code_projects] enabled = true`. Full setup — cbm service, import vs. link-local,
+branch tracking, refresh/rebuild, permissions/sandbox, and sharing with a coding
+assistant — is in **[docs/CODING_PROJECTS.md](docs/CODING_PROJECTS.md)**.
+
 ### JavaScript-Heavy Sites (FlareSolverr)
 
 For fetching content from sites that block simple requests, DAWN supports [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) as a headless browser proxy.

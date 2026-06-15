@@ -152,9 +152,12 @@ The same cbm server can back both Friday and a developer-side coding assistant, 
 they share one graph store. Point the assistant's MCP client at the same SSE
 endpoint (`http://localhost:9750/sse`). It's safe (per-call project scoping, no
 cross-contamination); the only caveat is that a long index on one side briefly
-blocks the other (single shared process). Full details, including the
-read-access/sandbox requirements and the second-instance option: see
-[CODING_HARNESS_CBM_SHARING.md](CODING_HARNESS_CBM_SHARING.md).
+blocks the other (single shared process). If that latency matters, run a second
+`mcp-proxy` + cbm instance on another port pointed at the same `CBM_CACHE_DIR`
+(separate process, WAL-safe). The read-access/sandbox requirements are the same as
+§4 above. Full deep-dive (concurrency analysis, second-instance setup) lives in the
+[atlas dawn archive](https://github.com/The-OASIS-Project/atlas/tree/main/dawn/archive)
+(`CODING_HARNESS_CBM_SHARING.md`).
 
 ---
 

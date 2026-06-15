@@ -224,6 +224,7 @@ These features are not required but extend what DAWN can do. Each links to its s
 | **Messaging Channels** | Chat with DAWN from Telegram, Slack, Discord, or SMS | [docs/MESSAGING_CHANNELS_SETUP.md](docs/MESSAGING_CHANNELS_SETUP.md) |
 | **Google OAuth** | Connect Google Calendar and Gmail via OAuth 2.0 (no app password needed) | [docs/GOOGLE_OAUTH_SETUP.md](docs/GOOGLE_OAUTH_SETUP.md) |
 | **Home Assistant** | Control smart home devices by voice | [docs/HOMEASSISTANT_SETUP.md](docs/HOMEASSISTANT_SETUP.md) |
+| **Code Projects** | Index repositories so the assistant can answer questions about your code (via the external cbm code-graph server) | [docs/CODING_PROJECTS.md](docs/CODING_PROJECTS.md) |
 | **SearXNG Web Search** | Privacy-focused voice-activated web search | [GETTING_STARTED.md — SearXNG](GETTING_STARTED.md#searxng-setup-for-web-search) |
 | **Plex Music Source** | Unified music library with local + Plex tracks | [GETTING_STARTED.md — Plex](GETTING_STARTED.md#plex-music-source) |
 | **FlareSolverr** | Fetch JavaScript-heavy web pages | [GETTING_STARTED.md — FlareSolverr](GETTING_STARTED.md#javascript-heavy-sites-flaresolverr) |
@@ -250,6 +251,7 @@ These features are not required but extend what DAWN can do. Each links to its s
 | **[docs/OTA_DESIGN.md](docs/OTA_DESIGN.md)** | Server→satellite over-the-air update system (design + operator guide) |
 | **[docs/GOOGLE_OAUTH_SETUP.md](docs/GOOGLE_OAUTH_SETUP.md)** | Google OAuth 2.0 setup for Calendar and Email |
 | **[docs/TOOL_DEVELOPMENT_GUIDE.md](docs/TOOL_DEVELOPMENT_GUIDE.md)** | Guide for adding new LLM tools |
+| **[docs/CODING_PROJECTS.md](docs/CODING_PROJECTS.md)** | Code Projects (coding harness): import/link repos + cbm server setup |
 | **[atlas archive](https://github.com/The-OASIS-Project/atlas/tree/main/dawn/archive)** | Historical design docs (memory, RAG, user auth, plan executor, scheduler, image search, CalDAV, email, etc.) |
 | **[services/llama-server/README.md](services/llama-server/README.md)** | Local LLM service setup |
 | **[test_recordings/BENCHMARK_RESULTS.md](test_recordings/BENCHMARK_RESULTS.md)** | ASR performance benchmarks |
