@@ -40,11 +40,12 @@ HARNESS_GLOBS=(
    'auth_db_mcp.*'
    'admin_socket_mcp.*'
    'admin_socket_code_project.*'
-   'auth_db_migrations_v55.*'
-   'auth_db_migrations_v56.*'
-   'dawn_admin_mcp.*'
-   'dawn_admin_code_project.*'
-   'webui_projects.*'
+   'auth_db_migrations_v64.*'
+   'auth_db_migrations_v65.*'
+   'auth_db_migrations_v66.*'
+   'webui_code_projects.*'
+   'main.*'          # dawn-admin CLI: mcp + code-project subcommands
+   'socket_client.*' # dawn-admin: admin_client_mcp_* / _code_proj_* clients
 )
 
 # Forbidden process-creation / management primitives (call syntax only).
@@ -63,11 +64,32 @@ if [ ${#files[@]} -eq 0 ]; then
    exit 0
 fi
 
+# Strip C comments (multi-line /* */ and // line) while preserving line numbers,
+# so prose like "from daemon (...)" in a doc comment can't false-positive on the
+# call-syntax patterns below. The `inblk` state persists across lines.
+strip_comments() {
+   awk '
+      {
+         line = $0; out = ""; i = 1; L = length(line);
+         while (i <= L) {
+            c2 = substr(line, i, 2);
+            if (inblk) {
+               if (c2 == "*/") { inblk = 0; i += 2 } else { i++ }
+            } else if (c2 == "/*") {
+               inblk = 1; i += 2;
+            } else if (c2 == "//") {
+               break;  # rest of the line is a comment
+            } else {
+               out = out substr(line, i, 1); i++;
+            }
+         }
+         print out;
+      }' "$1"
+}
+
 violations=0
 for f in "${files[@]}"; do
-   # Blank out single-line /* */ then // comments (preserves line numbers),
-   # then match call syntax.
-   hits="$(sed -e 's:/\*[^*]*\*/::g' -e 's://.*$::' "$f" | grep -nE "$FORBIDDEN" || true)"
+   hits="$(strip_comments "$f" | grep -nE "$FORBIDDEN" || true)"
    if [ -n "$hits" ]; then
       echo "VIOLATION in $f:"
       printf '%s\n' "$hits" | sed 's/^/  /'

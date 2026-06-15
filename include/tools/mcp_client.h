@@ -82,24 +82,28 @@ typedef struct mcp_client mcp_client_t;
 
 /**
  * @brief Create a client and its transport (idle; call mcp_client_connect()).
+ * @param opts Client + transport options (copied as needed by the client).
  * @return Heap handle, or NULL on error. Free with mcp_client_destroy().
  */
 mcp_client_t *mcp_client_create(const mcp_client_opts_t *opts);
 
-/** @brief Shut down (if needed), destroy the transport, and free the client. */
+/** @brief Shut down (if needed), destroy the transport, and free the client.
+ *  @param c Client handle (NULL is a no-op). */
 void mcp_client_destroy(mcp_client_t *c);
 
 /**
  * @brief Start the transport and run the handshake (initialize ->
  *        notifications/initialized -> tools/list). Blocking.
+ * @param c Client handle.
  * @return SUCCESS, or an MCP_ERR_* code (DISCONNECTED / PROTOCOL / DISABLED).
  */
 int mcp_client_connect(mcp_client_t *c);
 
-/** @brief Graceful shutdown: fail all pending requests, stop the transport. */
+/** @brief Graceful shutdown: fail all pending requests, stop the transport.
+ *  @param c Client handle. */
 void mcp_client_shutdown(mcp_client_t *c);
 
-/** @brief Current lifecycle state. */
+/** @brief Current lifecycle state. @param c Client handle. @return The state. */
 mcp_client_state_t mcp_client_state(mcp_client_t *c);
 
 /**
@@ -107,6 +111,7 @@ mcp_client_state_t mcp_client_state(mcp_client_t *c);
  *
  * The repeated-failure backstop latches a client to DISABLED; this is the
  * operator escape hatch (admin `mcp reset`). No-op unless DISABLED.
+ * @param c Client handle.
  */
 void mcp_client_reset(mcp_client_t *c);
 

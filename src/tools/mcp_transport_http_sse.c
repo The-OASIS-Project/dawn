@@ -32,6 +32,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h> /* strcasecmp */
 
 #include "core/curl_buffer.h"
 #include "dawn_error.h"
@@ -96,21 +97,60 @@ static const mcp_transport_vtable_t s_http_sse_vtable = {
  * "/messages?sessionId=...") against the SSE base URL into an absolute URL.
  * Uses libcurl's RFC 3986 relative-resolution. Caller frees the result.
  */
+/* True if the two CURLU handles share scheme + host + (effective) port. */
+static bool curlu_same_origin(CURLU *a, CURLU *b) {
+   char *as = NULL, *bs = NULL, *ah = NULL, *bh = NULL, *ap = NULL, *bp = NULL;
+   bool same = false;
+   if (curl_url_get(a, CURLUPART_SCHEME, &as, 0) == CURLUE_OK &&
+       curl_url_get(b, CURLUPART_SCHEME, &bs, 0) == CURLUE_OK &&
+       curl_url_get(a, CURLUPART_HOST, &ah, 0) == CURLUE_OK &&
+       curl_url_get(b, CURLUPART_HOST, &bh, 0) == CURLUE_OK &&
+       curl_url_get(a, CURLUPART_PORT, &ap, CURLU_DEFAULT_PORT) == CURLUE_OK &&
+       curl_url_get(b, CURLUPART_PORT, &bp, CURLU_DEFAULT_PORT) == CURLUE_OK) {
+      same = (strcasecmp(as, bs) == 0 && strcasecmp(ah, bh) == 0 && strcmp(ap, bp) == 0);
+   }
+   curl_free(as);
+   curl_free(bs);
+   curl_free(ah);
+   curl_free(bh);
+   curl_free(ap);
+   curl_free(bp);
+   return same;
+}
+
 static char *resolve_endpoint(const char *base_url, const char *endpoint_field) {
+   CURLU *base = curl_url();
    CURLU *h = curl_url();
-   if (h == NULL) {
+   if (base == NULL || h == NULL) {
+      curl_url_cleanup(base);
+      curl_url_cleanup(h);
       return NULL;
    }
 
    char *result = NULL;
-   if (curl_url_set(h, CURLUPART_URL, base_url, 0) == CURLUE_OK &&
+   if (curl_url_set(base, CURLUPART_URL, base_url, 0) == CURLUE_OK &&
+       curl_url_set(h, CURLUPART_URL, base_url, 0) == CURLUE_OK &&
        curl_url_set(h, CURLUPART_URL, endpoint_field, 0) == CURLUE_OK) {
-      char *full = NULL;
-      if (curl_url_get(h, CURLUPART_URL, &full, 0) == CURLUE_OK) {
-         result = strdup(full);
-         curl_free(full);
+      /* The `endpoint` event is server-controlled. curl resolves an absolute
+       * endpoint by REPLACING scheme/host, so a malicious or MITM'd server could
+       * point our authenticated POSTs (bearer Authorization header) at another
+       * origin — SSRF / token exfiltration. Require the resolved endpoint to stay
+       * same-origin as the operator-configured base URL, and reject embedded
+       * credentials. */
+      char *user = NULL;
+      bool has_user = (curl_url_get(h, CURLUPART_USER, &user, 0) == CURLUE_OK && user != NULL);
+      curl_free(user);
+      if (has_user || !curlu_same_origin(base, h)) {
+         OLOG_ERROR("MCP transport: rejecting cross-origin or credentialed SSE endpoint");
+      } else {
+         char *full = NULL;
+         if (curl_url_get(h, CURLUPART_URL, &full, 0) == CURLUE_OK) {
+            result = strdup(full);
+            curl_free(full);
+         }
       }
    }
+   curl_url_cleanup(base);
    curl_url_cleanup(h);
    return result;
 }

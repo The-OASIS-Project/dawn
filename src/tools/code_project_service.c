@@ -211,12 +211,18 @@ static bool valid_url(const char *url, const char *allowed_host_pattern) {
          ok = true; /* no allowlist configured */
       } else {
          /* Anchor the operator pattern so 'github\.com' can't match
-          * 'github.com.evil.net' or 'notgithub.com' (sec-S2). */
-         char anchored[256];
-         snprintf(anchored, sizeof(anchored), "^(%s)$", allowed_host_pattern);
+          * 'github.com.evil.net' or 'notgithub.com' (sec-S2). Buffer is sized
+          * past the config field (allowed_host_pattern[256]) + the "^(...)$"
+          * wrapper, and the snprintf return is checked: a truncated anchor could
+          * silently broaden the allowlist, so on truncation we fail closed. */
+         char anchored[256 + 8];
+         int an = snprintf(anchored, sizeof(anchored), "^(%s)$", allowed_host_pattern);
          regex_t re;
-         int crc = regcomp(&re, anchored, REG_EXTENDED | REG_NOSUB);
-         if (crc == 0) {
+         int crc = 1;
+         if (an < 0 || (size_t)an >= sizeof(anchored)) {
+            OLOG_ERROR("code_project: allowed_host_pattern too long to anchor — "
+                       "rejecting all imports (fail closed)");
+         } else if ((crc = regcomp(&re, anchored, REG_EXTENDED | REG_NOSUB)) == 0) {
             ok = (regexec(&re, host, 0, NULL, 0) == 0);
             regfree(&re);
          } else {

@@ -83,7 +83,7 @@ static int transfer_progress_cb(const git_indexer_progress *stats, void *payload
          o->progress_cb(o->progress_user, pct, "cloning");
       }
    }
-   return 0;
+   return SUCCESS;
 }
 
 static void checkout_progress_cb(const char *path, size_t completed, size_t total, void *payload) {
@@ -114,7 +114,7 @@ static int sweep_cb(const char *path, const struct stat *sb, int typeflag, struc
       if (unlink(path) != 0) {
          s_sweep_failed = 1;
       }
-      return 0;
+      return SUCCESS;
    }
    if (s_sweep_max_depth > 0 && ftw->level > (int)s_sweep_max_depth) {
       OLOG_ERROR("code_git: path depth %d exceeds cap %u: %s", ftw->level, s_sweep_max_depth, path);
@@ -135,7 +135,7 @@ static int sweep_cb(const char *path, const struct stat *sb, int typeflag, struc
          s_sweep_failed = 1;
       }
    }
-   return 0;
+   return SUCCESS;
 }
 
 /* Run the post-checkout sweep over @p path: strip symlinks (containment) and
@@ -202,7 +202,7 @@ static int remove_cb(const char *path, const struct stat *sb, int typeflag, stru
    (void)typeflag;
    (void)ftw;
    remove(path);
-   return 0;
+   return SUCCESS;
 }
 
 int code_project_git_remove(const char *local_path) {

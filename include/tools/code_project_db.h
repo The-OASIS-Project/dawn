@@ -16,8 +16,9 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * CRUD + visibility queries for the code_projects table (schema v56). Parallels
- * document_db.c; uses the shared auth_db handle.
+ * CRUD + visibility queries for the code_projects table (created in schema v65;
+ * branch/kind/graph_name columns added in v66). Parallels document_db.c; uses the
+ * shared auth_db handle.
  */
 
 #ifndef CODE_PROJECT_DB_H
@@ -64,25 +65,30 @@ typedef struct {
 /* All functions below return AUTH_DB_SUCCESS / AUTH_DB_NOT_FOUND / AUTH_DB_FAILURE
  * unless noted otherwise. */
 
-/** @brief Insert a new project row. @param id_out If non-NULL, set to the new row id. */
+/** @brief Insert a new project row (validates @p p->kind in C).
+ *  @param p      Project to insert (kind defaults to "clone" if empty).
+ *  @param id_out If non-NULL, set to the new row id. */
 int code_project_db_create(const code_project_t *p, int64_t *id_out);
 
-/** @brief Update a project's status string and optional status message. */
+/** @brief Update a project's status string and optional status message.
+ *  @param id @param status New status. @param msg Optional detail (NULL = ""). */
 int code_project_db_update_status(int64_t id, const char *status, const char *msg);
 
-/** @brief Stamp the last-indexed time on a project. */
+/** @brief Stamp the last-indexed time on a project. @param id @param when Unix time. */
 int code_project_db_set_indexed_at(int64_t id, time_t when);
 
-/** @brief Set a project's tracked branch (clone kind). Empty/NULL clears it. */
+/** @brief Set a project's tracked branch (clone kind). @param id @param branch
+ *  Branch name; empty/NULL clears it. */
 int code_project_db_set_branch(int64_t id, const char *branch);
 
-/** @brief Set a project's persisted cbm graph slug. Empty/NULL clears it. */
+/** @brief Set a project's persisted cbm graph slug. @param id @param graph_name
+ *  Slug; empty/NULL clears it. */
 int code_project_db_set_graph_name(int64_t id, const char *graph_name);
 
-/** @brief Fetch a project by id into @p out. */
+/** @brief Fetch a project by id. @param id @param out Filled on success. */
 int code_project_db_get(int64_t id, code_project_t *out);
 
-/** @brief Fetch a project by unique name into @p out. */
+/** @brief Fetch a project by unique name. @param name @param out Filled on success. */
 int code_project_db_get_by_name(const char *name, code_project_t *out);
 
 /**
@@ -109,10 +115,10 @@ int code_project_db_list_all(code_project_t *out, int max, int *count_out);
  */
 int code_project_db_check_visible(int64_t user_id, const char *name, bool *out);
 
-/** @brief Set or clear a project's global (shared) flag. */
+/** @brief Set or clear a project's global (shared) flag. @param id @param is_global */
 int code_project_db_set_global(int64_t id, bool is_global);
 
-/** @brief Delete a project row by id. */
+/** @brief Delete a project row by id. @param id */
 int code_project_db_delete(int64_t id);
 
 #endif /* CODE_PROJECT_DB_H */

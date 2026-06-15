@@ -7,7 +7,8 @@ what it is, how to set it up, and how to use it.
 
 - **What does the work:** an external, operator-launched code-graph server called
   **cbm** (`codebase-memory-mcp`). DAWN never launches it (security invariant); you
-  run it as the `cbm-mcp` service and DAWN connects over a local socket.
+  run it as the `cbm-mcp` service and DAWN connects to it over HTTP+SSE on
+  localhost (`127.0.0.1:9750`).
 - **What DAWN adds:** a project registry (import/link/refresh/rebuild/delete +
   branch tracking), a name-translation boundary that keeps your filesystem layout
   out of the LLM's view, and the WebUI + `dawn-admin` surfaces to manage it.

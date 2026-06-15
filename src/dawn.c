@@ -2389,6 +2389,12 @@ mqtt_disabled:
     * on whether the server was up at boot. */
    if (auth_db_ready) {
       for (int i = 0; i < g_config.mcp.server_count; i++) {
+         /* Skip disabled servers and empty aliases: config only requires
+          * alias/url when the server is enabled, so granting unconditionally
+          * could insert an access row with an empty alias. */
+         if (!g_config.mcp.servers[i].enabled || g_config.mcp.servers[i].alias[0] == '\0') {
+            continue;
+         }
          auth_db_mcp_grant_all_admins(g_config.mcp.servers[i].alias);
       }
    }
