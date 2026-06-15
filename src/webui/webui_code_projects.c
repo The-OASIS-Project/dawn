@@ -65,10 +65,15 @@ void handle_code_projects_list(ws_connection_t *conn, json_object *payload) {
       return;
    }
 
+   /* Admins see every project (including operator/CLI imports with user_id=0,
+    * which are neither global nor owned by any WebUI user); regular users see
+    * their own + global. Mirrors resolve_owned_or_admin's act-on-any gate. */
+   bool is_admin = conn_check_admin_quiet(conn);
    code_project_t list[CODE_PROJECTS_MAX];
    int n = 0;
-   bool ok = (code_project_db_list_visible(conn->auth_user_id, list, CODE_PROJECTS_MAX, &n) ==
-              AUTH_DB_SUCCESS);
+   bool ok = ((is_admin ? code_project_db_list_all(list, CODE_PROJECTS_MAX, &n)
+                        : code_project_db_list_visible(conn->auth_user_id, list, CODE_PROJECTS_MAX,
+                                                       &n)) == AUTH_DB_SUCCESS);
 
    json_object *response = json_object_new_object();
    json_object_object_add(response, "type", json_object_new_string("code_projects_list_response"));
@@ -85,8 +90,12 @@ void handle_code_projects_list(ws_connection_t *conn, json_object *payload) {
       json_object_object_add(p, "is_global", json_object_new_boolean(list[i].is_global));
       json_object_object_add(p, "source_url", json_object_new_string(list[i].source_url));
       json_object_object_add(p, "indexed_at", json_object_new_int64(list[i].indexed_at));
-      json_object_object_add(p, "owned",
-                             json_object_new_boolean(list[i].user_id == conn->auth_user_id));
+      json_object_object_add(p, "kind", json_object_new_string(list[i].kind));
+      json_object_object_add(p, "branch", json_object_new_string(list[i].branch));
+      /* graph_name is the internal cbm slug — deliberately not exposed. */
+      /* "owned" drives the action buttons; admins may act on any project. */
+      json_object_object_add(
+          p, "owned", json_object_new_boolean(is_admin || list[i].user_id == conn->auth_user_id));
       json_object_array_add(projects, p);
    }
    json_object_object_add(resp_payload, "projects", projects);
@@ -115,6 +124,7 @@ void handle_code_projects_import(ws_connection_t *conn, json_object *payload) {
 
    const char *url = NULL;
    const char *name = NULL;
+   const char *branch = NULL;
    bool global = false;
    if (payload) {
       json_object *o;
@@ -123,6 +133,9 @@ void handle_code_projects_import(ws_connection_t *conn, json_object *payload) {
       }
       if (json_object_object_get_ex(payload, "name", &o)) {
          name = json_object_get_string(o);
+      }
+      if (json_object_object_get_ex(payload, "branch", &o)) {
+         branch = json_object_get_string(o);
       }
       if (json_object_object_get_ex(payload, "global", &o)) {
          global = json_object_get_boolean(o);
@@ -156,7 +169,7 @@ void handle_code_projects_import(ws_connection_t *conn, json_object *payload) {
     * If the repo turns out not to exist, a code_project_import_failed event
     * toasts the user; if it exists, code_project_status_changed adds the row. */
    int64_t id = 0;
-   if (code_project_import(conn->auth_user_id, url, name, global, &id) != SUCCESS) {
+   if (code_project_import(conn->auth_user_id, url, name, branch, global, &id) != SUCCESS) {
       send_action_result(conn, "code_projects_import_response", false,
                          "Import rejected (invalid name/URL, duplicate, or blocked host).");
       return;
@@ -219,4 +232,92 @@ void handle_code_projects_delete(ws_connection_t *conn, json_object *payload) {
    bool ok = (code_project_delete(p.id) == SUCCESS);
    send_action_result(conn, "code_projects_action_response", ok,
                       ok ? "Project deleted." : "Delete failed.");
+}
+
+void handle_code_projects_rebuild(ws_connection_t *conn, json_object *payload) {
+   if (!conn_require_auth(conn)) {
+      return;
+   }
+   code_project_t p;
+   if (!resolve_owned_or_admin(conn, payload, "code_projects_action_response", &p)) {
+      return;
+   }
+   bool ok = (code_project_rebuild(p.id) == SUCCESS);
+   send_action_result(conn, "code_projects_action_response", ok,
+                      ok ? "Clean rebuild queued (may take a few minutes)." : "Rebuild failed.");
+}
+
+void handle_code_projects_set_branch(ws_connection_t *conn, json_object *payload) {
+   if (!conn_require_auth(conn)) {
+      return;
+   }
+   code_project_t p;
+   if (!resolve_owned_or_admin(conn, payload, "code_projects_action_response", &p)) {
+      return;
+   }
+   const char *branch = NULL;
+   if (payload) {
+      json_object *o;
+      if (json_object_object_get_ex(payload, "branch", &o)) {
+         branch = json_object_get_string(o);
+      }
+   }
+   if (branch == NULL || branch[0] == '\0') {
+      send_action_result(conn, "code_projects_action_response", false,
+                         "A branch name is required.");
+      return;
+   }
+   bool ok = (code_project_set_branch(p.id, branch) == SUCCESS);
+   send_action_result(conn, "code_projects_action_response", ok,
+                      ok ? "Branch set; rebuilding index (may take a few minutes)."
+                         : "Set branch failed (linked repos track their live checkout).");
+}
+
+void handle_code_projects_link(ws_connection_t *conn, json_object *payload) {
+   if (!conn_require_auth(conn)) {
+      return;
+   }
+   const dawn_config_t *cfg = config_get();
+   if (cfg == NULL || !cfg->code_projects.enabled) {
+      send_action_result(conn, "code_projects_link_response", false, "Code projects are disabled.");
+      return;
+   }
+   /* Linking an arbitrary local path exposes its file contents to the LLM — gate
+    * to admins regardless of import_user_required. */
+   if (!conn_check_admin_quiet(conn)) {
+      send_action_result(conn, "code_projects_link_response", false,
+                         "Linking a local repository is restricted to administrators.");
+      return;
+   }
+   const char *path = NULL;
+   const char *name = NULL;
+   if (payload) {
+      json_object *o;
+      if (json_object_object_get_ex(payload, "path", &o)) {
+         path = json_object_get_string(o);
+      }
+      if (json_object_object_get_ex(payload, "name", &o)) {
+         name = json_object_get_string(o);
+      }
+   }
+   if (path == NULL || path[0] == '\0') {
+      send_action_result(conn, "code_projects_link_response", false, "A local path is required.");
+      return;
+   }
+   /* Derive a name from the path's last component when absent. */
+   char derived[CODE_PROJECT_NAME_MAX] = { 0 };
+   if (name == NULL || name[0] == '\0') {
+      const char *slash = strrchr(path, '/');
+      const char *base = (slash != NULL && slash[1] != '\0') ? slash + 1 : path;
+      snprintf(derived, sizeof(derived), "%s", base);
+      name = derived;
+   }
+   int64_t id = 0;
+   if (code_project_link(conn->auth_user_id, path, name, false, &id) != SUCCESS) {
+      send_action_result(conn, "code_projects_link_response", false,
+                         "Link rejected (path not allowed, not a git repo, or duplicate name).");
+      return;
+   }
+   send_action_result(conn, "code_projects_link_response", true,
+                      "Local repository linked; indexing…");
 }

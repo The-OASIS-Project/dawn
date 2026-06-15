@@ -1169,9 +1169,39 @@ Format rules:
                <button id="code-projects-close" aria-label="Close code projects">&times;</button>
             </div>
 
-            <form class="dawn-form code-projects-import" id="code-projects-import-form" autocomplete="off">
+            <!-- Segmented toggle: two creation paths. The Link tab is admin-only
+                 (JS hides #code-projects-tab-link alongside the link form). -->
+            <div class="code-projects-tabs" role="tablist" aria-label="Add a project">
+               <button
+                  type="button"
+                  id="code-projects-tab-import"
+                  class="code-projects-tab active"
+                  role="tab"
+                  data-tab="import"
+                  aria-selected="true"
+                  aria-controls="code-projects-import-form"
+               >
+                  Import URL
+               </button>
+               <button
+                  type="button"
+                  id="code-projects-tab-link"
+                  class="code-projects-tab hidden"
+                  role="tab"
+                  data-tab="link"
+                  aria-selected="false"
+                  aria-controls="code-projects-link-form"
+               >
+                  Link local
+               </button>
+            </div>
+
+            <form
+               class="dawn-form code-projects-form"
+               id="code-projects-import-form"
+               autocomplete="off"
+            >
                <div class="form-group">
-                  <label for="code-projects-url">Import repository</label>
                   <input
                      type="text"
                      id="code-projects-url"
@@ -1183,16 +1213,58 @@ Format rules:
                   <input
                      type="text"
                      id="code-projects-name"
-                     placeholder="Name (optional — derived from URL)"
+                     placeholder="Name (optional)"
                      autocomplete="off"
                   />
                </div>
-               <label class="code-projects-global-toggle" id="code-projects-global-label">
+               <div class="form-group">
+                  <input
+                     type="text"
+                     id="code-projects-branch"
+                     placeholder="Branch (optional)"
+                     autocomplete="off"
+                  />
+               </div>
+               <label class="code-projects-global-toggle hidden" id="code-projects-global-label">
                   <input type="checkbox" id="code-projects-global-check" />
                   Share with all users (admin)
                </label>
                <div class="form-error" id="code-projects-import-error"></div>
-               <button type="submit" id="code-projects-import-btn" class="btn-primary">Import</button>
+               <div class="form-actions">
+                  <button type="submit" id="code-projects-import-btn" class="btn-primary">
+                     Import
+                  </button>
+               </div>
+            </form>
+
+            <!-- Link an existing local checkout (admin only; hidden for non-admins). -->
+            <form
+               class="dawn-form code-projects-form hidden"
+               id="code-projects-link-form"
+               autocomplete="off"
+            >
+               <div class="form-group">
+                  <input
+                     type="text"
+                     id="code-projects-link-path"
+                     placeholder="/path/to/local/repo (in allowed roots)"
+                     autocomplete="off"
+                  />
+               </div>
+               <div class="form-group">
+                  <input
+                     type="text"
+                     id="code-projects-link-name"
+                     placeholder="Name (optional)"
+                     autocomplete="off"
+                  />
+               </div>
+               <div class="form-error" id="code-projects-link-error"></div>
+               <div class="form-actions">
+                  <button type="submit" id="code-projects-link-btn" class="btn-primary">
+                     Link
+                  </button>
+               </div>
             </form>
 
             <div id="code-projects-list" class="code-projects-list">

@@ -1833,6 +1833,7 @@ static void parse_code_projects(toml_table_t *table, code_projects_config_t *con
                                              "clone_depth",
                                              "allowed_host_pattern",
                                              "default_active",
+                                             "allowed_local_roots",
                                              NULL };
    warn_unknown_keys(table, "code_projects", known_keys);
 
@@ -1847,6 +1848,31 @@ static void parse_code_projects(toml_table_t *table, code_projects_config_t *con
    PARSE_INT(table, "clone_depth", config->clone_depth);
    PARSE_STRING(table, "allowed_host_pattern", config->allowed_host_pattern);
    PARSE_STRING(table, "default_active", config->default_active);
+
+   /* allowed_local_roots: absolute dir prefixes a link-local repo may live under
+    * (empty = link-local disabled). Content-exposure boundary — see config struct. */
+   toml_array_t *roots_arr = toml_array_in(table, "allowed_local_roots");
+   if (roots_arr) {
+      int count = toml_array_nelem(roots_arr);
+      if (count > CODE_PROJECTS_MAX_LOCAL_ROOTS) {
+         OLOG_WARNING("code_projects.allowed_local_roots has %d entries, max is %d - truncating",
+                      count, CODE_PROJECTS_MAX_LOCAL_ROOTS);
+         count = CODE_PROJECTS_MAX_LOCAL_ROOTS;
+      }
+      config->allowed_local_roots_count = 0;
+      for (int i = 0; i < count; i++) {
+         toml_datum_t d = toml_string_at(roots_arr, i);
+         if (d.ok && d.u.s) {
+            strncpy(config->allowed_local_roots[config->allowed_local_roots_count], d.u.s,
+                    CONFIG_PATH_MAX - 1);
+            config->allowed_local_roots[config->allowed_local_roots_count][CONFIG_PATH_MAX - 1] =
+                '\0';
+            config->allowed_local_roots_count++;
+            free(d.u.s);
+         }
+      }
+      OLOG_INFO("Parsed %d code_projects.allowed_local_roots", config->allowed_local_roots_count);
+   }
 }
 
 int config_parse_file(const char *path, dawn_config_t *config) {

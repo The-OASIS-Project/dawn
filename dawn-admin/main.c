@@ -2434,8 +2434,9 @@ int main(int argc, char *argv[]) {
    if (strcmp(cmd, "code-project") == 0) {
       if (argc < 3) {
          fprintf(stderr,
-                 "Usage: %s code-project {list | import <url> [--name n] [--global] | "
-                 "refresh <name> | delete <name>}\n",
+                 "Usage: %s code-project {list | import <url> [--name n] [--branch b] [--global] | "
+                 "link <path> [--name n] | refresh <name> | rebuild <name> | "
+                 "set-branch <name> <branch> | delete <name>}\n",
                  argv[0]);
          return 1;
       }
@@ -2451,10 +2452,13 @@ int main(int argc, char *argv[]) {
       } else if (strcmp(subcmd, "import") == 0) {
          const char *url = NULL;
          const char *name = NULL;
+         const char *branch = NULL;
          bool global = false;
          for (int i = 3; i < argc; i++) {
             if (strcmp(argv[i], "--name") == 0 && i + 1 < argc) {
                name = argv[++i];
+            } else if (strcmp(argv[i], "--branch") == 0 && i + 1 < argc) {
+               branch = argv[++i];
             } else if (strcmp(argv[i], "--global") == 0) {
                global = true;
             } else if (argv[i][0] != '-') {
@@ -2463,7 +2467,9 @@ int main(int argc, char *argv[]) {
          }
          if (url == NULL) {
             admin_client_disconnect(fd);
-            fprintf(stderr, "Usage: %s code-project import <url> [--name n] [--global]\n", argv[0]);
+            fprintf(stderr,
+                    "Usage: %s code-project import <url> [--name n] [--branch b] [--global]\n",
+                    argv[0]);
             return 1;
          }
          /* Derive name from the URL's last path component (strip .git) if absent. */
@@ -2478,16 +2484,45 @@ int main(int argc, char *argv[]) {
             }
             name = derived;
          }
-         resp = admin_client_code_proj_import(fd, url, name, global, response, sizeof(response));
-      } else if (strcmp(subcmd, "refresh") == 0 || strcmp(subcmd, "delete") == 0) {
+         resp = admin_client_code_proj_import(fd, url, name, branch, global, response,
+                                              sizeof(response));
+      } else if (strcmp(subcmd, "link") == 0) {
+         const char *path = NULL;
+         const char *name = NULL;
+         for (int i = 3; i < argc; i++) {
+            if (strcmp(argv[i], "--name") == 0 && i + 1 < argc) {
+               name = argv[++i];
+            } else if (argv[i][0] != '-') {
+               path = argv[i];
+            }
+         }
+         if (path == NULL) {
+            admin_client_disconnect(fd);
+            fprintf(stderr, "Usage: %s code-project link <path> [--name n]\n", argv[0]);
+            return 1;
+         }
+         resp = admin_client_code_proj_link(fd, path, name, response, sizeof(response));
+      } else if (strcmp(subcmd, "set-branch") == 0) {
+         if (argc < 5) {
+            admin_client_disconnect(fd);
+            fprintf(stderr, "Usage: %s code-project set-branch <name> <branch>\n", argv[0]);
+            return 1;
+         }
+         resp = admin_client_code_proj_set_branch(fd, argv[3], argv[4], response, sizeof(response));
+      } else if (strcmp(subcmd, "refresh") == 0 || strcmp(subcmd, "rebuild") == 0 ||
+                 strcmp(subcmd, "delete") == 0) {
          if (argc < 4) {
             admin_client_disconnect(fd);
             fprintf(stderr, "Usage: %s code-project %s <name>\n", argv[0], subcmd);
             return 1;
          }
-         resp = (strcmp(subcmd, "refresh") == 0)
-                    ? admin_client_code_proj_refresh(fd, argv[3], response, sizeof(response))
-                    : admin_client_code_proj_delete(fd, argv[3], response, sizeof(response));
+         if (strcmp(subcmd, "refresh") == 0) {
+            resp = admin_client_code_proj_refresh(fd, argv[3], response, sizeof(response));
+         } else if (strcmp(subcmd, "rebuild") == 0) {
+            resp = admin_client_code_proj_rebuild(fd, argv[3], response, sizeof(response));
+         } else {
+            resp = admin_client_code_proj_delete(fd, argv[3], response, sizeof(response));
+         }
       } else {
          admin_client_disconnect(fd);
          fprintf(stderr, "Error: Unknown code-project subcommand: %s\n", subcmd);

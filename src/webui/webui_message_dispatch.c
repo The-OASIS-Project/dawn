@@ -1100,8 +1100,14 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       handle_code_projects_list(conn, payload);
    } else if (strcmp(type, "code_projects_import") == 0) {
       handle_code_projects_import(conn, payload);
+   } else if (strcmp(type, "code_projects_link") == 0) {
+      handle_code_projects_link(conn, payload);
    } else if (strcmp(type, "code_projects_refresh") == 0) {
       handle_code_projects_refresh(conn, payload);
+   } else if (strcmp(type, "code_projects_rebuild") == 0) {
+      handle_code_projects_rebuild(conn, payload);
+   } else if (strcmp(type, "code_projects_set_branch") == 0) {
+      handle_code_projects_set_branch(conn, payload);
    } else if (strcmp(type, "code_projects_delete") == 0) {
       handle_code_projects_delete(conn, payload);
    }

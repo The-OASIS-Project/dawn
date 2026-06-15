@@ -20,15 +20,20 @@
  *
  * cbm names every project by slugifying its absolute repo path
  * (/var/lib/dawn/source/echo -> "var-lib-dawn-source-echo") and prefixes every
- * qualified_name and file_path with that on-disk location. To keep the
- * filesystem layout out of the LLM's view (security) and to keep stored
- * conversations portable across a directory move, the bridge translates the cbm
- * identifier namespace at the boundary: the LLM only ever sees clean project
- * names ("echo") and project-relative paths.
+ * qualified_name with that slug. To keep the filesystem layout out of the LLM's
+ * view (security) and to keep stored conversations portable across a directory
+ * move, the bridge translates the cbm identifier namespace at the boundary: the
+ * LLM only ever sees clean DAWN project names ("echo") and project-relative paths.
  *
- * Because every project shares a single source_root, the whole mapping reduces
- * to one prefix string, captured from cbm (not computed — robust to whatever
- * slug rule cbm uses) and cached in the daemon.
+ * The mapping is per-project (DAWN clean name <-> cbm graph slug + repo path),
+ * captured from cbm's project list intersected with DAWN's own rows — so it
+ * supports multiple projects at arbitrary roots (clones AND linked local repos),
+ * not just one shared source_root. Captured from cbm (not computed — robust to
+ * whatever slug rule cbm uses) and cached in the daemon.
+ *
+ * Lock/dependency invariants: only capture() touches code_project_db (to snapshot
+ * rows; the DB lock is released before the cbm call). to_graph()/scrub() are
+ * DB-free and run on the LLM hot path. Never hold a lock across a cbm call.
  */
 
 #ifndef CODE_PROJECT_NAMEMAP_H
@@ -37,28 +42,29 @@
 #include <stddef.h>
 
 /**
- * @brief (Re)capture cbm's graph-name prefix by asking cbm for its project list
- *        and comparing a root_path under source_root to its graph name.
+ * @brief (Re)capture the per-project name map by asking cbm for its project list
+ *        and intersecting it with DAWN's rows (matched by root_path == local_path).
  *
- * Performs a cbm tools/call, so call it from the bridge-init and post-index
- * paths — never while holding the bridge slot mutex. Idempotent; a no-op when
- * cbm has no projects yet (nothing to derive the prefix from).
+ * Performs a cbm tools/call, so call it from the bridge-init and post-index/
+ * mutation paths — never while holding the bridge slot mutex. Idempotent; clears
+ * the map when DAWN has no projects.
  */
 void code_project_namemap_capture(void);
 
 /**
- * @brief Outbound: translate a clean project name or qualified name the LLM
- *        supplied into cbm's graph namespace (prepend the captured prefix).
+ * @brief Outbound: translate a clean project name or qualified_name the LLM
+ *        supplied into cbm's graph namespace.
  *
- * Writes the translated value to @p out. If no prefix is known yet, or the value
- * already carries it, @p out receives an unchanged copy.
+ * The leading token (before the first '.') is mapped clean->slug via the captured
+ * map; the remainder is passed through. If the project is unknown, @p out receives
+ * an unchanged copy (and a warning is logged) so cbm 404s visibly.
  */
 void code_project_namemap_to_graph(const char *clean_value, char *out, size_t out_sz);
 
 /**
- * @brief Inbound: return a malloc'd copy of a cbm result string with the
- *        graph-name prefix and the source_root path prefix stripped, so no slug
- *        or absolute path reaches the LLM.
+ * @brief Inbound: return a malloc'd copy of a cbm result with every known graph
+ *        slug mapped back to its clean name and every absolute repo path stripped,
+ *        so no slug or filesystem layout reaches the LLM.
  *
  * @return malloc'd scrubbed string (caller frees), or NULL on allocation failure
  *         (caller should fall back to the original result).

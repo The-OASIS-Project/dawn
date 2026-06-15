@@ -20,11 +20,16 @@
  * update/delete, plus FK CASCADE on user delete.
  */
 
+#include <sqlite3.h>
 #include <string.h>
 
 #include "auth/auth_db.h"
 #include "tools/code_project_db.h"
 #include "unity.h"
+
+/* From auth_db_migrations_v66.c (linked via AUTH_DB_SOURCES) — exercised directly
+ * to prove the ALTERs are idempotent under the hard-gating migration ladder. */
+int auth_db_migrations_v66(sqlite3 *db);
 
 static int64_t g_alice;
 static int64_t g_bob;
@@ -132,11 +137,113 @@ static void test_cascade_on_user_delete(void) {
    TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, code_project_db_get(id, &got));
 }
 
+/* branch/kind/graph_name round-trip + setters; also asserts the pre-existing
+ * columns still read correctly (read_row positional-index stability). */
+static void test_branch_kind_graph_roundtrip(void) {
+   code_project_t p = { 0 };
+   snprintf(p.name, sizeof(p.name), "proj1");
+   snprintf(p.source_url, sizeof(p.source_url), "https://github.com/o/proj1");
+   snprintf(p.local_path, sizeof(p.local_path), "/var/lib/dawn/source/proj1");
+   p.user_id = g_alice;
+   p.imported_by = g_alice;
+   snprintf(p.status, sizeof(p.status), "pending");
+   snprintf(p.branch, sizeof(p.branch), "develop");
+   snprintf(p.kind, sizeof(p.kind), "clone");
+   snprintf(p.graph_name, sizeof(p.graph_name), "var-lib-dawn-source-proj1");
+   int64_t id = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, code_project_db_create(&p, &id));
+
+   code_project_t got;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, code_project_db_get(id, &got));
+   TEST_ASSERT_EQUAL_STRING("develop", got.branch);
+   TEST_ASSERT_EQUAL_STRING("clone", got.kind);
+   TEST_ASSERT_EQUAL_STRING("var-lib-dawn-source-proj1", got.graph_name);
+   /* Old fields must still read at their original indices. */
+   TEST_ASSERT_EQUAL_STRING("proj1", got.name);
+   TEST_ASSERT_EQUAL_STRING("https://github.com/o/proj1", got.source_url);
+   TEST_ASSERT_EQUAL_STRING("/var/lib/dawn/source/proj1", got.local_path);
+   TEST_ASSERT_EQUAL_INT64(g_alice, got.user_id);
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, code_project_db_set_branch(id, "main"));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, code_project_db_set_graph_name(id, "newslug"));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, code_project_db_get(id, &got));
+   TEST_ASSERT_EQUAL_STRING("main", got.branch);
+   TEST_ASSERT_EQUAL_STRING("newslug", got.graph_name);
+}
+
+/* kind defaults to "clone" when the caller leaves it empty. */
+static void test_default_kind_clone(void) {
+   code_project_t p = { 0 };
+   snprintf(p.name, sizeof(p.name), "defk");
+   snprintf(p.source_url, sizeof(p.source_url), "https://github.com/o/defk");
+   snprintf(p.local_path, sizeof(p.local_path), "/var/lib/dawn/source/defk");
+   p.user_id = g_alice;
+   snprintf(p.status, sizeof(p.status), "pending");
+   int64_t id = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, code_project_db_create(&p, &id));
+   code_project_t got;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, code_project_db_get(id, &got));
+   TEST_ASSERT_EQUAL_STRING("clone", got.kind);
+}
+
+/* An out-of-domain kind is rejected in C (no CHECK constraint). */
+static void test_invalid_kind_rejected(void) {
+   code_project_t p = { 0 };
+   snprintf(p.name, sizeof(p.name), "badk");
+   snprintf(p.source_url, sizeof(p.source_url), "https://github.com/o/badk");
+   snprintf(p.local_path, sizeof(p.local_path), "/var/lib/dawn/source/badk");
+   p.user_id = g_alice;
+   snprintf(p.kind, sizeof(p.kind), "bogus");
+   int64_t id = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_FAILURE, code_project_db_create(&p, &id));
+}
+
+/* v66 must be re-runnable: ALTER ADD COLUMN errors on a duplicate, and the
+ * migration ladder hard-gates the version bump on failure — a non-idempotent v66
+ * would wedge the schema on the next boot. Build a v65-shape table, migrate twice,
+ * and confirm both calls succeed, the columns exist, and a pre-existing row gets
+ * the kind='clone' default. */
+static void test_v66_migration_idempotent(void) {
+   sqlite3 *db = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_open(":memory:", &db));
+   const char *v65 =
+       "CREATE TABLE code_projects (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+       "name TEXT NOT NULL UNIQUE, source_url TEXT NOT NULL, local_path TEXT NOT NULL,"
+       "user_id INTEGER, is_global INTEGER NOT NULL DEFAULT 0,"
+       "status TEXT NOT NULL DEFAULT 'pending', status_msg TEXT,"
+       "created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,"
+       "indexed_at INTEGER, imported_by INTEGER);";
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(db, v65, NULL, NULL, NULL));
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK,
+                         sqlite3_exec(db,
+                                      "INSERT INTO code_projects "
+                                      "(name,source_url,local_path,created_at,updated_at) "
+                                      "VALUES ('old','https://x/y','/p',0,0);",
+                                      NULL, NULL, NULL));
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v66(db));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v66(db)); /* re-run: must not wedge */
+
+   sqlite3_stmt *st = NULL;
+   TEST_ASSERT_EQUAL_INT(
+       SQLITE_OK,
+       sqlite3_prepare_v2(db, "SELECT kind, branch, graph_name FROM code_projects WHERE name='old'",
+                          -1, &st, NULL));
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+   TEST_ASSERT_EQUAL_STRING("clone", (const char *)sqlite3_column_text(st, 0));
+   sqlite3_finalize(st);
+   sqlite3_close(db);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_create_and_get);
    RUN_TEST(test_visibility);
    RUN_TEST(test_update_and_delete);
    RUN_TEST(test_cascade_on_user_delete);
+   RUN_TEST(test_branch_kind_graph_roundtrip);
+   RUN_TEST(test_default_kind_clone);
+   RUN_TEST(test_invalid_kind_rejected);
+   RUN_TEST(test_v66_migration_idempotent);
    return UNITY_END();
 }

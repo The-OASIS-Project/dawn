@@ -14,6 +14,8 @@
    let triggerElement = null;
    let focusTrapCleanup = null;
    let featureEnabled = false; /* [code_projects].enabled from server config */
+   let activeTab = 'import'; /* 'import' | 'link' — creation-path tab */
+   let tablist = null; /* DawnTablist binding (arrow-key/roving-tabindex a11y) */
    const callbacks = { trapFocus: null, showConfirmModal: null };
 
    /* ---- escaping -------------------------------------------------------- */
@@ -95,20 +97,45 @@
       }
    }
 
+   /* ---- creation-path tabs (Import URL | Link local) ------------------- */
+   function selectTab(which) {
+      /* The Link tab only exists for admins; ignore a request to switch to it
+       * when it's hidden (keeps non-admins on the import path). */
+      if (which === 'link' && el.tabLink && el.tabLink.classList.contains('hidden')) {
+         which = 'import';
+      }
+      activeTab = which === 'link' ? 'link' : 'import';
+      if (el.form) el.form.classList.toggle('hidden', activeTab !== 'import');
+      if (el.linkForm) el.linkForm.classList.toggle('hidden', activeTab !== 'link');
+      /* DawnTablist.sync() owns the tab buttons' .active / aria-selected / roving
+       * tabindex from getActive(). */
+      if (tablist) tablist.sync();
+   }
+
+   /* Show or clear an inline form error. `.dawn-form .form-error` is display:none
+    * until `.visible` is added (the shared primitive's contract). */
+   function setFormError(elError, msg) {
+      if (!elError) return;
+      elError.textContent = msg || '';
+      elError.classList.toggle('visible', !!msg);
+   }
+
    /* ---- actions -------------------------------------------------------- */
    function submitImport(e) {
       if (e) e.preventDefault();
       if (!wsReady()) return;
       const url = el.urlInput ? el.urlInput.value.trim() : '';
       const name = el.nameInput ? el.nameInput.value.trim() : '';
+      const branch = el.branchInput ? el.branchInput.value.trim() : '';
       const global = el.globalCheck ? !!el.globalCheck.checked : false;
-      if (el.importError) el.importError.textContent = '';
+      setFormError(el.importError, '');
       if (!url) {
-         if (el.importError) el.importError.textContent = 'A repository URL is required.';
+         setFormError(el.importError, 'A repository URL is required.');
          return;
       }
       const payload = { url: url };
       if (name) payload.name = name;
+      if (branch) payload.branch = branch;
       if (global) payload.global = true;
       DawnWS.send({ type: 'code_projects_import', payload: payload });
       setStatus('Importing…');
@@ -116,9 +143,41 @@
        * keeps the user's typed URL. */
    }
 
+   function submitLink(e) {
+      if (e) e.preventDefault();
+      if (!wsReady()) return;
+      const path = el.linkPathInput ? el.linkPathInput.value.trim() : '';
+      const name = el.linkNameInput ? el.linkNameInput.value.trim() : '';
+      setFormError(el.linkError, '');
+      if (!path) {
+         setFormError(el.linkError, 'A local path is required.');
+         return;
+      }
+      const payload = { path: path };
+      if (name) payload.name = name;
+      DawnWS.send({ type: 'code_projects_link', payload: payload });
+      setStatus('Linking…');
+   }
+
    function refreshProject(name) {
       if (!wsReady() || !name) return;
       DawnWS.send({ type: 'code_projects_refresh', payload: { name: name } });
+   }
+
+   function rebuildProject(name) {
+      if (!wsReady() || !name) return;
+      DawnWS.send({ type: 'code_projects_rebuild', payload: { name: name } });
+   }
+
+   function setBranchProject(name, currentBranch) {
+      if (!wsReady() || !name) return;
+      /* TODO: replace with styledPrompt() when that themed/focus-trapped primitive
+       * ships (Odysseus Tier-0 quick-win); native prompt breaks the panel's chrome. */
+      const branch = window.prompt('Branch to track for "' + name + '":', currentBranch || '');
+      if (branch == null) return; /* cancelled */
+      const trimmed = branch.trim();
+      if (!trimmed) return;
+      DawnWS.send({ type: 'code_projects_set_branch', payload: { name: name, branch: trimmed } });
    }
 
    function deleteProject(name) {
@@ -138,7 +197,7 @@
    function statusBadge(status) {
       const s = escapeHtml(status);
       const cls = status === 'ready' ? 'ready' : status === 'error' ? 'error' : 'pending';
-      return '<span class="code-project-badge ' + cls + '">' + s + '</span>';
+      return '<span class="dawn-badge code-project-badge ' + cls + '">' + s + '</span>';
    }
 
    function renderList(projects) {
@@ -150,20 +209,27 @@
       let html = '';
       projects.forEach((p) => {
          const name = escapeHtml(p.name);
-         const src = escapeHtml(p.source_url);
+         const isLocal = p.kind === 'local';
+         /* For a linked local repo there is no remote URL — show the kind instead. */
+         const src = escapeHtml(isLocal ? 'local repo' : p.source_url);
+         const branch = p.branch ? escapeHtml(p.branch) : '';
          const msg = p.status_msg ? escapeHtml(p.status_msg) : '';
          const owned = !!p.owned;
          html +=
             '<div class="code-project-row">' +
             '<div class="code-project-main">' +
             '<div class="code-project-name">' +
+            '<span class="code-project-name-text">' +
             name +
-            (p.is_global ? ' <span class="code-project-global">global</span>' : '') +
+            '</span>' +
+            (p.is_global ? '<span class="dawn-badge accent">global</span>' : '') +
+            (isLocal ? '<span class="dawn-badge muted">local</span>' : '') +
             '</div>' +
             '<div class="code-project-meta">' +
             statusBadge(p.status) +
-            (msg ? ' <span class="code-project-msg">' + msg + '</span>' : '') +
+            (branch ? '<span class="code-project-branch">' + branch + '</span>' : '') +
             '</div>' +
+            (msg ? '<div class="code-project-msg">' + msg + '</div>' : '') +
             '<div class="code-project-src">' +
             src +
             '</div>' +
@@ -172,9 +238,24 @@
             (owned
                ? '<button class="btn-link code-project-refresh" data-name="' +
                  name +
-                 '" title="Re-index" aria-label="Re-index ' +
+                 '" title="Re-index (fetch + incremental)" aria-label="Re-index ' +
                  name +
                  '">&#x21bb;</button>' +
+                 '<button class="btn-link code-project-rebuild" data-name="' +
+                 name +
+                 '" title="Clean rebuild" aria-label="Rebuild ' +
+                 name +
+                 '">&#x267b;</button>' +
+                 /* Branch is read-only for linked local repos (tracks the live checkout). */
+                 (isLocal
+                    ? ''
+                    : '<button class="btn-link code-project-branch-btn" data-name="' +
+                      name +
+                      '" data-branch="' +
+                      branch +
+                      '" title="Set branch" aria-label="Set branch for ' +
+                      name +
+                      '">&#x26d6;</button>') +
                  '<button class="btn-link code-project-delete" data-name="' +
                  name +
                  '" title="Delete" aria-label="Delete ' +
@@ -187,6 +268,14 @@
       el.list.innerHTML = html;
       el.list.querySelectorAll('.code-project-refresh').forEach((b) => {
          b.addEventListener('click', () => refreshProject(b.getAttribute('data-name')));
+      });
+      el.list.querySelectorAll('.code-project-rebuild').forEach((b) => {
+         b.addEventListener('click', () => rebuildProject(b.getAttribute('data-name')));
+      });
+      el.list.querySelectorAll('.code-project-branch-btn').forEach((b) => {
+         b.addEventListener('click', () =>
+            setBranchProject(b.getAttribute('data-name'), b.getAttribute('data-branch'))
+         );
       });
       el.list.querySelectorAll('.code-project-delete').forEach((b) => {
          b.addEventListener('click', () => deleteProject(b.getAttribute('data-name')));
@@ -213,7 +302,22 @@
       if (payload.ok) {
          if (el.urlInput) el.urlInput.value = '';
          if (el.nameInput) el.nameInput.value = '';
+         if (el.branchInput) el.branchInput.value = '';
          if (el.globalCheck) el.globalCheck.checked = false;
+         requestList();
+      }
+   }
+
+   function handleLinkResponse(payload) {
+      if (!payload) return;
+      setStatus('');
+      toast(
+         payload.message || (payload.ok ? 'Linked' : 'Link failed'),
+         payload.ok ? 'success' : 'error'
+      );
+      if (payload.ok) {
+         if (el.linkPathInput) el.linkPathInput.value = '';
+         if (el.linkNameInput) el.linkNameInput.value = '';
          requestList();
       }
    }
@@ -251,9 +355,16 @@
       const show = authed && featureEnabled;
       el.btn.classList.toggle('hidden', !show);
       if (!show) close();
+      const isAdmin = !!(st && st.isAdmin);
       if (el.globalLabel) {
-         el.globalLabel.classList.toggle('hidden', !(st && st.isAdmin));
+         el.globalLabel.classList.toggle('hidden', !isAdmin);
       }
+      /* Linking an arbitrary local path is admin-only — hide the tab + form, and
+       * collapse the (now single-option) segmented control. Non-admins always sit
+       * on the import path. */
+      if (el.tabLink) el.tabLink.classList.toggle('hidden', !isAdmin);
+      if (el.tabs) el.tabs.classList.toggle('single', !isAdmin);
+      if (!isAdmin) selectTab('import');
    }
 
    /* Called from dawn.js on get_config_response (fires at connect and after every
@@ -278,15 +389,35 @@
       el.form = document.getElementById('code-projects-import-form');
       el.urlInput = document.getElementById('code-projects-url');
       el.nameInput = document.getElementById('code-projects-name');
+      el.branchInput = document.getElementById('code-projects-branch');
       el.globalCheck = document.getElementById('code-projects-global-check');
       el.globalLabel = document.getElementById('code-projects-global-label');
       el.importError = document.getElementById('code-projects-import-error');
+      el.linkForm = document.getElementById('code-projects-link-form');
+      el.linkPathInput = document.getElementById('code-projects-link-path');
+      el.linkNameInput = document.getElementById('code-projects-link-name');
+      el.linkError = document.getElementById('code-projects-link-error');
+      el.tabs = document.querySelector('.code-projects-tabs');
+      el.tabImport = document.getElementById('code-projects-tab-import');
+      el.tabLink = document.getElementById('code-projects-tab-link');
 
       if (!el.btn || !el.popover) return;
 
       el.btn.addEventListener('click', toggle);
       if (el.closeBtn) el.closeBtn.addEventListener('click', close);
       if (el.form) el.form.addEventListener('submit', submitImport);
+      if (el.linkForm) el.linkForm.addEventListener('submit', submitLink);
+      /* Shared tablist helper owns clicks + arrow-key/Home/End + roving tabindex
+       * (WAI-ARIA), consistent with the other popovers. data-tab on each button
+       * carries the identifier. */
+      if (window.DawnTablist && el.tabs) {
+         tablist = window.DawnTablist.bind({
+            tabs: el.tabs.querySelectorAll('.code-projects-tab'),
+            getActive: () => activeTab,
+            onActivate: (name) => selectTab(name),
+         });
+         tablist.sync();
+      }
       document.addEventListener('keydown', (e) => {
          if (e.key === 'Escape' && isOpen) close();
       });
@@ -303,6 +434,7 @@
       setEnabled: setEnabled,
       handleListResponse: handleListResponse,
       handleImportResponse: handleImportResponse,
+      handleLinkResponse: handleLinkResponse,
       handleActionResponse: handleActionResponse,
       handleStatusChanged: handleStatusChanged,
       handleImportFailed: handleImportFailed,

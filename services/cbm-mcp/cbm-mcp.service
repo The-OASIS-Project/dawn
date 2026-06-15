@@ -45,5 +45,22 @@ ProtectHome=true
 PrivateTmp=true
 ReadWritePaths=/var/lib/dawn/cbm-cache /var/log/dawn
 
+# --- Link-local repos (opt-in; OFF by default) ------------------------------
+# To let cbm index repositories OUTSIDE /var/lib/dawn/source (the [code_projects]
+# `allowed_local_roots` feature, and Claude Code indexing its own repos through
+# the shared SSE endpoint), this sandboxed unit must be granted READ access to
+# those trees. ProtectHome=true above HIDES all of /home and DEFEATS ReadOnlyPaths,
+# so the correct pattern is ProtectHome=tmpfs + a read-only bind PER allowed root:
+#
+#   ProtectHome=tmpfs
+#   BindReadOnlyPaths=/home/<user>/code:/home/<user>/code
+#
+# Keep these in sync with [code_projects].allowed_local_roots in dawn.toml, and
+# do NOT add trees containing secrets (.env, secrets.toml) — cbm indexes file
+# CONTENTS and they become reachable by the LLM. The cbm service user (dawn) must
+# also have read permission on the files. After editing: `systemctl daemon-reload`
+# then restart this unit.
+# ----------------------------------------------------------------------------
+
 [Install]
 WantedBy=multi-user.target

@@ -221,21 +221,27 @@ typedef enum {
 
    /* Next free messaging opcode: 0xA5.  (Range ends 0xAF.) */
 
-   /* Phase 8: MCP bridge (coding harness).  Range 0xB0..0xBF reserved for the
-    * coding harness; 0xB5+ reserved for code-projects (Step 16). */
+   /* MCP bridge.  Range 0xB0..0xBF is the MCP-bridge band (code projects used to
+    * share it but moved to its own 0xD0 band; next free here: 0xB5). */
    ADMIN_MSG_MCP_LIST = 0xB0,   /**< List connected servers + tool counts */
    ADMIN_MSG_MCP_STATUS = 0xB1, /**< Detailed bridge status (same payload as LIST) */
    ADMIN_MSG_MCP_GRANT = 0xB2,  /**< Grant MCP access; payload "<username>\0<alias>" */
    ADMIN_MSG_MCP_REVOKE = 0xB3, /**< Revoke MCP access; payload "<username>\0<alias>" */
    ADMIN_MSG_MCP_RESET = 0xB4,  /**< Clear DISABLED + reconnect all servers */
 
-   /* Phase 9: code projects (coding harness). */
-   ADMIN_MSG_CODE_PROJ_LIST = 0xB5,    /**< List all projects */
-   ADMIN_MSG_CODE_PROJ_IMPORT = 0xB6,  /**< Import a repo; payload flags(1) + "name\0url" */
-   ADMIN_MSG_CODE_PROJ_REFRESH = 0xB7, /**< Re-index a project; payload: name */
-   ADMIN_MSG_CODE_PROJ_DELETE = 0xB8,  /**< Delete a project; payload: name */
+   /* Code projects (coding harness).  Own band 0xD0..0xDF — kept separate from the
+    * MCP-bridge band (0xBx) so neither subsystem starves the other.  (OTA owns
+    * 0xCx.)  Dispatch + dawn-admin reference these by name, so the numeric values
+    * are free to change while the harness has no external consumers. */
+   ADMIN_MSG_CODE_PROJ_LIST = 0xD0,       /**< List all projects */
+   ADMIN_MSG_CODE_PROJ_IMPORT = 0xD1,     /**< Import a repo; payload flags(1) + "name\0url" */
+   ADMIN_MSG_CODE_PROJ_REFRESH = 0xD2,    /**< Re-index a project; payload: name */
+   ADMIN_MSG_CODE_PROJ_DELETE = 0xD3,     /**< Delete a project; payload: name */
+   ADMIN_MSG_CODE_PROJ_REBUILD = 0xD4,    /**< Clean rebuild a project; payload: name */
+   ADMIN_MSG_CODE_PROJ_LINK = 0xD5,       /**< Link a local repo; payload "name\0path" */
+   ADMIN_MSG_CODE_PROJ_SET_BRANCH = 0xD6, /**< Set branch + rebuild; payload "name\0branch" */
 
-   /* Next free opcode: 0xB9. */
+   /* Next free code-projects opcode: 0xD7 (band ends 0xDF). */
 
    /* OTA updates (operator surface for the server→satellite OTA system; the
     * #11 operator-surface follow-ups, see docs/OTA_DESIGN.md).  Opcode range

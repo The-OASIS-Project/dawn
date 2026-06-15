@@ -56,7 +56,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 65
+#define AUTH_DB_SCHEMA_VERSION 66
 
 /* Retention periods */
 #define LOGIN_ATTEMPT_RETENTION_SEC (7 * 24 * 60 * 60) /* 7 days */
@@ -495,6 +495,14 @@ int auth_db_migrations_v64(sqlite3 *db);
  * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
  */
 int auth_db_migrations_v65(sqlite3 *db);
+
+/**
+ * @brief v66 migration: add branch / kind / graph_name columns to code_projects
+ *        (branch tracking, link-local repos, persisted cbm graph slug). Idempotent
+ *        (probes PRAGMA table_info before each ALTER); NOT gated on a feature flag.
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int auth_db_migrations_v66(sqlite3 *db);
 
 /**
  * @brief Prepare every cached sqlite3_stmt* in s_db.

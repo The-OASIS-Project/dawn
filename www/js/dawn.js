@@ -724,6 +724,10 @@
                if (typeof DawnCodeProjects !== 'undefined')
                   DawnCodeProjects.handleImportResponse(msg.payload);
                break;
+            case 'code_projects_link_response':
+               if (typeof DawnCodeProjects !== 'undefined')
+                  DawnCodeProjects.handleLinkResponse(msg.payload);
+               break;
             case 'code_projects_action_response':
                if (typeof DawnCodeProjects !== 'undefined')
                   DawnCodeProjects.handleActionResponse(msg.payload);

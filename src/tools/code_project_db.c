@@ -33,9 +33,11 @@
 #include "auth/auth_db_internal.h"
 #include "logging.h"
 
+/* Column order is load-bearing: read_row() indexes positionally. New columns are
+ * appended (indices 12/13/14) so existing indices stay stable. */
 #define CP_COLS                                                         \
    "id,name,source_url,local_path,user_id,is_global,status,status_msg," \
-   "created_at,updated_at,indexed_at,imported_by"
+   "created_at,updated_at,indexed_at,imported_by,branch,kind,graph_name"
 
 static void copy_col_text(char *dst, size_t dst_sz, sqlite3_stmt *st, int col) {
    const unsigned char *s = sqlite3_column_text(st, col);
@@ -57,15 +59,30 @@ static void read_row(sqlite3_stmt *st, code_project_t *out) {
    out->updated_at = sqlite3_column_int64(st, 9);
    out->indexed_at = sqlite3_column_int64(st, 10);
    out->imported_by = sqlite3_column_int64(st, 11);
+   copy_col_text(out->branch, sizeof(out->branch), st, 12);
+   copy_col_text(out->kind, sizeof(out->kind), st, 13);
+   copy_col_text(out->graph_name, sizeof(out->graph_name), st, 14);
+   if (out->kind[0] == '\0') {
+      /* Defensive: a NULL/empty kind (shouldn't happen — DEFAULT 'clone') reads
+       * back as clone so downstream kind checks behave. */
+      snprintf(out->kind, sizeof(out->kind), "%s", CODE_PROJECT_KIND_CLONE);
+   }
 }
 
 int code_project_db_create(const code_project_t *p, int64_t *id_out) {
    if (p == NULL) {
       return AUTH_DB_FAILURE;
    }
+   /* kind is C-validated (no CHECK constraint — see header). Empty defaults to clone. */
+   const char *kind = (p->kind[0] != '\0') ? p->kind : CODE_PROJECT_KIND_CLONE;
+   if (strcmp(kind, CODE_PROJECT_KIND_CLONE) != 0 && strcmp(kind, CODE_PROJECT_KIND_LOCAL) != 0) {
+      OLOG_ERROR("code_project_db: invalid kind '%s'", kind);
+      return AUTH_DB_FAILURE;
+   }
    const char *sql =
        "INSERT INTO code_projects (name, source_url, local_path, user_id, is_global, status, "
-       "status_msg, created_at, updated_at, imported_by) VALUES (?,?,?,?,?,?,?,?,?,?)";
+       "status_msg, created_at, updated_at, imported_by, branch, kind, graph_name) "
+       "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)";
    time_t now = time(NULL);
 
    pthread_mutex_lock(&s_db.mutex);
@@ -93,6 +110,9 @@ int code_project_db_create(const code_project_t *p, int64_t *id_out) {
    } else {
       sqlite3_bind_null(st, 10);
    }
+   sqlite3_bind_text(st, 11, p->branch, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_text(st, 12, kind, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_text(st, 13, p->graph_name, -1, SQLITE_TRANSIENT);
 
    int rc = sqlite3_step(st);
    sqlite3_finalize(st);
@@ -143,6 +163,41 @@ int code_project_db_set_indexed_at(int64_t id, time_t when) {
    sqlite3_finalize(st);
    pthread_mutex_unlock(&s_db.mutex);
    return rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+}
+
+/* UPDATE one TEXT column (+ updated_at) on a project. @col is a fixed literal
+ * (not user input); a NULL value binds the empty string. */
+static int set_text_col(int64_t id, const char *col, const char *value) {
+   /* `kind` must only ever be set at create time (it gates whether delete removes
+    * the working tree); never allow it through this generic setter. Defends the
+    * "all kind writes go through db_create" invariant. */
+   if (strcmp(col, "kind") == 0) {
+      OLOG_ERROR("code_project_db: refusing to mutate 'kind' via set_text_col");
+      return AUTH_DB_FAILURE;
+   }
+   char sql[96];
+   snprintf(sql, sizeof(sql), "UPDATE code_projects SET %s=?, updated_at=? WHERE id=?", col);
+   pthread_mutex_lock(&s_db.mutex);
+   sqlite3_stmt *st = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL) != SQLITE_OK) {
+      pthread_mutex_unlock(&s_db.mutex);
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_text(st, 1, value != NULL ? value : "", -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int64(st, 2, (sqlite3_int64)time(NULL));
+   sqlite3_bind_int64(st, 3, id);
+   int rc = sqlite3_step(st);
+   sqlite3_finalize(st);
+   pthread_mutex_unlock(&s_db.mutex);
+   return rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+}
+
+int code_project_db_set_branch(int64_t id, const char *branch) {
+   return set_text_col(id, "branch", branch);
+}
+
+int code_project_db_set_graph_name(int64_t id, const char *graph_name) {
+   return set_text_col(id, "graph_name", graph_name);
 }
 
 static int get_by(const char *where_col,

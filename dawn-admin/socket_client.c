@@ -1935,7 +1935,12 @@ admin_resp_code_t admin_client_mcp_revoke(int fd,
    return mcp_grant_revoke(fd, ADMIN_MSG_MCP_REVOKE, username, alias, response, resp_len);
 }
 
-/* ===== Code projects (0xB5-0xB8) ===== */
+/* ===== Code projects (0xD0-0xD6) ===== */
+
+/* Staging buffer for multi-field code-project payloads (flags + name + url +
+ * branch, or name + path) — larger than a single field since they pack several
+ * NUL-separated values (name 63 + url 511 + branch 128 ≈ 704 worst case). */
+#define CP_ADMIN_PAYLOAD_BUF 1024
 
 admin_resp_code_t admin_client_code_proj_list(int fd, char *response, size_t resp_len) {
    if (send_message(fd, ADMIN_MSG_CODE_PROJ_LIST, NULL, 0) != 0) {
@@ -1947,24 +1952,60 @@ admin_resp_code_t admin_client_code_proj_list(int fd, char *response, size_t res
 admin_resp_code_t admin_client_code_proj_import(int fd,
                                                 const char *url,
                                                 const char *name,
+                                                const char *branch,
                                                 bool global,
                                                 char *response,
                                                 size_t resp_len) {
    if (!url || !url[0] || !name || !name[0]) {
       return ADMIN_RESP_FAILURE;
    }
+   /* Wire: flags(1) + "name\0url[\0branch]". */
    size_t nl = strlen(name);
    size_t ul = strlen(url);
-   uint8_t buf[1024];
-   if (1 + nl + 1 + ul > sizeof(buf)) {
+   size_t bl = (branch != NULL) ? strlen(branch) : 0;
+   uint8_t buf[CP_ADMIN_PAYLOAD_BUF];
+   if (1 + nl + 1 + ul + (bl ? 1 + bl : 0) > sizeof(buf)) {
       return ADMIN_RESP_FAILURE;
    }
-   buf[0] = (uint8_t)(global ? 0x01 : 0x00);
-   memcpy(buf + 1, name, nl);
-   buf[1 + nl] = '\0';
-   memcpy(buf + 1 + nl + 1, url, ul);
-   uint16_t total = (uint16_t)(1 + nl + 1 + ul);
-   if (send_message(fd, ADMIN_MSG_CODE_PROJ_IMPORT, (const char *)buf, total) != 0) {
+   size_t off = 0;
+   buf[off++] = (uint8_t)(global ? 0x01 : 0x00);
+   memcpy(buf + off, name, nl);
+   off += nl;
+   buf[off++] = '\0';
+   memcpy(buf + off, url, ul);
+   off += ul;
+   if (bl) {
+      buf[off++] = '\0';
+      memcpy(buf + off, branch, bl);
+      off += bl;
+   }
+   if (send_message(fd, ADMIN_MSG_CODE_PROJ_IMPORT, (const char *)buf, (uint16_t)off) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
+/* Send a "first\0second" pair payload under @p opcode. */
+static admin_resp_code_t code_proj_pair(int fd,
+                                        uint8_t opcode,
+                                        const char *first,
+                                        const char *second,
+                                        char *response,
+                                        size_t resp_len) {
+   /* @first may be empty (e.g. link with a derived name); @second is required. */
+   if (first == NULL || !second || !second[0]) {
+      return ADMIN_RESP_FAILURE;
+   }
+   size_t fl = strlen(first);
+   size_t sl = strlen(second);
+   uint8_t buf[CP_ADMIN_PAYLOAD_BUF];
+   if (fl + 1 + sl > sizeof(buf)) {
+      return ADMIN_RESP_FAILURE;
+   }
+   memcpy(buf, first, fl);
+   buf[fl] = '\0';
+   memcpy(buf + fl + 1, second, sl);
+   if (send_message(fd, opcode, (const char *)buf, (uint16_t)(fl + 1 + sl)) != 0) {
       return ADMIN_RESP_SERVICE_ERROR;
    }
    return recv_text_response(fd, response, resp_len);
@@ -2010,4 +2051,29 @@ admin_resp_code_t admin_client_code_proj_delete(int fd,
                                                 char *response,
                                                 size_t resp_len) {
    return code_proj_by_name(fd, ADMIN_MSG_CODE_PROJ_DELETE, name, response, resp_len);
+}
+
+admin_resp_code_t admin_client_code_proj_rebuild(int fd,
+                                                 const char *name,
+                                                 char *response,
+                                                 size_t resp_len) {
+   return code_proj_by_name(fd, ADMIN_MSG_CODE_PROJ_REBUILD, name, response, resp_len);
+}
+
+admin_resp_code_t admin_client_code_proj_set_branch(int fd,
+                                                    const char *name,
+                                                    const char *branch,
+                                                    char *response,
+                                                    size_t resp_len) {
+   return code_proj_pair(fd, ADMIN_MSG_CODE_PROJ_SET_BRANCH, name, branch, response, resp_len);
+}
+
+admin_resp_code_t admin_client_code_proj_link(int fd,
+                                              const char *path,
+                                              const char *name,
+                                              char *response,
+                                              size_t resp_len) {
+   /* Wire: "name\0path"; name may be empty (daemon derives it from the basename). */
+   return code_proj_pair(fd, ADMIN_MSG_CODE_PROJ_LINK, name != NULL ? name : "", path, response,
+                         resp_len);
 }

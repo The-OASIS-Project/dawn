@@ -41,6 +41,7 @@ void code_project_service_shutdown(void);
  * @param requester_user_id Owner (ignored when @p global).
  * @param source_url        HTTPS clone URL (SSRF + host-allowlist checked).
  * @param desired_name      Project name (validated against the name charset).
+ * @param branch            Branch to clone, or NULL/"" for the remote HEAD.
  * @param global            Make the project visible to all users.
  * @param project_id_out    On SUCCESS, the new project id.
  * @return SUCCESS or FAILURE (invalid input, duplicate name, or disabled).
@@ -48,13 +49,52 @@ void code_project_service_shutdown(void);
 int code_project_import(int64_t requester_user_id,
                         const char *source_url,
                         const char *desired_name,
+                        const char *branch,
                         bool global,
                         int64_t *project_id_out);
 
-/** @brief Queue a re-index of an existing project. */
+/**
+ * @brief Link an existing local git checkout (no clone) and queue an index.
+ *
+ * The path is realpath'd, confirmed to be a directory inside an
+ * [code_projects].allowed_local_roots prefix, and validated as a git repo (no
+ * parent search) on the caller thread. kind='local': DAWN only ever READS the
+ * tree (never clones/removes it). global is rejected (a linked tree's file
+ * contents would otherwise reach every user); admin-gating is enforced by the
+ * caller (WebUI/admin).
+ *
+ * @param requester_user_id Owner of the new project row.
+ * @param local_path        Path to an existing checkout (realpath'd + contained).
+ * @param desired_name      Project name (validated against the name charset).
+ * @param global            Must be false; rejected for linked repos.
+ * @param project_id_out    Set to 0 (no row exists until the worker creates it).
+ * @return SUCCESS or FAILURE.
+ */
+int code_project_link(int64_t requester_user_id,
+                      const char *local_path,
+                      const char *desired_name,
+                      bool global,
+                      int64_t *project_id_out);
+
+/** @brief Queue a cheap incremental re-index (clone: fetch tracked branch).
+ *  @param project_id Row id. @return SUCCESS or FAILURE. */
 int code_project_refresh(int64_t project_id);
 
-/** @brief Delete a project: graph backend (best-effort) + clone + DB row. */
+/** @brief Queue a clean rebuild (clone: fetch; then drop the cbm graph + re-index).
+ *  @param project_id Row id. @return SUCCESS or FAILURE. */
+int code_project_rebuild(int64_t project_id);
+
+/**
+ * @brief Set a clone project's tracked branch and queue a rebuild to apply it.
+ *        Rejected for linked local projects (branch tracks the live checkout).
+ * @param project_id Row id (must be a clone-kind project).
+ * @param branch     Branch name to track (validated against libgit2 ref rules).
+ * @return SUCCESS or FAILURE.
+ */
+int code_project_set_branch(int64_t project_id, const char *branch);
+
+/** @brief Delete a project: graph backend (best-effort) + clone + DB row.
+ *         A linked local project's working tree is never removed (only the row). */
 int code_project_delete(int64_t project_id);
 
 /**

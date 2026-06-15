@@ -36,6 +36,7 @@
 #include "logging.h"
 
 #define GIT_SWEEP_MAX_FDS 16
+#define CODE_GIT_REFNAME_MAX 256 /* "refs/remotes/origin/" + branch (<=128) + slack */
 
 typedef struct {
    const code_git_clone_opts_t *opts;
@@ -135,6 +136,25 @@ static int sweep_cb(const char *path, const struct stat *sb, int typeflag, struc
       }
    }
    return 0;
+}
+
+/* Run the post-checkout sweep over @p path: strip symlinks (containment) and
+ * tally the authoritative on-disk size / file-count / depth against the caps
+ * (sec-S5). Shared by clone and fetch (fetch adds files too). Not reentrant —
+ * uses the file-scope sweep state; callers serialize on the one worker thread.
+ * @return SUCCESS or FAILURE. */
+static int run_post_checkout_sweep(const char *path,
+                                   uint8_t max_depth,
+                                   size_t max_bytes,
+                                   uint32_t max_files) {
+   s_sweep_max_depth = max_depth;
+   s_sweep_max_bytes = max_bytes;
+   s_sweep_max_files = max_files;
+   s_sweep_bytes = 0;
+   s_sweep_files = 0;
+   s_sweep_failed = 0;
+   nftw(path, sweep_cb, GIT_SWEEP_MAX_FDS, FTW_PHYS);
+   return s_sweep_failed ? FAILURE : SUCCESS;
 }
 
 /* libgit2's global init/shutdown is a process-wide refcount; pairing it
@@ -241,18 +261,195 @@ int code_project_git_clone(const code_git_clone_opts_t *opts) {
 
    /* Defense in depth: strip symlinks, enforce the path-depth cap, and tally the
     * authoritative on-disk size/file count against the caps (sec-S5). */
-   s_sweep_max_depth = opts->max_path_depth;
-   s_sweep_max_bytes = opts->max_size_bytes;
-   s_sweep_max_files = opts->max_file_count;
-   s_sweep_bytes = 0;
-   s_sweep_files = 0;
-   s_sweep_failed = 0;
-   nftw(opts->local_path, sweep_cb, GIT_SWEEP_MAX_FDS, FTW_PHYS);
-   if (s_sweep_failed) {
+   if (run_post_checkout_sweep(opts->local_path, opts->max_path_depth, opts->max_size_bytes,
+                               opts->max_file_count) != SUCCESS) {
       OLOG_ERROR("code_git: post-clone sweep failed; removing clone at %s", opts->local_path);
       code_project_git_remove(opts->local_path);
       return FAILURE;
    }
 
+   return SUCCESS;
+}
+
+/* Log the last libgit2 error (credentials redacted) under @p ctx. */
+static void log_git_error(const char *ctx, const char *path) {
+   const git_error *e = git_error_last();
+   char redacted[256];
+   redact_credentials(redacted, sizeof(redacted),
+                      (e != NULL && e->message != NULL) ? e->message : "git error");
+   OLOG_ERROR("code_git: %s for '%s' failed: %s", ctx, path != NULL ? path : "", redacted);
+}
+
+int code_project_git_fetch_checkout(const code_git_fetch_opts_t *opts) {
+   if (opts == NULL || opts->local_path == NULL || opts->branch == NULL ||
+       opts->branch[0] == '\0') {
+      return FAILURE;
+   }
+
+   git_repository *repo = NULL;
+   git_remote *remote = NULL;
+   git_object *target = NULL;
+   git_reference *local_ref = NULL;
+   int result = FAILURE;
+
+   if (git_repository_open(&repo, opts->local_path) != 0) {
+      log_git_error("repo open", opts->local_path);
+      goto done;
+   }
+   if (git_remote_lookup(&remote, repo, "origin") != 0) {
+      log_git_error("remote lookup (origin)", opts->local_path);
+      goto done;
+   }
+
+   /* Fetch with the same hardening as clone: no redirects, preserve the original
+    * shallow depth (else a shallow clone silently unshallows), and enforce the
+    * in-flight size/count caps via the shared transfer callback. */
+   code_git_clone_opts_t capopts;
+   memset(&capopts, 0, sizeof(capopts));
+   capopts.max_file_count = opts->max_file_count;
+   capopts.max_size_bytes = opts->max_size_bytes;
+   git_cb_ctx_t ctx = { .opts = &capopts, .last_transfer_pct = -1, .last_checkout_pct = -1 };
+
+   git_fetch_options fo;
+   git_fetch_options_init(&fo, GIT_FETCH_OPTIONS_VERSION);
+   fo.callbacks.transfer_progress = transfer_progress_cb;
+   fo.callbacks.payload = &ctx;
+   fo.follow_redirects = GIT_REMOTE_REDIRECT_NONE;
+   if (opts->clone_depth > 0) {
+      fo.depth = opts->clone_depth;
+   }
+   /* NULL refspec → origin's configured refspec (+refs/heads/*:refs/remotes/origin/*),
+    * so refs/remotes/origin/<branch> resolves even for a branch we didn't clone. */
+   if (git_remote_fetch(remote, NULL, &fo, NULL) != 0) {
+      log_git_error("fetch (origin)", opts->local_path);
+      goto done;
+   }
+
+   char remote_ref[CODE_GIT_REFNAME_MAX];
+   snprintf(remote_ref, sizeof(remote_ref), "refs/remotes/origin/%s", opts->branch);
+   if (git_revparse_single(&target, repo, remote_ref) != 0) {
+      OLOG_ERROR("code_git: branch '%s' not found on origin for %s", opts->branch,
+                 opts->local_path);
+      goto done;
+   }
+
+   /* Ensure a local refs/heads/<branch> exists (set_head needs it). reset(HARD)
+    * below moves it to the target, so an existing branch needs no manual update. */
+   char local_name[CODE_GIT_REFNAME_MAX];
+   snprintf(local_name, sizeof(local_name), "refs/heads/%s", opts->branch);
+   if (git_reference_lookup(&local_ref, repo, local_name) != 0) {
+      git_commit *tc = NULL;
+      if (git_object_peel((git_object **)&tc, target, GIT_OBJECT_COMMIT) != 0) {
+         log_git_error("peel target commit", opts->local_path);
+         goto done;
+      }
+      git_reference *created = NULL;
+      int brc = git_branch_create(&created, repo, opts->branch, tc, 0);
+      git_commit_free(tc);
+      if (brc != 0) {
+         log_git_error("branch create", opts->local_path);
+         goto done;
+      }
+      git_branch_set_upstream(created, opts->branch); /* best-effort tracking */
+      git_reference_free(created);
+   }
+
+   git_checkout_options cho;
+   git_checkout_options_init(&cho, GIT_CHECKOUT_OPTIONS_VERSION);
+   /* FORCE: the tree is daemon-owned; match the remote branch exactly. */
+   cho.checkout_strategy = GIT_CHECKOUT_FORCE;
+   if (git_checkout_tree(repo, target, &cho) != 0) {
+      log_git_error("checkout_tree", opts->local_path);
+      goto done;
+   }
+   if (git_repository_set_head(repo, local_name) != 0) {
+      log_git_error("set_head", opts->local_path);
+      goto done;
+   }
+   if (git_reset(repo, target, GIT_RESET_HARD, NULL) != 0) {
+      log_git_error("reset --hard", opts->local_path);
+      goto done;
+   }
+
+   /* Fetch may have added files — re-run the authoritative on-disk sweep. Leave
+    * the clone in place on failure (caller marks the project errored). */
+   if (run_post_checkout_sweep(opts->local_path, opts->max_path_depth, opts->max_size_bytes,
+                               opts->max_file_count) != SUCCESS) {
+      OLOG_ERROR("code_git: post-fetch sweep failed for %s", opts->local_path);
+      goto done;
+   }
+   result = SUCCESS;
+
+done:
+   if (local_ref != NULL) {
+      git_reference_free(local_ref);
+   }
+   if (target != NULL) {
+      git_object_free(target);
+   }
+   if (remote != NULL) {
+      git_remote_free(remote);
+   }
+   if (repo != NULL) {
+      git_repository_free(repo);
+   }
+   return result;
+}
+
+int code_project_git_current_branch(const char *local_path, char *out, size_t out_sz) {
+   if (local_path == NULL || out == NULL || out_sz == 0) {
+      return FAILURE;
+   }
+   out[0] = '\0';
+   git_repository *repo = NULL;
+   if (git_repository_open(&repo, local_path) != 0) {
+      return FAILURE;
+   }
+   int result = FAILURE;
+   git_reference *head = NULL;
+   int rc = git_repository_head(&head, repo);
+   if (rc == 0) {
+      if (git_repository_head_detached(repo) == 1) {
+         const git_oid *oid = git_reference_target(head);
+         char sha[9] = { 0 };
+         if (oid != NULL) {
+            git_oid_tostr(sha, sizeof(sha), oid);
+         }
+         snprintf(out, out_sz, "(detached %s)", sha);
+      } else {
+         const char *name = git_reference_shorthand(head);
+         snprintf(out, out_sz, "%s", name != NULL ? name : "");
+      }
+      git_reference_free(head);
+      result = SUCCESS;
+   } else if (rc == GIT_EUNBORNBRANCH) {
+      result = SUCCESS; /* valid repo, no commits yet — out stays "" */
+   }
+   git_repository_free(repo);
+   return result;
+}
+
+int code_project_git_branch_valid(const char *branch) {
+   if (branch == NULL || branch[0] == '\0') {
+      return FAILURE;
+   }
+   /* Defer to libgit2's own ref-name rules rather than hand-rolling a charset —
+    * this rejects leading '-', '..', control chars, trailing '/', etc. Needs only
+    * libgit2 init (no repo), which the daemon holds for its lifetime. */
+   char refname[CODE_GIT_REFNAME_MAX];
+   snprintf(refname, sizeof(refname), "refs/heads/%s", branch);
+   return (git_reference_is_valid_name(refname) == 1) ? SUCCESS : FAILURE;
+}
+
+int code_project_git_open_validate(const char *local_path) {
+   if (local_path == NULL || local_path[0] == '\0') {
+      return FAILURE;
+   }
+   /* NO_SEARCH: must be a repo at exactly this path, not an ancestor's .git. */
+   git_repository *repo = NULL;
+   if (git_repository_open_ext(&repo, local_path, GIT_REPOSITORY_OPEN_NO_SEARCH, NULL) != 0) {
+      return FAILURE;
+   }
+   git_repository_free(repo);
    return SUCCESS;
 }

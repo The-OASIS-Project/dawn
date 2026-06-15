@@ -1003,6 +1003,13 @@
 # # URLs with embedded credentials are rejected.
 # allowed_host_pattern = "([a-z0-9-]+\\.)?(github\\.com|gitlab\\.com|codeberg\\.org|bitbucket\\.org)"
 # default_active = ""                   # fallback active project name for new sessions
+# # Link-local repos (opt-in): absolute dir prefixes under which an EXISTING local
+# # checkout may be linked + indexed without cloning. Empty/unset = link-local
+# # disabled. SECURITY: indexed file CONTENTS reach the LLM, so list only
+# # secret-free trees; linking is admin-only and never shared globally. The cbm
+# # service sandbox must also be granted read access to these paths — see the
+# # "Link-local repos" block in services/cbm-mcp/cbm-mcp.service (keep in sync).
+# allowed_local_roots = ["/home/dev/code"]
 
 # =============================================================================
 # Secrets (separate file)

@@ -71,6 +71,10 @@ static void make_source_repo(const char *path) {
 }
 
 void setUp(void) {
+   /* Hold a libgit2 init for the whole test (refcounted, nests with the helper
+    * init/shutdown pairs) so fetch/remote ops aren't left uninitialized — mirrors
+    * the daemon's code_project_git_global_init() at startup. */
+   code_project_git_global_init();
    snprintf(g_base, sizeof(g_base), "/tmp/dawn_git_test_XXXXXX");
    TEST_ASSERT_NOT_NULL(mkdtemp(g_base));
    snprintf(g_src, sizeof(g_src), "%s/src", g_base);
@@ -79,6 +83,7 @@ void setUp(void) {
 
 void tearDown(void) {
    code_project_git_remove(g_base);
+   code_project_git_global_shutdown();
 }
 
 static int path_exists(const char *p) {
@@ -128,10 +133,92 @@ static void test_remove(void) {
    TEST_ASSERT_FALSE(path_exists(dst));
 }
 
+/* open_validate accepts a repo at exactly the path and (via NO_SEARCH) rejects a
+ * plain dir and a subdirectory of a repo (no parent-search to an ancestor .git). */
+static void test_open_validate(void) {
+   TEST_ASSERT_EQUAL_INT(SUCCESS, code_project_git_open_validate(g_src));
+   TEST_ASSERT_EQUAL_INT(FAILURE, code_project_git_open_validate(g_base)); /* plain dir */
+   char sub[400];
+   snprintf(sub, sizeof(sub), "%s/subdir", g_src);
+   TEST_ASSERT_EQUAL_INT(0, mkdir(sub, 0755));
+   TEST_ASSERT_EQUAL_INT(FAILURE, code_project_git_open_validate(sub)); /* NO_SEARCH */
+}
+
+/* Add a commit on a new branch @p branch (creating refs/heads/<branch>) to the
+ * repo at @p repo_path, introducing @p fname so a checkout is observable. */
+static void add_branch_commit(const char *repo_path, const char *branch, const char *fname) {
+   /* libgit2 is already initialized for the test's lifetime by setUp()'s
+    * code_project_git_global_init(); no nested init/shutdown needed here. */
+   git_repository *repo = NULL;
+   TEST_ASSERT_EQUAL_INT(0, git_repository_open(&repo, repo_path));
+
+   char fp[512];
+   snprintf(fp, sizeof(fp), "%s/%s", repo_path, fname);
+   FILE *f = fopen(fp, "w");
+   TEST_ASSERT_NOT_NULL(f);
+   fputs("feature\n", f);
+   fclose(f);
+
+   git_index *idx = NULL;
+   TEST_ASSERT_EQUAL_INT(0, git_repository_index(&idx, repo));
+   TEST_ASSERT_EQUAL_INT(0, git_index_add_bypath(idx, fname));
+   TEST_ASSERT_EQUAL_INT(0, git_index_write(idx));
+   git_oid tree_oid;
+   TEST_ASSERT_EQUAL_INT(0, git_index_write_tree(&tree_oid, idx));
+   git_tree *tree = NULL;
+   TEST_ASSERT_EQUAL_INT(0, git_tree_lookup(&tree, repo, &tree_oid));
+
+   git_oid parent_oid;
+   TEST_ASSERT_EQUAL_INT(0, git_reference_name_to_id(&parent_oid, repo, "HEAD"));
+   git_commit *parent = NULL;
+   TEST_ASSERT_EQUAL_INT(0, git_commit_lookup(&parent, repo, &parent_oid));
+   git_signature *sig = NULL;
+   TEST_ASSERT_EQUAL_INT(0, git_signature_now(&sig, "Test", "test@example.com"));
+
+   char ref[256];
+   snprintf(ref, sizeof(ref), "refs/heads/%s", branch);
+   git_oid commit_oid;
+   TEST_ASSERT_EQUAL_INT(0, git_commit_create_v(&commit_oid, repo, ref, sig, sig, NULL, "feat",
+                                                tree, 1, parent));
+
+   git_signature_free(sig);
+   git_commit_free(parent);
+   git_tree_free(tree);
+   git_index_free(idx);
+   git_repository_free(repo);
+}
+
+/* Clone, then fetch + check out a branch that exists only on the remote — the
+ * branch-switch path. current_branch must report it and its file must appear. */
+static void test_fetch_checkout_branch(void) {
+   char dst[400];
+   snprintf(dst, sizeof(dst), "%s/dst_fc", g_base);
+   code_git_clone_opts_t co = { .source_url = g_src, .local_path = dst, .max_path_depth = 20 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, code_project_git_clone(&co));
+
+   add_branch_commit(g_src, "feature", "FEATURE.md"); /* remote-only after the clone */
+
+   code_git_fetch_opts_t fo = { .local_path = dst,
+                                .branch = "feature",
+                                .clone_depth = 0,
+                                .max_path_depth = 20 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, code_project_git_fetch_checkout(&fo));
+
+   char br[128];
+   TEST_ASSERT_EQUAL_INT(SUCCESS, code_project_git_current_branch(dst, br, sizeof(br)));
+   TEST_ASSERT_EQUAL_STRING("feature", br);
+
+   char feat[480];
+   snprintf(feat, sizeof(feat), "%s/FEATURE.md", dst);
+   TEST_ASSERT_TRUE(path_exists(feat));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_clone_success);
    RUN_TEST(test_clone_bad_url_fails);
    RUN_TEST(test_remove);
+   RUN_TEST(test_open_validate);
+   RUN_TEST(test_fetch_checkout_branch);
    return UNITY_END();
 }

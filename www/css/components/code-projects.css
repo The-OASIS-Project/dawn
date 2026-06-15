@@ -64,40 +64,103 @@
    display: flex;
    align-items: center;
    justify-content: space-between;
-   padding: 0.75rem 1rem;
+   padding: 0.875rem 1rem;
    border-bottom: 1px solid var(--accent-border);
+   background: rgba(10, 10, 15, 0.5);
+   border-radius: 12px 12px 0 0;
 }
 
 .code-projects-header h3 {
    margin: 0;
    font-size: 1rem;
-   color: var(--text-primary);
+   font-weight: 600;
+   letter-spacing: 0.03em;
+   color: var(--accent);
 }
 
 #code-projects-close {
-   background: none;
-   border: none;
+   width: 28px;
+   height: 28px;
+   padding: 0;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   background: transparent;
+   border: 1px solid var(--text-secondary);
+   border-radius: 50%;
    color: var(--text-secondary);
-   font-size: 1.4rem;
+   font-size: 1.1rem;
    line-height: 1;
    cursor: pointer;
+   transition: all var(--transition-fast);
 }
 
 #code-projects-close:hover {
+   border-color: var(--accent);
+   color: var(--accent);
+}
+
+/* Creation-path tabs (Import URL | Link local). Underline style matched to the
+ * doc-library / scheduler popovers for consistency. (A shared `.dawn-tab` is the
+ * proper follow-up now that there are 3 consumers — deferred to avoid restyling
+ * two shipped panels here.) */
+.code-projects-tabs {
+   display: flex;
+   gap: 0.25rem;
+   padding: 0 1rem;
+   border-bottom: 1px solid var(--border-color);
+}
+
+.code-projects-tabs.single {
+   display: none; /* only one path available → hide the chrome */
+}
+
+/* This project has NO global `.hidden { display:none }` utility (see the note in
+ * doc-library.css) — every component scopes its own. These cover the tab strip,
+ * the inactive creation form, the admin-only link tab, and the global toggle. */
+.code-projects-tab.hidden,
+.code-projects-form.hidden,
+.code-projects-global-toggle.hidden {
+   display: none;
+}
+
+.code-projects-tab {
+   background: none;
+   border: none;
+   border-bottom: 2px solid transparent;
+   color: var(--text-secondary);
+   font-size: 0.85rem;
+   font-weight: 500;
+   padding: 0.5rem 0.75rem;
+   cursor: pointer;
+   transition:
+      color 0.15s,
+      border-color 0.15s;
+}
+
+.code-projects-tab:hover {
    color: var(--text-primary);
 }
 
-.code-projects-import {
-   padding: 0.75rem 1rem;
-   border-bottom: 1px solid var(--accent-border);
-   display: flex;
-   flex-direction: column;
-   gap: 0.5rem;
+.code-projects-tab.active {
+   color: var(--accent);
+   border-bottom-color: var(--accent);
 }
 
-.code-projects-import input[type='text'] {
-   width: 100%;
-   box-sizing: border-box;
+.code-projects-tab:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: -2px;
+   border-radius: 4px;
+}
+
+/* Both creation forms share this geometry (each carries .dawn-form too). */
+.code-projects-form {
+   padding: 0.75rem 1rem;
+   border-bottom: 1px solid var(--accent-border);
+   /* 0.25rem = the design's tight unit (matches .dawn-form's within-group gap);
+    * tighter than .dawn-form's 0.75rem between-field default since these stacked
+    * inputs have no labels. */
+   gap: 0.25rem;
 }
 
 .code-projects-global-toggle {
@@ -108,36 +171,37 @@
    color: var(--text-secondary);
 }
 
-.code-projects-import .form-error {
-   color: var(--error, #e06c75);
-   font-size: 0.8rem;
-   min-height: 0;
-}
-
-.code-projects-import .form-error:empty {
+.code-projects-form .form-error:empty {
    display: none;
 }
 
 .code-projects-list {
    flex: 1 1 auto;
    overflow-y: auto;
-   padding: 0.5rem 0.5rem;
+   padding: 0.25rem 0.5rem;
+   min-height: 60px;
 }
 
 .code-projects-empty {
    color: var(--text-secondary);
    text-align: center;
-   padding: 1.5rem 0.5rem;
+   padding: 1.75rem 0.5rem;
    font-size: 0.85rem;
 }
 
 .code-project-row {
+   position: relative; /* anchor for the absolute hover-action overlay */
    display: flex;
    align-items: flex-start;
    justify-content: space-between;
    gap: 0.5rem;
-   padding: 0.5rem;
+   padding: 0.6rem 0.5rem;
    border-radius: 8px;
+   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.code-project-row:last-child {
+   border-bottom: none;
 }
 
 .code-project-row:hover {
@@ -147,78 +211,140 @@
 .code-project-main {
    min-width: 0;
    flex: 1 1 auto;
+   display: flex;
+   flex-direction: column;
+   gap: 0.3rem;
 }
 
+/* Line 1: name + provenance pills. Right gutter keeps the name/pills clear of the
+ * hover-action overlay (which floats at the row's top-right); only this line needs
+ * it — the URL/meta rows sit below the 28px overlay and stay full-width. */
 .code-project-name {
+   display: flex;
+   align-items: center;
+   gap: 0.4rem;
+   padding-right: 7rem;
    color: var(--text-primary);
    font-weight: 600;
    font-size: 0.9rem;
-   white-space: nowrap;
+}
+
+.code-project-name-text {
+   min-width: 0;
    overflow: hidden;
    text-overflow: ellipsis;
+   white-space: nowrap;
 }
 
-.code-project-global {
-   font-size: 0.7rem;
-   color: var(--accent);
-   border: 1px solid var(--accent-border);
-   border-radius: 4px;
-   padding: 0 0.3rem;
-   vertical-align: middle;
-}
-
+/* Line 2: status badge + branch pill on one tidy row */
 .code-project-meta {
-   margin-top: 0.2rem;
+   display: flex;
+   align-items: center;
+   flex-wrap: wrap;
+   gap: 0.35rem;
    font-size: 0.78rem;
 }
 
-.code-project-badge {
-   display: inline-block;
-   border-radius: 4px;
-   padding: 0 0.35rem;
-   font-size: 0.72rem;
-   text-transform: uppercase;
-   letter-spacing: 0.02em;
-}
-
+/* Status badge reuses .dawn-badge; these only set the state tints. */
 .code-project-badge.ready {
    background: rgba(34, 197, 94, 0.18);
-   color: var(--success, #22c55e);
+   color: var(--success);
 }
 
 .code-project-badge.error {
    background: rgba(239, 68, 68, 0.18);
-   color: var(--error, #ef4444);
+   color: var(--error);
 }
 
 .code-project-badge.pending {
-   background: rgba(255, 255, 255, 0.1);
+   background: var(--bg-secondary);
    color: var(--text-secondary);
+   border: 1px solid var(--border-color);
 }
 
-.code-project-msg {
+.code-project-branch {
+   font-size: 0.7rem;
+   font-family: var(--font-mono);
    color: var(--text-secondary);
+   border: 1px solid var(--border-color);
+   border-radius: 4px;
+   padding: 1px 0.35rem;
+   max-width: 12rem;
+   overflow: hidden;
+   text-overflow: ellipsis;
+   white-space: nowrap;
+}
+
+/* Line 3: free-text status message — own line, clamped, dim. */
+.code-project-msg {
+   font-size: 0.75rem;
+   color: var(--text-secondary);
+   display: -webkit-box;
+   -webkit-line-clamp: 2;
+   -webkit-box-orient: vertical;
+   overflow: hidden;
 }
 
 .code-project-src {
-   margin-top: 0.2rem;
    font-size: 0.72rem;
-   color: var(--text-secondary);
-   white-space: nowrap;
-   overflow: hidden;
-   text-overflow: ellipsis;
+   color: var(--text-tertiary);
+   overflow-wrap: anywhere; /* show the full URL/path (wraps); never truncate */
 }
 
+/* Actions — a hover overlay floated over the row's top-right (mirrors the
+ * conversation list's .history-item-actions). Out of flow, so the row content
+ * (esp. the URL/path) gets the full panel width; buttons carry a solid bg so
+ * they read cleanly over whatever is behind them. */
 .code-project-actions {
    display: flex;
    gap: 0.25rem;
-   flex: 0 0 auto;
+   position: absolute;
+   top: 0.5rem;
+   right: 0.5rem;
+   z-index: 1;
+   opacity: 0;
+   transition: opacity var(--transition-fast);
+}
+
+.code-project-row:hover .code-project-actions,
+.code-project-actions:focus-within {
+   opacity: 1;
 }
 
 .code-project-actions .btn-link {
-   font-size: 1rem;
+   width: 28px;
+   height: 28px;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   padding: 0;
+   font-size: 0.95rem;
    line-height: 1;
-   padding: 0.15rem 0.35rem;
+   background: var(--bg-secondary);
+   border: 1px solid rgba(255, 255, 255, 0.15);
+   border-radius: 4px;
+   color: var(--text-secondary);
+   transition: all var(--transition-fast);
+}
+
+.code-project-actions .btn-link:hover {
+   background: var(--bg-tertiary);
+   border-color: var(--accent-dim);
+   color: var(--accent);
+}
+
+/* Delete is destructive — red on hover. */
+.code-project-actions .code-project-delete:hover {
+   background: var(--bg-tertiary);
+   border-color: rgba(239, 68, 68, 0.3);
+   color: var(--error);
+}
+
+/* Touch / no-hover: the overlay can't be revealed by hover, so keep it visible. */
+@media (hover: none) {
+   .code-project-actions {
+      opacity: 1;
+   }
 }
 
 /* Keyboard focus rings — parity with the doc-library popover controls. */
@@ -227,14 +353,14 @@
 #coding-btn:focus-visible {
    outline: 2px solid var(--accent);
    outline-offset: 2px;
-   border-radius: 4px;
+   border-radius: 6px;
 }
 
 .code-projects-status {
-   padding: 0.4rem 1rem;
+   padding: 0.5rem 1rem;
    font-size: 0.78rem;
    color: var(--text-secondary);
-   min-height: 0;
+   border-top: 1px solid var(--accent-border);
 }
 
 .code-projects-status:empty {

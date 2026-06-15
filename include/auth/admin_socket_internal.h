@@ -74,12 +74,15 @@ int handle_mcp_revoke(int client_fd, const char *payload, uint16_t payload_len);
 int handle_mcp_reset(int client_fd, const char *payload, uint16_t payload_len);
 #endif
 
-/* Code-projects handlers (admin_socket_code_project.c), opcodes 0xB5-0xB8. */
+/* Code-projects handlers (admin_socket_code_project.c), opcodes 0xD0-0xD6. */
 #ifdef DAWN_ENABLE_CODE_PROJECTS
 int handle_code_proj_list(int client_fd, const char *payload, uint16_t payload_len);
 int handle_code_proj_import(int client_fd, const char *payload, uint16_t payload_len);
 int handle_code_proj_refresh(int client_fd, const char *payload, uint16_t payload_len);
 int handle_code_proj_delete(int client_fd, const char *payload, uint16_t payload_len);
+int handle_code_proj_rebuild(int client_fd, const char *payload, uint16_t payload_len);
+int handle_code_proj_link(int client_fd, const char *payload, uint16_t payload_len);
+int handle_code_proj_set_branch(int client_fd, const char *payload, uint16_t payload_len);
 #endif
 
 /* Messaging-channels handlers (admin_socket_messaging.c).  Dispatched from

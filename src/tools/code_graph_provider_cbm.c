@@ -86,11 +86,15 @@ static int cbm_index_poll_status(const char *project_name, code_graph_status_t *
    return SUCCESS;
 }
 
-static int cbm_delete_project(const char *project_name) {
-   if (project_name == NULL || project_name[0] == '\0') {
+static int cbm_delete_project(const char *graph_name) {
+   if (graph_name == NULL || graph_name[0] == '\0') {
       return FAILURE;
    }
-   char *args = cbm_args_one("project_name", project_name);
+   /* cbm's delete_project tool keys on "project" = the path-derived graph slug
+    * (NOT DAWN's clean name). The caller resolves the slug; we just pass it under
+    * the key cbm expects. (Both the key and the value were wrong before — the
+    * delete silently no-op'd and the on-disk .db was never removed.) */
+   char *args = cbm_args_one("project", graph_name);
    if (args == NULL) {
       return FAILURE;
    }

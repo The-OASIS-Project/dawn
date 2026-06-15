@@ -1025,6 +1025,8 @@ typedef struct {
 /* =============================================================================
  * Code projects (coding harness) — [code_projects]
  * ============================================================================= */
+#define CODE_PROJECTS_MAX_LOCAL_ROOTS 8
+
 typedef struct {
    bool enabled;
    char source_root[CONFIG_PATH_MAX]; /* where repos are cloned */
@@ -1037,6 +1039,12 @@ typedef struct {
    int clone_depth;                /* 0 = full, 1 = shallow */
    char allowed_host_pattern[256]; /* POSIX ERE for the clone host allowlist */
    char default_active[64];        /* fallback active project name */
+   /* Absolute dir prefixes a link-local repo may live under. Empty = link-local
+    * disabled. This is the content-exposure boundary (indexed file CONTENTS reach
+    * the LLM); must stay in sync with the cbm-mcp.service BindReadOnlyPaths and
+    * must not contain secret-bearing trees. */
+   char allowed_local_roots[CODE_PROJECTS_MAX_LOCAL_ROOTS][CONFIG_PATH_MAX];
+   int allowed_local_roots_count;
 } code_projects_config_t;
 
 /* =============================================================================

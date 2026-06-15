@@ -32,12 +32,21 @@
 #define CODE_PROJECT_PATH_MAX 512
 #define CODE_PROJECT_STATUS_MAX 32
 #define CODE_PROJECT_MSG_MAX 256
-#define CODE_PROJECTS_MAX 64 /* upper bound on rows returned by a single list query */
+#define CODE_PROJECT_BRANCH_MAX 128
+#define CODE_PROJECT_KIND_MAX 8         /* "clone" | "local" */
+#define CODE_PROJECT_GRAPH_NAME_MAX 256 /* cbm's path-derived slug (can be long) */
+#define CODE_PROJECTS_MAX 64            /* upper bound on rows returned by a single list query */
+
+/* code_projects.kind values. Validated in C (code_project_db_create), not via a
+ * SQLite CHECK constraint (avoids a table rebuild) — all writes must go through
+ * code_project_db_create so the invariant holds. */
+#define CODE_PROJECT_KIND_CLONE "clone" /* DAWN-managed clone under source_root */
+#define CODE_PROJECT_KIND_LOCAL "local" /* linked existing local checkout (no clone) */
 
 typedef struct {
    int64_t id;
    char name[CODE_PROJECT_NAME_MAX];
-   char source_url[CODE_PROJECT_URL_MAX];
+   char source_url[CODE_PROJECT_URL_MAX]; /* "" for kind=local (no remote) */
    char local_path[CODE_PROJECT_PATH_MAX];
    int64_t user_id; /* 0 = no owner */
    bool is_global;
@@ -45,8 +54,11 @@ typedef struct {
    char status_msg[CODE_PROJECT_MSG_MAX];
    int64_t created_at;
    int64_t updated_at;
-   int64_t indexed_at;  /* 0 = never */
-   int64_t imported_by; /* 0 = unknown */
+   int64_t indexed_at;                           /* 0 = never */
+   int64_t imported_by;                          /* 0 = unknown */
+   char branch[CODE_PROJECT_BRANCH_MAX];         /* tracked branch; "" = HEAD / as-checked-out */
+   char kind[CODE_PROJECT_KIND_MAX];             /* "clone" | "local" */
+   char graph_name[CODE_PROJECT_GRAPH_NAME_MAX]; /* cbm graph slug; "" = not yet indexed */
 } code_project_t;
 
 /* All functions below return AUTH_DB_SUCCESS / AUTH_DB_NOT_FOUND / AUTH_DB_FAILURE
@@ -60,6 +72,12 @@ int code_project_db_update_status(int64_t id, const char *status, const char *ms
 
 /** @brief Stamp the last-indexed time on a project. */
 int code_project_db_set_indexed_at(int64_t id, time_t when);
+
+/** @brief Set a project's tracked branch (clone kind). Empty/NULL clears it. */
+int code_project_db_set_branch(int64_t id, const char *branch);
+
+/** @brief Set a project's persisted cbm graph slug. Empty/NULL clears it. */
+int code_project_db_set_graph_name(int64_t id, const char *graph_name);
 
 /** @brief Fetch a project by id into @p out. */
 int code_project_db_get(int64_t id, code_project_t *out);

@@ -940,6 +940,7 @@ admin_resp_code_t admin_client_code_proj_list(int fd, char *response, size_t res
 admin_resp_code_t admin_client_code_proj_import(int fd,
                                                 const char *url,
                                                 const char *name,
+                                                const char *branch,
                                                 bool global,
                                                 char *response,
                                                 size_t resp_len);
@@ -951,5 +952,19 @@ admin_resp_code_t admin_client_code_proj_delete(int fd,
                                                 const char *name,
                                                 char *response,
                                                 size_t resp_len);
+admin_resp_code_t admin_client_code_proj_rebuild(int fd,
+                                                 const char *name,
+                                                 char *response,
+                                                 size_t resp_len);
+admin_resp_code_t admin_client_code_proj_set_branch(int fd,
+                                                    const char *name,
+                                                    const char *branch,
+                                                    char *response,
+                                                    size_t resp_len);
+admin_resp_code_t admin_client_code_proj_link(int fd,
+                                              const char *path,
+                                              const char *name,
+                                              char *response,
+                                              size_t resp_len);
 
 #endif /* DAWN_ADMIN_SOCKET_CLIENT_H */

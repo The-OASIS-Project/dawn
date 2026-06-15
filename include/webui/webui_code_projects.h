@@ -32,13 +32,25 @@
  *  Response type: code_projects_list_response */
 void handle_code_projects_list(ws_connection_t *conn, json_object *payload);
 
-/** @brief Import a repo. Payload: { url, name?, global? }.
+/** @brief Import a repo. Payload: { url, name?, branch?, global? }.
  *  Response type: code_projects_import_response */
 void handle_code_projects_import(ws_connection_t *conn, json_object *payload);
 
-/** @brief Queue a re-index of a project. Payload: { name }.
+/** @brief Link an existing local checkout (admin). Payload: { path, name? }.
+ *  Response type: code_projects_link_response */
+void handle_code_projects_link(ws_connection_t *conn, json_object *payload);
+
+/** @brief Queue an incremental re-index of a project. Payload: { name }.
  *  Response type: code_projects_action_response */
 void handle_code_projects_refresh(ws_connection_t *conn, json_object *payload);
+
+/** @brief Queue a clean rebuild of a project. Payload: { name }.
+ *  Response type: code_projects_action_response */
+void handle_code_projects_rebuild(ws_connection_t *conn, json_object *payload);
+
+/** @brief Set a clone project's tracked branch + rebuild. Payload: { name, branch }.
+ *  Response type: code_projects_action_response */
+void handle_code_projects_set_branch(ws_connection_t *conn, json_object *payload);
 
 /** @brief Delete a project (owner or admin). Payload: { name }.
  *  Response type: code_projects_action_response */

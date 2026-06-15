@@ -2459,6 +2459,12 @@ static int handle_client(int client_fd) {
          return handle_code_proj_refresh(client_fd, payload, header.payload_len);
       case ADMIN_MSG_CODE_PROJ_DELETE:
          return handle_code_proj_delete(client_fd, payload, header.payload_len);
+      case ADMIN_MSG_CODE_PROJ_REBUILD:
+         return handle_code_proj_rebuild(client_fd, payload, header.payload_len);
+      case ADMIN_MSG_CODE_PROJ_LINK:
+         return handle_code_proj_link(client_fd, payload, header.payload_len);
+      case ADMIN_MSG_CODE_PROJ_SET_BRANCH:
+         return handle_code_proj_set_branch(client_fd, payload, header.payload_len);
 #endif
 
       default:
