@@ -936,6 +936,12 @@ dawn_add_unit_test(test_input_queue
    LIBS    dawn_common unity pthread
    LABEL   ci)
 
+dawn_add_unit_test(test_pending_system_msg
+   SOURCES test_pending_system_msg.c
+           ${SRC_ROOT}/src/core/pending_system_msg.c
+   LIBS    dawn_common unity pthread
+   LABEL   ci)
+
 dawn_add_unit_test(test_config_validate
    SOURCES test_config_validate.c
            ${SRC_ROOT}/src/config/config_validate.c

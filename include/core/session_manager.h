@@ -902,6 +902,23 @@ void session_add_message(session_t *session, const char *role, const char *conte
 int session_broadcast_system_message(const char *content);
 
 /**
+ * @brief Like session_broadcast_system_message() but skips the LOCAL session.
+ *
+ * The local session (sessions[0], voice pipeline) is appended-to by the main
+ * thread WITHOUT history_mutex, so a foreign thread must never write it directly
+ * (history_mutex won't serialize against the unlocked main-path append). Callers
+ * running off the main thread (e.g. the phone broadcaster on the MQTT/echo
+ * thread) use this to fan an event out to the WebUI/DAP/DAP2 surfaces — which
+ * ARE fully serialized by their own history_mutex — and defer the local write to
+ * the main loop via pending_sysmsg_push(). On-main-thread callers should keep
+ * using session_broadcast_system_message(), which includes the local session.
+ *
+ * @param content Message content (NULL/empty is a no-op).
+ * @return Number of (non-local) sessions the message was written into.
+ */
+int session_broadcast_system_message_nonlocal(const char *content);
+
+/**
  * @brief Stamp a DB row ID onto the most recent unstamped history entry for role.
  *
  * Scans backward through conversation_history for the last entry with matching

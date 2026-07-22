@@ -488,6 +488,7 @@ link_directories(${CMAKE_SOURCE_DIR})
 set(DAWN_SOURCES
     # Core files
     src/dawn.c
+    src/core/pending_system_msg.c
     src/input_queue.c
     src/mosquitto_comms.c
     src/text_to_command_nuevo.c

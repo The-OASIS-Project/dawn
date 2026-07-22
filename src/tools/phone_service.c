@@ -40,6 +40,7 @@
 #include "audio/flac_playback.h"
 #include "core/command_router.h"
 #include "core/ocp_helpers.h"
+#include "core/pending_system_msg.h"
 #include "core/session_manager.h"
 #include "core/worker_pool.h"
 #include "dawn_error.h"
@@ -315,10 +316,10 @@ static void inject_local_context(const char *message) {
    /* Session context injection is a WebUI/multi-client feature; in a WebUI-less
     * build there is no session to inject into. */
 #ifdef ENABLE_WEBUI
-   session_t *session = session_get_local();
-   if (session) {
-      session_add_message(session, "system", message);
-   }
+   /* Runs on the MQTT/echo callback thread — do NOT write sessions[0] directly.
+    * The local session's history is appended-to by the main thread without
+    * history_mutex, so defer this to the main-loop drain (single-owner). */
+   pending_sysmsg_push(message);
 #else
    (void)message;
 #endif
@@ -336,7 +337,12 @@ static void inject_local_context(const char *message) {
  */
 static void broadcast_call_context(const char *message) {
 #ifdef ENABLE_WEBUI
-   session_broadcast_system_message(message);
+   /* Runs on the MQTT/echo callback thread.  Fan out to the WebUI/DAP/DAP2
+    * surfaces immediately (those are fully serialized by their own
+    * history_mutex), but defer the LOCAL-session write to the main-loop drain —
+    * sessions[0] has an unlocked main-path writer this thread must not race. */
+   pending_sysmsg_push(message);
+   session_broadcast_system_message_nonlocal(message);
 #else
    (void)message;
 #endif

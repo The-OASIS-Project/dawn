@@ -67,6 +67,7 @@
 #include "core/ota.h"
 #include "core/ota_rollout.h"
 #include "core/path_utils.h"
+#include "core/pending_system_msg.h"
 #include "core/session_manager.h"
 #include "core/utterance_dedup.h"
 #include "core/wake_word.h"
@@ -494,6 +495,28 @@ sig_atomic_t get_quit(void) {
 int is_llm_processing(void) {
    return llm_processing;
 }
+
+#ifdef ENABLE_MULTI_CLIENT
+/* Apply deferred device/system-context messages (e.g. phone call state) into the
+ * local session's history.  Foreign threads (the MQTT/echo callback) enqueue via
+ * pending_sysmsg_push(); only the main thread appends, and callers gate on
+ * !llm_processing so history is never mutated mid-turn — preserving single-owner
+ * ownership of sessions[0], whose main-path appends are unlocked.  See
+ * include/core/pending_system_msg.h. */
+static void drain_pending_system_messages(void) {
+   session_t *local = session_get_local();
+   if (!local) {
+      return;
+   }
+
+   /* +1 to match the queue's storage width so a full-length message round-trips
+    * without losing its last byte. */
+   char msg[PENDING_SYSMSG_MAX_TEXT + 1];
+   while (pending_sysmsg_pop(msg, sizeof(msg))) {
+      session_add_message(local, "system", msg);
+   }
+}
+#endif
 
 #if 0
 // Define the function to draw the waveform using SDL
@@ -2510,6 +2533,12 @@ mqtt_disabled:
          sleep(1);
          /* SAGE heartbeat (server mode has no per-second loop of its own). */
          attention_tick(time(NULL));
+#ifdef ENABLE_MULTI_CLIENT
+         /* Apply deferred device/system-context messages.  Server mode drives no
+          * local voice turn, so the local session has no other writer and the
+          * drain is always safe here. */
+         drain_pending_system_messages();
+#endif
       }
       goto server_shutdown;
    }
@@ -2693,6 +2722,15 @@ mqtt_disabled:
                pthread_cond_signal(&tts_cond);
             }
             pthread_mutex_unlock(&tts_mutex);
+
+            /* Apply any deferred device/system-context messages (phone call state,
+             * etc.) before dispatching a new turn, so the LLM sees them.  Gated on
+             * !llm_processing so the local history is never mutated mid-turn. */
+#ifdef ENABLE_MULTI_CLIENT
+            if (!llm_processing) {
+               drain_pending_system_messages();
+            }
+#endif
 
             /* Check for text input from any source (TUI, MQTT device relay, future REST).
              * Gated on !llm_processing so a queued item is never popped into a turn while

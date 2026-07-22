@@ -1160,7 +1160,7 @@ void session_add_message(session_t *session, const char *role, const char *conte
    pthread_mutex_unlock(&session->history_mutex);
 }
 
-int session_broadcast_system_message(const char *content) {
+static int broadcast_system_message_impl(const char *content, bool include_local) {
    if (!initialized || !content || content[0] == '\0') {
       return 0;
    }
@@ -1189,9 +1189,14 @@ int session_broadcast_system_message(const char *content) {
       }
 
       /* Interactive surfaces only.  Messaging-channel forever-conversations are
-       * excluded so a device event doesn't leak into an unrelated chat. */
-      if (s->type == SESSION_TYPE_LOCAL || s->type == SESSION_TYPE_DAP ||
-          s->type == SESSION_TYPE_DAP2 || s->type == SESSION_TYPE_WEBUI) {
+       * excluded so a device event doesn't leak into an unrelated chat.  The
+       * LOCAL session is skipped when include_local is false so an off-main-thread
+       * caller doesn't race the unlocked main-path append (see the _nonlocal
+       * variant's header doc). */
+      bool is_local = (s->type == SESSION_TYPE_LOCAL);
+      bool interactive = is_local || s->type == SESSION_TYPE_DAP || s->type == SESSION_TYPE_DAP2 ||
+                         s->type == SESSION_TYPE_WEBUI;
+      if (interactive && (include_local || !is_local)) {
          session_add_message(s, "system", content);
          delivered++;
       }
@@ -1200,6 +1205,14 @@ int session_broadcast_system_message(const char *content) {
    }
 
    return delivered;
+}
+
+int session_broadcast_system_message(const char *content) {
+   return broadcast_system_message_impl(content, true);
+}
+
+int session_broadcast_system_message_nonlocal(const char *content) {
+   return broadcast_system_message_impl(content, false);
 }
 
 void session_stamp_last_message_id(session_t *session, const char *role, int64_t msg_id) {
