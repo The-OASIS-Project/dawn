@@ -19,6 +19,7 @@
       searchTimeout: null,
       pendingMessages: [], // Messages to save once conversation is created
       creatingConversation: false, // Prevent duplicate creation
+      generatingConvIds: new Set(), // conv ids currently streaming a background turn
       // Monotonic token bumped on every conversation load. The async message-render
       // loop captures it and bails if a newer load starts mid-render — prevents two
       // concurrent renders (e.g. on reconnect) from interleaving messages, misplacing
@@ -187,6 +188,44 @@
     */
    function getActiveConversationId() {
       return historyState.activeConversationId;
+   }
+
+   /**
+    * Toggle a "generating" indicator on a conversation's sidebar row — used when
+    * a background conversation (one you're not currently viewing) is streaming a
+    * turn, so its progress is visible without its tokens leaking into the active
+    * view. No-op if the row isn't currently rendered in the list.
+    * @param {number|string} convId
+    * @param {boolean} generating
+    */
+   function setConversationGenerating(convId, generating) {
+      if (!convId) return;
+      const key = String(convId); // string key — conversation ids can exceed 2^53
+      // Model it in state so a sidebar re-render (rename, unread refresh, new item,
+      // …) doesn't wipe the indicator; renderConversationItem re-applies the class.
+      if (generating) {
+         historyState.generatingConvIds.add(key);
+      } else {
+         historyState.generatingConvIds.delete(key);
+      }
+      // Also toggle live on the currently-rendered row (avoids a full re-render).
+      const item = historyElements.list?.querySelector(
+         `.history-item[data-conv-id="${CSS.escape(String(convId))}"]`
+      );
+      if (item) {
+         item.classList.toggle('generating', !!generating);
+      }
+   }
+
+   /**
+    * Clear all generating indicators — called on WS disconnect, when in-flight
+    * background turns are aborted server-side, so no dot is left stuck lit.
+    */
+   function clearGenerating() {
+      historyState.generatingConvIds.clear();
+      historyElements.list
+         ?.querySelectorAll('.history-item.generating')
+         .forEach((el) => el.classList.remove('generating'));
    }
 
    /* =============================================================================
@@ -476,6 +515,14 @@
          DawnSilentObserve.reset();
       }
 
+      // Discard any in-flight streaming state WITHOUT saving before we tear down
+      // the transcript — its partial belongs to the conversation we're leaving,
+      // not the one being loaded (prevents the stale partial from being persisted
+      // into the newly-active conversation on the next stream start/resume).
+      if (typeof DawnStreaming !== 'undefined' && DawnStreaming.resetSilently) {
+         DawnStreaming.resetSilently();
+      }
+
       // Clear transcript
       if (transcript) {
          transcript.innerHTML = '';
@@ -660,6 +707,11 @@
             DawnToast.show(payload.error || 'Failed to delete conversation', 'error');
          }
          return;
+      }
+
+      // Drop any stale generating-indicator entry for the deleted conversation.
+      if (deletedId) {
+         historyState.generatingConvIds.delete(String(deletedId));
       }
 
       // If we deleted the active conversation, start fresh
@@ -1007,6 +1059,7 @@
       if (isUnread) classes.push('unread');
       if (isPinned) classes.push('pinned');
       if (isChainChild) classes.push('chain-child');
+      if (historyState.generatingConvIds.has(String(conv.id))) classes.push('generating');
 
       // Pin/unpin toggle. Stable aria-label + aria-pressed reflects state (do not
       // also swap the label text — that double-announces); dynamic title tooltips.
@@ -1481,6 +1534,26 @@
       } else {
          historyState.pendingMessages.push({ role, content, reasoning });
       }
+   }
+
+   /**
+    * Create the conversation row BEFORE the first message is sent, so the server
+    * tags that turn's frames with the real conversation id instead of 0.
+    *
+    * WebSocket messages are processed in order per connection, so sending
+    * new_conversation here (before the text message) guarantees the server sets
+    * conn->active_conversation_id before it dispatches the text — closing the
+    * fresh-chat race where the row didn't exist yet at dispatch time. No-op if a
+    * conversation is already active or one is already being created; the existing
+    * saveMessageToHistory guard (creatingConversation) prevents a double-create.
+    * @param {string} text - the user's message (used only for the auto-title)
+    */
+   function beginConversationBeforeSend(text) {
+      const authState = callbacks.getAuthState ? callbacks.getAuthState() : {};
+      if (!authState.authenticated) return;
+      if (historyState.activeConversationId || historyState.creatingConversation) return;
+      historyState.creatingConversation = true;
+      requestNewConversation(generateTitleFromMessage(text || ''));
    }
 
    /**
@@ -2037,6 +2110,9 @@
       startNewChat: startNewChat,
       requestUpdateContext: requestUpdateContext,
       getActiveConversationId: getActiveConversationId,
+      setConversationGenerating: setConversationGenerating,
+      clearGenerating: clearGenerating,
+      beginConversationBeforeSend: beginConversationBeforeSend,
       setKnownContextMax: setKnownContextMax,
       getContextGuard: getContextGuard,
       clearContextGuard: clearContextGuard,

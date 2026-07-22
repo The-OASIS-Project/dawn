@@ -488,6 +488,7 @@ link_directories(${CMAKE_SOURCE_DIR})
 set(DAWN_SOURCES
     # Core files
     src/dawn.c
+    src/core/conv_stream.c
     src/core/pending_system_msg.c
     src/input_queue.c
     src/mosquitto_comms.c
@@ -757,6 +758,7 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v69.c
     src/auth/auth_db_migrations_v70.c
     src/auth/auth_db_migrations_v71.c
+    src/auth/auth_db_migrations_v72.c
     src/auth/auth_db_attention.c
     src/auth/auth_db_statements.c
     # DB-layer tables depended on by the always-compiled memory / OTA / tool

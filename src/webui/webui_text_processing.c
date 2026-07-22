@@ -341,9 +341,14 @@ static void webui_tool_persist_cb(void *userdata,
    if (!ctx || !ctx->session || !role) {
       return;
    }
-   int64_t conv_id = webui_get_active_conversation_id(ctx->session);
+   /* Persist to the conversation THIS TURN belongs to (captured at dispatch /
+    * back-filled at conversation creation), NOT the live view — otherwise
+    * switching conversations mid-tool-loop writes this turn's iteration rows into
+    * whatever conversation is on screen.  No live-view fallback: an untagged turn
+    * (conv_id 0) is skipped rather than mis-attributed. */
+   int64_t conv_id = ctx->session->stream_conversation_id;
    if (conv_id <= 0) {
-      return; /* conversation not established yet — skip (rare; tools fire seconds in) */
+      return; /* turn not tagged with a conversation — skip rather than guess */
    }
    if (conv_db_add_message_with_tools(conv_id, ctx->auth_user_id, role, content ? content : "",
                                       tool_calls_json, tool_call_id, reasoning_json,
@@ -456,9 +461,16 @@ static void *text_worker_thread(void *arg) {
     * add user msg → persist to conv_db → transcript echo (via callback)
     * → focus injection → LLM call.  Vision buffers are owned by `work`
     * and freed below after the LLM call returns. */
+   /* Use the turn's CAPTURED conversation (set at dispatch, back-filled at
+    * creation) rather than a live re-read of conn->active_conversation_id, which
+    * this worker could observe AFTER a mid-turn view switch — that would persist
+    * the user message / inject focus for the wrong conversation. */
+   int64_t turn_conv = session->stream_conversation_id;
+   if (turn_conv <= 0 && conn && conn->active_conversation_id > 0) {
+      turn_conv = conn->active_conversation_id;
+   }
    text_input_dispatch_opts_t dispatch_opts = {
-      .conversation_id = (conn && conn->active_conversation_id > 0) ? conn->active_conversation_id
-                                                                    : 0,
+      .conversation_id = turn_conv,
       .auth_user_id = conn ? conn->auth_user_id : 0,
       .sentence_cb = tts_enabled ? webui_sentence_audio_callback : NULL,
       .sentence_userdata = tts_enabled ? session : NULL,
@@ -598,6 +610,29 @@ static void *text_worker_thread(void *arg) {
     * The LLM call uses webui_send_stream_start/delta/end for real-time delivery.
     * Assistant response is already added to history inside the LLM call. */
 
+   /* Persist the final assistant answer for a BACKGROUNDED turn — one that
+    * finished while the client was viewing a DIFFERENT conversation.  The final
+    * answer is normally saved by the client (finalizeStream), but the client only
+    * saves the conversation it is looking at, so a turn that completes in the
+    * background would otherwise lose its answer on reload.  A foreground turn
+    * (turn conv == the on-screen conv) is saved by the client — skip it here to
+    * avoid a duplicate row.  Tool-turn rows are already persisted server-side by
+    * webui_tool_persist_cb to the same (captured) conversation. */
+   if (conn && final_response && final_response[0] != '\0') {
+      int64_t turn_conv = session->stream_conversation_id;
+      if (turn_conv > 0 && turn_conv != webui_get_active_conversation_id(session)) {
+         if (conv_db_add_message_with_tools(turn_conv, conn->auth_user_id, "assistant",
+                                            final_response, NULL, NULL, NULL,
+                                            NULL) != AUTH_DB_SUCCESS) {
+            OLOG_WARNING("WebUI: failed to persist backgrounded assistant answer to conv %lld",
+                         (long long)turn_conv);
+         } else {
+            OLOG_INFO("WebUI: persisted backgrounded assistant answer to conv %lld",
+                      (long long)turn_conv);
+         }
+      }
+   }
+
    /* Free the final response (either original response or processed copy) */
    free(final_response);
 
@@ -660,6 +695,13 @@ int webui_process_text_input_with_vision(session_t *session,
     * old worker sees disconnected=false after a new message is sent. */
    unsigned int new_gen = atomic_fetch_add(&session->request_generation, 1) + 1;
    session->disconnected = false;
+
+   /* Bind this turn to the conversation being viewed NOW (dispatch time), before
+    * any thinking/stream frame — so every frame of the turn stays tagged with it
+    * even if the client switches views mid-turn (background-jobs delta routing).
+    * Captured here (not at stream_start) so THINKING frames, which precede the
+    * answer stream, carry the correct conversation too. */
+   session->stream_conversation_id = webui_get_active_conversation_id(session);
 
    /* Create work item */
    text_work_t *work = calloc(1, sizeof(text_work_t));

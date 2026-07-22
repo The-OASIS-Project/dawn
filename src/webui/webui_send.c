@@ -322,12 +322,16 @@ bool check_opus_capability(struct json_object *payload) {
 void send_state_impl_full(struct lws *wsi,
                           const char *state,
                           const char *detail,
-                          const char *tools_json) {
+                          const char *tools_json,
+                          int64_t conversation_id) {
    /* Build state message with proper JSON escaping using json-c */
    struct json_object *obj = json_object_new_object();
    struct json_object *payload = json_object_new_object();
 
    json_object_object_add(payload, "state", json_object_new_string(state));
+   if (conversation_id > 0) {
+      json_object_object_add(payload, "conversation_id", json_object_new_int64(conversation_id));
+   }
 
    if (detail && detail[0] != '\0') {
       json_object_object_add(payload, "detail", json_object_new_string(detail));
@@ -350,7 +354,7 @@ void send_state_impl_full(struct lws *wsi,
 }
 
 void send_state_impl(struct lws *wsi, const char *state, const char *detail) {
-   send_state_impl_full(wsi, state, detail, NULL);
+   send_state_impl_full(wsi, state, detail, NULL, 0);
 }
 
 void send_conversation_reset_impl(struct lws *wsi) {
@@ -383,13 +387,17 @@ void send_transcript_impl_ex(struct lws *wsi,
                              const char *role,
                              const char *text,
                              bool replay,
-                             bool server_saved) {
+                             bool server_saved,
+                             int64_t conversation_id) {
    /* Escape JSON special characters in text */
    struct json_object *obj = json_object_new_object();
    struct json_object *payload = json_object_new_object();
 
    json_object_object_add(payload, "role", json_object_new_string(role));
    json_object_object_add(payload, "text", json_object_new_string(text));
+   if (conversation_id > 0) {
+      json_object_object_add(payload, "conversation_id", json_object_new_int64(conversation_id));
+   }
    if (replay) {
       json_object_object_add(payload, "replay", json_object_new_boolean(true));
    }
@@ -405,7 +413,7 @@ void send_transcript_impl_ex(struct lws *wsi,
 }
 
 static void send_transcript_impl(struct lws *wsi, const char *role, const char *text) {
-   send_transcript_impl_ex(wsi, role, text, false, false);
+   send_transcript_impl_ex(wsi, role, text, false, false, 0);
 }
 
 void send_error_impl(struct lws *wsi, const char *code, const char *message) {
@@ -583,18 +591,23 @@ void send_compaction_impl(struct lws *wsi,
  *   stream_end   - Finalize entry, exit streaming state
  * ============================================================================= */
 
-void send_stream_start_impl(struct lws *wsi, uint32_t stream_id) {
-   char json[128];
-   snprintf(json, sizeof(json), "{\"type\":\"stream_start\",\"payload\":{\"stream_id\":%u}}",
-            stream_id);
+void send_stream_start_impl(struct lws *wsi, uint32_t stream_id, int64_t conversation_id) {
+   char json[160];
+   snprintf(json, sizeof(json),
+            "{\"type\":\"stream_start\",\"payload\":{\"stream_id\":%u,\"conversation_id\":%lld}}",
+            stream_id, (long long)conversation_id);
    send_json_message(wsi, json);
 }
 
-void send_stream_delta_impl(struct lws *wsi, uint32_t stream_id, const char *text) {
+void send_stream_delta_impl(struct lws *wsi,
+                            uint32_t stream_id,
+                            int64_t conversation_id,
+                            const char *text) {
    struct json_object *obj = json_object_new_object();
    struct json_object *payload = json_object_new_object();
 
    json_object_object_add(payload, "stream_id", json_object_new_int((int32_t)stream_id));
+   json_object_object_add(payload, "conversation_id", json_object_new_int64(conversation_id));
    json_object_object_add(payload, "delta", json_object_new_string(text));
    json_object_object_add(obj, "type", json_object_new_string("stream_delta"));
    json_object_object_add(obj, "payload", payload);
@@ -604,11 +617,15 @@ void send_stream_delta_impl(struct lws *wsi, uint32_t stream_id, const char *tex
    json_object_put(obj);
 }
 
-void send_stream_end_impl(struct lws *wsi, uint32_t stream_id, const char *reason) {
+void send_stream_end_impl(struct lws *wsi,
+                          uint32_t stream_id,
+                          int64_t conversation_id,
+                          const char *reason) {
    struct json_object *obj = json_object_new_object();
    struct json_object *payload = json_object_new_object();
 
    json_object_object_add(payload, "stream_id", json_object_new_int((int32_t)stream_id));
+   json_object_object_add(payload, "conversation_id", json_object_new_int64(conversation_id));
    json_object_object_add(payload, "reason", json_object_new_string(reason ? reason : "complete"));
    json_object_object_add(obj, "type", json_object_new_string("stream_end"));
    json_object_object_add(obj, "payload", payload);
@@ -622,11 +639,15 @@ void send_stream_end_impl(struct lws *wsi, uint32_t stream_id, const char *reaso
  * Extended Thinking WebSocket Helpers
  * ============================================================================= */
 
-void send_thinking_start_impl(struct lws *wsi, uint32_t stream_id, const char *provider) {
+void send_thinking_start_impl(struct lws *wsi,
+                              uint32_t stream_id,
+                              int64_t conversation_id,
+                              const char *provider) {
    struct json_object *obj = json_object_new_object();
    struct json_object *payload = json_object_new_object();
 
    json_object_object_add(payload, "stream_id", json_object_new_int((int32_t)stream_id));
+   json_object_object_add(payload, "conversation_id", json_object_new_int64(conversation_id));
    json_object_object_add(payload, "provider",
                           json_object_new_string(provider ? provider : "unknown"));
    json_object_object_add(obj, "type", json_object_new_string("thinking_start"));
@@ -637,11 +658,15 @@ void send_thinking_start_impl(struct lws *wsi, uint32_t stream_id, const char *p
    json_object_put(obj);
 }
 
-void send_thinking_delta_impl(struct lws *wsi, uint32_t stream_id, const char *text) {
+void send_thinking_delta_impl(struct lws *wsi,
+                              uint32_t stream_id,
+                              int64_t conversation_id,
+                              const char *text) {
    struct json_object *obj = json_object_new_object();
    struct json_object *payload = json_object_new_object();
 
    json_object_object_add(payload, "stream_id", json_object_new_int((int32_t)stream_id));
+   json_object_object_add(payload, "conversation_id", json_object_new_int64(conversation_id));
    json_object_object_add(payload, "delta", json_object_new_string(text));
    json_object_object_add(obj, "type", json_object_new_string("thinking_delta"));
    json_object_object_add(obj, "payload", payload);
@@ -651,11 +676,15 @@ void send_thinking_delta_impl(struct lws *wsi, uint32_t stream_id, const char *t
    json_object_put(obj);
 }
 
-void send_thinking_end_impl(struct lws *wsi, uint32_t stream_id, int has_content) {
+void send_thinking_end_impl(struct lws *wsi,
+                            uint32_t stream_id,
+                            int64_t conversation_id,
+                            int has_content) {
    struct json_object *obj = json_object_new_object();
    struct json_object *payload = json_object_new_object();
 
    json_object_object_add(payload, "stream_id", json_object_new_int((int32_t)stream_id));
+   json_object_object_add(payload, "conversation_id", json_object_new_int64(conversation_id));
    json_object_object_add(payload, "has_content", json_object_new_boolean(has_content));
    json_object_object_add(obj, "type", json_object_new_string("thinking_end"));
    json_object_object_add(obj, "payload", payload);
@@ -665,11 +694,17 @@ void send_thinking_end_impl(struct lws *wsi, uint32_t stream_id, int has_content
    json_object_put(obj);
 }
 
-void send_reasoning_summary_impl(struct lws *wsi, uint32_t stream_id, int reasoning_tokens) {
+void send_reasoning_summary_impl(struct lws *wsi,
+                                 uint32_t stream_id,
+                                 int64_t conversation_id,
+                                 int reasoning_tokens) {
    struct json_object *obj = json_object_new_object();
    struct json_object *payload = json_object_new_object();
 
    json_object_object_add(payload, "stream_id", json_object_new_int((int32_t)stream_id));
+   if (conversation_id > 0) {
+      json_object_object_add(payload, "conversation_id", json_object_new_int64(conversation_id));
+   }
    json_object_object_add(payload, "reasoning_tokens", json_object_new_int(reasoning_tokens));
    json_object_object_add(obj, "type", json_object_new_string("reasoning_summary"));
    json_object_object_add(obj, "payload", payload);
@@ -773,8 +808,8 @@ void process_one_response(void) {
    /* Send via lws_write (one write per callback!) */
    switch (resp.type) {
       case WS_RESP_STATE:
-         send_state_impl_full(conn->wsi, resp.state.state, resp.state.detail,
-                              resp.state.tools_json);
+         send_state_impl_full(conn->wsi, resp.state.state, resp.state.detail, resp.state.tools_json,
+                              resp.state.conversation_id);
          /* If LLM pipeline sent "idle" and always-on is in PROCESSING, resume listening.
           * processing_complete resets internal state (buffer, VAD, cooldown) but set_state
           * does NOT send a WebSocket message. We must notify the client via the response
@@ -795,7 +830,7 @@ void process_one_response(void) {
          break;
       case WS_RESP_TRANSCRIPT:
          send_transcript_impl_ex(conn->wsi, resp.transcript.role, resp.transcript.text, false,
-                                 resp.transcript.server_saved);
+                                 resp.transcript.server_saved, resp.transcript.conversation_id);
          free(resp.transcript.role);
          free(resp.transcript.text);
          break;
@@ -831,14 +866,16 @@ void process_one_response(void) {
                            resp.context.threshold);
          break;
       case WS_RESP_STREAM_START:
-         send_stream_start_impl(conn->wsi, resp.stream.stream_id);
+         send_stream_start_impl(conn->wsi, resp.stream.stream_id, resp.stream.conversation_id);
          break;
       case WS_RESP_STREAM_DELTA:
-         send_stream_delta_impl(conn->wsi, resp.stream.stream_id, resp.stream.text);
+         send_stream_delta_impl(conn->wsi, resp.stream.stream_id, resp.stream.conversation_id,
+                                resp.stream.text);
          /* text[] is inline buffer - no free needed */
          break;
       case WS_RESP_STREAM_END:
-         send_stream_end_impl(conn->wsi, resp.stream.stream_id, resp.stream.text);
+         send_stream_end_impl(conn->wsi, resp.stream.stream_id, resp.stream.conversation_id,
+                              resp.stream.text);
          /* text[] is inline buffer - no free needed */
          break;
       case WS_RESP_METRICS_UPDATE:
@@ -852,20 +889,22 @@ void process_one_response(void) {
          free(resp.compaction.summary);
          break;
       case WS_RESP_THINKING_START:
-         send_thinking_start_impl(conn->wsi, resp.stream.stream_id, resp.stream.text);
+         send_thinking_start_impl(conn->wsi, resp.stream.stream_id, resp.stream.conversation_id,
+                                  resp.stream.text);
          /* text[] reused for provider name - no free needed */
          break;
       case WS_RESP_THINKING_DELTA:
-         send_thinking_delta_impl(conn->wsi, resp.stream.stream_id, resp.stream.text);
+         send_thinking_delta_impl(conn->wsi, resp.stream.stream_id, resp.stream.conversation_id,
+                                  resp.stream.text);
          /* text[] is inline buffer - no free needed */
          break;
       case WS_RESP_THINKING_END:
-         send_thinking_end_impl(conn->wsi, resp.stream.stream_id,
+         send_thinking_end_impl(conn->wsi, resp.stream.stream_id, resp.stream.conversation_id,
                                 resp.stream.text[0] == '1'); /* has_content flag */
          /* text[] reused for flag - no free needed */
          break;
       case WS_RESP_REASONING_SUMMARY:
-         send_reasoning_summary_impl(conn->wsi, resp.stream.stream_id,
+         send_reasoning_summary_impl(conn->wsi, resp.stream.stream_id, resp.stream.conversation_id,
                                      atoi(resp.stream.text)); /* reasoning_tokens as string */
          /* text[] reused for token count - no free needed */
          break;

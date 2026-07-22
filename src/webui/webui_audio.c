@@ -1382,6 +1382,9 @@ void handle_binary_message(ws_connection_t *conn, const uint8_t *data, size_t le
          if (conn->session) {
             new_gen = atomic_fetch_add(&conn->session->request_generation, 1) + 1;
             conn->session->disconnected = false;
+            /* Bind the turn to the current conversation before any frame (see the
+             * text-input path) so thinking + stream deltas route correctly. */
+            conn->session->stream_conversation_id = webui_get_active_conversation_id(conn->session);
          }
 
          /* Create work item for worker thread */

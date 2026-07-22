@@ -62,6 +62,7 @@
 #include "core/command_executor.h"
 #include "core/command_router.h"
 #include "core/component_status.h"
+#include "core/conv_stream.h"
 #include "core/embedding_engine.h"
 #include "core/ocp_helpers.h"
 #include "core/ota.h"
@@ -2532,7 +2533,9 @@ mqtt_disabled:
       while (!quit) {
          sleep(1);
          /* SAGE heartbeat (server mode has no per-second loop of its own). */
-         attention_tick(time(NULL));
+         time_t now_srv = time(NULL);
+         attention_tick(now_srv);
+         conv_stream_evict_stale(now_srv);
 #ifdef ENABLE_MULTI_CLIENT
          /* Apply deferred device/system-context messages.  Server mode drives no
           * local voice turn, so the local session has no other writer and the
@@ -2555,6 +2558,8 @@ mqtt_disabled:
             ota_rollout_tick(now_rollout);
             /* SAGE proactive-attention heartbeat (same once-per-second cadence). */
             attention_tick(now_rollout);
+            /* Evict finalized/abandoned live-partial replay-ring entries. */
+            conv_stream_evict_stale(now_rollout);
          }
       }
 

@@ -222,13 +222,15 @@ typedef struct {
    union {
       struct {
          char *state;
-         char *detail;     /* Optional detail message */
-         char *tools_json; /* Optional JSON array of active tools */
+         char *detail;            /* Optional detail message */
+         char *tools_json;        /* Optional JSON array of active tools */
+         int64_t conversation_id; /* Turn's conversation (0 = none); routes the pill */
       } state;
       struct {
          char *role;
          char *text;
-         bool server_saved; /* Message already persisted to DB server-side */
+         bool server_saved;       /* Message already persisted to DB server-side */
+         int64_t conversation_id; /* Live-turn conversation (0 = none); routes tool/visual frames */
       } transcript;
       struct {
          char *code;
@@ -249,7 +251,8 @@ typedef struct {
       } context;
       struct {
          uint32_t stream_id;
-         char text[1024]; /* Buffer for delta/end text (increased for thinking) */
+         int64_t conversation_id; /* Conversation this turn belongs to (0 = none) */
+         char text[1024];         /* Buffer for delta/end text (increased for thinking) */
       } stream;
       struct {
          char state[16];   /* idle, listening, thinking, speaking, error */

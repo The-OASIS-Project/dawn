@@ -58,6 +58,7 @@
 #include "config/config_parser.h"
 #include "config/dawn_config.h"
 #include "core/command_router.h"
+#include "core/conv_stream.h"
 #include "core/missed_notifications_db.h"
 #include "core/ocp_helpers.h"
 #include "core/rate_limiter.h"
@@ -1479,6 +1480,7 @@ static void send_state_with_tools(session_t *session, const char *state) {
                               .state = strdup(state),
                               .detail = NULL,
                               .tools_json = tools_json, /* Takes ownership */
+                              .conversation_id = session->stream_conversation_id,
                           } };
 
    if (!resp.state.state) {
@@ -1964,6 +1966,7 @@ void webui_send_transcript_ex(session_t *session,
                               .role = strdup(role),
                               .text = strdup(text),
                               .server_saved = server_saved,
+                              .conversation_id = session->stream_conversation_id,
                           } };
 
    if (!resp.transcript.role || !resp.transcript.text) {
@@ -1990,6 +1993,7 @@ void webui_send_state_with_detail(session_t *session, const char *state, const c
                           .state = {
                               .state = strdup(state),
                               .detail = detail ? strdup(detail) : NULL,
+                              .conversation_id = session->stream_conversation_id,
                           } };
 
    if (!resp.state.state) {
@@ -2172,6 +2176,13 @@ void webui_send_stream_start(session_t *session) {
    uint32_t sid = atomic_fetch_add(&session->current_stream_id, 1) + 1;
    atomic_store(&session->llm_streaming_active, true);
 
+   /* The turn's conversation was captured at dispatch (before thinking frames);
+    * read it here rather than re-reading the live view, which may have changed if
+    * the client switched during thinking.  Publish the turn into the
+    * conversation-keyed replay ring.  0 for non-WebUI (DAP2) — a harmless no-op. */
+   int64_t conv_id = session->stream_conversation_id;
+   conv_stream_begin(conv_id, sid);
+
    /* Reset command tag filter state for new stream */
    session->cmd_tag_filter.nesting_depth = 0;
    session->cmd_tag_filter.len = 0;
@@ -2189,11 +2200,13 @@ void webui_send_stream_start(session_t *session) {
                           .type = WS_RESP_STREAM_START,
                           .stream = {
                               .stream_id = sid,
+                              .conversation_id = conv_id,
                               .text = "",
                           } };
 
    queue_response(&resp);
-   OLOG_INFO("WebUI: Stream start id=%u for session %u", sid, session->session_id);
+   OLOG_INFO("WebUI: Stream start id=%u conv=%lld for session %u", sid, (long long)conv_id,
+             session->session_id);
 }
 
 /* Command tag filter uses shared constants from core/text_filter.h */
@@ -2306,12 +2319,15 @@ static void webui_filter_output(const char *text, size_t len, void *ctx) {
                           .type = WS_RESP_STREAM_DELTA,
                           .stream = {
                               .stream_id = session->current_stream_id,
+                              .conversation_id = session->stream_conversation_id,
                           } };
 
    snprintf(resp.stream.text, sizeof(resp.stream.text), "%s", fixed_text);
 
    session->stream_had_content = true;
    update_stream_last_char(session, resp.stream.text);
+   conv_stream_append(session->stream_conversation_id, session->current_stream_id,
+                      resp.stream.text);
    queue_response(&resp);
 }
 
@@ -2381,10 +2397,15 @@ void webui_send_stream_delta(session_t *session, const char *text) {
                              .type = WS_RESP_STREAM_DELTA,
                              .stream = {
                                  .stream_id = session->current_stream_id,
+                                 .conversation_id = session->stream_conversation_id,
                              } };
       snprintf(resp.stream.text, sizeof(resp.stream.text), "%s", fixed_text);
       session->stream_had_content = true;
       update_stream_last_char(session, resp.stream.text);
+      /* Accumulate into the replay ring so a client attaching mid-turn (or the
+       * one that switched away) can replay the partial. */
+      conv_stream_append(session->stream_conversation_id, session->current_stream_id,
+                         resp.stream.text);
       queue_response(&resp);
       return;
    }
@@ -2401,10 +2422,14 @@ void webui_send_stream_end(session_t *session, const char *reason) {
    /* Mark streaming inactive */
    atomic_store(&session->llm_streaming_active, false);
 
+   /* Finalize the replay-ring partial (kept for a short grace window). */
+   conv_stream_end(session->stream_conversation_id, atomic_load(&session->current_stream_id));
+
    ws_response_t resp = { .session = session,
                           .type = WS_RESP_STREAM_END,
                           .stream = {
                               .stream_id = atomic_load(&session->current_stream_id),
+                              .conversation_id = session->stream_conversation_id,
                           } };
 
    /* Copy reason into fixed buffer (no malloc/free churn) */
@@ -2430,6 +2455,7 @@ void webui_send_thinking_start(session_t *session, const char *provider) {
                           .type = WS_RESP_THINKING_START,
                           .stream = {
                               .stream_id = session->current_stream_id,
+                              .conversation_id = session->stream_conversation_id,
                           } };
 
    /* Store provider name in text buffer */
@@ -2455,6 +2481,7 @@ void webui_send_thinking_delta(session_t *session, const char *text) {
                           .type = WS_RESP_THINKING_DELTA,
                           .stream = {
                               .stream_id = session->current_stream_id,
+                              .conversation_id = session->stream_conversation_id,
                           } };
 
    strncpy(resp.stream.text, text, sizeof(resp.stream.text) - 1);
@@ -2472,6 +2499,7 @@ void webui_send_thinking_end(session_t *session, bool has_content) {
                           .type = WS_RESP_THINKING_END,
                           .stream = {
                               .stream_id = session->current_stream_id,
+                              .conversation_id = session->stream_conversation_id,
                           } };
 
    /* Use text[0] to store has_content flag */
@@ -2496,6 +2524,7 @@ void webui_send_reasoning_summary(session_t *session, int reasoning_tokens) {
                           .type = WS_RESP_REASONING_SUMMARY,
                           .stream = {
                               .stream_id = session->current_stream_id,
+                              .conversation_id = session->stream_conversation_id,
                           } };
 
    /* Store reasoning_tokens as string in text buffer */

@@ -102,6 +102,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v69.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v70.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v71.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v72.c
     ${SRC_ROOT}/src/auth/auth_db_statements.c
     ${SRC_ROOT}/src/auth/auth_db_user.c
     ${SRC_ROOT}/src/auth/auth_db_session.c
@@ -940,6 +941,18 @@ dawn_add_unit_test(test_pending_system_msg
    SOURCES test_pending_system_msg.c
            ${SRC_ROOT}/src/core/pending_system_msg.c
    LIBS    dawn_common unity pthread
+   LABEL   ci)
+
+dawn_add_unit_test(test_auth_db_migrations_v72
+   SOURCES test_auth_db_migrations_v72.c
+           ${SRC_ROOT}/src/auth/auth_db_migrations_v72.c
+   LIBS    dawn_common unity sqlite3 pthread
+   LABEL   ci)
+
+dawn_add_unit_test(test_conv_stream
+   SOURCES test_conv_stream.c
+           ${SRC_ROOT}/src/core/conv_stream.c
+   LIBS    unity pthread
    LABEL   ci)
 
 dawn_add_unit_test(test_config_validate

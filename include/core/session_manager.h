@@ -373,6 +373,12 @@ typedef struct session {
    atomic_bool stream_had_content;    // True if any deltas were sent (for fallback)
    atomic_uint current_stream_id;     // Monotonic ID to detect stale deltas
    atomic_bool thinking_active;       // True while streaming thinking/reasoning content
+   // Conversation the CURRENT turn belongs to, captured at stream start so all of
+   // this turn's deltas stay tagged with it even if the client switches views
+   // mid-stream (background-jobs delta routing). 0 = none/non-WebUI. Atomic for
+   // parity with current_stream_id / TSan-cleanliness (a second turn's stream
+   // start can write it while a superseded turn's tail still reads).
+   _Atomic int64_t stream_conversation_id;
 
    // Streaming metrics for UI visualization
    uint64_t stream_start_ms;     // Timestamp when LLM call started

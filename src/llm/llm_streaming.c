@@ -941,8 +941,9 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
                      char json_buf[384];
                      snprintf(json_buf, sizeof(json_buf),
                               "{\"type\":\"visual_progress_start\",\"payload\":"
-                              "{\"tool_id\":\"%s\"}}",
-                              ctx->provider.claude.tool_id);
+                              "{\"tool_id\":\"%s\",\"conversation_id\":%lld}}",
+                              ctx->provider.claude.tool_id,
+                              (long long)ws_session->stream_conversation_id);
                      webui_send_session_json(ws_session, json_buf);
                   }
                }

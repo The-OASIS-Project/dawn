@@ -109,6 +109,26 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
          if (json_object_object_get_ex(payload, "text", &text_obj)) {
             const char *text = json_object_get_string(text_obj);
             if (text && strlen(text) > 0) {
+               /* Explicit target conversation (background-jobs delta routing): the
+                * client sends the conversation this message belongs to, so the
+                * server never has to infer it from the live view — robust across
+                * reconnect and multi-tab, where server-side active_conversation_id
+                * can be stale or 0.  Validate ownership first (a client must not
+                * tag/persist into another user's conversation), then heal both the
+                * active id and its privacy flag (which gates memory extraction). */
+               struct json_object *conv_id_obj;
+               if (json_object_object_get_ex(payload, "conversation_id", &conv_id_obj)) {
+                  int64_t req_conv = json_object_get_int64(conv_id_obj);
+                  if (req_conv > 0 && conn->auth_user_id > 0) {
+                     conversation_t conv;
+                     if (conv_db_get(req_conv, conn->auth_user_id, &conv) == AUTH_DB_SUCCESS) {
+                        conn->active_conversation_id = req_conv;
+                        conn->active_conversation_private = conv.is_private;
+                        conv_free(&conv);
+                     }
+                  }
+               }
+
                /* Extract optional images for vision (array format) */
                const char *vision_images[WEBUI_MAX_VISION_IMAGES_CAP] = { 0 };
                size_t vision_image_sizes[WEBUI_MAX_VISION_IMAGES_CAP] = { 0 };

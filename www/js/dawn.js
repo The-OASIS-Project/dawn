@@ -44,6 +44,21 @@
    // =============================================================================
    // Message Handling
    // =============================================================================
+
+   // True if a payload carries a conversation_id that belongs to a conversation
+   // OTHER than the one on screen — a background turn's frame that must not render
+   // into the active view (mirrors streaming.js isBackgroundStream). Untagged
+   // payloads (no conversation_id — global/control frames) are never foreign.
+   function isForeignConvFrame(payload) {
+      const c = payload && payload.conversation_id;
+      if (!c) return false;
+      const a =
+         typeof DawnHistory !== 'undefined' && DawnHistory.getActiveConversationId
+            ? DawnHistory.getActiveConversationId()
+            : null;
+      return String(c) !== String(a || '');
+   }
+
    function handleTextMessage(data) {
       try {
          const msg = JSON.parse(data);
@@ -51,6 +66,10 @@
 
          switch (msg.type) {
             case 'state':
+               // A background turn's state (thinking/speaking/idle for a conversation
+               // not on screen) must not drive the pill. Untagged states (no
+               // conversation_id — global: idle-at-rest, listening) always apply.
+               if (isForeignConvFrame(msg.payload)) break;
                updateState(msg.payload.state, msg.payload.detail, msg.payload.tools);
                break;
             case 'force_logout':
@@ -76,6 +95,11 @@
                   } catch (e) {
                      console.error('Failed to parse LLM state update:', e);
                   }
+               } else if (isForeignConvFrame(msg.payload)) {
+                  // Live transcript frame (tool debug / inline visual / assistant /
+                  // user echo) from a turn in a conversation NOT on screen — skip so
+                  // a background turn's rows/visuals don't render into the active view.
+                  // (The sidebar generating dot is already driven by stream/thinking.)
                } else if (msg.payload.role === 'tool') {
                   // Tool debug messages - display only, don't save to history.
                   // E3: a native tool call means the preceding iteration's reasoning is
@@ -441,6 +465,10 @@
                // turn_id / items / filter_rejections all top-level) — NOT
                // wrapped under msg.payload like silent_observation.  See
                // src/webui/webui_server.c::webui_broadcast_context_injection.
+               // A background turn's injection must not update the active view's
+               // "Context for this turn" panel — conversation_id is at the root, so
+               // gate on msg itself (not msg.payload).
+               if (isForeignConvFrame(msg)) break;
                if (window.DawnContextInjection) {
                   window.DawnContextInjection.handleEvent(msg);
                }
@@ -459,6 +487,10 @@
                // LLM response complete — next context message will have fresh data
                DawnHistory.clearContextGuard();
                break;
+            case 'stream_resume':
+               // Server replay of an in-flight turn when switching to its conversation
+               DawnStreaming.handleResume(msg.payload);
+               break;
             case 'thinking_start':
                DawnStreaming.handleThinkingStart(msg.payload);
                break;
@@ -472,6 +504,7 @@
                DawnStreaming.handleReasoningSummary(msg.payload);
                break;
             case 'visual_progress_start':
+               if (isForeignConvFrame(msg.payload)) break; // background turn's visual — skip
                if (typeof DawnVisualRender !== 'undefined' && DawnVisualRender.showProgress) {
                   DawnVisualRender.showProgress(msg.payload);
                }
@@ -1124,10 +1157,34 @@
          }
       }
 
+      // Fresh chat: create the conversation row FIRST (ordered before this text on
+      // the wire) so the server tags this turn's frames with the real conversation
+      // id, not 0 — otherwise a backgrounded turn can't be routed and its output
+      // bleeds into whatever conversation is on screen.
+      if (
+         typeof DawnHistory !== 'undefined' &&
+         DawnHistory.beginConversationBeforeSend &&
+         !DawnHistory.getActiveConversationId()
+      ) {
+         DawnHistory.beginConversationBeforeSend(text);
+      }
+
       const msg = {
          type: 'text',
          payload: { text: messageText },
       };
+
+      // Tell the server which conversation this message belongs to, so it tags
+      // this turn's frames explicitly instead of inferring from the live view
+      // (robust across reconnect/multi-tab). Null for a fresh chat — the
+      // pre-create above establishes it by wire ordering instead.
+      const activeConvId =
+         typeof DawnHistory !== 'undefined' && DawnHistory.getActiveConversationId
+            ? DawnHistory.getActiveConversationId()
+            : null;
+      if (activeConvId) {
+         msg.payload.conversation_id = activeConvId;
+      }
 
       // Add vision images if pending (supports multiple)
       const pendingImages = DawnVision.getPendingImages();
@@ -1160,6 +1217,10 @@
       // conversation once (the duplicate-restore guard in the session handler).
       if (status !== 'connected') {
          restoredConvIdThisConnection = null;
+         // Background turns are aborted server-side on disconnect — drop stale dots.
+         if (typeof DawnHistory !== 'undefined' && DawnHistory.clearGenerating) {
+            DawnHistory.clearGenerating();
+         }
       }
       DawnElements.connectionStatus.className = status;
       DawnElements.connectionStatus.title = ''; // Clear any previous tooltip

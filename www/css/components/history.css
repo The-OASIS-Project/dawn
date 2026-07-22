@@ -812,3 +812,46 @@
       margin-left: 1rem;
    }
 }
+
+/* =============================================================================
+ * Background-turn "generating" indicator
+ *
+ * Shown on a conversation's sidebar row when it is streaming a turn while NOT
+ * being viewed (background-jobs delta routing) — so progress is visible without
+ * its tokens rendering into the active view.  An absolutely-positioned pulsing
+ * accent dot in the left gutter: toggling it never shifts the title text, and it
+ * stays steady across tool-loop iterations.  Falls back to a static dot under
+ * prefers-reduced-motion.
+ * ============================================================================= */
+
+.history-item.generating::before {
+   content: '';
+   position: absolute;
+   left: 0.5rem;
+   top: 50%;
+   transform: translateY(-50%);
+   width: 6px;
+   height: 6px;
+   border-radius: 50%;
+   background: var(--accent);
+   animation: history-generating-pulse 1.1s ease-in-out infinite;
+   pointer-events: none;
+}
+
+@keyframes history-generating-pulse {
+   0%,
+   100% {
+      opacity: 1;
+   }
+   50% {
+      opacity: 0.3;
+   }
+}
+
+/* Static dot for users who prefer reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+   .history-item.generating::before {
+      animation: none;
+      opacity: 1;
+   }
+}

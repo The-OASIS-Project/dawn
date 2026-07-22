@@ -103,7 +103,8 @@ void send_state_impl(struct lws *wsi, const char *state, const char *detail);
 void send_state_impl_full(struct lws *wsi,
                           const char *state,
                           const char *detail,
-                          const char *tools_json);
+                          const char *tools_json,
+                          int64_t conversation_id);
 void send_audio_impl(struct lws *wsi, const uint8_t *data, size_t len);
 void send_audio_end_impl(struct lws *wsi, bool is_opus);
 
@@ -122,19 +123,38 @@ void send_metrics_impl(struct lws *wsi,
                        float token_rate,
                        int context_tokens);
 void send_music_position_impl(struct lws *wsi, double position_sec, uint32_t duration_sec);
-void send_reasoning_summary_impl(struct lws *wsi, uint32_t stream_id, int reasoning_tokens);
+void send_reasoning_summary_impl(struct lws *wsi,
+                                 uint32_t stream_id,
+                                 int64_t conversation_id,
+                                 int reasoning_tokens);
 void send_session_token_impl(ws_connection_t *conn, const char *token);
-void send_stream_start_impl(struct lws *wsi, uint32_t stream_id);
-void send_stream_delta_impl(struct lws *wsi, uint32_t stream_id, const char *text);
-void send_stream_end_impl(struct lws *wsi, uint32_t stream_id, const char *reason);
-void send_thinking_start_impl(struct lws *wsi, uint32_t stream_id, const char *provider);
-void send_thinking_delta_impl(struct lws *wsi, uint32_t stream_id, const char *text);
-void send_thinking_end_impl(struct lws *wsi, uint32_t stream_id, int has_content);
+void send_stream_start_impl(struct lws *wsi, uint32_t stream_id, int64_t conversation_id);
+void send_stream_delta_impl(struct lws *wsi,
+                            uint32_t stream_id,
+                            int64_t conversation_id,
+                            const char *text);
+void send_stream_end_impl(struct lws *wsi,
+                          uint32_t stream_id,
+                          int64_t conversation_id,
+                          const char *reason);
+void send_thinking_start_impl(struct lws *wsi,
+                              uint32_t stream_id,
+                              int64_t conversation_id,
+                              const char *provider);
+void send_thinking_delta_impl(struct lws *wsi,
+                              uint32_t stream_id,
+                              int64_t conversation_id,
+                              const char *text);
+void send_thinking_end_impl(struct lws *wsi,
+                            uint32_t stream_id,
+                            int64_t conversation_id,
+                            int has_content);
 void send_transcript_impl_ex(struct lws *wsi,
                              const char *role,
                              const char *text,
                              bool replay,
-                             bool server_saved);
+                             bool server_saved,
+                             int64_t conversation_id);
 
 /* =============================================================================
  * Audio Send (used by webui_audio.c)

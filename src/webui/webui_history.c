@@ -31,6 +31,7 @@
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
+#include "core/conv_stream.h"
 #include "core/ocp_helpers.h"
 #include "core/session_manager.h"
 #include "image_store.h"
@@ -411,6 +412,15 @@ void handle_new_conversation(ws_connection_t *conn, struct json_object *payload)
 
       /* Update active conversation tracking */
       conn->active_conversation_id = conv_id;
+
+      /* Back-fill the in-flight turn's conversation tag if it was dispatched
+       * before this row existed (fresh-chat first message: the text is dispatched,
+       * then this new_conversation creates the row).  Only overwrite the
+       * uninitialized (0) value so an established turn's tag is never clobbered.
+       * This is the server-side safety net for the client's pre-create ordering. */
+      if (conn->session && conn->session->stream_conversation_id == 0) {
+         conn->session->stream_conversation_id = conv_id;
+      }
    } else if (result == AUTH_DB_LIMIT_EXCEEDED) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error",
@@ -832,6 +842,30 @@ void handle_load_conversation(ws_connection_t *conn, struct json_object *payload
          json_object_object_add(response, "payload", resp_payload);
          send_json_response(conn, response);
          json_object_put(response);
+
+         /* If this conversation has an IN-FLIGHT turn, replay its partial so the
+          * client shows the mid-stream state and resumes live rendering.  Only
+          * when still active — a finished turn's final text is already in the
+          * loaded messages above, so resuming it would double-render. */
+         bool sr_active = false, sr_trunc = false;
+         uint32_t sr_sid = 0;
+         char *sr_partial = conv_stream_dup_partial(conv_id, &sr_active, &sr_sid, &sr_trunc);
+         if (sr_partial != NULL) {
+            if (sr_active) {
+               struct json_object *sr = json_object_new_object();
+               struct json_object *sp = json_object_new_object();
+               json_object_object_add(sp, "conversation_id", json_object_new_int64(conv_id));
+               json_object_object_add(sp, "stream_id", json_object_new_int((int32_t)sr_sid));
+               json_object_object_add(sp, "partial", json_object_new_string(sr_partial));
+               json_object_object_add(sp, "truncated", json_object_new_boolean(sr_trunc));
+               json_object_object_add(sr, "type", json_object_new_string("stream_resume"));
+               json_object_object_add(sr, "payload", sp);
+               send_json_response(conn, sr);
+               json_object_put(sr);
+            }
+            free(sr_partial);
+         }
+
          conv_free(&conv);
          return;
       } else {
@@ -941,6 +975,9 @@ void handle_delete_conversation(ws_connection_t *conn, struct json_object *paylo
    int result = conv_db_delete(conv_id, conn->auth_user_id);
 
    if (result == AUTH_DB_SUCCESS) {
+      /* Free any live-partial replay-ring entry for the deleted conversation. */
+      conv_stream_clear(conv_id);
+
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
       json_object_object_add(resp_payload, "message",
                              json_object_new_string("Conversation deleted"));

@@ -181,8 +181,24 @@ static const char *SCHEMA_SQL =
      * or CURRENT_TIMESTAMP): SQLite's fast ALTER TABLE ADD COLUMN path requires
      * a literal default, otherwise migration becomes a full table rewrite. */
     "   anchor_date INTEGER NOT NULL DEFAULT 0,"
+    /* Background-jobs (v72): a job IS a parented conversation.  parent_id NULL =
+     * root/user-initiated; job_status NULL = not a job.  All literal DEFAULTs keep
+     * the ALTER fast.  The parent_id index lives in the v72 migration, not here
+     * (base schema runs before migrations).  See docs/BACKGROUND_JOBS_DESIGN.md. */
+    "   parent_id INTEGER DEFAULT NULL,"
+    "   spawn_mode TEXT DEFAULT NULL,"
+    "   on_complete TEXT DEFAULT NULL,"
+    "   on_complete_fired INTEGER NOT NULL DEFAULT 0,"
+    "   job_status TEXT DEFAULT NULL,"
+    "   job_error TEXT DEFAULT NULL,"
+    "   spawn_depth INTEGER NOT NULL DEFAULT 0,"
+    "   reinvoke_count INTEGER NOT NULL DEFAULT 0,"
+    "   started_at INTEGER NOT NULL DEFAULT 0,"
+    "   finished_at INTEGER NOT NULL DEFAULT 0,"
+    "   workspace_ref TEXT DEFAULT NULL,"
     "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
-    "   FOREIGN KEY (continued_from) REFERENCES conversations(id) ON DELETE SET NULL"
+    "   FOREIGN KEY (continued_from) REFERENCES conversations(id) ON DELETE SET NULL,"
+    "   FOREIGN KEY (parent_id) REFERENCES conversations(id) ON DELETE SET NULL"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id, updated_at DESC);"
     "CREATE INDEX IF NOT EXISTS idx_conversations_search ON conversations(user_id, title);"
@@ -207,6 +223,25 @@ static const char *SCHEMA_SQL =
     "   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, id ASC);"
+
+    /* conversation_events (v72): durable step-granular log for the background-jobs
+     * observe/replay contract (status | tool_call | tool_result | terminal_chunk |
+     * spawn | complete).  seq is per-conversation monotonic.  Live tokens are NOT
+     * persisted here (in-memory replay ring only); final assistant text stays in
+     * `messages`.  New table -> table + index are both safe in the base schema. */
+    "CREATE TABLE IF NOT EXISTS conversation_events ("
+    "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "   conversation_id INTEGER NOT NULL,"
+    "   seq INTEGER NOT NULL,"
+    "   kind TEXT NOT NULL,"
+    "   payload TEXT,"
+    "   created_at INTEGER NOT NULL,"
+    "   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
+    ");"
+    /* UNIQUE enforces the per-conversation monotonic seq invariant at the DB
+     * layer (seq is assigned MAX(seq)+1 under the auth_db mutex). */
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_events ON conversation_events(conversation_id, seq "
+    "ASC);"
 
     /* Session metrics table (added in schema v8) */
     "CREATE TABLE IF NOT EXISTS session_metrics ("

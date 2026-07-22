@@ -39,8 +39,85 @@
     * Handle stream_start: Create new assistant entry for streaming
     * @param {Object} payload - Stream start payload with stream_id
     */
+   /**
+    * True if this stream belongs to a conversation OTHER than the one currently
+    * being viewed — a background turn whose tokens must NOT render into the active
+    * view. A stream with no conversation_id, or when the view isn't yet bound to a
+    * conversation, is treated as the active stream (render normally).
+    * @param {Object} payload
+    */
+   function isBackgroundStream(payload) {
+      const streamConv = payload && payload.conversation_id;
+      // No conversation id (fresh chat's first turn before the row exists, or a
+      // non-WebUI client) → render in place.
+      if (!streamConv) return false;
+      const activeConv =
+         typeof DawnHistory !== 'undefined' && DawnHistory.getActiveConversationId
+            ? DawnHistory.getActiveConversationId()
+            : null;
+      // View not bound to a conversation (e.g. a fresh "New Chat" pane): a frame
+      // that carries a real conversation id can only be a background turn — never
+      // render it here.
+      if (!activeConv) return true;
+      // Purely conversation-based: a frame is background iff it belongs to a
+      // conversation other than the one on screen — independent of any
+      // (possibly stale) local streamingState. Compare as strings — conversation
+      // ids are DB rowids that can exceed 2^53.
+      return String(streamConv) !== String(activeConv);
+   }
+
+   /**
+    * Clear streaming state WITHOUT persisting it. Used when the user switches
+    * away from a streaming conversation (the partial belongs to that conversation
+    * and will be re-established via stream_resume on switch-back or persisted by
+    * the server once server-side persistence lands). Distinct from
+    * finalizeStream(), which SAVES the content — calling that here would leak the
+    * partial into the newly-active conversation.
+    */
+   function resetStreamingStateSilently() {
+      if (DawnState.streamingState.entryElement) {
+         DawnState.streamingState.entryElement.classList.remove('streaming');
+      }
+      DawnState.streamingState.active = false;
+      DawnState.streamingState.streamId = null;
+      DawnState.streamingState.entryElement = null;
+      DawnState.streamingState.textElement = null;
+      DawnState.streamingState.content = '';
+      DawnState.streamingState.preVisualContent = '';
+      DawnState.streamingState.pendingRender = false;
+      // Drop any stale thinking + reasoning state (it belonged to the conversation
+      // we left — otherwise the next conversation's finalizeStream would prepend
+      // this turn's pre-visual text / attach its reasoning to the wrong message).
+      if (DawnState.thinkingState) {
+         DawnState.thinkingState.active = false;
+      }
+      clearReasoningState();
+      if (typeof DawnVisualization !== 'undefined' && DawnVisualization.stopHesitation) {
+         DawnVisualization.stopHesitation();
+      }
+      // Reset the status pill for the conversation we're switching to — it isn't
+      // generating from this view's perspective.  If the conversation we land on
+      // has an in-flight turn, handleStreamResume re-raises the pill to "speaking".
+      if (callbacks.onStateChange) {
+         callbacks.onStateChange('idle', '');
+      }
+   }
+
+   function markGenerating(convId, generating) {
+      if (typeof DawnHistory !== 'undefined' && DawnHistory.setConversationGenerating) {
+         DawnHistory.setConversationGenerating(convId, generating);
+      }
+   }
+
    function handleStreamStart(payload) {
       console.log('Stream start:', payload);
+
+      // A turn for a conversation the user isn't viewing: show a sidebar
+      // indicator and do NOT open a bubble in the active transcript.
+      if (isBackgroundStream(payload)) {
+         markGenerating(payload.conversation_id, true);
+         return;
+      }
 
       // Update status to show responding
       if (callbacks.onStateChange) {
@@ -101,6 +178,14 @@
     * @param {Object} payload - Stream delta payload with stream_id and delta
     */
    function handleStreamDelta(payload) {
+      // Background conversation's token — keep the sidebar indicator live, but do
+      // not render into the active view. The text accumulates server-side in the
+      // replay ring and is replayed on switch-back (stream_resume).
+      if (isBackgroundStream(payload)) {
+         markGenerating(payload.conversation_id, true);
+         return;
+      }
+
       // Ignore deltas for different stream IDs
       if (
          !DawnState.streamingState.active ||
@@ -190,6 +275,16 @@
    function handleStreamEnd(payload) {
       console.log('Stream end:', payload);
 
+      // Background conversation's turn: keep the sidebar indicator lit across
+      // tool-loop iteration boundaries (each iteration re-issues stream_start/end);
+      // clear it only when the whole turn is actually done.
+      if (isBackgroundStream(payload)) {
+         if (payload.reason !== 'tool_iteration') {
+            markGenerating(payload.conversation_id, false);
+         }
+         return;
+      }
+
       // Ignore end for different stream IDs
       if (payload.stream_id !== DawnState.streamingState.streamId) {
          console.warn(
@@ -212,6 +307,60 @@
       }
 
       finalizeStream();
+   }
+
+   /**
+    * Handle stream_resume: sent by the server when the client switches TO a
+    * conversation that has an in-flight turn. Rebuilds the streaming bubble from
+    * the partial text accumulated server-side and resumes live rendering, so
+    * subsequent (now-foreground) deltas append seamlessly.
+    * @param {Object} payload - { conversation_id, stream_id, partial, truncated }
+    */
+   function handleStreamResume(payload) {
+      if (!payload || typeof payload.partial !== 'string') return;
+
+      // Only resume into the conversation actually being viewed.
+      const activeConv =
+         typeof DawnHistory !== 'undefined' && DawnHistory.getActiveConversationId
+            ? DawnHistory.getActiveConversationId()
+            : null;
+      if (activeConv && String(payload.conversation_id) !== String(activeConv)) return;
+
+      // Clear the sidebar indicator for the now-foreground conversation.
+      markGenerating(payload.conversation_id, false);
+
+      // Discard any prior streaming state WITHOUT saving (its bubble belonged to
+      // the old view; saving it here would persist it into this conversation).
+      resetStreamingStateSilently();
+
+      const transcript = DawnElements.transcript;
+      if (!transcript) return;
+      const placeholder = transcript.querySelector('.transcript-placeholder');
+      if (placeholder) placeholder.remove();
+
+      const entry = document.createElement('div');
+      entry.className = 'transcript-entry assistant streaming';
+      entry.setAttribute('aria-live', 'polite');
+      entry.setAttribute('aria-atomic', 'false');
+      entry.innerHTML = `
+        <div class="role">assistant</div>
+        <div class="text"></div>
+      `;
+      transcript.appendChild(entry);
+
+      DawnState.streamingState.active = true;
+      DawnState.streamingState.streamId = payload.stream_id;
+      DawnState.streamingState.entryElement = entry;
+      DawnState.streamingState.textElement = entry.querySelector('.text');
+      DawnState.streamingState.content = payload.partial;
+      DawnState.streamingState.lastRenderMs = 0;
+      DawnState.streamingState.pendingRender = false;
+      renderStreamingContent();
+      transcript.scrollTop = transcript.scrollHeight;
+
+      if (callbacks.onStateChange) {
+         callbacks.onStateChange('speaking', 'Responding');
+      }
    }
 
    /**
@@ -400,6 +549,13 @@
    function handleThinkingStart(payload) {
       console.log('Thinking start:', payload);
 
+      // Thinking for a conversation the user isn't viewing: sidebar indicator
+      // only, never render into the active transcript.
+      if (isBackgroundStream(payload)) {
+         markGenerating(payload.conversation_id, true);
+         return;
+      }
+
       // Cancel any existing thinking block
       if (DawnState.thinkingState.active) {
          console.warn('Thinking start received while already thinking');
@@ -477,6 +633,12 @@
     * @param {Object} payload - { stream_id, delta }
     */
    function handleThinkingDelta(payload) {
+      // Background conversation's thinking — do not render into the active view.
+      if (isBackgroundStream(payload)) {
+         markGenerating(payload.conversation_id, true);
+         return;
+      }
+
       // Ignore deltas for inactive or mismatched streams
       if (!DawnState.thinkingState.active) {
          return;
@@ -533,6 +695,10 @@
     */
    function handleThinkingEnd(payload) {
       console.log('Thinking end:', payload);
+      // Background conversation's thinking ended — nothing to finalize in view.
+      if (isBackgroundStream(payload)) {
+         return;
+      }
       finalizeThinking(payload.has_content);
    }
 
@@ -676,6 +842,14 @@
    function handleReasoningSummary(payload) {
       console.log('Reasoning summary:', payload);
 
+      // Background conversation's reasoning summary — don't render it into the
+      // active view, and (critically) don't clobber the active view's
+      // streamingState.reasoningTokens with this background turn's count.
+      if (isBackgroundStream(payload)) {
+         markGenerating(payload.conversation_id, true);
+         return;
+      }
+
       const transcript = DawnElements.transcript;
       if (!transcript) return;
 
@@ -751,6 +925,8 @@
       handleStart: handleStreamStart,
       handleDelta: handleStreamDelta,
       handleEnd: handleStreamEnd,
+      handleResume: handleStreamResume,
+      resetSilently: resetStreamingStateSilently,
       finalize: finalizeStream,
       setCallbacks: setCallbacks,
       // Thinking handlers
