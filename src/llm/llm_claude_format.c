@@ -536,6 +536,56 @@ static void add_vision_to_claude_messages(json_object *messages_array,
    }
 }
 
+/**
+ * @brief Parse the leading version number out of a Claude model id.
+ *
+ * Takes the first numeric token that follows a delimiter, e.g.
+ * "claude-opus-4-8" -> 4.8, "claude-sonnet-5" -> 5.0, "claude-haiku-4-5" -> 4.5,
+ * "claude-fable-5" -> 5.0, "claude-3-5-sonnet-20241022" -> 3.5.  The version is
+ * always the first version token in current Claude ids, so a trailing date
+ * suffix does not interfere.
+ */
+static void claude_parse_model_version(const char *model_name, int *major_out, int *minor_out) {
+   int major = 0, minor = 0;
+   const char *p = model_name ? model_name : "";
+   while (*p) {
+      if ((*p >= '0' && *p <= '9') && (p == model_name || *(p - 1) == '-' || *(p - 1) == '.')) {
+         major = atoi(p);
+         while (*p >= '0' && *p <= '9') {
+            p++;
+         }
+         if ((*p == '-' || *p == '.') && (*(p + 1) >= '0' && *(p + 1) <= '9')) {
+            minor = atoi(p + 1);
+         }
+         break;
+      }
+      p++;
+   }
+   *major_out = major;
+   *minor_out = minor;
+}
+
+/**
+ * @brief Whether a Claude model requires adaptive thinking instead of the
+ *        legacy `thinking.type=enabled` + `budget_tokens` shape.
+ *
+ * Anthropic removed `thinking.type=enabled` / `budget_tokens` on Opus 4.7+,
+ * Sonnet 5, and Fable/Mythos 5 — those models reject it with a 400 and require
+ * `thinking.type=adaptive` + `output_config.effort`.  Opus 4.6 / Sonnet 4.6,
+ * Haiku 4.5, Sonnet 4.5, and older still accept the legacy enabled+budget shape.
+ */
+static bool claude_model_requires_adaptive_thinking(const char *model_name) {
+   int major = 0, minor = 0;
+   claude_parse_model_version(model_name, &major, &minor);
+   if (major >= 5) {
+      return true; /* Sonnet 5, Fable 5, Mythos 5, and future 5.x */
+   }
+   if (major == 4 && minor >= 7) {
+      return true; /* Opus 4.7, 4.8 */
+   }
+   return false;
+}
+
 json_object *convert_to_claude_format(struct json_object *openai_conversation,
                                       const char *input_text,
                                       const char **vision_images,
@@ -655,13 +705,33 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
    }
    json_object_object_add(claude_request, "max_tokens", json_object_new_int(max_tokens));
 
-   // Add extended thinking configuration
+   // Add extended thinking configuration.  Newer Claude models (Opus 4.7+,
+   // Sonnet 5, Fable/Mythos 5) reject `thinking.type=enabled` + `budget_tokens`
+   // with a 400 and require `thinking.type=adaptive` + `output_config.effort`;
+   // older models still use the legacy enabled+budget shape.
    if (thinking_enabled) {
       json_object *thinking = json_object_new_object();
-      json_object_object_add(thinking, "type", json_object_new_string("enabled"));
-      json_object_object_add(thinking, "budget_tokens", json_object_new_int(thinking_budget));
-      json_object_object_add(claude_request, "thinking", thinking);
-      OLOG_INFO("Claude: Extended thinking enabled (budget: %d tokens)", thinking_budget);
+      if (claude_model_requires_adaptive_thinking(model_name)) {
+         json_object_object_add(thinking, "type", json_object_new_string("adaptive"));
+         /* Default display is "omitted" on these models (empty thinking text);
+          * request "summarized" so DAWN's thinking UI still shows reasoning. */
+         json_object_object_add(thinking, "display", json_object_new_string("summarized"));
+         json_object_object_add(claude_request, "thinking", thinking);
+
+         const char *effort = llm_get_current_reasoning_effort();
+         if (!effort || effort[0] == '\0') {
+            effort = "medium";
+         }
+         json_object *output_config = json_object_new_object();
+         json_object_object_add(output_config, "effort", json_object_new_string(effort));
+         json_object_object_add(claude_request, "output_config", output_config);
+         OLOG_INFO("Claude: Adaptive thinking enabled (effort: %s)", effort);
+      } else {
+         json_object_object_add(thinking, "type", json_object_new_string("enabled"));
+         json_object_object_add(thinking, "budget_tokens", json_object_new_int(thinking_budget));
+         json_object_object_add(claude_request, "thinking", thinking);
+         OLOG_INFO("Claude: Extended thinking enabled (budget: %d tokens)", thinking_budget);
+      }
    }
 
    // Add tools if native tool calling is enabled
