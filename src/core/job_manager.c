@@ -670,8 +670,17 @@ void jobs_monitor_tick(time_t now) {
 
    job_record_t rows[JOB_MONITOR_MAX_PER_TICK];
    int n = 0;
-   if (conv_db_job_list_pending_followups(max, rows, &n) != AUTH_DB_SUCCESS || n == 0) {
+   if (conv_db_job_list_pending_followups(max, rows, &n) != AUTH_DB_SUCCESS) {
+      /* Re-arm the gate: the scan was cleared above, so returning without it
+       * would strand every pending follow-up until some UNRELATED job transition
+       * happened to mark dirty again — on an otherwise idle system, never.
+       * A transient SQLITE_BUSY must cost one tick, not the delivery. */
+      atomic_store(&s_jobs_dirty, true);
+      OLOG_WARNING("jobs_monitor_tick: follow-up scan failed; retrying next tick");
       return;
+   }
+   if (n == 0) {
+      return; /* genuinely nothing pending — leave the gate closed */
    }
    /* Drained a full batch → likely more waiting; keep the gate hot. */
    if (n >= max) {

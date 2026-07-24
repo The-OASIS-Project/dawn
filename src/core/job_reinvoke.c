@@ -471,15 +471,25 @@ static void reinvoke_run_detached(reinvoke_work_t *w,
 
    bool cancelled = atomic_load(&s->cancel_requested);
    if (!cancelled && response != NULL && response[0] != '\0') {
+      /* Mark fired ONLY once the reply is durably stored (invariant C3).  This
+       * path is detached: there is no client to client-save the reply, so this
+       * insert is the only durable store.  Firing on a failed persist would
+       * permanently suppress the follow-up AND lose the output — the exact
+       * silent-loss shape the invariant exists to prevent.  Leaving the rows
+       * unfired lets the monitor retry on a later tick; retries stay bounded
+       * because build_envelope() bumps each job's reinvoke count per attempt and
+       * force-fires past max_reinvokes_per_tree. */
       if (conv_db_add_message_with_tools(w->parent_conv, w->user_id, "assistant", response, NULL,
-                                         NULL, NULL, NULL) != AUTH_DB_SUCCESS) {
-         OLOG_WARNING("job_reinvoke: failed to persist re-engagement reply to parent %lld",
-                      (long long)w->parent_conv);
+                                         NULL, NULL, NULL) == AUTH_DB_SUCCESS) {
+         conv_db_job_mark_fired_many(fired_ids, n_fired);
+         job_reinvoke_notify_conv_appended(w->user_id, w->parent_conv);
+         OLOG_INFO("job_reinvoke: re-engaged parent %lld (detached) with %d job result(s)",
+                   (long long)w->parent_conv, n_fired);
+      } else {
+         OLOG_ERROR("job_reinvoke: failed to persist re-engagement reply to parent %lld; "
+                    "leaving %d job(s) unfired so the monitor retries",
+                    (long long)w->parent_conv, n_fired);
       }
-      conv_db_job_mark_fired_many(fired_ids, n_fired);
-      job_reinvoke_notify_conv_appended(w->user_id, w->parent_conv);
-      OLOG_INFO("job_reinvoke: re-engaged parent %lld (detached) with %d job result(s)",
-                (long long)w->parent_conv, n_fired);
    } else {
       OLOG_WARNING("job_reinvoke: detached re-engage of parent %lld empty/cancelled; retrying",
                    (long long)w->parent_conv);
