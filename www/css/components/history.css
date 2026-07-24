@@ -361,6 +361,17 @@
    gap: 0.4rem;
 }
 
+/* The title text is its own flex item so it ellipsizes deterministically —
+ * text-overflow on the flex container does not reliably clip a bare anonymous
+ * text run, and the leading status icons + jobs pill compete for the row's width
+ * in the narrow sidebar.  min-width:0 lets it shrink below its content width. */
+.history-item-title-text {
+   min-width: 0;
+   overflow: hidden;
+   text-overflow: ellipsis;
+   white-space: nowrap;
+}
+
 .history-item-title.title-updated {
    animation: title-flash 0.6s ease-out;
 }
@@ -854,4 +865,47 @@
       animation: none;
       opacity: 1;
    }
+}
+
+/* "Done / unread" indicator — a steady (non-pulsing) success dot on a
+ * conversation that gained external content (a background turn or job completing,
+ * or a channel message arriving) while you were viewing elsewhere, so it's never
+ * silent.  Same left gutter as the generating dot (the two are mutually exclusive:
+ * generating clears when the turn ends, then done-unread sets).  Cleared when you
+ * view the conversation.  The generating dot wins if both classes are somehow
+ * present. */
+.history-item.done-unread:not(.generating)::before {
+   content: '';
+   position: absolute;
+   left: 0.5rem;
+   top: 50%;
+   transform: translateY(-50%);
+   width: 6px;
+   height: 6px;
+   border-radius: 50%;
+   background: var(--success);
+   pointer-events: none;
+}
+
+/* Per-conversation "background jobs running" badge — an inline amber pill (⚙ N)
+ * at the start of the sidebar title, mirroring the composer/global jobs pill.
+ * Shown while ≥1 background job whose parent is this conversation is running;
+ * removed when the count hits 0 (then the done-unread dot may take over). */
+.history-item-jobs {
+   display: inline-flex;
+   align-items: center;
+   flex: none;
+   padding: 0 5px;
+   height: 15px;
+   border-radius: 999px;
+   background: var(--bg-secondary);
+   color: var(--warning); /* amber — matches the composer/global jobs pill */
+   border: 1px solid var(--warning-border);
+   font-family: var(--font-mono, 'IBM Plex Mono', monospace);
+   font-size: 0.6rem;
+   font-weight: 600;
+   line-height: 1;
+   letter-spacing: 0.02em;
+   white-space: nowrap;
+   vertical-align: middle;
 }

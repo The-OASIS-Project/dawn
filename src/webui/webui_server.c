@@ -2658,6 +2658,7 @@ void webui_send_metrics_update(session_t *session,
    resp.metrics.ttft_ms = ttft_ms;
    resp.metrics.token_rate = token_rate;
    resp.metrics.context_pct = context_percent;
+   resp.metrics.conversation_id = atomic_load(&session->stream_conversation_id);
 
    queue_response(&resp);
 }

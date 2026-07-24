@@ -514,6 +514,10 @@
                }
                break;
             case 'metrics_update':
+               // A background turn's tok/s / TTFT must not update the footer of the
+               // view you're on. payload carries conversation_id; untagged (conv 0)
+               // idle/global metrics still apply.
+               if (isForeignConvFrame(msg.payload)) break;
                DawnMetrics.handleUpdate(msg.payload);
                break;
             // User management responses

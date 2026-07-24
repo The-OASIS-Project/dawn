@@ -263,6 +263,8 @@ typedef struct {
          int ttft_ms;      /* Time to first token (ms) */
          float token_rate; /* Tokens per second */
          int context_pct;  /* Context utilization 0-100 */
+         int64_t
+             conversation_id; /* turn's conversation — client gates the footer to the active view */
       } metrics;
       struct {
          int tokens_before;

@@ -35,6 +35,15 @@ window.DawnJobsActivity = (function () {
       return t;
    }
 
+   // Authoritative active-job count for a conversation (0 if none) — read by the
+   // sidebar to show a per-conversation "jobs running" badge on the history row.
+   function getCount(convId) {
+      if (convId == null) {
+         return 0;
+      }
+      return byParent[String(convId)] || 0;
+   }
+
    function plural(n) {
       return n + ' background task' + (n === 1 ? '' : 's') + ' running';
    }
@@ -44,7 +53,13 @@ window.DawnJobsActivity = (function () {
          return;
       }
       if (n > 0) {
-         el.textContent = '⚙︎ ' + n; // gear (text-presentation VS) + count
+         // Visible "⚙︎ N" is aria-hidden so a screen reader reads the descriptive
+         // aria-label instead of the raw gear glyph (announcement of ⚙︎ is AT-dependent).
+         el.textContent = '';
+         const glyph = document.createElement('span');
+         glyph.setAttribute('aria-hidden', 'true');
+         glyph.textContent = '⚙︎ ' + n; // gear (text-presentation VS) + count
+         el.appendChild(glyph);
          el.title = tooltip;
          el.setAttribute('aria-label', tooltip);
          el.classList.remove('hidden');
@@ -85,13 +100,17 @@ window.DawnJobsActivity = (function () {
          return;
       }
       var key = String(convId);
-      var c = Number(count); // defend total() against a stringy count
-      if (c > 0) {
+      var c = Number(count); // defend total() against a stringy/non-finite count
+      if (Number.isFinite(c) && c > 0) {
          byParent[key] = c;
       } else {
          delete byParent[key];
       }
       renderAll();
+      // Patch just this conversation's sidebar badge (no full list re-render).
+      if (typeof DawnHistory !== 'undefined' && DawnHistory.updateConversationJobsBadge) {
+         DawnHistory.updateConversationJobsBadge(key);
+      }
    }
 
    // jobs_activity_snapshot: replace the whole map (connect/reconnect).
@@ -99,12 +118,17 @@ window.DawnJobsActivity = (function () {
       byParent = Object.create(null);
       if (Array.isArray(list)) {
          list.forEach(function (e) {
-            if (e && e.conversation_id != null && Number(e.active_count) > 0) {
-               byParent[String(e.conversation_id)] = Number(e.active_count);
+            var c = e ? Number(e.active_count) : NaN;
+            if (e && e.conversation_id != null && Number.isFinite(c) && c > 0) {
+               byParent[String(e.conversation_id)] = c;
             }
          });
       }
       renderAll();
+      // Snapshot replaced the whole map — reconcile every rendered sidebar row.
+      if (typeof DawnHistory !== 'undefined' && DawnHistory.refreshAllJobsBadges) {
+         DawnHistory.refreshAllJobsBadges();
+      }
    }
 
    // --- lifecycle hooks ------------------------------------------------------
@@ -134,5 +158,6 @@ window.DawnJobsActivity = (function () {
       applySnapshot: applySnapshot,
       handleReconnect: handleReconnect,
       onConversationSwitch: onConversationSwitch,
+      getCount: getCount,
    };
 })();

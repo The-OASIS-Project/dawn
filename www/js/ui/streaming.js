@@ -281,6 +281,11 @@
       if (isBackgroundStream(payload)) {
          if (payload.reason !== 'tool_iteration') {
             markGenerating(payload.conversation_id, false);
+            // Turn finished while you were viewing elsewhere — leave a steady "done"
+            // mark on its sidebar row (cleared when you view it) so it isn't silent.
+            if (typeof DawnHistory !== 'undefined' && DawnHistory.setConversationUnread) {
+               DawnHistory.setConversationUnread(payload.conversation_id, true);
+            }
          }
          return;
       }

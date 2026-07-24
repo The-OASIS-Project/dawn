@@ -20,6 +20,7 @@
       pendingMessages: [], // Messages to save once conversation is created
       creatingConversation: false, // Prevent duplicate creation
       generatingConvIds: new Set(), // conv ids currently streaming a background turn
+      unreadConvIds: new Set(), // conv ids whose background turn finished while you viewed elsewhere (cleared on view; client-local, resets on reload)
       // Monotonic token bumped on every conversation load. The async message-render
       // loop captures it and bails if a newer load starts mid-render — prevents two
       // concurrent renders (e.g. on reconnect) from interleaving messages, misplacing
@@ -167,6 +168,8 @@
       historyState.activeConversationId = id;
       if (id) {
          sessionStorage.setItem('dawn_active_conversation', id.toString());
+         // Viewing a conversation clears its background-completion "done/unread" mark.
+         setConversationUnread(id, false);
       } else {
          sessionStorage.removeItem('dawn_active_conversation');
       }
@@ -218,7 +221,117 @@
       );
       if (item) {
          item.classList.toggle('generating', !!generating);
+         // generating and done-unread are mutually exclusive in CSS; a full render
+         // suppresses done-unread while generating, so when generating clears via
+         // this live path we must re-assert the done-unread mark from state — else a
+         // prior background completion's dot is silently dropped.
+         if (!generating) {
+            item.classList.toggle('done-unread', historyState.unreadConvIds.has(key));
+         }
+         // a11y: a generating row is busy; screen readers announce it on focus.
+         item.setAttribute('aria-busy', generating ? 'true' : 'false');
+         updateRowLiveStatus(item);
       }
+   }
+
+   /**
+    * Toggle a "done / unread" indicator on a conversation's sidebar row — set when
+    * external content lands in a conversation you're NOT viewing (a background turn
+    * or job completing, or a channel message arriving), so it isn't silent.  Cleared
+    * when you view the conversation
+    * (setActiveConversationId).  Modeled in state so a re-render re-applies it.
+    * @param {number|string} convId
+    * @param {boolean} unread
+    */
+   function setConversationUnread(convId, unread) {
+      if (!convId) return;
+      const key = String(convId);
+      // Never mark the conversation you're currently viewing as unread.
+      if (unread && key === String(historyState.activeConversationId || '')) return;
+      if (unread) {
+         historyState.unreadConvIds.add(key);
+      } else {
+         historyState.unreadConvIds.delete(key);
+      }
+      const item = historyElements.list?.querySelector(
+         `.history-item[data-conv-id="${CSS.escape(String(convId))}"]`
+      );
+      if (item) {
+         item.classList.toggle('done-unread', !!unread);
+         updateRowLiveStatus(item);
+      }
+   }
+
+   /* Keep the row's visually-hidden status text in sync with its state classes so a
+    * screen-reader user hears "generating" / "finished, unread" without a re-render. */
+   function updateRowLiveStatus(item) {
+      const st = item.querySelector('.history-item-live-status');
+      if (!st) return;
+      st.textContent = item.classList.contains('generating')
+         ? 'generating'
+         : item.classList.contains('done-unread')
+           ? 'unread'
+           : '';
+   }
+
+   /* Human label for a per-conversation running-jobs badge. */
+   function jobsBadgeLabel(n) {
+      return n + ' background task' + (n === 1 ? '' : 's') + ' running';
+   }
+
+   /* Render-time HTML for the sidebar "background jobs running" badge (amber pill,
+    * ⚙ N).  n is a count → interpolation is safe; the label is attr-escaped. */
+   function renderJobsBadge(n) {
+      const label = jobsBadgeLabel(n);
+      return `<span class="history-item-jobs" role="img" title="${DawnFormat.escapeAttr(label)}" aria-label="${DawnFormat.escapeAttr(label)}"><span aria-hidden="true">⚙︎ ${n}</span></span>`;
+   }
+
+   /* Live-patch one conversation row's running-jobs badge from the authoritative
+    * DawnJobsActivity count (no full list re-render).  Adds / updates / removes the
+    * badge so a job starting or finishing shows immediately while you're elsewhere. */
+   function updateConversationJobsBadge(convId) {
+      const item = historyElements.list?.querySelector(
+         `.history-item[data-conv-id="${CSS.escape(String(convId))}"]`
+      );
+      if (item) updateConversationJobsBadgeEl(item, convId);
+   }
+
+   /* Core of updateConversationJobsBadge that takes the row element directly, so
+    * refreshAllJobsBadges (which already enumerated the rows) doesn't re-query each
+    * one by attribute selector. */
+   function updateConversationJobsBadgeEl(item, convId) {
+      const count =
+         typeof DawnJobsActivity !== 'undefined' && DawnJobsActivity.getCount
+            ? DawnJobsActivity.getCount(convId)
+            : 0;
+      const titleEl = item.querySelector('.history-item-title');
+      if (!titleEl) return;
+      let badge = titleEl.querySelector('.history-item-jobs');
+      if (count > 0) {
+         if (!badge) {
+            badge = document.createElement('span');
+            badge.className = 'history-item-jobs';
+            badge.setAttribute('role', 'img');
+            const g = document.createElement('span');
+            g.setAttribute('aria-hidden', 'true');
+            badge.appendChild(g);
+            titleEl.insertBefore(badge, titleEl.firstChild);
+         }
+         const label = jobsBadgeLabel(count);
+         badge.querySelector('span[aria-hidden]').textContent = '⚙︎ ' + count;
+         badge.title = label;
+         badge.setAttribute('aria-label', label);
+      } else if (badge) {
+         badge.remove();
+      }
+   }
+
+   /* Reconcile every rendered row's badge (after a jobs_activity_snapshot replaces
+    * the whole map — covers convs that dropped to 0 too). */
+   function refreshAllJobsBadges() {
+      historyElements.list
+         ?.querySelectorAll('.history-item[data-conv-id]')
+         .forEach((el) => updateConversationJobsBadgeEl(el, el.getAttribute('data-conv-id')));
    }
 
    /**
@@ -227,9 +340,17 @@
     */
    function clearGenerating() {
       historyState.generatingConvIds.clear();
-      historyElements.list
-         ?.querySelectorAll('.history-item.generating')
-         .forEach((el) => el.classList.remove('generating'));
+      historyElements.list?.querySelectorAll('.history-item.generating').forEach((el) => {
+         el.classList.remove('generating');
+         // A prior background completion may have been masked while this row was
+         // generating (a full render suppresses done-unread under generating).
+         // Restore it from state so clearing generating doesn't hide the dot.
+         const key = el.getAttribute('data-conv-id');
+         if (key) {
+            el.classList.toggle('done-unread', historyState.unreadConvIds.has(String(key)));
+         }
+         updateRowLiveStatus(el);
+      });
    }
 
    /* =============================================================================
@@ -716,6 +837,7 @@
       // Drop any stale generating-indicator entry for the deleted conversation.
       if (deletedId) {
          historyState.generatingConvIds.delete(String(deletedId));
+         historyState.unreadConvIds.delete(String(deletedId));
       }
 
       // If we deleted the active conversation, start fresh
@@ -779,11 +901,18 @@
          `.history-item[data-conv-id="${CSS.escape(String(id))}"] .history-item-title`
       );
       if (item) {
-         // Remove existing text nodes, preserve icon elements in-place
-         Array.from(item.childNodes)
-            .filter((n) => n.nodeType === Node.TEXT_NODE)
-            .forEach((n) => n.remove());
-         item.appendChild(document.createTextNode(title));
+         // Update only the title-text span so the jobs badge, status icons, and the
+         // sr-only live-status stay in place.  Fall back to the legacy text-node
+         // path for any row rendered before the wrapper existed.
+         const textEl = item.querySelector('.history-item-title-text');
+         if (textEl) {
+            textEl.textContent = title;
+         } else {
+            Array.from(item.childNodes)
+               .filter((n) => n.nodeType === Node.TEXT_NODE)
+               .forEach((n) => n.remove());
+            item.appendChild(document.createTextNode(title));
+         }
 
          // Brief highlight to signal the update
          item.classList.add('title-updated');
@@ -813,13 +942,20 @@
       const id = Number(payload.conversation_id);
       if (!Number.isInteger(id) || id <= 0) return;
 
-      // Only act when the affected conversation is currently being viewed.
-      if (historyState.activeConversationId !== id) return;
+      // Not the conversation on screen → external content landed in a conversation
+      // you're NOT looking at: a finished background job's reinvoke result (the
+      // detached/backgrounded path persists + broadcasts this instead of streaming),
+      // or a messaging inbound. Leave a steady "done/unread" mark on its sidebar row
+      // so a completion isn't silent; cleared when you view it. (The background-stream
+      // path — a turn you switched away from — is handled in streaming.js handleEnd.)
+      if (historyState.activeConversationId !== id) {
+         setConversationUnread(id, true);
+         return;
+      }
 
-      // Re-fetch and full-re-render the conversation so the new
-      // external turns appear.  TODO: switch to an incremental-append
-      // path when forever-conversations get long enough that the full
-      // re-render's scroll-jump becomes annoying.
+      // Active view: re-fetch and full-re-render so the new external turns appear.
+      // TODO: switch to an incremental-append path when forever-conversations get
+      // long enough that the full re-render's scroll-jump becomes annoying.
       requestLoadConversation(id);
    }
 
@@ -1063,7 +1199,19 @@
       if (isUnread) classes.push('unread');
       if (isPinned) classes.push('pinned');
       if (isChainChild) classes.push('chain-child');
-      if (historyState.generatingConvIds.has(String(conv.id))) classes.push('generating');
+      const isGenerating = historyState.generatingConvIds.has(String(conv.id));
+      const isDoneUnread = !isGenerating && historyState.unreadConvIds.has(String(conv.id));
+      if (isGenerating) classes.push('generating');
+      if (isDoneUnread) classes.push('done-unread');
+      // Visually-hidden status text (kept in sync live by updateRowLiveStatus).
+      const liveStatus = isGenerating ? 'generating' : isDoneUnread ? 'finished, unread' : '';
+      // Per-conversation "background jobs running" badge (⚙ N), driven by the
+      // authoritative DawnJobsActivity map; live-patched by updateConversationJobsBadge.
+      const jobsRunning =
+         typeof DawnJobsActivity !== 'undefined' && DawnJobsActivity.getCount
+            ? DawnJobsActivity.getCount(conv.id)
+            : 0;
+      const jobsBadge = jobsRunning > 0 ? renderJobsBadge(jobsRunning) : '';
 
       // Pin/unpin toggle. Stable aria-label + aria-pressed reflects state (do not
       // also swap the label text — that double-announces); dynamic title tooltips.
@@ -1074,9 +1222,9 @@
         `;
 
       return `
-      <div class="${classes.join(' ')}" data-conv-id="${conv.id}">
+      <div class="${classes.join(' ')}" data-conv-id="${conv.id}"${isGenerating ? ' aria-busy="true"' : ''}>
         <div class="history-item-content">
-          <div class="history-item-title">${pinnedIcon}${privateIcon}${voiceIcon}${briefingIcon}${messagingIcon}${archivedIcon}${chainIcon}${DawnFormat.escapeHtml(conv.title)}</div>
+          <div class="history-item-title">${jobsBadge}${pinnedIcon}${privateIcon}${voiceIcon}${briefingIcon}${messagingIcon}${archivedIcon}${chainIcon}<span class="history-item-title-text">${DawnFormat.escapeHtml(conv.title)}</span><span class="history-item-live-status sr-only">${liveStatus}</span></div>
           <div class="history-item-meta">
             <span class="history-item-time">${time}</span>
             <span class="history-item-count">${conv.message_count} messages</span>
@@ -1270,7 +1418,10 @@
          if (renameBtn) {
             renameBtn.addEventListener('click', async (e) => {
                e.stopPropagation();
-               const title = item.querySelector('.history-item-title').textContent;
+               // Read only the title text — the jobs badge (⚙ N) and sr-only status
+               // also live inside .history-item-title and would pollute the prefill.
+               const titleTextEl = item.querySelector('.history-item-title-text');
+               const title = (titleTextEl || item.querySelector('.history-item-title')).textContent;
                const newTitle = await DawnDialog.prompt('', title, {
                   title: 'Rename Conversation',
                   okText: 'Rename',
@@ -2115,6 +2266,9 @@
       requestUpdateContext: requestUpdateContext,
       getActiveConversationId: getActiveConversationId,
       setConversationGenerating: setConversationGenerating,
+      setConversationUnread: setConversationUnread,
+      updateConversationJobsBadge: updateConversationJobsBadge,
+      refreshAllJobsBadges: refreshAllJobsBadges,
       clearGenerating: clearGenerating,
       beginConversationBeforeSend: beginConversationBeforeSend,
       setKnownContextMax: setKnownContextMax,

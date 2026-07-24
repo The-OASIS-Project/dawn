@@ -549,12 +549,15 @@ void send_metrics_impl(struct lws *wsi,
                        const char *state,
                        int ttft_ms,
                        float token_rate,
-                       int context_pct) {
+                       int context_pct,
+                       int64_t conversation_id) {
    char json[256];
+   /* conversation_id lets the client gate the footer to the active view — a
+    * background turn's tok/s/TTFT must not update the footer of an idle view. */
    snprintf(json, sizeof(json),
             "{\"type\":\"metrics_update\",\"payload\":{\"state\":\"%s\",\"ttft_ms\":%d,"
-            "\"token_rate\":%.1f,\"context_percent\":%d}}",
-            state, ttft_ms, token_rate, context_pct);
+            "\"token_rate\":%.1f,\"context_percent\":%d,\"conversation_id\":%lld}}",
+            state, ttft_ms, token_rate, context_pct, (long long)conversation_id);
    send_json_message(wsi, json);
 }
 
@@ -906,7 +909,8 @@ void process_one_response(void) {
          break;
       case WS_RESP_METRICS_UPDATE:
          send_metrics_impl(conn->wsi, resp.metrics.state, resp.metrics.ttft_ms,
-                           resp.metrics.token_rate, resp.metrics.context_pct);
+                           resp.metrics.token_rate, resp.metrics.context_pct,
+                           resp.metrics.conversation_id);
          break;
       case WS_RESP_COMPACTION_COMPLETE:
          send_compaction_impl(conn->wsi, resp.compaction.tokens_before,

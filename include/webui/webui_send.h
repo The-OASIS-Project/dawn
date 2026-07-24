@@ -121,7 +121,8 @@ void send_metrics_impl(struct lws *wsi,
                        const char *state,
                        int ttft_ms,
                        float token_rate,
-                       int context_tokens);
+                       int context_tokens,
+                       int64_t conversation_id);
 void send_music_position_impl(struct lws *wsi, double position_sec, uint32_t duration_sec);
 void send_reasoning_summary_impl(struct lws *wsi,
                                  uint32_t stream_id,
