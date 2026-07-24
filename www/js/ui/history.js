@@ -1343,10 +1343,16 @@
       const yesterday = today - 86400000;
       const weekAgo = today - 604800000;
 
-      conversations.forEach((conv) => {
-         if (isChild[conv.id]) return;
-         if (isPinnedTop(conv)) return; // already in the Pinned section
+      // Sort defensively by updated_at DESC — like the Pinned section above — so an
+      // in-place pin/unpin patch (which mutates the cached array without a refetch)
+      // can't leave a just-unpinned row near the front of the array.  Because the
+      // groups below render in Object.entries (first-seen) order, an out-of-order
+      // array would otherwise make that row's date-group heading jump above Today.
+      const datedTopLevel = conversations
+         .filter((conv) => !isChild[conv.id] && !isPinnedTop(conv))
+         .sort((a, b) => b.updated_at - a.updated_at);
 
+      datedTopLevel.forEach((conv) => {
          const timestamp = conv.updated_at * 1000;
          let groupKey;
 
