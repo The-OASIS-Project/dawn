@@ -46,10 +46,22 @@
 
 /* One pool slot: the job session + the provider class it is accounted against
  * (so job_manager_end() decrements the right counter without the caller having
- * to remember it). */
+ * to remember it), plus the runtime-reap bookkeeping.
+ *
+ * started_at lives HERE rather than being read back from conversations.started_at
+ * so the 1-Hz overdue scan is a pure in-memory walk — no DB work on the voice
+ * loop's heartbeat, running or idle.
+ *
+ * Field order puts the 8-byte members first: the reap walks this array every
+ * second, and the natural declaration order would waste 8 bytes per slot to
+ * padding (32 B/slot vs 24 B), costing extra cache lines across a 256-slot pool. */
 typedef struct {
    session_t *session;
+   time_t started_at; /* slot reservation time; 0 = free, or reap verdict claimed */
+   time_t reaped_at;  /* when reap_overdue flagged it; 0 = not reaped */
+   time_t nag_at;     /* last re-cancel/re-log while it refuses to die */
    job_provider_class_t provider;
+   bool counters_released; /* provider counter already force-released (zombie) */
 } job_slot_t;
 
 static job_slot_t *s_slots = NULL; /* [s_pool_size]; NULL session = free slot */
@@ -162,17 +174,19 @@ int job_manager_init(void) {
       pthread_mutex_unlock(&s_pool_mutex);
       return SUCCESS;
    }
-   int cap = g_config.jobs.max_active_jobs; /* clamped to [1,256] by config parse */
-   if (cap < 1) {
-      cap = 1;
-   }
-   s_slots = calloc((size_t)cap, sizeof(job_slot_t));
+   /* Fixed-size pool, NOT sized from max_active_jobs: that setting is
+    * runtime-mutable via the WebUI settings panel, so sizing the array from it
+    * would let a raised cap pass job_manager_capacity() (a counter comparison)
+    * while begin_ex found no free slot in a smaller boot-time array — a phantom
+    * "job capacity reached" failure on a freshly created job row.  max_active_jobs
+    * is a pure policy counter; nothing is allocated from it.  See JOB_POOL_MAX_SLOTS. */
+   s_slots = calloc((size_t)JOB_POOL_MAX_SLOTS, sizeof(job_slot_t));
    if (s_slots == NULL) {
       pthread_mutex_unlock(&s_pool_mutex);
-      OLOG_ERROR("job_manager_init: failed to allocate %d job slots", cap);
+      OLOG_ERROR("job_manager_init: failed to allocate %d job slots", JOB_POOL_MAX_SLOTS);
       return FAILURE;
    }
-   s_pool_size = cap;
+   s_pool_size = JOB_POOL_MAX_SLOTS;
    s_n_running_local = 0;
    s_n_running_cloud = 0;
    s_boot_time = time(NULL);
@@ -206,7 +220,8 @@ int job_manager_init(void) {
       OLOG_INFO("job_manager: suppressed auto-reinvoke for %d pre-restart job(s)", n_fired);
    }
 
-   OLOG_INFO("job_manager: initialized (%d job slots)", cap);
+   OLOG_INFO("job_manager: initialized (%d job slots, max_active_jobs=%d)", JOB_POOL_MAX_SLOTS,
+             g_config.jobs.max_active_jobs);
    return SUCCESS;
 }
 
@@ -297,8 +312,10 @@ int job_manager_begin_ex(int user_id,
       return JOB_MGR_CAP_USER;
    }
    if (slot < 0) {
-      /* Pool is sized to max_active_jobs, so running < max_active implies a free
-       * slot; treat any shortfall as the global cap for the LLM. */
+      /* The pool is JOB_POOL_MAX_SLOTS wide and max_active_jobs is clamped to
+       * that ceiling, so the counter check above should already have refused —
+       * except when a zombie (force-released) slot is still held by a wedged
+       * worker.  Report the global cap either way. */
       pthread_mutex_unlock(&s_pool_mutex);
       return JOB_MGR_CAP_GLOBAL;
    }
@@ -316,6 +333,10 @@ int job_manager_begin_ex(int user_id,
 
    s_slots[slot].session = s;
    s_slots[slot].provider = provider;
+   s_slots[slot].started_at = time(NULL); /* runtime-reap clock starts here */
+   s_slots[slot].reaped_at = 0;
+   s_slots[slot].nag_at = 0;
+   s_slots[slot].counters_released = false;
    if (provider == JOB_PROVIDER_LOCAL) {
       s_n_running_local++;
    } else {
@@ -343,14 +364,27 @@ void job_manager_end(session_t *session) {
    pthread_mutex_lock(&s_pool_mutex);
    for (int i = 0; i < s_pool_size; i++) {
       if (s_slots[i].session == session) {
-         if (s_slots[i].provider == JOB_PROVIDER_LOCAL) {
-            if (s_n_running_local > 0) {
-               s_n_running_local--;
+         /* Skip the decrement if the reap already force-released this slot's
+          * provider counter (the worker was presumed wedged and came back
+          * anyway) — decrementing twice would under-count and let the pool
+          * over-admit. */
+         if (!s_slots[i].counters_released) {
+            if (s_slots[i].provider == JOB_PROVIDER_LOCAL) {
+               if (s_n_running_local > 0) {
+                  s_n_running_local--;
+               }
+            } else if (s_n_running_cloud > 0) {
+               s_n_running_cloud--;
             }
-         } else if (s_n_running_cloud > 0) {
-            s_n_running_cloud--;
+         } else {
+            OLOG_INFO("job_manager: presumed-wedged job session %u returned after all",
+                      session->session_id);
          }
          s_slots[i].session = NULL;
+         s_slots[i].started_at = 0;
+         s_slots[i].reaped_at = 0;
+         s_slots[i].nag_at = 0;
+         s_slots[i].counters_released = false;
          break;
       }
    }
@@ -415,6 +449,167 @@ int job_manager_running_count(void) {
    return n;
 }
 
+/* What the reap did to one slot this tick, copied out so all logging happens
+ * with no lock held. */
+typedef enum {
+   REAP_NOTE_FIRST,   /* newly flagged: cancel requested */
+   REAP_NOTE_NAG,     /* still alive N seconds later: cancel re-issued */
+   REAP_NOTE_RELEASED /* grace expired: provider counter force-reclaimed */
+} job_reap_note_kind_t;
+
+typedef struct {
+   job_reap_note_kind_t kind;
+   int64_t conv_id;
+   uint32_t session_id;
+   long ran_for;
+   bool local; /* provider class, for the force-release message */
+} job_reap_note_t;
+
+int job_manager_reap_overdue(time_t now) {
+   int limit = g_config.jobs.max_runtime_sec;
+   if (limit <= 0) {
+      return 0; /* reaping disabled */
+   }
+
+   /* Bounds LOG volume only — the reap work itself is unbounded because every
+    * overdue slot must be acted on in the tick it expires (holding a provider
+    * counter is the scarce resource). Any notice past the cap is dropped, not
+    * deferred; the next nag re-surfaces it. */
+   job_reap_note_t notes[JOB_REAP_LOG_MAX_PER_TICK];
+   int n_notes = 0;
+   int n_reaped = 0;
+
+   pthread_mutex_lock(&s_pool_mutex);
+   if (!s_initialized || (s_n_running_local + s_n_running_cloud) == 0) {
+      pthread_mutex_unlock(&s_pool_mutex); /* idle: no scan at all */
+      return 0;
+   }
+   for (int i = 0; i < s_pool_size; i++) {
+      session_t *s = s_slots[i].session;
+      if (s == NULL || s_slots[i].started_at <= 0) {
+         continue; /* free slot, or the worker already claimed its verdict */
+      }
+      /* Integer subtraction, not difftime(): matches the rest of the codebase
+       * and keeps the per-second scan free of a libm call. time_t is signed, so
+       * a backwards clock step yields a negative elapsed and reaps nothing. */
+      time_t elapsed = now - s_slots[i].started_at;
+
+      if (s_slots[i].reaped_at == 0) {
+         if (elapsed <= (time_t)limit) {
+            continue; /* not overdue yet */
+         }
+         /* First strike: request cancellation. This is only OBSERVED where the
+          * session cancel flag is polled (the LLM/CURL transfer), so it is a
+          * request, not a kill — the nag/force-release below handle a job that
+          * ignores it. */
+         s_slots[i].reaped_at = now;
+         s_slots[i].nag_at = now;
+         session_cancel_turn(s); /* atomic store — safe under the pool lock */
+         n_reaped++;
+         if (n_notes < JOB_REAP_LOG_MAX_PER_TICK) {
+            notes[n_notes++] = (job_reap_note_t){ REAP_NOTE_FIRST,
+                                                  atomic_load(&s->stream_conversation_id),
+                                                  s->session_id, (long)elapsed,
+                                                  s_slots[i].provider == JOB_PROVIDER_LOCAL };
+         }
+         continue;
+      }
+
+      /* Already reaped and still here: the worker has not returned. */
+      time_t since_reap = now - s_slots[i].reaped_at;
+
+      if (!s_slots[i].counters_released && since_reap > JOB_REAP_FORCE_RELEASE_SEC) {
+         /* Grace expired — presume wedged somewhere that never polls the cancel
+          * flag (e.g. inside a tool call) and reclaim the PROVIDER COUNTER, which
+          * is the scarce resource (max_concurrent_local defaults to 1). The slot
+          * itself stays owned so the zombie's session pointer remains valid and
+          * job_manager_end() can still run if it ever returns. */
+         if (s_slots[i].provider == JOB_PROVIDER_LOCAL) {
+            if (s_n_running_local > 0) {
+               s_n_running_local--;
+            }
+         } else if (s_n_running_cloud > 0) {
+            s_n_running_cloud--;
+         }
+         s_slots[i].counters_released = true;
+         s_slots[i].nag_at = now;
+         if (n_notes < JOB_REAP_LOG_MAX_PER_TICK) {
+            notes[n_notes++] = (job_reap_note_t){ REAP_NOTE_RELEASED,
+                                                  atomic_load(&s->stream_conversation_id),
+                                                  s->session_id, (long)elapsed,
+                                                  s_slots[i].provider == JOB_PROVIDER_LOCAL };
+         }
+         continue;
+      }
+
+      if (now - s_slots[i].nag_at >= JOB_REAP_NAG_INTERVAL_SEC) {
+         /* Re-issue the cancel and re-log, so a stuck job stays visible instead
+          * of producing exactly one line and then going silent forever. */
+         s_slots[i].nag_at = now;
+         session_cancel_turn(s);
+         if (n_notes < JOB_REAP_LOG_MAX_PER_TICK) {
+            notes[n_notes++] = (job_reap_note_t){ REAP_NOTE_NAG,
+                                                  atomic_load(&s->stream_conversation_id),
+                                                  s->session_id, (long)elapsed,
+                                                  s_slots[i].provider == JOB_PROVIDER_LOCAL };
+         }
+      }
+   }
+   pthread_mutex_unlock(&s_pool_mutex);
+
+   for (int i = 0; i < n_notes; i++) {
+      const job_reap_note_t *n = &notes[i];
+      switch (n->kind) {
+         case REAP_NOTE_FIRST:
+            /* Deliberately says "cancel requested", not "marked failed": this
+             * function only requests: the WORKER writes the terminal state and the
+             * monitor fires the follow-up, and neither happens if it never returns. */
+            OLOG_WARNING("job_manager: job conv %lld (session %u) ran %lds, over the %ds [jobs] "
+                         "max_runtime_sec — cancel requested",
+                         (long long)n->conv_id, n->session_id, n->ran_for, limit);
+            break;
+         case REAP_NOTE_NAG:
+            OLOG_WARNING("job_manager: job conv %lld (session %u) still running %lds after its "
+                         "reap — cancel re-issued",
+                         (long long)n->conv_id, n->session_id, n->ran_for);
+            break;
+         case REAP_NOTE_RELEASED:
+            OLOG_ERROR("job_manager: job conv %lld (session %u) ignored cancellation for %ds after "
+                       "its reap (total %lds) — presumed wedged; force-releasing its %s provider "
+                       "slot so new jobs can start. Its pool slot stays held until it returns.",
+                       (long long)n->conv_id, n->session_id, JOB_REAP_FORCE_RELEASE_SEC, n->ran_for,
+                       n->local ? "local" : "cloud");
+            break;
+      }
+   }
+   return n_reaped;
+}
+
+bool job_manager_claim_reaped(const session_t *session) {
+   if (session == NULL) {
+      return false;
+   }
+   bool reaped = false;
+   pthread_mutex_lock(&s_pool_mutex);
+   for (int i = 0; i < s_pool_size; i++) {
+      if (s_slots[i].session == session) {
+         reaped = (s_slots[i].reaped_at != 0);
+         /* Stop the reap clock: the worker has reached its terminal-write block,
+          * so the slot must not be flagged (or nagged, or force-released) while
+          * it finishes. Clearing started_at is what the scan's skip test reads. */
+         s_slots[i].started_at = 0;
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_pool_mutex);
+   return reaped;
+}
+
+bool job_record_timed_out(const job_record_t *rec) {
+   return rec != NULL && strcmp(rec->job_status, "failed") == 0 &&
+          strcmp(rec->job_error, JOB_ERR_TIMED_OUT) == 0;
+}
+
 /* =============================================================================
  * Completion monitor (heartbeat tick + off-thread delivery)
  * ============================================================================= */
@@ -452,7 +647,13 @@ static void *job_notify_thread(void *arg) {
 }
 
 void jobs_monitor_tick(time_t now) {
-   (void)now; /* reserved for the max_runtime reap (follow-up) */
+   /* Runtime reap runs BEFORE the dirty-gate: a wedged job never reaches a
+    * terminal state, so it never marks anything dirty — gating the reap on the
+    * flag would mean the one case it exists for is the one case it never sees.
+    * It is an in-memory pool walk that early-outs when nothing is running, so
+    * the idle tick still does zero DB work. */
+   job_manager_reap_overdue(now);
+
    if (!atomic_load(&s_jobs_dirty)) {
       return; /* idle: zero per-tick DB work */
    }
@@ -510,8 +711,10 @@ void jobs_monitor_tick(time_t now) {
          continue;
       }
 
+      bool timed_out = job_record_timed_out(&rows[i]);
       const char *verb = (strcmp(rows[i].job_status, "done") == 0)          ? "is done"
                          : (strcmp(rows[i].job_status, "interrupted") == 0) ? "was interrupted"
+                         : timed_out                                        ? "timed out"
                                                                             : "failed";
       const char *tail = (strcmp(rows[i].job_status, "done") == 0) ? " Ask me for the result." : "";
       char text[512];

@@ -28,6 +28,8 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <string.h>
+#include <time.h>
 
 #include "config/dawn_config.h"
 #include "core/job_manager.h"
@@ -153,6 +155,7 @@ void setUp(void) {
    g_config.jobs.max_concurrent_local = 16;
    g_config.jobs.max_concurrent_cloud = 16;
    g_config.jobs.max_jobs_per_user = 16;
+   g_config.jobs.max_runtime_sec = 1800;
    TEST_ASSERT_EQUAL_INT(SUCCESS, job_manager_init());
 }
 
@@ -251,6 +254,158 @@ static void test_cancel_ownership(void) {
    job_manager_end(a);
 }
 
+/* --- runtime reap ----------------------------------------------------------
+ * jobs_monitor_tick takes `now` as a parameter precisely so the overdue clock
+ * can be simulated: these pass a future `now` rather than sleeping. */
+
+static void test_reap_overdue(void) {
+   session_t *a = NULL;
+   TEST_ASSERT_EQUAL_INT(JOB_MGR_OK, job_manager_begin(1, 700, JOB_PROVIDER_LOCAL, &a));
+   TEST_ASSERT_FALSE(atomic_load(&a->cancel_requested));
+
+   time_t overdue = time(NULL) + g_config.jobs.max_runtime_sec + 5;
+   TEST_ASSERT_EQUAL_INT(1, job_manager_reap_overdue(overdue));
+
+   /* Reaped jobs are cancel-requested so the worker unwinds and frees the slot. */
+   TEST_ASSERT_TRUE(atomic_load(&a->cancel_requested));
+
+   /* Idempotent: an already-reaped slot is not counted again on a later tick
+    * (it moves to the nag/force-release track, not a second first-strike). */
+   TEST_ASSERT_EQUAL_INT(0, job_manager_reap_overdue(overdue + 1));
+
+   /* The worker claims the verdict — true, so it records `failed`/timed-out
+    * rather than `cancelled` (which would suppress the completion follow-up). */
+   TEST_ASSERT_TRUE(job_manager_claim_reaped(a));
+
+   /* The slot is only released by the worker's job_manager_end(). */
+   TEST_ASSERT_EQUAL_INT(1, job_manager_running_count());
+   job_manager_end(a);
+   TEST_ASSERT_EQUAL_INT(0, job_manager_running_count());
+}
+
+/* Claiming stops the reap clock, so a job that reaches its terminal-write block
+ * can no longer be flagged (or nagged, or force-released) while it finishes —
+ * this is what stops the reap stealing an answer that already landed. */
+static void test_claim_stops_the_reap_clock(void) {
+   session_t *a = NULL;
+   TEST_ASSERT_EQUAL_INT(JOB_MGR_OK, job_manager_begin(1, 708, JOB_PROVIDER_CLOUD, &a));
+
+   /* Worker finishes just under the wire and claims: not reaped. */
+   TEST_ASSERT_FALSE(job_manager_claim_reaped(a));
+
+   /* A tick well past the deadline must now find nothing to reap. */
+   TEST_ASSERT_EQUAL_INT(0, job_manager_reap_overdue(time(NULL) + 999999));
+   TEST_ASSERT_FALSE(atomic_load(&a->cancel_requested));
+
+   job_manager_end(a);
+}
+
+/* A reaped job that never returns must not hold its provider counter forever:
+ * after the grace period the counter is reclaimed so new jobs can start, while
+ * the slot stays owned (the zombie's session pointer must remain valid). */
+static void test_reap_force_releases_provider_counter(void) {
+   g_config.jobs.max_runtime_sec = 10;
+   g_config.jobs.max_concurrent_local = 1; /* the default, and the painful case */
+   session_t *stuck = NULL, *next = NULL;
+   TEST_ASSERT_EQUAL_INT(JOB_MGR_OK, job_manager_begin(1, 709, JOB_PROVIDER_LOCAL, &stuck));
+
+   time_t t0 = time(NULL);
+   TEST_ASSERT_EQUAL_INT(1, job_manager_reap_overdue(t0 + 11)); /* first strike */
+
+   /* Still inside the grace period: the counter is held, so local is full. */
+   TEST_ASSERT_EQUAL_INT(JOB_MGR_CAP_PROVIDER,
+                         job_manager_begin(1, 710, JOB_PROVIDER_LOCAL, &next));
+
+   /* Past the grace period: counter reclaimed, a new local job can start. */
+   job_manager_reap_overdue(t0 + 11 + JOB_REAP_FORCE_RELEASE_SEC + 1);
+   TEST_ASSERT_EQUAL_INT(JOB_MGR_OK, job_manager_begin(1, 711, JOB_PROVIDER_LOCAL, &next));
+
+   /* The zombie's slot is still occupied, so its session is still resolvable. */
+   TEST_ASSERT_TRUE(job_manager_claim_reaped(stuck));
+
+   /* If the zombie ever returns, job_manager_end must NOT double-decrement. */
+   job_manager_end(stuck);
+   TEST_ASSERT_EQUAL_INT(1, job_manager_running_count()); /* only `next` remains */
+   job_manager_end(next);
+   TEST_ASSERT_EQUAL_INT(0, job_manager_running_count());
+}
+
+static void test_reap_not_yet_overdue(void) {
+   session_t *a = NULL;
+   TEST_ASSERT_EQUAL_INT(JOB_MGR_OK, job_manager_begin(1, 701, JOB_PROVIDER_CLOUD, &a));
+
+   /* Exactly at the limit is NOT overdue (strictly-greater comparison). */
+   TEST_ASSERT_EQUAL_INT(0, job_manager_reap_overdue(time(NULL) + g_config.jobs.max_runtime_sec));
+   TEST_ASSERT_FALSE(job_manager_claim_reaped(a));
+   TEST_ASSERT_FALSE(atomic_load(&a->cancel_requested));
+
+   job_manager_end(a);
+}
+
+static void test_reap_disabled_when_zero(void) {
+   g_config.jobs.max_runtime_sec = 0; /* the documented "disabled" value */
+   session_t *a = NULL;
+   TEST_ASSERT_EQUAL_INT(JOB_MGR_OK, job_manager_begin(1, 702, JOB_PROVIDER_CLOUD, &a));
+
+   TEST_ASSERT_EQUAL_INT(0, job_manager_reap_overdue(time(NULL) + 999999));
+   TEST_ASSERT_FALSE(job_manager_claim_reaped(a));
+   TEST_ASSERT_FALSE(atomic_load(&a->cancel_requested));
+
+   job_manager_end(a);
+}
+
+static void test_reap_ignores_backwards_clock(void) {
+   session_t *a = NULL;
+   TEST_ASSERT_EQUAL_INT(JOB_MGR_OK, job_manager_begin(1, 703, JOB_PROVIDER_CLOUD, &a));
+
+   /* An NTP step backwards must not mass-reap the pool (negative elapsed). */
+   TEST_ASSERT_EQUAL_INT(0, job_manager_reap_overdue(time(NULL) - 999999));
+   TEST_ASSERT_FALSE(job_manager_claim_reaped(a));
+
+   job_manager_end(a);
+}
+
+static void test_reap_distinct_from_user_cancel(void) {
+   session_t *a = NULL;
+   TEST_ASSERT_EQUAL_INT(JOB_MGR_OK, job_manager_begin(5, 704, JOB_PROVIDER_CLOUD, &a));
+
+   /* A user cancel raises the same cancel_requested flag, but must NOT read as
+    * a reap — otherwise the worker would fire a follow-up for a cancelled job. */
+   TEST_ASSERT_EQUAL_INT(JOB_MGR_OK, job_manager_cancel(704, 5));
+   TEST_ASSERT_TRUE(atomic_load(&a->cancel_requested));
+   TEST_ASSERT_FALSE(job_manager_claim_reaped(a));
+
+   job_manager_end(a);
+}
+
+/* The scan must reap EVERY overdue slot in one pass, not stop at the first —
+ * otherwise a second wedged job survives a tick and keeps its provider counter.
+ * (Both jobs share a start second here, which is the realistic case: slot
+ * clocks are 1-second resolution, so a burst of spawns expires together.) */
+static void test_reap_all_overdue_slots(void) {
+   g_config.jobs.max_runtime_sec = 100;
+   session_t *a = NULL, *b = NULL, *c = NULL;
+   TEST_ASSERT_EQUAL_INT(JOB_MGR_OK, job_manager_begin(1, 705, JOB_PROVIDER_CLOUD, &a));
+   TEST_ASSERT_EQUAL_INT(JOB_MGR_OK, job_manager_begin(1, 706, JOB_PROVIDER_CLOUD, &b));
+   TEST_ASSERT_EQUAL_INT(JOB_MGR_OK, job_manager_begin(2, 707, JOB_PROVIDER_LOCAL, &c));
+
+   TEST_ASSERT_EQUAL_INT(3, job_manager_reap_overdue(time(NULL) + 101));
+   TEST_ASSERT_TRUE(atomic_load(&a->cancel_requested));
+   TEST_ASSERT_TRUE(atomic_load(&b->cancel_requested));
+   TEST_ASSERT_TRUE(atomic_load(&c->cancel_requested)); /* across users and providers */
+
+   job_manager_end(a);
+   job_manager_end(b);
+   job_manager_end(c);
+}
+
+static void test_claim_reaped_null_and_unknown(void) {
+   TEST_ASSERT_FALSE(job_manager_claim_reaped(NULL));
+   session_t orphan;
+   memset(&orphan, 0, sizeof(orphan)); /* never in the pool */
+   TEST_ASSERT_FALSE(job_manager_claim_reaped(&orphan));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_begin_and_count);
@@ -259,5 +414,14 @@ int main(void) {
    RUN_TEST(test_user_cap);
    RUN_TEST(test_resolver);
    RUN_TEST(test_cancel_ownership);
+   RUN_TEST(test_reap_overdue);
+   RUN_TEST(test_reap_not_yet_overdue);
+   RUN_TEST(test_reap_disabled_when_zero);
+   RUN_TEST(test_reap_ignores_backwards_clock);
+   RUN_TEST(test_reap_distinct_from_user_cancel);
+   RUN_TEST(test_reap_all_overdue_slots);
+   RUN_TEST(test_claim_stops_the_reap_clock);
+   RUN_TEST(test_reap_force_releases_provider_counter);
+   RUN_TEST(test_claim_reaped_null_and_unknown);
    return UNITY_END();
 }

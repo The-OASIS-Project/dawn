@@ -88,19 +88,50 @@ static void job_worker_run(job_work_t *work) {
    session_set_tool_persist_hook(s, NULL, NULL);
 
    time_t now = time(NULL);
-   if (atomic_load(&s->cancel_requested)) {
-      /* Cancelled mid-run: mark cancelled + suppress the completion follow-up. */
+
+   /* Disposition. Order matters, because a runtime reap ALSO raises
+    * cancel_requested — the two are told apart only by the reap claim:
+    *   - snapshot cancel_requested BEFORE claiming, so a reap landing between
+    *     the two reads can't masquerade as a user cancel (which would
+    *     mark_fired and silently swallow the timeout's follow-up);
+    *   - claim_reaped() also stops the reap clock, so nothing can flag this job
+    *     while the terminal writes below are in flight. */
+   bool cancelled = atomic_load(&s->cancel_requested);
+   bool reaped = job_manager_claim_reaped(s);
+   bool have_answer = (response != NULL && response[0] != '\0');
+
+   /* Persist a produced answer no matter how the turn ended. A job that finished
+    * microseconds before its deadline, or just as the user hit cancel, did the
+    * work — throwing it away is never the right outcome, and it stays reachable
+    * via `job status` even when the disposition below suppresses a notification. */
+   if (have_answer &&
+       conv_db_add_message_with_tools(work->conv_id, work->user_id, "assistant", response, NULL,
+                                      NULL, NULL, NULL) != AUTH_DB_SUCCESS) {
+      OLOG_WARNING("job_worker: failed to persist final answer to conv %lld",
+                   (long long)work->conv_id);
+   }
+
+   if (cancelled && !reaped) {
+      /* User cancel wins even if an answer landed: they asked it to stop, so no
+       * completion notification. The answer above is still retrievable. */
       conv_db_job_set_terminal(work->conv_id, "cancelled", NULL, now);
       conv_db_job_mark_fired(work->conv_id);
-      OLOG_INFO("job_worker: job conv %lld cancelled", (long long)work->conv_id);
-   } else if (response != NULL && response[0] != '\0') {
-      if (conv_db_add_message_with_tools(work->conv_id, work->user_id, "assistant", response, NULL,
-                                         NULL, NULL, NULL) != AUTH_DB_SUCCESS) {
-         OLOG_WARNING("job_worker: failed to persist final answer to conv %lld",
-                      (long long)work->conv_id);
-      }
+      OLOG_INFO("job_worker: job conv %lld cancelled%s", (long long)work->conv_id,
+                have_answer ? " (answer produced before the cancel landed; kept)" : "");
+   } else if (have_answer) {
+      /* Includes the beat-the-reaper case: the deadline passed but the work
+       * completed, so report it honestly as done rather than as a timeout. */
       conv_db_job_set_terminal(work->conv_id, "done", NULL, now);
-      OLOG_INFO("job_worker: job conv %lld done", (long long)work->conv_id);
+      OLOG_INFO("job_worker: job conv %lld done%s", (long long)work->conv_id,
+                reaped ? " (finished as the runtime reap fired; kept the answer)" : "");
+   } else if (reaped) {
+      /* Deliberately NOT mark_fired: the monitor still owes this job's
+       * on_complete (notify or reinvoke_parent).  A reaped reinvoke_parent row
+       * flows through the normal reinvoke path, so conv_db_job_bump_reinvoke
+       * already charges it against max_reinvokes_per_tree — a
+       * timeout -> re-dispatch -> re-spawn loop cannot run forever. */
+      conv_db_job_set_terminal(work->conv_id, "failed", JOB_ERR_TIMED_OUT, now);
+      OLOG_WARNING("job_worker: job conv %lld timed out (reaped)", (long long)work->conv_id);
    } else {
       conv_db_job_set_terminal(work->conv_id, "failed", "no response from model", now);
       OLOG_WARNING("job_worker: job conv %lld failed (empty response)", (long long)work->conv_id);

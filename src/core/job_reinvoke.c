@@ -252,7 +252,14 @@ static char *build_envelope(int64_t parent_conv, int user_id, int64_t *fired_ids
          return NULL;
       }
 
-      const char *body = (result && result[0] != '\0') ? result : "(the job produced no output)";
+      /* A runtime-reaped job has no assistant text, so say WHY rather than
+       * letting the model report an empty result as "produced no output" —
+       * "timed out" is the difference between a useless answer and an
+       * actionable one (design §5: the timeout follow-up must be honest). */
+      const char *empty_reason = job_record_timed_out(&rows[i])
+                                     ? "(the job timed out before producing a result)"
+                                     : "(the job produced no output)";
+      const char *body = (result && result[0] != '\0') ? result : empty_reason;
       size_t body_len = strlen(body);
       bool truncated = false;
       if (body_len > JOB_REINVOKE_RESULT_CAP) {

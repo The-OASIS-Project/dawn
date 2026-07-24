@@ -70,6 +70,45 @@ void job_manager_register_reinvoke_processor(job_reinvoke_processor_fn fn);
 /** Max job rows the completion monitor drains (and hands a processor) per tick. */
 #define JOB_MONITOR_MAX_PER_TICK 16
 
+/**
+ * @brief Job-session pool slot count.
+ *
+ * The pool is allocated ONCE at job_manager_init() to this fixed size, NOT to
+ * `[jobs] max_active_jobs` — that setting is runtime-mutable via the WebUI
+ * settings panel, and sizing the array from it would let a raised cap pass
+ * job_manager_capacity() (a counter comparison) while job_manager_begin_ex()
+ * found no free slot in a smaller boot-time array, producing phantom
+ * "job capacity reached" failures.  `max_active_jobs` is therefore a pure policy
+ * counter with nothing allocated from it.
+ *
+ * @note MUST stay >= the `max_active_jobs` ceiling in config_clamp_jobs()
+ *       (config_parser.c).  256 slots x sizeof(job_slot_t) is ~10 KB — cheap
+ *       enough to pre-allocate outright.  Keep the two values in sync.
+ */
+#define JOB_POOL_MAX_SLOTS 256
+
+/** Max reap notices logged per tick (bounds log volume, not reap work). */
+#define JOB_REAP_LOG_MAX_PER_TICK 16
+
+/** Re-issue the cancel + re-log this often while a reaped job refuses to die. */
+#define JOB_REAP_NAG_INTERVAL_SEC 60
+
+/**
+ * @brief Grace period after a reap before the job's provider counter is
+ *        force-released.
+ *
+ * A reap is a cancel *request*: it is only observed where the session cancel
+ * flag is checked (the LLM/CURL transfer).  A job wedged somewhere that does not
+ * poll it — notably inside a tool call, since the tool loop's per-iteration gate
+ * checks the GLOBAL wake-word interrupt rather than the session flag — never
+ * returns, so its worker never calls job_manager_end() and its provider counter
+ * is held forever.  With the default max_concurrent_local = 1 that is a
+ * permanent block on every later local job.  After this grace period the
+ * provider counter is reclaimed so the pool keeps working; the slot itself stays
+ * owned by the zombie worker so its session pointer remains valid.
+ */
+#define JOB_REAP_FORCE_RELEASE_SEC 300
+
 /** Provider resource class a running job is accounted against. */
 typedef enum {
    JOB_PROVIDER_LOCAL = 0, /**< local (GPU) LLM — scarce, keep concurrency low */
@@ -160,9 +199,75 @@ int job_manager_running_count(void);
 void job_manager_mark_dirty(void);
 
 /**
+ * @brief `job_error` text stamped on a job reaped for exceeding max_runtime_sec.
+ *
+ * Shared by the producer (job_worker's terminal write) and the consumer (the
+ * monitor's notify wording), so the "did this fail or time out?" test is a
+ * single named constant rather than a string duplicated at both ends.
+ */
+#define JOB_ERR_TIMED_OUT "timed out (exceeded [jobs] max_runtime_sec)"
+
+/**
+ * @brief Request cancellation of every job that has outrun `[jobs] max_runtime_sec`.
+ *
+ * Without this a wedged worker never reaches a terminal state, so it holds its
+ * pool slot AND its provider counter forever — with the default
+ * max_concurrent_local=1 a single hung local job permanently blocks every
+ * subsequent local spawn until the daemon restarts.
+ *
+ * Scans the in-memory pool only (no DB work) and so is deliberately NOT behind
+ * the completion monitor's dirty-gate: a job that hangs never marks anything
+ * dirty, which is exactly the case this exists to catch.  Overdue slots are
+ * flagged reaped and cancel-requested; the worker observes the cancel, unwinds,
+ * and (seeing job_manager_was_reaped) records `failed`/JOB_ERR_TIMED_OUT while
+ * still letting its completion follow-up fire — per design §5 a timeout must
+ * never silently no-op.  `max_runtime_sec <= 0` disables reaping.
+ *
+ * @param now Current time (the heartbeat's, so it matches jobs_monitor_tick).
+ * @return number of jobs newly reaped on this call (0 when nothing is overdue).
+ */
+int job_manager_reap_overdue(time_t now);
+
+/**
+ * @brief Claim this job session's reap verdict, making the slot non-reapable.
+ *
+ * Lets the worker distinguish a timeout reap from a user cancel: both arrive as
+ * `cancel_requested`, but a user cancel suppresses the completion follow-up
+ * while a reap must still deliver one.
+ *
+ * This is a CLAIM, not a plain query — it stops the reap clock for this slot as
+ * a side effect.  Without that, the slot stays reapable across the worker's
+ * whole terminal-write window (several DB round-trips), so a job that finished
+ * microseconds before its deadline could be flagged *after* it had already
+ * decided it was `done`, and a heartbeat could log "reaping…" for a job the DB
+ * already recorded as complete.  Calling this closes both windows.
+ *
+ * Call it exactly once, before job_manager_end().  Idempotent, but a second call
+ * returns false because the first already consumed the verdict.
+ *
+ * @param session The job session (NULL-safe).
+ * @return true if this session's slot had been flagged by job_manager_reap_overdue().
+ */
+bool job_manager_claim_reaped(const session_t *session);
+
+/**
+ * @brief Did this job record end as a runtime-reap timeout?
+ *
+ * Single definition of the "failed + timed out" test, so consumers (completion
+ * notice wording, reinvoke envelope, future jobs panel) cannot drift from each
+ * other — and so JOB_ERR_TIMED_OUT stays free to change without silently
+ * breaking a hand-written strcmp somewhere.
+ *
+ * @param rec Job record (NULL-safe).
+ * @return true if the job terminated via the max_runtime_sec reap.
+ */
+bool job_record_timed_out(const job_record_t *rec);
+
+/**
  * @brief Completion monitor — call once per second from the main-loop heartbeat.
  *
- * When dirty, drains up to `[jobs] monitor_followups_per_tick` terminal jobs
+ * Reaps overdue jobs (unconditionally — see job_manager_reap_overdue), then,
+ * when dirty, drains up to `[jobs] monitor_followups_per_tick` terminal jobs
  * awaiting their follow-up, marks them fired, and dispatches the "notify"
  * completions on a detached delivery thread (scheduler_emit_alert does blocking
  * TTS/messaging, which must not run on the voice loop).
