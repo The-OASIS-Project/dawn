@@ -964,9 +964,15 @@ dawn_add_unit_test(test_conv_db_jobs
    LIBS    dawn_common unity sqlite3 pthread m stemmer
    LABEL   ci)
 
+# Background-job session pool.  ENABLE_MULTI_CLIENT is forced (same reason as
+# test_ota_rollout above): the ci preset builds WEBUI=OFF, and session_manager.h
+# only declares the multi-client session API — session_job_lookup_fn, and the
+# real session_release rather than its no-op inline stub — under that define.
+# Without it this test cannot compile on the preset CI actually runs.
 dawn_add_unit_test(test_job_manager
    SOURCES test_job_manager.c
            ${SRC_ROOT}/src/core/job_manager.c
+   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity pthread
    LABEL   ci)
 
