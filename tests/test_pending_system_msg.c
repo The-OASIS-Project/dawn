@@ -22,6 +22,7 @@
  * overflow eviction, truncation, output-buffer clamping).
  */
 
+#include <stdio.h> /* snprintf */
 #include <string.h>
 
 #include "core/pending_system_msg.h"

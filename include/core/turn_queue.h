@@ -55,10 +55,13 @@ typedef enum {
    TURN_SOURCE_BACKGROUND = 1 /**< reinvoke / child agent — may be bound/coalesced */
 } turn_source_t;
 
-/** Return codes. */
+/* Return codes.  Follows the project convention: 0 = success, 1 = generic
+ * failure, specific conditions > 1 — so TURN_QUEUE_FULL (a specific, and
+ * caller-actionable, capacity condition) must not sit on the generic-failure
+ * value.  All callers compare symbolically. */
 #define TURN_QUEUE_OK 0
-#define TURN_QUEUE_FULL 1 /**< per-source bound hit; caller still owns @p work */
-#define TURN_QUEUE_FAIL 2
+#define TURN_QUEUE_FAIL 1
+#define TURN_QUEUE_FULL 2 /**< per-source bound hit; caller still owns @p work */
 
 /**
  * @brief Enqueue a turn for @p session_id, spawning it now iff no turn is in
@@ -86,6 +89,8 @@ int turn_queue_enqueue(uint32_t session_id,
 /**
  * @brief Called by a turn worker when it finishes: chains the next queued turn
  *        for @p session_id (spawns it) or clears the in-flight gate if empty.
+ *
+ * @param session_id Session whose in-flight turn just completed.
  */
 void turn_queue_turn_done(uint32_t session_id);
 
@@ -98,6 +103,8 @@ void turn_queue_turn_done(uint32_t session_id);
  *        turn's `turn_queue_turn_done` does NOT chain a successor — it retires
  *        the slot.  The in-flight turn (if any) is left to finish/abort on its
  *        own (teardown's cancel flag aborts it promptly).
+ *
+ * @param session_id Session being torn down.
  */
 void turn_queue_purge_session(uint32_t session_id);
 
