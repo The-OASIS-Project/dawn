@@ -722,6 +722,26 @@ void send_reasoning_summary_impl(struct lws *wsi,
  * pending, it requests a writeable callback via lws_callback_on_writable().
  * ============================================================================= */
 
+/* Invalidate any queued responses that reference a session about to be freed, so
+ * the send thread never dereferences a dangling session pointer.  Called by
+ * session_destroy (weak seam) BEFORE session_free; the nulled entries are reaped
+ * by process_one_response's dead-entry path.  Synchronizes the send-queue's
+ * session reads with the free via s_queue_mutex. */
+void webui_send_purge_session(const session_t *s) {
+   if (!s) {
+      return;
+   }
+   pthread_mutex_lock(&s_queue_mutex);
+   int i = s_queue_head;
+   while (i != s_queue_tail) {
+      if (s_response_queue[i].session == s) {
+         s_response_queue[i].session = NULL;
+      }
+      i = (i + 1) % WEBUI_RESPONSE_QUEUE_SIZE;
+   }
+   pthread_mutex_unlock(&s_queue_mutex);
+}
+
 void process_one_response(void) {
    pthread_mutex_lock(&s_queue_mutex);
 
@@ -774,6 +794,11 @@ void process_one_response(void) {
     * the gap, then advance head. Preserves FIFO ordering for all sessions. */
    int found_idx = (s_queue_head + found_offset) % WEBUI_RESPONSE_QUEUE_SIZE;
    ws_response_t resp = s_response_queue[found_idx];
+   /* Capture the session's fields UNDER the queue lock — after we unlock,
+    * session_destroy may purge + free resp.session (it takes this same lock), so
+    * resp.session must never be dereferenced past the unlock. */
+   bool resp_disconnected = (resp.session == NULL) || atomic_load(&resp.session->disconnected);
+   ws_connection_t *resp_conn = resp.session ? (ws_connection_t *)resp.session->client_data : NULL;
    for (int i = found_offset; i > 0; i--) {
       int dst = (s_queue_head + i) % WEBUI_RESPONSE_QUEUE_SIZE;
       int src = (s_queue_head + i - 1) % WEBUI_RESPONSE_QUEUE_SIZE;
@@ -786,8 +811,9 @@ void process_one_response(void) {
    bool more_pending = (s_queue_head != s_queue_tail);
    pthread_mutex_unlock(&s_queue_mutex);
 
-   /* Find connection for this session */
-   if (!resp.session || resp.session->disconnected) {
+   /* Find connection for this session (using values captured under the lock —
+    * resp.session may already be freed by now). */
+   if (resp_disconnected) {
       free_response(&resp);
       /* If more responses, schedule another callback */
       if (more_pending && s_lws_context) {
@@ -796,7 +822,7 @@ void process_one_response(void) {
       return;
    }
 
-   ws_connection_t *conn = (ws_connection_t *)resp.session->client_data;
+   ws_connection_t *conn = resp_conn;
    if (!conn || !conn->wsi) {
       free_response(&resp);
       if (more_pending && s_lws_context) {

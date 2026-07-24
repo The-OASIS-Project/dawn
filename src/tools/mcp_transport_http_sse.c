@@ -65,7 +65,7 @@ typedef struct {
    CURLM *multi;
    pthread_t reader;
    bool reader_running;
-   volatile sig_atomic_t stop_flag;
+   _Atomic sig_atomic_t stop_flag;  // atomic: written on stop, read in reader loop
 
    /* POST endpoint, published by the reader once the `endpoint` event lands. */
    pthread_mutex_t ep_mtx;

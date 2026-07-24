@@ -659,7 +659,12 @@ endif()
 if(ENABLE_WEBUI)
     list(APPEND DAWN_SOURCES
         src/core/session_manager.c
+        src/core/turn_queue.c
         src/core/session_manager_llm.c
+        src/core/job_manager.c
+        src/core/job_worker.c
+        src/core/job_reinvoke.c
+        src/core/job_dispatch.c
         src/core/text_input_dispatch.c
         src/core/prompt_compose.c
         src/core/session_dedup.c
@@ -759,6 +764,7 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v70.c
     src/auth/auth_db_migrations_v71.c
     src/auth/auth_db_migrations_v72.c
+    src/auth/auth_db_migrations_v73.c
     src/auth/auth_db_attention.c
     src/auth/auth_db_statements.c
     # DB-layer tables depended on by the always-compiled memory / OTA / tool
@@ -766,6 +772,7 @@ list(APPEND DAWN_SOURCES
     # they can't live in the ENABLE_AUTH-gated block below (breaks local / ci with
     # WEBUI off).  The admin-socket transports that USE these stay AUTH-gated.
     src/auth/auth_db_conv.c
+    src/auth/auth_db_jobs.c
     src/auth/auth_db_user.c
     src/auth/auth_db_settings.c
     src/auth/auth_db_satellite.c

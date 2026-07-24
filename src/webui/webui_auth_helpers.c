@@ -840,6 +840,25 @@ static char *append_block_directive(char *base, const char *text) {
    return out;
 }
 
+/* Headless-worker directive, baked into the stable prefix for SESSION_TYPE_JOB
+ * sessions (background jobs).  A job worker inherits the full interactive persona
+ * via the shared dispatch, so without this it behaves like a live assistant —
+ * deferring ("let me wait for those to wrap"), conversing, and reaching for the
+ * job tool.  This reframes the operating mode: no user is present, produce the
+ * finished result, don't fan out.  (Tool-side, the `job` tool is also removed
+ * from a job session's schema — belt and suspenders.) */
+static const char JOB_HEADLESS_DIRECTIVE[] =
+    "[Background task mode] You're completing this task as an autonomous background agent rather "
+    "than in a live conversation. The person who requested it isn't available right now, so "
+    "there's "
+    "no chance to ask follow-up questions, confirm details, or wait for input — proceed with "
+    "reasonable assumptions and finish the task in full using the tools available to you. Your "
+    "response is the deliverable: it's saved and delivered to the user once you're done, so "
+    "provide "
+    "the complete, self-contained result — the actual findings or output — rather than a plan, a "
+    "progress update, or a note that you'll get started or follow up later. You also can't start "
+    "additional background jobs, so carry the work through to completion yourself in this session.";
+
 int dawn_build_prompt(int user_id,
                       const char *user_turn_text,
                       prompt_refresh_kind_t kind,
@@ -892,6 +911,12 @@ int dawn_build_prompt(int user_id,
                                                      voice_directive_effective());
          out->stable_prefix = append_block_directive(out->stable_prefix,
                                                      asr_disambiguation_hint_effective());
+      }
+      /* Background jobs run headless — reframe the operating mode so the worker
+       * produces a finished result instead of behaving like a live assistant.
+       * Constant for the surface, so it rides in the cacheable stable prefix. */
+      if (dispatch_for_satellite->type == SESSION_TYPE_JOB) {
+         out->stable_prefix = append_block_directive(out->stable_prefix, JOB_HEADLESS_DIRECTIVE);
       }
    }
 

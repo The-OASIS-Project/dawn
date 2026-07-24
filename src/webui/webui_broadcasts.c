@@ -49,6 +49,8 @@
 #include "core/attention/attention.h"
 #include "core/focus/focus_candidate_helpers.h"
 #include "core/focus/focus_source.h"
+#include "core/job_manager.h"
+#include "core/job_reinvoke.h"
 #include "core/missed_notifications_db.h"
 #include "core/scheduler.h"
 #include "logging.h"
@@ -454,6 +456,13 @@ void webui_broadcast_conversation_renamed(int user_id, int64_t conv_id, const ch
    if (sent > 0) {
       OLOG_INFO("WebUI: Broadcast conversation rename to %d client(s): %s", sent, title);
    }
+}
+
+/* Strong override of the job_reinvoke (Layer 2) weak seam: when a reinvoke_parent
+ * re-engagement persists its reply to the parent conversation, refresh any open
+ * tab viewing it by reusing the conversation_messages_appended broadcast. */
+void job_reinvoke_notify_conv_appended(int user_id, int64_t conversation_id) {
+   webui_broadcast_conversation_messages_appended(user_id, conversation_id);
 }
 
 void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id) {
@@ -882,6 +891,130 @@ void webui_broadcast_attention_alert(int user_id, const char *summary, const cha
    if (sent > 0) {
       OLOG_INFO("WebUI: attention alert (%s) to %d client(s)", level, sent);
    }
+}
+
+/* Strong override of the weak job-notification symbol in job_manager.c: a
+ * silent job-completion toast to the owner's browser sessions (no voice). */
+void webui_broadcast_job_notification(int user_id,
+                                      const char *text,
+                                      int64_t conv_id,
+                                      int running_count) {
+   if (user_id <= 0 || !text) {
+      return;
+   }
+   char text_safe[512];
+   snprintf(text_safe, sizeof(text_safe), "%s", text);
+   sanitize_utf8_for_json(text_safe);
+
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("job_notification"));
+   json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "text", json_object_new_string(text_safe));
+   json_object_object_add(payload, "conv_id", json_object_new_int64(conv_id));
+   json_object_object_add(payload, "running", json_object_new_int(running_count));
+   json_object_object_add(root, "payload", payload);
+
+   int sent = broadcast_json_to_user(user_id, root);
+   if (sent > 0) {
+      OLOG_INFO("WebUI: job notification to %d client(s)", sent);
+   }
+}
+
+/* Strong override of job_manager.c's weak job-activity symbol: push a parent
+ * conversation's active-job count so the per-conversation + global "jobs
+ * running" pills stay live. */
+void webui_broadcast_job_activity(int user_id, int64_t parent_id, int active_count) {
+   if (user_id <= 0 || parent_id <= 0) {
+      return;
+   }
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("job_activity"));
+   json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "conversation_id", json_object_new_int64(parent_id));
+   json_object_object_add(payload, "active_count", json_object_new_int(active_count));
+   json_object_object_add(root, "payload", payload);
+   broadcast_json_to_user(user_id, root);
+}
+
+/* Strong override of the job_reinvoke weak seam: find a live, idle, connected
+ * WebUI session the owner is currently viewing on @p conv_id, and atomically
+ * claim a turn on it so a reinvoke result can stream in (warm cache, native
+ * token stream).  Claim-under-registry-lock so a concurrent user turn either
+ * hasn't started (turn_in_flight==0 gate) or supersedes us afterward via
+ * request_generation.  Returns the retained+claimed session, or NULL. */
+session_t *webui_find_reinvoke_viewer(int64_t conv_id, int user_id) {
+   if (conv_id <= 0 || user_id <= 0) {
+      return NULL;
+   }
+   session_t *found = NULL;
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      ws_connection_t *conn = s_active_connections[i];
+      if (!conn || !conn->session || !conn->authenticated) {
+         continue;
+      }
+      if (conn->auth_user_id != user_id || conn->session->type != SESSION_TYPE_WEBUI) {
+         continue;
+      }
+      if (webui_get_active_conversation_id(conn->session) != conv_id) {
+         continue;
+      }
+      session_t *s = conn->session;
+      /* A connected viewer of the parent conv.  Do NOT skip a mid-turn session:
+       * the turn queue serializes the reinvoke behind the active turn (that is the
+       * whole point — no second gate).  Retain ONLY; the turn claim
+       * (begin_turn_flags + request_generation + turn_in_flight + stream binding)
+       * happens at DEQUEUE in the reinvoke turn closure, being_destroyed-safe. */
+      /* Skip a disconnected OR tearing-down session: no live viewer to stream
+       * into → the caller takes the detached path.  (being_destroyed is redundant
+       * with disconnected today — teardown sets disconnected first — but checking
+       * it explicitly makes the teardown-safety self-evident and independent of
+       * session_destroy's phase ordering.) */
+      if (atomic_load(&s->disconnected) || atomic_load(&s->being_destroyed)) {
+         continue;
+      }
+      session_retain(s);
+      found = s;
+      break;
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+   return found;
+}
+
+/* Strong override of the Layer-2 weak seam: the conversation the session's client
+ * is currently viewing (used by the reinvoke closure's server-persist decision). */
+int64_t webui_session_active_conversation(session_t *s) {
+   return webui_get_active_conversation_id(s);
+}
+
+/* Connect/reconnect rehydration: push the full per-parent active-job map so a
+ * (re)loaded client shows the correct pills.  Authoritative counts (not deltas),
+ * so it is safe to broadcast to all of the user's sessions. */
+/* Max distinct parent conversations reported in one activity snapshot. */
+#define JOB_ACTIVITY_SNAPSHOT_MAX 64
+void webui_jobs_broadcast_activity_snapshot(int user_id) {
+   if (user_id <= 0) {
+      return;
+   }
+   job_parent_count_t counts[JOB_ACTIVITY_SNAPSHOT_MAX];
+   int n = 0;
+   if (conv_db_job_active_counts_by_user(user_id, counts, JOB_ACTIVITY_SNAPSHOT_MAX, &n) !=
+       AUTH_DB_SUCCESS) {
+      return;
+   }
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("jobs_activity_snapshot"));
+   json_object *payload = json_object_new_object();
+   json_object *arr = json_object_new_array();
+   for (int i = 0; i < n; i++) {
+      json_object *e = json_object_new_object();
+      json_object_object_add(e, "conversation_id", json_object_new_int64(counts[i].parent_id));
+      json_object_object_add(e, "active_count", json_object_new_int(counts[i].count));
+      json_object_array_add(arr, e);
+   }
+   json_object_object_add(payload, "counts", arr);
+   json_object_object_add(root, "payload", payload);
+   broadcast_json_to_user(user_id, root);
 }
 
 void webui_broadcast_memory_proposals_changed(int user_id) {

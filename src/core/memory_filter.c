@@ -109,6 +109,42 @@ static const char *BLOCKED_PATTERNS[] = {
    "[system:", NULL
 };
 
+/* High-confidence prompt-injection COMMAND patterns — a curated subset of
+ * BLOCKED_PATTERNS used to screen long, LLM/web-derived RESULT text (e.g. a
+ * background-job research result) before re-injecting it.  The full blocklist
+ * false-positives heavily on technical results, which legitimately contain
+ * "bearer", "api key", "system prompt", "](https://…", "base64,", etc. as
+ * subject matter.  These entries, by contrast, are AI-directed override
+ * commands / jailbreak names / structural role markers / memory-poisoning verbs
+ * that essentially never appear as legitimate research content — while still
+ * catching the classic "ignore your instructions / act as DAN" attack shape.
+ * (Deliberately excludes the credential + vocabulary + markdown-link + base64 +
+ * bare "override"/"bypass"/"the model should" patterns, and the ReAct check,
+ * all of which are common in AI/API/security research.) */
+static const char *INJECTION_COMMAND_PATTERNS[] = {
+   /* AI-directed override */
+   "ignore your", "ignore previous", "ignore above", "ignore all ", "forget your",
+   "forget previous", "forget above", "forget all ", "forget everything",
+   /* Disable-safety */
+   "disable safe", "disable filter", "disable guard", "disable content", "skip safe", "skip check",
+   "skip verif", "skip valid",
+   /* Jailbreak names */
+   "jailbreak", "dan mode", "do anything now", "godmode", "unlimited mode",
+   "developer mode enabled", "developer mode activated", "remove restrictions",
+   "remove limitations", "remove guardrails",
+   /* Role manipulation (AI-directed) */
+   "act as if", "respond as", "behave as",
+   /* System impersonation */
+   "admin override", "sudo mode",
+   /* LLM role / system structural markers */
+   "[inst]", "<<sys>>", "<|im_start|>", "<|im_end|>", "{{#system", "<system>", "<system_prompt>",
+   "<claude_", "[system:",
+   /* Memory poisoning (AI-directed) */
+   "store in your memory", "save in your memory", "save to your memory", "write to your memory",
+   "add to your memory", "update your memory", "modify your memory", "write to permanent",
+   "write to persistent", "save to permanent", "store to persistent", NULL
+};
+
 /* Cyrillic/Greek homoglyphs that map to ASCII equivalents */
 static const struct {
    const char *lookalike;
@@ -427,6 +463,28 @@ bool memory_filter_check(const char *text) {
       blocked = check_react_cooccurrence(normalized);
    }
 
+   free(normalized);
+   return blocked;
+}
+
+bool memory_filter_check_injection_commands(const char *text) {
+   if (!text) {
+      return false;
+   }
+   char *normalized = memory_filter_normalize(text);
+   if (!normalized) {
+      OLOG_WARNING("memory_filter: normalization failed, blocking for safety");
+      return true;
+   }
+   bool blocked = false;
+   for (int i = 0; INJECTION_COMMAND_PATTERNS[i] != NULL; i++) {
+      if (strstr(normalized, INJECTION_COMMAND_PATTERNS[i]) != NULL) {
+         OLOG_WARNING("memory_filter: blocked injection command: '%s'",
+                      INJECTION_COMMAND_PATTERNS[i]);
+         blocked = true;
+         break;
+      }
+   }
    free(normalized);
    return blocked;
 }

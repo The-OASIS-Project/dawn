@@ -574,6 +574,22 @@ void config_set_defaults(dawn_config_t *config) {
    config->scheduler.event_retention_days = 30;
    config->scheduler.briefing_speak_aloud_on_webui_source = false;
 
+   /* Background jobs — enabled by default; caps are LLM-resource-bound + DoS
+    * guards (see docs/BACKGROUND_JOBS_DESIGN.md §7). */
+   config->jobs.enabled = true;
+   config->jobs.max_concurrent_local = 1;
+   config->jobs.max_concurrent_cloud = 4;
+   config->jobs.max_active_jobs = 16;
+   config->jobs.max_jobs_per_user = 4;
+   config->jobs.max_queued_per_user = 8;
+   config->jobs.monitor_followups_per_tick = 4;
+   config->jobs.max_spawn_depth = 3;
+   config->jobs.max_children_per_tree = 4;
+   config->jobs.max_reinvokes_per_tree = 8;
+   config->jobs.max_concurrent_reinvokes = 2;
+   config->jobs.max_runtime_sec = 1800;
+   config->jobs.event_chunk_cap = 16384;
+
    /* Proactive attention (SAGE) — master switch OFF by default (opt-in). Watch
     * rules are DB-backed, not config. Numeric defaults mirror the module's
     * SAGE_MAX_ALERTS_PER_HOUR / judge floor. */

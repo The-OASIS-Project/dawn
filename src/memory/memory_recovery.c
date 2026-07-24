@@ -64,7 +64,7 @@
 
 /* Worker thread state */
 static pthread_t s_recovery_thread;
-static volatile bool s_running = false;
+static _Atomic bool s_running = false;  // atomic: written on shutdown, read in loop
 static pthread_mutex_t s_state_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* Serialize concurrent run_pass invocations.  The standing recovery thread
@@ -107,6 +107,11 @@ static int load_stuck_conversations(stuck_list_t *out, time_t idle_cutoff, int m
 
    /* Criteria:
     *   - non-private
+    *   - NOT a background job (job_status IS NULL): a job's conversation holds
+    *     the goal + raw result, but memory should be based on the PARENT — the
+    *     reinvoke surfaces the result INTO the parent conversation, whose own
+    *     extraction captures it.  Extracting job convs directly floods memory
+    *     with per-job research fragments duplicating the parent's summary.
     *   - has at least 2 messages (matches memory_trigger_extraction skip threshold)
     *   - extraction backlog: last_extracted_msg_count < message_count
     *   - idle: updated_at < idle_cutoff
@@ -116,6 +121,7 @@ static int load_stuck_conversations(stuck_list_t *out, time_t idle_cutoff, int m
    const char *sql = "SELECT id, user_id, message_count, extraction_attempts "
                      "FROM conversations "
                      "WHERE is_private = 0 "
+                     "  AND job_status IS NULL "
                      "  AND message_count >= 2 "
                      "  AND last_extracted_msg_count < message_count "
                      "  AND updated_at < ? "

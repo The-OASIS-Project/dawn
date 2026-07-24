@@ -64,6 +64,10 @@
 #include "core/component_status.h"
 #include "core/conv_stream.h"
 #include "core/embedding_engine.h"
+#ifdef ENABLE_WEBUI
+#include "core/job_manager.h" /* job subsystem compiles only under ENABLE_WEBUI */
+#include "core/job_reinvoke.h"
+#endif
 #include "core/ocp_helpers.h"
 #include "core/ota.h"
 #include "core/ota_rollout.h"
@@ -272,7 +276,10 @@ struct timeval pipeline_start_time;  // Track when pipeline processing starts
  * and prevents the compiler from applying unwanted optimizations, considering
  * it may be altered asynchronously by signal handling.
  */
-volatile sig_atomic_t quit = 0;
+/* _Atomic (not just volatile): written by the signal handler, read by worker
+ * threads (e.g. TTS via get_quit()).  Atomic keeps it async-signal-safe AND
+ * race-free; volatile alone guaranteed neither. */
+_Atomic sig_atomic_t quit = 0;
 
 /**
  * @brief Flag to request application restart via self-exec
@@ -2447,6 +2454,21 @@ mqtt_disabled:
       attention_init();
    }
 
+   /* Background-job session pool (needs session_manager up so it can register
+    * its resolver hook).  Gated on [jobs] enabled; non-fatal on failure.  The
+    * whole job subsystem is compiled only under ENABLE_WEBUI (CMakeLists.txt), so
+    * the init/tick/shutdown call sites are guarded to keep the WEBUI-off (local)
+    * preset linking. */
+#ifdef ENABLE_WEBUI
+   if (g_config.jobs.enabled) {
+      if (job_manager_init() != SUCCESS) {
+         OLOG_WARNING("job_manager init failed - background jobs disabled");
+      } else {
+         job_reinvoke_init(); /* register the reinvoke_parent processor */
+      }
+   }
+#endif
+
    /* OTA subsystem (after the DB is ready — it reconciles device state).
     * Non-fatal: a failure just leaves OTA serving disabled. */
    if (ota_init() != SUCCESS) {
@@ -2536,6 +2558,9 @@ mqtt_disabled:
          time_t now_srv = time(NULL);
          attention_tick(now_srv);
          conv_stream_evict_stale(now_srv);
+#ifdef ENABLE_WEBUI
+         jobs_monitor_tick(now_srv);
+#endif
 #ifdef ENABLE_MULTI_CLIENT
          /* Apply deferred device/system-context messages.  Server mode drives no
           * local voice turn, so the local session has no other writer and the
@@ -2560,6 +2585,10 @@ mqtt_disabled:
             attention_tick(now_rollout);
             /* Evict finalized/abandoned live-partial replay-ring entries. */
             conv_stream_evict_stale(now_rollout);
+#ifdef ENABLE_WEBUI
+            /* Background-job completion monitor (dirty-gated). */
+            jobs_monitor_tick(now_rollout);
+#endif
          }
       }
 
@@ -4019,6 +4048,14 @@ server_shutdown:
          OLOG_INFO("Shutdown: saved as conversation %lld", (long long)conv_id);
       }
    }
+#endif
+
+   /* Background jobs: cancel running jobs before auth/DB teardown (their workers
+    * use sessions + conv_db).  Unregisters the resolver + requests cancellation;
+    * detached workers observe it and tear down their own sessions. */
+#ifdef ENABLE_WEBUI
+   OLOG_INFO("Shutdown: job_manager_shutdown");
+   job_manager_shutdown();
 #endif
 
 #ifdef ENABLE_AUTH

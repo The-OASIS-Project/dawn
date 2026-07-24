@@ -170,6 +170,10 @@
       } else {
          sessionStorage.removeItem('dawn_active_conversation');
       }
+      // Re-scope the per-conversation background-jobs pill to the new view.
+      if (typeof DawnJobsActivity !== 'undefined') {
+         DawnJobsActivity.onConversationSwitch();
+      }
    }
 
    /**

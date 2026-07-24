@@ -120,6 +120,13 @@ typedef enum {
                             // Owned by the messaging engine's slot map.  Exempt
                             // from session_cleanup_expired (engine handles
                             // lifetime via LRU eviction + /new reset).
+   SESSION_TYPE_JOB,        // Background job (background-jobs Phase 1).  Text-only
+                            // (no ASR/TTS/audio).  Lives in the SEPARATE job pool
+                            // (src/core/job_manager.c), NOT the interactive
+                            // sessions[] array — so it never counts against
+                            // MAX_SESSIONS and can't starve an interactive client.
+                            // session_get()/_for_reconnect() resolve it via the
+                            // registered job-lookup hook.
 } session_type_t;
 
 /**
@@ -311,7 +318,9 @@ typedef struct session {
    uint32_t session_id;
    session_type_t type;
    time_t created_at;
-   time_t last_activity;
+   _Atomic time_t last_activity; /* touched on WS activity (session_touch, lock-free) and read by
+                                  * session_cleanup_expired under a DIFFERENT lock — atomic so the
+                                  * two never race on this plain-width field */
    time_t last_interaction_complete;  // Last wake-word-to-response cycle (for idle timeout)
 
    // Conversation history (owned by session, protected by history_mutex)
@@ -335,8 +344,26 @@ typedef struct session {
    // provider_address).  Empty provider[0] means "not a messaging session".
    messaging_identity_t messaging_identity;
 
-   // Cancellation (atomic for cross-thread visibility on ARM64)
-   atomic_bool disconnected;  // Set on client disconnect
+   // Cancellation vs emission-gating are DISTINCT signals (background-jobs
+   // Phase 1 decoupling).  `disconnected` gates LIVE EMISSION only ("no client
+   // attached right now") — a client close sets it, but the in-flight turn keeps
+   // generating and is persisted server-side.  `cancel_requested` is the real
+   // "abort this turn's generation" signal handed to llm_set_cancel_flag and
+   // checked by REQUEST_SUPERSEDED; only an explicit Stop or session teardown
+   // sets it.  Use the session_{cancel_turn,mark_disconnected,teardown_flags}
+   // helpers below so the two-flag invariant lives in one place, not scattered
+   // across raw stores.  (atomic for cross-thread visibility on ARM64.)
+   atomic_bool disconnected;      // Emission gate: client is not attached
+   atomic_bool cancel_requested;  // Abort this turn's generation (Stop / teardown)
+   // Set once at the very start of session_destroy() and never cleared.  The turn
+   // queue's dequeue wrappers check it before starting a queued turn: a turn that
+   // was spawned into the tiny pop-to-run window just as teardown began must NOT
+   // clear the teardown flags and run — it cleans up and lets the queue drain.
+   atomic_bool being_destroyed;
+   // Turn-in-flight guard: a worker increments this after passing its supersede
+   // check and decrements it at exit, so session_cleanup_expired never reaps a
+   // disconnected-but-still-generating session out from under its worker.
+   atomic_int turn_in_flight;
 
    /* WebUI: was THIS turn's input voice (ASR-transcribed) vs typed?  Stamped on
     * the WORKER thread immediately before the synchronous prompt build — from the
@@ -468,6 +495,52 @@ typedef struct session {
    session_tool_iteration_fn tool_iteration_cb;
    void *tool_iteration_userdata;
 } session_t;
+
+// =============================================================================
+// Turn cancellation / disconnect flag helpers
+//
+// The two flags are DISTINCT (see the field comments above).  These funnel the
+// invariant so callers state intent instead of poking raw atomics:
+//   - session_cancel_turn:      Stop button — abort generation, client stays.
+//   - session_mark_disconnected: client left — gate emission, turn survives.
+//   - session_teardown_flags:    session is being destroyed — abort + gate.
+// =============================================================================
+
+/** Abort this turn's generation (explicit Stop).  Does NOT gate emission. */
+static inline void session_cancel_turn(session_t *s) {
+   if (s != NULL) {
+      atomic_store(&s->cancel_requested, true);
+   }
+}
+
+/** Gate live emission (client detached).  Does NOT abort the in-flight turn. */
+static inline void session_mark_disconnected(session_t *s) {
+   if (s != NULL) {
+      atomic_store(&s->disconnected, true);
+   }
+}
+
+/** Session teardown: abort the turn AND gate emission (both flags). */
+static inline void session_teardown_flags(session_t *s) {
+   if (s != NULL) {
+      atomic_store(&s->cancel_requested, true);
+      atomic_store(&s->disconnected, true);
+   }
+}
+
+/** Clear both flags at the start of a fresh turn (client present, not cancelled). */
+static inline void session_begin_turn_flags(session_t *s) {
+   /* Never resurrect a session whose teardown has begun: if being_destroyed is
+    * set, leave the teardown-set cancel/disconnected flags standing so an
+    * in-flight worker still aborts at its next LLM gate.  This closes the
+    * turn-queue dequeue race where a turn spawned into the pop-to-run window
+    * would otherwise clear the teardown cancel and run to completion, defeating
+    * session_destroy's ref-count wait (UAF). */
+   if (s != NULL && !atomic_load(&s->being_destroyed)) {
+      atomic_store(&s->disconnected, false);
+      atomic_store(&s->cancel_requested, false);
+   }
+}
 
 // =============================================================================
 // Prompt Builder Callback Types (defined before #ifdef so stubs can use them)
@@ -786,6 +859,45 @@ session_t *session_get(uint32_t session_id);
  */
 session_t *session_get_for_reconnect(uint32_t session_id);
 
+/* =============================================================================
+ * Job-pool integration (background-jobs Phase 1)
+ *
+ * Background jobs live in a SEPARATE pool (src/core/job_manager.c), not the
+ * interactive sessions[] array.  But the shared LLM tool loop re-acquires its
+ * session by id via session_get()/session_get_for_reconnect() (persist,
+ * iteration-boundary, compaction-merge).  So the job pool registers a lookup
+ * hook: when the interactive-array scan misses, session_get*()/ fall back to it.
+ * This keeps session_manager decoupled from job_manager (no upward dependency)
+ * while letting a job's tool loop resolve its own session.
+ * ============================================================================= */
+
+/**
+ * @brief Job-pool resolver: find a job session by id and retain it (ref++).
+ * @param for_reconnect true = return even a cancel-requested session (matches
+ *        session_get_for_reconnect semantics); false = skip a dying one.
+ * @return Retained session (caller must session_release), or NULL.
+ */
+typedef session_t *(*session_job_lookup_fn)(uint32_t session_id, bool for_reconnect);
+
+/** Register the job-pool resolver (called once by job_manager_init). */
+void session_manager_register_job_lookup(session_job_lookup_fn fn);
+
+/**
+ * @brief Allocate a bare session for the JOB pool (job_manager owns its lifetime).
+ *
+ * Same initialized state as an interactive session (all mutexes + cond + default
+ * llm_config, empty history, ref_count=1) and a fresh unique session_id — but it
+ * is NOT placed in the interactive sessions[] array and does not count against
+ * MAX_SESSIONS.  The caller sets type/user_id/conv binding and owns teardown via
+ * session_manager_free_bare() after its own cancel-then-wait.
+ *
+ * @return New bare session (ref_count=1), or NULL on allocation failure.
+ */
+session_t *session_manager_alloc_bare(void);
+
+/** Free a bare (job-pool) session allocated with session_manager_alloc_bare(). */
+void session_manager_free_bare(session_t *session);
+
 /**
  * @brief Find session by DAP2 UUID and retain it
  *
@@ -852,6 +964,18 @@ void session_destroy(uint32_t session_id);
  * SESSION_TIMEOUT_SEC without activity.
  */
 void session_cleanup_expired(void);
+
+/**
+ * @brief Is a live interactive session currently mid-turn on @p conv_id?
+ *
+ * Read-locked scan of the interactive session array for a session whose current
+ * turn (`stream_conversation_id`) is @p conv_id and has `turn_in_flight > 0`.
+ * Used by the background-job reinvoke path to defer re-engaging a parent
+ * conversation that a user is actively generating in (avoid two writers).
+ *
+ * @return true if a session is mid-turn on that conversation, false otherwise.
+ */
+bool session_manager_conv_has_turn_in_flight(int64_t conv_id);
 
 /**
  * @brief Check all sessions for idle conversation timeout
@@ -1736,6 +1860,11 @@ static inline void session_manager_cleanup(void) {
 }
 
 static inline void session_cleanup_expired(void) {
+}
+
+static inline bool session_manager_conv_has_turn_in_flight(int64_t conv_id) {
+   (void)conv_id;
+   return false;
 }
 
 static inline void session_check_idle_conversations(void) {

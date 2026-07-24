@@ -905,6 +905,33 @@ typedef struct {
 } scheduler_config_t;
 
 /* =============================================================================
+ * Background Jobs Configuration
+ *
+ * A background job IS a parented conversation run in a separate text-only
+ * job-session pool (never the audio-bound interactive array).  These caps are
+ * LLM-resource-bound (provider concurrency) + DoS guards; job creation/listing/
+ * cancel is conversational (the `job` tool + WebUI), never config.  See
+ * docs/BACKGROUND_JOBS_DESIGN.md §7.
+ * ============================================================================= */
+typedef struct {
+   bool enabled;                   /* Master enable/disable for background jobs */
+   int max_concurrent_local;       /* Concurrent jobs on a local (GPU) LLM — keep low */
+   int max_concurrent_cloud;       /* Concurrent jobs on a cloud LLM — parallelism is cheap */
+   int max_active_jobs;            /* GLOBAL running ceiling across all users (pool size) */
+   int max_jobs_per_user;          /* Per-user concurrent running cap */
+   int max_queued_per_user;        /* Per-user bounded backlog; reject beyond (no silent enqueue) */
+   int monitor_followups_per_tick; /* Bound heartbeat work so the voice loop isn't degraded */
+   int max_spawn_depth;            /* Tree depth cap (exercised in Phase 3) */
+   int max_children_per_tree;      /* Active children per parent (Phase 3) */
+   int max_reinvokes_per_tree;     /* Runaway guard: v1 uses it as the per-job reinvoke
+                                    * FAILURE-ATTEMPT cap (bump at attempt; force-fire past it);
+                                    * true per-tree cumulative accounting lands with trees. */
+   int max_concurrent_reinvokes;   /* Global cap on in-flight reinvoke_parent workers */
+   int max_runtime_sec;            /* Per-job reap (still fires follow-up on timeout) */
+   int event_chunk_cap;            /* Head+tail truncation for event payloads (Phase 2) */
+} jobs_config_t;
+
+/* =============================================================================
  * Music Configuration
  * ============================================================================= */
 
@@ -1134,6 +1161,7 @@ typedef struct {
    paths_config_t paths;
    music_config_t music;
    scheduler_config_t scheduler;
+   jobs_config_t jobs;
    calendar_config_t calendar;
    messaging_config_t messaging;
    ota_config_t ota;

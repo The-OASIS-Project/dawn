@@ -246,7 +246,9 @@ int auth_db_prepare_statements(void) {
        "SELECT id, user_id, title, created_at, updated_at, message_count, is_archived, "
        "context_tokens, context_max, continued_from, compaction_summary, is_private, origin, "
        "is_pinned "
-       "FROM conversations WHERE user_id = ? AND (is_archived = 0 OR ? = 1) "
+       /* job_status IS NULL: hide background-job conversations from the sidebar
+        * (they are surfaced via the `job` tool / the Phase-2 jobs panel). */
+       "FROM conversations WHERE user_id = ? AND (is_archived = 0 OR ? = 1) AND job_status IS NULL "
        "ORDER BY is_pinned DESC, updated_at DESC LIMIT ? OFFSET ?",
        -1, &s_db.stmt_conv_list, NULL);
    if (rc != SQLITE_OK) {

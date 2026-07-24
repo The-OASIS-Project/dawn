@@ -209,9 +209,9 @@ void worker_pool_shutdown(void) {
       pthread_mutex_lock(&w->mutex);
       w->state = WORKER_STATE_SHUTDOWN;
 
-      // Mark session as disconnected to abort LLM calls
+      // Shutdown: abort in-flight LLM calls AND gate emission (both flags).
       if (w->session) {
-         w->session->disconnected = true;
+         session_teardown_flags(w->session);
       }
 
       pthread_cond_signal(&w->client_ready_cond);

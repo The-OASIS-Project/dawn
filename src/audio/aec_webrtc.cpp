@@ -763,9 +763,15 @@ void aec_add_reference(const int16_t *samples, size_t num_samples) {
       aec_cal_add_reference(samples, num_samples);
    }
 
-   // Input is already 48kHz from TTS (TTS resamples 22050→48kHz)
-   // Write directly to reference buffer
-   g_ref_buffer->write(samples, num_samples);
+   // Input is already 48kHz from TTS (TTS resamples 22050→48kHz).
+   // Write under g_aec_mutex + re-check: serializes with aec_cleanup()'s delete
+   // of g_ref_buffer (the pre-lock null-check at the top is advisory only).
+   {
+      std::lock_guard<std::mutex> lock(g_aec_mutex);
+      if (g_ref_buffer) {
+         g_ref_buffer->write(samples, num_samples);
+      }
+   }
 
    // Record reference audio if recording is active
    if (g_recording_active.load()) {
@@ -790,9 +796,14 @@ void aec_add_reference_with_delay(const int16_t *samples,
    }
 
    // Input is already 48kHz from TTS (TTS resamples 22050→48kHz)
-   // Write directly to reference buffer
-   // Note: playback_delay_us is ignored in current delay line implementation
-   g_ref_buffer->write_with_delay(samples, num_samples, playback_delay_us);
+   // Note: playback_delay_us is ignored in current delay line implementation.
+   // Under g_aec_mutex + re-check: serializes with aec_cleanup()'s buffer delete.
+   {
+      std::lock_guard<std::mutex> lock(g_aec_mutex);
+      if (g_ref_buffer) {
+         g_ref_buffer->write_with_delay(samples, num_samples, playback_delay_us);
+      }
+   }
 
    // Record reference audio if recording is active
    if (g_recording_active.load()) {
@@ -863,10 +874,18 @@ void aec_process(const int16_t *mic_in, int16_t *clean_out, size_t num_samples) 
          memset(g_mic_frame + chunk, 0, (AEC_FRAME_SAMPLES - chunk) * sizeof(int16_t));
       }
 
-      // Get reference audio from delay line buffer (at 48kHz)
+      // Get reference audio from delay line buffer (at 48kHz).  Read under
+      // g_aec_mutex so a concurrent aec_cleanup() — which deletes g_ref_buffer
+      // under the same mutex — can't free the buffer (and its internal mutex)
+      // mid-read.  Without this the capture thread's read_frame() races the
+      // shutdown delete (a use-after-free, benign only because the process is
+      // exiting).
       bool has_reference = false;
-      if (g_ref_buffer) {
-         has_reference = g_ref_buffer->read_frame(g_ref_frame);
+      {
+         std::lock_guard<std::mutex> lock(g_aec_mutex);
+         if (g_ref_buffer) {
+            has_reference = g_ref_buffer->read_frame(g_ref_frame);
+         }
       }
 
       if (!has_reference) {

@@ -35,6 +35,7 @@
 #include "audio/resampler.h"
 #include "auth/auth_db.h"
 #include "core/session_manager.h"
+#include "core/turn_queue.h"
 #include "core/utterance_dedup.h"
 #include "core/worker_pool.h"
 #include "llm/llm_context.h"
@@ -742,6 +743,9 @@ typedef struct {
    size_t audio_len;
    bool use_opus;            /* True if audio_data is Opus-encoded, false if raw PCM */
    unsigned int request_gen; /* Captured request_generation to detect superseded requests */
+   int64_t conv_id;          /* Conversation this turn was captured for at enqueue; applied to
+                              * session->stream_conversation_id AT DEQUEUE (a queued turn must
+                              * not disturb the running turn's binding). */
 } audio_work_t;
 
 /**
@@ -1081,6 +1085,17 @@ void scheduler_send_tts_to_session(session_t *session, const char *text) {
  * sentence completes during the LLM response, rather than waiting for the full
  * response. This significantly reduces perceived latency.
  */
+/* Balanced exit for the audio worker once it has passed its supersede check and
+ * incremented turn_in_flight: clear the in-flight guard, THEN release the ref
+ * (decrement-before-release, so a concurrent session_destroy that this release
+ * unblocks already reads turn_in_flight == 0).  Mirror of text_worker_end. */
+static void audio_worker_end(session_t *session) {
+   if (session) {
+      atomic_fetch_sub(&session->turn_in_flight, 1);
+      session_release(session);
+   }
+}
+
 static void *audio_worker_thread(void *arg) {
    audio_work_t *work = (audio_work_t *)arg;
    session_t *session = work->session;
@@ -1091,12 +1106,18 @@ static void *audio_worker_thread(void *arg) {
    if (!session || REQUEST_SUPERSEDED(session, expected_gen)) {
       OLOG_INFO("WebUI: Audio session disconnected or request superseded, aborting");
       if (session) {
-         session_release(session);
+         session_release(session); /* pre-increment exit: bare release, no turn_in_flight */
       }
       free(audio_data);
       free(work);
       return NULL;
    }
+
+   /* Passed the supersede check — this turn is now in flight.  Guards
+    * session_cleanup_expired from reaping a still-generating voice turn and makes
+    * conv_has_turn_in_flight see it (parity with text_worker_thread).  Every exit
+    * BELOW this point releases via audio_worker_end (decrement-then-release). */
+   atomic_fetch_add(&session->turn_in_flight, 1);
 
    OLOG_INFO("WebUI: Processing audio for session %u (%zu bytes, %s)", session->session_id,
              audio_len, work->use_opus ? "opus" : "pcm");
@@ -1121,7 +1142,7 @@ static void *audio_worker_thread(void *arg) {
          OLOG_WARNING("WebUI: Tier 2 audio length %zu is not a multiple of 2", audio_len);
          webui_send_error(session, "INVALID_AUDIO", "Audio length must be a multiple of 2 bytes");
          webui_send_state(session, "idle");
-         session_release(session);
+         audio_worker_end(session);
          free(audio_data);
          free(work);
          return NULL;
@@ -1136,7 +1157,7 @@ static void *audio_worker_thread(void *arg) {
                       max_samples_16k);
          webui_send_error(session, "AUDIO_TOO_LONG", "Recording exceeds 30 second limit");
          webui_send_state(session, "idle");
-         session_release(session);
+         audio_worker_end(session);
          free(audio_data);
          free(work);
          return NULL;
@@ -1158,7 +1179,7 @@ static void *audio_worker_thread(void *arg) {
       OLOG_WARNING("WebUI: Audio transcription failed or empty");
       webui_send_error(session, "ASR_FAILED", "Could not understand audio");
       webui_send_state(session, "idle");
-      session_release(session);
+      audio_worker_end(session);
       free(transcript);
       free(work);
       return NULL;
@@ -1168,7 +1189,7 @@ static void *audio_worker_thread(void *arg) {
 
    /* Check if request was superseded */
    if (REQUEST_SUPERSEDED(session, expected_gen)) {
-      session_release(session);
+      audio_worker_end(session);
       free(transcript);
       free(work);
       return NULL;
@@ -1180,7 +1201,7 @@ static void *audio_worker_thread(void *arg) {
       OLOG_INFO("WebUI: Dedup suppressed duplicate utterance for session %u: \"%s\"",
                 session->session_id, transcript);
       webui_send_state(session, "idle");
-      session_release(session);
+      audio_worker_end(session);
       free(transcript);
       free(work);
       return NULL;
@@ -1232,7 +1253,7 @@ static void *audio_worker_thread(void *arg) {
          webui_send_error(session, "LLM_ERROR", "Failed to get response");
       }
       webui_send_state(session, "idle");
-      session_release(session);
+      audio_worker_end(session);
       free(response);
       free(work);
       return NULL;
@@ -1276,11 +1297,76 @@ static void *audio_worker_thread(void *arg) {
    /* Mark interaction complete for conversation idle timeout tracking */
    session_update_interaction_complete(session);
 
-   /* Release session reference (acquired before thread creation) */
-   session_release(session);
+   /* Balanced exit: clear turn_in_flight, then release the ref acquired before
+    * thread creation. */
+   audio_worker_end(session);
 
    free(work);
    return NULL;
+}
+
+/* =============================================================================
+ * Turn-queue integration (P1): serialize the push-to-talk voice turn.  The PTT
+ * path is the second WebUI turn producer (alongside text input); routing it
+ * through the queue keeps voice input from racing an in-flight text/background
+ * turn on the same session.
+ * ============================================================================= */
+
+/* free_work closure: drop a queued audio turn WITHOUT running it (bound-reject
+ * or purge).  Mirrors the run-path cleanup (release the session retain + free). */
+static void audio_turn_free(void *work) {
+   audio_work_t *w = (audio_work_t *)work;
+   if (w == NULL) {
+      return;
+   }
+   if (w->session != NULL) {
+      session_release(w->session);
+   }
+   free(w->audio_data);
+   free(w);
+}
+
+/* Worker entry for a queued audio turn.  Binds this turn's conversation + clears
+ * the turn flags AT DEQUEUE (never at enqueue — a queued turn must not disturb
+ * the running turn), runs the existing ASR+LLM turn body, then chains the next
+ * queued turn for this session. */
+static void *audio_turn_thread_entry(void *arg) {
+   audio_work_t *work = (audio_work_t *)arg;
+   uint32_t sid = 0;
+   if (work != NULL && work->session != NULL) {
+      sid = work->session->session_id;
+      if (atomic_load(&work->session->being_destroyed)) {
+         /* Session began teardown after this turn was popped-to-spawn (C1): do
+          * NOT clear its flags or run — teardown's cancel must stand.  Clean up
+          * and let the queue drain. */
+         audio_turn_free(work);
+         turn_queue_turn_done(sid);
+         return NULL;
+      }
+      atomic_store(&work->session->stream_conversation_id, work->conv_id);
+      session_begin_turn_flags(work->session); /* fresh flags for THIS turn (G2) */
+   }
+   audio_worker_thread(work); /* existing turn body — frees work, releases session */
+   turn_queue_turn_done(sid); /* chain the next queued turn for this session */
+   return NULL;
+}
+
+/* spawn closure: start the turn worker for a dequeued audio turn. */
+static void audio_turn_spawn(void *work) {
+   pthread_t thread;
+   pthread_attr_t attr;
+   pthread_attr_init(&attr);
+   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+   int ret = pthread_create(&thread, &attr, audio_turn_thread_entry, work);
+   pthread_attr_destroy(&attr);
+   if (ret != 0) {
+      /* Spawn failed: free this turn + advance the queue so it can't wedge. */
+      audio_work_t *w = (audio_work_t *)work;
+      uint32_t sid = (w != NULL && w->session != NULL) ? w->session->session_id : 0;
+      OLOG_ERROR("WebUI: failed to spawn queued audio turn worker; dropping it");
+      audio_turn_free(work);
+      turn_queue_turn_done(sid);
+   }
 }
 
 /**
@@ -1375,16 +1461,17 @@ void handle_binary_message(ws_connection_t *conn, const uint8_t *data, size_t le
 
          OLOG_INFO("WebUI: Audio end, processing %zu bytes", conn->audio_buffer_len);
 
-         /* Increment request generation FIRST to invalidate any pending requests,
-          * then reset disconnected flag. This prevents race conditions where an
-          * old worker sees disconnected=false after a new message is sent. */
+         /* Under the turn queue (P1) the queue serializes turn spawning per
+          * session, so we do NOT bump request_generation here (that would
+          * supersede a still-queued turn), nor clear the turn flags / bind
+          * stream_conversation_id — both happen AT DEQUEUE (in
+          * audio_turn_thread_entry), when this turn actually starts. The
+          * conversation is captured now and applied at dequeue. */
          unsigned int new_gen = 0;
+         int64_t turn_conv_id = 0;
          if (conn->session) {
-            new_gen = atomic_fetch_add(&conn->session->request_generation, 1) + 1;
-            conn->session->disconnected = false;
-            /* Bind the turn to the current conversation before any frame (see the
-             * text-input path) so thinking + stream deltas route correctly. */
-            conn->session->stream_conversation_id = webui_get_active_conversation_id(conn->session);
+            new_gen = atomic_load(&conn->session->request_generation);
+            turn_conv_id = webui_get_active_conversation_id(conn->session);
          }
 
          /* Create work item for worker thread */
@@ -1402,30 +1489,31 @@ void handle_binary_message(ws_connection_t *conn, const uint8_t *data, size_t le
          work->audio_data = conn->audio_buffer;
          work->audio_len = conn->audio_buffer_len;
          work->use_opus = conn->use_opus;
-         work->request_gen = new_gen;
+         work->request_gen = new_gen; /* current gen; supersede is disabled under the queue */
+         work->conv_id = turn_conv_id;
 
          /* Transfer ownership to worker */
          conn->audio_buffer = NULL;
          conn->audio_buffer_len = 0;
 
-         /* Retain session for worker thread (worker will release when done) */
+         /* Retain session for the queued turn (released via audio_turn_free on
+          * reject/purge, or session_release inside audio_worker_thread on run). */
          session_retain(conn->session);
 
-         /* Spawn worker thread */
-         pthread_t thread;
-         pthread_attr_t attr;
-         pthread_attr_init(&attr);
-         pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-
-         int ret = pthread_create(&thread, &attr, audio_worker_thread, work);
-         pthread_attr_destroy(&attr);
-
-         if (ret != 0) {
-            OLOG_ERROR("WebUI: Failed to create audio worker thread");
-            session_release(conn->session);
-            free(work->audio_data);
-            free(work);
-            send_error_impl(conn->wsi, "PROCESSING_ERROR", "Audio processing failed");
+         /* Enqueue rather than spawn directly: the turn queue guarantees only one
+          * turn runs per session at a time (serializes user + background turns),
+          * spawning this one now iff nothing is in flight. */
+         int qrc = turn_queue_enqueue(conn->session->session_id, TURN_SOURCE_USER, work,
+                                      audio_turn_spawn, audio_turn_free);
+         if (qrc != TURN_QUEUE_OK) {
+            if (qrc == TURN_QUEUE_FULL) {
+               send_error_impl(conn->wsi, "TURN_QUEUE_FULL",
+                               "Too many turns queued; please wait for the current one to finish");
+            } else {
+               OLOG_ERROR("WebUI: failed to enqueue audio turn");
+               send_error_impl(conn->wsi, "PROCESSING_ERROR", "Audio processing failed");
+            }
+            audio_turn_free(work); /* frees work + audio_data AND releases the session retain */
          }
          break;
       }

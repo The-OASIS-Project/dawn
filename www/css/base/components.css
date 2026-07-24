@@ -144,6 +144,65 @@
    border: 1px solid var(--border-color);
 }
 
+/* Background-jobs "running" indicator — styled to MATCH the composer "working"
+ * pill (#composer-busy): same rounded, mono, shadowed pill so it reads as a
+ * sibling status indicator.  The per-conversation instance floats above the
+ * composer beside the working pill; the global instance sits inline in the
+ * header.  Pulses gently while jobs run.  Display-only. */
+.jobs-pill {
+   display: inline-flex;
+   align-items: center;
+   gap: 6px;
+   padding: 3px 10px;
+   border-radius: 999px;
+   font-family: var(--font-mono, 'IBM Plex Mono', monospace);
+   font-size: 0.72rem;
+   letter-spacing: 0.04em;
+   line-height: 1.3;
+   white-space: nowrap;
+   vertical-align: middle;
+   background: var(--bg-secondary);
+   color: var(--warning); /* amber — stands apart from the cyan "working" pill */
+   border: 1px solid var(--warning-border);
+   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+   animation: jobsPillPulse 1.6s ease-in-out infinite;
+}
+
+/* Per-conversation pill: floats above the composer, top-right, mirroring the
+ * "working" pill (#composer-busy) which floats top-left.  #input-area is the
+ * positioned offset parent. */
+.conv-jobs-pill {
+   position: absolute;
+   bottom: calc(100% + 6px);
+   right: 8px;
+   z-index: 2;
+}
+
+@keyframes jobsPillPulse {
+   0%,
+   100% {
+      opacity: 1;
+   }
+   50% {
+      opacity: 0.62;
+   }
+}
+
+@media (prefers-reduced-motion: reduce) {
+   .jobs-pill {
+      animation: none;
+   }
+}
+
+.jobs-pill.jobs-pill-global {
+   cursor: default;
+   box-shadow: none; /* inline in the header — no float shadow needed */
+}
+
+.jobs-pill.hidden {
+   display: none;
+}
+
 /* -----------------------------------------------------------------------------
  * Form (.dawn-form)
  * Usage: <form class="dawn-form"> or <div class="dawn-form">

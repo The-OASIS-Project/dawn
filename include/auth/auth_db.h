@@ -1183,6 +1183,223 @@ int conv_db_create_continuation(int user_id,
                                 const char *compaction_summary,
                                 int64_t *conv_id_out);
 
+/* =============================================================================
+ * Background Job Accessors (v72/v73)
+ *
+ * A background job IS a parented conversation: its lifecycle lives in the job
+ * columns on `conversations` (parent_id, spawn_mode, on_complete,
+ * on_complete_fired, job_status, job_error, spawn_depth, reinvoke_count,
+ * started_at, finished_at, deliver_to).  job_status IS NULL means "not a job".
+ * These accessors are the read/write surface over those columns; the shared
+ * conversation_t / conv_db_get read path is deliberately left untouched (the
+ * job columns are NULL for ~every normal conversation).  See
+ * docs/BACKGROUND_JOBS_DESIGN.md and src/core/job_manager.c.
+ * ============================================================================= */
+
+#define JOB_STATUS_MAX 16      /**< "interrupted" is the longest status */
+#define JOB_SPAWN_MODE_MAX 16  /**< "detached" (v1) */
+#define JOB_ON_COMPLETE_MAX 24 /**< "reinvoke_parent" (Phase 3) */
+#define JOB_DELIVER_TO_MAX 64  /**< messaging channel display_name */
+#define JOB_ERROR_MAX 256      /**< truncated failure reason */
+
+/**
+ * @brief A background job's lifecycle row (subset of `conversations` columns).
+ */
+typedef struct {
+   int64_t id;        /**< conversation id of the job */
+   int user_id;       /**< owner (inherited from the spawner, non-overridable) */
+   int64_t parent_id; /**< spawning conversation id (0 = root/user-initiated) */
+   char title[CONV_TITLE_MAX];
+   char spawn_mode[JOB_SPAWN_MODE_MAX];
+   char on_complete[JOB_ON_COMPLETE_MAX]; /**< "notify" | "none" (v1) */
+   bool on_complete_fired;
+   char job_status[JOB_STATUS_MAX]; /**< queued|running|done|failed|interrupted|cancelled */
+   char job_error[JOB_ERROR_MAX];
+   char deliver_to[JOB_DELIVER_TO_MAX]; /**< empty = local; else messaging channel */
+   int spawn_depth;
+   int reinvoke_count;
+   time_t started_at;
+   time_t finished_at;
+   time_t created_at;
+} job_record_t;
+
+/**
+ * @brief Create a background-job conversation (job_status='queued').
+ *
+ * The child inherits @p user_id (the caller never supplies a foreign user_id).
+ *
+ * @param user_id Owner (the spawner's user_id).
+ * @param title Job title (NULL → default).
+ * @param parent_id Spawning conversation id (0 = root).
+ * @param spawn_mode "detached" (v1).
+ * @param on_complete "notify" | "none".
+ * @param deliver_to Messaging channel display_name, or NULL/"" for local delivery.
+ * @param spawn_depth parent.spawn_depth + 1 (0 = root).
+ * @param conv_id_out Receives the new job conversation id.
+ * @return AUTH_DB_SUCCESS, AUTH_DB_LIMIT_EXCEEDED, or AUTH_DB_FAILURE.
+ */
+int conv_db_create_job(int user_id,
+                       const char *title,
+                       int64_t parent_id,
+                       const char *spawn_mode,
+                       const char *on_complete,
+                       const char *deliver_to,
+                       int spawn_depth,
+                       int64_t *conv_id_out);
+
+/**
+ * @brief System-caller: mark a job running and stamp started_at.
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int conv_db_job_set_running(int64_t conv_id, time_t started_at);
+
+/**
+ * @brief System-caller: set a terminal status + error + finished_at in one write.
+ * @param status One of done|failed|interrupted|cancelled.
+ * @param error_or_null Failure detail (truncated), or NULL.
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int conv_db_job_set_terminal(int64_t conv_id,
+                             const char *status,
+                             const char *error_or_null,
+                             time_t finished_at);
+
+/**
+ * @brief System-caller: set on_complete_fired=1 (idempotency / follow-up guard).
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int conv_db_job_mark_fired(int64_t conv_id);
+
+/**
+ * @brief Ownership-checked: load a job's lifecycle record.
+ * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND (not a job), AUTH_DB_FORBIDDEN, AUTH_DB_FAILURE.
+ */
+int conv_db_job_get(int64_t conv_id, int user_id, job_record_t *out);
+
+/**
+ * @brief Ownership-checked status probe (for the delete guard).
+ *
+ * Writes the empty string to @p status_out when the conversation exists but is
+ * not a job (job_status IS NULL).
+ *
+ * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, AUTH_DB_FORBIDDEN, AUTH_DB_FAILURE.
+ */
+int conv_db_job_get_status(int64_t conv_id, int user_id, char *status_out, size_t n);
+
+/**
+ * @brief Ownership-scoped: list a user's jobs (newest first), up to @p max.
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int conv_db_job_list_by_user(int user_id, job_record_t *out, int max, int *count_out);
+
+/**
+ * @brief System-caller: jobs in a terminal state awaiting their follow-up
+ *        (job_status IN (done,failed,interrupted) AND on_complete_fired=0).
+ *
+ * Copies up to @p max rows out under the DB lock so the caller can release it
+ * before performing blocking delivery.
+ *
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int conv_db_job_list_pending_followups(int max, job_record_t *out, int *count_out);
+
+/**
+ * @brief The parent's still-pending reinvoke_parent jobs (done/failed/interrupted,
+ *        on_complete_fired=0, on_complete='reinvoke_parent'), ordered finished_at ASC.
+ *
+ * Re-queried at reinvoke DISPATCH time (not monitor time) so a coalesced
+ * re-engagement picks up sibling jobs that finished while it was queued behind an
+ * active turn.  Ownership-scoped to @p user_id.
+ *
+ * @return AUTH_DB_SUCCESS / AUTH_DB_INVALID / AUTH_DB_FAILURE.
+ */
+int conv_db_job_pending_reinvoke_for_parent(int64_t parent_id,
+                                            int user_id,
+                                            job_record_t *out,
+                                            int max,
+                                            int *count_out);
+
+/**
+ * @brief System-caller: all jobs still marked running/queued (boot scan +
+ *        counter/queue rebuild).
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int conv_db_job_scan_active(job_record_t *out, int max, int *count_out);
+
+/**
+ * @brief System-caller: mark several jobs' on_complete_fired=1 in one transaction.
+ *
+ * Used by the reinvoke worker to claim a coalesced group atomically alongside
+ * the reply persist (shrinks the crash-window that could double-deliver).  A
+ * NULL/empty list is a no-op success.
+ *
+ * @return AUTH_DB_SUCCESS, AUTH_DB_INVALID (ids NULL with n>0), or AUTH_DB_FAILURE.
+ */
+int conv_db_job_mark_fired_many(const int64_t *ids, int n);
+
+/**
+ * @brief System-caller: increment a job's reinvoke_count (attempt counter).
+ *
+ * Bumped at each reinvoke ATTEMPT (not only on success) so a persistently
+ * failing reinvoke trips the runaway ceiling instead of retrying forever.
+ *
+ * @param new_count_out Receives the post-increment value (may be NULL).
+ * @return AUTH_DB_SUCCESS, AUTH_DB_INVALID (conv_id <= 0), or AUTH_DB_FAILURE.
+ */
+int conv_db_job_bump_reinvoke(int64_t conv_id, int *new_count_out);
+
+/**
+ * @brief System-caller (boot): suppress auto-reinvoke across a daemon restart.
+ *
+ * Marks on_complete_fired=1 for every terminal (done/failed/interrupted),
+ * not-yet-fired job whose on_complete='reinvoke_parent', so a job that finished
+ * before this boot is NEVER auto-reinvoked on startup (design §143).  Also frees
+ * the finished_at-ordered follow-up drain from head-of-line blocking on a stale
+ * reinvoke row.
+ *
+ * @param count_out Receives the number of rows fired (may be NULL).
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int conv_db_job_fire_boot_reinvokes(int *count_out);
+
+/** A parent conversation and its count of active (queued/running) child jobs. */
+typedef struct {
+   int64_t parent_id;
+   int count;
+} job_parent_count_t;
+
+/**
+ * @brief Count active (queued/running) jobs whose parent is @p parent_id.
+ * @return AUTH_DB_SUCCESS (0 for parent_id <= 0), AUTH_DB_INVALID, or AUTH_DB_FAILURE.
+ */
+int conv_db_job_active_count_for_parent(int64_t parent_id, int *count_out);
+
+/**
+ * @brief Per-parent active-job counts for a user (connect snapshot), grouped by
+ *        parent_id.  Copies up to @p max {parent_id,count} pairs into @p out.
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int conv_db_job_active_counts_by_user(int user_id,
+                                      job_parent_count_t *out,
+                                      int max,
+                                      int *count_out);
+
+/**
+ * @brief Ownership-scoped: copy a job's last assistant message text (its result).
+ *
+ * Allocates *out (caller frees) with the content of the most recent
+ * role='assistant' message in the job conversation, or sets *out=NULL when the
+ * job produced no assistant message.  The conversation is ownership-JOINed to
+ * @p user_id.
+ *
+ * A conversation not owned by @p user_id (or with no assistant message) simply
+ * yields *out=NULL — the ownership filter is the SQL JOIN, so there is no
+ * distinct FORBIDDEN result.
+ *
+ * @return AUTH_DB_SUCCESS (even when *out is NULL), AUTH_DB_INVALID, or AUTH_DB_FAILURE.
+ */
+int conv_db_job_last_assistant_text(int64_t conv_id, int user_id, char **out);
+
 /**
  * @brief List conversations for a user
  *

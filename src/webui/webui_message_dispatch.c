@@ -1341,6 +1341,11 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       if (!conn_require_auth(conn))
          return;
       webui_phone_send_status(conn);
+   } else if (strcmp(type, "jobs_activity_request") == 0) {
+      /* Client asks for the per-conversation active-job counts (pill rehydration). */
+      if (!conn_require_auth(conn))
+         return;
+      webui_jobs_broadcast_activity_snapshot(conn->auth_user_id);
    } else if (strcmp(type, "scheduler_action") == 0) {
       if (!conn_is_satellite_session(conn) && !conn_require_auth(conn))
          return;
@@ -1488,11 +1493,12 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
 static void handle_cancel_message(ws_connection_t *conn) {
    if (conn->session) {
       OLOG_INFO("WebUI: Cancel requested for session %u", conn->session->session_id);
-      conn->session->disconnected = true; /* Signal worker to abort */
-      /* Note: llm_request_interrupt() is NOT called here because it uses a global flag
-       * that would affect all users. Instead, session_manager.c sets the TLS cancel flag
-       * to &session->disconnected before each LLM call, so the CURL progress callback
-       * will check THIS session's disconnected flag only. */
+      /* Explicit Stop: abort THIS turn's generation, but the client stays
+       * connected — so set cancel_requested (not disconnected).  session
+       * manager hands &session->cancel_requested to llm_set_cancel_flag before
+       * each LLM call, so the CURL progress callback aborts THIS session only.
+       * (llm_request_interrupt() is NOT used — its global flag hits all users.) */
+      session_cancel_turn(conn->session);
       send_state_impl(conn->wsi, "idle", NULL);
    }
 }

@@ -299,6 +299,10 @@
                if (typeof DawnPhone !== 'undefined') {
                   DawnPhone.handleReconnect();
                }
+               // Rehydrate the background-jobs pills (per-conversation + global).
+               if (typeof DawnJobsActivity !== 'undefined') {
+                  DawnJobsActivity.handleReconnect();
+               }
                // Re-enable always-on if it was active before the connection
                // dropped. Deferred to here (not raw 'connected') for the same
                // reason as phone: always_on_enable must land on the restored
@@ -960,6 +964,26 @@
                }
                break;
             }
+            case 'job_notification': {
+               // Background-job completion: a silent in-browser toast (no voice).
+               const jp = msg.payload || {};
+               if (typeof DawnToast !== 'undefined' && jp.text) {
+                  DawnToast.show(jp.text, 'info', 8000, { badge: 'JOB' });
+               }
+               break;
+            }
+            case 'job_activity':
+               // A parent conversation's active-job count changed → update pills.
+               if (typeof DawnJobsActivity !== 'undefined' && msg.payload) {
+                  DawnJobsActivity.setActive(msg.payload.conversation_id, msg.payload.active_count);
+               }
+               break;
+            case 'jobs_activity_snapshot':
+               // Connect/reconnect rehydration of the full per-parent count map.
+               if (typeof DawnJobsActivity !== 'undefined' && msg.payload) {
+                  DawnJobsActivity.applySnapshot(msg.payload.counts);
+               }
+               break;
             case 'phone_call_notification':
                if (typeof DawnPhone !== 'undefined') {
                   DawnPhone.handleNotification(msg.payload);
@@ -2147,6 +2171,11 @@
       DawnSettings.initConversationLlmControls();
       DawnTools.init();
       DawnMetricsPanel.init();
+      if (typeof DawnJobsActivity !== 'undefined') {
+         DawnJobsActivity.init(
+            typeof DawnHistory !== 'undefined' ? DawnHistory.getActiveConversationId : null
+         );
+      }
       DawnUserBadge.init({
          openSection: DawnSettings.openSection,
          metricsToggle: typeof DawnMetricsPanel !== 'undefined' ? DawnMetricsPanel.toggle : null,

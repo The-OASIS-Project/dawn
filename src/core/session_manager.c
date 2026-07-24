@@ -34,6 +34,7 @@
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
 #include "core/prompt_compose.h"
+#include "core/turn_queue.h"
 #include "dawn_error.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_interface.h"
@@ -50,8 +51,19 @@
 
 static session_t *sessions[MAX_SESSIONS];
 static pthread_rwlock_t session_manager_rwlock = PTHREAD_RWLOCK_INITIALIZER;
-static uint32_t next_session_id = 1;  // 0 is reserved for local session
+static _Atomic uint32_t next_session_id = 1;  // 0 is reserved for local session
+// Job-pool resolver (background-jobs Phase 1): job_manager registers this so
+// session_get()/_for_reconnect() can resolve a job session on interactive-array
+// miss.  Read lock-free (set once at job_manager_init before any job exists).
+static session_job_lookup_fn s_job_lookup_fn = NULL;
 static bool initialized = false;
+
+/* Weak seam: WebUI overrides this (webui_send.c) to scrub the response queue of a
+ * session about to be freed, preventing a send-thread-vs-teardown use-after-free.
+ * No-op without WebUI. */
+__attribute__((weak)) void webui_send_purge_session(const session_t *s) {
+   (void)s;
+}
 
 /**
  * Thread-local command context - allows device callbacks to access the current session
@@ -125,6 +137,11 @@ static void generate_crypto_random_hex(char *buf, size_t num_bytes) {
  * @return true if strings are equal, false otherwise
  */
 #define RECONNECT_SECRET_LEN 64 /* 32 bytes * 2 hex chars */
+
+/* session_destroy ref-count wait ceiling.  teardown's cancel aborts a live
+ * worker within ~1s; a hold past this means a wedged worker, so we leak the
+ * session_t (recoverable) rather than free it under a still-running worker (UAF). */
+#define SESSION_DESTROY_REF_WAIT_MAX_SEC 30
 
 static bool constant_time_compare(const char *a, const char *b) {
    if (!a || !b) {
@@ -277,6 +294,37 @@ static void session_free(session_t *session) {
    free(session);
 }
 
+/* =============================================================================
+ * Job-pool integration (background-jobs Phase 1)
+ * ============================================================================= */
+
+void session_manager_register_job_lookup(session_job_lookup_fn fn) {
+   s_job_lookup_fn = fn;
+}
+
+session_t *session_manager_alloc_bare(void) {
+   session_t *session = session_alloc();
+   if (!session) {
+      return NULL;
+   }
+   /* Fresh unique id (atomic — no session_manager_rwlock held here) + the same
+    * baseline an interactive session gets from session_create(), minus placement
+    * in sessions[].  The caller (job_manager) sets type/user binding and owns
+    * teardown via session_manager_free_bare(). */
+   session->session_id = atomic_fetch_add(&next_session_id, 1);
+   session->ref_count = 1;
+   session->created_at = time(NULL);
+   session->last_activity = session->created_at;
+   session->client_fd = -1;
+   return session;
+}
+
+void session_manager_free_bare(session_t *session) {
+   if (session) {
+      session_free(session);
+   }
+}
+
 static int find_free_slot(void) {
    for (int i = 0; i < MAX_SESSIONS; i++) {
       if (sessions[i] == NULL) {
@@ -364,8 +412,8 @@ void session_manager_cleanup(void) {
 
    for (int i = 0; i < MAX_SESSIONS; i++) {
       if (sessions[i] != NULL) {
-         // Mark as disconnected to abort any in-flight operations
-         sessions[i]->disconnected = true;
+         // Shutdown: abort any in-flight operations AND gate emission (both flags).
+         session_teardown_flags(sessions[i]);
 
          // For LOCAL session, wait for ref_count to reach 1 (workers may be using it)
          // For WebSocket/DAP sessions, force cleanup (ref_count is for reconnection support)
@@ -766,10 +814,18 @@ session_t *session_get(uint32_t session_id) {
       pthread_mutex_lock(&found->ref_mutex);
       found->ref_count++;
       pthread_mutex_unlock(&found->ref_mutex);
+      pthread_rwlock_unlock(&session_manager_rwlock);
+      return found;
    }
 
    pthread_rwlock_unlock(&session_manager_rwlock);
-   return found;
+   /* Interactive-array miss: fall back to the job pool (background-jobs Phase 1).
+    * Called after releasing session_manager_rwlock so the resolver's job_pool
+    * lock never nests under it. */
+   if (s_job_lookup_fn) {
+      return s_job_lookup_fn(session_id, false);
+   }
+   return NULL;
 }
 
 session_t *session_find_by_uuid(const char *uuid) {
@@ -816,11 +872,16 @@ session_t *session_get_for_reconnect(uint32_t session_id) {
       pthread_mutex_lock(&found->ref_mutex);
       found->ref_count++;
       pthread_mutex_unlock(&found->ref_mutex);
+      pthread_rwlock_unlock(&session_manager_rwlock);
+      return found;
    }
 
    pthread_rwlock_unlock(&session_manager_rwlock);
-
-   return found;
+   /* Interactive-array miss: fall back to the job pool (background-jobs Phase 1). */
+   if (s_job_lookup_fn) {
+      return s_job_lookup_fn(session_id, true);
+   }
+   return NULL;
 }
 
 void session_retain(session_t *session) {
@@ -892,11 +953,26 @@ void session_destroy(uint32_t session_id) {
       return;
    }
 
-   // Phase 1: Mark disconnected and remove from active list
-   session->disconnected = true;
+   // Phase 1: Abort the turn + gate emission, and remove from active list.
+   // Mark being_destroyed FIRST (before teardown flags): a queued turn spawned
+   // into the tiny pop-to-run window reads this and declines to resurrect the
+   // session's flags (see the turn-queue dequeue wrappers).
+   atomic_store(&session->being_destroyed, true);
+   // teardown sets BOTH cancel_requested (so an in-flight LLM/compaction worker
+   // aborts promptly and unrefs — the ref wait below then completes cleanly) and
+   // disconnected (emission gate).  A destroy MUST cancel: unlike a bare client
+   // disconnect (which the turn survives), a destroy frees the session_t.
+   session_teardown_flags(session);
    sessions[slot] = NULL;
 
    pthread_rwlock_unlock(&session_manager_rwlock);
+
+   /* Phase 1.25: Close the turn queue for this session BEFORE the ref-count wait.
+    * Marks the session closing (no new turns can enqueue, the in-flight turn's
+    * turn_done won't chain a successor) and drops every already-QUEUED turn —
+    * each queued turn holds a session retain, so dropping them here lets the
+    * ref-count wait below actually reach zero instead of timing out. */
+   turn_queue_purge_session(session_id);
 
    /* Phase 1.5: Detach WebUI connections before waiting for ref_count.
     * This NULLs out conn->session pointers and calls session_release()
@@ -907,9 +983,10 @@ void session_destroy(uint32_t session_id) {
 #endif
 
    /* Phase 1.75: Join async compaction thread if running.
-    * The bg thread checks session->disconnected (set in Phase 1) and the
-    * cancel flag aborts any in-flight CURL transfer, so the join returns
-    * promptly. Must happen before Phase 2 to release the thread's ref. */
+    * The bg thread's CURL cancel flag is &session->cancel_requested, which
+    * Phase 1's session_teardown_flags() just set, so any in-flight transfer
+    * aborts and the join returns promptly. Must happen before Phase 2 to
+    * release the thread's ref. */
    if (atomic_load(&session->async_compact.state) != ASYNC_COMPACT_IDLE &&
        session->async_compact.thread_active) {
       OLOG_INFO("Session %u: joining async compaction thread", session_id);
@@ -918,21 +995,32 @@ void session_destroy(uint32_t session_id) {
       OLOG_INFO("Session %u: async compaction thread joined", session_id);
    }
 
-   // Phase 2: Wait for ref_count to reach 0 (with timeout to prevent shutdown hang)
+   // Phase 2: Wait for ref_count to reach 0 (bounded retry; leak rather than
+   // free-under-a-worker).  teardown set cancel_requested, so a live LLM/CURL
+   // worker aborts within ~1s and releases its ref — 30s is generous.  A hold
+   // PAST that means a genuinely wedged worker: leaking a few-KB session_t is
+   // recoverable, but freeing it while a worker still dereferences it is a UAF.
+   // On the leak path we deliberately return WITHOUT Phase 3 (metrics +
+   // extraction) or session_free, logging ERROR so the leak is visible.
    pthread_mutex_lock(&session->ref_mutex);
+   int waited_sec = 0;
    while (session->ref_count > 0) {
-      OLOG_INFO("Waiting for session %u ref_count (current=%d)", session_id, session->ref_count);
-
       struct timespec timeout;
       clock_gettime(CLOCK_REALTIME, &timeout);
       timeout.tv_sec += 3;
 
       int rc = pthread_cond_timedwait(&session->ref_zero_cond, &session->ref_mutex, &timeout);
       if (rc == ETIMEDOUT) {
-         OLOG_WARNING(
-             "Session %u: ref_count wait timed out (ref_count=%d), proceeding with destroy",
-             session_id, session->ref_count);
-         break;
+         waited_sec += 3;
+         OLOG_WARNING("Session %u: ref_count wait %ds (ref_count=%d)", session_id, waited_sec,
+                      session->ref_count);
+         if (waited_sec >= SESSION_DESTROY_REF_WAIT_MAX_SEC) {
+            OLOG_ERROR("Session %u: ref_count stuck at %d after %ds — leaking session instead of "
+                       "freeing (UAF guard)",
+                       session_id, session->ref_count, waited_sec);
+            pthread_mutex_unlock(&session->ref_mutex);
+            return; /* deliberate leak: skip metrics/extraction/session_free */
+         }
       }
    }
    pthread_mutex_unlock(&session->ref_mutex);
@@ -1012,7 +1100,29 @@ void session_destroy(uint32_t session_id) {
    }
 
    OLOG_INFO("Destroying session %u (type=%s)", session_id, session_type_name(session->type));
+   /* The turn queue was already closed + drained in Phase 1.25 (before the
+    * ref-count wait).  Invalidate any queued WebUI responses (TSan UAF fix)
+    * before the free. */
+   webui_send_purge_session(session);
    session_free(session);
+}
+
+bool session_manager_conv_has_turn_in_flight(int64_t conv_id) {
+   if (!initialized || conv_id <= 0) {
+      return false;
+   }
+   bool busy = false;
+   pthread_rwlock_rdlock(&session_manager_rwlock);
+   for (int i = 0; i < MAX_SESSIONS; i++) {
+      session_t *s = sessions[i];
+      if (s != NULL && atomic_load(&s->turn_in_flight) > 0 &&
+          atomic_load(&s->stream_conversation_id) == conv_id) {
+         busy = true;
+         break;
+      }
+   }
+   pthread_rwlock_unlock(&session_manager_rwlock);
+   return busy;
 }
 
 void session_cleanup_expired(void) {
@@ -1041,6 +1151,15 @@ void session_cleanup_expired(void) {
           * in the owner's map after session_destroy's 3-sec ref-count
           * wait times out. */
          if (sessions[i]->type == SESSION_TYPE_MESSAGING || sessions[i]->idle_timeout_exempt) {
+            continue;
+         }
+         /* Do not reap a session with a turn in flight.  Post background-jobs
+          * Phase 1 a disconnected client no longer aborts its turn, so a
+          * still-generating worker routinely coexists with an idle-looking
+          * (stale last_activity) session; destroying it here would abort the
+          * survivor and race its worker.  The worker clears this on exit; the
+          * session is reaped on the next sweep once truly idle. */
+         if (atomic_load(&sessions[i]->turn_in_flight) > 0) {
             continue;
          }
          time_t idle_time = now - sessions[i]->last_activity;
@@ -2463,11 +2582,12 @@ void session_touch(session_t *session) {
    if (!session) {
       return;
    }
-   // Protect last_activity write with history_mutex for thread safety
-   // time_t may not be atomic on all platforms
-   pthread_mutex_lock(&session->history_mutex);
-   session->last_activity = time(NULL);
-   pthread_mutex_unlock(&session->history_mutex);
+   /* last_activity is _Atomic — a lock-free atomic store is sufficient (and this
+    * runs on every WS callback, so the old history_mutex round-trip was both
+    * redundant and on a hot path).  The reader (session_cleanup_expired) holds a
+    * different lock, so the atomicity — not a shared mutex — is what makes them
+    * race-free. */
+   atomic_store(&session->last_activity, time(NULL));
 }
 
 int session_count(void) {
@@ -2501,6 +2621,8 @@ const char *session_type_name(session_type_t type) {
          return "WEBUI";
       case SESSION_TYPE_MESSAGING:
          return "MESSAGING";
+      case SESSION_TYPE_JOB:
+         return "JOB";
       default:
          return "UNKNOWN";
    }

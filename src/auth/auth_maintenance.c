@@ -44,7 +44,7 @@
 
 /* Thread state */
 static pthread_t s_maintenance_thread;
-static volatile bool s_running = false;
+static _Atomic bool s_running = false;  // atomic: written on shutdown, read in loop
 static pthread_mutex_t s_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /**

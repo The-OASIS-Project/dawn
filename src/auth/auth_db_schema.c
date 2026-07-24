@@ -196,6 +196,11 @@ static const char *SCHEMA_SQL =
     "   started_at INTEGER NOT NULL DEFAULT 0,"
     "   finished_at INTEGER NOT NULL DEFAULT 0,"
     "   workspace_ref TEXT DEFAULT NULL,"
+    /* deliver_to (v73): job-completion notification target — empty/NULL = local
+     * chime+banner+voice; a messaging channel display_name routes the "done"
+     * alert there (scheduler deliver_to semantics).  The v73 partial follow-up
+     * index (idx_conv_job_followup) lives in the migration, not here. */
+    "   deliver_to TEXT DEFAULT NULL,"
     "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
     "   FOREIGN KEY (continued_from) REFERENCES conversations(id) ON DELETE SET NULL,"
     "   FOREIGN KEY (parent_id) REFERENCES conversations(id) ON DELETE SET NULL"

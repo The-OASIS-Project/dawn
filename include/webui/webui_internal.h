@@ -59,21 +59,25 @@
  * ============================================================================= */
 
 /**
- * @brief Check if a request has been superseded by a newer one
+ * @brief Check if a request has been superseded and should abort
  *
- * A request is superseded if:
- * 1. The session was disconnected (user closed connection or clicked stop)
- * 2. A newer request was initiated (user sent new message before old completed)
+ * A request aborts if:
+ * 1. Cancellation was requested (Stop button, or session teardown) — NOT a mere
+ *    client disconnect.  Post background-jobs Phase 1, a disconnected turn keeps
+ *    generating and is persisted server-side, so `disconnected` alone no longer
+ *    aborts; only `cancel_requested` does.
+ * 2. A newer request was initiated (user sent a new message before this one
+ *    completed) — request_generation moved on.
  *
  * Workers should check this before and after long operations (LLM calls, etc.)
- * to avoid processing stale requests.
+ * to avoid processing stale/cancelled requests.
  *
  * @param session Pointer to session_t
  * @param expected_gen The request_generation captured when work was queued
  * @return true if request should be aborted, false if still valid
  */
 #define REQUEST_SUPERSEDED(session, expected_gen) \
-   (atomic_load(&(session)->disconnected) ||      \
+   (atomic_load(&(session)->cancel_requested) ||  \
     atomic_load(&(session)->request_generation) != (expected_gen))
 
 #ifdef __cplusplus
@@ -311,7 +315,7 @@ typedef struct {
  * ============================================================================= */
 
 extern struct lws_context *s_lws_context;
-extern volatile int s_running;
+extern _Atomic int s_running;
 extern volatile int s_client_count;
 extern int s_port;
 extern char s_www_path[256];

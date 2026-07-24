@@ -1,0 +1,685 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s).
+ *
+ * Authentication Database - Background Job Accessors
+ *
+ * Read/write surface over the job lifecycle columns on `conversations` (a job
+ * IS a parented conversation).  Kept out of auth_db_conv.c (already > 1500 ln)
+ * for cohesion.  The shared conversation_t / conv_db_get read path is left
+ * untouched — the job columns are NULL for ~every normal conversation, so the
+ * job surface is its own row type (job_record_t) with its own queries.
+ *
+ * Statements are prepared ad-hoc (prepare/step/finalize) rather than cached in
+ * s_db: every path here is low-frequency (spawn, a handful of status
+ * transitions per job, the once-per-second-when-dirty monitor scan, the boot
+ * scan).  Caching into s_db.stmt_* is a documented follow-up if profiling ever
+ * shows it (mirrors the memory_db_alias.c note in TODO.md).
+ *
+ * SECURITY: All SQL is constant or parameterized — never sqlite3_mprintf with
+ * user input.  System-caller setters take no user_id (internal daemon
+ * transitions only); every user-facing reader binds and checks user_id.
+ */
+
+#define AUTH_DB_INTERNAL_ALLOWED
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+
+#include "auth/auth_db_internal.h"
+#include "logging.h"
+
+/* =============================================================================
+ * Helpers
+ * ============================================================================= */
+
+/* Copy a possibly-NULL text column into a fixed buffer, always NUL-terminated. */
+static void job_copy_text(sqlite3_stmt *st, int col, char *dst, size_t n) {
+   const char *s = (const char *)sqlite3_column_text(st, col);
+   if (s && n > 0) {
+      strncpy(dst, s, n - 1);
+      dst[n - 1] = '\0';
+   } else if (n > 0) {
+      dst[0] = '\0';
+   }
+}
+
+/* Unpack a full job_record_t from a row selected with JOB_SELECT_COLS order. */
+static void job_unpack_row(sqlite3_stmt *st, job_record_t *r) {
+   memset(r, 0, sizeof(*r));
+   r->id = sqlite3_column_int64(st, 0);
+   r->user_id = sqlite3_column_int(st, 1);
+   r->parent_id = sqlite3_column_int64(st, 2);
+   job_copy_text(st, 3, r->title, sizeof(r->title));
+   job_copy_text(st, 4, r->spawn_mode, sizeof(r->spawn_mode));
+   job_copy_text(st, 5, r->on_complete, sizeof(r->on_complete));
+   r->on_complete_fired = sqlite3_column_int(st, 6) != 0;
+   job_copy_text(st, 7, r->job_status, sizeof(r->job_status));
+   job_copy_text(st, 8, r->job_error, sizeof(r->job_error));
+   job_copy_text(st, 9, r->deliver_to, sizeof(r->deliver_to));
+   r->spawn_depth = sqlite3_column_int(st, 10);
+   r->reinvoke_count = sqlite3_column_int(st, 11);
+   r->started_at = (time_t)sqlite3_column_int64(st, 12);
+   r->finished_at = (time_t)sqlite3_column_int64(st, 13);
+   r->created_at = (time_t)sqlite3_column_int64(st, 14);
+}
+
+#define JOB_SELECT_COLS                                                                      \
+   "id, user_id, parent_id, title, spawn_mode, on_complete, on_complete_fired, job_status, " \
+   "job_error, deliver_to, spawn_depth, reinvoke_count, started_at, finished_at, created_at"
+
+/* Run a parameterless-after-@nbind constant SELECT into an out[] array.  Caller
+ * holds the auth_db lock.  @bind is invoked to bind params (may be NULL). */
+static int job_select_into(const char *sql,
+                           void (*bind)(sqlite3_stmt *st, void *ctx),
+                           void *bind_ctx,
+                           job_record_t *out,
+                           int max,
+                           int *count_out) {
+   *count_out = 0;
+   if (!out || max <= 0) {
+      return AUTH_DB_SUCCESS;
+   }
+   sqlite3_stmt *st = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL) != SQLITE_OK) {
+      OLOG_ERROR("auth_db_jobs: prepare failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+   if (bind) {
+      bind(st, bind_ctx);
+   }
+   int n = 0;
+   while (n < max && sqlite3_step(st) == SQLITE_ROW) {
+      job_unpack_row(st, &out[n]);
+      n++;
+   }
+   sqlite3_finalize(st);
+   *count_out = n;
+   return AUTH_DB_SUCCESS;
+}
+
+/* =============================================================================
+ * Create
+ * ============================================================================= */
+
+int conv_db_create_job(int user_id,
+                       const char *title,
+                       int64_t parent_id,
+                       const char *spawn_mode,
+                       const char *on_complete,
+                       const char *deliver_to,
+                       int spawn_depth,
+                       int64_t *conv_id_out) {
+   if (user_id <= 0 || !conv_id_out) {
+      return AUTH_DB_INVALID;
+   }
+
+   char safe_title[CONV_TITLE_MAX];
+   if (title && title[0] != '\0') {
+      strncpy(safe_title, title, CONV_TITLE_MAX - 1);
+      safe_title[CONV_TITLE_MAX - 1] = '\0';
+   } else {
+      strcpy(safe_title, "Background Job");
+   }
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   /* Respect the per-user conversation ceiling (job conversations persist and
+    * count like any other).  Job concurrency is bounded separately by the
+    * [jobs] caps, but the storage limit still applies. */
+   if (CONV_MAX_PER_USER > 0) {
+      sqlite3_reset(s_db.stmt_conv_count);
+      sqlite3_bind_int(s_db.stmt_conv_count, 1, user_id);
+      if (sqlite3_step(s_db.stmt_conv_count) == SQLITE_ROW) {
+         int count = sqlite3_column_int(s_db.stmt_conv_count, 0);
+         if (count >= CONV_MAX_PER_USER) {
+            sqlite3_reset(s_db.stmt_conv_count);
+            AUTH_DB_UNLOCK();
+            return AUTH_DB_LIMIT_EXCEEDED;
+         }
+      }
+      sqlite3_reset(s_db.stmt_conv_count);
+   }
+
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(
+       s_db.db,
+       "INSERT INTO conversations "
+       "(user_id, title, created_at, updated_at, anchor_date, origin, "
+       " parent_id, spawn_mode, on_complete, deliver_to, spawn_depth, job_status) "
+       "VALUES (?, ?, ?, ?, ?, 'job', ?, ?, ?, ?, ?, 'queued')",
+       -1, &st, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("conv_db_create_job: prepare failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+
+   time_t now = time(NULL);
+   sqlite3_bind_int(st, 1, user_id);
+   sqlite3_bind_text(st, 2, safe_title, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int64(st, 3, (int64_t)now);
+   sqlite3_bind_int64(st, 4, (int64_t)now);
+   sqlite3_bind_int64(st, 5, (int64_t)now); /* anchor_date */
+   if (parent_id > 0) {
+      sqlite3_bind_int64(st, 6, parent_id);
+   } else {
+      sqlite3_bind_null(st, 6);
+   }
+   sqlite3_bind_text(st, 7, spawn_mode ? spawn_mode : "detached", -1, SQLITE_TRANSIENT);
+   sqlite3_bind_text(st, 8, on_complete ? on_complete : "notify", -1, SQLITE_TRANSIENT);
+   if (deliver_to && deliver_to[0] != '\0') {
+      sqlite3_bind_text(st, 9, deliver_to, -1, SQLITE_TRANSIENT);
+   } else {
+      sqlite3_bind_null(st, 9);
+   }
+   sqlite3_bind_int(st, 10, spawn_depth);
+
+   rc = sqlite3_step(st);
+   sqlite3_finalize(st);
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("conv_db_create_job: insert failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+
+   *conv_id_out = sqlite3_last_insert_rowid(s_db.db);
+   AUTH_DB_UNLOCK();
+
+   OLOG_INFO("Created job conversation %lld for user %d (parent %lld, depth %d)",
+             (long long)*conv_id_out, user_id, (long long)parent_id, spawn_depth);
+   return AUTH_DB_SUCCESS;
+}
+
+/* =============================================================================
+ * System-caller setters (no ownership check — internal daemon transitions)
+ * ============================================================================= */
+
+/* Shared one-shot UPDATE helper: prepare, bind via callback, step, finalize. */
+static int job_update_exec(const char *sql,
+                           void (*bind)(sqlite3_stmt *st, void *ctx),
+                           void *bind_ctx,
+                           const char *what) {
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL) != SQLITE_OK) {
+      OLOG_ERROR("auth_db_jobs: prepare %s failed: %s", what, sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   if (bind) {
+      bind(st, bind_ctx);
+   }
+   int rc = sqlite3_step(st);
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("auth_db_jobs: %s failed", what);
+      return AUTH_DB_FAILURE;
+   }
+   return AUTH_DB_SUCCESS;
+}
+
+struct running_bind {
+   int64_t conv_id;
+   time_t started_at;
+};
+static void bind_running(sqlite3_stmt *st, void *ctx) {
+   struct running_bind *b = ctx;
+   sqlite3_bind_int64(st, 1, (int64_t)b->started_at);
+   sqlite3_bind_int64(st, 2, b->conv_id);
+}
+int conv_db_job_set_running(int64_t conv_id, time_t started_at) {
+   if (conv_id <= 0) {
+      return AUTH_DB_INVALID;
+   }
+   struct running_bind b = { conv_id, started_at };
+   return job_update_exec("UPDATE conversations SET job_status='running', started_at=? WHERE id=?",
+                          bind_running, &b, "set_running");
+}
+
+struct terminal_bind {
+   int64_t conv_id;
+   const char *status;
+   const char *error;
+   time_t finished_at;
+};
+static void bind_terminal(sqlite3_stmt *st, void *ctx) {
+   struct terminal_bind *b = ctx;
+   sqlite3_bind_text(st, 1, b->status, -1, SQLITE_TRANSIENT);
+   if (b->error && b->error[0] != '\0') {
+      /* A POSITIVE length makes sqlite3_bind_text copy exactly that many bytes —
+       * it does NOT stop at the NUL — so pass the real string length (capped at
+       * the column width) rather than JOB_ERROR_MAX-1, which read past short
+       * literals into adjacent .rodata. */
+      sqlite3_bind_text(st, 2, b->error, (int)strnlen(b->error, JOB_ERROR_MAX - 1),
+                        SQLITE_TRANSIENT);
+   } else {
+      sqlite3_bind_null(st, 2);
+   }
+   sqlite3_bind_int64(st, 3, (int64_t)b->finished_at);
+   sqlite3_bind_int64(st, 4, b->conv_id);
+}
+int conv_db_job_set_terminal(int64_t conv_id,
+                             const char *status,
+                             const char *error_or_null,
+                             time_t finished_at) {
+   if (conv_id <= 0 || !status) {
+      return AUTH_DB_INVALID;
+   }
+   struct terminal_bind b = { conv_id, status, error_or_null, finished_at };
+   return job_update_exec(
+       "UPDATE conversations SET job_status=?, job_error=?, finished_at=? WHERE id=?",
+       bind_terminal, &b, "set_terminal");
+}
+
+static void bind_conv_id_only(sqlite3_stmt *st, void *ctx) {
+   sqlite3_bind_int64(st, 1, *(int64_t *)ctx);
+}
+int conv_db_job_mark_fired(int64_t conv_id) {
+   if (conv_id <= 0) {
+      return AUTH_DB_INVALID;
+   }
+   return job_update_exec("UPDATE conversations SET on_complete_fired=1 WHERE id=?",
+                          bind_conv_id_only, &conv_id, "mark_fired");
+}
+
+/* =============================================================================
+ * Ownership-checked readers
+ * ============================================================================= */
+
+int conv_db_job_get(int64_t conv_id, int user_id, job_record_t *out) {
+   if (conv_id <= 0 || !out) {
+      return AUTH_DB_INVALID;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db, "SELECT " JOB_SELECT_COLS " FROM conversations WHERE id=?",
+                               -1, &st, NULL);
+   if (rc != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(st, 1, conv_id);
+   rc = sqlite3_step(st);
+   if (rc != SQLITE_ROW) {
+      sqlite3_finalize(st);
+      AUTH_DB_UNLOCK();
+      return (rc == SQLITE_DONE) ? AUTH_DB_NOT_FOUND : AUTH_DB_FAILURE;
+   }
+   int owner_id = sqlite3_column_int(st, 1);
+   const char *status = (const char *)sqlite3_column_text(st, 7);
+   if (owner_id != user_id) {
+      sqlite3_finalize(st);
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FORBIDDEN;
+   }
+   if (!status || status[0] == '\0') { /* row exists but is not a job */
+      sqlite3_finalize(st);
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_NOT_FOUND;
+   }
+   job_unpack_row(st, out);
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   return AUTH_DB_SUCCESS;
+}
+
+int conv_db_job_get_status(int64_t conv_id, int user_id, char *status_out, size_t n) {
+   if (conv_id <= 0 || !status_out || n == 0) {
+      return AUTH_DB_INVALID;
+   }
+   status_out[0] = '\0';
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db, "SELECT user_id, job_status FROM conversations WHERE id=?",
+                               -1, &st, NULL);
+   if (rc != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(st, 1, conv_id);
+   rc = sqlite3_step(st);
+   if (rc != SQLITE_ROW) {
+      sqlite3_finalize(st);
+      AUTH_DB_UNLOCK();
+      return (rc == SQLITE_DONE) ? AUTH_DB_NOT_FOUND : AUTH_DB_FAILURE;
+   }
+   int owner_id = sqlite3_column_int(st, 0);
+   if (owner_id != user_id) {
+      sqlite3_finalize(st);
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FORBIDDEN;
+   }
+   const char *status = (const char *)sqlite3_column_text(st, 1);
+   if (status) {
+      strncpy(status_out, status, n - 1);
+      status_out[n - 1] = '\0';
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   return AUTH_DB_SUCCESS;
+}
+
+int conv_db_job_list_by_user(int user_id, job_record_t *out, int max, int *count_out) {
+   if (user_id <= 0 || !count_out) {
+      return AUTH_DB_INVALID;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "SELECT " JOB_SELECT_COLS " FROM conversations "
+                               "WHERE user_id=? AND job_status IS NOT NULL "
+                               "ORDER BY created_at DESC LIMIT ?",
+                               -1, &st, NULL);
+   if (rc != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int(st, 1, user_id);
+   sqlite3_bind_int(st, 2, max);
+   int n = 0;
+   while (n < max && sqlite3_step(st) == SQLITE_ROW) {
+      job_unpack_row(st, &out[n]);
+      n++;
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   *count_out = n;
+   return AUTH_DB_SUCCESS;
+}
+
+/* =============================================================================
+ * System-caller scans (monitor + boot) — copy-out under the lock
+ * ============================================================================= */
+
+struct limit_bind {
+   int limit;
+};
+static void bind_limit(sqlite3_stmt *st, void *ctx) {
+   sqlite3_bind_int(st, 1, ((struct limit_bind *)ctx)->limit);
+}
+
+int conv_db_job_list_pending_followups(int max, job_record_t *out, int *count_out) {
+   if (!count_out) {
+      return AUTH_DB_INVALID;
+   }
+   struct limit_bind b = { max };
+   AUTH_DB_LOCK_OR_FAIL();
+   int rc = job_select_into("SELECT " JOB_SELECT_COLS " FROM conversations "
+                            "WHERE job_status IN ('done','failed','interrupted') "
+                            "AND on_complete_fired=0 "
+                            "ORDER BY finished_at ASC LIMIT ?",
+                            bind_limit, &b, out, max, count_out);
+   AUTH_DB_UNLOCK();
+   return rc;
+}
+
+int conv_db_job_pending_reinvoke_for_parent(int64_t parent_id,
+                                            int user_id,
+                                            job_record_t *out,
+                                            int max,
+                                            int *count_out) {
+   if (parent_id <= 0 || user_id <= 0 || !count_out) {
+      return AUTH_DB_INVALID;
+   }
+   *count_out = 0;
+   if (!out || max <= 0) {
+      return AUTH_DB_SUCCESS;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "SELECT " JOB_SELECT_COLS " FROM conversations "
+                               "WHERE parent_id=? AND user_id=? "
+                               "AND job_status IN ('done','failed','interrupted') "
+                               "AND on_complete_fired=0 AND on_complete='reinvoke_parent' "
+                               "ORDER BY finished_at ASC LIMIT ?",
+                               -1, &st, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("conv_db_job_pending_reinvoke_for_parent: prepare failed: %s",
+                 sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(st, 1, parent_id);
+   sqlite3_bind_int(st, 2, user_id);
+   sqlite3_bind_int(st, 3, max);
+   int n = 0;
+   while (n < max && sqlite3_step(st) == SQLITE_ROW) {
+      job_unpack_row(st, &out[n]);
+      n++;
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   *count_out = n;
+   return AUTH_DB_SUCCESS;
+}
+
+int conv_db_job_scan_active(job_record_t *out, int max, int *count_out) {
+   if (!count_out) {
+      return AUTH_DB_INVALID;
+   }
+   struct limit_bind b = { max };
+   AUTH_DB_LOCK_OR_FAIL();
+   int rc = job_select_into("SELECT " JOB_SELECT_COLS " FROM conversations "
+                            "WHERE job_status IN ('running','queued') "
+                            "ORDER BY created_at ASC LIMIT ?",
+                            bind_limit, &b, out, max, count_out);
+   AUTH_DB_UNLOCK();
+   return rc;
+}
+
+/* =============================================================================
+ * Reinvoke support (Phase 3 — reinvoke_parent)
+ * ============================================================================= */
+
+int conv_db_job_mark_fired_many(const int64_t *ids, int n) {
+   if (n <= 0) {
+      return AUTH_DB_SUCCESS; /* nothing to do */
+   }
+   if (ids == NULL) {
+      return AUTH_DB_INVALID;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   if (sqlite3_prepare_v2(s_db.db, "UPDATE conversations SET on_complete_fired=1 WHERE id=?", -1,
+                          &st, NULL) != SQLITE_OK) {
+      OLOG_ERROR("conv_db_job_mark_fired_many: prepare failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   if (sqlite3_exec(s_db.db, "BEGIN", NULL, NULL, NULL) != SQLITE_OK) {
+      OLOG_ERROR("conv_db_job_mark_fired_many: BEGIN failed: %s", sqlite3_errmsg(s_db.db));
+      sqlite3_finalize(st);
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   int rc = AUTH_DB_SUCCESS;
+   for (int i = 0; i < n; i++) {
+      sqlite3_reset(st);
+      sqlite3_bind_int64(st, 1, ids[i]);
+      if (sqlite3_step(st) != SQLITE_DONE) {
+         OLOG_ERROR("conv_db_job_mark_fired_many: update %lld failed", (long long)ids[i]);
+         rc = AUTH_DB_FAILURE;
+         break;
+      }
+   }
+   sqlite3_exec(s_db.db, (rc == AUTH_DB_SUCCESS) ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL);
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   return rc;
+}
+
+int conv_db_job_bump_reinvoke(int64_t conv_id, int *new_count_out) {
+   if (conv_id <= 0) {
+      return AUTH_DB_INVALID;
+   }
+   if (new_count_out) {
+      *new_count_out = 0;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   /* UPDATE ... RETURNING: one prepare + step, no read-after-write gap. */
+   if (sqlite3_prepare_v2(s_db.db,
+                          "UPDATE conversations SET reinvoke_count = reinvoke_count + 1 "
+                          "WHERE id=? RETURNING reinvoke_count",
+                          -1, &st, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(st, 1, conv_id);
+   int step = sqlite3_step(st);
+   int rc = AUTH_DB_SUCCESS;
+   if (step == SQLITE_ROW) {
+      if (new_count_out) {
+         *new_count_out = sqlite3_column_int(st, 0);
+      }
+   } else {
+      rc = AUTH_DB_FAILURE; /* no such row / error */
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   return rc;
+}
+
+int conv_db_job_fire_boot_reinvokes(int *count_out) {
+   if (count_out) {
+      *count_out = 0;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "UPDATE conversations SET on_complete_fired=1 "
+                          "WHERE job_status IN ('done','failed','interrupted') "
+                          "AND on_complete_fired=0 AND on_complete='reinvoke_parent'",
+                          -1, &st, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   int rc = sqlite3_step(st);
+   sqlite3_finalize(st);
+   if (rc != SQLITE_DONE) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   if (count_out) {
+      *count_out = sqlite3_changes(s_db.db);
+   }
+   AUTH_DB_UNLOCK();
+   return AUTH_DB_SUCCESS;
+}
+
+int conv_db_job_active_count_for_parent(int64_t parent_id, int *count_out) {
+   if (!count_out) {
+      return AUTH_DB_INVALID;
+   }
+   *count_out = 0;
+   if (parent_id <= 0) {
+      return AUTH_DB_SUCCESS;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT COUNT(*) FROM conversations "
+                          "WHERE parent_id=? AND job_status IN ('queued','running')",
+                          -1, &st, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(st, 1, parent_id);
+   if (sqlite3_step(st) == SQLITE_ROW) {
+      *count_out = sqlite3_column_int(st, 0);
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   return AUTH_DB_SUCCESS;
+}
+
+int conv_db_job_active_counts_by_user(int user_id,
+                                      job_parent_count_t *out,
+                                      int max,
+                                      int *count_out) {
+   if (!count_out) {
+      return AUTH_DB_INVALID;
+   }
+   *count_out = 0;
+   if (user_id <= 0 || !out || max <= 0) {
+      return AUTH_DB_INVALID;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT parent_id, COUNT(*) FROM conversations "
+                          "WHERE user_id=? AND parent_id IS NOT NULL "
+                          "AND job_status IN ('queued','running') "
+                          "GROUP BY parent_id LIMIT ?",
+                          -1, &st, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int(st, 1, user_id);
+   sqlite3_bind_int(st, 2, max);
+   int n = 0;
+   while (n < max && sqlite3_step(st) == SQLITE_ROW) {
+      out[n].parent_id = sqlite3_column_int64(st, 0);
+      out[n].count = sqlite3_column_int(st, 1);
+      n++;
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   *count_out = n;
+   return AUTH_DB_SUCCESS;
+}
+
+int conv_db_job_last_assistant_text(int64_t conv_id, int user_id, char **out) {
+   if (conv_id <= 0 || user_id <= 0 || !out) {
+      return AUTH_DB_INVALID;
+   }
+   *out = NULL;
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT m.content FROM messages m "
+                          "JOIN conversations c ON c.id = m.conversation_id "
+                          "WHERE m.conversation_id=? AND c.user_id=? AND m.role='assistant' "
+                          "ORDER BY m.id DESC LIMIT 1",
+                          -1, &st, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(st, 1, conv_id);
+   sqlite3_bind_int(st, 2, user_id);
+   int step = sqlite3_step(st);
+   int rc = AUTH_DB_SUCCESS;
+   if (step == SQLITE_ROW) {
+      const char *content = (const char *)sqlite3_column_text(st, 0);
+      if (content != NULL) {
+         char *dup = strdup(content);
+         if (dup == NULL) {
+            rc = AUTH_DB_FAILURE;
+         } else {
+            *out = dup;
+         }
+      }
+   } else if (step != SQLITE_DONE) {
+      rc = AUTH_DB_FAILURE;
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   return rc;
+}

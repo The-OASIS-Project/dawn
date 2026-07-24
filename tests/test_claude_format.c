@@ -48,6 +48,9 @@ const char *llm_get_default_claude_model(void) {
 const char *llm_get_current_thinking_mode(void) {
    return "disabled";
 }
+const char *llm_get_current_reasoning_effort(void) {
+   return NULL;
+}
 bool llm_tools_enabled(const llm_resolved_config_t *c) {
    (void)c;
    return false;

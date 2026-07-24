@@ -51,7 +51,7 @@ static bool s_initialized = false;
 
 /* Heartbeat thread */
 static pthread_t s_heartbeat_thread;
-static bool s_heartbeat_running = false;
+static _Atomic bool s_heartbeat_running = false;  // atomic: written on shutdown, read in loop
 static struct mosquitto *s_mosq = NULL;
 
 /* HUD status tracking */

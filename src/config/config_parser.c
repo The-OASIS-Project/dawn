@@ -1727,6 +1727,68 @@ static void parse_scheduler(toml_table_t *table, scheduler_config_t *config) {
       config->alarm_volume = 100;
 }
 
+static void parse_jobs(toml_table_t *table, jobs_config_t *config) {
+   if (!table)
+      return;
+
+   static const char *const known_keys[] = { "enabled",
+                                             "max_concurrent_local",
+                                             "max_concurrent_cloud",
+                                             "max_active_jobs",
+                                             "max_jobs_per_user",
+                                             "max_queued_per_user",
+                                             "monitor_followups_per_tick",
+                                             "max_spawn_depth",
+                                             "max_children_per_tree",
+                                             "max_reinvokes_per_tree",
+                                             "max_concurrent_reinvokes",
+                                             "max_runtime_sec",
+                                             "event_chunk_cap",
+                                             NULL };
+   warn_unknown_keys(table, "jobs", known_keys);
+
+   PARSE_BOOL(table, "enabled", config->enabled);
+   PARSE_INT(table, "max_concurrent_local", config->max_concurrent_local);
+   PARSE_INT(table, "max_concurrent_cloud", config->max_concurrent_cloud);
+   PARSE_INT(table, "max_active_jobs", config->max_active_jobs);
+   PARSE_INT(table, "max_jobs_per_user", config->max_jobs_per_user);
+   PARSE_INT(table, "max_queued_per_user", config->max_queued_per_user);
+   PARSE_INT(table, "monitor_followups_per_tick", config->monitor_followups_per_tick);
+   PARSE_INT(table, "max_spawn_depth", config->max_spawn_depth);
+   PARSE_INT(table, "max_children_per_tree", config->max_children_per_tree);
+   PARSE_INT(table, "max_reinvokes_per_tree", config->max_reinvokes_per_tree);
+   PARSE_INT(table, "max_concurrent_reinvokes", config->max_concurrent_reinvokes);
+   PARSE_INT(table, "max_runtime_sec", config->max_runtime_sec);
+   PARSE_INT(table, "event_chunk_cap", config->event_chunk_cap);
+
+   /* Clamp to sane bounds — the job-session pool array is sized to
+    * max_active_jobs, so a nonsense value must not blow allocation. */
+   if (config->max_concurrent_local < 0)
+      config->max_concurrent_local = 0;
+   if (config->max_concurrent_cloud < 0)
+      config->max_concurrent_cloud = 0;
+   if (config->max_active_jobs < 1)
+      config->max_active_jobs = 1;
+   if (config->max_active_jobs > 256)
+      config->max_active_jobs = 256;
+   if (config->max_jobs_per_user < 1)
+      config->max_jobs_per_user = 1;
+   if (config->max_queued_per_user < 0)
+      config->max_queued_per_user = 0;
+   if (config->monitor_followups_per_tick < 1)
+      config->monitor_followups_per_tick = 1;
+   if (config->max_spawn_depth < 0)
+      config->max_spawn_depth = 0;
+   if (config->max_reinvokes_per_tree < 1) /* need at least one reinvoke attempt */
+      config->max_reinvokes_per_tree = 1;
+   if (config->max_concurrent_reinvokes < 1)
+      config->max_concurrent_reinvokes = 1;
+   if (config->max_concurrent_reinvokes > 32) /* bounded by the in-flight set */
+      config->max_concurrent_reinvokes = 32;
+   if (config->max_runtime_sec < 0)
+      config->max_runtime_sec = 0;
+}
+
 static void parse_calendar(toml_table_t *table, calendar_config_t *config) {
    if (!table)
       return;
@@ -1995,6 +2057,7 @@ int config_parse_file(const char *path, dawn_config_t *config) {
    parse_paths(toml_table_in(root, "paths"), &config->paths);
    parse_music(toml_table_in(root, "music"), &config->music);
    parse_scheduler(toml_table_in(root, "scheduler"), &config->scheduler);
+   parse_jobs(toml_table_in(root, "jobs"), &config->jobs);
    parse_calendar(toml_table_in(root, "calendar"), &config->calendar);
    parse_messaging(toml_table_in(root, "messaging"), &config->messaging);
    parse_ota(toml_table_in(root, "ota"), &config->ota);

@@ -270,8 +270,22 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │  Messaging recv  — per-provider listener (Telegram/    │
 │                    Slack/Discord WS or poll)           │
 │  Messaging work  — inbound dispatch + async outbound   │
+│  Job worker      — detached per background job (ASR-   │
+│                    less LLM tool loop on a pool session)│
+│  Reinvoke worker — detached per re-engagement (runs a  │
+│                    turn via the turn queue or detached) │
+│  Job notify      — transient detached delivery of job  │
+│                    completions (chime/banner/voice)     │
 └────────────────────────────────────────────────────────┘
 ```
+
+**Turn serialization (background-jobs era).** All WebUI LLM turns — user text, push-to-talk
+voice, and background-job re-engagements — funnel through the per-session **turn queue**
+(`src/core/turn_queue.c`), which guarantees at most one turn runs on a given `session_t` at a
+time. This makes "two turns never touch one session's streaming state concurrently" a
+structural property rather than a race to manage. The job worker, reinvoke worker, and
+notify-delivery threads above are all detached; `jobs_monitor_tick` advances job lifecycle on
+the main-loop 1-second heartbeat (dirty-gated — zero DB work when idle), adding no polling thread.
 
 **Note on the thread budget.** Messaging is the one subsystem that meaningfully grows the
 thread count — each enabled provider runs a persistent listener thread plus a shared worker.
@@ -360,6 +374,9 @@ Per-module locks (scoped to a single subsystem):
   command_router::registry_mutex                  — request/response routing
   utterance_dedup::s_mutex (utterance_dedup.c)    — cross-device dedup slots (leaf)
   attention::s_mutex (src/core/attention/attention_core.c) — SAGE watch cache + event queue + metrics (leaf)
+  turn_queue::s_turn_queue_mutex (src/core/turn_queue.c)   — per-session turn-serialization queue (LEAF; never held across the spawn/free closures)
+  job_manager::s_pool_mutex (src/core/job_manager.c)       — background-job session pool (REGISTRY tier, like session_manager_rwlock: released before any ref-cond wait, session_free, or conv_db_*/scheduler_* callout)
+  job_reinvoke::s_inflight_mutex (src/core/job_reinvoke.c) — per-parent reinvoke in-flight set (leaf)
   ...and similar per-tool mutexes in src/tools/*.c
 ```
 

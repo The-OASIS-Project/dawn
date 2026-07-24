@@ -272,6 +272,11 @@
                </button>
             </div>
             <div id="header-controls">
+               <span
+                  id="global-jobs-pill"
+                  class="jobs-pill jobs-pill-global hidden"
+                  aria-live="off"
+               ></span>
                <button
                   id="debug-btn"
                   title="Show command/tool call details"
@@ -1899,6 +1904,10 @@ Format rules:
                </svg>
                <span class="composer-busy-label" id="composer-busy-label">Working</span>
             </div>
+            <!-- Background-jobs running indicator: floats above the composer beside
+                 the "working" pill.  Shown whenever this conversation has jobs
+                 running.  Rendered by DawnJobsActivity. -->
+            <span class="jobs-pill conv-jobs-pill hidden" role="status" aria-live="polite"></span>
             <button
                id="tts-toggle"
                class="input-button"
@@ -3476,6 +3485,7 @@ token = "eyJ..."</pre
       <script defer src="/js/ui/watches.js"></script>
       <script defer src="/js/ui/scheduler-queue.js"></script>
       <script defer src="/js/ui/phone.js"></script>
+      <script defer src="/js/ui/jobs-activity.js"></script>
       <script defer src="/js/ui/visual-render.js"></script>
       <script defer src="/js/ui/plan-orchestrator.js"></script>
       <script defer src="/js/ui/user-badge.js"></script>

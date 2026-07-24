@@ -154,8 +154,8 @@ static int llm_call_prepare(session_t *session,
    ctx->llm_input = user_text;
 
    // Check for cancellation before LLM call
-   if (session->disconnected) {
-      OLOG_INFO("Session %u disconnected before LLM call", session->session_id);
+   if (session->cancel_requested) {
+      OLOG_INFO("Session %u cancelled before LLM call", session->session_id);
       return 2;
    }
 
@@ -272,8 +272,8 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
    llm_call_cleanup(ctx);
 
    // Check for cancellation after LLM call
-   if (session->disconnected) {
-      OLOG_INFO("Session %u disconnected during LLM call", session->session_id);
+   if (session->cancel_requested) {
+      OLOG_INFO("Session %u cancelled during LLM call", session->session_id);
       free(response);
       return NULL;
    }
@@ -307,8 +307,8 @@ char *session_llm_call(session_t *session, const char *user_text) {
       return NULL;
    }
 
-   if (session->disconnected) {
-      OLOG_INFO("Session %u disconnected, aborting LLM call", session->session_id);
+   if (session->cancel_requested) {
+      OLOG_INFO("Session %u cancelled, aborting LLM call", session->session_id);
       return NULL;
    }
 
@@ -328,7 +328,7 @@ char *session_llm_call(session_t *session, const char *user_text) {
    session->stream_token_count = 0;
 
    /* Set per-session cancel flag for multi-user WebUI support */
-   llm_set_cancel_flag(&session->disconnected);
+   llm_set_cancel_flag(&session->cancel_requested);
 
    char *response = llm_chat_completion_streaming_with_config(ctx.history, ctx.llm_input, NULL,
                                                               NULL, 0, session_text_chunk_callback,
@@ -456,8 +456,8 @@ char *session_llm_call_with_tts(session_t *session,
       return NULL;
    }
 
-   if (session->disconnected) {
-      OLOG_INFO("Session %u disconnected, aborting LLM call", session->session_id);
+   if (session->cancel_requested) {
+      OLOG_INFO("Session %u cancelled, aborting LLM call", session->session_id);
       return NULL;
    }
 
@@ -491,7 +491,7 @@ char *session_llm_call_with_tts(session_t *session,
    }
 
    /* Set per-session cancel flag for multi-user WebUI support */
-   llm_set_cancel_flag(&session->disconnected);
+   llm_set_cancel_flag(&session->cancel_requested);
 
    // Call LLM with combined callback (text streaming + sentence buffering)
    char *response = llm_chat_completion_streaming_with_config(ctx.history, ctx.llm_input, NULL,
@@ -522,8 +522,8 @@ char *session_llm_call_with_tts_vision_no_add(session_t *session,
       return NULL;
    }
 
-   if (session->disconnected) {
-      OLOG_INFO("Session %u disconnected, aborting LLM call", session->session_id);
+   if (session->cancel_requested) {
+      OLOG_INFO("Session %u cancelled, aborting LLM call", session->session_id);
       return NULL;
    }
 
@@ -557,7 +557,7 @@ char *session_llm_call_with_tts_vision_no_add(session_t *session,
    session->stream_token_count = 0;
 
    /* Set per-session cancel flag for multi-user WebUI support */
-   llm_set_cancel_flag(&session->disconnected);
+   llm_set_cancel_flag(&session->cancel_requested);
 
    char *response;
 

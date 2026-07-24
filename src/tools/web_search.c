@@ -98,7 +98,9 @@ int web_search_init(const char *searxng_url) {
    // Note: curl_global_init() is called in main() - not here
    // This avoids conflicts with other modules using libcurl
 
-   module_initialized = 1;
+   /* Release-store to pair with the acquire-load in web_search_is_initialized()
+    * (which reads without the mutex) — a plain store here races that load. */
+   __atomic_store_n(&module_initialized, 1, __ATOMIC_RELEASE);
    pthread_mutex_unlock(&module_mutex);
    OLOG_INFO("web_search: Initialized with URL %s", searxng_base_url);
    return 0;

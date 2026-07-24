@@ -65,7 +65,7 @@
 
 static pthread_t s_listener_thread;
 static volatile bool s_thread_running = false;
-static volatile bool s_shutdown_requested = false;
+static _Atomic bool s_shutdown_requested = false;  // atomic: written on shutdown, read in loop
 
 static int s_listen_fd = -1;
 static int s_shutdown_pipe[2] = { -1, -1 };

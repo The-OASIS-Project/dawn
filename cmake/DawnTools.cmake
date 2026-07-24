@@ -34,6 +34,7 @@ option(DAWN_ENABLE_VIEWING_TOOL "Enable viewing/vision tool (MQTT)" ON)
 option(DAWN_ENABLE_HUD_TOOLS "Enable HUD control tools (MQTT)" ON)
 option(DAWN_ENABLE_AUDIO_TOOLS "Enable voice amplifier and audio device tools" ON)
 option(DAWN_ENABLE_SCHEDULER_TOOL "Enable scheduler/timer/alarm/reminder tool" ON)
+option(DAWN_ENABLE_JOB_TOOL "Enable background job tool" ON)
 option(DAWN_ENABLE_TTS_TOOL "Enable text-to-speech command tool" ON)
 option(DAWN_ENABLE_DOCUMENT_SEARCH_TOOL "Enable RAG document search tool" ON)
 option(DAWN_ENABLE_CALENDAR_TOOL "Enable CalDAV calendar integration" ON)
@@ -245,6 +246,18 @@ if(DAWN_ENABLE_SCHEDULER_TOOL)
     message(STATUS "DAWN: Scheduler tool ENABLED")
 else()
     message(STATUS "DAWN: Scheduler tool DISABLED")
+endif()
+
+# Background Job Tool.  The job subsystem (job_manager/worker/reinvoke) compiles
+# only under ENABLE_WEBUI, and job_tool.c links against it — so gate the tool on
+# ENABLE_WEBUI too (mirrors the calendar/email tools below), keeping the WEBUI-off
+# (local) preset linking.
+if(DAWN_ENABLE_JOB_TOOL AND ENABLE_WEBUI)
+    add_definitions(-DDAWN_ENABLE_JOB_TOOL)
+    list(APPEND TOOL_SOURCES src/tools/job_tool.c)
+    message(STATUS "DAWN: Job tool ENABLED")
+else()
+    message(STATUS "DAWN: Job tool DISABLED")
 endif()
 
 # TTS Tool

@@ -166,7 +166,13 @@ static char *build_reasoning_json(const llm_tool_response_t *result, const char 
 static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
                                        int before_len,
                                        const char *reasoning_json) {
-   session_t *s = session_get(params->session_id);
+   /* for_reconnect (not session_get): a turn that survives a client disconnect
+    * (background-jobs Phase 1) must STILL persist its tool-iteration rows
+    * server-side.  session_get() skips disconnected sessions and would return
+    * NULL here, silently dropping the tool_calls + role:tool rows so a reload
+    * shows the answer but no tool use.  The session is not torn down mid-turn
+    * (turn_in_flight guards the idle sweep; the worker holds a ref). */
+   session_t *s = session_get_for_reconnect(params->session_id);
    if (!s) {
       return;
    }
@@ -481,8 +487,11 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
    char *final_response = NULL;
 
    for (int iteration = 0; iteration <= LLM_TOOLS_MAX_ITERATIONS; iteration++) {
-      /* Step 0: Merge any completed async compaction (invisible to user) */
-      session_t *loop_session = session_get(params->session_id);
+      /* Step 0: Merge any completed async compaction (invisible to user).
+       * for_reconnect so a turn surviving a client disconnect still merges its
+       * compaction across iterations (session_get would skip a disconnected
+       * session and let context grow unbounded on a long survivor). */
+      session_t *loop_session = session_get_for_reconnect(params->session_id);
       if (loop_session) {
          llm_context_async_merge(loop_session, params->conversation_history);
          session_release(loop_session);

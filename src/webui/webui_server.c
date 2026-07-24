@@ -113,7 +113,7 @@
 
 struct lws_context *s_lws_context = NULL;
 static pthread_t s_webui_thread;
-volatile int s_running = 0;
+_Atomic int s_running = 0;  // atomic: written on shutdown, read in server-thread loop
 volatile int s_client_count = 0;
 int s_port = 0;
 char s_www_path[256] = { 0 };
@@ -806,8 +806,11 @@ static int callback_websocket(struct lws *wsi,
                    closing_session ? closing_session->session_id : 0);
 
          if (closing_session) {
-            /* Mark session as disconnected (aborts any pending LLM calls) */
-            closing_session->disconnected = true;
+            /* Client left: gate emission only.  Post background-jobs Phase 1 the
+             * in-flight turn KEEPS generating and is persisted server-side — we
+             * do NOT cancel it here (that is session_teardown_flags' job, on
+             * actual destroy).  A reconnect or a new request supersedes it. */
+            session_mark_disconnected(closing_session);
             closing_session->client_data = NULL;
 
             /* Release our reference to the session.

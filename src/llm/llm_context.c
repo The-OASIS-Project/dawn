@@ -1829,11 +1829,11 @@ static void *async_compact_thread(void *arg) {
 
    OLOG_INFO("llm_context: Async compaction thread started for session %u", sid);
 
-   llm_set_cancel_flag(&session->disconnected);
+   llm_set_cancel_flag(&session->cancel_requested);
    session_set_command_context(session);
 
-   if (atomic_load(&session->disconnected)) {
-      OLOG_INFO("llm_context: Async compaction: session %u disconnected, aborting", sid);
+   if (atomic_load(&session->cancel_requested)) {
+      OLOG_INFO("llm_context: Async compaction: session %u cancelled, aborting", sid);
       goto cleanup_abort;
    }
 
@@ -1843,8 +1843,8 @@ static void *async_compact_thread(void *arg) {
                                 session->async_compact.trigger_model,
                                 session->async_compact.trigger_conv_id, &result);
 
-   if (atomic_load(&session->disconnected)) {
-      OLOG_INFO("llm_context: Async compaction: session %u disconnected after compact", sid);
+   if (atomic_load(&session->cancel_requested)) {
+      OLOG_INFO("llm_context: Async compaction: session %u cancelled after compact", sid);
       llm_compaction_result_free(&result);
       goto cleanup_abort;
    }
@@ -1900,7 +1900,7 @@ int llm_context_async_trigger(session_t *session,
       return 0;
    if (atomic_load(&session->async_compact.state) != ASYNC_COMPACT_IDLE)
       return 0;
-   if (atomic_load(&session->disconnected))
+   if (atomic_load(&session->cancel_requested))
       return 0;
 
    time_t now = time(NULL);

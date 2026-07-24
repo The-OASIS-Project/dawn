@@ -44,6 +44,7 @@
 #include "core/ocp_helpers.h"
 #include "core/session_manager.h"
 #include "core/text_input_dispatch.h"
+#include "core/turn_queue.h"
 #include "core/worker_pool.h"
 #include "dawn.h"
 #include "llm/llm_context.h"
@@ -66,6 +67,9 @@
 typedef struct {
    session_t *session;
    char *text;
+   int64_t conv_id;          /* Conversation this turn was sent for, captured at enqueue and
+                              * applied to session->stream_conversation_id AT DEQUEUE (a queued
+                              * turn must not clobber a running turn's conversation). */
    unsigned int request_gen; /* Captured request_generation to detect superseded requests */
    bool input_was_voice;     /* True = this turn's input was ASR-transcribed (voice); applied
                               * to session->input_was_voice on the worker thread right before
@@ -92,8 +96,10 @@ char *webui_process_commands(const char *llm_response, session_t *session) {
       return NULL;
    }
 
-   /* Bail early if satellite/client already disconnected — avoid wasting LLM API calls */
-   if (session->disconnected) {
+   /* Bail only if the turn was CANCELLED (Stop / teardown).  A mere client
+    * disconnect no longer aborts — the turn survives, so command follow-ups
+    * must still run for the full answer to be persisted (background-jobs Ph1). */
+   if (session->cancel_requested) {
       return NULL;
    }
 
@@ -383,6 +389,17 @@ static void webui_text_dispatch_on_user_msg(void *ctx, const char *text, bool pe
    webui_send_transcript_ex(session, "user", text, persisted_to_db);
 }
 
+/* Balanced exit for a worker that has passed its initial supersede check and
+ * incremented turn_in_flight: clear the in-flight guard, then release the ref.
+ * Decrement BEFORE release so that if this release drops ref_count to 0 and a
+ * concurrent session_destroy proceeds, turn_in_flight already reads 0. */
+static void text_worker_end(session_t *session) {
+   if (session) {
+      atomic_fetch_sub(&session->turn_in_flight, 1);
+      session_release(session);
+   }
+}
+
 static void text_worker_cleanup(text_work_t *work, session_t *session, char *text) {
    if (session) {
       session_release(session);
@@ -416,6 +433,12 @@ static void *text_worker_thread(void *arg) {
       return NULL;
    }
 
+   /* Mark a turn in flight so session_cleanup_expired won't reap this session
+    * out from under us while it generates (a disconnected client no longer
+    * aborts the turn — background-jobs Phase 1).  Cleared by text_worker_end()
+    * at every subsequent exit. */
+   atomic_fetch_add(&session->turn_in_flight, 1);
+
    if (work->vision_image_count > 0) {
       size_t total_bytes = 0;
       for (int i = 0; i < work->vision_image_count; i++) {
@@ -447,7 +470,15 @@ static void *text_worker_thread(void *arg) {
    }
 
    ws_connection_t *conn = (ws_connection_t *)session->client_data;
+   /* Capture everything we need from conn NOW, while it is valid.  Post
+    * background-jobs Phase 1 the turn survives a client disconnect, and on WS
+    * close libwebsockets frees `conn` right after the CLOSED callback — so the
+    * worker tail (after the long LLM call) must NOT dereference conn again.
+    * user_id falls back to the authenticated session user (metrics.user_id),
+    * which is stable and disconnect-safe, for server-authoritative persistence. */
    bool tts_enabled = conn && conn->tts_enabled;
+   bool use_opus = conn && conn->use_opus;
+   int turn_user_id = conn ? conn->auth_user_id : (int)session->metrics.user_id;
 
    /* Stamp this turn's input modality (voice vs typed) onto the session right
     * before dispatch, on THIS worker thread — same pattern as tts_enabled above.
@@ -514,7 +545,7 @@ static void *text_worker_thread(void *arg) {
    if (REQUEST_SUPERSEDED(session, expected_gen)) {
       /* Request superseded - don't try to send response */
       OLOG_INFO("WebUI: Session %u request superseded during LLM call", session->session_id);
-      session_release(session);
+      text_worker_end(session);
       free(response);
       free(text);
       free(work);
@@ -525,7 +556,7 @@ static void *text_worker_thread(void *arg) {
       /* LLM call failed */
       webui_send_error(session, "LLM_ERROR", "Failed to get response from AI");
       webui_send_state(session, "idle");
-      session_release(session);
+      text_worker_end(session);
       free(text);
       free(work);
       return NULL;
@@ -545,7 +576,7 @@ static void *text_worker_thread(void *arg) {
          if (REQUEST_SUPERSEDED(session, expected_gen)) {
             OLOG_INFO("WebUI: Session %u request superseded during command processing",
                       session->session_id);
-            session_release(session);
+            text_worker_end(session);
             free(response);
             free(processed);
             free(text);
@@ -600,9 +631,9 @@ static void *text_worker_thread(void *arg) {
    /* Strip any remaining command tags from final response */
    strip_command_tags(final_response);
 
-   /* Send audio end marker if TTS was enabled */
+   /* Send audio end marker if TTS was enabled (use_opus captured at worker
+    * start — conn may be freed by now if the client disconnected mid-turn). */
    if (tts_enabled) {
-      bool use_opus = conn && conn->use_opus;
       webui_send_audio_end(session, use_opus);
    }
 
@@ -610,25 +641,29 @@ static void *text_worker_thread(void *arg) {
     * The LLM call uses webui_send_stream_start/delta/end for real-time delivery.
     * Assistant response is already added to history inside the LLM call. */
 
-   /* Persist the final assistant answer for a BACKGROUNDED turn — one that
-    * finished while the client was viewing a DIFFERENT conversation.  The final
-    * answer is normally saved by the client (finalizeStream), but the client only
-    * saves the conversation it is looking at, so a turn that completes in the
-    * background would otherwise lose its answer on reload.  A foreground turn
-    * (turn conv == the on-screen conv) is saved by the client — skip it here to
-    * avoid a duplicate row.  Tool-turn rows are already persisted server-side by
-    * webui_tool_persist_cb to the same (captured) conversation. */
-   if (conn && final_response && final_response[0] != '\0') {
+   /* Server-authoritative persistence of the final assistant answer when the
+    * client won't save it — two cases (background-jobs Phase 1):
+    *   (a) BACKGROUNDED: the turn finished while the client was viewing a
+    *       DIFFERENT conversation (the client saver only writes the on-screen
+    *       conversation), or
+    *   (b) CLIENT GONE: the client disconnected mid-turn — the turn survived and
+    *       completed, but there is no client left to save it (Arch-H1).
+    * A foreground, still-connected turn is saved by the client → skip to avoid a
+    * duplicate row.  Uses turn_user_id + the captured conversation — NEVER conn,
+    * which libwebsockets may have freed after a mid-turn disconnect.  Tool-turn
+    * rows were already persisted server-side by webui_tool_persist_cb. */
+   if (final_response && final_response[0] != '\0') {
       int64_t turn_conv = session->stream_conversation_id;
-      if (turn_conv > 0 && turn_conv != webui_get_active_conversation_id(session)) {
-         if (conv_db_add_message_with_tools(turn_conv, conn->auth_user_id, "assistant",
-                                            final_response, NULL, NULL, NULL,
-                                            NULL) != AUTH_DB_SUCCESS) {
-            OLOG_WARNING("WebUI: failed to persist backgrounded assistant answer to conv %lld",
+      bool client_gone = atomic_load(&session->disconnected);
+      bool backgrounded = (turn_conv > 0 && turn_conv != webui_get_active_conversation_id(session));
+      if (turn_conv > 0 && turn_user_id > 0 && (backgrounded || client_gone)) {
+         if (conv_db_add_message_with_tools(turn_conv, turn_user_id, "assistant", final_response,
+                                            NULL, NULL, NULL, NULL) != AUTH_DB_SUCCESS) {
+            OLOG_WARNING("WebUI: failed to persist final assistant answer to conv %lld",
                          (long long)turn_conv);
          } else {
-            OLOG_INFO("WebUI: persisted backgrounded assistant answer to conv %lld",
-                      (long long)turn_conv);
+            OLOG_INFO("WebUI: persisted final assistant answer server-side to conv %lld (%s)",
+                      (long long)turn_conv, client_gone ? "client gone" : "backgrounded");
          }
       }
    }
@@ -652,12 +687,78 @@ static void *text_worker_thread(void *arg) {
    /* Mark interaction complete for conversation idle timeout tracking */
    session_update_interaction_complete(session);
 
-   /* Release session reference (acquired in webui_process_text_input) */
-   session_release(session);
+   /* Release session reference (acquired in webui_process_text_input) + clear
+    * the turn-in-flight guard (balanced with the increment after the initial
+    * supersede check). */
+   text_worker_end(session);
 
    free(text);
    free(work);
    return NULL;
+}
+
+/* =============================================================================
+ * Turn-queue integration (P1): the queue serializes turn spawning per session.
+ * ============================================================================= */
+
+/* free_work closure: drop a turn WITHOUT running it (bound-reject or purge).
+ * Mirrors the run-path cleanup (release the session retain + free the work). */
+static void webui_text_turn_free(void *work) {
+   text_work_t *w = (text_work_t *)work;
+   if (w == NULL) {
+      return;
+   }
+   if (w->session != NULL) {
+      session_release(w->session);
+   }
+   free(w->text);
+   for (int i = 0; i < w->vision_image_count; i++) {
+      free(w->vision_images[i]);
+   }
+   free(w);
+}
+
+/* Worker entry for a queued turn.  Binds this turn's conversation + clears the
+ * turn flags AT DEQUEUE (never at enqueue — a queued turn must not disturb the
+ * running turn's binding/flags), runs the existing turn body, then chains the
+ * next queued turn for this session. */
+static void *text_turn_thread_entry(void *arg) {
+   text_work_t *work = (text_work_t *)arg;
+   uint32_t sid = 0;
+   if (work != NULL && work->session != NULL) {
+      sid = work->session->session_id;
+      if (atomic_load(&work->session->being_destroyed)) {
+         /* Session began teardown after this turn was popped-to-spawn (C1): do
+          * NOT clear its flags or run — teardown's cancel must stand.  Clean up
+          * and let the queue drain. */
+         webui_text_turn_free(work);
+         turn_queue_turn_done(sid);
+         return NULL;
+      }
+      atomic_store(&work->session->stream_conversation_id, work->conv_id);
+      session_begin_turn_flags(work->session); /* fresh flags for THIS turn (G2) */
+   }
+   text_worker_thread(work);  /* existing turn body — frees work, releases session */
+   turn_queue_turn_done(sid); /* chain the next queued turn for this session */
+   return NULL;
+}
+
+/* spawn closure: start the turn worker for a dequeued turn. */
+static void webui_text_turn_spawn(void *work) {
+   pthread_t thread;
+   pthread_attr_t attr;
+   pthread_attr_init(&attr);
+   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+   int ret = pthread_create(&thread, &attr, text_turn_thread_entry, work);
+   pthread_attr_destroy(&attr);
+   if (ret != 0) {
+      /* Spawn failed: free this turn + advance the queue so it can't wedge. */
+      text_work_t *w = (text_work_t *)work;
+      uint32_t sid = (w != NULL && w->session != NULL) ? w->session->session_id : 0;
+      OLOG_ERROR("WebUI: failed to spawn queued text turn worker; dropping it");
+      webui_text_turn_free(work);
+      turn_queue_turn_done(sid);
+   }
 }
 
 /**
@@ -690,18 +791,18 @@ int webui_process_text_input_with_vision(session_t *session,
       vision_image_count = max_vision_images;
    }
 
-   /* Increment request generation FIRST to invalidate any pending requests,
-    * then reset disconnected flag. This prevents race conditions where an
-    * old worker sees disconnected=false after a new message is sent. */
-   unsigned int new_gen = atomic_fetch_add(&session->request_generation, 1) + 1;
-   session->disconnected = false;
+   /* Turn queue (P1): this turn is SERIALIZED behind any turn already in flight
+    * for this session, so we do NOT bump request_generation (that would supersede
+    * an in-flight turn and break strict-FIFO ordering) and we do NOT clear the
+    * turn flags or bind stream_conversation_id here — both happen AT DEQUEUE (in
+    * text_turn_thread_entry), when this turn actually starts, so a queued turn
+    * never disturbs the running turn's flags or conversation binding.  Supersede
+    * is replaced by the queue; Stop still works via cancel_requested. */
+   unsigned int new_gen = atomic_load(&session->request_generation);
 
-   /* Bind this turn to the conversation being viewed NOW (dispatch time), before
-    * any thinking/stream frame — so every frame of the turn stays tagged with it
-    * even if the client switches views mid-turn (background-jobs delta routing).
-    * Captured here (not at stream_start) so THINKING frames, which precede the
-    * answer stream, carry the correct conversation too. */
-   session->stream_conversation_id = webui_get_active_conversation_id(session);
+   /* Conversation this turn was sent for — captured NOW (the viewed conversation)
+    * and applied to session->stream_conversation_id at dequeue. */
+   int64_t turn_conv_id = webui_get_active_conversation_id(session);
 
    /* Create work item */
    text_work_t *work = calloc(1, sizeof(text_work_t));
@@ -712,7 +813,8 @@ int webui_process_text_input_with_vision(session_t *session,
 
    work->session = session;
    work->text = strdup(text);
-   work->request_gen = new_gen; /* Capture generation for this request */
+   work->conv_id = turn_conv_id;
+   work->request_gen = new_gen; /* current gen; supersede is disabled under the queue */
    work->input_was_voice = input_was_voice;
    if (!work->text) {
       OLOG_ERROR("WebUI: Failed to allocate text copy");
@@ -748,26 +850,22 @@ int webui_process_text_input_with_vision(session_t *session,
       }
    }
 
-   /* Retain session for worker thread (worker will release when done) */
+   /* Retain the session for the queued turn (released by the worker when it runs,
+    * or by webui_text_turn_free on purge/reject). */
    session_retain(session);
 
-   /* Spawn detached worker thread */
-   pthread_t thread;
-   pthread_attr_t attr;
-   pthread_attr_init(&attr);
-   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-
-   int ret = pthread_create(&thread, &attr, text_worker_thread, work);
-   pthread_attr_destroy(&attr);
-
-   if (ret != 0) {
-      OLOG_ERROR("WebUI: Failed to create text worker thread");
-      session_release(session);
-      free(work->text);
-      for (int i = 0; i < work->vision_image_count; i++) {
-         free(work->vision_images[i]);
+   /* Enqueue onto the per-session turn queue — spawned now iff no turn is in
+    * flight for this session, else queued FIFO and chained when the current
+    * finishes (strict serialization → no concurrent streams on one session). */
+   int qrc = turn_queue_enqueue(session->session_id, TURN_SOURCE_USER, work, webui_text_turn_spawn,
+                                webui_text_turn_free);
+   if (qrc != TURN_QUEUE_OK) {
+      /* Cap hit (FULL) or failure: we still own `work` — clean up + tell the user. */
+      if (qrc == TURN_QUEUE_FULL) {
+         webui_send_error(session, "TURN_QUEUE_FULL",
+                          "You have too many messages queued — wait for the current reply.");
       }
-      free(work);
+      webui_text_turn_free(work); /* frees work AND releases the session retain */
       return 1;
    }
 

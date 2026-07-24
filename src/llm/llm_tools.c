@@ -979,6 +979,17 @@ static bool is_tool_enabled_for_session(const tool_definition_t *t, bool is_remo
    if (!t->enabled) {
       return false; /* Capability not available */
    }
+   /* Headless background-job workers must not fan out into more jobs — hide the
+    * job-spawn tool from a SESSION_TYPE_JOB context's schema so the model never
+    * sees it.  (handle_spawn also hard-refuses a job-context caller as a backstop
+    * for any non-schema path, e.g. a legacy <command> tag.)  The session lookup
+    * runs only for the "job" tool, so it costs nothing for every other tool. */
+   if (strcmp(t->name, "job") == 0) {
+      session_t *ctx = session_get_command_context();
+      if (ctx != NULL && ctx->type == SESSION_TYPE_JOB) {
+         return false;
+      }
+   }
    return is_remote ? t->enabled_remote : t->enabled_local;
 }
 
@@ -1233,24 +1244,36 @@ int llm_tools_get_enabled_count_filtered(bool is_remote_session) {
 }
 
 int llm_tools_estimate_tokens(bool is_remote_session) {
-   /* Use cached value if available */
+   /* The per-session job-tool mask (is_tool_enabled_for_session) makes the built
+    * schema session-dependent, but this estimate cache is process-global.  If this
+    * ever runs in a SESSION_TYPE_JOB context, compute fresh and do NOT read or
+    * write the shared cache — otherwise a job worker's one-tool-lighter schema
+    * would poison the estimate served to every other surface until the next config
+    * reload.  (No job-context caller exists today; this keeps it that way safely.) */
+   session_t *ctx = session_get_command_context();
+   bool job_ctx = (ctx != NULL && ctx->type == SESSION_TYPE_JOB);
+
    int *cache = is_remote_session ? &s_token_estimate_remote : &s_token_estimate_local;
-   if (*cache >= 0) {
+   if (!job_ctx && *cache >= 0) {
       return *cache;
    }
 
-   /* Compute and cache */
    struct json_object *tools = llm_tools_get_openai_format_filtered(is_remote_session);
    if (!tools) {
-      *cache = 0;
+      if (!job_ctx) {
+         *cache = 0;
+      }
       return 0;
    }
 
    const char *json_str = json_object_to_json_string(tools);
-   *cache = strlen(json_str) / 4; /* Rough estimate: ~4 chars per token */
-
+   int est = (int)(strlen(json_str) / 4); /* Rough estimate: ~4 chars per token */
    json_object_put(tools);
-   return *cache;
+
+   if (!job_ctx) {
+      *cache = est;
+   }
+   return est;
 }
 
 void llm_tools_invalidate_cache(void) {

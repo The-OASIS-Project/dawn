@@ -88,6 +88,9 @@
 #ifdef DAWN_ENABLE_SCHEDULER_TOOL
 #include "tools/scheduler_tool.h"
 #endif
+#ifdef DAWN_ENABLE_JOB_TOOL
+#include "tools/job_tool.h"
+#endif
 #ifdef DAWN_ENABLE_TTS_TOOL
 #include "tools/tts_tool.h"
 #endif
@@ -263,6 +266,12 @@ int tools_register_all(void) {
 #ifdef DAWN_ENABLE_SCHEDULER_TOOL
    if (scheduler_tool_register() != 0) {
       OLOG_WARNING("Failed to register scheduler tool");
+   }
+#endif
+
+#ifdef DAWN_ENABLE_JOB_TOOL
+   if (job_tool_register() != 0) {
+      OLOG_WARNING("Failed to register job tool");
    }
 #endif
 

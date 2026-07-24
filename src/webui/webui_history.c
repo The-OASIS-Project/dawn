@@ -960,6 +960,24 @@ void handle_delete_conversation(ws_connection_t *conn, struct json_object *paylo
 
    int64_t conv_id = json_object_get_int64(id_obj);
 
+   /* Refuse to delete a live background-job conversation out from under its
+    * running worker (which is still writing to it).  Sidebar-hiding is
+    * presentation, not authorization — a conv id learned from `job list` is
+    * still directly deletable, so guard here.  Cancel the job first. */
+   char job_status[JOB_STATUS_MAX];
+   if (conv_db_job_get_status(conv_id, conn->auth_user_id, job_status, sizeof(job_status)) ==
+           AUTH_DB_SUCCESS &&
+       (strcmp(job_status, "running") == 0 || strcmp(job_status, "queued") == 0)) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string(
+                                 "Cancel the background job before deleting it."));
+      json_object_object_add(response, "payload", resp_payload);
+      send_json_response(conn, response);
+      json_object_put(response);
+      return;
+   }
+
    /* Cascade-delete referenced images BEFORE the row cascade removes the markers
     * (referenced images are conversation-lifecycle-owned, bumped to PERMANENT at save).
     * Collect ids UNDER conv_db_get_messages' lock, then delete AFTER it returns —

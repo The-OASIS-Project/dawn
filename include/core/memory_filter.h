@@ -58,6 +58,22 @@ char *memory_filter_normalize(const char *text);
  */
 bool memory_filter_check(const char *text);
 
+/**
+ * @brief Check text against ONLY the high-confidence injection-command subset.
+ *
+ * A narrowed variant of memory_filter_check() that scans just the AI-directed
+ * override / jailbreak / role-marker / memory-poisoning patterns — NOT the
+ * credential, vocabulary, markdown-link, base64, or ReAct patterns.  Intended
+ * for long LLM/web-derived text (e.g. a background-job research result) that
+ * legitimately contains credential/API vocabulary as subject matter, where the
+ * full blocklist false-positives heavily.  Still catches the classic
+ * "ignore your instructions / act as DAN / <|im_start|>" attack shape.
+ *
+ * @param text  Input text to check.
+ * @return true if the text should be REJECTED (contains an injection command).
+ */
+bool memory_filter_check_injection_commands(const char *text);
+
 #ifdef __cplusplus
 }
 #endif
