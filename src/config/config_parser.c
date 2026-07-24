@@ -1727,6 +1727,44 @@ static void parse_scheduler(toml_table_t *table, scheduler_config_t *config) {
       config->alarm_volume = 100;
 }
 
+/* Shared by the TOML parse path and the WebUI settings POST handler so a value
+ * arriving over the wire can't bypass bounds the file path enforces.  The
+ * job-session pool array is sized to max_active_jobs, so a nonsense value must
+ * not blow the allocation. */
+void config_clamp_jobs(jobs_config_t *config) {
+   if (!config) {
+      return;
+   }
+   if (config->max_concurrent_local < 0)
+      config->max_concurrent_local = 0;
+   if (config->max_concurrent_cloud < 0)
+      config->max_concurrent_cloud = 0;
+   if (config->max_active_jobs < 1)
+      config->max_active_jobs = 1;
+   if (config->max_active_jobs > 256)
+      config->max_active_jobs = 256;
+   if (config->max_jobs_per_user < 1)
+      config->max_jobs_per_user = 1;
+   if (config->max_queued_per_user < 0)
+      config->max_queued_per_user = 0;
+   if (config->monitor_followups_per_tick < 1)
+      config->monitor_followups_per_tick = 1;
+   if (config->max_spawn_depth < 0)
+      config->max_spawn_depth = 0;
+   if (config->max_children_per_tree < 0)
+      config->max_children_per_tree = 0;
+   if (config->event_chunk_cap < 0) /* sizes a Phase-2 payload buffer */
+      config->event_chunk_cap = 0;
+   if (config->max_reinvokes_per_tree < 1) /* need at least one reinvoke attempt */
+      config->max_reinvokes_per_tree = 1;
+   if (config->max_concurrent_reinvokes < 1)
+      config->max_concurrent_reinvokes = 1;
+   if (config->max_concurrent_reinvokes > 32) /* bounded by the in-flight set */
+      config->max_concurrent_reinvokes = 32;
+   if (config->max_runtime_sec < 0)
+      config->max_runtime_sec = 0;
+}
+
 static void parse_jobs(toml_table_t *table, jobs_config_t *config) {
    if (!table)
       return;
@@ -1761,32 +1799,7 @@ static void parse_jobs(toml_table_t *table, jobs_config_t *config) {
    PARSE_INT(table, "max_runtime_sec", config->max_runtime_sec);
    PARSE_INT(table, "event_chunk_cap", config->event_chunk_cap);
 
-   /* Clamp to sane bounds — the job-session pool array is sized to
-    * max_active_jobs, so a nonsense value must not blow allocation. */
-   if (config->max_concurrent_local < 0)
-      config->max_concurrent_local = 0;
-   if (config->max_concurrent_cloud < 0)
-      config->max_concurrent_cloud = 0;
-   if (config->max_active_jobs < 1)
-      config->max_active_jobs = 1;
-   if (config->max_active_jobs > 256)
-      config->max_active_jobs = 256;
-   if (config->max_jobs_per_user < 1)
-      config->max_jobs_per_user = 1;
-   if (config->max_queued_per_user < 0)
-      config->max_queued_per_user = 0;
-   if (config->monitor_followups_per_tick < 1)
-      config->monitor_followups_per_tick = 1;
-   if (config->max_spawn_depth < 0)
-      config->max_spawn_depth = 0;
-   if (config->max_reinvokes_per_tree < 1) /* need at least one reinvoke attempt */
-      config->max_reinvokes_per_tree = 1;
-   if (config->max_concurrent_reinvokes < 1)
-      config->max_concurrent_reinvokes = 1;
-   if (config->max_concurrent_reinvokes > 32) /* bounded by the in-flight set */
-      config->max_concurrent_reinvokes = 32;
-   if (config->max_runtime_sec < 0)
-      config->max_runtime_sec = 0;
+   config_clamp_jobs(config);
 }
 
 static void parse_calendar(toml_table_t *table, calendar_config_t *config) {
@@ -2011,6 +2024,16 @@ static void parse_attention(toml_table_t *table, attention_config_t *config) {
    PARSE_STRING(table, "quiet_hours", config->quiet_hours);
 }
 
+/* Parse dawn.toml into `config`.
+ *
+ * Adding a parse_*() dispatch below is only step 3 of ~9.  A section that is
+ * parsed here but never emitted by config_write_toml() gets DELETED from the
+ * user's dawn.toml the first time they save any WebUI setting — silently, with
+ * a clean build and green tests.  Wire config_to_json(), config_write_toml(),
+ * and the webui_config.c POST handler in the same change, and add the section
+ * to tests/test_config_roundtrip.c's required[] list.
+ *
+ * Full checklist: docs/CONFIGURATION_GUIDE.md */
 int config_parse_file(const char *path, dawn_config_t *config) {
    if (!path || !config) {
       OLOG_ERROR("config_parse_file: NULL argument");

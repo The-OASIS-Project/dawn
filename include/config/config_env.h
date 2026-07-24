@@ -100,6 +100,11 @@ void config_dump_settings(const dawn_config_t *config,
  * Serializes the entire config structure to a json-c object.
  * Caller must free the returned object with json_object_put().
  *
+ * This is what the WebUI settings panel reads, so a field missing here renders
+ * as its schema default rather than the value actually in force.  Pairs with
+ * config_write_toml() (persist) and the webui_config.c POST handler (apply) —
+ * the three always move together.  See docs/CONFIGURATION_GUIDE.md.
+ *
  * @param config Configuration to serialize
  * @return json_object* JSON object (caller owns), or NULL on error
  */
@@ -119,7 +124,25 @@ json_object *secrets_to_json_status(const secrets_config_t *secrets);
 /**
  * @brief Write configuration to TOML file
  *
- * Writes the complete configuration to the specified path in TOML format.
+ * Writes the configuration to the specified path in TOML format, REPLACING the
+ * whole file (it is not a patch).  This is what the WebUI settings save calls,
+ * so it is the authority on what survives a save.
+ *
+ * @warning **Every section config_parse_file() reads must be emitted here.**  A
+ * section the parser reads but this function never prints is SILENTLY DELETED
+ * from the user's dawn.toml on the next settings save — of any setting, in any
+ * panel — reverting it to defaults on the next start.  Nothing fails to build
+ * and no test goes red when you forget; the user just loses their config.  This
+ * has shipped three times (messaging tokens, [jobs], [scheduler]).
+ *
+ * When adding a section or field, config_to_json() (GET), this function
+ * (persist), and the webui_config.c POST handler always move together.  Write
+ * EVERY field in the struct, including ones the settings panel does not expose
+ * and ones no code enforces yet — the writer emits from the in-memory config,
+ * so printing them is what preserves a hand-edited value across a save.
+ *
+ * Guarded by tests/test_config_roundtrip.c; add new sections to its required[]
+ * list.  Full checklist: docs/CONFIGURATION_GUIDE.md.
  *
  * @param config Configuration to write
  * @param path Output file path

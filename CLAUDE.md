@@ -15,6 +15,7 @@ See @ARCHITECTURE.md for subsystem breakdowns, data flow, and module dependencie
 - **Feedback before implementation.** When the developer asks a question, provide analysis, trade-offs, and a recommendation *first*. Wait for explicit confirmation ("go ahead", "do it", "yes") before coding.
 - **Format before committing.** Every change must pass `./format_code.sh --check`. The pre-commit hook enforces this.
 - **GPL header on every new `.c`/`.cpp`/`.h`.** Template at the bottom of this file.
+- **Adding a `dawn.toml` setting? Read @docs/CONFIGURATION_GUIDE.md first.** It touches up to nine files. A setting that `config_write_toml()` doesn't emit is **silently deleted from the user's `dawn.toml`** on their next WebUI settings save — clean build, green tests, no warning. Already shipped three times. `config_to_json()` (GET) + `config_write_toml()` (persist) + `webui_config.c` POST handler always move together, and new sections go in `tests/test_config_roundtrip.c`'s `required[]`.
 - **Never commit `docs/TODO.md` or `docs/DONE.md`** — both developer-maintained. TODO.md is the active list; DONE.md is the shipped/completed archive (moved 2026-05-28). When an item ships, move its `~~strikethrough~~` row from TODO.md into DONE.md under the matching section.
 - **Design doc commit policy**: commit design docs only when they describe shipped or in-flight code (implementation matches the doc substantially). Docs for planned-but-unstarted work and working/scratch docs stay untracked — the developer uses them as a local unimplemented-work reminder. When unsure, ask.
 
@@ -121,6 +122,13 @@ LOG_ERROR("I2C communication failed: %d", error);
 - `dawn.toml` — runtime config (LLM provider, ASR/TTS, audio, network, WebUI, scheduler, MQTT). See file for all sections.
 - `dawn.h` — compile-time defaults (`AI_NAME`, `AI_DESCRIPTION`, device names, MQTT broker defaults).
 - `secrets.toml` — API keys / OAuth credentials. **Gitignored.** Never commit.
+
+**Adding or changing a setting** — follow @docs/CONFIGURATION_GUIDE.md. Two mechanisms exist: *tool-owned*
+config (`config_section` + `config_writer` in `tool_metadata_t`, written back automatically by the tool
+registry — prefer this for anything tool-specific, it has no round-trip hazard) and *global* config
+(`dawn_config_t` + `config_parser.c`, where you must wire the writer yourself). Verify with
+`tests/test_config_roundtrip.c`, then by saving an unrelated settings panel and confirming your section is
+still in `dawn.toml`.
 
 ## Satellite Development
 

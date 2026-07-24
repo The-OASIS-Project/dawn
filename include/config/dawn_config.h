@@ -23,6 +23,15 @@
  * Thread Safety: Configuration is loaded at startup and may be mutated at runtime
  * via WebUI settings behind s_config_rwlock (in webui_server.c). Readers should
  * snapshot values into local variables when consistency across multiple fields matters.
+ *
+ * ADDING A FIELD OR SECTION HERE IS STEP 1 OF ~9 — see docs/CONFIGURATION_GUIDE.md.
+ * Declaring the struct member, defaulting it, and parsing it is NOT enough: a
+ * setting that config_write_toml() (config_env.c) never emits is silently DELETED
+ * from the user's dawn.toml the first time they save any WebUI setting, because a
+ * settings save rewrites the whole file from this struct. The build stays clean and
+ * the tests stay green when you forget — it has shipped three times. config_to_json()
+ * (GET), config_write_toml() (persist), and webui_config.c's POST handler always move
+ * together; tests/test_config_roundtrip.c guards it.
  */
 
 #ifndef DAWN_CONFIG_H
@@ -1196,6 +1205,18 @@ void config_set_defaults(dawn_config_t *config);
  * @param secrets Secrets struct to initialize
  */
 void config_set_secrets_defaults(secrets_config_t *secrets);
+
+/**
+ * @brief Clamp [jobs] caps to their safe bounds.
+ *
+ * Shared by the TOML parse path and the WebUI settings POST handler so the two
+ * entry points cannot drift — a value arriving over the wire is bounded exactly
+ * like one read from dawn.toml (max_active_jobs sizes the job-session pool
+ * array, so an out-of-range value must never reach the allocation).
+ *
+ * @param config Jobs config to clamp in place (NULL-safe).
+ */
+void config_clamp_jobs(jobs_config_t *config);
 
 /**
  * @brief Get the global config instance (read-only after init)

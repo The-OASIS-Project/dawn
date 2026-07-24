@@ -967,6 +967,41 @@
 # quiet_hours = ""                # P1 quiet-hours window, e.g. "23:00-07:00".
 
 # =============================================================================
+# Background jobs
+# =============================================================================
+# Fire-and-forget tasks ("research X, tell me when done"). A job IS a parented
+# conversation run in its own text-only session pool, so a job can never starve
+# an audio-bound WebUI/satellite client. These caps are LLM-resource-bound plus
+# DoS guards; creating/listing/cancelling jobs is conversational (the `job` tool
+# and the WebUI), never config. See docs/BACKGROUND_JOBS_DESIGN.md §7.
+
+[jobs]
+# enabled = true                     # Master switch for background jobs.
+# max_concurrent_local = 1           # Jobs at once on a LOCAL (GPU) model. Keep
+                                     #   at 1 on a single GPU. 0 = none.
+# max_concurrent_cloud = 4           # Jobs at once on a CLOUD model (cheap to
+                                     #   parallelize). Counted separately.
+# max_active_jobs = 16               # GLOBAL running ceiling, all users. Sizes
+                                     #   the job-session pool array. 1-256.
+# max_jobs_per_user = 4              # Per-user concurrent running cap.
+# max_runtime_sec = 1800             # Per-job time budget. A job past this is
+                                     #   reaped (marked failed, follow-up STILL
+                                     #   fires) so a wedged worker can't hold a
+                                     #   pool slot forever. 0 = no limit.
+# max_reinvokes_per_tree = 8         # Runaway guard: stop re-engaging the parent
+                                     #   after this many attempts on one job.
+# max_concurrent_reinvokes = 2       # In-flight reinvoke_parent workers. 1-32.
+# monitor_followups_per_tick = 4     # Completion follow-ups drained per 1s
+                                     #   heartbeat (bounds work on the voice loop).
+#
+# Parsed and round-tripped, but NOT yet enforced — reserved for the Phase 2
+# (durable event log) and Phase 3 (job trees) work. Setting them has no effect:
+# max_queued_per_user = 8            # Phase 2/3: per-user queued backlog.
+# max_spawn_depth = 3                # Phase 3: job-tree depth cap.
+# max_children_per_tree = 4          # Phase 3: active children per parent.
+# event_chunk_cap = 16384            # Phase 2: event-payload truncation bytes.
+
+# =============================================================================
 # OTA (over-the-air satellite updates)
 # =============================================================================
 # Server→satellite firmware updates. Release artifacts are signed OFFLINE with

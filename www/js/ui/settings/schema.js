@@ -38,6 +38,16 @@
 
    /**
     * Settings schema definition
+    *
+    * This is the CLIENT half only. Adding a field here does NOT wire it up — the
+    * server must also serialize it (config_to_json), accept it (webui_config.c
+    * POST handler), and persist it (config_write_toml). Miss the last one and the
+    * setting is silently deleted from the user's dawn.toml on the next save,
+    * because a settings save rewrites the whole file from the in-memory config.
+    * A field added here but not server-side renders a control that shows the
+    * default and quietly discards edits.
+    *
+    * Full checklist: docs/CONFIGURATION_GUIDE.md
     */
    const SETTINGS_SCHEMA = {
       general: {

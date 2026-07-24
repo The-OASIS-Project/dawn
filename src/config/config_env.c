@@ -1763,6 +1763,38 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_string(config->attention.quiet_hours));
    json_object_object_add(root, "attention", attention);
 
+   /* [jobs] (background jobs — operator caps; job create/list/cancel is
+    * conversational, never config).  ALL fields are emitted, including the ones
+    * the settings panel does not surface yet, so the JSON stays a faithful
+    * mirror of the struct as the UI grows. */
+   json_object *jobs = json_object_new_object();
+   json_object_object_add(jobs, "enabled", json_object_new_boolean(config->jobs.enabled));
+   json_object_object_add(jobs, "max_concurrent_local",
+                          json_object_new_int(config->jobs.max_concurrent_local));
+   json_object_object_add(jobs, "max_concurrent_cloud",
+                          json_object_new_int(config->jobs.max_concurrent_cloud));
+   json_object_object_add(jobs, "max_active_jobs",
+                          json_object_new_int(config->jobs.max_active_jobs));
+   json_object_object_add(jobs, "max_jobs_per_user",
+                          json_object_new_int(config->jobs.max_jobs_per_user));
+   json_object_object_add(jobs, "max_queued_per_user",
+                          json_object_new_int(config->jobs.max_queued_per_user));
+   json_object_object_add(jobs, "monitor_followups_per_tick",
+                          json_object_new_int(config->jobs.monitor_followups_per_tick));
+   json_object_object_add(jobs, "max_spawn_depth",
+                          json_object_new_int(config->jobs.max_spawn_depth));
+   json_object_object_add(jobs, "max_children_per_tree",
+                          json_object_new_int(config->jobs.max_children_per_tree));
+   json_object_object_add(jobs, "max_reinvokes_per_tree",
+                          json_object_new_int(config->jobs.max_reinvokes_per_tree));
+   json_object_object_add(jobs, "max_concurrent_reinvokes",
+                          json_object_new_int(config->jobs.max_concurrent_reinvokes));
+   json_object_object_add(jobs, "max_runtime_sec",
+                          json_object_new_int(config->jobs.max_runtime_sec));
+   json_object_object_add(jobs, "event_chunk_cap",
+                          json_object_new_int(config->jobs.event_chunk_cap));
+   json_object_object_add(root, "jobs", jobs);
+
    /* [calendar] */
    json_object *calendar = json_object_new_object();
    json_object_object_add(calendar, "enabled", json_object_new_boolean(config->calendar.enabled));
@@ -1879,9 +1911,10 @@ static char *toml_escape_string(const char *str) {
    if (!str)
       return strdup("");
 
-   /* Calculate worst-case output size (each char becomes 2 chars + null) */
+   /* Worst case is a C0 control character, which expands to the 6-byte \uXXXX
+    * form (below); every other escape is 2 bytes. */
    size_t len = strlen(str);
-   size_t max_size = len * 2 + 1;
+   size_t max_size = len * 6 + 1;
 
    char *out = malloc(max_size);
    if (!out)
@@ -1911,7 +1944,15 @@ static char *toml_escape_string(const char *str) {
             *dst++ = 't';
             break;
          default:
-            *dst++ = *src;
+            /* Remaining C0 controls (and DEL) are ILLEGAL raw in a TOML basic
+             * string — emitting one verbatim produces a dawn.toml the parser
+             * rejects on the next boot, i.e. a persistent config-wedge from a
+             * single bad settings value.  \uXXXX is the spec-legal form. */
+            if ((unsigned char)*src < 0x20 || (unsigned char)*src == 0x7F) {
+               dst += sprintf(dst, "\\u%04X", (unsigned char)*src);
+            } else {
+               *dst++ = *src;
+            }
             break;
       }
    }
@@ -1983,6 +2024,26 @@ static void write_toml_string_multiline(FILE *fp, const char *key, const char *v
    }
 }
 
+/* ============================================================================
+ * !! READ BEFORE EDITING — this function is a silent-data-loss hazard !!
+ *
+ * fopen(path, "w") TRUNCATES.  This rewrites the user's whole dawn.toml from
+ * the in-memory config; it does NOT patch the existing file.  So any section
+ * config_parse_file() reads but this function never prints is DELETED from the
+ * user's config the next time they save ANY setting in ANY WebUI panel, and
+ * comes back as defaults on the next start.
+ *
+ * Nothing fails to build and no test goes red when you forget a section — which
+ * is why it has shipped three times (messaging tokens, [jobs], [scheduler]).
+ *
+ * Adding a section/field here?  config_to_json() (GET) and the webui_config.c
+ * POST handler need the same addition, and tests/test_config_roundtrip.c needs
+ * the section in its required[] list.  Print EVERY field in the struct — even
+ * ones the settings panel doesn't expose and ones nothing enforces yet — since
+ * printing them is what preserves a hand-edited value across a save.
+ *
+ * Checklist + worked example: docs/CONFIGURATION_GUIDE.md
+ * ============================================================================ */
 int config_write_toml(const dawn_config_t *config, const char *path) {
    if (!config || !path)
       return 1;
@@ -2018,10 +2079,10 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
       write_toml_string(fp, "location", config->localization.location);
    if (config->localization.timezone[0])
       write_toml_string(fp, "timezone", config->localization.timezone);
-   fprintf(fp, "units = \"%s\"\n", config->localization.units);
+   write_toml_string(fp, "units", config->localization.units);
 
    fprintf(fp, "\n[audio]\n");
-   fprintf(fp, "backend = \"%s\"\n", config->audio.backend);
+   write_toml_string(fp, "backend", config->audio.backend);
    write_toml_string(fp, "capture_device", config->audio.capture_device);
    write_toml_string(fp, "playback_device", config->audio.playback_device);
    fprintf(fp, "output_rate = %d\n", config->audio.output_rate);
@@ -2047,39 +2108,39 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "max_chunk_duration = %.1f\n", config->vad.chunking.max_duration);
 
    fprintf(fp, "\n[asr]\n");
-   fprintf(fp, "model = \"%s\"\n", config->asr.model);
-   fprintf(fp, "models_path = \"%s\"\n", config->asr.models_path);
+   write_toml_string(fp, "model", config->asr.model);
+   write_toml_string(fp, "models_path", config->asr.models_path);
    fprintf(fp, "dedup_window_sec = %d\n", config->asr.dedup_window_sec);
    write_toml_string_multiline(fp, "disambiguation_hint", config->asr.disambiguation_hint);
 
    fprintf(fp, "\n[tts]\n");
-   fprintf(fp, "models_path = \"%s\"\n", config->tts.models_path);
-   fprintf(fp, "voice_model = \"%s\"\n", config->tts.voice_model);
+   write_toml_string(fp, "models_path", config->tts.models_path);
+   write_toml_string(fp, "voice_model", config->tts.voice_model);
    fprintf(fp, "length_scale = %.2f\n", config->tts.length_scale);
    write_toml_string_multiline(fp, "voice_directive", config->tts.voice_directive);
    write_toml_string_multiline(fp, "voice_directive_webui", config->tts.voice_directive_webui);
 
    fprintf(fp, "\n[commands]\n");
-   fprintf(fp, "processing_mode = \"%s\"\n", config->commands.processing_mode);
+   write_toml_string(fp, "processing_mode", config->commands.processing_mode);
 
    fprintf(fp, "\n[llm]\n");
-   fprintf(fp, "type = \"%s\"\n", config->llm.type);
+   write_toml_string(fp, "type", config->llm.type);
    fprintf(fp, "max_tokens = %d\n", config->llm.max_tokens);
    fprintf(fp, "compact_soft_threshold = %.2f\n", config->llm.compact_soft_threshold);
    fprintf(fp, "compact_hard_threshold = %.2f\n", config->llm.compact_hard_threshold);
    fprintf(fp, "compact_use_session = %s\n", config->llm.compact_use_session ? "true" : "false");
    if (config->llm.compact_provider[0])
-      fprintf(fp, "compact_provider = \"%s\"\n", config->llm.compact_provider);
+      write_toml_string(fp, "compact_provider", config->llm.compact_provider);
    if (config->llm.compact_model[0])
-      fprintf(fp, "compact_model = \"%s\"\n", config->llm.compact_model);
+      write_toml_string(fp, "compact_model", config->llm.compact_model);
    if (config->llm.compact_openrouter_model[0])
-      fprintf(fp, "compact_openrouter_model = \"%s\"\n", config->llm.compact_openrouter_model);
+      write_toml_string(fp, "compact_openrouter_model", config->llm.compact_openrouter_model);
    fprintf(fp, "conversation_logging = %s\n", config->llm.conversation_logging ? "true" : "false");
 
    fprintf(fp, "\n[llm.cloud]\n");
-   fprintf(fp, "provider = \"%s\"\n", config->llm.cloud.provider);
+   write_toml_string(fp, "provider", config->llm.cloud.provider);
    if (config->llm.cloud.endpoint[0])
-      fprintf(fp, "endpoint = \"%s\"\n", config->llm.cloud.endpoint);
+      write_toml_string(fp, "endpoint", config->llm.cloud.endpoint);
    fprintf(fp, "vision_enabled = %s\n", config->llm.cloud.vision_enabled ? "true" : "false");
    fprintf(fp, "use_openrouter = %s\n", config->llm.cloud.use_openrouter ? "true" : "false");
 
@@ -2122,13 +2183,13 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
 #undef WRITE_MODEL_ARRAY
 
    fprintf(fp, "\n[llm.local]\n");
-   fprintf(fp, "endpoint = \"%s\"\n", config->llm.local.endpoint);
+   write_toml_string(fp, "endpoint", config->llm.local.endpoint);
    if (config->llm.local.model[0])
-      fprintf(fp, "model = \"%s\"\n", config->llm.local.model);
+      write_toml_string(fp, "model", config->llm.local.model);
    fprintf(fp, "vision_enabled = %s\n", config->llm.local.vision_enabled ? "true" : "false");
 
    fprintf(fp, "\n[llm.tools]\n");
-   fprintf(fp, "mode = \"%s\"\n", config->llm.tools.mode);
+   write_toml_string(fp, "mode", config->llm.tools.mode);
    /* Write local_enabled array if configured (even if empty - empty means none enabled) */
    if (config->llm.tools.local_enabled_configured || config->llm.tools.local_enabled_count > 0) {
       if (config->llm.tools.local_enabled_count > 0) {
@@ -2193,21 +2254,21 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    }
 
    fprintf(fp, "\n[llm.thinking]\n");
-   fprintf(fp, "mode = \"%s\"\n", config->llm.thinking.mode);
-   fprintf(fp, "reasoning_effort = \"%s\"\n", config->llm.thinking.reasoning_effort);
+   write_toml_string(fp, "mode", config->llm.thinking.mode);
+   write_toml_string(fp, "reasoning_effort", config->llm.thinking.reasoning_effort);
    fprintf(fp, "budget_low = %d\n", config->llm.thinking.budget_low);
    fprintf(fp, "budget_medium = %d\n", config->llm.thinking.budget_medium);
    fprintf(fp, "budget_high = %d\n", config->llm.thinking.budget_high);
    fprintf(fp, "budget_xhigh = %d\n", config->llm.thinking.budget_xhigh);
 
    fprintf(fp, "\n[llm.silent_observe]\n");
-   fprintf(fp, "provider = \"%s\"\n", config->llm.silent_observe.provider);
-   fprintf(fp, "model = \"%s\"\n", config->llm.silent_observe.model);
-   fprintf(fp, "openrouter_model = \"%s\"\n", config->llm.silent_observe.openrouter_model);
+   write_toml_string(fp, "provider", config->llm.silent_observe.provider);
+   write_toml_string(fp, "model", config->llm.silent_observe.model);
+   write_toml_string(fp, "openrouter_model", config->llm.silent_observe.openrouter_model);
 
    fprintf(fp, "\n[search]\n");
-   fprintf(fp, "engine = \"%s\"\n", config->search.engine);
-   fprintf(fp, "endpoint = \"%s\"\n", config->search.endpoint);
+   write_toml_string(fp, "engine", config->search.engine);
+   write_toml_string(fp, "endpoint", config->search.endpoint);
 
    /* Write title_filters under [search] BEFORE [search.summarizer] so TOML
     * attaches the array to the right table.  Any key emitted after a sub-
@@ -2227,7 +2288,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    }
 
    fprintf(fp, "\n[search.summarizer]\n");
-   fprintf(fp, "backend = \"%s\"\n", config->search.summarizer.backend);
+   write_toml_string(fp, "backend", config->search.summarizer.backend);
    fprintf(fp, "threshold_bytes = %zu\n", config->search.summarizer.threshold_bytes);
    fprintf(fp, "target_words = %zu\n", config->search.summarizer.target_words);
    fprintf(fp, "target_ratio = %.2f\n", config->search.summarizer.target_ratio);
@@ -2243,7 +2304,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    if (emit_url_fetcher) {
       fprintf(fp, "\n[url_fetcher]\n");
       if (config->url_fetcher.fallback[0] != '\0') {
-         fprintf(fp, "fallback = \"%s\"\n", config->url_fetcher.fallback);
+         write_toml_string(fp, "fallback", config->url_fetcher.fallback);
       }
       if (config->url_fetcher.whitelist_count > 0) {
          fprintf(fp, "whitelist = [\n");
@@ -2258,7 +2319,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
 
       fprintf(fp, "\n[url_fetcher.flaresolverr]\n");
       fprintf(fp, "enabled = %s\n", config->url_fetcher.flaresolverr.enabled ? "true" : "false");
-      fprintf(fp, "endpoint = \"%s\"\n", config->url_fetcher.flaresolverr.endpoint);
+      write_toml_string(fp, "endpoint", config->url_fetcher.flaresolverr.endpoint);
       fprintf(fp, "timeout_sec = %d\n", config->url_fetcher.flaresolverr.timeout_sec);
       fprintf(fp, "max_response_bytes = %zu\n",
               config->url_fetcher.flaresolverr.max_response_bytes);
@@ -2270,7 +2331,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
          fprintf(fp, "timeout_sec = %d\n", config->url_fetcher.tavily.timeout_sec);
          fprintf(fp, "max_response_bytes = %zu\n", config->url_fetcher.tavily.max_response_bytes);
          if (config->url_fetcher.tavily.extract_depth[0]) {
-            fprintf(fp, "extract_depth = \"%s\"\n", config->url_fetcher.tavily.extract_depth);
+            write_toml_string(fp, "extract_depth", config->url_fetcher.tavily.extract_depth);
          }
          fprintf(fp, "rate_limit_per_minute = %d\n",
                  config->url_fetcher.tavily.rate_limit_per_minute);
@@ -2281,15 +2342,15 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
 
    fprintf(fp, "\n[mqtt]\n");
    fprintf(fp, "enabled = %s\n", config->mqtt.enabled ? "true" : "false");
-   fprintf(fp, "broker = \"%s\"\n", config->mqtt.broker);
+   write_toml_string(fp, "broker", config->mqtt.broker);
    fprintf(fp, "port = %d\n", config->mqtt.port);
    fprintf(fp, "tls = %s\n", config->mqtt.tls ? "true" : "false");
    if (config->mqtt.tls_ca_cert[0])
-      fprintf(fp, "tls_ca_cert = \"%s\"\n", config->mqtt.tls_ca_cert);
+      write_toml_string(fp, "tls_ca_cert", config->mqtt.tls_ca_cert);
    if (config->mqtt.tls_cert_path[0])
-      fprintf(fp, "tls_cert_path = \"%s\"\n", config->mqtt.tls_cert_path);
+      write_toml_string(fp, "tls_cert_path", config->mqtt.tls_cert_path);
    if (config->mqtt.tls_key_path[0])
-      fprintf(fp, "tls_key_path = \"%s\"\n", config->mqtt.tls_key_path);
+      write_toml_string(fp, "tls_key_path", config->mqtt.tls_key_path);
 
    fprintf(fp, "\n[network]\n");
    fprintf(fp, "workers = %d\n", config->network.workers);
@@ -2305,26 +2366,25 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "port = %d\n", config->webui.port);
    fprintf(fp, "max_clients = %d\n", config->webui.max_clients);
    fprintf(fp, "audio_chunk_ms = %d\n", config->webui.audio_chunk_ms);
-   fprintf(fp, "www_path = \"%s\"\n", config->webui.www_path);
-   fprintf(fp, "bind_address = \"%s\"\n", config->webui.bind_address);
+   write_toml_string(fp, "www_path", config->webui.www_path);
+   write_toml_string(fp, "bind_address", config->webui.bind_address);
    fprintf(fp, "https = %s\n", config->webui.https ? "true" : "false");
    if (config->webui.ssl_cert_path[0])
-      fprintf(fp, "ssl_cert_path = \"%s\"\n", config->webui.ssl_cert_path);
+      write_toml_string(fp, "ssl_cert_path", config->webui.ssl_cert_path);
    if (config->webui.ssl_key_path[0])
-      fprintf(fp, "ssl_key_path = \"%s\"\n", config->webui.ssl_key_path);
+      write_toml_string(fp, "ssl_key_path", config->webui.ssl_key_path);
    fprintf(fp, "export_max_messages = %d\n", config->webui.export_max_messages);
    /* Validate at write time to prevent TOML injection */
    const char *exp_fmt = (strcmp(config->webui.export_format, "html") == 0) ? "html" : "json";
-   fprintf(fp, "export_format = \"%s\"\n", exp_fmt);
+   write_toml_string(fp, "export_format", exp_fmt);
 
    fprintf(fp, "\n[memory]\n");
    fprintf(fp, "enabled = %s\n", config->memory.enabled ? "true" : "false");
    fprintf(fp, "context_budget_tokens = %d\n", config->memory.context_budget_tokens);
    fprintf(fp, "source_budget_chars = %d\n", config->memory.source_budget_chars);
-   fprintf(fp, "extraction_provider = \"%s\"\n", config->memory.extraction_provider);
-   fprintf(fp, "extraction_model = \"%s\"\n", config->memory.extraction_model);
-   fprintf(fp, "extraction_openrouter_model = \"%s\"\n",
-           config->memory.extraction_openrouter_model);
+   write_toml_string(fp, "extraction_provider", config->memory.extraction_provider);
+   write_toml_string(fp, "extraction_model", config->memory.extraction_model);
+   write_toml_string(fp, "extraction_openrouter_model", config->memory.extraction_openrouter_model);
    fprintf(fp, "extraction_timeout_ms = %d\n", config->memory.extraction_timeout_ms);
    fprintf(fp, "paraphrase_dedup_enabled = %s\n",
            config->memory.paraphrase_dedup_enabled ? "true" : "false");
@@ -2358,17 +2418,17 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "\n[memory.embeddings]\n");
    {
       char *escaped = toml_escape_string(config->memory.embedding_provider);
-      fprintf(fp, "provider = \"%s\"\n", escaped ? escaped : config->memory.embedding_provider);
+      write_toml_string(fp, "provider", escaped ? escaped : config->memory.embedding_provider);
       free(escaped);
    }
    if (config->memory.embedding_model[0]) {
       char *escaped = toml_escape_string(config->memory.embedding_model);
-      fprintf(fp, "model = \"%s\"\n", escaped ? escaped : config->memory.embedding_model);
+      write_toml_string(fp, "model", escaped ? escaped : config->memory.embedding_model);
       free(escaped);
    }
    if (config->memory.embedding_endpoint[0]) {
       char *escaped = toml_escape_string(config->memory.embedding_endpoint);
-      fprintf(fp, "endpoint = \"%s\"\n", escaped ? escaped : config->memory.embedding_endpoint);
+      write_toml_string(fp, "endpoint", escaped ? escaped : config->memory.embedding_endpoint);
       free(escaped);
    }
    fprintf(fp, "keyword_weight = %.2f\n", config->memory.embedding_keyword_weight);
@@ -2390,7 +2450,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
            config->memory.embedding_backfill_on_startup ? "true" : "false");
    if (config->memory.model_id[0]) {
       char *escaped = toml_escape_string(config->memory.model_id);
-      fprintf(fp, "model_id = \"%s\"\n", escaped ? escaped : config->memory.model_id);
+      write_toml_string(fp, "model_id", escaped ? escaped : config->memory.model_id);
       free(escaped);
    }
    fprintf(fp, "recompute_on_model_change = %s\n",
@@ -2457,15 +2517,15 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "mic_record = %s\n", config->debug.mic_record ? "true" : "false");
    fprintf(fp, "asr_record = %s\n", config->debug.asr_record ? "true" : "false");
    fprintf(fp, "aec_record = %s\n", config->debug.aec_record ? "true" : "false");
-   fprintf(fp, "record_path = \"%s\"\n", config->debug.record_path);
+   write_toml_string(fp, "record_path", config->debug.record_path);
    fprintf(fp, "silent_observe_test_endpoint = %s\n",
            config->debug.silent_observe_test_endpoint ? "true" : "false");
 
    fprintf(fp, "\n[paths]\n");
    if (config->paths.data_dir[0] != '\0') {
-      fprintf(fp, "data_dir = \"%s\"\n", config->paths.data_dir);
+      write_toml_string(fp, "data_dir", config->paths.data_dir);
    }
-   fprintf(fp, "music_dir = \"%s\"\n", config->paths.music_dir);
+   write_toml_string(fp, "music_dir", config->paths.music_dir);
 
    /* [images] controls stored image retention and cleanup */
    fprintf(fp, "\n[images]\n");
@@ -2510,19 +2570,19 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
 
    /* [music.plex] — Plex Media Server connection settings */
    fprintf(fp, "\n[music.plex]\n");
-   fprintf(fp, "host = \"%s\"\n", config->music.plex.host);
+   write_toml_string(fp, "host", config->music.plex.host);
    fprintf(fp, "port = %d\n", config->music.plex.port);
    fprintf(fp, "music_section_id = %d\n", config->music.plex.music_section_id);
    fprintf(fp, "ssl = %s\n", config->music.plex.ssl ? "true" : "false");
    fprintf(fp, "ssl_verify = %s\n", config->music.plex.ssl_verify ? "true" : "false");
    if (config->music.plex.client_identifier[0]) {
-      fprintf(fp, "client_identifier = \"%s\"\n", config->music.plex.client_identifier);
+      write_toml_string(fp, "client_identifier", config->music.plex.client_identifier);
    }
 
    fprintf(fp, "\n[music.streaming]\n");
    fprintf(fp, "enabled = %s\n", config->music.streaming_enabled ? "true" : "false");
-   fprintf(fp, "default_quality = \"%s\"\n", config->music.streaming_quality);
-   fprintf(fp, "bitrate_mode = \"%s\"\n", config->music.streaming_bitrate_mode);
+   write_toml_string(fp, "default_quality", config->music.streaming_quality);
+   write_toml_string(fp, "bitrate_mode", config->music.streaming_bitrate_mode);
 
    /* [calendar] CalDAV integration settings */
    fprintf(fp, "\n[calendar]\n");
@@ -2540,7 +2600,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    /* [ota] — round-trips so a WebUI settings save can't drop it. */
    fprintf(fp, "\n[ota]\n");
    fprintf(fp, "enabled = %s\n", config->ota.enabled ? "true" : "false");
-   fprintf(fp, "release_dir = \"%s\"\n", config->ota.release_dir);
+   write_toml_string(fp, "release_dir", config->ota.release_dir);
    fprintf(fp, "download_token_ttl_sec = %d\n", config->ota.download_token_ttl_sec);
    fprintf(fp, "require_tls = %s\n", config->ota.require_tls ? "true" : "false");
 
@@ -2553,7 +2613,50 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
            config->attention.inject_into_sessions ? "true" : "false");
    fprintf(fp, "judge_enabled = %s\n", config->attention.judge_enabled ? "true" : "false");
    fprintf(fp, "judge_threshold = %.2f\n", config->attention.judge_threshold);
-   fprintf(fp, "quiet_hours = \"%s\"\n", config->attention.quiet_hours);
+   write_toml_string(fp, "quiet_hours", config->attention.quiet_hours);
+
+   /* [scheduler] — round-trips so a WebUI settings save can't drop it.  This
+    * section is parsed, surfaced in the settings panel, and accepted by the POST
+    * handler, but was never written back: edits applied at runtime and then
+    * vanished on restart, and a hand-written [scheduler] block was deleted by
+    * the first settings save.  (Pre-existing; found by the config round-trip
+    * audit that caught [jobs] below.) */
+   fprintf(fp, "\n[scheduler]\n");
+   fprintf(fp, "enabled = %s\n", config->scheduler.enabled ? "true" : "false");
+   fprintf(fp, "default_snooze_minutes = %d\n", config->scheduler.default_snooze_minutes);
+   fprintf(fp, "max_snooze_count = %d\n", config->scheduler.max_snooze_count);
+   fprintf(fp, "max_events_per_user = %d\n", config->scheduler.max_events_per_user);
+   fprintf(fp, "max_events_total = %d\n", config->scheduler.max_events_total);
+   fprintf(fp, "missed_event_recovery = %s\n",
+           config->scheduler.missed_event_recovery ? "true" : "false");
+   write_toml_string(fp, "missed_task_policy", config->scheduler.missed_task_policy);
+   fprintf(fp, "missed_task_max_age_sec = %d\n", config->scheduler.missed_task_max_age_sec);
+   fprintf(fp, "alarm_timeout_sec = %d\n", config->scheduler.alarm_timeout_sec);
+   fprintf(fp, "alarm_volume = %d\n", config->scheduler.alarm_volume);
+   fprintf(fp, "event_retention_days = %d\n", config->scheduler.event_retention_days);
+   fprintf(fp, "briefing_speak_aloud_on_webui_source = %s\n",
+           config->scheduler.briefing_speak_aloud_on_webui_source ? "true" : "false");
+
+   /* [jobs] (background jobs) — round-trips so a WebUI settings save can't drop
+    * the operator's job caps.  EVERY field is written, including the ones the
+    * settings panel doesn't surface yet (Phase 2/3 forward-decls): the writer
+    * emits from the in-memory config, so writing them is what preserves a
+    * hand-edited value across a save.  Job create/list/cancel is conversational
+    * (the `job` tool + WebUI), never config. */
+   fprintf(fp, "\n[jobs]\n");
+   fprintf(fp, "enabled = %s\n", config->jobs.enabled ? "true" : "false");
+   fprintf(fp, "max_concurrent_local = %d\n", config->jobs.max_concurrent_local);
+   fprintf(fp, "max_concurrent_cloud = %d\n", config->jobs.max_concurrent_cloud);
+   fprintf(fp, "max_active_jobs = %d\n", config->jobs.max_active_jobs);
+   fprintf(fp, "max_jobs_per_user = %d\n", config->jobs.max_jobs_per_user);
+   fprintf(fp, "max_queued_per_user = %d\n", config->jobs.max_queued_per_user);
+   fprintf(fp, "monitor_followups_per_tick = %d\n", config->jobs.monitor_followups_per_tick);
+   fprintf(fp, "max_spawn_depth = %d\n", config->jobs.max_spawn_depth);
+   fprintf(fp, "max_children_per_tree = %d\n", config->jobs.max_children_per_tree);
+   fprintf(fp, "max_reinvokes_per_tree = %d\n", config->jobs.max_reinvokes_per_tree);
+   fprintf(fp, "max_concurrent_reinvokes = %d\n", config->jobs.max_concurrent_reinvokes);
+   fprintf(fp, "max_runtime_sec = %d\n", config->jobs.max_runtime_sec);
+   fprintf(fp, "event_chunk_cap = %d\n", config->jobs.event_chunk_cap);
 
    /* [mcp] + [[mcp.server]] (coding harness) — round-trips so a settings save
     * can't drop a manually-configured bridge server. */
@@ -2563,17 +2666,17 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    for (int i = 0; i < config->mcp.server_count && i < MCP_SERVERS_MAX; i++) {
       const mcp_server_config_t *srv = &config->mcp.servers[i];
       fprintf(fp, "\n[[mcp.server]]\n");
-      fprintf(fp, "alias = \"%s\"\n", srv->alias);
-      fprintf(fp, "url = \"%s\"\n", srv->url);
-      fprintf(fp, "transport = \"%s\"\n", srv->transport);
+      write_toml_string(fp, "alias", srv->alias);
+      write_toml_string(fp, "url", srv->url);
+      write_toml_string(fp, "transport", srv->transport);
       fprintf(fp, "enabled = %s\n", srv->enabled ? "true" : "false");
-      fprintf(fp, "capabilities = \"%s\"\n", srv->capabilities);
+      write_toml_string(fp, "capabilities", srv->capabilities);
       fprintf(fp, "request_timeout_seconds = %d\n", srv->request_timeout_seconds);
       fprintf(fp, "idle_close_seconds = %d\n", srv->idle_close_seconds);
       fprintf(fp, "tls_verify = %s\n", srv->tls_verify ? "true" : "false");
-      fprintf(fp, "auth_bearer_env = \"%s\"\n", srv->auth_bearer_env);
+      write_toml_string(fp, "auth_bearer_env", srv->auth_bearer_env);
       if (srv->auth_bearer_token_secret[0] != '\0') {
-         fprintf(fp, "auth_bearer_token_secret = \"%s\"\n", srv->auth_bearer_token_secret);
+         write_toml_string(fp, "auth_bearer_token_secret", srv->auth_bearer_token_secret);
       }
    }
 
@@ -2582,16 +2685,16 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
     * interpreted as escapes on the next read. */
    fprintf(fp, "\n[code_projects]\n");
    fprintf(fp, "enabled = %s\n", config->code_projects.enabled ? "true" : "false");
-   fprintf(fp, "source_root = \"%s\"\n", config->code_projects.source_root);
-   fprintf(fp, "default_index_mode = \"%s\"\n", config->code_projects.default_index_mode);
+   write_toml_string(fp, "source_root", config->code_projects.source_root);
+   write_toml_string(fp, "default_index_mode", config->code_projects.default_index_mode);
    fprintf(fp, "default_global = %s\n", config->code_projects.default_global ? "true" : "false");
-   fprintf(fp, "import_user_required = \"%s\"\n", config->code_projects.import_user_required);
+   write_toml_string(fp, "import_user_required", config->code_projects.import_user_required);
    fprintf(fp, "max_repo_size_mb = %d\n", config->code_projects.max_repo_size_mb);
    fprintf(fp, "max_file_count = %d\n", config->code_projects.max_file_count);
    fprintf(fp, "max_path_depth = %d\n", config->code_projects.max_path_depth);
    fprintf(fp, "clone_depth = %d\n", config->code_projects.clone_depth);
    fprintf(fp, "allowed_host_pattern = '%s'\n", config->code_projects.allowed_host_pattern);
-   fprintf(fp, "default_active = \"%s\"\n", config->code_projects.default_active);
+   write_toml_string(fp, "default_active", config->code_projects.default_active);
    /* allowed_local_roots[] — link-local allowlist; emit [] when empty so a WebUI clear
     * round-trips (absent would fall back to the compiled default of none anyway). */
    if (config->code_projects.allowed_local_roots_count > 0) {

@@ -305,6 +305,23 @@ void handle_get_config(ws_connection_t *conn) {
       }                                                 \
    } while (0)
 
+/* Apply a settings-panel POST onto the live config.
+ *
+ * One of three functions that must stay in lockstep whenever a config section or
+ * field is added — miss any one of them and the failure is silent:
+ *
+ * - config_to_json() in config_env.c is the GET side; omitting a field there
+ *   makes the panel show the schema default instead of the value in force.
+ * - THIS function is the APPLY side; omitting a field here silently discards
+ *   the user's edit.
+ * - config_write_toml() in config_env.c is the PERSIST side; omitting a section
+ *   there DELETES it from the user's dawn.toml on the next save.
+ *
+ * Clamp anything bounded through the section's shared clamp helper (e.g.
+ * config_clamp_jobs()) rather than re-deriving limits here: a value arriving
+ * over the wire must not be able to bypass the bounds the TOML path enforces.
+ *
+ * Checklist: docs/CONFIGURATION_GUIDE.md.  Guard: tests/test_config_roundtrip.c. */
 static void apply_config_from_json(dawn_config_t *config, struct json_object *payload) {
    struct json_object *section;
 
@@ -1143,6 +1160,30 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       if (config->attention.judge_threshold > 5.0)
          config->attention.judge_threshold = 5.0;
       JSON_TO_CONFIG_STR(section, "quiet_hours", config->attention.quiet_hours);
+   }
+
+   /* [jobs] — background-job caps.  Handles every field, including those the
+    * settings panel doesn't surface yet, so adding a UI field later needs no
+    * server change.  Clamps mirror parse_jobs() in config_parser.c: a value
+    * arriving over the WebUI must not be able to bypass the bounds the TOML
+    * path enforces (max_active_jobs sizes the job-session pool array). */
+   if (json_object_object_get_ex(payload, "jobs", &section)) {
+      JSON_TO_CONFIG_BOOL(section, "enabled", config->jobs.enabled);
+      JSON_TO_CONFIG_INT(section, "max_concurrent_local", config->jobs.max_concurrent_local);
+      JSON_TO_CONFIG_INT(section, "max_concurrent_cloud", config->jobs.max_concurrent_cloud);
+      JSON_TO_CONFIG_INT(section, "max_active_jobs", config->jobs.max_active_jobs);
+      JSON_TO_CONFIG_INT(section, "max_jobs_per_user", config->jobs.max_jobs_per_user);
+      JSON_TO_CONFIG_INT(section, "max_queued_per_user", config->jobs.max_queued_per_user);
+      JSON_TO_CONFIG_INT(section, "monitor_followups_per_tick",
+                         config->jobs.monitor_followups_per_tick);
+      JSON_TO_CONFIG_INT(section, "max_spawn_depth", config->jobs.max_spawn_depth);
+      JSON_TO_CONFIG_INT(section, "max_children_per_tree", config->jobs.max_children_per_tree);
+      JSON_TO_CONFIG_INT(section, "max_reinvokes_per_tree", config->jobs.max_reinvokes_per_tree);
+      JSON_TO_CONFIG_INT(section, "max_concurrent_reinvokes",
+                         config->jobs.max_concurrent_reinvokes);
+      JSON_TO_CONFIG_INT(section, "max_runtime_sec", config->jobs.max_runtime_sec);
+      JSON_TO_CONFIG_INT(section, "event_chunk_cap", config->jobs.event_chunk_cap);
+      config_clamp_jobs(&config->jobs);
    }
 
    /* [mcp] — coding-harness MCP bridge. Only the scalars are settings-editable;

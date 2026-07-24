@@ -982,6 +982,15 @@ dawn_add_unit_test(test_config_validate
    LIBS    unity
    LABEL   ci)
 
+dawn_add_unit_test(test_config_roundtrip
+   SOURCES test_config_roundtrip.c test_config_roundtrip_stub.c
+           ${SRC_ROOT}/src/config/config_parser.c
+           ${SRC_ROOT}/src/config/config_env.c
+           ${SRC_ROOT}/src/config/config_defaults.c
+           ${SRC_ROOT}/src/tools/toml.c
+   LIBS    unity json-c m pthread
+   LABEL   ci)
+
 dawn_add_unit_test(test_calculator
    SOURCES test_calculator.c
            ${SRC_ROOT}/src/tools/calculator.c
