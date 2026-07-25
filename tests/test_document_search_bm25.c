@@ -25,6 +25,7 @@
  * channel uses no embeddings, so this needs only the real auth_db + FTS index.
  */
 
+#include <stdlib.h> /* free */
 #include <string.h>
 
 #include "auth/auth_db.h"

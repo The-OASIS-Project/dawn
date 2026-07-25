@@ -292,18 +292,31 @@ void webui_broadcast_job_notification(int user_id,
                                       int running_count);
 
 /**
- * @brief Push a parent conversation's active background-job count to its owner's
- *        browser sessions (drives the per-conversation + global "jobs running"
- *        pills).  Weak symbol: a no-op unless WebUI links its strong override.
+ * @brief Push ONE job's current row to its owner's browser sessions.
+ *
+ * The lifecycle delta of the job frames (§6.4): clients keep an active-job set
+ * keyed by conversation id and upsert this row into it, dropping it when the row
+ * arrives terminal.  Set membership — never +/-1 arithmetic — so reconnect,
+ * multi-tab and out-of-order delivery all converge.
+ *
+ * Weak symbol: a no-op unless WebUI links its strong override.
  */
-void webui_broadcast_job_activity(int user_id, int64_t parent_id, int active_count);
+void webui_broadcast_job_update(int user_id, const job_record_t *rec);
 
 /**
- * @brief Query @p parent_id's current active (queued/running) child-job count and
- *        broadcast it.  Call on each spawn / terminal / cancel transition.  No-op
- *        for parent_id <= 0 (a rootless job has no conversation pill to update).
+ * @brief Read @p conv_id's job row and broadcast it (see webui_broadcast_job_update).
+ *
+ * Three call sites, one per lifecycle transition — enter (`job_tool.c`, BEFORE
+ * the worker is spawned so nothing can race the read), queued->running
+ * (`job_worker.c`), and leave (`job_manager_set_terminal()`, which is the choke
+ * point for all eight terminal dispositions).
+ *
+ * ORDERING: after the row is created, the owning worker is the only emitter, so
+ * frames for a given job are enqueued in DB order.  A new transition MUST emit
+ * from whichever thread owns the row at that moment — emitting from a second
+ * thread reintroduces the stale-read race documented at the spawn site.
  */
-void job_activity_emit(int user_id, int64_t parent_id);
+void job_update_emit(int64_t conv_id, int user_id);
 
 /**
  * @brief Record a job's terminal state AND emit its `complete` event (§6.2).

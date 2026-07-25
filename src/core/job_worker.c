@@ -69,6 +69,11 @@ static void job_worker_run(job_work_t *work) {
    }
 
    conv_db_job_set_running(work->conv_id, time(NULL));
+   /* queued -> running is a state change WITHIN the active set, so it changes no
+    * count — but without it a watcher's row reads 'queued' with started_at 0 for
+    * the job's whole runtime, and an elapsed timer computed off that renders
+    * 1970.  Single-owner: from here on the worker owns this row's transitions. */
+   job_update_emit(work->conv_id, work->user_id);
    OLOG_INFO("job_worker: running job conv %lld (session %u, user %d)", (long long)work->conv_id,
              s->session_id, work->user_id);
 
@@ -153,12 +158,8 @@ static void job_worker_run(job_work_t *work) {
    }
    free(response);
 
-   /* Refresh the parent conversation's "jobs running" pills (this job left the
-    * active set). */
-   job_record_t jr;
-   if (conv_db_job_get(work->conv_id, work->user_id, &jr) == AUTH_DB_SUCCESS) {
-      job_activity_emit(work->user_id, jr.parent_id);
-   }
+   /* This job left the active set; job_manager_set_terminal() already pushed the
+    * job_update that tells watchers so, on every disposition above. */
 
    /* Wake the completion monitor to fire the follow-up (a 'cancelled' row is
     * already marked fired, so the monitor skips it). */

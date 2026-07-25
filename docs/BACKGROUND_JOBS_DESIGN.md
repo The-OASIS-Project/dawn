@@ -279,12 +279,41 @@ One attach protocol, two renderers. All server→client frames go through the `s
    - **`status` is emitted for EVERY conversation, not just jobs** — `{state: generating|idle}` at turn start/end — so the sidebar chip and a TUI read one durable signal (not delta-timing).
    - **`complete` carries terminal disposition**: `{disposition: done|failed|interrupted|cancelled, error?, final_message_id}` so a tailer renders the ending from the stream alone.
 3. **`message_appended`** `{conversation_id, message_id, role, text}` — pushed when a turn's final assistant message persists, so a pure event-tailer receives the **answer body** (which lives in `messages`, not events). Both renderers append identically. *(Without this the Phase-2 TUI verification cannot pass — U-Crit.)*
-4. **`jobs_snapshot`** / **`job_update`** `{conv_id, parent_id, title, job_status, spawn_depth, started_at, last_event_seq}` — list-level state for badges/panels. Pushed/requested on `(re)connect` (mirrors `phone_status`).
+4. **`jobs_snapshot`** / **`job_update`** — list-level job state for badges/panels. **AS BUILT (2026-07-25) these are split by object LIFETIME, not by consumer** — see the amendment below.
+
+**The lifetime split (amends the original §6.4 sketch).** Jobs reach a client through three frames:
+
+| Frame | Carries | Bound |
+|---|---|---|
+| `jobs_snapshot` | the **complete ACTIVE set**, full rows, on `jobs_request` (connect/reconnect) | structurally bounded — see below |
+| `job_update` | **one job's row**, on every lifecycle transition | — |
+| `list_jobs_response` | one **keyset-paginated page of TERMINAL jobs** (history), on `list_jobs` | unbounded feed |
+
+Job object: `{conversation_id, parent_id, title, status, spawn_mode, on_complete, spawn_depth, reinvoke_count, created_at, started_at, finished_at, deliver_to?, error?}` (the last two omitted when empty).
+
+This **replaced** the Phase-1 pair `job_activity` / `jobs_activity_snapshot`, which pushed server-computed per-parent *counts* to drive the activity pills. Rationale, in the order it matters:
+
+1. **Counts are recoverable from rows; rows are not recoverable from counts.** Shipping both frame families meant computing one truth twice, on two queries and two push paths, free to disagree transiently — the panel saying "running" while the pill says 0. The client now derives pill counts by grouping the active set on `parent_id`.
+2. **Deriving counts is only sound because the active set is bounded.** `job_manager` gates every reservation on the global `max_active_jobs` (clamped ≤ 256) *before* the per-user cap, so a user's active jobs fit in one frame and `jobs_snapshot` is a complete SET. History has no such bound — which is exactly why it is a separate, paginated frame, and why **a page of `list_jobs_response` must never feed a count**. If the snapshot ceiling is ever hit the frame says `truncated: true` rather than silently under-reporting.
+3. **Set membership, not delta arithmetic.** The property the server-side counts were protecting (correct under reconnect / multi-tab / rapid switching) survives because the client upserts rows into a set keyed by conversation id and drops them when they arrive terminal. A duplicated, replayed or out-of-order `job_update` converges to the same answer.
+4. **Two emit sites, not three.** `job_update_emit()` is called from the spawn site (a job enters the active set) and from `job_manager_set_terminal()` (a job leaves it). Folding the exit into the terminal choke point means the boot interrupted-scan and the spawn-failure path emit too — both of which the old per-call-site emits missed.
+
+**Emit ordering — three sites, each owned by the thread that owns the row.** `job_update_emit()` fires at spawn (`job_tool.c`), at `queued→running` (`job_worker.c`), and at every terminal disposition (`job_manager_set_terminal()`). Two ordering rules make the frames converge, and both were found by review rather than by design:
+
+- The spawn emit runs **before** `job_worker_spawn()`. Emitting after it lets the spawning thread read a stale `queued` row and enqueue it *behind* the detached worker's terminal frame; a client then drops the terminal (for a job it has not seen) and inserts the stale active row, pinning a phantom job until reconnect. Emitting first means no worker exists to race. Any new transition must emit from whichever thread owns the row at that moment.
+- **Terminal is a sink, enforced client-side.** `jobs_snapshot` reads the active set and enqueues the frame as two steps; a job finishing in between enqueues its terminal frame first and the snapshot then resurrects it. Ordering cannot fix this from the server, so the client keeps a bounded FIFO of recently-terminal conversation ids and refuses to re-activate them (`jobs-activity.js`). This is the job-frame equivalent of what `seq` does for `conversation_events` — the job frames are a separate family and cannot borrow the event stream's cursor, because the pill is a cross-conversation aggregate while the event stream is per-attach.
+
+**Surface scope (deliberate).** The job list frames are browser-only: `is_satellite` connections are excluded from `jobs_snapshot`/`job_update`/`list_jobs_response`, unlike the CP1/CP2 event frames, which are not filtered. DAP2 satellites (Pi/ESP32) have no job UI and no use for the rows. This does **not** exclude the Phase-5 TUI, which authenticates as an ordinary WS client (`is_satellite` false) — `tests/tools/tail_conversation.py --jobs` is the proof, and it is the reference consumer for exactly this reason.
+
+**CP4 obligation (§8.7).** `title` is derived from an LLM-authored goal and is therefore prompt-injectable. The server UTF-8-sanitizes it but does **not** HTML-escape (correctly — that is the renderer's job), and there is no client render site today. The jobs panel **must** escape `title`, `error` and `deliver_to` through `DawnFormat.escapeHtml` (the `history.js` precedent); a template literal into `innerHTML` there is stored XSS reachable through prompt injection.
+
+Server code: `src/webui/webui_jobs.c` (frames) + `conv_db_job_list_active_by_user` / `conv_db_job_list_history_by_user` (readers, paired deliberately, sharing one `JOB_ACTIVE_STATUSES` predicate so the partition cannot drift — see the block comment in `auth_db_jobs.c`). Client store: `www/js/ui/jobs-activity.js`.
 
 **Client → server:**
 
 - **`attach_conversation {conv_id, last_seq}`** (extends the existing `load_conversation` handler): server **binds `conn->auth_user_id`, loads the conv ownership-checked** (`conv_db_get(conv_id, auth_user_id)`), then replies with (a) messages via `conv_db_get_messages`, (b) durable events where `seq > last_seq` **JOINed on `user_id`**, (c) in-memory ring replay of the current partial turn, then (d) live-tails. **Register-subscriber-before-replay** + seq-dedup + end-sentinel tail-flush (copied from `agent_runs.subscribe()`). Replay size capped / rate-limited (L1).
-- **`list_jobs`**, **`job_action {spawn|cancel|resume, conv_id, ...}`** — mirror `phone_action`'s shape **and** ownership-check `conv_id` against `auth_user_id` before acting (IDOR guard — §Security C3).
+- **`jobs_request {}`** → `jobs_snapshot`. **`list_jobs {before_created_at, before_id, limit}`** → `list_jobs_response` (cursor omitted/0 = first page; echo back the response's `next_before_*` for the next one).
+- **`job_action {spawn|cancel|resume, conv_id, ...}`** — mirror `phone_action`'s shape **and** ownership-check `conv_id` against `auth_user_id` before acting (IDOR guard — §Security C3). *(`spawn` deliberately dropped — creation is conversational, §7.)* **Not yet built** — the remainder of CP3.
 
 **Ordering unifier:** within a conversation, `messages.id` and `conversation_events.seq` interleave by insertion order; live deltas belong to the not-yet-persisted tail message. Renderer algorithm (identical both surfaces): render merged messages + events → append partial tail from ring replay → live-tail → append final text on `message_appended`.
 
@@ -373,11 +402,13 @@ Hazard map: **H1** → Phase 0 (live) + Phase 2 (durable). **H2/H3** → Phase 1
 - **Headless job workers:** the `job` tool is masked out of a `SESSION_TYPE_JOB` session's schema + a headless-agent directive rides its stable prefix, so a worker does its task **inline** and reports — instead of behaving like interactive Friday (deferring / recursively spawning more jobs). Hard backstop refuses `spawn` from a job context.
 - **Extraction exemption** landed at the `memory_recovery` scan (`AND job_status IS NULL`) — memory comes from the parent, not per-job research fragments.
 
-### Phase 2 — Durable event log + observe surface — ◑ IN PROGRESS (CP1 + CP2 shipped, uncommitted)
+### Phase 2 — Durable event log + observe surface — ◑ IN PROGRESS (CP1 + CP2 shipped; CP3 partial)
 
-**CP1 (event writers) and CP2 (attach/replay + line-printer gate) are BUILT and live-verified.**
-Plan: `~/.claude/plans/immutable-shimmying-lark.md`. Remaining: CP3 WS control surface, CP4 jobs
-panel, CP5 live-watch.
+**CP1 (event writers) and CP2 (attach/replay + line-printer gate) are SHIPPED and live-verified**
+(commit `2380b31`). **CP3's frame half — the lifetime split — is BUILT** (`jobs_snapshot` /
+`job_update` / `list_jobs_response`, replacing the Phase-1 count frames; see the §6.4 amendment).
+Plan: `~/.claude/plans/immutable-shimmying-lark.md`. Remaining: CP3's `job_action {cancel|resume}`
+and the resume re-dispatch, CP4 jobs panel, CP5 live-watch.
 
 **As-built — amendments to §6/§8 that this phase actually shipped:**
 
@@ -403,6 +434,12 @@ panel, CP5 live-watch.
   documents-retention precedent, this guards transient tool output, not authored content.
 - **§6.4 `job_action` will ship `{cancel|resume}`; `spawn` is deliberately dropped** (creation is
   conversational per §7).
+- **§6.4 job frames are split by object LIFETIME** — `jobs_snapshot` (complete active set) /
+  `job_update` (one row per transition) / `list_jobs_response` (paginated history), replacing the
+  Phase-1 `job_activity` / `jobs_activity_snapshot` count frames. Full rationale in §6; the load-bearing
+  half is that the *active* set is structurally bounded and so may be counted, while *history* is not
+  and must never be. Also folds two of the three old emit sites into `job_manager_set_terminal()`,
+  which is what makes the boot interrupted-scan and spawn-failure paths emit at all.
 - **§6 accepted deviation:** deltas carry no byte offsets, so a delta enqueued between the attach's
   partial-dup and its snapshot can be lost. Self-healing — `message_appended` delivers the complete
   final text — so offsets were not built. Recorded rather than fixed.
@@ -437,7 +474,7 @@ run or ASan.
 
 ### Phase 2 — Durable event log + observe surface (ships the contract) — ○ AHEAD (mandatory; the whole *observe* half)
 `agent ~3-4d · api $0 · 5 ckpt` — **nothing here is built yet** beyond the activity pill; the `conversation_events` table sits empty.
-- `conversation_events` **writers + seq**; **ownership-JOINed** reads (**§8.3**); secret redaction (**§8.6**) + render sanitization (**§8.7**) + retention/pruning (**§8.8**); full `attach_conversation {last_seq}` replay; **WS `list_jobs` / `job_action {spawn|cancel|resume}`** handlers (ownership-checked); **always-visible `.agent-event.*` rendering** (not debug-gated) distinguishing tool_call/tool_result/terminal/spawn/complete; **jobs panel as an indented tree** (by `spawn_depth`) with status/elapsed/cancel + a **global "agents: N running" count badge**; **live-watch = phone-panel twin** (server-authoritative anchor-elapsed, minimize-to-pill, reconnect rehydrate via `jobs_snapshot`, sr-only polite milestone announcer, `DawnEscStack`); toast target branches `notify`→job vs `reinvoke_parent`→parent. *(Shipped so far: only the amber activity **pill** — `jobs-activity.js` + a `jobs_activity_snapshot` frame. The panel/tree/live-watch and the whole durable-event contract are this phase.)*
+- `conversation_events` **writers + seq**; **ownership-JOINed** reads (**§8.3**); secret redaction (**§8.6**) + render sanitization (**§8.7**) + retention/pruning (**§8.8**); full `attach_conversation {last_seq}` replay; **WS `list_jobs` / `job_action {cancel|resume}`** handlers (ownership-checked); **always-visible `.agent-event.*` rendering** (not debug-gated) distinguishing tool_call/tool_result/terminal/spawn/complete; **jobs panel as an indented tree** (by `spawn_depth`) with status/elapsed/cancel + a **global "agents: N running" count badge**; **live-watch = phone-panel twin** (server-authoritative anchor-elapsed, minimize-to-pill, reconnect rehydrate via `jobs_snapshot`, sr-only polite milestone announcer, `DawnEscStack`); toast target branches `notify`→job vs `reinvoke_parent`→parent. *(Status: CP1 event log + CP2 attach/replay + CP3's lifetime-split job frames are shipped; `job_action`/resume, the panel/tree and live-watch remain — see §10 Phase 2 and the §14 ledger.)*
 - **Verify:** a **~100-line Python line-printer** speaking the handshake tails a live job from another machine and shows tool steps + the final answer (`message_appended`) + disposition — the TUI de-risk; panel survives reconnect with correct replay.
 
 ### Phase 3 — reinvoke_parent + trees (ships **P3**) — ◑ PARTIAL
@@ -606,12 +643,26 @@ by architecture/security/embedded passes, then a **6-agent full pre-commit revie
 
 ### Designed-but-not-yet-shipped ledger (the single checklist so no scope is lost)
 
-- **Phase 2 — the entire *observe* half.** `conversation_events` table exists but **has zero writers/reads**: no event
-  emission (`status`/`tool_call`/`tool_result`/`spawn`/`complete`), no `attach_conversation {last_seq}` replay, no WS
-  `list_jobs`/`job_action` handlers, no jobs tree panel / global count badge / live-watch panel, no secret redaction
-  (§8.6) / render sanitization (§8.7) / retention (§8.8), no TUI line-printer. *Shipped from the observe side (`f42fce1`):
-  the global/composer activity pill, the sidebar per-conversation running-jobs pill + done/unread dot, and active-view
-  `metrics_update` gating — the ambient indicators, not the panel/tree/live-watch.*
+- **Phase 2 — the *observe* half, now partly shipped.**
+  - ✅ **CP1 + CP2** (`2380b31`): `conversation_events` writers + per-conversation seq, all five event kinds
+    (`status`/`tool_call`/`tool_result`/`spawn`/`complete`), ownership-JOINed reads (§8.3), secret redaction (§8.6),
+    kind-aware retention (§8.8), `attach_conversation {last_seq}` replay, `message_appended`, and the
+    `tests/tools/tail_conversation.py` line-printer (contract gate, passed on real data).
+  - ✅ **CP3 frame half** — the lifetime split: `jobs_snapshot` / `job_update` / `list_jobs_response` replacing the
+    Phase-1 count frames (§6.4 amendment).
+  - ✅ **Live-verified 2026-07-25** on a real 4-job fan-out: 12 `job_update` emissions (4 jobs ×
+    `queued`→`running`→`done`, in order), pills tracking live, snapshot rehydrating on reconnect, and
+    `tail_conversation.py --jobs` walking 24/25 history pages with no repeats, no stalled cursor, and no
+    active/history overlap — run twice across a transition (4+47 → 1+50) so the partition was checked *while rows
+    moved sides*. The **live event tail is confirmed too**: `conversation_event`/`message_appended` do arrive
+    mid-run, which was the outstanding CP1/CP2 unknown.
+  - ○ **Remaining**: `job_action {cancel|resume}` + resume re-dispatch (CP3), the jobs tree panel + global count badge
+    + always-visible `.agent-event.*` rendering with §8.7 sanitization (CP4), the live-watch panel (CP5). Note the
+    browser still sends `load_conversation`, **not** `attach_conversation`, so it never receives the
+    `conversation_events` replay batch — wiring that over is CP4's job, and until then the browser sees only the
+    live half of the event stream.
+  - *Earlier ambient indicators (`f42fce1`): the global/composer activity pill, the sidebar per-conversation running-jobs
+    pill + done/unread dot, and active-view `metrics_update` gating.*
 - **Queued state (Phase-1 simplification).** A queued row is *inserted* as `job_status='queued'` and cancel handles that
   status, but nothing ever waits in it: no monitor promotion, no `max_queued_per_user` enforcement — spawns fail fast past
   the running cap.

@@ -120,6 +120,24 @@ everything; on reconnect pass the highest `seq` already seen to receive only the
 { "type": "attach_conversation", "payload": { "conversation_id": 1006, "last_seq": 0 } }
 ```
 
+#### `jobs_request`
+Ask for the caller's complete **active** job set. Sent on connect/reconnect.
+Response: `jobs_snapshot`.
+```json
+{ "type": "jobs_request" }
+```
+
+#### `list_jobs`
+Ask for a page of the caller's **terminal** jobs (history). Omit the cursor for the
+first page, then echo back the previous response's `next_before_*`. `limit` is
+clamped server-side (default 25, max 50). Response: `list_jobs_response`.
+```json
+{
+   "type": "list_jobs",
+   "payload": { "before_created_at": 1784949100, "before_id": 998, "limit": 25 }
+}
+```
+
 ### Configuration (Admin Only)
 
 #### `get_config`
@@ -930,6 +948,63 @@ would watch a job run and never learn its answer.
 The answer reaches a client by **either** route: this frame (turn completes while
 attached) or the message batch on attach (already-finished job). `complete` carries
 `final_message_id` to correlate the two.
+
+### Background-Job List Frames (Phase 2)
+
+Job state reaches a client through three frames **split by object lifetime**. The
+split is load-bearing, not cosmetic: a user's **active** jobs are structurally
+bounded (`max_active_jobs` clamps to 256 and gates every reservation), so the
+active set arrives whole and may be counted; **history** is unbounded, so it is
+paginated and a page of it must never be counted.
+
+All three carry the same job object:
+```json
+{
+   "conversation_id": 1006, "parent_id": 990, "title": "research X",
+   "status": "running", "spawn_mode": "detached", "on_complete": "notify",
+   "spawn_depth": 1, "reinvoke_count": 0,
+   "created_at": 1784949199, "started_at": 1784949200, "finished_at": 0,
+   "deliver_to": "telegram-main", "error": "..."
+}
+```
+`deliver_to` and `error` are **omitted when empty**. `status` ∈ `queued` |
+`running` | `done` | `failed` | `interrupted` | `cancelled`; the first two are the
+active states — treat anything else as terminal so an unrecognized future status
+cannot pin a row in a client's active set forever.
+
+#### `jobs_snapshot` — the complete active set
+Reply to `jobs_request`; sent on (re)connect. Replaces the client's whole active
+set. `truncated: true` means the server hit its row ceiling and any count derived
+from this set is a **lower bound** — it should not happen under any valid config.
+```json
+{ "type": "jobs_snapshot", "payload": { "jobs": [ /* … */ ], "truncated": false } }
+```
+
+#### `job_update` — one job's lifecycle transition
+Pushed when a job enters the active set (spawn) or leaves it (any terminal
+disposition, including the boot interrupted-scan). Clients **upsert by
+`conversation_id` and drop on terminal status** — set membership, never +/-1
+arithmetic, so duplicate or out-of-order frames converge.
+```json
+{ "type": "job_update", "payload": { "job": { /* … */ } } }
+```
+
+#### `list_jobs_response` — a page of terminal jobs
+Reply to `list_jobs`. Keyset-paginated on `(created_at, id)` descending: echo
+`next_before_created_at`/`next_before_id` back as the next request's cursor. The
+id tiebreak matters — several jobs finishing within the same second is the common
+case. `next_before_*` are omitted on an empty page.
+```json
+{
+   "type": "list_jobs_response",
+   "payload": {
+      "jobs": [ /* … */ ],
+      "has_more": true,
+      "next_before_created_at": 1784949100,
+      "next_before_id": 998
+   }
+}
+```
 
 ### Session & State
 

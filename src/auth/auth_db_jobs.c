@@ -36,6 +36,7 @@
  */
 
 #define AUTH_DB_INTERNAL_ALLOWED
+#include <stdint.h> /* INT64_MAX */
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -584,66 +585,106 @@ int conv_db_job_fire_boot_reinvokes(int *count_out) {
    return AUTH_DB_SUCCESS;
 }
 
-int conv_db_job_active_count_for_parent(int64_t parent_id, int *count_out) {
-   if (!count_out) {
-      return AUTH_DB_INVALID;
-   }
-   *count_out = 0;
-   if (parent_id <= 0) {
-      return AUTH_DB_SUCCESS;
-   }
-   AUTH_DB_LOCK_OR_FAIL();
-   sqlite3_stmt *st = NULL;
-   if (sqlite3_prepare_v2(s_db.db,
-                          "SELECT COUNT(*) FROM conversations "
-                          "WHERE parent_id=? AND job_status IN ('queued','running')",
-                          -1, &st, NULL) != SQLITE_OK) {
-      AUTH_DB_UNLOCK();
-      return AUTH_DB_FAILURE;
-   }
-   sqlite3_bind_int64(st, 1, parent_id);
-   if (sqlite3_step(st) == SQLITE_ROW) {
-      *count_out = sqlite3_column_int(st, 0);
-   }
-   sqlite3_finalize(st);
-   AUTH_DB_UNLOCK();
-   return AUTH_DB_SUCCESS;
+/* =============================================================================
+ * The lifetime split: ACTIVE is a bounded set, HISTORY is an unbounded feed
+ *
+ * These two readers exist as a pair, and the difference between them is the
+ * whole reason the WebUI's job frames are shaped the way they are (§6.4).
+ *
+ * A user's ACTIVE jobs are structurally bounded: job_manager gates every
+ * reservation on the global `max_active_jobs` (clamped to <= 256) before the
+ * per-user cap, so `_list_active_by_user` can never truncate in practice and its
+ * result is a complete SET.  That is what makes it safe to derive the "N jobs
+ * running" pill counts from these rows client-side — the property the counts
+ * used to be computed server-side to guarantee.
+ *
+ * HISTORY grows without bound, so `_list_history_by_user` is keyset-paginated
+ * and must never feed a count.  Deriving a total from a LIMITed page would
+ * silently under-report, which is exactly the bug the split prevents.
+ * ============================================================================= */
+
+/* The active/terminal boundary, defined ONCE.  The two readers below are exact
+ * complements of each other — one uses this predicate, the other negates it —
+ * and the partition being exact is what the WebUI frames rely on: a status
+ * listed in one but not the other puts a job in both lists or in neither, which
+ * surfaces as a wrong count rather than as an obvious failure.  A new
+ * non-terminal status (e.g. a paused state) is a one-line change here.
+ * NOTE: www/js/ui/jobs-activity.js mirrors this — keep isActive() in sync. */
+#define JOB_ACTIVE_STATUSES "('queued','running')"
+
+struct job_user_limit_bind {
+   int user_id;
+   int limit;
+};
+
+static void bind_user_limit(sqlite3_stmt *st, void *ctx) {
+   struct job_user_limit_bind *b = ctx;
+   sqlite3_bind_int(st, 1, b->user_id);
+   sqlite3_bind_int(st, 2, b->limit);
 }
 
-int conv_db_job_active_counts_by_user(int user_id,
-                                      job_parent_count_t *out,
-                                      int max,
-                                      int *count_out) {
-   if (!count_out) {
-      return AUTH_DB_INVALID;
-   }
-   *count_out = 0;
-   if (user_id <= 0 || !out || max <= 0) {
+int conv_db_job_list_active_by_user(int user_id, job_record_t *out, int max, int *count_out) {
+   if (user_id <= 0 || !out || max <= 0 || !count_out) {
       return AUTH_DB_INVALID;
    }
    AUTH_DB_LOCK_OR_FAIL();
-   sqlite3_stmt *st = NULL;
-   if (sqlite3_prepare_v2(s_db.db,
-                          "SELECT parent_id, COUNT(*) FROM conversations "
-                          "WHERE user_id=? AND parent_id IS NOT NULL "
-                          "AND job_status IN ('queued','running') "
-                          "GROUP BY parent_id LIMIT ?",
-                          -1, &st, NULL) != SQLITE_OK) {
-      AUTH_DB_UNLOCK();
-      return AUTH_DB_FAILURE;
-   }
-   sqlite3_bind_int(st, 1, user_id);
-   sqlite3_bind_int(st, 2, max);
-   int n = 0;
-   while (n < max && sqlite3_step(st) == SQLITE_ROW) {
-      out[n].parent_id = sqlite3_column_int64(st, 0);
-      out[n].count = sqlite3_column_int(st, 1);
-      n++;
-   }
-   sqlite3_finalize(st);
+   struct job_user_limit_bind b = { .user_id = user_id, .limit = max };
+   /* Oldest-first: the set is unordered as far as correctness goes, but a
+    * longest-running-at-top list is what a watcher expects to read. */
+   int rc = job_select_into("SELECT " JOB_SELECT_COLS " FROM conversations "
+                            "WHERE user_id=? AND job_status IN " JOB_ACTIVE_STATUSES " "
+                            "ORDER BY created_at ASC, id ASC LIMIT ?",
+                            bind_user_limit, &b, out, max, count_out);
    AUTH_DB_UNLOCK();
-   *count_out = n;
-   return AUTH_DB_SUCCESS;
+   return rc;
+}
+
+struct job_history_bind {
+   int user_id;
+   int64_t before_created_at;
+   int64_t before_id;
+   int limit;
+};
+
+static void bind_history(sqlite3_stmt *st, void *ctx) {
+   struct job_history_bind *b = ctx;
+   sqlite3_bind_int(st, 1, b->user_id);
+   sqlite3_bind_int64(st, 2, b->before_created_at);
+   sqlite3_bind_int64(st, 3, b->before_id);
+   sqlite3_bind_int(st, 4, b->limit);
+}
+
+int conv_db_job_list_history_by_user(int user_id,
+                                     int64_t before_created_at,
+                                     int64_t before_id,
+                                     job_record_t *out,
+                                     int max,
+                                     int *count_out) {
+   if (user_id <= 0 || !out || max <= 0 || !count_out) {
+      return AUTH_DB_INVALID;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   /* A first page (cursor 0) starts past the newest possible row rather than
+    * needing a second SQL variant. */
+   struct job_history_bind b = {
+      .user_id = user_id,
+      .before_created_at = before_created_at > 0 ? before_created_at : INT64_MAX,
+      .before_id = before_created_at > 0 ? before_id : INT64_MAX,
+      .limit = max,
+   };
+   /* Keyset on (created_at, id), not OFFSET: a job reaching a terminal state
+    * between two pages would otherwise shift every later row and duplicate or
+    * skip one.  The id tiebreak makes the order total — several jobs finishing
+    * inside the same second is the common case, not the rare one.  Numbered
+    * placeholders because the cursor timestamp appears twice. */
+   int rc = job_select_into("SELECT " JOB_SELECT_COLS " FROM conversations "
+                            "WHERE user_id=?1 AND job_status IS NOT NULL "
+                            "AND job_status NOT IN " JOB_ACTIVE_STATUSES " "
+                            "AND (created_at < ?2 OR (created_at = ?2 AND id < ?3)) "
+                            "ORDER BY created_at DESC, id DESC LIMIT ?4",
+                            bind_history, &b, out, max, count_out);
+   AUTH_DB_UNLOCK();
+   return rc;
 }
 
 int conv_db_job_last_assistant_text(int64_t conv_id, int user_id, char **out) {

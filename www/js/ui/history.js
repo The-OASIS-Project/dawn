@@ -326,8 +326,8 @@
       }
    }
 
-   /* Reconcile every rendered row's badge (after a jobs_activity_snapshot replaces
-    * the whole map — covers convs that dropped to 0 too). */
+   /* Reconcile every rendered row's badge (after a jobs_snapshot replaces the
+    * whole active set — covers convs that dropped to 0 too). */
    function refreshAllJobsBadges() {
       historyElements.list
          ?.querySelectorAll('.history-item[data-conv-id]')

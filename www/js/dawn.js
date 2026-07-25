@@ -495,6 +495,29 @@
                // Server replay of an in-flight turn when switching to its conversation
                DawnStreaming.handleResume(msg.payload);
                break;
+            // --- Phase-2 observe stream (durable steps + persisted answers) -----
+            // The browser does NOT need these to render a turn: it has its own
+            // live path (stream_start/delta/end) and loads history over
+            // load_conversation. They exist for consumers that have neither — the
+            // Phase-5 TUI tails them, and CP4's jobs panel will render them as
+            // .agent-event rows. Claimed here rather than left to fall through,
+            // because a long-running job emits dozens per turn and an unhandled
+            // frame logs a line each time, burying everything else in the console.
+            case 'conversation_event':
+               if (typeof DawnJobs !== 'undefined' && DawnJobs.handleConversationEvent) {
+                  DawnJobs.handleConversationEvent(msg.payload);
+               }
+               break;
+            case 'conversation_events':
+               // Durable replay batch, sent in response to attach_conversation.
+               if (typeof DawnJobs !== 'undefined' && DawnJobs.handleConversationEvents) {
+                  DawnJobs.handleConversationEvents(msg.payload);
+               }
+               break;
+            case 'message_appended':
+               // Final assistant text for an event-only consumer. The browser
+               // already has it from the stream, so this is a no-op here.
+               break;
             case 'thinking_start':
                DawnStreaming.handleThinkingStart(msg.payload);
                break;
@@ -976,16 +999,22 @@
                }
                break;
             }
-            case 'job_activity':
-               // A parent conversation's active-job count changed → update pills.
+            case 'job_update':
+               // One job's lifecycle transition → upsert into the active set.
                if (typeof DawnJobsActivity !== 'undefined' && msg.payload) {
-                  DawnJobsActivity.setActive(msg.payload.conversation_id, msg.payload.active_count);
+                  DawnJobsActivity.upsertJob(msg.payload.job);
                }
                break;
-            case 'jobs_activity_snapshot':
-               // Connect/reconnect rehydration of the full per-parent count map.
+            case 'jobs_snapshot':
+               // Connect/reconnect rehydration of the complete active set.
                if (typeof DawnJobsActivity !== 'undefined' && msg.payload) {
-                  DawnJobsActivity.applySnapshot(msg.payload.counts);
+                  DawnJobsActivity.applySnapshot(msg.payload.jobs, msg.payload.truncated);
+               }
+               break;
+            case 'list_jobs_response':
+               // A page of terminal jobs — the jobs panel's history feed (CP4).
+               if (typeof DawnJobs !== 'undefined' && DawnJobs.handleHistoryPage) {
+                  DawnJobs.handleHistoryPage(msg.payload);
                }
                break;
             case 'phone_call_notification':

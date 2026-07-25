@@ -1,26 +1,81 @@
 /*
- * Background-jobs activity pills.
+ * Background-jobs ACTIVE SET — the client's store of running jobs, plus the two
+ * activity pills that project from it.
  *
- * Two display-only indicators driven by a single authoritative client-side map
- * (conversation_id -> active job count), fed by the server:
- *   - a PER-CONVERSATION pill next to the state ("thinking") pill, showing the
- *     count of active background jobs whose parent is the CURRENTLY VIEWED
- *     conversation;
- *   - a GLOBAL pill in the header, showing the total across all conversations.
+ * The store is a set of job rows keyed by conversation id, fed by two frames:
+ *   jobs_snapshot  the complete active set, on (re)connect
+ *   job_update     one row per lifecycle transition (upsert; drop when terminal)
  *
- * Both pills are pure functions of (map, activeConversationId), so switching
- * conversations is a re-render — never a stateful reset — which avoids the
- * per-conversation state-leak class of bug. Counts are the server's
- * authoritative values (not client +1/-1 deltas), so reconnect / multi-tab /
- * rapid switching all stay correct. A `jobs_activity_request` on (re)connect
- * rehydrates the whole map.
+ * Counts are DERIVED here by grouping the set on parent_id — the server no
+ * longer sends counts at all. The property that used to be guaranteed by
+ * server-side counting is preserved by using set membership rather than +/-1
+ * arithmetic: a duplicate, out-of-order or replayed job_update converges to the
+ * same answer, so reconnect / multi-tab / rapid switching all stay correct.
+ * Deriving is sound because the active set is structurally bounded and arrives
+ * whole (see src/webui/webui_jobs.c); job HISTORY is paginated and deliberately
+ * never reaches this store.
+ *
+ * The two pills it renders:
+ *   - a PER-CONVERSATION pill next to the state ("thinking") pill, counting
+ *     active jobs whose parent is the CURRENTLY VIEWED conversation;
+ *   - a GLOBAL pill in the header, counting all of them.
+ * Both are pure functions of (set, activeConversationId), so switching
+ * conversations is a re-render, never a stateful reset.
  */
 
 window.DawnJobsActivity = (function () {
    'use strict';
 
-   // conversation_id (as string key) -> active job count (> 0 only)
+   // conversation_id (as string key) -> job row, for ACTIVE jobs only.
+   var jobs = Object.create(null);
+
+   // Derived: parent conversation_id (as string key) -> active job count (> 0).
    var byParent = Object.create(null);
+
+   // A job leaves the active set the moment it reports a terminal status. The
+   // server only sends these two as live states, so anything else is terminal —
+   // which keeps an unrecognized future status from pinning a row forever.
+   function isActive(status) {
+      return status === 'running' || status === 'queued';
+   }
+
+   // Terminal is a SINK: a job that has finished never becomes active again.
+   //
+   // Enforcing that client-side closes a window the server cannot close by
+   // ordering alone. jobs_snapshot reads the active set and enqueues the frame
+   // as two separate steps; a job finishing in between enqueues its terminal
+   // job_update FIRST, which is dropped here as "never tracked", and then the
+   // snapshot re-inserts the row it read a moment earlier — pinning a finished
+   // job in the set until the next reconnect. Remembering the recent terminals
+   // makes the resurrection impossible regardless of frame order.
+   //
+   // Bounded FIFO: the race window is milliseconds, so a short memory is ample,
+   // and a cap means a long-lived tab cannot accumulate ids forever.
+   var TERMINAL_MEMORY_MAX = 128;
+   var terminalSeen = Object.create(null);
+   var terminalOrder = [];
+
+   function markTerminal(key) {
+      if (terminalSeen[key]) {
+         return;
+      }
+      terminalSeen[key] = true;
+      terminalOrder.push(key);
+      if (terminalOrder.length > TERMINAL_MEMORY_MAX) {
+         delete terminalSeen[terminalOrder.shift()];
+      }
+   }
+
+   function recount() {
+      byParent = Object.create(null);
+      for (var id in jobs) {
+         var p = jobs[id].parent_id;
+         if (p) {
+            var key = String(p);
+            byParent[key] = (byParent[key] || 0) + 1;
+         }
+      }
+   }
 
    // Resolver for the currently-viewed conversation id (wired in init()).
    var activeConvIdFn = function () {
@@ -94,48 +149,83 @@ window.DawnJobsActivity = (function () {
 
    // --- server-driven updates ------------------------------------------------
 
-   // job_activity: one parent's authoritative active count.
-   function setActive(convId, count) {
-      if (convId == null) {
+   // job_update: one job's current row. Upsert while active, drop when terminal.
+   function upsertJob(job) {
+      if (!job || job.conversation_id == null) {
          return;
       }
-      var key = String(convId);
-      var c = Number(count); // defend total() against a stringy/non-finite count
-      if (Number.isFinite(c) && c > 0) {
-         byParent[key] = c;
+      var key = String(job.conversation_id);
+      if (!isActive(job.status)) {
+         markTerminal(key);
+         if (!(key in jobs)) {
+            return; // terminal row for a job we never tracked — nothing changed
+         }
+         delete jobs[key];
+      } else if (terminalSeen[key]) {
+         return; // stale active row for a job already known finished
       } else {
-         delete byParent[key];
+         jobs[key] = job;
       }
+      recount();
       renderAll();
-      // Patch just this conversation's sidebar badge (no full list re-render).
-      if (typeof DawnHistory !== 'undefined' && DawnHistory.updateConversationJobsBadge) {
-         DawnHistory.updateConversationJobsBadge(key);
+      // Patch just the affected conversation's sidebar badge (no list re-render).
+      // A job's parent never changes, so the row carries the right parent whether
+      // it just joined the set or just left it. A rootless job (parent_id 0) has
+      // no conversation badge to patch.
+      if (
+         job.parent_id &&
+         typeof DawnHistory !== 'undefined' &&
+         DawnHistory.updateConversationJobsBadge
+      ) {
+         DawnHistory.updateConversationJobsBadge(String(job.parent_id));
       }
    }
 
-   // jobs_activity_snapshot: replace the whole map (connect/reconnect).
-   function applySnapshot(list) {
-      byParent = Object.create(null);
+   // jobs_snapshot: replace the whole active set (connect/reconnect).
+   function applySnapshot(list, truncated) {
+      // The server could not fit the whole active set in one frame, so every
+      // count derived below is a lower bound. Shouldn't happen under any valid
+      // config; say so rather than render a wrong number as if it were right.
+      if (truncated) {
+         console.warn('DawnJobsActivity: active-job snapshot truncated — counts are lower bounds');
+      }
+      jobs = Object.create(null);
       if (Array.isArray(list)) {
-         list.forEach(function (e) {
-            var c = e ? Number(e.active_count) : NaN;
-            if (e && e.conversation_id != null && Number.isFinite(c) && c > 0) {
-               byParent[String(e.conversation_id)] = c;
+         list.forEach(function (job) {
+            if (!job || job.conversation_id == null || !isActive(job.status)) {
+               return;
             }
+            var key = String(job.conversation_id);
+            if (terminalSeen[key]) {
+               return; // finished between the server's read and this frame
+            }
+            jobs[key] = job;
          });
       }
+      recount();
       renderAll();
-      // Snapshot replaced the whole map — reconcile every rendered sidebar row.
+      // The whole set was replaced — reconcile every rendered sidebar row so
+      // conversations that dropped to zero lose their badge too.
       if (typeof DawnHistory !== 'undefined' && DawnHistory.refreshAllJobsBadges) {
          DawnHistory.refreshAllJobsBadges();
       }
+   }
+
+   // Every active job row, for surfaces that need more than a count (the jobs
+   // panel). The ARRAY is a copy, but the rows are the store's own objects —
+   // treat them as read-only. Mutating a row would silently desync the derived
+   // counts from what the panel renders.
+   function getActive() {
+      return Object.keys(jobs).map(function (k) {
+         return jobs[k];
+      });
    }
 
    // --- lifecycle hooks ------------------------------------------------------
 
    function handleReconnect() {
       if (typeof DawnWS !== 'undefined') {
-         DawnWS.send({ type: 'jobs_activity_request' });
+         DawnWS.send({ type: 'jobs_request' });
       }
    }
 
@@ -154,10 +244,11 @@ window.DawnJobsActivity = (function () {
 
    return {
       init: init,
-      setActive: setActive,
+      upsertJob: upsertJob,
       applySnapshot: applySnapshot,
       handleReconnect: handleReconnect,
       onConversationSwitch: onConversationSwitch,
       getCount: getCount,
+      getActive: getActive,
    };
 })();

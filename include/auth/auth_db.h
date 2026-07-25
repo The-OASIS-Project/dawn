@@ -1362,27 +1362,34 @@ int conv_db_job_bump_reinvoke(int64_t conv_id, int *new_count_out);
  */
 int conv_db_job_fire_boot_reinvokes(int *count_out);
 
-/** A parent conversation and its count of active (queued/running) child jobs. */
-typedef struct {
-   int64_t parent_id;
-   int count;
-} job_parent_count_t;
+/**
+ * @brief Ownership-scoped: a user's ACTIVE (queued/running) jobs, oldest first.
+ *
+ * A complete SET, not a page.  job_manager gates every reservation on the global
+ * `max_active_jobs` (clamped <= 256) before the per-user cap, so this result is
+ * structurally bounded and cannot truncate in practice — which is what makes it
+ * safe to derive per-parent "jobs running" counts from these rows.  Pair with
+ * conv_db_job_list_history_by_user(); see the block comment in auth_db_jobs.c.
+ *
+ * @return AUTH_DB_SUCCESS, AUTH_DB_INVALID, or AUTH_DB_FAILURE.
+ */
+int conv_db_job_list_active_by_user(int user_id, job_record_t *out, int max, int *count_out);
 
 /**
- * @brief Count active (queued/running) jobs whose parent is @p parent_id.
- * @return AUTH_DB_SUCCESS (0 for parent_id <= 0), AUTH_DB_INVALID, or AUTH_DB_FAILURE.
+ * @brief Ownership-scoped: a user's TERMINAL jobs, newest first, keyset-paginated.
+ *
+ * Unbounded feed — never derive a count or a "how many are running" answer from
+ * a page of this.  Pass @p before_created_at == 0 for the first page; afterwards
+ * pass the (created_at, id) of the last row received to get the next page.
+ *
+ * @return AUTH_DB_SUCCESS, AUTH_DB_INVALID, or AUTH_DB_FAILURE.
  */
-int conv_db_job_active_count_for_parent(int64_t parent_id, int *count_out);
-
-/**
- * @brief Per-parent active-job counts for a user (connect snapshot), grouped by
- *        parent_id.  Copies up to @p max {parent_id,count} pairs into @p out.
- * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
- */
-int conv_db_job_active_counts_by_user(int user_id,
-                                      job_parent_count_t *out,
-                                      int max,
-                                      int *count_out);
+int conv_db_job_list_history_by_user(int user_id,
+                                     int64_t before_created_at,
+                                     int64_t before_id,
+                                     job_record_t *out,
+                                     int max,
+                                     int *count_out);
 
 /**
  * @brief Ownership-scoped: copy a job's last assistant message text (its result).

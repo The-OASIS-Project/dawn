@@ -109,14 +109,11 @@ __attribute__((weak)) void webui_broadcast_job_notification(int user_id,
    (void)running_count;
 }
 
-/* Per-parent active-job count push — weak default is a no-op; webui_broadcasts.c
- * provides the strong override (drives the "jobs running" pills). */
-__attribute__((weak)) void webui_broadcast_job_activity(int user_id,
-                                                        int64_t parent_id,
-                                                        int active_count) {
+/* Single-job lifecycle push — weak default is a no-op; webui_jobs.c provides the
+ * strong override (feeds the client's active-job set, and through it the pills). */
+__attribute__((weak)) void webui_broadcast_job_update(int user_id, const job_record_t *rec) {
    (void)user_id;
-   (void)parent_id;
-   (void)active_count;
+   (void)rec;
 }
 
 int job_manager_set_terminal(int64_t conv_id,
@@ -131,16 +128,20 @@ int job_manager_set_terminal(int64_t conv_id,
     * record.  The event carries the disposition either way. */
    conv_event_emit(conv_id, user_id, CONV_EVENT_COMPLETE,
                    event_payload_complete(status, error_or_null, final_message_id));
+   /* Every terminal disposition funnels through here, so this one call retires
+    * the job from every client's active set — including the boot interrupted-scan
+    * and the spawn-failure path, which the old per-call-site emits missed. */
+   job_update_emit(conv_id, user_id);
    return rc;
 }
 
-void job_activity_emit(int user_id, int64_t parent_id) {
-   if (user_id <= 0 || parent_id <= 0) {
+void job_update_emit(int64_t conv_id, int user_id) {
+   if (conv_id <= 0 || user_id <= 0) {
       return;
    }
-   int count = 0;
-   if (conv_db_job_active_count_for_parent(parent_id, &count) == AUTH_DB_SUCCESS) {
-      webui_broadcast_job_activity(user_id, parent_id, count);
+   job_record_t rec;
+   if (conv_db_job_get(conv_id, user_id, &rec) == AUTH_DB_SUCCESS) {
+      webui_broadcast_job_update(user_id, &rec);
    }
 }
 

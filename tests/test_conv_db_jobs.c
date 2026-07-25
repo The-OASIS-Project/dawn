@@ -134,6 +134,100 @@ static void test_active_scan(void) {
    TEST_ASSERT_EQUAL_INT(2, n); /* queued + running, not done */
 }
 
+/* ── the lifetime split: active is a SET, history is a PAGE ───────────────────
+ *
+ * These two readers partition a user's jobs by lifecycle state, and the WebUI
+ * frames depend on that partition being exact: the client derives its "N jobs
+ * running" counts from the active set, so a row appearing in both lists (or in
+ * neither) shows up as a wrong count rather than as an obvious failure. */
+
+static void test_active_and_history_partition(void) {
+   int64_t q = 0, r = 0, d = 0, f = 0;
+   conv_db_create_job(alice_id, "queued", 0, "detached", "notify", NULL, 1, &q);
+   conv_db_create_job(alice_id, "running", 0, "detached", "notify", NULL, 1, &r);
+   conv_db_create_job(alice_id, "done", 0, "detached", "notify", NULL, 1, &d);
+   conv_db_create_job(alice_id, "failed", 0, "detached", "notify", NULL, 1, &f);
+   conv_db_job_set_running(r, 100);
+   conv_db_job_set_terminal(d, "done", NULL, 200);
+   conv_db_job_set_terminal(f, "failed", "boom", 200);
+
+   job_record_t out[8];
+   int n = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_list_active_by_user(alice_id, out, 8, &n));
+   TEST_ASSERT_EQUAL_INT(2, n); /* queued + running */
+
+   int m = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_job_list_history_by_user(alice_id, 0, 0, out, 8, &m));
+   TEST_ASSERT_EQUAL_INT(2, m); /* done + failed */
+
+   /* Every job lands in exactly one list. */
+   TEST_ASSERT_EQUAL_INT(4, n + m);
+
+   /* Ownership: bob sees neither list. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_list_active_by_user(bob_id, out, 8, &n));
+   TEST_ASSERT_EQUAL_INT(0, n);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_job_list_history_by_user(bob_id, 0, 0, out, 8, &m));
+   TEST_ASSERT_EQUAL_INT(0, m);
+}
+
+/* A non-job conversation is in neither list — job_status IS NULL for ~every row
+ * in the table, so a missing predicate would flood both. */
+static void test_active_and_history_ignore_plain_conversations(void) {
+   int64_t chat = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "just a chat", &chat));
+
+   job_record_t out[8];
+   int n = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_list_active_by_user(alice_id, out, 8, &n));
+   TEST_ASSERT_EQUAL_INT(0, n);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_job_list_history_by_user(alice_id, 0, 0, out, 8, &n));
+   TEST_ASSERT_EQUAL_INT(0, n);
+}
+
+/* Keyset pagination walks the whole history exactly once.  Every job here is
+ * created in the same second, so this pins the (created_at, id) tiebreak: with
+ * created_at alone the cursor would either loop forever or skip the ties. */
+static void test_history_pagination_no_gaps_or_dupes(void) {
+   int64_t ids[5] = { 0 };
+   for (int i = 0; i < 5; i++) {
+      char t[16];
+      snprintf(t, sizeof(t), "j%d", i);
+      conv_db_create_job(alice_id, t, 0, "detached", "notify", NULL, 1, &ids[i]);
+      conv_db_job_set_terminal(ids[i], "done", NULL, 200);
+   }
+
+   bool seen[5] = { false };
+   int total = 0;
+   int64_t cursor_at = 0, cursor_id = 0;
+   for (int page = 0; page < 10; page++) { /* bounded: a stuck cursor fails loudly */
+      job_record_t out[2];
+      int n = -1;
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_list_history_by_user(
+                                                 alice_id, cursor_at, cursor_id, out, 2, &n));
+      if (n == 0) {
+         break;
+      }
+      for (int i = 0; i < n; i++) {
+         for (int k = 0; k < 5; k++) {
+            if (ids[k] == out[i].id) {
+               TEST_ASSERT_FALSE(seen[k]); /* no row served twice */
+               seen[k] = true;
+            }
+         }
+         total++;
+      }
+      cursor_at = (int64_t)out[n - 1].created_at;
+      cursor_id = out[n - 1].id;
+   }
+   TEST_ASSERT_EQUAL_INT(5, total); /* no row skipped either */
+   for (int k = 0; k < 5; k++) {
+      TEST_ASSERT_TRUE(seen[k]);
+   }
+}
+
 /* ── ownership isolation: bob cannot get/see alice's job ───────────────────── */
 
 static void test_ownership_isolation(void) {
@@ -265,6 +359,9 @@ int main(void) {
    RUN_TEST(test_status_transitions);
    RUN_TEST(test_pending_followups_scan);
    RUN_TEST(test_active_scan);
+   RUN_TEST(test_active_and_history_partition);
+   RUN_TEST(test_active_and_history_ignore_plain_conversations);
+   RUN_TEST(test_history_pagination_no_gaps_or_dupes);
    RUN_TEST(test_ownership_isolation);
    RUN_TEST(test_get_status_probe);
    RUN_TEST(test_mark_fired_many);

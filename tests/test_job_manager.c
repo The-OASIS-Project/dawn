@@ -126,12 +126,14 @@ int conv_db_job_mark_fired(int64_t conv_id) {
    return AUTH_DB_SUCCESS;
 }
 
-int conv_db_job_active_count_for_parent(int64_t parent_id, int *count_out) {
-   (void)parent_id;
-   if (count_out) {
-      *count_out = 0;
-   }
-   return AUTH_DB_SUCCESS;
+/* job_update_emit() reads the row back before broadcasting it; these tests
+ * exercise pool logic, not the WS frames, so the read reports "not a job" and
+ * the emit is a no-op. */
+int conv_db_job_get(int64_t conv_id, int user_id, job_record_t *out) {
+   (void)conv_id;
+   (void)user_id;
+   (void)out;
+   return AUTH_DB_NOT_FOUND;
 }
 
 /* Phase-2 observe seam: job_manager_set_terminal pairs the DB write with a

@@ -136,6 +136,17 @@ static char *handle_spawn(struct json_object *details,
       return strdup("Error: failed to create the background job.");
    }
 
+   /* The job has entered the active set — push its row so watchers see it appear.
+    * BEFORE job_worker_spawn(), not after: the worker is detached and can reach
+    * set_running or even a terminal disposition immediately, so emitting after
+    * the spawn lets this thread read a stale 'queued' row and enqueue it BEHIND
+    * the worker's terminal frame.  A client would then drop the terminal (for a
+    * job it has not seen yet) and insert the stale active row — pinning a phantom
+    * job in its set until the next reconnect.  Emitting here, the row is
+    * definitively 'queued' and no worker exists to race.  Its exit is emitted by
+    * job_manager_set_terminal(), including on the spawn-failure path below. */
+   job_update_emit(conv_id, user_id);
+
    if (job_worker_spawn(user_id, conv_id, goal) != SUCCESS) {
       job_manager_set_terminal(conv_id, user_id, "failed", "worker spawn failed", time(NULL), 0);
       return strdup("Error: failed to start the background job worker.");
@@ -148,9 +159,6 @@ static char *handle_spawn(struct json_object *details,
    if (parent_conv > 0) {
       conv_event_emit(parent_conv, user_id, CONV_EVENT_SPAWN, event_payload_spawn(conv_id, title));
    }
-
-   /* Update the parent conversation's "jobs running" pills. */
-   job_activity_emit(user_id, parent_conv);
 
    char buf[CONV_TITLE_MAX + 160];
    if (strcmp(on_complete, "reinvoke_parent") == 0) {
@@ -273,12 +281,10 @@ static char *handle_cancel(struct json_object *details, int user_id) {
       return strdup("No such background job.");
    }
    if (strcmp(status, "queued") == 0) {
+      /* set_terminal emits the job_update that retires this row from watchers'
+       * active sets — no separate refresh needed. */
       job_manager_set_terminal(conv_id, user_id, "cancelled", NULL, time(NULL), 0);
       conv_db_job_mark_fired(conv_id);
-      job_record_t jr;
-      if (conv_db_job_get(conv_id, user_id, &jr) == AUTH_DB_SUCCESS) {
-         job_activity_emit(user_id, jr.parent_id); /* refresh the parent's pills */
-      }
       snprintf(buf, sizeof(buf), "Cancelled queued job #%lld.", (long long)conv_id);
       return strdup(buf);
    }

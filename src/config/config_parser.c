@@ -1747,6 +1747,11 @@ void config_clamp_jobs(jobs_config_t *config) {
       config->max_jobs_per_user = 1;
    if (config->max_queued_per_user < 0)
       config->max_queued_per_user = 0;
+   /* Bounded at BOTH ends, like its siblings: the WebUI jobs snapshot sizes its
+    * row buffer from (max_active_jobs + max_queued_per_user), so an unbounded
+    * value overflows that signed addition (UB) on a hand-edited config. */
+   if (config->max_queued_per_user > 256)
+      config->max_queued_per_user = 256;
    if (config->monitor_followups_per_tick < 1)
       config->monitor_followups_per_tick = 1;
    if (config->max_spawn_depth < 0)

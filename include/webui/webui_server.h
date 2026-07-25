@@ -620,11 +620,8 @@ void webui_broadcast_conversation_renamed(int user_id, int64_t conv_id, const ch
  */
 void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id);
 
-/**
- * @brief Broadcast the user's full per-parent active-job count map (connect /
- *        reconnect rehydration for the "jobs running" pills).
- */
-void webui_jobs_broadcast_activity_snapshot(int user_id);
+/* The background-job frames take a ws_connection_t and are declared alongside
+ * the other per-connection senders in webui_handlers.h. */
 
 /**
  * @brief Broadcast memory extraction notice to a user's WebUI connections

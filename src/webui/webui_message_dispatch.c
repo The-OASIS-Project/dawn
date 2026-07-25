@@ -1350,11 +1350,28 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       if (!conn_require_auth(conn))
          return;
       webui_phone_send_status(conn);
-   } else if (strcmp(type, "jobs_activity_request") == 0) {
-      /* Client asks for the per-conversation active-job counts (pill rehydration). */
+   } else if (strcmp(type, "jobs_request") == 0) {
+      /* Client asks for its complete ACTIVE job set (connect/reconnect). */
       if (!conn_require_auth(conn))
          return;
-      webui_jobs_broadcast_activity_snapshot(conn->auth_user_id);
+      webui_jobs_send_snapshot(conn);
+   } else if (strcmp(type, "list_jobs") == 0) {
+      /* Client asks for a page of TERMINAL jobs.  Separate from the snapshot
+       * because history is unbounded — see src/webui/webui_jobs.c. */
+      if (!conn_require_auth(conn))
+         return;
+      int64_t before_created_at = 0, before_id = 0;
+      int limit = 0;
+      if (payload) {
+         json_object *o;
+         if (json_object_object_get_ex(payload, "before_created_at", &o))
+            before_created_at = json_object_get_int64(o);
+         if (json_object_object_get_ex(payload, "before_id", &o))
+            before_id = json_object_get_int64(o);
+         if (json_object_object_get_ex(payload, "limit", &o))
+            limit = json_object_get_int(o);
+      }
+      webui_jobs_send_history(conn, before_created_at, before_id, limit);
    } else if (strcmp(type, "scheduler_action") == 0) {
       if (!conn_is_satellite_session(conn) && !conn_require_auth(conn))
          return;

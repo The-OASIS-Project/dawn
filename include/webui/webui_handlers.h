@@ -143,6 +143,28 @@ void handle_load_conversation(ws_connection_t *conn, struct json_object *payload
 void webui_send_conversation_events(ws_connection_t *conn, int64_t conv_id, int64_t last_seq);
 
 /**
+ * @brief Send the user's complete ACTIVE job set (connect/reconnect rehydration).
+ *
+ * The client keys jobs by conversation id and derives the "jobs running" pill
+ * counts from this set, which is only sound because the active set is bounded
+ * and arrives whole — see the lifetime-split note atop src/webui/webui_jobs.c.
+ */
+void webui_jobs_send_snapshot(ws_connection_t *conn);
+
+/**
+ * @brief Send one keyset-paginated page of the user's TERMINAL jobs (history).
+ *
+ * Unbounded feed, deliberately separate from the snapshot: a page of this must
+ * never be counted.  Pass @p before_created_at == 0 for the first page;
+ * afterwards echo back the `next_before_*` cursor from the previous response.
+ * @p limit <= 0 takes the default page size.
+ */
+void webui_jobs_send_history(ws_connection_t *conn,
+                             int64_t before_created_at,
+                             int64_t before_id,
+                             int limit);
+
+/**
  * @brief Delete a conversation
  */
 void handle_delete_conversation(ws_connection_t *conn, struct json_object *payload);

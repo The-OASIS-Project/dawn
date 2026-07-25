@@ -994,21 +994,8 @@ void webui_broadcast_job_notification(int user_id,
    }
 }
 
-/* Strong override of job_manager.c's weak job-activity symbol: push a parent
- * conversation's active-job count so the per-conversation + global "jobs
- * running" pills stay live. */
-void webui_broadcast_job_activity(int user_id, int64_t parent_id, int active_count) {
-   if (user_id <= 0 || parent_id <= 0) {
-      return;
-   }
-   json_object *root = json_object_new_object();
-   json_object_object_add(root, "type", json_object_new_string("job_activity"));
-   json_object *payload = json_object_new_object();
-   json_object_object_add(payload, "conversation_id", json_object_new_int64(parent_id));
-   json_object_object_add(payload, "active_count", json_object_new_int(active_count));
-   json_object_object_add(root, "payload", payload);
-   broadcast_json_to_user(user_id, root);
-}
+/* The job lifecycle frames (job_update / jobs_snapshot / list_jobs_response)
+ * live in webui_jobs.c — see the lifetime-split rationale at the top of it. */
 
 /* Strong override of the job_reinvoke weak seam: find a live, idle, connected
  * WebUI session the owner is currently viewing on @p conv_id, and atomically
@@ -1059,36 +1046,6 @@ session_t *webui_find_reinvoke_viewer(int64_t conv_id, int user_id) {
  * is currently viewing (used by the reinvoke closure's server-persist decision). */
 int64_t webui_session_active_conversation(session_t *s) {
    return webui_get_active_conversation_id(s);
-}
-
-/* Connect/reconnect rehydration: push the full per-parent active-job map so a
- * (re)loaded client shows the correct pills.  Authoritative counts (not deltas),
- * so it is safe to broadcast to all of the user's sessions. */
-/* Max distinct parent conversations reported in one activity snapshot. */
-#define JOB_ACTIVITY_SNAPSHOT_MAX 64
-void webui_jobs_broadcast_activity_snapshot(int user_id) {
-   if (user_id <= 0) {
-      return;
-   }
-   job_parent_count_t counts[JOB_ACTIVITY_SNAPSHOT_MAX];
-   int n = 0;
-   if (conv_db_job_active_counts_by_user(user_id, counts, JOB_ACTIVITY_SNAPSHOT_MAX, &n) !=
-       AUTH_DB_SUCCESS) {
-      return;
-   }
-   json_object *root = json_object_new_object();
-   json_object_object_add(root, "type", json_object_new_string("jobs_activity_snapshot"));
-   json_object *payload = json_object_new_object();
-   json_object *arr = json_object_new_array();
-   for (int i = 0; i < n; i++) {
-      json_object *e = json_object_new_object();
-      json_object_object_add(e, "conversation_id", json_object_new_int64(counts[i].parent_id));
-      json_object_object_add(e, "active_count", json_object_new_int(counts[i].count));
-      json_object_array_add(arr, e);
-   }
-   json_object_object_add(payload, "counts", arr);
-   json_object_object_add(root, "payload", payload);
-   broadcast_json_to_user(user_id, root);
 }
 
 void webui_broadcast_memory_proposals_changed(int user_id) {

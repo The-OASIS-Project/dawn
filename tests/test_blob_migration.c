@@ -28,6 +28,7 @@
 #include <dirent.h>
 #include <sqlite3.h>
 #include <stdio.h>
+#include <stdlib.h> /* mkdtemp */
 #include <string.h>
 #include <unistd.h>
 

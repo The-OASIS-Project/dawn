@@ -22,10 +22,17 @@ What it exercises
 Replay alone is verifiable against a job that already finished, which costs no
 LLM tokens.  Live-tailing needs a job actually running.
 
+It also exercises the job LIST frames (`jobs_request` / `list_jobs`), which are
+split by object lifetime: the ACTIVE set arrives whole and may be counted, while
+TERMINAL history is keyset-paginated and must not be.  Walking the cursor from a
+dumb client is the only thing that proves the pagination contract end to end
+before a panel is built on top of it.
+
 Usage
 -----
     ./tail_conversation.py --conv 1006 --user admin --password ... --insecure
     ./tail_conversation.py --conv 1006 --user admin --password ... --from-seq 12
+    ./tail_conversation.py --jobs --user admin --password ... --insecure
 
 The WebUI is TLS-only by default; --insecure skips verification of the
 self-signed cert a typical LAN deployment uses.
@@ -169,9 +176,82 @@ def show_event(e, state, live=False):
         print(f"{tag} [{seq:>3}] {kind}  {clean(body, 90)}")
 
 
+def job_line(j):
+    """One job row, the way a dumb list client would show it."""
+    fin = j.get("finished_at") or 0
+    return (f"   [{j.get('status'):>11}] conv {j.get('conversation_id'):<6} "
+            f"parent {j.get('parent_id') or '-':<6} d{j.get('spawn_depth')} "
+            f"{clean(j.get('title'), 48)}" + (f"  !{clean(j.get('error'), 40)}" if j.get('error') else "")
+            + ("" if fin else "  (running)"))
+
+
+def probe_jobs(ws):
+    """Exercise the two job list frames and walk the history cursor.
+
+    The contract being checked: the ACTIVE snapshot is a complete set (so its
+    rows may be counted), while history is a page whose cursor must advance
+    without repeating or skipping a row.  A stuck cursor is the classic keyset
+    bug and it is invisible until someone pages past the first screen.
+    """
+    ws.send(json.dumps({"type": "jobs_request"}))
+    active, cursor, seen, pages = None, None, set(), 0
+    dupes = []
+
+    while True:
+        msg = json.loads(ws.recv())
+        kind = msg.get("type")
+        p = msg.get("payload") or {}
+
+        if kind == "jobs_snapshot":
+            active = p.get("jobs") or []
+            print(f"── active: {len(active)} job(s) (truncated={p.get('truncated')}) ──")
+            for j in active:
+                print(job_line(j))
+            if p.get("truncated"):
+                print("   ⚠ snapshot truncated — derived counts would be LOWER BOUNDS")
+            # Per-parent counts, derived exactly the way the browser derives them.
+            by_parent = {}
+            for j in active:
+                if j.get("parent_id"):
+                    by_parent[j["parent_id"]] = by_parent.get(j["parent_id"], 0) + 1
+            print(f"   derived per-parent counts: {by_parent or '{}'}")
+            ws.send(json.dumps({"type": "list_jobs", "payload": {"limit": 2}}))
+
+        elif kind == "list_jobs_response":
+            rows = p.get("jobs") or []
+            pages += 1
+            print(f"── history page {pages}: {len(rows)} row(s) (has_more={p.get('has_more')}) ──")
+            for j in rows:
+                cid = j.get("conversation_id")
+                if cid in seen:
+                    dupes.append(cid)
+                seen.add(cid)
+                print(job_line(j))
+            nxt = (p.get("next_before_created_at"), p.get("next_before_id"))
+            if not p.get("has_more") or not rows or nxt == cursor or pages >= 25:
+                if nxt == cursor and p.get("has_more"):
+                    print("\n⚠ cursor did not advance — pagination would loop forever")
+                break
+            cursor = nxt
+            ws.send(json.dumps({"type": "list_jobs", "payload": {
+                "before_created_at": nxt[0], "before_id": nxt[1], "limit": 2}}))
+
+    print(f"\n── walked {pages} page(s), {len(seen)} distinct terminal job(s) ──")
+    if dupes:
+        print(f"⚠ cursor served {len(dupes)} row(s) twice: {dupes}")
+    elif active is None:
+        print("⚠ no jobs_snapshot arrived")
+    else:
+        print("✓ active set + history walk consistent (no repeats, cursor advanced)")
+    # The partition invariant: a job is active OR terminal, never both.
+    overlap = {j.get("conversation_id") for j in (active or [])} & seen
+    if overlap:
+        print(f"⚠ PARTITION VIOLATED — conv(s) in both active and history: {sorted(overlap)}")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--conv", type=int, required=True)
+    ap.add_argument("--conv", type=int)
     ap.add_argument("--user", required=True)
     ap.add_argument("--password", required=True)
     # DAWN's WebUI is TLS-only in the default config (ssl_cert_path is set), so
@@ -181,7 +261,11 @@ def main():
     ap.add_argument("--from-seq", type=int, default=0, help="replay cursor (0 = whole log)")
     ap.add_argument("--insecure", action="store_true", help="skip TLS verify (self-signed)")
     ap.add_argument("--follow", action="store_true", help="keep tailing after 'complete'")
+    ap.add_argument("--jobs", action="store_true",
+                    help="probe the job list frames instead of tailing a conversation")
     args = ap.parse_args()
+    if not args.jobs and args.conv is None:
+        ap.error("--conv is required unless --jobs is given")
 
     cookie = login(args.host, args.user, args.password, args.insecure)
     ws_url = args.host.replace("https://", "wss://").replace("http://", "ws://")
@@ -196,6 +280,13 @@ def main():
         subprotocols=[WS_SUBPROTOCOL],
         sslopt={"cert_reqs": 0} if args.insecure else None,
     )
+    if args.jobs:
+        try:
+            probe_jobs(ws)
+        finally:
+            ws.close()
+        return
+
     ws.send(json.dumps({
         "type": "attach_conversation",
         "payload": {"conversation_id": args.conv, "last_seq": args.from_seq},

@@ -613,6 +613,7 @@ if(ENABLE_WEBUI)
         src/webui/webui_auth_helpers.c
         src/webui/webui_broadcasts.c
         src/webui/webui_events.c
+        src/webui/webui_jobs.c
         src/webui/webui_message_dispatch.c
         src/webui/webui_send.c
         src/webui/build_focus_block.c
