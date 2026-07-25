@@ -2302,6 +2302,15 @@
                default: 2,
                advanced: true,
             },
+            event_retention_days: {
+               type: 'number',
+               label: 'Job Event Retention (days)',
+               min: 0,
+               max: 3650,
+               hint: 'Age out background-job step payloads after N days (0 = keep forever)',
+               default: 30,
+               advanced: true,
+            },
             max_reinvokes_per_tree: {
                type: 'number',
                label: 'Max Reinvoke Attempts',

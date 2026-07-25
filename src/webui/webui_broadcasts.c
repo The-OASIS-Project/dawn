@@ -47,6 +47,7 @@
 
 #include "auth/auth_db.h"
 #include "core/attention/attention.h"
+#include "core/conv_event.h"
 #include "core/focus/focus_candidate_helpers.h"
 #include "core/focus/focus_source.h"
 #include "core/job_manager.h"
@@ -456,6 +457,79 @@ void webui_broadcast_conversation_renamed(int user_id, int64_t conv_id, const ch
    if (sent > 0) {
       OLOG_INFO("WebUI: Broadcast conversation rename to %d client(s): %s", sent, title);
    }
+}
+
+/* Strong override of the conv_event (Layer 2) weak seam: push one durable
+ * observe-side step to the owner's attached clients (background-jobs Phase 2).
+ *
+ * Carries the DB-assigned `seq` so a client that receives this live while its
+ * attach replay is still in flight can dedup against the replayed batch — the
+ * one ordering hazard in the attach contract (§6).
+ *
+ * Fans out to ALL of the user's connections rather than the one viewing the
+ * conversation: a jobs panel watches conversations the user is NOT currently
+ * looking at, which is the entire point of a background job.  The client routes
+ * by conversation_id, exactly as it already does for conversation-scoped
+ * streaming frames. */
+void webui_broadcast_conversation_event(int user_id,
+                                        int64_t conv_id,
+                                        int64_t seq,
+                                        const char *kind,
+                                        const char *payload) {
+   if (user_id <= 0 || conv_id <= 0 || kind == NULL) {
+      return;
+   }
+
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("conversation_event"));
+
+   json_object *p = json_object_new_object();
+   json_object_object_add(p, "conversation_id", json_object_new_int64(conv_id));
+   json_object_object_add(p, "seq", json_object_new_int64(seq));
+   json_object_object_add(p, "kind", json_object_new_string(kind));
+   /* payload is pre-redacted + pre-capped JSON (event_payload.c).  Forwarded as
+    * an opaque STRING, not re-parsed: the renderer treats it as untrusted text
+    * (§8.7), so parsing it here would only invite a consumer to trust it. */
+   if (payload) {
+      json_object_object_add(p, "payload", json_object_new_string(payload));
+   }
+   json_object_object_add(root, "payload", p);
+
+   /* NO json_object_put(root) here: broadcast_json_to_user TAKES OWNERSHIP and
+    * drops the tree itself before the registry walk (see its contract above).
+    * Every sibling broadcaster in this file relies on that; adding a second put
+    * is a double free. */
+   broadcast_json_to_user(user_id, root);
+}
+
+/* Strong override of the conv_event (Layer 2) weak seam: deliver a persisted
+ * assistant message WITH its body, so a client that only consumes the event
+ * stream still receives the answer (§6.3, U-Crit).
+ *
+ * The existing conversation_messages_appended broadcast below is signal-only and
+ * cannot serve this: it says "go refetch", which a line-printer or TUI has no
+ * way to do. */
+void webui_broadcast_message_appended(int user_id,
+                                      int64_t conv_id,
+                                      int64_t msg_id,
+                                      const char *role,
+                                      const char *text) {
+   if (user_id <= 0 || conv_id <= 0 || text == NULL) {
+      return;
+   }
+
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("message_appended"));
+
+   json_object *p = json_object_new_object();
+   json_object_object_add(p, "conversation_id", json_object_new_int64(conv_id));
+   json_object_object_add(p, "message_id", json_object_new_int64(msg_id));
+   json_object_object_add(p, "role", json_object_new_string(role ? role : "assistant"));
+   json_object_object_add(p, "text", json_object_new_string(text));
+   json_object_object_add(root, "payload", p);
+
+   /* broadcast_json_to_user TAKES OWNERSHIP — no json_object_put here. */
+   broadcast_json_to_user(user_id, root);
 }
 
 /* Strong override of the job_reinvoke (Layer 2) weak seam: when a reinvoke_parent

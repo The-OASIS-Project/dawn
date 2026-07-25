@@ -27,10 +27,13 @@
  */
 #include "core/text_input_dispatch.h"
 
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "auth/auth_db.h"
+#include "core/conv_event.h"
+#include "core/event_payload.h"
 #include "core/session_manager.h"
 #include "logging.h"
 
@@ -43,6 +46,25 @@ char *core_text_input_dispatch(session_t *session,
                                const text_input_dispatch_opts_t *opts) {
    if (!session || !text || text[0] == '\0') {
       return NULL;
+   }
+
+   /* Observe-side `status` (background-jobs Phase 2, §6.2).  Three terms, because
+    * none alone covers the set: the session type catches a job worker, the
+    * turn-source bit catches a reinvoke running on a viewer's own session, and
+    * the conversation flag catches a user typing directly into a job
+    * conversation from the sidebar — which is neither of the first two, yet is
+    * exactly the turn someone tailing that job wants to see.
+    *
+    * The conversation is the one captured at DISPATCH, never the live view
+    * (Phase 0's rule), so a background turn tags the right conversation even
+    * while the user is looking at another one. */
+   const bool emit_status = (session->type == SESSION_TYPE_JOB) ||
+                            (opts && (opts->is_background_turn || opts->is_job_conversation));
+   const int64_t status_conv = atomic_load(&session->stream_conversation_id);
+   const int status_user = opts && opts->auth_user_id > 0 ? opts->auth_user_id
+                                                          : (int)session->metrics.user_id;
+   if (emit_status && status_conv > 0) {
+      conv_event_emit(status_conv, status_user, CONV_EVENT_STATUS, event_payload_status(true));
    }
 
    /* Step 1: add user message to session history.  When images are
@@ -120,6 +142,14 @@ char *core_text_input_dispatch(session_t *session,
                                                             vision_image_sizes, vision_mimes,
                                                             vision_image_count, sentence_cb,
                                                             sentence_userdata);
+
+   /* Turn end.  This function has a single return, and the LLM call above is
+    * synchronous, so one emit here covers success, cancellation and failure
+    * alike — an `idle` placed in a worker's exit path instead would be missed
+    * on whichever error branch someone later adds. */
+   if (emit_status && status_conv > 0) {
+      conv_event_emit(status_conv, status_user, CONV_EVENT_STATUS, event_payload_status(false));
+   }
 
    return response;
 }

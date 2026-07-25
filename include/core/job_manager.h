@@ -306,6 +306,35 @@ void webui_broadcast_job_activity(int user_id, int64_t parent_id, int active_cou
 void job_activity_emit(int user_id, int64_t parent_id);
 
 /**
+ * @brief Record a job's terminal state AND emit its `complete` event (§6.2).
+ *
+ * Use this instead of calling conv_db_job_set_terminal() directly. A job reaches
+ * a terminal state from EIGHT places — the worker's four dispositions, the
+ * tool's spawn-failure and queued-cancel, and the boot interrupted-scan — and a
+ * tailer that misses any one of them never sees that job end. Pairing the two
+ * writes here means adding a ninth disposition can't silently skip the event.
+ *
+ * Deliberately NOT folded into conv_db_job_set_terminal(): that is the DB layer,
+ * and emitting from inside it would have the DB calling a WebUI weak symbol.
+ *
+ * @param conv_id          The job conversation.
+ * @param user_id          Owner, for broadcast targeting (<= 0 skips fan-out).
+ * @param status           done|failed|interrupted|cancelled.
+ * @param error_or_null    Failure reason; redacted before persisting (§8.6).
+ * @param finished_at      Terminal timestamp.
+ * @param final_message_id `messages.id` of the final answer, or 0 if none — lets
+ *                         a tailer correlate the disposition with the body.
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE (from the DB write; the event is
+ *         best-effort and never fails the call).
+ */
+int job_manager_set_terminal(int64_t conv_id,
+                             int user_id,
+                             const char *status,
+                             const char *error_or_null,
+                             time_t finished_at,
+                             int64_t final_message_id);
+
+/**
  * @brief Peek whether a new job could start now (no reservation).
  *
  * Lets the `job` tool refuse cleanly past a cap before creating the row.

@@ -1793,6 +1793,8 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_int(config->jobs.max_runtime_sec));
    json_object_object_add(jobs, "event_chunk_cap",
                           json_object_new_int(config->jobs.event_chunk_cap));
+   json_object_object_add(jobs, "event_retention_days",
+                          json_object_new_int(config->jobs.event_retention_days));
    json_object_object_add(root, "jobs", jobs);
 
    /* [calendar] */
@@ -2657,6 +2659,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "max_concurrent_reinvokes = %d\n", config->jobs.max_concurrent_reinvokes);
    fprintf(fp, "max_runtime_sec = %d\n", config->jobs.max_runtime_sec);
    fprintf(fp, "event_chunk_cap = %d\n", config->jobs.event_chunk_cap);
+   fprintf(fp, "event_retention_days = %d\n", config->jobs.event_retention_days);
 
    /* [mcp] + [[mcp.server]] (coding harness) — round-trips so a settings save
     * can't drop a manually-configured bridge server. */

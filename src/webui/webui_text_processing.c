@@ -41,6 +41,7 @@
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
 #include "core/command_router.h"
+#include "core/conv_event.h"
 #include "core/ocp_helpers.h"
 #include "core/session_manager.h"
 #include "core/text_input_dispatch.h"
@@ -657,13 +658,16 @@ static void *text_worker_thread(void *arg) {
       bool client_gone = atomic_load(&session->disconnected);
       bool backgrounded = (turn_conv > 0 && turn_conv != webui_get_active_conversation_id(session));
       if (turn_conv > 0 && turn_user_id > 0 && (backgrounded || client_gone)) {
+         int64_t appended_id = 0;
          if (conv_db_add_message_with_tools(turn_conv, turn_user_id, "assistant", final_response,
-                                            NULL, NULL, NULL, NULL) != AUTH_DB_SUCCESS) {
+                                            NULL, NULL, NULL, &appended_id) != AUTH_DB_SUCCESS) {
             OLOG_WARNING("WebUI: failed to persist final assistant answer to conv %lld",
                          (long long)turn_conv);
          } else {
             OLOG_INFO("WebUI: persisted final assistant answer server-side to conv %lld (%s)",
                       (long long)turn_conv, client_gone ? "client gone" : "backgrounded");
+            conv_event_notify_message_appended(turn_conv, turn_user_id, appended_id, "assistant",
+                                               final_response);
          }
       }
    }

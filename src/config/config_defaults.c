@@ -589,6 +589,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->jobs.max_concurrent_reinvokes = 2;
    config->jobs.max_runtime_sec = 1800;
    config->jobs.event_chunk_cap = 16384;
+   config->jobs.event_retention_days = 30;
 
    /* Proactive attention (SAGE) — master switch OFF by default (opt-in). Watch
     * rules are DB-backed, not config. Numeric defaults mirror the module's

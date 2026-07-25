@@ -938,6 +938,7 @@ typedef struct {
    int max_concurrent_reinvokes;   /* Global cap on in-flight reinvoke_parent workers */
    int max_runtime_sec;            /* Per-job reap (still fires follow-up on timeout) */
    int event_chunk_cap;            /* Head+tail truncation for event payloads (Phase 2) */
+   int event_retention_days;       /* Age out conversation_events payloads; 0 = never */
 } jobs_config_t;
 
 /* =============================================================================

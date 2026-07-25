@@ -91,6 +91,24 @@ typedef struct {
     * appendage.  The hint applies only to this turn — the next call
     * to session_dispatch_user_turn rebuilds the prompt from scratch. */
    const char *channel_hint;
+
+   /* Observe-side `status` events (background-jobs Phase 2).  Emitted at turn
+    * start/end so a jobs panel or TUI reads one durable signal instead of
+    * inferring liveness from delta timing.
+    *
+    * Scoped deliberately (see BACKGROUND_JOBS_DESIGN.md §6.2): only turns worth
+    * watching emit.  An interactive conversation is already observable through
+    * the sidebar chip, and emitting for every turn would roughly double the
+    * event table for no added visibility.
+    *
+    * `is_background_turn` — reinvoke / child-agent turn (TURN_SOURCE_BACKGROUND).
+    * `is_job_conversation` — the conversation itself is a job (job_status IS NOT
+    *   NULL).  Needed on top of session type + turn source: a user can type into
+    *   a job conversation from their own WebUI session, and a tailer watching
+    *   that job must still see the turn.  A SESSION_TYPE_JOB session implies
+    *   this, so the worker need not set it. */
+   bool is_background_turn;
+   bool is_job_conversation;
 } text_input_dispatch_opts_t;
 
 /**

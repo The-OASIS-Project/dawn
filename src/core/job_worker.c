@@ -35,6 +35,8 @@
 #include <time.h>
 
 #include "auth/auth_db.h"
+#include "core/conv_event.h"
+#include "core/event_payload.h"
 #include "core/job_dispatch.h"
 #include "core/job_manager.h"
 #include "core/session_manager.h"
@@ -59,7 +61,7 @@ static void job_worker_run(job_work_t *work) {
                          rc == JOB_MGR_CAP_USER)
                             ? "job capacity reached"
                             : "failed to start job";
-      conv_db_job_set_terminal(work->conv_id, "failed", err, time(NULL));
+      job_manager_set_terminal(work->conv_id, work->user_id, "failed", err, time(NULL), 0);
       job_manager_mark_dirty(); /* let the monitor notify this failure */
       OLOG_WARNING("job_worker: could not start job conv %lld (rc=%d)", (long long)work->conv_id,
                    rc);
@@ -103,25 +105,37 @@ static void job_worker_run(job_work_t *work) {
    /* Persist a produced answer no matter how the turn ended. A job that finished
     * microseconds before its deadline, or just as the user hit cancel, did the
     * work — throwing it away is never the right outcome, and it stays reachable
-    * via `job status` even when the disposition below suppresses a notification. */
+    * via `job status` even when the disposition below suppresses a notification.
+    *
+    * Capture the row id: the `complete` event carries it as final_message_id so a
+    * tailer can correlate the disposition with the answer body it already
+    * received via message_appended (§6.2). */
+   int64_t final_msg_id = 0;
    if (have_answer &&
        conv_db_add_message_with_tools(work->conv_id, work->user_id, "assistant", response, NULL,
-                                      NULL, NULL, NULL) != AUTH_DB_SUCCESS) {
+                                      NULL, NULL, &final_msg_id) != AUTH_DB_SUCCESS) {
       OLOG_WARNING("job_worker: failed to persist final answer to conv %lld",
                    (long long)work->conv_id);
+      final_msg_id = 0;
+   }
+   /* §6.3: hand the ANSWER BODY to event-only consumers.  Without this a TUI
+    * tailing this job sees every step and then never learns the conclusion. */
+   if (have_answer) {
+      conv_event_notify_message_appended(work->conv_id, work->user_id, final_msg_id, "assistant",
+                                         response);
    }
 
    if (cancelled && !reaped) {
       /* User cancel wins even if an answer landed: they asked it to stop, so no
        * completion notification. The answer above is still retrievable. */
-      conv_db_job_set_terminal(work->conv_id, "cancelled", NULL, now);
+      job_manager_set_terminal(work->conv_id, work->user_id, "cancelled", NULL, now, 0);
       conv_db_job_mark_fired(work->conv_id);
       OLOG_INFO("job_worker: job conv %lld cancelled%s", (long long)work->conv_id,
                 have_answer ? " (answer produced before the cancel landed; kept)" : "");
    } else if (have_answer) {
       /* Includes the beat-the-reaper case: the deadline passed but the work
        * completed, so report it honestly as done rather than as a timeout. */
-      conv_db_job_set_terminal(work->conv_id, "done", NULL, now);
+      job_manager_set_terminal(work->conv_id, work->user_id, "done", NULL, now, final_msg_id);
       OLOG_INFO("job_worker: job conv %lld done%s", (long long)work->conv_id,
                 reaped ? " (finished as the runtime reap fired; kept the answer)" : "");
    } else if (reaped) {
@@ -130,10 +144,11 @@ static void job_worker_run(job_work_t *work) {
        * flows through the normal reinvoke path, so conv_db_job_bump_reinvoke
        * already charges it against max_reinvokes_per_tree — a
        * timeout -> re-dispatch -> re-spawn loop cannot run forever. */
-      conv_db_job_set_terminal(work->conv_id, "failed", JOB_ERR_TIMED_OUT, now);
+      job_manager_set_terminal(work->conv_id, work->user_id, "failed", JOB_ERR_TIMED_OUT, now, 0);
       OLOG_WARNING("job_worker: job conv %lld timed out (reaped)", (long long)work->conv_id);
    } else {
-      conv_db_job_set_terminal(work->conv_id, "failed", "no response from model", now);
+      job_manager_set_terminal(work->conv_id, work->user_id, "failed", "no response from model",
+                               now, 0);
       OLOG_WARNING("job_worker: job conv %lld failed (empty response)", (long long)work->conv_id);
    }
    free(response);

@@ -1183,6 +1183,7 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
                          config->jobs.max_concurrent_reinvokes);
       JSON_TO_CONFIG_INT(section, "max_runtime_sec", config->jobs.max_runtime_sec);
       JSON_TO_CONFIG_INT(section, "event_chunk_cap", config->jobs.event_chunk_cap);
+      JSON_TO_CONFIG_INT(section, "event_retention_days", config->jobs.event_retention_days);
       config_clamp_jobs(&config->jobs);
    }
 

@@ -92,6 +92,7 @@ static void test_jobs_roundtrip(void) {
    g_written.jobs.max_concurrent_reinvokes = 5;
    g_written.jobs.max_runtime_sec = 999;
    g_written.jobs.event_chunk_cap = 4242;
+   g_written.jobs.event_retention_days = 17;
 
    round_trip();
 
@@ -108,6 +109,7 @@ static void test_jobs_roundtrip(void) {
    TEST_ASSERT_EQUAL_INT(5, g_read.jobs.max_concurrent_reinvokes);
    TEST_ASSERT_EQUAL_INT(999, g_read.jobs.max_runtime_sec);
    TEST_ASSERT_EQUAL_INT(4242, g_read.jobs.event_chunk_cap);
+   TEST_ASSERT_EQUAL_INT(17, g_read.jobs.event_retention_days);
 }
 
 /* --- [scheduler] ----------------------------------------------------------- */

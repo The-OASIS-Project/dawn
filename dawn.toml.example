@@ -993,6 +993,14 @@
 # max_concurrent_reinvokes = 2       # In-flight reinvoke_parent workers. 1-32.
 # monitor_followups_per_tick = 4     # Completion follow-ups drained per 1s
                                      #   heartbeat (bounds work on the voice loop).
+# event_retention_days = 30          # Age out background-job step payloads after
+                                     #   N days: bulky tool_call/tool_result bodies
+                                     #   are cleared (the step itself is kept, so
+                                     #   history stays coherent) and stale status
+                                     #   heartbeats are deleted. 0 = keep forever.
+                                     #   ON by default — unlike document retention,
+                                     #   this guards transient tool output, not
+                                     #   anything you authored.
 #
 # Parsed and round-tripped, but NOT yet enforced — reserved for the Phase 2
 # (durable event log) and Phase 3 (job trees) work. Setting them has no effect:

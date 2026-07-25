@@ -100,6 +100,27 @@ static void *maintenance_thread_func(void *arg) {
          }
       }
 
+      /* Prune the background-job event log past retention (background-jobs
+       * Phase 2, §8.8).  Kind-aware, not a blanket delete: bulky
+       * tool_call/tool_result payloads are NULLed with the row kept — so the
+       * per-conversation seq chain stays coherent and the step still renders as
+       * "payload expired" rather than vanishing — while stale `status`
+       * heartbeats, whose payload IS their whole content, are deleted outright.
+       *
+       * ON by default (30 days), unlike the document sweeps above: those guard
+       * user-authored content, this guards transient tool output, so unbounded
+       * growth is the worse default.  0 disables. */
+      {
+         int ev_nulled = 0, ev_deleted = 0;
+         if (conv_db_event_prune_expired(g_config.jobs.event_retention_days, &ev_nulled,
+                                         &ev_deleted) == AUTH_DB_SUCCESS &&
+             (ev_nulled > 0 || ev_deleted > 0)) {
+            OLOG_INFO(
+                "auth_maintenance: job events — cleared %d payload(s), removed %d status row(s)",
+                ev_nulled, ev_deleted);
+         }
+      }
+
       /* Document originals (v68): age-delete (off by default, retention_days=0)
        * plus orphan reclamation (uploaded-but-never-indexed + post-delete).
        * Gated on readiness only, NOT originals_enabled: if an operator disables

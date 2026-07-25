@@ -489,6 +489,8 @@ set(DAWN_SOURCES
     # Core files
     src/dawn.c
     src/core/conv_stream.c
+    src/core/event_payload.c
+    src/core/conv_event.c
     src/core/pending_system_msg.c
     src/input_queue.c
     src/mosquitto_comms.c
@@ -610,6 +612,7 @@ if(ENABLE_WEBUI)
         src/webui/webui_vision_validate.c
         src/webui/webui_auth_helpers.c
         src/webui/webui_broadcasts.c
+        src/webui/webui_events.c
         src/webui/webui_message_dispatch.c
         src/webui/webui_send.c
         src/webui/build_focus_block.c
@@ -773,6 +776,7 @@ list(APPEND DAWN_SOURCES
     # WEBUI off).  The admin-socket transports that USE these stay AUTH-gated.
     src/auth/auth_db_conv.c
     src/auth/auth_db_jobs.c
+    src/auth/auth_db_events.c
     src/auth/auth_db_user.c
     src/auth/auth_db_settings.c
     src/auth/auth_db_satellite.c

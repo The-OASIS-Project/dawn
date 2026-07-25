@@ -128,6 +128,21 @@ void handle_continue_conversation(ws_connection_t *conn, struct json_object *pay
 void handle_load_conversation(ws_connection_t *conn, struct json_object *payload);
 
 /**
+ * @brief Replay a conversation's durable event log to @p conn (§6 attach step 2).
+ *
+ * Sends one `conversation_events` frame carrying events at seq > @p last_seq, or
+ * nothing when there are none.  Ownership-scoped through conv_db_event_list's
+ * JOIN, so a conversation this connection's user does not own replays as empty.
+ *
+ * Called from handle_load_conversation between the message batch and the
+ * in-memory ring replay — that ordering is the attach contract (§6), not an
+ * implementation detail.
+ *
+ * @param last_seq Exclusive cursor; 0 replays the whole log.
+ */
+void webui_send_conversation_events(ws_connection_t *conn, int64_t conv_id, int64_t last_seq);
+
+/**
  * @brief Delete a conversation
  */
 void handle_delete_conversation(ws_connection_t *conn, struct json_object *payload);

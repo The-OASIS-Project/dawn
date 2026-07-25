@@ -109,6 +109,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_session.c
     ${SRC_ROOT}/src/auth/auth_db_conv.c
     ${SRC_ROOT}/src/auth/auth_db_jobs.c
+    ${SRC_ROOT}/src/auth/auth_db_events.c
     ${SRC_ROOT}/src/auth/auth_db_settings.c
     ${SRC_ROOT}/src/auth/auth_db_satellite.c
     ${SRC_ROOT}/src/auth/auth_db_metrics.c
@@ -956,6 +957,12 @@ dawn_add_unit_test(test_auth_db_migrations_v73
            ${SRC_ROOT}/src/auth/auth_db_migrations_v72.c
            ${SRC_ROOT}/src/auth/auth_db_migrations_v73.c
    LIBS    dawn_common unity sqlite3 pthread
+   LABEL   ci)
+
+dawn_add_unit_test(test_conv_db_events
+   SOURCES test_conv_db_events.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer
    LABEL   ci)
 
 dawn_add_unit_test(test_conv_db_jobs

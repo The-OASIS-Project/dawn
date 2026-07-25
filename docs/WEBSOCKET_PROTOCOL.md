@@ -8,8 +8,17 @@ WebUI browser clients, and DAP2 satellite devices. All connections use the
 
 - **Text messages**: JSON with `{"type": "...", "payload": {...}}`
 - **Binary messages**: Single type byte prefix followed by raw data
-- **Subprotocol**: `dawn-1.0`
-- **Authentication**: HTTP cookie set during login (see `webui_http.c`)
+- **Subprotocol**: `dawn-1.0` — **mandatory, and it fails silently.** libwebsockets
+  selects its protocol handler by subprotocol name, so a client that negotiates none
+  is routed to the **HTTP** handler instead: the socket opens cleanly, `send()`
+  succeeds, and every frame is discarded with **no error and no server log line**.
+  The symptom is a connection that looks healthy and never answers. Non-browser
+  clients must pass it explicitly (Python `websocket-client`:
+  `create_connection(url, subprotocols=["dawn-1.0"])`). Reference client:
+  `tests/tools/tail_conversation.py`.
+- **Authentication**: HTTP cookie set during login (see `webui_http.c`). Obtain it
+  with `GET /api/auth/csrf` then `POST /api/auth/login`; the WebUI is TLS-only when
+  `[webui] ssl_cert_path` is set, so use `wss://`.
 
 ## Binary Message Types
 
@@ -102,6 +111,14 @@ Update client capabilities after initial connection.
 ```
 
 ---
+
+#### `attach_conversation`
+Like `load_conversation`, but also replays the durable event log — the entry point
+for any observe client. `last_seq` is an **exclusive** cursor: `0` replays
+everything; on reconnect pass the highest `seq` already seen to receive only the gap.
+```json
+{ "type": "attach_conversation", "payload": { "conversation_id": 1006, "last_seq": 0 } }
+```
 
 ### Configuration (Admin Only)
 
@@ -857,6 +874,62 @@ A `failed` status releases the server-side single-flight lock so a re-push is al
 ---
 
 ## Server → Client Messages
+
+### Background-Job Observe Stream (Phase 2)
+
+The attach/replay contract that makes a background job watchable from any client,
+browser or not. Reference consumer: `tests/tools/tail_conversation.py`.
+
+**Attach ordering is part of the contract**, not an implementation detail — a
+client that simply appends what it receives must end up with a coherent view:
+
+1. `load_conversation_response` — message history
+2. `conversation_events` — durable step log, `seq > last_seq`
+3. `stream_resume` — in-memory partial of a turn still in flight (if any)
+4. then live `conversation_event` / `message_appended`
+
+#### `conversation_events`
+Durable replay batch, ASC by `seq`. `seq` is **per-conversation** monotonic, so a
+client keeps one cursor per conversation. A `payload` of `null` means the body was
+aged out by retention (`[jobs] event_retention_days`) while the step itself was
+kept — render it as "expired", not as empty.
+```json
+{
+   "type": "conversation_events",
+   "payload": {
+      "conversation_id": 1006,
+      "events": [
+         { "seq": 1, "kind": "status", "payload": "{\"state\":\"generating\"}", "created_at": 1784949199 },
+         { "seq": 2, "kind": "tool_call", "payload": "{\"tool\":\"search\",\"args\":{...}}", "created_at": 1784949199 }
+      ],
+      "has_more": false,
+      "last_seq": 21
+   }
+}
+```
+
+#### `conversation_event`
+One step, pushed live. Same shape as an entry above, plus `conversation_id`.
+Carries the DB-assigned `seq` so a client can **dedup against the replay batch** —
+a live frame can race an in-flight attach.
+`kind` ∈ `status` | `tool_call` | `tool_result` | `spawn` | `complete`
+(`terminal_chunk` is reserved for Phase 4). `payload` is an opaque **string** of
+pre-redacted JSON; render it as text only (§8.7) — it can carry web/tool output.
+
+#### `message_appended`
+A persisted assistant message **with its body**. Distinct from
+`conversation_messages_appended`, which is signal-only ("refetch") and useless to a
+client that cannot issue REST calls. Without this frame an event-only consumer
+would watch a job run and never learn its answer.
+```json
+{
+   "type": "message_appended",
+   "payload": { "conversation_id": 1006, "message_id": 21547, "role": "assistant", "text": "..." }
+}
+```
+The answer reaches a client by **either** route: this frame (turn completes while
+attached) or the message batch on attach (already-finished job). `complete` carries
+`final_message_id` to correlate the two.
 
 ### Session & State
 

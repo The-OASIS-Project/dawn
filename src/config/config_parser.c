@@ -1782,6 +1782,7 @@ static void parse_jobs(toml_table_t *table, jobs_config_t *config) {
                                              "max_concurrent_reinvokes",
                                              "max_runtime_sec",
                                              "event_chunk_cap",
+                                             "event_retention_days",
                                              NULL };
    warn_unknown_keys(table, "jobs", known_keys);
 
@@ -1798,6 +1799,7 @@ static void parse_jobs(toml_table_t *table, jobs_config_t *config) {
    PARSE_INT(table, "max_concurrent_reinvokes", config->max_concurrent_reinvokes);
    PARSE_INT(table, "max_runtime_sec", config->max_runtime_sec);
    PARSE_INT(table, "event_chunk_cap", config->event_chunk_cap);
+   PARSE_INT(table, "event_retention_days", config->event_retention_days);
 
    config_clamp_jobs(config);
 }

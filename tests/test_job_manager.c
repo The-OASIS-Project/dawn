@@ -134,6 +134,28 @@ int conv_db_job_active_count_for_parent(int64_t parent_id, int *count_out) {
    return AUTH_DB_SUCCESS;
 }
 
+/* Phase-2 observe seam: job_manager_set_terminal pairs the DB write with a
+ * `complete` event.  These tests exercise pool logic, not the event log, so the
+ * pairing is stubbed out here — same treatment as the conv_db_job_* setters
+ * above.  (This file bare-links job_manager.c, so every new cross-module call it
+ * gains needs a stub or the target silently stops building — the failure shows
+ * up only under `make tests-ci`, never `make dawn`.) */
+void conv_event_emit(int64_t conv_id, int user_id, const char *kind, char *payload_owned) {
+   (void)conv_id;
+   (void)user_id;
+   (void)kind;
+   free(payload_owned);
+}
+
+char *event_payload_complete(const char *disposition,
+                             const char *error_or_null,
+                             int64_t final_message_id) {
+   (void)disposition;
+   (void)error_or_null;
+   (void)final_message_id;
+   return NULL;
+}
+
 int scheduler_emit_alert(int user_id,
                          const char *text,
                          sched_event_type_t type,

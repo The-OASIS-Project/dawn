@@ -35,6 +35,8 @@
 #include <time.h>
 
 #include "auth/auth_db.h"
+#include "core/conv_event.h"
+#include "core/event_payload.h"
 #include "core/job_dispatch.h"
 #include "core/job_manager.h"
 #include "core/job_worker.h"
@@ -135,8 +137,16 @@ static char *handle_spawn(struct json_object *details,
    }
 
    if (job_worker_spawn(user_id, conv_id, goal) != SUCCESS) {
-      conv_db_job_set_terminal(conv_id, "failed", "worker spawn failed", time(NULL));
+      job_manager_set_terminal(conv_id, user_id, "failed", "worker spawn failed", time(NULL), 0);
       return strdup("Error: failed to start the background job worker.");
+   }
+
+   /* Record the spawn on the PARENT's event stream, not the child's: it is the
+    * parent a user is watching when a job is launched, and it is what gives the
+    * jobs panel its tree edge (§6.2 spawn carries the child conv_id + title).
+    * A rootless job has no parent stream to write to. */
+   if (parent_conv > 0) {
+      conv_event_emit(parent_conv, user_id, CONV_EVENT_SPAWN, event_payload_spawn(conv_id, title));
    }
 
    /* Update the parent conversation's "jobs running" pills. */
@@ -263,7 +273,7 @@ static char *handle_cancel(struct json_object *details, int user_id) {
       return strdup("No such background job.");
    }
    if (strcmp(status, "queued") == 0) {
-      conv_db_job_set_terminal(conv_id, "cancelled", NULL, time(NULL));
+      job_manager_set_terminal(conv_id, user_id, "cancelled", NULL, time(NULL), 0);
       conv_db_job_mark_fired(conv_id);
       job_record_t jr;
       if (conv_db_job_get(conv_id, user_id, &jr) == AUTH_DB_SUCCESS) {

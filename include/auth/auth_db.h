@@ -1400,6 +1400,84 @@ int conv_db_job_active_counts_by_user(int user_id,
  */
 int conv_db_job_last_assistant_text(int64_t conv_id, int user_id, char **out);
 
+/* =============================================================================
+ * Conversation event log (background-jobs Phase 2 — the observe half)
+ *
+ * Step-granular, NEVER token-granular: live tokens live only in the in-memory
+ * conv_stream replay ring, and final assistant text stays in `messages`.  This
+ * table is what makes a background job inspectable — and what a TUI tails.
+ *
+ * `seq` is per-conversation monotonic, assigned MAX(seq)+1 inside the insert so
+ * it is atomic under the auth_db write lock; the v72 UNIQUE(conversation_id,seq)
+ * index is a backstop, not the mechanism.  There is no user_id column (mirrors
+ * `messages`): every read JOINs `conversations` and filters user_id
+ * (§8.3) — never a bare WHERE conversation_id=?.
+ *
+ * Payloads are secret-redacted and size-capped BEFORE they arrive here (§8.6);
+ * this layer stores what it is given.  See docs/BACKGROUND_JOBS_DESIGN.md §6/§8.
+ * ============================================================================= */
+
+#define CONV_EVENT_KIND_MAX 16 /**< "terminal_chunk" is the longest kind */
+
+/** One durable step in a conversation's event log. */
+typedef struct {
+   int64_t id;
+   int64_t conversation_id;
+   int64_t seq;                    /**< per-conversation monotonic */
+   char kind[CONV_EVENT_KIND_MAX]; /**< status|tool_call|tool_result|
+                                    *   terminal_chunk|spawn|complete */
+   char *payload;                  /**< heap, caller frees; NULL once pruned */
+   time_t created_at;
+} conv_event_t;
+
+/**
+ * @brief Append one event, assigning the next per-conversation seq atomically.
+ *
+ * @param conv_id   Conversation the event belongs to.
+ * @param kind      One of the §6.2 kinds (not validated here; keep the set tight).
+ * @param payload   Kind-specific JSON, already redacted + capped. May be NULL.
+ * @param seq_out   Receives the assigned seq (may be NULL).
+ * @return AUTH_DB_SUCCESS, AUTH_DB_INVALID, or AUTH_DB_FAILURE.
+ */
+int conv_db_event_append(int64_t conv_id, const char *kind, const char *payload, int64_t *seq_out);
+
+/**
+ * @brief Ownership-scoped: events for a conversation with seq > @p after_seq, ASC.
+ *
+ * The ownership filter is the SQL JOIN on conversations.user_id, so a foreign
+ * conv_id yields zero rows rather than a distinct FORBIDDEN result — same
+ * contract as conv_db_get_messages.  Caller frees each row's `payload`.
+ *
+ * @param after_seq Exclusive lower bound (0 replays the whole log).
+ * @return AUTH_DB_SUCCESS, AUTH_DB_INVALID, or AUTH_DB_FAILURE.
+ */
+int conv_db_event_list(int64_t conv_id,
+                       int user_id,
+                       int64_t after_seq,
+                       int max,
+                       conv_event_t *out,
+                       int *count_out);
+
+/** @brief Free the heap members of @p n rows filled by conv_db_event_list. */
+void conv_db_event_rows_free(conv_event_t *rows, int n);
+
+/**
+ * @brief Kind-aware retention sweep (§8.8).
+ *
+ * Payload-nulls aged `tool_call`/`tool_result`/`terminal_chunk` rows (keeping the
+ * row so the seq chain — and therefore replay ordering — stays coherent) and
+ * DELETEs aged `status` rows outright, since for those the payload *is* the
+ * content and seq gaps are harmless (reads are `seq > last_seq`; nothing needs
+ * density).  `spawn`/`complete` are kept intact: they are the tree skeleton and
+ * the disposition.
+ *
+ * @param retention_days Age threshold; <= 0 disables the sweep entirely.
+ * @param nulled_out     Payloads cleared (may be NULL).
+ * @param deleted_out    Rows removed (may be NULL).
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int conv_db_event_prune_expired(int retention_days, int *nulled_out, int *deleted_out);
+
 /**
  * @brief List conversations for a user
  *

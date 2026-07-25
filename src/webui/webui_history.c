@@ -31,6 +31,7 @@
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
+#include "core/conv_event.h"
 #include "core/conv_stream.h"
 #include "core/ocp_helpers.h"
 #include "core/session_manager.h"
@@ -843,6 +844,17 @@ void handle_load_conversation(ws_connection_t *conn, struct json_object *payload
          send_json_response(conn, response);
          json_object_put(response);
 
+         /* ATTACH step 2 (§6): durable event replay, between the messages above
+          * and the in-memory ring below.  Opt-in — a plain `load_conversation`
+          * from the existing WebUI is unchanged, while an `attach_conversation`
+          * carries `last_seq` and gets the job's step history.  0 replays
+          * everything; a reconnecting client passes the last seq it saw so it
+          * receives only the gap. */
+         json_object *last_seq_obj = NULL;
+         if (payload && json_object_object_get_ex(payload, "last_seq", &last_seq_obj)) {
+            webui_send_conversation_events(conn, conv_id, json_object_get_int64(last_seq_obj));
+         }
+
          /* If this conversation has an IN-FLIGHT turn, replay its partial so the
           * client shows the mid-stream state and resumes live rendering.  Only
           * when still active — a finished turn's final text is already in the
@@ -1377,6 +1389,14 @@ void handle_save_message(ws_connection_t *conn, struct json_object *payload) {
    if (result == AUTH_DB_SUCCESS) {
       if (conn->session && msg_id > 0)
          session_stamp_last_message_id(conn->session, role, msg_id);
+      /* §6.3 — the SUBTLE one.  A foreground WebUI turn is saved by the BROWSER,
+       * not the server, so this is the only place its body becomes durable.  An
+       * event-only consumer tailing a conversation that happens to have a tab
+       * open would otherwise never receive the answer.  Assistant rows only:
+       * user text is echoed to the sender already. */
+      if (role && strcmp(role, "assistant") == 0) {
+         conv_event_notify_message_appended(conv_id, conn->auth_user_id, msg_id, role, content);
+      }
       /* Promote any referenced images to PERMANENT so they survive age/LRU eviction
        * for the life of the conversation (conversation-lifecycle-owned).  Owner-checked
        * via conn->auth_user_id; an injected foreign id no-ops.  Per-message scan: the

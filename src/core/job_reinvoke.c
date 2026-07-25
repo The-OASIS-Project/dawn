@@ -46,6 +46,7 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/conv_event.h"
 #include "core/job_dispatch.h"
 #include "core/job_manager.h"
 #include "core/memory_filter.h"
@@ -308,6 +309,7 @@ static text_input_dispatch_opts_t reinvoke_dispatch_opts(int user_id) {
       .on_user_msg_added = NULL,
       .user_msg_added_ctx = NULL,
       .channel_hint = NULL,
+      .is_background_turn = true, /* reinvoke: emits observe `status` (§6.2) */
    };
    return opts;
 }
@@ -386,11 +388,14 @@ static void *reinvoke_turn_entry(void *arg) {
          bool backgrounded = (webui_session_active_conversation(live) != parent);
          bool persisted_ok = true;
          if (client_gone || backgrounded) {
+            int64_t appended_id = 0;
             persisted_ok = (conv_db_add_message_with_tools(parent, user_id, "assistant", response,
                                                            NULL, NULL, NULL,
-                                                           NULL) == AUTH_DB_SUCCESS);
+                                                           &appended_id) == AUTH_DB_SUCCESS);
             if (persisted_ok) {
                job_reinvoke_notify_conv_appended(user_id, parent);
+               conv_event_notify_message_appended(parent, user_id, appended_id, "assistant",
+                                                  response);
             }
          }
          if (persisted_ok) {
@@ -479,10 +484,13 @@ static void reinvoke_run_detached(reinvoke_work_t *w,
        * unfired lets the monitor retry on a later tick; retries stay bounded
        * because build_envelope() bumps each job's reinvoke count per attempt and
        * force-fires past max_reinvokes_per_tree. */
+      int64_t appended_id = 0;
       if (conv_db_add_message_with_tools(w->parent_conv, w->user_id, "assistant", response, NULL,
-                                         NULL, NULL, NULL) == AUTH_DB_SUCCESS) {
+                                         NULL, NULL, &appended_id) == AUTH_DB_SUCCESS) {
          conv_db_job_mark_fired_many(fired_ids, n_fired);
          job_reinvoke_notify_conv_appended(w->user_id, w->parent_conv);
+         conv_event_notify_message_appended(w->parent_conv, w->user_id, appended_id, "assistant",
+                                            response);
          OLOG_INFO("job_reinvoke: re-engaged parent %lld (detached) with %d job result(s)",
                    (long long)w->parent_conv, n_fired);
       } else {

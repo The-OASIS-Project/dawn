@@ -34,6 +34,8 @@
 #include <string.h>
 #include <time.h>
 
+#include "core/conv_event.h"
+#include "core/event_payload.h"
 #include "core/session_manager.h"
 #include "llm/llm_claude.h"
 #include "llm/llm_context.h"
@@ -178,10 +180,11 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
    }
    session_tool_persist_fn cb = s->tool_persist_cb;
    void *ud = s->tool_persist_userdata;
-   if (!cb) {
-      session_release(s);
-      return;
-   }
+   /* NOTE: deliberately no early-return when cb is NULL.  The observe-side
+    * event log (background-jobs Phase 2) is emitted from the same walk below,
+    * and it must NOT be coupled to whether a conversation-persist hook happens
+    * to be installed — a surface with no persist hook still has tool steps
+    * worth watching. */
 
    int after = json_object_array_length(params->conversation_history);
    struct json_object *canonical = json_object_new_array();
@@ -199,6 +202,11 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
       }
    }
 
+   /* The event log is conversation-scoped; the turn's conversation was captured
+    * at dispatch (never the live view — Phase 0's rule). */
+   const int64_t ev_conv = atomic_load(&s->stream_conversation_id);
+   const int ev_user = (int)s->metrics.user_id;
+
    int n = json_object_array_length(canonical);
    for (int i = 0; i < n; i++) {
       struct json_object *m = json_object_array_get_idx(canonical, i);
@@ -211,10 +219,40 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
                                 ? json_object_get_string(content_obj)
                                 : "";
       if (json_object_object_get_ex(m, "tool_calls", &tc_obj)) {
-         cb(ud, role, content ? content : "", json_object_to_json_string(tc_obj), NULL,
-            reasoning_json);
+         const char *tc_json = json_object_to_json_string(tc_obj);
+         if (cb) {
+            cb(ud, role, content ? content : "", tc_json, NULL, reasoning_json);
+         }
+         /* One tool_call event per call in the batch: an iteration can invoke
+          * several tools, and a tailer wants them individually, not as one blob. */
+         if (ev_conv > 0 && json_object_is_type(tc_obj, json_type_array)) {
+            int ncalls = json_object_array_length(tc_obj);
+            for (int c = 0; c < ncalls; c++) {
+               struct json_object *call = json_object_array_get_idx(tc_obj, c);
+               struct json_object *fn = NULL, *nm = NULL, *ar = NULL;
+               const char *tool_name = NULL, *args = NULL;
+               if (json_object_object_get_ex(call, "function", &fn)) {
+                  if (json_object_object_get_ex(fn, "name", &nm)) {
+                     tool_name = json_object_get_string(nm);
+                  }
+                  if (json_object_object_get_ex(fn, "arguments", &ar)) {
+                     args = json_object_get_string(ar);
+                  }
+               }
+               conv_event_emit(ev_conv, ev_user, CONV_EVENT_TOOL_CALL,
+                               event_payload_tool_call(tool_name, args));
+            }
+         }
       } else if (json_object_object_get_ex(m, "tool_call_id", &tcid_obj)) {
-         cb(ud, role, content ? content : "", NULL, json_object_get_string(tcid_obj), NULL);
+         if (cb) {
+            cb(ud, role, content ? content : "", NULL, json_object_get_string(tcid_obj), NULL);
+         }
+         if (ev_conv > 0) {
+            /* The canonical role:tool row carries the result text; the tool's
+             * name isn't on it, so correlate via tool_call_id at render time. */
+            conv_event_emit(ev_conv, ev_user, CONV_EVENT_TOOL_RESULT,
+                            event_payload_tool_result(json_object_get_string(tcid_obj), content));
+         }
       }
    }
 

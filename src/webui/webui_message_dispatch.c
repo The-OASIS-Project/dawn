@@ -960,6 +960,15 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       if (payload) {
          handle_load_conversation(conn, payload);
       }
+   } else if (strcmp(type, "attach_conversation") == 0) {
+      /* Same handler as load_conversation — an attach IS a load that also asks
+       * for the durable event log.  The distinction is the `last_seq` cursor in
+       * the payload, which the handler keys off; keeping them one code path
+       * means the ownership check, message batch and ring replay can't drift
+       * apart from each other (§6 attach ordering). */
+      if (payload) {
+         handle_load_conversation(conn, payload);
+      }
    } else if (strcmp(type, "delete_conversation") == 0) {
       if (payload) {
          handle_delete_conversation(conn, payload);

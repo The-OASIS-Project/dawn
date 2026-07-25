@@ -39,6 +39,8 @@
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
+#include "core/conv_event.h"
+#include "core/event_payload.h"
 #include "core/scheduler.h"
 #include "core/scheduler_db.h"
 #include "dawn_error.h"
@@ -115,6 +117,21 @@ __attribute__((weak)) void webui_broadcast_job_activity(int user_id,
    (void)user_id;
    (void)parent_id;
    (void)active_count;
+}
+
+int job_manager_set_terminal(int64_t conv_id,
+                             int user_id,
+                             const char *status,
+                             const char *error_or_null,
+                             time_t finished_at,
+                             int64_t final_message_id) {
+   int rc = conv_db_job_set_terminal(conv_id, status, error_or_null, finished_at);
+   /* Emit even when the DB write failed: the job HAS ended, and a tailer that
+    * never sees an ending is worse than one that sees an ending the row didn't
+    * record.  The event carries the disposition either way. */
+   conv_event_emit(conv_id, user_id, CONV_EVENT_COMPLETE,
+                   event_payload_complete(status, error_or_null, final_message_id));
+   return rc;
 }
 
 void job_activity_emit(int user_id, int64_t parent_id) {
@@ -205,7 +222,8 @@ int job_manager_init(void) {
            AUTH_DB_SUCCESS &&
        n_stale > 0) {
       for (int i = 0; i < n_stale; i++) {
-         conv_db_job_set_terminal(stale[i].id, "interrupted", "daemon restarted", time(NULL));
+         job_manager_set_terminal(stale[i].id, stale[i].user_id, "interrupted", "daemon restarted",
+                                  time(NULL), 0);
       }
       atomic_store(&s_jobs_dirty, true);
       OLOG_INFO("job_manager: marked %d interrupted job(s) from a previous run", n_stale);
