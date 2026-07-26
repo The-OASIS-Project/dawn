@@ -54,7 +54,7 @@ static void test_create_and_get(void) {
    int64_t job = 0;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
                          conv_db_create_job(alice_id, "research X", parent, "detached", "notify",
-                                            "telegram-main", 1, &job));
+                                            "telegram-main", 1, "go research X thoroughly", &job));
    TEST_ASSERT_TRUE(job > 0);
 
    job_record_t r;
@@ -75,8 +75,8 @@ static void test_create_and_get(void) {
 
 static void test_status_transitions(void) {
    int64_t job = 0;
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
-                         conv_db_create_job(alice_id, "j", 0, "detached", "notify", NULL, 1, &job));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create_job(alice_id, "j", 0, "detached", "notify",
+                                                             NULL, 1, "goal text", &job));
 
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_set_running(job, 5000));
    job_record_t r;
@@ -99,9 +99,9 @@ static void test_status_transitions(void) {
 
 static void test_pending_followups_scan(void) {
    int64_t j1 = 0, j2 = 0, j3 = 0;
-   conv_db_create_job(alice_id, "j1", 0, "detached", "notify", NULL, 1, &j1);
-   conv_db_create_job(alice_id, "j2", 0, "detached", "notify", NULL, 1, &j2);
-   conv_db_create_job(alice_id, "j3", 0, "detached", "notify", NULL, 1, &j3);
+   conv_db_create_job(alice_id, "j1", 0, "detached", "notify", NULL, 1, "goal text", &j1);
+   conv_db_create_job(alice_id, "j2", 0, "detached", "notify", NULL, 1, "goal text", &j2);
+   conv_db_create_job(alice_id, "j3", 0, "detached", "notify", NULL, 1, "goal text", &j3);
 
    conv_db_job_set_terminal(j1, "done", NULL, 100);     /* pending */
    conv_db_job_set_terminal(j2, "failed", "boom", 100); /* pending */
@@ -122,9 +122,10 @@ static void test_pending_followups_scan(void) {
 
 static void test_active_scan(void) {
    int64_t j1 = 0, j2 = 0, j3 = 0;
-   conv_db_create_job(alice_id, "q", 0, "detached", "notify", NULL, 1, &j1); /* queued */
-   conv_db_create_job(alice_id, "r", 0, "detached", "notify", NULL, 1, &j2);
-   conv_db_create_job(alice_id, "d", 0, "detached", "notify", NULL, 1, &j3);
+   conv_db_create_job(alice_id, "q", 0, "detached", "notify", NULL, 1, "goal text",
+                      &j1); /* queued */
+   conv_db_create_job(alice_id, "r", 0, "detached", "notify", NULL, 1, "goal text", &j2);
+   conv_db_create_job(alice_id, "d", 0, "detached", "notify", NULL, 1, "goal text", &j3);
    conv_db_job_set_running(j2, 100);
    conv_db_job_set_terminal(j3, "done", NULL, 100);
 
@@ -143,10 +144,10 @@ static void test_active_scan(void) {
 
 static void test_active_and_history_partition(void) {
    int64_t q = 0, r = 0, d = 0, f = 0;
-   conv_db_create_job(alice_id, "queued", 0, "detached", "notify", NULL, 1, &q);
-   conv_db_create_job(alice_id, "running", 0, "detached", "notify", NULL, 1, &r);
-   conv_db_create_job(alice_id, "done", 0, "detached", "notify", NULL, 1, &d);
-   conv_db_create_job(alice_id, "failed", 0, "detached", "notify", NULL, 1, &f);
+   conv_db_create_job(alice_id, "queued", 0, "detached", "notify", NULL, 1, "goal text", &q);
+   conv_db_create_job(alice_id, "running", 0, "detached", "notify", NULL, 1, "goal text", &r);
+   conv_db_create_job(alice_id, "done", 0, "detached", "notify", NULL, 1, "goal text", &d);
+   conv_db_create_job(alice_id, "failed", 0, "detached", "notify", NULL, 1, "goal text", &f);
    conv_db_job_set_running(r, 100);
    conv_db_job_set_terminal(d, "done", NULL, 200);
    conv_db_job_set_terminal(f, "failed", "boom", 200);
@@ -195,7 +196,7 @@ static void test_history_pagination_no_gaps_or_dupes(void) {
    for (int i = 0; i < 5; i++) {
       char t[16];
       snprintf(t, sizeof(t), "j%d", i);
-      conv_db_create_job(alice_id, t, 0, "detached", "notify", NULL, 1, &ids[i]);
+      conv_db_create_job(alice_id, t, 0, "detached", "notify", NULL, 1, "goal text", &ids[i]);
       conv_db_job_set_terminal(ids[i], "done", NULL, 200);
    }
 
@@ -228,11 +229,158 @@ static void test_history_pagination_no_gaps_or_dupes(void) {
    }
 }
 
+/* ── resume claim: atomic, state-gated, and re-arms delivery ──────────────────
+ *
+ * The claim being atomic is what stops two clicks (or two tabs) from both
+ * spawning a worker onto the same job.  Re-arming on_complete_fired is what
+ * stops a resumed job from finishing and notifying nobody — the interrupted
+ * notice already consumed the flag, and the monitor skips a fired row. */
+
+static void test_resume_claim_is_exclusive(void) {
+   int64_t job = 0;
+   conv_db_create_job(alice_id, "j", 0, "detached", "notify", NULL, 1, "goal text", &job);
+   conv_db_job_set_terminal(job, "interrupted", "daemon restarted", 100);
+   conv_db_job_mark_fired(job); /* the interrupted-notify consumed the flag */
+
+   /* First caller claims it. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_reset_for_resume(job, alice_id));
+
+   job_record_t r;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(job, alice_id, &r));
+   TEST_ASSERT_EQUAL_STRING("queued", r.job_status);
+   TEST_ASSERT_EQUAL_STRING("", r.job_error);
+   TEST_ASSERT_EQUAL_INT64(0, (int64_t)r.finished_at);
+   TEST_ASSERT_EQUAL_INT64(0, (int64_t)r.started_at);
+   TEST_ASSERT_FALSE(r.on_complete_fired); /* delivery re-armed */
+
+   /* Second caller loses: the row already left the resumable set. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(job, alice_id));
+}
+
+/* The goal is durable from CREATE, not from a successful dispatch (v74).
+ *
+ * This is what makes a job that died before it ever ran resumable at all: its
+ * conversation has no messages, so before v74 the instruction existed nowhere
+ * and resuming re-engaged the model with no task — producing an empty `done`
+ * that, being terminal, could never be retried. */
+static void test_goal_is_stored_at_create(void) {
+   int64_t job = 0;
+   conv_db_create_job(alice_id, "t", 0, "detached", "notify", NULL, 1,
+                      "research the 2026 season and summarize", &job);
+
+   char *goal = NULL;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get_goal(job, alice_id, &goal));
+   TEST_ASSERT_EQUAL_STRING("research the 2026 season and summarize", goal);
+   free(goal);
+
+   /* Ownership-scoped like every other user-facing read. */
+   goal = NULL;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_get_goal(job, bob_id, &goal));
+   TEST_ASSERT_NULL(goal);
+
+   /* A job created without one (pre-v74 shape) reports NOT_FOUND, not an empty
+    * string — that distinction is what the resume guard keys on. */
+   int64_t bare = 0;
+   conv_db_create_job(alice_id, "t", 0, "detached", "notify", NULL, 1, NULL, &bare);
+   goal = NULL;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_get_goal(bare, alice_id, &goal));
+   TEST_ASSERT_NULL(goal);
+
+   /* And a non-job conversation never yields one. */
+   int64_t chat = 0;
+   conv_db_create(alice_id, "chat", &chat);
+   goal = NULL;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_get_goal(chat, alice_id, &goal));
+   TEST_ASSERT_NULL(goal);
+}
+
+/* The claim is self-authorizing: a foreign owner cannot claim the row even if a
+ * caller skipped its own ownership check. */
+static void test_resume_claim_is_ownership_scoped(void) {
+   int64_t job = 0;
+   conv_db_create_job(alice_id, "j", 0, "detached", "notify", NULL, 1, "goal text", &job);
+   conv_db_job_set_terminal(job, "interrupted", "daemon restarted", 100);
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(job, bob_id));
+   /* …and alice's claim still works afterwards — bob's attempt changed nothing. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_reset_for_resume(job, alice_id));
+}
+
+/* set_running is a claim on 'queued', not a blind write.  A cancel that retires
+ * a queued row before its detached worker is scheduled must WIN — otherwise the
+ * worker resurrects the job and it runs after the user was told it stopped. */
+static void test_set_running_loses_to_a_cancel(void) {
+   int64_t job = 0;
+   conv_db_create_job(alice_id, "j", 0, "detached", "notify", NULL, 1, "goal text", &job);
+
+   /* Cancel lands first (row leaves 'queued'). */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_set_terminal(job, "cancelled", NULL, 100));
+   /* The worker then wakes and tries to claim: it must lose. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_set_running(job, 200));
+
+   job_record_t r;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(job, alice_id, &r));
+   TEST_ASSERT_EQUAL_STRING("cancelled", r.job_status); /* not resurrected */
+
+   /* And two workers cannot both claim one queued row. */
+   int64_t j2 = 0;
+   conv_db_create_job(alice_id, "j2", 0, "detached", "notify", NULL, 1, "goal text", &j2);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_set_running(j2, 100));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_set_running(j2, 200));
+}
+
+static void test_resume_rejects_non_resumable_states(void) {
+   int64_t done = 0, cancelled = 0, running = 0, failed = 0;
+   conv_db_create_job(alice_id, "done", 0, "detached", "notify", NULL, 1, "goal text", &done);
+   conv_db_create_job(alice_id, "cancelled", 0, "detached", "notify", NULL, 1, "goal text",
+                      &cancelled);
+   conv_db_create_job(alice_id, "running", 0, "detached", "notify", NULL, 1, "goal text", &running);
+   conv_db_create_job(alice_id, "failed", 0, "detached", "notify", NULL, 1, "goal text", &failed);
+   conv_db_job_set_terminal(done, "done", NULL, 100);
+   conv_db_job_set_terminal(cancelled, "cancelled", NULL, 100);
+   conv_db_job_set_running(running, 100);
+   conv_db_job_set_terminal(failed, "failed", "job capacity reached", 100);
+
+   /* A finished job has an answer; a cancelled one was stopped deliberately; a
+    * running one is already going.  Only interrupted/failed are resumable. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(done, alice_id));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(cancelled, alice_id));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(running, alice_id));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_reset_for_resume(failed, alice_id));
+
+   /* A plain conversation is not a job and must never be resumable. */
+   int64_t chat = 0;
+   conv_db_create(alice_id, "just a chat", &chat);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(chat, alice_id));
+}
+
+/* A resumed job rejoins the ACTIVE set and leaves history — the partition has to
+ * survive a backwards transition, not just forward ones. */
+static void test_resume_moves_row_back_to_active(void) {
+   int64_t job = 0;
+   conv_db_create_job(alice_id, "j", 0, "detached", "notify", NULL, 1, "goal text", &job);
+   conv_db_job_set_terminal(job, "interrupted", "daemon restarted", 100);
+
+   job_record_t out[8];
+   int n = -1, m = -1;
+   conv_db_job_list_active_by_user(alice_id, out, 8, &n);
+   conv_db_job_list_history_by_user(alice_id, 0, 0, out, 8, &m);
+   TEST_ASSERT_EQUAL_INT(0, n);
+   TEST_ASSERT_EQUAL_INT(1, m);
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_reset_for_resume(job, alice_id));
+
+   conv_db_job_list_active_by_user(alice_id, out, 8, &n);
+   conv_db_job_list_history_by_user(alice_id, 0, 0, out, 8, &m);
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT(0, m);
+}
+
 /* ── ownership isolation: bob cannot get/see alice's job ───────────────────── */
 
 static void test_ownership_isolation(void) {
    int64_t job = 0;
-   conv_db_create_job(alice_id, "secret", 0, "detached", "notify", NULL, 1, &job);
+   conv_db_create_job(alice_id, "secret", 0, "detached", "notify", NULL, 1, "goal text", &job);
 
    job_record_t r;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_FORBIDDEN, conv_db_job_get(job, bob_id, &r));
@@ -250,7 +398,7 @@ static void test_ownership_isolation(void) {
 static void test_get_status_probe(void) {
    int64_t plain = 0, job = 0;
    conv_db_create(alice_id, "plain chat", &plain);
-   conv_db_create_job(alice_id, "j", 0, "detached", "notify", NULL, 1, &job);
+   conv_db_create_job(alice_id, "j", 0, "detached", "notify", NULL, 1, "goal text", &job);
    conv_db_job_set_running(job, 100);
 
    char status[JOB_STATUS_MAX];
@@ -272,9 +420,9 @@ static void test_get_status_probe(void) {
 
 static void test_mark_fired_many(void) {
    int64_t j1 = 0, j2 = 0, j3 = 0;
-   conv_db_create_job(alice_id, "a", 0, "detached", "reinvoke_parent", NULL, 1, &j1);
-   conv_db_create_job(alice_id, "b", 0, "detached", "reinvoke_parent", NULL, 1, &j2);
-   conv_db_create_job(alice_id, "c", 0, "detached", "reinvoke_parent", NULL, 1, &j3);
+   conv_db_create_job(alice_id, "a", 0, "detached", "reinvoke_parent", NULL, 1, "goal text", &j1);
+   conv_db_create_job(alice_id, "b", 0, "detached", "reinvoke_parent", NULL, 1, "goal text", &j2);
+   conv_db_create_job(alice_id, "c", 0, "detached", "reinvoke_parent", NULL, 1, "goal text", &j3);
    conv_db_job_set_terminal(j1, "done", NULL, 100);
    conv_db_job_set_terminal(j2, "done", NULL, 100);
    conv_db_job_set_terminal(j3, "done", NULL, 100);
@@ -295,7 +443,7 @@ static void test_mark_fired_many(void) {
 
 static void test_bump_reinvoke(void) {
    int64_t job = 0;
-   conv_db_create_job(alice_id, "j", 0, "detached", "reinvoke_parent", NULL, 1, &job);
+   conv_db_create_job(alice_id, "j", 0, "detached", "reinvoke_parent", NULL, 1, "goal text", &job);
 
    int c = -1;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_bump_reinvoke(job, &c));
@@ -310,8 +458,9 @@ static void test_bump_reinvoke(void) {
 
 static void test_fire_boot_reinvokes(void) {
    int64_t rp = 0, nf = 0;
-   conv_db_create_job(alice_id, "reinvoke", 0, "detached", "reinvoke_parent", NULL, 1, &rp);
-   conv_db_create_job(alice_id, "notify", 0, "detached", "notify", NULL, 1, &nf);
+   conv_db_create_job(alice_id, "reinvoke", 0, "detached", "reinvoke_parent", NULL, 1, "goal text",
+                      &rp);
+   conv_db_create_job(alice_id, "notify", 0, "detached", "notify", NULL, 1, "goal text", &nf);
    conv_db_job_set_terminal(rp, "done", NULL, 100);
    conv_db_job_set_terminal(nf, "done", NULL, 100);
 
@@ -329,7 +478,7 @@ static void test_fire_boot_reinvokes(void) {
 
 static void test_last_assistant_text(void) {
    int64_t job = 0;
-   conv_db_create_job(alice_id, "j", 0, "detached", "reinvoke_parent", NULL, 1, &job);
+   conv_db_create_job(alice_id, "j", 0, "detached", "reinvoke_parent", NULL, 1, "goal text", &job);
 
    /* No assistant message yet → success with *out == NULL. */
    char *out = (char *)0x1;
@@ -362,6 +511,12 @@ int main(void) {
    RUN_TEST(test_active_and_history_partition);
    RUN_TEST(test_active_and_history_ignore_plain_conversations);
    RUN_TEST(test_history_pagination_no_gaps_or_dupes);
+   RUN_TEST(test_goal_is_stored_at_create);
+   RUN_TEST(test_resume_claim_is_exclusive);
+   RUN_TEST(test_resume_claim_is_ownership_scoped);
+   RUN_TEST(test_set_running_loses_to_a_cancel);
+   RUN_TEST(test_resume_rejects_non_resumable_states);
+   RUN_TEST(test_resume_moves_row_back_to_active);
    RUN_TEST(test_ownership_isolation);
    RUN_TEST(test_get_status_probe);
    RUN_TEST(test_mark_fired_many);

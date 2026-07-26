@@ -117,6 +117,7 @@ void free_response(ws_response_t *resp) {
       case WS_RESP_STREAM_START:
       case WS_RESP_STREAM_DELTA:
       case WS_RESP_STREAM_END:
+      case WS_RESP_REASONING_SUMMARY:
          /* No data to free - text[] is inline fixed buffer */
          break;
       case WS_RESP_METRICS_UPDATE:

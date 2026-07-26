@@ -627,7 +627,23 @@ void job_reinvoke_process_pending(const job_record_t *rows, int n) {
       int uid = rows[i].user_id;
       done[i] = true;
       if (parent <= 0) {
-         continue; /* rootless — shouldn't reach here (tool falls back to notify) */
+         /* Rootless.  The spawn path falls back to 'notify' when there is no
+          * parent, so this looks unreachable — but `conversations.parent_id` is
+          * ON DELETE SET NULL (v72), so DELETING the parent conversation orphans
+          * its finished children AFTER the fact.
+          *
+          * Skipping without firing used to strand the row: the monitor routes
+          * every reinvoke_parent row here BEFORE the mark-fired branch, so
+          * on_complete_fired stayed 0 forever.  conv_db_job_list_pending_followups
+          * is GLOBAL (no user filter) and ordered finished_at ASC, so a handful of
+          * orphans sort first for good and consume the whole per-tick budget —
+          * permanently starving completion notifications for EVERY user, and
+          * pinning the dirty-gated monitor on so it scans the DB every second.
+          * Fire it and tell the owner instead; there is no parent left to
+          * re-engage, so a notification is the correct degraded delivery. */
+         conv_db_job_mark_fired(rows[i].id);
+         reinvoke_notify_fallback(uid, rows[i].title, rows[i].id);
+         continue;
       }
 
       /* Mark this parent's other rows done so it is processed once this tick. */

@@ -131,7 +131,7 @@ static char *handle_spawn(struct json_object *details,
    conv_generate_title(goal, title, sizeof(title));
 
    int64_t conv_id = 0;
-   if (conv_db_create_job(user_id, title, parent_conv, "detached", on_complete, deliver_to, 1,
+   if (conv_db_create_job(user_id, title, parent_conv, "detached", on_complete, deliver_to, 1, goal,
                           &conv_id) != AUTH_DB_SUCCESS) {
       return strdup("Error: failed to create the background job.");
    }
@@ -149,6 +149,7 @@ static char *handle_spawn(struct json_object *details,
 
    if (job_worker_spawn(user_id, conv_id, goal) != SUCCESS) {
       job_manager_set_terminal(conv_id, user_id, "failed", "worker spawn failed", time(NULL), 0);
+      job_manager_mark_dirty(); /* terminal + unfired — wake the monitor to notify */
       return strdup("Error: failed to start the background job worker.");
    }
 
@@ -252,6 +253,53 @@ static char *handle_status(struct json_object *details, int user_id) {
 
 /* --- cancel ---------------------------------------------------------------- */
 
+static char *handle_resume(struct json_object *details, int user_id) {
+   struct json_object *jid = NULL;
+   int64_t conv_id = (json_object_object_get_ex(details, "job_id", &jid) && jid)
+                         ? json_object_get_int64(jid)
+                         : 0;
+   if (conv_id <= 0) {
+      return strdup("Error: 'job_id' is required to resume a background job.");
+   }
+
+   char buf[192];
+   /* Same one mutation path the WebUI uses — including the ownership check, so
+    * a job_id belonging to someone else is refused here too. */
+   switch (job_worker_resume(conv_id, user_id)) {
+      case JOB_RESUME_STARTED:
+         snprintf(buf, sizeof(buf),
+                  "Resuming background job #%lld — it'll pick up where it left off.",
+                  (long long)conv_id);
+         return strdup(buf);
+      case JOB_RESUME_NOT_RESUMABLE:
+         snprintf(buf, sizeof(buf),
+                  "Job #%lld can't be resumed — only a job that was interrupted or failed can be.",
+                  (long long)conv_id);
+         return strdup(buf);
+      case JOB_RESUME_CAPACITY:
+         return strdup("Too many jobs are running right now — try resuming it again shortly.");
+      case JOB_RESUME_FAILED:
+         snprintf(buf, sizeof(buf), "Couldn't restart job #%lld.", (long long)conv_id);
+         return strdup(buf);
+      case JOB_RESUME_NOTHING_TO_RUN:
+         snprintf(buf, sizeof(buf),
+                  "Job #%lld never started and its instruction wasn't recorded, so there's nothing "
+                  "to resume — ask me to do it again and I'll start a fresh job.",
+                  (long long)conv_id);
+         return strdup(buf);
+      case JOB_RESUME_FORBIDDEN:
+      case JOB_RESUME_NOT_FOUND:
+         /* One answer for both.  Job ids are small sequential integers, so a
+          * distinct "belongs to someone else" turns this into an enumeration
+          * oracle for other users' jobs — the WebUI handler already collapses
+          * them and this surface must match. */
+         break;
+   }
+   /* No `default:` above, so -Wswitch makes a new enumerator a build error at
+    * every surface rather than a silent mislabel. */
+   return strdup("No such background job.");
+}
+
 static char *handle_cancel(struct json_object *details, int user_id) {
    struct json_object *jid = NULL;
    int64_t conv_id = (json_object_object_get_ex(details, "job_id", &jid) && jid)
@@ -261,35 +309,34 @@ static char *handle_cancel(struct json_object *details, int user_id) {
       return strdup("Error: 'job_id' is required to cancel a background job.");
    }
 
-   int rc = job_manager_cancel(conv_id, user_id);
-   char buf[192];
-   if (rc == JOB_MGR_OK) {
-      snprintf(buf, sizeof(buf), "Cancelling background job #%lld.", (long long)conv_id);
-      return strdup(buf);
-   }
-   if (rc == JOB_MGR_FORBIDDEN) {
-      return strdup("That background job belongs to someone else.");
-   }
-
-   /* Not currently running — it may be queued or already terminal. */
-   char status[JOB_STATUS_MAX];
-   int grc = conv_db_job_get_status(conv_id, user_id, status, sizeof(status));
-   if (grc == AUTH_DB_FORBIDDEN) {
-      return strdup("That background job belongs to someone else.");
-   }
-   if (grc != AUTH_DB_SUCCESS || status[0] == '\0') {
+   /* Confirm it IS a job before cancelling.  The job-session pool also holds
+    * reinvoke sessions bound to a plain PARENT conversation, and
+    * job_manager_cancel matches on conversation id alone — so without this,
+    * cancelling your own conversation id would abort an in-flight re-engagement
+    * and report it as a cancelled background job.  The WebUI handler already
+    * does this check; matching it here removes the asymmetry. */
+   job_record_t probe;
+   if (conv_db_job_get(conv_id, user_id, &probe) != AUTH_DB_SUCCESS) {
       return strdup("No such background job.");
    }
-   if (strcmp(status, "queued") == 0) {
-      /* set_terminal emits the job_update that retires this row from watchers'
-       * active sets — no separate refresh needed. */
-      job_manager_set_terminal(conv_id, user_id, "cancelled", NULL, time(NULL), 0);
-      conv_db_job_mark_fired(conv_id);
-      snprintf(buf, sizeof(buf), "Cancelled queued job #%lld.", (long long)conv_id);
-      return strdup(buf);
+
+   char status[JOB_STATUS_MAX];
+   char buf[192];
+   switch (job_manager_cancel_or_retire(conv_id, user_id, status, sizeof(status))) {
+      case JOB_CANCEL_SIGNALLED:
+         snprintf(buf, sizeof(buf), "Cancelling background job #%lld.", (long long)conv_id);
+         return strdup(buf);
+      case JOB_CANCEL_RETIRED:
+         snprintf(buf, sizeof(buf), "Cancelled queued job #%lld.", (long long)conv_id);
+         return strdup(buf);
+      case JOB_CANCEL_ALREADY_TERMINAL:
+         snprintf(buf, sizeof(buf), "Job #%lld already finished (%s).", (long long)conv_id, status);
+         return strdup(buf);
+      case JOB_CANCEL_FORBIDDEN:
+      case JOB_CANCEL_NOT_FOUND:
+         break; /* one answer for both — see handle_resume */
    }
-   snprintf(buf, sizeof(buf), "Job #%lld already finished (%s).", (long long)conv_id, status);
-   return strdup(buf);
+   return strdup("No such background job.");
 }
 
 /* --- dispatch -------------------------------------------------------------- */
@@ -328,11 +375,33 @@ static char *job_tool_callback(const char *action, char *value, int *should_resp
       caller_is_job = (ctx->type == SESSION_TYPE_JOB);
    }
 
-   /* Backstop: a background-job worker runs headless and must never spawn further
+   /* Actions that START WORK: they take a pool slot, a provider counter and an
+    * LLM budget, and they act on behalf of a specific user.  Both guards below
+    * key off this one predicate so a future action can't be added to the
+    * dispatch chain and silently miss them. */
+   const bool starts_work = (strcmp(action, "spawn") == 0 || strcmp(action, "resume") == 0);
+
+   /* No caller context means no session to attribute this to.  Every other path
+    * (LLM tool call, legacy <command> tag) sets it; the one that does not is an
+    * MQTT publish, which is UNAUTHENTICATED on a broker without auth/TLS and
+    * would otherwise run as user_id 1 with the fan-out backstop wide open.
+    * Reads stay available (they are already user-scoped and harmless); anything
+    * that starts work fails closed. */
+   if (ctx == NULL && starts_work) {
+      json_object_put(details);
+      OLOG_WARNING("job_tool: refused '%s' from a caller with no session context", action);
+      return strdup("Error: background jobs can only be started from a user session.");
+   }
+
+   /* Backstop: a background-job worker runs headless and must never start further
     * jobs (unbounded fan-out).  The `job` tool is already removed from a job
     * session's schema, so the model shouldn't see it; this refuses any non-schema
-    * path (e.g. a legacy <command> tag) that reaches spawn from a job context. */
-   if (caller_is_job && strcmp(action, "spawn") == 0) {
+    * path (e.g. a legacy <command> tag) that reaches it from a job context.
+    *
+    * `resume` counts: it takes a pool slot and spawns a worker exactly like
+    * spawn does, so leaving it out would reopen the fan-out this closes — via a
+    * job the model can find with `list`. */
+   if (caller_is_job && starts_work) {
       json_object_put(details);
       return strdup("Error: background jobs can't start further background jobs.");
    }
@@ -346,10 +415,12 @@ static char *job_tool_callback(const char *action, char *value, int *should_resp
       result = handle_status(details, user_id);
    } else if (strcmp(action, "cancel") == 0) {
       result = handle_cancel(details, user_id);
+   } else if (strcmp(action, "resume") == 0) {
+      result = handle_resume(details, user_id);
    } else {
       char buf[160];
-      snprintf(buf, sizeof(buf), "Error: unknown action '%s'. Valid: spawn, list, status, cancel.",
-               action);
+      snprintf(buf, sizeof(buf),
+               "Error: unknown action '%s'. Valid: spawn, list, status, cancel, resume.", action);
       result = strdup(buf);
    }
 
@@ -365,12 +436,13 @@ static const treg_param_t job_params[] = {
    {
        .name = "action",
        .description = "The job action: 'spawn' (start a background job), 'list' (show your jobs), "
-                      "'status' (check a job / read its result), 'cancel' (cancel a job).",
+                      "'status' (check a job / read its result), 'cancel' (cancel a job), "
+                      "'resume' (restart a job that was interrupted or failed).",
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
-       .enum_values = { "spawn", "list", "status", "cancel" },
-       .enum_count = 4,
+       .enum_values = { "spawn", "list", "status", "cancel", "resume" },
+       .enum_count = 5,
    },
    {
        .name = "details",
@@ -384,6 +456,7 @@ static const treg_param_t job_params[] = {
            "completion notice to)}.\n"
            "status: {job_id (the number from spawn/list; omit to list all)}.\n"
            "cancel: {job_id (required)}.\n"
+           "resume: {job_id (required)}.\n"
            "list: {} (no fields).",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,

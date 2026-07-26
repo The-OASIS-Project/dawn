@@ -111,9 +111,12 @@ __attribute__((weak)) void webui_broadcast_job_notification(int user_id,
 
 /* Single-job lifecycle push — weak default is a no-op; webui_jobs.c provides the
  * strong override (feeds the client's active-job set, and through it the pills). */
-__attribute__((weak)) void webui_broadcast_job_update(int user_id, const job_record_t *rec) {
+__attribute__((weak)) void webui_broadcast_job_update(int user_id,
+                                                      const job_record_t *rec,
+                                                      bool resumed) {
    (void)user_id;
    (void)rec;
+   (void)resumed;
 }
 
 int job_manager_set_terminal(int64_t conv_id,
@@ -136,12 +139,16 @@ int job_manager_set_terminal(int64_t conv_id,
 }
 
 void job_update_emit(int64_t conv_id, int user_id) {
+   job_update_emit_ex(conv_id, user_id, false);
+}
+
+void job_update_emit_ex(int64_t conv_id, int user_id, bool resumed) {
    if (conv_id <= 0 || user_id <= 0) {
       return;
    }
    job_record_t rec;
    if (conv_db_job_get(conv_id, user_id, &rec) == AUTH_DB_SUCCESS) {
-      webui_broadcast_job_update(user_id, &rec);
+      webui_broadcast_job_update(user_id, &rec, resumed);
    }
 }
 
@@ -459,6 +466,45 @@ int job_manager_cancel(int64_t conv_id, int user_id) {
    }
    pthread_mutex_unlock(&s_pool_mutex);
    return rc;
+}
+
+job_cancel_result_t job_manager_cancel_or_retire(int64_t conv_id,
+                                                 int user_id,
+                                                 char *status_out,
+                                                 size_t status_n) {
+   if (status_out && status_n > 0) {
+      status_out[0] = '\0';
+   }
+   int rc = job_manager_cancel(conv_id, user_id);
+   if (rc == JOB_MGR_OK) {
+      return JOB_CANCEL_SIGNALLED;
+   }
+   if (rc == JOB_MGR_FORBIDDEN) {
+      return JOB_CANCEL_FORBIDDEN;
+   }
+
+   /* Not running.  Either it never reached a worker (queued) or it is already
+    * terminal — the status read is ownership-checked, so a foreign row answers
+    * FORBIDDEN here rather than leaking its state. */
+   char status[JOB_STATUS_MAX];
+   int grc = conv_db_job_get_status(conv_id, user_id, status, sizeof(status));
+   if (grc == AUTH_DB_FORBIDDEN) {
+      return JOB_CANCEL_FORBIDDEN;
+   }
+   if (grc != AUTH_DB_SUCCESS || status[0] == '\0') {
+      return JOB_CANCEL_NOT_FOUND;
+   }
+   if (status_out && status_n > 0) {
+      snprintf(status_out, status_n, "%s", status);
+   }
+   if (strcmp(status, "queued") == 0) {
+      /* No session to signal, so retire the row directly.  mark_fired suppresses
+       * the completion notice: the user just asked for this. */
+      job_manager_set_terminal(conv_id, user_id, "cancelled", NULL, time(NULL), 0);
+      conv_db_job_mark_fired(conv_id);
+      return JOB_CANCEL_RETIRED;
+   }
+   return JOB_CANCEL_ALREADY_TERMINAL;
 }
 
 int job_manager_running_count(void) {

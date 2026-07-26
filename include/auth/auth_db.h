@@ -1245,7 +1245,21 @@ int conv_db_create_job(int user_id,
                        const char *on_complete,
                        const char *deliver_to,
                        int spawn_depth,
+                       const char *goal,
                        int64_t *conv_id_out);
+
+/**
+ * @brief Ownership-scoped: the instruction a job was created with.
+ *
+ * Allocates *out (caller frees) with the job's `job_goal`. Returns
+ * AUTH_DB_NOT_FOUND when the row is absent, not owned by @p user_id, or has no
+ * stored goal — the last case being a pre-v74 job that never dispatched, and so
+ * has neither a goal column nor a first user message to recover one from.
+ *
+ * Deliberately not a job_record_t field: only the resume path needs it, and
+ * job_record_t is bulk-copied in arrays for the WebUI job snapshot.
+ */
+int conv_db_job_get_goal(int64_t conv_id, int user_id, char **out);
 
 /**
  * @brief System-caller: mark a job running and stamp started_at.
@@ -1361,6 +1375,23 @@ int conv_db_job_bump_reinvoke(int64_t conv_id, int *new_count_out);
  * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
  */
 int conv_db_job_fire_boot_reinvokes(int *count_out);
+
+/**
+ * @brief Atomically claim an interrupted/failed job for re-dispatch.
+ *
+ * Resets the row to 'queued' and clears job_error, started_at, finished_at and
+ * **on_complete_fired** — the last of which is what re-arms delivery, since the
+ * interrupted-notify consumed it and the monitor skips a fired row.
+ *
+ * The resumable-status test and the owner test are both part of the UPDATE, so
+ * this is a self-authorizing claim: exactly one of two concurrent callers
+ * succeeds, and a foreign row cannot be claimed even if a caller forgot to check.
+ *
+ * @return AUTH_DB_SUCCESS (claimed), AUTH_DB_NOT_FOUND (absent, not owned by
+ *         @p user_id, not a job, or not in a resumable state), AUTH_DB_INVALID,
+ *         or AUTH_DB_FAILURE.
+ */
+int conv_db_job_reset_for_resume(int64_t conv_id, int user_id);
 
 /**
  * @brief Ownership-scoped: a user's ACTIVE (queued/running) jobs, oldest first.

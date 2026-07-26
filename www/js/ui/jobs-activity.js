@@ -39,18 +39,25 @@ window.DawnJobsActivity = (function () {
       return status === 'running' || status === 'queued';
    }
 
-   // Terminal is a SINK: a job that has finished never becomes active again.
+   // Jobs seen terminal since the last jobs_request was sent.
    //
-   // Enforcing that client-side closes a window the server cannot close by
-   // ordering alone. jobs_snapshot reads the active set and enqueues the frame
-   // as two separate steps; a job finishing in between enqueues its terminal
-   // job_update FIRST, which is dropped here as "never tracked", and then the
-   // snapshot re-inserts the row it read a moment earlier — pinning a finished
-   // job in the set until the next reconnect. Remembering the recent terminals
-   // makes the resurrection impossible regardless of frame order.
+   // This exists for ONE race, and only for snapshots: the server reads the
+   // active set and enqueues the frame as two separate steps, so a job finishing
+   // in between enqueues its terminal job_update FIRST (dropped here as "never
+   // tracked"), and the snapshot then re-inserts the row it read a moment
+   // earlier — pinning a finished job until the next reconnect.
    //
-   // Bounded FIFO: the race window is milliseconds, so a short memory is ample,
-   // and a cap means a long-lived tab cannot accumulate ids forever.
+   // It deliberately does NOT gate live job_update frames. Those are now
+   // ordered at the source: every active-status emit either precedes the
+   // worker's existence (spawn/resume) or is claim-gated on 'queued'
+   // (conv_db_job_set_running), so a stale active frame cannot follow a terminal
+   // one. Gating them too would mean a single dropped frame — queue_response
+   // discards the oldest under pressure — could hide a running job for its whole
+   // runtime with no self-heal.
+   //
+   // Cleared on every jobs_request (see handleReconnect), so it only ever holds
+   // the handful of terminals from one in-flight round trip. The cap is a
+   // backstop against a snapshot request that never gets answered.
    var TERMINAL_MEMORY_MAX = 128;
    var terminalSeen = Object.create(null);
    var terminalOrder = [];
@@ -63,6 +70,20 @@ window.DawnJobsActivity = (function () {
       terminalOrder.push(key);
       if (terminalOrder.length > TERMINAL_MEMORY_MAX) {
          delete terminalSeen[terminalOrder.shift()];
+      }
+   }
+
+   function unmarkTerminal(key) {
+      if (!terminalSeen[key]) {
+         return;
+      }
+      delete terminalSeen[key];
+      // Drop the ordering entry too: leaving it would let a later re-termination
+      // push a duplicate key, and the eventual eviction of the stale copy would
+      // then release a mark that is still live.
+      var i = terminalOrder.indexOf(key);
+      if (i >= 0) {
+         terminalOrder.splice(i, 1);
       }
    }
 
@@ -155,15 +176,22 @@ window.DawnJobsActivity = (function () {
          return;
       }
       var key = String(job.conversation_id);
+      // A resume is the one transition that legitimately moves a job backwards
+      // out of a terminal state, so it clears any mark an in-flight snapshot
+      // would otherwise apply. The server flags it explicitly rather than us
+      // inferring it from the status, because a tab that did not initiate the
+      // resume sees only this frame.
+      if (job.resumed) {
+         unmarkTerminal(key);
+      }
       if (!isActive(job.status)) {
          markTerminal(key);
          if (!(key in jobs)) {
             return; // terminal row for a job we never tracked — nothing changed
          }
          delete jobs[key];
-      } else if (terminalSeen[key]) {
-         return; // stale active row for a job already known finished
       } else {
+         // Applied unconditionally: live frames are ordered at the source.
          jobs[key] = job;
       }
       recount();
@@ -225,6 +253,14 @@ window.DawnJobsActivity = (function () {
 
    function handleReconnect() {
       if (typeof DawnWS !== 'undefined') {
+         // A snapshot request opens a fresh reconciliation window, so drop the
+         // terminal memory here. It exists only to suppress rows that finished
+         // between the server's read and the frame's arrival — marks older than
+         // this request are stale, and keeping them would make the snapshot
+         // refuse a job resumed while this tab was disconnected (whose `resumed`
+         // frame it never received).
+         terminalSeen = Object.create(null);
+         terminalOrder = [];
          DawnWS.send({ type: 'jobs_request' });
       }
    }

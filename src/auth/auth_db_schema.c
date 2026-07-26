@@ -201,6 +201,13 @@ static const char *SCHEMA_SQL =
      * alert there (scheduler deliver_to semantics).  The v73 partial follow-up
      * index (idx_conv_job_followup) lives in the migration, not here. */
     "   deliver_to TEXT DEFAULT NULL,"
+    /* job_goal (v74): the instruction the job was created with, stored at CREATE
+     * time.  Until v74 the goal existed only as the first `messages` row, which
+     * core_text_input_dispatch writes — so a job that died BEFORE dispatch (the
+     * "job capacity reached" class, or any pre-dispatch failure) left an empty
+     * conversation with its goal nowhere, and resuming it re-engaged the model
+     * with no task at all.  `title` is a generated summary, not the goal. */
+    "   job_goal TEXT DEFAULT NULL,"
     "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
     "   FOREIGN KEY (continued_from) REFERENCES conversations(id) ON DELETE SET NULL,"
     "   FOREIGN KEY (parent_id) REFERENCES conversations(id) ON DELETE SET NULL"

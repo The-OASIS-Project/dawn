@@ -44,13 +44,27 @@
 #include "dawn_error.h"
 #include "llm/llm_interface.h"
 #include "logging.h"
+#include "memory/memory_history_loader.h"
 
 /* Work item handed to the detached worker thread. */
 typedef struct {
    int user_id;
    int64_t conv_id;
-   char *goal; /* owned; freed by the worker */
+   char *goal;  /* owned; freed by the worker */
+   bool resume; /* re-dispatch of an interrupted/failed job (history hydrated) */
 } job_work_t;
+
+/* What a resumed job is told.  A fresh job is dispatched with the user's goal on
+ * an empty session; a resume runs on the SAME conversation with its prior
+ * messages hydrated, so re-sending the original goal would read as a duplicate
+ * request and invite the model to start over.  This says what happened and what
+ * to do about it, and leaves the work already in the transcript to speak for
+ * itself. */
+#define JOB_RESUME_DIRECTIVE                                                            \
+   "Your previous attempt at this task did not finish — it was interrupted by a "     \
+   "daemon restart or ended in an error before producing a final answer. The messages " \
+   "above are your own work so far. Review them, continue from where you left off "     \
+   "without repeating work that is already complete, and produce the final answer."
 
 static void job_worker_run(job_work_t *work) {
    session_t *s = NULL;
@@ -68,7 +82,16 @@ static void job_worker_run(job_work_t *work) {
       return;
    }
 
-   conv_db_job_set_running(work->conv_id, time(NULL));
+   /* Claim the row.  Losing means it left 'queued' while this detached thread
+    * was waiting to be scheduled — a cancel retired it, so the turn must not
+    * run.  Release the slot and leave the terminal row exactly as the canceller
+    * wrote it (it already emitted the frame and marked the notice fired). */
+   if (conv_db_job_set_running(work->conv_id, time(NULL)) != AUTH_DB_SUCCESS) {
+      OLOG_INFO("job_worker: conv %lld left 'queued' before start (cancelled) — standing down",
+                (long long)work->conv_id);
+      job_manager_end(s);
+      return;
+   }
    /* queued -> running is a state change WITHIN the active set, so it changes no
     * count — but without it a watcher's row reads 'queued' with started_at 0 for
     * the job's whole runtime, and an elapsed timer computed off that renders
@@ -76,6 +99,52 @@ static void job_worker_run(job_work_t *work) {
    job_update_emit(work->conv_id, work->user_id);
    OLOG_INFO("job_worker: running job conv %lld (session %u, user %d)", (long long)work->conv_id,
              s->session_id, work->user_id);
+
+   /* A resumed job continues an existing transcript, so hydrate it before
+    * dispatching — without this the model sees only JOB_RESUME_DIRECTIVE and
+    * "continue from where you left off" refers to nothing.  Same seam
+    * reinvoke_run_detached uses.
+    *
+    * An EMPTY transcript means the job never dispatched at all — it was refused
+    * at the capacity gate, or its worker failed to start — so there is nothing
+    * to continue: this is a first run, not a resume.  Send the stored goal
+    * instead of the directive.  Getting this wrong is not cosmetic: sending
+    * "continue where you left off" into an empty conversation produced a
+    * confident non-answer, marked the job `done`, and — because `done` is not
+    * resumable — destroyed the retry.  Observed live on conv 970, which is why
+    * v74 made the goal durable at creation. */
+   if (work->resume) {
+      size_t restored = 0;
+      struct json_object *hist = memory_history_load_from_db(work->conv_id, work->user_id,
+                                                             &restored);
+      if (hist != NULL && restored > 0) {
+         pthread_mutex_lock(&s->history_mutex);
+         if (s->conversation_history) {
+            json_object_put(s->conversation_history);
+         }
+         s->conversation_history = hist;
+         pthread_mutex_unlock(&s->history_mutex);
+         OLOG_INFO("job_worker: resuming conv %lld with %zu bytes of history — continuing",
+                   (long long)work->conv_id, restored);
+      } else {
+         if (hist != NULL) {
+            json_object_put(hist);
+         }
+         /* job_worker_resume() refuses to claim a transcript-less row without a
+          * goal, so this swap always has something to send. */
+         char *goal = NULL;
+         if (conv_db_job_get_goal(work->conv_id, work->user_id, &goal) == AUTH_DB_SUCCESS &&
+             goal != NULL) {
+            free(work->goal);
+            work->goal = goal;
+            OLOG_INFO("job_worker: conv %lld never ran — restarting from its goal",
+                      (long long)work->conv_id);
+         } else {
+            OLOG_WARNING("job_worker: resume of conv %lld has neither history nor a goal",
+                         (long long)work->conv_id);
+         }
+      }
+   }
 
    /* Persist tool iterations to the job conversation for the whole (synchronous)
     * dispatch; pctx is stack-scoped and the hook fires on THIS thread. */
@@ -177,7 +246,91 @@ static void *job_worker_thread(void *arg) {
    return NULL;
 }
 
+/* Static: the only sanctioned way to reach a resume is job_worker_resume(),
+ * which owns the ownership check, capacity gate, atomic claim and broadcast.
+ * Exporting these next to it would make the unguarded call the shorter one. */
+static int job_worker_spawn_ex(int user_id, int64_t conv_id, const char *goal, bool resume);
+
+static int job_worker_spawn_resume(int user_id, int64_t conv_id) {
+   return job_worker_spawn_ex(user_id, conv_id, JOB_RESUME_DIRECTIVE, true);
+}
+
+job_resume_result_t job_worker_resume(int64_t conv_id, int user_id) {
+   if (conv_id <= 0 || user_id <= 0) {
+      return JOB_RESUME_NOT_FOUND;
+   }
+
+   /* Ownership first: a job id is a guessable integer, so every surface that can
+    * reach this must bind its caller's user_id (§8.2).  conv_db_job_get answers
+    * FORBIDDEN for a foreign row and NOT_FOUND for a non-job conversation. */
+   job_record_t rec;
+   int grc = conv_db_job_get(conv_id, user_id, &rec);
+   if (grc == AUTH_DB_FORBIDDEN) {
+      return JOB_RESUME_FORBIDDEN;
+   }
+   if (grc != AUTH_DB_SUCCESS) {
+      return JOB_RESUME_NOT_FOUND;
+   }
+
+   /* Fail before mutating.  job_manager_begin enforces the caps regardless, but
+    * only by resetting the row and then immediately failing it, which reads to
+    * the user as "resuming broke the job". */
+   if (job_manager_capacity(user_id, job_provider_from_default()) != JOB_MGR_OK) {
+      return JOB_RESUME_CAPACITY;
+   }
+
+   /* There must be SOMETHING to run: either a transcript to continue, or the
+    * stored goal to start from.  A pre-v74 job that never dispatched has
+    * neither — its goal was only ever a `messages` row that was never written,
+    * and the v74 backfill had nothing to recover.  Refusing is the whole point:
+    * resuming one anyway re-engages the model with no task, and the resulting
+    * empty `done` is unresumable, so a bad resume is destructive rather than
+    * merely useless. */
+   char *goal_probe = NULL;
+   bool have_goal = (conv_db_job_get_goal(conv_id, user_id, &goal_probe) == AUTH_DB_SUCCESS);
+   free(goal_probe);
+   if (!have_goal) {
+      size_t restored = 0;
+      struct json_object *hist = memory_history_load_from_db(conv_id, user_id, &restored);
+      if (hist != NULL) {
+         json_object_put(hist);
+      }
+      if (restored == 0) {
+         OLOG_WARNING("job_worker: conv %lld has no goal and no transcript — not resumable",
+                      (long long)conv_id);
+         return JOB_RESUME_NOTHING_TO_RUN;
+      }
+   }
+
+   /* The claim.  The resumable-status test lives inside the UPDATE, so exactly
+    * one of two concurrent callers (two clicks, or the tool and a browser at
+    * once) proceeds to spawn a worker. */
+   if (conv_db_job_reset_for_resume(conv_id, user_id) != AUTH_DB_SUCCESS) {
+      return JOB_RESUME_NOT_RESUMABLE;
+   }
+
+   /* Publish 'queued' before the worker exists — same ordering rule as spawn —
+    * flagged so watchers release the terminal mark they hold for this job. */
+   job_update_emit_ex(conv_id, user_id, true);
+
+   if (job_worker_spawn_resume(user_id, conv_id) != SUCCESS) {
+      job_manager_set_terminal(conv_id, user_id, "failed", "resume failed to start", time(NULL), 0);
+      /* The reset just cleared on_complete_fired, so this row is terminal and
+       * unfired.  Without waking the dirty-gated monitor it waits for an
+       * unrelated job transition — on an idle daemon, forever, and across a
+       * restart the boot-time guard marks it fired and suppresses the notice. */
+      job_manager_mark_dirty();
+      return JOB_RESUME_FAILED;
+   }
+   OLOG_INFO("job_worker: resumed job conv %lld for user %d", (long long)conv_id, user_id);
+   return JOB_RESUME_STARTED;
+}
+
 int job_worker_spawn(int user_id, int64_t conv_id, const char *goal) {
+   return job_worker_spawn_ex(user_id, conv_id, goal, false);
+}
+
+static int job_worker_spawn_ex(int user_id, int64_t conv_id, const char *goal, bool resume) {
    if (user_id <= 0 || conv_id <= 0 || goal == NULL) {
       return FAILURE;
    }
@@ -187,6 +340,7 @@ int job_worker_spawn(int user_id, int64_t conv_id, const char *goal) {
    }
    work->user_id = user_id;
    work->conv_id = conv_id;
+   work->resume = resume;
    work->goal = strdup(goal);
    if (work->goal == NULL) {
       free(work);

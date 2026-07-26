@@ -301,7 +301,7 @@ void webui_broadcast_job_notification(int user_id,
  *
  * Weak symbol: a no-op unless WebUI links its strong override.
  */
-void webui_broadcast_job_update(int user_id, const job_record_t *rec);
+void webui_broadcast_job_update(int user_id, const job_record_t *rec, bool resumed);
 
 /**
  * @brief Read @p conv_id's job row and broadcast it (see webui_broadcast_job_update).
@@ -317,6 +317,15 @@ void webui_broadcast_job_update(int user_id, const job_record_t *rec);
  * thread reintroduces the stale-read race documented at the spawn site.
  */
 void job_update_emit(int64_t conv_id, int user_id);
+
+/**
+ * @brief job_update_emit() for the one transition that moves a job BACKWARDS.
+ *
+ * @p resumed rides along on the frame because clients treat a terminal status as
+ * absorbing — that is what keeps a stale frame from resurrecting a finished job
+ * — so a resume has to say so explicitly or every watcher refuses it.
+ */
+void job_update_emit_ex(int64_t conv_id, int user_id, bool resumed);
 
 /**
  * @brief Record a job's terminal state AND emit its `complete` event (§6.2).
@@ -356,6 +365,36 @@ int job_manager_set_terminal(int64_t conv_id,
  * @return JOB_MGR_OK, or JOB_MGR_CAP_{GLOBAL,PROVIDER,USER}, or JOB_MGR_FAIL.
  */
 int job_manager_capacity(int user_id, job_provider_class_t provider);
+
+/** Outcome of job_manager_cancel_or_retire(). */
+typedef enum {
+   JOB_CANCEL_SIGNALLED,        /**< running job was told to stop */
+   JOB_CANCEL_RETIRED,          /**< queued row never reached a worker; retired directly */
+   JOB_CANCEL_ALREADY_TERMINAL, /**< already done/failed/cancelled/interrupted */
+   JOB_CANCEL_FORBIDDEN,        /**< owned by a different user */
+   JOB_CANCEL_NOT_FOUND         /**< no such job */
+} job_cancel_result_t;
+
+/**
+ * @brief Cancel a job however it needs cancelling — ONE mutation path.
+ *
+ * "Cancel" is two different operations depending on where the job is: a running
+ * job is signalled through its session, while a queued row has no session and
+ * must be retired directly (and marked fired, so the user is not notified about
+ * a stop they asked for). Both the `job` tool and the WebUI `job_action` handler
+ * need exactly that pair, and they differ only in how they word the outcome —
+ * hence a result enum here rather than duplicated logic at each surface.
+ *
+ * Ownership-checked internally; a foreign job answers JOB_CANCEL_FORBIDDEN
+ * without revealing its state.
+ *
+ * @param status_out Optional: receives the job's status when it was NOT running
+ *                   (i.e. for RETIRED / ALREADY_TERMINAL), for message wording.
+ */
+job_cancel_result_t job_manager_cancel_or_retire(int64_t conv_id,
+                                                 int user_id,
+                                                 char *status_out,
+                                                 size_t status_n);
 
 #ifdef __cplusplus
 }

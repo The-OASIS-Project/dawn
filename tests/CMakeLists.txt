@@ -104,6 +104,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v71.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v72.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v73.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v74.c
     ${SRC_ROOT}/src/auth/auth_db_statements.c
     ${SRC_ROOT}/src/auth/auth_db_user.c
     ${SRC_ROOT}/src/auth/auth_db_session.c
@@ -971,6 +972,18 @@ dawn_add_unit_test(test_conv_db_jobs
    LIBS    dawn_common unity sqlite3 pthread m stemmer
    LABEL   ci)
 
+# Pure string transform shared by six history-hydration callers  (json-c is for
+# the rest of the TU, not the helper under test) (resume,
+# reinvoke, messaging drift reload, ...).  Links the loader against the real
+# auth_db sources because the TU needs them, though only the pure helper is
+# exercised.
+dawn_add_unit_test(test_history_strip_markers
+   SOURCES test_history_strip_markers.c
+           ${SRC_ROOT}/src/memory/memory_history_loader.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # Background-job session pool.  ENABLE_MULTI_CLIENT is forced (same reason as
 # test_ota_rollout above): the ci preset builds WEBUI=OFF, and session_manager.h
 # only declares the multi-client session API — session_job_lookup_fn, and the
@@ -1261,3 +1274,11 @@ add_test(NAME check_swap_eligible_types_mirror
          COMMAND bash ${SRC_ROOT}/tests/check_swap_eligible_types_mirror.sh
          WORKING_DIRECTORY ${SRC_ROOT})
 set_tests_properties(check_swap_eligible_types_mirror PROPERTIES LABELS "ci")
+
+# SECTION_CATEGORIES in schema.js is the settings render gate — a section absent
+# from it is invisible in the UI no matter how correctly it is wired everywhere
+# else.  `[attention]` and `[jobs]` both shipped that way before this guard.
+add_test(NAME check_settings_sections_rendered
+         COMMAND bash ${SRC_ROOT}/tests/check_settings_sections_rendered.sh
+         WORKING_DIRECTORY ${SRC_ROOT})
+set_tests_properties(check_settings_sections_rendered PROPERTIES LABELS "ci")

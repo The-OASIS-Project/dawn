@@ -1017,6 +1017,15 @@
                   DawnJobs.handleHistoryPage(msg.payload);
                }
                break;
+            case 'job_action_response':
+               // Result of a cancel/resume. Always sent, including on refusal,
+               // so a panel can tell "refused" from "still working".
+               if (typeof DawnJobs !== 'undefined' && DawnJobs.handleActionResult) {
+                  DawnJobs.handleActionResult(msg.payload);
+               } else if (msg.payload && !msg.payload.ok) {
+                  console.warn('job_action refused:', msg.payload.message);
+               }
+               break;
             case 'phone_call_notification':
                if (typeof DawnPhone !== 'undefined') {
                   DawnPhone.handleNotification(msg.payload);

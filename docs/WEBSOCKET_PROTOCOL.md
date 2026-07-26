@@ -138,6 +138,19 @@ clamped server-side (default 25, max 50). Response: `list_jobs_response`.
 }
 ```
 
+#### `job_action`
+Cancel or resume one background job. Ownership is checked against the connection's
+authenticated user **before** acting; a job belonging to someone else and a job
+that does not exist give the same answer, so this cannot be used to probe for
+other users' job ids. Always answered with `job_action_response`.
+```json
+{ "type": "job_action", "payload": { "action": "cancel", "conversation_id": 1009 } }
+```
+- `cancel` — signals a running job, or retires a still-queued one.
+- `resume` — re-dispatches an `interrupted` or `failed` job, continuing its
+  existing transcript. Counts as a spawn against the job caps. Refused for
+  `done` (it has an answer), `cancelled` (stopped deliberately), and `running`.
+
 ### Configuration (Admin Only)
 
 #### `get_config`
@@ -981,12 +994,29 @@ from this set is a **lower bound** — it should not happen under any valid conf
 ```
 
 #### `job_update` — one job's lifecycle transition
-Pushed when a job enters the active set (spawn) or leaves it (any terminal
-disposition, including the boot interrupted-scan). Clients **upsert by
-`conversation_id` and drop on terminal status** — set membership, never +/-1
-arithmetic, so duplicate or out-of-order frames converge.
+Pushed when a job enters the active set (spawn), changes state within it
+(`queued`→`running`), or leaves it (any terminal disposition, including the boot
+interrupted-scan). Clients **upsert by `conversation_id` and drop on terminal
+status** — set membership, never +/-1 arithmetic, so duplicate or out-of-order
+frames converge.
 ```json
 { "type": "job_update", "payload": { "job": { /* … */ } } }
+```
+The job object carries **`resumed: true`** on exactly one transition: a successful
+`job_action{resume}`, which moves a job *backwards* out of a terminal state. Since
+clients treat terminal as a sink — that is what stops a stale frame from
+resurrecting a finished job — this flag is what tells them to release the mark. A
+tab that did not initiate the resume sees only this frame, so the signal has to be
+in the data rather than in frame ordering.
+
+#### `job_action_response`
+Result of a `job_action`. Sent on every outcome including refusal, so a client can
+distinguish "refused" from "still working".
+```json
+{
+   "type": "job_action_response",
+   "payload": { "action": "resume", "conversation_id": 1009, "ok": true, "message": "Resuming." }
+}
 ```
 
 #### `list_jobs_response` — a page of terminal jobs

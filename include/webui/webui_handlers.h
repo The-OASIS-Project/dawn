@@ -165,6 +165,18 @@ void webui_jobs_send_history(ws_connection_t *conn,
                              int limit);
 
 /**
+ * @brief Handle `job_action {action, conversation_id}` — cancel or resume.
+ *
+ * Binds `conn->auth_user_id` and loads the job ownership-checked BEFORE acting
+ * (§8.2 IDOR guard: a job id is a guessable integer, unlike `phone_action`'s
+ * single operator-owned modem).  A foreign or absent job gets one
+ * indistinguishable answer so the handler is not an id oracle.
+ *
+ * Always replies with `job_action_response {action, conversation_id, ok, message}`.
+ */
+void webui_jobs_handle_action(ws_connection_t *conn, struct json_object *payload);
+
+/**
  * @brief Delete a conversation
  */
 void handle_delete_conversation(ws_connection_t *conn, struct json_object *payload);

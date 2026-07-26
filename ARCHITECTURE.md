@@ -660,7 +660,7 @@ The WebUI settings panel (`www/js/ui/settings.js`) defines a `SETTINGS_SCHEMA` t
 | OTA / Fleet        | `[ota]`                               | Release dir, download-token TTL, TLS requirement; fleet rollout lives in the OTA panel, not Settings |
 | Code Projects      | `[code_projects]`                     | Coding harness: enable, source root, import permissions, clone caps, and `allowed_local_roots` (link-local allowlist). Compiled in only with `DAWN_ENABLE_CODE_PROJECTS`. |
 | Scheduler & Watches | `[scheduler]`, `[attention]`         | Snooze/alarm defaults, per-user + global event caps, missed-task policy, retention; SAGE watch budgets (watch *rules* are DB-backed, not config) |
-| Background Jobs    | `[jobs]`                              | Master enable, global/per-user/per-provider concurrency caps, per-job runtime reap, reinvoke caps. Job create/list/cancel is conversational (the `job` tool + WebUI), never config. Four Phase-2/3 knobs are parsed and round-tripped but not yet enforced, so they are deliberately **not** surfaced in the panel |
+| Background Jobs    | `[jobs]`                              | Master enable, global/per-user/per-provider concurrency caps, per-job runtime reap, reinvoke caps. Job create/list/cancel/resume is conversational (the `job` tool + WebUI), never config. Four Phase-2/3 knobs are parsed and round-tripped but not yet enforced, so they are deliberately **not** surfaced in the panel |
 
 ### Adding a setting — read [docs/CONFIGURATION_GUIDE.md](docs/CONFIGURATION_GUIDE.md) first
 

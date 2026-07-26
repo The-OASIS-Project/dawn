@@ -236,7 +236,7 @@ been created. `max_active_jobs` is now a pure policy counter with nothing alloca
 
 ### Spawn
 
-Jobs are created via an **LLM tool** (`job_tool.c`, actions `spawn`/`list`/`status`/`cancel`) and the WebUI — never TOML (JARVIS conversational-control principle). Spawn:
+Jobs are created via an **LLM tool** (`job_tool.c`, actions `spawn`/`list`/`status`/`cancel`/`resume`) and the WebUI — never TOML (JARVIS conversational-control principle). Spawn:
 
 1. Creates a child conversation (`conv_db_create`) with the **spawner's `user_id` (non-overridable)**, `parent_id`, `spawn_mode`, `on_complete`, `spawn_depth = parent.spawn_depth + 1`, `job_status='queued'`, inheriting the parent's per-conversation LLM settings by default (explicit overrides allowed — messaging seeded-settings precedent).
 2. **Budget gates — refuse (not silently enqueue) past a cap:** `spawn_depth ≤ max_spawn_depth`; active children in this tree `≤ max_children_per_tree`; **global** active jobs `≤ max_active_jobs`; **per-user** concurrent `≤ max_jobs_per_user` and queued `≤ max_queued_per_user`; per-provider running counter (`max_concurrent_local`/`_cloud`). If the cancelling ancestor's `cancel_requested` is set, spawn is refused (spawn-into-cancelling-tree guard). Over the running-counter but under the queue cap → `queued`; over the queue cap → refusal returned to the LLM.
@@ -253,6 +253,7 @@ Each tick drains up to **`monitor_followups_per_tick`** rows (bounded work — n
 - `on_complete='notify'` → deliver via scheduler/briefing infra (coalesced — §6 completion), `deliver_to` for messaging-origin jobs. Flip `on_complete_fired=1` **only on success**; retry next tick otherwise.
 - `on_complete='reinvoke_parent'` → **defer if the parent has a turn in flight** (Odysseus monitor discipline). When parent idle: load the child result from `messages` (`conv_db_get_messages`, ownership-scoped), inject into the parent conversation (DB + `session_add_message` + `session_dispatch_user_turn`), re-dispatch, `reinvoke_count++`. Flip the flag only after dispatch succeeds. If `reinvoke_count ≥ max_reinvokes_per_tree`, stop re-dispatching and notify instead (livelock guard).
 - A `max_runtime_sec` reap marks a hung job `failed` and **still fires** its follow-up ("timed out") so completion never silently no-ops — but the reap counts against `reinvoke_count`/the tree budget so a timeout→re-dispatch→re-spawn loop cannot run forever.
+- **Every row routed to the reinvoke processor must leave the follow-up set.** The monitor partitions on `on_complete` *before* the mark-fired branch, so the processor owns firing for `reinvoke_parent` rows — and a row it declines to fire is stranded permanently. This bit once (fixed 2026-07-25): `conversations.parent_id` is `ON DELETE SET NULL`, so **deleting a parent conversation orphans its finished children after the fact**, and the processor skipped rootless rows without firing them. Because `conv_db_job_list_pending_followups` is **global — no `user_id` filter** — and ordered `finished_at ASC`, a handful of orphans sort first forever, consume the entire per-tick budget, and starve completion notifications for *every user on the daemon* while pinning the dirty-gated monitor permanently on. An orphan now fires and degrades to a notification, since there is no parent left to re-engage.
 
 ### Cancel (ownership-bounded, cascading)
 
@@ -313,7 +314,22 @@ Server code: `src/webui/webui_jobs.c` (frames) + `conv_db_job_list_active_by_use
 
 - **`attach_conversation {conv_id, last_seq}`** (extends the existing `load_conversation` handler): server **binds `conn->auth_user_id`, loads the conv ownership-checked** (`conv_db_get(conv_id, auth_user_id)`), then replies with (a) messages via `conv_db_get_messages`, (b) durable events where `seq > last_seq` **JOINed on `user_id`**, (c) in-memory ring replay of the current partial turn, then (d) live-tails. **Register-subscriber-before-replay** + seq-dedup + end-sentinel tail-flush (copied from `agent_runs.subscribe()`). Replay size capped / rate-limited (L1).
 - **`jobs_request {}`** → `jobs_snapshot`. **`list_jobs {before_created_at, before_id, limit}`** → `list_jobs_response` (cursor omitted/0 = first page; echo back the response's `next_before_*` for the next one).
-- **`job_action {spawn|cancel|resume, conv_id, ...}`** — mirror `phone_action`'s shape **and** ownership-check `conv_id` against `auth_user_id` before acting (IDOR guard — §Security C3). *(`spawn` deliberately dropped — creation is conversational, §7.)* **Not yet built** — the remainder of CP3.
+- **`job_action {action, conversation_id}`** where action ∈ `cancel` | `resume` → `job_action_response {action, conversation_id, ok, message}`. *(`spawn` deliberately dropped — creation is conversational, §7.)*
+
+**`job_action` as built (CP3b).** `phone_action` is the model for the *frame*, not for the *authorization*: it acts on a single operator-owned modem and checks one configured owner id, whereas a job id is a guessable integer belonging to whoever spawned it. So every action binds `conn->auth_user_id` and loads the row through the ownership-checked `conv_db_job_get` **before doing anything** (§8.2). A foreign job and a nonexistent one get the same answer — distinguishing them would make the handler an oracle for other users' job ids. Every exit answers, including refusals, so a panel can tell "refused" from "still working".
+
+- **`cancel`** is two operations behind one name — a *running* job is signalled through its session, a *queued* one has no session and must be retired directly (and marked fired, so the user is not notified about a stop they asked for). Both the `job` tool and this handler need exactly that pair, so it lives once in `job_manager_cancel_or_retire()` and each surface only words the outcome.
+- **`resume`** re-dispatches an `interrupted` **or `failed`** job — the design originally scoped this to `interrupted` (the boot-scan gap), but a job that failed on "job capacity reached" is the same one-click retry and the state machine does not distinguish them. `done` and `cancelled` are excluded: one has an answer, the other was stopped deliberately.
+  - **The resumable-status test is inside the UPDATE** (`conv_db_job_reset_for_resume`), so it is a *claim*: two clicks or two tabs cannot both spawn a worker onto the same job.
+  - **`on_complete_fired` is cleared** — this is what re-arms delivery. The interrupted-notify already consumed the flag and the monitor skips a fired row, so without it a resumed job finishes and notifies nobody.
+  - **It counts as a spawn for caps.** The worker goes through the same `job_manager_begin()` gate; the handler pre-checks `job_manager_capacity()` only so a full pool refuses cleanly instead of resetting the row and immediately failing it.
+  - It **inherits the memory-extraction exemption** for free, by running on a `SESSION_TYPE_JOB` pool session.
+  - The worker **hydrates the conversation's prior messages** (the seam `reinvoke_run_detached` uses) and dispatches a continuation directive rather than the original goal — re-sending the goal onto a hydrated transcript reads as a duplicate request and invites starting over.
+  - Its `job_update` carries **`resumed: true`**. Resume is the one transition that moves a job *backwards* out of a terminal state, and clients treat terminal as a sink; without an explicit flag every tab that watched the job fail would refuse the resurrection. A flag rather than a frame-ordering rule, because a tab that did not initiate the resume sees only this frame.
+  - **The goal is durable from CREATE (v74 `job_goal`)**, not a side effect of a successful dispatch. Until v74 the goal existed only as the conversation's first `messages` row, which `core_text_input_dispatch` writes once the worker is running — so a job refused at the capacity gate wrote no messages and lost its instruction entirely (`title` is a generated summary, not the goal). Resuming one dispatched "continue where you left off" into an empty conversation; the model answered that there was nothing to continue, the job went `done`, and because `done` is not resumable **the retry was destroyed**. Observed live on conv 970. Now: a resume with a transcript continues it, a resume without one **re-sends the stored goal** (it never ran, so it is a first run, not a resume), and a pre-v74 row with neither is **refused** (`JOB_RESUME_NOTHING_TO_RUN`) rather than run to an empty `done`. `job_goal` is deliberately not a `job_record_t` field — only the resume path reads it, and `job_record_t` is bulk-copied in arrays for the WebUI snapshot.
+  - **`conv_db_job_set_running` is a claim too** (`WHERE job_status='queued'`), and a worker that loses it stands down. Resume creates queued rows on demand and CP4 will put Resume and Cancel on the same row, so "resume then immediately cancel" stops being a millisecond race: the cancel finds no session, retires the row, reports success — and without the claim the worker would then resurrect it to `running` and finish a job the user was told had stopped.
+  - **The client's terminal sink applies to `jobs_snapshot` only.** Live `job_update` frames are ordered at the source (every active-status emit either precedes the worker's existence or is claim-gated on `queued`), so gating them too would let one dropped frame — `queue_response` discards the oldest under pressure — hide a running job for its whole runtime with no self-heal. The sink is also cleared on every `jobs_request`, so it spans one round trip rather than a session.
+  - **Also a `job` tool action**, so "resume that job" works by voice or in chat, not only from the panel. Both surfaces call one `job_worker_resume()` — the ownership check, capacity test, atomic claim, `resumed` broadcast and spawn all live there, so a third surface cannot get the ordering or the authorization subtly different. **The headless backstop covers `resume` as well as `spawn`**: a resume takes a pool slot and starts a worker exactly like a spawn, so allowing it from a job session would reopen the unbounded fan-out that backstop closes — reachable via any job the model can find with `list`.
 
 **Ordering unifier:** within a conversation, `messages.id` and `conversation_events.seq` interleave by insertion order; live deltas belong to the not-yet-persisted tail message. Renderer algorithm (identical both surfaces): render merged messages + events → append partial tail from ring replay → live-tail → append final text on `message_appended`.
 
@@ -648,8 +664,11 @@ by architecture/security/embedded passes, then a **6-agent full pre-commit revie
     (`status`/`tool_call`/`tool_result`/`spawn`/`complete`), ownership-JOINed reads (§8.3), secret redaction (§8.6),
     kind-aware retention (§8.8), `attach_conversation {last_seq}` replay, `message_appended`, and the
     `tests/tools/tail_conversation.py` line-printer (contract gate, passed on real data).
-  - ✅ **CP3 frame half** — the lifetime split: `jobs_snapshot` / `job_update` / `list_jobs_response` replacing the
+  - ✅ **CP3a frame half** — the lifetime split: `jobs_snapshot` / `job_update` / `list_jobs_response` replacing the
     Phase-1 count frames (§6.4 amendment).
+  - ✅ **CP3b control surface** — `job_action {cancel|resume}` + `job_action_response`, ownership-checked before
+    acting; the resume re-dispatch (atomic claim, `on_complete_fired` re-arm, history hydration, counts as a spawn);
+    and `job_manager_cancel_or_retire()` so the tool and the WS surface share ONE cancel mutation path.
   - ✅ **Live-verified 2026-07-25** on a real 4-job fan-out: 12 `job_update` emissions (4 jobs ×
     `queued`→`running`→`done`, in order), pills tracking live, snapshot rehydrating on reconnect, and
     `tail_conversation.py --jobs` walking 24/25 history pages with no repeats, no stalled cursor, and no
@@ -674,8 +693,10 @@ by architecture/security/embedded passes, then a **6-agent full pre-commit revie
 - **Trees (Phase 3).** `spawn_depth=parent+1` propagation, `max_spawn_depth`/`max_children_per_tree` **enforcement**,
   cascade cancel, spawn-into-cancelling-tree guard, parent-delete reap, settings inheritance, `awaited` UI sugar. *(Headless
   workers currently block job→job spawning; re-enable only behind enforced caps.)*
-- **Resume.** Boot marks `interrupted` + notifies ✅, but the explicit **Resume button** / `job_action{resume}` (re-dispatch
-  with history + "you were interrupted" line) is not built.
+- ~~**Resume.**~~ ✅ **SHIPPED (CP3b).** `job_action{resume}` re-dispatches an interrupted **or failed** job with its
+  transcript hydrated and a continuation directive; the status test is inside the UPDATE so the claim is atomic,
+  `on_complete_fired` is cleared to re-arm delivery, and it counts as a spawn against the caps. The **Resume
+  *button*** is CP4 (the frame it calls is live).
 - **Phase 4 — workspace/sandbox.** `workspace_ref` reserved; zero semantics (MCP reattach, generation nonce, inheritance,
   `terminal_chunk` events, sandbox-count cap).
 - **Phase 5 — TUI client.** Stretch; blocked on the Phase-2 event contract.

@@ -1372,6 +1372,11 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
             limit = json_object_get_int(o);
       }
       webui_jobs_send_history(conn, before_created_at, before_id, limit);
+   } else if (strcmp(type, "job_action") == 0) {
+      /* cancel | resume.  Ownership is checked inside, against conn->auth_user_id. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_jobs_handle_action(conn, payload);
    } else if (strcmp(type, "scheduler_action") == 0) {
       if (!conn_is_satellite_session(conn) && !conn_require_auth(conn))
          return;

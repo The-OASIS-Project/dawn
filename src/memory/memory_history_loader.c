@@ -44,8 +44,25 @@ char *memory_history_strip_image_markers(const char *src) {
       return NULL;
    }
    const char *p = src;
+   const char *end = src + in_len;
    char *q = dst;
-   while (*p) {
+   /* Skip to the next '[' with memchr rather than testing strncmp at every byte.
+    * A marker can only start at a '[', so the 7-byte compare runs at candidates
+    * instead of ~once per character — and memchr is vectorized in ARM64 glibc
+    * while the byte loop is not.  Measured 7x on a real job transcript (239 KB:
+    * 1070us -> 154us), which matters because this runs INSIDE the callback that
+    * conv_db_get_messages holds the global auth_db mutex across.  Six callers
+    * share it, two of them hotter than the resume path this was found on. */
+   for (;;) {
+      const char *br = memchr(p, '[', (size_t)(end - p));
+      if (!br) {
+         memcpy(q, p, (size_t)(end - p));
+         q += (end - p);
+         break;
+      }
+      memcpy(q, p, (size_t)(br - p));
+      q += (br - p);
+      p = br;
       if (strncmp(p, "[IMAGE:", 7) == 0) {
          const char *close = strchr(p + 7, ']');
          if (close) {

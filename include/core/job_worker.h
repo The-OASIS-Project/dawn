@@ -29,6 +29,7 @@
 #ifndef JOB_WORKER_H
 #define JOB_WORKER_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -50,6 +51,41 @@ extern "C" {
  * @return SUCCESS if the worker thread was spawned, FAILURE otherwise.
  */
 int job_worker_spawn(int user_id, int64_t conv_id, const char *goal);
+
+/* NOTE: the unguarded resume primitives (raw spawn-with-history-hydration) are
+ * deliberately NOT exported.  They perform no ownership check, no capacity
+ * check, no atomic claim and no `resumed` broadcast — the four things
+ * job_worker_resume() exists to guarantee — so exposing them next to it would
+ * make the unsafe call the shorter one to reach for. */
+
+/** Outcome of job_worker_resume(). */
+typedef enum {
+   JOB_RESUME_STARTED,       /**< claimed and a worker was spawned */
+   JOB_RESUME_NOT_RESUMABLE, /**< exists, but is done/cancelled/running/queued */
+   JOB_RESUME_CAPACITY,      /**< job caps full; nothing was mutated */
+   JOB_RESUME_FORBIDDEN,     /**< owned by a different user */
+   JOB_RESUME_NOT_FOUND,     /**< no such job */
+   /* Pre-v74 job that never dispatched: no transcript to continue, and no stored
+    * goal to restart from (its goal only ever existed as a `messages` row that
+    * was never written).  Refused rather than run, because resuming with nothing
+    * to do yields an empty `done` — and `done` is not resumable, so the mistake
+    * is destructive. */
+   JOB_RESUME_NOTHING_TO_RUN,
+   JOB_RESUME_FAILED /**< claimed, but the worker thread would not start */
+} job_resume_result_t;
+
+/**
+ * @brief Resume an interrupted/failed job — ONE mutation path for every surface.
+ *
+ * Ownership check, capacity check, atomic claim, `resumed` broadcast and worker
+ * spawn, in the order that leaves nothing half-done: capacity is tested BEFORE
+ * the claim so a full pool refuses without touching the row.
+ *
+ * Callers (the `job` tool, the WebUI `job_action` handler) supply their own
+ * caller's user_id and only word the outcome — the authorization is here, so a
+ * new surface cannot forget it.
+ */
+job_resume_result_t job_worker_resume(int64_t conv_id, int user_id);
 
 #ifdef __cplusplus
 }

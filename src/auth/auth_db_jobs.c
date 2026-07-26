@@ -124,6 +124,7 @@ int conv_db_create_job(int user_id,
                        const char *on_complete,
                        const char *deliver_to,
                        int spawn_depth,
+                       const char *goal,
                        int64_t *conv_id_out) {
    if (user_id <= 0 || !conv_id_out) {
       return AUTH_DB_INVALID;
@@ -161,8 +162,8 @@ int conv_db_create_job(int user_id,
        s_db.db,
        "INSERT INTO conversations "
        "(user_id, title, created_at, updated_at, anchor_date, origin, "
-       " parent_id, spawn_mode, on_complete, deliver_to, spawn_depth, job_status) "
-       "VALUES (?, ?, ?, ?, ?, 'job', ?, ?, ?, ?, ?, 'queued')",
+       " parent_id, spawn_mode, on_complete, deliver_to, spawn_depth, job_goal, job_status) "
+       "VALUES (?, ?, ?, ?, ?, 'job', ?, ?, ?, ?, ?, ?, 'queued')",
        -1, &st, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("conv_db_create_job: prepare failed: %s", sqlite3_errmsg(s_db.db));
@@ -189,6 +190,15 @@ int conv_db_create_job(int user_id,
       sqlite3_bind_null(st, 9);
    }
    sqlite3_bind_int(st, 10, spawn_depth);
+   /* The goal, durable from creation.  Stored here rather than left to emerge as
+    * the first `messages` row, because a job that never dispatches (capacity
+    * refusal, worker-spawn failure) writes no messages at all and would
+    * otherwise lose the instruction entirely — see the v74 migration. */
+   if (goal && goal[0] != '\0') {
+      sqlite3_bind_text(st, 11, goal, -1, SQLITE_TRANSIENT);
+   } else {
+      sqlite3_bind_null(st, 11);
+   }
 
    rc = sqlite3_step(st);
    sqlite3_finalize(st);
@@ -248,9 +258,37 @@ int conv_db_job_set_running(int64_t conv_id, time_t started_at) {
    if (conv_id <= 0) {
       return AUTH_DB_INVALID;
    }
-   struct running_bind b = { conv_id, started_at };
-   return job_update_exec("UPDATE conversations SET job_status='running', started_at=? WHERE id=?",
-                          bind_running, &b, "set_running");
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   /* A CLAIM on 'queued', not a blind write.  A worker is detached, so between
+    * its row being queued and its thread being scheduled the user can cancel:
+    * the cancel finds no session, retires the row to 'cancelled' and reports
+    * success — and then this write would resurrect it to 'running', so the job
+    * runs to completion after the user was told it stopped.  The window is
+    * ordinary-sized now that resume creates queued rows on demand and the panel
+    * will offer Resume and Cancel on the same row.  Losing the claim is how the
+    * worker learns to stand down. */
+   if (sqlite3_prepare_v2(s_db.db,
+                          "UPDATE conversations SET job_status='running', started_at=? "
+                          "WHERE id=? AND job_status='queued'",
+                          -1, &st, NULL) != SQLITE_OK) {
+      OLOG_ERROR("auth_db_jobs: prepare set_running failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(st, 1, (int64_t)started_at);
+   sqlite3_bind_int64(st, 2, conv_id);
+   int rc = sqlite3_step(st);
+   int changed = sqlite3_changes(s_db.db);
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("auth_db_jobs: set_running failed for conv %lld", (long long)conv_id);
+      return AUTH_DB_FAILURE;
+   }
+   /* NOT_FOUND = the row left 'queued' underneath us (cancelled, or already
+    * claimed by another worker).  The caller must abandon the turn. */
+   return changed == 1 ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
 }
 
 struct terminal_bind {
@@ -297,6 +335,87 @@ int conv_db_job_mark_fired(int64_t conv_id) {
    }
    return job_update_exec("UPDATE conversations SET on_complete_fired=1 WHERE id=?",
                           bind_conv_id_only, &conv_id, "mark_fired");
+}
+
+int conv_db_job_get_goal(int64_t conv_id, int user_id, char **out) {
+   if (conv_id <= 0 || user_id <= 0 || !out) {
+      return AUTH_DB_INVALID;
+   }
+   *out = NULL;
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   /* Ownership-JOINed like every other user-facing read here.  Deliberately NOT
+    * part of job_record_t: a goal is free text, and job_record_t is bulk-copied
+    * in arrays of up to JOBS_SNAPSHOT_HARD_MAX for the WebUI snapshot — adding
+    * a text field there would multiply that buffer for a value only the resume
+    * path reads. */
+   if (sqlite3_prepare_v2(s_db.db, "SELECT job_goal FROM conversations WHERE id=? AND user_id=?",
+                          -1, &st, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(st, 1, conv_id);
+   sqlite3_bind_int(st, 2, user_id);
+   int rc = AUTH_DB_NOT_FOUND;
+   if (sqlite3_step(st) == SQLITE_ROW) {
+      const char *g = (const char *)sqlite3_column_text(st, 0);
+      if (g && g[0] != '\0') {
+         *out = strdup(g);
+         rc = (*out != NULL) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+      } else {
+         /* Row exists but has no goal — a pre-v74 job whose backfill found no
+          * first user message, i.e. one that never dispatched. */
+         rc = AUTH_DB_NOT_FOUND;
+      }
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   return rc;
+}
+
+int conv_db_job_reset_for_resume(int64_t conv_id, int user_id) {
+   if (conv_id <= 0 || user_id <= 0) {
+      return AUTH_DB_INVALID;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   /* The status predicate is the CLAIM, not a precondition checked earlier: two
+    * concurrent resume requests both pass a read-then-write check, and the loser
+    * would spawn a second worker onto a job the winner is already running.  Here
+    * the row leaves the resumable set inside the UPDATE, so exactly one caller
+    * sees changes==1.
+    *
+    * user_id is in the predicate too, so the claim is self-authorizing rather
+    * than relying on the caller having checked — every other user-facing
+    * statement in this file binds it, and this one should not be the exception.
+    *
+    * Clearing on_complete_fired is what actually re-arms delivery — the boot
+    * interrupted-notify consumed it, and the monitor skips a fired row, so a
+    * resumed job would finish and silently notify nobody.  finished_at/started_at
+    * reset too, or the panel renders a job that finished before it started. */
+   if (sqlite3_prepare_v2(s_db.db,
+                          "UPDATE conversations SET job_status='queued', job_error=NULL, "
+                          "started_at=0, finished_at=0, on_complete_fired=0 "
+                          "WHERE id=? AND user_id=? AND job_status IN ('interrupted','failed')",
+                          -1, &st, NULL) != SQLITE_OK) {
+      OLOG_ERROR("auth_db_jobs: prepare reset_for_resume failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(st, 1, conv_id);
+   sqlite3_bind_int(st, 2, user_id);
+   int rc = sqlite3_step(st);
+   int changed = sqlite3_changes(s_db.db);
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("auth_db_jobs: reset_for_resume failed for conv %lld", (long long)conv_id);
+      return AUTH_DB_FAILURE;
+   }
+   /* No row changed: it does not exist, is not a job, or is not in a resumable
+    * state (running/queued/done/cancelled).  The caller has already
+    * ownership-checked, so this is a state answer, not an authorization one. */
+   return changed == 1 ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
 }
 
 /* =============================================================================

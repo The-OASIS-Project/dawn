@@ -5,6 +5,21 @@ project(dawn LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# -Wswitch: an enum switch with no `default:` must handle every enumerator.
+#
+# Not part of -Wall's default here because the project does not build with
+# -Wall (see below), and this one warning class pays for itself: the codebase
+# uses result enums as the seam between a shared operation and the surfaces that
+# word its outcome, so a NEW enumerator silently falling through to a generic
+# "unknown" branch is a user-visible wrong answer that compiles clean.  That
+# exact bug shipped once — JOB_RESUME_NOTHING_TO_RUN reached the WebUI handler
+# but not the `job` tool, so resuming a job reported "No such background job."
+#
+# Measured cost when enabled: ONE pre-existing site, since fixed.  Enabling the
+# rest of -Wall is a separate, larger decision (213 warnings, mostly -Wcomment
+# and -Wstringop-truncation) — see docs/TODO.md.
+add_compile_options(-Wswitch)
+
 # Standard install paths (/usr/local/bin, /usr/local/lib, etc.)
 include(GNUInstallDirs)
 
@@ -769,6 +784,7 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v71.c
     src/auth/auth_db_migrations_v72.c
     src/auth/auth_db_migrations_v73.c
+    src/auth/auth_db_migrations_v74.c
     src/auth/auth_db_attention.c
     src/auth/auth_db_statements.c
     # DB-layer tables depended on by the always-compiled memory / OTA / tool

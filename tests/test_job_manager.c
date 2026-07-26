@@ -136,6 +136,18 @@ int conv_db_job_get(int64_t conv_id, int user_id, job_record_t *out) {
    return AUTH_DB_NOT_FOUND;
 }
 
+/* job_manager_cancel_or_retire()'s not-running branch probes the row's status to
+ * decide between "retire a queued row" and "already terminal".  These tests only
+ * exercise the running-job path (the pool), so report no such job. */
+int conv_db_job_get_status(int64_t conv_id, int user_id, char *status_out, size_t n) {
+   (void)conv_id;
+   (void)user_id;
+   if (status_out && n > 0) {
+      status_out[0] = '\0';
+   }
+   return AUTH_DB_NOT_FOUND;
+}
+
 /* Phase-2 observe seam: job_manager_set_terminal pairs the DB write with a
  * `complete` event.  These tests exercise pool logic, not the event log, so the
  * pairing is stubbed out here — same treatment as the conv_db_job_* setters

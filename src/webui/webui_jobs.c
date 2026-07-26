@@ -55,6 +55,7 @@
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
 #include "core/job_manager.h"
+#include "core/job_worker.h"
 #include "logging.h"
 #include "utils/string_utils.h"
 #include "webui/webui_internal.h"
@@ -143,8 +144,15 @@ static void send_frame(ws_connection_t *conn, const char *type, json_object *pay
 
 /* Strong override of the weak seam in job_manager.c.  Fans one job row out to
  * the owner's authenticated browser sessions; clients upsert it into their
- * active set and drop it when it arrives terminal. */
-void webui_broadcast_job_update(int user_id, const job_record_t *rec) {
+ * active set and drop it when it arrives terminal.
+ *
+ * @p resumed marks the one transition that moves a job BACKWARDS out of a
+ * terminal state.  Clients treat terminal as a sink (it is what stops a stale
+ * frame from resurrecting a finished job), so without an explicit signal a
+ * resumed job would be refused by every tab that watched it fail.  A flag rather
+ * than an ordering rule, because a tab that did not initiate the resume sees
+ * only this frame. */
+void webui_broadcast_job_update(int user_id, const job_record_t *rec, bool resumed) {
    if (user_id <= 0 || !rec) {
       return;
    }
@@ -152,7 +160,11 @@ void webui_broadcast_job_update(int user_id, const job_record_t *rec) {
    json_object *root = json_object_new_object();
    json_object_object_add(root, "type", json_object_new_string("job_update"));
    json_object *payload = json_object_new_object();
-   json_object_object_add(payload, "job", job_to_json(rec));
+   json_object *job = job_to_json(rec);
+   if (resumed) {
+      json_object_object_add(job, "resumed", json_object_new_boolean(true));
+   }
+   json_object_object_add(payload, "job", job);
    json_object_object_add(root, "payload", payload);
    /* PLAIN to match every other broadcast in the WebUI layer — the default
     * (_SPACED) would ship ~35 bytes of gratuitous whitespace per frame per
@@ -193,8 +205,8 @@ void webui_broadcast_job_update(int user_id, const job_record_t *rec) {
    json_object_put(root);
 
    if (sent > 0) {
-      OLOG_INFO("WebUI: job_update conv %lld (%s) to %d client(s)", (long long)rec->id,
-                rec->job_status, sent);
+      OLOG_INFO("WebUI: job_update conv %lld (%s%s) to %d client(s)", (long long)rec->id,
+                rec->job_status, resumed ? ", resumed" : "", sent);
    }
 }
 
@@ -315,4 +327,128 @@ void webui_jobs_send_history(ws_connection_t *conn,
    send_frame(conn, "list_jobs_response", payload);
 
    free(rows);
+}
+
+/* =============================================================================
+ * Inbound: job_action {cancel|resume}
+ * ============================================================================= */
+
+/* Every exit from the action handler answers.  A silent failure would leave the
+ * panel unable to tell "refused" from "still working", which is how a stale row
+ * ends up rendered as if it were current. */
+static void send_action_result(ws_connection_t *conn,
+                               const char *action,
+                               int64_t conv_id,
+                               bool ok,
+                               const char *message) {
+   json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "action", json_object_new_string(action ? action : ""));
+   json_object_object_add(payload, "conversation_id", json_object_new_int64(conv_id));
+   json_object_object_add(payload, "ok", json_object_new_boolean(ok));
+   json_object_object_add(payload, "message", json_object_new_string(message ? message : ""));
+   send_frame(conn, "job_action_response", payload);
+}
+
+void webui_jobs_handle_action(ws_connection_t *conn, json_object *payload) {
+   if (!conn || !conn->session || !conn->authenticated || conn->is_satellite ||
+       conn->auth_user_id <= 0) {
+      return;
+   }
+
+   json_object *o = NULL;
+   const char *action = (payload && json_object_object_get_ex(payload, "action", &o))
+                            ? json_object_get_string(o)
+                            : NULL;
+   int64_t conv_id = (payload && json_object_object_get_ex(payload, "conversation_id", &o))
+                         ? json_object_get_int64(o)
+                         : 0;
+   if (!action || conv_id <= 0) {
+      send_action_result(conn, action, conv_id, false, "Malformed job action.");
+      return;
+   }
+
+   /* OWNERSHIP FIRST (§8.2).  phone_action's shape is the model for the frame,
+    * NOT for the authorization: it acts on a single operator-owned modem, so it
+    * checks one configured owner id.  A job id is a guessable integer belonging
+    * to whoever spawned it, so every action binds conn->auth_user_id and loads
+    * the row ownership-checked BEFORE doing anything — otherwise cancelling
+    * another user's job is a two-line request.  conv_db_job_get returns
+    * FORBIDDEN for a foreign row and NOT_FOUND for a non-job conversation. */
+   job_record_t rec;
+   int grc = conv_db_job_get(conv_id, conn->auth_user_id, &rec);
+   if (grc != AUTH_DB_SUCCESS) {
+      /* One message for both: distinguishing "not yours" from "does not exist"
+       * turns the handler into an oracle for other users' job ids. */
+      send_action_result(conn, action, conv_id, false, "No such background job.");
+      /* Log the MATCHED action, never the raw client string: it is attacker-
+       * controlled and json-c preserves embedded newlines, so echoing it lets a
+       * caller forge log lines (and flood them, since this fires on every probe). */
+      const char *safe = (strcmp(action, "cancel") == 0)   ? "cancel"
+                         : (strcmp(action, "resume") == 0) ? "resume"
+                                                           : "unknown";
+      OLOG_WARNING("webui_jobs: user %d denied '%s' on conv %lld (rc=%d)", conn->auth_user_id, safe,
+                   (long long)conv_id, grc);
+      return;
+   }
+
+   if (strcmp(action, "cancel") == 0) {
+      /* Shared with the `job` tool: cancelling a RUNNING job signals its session,
+       * cancelling a QUEUED one retires the row — two operations behind one name,
+       * and one mutation path so the two surfaces cannot drift. */
+      char status[JOB_STATUS_MAX];
+      switch (job_manager_cancel_or_retire(conv_id, conn->auth_user_id, status, sizeof(status))) {
+         case JOB_CANCEL_SIGNALLED:
+            send_action_result(conn, action, conv_id, true, "Cancelling.");
+            return;
+         case JOB_CANCEL_RETIRED:
+            send_action_result(conn, action, conv_id, true, "Cancelled.");
+            return;
+         case JOB_CANCEL_ALREADY_TERMINAL:
+            send_action_result(conn, action, conv_id, false, "That job has already finished.");
+            return;
+         case JOB_CANCEL_FORBIDDEN:
+         case JOB_CANCEL_NOT_FOUND:
+            /* Ownership was verified above, so this means the row changed
+             * underneath us — answer the same way as an unknown job. */
+            break;
+      }
+      /* No `default:` in the switch, so -Wswitch turns a new enumerator into a
+       * build error here rather than a silent mislabel. */
+      send_action_result(conn, action, conv_id, false, "No such background job.");
+      return;
+   }
+
+   if (strcmp(action, "resume") == 0) {
+      /* Shared with the `job` tool — ownership, capacity, the atomic claim and
+       * the `resumed` broadcast all live in job_worker_resume(), so neither
+       * surface can get the ordering (or the authorization) subtly different. */
+      switch (job_worker_resume(conv_id, conn->auth_user_id)) {
+         case JOB_RESUME_STARTED:
+            send_action_result(conn, action, conv_id, true, "Resuming.");
+            return;
+         case JOB_RESUME_NOT_RESUMABLE:
+            send_action_result(conn, action, conv_id, false,
+                               "Only an interrupted or failed job can be resumed.");
+            return;
+         case JOB_RESUME_CAPACITY:
+            send_action_result(conn, action, conv_id, false,
+                               "Too many jobs running right now — try again shortly.");
+            return;
+         case JOB_RESUME_FAILED:
+            send_action_result(conn, action, conv_id, false, "Could not restart that job.");
+            return;
+         case JOB_RESUME_NOTHING_TO_RUN:
+            send_action_result(conn, action, conv_id, false,
+                               "That job never started and its instruction wasn't recorded — "
+                               "ask for it again instead.");
+            return;
+         case JOB_RESUME_FORBIDDEN:
+         case JOB_RESUME_NOT_FOUND:
+            break;
+      }
+      send_action_result(conn, action, conv_id, false, "No such background job.");
+      return;
+   }
+
+   send_action_result(conn, action, conv_id, false, "Unknown job action.");
 }
