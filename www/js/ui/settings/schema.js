@@ -2525,9 +2525,14 @@
       },
       {
          id: 'scheduling',
-         label: 'Scheduling',
+         label: 'Scheduling & Background Work',
          icon: '&#x23F0;',
-         sections: ['scheduler', 'calendar'],
+         // `attention` (SAGE watches) and `jobs` sit here because all four are
+         // the same user question: what runs later, and how much of it at once.
+         // Both were defined in SETTINGS_SCHEMA but listed in no category, so
+         // their panels never rendered — see check_settings_sections_rendered.sh,
+         // which fails CI if a section is ever orphaned this way again.
+         sections: ['scheduler', 'attention', 'jobs', 'calendar'],
       },
       {
          id: 'network',

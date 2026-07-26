@@ -2,10 +2,10 @@
 
 How to wire a new `dawn.toml` setting so it survives a WebUI settings save.
 
-**Read this before adding any setting.** Wiring a setting touches up to nine places. Miss one and nothing
-fails to build, no test goes red, and the daemon starts fine — the damage shows up later as a user's
-settings quietly reverting to defaults. That exact bug has shipped **three times** (see [Why this guide
-exists](#why-this-guide-exists)).
+**Read this before adding any setting.** Wiring a setting touches up to nine places — a whole new section,
+ten. Miss one and nothing fails to build, no test goes red, and the daemon starts fine; the damage shows up
+later as a user's settings quietly reverting to defaults, or as a panel that simply is not there. Some
+variant of that has now shipped **four times** (see [Why this guide exists](#why-this-guide-exists)).
 
 ---
 
@@ -36,14 +36,17 @@ That has one brutal consequence:
 > user's `dawn.toml` the first time they save any setting — including settings in a completely unrelated
 > panel.** On the next restart those settings come back as defaults.
 
-Nothing warns you. The writer has no idea a section exists; it only knows what it was told to print. The
-three shipped instances:
+Nothing warns you. The writer has no idea a section exists; it only knows what it was told to print. And
+the client has a mirror-image gate of its own — `SECTION_CATEGORIES` (see step 6 of
+[Adding a whole new section](#adding-a-whole-new-section)) — with exactly the same silence. The shipped
+instances:
 
 | What was lost | How it happened | Fixed |
 |---|---|---|
 | All four messaging bot tokens + `service_token` | `secrets_write_toml()` had no write lines for them | Messaging Phase 6.5 |
 | Entire `[jobs]` section | Wired into the struct/defaults/parser and the WebUI *client* schema, but zero server-side support | 2026-07-24 |
 | Entire `[scheduler]` section | Fully wired everywhere **except** the writer — edits applied at runtime, then vanished on restart | 2026-07-24 |
+| `[attention]` + `[jobs]` panels | Wired through **every** step above, but neither section was listed in `SECTION_CATEGORIES` — the client-side render gate — so both panels simply never appeared | 2026-07-26 |
 
 The `[jobs]` case is the instructive one: whoever wired it followed `ARCHITECTURE.md`, which said *"also add
 corresponding entries to `SETTINGS_SCHEMA` to expose them in the WebUI."* That sentence names the **client**
@@ -193,9 +196,22 @@ Everything above, plus:
 4. **Section object in `config_to_json()`** — build the object, then
    `json_object_object_add(root, "mysection", mysection);`.
 5. **POST block** — `if (json_object_object_get_ex(payload, "mysection", &section)) { … }`.
-6. **Add the section to the CI guard** — the `required[]` list in `tests/test_config_roundtrip.c`. This is
-   what makes the next person's mistake fail loudly instead of silently.
-7. **ARCHITECTURE.md** — add a row to the *WebUI Settings Panel Mapping* table.
+6. 🔴 **Assign the section to a category** — add its name to a `sections: [...]` array in
+   `SECTION_CATEGORIES`, at the bottom of `www/js/ui/settings/schema.js`. **`SETTINGS_SCHEMA` alone is not
+   enough.** `SECTION_CATEGORIES` is the render gate, and its own comment says it: *"Sections not listed
+   here will not be rendered."* Miss this and your section is wired through every step above, parses,
+   round-trips, saves — and is **completely invisible in the UI**, with nothing failing and no warning.
+7. **Add the section to both CI guards** — the `required[]` list in `tests/test_config_roundtrip.c` (server
+   side: proves the writer emits it) and, for the client side, `tests/check_settings_sections_rendered.sh`
+   needs no edit but *will* fail by name if you skipped step 6. Together these make the next person's
+   mistake fail loudly instead of silently.
+8. **ARCHITECTURE.md** — add a row to the *WebUI Settings Panel Mapping* table.
+
+> **Step 6 has already bitten twice.** `[attention]` (SAGE watches) and `[jobs]` (background jobs) were both
+> fully wired end to end and both unreachable in the panel, found only when someone went looking for a
+> settings page that should have existed. It is the client-side twin of the `config_write_toml` omission
+> this guide opens with: same silence, same "everything is green", same user-visible result of *the setting
+> isn't there*. `check_settings_sections_rendered.sh` now guards it.
 
 **Conditional sections** (emitted only when they hold content — `[persona]`, `[url_fetcher]`) are fine and
 safe *provided the emit condition derives from the parsed content*, so anything the user actually set is
@@ -220,6 +236,15 @@ still wire steps 4/5/6 so a hand-edited value round-trips, and label it clearly 
 ---
 
 ## Verifying your wiring
+
+**0. Run the render-gate guard** (new sections only, but it is instant):
+
+```bash
+bash tests/check_settings_sections_rendered.sh
+```
+
+It fails by name if a `SETTINGS_SCHEMA` section is in no `SECTION_CATEGORIES` category — i.e. wired
+correctly everywhere and invisible anyway.
 
 **1. Run the round-trip guard.** `tests/test_config_roundtrip.c` writes the config, re-parses it, and checks
 values survive — plus a section-coverage check that fails *by name* if a writer-owned section stops being
