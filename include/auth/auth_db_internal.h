@@ -48,6 +48,13 @@
  * Constants
  * ============================================================================= */
 
+/* Canonical background-job column projection, in the order job_unpack_row()
+ * (auth_db_jobs.c) reads.  Shared so the cached prepared statements in
+ * auth_db_statements.c stay column-aligned with the readers. */
+#define JOB_SELECT_COLS                                                                      \
+   "id, user_id, parent_id, title, spawn_mode, on_complete, on_complete_fired, job_status, " \
+   "job_error, deliver_to, spawn_depth, reinvoke_count, started_at, finished_at, created_at"
+
 /* Current schema version.
  * NOTE: the schema version is GLOBAL and must advance uniformly across every
  * build config. The v64 (mcp_user_access) and v65 (code_projects) migrations run
@@ -127,6 +134,12 @@ typedef struct {
    sqlite3_stmt *stmt_conv_delete;
    sqlite3_stmt *stmt_conv_delete_admin;
    sqlite3_stmt *stmt_conv_count;
+   /* Background-jobs hot paths, cached because they run under the global auth_db
+    * lock on the 1-Hz heartbeat (drain) / on every persisted event (append) —
+    * a per-call prepare was measured at ~36% of the drain scan.  Prepared with
+    * JOB_SELECT_COLS (below) so the projection matches job_unpack_row(). */
+   sqlite3_stmt *stmt_job_pending_followups;
+   sqlite3_stmt *stmt_event_append;
    sqlite3_stmt *stmt_msg_add;
    sqlite3_stmt *stmt_msg_get;
    sqlite3_stmt *stmt_msg_get_after;

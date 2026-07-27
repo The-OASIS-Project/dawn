@@ -60,27 +60,17 @@ int conv_db_event_append(int64_t conv_id, const char *kind, const char *payload,
 
    AUTH_DB_LOCK_OR_FAIL();
 
-   /* seq is assigned INSIDE the insert, so "read max, then write" can never
-    * interleave: the whole statement runs under the auth_db write lock, and the
-    * v72 UNIQUE(conversation_id, seq) index is the backstop if that assumption
-    * ever breaks.  The correlated subquery is scoped to this conversation, so it
-    * rides the same index rather than scanning the table.
-    *
-    * RETURNING gives us the assigned seq without a second round-trip — needed
-    * because the live fan-out frame must carry the authoritative seq (a client
-    * dedups on it). */
-   static const char *SQL =
-       "INSERT INTO conversation_events (conversation_id, seq, kind, payload, created_at) "
-       "VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM conversation_events WHERE "
-       "conversation_id = ?), ?, ?, ?) "
-       "RETURNING seq";
-
-   sqlite3_stmt *st = NULL;
-   if (sqlite3_prepare_v2(s_db.db, SQL, -1, &st, NULL) != SQLITE_OK) {
-      OLOG_ERROR("auth_db_events: prepare append failed: %s", sqlite3_errmsg(s_db.db));
-      AUTH_DB_UNLOCK();
-      return AUTH_DB_FAILURE;
-   }
+   /* Cached statement (prepared in auth_db_statements.c) — this is the busiest
+    * new write path, one per persisted step event, all under the global lock; a
+    * per-call prepare was pure overhead.  seq is assigned INSIDE the insert, so
+    * "read max, then write" can never interleave: the whole statement runs under
+    * the auth_db write lock, and the v72 UNIQUE(conversation_id, seq) index is
+    * the backstop if that assumption ever breaks.  The correlated subquery is
+    * scoped to this conversation, so it rides the same index rather than scanning
+    * the table.  RETURNING gives us the assigned seq without a second round-trip —
+    * the live fan-out frame must carry the authoritative seq (a client dedups). */
+   sqlite3_stmt *st = s_db.stmt_event_append;
+   sqlite3_reset(st);
    sqlite3_bind_int64(st, 1, conv_id);
    sqlite3_bind_int64(st, 2, conv_id);
    sqlite3_bind_text(st, 3, kind, -1, SQLITE_TRANSIENT);
@@ -93,7 +83,7 @@ int conv_db_event_append(int64_t conv_id, const char *kind, const char *payload,
 
    int rc = sqlite3_step(st);
    int64_t assigned = (rc == SQLITE_ROW) ? sqlite3_column_int64(st, 0) : 0;
-   sqlite3_finalize(st);
+   sqlite3_reset(st);
    AUTH_DB_UNLOCK();
 
    if (rc != SQLITE_ROW) {

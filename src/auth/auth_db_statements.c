@@ -327,6 +327,34 @@ int auth_db_prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   /* Background-jobs completion drain — runs under this lock on the 1-Hz
+    * heartbeat, so it is cached rather than prepared per tick (see
+    * conv_db_job_list_pending_followups). */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT " JOB_SELECT_COLS " FROM conversations "
+                           "WHERE job_status IN ('done','failed','interrupted') "
+                           "AND on_complete_fired=0 ORDER BY finished_at ASC LIMIT ?",
+                           -1, &s_db.stmt_job_pending_followups, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare job_pending_followups failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   /* conversation_events append — the busiest new write path (fires per persisted
+    * step event).  seq is assigned inside the INSERT under this lock; RETURNING
+    * hands back the authoritative seq for the live fan-out frame.  See
+    * conv_db_event_append for the full rationale. */
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "INSERT INTO conversation_events (conversation_id, seq, kind, payload, created_at) "
+       "VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM conversation_events WHERE "
+       "conversation_id = ?), ?, ?, ?) RETURNING seq",
+       -1, &s_db.stmt_event_append, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare event_append failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
    rc = sqlite3_prepare_v2(
        s_db.db,
        "INSERT INTO messages (conversation_id, role, content, tool_calls, tool_call_id, "
@@ -2488,6 +2516,10 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_conv_delete_admin);
    if (s_db.stmt_conv_count)
       sqlite3_finalize(s_db.stmt_conv_count);
+   if (s_db.stmt_job_pending_followups)
+      sqlite3_finalize(s_db.stmt_job_pending_followups);
+   if (s_db.stmt_event_append)
+      sqlite3_finalize(s_db.stmt_event_append);
    if (s_db.stmt_msg_add)
       sqlite3_finalize(s_db.stmt_msg_add);
    if (s_db.stmt_msg_get)

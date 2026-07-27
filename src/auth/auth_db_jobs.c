@@ -79,9 +79,8 @@ static void job_unpack_row(sqlite3_stmt *st, job_record_t *r) {
    r->created_at = (time_t)sqlite3_column_int64(st, 14);
 }
 
-#define JOB_SELECT_COLS                                                                      \
-   "id, user_id, parent_id, title, spawn_mode, on_complete, on_complete_fired, job_status, " \
-   "job_error, deliver_to, spawn_depth, reinvoke_count, started_at, finished_at, created_at"
+/* JOB_SELECT_COLS lives in auth_db_internal.h so the cached prepared statements
+ * in auth_db_statements.c project the same columns job_unpack_row() reads. */
 
 /* Run a parameterless-after-@nbind constant SELECT into an out[] array.  Caller
  * holds the auth_db lock.  @bind is invoked to bind params (may be NULL). */
@@ -608,15 +607,26 @@ int conv_db_job_list_pending_followups(int max, job_record_t *out, int *count_ou
    if (!count_out) {
       return AUTH_DB_INVALID;
    }
-   struct limit_bind b = { max };
+   *count_out = 0;
+   if (!out || max <= 0) {
+      return AUTH_DB_SUCCESS;
+   }
    AUTH_DB_LOCK_OR_FAIL();
-   int rc = job_select_into("SELECT " JOB_SELECT_COLS " FROM conversations "
-                            "WHERE job_status IN ('done','failed','interrupted') "
-                            "AND on_complete_fired=0 "
-                            "ORDER BY finished_at ASC LIMIT ?",
-                            bind_limit, &b, out, max, count_out);
+   /* Cached statement (prepared in auth_db_statements.c): this runs on the 1-Hz
+    * heartbeat under the global lock, where a per-tick prepare was ~36% of the
+    * scan.  Reset+rebind rather than prepare+finalize. */
+   sqlite3_stmt *st = s_db.stmt_job_pending_followups;
+   sqlite3_reset(st);
+   sqlite3_bind_int(st, 1, max);
+   int n = 0;
+   while (n < max && sqlite3_step(st) == SQLITE_ROW) {
+      job_unpack_row(st, &out[n]);
+      n++;
+   }
+   sqlite3_reset(st);
    AUTH_DB_UNLOCK();
-   return rc;
+   *count_out = n;
+   return AUTH_DB_SUCCESS;
 }
 
 int conv_db_job_pending_reinvoke_for_parent(int64_t parent_id,
