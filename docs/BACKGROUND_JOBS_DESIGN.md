@@ -665,6 +665,68 @@ by architecture/security/embedded passes, then a **6-agent full pre-commit revie
   active view's footer (`conversation_id` threaded into the frame; client `isForeignConvFrame` gate).
   ○ **`stream_resume` vs async load-render ordering** (self-corrects on reload). — remaining deferred UI polish.
 
+### KNOWN DEFECTS — completion delivery (next work item, 2026-07-27)
+
+**Symptom:** a background job finishes and the user is never told. Fixed **three times** in three
+consecutive rounds during CP4a testing, each believed complete; a 3-agent audit then found the rest.
+They share one root cause — `on_complete_fired` is a single bit answering two questions ("has the
+parent been re-engaged?" and "has the user been told?"), and it is **written ahead of** the delivery
+it commits to. Do these as ONE change with its own review; they are not independent.
+
+**Already fixed** (live-verified, in `e76ae9d` and earlier): boot no longer marks rows fired (it
+downgrades `on_complete` instead); the monitor's `finished_at >= s_boot_time` gate is now a 7-day
+staleness bound; a shutdown-cancelled worker records `interrupted`, not `cancelled`.
+
+**Still open:**
+
+1. **The boot downgrade is destructive.** `conv_db_job_downgrade_boot_reinvokes` permanently rewrites
+   `on_complete` `reinvoke_parent`→`notify`. A job downgraded at boot and then *explicitly resumed*
+   completes and only toasts — its results never return to the parent. Worse than it first looks: the
+   boot scan converts stale `running` rows to `interrupted` **before** the downgrade query runs, so
+   this hits *every* job that was in flight at restart — exactly the population Resume exists for.
+   Live case: conv 1034. **Settled fix:** delete the downgrade entirely; instead, in the monitor's
+   partition, route a `reinvoke_parent` row whose `finished_at < s_boot_time` down the *notify*
+   branch. Restart-safety holds, the row still drains, and **resume needs no knowledge at all** —
+   `reset_for_resume` already zeroes `finished_at`, so a resumed run naturally regains its
+   disposition. Strictly less code than an `on_complete_orig` column.
+2. **`mark_fired` precedes delivery** (`job_manager.c`, drain loop). `broadcast_json_to_user` returns
+   0 when no client is connected, and at boot that is *guaranteed*, not rare — the daemon always
+   finishes booting before a browser can reconnect (verified: boot 19:31:50, drain fired both rows,
+   browser reconnected 19:32:40, nothing sent). **This violates the doc's own §5 rule** — "flip
+   `on_complete_fired=1` only on success; retry next tick otherwise" — so the fix is already blessed.
+   Per-path rule required: the WebUI path is synchronous, so change the weak symbol to return the
+   client count and fire on `> 0`, leaving the staleness bound as the only unconditional fire; the
+   messaging path is queued to a worker thread, so it must fire *inside* that thread on
+   `MESSAGING_SUCCESS` only — which needs `job_id` added to `job_notify_t`, `scheduler_send_to_
+   messaging_channel` changed from `void` to return its already-computed rc, and an in-memory
+   "delivering" set (mirror `s_inflight` in `job_reinvoke.c`) so the next 1 Hz drain cannot
+   double-send. Add an attempt ceiling too, or an unlinked channel retries every second for 7 days.
+3. **Boot leaves the dirty gate closed** for terminal+unfired `notify` rows. `s_jobs_dirty` is set
+   only when the stale scan or the downgrade found something; a row that is already terminal and
+   already `notify` matches neither, so `jobs_monitor_tick` returns early and it strands until an
+   unrelated job transitions — on an idle daemon, never, until the 7-day bound silently drops it.
+   This is the direct residual of the shutdown fix: the cleaner the shutdown, the worse the outcome
+   (a worker that got to write `interrupted` strands; one killed mid-write stays `running` and is
+   caught by the boot scan). Fix: probe `conv_db_job_list_pending_followups(1, …)` at init and set
+   the gate, or just set it unconditionally and let the first tick self-close it.
+4. **Reinvoke deferral doesn't bump `reinvoke_count`.** `conv_db_job_list_pending_followups` is
+   **global** (no `user_id` filter), ordered `finished_at ASC`, `LIMIT monitor_followups_per_tick`
+   (default 4). Both deferral paths — parent has a turn in flight, and the `max_concurrent_reinvokes`
+   cap — `continue` without bumping, and the bump only happens inside `build_envelope`. So a parent
+   with a wedged `turn_in_flight` pins the four oldest rows at the head **for every user on the
+   daemon** and pins the dirty-gated monitor permanently on. Same amplification the orphan fix
+   closed, different cause.
+
+**Smaller, same cluster:** a user Cancel landing during shutdown is misclassified `interrupted` —
+which is tool-resumable, silently inverting `JOB_RESUME_ORIGIN_TOOL`; and the shutdown branch records
+`interrupted` even when an answer already landed, inviting a duplicate re-run. Both want the session
+cancel-*reason* from `docs/TODO.md` rather than more `if`s.
+
+**Root-cause fix, after or with the above:** split the column into `on_complete_fired` +
+`notified_at`. Cancel sets both, the boot path sets neither, delivery sets only `notified_at`. That
+makes defects 1–3 structurally unrepresentable instead of individually patched. Filed in
+`docs/TODO.md`; the trigger is Phase-3 trees, whose cascade-cancel adds more fire sites.
+
 ### Designed-but-not-yet-shipped ledger (the single checklist so no scope is lost)
 
 - **Phase 2 — the *observe* half, now partly shipped.**
