@@ -229,7 +229,11 @@ void handle_get_memory_fact_source(ws_connection_t *conn, struct json_object *pa
 
    int64_t conv_id = 0, start_id = 0, end_id = 0;
    int rc = memory_db_fact_get_source(fact_id, conn->auth_user_id, &conv_id, &start_id, &end_id);
-   if (rc != MEMORY_DB_SUCCESS) {
+   /* conv_id <= 0 means the provenance was cleared — the source conversation was
+    * deleted, so the fact stands on its own with no source to show.  Report it as
+    * unavailable (the UI already hides the button for these; this keeps a direct
+    * call honest instead of returning an empty range that reads as "no messages"). */
+   if (rc != MEMORY_DB_SUCCESS || conv_id <= 0) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "reason", json_object_new_string("not_available"));
       json_object_object_add(response, "payload", resp_payload);

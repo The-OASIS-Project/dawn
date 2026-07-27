@@ -954,6 +954,39 @@ int conv_db_force_anchor_date_unsafe(int64_t conv_id, int user_id, int64_t ancho
    return AUTH_DB_SUCCESS;
 }
 
+/* Null the provenance back-pointers on any memory row that referenced a
+ * conversation just deleted.  The memory tables intentionally have NO foreign
+ * key to conversations — a fact outlives the chat it was learned from — so
+ * nothing nulls source_conversation_id automatically; without this, every
+ * conversation delete leaves a dangling link behind (they had accumulated into
+ * the thousands before this).  The rows (the knowledge) are kept; only the stale
+ * pointer + its now-meaningless message range are cleared.  Caller holds the
+ * auth_db lock.  A structural FK ON DELETE SET NULL would be cleaner but means
+ * rebuilding memory_facts and its FTS shadow tables — deferred as too risky. */
+static void clear_memory_provenance(int64_t conv_id) {
+   static const char *const TABLES[] = { "memory_facts", "memory_preferences", "memory_summaries",
+                                         "memory_relations" };
+   for (size_t i = 0; i < sizeof(TABLES) / sizeof(TABLES[0]); i++) {
+      char sql[192];
+      snprintf(sql, sizeof(sql),
+               "UPDATE %s SET source_conversation_id=NULL, source_msg_id_start=NULL, "
+               "source_msg_id_end=NULL WHERE source_conversation_id=?",
+               TABLES[i]); /* table name is a fixed allowlist literal, never input */
+      sqlite3_stmt *st = NULL;
+      if (sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL) != SQLITE_OK) {
+         OLOG_WARNING("conv_db_delete: provenance-clear prepare for %s failed: %s", TABLES[i],
+                      sqlite3_errmsg(s_db.db));
+         continue;
+      }
+      sqlite3_bind_int64(st, 1, conv_id);
+      if (sqlite3_step(st) != SQLITE_DONE) {
+         OLOG_WARNING("conv_db_delete: provenance-clear on %s failed: %s", TABLES[i],
+                      sqlite3_errmsg(s_db.db));
+      }
+      sqlite3_finalize(st);
+   }
+}
+
 int conv_db_delete(int64_t conv_id, int user_id) {
    if (conv_id <= 0) {
       return AUTH_DB_INVALID;
@@ -969,6 +1002,12 @@ int conv_db_delete(int64_t conv_id, int user_id) {
    int rc = sqlite3_step(s_db.stmt_conv_delete);
    int changes = sqlite3_changes(s_db.db);
    sqlite3_reset(s_db.stmt_conv_delete);
+
+   /* Only clear provenance if we actually deleted the row (owned + existed) —
+    * otherwise the facts belong to whoever really owns conv_id. */
+   if (rc == SQLITE_DONE && changes > 0) {
+      clear_memory_provenance(conv_id);
+   }
 
    AUTH_DB_UNLOCK();
 
@@ -997,6 +1036,10 @@ int conv_db_delete_admin(int64_t conv_id) {
    int rc = sqlite3_step(s_db.stmt_conv_delete_admin);
    int changes = sqlite3_changes(s_db.db);
    sqlite3_reset(s_db.stmt_conv_delete_admin);
+
+   if (rc == SQLITE_DONE && changes > 0) {
+      clear_memory_provenance(conv_id);
+   }
 
    AUTH_DB_UNLOCK();
 
