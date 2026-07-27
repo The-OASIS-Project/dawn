@@ -114,6 +114,7 @@ static void job_worker_run(job_work_t *work) {
     * resumable — destroyed the retry.  Observed live on conv 970, which is why
     * v74 made the goal durable at creation. */
    if (work->resume) {
+      bool continued = false;
       size_t restored = 0;
       struct json_object *hist = memory_history_load_from_db(work->conv_id, work->user_id,
                                                              &restored);
@@ -124,6 +125,7 @@ static void job_worker_run(job_work_t *work) {
          }
          s->conversation_history = hist;
          pthread_mutex_unlock(&s->history_mutex);
+         continued = true;
          OLOG_INFO("job_worker: resuming conv %lld with %zu bytes of history — continuing",
                    (long long)work->conv_id, restored);
       } else {
@@ -144,6 +146,24 @@ static void job_worker_run(job_work_t *work) {
                          (long long)work->conv_id);
          }
       }
+
+      /* Durable boundary marker in the event stream: without it a tailer sees
+       * complete{interrupted} → status{generating} → fresh tool_calls with nothing
+       * marking the restart, and the transcript renderer (CP4b) would draw the
+       * JOB_RESUME_DIRECTIVE as if the user typed it.  The message role stays
+       * `user` (the provider needs a user turn); the renderer draws the boundary
+       * off this event instead. */
+      struct json_object *pj = json_object_new_object();
+      char *payload = NULL;
+      if (pj != NULL) {
+         json_object_object_add(pj, "continued", json_object_new_boolean(continued));
+         const char *rendered = json_object_to_json_string_ext(pj, JSON_C_TO_STRING_PLAIN);
+         if (rendered != NULL) {
+            payload = strdup(rendered);
+         }
+         json_object_put(pj);
+      }
+      conv_event_emit(work->conv_id, work->user_id, CONV_EVENT_RESUME, payload);
    }
 
    /* Persist tool iterations to the job conversation for the whole (synchronous)

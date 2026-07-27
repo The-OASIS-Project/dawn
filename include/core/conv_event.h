@@ -50,6 +50,8 @@ extern "C" {
 #define CONV_EVENT_TERMINAL_CHUNK "terminal_chunk" /* Phase 4 */
 #define CONV_EVENT_SPAWN "spawn"
 #define CONV_EVENT_COMPLETE "complete"
+#define CONV_EVENT_RESUME \
+   "resume" /* boundary marker when an interrupted/failed/cancelled job restarts */
 
 /**
  * @brief Persist one event and fan it out to the owner's attached clients.
