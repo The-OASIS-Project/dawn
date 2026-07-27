@@ -112,6 +112,30 @@ static void test_jobs_roundtrip(void) {
    TEST_ASSERT_EQUAL_INT(17, g_read.jobs.event_retention_days);
 }
 
+/* A small positive event_chunk_cap must be floored, or the head+tail truncator
+ * underflows its tail-length subtraction (size_t) into an out-of-bounds read.
+ * 0 ("unset" -> runtime default) and large values pass through unchanged. */
+static void test_event_chunk_cap_has_a_floor(void) {
+   jobs_config_t j = { 0 };
+   j.max_active_jobs = 8;
+   j.max_jobs_per_user = 2;
+   j.monitor_followups_per_tick = 2;
+   j.max_reinvokes_per_tree = 4;
+   j.max_concurrent_reinvokes = 2;
+
+   j.event_chunk_cap = 20; /* below the floor */
+   config_clamp_jobs(&j);
+   TEST_ASSERT_EQUAL_INT(JOBS_EVENT_CHUNK_CAP_MIN, j.event_chunk_cap);
+
+   j.event_chunk_cap = 0; /* unset — must stay 0 */
+   config_clamp_jobs(&j);
+   TEST_ASSERT_EQUAL_INT(0, j.event_chunk_cap);
+
+   j.event_chunk_cap = 65536; /* comfortably above the floor — unchanged */
+   config_clamp_jobs(&j);
+   TEST_ASSERT_EQUAL_INT(65536, j.event_chunk_cap);
+}
+
 /* --- [scheduler] ----------------------------------------------------------- */
 
 static void test_scheduler_roundtrip(void) {
@@ -303,6 +327,7 @@ static void test_control_characters_survive_the_round_trip(void) {
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_jobs_roundtrip);
+   RUN_TEST(test_event_chunk_cap_has_a_floor);
    RUN_TEST(test_scheduler_roundtrip);
    RUN_TEST(test_all_writer_owned_sections_present);
    RUN_TEST(test_written_file_reparses);

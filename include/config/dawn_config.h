@@ -922,6 +922,13 @@ typedef struct {
  * cancel is conversational (the `job` tool + WebUI), never config.  See
  * docs/BACKGROUND_JOBS_DESIGN.md §7.
  * ============================================================================= */
+
+/* Minimum positive event_chunk_cap.  The head+tail truncator needs room for the
+ * 2/3 head, the elision marker, and a non-empty tail; a smaller positive cap
+ * underflows the tail-length subtraction (size_t) into a wild out-of-bounds
+ * read.  0 stays legal (means "unset" -> the runtime default in payload_cap()). */
+#define JOBS_EVENT_CHUNK_CAP_MIN 256
+
 typedef struct {
    bool enabled;                   /* Master enable/disable for background jobs */
    int max_concurrent_local;       /* Concurrent jobs on a local (GPU) LLM — keep low */

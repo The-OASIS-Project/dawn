@@ -1758,8 +1758,12 @@ void config_clamp_jobs(jobs_config_t *config) {
       config->max_spawn_depth = 0;
    if (config->max_children_per_tree < 0)
       config->max_children_per_tree = 0;
-   if (config->event_chunk_cap < 0) /* sizes a Phase-2 payload buffer */
+   /* sizes a Phase-2 payload buffer.  0 = "unset" (runtime default); any positive
+    * value must clear JOBS_EVENT_CHUNK_CAP_MIN or the truncator underflows (OOB). */
+   if (config->event_chunk_cap < 0)
       config->event_chunk_cap = 0;
+   else if (config->event_chunk_cap > 0 && config->event_chunk_cap < JOBS_EVENT_CHUNK_CAP_MIN)
+      config->event_chunk_cap = JOBS_EVENT_CHUNK_CAP_MIN;
    if (config->max_reinvokes_per_tree < 1) /* need at least one reinvoke attempt */
       config->max_reinvokes_per_tree = 1;
    if (config->max_concurrent_reinvokes < 1)
