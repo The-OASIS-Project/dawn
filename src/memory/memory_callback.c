@@ -1962,6 +1962,61 @@ static char *memory_action_delete_contact(int user_id, const char *value) {
  * Main Callback
  * ============================================================================= */
 
+/* Privacy gate for an explicit `remember` (v75).
+ *
+ * `is_private` means "no AUTOMATIC extraction from this conversation".  It has
+ * never covered the memory tool, because memory_action_remember() takes only
+ * (user_id, value) and has no conversation to test — so a `remember` issued
+ * inside a private conversation wrote through, and that is how private research
+ * reached long-term memory.
+ *
+ * Deliberately a CONFIRMATION, not a block.  "Remember my daughter's birthday is
+ * the 14th" said inside a private conversation is a legitimate instruction, and
+ * silently discarding it is the worse failure mode: the user believes it was
+ * saved and finds out months later.  What must not happen is the MODEL deciding
+ * unprompted to persist private material.  Nothing here can distinguish those
+ * two, so it hands the decision to the person who can.
+ *
+ * @return NULL to proceed, or an owned refusal string to return to the caller.
+ */
+static char *memory_private_confirm_gate(int user_id, const char *value) {
+#ifdef ENABLE_AUTH
+   session_t *session = session_get_command_context();
+   if (session == NULL) {
+      return NULL; /* no conversation context (scheduler, MQTT) — nothing to gate */
+   }
+   int64_t conv_id = atomic_load(&session->stream_conversation_id);
+   if (conv_id <= 0) {
+      return NULL;
+   }
+   bool is_private = false;
+   if (conv_db_is_private(conv_id, user_id, &is_private) != AUTH_DB_SUCCESS || !is_private) {
+      /* On a read error, proceed: a private conversation is already exempt from
+       * extraction, so the residual exposure here is one explicit fact, whereas
+       * failing closed would silently swallow every deliberate save. */
+      return NULL;
+   }
+
+   char confirm[8] = "";
+   if (tool_param_extract_custom((char *)value, "confirm_private", confirm, sizeof(confirm)) &&
+       strcmp(confirm, "true") == 0) {
+      OLOG_INFO("memory: confirmed save from private conversation %lld", (long long)conv_id);
+      return NULL;
+   }
+
+   OLOG_INFO("memory: refused unconfirmed save from private conversation %lld", (long long)conv_id);
+   return strdup(
+       "Not saved — this conversation is private, so nothing leaves it unless the user wants it "
+       "to. If the user ASKED you to remember this, they have already decided: call 'remember' "
+       "again with confirm_private=true and don't ask them to repeat themselves. Only if saving "
+       "was your own idea, ask them first.");
+#else
+   (void)user_id;
+   (void)value;
+   return NULL;
+#endif
+}
+
 char *memoryCallback(const char *actionName, char *value, int *should_respond) {
    if (should_respond) {
       *should_respond = 1;
@@ -2064,7 +2119,34 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
                                   category[0] ? category : NULL, as_of_ts, include_historical,
                                   with_source, g_config.memory.source_budget_chars);
    } else if (strcmp(actionName, "remember") == 0) {
-      return memory_action_remember(user_id, value);
+      char *gate = memory_private_confirm_gate(user_id, value);
+      if (gate != NULL) {
+         return gate; /* private conversation, not yet confirmed */
+      }
+      /* Strip the packed custom-param suffix before the text is stored.
+       * TOOL_MAPS_TO_CUSTOM params ride INSIDE `value` as
+       * "base::field::val" (tool_registry.h), and remember stores its input
+       * verbatim as fact_text.  `remember` had no custom param until
+       * confirm_private, so passing `value` straight through used to be safe;
+       * now the confirmed retry — the very thing the refusal string tells the
+       * model to do — would persist "…the 14th::confirm_private::true" as the
+       * fact, poisoning its embedding, its dedup hash and every later recall.
+       *
+       * Trimmed at OUR marker specifically rather than via
+       * tool_param_extract_base(), which cuts at the FIRST "::" — fine for the
+       * ID lists `forget` passes, but a fact is free-form user text and may
+       * legitimately contain "::" ("the ratio is 3::1"), which base-extraction
+       * would silently truncate. */
+      static const char kConfirmMarker[] = "::confirm_private::";
+      char *marker = strstr(value, kConfirmMarker);
+      char *trimmed = NULL;
+      if (marker != NULL) {
+         size_t base_len = (size_t)(marker - value);
+         trimmed = strndup(value, base_len);
+      }
+      char *res = memory_action_remember(user_id, trimmed ? trimmed : value);
+      free(trimmed);
+      return res;
    } else if (strcmp(actionName, "forget") == 0) {
       /* IDs are the base value; optional replaced_by switches delete -> supersede (merge).
        * Base-extract so the ID parser doesn't choke on the ::replaced_by:: suffix. */

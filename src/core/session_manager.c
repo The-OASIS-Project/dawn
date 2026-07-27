@@ -1688,7 +1688,16 @@ int session_save_voice_conversation(session_t *session, int64_t *conv_id_out) {
       }
    }
 
-   /* Trigger memory extraction (async) if enabled */
+   /* Trigger memory extraction (async) if enabled.
+    *
+    * NOTE: a background job never reaches here.  Job sessions are allocated bare
+    * (session_manager_alloc_bare) and torn down by job_manager_end() via
+    * session_manager_free_bare() -> session_free(), so neither this function nor
+    * session_destroy() runs for them.  A SESSION_TYPE_JOB guard on this line
+    * would be dead code — the job-extraction exemption belongs where a job
+    * conversation can actually be reached, which is should_skip_memory_extraction()
+    * in webui_history.c (the jobs panel can load one into a WebUI session) and
+    * memory_recovery.c's scan. */
    if (g_config.memory.enabled) {
       int duration_seconds = (int)(time(NULL) - session->created_at);
       char session_id_str[32];

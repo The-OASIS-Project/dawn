@@ -493,6 +493,17 @@ static json_object *build_entities_json_array(int user_id,
           * to literal entity_id, so cross-alias dedup happens at render). */
          json_object_object_add(rel_obj, "mention_count",
                                 json_object_new_int(all_rels[r].mention_count));
+         /* Validity range — "spoke_at Dragon Con 2024" is a good deal less
+          * useful without WHEN.  Omitted when unset so the client can tell
+          * "no date recorded" from a real value rather than rendering 1970. */
+         if (all_rels[r].valid_from > 0) {
+            json_object_object_add(rel_obj, "valid_from",
+                                   json_object_new_int64(all_rels[r].valid_from));
+         }
+         if (all_rels[r].valid_to > 0) {
+            json_object_object_add(rel_obj, "valid_to",
+                                   json_object_new_int64(all_rels[r].valid_to));
+         }
          json_object_array_add(relations_array, rel_obj);
       }
 
@@ -525,6 +536,14 @@ static json_object *build_entities_json_array(int user_id,
                                 json_object_new_double(all_rels[r].confidence));
          json_object_object_add(rel_obj, "mention_count",
                                 json_object_new_int(all_rels[r].mention_count));
+         if (all_rels[r].valid_from > 0) {
+            json_object_object_add(rel_obj, "valid_from",
+                                   json_object_new_int64(all_rels[r].valid_from));
+         }
+         if (all_rels[r].valid_to > 0) {
+            json_object_object_add(rel_obj, "valid_to",
+                                   json_object_new_int64(all_rels[r].valid_to));
+         }
          json_object_array_add(relations_array, rel_obj);
       }
 

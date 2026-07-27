@@ -809,6 +809,17 @@
    white-space: nowrap;
 }
 
+/* When a relation was valid — same monospace/tabular treatment as the mention
+   count beside it, so dates and counts line up rather than competing. */
+.entity-relation-when {
+   color: var(--text-secondary);
+   font-family: 'IBM Plex Mono', monospace;
+   font-size: 0.7rem;
+   font-variant-numeric: tabular-nums;
+   flex-shrink: 0;
+   white-space: nowrap;
+}
+
 /* Collapsed relations toggle */
 .entity-relations-more {
    color: var(--text-secondary);

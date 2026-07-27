@@ -325,6 +325,27 @@ static bool should_skip_memory_extraction(ws_connection_t *conn) {
       return true;
    }
 
+   /* Never extract a BACKGROUND JOB conversation.  A job transcript is research
+    * the model produced while working, not anything the user said — memory is
+    * meant to come from the parent conversation, which is extracted on its own.
+    *
+    * This is the real enforcement point, and it was missing.  The exemption was
+    * implemented in memory_recovery.c's catch-up scan (`AND job_status IS NULL`)
+    * and nowhere else, which was survivable only while job conversations were
+    * unreachable in the UI — they are hidden from the sidebar.  The jobs panel's
+    * "View" button is the first surface that loads one into a WebUI session, so
+    * from that point on, viewing a job and then switching away extracted it.
+    *
+    * Privacy inheritance covers a job spawned from a private parent; this covers
+    * the rest, and the two are deliberately independent. */
+   job_record_t job_rec;
+   if (conv_db_job_get(conn->active_conversation_id, conn->auth_user_id, &job_rec) ==
+       AUTH_DB_SUCCESS) {
+      OLOG_INFO("WebUI: skipping memory extraction, conversation %lld is a background job",
+                (long long)conn->active_conversation_id);
+      return true;
+   }
+
    /* Re-verify from database to handle race conditions (e.g., set_private in flight) */
    bool db_private = false;
    int priv_rc = conv_db_is_private(conn->active_conversation_id, conn->auth_user_id, &db_private);

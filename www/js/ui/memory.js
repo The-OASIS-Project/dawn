@@ -937,6 +937,16 @@
             if ((rel.confidence || 0) > (existing.confidence || 0)) {
                existing.confidence = rel.confidence;
             }
+            /* Widen the validity span across merged alias rows rather than
+               keeping whichever happened to be first: two rows for the same
+               relation are two sightings of one thing, so the union is the
+               honest answer. Absent endpoints don't narrow it. */
+            if (rel.valid_from && (!existing.valid_from || rel.valid_from < existing.valid_from)) {
+               existing.valid_from = rel.valid_from;
+            }
+            if (rel.valid_to && (!existing.valid_to || rel.valid_to > existing.valid_to)) {
+               existing.valid_to = rel.valid_to;
+            }
          } else {
             const copy = Object.assign({}, rel, { mention_count: count });
             byKey.set(key, copy);
@@ -973,8 +983,44 @@
          `<span class="entity-relation-verb">${escapeHtml(rel.relation)}</span> ` +
          `<span class="${targetClass}"${targetAttr}>${targetName}</span>` +
          countHtml +
+         renderRelationWhen(rel) +
          `</div>`
       );
+   }
+
+   /* Unix seconds -> YYYY-MM-DD, formatted in UTC.
+      Deliberately not local time: these are stored as UTC midnight for a bare
+      date, so rendering them in a negative-offset zone would show the previous
+      day — a conference on the 27th would read as the 26th. */
+   function formatRelationDate(ts) {
+      const d = new Date(ts * 1000);
+      const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+      const dd = String(d.getUTCDate()).padStart(2, '0');
+      return `${d.getUTCFullYear()}-${mm}-${dd}`;
+   }
+
+   /* The "when" of a relation. Rendered only when known — an absent range shows
+      nothing rather than a placeholder, since most relations are timeless
+      ("John owns a Jetson") and a "no date" marker on every one would be noise. */
+   function renderRelationWhen(rel) {
+      const from = rel.valid_from || 0;
+      const to = rel.valid_to || 0;
+      if (!from && !to) return '';
+
+      let text;
+      if (from && to) {
+         /* Equal endpoints are the normal shape for a single-day event, not a
+            degenerate range — show one date, not "X – X". */
+         text =
+            from === to
+               ? formatRelationDate(from)
+               : `${formatRelationDate(from)} – ${formatRelationDate(to)}`;
+      } else if (from) {
+         text = `since ${formatRelationDate(from)}`;
+      } else {
+         text = `until ${formatRelationDate(to)}`;
+      }
+      return ` <span class="entity-relation-when">${escapeHtml(text)}</span>`;
    }
 
    /**
@@ -1125,6 +1171,7 @@
       // Close doc library if open
       if (typeof DawnDocLibrary !== 'undefined') DawnDocLibrary.close();
       if (typeof DawnCodeProjects !== 'undefined') DawnCodeProjects.close();
+      if (typeof DawnJobs !== 'undefined') DawnJobs.close();
 
       // Store trigger element for focus restoration
       triggerElement = document.activeElement;

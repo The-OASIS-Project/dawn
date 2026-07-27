@@ -224,6 +224,26 @@ static const treg_param_t memory_params[] = {
        .maps_to = TOOL_MAPS_TO_CUSTOM,
        .field_name = "with_source",
    },
+   /* Private-conversation confirmation gate for 'remember'.  Not a blanket block:
+    * a user can legitimately say "remember X" inside a private conversation, and
+    * silently dropping that is a worse failure than the leak it would prevent —
+    * they believe it was saved.  What must not happen is the MODEL deciding on
+    * its own to persist private material.  The tool cannot tell those apart, so
+    * it asks. */
+   {
+       .name = "confirm_private",
+       .description =
+           "For 'remember' in a PRIVATE conversation ONLY.  Set this to true when THE USER asked "
+           "for the save — if they said 'remember that', 'save this', 'note that down', or "
+           "similar, they have already decided and you should just set it and save.  Do NOT ask "
+           "them to confirm something they only just told you to do.  Leave it unset when saving "
+           "is YOUR idea rather than theirs; the tool will then decline and you should ask first. "
+           "The distinction is who decided, not how sensitive the content looks.",
+       .type = TOOL_PARAM_TYPE_BOOL,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "confirm_private",
+   },
    /* Merge mode for 'forget': supersede the listed IDs into a keeper instead of deleting. */
    {
        .name = "replaced_by",

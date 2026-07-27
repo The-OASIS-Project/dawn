@@ -1267,8 +1267,21 @@ static void process_extraction_response(int user_id,
                   valid_from = iso8601_parse_date_utc(json_object_get_string(vf_obj));
                if (json_object_object_get_ex(rel, "valid_to", &vt_obj))
                   valid_to = iso8601_parse_date_utc(json_object_get_string(vt_obj));
-               if (valid_from != 0 && valid_to != 0 && valid_to <= valid_from) {
-                  OLOG_WARNING("memory_extraction: dropping invalid validity range for "
+               /* Only an INVERTED range is bad data.  `valid_to == valid_from` is
+                * the normal shape for a single-day event — iso8601_parse_date_utc
+                * resolves a bare date to UTC midnight, so "spoke at Dragon Con
+                * 2023" on one date yields identical endpoints.  Rejecting `<=`
+                * therefore discarded the temporal data of every same-day event
+                * while keeping the relation, so the relation survived with no
+                * date at all and "when did that happen?" lost its answer.
+                *
+                * The range is inclusive downstream — memory_db_relation_add
+                * stores the endpoints independently and treats a past valid_to as
+                * a bounded historical slice (new_is_current), which is exactly
+                * what a one-day past event is — so a point interval needs no
+                * special handling once it is allowed through. */
+               if (valid_from != 0 && valid_to != 0 && valid_to < valid_from) {
+                  OLOG_WARNING("memory_extraction: dropping inverted validity range for "
                                "(%s, %s, %s): [%ld..%ld]",
                                r_subj, canon_pred, r_obj, (long)valid_from, (long)valid_to);
                   valid_from = 0;
