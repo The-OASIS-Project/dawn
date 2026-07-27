@@ -407,6 +407,14 @@ typedef struct session {
    // start can write it while a superseded turn's tail still reads).
    _Atomic int64_t stream_conversation_id;
 
+   // Whether THIS turn's step events (tool_call/tool_result) should be persisted
+   // to conversation_events and fanned out.  Set at dispatch from the same
+   // observe-scope predicate as the `status` event (job session / background turn
+   // / job conversation — see core_text_input_dispatch), read by the tool loop.
+   // Keeps the durable-log + fan-out tax off ordinary interactive turns, which
+   // are already observable via the sidebar chip and the debug transcript.
+   _Atomic bool events_observable;
+
    // Streaming metrics for UI visualization
    uint64_t stream_start_ms;     // Timestamp when LLM call started
    uint64_t first_token_ms;      // Timestamp of first token (0 if none yet)

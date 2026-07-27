@@ -203,9 +203,19 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
    }
 
    /* The event log is conversation-scoped; the turn's conversation was captured
-    * at dispatch (never the live view — Phase 0's rule). */
+    * at dispatch (never the live view — Phase 0's rule).  ev_observe additionally
+    * scopes step events to the same observe set as the `status` heartbeat, so
+    * ordinary interactive turns don't pay the durable-log + fan-out tax. */
    const int64_t ev_conv = atomic_load(&s->stream_conversation_id);
    const int ev_user = (int)s->metrics.user_id;
+   const bool ev_observe = ev_conv > 0 && atomic_load(&s->events_observable);
+
+   /* The canonical role:tool result row carries no tool name — only its
+    * tool_call_id — but the redactor needs the name to apply the
+    * TOOL_CAP_SECRETS backstop.  The assistant tool_calls row (with both id and
+    * name) precedes its results in this same batch, so map id->name as we pass
+    * it and look up when the result arrives. */
+   struct json_object *tcid_to_name = ev_observe ? json_object_new_object() : NULL;
 
    int n = json_object_array_length(canonical);
    for (int i = 0; i < n; i++) {
@@ -225,12 +235,12 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
          }
          /* One tool_call event per call in the batch: an iteration can invoke
           * several tools, and a tailer wants them individually, not as one blob. */
-         if (ev_conv > 0 && json_object_is_type(tc_obj, json_type_array)) {
+         if (ev_observe && json_object_is_type(tc_obj, json_type_array)) {
             int ncalls = json_object_array_length(tc_obj);
             for (int c = 0; c < ncalls; c++) {
                struct json_object *call = json_object_array_get_idx(tc_obj, c);
-               struct json_object *fn = NULL, *nm = NULL, *ar = NULL;
-               const char *tool_name = NULL, *args = NULL;
+               struct json_object *fn = NULL, *nm = NULL, *ar = NULL, *ido = NULL;
+               const char *tool_name = NULL, *args = NULL, *call_id = NULL;
                if (json_object_object_get_ex(call, "function", &fn)) {
                   if (json_object_object_get_ex(fn, "name", &nm)) {
                      tool_name = json_object_get_string(nm);
@@ -239,23 +249,41 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
                      args = json_object_get_string(ar);
                   }
                }
+               if (json_object_object_get_ex(call, "id", &ido)) {
+                  call_id = json_object_get_string(ido);
+               }
+               if (call_id && tool_name && tcid_to_name) {
+                  json_object_object_add(tcid_to_name, call_id, json_object_new_string(tool_name));
+               }
                conv_event_emit(ev_conv, ev_user, CONV_EVENT_TOOL_CALL,
                                event_payload_tool_call(tool_name, args));
             }
          }
       } else if (json_object_object_get_ex(m, "tool_call_id", &tcid_obj)) {
+         const char *tcid = json_object_get_string(tcid_obj);
          if (cb) {
-            cb(ud, role, content ? content : "", NULL, json_object_get_string(tcid_obj), NULL);
+            cb(ud, role, content ? content : "", NULL, tcid, NULL);
          }
-         if (ev_conv > 0) {
-            /* The canonical role:tool row carries the result text; the tool's
-             * name isn't on it, so correlate via tool_call_id at render time. */
+         if (ev_observe) {
+            /* Recover the tool name from the batch's tool_calls (mapped above) so
+             * the redactor's TOOL_CAP_SECRETS backstop can fire; without it every
+             * result persisted unredacted.  A rare uncorrelated result (NULL name)
+             * stays unredacted, as before — a value-shape scan of the whole result
+             * body is deliberately NOT applied here, since it would redact any
+             * result merely containing a long opaque run (search URLs, base64) and
+             * gut the observe surface. */
+            struct json_object *nmo = NULL;
+            const char *rtool = (tcid && tcid_to_name &&
+                                 json_object_object_get_ex(tcid_to_name, tcid, &nmo))
+                                    ? json_object_get_string(nmo)
+                                    : NULL;
             conv_event_emit(ev_conv, ev_user, CONV_EVENT_TOOL_RESULT,
-                            event_payload_tool_result(json_object_get_string(tcid_obj), content));
+                            event_payload_tool_result(rtool, content));
          }
       }
    }
 
+   json_object_put(tcid_to_name);
    json_object_put(canonical);
    session_release(s);
 }

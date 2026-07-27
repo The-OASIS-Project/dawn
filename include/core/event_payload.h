@@ -25,22 +25,21 @@
  * they would drift per-site — which is exactly how a secret eventually gets
  * persisted.
  *
- * REDACTION POLICY — denylist + capability backstop, deliberately NOT the
- * name-allowlist §8.6's wording suggests.  An allowlist would render most args
- * as "<redacted>", gutting the observe surface Phase 2 exists to build: the
- * value of a tool_call event is seeing WHICH tool ran with WHAT query.  The
- * actual secret-in-args surface is narrow and identifiable — auditing the whole
- * registry found exactly one credential parameter (shutdown_tool's
- * `passphrase`) — so three cheap rules cover it without the UX cost:
+ * REDACTION POLICY — CONTENT-based, deliberately NOT a name-allowlist and NOT
+ * keyed on the tool's TOOL_CAP_SECRETS capability.  An allowlist would render
+ * most args "<redacted>", gutting the observe surface Phase 2 exists to build;
+ * a capability whole-redact erased benign device/event state (home_assistant,
+ * calendar) whose secret lives in secrets.toml and never appears in the args or
+ * results.  This is a personal assistant — "the state of my HA" is not a secret.
+ * Two cheap rules catch a real credential wherever it appears:
  *
  *   1. key-name pattern  (pass/secret/token/key/credential/auth/bearer)
  *   2. value shape       ("sk-…", "Bearer …", long unbroken base64/hex runs)
- *   3. capability        every arg of a TOOL_CAP_SECRETS tool
  *
- * Rule 3 is the fails-safe property that made an allowlist tempting: a future
- * tool that handles credentials is covered by its own declared capability,
- * rather than by someone remembering to update a list.  Deviation recorded in
- * docs/BACKGROUND_JOBS_DESIGN.md §8.6.
+ * Applied per-arg on tool_call; tool_result bodies are stored readable (a tool
+ * does not echo its own config credential).  Residual: a secret embedded in
+ * freeform result text is not scrubbed — close it with a substring scrubber only
+ * if a real case appears.  Recorded in docs/BACKGROUND_JOBS_DESIGN.md §8.6.
  */
 
 #ifndef EVENT_PAYLOAD_H
@@ -75,7 +74,7 @@ size_t event_payload_utf8_floor(const char *s, size_t len);
 /**
  * @brief Build a redacted, capped `tool_call` payload.
  *
- * @param tool_name Tool being invoked (used for the capability backstop).
+ * @param tool_name Tool being invoked (recorded in the payload for display).
  * @param args_json Raw arguments JSON (LLM-generated); may be NULL.
  * @return malloc'd JSON, or NULL on OOM. Caller frees.
  */

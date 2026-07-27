@@ -1025,6 +1025,12 @@ dawn_add_unit_test(test_calculator
    LIBS    dawn_common unity m pthread
    LABEL   ci)
 
+dawn_add_unit_test(test_event_payload
+   SOURCES test_event_payload.c
+           ${SRC_ROOT}/src/core/event_payload.c
+   LIBS    unity json-c m pthread
+   LABEL   ci)
+
 dawn_add_unit_test(test_contacts_db
    SOURCES test_contacts_db.c test_contacts_db_stub.c
            ${SRC_ROOT}/src/memory/contacts_db.c

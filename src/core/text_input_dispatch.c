@@ -63,6 +63,12 @@ char *core_text_input_dispatch(session_t *session,
    const int64_t status_conv = atomic_load(&session->stream_conversation_id);
    const int status_user = opts && opts->auth_user_id > 0 ? opts->auth_user_id
                                                           : (int)session->metrics.user_id;
+   /* The tool loop emits tool_call/tool_result on this same turn; scope those to
+    * the same observe set as the status heartbeat so ordinary interactive turns
+    * don't pay the durable-log + fan-out tax (write-amplification under the global
+    * auth_db lock).  Set every dispatch so it reflects THIS turn; the tool loop
+    * runs synchronously within this turn on the same session. */
+   atomic_store(&session->events_observable, emit_status);
    if (emit_status && status_conv > 0) {
       conv_event_emit(status_conv, status_user, CONV_EVENT_STATUS, event_payload_status(true));
    }

@@ -30,7 +30,6 @@
 
 #include "config/dawn_config.h"
 #include "logging.h"
-#include "tools/tool_registry.h"
 
 /* Substrings that mark a key as credential-bearing.  Matched case-insensitively
  * anywhere in the key, so "api_key", "authToken" and "passphrase" all hit. */
@@ -104,11 +103,17 @@ size_t event_payload_utf8_floor(const char *s, size_t len) {
    return len;
 }
 
-/* Cap from config, with a sane floor so a misconfigured 0 can't erase content
- * (config clamps negatives; 0 legitimately means "unset" here). */
+/* Cap from config, with a sane floor so a misconfigured value can't erase
+ * content or underflow the truncator (0 legitimately means "unset" here).
+ * config_clamp_jobs() already enforces JOBS_EVENT_CHUNK_CAP_MIN on positives;
+ * this re-floors defensively so a non-config caller can't reach truncate_middle
+ * with a value small enough to underflow the tail-length subtraction below. */
 static size_t payload_cap(void) {
    int cap = g_config.jobs.event_chunk_cap;
-   return (cap > 0) ? (size_t)cap : 16384;
+   if (cap <= 0) {
+      return 16384;
+   }
+   return (cap < JOBS_EVENT_CHUNK_CAP_MIN) ? JOBS_EVENT_CHUNK_CAP_MIN : (size_t)cap;
 }
 
 /* Head+tail truncation: the head says what happened, the tail usually carries
@@ -136,28 +141,27 @@ static char *truncate_middle(const char *s) {
    return out;
 }
 
-static bool tool_handles_secrets(const char *tool_name) {
-   if (tool_name == NULL) {
-      return false;
-   }
-   const tool_metadata_t *meta = tool_registry_lookup(tool_name);
-   return meta != NULL && (meta->capabilities & TOOL_CAP_SECRETS) != 0;
-}
-
-/* Walk a parsed args object, replacing sensitive values in place. */
-static void redact_args_obj(struct json_object *args, bool redact_everything) {
+/* Walk a parsed args object, replacing sensitive values in place.  Redaction is
+ * CONTENT-based (a sensitive key name or a secret-shaped value), deliberately
+ * NOT keyed on the tool's TOOL_CAP_SECRETS capability: that flag means "this tool
+ * uses a secrets.toml credential" (home_assistant's API token, calendar's OAuth),
+ * which lives in config and never appears in the tool's args or results.  Whole-
+ * redacting such a tool only erased benign device/event state — this is a personal
+ * assistant, and "the state of my HA" is not a secret.  A real credential pasted
+ * into an arg is still caught by name or by value shape. */
+static void redact_args_obj(struct json_object *args) {
    if (args == NULL || !json_object_is_type(args, json_type_object)) {
       return;
    }
    json_object_object_foreach(args, key, val) {
-      bool sensitive = redact_everything || event_payload_key_is_sensitive(key);
+      bool sensitive = event_payload_key_is_sensitive(key);
       if (!sensitive && json_object_is_type(val, json_type_string)) {
          sensitive = value_looks_secret(json_object_get_string(val));
       }
       if (sensitive) {
          json_object_object_add(args, key, json_object_new_string(EVENT_REDACTED_MARKER));
       } else if (json_object_is_type(val, json_type_object)) {
-         redact_args_obj(val, redact_everything); /* nested arg objects */
+         redact_args_obj(val); /* nested arg objects */
       }
    }
 }
@@ -169,13 +173,12 @@ char *event_payload_tool_call(const char *tool_name, const char *args_json) {
    }
    json_object_object_add(root, "tool", json_object_new_string(tool_name ? tool_name : "?"));
 
-   bool redact_all = tool_handles_secrets(tool_name);
    struct json_object *args = NULL;
    if (args_json && args_json[0]) {
       args = json_tokener_parse(args_json);
    }
    if (args != NULL && json_object_is_type(args, json_type_object)) {
-      redact_args_obj(args, redact_all);
+      redact_args_obj(args);
       json_object_object_add(root, "args", args);
    } else {
       /* Unparseable or non-object args: never persist raw — we can't tell what
@@ -200,17 +203,18 @@ char *event_payload_tool_result(const char *tool_name, const char *result_text) 
    json_object_object_add(root, "tool", json_object_new_string(tool_name ? tool_name : "?"));
 
    /* Cap the result BEFORE embedding it, so the cap governs the payload the way
-    * an operator expects rather than being diluted by JSON escaping. */
+    * an operator expects rather than being diluted by JSON escaping.  Results are
+    * stored readable: a tool's config credential (the reason it carries
+    * TOOL_CAP_SECRETS) is not echoed in its output, and blanket-redacting erased
+    * benign state (device readings, calendar events) for no security gain.  A
+    * secret genuinely embedded in freeform result text is the documented residual
+    * (a smarter substring scrubber can close it if a real case appears). */
    char *body = truncate_middle(result_text ? result_text : "");
    if (body == NULL) {
       json_object_put(root);
       return NULL;
    }
-   if (tool_handles_secrets(tool_name)) {
-      json_object_object_add(root, "result", json_object_new_string(EVENT_REDACTED_MARKER));
-   } else {
-      json_object_object_add(root, "result", json_object_new_string(body));
-   }
+   json_object_object_add(root, "result", json_object_new_string(body));
    free(body);
 
    const char *rendered = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
