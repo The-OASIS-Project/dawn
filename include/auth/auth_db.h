@@ -1363,18 +1363,25 @@ int conv_db_job_mark_fired_many(const int64_t *ids, int n);
 int conv_db_job_bump_reinvoke(int64_t conv_id, int *new_count_out);
 
 /**
- * @brief System-caller (boot): suppress auto-reinvoke across a daemon restart.
+ * @brief System-caller (boot): suppress auto-reinvoke across a daemon restart,
+ *        WITHOUT suppressing the completion notice.
  *
- * Marks on_complete_fired=1 for every terminal (done/failed/interrupted),
- * not-yet-fired job whose on_complete='reinvoke_parent', so a job that finished
- * before this boot is NEVER auto-reinvoked on startup (design §143).  Also frees
- * the finished_at-ordered follow-up drain from head-of-line blocking on a stale
- * reinvoke row.
+ * Rewrites on_complete from 'reinvoke_parent' to 'notify' for every terminal
+ * (done/failed/interrupted), not-yet-fired job, so a job that finished before
+ * this boot is NEVER auto-reinvoked on startup (design §143) but the user is
+ * still told it finished.
  *
- * @param count_out Receives the number of rows fired (may be NULL).
+ * Deliberately does NOT set on_complete_fired.  That flag answers both "has the
+ * parent been re-engaged?" and "has the user been told?", so firing the row to
+ * stop the former also silently stopped the latter — a job finishing seconds
+ * before a restart reported to nobody.  Changing the disposition separates the
+ * two concerns with no schema change.  Also still frees the finished_at-ordered
+ * follow-up drain from head-of-line blocking on a stale reinvoke row.
+ *
+ * @param count_out Receives the number of rows downgraded (may be NULL).
  * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
  */
-int conv_db_job_fire_boot_reinvokes(int *count_out);
+int conv_db_job_downgrade_boot_reinvokes(int *count_out);
 
 /**
  * @brief Atomically claim an interrupted/failed job for re-dispatch.
@@ -1387,11 +1394,16 @@ int conv_db_job_fire_boot_reinvokes(int *count_out);
  * this is a self-authorizing claim: exactly one of two concurrent callers
  * succeeds, and a foreign row cannot be claimed even if a caller forgot to check.
  *
+ * @param allow_cancelled Admit 'cancelled' to the resumable set as well as
+ *        'interrupted' and 'failed'.  True only on the human-driven WebUI path:
+ *        restarting an interrupted job restores the user's intent, whereas
+ *        restarting a cancelled one reverses it, which the model must not do on
+ *        its own behalf.
  * @return AUTH_DB_SUCCESS (claimed), AUTH_DB_NOT_FOUND (absent, not owned by
  *         @p user_id, not a job, or not in a resumable state), AUTH_DB_INVALID,
  *         or AUTH_DB_FAILURE.
  */
-int conv_db_job_reset_for_resume(int64_t conv_id, int user_id);
+int conv_db_job_reset_for_resume(int64_t conv_id, int user_id, bool allow_cancelled);
 
 /**
  * @brief Ownership-scoped: a user's ACTIVE (queued/running) jobs, oldest first.

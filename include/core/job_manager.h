@@ -66,6 +66,13 @@ void job_manager_register_reinvoke_processor(job_reinvoke_processor_fn fn);
 #define JOB_MGR_CAP_USER 4     /**< per-user concurrent running reached */
 #define JOB_MGR_NOT_FOUND 5    /**< no running job for that conversation */
 #define JOB_MGR_FORBIDDEN 6    /**< running job owned by a different user */
+/** A live session already exists for that conversation.  One job conversation
+ *  gets one session: `job_manager_cancel` matches slots by
+ *  `stream_conversation_id` and stops at the first hit, so a duplicate would let
+ *  a later Cancel signal the wrong one and report success while the other ran
+ *  on.  Reachable since `cancelled` became resumable — a resume can land while
+ *  the cancelled worker is still tearing down. */
+#define JOB_MGR_CONV_BUSY 7
 
 /** Max job rows the completion monitor drains (and hands a processor) per tick. */
 #define JOB_MONITOR_MAX_PER_TICK 16
@@ -190,6 +197,32 @@ int job_manager_cancel(int64_t conv_id, int user_id);
 
 /** @return current number of running jobs across all users/providers. */
 int job_manager_running_count(void);
+
+/**
+ * @brief Is the daemon tearing down the job pool?
+ *
+ * job_manager_shutdown() cancels every running job's turn, and a worker cannot
+ * otherwise distinguish that from the user pressing Cancel — so it would record
+ * 'cancelled' (a disposition only a human may resume) and suppress the
+ * completion notice on the grounds that the user asked for the stop.  Workers
+ * consult this before interpreting a cancel.
+ *
+ * @return true once shutdown has begun.
+ */
+bool job_manager_is_shutting_down(void);
+
+/**
+ * @brief Is a live job session already attached to this conversation?
+ *
+ * Lets a caller refuse BEFORE mutating the row, rather than discovering the
+ * clash inside job_manager_begin() after a claim has already reset it.  Note the
+ * answer is advisory the moment it returns — job_manager_begin()'s own
+ * JOB_MGR_CONV_BUSY under the pool lock is the authoritative guard.
+ *
+ * @param conv_id Job conversation id.
+ * @return true if a pool slot currently holds a session for @p conv_id.
+ */
+bool job_manager_conv_is_live(int64_t conv_id);
 
 /**
  * @brief Flag that a job reached a terminal state, so the next monitor tick

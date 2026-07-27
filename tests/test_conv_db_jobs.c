@@ -243,7 +243,7 @@ static void test_resume_claim_is_exclusive(void) {
    conv_db_job_mark_fired(job); /* the interrupted-notify consumed the flag */
 
    /* First caller claims it. */
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_reset_for_resume(job, alice_id));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_reset_for_resume(job, alice_id, false));
 
    job_record_t r;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(job, alice_id, &r));
@@ -254,7 +254,7 @@ static void test_resume_claim_is_exclusive(void) {
    TEST_ASSERT_FALSE(r.on_complete_fired); /* delivery re-armed */
 
    /* Second caller loses: the row already left the resumable set. */
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(job, alice_id));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(job, alice_id, false));
 }
 
 /* The goal is durable from CREATE, not from a successful dispatch (v74).
@@ -301,9 +301,9 @@ static void test_resume_claim_is_ownership_scoped(void) {
    conv_db_create_job(alice_id, "j", 0, "detached", "notify", NULL, 1, "goal text", &job);
    conv_db_job_set_terminal(job, "interrupted", "daemon restarted", 100);
 
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(job, bob_id));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(job, bob_id, false));
    /* …and alice's claim still works afterwards — bob's attempt changed nothing. */
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_reset_for_resume(job, alice_id));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_reset_for_resume(job, alice_id, false));
 }
 
 /* set_running is a claim on 'queued', not a blind write.  A cancel that retires
@@ -341,17 +341,93 @@ static void test_resume_rejects_non_resumable_states(void) {
    conv_db_job_set_running(running, 100);
    conv_db_job_set_terminal(failed, "failed", "job capacity reached", 100);
 
-   /* A finished job has an answer; a cancelled one was stopped deliberately; a
-    * running one is already going.  Only interrupted/failed are resumable. */
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(done, alice_id));
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(cancelled, alice_id));
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(running, alice_id));
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_reset_for_resume(failed, alice_id));
+   /* A finished job has an answer and a running one is already going — neither
+    * is resumable from any surface, however it is asked. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(done, alice_id, false));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(done, alice_id, true));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(running, alice_id, false));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(running, alice_id, true));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_reset_for_resume(failed, alice_id, false));
 
-   /* A plain conversation is not a job and must never be resumable. */
+   /* A plain conversation is not a job and must never be resumable, and
+    * allow_cancelled must not open a door for one. */
    int64_t chat = 0;
    conv_db_create(alice_id, "just a chat", &chat);
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(chat, alice_id));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(chat, alice_id, false));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(chat, alice_id, true));
+}
+
+/* Firing is only correct for a row that is still terminal.  A cancelling worker
+ * calls mark_fired one statement after set_terminal, and Resume is one click, so
+ * a resume can land in between — and setting on_complete_fired=1 on the
+ * freshly-queued row makes the monitor skip it, so the resumed job finishes and
+ * notifies NOBODY.  Silent by construction, hence the test. */
+static void test_mark_fired_cannot_clobber_a_resumed_row(void) {
+   int64_t job = 0;
+   conv_db_create_job(alice_id, "j", 0, "detached", "reinvoke_parent", NULL, 1, "goal text", &job);
+   conv_db_job_set_terminal(job, "cancelled", NULL, 100);
+
+   /* The resume wins the race and clears the flag. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_reset_for_resume(job, alice_id, true));
+   job_record_t rec;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(job, alice_id, &rec));
+   TEST_ASSERT_EQUAL_STRING("queued", rec.job_status);
+   TEST_ASSERT_FALSE(rec.on_complete_fired);
+
+   /* The late worker fires. It must NOT take, or delivery is lost forever. */
+   conv_db_job_mark_fired(job);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(job, alice_id, &rec));
+   TEST_ASSERT_FALSE(rec.on_complete_fired);
+
+   /* Same for a running row, and for the batch variant. */
+   conv_db_job_set_running(job, 200);
+   conv_db_job_mark_fired(job);
+   int64_t ids[] = { job };
+   conv_db_job_mark_fired_many(ids, 1);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(job, alice_id, &rec));
+   TEST_ASSERT_FALSE(rec.on_complete_fired);
+
+   /* But firing a genuinely terminal row still works — the guard must not have
+    * broken the normal path. */
+   conv_db_job_set_terminal(job, "done", NULL, 300);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_mark_fired(job));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(job, alice_id, &rec));
+   TEST_ASSERT_TRUE(rec.on_complete_fired);
+}
+
+/* Cancelling is the user asking a job to stop, so only a user may undo it: the
+ * `job` tool passes allow_cancelled=false and the WebUI click path passes true.
+ * The whole point of the flag is that these two disagree on exactly one status,
+ * so pin both answers on the SAME row. */
+static void test_resume_cancelled_only_when_user_asks(void) {
+   int64_t cancelled = 0;
+   conv_db_create_job(alice_id, "cancelled", 0, "detached", "notify", NULL, 1, "goal text",
+                      &cancelled);
+   conv_db_job_set_terminal(cancelled, "cancelled", NULL, 100);
+
+   /* Tool path: refused, and — critically — the row is left untouched, so a
+    * refused attempt cannot strand a cancelled job in a half-reset state. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND,
+                         conv_db_job_reset_for_resume(cancelled, alice_id, false));
+   job_record_t rec;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(cancelled, alice_id, &rec));
+   TEST_ASSERT_EQUAL_STRING("cancelled", rec.job_status);
+
+   /* User path: claimed, and reset to queued like any other resume. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_reset_for_resume(cancelled, alice_id, true));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(cancelled, alice_id, &rec));
+   TEST_ASSERT_EQUAL_STRING("queued", rec.job_status);
+
+   /* The claim is still a claim: a second attempt finds nothing to take, so two
+    * clicks cannot spawn two workers. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND,
+                         conv_db_job_reset_for_resume(cancelled, alice_id, true));
+
+   /* Ownership stays in the predicate regardless of the flag. */
+   int64_t other = 0;
+   conv_db_create_job(alice_id, "other", 0, "detached", "notify", NULL, 1, "goal text", &other);
+   conv_db_job_set_terminal(other, "cancelled", NULL, 100);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(other, bob_id, true));
 }
 
 /* A resumed job rejoins the ACTIVE set and leaves history — the partition has to
@@ -368,7 +444,7 @@ static void test_resume_moves_row_back_to_active(void) {
    TEST_ASSERT_EQUAL_INT(0, n);
    TEST_ASSERT_EQUAL_INT(1, m);
 
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_reset_for_resume(job, alice_id));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_reset_for_resume(job, alice_id, false));
 
    conv_db_job_list_active_by_user(alice_id, out, 8, &n);
    conv_db_job_list_history_by_user(alice_id, 0, 0, out, 8, &m);
@@ -456,7 +532,12 @@ static void test_bump_reinvoke(void) {
    TEST_ASSERT_EQUAL_INT(2, r.reinvoke_count);
 }
 
-static void test_fire_boot_reinvokes(void) {
+/* Across a restart the parent must never be auto-re-engaged — but the user must
+ * still be TOLD the job finished.  Those are two different things that used to
+ * share one flag: marking the row fired stopped the reinvoke and silently
+ * stopped the notification with it, so a job finishing seconds before a restart
+ * vanished.  The downgrade separates them, and this test pins BOTH halves. */
+static void test_boot_downgrade_keeps_the_notification(void) {
    int64_t rp = 0, nf = 0;
    conv_db_create_job(alice_id, "reinvoke", 0, "detached", "reinvoke_parent", NULL, 1, "goal text",
                       &rp);
@@ -464,16 +545,53 @@ static void test_fire_boot_reinvokes(void) {
    conv_db_job_set_terminal(rp, "done", NULL, 100);
    conv_db_job_set_terminal(nf, "done", NULL, 100);
 
-   int fired = -1;
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_fire_boot_reinvokes(&fired));
-   TEST_ASSERT_EQUAL_INT(1, fired); /* only the reinvoke_parent row */
+   int n_down = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_downgrade_boot_reinvokes(&n_down));
+   TEST_ASSERT_EQUAL_INT(1, n_down); /* only the reinvoke_parent row */
 
-   /* The notify row is still a pending follow-up; the reinvoke row is suppressed. */
+   /* Half one: it can never re-engage the parent, because it is no longer a
+    * reinvoke row.  And it is NOT fired — that is what leaves delivery owed. */
+   job_record_t rec;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(rp, alice_id, &rec));
+   TEST_ASSERT_EQUAL_STRING("notify", rec.on_complete);
+   TEST_ASSERT_FALSE(rec.on_complete_fired);
+
+   /* Half two: BOTH rows are still pending follow-ups, so the user hears about
+    * the downgraded job too.  Under the old fire-the-row behaviour this was 1. */
    job_record_t rows[8];
    int n = 0;
    conv_db_job_list_pending_followups(8, rows, &n);
-   TEST_ASSERT_EQUAL_INT(1, n);
-   TEST_ASSERT_EQUAL_INT64(nf, rows[0].id);
+   TEST_ASSERT_EQUAL_INT(2, n);
+
+   /* Idempotent: a second boot finds nothing left to downgrade. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_downgrade_boot_reinvokes(&n_down));
+   TEST_ASSERT_EQUAL_INT(0, n_down);
+}
+
+/* A job carries out a private conversation's work, so it must not be a public
+ * copy of it — the child defaulting to is_private=0 is what let a private
+ * conversation's research reach long-term memory. */
+static void test_job_inherits_parent_privacy(void) {
+   int64_t priv = 0, pub = 0, child_of_priv = 0, child_of_pub = 0, rootless = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "private chat", &priv));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(priv, alice_id, true));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "public chat", &pub));
+
+   conv_db_create_job(alice_id, "j1", priv, "detached", "notify", NULL, 1, "g", &child_of_priv);
+   conv_db_create_job(alice_id, "j2", pub, "detached", "notify", NULL, 1, "g", &child_of_pub);
+   conv_db_create_job(alice_id, "j3", 0, "detached", "notify", NULL, 1, "g", &rootless);
+
+   bool is_private = false;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_is_private(child_of_priv, alice_id, &is_private));
+   TEST_ASSERT_TRUE(is_private);
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_is_private(child_of_pub, alice_id, &is_private));
+   TEST_ASSERT_FALSE(is_private);
+
+   /* No parent to inherit from — public, and must not fail closed into private
+    * (that would silently exempt every scheduled job from memory). */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_is_private(rootless, alice_id, &is_private));
+   TEST_ASSERT_FALSE(is_private);
 }
 
 static void test_last_assistant_text(void) {
@@ -516,12 +634,15 @@ int main(void) {
    RUN_TEST(test_resume_claim_is_ownership_scoped);
    RUN_TEST(test_set_running_loses_to_a_cancel);
    RUN_TEST(test_resume_rejects_non_resumable_states);
+   RUN_TEST(test_resume_cancelled_only_when_user_asks);
+   RUN_TEST(test_mark_fired_cannot_clobber_a_resumed_row);
    RUN_TEST(test_resume_moves_row_back_to_active);
    RUN_TEST(test_ownership_isolation);
    RUN_TEST(test_get_status_probe);
    RUN_TEST(test_mark_fired_many);
    RUN_TEST(test_bump_reinvoke);
-   RUN_TEST(test_fire_boot_reinvokes);
+   RUN_TEST(test_boot_downgrade_keeps_the_notification);
+   RUN_TEST(test_job_inherits_parent_privacy);
    RUN_TEST(test_last_assistant_text);
    return UNITY_END();
 }

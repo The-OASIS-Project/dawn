@@ -264,16 +264,27 @@ static char *handle_resume(struct json_object *details, int user_id) {
 
    char buf[192];
    /* Same one mutation path the WebUI uses — including the ownership check, so
-    * a job_id belonging to someone else is refused here too. */
-   switch (job_worker_resume(conv_id, user_id)) {
+    * a job_id belonging to someone else is refused here too.
+    *
+    * BY_TOOL, deliberately: this callback is reached by the MODEL, including on
+    * a reinvoke turn whose content came from untrusted job output, so it must
+    * not be able to restart a job the user cancelled.  A person wanting that
+    * clicks Resume in the panel. */
+   switch (job_worker_resume(conv_id, user_id, JOB_RESUME_ORIGIN_TOOL)) {
       case JOB_RESUME_STARTED:
          snprintf(buf, sizeof(buf),
                   "Resuming background job #%lld — it'll pick up where it left off.",
                   (long long)conv_id);
          return strdup(buf);
       case JOB_RESUME_NOT_RESUMABLE:
+         /* Hedged, because this covers two quite different states: a cancelled
+          * job (restartable, just not by me) and a done/running one (not
+          * restartable at all).  The result code doesn't distinguish them, so
+          * the wording must not claim to either. */
          snprintf(buf, sizeof(buf),
-                  "Job #%lld can't be resumed — only a job that was interrupted or failed can be.",
+                  "I can only restart a job that was interrupted or failed, and #%lld isn't in "
+                  "that state. If you cancelled it and want it back, you can resume it yourself "
+                  "from the background-jobs panel.",
                   (long long)conv_id);
          return strdup(buf);
       case JOB_RESUME_CAPACITY:

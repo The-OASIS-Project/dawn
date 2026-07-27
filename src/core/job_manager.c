@@ -78,6 +78,18 @@ static pthread_mutex_t s_pool_mutex = PTHREAD_MUTEX_INITIALIZER;
  * An idle system does zero per-tick DB work. */
 static atomic_bool s_jobs_dirty = false;
 
+/* Set before shutdown cancels the pool.  A worker sees only "my turn was
+ * cancelled" and otherwise treats that as the USER having stopped the job —
+ * which suppresses the completion notice ("they just asked for this") and
+ * records the disposition as 'cancelled', a state only a human may resume.
+ * Neither is true when the daemon pulled the rug, so the worker needs to be able
+ * to tell the two apart. */
+static atomic_bool s_shutting_down = false;
+
+bool job_manager_is_shutting_down(void) {
+   return atomic_load(&s_shutting_down);
+}
+
 /* Daemon boot time.  The monitor only DELIVERS a notification for a job that
  * reached a terminal state during THIS run (finished_at >= s_boot_time) — a job
  * that finished before this boot (e.g. an old completed job whose fired flag
@@ -160,6 +172,13 @@ void job_update_emit_ex(int64_t conv_id, int user_id, bool resumed) {
  * restart with many stale running/queued jobs is caught in one pass. */
 #define JOB_BOOT_SCAN_MAX (JOB_MONITOR_MAX_PER_TICK * 4)
 
+/* How stale an unannounced completion may be and still be worth announcing.
+ * Generous on purpose: it must comfortably cover a daemon restart, an overnight
+ * shutdown, or a machine that was off for a few days, because in every one of
+ * those the user genuinely has not heard yet.  Its only job is to stop a
+ * one-time flood from legacy rows whose fired flag predates the monitor. */
+#define JOB_NOTIFY_MAX_STALENESS_SEC (7 * 24 * 60 * 60)
+
 /* =============================================================================
  * Resolver hook (registered with session_manager)
  * ============================================================================= */
@@ -238,12 +257,18 @@ int job_manager_init(void) {
    }
 
    /* Restart-safety (design §143): never auto-reinvoke a parent across a restart.
-    * Mark any terminal + not-yet-fired reinvoke_parent job fired so the monitor
-    * won't re-engage the LLM for a job that finished before this boot (and so a
-    * stale reinvoke row can't head-of-line-block the finished_at-ordered drain). */
-   int n_fired = 0;
-   if (conv_db_job_fire_boot_reinvokes(&n_fired) == AUTH_DB_SUCCESS && n_fired > 0) {
-      OLOG_INFO("job_manager: suppressed auto-reinvoke for %d pre-restart job(s)", n_fired);
+    * Downgrade any terminal + not-yet-fired reinvoke_parent job to 'notify', so
+    * the monitor won't re-engage the LLM for a job that finished before this boot
+    * — but still TELLS the user it finished.  (Marking the row fired instead, as
+    * this did originally, suppressed the notification too, because one flag
+    * serves both dispositions; a job that finished just before a restart then
+    * vanished silently.  This also keeps a stale reinvoke row from
+    * head-of-line-blocking the finished_at-ordered drain.) */
+   int n_downgraded = 0;
+   if (conv_db_job_downgrade_boot_reinvokes(&n_downgraded) == AUTH_DB_SUCCESS && n_downgraded > 0) {
+      atomic_store(&s_jobs_dirty, true); /* wake the monitor to deliver them */
+      OLOG_INFO("job_manager: %d pre-restart job(s) downgraded to notify (no auto-reinvoke)",
+                n_downgraded);
    }
 
    OLOG_INFO("job_manager: initialized (%d job slots, max_active_jobs=%d)", JOB_POOL_MAX_SLOTS,
@@ -255,6 +280,10 @@ void job_manager_shutdown(void) {
    if (!s_initialized) {
       return;
    }
+   /* Flag BEFORE cancelling, so a worker that observes the cancel can tell it
+    * came from shutdown rather than from the user (see s_shutting_down). */
+   atomic_store(&s_shutting_down, true);
+
    /* Stop new resolves first, then request cancellation of every running job so
     * their workers observe it and tear down via job_manager_end(). */
    session_manager_register_job_lookup(NULL);
@@ -329,7 +358,19 @@ int job_manager_begin_ex(int user_id,
          if (slot < 0) {
             slot = i;
          }
-      } else if ((int)s_slots[i].session->metrics.user_id == user_id) {
+         continue;
+      }
+      /* One live session per job conversation.  A cancelled worker holds its
+       * slot until job_manager_end() completes its cancel-then-wait teardown,
+       * and a resume of that same job is now one click away — so without this
+       * two sessions could share a stream_conversation_id, after which
+       * job_manager_cancel()'s first-match scan can signal the dying one and
+       * tell the user a still-running job has stopped. */
+      if (atomic_load(&s_slots[i].session->stream_conversation_id) == conv_id) {
+         pthread_mutex_unlock(&s_pool_mutex);
+         return JOB_MGR_CONV_BUSY;
+      }
+      if ((int)s_slots[i].session->metrics.user_id == user_id) {
          user_count++;
       }
    }
@@ -505,6 +546,20 @@ job_cancel_result_t job_manager_cancel_or_retire(int64_t conv_id,
       return JOB_CANCEL_RETIRED;
    }
    return JOB_CANCEL_ALREADY_TERMINAL;
+}
+
+bool job_manager_conv_is_live(int64_t conv_id) {
+   if (conv_id <= 0) {
+      return false;
+   }
+   pthread_mutex_lock(&s_pool_mutex);
+   bool live = false;
+   for (int i = 0; i < s_pool_size && !live; i++) {
+      live = (s_slots[i].session != NULL &&
+              atomic_load(&s_slots[i].session->stream_conversation_id) == conv_id);
+   }
+   pthread_mutex_unlock(&s_pool_mutex);
+   return live;
 }
 
 int job_manager_running_count(void) {
@@ -765,6 +820,8 @@ void jobs_monitor_tick(time_t now) {
    job_notify_t *msg_items = calloc((size_t)n, sizeof(job_notify_t));
    int msg_count = 0;
 
+   const time_t now_ts = time(NULL);
+
    for (int i = 0; i < n; i++) {
       if (s_reinvoke_processor != NULL && strcmp(rows[i].on_complete, "reinvoke_parent") == 0) {
          reinvoke_rows[n_reinvoke++] = rows[i]; /* processor owns firing */
@@ -779,9 +836,22 @@ void jobs_monitor_tick(time_t now) {
       if (strcmp(rows[i].on_complete, "notify") != 0) {
          continue; /* on_complete 'none' → mark fired, no delivery */
       }
-      /* Only announce completions from THIS run — never replay stale ones (an
-       * old job whose fired flag predates the monitor, seen across a restart). */
-      if (rows[i].finished_at < s_boot_time) {
+      /* Announce anything still OWED that finished recently — including across a
+       * restart, which is the case that matters most: the daemon goes down while
+       * a job is running, or a job finishes moments before shutdown, and the user
+       * has no other way to learn about it.
+       *
+       * This used to read `finished_at < s_boot_time` — "only completions from
+       * THIS run" — which suppressed precisely those.  Together with the boot
+       * scan marking rows fired, a job that ended around a restart was silenced
+       * twice over.
+       *
+       * `on_complete_fired` is the real "has this been announced?" answer; the
+       * bound below exists only for the narrow case the original rule was
+       * reaching for — a one-time flood of legacy rows whose flag predates the
+       * monitor.  Anything older than this is left to the jobs panel, which
+       * still shows it with its result. */
+      if (rows[i].finished_at < now_ts - JOB_NOTIFY_MAX_STALENESS_SEC) {
          continue;
       }
 

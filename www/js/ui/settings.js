@@ -670,6 +670,15 @@
          callbacks.updateHistoryButtonVisibility = cbs.updateHistoryButtonVisibility;
       if (cbs.updateMemoryButtonVisibility)
          callbacks.updateMemoryButtonVisibility = cbs.updateMemoryButtonVisibility;
+      /* Was never stored, so updateAuthVisibility's call to it (above) could
+       * never fire.  It went unnoticed because both panels behind it survived
+       * by accident: #scheduler-btn has no `.hidden` CSS rule at all, so its
+       * gate is inert and the button is simply always visible, and #coding-btn
+       * is revealed a second way (setEnabled, on get_config_response).  The
+       * jobs button is the first with a real `.hidden` rule AND no second
+       * path — i.e. the first one actually gated by this callback. */
+      if (cbs.updateSchedulerButtonVisibility)
+         callbacks.updateSchedulerButtonVisibility = cbs.updateSchedulerButtonVisibility;
       if (cbs.restoreHistorySidebarState)
          callbacks.restoreHistorySidebarState = cbs.restoreHistorySidebarState;
 

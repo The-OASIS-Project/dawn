@@ -58,10 +58,28 @@ int job_worker_spawn(int user_id, int64_t conv_id, const char *goal);
  * job_worker_resume() exists to guarantee — so exposing them next to it would
  * make the unsafe call the shorter one to reach for. */
 
+/**
+ * @brief Who is asking for a resume — this decides whether 'cancelled' counts.
+ *
+ * Restarting an interrupted or failed job RESTORES the user's intent; restarting
+ * a cancelled one REVERSES it.  A person may freely change their mind, so the
+ * WebUI click path admits cancelled jobs.  The model may not undo a stop the
+ * user asked for on its own initiative — and it can reach `resume` through the
+ * `job` tool during a reinvoke turn driven by untrusted job output — so the tool
+ * path does not.
+ */
+typedef enum {
+   /* Must stay 0: a zeroed or default-initialised value has to mean the
+    * RESTRICTIVE set, so a caller that forgets to set it fails closed. */
+   JOB_RESUME_ORIGIN_TOOL = 0, /**< the `job` tool, i.e. the model: interrupted/failed only */
+   JOB_RESUME_ORIGIN_USER      /**< a WebUI click: also admits 'cancelled' */
+} job_resume_origin_t;
+
 /** Outcome of job_worker_resume(). */
 typedef enum {
    JOB_RESUME_STARTED,       /**< claimed and a worker was spawned */
-   JOB_RESUME_NOT_RESUMABLE, /**< exists, but is done/cancelled/running/queued */
+   JOB_RESUME_NOT_RESUMABLE, /**< exists, but is done/running/queued — or cancelled
+                                  when the caller is JOB_RESUME_ORIGIN_TOOL */
    JOB_RESUME_CAPACITY,      /**< job caps full; nothing was mutated */
    JOB_RESUME_FORBIDDEN,     /**< owned by a different user */
    JOB_RESUME_NOT_FOUND,     /**< no such job */
@@ -75,7 +93,7 @@ typedef enum {
 } job_resume_result_t;
 
 /**
- * @brief Resume an interrupted/failed job — ONE mutation path for every surface.
+ * @brief Resume a stopped job — ONE mutation path for every surface.
  *
  * Ownership check, capacity check, atomic claim, `resumed` broadcast and worker
  * spawn, in the order that leaves nothing half-done: capacity is tested BEFORE
@@ -84,8 +102,16 @@ typedef enum {
  * Callers (the `job` tool, the WebUI `job_action` handler) supply their own
  * caller's user_id and only word the outcome — the authorization is here, so a
  * new surface cannot forget it.
+ *
+ * @param origin Which surface is asking; decides whether a cancelled job is
+ *        resumable (see job_resume_origin_t).  A new surface must choose
+ *        deliberately rather than inherit a default.  NOTE this is an *asserted*
+ *        caller claim, not a verified one — unlike @p user_id, which is bound
+ *        into the SQL predicate, nothing here can check that ORIGIN_USER really
+ *        came from an authenticated browser.  The split holds because there are
+ *        exactly two call sites and they are audited; a third must be too.
  */
-job_resume_result_t job_worker_resume(int64_t conv_id, int user_id);
+job_resume_result_t job_worker_resume(int64_t conv_id, int user_id, job_resume_origin_t origin);
 
 #ifdef __cplusplus
 }

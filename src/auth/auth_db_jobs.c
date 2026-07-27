@@ -157,13 +157,42 @@ int conv_db_create_job(int user_id,
       sqlite3_reset(s_db.stmt_conv_count);
    }
 
+   /* Inherit the parent's privacy.  A job is the private conversation's work
+    * carried out elsewhere, so it must not be a public copy of it — without this
+    * a private conversation's research was reachable by anything that trusts the
+    * flag (source-linked recall filters on `c.is_private = 0`, and extraction
+    * gates on it), because the child defaulted to 0.
+    *
+    * Read inline, under the lock we already hold: conv_db_is_private() takes the
+    * same auth_db mutex and would deadlock here.  Ownership is bound so a
+    * caller cannot inherit from someone else's conversation, and on any failure
+    * the value stays `true` — a job whose parent we cannot read is treated as
+    * private, because guessing wrong in that direction is the recoverable one. */
+   int inherited_private = 1;
+   if (parent_id > 0) {
+      sqlite3_stmt *pst = NULL;
+      if (sqlite3_prepare_v2(s_db.db,
+                             "SELECT is_private FROM conversations WHERE id=? AND user_id=?", -1,
+                             &pst, NULL) == SQLITE_OK) {
+         sqlite3_bind_int64(pst, 1, parent_id);
+         sqlite3_bind_int(pst, 2, user_id);
+         if (sqlite3_step(pst) == SQLITE_ROW) {
+            inherited_private = sqlite3_column_int(pst, 0) != 0 ? 1 : 0;
+         }
+         sqlite3_finalize(pst);
+      }
+   } else {
+      inherited_private = 0; /* rootless job — no parent whose privacy to carry */
+   }
+
    sqlite3_stmt *st = NULL;
    int rc = sqlite3_prepare_v2(
        s_db.db,
        "INSERT INTO conversations "
        "(user_id, title, created_at, updated_at, anchor_date, origin, "
-       " parent_id, spawn_mode, on_complete, deliver_to, spawn_depth, job_goal, job_status) "
-       "VALUES (?, ?, ?, ?, ?, 'job', ?, ?, ?, ?, ?, ?, 'queued')",
+       " parent_id, spawn_mode, on_complete, deliver_to, spawn_depth, job_goal, job_status, "
+       " is_private) "
+       "VALUES (?, ?, ?, ?, ?, 'job', ?, ?, ?, ?, ?, ?, 'queued', ?)",
        -1, &st, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("conv_db_create_job: prepare failed: %s", sqlite3_errmsg(s_db.db));
@@ -199,6 +228,7 @@ int conv_db_create_job(int user_id,
    } else {
       sqlite3_bind_null(st, 11);
    }
+   sqlite3_bind_int(st, 12, inherited_private);
 
    rc = sqlite3_step(st);
    sqlite3_finalize(st);
@@ -211,6 +241,10 @@ int conv_db_create_job(int user_id,
    *conv_id_out = sqlite3_last_insert_rowid(s_db.db);
    AUTH_DB_UNLOCK();
 
+   if (inherited_private) {
+      OLOG_INFO("conv_db_create_job: conv %lld inherits private from parent %lld",
+                (long long)*conv_id_out, (long long)parent_id);
+   }
    OLOG_INFO("Created job conversation %lld for user %d (parent %lld, depth %d)",
              (long long)*conv_id_out, user_id, (long long)parent_id, spawn_depth);
    return AUTH_DB_SUCCESS;
@@ -267,7 +301,17 @@ int conv_db_job_set_running(int64_t conv_id, time_t started_at) {
     * runs to completion after the user was told it stopped.  The window is
     * ordinary-sized now that resume creates queued rows on demand and the panel
     * will offer Resume and Cancel on the same row.  Losing the claim is how the
-    * worker learns to stand down. */
+    * worker learns to stand down.
+    *
+    * ⚠ 'queued' is NOT a value a stale worker can only see once.  Since
+    * 'cancelled' became user-resumable, cancel→resume returns the row to
+    * 'queued', so this predicate alone no longer proves "nobody cancelled me" —
+    * a worker spawned before the cancel could claim the row spawned by the
+    * resume.  What actually keeps that from happening is upstream: one live
+    * session per conversation (JOB_MGR_CONV_BUSY in job_manager_begin_ex),
+    * which refuses the second worker before it ever reaches this statement.  If
+    * that guard is ever relaxed, this claim needs a generation/rev term rather
+    * than a status term. */
    if (sqlite3_prepare_v2(s_db.db,
                           "UPDATE conversations SET job_status='running', started_at=? "
                           "WHERE id=? AND job_status='queued'",
@@ -329,12 +373,25 @@ int conv_db_job_set_terminal(int64_t conv_id,
 static void bind_conv_id_only(sqlite3_stmt *st, void *ctx) {
    sqlite3_bind_int64(st, 1, *(int64_t *)ctx);
 }
+/* Firing is only ever correct for a row that is still TERMINAL.  Every caller
+ * fires a job it just saw finish, but between that observation and this write a
+ * resume can put the row back to 'queued' — and setting on_complete_fired=1 on
+ * a freshly-resumed row makes the monitor skip it, so the resumed job completes
+ * and notifies nobody.  That is exactly what reset_for_resume clears the flag to
+ * prevent.  Reachable since 'cancelled' became user-resumable: the cancelling
+ * worker marks fired one statement after set_terminal, and Resume is one click.
+ *
+ * Silently no-ops rather than erroring — job_update_exec doesn't surface the row
+ * count, and "the row moved on" is the correct outcome, not a failure. */
+#define JOB_FIRE_ONLY_IF_TERMINAL " AND job_status NOT IN ('queued','running')"
+
 int conv_db_job_mark_fired(int64_t conv_id) {
    if (conv_id <= 0) {
       return AUTH_DB_INVALID;
    }
-   return job_update_exec("UPDATE conversations SET on_complete_fired=1 WHERE id=?",
-                          bind_conv_id_only, &conv_id, "mark_fired");
+   return job_update_exec(
+       "UPDATE conversations SET on_complete_fired=1 WHERE id=?" JOB_FIRE_ONLY_IF_TERMINAL,
+       bind_conv_id_only, &conv_id, "mark_fired");
 }
 
 int conv_db_job_get_goal(int64_t conv_id, int user_id, char **out) {
@@ -373,7 +430,7 @@ int conv_db_job_get_goal(int64_t conv_id, int user_id, char **out) {
    return rc;
 }
 
-int conv_db_job_reset_for_resume(int64_t conv_id, int user_id) {
+int conv_db_job_reset_for_resume(int64_t conv_id, int user_id, bool allow_cancelled) {
    if (conv_id <= 0 || user_id <= 0) {
       return AUTH_DB_INVALID;
    }
@@ -392,12 +449,24 @@ int conv_db_job_reset_for_resume(int64_t conv_id, int user_id) {
     * Clearing on_complete_fired is what actually re-arms delivery — the boot
     * interrupted-notify consumed it, and the monitor skips a fired row, so a
     * resumed job would finish and silently notify nobody.  finished_at/started_at
-    * reset too, or the panel renders a job that finished before it started. */
-   if (sqlite3_prepare_v2(s_db.db,
-                          "UPDATE conversations SET job_status='queued', job_error=NULL, "
-                          "started_at=0, finished_at=0, on_complete_fired=0 "
-                          "WHERE id=? AND user_id=? AND job_status IN ('interrupted','failed')",
-                          -1, &st, NULL) != SQLITE_OK) {
+    * reset too, or the panel renders a job that finished before it started.
+    *
+    * 'cancelled' is admitted only when @p allow_cancelled.  interrupted/failed
+    * mean the job stopped against the user's wishes, so restarting restores an
+    * intent; cancelled means they asked it to stop, so restarting REVERSES one.
+    * That difference is only safe to ignore when a human is asking — hence the
+    * flag, set by the WebUI click path and cleared by the `job` tool, so the
+    * model cannot restart work a person deliberately stopped.  See the
+    * job_worker_resume() contract for why the split lives at the surface. */
+   const char *sql =
+       allow_cancelled
+           ? "UPDATE conversations SET job_status='queued', job_error=NULL, "
+             "started_at=0, finished_at=0, on_complete_fired=0 "
+             "WHERE id=? AND user_id=? AND job_status IN ('interrupted','failed','cancelled')"
+           : "UPDATE conversations SET job_status='queued', job_error=NULL, "
+             "started_at=0, finished_at=0, on_complete_fired=0 "
+             "WHERE id=? AND user_id=? AND job_status IN ('interrupted','failed')";
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL) != SQLITE_OK) {
       OLOG_ERROR("auth_db_jobs: prepare reset_for_resume failed: %s", sqlite3_errmsg(s_db.db));
       AUTH_DB_UNLOCK();
       return AUTH_DB_FAILURE;
@@ -413,8 +482,9 @@ int conv_db_job_reset_for_resume(int64_t conv_id, int user_id) {
       return AUTH_DB_FAILURE;
    }
    /* No row changed: it does not exist, is not a job, or is not in a resumable
-    * state (running/queued/done/cancelled).  The caller has already
-    * ownership-checked, so this is a state answer, not an authorization one. */
+    * state (running/queued/done, plus cancelled unless @p allow_cancelled).  The
+    * caller has already ownership-checked, so this is a state answer, not an
+    * authorization one. */
    return changed == 1 ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
 }
 
@@ -617,8 +687,10 @@ int conv_db_job_mark_fired_many(const int64_t *ids, int n) {
    }
    AUTH_DB_LOCK_OR_FAIL();
    sqlite3_stmt *st = NULL;
-   if (sqlite3_prepare_v2(s_db.db, "UPDATE conversations SET on_complete_fired=1 WHERE id=?", -1,
-                          &st, NULL) != SQLITE_OK) {
+   if (sqlite3_prepare_v2(s_db.db,
+                          "UPDATE conversations SET on_complete_fired=1 "
+                          "WHERE id=?" JOB_FIRE_ONLY_IF_TERMINAL,
+                          -1, &st, NULL) != SQLITE_OK) {
       OLOG_ERROR("conv_db_job_mark_fired_many: prepare failed: %s", sqlite3_errmsg(s_db.db));
       AUTH_DB_UNLOCK();
       return AUTH_DB_FAILURE;
@@ -677,14 +749,30 @@ int conv_db_job_bump_reinvoke(int64_t conv_id, int *new_count_out) {
    return rc;
 }
 
-int conv_db_job_fire_boot_reinvokes(int *count_out) {
+int conv_db_job_downgrade_boot_reinvokes(int *count_out) {
    if (count_out) {
       *count_out = 0;
    }
    AUTH_DB_LOCK_OR_FAIL();
    sqlite3_stmt *st = NULL;
+   /* DOWNGRADE to 'notify' — do NOT set on_complete_fired.
+    *
+    * This used to mark the row fired, which did suppress the cross-restart
+    * re-engagement it was written for, but `on_complete_fired` answers two
+    * different questions with one bit: "has the parent been re-engaged?" and
+    * "has the user been told?".  Firing the row answered both, so a job that
+    * finished moments before a restart was silently swallowed — no reinvoke
+    * (correct) and no notification either (not intended, and the user has no
+    * other way to learn it finished).
+    *
+    * Changing the DISPOSITION instead separates them: the reinvoke can never
+    * happen because the row is no longer a reinvoke_parent row, while
+    * on_complete_fired stays 0 so the monitor still owes — and delivers — a
+    * completion notice through the ordinary notify path.  No schema change, and
+    * the row still drains from the finished_at-ordered queue rather than
+    * head-of-line-blocking it. */
    if (sqlite3_prepare_v2(s_db.db,
-                          "UPDATE conversations SET on_complete_fired=1 "
+                          "UPDATE conversations SET on_complete='notify' "
                           "WHERE job_status IN ('done','failed','interrupted') "
                           "AND on_complete_fired=0 AND on_complete='reinvoke_parent'",
                           -1, &st, NULL) != SQLITE_OK) {

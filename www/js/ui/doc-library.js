@@ -349,6 +349,7 @@
       if (typeof DawnMemory !== 'undefined') DawnMemory.close();
       if (typeof DawnSchedulerQueue !== 'undefined') DawnSchedulerQueue.close();
       if (typeof DawnCodeProjects !== 'undefined') DawnCodeProjects.close();
+      if (typeof DawnJobs !== 'undefined') DawnJobs.close();
 
       triggerElement = document.activeElement;
       el.popover.classList.remove('hidden');

@@ -100,6 +100,14 @@
    background: var(--error);
 }
 
+/* Explicit rather than relying on the base default happening to be the right
+ * grey — a consumer writing `muted` should get muted because the variant
+ * exists, not by luck.  Pairs with .dawn-badge.muted so one tone vocabulary
+ * (success/warning/error/muted) works across BOTH primitives. */
+.dawn-status-dot.muted {
+   background: var(--text-tertiary);
+}
+
 /* -----------------------------------------------------------------------------
  * Badge (.dawn-badge)
  * Usage: <span class="dawn-badge accent">OAuth</span>
@@ -144,6 +152,20 @@
    border: 1px solid var(--border-color);
 }
 
+/* success / error complete the tone vocabulary the status dot already had.
+ * Added for the background-jobs panel, where `done` / `failed` / `interrupted`
+ * are the majority of rendered rows — without these the badge class resolved
+ * to nothing and those statuses rendered as bare unstyled text. */
+.dawn-badge.success {
+   background: var(--success);
+   color: #000;
+}
+
+.dawn-badge.error {
+   background: var(--error);
+   color: #000;
+}
+
 /* Background-jobs "running" indicator — styled to MATCH the composer "working"
  * pill (#composer-busy): same rounded, mono, shadowed pill so it reads as a
  * sibling status indicator.  The per-conversation instance floats above the
@@ -157,13 +179,20 @@
    border-radius: 999px;
    font-family: var(--font-mono, 'IBM Plex Mono', monospace);
    font-size: 0.72rem;
+   /* Explicit: these are <button>s now, and base/buttons.css sets 600 on the
+      element.  Without this the pill renders bolder than #composer-busy, the
+      sibling it is specified above to match. */
+   font-weight: 400;
    letter-spacing: 0.04em;
    line-height: 1.3;
    white-space: nowrap;
    vertical-align: middle;
    background: var(--bg-secondary);
    color: var(--warning); /* amber — stands apart from the cyan "working" pill */
-   border: 1px solid var(--warning-border);
+   /* 0.45, not --warning-border's 0.25: as a control the boundary has to clear
+      WCAG 1.4.11's 3:1 (0.25 composites to ~1.7:1 on this background, and the
+      fill is the same colour as #input-area so it contributes nothing). */
+   border: 1px solid rgba(240, 180, 41, 0.45);
    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
    animation: jobsPillPulse 1.6s ease-in-out infinite;
 }
@@ -178,24 +207,52 @@
    z-index: 2;
 }
 
+/* Pulses the BORDER, not the element's opacity.  Element opacity composites the
+ * text too: at the old 0.62 trough the amber label fell to ~4.2:1 on this
+ * background, under the 4.5:1 AA floor for 11.5px text, for a large part of
+ * every cycle.  Animating the border keeps the "something is running" motion
+ * and leaves the text at full contrast throughout. */
 @keyframes jobsPillPulse {
    0%,
    100% {
-      opacity: 1;
+      border-color: rgba(240, 180, 41, 0.45);
    }
    50% {
-      opacity: 0.62;
+      border-color: rgba(240, 180, 41, 0.9);
    }
 }
 
 @media (prefers-reduced-motion: reduce) {
+   /* transition + hover transform as well as the pulse: as <button>s these now
+      inherit `transition: all` and a translateY hover from base/buttons.css, so
+      zeroing only the animation would still leave the element moving. */
    .jobs-pill {
       animation: none;
+      transition: none;
    }
 }
 
+/* Out-specifies base/buttons.css's `button:hover:not(:disabled)` (0,2,1), which
+ * a bare `.jobs-pill:hover` (0,2,0) loses to — so the global pill kept lifting
+ * and brightening on hover even under reduced-motion.  Applied unconditionally:
+ * a status pill should not animate on hover for anyone. */
+.jobs-pill:hover:not(:disabled) {
+   transform: none;
+   filter: none;
+}
+
+/* Both pills are real <button>s — each opens the Background Jobs panel, and the
+ * count they show is exactly what that panel lists, so clicking is the gesture
+ * users reach for first.  They stay styled as pills (these class rules
+ * out-specify the element defaults in base/buttons.css); only the affordances
+ * change. */
+.jobs-pill:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+}
+
 .jobs-pill.jobs-pill-global {
-   cursor: default;
+   /* cursor comes from base/buttons.css now that this is a <button>. */
    box-shadow: none; /* inline in the header — no float shadow needed */
 }
 

@@ -199,7 +199,18 @@ static void job_worker_run(job_work_t *work) {
                                          response);
    }
 
-   if (cancelled && !reaped) {
+   if (cancelled && !reaped && job_manager_is_shutting_down()) {
+      /* The daemon cancelled this, not the user.  Recording it as 'cancelled'
+       * would be wrong twice over: it suppresses the completion notice on the
+       * grounds that the user asked for the stop, and it lands the job in a
+       * state only a human may resume.  'interrupted' is what actually happened
+       * — the same disposition the boot scan assigns to a worker that never got
+       * to write at all — and leaving it UNFIRED is what lets the user be told. */
+      job_manager_set_terminal(work->conv_id, work->user_id, "interrupted", "daemon shutting down",
+                               now, have_answer ? final_msg_id : 0);
+      OLOG_INFO("job_worker: job conv %lld interrupted by shutdown%s", (long long)work->conv_id,
+                have_answer ? " (answer produced first; kept)" : "");
+   } else if (cancelled && !reaped) {
       /* User cancel wins even if an answer landed: they asked it to stop, so no
        * completion notification. The answer above is still retrievable. */
       job_manager_set_terminal(work->conv_id, work->user_id, "cancelled", NULL, now, 0);
@@ -255,7 +266,7 @@ static int job_worker_spawn_resume(int user_id, int64_t conv_id) {
    return job_worker_spawn_ex(user_id, conv_id, JOB_RESUME_DIRECTIVE, true);
 }
 
-job_resume_result_t job_worker_resume(int64_t conv_id, int user_id) {
+job_resume_result_t job_worker_resume(int64_t conv_id, int user_id, job_resume_origin_t origin) {
    if (conv_id <= 0 || user_id <= 0) {
       return JOB_RESUME_NOT_FOUND;
    }
@@ -277,6 +288,15 @@ job_resume_result_t job_worker_resume(int64_t conv_id, int user_id) {
     * the user as "resuming broke the job". */
    if (job_manager_capacity(user_id, job_provider_from_default()) != JOB_MGR_OK) {
       return JOB_RESUME_CAPACITY;
+   }
+
+   /* Same reason, for the one cap capacity() cannot see: a cancelled job holds
+    * its pool slot until job_manager_end() finishes tearing it down, and Resume
+    * on a cancelled job is now one click.  begin() refuses the duplicate anyway,
+    * but only AFTER the claim has already reset the row — leaving a job that
+    * reads 'queued' with no worker until the failure path retires it. */
+   if (job_manager_conv_is_live(conv_id)) {
+      return JOB_RESUME_NOT_RESUMABLE;
    }
 
    /* There must be SOMETHING to run: either a transcript to continue, or the
@@ -304,8 +324,12 @@ job_resume_result_t job_worker_resume(int64_t conv_id, int user_id) {
 
    /* The claim.  The resumable-status test lives inside the UPDATE, so exactly
     * one of two concurrent callers (two clicks, or the tool and a browser at
-    * once) proceeds to spawn a worker. */
-   if (conv_db_job_reset_for_resume(conv_id, user_id) != AUTH_DB_SUCCESS) {
+    * once) proceeds to spawn a worker.  The origin widens that test to include
+    * 'cancelled' for a human caller only — passed down rather than pre-checked
+    * here, so the decision stays inside the same atomic statement as the rest of
+    * the predicate and a tool caller cannot win a race a user started. */
+   if (conv_db_job_reset_for_resume(conv_id, user_id, origin == JOB_RESUME_ORIGIN_USER) !=
+       AUTH_DB_SUCCESS) {
       return JOB_RESUME_NOT_RESUMABLE;
    }
 

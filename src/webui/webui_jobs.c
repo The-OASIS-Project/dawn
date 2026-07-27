@@ -421,14 +421,21 @@ void webui_jobs_handle_action(ws_connection_t *conn, json_object *payload) {
    if (strcmp(action, "resume") == 0) {
       /* Shared with the `job` tool — ownership, capacity, the atomic claim and
        * the `resumed` broadcast all live in job_worker_resume(), so neither
-       * surface can get the ordering (or the authorization) subtly different. */
-      switch (job_worker_resume(conv_id, conn->auth_user_id)) {
+       * surface can get the ordering (or the authorization) subtly different.
+       *
+       * BY_USER is the one thing that differs: this frame only arrives from a
+       * click in an authenticated browser, so the caller is a person changing
+       * their mind, and a cancelled job is resumable here.  The tool path passes
+       * BY_TOOL so the model cannot undo a stop the user asked for. */
+      switch (job_worker_resume(conv_id, conn->auth_user_id, JOB_RESUME_ORIGIN_USER)) {
          case JOB_RESUME_STARTED:
             send_action_result(conn, action, conv_id, true, "Resuming.");
             return;
          case JOB_RESUME_NOT_RESUMABLE:
-            send_action_result(conn, action, conv_id, false,
-                               "Only an interrupted or failed job can be resumed.");
+            /* State-neutral on purpose: this also covers a job that is running or
+             * queued again (resumed in another tab before this click landed), so
+             * naming a specific state would sometimes be a lie. */
+            send_action_result(conn, action, conv_id, false, "That job can't be resumed now.");
             return;
          case JOB_RESUME_CAPACITY:
             send_action_result(conn, action, conv_id, false,

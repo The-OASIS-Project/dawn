@@ -35,6 +35,7 @@
    /* State Colors */
    --error: #ef4444;
    --error-hover: #dc2626; /* Darker red for hover states */
+   --error-subtle: rgba(239, 68, 68, 0.12); /* Tinted background for destructive hovers */
    --success: #22c55e;
    --warning: #f0b429; /* Amber - hesitation, strain, >50% context */
    --warning-subtle: rgba(240, 180, 41, 0.08);

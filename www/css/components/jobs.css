@@ -1,0 +1,468 @@
+/* =============================================================================
+ * Background Jobs popover
+ *
+ * Mirrors #scheduler-popover's positioning, chrome, dimensions and responsive
+ * breakpoints so all header popovers change presentation at the same widths.
+ * Reuses the shared .popover-arrow, .dawn-status-dot and .dawn-badge
+ * primitives — do NOT redefine them here.
+ * ============================================================================= */
+
+/* ---- header trigger --------------------------------------------------- *
+ * This project has NO global `.hidden { display: none }` utility — every
+ * component scopes its own (see #doc-library-btn / #coding-btn).  So the
+ * `.hidden` rule below is not decoration: without it, `classList.toggle
+ * ('hidden')` in updateVisibility() styles nothing and the auth gate on this
+ * button silently does nothing.  Mirrors #doc-library-btn otherwise. */
+#jobs-btn {
+   background: none;
+   border: none;
+   color: var(--text-secondary);
+   cursor: pointer;
+   padding: 0.25rem;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   position: relative;
+   transition: color var(--transition-fast);
+}
+
+#jobs-btn:hover,
+#jobs-btn.active {
+   color: var(--accent);
+}
+
+#jobs-btn:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+}
+
+#jobs-btn svg {
+   width: 20px;
+   height: 20px;
+}
+
+#jobs-btn.hidden {
+   display: none;
+}
+
+#jobs-popover {
+   position: fixed;
+   top: 50px;
+   right: 60px;
+   width: 504px; /* matches the Scheduler and Document Library popovers */
+   max-height: 70vh;
+   background: rgba(18, 18, 26, 0.98);
+   backdrop-filter: blur(20px);
+   -webkit-backdrop-filter: blur(20px);
+   border: 1px solid var(--accent-border);
+   border-radius: 12px;
+   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+   z-index: 1000;
+   display: flex;
+   flex-direction: column;
+   opacity: 1;
+   transform: translateY(0);
+   visibility: visible;
+   transition:
+      opacity 0.15s ease,
+      transform 0.15s ease,
+      visibility 0s;
+}
+
+/* `visibility: hidden` — deliberately STRICTER than the sibling popovers,
+ * which hide with opacity + pointer-events alone.  Those leave their contents
+ * in the tab order while "closed"; here the contents are Cancel and Resume
+ * buttons that destroy or restart real work, so a Tab-reachable invisible
+ * Cancel is not acceptable.  Delayed to the end of the fade so the transition
+ * still plays.  (The siblings want the same treatment — filed separately,
+ * since changing four shipped panels belongs in its own change.) */
+#jobs-popover.hidden {
+   opacity: 0;
+   transform: translateY(-8px);
+   pointer-events: none;
+   visibility: hidden;
+   transition:
+      opacity 0.15s ease,
+      transform 0.15s ease,
+      visibility 0s linear 0.15s;
+}
+
+/* ---- header ---------------------------------------------------------- */
+
+.jobs-popover-header {
+   display: flex;
+   justify-content: space-between;
+   align-items: center;
+   padding: 0.875rem 1rem;
+   border-bottom: 1px solid var(--accent-border);
+   background: rgba(10, 10, 15, 0.5);
+   border-radius: 12px 12px 0 0;
+}
+
+.jobs-popover-header h3 {
+   font-size: 1rem;
+   font-weight: 600;
+   color: var(--accent);
+   letter-spacing: 0.03em;
+   margin: 0;
+}
+
+/* Matches #scheduler-close: a 28x28 circular target, not a bare glyph — a
+ * bare × computes to roughly 12x22, under the WCAG 2.2 AA 24x24 minimum. */
+#jobs-close {
+   background: none;
+   border: 1px solid var(--text-secondary);
+   color: var(--text-secondary);
+   font-size: 1.1rem;
+   line-height: 1;
+   cursor: pointer;
+   width: 28px;
+   height: 28px;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   border-radius: 50%;
+   transition:
+      color var(--transition-fast),
+      border-color var(--transition-fast);
+}
+
+#jobs-close:hover {
+   color: var(--accent);
+   border-color: var(--accent);
+}
+
+#jobs-close:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+}
+
+/* ---- scroll body ----------------------------------------------------- */
+
+.jobs-popover-body {
+   overflow-y: auto;
+   padding: 0.5rem 0 0.75rem;
+   flex: 1;
+}
+
+.jobs-section-head {
+   display: flex;
+   align-items: baseline;
+   gap: 0.5rem;
+   padding: 0.5rem 1rem 0.35rem;
+   font-family: var(--font-mono);
+   font-size: 0.7rem;
+   letter-spacing: 0.08em;
+   text-transform: uppercase;
+   color: var(--text-tertiary);
+}
+
+.jobs-section-head .jobs-section-count {
+   color: var(--warning);
+}
+
+.jobs-section-head .jobs-section-note {
+   color: var(--text-secondary);
+   text-transform: none;
+   letter-spacing: 0.02em;
+}
+
+/* --text-secondary, not --text-tertiary: tertiary measures 3.86:1 on this
+ * panel background, under the 4.5:1 AA floor for text this size. */
+.jobs-empty {
+   padding: 0.75rem 1rem;
+   color: var(--text-secondary);
+   font-size: 0.85rem;
+}
+
+/* A failed load must not look like an empty list — same slot, different
+ * colour, and it carries a Retry rather than telling the user to reopen. */
+.jobs-empty.is-error {
+   color: var(--error);
+   display: flex;
+   align-items: center;
+   gap: 0.6rem;
+   flex-wrap: wrap;
+}
+
+.jobs-retry {
+   background: none;
+   border: 1px solid var(--error);
+   color: var(--error);
+   font-size: 0.72rem;
+   padding: 3px 10px;
+   border-radius: 999px;
+   cursor: pointer;
+}
+
+.jobs-retry:hover {
+   background: var(--error-subtle);
+}
+
+.jobs-retry:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+}
+
+/* ---- parent grouping (ACTIVE only — history is a flat list) ---------- */
+
+.jobs-group {
+   margin-bottom: 0.35rem;
+}
+
+.jobs-group-head {
+   display: flex;
+   align-items: center;
+   gap: 0.5rem;
+   padding: 0.3rem 1rem;
+   font-size: 0.75rem;
+   color: var(--text-secondary);
+   background: var(--accent-subtle);
+   border-top: 1px solid var(--accent-border);
+   border-bottom: 1px solid var(--accent-border);
+}
+
+.jobs-group-label {
+   font-family: var(--font-mono);
+}
+
+.jobs-group-count {
+   margin-left: auto;
+   color: var(--text-tertiary);
+   font-size: 0.7rem;
+}
+
+/* Border at --accent-medium, not --accent-border: the latter is 1.18:1 against
+ * this panel, below the 3:1 WCAG 1.4.11 floor for a control boundary, so the
+ * control did not read as one. */
+.jobs-group-open {
+   background: none;
+   border: 1px solid var(--accent-medium);
+   color: var(--accent);
+   font-size: 0.7rem;
+   padding: 3px 10px;
+   border-radius: 999px;
+   cursor: pointer;
+}
+
+.jobs-group-open:hover {
+   background: var(--accent-hover);
+}
+
+.jobs-group-open:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+}
+
+/* ---- rows ------------------------------------------------------------ */
+
+.jobs-row {
+   display: flex;
+   align-items: flex-start;
+   gap: 0.6rem;
+   padding: 0.55rem 1rem;
+   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.jobs-row:hover {
+   background: rgba(255, 255, 255, 0.02);
+}
+
+/* The dot is a baseline-agnostic marker; nudge it onto the title's line. */
+.jobs-row > .dawn-status-dot {
+   margin-top: 0.42rem;
+   flex: 0 0 auto;
+}
+
+.jobs-row-main {
+   flex: 1;
+   min-width: 0;
+}
+
+.jobs-row-title {
+   color: var(--text-primary);
+   font-size: 0.85rem;
+   line-height: 1.35;
+   /* Job titles are LLM-authored and can be long; wrap rather than clip so the
+      whole goal stays readable. break-word keeps a pathological unbroken
+      string from widening the popover. */
+   overflow-wrap: break-word;
+   word-break: break-word;
+}
+
+.jobs-row-meta {
+   display: flex;
+   flex-wrap: wrap;
+   align-items: center;
+   gap: 0.35rem;
+   margin-top: 0.25rem;
+}
+
+.jobs-elapsed {
+   font-family: var(--font-mono);
+   font-size: 0.7rem;
+   color: var(--text-tertiary);
+   font-variant-numeric: tabular-nums; /* no width jitter as the seconds tick */
+}
+
+.jobs-row-error {
+   margin-top: 0.3rem;
+   font-size: 0.75rem;
+   color: var(--error);
+   overflow-wrap: break-word;
+   word-break: break-word;
+}
+
+.jobs-row-actions {
+   display: flex;
+   gap: 0.35rem;
+   flex: 0 0 auto;
+}
+
+/* --text-tertiary border rather than --border-color (1.43:1, below the 3:1
+ * control-boundary floor) so these read as buttons rather than as text. */
+.jobs-action-btn {
+   background: none;
+   border: 1px solid var(--text-tertiary);
+   color: var(--text-secondary);
+   font-size: 0.72rem;
+   padding: 4px 12px;
+   border-radius: 999px;
+   cursor: pointer;
+   white-space: nowrap;
+   transition:
+      background var(--transition-fast) ease,
+      color var(--transition-fast) ease,
+      border-color var(--transition-fast) ease;
+}
+
+.jobs-action-btn:focus-visible,
+.jobs-open-btn:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+}
+
+/* Navigational, not destructive — quieter than the action buttons so Cancel
+ * and Resume stay the emphasis on a row. */
+.jobs-open-btn {
+   background: none;
+   border: 1px solid transparent;
+   color: var(--accent);
+   font-size: 0.72rem;
+   padding: 4px 8px;
+   border-radius: 999px;
+   cursor: pointer;
+   white-space: nowrap;
+}
+
+.jobs-open-btn:hover {
+   background: var(--accent-hover);
+   border-color: var(--accent-medium);
+}
+
+.jobs-action-btn:hover:not(:disabled) {
+   background: var(--accent-hover);
+   border-color: var(--accent-medium);
+   color: var(--text-primary);
+}
+
+.jobs-action-btn.cancel:hover:not(:disabled) {
+   background: var(--error-subtle);
+   border-color: var(--error);
+   color: var(--error);
+}
+
+.jobs-action-btn:disabled {
+   opacity: 0.45;
+   cursor: default;
+}
+
+/* ---- load more ------------------------------------------------------- */
+
+#jobs-load-more {
+   display: block;
+   margin: 0.6rem auto 0;
+   background: none;
+   border: 1px solid var(--accent-medium);
+   color: var(--accent);
+   font-size: 0.75rem;
+   padding: 5px 14px;
+   border-radius: 999px;
+   cursor: pointer;
+}
+
+#jobs-load-more:hover:not(:disabled) {
+   background: var(--accent-hover);
+}
+
+#jobs-load-more:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+}
+
+#jobs-load-more:disabled {
+   opacity: 0.45;
+   cursor: default;
+}
+
+/* Required, not decorative — see the #jobs-btn note above: with no global
+ * `.hidden` utility, omitting this leaves a permanently-visible "Load more"
+ * that re-requests page one and appears to do nothing. */
+#jobs-load-more.hidden {
+   display: none;
+}
+
+/* Coarse pointers get real targets. The <=480px layout is an explicitly
+ * phone-shaped bottom sheet, so the 21px row buttons above are not enough
+ * there. Mirrors the scheduler's delete-button treatment. */
+@media (pointer: coarse) {
+   .jobs-action-btn,
+   .jobs-open-btn,
+   .jobs-group-open,
+   .jobs-retry,
+   #jobs-load-more {
+      min-height: 32px;
+      padding-top: 6px;
+      padding-bottom: 6px;
+   }
+   #jobs-close {
+      width: 36px;
+      height: 36px;
+   }
+}
+
+/* ---- responsive ------------------------------------------------------ */
+
+@media (max-width: 600px) {
+   #jobs-popover {
+      width: calc(100vw - 24px);
+      max-width: 504px;
+      top: 60px;
+      right: 12px;
+      left: 12px;
+   }
+}
+
+/* Bottom-sheet at ≤480px, matching #scheduler-popover / #memory-popover so
+   every header popover switches presentation at the same viewport width. */
+@media (max-width: 480px) {
+   #jobs-popover {
+      top: auto;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      width: 100%;
+      max-width: 100%;
+      border-radius: 12px 12px 0 0;
+      max-height: 80vh;
+   }
+   #jobs-popover .popover-arrow {
+      display: none;
+   }
+}
+
+@media (prefers-reduced-motion: reduce) {
+   #jobs-popover {
+      transition: none;
+   }
+}

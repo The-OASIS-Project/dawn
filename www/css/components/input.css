@@ -157,8 +157,15 @@
    }
 }
 
-/* Normalize all input row controls to same height and suppress base hover lift */
-#input-area > button,
+/* Normalize all input row controls to same height and suppress base hover lift.
+ *
+ * :not(.jobs-pill) — the background-jobs pill is an absolutely-positioned
+ * overlay floating ABOVE the composer, not a control in the input row.  It is a
+ * direct child of #input-area, so it matched this rule the moment it became a
+ * <button> (as a <span> it never did), and a 46px floor on a box only ~46px wide
+ * renders border-radius:999px as a circle.  A class cannot out-specify an ID
+ * selector, so the exclusion has to live here. */
+#input-area > button:not(.jobs-pill),
 #input-area > .attach-btn-wrapper,
 #input-area > .action-btn-wrapper {
    min-height: 46px;

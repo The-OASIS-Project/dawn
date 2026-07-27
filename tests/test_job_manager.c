@@ -105,7 +105,7 @@ int conv_db_job_set_terminal(int64_t conv_id, const char *status, const char *er
    return AUTH_DB_SUCCESS;
 }
 
-int conv_db_job_fire_boot_reinvokes(int *count_out) {
+int conv_db_job_downgrade_boot_reinvokes(int *count_out) {
    if (count_out) {
       *count_out = 0;
    }

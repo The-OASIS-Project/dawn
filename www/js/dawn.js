@@ -17,6 +17,10 @@
    // 'session' messages per (re)connect (reconnect + capability-update), and each would
    // otherwise re-issue a full load_conversation. Reset on disconnect (updateConnectionStatus).
    let restoredConvIdThisConnection = null;
+   // Last authenticated state the popover fan-out saw, so it can tell an actual
+   // auth TRANSITION from the many unchanged-auth calls updateAuthVisibility()
+   // makes (every get_config_response).  Only the transition warrants a refetch.
+   let lastAuthFanOutState = false;
    let pendingThumbnailsForSave = []; // Thumbnails to attach when saving user message
    let pendingVisualsForSave = []; // <dawn-visual> content to attach to next assistant message
 
@@ -302,6 +306,11 @@
                // Rehydrate the background-jobs pills (per-conversation + global).
                if (typeof DawnJobsActivity !== 'undefined') {
                   DawnJobsActivity.handleReconnect();
+               }
+               // The jobs panel drops the request state that died with the
+               // socket (in-flight actions, a half-loaded history page).
+               if (typeof DawnJobs !== 'undefined') {
+                  DawnJobs.handleReconnect();
                }
                // Re-enable always-on if it was active before the connection
                // dropped. Deferred to here (not raw 'connected') for the same
@@ -994,8 +1003,22 @@
             case 'job_notification': {
                // Background-job completion: a silent in-browser toast (no voice).
                const jp = msg.payload || {};
-               if (typeof DawnToast !== 'undefined' && jp.text) {
-                  DawnToast.show(jp.text, 'info', 8000, { badge: 'JOB' });
+               if (!jp.text) break;
+               // Leave a PERSISTENT trace first.  An 8s toast used to be the only
+               // surface a completion ever got: the conversation pill is removed
+               // when the job goes terminal, and the sidebar unread dot is set
+               // only from conversation_messages_appended — i.e. only on the
+               // reinvoke path.  A job completing through the plain notify path
+               // appended no messages, so a missed toast meant the completion
+               // vanished without trace. That is what "no one received the
+               // results" looked like from the outside.
+               if (jp.conv_id && typeof DawnHistory !== 'undefined') {
+                  DawnHistory.setConversationUnread(jp.conv_id, true);
+               }
+               if (typeof DawnToast !== 'undefined') {
+                  // Manual dismiss (0), not 8s: this is a rare, long-awaited
+                  // event, and it is the only push the notify path produces.
+                  DawnToast.show(jp.text, 'info', 0, { badge: 'JOB' });
                }
                break;
             }
@@ -2195,16 +2218,32 @@
          },
          updateHistoryButtonVisibility: DawnHistory.updateButtonVisibility,
          updateMemoryButtonVisibility: DawnMemory.updateVisibility,
+         // Auth-gated reveal for the header popovers.  Runs on EVERY
+         // updateAuthVisibility() call — the `session` frame AND every
+         // get_config_response — so it must stay cheap: the visibility toggles
+         // are idempotent, but the scheduler REFRESH is a DB read on the lws
+         // service thread holding the global auth_db mutex, so it is gated on an
+         // actual authenticated transition rather than on every config reply.
+         // (Before the callback was wired up this whole body was dead, which is
+         // why "it always did this" is not a defence.)
          updateSchedulerButtonVisibility: () => {
+            const authed = !!(DawnState.authState && DawnState.authState.authenticated);
+            const becameAuthed = authed && !lastAuthFanOutState;
+            lastAuthFanOutState = authed;
+
             if (window.DawnSchedulerQueue) {
                DawnSchedulerQueue.updateVisibility(DawnState.authState);
-               if (DawnState.authState && DawnState.authState.authenticated) {
+               if (becameAuthed) {
                   DawnSchedulerQueue.refresh();
                }
             }
             // Coding popover shares the same auth-gated reveal lifecycle.
             if (window.DawnCodeProjects) {
                DawnCodeProjects.updateVisibility(DawnState.authState);
+            }
+            // Background-jobs popover — same lifecycle (jobs are per-user).
+            if (window.DawnJobs) {
+               DawnJobs.updateVisibility(DawnState.authState);
             }
          },
          restoreHistorySidebarState: DawnHistory.restoreSidebarState,
@@ -2217,6 +2256,15 @@
          DawnJobsActivity.init(
             typeof DawnHistory !== 'undefined' ? DawnHistory.getActiveConversationId : null
          );
+      }
+      if (typeof DawnJobs !== 'undefined') {
+         // Must precede DawnWS.connect() further down: init() self-heals its
+         // auth-gated reveal from DawnState, and the button would otherwise
+         // stay hidden until the next auth event if the `session` frame landed
+         // first. (No ordering dependency on DawnJobsActivity — the pill is a
+         // real <button> in the markup, not something this module adorns.)
+         DawnJobs.setCallbacks({ trapFocus: DawnSettings.trapFocus });
+         DawnJobs.init();
       }
       DawnUserBadge.init({
          openSection: DawnSettings.openSection,

@@ -134,7 +134,9 @@ window.DawnJobsActivity = (function () {
          el.textContent = '';
          const glyph = document.createElement('span');
          glyph.setAttribute('aria-hidden', 'true');
-         glyph.textContent = '⚙︎ ' + n; // gear (text-presentation VS) + count
+         /* Stacked-layers mark, matching #jobs-btn — NOT a gear.  The gear
+          * collides with #settings-btn, which sits in this same header row. */
+         glyph.textContent = '▤ ' + n;
          el.appendChild(glyph);
          el.title = tooltip;
          el.setAttribute('aria-label', tooltip);
@@ -147,9 +149,28 @@ window.DawnJobsActivity = (function () {
       }
    }
 
+   /* Last per-conversation count announced, so the sr-only region speaks only on
+    * a 0<->n transition rather than on every increment. */
+   var lastAnnouncedConvCount = 0;
+
+   function announceConvCount(n) {
+      if (n > 0 === lastAnnouncedConvCount > 0) {
+         return; /* still running / still idle — nothing worth interrupting for */
+      }
+      lastAnnouncedConvCount = n;
+      var el = document.getElementById('jobs-activity-announcer');
+      if (!el) {
+         return;
+      }
+      /* Plain text, not aria-hidden, in an element that is always rendered —
+       * the two properties the pill itself could not satisfy. */
+      el.textContent = n > 0 ? plural(n) + ' in this conversation' : 'Background tasks finished';
+   }
+
    function renderConvPill() {
       var id = activeConvIdFn();
       var n = id != null && byParent[String(id)] ? byParent[String(id)] : 0;
+      announceConvCount(n);
       // Rendered into every .conv-jobs-pill slot: the full-visualizer status row
       // AND the collapsed mini-status bar, so it's visible in either state.
       var els = document.querySelectorAll('.conv-jobs-pill');

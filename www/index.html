@@ -272,11 +272,19 @@
                </button>
             </div>
             <div id="header-controls">
-               <span
+               <!-- A real <button>, not a span with role="button": it opens the
+                    Background Jobs panel, and a native button brings the role,
+                    focusability and Space-on-keyup behaviour for free.  Its
+                    text and aria-label are written by jobs-activity.js; its
+                    click behaviour by jobs.js. -->
+               <button
                   id="global-jobs-pill"
+                  type="button"
                   class="jobs-pill jobs-pill-global hidden"
                   aria-live="off"
-               ></span>
+                  aria-haspopup="dialog"
+                  aria-expanded="false"
+               ></button>
                <button
                   id="debug-btn"
                   title="Show command/tool call details"
@@ -343,6 +351,32 @@
                      <polyline points="12 7 12 12 15 14" />
                   </svg>
                   <span class="sched-queue-indicator" aria-hidden="true"></span>
+               </button>
+               <button
+                  id="jobs-btn"
+                  class="hidden"
+                  title="Background Jobs"
+                  aria-label="Open background jobs"
+                  aria-haspopup="dialog"
+                  aria-expanded="false"
+               >
+                  <svg
+                     width="20"
+                     height="20"
+                     viewBox="0 0 24 24"
+                     fill="none"
+                     stroke="currentColor"
+                     stroke-width="2"
+                     stroke-linecap="round"
+                     stroke-linejoin="round"
+                  >
+                     <!-- Stacked layers = several tasks running behind the
+                          conversation.  Deliberately NOT a gear: #settings-btn
+                          three buttons along uses the identical gear glyph. -->
+                     <polygon points="12 2 2 7 12 12 22 7 12 2" />
+                     <polyline points="2 17 12 22 22 17" />
+                     <polyline points="2 12 12 17 22 12" />
+                  </svg>
                </button>
                <button
                   id="doc-library-btn"
@@ -1297,6 +1331,41 @@ Format rules:
             <div id="doc-library-indexing" class="doc-library-indexing hidden"></div>
          </div>
 
+         <!-- Background Jobs popover.  Two sections because the two sets arrive
+              by different contracts: the ACTIVE set is complete and bounded (so
+              it groups by parent conversation), while HISTORY is keyset-
+              paginated (so it stays a flat list — a group straddling a page
+              boundary would render twice with wrong counts). -->
+         <div
+            id="jobs-popover"
+            class="popover hidden"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="jobs-popover-title"
+         >
+            <div class="popover-arrow"></div>
+
+            <header class="jobs-popover-header">
+               <h3 id="jobs-popover-title">Background Jobs</h3>
+               <button id="jobs-close" aria-label="Close background jobs">&times;</button>
+            </header>
+
+            <div class="jobs-popover-body">
+               <div class="jobs-section-head">
+                  <span>Running</span>
+                  <span class="jobs-section-count" id="jobs-active-count">0</span>
+               </div>
+               <div id="jobs-active-list"></div>
+
+               <div class="jobs-section-head">
+                  <span>Finished</span>
+                  <span class="jobs-section-note" id="jobs-history-count"></span>
+               </div>
+               <div id="jobs-history-list"></div>
+               <button id="jobs-load-more" class="hidden" type="button">Load more</button>
+            </div>
+         </div>
+
          <!-- Code Projects popover (coding harness) -->
          <div
             id="code-projects-popover"
@@ -1907,7 +1976,35 @@ Format rules:
             <!-- Background-jobs running indicator: floats above the composer beside
                  the "working" pill.  Shown whenever this conversation has jobs
                  running.  Rendered by DawnJobsActivity. -->
-            <span class="jobs-pill conv-jobs-pill hidden" role="status" aria-live="polite"></span>
+            <!-- A <button>, like #global-jobs-pill: it opens the same panel.
+                 Deliberately NOT a live region.  It used to carry
+                 role="status" aria-live="polite", but that never announced
+                 anything: its only child is aria-hidden (the ⚙ glyph), and
+                 jobs-activity.js writes the content while the element is still
+                 display:none, so there was no announceable mutation in a
+                 rendered region.  Announcements now come from the always-present
+                 sr-only region below, which also avoids putting a live region on
+                 a focusable control (AT re-announces the focused button on top
+                 of the update). -->
+            <button
+               type="button"
+               class="jobs-pill conv-jobs-pill hidden"
+               aria-haspopup="dialog"
+               aria-expanded="false"
+            ></button>
+            <!-- Permanently rendered (never display:none) so a mutation is
+                 always announceable, and aria-atomic so the whole sentence is
+                 read rather than just the changed node — the property
+                 role="status" used to imply for free. Written only on 0<->n
+                 transitions, not on every count change: a job spawning or
+                 finishing is frequent, and per-increment chatter is worse than
+                 silence now that the pill is a control the user can query. -->
+            <div
+               id="jobs-activity-announcer"
+               class="sr-only"
+               aria-live="polite"
+               aria-atomic="true"
+            ></div>
             <button
                id="tts-toggle"
                class="input-button"
@@ -3486,6 +3583,7 @@ token = "eyJ..."</pre
       <script defer src="/js/ui/scheduler-queue.js"></script>
       <script defer src="/js/ui/phone.js"></script>
       <script defer src="/js/ui/jobs-activity.js"></script>
+      <script defer src="/js/ui/jobs.js"></script>
       <script defer src="/js/ui/visual-render.js"></script>
       <script defer src="/js/ui/plan-orchestrator.js"></script>
       <script defer src="/js/ui/user-badge.js"></script>

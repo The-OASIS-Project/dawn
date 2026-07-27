@@ -18,12 +18,17 @@ historical record of the shipped subset graduates to `atlas/dawn/archive/` once 
   design addition not in the original §10 plan — see §4a/§14), headless job workers (job tool masked + headless
   prompt so workers don't fan out), the memory-extraction exemption, and the sidebar **done/unread dot** +
   **per-conversation running-jobs pill** + **active-view `metrics_update` gating** (a Phase-2-observe precursor;
-  the full jobs panel/tree/live-watch is still AHEAD). §14 is the authoritative shipped-state record.
-- **AHEAD (this doc's forward plan)** — Phase 2 (durable event log + observe UI), the **trees** half of Phase 3
-  (multi-level spawn + depth/children caps + cascade cancel), the **queued state** + **Resume**, Phase 4
-  (workspace/sandbox), Phase 5 (TUI). Nothing from the original scope is dropped — §10 marks each item's state;
-  §14's "Designed-but-not-yet-shipped ledger" is the single checklist so no scope is lost.
-- Authored 2026-07-22; shipped-state reconciliation 2026-07-24.
+  the full jobs panel/live-watch is still AHEAD). §14 is the authoritative shipped-state record.
+- **IN PROGRESS — branch `background-jobs-p2-observe`.** Phase 2's **entire server half** is built and
+  live-verified: the durable event log + `attach_conversation` replay (`2380b31`), the lifetime-split job frames
+  (`addfce3`), and `job_action {cancel|resume}` + the resume re-dispatch (`673656b`) — so **Resume is no longer
+  ahead**. What remains of Phase 2 is browser-side: the jobs panel (CP4) and the live-watch (CP5). *(Branch SHAs —
+  they die at rebase-merge; cite the PR once opened.)*
+- **AHEAD (this doc's forward plan)** — Phase 2's CP4/CP5 browser surfaces, the **trees** half of Phase 3
+  (multi-level spawn + depth/children caps + cascade cancel), the **queued state**, Phase 4 (workspace/sandbox),
+  Phase 5 (TUI). Nothing from the original scope is dropped — §10 marks each item's state; §14's
+  "Designed-but-not-yet-shipped ledger" is the single checklist so no scope is lost.
+- Authored 2026-07-22; shipped-state reconciliations 2026-07-24 and 2026-07-26.
 
 **Reviewers:** master-plan-reviewer (plan pass); architecture + security + ui-design (doc pass); a 6-agent full
 pre-commit review of `2bbe683` (architecture / security / embedded-efficiency / coding-standards / UI /
@@ -319,7 +324,8 @@ Server code: `src/webui/webui_jobs.c` (frames) + `conv_db_job_list_active_by_use
 **`job_action` as built (CP3b).** `phone_action` is the model for the *frame*, not for the *authorization*: it acts on a single operator-owned modem and checks one configured owner id, whereas a job id is a guessable integer belonging to whoever spawned it. So every action binds `conn->auth_user_id` and loads the row through the ownership-checked `conv_db_job_get` **before doing anything** (§8.2). A foreign job and a nonexistent one get the same answer — distinguishing them would make the handler an oracle for other users' job ids. Every exit answers, including refusals, so a panel can tell "refused" from "still working".
 
 - **`cancel`** is two operations behind one name — a *running* job is signalled through its session, a *queued* one has no session and must be retired directly (and marked fired, so the user is not notified about a stop they asked for). Both the `job` tool and this handler need exactly that pair, so it lives once in `job_manager_cancel_or_retire()` and each surface only words the outcome.
-- **`resume`** re-dispatches an `interrupted` **or `failed`** job — the design originally scoped this to `interrupted` (the boot-scan gap), but a job that failed on "job capacity reached" is the same one-click retry and the state machine does not distinguish them. `done` and `cancelled` are excluded: one has an answer, the other was stopped deliberately.
+- **`resume`** re-dispatches an `interrupted` **or `failed`** job — the design originally scoped this to `interrupted` (the boot-scan gap), but a job that failed on "job capacity reached" is the same one-click retry and the state machine does not distinguish them. `done` is always excluded: it has an answer.
+  - **`cancelled` depends on the caller** (`job_resume_origin_t`, added with CP4a). It was originally excluded outright as "stopped deliberately", but a user changing their mind is legitimate and `job_goal` makes the restart exact — so the WebUI click path (`JOB_RESUME_ORIGIN_USER`) admits it while the `job` tool (`JOB_RESUME_ORIGIN_TOOL`) does not. The asymmetry is the point: restarting an interrupted job *restores* the user's intent, restarting a cancelled one *reverses* it, and the model — which reaches `resume` during reinvoke turns driven by untrusted job output — must not do that on its own. The origin is passed into the claim, not checked before it, so the widened predicate stays inside the same atomic UPDATE.
   - **The resumable-status test is inside the UPDATE** (`conv_db_job_reset_for_resume`), so it is a *claim*: two clicks or two tabs cannot both spawn a worker onto the same job.
   - **`on_complete_fired` is cleared** — this is what re-arms delivery. The interrupted-notify already consumed the flag and the monitor skips a fired row, so without it a resumed job finishes and notifies nobody.
   - **It counts as a spawn for caps.** The worker goes through the same `job_manager_begin()` gate; the handler pre-checks `job_manager_capacity()` only so a full pool refuses cleanly instead of resetting the row and immediately failing it.
@@ -418,13 +424,15 @@ Hazard map: **H1** → Phase 0 (live) + Phase 2 (durable). **H2/H3** → Phase 1
 - **Headless job workers:** the `job` tool is masked out of a `SESSION_TYPE_JOB` session's schema + a headless-agent directive rides its stable prefix, so a worker does its task **inline** and reports — instead of behaving like interactive Friday (deferring / recursively spawning more jobs). Hard backstop refuses `spawn` from a job context.
 - **Extraction exemption** landed at the `memory_recovery` scan (`AND job_status IS NULL`) — memory comes from the parent, not per-job research fragments.
 
-### Phase 2 — Durable event log + observe surface — ◑ IN PROGRESS (CP1 + CP2 shipped; CP3 partial)
+### Phase 2 — Durable event log + observe surface — ◑ IN PROGRESS (CP1–CP4a shipped; CP4b/CP5 ahead)
 
-**CP1 (event writers) and CP2 (attach/replay + line-printer gate) are SHIPPED and live-verified**
-(commit `2380b31`). **CP3's frame half — the lifetime split — is BUILT** (`jobs_snapshot` /
-`job_update` / `list_jobs_response`, replacing the Phase-1 count frames; see the §6.4 amendment).
-Plan: `~/.claude/plans/immutable-shimmying-lark.md`. Remaining: CP3's `job_action {cancel|resume}`
-and the resume re-dispatch, CP4 jobs panel, CP5 live-watch.
+**The whole server half is SHIPPED and live-verified.** CP1 (event writers) + CP2 (attach/replay +
+line-printer gate) in `2380b31`; CP3a's lifetime split (`jobs_snapshot` / `job_update` /
+`list_jobs_response`, replacing the Phase-1 count frames — see the §6.4 amendment) in `addfce3`;
+CP3b's control surface (`job_action {cancel|resume}` + the resume re-dispatch + durable `job_goal`)
+in `673656b`; **CP4a's jobs panel** on top. Plan: `~/.claude/plans/immutable-shimmying-lark.md`.
+**Remaining** — CP4b (`.agent-event.*` transcript rendering + the `attach_conversation`
+switchover), CP5 live-watch.
 
 **As-built — amendments to §6/§8 that this phase actually shipped:**
 
@@ -480,17 +488,17 @@ and the resume re-dispatch, CP4 jobs panel, CP5 live-watch.
 **Live-verified (real job, conv 1006):** 21 events, correct order, both tool-loop iterations, per-
 conversation seq, `complete{done, final_message_id:21547}` correlating to the real answer row, and the
 Python line-printer reconstructing the whole job from the wire alone — the Phase-5 TUI de-risk.
-**Still unverified: the LIVE tail** (`conversation_event` frames arriving during a run); replay is
-proven, live push is not.
+**The LIVE tail is confirmed too** (verified 2026-07-25 on a 4-job fan-out): `conversation_event` and
+`message_appended` frames do arrive mid-run, closing the one CP1/CP2 unknown.
 
 **A double free found only by live testing:** `broadcast_json_to_user()` takes ownership of the JSON
 tree; adding a `json_object_put()` after it corrupted the heap. Unit tests link the **weak no-op**
 broadcast symbol, so no test could have caught it. Any future weak/strong broadcast seam needs a live
 run or ASan.
 
-### Phase 2 — Durable event log + observe surface (ships the contract) — ○ AHEAD (mandatory; the whole *observe* half)
-`agent ~3-4d · api $0 · 5 ckpt` — **nothing here is built yet** beyond the activity pill; the `conversation_events` table sits empty.
-- `conversation_events` **writers + seq**; **ownership-JOINed** reads (**§8.3**); secret redaction (**§8.6**) + render sanitization (**§8.7**) + retention/pruning (**§8.8**); full `attach_conversation {last_seq}` replay; **WS `list_jobs` / `job_action {cancel|resume}`** handlers (ownership-checked); **always-visible `.agent-event.*` rendering** (not debug-gated) distinguishing tool_call/tool_result/terminal/spawn/complete; **jobs panel as an indented tree** (by `spawn_depth`) with status/elapsed/cancel + a **global "agents: N running" count badge**; **live-watch = phone-panel twin** (server-authoritative anchor-elapsed, minimize-to-pill, reconnect rehydrate via `jobs_snapshot`, sr-only polite milestone announcer, `DawnEscStack`); toast target branches `notify`→job vs `reinvoke_parent`→parent. *(Status: CP1 event log + CP2 attach/replay + CP3's lifetime-split job frames are shipped; `job_action`/resume, the panel/tree and live-watch remain — see §10 Phase 2 and the §14 ledger.)*
+### Phase 2 — Durable event log + observe surface (ships the contract) — ◑ PARTIAL (server half done; browser half ahead)
+`agent ~3-4d · api $0 · 5 ckpt` — **the entire server half is built and live-verified** (CP1–CP3, see §10 above); only the CP4 panel and CP5 live-watch remain.
+- `conversation_events` **writers + seq**; **ownership-JOINed** reads (**§8.3**); secret redaction (**§8.6**) + render sanitization (**§8.7**) + retention/pruning (**§8.8**); full `attach_conversation {last_seq}` replay; **WS `list_jobs` / `job_action {cancel|resume}`** handlers (ownership-checked); **always-visible `.agent-event.*` rendering** (not debug-gated) distinguishing tool_call/tool_result/terminal/spawn/complete; **jobs panel as an indented tree** (by `spawn_depth`) with status/elapsed/cancel + a **global "agents: N running" count badge**; **live-watch = phone-panel twin** (server-authoritative anchor-elapsed, minimize-to-pill, reconnect rehydrate via `jobs_snapshot`, sr-only polite milestone announcer, `DawnEscStack`); toast target branches `notify`→job vs `reinvoke_parent`→parent. *(Status: CP1 event log, CP2 attach/replay, CP3a's lifetime-split job frames and CP3b's `job_action {cancel|resume}` + resume re-dispatch are all shipped and live-verified. The panel and live-watch remain — and note the "indented tree by `spawn_depth`" cannot render as specified until Phase-3 depth propagation lands, since every job is depth 1 today. See §10 Phase 2 and the §14 ledger.)*
 - **Verify:** a **~100-line Python line-printer** speaking the handshake tails a live job from another machine and shows tool steps + the final answer (`message_appended`) + disposition — the TUI de-risk; panel survives reconnect with correct replay.
 
 ### Phase 3 — reinvoke_parent + trees (ships **P3**) — ◑ PARTIAL
@@ -675,11 +683,30 @@ by architecture/security/embedded passes, then a **6-agent full pre-commit revie
     active/history overlap — run twice across a transition (4+47 → 1+50) so the partition was checked *while rows
     moved sides*. The **live event tail is confirmed too**: `conversation_event`/`message_appended` do arrive
     mid-run, which was the outstanding CP1/CP2 unknown.
-  - ○ **Remaining**: `job_action {cancel|resume}` + resume re-dispatch (CP3), the jobs tree panel + global count badge
-    + always-visible `.agent-event.*` rendering with §8.7 sanitization (CP4), the live-watch panel (CP5). Note the
-    browser still sends `load_conversation`, **not** `attach_conversation`, so it never receives the
-    `conversation_events` replay batch — wiring that over is CP4's job, and until then the browser sees only the
-    live half of the event stream.
+  - ✅ **CP4a jobs panel** — `www/js/ui/jobs.js` + `jobs.css`: RUNNING (grouped by parent conversation) and
+    FINISHED (keyset-paginated) sections, live elapsed, per-row **View** / **Cancel** / **Resume**, opened from
+    a header button *or* from the activity pill. Three as-built deviations from §6/§8 worth recording:
+    - **No tree, and no depth indent.** `spawn_depth` is hardcoded to `1` at the sole create site
+      (`job_tool.c`) because job→job spawning stays blocked until the Phase-3 caps are enforced, so every job
+      is depth 1. An indent alone would not fix it later either: rows sort `created_at DESC`, so a child —
+      created *after* its parent — sorts **above** it, and indenting that renders a child hanging over its own
+      parent. **Trees need an ordering change, not a padding rule; Phase 3 owes both.** `parent_id` is real,
+      so grouping by parent conversation is the v1 structure.
+    - **§8.7 satisfied by `textContent`, not `DawnFormat.escapeHtml`.** §6.4 mandates escaping; the panel
+      instead builds every row with `createElement`/`textContent` and never assigns `innerHTML`, which is the
+      stronger form of the same obligation — structurally XSS-proof rather than dependent on remembering to
+      escape at each site. Deliberate; keep it that way. Bidi overrides (U+202E) survive the server's UTF-8
+      sanitize, so `title` and `error` also carry `dir="auto"` to isolate them.
+    - **A job's own conversation is reachable from the panel.** Job conversations are hidden from the sidebar,
+      so this panel is the only surface that knows the id; without a per-row **View** the job's transcript and
+      final answer were unreachable from the UI.
+  - ○ **Remaining — browser-side only**: CP4b (`.agent-event.*` transcript rendering + the
+    `load_conversation` → `attach_conversation` switchover) and CP5 (live-watch panel). The browser still
+    sends `load_conversation`, so it never receives the `conversation_events` replay batch and sees only the
+    live half of the event stream — and `dawn.js` already routes `conversation_event`/`conversation_events` to
+    `DawnJobs` hooks that do not exist yet, so those frames are currently built, broadcast and dropped.
+    Deliberately split from CP4a: the switchover touches the path *every* conversation load takes, a different
+    risk class from an additive panel.
   - *Earlier ambient indicators (`f42fce1`): the global/composer activity pill, the sidebar per-conversation running-jobs
     pill + done/unread dot, and active-view `metrics_update` gating.*
 - **Queued state (Phase-1 simplification).** A queued row is *inserted* as `job_status='queued'` and cancel handles that
@@ -693,10 +720,40 @@ by architecture/security/embedded passes, then a **6-agent full pre-commit revie
 - **Trees (Phase 3).** `spawn_depth=parent+1` propagation, `max_spawn_depth`/`max_children_per_tree` **enforcement**,
   cascade cancel, spawn-into-cancelling-tree guard, parent-delete reap, settings inheritance, `awaited` UI sugar. *(Headless
   workers currently block job→job spawning; re-enable only behind enforced caps.)*
-- ~~**Resume.**~~ ✅ **SHIPPED (CP3b).** `job_action{resume}` re-dispatches an interrupted **or failed** job with its
+- ~~**Resume.**~~ ✅ **SHIPPED (CP3b + CP4a).** `job_action{resume}` re-dispatches a stopped job with its
   transcript hydrated and a continuation directive; the status test is inside the UPDATE so the claim is atomic,
-  `on_complete_fired` is cleared to re-arm delivery, and it counts as a spawn against the caps. The **Resume
-  *button*** is CP4 (the frame it calls is live).
+  `on_complete_fired` is cleared to re-arm delivery, and it counts as a spawn against the caps. The Resume
+  **button** shipped with the CP4a panel.
+  - **The resumable set depends on WHO is asking** (`job_resume_origin_t`, added with the CP4a panel).
+    Interrupted and failed mean the job stopped *against* the user's wishes, so restarting **restores** an
+    intent — both surfaces allow it. Cancelled means the user asked it to stop, so restarting **reverses** one,
+    which is only safe when a human is asking. So `JOB_RESUME_ORIGIN_USER` (the WebUI click path) admits
+    `cancelled`; `JOB_RESUME_ORIGIN_TOOL` (the `job` tool, i.e. the model) does not — it can reach `resume` during
+    a reinvoke turn driven by untrusted job output, and must not be able to undo a stop a person asked for.
+    The origin is passed **into** the claim rather than pre-checked, so the widened predicate stays inside the
+    same atomic UPDATE and a tool caller cannot win a race a user started. The tool's refusal names the
+    alternative ("use Resume in the background-jobs panel") instead of just declining.
+  - **Forward path:** once `is_background_turn` is threaded through to the tool callback (TODO), the tool could
+    take `ORIGIN_USER` on a *foreground* turn and `ORIGIN_TOOL` on a background one — so "restart the job I
+    cancelled" works by voice while an injected result still cannot.
+  - **Admitting `cancelled` cost two guards elsewhere**, both found by review and both fixed with it. Excluding
+    `cancelled` had silently been doing double duty as a *mutual-exclusion* mechanism, because a cancelled row
+    could never come back:
+    - **`conv_db_job_mark_fired` is now status-scoped** (`AND job_status NOT IN ('queued','running')`). It was
+      the one job mutation in `auth_db_jobs.c` written blind (`WHERE id=?`). The cancelling worker fires one
+      statement after `set_terminal`, so a resume landing between them would have had its freshly-cleared
+      `on_complete_fired` set back to 1 — and the monitor skips a fired row, so the resumed job would finish
+      and **notify nobody**, which is the exact failure the reset clears the flag to prevent. Silent, hence
+      `test_mark_fired_cannot_clobber_a_resumed_row`.
+    - **One live session per job conversation** (`JOB_MGR_CONV_BUSY` in `job_manager_begin_ex`, plus
+      `job_manager_conv_is_live()` so `job_worker_resume` refuses *before* mutating). A cancelled worker holds
+      its pool slot through `job_manager_end`'s cancel-then-wait teardown; a resume inside that window would
+      have created a second session on the same `stream_conversation_id`, after which `job_manager_cancel`'s
+      first-match scan could signal the dying one and report success while the other ran on.
+    - Consequently `conv_db_job_set_running`'s `WHERE job_status='queued'` claim **no longer proves "nobody
+      cancelled me"** — 'queued' is now a value a row can re-enter. What keeps a pre-cancel worker from
+      claiming a post-resume row is the one-session-per-conversation guard above, not the status predicate.
+      Noted at the statement; if that guard is relaxed, the claim needs a generation term instead.
 - **Phase 4 — workspace/sandbox.** `workspace_ref` reserved; zero semantics (MCP reattach, generation nonce, inheritance,
   `terminal_chunk` events, sandbox-count cap).
 - **Phase 5 — TUI client.** Stretch; blocked on the Phase-2 event contract.
