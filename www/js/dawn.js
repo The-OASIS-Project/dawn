@@ -1034,6 +1034,17 @@
                   DawnJobsActivity.applySnapshot(msg.payload.jobs, msg.payload.truncated);
                }
                break;
+            case 'jobs_invalidate':
+               // A structural change (e.g. a cascade-deleted job) that the
+               // job_update deltas don't cover — re-sync both the pill store and
+               // the panel from the authoritative snapshot/history.
+               if (typeof DawnJobsActivity !== 'undefined') {
+                  DawnJobsActivity.refresh();
+               }
+               if (typeof DawnJobs !== 'undefined' && DawnJobs.refresh) {
+                  DawnJobs.refresh();
+               }
+               break;
             case 'list_jobs_response':
                // A page of terminal jobs — the jobs panel's history feed (CP4).
                if (typeof DawnJobs !== 'undefined' && DawnJobs.handleHistoryPage) {

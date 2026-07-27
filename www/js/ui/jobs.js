@@ -946,6 +946,9 @@
       toggle: toggle,
       updateVisibility: updateVisibility,
       handleReconnect: handleReconnect,
+      // jobs_invalidate: re-render the active set and reload history if open —
+      // identical to the reconnect resync, so a removed job leaves both lists.
+      refresh: handleReconnect,
       handleHistoryPage: handleHistoryPage,
       handleActionResult: handleActionResult,
    };

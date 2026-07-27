@@ -210,6 +210,43 @@ void webui_broadcast_job_update(int user_id, const job_record_t *rec, bool resum
    }
 }
 
+/* Contentless "re-sync your job views" nudge — see the header for why a generic
+ * refresh beats a job_removed delta (a removed job may live in the paginated
+ * history, not the active set, so a delta would have to touch both lists). */
+void webui_broadcast_jobs_invalidate(int user_id) {
+   if (user_id <= 0) {
+      return;
+   }
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("jobs_invalidate"));
+   const char *json_str = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+   if (!json_str) {
+      json_object_put(root);
+      return;
+   }
+
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      ws_connection_t *conn = s_active_connections[i];
+      if (!conn || !conn->session) {
+         continue;
+      }
+      if (!conn->authenticated || conn->is_satellite || conn->auth_user_id != user_id) {
+         continue;
+      }
+      char *json_copy = strdup(json_str);
+      if (!json_copy) {
+         continue;
+      }
+      ws_response_t resp = { .session = conn->session,
+                             .type = WS_RESP_JSON,
+                             .generic_json = { .json = json_copy } };
+      queue_response(&resp);
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+   json_object_put(root);
+}
+
 /* =============================================================================
  * Inbound: jobs_request -> jobs_snapshot (the complete active set)
  * ============================================================================= */

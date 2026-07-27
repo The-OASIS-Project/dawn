@@ -33,6 +33,7 @@
 #include "config/dawn_config.h"
 #include "core/conv_event.h"
 #include "core/conv_stream.h"
+#include "core/job_manager.h"
 #include "core/ocp_helpers.h"
 #include "core/session_manager.h"
 #include "image_store.h"
@@ -970,6 +971,57 @@ static int collect_conv_images_cb(const conversation_message_t *msg, void *ctx) 
    return 0; /* continue iteration */
 }
 
+/* Cancel + delete the DIRECT background-job children of a conversation being
+ * deleted.  parent_id carries ON DELETE SET NULL, which would otherwise leave a
+ * chat's research jobs orphaned (parentless, hidden) rather than cleaned up.
+ * Single level — job->job spawning is blocked today, so a direct child has no
+ * children of its own.  A running/queued child is stopped first so its worker
+ * isn't left writing to a deleted row (its later writes then fail harmlessly on
+ * the missing FK).  Each child's referenced images are freed the same way the
+ * parent's are.  Batched + progress-guarded so a long-lived chat that spawned
+ * many jobs is fully covered without an unbounded stack or a re-fetch loop. */
+static int cascade_delete_child_jobs(ws_connection_t *conn, int64_t parent_id) {
+   int total = 0;
+   for (;;) {
+      job_record_t kids[16];
+      const int cap = (int)(sizeof(kids) / sizeof(kids[0]));
+      int n = 0;
+      if (conv_db_job_list_children(parent_id, conn->auth_user_id, kids, cap, &n) !=
+              AUTH_DB_SUCCESS ||
+          n == 0) {
+         break;
+      }
+      int deleted_this_batch = 0;
+      for (int i = 0; i < n; i++) {
+         if (strcmp(kids[i].job_status, "running") == 0 ||
+             strcmp(kids[i].job_status, "queued") == 0) {
+            job_manager_cancel_or_retire(kids[i].id, conn->auth_user_id, NULL, 0);
+         }
+         /* Free the child's referenced images (mirrors the parent path below):
+          * image_store_delete re-takes the auth_db mutex, so collect under the
+          * message-read lock, then delete after the callback returns. */
+         conv_image_id_acc_t img = { 0 };
+         conv_db_get_messages(kids[i].id, conn->auth_user_id, collect_conv_images_cb, &img);
+         for (int k = 0; k < img.count; k++) {
+            image_store_delete(img.ids[k], conn->auth_user_id);
+         }
+         free(img.ids);
+
+         if (conv_db_delete(kids[i].id, conn->auth_user_id) == AUTH_DB_SUCCESS) {
+            conv_stream_clear(kids[i].id);
+            total++;
+            deleted_this_batch++;
+         }
+      }
+      /* No progress means every delete in the batch failed — stop rather than
+       * re-fetch the same rows forever.  A short batch means we drained them. */
+      if (deleted_this_batch == 0 || n < cap) {
+         break;
+      }
+   }
+   return total;
+}
+
 void handle_delete_conversation(ws_connection_t *conn, struct json_object *payload) {
    if (!conn_require_auth(conn)) {
       return;
@@ -1022,6 +1074,18 @@ void handle_delete_conversation(ws_connection_t *conn, struct json_object *paylo
       image_store_delete(img_acc.ids[i], conn->auth_user_id);
    }
    free(img_acc.ids);
+
+   /* Cancel + delete this conversation's background-job children first, so a
+    * chat's research jobs don't survive orphaned when the chat is deleted. */
+   int cascaded = cascade_delete_child_jobs(conn, conv_id);
+   if (cascaded > 0) {
+      OLOG_INFO("WebUI: cascade-deleted %d background-job child(ren) of conv %lld", cascaded,
+                (long long)conv_id);
+      /* The children are gone from the DB but the jobs panel/pill only learns of
+       * removals on a full re-sync — nudge it so the delete shows live instead of
+       * on the next panel open. */
+      webui_broadcast_jobs_invalidate(conn->auth_user_id);
+   }
 
    int result = conv_db_delete(conv_id, conn->auth_user_id);
 

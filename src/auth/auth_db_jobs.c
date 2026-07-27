@@ -803,6 +803,40 @@ int conv_db_job_list_active_by_user(int user_id, job_record_t *out, int max, int
    return rc;
 }
 
+struct job_parent_bind {
+   int64_t parent_id;
+   int user_id;
+   int limit;
+};
+
+static void bind_parent_user_limit(sqlite3_stmt *st, void *ctx) {
+   struct job_parent_bind *b = ctx;
+   sqlite3_bind_int64(st, 1, b->parent_id);
+   sqlite3_bind_int(st, 2, b->user_id);
+   sqlite3_bind_int(st, 3, b->limit);
+}
+
+int conv_db_job_list_children(int64_t parent_id,
+                              int user_id,
+                              job_record_t *out,
+                              int max,
+                              int *count_out) {
+   if (parent_id <= 0 || user_id <= 0 || !out || max <= 0 || !count_out) {
+      return AUTH_DB_INVALID;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   struct job_parent_bind b = { .parent_id = parent_id, .user_id = user_id, .limit = max };
+   /* Every job child of this parent, any status — the parent-delete cascade
+    * cancels the active ones and deletes them all.  user_id is bound too so the
+    * single-user-tree invariant holds even here. */
+   int rc = job_select_into("SELECT " JOB_SELECT_COLS " FROM conversations "
+                            "WHERE parent_id=? AND user_id=? AND job_status IS NOT NULL "
+                            "ORDER BY id ASC LIMIT ?",
+                            bind_parent_user_limit, &b, out, max, count_out);
+   AUTH_DB_UNLOCK();
+   return rc;
+}
+
 struct job_history_bind {
    int user_id;
    int64_t before_created_at;

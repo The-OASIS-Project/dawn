@@ -1398,6 +1398,22 @@ int conv_db_job_reset_for_resume(int64_t conv_id, int user_id, bool allow_cancel
 int conv_db_job_list_active_by_user(int user_id, job_record_t *out, int max, int *count_out);
 
 /**
+ * @brief Ownership-scoped: the DIRECT job children of a parent conversation.
+ *
+ * A batch of up to @p max children (any status), ordered by id.  Single level —
+ * job->job spawning is blocked today, so a direct child has no children of its
+ * own.  Used by the parent-delete cascade: call in a loop, deleting the returned
+ * rows, until it returns 0.
+ *
+ * @return AUTH_DB_SUCCESS, AUTH_DB_INVALID, or AUTH_DB_FAILURE.
+ */
+int conv_db_job_list_children(int64_t parent_id,
+                              int user_id,
+                              job_record_t *out,
+                              int max,
+                              int *count_out);
+
+/**
  * @brief Ownership-scoped: a user's TERMINAL jobs, newest first, keyset-paginated.
  *
  * Unbounded feed — never derive a count or a "how many are running" answer from

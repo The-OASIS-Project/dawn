@@ -177,6 +177,18 @@ void webui_jobs_send_history(ws_connection_t *conn,
 void webui_jobs_handle_action(ws_connection_t *conn, struct json_object *payload);
 
 /**
+ * @brief Nudge the owner's browsers to re-sync their job views.
+ *
+ * A contentless `jobs_invalidate` frame for STRUCTURAL changes that the normal
+ * `job_update` lifecycle deltas don't cover — today, a job removed by the
+ * parent-delete cascade.  The client re-requests the snapshot (updating the pill
+ * + running list) and reloads history if the panel is open, rather than the
+ * server shipping a removal delta that would have to be applied to both the
+ * active set and the separately-paginated history list.  Browser + owner only.
+ */
+void webui_broadcast_jobs_invalidate(int user_id);
+
+/**
  * @brief Delete a conversation
  */
 void handle_delete_conversation(ws_connection_t *conn, struct json_object *payload);

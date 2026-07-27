@@ -304,6 +304,9 @@ window.DawnJobsActivity = (function () {
       upsertJob: upsertJob,
       applySnapshot: applySnapshot,
       handleReconnect: handleReconnect,
+      // A jobs_invalidate nudge re-syncs exactly like a reconnect: re-request the
+      // snapshot so the pill drops a removed (e.g. cascade-deleted) job.
+      refresh: handleReconnect,
       onConversationSwitch: onConversationSwitch,
       getCount: getCount,
       getActive: getActive,

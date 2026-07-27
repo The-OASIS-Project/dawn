@@ -622,6 +622,42 @@ static void test_last_assistant_text(void) {
    TEST_ASSERT_NULL(out); /* bob's JOIN matches no rows */
 }
 
+/* ── list_children: the parent-delete cascade's lookup ─────────────────────── */
+
+static void test_list_children(void) {
+   int64_t parent = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "parent chat", &parent));
+
+   int64_t a = 0, b = 0, other = 0;
+   conv_db_create_job(alice_id, "child a", parent, "detached", "notify", NULL, 1, "g", &a);
+   conv_db_create_job(alice_id, "child b", parent, "detached", "notify", NULL, 1, "g", &b);
+   /* A job under a DIFFERENT parent must not appear. */
+   int64_t other_parent = 0;
+   conv_db_create(alice_id, "other chat", &other_parent);
+   conv_db_create_job(alice_id, "elsewhere", other_parent, "detached", "notify", NULL, 1, "g",
+                      &other);
+
+   job_record_t out[8];
+   int n = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_list_children(parent, alice_id, out, 8, &n));
+   TEST_ASSERT_EQUAL_INT(2, n);
+   /* Ordered by id ASC — a was created before b. */
+   TEST_ASSERT_EQUAL_INT64(a, out[0].id);
+   TEST_ASSERT_EQUAL_INT64(b, out[1].id);
+
+   /* Ownership-scoped: the other user sees none of alice's children. */
+   n = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_list_children(parent, bob_id, out, 8, &n));
+   TEST_ASSERT_EQUAL_INT(0, n);
+
+   /* A childless conversation returns nothing. */
+   n = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_job_list_children(other_parent, alice_id, out, 8, &n));
+   TEST_ASSERT_EQUAL_INT(1, n); /* just the one 'elsewhere' job */
+   TEST_ASSERT_EQUAL_INT64(other, out[0].id);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_create_and_get);
@@ -646,5 +682,6 @@ int main(void) {
    RUN_TEST(test_restart_safety_leaves_the_disposition_alone);
    RUN_TEST(test_job_inherits_parent_privacy);
    RUN_TEST(test_last_assistant_text);
+   RUN_TEST(test_list_children);
    return UNITY_END();
 }

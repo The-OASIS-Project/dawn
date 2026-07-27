@@ -175,7 +175,9 @@ The monitor is **dirty-gated** (zero DB work when idle) and drains up to `monito
 
 ### Cancel (ownership-bounded)
 
-Cancel sets the target's `cancel_requested`, marks `job_status='cancelled'`, sets `on_complete_fired=1` (suppress follow-up). A running job is signalled through its session; a queued one has no session and is retired directly — both live in `job_manager_cancel_or_retire()` so the tool and WS surface share one mutation path. Best-effort MCP cancel is sent to the sandbox; DAWN cancels its *conversation*, not the operator-owned remote process. *(Phase 3 adds cascade to descendants, filtered `WHERE user_id = caller`, and the parent-delete reap-before-FK-null.)*
+Cancel sets the target's `cancel_requested`, marks `job_status='cancelled'`, sets `on_complete_fired=1` (suppress follow-up). A running job is signalled through its session; a queued one has no session and is retired directly — both live in `job_manager_cancel_or_retire()` so the tool and WS surface share one mutation path. Best-effort MCP cancel is sent to the sandbox; DAWN cancels its *conversation*, not the operator-owned remote process.
+
+**Parent-delete cascade (single level, shipped).** Deleting a parent conversation would otherwise leave its job children orphaned — `parent_id` is `ON DELETE SET NULL`. So the delete handler (`webui_history.c`) first cancels each direct job child (`job_manager_cancel_or_retire`) and deletes it (`conv_db_job_list_children` → `conv_db_delete`, freeing the child's images the same way the parent's are), ownership-scoped. Single level is complete today because job→job spawning is blocked (`spawn_depth ≡ 1`). *(Phase 3 generalizes this to multi-level trees with the `WHERE user_id = caller` descendant walk + the reap-before-FK-null ordering; the single-level path is a subset of that work.)*
 
 ### Restart semantics (honest, structural)
 
@@ -206,6 +208,9 @@ One attach protocol, two renderers. All server→client frames go through the `s
    | `jobs_snapshot` | the complete ACTIVE set, full rows, on `jobs_request` | structurally bounded (active set ≤ `max_active_jobs`, clamped ≤ 256); says `truncated: true` if ever hit |
    | `job_update` | one job's row, on every lifecycle transition | — |
    | `list_jobs_response` | one keyset-paginated page of TERMINAL jobs (history) | unbounded feed — **never feed a count from it** |
+   | `jobs_invalidate` | contentless "re-sync your job views" nudge for STRUCTURAL changes the deltas don't cover (a job removed by the parent-delete cascade) | — |
+
+   `job_update` is a delta (add/change); a removal has no delta because a removed job may live in the paginated history, not the active set — so a `job_removed` delta would have to be applied to both lists. `jobs_invalidate` instead tells the client to re-pull the authoritative snapshot (+ reload history if the panel is open), which is what it already does on reconnect. Emitted browser+owner-only from the delete handler after the cascade.
 
    Job object: `{conversation_id, parent_id, title, status, spawn_mode, on_complete, spawn_depth, reinvoke_count, created_at, started_at, finished_at, deliver_to?, error?}`.
 
@@ -378,7 +383,7 @@ Surfaced by the branch review (2026-07-27). A pre-Phase-3 hardening batch addres
 
 1. ✅ **FIXED — `tool_result` secret redaction (was High, §8.6).** Two changes: (a) the emit site now correlates `tool_call_id`→tool name from the batch, so the payload records the real tool (display), and (b) redaction was reworked to be **content-based**, no longer keyed on `TOOL_CAP_SECRETS` — that flag flagged benign-data tools (home_assistant, calendar) whose secret lives in config, and whole-redacting erased device/event state for no gain. Real credentials in args are caught by key-name/value-shape; result bodies are readable. (`src/llm/llm_tool_loop.c`, `src/core/event_payload.c`.)
 2. ✅ **FIXED — `delivery_claim` stale-index OOB (was High).** `-1` found-sentinel + insert at `s_delivery_n`; `test_delivery_claim_after_full_table_sweep`. (`src/core/job_manager.c`.)
-3. **`on_complete_fired` is one bit answering two questions (Medium — Phase-3 prerequisite; hardening-batch C1).** It gates both "parent re-engaged?" and "user told?"; the delivery path is coherent via the single `job_notify_user()` writer, but the completion logic took six rounds to stabilize and cascade-cancel (Phase 3) adds fire sites. Split into `reinvoke_fired` + `notified_at` **before** trees.
+3. **`on_complete_fired` is one bit answering two questions (Medium — deferred to Phase-3 start).** It gates both "parent re-engaged?" and "user told?"; the delivery path is coherent via the single `job_notify_user()` writer (live-verified), so this is a *structural* hardening, not an active bug. Its whole purpose is to survive Phase-3 cascade-cancel adding fire sites, so it lands at Phase-3 kickoff — next to the code that stresses it, with its own review. Split into `reinvoke_fired` + `notified_at` **before** the trees work.
 4. ✅ **FIXED — `event_chunk_cap` minimum clamp (was Medium, memory safety).** `JOBS_EVENT_CHUNK_CAP_MIN` (256) floor in `config_clamp_jobs()` + defensive re-floor in `payload_cap()`; `test_event_chunk_cap_has_a_floor`.
 5. ◑ **PARTLY FIXED — event write amplification.** `tool_call`/`tool_result` persistence + fan-out are now **gated to the observe set** (`session->events_observable`), so ordinary interactive turns no longer write step events (live-verified). Remaining: the drain/append still `prepare`/`finalize` per call under the global lock — cache into `s_db.stmt_*` (hardening-batch C2).
 6. **Tool-loop honors the *global* interrupt, not the session cancel flag (Medium).** A job wedged in a tool call ignores its session cancel (only the reap's counter-reclaim saves the slot), and a wake-word barge-in / shutdown kills concurrent jobs and files them as "no response from model." Changing it alters cancellation for voice/WebUI/messaging alike, so it's its own change.
