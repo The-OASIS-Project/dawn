@@ -94,6 +94,57 @@ static void doc_manage_parse_config(toml_table_t *table, void *config) {
 _Static_assert(DOCMGMT_SAVE_TEXT_MAX >= LLM_TOOLS_ARGS_LEN,
                "save_text buffer must hold the full tool-arg value or docs clip again");
 
+/* Advertised per-call text budget — ADVISORY, and deliberately NOT enforced.
+ *
+ * The buffer above must stay >= LLM_TOOLS_ARGS_LEN so a value that survived the
+ * transport is never re-clipped here (that is what the assert guards).  This is
+ * the different question the model needs answered: how much text can it send
+ * before the *transport* rejects the call?  The arg buffer holds the whole JSON
+ * object — action, label, quoting, and every newline and quote escaped to two
+ * bytes — so the usable text is meaningfully less than LLM_TOOLS_ARGS_LEN, and
+ * discovering that by being rejected is ruinously expensive: the model streams
+ * the entire document first, so an over-long note costs a full generation that
+ * is then thrown away.  Observed live: three attempts, ~20k output tokens
+ * discarded, 92% of a 4-minute job spent re-writing the same report.
+ *
+ * 12 KB measured against real assistant output (escapes at 1.02-1.06x) and
+ * synthetic quote/newline-dense markdown (1.125x, the worst case found): 12288 x
+ * 1.125 + envelope still leaves ~2.4 KB of headroom.  Not enforced because a
+ * call that DID fit should never be refused for exceeding a guideline. */
+#define DOCMGMT_SAVE_TEXT_BUDGET 12288
+_Static_assert(DOCMGMT_SAVE_TEXT_BUDGET < LLM_TOOLS_ARGS_LEN,
+               "the advertised budget must leave room for the JSON envelope + escaping");
+
+/* Put the budget in the tool description as a NUMBER — "keep it short" is not
+ * something a model can act on precisely, and a stale hand-typed constant here
+ * would send it straight back into the discard loop. */
+#define DOCMGMT_STR_HELPER(x) #x
+#define DOCMGMT_STR(x) DOCMGMT_STR_HELPER(x)
+
+/* Length is deliberately NOT capped at LLM_TOOLS_DESC_LEN.  The 512-byte buffers
+ * in tool_param_t / tool_definition_t are the CACHED copies — used for the WebUI
+ * tools panel and the legacy non-registry fallback — while the schema the model
+ * actually receives is built live from the registry, where descriptions are
+ * `const char *` straight to the literal (build_parameters_schema_from_treg, and
+ * tool_effective_description for the tool-level text; the comment there records
+ * that scheduler's ~5.8 KB description is what drove it).  So write what the
+ * model needs and let it run long. */
+#define DOCMGMT_TEXT_PARAM_DESC                                                                      \
+   "The text to store. Required by save_note and save_text (the full verbatim content the user "     \
+   "wants kept) and by append (the text to add to the end of the note). Must be the LAST "           \
+   "argument for those actions. Not used by edit / list / delete / confirm_delete. "                 \
+   "Keep each call under about " DOCMGMT_STR(                                                        \
+       DOCMGMT_SAVE_TEXT_BUDGET) " bytes: that limit "                                               \
+                                 "covers the whole argument object, including the JSON escaping "    \
+                                 "of every newline and quote, "                                      \
+                                 "and a call over it is rejected BEFORE it runs, so the entire "     \
+                                 "write is wasted. To store more, "                                  \
+                                 "send the first part with save_text, then add each following "      \
+                                 "part with append to the SAME "                                     \
+                                 "label. Do not create 'Part 1'/'Part 2' documents — that splits " \
+                                 "one piece of writing across "                                      \
+                                 "separate records."
+
 typedef struct {
    int user_id;
    int64_t doc_id;
@@ -236,10 +287,7 @@ static const treg_param_t doc_manage_params[] = {
    },
    {
        .name = "text",
-       .description = "The text to store. Required by save_note and save_text (the full verbatim "
-                      "content the user wants kept) and by append (the text to add to the end of "
-                      "the note). Must be the LAST argument for those actions. Not used by edit / "
-                      "list / delete / confirm_delete.",
+       .description = DOCMGMT_TEXT_PARAM_DESC,
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,

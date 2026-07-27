@@ -1312,12 +1312,23 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
     * silently stores corrupt data — return a clear, actionable error instead of
     * the generic "Invalid JSON" the truncation would otherwise produce. */
    if (call->args_truncated) {
-      snprintf(
-          result->result, LLM_TOOLS_RESULT_LEN,
-          "Error: the arguments to '%s' were too long (over %d bytes) and were cut off, so the "
-          "call was not run. Split the input into smaller pieces (e.g. save a long document in "
-          "sections) and try again.",
-          call->name, LLM_TOOLS_ARGS_LEN - 1);
+      /* Name the budget and the recovery ACTION.  The old wording — "split the
+       * input into smaller pieces (e.g. save a long document in sections)" — was
+       * true but unusable twice over: it gave no size to aim at, so the retry was
+       * a guess that overshot again; and "in sections" reads as "make more
+       * documents", so a long report came back as 'Part 1'/'Part 2' instead of
+       * one document. Observed live: two discarded ~7k-token generations before a
+       * third happened to fit. Everything here is generic — 'append' is a common
+       * action name, and a tool without one simply ignores the hint. */
+      snprintf(result->result, LLM_TOOLS_RESULT_LEN,
+               "Error: the arguments to '%s' totalled over %d bytes and were cut off, so the call "
+               "did NOT run and nothing was saved. That limit covers the whole argument object — "
+               "the field names and the JSON escaping, not just your text — so aim for roughly "
+               "half of it per call. Do not retry the same call: send the first part now, then "
+               "add each remaining part with this tool's 'append' action, targeting the SAME "
+               "label. Creating 'Part 1'/'Part 2' entries instead leaves the content split across "
+               "separate records.",
+               call->name, LLM_TOOLS_ARGS_LEN - 1);
       result->success = false;
       return 1;
    }
