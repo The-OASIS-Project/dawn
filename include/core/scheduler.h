@@ -96,7 +96,8 @@ void scheduler_notify_new_event(void);
  *                     function emits NO WebUI banner in either case — the caller
  *                     owns any visual surface.  Ignored when @deliver_to routes
  *                     to a messaging channel.
- * @return SUCCESS, or FAILURE on bad input.
+ * @return SUCCESS, or FAILURE on bad input — or, when @deliver_to names a
+ *         channel, when that channel did not accept the message.
  */
 int scheduler_emit_alert(int user_id,
                          const char *text,
@@ -202,8 +203,14 @@ void scheduler_send_tts_to_session(session_t *session, const char *text);
  * (user_id, channel_name) ownership check + per-channel + provider-
  * global rate limits; the scheduler.c stub is the no-op default for
  * messaging-disabled builds.  Sixth scheduler weak symbol — see
- * docs/MESSAGING_CHANNELS_DESIGN.md §9. */
-void scheduler_send_to_messaging_channel(int user_id, const char *channel_name, const char *text);
+ * docs/MESSAGING_CHANNELS_DESIGN.md §9.
+ *
+ * Returns SUCCESS only if the message actually went out, so a caller that owes
+ * an at-least-once delivery (background-job completion notices) can retry rather
+ * than record an unsent notice as delivered.  Engine result codes are collapsed
+ * to SUCCESS/FAILURE deliberately — the scheduler is not a messaging module and
+ * should not carry MESSAGING_* into its callers. */
+int scheduler_send_to_messaging_channel(int user_id, const char *channel_name, const char *text);
 
 /* =============================================================================
  * Alarm Sound

@@ -34,6 +34,7 @@
 #include <unistd.h>
 
 #include "core/rate_limiter.h"
+#include "core/scheduler.h" /* prototype for the scheduler_send_to_messaging_channel override */
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "logging.h"
@@ -179,18 +180,19 @@ static const char *engine_rc_name(int rc) {
    }
 }
 
-void scheduler_send_to_messaging_channel(int user_id, const char *channel_name, const char *text) {
+int scheduler_send_to_messaging_channel(int user_id, const char *channel_name, const char *text) {
    if (user_id <= 0 || !channel_name || channel_name[0] == '\0' || !text) {
-      return;
+      return FAILURE;
    }
    int rc = messaging_engine_send(user_id, channel_name, text);
    if (rc == MESSAGING_SUCCESS) {
       OLOG_INFO("messaging: scheduler fan-out to '%s' for user %d delivered", channel_name,
                 user_id);
-   } else {
-      OLOG_WARNING("messaging: scheduler fan-out to '%s' for user %d failed (rc=%d %s)",
-                   channel_name, user_id, rc, engine_rc_name(rc));
+      return SUCCESS;
    }
+   OLOG_WARNING("messaging: scheduler fan-out to '%s' for user %d failed (rc=%d %s)", channel_name,
+                user_id, rc, engine_rc_name(rc));
+   return FAILURE;
 }
 
 /* =============================================================================

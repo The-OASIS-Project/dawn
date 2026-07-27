@@ -116,12 +116,13 @@ void scheduler_broadcast_events_changed(int user_id) {
  * driver).  When messaging is built out, this no-op default never fires
  * because the linker picks the strong symbol; it's here so the scheduler
  * builds standalone. */
-void scheduler_send_to_messaging_channel(int user_id, const char *channel_name, const char *text)
+int scheduler_send_to_messaging_channel(int user_id, const char *channel_name, const char *text)
     __attribute__((weak));
-void scheduler_send_to_messaging_channel(int user_id, const char *channel_name, const char *text) {
+int scheduler_send_to_messaging_channel(int user_id, const char *channel_name, const char *text) {
    (void)user_id;
    (void)channel_name;
    (void)text;
+   return FAILURE; /* nothing was sent — see the header on why that matters */
 }
 #endif
 
@@ -374,7 +375,15 @@ int scheduler_emit_alert(int user_id,
    }
 #ifdef ENABLE_WEBUI
    if (deliver_via_messaging) {
-      scheduler_send_to_messaging_channel(ev.user_id, ev.deliver_to, text);
+      /* Report whether the channel took it.  Local TTS is fire-and-forget by
+       * nature, but a channel send can fail for an unlinked or rate-limited
+       * conversation, and a caller owing an at-least-once notice has to be able
+       * to tell that apart from success. */
+      return scheduler_send_to_messaging_channel(ev.user_id, ev.deliver_to, text);
+   }
+#else
+   if (deliver_via_messaging) {
+      return FAILURE; /* asked for a channel in a build that has none */
    }
 #endif
    return SUCCESS;

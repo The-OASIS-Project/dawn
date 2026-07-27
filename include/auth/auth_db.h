@@ -1363,27 +1363,6 @@ int conv_db_job_mark_fired_many(const int64_t *ids, int n);
 int conv_db_job_bump_reinvoke(int64_t conv_id, int *new_count_out);
 
 /**
- * @brief System-caller (boot): suppress auto-reinvoke across a daemon restart,
- *        WITHOUT suppressing the completion notice.
- *
- * Rewrites on_complete from 'reinvoke_parent' to 'notify' for every terminal
- * (done/failed/interrupted), not-yet-fired job, so a job that finished before
- * this boot is NEVER auto-reinvoked on startup (design §143) but the user is
- * still told it finished.
- *
- * Deliberately does NOT set on_complete_fired.  That flag answers both "has the
- * parent been re-engaged?" and "has the user been told?", so firing the row to
- * stop the former also silently stopped the latter — a job finishing seconds
- * before a restart reported to nobody.  Changing the disposition separates the
- * two concerns with no schema change.  Also still frees the finished_at-ordered
- * follow-up drain from head-of-line blocking on a stale reinvoke row.
- *
- * @param count_out Receives the number of rows downgraded (may be NULL).
- * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
- */
-int conv_db_job_downgrade_boot_reinvokes(int *count_out);
-
-/**
  * @brief Atomically claim an interrupted/failed job for re-dispatch.
  *
  * Resets the row to 'queued' and clears job_error, started_at, finished_at and

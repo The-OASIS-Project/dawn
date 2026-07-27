@@ -583,6 +583,16 @@ void drawWaveform(const int16_t *audioBuffer, size_t numSamples) {
  */
 void signal_handler(int signal) {
    if (signal == SIGINT) {
+#ifdef ENABLE_WEBUI
+      /* BEFORE the interrupt, and that order is the whole point.  The interrupt
+       * below aborts every running background job's tool loop within
+       * milliseconds, and each worker then decides how to record itself.  Since
+       * job_manager_shutdown() does not run until the main loop next notices
+       * `quit`, a worker that asked "is the daemon going down?" got `false` and
+       * filed an interrupted job as "failed: no response from model" — which
+       * reads terminal to the user and is not what happened. */
+      job_manager_note_shutdown_requested();
+#endif
       // Request LLM interrupt (safe to call from signal handler - uses sig_atomic_t)
       llm_request_interrupt();
       quit = 1;

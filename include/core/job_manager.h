@@ -199,15 +199,30 @@ int job_manager_cancel(int64_t conv_id, int user_id);
 int job_manager_running_count(void);
 
 /**
- * @brief Is the daemon tearing down the job pool?
+ * @brief Record that the daemon has been asked to exit.
  *
- * job_manager_shutdown() cancels every running job's turn, and a worker cannot
- * otherwise distinguish that from the user pressing Cancel — so it would record
- * 'cancelled' (a disposition only a human may resume) and suppress the
- * completion notice on the grounds that the user asked for the stop.  Workers
- * consult this before interpreting a cancel.
+ * Async-signal-safe (one relaxed store to a lock-free atomic), and called from
+ * the SIGINT handler, which is the only place early enough to be useful.
  *
- * @return true once shutdown has begun.
+ * job_manager_shutdown() also sets this, but far too late to classify anything:
+ * SIGINT calls llm_request_interrupt() immediately, which aborts every running
+ * job's tool loop within milliseconds, while job_manager_shutdown() does not run
+ * until the main loop next notices `quit` — up to a second later, long after the
+ * workers have already recorded their dispositions.  Every Ctrl+C therefore used
+ * to file its interrupted jobs as "failed: no response from model", which reads
+ * terminal to the user and misdescribes what happened.
+ */
+void job_manager_note_shutdown_requested(void);
+
+/**
+ * @brief Is the daemon tearing down, or about to?
+ *
+ * A worker cannot otherwise distinguish "the daemon pulled the rug" from "the
+ * user pressed Cancel" — so it would record 'cancelled' (a disposition only a
+ * human may resume) and suppress the completion notice on the grounds that the
+ * user asked for the stop.  Workers consult this before interpreting a stop.
+ *
+ * @return true once shutdown has been requested or begun.
  */
 bool job_manager_is_shutting_down(void);
 
@@ -279,9 +294,17 @@ int job_manager_reap_overdue(time_t now);
  * returns false because the first already consumed the verdict.
  *
  * @param session The job session (NULL-safe).
+ * @param user_cancelled_out Receives true if the cancel came from
+ *        job_manager_cancel() — i.e. a human asked for it — rather than from the
+ *        shutdown sweep.  Both arrive as the same `cancel_requested` flag, so
+ *        without this a Cancel that lands during shutdown is recorded as
+ *        `interrupted`: a disposition the LLM may resume on its own, silently
+ *        restarting work the user just stopped.  Read here rather than as a
+ *        second pool walk so the whole disposition is one atomic slot read.
+ *        May be NULL.
  * @return true if this session's slot had been flagged by job_manager_reap_overdue().
  */
-bool job_manager_claim_reaped(const session_t *session);
+bool job_manager_claim_reaped(const session_t *session, bool *user_cancelled_out);
 
 /**
  * @brief Did this job record end as a runtime-reap timeout?
@@ -314,15 +337,42 @@ void jobs_monitor_tick(time_t now);
  * (webui_broadcasts.c).  Called by the completion monitor for jobs with no
  * messaging `deliver_to` target — a quiet in-browser banner, NO voice.
  *
+ * Returns the number of clients it reached, because the monitor may only record
+ * the notice as delivered when that is > 0.  At boot it is reliably 0 — the
+ * daemon always finishes starting before a browser can reconnect — so a caller
+ * that assumed delivery would lose exactly the completions a restart stranded.
+ *
  * @param user_id Owner.
  * @param text Completion message.
  * @param conv_id The job conversation id (so the client can deep-link later).
  * @param running_count Jobs still running (for a "N running" indicator).
+ * @return Number of client connections the toast was queued to; 0 if none.
  */
-void webui_broadcast_job_notification(int user_id,
-                                      const char *text,
-                                      int64_t conv_id,
-                                      int running_count);
+int webui_broadcast_job_notification(int user_id,
+                                     const char *text,
+                                     int64_t conv_id,
+                                     int running_count);
+
+/**
+ * @brief Tell @p user_id about a finished job — the single "was the user told?"
+ *        answer for every completion path.
+ *
+ * Broadcasts a toast to the owner's browsers; if none are connected, queues the
+ * text as a missed notification, which replays on their next authenticated
+ * connect.  Callers therefore get a durable yes/no instead of a best-effort
+ * push, which is what lets a completion row be retired immediately rather than
+ * waiting at the head of a queue every user shares.
+ *
+ * Exists because "has the user been told?" was previously decided at six
+ * separate sites with three different rules, and the ones that broadcast without
+ * checking simply lost the notice whenever no tab was open — the defect this
+ * whole path was rebuilt to remove.  New completion paths call THIS, not
+ * webui_broadcast_job_notification directly.
+ *
+ * @return true if the notice was delivered or durably queued; false only if both
+ *         failed (logged), in which case the caller still owes the user.
+ */
+bool job_notify_user(int user_id, const char *text, int64_t conv_id, int running);
 
 /**
  * @brief Push ONE job's current row to its owner's browser sessions.

@@ -41,6 +41,7 @@
 #include "config/dawn_config.h"
 #include "core/conv_event.h"
 #include "core/event_payload.h"
+#include "core/missed_notifications_db.h"
 #include "core/scheduler.h"
 #include "core/scheduler_db.h"
 #include "dawn_error.h"
@@ -64,6 +65,7 @@ typedef struct {
    time_t nag_at;     /* last re-cancel/re-log while it refuses to die */
    job_provider_class_t provider;
    bool counters_released; /* provider counter already force-released (zombie) */
+   bool user_cancelled;    /* the cancel came from job_manager_cancel(), not shutdown */
 } job_slot_t;
 
 static job_slot_t *s_slots = NULL; /* [s_pool_size]; NULL session = free slot */
@@ -74,8 +76,10 @@ static bool s_initialized = false;
 static pthread_mutex_t s_pool_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* Dirty-gate for the completion monitor: set when a job reaches a terminal
- * state (or boot finds interrupted rows), cleared when the drain finds nothing.
- * An idle system does zero per-tick DB work. */
+ * state, at boot, and when a client the daemon may owe a notice CONNECTS —
+ * cleared when the drain finds nothing left to do.  An idle system does zero
+ * per-tick DB work, which is why anything that changes the answer has to open
+ * the gate explicitly. */
 static atomic_bool s_jobs_dirty = false;
 
 /* Set before shutdown cancels the pool.  A worker sees only "my turn was
@@ -86,19 +90,29 @@ static atomic_bool s_jobs_dirty = false;
  * to tell the two apart. */
 static atomic_bool s_shutting_down = false;
 
+void job_manager_note_shutdown_requested(void) {
+   atomic_store(&s_shutting_down, true);
+}
+
 bool job_manager_is_shutting_down(void) {
    return atomic_load(&s_shutting_down);
 }
 
-/* Daemon boot time.  The monitor only DELIVERS a notification for a job that
- * reached a terminal state during THIS run (finished_at >= s_boot_time) — a job
- * that finished before this boot (e.g. an old completed job whose fired flag
- * predates the monitor) is marked fired but NOT re-announced, so a restart never
- * replays stale completions. */
+/* Daemon boot time — the monitor's restart-safety input.  A job whose terminal
+ * state predates this boot (finished_at < s_boot_time) is DELIVERED as an
+ * ordinary notification rather than being allowed to re-engage its parent's LLM,
+ * because auto-resuming a conversation across a restart is not something the
+ * user asked for.  Note "delivered", not "suppressed": they are still owed the
+ * news, and this is deliberately a per-tick decision rather than a rewrite of
+ * the row, so an explicit Resume (which clears finished_at) gets the
+ * re-engagement back for free.  See jobs_monitor_tick. */
 static time_t s_boot_time = 0;
 
 /* JOB_MONITOR_MAX_PER_TICK (per-tick drain bound + delivery-batch cap) is
  * defined in job_manager.h so job_reinvoke sizes its group buffers to match. */
+
+/* Defined with the delivery table in the completion-monitor section below. */
+static void delivery_table_reset(void);
 
 /* Reinvoke processor (registered by job_reinvoke; NULL until then).  Read on the
  * monitor thread; set once at init — a plain pointer is adequate (init happens
@@ -109,16 +123,19 @@ void job_manager_register_reinvoke_processor(job_reinvoke_processor_fn fn) {
    s_reinvoke_processor = fn;
 }
 
-/* WebUI completion toast — weak default is a no-op; webui_broadcasts.c provides
- * the strong override (silent in-browser banner, no voice). */
-__attribute__((weak)) void webui_broadcast_job_notification(int user_id,
-                                                            const char *text,
-                                                            int64_t conv_id,
-                                                            int running_count) {
+/* WebUI completion toast — weak default reaches nobody; webui_broadcasts.c
+ * provides the strong override (silent in-browser banner, no voice).  Returning
+ * 0 rather than "delivered" is what keeps a headless build from marking notices
+ * it never sent as fired. */
+__attribute__((weak)) int webui_broadcast_job_notification(int user_id,
+                                                           const char *text,
+                                                           int64_t conv_id,
+                                                           int running_count) {
    (void)user_id;
    (void)text;
    (void)conv_id;
    (void)running_count;
+   return 0;
 }
 
 /* Single-job lifecycle push — weak default is a no-op; webui_jobs.c provides the
@@ -234,6 +251,8 @@ int job_manager_init(void) {
    s_n_running_local = 0;
    s_n_running_cloud = 0;
    s_boot_time = time(NULL);
+   delivery_table_reset(); /* every other module-static here is re-initialised; so is this */
+   atomic_store(&s_shutting_down, false); /* ...and so is this: nothing else ever clears it */
    s_initialized = true;
    pthread_mutex_unlock(&s_pool_mutex);
 
@@ -242,7 +261,16 @@ int job_manager_init(void) {
    /* Boot scan: any job left 'running'/'queued' in the DB is stale — its worker
     * died with the previous daemon.  Mark them 'interrupted' (leaving
     * on_complete_fired=0) so the monitor notifies "interrupted"; never
-    * auto-reinvoke a parent across a restart. */
+    * auto-reinvoke a parent across a restart.
+    *
+    * finished_at is stamped just BEFORE this boot, and that is load-bearing, not
+    * cosmetic.  It is the more truthful value — the work stopped when the
+    * previous daemon died, not when this one started — and the monitor's
+    * restart-safety rule is `finished_at < s_boot_time`.  Stamping these `now`
+    * would classify precisely the jobs the restart interrupted as "finished
+    * during this run" and auto-reinvoke a parent across the restart, which is
+    * the one thing that rule exists to prevent. */
+   const time_t pre_boot_ts = s_boot_time - 1;
    job_record_t stale[JOB_BOOT_SCAN_MAX];
    int n_stale = 0;
    if (conv_db_job_scan_active(stale, (int)(sizeof(stale) / sizeof(stale[0])), &n_stale) ==
@@ -250,26 +278,21 @@ int job_manager_init(void) {
        n_stale > 0) {
       for (int i = 0; i < n_stale; i++) {
          job_manager_set_terminal(stale[i].id, stale[i].user_id, "interrupted", "daemon restarted",
-                                  time(NULL), 0);
+                                  pre_boot_ts, 0);
       }
-      atomic_store(&s_jobs_dirty, true);
       OLOG_INFO("job_manager: marked %d interrupted job(s) from a previous run", n_stale);
    }
 
-   /* Restart-safety (design §143): never auto-reinvoke a parent across a restart.
-    * Downgrade any terminal + not-yet-fired reinvoke_parent job to 'notify', so
-    * the monitor won't re-engage the LLM for a job that finished before this boot
-    * — but still TELLS the user it finished.  (Marking the row fired instead, as
-    * this did originally, suppressed the notification too, because one flag
-    * serves both dispositions; a job that finished just before a restart then
-    * vanished silently.  This also keeps a stale reinvoke row from
-    * head-of-line-blocking the finished_at-ordered drain.) */
-   int n_downgraded = 0;
-   if (conv_db_job_downgrade_boot_reinvokes(&n_downgraded) == AUTH_DB_SUCCESS && n_downgraded > 0) {
-      atomic_store(&s_jobs_dirty, true); /* wake the monitor to deliver them */
-      OLOG_INFO("job_manager: %d pre-restart job(s) downgraded to notify (no auto-reinvoke)",
-                n_downgraded);
-   }
+   /* Open the dirty gate unconditionally so the first tick looks once.
+    *
+    * Setting it only when the scan above found something was a silent stranding
+    * bug: a job that reached a terminal state cleanly just before shutdown is
+    * neither stale nor newly-transitioned, so nothing marked the gate, the
+    * monitor early-returned every tick, and the completion sat undelivered until
+    * some UNRELATED job happened to transition — on an idle daemon, never.  The
+    * cleaner the shutdown, the worse the outcome.  The first tick self-closes
+    * the gate when there is genuinely nothing pending, so the cost is one query. */
+   atomic_store(&s_jobs_dirty, true);
 
    OLOG_INFO("job_manager: initialized (%d job slots, max_active_jobs=%d)", JOB_POOL_MAX_SLOTS,
              g_config.jobs.max_active_jobs);
@@ -404,6 +427,7 @@ int job_manager_begin_ex(int user_id,
    s_slots[slot].reaped_at = 0;
    s_slots[slot].nag_at = 0;
    s_slots[slot].counters_released = false;
+   s_slots[slot].user_cancelled = false; /* per-JOB, not per-slot: see job_manager_end */
    if (provider == JOB_PROVIDER_LOCAL) {
       s_n_running_local++;
    } else {
@@ -452,6 +476,11 @@ void job_manager_end(session_t *session) {
          s_slots[i].reaped_at = 0;
          s_slots[i].nag_at = 0;
          s_slots[i].counters_released = false;
+         /* Slots are recycled, so a cancel verdict left behind would be read by
+          * whichever job lands here next — and a stale `user_cancelled` files a
+          * shutdown-interrupted job as user-cancelled, which fires it and tells
+          * nobody.  Cleared at both ends for the same reason as the fields above. */
+         s_slots[i].user_cancelled = false;
          break;
       }
    }
@@ -499,6 +528,11 @@ int job_manager_cancel(int64_t conv_id, int user_id) {
          if ((int)s->metrics.user_id != user_id) {
             rc = JOB_MGR_FORBIDDEN;
          } else {
+            /* Record WHO asked before signalling.  session_cancel_turn is a bare
+             * flag shared with the shutdown sweep and the runtime reap, so the
+             * worker cannot otherwise tell a human's Cancel from the daemon
+             * pulling the rug — and the two want opposite dispositions. */
+            s_slots[i].user_cancelled = true;
             session_cancel_turn(s); /* atomic store — safe under the pool lock */
             rc = JOB_MGR_OK;
          }
@@ -705,7 +739,10 @@ int job_manager_reap_overdue(time_t now) {
    return n_reaped;
 }
 
-bool job_manager_claim_reaped(const session_t *session) {
+bool job_manager_claim_reaped(const session_t *session, bool *user_cancelled_out) {
+   if (user_cancelled_out != NULL) {
+      *user_cancelled_out = false;
+   }
    if (session == NULL) {
       return false;
    }
@@ -714,6 +751,9 @@ bool job_manager_claim_reaped(const session_t *session) {
    for (int i = 0; i < s_pool_size; i++) {
       if (s_slots[i].session == session) {
          reaped = (s_slots[i].reaped_at != 0);
+         if (user_cancelled_out != NULL) {
+            *user_cancelled_out = s_slots[i].user_cancelled;
+         }
          /* Stop the reap clock: the worker has reached its terminal-write block,
           * so the slot must not be flagged (or nagged, or force-released) while
           * it finishes. Clearing started_at is what the scan's skip test reads. */
@@ -740,6 +780,7 @@ void job_manager_mark_dirty(void) {
 
 /* One queued completion notification (copied out so delivery holds no lock). */
 typedef struct {
+   int64_t job_id;
    int user_id;
    char deliver_to[JOB_DELIVER_TO_MAX];
    char text[512];
@@ -750,19 +791,177 @@ typedef struct {
    int count;
 } job_notify_batch_t;
 
+bool job_notify_user(int user_id, const char *text, int64_t conv_id, int running) {
+   if (user_id <= 0 || text == NULL || text[0] == '\0') {
+      return false;
+   }
+   if (webui_broadcast_job_notification(user_id, text, conv_id, running) > 0) {
+      return true;
+   }
+   /* Nobody was listening.  Queue it instead of dropping it: an owner with no
+    * tab open is the ordinary case, not an error, and it is guaranteed right
+    * after a restart because the daemon always finishes booting before a browser
+    * can reconnect.  missed_notif replays on the next authenticated connect and
+    * caps itself per user, so this is a durable hand-off rather than a retry —
+    * which is what lets the row be retired on the spot instead of sitting at the
+    * head of a queue every other user shares. */
+   if (missed_notif_insert(user_id, /*event_id=*/0, "reminder", "fired", "Background job", text,
+                           time(NULL), conv_id) == SUCCESS) {
+      return true;
+   }
+   OLOG_WARNING("job_manager: could not deliver OR queue the notice for job %lld",
+                (long long)conv_id);
+   return false;
+}
+
+/* Messaging-channel delivery bookkeeping.
+ *
+ * A notice is fired only once it has been DELIVERED, so an undelivered row keeps
+ * coming back from the scan.  That is exactly right for a channel that is
+ * momentarily down, and exactly wrong twice over without this table:
+ *   - the send is a blocking curl on a detached thread, so the next 1 Hz drain
+ *     would queue the same row again and the user would get duplicates;
+ *   - an unlinked or misconfigured channel fails every attempt, so with no
+ *     ceiling the row would retry every second until the staleness bound dropped
+ *     it a week later.
+ * `in_flight` answers the first, `attempts` the second. */
+#define JOB_NOTIFY_MAX_ATTEMPTS 5
+#define JOB_NOTIFY_TRACK_SLOTS (JOB_MONITOR_MAX_PER_TICK * 2)
+
+/* An entry not touched for this long has been retired by some other path (the
+ * staleness bound, a cancel, a resume, a deleted parent) and its slot is
+ * reclaimed — see the sweep in delivery_claim. */
+#define JOB_NOTIFY_TRACK_STALE_SEC 300
+
+typedef struct {
+   int64_t job_id;
+   time_t last_attempt_at;
+   int attempts;
+   bool in_flight;
+} job_delivery_t;
+
+static job_delivery_t s_delivery[JOB_NOTIFY_TRACK_SLOTS];
+static int s_delivery_n = 0;
+static pthread_mutex_t s_delivery_mutex = PTHREAD_MUTEX_INITIALIZER; /* leaf */
+
+static void delivery_table_reset(void) {
+   pthread_mutex_lock(&s_delivery_mutex);
+   s_delivery_n = 0;
+   pthread_mutex_unlock(&s_delivery_mutex);
+}
+
+/* Reserve @job_id for a delivery attempt.  false means the caller must NOT
+ * attempt it; @give_up separates the two reasons, because a spent ceiling has to
+ * be retired by this caller (nobody else will) while an in-flight row belongs to
+ * the thread that already claimed it. */
+static bool delivery_claim(int64_t job_id, time_t now, bool *give_up) {
+   *give_up = false;
+   bool ok = false;
+   pthread_mutex_lock(&s_delivery_mutex);
+   int idx = s_delivery_n; /* == s_delivery_n means "not tracked yet" */
+   for (int i = 0; i < s_delivery_n;) {
+      /* Sweep abandoned entries while looking.  An entry leaves cleanly on
+       * delivery or at the ceiling, but its row can also be retired out from
+       * under it — by the staleness bound, a cancel-retire, a resume, or a
+       * deleted parent — and nothing would ever remove it then.  Without the
+       * sweep the table fills with dead rows and the full-table branch below
+       * blocks messaging delivery outright. */
+      if (s_delivery[i].job_id != job_id && !s_delivery[i].in_flight &&
+          (now - s_delivery[i].last_attempt_at) > JOB_NOTIFY_TRACK_STALE_SEC) {
+         s_delivery[i] = s_delivery[s_delivery_n - 1];
+         s_delivery_n--;
+         continue; /* re-test the row swapped into i */
+      }
+      if (s_delivery[i].job_id == job_id) {
+         idx = i;
+         break;
+      }
+      i++;
+   }
+   if (idx == s_delivery_n) {
+      if (s_delivery_n >= JOB_NOTIFY_TRACK_SLOTS) {
+         /* Full: refuse, do NOT proceed untracked.  An untracked attempt has
+          * neither the in_flight guard nor the attempt ceiling, so it would
+          * re-send every tick and spawn a thread per second — exactly the two
+          * failures this table exists to prevent.  Refusing is safe because the
+          * row stays unfired and is retried once a slot frees. */
+         ok = false;
+      } else {
+         s_delivery[idx].job_id = job_id;
+         s_delivery[idx].attempts = 1;
+         s_delivery[idx].in_flight = true;
+         s_delivery[idx].last_attempt_at = now;
+         s_delivery_n++;
+         ok = true;
+      }
+   } else if (s_delivery[idx].in_flight) {
+      ok = false; /* someone else's to finish */
+   } else if (s_delivery[idx].attempts >= JOB_NOTIFY_MAX_ATTEMPTS) {
+      *give_up = true;
+   } else {
+      s_delivery[idx].attempts++;
+      s_delivery[idx].in_flight = true;
+      s_delivery[idx].last_attempt_at = now;
+      ok = true;
+   }
+   pthread_mutex_unlock(&s_delivery_mutex);
+   return ok;
+}
+
+/* Release a claim.  A row that is done with (delivered, or retired at the
+ * ceiling) leaves the table; a failed attempt keeps its count so the ceiling
+ * means something. */
+static void delivery_release(int64_t job_id, bool finished) {
+   pthread_mutex_lock(&s_delivery_mutex);
+   for (int i = 0; i < s_delivery_n; i++) {
+      if (s_delivery[i].job_id == job_id) {
+         if (finished) {
+            s_delivery[i] = s_delivery[s_delivery_n - 1];
+            s_delivery_n--;
+         } else {
+            s_delivery[i].in_flight = false;
+         }
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_delivery_mutex);
+}
+
 /* Detached delivery thread for MESSAGING-channel completions only:
  * scheduler_send_to_messaging_channel (via scheduler_emit_alert) does blocking
  * curl, so it must not run on the main-loop heartbeat (arch-HIGH-3).  Voice is
  * OFF — jobs notify via the browser toast / messaging channel, never the local
- * speaker.  Rows were marked fired on the tick, so no double-deliver. */
+ * speaker.
+ *
+ * The row is fired HERE, on success, rather than by the tick that queued it:
+ * marking it up front makes "we tried" indistinguishable from "they heard", and
+ * a channel that is down at that moment loses the completion permanently. */
 static void *job_notify_thread(void *arg) {
    job_notify_batch_t *b = (job_notify_batch_t *)arg;
    for (int i = 0; i < b->count; i++) {
-      scheduler_emit_alert(b->items[i].user_id, b->items[i].text, SCHED_EVENT_REMINDER,
-                           b->items[i].deliver_to, /*speak=*/false);
+      const job_notify_t *it = &b->items[i];
+      bool delivered = (scheduler_emit_alert(it->user_id, it->text, SCHED_EVENT_REMINDER,
+                                             it->deliver_to, /*speak=*/false) == SUCCESS);
+      if (delivered) {
+         conv_db_job_mark_fired(it->job_id);
+      } else {
+         OLOG_WARNING("job_manager: completion notice for job %lld to '%s' failed; will retry",
+                      (long long)it->job_id, it->deliver_to);
+      }
+      delivery_release(it->job_id, delivered);
    }
    free(b->items);
    free(b);
+   /* Unconditionally, and only once every claim above has been released.
+    *
+    * Success is progress and may unblock rows behind these — the scan is a
+    * GLOBAL `finished_at ASC LIMIT n`, so while these were in flight they
+    * occupied the whole window and every tick meanwhile made no progress and
+    * closed the gate.  Waking on failure alone therefore stranded the rest of
+    * the backlog on the ordinary success path.  Marking after the releases is
+    * what stops a tick landing in between, finding the rows still in_flight,
+    * and closing the gate on a row that has just become retryable. */
+   job_manager_mark_dirty();
    return NULL;
 }
 
@@ -773,6 +972,15 @@ void jobs_monitor_tick(time_t now) {
     * It is an in-memory pool walk that early-outs when nothing is running, so
     * the idle tick still does zero DB work. */
    job_manager_reap_overdue(now);
+
+   if (!s_initialized) {
+      /* [jobs] disabled — job_manager_init() never ran, so s_boot_time is 0 and
+       * no reinvoke processor is registered.  The heartbeat calls this
+       * unconditionally, so without the guard anything that set the dirty flag
+       * would drive the drain through an uninitialised subsystem and retire
+       * legacy job rows with the restart-safety rule permanently false. */
+      return;
+   }
 
    if (!atomic_load(&s_jobs_dirty)) {
       return; /* idle: zero per-tick DB work */
@@ -802,10 +1010,6 @@ void jobs_monitor_tick(time_t now) {
    if (n == 0) {
       return; /* genuinely nothing pending — leave the gate closed */
    }
-   /* Drained a full batch → likely more waiting; keep the gate hot. */
-   if (n >= max) {
-      atomic_store(&s_jobs_dirty, true);
-   }
 
    int running = job_manager_running_count();
 
@@ -822,36 +1026,59 @@ void jobs_monitor_tick(time_t now) {
 
    const time_t now_ts = time(NULL);
 
+   /* Did this pass move ANYTHING forward?  Only then is it worth re-arming the
+    * gate on a full batch: a batch of rows that all failed to deliver has
+    * changed nothing, and re-arming on it turns the dirty gate — whose entire
+    * purpose is that an idle daemon does zero DB work — into a 1 Hz scan that
+    * never stops. */
+   bool progressed = false;
+
    for (int i = 0; i < n; i++) {
-      if (s_reinvoke_processor != NULL && strcmp(rows[i].on_complete, "reinvoke_parent") == 0) {
-         reinvoke_rows[n_reinvoke++] = rows[i]; /* processor owns firing */
+      const bool is_reinvoke = strcmp(rows[i].on_complete, "reinvoke_parent") == 0;
+
+      /* Restart safety (§143): never auto-reinvoke a parent across a restart.
+       * A row whose terminal state predates this boot is DELIVERED as an
+       * ordinary notification instead — note *delivered*, not rewritten.  Boot
+       * used to rewrite on_complete to 'notify' in the DB, which is permanent:
+       * a job interrupted by the restart and then explicitly Resumed completed
+       * and only toasted, its results never returning to the parent that asked
+       * for them — and since the boot scan terminalizes every in-flight row
+       * first, that was the whole population Resume exists for.  Deciding here
+       * instead needs no extra state and no schema: Resume clears finished_at,
+       * so a resumed run naturally regains its disposition. */
+      const bool cross_restart = is_reinvoke && rows[i].finished_at < s_boot_time;
+
+      if (is_reinvoke && !cross_restart && s_reinvoke_processor != NULL) {
+         /* Handed off, NOT progressed: the processor owns firing these, and it
+          * may well defer every one of them.  Counting the hand-off as progress
+          * would re-arm the gate on a batch that moved nothing — a permanent
+          * 1 Hz scan whenever the head of the queue is a busy parent.  The
+          * processor re-arms on defer, and the worker re-arms on completion, so
+          * the wake-up still comes from whoever actually did something. */
+         reinvoke_rows[n_reinvoke++] = rows[i];
          continue;
       }
 
-      /* Mark fired now (on the tick) so the next tick can't re-drain the same
-       * row while delivery is in flight.  A rare delivery failure loses the
-       * notify, but the result stays retrievable via `job status`. */
-      conv_db_job_mark_fired(rows[i].id);
-
-      if (strcmp(rows[i].on_complete, "notify") != 0) {
-         continue; /* on_complete 'none' → mark fired, no delivery */
+      /* 'none' is the only disposition that owes the user nothing: retire the
+       * row silently.  Everything else owes a notice — including a reinvoke row
+       * demoted just above, and one in a build with no reinvoke processor linked
+       * at all, which can never be re-engaged. */
+      if (strcmp(rows[i].on_complete, "none") == 0) {
+         conv_db_job_mark_fired(rows[i].id);
+         progressed = true;
+         continue;
       }
-      /* Announce anything still OWED that finished recently — including across a
-       * restart, which is the case that matters most: the daemon goes down while
-       * a job is running, or a job finishes moments before shutdown, and the user
-       * has no other way to learn about it.
-       *
-       * This used to read `finished_at < s_boot_time` — "only completions from
-       * THIS run" — which suppressed precisely those.  Together with the boot
-       * scan marking rows fired, a job that ended around a restart was silenced
-       * twice over.
-       *
-       * `on_complete_fired` is the real "has this been announced?" answer; the
-       * bound below exists only for the narrow case the original rule was
-       * reaching for — a one-time flood of legacy rows whose flag predates the
-       * monitor.  Anything older than this is left to the jobs panel, which
-       * still shows it with its result. */
+
+      /* The staleness bound is the one UNCONDITIONAL fire.  Everything below
+       * fires on delivery only, so this is what stops an ancient row retrying
+       * forever.  Generous on purpose (a week): a daemon restart, an overnight
+       * shutdown or a machine off for days are all cases where the user
+       * genuinely has not heard yet.  Its real job is to stop a one-time flood
+       * from legacy rows whose fired flag predates the monitor; anything older
+       * is left to the jobs panel, which still shows it with its result. */
       if (rows[i].finished_at < now_ts - JOB_NOTIFY_MAX_STALENESS_SEC) {
+         conv_db_job_mark_fired(rows[i].id);
+         progressed = true;
          continue;
       }
 
@@ -864,17 +1091,50 @@ void jobs_monitor_tick(time_t now) {
       char text[512];
       snprintf(text, sizeof(text), "Background job \"%s\" %s.%s", rows[i].title, verb, tail);
 
-      if (rows[i].deliver_to[0] != '\0') {
-         if (msg_items != NULL) {
-            job_notify_t *it = &msg_items[msg_count++];
-            it->user_id = rows[i].user_id;
-            snprintf(it->deliver_to, sizeof(it->deliver_to), "%s", rows[i].deliver_to);
-            snprintf(it->text, sizeof(it->text), "%s", text);
+      if (rows[i].deliver_to[0] != '\0' && msg_items != NULL) {
+         /* Messaging channel: blocking curl, so it is queued to the delivery
+          * thread and fired there, on success only.  Claim AFTER the msg_items
+          * check — claiming first would burn an attempt on an allocation failure
+          * that never reached the wire. */
+         bool give_up = false;
+         if (!delivery_claim(rows[i].id, now_ts, &give_up)) {
+            if (give_up) {
+               /* Out of attempts.  Retire the row so it stops holding the head
+                * of a queue every user shares, but hand the notice to the
+                * durable path first — giving up on a CHANNEL is not a reason to
+                * give up on telling the user. */
+               OLOG_WARNING("job_manager: giving up on job %lld notice to '%s' after %d attempts",
+                            (long long)rows[i].id, rows[i].deliver_to, JOB_NOTIFY_MAX_ATTEMPTS);
+               job_notify_user(rows[i].user_id, text, rows[i].id, running);
+               conv_db_job_mark_fired(rows[i].id);
+               delivery_release(rows[i].id, /*finished=*/true);
+               progressed = true;
+            }
+            continue; /* otherwise a thread already owns it, or the table is full */
          }
+         job_notify_t *it = &msg_items[msg_count++];
+         it->job_id = rows[i].id;
+         it->user_id = rows[i].user_id;
+         snprintf(it->deliver_to, sizeof(it->deliver_to), "%s", rows[i].deliver_to);
+         snprintf(it->text, sizeof(it->text), "%s", text);
+         progressed = true;
       } else {
-         /* Silent in-browser toast (weak symbol → no-op without WebUI). */
-         webui_broadcast_job_notification(rows[i].user_id, text, rows[i].id, running);
+         /* Browser toast, or a messaging row we could not queue.  job_notify_user
+          * either reaches a live browser or queues the text as a missed
+          * notification, so the answer is durable and the row can be retired on
+          * the spot.  That last part matters more than it looks: the scan is
+          * GLOBAL and only a few rows deep, so a row left waiting for its owner
+          * to open a tab would sit at the head of it — blocking every other
+          * user's completions, for up to the staleness bound. */
+         job_notify_user(rows[i].user_id, text, rows[i].id, running);
+         conv_db_job_mark_fired(rows[i].id);
+         progressed = true;
       }
+   }
+
+   /* Drained a full batch AND moved something → likely more waiting behind it. */
+   if (n >= max && progressed) {
+      atomic_store(&s_jobs_dirty, true);
    }
 
    /* Hand reinvoke_parent completions to the reinvoke processor (bounded,
@@ -889,25 +1149,34 @@ void jobs_monitor_tick(time_t now) {
       return;
    }
 
+   /* Every queued item holds a delivery claim that only the delivery thread
+    * releases.  If the batch never reaches that thread the claims must be handed
+    * back HERE, or those rows stay in_flight forever — unfired, so still owed,
+    * but permanently ineligible to be re-queued.  That is silent loss, which is
+    * the failure mode this whole change exists to remove. */
    job_notify_batch_t *batch = malloc(sizeof(*batch));
-   if (batch == NULL) {
-      free(msg_items);
-      return;
-   }
-   batch->items = msg_items;
-   batch->count = msg_count;
-
    pthread_t thread;
    pthread_attr_t attr;
    pthread_attr_init(&attr);
    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-   if (pthread_create(&thread, &attr, job_notify_thread, batch) != 0) {
-      OLOG_WARNING("jobs_monitor_tick: failed to spawn delivery thread; %d notice(s) dropped",
-                   msg_count);
-      free(batch->items);
-      free(batch);
+   bool handed_off = false;
+   if (batch != NULL) {
+      batch->items = msg_items;
+      batch->count = msg_count;
+      handed_off = (pthread_create(&thread, &attr, job_notify_thread, batch) == 0);
    }
    pthread_attr_destroy(&attr);
+
+   if (!handed_off) {
+      OLOG_WARNING("jobs_monitor_tick: could not spawn delivery thread; %d notice(s) requeued",
+                   msg_count);
+      for (int i = 0; i < msg_count; i++) {
+         delivery_release(msg_items[i].job_id, /*finished=*/false);
+      }
+      free(msg_items);
+      free(batch);
+      atomic_store(&s_jobs_dirty, true); /* still owed — try again next tick */
+   }
 }
 
 int job_manager_capacity(int user_id, job_provider_class_t provider) {

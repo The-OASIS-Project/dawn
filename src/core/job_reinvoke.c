@@ -76,6 +76,74 @@ static int64_t s_inflight[JOB_REINVOKE_MAX_INFLIGHT];
 static int s_inflight_n = 0;
 static pthread_mutex_t s_inflight_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/* How long a parent may keep deferring its re-engagement before its finished
+ * jobs are delivered as plain notifications instead.
+ *
+ * Deferral itself is correct and common — a parent mid-turn should wait.  What
+ * is not survivable is deferring FOREVER: conv_db_job_list_pending_followups is
+ * global (no user filter), ordered finished_at ASC and limited to a few rows, so
+ * a parent whose turn-in-flight flag never clears pins the oldest rows at the
+ * head of that queue for EVERY user on the daemon, and keeps the dirty-gated
+ * monitor scanning every second.  Ten minutes is far longer than any real turn
+ * and short enough that a wedge degrades rather than silences. */
+#define JOB_REINVOKE_MAX_DEFER_SEC 600
+#define JOB_REINVOKE_DEFER_SLOTS 16
+
+/* A parent that is genuinely still deferring is re-noted on every drain, so
+ * anything not seen for this long has moved on (its rows were fired elsewhere,
+ * or it recovered) and its slot is reclaimed.  Without the sweep the table fills
+ * with dead parents, and a full table degrades on sight — which would turn the
+ * ordinary case, a parent briefly mid-turn, into an instant demotion. */
+#define JOB_REINVOKE_DEFER_STALE_SEC 60
+
+typedef struct {
+   int64_t parent_conv;
+   time_t first_deferred_at;
+   time_t last_seen;
+} reinvoke_defer_t;
+
+static reinvoke_defer_t s_defer[JOB_REINVOKE_DEFER_SLOTS];
+static int s_defer_n = 0; /* monitor thread only — no lock needed */
+
+/* Record a deferral for @parent_conv; true when it has been deferring longer
+ * than the bound and its rows should be degraded to notifications.  A full table
+ * answers true, which fails toward delivering rather than toward silence. */
+static bool defer_note(int64_t parent_conv, time_t now) {
+   for (int i = 0; i < s_defer_n;) { /* sweep the dead before looking for a slot */
+      if (s_defer[i].parent_conv != parent_conv &&
+          (now - s_defer[i].last_seen) > JOB_REINVOKE_DEFER_STALE_SEC) {
+         s_defer[i] = s_defer[s_defer_n - 1];
+         s_defer_n--;
+         continue; /* re-test the row swapped into i */
+      }
+      if (s_defer[i].parent_conv == parent_conv) {
+         s_defer[i].last_seen = now;
+         return (now - s_defer[i].first_deferred_at) > JOB_REINVOKE_MAX_DEFER_SEC;
+      }
+      i++;
+   }
+   if (s_defer_n >= JOB_REINVOKE_DEFER_SLOTS) {
+      return true;
+   }
+   s_defer[s_defer_n].parent_conv = parent_conv;
+   s_defer[s_defer_n].first_deferred_at = now;
+   s_defer[s_defer_n].last_seen = now;
+   s_defer_n++;
+   return false;
+}
+
+/* Forget a parent's deferral history — it got its worker, so the clock restarts
+ * if it ever backs up again. */
+static void defer_forget(int64_t parent_conv) {
+   for (int i = 0; i < s_defer_n; i++) {
+      if (s_defer[i].parent_conv == parent_conv) {
+         s_defer[i] = s_defer[s_defer_n - 1];
+         s_defer_n--;
+         return;
+      }
+   }
+}
+
 /* Work handed to the re-engagement worker thread (reinvoke_thread).  No job list:
  * the coalesced set is RE-QUERIED at dispatch time
  * (conv_db_job_pending_reinvoke_for_parent) so a re-engagement that waited behind
@@ -179,7 +247,12 @@ static bool sb_append(char **buf, size_t *len, size_t *cap, const char *src, siz
 static void reinvoke_notify_fallback(int user_id, const char *title, int64_t job_id) {
    char text[CONV_TITLE_MAX + 96];
    snprintf(text, sizeof(text), "Background job \"%s\" finished — ask me for the result.", title);
-   webui_broadcast_job_notification(user_id, text, job_id, job_manager_running_count());
+   /* job_notify_user, NOT a bare broadcast: every caller below marks the row
+    * fired, and each of these paths is reached precisely when a re-engagement is
+    * impossible — which correlates with the browser being gone, so a bare
+    * broadcast would fire the row into an empty room.  The funnel queues it
+    * durably when nobody is listening. */
+   job_notify_user(user_id, text, job_id, job_manager_running_count());
 }
 
 /* Build the coalesced user-role automated-event envelope for a group of jobs.
@@ -259,8 +332,21 @@ static char *build_envelope(int64_t parent_conv, int user_id, int64_t *fired_ids
        * actionable one (design §5: the timeout follow-up must be honest). */
       const char *empty_reason = job_record_timed_out(&rows[i])
                                      ? "(the job timed out before producing a result)"
+                                 : (strcmp(rows[i].job_status, "interrupted") == 0)
+                                     ? "(the job was interrupted before producing a result)"
+                                 : (strcmp(rows[i].job_status, "failed") == 0)
+                                     ? "(the job failed before producing a result)"
                                      : "(the job produced no output)";
-      const char *body = (result && result[0] != '\0') ? result : empty_reason;
+      /* Only a 'done' job HAS a result.  conv_db_job_last_assistant_text returns
+       * the last assistant row whatever it is, and for a job that never reached a
+       * final answer that row is the tool-call preamble — "I'll dive into X, let
+       * me search…".  Handing that over as the result is worse than saying
+       * nothing: it reads like an answer, so the model either reports it as one or
+       * silently redoes the whole task inline.  Live-verified on conv 1041, whose
+       * preamble was presented as research and prompted the parent to run the
+       * searches over again in its own turn — correct output, invisible cost. */
+      const bool has_result = (strcmp(rows[i].job_status, "done") == 0);
+      const char *body = (has_result && result && result[0] != '\0') ? result : empty_reason;
       size_t body_len = strlen(body);
       bool truncated = false;
       if (body_len > JOB_REINVOKE_RESULT_CAP) {
@@ -606,6 +692,7 @@ void job_reinvoke_process_pending(const job_record_t *rows, int n) {
       return;
    }
    int cap = g_config.jobs.max_concurrent_reinvokes;
+   const time_t now = time(NULL);
    bool deferred = false;
 
    if (n > JOB_MONITOR_MAX_PER_TICK) {
@@ -657,21 +744,50 @@ void job_reinvoke_process_pending(const job_record_t *rows, int n) {
        * early skip that avoids spawning a worker that would just queue behind the
        * active turn.  No longer the SAFETY mechanism (the turn queue serializes),
        * so a race-missed just-dequeued turn is harmless.  Rows stay unfired →
-       * retried when the turn ends. */
-      if (session_manager_conv_has_turn_in_flight(parent)) {
-         deferred = true;
-         continue;
+       * retried when the turn ends.  Same for the concurrency cap below. */
+      bool defer_now = session_manager_conv_has_turn_in_flight(parent);
+      claim_result_t claim = CLAIM_OK;
+      if (!defer_now) {
+         claim = inflight_try_claim(parent, cap);
+         defer_now = (claim != CLAIM_OK); /* at cap, or a worker already owns it */
       }
 
-      claim_result_t claim = inflight_try_claim(parent, cap);
-      if (claim != CLAIM_OK) {
-         deferred = true; /* at cap or already running → retry a later tick */
+      if (defer_now) {
+         /* CLAIM_ALREADY_INFLIGHT is a worker actively re-engaging this parent —
+          * progress, not a wedge — and its rows stay unfired for the whole turn,
+          * so they re-appear on EVERY tick meanwhile.  Advancing the clock on
+          * those would trip the bound mid-turn and fire "job finished — ask me
+          * for the result" while the worker is delivering those very results:
+          * the user gets both. */
+         if (claim == CLAIM_ALREADY_INFLIGHT) {
+            deferred = true;
+            continue;
+         }
+         if (!defer_note(parent, now)) {
+            deferred = true;
+            continue;
+         }
+         /* Deferring past the bound: this parent is not coming back on its own,
+          * and its rows are holding the head of a GLOBAL queue.  Deliver them as
+          * plain notifications so the user still learns the work finished, and
+          * let the queue move.  The result stays retrievable either way. */
+         OLOG_WARNING("job_reinvoke: parent %lld deferred > %ds — notifying instead of re-engaging",
+                      (long long)parent, JOB_REINVOKE_MAX_DEFER_SEC);
+         for (int j = i; j < n; j++) {
+            if (rows[j].parent_id == parent && rows[j].user_id == uid) {
+               conv_db_job_mark_fired(rows[j].id);
+               reinvoke_notify_fallback(uid, rows[j].title, rows[j].id);
+            }
+         }
          continue;
       }
 
       if (!reinvoke_spawn(parent, uid)) {
          inflight_release(parent);
          deferred = true;
+         defer_note(parent, now);
+      } else {
+         defer_forget(parent); /* it got its worker */
       }
    }
 

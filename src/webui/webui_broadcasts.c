@@ -401,8 +401,15 @@ int scheduler_route_tts_to_user(int user_id,
  * queue).  NOT for the scheduler notification / silent-observation /
  * context-injection paths — those carry per-function variation (missed-queue,
  * satellite filter, WebUI-session gate) that doesn't belong here.
+ *
+ * @p browsers_only skips satellite connections.  It exists because the return
+ * value is now a DECISION for some callers, not just a log line: the job monitor
+ * records a completion as delivered when this returns > 0, and a satellite
+ * cannot render a browser toast — so counting one would fire the row and show
+ * the user nothing.  Callers that only log the count pass false and keep the
+ * historical fan-out.
  * ============================================================================= */
-static int broadcast_json_to_user(int user_id, json_object *root) {
+static int broadcast_json_to_user_ex(int user_id, json_object *root, bool browsers_only) {
    if (!root)
       return 0;
 
@@ -419,6 +426,8 @@ static int broadcast_json_to_user(int user_id, json_object *root) {
       if (!conn || !conn->session || !conn->authenticated)
          continue;
       if (user_id > 0 && conn->auth_user_id != user_id)
+         continue;
+      if (browsers_only && conn->is_satellite)
          continue;
 
       char *json_copy = strdup(json_cached);
@@ -453,7 +462,7 @@ void webui_broadcast_conversation_renamed(int user_id, int64_t conv_id, const ch
    json_object_object_add(payload, "title", json_object_new_string(title));
    json_object_object_add(root, "payload", payload);
 
-   int sent = broadcast_json_to_user(user_id, root);
+   int sent = broadcast_json_to_user_ex(user_id, root, false);
    if (sent > 0) {
       OLOG_INFO("WebUI: Broadcast conversation rename to %d client(s): %s", sent, title);
    }
@@ -499,7 +508,7 @@ void webui_broadcast_conversation_event(int user_id,
     * drops the tree itself before the registry walk (see its contract above).
     * Every sibling broadcaster in this file relies on that; adding a second put
     * is a double free. */
-   broadcast_json_to_user(user_id, root);
+   broadcast_json_to_user_ex(user_id, root, false);
 }
 
 /* Strong override of the conv_event (Layer 2) weak seam: deliver a persisted
@@ -529,7 +538,7 @@ void webui_broadcast_message_appended(int user_id,
    json_object_object_add(root, "payload", p);
 
    /* broadcast_json_to_user TAKES OWNERSHIP — no json_object_put here. */
-   broadcast_json_to_user(user_id, root);
+   broadcast_json_to_user_ex(user_id, root, false);
 }
 
 /* Strong override of the job_reinvoke (Layer 2) weak seam: when a reinvoke_parent
@@ -550,7 +559,7 @@ void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id
    json_object_object_add(payload, "conversation_id", json_object_new_int64(conv_id));
    json_object_object_add(root, "payload", payload);
 
-   int sent = broadcast_json_to_user(user_id, root);
+   int sent = broadcast_json_to_user_ex(user_id, root, false);
    if (sent > 0) {
       OLOG_INFO("WebUI: Broadcast conversation_messages_appended (conv=%lld) to %d client(s)",
                 (long long)conv_id, sent);
@@ -934,7 +943,7 @@ void webui_broadcast_memory_notice(int user_id, const char *level, const char *m
    json_object_object_add(payload, "message", json_object_new_string(message));
    json_object_object_add(root, "payload", payload);
 
-   int sent = broadcast_json_to_user(user_id, root);
+   int sent = broadcast_json_to_user_ex(user_id, root, false);
    if (sent > 0) {
       OLOG_INFO("WebUI: Broadcast memory notice (%s) to %d client(s)", level, sent);
    }
@@ -961,7 +970,7 @@ void webui_broadcast_attention_alert(int user_id, const char *summary, const cha
    json_object_object_add(payload, "level", json_object_new_string(level));
    json_object_object_add(root, "payload", payload);
 
-   int sent = broadcast_json_to_user(user_id, root);
+   int sent = broadcast_json_to_user_ex(user_id, root, false);
    if (sent > 0) {
       OLOG_INFO("WebUI: attention alert (%s) to %d client(s)", level, sent);
    }
@@ -969,12 +978,12 @@ void webui_broadcast_attention_alert(int user_id, const char *summary, const cha
 
 /* Strong override of the weak job-notification symbol in job_manager.c: a
  * silent job-completion toast to the owner's browser sessions (no voice). */
-void webui_broadcast_job_notification(int user_id,
-                                      const char *text,
-                                      int64_t conv_id,
-                                      int running_count) {
+int webui_broadcast_job_notification(int user_id,
+                                     const char *text,
+                                     int64_t conv_id,
+                                     int running_count) {
    if (user_id <= 0 || !text) {
-      return;
+      return 0;
    }
    char text_safe[512];
    snprintf(text_safe, sizeof(text_safe), "%s", text);
@@ -988,10 +997,14 @@ void webui_broadcast_job_notification(int user_id,
    json_object_object_add(payload, "running", json_object_new_int(running_count));
    json_object_object_add(root, "payload", payload);
 
-   int sent = broadcast_json_to_user(user_id, root);
+   /* Browsers only, and the count is load-bearing: the monitor records the
+    * completion as delivered when this returns > 0, so counting a satellite —
+    * which has no toast surface — would fire the row and show the user nothing. */
+   int sent = broadcast_json_to_user_ex(user_id, root, /*browsers_only=*/true);
    if (sent > 0) {
-      OLOG_INFO("WebUI: job notification to %d client(s)", sent);
+      OLOG_INFO("WebUI: job notification to %d browser client(s)", sent);
    }
+   return sent;
 }
 
 /* The job lifecycle frames (job_update / jobs_snapshot / list_jobs_response)
@@ -1064,7 +1077,7 @@ void webui_broadcast_memory_proposals_changed(int user_id) {
    json_object_object_add(payload, "count", json_object_new_int(pending));
    json_object_object_add(root, "payload", payload);
 
-   int sent = broadcast_json_to_user(user_id, root);
+   int sent = broadcast_json_to_user_ex(user_id, root, false);
    if (sent > 0) {
       OLOG_INFO("WebUI: Broadcast memory_proposals_changed (count=%d) to %d client(s)", pending,
                 sent);
@@ -1082,7 +1095,7 @@ void scheduler_broadcast_events_changed(int user_id) {
 
    /* user_id <= 0 ("system event", e.g. the startup missed-recovery sweep) fans
     * out to every authenticated session — handled by the helper's convention. */
-   int sent = broadcast_json_to_user(user_id, root);
+   int sent = broadcast_json_to_user_ex(user_id, root, false);
    if (sent > 0) {
       OLOG_INFO("WebUI: Broadcast scheduler_events_changed (user=%d) to %d client(s)", user_id,
                 sent);
@@ -1105,7 +1118,7 @@ void code_project_broadcast_status_changed(int64_t project_id) {
    json_object_object_add(root, "payload", payload);
 
    /* Ping every authenticated browser (user_id <= 0 = fan out to all). */
-   broadcast_json_to_user(0, root);
+   broadcast_json_to_user_ex(0, root, false);
 }
 
 /* Strong override of the weak code_project_broadcast_import_failed stub. A
@@ -1125,6 +1138,6 @@ void code_project_broadcast_import_failed(int64_t user_id, const char *name, con
    json_object_object_add(root, "payload", payload);
 
    /* Toast only the requesting user. */
-   broadcast_json_to_user((int)user_id, root);
+   broadcast_json_to_user_ex((int)user_id, root, false);
 }
 #endif /* DAWN_ENABLE_CODE_PROJECTS */

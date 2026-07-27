@@ -173,7 +173,8 @@ static void job_worker_run(job_work_t *work) {
     *   - claim_reaped() also stops the reap clock, so nothing can flag this job
     *     while the terminal writes below are in flight. */
    bool cancelled = atomic_load(&s->cancel_requested);
-   bool reaped = job_manager_claim_reaped(s);
+   bool user_cancelled = false;
+   bool reaped = job_manager_claim_reaped(s, &user_cancelled);
    bool have_answer = (response != NULL && response[0] != '\0');
 
    /* Persist a produced answer no matter how the turn ended. A job that finished
@@ -199,18 +200,35 @@ static void job_worker_run(job_work_t *work) {
                                          response);
    }
 
-   if (cancelled && !reaped && job_manager_is_shutting_down()) {
-      /* The daemon cancelled this, not the user.  Recording it as 'cancelled'
-       * would be wrong twice over: it suppresses the completion notice on the
-       * grounds that the user asked for the stop, and it lands the job in a
-       * state only a human may resume.  'interrupted' is what actually happened
-       * — the same disposition the boot scan assigns to a worker that never got
-       * to write at all — and leaving it UNFIRED is what lets the user be told. */
+   /* The daemon pulled the rug, as opposed to a human asking for the stop.
+    *
+    * Deliberately does NOT require cancel_requested.  On SIGINT the thing that
+    * actually stops a job is llm_request_interrupt() — a GLOBAL flag the tool
+    * loop polls (llm_tool_loop.c, step 11) — not this session's cancel flag,
+    * which job_manager_shutdown() sets up to a second later.  Keying on
+    * cancel_requested made this branch unreachable for every real Ctrl+C: the
+    * worker returned no answer, saw no cancel, and filed itself as "failed: no
+    * response from model" (live-verified on conv 1038).  Shutting down plus no
+    * answer IS an interruption, however the stop arrived.
+    *
+    * The !user_cancelled term stays: a Cancel that lands as the daemon goes down
+    * would otherwise be filed 'interrupted', which is tool-resumable, so the LLM
+    * could quietly restart work the user just stopped. */
+   const bool shutdown_stop = !reaped && !user_cancelled && job_manager_is_shutting_down();
+
+   if (shutdown_stop && !have_answer) {
+      /* Recording this as 'cancelled' would be wrong twice over: it suppresses
+       * the completion notice on the grounds that the user asked for the stop,
+       * and it lands the job in a state only a human may resume.  'interrupted'
+       * is what actually happened — the same disposition the boot scan assigns
+       * to a worker that never got to write at all — and leaving it UNFIRED is
+       * what lets the user be told.  A shutdown that arrives AFTER the answer
+       * falls through to 'done' below: the work is finished either way, and
+       * filing it as interrupted invites a resume that re-runs it. */
       job_manager_set_terminal(work->conv_id, work->user_id, "interrupted", "daemon shutting down",
-                               now, have_answer ? final_msg_id : 0);
-      OLOG_INFO("job_worker: job conv %lld interrupted by shutdown%s", (long long)work->conv_id,
-                have_answer ? " (answer produced first; kept)" : "");
-   } else if (cancelled && !reaped) {
+                               now, 0);
+      OLOG_INFO("job_worker: job conv %lld interrupted by shutdown", (long long)work->conv_id);
+   } else if (cancelled && !reaped && !shutdown_stop) {
       /* User cancel wins even if an answer landed: they asked it to stop, so no
        * completion notification. The answer above is still retrievable. */
       job_manager_set_terminal(work->conv_id, work->user_id, "cancelled", NULL, now, 0);

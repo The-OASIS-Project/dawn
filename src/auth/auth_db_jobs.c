@@ -749,49 +749,6 @@ int conv_db_job_bump_reinvoke(int64_t conv_id, int *new_count_out) {
    return rc;
 }
 
-int conv_db_job_downgrade_boot_reinvokes(int *count_out) {
-   if (count_out) {
-      *count_out = 0;
-   }
-   AUTH_DB_LOCK_OR_FAIL();
-   sqlite3_stmt *st = NULL;
-   /* DOWNGRADE to 'notify' — do NOT set on_complete_fired.
-    *
-    * This used to mark the row fired, which did suppress the cross-restart
-    * re-engagement it was written for, but `on_complete_fired` answers two
-    * different questions with one bit: "has the parent been re-engaged?" and
-    * "has the user been told?".  Firing the row answered both, so a job that
-    * finished moments before a restart was silently swallowed — no reinvoke
-    * (correct) and no notification either (not intended, and the user has no
-    * other way to learn it finished).
-    *
-    * Changing the DISPOSITION instead separates them: the reinvoke can never
-    * happen because the row is no longer a reinvoke_parent row, while
-    * on_complete_fired stays 0 so the monitor still owes — and delivers — a
-    * completion notice through the ordinary notify path.  No schema change, and
-    * the row still drains from the finished_at-ordered queue rather than
-    * head-of-line-blocking it. */
-   if (sqlite3_prepare_v2(s_db.db,
-                          "UPDATE conversations SET on_complete='notify' "
-                          "WHERE job_status IN ('done','failed','interrupted') "
-                          "AND on_complete_fired=0 AND on_complete='reinvoke_parent'",
-                          -1, &st, NULL) != SQLITE_OK) {
-      AUTH_DB_UNLOCK();
-      return AUTH_DB_FAILURE;
-   }
-   int rc = sqlite3_step(st);
-   sqlite3_finalize(st);
-   if (rc != SQLITE_DONE) {
-      AUTH_DB_UNLOCK();
-      return AUTH_DB_FAILURE;
-   }
-   if (count_out) {
-      *count_out = sqlite3_changes(s_db.db);
-   }
-   AUTH_DB_UNLOCK();
-   return AUTH_DB_SUCCESS;
-}
-
 /* =============================================================================
  * The lifetime split: ACTIVE is a bounded set, HISTORY is an unbounded feed
  *

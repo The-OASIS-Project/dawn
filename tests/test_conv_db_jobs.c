@@ -532,40 +532,42 @@ static void test_bump_reinvoke(void) {
    TEST_ASSERT_EQUAL_INT(2, r.reinvoke_count);
 }
 
-/* Across a restart the parent must never be auto-re-engaged — but the user must
- * still be TOLD the job finished.  Those are two different things that used to
- * share one flag: marking the row fired stopped the reinvoke and silently
- * stopped the notification with it, so a job finishing seconds before a restart
- * vanished.  The downgrade separates them, and this test pins BOTH halves. */
-static void test_boot_downgrade_keeps_the_notification(void) {
-   int64_t rp = 0, nf = 0;
+/* Across a restart the parent must never be auto-re-engaged, the user must still
+ * be TOLD the job finished, and an explicit Resume must get the re-engagement
+ * BACK.  Three things that used to be answered by rewriting the row: boot set
+ * on_complete to 'notify', which is permanent, so a job interrupted by the
+ * restart and then Resumed completed and only toasted — its results never
+ * returned to the parent that asked for them, which is the whole population
+ * Resume exists for.  The demotion is a per-tick decision now (job_manager.c,
+ * keyed on finished_at vs boot time); this pins the two DB properties that rule
+ * stands on. */
+static void test_restart_safety_leaves_the_disposition_alone(void) {
+   int64_t rp = 0;
    conv_db_create_job(alice_id, "reinvoke", 0, "detached", "reinvoke_parent", NULL, 1, "goal text",
                       &rp);
-   conv_db_create_job(alice_id, "notify", 0, "detached", "notify", NULL, 1, "goal text", &nf);
-   conv_db_job_set_terminal(rp, "done", NULL, 100);
-   conv_db_job_set_terminal(nf, "done", NULL, 100);
+   conv_db_job_set_terminal(rp, "interrupted", "daemon restarted", 100);
 
-   int n_down = -1;
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_downgrade_boot_reinvokes(&n_down));
-   TEST_ASSERT_EQUAL_INT(1, n_down); /* only the reinvoke_parent row */
-
-   /* Half one: it can never re-engage the parent, because it is no longer a
-    * reinvoke row.  And it is NOT fired — that is what leaves delivery owed. */
    job_record_t rec;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(rp, alice_id, &rec));
-   TEST_ASSERT_EQUAL_STRING("notify", rec.on_complete);
-   TEST_ASSERT_FALSE(rec.on_complete_fired);
+   TEST_ASSERT_EQUAL_STRING("reinvoke_parent", rec.on_complete); /* NOT rewritten */
+   TEST_ASSERT_FALSE(rec.on_complete_fired);                     /* delivery still owed */
+   TEST_ASSERT_EQUAL_INT(100, (int)rec.finished_at);             /* the monitor's input */
 
-   /* Half two: BOTH rows are still pending follow-ups, so the user hears about
-    * the downgraded job too.  Under the old fire-the-row behaviour this was 1. */
+   /* It is a pending follow-up either way, so the user hears about it. */
    job_record_t rows[8];
    int n = 0;
    conv_db_job_list_pending_followups(8, rows, &n);
-   TEST_ASSERT_EQUAL_INT(2, n);
+   TEST_ASSERT_EQUAL_INT(1, n);
 
-   /* Idempotent: a second boot finds nothing left to downgrade. */
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_downgrade_boot_reinvokes(&n_down));
-   TEST_ASSERT_EQUAL_INT(0, n_down);
+   /* Resume clears finished_at, and that alone restores the disposition: the
+    * monitor demotes on `finished_at < boot`, so a re-run stamped after this
+    * boot is a reinvoke again — no second column, no boot bookkeeping. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_job_reset_for_resume(rp, alice_id, /*allow_cancelled=*/false));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(rp, alice_id, &rec));
+   TEST_ASSERT_EQUAL_STRING("reinvoke_parent", rec.on_complete);
+   TEST_ASSERT_EQUAL_INT(0, (int)rec.finished_at);
+   TEST_ASSERT_FALSE(rec.on_complete_fired);
 }
 
 /* A job carries out a private conversation's work, so it must not be a public
@@ -641,7 +643,7 @@ int main(void) {
    RUN_TEST(test_get_status_probe);
    RUN_TEST(test_mark_fired_many);
    RUN_TEST(test_bump_reinvoke);
-   RUN_TEST(test_boot_downgrade_keeps_the_notification);
+   RUN_TEST(test_restart_safety_leaves_the_disposition_alone);
    RUN_TEST(test_job_inherits_parent_privacy);
    RUN_TEST(test_last_assistant_text);
    return UNITY_END();
