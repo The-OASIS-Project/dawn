@@ -844,8 +844,49 @@ static void test_ancient_row_is_retired_without_delivery(void) {
    TEST_ASSERT_TRUE(stub_was_fired(960));
 }
 
+/* Test-only shims over job_manager.c's static delivery-claim bookkeeping. */
+bool job_manager_delivery_claim_for_test(int64_t job_id, time_t now, bool *give_up);
+void job_manager_delivery_release_for_test(int64_t job_id, bool finished);
+void job_manager_delivery_reset_for_test(void);
+int job_manager_delivery_slots_for_test(void);
+int job_manager_delivery_stale_sec_for_test(void);
+
+/* A full delivery table swept clean just before a not-tracked claim used to read
+ * (or, when full, write) one past the live region: the "not found" sentinel was
+ * seeded from s_delivery_n BEFORE the sweep decremented it.  Regression — the
+ * claim must cleanly insert, returning a real verdict and leaving a coherent
+ * table, not a garbage verdict or corrupt state. */
+static void test_delivery_claim_after_full_table_sweep(void) {
+   job_manager_delivery_reset_for_test();
+   const int slots = job_manager_delivery_slots_for_test();
+   const time_t t0 = 1000000; /* fixed clock */
+   bool give_up = false;
+
+   /* Fill the table: each id claimed then released-not-finished stays as a
+    * not-in-flight entry with last_attempt_at = t0. */
+   for (int i = 0; i < slots; i++) {
+      TEST_ASSERT_TRUE(job_manager_delivery_claim_for_test(5000 + i, t0, &give_up));
+      TEST_ASSERT_FALSE(give_up);
+      job_manager_delivery_release_for_test(5000 + i, /*finished=*/false);
+   }
+
+   /* Full table; a claim for an untracked id past the staleness bound sweeps
+    * every entry, then must INSERT the new one (not fall through to a dead
+    * slot's verdict, and not write past the array end). */
+   const time_t later = t0 + job_manager_delivery_stale_sec_for_test() + 1;
+   give_up = true;
+   TEST_ASSERT_TRUE(job_manager_delivery_claim_for_test(9000, later, &give_up));
+   TEST_ASSERT_FALSE(give_up);
+
+   /* Table is coherent: the just-inserted id is in-flight (refused), and a
+    * second fresh id inserts — proving the sweep really reclaimed the slots. */
+   TEST_ASSERT_FALSE(job_manager_delivery_claim_for_test(9000, later, &give_up));
+   TEST_ASSERT_TRUE(job_manager_delivery_claim_for_test(9001, later, &give_up));
+}
+
 int main(void) {
    UNITY_BEGIN();
+   RUN_TEST(test_delivery_claim_after_full_table_sweep);
    RUN_TEST(test_begin_and_count);
    RUN_TEST(test_global_cap);
    RUN_TEST(test_provider_cap);

@@ -858,7 +858,11 @@ static bool delivery_claim(int64_t job_id, time_t now, bool *give_up) {
    *give_up = false;
    bool ok = false;
    pthread_mutex_lock(&s_delivery_mutex);
-   int idx = s_delivery_n; /* == s_delivery_n means "not tracked yet" */
+   /* -1 = not tracked yet.  Must NOT be seeded from s_delivery_n, because the
+    * sweep below decrements s_delivery_n as it removes dead rows — a stale index
+    * captured up front would then miss the "not found" test and read (or, when
+    * the table was full, write one past) a dead slot. */
+   int idx = -1;
    for (int i = 0; i < s_delivery_n;) {
       /* Sweep abandoned entries while looking.  An entry leaves cleanly on
        * delivery or at the ceiling, but its row can also be retired out from
@@ -878,7 +882,7 @@ static bool delivery_claim(int64_t job_id, time_t now, bool *give_up) {
       }
       i++;
    }
-   if (idx == s_delivery_n) {
+   if (idx < 0) {
       if (s_delivery_n >= JOB_NOTIFY_TRACK_SLOTS) {
          /* Full: refuse, do NOT proceed untracked.  An untracked attempt has
           * neither the in_flight guard nor the attempt ceiling, so it would
@@ -887,10 +891,10 @@ static bool delivery_claim(int64_t job_id, time_t now, bool *give_up) {
           * row stays unfired and is retried once a slot frees. */
          ok = false;
       } else {
-         s_delivery[idx].job_id = job_id;
-         s_delivery[idx].attempts = 1;
-         s_delivery[idx].in_flight = true;
-         s_delivery[idx].last_attempt_at = now;
+         s_delivery[s_delivery_n].job_id = job_id;
+         s_delivery[s_delivery_n].attempts = 1;
+         s_delivery[s_delivery_n].in_flight = true;
+         s_delivery[s_delivery_n].last_attempt_at = now;
          s_delivery_n++;
          ok = true;
       }
@@ -925,6 +929,26 @@ static void delivery_release(int64_t job_id, bool finished) {
       }
    }
    pthread_mutex_unlock(&s_delivery_mutex);
+}
+
+/* Test-only shims over the delivery bookkeeping.  Kept out of the public header
+ * (the unit test forward-declares them); the statics above stay static.  Exists
+ * so the sweep-then-claim OOB corner — a full table swept just before a
+ * not-tracked claim — can be pinned without driving the whole notify path. */
+bool job_manager_delivery_claim_for_test(int64_t job_id, time_t now, bool *give_up) {
+   return delivery_claim(job_id, now, give_up);
+}
+void job_manager_delivery_release_for_test(int64_t job_id, bool finished) {
+   delivery_release(job_id, finished);
+}
+void job_manager_delivery_reset_for_test(void) {
+   delivery_table_reset();
+}
+int job_manager_delivery_slots_for_test(void) {
+   return JOB_NOTIFY_TRACK_SLOTS;
+}
+int job_manager_delivery_stale_sec_for_test(void) {
+   return JOB_NOTIFY_TRACK_STALE_SEC;
 }
 
 /* Detached delivery thread for MESSAGING-channel completions only:
