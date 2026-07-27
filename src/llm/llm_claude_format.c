@@ -35,6 +35,7 @@
 #include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 #ifdef ENABLE_WEBUI
 #include "webui/webui_server.h"
 #endif
@@ -984,6 +985,14 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
                char summary[2048];
                snprintf(summary, sizeof(summary), "[Previous tool result: %.1900s%s]",
                         result_content, strlen(result_content) > 1900 ? "..." : "");
+               /* `%.1900s` is a BYTE precision, so it splits multi-byte characters —
+                * and an invalid sequence here fails the ENTIRE provider request, not
+                * just this message.  This is the more frequent of the two cuts in this
+                * branch: it runs for every orphaned tool result, while the 4096-byte
+                * combine below only runs when appending to an existing assistant turn.
+                * Both are sanitized; neither is safe alone, since the combine can land
+                * mid-codepoint on the concatenation even when its inputs are clean. */
+               sanitize_utf8_for_json(summary);
 
                json_object *summary_msg = json_object_new_object();
                json_object_object_add(summary_msg, "role", json_object_new_string("assistant"));
@@ -1015,6 +1024,16 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
                         }
                         snprintf(combined, sizeof(combined), "%s\n%s", existing ? existing : "",
                                  summary);
+                        /* snprintf cuts on a BYTE boundary, so a multi-byte character
+                         * straddling the limit leaves a partial sequence — and the whole
+                         * request then dies at the provider, not just this field:
+                         * "The request body is not valid JSON: str is not valid UTF-8:
+                         * surrogates not allowed" (HTTP 400).  Live-verified on a resumed
+                         * research job (conv 1041), which is the likely victim: resume
+                         * hydrates history whose tool rows arrive orphaned, this branch
+                         * combines their summaries, and search results are full of
+                         * non-ASCII, so the cut lands mid-codepoint often. */
+                        sanitize_utf8_for_json(combined);
                         json_object_object_add(last_message, "content",
                                                json_object_new_string(combined));
                      }
