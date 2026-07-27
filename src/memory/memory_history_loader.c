@@ -111,6 +111,22 @@ static int append_message_to_history(const conversation_message_t *msg, void *ct
    json_object_object_add(entry, "role", role);
    json_object_object_add(entry, "content", content);
    json_object_object_add(entry, "id", json_object_new_int64(msg->id));
+   /* Carry the structured tool fields (mirrors webui_session_restore_msg_cb) so a
+    * reloaded assistant tool-call turn and its role:tool results rebuild as
+    * OpenAI-canonical tool messages for the LLM, instead of being orphaned and
+    * degraded to a "[Previous tool result: …]" summary.  That summary path is
+    * both lossy (a resumed job could no longer tell which tool calls already ran)
+    * and a crash vector — its byte-truncation split multi-byte characters until
+    * sanitized (3e473be).  Fixing it at the source keeps the transcript intact. */
+   if (msg->tool_calls && msg->tool_calls[0]) {
+      struct json_object *tc = json_tokener_parse(msg->tool_calls);
+      if (tc) {
+         json_object_object_add(entry, "tool_calls", tc);
+      }
+   }
+   if (msg->tool_call_id && msg->tool_call_id[0]) {
+      json_object_object_add(entry, "tool_call_id", json_object_new_string(msg->tool_call_id));
+   }
    json_object_array_add(ctx->array, entry);
    return 0;
 }
