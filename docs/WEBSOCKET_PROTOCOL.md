@@ -1036,6 +1036,17 @@ case. `next_before_*` are omitted on an empty page.
 }
 ```
 
+#### `job_notification`
+A background job finished: a silent completion toast to the owner's browser
+sessions (no voice). Browsers only, and the delivery count is load-bearing — the
+completion monitor records the job as "user told" when this reaches at least one
+client, so it is never counted toward a satellite (which has no toast surface).
+```json
+{ "type": "job_notification", "payload": { "text": "Research on X is ready.", "conv_id": 1009, "running": 2 } }
+```
+- `conv_id`: the job's conversation id (open it to read the result)
+- `running`: the user's remaining active-job count after this completion
+
 ### Session & State
 
 #### `session`
@@ -1284,6 +1295,107 @@ Proactive LLM configuration update (sent when session config changes).
 
 ---
 
+### Proactive & Ambient Broadcasts
+
+Server-initiated pushes from the proactive-attention (SAGE), focus, and memory
+subsystems. These are **WebUI-only UI primitives** (satellites do not render them)
+and are routed to the owning user's browser sessions. A read-mostly dashboard
+consumes them as ambient notices; see the consumer-facing map in
+`dawn-nextgen/docs/DAWN_UI_SIGNAL_MAP.md`.
+
+#### `attention_alert`
+The SAGE proactive-attention banner. Its own channel (not `scheduler_notification`)
+so it shows an ATTENTION badge and never triggers the scheduler chime.
+```json
+{
+   "type": "attention_alert",
+   "payload": { "summary": "Package out for delivery, arriving today.", "level": "ambient" }
+}
+```
+- `level`: `alert` (needs the user) or `ambient` (informational)
+
+#### `silent_observation`
+A quieter rail-icon / peek primitive: DAWN noticed something worth surfacing
+without a banner.
+```json
+{
+   "type": "silent_observation",
+   "payload": {
+      "ts": 1784949199,
+      "category": "calendar",
+      "note": "Standup moved to 10:30.",
+      "filter_match": true
+   }
+}
+```
+- `ts`: Unix seconds
+- `filter_match`: whether it matched an active user watch/filter
+
+#### `context_injection`
+Diagnostic: what the focus system pulled into context for a turn (the "why did it
+say that" surface). **Fields are at the root, not wrapped in `payload`.** Routed
+only to the user's session(s) currently viewing `conversation_id`.
+```json
+{
+   "type": "context_injection",
+   "user_id": 3,
+   "conversation_id": 1006,
+   "turn_id": 42,
+   "items": [
+      {
+         "source_id": "mem:918",
+         "source_type": "internal",
+         "text": "...",
+         "score": 0.82,
+         "score_breakdown": { "semantic": 0.5, "recency": 0.1, "importance": 0.2, "source": 0.02 },
+         "applied_source_weight": 1.0,
+         "provenance": { "conversation_id": 1000, "msg_id_start": 12, "msg_id_end": 14 }
+      }
+   ],
+   "filter_rejections": [ { "source_id": "mem:77", "count": 2 } ]
+}
+```
+- `source_type`: `internal`, `external`, or `user-content`
+- `provenance`: omitted entirely when unavailable (never a zero-stub)
+
+#### `memory_extraction_notice`
+DAWN stored or updated a memory during a turn.
+```json
+{ "type": "memory_extraction_notice", "payload": { "level": "info", "message": "Saved: prefers metric units." } }
+```
+
+#### `memory_proposals_changed`
+The count of pending memory proposals changed (signal to refresh a proposals view).
+```json
+{ "type": "memory_proposals_changed", "payload": { "count": 3 } }
+```
+
+---
+
+### Phone
+
+#### `phone_call_notification`
+Inbound/outbound call state, for a transient call banner. Owner's browser sessions
+only (carries caller PII); also sent as a per-connection snapshot on connect.
+```json
+{
+   "type": "phone_call_notification",
+   "payload": {
+      "status": "ringing",
+      "name": "Jane Doe",
+      "number": "+15551234567",
+      "call_id": 88,
+      "elapsed_sec": 0,
+      "photo": null
+   }
+}
+```
+- `status`: `ringing`, `active`, or `ended`
+- `elapsed_sec`: call duration (for `active` / `ended`)
+- `photo`: optional contact-photo object; omitted when none
+
+---
+
 ### Music
 
 #### `music_state`
@@ -1375,6 +1487,14 @@ Broadcast to all authenticated WebUI clients when a scheduled event fires, is di
 - `message`: Display message (may include custom reminder text)
 - Alarms pulse and support snooze; timers/reminders auto-dismiss after firing
 - Not sent to satellite connections (satellites don't have WebUI notification UI)
+
+#### `scheduler_events_changed`
+Signal-only: the scheduled-event queue changed (event added, edited, or removed).
+Empty payload; clients refetch the queue. Distinct from `scheduler_notification`,
+which reports one event firing/dismiss/snooze.
+```json
+{ "type": "scheduler_events_changed" }
+```
 
 ---
 
@@ -1490,6 +1610,11 @@ All `*_response` messages follow a common pattern:
 | File | Purpose |
 |------|---------|
 | `src/webui/webui_server.c` | Main message dispatch, streaming, state |
+| `src/webui/webui_broadcasts.c` | Push broadcasts: attention, silent-observation, context-injection, memory, job/conversation notices |
+| `src/core/attention/attention_core.c` | Proactive-attention engine (drives `attention_alert`) |
+| `src/webui/webui_scheduler.c` | Scheduler events + notifications |
+| `src/webui/webui_phone.c` | Phone call notifications |
+| `src/webui/webui_homeassistant.c` | Home Assistant entity list/state |
 | `src/webui/webui_config.c` | Config get/set, audio devices, models |
 | `src/webui/webui_satellite.c` | DAP2 satellite registration and queries |
 | `src/webui/webui_music.c` | Music streaming, search, library, queue |
