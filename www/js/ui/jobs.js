@@ -194,13 +194,15 @@
 
    /* Opens a conversation and dismisses the panel. Used for both a job's own
     * conversation and its parent — the only difference is which id. */
-   function buildOpenButton(convId, label, ariaLabel) {
+   function buildOpenButton(convId, label, ariaLabel, attach) {
       const btn = elem('button', 'jobs-open-btn', label);
       btn.type = 'button';
       btn.setAttribute('aria-label', ariaLabel);
       btn.addEventListener('click', function () {
          if (typeof DawnHistory !== 'undefined' && DawnHistory.loadConversation) {
-            DawnHistory.loadConversation(convId);
+            // A job's own conversation attaches (durable events → completion
+            // marker); the parent is a normal conversation.
+            DawnHistory.loadConversation(convId, attach ? { attach: true } : undefined);
             close();
          }
       });
@@ -304,7 +306,8 @@
          buildOpenButton(
             job.conversation_id,
             'View',
-            'View background job: ' + (job.title || 'untitled')
+            'View background job: ' + (job.title || 'untitled'),
+            true /* attach — this is the job's own conversation */
          )
       );
       if (isActiveStatus(job.status)) {

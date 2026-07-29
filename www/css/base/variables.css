@@ -36,7 +36,9 @@
    --error: #ef4444;
    --error-hover: #dc2626; /* Darker red for hover states */
    --error-subtle: rgba(239, 68, 68, 0.12); /* Tinted background for destructive hovers */
+   --error-text: #f87171; /* Lighter red for small error TEXT — #ef4444 fails AA on mid-dark bg */
    --success: #22c55e;
+   --success-subtle: rgba(34, 197, 94, 0.12); /* Tinted success surface/border */
    --warning: #f0b429; /* Amber - hesitation, strain, >50% context */
    --warning-subtle: rgba(240, 180, 41, 0.08);
    --warning-hover: rgba(240, 180, 41, 0.12);

@@ -472,3 +472,56 @@
       transition: none;
    }
 }
+
+/* =============================================================================
+ * CP4b — durable-event markers in a job's transcript (www/js/ui/agent-events.js).
+ * An understated, centered status line for a job's terminal `complete`
+ * disposition.  Colors come from tokens so every theme adapts; text colors are
+ * chosen to clear WCAG AA on the mid-dark --bg-tertiary surface.  A decorative
+ * ::before glyph reinforces the disposition beyond hue alone (the word already
+ * differs, so this is polish, not the sole non-color signal).  #transcript is a
+ * block container, so margin-auto (not align-self) does the centering.
+ * ============================================================================= */
+.agent-event {
+   display: block;
+   width: fit-content;
+   max-width: 90%;
+   margin: 12px auto;
+   padding: 4px 12px;
+   border: 1px solid var(--border-color);
+   border-radius: var(--border-radius-sm);
+   background: var(--bg-tertiary);
+   color: var(--text-secondary);
+   font-size: 0.8rem;
+   font-weight: 500;
+   text-align: center;
+   word-break: break-word;
+}
+
+.agent-event::before {
+   margin-right: 6px;
+   font-weight: 600;
+}
+
+.agent-event-ok {
+   color: var(--success); /* #22c55e on --bg-tertiary ≈ 5.9:1 — passes AA */
+   border-color: var(--success-subtle);
+}
+.agent-event-ok::before {
+   content: '\2713'; /* ✓ */
+}
+
+.agent-event-err {
+   color: var(--error-text); /* lighter red — raw --error fails AA at this size */
+   border-color: var(--error-subtle);
+}
+.agent-event-err::before {
+   content: '\2715'; /* ✕ */
+}
+
+.agent-event-muted {
+   color: var(--text-secondary); /* not --text-tertiary — see jobs.css contrast note above */
+}
+.agent-event-muted::before {
+   content: '\2014'; /* — */
+}

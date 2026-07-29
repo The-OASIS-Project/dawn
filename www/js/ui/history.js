@@ -430,13 +430,28 @@
       });
    }
 
-   function requestLoadConversation(convId) {
+   function requestLoadConversation(convId, opts) {
       if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
 
       /* Clear unread briefing indicator */
       if (typeof DawnScheduler !== 'undefined' && DawnScheduler.removeUnreadBriefing) {
          DawnScheduler.removeUnreadBriefing(convId);
       }
+
+      // CP4b: viewing a background job (opts.attach) asks for the durable event
+      // log too — the same handler serves both, keyed on last_seq.  A plain load
+      // (sidebar conversation) is unchanged.  Reset the event renderer first so
+      // last_seq starts at 0 and no marker from the previous view carries over.
+      const attach = !!(opts && opts.attach);
+      if (attach) {
+         if (typeof DawnAgentEvents !== 'undefined') DawnAgentEvents.reset(convId);
+         DawnWS.send({
+            type: 'attach_conversation',
+            payload: { conversation_id: convId, last_seq: 0 },
+         });
+         return;
+      }
+      if (typeof DawnAgentEvents !== 'undefined') DawnAgentEvents.reset(0); // leaving any attached job
 
       DawnWS.send({
          type: 'load_conversation',
@@ -757,6 +772,13 @@
             if (isArchived && continuedBy) {
                console.log(`Adding continuation link to conversation ${continuedBy}`);
                addContinuationLink(continuedBy);
+            }
+
+            // CP4b: the message DOM is now complete — release any buffered
+            // durable-event markers (e.g. a job's `complete` disposition) so they
+            // append AFTER the last message rather than mid-render.
+            if (typeof DawnAgentEvents !== 'undefined') {
+               DawnAgentEvents.flush(payload.conversation_id);
             }
 
             // Scroll to bottom after all messages loaded

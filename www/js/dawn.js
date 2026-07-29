@@ -513,14 +513,14 @@
             // because a long-running job emits dozens per turn and an unhandled
             // frame logs a line each time, burying everything else in the console.
             case 'conversation_event':
-               if (typeof DawnJobs !== 'undefined' && DawnJobs.handleConversationEvent) {
-                  DawnJobs.handleConversationEvent(msg.payload);
+               if (typeof DawnAgentEvents !== 'undefined') {
+                  DawnAgentEvents.handleConversationEvent(msg.payload);
                }
                break;
             case 'conversation_events':
                // Durable replay batch, sent in response to attach_conversation.
-               if (typeof DawnJobs !== 'undefined' && DawnJobs.handleConversationEvents) {
-                  DawnJobs.handleConversationEvents(msg.payload);
+               if (typeof DawnAgentEvents !== 'undefined') {
+                  DawnAgentEvents.handleConversationEvents(msg.payload);
                }
                break;
             case 'message_appended':
