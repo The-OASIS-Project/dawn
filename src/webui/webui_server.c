@@ -1575,7 +1575,7 @@ static void webui_tool_execution_callback(void *session_ptr,
                                           const char *result,
                                           bool success) {
    session_t *session = (session_t *)session_ptr;
-   if (!session || session->type != SESSION_TYPE_WEBUI) {
+   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_JOB)) {
       return;
    }
 
@@ -1959,7 +1959,7 @@ void webui_send_transcript_ex(session_t *session,
                               const char *role,
                               const char *text,
                               bool server_saved) {
-   if (!session || session->type != SESSION_TYPE_WEBUI) {
+   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_JOB)) {
       return;
    }
 
@@ -2171,7 +2171,8 @@ void webui_send_audio_end(session_t *session, bool is_opus) {
  * ============================================================================= */
 
 void webui_send_stream_start(session_t *session) {
-   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_DAP2)) {
+   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_DAP2 &&
+                    session->type != SESSION_TYPE_JOB)) {
       return;
    }
 
@@ -2374,7 +2375,8 @@ int webui_filter_command_tags(session_t *session,
  * Automatically starts the stream on first content. Thread-safe per session.
  */
 void webui_send_stream_delta(session_t *session, const char *text) {
-   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_DAP2)) {
+   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_DAP2 &&
+                    session->type != SESSION_TYPE_JOB)) {
       return;
    }
 
@@ -2418,7 +2420,8 @@ void webui_send_stream_delta(session_t *session, const char *text) {
 }
 
 void webui_send_stream_end(session_t *session, const char *reason) {
-   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_DAP2)) {
+   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_DAP2 &&
+                    session->type != SESSION_TYPE_JOB)) {
       return;
    }
 
@@ -2450,7 +2453,7 @@ void webui_send_stream_end(session_t *session, const char *reason) {
  * ============================================================================= */
 
 void webui_send_thinking_start(session_t *session, const char *provider) {
-   if (!session || session->type != SESSION_TYPE_WEBUI) {
+   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_JOB)) {
       return;
    }
 
@@ -2472,7 +2475,7 @@ void webui_send_thinking_start(session_t *session, const char *provider) {
 }
 
 void webui_send_thinking_delta(session_t *session, const char *text) {
-   if (!session || session->type != SESSION_TYPE_WEBUI) {
+   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_JOB)) {
       return;
    }
 
@@ -2494,7 +2497,7 @@ void webui_send_thinking_delta(session_t *session, const char *text) {
 }
 
 void webui_send_thinking_end(session_t *session, bool has_content) {
-   if (!session || session->type != SESSION_TYPE_WEBUI) {
+   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_JOB)) {
       return;
    }
 
@@ -2515,7 +2518,7 @@ void webui_send_thinking_end(session_t *session, bool has_content) {
 }
 
 void webui_send_reasoning_summary(session_t *session, int reasoning_tokens) {
-   if (!session || session->type != SESSION_TYPE_WEBUI) {
+   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_JOB)) {
       return;
    }
 
@@ -2536,6 +2539,83 @@ void webui_send_reasoning_summary(session_t *session, int reasoning_tokens) {
    queue_response(&resp);
    OLOG_INFO("WebUI: Reasoning summary id=%u tokens=%d for session %u", session->current_stream_id,
              reasoning_tokens, session->session_id);
+}
+
+void webui_fanout_job_stream_response(ws_response_t *resp) {
+   if (!resp) {
+      return;
+   }
+   /* queue_response never enqueues a job-session frame, so this fan-out OWNS it and
+    * must free_response() it exactly once (a no-op for the inline stream/thinking
+    * types, correct for any heap-carrying type — transcript, state, …).
+    *
+    * Frames a viewer should see, mirroring a normal turn:
+    *  - stream/thinking/reasoning: inline text[], carry conversation_id — heap-free copy.
+    *  - transcript ("tool"/"visual"): the native-tool debug + visual entries, same path
+    *    a WEBUI turn uses; heap role/text, so each recipient gets its own strdup.
+    * Any other type (e.g. the tools-running state pill) is dropped but still freed.
+    * conversation_id lives in a different union member per type — read it per type. */
+   int64_t conv_id;
+   switch (resp->type) {
+      case WS_RESP_STREAM_START:
+      case WS_RESP_STREAM_DELTA:
+      case WS_RESP_STREAM_END:
+      case WS_RESP_THINKING_START:
+      case WS_RESP_THINKING_DELTA:
+      case WS_RESP_THINKING_END:
+      case WS_RESP_REASONING_SUMMARY:
+         conv_id = resp->stream.conversation_id;
+         break;
+      case WS_RESP_TRANSCRIPT:
+         conv_id = resp->transcript.conversation_id;
+         break;
+      default:
+         free_response(resp);
+         return;
+   }
+   int user_id = resp->session ? (int)resp->session->metrics.user_id : 0;
+   if (conv_id <= 0 || user_id <= 0) {
+      free_response(resp);
+      return;
+   }
+
+   /* conn_registry -> response-queue lock order, matching broadcast_json_to_user_ex.
+    * The copies target real WEBUI sessions, so queue_response takes its ordinary
+    * path (no recursion back into this fan-out). */
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      ws_connection_t *conn = s_active_connections[i];
+      if (!conn || !conn->session || !conn->authenticated || conn->is_satellite) {
+         continue;
+      }
+      if (conn->auth_user_id != user_id || conn->session->type != SESSION_TYPE_WEBUI) {
+         continue;
+      }
+      /* Read this connection's view directly — webui_get_active_conversation_id()
+       * resolves via session->client_data, which collapses to a single connection
+       * when two tabs share one session, mis-targeting the other tab. */
+      if (conn->active_conversation_id != conv_id) {
+         continue; /* not looking at this job — it'll replay from the ring on open */
+      }
+      ws_response_t copy = *resp;
+      copy.session = conn->session; /* retarget from the fd-less job session to a viewer */
+      if (resp->type == WS_RESP_TRANSCRIPT) {
+         /* Heap frame — each recipient owns its own strings (freed by free_response
+          * after send).  Skip this recipient on OOM rather than share a pointer. */
+         copy.transcript.role = resp->transcript.role ? strdup(resp->transcript.role) : NULL;
+         copy.transcript.text = resp->transcript.text ? strdup(resp->transcript.text) : NULL;
+         if ((resp->transcript.role && !copy.transcript.role) ||
+             (resp->transcript.text && !copy.transcript.text)) {
+            free(copy.transcript.role);
+            free(copy.transcript.text);
+            continue;
+         }
+      }
+      queue_response(&copy);
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+
+   free_response(resp); /* fan-out owns the original; free its heap exactly once */
 }
 
 void webui_send_session_json(session_t *session, const char *json_str) {

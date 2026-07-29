@@ -57,6 +57,14 @@
  * ============================================================================= */
 
 void queue_response(ws_response_t *resp) {
+   /* A background-job session has no browser fd of its own.  Fan its stream
+    * frames out to the connections VIEWING that conversation instead, so a job
+    * you're watching streams like a normal conversation (webui_server.c). */
+   if (resp->session && resp->session->type == SESSION_TYPE_JOB) {
+      webui_fanout_job_stream_response(resp);
+      return;
+   }
+
    pthread_mutex_lock(&s_queue_mutex);
 
    int next_tail = (s_queue_tail + 1) % WEBUI_RESPONSE_QUEUE_SIZE;

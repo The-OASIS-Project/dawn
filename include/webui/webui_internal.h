@@ -289,6 +289,20 @@ typedef struct {
    };
 } ws_response_t;
 
+/**
+ * @brief Fan a background job's stream/thinking frame out to the browsers viewing
+ *        its conversation.
+ *
+ * A job runs on a text-only job-pool session with no browser fd, so its stream
+ * frames can't be queued to a single connection.  This re-targets a copy of the
+ * frame to each of the owner's WEBUI connections whose ACTIVE conversation is the
+ * job's, so a job you're watching streams like a normal conversation.  Called
+ * from queue_response() for SESSION_TYPE_JOB responses.  Stream/thinking/reasoning
+ * frames (inline text[]) and transcript frames (heap "tool"/"visual" debug entries,
+ * the same native-tool path a normal turn uses) are fanned out; other types dropped.
+ */
+void webui_fanout_job_stream_response(ws_response_t *resp);
+
 /* =============================================================================
  * Token-to-Session Mapping
  * ============================================================================= */

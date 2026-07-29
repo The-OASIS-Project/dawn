@@ -68,8 +68,12 @@ static void session_text_chunk_callback(const char *chunk, void *userdata) {
    /* Chunks are accumulated by the streaming layer (llm_streaming.c)
     * and also sent to WebSocket/satellite for real-time display */
 #ifdef ENABLE_WEBUI
-   if ((session->type == SESSION_TYPE_WEBUI || session->type == SESSION_TYPE_DAP2) && chunk &&
-       chunk[0] != '\0') {
+   /* SESSION_TYPE_JOB is included so a background job STREAMS to browsers viewing
+    * its conversation: the send functions fan out by conversation_id (a job's own
+    * session has no fd).  Browser metrics below stay WEBUI-only. */
+   if ((session->type == SESSION_TYPE_WEBUI || session->type == SESSION_TYPE_DAP2 ||
+        session->type == SESSION_TYPE_JOB) &&
+       chunk && chunk[0] != '\0') {
       uint64_t now_ms = get_time_ms();
 
       /* Track timing for first token (TTFT) — based on LLM output, not filtering */
@@ -185,8 +189,10 @@ static int llm_call_prepare(session_t *session,
    // Set command context for tool callbacks
    session_set_command_context(session);
 
-   // Reset streaming filter state for WebSocket and satellite sessions
-   if (session->type == SESSION_TYPE_WEBUI || session->type == SESSION_TYPE_DAP2) {
+   // Reset streaming filter state for WebSocket, satellite, and job sessions
+   // (jobs stream too — see the callback above).
+   if (session->type == SESSION_TYPE_WEBUI || session->type == SESSION_TYPE_DAP2 ||
+       session->type == SESSION_TYPE_JOB) {
       session->cmd_tag_filter.nesting_depth = 0;
       session->cmd_tag_filter.len = 0;
       session->stream_had_content = false;
@@ -223,8 +229,11 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
     * session_llm_call_no_add) satisfy this. */
    int post_call_error = llm_last_error();
 #ifdef ENABLE_WEBUI
-   // End WebSocket streaming
-   if (session->type == SESSION_TYPE_WEBUI) {
+   // End WebSocket streaming.  JOB is included so a viewed job's stream is
+   // properly closed (webui_send_stream_end finalizes the replay ring + fans out
+   // stream_end); the idle-metrics and non-streaming transcript fallback below are
+   // WEBUI-only in effect (they emit non-stream frames the job fan-out drops).
+   if (session->type == SESSION_TYPE_WEBUI || session->type == SESSION_TYPE_JOB) {
       // Send idle state update (rate is calculated accurately by streaming layer from usage stats)
       // Only send if we had streaming activity
       if (session->stream_token_count > 0 && session->first_token_ms > 0) {
