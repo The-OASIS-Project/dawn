@@ -163,7 +163,8 @@
 [llm]
 # type = "cloud"                  # "cloud" or "local"
                                   # Env: DAWN_LLM_TYPE
-# max_tokens = 8192               # Maximum response tokens
+# max_tokens = 16384              # Maximum response tokens (ceiling, not a target). 16384 is the
+                                  # universally-safe max (= GPT-4o's cap); Claude 4.x allows up to 64K.
                                   # Env: DAWN_LLM_MAX_TOKENS
 # compact_soft_threshold = 0.60   # Async background compaction trigger
 # compact_hard_threshold = 0.85   # Blocking compaction trigger (safety net)

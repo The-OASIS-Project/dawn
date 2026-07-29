@@ -113,7 +113,8 @@ void config_set_defaults(dawn_config_t *config) {
 
    /* LLM */
    SAFE_COPY(config->llm.type, "cloud");
-   config->llm.max_tokens = 8192; /* Higher default for SVG tool output */
+   config->llm.max_tokens = 16384; /* Generous, universally-safe ceiling (= GPT-4o max output,
+                                      well within Claude 4.x 64K); a ceiling, not a target */
 
    /* LLM Cloud */
    config->llm.cloud.provider[0] = '\0'; /* Empty = auto-detect from available API keys */

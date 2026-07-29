@@ -288,6 +288,22 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
    session_release(s);
 }
 
+/* Stash the final turn's finish/stop reason on the session so a background-job
+ * worker can tell a cut-off answer ("max_tokens"/"length") from a clean finish.
+ * Additive + best-effort: other callers never read it, and a lookup miss is a
+ * no-op (the worker then reads an empty reason = "not truncated"). */
+static void tool_loop_stash_finish_reason(uint32_t session_id, const char *reason) {
+   if (reason == NULL || reason[0] == '\0') {
+      return;
+   }
+   session_t *s = session_get_for_reconnect(session_id);
+   if (s == NULL) {
+      return;
+   }
+   snprintf(s->last_finish_reason, sizeof(s->last_finish_reason), "%s", reason);
+   session_release(s);
+}
+
 /* Fire the per-session iteration-boundary hook (if installed).  Called when an
  * iteration produced tool calls, just before the tools execute, so the WebUI can
  * close the current streaming bubble — the next iteration's text then opens a fresh
@@ -686,6 +702,7 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
             empty[0] = '\0';
             return empty;
          }
+         tool_loop_stash_finish_reason(params->session_id, result.finish_reason);
          final_response = result.text;
          result.text = NULL; /* Transfer ownership to caller */
          llm_tool_response_free(&result);
@@ -750,6 +767,7 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
             return NULL;
          }
 
+         tool_loop_stash_finish_reason(params->session_id, result.finish_reason);
          final_response = result.text;
          result.text = NULL;
          llm_tool_response_free(&result);

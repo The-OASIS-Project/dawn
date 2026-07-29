@@ -66,6 +66,23 @@ typedef struct {
    "above are your own work so far. Review them, continue from where you left off "     \
    "without repeating work that is already complete, and produce the final answer."
 
+/* Deliverable contract prepended to a job's goal on its first run.  A background
+ * job hands exactly ONE thing back to the conversation that started it: the text
+ * of its final message (reinjected, head-capped ~12 KB — JOB_REINVOKE_RESULT_CAP).
+ * Without this framing the model improvises — most damagingly by saving its whole
+ * report into a document and "handing off" a pointer the conversation never
+ * receives, which also blows the output-token cap mid-tool-argument and truncates
+ * to nothing (observed live, conv 1060).  Same shape as a Claude Code subagent:
+ * the final message IS the return value. */
+#define JOB_DELIVERABLE_DIRECTIVE                                                     \
+   "You are running as a background job. Your FINAL message is the entire result "    \
+   "handed back to the conversation that started you — put your complete answer "   \
+   "there, as a concise, self-contained synthesis (aim for under ~1500 words). Do "   \
+   "NOT save your answer into a document or note and hand back a pointer to it: the " \
+   "conversation receives only your final message, never a file you create. If you "  \
+   "genuinely need to store a large reference artifact, write it in chunks with an "  \
+   "append action rather than one large create. Here is your task:\n\n"
+
 static void job_worker_run(job_work_t *work) {
    session_t *s = NULL;
    int rc = job_manager_begin(work->user_id, work->conv_id, job_provider_from_default(), &s);
@@ -180,8 +197,32 @@ static void job_worker_run(job_work_t *work) {
       .user_msg_added_ctx = NULL,
       .channel_hint = NULL,
    };
-   char *response = core_text_input_dispatch(s, work->goal, NULL, NULL, NULL, 0, &opts);
+   /* First run: frame the goal with the deliverable contract so the answer comes
+    * back as the final message, not saved off as a document.  A resume already
+    * carries this — its restored history holds the framed first turn, and it gets
+    * JOB_RESUME_DIRECTIVE.  The durable job_goal column (panel display) stays clean. */
+   char *framed_goal = NULL;
+   const char *dispatch_text = work->goal;
+   if (!work->resume && work->goal != NULL) {
+      size_t need = strlen(JOB_DELIVERABLE_DIRECTIVE) + strlen(work->goal) + 1;
+      framed_goal = malloc(need);
+      if (framed_goal != NULL) {
+         snprintf(framed_goal, need, "%s%s", JOB_DELIVERABLE_DIRECTIVE, work->goal);
+         dispatch_text = framed_goal;
+      }
+   }
+   s->last_finish_reason[0] =
+       '\0'; /* clear before dispatch — pooled session may hold a stale reason */
+   char *response = core_text_input_dispatch(s, dispatch_text, NULL, NULL, NULL, 0, &opts);
+   free(framed_goal);
    session_set_tool_persist_hook(s, NULL, NULL);
+
+   /* Item 1: the tool loop stashes the final turn's finish_reason on the session.
+    * A job whose final turn hit the output-token cap ('max_tokens'/'length') did
+    * NOT produce a complete answer — flag it so it isn't reported as a clean done
+    * and the reinjected result tells the parent it was cut off. */
+   bool truncated = (strcmp(s->last_finish_reason, "max_tokens") == 0 ||
+                     strcmp(s->last_finish_reason, "length") == 0);
 
    time_t now = time(NULL);
 
@@ -205,8 +246,39 @@ static void job_worker_run(job_work_t *work) {
     * Capture the row id: the `complete` event carries it as final_message_id so a
     * tailer can correlate the disposition with the answer body it already
     * received via message_appended (§6.2). */
+   /* Item 2: a truncated-tool turn can leave its text already persisted as the
+    * conv's last assistant row (observed as a byte-identical duplicate, conv 1060).
+    * Dedup by content: if the last assistant row already equals this answer, the
+    * work is on disk — don't write it (or notify) a second time.  Comparison uses
+    * the pre-notice text; the notice below is only added on the row WE write. */
+   bool already_persisted = false;
+   if (have_answer) {
+      char *last = NULL;
+      if (conv_db_job_last_assistant_text(work->conv_id, work->user_id, &last) == AUTH_DB_SUCCESS &&
+          last != NULL && strcmp(last, response) == 0) {
+         already_persisted = true;
+      }
+      free(last);
+   }
+
+   /* Item 1: if the final turn hit the output cap and WE are the one persisting the
+    * answer, mark it incomplete so the reinjected result tells the parent it was cut
+    * off rather than presenting a truncated fragment as the finished work. */
+   if (have_answer && truncated && !already_persisted) {
+      static const char *const NOTICE =
+          "\n\n[Note: this background job reached the output length limit and was cut off before "
+          "finishing — the result above may be incomplete.]";
+      size_t need = strlen(response) + strlen(NOTICE) + 1;
+      char *aug = malloc(need);
+      if (aug != NULL) {
+         snprintf(aug, need, "%s%s", response, NOTICE);
+         free(response);
+         response = aug;
+      }
+   }
+
    int64_t final_msg_id = 0;
-   if (have_answer &&
+   if (have_answer && !already_persisted &&
        conv_db_add_message_with_tools(work->conv_id, work->user_id, "assistant", response, NULL,
                                       NULL, NULL, &final_msg_id) != AUTH_DB_SUCCESS) {
       OLOG_WARNING("job_worker: failed to persist final answer to conv %lld",
@@ -214,8 +286,9 @@ static void job_worker_run(job_work_t *work) {
       final_msg_id = 0;
    }
    /* §6.3: hand the ANSWER BODY to event-only consumers.  Without this a TUI
-    * tailing this job sees every step and then never learns the conclusion. */
-   if (have_answer) {
+    * tailing this job sees every step and then never learns the conclusion.  Skip
+    * when the row was already persisted (item 2) — the body is already on the stream. */
+   if (have_answer && !already_persisted) {
       conv_event_notify_message_appended(work->conv_id, work->user_id, final_msg_id, "assistant",
                                          response);
    }
@@ -259,8 +332,9 @@ static void job_worker_run(job_work_t *work) {
       /* Includes the beat-the-reaper case: the deadline passed but the work
        * completed, so report it honestly as done rather than as a timeout. */
       job_manager_set_terminal(work->conv_id, work->user_id, "done", NULL, now, final_msg_id);
-      OLOG_INFO("job_worker: job conv %lld done%s", (long long)work->conv_id,
-                reaped ? " (finished as the runtime reap fired; kept the answer)" : "");
+      OLOG_INFO("job_worker: job conv %lld done%s%s", (long long)work->conv_id,
+                reaped ? " (finished as the runtime reap fired; kept the answer)" : "",
+                truncated ? " (answer truncated at the output cap — flagged incomplete)" : "");
    } else if (reaped) {
       /* Deliberately NOT mark_fired: the monitor still owes this job's
        * on_complete (notify or reinvoke_parent).  A reaped reinvoke_parent row

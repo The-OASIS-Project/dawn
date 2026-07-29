@@ -415,6 +415,14 @@ typedef struct session {
    // are already observable via the sidebar chip and the debug transcript.
    _Atomic bool events_observable;
 
+   // Final turn's finish/stop reason ("stop"/"end_turn"/"tool_use"/"max_tokens"/…),
+   // stashed by the tool loop at each terminal return (llm_tool_loop.c).  Read by the
+   // background-job worker to tell a cut-off answer ('max_tokens'/'length') from a
+   // clean finish; other callers ignore it.  Single-writer per turn (the dispatch
+   // thread), read after the dispatch returns on the same thread — no lock needed.
+   // Cleared before a job dispatches so a pooled session can't read a stale value.
+   char last_finish_reason[32];
+
    // Streaming metrics for UI visualization
    uint64_t stream_start_ms;     // Timestamp when LLM call started
    uint64_t first_token_ms;      // Timestamp of first token (0 if none yet)
