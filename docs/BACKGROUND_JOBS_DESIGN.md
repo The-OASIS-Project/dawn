@@ -301,10 +301,11 @@ Separate job-session pool (dual local/cloud counters, cancel-then-wait teardown)
 ### Phase 1.5 — Per-session turn queue + headless workers — ✅ (design addition, §4a)
 Turn queue serializing text/voice/reinvoke per session + teardown safety. Headless job workers: the `job` tool is masked from a `SESSION_TYPE_JOB` schema + a headless directive rides the stable prefix + a `handle_spawn` backstop, so a worker does its task inline instead of fanning out. `reinvoke_parent` re-architected onto the queue.
 
-### Phase 2 — Durable event log + observe surface — ◑ (server half shipped; browser half ahead)
+### Phase 2 — Durable event log + observe surface — ◑ (server half + browser live view shipped; event-log render ahead)
 - ✅ **Server half:** `conversation_events` writers + per-conversation seq (all kinds); ownership-JOINed reads (§8.3); secret redaction (§8.6, *with the tool_result gap in §14*); kind-aware retention (§8.8); `attach_conversation {last_seq}` replay + `message_appended`; the lifetime-split job frames (§6.4); `job_action {cancel|resume}` + resume re-dispatch + durable `job_goal` (v74); the `tail_conversation.py` line-printer (contract gate). Live-verified on real jobs (event order, seq, `complete` correlation, live tail, 4-job fan-out).
 - ✅ **CP4a jobs panel** (`www/js/ui/jobs.js` + `jobs.css`): RUNNING grouped by parent conversation + FINISHED keyset-paginated, live elapsed, per-row View/Cancel/Resume, opened from a header button or the activity pill. Deviations: no depth indent (spawn_depth ≡ 1 today → grouped by parent instead; **trees need an ordering change + a padding rule, both Phase 3**); XSS-safety via `textContent` (stronger than escape-at-site); a job's own conversation reachable only from this panel (job convs are sidebar-hidden).
-- ○ **Remaining (browser-side):** **CP4b** — `.agent-event.*` transcript rendering + the `load_conversation → attach_conversation` switchover (touches every conversation load — a different risk class from the additive panel; `dawn.js` already routes `conversation_event`/`conversation_events` to `DawnJobs` hooks that are still no-op stubs, so those frames are currently built, broadcast, and dropped). **CP5** — live-watch panel (phone-panel twin: server-authoritative elapsed, minimize-to-pill, reconnect rehydrate, sr-only announcer).
+- ✅ **Watched-job live view:** a running job streams its assistant text **and** live `[Tool Call: …]`/visual entries to any browser viewing its conversation, debug-gated exactly like a normal turn — achieved by admitting `SESSION_TYPE_JOB` to the **normal turn's** stream/thinking/transcript path and fanning those frames out to viewers (`webui_fanout_job_stream_response`), **not** via the event log. This retires the browser's need for the event-log render below: the live view is the streaming path, and reload uses the existing `load_conversation` (persisted messages). Client needed no change — `isForeignConvFrame` already gates on `conversation_id`. Live-verified (text + tools in lock-step). *(A live research job also surfaced pre-existing job-**completion** defects — `max_tokens` mis-marked `done`, duplicate final-answer persist, preamble-soup answer — filed in `docs/TODO.md`; orthogonal to this path.)*
+- ○ **Remaining (browser-side):** **CP4b event-log render** — `.agent-event.*` transcript rendering + the `load_conversation → attach_conversation` switchover. **Now scoped to the durable/TUI consumer only** (replay-a-finished-job-from-events + the line-printer), since the browser live view no longer needs it; `dawn.js` still routes `conversation_event`/`conversation_events` to `DawnJobs` hooks that are no-op stubs, so those frames are built, broadcast, and dropped. **CP5** — live-watch panel (phone-panel twin: server-authoritative elapsed, minimize-to-pill, reconnect rehydrate, sr-only announcer).
 - **Verify:** panel survives reconnect with correct replay; the line-printer tails a live job from another machine.
 
 ### Phase 3 — reinvoke_parent + trees (ships P3) — ◑
@@ -361,13 +362,15 @@ Separate program consuming the Phase-2 contract; nothing daemon-side. Blocked on
 ## 14. Implementation status & ledger
 
 **Shipped (branch `background-jobs-p2-observe`, on top of P0/P1 merged to `main` via PR #23):**
-Phase 0, Phase 1, Phase 1.5, and the Phase-2 **server half** + CP4a jobs panel. Schema at v74. See the phase table (§10) and git history for per-commit detail.
+Phase 0, Phase 1, Phase 1.5, the Phase-2 **server half** + CP4a jobs panel, and the **watched-job live view** (a running job streams its text + live tool-call/visual entries to browser viewers via the normal turn's stream/transcript fan-out — §Phase 2). Schema at v74. See the phase table (§10) and git history for per-commit detail.
 
 **Remaining (the single checklist — no scope lost):**
 
 | Item | Phase | State |
 |---|---|---|
-| CP4b transcript render (`.agent-event.*`) + `load_conversation → attach_conversation` switchover | 2 | ○ AHEAD — `DawnJobs` event hooks are no-op stubs; event frames built + dropped today |
+| **Watched-job live view** — running job streams text + tool calls to browser viewers | 2 | ✅ SHIPPED — via the normal-turn stream/transcript fan-out (`webui_fanout_job_stream_response`), debug-gated like a normal turn; **not** the event log |
+| CP4b event-log transcript render (`.agent-event.*`) + `load_conversation → attach_conversation` switchover | 2 | ○ AHEAD — **now scoped to durable replay-from-events + the TUI** (browser live view no longer needs it); `DawnJobs` event hooks still no-op stubs, frames built + dropped |
+| Jobs completion cluster: `max_tokens`→`truncated`, duplicate final-answer persist, preamble-soup answer, large-doc-save cap | 2/— | ○ AHEAD — pre-existing, surfaced by a live research job; tracked in `docs/TODO.md` |
 | CP5 live-watch panel (phone-panel twin) | 2 | ○ AHEAD |
 | Queued state machine + `max_queued_per_user` enforcement + monitor promotion | 2/3 | ○ AHEAD — spawns fail-fast past cap today |
 | Trees: `spawn_depth=parent+1`, enforce depth/children caps, cascade cancel, spawn-into-cancelling-tree guard, parent-delete reap, settings inheritance, `awaited` UI sugar | 3 | ○ AHEAD — job→job spawn blocked until caps enforced |
