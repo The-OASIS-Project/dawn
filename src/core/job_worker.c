@@ -45,6 +45,7 @@
 #include "llm/llm_interface.h"
 #include "logging.h"
 #include "memory/memory_history_loader.h"
+#include "webui/webui_server.h" /* webui_tool_iteration_cb — bubble-seal hook (job_worker is ENABLE_WEBUI-only) */
 
 /* Work item handed to the detached worker thread. */
 typedef struct {
@@ -187,6 +188,11 @@ static void job_worker_run(job_work_t *work) {
     * dispatch; pctx is stack-scoped and the hook fires on THIS thread. */
    job_persist_ctx_t pctx = { work->conv_id, work->user_id };
    session_set_tool_persist_hook(s, job_dispatch_tool_persist_cb, &pctx);
+   /* Same iteration-boundary hook the WebUI turn uses: seals the streaming bubble at
+    * each tool boundary so a viewer sees the final answer open BELOW the last tool
+    * (webui_send_stream_end fans out to viewers for a job session).  Headless with no
+    * viewer, it's a cheap no-op. */
+   session_set_tool_iteration_hook(s, webui_tool_iteration_cb, NULL);
 
    text_input_dispatch_opts_t opts = {
       .conversation_id = work->conv_id, /* persist the goal (user msg) to the job conv */
@@ -216,6 +222,7 @@ static void job_worker_run(job_work_t *work) {
    char *response = core_text_input_dispatch(s, dispatch_text, NULL, NULL, NULL, 0, &opts);
    free(framed_goal);
    session_set_tool_persist_hook(s, NULL, NULL);
+   session_set_tool_iteration_hook(s, NULL, NULL);
 
    /* Item 1: the tool loop stashes the final turn's finish_reason on the session.
     * A job whose final turn hit the output-token cap ('max_tokens'/'length') did

@@ -369,8 +369,13 @@ static void webui_tool_persist_cb(void *userdata,
  * iteration's tool entries render after its text and the next iteration opens a fresh
  * bubble.  reason="tool_iteration" tells the browser to seal the bubble WITHOUT going
  * idle or saving it (only the final stream_end does that).  Must stay in sync with the
- * matching reason string in www/js/ui/streaming.js. */
-static void webui_tool_iteration_cb(session_t *session, void *userdata) {
+ * matching reason string in www/js/ui/streaming.js.
+ *
+ * Not static: a background job's worker installs this same hook so a viewed job's live
+ * stream seals its bubble at each tool boundary (else the final answer renders in the
+ * still-open bubble above the last tool).  For a job session webui_send_stream_end fans
+ * out to the viewers (webui_fanout_job_stream_response) instead of one connection. */
+void webui_tool_iteration_cb(session_t *session, void *userdata) {
    (void)userdata;
    if (session && atomic_load(&session->llm_streaming_active)) {
       webui_send_stream_end(session, "tool_iteration");

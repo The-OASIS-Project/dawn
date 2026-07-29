@@ -406,6 +406,17 @@ int webui_filter_command_tags(struct session *session,
 void webui_send_stream_end(struct session *session, const char *reason);
 
 /**
+ * @brief Tool-iteration-boundary hook — seals the open streaming bubble so the next
+ *        iteration's text opens a fresh bubble below the tool entries.
+ *
+ * Installed by the WebUI turn and reused by the background-job worker (so a viewed
+ * job's stream orders identically). Sends stream_end(reason="tool_iteration"); for a
+ * job session that fans out to the conversation's viewers. Signature matches
+ * session_set_tool_iteration_hook().
+ */
+void webui_tool_iteration_cb(struct session *session, void *userdata);
+
+/**
  * @brief Send thinking block start notification
  *
  * Signals the client that extended thinking content is about to stream.
