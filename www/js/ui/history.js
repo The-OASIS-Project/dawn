@@ -720,6 +720,14 @@
             }
          }
          const consumedResultIds = new Set();
+         // CP4b: stamp each rendered entry with its message's created_at so
+         // DawnAgentEvents can slot a durable-event marker (e.g. a `resume` boundary)
+         // at the right spot by timestamp.  Tags the entries this message just added.
+         const tagEntries = (fromLen, ts) => {
+            for (let k = fromLen; k < transcript.children.length; k++) {
+               transcript.children[k].setAttribute('data-ts', String(ts || 0));
+            }
+         };
          (async () => {
             for (const msg of messages) {
                // A newer conversation load started — abandon this stale render so the two
@@ -727,6 +735,7 @@
                if (renderToken !== historyState.loadRenderToken) return;
                if (msg.role === 'system') continue;
                if (typeof DawnTranscript === 'undefined') continue;
+               const entryStart = transcript.children.length;
                if (msg.role === 'tool') {
                   // Normally skipped — rendered paired with its assistant call above. But if
                   // that call fell into an earlier, not-yet-loaded page (pagination split a
@@ -736,6 +745,7 @@
                   if (msg.tool_call_id && !consumedResultIds.has(msg.tool_call_id)) {
                      DawnTranscript.addDebug('tool result', `[Tool Result: ${msg.content || ''}]`);
                   }
+                  tagEntries(entryStart, msg.created_at);
                   continue;
                }
 
@@ -762,10 +772,12 @@
                      // the debug badge/colour matches the live 'tool call' rendering.
                      DawnTranscript.addDebug('tool call', combined);
                   }
+                  tagEntries(entryStart, msg.created_at);
                   continue;
                }
 
                await DawnTranscript.addEntry(msg.role, msg.content, msg.reasoning);
+               tagEntries(entryStart, msg.created_at);
             }
 
             // Add continuation link at bottom for archived conversations (after all messages)

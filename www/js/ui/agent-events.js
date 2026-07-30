@@ -2,23 +2,19 @@
  * DawnAgentEvents — CP4b: render the durable conversation_events stream as
  * transcript boundary markers for a viewed background job.
  *
- * Scope (deliberate): the browser renders the terminal `complete` disposition —
- * an event kind NOT present in `messages`.  `tool_call`/`tool_result` are ignored
- * because the conversation's `messages` already carry them (rendered debug-gated
- * by the load path); rendering the events too would double-render, and messages
- * survive event pruning while events do not.  `status` is transient and already
- * surfaced by the generating indicator.  `resume` is NOT drawn here: its boundary
- * is already visible in the transcript (the continuation follows it), and placing
- * a marker at the boundary needs per-entry `created_at` tags (`data-ts`) on the
- * message entries, which the load path does not emit yet.  When the resume marker
- * lands, tag entries in the load loop and reintroduce created_at-ordered insertion
- * in the same change — until then a `complete` marker only ever appends, so this
- * renderer appends unconditionally.
+ * Scope (deliberate): the browser renders the `complete` disposition and the
+ * `resume` boundary — event kinds NOT present in `messages`.  `tool_call`/
+ * `tool_result` are ignored because the conversation's `messages` already carry
+ * them (rendered debug-gated by the load path); rendering the events too would
+ * double-render, and messages survive event pruning while events do not.  `status`
+ * is transient and already surfaced by the generating indicator.
  *
  * Ordering: a `complete` event always fires after the final message, so it
- * appends.  Replay events that arrive while the async message render is still in
- * flight are BUFFERED and flushed once the DOM is complete, so a complete marker
- * can't land mid-transcript.  Live events (post-flush) render immediately.
+ * appends.  A `resume` is a mid-transcript boundary, placed by `created_at` against
+ * the message entries (each tagged `data-ts` by the load path — `insertByTs`).
+ * Replay events that arrive while the async message render is still in flight are
+ * BUFFERED and flushed once the DOM is complete (entries all tagged), so a marker
+ * can't land before the entry it should follow.  Live events (post-flush) append.
  *
  * Rendering is text-only (createElement/textContent) — event payloads are
  * untrusted (§8.6/§8.7).  Markers are appended straight into `#transcript`,
@@ -36,10 +32,10 @@
    let flushed = false; // has the message render completed (buffer drained)?
    let buffer = []; // {ev, live} received before the render completed
 
-   // Kinds this renderer draws.  Everything else (tool_call/tool_result/status/
-   // resume) is intentionally dropped — see file header.  A set so an unknown or
-   // future kind is ignored, not thrown.
-   const MARKER_KINDS = { complete: true };
+   // Kinds this renderer draws.  Everything else (tool_call/tool_result/status) is
+   // intentionally dropped — see file header.  A set so an unknown or future kind is
+   // ignored, not thrown.
+   const MARKER_KINDS = { complete: true, resume: true };
 
    function transcriptEl() {
       return document.getElementById('transcript');
@@ -84,21 +80,46 @@
    }
 
    /* Build the marker element (text-only). Returns null for kinds we don't draw.
-    * `live` marks a completion happening now — only then is role="status" set, so a
+    * `live` marks an event happening now — only then is role="status" set, so a
     * replayed marker on reload is not re-announced by a screen reader as if fresh. */
    function buildMarker(kind, payload, live) {
-      if (kind !== 'complete') return null;
       const el = document.createElement('div');
       el.className = 'agent-event';
-      const info = completeLine(payload);
-      el.classList.add('agent-event-' + info.cls);
+      if (kind === 'complete') {
+         const info = completeLine(payload);
+         el.classList.add('agent-event-' + info.cls);
+         el.textContent = info.text; // textContent — payload.error is untrusted
+      } else if (kind === 'resume') {
+         el.classList.add('agent-event-muted');
+         el.textContent = 'Resumed — continuing the task';
+      } else {
+         return null;
+      }
       if (live) el.setAttribute('role', 'status');
-      el.textContent = info.text; // textContent — payload.error is untrusted
       return el;
    }
 
-   /* Draw one event (already ownership/active-conv checked). Dedups by seq.
-    * Appends: a `complete` is chronologically last, so it belongs at the end. */
+   /* Insert `el` at the position matching `createdAt` among the transcript's message
+    * entries (each tagged data-ts by the load path).  A `complete` (latest ts) and a
+    * live event (createdAt=Infinity) append; a replayed `resume` slots in at its
+    * boundary — before the first entry created after it. */
+   function insertByTs(el, createdAt) {
+      const t = transcriptEl();
+      if (!t) return;
+      if (createdAt !== Infinity) {
+         const entries = t.children;
+         for (let i = 0; i < entries.length; i++) {
+            const ts = parseInt(entries[i].getAttribute('data-ts') || '', 10);
+            if (!isNaN(ts) && ts > createdAt) {
+               t.insertBefore(el, entries[i]);
+               return;
+            }
+         }
+      }
+      t.appendChild(el);
+   }
+
+   /* Draw one event (already ownership/active-conv checked). Dedups by seq. */
    function renderMarker(ev, live) {
       if (!ev || !MARKER_KINDS[ev.kind]) return;
       if (renderedSeqs.has(ev.seq)) return;
@@ -114,8 +135,8 @@
       }
       const el = buildMarker(ev.kind, payload, live);
       if (!el) return;
-      const t = transcriptEl();
-      if (t) t.appendChild(el);
+      // Replay carries created_at (interleave by boundary); a live event is "now".
+      insertByTs(el, typeof ev.created_at === 'number' ? ev.created_at : Infinity);
    }
 
    /* Replay batch: {conversation_id, events:[{seq,kind,created_at,payload}], has_more, last_seq}. */
