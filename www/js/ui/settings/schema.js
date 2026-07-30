@@ -2311,6 +2311,15 @@
                default: 30,
                advanced: true,
             },
+            event_chunk_cap: {
+               type: 'number',
+               label: 'Job Event Payload Cap (bytes)',
+               min: 256,
+               max: 262144,
+               hint: 'Max bytes of a single tool_call/tool_result event before head+tail truncation',
+               default: 16384,
+               advanced: true,
+            },
             max_reinvokes_per_tree: {
                type: 'number',
                label: 'Max Reinvoke Attempts',

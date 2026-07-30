@@ -30,6 +30,7 @@
 
 #include "config/dawn_config.h"
 #include "logging.h"
+#include "utils/string_utils.h" /* sanitize_utf8_for_json */
 
 /* Substrings that mark a key as credential-bearing.  Matched case-insensitively
  * anywhere in the key, so "api_key", "authToken" and "passphrase" all hit. */
@@ -149,6 +150,8 @@ static char *truncate_middle(const char *s) {
  * redacting such a tool only erased benign device/event state — this is a personal
  * assistant, and "the state of my HA" is not a secret.  A real credential pasted
  * into an arg is still caught by name or by value shape. */
+static void redact_args_arr(struct json_object *arr); /* mutually recursive with redact_args_obj */
+
 static void redact_args_obj(struct json_object *args) {
    if (args == NULL || !json_object_is_type(args, json_type_object)) {
       return;
@@ -162,6 +165,30 @@ static void redact_args_obj(struct json_object *args) {
          json_object_object_add(args, key, json_object_new_string(EVENT_REDACTED_MARKER));
       } else if (json_object_is_type(val, json_type_object)) {
          redact_args_obj(val); /* nested arg objects */
+      } else if (json_object_is_type(val, json_type_array)) {
+         redact_args_arr(val); /* a secret can nest in an array under a benign key */
+      }
+   }
+}
+
+/* Walk a parsed args array, redacting secret-shaped string elements and recursing
+ * into nested objects/arrays — the array-typed twin of redact_args_obj.  Without
+ * this, a credential in e.g. {"headers":[{"name":"Authorization","value":"Bearer …"}]}
+ * under a benign key would pass through unredacted. */
+static void redact_args_arr(struct json_object *arr) {
+   if (arr == NULL || !json_object_is_type(arr, json_type_array)) {
+      return;
+   }
+   size_t n = json_object_array_length(arr);
+   for (size_t i = 0; i < n; i++) {
+      struct json_object *el = json_object_array_get_idx(arr, i);
+      if (json_object_is_type(el, json_type_string) &&
+          value_looks_secret(json_object_get_string(el))) {
+         json_object_array_put_idx(arr, i, json_object_new_string(EVENT_REDACTED_MARKER));
+      } else if (json_object_is_type(el, json_type_object)) {
+         redact_args_obj(el);
+      } else if (json_object_is_type(el, json_type_array)) {
+         redact_args_arr(el);
       }
    }
 }
@@ -191,6 +218,13 @@ char *event_payload_tool_call(const char *tool_name, const char *args_json) {
 
    const char *rendered = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
    char *out = rendered ? truncate_middle(rendered) : NULL;
+   /* json-c passes byte-for-byte; a tool arg with non-UTF-8 bytes would make an
+    * invalid WS text frame (RFC 6455 §5.6) and — persisted here — re-wedge every
+    * replay.  Sanitize before it reaches a text frame (interior bytes, which the
+    * UTF-8-floored truncation does not touch). */
+   if (out != NULL) {
+      sanitize_utf8_for_json(out);
+   }
    json_object_put(root);
    return out;
 }
@@ -219,6 +253,12 @@ char *event_payload_tool_result(const char *tool_name, const char *result_text) 
 
    const char *rendered = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
    char *out = rendered ? strdup(rendered) : NULL;
+   /* Tool output is attacker-influenceable (web/url/search/document tools); a
+    * non-UTF-8 byte would make an invalid WS text frame that persists and
+    * re-wedges every replay.  Sanitize interior bytes the cap can't reach. */
+   if (out != NULL) {
+      sanitize_utf8_for_json(out);
+   }
    json_object_put(root);
    return out;
 }
@@ -258,6 +298,9 @@ char *event_payload_complete(const char *disposition,
    }
    const char *rendered = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
    char *out = rendered ? strdup(rendered) : NULL;
+   if (out != NULL) {
+      sanitize_utf8_for_json(out); /* job_error can quote a failing request's bytes */
+   }
    json_object_put(root);
    return out;
 }
@@ -271,6 +314,9 @@ char *event_payload_spawn(int64_t child_conv_id, const char *title) {
    json_object_object_add(root, "title", json_object_new_string(title ? title : ""));
    const char *rendered = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
    char *out = rendered ? strdup(rendered) : NULL;
+   if (out != NULL) {
+      sanitize_utf8_for_json(out); /* title is derived from the (untrusted) job goal */
+   }
    json_object_put(root);
    return out;
 }

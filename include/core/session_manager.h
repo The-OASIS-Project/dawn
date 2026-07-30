@@ -548,10 +548,13 @@ static inline void session_teardown_flags(session_t *s) {
 static inline void session_begin_turn_flags(session_t *s) {
    /* Never resurrect a session whose teardown has begun: if being_destroyed is
     * set, leave the teardown-set cancel/disconnected flags standing so an
-    * in-flight worker still aborts at its next LLM gate.  This closes the
+    * in-flight worker still aborts at its next LLM gate.  This NARROWS the
     * turn-queue dequeue race where a turn spawned into the pop-to-run window
     * would otherwise clear the teardown cancel and run to completion, defeating
-    * session_destroy's ref-count wait (UAF). */
+    * session_destroy's ref-count wait (UAF).  The load and the two clears are not
+    * one atomic unit, so a teardown flipping being_destroyed between them is still
+    * possible — but the Phase-2 bounded-ref-wait-then-leak teardown degrades that
+    * residual to a bounded wait + leak, never a free-under-worker. */
    if (s != NULL && !atomic_load(&s->being_destroyed)) {
       atomic_store(&s->disconnected, false);
       atomic_store(&s->cancel_requested, false);

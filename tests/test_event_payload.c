@@ -100,11 +100,53 @@ static void test_home_assistant_args_are_readable(void) {
    free(p);
 }
 
+/* A secret nested in an ARRAY under a benign key still redacts — the array walker
+ * mirrors the object walker (no blind spot for e.g. an auth header list). */
+static void test_array_nested_secret_is_redacted(void) {
+   char *p = event_payload_tool_call(
+       "fetch",
+       "{\"headers\":[{\"name\":\"Authorization\",\"value\":\"Bearer sk-abcdef0123456789\"}]}");
+   TEST_ASSERT_NOT_NULL(p);
+   struct json_object *root = json_tokener_parse(p);
+   TEST_ASSERT_NOT_NULL(root);
+   struct json_object *args = NULL, *headers = NULL, *h0 = NULL, *val = NULL, *nm = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(root, "args", &args));
+   TEST_ASSERT_TRUE(json_object_object_get_ex(args, "headers", &headers));
+   TEST_ASSERT_TRUE(json_object_is_type(headers, json_type_array));
+   h0 = json_object_array_get_idx(headers, 0);
+   TEST_ASSERT_NOT_NULL(h0);
+   TEST_ASSERT_TRUE(json_object_object_get_ex(h0, "value", &val));
+   TEST_ASSERT_EQUAL_STRING(EVENT_REDACTED_MARKER, json_object_get_string(val));
+   TEST_ASSERT_TRUE(json_object_object_get_ex(h0, "name", &nm)); /* benign sibling survives */
+   TEST_ASSERT_EQUAL_STRING("Authorization", json_object_get_string(nm));
+   json_object_put(root);
+   free(p);
+}
+
+/* A non-UTF-8 byte in tool output must not survive into the WS text frame (it would
+ * be an invalid frame that persists and re-wedges every replay). */
+static void test_non_utf8_result_is_sanitized(void) {
+   /* Split literal so \xff doesn't greedily absorb the following 'b' as a hex digit. */
+   char *p = event_payload_tool_result("search", "clean\xff"
+                                                 "bytes");
+   TEST_ASSERT_NOT_NULL(p);
+   TEST_ASSERT_NULL(strchr(p, (char)0xFF)); /* invalid byte gone */
+   struct json_object *root = json_tokener_parse(p);
+   TEST_ASSERT_NOT_NULL(root); /* still valid, parseable JSON */
+   struct json_object *result = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(root, "result", &result));
+   TEST_ASSERT_EQUAL_STRING("clean?bytes", json_object_get_string(result));
+   json_object_put(root);
+   free(p);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_result_body_is_readable);
    RUN_TEST(test_sensitive_key_is_redacted);
    RUN_TEST(test_secret_shaped_value_is_redacted);
    RUN_TEST(test_home_assistant_args_are_readable);
+   RUN_TEST(test_array_nested_secret_is_redacted);
+   RUN_TEST(test_non_utf8_result_is_sanitized);
    return UNITY_END();
 }

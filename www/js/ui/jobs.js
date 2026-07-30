@@ -198,6 +198,11 @@
       const btn = elem('button', 'jobs-open-btn', label);
       btn.type = 'button';
       btn.setAttribute('aria-label', ariaLabel);
+      /* Keyed so focus survives an active-list rebuild (captureFocus/restoreFocus),
+       * same as the Cancel/Resume buttons — else a keyboard user on View/Open loses
+       * focus to <body> when a job transitions mid-interaction. */
+      btn.dataset.jobId = String(convId);
+      btn.dataset.action = attach ? 'view' : 'open';
       btn.addEventListener('click', function () {
          if (typeof DawnHistory !== 'undefined' && DawnHistory.loadConversation) {
             // A job's own conversation attaches (durable events → completion
@@ -391,7 +396,7 @@
       if (!mark || !el.activeList) {
          return;
       }
-      const nodes = el.activeList.querySelectorAll('.jobs-action-btn');
+      const nodes = el.activeList.querySelectorAll('.jobs-action-btn, .jobs-open-btn');
       for (let i = 0; i < nodes.length; i++) {
          if (nodes[i].dataset.jobId === mark.jobId && nodes[i].dataset.action === mark.action) {
             nodes[i].focus();

@@ -1028,6 +1028,7 @@ dawn_add_unit_test(test_calculator
 dawn_add_unit_test(test_event_payload
    SOURCES test_event_payload.c
            ${SRC_ROOT}/src/core/event_payload.c
+           ${SRC_ROOT}/common/src/utils/string_utils.c
    LIBS    unity json-c m pthread
    LABEL   ci)
 

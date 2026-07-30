@@ -230,7 +230,7 @@ One attach protocol, two renderers. All server→client frames go through the `s
 
 **Ordering unifier:** `messages.id` and `conversation_events.seq` interleave by insertion order; live deltas belong to the not-yet-persisted tail. Renderer (both surfaces): merged messages + events → partial tail from ring replay → live-tail → final text on `message_appended`.
 
-**Layer contract for `conv_stream.c` / `conv_event.c`:** passive **Layer-1 leaf** stores keyed by `conversation_id` (leaf mutex, copy-under-lock, no I/O or send-funnel call while held). Higher layers **pull** on attach; live fan-out to a second attached client is driven from the emit path (Layer 4) / registered-fn bridge — never a Layer-1→Layer-4 upcall. `conv_event_emit()` pairs persist + fan-out in one call (durable-first) so an emit site can't persist-without-broadcasting.
+**Layer contract for `conv_stream.c` / `conv_event.c`:** both use leaf-lock discipline (mutex, copy-under-lock, no I/O or send-funnel call while held) keyed by `conversation_id`. `conv_stream.c` (the in-memory replay ring) is a true **Layer-1 leaf**; `conv_event.c` is **Layer 2** — it persists via `auth_db` and pairs persist + fan-out (`conv_event_emit()`, durable-first, so an emit site can't persist-without-broadcasting), reaching Layer 4 only through the registered-fn/weak-symbol bridge. Higher layers **pull** on attach; live fan-out to a second attached client is driven from the emit path (Layer 4) / bridge — never a Layer-1→Layer-4 upcall.
 
 **Untrusted-content discipline (both renderers):** `tool_result` and `terminal_chunk` payloads are attacker-controllable (web fetches, compiled/run output). Persisted secret-redacted (§8.6) and rendered **as text only** — WebUI via `textContent`/DOMPurify + control-sequence stripping; TUI strips ANSI/control bytes. `conversation_events.payload` is untrusted at every read site.
 
@@ -326,7 +326,7 @@ Separate program consuming the Phase-2 contract; nothing daemon-side. Blocked on
 
 - Return codes `SUCCESS`/`FAILURE` (positive-only); event/insert helpers use `int64_t *id_out`.
 - GPL header on new C files; new files under the 1,500 soft limit. Migration bodies in their own `_v7N.c`; only the ladder block touches the size-exempt `auth_db_migrations.c`.
-- Layering: `conv_stream.c`/`conv_event.c` L1 leaf (passive; fan-out driven from L4/bridge); job-pool/`job_manager` L2; `job_tool.c` L3; WebUI L4. Downward-only; monitor tick + live fan-out use registered-fn/weak-symbol bridges. `complete` is emitted from the L2 wrapper (`job_manager_set_terminal`), never the DB layer.
+- Layering: `conv_stream.c` L1 leaf (passive ring), `conv_event.c` L2 (persist+emit; fan-out driven from L4/bridge); job-pool/`job_manager` L2; `job_tool.c` L3; WebUI L4. Downward-only; monitor tick + live fan-out use registered-fn/weak-symbol bridges. `complete` is emitted from the L2 wrapper (`job_manager_set_terminal`), never the DB layer.
 - Settings in `dawn.toml` + `SETTINGS_SCHEMA`; job control conversational.
 - WS send-funnel invariant preserved; no-ES-modules WebUI conventions (`window.DawnJobs` IIFE; compose `.dawn-badge` + `.dawn-status-dot` state tints — no new chip component; `DawnDialog`/`DawnEscStack`/`DawnStore`/`DawnToast`; phone-panel reuse for live-watch).
 

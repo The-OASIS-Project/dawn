@@ -975,11 +975,16 @@ static int collect_conv_images_cb(const conversation_message_t *msg, void *ctx) 
  * deleted.  parent_id carries ON DELETE SET NULL, which would otherwise leave a
  * chat's research jobs orphaned (parentless, hidden) rather than cleaned up.
  * Single level — job->job spawning is blocked today, so a direct child has no
- * children of its own.  A running/queued child is stopped first so its worker
- * isn't left writing to a deleted row (its later writes then fail harmlessly on
- * the missing FK).  Each child's referenced images are freed the same way the
- * parent's are.  Batched + progress-guarded so a long-lived chat that spawned
- * many jobs is fully covered without an unbounded stack or a re-fetch loop. */
+ * children of its own.  A running/queued child is REQUESTED to cancel first, but
+ * cancel is an async flag the tool loop only observes at its next boundary (and it
+ * currently polls the global interrupt, not the session flag — tracked defect), so
+ * the worker may keep running its current LLM/tool turn against the now-deleted row
+ * until it returns on its own; those late writes fail harmlessly on the missing FK
+ * and conv_event_emit swallows the FK error — no UAF, but tool side-effects can
+ * still fire and the pool slot stays held until the turn ends.  Each child's
+ * referenced images are freed the same way the parent's are.  Batched +
+ * progress-guarded so a long-lived chat that spawned many jobs is fully covered
+ * without an unbounded stack or a re-fetch loop. */
 static int cascade_delete_child_jobs(ws_connection_t *conn, int64_t parent_id) {
    int total = 0;
    for (;;) {

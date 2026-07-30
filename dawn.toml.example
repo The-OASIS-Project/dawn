@@ -1002,13 +1002,16 @@
                                      #   ON by default — unlike document retention,
                                      #   this guards transient tool output, not
                                      #   anything you authored.
+# event_chunk_cap = 16384            # Max bytes of a single tool_call/tool_result
+                                     #   event payload before head+tail truncation
+                                     #   (floored at 256). Bounds the durable event
+                                     #   log + the observe frame size.
 #
-# Parsed and round-tripped, but NOT yet enforced — reserved for the Phase 2
-# (durable event log) and Phase 3 (job trees) work. Setting them has no effect:
+# Parsed and round-tripped, but NOT yet enforced — reserved for the Phase 2 queued
+# state and Phase 3 (job trees) work. Setting them has no effect:
 # max_queued_per_user = 8            # Phase 2/3: per-user queued backlog.
 # max_spawn_depth = 3                # Phase 3: job-tree depth cap.
 # max_children_per_tree = 4          # Phase 3: active children per parent.
-# event_chunk_cap = 16384            # Phase 2: event-payload truncation bytes.
 
 # =============================================================================
 # OTA (over-the-air satellite updates)

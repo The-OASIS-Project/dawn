@@ -480,12 +480,24 @@ void webui_broadcast_conversation_renamed(int user_id, int64_t conv_id, const ch
  * looking at, which is the entire point of a background job.  The client routes
  * by conversation_id, exactly as it already does for conversation-scoped
  * streaming frames. */
+/* Defined below; used by the two broadcasters above its definition. */
+static bool any_session_matches(int user_id, int64_t conv_id_or_zero);
+
 void webui_broadcast_conversation_event(int user_id,
                                         int64_t conv_id,
                                         int64_t seq,
                                         const char *kind,
                                         const char *payload) {
    if (user_id <= 0 || conv_id <= 0 || kind == NULL) {
+      return;
+   }
+   /* Every job turn is observable, so an unwatched "spawn and walk away" job
+    * still emits status/tool_call/tool_result/complete here.  broadcast_json_to_
+    * user_ex serializes + strdups the (up-to-16 KB) payload BEFORE it walks for
+    * recipients, so with no session of this user connected that is pure waste
+    * (tens of KB per event, ~1 MB over a research job).  Pre-flight it — user-
+    * scoped (conv 0) to match the user-scoped broadcast, not conv-scoped. */
+   if (!any_session_matches(user_id, 0)) {
       return;
    }
 
@@ -524,6 +536,11 @@ void webui_broadcast_message_appended(int user_id,
                                       const char *role,
                                       const char *text) {
    if (user_id <= 0 || conv_id <= 0 || text == NULL) {
+      return;
+   }
+   /* Same waste as the event broadcaster above: an unwatched job's answer body
+    * would be serialized + strdup'd for nobody.  User-scoped pre-flight. */
+   if (!any_session_matches(user_id, 0)) {
       return;
    }
 

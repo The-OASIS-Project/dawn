@@ -333,7 +333,11 @@ static void announce_event(const sched_event_t *event) {
 
 #ifdef ENABLE_WEBUI
    if (deliver_via_messaging) {
-      scheduler_send_to_messaging_channel(event->user_id, event->deliver_to, announcement);
+      /* Deliberately fire-and-forget: a failed channel send is WARN-logged in the
+       * engine, and the scheduler owns no retry queue for announcements/briefings.
+       * The int return exists for the jobs consumer (scheduler_emit_alert), which
+       * owes an at-least-once notice; retrying scheduled reminders is out of scope. */
+      (void)scheduler_send_to_messaging_channel(event->user_id, event->deliver_to, announcement);
    } else {
       scheduler_broadcast_notification(event, announcement);
    }
@@ -937,7 +941,8 @@ static void *briefing_thread_func(void *arg) {
 
 #ifdef ENABLE_WEBUI
       if (deliver_via_messaging) {
-         scheduler_send_to_messaging_channel(event->user_id, event->deliver_to, final_text);
+         /* Fire-and-forget (engine WARN-logs a failed send); see announce_event. */
+         (void)scheduler_send_to_messaging_channel(event->user_id, event->deliver_to, final_text);
       } else {
          scheduler_broadcast_briefing_notification(event, final_text, conv_created ? conv_id : 0);
       }
@@ -998,7 +1003,8 @@ fail:
       /* Exclusive-delivery mirrors the success path — when deliver_to
        * is set the messaging channel is the ONLY destination. */
       if (event->deliver_to[0]) {
-         scheduler_send_to_messaging_channel(event->user_id, event->deliver_to, fail_msg);
+         /* Fire-and-forget (engine WARN-logs a failed send); see announce_event. */
+         (void)scheduler_send_to_messaging_channel(event->user_id, event->deliver_to, fail_msg);
       } else {
          scheduler_broadcast_notification(event, fail_msg);
       }
