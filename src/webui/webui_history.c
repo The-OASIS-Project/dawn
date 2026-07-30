@@ -1433,6 +1433,24 @@ void handle_save_message(ws_connection_t *conn, struct json_object *payload) {
       return;
    }
 
+   /* A job conversation is persisted ENTIRELY server-side: the dispatch saves the
+    * goal, job_worker + the tool-persist hook save the assistant/tool rows.  When a
+    * user WATCHES a job live (CP4b), the client's streaming backup-save (streaming.js)
+    * fires on stream-end and would DUPLICATE the server-authoritative final answer —
+    * observed on conv 1063 as the real report PLUS a second preamble-soup row.  Drop
+    * the client save for a job conv; answer success so the client treats it as saved
+    * and does not retry.  conv_db_job_get's ownership JOIN means a foreign/non-job id
+    * falls through to the normal (ownership-checked) save path below. */
+   job_record_t jrec;
+   if (conv_db_job_get(conv_id, conn->auth_user_id, &jrec) == AUTH_DB_SUCCESS) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+      json_object_object_add(resp_payload, "conversation_id", json_object_new_int64(conv_id));
+      json_object_object_add(response, "payload", resp_payload);
+      send_json_response(conn, response);
+      json_object_put(response);
+      return;
+   }
+
    /* Optional display-only reasoning JSON for the final answer (E3).  Bounded by the same
     * limit as message content; over-limit is dropped (the "AI thought" panel simply won't
     * render for that message rather than storing an unbounded blob). */
