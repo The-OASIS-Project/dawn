@@ -217,11 +217,15 @@
                   }
                }
                break;
-            case 'error':
-               // Handle INFO_ prefixed codes as info notifications (not errors)
-               if (msg.payload.code && msg.payload.code.startsWith('INFO_')) {
+            case 'error': {
+               // Route on the explicit severity field. Fall back to the legacy
+               // INFO_ code-prefix convention for servers that don't send it yet.
+               const severity =
+                  msg.payload.severity ||
+                  (msg.payload.code && msg.payload.code.startsWith('INFO_') ? 'info' : 'error');
+               if (severity === 'info' || severity === 'warning') {
                   console.log('Server notification:', msg.payload);
-                  DawnToast.show(msg.payload.message, 'info');
+                  DawnToast.show(msg.payload.message, severity);
                   break;
                }
                console.error('Server error:', msg.payload);
@@ -264,6 +268,7 @@
                   DawnTranscript.addEntry('system', `Error: ${msg.payload.message}`);
                }
                break;
+            }
             case 'session':
                console.log('Session token received');
                DawnStore.set(DawnStore.KEYS.SESSION_TOKEN, msg.payload.token);
@@ -343,6 +348,18 @@
                if (msg.payload.audio_chunk_ms) {
                   DawnAudioCapture.setAudioChunkMs(msg.payload.audio_chunk_ms);
                   console.log('Audio chunk size set to:', msg.payload.audio_chunk_ms, 'ms');
+               }
+               // Music-stream server details (port + enabled) so the dedicated
+               // socket targets the advertised port instead of assuming main+1.
+               if (
+                  typeof DawnMusicPlayback !== 'undefined' &&
+                  DawnMusicPlayback.setServerConfig &&
+                  (msg.payload.music_port !== undefined || msg.payload.music_enabled !== undefined)
+               ) {
+                  DawnMusicPlayback.setServerConfig(
+                     msg.payload.music_port,
+                     msg.payload.music_enabled
+                  );
                }
                break;
             case 'server_features':

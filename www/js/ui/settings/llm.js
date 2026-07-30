@@ -272,8 +272,12 @@
       if (grid) {
          grid.classList.toggle('locked', locked);
       }
+      // Reasoning mode + effort stay editable mid-conversation. Effort never
+      // errors on any provider; a reasoning-mode change is made safe server-side
+      // (Claude clamps an incompatible thinking toggle instead of 400ing). Only
+      // tool mode is frozen after the first message (pending a per-provider test).
       if (reasoningSelect) {
-         reasoningSelect.disabled = locked;
+         reasoningSelect.disabled = false;
       }
       if (toolsSelect) {
          toolsSelect.disabled = locked;
@@ -1122,6 +1126,35 @@
     * Update LLM controls from runtime state
     * @param {Object} runtime - Runtime state object
     */
+   /**
+    * Apply the session's actual reasoning settings from an llm_runtime payload to
+    * the thinking-mode + effort controls. Before llm_runtime carried thinking_mode
+    * and reasoning_effort, these controls could only show the config default until
+    * the user touched them; now a fresh connection reflects the live session value.
+    */
+   function applyRuntimeReasoning(runtime) {
+      const reasoningSelect = document.getElementById('reasoning-mode-select');
+      const depthSelect = document.getElementById('reasoning-effort-select');
+      if (reasoningSelect && runtime.thinking_mode) {
+         reasoningSelect.value = normalizeThinkingMode(runtime.thinking_mode);
+         conversationLlmState.thinking_mode = reasoningSelect.value;
+      }
+      if (depthSelect && runtime.reasoning_effort) {
+         depthSelect.value = runtime.reasoning_effort;
+         // Clamp the selection to what the model accepts (also hides invalid opts).
+         if (runtime.model) {
+            syncEffortDropdownToModel(runtime.model, true);
+         }
+         conversationLlmState.reasoning_effort = depthSelect.value;
+      }
+      // Effort is inert when thinking is disabled — mirror the reset-path UX.
+      if (reasoningSelect && depthSelect) {
+         const off = reasoningSelect.value === 'disabled';
+         depthSelect.disabled = off;
+         setControlHint('effort-hint', off ? 'Enable reasoning first' : null);
+      }
+   }
+
    function updateLlmControls(runtime) {
       llmRuntimeState = { ...llmRuntimeState, ...runtime };
 
@@ -1142,6 +1175,7 @@
          if (runtime.model) {
             syncEffortDropdownToModel(runtime.model, true);
          }
+         applyRuntimeReasoning(runtime);
          if (typeof DAWN !== 'undefined' && DAWN.updateLlmMiniSummary) {
             DAWN.updateLlmMiniSummary();
          }
@@ -1229,6 +1263,10 @@
       if (runtime.model) {
          syncEffortDropdownToModel(runtime.model, true);
       }
+
+      // Apply the session's actual thinking_mode / reasoning_effort (llm_runtime
+      // now carries them) so the controls reflect the live session, not the default.
+      applyRuntimeReasoning(runtime);
 
       // Update collapsed mini bar summary if available
       if (typeof DAWN !== 'undefined' && DAWN.updateLlmMiniSummary) {

@@ -124,6 +124,10 @@
       retryCount: 0,
       maxRetries: 5,
       authFailed: false, // True when server rejects token — stop retrying
+      // Advertised by the server's `config` frame. serverPort null = not yet
+      // advertised (fall back to main+1); serverEnabled false = music server off.
+      serverPort: null,
+      serverEnabled: null,
 
       /**
        * Connect to the dedicated music streaming server
@@ -139,10 +143,17 @@
             return;
          }
 
+         // Skip the dedicated socket entirely when the server says music is off.
+         if (this.serverEnabled === false) {
+            console.log('Music stream: server reports music disabled; not connecting');
+            return;
+         }
+
          const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
          const host = window.location.hostname;
          const mainPort = parseInt(window.location.port || '8080', 10);
-         const musicPort = mainPort + 1;
+         // Prefer the server-advertised port; fall back to main+1 for older servers.
+         const musicPort = this.serverPort || mainPort + 1;
          const url = `${protocol}//${host}:${musicPort}`;
 
          console.log('Music stream: Connecting to', url, '(attempt', this.retryCount + 1 + ')');
@@ -963,5 +974,22 @@
       handleBinaryMessage: handleBinaryMessage,
       handleJsonMessage: handleJsonMessage,
       reconnectMusicStream: reconnectMusicStream,
+      setServerConfig: setServerConfig,
    };
+
+   /**
+    * Record the music-stream server details advertised in the `config` frame so
+    * the dedicated socket targets the real port instead of assuming main+1, and
+    * can skip connecting entirely when the server has music disabled.
+    * @param {number} port - Advertised music-stream port
+    * @param {boolean} enabled - Whether the music server is running
+    */
+   function setServerConfig(port, enabled) {
+      if (typeof port === 'number' && port > 0) {
+         MusicStreamConnection.serverPort = port;
+      }
+      if (typeof enabled === 'boolean') {
+         MusicStreamConnection.serverEnabled = enabled;
+      }
+   }
 })(window);

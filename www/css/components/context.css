@@ -424,9 +424,11 @@
    }
 }
 
-/* Locked state — disables reasoning/effort/tools selects */
-#llm-controls-grid.locked #reasoning-mode-select,
-#llm-controls-grid.locked #reasoning-effort-select,
+/* Locked state — only tool mode is frozen after the first message. Reasoning
+ * mode and effort stay editable: effort never errors mid-conversation on any
+ * provider, and reasoning-mode changes are made safe server-side (Claude clamps
+ * an incompatible thinking toggle rather than 400ing). Tool mode stays locked
+ * pending a per-provider mid-conversation switch test. */
 #llm-controls-grid.locked #tools-mode-select {
    opacity: 0.6;
    cursor: not-allowed;
