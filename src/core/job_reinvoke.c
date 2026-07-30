@@ -57,6 +57,7 @@
 #include "llm/llm_interface.h"
 #include "logging.h"
 #include "memory/memory_history_loader.h"
+#include "webui/webui_server.h" /* webui_tool_iteration_cb — bubble-seal hook (job_reinvoke is ENABLE_WEBUI-only) */
 
 /* Generous per-result head cap so a pathological job output can't blow the
  * reinjected prompt.  Decision #3 is "full result" — this is a safety ceiling,
@@ -457,8 +458,15 @@ static void *reinvoke_turn_entry(void *arg) {
    if (envelope != NULL && n_fired > 0) {
       job_persist_ctx_t pctx = { parent, user_id };
       session_set_tool_persist_hook(live, job_dispatch_tool_persist_cb, &pctx);
+      /* Same tool-iteration seal job_worker/WebUI install: without it a multi-
+       * iteration re-engagement on the viewer's session never flips
+       * llm_streaming_active false between iterations, so every iteration's text
+       * (incl. the final answer) collapses into the first bubble and the tool
+       * entries pile below it.  A live viewer is a WEBUI session, so this renders. */
+      session_set_tool_iteration_hook(live, webui_tool_iteration_cb, NULL);
       text_input_dispatch_opts_t opts = reinvoke_dispatch_opts(user_id);
       char *response = core_text_input_dispatch(live, envelope, NULL, NULL, NULL, 0, &opts);
+      session_set_tool_iteration_hook(live, NULL, NULL);
       session_set_tool_persist_hook(live, NULL, NULL);
 
       /* C3: mark fired ONLY if the reply is actually saved somewhere.  A
@@ -556,8 +564,13 @@ static void reinvoke_run_detached(reinvoke_work_t *w,
 
    job_persist_ctx_t pctx = { w->parent_conv, w->user_id };
    session_set_tool_persist_hook(s, job_dispatch_tool_persist_cb, &pctx);
+   /* Iteration seal (see live path): a no-op with no viewer, but correct if the
+    * parent conv is opened mid-turn and gets live events, and consistent with
+    * job_worker. */
+   session_set_tool_iteration_hook(s, webui_tool_iteration_cb, NULL);
    text_input_dispatch_opts_t opts = reinvoke_dispatch_opts(w->user_id);
    char *response = core_text_input_dispatch(s, envelope, NULL, NULL, NULL, 0, &opts);
+   session_set_tool_iteration_hook(s, NULL, NULL);
    session_set_tool_persist_hook(s, NULL, NULL);
 
    bool cancelled = atomic_load(&s->cancel_requested);
