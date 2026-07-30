@@ -50,6 +50,7 @@
 #include "logging.h"
 #include "webui/webui_always_on.h"
 #include "webui/webui_internal.h"
+#include "webui/webui_music_server.h"
 #include "webui/webui_server.h"
 
 /* =============================================================================
@@ -426,11 +427,24 @@ static void send_transcript_impl(struct lws *wsi, const char *role, const char *
 }
 
 void send_error_impl(struct lws *wsi, const char *code, const char *message) {
+   send_error_impl_ex(wsi, code, message, WS_SEVERITY_ERROR);
+}
+
+void send_error_impl_ex(struct lws *wsi,
+                        const char *code,
+                        const char *message,
+                        ws_error_severity_t severity) {
    struct json_object *obj = json_object_new_object();
    struct json_object *payload = json_object_new_object();
 
+   const char *severity_str = severity == WS_SEVERITY_INFO      ? "info"
+                              : severity == WS_SEVERITY_WARNING ? "warning"
+                                                                : "error";
+
    json_object_object_add(payload, "code", json_object_new_string(code));
    json_object_object_add(payload, "message", json_object_new_string(message));
+   json_object_object_add(payload, "severity", json_object_new_string(severity_str));
+   /* Kept for backward compat; `severity` is the field new clients should read. */
    json_object_object_add(payload, "recoverable", json_object_new_boolean(1));
    json_object_object_add(obj, "type", json_object_new_string("error"));
    json_object_object_add(obj, "payload", payload);
@@ -471,11 +485,17 @@ void send_session_token_impl(ws_connection_t *conn, const char *token) {
    send_json_message(conn->wsi, json);
 }
 
-static void send_config_impl(struct lws *wsi) {
-   char json[256];
-   snprintf(json, sizeof(json), "{\"type\":\"config\",\"payload\":{\"audio_chunk_ms\":%d}}",
-            g_config.webui.audio_chunk_ms);
-   send_json_message(wsi, json);
+/* Single source of truth for the `config` frame payload. Used by the on-connect
+ * init batch (queue_init_messages). Advertises the dedicated music-stream server so
+ * clients don't have to guess main_port + 1; music_enabled=false means skip the
+ * dedicated socket entirely. */
+static void build_config_json(char *json, size_t len) {
+   bool music_enabled = webui_music_server_is_running();
+   int music_port = webui_music_server_get_port();
+   snprintf(json, len,
+            "{\"type\":\"config\",\"payload\":{\"audio_chunk_ms\":%d,"
+            "\"music_enabled\":%s,\"music_port\":%d}}",
+            g_config.webui.audio_chunk_ms, music_enabled ? "true" : "false", music_port);
 }
 
 /* Compile-time constant: feature flags sent to all clients on connect */
@@ -514,8 +534,7 @@ void queue_init_messages(ws_connection_t *conn, const char *token) {
    /* 2. Config — pre-serialize as JSON string */
    {
       char json[256];
-      snprintf(json, sizeof(json), "{\"type\":\"config\",\"payload\":{\"audio_chunk_ms\":%d}}",
-               g_config.webui.audio_chunk_ms);
+      build_config_json(json, sizeof(json));
       ws_response_t resp = { 0 };
       resp.session = session;
       resp.type = WS_RESP_JSON;
@@ -873,7 +892,7 @@ void process_one_response(void) {
          free(resp.transcript.text);
          break;
       case WS_RESP_ERROR:
-         send_error_impl(conn->wsi, resp.error.code, resp.error.message);
+         send_error_impl_ex(conn->wsi, resp.error.code, resp.error.message, resp.error.severity);
          free(resp.error.code);
          free(resp.error.message);
          break;

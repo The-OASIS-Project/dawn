@@ -97,6 +97,34 @@ static const char *s_restart_required_fields[] = {
    "webui.ssl_key_path", "webui.bind_address",   NULL
 };
 
+/* Effective model name for a resolved LLM config: the session's model if set,
+ * otherwise the provider/type default. Never returns the empty string for a valid
+ * provider, so callers can persist/report "the model actually in use". The returned
+ * pointer is owned by config/provider-default state — copy it before further calls. */
+const char *webui_effective_model_name(const llm_resolved_config_t *resolved) {
+   if (!resolved) {
+      return "";
+   }
+   if (resolved->model && resolved->model[0] != '\0') {
+      return resolved->model;
+   }
+   if (resolved->type == LLM_LOCAL) {
+      return g_config.llm.local.model[0] ? g_config.llm.local.model : "local";
+   }
+   switch (resolved->cloud_provider) {
+      case CLOUD_PROVIDER_OPENAI:
+         return llm_get_default_openai_model();
+      case CLOUD_PROVIDER_CLAUDE:
+         return llm_get_default_claude_model();
+      case CLOUD_PROVIDER_GEMINI:
+         return llm_get_default_gemini_model();
+      case CLOUD_PROVIDER_OPENROUTER:
+         return llm_get_default_openrouter_model();
+      default:
+         return "";
+   }
+}
+
 void handle_get_config(ws_connection_t *conn) {
    if (!conn_require_auth(conn))
       return;
@@ -198,21 +226,8 @@ void handle_get_config(ws_connection_t *conn) {
                                : resolved.cloud_provider == CLOUD_PROVIDER_OPENROUTER ? "OpenRouter"
                                                                                       : "None";
    json_object_object_add(llm_runtime, "provider", json_object_new_string(provider_name));
-   /* Get actual model name from config based on type/provider */
-   const char *model_name = NULL;
-   if (resolved.model && resolved.model[0] != '\0') {
-      model_name = resolved.model;
-   } else if (resolved.type == LLM_LOCAL) {
-      model_name = g_config.llm.local.model[0] ? g_config.llm.local.model : "local";
-   } else if (resolved.cloud_provider == CLOUD_PROVIDER_OPENAI) {
-      model_name = llm_get_default_openai_model();
-   } else if (resolved.cloud_provider == CLOUD_PROVIDER_CLAUDE) {
-      model_name = llm_get_default_claude_model();
-   } else if (resolved.cloud_provider == CLOUD_PROVIDER_GEMINI) {
-      model_name = llm_get_default_gemini_model();
-   } else if (resolved.cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
-      model_name = llm_get_default_openrouter_model();
-   }
+   /* Actual model name in use (session override, else provider/type default). */
+   const char *model_name = webui_effective_model_name(&resolved);
    json_object_object_add(llm_runtime, "model",
                           json_object_new_string(model_name ? model_name : ""));
    json_object_object_add(llm_runtime, "openai_available",
@@ -227,6 +242,15 @@ void handle_get_config(ws_connection_t *conn) {
    if (ctx_max > 0) {
       json_object_object_add(llm_runtime, "context_max", json_object_new_int(ctx_max));
    }
+   /* Session's actual reasoning settings, so a client shows the real per-session
+    * value instead of the config default. Sourced from `resolved` to match every
+    * sibling field in this object (type/provider/model/context_max). llm_state_update
+    * only fires on a switch_llm tool call, so this is the only place a fresh
+    * connection learns them. */
+   json_object_object_add(llm_runtime, "thinking_mode",
+                          json_object_new_string(resolved.thinking_mode));
+   json_object_object_add(llm_runtime, "reasoning_effort",
+                          json_object_new_string(resolved.reasoning_effort));
    json_object_object_add(payload, "llm_runtime", llm_runtime);
 
    /* Add auth state for frontend UI visibility control */

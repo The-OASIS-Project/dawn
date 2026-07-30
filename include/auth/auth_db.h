@@ -1786,6 +1786,27 @@ int conv_db_update_llm_settings(int64_t conv_id,
                                 const char *reasoning_effort);
 
 /**
+ * @brief Fill only the LLM-settings columns that are currently NULL/empty.
+ *
+ * Unlike conv_db_lock_llm_settings (message_count==0 gate, overwrites) and
+ * conv_db_update_llm_settings (overwrites unconditionally), this per-column
+ * fill-if-empty never clobbers an existing value and has no message_count
+ * dependency — making it race-proof against the first-turn message persist. Used
+ * to stamp a fresh conversation with the session's resolved config at creation so
+ * no conversation persists NULL LLM columns.
+ *
+ * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND (no matching row), or AUTH_DB_FAILURE
+ */
+int conv_db_fill_llm_settings_if_empty(int64_t conv_id,
+                                       int user_id,
+                                       const char *llm_type,
+                                       const char *cloud_provider,
+                                       const char *model,
+                                       const char *tools_mode,
+                                       const char *thinking_mode,
+                                       const char *reasoning_effort);
+
+/**
  * @brief Delete a conversation and all its messages
  *
  * @param conv_id Conversation ID

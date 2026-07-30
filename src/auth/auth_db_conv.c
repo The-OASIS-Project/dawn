@@ -417,7 +417,7 @@ int conv_db_create_continuation(int user_id,
 
    /* Get parent title and LLM settings for the continuation */
    const char *sql_get_parent =
-       "SELECT title, llm_type, cloud_provider, model, tools_mode, thinking_mode "
+       "SELECT title, llm_type, cloud_provider, model, tools_mode, thinking_mode, reasoning_effort "
        "FROM conversations WHERE id = ?";
    rc = sqlite3_prepare_v2(s_db.db, sql_get_parent, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
@@ -432,6 +432,7 @@ int conv_db_create_continuation(int user_id,
    char parent_model[64] = "";
    char parent_tools_mode[16] = "";
    char parent_thinking_mode[16] = "";
+   char parent_reasoning_effort[16] = "";
 
    if (sqlite3_step(stmt) == SQLITE_ROW) {
       const char *title = (const char *)sqlite3_column_text(stmt, 0);
@@ -460,6 +461,10 @@ int conv_db_create_continuation(int user_id,
          strncpy(parent_thinking_mode, val, sizeof(parent_thinking_mode) - 1);
          parent_thinking_mode[sizeof(parent_thinking_mode) - 1] = '\0';
       }
+      if ((val = (const char *)sqlite3_column_text(stmt, 6)) != NULL) {
+         strncpy(parent_reasoning_effort, val, sizeof(parent_reasoning_effort) - 1);
+         parent_reasoning_effort[sizeof(parent_reasoning_effort) - 1] = '\0';
+      }
    }
    sqlite3_finalize(stmt);
 
@@ -473,8 +478,8 @@ int conv_db_create_continuation(int user_id,
    const char *sql_create =
        "INSERT INTO conversations (user_id, title, created_at, updated_at, continued_from, "
        "compaction_summary, llm_type, cloud_provider, model, tools_mode, thinking_mode, "
-       "anchor_date) "
-       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+       "reasoning_effort, anchor_date) "
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
    rc = sqlite3_prepare_v2(s_db.db, sql_create, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("conv_db_create_continuation: prepare insert failed: %s", sqlite3_errmsg(s_db.db));
@@ -498,7 +503,8 @@ int conv_db_create_continuation(int user_id,
    sqlite3_bind_text(stmt, 9, parent_model, -1, SQLITE_TRANSIENT);
    sqlite3_bind_text(stmt, 10, parent_tools_mode, -1, SQLITE_TRANSIENT);
    sqlite3_bind_text(stmt, 11, parent_thinking_mode, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_int64(stmt, 12, (int64_t)now);
+   sqlite3_bind_text(stmt, 12, parent_reasoning_effort, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int64(stmt, 13, (int64_t)now);
 
    rc = sqlite3_step(stmt);
    sqlite3_finalize(stmt);
@@ -1367,6 +1373,71 @@ int conv_db_lock_llm_settings(int64_t conv_id,
    AUTH_DB_UNLOCK();
 
    /* No rows updated = conversation not found, wrong owner, or already has messages */
+   return (changes > 0) ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
+}
+
+int conv_db_fill_llm_settings_if_empty(int64_t conv_id,
+                                       int user_id,
+                                       const char *llm_type,
+                                       const char *cloud_provider,
+                                       const char *model,
+                                       const char *tools_mode,
+                                       const char *thinking_mode,
+                                       const char *reasoning_effort) {
+   if (conv_id <= 0) {
+      return AUTH_DB_INVALID;
+   }
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   /* Fill ONLY the columns currently NULL/empty. Never overwrites a value the user
+    * chose or a continuation inherited from its parent, and has NO message_count
+    * gate — so it's race-proof against the first-turn worker persisting the user
+    * message (which would otherwise flip message_count to 1 and defeat the
+    * lock-style guard). */
+   const char *sql =
+       "UPDATE conversations SET "
+       "llm_type = CASE WHEN llm_type IS NULL OR llm_type = '' THEN ?1 ELSE llm_type END, "
+       "cloud_provider = CASE WHEN cloud_provider IS NULL OR cloud_provider = '' "
+       "THEN ?2 ELSE cloud_provider END, "
+       "model = CASE WHEN model IS NULL OR model = '' THEN ?3 ELSE model END, "
+       "tools_mode = CASE WHEN tools_mode IS NULL OR tools_mode = '' THEN ?4 ELSE tools_mode END, "
+       "thinking_mode = CASE WHEN thinking_mode IS NULL OR thinking_mode = '' "
+       "THEN ?5 ELSE thinking_mode END, "
+       "reasoning_effort = CASE WHEN reasoning_effort IS NULL OR reasoning_effort = '' "
+       "THEN ?6 ELSE reasoning_effort END "
+       "WHERE id = ?7 AND user_id = ?8";
+
+   sqlite3_stmt *stmt = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare fill_llm_settings failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+
+   sqlite3_bind_text(stmt, 1, llm_type ? llm_type : "", -1, SQLITE_STATIC);
+   sqlite3_bind_text(stmt, 2, cloud_provider ? cloud_provider : "", -1, SQLITE_STATIC);
+   sqlite3_bind_text(stmt, 3, model ? model : "", -1, SQLITE_STATIC);
+   sqlite3_bind_text(stmt, 4, tools_mode ? tools_mode : "", -1, SQLITE_STATIC);
+   sqlite3_bind_text(stmt, 5, thinking_mode ? thinking_mode : "", -1, SQLITE_STATIC);
+   sqlite3_bind_text(stmt, 6, reasoning_effort ? reasoning_effort : "", -1, SQLITE_STATIC);
+   sqlite3_bind_int64(stmt, 7, conv_id);
+   sqlite3_bind_int(stmt, 8, user_id);
+
+   rc = sqlite3_step(stmt);
+   sqlite3_finalize(stmt);
+
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("auth_db: fill_llm_settings step failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+
+   int changes = sqlite3_changes(s_db.db);
+   AUTH_DB_UNLOCK();
+
+   /* changes == 0 only when the id/user_id predicate matched no row. */
    return (changes > 0) ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
 }
 

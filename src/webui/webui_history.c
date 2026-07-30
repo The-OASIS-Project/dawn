@@ -436,6 +436,11 @@ void handle_new_conversation(ws_connection_t *conn, struct json_object *payload)
       /* Update active conversation tracking */
       conn->active_conversation_id = conv_id;
 
+      /* Stamp the session's current LLM settings onto the fresh row so it records
+       * the model/reasoning it runs with instead of leaving NULL columns (which the
+       * client would render as stale defaults). Safe no-op once a message lands. */
+      webui_conv_stamp_llm_settings(conn->session, conv_id, conn->auth_user_id);
+
       /* Back-fill the in-flight turn's conversation tag if it was dispatched
        * before this row existed (fresh-chat first message: the text is dispatched,
        * then this new_conversation creates the row).  Only overwrite the
@@ -590,6 +595,11 @@ void handle_continue_conversation(ws_connection_t *conn, struct json_object *pay
       OLOG_INFO("WebUI: Conversation %lld continued as %lld for user %s", (long long)old_conv_id,
                 (long long)new_conv_id, conn->username);
 
+      /* Backstop for a continuation whose parent had NULL settings (legacy row):
+       * the inherited copy is empty, so fill from the live session config. No-op
+       * when the parent's settings were inherited non-empty. */
+      webui_conv_stamp_llm_settings(conn->session, new_conv_id, conn->auth_user_id);
+
       auth_db_log_event("CONVERSATION_CONTINUED", conn->username, conn->client_ip,
                         "Context compacted");
    } else if (result == AUTH_DB_NOT_FOUND) {
@@ -643,6 +653,86 @@ static int load_msg_callback(const conversation_message_t *msg, void *context) {
 
    json_object_array_add(msg_array, msg_obj);
    return 0;
+}
+
+/**
+ * @brief Build the per-conversation llm_settings JSON object.
+ *
+ * Substitutes the effective global defaults for any column left empty — legacy
+ * conversations created before settings were stamped at creation. Without this a
+ * NULL column reaches the client as "" and the UI leaves its LLM controls showing
+ * the previously-viewed conversation's values. Shared by load + export so both stay
+ * consistent (and both carry reasoning_effort).
+ *
+ * Note: export therefore reports the *effective* value for a legacy empty column,
+ * not the raw stored blank — a deliberate choice (the effective config is what the
+ * conversation actually ran with, and it's strictly better than the prior export,
+ * which omitted reasoning_effort entirely).
+ */
+static json_object *build_conv_llm_settings_json(const conversation_t *conv) {
+   session_llm_config_t def_sc;
+   llm_get_default_config(&def_sc);
+   llm_resolved_config_t def_r = { 0 };
+   llm_resolve_config(&def_sc, &def_r);
+
+   const char *def_type = def_r.type == LLM_LOCAL ? "local" : "cloud";
+   const char *def_provider = cloud_provider_to_string(def_r.cloud_provider);
+   const char *def_model = webui_effective_model_name(&def_r);
+
+   json_object *llm = json_object_new_object();
+   json_object_object_add(llm, "llm_type",
+                          json_object_new_string(conv->llm_type[0] ? conv->llm_type : def_type));
+   json_object_object_add(llm, "cloud_provider",
+                          json_object_new_string(conv->cloud_provider[0]
+                                                     ? conv->cloud_provider
+                                                     : (def_provider ? def_provider : "")));
+   json_object_object_add(llm, "model",
+                          json_object_new_string(conv->model[0] ? conv->model
+                                                                : (def_model ? def_model : "")));
+   json_object_object_add(llm, "tools_mode",
+                          json_object_new_string(conv->tools_mode[0] ? conv->tools_mode
+                                                                     : def_r.tool_mode));
+   json_object_object_add(llm, "thinking_mode",
+                          json_object_new_string(conv->thinking_mode[0] ? conv->thinking_mode
+                                                                        : def_r.thinking_mode));
+   json_object_object_add(llm, "reasoning_effort",
+                          json_object_new_string(conv->reasoning_effort[0]
+                                                     ? conv->reasoning_effort
+                                                     : def_r.reasoning_effort));
+   return llm;
+}
+
+/**
+ * @brief Stamp a conversation with the session's resolved LLM settings at creation.
+ *
+ * Fills only the columns still NULL/empty, so a fresh chat records the model and
+ * reasoning it actually runs with — without clobbering a continuation's inherited
+ * parent settings or a value the user already chose. Uses the race-proof
+ * fill-if-empty primitive (no message_count gate) so a concurrent first-turn
+ * persist can't defeat it. This deliberately FREEZES settings at creation; the
+ * messaging stamp (messaging_engine_channels.c) makes the opposite choice (writes
+ * NULLs to keep inheriting the global default) — do not "align" them.
+ */
+void webui_conv_stamp_llm_settings(session_t *session, int64_t conv_id, int user_id) {
+   if (!session || conv_id <= 0) {
+      return;
+   }
+   session_llm_config_t sc;
+   session_get_llm_config(session, &sc);
+   llm_resolved_config_t r = { 0 };
+   if (llm_resolve_config(&sc, &r) != 0) {
+      return; /* Unconfigured provider: leave columns for read-side defaults. */
+   }
+
+   /* Copy the effective model immediately — resolved.model may alias volatile
+    * state, and the helper can return a provider-default pointer. */
+   char model[LLM_MODEL_NAME_MAX];
+   snprintf(model, sizeof(model), "%s", webui_effective_model_name(&r));
+
+   const char *type_str = r.type == LLM_LOCAL ? "local" : "cloud";
+   conv_db_fill_llm_settings_if_empty(conv_id, user_id, type_str,
+                                      cloud_provider_to_string(r.cloud_provider), model,
+                                      r.tool_mode, r.thinking_mode, r.reasoning_effort);
 }
 
 /**
@@ -809,25 +899,10 @@ void handle_load_conversation(ws_connection_t *conn, struct json_object *payload
             json_object_object_add(resp_payload, "context_max",
                                    json_object_new_int(conv.context_max));
 
-            /* Per-conversation LLM settings */
-            json_object *llm_settings = json_object_new_object();
-            json_object_object_add(llm_settings, "llm_type",
-                                   json_object_new_string(conv.llm_type[0] ? conv.llm_type : ""));
-            json_object_object_add(llm_settings, "cloud_provider",
-                                   json_object_new_string(
-                                       conv.cloud_provider[0] ? conv.cloud_provider : ""));
-            json_object_object_add(llm_settings, "model",
-                                   json_object_new_string(conv.model[0] ? conv.model : ""));
-            json_object_object_add(llm_settings, "tools_mode",
-                                   json_object_new_string(conv.tools_mode[0] ? conv.tools_mode
-                                                                             : ""));
-            json_object_object_add(llm_settings, "thinking_mode",
-                                   json_object_new_string(conv.thinking_mode[0] ? conv.thinking_mode
-                                                                                : ""));
-            json_object_object_add(llm_settings, "reasoning_effort",
-                                   json_object_new_string(
-                                       conv.reasoning_effort[0] ? conv.reasoning_effort : ""));
-            json_object_object_add(resp_payload, "llm_settings", llm_settings);
+            /* Per-conversation LLM settings (effective defaults substituted for
+             * legacy NULL columns — see build_conv_llm_settings_json). */
+            json_object_object_add(resp_payload, "llm_settings",
+                                   build_conv_llm_settings_json(&conv));
 
             json_object_object_add(resp_payload, "llm_locked",
                                    json_object_new_boolean(total_messages > 0));
@@ -1886,14 +1961,8 @@ void handle_export_conversation(ws_connection_t *conn, struct json_object *paylo
    json_object_object_add(conv_obj, "continued_from",
                           conv.continued_from ? json_object_new_int64(conv.continued_from) : NULL);
 
-   /* LLM settings */
-   json_object *llm_obj = json_object_new_object();
-   json_object_object_add(llm_obj, "llm_type", json_object_new_string(conv.llm_type));
-   json_object_object_add(llm_obj, "cloud_provider", json_object_new_string(conv.cloud_provider));
-   json_object_object_add(llm_obj, "model", json_object_new_string(conv.model));
-   json_object_object_add(llm_obj, "tools_mode", json_object_new_string(conv.tools_mode));
-   json_object_object_add(llm_obj, "thinking_mode", json_object_new_string(conv.thinking_mode));
-   json_object_object_add(conv_obj, "llm_settings", llm_obj);
+   /* LLM settings (shared builder: effective defaults + reasoning_effort). */
+   json_object_object_add(conv_obj, "llm_settings", build_conv_llm_settings_json(&conv));
 
    json_object_object_add(export_doc, "conversation", conv_obj);
    json_object_object_add(export_doc, "messages", messages);

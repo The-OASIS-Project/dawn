@@ -239,6 +239,7 @@ typedef struct {
       struct {
          char *code;
          char *message;
+         ws_error_severity_t severity; /* Default 0 = WS_SEVERITY_ERROR */
       } error;
       struct {
          char *token;
@@ -644,9 +645,32 @@ bool conn_require_admin(ws_connection_t *conn);
 void send_json_response(ws_connection_t *conn, json_object *response);
 
 /**
- * @brief Send error message implementation
+ * @brief Effective model name for a resolved LLM config (session model if set,
+ *        else the provider/type default). Never empty for a valid provider.
+ *        Returned pointer is not owned — copy before further calls.
+ */
+const char *webui_effective_model_name(const llm_resolved_config_t *resolved);
+
+/**
+ * @brief Stamp a conversation with the session's resolved LLM settings at
+ *        creation, so no conversation persists NULL llm columns. No-op once the
+ *        conversation has any messages (conv_db_lock_llm_settings gates on
+ *        message_count == 0).
+ */
+void webui_conv_stamp_llm_settings(session_t *session, int64_t conv_id, int user_id);
+
+/**
+ * @brief Send error message implementation (severity = error)
  */
 void send_error_impl(struct lws *wsi, const char *code, const char *message);
+
+/**
+ * @brief Send error message implementation with an explicit severity.
+ */
+void send_error_impl_ex(struct lws *wsi,
+                        const char *code,
+                        const char *message,
+                        ws_error_severity_t severity);
 
 /**
  * @brief Handle a phone_action WS message (answer / reject / hangup a call).

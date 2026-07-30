@@ -300,6 +300,19 @@ void webui_send_context(struct session *session,
                         float threshold);
 
 /**
+ * @brief Severity carried on an `error` frame so a client can distinguish a
+ *        real failure from a purely informational notice (e.g. "thinking
+ *        auto-disabled"). Serialized as the `severity` string in the payload;
+ *        the default (zero) is ERROR so existing zero-initialized callers keep
+ *        their current behavior.
+ */
+typedef enum {
+   WS_SEVERITY_ERROR = 0, /**< A real failure. Serializes to "error". */
+   WS_SEVERITY_WARNING,   /**< Something degraded but usable. "warning". */
+   WS_SEVERITY_INFO,      /**< Informational notice, nothing broke. "info". */
+} ws_error_severity_t;
+
+/**
  * @brief Send error message to WebSocket client
  *
  * @param session Session to send to (must be SESSION_TYPE_WEBUI)
@@ -307,8 +320,24 @@ void webui_send_context(struct session *session,
  * @param message Human-readable error message
  *
  * @note Thread-safe - can be called from any thread
+ * @note Sends at WS_SEVERITY_ERROR. Use webui_send_error_ex() for info/warning.
  */
 void webui_send_error(struct session *session, const char *code, const char *message);
+
+/**
+ * @brief Send an error frame with an explicit severity.
+ *
+ * @param session  Session to send to (SESSION_TYPE_WEBUI or SESSION_TYPE_DAP2)
+ * @param code     Error/notice code (e.g., "INFO_THINKING_DISABLED")
+ * @param message  Human-readable text
+ * @param severity Frame severity (info | warning | error)
+ *
+ * @note Thread-safe - can be called from any thread
+ */
+void webui_send_error_ex(struct session *session,
+                         const char *code,
+                         const char *message,
+                         ws_error_severity_t severity);
 
 /**
  * @brief Send context compaction notification to WebSocket client

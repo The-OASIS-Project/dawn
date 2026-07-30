@@ -587,6 +587,25 @@ static bool claude_model_requires_adaptive_thinking(const char *model_name) {
    return false;
 }
 
+#ifdef ENABLE_WEBUI
+/* Emit a WebUI info notice about a thinking-mode clamp, at most once per session.
+ * Shared by the auto-disable and auto-enable clamps below so the matched pair stays
+ * in sync. *last_session is a single-slot "most recently notified session" tracker
+ * (per-session best-effort dedup; a benign redundant/skipped notice is possible when
+ * two sessions collide on the static — same precedent as before). */
+static void claude_notify_thinking_clamp_once(uint32_t *last_session,
+                                              const char *code,
+                                              const char *log_label,
+                                              const char *notice_msg) {
+   session_t *session = session_get_command_context();
+   if (session && session->type == SESSION_TYPE_WEBUI && session->session_id != *last_session) {
+      *last_session = session->session_id;
+      OLOG_INFO("Claude: %s for session %u", log_label, session->session_id);
+      webui_send_error_ex(session, code, notice_msg, WS_SEVERITY_INFO);
+   }
+}
+#endif
+
 json_object *convert_to_claude_format(struct json_object *openai_conversation,
                                       const char *input_text,
                                       const char **vision_images,
@@ -611,10 +630,10 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
    int thinking_budget = 0;
    OLOG_INFO("Claude: thinking_mode='%s', model='%s'", thinking_mode, model_name);
 
-   if (strcmp(thinking_mode, "disabled") != 0) {
-      // Check if model supports thinking (Claude 3.5+)
-      // Extract version from model name and check if >= 3.5
-      bool model_supports = false;
+   // Detect extended-thinking support (Claude 3.5+) once — both the enable path
+   // below and the mid-conversation disable-clamp further down need it.
+   bool model_supports_thinking = false;
+   {
       int major = 0, minor = 0;
       const char *p = model_name;
       while (*p) {
@@ -632,15 +651,18 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
             }
             // Version >= 3.5 supports thinking
             if (major > 3 || (major == 3 && minor >= 5)) {
-               model_supports = true;
+               model_supports_thinking = true;
                break;
             }
          }
          p++;
       }
-      OLOG_INFO("Claude: version detected %d.%d, model_supports=%d", major, minor, model_supports);
+      OLOG_INFO("Claude: version detected %d.%d, model_supports=%d", major, minor,
+                model_supports_thinking);
+   }
 
-      if (model_supports || strcmp(thinking_mode, "enabled") == 0) {
+   if (strcmp(thinking_mode, "disabled") != 0) {
+      if (model_supports_thinking || strcmp(thinking_mode, "enabled") == 0) {
          thinking_enabled = true;
          thinking_budget = llm_get_effective_budget_tokens();
       }
@@ -679,21 +701,48 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
          thinking_enabled = false;
 
 #ifdef ENABLE_WEBUI
-         /* Send notification to WebUI about thinking being disabled (once per session) */
          static uint32_t last_notified_session = 0;
-         session_t *session = session_get_command_context();
-         if (session && session->type == SESSION_TYPE_WEBUI &&
-             session->session_id != last_notified_session) {
-            last_notified_session = session->session_id;
-            OLOG_INFO("Claude: Auto-disabled thinking for session %u (incompatible history)",
-                      session->session_id);
-            webui_send_error(session, "INFO_THINKING_DISABLED",
-                             "Extended thinking auto-disabled: conversation history from "
-                             "previous provider is incompatible. Start a new conversation "
-                             "to use thinking with Claude.");
-         }
+         claude_notify_thinking_clamp_once(
+             &last_notified_session, "INFO_THINKING_DISABLED",
+             "Auto-disabled thinking (incompatible history)",
+             "Extended thinking auto-disabled: conversation history from previous provider "
+             "is incompatible. Start a new conversation to use thinking with Claude.");
 #endif
       }
+   }
+
+   // Inverse of the auto-disable above: the user has thinking DISABLED, but the
+   // conversation already contains thinking blocks. Claude rejects that request
+   // ("assistant message cannot contain thinking"), so force thinking back on for
+   // this turn. This is the server-side guarantee that lets any client (WebUI,
+   // satellite, ...) allow a mid-conversation thinking toggle: enabling is guarded
+   // above (auto-disabled when incompatible), disabling is guarded here.
+   //
+   // Residual case this can't fix: if the model was switched mid-conversation to
+   // one that does NOT support thinking, the model_supports_thinking guard skips
+   // the clamp and Claude still 400s (can't preserve thinking blocks, can't strip
+   // them here). Rare in practice (a thinking history implies a thinking model);
+   // resolving it would require stripping thinking blocks from history — out of scope.
+   //
+   // The !llm_tools_suppressed() guard is deliberate: internal utility calls
+   // (search summarization, context compaction) already force thinking off above
+   // and must not have it forced back on here. Those paths build minimal prompts,
+   // so has_existing_thinking is expected false for them.
+   if (!thinking_enabled && has_existing_thinking && model_supports_thinking &&
+       !llm_tools_suppressed()) {
+      thinking_enabled = true;
+      thinking_budget = llm_get_effective_budget_tokens();
+
+#ifdef ENABLE_WEBUI
+      static uint32_t last_kept_on_session = 0;
+      claude_notify_thinking_clamp_once(
+          &last_kept_on_session, "INFO_THINKING_KEPT_ON",
+          "Forced thinking ON (history contains thinking blocks)",
+          "Extended thinking stayed on: this conversation already contains reasoning, which "
+          "Claude requires be preserved. Start a new conversation to turn thinking off.");
+#else
+      OLOG_INFO("Claude: Forced thinking ON (history contains thinking blocks)");
+#endif
    }
 
    // Max tokens: Claude requires max_tokens > budget_tokens when thinking is enabled

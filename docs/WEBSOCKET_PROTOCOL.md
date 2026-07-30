@@ -158,7 +158,26 @@ Request the full daemon configuration.
 ```json
 {"type": "get_config"}
 ```
-Response: `get_config_response`
+Response: `get_config_response`. The payload includes an `llm_runtime` object with the
+session's *resolved/actual* LLM state (not just config defaults):
+```json
+{
+   "llm_runtime": {
+      "type": "cloud",
+      "provider": "Claude",
+      "model": "claude-...",
+      "openai_available": true,
+      "claude_available": true,
+      "gemini_available": false,
+      "context_max": 200000,
+      "thinking_mode": "enabled",
+      "reasoning_effort": "medium"
+   }
+}
+```
+- `thinking_mode` / `reasoning_effort`: the session's current reasoning settings (same
+  vocabulary as `set_llm_runtime`). This is the only place a fresh connection learns
+  them — `llm_state_update` is only pushed on a `switch_llm` tool call.
 
 #### `set_config`
 Update daemon configuration settings.
@@ -1069,10 +1088,16 @@ WebUI configuration (sent after session).
 {
    "type": "config",
    "payload": {
-      "audio_chunk_ms": 200
+      "audio_chunk_ms": 200,
+      "music_enabled": true,
+      "music_port": 3001
    }
 }
 ```
+- `music_enabled`: Whether the dedicated `dawn-music` audio server is running. When
+  `false`, a client should not open the music socket.
+- `music_port`: Port of the dedicated music-stream server (subprotocol `dawn-music`).
+  Advertised so clients don't have to assume `main_port + 1`.
 
 #### `state`
 State machine update.
@@ -1090,17 +1115,23 @@ State machine update.
 - `tools`: Optional array of active tool calls (during parallel execution)
 
 #### `error`
-Error notification.
+Error or informational notification.
 ```json
 {
    "type": "error",
    "payload": {
       "code": "LLM_TIMEOUT",
       "message": "Request timed out",
+      "severity": "error",
       "recoverable": true
    }
 }
 ```
+- `severity`: `"info" | "warning" | "error"`. Not every `error` frame is a failure —
+  DAWN also sends purely informational notices on this channel (e.g.
+  `INFO_THINKING_DISABLED`, severity `"info"`). A client should route/style on
+  `severity` rather than the code prefix. Absent field ⇒ treat as `"error"`.
+- `recoverable`: Legacy field, currently always `true`. Prefer `severity`.
 
 #### `force_logout`
 Server-initiated logout (session revoked).

@@ -49,6 +49,7 @@
 #include "core/scheduler_db.h"
 #include "core/session_manager.h"
 #include "dawn.h"
+#include "llm/llm_claude_format.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_context.h"
 #include "llm/llm_local_provider.h"
@@ -417,6 +418,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
          session_llm_config_t config;
          session_get_llm_config(conn->session, &config);
          bool has_changes = false;
+         bool thinking_clamped_on = false; /* set-time thinking-disable clamp fired */
 
          /* Track old tool_mode for prompt rebuild */
          char old_tool_mode[LLM_TOOL_MODE_MAX];
@@ -557,6 +559,30 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                if (strcmp(new_thinking_mode, "disabled") == 0 ||
                    strcmp(new_thinking_mode, "auto") == 0 ||
                    strcmp(new_thinking_mode, "enabled") == 0) {
+                  /* Native Claude rejects disabling thinking on a conversation whose
+                   * history already contains thinking blocks ("assistant message cannot
+                   * contain thinking"). Clamp the stored value to enabled at set-time so
+                   * the persisted/effective state stays consistent and the response
+                   * reflects reality to the client — the control follows the effective
+                   * value, not the unachievable pick. Only native Claude has this
+                   * constraint (OpenRouter uses the OpenAI-compatible formatter). The
+                   * request-time formatter clamp remains the safety net for non-WebUI
+                   * clients. */
+                  if (strcmp(new_thinking_mode, "disabled") == 0 && config.type == LLM_CLOUD &&
+                      config.cloud_provider == CLOUD_PROVIDER_CLAUDE) {
+                     pthread_mutex_lock(&conn->session->history_mutex);
+                     bool has_thinking = claude_history_has_thinking_blocks(
+                         conn->session->conversation_history);
+                     pthread_mutex_unlock(&conn->session->history_mutex);
+                     if (has_thinking) {
+                        OLOG_INFO("WebUI: thinking disable clamped to enabled (conversation "
+                                  "already contains reasoning Claude must preserve)");
+                        new_thinking_mode = "enabled";
+                        /* Notify only after the config actually persists (below), so a
+                         * failed apply doesn't produce a "kept on" + "failed" double toast. */
+                        thinking_clamped_on = true;
+                     }
+                  }
                   has_changes = true;
                   strncpy(config.thinking_mode, new_thinking_mode,
                           sizeof(config.thinking_mode) - 1);
@@ -599,6 +625,18 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
             } else {
                OLOG_INFO("WebUI: Session %u LLM config updated (type=%d, provider=%d)",
                          conn->session->session_id, config.type, config.cloud_provider);
+
+               /* Set-time thinking clamp fired and persisted — tell the user why the
+                * Disabled toggle didn't take. The dropdown follows the effective value
+                * via the response's thinking_mode field. */
+               if (thinking_clamped_on) {
+                  webui_send_error_ex(
+                      conn->session, "INFO_THINKING_KEPT_ON",
+                      "Extended thinking stayed on: this conversation already contains "
+                      "reasoning, which Claude requires be preserved. Start a new "
+                      "conversation to turn thinking off.",
+                      WS_SEVERITY_INFO);
+               }
 
                /* If local model or LLM type changed, context size may differ */
                if (config.type == LLM_LOCAL &&
@@ -682,6 +720,13 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
          }
          json_object_object_add(resp_payload, "model",
                                 json_object_new_string(model_name ? model_name : ""));
+
+         /* Effective reasoning settings — so the client control reflects the real
+          * value (e.g. after a server-side thinking clamp), not the picked one. */
+         json_object_object_add(resp_payload, "thinking_mode",
+                                json_object_new_string(current.thinking_mode));
+         json_object_object_add(resp_payload, "reasoning_effort",
+                                json_object_new_string(current.reasoning_effort));
       }
 
       /* Include API key availability */

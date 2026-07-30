@@ -84,6 +84,14 @@ void webui_send_error(struct session *s, const char *code, const char *message) 
    (void)code;
    (void)message;
 }
+/* severity typed as int in the stub — the linker matches on symbol name only,
+ * and this file doesn't pull in the ws_error_severity_t enum. */
+void webui_send_error_ex(struct session *s, const char *code, const char *message, int severity) {
+   (void)s;
+   (void)code;
+   (void)message;
+   (void)severity;
+}
 
 void setUp(void) {
    g_config.llm.max_tokens = 4096;

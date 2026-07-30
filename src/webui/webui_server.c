@@ -2046,6 +2046,13 @@ void webui_send_context(session_t *session, int current_tokens, int max_tokens, 
 }
 
 void webui_send_error(session_t *session, const char *code, const char *message) {
+   webui_send_error_ex(session, code, message, WS_SEVERITY_ERROR);
+}
+
+void webui_send_error_ex(session_t *session,
+                         const char *code,
+                         const char *message,
+                         ws_error_severity_t severity) {
    if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_DAP2)) {
       return;
    }
@@ -2055,6 +2062,7 @@ void webui_send_error(session_t *session, const char *code, const char *message)
                           .error = {
                               .code = strdup(code),
                               .message = strdup(message),
+                              .severity = severity,
                           } };
 
    if (!resp.error.code || !resp.error.message) {
