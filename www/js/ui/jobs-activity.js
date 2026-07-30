@@ -149,11 +149,21 @@ window.DawnJobsActivity = (function () {
       }
    }
 
-   /* Last per-conversation count announced, so the sr-only region speaks only on
-    * a 0<->n transition rather than on every increment. */
+   /* Last per-conversation count announced (and which conversation), so the sr-only
+    * region speaks only on a 0<->n transition rather than on every increment. */
    var lastAnnouncedConvCount = 0;
+   var lastAnnouncedConvId = null;
 
    function announceConvCount(n) {
+      var convId = activeConvIdFn ? activeConvIdFn() : null;
+      if (String(convId) !== String(lastAnnouncedConvId)) {
+         /* Switched conversations — adopt the new view's baseline silently.  A 0
+          * here means "this conversation has no jobs," NOT "jobs finished," so it
+          * must never trigger the "finished" announcement (PR #24 review). */
+         lastAnnouncedConvId = convId;
+         lastAnnouncedConvCount = n;
+         return;
+      }
       if (n > 0 === lastAnnouncedConvCount > 0) {
          return; /* still running / still idle — nothing worth interrupting for */
       }

@@ -253,25 +253,12 @@ static void job_worker_run(job_work_t *work) {
     * Capture the row id: the `complete` event carries it as final_message_id so a
     * tailer can correlate the disposition with the answer body it already
     * received via message_appended (§6.2). */
-   /* Item 2: a truncated-tool turn can leave its text already persisted as the
-    * conv's last assistant row (observed as a byte-identical duplicate, conv 1060).
-    * Dedup by content: if the last assistant row already equals this answer, the
-    * work is on disk — don't write it (or notify) a second time.  Comparison uses
-    * the pre-notice text; the notice below is only added on the row WE write. */
-   bool already_persisted = false;
-   if (have_answer) {
-      char *last = NULL;
-      if (conv_db_job_last_assistant_text(work->conv_id, work->user_id, &last) == AUTH_DB_SUCCESS &&
-          last != NULL && strcmp(last, response) == 0) {
-         already_persisted = true;
-      }
-      free(last);
-   }
-
-   /* Item 1: if the final turn hit the output cap and WE are the one persisting the
-    * answer, mark it incomplete so the reinjected result tells the parent it was cut
-    * off rather than presenting a truncated fragment as the finished work. */
-   if (have_answer && truncated && !already_persisted) {
+   /* Item 1: if the final turn hit the output cap, mark the answer incomplete
+    * BEFORE the dedup comparison below, so the marker is part of both the dedup key
+    * and the persisted + reinjected text.  Gating this on the dedup result (as it
+    * was) dropped the marker whenever the row was already on disk, letting a
+    * truncated job reinject/observe as if it were complete (PR #24 review). */
+   if (have_answer && truncated) {
       static const char *const NOTICE =
           "\n\n[Note: this background job reached the output length limit and was cut off before "
           "finishing — the result above may be incomplete.]";
@@ -282,6 +269,21 @@ static void job_worker_run(job_work_t *work) {
          free(response);
          response = aug;
       }
+   }
+
+   /* Dedup by content: if the last assistant row already equals this answer (now
+    * including any truncation marker), the work is on disk — don't write it (or
+    * notify) a second time.  The primary duplicate source (a live viewer's client
+    * save) is blocked upstream in handle_save_message; this guards the residual
+    * (a final answer that repeats a prior tool-bearing turn's text). */
+   bool already_persisted = false;
+   if (have_answer) {
+      char *last = NULL;
+      if (conv_db_job_last_assistant_text(work->conv_id, work->user_id, &last) == AUTH_DB_SUCCESS &&
+          last != NULL && strcmp(last, response) == 0) {
+         already_persisted = true;
+      }
+      free(last);
    }
 
    int64_t final_msg_id = 0;

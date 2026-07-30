@@ -29,10 +29,11 @@
  * obligation, so the deviation is deliberate.)
  *
  * NOT here, deliberately: `handleConversationEvent` / `handleConversationEvents`.
- * dawn.js already routes both frames to this namespace and they fall through as
- * no-ops until CP4b implements the transcript-side `.agent-event.*` rendering
- * and switches the browser from load_conversation to attach_conversation. The
- * absence is a checkpoint boundary, not an oversight.
+ * Those durable-event frames are the transcript's concern, not the job list's —
+ * dawn.js routes them to the DawnAgentEvents module (www/js/ui/agent-events.js),
+ * which renders the resume/complete `.agent-event` markers (CP4b, shipped) and
+ * drives the load_conversation → attach_conversation switch. This panel owns the
+ * job list + actions only.
  */
 (function (global) {
    'use strict';

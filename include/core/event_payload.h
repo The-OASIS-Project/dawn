@@ -65,7 +65,9 @@ extern "C" {
  * bug that a PR review on this program proposed as a "fix"; verified across
  * every truncation offset of mixed ASCII/2-byte/3-byte input.
  *
- * @param s   Buffer (not required to be NUL-terminated at @p len).
+ * @param s   Buffer whose byte at @p len (the first EXCLUDED byte) is READ — so
+ *            it must be accessible, i.e. the buffer is at least @p len + 1 bytes
+ *            (a NUL-terminated C string of length >= @p len satisfies this).
  * @param len Desired cut point.
  * @return Adjusted length, <= @p len.
  */
