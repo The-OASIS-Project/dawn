@@ -337,6 +337,35 @@ void handle_music_control(ws_connection_t *conn, struct json_object *payload) {
          state->paused = false;
          pthread_mutex_unlock(&state->state_mutex);
          webui_music_send_state(conn, state);
+      } else if (!state->playing) {
+         /* Stopped with a populated queue: start the current queue track.
+          * A bare "play" (no path/query) after a stop should resume the
+          * queue, not silently echo state. */
+         user_music_queue_t *uq = state->shared_queue;
+         char play_path[WEBUI_MUSIC_PATH_MAX] = { 0 };
+
+         /* Lock hierarchy: queue → state. Both released before start_playback,
+          * which acquires them itself. */
+         pthread_mutex_lock(&uq->queue_mutex);
+         int q_len = uq->queue_length;
+         pthread_mutex_lock(&state->state_mutex);
+         if (q_len > 0) {
+            if (state->queue_index < 0 || state->queue_index >= q_len) {
+               state->queue_index = 0;
+            }
+            snprintf(play_path, sizeof(play_path), "%s", uq->queue[state->queue_index].path);
+         }
+         pthread_mutex_unlock(&state->state_mutex);
+         pthread_mutex_unlock(&uq->queue_mutex);
+
+         if (play_path[0]) {
+            if (webui_music_start_playback(state, play_path) != 0) {
+               webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
+               return;
+            }
+         }
+         /* Empty queue: nothing to start; just echo state. */
+         webui_music_send_state(conn, state);
       } else {
          /* Already playing - just send state */
          webui_music_send_state(conn, state);
