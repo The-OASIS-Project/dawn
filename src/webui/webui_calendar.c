@@ -25,13 +25,21 @@
 #include "webui/webui_calendar.h"
 
 #include <json-c/json.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "config/dawn_config.h"
 #include "logging.h"
 #include "tools/calendar_db.h"
 #include "tools/calendar_service.h"
 #include "webui/webui_internal.h"
+
+/* Upcoming-events pull (read a window of occurrences for a calendar panel). */
+#define CAL_UPCOMING_MAX 256                      /* result cap; ordered by start, drops farthest */
+#define CAL_UPCOMING_DEFAULT_DAYS 7               /* {days} convenience-path default */
+#define CAL_UPCOMING_MAX_DAYS 90                  /* {days} convenience-path clamp */
+#define CAL_UPCOMING_MAX_SPAN_SEC (366L * 86400L) /* explicit {start,end} span ceiling */
 
 /* =============================================================================
  * Helper: verify account belongs to the requesting user
@@ -604,6 +612,165 @@ void handle_calendar_set_enabled(ws_connection_t *conn, json_object *payload) {
       }
    }
 
+   json_object_object_add(response, "payload", resp_payload);
+   send_json_response(conn, response);
+   json_object_put(response);
+}
+
+/* =============================================================================
+ * List My Calendars (flat, across all accounts — the id->{name,color} map a
+ * panel needs to group/color events by their calendar_id in ONE call, instead
+ * of list_accounts + per-account list_calendars)
+ * ============================================================================= */
+
+void handle_calendar_list_my_calendars(ws_connection_t *conn) {
+   if (!conn_require_auth(conn))
+      return;
+
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type",
+                          json_object_new_string("calendar_list_my_calendars_response"));
+   json_object *resp_payload = json_object_new_object();
+
+   /* Active calendars only — matches exactly the set the pull draws events from,
+    * so every calendar_id an event can carry is present in this map. */
+   calendar_calendar_t cals[32];
+   int count = 0;
+   int rc = calendar_db_active_calendars_for_user(conn->auth_user_id, cals, 32, &count);
+
+   if (rc != 0) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Failed to list calendars"));
+   } else {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+      json_object *arr = json_object_new_array();
+      for (int i = 0; i < count; i++) {
+         json_object *o = json_object_new_object();
+         json_object_object_add(o, "id", json_object_new_int64(cals[i].id));
+         json_object_object_add(o, "account_id", json_object_new_int64(cals[i].account_id));
+         json_object_object_add(o, "name", json_object_new_string(cals[i].display_name));
+         json_object_object_add(o, "color", json_object_new_string(cals[i].color));
+         json_object_array_add(arr, o);
+      }
+      json_object_object_add(resp_payload, "calendars", arr);
+   }
+
+   json_object_object_add(response, "payload", resp_payload);
+   send_json_response(conn, response);
+   json_object_put(response);
+}
+
+/* =============================================================================
+ * Upcoming Events (read-only pull for a calendar panel)
+ * ============================================================================= */
+
+/* Send a {success:false, error} response and clean up. */
+static void upcoming_send_error(ws_connection_t *conn,
+                                json_object *response,
+                                json_object *resp_payload,
+                                const char *msg) {
+   json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+   json_object_object_add(resp_payload, "error", json_object_new_string(msg));
+   json_object_object_add(response, "payload", resp_payload);
+   send_json_response(conn, response);
+   json_object_put(response);
+}
+
+void handle_calendar_upcoming_events(ws_connection_t *conn, json_object *payload) {
+   if (!conn_require_auth(conn))
+      return;
+
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type",
+                          json_object_new_string("calendar_upcoming_events_response"));
+   json_object *resp_payload = json_object_new_object();
+
+   /* Resolve the window: explicit {start,end} epoch (power path) wins over {days}
+    * (convenience path). Exactly one of start/end present is a client bug. */
+   time_t start = 0;
+   time_t end = 0;
+   json_object *jstart = NULL;
+   json_object *jend = NULL;
+   bool has_start = payload && json_object_object_get_ex(payload, "start", &jstart);
+   bool has_end = payload && json_object_object_get_ex(payload, "end", &jend);
+
+   if (has_start != has_end) {
+      upcoming_send_error(conn, response, resp_payload,
+                          "Provide both 'start' and 'end', or neither");
+      return;
+   }
+
+   if (has_start && has_end) {
+      start = (time_t)json_object_get_int64(jstart);
+      end = (time_t)json_object_get_int64(jend);
+      if (start <= 0 || end <= 0 || start >= end) {
+         upcoming_send_error(conn, response, resp_payload,
+                             "Invalid range: require 0 < start < end");
+         return;
+      }
+      if (end - start > CAL_UPCOMING_MAX_SPAN_SEC) {
+         upcoming_send_error(conn, response, resp_payload, "Range too large (max 366 days)");
+         return;
+      }
+   } else {
+      int days = CAL_UPCOMING_DEFAULT_DAYS;
+      json_object *jdays = NULL;
+      if (payload && json_object_object_get_ex(payload, "days", &jdays))
+         days = json_object_get_int(jdays);
+      if (days < 1)
+         days = 1;
+      if (days > CAL_UPCOMING_MAX_DAYS)
+         days = CAL_UPCOMING_MAX_DAYS;
+      start = time(NULL);
+      end = start + (time_t)days * 86400;
+   }
+
+   /* Optional calendar_name filter (empty/omitted = all active calendars). */
+   const char *cal_name = NULL;
+   json_object *jcal = NULL;
+   if (payload && json_object_object_get_ex(payload, "calendar_name", &jcal)) {
+      const char *s = json_object_get_string(jcal);
+      if (s && s[0])
+         cal_name = s;
+   }
+
+   /* ~1 KB per occurrence * 256 — heap, not stack. */
+   calendar_occurrence_t *occ = calloc(CAL_UPCOMING_MAX, sizeof(calendar_occurrence_t));
+   if (!occ) {
+      upcoming_send_error(conn, response, resp_payload, "Out of memory");
+      return;
+   }
+
+   int count = calendar_service_range(conn->auth_user_id, start, end, cal_name, occ,
+                                      CAL_UPCOMING_MAX);
+
+   json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+   json_object_object_add(resp_payload, "start", json_object_new_int64((int64_t)start));
+   json_object_object_add(resp_payload, "end", json_object_new_int64((int64_t)end));
+   json_object_object_add(resp_payload, "truncated",
+                          json_object_new_boolean(count >= CAL_UPCOMING_MAX));
+
+   json_object *arr = json_object_new_array();
+   for (int i = 0; i < count; i++) {
+      json_object *o = json_object_new_object();
+      json_object_object_add(o, "id", json_object_new_int64(occ[i].id));
+      json_object_object_add(o, "calendar_id", json_object_new_int64(occ[i].calendar_id));
+      json_object_object_add(o, "uid", json_object_new_string(occ[i].event_uid));
+      json_object_object_add(o, "summary", json_object_new_string(occ[i].summary));
+      json_object_object_add(o, "location", json_object_new_string(occ[i].location));
+      json_object_object_add(o, "start", json_object_new_int64((int64_t)occ[i].dtstart));
+      json_object_object_add(o, "end", json_object_new_int64((int64_t)occ[i].dtend));
+      json_object_object_add(o, "all_day", json_object_new_boolean(occ[i].all_day));
+      json_object_object_add(o, "start_date", json_object_new_string(occ[i].dtstart_date));
+      json_object_object_add(o, "end_date", json_object_new_string(occ[i].dtend_date));
+      json_object_object_add(o, "cancelled", json_object_new_boolean(occ[i].is_cancelled));
+      json_object_object_add(o, "is_override", json_object_new_boolean(occ[i].is_override));
+      json_object_array_add(arr, o);
+   }
+   json_object_object_add(resp_payload, "events", arr);
+
+   free(occ);
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);

@@ -2205,7 +2205,8 @@ int auth_db_prepare_statements(void) {
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT o.id, o.event_id, o.dtstart, o.dtend, o.all_day, "
                            "o.dtstart_date, o.dtend_date, o.summary, o.location, "
-                           "o.is_override, o.is_cancelled, o.recurrence_id, e.uid "
+                           "o.is_override, o.is_cancelled, o.recurrence_id, e.uid, "
+                           "e.calendar_id "
                            "FROM calendar_occurrences o "
                            "JOIN calendar_events e ON o.event_id = e.id "
                            "WHERE e.calendar_id IN (SELECT value FROM json_each(?)) "
@@ -2221,7 +2222,8 @@ int auth_db_prepare_statements(void) {
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT o.id, o.event_id, o.dtstart, o.dtend, o.all_day, "
                            "o.dtstart_date, o.dtend_date, o.summary, o.location, "
-                           "o.is_override, o.is_cancelled, o.recurrence_id, e.uid "
+                           "o.is_override, o.is_cancelled, o.recurrence_id, e.uid, "
+                           "e.calendar_id "
                            "FROM calendar_occurrences o "
                            "JOIN calendar_events e ON o.event_id = e.id "
                            "WHERE e.calendar_id IN (SELECT value FROM json_each(?)) "

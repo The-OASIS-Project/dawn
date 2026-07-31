@@ -51,6 +51,19 @@
 #include "tools/email_db.h"
 #include "tools/oauth_client.h"
 
+/* Weak no-op fallback for the WebUI "calendar changed, refetch" broadcast,
+ * compiled ONLY when WebUI is OFF (calendar_service.c is gated on the calendar
+ * tool, not on ENABLE_WEBUI, so it builds in the local/ci presets). When WebUI
+ * is on, the strong override in src/webui/webui_broadcasts.c is linked instead.
+ * sync_now calls this unconditionally, so a definition must exist in every
+ * build. Mirrors scheduler_broadcast_events_changed (src/core/scheduler.c). */
+#ifndef ENABLE_WEBUI
+void calendar_broadcast_events_changed(int user_id) __attribute__((weak));
+void calendar_broadcast_events_changed(int user_id) {
+   (void)user_id;
+}
+#endif
+
 /* =============================================================================
  * State
  * ============================================================================= */
@@ -704,6 +717,16 @@ int calendar_service_sync_now(int64_t account_id) {
    sodium_memzero(token, sizeof(token));
    calendar_db_account_update_sync(account_id, now);
    OLOG_INFO("calendar: synced %d calendars for '%s'", synced, acct.name);
+
+   /* Nudge the owner's WebUI sessions to refetch. Gated on synced > 0, i.e. at
+    * least one calendar was (re)fetched: for a ctag-capable server that means the
+    * ctag moved (real change); a ctag-less server can't prove no-change, so it
+    * fetches — and thus broadcasts — every interval (benign: signal-only refetch,
+    * no event data on the wire). Covers all three sync entry points (background
+    * thread, manual WS sync, post-add initial sync). */
+   if (synced > 0)
+      calendar_broadcast_events_changed(acct.user_id);
+
    return 0;
 }
 
@@ -795,6 +818,22 @@ int calendar_service_today(int user_id,
    return count;
 }
 
+/* Sort merged timed + all-day occurrences by start time (soonest first), with
+ * occurrence id as a stable tiebreak so equal-dtstart rows render deterministically. */
+static int occ_cmp_dtstart(const void *a, const void *b) {
+   const calendar_occurrence_t *oa = a;
+   const calendar_occurrence_t *ob = b;
+   if (oa->dtstart < ob->dtstart)
+      return -1;
+   if (oa->dtstart > ob->dtstart)
+      return 1;
+   if (oa->id < ob->id)
+      return -1;
+   if (oa->id > ob->id)
+      return 1;
+   return 0;
+}
+
 int calendar_service_range(int user_id,
                            time_t start,
                            time_t end,
@@ -808,6 +847,42 @@ int calendar_service_range(int user_id,
 
    int count = 0;
    calendar_db_occurrences_in_range(cal_ids, cal_count, start, end, out, max_count, &count);
+
+   /* Merge all-day occurrences: they are stored/queried by date string, and the
+    * timed query hardcodes all_day = 0, so without this holidays/birthdays/PTO
+    * never appear (this also fixed the same latent gap on the LLM range path).
+    * Same localtime_r/tm_gmtoff approximation calendar_service_today uses. */
+   if (count < max_count) {
+      struct tm start_tm;
+      struct tm end_tm;
+      localtime_r(&start, &start_tm);
+      localtime_r(&end, &end_tm);
+
+      char start_date[16];
+      iso8601_format_date(start_tm.tm_year + 1900, start_tm.tm_mon + 1, start_tm.tm_mday,
+                          start_date, sizeof(start_date));
+
+      /* Exclusive upper date bound = day after the window's end day, so an
+       * all-day event on the final day is included. */
+      struct tm end_next = end_tm;
+      end_next.tm_mday += 1;
+      mktime(&end_next); /* normalize */
+      char end_date[16];
+      iso8601_format_date(end_next.tm_year + 1900, end_next.tm_mon + 1, end_next.tm_mday, end_date,
+                          sizeof(end_date));
+
+      int allday = 0;
+      calendar_db_allday_occurrences_in_range(cal_ids, cal_count, start_date, end_date, out + count,
+                                              max_count - count, &allday);
+      count += allday;
+   }
+
+   /* The merge appended all-day rows after the timed rows, breaking the per-query
+    * dtstart ordering; re-sort so the soonest events come first (the caller's cap
+    * relies on start-order to drop the farthest events, not arbitrary ones). */
+   if (count > 1)
+      qsort(out, count, sizeof(calendar_occurrence_t), occ_cmp_dtstart);
+
    return count;
 }
 

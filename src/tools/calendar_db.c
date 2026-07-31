@@ -136,10 +136,13 @@ static void row_to_occurrence(sqlite3_stmt *stmt, calendar_occurrence_t *o) {
    o->is_override = sqlite3_column_int(stmt, 9) != 0;
    o->is_cancelled = sqlite3_column_int(stmt, 10) != 0;
    col_str(o->recurrence_id, sizeof(o->recurrence_id), stmt, 11);
-   /* Column 12 (e.uid) present in JOIN queries */
+   /* Columns 12 (e.uid) and 13 (e.calendar_id) present in JOIN queries; the
+    * calendar id is selected only by the range queries, so guard each on the
+    * actual column count. */
    int col_count = sqlite3_column_count(stmt);
    if (col_count >= 13)
       col_str(o->event_uid, sizeof(o->event_uid), stmt, 12);
+   o->calendar_id = (col_count >= 14) ? sqlite3_column_int64(stmt, 13) : 0;
 }
 
 /* =============================================================================

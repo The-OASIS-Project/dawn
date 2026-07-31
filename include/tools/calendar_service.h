@@ -77,6 +77,14 @@ int calendar_service_test_connection(int64_t account_id);
 /** Trigger an immediate sync for an account */
 int calendar_service_sync_now(int64_t account_id);
 
+/**
+ * Notify a user's WebUI sessions that their calendar data changed (refetch nudge).
+ * Signal-only (no event data). Called change-gated from calendar_service_sync_now.
+ * Layer-3→Layer-4 hook: strong override in src/webui/webui_broadcasts.c; a weak
+ * no-op fallback in calendar_service.c keeps WebUI-off builds linking.
+ */
+void calendar_broadcast_events_changed(int user_id);
+
 /* ============================================================================
  * Query Operations (used by calendar_tool.c)
  * ============================================================================ */

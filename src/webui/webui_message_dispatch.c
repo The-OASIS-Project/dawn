@@ -1268,6 +1268,12 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       if (payload) {
          handle_calendar_set_enabled(conn, payload);
       }
+   } else if (strcmp(type, "calendar_list_my_calendars") == 0) {
+      /* Flat id->{name,color} map across accounts; no payload. */
+      handle_calendar_list_my_calendars(conn);
+   } else if (strcmp(type, "calendar_upcoming_events") == 0) {
+      /* Read-only pull; payload optional (defaults to a 7-day window). */
+      handle_calendar_upcoming_events(conn, payload);
    }
 #endif /* DAWN_ENABLE_CALENDAR_TOOL */
 #ifdef DAWN_ENABLE_EMAIL_TOOL

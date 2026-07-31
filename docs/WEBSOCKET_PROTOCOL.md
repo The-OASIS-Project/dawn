@@ -759,6 +759,12 @@ Control music playback.
 ```
 - `action`: `play`, `pause`, `resume`, `stop`, `next`, `previous`, `seek`
 - `position_sec`: only for `seek` action
+- `play` behaviour depends on the payload and current state:
+  - with `path` or `query` — plays that specific track / search hit (adds to top of queue)
+  - bare (no `path`/`query`) while **paused** — resumes the pause
+  - bare while **stopped** with a non-empty queue — starts the current `queue_index` track
+    (index clamped into range); empty queue just re-echoes state
+  - bare while **already playing** — re-echoes state (no-op)
 - Response: `music_state` (updated state)
 
 #### `music_search`
@@ -824,6 +830,82 @@ Dismiss, snooze, or cancel a scheduler event (alarm/timer/reminder).
 - No direct response; server broadcasts updated `scheduler_notification` to all clients
 
 ---
+
+### Calendar
+
+Calendar account management (`calendar_list_accounts`, `calendar_add_account`, …) is
+handled per-user in `webui_calendar.c`. The read-only *data* requests:
+
+#### `calendar_list_my_calendars`
+List the user's active calendars flat across all accounts — the `calendar_id`→{name, color}
+map a panel needs to group/color the events returned by `calendar_upcoming_events`, in one
+call (instead of `calendar_list_accounts` + per-account `calendar_list_calendars`). No payload.
+```json
+{ "type": "calendar_list_my_calendars" }
+```
+Response `calendar_list_my_calendars_response`:
+```json
+{
+   "type": "calendar_list_my_calendars_response",
+   "payload": {
+      "success": true,
+      "calendars": [
+         { "id": 7, "account_id": 3, "name": "Work", "color": "#3b82f6" }
+      ]
+   }
+}
+```
+- `id` matches the per-event `calendar_id` from `calendar_upcoming_events`.
+- Active calendars only — exactly the set the pull draws events from.
+- Re-run on `calendar_events_changed` (a newly-synced calendar can appear).
+
+#### `calendar_upcoming_events`
+Read a window of upcoming occurrences from the offline cache (build a calendar panel).
+Authenticated; each user sees only their own accounts' events.
+```json
+{
+   "type": "calendar_upcoming_events",
+   "payload": {
+      "days": 7,
+      "calendar_name": "Work"
+   }
+}
+```
+- **Window** — two mutually-exclusive forms:
+  - `days` (convenience) — `now` .. `now + days*86400`. Default 7, clamped 1–90.
+  - `start` + `end` (epoch seconds, power path) — used when **both** present; `start < end`,
+    span ≤ 366 days. Providing exactly one of `start`/`end`, or `start >= end`, is an error.
+- `calendar_name`: optional case-insensitive filter; omitted/empty = all active calendars.
+- Includes both timed **and all-day** occurrences, ordered by start; capped at 256 (the
+  farthest are dropped and `truncated:true` is set).
+- Reads the pre-expanded SQLite cache — no network at request time.
+- Payload is optional (a bare request defaults to a 7-day window).
+- Response: `calendar_upcoming_events_response`:
+```json
+{
+   "type": "calendar_upcoming_events_response",
+   "payload": {
+      "success": true,
+      "start": 1784949199,
+      "end": 1785554000,
+      "truncated": false,
+      "events": [
+         {
+            "id": 412, "calendar_id": 7, "uid": "abc@google.com",
+            "summary": "Standup", "location": "",
+            "start": 1784971800, "end": 1784973600,
+            "all_day": false, "start_date": "", "end_date": "",
+            "cancelled": false, "is_override": false
+         }
+      ]
+   }
+}
+```
+  - `calendar_id`: the owning calendar (grouping/coloring key). Map to name/color via
+    `calendar_list_calendars`; the response does not carry the calendar *name* (it would
+    force an extra join, and the id is the stable key).
+  - `start_date`/`end_date`: `YYYY-MM-DD`, only meaningful when `all_day` is true.
+  - `start`/`end` (top level): echo the resolved window.
 
 ### DAP2 Satellite Messages
 
@@ -1527,6 +1609,16 @@ which reports one event firing/dismiss/snooze.
 { "type": "scheduler_events_changed" }
 ```
 
+#### `calendar_events_changed`
+Signal-only: a background CalDAV sync pulled changes for this user (empty payload; the
+client refetches via `calendar_upcoming_events`). Emitted **only when something actually
+changed** (ctag-gated), routed to the owning user's **browser** sessions (not satellites —
+no calendar panel there). The sibling of `scheduler_events_changed` for calendar data;
+carries no event content, so no PII on the wire.
+```json
+{ "type": "calendar_events_changed" }
+```
+
 ---
 
 ### Satellite Responses
@@ -1615,6 +1707,8 @@ Satellites also receive the same streaming messages as WebUI clients:
 | `music_library` | `music_library_response` |
 | `music_queue` | `music_queue_response` |
 | `scheduler_action` | *(broadcast: `scheduler_notification`)* |
+| `calendar_list_my_calendars` | `calendar_list_my_calendars_response` |
+| `calendar_upcoming_events` | `calendar_upcoming_events_response` |
 | `satellite_register` | `satellite_register_ack` |
 | `satellite_ping` | `satellite_pong` |
 

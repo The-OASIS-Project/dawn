@@ -103,6 +103,8 @@ typedef struct {
    bool is_cancelled;
    char recurrence_id[32];
    char event_uid[256]; /**< Populated by JOIN queries — the parent event's UID */
+   int64_t
+       calendar_id; /**< Populated by range JOIN queries — the owning calendar's id (0 if absent) */
 } calendar_occurrence_t;
 
 /* ============================================================================

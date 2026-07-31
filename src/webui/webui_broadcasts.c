@@ -56,6 +56,7 @@
 #include "core/scheduler.h"
 #include "logging.h"
 #include "memory/memory_db_aliases.h"
+#include "tools/calendar_service.h"
 #include "utils/string_utils.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_server.h"
@@ -1115,6 +1116,30 @@ void scheduler_broadcast_events_changed(int user_id) {
    int sent = broadcast_json_to_user_ex(user_id, root, false);
    if (sent > 0) {
       OLOG_INFO("WebUI: Broadcast scheduler_events_changed (user=%d) to %d client(s)", user_id,
+                sent);
+   }
+}
+
+/*
+ * Strong symbol that overrides the weak stub in calendar_service.c.
+ * Empty payload — clients refetch their upcoming-events window on receipt.
+ * Browsers only: a satellite renders no calendar panel. Called from the calendar
+ * sync thread (change-gated), so it must use the thread-safe response queue.
+ */
+void calendar_broadcast_events_changed(int user_id) {
+   /* A calendar account always belongs to a real authenticated user; unlike the
+    * scheduler (which fans user_id<=0 "system events" to everyone), a calendar
+    * change has no all-users meaning, so refuse the degenerate broadcast-to-all. */
+   if (user_id <= 0)
+      return;
+
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("calendar_events_changed"));
+   json_object_object_add(root, "payload", json_object_new_object());
+
+   int sent = broadcast_json_to_user_ex(user_id, root, /*browsers_only=*/true);
+   if (sent > 0) {
+      OLOG_INFO("WebUI: Broadcast calendar_events_changed (user=%d) to %d client(s)", user_id,
                 sent);
    }
 }
