@@ -51,8 +51,14 @@
       viewMonthBtn: null,
       viewListBtn: null,
       upcomingToggle: null,
+      detail: null,
+      detailTitle: null,
+      detailMeta: null,
+      detailClose: null,
    };
    let changeTimer = null;
+   let detailEscToken = null;
+   let detailReturnFocus = null;
    /* Set once the user navigates/selects a day, so we stop auto-anchoring to
     * "today's month" on activate (they've chosen where to look). */
    let userTouched = false;
@@ -71,6 +77,9 @@
          .replace(/"/g, '&quot;');
    }
 
+   /* NOTE: the escapeHtml fallback above does not escape ' — every attribute in
+    * this file is double-quoted (escapeAttr adds ' for attribute contexts). Keep
+    * attributes double-quoted so the fallback stays safe. */
    function escapeAttr(str) {
       if (typeof DawnFormat !== 'undefined' && DawnFormat.escapeAttr) {
          return DawnFormat.escapeAttr(str == null ? '' : String(str));
@@ -270,9 +279,14 @@
    function rowHTML(ev) {
       const time = ev.allDay ? 'all-day' : formatTime(ev.start);
       const cal = Data.nameFor(ev.calendarKey);
+      const label = (ev.title || '(no title)') + ', ' + time + (cal ? ', ' + cal : '');
       return (
-         '<div class="cal-row" data-cal-key="' +
+         '<div class="cal-row" role="button" tabindex="0" data-event-id="' +
+         escapeAttr(String(ev.id)) +
+         '" data-cal-key="' +
          escapeAttr(ev.calendarKey) +
+         '" aria-label="' +
+         escapeAttr(label) +
          '">' +
          '<span class="cal-row-accent" aria-hidden="true"></span>' +
          '<span class="cal-row-time' +
@@ -555,22 +569,155 @@
        * refetches where an announcement would be spurious. */
    }
 
+   /* ---- read-only detail popover ---------------------------------------- */
+
+   function findEventById(id) {
+      const evs = Data.state.events;
+      for (let i = 0; i < evs.length; i++) {
+         if (String(evs[i].id) === String(id)) return evs[i];
+      }
+      return null;
+   }
+
+   function fmtDayShort(dt) {
+      return dt.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+   }
+
+   function formatDetailWhen(ev) {
+      if (ev.allDay) {
+         const start = ev.startDate ? parseDateKey(ev.startDate) : new Date(ev.start * 1000);
+         /* endDate is the iCal-exclusive DTEND; the inclusive last day is
+          * endDate - 1. Show a range only for genuinely multi-day events. */
+         let lastDay = null;
+         if (ev.endDate) {
+            const inclusive = addDays(parseDateKey(ev.endDate), -1);
+            if (inclusive.getTime() > start.getTime()) lastDay = inclusive;
+         }
+         return 'All day · ' + fmtDayShort(start) + (lastDay ? ' – ' + fmtDayShort(lastDay) : '');
+      }
+      const start = new Date(ev.start * 1000);
+      let s = fmtDayShort(start) + ' · ' + formatTime(ev.start);
+      if (ev.end) {
+         const end = new Date(ev.end * 1000);
+         /* Prefix the end time with its date when the event crosses midnight. */
+         const crossesDay = keyFromDate(start) !== keyFromDate(end);
+         s += ' – ' + (crossesDay ? fmtDayShort(end) + ' ' : '') + formatTime(ev.end);
+      }
+      return s;
+   }
+
+   function detailMetaHTML(ev) {
+      let html = '<div class="calendar-detail-when">' + escapeHtml(formatDetailWhen(ev)) + '</div>';
+      if (ev.location) {
+         html += '<div class="calendar-detail-loc">' + escapeHtml(ev.location) + '</div>';
+      }
+      const cal = Data.nameFor(ev.calendarKey);
+      if (cal) {
+         html +=
+            '<div class="calendar-detail-cal"><span class="cal-legend-dot" aria-hidden="true" data-cal-key="' +
+            escapeAttr(ev.calendarKey) +
+            '"></span>' +
+            escapeHtml(cal) +
+            '</div>';
+      }
+      return html;
+   }
+
+   /* Own Tab-trap so the detail composes with the scheduler popover's focus
+    * trap: keep Tab within the dialog AND stopPropagation so the parent trap
+    * (a keydown listener on the outer popover) doesn't also act. */
+   function detailKeydown(e) {
+      if (e.key !== 'Tab') return;
+      e.stopPropagation();
+      const nodes = els.detail.querySelectorAll(
+         'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+      );
+      const list = [];
+      for (let i = 0; i < nodes.length; i++) {
+         const el = nodes[i];
+         if (el.disabled || el.getAttribute('aria-hidden') === 'true') continue;
+         if (el.getClientRects().length > 0) list.push(el);
+      }
+      if (list.length === 0) return;
+      const first = list[0];
+      const last = list[list.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey) {
+         if (active === first || !els.detail.contains(active)) {
+            e.preventDefault();
+            last.focus();
+         }
+      } else if (active === last || !els.detail.contains(active)) {
+         e.preventDefault();
+         first.focus();
+      }
+   }
+
+   function openDetail(ev) {
+      if (!ev || !els.detail) return;
+      detailReturnFocus = document.activeElement;
+      if (els.detailTitle) els.detailTitle.textContent = ev.title || '(no title)';
+      if (els.detailMeta) {
+         els.detailMeta.innerHTML = detailMetaHTML(ev);
+         const dot = els.detailMeta.querySelector('.cal-legend-dot[data-cal-key]');
+         if (dot) dot.style.backgroundColor = Data.colorFor(dot.getAttribute('data-cal-key')) || '';
+      }
+      els.detail.classList.remove('hidden');
+      if (detailEscToken) DawnEscStack.unregister(detailEscToken);
+      detailEscToken = DawnEscStack.register(function () {
+         closeDetail();
+         return true;
+      });
+      if (els.detailClose) els.detailClose.focus();
+   }
+
+   function closeDetail(returnFocus) {
+      if (!els.detail || els.detail.classList.contains('hidden')) return;
+      els.detail.classList.add('hidden');
+      if (detailEscToken) {
+         DawnEscStack.unregister(detailEscToken);
+         detailEscToken = null;
+      }
+      /* returnFocus === false on the deactivate path (the row is about to be
+       * hidden and focus belongs to whatever triggered the deactivate). */
+      if (returnFocus !== false && detailReturnFocus && document.contains(detailReturnFocus)) {
+         detailReturnFocus.focus();
+      }
+      detailReturnFocus = null;
+   }
+
    /* ---- events ----------------------------------------------------------- */
 
    function onBodyClick(e) {
       const action = e.target.closest ? e.target.closest('[data-cal-action]') : null;
-      if (!action) return;
-      const a = action.getAttribute('data-cal-action');
-      if (a === 'retry') {
-         load();
-      } else if (a === 'add-account') {
-         if (window.DawnSettings && DawnSettings.openSection) {
-            if (window.DawnSchedulerQueue) DawnSchedulerQueue.close();
-            DawnSettings.openSection('calendar-accounts-section');
-         } else {
-            console.warn('DawnCalendar: settings deep-link unavailable (DawnSettings missing)');
+      if (action) {
+         const a = action.getAttribute('data-cal-action');
+         if (a === 'retry') {
+            load();
+         } else if (a === 'add-account') {
+            if (window.DawnSettings && DawnSettings.openSection) {
+               if (window.DawnSchedulerQueue) DawnSchedulerQueue.close();
+               DawnSettings.openSection('calendar-accounts-section');
+            } else {
+               console.warn('DawnCalendar: settings deep-link unavailable (DawnSettings missing)');
+            }
          }
+         return;
       }
+      const row = e.target.closest ? e.target.closest('.cal-row[data-event-id]') : null;
+      if (row) {
+         const ev = findEventById(row.getAttribute('data-event-id'));
+         if (ev) openDetail(ev);
+      }
+   }
+
+   function onBodyKeydown(e) {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      const row = e.target.closest ? e.target.closest('.cal-row[data-event-id]') : null;
+      if (!row) return;
+      e.preventDefault();
+      const ev = findEventById(row.getAttribute('data-event-id'));
+      if (ev) openDetail(ev);
    }
 
    function onLegendClick(e) {
@@ -691,6 +838,7 @@
 
    function deactivate() {
       Data.setActive(false);
+      closeDetail(false); /* don't leave the detail overlay up when the pane is hidden */
       if (changeTimer) {
          clearTimeout(changeTimer);
          changeTimer = null;
@@ -730,10 +878,27 @@
       els.viewMonthBtn = document.getElementById('calendar-view-month');
       els.viewListBtn = document.getElementById('calendar-view-list');
       els.upcomingToggle = document.getElementById('calendar-upcoming');
+      els.detail = document.getElementById('calendar-detail');
+      els.detailTitle = document.getElementById('calendar-detail-title');
+      els.detailMeta = document.getElementById('calendar-detail-meta');
+      els.detailClose = document.getElementById('calendar-detail-close');
       if (!els.pane || !els.body) return;
       if (els.upcomingToggle) els.upcomingToggle.addEventListener('change', onToggleUpcoming);
       els.body.addEventListener('click', onBodyClick);
+      els.body.addEventListener('keydown', onBodyKeydown);
       if (els.legend) els.legend.addEventListener('click', onLegendClick);
+      if (els.detail) {
+         els.detail.addEventListener('keydown', detailKeydown);
+         /* Click the backdrop (not the card) to close. */
+         els.detail.addEventListener('click', function (e) {
+            if (e.target === els.detail) closeDetail();
+         });
+      }
+      if (els.detailClose) {
+         els.detailClose.addEventListener('click', function () {
+            closeDetail();
+         });
+      }
       if (els.prevBtn) {
          els.prevBtn.addEventListener('click', function () {
             pageMonth(-1, false);

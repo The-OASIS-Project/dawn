@@ -900,6 +900,32 @@
                   aria-label="Agenda"
                ></div>
                <div class="sr-only" id="calendar-sr" role="status" aria-live="polite"></div>
+
+               <!-- Read-only event detail popover (Phase 3). Overlays the pane;
+                    runs its own Tab trap + Esc token so it composes with the
+                    scheduler popover's focus trap. -->
+               <!-- Non-modal: it overlays only the calendar pane (not the
+                    scheduler tabs/header), so it does NOT claim aria-modal — the
+                    keyboard Tab-trap + Esc + focus-return are the real guards. -->
+               <div
+                  class="calendar-detail hidden"
+                  id="calendar-detail"
+                  role="dialog"
+                  aria-labelledby="calendar-detail-title"
+               >
+                  <div class="calendar-detail-card" id="calendar-detail-card">
+                     <button
+                        class="calendar-detail-close"
+                        id="calendar-detail-close"
+                        type="button"
+                        aria-label="Close event details"
+                     >
+                        ×
+                     </button>
+                     <h4 class="calendar-detail-title" id="calendar-detail-title"></h4>
+                     <div class="calendar-detail-meta" id="calendar-detail-meta"></div>
+                  </div>
+               </div>
             </div>
          </div>
 

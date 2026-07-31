@@ -1,10 +1,11 @@
 /*
  * DAWN WebUI — Calendar pane (browsable CalDAV calendar).
  *
- * Phase 1: List mode (day-grouped agenda) inside the Scheduler & Watches
- * popover. Reuses the scheduler popover's empty-state chrome
- * (.sched-popover-empty*) and visual language; the agenda rows mirror
- * .sched-row (3px accent + time + title + tag). The month grid is Phase 2.
+ * Inside the Scheduler & Watches popover: List (day-grouped agenda) + Month
+ * (mini-grid + selected-day agenda) views, a read-only event detail popover, and
+ * per-calendar / upcoming-only filters. Reuses the scheduler popover's empty-state
+ * chrome (.sched-popover-empty*) and visual language; agenda rows mirror
+ * .sched-row (3px accent + time + title + tag).
  *
  * Coloring is structural: the calendar color is applied ONLY to the accent bar
  * and legend dot (via CSSOM in calendar.js), never behind text — so event text
@@ -20,8 +21,9 @@
    border-left: 1px solid rgba(255, 255, 255, 0.12);
 }
 
-/* Pane container */
+/* Pane container (position:relative so the detail overlay is scoped to it) */
 .calendar-pane {
+   position: relative;
    display: flex;
    flex-direction: column;
    flex: 1 1 auto;
@@ -138,9 +140,20 @@
    border-bottom: none;
 }
 
-/* No row-hover highlight in Phase 1: rows are inert (a hover cue would imply a
- * click that does nothing). Phase 2 adds the read-only detail popover and
- * restores a hover affordance here. */
+/* Rows are interactive (open the read-only detail popover). */
+.cal-row {
+   cursor: pointer;
+}
+
+.cal-row:hover,
+.cal-row:focus-visible {
+   background: var(--accent-subtle);
+}
+
+.cal-row:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: -2px;
+}
 
 .cal-row-accent {
    width: 3px;
@@ -447,4 +460,96 @@
    .calendar-view-toggle {
       display: none;
    }
+}
+
+/* =========================================================================
+ * Phase 3 — read-only event detail popover (overlays the pane)
+ * ========================================================================= */
+
+#calendar-detail.hidden {
+   display: none;
+}
+
+.calendar-detail {
+   position: absolute;
+   inset: 0;
+   z-index: 5;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   padding: 1rem;
+   background: rgba(0, 0, 0, 0.5);
+}
+
+.calendar-detail-card {
+   position: relative;
+   width: 100%;
+   max-width: 320px;
+   background: var(--bg-secondary, #1b1f24);
+   border: 1px solid rgba(255, 255, 255, 0.12);
+   border-radius: 10px;
+   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+   padding: 0.875rem 1rem 1rem;
+}
+
+.calendar-detail-close {
+   position: absolute;
+   top: 0.375rem;
+   right: 0.375rem;
+   width: 30px;
+   height: 30px;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   background: transparent;
+   border: none;
+   border-radius: 6px;
+   color: var(--text-secondary);
+   font-size: 1.25rem;
+   line-height: 1;
+   cursor: pointer;
+}
+
+.calendar-detail-close:hover {
+   background: var(--accent-subtle);
+   color: var(--text-primary);
+}
+
+.calendar-detail-close:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 1px;
+}
+
+.calendar-detail-title {
+   margin: 0 1.75rem 0.5rem 0;
+   font-size: 0.95rem;
+   font-weight: 600;
+   color: var(--text-primary);
+   overflow-wrap: anywhere;
+}
+
+.calendar-detail-meta {
+   display: flex;
+   flex-direction: column;
+   gap: 0.3125rem;
+   font-size: 0.8rem;
+   color: var(--text-secondary);
+}
+
+.calendar-detail-when {
+   font-variant-numeric: tabular-nums;
+}
+
+.calendar-detail-loc {
+   color: var(--text-secondary);
+   overflow-wrap: anywhere;
+}
+
+.calendar-detail-cal {
+   display: inline-flex;
+   align-items: center;
+   gap: 0.375rem;
+   /* --text-secondary (not tertiary): the calendar name is the accessible label
+    * (the dot is aria-hidden), so it must clear AA. */
+   color: var(--text-secondary);
 }

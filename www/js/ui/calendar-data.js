@@ -169,6 +169,16 @@
       return true;
    }
 
+   /* Accept only a hex (#rgb..#rrggbbaa) or a plain CSS named color from the
+    * (untrusted) CalDAV server; drop anything else to '' (renders as the default
+    * accent).  Defense-in-depth: the color reaches only the CSSOM setter today,
+    * but this keeps the invariant if it ever moves into a string-built style. */
+   function safeColor(c) {
+      if (typeof c !== 'string') return '';
+      const s = c.trim();
+      return /^#[0-9a-fA-F]{3,8}$/.test(s) || /^[a-zA-Z]{1,32}$/.test(s) ? s : '';
+   }
+
    /* Fold a calendar_list_my_calendars_response into the id->{name,color} map.
     * Last-writer-wins (the list changes rarely; no ordering guard needed). */
    function ingestCalendars(payload) {
@@ -181,7 +191,7 @@
       for (let i = 0; i < payload.calendars.length; i++) {
          const c = payload.calendars[i];
          const key = String(c.id);
-         map[key] = { name: c.name || '', color: c.color || '' };
+         map[key] = { name: c.name || '', color: safeColor(c.color) };
          order.push(key);
       }
       state.calendars = map;
