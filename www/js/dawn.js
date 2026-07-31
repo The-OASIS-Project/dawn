@@ -1092,6 +1092,21 @@
                   DawnSchedulerQueue.refresh();
                }
                break;
+            case 'calendar_list_my_calendars_response':
+               if (typeof DawnCalendar !== 'undefined') {
+                  DawnCalendar.handleCalendarsResponse(msg.payload);
+               }
+               break;
+            case 'calendar_upcoming_events_response':
+               if (typeof DawnCalendar !== 'undefined') {
+                  DawnCalendar.handleEventsResponse(msg.payload);
+               }
+               break;
+            case 'calendar_events_changed':
+               if (typeof DawnCalendar !== 'undefined') {
+                  DawnCalendar.onEventsChanged();
+               }
+               break;
             case 'memory_extraction_notice':
                if (msg.payload) {
                   showMemoryExtractionNotice(msg.payload.level, msg.payload.message);
@@ -2343,6 +2358,12 @@
       // scheduler popover, so init it before the scheduler queue below).
       if (typeof DawnWatches !== 'undefined') {
          DawnWatches.init();
+      }
+
+      // Initialize calendar pane (browsable CalDAV calendar — also a tab inside
+      // the scheduler popover, init before the scheduler queue below).
+      if (typeof DawnCalendar !== 'undefined') {
+         DawnCalendar.init();
       }
 
       // Initialize scheduler queue panel

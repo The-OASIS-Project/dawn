@@ -750,7 +750,7 @@
                   Missed
                </button>
                <button
-                  class="sched-popover-tab dawn-tab"
+                  class="sched-popover-tab dawn-tab pane-group-start"
                   id="sched-tab-watches"
                   role="tab"
                   aria-selected="false"
@@ -758,6 +758,16 @@
                   data-tab="watches"
                >
                   Watches
+               </button>
+               <button
+                  class="sched-popover-tab dawn-tab"
+                  id="sched-tab-calendar"
+                  role="tab"
+                  aria-selected="false"
+                  aria-controls="calendar-pane"
+                  data-tab="calendar"
+               >
+                  Calendar
                </button>
             </nav>
 
@@ -809,6 +819,31 @@
                      + Add watch
                   </button>
                </footer>
+            </div>
+
+            <!-- Calendar pane (browsable CalDAV calendar) — shown when the
+                 Calendar tab is active; scheduler-queue.js toggles visibility,
+                 DawnCalendar owns its data + rendering. Phase 1 = List mode. -->
+            <div
+               id="calendar-pane"
+               class="calendar-pane hidden"
+               role="tabpanel"
+               aria-labelledby="sched-tab-calendar"
+            >
+               <div
+                  class="calendar-legend hidden"
+                  id="calendar-legend"
+                  role="group"
+                  aria-label="Calendars"
+               ></div>
+               <div
+                  class="calendar-body"
+                  id="calendar-body"
+                  tabindex="0"
+                  role="region"
+                  aria-label="Agenda"
+               ></div>
+               <div class="sr-only" id="calendar-sr" role="status" aria-live="polite"></div>
             </div>
          </div>
 
@@ -3580,6 +3615,8 @@ token = "eyJ..."</pre
       <script defer src="/js/ui/settings.js"></script>
       <script defer src="/js/ui/scheduler.js"></script>
       <script defer src="/js/ui/watches.js"></script>
+      <script defer src="/js/ui/calendar-data.js"></script>
+      <script defer src="/js/ui/calendar.js"></script>
       <script defer src="/js/ui/scheduler-queue.js"></script>
       <script defer src="/js/ui/phone.js"></script>
       <script defer src="/js/ui/jobs-activity.js"></script>

@@ -666,8 +666,9 @@
     * its state.  Errors are console-logged for the next bisect. */
    function render() {
       if (!els.list) return;
-      /* Watches tab: DawnWatches owns the visible pane; skip the event list. */
-      if (state.activeTab === 'watches') return;
+      /* Pane tab (Watches / Calendar): the pane's module owns the visible
+       * content; skip the scheduler event list. */
+      if (isPaneTab(state.activeTab)) return;
       renderStats();
       try {
          renderInternal();
@@ -1202,21 +1203,49 @@
     * state and re-applies DOM via tablist.sync() after state change. */
    let tablist = null;
 
-   /* Swap between the scheduler event list and the Watches pane based on the
-    * active tab.  The Watches tab shows genuinely different content (per-user
-    * attention_rules, owned by DawnWatches), so we hide the scheduler-only
-    * chrome (stats / search / list / footer) rather than filter the shared
-    * list.  DawnWatches owns the pane's data + rendering + live-value polling. */
+   /* Pane tabs: tabs that swap the WHOLE pane (genuinely different content,
+    * owned by another module) rather than filtering the shared event list.
+    * Each entry maps a tab name → its DOM pane element + its owning module
+    * (both resolved lazily: els is populated in init(), the modules are
+    * separate globals loaded before this file).  Adding a pane tab is one
+    * entry here instead of editing the four sites below (applyPaneVisibility,
+    * close, render, the ticker) — this is the local answer to the N-pane
+    * hand-wiring smell filed in TODO.md. */
+   const PANES = {
+      watches: {
+         pane: () => els.watchesPane,
+         mod: () => (typeof DawnWatches !== 'undefined' ? DawnWatches : null),
+      },
+      calendar: {
+         pane: () => els.calendarPane,
+         mod: () => (typeof DawnCalendar !== 'undefined' ? DawnCalendar : null),
+      },
+   };
+
+   function isPaneTab(tab) {
+      return Object.prototype.hasOwnProperty.call(PANES, tab);
+   }
+
+   /* Swap between the scheduler event list and a pane (Watches / Calendar) based
+    * on the active tab.  A pane tab shows genuinely different content owned by
+    * its module, so we hide the scheduler-only chrome (stats / search / list /
+    * footer) rather than filter the shared list, and hand activation to the
+    * owning module (which owns that pane's data + rendering + live polling). */
    function applyPaneVisibility() {
-      const onWatches = state.activeTab === 'watches';
-      if (els.statsBar) els.statsBar.classList.toggle('hidden', onWatches);
-      if (els.searchWrap) els.searchWrap.classList.toggle('hidden', onWatches);
-      if (els.list) els.list.classList.toggle('hidden', onWatches);
-      if (els.footer) els.footer.classList.toggle('hidden', onWatches);
-      if (els.watchesPane) els.watchesPane.classList.toggle('hidden', !onWatches);
-      if (typeof DawnWatches !== 'undefined') {
-         if (onWatches) DawnWatches.activate();
-         else DawnWatches.deactivate();
+      const onPane = isPaneTab(state.activeTab);
+      if (els.statsBar) els.statsBar.classList.toggle('hidden', onPane);
+      if (els.searchWrap) els.searchWrap.classList.toggle('hidden', onPane);
+      if (els.list) els.list.classList.toggle('hidden', onPane);
+      if (els.footer) els.footer.classList.toggle('hidden', onPane);
+      for (const key of Object.keys(PANES)) {
+         const active = state.activeTab === key;
+         const paneEl = PANES[key].pane();
+         if (paneEl) paneEl.classList.toggle('hidden', !active);
+         const mod = PANES[key].mod();
+         if (mod) {
+            if (active) mod.activate();
+            else mod.deactivate();
+         }
       }
    }
 
@@ -1250,10 +1279,10 @@
                isActiveStatus(e.status) &&
                (e.effective_fire_at || e.fire_at) - Math.floor(Date.now() / 1000) < 3600
          );
-         if (needsTick && state.isOpen && state.activeTab !== 'watches') {
+         if (needsTick && state.isOpen && !isPaneTab(state.activeTab)) {
             /* Only update time columns in-place — avoids tearing down the
-             * armed pill or open menu.  Skipped on the Watches tab, where the
-             * event list is hidden. */
+             * armed pill or open menu.  Skipped on a pane tab (Watches /
+             * Calendar), where the event list is hidden. */
             updateTimeColumns();
          }
       }, 1000);
@@ -1348,8 +1377,11 @@
       disarmClearMissed();
       closeMenu();
       stopCountdown();
-      /* Stop the Watches pane's live-value polling while the popover is hidden. */
-      if (typeof DawnWatches !== 'undefined') DawnWatches.deactivate();
+      /* Stop every pane's live polling / servicing while the popover is hidden. */
+      for (const key of Object.keys(PANES)) {
+         const mod = PANES[key].mod();
+         if (mod) mod.deactivate();
+      }
       if (state.focusTrapCleanup) {
          state.focusTrapCleanup();
          state.focusTrapCleanup = null;
@@ -1400,6 +1432,7 @@
       els.searchWrap = els.popover ? els.popover.querySelector('.sched-popover-search') : null;
       els.footer = els.popover ? els.popover.querySelector('.sched-popover-footer') : null;
       els.watchesPane = document.getElementById('watches-pane');
+      els.calendarPane = document.getElementById('calendar-pane');
 
       if (!els.btn || !els.popover) return;
 

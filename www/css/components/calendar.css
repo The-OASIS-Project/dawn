@@ -1,0 +1,224 @@
+/*
+ * DAWN WebUI — Calendar pane (browsable CalDAV calendar).
+ *
+ * Phase 1: List mode (day-grouped agenda) inside the Scheduler & Watches
+ * popover. Reuses the scheduler popover's empty-state chrome
+ * (.sched-popover-empty*) and visual language; the agenda rows mirror
+ * .sched-row (3px accent + time + title + tag). The month grid is Phase 2.
+ *
+ * Coloring is structural: the calendar color is applied ONLY to the accent bar
+ * and legend dot (via CSSOM in calendar.js), never behind text — so event text
+ * stays theme-foreground on the theme surface (guaranteed WCAG AA regardless of
+ * the arbitrary CalDAV color).
+ */
+
+/* Divider before the pane-tabs (Watches | Calendar) — they swap the whole pane,
+ * unlike the list-filter tabs (All/Timers/…) to their left. */
+.sched-popover-tabs .sched-popover-tab.pane-group-start {
+   margin-left: 0.375rem;
+   padding-left: 0.5rem;
+   border-left: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+/* Pane container */
+.calendar-pane {
+   display: flex;
+   flex-direction: column;
+   flex: 1 1 auto;
+   min-height: 0;
+   overflow: hidden;
+}
+
+/* This project has NO global `.hidden { display:none }` utility (see
+ * watches.css) — scheduler-queue.js toggles `.hidden` to swap panes, so the
+ * calendar pane and its legend need explicit hide rules. The scheduler-only
+ * chrome (stats/search/list/footer) hide rules already live in watches.css and
+ * apply regardless of which pane tab triggered the swap. */
+#calendar-pane.hidden,
+#calendar-legend.hidden {
+   display: none;
+}
+
+/* Legend / per-calendar filter chips */
+.calendar-legend {
+   display: flex;
+   flex-wrap: wrap;
+   gap: 0.375rem;
+   padding: 0.5rem 0.875rem;
+   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.cal-legend-chip {
+   display: inline-flex;
+   align-items: center;
+   gap: 0.375rem;
+   padding: 0.1875rem 0.5rem;
+   background: transparent;
+   border: 1px solid rgba(255, 255, 255, 0.1);
+   border-radius: 999px;
+   color: var(--text-secondary);
+   font-size: 0.75rem;
+   cursor: pointer;
+   transition:
+      opacity var(--transition-fast),
+      border-color var(--transition-fast);
+}
+
+.cal-legend-chip:hover {
+   border-color: rgba(255, 255, 255, 0.2);
+}
+
+.cal-legend-chip:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 1px;
+}
+
+/* Filtered-off is conveyed by dimming + strikethrough (not color alone —
+ * these chips ARE the color legend). */
+.cal-legend-chip.off {
+   opacity: 0.45;
+}
+
+.cal-legend-chip.off .cal-legend-name {
+   text-decoration: line-through;
+}
+
+.cal-legend-dot {
+   width: 10px;
+   height: 10px;
+   border-radius: 50%;
+   flex-shrink: 0;
+   /* Inset ring so a near-background calendar color still reads as a swatch. */
+   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.25);
+}
+
+/* Scroll region — tabbable (role=region) so keyboard users can scroll a long
+ * agenda; the rows themselves aren't focusable in Phase 1. */
+.calendar-body {
+   flex: 1;
+   overflow-y: auto;
+   max-height: 50vh;
+   padding: 0.25rem 0;
+}
+
+.calendar-body:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: -2px;
+}
+
+/* Day grouping */
+.cal-day-header {
+   position: sticky;
+   top: 0;
+   z-index: 1;
+   padding: 0.375rem 0.875rem;
+   font-size: 0.7rem;
+   font-weight: 600;
+   text-transform: uppercase;
+   letter-spacing: 0.04em;
+   /* --text-secondary (not tertiary): the header carries the date, and tertiary
+    * at this size falls below AA on the popover surface. */
+   color: var(--text-secondary);
+   background: var(--bg-secondary, #1b1f24);
+   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+/* Agenda row — mirrors .sched-row's visual language */
+.cal-row {
+   position: relative;
+   display: grid;
+   grid-template-columns: 3px auto 1fr auto;
+   align-items: center;
+   gap: 0.5rem;
+   padding: 0.5rem 0.875rem;
+   border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+.cal-row:last-child {
+   border-bottom: none;
+}
+
+/* No row-hover highlight in Phase 1: rows are inert (a hover cue would imply a
+ * click that does nothing). Phase 2 adds the read-only detail popover and
+ * restores a hover affordance here. */
+
+.cal-row-accent {
+   width: 3px;
+   align-self: stretch;
+   border-radius: 1.5px;
+   /* Default when a calendar has no color; CSSOM overrides per-row. */
+   background: var(--accent);
+}
+
+.cal-row-time {
+   font-family: 'IBM Plex Mono', monospace;
+   font-variant-numeric: tabular-nums;
+   font-size: 0.75rem;
+   color: var(--text-secondary);
+   white-space: nowrap;
+}
+
+.cal-row-time.allday {
+   font-style: italic;
+   color: var(--text-tertiary);
+}
+
+.cal-row-title {
+   font-size: 0.85rem;
+   color: var(--text-primary);
+   overflow: hidden;
+   text-overflow: ellipsis;
+   white-space: nowrap;
+}
+
+.cal-row-cal {
+   font-size: 0.7rem;
+   /* --text-secondary (not tertiary): identifies which calendar the event is
+    * on, so it must clear AA. */
+   color: var(--text-secondary);
+   white-space: nowrap;
+   overflow: hidden;
+   text-overflow: ellipsis;
+   max-width: 40%;
+}
+
+/* Truncation note */
+.cal-truncated {
+   padding: 0.625rem 0.875rem;
+   text-align: center;
+}
+
+/* Empty-state action button (deep-link to Calendar Accounts, Retry) */
+.cal-empty-action {
+   margin-top: 1rem;
+   padding: 0.375rem 0.875rem;
+   background: var(--accent-subtle);
+   border: 1px solid var(--accent);
+   border-radius: 6px;
+   color: var(--accent);
+   font-size: 0.8rem;
+   cursor: pointer;
+   transition: background var(--transition-fast);
+}
+
+.cal-empty-action:hover {
+   background: var(--accent);
+   color: var(--bg-primary, #12161a);
+}
+
+.cal-empty-action:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+}
+
+/* Touch targets on the mobile bottom-sheet */
+@media (max-width: 480px) {
+   .cal-row {
+      padding-top: 0.625rem;
+      padding-bottom: 0.625rem;
+   }
+
+   .cal-legend-chip {
+      padding: 0.3125rem 0.625rem;
+   }
+}
