@@ -2,9 +2,11 @@
  * DAWN WebUI — Calendar pane (DawnCalendar).
  *
  * A browsable CalDAV calendar as a tab inside the Scheduler & Watches popover.
- * Phase 1 ships List mode (a day-grouped agenda of the next 30 days); the month
- * grid is Phase 2.  Rendering + WS I/O live here; all state, window math, and the
- * source-agnostic occurrence model live in DawnCalendarData (calendar-data.js).
+ * Two views: Month (a mini-grid — DawnCalendarGrid — plus the selected day's
+ * agenda) and List (a day-grouped agenda of the next 30 days); the view is
+ * forced to List on a narrow viewport.  Rendering + WS I/O live here; all state,
+ * window math, and the source-agnostic occurrence model live in DawnCalendarData
+ * (calendar-data.js); the grid render + keyboard nav in calendar-grid.js.
  *
  * Lifecycle: the scheduler popover calls activate()/deactivate() as the Calendar
  * tab becomes / stops being the visible pane, so state.active is exactly
@@ -22,6 +24,15 @@
    'use strict';
 
    const Data = window.DawnCalendarData;
+   const Grid = window.DawnCalendarGrid;
+
+   /* Max density dots per month-grid cell before a "+N" overflow. */
+   const DOT_CAP = 3;
+
+   /* Below this width the popover is full-width and a month grid doesn't fit, so
+    * the view is forced to List (presentation only — the stored pref is kept, so
+    * widening restores Month). */
+   const NARROW_MQ = window.matchMedia ? window.matchMedia('(max-width: 600px)') : null;
 
    /* Trailing-edge debounce for calendar_events_changed: a multi-account sync
     * fires a burst, and a change during an in-flight fetch must refetch AFTER it
@@ -29,8 +40,22 @@
     * a superseded response, and this schedules the fresh read). */
    const EVENTS_CHANGED_DEBOUNCE_MS = 300;
 
-   const els = { pane: null, legend: null, body: null };
+   const els = {
+      pane: null,
+      legend: null,
+      body: null,
+      grid: null,
+      prevBtn: null,
+      nextBtn: null,
+      period: null,
+      viewMonthBtn: null,
+      viewListBtn: null,
+      upcomingToggle: null,
+   };
    let changeTimer = null;
+   /* Set once the user navigates/selects a day, so we stop auto-anchoring to
+    * "today's month" on activate (they've chosen where to look). */
+   let userTouched = false;
 
    /* ---- helpers ---------------------------------------------------------- */
 
@@ -64,11 +89,11 @@
       if (el) el.textContent = msg;
    }
 
+   /* Delegate to the data layer's DST-safe key builder (single source of truth;
+    * calendar-grid.js keeps a deliberate standalone copy to stay dependency-free
+    * — it must remain byte-identical). */
    function keyFromDate(dt) {
-      const y = dt.getFullYear();
-      const m = String(dt.getMonth() + 1).padStart(2, '0');
-      const d = String(dt.getDate()).padStart(2, '0');
-      return y + '-' + m + '-' + d;
+      return Data.keyFromDate(dt);
    }
 
    function localDateKey(epochSec) {
@@ -96,6 +121,96 @@
       if (dateKey === keyFromDate(today)) prefix = 'Today · ';
       else if (dateKey === keyFromDate(tomorrow)) prefix = 'Tomorrow · ';
       return prefix + weekday + ' ' + md;
+   }
+
+   function parseDateKey(key) {
+      const p = key.split('-');
+      return new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+   }
+
+   function addDays(dt, n) {
+      return new Date(dt.getFullYear(), dt.getMonth(), dt.getDate() + n);
+   }
+
+   /* Bucket filter-applied events by local day for the MONTH grid + selected-day
+    * agenda: timed events on the local date of their start; all-day events across
+    * [startDate, endDate) — endDate is the iCal-exclusive DTEND, so a 1-day
+    * all-day event (empty/next-day endDate) hits exactly one cell.  The all-day
+    * span is clamped to the visible window (Data.state.window) so a multi-year
+    * all-day event still lands on its in-window days and the loop stays ≤42
+    * iterations.  (List mode uses groupByDay instead, which keys all-day events
+    * on startDate only — one row at the start — because a list shouldn't repeat a
+    * multi-day event on every day; the two bucketers differ deliberately.) */
+   function buildBuckets(events) {
+      const buckets = Object.create(null);
+      const win = Data.state.window;
+      const winStart = win && win.start ? startOfLocalDay(new Date(win.start * 1000)) : null;
+      const winEnd = win && win.end ? startOfLocalDay(new Date(win.end * 1000)) : null;
+      const upcoming = isUpcomingOnly();
+      const todayKey = keyFromDate(new Date());
+      for (let i = 0; i < events.length; i++) {
+         const ev = events[i];
+         if (Data.isFilteredOff(ev.calendarKey)) continue;
+         if (ev.allDay && ev.startDate) {
+            const endExcl = ev.endDate
+               ? parseDateKey(ev.endDate)
+               : addDays(parseDateKey(ev.startDate), 1);
+            let d = parseDateKey(ev.startDate);
+            if (winStart && d.getTime() < winStart.getTime()) d = new Date(winStart);
+            let guard = 0;
+            while (
+               d.getTime() < endExcl.getTime() &&
+               (!winEnd || d.getTime() <= winEnd.getTime()) &&
+               guard < 60
+            ) {
+               const k = keyFromDate(d);
+               if (!upcoming || k >= todayKey) (buckets[k] || (buckets[k] = [])).push(ev);
+               d = addDays(d, 1);
+               guard++;
+            }
+         } else {
+            const k = localDateKey(ev.start);
+            if (!upcoming || k >= todayKey) (buckets[k] || (buckets[k] = [])).push(ev);
+         }
+      }
+      return buckets;
+   }
+
+   function startOfLocalDay(dt) {
+      return new Date(dt.getFullYear(), dt.getMonth(), dt.getDate());
+   }
+
+   /* ---- mode / viewport -------------------------------------------------- */
+
+   function isNarrow() {
+      return !!(NARROW_MQ && NARROW_MQ.matches);
+   }
+
+   function prefMode() {
+      const v = window.DawnStore ? DawnStore.get(DawnStore.KEYS.CALENDAR_VIEW, 'month') : 'month';
+      return v === 'list' ? 'list' : 'month';
+   }
+
+   /* "Upcoming only" (default on): hide events dated before today, so the current
+    * month isn't cluttered with past/finished events.  Client-side (the data is
+    * already fetched), so toggling just re-renders.  List mode is inherently
+    * forward already (its window starts at now). */
+   function isUpcomingOnly() {
+      return window.DawnStore
+         ? DawnStore.getBool(DawnStore.KEYS.CALENDAR_UPCOMING_ONLY, true)
+         : true;
+   }
+
+   /* The mode actually rendered: the stored pref, forced to List on a narrow
+    * viewport.  Returns true if it differs from the data layer's current mode
+    * (so the caller must refetch — the window differs between modes). */
+   function syncMode() {
+      const eff = isNarrow() ? 'list' : prefMode();
+      if (Data.state.mode !== eff) {
+         Data.setMode(eff);
+         return true;
+      }
+      return false;
    }
 
    /* ---- WS I/O ----------------------------------------------------------- */
@@ -175,17 +290,22 @@
       );
    }
 
-   /* Group visible (filter-applied) events by local day, ascending. All-day
-    * events key on their startDate string; timed on the local date of start.
+   /* LIST-mode grouping: visible (filter-applied) events by local day, ascending.
+    * All-day events key on their startDate ONLY (one row at the start — a list
+    * shouldn't repeat a multi-day event on every covered day; contrast
+    * buildBuckets, which spans them across grid cells for the month view).
     * Within a day the global start-order is preserved, so all-day (midnight)
     * sorts above timed. */
    function groupByDay(events) {
       const groups = [];
       const index = {};
+      const upcoming = isUpcomingOnly();
+      const todayKey = keyFromDate(new Date());
       for (let i = 0; i < events.length; i++) {
          const ev = events[i];
          if (Data.isFilteredOff(ev.calendarKey)) continue;
          const key = ev.allDay && ev.startDate ? ev.startDate : localDateKey(ev.start);
+         if (upcoming && key < todayKey) continue;
          let g = index[key];
          if (!g) {
             g = { key: key, label: dayLabel(key), items: [] };
@@ -267,12 +387,75 @@
       });
    }
 
+   function monthLabel(anchor) {
+      return new Date(anchor.year, anchor.month, 1).toLocaleDateString([], {
+         month: 'long',
+         year: 'numeric',
+      });
+   }
+
+   function setToggleActive(mode) {
+      if (els.viewMonthBtn) {
+         const on = mode === 'month';
+         els.viewMonthBtn.classList.toggle('active', on);
+         els.viewMonthBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+      }
+      if (els.viewListBtn) {
+         const on = mode === 'list';
+         els.viewListBtn.classList.toggle('active', on);
+         els.viewListBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+      }
+   }
+
+   /* Update the header in place (don't rebuild — keeps focus on a nav button
+    * across a month page). */
+   function renderHeader() {
+      const s = Data.state;
+      const month = s.mode === 'month';
+      if (els.prevBtn) els.prevBtn.classList.toggle('hidden', !month);
+      if (els.nextBtn) els.nextBtn.classList.toggle('hidden', !month);
+      if (els.period) els.period.textContent = month ? monthLabel(s.anchor) : 'Next 30 days';
+      if (els.upcomingToggle) els.upcomingToggle.checked = isUpcomingOnly();
+      setToggleActive(s.mode);
+   }
+
+   function renderGrid() {
+      if (!els.grid) return;
+      const s = Data.state;
+      const show = s.mode === 'month' && !s.error && s.eventsLoaded && Grid;
+      if (!show) {
+         els.grid.classList.add('hidden');
+         return;
+      }
+      /* Grid.render replaces the grid's innerHTML; if the user was keyboard-
+       * navigating it when a background refetch triggered this render, restore
+       * focus to the (still-selected) cell so nav isn't interrupted. */
+      els.grid.setAttribute('aria-label', 'Calendar, ' + monthLabel(s.anchor));
+      const hadFocus = els.grid.contains(document.activeElement);
+      Grid.render(els.grid, {
+         year: s.anchor.year,
+         month: s.anchor.month,
+         weekStart: Data.getWeekStart(),
+         todayKey: keyFromDate(new Date()),
+         selectedKey: s.selectedKey,
+         buckets: buildBuckets(s.events),
+         colorFor: Data.colorFor,
+         dotCap: DOT_CAP,
+         onSelect: onGridSelect,
+         onPageToDate: onGridPageToDate,
+      });
+      els.grid.classList.remove('hidden');
+      if (hadFocus) focusSelectedCell();
+   }
+
    /* Render gate: only touch the DOM while the pane is the visible tab in an
     * open popover (state.active). A late response after close updates state and
     * returns here early — no paint into a hidden pane. */
    function render() {
       if (!Data.state.active) return;
+      renderHeader();
       renderLegend();
+      renderGrid();
       renderBody();
    }
 
@@ -296,25 +479,33 @@
          els.body.innerHTML = simpleStateHTML('Loading…', null, null);
          return;
       }
-      if (s.events.length === 0) {
-         if (s.calendarsLoaded && s.calendarOrder.length === 0) {
-            els.body.innerHTML = simpleStateHTML(
-               'No calendars',
-               'Add a CalDAV account to see your events here.',
-               { id: 'add-account', label: 'Add a calendar account' }
-            );
-         } else {
-            els.body.innerHTML = simpleStateHTML(
-               'Nothing scheduled',
-               'No events in the next 30 days.',
-               null
-            );
-            announce('No events in the next 30 days');
-         }
+      /* No calendars configured — deep-link to settings, in either mode. */
+      if (s.calendarsLoaded && s.calendarOrder.length === 0) {
+         els.body.innerHTML = simpleStateHTML(
+            'No calendars',
+            'Add a CalDAV account to see your events here.',
+            { id: 'add-account', label: 'Add a calendar account' }
+         );
          return;
       }
 
-      /* Events exist; apply the client-side per-calendar filter. */
+      /* Month mode: the grid is the browse surface; the body shows the selected
+       * day's events (even when the whole month is empty). */
+      if (s.mode === 'month') {
+         renderSelectedDay();
+         return;
+      }
+
+      /* List mode. */
+      if (s.events.length === 0) {
+         els.body.innerHTML = simpleStateHTML(
+            'Nothing scheduled',
+            'No events in the next 30 days.',
+            null
+         );
+         announce('No events in the next 30 days');
+         return;
+      }
       const groups = groupByDay(s.events);
       if (groups.length === 0) {
          els.body.innerHTML = simpleStateHTML(
@@ -332,6 +523,36 @@
       announce(
          visible === 1 ? '1 event in the next 30 days' : visible + ' events in the next 30 days'
       );
+   }
+
+   /* A "some events hidden" note when the 256 cap trimmed the window (the
+    * recursive window-bisect is a deferred follow-up; the note keeps the view
+    * honest rather than silently sparse). */
+   function truncatedNoteHTML() {
+      return Data.state.truncated
+         ? '<div class="cal-truncated"><span class="dawn-badge muted">' +
+              'Some events this month are hidden (too many to show).</span></div>'
+         : '';
+   }
+
+   /* Month mode: agenda for the selected day only. */
+   function renderSelectedDay() {
+      const s = Data.state;
+      const label = dayLabel(s.selectedKey);
+      const dayEvents = buildBuckets(s.events)[s.selectedKey] || [];
+      let html = truncatedNoteHTML();
+      html += '<div class="cal-day"><div class="cal-day-header">' + escapeHtml(label) + '</div>';
+      if (dayEvents.length === 0) {
+         html += '<div class="sched-popover-empty-compact">Nothing scheduled</div>';
+      } else {
+         for (let i = 0; i < dayEvents.length; i++) html += rowHTML(dayEvents[i]);
+      }
+      html += '</div>';
+      els.body.innerHTML = html;
+      colorizeAccents();
+      /* No SR announce here: the focused gridcell's aria-label already conveys
+       * the day + its event count, and this render also fires on passive
+       * refetches where an announcement would be spurious. */
    }
 
    /* ---- events ----------------------------------------------------------- */
@@ -365,6 +586,81 @@
       chip.classList.toggle('off', off);
       chip.setAttribute('aria-pressed', off ? 'false' : 'true');
       renderBody();
+      renderGrid(); /* month mode: re-filter the grid dots too (focus stays on the chip) */
+   }
+
+   /* When the anchor month changes, keep the selection inside it: today if the
+    * new month contains today, else its 1st. */
+   function reselectForAnchor() {
+      const s = Data.state;
+      const now = new Date();
+      if (now.getFullYear() === s.anchor.year && now.getMonth() === s.anchor.month) {
+         Data.setSelectedKey(keyFromDate(now));
+      } else {
+         Data.setSelectedKey(keyFromDate(new Date(s.anchor.year, s.anchor.month, 1)));
+      }
+   }
+
+   /* Don't focus a hidden grid (e.g. after a disconnect paged into the error
+    * state) — that would drop focus to <body>. */
+   function focusSelectedCell() {
+      if (!els.grid || els.grid.classList.contains('hidden')) return;
+      const cell = els.grid.querySelector('.cal-cell[tabindex="0"]');
+      if (cell) cell.focus();
+   }
+
+   function monthOfKey(key) {
+      const p = key.split('-');
+      return { year: Number(p[0]), month: Number(p[1]) - 1 };
+   }
+
+   /* Month-button navigation: jump a month, select today (if landed on) or the
+    * 1st — a "next month" gesture carries no specific target day. */
+   function pageMonth(delta, focusGrid) {
+      userTouched = true;
+      Data.shiftMonth(delta);
+      reselectForAnchor();
+      load(); /* new window; render() paints the new month (dots fill on response) */
+      if (focusGrid) focusSelectedCell();
+   }
+
+   /* Page to a specific date in another month (a spillover-cell pick or a
+    * keyboard step off the grid edge) — keeps navigation date-contiguous. */
+   function pageToDate(key, focusGrid) {
+      userTouched = true;
+      const km = monthOfKey(key);
+      Data.setAnchorMonth(km.year, km.month);
+      Data.setSelectedKey(key);
+      load();
+      if (focusGrid) focusSelectedCell();
+   }
+
+   /* Grid callbacks. */
+   function onGridSelect(key) {
+      userTouched = true;
+      Data.setSelectedKey(key);
+      renderBody(); /* the grid moved its own selection visual + focus */
+   }
+   function onGridPageToDate(key) {
+      pageToDate(key, true);
+   }
+
+   function onToggleView(view) {
+      if (window.DawnStore) DawnStore.set(DawnStore.KEYS.CALENDAR_VIEW, view);
+      if (syncMode()) load();
+      else render();
+   }
+
+   function onToggleUpcoming() {
+      const on = els.upcomingToggle ? els.upcomingToggle.checked : true;
+      if (window.DawnStore) DawnStore.setBool(DawnStore.KEYS.CALENDAR_UPCOMING_ONLY, on);
+      render(); /* client-side filter — no refetch, just re-render */
+   }
+
+   function onViewportChange() {
+      if (!Data.state.active) return; /* resync on next activate() */
+      if (syncMode()) load();
+      else render();
    }
 
    /* ---- lifecycle / public API ------------------------------------------ */
@@ -372,8 +668,22 @@
    function activate() {
       const s = Data.state;
       Data.setActive(true);
+      /* Re-anchor an untouched calendar to today's month — covers the page
+       * staying open across a month boundary (anchor was seeded at script load).
+       * If that moves the anchor, the cached events are for the old month, so
+       * force a refetch. */
+      let anchorMoved = false;
+      if (!userTouched) {
+         const now = new Date();
+         if (s.anchor.year !== now.getFullYear() || s.anchor.month !== now.getMonth()) {
+            Data.setAnchorMonth(now.getFullYear(), now.getMonth());
+            anchorMoved = true;
+         }
+         Data.setSelectedKey(keyFromDate(now));
+      }
+      const modeChanged = syncMode(); /* reflect the pref + viewport before painting */
       render(); /* show cached state (or the loading placeholder) immediately */
-      if (!s.eventsLoaded || s.dirty || s.error) {
+      if (!s.eventsLoaded || s.dirty || s.error || modeChanged || anchorMoved) {
          Data.setDirty(false);
          load();
       }
@@ -413,9 +723,41 @@
       els.pane = document.getElementById('calendar-pane');
       els.legend = document.getElementById('calendar-legend');
       els.body = document.getElementById('calendar-body');
+      els.grid = document.getElementById('calendar-grid');
+      els.prevBtn = document.getElementById('calendar-prev');
+      els.nextBtn = document.getElementById('calendar-next');
+      els.period = document.getElementById('calendar-period');
+      els.viewMonthBtn = document.getElementById('calendar-view-month');
+      els.viewListBtn = document.getElementById('calendar-view-list');
+      els.upcomingToggle = document.getElementById('calendar-upcoming');
       if (!els.pane || !els.body) return;
+      if (els.upcomingToggle) els.upcomingToggle.addEventListener('change', onToggleUpcoming);
       els.body.addEventListener('click', onBodyClick);
       if (els.legend) els.legend.addEventListener('click', onLegendClick);
+      if (els.prevBtn) {
+         els.prevBtn.addEventListener('click', function () {
+            pageMonth(-1, false);
+         });
+      }
+      if (els.nextBtn) {
+         els.nextBtn.addEventListener('click', function () {
+            pageMonth(1, false);
+         });
+      }
+      if (els.viewMonthBtn) {
+         els.viewMonthBtn.addEventListener('click', function () {
+            onToggleView('month');
+         });
+      }
+      if (els.viewListBtn) {
+         els.viewListBtn.addEventListener('click', function () {
+            onToggleView('list');
+         });
+      }
+      if (NARROW_MQ) {
+         if (NARROW_MQ.addEventListener) NARROW_MQ.addEventListener('change', onViewportChange);
+         else if (NARROW_MQ.addListener) NARROW_MQ.addListener(onViewportChange); /* older */
+      }
    }
 
    window.DawnCalendar = {

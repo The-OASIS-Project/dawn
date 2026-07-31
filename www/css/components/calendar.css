@@ -222,3 +222,229 @@
       padding: 0.3125rem 0.625rem;
    }
 }
+
+/* =========================================================================
+ * Phase 2 — header (nav + view toggle) and the month grid
+ * ========================================================================= */
+
+.calendar-header {
+   display: flex;
+   align-items: center;
+   flex-wrap: wrap;
+   gap: 0.5rem;
+   padding: 0.5rem 0.875rem;
+   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+/* Nav on the left; the upcoming toggle + view toggle group on the right. */
+.calendar-nav {
+   display: flex;
+   align-items: center;
+   gap: 0.25rem;
+   margin-right: auto;
+}
+
+.calendar-upcoming-toggle {
+   display: inline-flex;
+   align-items: center;
+   gap: 0.3125rem;
+   font-size: 0.72rem;
+   color: var(--text-secondary);
+   cursor: pointer;
+   user-select: none;
+}
+
+.calendar-upcoming-toggle input {
+   accent-color: var(--accent);
+   cursor: pointer;
+   margin: 0;
+}
+
+.calendar-upcoming-toggle:hover {
+   color: var(--text-primary);
+}
+
+.calendar-nav-btn {
+   background: transparent;
+   border: none;
+   color: var(--text-secondary);
+   font-size: 1.1rem;
+   line-height: 1;
+   cursor: pointer;
+   padding: 2px 6px;
+   border-radius: 4px;
+}
+
+.calendar-nav-btn:hover {
+   background: var(--accent-subtle);
+   color: var(--text-primary);
+}
+
+.calendar-nav-btn:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 1px;
+}
+
+.calendar-nav-btn.hidden {
+   display: none;
+}
+
+.calendar-period {
+   font-size: 0.85rem;
+   font-weight: 600;
+   color: var(--text-primary);
+   min-width: 8em;
+   text-align: center;
+}
+
+.calendar-view-toggle {
+   display: inline-flex;
+   border: 1px solid rgba(255, 255, 255, 0.1);
+   border-radius: 6px;
+   overflow: hidden;
+   flex-shrink: 0;
+}
+
+.calendar-view-btn {
+   background: transparent;
+   border: none;
+   color: var(--text-secondary);
+   font-size: 0.72rem;
+   padding: 0.25rem 0.5rem;
+   cursor: pointer;
+   transition: background var(--transition-fast);
+}
+
+.calendar-view-btn:hover {
+   background: var(--accent-subtle);
+}
+
+.calendar-view-btn.active {
+   background: var(--accent);
+   color: var(--bg-primary, #12161a);
+}
+
+.calendar-view-btn:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: -2px;
+}
+
+/* Grid */
+#calendar-grid.hidden {
+   display: none;
+}
+
+.calendar-grid {
+   padding: 0.375rem 0.5rem 0.5rem;
+   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.cal-grid-weekdays,
+.cal-week {
+   display: grid;
+   grid-template-columns: repeat(7, 1fr);
+}
+
+.cal-weekday {
+   text-align: center;
+   font-size: 0.62rem;
+   text-transform: uppercase;
+   letter-spacing: 0.03em;
+   /* --text-secondary (not tertiary): below AA at this size on the popover
+    * surface (same rule as .cal-day-header / .cal-row-cal). */
+   color: var(--text-secondary);
+   padding: 2px 0 4px;
+}
+
+.cal-cell {
+   position: relative;
+   display: flex;
+   flex-direction: column;
+   align-items: center;
+   gap: 2px;
+   min-height: 44px;
+   padding: 3px 2px;
+   border-radius: 6px;
+   cursor: pointer;
+   color: var(--text-secondary);
+   font-size: 0.8rem;
+}
+
+.cal-cell.adjacent {
+   opacity: 0.4;
+}
+
+/* A spillover cell that's transiently focused/selected (before it pages) must
+ * NOT dim its accent focus ring / selected fill — that would drop the focus
+ * indicator below the WCAG 1.4.11 3:1 contrast floor. */
+.cal-cell.adjacent:focus-visible,
+.cal-cell.adjacent.selected {
+   opacity: 1;
+}
+
+.cal-cell:hover {
+   background: var(--accent-subtle);
+}
+
+.cal-cell:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: -2px;
+}
+
+.cal-cell.selected {
+   background: var(--accent-subtle);
+}
+
+.cal-cell-num {
+   width: 22px;
+   height: 22px;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   border-radius: 50%;
+}
+
+/* today = accent ring on the number; selected = filled number; both stack. */
+.cal-cell.today .cal-cell-num {
+   box-shadow: inset 0 0 0 1.5px var(--accent);
+   color: var(--accent);
+}
+
+.cal-cell.selected .cal-cell-num {
+   background: var(--accent);
+   color: var(--bg-primary, #12161a);
+}
+
+.cal-dots {
+   display: flex;
+   gap: 3px;
+   align-items: center;
+   min-height: 6px;
+}
+
+.cal-dot {
+   width: 5px;
+   height: 5px;
+   border-radius: 50%;
+   /* CSSOM sets the per-calendar color; this is the no-color default. */
+   background: var(--accent);
+   /* Inset ring so a near-background calendar color still reads as a dot
+    * (matches .cal-legend-dot). */
+   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.25);
+}
+
+.cal-dot-more {
+   font-size: 0.6rem;
+   /* --text-secondary: the "+N" overflow is load-bearing (more events exist)
+    * and must clear AA. */
+   color: var(--text-secondary);
+   line-height: 1;
+}
+
+/* Below 600px the popover is full-width and the view is forced to List, so the
+ * Month/List toggle is hidden (the stored pref is preserved, not overwritten). */
+@media (max-width: 600px) {
+   .calendar-view-toggle {
+      display: none;
+   }
+}

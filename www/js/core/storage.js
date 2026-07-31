@@ -42,6 +42,8 @@
       DEBUG_MODE: 'dawn_debug_mode',
       MUSIC_PANEL_OPEN: 'dawn_music_panel_open',
       SETTINGS_SHOW_ADVANCED: 'dawn-settings-show-advanced',
+      CALENDAR_VIEW: 'dawn_calendar_view',
+      CALENDAR_UPCOMING_ONLY: 'dawn_calendar_upcoming_only',
    });
 
    /**

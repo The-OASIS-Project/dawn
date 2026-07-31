@@ -830,11 +830,67 @@
                role="tabpanel"
                aria-labelledby="sched-tab-calendar"
             >
+               <div class="calendar-header" id="calendar-header">
+                  <div class="calendar-nav" id="calendar-nav">
+                     <button
+                        class="calendar-nav-btn"
+                        id="calendar-prev"
+                        type="button"
+                        aria-label="Previous month"
+                     >
+                        ‹
+                     </button>
+                     <span class="calendar-period" id="calendar-period"></span>
+                     <button
+                        class="calendar-nav-btn"
+                        id="calendar-next"
+                        type="button"
+                        aria-label="Next month"
+                     >
+                        ›
+                     </button>
+                  </div>
+                  <label class="calendar-upcoming-toggle" title="Hide events before today">
+                     <input type="checkbox" id="calendar-upcoming" checked />
+                     <span>Upcoming</span>
+                  </label>
+                  <div
+                     class="calendar-view-toggle"
+                     id="calendar-view-toggle"
+                     role="group"
+                     aria-label="Calendar view"
+                  >
+                     <button
+                        class="calendar-view-btn active"
+                        id="calendar-view-month"
+                        type="button"
+                        aria-pressed="true"
+                        data-view="month"
+                     >
+                        Month
+                     </button>
+                     <button
+                        class="calendar-view-btn"
+                        id="calendar-view-list"
+                        type="button"
+                        aria-pressed="false"
+                        data-view="list"
+                     >
+                        List
+                     </button>
+                  </div>
+               </div>
                <div
                   class="calendar-legend hidden"
                   id="calendar-legend"
                   role="group"
                   aria-label="Calendars"
+               ></div>
+               <div
+                  class="calendar-grid hidden"
+                  id="calendar-grid"
+                  role="grid"
+                  aria-label="Month"
                ></div>
                <div
                   class="calendar-body"
@@ -3616,6 +3672,7 @@ token = "eyJ..."</pre
       <script defer src="/js/ui/scheduler.js"></script>
       <script defer src="/js/ui/watches.js"></script>
       <script defer src="/js/ui/calendar-data.js"></script>
+      <script defer src="/js/ui/calendar-grid.js"></script>
       <script defer src="/js/ui/calendar.js"></script>
       <script defer src="/js/ui/scheduler-queue.js"></script>
       <script defer src="/js/ui/phone.js"></script>

@@ -25,9 +25,25 @@
     * clamps 1..90, explicit allows 366) and the window is client-predictable. */
    const LIST_WINDOW_DAYS = 30;
 
+   /* Local 'YYYY-MM-DD' for a Date, built from local field getters (DST-safe —
+    * never epoch arithmetic). */
+   function keyFromDate(dt) {
+      const y = dt.getFullYear();
+      const m = String(dt.getMonth() + 1).padStart(2, '0');
+      const d = String(dt.getDate()).padStart(2, '0');
+      return y + '-' + m + '-' + d;
+   }
+
+   const _now = new Date();
+
    const state = {
       active: false /* true while the Calendar tab is the visible pane */,
-      mode: 'list' /* 'list' (Phase 1) | 'month' (Phase 2) */,
+      mode: 'month' /* 'month' (default) | 'list' */,
+      anchor: {
+         year: _now.getFullYear(),
+         month: _now.getMonth(),
+      } /* displayed month (month mode) */,
+      selectedKey: keyFromDate(_now) /* selected day 'YYYY-MM-DD' (month mode) */,
       eventsLoaded: false,
       calendarsLoaded: false,
       dirty: false /* a calendar_events_changed arrived while inactive */,
@@ -46,8 +62,49 @@
       return Math.floor(Date.now() / 1000);
    }
 
-   /* The window for the current mode.  Phase 1: List = [now, now + N days]. */
+   /* First day of the week for the user's locale, as a JS getDay() value
+    * (0=Sun..6=Sat).  Intl.weekInfo.firstDay is 1=Mon..7=Sun; feature-detect it
+    * (not universal) and fall back to Sunday. */
+   function getWeekStart() {
+      try {
+         const loc = new Intl.Locale(navigator.language || 'en-US');
+         const wi = loc.weekInfo || (loc.getWeekInfo && loc.getWeekInfo());
+         if (wi && typeof wi.firstDay === 'number') {
+            return wi.firstDay === 7 ? 0 : wi.firstDay;
+         }
+      } catch (e) {
+         /* older browser — fall through */
+      }
+      return 0;
+   }
+
+   /* The 42-cell (6-week) month grid window for state.anchor, aligned to the
+    * locale week start.  All Date construction (never epoch ± 86400) so the
+    * cell days and window edges are DST-correct. */
+   function computeMonthWindow() {
+      const ws = getWeekStart();
+      const first = new Date(state.anchor.year, state.anchor.month, 1);
+      const offset = (first.getDay() - ws + 7) % 7; /* days from week start to the 1st */
+      const firstCell = new Date(state.anchor.year, state.anchor.month, 1 - offset);
+      const lastCell = new Date(
+         firstCell.getFullYear(),
+         firstCell.getMonth(),
+         firstCell.getDate() + 41,
+         23,
+         59,
+         59
+      );
+      return {
+         start: Math.floor(firstCell.getTime() / 1000) /* local midnight of the first cell */,
+         end: Math.floor(lastCell.getTime() / 1000) /* end of the last cell's day */,
+      };
+   }
+
+   /* The window for the current mode: Month = the 42-cell grid range; List =
+    * [now, now + N days].  Always an explicit {start,end} (see the ordering
+    * guard). */
    function computeWindow() {
+      if (state.mode === 'month') return computeMonthWindow();
       const start = nowSec();
       return { start: start, end: start + LIST_WINDOW_DAYS * 86400 };
    }
@@ -162,10 +219,26 @@
    function setError(v) {
       state.error = v || null;
    }
+   function setMode(m) {
+      state.mode = m === 'list' ? 'list' : 'month';
+   }
+   function setAnchorMonth(year, month) {
+      /* new Date normalizes month overflow/underflow (e.g. month -1 or 12). */
+      const d = new Date(year, month, 1);
+      state.anchor = { year: d.getFullYear(), month: d.getMonth() };
+   }
+   function shiftMonth(delta) {
+      setAnchorMonth(state.anchor.year, state.anchor.month + delta);
+   }
+   function setSelectedKey(k) {
+      if (k) state.selectedKey = k;
+   }
 
    window.DawnCalendarData = {
       state: state,
       computeWindow: computeWindow,
+      getWeekStart: getWeekStart,
+      keyFromDate: keyFromDate,
       fromCalDav: fromCalDav,
       beginEventsFetch: beginEventsFetch,
       ingestEvents: ingestEvents,
@@ -177,5 +250,9 @@
       setActive: setActive,
       setDirty: setDirty,
       setError: setError,
+      setMode: setMode,
+      setAnchorMonth: setAnchorMonth,
+      shiftMonth: shiftMonth,
+      setSelectedKey: setSelectedKey,
    };
 })();
