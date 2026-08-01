@@ -1175,18 +1175,31 @@ int webui_music_start_playback(session_music_state_t *state, const char *path) {
 
    state->playing = true;
    state->paused = false;
-
-   /* Cache duration from shared queue to avoid queue_mutex on 1Hz position updates */
+   int qidx = state->queue_index;
    user_music_queue_t *uq = state->shared_queue;
+   pthread_mutex_unlock(&state->state_mutex);
+
+   /* Cache the track duration for the 1 Hz position updates. Do NOT hold
+    * state_mutex while taking queue_mutex — the documented lock order is
+    * queue_mutex → state_mutex, so holding state here and then taking queue
+    * (state → queue) inverts it and can deadlock against paths that correctly
+    * nest queue → state (e.g. next/previous). Snapshot the index under state
+    * above, read the duration under queue alone, then store it under state. */
    if (uq) {
+      bool have_dur = false;
+      uint32_t dur = 0;
       pthread_mutex_lock(&uq->queue_mutex);
-      if (state->queue_index >= 0 && state->queue_index < uq->queue_length) {
-         state->cached_duration_sec = uq->queue[state->queue_index].duration_sec;
+      if (qidx >= 0 && qidx < uq->queue_length) {
+         dur = uq->queue[qidx].duration_sec;
+         have_dur = true;
       }
       pthread_mutex_unlock(&uq->queue_mutex);
+      if (have_dur) {
+         pthread_mutex_lock(&state->state_mutex);
+         state->cached_duration_sec = dur;
+         pthread_mutex_unlock(&state->state_mutex);
+      }
    }
-
-   pthread_mutex_unlock(&state->state_mutex);
 
    /* Start streaming thread if not already running */
    return webui_music_start_streaming(state);

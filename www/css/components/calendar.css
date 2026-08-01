@@ -95,7 +95,8 @@
 }
 
 /* Scroll region — tabbable (role=region) so keyboard users can scroll a long
- * agenda; the rows themselves aren't focusable in Phase 1. */
+ * agenda; the rows are individually focusable (role=button) to open the detail
+ * popover. */
 .calendar-body {
    flex: 1;
    overflow-y: auto;

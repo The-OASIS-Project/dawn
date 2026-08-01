@@ -1795,6 +1795,14 @@ int conv_db_update_llm_settings(int64_t conv_id,
  * to stamp a fresh conversation with the session's resolved config at creation so
  * no conversation persists NULL LLM columns.
  *
+ * @param conv_id        Conversation to fill.
+ * @param user_id        Owning user (ownership check).
+ * @param llm_type       "cloud" / "local" (filled only if the column is NULL/empty).
+ * @param cloud_provider Provider slug (filled only if NULL/empty).
+ * @param model          Model name (filled only if NULL/empty).
+ * @param tools_mode     Tool mode (filled only if NULL/empty).
+ * @param thinking_mode  Thinking mode (filled only if NULL/empty).
+ * @param reasoning_effort Reasoning effort (filled only if NULL/empty).
  * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND (no matching row), or AUTH_DB_FAILURE
  */
 int conv_db_fill_llm_settings_if_empty(int64_t conv_id,

@@ -176,7 +176,9 @@
    function safeColor(c) {
       if (typeof c !== 'string') return '';
       const s = c.trim();
-      return /^#[0-9a-fA-F]{3,8}$/.test(s) || /^[a-zA-Z]{1,32}$/.test(s) ? s : '';
+      /* Valid CSS hex is 3/4/6/8 digits (not 5 or 7), or a plain named color. */
+      const hex = /^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+      return hex.test(s) || /^[a-zA-Z]{1,32}$/.test(s) ? s : '';
    }
 
    /* Fold a calendar_list_my_calendars_response into the id->{name,color} map.

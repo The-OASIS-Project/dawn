@@ -82,6 +82,7 @@ int calendar_service_sync_now(int64_t account_id);
  * Signal-only (no event data). Called change-gated from calendar_service_sync_now.
  * Layer-3→Layer-4 hook: strong override in src/webui/webui_broadcasts.c; a weak
  * no-op fallback in calendar_service.c keeps WebUI-off builds linking.
+ * @param user_id Owner whose browser sessions receive the refetch nudge.
  */
 void calendar_broadcast_events_changed(int user_id);
 

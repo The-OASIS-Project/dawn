@@ -647,25 +647,37 @@ void send_json_response(ws_connection_t *conn, json_object *response);
 /**
  * @brief Effective model name for a resolved LLM config (session model if set,
  *        else the provider/type default). Never empty for a valid provider.
- *        Returned pointer is not owned — copy before further calls.
+ * @param resolved Resolved LLM config to read the model from.
+ * @return Model-name string; not owned by the caller — copy before further calls.
  */
 const char *webui_effective_model_name(const llm_resolved_config_t *resolved);
 
 /**
  * @brief Stamp a conversation with the session's resolved LLM settings at
- *        creation, so no conversation persists NULL llm columns. No-op once the
- *        conversation has any messages (conv_db_lock_llm_settings gates on
- *        message_count == 0).
+ *        creation, so no conversation persists NULL/empty llm columns. Fills
+ *        only the columns that are currently NULL or empty via
+ *        conv_db_fill_llm_settings_if_empty() — a per-column, race-proof update
+ *        with NO message-count gate (so it is safe against the turn worker).
+ * @param session Session whose resolved LLM config supplies the defaults.
+ * @param conv_id Conversation to stamp.
+ * @param user_id Owning user (for the auth_db lookup).
  */
 void webui_conv_stamp_llm_settings(session_t *session, int64_t conv_id, int user_id);
 
 /**
- * @brief Send error message implementation (severity = error)
+ * @brief Send an error message to a client (severity = error).
+ * @param wsi     Target libwebsockets connection.
+ * @param code    Machine-readable error code string.
+ * @param message Human-readable message.
  */
 void send_error_impl(struct lws *wsi, const char *code, const char *message);
 
 /**
- * @brief Send error message implementation with an explicit severity.
+ * @brief Send an error/notice message with an explicit severity.
+ * @param wsi      Target libwebsockets connection.
+ * @param code     Machine-readable code string (e.g. INFO_THINKING_DISABLED).
+ * @param message  Human-readable message.
+ * @param severity info / warning / error — controls client-side routing.
  */
 void send_error_impl_ex(struct lws *wsi,
                         const char *code,

@@ -56,10 +56,19 @@ void handle_calendar_toggle_read_only(ws_connection_t *conn, json_object *payloa
 /** Set an account's enabled flag */
 void handle_calendar_set_enabled(ws_connection_t *conn, json_object *payload);
 
-/** List the user's active calendars flat across accounts (id->{name,color} map) */
+/**
+ * @brief List the user's active calendars flat across accounts (the
+ *        calendar_id -> {name,color} map a panel needs), in one call.
+ * @param conn Authenticated WebSocket connection (self-scoped to its user).
+ */
 void handle_calendar_list_my_calendars(ws_connection_t *conn);
 
-/** Read a window of upcoming occurrences (read-only pull for a calendar panel) */
+/**
+ * @brief Read a window of upcoming occurrences (read-only pull for a panel).
+ * @param conn    Authenticated WebSocket connection (self-scoped to its user).
+ * @param payload {days} or explicit {start,end} epoch window + optional
+ *                calendar_name filter.
+ */
 void handle_calendar_upcoming_events(ws_connection_t *conn, json_object *payload);
 
 #endif /* WEBUI_CALENDAR_H */

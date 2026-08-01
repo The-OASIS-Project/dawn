@@ -848,41 +848,55 @@ int calendar_service_range(int user_id,
    int count = 0;
    calendar_db_occurrences_in_range(cal_ids, cal_count, start, end, out, max_count, &count);
 
-   /* Merge all-day occurrences: they are stored/queried by date string, and the
-    * timed query hardcodes all_day = 0, so without this holidays/birthdays/PTO
-    * never appear (this also fixed the same latent gap on the LLM range path).
-    * Same localtime_r/tm_gmtoff approximation calendar_service_today uses. */
-   if (count < max_count) {
-      struct tm start_tm;
-      struct tm end_tm;
-      localtime_r(&start, &start_tm);
-      localtime_r(&end, &end_tm);
+   /* All-day occurrences are a DISJOINT query (the timed query hardcodes
+    * all_day = 0), so without merging them holidays/birthdays/PTO never appear
+    * (this also fixed the same latent gap on the LLM range path).  Fetch them
+    * into a temp buffer and merge, so the max_count cap applies to the COMBINED
+    * start-ordered set — a window that fills the cap with timed events must
+    * still surface the soonest all-day events instead of dropping them all.
+    * Same localtime_r/tm_gmtoff date approximation calendar_service_today uses. */
+   struct tm start_tm;
+   struct tm end_tm;
+   localtime_r(&start, &start_tm);
+   localtime_r(&end, &end_tm);
 
-      char start_date[16];
-      iso8601_format_date(start_tm.tm_year + 1900, start_tm.tm_mon + 1, start_tm.tm_mday,
-                          start_date, sizeof(start_date));
+   char start_date[16];
+   iso8601_format_date(start_tm.tm_year + 1900, start_tm.tm_mon + 1, start_tm.tm_mday, start_date,
+                       sizeof(start_date));
 
-      /* Exclusive upper date bound = day after the window's end day, so an
-       * all-day event on the final day is included. */
-      struct tm end_next = end_tm;
-      end_next.tm_mday += 1;
-      mktime(&end_next); /* normalize */
-      char end_date[16];
-      iso8601_format_date(end_next.tm_year + 1900, end_next.tm_mon + 1, end_next.tm_mday, end_date,
-                          sizeof(end_date));
+   /* Exclusive upper date bound = day after the window's end day, so an all-day
+    * event on the final day is included. */
+   struct tm end_next = end_tm;
+   end_next.tm_mday += 1;
+   mktime(&end_next); /* normalize */
+   char end_date[16];
+   iso8601_format_date(end_next.tm_year + 1900, end_next.tm_mon + 1, end_next.tm_mday, end_date,
+                       sizeof(end_date));
 
-      int allday = 0;
-      calendar_db_allday_occurrences_in_range(cal_ids, cal_count, start_date, end_date, out + count,
-                                              max_count - count, &allday);
-      count += allday;
+   calendar_occurrence_t *allday = malloc((size_t)max_count * sizeof(*allday));
+   int allday_count = 0;
+   if (allday) {
+      calendar_db_allday_occurrences_in_range(cal_ids, cal_count, start_date, end_date, allday,
+                                              max_count, &allday_count);
    }
 
-   /* The merge appended all-day rows after the timed rows, breaking the per-query
-    * dtstart ordering; re-sort so the soonest events come first (the caller's cap
-    * relies on start-order to drop the farthest events, not arbitrary ones). */
-   if (count > 1)
-      qsort(out, count, sizeof(calendar_occurrence_t), occ_cmp_dtstart);
-
+   if (allday_count > 0) {
+      /* Merge timed (out[0..count]) + all-day into one buffer, sort by start, and
+       * keep the soonest max_count.  Each input is already start-ordered by its
+       * query, but the combined set needs the re-sort. */
+      int total = count + allday_count;
+      calendar_occurrence_t *merged = malloc((size_t)total * sizeof(*merged));
+      if (merged) {
+         memcpy(merged, out, (size_t)count * sizeof(*merged));
+         memcpy(merged + count, allday, (size_t)allday_count * sizeof(*merged));
+         qsort(merged, total, sizeof(*merged), occ_cmp_dtstart);
+         count = total < max_count ? total : max_count;
+         memcpy(out, merged, (size_t)count * sizeof(*merged));
+         free(merged);
+      }
+      /* merged-alloc failure → out keeps the timed-only set (graceful degradation). */
+   }
+   free(allday);
    return count;
 }
 
