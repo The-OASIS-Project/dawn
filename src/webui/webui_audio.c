@@ -117,8 +117,12 @@ int webui_audio_init(void) {
       return WEBUI_AUDIO_ERROR;
    }
 
-   /* Create resampler for TTS output (22050Hz → 48kHz for Opus output) */
-   s_tts_resampler = resampler_create(22050, WEBUI_OPUS_SAMPLE_RATE, 1);
+   /* Create resampler for TTS output (22050Hz → 48kHz for Opus output).
+    * MEDIUM quality: inaudible for speech but ~4-5x cheaper than BEST, so a long
+    * sentence's resample no longer spikes CPU and starves the music stream thread
+    * (was a ~680ms synchronous burst per long sentence). */
+   s_tts_resampler = resampler_create_ex(22050, WEBUI_OPUS_SAMPLE_RATE, 1,
+                                         RESAMPLER_QUALITY_MEDIUM);
    if (!s_tts_resampler) {
       OLOG_ERROR("WebUI audio: Failed to create TTS resampler");
       resampler_destroy(s_input_resampler);

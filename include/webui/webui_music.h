@@ -304,6 +304,13 @@ struct lws;
  */
 void webui_music_set_stream_wsi(session_t *session, struct lws *wsi);
 
+/** webui_music_write_pending() return: the write failed fatally (lws_write error
+ *  or short write). A truncated WebSocket frame desyncs the client's WS parser, so
+ *  the writable callback must CLOSE the socket (client reconnects cleanly) rather
+ *  than leave it desynced. Distinct from SUCCESS(0) and the benign "nothing
+ *  pending" case so the callback only closes on a genuine fatal write. */
+#define WEBUI_MUSIC_WRITE_CLOSE 2
+
 /**
  * @brief Write pending audio data to the music WebSocket
  *
@@ -312,9 +319,31 @@ void webui_music_set_stream_wsi(session_t *session, struct lws *wsi);
  *
  * @param session Main session
  * @param wsi Music WebSocket instance
- * @return 0 on success, non-zero if no data pending
+ * @return SUCCESS(0) on success; WEBUI_MUSIC_WRITE_CLOSE on a fatal write (caller
+ *         must close the socket); non-zero otherwise (nothing pending / no state)
  */
 int webui_music_write_pending(session_t *session, struct lws *wsi);
+
+/**
+ * @brief Record a client buffer-depth report (closed-loop flow control)
+ *
+ * Called from the music-server lws thread when a client sends a
+ * {"type":"music_buffer","buffered_ms":N} message on the dedicated music socket.
+ * Resolves the session's music state and stores the value plus a receipt
+ * timestamp (plain atomics), consumed by the streaming thread's pacer. No-op if
+ * the session has no music state. Delegated here (rather than poked directly from
+ * the server file) so music-state internals stay in this module.
+ *
+ * @param session Authenticated session the report belongs to
+ * @param buffered_ms Client worklet buffered depth in ms (caller pre-clamps)
+ */
+void webui_music_report_buffer(session_t *session, uint32_t buffered_ms);
+
+/** Upper clamp for a client-reported buffer depth (ms) = the client worklet ring
+ *  capacity (music-worklet-processor.js: 48000*10 samples = 10s). The music server
+ *  clamps `buffered_ms` to [0, this] before calling webui_music_report_buffer(),
+ *  so a garbage/hostile report can't drive the pacer into a multi-second sleep. */
+#define WEBUI_MUSIC_CLIENT_BUFFER_MAX_MS 10000
 
 /* =============================================================================
  * LLM Tool Integration

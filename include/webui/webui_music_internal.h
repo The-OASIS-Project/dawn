@@ -51,6 +51,33 @@ extern "C" {
 /** Maximum Opus frame size */
 #define OPUS_MAX_FRAME_SIZE 1276
 
+/** Dedicated music-socket send ring depth (frames). At one 20ms frame per slot,
+ *  8 slots absorb ~160ms of writable-callback / scheduling jitter before dropping.
+ *  This depth is sized to cover the worst real-time stall on this path: the TTS
+ *  output resample burst, ~140ms at RESAMPLER_QUALITY_MEDIUM (webui_audio.c). If
+ *  that resampler is ever raised back to BEST (~680ms burst), or a slower core /
+ *  longer sentence pushes the stall past ~160ms, this depth must be re-checked —
+ *  otherwise the ring silently returns to dropping frames (watch write_drop_count). */
+#define WEBUI_MUSIC_WRITE_RING 8
+
+/* Closed-loop music buffer flow control (see music_stream_thread pacing in
+ * webui_music.c). The server holds the client's worklet ring near a target depth
+ * using periodic client buffer reports, bursting to refill after a drain. */
+
+/** Target client buffer depth (ms) the server paces to hold. ~10x the ~200ms
+ *  TTS-preemption stall it must ride out, and well under the client's 10s capacity. */
+#define WEBUI_MUSIC_TARGET_BUFFER_MS 2000
+/** Buffer reports older than this are stale → fall back to real-time pacing
+ *  (old clients that never report, or a client whose report sender stalled). */
+#define WEBUI_MUSIC_REPORT_STALE_MS 1000
+/** During a refill burst, back off to real-time pacing once the send ring is at
+ *  least this full (of WEBUI_MUSIC_WRITE_RING) so the burst can't overflow it. */
+#define WEBUI_MUSIC_REFILL_RING_HIGH 6
+/** Max single pacing sleep (us) — sanity bound against a bogus buffer estimate. */
+#define WEBUI_MUSIC_MAX_PACE_SLEEP_US 100000
+/* WEBUI_MUSIC_CLIENT_BUFFER_MAX_MS lives in the public webui_music.h — the music
+ * server file clamps reports against it and does not include this internal header. */
+
 /** Quality tier names for logging/UI */
 extern const char *QUALITY_NAMES[MUSIC_QUALITY_COUNT];
 
@@ -162,11 +189,35 @@ typedef struct {
    /* Plex temp file (downloaded track, unlinked after decoder opens) */
    char temp_file[256]; /**< Path to Plex temp file (empty = none) */
 
-   /* Dedicated music WebSocket (direct streaming) */
-   struct lws *music_wsi;                    /**< Music server WebSocket (NULL if not connected) */
-   pthread_mutex_t write_mutex;              /**< Protects write buffer */
-   uint8_t write_buffer[LWS_PRE + 4 + 1276]; /**< LWS_PRE + length prefix + max Opus frame */
-   size_t write_pending_len;                 /**< Bytes pending in write buffer (0 = empty) */
+   /* Dedicated music WebSocket (direct streaming).
+    *
+    * A small ring of pre-framed buffers, not a single slot: the music thread
+    * produces one 20ms Opus frame every 20ms, and the writable callback drains
+    * one frame per firing. A single slot dropped every frame that landed while a
+    * write was still pending — so any scheduling hiccup (e.g. a heavy TTS
+    * resample burst on another thread) turned into silent gaps. The ring absorbs
+    * ~WEBUI_MUSIC_WRITE_RING * 20ms of jitter before it has to drop. */
+   struct lws *music_wsi;       /**< Music server WebSocket (NULL if not connected) */
+   pthread_mutex_t write_mutex; /**< Protects the write ring */
+   uint8_t write_ring[WEBUI_MUSIC_WRITE_RING][LWS_PRE + 4 + 1276]; /**< per-slot: LWS_PRE + type
+                                                                        byte + length prefix + max
+                                                                        Opus frame */
+   size_t write_ring_len[WEBUI_MUSIC_WRITE_RING]; /**< payload bytes in each slot */
+   int write_ring_head; /**< next slot to drain (oldest) — only touched under write_mutex */
+   int write_ring_tail; /**< next slot to fill — only touched under write_mutex */
+   /* Occupied slots. Mutated under write_mutex (with head/tail), but ALSO read
+    * unlocked by the streaming thread's pacer as a refill heuristic, so it is
+    * atomic to keep that read race-free (TSan-clean). */
+   _Atomic int write_ring_count;
+   uint64_t write_drop_count; /**< total frames dropped when the ring was full */
+
+   /* Closed-loop buffer flow control. Written by the music-server lws thread via
+    * webui_music_report_buffer(); read by the per-session streaming thread's pacer.
+    * Plain atomics (not write_mutex): independent scalars with no tie to the ring,
+    * matching the existing lock-free control-flag pattern. calloc-zeroed, so 0 is
+    * the natural "no report yet" sentinel. */
+   atomic_uint client_buffered_ms;         /**< last client-reported worklet depth (ms) */
+   _Atomic uint64_t last_buffer_report_ms; /**< get_time_ms() when it arrived (0 = none) */
 } session_music_state_t;
 
 /* =============================================================================

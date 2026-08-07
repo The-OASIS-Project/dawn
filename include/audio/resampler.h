@@ -53,9 +53,26 @@ extern "C" {
 typedef struct resampler_t resampler_t;
 
 /**
+ * @brief Converter quality tier
+ *
+ * Maps to a libsamplerate converter internally without leaking the SRC_*
+ * constants to callers. BEST is the cleanest (and most CPU-expensive) sinc
+ * filter — required for ASR downsampling and hi-fi music. MEDIUM is roughly
+ * 4-5x cheaper and inaudible for speech, so it fits the TTS output path where
+ * a large synchronous resample would otherwise spike CPU and starve other
+ * real-time audio threads.
+ */
+typedef enum {
+   RESAMPLER_QUALITY_BEST = 0, /**< SRC_SINC_BEST_QUALITY — ASR/music (default) */
+   RESAMPLER_QUALITY_MEDIUM,   /**< SRC_SINC_MEDIUM_QUALITY — voice/TTS output */
+} resampler_quality_t;
+
+/**
  * @brief Create a resampler instance with pre-allocated buffers
  *
  * Allocates all memory upfront. Processing calls will not allocate.
+ * Uses the best-quality converter; equivalent to resampler_create_ex() with
+ * RESAMPLER_QUALITY_BEST.
  *
  * @param src_rate Source sample rate (e.g., 22050)
  * @param dst_rate Destination sample rate (e.g., 16000)
@@ -63,6 +80,20 @@ typedef struct resampler_t resampler_t;
  * @return Resampler handle, or NULL on error
  */
 resampler_t *resampler_create(int src_rate, int dst_rate, int channels);
+
+/**
+ * @brief Create a resampler instance with an explicit quality tier
+ *
+ * @param src_rate Source sample rate (e.g., 22050)
+ * @param dst_rate Destination sample rate (e.g., 48000)
+ * @param channels Number of channels (1 for mono)
+ * @param quality Converter quality tier (see resampler_quality_t)
+ * @return Resampler handle, or NULL on error
+ */
+resampler_t *resampler_create_ex(int src_rate,
+                                 int dst_rate,
+                                 int channels,
+                                 resampler_quality_t quality);
 
 /**
  * @brief Destroy resampler instance and free all resources

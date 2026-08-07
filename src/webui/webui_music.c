@@ -253,6 +253,11 @@ static uint64_t get_time_ms(void) {
    return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+/* queue_music_direct() return value when a frame is dropped because the dedicated
+ * send ring was full — distinct from SUCCESS(0)/FAILURE(1) so the closed-loop pacer
+ * does not credit its buffer estimate for a frame the client never received. */
+#define WEBUI_MUSIC_QUEUE_DROPPED 2
+
 /* Forward declarations */
 static int queue_music_data(ws_connection_t *conn, const uint8_t *data, size_t len);
 static int queue_music_direct(session_music_state_t *state, const uint8_t *data, size_t len);
@@ -504,7 +509,9 @@ int webui_music_configure_encoder(session_music_state_t *state, music_quality_t 
  * Callers do NOT need to hold any lock.
  * Lock hierarchy: queue_mutex → state_mutex (never reversed).
  */
-void webui_music_send_state(ws_connection_t *conn, session_music_state_t *state) {
+static void webui_music_send_state_impl(ws_connection_t *conn,
+                                        session_music_state_t *state,
+                                        bool advance_auto) {
    user_music_queue_t *uq = state->shared_queue;
    if (!uq) {
       return;
@@ -555,6 +562,14 @@ void webui_music_send_state(ws_connection_t *conn, session_music_state_t *state)
    json_object_object_add(payload, "playing", json_object_new_boolean(playing));
    json_object_object_add(payload, "paused", json_object_new_boolean(paused));
 
+   /* Tag a natural end-of-track advance so the client keeps its buffer (gapless):
+    * with the server running a lead, EOF fires ~2s before the user hears the
+    * boundary, and the client's default track-change/seek flush would truncate
+    * that lead. User-initiated skips are NOT tagged, so they still flush. */
+   if (advance_auto) {
+      json_object_object_add(payload, "advance", json_object_new_string("auto"));
+   }
+
    if (has_track) {
       struct json_object *track_obj = json_object_new_object();
       json_object_object_add(track_obj, "path", json_object_new_string(current_track.path));
@@ -602,6 +617,10 @@ void webui_music_send_state(ws_connection_t *conn, session_music_state_t *state)
    queue_response(&resp);
 
    json_object_put(response);
+}
+
+void webui_music_send_state(ws_connection_t *conn, session_music_state_t *state) {
+   webui_music_send_state_impl(conn, state, false);
 }
 
 /**
@@ -725,6 +744,17 @@ static void *music_stream_thread(void *arg) {
    const uint64_t frame_duration_us = (WEBUI_MUSIC_FRAME_SAMPLES * 1000000ULL) / OPUS_SAMPLE_RATE;
    bool was_sending = false; /* Diagnostic: track state transitions for logging */
 
+   /* Closed-loop flow control: hold the client worklet buffer near
+    * WEBUI_MUSIC_TARGET_BUFFER_MS using periodic client reports, so a TTS-induced
+    * CPU preemption can't drain a near-empty buffer into silence. Estimate is
+    * bookkept (+frame on send, -sleep as the client drains) and re-anchored to
+    * each fresh report; falls back to the real-time pacer above when reports go
+    * stale (old clients, or a client whose report sender stalled). */
+   uint64_t est_buffered_us = 0;     /* server's estimate of client buffer depth */
+   uint64_t last_seen_report_ms = 0; /* last report timestamp already consumed */
+   bool was_closed_loop = false;     /* were we closed-loop last frame? (fallback re-baseline) */
+   unsigned pace_log_counter = 0;    /* throttle for the periodic pacing log */
+
    while (!atomic_load(&state->stop_requested)) {
       /* Quick check without lock first */
       if (!atomic_load(&state->streaming)) {
@@ -768,6 +798,11 @@ static void *music_stream_thread(void *arg) {
          stream_start_time = 0;
          frames_sent = 0;
          state->resample_accum_count = 0;
+         /* Resume is a client-flush boundary (the client clears its worklet on
+          * resume), so the client buffer is empty — reset the estimate to refill
+          * from scratch. (Natural auto-advance, by contrast, is gapless and must
+          * NOT reset the estimate; it stays continuous across the boundary.) */
+         est_buffered_us = 0;
       }
 
       /* Mark decoder busy and grab what we need */
@@ -907,8 +942,9 @@ static void *music_stream_thread(void *arg) {
 
          pthread_mutex_unlock(&state->state_mutex);
 
-         /* Send state update for new track */
-         webui_music_send_state(conn, state);
+         /* Send state update for new track — tag as a natural auto-advance so the
+          * client keeps its buffered lead (gapless) instead of flushing. */
+         webui_music_send_state_impl(conn, state, true);
          continue;
       }
 
@@ -960,7 +996,12 @@ static void *music_stream_thread(void *arg) {
          if (state->paused || !state->playing || atomic_load(&state->stop_requested))
             break;
 
-         /* Initialize stream timing on first frame */
+         /* Initialize stream timing on first frame. NOTE: est_buffered_us is
+          * deliberately NOT reset here — a brand-new thread (fresh play / seek /
+          * user skip) starts with est=0 as a thread local, while a natural
+          * auto-advance reaches this point on the SAME thread and must keep its
+          * estimate (the buffered lead is continuous across the gapless boundary).
+          * The only in-thread flush boundary, resume-from-pause, resets est above. */
          if (stream_start_time == 0) {
             struct timespec ts;
             clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -986,21 +1027,77 @@ static void *music_stream_thread(void *arg) {
          opus_buffer[0] = opus_bytes & 0xFF;
          opus_buffer[1] = (opus_bytes >> 8) & 0xFF;
 
-         /* Send to client - uses dedicated music socket if available, else main socket */
-         queue_music_direct(state, opus_buffer, opus_bytes + 2);
+         /* Send to client — dedicated music socket if available, else main socket.
+          * A WEBUI_MUSIC_QUEUE_DROPPED return means the send ring was full, so we
+          * must NOT credit the estimate for a frame the client never received. */
+         int qrc = queue_music_direct(state, opus_buffer, opus_bytes + 2);
          frames_sent++;
 
-         /* Time-based pacing: calculate when this frame should have been sent */
-         uint64_t expected_time = stream_start_time + (frames_sent * frame_duration_us);
-         struct timespec ts;
-         clock_gettime(CLOCK_MONOTONIC, &ts);
-         uint64_t current_time = (uint64_t)ts.tv_sec * 1000000ULL + ts.tv_nsec / 1000;
+         /* ---- Closed-loop pacing (see the est_buffered_us notes above) ----------
+          * Hold the client buffer near the target depth. Bookkeep the estimate
+          * (+frame queued, -sleep as the client plays it back in real time) and
+          * re-anchor to each fresh client report; fall back to the real-time pacer
+          * when reports are stale. */
+         if (qrc == SUCCESS) {
+            est_buffered_us += frame_duration_us;
+         }
 
-         /* Sleep if we're ahead of schedule */
-         if (current_time < expected_time) {
-            uint64_t sleep_us = expected_time - current_time;
-            if (sleep_us > 1000 && sleep_us < 100000) { /* Sanity check: 1ms - 100ms */
+         uint64_t now_ms = get_time_ms();
+         uint64_t rts = atomic_load(&state->last_buffer_report_ms);
+         bool report_fresh = (rts != 0) && ((now_ms - rts) <= WEBUI_MUSIC_REPORT_STALE_MS);
+         if (report_fresh && rts != last_seen_report_ms) {
+            est_buffered_us = (uint64_t)atomic_load(&state->client_buffered_ms) * 1000ULL;
+            last_seen_report_ms = rts;
+         }
+
+         if (report_fresh) {
+            was_closed_loop = true;
+            uint64_t target_us = (uint64_t)WEBUI_MUSIC_TARGET_BUFFER_MS * 1000ULL;
+            if (est_buffered_us > target_us) {
+               /* At/above target: pace so the client drains back toward it. */
+               uint64_t sleep_us = est_buffered_us - target_us;
+               if (sleep_us > WEBUI_MUSIC_MAX_PACE_SLEEP_US) {
+                  sleep_us = WEBUI_MUSIC_MAX_PACE_SLEEP_US;
+               }
+               if (sleep_us >= 1000) {
+                  usleep((useconds_t)sleep_us);
+                  est_buffered_us -= sleep_us; /* wall time the client drained */
+               }
+            } else {
+               /* Below target: refill faster than real time, but gate on the send
+                * ring so the burst can't overflow the 8-slot ring (dropped frames
+                * would defeat the refill). */
+               uint64_t sleep_us = (state->write_ring_count >= WEBUI_MUSIC_REFILL_RING_HIGH)
+                                       ? frame_duration_us      /* ring backing up: ~1x */
+                                       : frame_duration_us / 4; /* headroom: ~4x fill */
                usleep((useconds_t)sleep_us);
+               est_buffered_us = (est_buffered_us > sleep_us) ? (est_buffered_us - sleep_us) : 0;
+            }
+
+            if ((++pace_log_counter % 250) == 0) {
+               OLOG_INFO("WebUI music: buffer est=%llums target=%dms ring=%d/%d",
+                         (unsigned long long)(est_buffered_us / 1000), WEBUI_MUSIC_TARGET_BUFFER_MS,
+                         state->write_ring_count, WEBUI_MUSIC_WRITE_RING);
+            }
+         } else {
+            /* No fresh report: fall back to the real-time pacer. On the transition
+             * out of closed-loop, re-baseline its clock to NOW — otherwise an
+             * accumulated lead in frames_sent makes expected_time race ahead of
+             * wall-clock and the sanity clamp skips the sleep entirely, blasting
+             * the ring unpaced (the exact stutter this feature removes). */
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            uint64_t current_time = (uint64_t)ts.tv_sec * 1000000ULL + ts.tv_nsec / 1000;
+            if (was_closed_loop) {
+               stream_start_time = current_time - (frames_sent * frame_duration_us);
+               was_closed_loop = false;
+            }
+            uint64_t expected_time = stream_start_time + (frames_sent * frame_duration_us);
+            if (current_time < expected_time) {
+               uint64_t sleep_us = expected_time - current_time;
+               if (sleep_us > 1000 && sleep_us < 100000) { /* Sanity check: 1ms - 100ms */
+                  usleep((useconds_t)sleep_us);
+               }
             }
          }
 
@@ -1305,7 +1402,10 @@ int webui_music_session_init(ws_connection_t *conn) {
    state->bitrate_mode = s_config.bitrate_mode;
    state->shuffle_seed = (unsigned int)time(NULL) ^ (unsigned int)(uintptr_t)state;
    state->music_wsi = NULL;
-   state->write_pending_len = 0;
+   state->write_ring_head = 0;
+   state->write_ring_tail = 0;
+   state->write_ring_count = 0;
+   state->write_drop_count = 0;
 
    /* Get or create shared queue */
    user_music_queue_t *uq = find_or_create_user_queue(conn->auth_user_id);
@@ -1498,11 +1598,32 @@ void webui_music_set_stream_wsi(session_t *session, struct lws *wsi) {
 
    pthread_mutex_lock(&state->write_mutex);
    state->music_wsi = wsi;
-   state->write_pending_len = 0; /* Clear any stale pending data */
+   /* Drop any stale queued frames — they belong to a previous socket. */
+   state->write_ring_head = 0;
+   state->write_ring_tail = 0;
+   state->write_ring_count = 0;
    pthread_mutex_unlock(&state->write_mutex);
 
    OLOG_INFO("WebUI music: %s music stream wsi for session %u", wsi ? "Set" : "Cleared",
              session->session_id);
+}
+
+void webui_music_report_buffer(session_t *session, uint32_t buffered_ms) {
+   if (!session)
+      return;
+
+   ws_connection_t *conn = (ws_connection_t *)session->client_data;
+   if (!conn || !conn->music_state)
+      return;
+
+   session_music_state_t *state = (session_music_state_t *)conn->music_state;
+
+   /* Publish value before timestamp: the streaming thread gates on a fresh
+    * timestamp, so a fresh timestamp must imply an at-least-as-fresh value.
+    * A one-report skew across the two atomics is harmless for a continuously
+    * re-anchoring pacer, so no lock is needed. */
+   atomic_store(&state->client_buffered_ms, buffered_ms);
+   atomic_store(&state->last_buffer_report_ms, get_time_ms());
 }
 
 int webui_music_write_pending(session_t *session, struct lws *wsi) {
@@ -1517,24 +1638,44 @@ int webui_music_write_pending(session_t *session, struct lws *wsi) {
 
    pthread_mutex_lock(&state->write_mutex);
 
-   if (state->write_pending_len == 0) {
+   if (state->write_ring_count == 0) {
       pthread_mutex_unlock(&state->write_mutex);
       return 1; /* No data pending */
    }
 
-   /* Write the pending frame (data is already positioned after LWS_PRE) */
-   int written = lws_write(wsi, state->write_buffer + LWS_PRE, state->write_pending_len,
-                           LWS_WRITE_BINARY);
+   /* Write the oldest queued frame (data is already positioned after LWS_PRE).
+    * lws permits exactly one lws_write per writable callback, so we drain one
+    * slot here and re-arm below if more remain. */
+   uint8_t *slot = state->write_ring[state->write_ring_head];
+   size_t frame_len = state->write_ring_len[state->write_ring_head];
+   int written = lws_write(wsi, slot + LWS_PRE, frame_len, LWS_WRITE_BINARY);
 
-   if (written < 0) {
-      OLOG_WARNING("WebUI music: lws_write failed");
-      state->write_pending_len = 0;
+   /* Treat a short write the same as an error: lws cannot resume a partially-sent
+    * binary frame, so advancing past it would put a truncated Opus frame (broken
+    * length framing) on the wire — worse than a gap. Discard the whole ring rather
+    * than spin on it; the producer refills and the client resyncs on the next frame. */
+   if (written < 0 || (size_t)written < frame_len) {
+      OLOG_WARNING("WebUI music: lws_write %s (%d/%zu bytes) — dropping send ring",
+                   written < 0 ? "failed" : "short", written, frame_len);
+      state->write_ring_head = 0;
+      state->write_ring_tail = 0;
+      state->write_ring_count = 0;
       pthread_mutex_unlock(&state->write_mutex);
-      return FAILURE;
+      /* Signal the writable callback to close: a truncated WS frame would desync
+       * the client's framing, not just this Opus frame. */
+      return WEBUI_MUSIC_WRITE_CLOSE;
    }
 
-   state->write_pending_len = 0;
+   state->write_ring_head = (state->write_ring_head + 1) % WEBUI_MUSIC_WRITE_RING;
+   state->write_ring_count--;
+   bool more_pending = (state->write_ring_count > 0);
+
    pthread_mutex_unlock(&state->write_mutex);
+
+   /* More frames buffered — schedule another writable so the ring keeps draining. */
+   if (more_pending) {
+      lws_callback_on_writable(wsi);
+   }
 
    return 0;
 }
@@ -1560,25 +1701,35 @@ static int queue_music_direct(session_music_state_t *state, const uint8_t *data,
       return queue_music_data(state->conn, data, len);
    }
 
-   /* Check if previous frame is still pending */
-   if (state->write_pending_len > 0) {
-      /* Drop this frame - backpressure */
-      pthread_mutex_unlock(&state->write_mutex);
-      return 0;
-   }
-
    /* Buffer the frame for writeable callback.
     * Format: [type_byte][data...]
     * The data already contains length prefix + opus frame. */
    size_t total_len = 1 + len;
-   if (total_len > sizeof(state->write_buffer) - LWS_PRE) {
+   if (total_len > sizeof(state->write_ring[0]) - LWS_PRE) {
       pthread_mutex_unlock(&state->write_mutex);
       return FAILURE;
    }
 
-   state->write_buffer[LWS_PRE] = WS_BIN_MUSIC_DATA;
-   memcpy(state->write_buffer + LWS_PRE + 1, data, len);
-   state->write_pending_len = total_len;
+   /* Ring full — the writable callback is lagging behind real-time. Drop this
+    * frame (backpressure) and count it so the drops are visible (previously this
+    * was a single slot that dropped silently, presenting as unexplained stutter). */
+   if (state->write_ring_count >= WEBUI_MUSIC_WRITE_RING) {
+      uint64_t drops = ++state->write_drop_count;
+      pthread_mutex_unlock(&state->write_mutex);
+      if (drops % 50 == 1) {
+         OLOG_WARNING("WebUI music: dedicated-socket send ring full, dropped %llu frame(s) "
+                      "(writable callback lagging — playback may stutter)",
+                      (unsigned long long)drops);
+      }
+      return WEBUI_MUSIC_QUEUE_DROPPED;
+   }
+
+   uint8_t *slot = state->write_ring[state->write_ring_tail];
+   slot[LWS_PRE] = WS_BIN_MUSIC_DATA;
+   memcpy(slot + LWS_PRE + 1, data, len);
+   state->write_ring_len[state->write_ring_tail] = total_len;
+   state->write_ring_tail = (state->write_ring_tail + 1) % WEBUI_MUSIC_WRITE_RING;
+   state->write_ring_count++;
 
    /* Request writeable callback */
    lws_callback_on_writable(state->music_wsi);

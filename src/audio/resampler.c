@@ -44,6 +44,13 @@ struct resampler_t {
 };
 
 resampler_t *resampler_create(int src_rate, int dst_rate, int channels) {
+   return resampler_create_ex(src_rate, dst_rate, channels, RESAMPLER_QUALITY_BEST);
+}
+
+resampler_t *resampler_create_ex(int src_rate,
+                                 int dst_rate,
+                                 int channels,
+                                 resampler_quality_t quality) {
    if (src_rate <= 0 || dst_rate <= 0 || channels <= 0) {
       OLOG_ERROR("Invalid resampler parameters: src=%d dst=%d ch=%d", src_rate, dst_rate, channels);
       return NULL;
@@ -58,10 +65,14 @@ resampler_t *resampler_create(int src_rate, int dst_rate, int channels) {
    rs->ratio = (double)dst_rate / (double)src_rate;
    rs->channels = channels;
 
+   // BEST for cleanest 48kHz→16kHz downsampling (ASR aliasing → "underwater" audio)
+   // and hi-fi music. MEDIUM (~4-5x cheaper) is inaudible for speech and keeps a large
+   // TTS resample from spiking CPU and starving the real-time music stream thread.
+   int converter = (quality == RESAMPLER_QUALITY_MEDIUM) ? SRC_SINC_MEDIUM_QUALITY
+                                                         : SRC_SINC_BEST_QUALITY;
+
    int error;
-   // SRC_SINC_BEST_QUALITY for cleanest 48kHz→16kHz downsampling
-   // Critical for ASR - prevents aliasing artifacts that cause "underwater" audio
-   rs->src_state = src_new(SRC_SINC_BEST_QUALITY, channels, &error);
+   rs->src_state = src_new(converter, channels, &error);
    if (!rs->src_state) {
       OLOG_ERROR("Failed to create SRC state: %s", src_strerror(error));
       free(rs);

@@ -47,6 +47,7 @@
     * @property {boolean} subscribed      - Subscribed to the music stream socket.
     * @property {number} volume           - 0..1 client-side gain.
     * @property {number} bufferPercent    - 0..100.
+    * @property {number} bufferedMs        - Total client-side buffered audio (worklet + decode queue), ms.
     */
 
    // Playback state
@@ -84,6 +85,7 @@
       // Audio settings
       volume: 0.8,
       bufferPercent: 0,
+      bufferedMs: 0,
    };
 
    // Audio playback
@@ -93,6 +95,10 @@
    let opusDecoder = null;
    let gainNode = null;
    let workletNode = null;
+
+   // ms of audio per Opus frame (960 samples @ 48kHz). Used to convert the
+   // WebCodecs decode-queue backlog into a duration for buffer reporting.
+   const MUSIC_FRAME_MS = 20;
    let isDecoderReady = false;
    let decodeTimestamp = 0;
 
@@ -285,6 +291,21 @@
       isReady() {
          return this.connected && this.authenticated;
       },
+
+      /**
+       * Send a JSON control message up the music socket (e.g. buffer reports for
+       * closed-loop flow control). No-op unless authenticated and the socket is open.
+       */
+      send(obj) {
+         if (!this.isReady() || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            return;
+         }
+         try {
+            this.ws.send(JSON.stringify(obj));
+         } catch (e) {
+            // Socket may be tearing down; drop silently — reports are periodic.
+         }
+      },
    };
 
    // Opus always encodes at 48kHz
@@ -367,6 +388,27 @@
             workletNode.port.onmessage = (e) => {
                if (e.data.type === 'buffer') {
                   state.bufferPercent = e.data.percent;
+                  if (typeof e.data.bufferedMs === 'number') {
+                     // Report TOTAL client-side buffered audio = worklet depth PLUS the
+                     // WebCodecs decode-input backlog. There are two client buffers, and
+                     // decode callbacks run on the main thread — so under load (e.g.
+                     // concurrent TTS) frames the server sent pile up in opusDecoder's
+                     // queue, NOT the worklet. Reporting worklet-only made the server
+                     // read "empty" and burst ~3x forever, flooding the decode queue (it
+                     // drained ~10s in one shot once the main thread freed). Counting the
+                     // backlog caps the server at ~2s of TOTAL client buffering.
+                     const decodeBacklogMs =
+                        opusDecoder && opusDecoder.decodeQueueSize
+                           ? opusDecoder.decodeQueueSize * MUSIC_FRAME_MS
+                           : 0;
+                     state.bufferedMs = e.data.bufferedMs + decodeBacklogMs;
+                     // Forward to the server for closed-loop pacing. Inherits the
+                     // worklet's ~32ms cadence + the immediate 0-report on clear.
+                     MusicStreamConnection.send({
+                        type: 'music_buffer',
+                        buffered_ms: state.bufferedMs,
+                     });
+                  }
                   if (callbacks.onBufferUpdate) {
                      callbacks.onBufferUpdate(e.data.percent);
                   }
@@ -752,8 +794,15 @@
       const trackChanged = state.queueIndex !== prevQueueIndex;
       const seeked = Math.abs(state.positionSec - prevPosition) > 2;
 
+      // A server-tagged natural auto-advance is gapless: the server keeps streaming
+      // the next track into our existing buffered lead, and both the index change
+      // and the position jump to ~0 are expected. Suppress the flush so we don't
+      // truncate the ~2s of already-buffered audio (which includes the start of the
+      // next track). User-initiated skips/seeks are NOT tagged, so they still flush.
+      const autoAdvance = payload.advance === 'auto';
+
       // Clear audio buffer on track change or seek for instant response
-      if ((trackChanged || seeked) && workletNode) {
+      if ((trackChanged || seeked) && !autoAdvance && workletNode) {
          workletNode.port.postMessage({ type: 'clear' });
       }
 
@@ -787,11 +836,17 @@
     * @param {object} payload - Position payload
     */
    function handlePositionUpdate(payload) {
+      // Keep the raw decode position in state (used for seek detection); surface an
+      // audible-corrected position to the UI. The server streams a ~2s lead, so its
+      // decode position runs ahead of what the user hears — subtract our own buffered
+      // depth (ground truth, from the worklet) so the progress bar tracks playback.
       state.positionSec = payload.position_sec || 0;
       state.durationSec = payload.duration_sec || state.durationSec;
 
       if (callbacks.onPositionUpdate) {
-         callbacks.onPositionUpdate(state.positionSec, state.durationSec);
+         const bufferedSec = (state.bufferedMs || 0) / 1000;
+         const audibleSec = Math.max(0, state.positionSec - bufferedSec);
+         callbacks.onPositionUpdate(audibleSec, state.durationSec);
       }
    }
 

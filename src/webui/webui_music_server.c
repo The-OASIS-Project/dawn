@@ -111,7 +111,10 @@ static int callback_music_websocket(struct lws *wsi,
             }
 
             const char *type = json_object_get_string(type_obj);
-            if (strcmp(type, "auth") == 0) {
+            /* json_object_get_string() returns NULL for a JSON null value; guard
+             * before strcmp so an unauthenticated {"type":null} can't crash the
+             * daemon (CWE-476 DoS). */
+            if (type && strcmp(type, "auth") == 0) {
                struct json_object *token_obj;
                if (json_object_object_get_ex(msg, "token", &token_obj)) {
                   const char *token = json_object_get_string(token_obj);
@@ -156,15 +159,53 @@ static int callback_music_websocket(struct lws *wsi,
                }
             }
             json_object_put(msg);
+         } else {
+            /* Post-auth, the only expected client message is the periodic buffer
+             * report for closed-loop flow control. Be lenient: ignore anything
+             * malformed / unknown / binary and NEVER close the socket — dropping it
+             * would kill playback (and mirrors the client's own back-compat leniency
+             * toward an old server). */
+            if (!lws_frame_is_binary(wsi)) {
+               struct json_tokener *tok = json_tokener_new();
+               struct json_object *msg = tok ? json_tokener_parse_ex(tok, (const char *)in,
+                                                                     (int)len)
+                                             : NULL;
+               if (tok) {
+                  json_tokener_free(tok);
+               }
+               if (msg) {
+                  struct json_object *type_obj = NULL;
+                  struct json_object *ms_obj = NULL;
+                  const char *mtype = NULL;
+                  /* Guard json_object_get_string() → NULL for a JSON null value
+                   * before strcmp (CWE-476): a {"type":null} frame must not crash. */
+                  if (conn->session && json_object_object_get_ex(msg, "type", &type_obj) &&
+                      (mtype = json_object_get_string(type_obj)) != NULL &&
+                      strcmp(mtype, "music_buffer") == 0 &&
+                      json_object_object_get_ex(msg, "buffered_ms", &ms_obj)) {
+                     int ms = json_object_get_int(ms_obj);
+                     if (ms < 0) {
+                        ms = 0;
+                     } else if (ms > WEBUI_MUSIC_CLIENT_BUFFER_MAX_MS) {
+                        ms = WEBUI_MUSIC_CLIENT_BUFFER_MAX_MS;
+                     }
+                     webui_music_report_buffer(conn->session, (uint32_t)ms);
+                  }
+                  json_object_put(msg);
+               }
+            }
          }
-         /* After auth, we don't expect any messages - audio flows server->client only */
          break;
 
       case LWS_CALLBACK_SERVER_WRITEABLE:
          /* Streaming thread requests writeable via lws_callback_on_writable().
-          * The actual write is handled by webui_music_write_pending(). */
+          * The actual write is handled by webui_music_write_pending(). A fatal/short
+          * write would leave a truncated frame on the wire and desync the client's
+          * WS parser, so close the socket and let the client reconnect cleanly. */
          if (conn->authenticated && conn->session) {
-            webui_music_write_pending(conn->session, wsi);
+            if (webui_music_write_pending(conn->session, wsi) == WEBUI_MUSIC_WRITE_CLOSE) {
+               return LWS_CLOSE_CONNECTION;
+            }
          }
          break;
 
