@@ -88,6 +88,8 @@
       lastLocalVolumeChange: 0, // Timestamp of last local volume change
       volumeDebounceTimer: null, // Debounce timer for server volume sync
       volumeRestoredToServer: false, // True after saved volume sent to server on first state
+      seekTarget: 0, // Optimistic seek/track-change position (s), shown until the server confirms
+      seekPendingUntil: 0, // ms epoch: suppress stale pre-seek position echoes until then
    };
 
    /**
@@ -118,23 +120,23 @@
             if (s.paused) {
                DawnMusicPlayback.control('play');
             } else if (s.queueLength > 0) {
-               DawnMusicPlayback.control('play_index', { index: s.queueIndex });
+               changeTrack('play_index', { index: s.queueIndex });
             }
          },
          onPause: function () {
             DawnMusicPlayback.control('pause');
          },
          onPrevious: function () {
-            DawnMusicPlayback.control('previous');
+            changeTrack('previous');
          },
          onNext: function () {
-            DawnMusicPlayback.control('next');
+            changeTrack('next');
          },
          onStop: function () {
             DawnMusicPlayback.control('stop');
          },
          onSeekTo: function (e) {
-            DawnMusicPlayback.control('seek', { position_sec: e.time });
+            beginSeek(e.time);
          },
       });
    }
@@ -488,7 +490,7 @@
          DawnMusicPlayback.control('play');
       } else if (state.queueLength > 0) {
          // Have queue items - play from current index
-         DawnMusicPlayback.control('play_index', { index: state.queueIndex });
+         changeTrack('play_index', { index: state.queueIndex });
       } else {
          // Nothing in queue, open library search
          switchTab('library');
@@ -506,9 +508,7 @@
       const rect = elements.progressBar.getBoundingClientRect();
       const percent = (e.clientX - rect.left) / rect.width;
       const state = DawnMusicPlayback.getState();
-      const seekTime = percent * state.durationSec;
-
-      DawnMusicPlayback.control('seek', { position_sec: seekTime });
+      beginSeek(percent * state.durationSec);
    }
 
    /**
@@ -545,14 +545,14 @@
     * Handle next button — server handles shuffle/repeat logic
     */
    function handleNext() {
-      DawnMusicPlayback.control('next');
+      changeTrack('next');
    }
 
    /**
     * Handle previous button — server handles shuffle/repeat logic
     */
    function handlePrevious() {
-      DawnMusicPlayback.control('previous');
+      changeTrack('previous');
    }
 
    /**
@@ -811,19 +811,67 @@
     * @param {number} durationSec - Total duration in seconds
     */
    function handlePositionUpdate(positionSec, durationSec) {
-      // Update progress bar
-      if (elements.progressFill && durationSec > 0) {
-         const percent = (positionSec / durationSec) * 100;
-         elements.progressFill.style.width = `${percent}%`;
+      // While a seek/track-change is pending, ignore position echoes until the
+      // server's reported position converges to the target — otherwise a stale
+      // pre-change update would snap the bar back before jumping forward again.
+      if (localState.seekPendingUntil && Date.now() < localState.seekPendingUntil) {
+         if (Math.abs(positionSec - localState.seekTarget) > 1.5) {
+            return;
+         }
+         localState.seekPendingUntil = 0; // server caught up — resume live updates
       }
+      applyProgress(positionSec, durationSec);
+   }
 
-      // Update time displays
+   /**
+    * Render a position onto the progress bar + time displays.
+    * @param {number} positionSec
+    * @param {number} durationSec
+    */
+   function applyProgress(positionSec, durationSec) {
+      if (elements.progressFill && durationSec > 0) {
+         elements.progressFill.style.width = `${(positionSec / durationSec) * 100}%`;
+      }
       if (elements.currentTime) {
          elements.currentTime.textContent = formatTime(positionSec);
       }
       if (elements.totalTime) {
          elements.totalTime.textContent = formatTime(durationSec);
       }
+   }
+
+   /**
+    * Optimistic-UI helper: render a target position now and suppress stale position
+    * echoes until the server's reported position converges to it.
+    * @param {number} targetSec
+    */
+   function optimisticPosition(targetSec) {
+      const durationSec = DawnMusicPlayback.getState().durationSec || 0;
+      localState.seekTarget = targetSec;
+      localState.seekPendingUntil = Date.now() + 2000;
+      applyProgress(targetSec, durationSec);
+   }
+
+   /**
+    * Seek with optimistic UI: jump the bar to the target immediately.
+    * @param {number} seekTime - Target position in seconds
+    */
+   function beginSeek(seekTime) {
+      if (typeof seekTime !== 'number' || !isFinite(seekTime)) return;
+      optimisticPosition(seekTime);
+      DawnMusicPlayback.control('seek', { position_sec: seekTime });
+   }
+
+   /**
+    * Track-change control (next/previous/play_index) with optimistic UI: reset the
+    * bar to 0 immediately so it doesn't lag on the old track's position until the
+    * server echoes the new track's music_state.
+    * @param {string} action
+    * @param {object} [opts]
+    */
+   function changeTrack(action, opts) {
+      optimisticPosition(0);
+      DawnMusicPlayback.control(action, opts);
    }
 
    /**
@@ -1429,7 +1477,7 @@
          item.addEventListener('dblclick', (e) => {
             if (e.target.closest('.music-queue-remove-btn')) return;
             const index = parseInt(item.dataset.index);
-            DawnMusicPlayback.control('play_index', { index: index });
+            changeTrack('play_index', { index: index });
          });
       });
 

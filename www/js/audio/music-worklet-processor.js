@@ -1,8 +1,16 @@
 /**
  * Music Audio Worklet Processor
  *
- * Runs on dedicated audio thread for glitch-free playback.
- * Receives decoded stereo audio samples via port messages.
+ * Runs on the dedicated audio render thread for glitch-free playback. Receives
+ * decoded stereo samples via port messages and drains a local ring in process().
+ *
+ * Dual-mode: audio may arrive either on the node port (main thread — the fallback
+ * path) OR on a MessagePort transferred from the music-decode worker (the primary
+ * path — decode is off the main thread). If a `workerPort` has been handed over,
+ * audio/clear are taken on it and buffer reports go back on it (to the worker,
+ * which combines them with decodeQueueSize and reports to the server); otherwise
+ * everything uses the node port. Delivery on the worker port is ordered and on the
+ * render thread, so a 'clear' always precedes later 'audio' — no ack needed.
  */
 
 class MusicProcessor extends AudioWorkletProcessor {
@@ -23,18 +31,41 @@ class MusicProcessor extends AudioWorkletProcessor {
       this.reportInterval = 12;
       this.reportCounter = 0;
 
-      // Handle incoming audio data
+      // Set once the decode worker hands over its MessagePort (primary path).
+      this.workerPort = null;
+
       this.port.onmessage = (e) => {
-         if (e.data.type === 'audio') {
-            this.addSamples(e.data.left, e.data.right);
-         } else if (e.data.type === 'clear') {
-            this.writePos = 0;
-            this.readPos = 0;
-            this.samplesAvailable = 0;
-            // Report buffer cleared immediately (bufferedMs 0 lets the server refill fast)
-            this.port.postMessage({ type: 'buffer', percent: 0, bufferedMs: 0 });
+         const d = e.data;
+         if (d && d.type === 'workerPort') {
+            // One-time handoff: take audio/clear + send reports on the worker port.
+            // Ignore a second handoff — one worker owns the data path, by invariant.
+            if (this.workerPort) return;
+            this.workerPort = d.port;
+            this.workerPort.onmessage = (ev) => this.handleData(ev.data);
+         } else if (!this.workerPort) {
+            // Node port carries audio/clear only on the fallback (no-worker) path;
+            // once a worker port is bound, the worker is the sole data source.
+            this.handleData(d);
          }
       };
+   }
+
+   // Whichever channel is active — worker port (primary) or node port (fallback).
+   reportPort() {
+      return this.workerPort || this.port;
+   }
+
+   handleData(d) {
+      if (!d) return;
+      if (d.type === 'audio') {
+         this.addSamples(d.left, d.right);
+      } else if (d.type === 'clear') {
+         this.writePos = 0;
+         this.readPos = 0;
+         this.samplesAvailable = 0;
+         // Immediate 0-report so the server refills fast after a flush.
+         this.reportPort().postMessage({ type: 'buffer', percent: 0, bufferedMs: 0 });
+      }
    }
 
    addSamples(left, right) {
@@ -86,7 +117,11 @@ class MusicProcessor extends AudioWorkletProcessor {
          this.reportCounter = 0;
          const percent = Math.round((this.samplesAvailable / this.bufferSize) * 100);
          const bufferedMs = Math.round((this.samplesAvailable / sampleRate) * 1000);
-         this.port.postMessage({ type: 'buffer', percent: percent, bufferedMs: bufferedMs });
+         this.reportPort().postMessage({
+            type: 'buffer',
+            percent: percent,
+            bufferedMs: bufferedMs,
+         });
       }
 
       return true;

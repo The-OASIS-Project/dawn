@@ -99,6 +99,16 @@
    // ms of audio per Opus frame (960 samples @ 48kHz). Used to convert the
    // WebCodecs decode-queue backlog into a duration for buffer reporting.
    const MUSIC_FRAME_MS = 20;
+
+   // Primary path: a Web Worker owns the music WebSocket + Opus decode and posts
+   // PCM straight to the worklet over a MessagePort, so decode is off the main
+   // thread (immune to TTS/UI contention). Falls back to the in-file main-thread
+   // decode path when a Worker can't be created. Decided once in initOpusDecoder().
+   let useWorkerPath = false;
+   let decodeWorker = null;
+   // Server-advertised music-stream config, relayed to the worker (mirrors the
+   // fields on MusicStreamConnection used by the fallback path).
+   const serverCfg = { port: null, enabled: null };
    let isDecoderReady = false;
    let decodeTimestamp = 0;
 
@@ -348,83 +358,151 @@
          gainNode.connect(analyser);
          analyser.connect(audioContext.destination);
 
-         // Create stereo Opus decoder using WebCodecs
-         if (typeof AudioDecoder === 'undefined') {
-            console.error('Music playback: WebCodecs AudioDecoder not available');
-            return;
-         }
-
-         // Opus is always encoded at 48kHz
-         const decoderConfig = {
-            codec: 'opus',
-            sampleRate: OPUS_SAMPLE_RATE,
-            numberOfChannels: 2, // Stereo
-         };
-
-         const support = await AudioDecoder.isConfigSupported(decoderConfig);
-         if (!support.supported) {
-            console.error('Music playback: Stereo Opus decoding at 48kHz not supported');
-            return;
-         }
-
-         opusDecoder = new AudioDecoder({
-            output: handleDecodedAudio,
-            error: (e) => {
-               console.error('Music decoder error:', e);
-            },
-         });
-
-         opusDecoder.configure(decoderConfig);
-
-         // Create AudioWorkletNode for glitch-free playback on audio thread
+         // Create the AudioWorklet node first — both paths render through it.
          try {
             await audioContext.audioWorklet.addModule('js/audio/music-worklet-processor.js');
             workletNode = new AudioWorkletNode(audioContext, 'music-processor', {
                outputChannelCount: [2],
             });
             workletNode.connect(gainNode);
-
-            // Receive buffer status updates from worklet
-            workletNode.port.onmessage = (e) => {
-               if (e.data.type === 'buffer') {
-                  state.bufferPercent = e.data.percent;
-                  if (typeof e.data.bufferedMs === 'number') {
-                     // Report TOTAL client-side buffered audio = worklet depth PLUS the
-                     // WebCodecs decode-input backlog. There are two client buffers, and
-                     // decode callbacks run on the main thread — so under load (e.g.
-                     // concurrent TTS) frames the server sent pile up in opusDecoder's
-                     // queue, NOT the worklet. Reporting worklet-only made the server
-                     // read "empty" and burst ~3x forever, flooding the decode queue (it
-                     // drained ~10s in one shot once the main thread freed). Counting the
-                     // backlog caps the server at ~2s of TOTAL client buffering.
-                     const decodeBacklogMs =
-                        opusDecoder && opusDecoder.decodeQueueSize
-                           ? opusDecoder.decodeQueueSize * MUSIC_FRAME_MS
-                           : 0;
-                     state.bufferedMs = e.data.bufferedMs + decodeBacklogMs;
-                     // Forward to the server for closed-loop pacing. Inherits the
-                     // worklet's ~32ms cadence + the immediate 0-report on clear.
-                     MusicStreamConnection.send({
-                        type: 'music_buffer',
-                        buffered_ms: state.bufferedMs,
-                     });
-                  }
-                  if (callbacks.onBufferUpdate) {
-                     callbacks.onBufferUpdate(e.data.percent);
-                  }
-               }
-            };
-
-            console.log('Music playback: Using AudioWorklet for playback');
          } catch (workletError) {
             console.error('Music playback: AudioWorklet failed:', workletError);
             return;
          }
 
+         // Prefer the worker decode path (decode off the main thread); fall back to
+         // in-file main-thread decode if a Worker can't be created.
+         useWorkerPath = typeof Worker !== 'undefined';
+         if (useWorkerPath) {
+            try {
+               setupWorkerPath();
+            } catch (e) {
+               console.warn('Music playback: worker decode path unavailable, using main-thread', e);
+               useWorkerPath = false;
+               if (decodeWorker) {
+                  try {
+                     decodeWorker.terminate();
+                  } catch (_) {
+                     /* ignore */
+                  }
+                  decodeWorker = null;
+               }
+            }
+         }
+         if (!useWorkerPath) {
+            if (!(await setupMainDecoder())) return; // unsupported codec
+         }
+
          isDecoderReady = true;
-         console.log('Music playback: Stereo Opus decoder initialized at 48kHz');
+         console.log(
+            'Music playback:',
+            useWorkerPath ? 'worker decode path' : 'main-thread decode'
+         );
       } catch (e) {
          console.error('Music playback: Failed to initialize decoder:', e);
+      }
+   }
+
+   /**
+    * Worker decode path: hand a MessagePort to the worklet (via its node port), spin
+    * up the decode worker with the other end, and seed it with server config + token.
+    * The worklet takes audio + sends buffer reports on the worker port; the worker
+    * combines them with decodeQueueSize and reports to the server. Main only receives
+    * a periodic buffered-depth status (for the UI bar + position correction).
+    */
+   function setupWorkerPath() {
+      // Construct the Worker FIRST. If it throws (CSP worker-src, SecurityError — none
+      // caught by the typeof Worker gate), we fall back to main-thread decode with the
+      // worklet untouched. Handing the port to the worklet before this would latch a
+      // dead reportPort, silently breaking flow control on the very fallback it exists for.
+      decodeWorker = new Worker('js/audio/music-decode-worker.js');
+      decodeWorker.onerror = (e) => {
+         console.error('Music playback: decode worker error', (e && e.message) || e);
+      };
+      decodeWorker.onmessage = (e) => {
+         const d = e.data;
+         if (d && d.type === 'status' && typeof d.bufferedMs === 'number') {
+            state.bufferedMs = d.bufferedMs;
+            // bufferPercent here is derived from bufferedMs (10s ring == 100%). The
+            // fallback path derives it from the worklet's samplesAvailable/bufferSize.
+            // Both are keyed to the same 10s CLIENT_BUFFER ring, so they coincide — keep
+            // the ring size and this /100 divisor in sync if either changes.
+            state.bufferPercent = Math.min(100, Math.round(d.bufferedMs / 100));
+            if (callbacks.onBufferUpdate) callbacks.onBufferUpdate(state.bufferPercent);
+         }
+      };
+
+      const ch = new MessageChannel();
+      // processorOptions can't carry a Transferable, so hand p2 over via the node port.
+      workletNode.port.postMessage({ type: 'workerPort', port: ch.port2 }, [ch.port2]);
+      decodeWorker.postMessage({ type: 'workletPort', port: ch.port1 }, [ch.port1]);
+      decodeWorker.postMessage({
+         type: 'setServer',
+         port: serverCfg.port,
+         enabled: serverCfg.enabled,
+      });
+      const tok = DawnWS.getSessionToken ? DawnWS.getSessionToken() : null;
+      decodeWorker.postMessage({ type: 'setToken', token: tok });
+   }
+
+   /**
+    * Fallback main-thread decode path: WebCodecs AudioDecoder on the main thread,
+    * worklet reports back to main which adds decodeQueueSize and reports to the server.
+    * @returns {Promise<boolean>} false if the codec is unsupported
+    */
+   async function setupMainDecoder() {
+      if (typeof AudioDecoder === 'undefined') {
+         console.error('Music playback: WebCodecs AudioDecoder not available');
+         return false;
+      }
+      const decoderConfig = { codec: 'opus', sampleRate: OPUS_SAMPLE_RATE, numberOfChannels: 2 };
+      const support = await AudioDecoder.isConfigSupported(decoderConfig);
+      if (!support.supported) {
+         console.error('Music playback: Stereo Opus decoding at 48kHz not supported');
+         return false;
+      }
+      opusDecoder = new AudioDecoder({
+         output: handleDecodedAudio,
+         error: (e) => console.error('Music decoder error:', e),
+      });
+      opusDecoder.configure(decoderConfig);
+
+      // Buffer report (main path): worklet -> main; add decodeQueueSize; report to server.
+      workletNode.port.onmessage = (e) => {
+         if (e.data.type === 'buffer') {
+            state.bufferPercent = e.data.percent;
+            if (typeof e.data.bufferedMs === 'number') {
+               const decodeBacklogMs =
+                  opusDecoder && opusDecoder.decodeQueueSize
+                     ? opusDecoder.decodeQueueSize * MUSIC_FRAME_MS
+                     : 0;
+               state.bufferedMs = e.data.bufferedMs + decodeBacklogMs;
+               MusicStreamConnection.send({ type: 'music_buffer', buffered_ms: state.bufferedMs });
+            }
+            if (callbacks.onBufferUpdate) callbacks.onBufferUpdate(e.data.percent);
+         }
+      };
+      return true;
+   }
+
+   /**
+    * Flush the client audio buffer on a playback discontinuity. Worker path: tell the
+    * worker (resets its decoder + drops pending + clears the worklet, all ordered).
+    * Fallback: clear the worklet directly.
+    */
+   function flushWorklet() {
+      if (useWorkerPath && decodeWorker) {
+         decodeWorker.postMessage({ type: 'clear' });
+      } else if (workletNode) {
+         workletNode.port.postMessage({ type: 'clear' });
+      }
+   }
+
+   /** Resume a suspended AudioContext (call on the play/control user gesture — the
+    *  worker path never sees the audio data, so resume can't ride on data arrival). */
+   function resumeContext() {
+      if (audioContext && audioContext.state === 'suspended') {
+         audioContext.resume().catch(() => {});
       }
    }
 
@@ -620,9 +698,18 @@
     */
    async function subscribe(quality, bitrateMode) {
       await initOpusDecoder();
+      // Resume the context on this user gesture (worker path never sees data arrival).
+      resumeContext();
 
-      // Connect to dedicated music streaming server
-      MusicStreamConnection.connect();
+      // Connect to the dedicated music streaming server (worker owns the WS in the
+      // worker path; the main-thread MusicStreamConnection owns it in the fallback).
+      if (useWorkerPath && decodeWorker) {
+         const tok = DawnWS.getSessionToken ? DawnWS.getSessionToken() : null;
+         decodeWorker.postMessage({ type: 'setToken', token: tok });
+         decodeWorker.postMessage({ type: 'subscribe' });
+      } else {
+         MusicStreamConnection.connect();
+      }
 
       // Build payload - omit fields to use server defaults
       const payload = {};
@@ -686,8 +773,12 @@
     * Unsubscribe from music stream
     */
    function unsubscribe() {
-      // Disconnect from dedicated music server
-      MusicStreamConnection.disconnect();
+      // Disconnect from the dedicated music server (worker or main-thread owner).
+      if (useWorkerPath && decodeWorker) {
+         decodeWorker.postMessage({ type: 'unsubscribe' });
+      } else {
+         MusicStreamConnection.disconnect();
+      }
 
       DawnWS.send({ type: 'music_unsubscribe' });
 
@@ -697,10 +788,7 @@
       state.track = null;
       decodeTimestamp = 0;
 
-      // Clear worklet buffer
-      if (workletNode) {
-         workletNode.port.postMessage({ type: 'clear' });
-      }
+      flushWorklet();
 
       notifyStateChange();
       console.log('Music playback: Unsubscribed');
@@ -713,10 +801,10 @@
     */
    function control(action, opts = {}) {
       // Clear audio buffer immediately for actions that change playback position
-      // This makes the UI feel more responsive
+      // (optimistic — before the server echoes music_state) so the UI feels responsive.
       const bufferClearActions = ['seek', 'next', 'previous', 'play_index', 'stop'];
-      if (bufferClearActions.includes(action) && workletNode) {
-         workletNode.port.postMessage({ type: 'clear' });
+      if (bufferClearActions.includes(action)) {
+         flushWorklet();
       }
 
       const payload = { action: action, ...opts };
@@ -802,8 +890,8 @@
       const autoAdvance = payload.advance === 'auto';
 
       // Clear audio buffer on track change or seek for instant response
-      if ((trackChanged || seeked) && !autoAdvance && workletNode) {
-         workletNode.port.postMessage({ type: 'clear' });
+      if ((trackChanged || seeked) && !autoAdvance) {
+         flushWorklet();
       }
 
       // Handle audio output based on playback state
@@ -815,17 +903,16 @@
          } else if (isPlaying && !wasPlaying) {
             // Clear stale audio from ring buffer before resuming —
             // buffer holds pre-pause audio at the wrong position
-            if (workletNode) {
-               workletNode.port.postMessage({ type: 'clear' });
-            }
-            // Restore volume when resuming
+            flushWorklet();
+            // Resume the context (worker path can't resume on data arrival) + volume.
+            resumeContext();
             gainNode.gain.setValueAtTime(state.volume, audioContext.currentTime);
          }
       }
 
       // Clear buffer when stopped (not paused)
-      if (!state.playing && workletNode) {
-         workletNode.port.postMessage({ type: 'clear' });
+      if (!state.playing) {
+         flushWorklet();
       }
 
       notifyStateChange();
@@ -1007,7 +1094,13 @@
     * Reconnect music stream with fresh token (called when main WS gets new session)
     */
    function reconnectMusicStream() {
-      MusicStreamConnection.reconnectWithFreshToken();
+      if (useWorkerPath && decodeWorker) {
+         // Relay the fresh token; the worker resets its auth latch and reconnects.
+         const tok = DawnWS.getSessionToken ? DawnWS.getSessionToken() : null;
+         decodeWorker.postMessage({ type: 'setToken', token: tok });
+      } else {
+         MusicStreamConnection.reconnectWithFreshToken();
+      }
    }
 
    // Expose globally
@@ -1042,9 +1135,19 @@
    function setServerConfig(port, enabled) {
       if (typeof port === 'number' && port > 0) {
          MusicStreamConnection.serverPort = port;
+         serverCfg.port = port;
       }
       if (typeof enabled === 'boolean') {
          MusicStreamConnection.serverEnabled = enabled;
+         serverCfg.enabled = enabled;
+      }
+      // Relay to the worker if the worker path is live.
+      if (decodeWorker) {
+         decodeWorker.postMessage({
+            type: 'setServer',
+            port: serverCfg.port,
+            enabled: serverCfg.enabled,
+         });
       }
    }
 })(window);
