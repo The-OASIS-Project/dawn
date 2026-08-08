@@ -119,8 +119,10 @@ static int callback_music_websocket(struct lws *wsi,
                if (json_object_object_get_ex(msg, "token", &token_obj)) {
                   const char *token = json_object_get_string(token_obj);
 
-                  /* Look up session by token */
-                  session_t *session = lookup_session_by_token(token);
+                  /* json_object_get_string() → NULL for a JSON null token; guard
+                   * before lookup so {"type":"auth","token":null} can't reach it
+                   * (CWE-476), matching the post-auth string guards below. */
+                  session_t *session = token ? lookup_session_by_token(token) : NULL;
                   if (session) {
                      conn->authenticated = true;
                      conn->session = session;

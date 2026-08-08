@@ -113,7 +113,6 @@ typedef enum {
    WS_RESP_SESSION,    /* Session token for client */
    WS_RESP_AUDIO,      /* Binary audio data (Opus encoded) */
    WS_RESP_AUDIO_END,  /* End of audio stream marker */
-   WS_RESP_MUSIC_DATA, /* Binary music audio data (Opus encoded) */
    WS_RESP_CONTEXT,    /* Context/token usage update */
 
    /* LLM streaming types (ChatGPT-style real-time text) */

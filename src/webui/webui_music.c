@@ -127,6 +127,14 @@ static user_music_queue_t *s_user_queues[MAX_USER_QUEUES];
 static int s_user_queue_count = 0;
 static pthread_mutex_t s_user_queues_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/* Serializes the music-server thread's access to conn->music_state (report_buffer,
+ * write_pending, set_stream_wsi) against webui_music_session_cleanup(), which frees
+ * the state on the main WS thread. Without it, a dedicated-socket callback can
+ * dereference music_state in the window between free() and the conn->music_state=NULL
+ * store (use-after-free on ordinary tab close; hot on the ~32ms buffer-report path).
+ * Lock order: this is acquired BEFORE state->write_mutex, never the reverse. */
+static pthread_mutex_t s_music_teardown_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 /**
  * @brief Find or create a shared queue for an authenticated user
  *
@@ -259,7 +267,6 @@ static uint64_t get_time_ms(void) {
 #define WEBUI_MUSIC_QUEUE_DROPPED 2
 
 /* Forward declarations */
-static int queue_music_data(ws_connection_t *conn, const uint8_t *data, size_t len);
 static int queue_music_direct(session_music_state_t *state, const uint8_t *data, size_t len);
 
 /**
@@ -401,52 +408,6 @@ bool webui_music_is_path_valid(const char *path) {
    }
 
    return true;
-}
-
-/**
- * @brief Queue music audio data for sending via WebSocket
- *
- * This routes music data through the response queue to ensure thread-safe
- * WebSocket writes. Direct lws_write() from background threads is not safe.
- *
- * @param conn WebSocket connection
- * @param data Opus audio data (will be copied)
- * @param len Length of audio data
- * @return 0 on success, FAILURE on error
- */
-static int queue_music_data(ws_connection_t *conn, const uint8_t *data, size_t len) {
-   if (!conn || !conn->session || !data || len == 0) {
-      return FAILURE;
-   }
-
-   /* Backpressure: drop music frames when queue is getting full.
-    * This prevents music streaming from starving control messages.
-    * Better to drop some audio frames than cause UI glitches. */
-   int queue_fill = webui_get_queue_fill_pct();
-   if (queue_fill > 75) {
-      /* Queue is > 75% full - skip this frame to let it drain */
-      static _Atomic int drop_count = 0;
-      int drops = atomic_fetch_add(&drop_count, 1) + 1;
-      if (drops % 50 == 1)
-         OLOG_WARNING("WebUI music: Backpressure dropping frames (queue %d%%, dropped %d)",
-                      queue_fill, drops);
-      return 0; /* Not an error, just backpressure */
-   }
-
-   /* Allocate copy of data for queue (will be freed after send) */
-   uint8_t *data_copy = malloc(len);
-   if (!data_copy) {
-      OLOG_ERROR("WebUI music: Failed to allocate music data copy (%zu bytes)", len);
-      return FAILURE;
-   }
-   memcpy(data_copy, data, len);
-
-   ws_response_t resp = { .session = conn->session,
-                          .type = WS_RESP_MUSIC_DATA,
-                          .audio = { .data = data_copy, .len = len } };
-
-   queue_response(&resp);
-   return 0;
 }
 
 /**
@@ -1460,8 +1421,15 @@ void webui_music_session_cleanup(ws_connection_t *conn) {
       return;
    }
 
-   /* Stop streaming */
+   /* Stop the producer thread first (it holds no teardown lock; it only touches the
+    * write ring under write_mutex, which we destroy below). After this returns, the
+    * only other thread that can still reach `state` is the music-server callback. */
    webui_music_stop_streaming(state);
+
+   /* Serialize the destroy+free against the music-server accessors. Once we hold this,
+    * no report_buffer/write_pending/set_stream_wsi can be mid-flight on this state, and
+    * any that arrive after we NULL conn->music_state below will read NULL and bail. */
+   pthread_mutex_lock(&s_music_teardown_mutex);
 
    /* Clean up resources */
    pthread_mutex_lock(&state->state_mutex);
@@ -1499,6 +1467,8 @@ void webui_music_session_cleanup(ws_connection_t *conn) {
 
    free(state);
    conn->music_state = NULL;
+
+   pthread_mutex_unlock(&s_music_teardown_mutex);
 
    OLOG_INFO("WebUI music: Session cleaned up");
 }
@@ -1578,21 +1548,29 @@ void webui_music_set_stream_wsi(session_t *session, struct lws *wsi) {
    if (!session)
       return;
 
+   /* Guard conn->music_state against a concurrent cleanup free (see mutex comment). */
+   pthread_mutex_lock(&s_music_teardown_mutex);
+
    ws_connection_t *conn = (ws_connection_t *)session->client_data;
-   if (!conn)
+   if (!conn) {
+      pthread_mutex_unlock(&s_music_teardown_mutex);
       return;
+   }
 
    /* Lazily initialize music state if needed (music stream may connect
     * before any music_subscribe/control message arrives from the client) */
    if (!conn->music_state && wsi) {
       if (webui_music_session_init(conn) != 0) {
          OLOG_ERROR("WebUI music: Failed to init session for stream wsi");
+         pthread_mutex_unlock(&s_music_teardown_mutex);
          return;
       }
    }
 
-   if (!conn->music_state)
+   if (!conn->music_state) {
+      pthread_mutex_unlock(&s_music_teardown_mutex);
       return;
+   }
 
    session_music_state_t *state = (session_music_state_t *)conn->music_state;
 
@@ -1604,6 +1582,8 @@ void webui_music_set_stream_wsi(session_t *session, struct lws *wsi) {
    state->write_ring_count = 0;
    pthread_mutex_unlock(&state->write_mutex);
 
+   pthread_mutex_unlock(&s_music_teardown_mutex);
+
    OLOG_INFO("WebUI music: %s music stream wsi for session %u", wsi ? "Set" : "Cleared",
              session->session_id);
 }
@@ -1612,34 +1592,47 @@ void webui_music_report_buffer(session_t *session, uint32_t buffered_ms) {
    if (!session)
       return;
 
+   /* Guard conn->music_state against a concurrent cleanup free (see mutex comment). */
+   pthread_mutex_lock(&s_music_teardown_mutex);
+
    ws_connection_t *conn = (ws_connection_t *)session->client_data;
-   if (!conn || !conn->music_state)
-      return;
+   session_music_state_t *state = conn ? (session_music_state_t *)conn->music_state : NULL;
+   if (state) {
+      /* Defensive clamp: the caller pre-clamps, but the pacer must never see a value
+       * beyond the client ring even if a future/rogue caller doesn't (contract was
+       * advisory-only before). */
+      if (buffered_ms > WEBUI_MUSIC_CLIENT_BUFFER_MAX_MS)
+         buffered_ms = WEBUI_MUSIC_CLIENT_BUFFER_MAX_MS;
+      /* Publish value before timestamp: the streaming thread gates on a fresh
+       * timestamp, so a fresh timestamp must imply an at-least-as-fresh value.
+       * A one-report skew across the two atomics is harmless for a continuously
+       * re-anchoring pacer. */
+      atomic_store(&state->client_buffered_ms, buffered_ms);
+      atomic_store(&state->last_buffer_report_ms, get_time_ms());
+   }
 
-   session_music_state_t *state = (session_music_state_t *)conn->music_state;
-
-   /* Publish value before timestamp: the streaming thread gates on a fresh
-    * timestamp, so a fresh timestamp must imply an at-least-as-fresh value.
-    * A one-report skew across the two atomics is harmless for a continuously
-    * re-anchoring pacer, so no lock is needed. */
-   atomic_store(&state->client_buffered_ms, buffered_ms);
-   atomic_store(&state->last_buffer_report_ms, get_time_ms());
+   pthread_mutex_unlock(&s_music_teardown_mutex);
 }
 
 int webui_music_write_pending(session_t *session, struct lws *wsi) {
    if (!session)
       return FAILURE;
 
-   ws_connection_t *conn = (ws_connection_t *)session->client_data;
-   if (!conn || !conn->music_state)
-      return FAILURE;
+   /* Guard conn->music_state against a concurrent cleanup free (see mutex comment). */
+   pthread_mutex_lock(&s_music_teardown_mutex);
 
-   session_music_state_t *state = (session_music_state_t *)conn->music_state;
+   ws_connection_t *conn = (ws_connection_t *)session->client_data;
+   session_music_state_t *state = conn ? (session_music_state_t *)conn->music_state : NULL;
+   if (!state) {
+      pthread_mutex_unlock(&s_music_teardown_mutex);
+      return FAILURE;
+   }
 
    pthread_mutex_lock(&state->write_mutex);
 
    if (state->write_ring_count == 0) {
       pthread_mutex_unlock(&state->write_mutex);
+      pthread_mutex_unlock(&s_music_teardown_mutex);
       return 1; /* No data pending */
    }
 
@@ -1661,6 +1654,7 @@ int webui_music_write_pending(session_t *session, struct lws *wsi) {
       state->write_ring_tail = 0;
       state->write_ring_count = 0;
       pthread_mutex_unlock(&state->write_mutex);
+      pthread_mutex_unlock(&s_music_teardown_mutex);
       /* Signal the writable callback to close: a truncated WS frame would desync
        * the client's framing, not just this Opus frame. */
       return WEBUI_MUSIC_WRITE_CLOSE;
@@ -1677,6 +1671,7 @@ int webui_music_write_pending(session_t *session, struct lws *wsi) {
       lws_callback_on_writable(wsi);
    }
 
+   pthread_mutex_unlock(&s_music_teardown_mutex);
    return 0;
 }
 
@@ -1696,9 +1691,19 @@ static int queue_music_direct(session_music_state_t *state, const uint8_t *data,
    pthread_mutex_lock(&state->write_mutex);
 
    if (!state->music_wsi) {
-      /* No dedicated music socket - fall back to main socket queue */
+      /* No dedicated music socket connected — drop the frame. The dedicated
+       * "dawn-music" socket is the sole music transport for every client (browser
+       * worker + Tier-1 satellite); a client whose dedicated socket isn't up yet
+       * (startup race) or is reconnecting briefly gets no audio and resyncs once it
+       * registers. Count drops so the gap is visible, not silent. Returning DROPPED
+       * also keeps the pacer from crediting a frame the client never received. */
+      uint64_t drops = ++state->write_drop_count;
       pthread_mutex_unlock(&state->write_mutex);
-      return queue_music_data(state->conn, data, len);
+      if (drops % 50 == 1)
+         OLOG_WARNING("WebUI music: no dedicated music socket connected — dropped %llu "
+                      "frame(s) (client dedicated 'dawn-music' socket not registered)",
+                      (unsigned long long)drops);
+      return WEBUI_MUSIC_QUEUE_DROPPED;
    }
 
    /* Buffer the frame for writeable callback.

@@ -143,9 +143,6 @@ void free_response(ws_response_t *resp) {
       case WS_RESP_CONVERSATION_RESET:
          /* No data to free */
          break;
-      case WS_RESP_MUSIC_DATA:
-         free(resp->audio.data);
-         break;
       case WS_RESP_MUSIC_POSITION:
          /* No data to free - all inline values */
          break;
@@ -913,10 +910,6 @@ void process_one_response(void) {
          break;
       case WS_RESP_AUDIO_END:
          send_audio_end_impl(conn->wsi, resp.audio.is_opus);
-         break;
-      case WS_RESP_MUSIC_DATA:
-         send_binary_message(conn->wsi, WS_BIN_MUSIC_DATA, resp.audio.data, resp.audio.len);
-         free(resp.audio.data);
          break;
       case WS_RESP_CONTEXT:
          send_context_impl(conn->wsi, resp.context.current_tokens, resp.context.max_tokens,

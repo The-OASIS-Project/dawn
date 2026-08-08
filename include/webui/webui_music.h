@@ -340,9 +340,11 @@ int webui_music_write_pending(session_t *session, struct lws *wsi);
 void webui_music_report_buffer(session_t *session, uint32_t buffered_ms);
 
 /** Upper clamp for a client-reported buffer depth (ms) = the client worklet ring
- *  capacity (music-worklet-processor.js: 48000*10 samples = 10s). The music server
- *  clamps `buffered_ms` to [0, this] before calling webui_music_report_buffer(),
- *  so a garbage/hostile report can't drive the pacer into a multi-second sleep. */
+ *  capacity (music-worklet-processor.js: 48000*10 samples = 10s). Mirrored client-side
+ *  as CLIENT_BUFFER_MAX_MS in music-decode-worker.js (browser) — keep the two in sync.
+ *  The music server clamps `buffered_ms` to [0, this] before calling
+ *  webui_music_report_buffer() (which also clamps defensively), so a garbage/hostile
+ *  report can't drive the pacer into a multi-second sleep. */
 #define WEBUI_MUSIC_CLIENT_BUFFER_MAX_MS 10000
 
 /* =============================================================================

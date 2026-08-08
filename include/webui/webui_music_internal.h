@@ -208,7 +208,7 @@ typedef struct {
    /* Occupied slots. Mutated under write_mutex (with head/tail), but ALSO read
     * unlocked by the streaming thread's pacer as a refill heuristic, so it is
     * atomic to keep that read race-free (TSan-clean). */
-   _Atomic int write_ring_count;
+   atomic_int write_ring_count;
    uint64_t write_drop_count; /**< total frames dropped when the ring was full */
 
    /* Closed-loop buffer flow control. Written by the music-server lws thread via
