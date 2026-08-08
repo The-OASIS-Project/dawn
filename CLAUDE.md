@@ -156,6 +156,7 @@ Trigger phrases: "code review", "review my changes", "run the agents", "run the 
    - **All five** (full review / run all five): above + `coding-standards-auditor` — mandatory for large refactors, new modules, or pre-release audits.
 3. Synthesize into a consolidated table with severity and action (fix / skip / ask). **Fix pre-existing issues when found** — triage on merit (severity + fix effort), not on when introduced.
 4. Apply approved fixes; re-verify format and tests.
+5. **Re-review substantial post-review changes.** Code written *after* the agent pass — fixes, or new work added during a redirect — was seen by no reviewer. Re-run the relevant lens on it before commit (this is separate from tweaking already-reviewed code). A bug introduced while applying feedback is invisible to the original pass; that is exactly how the reconnect-state bug on the music branch reached the PR and was caught only by the bots.
 
 ## Benchmark Methodology — `recall_reach` ≠ leader entailment
 
