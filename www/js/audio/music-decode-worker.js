@@ -23,6 +23,10 @@
 
 'use strict';
 
+// Shared frame-parse + format-conversion (also used by the main-thread fallback in
+// music-playback.js). Resolves relative to this worker's URL (js/audio/).
+importScripts('music-opus-decode.js');
+
 const OPUS_SAMPLE_RATE = 48000;
 const FRAME_US = 20000; // 20ms per Opus frame, microseconds
 const FRAME_MS = 20;
@@ -188,77 +192,19 @@ function initDecoder() {
 
 function handleDecodedAudio(audioData) {
    try {
-      const numFrames = audioData.numberOfFrames;
-      const numChannels = audioData.numberOfChannels;
-      const format = audioData.format;
-      let left, right;
-
-      if (format === 'f32-planar') {
-         left = new Float32Array(numFrames);
-         right = new Float32Array(numFrames);
-         audioData.copyTo(left, { planeIndex: 0 });
-         if (numChannels > 1) audioData.copyTo(right, { planeIndex: 1 });
-         else right.set(left);
-      } else if (format === 'f32') {
-         const interleaved = new Float32Array(numFrames * numChannels);
-         audioData.copyTo(interleaved, { planeIndex: 0 });
-         left = new Float32Array(numFrames);
-         right = new Float32Array(numFrames);
-         if (numChannels >= 2) {
-            for (let i = 0; i < numFrames; i++) {
-               left[i] = interleaved[i * numChannels];
-               right[i] = interleaved[i * numChannels + 1];
-            }
-         } else {
-            for (let i = 0; i < numFrames; i++) {
-               left[i] = interleaved[i];
-               right[i] = interleaved[i];
-            }
-         }
-      } else {
-         const bytesPerSample = format.startsWith('s16') ? 2 : 4;
-         const totalSamples = numFrames * numChannels;
-         const buffer = new ArrayBuffer(totalSamples * bytesPerSample);
-         audioData.copyTo(buffer, { planeIndex: 0 });
-         left = new Float32Array(numFrames);
-         right = new Float32Array(numFrames);
-         if (format === 's16') {
-            const int16 = new Int16Array(buffer);
-            if (numChannels >= 2) {
-               for (let i = 0; i < numFrames; i++) {
-                  left[i] = int16[i * numChannels] / 32768.0;
-                  right[i] = int16[i * numChannels + 1] / 32768.0;
-               }
-            } else {
-               for (let i = 0; i < numFrames; i++) {
-                  left[i] = int16[i] / 32768.0;
-                  right[i] = left[i];
-               }
-            }
-         } else if (format === 's16-planar') {
-            const int16 = new Int16Array(buffer);
-            for (let i = 0; i < numFrames; i++) left[i] = int16[i] / 32768.0;
-            if (numChannels > 1) {
-               audioData.copyTo(buffer, { planeIndex: 1 });
-               const int16Right = new Int16Array(buffer);
-               for (let i = 0; i < numFrames; i++) right[i] = int16Right[i] / 32768.0;
-            } else {
-               right.set(left);
-            }
-         } else {
-            console.warn('Music worker: unsupported format', format);
-            return; // finally still closes audioData
-         }
-      }
-
-      if (workletPort) {
-         workletPort.postMessage({ type: 'audio', left, right }, [left.buffer, right.buffer]);
+      const stereo = DawnMusicDecode.audioDataToStereo(audioData);
+      if (stereo && workletPort) {
+         workletPort.postMessage({ type: 'audio', left: stereo.left, right: stereo.right }, [
+            stereo.left.buffer,
+            stereo.right.buffer,
+         ]);
       }
    } catch (e) {
       console.error('Music worker: error handling decoded audio', e, audioData && audioData.format);
    } finally {
-      // Close on every path (normal, unsupported-format return, or a throw mid-copy) —
+      // Close on every path (unsupported-format null, normal, or a throw mid-copy) —
       // a leaked AudioData wraps decoded PCM the GC won't reclaim promptly.
+      // audioDataToStereo never closes it; that's the caller's job.
       audioData.close();
    }
 }
@@ -267,17 +213,7 @@ async function handleMusicData(data) {
    if (!decoderReady) await initDecoder();
    if (!decoder || decoder.state === 'closed') return;
 
-   const view = new DataView(data);
-   let offset = 1; // skip message-type byte
-   while (offset + 2 <= data.byteLength) {
-      const frameLen = view.getUint16(offset, true);
-      offset += 2;
-      if (frameLen === 0 || frameLen > 1500 || offset + frameLen > data.byteLength) {
-         console.warn('Music worker: invalid frame length', frameLen);
-         break;
-      }
-      const opusFrame = new Uint8Array(data, offset, frameLen);
-      offset += frameLen;
+   DawnMusicDecode.forEachOpusFrame(data, (opusFrame) => {
       try {
          decoder.decode(
             new EncodedAudioChunk({ type: 'key', timestamp: decodeTimestamp, data: opusFrame })
@@ -286,7 +222,7 @@ async function handleMusicData(data) {
       } catch (e) {
          console.warn('Music worker: decode error', e);
       }
-   }
+   });
 }
 
 /* ---- Flush: reset decoder + drop pending, then tell the worklet to clear (ordered) ---- */

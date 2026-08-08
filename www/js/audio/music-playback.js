@@ -506,118 +506,20 @@
       }
    }
 
-   // Debug: count decoded frames
-   let decodedFrameCount = 0;
-
    /**
-    * Handle decoded audio from WebCodecs
+    * Handle decoded audio from WebCodecs (main-thread fallback path — see the module
+    * banner). Format conversion is shared with the worker via DawnMusicDecode.
     */
    function handleDecodedAudio(audioData) {
       try {
-         const numFrames = audioData.numberOfFrames;
-         const numChannels = audioData.numberOfChannels;
-         const format = audioData.format;
-
-         // Log first few decodes to check format
-         if (decodedFrameCount < 5) {
-            console.log(
-               'Music decode:',
-               'frames=' + numFrames,
-               'channels=' + numChannels,
-               'format=' + format,
-               'sampleRate=' + audioData.sampleRate
+         const stereo = DawnMusicDecode.audioDataToStereo(audioData);
+         if (stereo && workletNode) {
+            // Transferable objects — zero-copy handoff to the worklet.
+            workletNode.port.postMessage(
+               { type: 'audio', left: stereo.left, right: stereo.right },
+               [stereo.left.buffer, stereo.right.buffer]
             );
          }
-         decodedFrameCount++;
-
-         let left, right;
-
-         if (format === 'f32-planar') {
-            // Planar format: each channel is a separate plane
-            left = new Float32Array(numFrames);
-            right = new Float32Array(numFrames);
-
-            audioData.copyTo(left, { planeIndex: 0 });
-            if (numChannels > 1) {
-               audioData.copyTo(right, { planeIndex: 1 });
-            } else {
-               right.set(left);
-            }
-         } else if (format === 'f32') {
-            // Interleaved format: L R L R L R ...
-            const interleaved = new Float32Array(numFrames * numChannels);
-            audioData.copyTo(interleaved, { planeIndex: 0 });
-
-            left = new Float32Array(numFrames);
-            right = new Float32Array(numFrames);
-
-            if (numChannels >= 2) {
-               for (let i = 0; i < numFrames; i++) {
-                  left[i] = interleaved[i * numChannels];
-                  right[i] = interleaved[i * numChannels + 1];
-               }
-            } else {
-               // Mono interleaved
-               for (let i = 0; i < numFrames; i++) {
-                  left[i] = interleaved[i];
-                  right[i] = interleaved[i];
-               }
-            }
-         } else {
-            // Handle s16 or other formats by converting
-            const bytesPerSample = format.startsWith('s16') ? 2 : 4;
-            const totalSamples = numFrames * numChannels;
-            const buffer = new ArrayBuffer(totalSamples * bytesPerSample);
-
-            audioData.copyTo(buffer, { planeIndex: 0 });
-
-            left = new Float32Array(numFrames);
-            right = new Float32Array(numFrames);
-
-            if (format === 's16') {
-               // Interleaved signed 16-bit
-               const int16 = new Int16Array(buffer);
-               if (numChannels >= 2) {
-                  for (let i = 0; i < numFrames; i++) {
-                     left[i] = int16[i * numChannels] / 32768.0;
-                     right[i] = int16[i * numChannels + 1] / 32768.0;
-                  }
-               } else {
-                  for (let i = 0; i < numFrames; i++) {
-                     left[i] = int16[i] / 32768.0;
-                     right[i] = left[i];
-                  }
-               }
-            } else if (format === 's16-planar') {
-               // Planar signed 16-bit
-               const int16 = new Int16Array(buffer);
-               for (let i = 0; i < numFrames; i++) {
-                  left[i] = int16[i] / 32768.0;
-               }
-               if (numChannels > 1) {
-                  audioData.copyTo(buffer, { planeIndex: 1 });
-                  const int16Right = new Int16Array(buffer);
-                  for (let i = 0; i < numFrames; i++) {
-                     right[i] = int16Right[i] / 32768.0;
-                  }
-               } else {
-                  right.set(left);
-               }
-            } else {
-               console.warn('Music playback: Unsupported format:', format);
-               audioData.close();
-               return;
-            }
-         }
-
-         // Send to AudioWorklet for playback using transferable objects
-         if (workletNode) {
-            workletNode.port.postMessage({ type: 'audio', left, right }, [
-               left.buffer,
-               right.buffer,
-            ]);
-         }
-         audioData.close();
       } catch (e) {
          console.error(
             'Music playback: Error handling decoded audio:',
@@ -625,6 +527,8 @@
             'format:',
             audioData?.format
          );
+      } finally {
+         audioData.close(); // close on every path; audioDataToStereo never does
       }
    }
 
@@ -647,38 +551,16 @@
          return;
       }
 
-      const view = new DataView(data);
-
-      // Skip first byte (message type)
-      let offset = 1;
-
-      // Parse length-prefixed Opus frames and decode each one
-      while (offset + 2 <= data.byteLength) {
-         const frameLen = view.getUint16(offset, true); // little-endian
-         offset += 2;
-
-         if (frameLen === 0 || frameLen > 1500 || offset + frameLen > data.byteLength) {
-            console.warn('Music playback: Invalid frame length', frameLen);
-            break;
-         }
-
-         const opusFrame = new Uint8Array(data, offset, frameLen);
-         offset += frameLen;
-
+      DawnMusicDecode.forEachOpusFrame(data, (opusFrame) => {
          try {
-            // Create EncodedAudioChunk and decode
-            const chunk = new EncodedAudioChunk({
-               type: 'key',
-               timestamp: decodeTimestamp,
-               data: opusFrame,
-            });
-
-            opusDecoder.decode(chunk);
+            opusDecoder.decode(
+               new EncodedAudioChunk({ type: 'key', timestamp: decodeTimestamp, data: opusFrame })
+            );
             decodeTimestamp += 20000; // 20ms in microseconds
          } catch (e) {
             console.warn('Music playback: Decode error:', e);
          }
-      }
+      });
 
       state.buffering = false;
    }
