@@ -597,8 +597,9 @@ static void handle_message(ws_client_t *client, const char *msg, size_t len) {
       snprintf(ca, sizeof(ca), "%s", client->ca_cert_path);
       uint16_t oport = client->port;
       bool ossl = client->use_ssl;
+      bool overify = client->ssl_verify;
       pthread_mutex_unlock(&client->mutex);
-      ota_apply_handle_offer(client, uuid, host, oport, ossl, ca, payload);
+      ota_apply_handle_offer(client, uuid, host, oport, ossl, overify, ca, payload);
       pthread_mutex_lock(&client->mutex);
    } else {
       OLOG_DEBUG("Unknown message type: %s", type);

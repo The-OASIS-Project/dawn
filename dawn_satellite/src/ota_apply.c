@@ -88,6 +88,7 @@ typedef struct {
    char target_version[OTA_VERSION_STR_MAX];
    uint16_t port;
    bool use_ssl;
+   bool ssl_verify; /* Honor the satellite's ssl_verify flag on the HTTPS pull too */
    uint64_t image_size;
    uint8_t sha256[OTA_SHA256_BYTES];
 } ota_work_t;
@@ -152,14 +153,25 @@ static int download_to_fd(const ota_work_t *w, int fd) {
    curl_easy_setopt(c, CURLOPT_WRITEDATA, &sink);
    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 0L);
    curl_easy_setopt(c, CURLOPT_FAILONERROR, 1L);
-   curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 1L);
-   curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 2L);
+   /* Honor the satellite's ssl_verify flag, same as the WebSocket connection. OTA
+    * images are independently libsodium-signature-verified, so TLS verification is
+    * defense-in-depth here — a self-signed / verify-off dev deployment can still OTA
+    * (previously the hardcoded verify made ssl_verify=false silently un-OTA-able). */
+   curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, w->ssl_verify ? 1L : 0L);
+   curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, w->ssl_verify ? 2L : 0L);
    curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
    curl_easy_setopt(c, CURLOPT_TIMEOUT, 120L);
    if (w->ca_cert_path[0]) {
       curl_easy_setopt(c, CURLOPT_CAINFO, w->ca_cert_path);
    }
    CURLcode rc = curl_easy_perform(c);
+   if (rc != CURLE_OK) {
+      /* Log the real cause — the caller only reports a generic "download failed".
+       * Omit the query string (it carries the one-time token). */
+      OLOG_WARNING("OTA: image download failed: %s (%s://%s:%u%s, verify=%s)",
+                   curl_easy_strerror(rc), w->use_ssl ? "https" : "http", w->host,
+                   (unsigned)w->port, w->url_path, w->ssl_verify ? "on" : "off");
+   }
    curl_easy_cleanup(c);
    return (rc == CURLE_OK) ? SUCCESS : FAILURE;
 }
@@ -356,6 +368,7 @@ void ota_apply_handle_offer(ws_client_t *client,
                             const char *host,
                             uint16_t port,
                             bool use_ssl,
+                            bool ssl_verify,
                             const char *ca_cert_path,
                             struct json_object *payload) {
    /* uuid is interpolated raw into the download query string, so constrain it to
@@ -416,6 +429,7 @@ void ota_apply_handle_offer(ws_client_t *client,
    snprintf(w->target_version, sizeof(w->target_version), "%s", m.version);
    w->port = port;
    w->use_ssl = use_ssl;
+   w->ssl_verify = ssl_verify;
    w->image_size = m.image_size;
    memcpy(w->sha256, m.sha256, OTA_SHA256_BYTES);
 

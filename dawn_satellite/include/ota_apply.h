@@ -55,7 +55,8 @@ extern "C" {
  *
  * @param client    Live ws_client (for the immediate ack/reject only).
  * @param uuid      This device's satellite uuid.
- * @param host,port,use_ssl,ca_cert_path  Connection origin (reused for the HTTPS pull).
+ * @param host,port,use_ssl,ssl_verify,ca_cert_path  Connection origin (reused for the
+ *              HTTPS pull; ssl_verify gates TLS peer/host verification, same as the WS).
  * @param payload   The offer's JSON `payload` object.
  */
 void ota_apply_handle_offer(ws_client_t *client,
@@ -63,6 +64,7 @@ void ota_apply_handle_offer(ws_client_t *client,
                             const char *host,
                             uint16_t port,
                             bool use_ssl,
+                            bool ssl_verify,
                             const char *ca_cert_path,
                             struct json_object *payload);
 
