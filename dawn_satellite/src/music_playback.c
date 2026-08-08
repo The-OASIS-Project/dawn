@@ -62,10 +62,6 @@ struct music_playback {
    int16_t *ring;           /* PCM ring buffer (stereo interleaved, heap) */
    atomic_size_t ring_head; /* Write position (free-running, wraps naturally) */
    atomic_size_t ring_tail; /* Read position (free-running, wraps naturally) */
-
-   /* When true, a dedicated music_stream producer is active on its own thread.
-    * The ws_client fallback path must not call push_opus concurrently. */
-   atomic_bool dedicated_producer;
 };
 
 /* =============================================================================
@@ -145,7 +141,6 @@ music_playback_t *music_playback_create(audio_playback_t *audio) {
    atomic_store(&ctx->stop_flag, 0);
    atomic_store(&ctx->ring_head, 0);
    atomic_store(&ctx->ring_tail, 0);
-   atomic_store(&ctx->dedicated_producer, false);
 
    OLOG_INFO("Music playback engine created (ring buffer + LWS drain, %.1fs capacity)",
              (float)RING_SIZE / (48000.0f * 2));
@@ -339,13 +334,4 @@ int music_playback_get_buffered_ms(music_playback_t *ctx) {
    size_t ring_frames = ring_count(ctx) / 2;
    long alsa_frames = audio_playback_get_delay_frames(ctx->audio);
    return (int)((ring_frames + (size_t)alsa_frames) * 1000 / 48000);
-}
-
-void music_playback_set_dedicated_producer(music_playback_t *ctx, bool active) {
-   if (ctx)
-      atomic_store(&ctx->dedicated_producer, active);
-}
-
-bool music_playback_has_dedicated_producer(music_playback_t *ctx) {
-   return ctx && atomic_load(&ctx->dedicated_producer);
 }

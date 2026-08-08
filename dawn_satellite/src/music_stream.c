@@ -43,6 +43,13 @@
 
 #define MUSIC_STREAM_TYPE_OPUS 0x20
 #define MUSIC_FRAME_MAX_LEN 1500
+/* Cadence for the flow-control buffer report to the server. Must stay well under the
+ * daemon's report-staleness threshold so the pacer keeps holding our ~2s lead instead
+ * of falling back to real-time pacing. */
+#define MUSIC_BUFFER_REPORT_INTERVAL_MS 200
+/* Mirror of WEBUI_MUSIC_CLIENT_BUFFER_MAX_MS (daemon include/webui/webui_music.h). The
+ * server clamps to this too; clamping here keeps the wire value sane. Keep in sync. */
+#define MUSIC_BUFFER_MAX_MS 10000
 
 struct music_stream {
    char host[256];
@@ -67,6 +74,9 @@ struct music_stream {
    time_t last_disconnect;
    uint32_t reconnect_delay_ms; /* Current delay (exponential backoff) */
    atomic_bool reconnect_enabled;
+
+   /* Flow-control: last time we sent a buffer-depth report (CLOCK_MONOTONIC ms) */
+   int64_t last_report_ms;
 
    /* Fragment reassembly buffer for multi-fragment binary messages */
    uint8_t rx_buf[65536];
@@ -103,6 +113,47 @@ static int send_auth(music_stream_t *stream) {
    struct json_object *msg = json_object_new_object();
    json_object_object_add(msg, "type", json_object_new_string("auth"));
    json_object_object_add(msg, "token", json_object_new_string(stream->session_token));
+
+   const char *str = json_object_to_json_string_ext(msg, JSON_C_TO_STRING_PLAIN);
+   size_t slen = strlen(str);
+
+   unsigned char *buf = malloc(LWS_PRE + slen);
+   if (!buf) {
+      json_object_put(msg);
+      return -1;
+   }
+
+   memcpy(buf + LWS_PRE, str, slen);
+   int n = lws_write(stream->wsi, buf + LWS_PRE, slen, LWS_WRITE_TEXT);
+   free(buf);
+   json_object_put(msg);
+
+   return (n < 0) ? -1 : 0;
+}
+
+/* =============================================================================
+ * Flow-control buffer report
+ * ============================================================================= */
+
+static int64_t music_now_ms(void) {
+   struct timespec ts;
+   clock_gettime(CLOCK_MONOTONIC, &ts);
+   return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* Report our decoded-audio buffer depth so the server's closed-loop pacer holds our
+ * ~2s lead (the same flow control the browser worker uses). Sent from CLIENT_WRITEABLE
+ * on the service thread; the write is safe there. */
+static int send_buffer_report(music_stream_t *stream) {
+   int ms = music_playback_get_buffered_ms(stream->playback);
+   if (ms < 0)
+      ms = 0;
+   else if (ms > MUSIC_BUFFER_MAX_MS)
+      ms = MUSIC_BUFFER_MAX_MS;
+
+   struct json_object *msg = json_object_new_object();
+   json_object_object_add(msg, "type", json_object_new_string("music_buffer"));
+   json_object_object_add(msg, "buffered_ms", json_object_new_int(ms));
 
    const char *str = json_object_to_json_string_ext(msg, JSON_C_TO_STRING_PLAIN);
    size_t slen = strlen(str);
@@ -188,7 +239,6 @@ static int callback_music_ws(struct lws *wsi,
                   const char *type = json_object_get_string(type_obj);
                   if (type && strcmp(type, "auth_ok") == 0) {
                      atomic_store(&stream->authenticated, true);
-                     music_playback_set_dedicated_producer(stream->playback, true);
                      OLOG_INFO("Music stream: authenticated");
                   } else if (type && strcmp(type, "auth_failed") == 0) {
                      OLOG_ERROR("Music stream: authentication failed");
@@ -224,7 +274,11 @@ static int callback_music_ws(struct lws *wsi,
          break;
 
       case LWS_CALLBACK_CLIENT_WRITEABLE:
-         /* Nothing to send proactively — auth is sent on ESTABLISHED */
+         /* A writable is requested only to emit the periodic flow-control buffer
+          * report (see the service loop); auth is sent on ESTABLISHED. */
+         if (stream && atomic_load(&stream->authenticated)) {
+            send_buffer_report(stream);
+         }
          break;
 
       case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
@@ -232,7 +286,6 @@ static int callback_music_ws(struct lws *wsi,
          if (stream) {
             atomic_store(&stream->connected, false);
             atomic_store(&stream->authenticated, false);
-            music_playback_set_dedicated_producer(stream->playback, false);
             stream->last_disconnect = time(NULL);
          }
          break;
@@ -243,7 +296,6 @@ static int callback_music_ws(struct lws *wsi,
          if (stream) {
             atomic_store(&stream->connected, false);
             atomic_store(&stream->authenticated, false);
-            music_playback_set_dedicated_producer(stream->playback, false);
             stream->wsi = NULL;
             stream->last_disconnect = time(NULL);
          }
@@ -274,6 +326,17 @@ static void *music_service_thread(void *arg) {
 
       /* Drain ring buffer into ALSA after each service iteration */
       music_playback_drain(stream->playback);
+
+      /* Emit a periodic buffer-depth report so the server's closed-loop pacer holds
+       * our lead. Request a writable; the send happens in CLIENT_WRITEABLE. wsi is only
+       * mutated by callbacks on this same thread, so this read is race-free. */
+      if (atomic_load(&stream->authenticated) && stream->wsi) {
+         int64_t now = music_now_ms();
+         if (now - stream->last_report_ms >= MUSIC_BUFFER_REPORT_INTERVAL_MS) {
+            stream->last_report_ms = now;
+            lws_callback_on_writable(stream->wsi);
+         }
+      }
 
       /* Auto-reconnect logic */
       if (atomic_load(&stream->service_running) && atomic_load(&stream->reconnect_enabled) &&

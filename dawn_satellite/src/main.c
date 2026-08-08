@@ -339,8 +339,6 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
             if (voice_ctx && music_pb) {
                voice_processing_set_music_playback(voice_ctx, music_pb);
             }
-            /* Enable binary audio fallback on main WS */
-            ws_client_set_music_playback(ws, music_pb);
          }
       } else {
          printf("No session token received — music streaming disabled\n");
@@ -392,7 +390,6 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
 #endif
          if (voice_ctx)
             voice_processing_set_music_playback(voice_ctx, NULL);
-         ws_client_set_music_playback(ws, NULL);
       }
       if (music_ws)
          music_stream_destroy(music_ws);
@@ -507,7 +504,6 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
 #endif
       if (voice_ctx)
          voice_processing_set_music_playback(voice_ctx, NULL);
-      ws_client_set_music_playback(ws, NULL);
    }
    if (music_ws)
       music_stream_destroy(music_ws);

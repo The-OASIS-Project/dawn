@@ -35,10 +35,6 @@
 /* OTA device-apply (offer handling + status flush + health/commit signals) */
 #include "ota_apply.h"
 
-#ifdef HAVE_OPUS
-#include "music_playback.h"
-#endif
-
 /* =============================================================================
  * Internal Structures
  * ============================================================================= */
@@ -101,10 +97,6 @@ struct ws_client {
    /* Session token for music WebSocket auth (32 hex chars + null) */
    char session_token[33];
 
-#ifdef HAVE_OPUS
-   /* Music playback engine for binary audio fallback on main WS (not owned) */
-   music_playback_t *music_pb;
-#endif
 
    /* Alarm/scheduler callbacks */
    ws_alarm_notify_cb_t alarm_notify_cb;
@@ -199,27 +191,10 @@ static int callback_ws(struct lws *wsi,
 
       case LWS_CALLBACK_CLIENT_RECEIVE:
          if (client && in && len > 0) {
-            /* Handle binary frames (music audio fallback from main WS) */
+            /* Music audio arrives only on the dedicated "dawn-music" socket
+             * (music_stream.c), never on the main WS — ignore any stray binary frame
+             * rather than feeding it into the text-message accumulator below. */
             if (lws_frame_is_binary(wsi)) {
-#ifdef HAVE_OPUS
-               if (client->music_pb && len >= 1 &&
-                   !music_playback_has_dedicated_producer(client->music_pb)) {
-                  const uint8_t *data = (const uint8_t *)in;
-                  if (data[0] == 0x20) { /* WS_BIN_MUSIC_DATA */
-                     /* Parse opus frames: [0x20][2-byte LE len][opus]... */
-                     size_t offset = 1;
-                     while (offset + 2 <= len) {
-                        uint16_t frame_len = (uint16_t)data[offset] |
-                                             ((uint16_t)data[offset + 1] << 8);
-                        offset += 2;
-                        if (frame_len == 0 || frame_len > 1500 || offset + frame_len > len)
-                           break;
-                        music_playback_push_opus(client->music_pb, data + offset, (int)frame_len);
-                        offset += frame_len;
-                     }
-                  }
-               }
-#endif
                break;
             }
 
@@ -1604,15 +1579,6 @@ const char *ws_client_get_session_token(ws_client_t *client) {
    return client->session_token;
 }
 
-void ws_client_set_music_playback(ws_client_t *client, void *music_pb) {
-   if (!client)
-      return;
-#ifdef HAVE_OPUS
-   client->music_pb = (music_playback_t *)music_pb;
-#else
-   (void)music_pb;
-#endif
-}
 
 int ws_client_send_music_subscribe(ws_client_t *client) {
    if (!client || !client->registered)

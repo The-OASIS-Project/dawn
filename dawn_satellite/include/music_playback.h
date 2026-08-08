@@ -131,19 +131,6 @@ bool music_playback_is_playing(music_playback_t *ctx);
  */
 int music_playback_get_buffered_ms(music_playback_t *ctx);
 
-/**
- * Mark that a dedicated producer (music_stream) is active.
- * While active, fallback paths (ws_client) must not call push_opus
- * to maintain the single-producer invariant on the ring buffer.
- */
-void music_playback_set_dedicated_producer(music_playback_t *ctx, bool active);
-
-/**
- * Check if a dedicated producer is active.
- * Fallback producers should skip push_opus when this returns true.
- */
-bool music_playback_has_dedicated_producer(music_playback_t *ctx);
-
 
 #ifdef __cplusplus
 }
