@@ -90,7 +90,15 @@
       volumeRestoredToServer: false, // True after saved volume sent to server on first state
       seekTarget: 0, // Optimistic seek/track-change position (s), shown until the server confirms
       seekPendingUntil: 0, // ms epoch: suppress stale pre-seek position echoes until then
+      trackChangePending: false, // optimistic next/prev/play_index in flight (see changeTrack)
    };
+
+   // Optimistic-UI timing. Coupled: an echo must converge to the target within the
+   // window, and the buffered-position correction (music-playback.js) keeps the
+   // reported position below the target until the ring drains — so the window must
+   // outlast that drain. Move the two together.
+   const SEEK_OPTIMISTIC_MS = 2000; // show the optimistic target this long before releasing
+   const SEEK_CONVERGE_SEC = 1.5; // an echo within this of the target counts as "caught up"
 
    /**
     * Initialize UI bindings
@@ -765,6 +773,17 @@
          DawnMusicPlayback.queue('list');
       }
 
+      // Reconcile an optimistic track-change: changeTrack() resets the bar to 0 assuming
+      // the track advances. If the server shows the index did NOT move (end of queue, or
+      // a rejected change), release the pending window now so the bar doesn't sit at 0
+      // for the full timeout and then snap back to the still-playing track's position.
+      if (localState.trackChangePending) {
+         localState.trackChangePending = false;
+         if (!queueChanged) {
+            localState.seekPendingUntil = 0;
+         }
+      }
+
       // Queue is now persisted server-side in SQLite — no localStorage restore needed
       localState.queueRestored = true;
 
@@ -815,7 +834,7 @@
       // server's reported position converges to the target — otherwise a stale
       // pre-change update would snap the bar back before jumping forward again.
       if (localState.seekPendingUntil && Date.now() < localState.seekPendingUntil) {
-         if (Math.abs(positionSec - localState.seekTarget) > 1.5) {
+         if (Math.abs(positionSec - localState.seekTarget) > SEEK_CONVERGE_SEC) {
             return;
          }
          localState.seekPendingUntil = 0; // server caught up — resume live updates
@@ -831,6 +850,16 @@
    function applyProgress(positionSec, durationSec) {
       if (elements.progressFill && durationSec > 0) {
          elements.progressFill.style.width = `${(positionSec / durationSec) * 100}%`;
+      }
+      // Keep the role="slider" value truthful to assistive tech (WCAG 4.1.2). The bar
+      // is the single render authority, so the optimistic jump is reflected here too.
+      if (elements.progressBar && durationSec > 0) {
+         elements.progressBar.setAttribute('aria-valuenow', String(Math.round(positionSec)));
+         elements.progressBar.setAttribute('aria-valuemax', String(Math.round(durationSec)));
+         elements.progressBar.setAttribute(
+            'aria-valuetext',
+            `${formatTime(positionSec)} of ${formatTime(durationSec)}`
+         );
       }
       if (elements.currentTime) {
          elements.currentTime.textContent = formatTime(positionSec);
@@ -848,8 +877,19 @@
    function optimisticPosition(targetSec) {
       const durationSec = DawnMusicPlayback.getState().durationSec || 0;
       localState.seekTarget = targetSec;
-      localState.seekPendingUntil = Date.now() + 2000;
+      localState.seekPendingUntil = Date.now() + SEEK_OPTIMISTIC_MS;
+      // Snap the discrete optimistic jump instead of sliding it through the fill's
+      // 0.1s width transition (which undercuts the "instant" feel and is exactly the
+      // large motion prefers-reduced-motion users opt out of). Live incremental
+      // updates keep the CSS ease.
+      if (elements.progressFill) {
+         elements.progressFill.style.transition = 'none';
+      }
       applyProgress(targetSec, durationSec);
+      if (elements.progressFill) {
+         void elements.progressFill.offsetWidth; // commit the snap, then restore the ease
+         elements.progressFill.style.transition = '';
+      }
    }
 
    /**
@@ -870,6 +910,7 @@
     * @param {object} [opts]
     */
    function changeTrack(action, opts) {
+      localState.trackChangePending = true;
       optimisticPosition(0);
       DawnMusicPlayback.control(action, opts);
    }

@@ -59,7 +59,10 @@ function musicUrl() {
    const protocol = self.location.protocol === 'https:' ? 'wss:' : 'ws:';
    const host = self.location.hostname;
    const mainPort = parseInt(self.location.port || '8080', 10);
-   const port = serverPort || mainPort + 1;
+   // Self-defend: only trust a relayed serverPort that is a valid port number,
+   // else derive main+1. (main-thread already validates, this is defense-in-depth.)
+   const valid = Number.isInteger(serverPort) && serverPort > 0 && serverPort <= 65535;
+   const port = valid ? serverPort : mainPort + 1;
    return `${protocol}//${host}:${port}`;
 }
 
@@ -279,19 +282,19 @@ self.onmessage = (e) => {
       case 'setToken': {
          const changed = d.token && d.token !== token;
          token = d.token || null;
-         if (token && authFailed) {
-            // fresh token after an auth failure — reset the latch and reconnect
-            authFailed = false;
-            retryCount = 0;
-            if (subscribed) {
+         if (token && subscribed) {
+            // A fresh/changed token is a recovery signal. Reconnect when: the token
+            // rotated (re-auth so a revoked session can't persist), auth was latched
+            // failed, or the socket is down with no reconnect scheduled (retry
+            // exhausted — the case the old authFailed-only check missed, leaving music
+            // dead until re-subscribe). Mirrors the main-thread reconnectWithFreshToken.
+            const stalled = !connected && !reconnectTimer;
+            if (changed || authFailed || stalled) {
+               authFailed = false;
+               retryCount = 0;
                disconnect();
                connect();
             }
-         } else if (changed && subscribed && wsReady()) {
-            // token rotated on a live, authed socket — re-auth so a revoked session
-            // can't persist (matches the fallback's reconnectWithFreshToken()).
-            disconnect();
-            connect();
          }
          break;
       }

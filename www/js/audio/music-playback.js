@@ -47,7 +47,7 @@
     * @property {boolean} subscribed      - Subscribed to the music stream socket.
     * @property {number} volume           - 0..1 client-side gain.
     * @property {number} bufferPercent    - 0..100.
-    * @property {number} bufferedMs        - Total client-side buffered audio (worklet + decode queue), ms.
+    * @property {number} bufferedMs      - Client-side buffered audio (worklet + decode queue), ms.
     */
 
    // Playback state
@@ -492,8 +492,25 @@
     */
    function flushWorklet() {
       if (useWorkerPath && decodeWorker) {
+         // Worker owns the decoder; its clear handler resets it + clears the worklet.
          decodeWorker.postMessage({ type: 'clear' });
       } else if (workletNode) {
+         // Fallback (no-Worker) path: reset the main-thread decoder too, else frames
+         // already queued in it decode after the worklet clear and play as stale
+         // pre-seek audio at the new position.
+         if (opusDecoder && opusDecoder.state === 'configured') {
+            try {
+               opusDecoder.reset();
+               opusDecoder.configure({
+                  codec: 'opus',
+                  sampleRate: OPUS_SAMPLE_RATE,
+                  numberOfChannels: 2,
+               });
+            } catch (e) {
+               /* ignore — a reset failure just means the stale-frame window persists */
+            }
+         }
+         decodeTimestamp = 0;
          workletNode.port.postMessage({ type: 'clear' });
       }
    }
@@ -563,14 +580,6 @@
       });
 
       state.buffering = false;
-   }
-
-   /**
-    * Handle music segment end (not used for streaming, kept for compatibility)
-    */
-   function handleMusicSegmentEnd() {
-      // For streaming playback, we don't need segment markers
-      // Audio is played continuously as it's decoded
    }
 
    /**
@@ -924,27 +933,6 @@
    }
 
    /**
-    * Handle binary message from WebSocket
-    * Called from dawn.js message router
-    * @param {ArrayBuffer} data - Binary message data
-    */
-   function handleBinaryMessage(data) {
-      const view = new Uint8Array(data);
-      if (view.length === 0) return;
-
-      const messageType = view[0];
-
-      switch (messageType) {
-         case DawnConfig.WS_BIN_MUSIC_DATA:
-            handleMusicData(data);
-            break;
-         case DawnConfig.WS_BIN_MUSIC_SEGMENT_END:
-            handleMusicSegmentEnd();
-            break;
-      }
-   }
-
-   /**
     * Handle JSON message from WebSocket
     * Called from dawn.js message router
     * @param {object} message - Parsed JSON message
@@ -1001,7 +989,6 @@
       setCallbacks: setCallbacks,
       setVolume: setVolume,
       updateQuality: updateQuality,
-      handleBinaryMessage: handleBinaryMessage,
       handleJsonMessage: handleJsonMessage,
       reconnectMusicStream: reconnectMusicStream,
       setServerConfig: setServerConfig,

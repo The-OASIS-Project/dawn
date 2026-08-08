@@ -61,6 +61,11 @@
    #music-btn .music-playing-indicator {
       animation: none;
    }
+   /* The progress fill slides on every position/seek update; a seek/track-change is a
+    * large discrete jump. Drop the transition entirely for reduced-motion users. */
+   .music-progress-fill {
+      transition: none;
+   }
 }
 
 /* =============================================================================

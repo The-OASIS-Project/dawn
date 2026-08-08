@@ -1221,13 +1221,9 @@
                }
                break;
 
-            case DawnConfig.WS_BIN_MUSIC_DATA:
-            case DawnConfig.WS_BIN_MUSIC_SEGMENT_END:
-               // Music streaming messages - route to music playback handler
-               if (typeof DawnMusicPlayback !== 'undefined') {
-                  DawnMusicPlayback.handleBinaryMessage(data);
-               }
-               break;
+            // Music audio is delivered only over the dedicated "dawn-music" socket
+            // (port 3001); it is never carried on the main WS, so there is no music
+            // case here. WS_BIN_MUSIC_DATA falls through to the default log if ever seen.
 
             default:
                console.log('Unknown binary message type:', '0x' + msgType.toString(16));
