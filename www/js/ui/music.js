@@ -246,6 +246,10 @@
       // Progress bar seeking
       if (elements.progressBar) {
          elements.progressBar.addEventListener('click', handleSeek);
+         // role="slider" must be keyboard-operable (WCAG 2.1.1). Arrows scoped to the
+         // bar's own focus — no collision with the tablist (that only fires on the tab
+         // strip). Left/Right ±5s, PageUp/Dn ±15s, Home/End to start/end.
+         elements.progressBar.addEventListener('keydown', handleProgressKey);
       }
 
       // Volume
@@ -517,6 +521,46 @@
       const percent = (e.clientX - rect.left) / rect.width;
       const state = DawnMusicPlayback.getState();
       beginSeek(percent * state.durationSec);
+   }
+
+   /**
+    * Keyboard seek for the role="slider" progress bar.
+    * @param {KeyboardEvent} e
+    */
+   function handleProgressKey(e) {
+      const st = DawnMusicPlayback.getState();
+      const dur = st.durationSec || 0;
+      if (dur <= 0) return;
+      // Accumulate off the pending optimistic target so repeated presses add up.
+      const pending = localState.seekPendingUntil && Date.now() < localState.seekPendingUntil;
+      const base = pending ? localState.seekTarget : st.positionSec || 0;
+      let target;
+      switch (e.key) {
+         case 'ArrowRight':
+         case 'ArrowUp':
+            target = base + 5;
+            break;
+         case 'ArrowLeft':
+         case 'ArrowDown':
+            target = base - 5;
+            break;
+         case 'PageUp':
+            target = base + 15;
+            break;
+         case 'PageDown':
+            target = base - 15;
+            break;
+         case 'Home':
+            target = 0;
+            break;
+         case 'End':
+            target = dur;
+            break;
+         default:
+            return;
+      }
+      e.preventDefault();
+      beginSeek(Math.max(0, Math.min(dur, target)));
    }
 
    /**

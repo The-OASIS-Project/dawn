@@ -4,11 +4,10 @@
  * Used by BOTH music-decode paths so the frame-parse and the WebCodecs
  * format-conversion matrix live in exactly one place:
  *   - the off-main-thread decode worker (music-decode-worker.js, via importScripts) —
- *     the primary path, decode off the main thread for the dedicated music socket;
- *   - the main-thread path (music-playback.js) — the consumer of the server's
- *     main-WS music fallback, used when the dedicated socket (port 3001) isn't
- *     connected (single-port / reverse-proxy deployments stream music over the
- *     main WS instead; see webui_music.c queue_music_direct()).
+ *     the primary path, decode off the main thread;
+ *   - the main-thread path (music-playback.js) — the fallback DECODE location used when
+ *     a Worker can't be created. It still streams over the same dedicated music socket
+ *     (port 3001); music is never carried on the main WS.
  *
  * Runs unchanged in a Window or a WorkerGlobalScope — it touches only ArrayBuffer,
  * DataView, typed arrays, and the WebCodecs AudioData handed in by the caller (no

@@ -67,7 +67,15 @@ function musicUrl() {
 }
 
 function connect() {
-   if (ws && ws.readyState === WebSocket.OPEN) return;
+   // We're (re)connecting now: cancel any scheduled retry and clear its handle. A
+   // fired setTimeout leaves reconnectTimer non-null otherwise, which defeats the
+   // `stalled = !connected && !reconnectTimer` recovery check in setToken.
+   if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+   }
+   // OPEN or CONNECTING — a socket is already live/in-flight; don't open a second one.
+   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
    if (authFailed) return; // wait for a fresh token
    if (serverEnabled === false) return; // music server off
 
