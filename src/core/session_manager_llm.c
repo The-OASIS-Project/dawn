@@ -565,8 +565,11 @@ char *session_llm_call_with_tts_vision_no_add(session_t *session,
    session->last_token_ms = 0;
    session->stream_token_count = 0;
 
-   /* Set per-session cancel flag for multi-user WebUI support */
-   llm_set_cancel_flag(&session->cancel_requested);
+   /* Set per-session cancel flag for multi-user WebUI support.  A background job
+    * transfer opts out of the global interrupt flag (honor_global=false) so a
+    * foreground wake word can't abort it — mirrors the tool loop's is_background
+    * policy at the transfer level. */
+   llm_set_cancel_flag_ex(&session->cancel_requested, !session_is_background(session));
 
    char *response;
 

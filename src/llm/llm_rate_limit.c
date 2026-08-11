@@ -105,7 +105,18 @@ void llm_rate_limit_init(int max_rpm) {
    }
 }
 
-int llm_sleep_with_interrupt_check(int total_ms) {
+bool llm_interrupt_ctx_triggered(const llm_interrupt_ctx_t *ctx) {
+   if (!ctx) {
+      /* Legacy global-only behavior (foreground wake-word / Ctrl+C). */
+      return llm_is_interrupt_requested();
+   }
+   if (ctx->session_flag && atomic_load(ctx->session_flag)) {
+      return true;
+   }
+   return ctx->honor_global && llm_is_interrupt_requested();
+}
+
+int llm_sleep_with_interrupt_check_ctx(int total_ms, const llm_interrupt_ctx_t *ctx) {
    /* 250ms chunks: below the ~400ms wake-word-feels-laggy threshold, and 2.5x
     * fewer scheduler wakeups than 100ms on a multi-second backoff / slot wait.
     * Integer-ms counting avoids float drift; under heavy load a chunk may
@@ -114,7 +125,7 @@ int llm_sleep_with_interrupt_check(int total_ms) {
    struct timespec chunk = { .tv_sec = 0, .tv_nsec = LLM_INTERRUPT_SLEEP_CHUNK_MS * 1000000L };
    int elapsed_ms = 0;
    while (elapsed_ms < total_ms) {
-      if (llm_is_interrupt_requested()) {
+      if (llm_interrupt_ctx_triggered(ctx)) {
          return 1;
       }
       nanosleep(&chunk, NULL);
@@ -123,7 +134,11 @@ int llm_sleep_with_interrupt_check(int total_ms) {
    return 0;
 }
 
-int llm_rate_limit_wait(void) {
+int llm_sleep_with_interrupt_check(int total_ms) {
+   return llm_sleep_with_interrupt_check_ctx(total_ms, NULL);
+}
+
+int llm_rate_limit_wait_ctx(const llm_interrupt_ctx_t *ctx) {
    /* Fast path: disabled — zero overhead */
    if (atomic_load(&s_limiter.max_rpm) <= 0)
       return 0;
@@ -163,7 +178,7 @@ int llm_rate_limit_wait(void) {
       if (wait_ms < 1) {
          wait_ms = 1;
       }
-      if (llm_sleep_with_interrupt_check(wait_ms)) {
+      if (llm_sleep_with_interrupt_check_ctx(wait_ms, ctx)) {
          OLOG_INFO("Rate limit wait interrupted");
          return 1;
       }
@@ -183,6 +198,10 @@ int llm_rate_limit_wait(void) {
 
    pthread_mutex_unlock(&s_limiter.mutex);
    return 0;
+}
+
+int llm_rate_limit_wait(void) {
+   return llm_rate_limit_wait_ctx(NULL);
 }
 
 void llm_rate_limit_set_rpm(int max_rpm) {

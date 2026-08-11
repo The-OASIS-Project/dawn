@@ -561,6 +561,20 @@ static inline void session_begin_turn_flags(session_t *s) {
    }
 }
 
+/**
+ * True if this session runs a BACKGROUND turn — one that must break only on its
+ * own cancel flag, NOT the global wake-word / Ctrl+C interrupt (which is the
+ * foreground voice barge-in).  Single source of truth for that classification:
+ * the tool loop's is_background, the transfer-level honor_global opt-out
+ * (llm_set_cancel_flag_ex), and any future consumer derive from HERE, so the
+ * two layers of the isolation policy cannot drift.  Today that is exactly the
+ * job/research pool (SESSION_TYPE_JOB); when a second background context lands
+ * (e.g. a live reinvoke on a foreground session), widen this ONE predicate.
+ */
+static inline bool session_is_background(const session_t *s) {
+   return s != NULL && s->type == SESSION_TYPE_JOB;
+}
+
 // =============================================================================
 // Prompt Builder Callback Types (defined before #ifdef so stubs can use them)
 // =============================================================================

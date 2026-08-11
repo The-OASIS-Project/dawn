@@ -547,6 +547,14 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
    s_did_skip_followup = false;
    char *final_response = NULL;
 
+   /* Cancellation policy for this turn (loop-invariant).  A background turn
+    * (job / deep research) breaks only on its own session cancel flag; a
+    * foreground turn additionally honors the global wake-word / Ctrl+C
+    * interrupt.  A zero-valued params (cancel_flag=NULL, is_background=false)
+    * yields {NULL, honor_global=true} — the legacy global-only behavior. */
+   const llm_interrupt_ctx_t ictx = { .session_flag = params->cancel_flag,
+                                      .honor_global = !params->is_background };
+
    for (int iteration = 0; iteration <= LLM_TOOLS_MAX_ITERATIONS; iteration++) {
       /* Step 0: Merge any completed async compaction (invisible to user).
        * for_reconnect so a turn surviving a client disconnect still merges its
@@ -587,7 +595,7 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
 
       /* Step 2: Gate cloud calls through rate limiter */
       if (params->llm_type != LLM_LOCAL) {
-         if (llm_rate_limit_wait()) {
+         if (llm_rate_limit_wait_ctx(&ictx)) {
             OLOG_WARNING("Tool loop: rate limit wait interrupted at iteration %d", iteration);
             return NULL;
          }
@@ -620,7 +628,7 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
          OLOG_INFO("Tool loop: transient network error at iteration %d, "
                    "retry %d/%d in %dms",
                    iteration, retry + 1, LLM_TRANSIENT_RETRY_MAX, backoff_ms);
-         if (llm_sleep_with_interrupt_check(backoff_ms)) {
+         if (llm_sleep_with_interrupt_check_ctx(backoff_ms, &ictx)) {
             OLOG_INFO("Tool loop: retry backoff interrupted at iteration %d", iteration);
             llm_tool_response_free(&result);
             return NULL;
@@ -629,7 +637,7 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
           * top-of-iteration gate at the start of this loop).  Local LLM
           * is exempt — no shared per-minute budget there. */
          if (params->llm_type != LLM_LOCAL) {
-            if (llm_rate_limit_wait()) {
+            if (llm_rate_limit_wait_ctx(&ictx)) {
                OLOG_WARNING("Tool loop: rate limit wait interrupted during retry at "
                             "iteration %d",
                             iteration);
@@ -863,8 +871,10 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
       params->vision_image_sizes = NULL;
       params->vision_image_count = 0;
 
-      /* Step 11: Check interrupt */
-      if (llm_is_interrupt_requested()) {
+      /* Step 11: Check interrupt.  Background turns (job / research) break only
+       * on their own session cancel flag; foreground turns also honor the global
+       * wake-word / Ctrl+C interrupt.  See llm_interrupt_ctx_t. */
+      if (llm_interrupt_ctx_triggered(&ictx)) {
          OLOG_INFO("Tool loop: Interrupted by user");
          free_tool_result_resources(results);
          free(results);

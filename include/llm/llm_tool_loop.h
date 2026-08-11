@@ -32,6 +32,8 @@
 #define LLM_TOOL_LOOP_H
 
 #include <json-c/json.h>
+#include <stdatomic.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -98,6 +100,14 @@ typedef struct {
    uint32_t session_id;                      /**< Session ID for compaction */
    llm_type_t llm_type;                      /**< Current LLM type */
    cloud_provider_t cloud_provider;          /**< Current cloud provider */
+   _Atomic bool *cancel_flag;                /**< Per-session cancel_requested (NULL if none);
+                                              *   honored at every iteration boundary + wait.
+                                              *   Type must match session_t::cancel_requested
+                                              *   (atomic_bool) — a change there surfaces here. */
+   bool is_background;                       /**< True for job/research turns: honor cancel_flag
+                                              *   only, NOT the global wake-word/Ctrl+C interrupt.
+                                              *   Zero-value default (foreground) preserves the
+                                              *   legacy global-only behavior for every caller. */
 } llm_tool_loop_params_t;
 
 /**

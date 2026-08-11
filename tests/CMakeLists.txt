@@ -910,6 +910,12 @@ dawn_add_unit_test(test_rate_limiter
    LIBS    unity pthread
    LABEL   ci)
 
+dawn_add_unit_test(test_llm_interrupt_ctx
+   SOURCES test_llm_interrupt_ctx.c
+           ${SRC_ROOT}/src/llm/llm_rate_limit.c
+   LIBS    dawn_common unity pthread
+   LABEL   ci)
+
 dawn_add_unit_test(test_utterance_dedup
    SOURCES test_utterance_dedup.c
            ${SRC_ROOT}/src/core/utterance_dedup.c

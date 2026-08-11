@@ -304,14 +304,18 @@ static void job_worker_run(job_work_t *work) {
 
    /* The daemon pulled the rug, as opposed to a human asking for the stop.
     *
-    * Deliberately does NOT require cancel_requested.  On SIGINT the thing that
-    * actually stops a job is llm_request_interrupt() — a GLOBAL flag the tool
-    * loop polls (llm_tool_loop.c, step 11) — not this session's cancel flag,
-    * which job_manager_shutdown() sets up to a second later.  Keying on
-    * cancel_requested made this branch unreachable for every real Ctrl+C: the
-    * worker returned no answer, saw no cancel, and filed itself as "failed: no
-    * response from model" (live-verified on conv 1038).  Shutting down plus no
-    * answer IS an interruption, however the stop arrived.
+    * Deliberately keys on job_manager_is_shutting_down(), NOT on cancel_requested.
+    * On SIGINT a background/job tool loop is stopped by job_manager_shutdown()
+    * setting THIS session's cancel_requested: the loop polls only the session
+    * flag for a job session (llm_tool_loop.c step 11 via llm_interrupt_ctx_t),
+    * never the global llm_interrupt_requested — that global flag is the
+    * foreground voice barge-in, which a job must survive so one local wake word
+    * can't fail every concurrent job.  We don't gate this branch on
+    * cancel_requested because a user Cancel sets it too; is_shutting_down() +
+    * !user_cancelled is what isolates the daemon-pulled-the-rug case.  (History:
+    * keying on cancel_requested alone once filed every real Ctrl+C as "failed:
+    * no response from model" — live-verified on conv 1038.)  Shutting down plus
+    * no answer IS an interruption, however the stop arrived.
     *
     * The !user_cancelled term stays: a Cancel that lands as the daemon goes down
     * would otherwise be filed 'interrupted', which is tool-resumable, so the LLM
