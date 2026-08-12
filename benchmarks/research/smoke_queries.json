@@ -1,0 +1,95 @@
+{
+  "_comment": [
+    "Deep-research P0 smoke query set (DEEP_RESEARCH_DESIGN.md §15 Step 11).",
+    "Not an automated benchmark: a research run needs the live daemon + LLM + web",
+    "search, and quality here is judged by a human reading the report (compression",
+    "loss + synthesis coherence are the named mediocrity risks, §14). Submit each",
+    "brief conversationally (see README.md), let the runs finish, then snapshot a",
+    "baseline with capture_baseline.py. 'shape' groups the briefs by the research",
+    "pattern they exercise; 'should_cover' is what a GOOD report is expected to",
+    "contain — the eyeball checklist, NOT a machine-graded gold answer."
+  ],
+  "queries": [
+    {
+      "id": "factual_synthesis",
+      "shape": "single-topic factual synthesis",
+      "brief": "What is the primary mirror of the James Webb Space Telescope made of, and why was that material chosen?",
+      "should_cover": [
+        "beryllium substrate with a thin gold coating",
+        "low mass + dimensional stability at cryogenic temperatures",
+        "gold's reflectivity in the infrared"
+      ]
+    },
+    {
+      "id": "comparison",
+      "shape": "two-option comparison / tradeoff",
+      "brief": "Compare LFP (lithium iron phosphate) and NMC (nickel manganese cobalt) battery chemistries for a home energy-storage system.",
+      "should_cover": [
+        "safety / thermal-runaway resistance (LFP favorable)",
+        "energy density (NMC higher)",
+        "cycle life and cost",
+        "a clear per-use-case recommendation"
+      ]
+    },
+    {
+      "id": "temporal_recent",
+      "shape": "recent / time-bounded change",
+      "brief": "What were the major changes introduced in version 2.0 of the NIST Cybersecurity Framework compared to version 1.1?",
+      "should_cover": [
+        "the new 'Govern' function",
+        "expanded scope beyond critical infrastructure",
+        "citations to NIST sources rather than blog summaries"
+      ]
+    },
+    {
+      "id": "multi_entity_aggregation",
+      "shape": "list / cross-entity aggregation",
+      "brief": "Which major economies have set a legally-binding net-zero emissions target, and what target year has each committed to?",
+      "should_cover": [
+        "several countries each with a specific target year",
+        "distinction between legally-binding vs policy/pledge where sources disagree",
+        "per-claim sourcing so the list is auditable"
+      ]
+    },
+    {
+      "id": "procedural_bestpractice",
+      "shape": "how-to / current best practice",
+      "brief": "What are the current best practices for securing a self-hosted PostgreSQL database that must be reachable over the internet?",
+      "should_cover": [
+        "network restriction (VPN / allowlist / SSH tunnel over raw exposure)",
+        "TLS, strong auth (scram-sha-256), least-privilege roles",
+        "patching + monitoring/auditing"
+      ]
+    },
+    {
+      "id": "multi_perspective",
+      "shape": "consensus + disagreement (multi-perspective)",
+      "brief": "What is the current scientific consensus on the health effects of intermittent fasting, and where do researchers still disagree?",
+      "should_cover": [
+        "areas of broad agreement",
+        "explicit open questions / conflicting findings",
+        "does NOT flatten disagreement into a single confident answer"
+      ]
+    },
+    {
+      "id": "technical_deepdive",
+      "shape": "technical mechanism deep-dive",
+      "brief": "How does the Raft consensus algorithm handle leader election, and how does it prevent or resolve split votes?",
+      "should_cover": [
+        "randomized election timeouts",
+        "term numbers + majority quorum",
+        "what happens on a split vote (new term, re-election)"
+      ]
+    },
+    {
+      "id": "architecture_tradeoff",
+      "shape": "engineering tradeoff / decision support",
+      "brief": "What are the tradeoffs between gRPC and REST/JSON for communication between internal microservices?",
+      "should_cover": [
+        "performance / payload size (protobuf vs JSON)",
+        "streaming, codegen, tooling / debuggability",
+        "browser + ecosystem support considerations"
+      ]
+    }
+  ]
+}
