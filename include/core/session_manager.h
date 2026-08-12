@@ -423,6 +423,18 @@ typedef struct session {
    // Cleared before a job dispatches so a pooled session can't read a stale value.
    char last_finish_reason[32];
 
+   // Deep-research context (DEEP_RESEARCH_DESIGN.md §4a/§7/§11).  Set by the
+   // research controller on its bare job session; 0 = not a research session.
+   // When research_run_id > 0 the tool layer enforces the read-only research
+   // allowlist (search / url_fetch / research_plan / research_record ONLY, at
+   // BOTH schema advertisement and execution — is_tool_enabled_for_session), and
+   // the research_plan/research_record tools write to this run.  research_round
+   // is the current round, stamped onto recorded claims (diagnostics).
+   // Single-writer (the research worker thread), read on the same thread during
+   // tool execution — no lock, like last_finish_reason.
+   int64_t research_run_id;
+   int research_round;
+
    // Streaming metrics for UI visualization
    uint64_t stream_start_ms;     // Timestamp when LLM call started
    uint64_t first_token_ms;      // Timestamp of first token (0 if none yet)
@@ -573,6 +585,24 @@ static inline void session_begin_turn_flags(session_t *s) {
  */
 static inline bool session_is_background(const session_t *s) {
    return s != NULL && s->type == SESSION_TYPE_JOB;
+}
+
+/**
+ * @brief Mark @p session as a deep-research fetch session (or clear it).
+ *
+ * @param run_id  research_runs.id this session's research_plan/research_record
+ *                calls write to; > 0 also enables the read-only research tool
+ *                allowlist for the session.  0 clears research mode.
+ * @param round   current research round, stamped onto recorded claims.
+ *
+ * Single-writer: only the research controller (on its own bare job session)
+ * calls this.  Read on the same thread during tool execution — no lock.
+ */
+static inline void session_set_research_context(session_t *session, int64_t run_id, int round) {
+   if (session != NULL) {
+      session->research_run_id = run_id;
+      session->research_round = round;
+   }
 }
 
 // =============================================================================

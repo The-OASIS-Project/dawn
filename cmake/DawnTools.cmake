@@ -168,6 +168,12 @@ list(APPEND TOOL_SOURCES
     src/tools/recall_format.c)
 message(STATUS "DAWN: Recall tool ENABLED")
 
+# In-loop deep-research tools (research_plan / research_record).  Always
+# compiled; reachable ONLY inside a research session via the read-only tool
+# allowlist (is_tool_enabled_for_session).
+list(APPEND TOOL_SOURCES
+    src/tools/research_tools.c)
+
 # DateTime Tools (date and time)
 if(DAWN_ENABLE_DATETIME_TOOL)
     add_definitions(-DDAWN_ENABLE_DATETIME_TOOL)

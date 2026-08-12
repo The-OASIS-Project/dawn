@@ -52,6 +52,10 @@
 #ifdef DAWN_ENABLE_SEARCH_TOOL
 #include "tools/search_tool.h"
 #endif
+/* Unconditional: research_tools.c is always compiled + always registered
+ * (reachable only via the research allowlist), so its prototypes must be visible
+ * regardless of DAWN_ENABLE_URL_TOOL. */
+#include "tools/research_tools.h"
 #ifdef DAWN_ENABLE_URL_TOOL
 #include "tools/url_tool.h"
 #endif
@@ -176,6 +180,16 @@ int tools_register_all(void) {
       OLOG_WARNING("Failed to register url_fetch tool");
    }
 #endif
+
+   /* In-loop deep-research tools.  Registered unconditionally but reachable ONLY
+    * inside a research session via the read-only allowlist (is_tool_enabled_for_
+    * session); hidden from every ordinary session. */
+   if (research_plan_tool_register() != 0) {
+      OLOG_WARNING("Failed to register research_plan tool");
+   }
+   if (research_record_tool_register() != 0) {
+      OLOG_WARNING("Failed to register research_record tool");
+   }
 
 
 #ifdef DAWN_ENABLE_HOMEASSISTANT_TOOL
