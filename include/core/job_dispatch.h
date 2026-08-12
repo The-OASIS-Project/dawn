@@ -42,6 +42,20 @@ extern "C" {
  */
 job_provider_class_t job_provider_from_default(void);
 
+/**
+ * @brief Resolve the spawn surface for the current command context, for
+ *        conversations.origin (gates completion delivery).
+ *
+ * Maps the thread's command-context session type to "voice"/"webui"/"messaging"/
+ * "satellite", or "job" when there is no session (or a job spawning a job).  Only
+ * "voice" (the local mic) speaks on the Jetson speaker; a satellite has its own.
+ * Shared by every job-spawning surface (the `job` and `deep_research` tools) so
+ * the mapping cannot drift between them.
+ *
+ * @return a static string (do not free).
+ */
+const char *job_spawn_origin_string(void);
+
 /** Context for the tool-turn persist callback: the job's own conversation. */
 typedef struct {
    int64_t conv_id;

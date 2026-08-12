@@ -1313,6 +1313,18 @@ int conv_db_job_set_terminal(int64_t conv_id,
 int conv_db_job_mark_fired(int64_t conv_id);
 
 /**
+ * @brief System-caller: stamp the job-kind discriminator on a job conversation.
+ *
+ * NULL job_kind is an ordinary background job; 'research' marks a deep-research
+ * run so conv_db_job_reset_for_resume() refuses to hand it to the plain job
+ * worker (DEEP_RESEARCH_DESIGN §5.5). Set once, right after conv_db_create_job_ex
+ * and before the worker is spawned.
+ * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND (no such row), AUTH_DB_INVALID (bad
+ *         args), or AUTH_DB_FAILURE.
+ */
+int conv_db_job_set_kind(int64_t conv_id, const char *kind);
+
+/**
  * @brief Ownership-checked: load a job's lifecycle record.
  * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND (not a job), AUTH_DB_FORBIDDEN, AUTH_DB_FAILURE.
  */
@@ -1589,6 +1601,19 @@ int research_db_run_set_terminal(int64_t run_id,
                                  const char *status,
                                  const char *stop_reason,
                                  time_t finished_at);
+
+/**
+ * @brief Boot reconcile: mark every non-terminal run whose job conversation is
+ *        already terminal as 'interrupted' (finished_at=@p finished_at).
+ *
+ * Repairs runs stranded by a HARD kill (SIGKILL/crash/power loss), where the
+ * worker never ran its terminal disposition but the job boot scan marked the job
+ * 'interrupted'.  Call ONCE at startup, AFTER the job boot scan.  A no-op when no
+ * run is orphaned.
+ * @param count_out Receives the number of runs reconciled (may be NULL).
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int research_db_reconcile_orphaned(time_t finished_at, int *count_out);
 
 /* ── Questions (coverage ledger) ───────────────────────────────────────────── */
 

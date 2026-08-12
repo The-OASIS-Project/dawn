@@ -283,6 +283,18 @@ int job_manager_init(void) {
       OLOG_INFO("job_manager: marked %d interrupted job(s) from a previous run", n_stale);
    }
 
+   /* Reconcile deep-research runs stranded by the same restart: a research job's
+    * worker mirrors the terminal onto research_runs, but a HARD kill skips that,
+    * leaving the run at 'planning'/'researching' with a now-'interrupted' job —
+    * an un-cancellable zombie on the status surface.  Run AFTER the job scan so
+    * the job rows are already terminal (DEEP_RESEARCH_DESIGN §5.5). */
+   int n_research = 0;
+   if (research_db_reconcile_orphaned(pre_boot_ts, &n_research) == AUTH_DB_SUCCESS &&
+       n_research > 0) {
+      OLOG_INFO("job_manager: reconciled %d interrupted research run(s) from a previous run",
+                n_research);
+   }
+
    /* Open the dirty gate unconditionally so the first tick looks once.
     *
     * Setting it only when the scan above found something was a silent stranding

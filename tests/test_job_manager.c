@@ -113,6 +113,16 @@ int conv_db_job_scan_active(job_record_t *out, int max, int *count_out) {
    return AUTH_DB_SUCCESS;
 }
 
+/* Deep-research boot reconcile (called by job_manager_init after the job scan);
+ * no research rows in this harness, so it's a no-op that reports zero. */
+int research_db_reconcile_orphaned(time_t finished_at, int *count_out) {
+   (void)finished_at;
+   if (count_out) {
+      *count_out = 0;
+   }
+   return AUTH_DB_SUCCESS;
+}
+
 /* Records what the boot scan wrote, so a test can assert the stamp it chose. */
 static struct {
    int64_t conv_id;

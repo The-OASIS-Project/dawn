@@ -342,6 +342,45 @@ int research_db_run_set_terminal(int64_t run_id,
        bind_run_terminal, &b, "run_set_terminal");
 }
 
+int research_db_reconcile_orphaned(time_t finished_at, int *count_out) {
+   if (count_out) {
+      *count_out = 0;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   /* Mark every non-terminal run whose job conversation is already terminal as
+    * 'interrupted'.  This only fires after a HARD kill (SIGKILL / crash / power
+    * loss): a graceful stop runs the worker's disposition, which sets the run row
+    * terminal BEFORE the job row (research-first ordering), so during normal
+    * operation a terminal job always has a terminal run.  The stranded case is the
+    * boot scan having just marked the dead job 'interrupted' while the run row
+    * still reads 'planning'/'researching' — without this the run is an
+    * un-cancellable zombie the status/cancel surfaces can never clear.  Run AFTER
+    * the job boot scan so the job rows are already terminal. */
+   const char *sql = "UPDATE research_runs SET status='interrupted', stop_reason='interrupted', "
+                     "finished_at=? "
+                     "WHERE finished_at=0 AND conversation_id IN "
+                     "(SELECT id FROM conversations WHERE job_status NOT IN ('queued','running'))";
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL) != SQLITE_OK) {
+      OLOG_ERROR("research_db_reconcile_orphaned: prepare failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(st, 1, (int64_t)finished_at);
+   int rc = sqlite3_step(st);
+   int changed = sqlite3_changes(s_db.db);
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("research_db_reconcile_orphaned: update failed");
+      return AUTH_DB_FAILURE;
+   }
+   if (count_out) {
+      *count_out = changed;
+   }
+   return AUTH_DB_SUCCESS;
+}
+
 /* =============================================================================
  * Questions (coverage ledger)
  * ============================================================================= */

@@ -414,6 +414,35 @@ int conv_db_job_mark_fired(int64_t conv_id) {
        bind_conv_id_only, &conv_id, "mark_fired");
 }
 
+int conv_db_job_set_kind(int64_t conv_id, const char *kind) {
+   if (conv_id <= 0 || kind == NULL || kind[0] == '\0') {
+      return AUTH_DB_INVALID;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   /* Stamp the discriminator on a job row (e.g. 'research').  Set once, right
+    * after conv_db_create_job_ex, before the worker is spawned — the row is still
+    * 'queued' so nothing can resume it in the window, and reset_for_resume then
+    * excludes it for the run's whole life (DEEP_RESEARCH_DESIGN §5.5). */
+   if (sqlite3_prepare_v2(s_db.db, "UPDATE conversations SET job_kind=? WHERE id=?", -1, &st,
+                          NULL) != SQLITE_OK) {
+      OLOG_ERROR("auth_db_jobs: prepare set_kind failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_text(st, 1, kind, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int64(st, 2, conv_id);
+   int rc = sqlite3_step(st);
+   int changed = sqlite3_changes(s_db.db);
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("auth_db_jobs: set_kind failed for conv %lld", (long long)conv_id);
+      return AUTH_DB_FAILURE;
+   }
+   return changed == 1 ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
+}
+
 int conv_db_job_get_goal(int64_t conv_id, int user_id, char **out) {
    if (conv_id <= 0 || user_id <= 0 || !out) {
       return AUTH_DB_INVALID;
@@ -477,15 +506,25 @@ int conv_db_job_reset_for_resume(int64_t conv_id, int user_id, bool allow_cancel
     * That difference is only safe to ignore when a human is asking — hence the
     * flag, set by the WebUI click path and cleared by the `job` tool, so the
     * model cannot restart work a person deliberately stopped.  See the
-    * job_worker_resume() contract for why the split lives at the surface. */
+    * job_worker_resume() contract for why the split lives at the surface.
+    *
+    * job_kind='research' rows are EXCLUDED from the predicate: a research run is
+    * driven by research_worker + the controller, not the plain job tool loop, so
+    * a plain-worker resume would run the generic loop on a message-less research
+    * conversation and corrupt the run (DEEP_RESEARCH_DESIGN §5.5, plan HIGH-2).
+    * P0 has no research resume at all; P1 adds a ledger-aware one. Folding the
+    * exclusion into the CLAIM keeps it race-free — a research job can never leave
+    * the resumable set here regardless of caller or origin. */
    const char *sql =
        allow_cancelled
            ? "UPDATE conversations SET job_status='queued', job_error=NULL, "
              "started_at=0, finished_at=0, on_complete_fired=0 "
-             "WHERE id=? AND user_id=? AND job_status IN ('interrupted','failed','cancelled')"
+             "WHERE id=? AND user_id=? AND job_status IN ('interrupted','failed','cancelled') "
+             "AND (job_kind IS NULL OR job_kind != 'research')"
            : "UPDATE conversations SET job_status='queued', job_error=NULL, "
              "started_at=0, finished_at=0, on_complete_fired=0 "
-             "WHERE id=? AND user_id=? AND job_status IN ('interrupted','failed')";
+             "WHERE id=? AND user_id=? AND job_status IN ('interrupted','failed') "
+             "AND (job_kind IS NULL OR job_kind != 'research')";
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL) != SQLITE_OK) {
       OLOG_ERROR("auth_db_jobs: prepare reset_for_resume failed: %s", sqlite3_errmsg(s_db.db));
       AUTH_DB_UNLOCK();

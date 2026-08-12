@@ -285,6 +285,34 @@ static void test_resume_claim_is_exclusive(void) {
    TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(job, alice_id, false));
 }
 
+/* A job_kind='research' row is NEVER handed to the plain job worker's resume: the
+ * research controller drives it, so a plain-worker resume would run the generic
+ * loop on a message-less research conversation and corrupt the run (DEEP_RESEARCH
+ * §5.5, plan HIGH-2).  The exclusion lives in the reset_for_resume CLAIM, so it
+ * holds for BOTH origins (tool = allow_cancelled false, user = true). */
+static void test_research_job_is_not_plain_resumable(void) {
+   int64_t rjob = 0;
+   conv_db_create_job(alice_id, "research run", 0, "detached", "notify", NULL, 1, "brief", &rjob);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_set_kind(rjob, "research"));
+   conv_db_job_set_terminal(rjob, "failed", "boom", 100);
+
+   /* Refused for the tool origin (allow_cancelled=false)... */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(rjob, alice_id, false));
+   /* ...and the user origin (allow_cancelled=true) — the exclusion is in the claim. */
+   conv_db_job_set_terminal(rjob, "cancelled", NULL, 100);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(rjob, alice_id, true));
+   /* It stays failed/cancelled, never re-queued. */
+   job_record_t r;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(rjob, alice_id, &r));
+   TEST_ASSERT_EQUAL_STRING("cancelled", r.job_status);
+
+   /* Control: an ordinary (NULL job_kind) failed job resumes fine. */
+   int64_t pjob = 0;
+   conv_db_create_job(alice_id, "plain", 0, "detached", "notify", NULL, 1, "goal", &pjob);
+   conv_db_job_set_terminal(pjob, "failed", "boom", 100);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_reset_for_resume(pjob, alice_id, false));
+}
+
 /* The goal is durable from CREATE, not from a successful dispatch (v74).
  *
  * This is what makes a job that died before it ever ran resumable at all: its
@@ -698,6 +726,7 @@ int main(void) {
    RUN_TEST(test_history_pagination_no_gaps_or_dupes);
    RUN_TEST(test_goal_is_stored_at_create);
    RUN_TEST(test_resume_claim_is_exclusive);
+   RUN_TEST(test_research_job_is_not_plain_resumable);
    RUN_TEST(test_resume_claim_is_ownership_scoped);
    RUN_TEST(test_set_running_loses_to_a_cancel);
    RUN_TEST(test_resume_rejects_non_resumable_states);

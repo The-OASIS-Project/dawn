@@ -95,6 +95,9 @@
 #ifdef DAWN_ENABLE_JOB_TOOL
 #include "tools/job_tool.h"
 #endif
+#ifdef DAWN_ENABLE_DEEP_RESEARCH_TOOL
+#include "tools/deep_research_tool.h"
+#endif
 #ifdef DAWN_ENABLE_TTS_TOOL
 #include "tools/tts_tool.h"
 #endif
@@ -286,6 +289,12 @@ int tools_register_all(void) {
 #ifdef DAWN_ENABLE_JOB_TOOL
    if (job_tool_register() != 0) {
       OLOG_WARNING("Failed to register job tool");
+   }
+#endif
+
+#ifdef DAWN_ENABLE_DEEP_RESEARCH_TOOL
+   if (deep_research_tool_register() != 0) {
+      OLOG_WARNING("Failed to register deep_research tool");
    }
 #endif
 

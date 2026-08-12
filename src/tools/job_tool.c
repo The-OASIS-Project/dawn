@@ -70,30 +70,6 @@ static int status_msg_cb(const conversation_message_t *msg, void *ctx) {
 
 /* --- spawn ----------------------------------------------------------------- */
 
-/* The surface that requested this job, stored in conversations.origin and used
- * at completion to decide delivery.  Only the actual local mic ("voice") speaks
- * on the Jetson speaker — a satellite has its own speaker (routing a completion
- * there is future presence-based work), so it must NOT misroute to the Jetson. */
-static const char *job_spawn_origin(void) {
-   const session_t *ctx = session_get_command_context();
-   if (ctx == NULL) {
-      return "job";
-   }
-   switch (ctx->type) {
-      case SESSION_TYPE_LOCAL:
-         return "voice";
-      case SESSION_TYPE_WEBUI:
-         return "webui";
-      case SESSION_TYPE_MESSAGING:
-         return "messaging";
-      case SESSION_TYPE_DAP:
-      case SESSION_TYPE_DAP2:
-         return "satellite"; /* voice, but not the local speaker — notify-only in v1 */
-      default:
-         return "job"; /* e.g. a job spawning a job (blocked in P0) */
-   }
-}
-
 static char *handle_spawn(struct json_object *details,
                           int user_id,
                           int64_t parent_conv,
@@ -156,7 +132,7 @@ static char *handle_spawn(struct json_object *details,
 
    int64_t conv_id = 0;
    if (conv_db_create_job_ex(user_id, title, parent_conv, "detached", on_complete, deliver_to, 1,
-                             goal, job_spawn_origin(), &conv_id) != AUTH_DB_SUCCESS) {
+                             goal, job_spawn_origin_string(), &conv_id) != AUTH_DB_SUCCESS) {
       return strdup("Error: failed to create the background job.");
    }
 

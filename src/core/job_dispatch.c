@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "auth/auth_db.h"
+#include "core/session_manager.h"
 #include "llm/llm_interface.h"
 #include "logging.h"
 
@@ -32,6 +33,26 @@ job_provider_class_t job_provider_from_default(void) {
    memset(&defcfg, 0, sizeof(defcfg));
    llm_get_default_config(&defcfg);
    return (defcfg.type == LLM_LOCAL) ? JOB_PROVIDER_LOCAL : JOB_PROVIDER_CLOUD;
+}
+
+const char *job_spawn_origin_string(void) {
+   const session_t *ctx = session_get_command_context();
+   if (ctx == NULL) {
+      return "job";
+   }
+   switch (ctx->type) {
+      case SESSION_TYPE_LOCAL:
+         return "voice";
+      case SESSION_TYPE_WEBUI:
+         return "webui";
+      case SESSION_TYPE_MESSAGING:
+         return "messaging";
+      case SESSION_TYPE_DAP:
+      case SESSION_TYPE_DAP2:
+         return "satellite"; /* voice, but not the local speaker — notify-only in v1 */
+      default:
+         return "job"; /* no session, or a job spawning a job (blocked in P0) */
+   }
 }
 
 void job_dispatch_tool_persist_cb(void *userdata,
