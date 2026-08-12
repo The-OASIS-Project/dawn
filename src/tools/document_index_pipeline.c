@@ -149,6 +149,11 @@ int document_index_text(int user_id,
       char msg[128];
       snprintf(msg, sizeof(msg), "Document already indexed (id=%lld)", (long long)existing);
       set_error(out, DOC_INDEX_ERROR_DUPLICATE, msg);
+      /* Expose the existing doc id (set_error zeroes it to -1) so a caller that
+       * wants the already-stored copy can recover it rather than only learning
+       * one exists — used by the deep-research report save to point the run at a
+       * byte-identical prior report instead of failing. */
+      out->doc_id = existing;
       return DOC_INDEX_ERROR_DUPLICATE;
    }
 

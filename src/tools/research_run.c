@@ -224,6 +224,15 @@ int research_render_round_digest(int64_t run_id,
 
 /* =============================================================================
  * Synthesis — report = view over research_claims (§4/§8)
+ *
+ * MED-1 (untrusted-content egress): the report embeds each claim's model-authored
+ * text (already injection-command-gated at ingest by research_record) plus its
+ * source_url as a markdown link — it DELIBERATELY does NOT emit the raw `quote`
+ * (the verbatim untrusted web excerpt), which stays in research_claims for the P3
+ * audit surface only.  So the worst untrusted string reaching the note is a URL,
+ * neutralized by the notes render pipeline (marked + DOMPurify) on the human side;
+ * and reinvoke is disabled, so nothing re-injects the report into an LLM turn
+ * automatically (§8/§11).
  * ============================================================================= */
 
 int research_render_report(int64_t run_id, const char *brief, char **out_markdown) {

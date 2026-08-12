@@ -33,11 +33,14 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "auth/auth_db.h"
 #include "core/session_manager.h"
 #include "core/text_input_dispatch.h"
 #include "logging.h"
+#include "memory/memory_note_bridge.h"
+#include "tools/document_index_pipeline.h"
 #include "tools/research_run.h"
 
 /* Give up a run after this many CONSECUTIVE dispatch failures (provider 5xx /
@@ -71,6 +74,92 @@ static const char RESEARCH_SYSTEM_PROMPT[] =
     "considered answered automatically once it has enough independent sources — you do NOT mark "
     "questions answered yourself.\n"
     "Do not answer from prior knowledge; research and cite. Be systematic.";
+
+/* Build a filename-safe note label from the brief: "Research #<id>: <brief>",
+ * newlines/tabs flattened to spaces, capped so it stays a sane filename.  The id
+ * keeps re-runs of the same brief from colliding on one label. */
+static void research_report_label(int64_t run_id, const char *brief, char *out, size_t out_size) {
+   char clean[96];
+   size_t j = 0;
+   for (size_t i = 0; brief[i] != '\0' && j < sizeof(clean) - 1; i++) {
+      unsigned char ch = (unsigned char)brief[i];
+      clean[j++] = (ch == '\n' || ch == '\r' || ch == '\t') ? ' ' : brief[i];
+   }
+   /* The byte cap above can land mid-codepoint on a multi-byte (non-ASCII) brief,
+    * leaving a dangling partial UTF-8 sequence.  This label becomes the note
+    * filename, emitted into a JSON WS frame — malformed UTF-8 there makes the
+    * browser's JSON.parse throw and drops the whole frame (project invariant
+    * tool_desc_utf8_truncation).  If the final codepoint is incomplete, drop it:
+    * back up to the last lead/ASCII byte, and if the full sequence it starts does
+    * not fit within what we kept, cut at that boundary. */
+   if (j > 0) {
+      size_t start = j - 1;
+      while (start > 0 && (((unsigned char)clean[start]) & 0xC0) == 0x80) {
+         start--; /* skip continuation bytes back to the lead/ASCII byte */
+      }
+      unsigned char lead = (unsigned char)clean[start];
+      size_t need = (lead < 0x80)    ? 1
+                    : (lead >= 0xF0) ? 4
+                    : (lead >= 0xE0) ? 3
+                    : (lead >= 0xC0) ? 2
+                                     : 1; /* stray continuation at start → drop it */
+      if (start + need != j) {
+         j = start; /* incomplete final codepoint — cut it off */
+      }
+   }
+   clean[j] = '\0';
+   snprintf(out, out_size, "Research #%lld: %s", (long long)run_id, clean);
+}
+
+/* Turn the rendered report into a retrievable store artifact and point the run at
+ * it (research_runs.report_doc_id), so `deep_research status` / delivery can link
+ * it and fuzzy recall can find it.  BEST-EFFORT: the report revision is the
+ * durable copy, so a store failure logs and returns without failing the run.
+ *
+ * A short report files as a single-chunk NOTE (bridged into memory so a fuzzy
+ * "what did your research say about X" resolves to it, mirroring do_save_note); a
+ * report too large for one note falls back to the multi-chunk "text" document
+ * path (§8 short-vs-large split) — searchable/readable, just no note gloss. */
+static void research_persist_report_note(int user_id,
+                                         int64_t run_id,
+                                         const char *brief,
+                                         const char *report) {
+   char label[160];
+   research_report_label(run_id, brief, label, sizeof(label));
+
+   doc_index_result_t res;
+   int rc = document_index_note(user_id, label, report, strlen(report), false, &res);
+   if (rc == DOC_INDEX_ERROR_TOO_LARGE) {
+      /* Large report: file as a multi-chunk document instead of a single note. */
+      rc = document_index_text(user_id, label, "text", report, strlen(report), false, NULL, &res);
+      if (rc == DOC_INDEX_SUCCESS && res.doc_id > 0) {
+         research_db_run_set_report_doc(run_id, res.doc_id);
+         OLOG_INFO("research: run %lld report saved as document %lld (%s)", (long long)run_id,
+                   (long long)res.doc_id, label);
+      } else if (rc == DOC_INDEX_ERROR_DUPLICATE && res.doc_id > 0) {
+         /* A byte-identical report is already stored (e.g. a re-run with identical
+          * findings).  Point the run at the existing copy instead of failing —
+          * document_index_text puts the existing id in res.doc_id on DUPLICATE. */
+         research_db_run_set_report_doc(run_id, res.doc_id);
+         OLOG_INFO("research: run %lld report already stored as document %lld (%s)",
+                   (long long)run_id, (long long)res.doc_id, label);
+      } else {
+         OLOG_WARNING("research: run %lld large-report document save failed: %s", (long long)run_id,
+                      res.error_msg);
+      }
+      return;
+   }
+   if (rc != DOC_INDEX_SUCCESS || res.doc_id <= 0) {
+      OLOG_WARNING("research: run %lld report note save failed: %s", (long long)run_id,
+                   res.error_msg);
+      return;
+   }
+   research_db_run_set_report_doc(run_id, res.doc_id);
+   /* Best-effort memory->note bridge, exactly like do_save_note. */
+   (void)memory_note_bridge_upsert_gloss(user_id, res.doc_id, label);
+   OLOG_INFO("research: run %lld report saved as note %lld (%s)", (long long)run_id,
+             (long long)res.doc_id, label);
+}
 
 const char *research_run_execute(struct session *s,
                                  const research_run_t *run0,
@@ -171,12 +260,21 @@ const char *research_run_execute(struct session *s,
       stop_reason = "budget"; /* completed max_rounds without an earlier stop */
    }
 
-   /* Synthesize: render the report from the persisted claims and store it as the
-    * final revision.  Step 8 turns this into a notes doc + sets report_doc_id +
-    * delivers; until then the revision is the retrievable report. */
+   /* Synthesize: render the report from the persisted claims, store it as the
+    * final revision (the durable audit copy), then file it as a retrievable
+    * notes/document artifact and point the run at it (report_doc_id).  The note
+    * store is gated on there being findings AND the run not being user-cancelled:
+    * an empty "no findings" note or a note for a run the user stopped is clutter.
+    * A cancelled/failed run still keeps its revision, so nothing is lost. */
    char *report = NULL;
    if (research_render_report(run_id, run0->brief, &report) == AUTH_DB_SUCCESS && report) {
       research_db_revision_add(run_id, last_round, report);
+
+      int claim_count = 0;
+      research_db_claim_count(run_id, &claim_count);
+      if (claim_count > 0 && strcmp(stop_reason, "cancelled") != 0) {
+         research_persist_report_note(run0->user_id, run_id, run0->brief, report);
+      }
       free(report);
    } else {
       OLOG_WARNING("research_run_execute: run %lld synthesis produced no report",
