@@ -810,6 +810,7 @@ list(APPEND DAWN_SOURCES
     # WEBUI off).  The admin-socket transports that USE these stay AUTH-gated.
     src/auth/auth_db_conv.c
     src/auth/auth_db_jobs.c
+    src/auth/auth_db_research.c
     src/auth/auth_db_events.c
     src/auth/auth_db_user.c
     src/auth/auth_db_settings.c
