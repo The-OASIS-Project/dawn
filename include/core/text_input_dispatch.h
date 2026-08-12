@@ -109,6 +109,24 @@ typedef struct {
     *   this, so the worker need not set it. */
    bool is_background_turn;
    bool is_job_conversation;
+
+   /* Skip the entire per-turn prompt rebuild (step 4,
+    * session_dispatch_user_turn) for this dispatch.  When true, the session's
+    * CURRENT system prompt stands unchanged — nothing is recomposed: no
+    * persona, no memory, no focus injection, no tool-schema refresh.
+    *
+    * Used by the deep-research controller (DEEP_RESEARCH_DESIGN.md §4a): each
+    * research round runs on a BARE job session whose system prompt the
+    * controller set once (the research-agent prompt), with history reset to
+    * empty and a bounded digest carried in the user directive.  Skipping the
+    * builder is what keeps private memory out of the fetch loop STRUCTURALLY —
+    * there is no per-turn injection point to leak through.
+    *
+    * Precondition: the caller must have already set a valid system prompt on
+    * the session; otherwise the LLM call goes out with whatever prompt (if any)
+    * the session currently holds.  Interactive/messaging callers leave this
+    * false (the default) and get the normal per-turn rebuild. */
+   bool skip_prompt_rebuild;
 } text_input_dispatch_opts_t;
 
 /**
