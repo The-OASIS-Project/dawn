@@ -430,8 +430,12 @@ typedef struct session {
    // BOTH schema advertisement and execution — is_tool_enabled_for_session), and
    // the research_plan/research_record tools write to this run.  research_round
    // is the current round, stamped onto recorded claims (diagnostics).
-   // Single-writer (the research worker thread), read on the same thread during
-   // tool execution — no lock, like last_finish_reason.
+   // Single-writer (the research controller, between dispatches).  Read during a
+   // dispatch by the tool layer — on the controller thread AND on parallel
+   // native-tool worker threads (they share the session's command context), so
+   // the read is multi-threaded.  Lock-free is safe: the value is constant for
+   // the whole dispatch (set before, cleared after), and an aligned 64-bit
+   // load/store is atomic on the target ISAs.
    int64_t research_run_id;
    int research_round;
 
@@ -1711,6 +1715,17 @@ void session_record_query(session_t *session,
                           double llm_ttft_ms,
                           double llm_total_ms,
                           bool is_error);
+
+/**
+ * @brief Sum the session's running input-token and query totals across providers.
+ *
+ * Owns the metrics_mutex + the provider loop so callers (the deep-research
+ * controller's per-round metering, the job worker) don't reach into the metrics
+ * internals or the lock directly.  Either out-pointer may be NULL.
+ *
+ * @locks session->metrics_mutex
+ */
+void session_metrics_totals(session_t *session, uint64_t *tokens_in_out, uint32_t *queries_out);
 
 /**
  * @brief Record ASR timing for session metrics

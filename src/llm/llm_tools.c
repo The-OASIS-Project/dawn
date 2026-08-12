@@ -1003,9 +1003,11 @@ static bool is_tool_enabled_for_session(const tool_definition_t *t, bool is_remo
     * disabled web tool stays off even for research).
     *
     * NOTE: this gates only the NATIVE tool path.  The legacy <command>-tag path
-    * (command_execute) does not consult this — so the research controller MUST
-    * run its fetch loop native-tools-only with legacy command execution disabled
-    * (DEEP_RESEARCH_DESIGN §11; enforced at controller setup, Step 5). */
+    * (command_execute) does NOT consult this, so it is NOT closed here — the
+    * research fetch loop must run native-tools-only, and command_execute needs a
+    * research-aware refusal as defense-in-depth (DEEP_RESEARCH_DESIGN §11 HIGH-1).
+    * Both are the research_worker's session-setup responsibility (Step 6), with a
+    * regression test that a research-context command_execute is refused. */
    session_t *ctx = session_get_command_context();
    bool research_mode = (ctx != NULL && ctx->research_run_id > 0);
    if (research_mode) {

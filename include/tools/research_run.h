@@ -24,7 +24,8 @@
  * no LLM involvement — the "continue signal is the delta between the ledger and
  * the evidence, computed in C, not LLM self-assessment" (§6).  The live
  * orchestration (bare session + research prompt + round loop + synthesis) is
- * built on top in research_run.c and driven by the detached research_worker.
+ * built on top in research_run_loop.c (session/dispatch-coupled) and driven by
+ * the detached research_worker.
  */
 
 #ifndef RESEARCH_RUN_H
@@ -35,6 +36,8 @@
 #include <stdint.h>
 
 #include "auth/auth_db.h" /* research_run_t */
+
+struct session; /* core/session_manager.h — full type only needed in the .c */
 
 /* P0 budget/shape defaults.  Step 9 wires the [research] config section to
  * override these; until then research_budgets_defaults() is the single source. */
@@ -114,5 +117,36 @@ int research_render_round_digest(int64_t run_id,
                                  const research_budgets_t *b,
                                  char *out,
                                  size_t out_size);
+
+/**
+ * @brief Render the final report as markdown — a view over research_claims
+ *        grouped by question (§4/§8).  Reads the persisted claim rows (not any
+ *        round digest), so compression cannot lose evidence.  Allocates
+ *        *out_markdown (caller frees).
+ *
+ * @return AUTH_DB_SUCCESS (even with zero claims — emits a "no findings" note),
+ *         or a failure code (*out_markdown left NULL).
+ */
+int research_render_report(int64_t run_id, const char *brief, char **out_markdown);
+
+/**
+ * @brief Run the research controller loop on a prepared bare job session (§4).
+ *
+ * setup (research system prompt) → round loop { reset history to [system] +
+ * bounded digest + dispatch with skip_prompt_rebuild + meter tokens + refresh
+ * coverage + P0 stop decision } → synthesize (render report → final revision).
+ * The session MUST already be a bare SESSION_TYPE_JOB session (job_manager_begin)
+ * run native-tools-only with legacy <command> execution disabled — the read-only
+ * allowlist gates only the native tool path (§11 HIGH-1).
+ *
+ * The caller (research_worker) owns the session lifecycle + the terminal job
+ * transition; this returns the terminal stop_reason.
+ *
+ * @return a static stop_reason literal: "coverage" | "budget" | "token_budget" |
+ *         "cancelled" | "failed".
+ */
+const char *research_run_execute(struct session *s,
+                                 const research_run_t *run0,
+                                 const research_budgets_t *b);
 
 #endif /* RESEARCH_RUN_H */

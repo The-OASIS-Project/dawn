@@ -161,6 +161,41 @@ static void test_digest_respects_cap(void) {
    TEST_ASSERT_NOT_NULL(strstr(digest, "brief")); /* rendered content before truncating */
 }
 
+/* ── report render: view over claims, grouped by question, with sources ──────── */
+
+static void test_render_report(void) {
+   int64_t q1 = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_question_add(run, "what scatters blue light?", 0, &q1));
+   TEST_ASSERT_EQUAL_INT(
+       AUTH_DB_SUCCESS,
+       research_db_claim_add(run, q1, "Rayleigh scattering favors short wavelengths", "http://a",
+                             "web", "shorter wavelengths scatter more", 0));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, /* a general (question_id 0) claim */
+                         research_db_claim_add(run, 0, "The effect is stronger at midday", NULL,
+                                               "web", NULL, 1));
+
+   char *md = NULL;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_render_report(run, "why is the sky blue?", &md));
+   TEST_ASSERT_NOT_NULL(md);
+   TEST_ASSERT_NOT_NULL(strstr(md, "why is the sky blue?"));         /* brief */
+   TEST_ASSERT_NOT_NULL(strstr(md, "## what scatters blue light?")); /* question heading */
+   TEST_ASSERT_NOT_NULL(strstr(md, "Rayleigh scattering"));          /* claim text */
+   TEST_ASSERT_NOT_NULL(strstr(md, "[source](http://a)"));           /* source link */
+   TEST_ASSERT_NOT_NULL(strstr(md, "## General findings"));          /* q0 grouping */
+   free(md);
+}
+
+/* ── report render on an empty run yields a "no findings" note ────────────────── */
+
+static void test_render_report_empty(void) {
+   char *md = NULL;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_render_report(run, "empty brief", &md));
+   TEST_ASSERT_NOT_NULL(md);
+   TEST_ASSERT_NOT_NULL(strstr(md, "No findings"));
+   free(md);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_budgets_defaults);
@@ -168,5 +203,7 @@ int main(void) {
    RUN_TEST(test_should_stop_decision);
    RUN_TEST(test_digest_content);
    RUN_TEST(test_digest_respects_cap);
+   RUN_TEST(test_render_report);
+   RUN_TEST(test_render_report_empty);
    return UNITY_END();
 }

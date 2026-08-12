@@ -2809,6 +2809,32 @@ void session_record_query(session_t *session,
    pthread_mutex_unlock(&session->metrics_mutex);
 }
 
+void session_metrics_totals(session_t *session, uint64_t *tokens_in_out, uint32_t *queries_out) {
+   if (tokens_in_out) {
+      *tokens_in_out = 0;
+   }
+   if (queries_out) {
+      *queries_out = 0;
+   }
+   if (!session) {
+      return;
+   }
+   uint64_t tok = 0;
+   uint32_t q = 0;
+   pthread_mutex_lock(&session->metrics_mutex);
+   for (int i = 0; i < session->metrics.provider_count && i < SESSION_MAX_PROVIDERS; i++) {
+      tok += session->metrics.providers[i].tokens_input;
+      q += session->metrics.providers[i].queries;
+   }
+   pthread_mutex_unlock(&session->metrics_mutex);
+   if (tokens_in_out) {
+      *tokens_in_out = tok;
+   }
+   if (queries_out) {
+      *queries_out = q;
+   }
+}
+
 void session_record_asr_timing(session_t *session, double asr_ms) {
    if (!session) {
       return;

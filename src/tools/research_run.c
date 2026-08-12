@@ -34,6 +34,12 @@
 #include "auth/auth_db.h"
 #include "logging.h"
 
+/* Bounds for the synthesis render. Claims per run are structurally bounded (a
+ * few rounds x a handful of questions x a few claims); the caller-allocated
+ * snapshot is heap, and the report buffer is capped. */
+#define RESEARCH_MAX_REPORT_CLAIMS 256
+#define RESEARCH_REPORT_MAX 65536
+
 void research_budgets_defaults(research_budgets_t *out) {
    if (!out) {
       return;
@@ -198,7 +204,11 @@ int research_render_round_digest(int64_t run_id,
       shown++;
    }
    if (shown == 0) {
-      digest_append(out, cap, &off, "  (all questions are closed)\n");
+      /* Distinguish an empty ledger (round 1 — plan first) from all-closed. */
+      digest_append(out, cap, &off,
+                    n == 0 ? "  (none yet — start by calling research_plan to break the brief "
+                             "into concrete sub-questions.)\n"
+                           : "  (all questions are closed.)\n");
    }
 
    /* Last revision prose only (never every revision).  Absent in P0 unless
@@ -209,5 +219,108 @@ int research_render_round_digest(int64_t run_id,
    }
    free(last_md);
 
+   return AUTH_DB_SUCCESS;
+}
+
+/* =============================================================================
+ * Synthesis — report = view over research_claims (§4/§8)
+ * ============================================================================= */
+
+int research_render_report(int64_t run_id, const char *brief, char **out_markdown) {
+   if (!out_markdown) {
+      return AUTH_DB_INVALID;
+   }
+   *out_markdown = NULL;
+   if (run_id <= 0) {
+      return AUTH_DB_INVALID;
+   }
+
+   char *buf = malloc(RESEARCH_REPORT_MAX);
+   if (!buf) {
+      return AUTH_DB_FAILURE;
+   }
+   buf[0] = '\0';
+   size_t cap = RESEARCH_REPORT_MAX;
+   size_t off = 0;
+
+   digest_append(buf, cap, &off, "# Research report\n\n**Brief:** %s\n", brief ? brief : "(none)");
+
+   /* Questions, for grouping claims under their sub-question headings. */
+   research_question_t questions[RESEARCH_MAX_LEDGER_QUESTIONS];
+   int qn = 0;
+   research_db_question_list(run_id, questions, RESEARCH_MAX_LEDGER_QUESTIONS, &qn);
+
+   int ccount = 0;
+   int crc = research_db_claim_count(run_id, &ccount);
+   if (crc != AUTH_DB_SUCCESS) {
+      /* A read failure is NOT the same as an empty run — don't persist a false
+       * "no findings" report over a transient DB error. */
+      digest_append(buf, cap, &off, "\n_The findings for this brief could not be read._\n");
+      *out_markdown = buf;
+      return AUTH_DB_SUCCESS;
+   }
+   if (ccount <= 0) {
+      digest_append(buf, cap, &off, "\n_No findings were recorded for this brief._\n");
+      *out_markdown = buf;
+      return AUTH_DB_SUCCESS;
+   }
+
+   int ccap = ccount < RESEARCH_MAX_REPORT_CLAIMS ? ccount : RESEARCH_MAX_REPORT_CLAIMS;
+   research_claim_t *claims = calloc((size_t)ccap, sizeof(research_claim_t));
+   if (!claims) {
+      /* Out of memory for the snapshot — return the brief-only header rather
+       * than failing the whole synthesis. */
+      *out_markdown = buf;
+      return AUTH_DB_SUCCESS;
+   }
+   int cn = 0;
+   research_db_claim_list(run_id, claims, ccap, &cn);
+   if (cn < ccount) {
+      OLOG_WARNING("research_render_report: run %lld has %d claims; report capped at %d",
+                   (long long)run_id, ccount, ccap);
+   }
+
+   /* claims arrive ordered by (question_id ASC, id ASC), so a single pass groups
+    * them under headings. question_id 0 = general findings. */
+   int64_t cur_q = -1;
+   bool truncated = false;
+   for (int i = 0; i < cn && !truncated; i++) {
+      research_claim_t *c = &claims[i];
+      if (c->question_id != cur_q) {
+         cur_q = c->question_id;
+         const char *qtext = "General findings";
+         for (int k = 0; k < qn; k++) {
+            if (questions[k].id == cur_q) {
+               qtext = questions[k].question;
+               break;
+            }
+         }
+         if (!digest_append(buf, cap, &off, "\n## %s\n\n", qtext)) {
+            truncated = true;
+            break;
+         }
+      }
+      bool ok = c->source_url[0] ? digest_append(buf, cap, &off, "- %s ([source](%s))\n", c->claim,
+                                                 c->source_url)
+                                 : digest_append(buf, cap, &off, "- %s\n", c->claim);
+      if (!ok) {
+         truncated = true;
+      }
+   }
+   free(claims);
+
+   /* Mark truncation so the reader knows the report is incomplete — from either
+    * the byte cap (digest_append refused) or the claim-snapshot cap (cn<ccount).
+    * Rewind if needed to guarantee the marker fits. */
+   if (truncated || cn < ccount) {
+      const size_t reserve = 96;
+      if (cap > reserve && off > cap - reserve) {
+         off = cap - reserve;
+      }
+      digest_append(buf, cap, &off,
+                    "\n\n_(Report truncated — too many findings to render in full.)_\n");
+   }
+
+   *out_markdown = buf;
    return AUTH_DB_SUCCESS;
 }

@@ -696,6 +696,10 @@ if(ENABLE_WEBUI)
         src/core/job_worker.c
         src/core/job_reinvoke.c
         src/core/job_dispatch.c
+        # Deep-research live orchestration (rides on the job session + dispatch).
+        # The deterministic core (research_run.c) stays in unconditional
+        # TOOL_SOURCES; only this loop half is ENABLE_WEBUI-coupled.
+        src/tools/research_run_loop.c
         src/core/text_input_dispatch.c
         src/core/prompt_compose.c
         src/core/session_dedup.c
