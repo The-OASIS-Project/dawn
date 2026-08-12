@@ -95,6 +95,34 @@ static void test_status_transitions(void) {
    TEST_ASSERT_TRUE(r.on_complete_fired);
 }
 
+/* ── origin (spawn surface) round-trips; plain wrapper defaults to "job" ────── */
+
+static void test_create_job_ex_records_origin(void) {
+   int64_t voice_job = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_create_job_ex(alice_id, "voice job", 0, "detached", "notify", NULL,
+                                               1, "goal text", "voice", &voice_job));
+   job_record_t r;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(voice_job, alice_id, &r));
+   TEST_ASSERT_EQUAL_STRING("voice", r.origin);
+
+   /* The plain wrapper preserves the pre-repurpose value. */
+   int64_t plain_job = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_create_job(alice_id, "plain job", 0, "detached", "notify", NULL, 1,
+                                            "goal text", &plain_job));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(plain_job, alice_id, &r));
+   TEST_ASSERT_EQUAL_STRING("job", r.origin);
+
+   /* NULL/empty origin falls back to "job". */
+   int64_t null_origin_job = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_create_job_ex(alice_id, "null origin", 0, "detached", "notify",
+                                               NULL, 1, "goal text", NULL, &null_origin_job));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(null_origin_job, alice_id, &r));
+   TEST_ASSERT_EQUAL_STRING("job", r.origin);
+}
+
 /* ── follow-up scan: terminal + unfired only, disappears after fired ───────── */
 
 static void test_pending_followups_scan(void) {
@@ -662,6 +690,7 @@ int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_create_and_get);
    RUN_TEST(test_status_transitions);
+   RUN_TEST(test_create_job_ex_records_origin);
    RUN_TEST(test_pending_followups_scan);
    RUN_TEST(test_active_scan);
    RUN_TEST(test_active_and_history_partition);

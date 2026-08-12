@@ -1221,6 +1221,9 @@ typedef struct {
    time_t started_at;
    time_t finished_at;
    time_t created_at;
+   char origin[32]; /**< conversations.origin — for a job, the spawn surface
+                     *   ("voice"/"webui"/"messaging"); gates voice completion
+                     *   delivery.  Legacy job rows (pre-repurpose) read "job". */
 } job_record_t;
 
 /**
@@ -1235,6 +1238,7 @@ typedef struct {
  * @param on_complete "notify" | "none".
  * @param deliver_to Messaging channel display_name, or NULL/"" for local delivery.
  * @param spawn_depth parent.spawn_depth + 1 (0 = root).
+ * @param goal The instruction the job was created with (durable from creation).
  * @param conv_id_out Receives the new job conversation id.
  * @return AUTH_DB_SUCCESS, AUTH_DB_LIMIT_EXCEEDED, or AUTH_DB_FAILURE.
  */
@@ -1247,6 +1251,25 @@ int conv_db_create_job(int user_id,
                        int spawn_depth,
                        const char *goal,
                        int64_t *conv_id_out);
+
+/**
+ * @brief As conv_db_create_job(), but records the spawn surface in
+ *        conversations.origin.
+ *
+ * @param origin Spawn surface ("voice"/"webui"/"messaging"/"satellite"); gates
+ *        voice completion delivery. NULL/"" → "job". Job identity is
+ *        job_status, not this field. The plain conv_db_create_job() passes "job".
+ */
+int conv_db_create_job_ex(int user_id,
+                          const char *title,
+                          int64_t parent_id,
+                          const char *spawn_mode,
+                          const char *on_complete,
+                          const char *deliver_to,
+                          int spawn_depth,
+                          const char *goal,
+                          const char *origin,
+                          int64_t *conv_id_out);
 
 /**
  * @brief Ownership-scoped: the instruction a job was created with.

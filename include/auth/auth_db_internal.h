@@ -51,9 +51,10 @@
 /* Canonical background-job column projection, in the order job_unpack_row()
  * (auth_db_jobs.c) reads.  Shared so the cached prepared statements in
  * auth_db_statements.c stay column-aligned with the readers. */
-#define JOB_SELECT_COLS                                                                      \
-   "id, user_id, parent_id, title, spawn_mode, on_complete, on_complete_fired, job_status, " \
-   "job_error, deliver_to, spawn_depth, reinvoke_count, started_at, finished_at, created_at"
+#define JOB_SELECT_COLS                                                                        \
+   "id, user_id, parent_id, title, spawn_mode, on_complete, on_complete_fired, job_status, "   \
+   "job_error, deliver_to, spawn_depth, reinvoke_count, started_at, finished_at, created_at, " \
+   "origin"
 
 /* Current schema version.
  * NOTE: the schema version is GLOBAL and must advance uniformly across every

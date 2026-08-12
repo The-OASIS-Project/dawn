@@ -77,6 +77,7 @@ static void job_unpack_row(sqlite3_stmt *st, job_record_t *r) {
    r->started_at = (time_t)sqlite3_column_int64(st, 12);
    r->finished_at = (time_t)sqlite3_column_int64(st, 13);
    r->created_at = (time_t)sqlite3_column_int64(st, 14);
+   job_copy_text(st, 15, r->origin, sizeof(r->origin));
 }
 
 /* JOB_SELECT_COLS lives in auth_db_internal.h so the cached prepared statements
@@ -125,6 +126,22 @@ int conv_db_create_job(int user_id,
                        int spawn_depth,
                        const char *goal,
                        int64_t *conv_id_out) {
+   /* Preserves the pre-repurpose behavior (origin = "job") for every caller that
+    * doesn't care about the spawn surface — chiefly the tests. */
+   return conv_db_create_job_ex(user_id, title, parent_id, spawn_mode, on_complete, deliver_to,
+                                spawn_depth, goal, "job", conv_id_out);
+}
+
+int conv_db_create_job_ex(int user_id,
+                          const char *title,
+                          int64_t parent_id,
+                          const char *spawn_mode,
+                          const char *on_complete,
+                          const char *deliver_to,
+                          int spawn_depth,
+                          const char *goal,
+                          const char *origin,
+                          int64_t *conv_id_out) {
    if (user_id <= 0 || !conv_id_out) {
       return AUTH_DB_INVALID;
    }
@@ -191,7 +208,7 @@ int conv_db_create_job(int user_id,
        "(user_id, title, created_at, updated_at, anchor_date, origin, "
        " parent_id, spawn_mode, on_complete, deliver_to, spawn_depth, job_goal, job_status, "
        " is_private) "
-       "VALUES (?, ?, ?, ?, ?, 'job', ?, ?, ?, ?, ?, ?, 'queued', ?)",
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)",
        -1, &st, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("conv_db_create_job: prepare failed: %s", sqlite3_errmsg(s_db.db));
@@ -205,29 +222,33 @@ int conv_db_create_job(int user_id,
    sqlite3_bind_int64(st, 3, (int64_t)now);
    sqlite3_bind_int64(st, 4, (int64_t)now);
    sqlite3_bind_int64(st, 5, (int64_t)now); /* anchor_date */
+   /* origin = spawn surface ("voice"/"webui"/"messaging"), replacing the former
+    * hardcoded "job".  Job identity is job_status IS NOT NULL, not this field, so
+    * repurposing it is safe; it now gates voice completion delivery. NULL → "job". */
+   sqlite3_bind_text(st, 6, (origin && origin[0]) ? origin : "job", -1, SQLITE_TRANSIENT);
    if (parent_id > 0) {
-      sqlite3_bind_int64(st, 6, parent_id);
+      sqlite3_bind_int64(st, 7, parent_id);
    } else {
-      sqlite3_bind_null(st, 6);
+      sqlite3_bind_null(st, 7);
    }
-   sqlite3_bind_text(st, 7, spawn_mode ? spawn_mode : "detached", -1, SQLITE_TRANSIENT);
-   sqlite3_bind_text(st, 8, on_complete ? on_complete : "notify", -1, SQLITE_TRANSIENT);
+   sqlite3_bind_text(st, 8, spawn_mode ? spawn_mode : "detached", -1, SQLITE_TRANSIENT);
+   sqlite3_bind_text(st, 9, on_complete ? on_complete : "notify", -1, SQLITE_TRANSIENT);
    if (deliver_to && deliver_to[0] != '\0') {
-      sqlite3_bind_text(st, 9, deliver_to, -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text(st, 10, deliver_to, -1, SQLITE_TRANSIENT);
    } else {
-      sqlite3_bind_null(st, 9);
+      sqlite3_bind_null(st, 10);
    }
-   sqlite3_bind_int(st, 10, spawn_depth);
+   sqlite3_bind_int(st, 11, spawn_depth);
    /* The goal, durable from creation.  Stored here rather than left to emerge as
     * the first `messages` row, because a job that never dispatches (capacity
     * refusal, worker-spawn failure) writes no messages at all and would
     * otherwise lose the instruction entirely — see the v74 migration. */
    if (goal && goal[0] != '\0') {
-      sqlite3_bind_text(st, 11, goal, -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text(st, 12, goal, -1, SQLITE_TRANSIENT);
    } else {
-      sqlite3_bind_null(st, 11);
+      sqlite3_bind_null(st, 12);
    }
-   sqlite3_bind_int(st, 12, inherited_private);
+   sqlite3_bind_int(st, 13, inherited_private);
 
    rc = sqlite3_step(st);
    sqlite3_finalize(st);
