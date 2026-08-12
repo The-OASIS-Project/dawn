@@ -2785,6 +2785,17 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       }
    }
 
+   /* v75: deep-research foundation (job_kind discriminator + research_* tables +
+    * idx_conv_jobs_user).  Idempotent (column-exists probe + IF NOT EXISTS). */
+   bool v75_ok = (current_version >= 75);
+   if (current_version < 75) {
+      if (auth_db_migrations_v75(s_db.db) == AUTH_DB_SUCCESS) {
+         v75_ok = true;
+      } else {
+         OLOG_ERROR("auth_db: v75 migration (deep-research foundation) failed");
+      }
+   }
+
    /* Log migration if upgrading from an older version */
    if (current_version > 0 && current_version < AUTH_DB_SCHEMA_VERSION) {
       OLOG_INFO("auth_db: migrated schema from v%d to v%d", current_version,
@@ -2806,7 +2817,7 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
    const bool ready_to_bump = v48_ok && v49_ok && v50_ok && v51_ok && v52_ok && v53_ok && v54_ok &&
                               v55_ok && v56_ok && v57_ok && v58_ok && v59_ok && v60_ok && v61_ok &&
                               v62_ok && v63_ok && v64_ok && v65_ok && v66_ok && v67_ok && v68_ok &&
-                              v69_ok && v70_ok && v71_ok && v72_ok && v73_ok && v74_ok;
+                              v69_ok && v70_ok && v71_ok && v72_ok && v73_ok && v74_ok && v75_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

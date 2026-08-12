@@ -801,6 +801,7 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v72.c
     src/auth/auth_db_migrations_v73.c
     src/auth/auth_db_migrations_v74.c
+    src/auth/auth_db_migrations_v75.c
     src/auth/auth_db_attention.c
     src/auth/auth_db_statements.c
     # DB-layer tables depended on by the always-compiled memory / OTA / tool

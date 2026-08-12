@@ -1000,10 +1000,15 @@ int auth_db_backup(const char *dest_path);
 
 /**
  * @brief Maximum conversations per user (0 = unlimited)
- * Default 1000 to prevent potential DoS via conversation spam.
+ * Raised to 5000 in v75: a background job / deep-research run consumes a
+ * conversation slot, so automation was evicting chat history against the old
+ * 1000 cap.  The bump ships WITH the v75 `idx_conv_jobs_user` partial index —
+ * a 5000-row scan without it is the regression (see DEEP_RESEARCH_DESIGN §10.4/.5).
+ * Separate retention accounting for job/research conversations is the real fix,
+ * tracked in TODO.md; this is the pragmatic P0 floor.
  * Users can archive old conversations to free up slots.
  */
-#define CONV_MAX_PER_USER 1000
+#define CONV_MAX_PER_USER 5000
 
 /**
  * @brief Maximum compaction summary length
