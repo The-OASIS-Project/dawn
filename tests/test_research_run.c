@@ -1,0 +1,172 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s).
+ *
+ * Unit tests for the deep-research controller's deterministic core
+ * (src/tools/research_run.c): coverage-driven question promotion, the P0
+ * continue/stop decision (budgets + all-closed), and the bounded round-digest
+ * renderer (content + cap enforcement).
+ */
+
+#include <stdlib.h>
+#include <string.h>
+
+#include "auth/auth_db.h"
+#include "tools/research_run.h"
+#include "unity.h"
+
+static int uid = 0;
+static int64_t conv = 0;
+static int64_t run = 0;
+
+void setUp(void) {
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(":memory:"));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_create_user("alice", "h", true));
+   auth_user_t u;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_get_user("alice", &u));
+   uid = u.id;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(uid, "research", &conv));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_run_create(uid, conv, "why is the sky blue?", "web", &run));
+}
+
+void tearDown(void) {
+   auth_db_shutdown();
+}
+
+/* ── defaults ───────────────────────────────────────────────────────────────── */
+
+static void test_budgets_defaults(void) {
+   research_budgets_t b;
+   research_budgets_defaults(&b);
+   TEST_ASSERT_EQUAL_INT(RESEARCH_DEFAULT_MAX_ROUNDS, b.max_rounds);
+   TEST_ASSERT_EQUAL_INT(RESEARCH_DEFAULT_MIN_SOURCES, b.min_sources);
+   TEST_ASSERT_EQUAL_INT(RESEARCH_DEFAULT_ROUND_DIGEST_MAX_CHARS, b.round_digest_max_chars);
+}
+
+/* ── coverage promotion: open→answered at >= min_sources distinct URLs ───────── */
+
+static void test_refresh_coverage_promotes(void) {
+   int64_t q1 = 0, q2 = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_add(run, "q1", 0, &q1));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_add(run, "q2", 0, &q2));
+
+   /* q1 gets two DISTINCT sources; q2 gets one (plus a dup of the same url). */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_claim_add(run, q1, "c", "http://a", "web", NULL, 0));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_claim_add(run, q1, "c", "http://b", "web", NULL, 0));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_claim_add(run, q2, "c", "http://x", "web", NULL, 0));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_claim_add(run, q2, "c", "http://x", "web", NULL, 0));
+
+   int closed = -1, total = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_refresh_coverage(run, 2, &closed, &total));
+   TEST_ASSERT_EQUAL_INT(2, total);
+   TEST_ASSERT_EQUAL_INT(1, closed); /* q1 answered (2 distinct); q2 still open (1) */
+
+   research_question_t qs[8];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_list(run, qs, 8, &n));
+   TEST_ASSERT_EQUAL_STRING("answered", qs[0].status);
+   TEST_ASSERT_EQUAL_STRING("open", qs[1].status);
+}
+
+/* ── stop decision: budgets + all-closed ────────────────────────────────────── */
+
+static void test_should_stop_decision(void) {
+   research_budgets_t b;
+   research_budgets_defaults(&b);
+
+   research_run_t r;
+   memset(&r, 0, sizeof(r));
+
+   /* fresh, nothing closed → continue */
+   TEST_ASSERT_NULL(research_should_stop(&r, &b, false));
+
+   /* all closed → coverage */
+   TEST_ASSERT_EQUAL_STRING("coverage", research_should_stop(&r, &b, true));
+
+   /* rounds budget hit → budget */
+   r.rounds_run = b.max_rounds;
+   TEST_ASSERT_EQUAL_STRING("budget", research_should_stop(&r, &b, false));
+
+   /* token ceiling hit → token_budget (checked after rounds/tool_calls) */
+   memset(&r, 0, sizeof(r));
+   r.input_tokens = b.max_input_tokens + 1;
+   TEST_ASSERT_EQUAL_STRING("token_budget", research_should_stop(&r, &b, false));
+
+   /* tool-call budget hit → budget */
+   memset(&r, 0, sizeof(r));
+   r.tool_calls = b.max_tool_calls;
+   TEST_ASSERT_EQUAL_STRING("budget", research_should_stop(&r, &b, false));
+}
+
+/* ── digest content: brief + open questions + coverage roll-up + revision ────── */
+
+static void test_digest_content(void) {
+   int64_t q1 = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_question_add(run, "what scatters light?", 0, &q1));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_claim_add(run, q1, "c", "http://a", "web", NULL, 0));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_revision_add(run, 0, "Rayleigh scattering is the mechanism."));
+
+   research_budgets_t b;
+   research_budgets_defaults(&b);
+   char digest[8192];
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_render_round_digest(run, "why is the sky blue?",
+                                                                       &b, digest, sizeof(digest)));
+   TEST_ASSERT_NOT_NULL(strstr(digest, "why is the sky blue?")); /* brief */
+   TEST_ASSERT_NOT_NULL(strstr(digest, "what scatters light?")); /* open question */
+   TEST_ASSERT_NOT_NULL(strstr(digest, "sources 1/2"));          /* coverage roll-up */
+   TEST_ASSERT_NOT_NULL(strstr(digest, "Rayleigh scattering"));  /* last revision prose */
+}
+
+/* ── digest is bounded: a small cap truncates and stays NUL-terminated ───────── */
+
+static void test_digest_respects_cap(void) {
+   for (int i = 0; i < 40; i++) {
+      char q[64];
+      snprintf(q, sizeof(q), "a fairly long research sub-question number %d here", i);
+      research_db_question_add(run, q, 0, NULL);
+   }
+   research_budgets_t b;
+   research_budgets_defaults(&b);
+   b.round_digest_max_chars = 300; /* tight cap */
+   b.top_k_questions = 100;        /* would blow past 300 without the cap */
+
+   char digest[8192];
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_render_round_digest(run, "brief", &b, digest, sizeof(digest)));
+   /* Strict < cap proves the cap actually ENGAGED (40 long questions would blow
+    * well past 300 uncapped) — not merely that the content happened to fit. */
+   TEST_ASSERT_LESS_THAN_UINT(300u, (unsigned)strlen(digest));
+   TEST_ASSERT_NOT_NULL(strstr(digest, "brief")); /* rendered content before truncating */
+}
+
+int main(void) {
+   UNITY_BEGIN();
+   RUN_TEST(test_budgets_defaults);
+   RUN_TEST(test_refresh_coverage_promotes);
+   RUN_TEST(test_should_stop_decision);
+   RUN_TEST(test_digest_content);
+   RUN_TEST(test_digest_respects_cap);
+   return UNITY_END();
+}

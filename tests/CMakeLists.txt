@@ -993,6 +993,13 @@ dawn_add_unit_test(test_auth_db_research
    LIBS    dawn_common unity sqlite3 pthread m stemmer
    LABEL   ci)
 
+dawn_add_unit_test(test_research_run
+   SOURCES test_research_run.c
+           ${SRC_ROOT}/src/tools/research_run.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LABEL   ci)
+
 # Pure string transform shared by six history-hydration callers  (json-c is for
 # the rest of the TU, not the helper under test) (resume,
 # reinvoke, messaging drift reload, ...).  Links the loader against the real
