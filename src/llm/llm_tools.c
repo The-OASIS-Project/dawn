@@ -43,6 +43,7 @@
 #include "core/command_executor.h"
 #include "core/component_status.h"
 #include "core/ocp_helpers.h"
+#include "core/research_allowlist.h"
 #include "core/session_manager.h"
 #include "core/worker_pool.h"
 #include "dawn.h"
@@ -976,15 +977,9 @@ struct json_object *llm_tools_get_claude_format(void) {
  * research session is active, ONLY these tools are reachable — no email, HA,
  * phone, shutdown, or any other side-effecting verb (DEEP_RESEARCH_DESIGN §7/§11
  * plan HIGH-1).  research_plan/research_record are ALSO research-only: hidden
- * from every non-research session. */
-static bool is_research_allowlisted_tool(const char *name) {
-   return strcmp(name, "search") == 0 || strcmp(name, "url_fetch") == 0 ||
-          strcmp(name, "research_plan") == 0 || strcmp(name, "research_record") == 0;
-}
-
-static bool is_research_only_tool(const char *name) {
-   return strcmp(name, "research_plan") == 0 || strcmp(name, "research_record") == 0;
-}
+ * from every non-research session.  The name list is single-sourced in
+ * core/research_allowlist.h so the native gate here and the command_execute
+ * defense-in-depth close (HIGH-1) cannot drift. */
 
 /**
  * @brief Check if a tool is enabled for a given session type
@@ -1011,9 +1006,9 @@ static bool is_tool_enabled_for_session(const tool_definition_t *t, bool is_remo
    session_t *ctx = session_get_command_context();
    bool research_mode = (ctx != NULL && ctx->research_run_id > 0);
    if (research_mode) {
-      return is_research_allowlisted_tool(t->name);
+      return research_tool_is_allowlisted(t->name);
    }
-   if (is_research_only_tool(t->name)) {
+   if (research_tool_is_research_only(t->name)) {
       return false; /* research_plan/research_record never appear outside a research session */
    }
 

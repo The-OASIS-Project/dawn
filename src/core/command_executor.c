@@ -32,6 +32,8 @@
 
 #include "core/command_router.h"
 #include "core/ocp_helpers.h"
+#include "core/research_allowlist.h"
+#include "core/session_manager.h"
 #include "logging.h"
 #include "mosquitto_comms.h"
 #include "tools/tool_registry.h"
@@ -72,6 +74,39 @@ static const char *get_default_action(const tool_metadata_t *tool) {
    }
 }
 
+/**
+ * @brief Deep-research read-only boundary (DEEP_RESEARCH_DESIGN.md §11 HIGH-1).
+ *
+ * A research fetch loop processes UNTRUSTED web content and must reach only the
+ * read-only allowlist.  The native tool path (llm_tools_execute) already enforces
+ * this at execute time; command_execute() and its two separately-exported publish
+ * primitives (command_execute_mqtt_direct / command_execute_sync) are the OTHER
+ * actuation entries — legacy <command> tags, direct-regex matches, and the
+ * no-callback fallback route through them WITHOUT the native gate.  Putting the
+ * refusal at EVERY such entry (not one caller up) is the point of HIGH-1: the
+ * boundary must not depend on a particular caller having gated upstream.
+ *
+ * Inert outside a research run (research_run_id <= 0) and in local-only builds,
+ * where session_get_command_context() is a NULL stub.  On refusal @p result is
+ * fully (re)initialized so a caller that did not memset it first still gets a
+ * clean error.
+ *
+ * @return true if the call was refused (and @p result filled); false to proceed.
+ */
+static bool research_context_refuses(const char *device, cmd_exec_result_t *result) {
+   session_t *ctx = session_get_command_context();
+   if (ctx == NULL || ctx->research_run_id <= 0 || research_tool_is_allowlisted(device)) {
+      return false;
+   }
+   OLOG_WARNING("command_execute: refused '%s' in research context (run %lld) — read-only "
+                "allowlist (HIGH-1)",
+                device ? device : "(null)", (long long)ctx->research_run_id);
+   memset(result, 0, sizeof(*result));
+   result->success = false;
+   result->result = strdup("Tool not available during deep research (read-only allowlist).");
+   return true;
+}
+
 /* =============================================================================
  * Synchronous Execution (for sync_wait commands)
  * ============================================================================= */
@@ -83,6 +118,10 @@ int command_execute_sync(const char *device,
                          const char *topic,
                          cmd_exec_result_t *result,
                          int timeout_ms) {
+   if (research_context_refuses(device, result)) {
+      return 1;
+   }
+
    if (!mosq) {
       result->success = false;
       result->result = strdup("MQTT client not available for sync command");
@@ -169,6 +208,11 @@ int command_execute(const char *device,
       return 1;
    }
 
+   /* Deep-research read-only boundary (HIGH-1) — see research_context_refuses(). */
+   if (research_context_refuses(device, result)) {
+      return 1;
+   }
+
    /* Look up in tool_registry */
    const tool_metadata_t *tool = tool_registry_find(device);
    if (!tool) {
@@ -242,6 +286,13 @@ int command_execute_mqtt_direct(const tool_metadata_t *tool,
       return 1;
    }
    memset(result, 0, sizeof(*result));
+
+   /* Deep-research read-only boundary (HIGH-1) — this is a directly-exported
+    * actuation primitive, so it carries its own refusal rather than trusting a
+    * caller to have gated.  See research_context_refuses(). */
+   if (research_context_refuses(device, result)) {
+      return 1;
+   }
 
    if (!tool || !tool->topic || !tool->topic[0]) {
       result->success = false;

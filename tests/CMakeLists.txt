@@ -1000,6 +1000,12 @@ dawn_add_unit_test(test_research_run
    LIBS    dawn_common unity sqlite3 pthread m stemmer
    LABEL   ci)
 
+# Header-only predicate (the read-only research allowlist, HIGH-1): no link deps.
+dawn_add_unit_test(test_research_allowlist
+   SOURCES test_research_allowlist.c
+   LIBS    unity
+   LABEL   ci)
+
 # Pure string transform shared by six history-hydration callers  (json-c is for
 # the rest of the TU, not the helper under test) (resume,
 # reinvoke, messaging drift reload, ...).  Links the loader against the real
