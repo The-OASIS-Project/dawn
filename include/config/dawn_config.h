@@ -954,6 +954,33 @@ typedef struct {
 } jobs_config_t;
 
 /* =============================================================================
+ * Deep-Research Configuration
+ *
+ * Per-run budgets + the master switch for the deep_research tool (a research run
+ * IS a background job, so it also obeys the [jobs] caps).  The budget defaults
+ * MIRROR the compile-time RESEARCH_DEFAULT_* fallbacks in
+ * include/tools/research_run.h — keep the two in sync (config_defaults.c cannot
+ * include a Layer-3 tools header, hence the duplication).  research_budgets_load()
+ * applies these over research_budgets_defaults() at run start.  See
+ * docs/DEEP_RESEARCH_DESIGN.md §9.
+ * ============================================================================= */
+typedef struct {
+   bool enabled;         /* Master switch for the deep_research tool (default OFF) */
+   int max_rounds;       /* Hard per-run round cap (§6.1) */
+   int max_tool_calls;   /* Hard per-run tool-call cap (§6.1) */
+   int max_input_tokens; /* Hard per-run input-token / cost ceiling (§6.1 — the real spend control)
+                          */
+   int round_digest_max_chars; /* Cap on the reconstructed round prompt (§4a) */
+   int min_sources;            /* DISTINCT source_url before a question is 'answered' (§3/§6) */
+   /* Parsed + round-tripped but NOT yet enforced (kept out of the WebUI panel per
+    * CONFIGURATION_GUIDE — a control that silently does nothing is worse than
+    * none).  Reserved for P1 (saturation/critic) + a debug snapshot mode. */
+   int saturation_rounds;  /* P1: dry rounds before the saturation stop */
+   int critic_max_rearm;   /* P1: times the completeness critic may extend */
+   bool capture_revisions; /* Debug: persist per-round report snapshots */
+} research_config_t;
+
+/* =============================================================================
  * Music Configuration
  * ============================================================================= */
 
@@ -1184,6 +1211,7 @@ typedef struct {
    music_config_t music;
    scheduler_config_t scheduler;
    jobs_config_t jobs;
+   research_config_t research;
    calendar_config_t calendar;
    messaging_config_t messaging;
    ota_config_t ota;
@@ -1230,6 +1258,16 @@ void config_set_secrets_defaults(secrets_config_t *secrets);
  * @param config Jobs config to clamp in place (NULL-safe).
  */
 void config_clamp_jobs(jobs_config_t *config);
+
+/**
+ * @brief Clamp [research] budgets to their safe bounds.
+ *
+ * Shared by the TOML parse path and the WebUI settings POST handler so the two
+ * entry points cannot drift.
+ *
+ * @param config Research config to clamp in place (NULL-safe).
+ */
+void config_clamp_research(research_config_t *config);
 
 /**
  * @brief Get the global config instance (read-only after init)

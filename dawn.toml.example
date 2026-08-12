@@ -1028,6 +1028,30 @@
 # max_children_per_tree = 4          # Phase 3: active children per parent.
 
 # =============================================================================
+# Deep Research (multi-round, multi-source investigation → cited report in notes)
+#
+# A research run IS a background job, so it also obeys the [jobs] caps above (the
+# wall-clock ceiling reuses the [jobs] runtime reap). These are the per-run
+# research budgets. OFF by default — the deep_research tool refuses until enabled.
+# =============================================================================
+[research]
+# enabled = false                    # Master switch for the deep_research tool.
+# max_rounds = 6                     # Hard per-run round cap. 1-100.
+# max_tool_calls = 40                # Hard per-run cap on searches + page fetches.
+# max_input_tokens = 200000          # Per-run input-token ceiling — the real cost
+                                     #   control. 1000 - 100000000.
+# round_digest_max_chars = 6000      # Cap on the per-round reconstructed prompt
+                                     #   (the bounded-context knob). 256-65536.
+# min_sources = 2                    # DISTINCT sources before a sub-question is
+                                     #   counted 'answered'. 1-100.
+#
+# Parsed and round-tripped, but NOT yet enforced — reserved for later phases.
+# Setting them has no effect yet:
+# saturation_rounds = 2              # P1: dry rounds before the saturation stop.
+# critic_max_rearm = 2               # P1: times the completeness critic may extend.
+# capture_revisions = false          # Debug: persist per-round report snapshots.
+
+# =============================================================================
 # OTA (over-the-air satellite updates)
 # =============================================================================
 # Server→satellite firmware updates. Release artifacts are signed OFFLINE with

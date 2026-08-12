@@ -36,6 +36,7 @@
 #include <time.h>
 
 #include "auth/auth_db.h"
+#include "config/dawn_config.h"
 #include "core/conv_event.h"
 #include "core/event_payload.h"
 #include "core/job_dispatch.h"
@@ -344,6 +345,15 @@ static char *deep_research_callback(const char *action, char *value, int *should
       return strdup("Error: action is required (start, status, cancel).");
    }
 
+   /* Execution backstop for the runtime master switch: the native schema already
+    * hides the tool when disabled (llm_tools_refresh), but this refuses any
+    * non-schema entry (a legacy <command> tag, a hallucinated call replayed from
+    * history) so a disabled feature can never actually run. */
+   if (!g_config.research.enabled) {
+      return strdup("Deep research is turned off. Enable it in Settings → Deep Research "
+                    "(or set [research] enabled = true in dawn.toml).");
+   }
+
    struct json_object *details = NULL;
    if (value != NULL && value[0] != '\0') {
       details = json_tokener_parse(value);
@@ -448,6 +458,13 @@ static const treg_param_t deep_research_params[] = {
    },
 };
 
+/* Runtime master switch: the tool is compiled in (DAWN_ENABLE_DEEP_RESEARCH_TOOL)
+ * but refuses to advertise/execute until [research] enabled = true (default off,
+ * §9) — a research run costs real time/tokens, so it is opt-in. */
+static bool deep_research_is_available(void) {
+   return g_config.research.enabled;
+}
+
 static const tool_metadata_t deep_research_metadata = {
    .name = "deep_research",
    .device_string = "deep_research",
@@ -474,6 +491,7 @@ static const tool_metadata_t deep_research_metadata = {
    .default_local = true,
    .default_remote = true,
    .callback = deep_research_callback,
+   .is_available = deep_research_is_available,
 };
 
 int deep_research_tool_register(void) {

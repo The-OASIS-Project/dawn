@@ -39,14 +39,10 @@
 
 struct session; /* core/session_manager.h — full type only needed in the .c */
 
-/* P0 budget/shape defaults.  Step 9 wires the [research] config section to
- * override these; until then research_budgets_defaults() is the single source. */
-#define RESEARCH_DEFAULT_MAX_ROUNDS 6
-#define RESEARCH_DEFAULT_MAX_TOOL_CALLS 40
-#define RESEARCH_DEFAULT_MAX_INPUT_TOKENS 200000
-#define RESEARCH_DEFAULT_MIN_SOURCES 2
-#define RESEARCH_DEFAULT_ROUND_DIGEST_MAX_CHARS 6000
-#define RESEARCH_DEFAULT_TOP_K_QUESTIONS 8
+/* P0 budget/shape defaults — the single source of truth for both the compile-
+ * time fallback (research_budgets_defaults) and the [research] config defaults
+ * (config_defaults.c, which includes the same leaf header).  See research_defaults.h. */
+#include "tools/research_defaults.h"
 
 /* Hard bound on how many ledger questions the core loads at once (digest +
  * coverage refresh).  A run with more than this many questions is pathological;
@@ -66,6 +62,15 @@ typedef struct {
 
 /** @brief Fill @p out with the compile-time P0 defaults. */
 void research_budgets_defaults(research_budgets_t *out);
+
+/**
+ * @brief Fill @p out with the RUNTIME budgets: compile-time defaults overlaid
+ *        with the [research] config section (config_defaults mirrors the same
+ *        defaults, so this equals research_budgets_defaults() until the operator
+ *        changes config).  Defined in the ENABLE_WEBUI half (research_run_loop.c)
+ *        because it reads g_config; the deterministic core stays config-free.
+ */
+void research_budgets_load(research_budgets_t *out);
 
 /**
  * @brief Promote every open question whose distinct-source coverage has reached

@@ -1799,6 +1799,28 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_int(config->jobs.event_retention_days));
    json_object_object_add(root, "jobs", jobs);
 
+   /* [research] (deep-research budgets + master switch).  ALL fields emitted,
+    * including the parsed-but-not-yet-enforced ones the panel does not surface, so
+    * the JSON stays a faithful mirror of the struct. */
+   json_object *research = json_object_new_object();
+   json_object_object_add(research, "enabled", json_object_new_boolean(config->research.enabled));
+   json_object_object_add(research, "max_rounds", json_object_new_int(config->research.max_rounds));
+   json_object_object_add(research, "max_tool_calls",
+                          json_object_new_int(config->research.max_tool_calls));
+   json_object_object_add(research, "max_input_tokens",
+                          json_object_new_int(config->research.max_input_tokens));
+   json_object_object_add(research, "round_digest_max_chars",
+                          json_object_new_int(config->research.round_digest_max_chars));
+   json_object_object_add(research, "min_sources",
+                          json_object_new_int(config->research.min_sources));
+   json_object_object_add(research, "saturation_rounds",
+                          json_object_new_int(config->research.saturation_rounds));
+   json_object_object_add(research, "critic_max_rearm",
+                          json_object_new_int(config->research.critic_max_rearm));
+   json_object_object_add(research, "capture_revisions",
+                          json_object_new_boolean(config->research.capture_revisions));
+   json_object_object_add(root, "research", research);
+
    /* [calendar] */
    json_object *calendar = json_object_new_object();
    json_object_object_add(calendar, "enabled", json_object_new_boolean(config->calendar.enabled));
@@ -2663,6 +2685,21 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "max_runtime_sec = %d\n", config->jobs.max_runtime_sec);
    fprintf(fp, "event_chunk_cap = %d\n", config->jobs.event_chunk_cap);
    fprintf(fp, "event_retention_days = %d\n", config->jobs.event_retention_days);
+
+   /* [research] (deep-research budgets + master switch).  Emits EVERY field,
+    * including saturation_rounds/critic_max_rearm/capture_revisions which the
+    * panel doesn't surface yet — the writer emits from the in-memory config, so
+    * writing them is what preserves a hand-edited value across a save. */
+   fprintf(fp, "\n[research]\n");
+   fprintf(fp, "enabled = %s\n", config->research.enabled ? "true" : "false");
+   fprintf(fp, "max_rounds = %d\n", config->research.max_rounds);
+   fprintf(fp, "max_tool_calls = %d\n", config->research.max_tool_calls);
+   fprintf(fp, "max_input_tokens = %d\n", config->research.max_input_tokens);
+   fprintf(fp, "round_digest_max_chars = %d\n", config->research.round_digest_max_chars);
+   fprintf(fp, "min_sources = %d\n", config->research.min_sources);
+   fprintf(fp, "saturation_rounds = %d\n", config->research.saturation_rounds);
+   fprintf(fp, "critic_max_rearm = %d\n", config->research.critic_max_rearm);
+   fprintf(fp, "capture_revisions = %s\n", config->research.capture_revisions ? "true" : "false");
 
    /* [mcp] + [[mcp.server]] (coding harness) — round-trips so a settings save
     * can't drop a manually-configured bridge server. */

@@ -36,12 +36,41 @@
 #include <string.h>
 
 #include "auth/auth_db.h"
+#include "config/dawn_config.h"
 #include "core/session_manager.h"
 #include "core/text_input_dispatch.h"
 #include "logging.h"
 #include "memory/memory_note_bridge.h"
 #include "tools/document_index_pipeline.h"
 #include "tools/research_run.h"
+
+/* Runtime budgets: compile-time defaults overlaid with [research] config.  Kept
+ * here (not in the deterministic core research_run.c) because it reads g_config,
+ * which the unit-tested core must not depend on.  config_clamp_research() already
+ * bounded every value at parse/POST time, so a positive config value is safe to
+ * take as-is; a non-positive one means "unset" and keeps the default. */
+void research_budgets_load(research_budgets_t *out) {
+   if (!out) {
+      return;
+   }
+   research_budgets_defaults(out);
+   const research_config_t *rc = &g_config.research;
+   if (rc->max_rounds > 0) {
+      out->max_rounds = rc->max_rounds;
+   }
+   if (rc->max_tool_calls > 0) {
+      out->max_tool_calls = rc->max_tool_calls;
+   }
+   if (rc->max_input_tokens > 0) {
+      out->max_input_tokens = (int64_t)rc->max_input_tokens;
+   }
+   if (rc->round_digest_max_chars > 0) {
+      out->round_digest_max_chars = rc->round_digest_max_chars;
+   }
+   if (rc->min_sources > 0) {
+      out->min_sources = rc->min_sources;
+   }
+}
 
 /* Give up a run after this many CONSECUTIVE dispatch failures (provider 5xx /
  * empty response) rather than burning the whole round budget on dead calls. */

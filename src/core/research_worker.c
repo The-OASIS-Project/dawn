@@ -123,7 +123,7 @@ static void research_worker_run(research_work_t *work) {
              (long long)work->conv_id, (long long)run.id, s->session_id, work->user_id);
 
    research_budgets_t b;
-   research_budgets_defaults(&b); /* Step 9 overrides these from [research] */
+   research_budgets_load(&b); /* compile-time defaults overlaid with [research] config */
 
    /* Drive the round loop + synthesis.  Returns a static stop_reason literal:
     * coverage | budget | token_budget | cancelled | failed. */

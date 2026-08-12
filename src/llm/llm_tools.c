@@ -705,6 +705,16 @@ void llm_tools_refresh(void) {
       if (strcmp(t->name, "memory") == 0) {
          t->enabled = g_config.memory.enabled;
       }
+
+      /* Deep research is opt-in (costs real tokens/time): the [research] master
+       * switch gates the NATIVE schema here.  is_available() alone is NOT enough
+       * — it is consulted only in the armor block above and on the legacy
+       * <command> path, so a non-armor tool must be gated by name like search /
+       * memory or it stays advertised.  deep_research_callback also refuses at
+       * execution as a backstop for any non-schema path. */
+      if (strcmp(t->name, "deep_research") == 0) {
+         t->enabled = g_config.research.enabled;
+      }
    }
 
    /* Update cached enabled count (total capability-enabled) */

@@ -2331,6 +2331,63 @@
             },
          },
       },
+      research: {
+         label: 'Deep Research',
+         icon: '&#x1F50E;',
+         fields: {
+            enabled: {
+               type: 'checkbox',
+               label: 'Enable Deep Research',
+               hint: 'Let the assistant run multi-round, multi-source research jobs that write a cited report to notes',
+               default: false,
+            },
+            max_rounds: {
+               type: 'number',
+               label: 'Max Rounds Per Run',
+               min: 1,
+               max: 100,
+               hint: 'Hard cap on research rounds before a run must stop',
+               default: 6,
+               advanced: true,
+            },
+            max_tool_calls: {
+               type: 'number',
+               label: 'Max Tool Calls Per Run',
+               min: 1,
+               max: 1000,
+               hint: 'Hard cap on searches + page fetches across a run',
+               default: 40,
+               advanced: true,
+            },
+            max_input_tokens: {
+               type: 'number',
+               label: 'Max Input Tokens Per Run',
+               min: 1000,
+               max: 100000000,
+               hint: 'Per-run input-token ceiling — the real cost control',
+               default: 200000,
+               advanced: true,
+            },
+            round_digest_max_chars: {
+               type: 'number',
+               label: 'Round Context Cap (chars)',
+               min: 256,
+               max: 65536,
+               hint: 'Cap on the per-round reconstructed prompt (the bounded-context knob)',
+               default: 6000,
+               advanced: true,
+            },
+            min_sources: {
+               type: 'number',
+               label: 'Sources To Answer a Question',
+               min: 1,
+               max: 100,
+               hint: 'Distinct sources required before a sub-question counts as answered',
+               default: 2,
+               advanced: true,
+            },
+         },
+      },
       calendar: {
          label: 'Calendar',
          icon: '&#x1F4C5;',
@@ -2541,7 +2598,7 @@
          // Both were defined in SETTINGS_SCHEMA but listed in no category, so
          // their panels never rendered — see check_settings_sections_rendered.sh,
          // which fails CI if a section is ever orphaned this way again.
-         sections: ['scheduler', 'attention', 'jobs', 'calendar'],
+         sections: ['scheduler', 'attention', 'jobs', 'research', 'calendar'],
       },
       {
          id: 'network',

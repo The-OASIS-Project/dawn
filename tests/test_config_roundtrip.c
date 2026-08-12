@@ -112,6 +112,35 @@ static void test_jobs_roundtrip(void) {
    TEST_ASSERT_EQUAL_INT(17, g_read.jobs.event_retention_days);
 }
 
+/* --- [research] ------------------------------------------------------------ */
+
+static void test_research_roundtrip(void) {
+   /* Values inside config_clamp_research()'s bounds so a mismatch means "the
+    * writer dropped it", not "the clamp rewrote it".  Includes the parsed-but-
+    * not-yet-enforced fields, which must still round-trip. */
+   g_written.research.enabled = true;
+   g_written.research.max_rounds = 9;
+   g_written.research.max_tool_calls = 55;
+   g_written.research.max_input_tokens = 333000;
+   g_written.research.round_digest_max_chars = 4096;
+   g_written.research.min_sources = 3;
+   g_written.research.saturation_rounds = 4;
+   g_written.research.critic_max_rearm = 5;
+   g_written.research.capture_revisions = true;
+
+   round_trip();
+
+   TEST_ASSERT_TRUE(g_read.research.enabled);
+   TEST_ASSERT_EQUAL_INT(9, g_read.research.max_rounds);
+   TEST_ASSERT_EQUAL_INT(55, g_read.research.max_tool_calls);
+   TEST_ASSERT_EQUAL_INT(333000, g_read.research.max_input_tokens);
+   TEST_ASSERT_EQUAL_INT(4096, g_read.research.round_digest_max_chars);
+   TEST_ASSERT_EQUAL_INT(3, g_read.research.min_sources);
+   TEST_ASSERT_EQUAL_INT(4, g_read.research.saturation_rounds);
+   TEST_ASSERT_EQUAL_INT(5, g_read.research.critic_max_rearm);
+   TEST_ASSERT_TRUE(g_read.research.capture_revisions);
+}
+
 /* A small positive event_chunk_cap must be floored, or the head+tail truncator
  * underflows its tail-length subtraction (size_t) into an out-of-bounds read.
  * 0 ("unset" -> runtime default) and large values pass through unchanged. */
@@ -234,6 +263,7 @@ static void test_all_writer_owned_sections_present(void) {
       "[attention]",
       "[scheduler]",
       "[jobs]",
+      "[research]",
       "[mcp]",
       "[code_projects]",
    };
@@ -331,6 +361,7 @@ static void test_control_characters_survive_the_round_trip(void) {
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_jobs_roundtrip);
+   RUN_TEST(test_research_roundtrip);
    RUN_TEST(test_event_chunk_cap_has_a_floor);
    RUN_TEST(test_scheduler_roundtrip);
    RUN_TEST(test_all_writer_owned_sections_present);
