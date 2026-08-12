@@ -37,6 +37,8 @@
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
+#include "core/conv_event.h"
+#include "core/event_payload.h"
 #include "core/session_manager.h"
 #include "core/text_input_dispatch.h"
 #include "logging.h"
@@ -270,6 +272,11 @@ const char *research_run_execute(struct session *s,
       research_refresh_coverage(run_id, b->min_sources, &closed, &total);
       bool all_closed = (total > 0 && closed == total);
 
+      /* Observe/replay (§10): a per-round progress snapshot. Best-effort. */
+      conv_event_emit(run0->conversation_id, run0->user_id, CONV_EVENT_RESEARCH_ROUND,
+                      event_payload_research_round(round, closed, total, (int)queries,
+                                                   (int64_t)tok_in));
+
       research_run_t cur = *run0;
       cur.rounds_run = round;
       cur.tool_calls = (int)queries;
@@ -295,12 +302,12 @@ const char *research_run_execute(struct session *s,
     * store is gated on there being findings AND the run not being user-cancelled:
     * an empty "no findings" note or a note for a run the user stopped is clutter.
     * A cancelled/failed run still keeps its revision, so nothing is lost. */
+   int claim_count = 0;
+   research_db_claim_count(run_id, &claim_count);
+
    char *report = NULL;
    if (research_render_report(run_id, run0->brief, &report) == AUTH_DB_SUCCESS && report) {
       research_db_revision_add(run_id, last_round, report);
-
-      int claim_count = 0;
-      research_db_claim_count(run_id, &claim_count);
       if (claim_count > 0 && strcmp(stop_reason, "cancelled") != 0) {
          research_persist_report_note(run0->user_id, run_id, run0->brief, report);
       }
@@ -310,6 +317,12 @@ const char *research_run_execute(struct session *s,
                    (long long)run_id);
       free(report);
    }
+
+   /* Observe/replay (§10): terminal stop with the controller's reason + totals.
+    * The job's own `complete` event still fires from job_manager_set_terminal;
+    * this carries the research-specific stop_reason + coverage for the panel. */
+   conv_event_emit(run0->conversation_id, run0->user_id, CONV_EVENT_RESEARCH_STOP,
+                   event_payload_research_stop(stop_reason, last_round, claim_count));
 
    OLOG_INFO("research_run_execute: run %lld finished (stop=%s, rounds=%d)", (long long)run_id,
              stop_reason, last_round);

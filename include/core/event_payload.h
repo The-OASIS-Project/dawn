@@ -118,6 +118,37 @@ char *event_payload_complete(const char *disposition,
 char *event_payload_spawn(int64_t child_conv_id, const char *title);
 
 /**
+ * @brief Build a deep-research `research_round` progress payload:
+ *        {"round":N,"questions_closed":C,"questions_total":T,"tool_calls":K,"input_tokens":I}.
+ *        All integers, no untrusted content. Caller frees.
+ */
+char *event_payload_research_round(int round,
+                                   int questions_closed,
+                                   int questions_total,
+                                   int tool_calls,
+                                   int64_t input_tokens);
+
+/**
+ * @brief Build a deep-research `research_claim` payload:
+ *        {"round":N,"question_id":Q,"source_url":"…","source_kind":"…","claim":"…"}.
+ *
+ * claim/source_url/source_kind are web-derived; the output is UTF-8-sanitized so a
+ * non-UTF-8 byte can't wedge the WS event frame (the claim is already injection-
+ * command-gated at ingest by research_record). Caller frees.
+ */
+char *event_payload_research_claim(int round,
+                                   int64_t question_id,
+                                   const char *source_url,
+                                   const char *source_kind,
+                                   const char *claim);
+
+/**
+ * @brief Build a deep-research `research_stop` terminal payload:
+ *        {"stop_reason":"…","rounds":N,"claims_total":C}. Caller frees.
+ */
+char *event_payload_research_stop(const char *stop_reason, int rounds, int claims_total);
+
+/**
  * @brief True if @p key names a field whose value must never be persisted.
  *
  * Exposed for unit tests and for any future consumer that redacts a structure

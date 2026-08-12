@@ -33,11 +33,14 @@
 #include "tools/research_tools.h"
 
 #include <json-c/json.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "auth/auth_db.h"
+#include "core/conv_event.h"
+#include "core/event_payload.h"
 #include "core/memory_filter.h"
 #include "core/session_manager.h"
 #include "logging.h"
@@ -182,6 +185,20 @@ static char *research_record_callback(const char *action, char *value, int *shou
 
    int rc = research_db_claim_add(run_id, question_id, claim, source_url, source_kind, quote,
                                   round);
+
+   /* Observe/replay (§10): emit a research_claim event with the recorded finding.
+    * The claim is already injection-command-gated above; source_url/kind are
+    * web-derived and UTF-8-sanitized by the payload builder.  Best-effort — an
+    * observe event must never fail the record. */
+   if (rc == AUTH_DB_SUCCESS) {
+      session_t *ctx = session_get_command_context();
+      if (ctx != NULL) {
+         conv_event_emit(atomic_load(&ctx->stream_conversation_id), ctx->metrics.user_id,
+                         CONV_EVENT_RESEARCH_CLAIM,
+                         event_payload_research_claim(round, question_id, source_url, source_kind,
+                                                      claim));
+      }
+   }
    json_object_put(root);
 
    if (rc != AUTH_DB_SUCCESS) {

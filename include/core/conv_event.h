@@ -52,6 +52,11 @@ extern "C" {
 #define CONV_EVENT_COMPLETE "complete"
 #define CONV_EVENT_RESUME \
    "resume" /* boundary marker when an interrupted/failed/cancelled job restarts */
+/* Deep-research observe/replay (§10): a per-round progress snapshot, one per
+ * recorded evidence claim, and a terminal stop with the controller's reason. */
+#define CONV_EVENT_RESEARCH_ROUND "research_round"
+#define CONV_EVENT_RESEARCH_CLAIM "research_claim"
+#define CONV_EVENT_RESEARCH_STOP "research_stop"
 
 /**
  * @brief Persist one event and fan it out to the owner's attached clients.
