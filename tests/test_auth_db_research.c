@@ -208,6 +208,46 @@ static void test_claims_batch_count_list(void) {
    TEST_ASSERT_EQUAL_INT64(qb, out[2].question_id);
 }
 
+/* ── per-question claims (the round-digest gloss source) ─────────────────────── */
+static void test_question_claims(void) {
+   int64_t run = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_run_create(alice_id, conv, "q", "web", &run));
+   int64_t qa = 0, qb = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_add(run, "A", 0, &qa));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_add(run, "B", 0, &qb));
+   /* three claims for qa (id order = insert order), one for qb, one general. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_claim_add(run, qa, "a1", "http://a1", "web", NULL, 0));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_claim_add(run, qa, "a2", "http://a2", "web", NULL, 0));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_claim_add(run, qa, "a3", "http://a3", "web", NULL, 1));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_claim_add(run, qb, "b1", "http://b1", "web", NULL, 0));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_claim_add(run, 0, "gen", NULL, "memory", NULL, 0));
+
+   research_claim_t out[2];
+   int n = -1;
+   /* LIMIT 2 → only the two EARLIEST claims for qa, in id order, none from qb/general. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_claims(run, qa, out, 2, &n));
+   TEST_ASSERT_EQUAL_INT(2, n);
+   TEST_ASSERT_EQUAL_STRING("a1", out[0].claim);
+   TEST_ASSERT_EQUAL_STRING("a2", out[1].claim);
+   TEST_ASSERT_EQUAL_INT64(qa, out[0].question_id);
+
+   /* a question with a single claim returns exactly one. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_claims(run, qb, out, 2, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_STRING("b1", out[0].claim);
+
+   /* a question with no claims returns zero, not an error. */
+   int64_t qc = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_add(run, "C", 0, &qc));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_claims(run, qc, out, 2, &n));
+   TEST_ASSERT_EQUAL_INT(0, n);
+}
+
 /* ── report revisions: latest returns highest round; prune keeps only it ────── */
 
 static void test_revisions_latest_and_prune(void) {
@@ -258,6 +298,7 @@ int main(void) {
    RUN_TEST(test_questions);
    RUN_TEST(test_coverage_distinct_and_null);
    RUN_TEST(test_claims_batch_count_list);
+   RUN_TEST(test_question_claims);
    RUN_TEST(test_revisions_latest_and_prune);
    RUN_TEST(test_not_found);
    return UNITY_END();

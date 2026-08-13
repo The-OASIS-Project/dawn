@@ -25,10 +25,18 @@
 #ifndef RESEARCH_TOOLS_H
 #define RESEARCH_TOOLS_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /** @brief Register research_plan.  @return 0 on success. */
 int research_plan_tool_register(void);
 
 /** @brief Register research_record.  @return 0 on success. */
 int research_record_tool_register(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* RESEARCH_TOOLS_H */

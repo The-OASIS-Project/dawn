@@ -25,9 +25,13 @@
  *
  * Statements are prepared ad-hoc (prepare/step/finalize) rather than cached in
  * s_db, matching auth_db_jobs.c: every path is low-frequency (a handful of
- * writes per round, a few rounds per run).  The one hot spot — per-round claim
- * ingest — batches under a single BEGIN/COMMIT with one reused prepared
- * statement (research_db_claims_add; eff M1).
+ * writes per round, a few rounds per run).  A batched claim path
+ * (research_db_claims_add, one BEGIN/COMMIT for N rows) EXISTS for a caller that
+ * accumulates claims in memory — but the live loop does NOT use it: research_record
+ * records ONE claim per tool call (via research_db_claim_add → the n=1 path), each
+ * its own transaction.  That stays cheap because WAL + synchronous=NORMAL make a
+ * COMMIT a lock-held frame append with no fsync, and claims are dispersed across
+ * seconds of LLM latency, so they never burst against the global auth_db mutex.
  *
  * SECURITY: All SQL is constant or parameterized.  research_db_run_get() is the
  * only user-facing reader and binds user_id; every other function is a system
@@ -680,6 +684,40 @@ int research_db_claim_list(int64_t run_id, research_claim_t *out, int max, int *
    }
    sqlite3_bind_int64(st, 1, run_id);
    sqlite3_bind_int(st, 2, max);
+   int n = 0;
+   while (n < max && sqlite3_step(st) == SQLITE_ROW) {
+      res_unpack_claim(st, &out[n]);
+      n++;
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   *count_out = n;
+   return AUTH_DB_SUCCESS;
+}
+
+int research_db_question_claims(int64_t run_id,
+                                int64_t question_id,
+                                research_claim_t *out,
+                                int max,
+                                int *count_out) {
+   if (run_id <= 0 || !out || max <= 0 || !count_out) {
+      return AUTH_DB_INVALID;
+   }
+   *count_out = 0;
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   /* Constrains (run_id, question_id) so it seeks idx_research_claims_run. */
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "SELECT " RESEARCH_CLAIM_COLS " FROM research_claims "
+                               "WHERE run_id=? AND question_id=? ORDER BY id ASC LIMIT ?",
+                               -1, &st, NULL);
+   if (rc != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(st, 1, run_id);
+   sqlite3_bind_int64(st, 2, question_id);
+   sqlite3_bind_int(st, 3, max);
    int n = 0;
    while (n < max && sqlite3_step(st) == SQLITE_ROW) {
       res_unpack_claim(st, &out[n]);

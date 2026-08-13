@@ -201,6 +201,21 @@ int research_render_round_digest(int64_t run_id,
                          q->question, sources, b->min_sources)) {
          break; /* hit the cap */
       }
+      /* Carry the findings SO FAR for this question across the per-round history
+       * reset (§4a): without it round N+1 only sees the source COUNT and re-
+       * researches from scratch.  A couple of earlier claim texts (capped) is
+       * enough to build on and to avoid re-fetching the same ground. */
+      research_claim_t gloss[RESEARCH_DIGEST_GLOSS_CLAIMS];
+      int gn = 0;
+      if (research_db_question_claims(run_id, q->id, gloss, RESEARCH_DIGEST_GLOSS_CLAIMS, &gn) ==
+              AUTH_DB_SUCCESS &&
+          gn > 0) {
+         for (int g = 0; g < gn; g++) {
+            if (!digest_append(out, cap, &off, "      - found: %.240s\n", gloss[g].claim)) {
+               break;
+            }
+         }
+      }
       shown++;
    }
    if (shown == 0) {

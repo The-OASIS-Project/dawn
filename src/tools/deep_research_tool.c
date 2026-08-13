@@ -131,6 +131,17 @@ static char *handle_start(struct json_object *details, int user_id, int64_t pare
       deliver_to = NULL; /* ignore empty / suspicious delivery target */
    }
 
+   /* Web research is useless without a search backend: with search disabled the
+    * fetch loop can only plan + record, finds nothing, and would deliver a
+    * confusing empty "done" report.  Refuse up front instead.  Checked via the
+    * registry so this tracks the search tool's own availability rule (SearXNG
+    * endpoint / Tavily) without duplicating it. */
+   const tool_metadata_t *search_meta = tool_registry_find("search");
+   if (search_meta == NULL || (search_meta->is_available != NULL && !search_meta->is_available())) {
+      return strdup("Can't start deep research — web search isn't configured. Set up a search "
+                    "backend (SearXNG or Tavily) first, then try again.");
+   }
+
    /* Refuse cleanly past a running cap before creating any row. */
    job_provider_class_t provider = job_provider_from_default();
    int cap = job_manager_capacity(user_id, provider);

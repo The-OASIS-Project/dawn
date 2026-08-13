@@ -298,17 +298,28 @@ const char *research_run_execute(struct session *s,
 
    /* Synthesize: render the report from the persisted claims, store it as the
     * final revision (the durable audit copy), then file it as a retrievable
-    * notes/document artifact and point the run at it (report_doc_id).  The note
-    * store is gated on there being findings AND the run not being user-cancelled:
-    * an empty "no findings" note or a note for a run the user stopped is clutter.
-    * A cancelled/failed run still keeps its revision, so nothing is lost. */
+    * notes/document artifact and point the run at it (report_doc_id).  Gate on
+    * findings ALONE (claim_count > 0), NOT on stop_reason: a runtime reap and a
+    * daemon shutdown raise the same session cancel flag a user cancel does, so the
+    * loop's stop_reason collapses all three to "cancelled" — suppressing the note
+    * on that string threw away the report of a run that timed out mid-work after
+    * gathering real evidence (its findings then lived only in the revision, which
+    * has no P0 user surface).  A run that found something keeps its report; an
+    * empty run files nothing.  The worker separately suppresses the completion
+    * NOTIFICATION for a genuine user-cancel, so a cancelled run's note is
+    * retrievable without pestering the user about a stop they asked for. */
+   /* A `status` poll during report rendering now reads 'synthesizing' rather than
+    * a stale 'researching' (the worker overwrites this with the terminal status
+    * moments later). */
+   research_db_run_set_status(run_id, "synthesizing");
+
    int claim_count = 0;
    research_db_claim_count(run_id, &claim_count);
 
    char *report = NULL;
    if (research_render_report(run_id, run0->brief, &report) == AUTH_DB_SUCCESS && report) {
       research_db_revision_add(run_id, last_round, report);
-      if (claim_count > 0 && strcmp(stop_reason, "cancelled") != 0) {
+      if (claim_count > 0) {
          research_persist_report_note(run0->user_id, run_id, run0->brief, report);
       }
       free(report);

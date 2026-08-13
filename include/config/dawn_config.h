@@ -958,18 +958,23 @@ typedef struct {
  *
  * Per-run budgets + the master switch for the deep_research tool (a research run
  * IS a background job, so it also obeys the [jobs] caps).  The budget defaults
- * MIRROR the compile-time RESEARCH_DEFAULT_* fallbacks in
- * include/tools/research_run.h — keep the two in sync (config_defaults.c cannot
- * include a Layer-3 tools header, hence the duplication).  research_budgets_load()
- * applies these over research_budgets_defaults() at run start.  See
- * docs/DEEP_RESEARCH_DESIGN.md §9.
+ * come from the SHARED RESEARCH_DEFAULT_* constants in
+ * include/tools/research_defaults.h — a pure-macro leaf header both this Layer-0
+ * config and the Layer-3 core (research_run.c) include, so the config default and
+ * the compile-time fallback are ONE source and cannot drift.
+ * research_budgets_load() applies these over research_budgets_defaults() at run
+ * start.  See docs/DEEP_RESEARCH_DESIGN.md §9.
  * ============================================================================= */
 typedef struct {
-   bool enabled;         /* Master switch for the deep_research tool (default OFF) */
-   int max_rounds;       /* Hard per-run round cap (§6.1) */
-   int max_tool_calls;   /* Hard per-run tool-call cap (§6.1) */
-   int max_input_tokens; /* Hard per-run input-token / cost ceiling (§6.1 — the real spend control)
-                          */
+   bool enabled;       /* Master switch for the deep_research tool (default OFF) */
+   int max_rounds;     /* Hard per-run round cap (§6.1) */
+   int max_tool_calls; /* Hard per-run tool-call cap (§6.1) */
+   /* Hard per-run input-token / cost ceiling (§6.1 — the real spend control).
+    * Deliberately `int` though research_budgets_t.max_input_tokens is int64: the
+    * clamp bounds this to 100M (« INT32_MAX), so it uses the plain int config
+    * macros (PARSE_INT / JSON_TO_CONFIG_INT / "%d") and research_budgets_load()
+    * widens it to int64 at the one read site. */
+   int max_input_tokens;
    int round_digest_max_chars; /* Cap on the reconstructed round prompt (§4a) */
    int min_sources;            /* DISTINCT source_url before a question is 'answered' (§3/§6) */
    /* Parsed + round-tripped but NOT yet enforced (kept out of the WebUI panel per

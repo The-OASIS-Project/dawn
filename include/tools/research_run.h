@@ -37,6 +37,10 @@
 
 #include "auth/auth_db.h" /* research_run_t */
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct session; /* core/session_manager.h — full type only needed in the .c */
 
 /* P0 budget/shape defaults — the single source of truth for both the compile-
@@ -48,6 +52,11 @@ struct session; /* core/session_manager.h — full type only needed in the .c */
  * coverage refresh).  A run with more than this many questions is pathological;
  * the extras are simply not considered this pass. */
 #define RESEARCH_MAX_LEDGER_QUESTIONS 128
+
+/* Earliest claims per open question carried into the round digest as the
+ * "findings so far" gloss (§4a) — enough to build on, bounded to keep the digest
+ * within round_digest_max_chars. */
+#define RESEARCH_DIGEST_GLOSS_CLAIMS 2
 
 /** Per-run budgets + digest shape.  Populated by research_budgets_defaults(),
  *  later overridden from [research] config (Step 9). */
@@ -153,5 +162,9 @@ int research_render_report(int64_t run_id, const char *brief, char **out_markdow
 const char *research_run_execute(struct session *s,
                                  const research_run_t *run0,
                                  const research_budgets_t *b);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* RESEARCH_RUN_H */

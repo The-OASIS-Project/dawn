@@ -1673,6 +1673,17 @@ int research_db_claim_count(int64_t run_id, int *count_out);
  */
 int research_db_claim_list(int64_t run_id, research_claim_t *out, int max, int *count_out);
 
+/**
+ * @brief Up to @p max earliest claims for ONE question (id ASC) — the per-question
+ *        "findings so far" gloss the round digest carries across the history reset.
+ *        Constrains (run_id, question_id) so it seeks idx_research_claims_run.
+ */
+int research_db_question_claims(int64_t run_id,
+                                int64_t question_id,
+                                research_claim_t *out,
+                                int max,
+                                int *count_out);
+
 /* ── Report revisions (churn) ──────────────────────────────────────────────── */
 
 /** @brief Snapshot a round's intermediate report markdown. */

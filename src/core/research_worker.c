@@ -149,8 +149,9 @@ static void research_worker_run(research_work_t *work) {
       /* Honest "the daemon stopped it": 'interrupted' rather than 'cancelled', so
        * it neither suppresses a completion notice as if the user asked for it nor
        * lands where only a human may resume.  P0 has no research resume, so this is
-       * purely descriptive.  The partial report revision synthesized on the way out
-       * is still retrievable. */
+       * purely descriptive.  If the run gathered any findings before the stop, its
+       * report was filed to notes on the way out (persist gates on findings, not on
+       * the stop reason), so it is retrievable via `status`. */
       job_status = "interrupted";
       job_err = "daemon shutting down";
       research_status = "failed";

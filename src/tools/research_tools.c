@@ -24,10 +24,12 @@
  * Both are reachable ONLY inside a research session (the read-only allowlist in
  * llm_tools.c gates them at schema advertisement AND execution).  Each reads the
  * active run id + round from the thread-local command-context session, so a
- * caller can never write to another run.  research_record injection-gates the
- * claim text before storage (a memory-POISONING gate on what gets stored — NOT
- * an exfil control; §11).  Status transitions are deliberately NOT LLM-driven:
- * the deterministic controller owns them from distinct-source coverage (§6).
+ * caller can never write to another run.  BOTH injection-gate the LLM-authored
+ * text they store (claim text and question text) before it lands in the ledger —
+ * a memory-POISONING gate on what gets stored, since both persist into the
+ * RAG-retrievable report note, NOT an exfil control (§11).  Status transitions
+ * are deliberately NOT LLM-driven: the deterministic controller owns them from
+ * distinct-source coverage (§6).
  */
 
 #include "tools/research_tools.h"
@@ -96,6 +98,13 @@ static char *research_plan_callback(const char *action, char *value, int *should
       return strdup("Error: research_plan needs a \"questions\" array of sub-question strings.");
    }
 
+   /* Accumulate the "[qID] text" list of what was added, so the model can attach
+    * SAME-ROUND findings to the right question_id via research_record.  Without
+    * this the model has no ids until a later round's digest surfaces them, so the
+    * round that plans records everything as question_id=0 (general), which never
+    * advances per-question coverage. */
+   char list[1024];
+   size_t off = 0;
    int added = 0;
    int total = (int)json_object_array_length(questions);
    for (int i = 0; i < total && added < RESEARCH_PLAN_MAX_QUESTIONS; i++) {
@@ -104,24 +113,42 @@ static char *research_plan_callback(const char *action, char *value, int *should
       if (!q || q[0] == '\0') {
          continue;
       }
-      if (research_db_question_add(run_id, q, 0, NULL) == AUTH_DB_SUCCESS) {
+      /* Injection-gate question text before storage, mirroring research_record:
+       * a question is free-form output of an LLM being fed untrusted web content,
+       * and it persists verbatim as a report-note heading that can be RAG-
+       * retrieved into a full-tool session later (§11). */
+      if (memory_filter_check_injection_commands(q)) {
+         OLOG_WARNING(
+             "research_plan: refused a question flagged by the injection filter (run %lld)",
+             (long long)run_id);
+         continue;
+      }
+      int64_t qid = 0;
+      if (research_db_question_add(run_id, q, 0, &qid) == AUTH_DB_SUCCESS) {
          added++;
+         int n = snprintf(list + off, sizeof(list) - off, "[q%lld] %.80s\n", (long long)qid, q);
+         if (n > 0 && (size_t)n < sizeof(list) - off) {
+            off += (size_t)n;
+         }
       }
    }
    json_object_put(root);
 
-   char buf[160];
+   char buf[1024 + 256];
    if (added == 0) {
-      snprintf(buf, sizeof(buf), "No questions added (empty or all rejected).");
+      snprintf(buf, sizeof(buf),
+               "No questions added (empty, all rejected by the safety filter, or invalid).");
    } else {
       /* Only warn about the cap when it ACTUALLY truncated — i.e. we hit the cap
        * AND there were more array items past it.  Keying on raw `total` alone
        * would falsely warn when the extras were just empty/rejected items. */
       bool capped = (added == RESEARCH_PLAN_MAX_QUESTIONS && total > RESEARCH_PLAN_MAX_QUESTIONS);
-      snprintf(buf, sizeof(buf), "Added %d research question%s to the plan.%s", added,
-               added == 1 ? "" : "s",
-               capped ? " (extra questions past the per-call cap were dropped — add them in a "
-                        "later call.)"
+      snprintf(buf, sizeof(buf),
+               "Added %d research question%s. Pass the matching question_id when you record a "
+               "finding with research_record:\n%s%s",
+               added, added == 1 ? "" : "s", list,
+               capped ? "(Extra questions past the per-call cap were dropped — add them in a later "
+                        "call.)"
                       : "");
    }
    return strdup(buf);

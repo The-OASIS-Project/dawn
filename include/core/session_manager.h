@@ -600,7 +600,13 @@ static inline bool session_is_background(const session_t *s) {
  * @param round   current research round, stamped onto recorded claims.
  *
  * Single-writer: only the research controller (on its own bare job session)
- * calls this.  Read on the same thread during tool execution — no lock.
+ * calls this, set-before / cleared-after each dispatch.  The read is multi-thread
+ * (parallel tool-worker threads share this session's command context), and it is
+ * lock-free BECAUSE of that single-writer discipline: the write happens-before
+ * pthread_create of the tool workers and the clear happens only after their
+ * pthread_join, so no reader ever sees a torn or stale value.  A future change
+ * that set this from a second thread, or outside the join-bounded dispatch, would
+ * need synchronization (atomics).
  */
 static inline void session_set_research_context(session_t *session, int64_t run_id, int round) {
    if (session != NULL) {
