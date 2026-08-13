@@ -1044,10 +1044,13 @@
                                      #   (the bounded-context knob). 256-65536.
 # min_sources = 2                    # DISTINCT sources before a sub-question is
                                      #   counted 'answered'. 1-100.
+# saturation_rounds = 1              # Stop after this many consecutive rounds that
+                                     #   close no new question (diminishing returns).
+                                     #   0 disables. The agent can also end a run
+                                     #   itself via research_conclude. 0-100.
 #
 # Parsed and round-tripped, but NOT yet enforced — reserved for later phases.
 # Setting them has no effect yet:
-# saturation_rounds = 2              # P1: dry rounds before the saturation stop.
 # critic_max_rearm = 2               # P1: times the completeness critic may extend.
 # capture_revisions = false          # Debug: persist per-round report snapshots.
 

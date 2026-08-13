@@ -67,6 +67,7 @@ typedef struct {
    int min_sources;            /**< distinct source_urls to call a question answered (§6.2) */
    int round_digest_max_chars; /**< cap on the reconstructed round prompt (§4a.2, eff H1) */
    int top_k_questions;        /**< open questions surfaced per round digest */
+   int saturation_rounds; /**< consecutive dry rounds (0 new closures) before stopping; 0 off */
 } research_budgets_t;
 
 /** @brief Fill @p out with the compile-time P0 defaults. */
@@ -96,24 +97,31 @@ void research_budgets_load(research_budgets_t *out);
 int research_refresh_coverage(int64_t run_id, int min_sources, int *closed_out, int *total_out);
 
 /**
- * @brief The P0 continue/stop decision (§6, layers 1-2 only).
+ * @brief The continue/stop decision (§6).
  *
- * Layered outermost-first: hard budgets (rounds / tool_calls / input_tokens),
- * then the all-questions-closed early exit.  Saturation, the completeness critic,
- * and UNANSWERABLE verdicts are P1.
+ * "Natural end" reasons are checked BEFORE the hard budgets so the stop_reason
+ * reflects why the run is actually done, not merely that a ceiling was crossed on
+ * the same round: the agent's own completion signal (@p concluded), then all
+ * questions closed (@p all_closed), then saturation (@p no_progress_rounds dry
+ * rounds).  Hard budgets (rounds / tool_calls / input_tokens) are the backstop,
+ * checked last — they still fire every round boundary, so ordering only affects the
+ * LABEL when two conditions coincide; nothing here lets a run exceed a budget.
  *
- * @param run        the run's current meters (rounds_run / tool_calls / input_tokens).
- * @param b          the active budgets.
- * @param all_closed true iff every question is answered/unanswerable (from
- *                   research_refresh_coverage's closed==total).
- * @return a stop_reason string ("budget" | "token_budget" | "coverage") to stop,
- *         or NULL to continue.  On a NULL-arg programming error it returns the
- *         defensive sentinel "failed" (a run status, not a normal stop_reason).
- *         The returned pointer is always a static literal.
+ * @param run              the run's current meters (rounds_run / tool_calls / input_tokens).
+ * @param b                the active budgets (incl. saturation_rounds).
+ * @param all_closed       true iff every question is answered/unanswerable.
+ * @param no_progress_rounds consecutive rounds that closed no new question.
+ * @param concluded        the agent called research_conclude (already gated on having
+ *                         recorded findings by the caller).
+ * @return a stop_reason string ("concluded" | "coverage" | "saturation" | "budget" |
+ *         "token_budget") to stop, or NULL to continue.  On a NULL-arg programming
+ *         error it returns the defensive sentinel "failed".  Always a static literal.
  */
 const char *research_should_stop(const research_run_t *run,
                                  const research_budgets_t *b,
-                                 bool all_closed);
+                                 bool all_closed,
+                                 int no_progress_rounds,
+                                 bool concluded);
 
 /**
  * @brief Render the BOUNDED per-round digest into @p out (§4a.2).
@@ -156,8 +164,8 @@ int research_render_report(int64_t run_id, const char *brief, char **out_markdow
  * The caller (research_worker) owns the session lifecycle + the terminal job
  * transition; this returns the terminal stop_reason.
  *
- * @return a static stop_reason literal: "coverage" | "budget" | "token_budget" |
- *         "cancelled" | "failed".
+ * @return a static stop_reason literal: "concluded" | "coverage" | "saturation" |
+ *         "budget" | "token_budget" | "cancelled" | "failed".
  */
 const char *research_run_execute(struct session *s,
                                  const research_run_t *run0,

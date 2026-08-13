@@ -56,6 +56,7 @@ static void test_budgets_defaults(void) {
    TEST_ASSERT_EQUAL_INT(RESEARCH_DEFAULT_MAX_ROUNDS, b.max_rounds);
    TEST_ASSERT_EQUAL_INT(RESEARCH_DEFAULT_MIN_SOURCES, b.min_sources);
    TEST_ASSERT_EQUAL_INT(RESEARCH_DEFAULT_ROUND_DIGEST_MAX_CHARS, b.round_digest_max_chars);
+   TEST_ASSERT_EQUAL_INT(RESEARCH_DEFAULT_SATURATION_ROUNDS, b.saturation_rounds);
 }
 
 /* ── coverage promotion: open→answered at >= min_sources distinct URLs ───────── */
@@ -87,34 +88,55 @@ static void test_refresh_coverage_promotes(void) {
    TEST_ASSERT_EQUAL_STRING("open", qs[1].status);
 }
 
-/* ── stop decision: budgets + all-closed ────────────────────────────────────── */
+/* ── stop decision: budgets + all-closed + saturation + conclude ────────────── */
 
 static void test_should_stop_decision(void) {
    research_budgets_t b;
-   research_budgets_defaults(&b);
+   research_budgets_defaults(&b); /* saturation_rounds = 1 by default */
 
    research_run_t r;
    memset(&r, 0, sizeof(r));
 
-   /* fresh, nothing closed → continue */
-   TEST_ASSERT_NULL(research_should_stop(&r, &b, false));
+   /* fresh, nothing closed, making progress → continue */
+   TEST_ASSERT_NULL(research_should_stop(&r, &b, false, 0, false));
 
    /* all closed → coverage */
-   TEST_ASSERT_EQUAL_STRING("coverage", research_should_stop(&r, &b, true));
+   TEST_ASSERT_EQUAL_STRING("coverage", research_should_stop(&r, &b, true, 0, false));
 
    /* rounds budget hit → budget */
    r.rounds_run = b.max_rounds;
-   TEST_ASSERT_EQUAL_STRING("budget", research_should_stop(&r, &b, false));
+   TEST_ASSERT_EQUAL_STRING("budget", research_should_stop(&r, &b, false, 0, false));
 
-   /* token ceiling hit → token_budget (checked after rounds/tool_calls) */
+   /* token ceiling hit → token_budget */
    memset(&r, 0, sizeof(r));
    r.input_tokens = b.max_input_tokens + 1;
-   TEST_ASSERT_EQUAL_STRING("token_budget", research_should_stop(&r, &b, false));
+   TEST_ASSERT_EQUAL_STRING("token_budget", research_should_stop(&r, &b, false, 0, false));
 
    /* tool-call budget hit → budget */
    memset(&r, 0, sizeof(r));
    r.tool_calls = b.max_tool_calls;
-   TEST_ASSERT_EQUAL_STRING("budget", research_should_stop(&r, &b, false));
+   TEST_ASSERT_EQUAL_STRING("budget", research_should_stop(&r, &b, false, 0, false));
+
+   /* saturation: one dry round (>= saturation_rounds=1) → saturation */
+   memset(&r, 0, sizeof(r));
+   TEST_ASSERT_EQUAL_STRING("saturation", research_should_stop(&r, &b, false, 1, false));
+   /* below the threshold still continues */
+   TEST_ASSERT_NULL(research_should_stop(&r, &b, false, 0, false));
+   /* saturation_rounds=0 disables the stop entirely */
+   b.saturation_rounds = 0;
+   TEST_ASSERT_NULL(research_should_stop(&r, &b, false, 5, false));
+   b.saturation_rounds = 1;
+
+   /* conclude signal → concluded */
+   TEST_ASSERT_EQUAL_STRING("concluded", research_should_stop(&r, &b, false, 0, true));
+
+   /* precedence: concluded > coverage > saturation > budget when they coincide.
+    * This is the run-2 case — a dry round that also blew the token ceiling reports
+    * "saturation" (the real reason), not "token_budget". */
+   r.input_tokens = b.max_input_tokens + 1;
+   TEST_ASSERT_EQUAL_STRING("saturation", research_should_stop(&r, &b, false, 1, false));
+   TEST_ASSERT_EQUAL_STRING("coverage", research_should_stop(&r, &b, true, 1, false));
+   TEST_ASSERT_EQUAL_STRING("concluded", research_should_stop(&r, &b, true, 1, true));
 }
 
 /* ── digest content: brief + open questions + coverage roll-up + revision ────── */

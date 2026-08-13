@@ -438,6 +438,15 @@ typedef struct session {
    // load/store is atomic on the target ISAs.
    int64_t research_run_id;
    int research_round;
+   // research_conclude signal: the agent's own "I've covered the brief" flag.
+   // WRITTEN by a tool-worker thread (research_conclude callback), READ by the
+   // controller after core_text_input_dispatch returns (which joins the tool
+   // workers, giving the happens-before edge).  Atomic because the writer is a
+   // DIFFERENT thread from the reader (unlike research_run_id, single-writer on the
+   // controller): concurrent research_conclude calls store the same value.  The
+   // controller weighs it as ONE input to the deterministic stop decision — the
+   // agent never OWNS the stop (§6), it only advises.
+   atomic_bool research_concluded;
 
    // Streaming metrics for UI visualization
    uint64_t stream_start_ms;     // Timestamp when LLM call started
@@ -612,6 +621,28 @@ static inline void session_set_research_context(session_t *session, int64_t run_
    if (session != NULL) {
       session->research_run_id = run_id;
       session->research_round = round;
+   }
+}
+
+/**
+ * @brief Raise the agent's research_conclude signal on @p session (called from the
+ *        research_conclude tool callback, i.e. a tool-worker thread).
+ */
+static inline void session_research_mark_concluded(session_t *session) {
+   if (session != NULL) {
+      atomic_store(&session->research_concluded, true);
+   }
+}
+
+/** @brief Has the agent signalled research_conclude on @p session? */
+static inline bool session_research_is_concluded(session_t *session) {
+   return session != NULL && atomic_load(&session->research_concluded);
+}
+
+/** @brief Clear the research_conclude signal (controller, at run start). */
+static inline void session_research_reset_concluded(session_t *session) {
+   if (session != NULL) {
+      atomic_store(&session->research_concluded, false);
    }
 }
 

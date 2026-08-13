@@ -354,10 +354,65 @@ static const tool_metadata_t research_record_metadata = {
    .callback = research_record_callback,
 };
 
+/* =============================================================================
+ * research_conclude — the agent signals the brief is covered
+ * ============================================================================= */
+
+static char *research_conclude_callback(const char *action, char *value, int *should_respond) {
+   (void)action;
+   (void)value; /* no arguments — this is a signal, not a data write */
+   if (should_respond) {
+      *should_respond = 1;
+   }
+
+   int64_t run_id = research_active_run(NULL);
+   if (run_id <= 0) {
+      return strdup("Error: research_conclude is only available inside a research run.");
+   }
+
+   /* Raise the flag on the command-context session.  The controller reads it at the
+    * next round boundary (after this dispatch's tool workers join) and, once the run
+    * has recorded findings, stops with reason "concluded" and synthesizes the
+    * report.  The controller — not this tool — owns the stop (§6). */
+   session_t *ctx = session_get_command_context();
+   if (ctx == NULL) {
+      /* Unreachable in practice: research_active_run above already read run_id > 0
+       * from this same thread-local context.  Fail loud rather than telling the
+       * agent the run ended when the flag was never actually set. */
+      return strdup("Error: research_conclude could not reach the research session; keep going.");
+   }
+   session_research_mark_concluded(ctx);
+   OLOG_INFO("research_conclude: agent signalled completion for run %lld", (long long)run_id);
+   return strdup("Research marked complete. The controller will finish this run and build the "
+                 "report from your recorded findings — stop calling tools now.");
+}
+
+static const tool_metadata_t research_conclude_metadata = {
+   .name = "research_conclude",
+   .device_string = "research_conclude",
+   .topic = "dawn",
+   .description =
+       "Signal that the brief has been researched thoroughly and further searching would "
+       "add little — you have answered the sub-questions you can, each with enough "
+       "independent sources. Ends the run and builds the report from your recorded "
+       "findings. Do NOT call before recording findings; if a question cannot be "
+       "answered, stop researching it and conclude rather than looping.",
+   .params = NULL,
+   .param_count = 0,
+   .capabilities = TOOL_CAP_NONE,
+   .default_local = true,
+   .default_remote = true,
+   .callback = research_conclude_callback,
+};
+
 int research_plan_tool_register(void) {
    return tool_registry_register(&research_plan_metadata);
 }
 
 int research_record_tool_register(void) {
    return tool_registry_register(&research_record_metadata);
+}
+
+int research_conclude_tool_register(void) {
+   return tool_registry_register(&research_conclude_metadata);
 }

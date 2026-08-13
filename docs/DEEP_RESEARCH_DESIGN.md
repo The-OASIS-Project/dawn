@@ -9,7 +9,9 @@ and a first-live-run tuning pass. P1–P4 remain design-only below.
 **What works, end to end:** `deep_research start` (confirmation-gated) → detached `research_worker` on a bare
 memory-free job session → IterResearch round loop (reset history + bounded digest each round, `research_plan`
 seeds sub-questions, `search`/`url_fetch` under a read-only allowlist, `research_record` writes injection-gated
-claims) → deterministic C stop-controller (budgets + distinct-source coverage) → report rendered as a view over
+claims, or `research_conclude` when it judges the brief covered) → deterministic C stop-controller (natural-end
+reasons first — `concluded` → distinct-source `coverage` → `saturation` after N dry rounds — then hard budgets as
+the backstop) → report rendered as a view over
 `research_claims` → filed to notes (`report_doc_id`) → completion summary posted back to the originating chat.
 Observe events (`research_round`/`research_claim`/`research_stop`) stream to the panel; `[research]` config
 (off by default) tunes the budgets.
@@ -30,16 +32,30 @@ prompt + `research_record` description; `max_input_tokens` default 200k→400k; 
 summary to the parent chat (not reinvoke); tool description reframed around depth/background/kept-report;
 smoke-query set rewritten to genuinely-hard, DAWN-useful topics.
 
-**Stopping point / next.** Paused at P0 to accrue field signal before P1 (same discipline as memory@0.7324 and
-SAGE@P0 — P1 is quality tuning that needs a corpus of real runs to calibrate, not a whiteboard). **Resume
-trigger for P1:** after ~10 real runs, review `benchmarks/research/` baselines — runs stopping on budget with
-*useful* coverage = a plan-granularity tweak; runs stopping on budget while still surfacing *novel* claims =
-the saturation/critic signal §6 P1 exists for. Known limit observed: a granular 20-sub-question plan stops
-partial on `token_budget` (config-tunable now: raise `max_input_tokens` or steer plan breadth — not a P1 code
-item). Deferred/tracked (none blocking): coverage `COUNT(DISTINCT)` N+1 at scale (trigger >30 Q or concurrent
-runs), revision pruning, messaging-channel completion push, and the `url_fetch` exfil residual (the broader
-autonomously-dangerous tool-audit / per-session capability-mask initiative — sharpened by research, not P1).
-Multi-agent fan-out + P2 private-corpus mode are real later directions on the (unbuilt) job-trees substrate.
+**Convergence controls (2026-08-13, post-run-2, data-driven).** Run 2's per-round events exposed the real gap:
+round 3 spent **35% of the whole token budget and closed ZERO new questions**, and the plan *grew* mid-run
+(20→24 sub-questions) so coverage was arithmetically unreachable — the run could only ever stop on `token_budget`,
+never on convergence. Raising the budget (200k→400k) had treated the symptom, not the cause. Fixed by pulling the
+saturation stop forward from P1 and adding an agent completion signal:
+- **Saturation stop** (`[research] saturation_rounds`, default **1**): the controller stops after N consecutive
+  rounds that close no new question — diminishing returns, rather than grinding to the ceiling.
+- **`research_conclude` tool**: the agent ends a run itself when it judges the brief covered (honored only once
+  it has recorded findings; the controller still owns the stop — the agent advises, §6).
+- **Deliberately NOT a plan-size cap**: decomposition is the LLM's strength; capping it is the paternalistic
+  lever. Instead the stop-controller checks natural-end reasons (`concluded`/`coverage`/`saturation`) before the
+  hard budgets, so budget becomes a rare backstop and a run stops on *why it's actually done*, not on spend.
+  Re-run of the run-2 case now stops on `saturation` at round 3 instead of `token_budget`.
+
+**Stopping point / next.** Paused at P0 to accrue field signal before the remaining P1 (same discipline as
+memory@0.7324 and SAGE@P0). **Resume trigger:** after ~10 real runs, review `benchmarks/research/` baselines —
+if runs stop on `saturation`/`concluded` with good reports, the loop is healthy; runs still stopping on
+`token_budget` while surfacing novel claims are the remaining P1 signal (the fresh-context **completeness
+critic**, `critic_max_rearm`, still design-only). Deferred/tracked (none blocking): coverage `COUNT(DISTINCT)`
+N+1 at scale (trigger >30 Q or concurrent runs), the round-boundary budget overshoot (a round can exceed
+`max_input_tokens` before the boundary check — saturation/conclude make it rarely bind), revision pruning,
+messaging-channel completion push, and the `url_fetch` exfil residual (the broader autonomously-dangerous
+tool-audit / per-session capability-mask initiative — sharpened by research, not P1). Multi-agent fan-out + P2
+private-corpus mode are real later directions on the (unbuilt) job-trees substrate.
 
 ---
 
@@ -412,6 +428,18 @@ its own spawn path** (arch MED-2), not `job_worker`'s `handle_spawn`:
 
 The continue signal is **the delta between the ledger and the evidence**, computed in C — not LLM
 self-assessment (a model deep in a polluted context is unreliable about whether it is done *or* that it isn't).
+
+> **Shipped ordering (2026-08-13, differs from the original P0 layering below).** `research_should_stop()`
+> checks the **natural-end reasons first** — `concluded` (agent's `research_conclude` signal, gated on findings
+> having been recorded) → `coverage` (all questions closed) → `saturation` (`saturation_rounds` consecutive
+> rounds that close no new question, default 1) — and the **hard budgets LAST** as the backstop. Budgets still
+> fire every round boundary, so the reorder only decides the *label* when two conditions coincide (a run that
+> stalls the same round it crosses the ceiling reports `saturation`, the real reason, not `token_budget`); it
+> never lets a run overrun a budget. The saturation stop and the agent completion signal were pulled forward
+> from P1 into P0 after run-2 telemetry (see "Convergence controls" at the top). A plan-size cap was
+> **deliberately not** added — decomposition is the LLM's job. The layered list below is the original design
+> intent; items 4/5 (completeness critic, UNANSWERABLE) remain P1.
+
 Layered stopping stack, outermost first:
 
 1. **Hard budgets (P0)** — `max_rounds`, `max_tool_calls`, **`max_input_tokens`/cost ceiling**, wall-clock
@@ -478,9 +506,14 @@ shutdown (locked, [§13](#13-decisions-locked)):
 - `research_plan` — `{questions:[...], mark:[{qid, status}]}` — seed/refine the ledger. Writes
   `research_questions`.
 - `research_record` — `{claim, source_url, source_kind, quote, question_id}` — record one evidence row. Claim
-  text passes **`memory_filter_check_injection_commands`** (the curated result-text variant — the full
-  `memory_filter_check` false-positives on technical content like "api key"/"bearer"/"system prompt", sec
-  HIGH-3) before storage. This is a **memory-poisoning gate on what gets stored, not an exfil control**.
+  text **and `source_url`** pass **`memory_filter_check_injection_commands`** (the curated result-text variant —
+  the full `memory_filter_check` false-positives on technical content like "api key"/"bearer"/"system prompt",
+  sec HIGH-3) before storage. This is a **memory-poisoning gate on what gets stored, not an exfil control**. A
+  model-supplied `question_id` is tolerant-parsed (the `[q5]` token shape) and validated against the run —
+  an unknown id de-attributes to 0.
+- `research_conclude` — argless. The agent calls it when it judges the brief covered; sets an atomic flag the
+  controller reads at the next round boundary and, once findings exist, stops with reason `concluded` ([§6](#6-the-continuestop-controller)).
+  The agent **advises**; the deterministic controller still owns the stop.
 - **P2 private-corpus tools** (`memory_recall`, `document_search`) added to the `private`/`both` allowlist —
   gated behind the P2 egress control ([§11](#11-security--untrusted-content-in-an-autonomous-loop-locked)).
 
@@ -581,7 +614,7 @@ max_tool_calls       = 60      # hard per-run tool-call cap
 max_input_tokens     = 400000  # hard per-run input-token/cost ceiling (the real spend control, §6)
 round_digest_max_chars = 6000  # cap on the reconstructed round prompt (§4a) — the "bounded context" knob
 min_sources          = 2       # DISTINCT source_url before a question is 'answered' (§3/§6)
-saturation_rounds    = 2       # dry rounds before saturation stop (P1)
+saturation_rounds    = 1       # consecutive dry rounds before the saturation stop (enforced, §6); 0 = off
 critic_max_rearm     = 2       # times the completeness critic may extend (P1)
 capture_revisions    = false   # debug: persist per-round report snapshots (§3; audit uses claims+events)
 # Parsed + round-tripped but NOT surfaced until the phase that enforces them (per CONFIGURATION_GUIDE):

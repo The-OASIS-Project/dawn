@@ -1807,8 +1807,10 @@ void config_clamp_research(research_config_t *config) {
       config->min_sources = 1;
    if (config->min_sources > 100)
       config->min_sources = 100;
-   if (config->saturation_rounds < 0)
+   if (config->saturation_rounds < 0) /* 0 = disable the saturation stop */
       config->saturation_rounds = 0;
+   if (config->saturation_rounds > 100) /* sanity ceiling; > max_rounds is inert anyway */
+      config->saturation_rounds = 100;
    if (config->critic_max_rearm < 0)
       config->critic_max_rearm = 0;
 }

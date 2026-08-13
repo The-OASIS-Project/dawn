@@ -51,6 +51,7 @@ void research_budgets_defaults(research_budgets_t *out) {
    out->min_sources = RESEARCH_DEFAULT_MIN_SOURCES;
    out->round_digest_max_chars = RESEARCH_DEFAULT_ROUND_DIGEST_MAX_CHARS;
    out->top_k_questions = RESEARCH_DEFAULT_TOP_K_QUESTIONS;
+   out->saturation_rounds = RESEARCH_DEFAULT_SATURATION_ROUNDS;
 }
 
 int research_refresh_coverage(int64_t run_id, int min_sources, int *closed_out, int *total_out) {
@@ -109,12 +110,36 @@ int research_refresh_coverage(int64_t run_id, int min_sources, int *closed_out, 
 
 const char *research_should_stop(const research_run_t *run,
                                  const research_budgets_t *b,
-                                 bool all_closed) {
+                                 bool all_closed,
+                                 int no_progress_rounds,
+                                 bool concluded) {
    if (!run || !b) {
       return "failed";
    }
-   /* Layer 1 — hard budgets, outermost.  The token ceiling is the real spend
-    * control; tool-call count is a loose proxy (§6.1, eff M4). */
+   /* Natural-end reasons first, so the stop_reason reflects WHY the run is done
+    * rather than merely that a ceiling was crossed on the same round.  These never
+    * let a run overrun a budget: the hard checks below still fire every boundary,
+    * so ordering only picks the label when two conditions coincide. */
+   if (concluded) {
+      /* The agent judged the brief covered (research_conclude).  Advisory only —
+       * the controller still owns the stop; the caller has already gated this on
+       * the run having recorded findings, so an empty "conclude" can't end a run. */
+      return "concluded";
+   }
+   if (all_closed) {
+      /* Every question answered or unanswerable — the ideal stop (plan MED). */
+      return "coverage";
+   }
+   if (b->saturation_rounds > 0 && no_progress_rounds >= b->saturation_rounds) {
+      /* Diminishing returns: N consecutive rounds closed no new question.  Stops a
+       * run that keeps searching (and adding questions) without converging, instead
+       * of grinding to the token ceiling (live run 2: round 3 spent 35% of the
+       * budget and closed nothing). */
+      return "saturation";
+   }
+   /* Hard budgets — the backstop for a run that keeps making progress but won't
+    * end.  The token ceiling is the real spend control; tool-call count is a loose
+    * proxy (§6.1, eff M4). */
    if (b->max_rounds > 0 && run->rounds_run >= b->max_rounds) {
       return "budget";
    }
@@ -123,11 +148,6 @@ const char *research_should_stop(const research_run_t *run,
    }
    if (b->max_input_tokens > 0 && run->input_tokens >= b->max_input_tokens) {
       return "token_budget";
-   }
-   /* Layer 2 — all questions closed (answered or unanswerable).  Without this a
-    * budgets-only P0 burns the full budget on every run (plan MED). */
-   if (all_closed) {
-      return "coverage";
    }
    return NULL; /* continue */
 }

@@ -224,10 +224,13 @@ static void research_worker_run(research_work_t *work) {
       research_status = "failed";
       research_stop = "timeout";
    } else if (stop != NULL && (strcmp(stop, "coverage") == 0 || strcmp(stop, "budget") == 0 ||
-                               strcmp(stop, "token_budget") == 0)) {
+                               strcmp(stop, "token_budget") == 0 ||
+                               strcmp(stop, "saturation") == 0 || strcmp(stop, "concluded") == 0)) {
       /* The run finished on its own terms — the ONLY stop strings that map to a
-       * successful 'done'.  Whitelisted explicitly (not an else) so a stop the
-       * three authoritative flags didn't claim can never be upgraded to success:
+       * successful 'done' (coverage/concluded = converged, saturation = no more to
+       * find, budget/token_budget = spent its allowance).  Whitelisted explicitly
+       * (not an else) so a stop the three authoritative flags didn't claim can never
+       * be upgraded to success:
        * research_run_execute emits "cancelled" the instant it sees the session
        * cancel flag, so if any FUTURE cancel source ever raises that flag outside
        * job_manager's three mechanisms, this must fail closed, not report a

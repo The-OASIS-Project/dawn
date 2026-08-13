@@ -40,5 +40,12 @@
 #define RESEARCH_DEFAULT_MIN_SOURCES 2
 #define RESEARCH_DEFAULT_ROUND_DIGEST_MAX_CHARS 6000
 #define RESEARCH_DEFAULT_TOP_K_QUESTIONS 8
+/* Consecutive rounds that close NO new question before the saturation stop fires
+ * (0 disables).  1 = stop the first dry round: live run 2 spent 35% of its whole
+ * token budget on a 3rd round that closed nothing, so one dry round is already the
+ * signal to stop rather than grind the budget.  The agent can also end a run early
+ * itself via research_conclude; this is the controller's backstop for a run that
+ * stalls without concluding. */
+#define RESEARCH_DEFAULT_SATURATION_ROUNDS 1
 
 #endif /* RESEARCH_DEFAULTS_H */

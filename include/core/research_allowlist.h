@@ -38,16 +38,17 @@
 /**
  * @brief Is @p name a tool a deep-research fetch loop is allowed to run?
  *
- * The full read-only set: web `search` + `url_fetch` (reads) plus the two
- * ledger-writing research tools (`research_plan` / `research_record`).  Nothing
- * side-effecting or outward-facing appears here.
+ * The full read-only set: web `search` + `url_fetch` (reads) plus the three
+ * ledger/control research tools (`research_plan` / `research_record` /
+ * `research_conclude`).  Nothing side-effecting or outward-facing appears here.
  */
 static inline bool research_tool_is_allowlisted(const char *name) {
    if (name == NULL) {
       return false;
    }
    return strcmp(name, "search") == 0 || strcmp(name, "url_fetch") == 0 ||
-          strcmp(name, "research_plan") == 0 || strcmp(name, "research_record") == 0;
+          strcmp(name, "research_plan") == 0 || strcmp(name, "research_record") == 0 ||
+          strcmp(name, "research_conclude") == 0;
 }
 
 /**
@@ -58,7 +59,8 @@ static inline bool research_tool_is_research_only(const char *name) {
    if (name == NULL) {
       return false;
    }
-   return strcmp(name, "research_plan") == 0 || strcmp(name, "research_record") == 0;
+   return strcmp(name, "research_plan") == 0 || strcmp(name, "research_record") == 0 ||
+          strcmp(name, "research_conclude") == 0;
 }
 
 #endif /* RESEARCH_ALLOWLIST_H */

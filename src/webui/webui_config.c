@@ -1213,9 +1213,8 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
    }
 
    /* [research] — deep-research budgets + master switch. The parsed-but-not-yet-
-    * enforced fields (saturation_rounds/critic_max_rearm/capture_revisions) are
-    * applied here too so a hand-edited value round-trips, even though the panel
-    * doesn't surface them. */
+    * enforced fields (critic_max_rearm/capture_revisions) are applied here too so a
+    * hand-edited value round-trips, even though the panel doesn't surface them. */
    if (json_object_object_get_ex(payload, "research", &section)) {
       JSON_TO_CONFIG_BOOL(section, "enabled", config->research.enabled);
       JSON_TO_CONFIG_INT(section, "max_rounds", config->research.max_rounds);

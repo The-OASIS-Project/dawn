@@ -73,6 +73,10 @@ void research_budgets_load(research_budgets_t *out) {
    if (rc->min_sources > 0) {
       out->min_sources = rc->min_sources;
    }
+   /* saturation_rounds is clamped >= 0 at parse/POST; 0 legitimately means "off",
+    * so overlay it whenever the config differs from the compile-time default rather
+    * than gating on > 0 (which could never turn the stop off). */
+   out->saturation_rounds = rc->saturation_rounds;
 }
 
 /* Give up a run after this many CONSECUTIVE dispatch failures (provider 5xx /
@@ -95,7 +99,15 @@ static const char RESEARCH_SYSTEM_PROMPT[] =
     "the plan is empty, and again whenever a finding opens a new question worth answering.\n"
     "- research_record: record ONE factual finding — {claim (in your own words), source_url, "
     "quote (the exact supporting excerpt), question_id}. Record EVERY finding you want in the "
-    "report, each with its source.\n\n"
+    "report, each with its source.\n"
+    "- research_conclude: call when you have researched the brief thoroughly and further searching "
+    "would add little — you have answered the sub-questions you can, each with enough independent "
+    "sources. This ENDS the run and builds the report from your recorded findings. Call it once "
+    "you "
+    "are done rather than repeating near-empty rounds; do NOT call it before recording findings, "
+    "and "
+    "if a question simply cannot be answered, stop researching it and conclude rather than "
+    "looping.\n\n"
     "CRITICAL — attribute every finding to a question. research_plan returns a "
     "[qID] for each sub-question. When you record a finding, set question_id to the ID of the "
     "sub-question it answers. Progress is tracked PER QUESTION: a question closes only once it has "
@@ -213,6 +225,12 @@ const char *research_run_execute(struct session *s,
    const int max_rounds = b->max_rounds > 0 ? b->max_rounds : RESEARCH_DEFAULT_MAX_ROUNDS;
    int last_round = 0;
    int fail_streak = 0;
+   int prev_closed = -1; /* -1 so round 1 (closed >= 0) always counts as progress */
+   int no_progress_rounds = 0;
+
+   /* Clear any stale research_conclude signal before the loop reads it (the session
+    * is fresh from job_manager_begin, but reset defensively against reuse). */
+   session_research_reset_concluded(s);
 
    for (int round = 1; round <= max_rounds; round++) {
       last_round = round;
@@ -266,8 +284,33 @@ const char *research_run_execute(struct session *s,
        * meters are single-writer (this thread), so build `cur` locally instead of
        * reading back the row we just wrote. */
       int closed = 0, total = 0;
-      research_refresh_coverage(run_id, b->min_sources, &closed, &total);
+      int cov_rc = research_refresh_coverage(run_id, b->min_sources, &closed, &total);
       bool all_closed = (total > 0 && closed == total);
+
+      /* Saturation tracking: a round that closed NO new question made no coverage
+       * progress.  (It may have gathered sources toward not-yet-closed questions —
+       * but coverage, not raw fetching, is the convergence signal, and the agent can
+       * research_conclude when it judges it close; a dry round is otherwise the cue
+       * to stop rather than burn another round's budget.)  Advance the streak ONLY
+       * on a successful coverage read: a transient DB failure zeros `closed`, which
+       * would otherwise read as a dry round and (at saturation_rounds=1) trip a
+       * premature saturation stop on a mere DB hiccup.  Skip the round for
+       * saturation purposes, leaving the streak + baseline untouched. */
+      if (cov_rc == AUTH_DB_SUCCESS) {
+         if (prev_closed >= 0 && closed <= prev_closed) {
+            no_progress_rounds++;
+         } else {
+            no_progress_rounds = 0;
+         }
+         prev_closed = closed;
+      }
+
+      /* The agent's own completion signal, honored only once it has actually
+       * recorded findings: an empty research_conclude is the model bailing before
+       * doing the work, not a finished run, so the controller ignores it. */
+      int claims_so_far = 0;
+      research_db_claim_count(run_id, &claims_so_far);
+      bool concluded = session_research_is_concluded(s) && claims_so_far > 0;
 
       /* Observe/replay (§10): a per-round progress snapshot. Best-effort. */
       conv_event_emit(run0->conversation_id, run0->user_id, CONV_EVENT_RESEARCH_ROUND,
@@ -278,7 +321,7 @@ const char *research_run_execute(struct session *s,
       cur.rounds_run = round;
       cur.tool_calls = (int)queries;
       cur.input_tokens = (int64_t)tok_in;
-      stop_reason = research_should_stop(&cur, b, all_closed);
+      stop_reason = research_should_stop(&cur, b, all_closed, no_progress_rounds, concluded);
       if (stop_reason) {
          break;
       }

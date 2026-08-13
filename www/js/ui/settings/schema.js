@@ -2389,6 +2389,15 @@
                default: 2,
                advanced: true,
             },
+            saturation_rounds: {
+               type: 'number',
+               label: 'Stop After Dry Rounds',
+               min: 0,
+               max: 10,
+               hint: 'Stop when this many rounds in a row close no new question (diminishing returns). 0 disables.',
+               default: 1,
+               advanced: true,
+            },
          },
       },
       calendar: {

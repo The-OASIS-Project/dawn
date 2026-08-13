@@ -16,9 +16,10 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * In-loop deep-research tools: research_plan (seed the coverage ledger) and
- * research_record (record one evidence claim).  Reachable ONLY inside a research
- * session (session->research_run_id > 0) via the read-only tool allowlist; hidden
+ * In-loop deep-research tools: research_plan (seed the coverage ledger),
+ * research_record (record one evidence claim), and research_conclude (the agent
+ * signals the brief is covered).  Reachable ONLY inside a research session
+ * (session->research_run_id > 0) via the read-only tool allowlist; hidden
  * everywhere else.  See docs/DEEP_RESEARCH_DESIGN.md §7.
  */
 
@@ -34,6 +35,9 @@ int research_plan_tool_register(void);
 
 /** @brief Register research_record.  @return 0 on success. */
 int research_record_tool_register(void);
+
+/** @brief Register research_conclude.  @return 0 on success. */
+int research_conclude_tool_register(void);
 
 #ifdef __cplusplus
 }
