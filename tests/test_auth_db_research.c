@@ -139,6 +139,42 @@ static void test_questions(void) {
    TEST_ASSERT_EQUAL_INT64(q1, out[2].parent_qid); /* sub links to A */
 }
 
+/* ── question_belongs: validate a model-supplied question_id against its run ───── */
+
+static void test_question_belongs(void) {
+   /* A second run needs its own conversation: research_runs.conversation_id is
+    * UNIQUE and FK-constrained to a real conversations row. */
+   int64_t conv_b = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "research conv b", &conv_b));
+   int64_t run_a = 0, run_b = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_run_create(alice_id, conv, "a", "web", &run_a));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_run_create(alice_id, conv_b, "b", "web", &run_b));
+
+   int64_t qa = 0, qb = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_add(run_a, "in A", 0, &qa));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_add(run_b, "in B", 0, &qb));
+
+   bool belongs = false;
+   /* A question belongs to its own run. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_belongs(run_a, qa, &belongs));
+   TEST_ASSERT_TRUE(belongs);
+   /* ...but NOT to a different run (the cross-run de-attribution case). */
+   belongs = true;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_belongs(run_a, qb, &belongs));
+   TEST_ASSERT_FALSE(belongs);
+   /* A nonexistent id reads clean-false, never an error. */
+   belongs = true;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_belongs(run_a, 999999, &belongs));
+   TEST_ASSERT_FALSE(belongs);
+   /* Bad args are rejected and leave *out false. */
+   belongs = true;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_INVALID, research_db_question_belongs(run_a, 0, &belongs));
+   TEST_ASSERT_FALSE(belongs);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_INVALID, research_db_question_belongs(run_a, qa, NULL));
+}
+
 /* ── coverage = COUNT(DISTINCT source_url): dedup + NULL exclusion ───────────── */
 
 static void test_coverage_distinct_and_null(void) {
@@ -296,6 +332,7 @@ int main(void) {
    RUN_TEST(test_run_mode_default_and_unique);
    RUN_TEST(test_run_setters);
    RUN_TEST(test_questions);
+   RUN_TEST(test_question_belongs);
    RUN_TEST(test_coverage_distinct_and_null);
    RUN_TEST(test_claims_batch_count_list);
    RUN_TEST(test_question_claims);

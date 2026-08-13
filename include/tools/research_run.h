@@ -46,7 +46,7 @@ struct session; /* core/session_manager.h — full type only needed in the .c */
 /* P0 budget/shape defaults — the single source of truth for both the compile-
  * time fallback (research_budgets_defaults) and the [research] config defaults
  * (config_defaults.c, which includes the same leaf header).  See research_defaults.h. */
-#include "tools/research_defaults.h"
+#include "config/research_defaults.h"
 
 /* Hard bound on how many ledger questions the core loads at once (digest +
  * coverage refresh).  A run with more than this many questions is pathological;

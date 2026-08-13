@@ -33,6 +33,7 @@
 
 #include "auth/auth_db.h"
 #include "logging.h"
+#include "utils/string_utils.h" /* sanitize_utf8_for_json */
 
 /* Bounds for the synthesis render. Claims per run are structurally bounded (a
  * few rounds x a handful of questions x a few claims); the caller-allocated
@@ -299,6 +300,18 @@ int research_render_report(int64_t run_id, const char *brief, char **out_markdow
    }
    int cn = 0;
    research_db_claim_list(run_id, claims, ccap, &cn);
+   if (cn == 0 && ccount > 0) {
+      /* claim_count saw rows but the list read returned none — a transient
+       * lock/IO fault, not an empty run.  Don't render (and let the caller
+       * persist) a findings-less report that reads as authoritative when the
+       * ledger actually holds evidence; surface the read failure instead. */
+      OLOG_WARNING("research_render_report: run %lld count=%d but list returned 0 — read fault",
+                   (long long)run_id, ccount);
+      free(claims);
+      digest_append(buf, cap, &off, "\n_The findings for this brief could not be read._\n");
+      *out_markdown = buf;
+      return AUTH_DB_SUCCESS;
+   }
    if (cn < ccount) {
       OLOG_WARNING("research_render_report: run %lld has %d claims; report capped at %d",
                    (long long)run_id, ccount, ccap);
@@ -344,6 +357,15 @@ int research_render_report(int64_t run_id, const char *brief, char **out_markdow
       digest_append(buf, cap, &off,
                     "\n\n_(Report truncated — too many findings to render in full.)_\n");
    }
+
+   /* The claim text is model-authored over non-ASCII web content, and both
+    * digest_append's byte-bounded vsnprintf and the truncation rewind above can
+    * land mid-codepoint.  This report is stored as a note and later emitted into
+    * JSON WS frames (doc-library), where a malformed UTF-8 byte makes the browser's
+    * JSON.parse throw and drops the whole frame (project invariant
+    * tool_desc_utf8_truncation).  Sanitize once: valid multi-byte sequences are
+    * preserved, only invalid/truncated ones become '?'. */
+   sanitize_utf8_for_json(buf);
 
    *out_markdown = buf;
    return AUTH_DB_SUCCESS;

@@ -45,6 +45,7 @@
 #include "memory/memory_note_bridge.h"
 #include "tools/document_index_pipeline.h"
 #include "tools/research_run.h"
+#include "utils/string_utils.h" /* sanitize_utf8_for_json */
 
 /* Runtime budgets: compile-time defaults overlaid with [research] config.  Kept
  * here (not in the deterministic core research_run.c) because it reads g_config,
@@ -126,29 +127,15 @@ static void research_report_label(int64_t run_id, const char *brief, char *out, 
       unsigned char ch = (unsigned char)brief[i];
       clean[j++] = (ch == '\n' || ch == '\r' || ch == '\t') ? ' ' : brief[i];
    }
-   /* The byte cap above can land mid-codepoint on a multi-byte (non-ASCII) brief,
-    * leaving a dangling partial UTF-8 sequence.  This label becomes the note
-    * filename, emitted into a JSON WS frame — malformed UTF-8 there makes the
-    * browser's JSON.parse throw and drops the whole frame (project invariant
-    * tool_desc_utf8_truncation).  If the final codepoint is incomplete, drop it:
-    * back up to the last lead/ASCII byte, and if the full sequence it starts does
-    * not fit within what we kept, cut at that boundary. */
-   if (j > 0) {
-      size_t start = j - 1;
-      while (start > 0 && (((unsigned char)clean[start]) & 0xC0) == 0x80) {
-         start--; /* skip continuation bytes back to the lead/ASCII byte */
-      }
-      unsigned char lead = (unsigned char)clean[start];
-      size_t need = (lead < 0x80)    ? 1
-                    : (lead >= 0xF0) ? 4
-                    : (lead >= 0xE0) ? 3
-                    : (lead >= 0xC0) ? 2
-                                     : 1; /* stray continuation at start → drop it */
-      if (start + need != j) {
-         j = start; /* incomplete final codepoint — cut it off */
-      }
-   }
    clean[j] = '\0';
+   /* The byte cap above can land mid-codepoint on a multi-byte brief, and interior
+    * malformed bytes pass straight through — either leaves invalid UTF-8 in the
+    * note filename, which is emitted into a JSON WS frame (doc-library) where it
+    * breaks the browser's JSON.parse and drops the whole list frame (project
+    * invariant tool_desc_utf8_truncation).  Sanitize the whole label in one pass:
+    * valid sequences kept, invalid/truncated ones — including a trailing partial —
+    * become '?'.  (Covers the interior case the earlier trailing-only trim missed.) */
+   sanitize_utf8_for_json(clean);
    snprintf(out, out_size, "Research #%lld: %s", (long long)run_id, clean);
 }
 

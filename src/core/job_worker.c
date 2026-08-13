@@ -233,21 +233,18 @@ static void job_worker_run(job_work_t *work) {
 
    time_t now = time(NULL);
 
-   /* Disposition. `user_cancelled` is the AUTHORITATIVE "a human asked to stop"
-    * signal, and the disposition keys on it rather than the bare
-    * `cancel_requested` flag. Why: job_manager_cancel() sets user_cancelled
-    * under the pool lock BEFORE it raises cancel_requested (job_manager.c), and
-    * claim_reaped() reads it under the same lock — so it is race-free and it is
-    * set by the human-cancel path ONLY, never by the runtime reap or the
-    * shutdown sweep (both of which also raise cancel_requested). Reading
-    * cancel_requested here instead was a state-ordering bug: a Cancel landing in
-    * the window between that read and the claim left cancel_requested's snapshot
-    * false while user_cancelled was true, so the cancel branch was skipped and
-    * the job the user stopped got filed "failed: no response" (and, for a
-    * reinvoke_parent job, re-engaged). claim_reaped() also stops the reap clock,
-    * so nothing can flag this job while the terminal writes below are in flight. */
-   bool user_cancelled = false;
-   bool reaped = job_manager_claim_reaped(s, &user_cancelled);
+   /* Disposition. Resolve the three authoritative signals up front via the shared
+    * helper (job_disposition_signals): `user_cancelled` (a human asked to stop —
+    * race-free because job_manager_cancel() sets it under the pool lock BEFORE
+    * raising cancel_requested, and claim_reaped reads it under the same lock; keying
+    * on the bare cancel_requested snapshot instead once filed real Cancels/Ctrl+C as
+    * "failed: no response", conv 1038), `reaped` (the runtime deadline fired;
+    * claim_reaped also stops the reap clock so nothing re-flags this job mid-
+    * teardown), and `shutdown_stop` (the daemon pulled the rug). The mapping to
+    * status strings below stays job_worker-specific — it keys 'done' on a produced
+    * answer, which research_worker (no answer) does not. */
+   bool user_cancelled = false, reaped = false, shutdown_stop = false;
+   job_disposition_signals(s, &user_cancelled, &reaped, &shutdown_stop);
    bool have_answer = (response != NULL && response[0] != '\0');
 
    /* Persist a produced answer no matter how the turn ended. A job that finished
@@ -307,26 +304,12 @@ static void job_worker_run(job_work_t *work) {
                                          response);
    }
 
-   /* The daemon pulled the rug, as opposed to a human asking for the stop.
-    *
-    * Deliberately keys on job_manager_is_shutting_down(), NOT on cancel_requested.
-    * On SIGINT a background/job tool loop is stopped by job_manager_shutdown()
-    * setting THIS session's cancel_requested: the loop polls only the session
-    * flag for a job session (llm_tool_loop.c step 11 via llm_interrupt_ctx_t),
-    * never the global llm_interrupt_requested — that global flag is the
-    * foreground voice barge-in, which a job must survive so one local wake word
-    * can't fail every concurrent job.  We don't gate this branch on
-    * cancel_requested because a user Cancel sets it too; is_shutting_down() +
-    * !user_cancelled is what isolates the daemon-pulled-the-rug case.  (History:
-    * keying on cancel_requested alone once filed every real Ctrl+C as "failed:
-    * no response from model" — live-verified on conv 1038.)  Shutting down plus
-    * no answer IS an interruption, however the stop arrived.
-    *
-    * The !user_cancelled term stays: a Cancel that lands as the daemon goes down
-    * would otherwise be filed 'interrupted', which is tool-resumable, so the LLM
-    * could quietly restart work the user just stopped. */
-   const bool shutdown_stop = !reaped && !user_cancelled && job_manager_is_shutting_down();
-
+   /* `shutdown_stop` (the daemon pulled the rug, vs a human asking for the stop) was
+    * resolved with the other two signals above.  Its !user_cancelled term matters
+    * here: a Cancel that lands as the daemon goes down must file as 'cancelled', not
+    * 'interrupted' (which is tool-resumable) so the LLM can't quietly restart work
+    * the user just stopped.  Shutting down plus no answer IS an interruption, however
+    * the stop arrived. */
    if (shutdown_stop && !have_answer) {
       /* Recording this as 'cancelled' would be wrong twice over: it suppresses
        * the completion notice on the grounds that the user asked for the stop,

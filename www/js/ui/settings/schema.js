@@ -2363,7 +2363,10 @@
                type: 'number',
                label: 'Max Input Tokens Per Run',
                min: 1000,
-               max: 100000000,
+               // UI ceiling kept legible; the server clamp (config_clamp_research) is
+               // the real 100M backstop, so a hand-edited dawn.toml can still go higher.
+               max: 2000000,
+               step: 50000,
                hint: 'Per-run input-token ceiling — the real cost control',
                default: 400000,
                advanced: true,

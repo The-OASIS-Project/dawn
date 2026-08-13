@@ -35,6 +35,23 @@ job_provider_class_t job_provider_from_default(void) {
    return (defcfg.type == LLM_LOCAL) ? JOB_PROVIDER_LOCAL : JOB_PROVIDER_CLOUD;
 }
 
+void job_disposition_signals(session_t *s,
+                             bool *user_cancelled,
+                             bool *reaped,
+                             bool *shutdown_stop) {
+   bool uc = false;
+   bool rp = job_manager_claim_reaped(s, &uc);
+   if (user_cancelled != NULL) {
+      *user_cancelled = uc;
+   }
+   if (reaped != NULL) {
+      *reaped = rp;
+   }
+   if (shutdown_stop != NULL) {
+      *shutdown_stop = !rp && !uc && job_manager_is_shutting_down();
+   }
+}
+
 const char *job_spawn_origin_string(void) {
    const session_t *ctx = session_get_command_context();
    if (ctx == NULL) {

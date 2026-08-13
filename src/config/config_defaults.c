@@ -27,8 +27,8 @@
 #include <string.h>
 
 #include "config/dawn_config.h"
+#include "config/research_defaults.h" /* RESEARCH_DEFAULT_* — single source for [research] defaults */
 #include "memory/memory_db.h"
-#include "tools/research_defaults.h" /* RESEARCH_DEFAULT_* — single source for [research] defaults */
 
 /* =============================================================================
  * Global Configuration Instances
@@ -596,7 +596,7 @@ void config_set_defaults(dawn_config_t *config) {
 
    /* Deep research — master switch OFF by default (opt-in; the tool is compiled in
     * but refuses until enabled).  Budgets come from the SHARED RESEARCH_DEFAULT_*
-    * constants (tools/research_defaults.h), the same source research_budgets_defaults()
+    * constants (config/research_defaults.h), the same source research_budgets_defaults()
     * uses — config default and compile-time fallback cannot drift. */
    config->research.enabled = false;
    config->research.max_rounds = RESEARCH_DEFAULT_MAX_ROUNDS;

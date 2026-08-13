@@ -1643,6 +1643,19 @@ int research_db_question_list(int64_t run_id, research_question_t *out, int max,
  */
 int research_db_question_coverage(int64_t run_id, int64_t qid, int *distinct_sources_out);
 
+/**
+ * @brief Does question @p qid belong to run @p run_id?
+ *
+ * Existence check used to validate a model-supplied question_id before storing a
+ * claim against it: an id that names no question in this run is de-attributed to 0
+ * (general) so it neither silently fails coverage nor spawns an orphan report
+ * heading.  Sets *@p out true only on a confirmed match.
+ *
+ * @return AUTH_DB_SUCCESS with *out set on a clean read; AUTH_DB_INVALID on a bad
+ *         argument; AUTH_DB_FAILURE on a DB error (leaves *out false).
+ */
+int research_db_question_belongs(int64_t run_id, int64_t qid, bool *out);
+
 /* ── Claims (evidence) ─────────────────────────────────────────────────────── */
 
 /**

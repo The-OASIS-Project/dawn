@@ -88,10 +88,18 @@ static void research_deliver_to_parent(int64_t job_conv, int user_id) {
    research_db_claim_count(run.id, &claim_count);
 
    char msg[RESEARCH_BRIEF_MAX + 256];
-   if (claim_count > 0) {
+   if (claim_count > 0 && run.report_doc_id > 0) {
       snprintf(msg, sizeof(msg),
                "🔍 Deep research complete — \"%s\".\n\nI gathered %d finding%s and saved a cited "
                "report to your notes. Ask me about it, or open it in your documents.",
+               run.brief, claim_count, claim_count == 1 ? "" : "s");
+   } else if (claim_count > 0) {
+      /* Findings gathered, but the note/document save failed (report_doc_id stayed
+       * 0) — don't claim a report is in notes when it isn't.  The evidence is still
+       * in the ledger, so offer to summarize rather than point at a missing doc. */
+      snprintf(msg, sizeof(msg),
+               "🔍 Deep research complete — \"%s\".\n\nI gathered %d finding%s, but couldn't save "
+               "the report to your notes. Ask me and I'll summarize what I found.",
                run.brief, claim_count, claim_count == 1 ? "" : "s");
    } else {
       snprintf(msg, sizeof(msg),
@@ -182,14 +190,13 @@ static void research_worker_run(research_work_t *work) {
 
    time_t now = time(NULL);
 
-   /* Disposition — same authoritative signals job_worker uses, because the loop's
-    * "cancelled" is ambiguous: a user Cancel, a runtime reap, and daemon shutdown
-    * all arrive as the session cancel flag.  job_manager_claim_reaped() resolves
-    * reap-vs-user-cancel under the pool lock (and stops the reap clock), and
-    * is_shutting_down() isolates the daemon-pulled-the-rug case. */
-   bool user_cancelled = false;
-   bool reaped = job_manager_claim_reaped(s, &user_cancelled);
-   const bool shutdown_stop = !reaped && !user_cancelled && job_manager_is_shutting_down();
+   /* Disposition — resolve the three authoritative signals via the shared helper
+    * (identical to job_worker's), because the loop's "cancelled" is ambiguous: a
+    * user Cancel, a runtime reap, and daemon shutdown all arrive as the session
+    * cancel flag.  The status-string MAPPING below stays research-specific (keyed on
+    * the controller's stop reason, not on a produced answer). */
+   bool user_cancelled = false, reaped = false, shutdown_stop = false;
+   job_disposition_signals(s, &user_cancelled, &reaped, &shutdown_stop);
 
    const char *job_status;
    const char *job_err = NULL;

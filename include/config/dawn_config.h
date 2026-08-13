@@ -959,7 +959,7 @@ typedef struct {
  * Per-run budgets + the master switch for the deep_research tool (a research run
  * IS a background job, so it also obeys the [jobs] caps).  The budget defaults
  * come from the SHARED RESEARCH_DEFAULT_* constants in
- * include/tools/research_defaults.h — a pure-macro leaf header both this Layer-0
+ * include/config/research_defaults.h — a pure-macro leaf header both this Layer-0
  * config and the Layer-3 core (research_run.c) include, so the config default and
  * the compile-time fallback are ONE source and cannot drift.
  * research_budgets_load() applies these over research_budgets_defaults() at run
@@ -968,7 +968,8 @@ typedef struct {
 typedef struct {
    bool enabled;       /* Master switch for the deep_research tool (default OFF) */
    int max_rounds;     /* Hard per-run round cap (§6.1) */
-   int max_tool_calls; /* Hard per-run tool-call cap (§6.1) */
+   int max_tool_calls; /* Per-run cap; metered as LLM round-trips, a loose proxy for
+                        * tool calls — max_input_tokens is the real spend control (§6.1) */
    /* Hard per-run input-token / cost ceiling (§6.1 — the real spend control).
     * Deliberately `int` though research_budgets_t.max_input_tokens is int64: the
     * clamp bounds this to 100M (« INT32_MAX), so it uses the plain int config

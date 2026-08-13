@@ -158,6 +158,33 @@ static char *research_plan_callback(const char *action, char *value, int *should
  * research_record — record one evidence claim
  * ============================================================================= */
 
+/* Normalize a model-supplied question_id to the integer ledger id, tolerating the
+ * exact token the round digest SHOWS the model ("[q5]" / "q5") as well as a bare
+ * JSON int or a numeric string.  json_object_get_int64() returns 0 for a
+ * non-numeric string, so a model that echoes the displayed "[q5]" token would
+ * otherwise de-attribute EVERY finding to 0 (general) — the first-live-run
+ * "0 answered" failure the attribution prompt was meant to close, reachable again
+ * through the parser.  Returns 0 (general) when nothing positive-numeric is found. */
+static int64_t research_parse_question_id(struct json_object *j_qid) {
+   if (!j_qid) {
+      return 0;
+   }
+   if (json_object_is_type(j_qid, json_type_int)) {
+      int64_t v = json_object_get_int64(j_qid);
+      return v > 0 ? v : 0;
+   }
+   const char *s = json_object_get_string(j_qid);
+   if (!s) {
+      return 0;
+   }
+   while (*s == ' ' || *s == '[' || *s == 'q' || *s == 'Q') {
+      s++; /* strip the "[q" / "q" wrapper the digest renders around the id */
+   }
+   char *end = NULL;
+   long long v = strtoll(s, &end, 10);
+   return (end != s && v > 0) ? (int64_t)v : 0;
+}
+
 static char *research_record_callback(const char *action, char *value, int *should_respond) {
    (void)action;
    if (should_respond) {
@@ -208,7 +235,33 @@ static char *research_record_callback(const char *action, char *value, int *shou
    const char *source_url = j_url ? json_object_get_string(j_url) : NULL;
    const char *source_kind = j_kind ? json_object_get_string(j_kind) : NULL;
    const char *quote = j_quote ? json_object_get_string(j_quote) : NULL;
-   int64_t question_id = j_qid ? json_object_get_int64(j_qid) : 0;
+
+   /* Egress gate on source_url: it is web-derived and lands verbatim in the report
+    * note (later RAG-retrievable into a full-tool session), so it goes through the
+    * same injection-command filter as the claim/question text — the §11.2 "every
+    * stored output field is gated" invariant, which the URL had slipped.  A flagged
+    * URL is dropped to NULL: the finding itself is still worth keeping, just
+    * without the tainted citation. */
+   if (source_url && source_url[0] && memory_filter_check_injection_commands(source_url)) {
+      OLOG_WARNING(
+          "research_record: dropped a source_url flagged by the injection filter (run %lld)",
+          (long long)run_id);
+      source_url = NULL;
+   }
+
+   /* Attribute to the plan question the model named, tolerating the "[q5]" token
+    * shape (research_parse_question_id), then VALIDATE it belongs to this run: an
+    * id naming no question here (a hallucinated number, or one from another run) is
+    * de-attributed to 0 rather than stored as an orphan that closes nothing and
+    * later spawns a duplicate "General findings" heading in the report. */
+   int64_t question_id = research_parse_question_id(j_qid);
+   if (question_id > 0) {
+      bool belongs = false;
+      if (research_db_question_belongs(run_id, question_id, &belongs) != AUTH_DB_SUCCESS ||
+          !belongs) {
+         question_id = 0;
+      }
+   }
 
    int rc = research_db_claim_add(run_id, question_id, claim, source_url, source_kind, quote,
                                   round);

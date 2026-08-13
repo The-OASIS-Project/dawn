@@ -28,9 +28,12 @@
 #ifndef JOB_DISPATCH_H
 #define JOB_DISPATCH_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "core/job_manager.h" /* job_provider_class_t */
+
+struct session;
 
 #ifdef __cplusplus
 extern "C" {
@@ -41,6 +44,35 @@ extern "C" {
  * @return JOB_PROVIDER_LOCAL for a local LLM, JOB_PROVIDER_CLOUD otherwise.
  */
 job_provider_class_t job_provider_from_default(void);
+
+/**
+ * @brief Resolve the three AUTHORITATIVE terminal-disposition signals for a
+ *        finished worker turn, race-free and in one place.
+ *
+ * The tool loop's own "cancelled"/empty result is ambiguous: a human Cancel, the
+ * runtime reap, and daemon shutdown all arrive as the session cancel flag.  This
+ * disambiguates them the way both workers must:
+ *   - @p user_cancelled — a human asked to stop.  job_manager_cancel() sets this
+ *     under the pool lock BEFORE raising cancel_requested, and claim_reaped() reads
+ *     it under the same lock, so keying on it (never the bare cancel_requested
+ *     snapshot) is race-free.  Reading cancel_requested instead once filed real
+ *     Cancels/Ctrl+C as "failed: no response" (live-verified, conv 1038).
+ *   - @p reaped — the runtime deadline fired.  claim_reaped() also STOPS the reap
+ *     clock, so nothing can re-flag the job while the terminal writes are in flight.
+ *   - @p shutdown_stop — the daemon pulled the rug (!reaped && !user_cancelled &&
+ *     shutting down), isolated so it neither suppresses a completion notice as a
+ *     user-cancel would nor lands in a human-only-resumable state.
+ *
+ * Call ONCE per finished turn (it claims the reap under the lock).  Each worker
+ * then maps these to its own status strings — job_worker keys 'done' on a produced
+ * answer, research_worker on the controller's stop reason — so the string mapping
+ * stays per-worker; only this shared signal resolution is extracted.  Any out-ptr
+ * may be NULL.
+ */
+void job_disposition_signals(struct session *s,
+                             bool *user_cancelled,
+                             bool *reaped,
+                             bool *shutdown_stop);
 
 /**
  * @brief Resolve the spawn surface for the current command context, for
