@@ -108,6 +108,11 @@ typedef struct {
                                               *   only, NOT the global wake-word/Ctrl+C interrupt.
                                               *   Zero-value default (foreground) preserves the
                                               *   legacy global-only behavior for every caller. */
+   int64_t cumulative_input_token_ceiling;   /**< Cumulative-session input-token ceiling (0 =
+                                              *   unlimited): stop the turn once the SESSION's total
+                                              *   input tokens (not this turn's) reach this.  Set only
+                                              *   by the research controller (per-round overshoot
+                                              *   guard); 0 for every other caller. */
 } llm_tool_loop_params_t;
 
 /**

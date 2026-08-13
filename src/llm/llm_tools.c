@@ -1014,6 +1014,12 @@ static bool is_tool_enabled_for_session(const tool_definition_t *t, bool is_remo
     * Both are the research_worker's session-setup responsibility (Step 6), with a
     * regression test that a research-context command_execute is refused. */
    session_t *ctx = session_get_command_context();
+   /* No-tools turn (e.g. the deep-research synthesis turn): deny EVERY tool so the
+    * turn is pure text.  Checked before the allowlist so it also suppresses the read
+    * tools. */
+   if (ctx != NULL && session_tools_suppressed(ctx)) {
+      return false;
+   }
    bool research_mode = (ctx != NULL && ctx->research_run_id > 0);
    if (research_mode) {
       return research_tool_is_allowlisted(t->name);

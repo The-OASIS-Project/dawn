@@ -32,11 +32,13 @@
 
 #define RESEARCH_DEFAULT_MAX_ROUNDS 6
 #define RESEARCH_DEFAULT_MAX_TOOL_CALLS 40
-/* 400k: one round that url_fetches several full pages easily runs to ~250k input
- * tokens, so a tighter ceiling stops a run after a single round before the
- * multi-round loop (and per-question coverage) can engage.  Live-tuned from a
- * first-run 248k/1-round token_budget stop. */
-#define RESEARCH_DEFAULT_MAX_INPUT_TOKENS 400000
+/* 1M: a HIGH runaway backstop, not the normal stop.  The natural-end signals
+ * (concluded / coverage / saturation / unanswerable) are what should end a healthy
+ * run — well under this — so the ceiling only catches a genuine runaway (a loop
+ * that never converges or self-terminates).  Set it low and it guillotines a
+ * productive run mid-progress (live: a 400k ceiling cut a run off at 7/8); set it
+ * high and, because the natural-ends fire first, it is rarely reached. */
+#define RESEARCH_DEFAULT_MAX_INPUT_TOKENS 1000000
 #define RESEARCH_DEFAULT_MIN_SOURCES 2
 #define RESEARCH_DEFAULT_ROUND_DIGEST_MAX_CHARS 6000
 #define RESEARCH_DEFAULT_TOP_K_QUESTIONS 8

@@ -503,6 +503,23 @@
    font-weight: 600;
 }
 
+/* Research progress TRAIL: a run emits a per-round marker + one row per finding
+ * (~35). The default centered, bordered, fit-content pill is a one-shot-status
+ * treatment; reused for a trail it stacks ~35 boxes marching down the transcript.
+ * This modifier makes those rows read as a left-aligned list instead: full-width,
+ * un-boxed, tight vertical rhythm. The tone glyph (::before ✓/—) stays as the row
+ * marker. */
+.agent-event-line {
+   width: auto;
+   max-width: 100%;
+   margin: 2px 0;
+   padding: 2px 0;
+   border: none;
+   background: none;
+   text-align: left;
+   font-weight: 400;
+}
+
 .agent-event-ok {
    color: var(--success); /* #22c55e on --bg-tertiary ≈ 5.9:1 — passes AA */
    border-color: var(--success-subtle);

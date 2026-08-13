@@ -563,6 +563,33 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
       session_t *loop_session = session_get_for_reconnect(params->session_id);
       if (loop_session) {
          llm_context_async_merge(loop_session, params->conversation_history);
+
+         /* Step 0b: cumulative-session input-token ceiling (opt-in; 0 = unlimited).
+          * Input tokens are recorded per provider response (session_record_query), so
+          * at the top of this iteration the session total reflects spend through the
+          * previous iteration.  Stopping HERE bounds overshoot to a single
+          * iteration's tokens rather than a whole multi-tool turn's (the deep-
+          * research per-round guard).  This check is only ever reached BETWEEN
+          * iterations (a completed iteration with no tool calls already returned its
+          * text at step 4), so there is no partial answer to hand back — return an
+          * empty string (never NULL barring OOM) so the caller doesn't misread a
+          * budget stop as a provider failure. */
+         if (params->cumulative_input_token_ceiling > 0) {
+            uint64_t tok = 0;
+            session_metrics_totals(loop_session, &tok, NULL);
+            if (tok >= (uint64_t)params->cumulative_input_token_ceiling) {
+               session_release(loop_session);
+               OLOG_INFO("Tool loop: session input tokens %llu reached ceiling %lld at "
+                         "iteration %d — stopping turn",
+                         (unsigned long long)tok, (long long)params->cumulative_input_token_ceiling,
+                         iteration);
+               char *empty = malloc(1);
+               if (empty != NULL) {
+                  empty[0] = '\0';
+               }
+               return empty;
+            }
+         }
          session_release(loop_session);
       }
 

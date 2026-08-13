@@ -534,6 +534,36 @@ int research_db_question_belongs(int64_t run_id, int64_t qid, bool *out) {
    return AUTH_DB_SUCCESS;
 }
 
+int research_db_question_get(int64_t run_id, int64_t qid, research_question_t *out) {
+   if (!out) {
+      return AUTH_DB_INVALID;
+   }
+   memset(out, 0, sizeof(*out));
+   if (run_id <= 0 || qid <= 0) {
+      return AUTH_DB_INVALID;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "SELECT " RESEARCH_QUESTION_COLS
+                               " FROM research_questions WHERE id=? AND run_id=?",
+                               -1, &st, NULL);
+   if (rc != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(st, 1, qid);
+   sqlite3_bind_int64(st, 2, run_id);
+   int result = AUTH_DB_NOT_FOUND;
+   if (sqlite3_step(st) == SQLITE_ROW) {
+      res_unpack_question(st, out);
+      result = AUTH_DB_SUCCESS;
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   return result;
+}
+
 /* =============================================================================
  * Claims (evidence)
  * ============================================================================= */

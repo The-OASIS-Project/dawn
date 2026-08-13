@@ -62,7 +62,6 @@ struct session; /* core/session_manager.h — full type only needed in the .c */
  *  later overridden from [research] config (Step 9). */
 typedef struct {
    int max_rounds;             /**< stop after this many rounds (§6.1) */
-   int max_tool_calls;         /**< stop past this many tool calls (§6.1) */
    int64_t max_input_tokens;   /**< the real cost ceiling (§6.1, eff M4) */
    int min_sources;            /**< distinct source_urls to call a question answered (§6.2) */
    int round_digest_max_chars; /**< cap on the reconstructed round prompt (§4a.2, eff H1) */
@@ -141,10 +140,11 @@ int research_render_round_digest(int64_t run_id,
                                  size_t out_size);
 
 /**
- * @brief Render the final report as markdown — a view over research_claims
+ * @brief Render the EVIDENCE section as markdown — a view over research_claims
  *        grouped by question (§4/§8).  Reads the persisted claim rows (not any
- *        round digest), so compression cannot lose evidence.  Allocates
- *        *out_markdown (caller frees).
+ *        round digest), so compression cannot lose evidence.  The controller layers
+ *        a written prose answer on top of this (research_run_loop.c synthesis) to
+ *        form the final report.  Allocates *out_markdown (caller frees).
  *
  * @return AUTH_DB_SUCCESS (even with zero claims — emits a "no findings" note),
  *         or a failure code (*out_markdown left NULL).
@@ -156,7 +156,8 @@ int research_render_report(int64_t run_id, const char *brief, char **out_markdow
  *
  * setup (research system prompt) → round loop { reset history to [system] +
  * bounded digest + dispatch with skip_prompt_rebuild + meter tokens + refresh
- * coverage + P0 stop decision } → synthesize (render report → final revision).
+ * coverage + stop decision } → synthesize (no-tools LLM turn writes the answer from
+ * the evidence → final revision + notes + job-conversation copy).
  * The session MUST already be a bare SESSION_TYPE_JOB session (job_manager_begin)
  * run native-tools-only with legacy <command> execution disabled — the read-only
  * allowlist gates only the native tool path (§11 HIGH-1).
@@ -164,12 +165,16 @@ int research_render_report(int64_t run_id, const char *brief, char **out_markdow
  * The caller (research_worker) owns the session lifecycle + the terminal job
  * transition; this returns the terminal stop_reason.
  *
+ * @param out_summary  optional (may be NULL): receives a heap-allocated short lead
+ *                     from the synthesized report (caller frees), for the chat
+ *                     completion message.  Set to NULL when there is no synthesis.
  * @return a static stop_reason literal: "concluded" | "coverage" | "saturation" |
  *         "budget" | "token_budget" | "cancelled" | "failed".
  */
 const char *research_run_execute(struct session *s,
                                  const research_run_t *run0,
-                                 const research_budgets_t *b);
+                                 const research_budgets_t *b,
+                                 char **out_summary);
 
 #ifdef __cplusplus
 }

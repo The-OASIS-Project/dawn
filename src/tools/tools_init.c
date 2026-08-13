@@ -196,6 +196,9 @@ int tools_register_all(void) {
    if (research_conclude_tool_register() != 0) {
       OLOG_WARNING("Failed to register research_conclude tool");
    }
+   if (research_mark_unanswerable_tool_register() != 0) {
+      OLOG_WARNING("Failed to register research_mark_unanswerable tool");
+   }
 
 
 #ifdef DAWN_ENABLE_HOMEASSISTANT_TOOL

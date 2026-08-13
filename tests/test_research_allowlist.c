@@ -36,12 +36,15 @@ void setUp(void) {
 void tearDown(void) {
 }
 
-/* The four — and ONLY these four — tools a research loop may run. */
+/* The tools — and ONLY these — a research loop may run: two reads + the ledger/
+ * control writers (plan/record/conclude/mark_unanswerable). */
 static void test_allowlisted_tools_admitted(void) {
    TEST_ASSERT_TRUE(research_tool_is_allowlisted("search"));
    TEST_ASSERT_TRUE(research_tool_is_allowlisted("url_fetch"));
    TEST_ASSERT_TRUE(research_tool_is_allowlisted("research_plan"));
    TEST_ASSERT_TRUE(research_tool_is_allowlisted("research_record"));
+   TEST_ASSERT_TRUE(research_tool_is_allowlisted("research_conclude"));
+   TEST_ASSERT_TRUE(research_tool_is_allowlisted("research_mark_unanswerable"));
 }
 
 /* Every side-effecting / outward-facing tool must be refused — these are the
@@ -69,11 +72,14 @@ static void test_no_partial_or_null_match(void) {
    TEST_ASSERT_FALSE(research_tool_is_allowlisted(NULL));
 }
 
-/* research_only is a strict SUBSET: the two ledger writers, never the two reads —
- * these are the tools that must be hidden from every NON-research session. */
+/* research_only is a strict SUBSET: the four ledger/control tools (plan / record /
+ * conclude / mark_unanswerable), never the two reads — these must be hidden from
+ * every NON-research session. */
 static void test_research_only_subset(void) {
    TEST_ASSERT_TRUE(research_tool_is_research_only("research_plan"));
    TEST_ASSERT_TRUE(research_tool_is_research_only("research_record"));
+   TEST_ASSERT_TRUE(research_tool_is_research_only("research_conclude"));
+   TEST_ASSERT_TRUE(research_tool_is_research_only("research_mark_unanswerable"));
    /* Reads are allowlisted-in-research but NOT research-only (visible elsewhere). */
    TEST_ASSERT_FALSE(research_tool_is_research_only("search"));
    TEST_ASSERT_FALSE(research_tool_is_research_only("url_fetch"));

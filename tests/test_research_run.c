@@ -107,15 +107,10 @@ static void test_should_stop_decision(void) {
    r.rounds_run = b.max_rounds;
    TEST_ASSERT_EQUAL_STRING("budget", research_should_stop(&r, &b, false, 0, false));
 
-   /* token ceiling hit → token_budget */
+   /* token ceiling hit → token_budget (max_tool_calls was retired — no tool-call fuse) */
    memset(&r, 0, sizeof(r));
    r.input_tokens = b.max_input_tokens + 1;
    TEST_ASSERT_EQUAL_STRING("token_budget", research_should_stop(&r, &b, false, 0, false));
-
-   /* tool-call budget hit → budget */
-   memset(&r, 0, sizeof(r));
-   r.tool_calls = b.max_tool_calls;
-   TEST_ASSERT_EQUAL_STRING("budget", research_should_stop(&r, &b, false, 0, false));
 
    /* saturation: one dry round (>= saturation_rounds=1) → saturation */
    memset(&r, 0, sizeof(r));

@@ -408,3 +408,38 @@ char *event_payload_research_stop(const char *stop_reason, int rounds, int claim
    json_object_put(root);
    return out;
 }
+
+char *event_payload_research_conclude(int round) {
+   struct json_object *root = json_object_new_object();
+   if (root == NULL) {
+      return NULL;
+   }
+   json_object_object_add(root, "round", json_object_new_int(round));
+   const char *rendered = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+   char *out = rendered ? strdup(rendered) : NULL;
+   json_object_put(root);
+   return out;
+}
+
+char *event_payload_research_unanswerable(int64_t question_id, const char *question) {
+   struct json_object *root = json_object_new_object();
+   if (root == NULL) {
+      return NULL;
+   }
+   json_object_object_add(root, "question_id", json_object_new_int64(question_id));
+   /* question text is model-authored — cap + sanitize before it reaches the WS frame. */
+   char *q = truncate_middle(question ? question : "");
+   if (q == NULL) {
+      json_object_put(root);
+      return NULL;
+   }
+   json_object_object_add(root, "question", json_object_new_string(q));
+   free(q);
+   const char *rendered = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+   char *out = rendered ? strdup(rendered) : NULL;
+   if (out != NULL) {
+      sanitize_utf8_for_json(out);
+   }
+   json_object_put(root);
+   return out;
+}

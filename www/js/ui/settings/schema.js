@@ -2350,25 +2350,21 @@
                default: 6,
                advanced: true,
             },
-            max_tool_calls: {
-               type: 'number',
-               label: 'Max Tool Calls Per Run',
-               min: 1,
-               max: 1000,
-               hint: 'Hard cap on searches + page fetches across a run',
-               default: 40,
-               advanced: true,
-            },
+            // max_tool_calls: RETIRED as a stop condition (redundant with max_rounds x the
+            // per-round iteration cap). Parsed/round-tripped for back-compat but not enforced,
+            // so — per CONFIGURATION_GUIDE — it is NOT surfaced here (a control that does
+            // nothing is worse than none).
             max_input_tokens: {
                type: 'number',
                label: 'Max Input Tokens Per Run',
-               min: 1000,
-               // UI ceiling kept legible; the server clamp (config_clamp_research) is
-               // the real 100M backstop, so a hand-edited dawn.toml can still go higher.
-               max: 2000000,
-               step: 50000,
-               hint: 'Per-run input-token ceiling — the real cost control',
-               default: 400000,
+               // min on the 100k step grid so the default/max sit on clean values; the
+               // server clamp (config_clamp_research, floor 1000) is the real backstop,
+               // so a hand-edited dawn.toml can still go lower or up to 100M.
+               min: 100000,
+               max: 5000000,
+               step: 100000,
+               hint: 'High runaway backstop; healthy runs stop well under it (converged / concluded / saturated)',
+               default: 1000000,
                advanced: true,
             },
             round_digest_max_chars: {

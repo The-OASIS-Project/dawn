@@ -1656,6 +1656,13 @@ int research_db_question_coverage(int64_t run_id, int64_t qid, int *distinct_sou
  */
 int research_db_question_belongs(int64_t run_id, int64_t qid, bool *out);
 
+/**
+ * @brief Fetch one question row by id, scoped to its run.
+ * @return AUTH_DB_SUCCESS (row copied into @p out), AUTH_DB_NOT_FOUND (no such
+ *         question in this run), AUTH_DB_INVALID (bad args), or AUTH_DB_FAILURE.
+ */
+int research_db_question_get(int64_t run_id, int64_t qid, research_question_t *out);
+
 /* ── Claims (evidence) ─────────────────────────────────────────────────────── */
 
 /**

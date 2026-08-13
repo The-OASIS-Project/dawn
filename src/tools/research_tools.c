@@ -18,10 +18,12 @@
  *
  * In-loop deep-research tools (DEEP_RESEARCH_DESIGN.md §7):
  *
- *  - research_plan   — seed the coverage ledger with sub-questions to close.
- *  - research_record — record ONE evidence claim (claim + source + quote).
+ *  - research_plan             — seed the coverage ledger with sub-questions.
+ *  - research_record           — record ONE evidence claim (claim + source + quote).
+ *  - research_conclude         — the agent signals the brief is covered (§6).
+ *  - research_mark_unanswerable — the agent declares a sub-question unanswerable.
  *
- * Both are reachable ONLY inside a research session (the read-only allowlist in
+ * All are reachable ONLY inside a research session (the read-only allowlist in
  * llm_tools.c gates them at schema advertisement AND execution).  Each reads the
  * active run id + round from the thread-local command-context session, so a
  * caller can never write to another run.  BOTH injection-gate the LLM-authored
@@ -365,7 +367,8 @@ static char *research_conclude_callback(const char *action, char *value, int *sh
       *should_respond = 1;
    }
 
-   int64_t run_id = research_active_run(NULL);
+   int round = 0;
+   int64_t run_id = research_active_run(&round);
    if (run_id <= 0) {
       return strdup("Error: research_conclude is only available inside a research run.");
    }
@@ -382,9 +385,66 @@ static char *research_conclude_callback(const char *action, char *value, int *sh
       return strdup("Error: research_conclude could not reach the research session; keep going.");
    }
    session_research_mark_concluded(ctx);
+   /* Observe (§10): make the agent-judgment path visible in the panel rather than
+    * only inferable from the terminal stop reason. */
+   conv_event_emit(atomic_load(&ctx->stream_conversation_id), ctx->metrics.user_id,
+                   CONV_EVENT_RESEARCH_CONCLUDE, event_payload_research_conclude(round));
    OLOG_INFO("research_conclude: agent signalled completion for run %lld", (long long)run_id);
    return strdup("Research marked complete. The controller will finish this run and build the "
                  "report from your recorded findings — stop calling tools now.");
+}
+
+/* =============================================================================
+ * research_mark_unanswerable — the agent declares a sub-question unanswerable
+ * ============================================================================= */
+
+static char *research_mark_unanswerable_callback(const char *action,
+                                                 char *value,
+                                                 int *should_respond) {
+   (void)action;
+   if (should_respond) {
+      *should_respond = 1;
+   }
+
+   int64_t run_id = research_active_run(NULL);
+   if (run_id <= 0) {
+      return strdup("Error: research_mark_unanswerable is only available inside a research run.");
+   }
+   if (!value || value[0] == '\0') {
+      return strdup("Error: research_mark_unanswerable needs {\"question_id\": N}.");
+   }
+
+   struct json_object *root = json_tokener_parse(value);
+   if (!root) {
+      return strdup("Error: research_mark_unanswerable arguments were not valid JSON.");
+   }
+   struct json_object *j_qid = NULL;
+   json_object_object_get_ex(root, "question_id", &j_qid);
+   int64_t qid = research_parse_question_id(j_qid);
+   json_object_put(root);
+
+   /* Fetch the question (scoped to this run) — this both validates the id (the agent
+    * may only mark ITS OWN questions dead) and gives the text for the observe event.
+    * The agent may only mark unanswerable, never answered: distinct-source coverage
+    * stays the controller's deterministic call (§6). */
+   research_question_t q;
+   if (qid <= 0 || research_db_question_get(run_id, qid, &q) != AUTH_DB_SUCCESS) {
+      return strdup("Error: no such question in this run. Use the [qID] from the directive.");
+   }
+   if (research_db_question_set_status(qid, "unanswerable", 0.0) != AUTH_DB_SUCCESS) {
+      return strdup("Error: failed to mark the question unanswerable.");
+   }
+
+   session_t *ctx = session_get_command_context();
+   if (ctx != NULL) {
+      conv_event_emit(atomic_load(&ctx->stream_conversation_id), ctx->metrics.user_id,
+                      CONV_EVENT_RESEARCH_UNANSWERABLE,
+                      event_payload_research_unanswerable(qid, q.question));
+   }
+   OLOG_INFO("research_mark_unanswerable: run %lld question %lld marked unanswerable",
+             (long long)run_id, (long long)qid);
+   return strdup("Question marked unanswerable — it no longer blocks completion. Keep going on the "
+                 "others, or research_conclude if you're done.");
 }
 
 static const tool_metadata_t research_conclude_metadata = {
@@ -405,6 +465,36 @@ static const tool_metadata_t research_conclude_metadata = {
    .callback = research_conclude_callback,
 };
 
+static const treg_param_t research_unanswerable_params[] = {
+   {
+       .name = "details",
+       .description =
+           "JSON object {\"question_id\": N} — the [qID] of a sub-question that cannot be answered "
+           "from available sources (evidence of absence, not just absence of effort). Marking it "
+           "stops it from blocking completion.",
+       .type = TOOL_PARAM_TYPE_STRING,
+       .required = true,
+       .maps_to = TOOL_MAPS_TO_VALUE,
+   },
+};
+
+static const tool_metadata_t research_mark_unanswerable_metadata = {
+   .name = "research_mark_unanswerable",
+   .device_string = "research_mark_unanswerable",
+   .topic = "dawn",
+   .description =
+       "Mark a planned sub-question as unanswerable when you have genuinely tried and the "
+       "sources don't contain the answer. It stops blocking completion so the run can "
+       "finish on the questions you CAN answer instead of grinding to the budget on one "
+       "you can't. Use sparingly and only after real effort.",
+   .params = research_unanswerable_params,
+   .param_count = 1,
+   .capabilities = TOOL_CAP_NONE,
+   .default_local = true,
+   .default_remote = true,
+   .callback = research_mark_unanswerable_callback,
+};
+
 int research_plan_tool_register(void) {
    return tool_registry_register(&research_plan_metadata);
 }
@@ -415,4 +505,8 @@ int research_record_tool_register(void) {
 
 int research_conclude_tool_register(void) {
    return tool_registry_register(&research_conclude_metadata);
+}
+
+int research_mark_unanswerable_tool_register(void) {
+   return tool_registry_register(&research_mark_unanswerable_metadata);
 }

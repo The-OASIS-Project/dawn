@@ -2,12 +2,15 @@
  * DawnAgentEvents — CP4b: render the durable conversation_events stream as
  * transcript boundary markers for a viewed background job.
  *
- * Scope (deliberate): the browser renders the `complete` disposition and the
- * `resume` boundary — event kinds NOT present in `messages`.  `tool_call`/
- * `tool_result` are ignored because the conversation's `messages` already carry
- * them (rendered debug-gated by the load path); rendering the events too would
- * double-render, and messages survive event pruning while events do not.  `status`
- * is transient and already surfaced by the generating indicator.
+ * Scope (deliberate): the browser renders the `complete` disposition, the `resume`
+ * boundary, and the deep-research progress trail (`research_round`/`research_claim`/
+ * `research_conclude`/`research_unanswerable`/`research_stop`) — event kinds NOT
+ * present in `messages` (a research job's conversation holds only the final report
+ * message, so without these it would show a lone answer with no visible process).
+ * `tool_call`/`tool_result` are ignored because the conversation's `messages`
+ * already carry them (rendered debug-gated by the load path); rendering the events
+ * too would double-render, and messages survive event pruning while events do not.
+ * `status` is transient and already surfaced by the generating indicator.
  *
  * Ordering: a `complete` event always fires after the final message, so it
  * appends.  A `resume` is a mid-transcript boundary, placed by `created_at` against
@@ -34,8 +37,81 @@
 
    // Kinds this renderer draws.  Everything else (tool_call/tool_result/status) is
    // intentionally dropped — see file header.  A set so an unknown or future kind is
-   // ignored, not thrown.
-   const MARKER_KINDS = { complete: true, resume: true };
+   // ignored, not thrown.  The research_* kinds give a deep-research job a visible
+   // progress trail (its job conversation otherwise holds only the final report
+   // message), so the viewer isn't blank while the run works.
+   const MARKER_KINDS = {
+      complete: true,
+      resume: true,
+      research_round: true,
+      research_claim: true,
+      research_conclude: true,
+      research_unanswerable: true,
+      research_stop: true,
+   };
+
+   /* Bare hostname from a URL, for a compact claim citation. Never throws. */
+   function hostOf(url) {
+      if (typeof url !== 'string' || !url) return '';
+      try {
+         return new URL(url).hostname.replace(/^www\./, '');
+      } catch (e) {
+         return '';
+      }
+   }
+
+   /* Text line + css tone for a research_* event. Returns null for unknown. All
+    * fields are untrusted (model/web-authored) → callers set via textContent. */
+   function researchLine(kind, p) {
+      p = p || {};
+      switch (kind) {
+         case 'research_round':
+            return {
+               cls: 'muted',
+               text:
+                  'Round ' +
+                  (p.round || '?') +
+                  ' — ' +
+                  (p.questions_closed != null ? p.questions_closed : '?') +
+                  '/' +
+                  (p.questions_total != null ? p.questions_total : '?') +
+                  ' questions resolved',
+            };
+         case 'research_claim': {
+            const h = hostOf(p.source_url);
+            const c = typeof p.claim === 'string' ? p.claim : '';
+            // No leading bullet: the tone glyph (— via ::before) is the list marker.
+            return { cls: 'muted', text: c + (h ? ' (' + h + ')' : '') };
+         }
+         case 'research_conclude':
+            // Honest: the agent SIGNALLED done; the controller only honors it once
+            // findings exist, so don't assert "writing the report" here.
+            return { cls: 'ok', text: 'Agent signalled the brief is covered' };
+         case 'research_unanswerable':
+            return {
+               cls: 'muted',
+               text: 'Marked unanswerable: ' + (p.question ? p.question : '(question)'),
+            };
+         case 'research_stop': {
+            const r = p.stop_reason || '?';
+            // Green ✓ only for a clean/natural end; a budget/cancel stop is muted.
+            const clean = r === 'concluded' || r === 'coverage' || r === 'saturation';
+            return {
+               cls: clean ? 'ok' : 'muted',
+               text:
+                  'Research finished (' +
+                  r +
+                  ') — ' +
+                  (p.rounds || '?') +
+                  ' rounds, ' +
+                  (p.claims_total != null ? p.claims_total : '?') +
+                  ' findings',
+            };
+         }
+         default:
+            return null;
+      }
+   }
 
    function transcriptEl() {
       return document.getElementById('transcript');
@@ -92,10 +168,25 @@
       } else if (kind === 'resume') {
          el.classList.add('agent-event-muted');
          el.textContent = 'Resumed — continuing the task';
+      } else if (kind.indexOf('research_') === 0) {
+         const info = researchLine(kind, payload);
+         if (!info) return null;
+         // A progress TRAIL, not one-shot chips: left-aligned, un-boxed list rows
+         // (agent-event-line) so ~35 claims read as a list, not 35 centered pills.
+         el.classList.add('agent-event-line', 'agent-event-' + info.cls);
+         el.textContent = info.text; // textContent — claim/question/source untrusted
       } else {
          return null;
       }
-      if (live) el.setAttribute('role', 'status');
+      // role="status" only on live MILESTONES — announcing every one of ~35 live
+      // claim rows would flood a screen reader. Round/claim/unanswerable render
+      // visually but are not individually announced.
+      const announce =
+         kind === 'complete' ||
+         kind === 'resume' ||
+         kind === 'research_conclude' ||
+         kind === 'research_stop';
+      if (live && announce) el.setAttribute('role', 'status');
       return el;
    }
 

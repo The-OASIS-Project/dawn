@@ -1036,10 +1036,13 @@
 # =============================================================================
 [research]
 # enabled = false                    # Master switch for the deep_research tool.
-# max_rounds = 6                     # Hard per-run round cap. 1-100.
-# max_tool_calls = 40                # Hard per-run cap on searches + page fetches.
-# max_input_tokens = 400000          # Per-run input-token ceiling — the real cost
-                                     #   control. 1000 - 100000000.
+# max_rounds = 6                     # Hard per-run round cap (a real fuse). 1-100.
+# max_tool_calls = 40                # RETIRED — no longer enforced (redundant with max_rounds x
+                                     #   the per-round iteration cap). Parsed for back-compat only.
+# max_input_tokens = 1000000         # Per-run input-token ceiling — a HIGH runaway
+                                     #   backstop, not the normal stop (the natural-end
+                                     #   signals end healthy runs well under it).
+                                     #   1000 - 100000000.
 # round_digest_max_chars = 6000      # Cap on the per-round reconstructed prompt
                                      #   (the bounded-context knob). 256-65536.
 # min_sources = 2                    # DISTINCT sources before a sub-question is

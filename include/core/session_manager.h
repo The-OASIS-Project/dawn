@@ -447,6 +447,18 @@ typedef struct session {
    // controller weighs it as ONE input to the deterministic stop decision — the
    // agent never OWNS the stop (§6), it only advises.
    atomic_bool research_concluded;
+   // No-tools turn: while set, is_tool_enabled_for_session() denies EVERY tool, so
+   // the turn is structurally pure text.  Domain-neutral (the shared tool gate reads
+   // it without knowing "research"); the deep-research controller sets it around its
+   // final synthesis turn (write the report from the ledger, fetch nothing more).
+   atomic_bool tools_suppressed;
+   // Cumulative-session input-token ceiling for the tool loop (0 = unlimited).  When
+   // > 0, llm_tool_iteration_loop stops the turn once the session's total input
+   // tokens reach it — bounding a single multi-tool turn's spend so it can't blow far
+   // past a budget between round boundaries (the deep-research per-round overshoot).
+   // Single-writer (the research controller, set before a round dispatch, cleared
+   // before synthesis); read on the dispatch thread at loop-params construction.
+   int64_t input_token_ceiling;
 
    // Streaming metrics for UI visualization
    uint64_t stream_start_ms;     // Timestamp when LLM call started
@@ -643,6 +655,31 @@ static inline bool session_research_is_concluded(session_t *session) {
 static inline void session_research_reset_concluded(session_t *session) {
    if (session != NULL) {
       atomic_store(&session->research_concluded, false);
+   }
+}
+
+/** @brief Suppress/restore ALL tools for @p session (a no-tools generation turn). */
+static inline void session_set_tools_suppressed(session_t *session, bool on) {
+   if (session != NULL) {
+      atomic_store(&session->tools_suppressed, on);
+   }
+}
+
+/** @brief Are all tools suppressed for @p session (a no-tools turn)?
+ *  NB: distinct from llm_tools.c's thread-local llm_tools_suppressed() (a
+ *  suppress-COUNT for internal utility LLM calls) — this is a per-session gate. */
+static inline bool session_tools_suppressed(session_t *session) {
+   return session != NULL && atomic_load(&session->tools_suppressed);
+}
+
+/**
+ * @brief Set the cumulative-session input-token ceiling for the tool loop
+ *        (0 = unlimited).  Single-writer: the research controller, before a round
+ *        dispatch; cleared to 0 before synthesis.
+ */
+static inline void session_set_input_token_ceiling(session_t *session, int64_t ceiling) {
+   if (session != NULL) {
+      session->input_token_ceiling = ceiling;
    }
 }
 

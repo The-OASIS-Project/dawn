@@ -46,6 +46,39 @@ saturation stop forward from P1 and adding an agent completion signal:
   hard budgets, so budget becomes a rare backstop and a run stops on *why it's actually done*, not on spend.
   Re-run of the run-2 case now stops on `saturation` at round 3 instead of `token_budget`.
 
+**Answer + budget-as-fuse (2026-08-13, post-run-3, data-driven).** Run 3 stopped on `token_budget` at 7/8
+coverage having spent 450k on a 400k ceiling, and produced no *synthesized* answer — only a claims dump — while
+one genuinely-hard question churned to budget death. Diagnosis: the budget ceiling was doing the stopping (the
+natural-ends didn't fire in time), so a *low* ceiling guillotines a productive run; the answer must never depend
+on the stop reason. Fixes, all shipped:
+- **Synthesis turn (§8):** a final NO-TOOLS generation turn (a `session->research_synthesizing` flag denies
+  every tool) writes the report — executive summary + a *direct answer/recommendation* to the brief + an honest
+  "what I could not determine" section — layered over the claims evidence. It runs on EVERY terminal path (budget
+  included), so a run always hands back a real answer, never a raw dump. Persisted to the job conversation (so the
+  WebUI viewer shows it, not a blank transcript) and to notes.
+- **`research_mark_unanswerable` tool + `UNANSWERABLE` escape (§6 item 5):** the agent may mark a genuinely-
+  unsourceable sub-question dead so `coverage` can complete instead of one hard question grinding to budget.
+- **Budget = high runaway fuse, not the normal stop:** default ceiling raised 400k→**1M**. With the natural-ends
+  firing first it is rarely reached, so a high fuse never prematurely cuts a productive run (the run-3 failure);
+  a low one does.
+- **Honest budget accounting:** an opt-in per-turn cumulative-session input-token ceiling in the shared tool
+  loop bounds a single round's overshoot to one iteration (run 3 blew 179k→450k in one round), so the fuse means
+  what it says. Default-off for every non-research caller.
+- **Conclude reliability + fetch restraint:** the agent prompt surfaces coverage each round and nudges
+  `research_conclude` at near-complete/stuck; url_fetch is strongly discouraged vs snippets (run 3's rounds cost
+  ~270k on heavy full-page fetches). WebUI renders the research progress trail (`research_round`/`_claim`/
+  `_conclude`/`_unanswerable`/`_stop`).
+
+**Post-run-4 (2026-08-13).** Run 4 was the strongest yet — **22/23 coverage**, 88 claims, an 11k-char synthesized
+report, and it stayed **under** the 1M token fuse (904k), confirming the high ceiling doesn't guillotine. Two
+follow-ups it surfaced, both shipped: (1) **`max_tool_calls` retired** — it stopped run 4 at 22/23 on the 40-call
+cap despite tokens/rounds having room; it was redundant with `max_rounds` × the per-round iteration cap and is no
+longer a fuse (see §6). (2) **The chat completion carries the synthesized lead** (`research_run_execute` hands a
+capped summary to `research_deliver_to_parent`) instead of a bare finding-count pointer — the full report still
+lives in notes + the job conversation. Still open (behavioral, not a code fuse): the model has not yet reached for
+`research_conclude`/`research_mark_unanswerable` on its own — with `max_tool_calls` gone it now gets a round where
+the digest shows near-complete coverage, which is the next thing to watch.
+
 **Stopping point / next.** Paused at P0 to accrue field signal before the remaining P1 (same discipline as
 memory@0.7324 and SAGE@P0). **Resume trigger:** after ~10 real runs, review `benchmarks/research/` baselines —
 if runs stop on `saturation`/`concluded` with good reports, the loop is healthy; runs still stopping on
@@ -438,7 +471,14 @@ self-assessment (a model deep in a polluted context is unreliable about whether 
 > never lets a run overrun a budget. The saturation stop and the agent completion signal were pulled forward
 > from P1 into P0 after run-2 telemetry (see "Convergence controls" at the top). A plan-size cap was
 > **deliberately not** added — decomposition is the LLM's job. The layered list below is the original design
-> intent; items 4/5 (completeness critic, UNANSWERABLE) remain P1.
+> intent; item 4 (completeness critic) remains P1 (UNANSWERABLE shipped as `research_mark_unanswerable`).
+>
+> **`max_tool_calls` was RETIRED as a stop condition (2026-08-13, post-run-4).** It metered LLM round-trips,
+> already bounded by `max_rounds` × the per-round iteration cap (`LLM_TOOLS_MAX_ITERATIONS`), so it added no
+> distinct fuse — and set below that structural ceiling it only guillotined a productive run early (run 4
+> stopped at 22/23 on the 40-call cap while tokens and rounds had room). The two real fuses are now
+> **`max_input_tokens` (cost) + `max_rounds` (loop depth)** (+ the `[jobs]` runtime reap for wall-clock). The
+> config field stays parsed/round-tripped for back-compat but is unenforced and out of the panel.
 
 Layered stopping stack, outermost first:
 
@@ -609,9 +649,11 @@ so the writer is wired by hand — **#4/#5/#6 move together**.
 ```toml
 [research]
 enabled              = false   # master switch
-max_rounds           = 12      # hard per-run round cap
-max_tool_calls       = 60      # hard per-run tool-call cap
-max_input_tokens     = 400000  # hard per-run input-token/cost ceiling (the real spend control, §6)
+max_rounds           = 6       # hard per-run round cap (a real fuse)
+max_tool_calls       = 40      # RETIRED — parsed for back-compat, NOT enforced (redundant with
+                               #   max_rounds x the per-round iteration cap; §6)
+max_input_tokens     = 1000000 # per-run input-token ceiling — a HIGH runaway backstop, not the
+                               #   normal stop (§6); natural-ends end healthy runs well under it
 round_digest_max_chars = 6000  # cap on the reconstructed round prompt (§4a) — the "bounded context" knob
 min_sources          = 2       # DISTINCT source_url before a question is 'answered' (§3/§6)
 saturation_rounds    = 1       # consecutive dry rounds before the saturation stop (enforced, §6); 0 = off

@@ -69,13 +69,15 @@ static void research_mark_run_terminal(int64_t conv_id,
 
 /* Land the completion in the ORIGINATING conversation (the chat the run was
  * launched from), so the user sees it in-thread rather than only as a transient
- * toast.  This is NOT reinvoke_parent (§11): it persists a FIXED template — the
- * user's own brief + a finding count + a pointer to the notes report, NEVER the
- * web-derived report body — and does NOT re-engage the LLM, so it opens no
- * injection path.  Best-effort: any failure here never affects the terminal state.
- * A rootless / voice run (parent_id <= 0) has no chat thread, so the toast covers
- * it. */
-static void research_deliver_to_parent(int64_t job_conv, int user_id) {
+ * toast.  This is NOT reinvoke_parent (§11): it persists an assistant MESSAGE and
+ * does NOT re-engage the LLM, so no content re-enters a tool-enabled turn.  @p
+ * summary is a short lead from the SYNTHESIZED report (model-authored prose over
+ * injection-gated claims) — the same content already persisted to the job
+ * conversation + notes, rendered on the same human-facing DOMPurify path, so
+ * including it here opens no new surface; it just makes the chat useful instead of a
+ * bare pointer.  Best-effort: any failure here never affects the terminal state.  A
+ * rootless / voice run (parent_id <= 0) has no chat thread, so the toast covers it. */
+static void research_deliver_to_parent(int64_t job_conv, int user_id, const char *summary) {
    job_record_t rec;
    if (conv_db_job_get(job_conv, user_id, &rec) != AUTH_DB_SUCCESS || rec.parent_id <= 0) {
       return;
@@ -86,9 +88,16 @@ static void research_deliver_to_parent(int64_t job_conv, int user_id) {
    }
    int claim_count = 0;
    research_db_claim_count(run.id, &claim_count);
+   bool have_summary = (summary != NULL && summary[0] != '\0');
 
-   char msg[RESEARCH_BRIEF_MAX + 256];
-   if (claim_count > 0 && run.report_doc_id > 0) {
+   char msg[RESEARCH_BRIEF_MAX + 1024];
+   if (claim_count > 0 && run.report_doc_id > 0 && have_summary) {
+      /* The useful case: lead with the synthesized answer, then point to the note. */
+      snprintf(msg, sizeof(msg),
+               "🔍 Deep research complete — \"%s\".\n\n%s\n\nThat's the gist — I gathered %d "
+               "finding%s; the full cited report is in your notes.",
+               run.brief, summary, claim_count, claim_count == 1 ? "" : "s");
+   } else if (claim_count > 0 && run.report_doc_id > 0) {
       snprintf(msg, sizeof(msg),
                "🔍 Deep research complete — \"%s\".\n\nI gathered %d finding%s and saved a cited "
                "report to your notes. Ask me about it, or open it in your documents.",
@@ -185,8 +194,10 @@ static void research_worker_run(research_work_t *work) {
    research_budgets_load(&b); /* compile-time defaults overlaid with [research] config */
 
    /* Drive the round loop + synthesis.  Returns a static stop_reason literal:
-    * coverage | budget | token_budget | cancelled | failed. */
-   const char *stop = research_run_execute(s, &run, &b);
+    * concluded | coverage | saturation | budget | token_budget | cancelled | failed.
+    * out_summary receives a short lead from the synthesized report (we own + free). */
+   char *summary = NULL;
+   const char *stop = research_run_execute(s, &run, &b, &summary);
 
    time_t now = time(NULL);
 
@@ -261,12 +272,14 @@ static void research_worker_run(research_work_t *work) {
       conv_db_job_mark_fired(work->conv_id);
    }
 
-   /* On a clean finish, land a completion message in the originating chat (safe
-    * template, not reinvoke — see research_deliver_to_parent).  Failure/interrupt
-    * states stay toast+status only, to keep error noise out of the thread. */
+   /* On a clean finish, land a completion message (with the synthesized lead) in the
+    * originating chat — a message, not reinvoke (see research_deliver_to_parent).
+    * Failure/interrupt states stay toast+status only, to keep error noise out of the
+    * thread. */
    if (strcmp(job_status, "done") == 0) {
-      research_deliver_to_parent(work->conv_id, work->user_id);
+      research_deliver_to_parent(work->conv_id, work->user_id, summary);
    }
+   free(summary);
 
    /* NB: `run` is the pre-loop snapshot (research_run_execute advances rounds only
     * in the DB), so do not log run.rounds_run here — it would read stale (0).

@@ -968,9 +968,13 @@ typedef struct {
 typedef struct {
    bool enabled;       /* Master switch for the deep_research tool (default OFF) */
    int max_rounds;     /* Hard per-run round cap (§6.1) */
-   int max_tool_calls; /* Per-run cap; metered as LLM round-trips, a loose proxy for
-                        * tool calls — max_input_tokens is the real spend control (§6.1) */
-   /* Hard per-run input-token / cost ceiling (§6.1 — the real spend control).
+   int max_tool_calls; /* RETIRED as a stop condition (§6.1): metered LLM round-trips, which are
+                        * already bounded by max_rounds x the per-round iteration cap, so it added
+                        * no distinct fuse. Still parsed/round-tripped for back-compat but NOT
+                        * enforced and NOT surfaced in the panel. The real fuses are
+                        * max_input_tokens (cost) + max_rounds (loop depth). */
+   /* Per-run input-token ceiling — a HIGH runaway backstop, not the primary stop
+    * (§6.1); the natural-end signals end healthy runs well under it.
     * Deliberately `int` though research_budgets_t.max_input_tokens is int64: the
     * clamp bounds this to 100M (« INT32_MAX), so it uses the plain int config
     * macros (PARSE_INT / JSON_TO_CONFIG_INT / "%d") and research_budgets_load()

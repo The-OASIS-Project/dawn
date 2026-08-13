@@ -173,6 +173,18 @@ static void test_question_belongs(void) {
    TEST_ASSERT_EQUAL_INT(AUTH_DB_INVALID, research_db_question_belongs(run_a, 0, &belongs));
    TEST_ASSERT_FALSE(belongs);
    TEST_ASSERT_EQUAL_INT(AUTH_DB_INVALID, research_db_question_belongs(run_a, qa, NULL));
+
+   /* research_db_question_get: validates run-scope AND returns the row (used by
+    * research_mark_unanswerable to fill the observe event's question text). */
+   research_question_t q;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_get(run_a, qa, &q));
+   TEST_ASSERT_EQUAL_INT64(qa, q.id);
+   TEST_ASSERT_EQUAL_STRING("in A", q.question);
+   /* cross-run and nonexistent ids are NOT_FOUND, not SUCCESS. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, research_db_question_get(run_a, qb, &q));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, research_db_question_get(run_a, 999999, &q));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_INVALID, research_db_question_get(run_a, 0, &q));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_INVALID, research_db_question_get(run_a, qa, NULL));
 }
 
 /* ── coverage = COUNT(DISTINCT source_url): dedup + NULL exclusion ───────────── */

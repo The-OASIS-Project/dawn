@@ -2687,9 +2687,10 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "event_retention_days = %d\n", config->jobs.event_retention_days);
 
    /* [research] (deep-research budgets + master switch).  Emits EVERY field,
-    * including critic_max_rearm/capture_revisions which the panel doesn't surface
-    * yet — the writer emits from the in-memory config, so writing them is what
-    * preserves a hand-edited value across a save. */
+    * including the ones the panel doesn't surface (max_tool_calls — retired/
+    * unenforced; critic_max_rearm/capture_revisions — P1/debug) — the writer emits
+    * from the in-memory config, so writing them preserves a hand-edited value across
+    * a save. */
    fprintf(fp, "\n[research]\n");
    fprintf(fp, "enabled = %s\n", config->research.enabled ? "true" : "false");
    fprintf(fp, "max_rounds = %d\n", config->research.max_rounds);

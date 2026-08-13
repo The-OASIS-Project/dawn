@@ -1258,6 +1258,7 @@ char *llm_chat_completion_streaming(struct json_object *conversation_history,
        * session_destroy ordering) — the loop observes the flag and exits first. */
       .cancel_flag = session ? &session->cancel_requested : NULL,
       .is_background = session_is_background(session),
+      .cumulative_input_token_ceiling = session ? session->input_token_ceiling : 0,
    };
 
    response = llm_tool_iteration_loop(&loop_params);
@@ -1803,6 +1804,7 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
        * session_destroy ordering) — the loop observes the flag and exits first. */
       .cancel_flag = session ? &session->cancel_requested : NULL,
       .is_background = session_is_background(session),
+      .cumulative_input_token_ceiling = session ? session->input_token_ceiling : 0,
    };
 
    response = llm_tool_iteration_loop(&loop_params);

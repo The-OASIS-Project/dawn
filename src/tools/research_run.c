@@ -46,7 +46,6 @@ void research_budgets_defaults(research_budgets_t *out) {
       return;
    }
    out->max_rounds = RESEARCH_DEFAULT_MAX_ROUNDS;
-   out->max_tool_calls = RESEARCH_DEFAULT_MAX_TOOL_CALLS;
    out->max_input_tokens = RESEARCH_DEFAULT_MAX_INPUT_TOKENS;
    out->min_sources = RESEARCH_DEFAULT_MIN_SOURCES;
    out->round_digest_max_chars = RESEARCH_DEFAULT_ROUND_DIGEST_MAX_CHARS;
@@ -137,13 +136,13 @@ const char *research_should_stop(const research_run_t *run,
        * budget and closed nothing). */
       return "saturation";
    }
-   /* Hard budgets — the backstop for a run that keeps making progress but won't
-    * end.  The token ceiling is the real spend control; tool-call count is a loose
-    * proxy (§6.1, eff M4). */
+   /* Hard fuses — the backstop for a run that keeps making progress but won't end.
+    * Two, not three: the token ceiling is the real spend control, and max_rounds
+    * bounds the loop depth.  max_tool_calls was RETIRED (§6.1) — it metered LLM
+    * round-trips, which the per-round iteration cap already bounds at
+    * max_rounds x LLM_TOOLS_MAX_ITERATIONS, so it added no distinct safety property
+    * and, set below that structural ceiling, only guillotined productive runs early. */
    if (b->max_rounds > 0 && run->rounds_run >= b->max_rounds) {
-      return "budget";
-   }
-   if (b->max_tool_calls > 0 && run->tool_calls >= b->max_tool_calls) {
       return "budget";
    }
    if (b->max_input_tokens > 0 && run->input_tokens >= b->max_input_tokens) {

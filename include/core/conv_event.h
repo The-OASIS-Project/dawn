@@ -57,6 +57,11 @@ extern "C" {
 #define CONV_EVENT_RESEARCH_ROUND "research_round"
 #define CONV_EVENT_RESEARCH_CLAIM "research_claim"
 #define CONV_EVENT_RESEARCH_STOP "research_stop"
+/* The agent's own signals: it judged the brief covered (research_conclude) or a
+ * sub-question unanswerable (research_mark_unanswerable) — so the agent-judgment
+ * path is visible in the panel, not just inferred from the terminal stop reason. */
+#define CONV_EVENT_RESEARCH_CONCLUDE "research_conclude"
+#define CONV_EVENT_RESEARCH_UNANSWERABLE "research_unanswerable"
 
 /**
  * @brief Persist one event and fan it out to the owner's attached clients.

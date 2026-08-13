@@ -302,8 +302,10 @@ static char *search_tool_callback(const char *action, char *value, int *should_r
       return perform_search(query, SEARCH_TYPE_PAPERS, "papers", time_range);
    }
 
-   /* Fallback to web search for unknown categories */
-   OLOG_WARNING("search_tool: Unknown category '%s', defaulting to web search", action);
+   /* Fallback to web search for unknown categories.  Benign — a model (esp. in the
+    * research loop, which is told to "use search" without categories) sometimes
+    * passes a stray value; web is the right default, so this is INFO, not a warning. */
+   OLOG_INFO("search_tool: unrecognized category '%s', using web search", action);
    return perform_search(query, SEARCH_TYPE_WEB, "web", time_range);
 }
 

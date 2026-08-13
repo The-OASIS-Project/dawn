@@ -95,12 +95,23 @@ static const char *get_default_action(const tool_metadata_t *tool) {
  */
 static bool research_context_refuses(const char *device, cmd_exec_result_t *result) {
    session_t *ctx = session_get_command_context();
-   if (ctx == NULL || ctx->research_run_id <= 0 || research_tool_is_allowlisted(device)) {
+   if (ctx == NULL) {
       return false;
    }
-   OLOG_WARNING("command_execute: refused '%s' in research context (run %lld) — read-only "
-                "allowlist (HIGH-1)",
-                device ? device : "(null)", (long long)ctx->research_run_id);
+   bool suppressed = session_tools_suppressed(ctx); /* synthesis turn: NO tools at all */
+   bool research = ctx->research_run_id > 0;        /* fetch loop: read-only allowlist */
+   if (!suppressed && !research) {
+      return false; /* not a research/synthesis context — normal execution */
+   }
+   /* Fetch loop admits the read-only allowlist; a suppressed (synthesis) turn admits
+    * nothing — the allowlist bypass keeps the legacy/MQTT actuation path closed even
+    * though research_run_id stays set through synthesis (arch H1 / sec L1). */
+   if (!suppressed && research_tool_is_allowlisted(device)) {
+      return false;
+   }
+   OLOG_WARNING("command_execute: refused '%s' in research context (run %lld, suppressed=%d) — "
+                "read-only allowlist (HIGH-1)",
+                device ? device : "(null)", (long long)ctx->research_run_id, (int)suppressed);
    memset(result, 0, sizeof(*result));
    result->success = false;
    result->result = strdup("Tool not available during deep research (read-only allowlist).");

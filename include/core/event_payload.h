@@ -148,6 +148,15 @@ char *event_payload_research_claim(int round,
  */
 char *event_payload_research_stop(const char *stop_reason, int rounds, int claims_total);
 
+/** @brief Build a `research_conclude` payload: {"round":N}. Caller frees. */
+char *event_payload_research_conclude(int round);
+
+/**
+ * @brief Build a `research_unanswerable` payload:
+ *        {"question_id":Q,"question":"…"}. Caller frees.
+ */
+char *event_payload_research_unanswerable(int64_t question_id, const char *question);
+
 /**
  * @brief True if @p key names a field whose value must never be persisted.
  *

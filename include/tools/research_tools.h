@@ -17,8 +17,9 @@
  * the project author(s).
  *
  * In-loop deep-research tools: research_plan (seed the coverage ledger),
- * research_record (record one evidence claim), and research_conclude (the agent
- * signals the brief is covered).  Reachable ONLY inside a research session
+ * research_record (record one evidence claim), research_conclude (the agent signals
+ * the brief is covered), and research_mark_unanswerable (the agent declares a
+ * sub-question unanswerable).  Reachable ONLY inside a research session
  * (session->research_run_id > 0) via the read-only tool allowlist; hidden
  * everywhere else.  See docs/DEEP_RESEARCH_DESIGN.md §7.
  */
@@ -38,6 +39,9 @@ int research_record_tool_register(void);
 
 /** @brief Register research_conclude.  @return 0 on success. */
 int research_conclude_tool_register(void);
+
+/** @brief Register research_mark_unanswerable.  @return 0 on success. */
+int research_mark_unanswerable_tool_register(void);
 
 #ifdef __cplusplus
 }
