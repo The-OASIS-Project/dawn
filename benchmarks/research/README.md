@@ -9,11 +9,14 @@ an LLM + web search, and "is this report good?" is a judgment call, not a metric
 
 ## What's here
 
-- **`smoke_queries.json`** — 8 curated briefs across research shapes (factual
-  synthesis, comparison, recent-change, list aggregation, procedural, multi-
-  perspective, technical deep-dive, engineering tradeoff). Each has a
-  `should_cover` checklist — what a *good* report contains, for eyeballing, not a
-  machine-graded gold answer.
+- **`smoke_queries.json`** — 8 briefs chosen to be BOTH genuine research (current /
+  aggregated / niche material a capable model can't one-shot from training, so the
+  multi-round loop actually engages) AND useful to the developer: each maps to a
+  real DAWN subsystem decision (which local LLM / embedding / TTS / ASR to run on
+  Jetson, AR-glasses HUD hardware, cellular modem, the self-hosted-assistant
+  landscape). Evergreen textbook topics were removed — a strong model answers them
+  in one search and never spawns a run. Each brief has a `should_cover` checklist
+  (what a *good* report contains, for eyeballing — not a machine-graded gold answer).
 - **`capture_baseline.py`** — a READ-ONLY snapshot of runs that already executed,
   pulled straight from `auth.db`: budgets (rounds / tool calls / input tokens /
   wall-clock), coverage counts, claim + distinct-source counts, and the rendered

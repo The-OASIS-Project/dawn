@@ -484,17 +484,27 @@ static const tool_metadata_t deep_research_metadata = {
    .alias_count = 2,
 
    .description =
-       "Run a multi-round, multi-source RESEARCH investigation in the background and deliver a "
-       "written, cited report.  Use this ONLY for questions that genuinely need investigation "
-       "across several sources, a comparison, or a written report — 'research X and write it up', "
-       "'do a deep dive on Y', 'look into Z across multiple sources and brief me'.  For a simple "
-       "fact or single lookup, answer directly (with one 'search' if needed).  For a single "
-       "background task that isn't multi-source research, use the 'job' tool instead.\n\n"
-       "start is CONFIRMATION-GATED: call it with confirm=false first to get the plan and cost "
-       "envelope, present that to the user, and start the run only after they say yes (confirm="
-       "true).  The run works on its own; on completion the user is notified and a cited report is "
-       "saved to their notes.  Retrieve progress with status; the report does NOT auto-return into "
-       "this conversation.",
+       "Kick off a THOROUGH background research investigation that READS FULL SOURCE PAGES across "
+       "many rounds, tracks coverage per sub-question, and saves a persistent CITED REPORT to the "
+       "user's notes.  This is not the same as answering with a few 'search' calls yourself: it "
+       "goes much DEEPER (it fetches and reads whole pages, not just search snippets, over many "
+       "more rounds than you would do inline) and it runs in the BACKGROUND so the user isn't left "
+       "waiting.\n\n"
+       "Prefer deep_research over answering inline when ANY of these hold: the user asks you to "
+       "'research', 'look into', 'dig into', 'investigate', or 'do a deep dive on' a topic; the "
+       "user wants a written brief/report or a thorough comparison; the topic is broad or "
+       "comparison-heavy enough that a handful of searches would only skim it; or the user wants "
+       "it "
+       "done in the background while they do something else.  If a couple of 'search' calls would "
+       "genuinely answer the question well and the user clearly wants the answer right now, just "
+       "do "
+       "that instead — do not force a background run on a quick question.  For a single background "
+       "task that is not multi-source research, use the 'job' tool.\n\n"
+       "start is CONFIRMATION-GATED, so reaching for it is low-risk: call it with confirm=false "
+       "FIRST to get the plan + cost envelope, show that to the user, and only start the run "
+       "(confirm=true) after they say yes.  The run works on its own; on completion the user is "
+       "notified, a cited report is saved to their notes, and a summary lands back in this "
+       "conversation.  Check progress with status.",
 
    .params = deep_research_params,
    .param_count = 2,

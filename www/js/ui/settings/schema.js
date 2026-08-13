@@ -2365,7 +2365,7 @@
                min: 1000,
                max: 100000000,
                hint: 'Per-run input-token ceiling — the real cost control',
-               default: 200000,
+               default: 400000,
                advanced: true,
             },
             round_digest_max_chars: {

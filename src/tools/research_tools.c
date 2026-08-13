@@ -276,7 +276,10 @@ static const treg_param_t research_record_params[] = {
            "JSON object recording ONE evidence claim: {claim (required — the factual finding in "
            "your own words), source_url (the page it came from), source_kind ('web' default, or "
            "'document'/'memory'/'note'), quote (the exact supporting excerpt), question_id (the "
-           "plan question this answers, if any)}.  Record one claim per call as you find it.",
+           "[qID] of the plan sub-question this finding answers — set this whenever the finding "
+           "answers a planned question; coverage is tracked PER question, so a finding left "
+           "unattributed (question_id 0) never helps close one)}.  Record one claim per call as "
+           "you find it.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = true,
        .maps_to = TOOL_MAPS_TO_VALUE,

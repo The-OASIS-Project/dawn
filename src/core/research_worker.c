@@ -41,6 +41,12 @@
 #include "logging.h"
 #include "tools/research_run.h"
 
+/* Strong def in webui_broadcasts.c (this worker is ENABLE_WEBUI-only, so it always
+ * links).  Declared here rather than pulling in the heavy webui_server.h — the
+ * job_worker.c → webui_server.h include is tracked debt we don't want to grow.
+ * Signals an open WebUI chat that a conversation has new messages → refetch+render. */
+void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id);
+
 /* Work item handed to the detached worker thread. */
 typedef struct {
    int user_id;
@@ -59,6 +65,51 @@ static void research_mark_run_terminal(int64_t conv_id,
    if (research_db_run_get_by_conversation(conv_id, &r) == AUTH_DB_SUCCESS && r.finished_at == 0) {
       research_db_run_set_terminal(r.id, status, stop_reason, now);
    }
+}
+
+/* Land the completion in the ORIGINATING conversation (the chat the run was
+ * launched from), so the user sees it in-thread rather than only as a transient
+ * toast.  This is NOT reinvoke_parent (§11): it persists a FIXED template — the
+ * user's own brief + a finding count + a pointer to the notes report, NEVER the
+ * web-derived report body — and does NOT re-engage the LLM, so it opens no
+ * injection path.  Best-effort: any failure here never affects the terminal state.
+ * A rootless / voice run (parent_id <= 0) has no chat thread, so the toast covers
+ * it. */
+static void research_deliver_to_parent(int64_t job_conv, int user_id) {
+   job_record_t rec;
+   if (conv_db_job_get(job_conv, user_id, &rec) != AUTH_DB_SUCCESS || rec.parent_id <= 0) {
+      return;
+   }
+   research_run_t run;
+   if (research_db_run_get_by_conversation(job_conv, &run) != AUTH_DB_SUCCESS) {
+      return;
+   }
+   int claim_count = 0;
+   research_db_claim_count(run.id, &claim_count);
+
+   char msg[RESEARCH_BRIEF_MAX + 256];
+   if (claim_count > 0) {
+      snprintf(msg, sizeof(msg),
+               "🔍 Deep research complete — \"%s\".\n\nI gathered %d finding%s and saved a cited "
+               "report to your notes. Ask me about it, or open it in your documents.",
+               run.brief, claim_count, claim_count == 1 ? "" : "s");
+   } else {
+      snprintf(msg, sizeof(msg),
+               "🔍 Deep research on \"%s\" finished, but I couldn't find enough to report. Try "
+               "rephrasing or narrowing the question.",
+               run.brief);
+   }
+
+   int64_t msg_id = 0;
+   if (conv_db_add_message_with_tools(rec.parent_id, user_id, "assistant", msg, NULL, NULL, NULL,
+                                      &msg_id) != AUTH_DB_SUCCESS) {
+      OLOG_WARNING("research_worker: failed to post completion to parent conv %lld",
+                   (long long)rec.parent_id);
+      return;
+   }
+   webui_broadcast_conversation_messages_appended(user_id, rec.parent_id);
+   OLOG_INFO("research_worker: posted completion to parent conv %lld (msg %lld)",
+             (long long)rec.parent_id, (long long)msg_id);
 }
 
 static void research_worker_run(research_work_t *work) {
@@ -198,6 +249,13 @@ static void research_worker_run(research_work_t *work) {
     * stop); mark it fired so the monitor skips it, mirroring job_worker. */
    if (strcmp(job_status, "cancelled") == 0) {
       conv_db_job_mark_fired(work->conv_id);
+   }
+
+   /* On a clean finish, land a completion message in the originating chat (safe
+    * template, not reinvoke — see research_deliver_to_parent).  Failure/interrupt
+    * states stay toast+status only, to keep error noise out of the thread. */
+   if (strcmp(job_status, "done") == 0) {
+      research_deliver_to_parent(work->conv_id, work->user_id);
    }
 
    /* NB: `run` is the pre-loop snapshot (research_run_execute advances rounds only
