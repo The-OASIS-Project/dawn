@@ -52,7 +52,8 @@
 #define RESEARCH_RUN_COLS                                                           \
    "id, conversation_id, user_id, brief, mode, status, report_doc_id, rounds_run, " \
    "tool_calls, input_tokens, stop_reason, created_at, finished_at"
-#define RESEARCH_QUESTION_COLS "id, run_id, question, status, confidence, parent_qid, created_at"
+#define RESEARCH_QUESTION_COLS \
+   "id, run_id, question, status, confidence, parent_qid, created_at, resolution_reason"
 #define RESEARCH_CLAIM_COLS \
    "id, run_id, question_id, claim, source_url, source_kind, quote, round, created_at"
 
@@ -105,6 +106,7 @@ static void res_unpack_question(sqlite3_stmt *st, research_question_t *q) {
    q->confidence = sqlite3_column_double(st, 4);
    q->parent_qid = res_col_int64_or_zero(st, 5);
    q->created_at = (time_t)sqlite3_column_int64(st, 6);
+   res_copy_text(st, 7, q->resolution_reason, sizeof(q->resolution_reason));
 }
 
 static void res_unpack_claim(sqlite3_stmt *st, research_claim_t *c) {
@@ -433,22 +435,36 @@ int research_db_question_add(int64_t run_id,
 struct qstatus_bind {
    const char *status;
    double confidence;
+   const char *reason; /**< NULL -> SQL NULL (status carries no reason) */
    int64_t qid;
 };
 static void bind_qstatus(sqlite3_stmt *st, void *ctx) {
    struct qstatus_bind *b = ctx;
    sqlite3_bind_text(st, 1, b->status, -1, SQLITE_TRANSIENT);
    sqlite3_bind_double(st, 2, b->confidence);
-   sqlite3_bind_int64(st, 3, b->qid);
+   /* NULL reason -> SQL NULL (resolution_reason stays empty for open/answered). */
+   if (b->reason != NULL) {
+      sqlite3_bind_text(st, 3, b->reason, -1, SQLITE_TRANSIENT);
+   } else {
+      sqlite3_bind_null(st, 3);
+   }
+   sqlite3_bind_int64(st, 4, b->qid);
 }
 
-int research_db_question_set_status(int64_t qid, const char *status, double confidence) {
+int research_db_question_set_status(int64_t qid,
+                                    const char *status,
+                                    double confidence,
+                                    const char *reason) {
    if (qid <= 0 || !status || !status[0]) {
       return AUTH_DB_INVALID;
    }
-   struct qstatus_bind b = { .status = status, .confidence = confidence, .qid = qid };
-   return res_exec_update("UPDATE research_questions SET status=?, confidence=? WHERE id=?",
-                          bind_qstatus, &b, "question_set_status");
+   struct qstatus_bind b = { .status = status,
+                             .confidence = confidence,
+                             .reason = reason,
+                             .qid = qid };
+   return res_exec_update(
+       "UPDATE research_questions SET status=?, confidence=?, resolution_reason=? WHERE id=?",
+       bind_qstatus, &b, "question_set_status");
 }
 
 int research_db_question_list(int64_t run_id, research_question_t *out, int max, int *count_out) {

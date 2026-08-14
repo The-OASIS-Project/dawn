@@ -64,7 +64,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 75
+#define AUTH_DB_SCHEMA_VERSION 76
 
 /* Retention periods */
 #define LOGIN_ATTEMPT_RETENTION_SEC (7 * 24 * 60 * 60) /* 7 days */
@@ -123,6 +123,7 @@
    "   confidence REAL NOT NULL DEFAULT 0.0,"                                        \
    "   parent_qid INTEGER,"                                                          \
    "   created_at INTEGER NOT NULL,"                                                 \
+   "   resolution_reason TEXT,"                                                      \
    "   FOREIGN KEY (run_id) REFERENCES research_runs(id) ON DELETE CASCADE"          \
    ");"                                                                              \
    "CREATE INDEX IF NOT EXISTS idx_research_questions_run "                          \

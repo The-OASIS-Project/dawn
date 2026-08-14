@@ -125,7 +125,11 @@ static void test_questions(void) {
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_add(run, "top B", 0, &q2));
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_add(run, "sub of A", q1, &sub));
 
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_set_status(q1, "answered", 0.9));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_question_set_status(q1, "answered", 0.9, NULL));
+   /* Unanswerable carries a resolution reason; answered/open leave it empty. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_question_set_status(q2, "unanswerable", 0.0, "agent"));
 
    research_question_t out[8];
    int n = 0;
@@ -135,8 +139,10 @@ static void test_questions(void) {
    TEST_ASSERT_EQUAL_STRING("answered", out[0].status);
    TEST_ASSERT_EQUAL_FLOAT(0.9, out[0].confidence);
    TEST_ASSERT_EQUAL_INT64(0, out[0].parent_qid);
-   TEST_ASSERT_EQUAL_STRING("open", out[1].status);
-   TEST_ASSERT_EQUAL_INT64(q1, out[2].parent_qid); /* sub links to A */
+   TEST_ASSERT_EQUAL_STRING("", out[0].resolution_reason);      /* answered -> no reason */
+   TEST_ASSERT_EQUAL_STRING("unanswerable", out[1].status);     /* q2 */
+   TEST_ASSERT_EQUAL_STRING("agent", out[1].resolution_reason); /* reason round-trips */
+   TEST_ASSERT_EQUAL_INT64(q1, out[2].parent_qid);              /* sub links to A */
 }
 
 /* ── question_belongs: validate a model-supplied question_id against its run ───── */

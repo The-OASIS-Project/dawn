@@ -1512,6 +1512,7 @@ int conv_db_job_last_assistant_text(int64_t conv_id, int user_id, char **out);
 #define RESEARCH_STOP_REASON_MAX 24 /**< budget|token_budget|coverage|saturation|... */
 #define RESEARCH_QUESTION_MAX 512   /**< one sub-question */
 #define RESEARCH_QSTATUS_MAX 16     /**< open|answered|unanswerable */
+#define RESEARCH_REASON_MAX 16      /**< resolution reason: ""|stale|agent */
 #define RESEARCH_CLAIM_MAX 2048     /**< an extracted assertion */
 #define RESEARCH_URL_MAX 2048       /**< provenance source_url */
 #define RESEARCH_SOURCE_KIND_MAX 16 /**< web|document|memory|note|calendar|email */
@@ -1543,6 +1544,12 @@ typedef struct {
    double confidence;
    int64_t parent_qid; /**< 0 = top-level */
    time_t created_at;
+   /** Why the question reached its terminal state, beyond what `status` says: empty
+    *  for open/answered, "stale" (controller auto-retired — no new source for N
+    *  rounds) or "agent" (research_mark_unanswerable) for an unanswerable row.  Lets
+    *  a reader (the P1 completeness critic) distinguish an exhausted gap from a
+    *  model-judged dead-end without joining the observe-event stream. */
+   char resolution_reason[RESEARCH_REASON_MAX];
 } research_question_t;
 
 /** A load-bearing evidence claim (research_claims). */
@@ -1623,8 +1630,13 @@ int research_db_question_add(int64_t run_id,
                              int64_t parent_qid,
                              int64_t *qid_out);
 
-/** @brief Update a question's status + confidence. */
-int research_db_question_set_status(int64_t qid, const char *status, double confidence);
+/** @brief Update a question's status + confidence + resolution reason.
+ *  @p reason records WHY (e.g. "stale" | "agent" for an `unanswerable` row); pass
+ *  NULL for a status carrying no reason (e.g. "answered"), which stores SQL NULL. */
+int research_db_question_set_status(int64_t qid,
+                                    const char *status,
+                                    double confidence,
+                                    const char *reason);
 
 /** @brief List all questions for a run (id ASC). System caller (run_id pre-checked). */
 int research_db_question_list(int64_t run_id, research_question_t *out, int max, int *count_out);

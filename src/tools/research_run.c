@@ -93,7 +93,9 @@ int research_refresh_coverage(int64_t run_id, int min_sources, int *closed_out, 
          if (confidence > 1.0) {
             confidence = 1.0;
          }
-         if (research_db_question_set_status(q->id, "answered", confidence) == AUTH_DB_SUCCESS) {
+         /* Answered on coverage — no resolution reason (it was actually closed). */
+         if (research_db_question_set_status(q->id, "answered", confidence, NULL) ==
+             AUTH_DB_SUCCESS) {
             closed++;
          }
       }
@@ -181,7 +183,7 @@ int research_retire_stale_questions(int64_t run_id,
       if (++e->stale_rounds < stale_threshold) {
          continue;
       }
-      if (research_db_question_set_status(q->id, "unanswerable", 0.0) == AUTH_DB_SUCCESS) {
+      if (research_db_question_set_status(q->id, "unanswerable", 0.0, "stale") == AUTH_DB_SUCCESS) {
          /* Count only what we actually write, so *retired_n_out always bounds a safe
           * iteration of retired_out[0..n): a question past retired_max (or when
           * retired_out is NULL) is still retired in the DB — the status flip above

@@ -447,7 +447,7 @@ static char *research_mark_unanswerable_callback(const char *action,
    if (qid <= 0 || research_db_question_get(run_id, qid, &q) != AUTH_DB_SUCCESS) {
       return strdup("Error: no such question in this run. Use the [qID] from the directive.");
    }
-   if (research_db_question_set_status(qid, "unanswerable", 0.0) != AUTH_DB_SUCCESS) {
+   if (research_db_question_set_status(qid, "unanswerable", 0.0, "agent") != AUTH_DB_SUCCESS) {
       return strdup("Error: failed to mark the question unanswerable.");
    }
 

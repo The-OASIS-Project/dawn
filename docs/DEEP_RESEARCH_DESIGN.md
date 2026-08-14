@@ -296,6 +296,12 @@ Migration **v75** (`src/auth/auth_db_migrations_v75.c` + a v75 rung in `auth_db_
 migration, `exec_or_fail()` per statement. FK cascade is real — `PRAGMA foreign_keys=ON` is set per-connection
 (`auth_db_core.c:189`) and SQLite cascades transitively, so deleting a conversation collapses the whole run.
 
+Migration **v76** adds `research_questions.resolution_reason` (idempotent `ALTER … ADD COLUMN` on the shared
+DDL, `< 76` gate so it runs on fresh installs where the duplicate-column error is tolerated). It records WHY a
+question is `unanswerable` — `'stale'` (controller auto-retired, §6.3 Phase 2) vs `'agent'`
+(`research_mark_unanswerable`) — so the P1 completeness critic reads the terminal reason from the row rather than
+joining the observe-event stream (see §6 item 4). NULL for open/answered.
+
 **Design invariant (locked): all research state is SQLite rows, never an in-memory object graph.**
 Restart-durable for free, static-alloc-friendly, and it makes the report a *view over claims*.
 
@@ -328,6 +334,7 @@ CREATE TABLE IF NOT EXISTS research_questions (
    confidence    REAL NOT NULL DEFAULT 0.0,
    parent_qid    INTEGER,                        -- sub-questions generated mid-run (NULL = top-level)
    created_at    INTEGER NOT NULL,
+   resolution_reason TEXT,                       -- v76: why unanswerable — 'stale'|'agent' (NULL for open/answered)
    FOREIGN KEY (run_id) REFERENCES research_runs(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_research_questions_run ON research_questions(run_id, status);

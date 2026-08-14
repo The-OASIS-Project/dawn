@@ -131,8 +131,10 @@ static void test_retire_stale_questions(void) {
    research_question_t qs[8];
    int n = 0;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_list(run, qs, 8, &n));
-   TEST_ASSERT_EQUAL_STRING("unanswerable", qs[0].status); /* q_stale retired */
-   TEST_ASSERT_EQUAL_STRING("open", qs[1].status);         /* q_progress untouched */
+   TEST_ASSERT_EQUAL_STRING("unanswerable", qs[0].status);     /* q_stale retired */
+   TEST_ASSERT_EQUAL_STRING("stale", qs[0].resolution_reason); /* tagged stale, not agent */
+   TEST_ASSERT_EQUAL_STRING("open", qs[1].status);             /* q_progress untouched */
+   TEST_ASSERT_EQUAL_STRING("", qs[1].resolution_reason);      /* open -> no reason */
 
    /* Round 4 — the retired question is no longer 'open', so it is not re-counted. */
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
