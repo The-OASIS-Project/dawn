@@ -88,6 +88,65 @@ static void test_refresh_coverage_promotes(void) {
    TEST_ASSERT_EQUAL_STRING("open", qs[1].status);
 }
 
+/* ── staleness: auto-retire a question that gains no new source for N rounds ──── */
+
+static void test_retire_stale_questions(void) {
+   int64_t q_stale = 0, q_progress = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_add(run, "stuck", 0, &q_stale));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_add(run, "moving", 0, &q_progress));
+
+   research_stale_entry_t tracker[8];
+   int tracker_n = 0;
+   int64_t retired[8];
+   int retired_n = -1;
+   const int threshold = 2;
+
+   /* Round 1 — first observation seeds baselines, never a dry round. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_retire_stale_questions(run, 2, threshold, tracker, &tracker_n, 8,
+                                                         retired, 8, &retired_n));
+   TEST_ASSERT_EQUAL_INT(0, retired_n);
+   TEST_ASSERT_EQUAL_INT(2, tracker_n);
+
+   /* q_progress gains a source between rounds; q_stale gains nothing. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_claim_add(run, q_progress, "c", "http://p1", "web", NULL, 1));
+
+   /* Round 2 — q_stale dry (streak 1, below threshold); q_progress made progress. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_retire_stale_questions(run, 2, threshold, tracker, &tracker_n, 8,
+                                                         retired, 8, &retired_n));
+   TEST_ASSERT_EQUAL_INT(0, retired_n);
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_claim_add(run, q_progress, "c", "http://p2", "web", NULL, 2));
+
+   /* Round 3 — q_stale hits the threshold (2 dry rounds) → retired; q_progress spared. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_retire_stale_questions(run, 2, threshold, tracker, &tracker_n, 8,
+                                                         retired, 8, &retired_n));
+   TEST_ASSERT_EQUAL_INT(1, retired_n);
+   TEST_ASSERT_EQUAL_INT(q_stale, retired[0]);
+
+   research_question_t qs[8];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_list(run, qs, 8, &n));
+   TEST_ASSERT_EQUAL_STRING("unanswerable", qs[0].status); /* q_stale retired */
+   TEST_ASSERT_EQUAL_STRING("open", qs[1].status);         /* q_progress untouched */
+
+   /* Round 4 — the retired question is no longer 'open', so it is not re-counted. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_retire_stale_questions(run, 2, threshold, tracker, &tracker_n, 8,
+                                                         retired, 8, &retired_n));
+   TEST_ASSERT_EQUAL_INT(0, retired_n);
+
+   /* threshold 0 disables the feature entirely (no-op even on a dry question). */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_retire_stale_questions(run, 2, 0, tracker, &tracker_n, 8, retired,
+                                                         8, &retired_n));
+   TEST_ASSERT_EQUAL_INT(0, retired_n);
+}
+
 /* ── stop decision: budgets + all-closed + saturation + conclude ────────────── */
 
 static void test_should_stop_decision(void) {
@@ -217,6 +276,7 @@ int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_budgets_defaults);
    RUN_TEST(test_refresh_coverage_promotes);
+   RUN_TEST(test_retire_stale_questions);
    RUN_TEST(test_should_stop_decision);
    RUN_TEST(test_digest_content);
    RUN_TEST(test_digest_respects_cap);

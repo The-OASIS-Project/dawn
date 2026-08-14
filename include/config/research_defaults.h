@@ -57,5 +57,15 @@
  * the freeze.  This is NOT a cap on how many questions the initial plan may hold —
  * only on runaway LATE growth. */
 #define RESEARCH_DEFAULT_PLAN_FREEZE_ROUND 2
+/* Auto-retire an open sub-question as unanswerable after this many consecutive rounds
+ * in which it gained NO new distinct source (0 disables).  The controller's answer to
+ * a run stuck on genuinely-unclosable questions (a compound/synthesis/subjective
+ * question the agent never marks unanswerable itself): without it the open set never
+ * empties, coverage/saturation can't fire, and an expensive broad survey grinds to the
+ * max_input_tokens fuse (live run 7: 3 such questions drove it to the 1M ceiling).
+ * Retiring is convergence, not data loss — the claims already gathered for the question
+ * stay in research_claims and still render in the report; synthesis is honest about the
+ * gap.  2 = give a question two full dry rounds before giving up on closing it. */
+#define RESEARCH_DEFAULT_STALE_ROUNDS 2
 
 #endif /* RESEARCH_DEFAULTS_H */

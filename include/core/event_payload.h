@@ -153,9 +153,16 @@ char *event_payload_research_conclude(int round);
 
 /**
  * @brief Build a `research_unanswerable` payload:
- *        {"question_id":Q,"question":"…"}. Caller frees.
+ *        {"question_id":Q,"question":"…","reason":"agent|stale"}. Caller frees.
+ *
+ * @p reason distinguishes an agent-declared dead end ("agent",
+ * research_mark_unanswerable) from a controller auto-retirement ("stale", no new
+ * source for N rounds — P1 Phase 2); NULL/"" is treated as "agent".  A controlled
+ * literal, not model text.
  */
-char *event_payload_research_unanswerable(int64_t question_id, const char *question);
+char *event_payload_research_unanswerable(int64_t question_id,
+                                          const char *question,
+                                          const char *reason);
 
 /**
  * @brief True if @p key names a field whose value must never be persisted.

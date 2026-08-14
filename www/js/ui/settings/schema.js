@@ -2403,6 +2403,15 @@
                default: 2,
                advanced: true,
             },
+            stale_rounds: {
+               type: 'number',
+               label: 'Retire Stale Questions After',
+               min: 0,
+               max: 10,
+               hint: 'Auto-retire a sub-question as unanswerable after this many rounds with no new source, so a run stuck on unclosable questions still finishes. Its findings stay in the report. 0 disables.',
+               default: 2,
+               advanced: true,
+            },
          },
       },
       calendar: {

@@ -606,6 +606,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->research.min_sources = RESEARCH_DEFAULT_MIN_SOURCES;
    config->research.saturation_rounds = RESEARCH_DEFAULT_SATURATION_ROUNDS; /* enforced (§6) */
    config->research.plan_freeze_round = RESEARCH_DEFAULT_PLAN_FREEZE_ROUND; /* enforced (§6) */
+   config->research.stale_rounds = RESEARCH_DEFAULT_STALE_ROUNDS;           /* enforced (§6.3) */
    config->research.critic_max_rearm = 2;      /* P1, not yet enforced */
    config->research.capture_revisions = false; /* debug, not yet enforced */
 

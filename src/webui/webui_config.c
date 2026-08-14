@@ -1225,6 +1225,7 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_INT(section, "min_sources", config->research.min_sources);
       JSON_TO_CONFIG_INT(section, "saturation_rounds", config->research.saturation_rounds);
       JSON_TO_CONFIG_INT(section, "plan_freeze_round", config->research.plan_freeze_round);
+      JSON_TO_CONFIG_INT(section, "stale_rounds", config->research.stale_rounds);
       JSON_TO_CONFIG_INT(section, "critic_max_rearm", config->research.critic_max_rearm);
       JSON_TO_CONFIG_BOOL(section, "capture_revisions", config->research.capture_revisions);
       config_clamp_research(&config->research);

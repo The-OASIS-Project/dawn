@@ -1815,6 +1815,10 @@ void config_clamp_research(research_config_t *config) {
       config->plan_freeze_round = 1;
    if (config->plan_freeze_round > 100) /* >= max_rounds effectively disables the freeze */
       config->plan_freeze_round = 100;
+   if (config->stale_rounds < 0) /* 0 = disable stale-question auto-retirement */
+      config->stale_rounds = 0;
+   if (config->stale_rounds > 100) /* sanity ceiling; > max_rounds is inert anyway */
+      config->stale_rounds = 100;
    if (config->critic_max_rearm < 0)
       config->critic_max_rearm = 0;
 }
@@ -1831,6 +1835,7 @@ static void parse_research(toml_table_t *table, research_config_t *config) {
                                              "min_sources",
                                              "saturation_rounds",
                                              "plan_freeze_round",
+                                             "stale_rounds",
                                              "critic_max_rearm",
                                              "capture_revisions",
                                              NULL };
@@ -1844,6 +1849,7 @@ static void parse_research(toml_table_t *table, research_config_t *config) {
    PARSE_INT(table, "min_sources", config->min_sources);
    PARSE_INT(table, "saturation_rounds", config->saturation_rounds);
    PARSE_INT(table, "plan_freeze_round", config->plan_freeze_round);
+   PARSE_INT(table, "stale_rounds", config->stale_rounds);
    PARSE_INT(table, "critic_max_rearm", config->critic_max_rearm);
    PARSE_BOOL(table, "capture_revisions", config->capture_revisions);
 

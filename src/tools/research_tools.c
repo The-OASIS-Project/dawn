@@ -455,7 +455,7 @@ static char *research_mark_unanswerable_callback(const char *action,
    if (ctx != NULL) {
       conv_event_emit(atomic_load(&ctx->stream_conversation_id), ctx->metrics.user_id,
                       CONV_EVENT_RESEARCH_UNANSWERABLE,
-                      event_payload_research_unanswerable(qid, q.question));
+                      event_payload_research_unanswerable(qid, q.question, "agent"));
    }
    OLOG_INFO("research_mark_unanswerable: run %lld question %lld marked unanswerable",
              (long long)run_id, (long long)qid);

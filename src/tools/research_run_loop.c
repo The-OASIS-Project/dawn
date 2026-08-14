@@ -79,6 +79,8 @@ void research_budgets_load(research_budgets_t *out) {
     * so overlay it whenever the config differs from the compile-time default rather
     * than gating on > 0 (which could never turn the stop off). */
    out->saturation_rounds = rc->saturation_rounds;
+   /* stale_rounds: same "0 = off" contract as saturation_rounds, so overlay always. */
+   out->stale_rounds = rc->stale_rounds;
 }
 
 /* Give up a run after this many CONSECUTIVE dispatch failures (provider 5xx /
@@ -416,6 +418,15 @@ const char *research_run_execute(struct session *s,
    int prev_closed = -1; /* -1 so round 1 (closed >= 0) always counts as progress */
    int no_progress_rounds = 0;
 
+   /* P1 Phase 2 staleness tracker: per-question source-count baseline + dry-round
+    * streak, carried across rounds so a question that gathers no NEW source for
+    * b->stale_rounds rounds is auto-retired as unanswerable (§6.3).  In-memory only —
+    * a hard-killed run never resumes (research_db_reconcile_orphaned), so it has no
+    * cross-restart meaning.  tracker_n grows monotonically (questions are added, never
+    * removed) and is bounded by the ledger cap. */
+   research_stale_entry_t stale_tracker[RESEARCH_MAX_LEDGER_QUESTIONS];
+   int stale_tracker_n = 0;
+
    /* Clear any stale research_conclude signal before the loop reads it (the session
     * is fresh from job_manager_begin, but reset defensively against reuse). */
    session_research_reset_concluded(s);
@@ -480,6 +491,49 @@ const char *research_run_execute(struct session *s,
        * reading back the row we just wrote. */
       int closed = 0, total = 0;
       int cov_rc = research_refresh_coverage(run_id, b->min_sources, &closed, &total);
+
+      /* P1 Phase 2: auto-retire questions gone stale (no new distinct source for
+       * b->stale_rounds rounds), so a run stuck on genuinely-unclosable questions
+       * converges (coverage/saturation) instead of grinding to the token fuse (run 7:
+       * 3 stuck questions drove it to the 1M ceiling).  Only on a clean coverage read —
+       * a zeroed `closed` from a DB hiccup must not read as staleness.  A retirement
+       * moves a question out of the open set, so recount closed/total afterwards so
+       * this round's all_closed + saturation decisions see it. */
+      if (cov_rc == AUTH_DB_SUCCESS && b->stale_rounds > 0) {
+         int64_t retired[RESEARCH_MAX_LEDGER_QUESTIONS];
+         int retired_n = 0;
+         if (research_retire_stale_questions(run_id, b->min_sources, b->stale_rounds, stale_tracker,
+                                             &stale_tracker_n, RESEARCH_MAX_LEDGER_QUESTIONS,
+                                             retired, RESEARCH_MAX_LEDGER_QUESTIONS,
+                                             &retired_n) == AUTH_DB_SUCCESS &&
+             retired_n > 0) {
+            /* Recount into temporaries and overwrite only on success: a transient
+             * failure here must NOT zero closed/total (research_refresh_coverage
+             * zeroes its outputs on any failure), or the saturation block below —
+             * which gates on the FIRST call's cov_rc and can't see this one failed —
+             * would read closed=0 and trip a premature saturation stop on a DB hiccup
+             * (the exact hazard the first call's guard prevents). On failure we keep
+             * the pre-retirement counts; the questions are already 'unanswerable' in
+             * the DB, so next round's first refresh picks up the coverage gain. */
+            int c2 = 0, t2 = 0;
+            if (research_refresh_coverage(run_id, b->min_sources, &c2, &t2) == AUTH_DB_SUCCESS) {
+               closed = c2;
+               total = t2;
+            }
+            for (int ri = 0; ri < retired_n; ri++) {
+               research_question_t rq;
+               const char *qtext = (research_db_question_get(run_id, retired[ri], &rq) ==
+                                    AUTH_DB_SUCCESS)
+                                       ? rq.question
+                                       : "";
+               conv_event_emit(run0->conversation_id, run0->user_id,
+                               CONV_EVENT_RESEARCH_UNANSWERABLE,
+                               event_payload_research_unanswerable(retired[ri], qtext, "stale"));
+            }
+            OLOG_INFO("research: run %lld retired %d stale question(s) at round %d",
+                      (long long)run_id, retired_n, round);
+         }
+      }
       bool all_closed = (total > 0 && closed == total);
 
       /* Saturation tracking: a round that closed NO new question made no coverage
@@ -490,7 +544,12 @@ const char *research_run_execute(struct session *s,
        * on a successful coverage read: a transient DB failure zeros `closed`, which
        * would otherwise read as a dry round and (at saturation_rounds=1) trip a
        * premature saturation stop on a mere DB hiccup.  Skip the round for
-       * saturation purposes, leaving the streak + baseline untouched. */
+       * saturation purposes, leaving the streak + baseline untouched.
+       * NOTE: a stale-retirement this round raised `closed`, so it counts as coverage
+       * progress here and resets the streak — intentional: retiring a stuck question
+       * IS convergence (it shrinks the open set toward the all_closed coverage stop),
+       * so we let staleness drive to `coverage` rather than let a mid-retirement round
+       * trip `saturation` and stop with stuck questions still un-retired. */
       if (cov_rc == AUTH_DB_SUCCESS) {
          if (prev_closed >= 0 && closed <= prev_closed) {
             no_progress_rounds++;

@@ -67,7 +67,27 @@ typedef struct {
    int round_digest_max_chars; /**< cap on the reconstructed round prompt (§4a.2, eff H1) */
    int top_k_questions;        /**< open questions surfaced per round digest */
    int saturation_rounds; /**< consecutive dry rounds (0 new closures) before stopping; 0 off */
+   int stale_rounds;      /**< consecutive rounds a question gains NO new source before it is
+                               auto-retired as unanswerable; 0 off (§6.3, P1 Phase 2) */
 } research_budgets_t;
+
+/**
+ * @brief One question's in-memory staleness state (P1 Phase 2).
+ *
+ * The per-question source-count baseline + dry-round streak the caller carries
+ * across rounds so research_retire_stale_questions() can detect "no new source for
+ * N rounds".  DELIBERATELY in-memory, not a ledger column: a hard-killed run is
+ * reconciled to 'interrupted' and never resumes (research_db_reconcile_orphaned —
+ * "P0 has no research resume"), so this state's useful life is exactly ONE
+ * research_run_execute() invocation.  If research runs ever become resumable, this
+ * must move to a persisted research_questions column so a resumed run doesn't reset
+ * every streak (see DEEP_RESEARCH_DESIGN.md §6.3).
+ */
+typedef struct {
+   int64_t qid;      /**< the question being tracked */
+   int last_sources; /**< distinct-source count at its last observation */
+   int stale_rounds; /**< consecutive rounds since last_sources grew */
+} research_stale_entry_t;
 
 /** @brief Fill @p out with the compile-time P0 defaults. */
 void research_budgets_defaults(research_budgets_t *out);
@@ -94,6 +114,44 @@ void research_budgets_load(research_budgets_t *out);
  * @return AUTH_DB_SUCCESS or a failure code.
  */
 int research_refresh_coverage(int64_t run_id, int min_sources, int *closed_out, int *total_out);
+
+/**
+ * @brief Auto-retire open questions that have gone STALE — no new distinct source
+ *        for @p stale_threshold consecutive rounds — by marking them 'unanswerable'
+ *        (§6.3, P1 Phase 2).
+ *
+ * Run at each round boundary AFTER research_refresh_coverage(), so only truly-open,
+ * under-sourced questions are candidates (a question that reached min_sources this
+ * round is already 'answered' and skipped).  Retiring drops it from the open set so
+ * a run stuck on unclosable questions converges (coverage / saturation) instead of
+ * grinding to the token fuse.  Not data loss: the question's recorded claims stay in
+ * research_claims and still render in the report.
+ *
+ * The staleness state is IN-MEMORY (@p tracker), owned by the caller for the run's
+ * lifetime — see research_stale_entry_t on why it is not persisted.  Only the first
+ * observation of a question seeds a baseline (never counts as a dry round).
+ *
+ * @param run_id
+ * @param min_sources     coverage threshold (only informational here — refresh_coverage
+ *                        already promoted anything at/above it).
+ * @param stale_threshold consecutive dry rounds before retiring; <= 0 disables (no-op).
+ * @param tracker         caller-owned per-question state array.
+ * @param tracker_n       in/out: live entry count in @p tracker.
+ * @param tracker_max     capacity of @p tracker (RESEARCH_MAX_LEDGER_QUESTIONS).
+ * @param retired_out     caller-owned; receives the qids retired THIS call (may be NULL).
+ * @param retired_max     capacity of @p retired_out.
+ * @param retired_n_out   number of qids written to @p retired_out (may be NULL).
+ * @return AUTH_DB_SUCCESS or a failure code (tracker left usable).
+ */
+int research_retire_stale_questions(int64_t run_id,
+                                    int min_sources,
+                                    int stale_threshold,
+                                    research_stale_entry_t *tracker,
+                                    int *tracker_n,
+                                    int tracker_max,
+                                    int64_t *retired_out,
+                                    int retired_max,
+                                    int *retired_n_out);
 
 /**
  * @brief The continue/stop decision (§6).

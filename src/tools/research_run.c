@@ -51,6 +51,7 @@ void research_budgets_defaults(research_budgets_t *out) {
    out->round_digest_max_chars = RESEARCH_DEFAULT_ROUND_DIGEST_MAX_CHARS;
    out->top_k_questions = RESEARCH_DEFAULT_TOP_K_QUESTIONS;
    out->saturation_rounds = RESEARCH_DEFAULT_SATURATION_ROUNDS;
+   out->stale_rounds = RESEARCH_DEFAULT_STALE_ROUNDS;
 }
 
 int research_refresh_coverage(int64_t run_id, int min_sources, int *closed_out, int *total_out) {
@@ -103,6 +104,97 @@ int research_refresh_coverage(int64_t run_id, int min_sources, int *closed_out, 
    }
    if (total_out) {
       *total_out = n;
+   }
+   return AUTH_DB_SUCCESS;
+}
+
+int research_retire_stale_questions(int64_t run_id,
+                                    int min_sources,
+                                    int stale_threshold,
+                                    research_stale_entry_t *tracker,
+                                    int *tracker_n,
+                                    int tracker_max,
+                                    int64_t *retired_out,
+                                    int retired_max,
+                                    int *retired_n_out) {
+   (void)min_sources; /* refresh_coverage owns the answered threshold; staleness is a
+                         separate "no NEW source" signal that ignores the absolute count. */
+   if (retired_n_out) {
+      *retired_n_out = 0;
+   }
+   if (stale_threshold <= 0) {
+      return AUTH_DB_SUCCESS; /* feature disabled — no-op */
+   }
+   if (run_id <= 0 || !tracker || !tracker_n || tracker_max < 0) {
+      return AUTH_DB_INVALID;
+   }
+
+   research_question_t questions[RESEARCH_MAX_LEDGER_QUESTIONS];
+   int n = 0;
+   int rc = research_db_question_list(run_id, questions, RESEARCH_MAX_LEDGER_QUESTIONS, &n);
+   if (rc != AUTH_DB_SUCCESS) {
+      return rc; /* transient read fault — leave the tracker untouched, try next round */
+   }
+
+   int retired = 0;
+   for (int i = 0; i < n; i++) {
+      research_question_t *q = &questions[i];
+      /* Only OPEN questions can be stale: refresh_coverage ran first, so anything
+       * answered/unanswerable is already off the open set. */
+      if (strcmp(q->status, "open") != 0) {
+         continue;
+      }
+
+      int sources = 0;
+      if (research_db_question_coverage(run_id, q->id, &sources) != AUTH_DB_SUCCESS) {
+         continue; /* skip on a per-question read error — never fabricate staleness */
+      }
+
+      /* Find this question's tracker slot (linear over a small, run-bounded set). */
+      research_stale_entry_t *e = NULL;
+      for (int k = 0; k < *tracker_n; k++) {
+         if (tracker[k].qid == q->id) {
+            e = &tracker[k];
+            break;
+         }
+      }
+      if (e == NULL) {
+         /* First time we see this question: seed a baseline, don't count it as dry
+          * (a question added this round has had no chance to gather a source yet). */
+         if (*tracker_n >= tracker_max) {
+            continue; /* tracker full (pathological, > RESEARCH_MAX_LEDGER_QUESTIONS) */
+         }
+         e = &tracker[(*tracker_n)++];
+         e->qid = q->id;
+         e->last_sources = sources;
+         e->stale_rounds = 0;
+         continue;
+      }
+
+      if (sources > e->last_sources) {
+         e->last_sources = sources; /* progress — a new distinct source arrived */
+         e->stale_rounds = 0;
+         continue;
+      }
+
+      /* Dry round: no new distinct source for this question. */
+      if (++e->stale_rounds < stale_threshold) {
+         continue;
+      }
+      if (research_db_question_set_status(q->id, "unanswerable", 0.0) == AUTH_DB_SUCCESS) {
+         /* Count only what we actually write, so *retired_n_out always bounds a safe
+          * iteration of retired_out[0..n): a question past retired_max (or when
+          * retired_out is NULL) is still retired in the DB — the status flip above
+          * already happened — it is simply not listed back to the caller. */
+         if (retired_out && retired < retired_max) {
+            retired_out[retired++] = q->id;
+         }
+         e->stale_rounds = 0; /* retired — it is no longer 'open', so stop re-counting */
+      }
+   }
+
+   if (retired_n_out) {
+      *retired_n_out = retired;
    }
    return AUTH_DB_SUCCESS;
 }

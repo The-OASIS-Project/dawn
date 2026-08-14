@@ -421,7 +421,9 @@ char *event_payload_research_conclude(int round) {
    return out;
 }
 
-char *event_payload_research_unanswerable(int64_t question_id, const char *question) {
+char *event_payload_research_unanswerable(int64_t question_id,
+                                          const char *question,
+                                          const char *reason) {
    struct json_object *root = json_object_new_object();
    if (root == NULL) {
       return NULL;
@@ -435,6 +437,9 @@ char *event_payload_research_unanswerable(int64_t question_id, const char *quest
    }
    json_object_object_add(root, "question", json_object_new_string(q));
    free(q);
+   /* reason is a controlled literal ("agent" | "stale"); default to "agent". */
+   json_object_object_add(root, "reason",
+                          json_object_new_string((reason && reason[0]) ? reason : "agent"));
    const char *rendered = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
    char *out = rendered ? strdup(rendered) : NULL;
    if (out != NULL) {

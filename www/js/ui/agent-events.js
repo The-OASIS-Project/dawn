@@ -87,11 +87,14 @@
             // Honest: the agent SIGNALLED done; the controller only honors it once
             // findings exist, so don't assert "writing the report" here.
             return { cls: 'ok', text: 'Agent signalled the brief is covered' };
-         case 'research_unanswerable':
-            return {
-               cls: 'muted',
-               text: 'Marked unanswerable: ' + (p.question ? p.question : '(question)'),
-            };
+         case 'research_unanswerable': {
+            // "stale" = the controller auto-retired it (no new source for N rounds);
+            // otherwise the agent declared it unanswerable itself.
+            const q = p.question ? p.question : '(question)';
+            const label =
+               p.reason === 'stale' ? 'Retired — no new sources: ' : 'Marked unanswerable: ';
+            return { cls: 'muted', text: label + q };
+         }
          case 'research_stop': {
             const r = p.stop_reason || '?';
             // Green ✓ only for a clean/natural end; a budget/cancel stop is muted.

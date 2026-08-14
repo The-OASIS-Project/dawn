@@ -1817,6 +1817,8 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_int(config->research.saturation_rounds));
    json_object_object_add(research, "plan_freeze_round",
                           json_object_new_int(config->research.plan_freeze_round));
+   json_object_object_add(research, "stale_rounds",
+                          json_object_new_int(config->research.stale_rounds));
    json_object_object_add(research, "critic_max_rearm",
                           json_object_new_int(config->research.critic_max_rearm));
    json_object_object_add(research, "capture_revisions",
@@ -2702,6 +2704,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "min_sources = %d\n", config->research.min_sources);
    fprintf(fp, "saturation_rounds = %d\n", config->research.saturation_rounds);
    fprintf(fp, "plan_freeze_round = %d\n", config->research.plan_freeze_round);
+   fprintf(fp, "stale_rounds = %d\n", config->research.stale_rounds);
    fprintf(fp, "critic_max_rearm = %d\n", config->research.critic_max_rearm);
    fprintf(fp, "capture_revisions = %s\n", config->research.capture_revisions ? "true" : "false");
 

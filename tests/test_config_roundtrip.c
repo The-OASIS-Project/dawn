@@ -126,6 +126,7 @@ static void test_research_roundtrip(void) {
    g_written.research.min_sources = 3;
    g_written.research.saturation_rounds = 4;
    g_written.research.plan_freeze_round = 3;
+   g_written.research.stale_rounds = 3;
    g_written.research.critic_max_rearm = 5;
    g_written.research.capture_revisions = true;
 
@@ -139,6 +140,7 @@ static void test_research_roundtrip(void) {
    TEST_ASSERT_EQUAL_INT(3, g_read.research.min_sources);
    TEST_ASSERT_EQUAL_INT(4, g_read.research.saturation_rounds);
    TEST_ASSERT_EQUAL_INT(3, g_read.research.plan_freeze_round);
+   TEST_ASSERT_EQUAL_INT(3, g_read.research.stale_rounds);
    TEST_ASSERT_EQUAL_INT(5, g_read.research.critic_max_rearm);
    TEST_ASSERT_TRUE(g_read.research.capture_revisions);
 }

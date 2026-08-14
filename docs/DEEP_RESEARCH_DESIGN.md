@@ -2,7 +2,8 @@
 
 **Status: ✅ P0 SHIPPED + field-validated (2026-08-13).** All 11 §15 build steps landed across individual
 reviewed commits, a five-lens pre-release audit (arch/security/correctness/efficiency/standards, 0 blocking),
-and a first-live-run tuning pass. P1–P4 remain design-only below.
+and a first-live-run tuning pass. **P1 (controller-driven convergence: plan-freeze + stale-question
+auto-retirement) SHIPPED 2026-08-14, pending live test.** P2–P4 remain design-only below.
 
 ## Where this stands (2026-08-13)
 
@@ -90,7 +91,7 @@ messaging-channel completion push, and the `url_fetch` exfil residual (the broad
 tool-audit / per-session capability-mask initiative — sharpened by research, not P1). Multi-agent fan-out + P2
 private-corpus mode are real later directions on the (unbuilt) job-trees substrate.
 
-### P1: Controller-driven convergence — Phase 1 SHIPPED 2026-08-14 (pending live test), Phase 2 not started
+### P1: Controller-driven convergence — Phase 1 + Phase 2 SHIPPED 2026-08-14 (pending live test)
 
 **Problem (runs 2–5).** The reports are strong, but the model **never self-terminates** — 0 `research_conclude` /
 `research_mark_unanswerable` calls across four runs despite prompt nudges — and it **over-decomposes mid-run**
@@ -112,23 +113,50 @@ fires (run 5 would likely stop ~round 3, not grind to 1M). Touches: `research_pl
 `research_active_run`), one config knob (nine-touchpoint wire per CONFIGURATION_GUIDE), `RESEARCH_DEFAULT_PLAN_
 FREEZE_ROUND`, a unit test. Single-subsystem + config — no separate plan cycle needed.
 
-**Phase 2 — Stale-question auto-unanswerable** `agent ~half-day · api $0 · 1-2 ckpt`. The controller auto-marks a
-question `unanswerable` after `N` rounds open with no new distinct sources (`stale_rounds`, default 2) — the
-deterministic complement to the tool the model won't use (evidence-of-absence, in C). Lets `coverage` complete
-deterministically even when a hard question can't close, so a run stops on `coverage` (clean) rather than
-`saturation`/budget, and a partially-covered run finishes on its own terms. Needs per-question staleness
-tracking: a `stale_rounds`/`last_source_count` column (schema **v76**) or a per-round delta in
-`research_refresh_coverage`. Touches coverage logic, `auth_db_research.c`, a migration, tests.
+**Phase 2 — Stale-question auto-unanswerable — SHIPPED.** The controller auto-marks a question `unanswerable`
+after `N` consecutive rounds open with **no new distinct source** (`stale_rounds`, config, default **2**) — the
+deterministic complement to the `research_mark_unanswerable` tool the model won't use itself (evidence-of-absence,
+in C). Run 7 justified it: plan freeze held decomposition (15 questions, not 18) and coverage reached 80%, but **3
+genuinely-unclosable questions** (a compound one, a cross-cutting synthesis one, a subjective one) never closed,
+so the open set never emptied and the survey still ground to the 1M `token_budget` fuse at round 4. Auto-retiring
+a stuck question drops it from the open set so `coverage`/`saturation` can fire well under the fuse. **Not data
+loss:** the claims already gathered for a retired question stay in `research_claims` and still render in the
+report; synthesis is honest about the gap.
+
+- **"Stale" = no new distinct source for N rounds** (chosen over "< min_sources for N rounds": staleness is about
+  *evidence actually arriving*, not the absolute count — a question inching up one source per round is progressing
+  and should be spared). First observation of a question seeds a baseline and never counts as a dry round.
+- Runs *after* `research_refresh_coverage` each round, so only truly-open, under-sourced questions are candidates
+  (anything at `min_sources` is already `answered`); a retirement then triggers a coverage recount so the same
+  round's `all_closed`/saturation see it. Emits a `research_unanswerable` observe event tagged `reason:"stale"`
+  (vs `"agent"`) so the panel shows *why* a question was retired.
+- **Staleness state is IN-MEMORY** (`research_stale_entry_t` per-question tracker, owned by `research_run_execute`
+  for the run's lifetime), NOT a ledger column. Rationale: a hard-killed run is reconciled to `interrupted` by
+  `research_db_reconcile_orphaned` and **never resumes** ("P0 has no research resume"), so the tracker's useful
+  life is exactly one `research_run_execute` invocation — a durable column would protect state nothing reads on
+  boot. The durable *outcome* (a question flipped to `unanswerable`) is persisted regardless via the normal status
+  write. **⚠ If research runs ever become resumable** (ledger-resume, noted at §"Restart durability" / the P1
+  ledger-resume upgrade), this tracker MUST move to a persisted per-question column (`stale_rounds` +
+  `last_source_count` on `research_questions`, schema bump) — otherwise a resumed run resets every question's
+  dry-round streak to zero and can never retire a question that was already stale before the restart.
+- Touches: `research_retire_stale_questions()` + `research_stale_entry_t` (deterministic core, unit-tested), the
+  round loop, `stale_rounds` config (nine-touchpoint wire), the `reason` field on the unanswerable event, docs.
 
 **Together:** model decomposes freely in rounds 1–K → controller drives to completion (close what's closable,
 auto-retire what's stuck) → stops on `coverage`/`saturation` well under the 1M fuse, model self-termination a
 bonus not a dependency.
 
-**Open decisions:** `plan_freeze_round` = 2? `stale_rounds` = 2 and "no new sources" vs "< min_sources for N"?
-**Do Phase 1 alone first and re-measure** (it may suffice — freeze + effective saturation), then decide whether
-Phase 2's determinism is needed or gold-plating. Deliberately NOT in scope: the fresh-context completeness
-critic (heavier original P1) — revisit only if 1+2 don't converge. **Success criterion:** a run-5-style broad
-survey stops on `coverage`/`saturation` at ~700k, not `token_budget` at 1M.
+**Resolved decisions:** `plan_freeze_round` = 2 (shipped). `stale_rounds` = 2, "no new sources" (not
+"< min_sources for N"). Deliberately NOT in scope: the fresh-context completeness critic (heavier original P1) —
+revisit only if freeze + saturation + staleness don't converge in the field. **Success criterion (live-test):**
+the signal is the **stop reason flipping from `token_budget` to a natural end** (`coverage`/`saturation`) on a
+run-7-style broad survey — NOT a precise token figure. The search trajectory is non-deterministic (a field read
+of runs 5 vs 7: same brief, different long-tail entrants surfaced, different questions left open), so the exact
+stop token count and *which* questions go stale will vary run to run; ~700–800k is indicative, not a target.
+Note the scope boundary: staleness fixes **unclosable** questions (compound/synthesis/subjective — more budget
+won't close them); it does NOT address *breadth* (a fixed budget samples a subset of a fast-moving landscape) —
+that is the `max_rounds`/`max_input_tokens` knobs' job for a deliberately-broad survey, and the deferred
+completeness critic's, not staleness's.
 
 ---
 

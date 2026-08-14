@@ -1055,6 +1055,12 @@
                                      #   sub-questions and converges on the plan it has
                                      #   (curbs runaway late plan growth; does not cap
                                      #   the initial plan). Min 1; >= max_rounds = off.
+# stale_rounds = 2                   # Auto-retire a sub-question as unanswerable after
+                                     #   this many rounds in which it gains NO new source,
+                                     #   so a run stuck on genuinely-unclosable questions
+                                     #   still converges instead of burning the whole
+                                     #   token budget. Findings already gathered stay in
+                                     #   the report. 0 disables. 0-100.
 #
 # Parsed and round-tripped, but NOT yet enforced — reserved for later phases.
 # Setting them has no effect yet:

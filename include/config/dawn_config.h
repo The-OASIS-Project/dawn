@@ -984,6 +984,8 @@ typedef struct {
    int min_sources;            /* DISTINCT source_url before a question is 'answered' (§3/§6) */
    int saturation_rounds;      /* Consecutive dry rounds before the saturation stop (§6); 0 off */
    int plan_freeze_round; /* research_plan refuses new questions past this round (§6); min 1 */
+   int stale_rounds;      /* Rounds a question gains no new source before auto-retire as
+                             unanswerable (§6.3, P1 Phase 2); 0 off */
    /* Parsed + round-tripped but NOT yet enforced (kept out of the WebUI panel per
     * CONFIGURATION_GUIDE — a control that silently does nothing is worse than
     * none).  Reserved for P1 (critic) + a debug snapshot mode. */
