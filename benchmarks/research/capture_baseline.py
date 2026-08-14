@@ -67,13 +67,49 @@ def _collect_run(conn, run):
     """Build the metrics dict for one research_runs row (a sqlite3.Row)."""
     run_id = run["id"]
 
-    q = {"open": 0, "answered": 0, "unanswerable": 0, "total": 0}
-    for r in conn.execute(
-        "SELECT status, COUNT(*) c FROM research_questions WHERE run_id=? GROUP BY status",
-        (run_id,),
-    ):
+    # Question ledger, split by resolution_reason when the column exists (schema v76+):
+    # 'stale' = controller auto-retired (Phase 2), 'agent' = research_mark_unanswerable.
+    q = {"open": 0, "answered": 0, "unanswerable": 0, "stale": 0, "agent": 0, "total": 0}
+    try:
+        qrows = conn.execute(
+            "SELECT status, resolution_reason, COUNT(*) c FROM research_questions "
+            "WHERE run_id=? GROUP BY status, resolution_reason",
+            (run_id,),
+        ).fetchall()
+        has_reason = True
+    except sqlite3.OperationalError:
+        qrows = conn.execute(
+            "SELECT status, NULL resolution_reason, COUNT(*) c FROM research_questions "
+            "WHERE run_id=? GROUP BY status",
+            (run_id,),
+        ).fetchall()
+        has_reason = False
+    for r in qrows:
         q[r["status"]] = q.get(r["status"], 0) + r["c"]
         q["total"] += r["c"]
+        if r["resolution_reason"] in ("stale", "agent"):
+            q[r["resolution_reason"]] += r["c"]
+
+    # Completeness-critic activity: research_critic observe events on the run's
+    # conversation. A re-arm = decision 'continue' with N gap sub-questions added;
+    # otherwise the critic ran and confirmed the stop. No events => it never fired
+    # (fuse stop, no natural end, or critic disabled). conversation_events predates
+    # the research tables (v72 < v75), so this query is safe on any research DB.
+    critic = {"rearms": 0, "gaps_added": 0, "confirmed": 0}
+    for r in conn.execute(
+        "SELECT payload FROM conversation_events "
+        "WHERE conversation_id=? AND kind='research_critic'",
+        (run["conversation_id"],),
+    ):
+        try:
+            p = json.loads(r["payload"] or "{}")
+        except (ValueError, TypeError):
+            continue
+        if p.get("decision") == "continue":
+            critic["rearms"] += 1
+            critic["gaps_added"] += int(p.get("gaps_added") or 0)
+        else:
+            critic["confirmed"] += 1
 
     claims = conn.execute(
         "SELECT COUNT(*) n, COUNT(DISTINCT source_url) src FROM research_claims WHERE run_id=?",
@@ -106,6 +142,8 @@ def _collect_run(conn, run):
         "finished_at": run["finished_at"],
         "duration_sec": duration,
         "questions": q,
+        "has_reason": has_reason,
+        "critic": critic,
         "claims": {"count": claims["n"], "distinct_sources": claims["src"]},
         "report": {
             "revision_round": rev["round"] if rev else None,
@@ -121,16 +159,23 @@ def _print_summary(runs):
         return
     hdr = (
         f"{'run':>4}  {'status':<12} {'stop':<12} {'rnds':>4} {'tools':>5} "
-        f"{'tokens':>8} {'Q(a/t)':>7} {'claims':>6} {'src':>4}  brief"
+        f"{'tokens':>8} {'Q(a/t)':>7} {'crit':>6} {'claims':>6} {'src':>4}  brief"
     )
     print(hdr)
     print("-" * len(hdr))
     for r in runs:
         q = r["questions"]
+        c = r["critic"]
+        # 'Nr/Mg' = re-armed N times adding M gaps; 'stop' = ran + confirmed; '-' = never fired.
+        crit = (
+            f"{c['rearms']}r/{c['gaps_added']}g"
+            if c["rearms"]
+            else ("stop" if c["confirmed"] else "-")
+        )
         print(
             f"{r['run_id']:>4}  {r['status']:<12} {(r['stop_reason'] or '-'):<12} "
             f"{r['rounds_run']:>4} {r['tool_calls']:>5} {r['input_tokens']:>8} "
-            f"{str(q['answered']) + '/' + str(q['total']):>7} "
+            f"{str(q['answered']) + '/' + str(q['total']):>7} {crit:>6} "
             f"{r['claims']['count']:>6} {r['claims']['distinct_sources']:>4}  "
             f"{r['brief'][:60]}"
         )
@@ -149,10 +194,26 @@ def _write_markdown(runs, path):
                 f"input tokens: {r['input_tokens']} · duration: "
                 f"{r['duration_sec'] if r['duration_sec'] is not None else '-'}s\n"
             )
+            # Only show the stale/agent split when it fully accounts for the
+            # unanswerables — legacy rows (pre-v76 resolution_reason) read NULL, so
+            # "(0 stale, 0 agent)" would misleadingly imply neither when the split is
+            # simply unrecorded (it lives in the observe events for those runs).
+            if q["unanswerable"] and q["stale"] + q["agent"] == q["unanswerable"]:
+                unans = (
+                    f"{q['unanswerable']} unanswerable ({q['stale']} stale, {q['agent']} agent)"
+                )
+            else:
+                unans = f"{q['unanswerable']} unanswerable"
             f.write(
                 f"- questions: {q['answered']} answered / {q['open']} open / "
-                f"{q['unanswerable']} unanswerable (of {q['total']})\n"
+                f"{unans} (of {q['total']})\n"
             )
+            c = r["critic"]
+            if c["rearms"] or c["confirmed"]:
+                f.write(
+                    f"- critic: re-armed {c['rearms']}× (+{c['gaps_added']} gaps), "
+                    f"confirmed stop {c['confirmed']}×\n"
+                )
             f.write(
                 f"- claims: {r['claims']['count']} from {r['claims']['distinct_sources']} "
                 f"distinct sources · report_doc_id: {r['report_doc_id'] or '-'}\n\n"
