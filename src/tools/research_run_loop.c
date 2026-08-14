@@ -36,6 +36,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
@@ -157,7 +158,11 @@ static const char RESEARCH_SYNTHESIS_PROMPT[] =
     "or that remained uncertain — be honest about gaps rather than papering over them.\n\n"
     "Write for the user, in plain prose and tables where useful. Base every claim on the recorded "
     "findings below; do not invent facts not in the evidence. Do not include a raw list of every "
-    "claim — that evidence is appended to the report automatically.";
+    "claim — that evidence is appended to the report automatically.\n"
+    "This report is a SNAPSHOT and the reader may see it weeks later: when a finding is "
+    "time-sensitive (a count, price, version, ranking, or anything described as 'current'/'latest'/"
+    "'now'), state it as of the research date given in the directive rather than as a timeless "
+    "fact.";
 
 /* Longest title BODY (after the "Research #N: " prefix) we keep, so the note title
  * renders in the doc-library list.  A brief is a paragraph; the synthesized report's
@@ -290,16 +295,18 @@ static void research_persist_report_note(int user_id,
  * write.  Returns the prose (caller frees) or NULL on provider failure. */
 static char *research_synthesize(struct session *s,
                                  const research_run_t *run0,
-                                 const char *evidence) {
-   size_t need = strlen(run0->brief) + strlen(evidence) + 256;
+                                 const char *evidence,
+                                 const char *research_date) {
+   const char *d = (research_date && research_date[0]) ? research_date : "unknown";
+   size_t need = strlen(run0->brief) + strlen(evidence) + strlen(d) + 320;
    char *directive = malloc(need);
    if (!directive) {
       return NULL;
    }
    snprintf(directive, need,
-            "Brief:\n%s\n\nYour recorded findings (the evidence to write the report from):\n%s\n\n"
-            "Write the final report now.",
-            run0->brief, evidence);
+            "Brief:\n%s\n\nResearch date: %s\n\nYour recorded findings (the evidence to write the "
+            "report from):\n%s\n\nWrite the final report now.",
+            run0->brief, d, evidence);
 
    session_init_system_prompt(s, RESEARCH_SYNTHESIS_PROMPT); /* resets history to [system] */
    session_set_tools_suppressed(s, true);                    /* deny every tool this turn */
@@ -315,21 +322,35 @@ static char *research_synthesize(struct session *s,
    return prose;
 }
 
-/* Assemble the final report: the written answer on top, the evidence appendix
- * below.  Falls back to evidence-only when synthesis produced nothing.  Returns a
- * heap string (caller frees) or NULL if there is neither. */
-static char *research_assemble_report(const char *prose, const char *evidence) {
+/* Assemble the final report: a deterministic "Researched: <date>" dateline (so a
+ * fast-moving-topic report never reads as an undated, timeless snapshot), the
+ * written answer, then the evidence appendix below.  Falls back to evidence-only
+ * when synthesis produced nothing.  Returns a heap string (caller frees) or NULL if
+ * there is neither.  @p date may be NULL/"" (dateline omitted).  The leading "*..*"
+ * dateline does not disturb research_report_label's H1 detection — it falls through
+ * to the "\n# " scan for the model's title. */
+static char *research_assemble_report(const char *prose, const char *evidence, const char *date) {
    const char *ev = evidence ? evidence : "";
+   char dateline[48];
+   dateline[0] = '\0';
+   if (date && date[0]) {
+      snprintf(dateline, sizeof(dateline), "*Researched: %s.*\n\n", date);
+   }
    if (prose && prose[0]) {
-      size_t n = strlen(prose) + strlen(ev) + 64;
+      size_t n = strlen(dateline) + strlen(prose) + strlen(ev) + 64;
       char *out = malloc(n);
       if (out) {
-         snprintf(out, n, "%s\n\n---\n\n## Evidence & sources\n\n%s", prose, ev);
+         snprintf(out, n, "%s%s\n\n---\n\n## Evidence & sources\n\n%s", dateline, prose, ev);
       }
       return out;
    }
    if (evidence && evidence[0]) {
-      return strdup(evidence);
+      size_t n = strlen(dateline) + strlen(ev) + 1;
+      char *out = malloc(n);
+      if (out) {
+         snprintf(out, n, "%s%s", dateline, ev);
+      }
+      return out;
    }
    return NULL;
 }
@@ -618,6 +639,20 @@ const char *research_run_execute(struct session *s,
    char *evidence = NULL;
    research_render_report(run_id, run0->brief, &evidence);
 
+   /* Research date (local, YYYY-MM-DD) from the run's creation time — stamped
+    * deterministically into the report and handed to synthesis so time-sensitive
+    * findings read as "as of <date>", not as a timeless snapshot. localtime_r for
+    * thread safety (this runs on the detached research worker). */
+   char research_date[16];
+   research_date[0] = '\0';
+   {
+      time_t created = run0->created_at;
+      struct tm tmv;
+      if (localtime_r(&created, &tmv) != NULL) {
+         strftime(research_date, sizeof(research_date), "%Y-%m-%d", &tmv);
+      }
+   }
+
    /* Answer: a written synthesis of the evidence (exec summary + a direct answer to
     * the brief + honest gaps).  Skipped on a user cancel (they asked to stop — don't
     * spend another LLM call) or an empty run; the report then falls back to
@@ -625,14 +660,14 @@ const char *research_run_execute(struct session *s,
    char *prose = NULL;
    bool user_cancel = (stop_reason && strcmp(stop_reason, "cancelled") == 0);
    if (claim_count > 0 && !user_cancel && evidence != NULL) {
-      prose = research_synthesize(s, run0, evidence);
+      prose = research_synthesize(s, run0, evidence, research_date);
    }
    /* Hand a short lead back for the chat completion message (caller frees). */
    if (out_summary) {
       *out_summary = research_extract_summary(prose);
    }
 
-   char *report = research_assemble_report(prose, evidence);
+   char *report = research_assemble_report(prose, evidence, research_date);
    if (report != NULL) {
       research_db_revision_add(run_id, last_round, report);
       if (claim_count > 0) {

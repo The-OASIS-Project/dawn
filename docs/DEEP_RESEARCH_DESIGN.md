@@ -568,6 +568,34 @@ Layered stopping stack, outermost first:
    `continue, targeting these named gaps`. **Bounded re-arm**: at most `critic_max_rearm` times (default 2),
    then the run stops regardless. (Claims-as-view already subsumes Anthropic's separate CitationAgent pass —
    every claim carries its URL + quote — so we don't need to copy it.)
+
+   > **Feed the critic the STOP CONTEXT, not just the report — or it re-derives adjudicated gaps and
+   > ping-pongs against the convergence controls (added 2026-08-14).** A critic that sees only the report will
+   > re-open the same gaps the controller already settled, the agent re-runs the same dead searches, they go
+   > stale again, and a whole re-arm is spent confirming what was already known. The critic MUST receive, per
+   > question, the **terminal reason** — `answered` (closed on coverage) vs `unanswerable·stale` (Phase 2
+   > auto-retired: the agent worked it and evidence stopped arriving → the easy web avenues are exhausted) vs
+   > `unanswerable·agent` (the agent's own judged dead-end) vs `open` at a budget fuse (never reached, not
+   > judged → the *most* legitimate re-arm target) — plus the **run `stop_reason`** and **remaining budget**.
+   > The `stop_reason` changes what re-arming even means: after a natural end (`coverage`/`concluded`/
+   > `saturation`) completeness-checking is meaningful; after a **fuse** (`token_budget`/`budget`) re-arming is
+   > near-pointless — there is no budget left and the same fuse fires again, so the critic should grade what
+   > exists and report "incomplete, out of budget" rather than ask for more. **Decision rule:** re-arm ONLY
+   > with a *concrete untried angle*; otherwise record the gap as a **stated limitation** in the report and let
+   > the stop stand. A `stale`-retired question is not blindly off-limits, but its default assumption is
+   > "exhausted", so reopening it requires naming an avenue the prior rounds did not take (the star-count
+   > contradiction → *check the primary source / GitHub API*, NOT re-run the same keyword search — this is the
+   > good version of consistency-checking). `critic_max_rearm` is the safety net if it misjudges; the
+   > stop-context is what keeps it from *needing* the net.
+   >
+   > **Data-availability note for whoever builds it:** the retirement `reason` (`stale` vs `agent`) currently
+   > lives ONLY in the observe events (`conversation_events`, durable) — **not** on the `research_questions`
+   > row, which just reads `unanswerable`. So a critic reading the ledger must either join the event stream or
+   > we promote `reason` to a question column at build time (decide then — the critic's exact contract is not
+   > locked, so no speculative column now). The richer per-question attempt history (sources-per-round,
+   > dry-streak) is the **in-memory** staleness tracker (`research_stale_entry_t`), deliberately not persisted;
+   > if the critic needs it, that is the same trigger as resumability for graduating staleness to a persisted
+   > `research_questions` column (see §"P1 Phase 2").
 5. **UNANSWERABLE verdict (P1)** — the critic (and `research_plan`) may mark a question `unanswerable`
    ("evidence of absence" vs "absence of evidence", the SeekerGym distinction). Without this escape,
    unanswerable questions churn to budget-death and the report reads as a failure instead of a finding.
