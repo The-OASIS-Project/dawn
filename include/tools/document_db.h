@@ -323,6 +323,14 @@ int document_db_full_text_set(int64_t doc_id, const char *text);
  */
 int document_db_full_text_get(int64_t doc_id, int user_id, char **text_out);
 
+/**
+ * @brief Fetch just a document's stored original-file blob id (for a WS list serializer
+ * that wants to expose it without threading it through the shared row_to_document path).
+ * @param out    Buffer (>= BLOB_ID_LEN); set to "" when the doc has no stored original.
+ * @return SUCCESS (0) if the document row exists (blob id may be ""), FAILURE otherwise.
+ */
+int document_db_get_original_blob_id(int64_t doc_id, char *out, size_t out_sz);
+
 /* One prepared chunk for an in-place document replace (all borrowed). */
 typedef struct {
    const char *text;
