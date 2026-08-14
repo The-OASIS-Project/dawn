@@ -2394,6 +2394,15 @@
                default: 1,
                advanced: true,
             },
+            plan_freeze_round: {
+               type: 'number',
+               label: 'Freeze Plan After Round',
+               min: 1,
+               max: 10,
+               hint: 'After this round the agent stops adding new sub-questions and converges on the plan it has (curbs runaway late plan growth). Does not cap the initial plan size.',
+               default: 2,
+               advanced: true,
+            },
          },
       },
       calendar: {

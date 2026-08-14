@@ -90,6 +90,46 @@ messaging-channel completion push, and the `url_fetch` exfil residual (the broad
 tool-audit / per-session capability-mask initiative — sharpened by research, not P1). Multi-agent fan-out + P2
 private-corpus mode are real later directions on the (unbuilt) job-trees substrate.
 
+### P1: Controller-driven convergence — Phase 1 SHIPPED 2026-08-14 (pending live test), Phase 2 not started
+
+**Problem (runs 2–5).** The reports are strong, but the model **never self-terminates** — 0 `research_conclude` /
+`research_mark_unanswerable` calls across four runs despite prompt nudges — and it **over-decomposes mid-run**
+(plan grows 20→24, 11→23, 10→18). Run 5 is the proof: end of round 3 it was **8/10 (80%)**, then round 4 *added
+8 questions* and closed 1, dropping coverage to 9/18 and running spend to the 1M fuse. The "let the model decide
+when it's done via prompting" bet lost; convergence must move to the controller. This is the resume-trigger
+signal the soak was meant to surface — now surfaced. Two root behaviors: (1) no self-termination instinct;
+(2) unbounded *late* plan growth that inflates the denominator, tanks the coverage fraction, and drives cost.
+
+**Design — two controller-side mechanisms (not prompt):**
+
+**Phase 1 — Plan freeze — SHIPPED.** After round `K` (config `plan_freeze_round`, default
+**2**, clamp min 1 so round-1 planning always works), `research_plan` refuses new questions ("the plan is set —
+close the open questions or mark one unanswerable"). Preserves the "decomposition is the LLM's job" decision —
+no cap on *how many* it plans up front, only a stop on runaway *late* expansion (distinct from the plan-size cap
+we rejected). Key payoff: it makes the **existing saturation stop actually effective** — today the model dodges
+saturation by adding a question every round; with a frozen plan, a round that closes nothing → `saturation`
+fires (run 5 would likely stop ~round 3, not grind to 1M). Touches: `research_plan_callback` (round guard via
+`research_active_run`), one config knob (nine-touchpoint wire per CONFIGURATION_GUIDE), `RESEARCH_DEFAULT_PLAN_
+FREEZE_ROUND`, a unit test. Single-subsystem + config — no separate plan cycle needed.
+
+**Phase 2 — Stale-question auto-unanswerable** `agent ~half-day · api $0 · 1-2 ckpt`. The controller auto-marks a
+question `unanswerable` after `N` rounds open with no new distinct sources (`stale_rounds`, default 2) — the
+deterministic complement to the tool the model won't use (evidence-of-absence, in C). Lets `coverage` complete
+deterministically even when a hard question can't close, so a run stops on `coverage` (clean) rather than
+`saturation`/budget, and a partially-covered run finishes on its own terms. Needs per-question staleness
+tracking: a `stale_rounds`/`last_source_count` column (schema **v76**) or a per-round delta in
+`research_refresh_coverage`. Touches coverage logic, `auth_db_research.c`, a migration, tests.
+
+**Together:** model decomposes freely in rounds 1–K → controller drives to completion (close what's closable,
+auto-retire what's stuck) → stops on `coverage`/`saturation` well under the 1M fuse, model self-termination a
+bonus not a dependency.
+
+**Open decisions:** `plan_freeze_round` = 2? `stale_rounds` = 2 and "no new sources" vs "< min_sources for N"?
+**Do Phase 1 alone first and re-measure** (it may suffice — freeze + effective saturation), then decide whether
+Phase 2's determinism is needed or gold-plating. Deliberately NOT in scope: the fresh-context completeness
+critic (heavier original P1) — revisit only if 1+2 don't converge. **Success criterion:** a run-5-style broad
+survey stops on `coverage`/`saturation` at ~700k, not `token_budget` at 1M.
+
 ---
 
 **(Design register below — the original plan/scope. Git holds the build log; per-step + review detail lives in

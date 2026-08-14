@@ -49,5 +49,13 @@
  * itself via research_conclude; this is the controller's backstop for a run that
  * stalls without concluding. */
 #define RESEARCH_DEFAULT_SATURATION_ROUNDS 1
+/* Freeze the plan after this round: research_plan refuses NEW sub-questions once the
+ * round number exceeds this, so the model decomposes freely early (rounds 1..N) then
+ * converges on that plan instead of expanding the denominator every round (runs 2/4/5
+ * grew the plan mid-run, tanking the coverage fraction and driving spend to the fuse).
+ * Min 1 so round-1 planning always works; a value >= max_rounds effectively disables
+ * the freeze.  This is NOT a cap on how many questions the initial plan may hold —
+ * only on runaway LATE growth. */
+#define RESEARCH_DEFAULT_PLAN_FREEZE_ROUND 2
 
 #endif /* RESEARCH_DEFAULTS_H */

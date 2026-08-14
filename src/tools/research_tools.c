@@ -43,6 +43,7 @@
 #include <string.h>
 
 #include "auth/auth_db.h"
+#include "config/dawn_config.h" /* g_config.research.plan_freeze_round */
 #include "core/conv_event.h"
 #include "core/event_payload.h"
 #include "core/memory_filter.h"
@@ -80,9 +81,22 @@ static char *research_plan_callback(const char *action, char *value, int *should
       *should_respond = 1;
    }
 
-   int64_t run_id = research_active_run(NULL);
+   int round = 0;
+   int64_t run_id = research_active_run(&round);
    if (run_id <= 0) {
       return strdup("Error: research_plan is only available inside a research run.");
+   }
+   /* Plan freeze (§6): once past plan_freeze_round the model must converge on the
+    * plan it has rather than keep expanding the denominator (runs 2/4/5 grew the plan
+    * mid-run, tanking the coverage fraction and driving spend to the fuse).  Round 1
+    * always plans (empty ledger); the clamp keeps plan_freeze_round >= 1. */
+   if (round > g_config.research.plan_freeze_round) {
+      OLOG_INFO("research_plan: plan frozen at round %d (run %lld) — refusing new questions", round,
+                (long long)run_id);
+      return strdup(
+          "The research plan for this run is set — no new sub-questions now. Focus on closing the "
+          "open questions with more sources; mark any you genuinely cannot answer with "
+          "research_mark_unanswerable, or call research_conclude if you're done.");
    }
    if (!value || value[0] == '\0') {
       return strdup("Error: research_plan needs a JSON object: {\"questions\": [\"...\"]}.");
@@ -313,9 +327,11 @@ static const tool_metadata_t research_plan_metadata = {
    .name = "research_plan",
    .device_string = "research_plan",
    .topic = "dawn",
-   .description = "Seed the research plan with sub-questions to answer.  Use at the start of a "
-                  "research round to record the concrete questions the topic breaks down into, and "
-                  "again mid-research when a finding opens a new question worth closing.",
+   .description =
+       "Seed the research plan with sub-questions to answer.  Record the concrete "
+       "questions the topic breaks down into — decompose thoroughly in the EARLY rounds, "
+       "because after the first couple of rounds the plan is frozen and you converge on "
+       "it (you cannot keep adding questions late).",
    .params = research_plan_params,
    .param_count = 1,
    .capabilities = TOOL_CAP_NONE,

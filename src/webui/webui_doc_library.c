@@ -39,6 +39,7 @@
 #include "memory/memory_note_bridge.h"
 #include "tools/document_db.h"
 #include "tools/document_index_pipeline.h"
+#include "utils/string_utils.h" /* sanitize_utf8_for_json */
 #include "webui/webui_internal.h"
 
 /* =============================================================================
@@ -181,6 +182,9 @@ void handle_doc_library_list(ws_connection_t *conn, json_object *payload) {
          json_object *doc = json_object_new_object();
          bool is_note = (strcmp(docs[i].filetype, "note") == 0);
          json_object_object_add(doc, "id", json_object_new_int64(docs[i].id));
+         /* Sanitize before emit: a malformed-UTF-8 filename breaks the browser's
+          * JSON.parse and drops the WHOLE list frame (tool_desc_utf8_truncation). */
+         sanitize_utf8_for_json(docs[i].filename);
          json_object_object_add(doc, "filename", json_object_new_string(docs[i].filename));
          json_object_object_add(doc, "filetype", json_object_new_string(docs[i].filetype));
          json_object_object_add(doc, "is_note", json_object_new_boolean(is_note));
@@ -262,6 +266,7 @@ void handle_doc_library_get(ws_connection_t *conn, json_object *payload) {
                                 json_object_new_string("Document unavailable"));
       } else {
          json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+         sanitize_utf8_for_json(doc.filename);
          json_object_object_add(resp_payload, "filename", json_object_new_string(doc.filename));
          json_object_object_add(resp_payload, "filetype", json_object_new_string(doc.filetype));
          json_object_object_add(resp_payload, "text", json_object_new_string(text));
@@ -605,6 +610,8 @@ void handle_doc_library_version_list(ws_connection_t *conn, json_object *payload
       for (int i = 0; i < n; i++) {
          json_object *row = json_object_new_object();
          json_object_object_add(row, "id", json_object_new_int64(v[i].id));
+         sanitize_utf8_for_json(v[i].filename);
+         sanitize_utf8_for_json(v[i].preview);
          json_object_object_add(row, "filename", json_object_new_string(v[i].filename));
          json_object_object_add(row, "preview", json_object_new_string(v[i].preview));
          json_object_object_add(row, "archived_at", json_object_new_int64(v[i].archived_at));
@@ -641,6 +648,8 @@ void handle_doc_library_deleted_list(ws_connection_t *conn, json_object *payload
    for (int i = 0; i < n; i++) {
       json_object *row = json_object_new_object();
       json_object_object_add(row, "version_id", json_object_new_int64(v[i].id));
+      sanitize_utf8_for_json(v[i].filename);
+      sanitize_utf8_for_json(v[i].preview);
       json_object_object_add(row, "filename", json_object_new_string(v[i].filename));
       json_object_object_add(row, "preview", json_object_new_string(v[i].preview));
       json_object_object_add(row, "archived_at", json_object_new_int64(v[i].archived_at));

@@ -96,9 +96,9 @@ static const char RESEARCH_SYSTEM_PROMPT[] =
     "Tools (these are the ONLY tools available to you):\n"
     "- search: web search. Use short keyword queries (3-6 words).\n"
     "- url_fetch: fetch one page's full text when a search snippet isn't enough.\n"
-    "- research_plan: record the concrete sub-questions the brief breaks into. Call this FIRST "
-    "when "
-    "the plan is empty, and again whenever a finding opens a new question worth answering.\n"
+    "- research_plan: record the concrete sub-questions the brief breaks into. Call this FIRST and "
+    "decompose the brief THOROUGHLY in your first couple of rounds — after that the plan is frozen "
+    "and you converge on it, so get all the questions down early rather than adding more later.\n"
     "- research_record: record ONE factual finding — {claim (in your own words), source_url, "
     "quote (the exact supporting excerpt), question_id}. Record EVERY finding you want in the "
     "report, each with its source.\n"
@@ -157,25 +157,78 @@ static const char RESEARCH_SYNTHESIS_PROMPT[] =
     "findings below; do not invent facts not in the evidence. Do not include a raw list of every "
     "claim — that evidence is appended to the report automatically.";
 
-/* Build a filename-safe note label from the brief: "Research #<id>: <brief>",
- * newlines/tabs flattened to spaces, capped so it stays a sane filename.  The id
- * keeps re-runs of the same brief from colliding on one label. */
-static void research_report_label(int64_t run_id, const char *brief, char *out, size_t out_size) {
-   char clean[96];
-   size_t j = 0;
-   for (size_t i = 0; brief[i] != '\0' && j < sizeof(clean) - 1; i++) {
-      unsigned char ch = (unsigned char)brief[i];
-      clean[j++] = (ch == '\n' || ch == '\r' || ch == '\t') ? ' ' : brief[i];
+/* Longest title BODY (after the "Research #N: " prefix) we keep, so the note title
+ * renders in the doc-library list.  A brief is a paragraph; the synthesized report's
+ * own H1 is a concise human title, so we prefer that and cut at a word boundary. */
+#define RESEARCH_TITLE_BODY_MAX 56
+
+/* Build a short, filename-safe note title: "Research #<id>: <title>", preferring the
+ * synthesized report's first "# " heading (the model's own concise title) over the
+ * paragraph-length brief, cut at a word boundary with an ellipsis when truncated.
+ * The id keeps re-runs of the same brief from colliding.  @p report may be NULL /
+ * headingless — then it falls back to the brief. */
+static void research_report_label(int64_t run_id,
+                                  const char *brief,
+                                  const char *report,
+                                  char *out,
+                                  size_t out_size) {
+   /* Prefer the report's H1 (a "# Heading" line — the model's title); else the brief. */
+   const char *src = brief ? brief : "";
+   size_t src_len = strlen(src);
+   if (report != NULL) {
+      const char *h1 = NULL;
+      if (report[0] == '#' && report[1] == ' ') {
+         h1 = report + 2;
+      } else {
+         const char *p = strstr(report, "\n# ");
+         if (p != NULL) {
+            h1 = p + 3;
+         }
+      }
+      if (h1 != NULL) {
+         const char *nl = strchr(h1, '\n');
+         size_t h1_len = nl ? (size_t)(nl - h1) : strlen(h1);
+         /* The evidence-only render (synthesis skipped/failed) uses a generic
+          * "# Research report" header — not a real title — so keep the brief there. */
+         if (!(h1_len == 15 && strncmp(h1, "Research report", 15) == 0)) {
+            src = h1;
+            src_len = h1_len;
+         }
+      }
+   }
+
+   /* Copy up to the cap, flattening whitespace. */
+   char clean[RESEARCH_TITLE_BODY_MAX + 8];
+   size_t j = 0, i = 0;
+   for (; i < src_len && j < RESEARCH_TITLE_BODY_MAX; i++) {
+      unsigned char ch = (unsigned char)src[i];
+      clean[j++] = (ch == '\n' || ch == '\r' || ch == '\t') ? ' ' : src[i];
+   }
+   bool truncated = (i < src_len);
+   while (j > 0 && clean[j - 1] == ' ') {
+      j--; /* trim trailing space */
+   }
+   if (truncated) {
+      /* Back up to the last space so the cut isn't mid-word (unless that would gut
+       * the title). */
+      size_t wb = j;
+      while (wb > RESEARCH_TITLE_BODY_MAX / 2 && clean[wb - 1] != ' ') {
+         wb--;
+      }
+      if (wb > RESEARCH_TITLE_BODY_MAX / 2) {
+         j = wb;
+         while (j > 0 && clean[j - 1] == ' ') {
+            j--;
+         }
+      }
    }
    clean[j] = '\0';
-   /* The byte cap above can land mid-codepoint on a multi-byte brief, and interior
-    * malformed bytes pass straight through — either leaves invalid UTF-8 in the
-    * note filename, which is emitted into a JSON WS frame (doc-library) where it
-    * breaks the browser's JSON.parse and drops the whole list frame (project
-    * invariant tool_desc_utf8_truncation).  Sanitize the whole label in one pass:
-    * valid sequences kept, invalid/truncated ones — including a trailing partial —
-    * become '?'.  (Covers the interior case the earlier trailing-only trim missed.) */
+   /* A word-less cut can still land mid-codepoint; sanitize fixes that + any bad
+    * bytes (the label is emitted into a JSON WS frame — tool_desc_utf8_truncation). */
    sanitize_utf8_for_json(clean);
+   if (truncated) {
+      strncat(clean, "…", sizeof(clean) - strlen(clean) - 1);
+   }
    snprintf(out, out_size, "Research #%lld: %s", (long long)run_id, clean);
 }
 
@@ -193,7 +246,7 @@ static void research_persist_report_note(int user_id,
                                          const char *brief,
                                          const char *report) {
    char label[160];
-   research_report_label(run_id, brief, label, sizeof(label));
+   research_report_label(run_id, brief, report, label, sizeof(label));
 
    doc_index_result_t res;
    int rc = document_index_note(user_id, label, report, strlen(report), false, &res);

@@ -1051,6 +1051,10 @@
                                      #   close no new question (diminishing returns).
                                      #   0 disables. The agent can also end a run
                                      #   itself via research_conclude. 0-100.
+# plan_freeze_round = 2              # After this round the agent stops adding NEW
+                                     #   sub-questions and converges on the plan it has
+                                     #   (curbs runaway late plan growth; does not cap
+                                     #   the initial plan). Min 1; >= max_rounds = off.
 #
 # Parsed and round-tripped, but NOT yet enforced — reserved for later phases.
 # Setting them has no effect yet:
