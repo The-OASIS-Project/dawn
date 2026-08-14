@@ -58,10 +58,13 @@
 /* Build the pre-spawn proposal + cost envelope (§7a step 2).  Addressed to the
  * model: it relays this to the user and, on a yes, calls start again with
  * confirm=true.  We state the honest budget (rounds + provider) rather than a
- * fabricated dollar figure. */
+ * fabricated dollar figure — and it MUST reflect the budget the run will actually
+ * use, so read the runtime config (research_budgets_load) rather than the compile-
+ * time defaults: an operator who raised [research] max_input_tokens/max_rounds would
+ * otherwise be shown, and relay to the user, the wrong (default) envelope. */
 static char *research_build_proposal(const char *brief, bool private_requested) {
    research_budgets_t b;
-   research_budgets_defaults(&b);
+   research_budgets_load(&b);
    const bool local = (job_provider_from_default() == JOB_PROVIDER_LOCAL);
 
    /* Sized to hold a full-length brief (RESEARCH_BRIEF_MAX) plus the fixed prose,
