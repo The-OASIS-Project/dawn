@@ -149,6 +149,94 @@ static void test_retire_stale_questions(void) {
    TEST_ASSERT_EQUAL_INT(0, retired_n);
 }
 
+/* ── critic: is_natural_end classifies stop reasons ─────────────────────────── */
+
+static void test_is_natural_end(void) {
+   TEST_ASSERT_TRUE(research_is_natural_end("concluded"));
+   TEST_ASSERT_TRUE(research_is_natural_end("coverage"));
+   TEST_ASSERT_TRUE(research_is_natural_end("saturation"));
+   /* Fuses + non-natural stops (and NULL) are NOT natural ends — the critic must not
+    * re-arm them (no budget left; the same fuse fires again). */
+   TEST_ASSERT_FALSE(research_is_natural_end("budget"));
+   TEST_ASSERT_FALSE(research_is_natural_end("token_budget"));
+   TEST_ASSERT_FALSE(research_is_natural_end("cancelled"));
+   TEST_ASSERT_FALSE(research_is_natural_end("failed"));
+   TEST_ASSERT_FALSE(research_is_natural_end(NULL));
+}
+
+/* ── critic: verdict parser (tolerant + FAILS SAFE to stop) ──────────────────── */
+
+static void test_critic_parse_verdict(void) {
+   research_critic_verdict_t v;
+
+   /* Clean continue with two gaps → re-arm, both questions captured. */
+   TEST_ASSERT_EQUAL_INT(
+       AUTH_DB_SUCCESS,
+       research_critic_parse_verdict(
+           "{\"decision\":\"continue\",\"gaps\":[{\"question\":\"check GitHub API for stars\","
+           "\"angle\":\"primary source\"},{\"question\":\"T-Mobile MMSC "
+           "config\",\"angle\":\"docs\"}]}",
+           &v));
+   TEST_ASSERT_TRUE(v.re_arm);
+   TEST_ASSERT_EQUAL_INT(2, v.n_gaps);
+   TEST_ASSERT_EQUAL_STRING("check GitHub API for stars", v.gaps[0]);
+   TEST_ASSERT_EQUAL_STRING("T-Mobile MMSC config", v.gaps[1]);
+
+   /* "stop" decision → confirm stop. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_critic_parse_verdict("{\"decision\":\"stop\",\"gaps\":[]}", &v));
+   TEST_ASSERT_FALSE(v.re_arm);
+   TEST_ASSERT_EQUAL_INT(0, v.n_gaps);
+
+   /* "continue" but empty gaps → fail safe to stop (nothing to research). */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_critic_parse_verdict(
+                                              "{\"decision\":\"continue\",\"gaps\":[]}", &v));
+   TEST_ASSERT_FALSE(v.re_arm);
+
+   /* JSON wrapped in prose + a ```json fence → extracted from the first balanced {…}. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_critic_parse_verdict(
+                             "Here is my verdict:\n```json\n{\"decision\": \"continue\", \"gaps\": "
+                             "[{\"question\": \"verify the price\"}]}\n```\nDone.",
+                             &v));
+   TEST_ASSERT_TRUE(v.re_arm);
+   TEST_ASSERT_EQUAL_INT(1, v.n_gaps);
+   TEST_ASSERT_EQUAL_STRING("verify the price", v.gaps[0]);
+
+   /* Malformed JSON, no JSON at all, NULL, empty → all fail safe to stop. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_critic_parse_verdict("{\"decision\":\"continue\", oops", &v));
+   TEST_ASSERT_FALSE(v.re_arm);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_critic_parse_verdict("no json here", &v));
+   TEST_ASSERT_FALSE(v.re_arm);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_critic_parse_verdict(NULL, &v));
+   TEST_ASSERT_FALSE(v.re_arm);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_critic_parse_verdict("", &v));
+   TEST_ASSERT_FALSE(v.re_arm);
+
+   /* Empty-string questions are skipped; a continue that nets zero gaps stops. */
+   TEST_ASSERT_EQUAL_INT(
+       AUTH_DB_SUCCESS,
+       research_critic_parse_verdict(
+           "{\"decision\":\"continue\",\"gaps\":[{\"question\":\"\"},{\"angle\":\"no q\"}]}", &v));
+   TEST_ASSERT_FALSE(v.re_arm);
+   TEST_ASSERT_EQUAL_INT(0, v.n_gaps);
+
+   /* More than the cap → capped at RESEARCH_CRITIC_MAX_GAPS, still a valid re-arm. */
+   char big[2048];
+   int off = snprintf(big, sizeof(big), "{\"decision\":\"continue\",\"gaps\":[");
+   for (int i = 0; i < RESEARCH_CRITIC_MAX_GAPS + 5; i++) {
+      off += snprintf(big + off, sizeof(big) - off, "%s{\"question\":\"q%d\"}", i ? "," : "", i);
+   }
+   snprintf(big + off, sizeof(big) - off, "]}");
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_critic_parse_verdict(big, &v));
+   TEST_ASSERT_TRUE(v.re_arm);
+   TEST_ASSERT_EQUAL_INT(RESEARCH_CRITIC_MAX_GAPS, v.n_gaps);
+
+   /* NULL out → invalid. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_INVALID, research_critic_parse_verdict("{}", NULL));
+}
+
 /* ── stop decision: budgets + all-closed + saturation + conclude ────────────── */
 
 static void test_should_stop_decision(void) {
@@ -279,6 +367,8 @@ int main(void) {
    RUN_TEST(test_budgets_defaults);
    RUN_TEST(test_refresh_coverage_promotes);
    RUN_TEST(test_retire_stale_questions);
+   RUN_TEST(test_is_natural_end);
+   RUN_TEST(test_critic_parse_verdict);
    RUN_TEST(test_should_stop_decision);
    RUN_TEST(test_digest_content);
    RUN_TEST(test_digest_respects_cap);

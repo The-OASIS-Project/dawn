@@ -448,3 +448,19 @@ char *event_payload_research_unanswerable(int64_t question_id,
    json_object_put(root);
    return out;
 }
+
+char *event_payload_research_critic(const char *decision, int gaps_added, int rearm) {
+   struct json_object *root = json_object_new_object();
+   if (root == NULL) {
+      return NULL;
+   }
+   /* decision is a controlled literal ("stop" | "continue"). */
+   json_object_object_add(root, "decision",
+                          json_object_new_string((decision && decision[0]) ? decision : "stop"));
+   json_object_object_add(root, "gaps_added", json_object_new_int(gaps_added));
+   json_object_object_add(root, "rearm", json_object_new_int(rearm));
+   const char *rendered = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+   char *out = rendered ? strdup(rendered) : NULL;
+   json_object_put(root);
+   return out;
+}

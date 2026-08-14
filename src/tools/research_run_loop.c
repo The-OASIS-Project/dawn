@@ -42,6 +42,7 @@
 #include "config/dawn_config.h"
 #include "core/conv_event.h"
 #include "core/event_payload.h"
+#include "core/memory_filter.h" /* memory_filter_check_injection_commands (critic gap gate) */
 #include "core/session_manager.h"
 #include "core/text_input_dispatch.h"
 #include "logging.h"
@@ -82,6 +83,8 @@ void research_budgets_load(research_budgets_t *out) {
    out->saturation_rounds = rc->saturation_rounds;
    /* stale_rounds: same "0 = off" contract as saturation_rounds, so overlay always. */
    out->stale_rounds = rc->stale_rounds;
+   /* critic_max_rearm: 0 = critic off, same overlay-always contract. */
+   out->critic_max_rearm = rc->critic_max_rearm;
 }
 
 /* Give up a run after this many CONSECUTIVE dispatch failures (provider 5xx /
@@ -163,6 +166,37 @@ static const char RESEARCH_SYNTHESIS_PROMPT[] =
     "time-sensitive (a count, price, version, ranking, or anything described as 'current'/'latest'/"
     "'now'), state it as of the research date given in the directive rather than as a timeless "
     "fact.";
+
+/* Completeness-critic prompt (§6 item 4): a FRESH-CONTEXT, no-tools judge turn at
+ * natural-end stop-eligibility.  It sees the ledger digest (coverage + WHY each
+ * question closed + stop context) and decides stop vs re-arm-with-untried-angle,
+ * replying in strict JSON that research_critic_parse_verdict reads (fail-safe to
+ * stop). */
+static const char RESEARCH_CRITIC_PROMPT[] =
+    "You are a completeness critic for a research run that is about to stop. You have NO tools — "
+    "do "
+    "not search or fetch; judge only what is shown and reply.\n\n"
+    "You are given the brief, the stop context (why it's stopping, budget left, which re-arm this "
+    "is), and every sub-question with its status, WHY it closed, and its distinct-source count:\n"
+    "- answered = closed on coverage.\n"
+    "- unanswerable: agent = the researcher judged it a dead end.\n"
+    "- unanswerable: stale = the researcher worked it and NO new source arrived for several rounds "
+    "— the easy avenues are EXHAUSTED.\n"
+    "- open = not yet closed (e.g. the run ran out of rounds before reaching it).\n\n"
+    "Decide whether the run is complete enough to STOP, or whether an important gap remains that a "
+    "NEW, UNTRIED approach could close. Rules:\n"
+    "- Re-arm ONLY for a gap you can attack from an angle the prior rounds did NOT try — a "
+    "specific "
+    "primary source, a different query, resolving a contradiction against an authoritative source. "
+    "Phrase each as a concrete NEW sub-question.\n"
+    "- Do NOT re-arm a 'stale' (exhausted) question by repeating the same kind of search — that "
+    "already failed. Do NOT invent busywork to keep going. If the covered questions answer the "
+    "brief and the remaining gaps are genuinely exhausted or unimportant, STOP.\n"
+    "- Budget is limited; be selective — at most a few gaps.\n\n"
+    "Reply with ONLY a JSON object — no prose, no code fences:\n"
+    "{\"decision\": \"stop\" | \"continue\", \"gaps\": [{\"question\": \"<new concrete "
+    "sub-question>\", \"angle\": \"<the untried approach>\"}]}\n"
+    "Use \"stop\" with an empty gaps array unless a real, attackable gap remains.";
 
 /* Longest title BODY (after the "Research #N: " prefix) we keep, so the note title
  * renders in the doc-library list.  A brief is a paragraph; the synthesized report's
@@ -322,6 +356,77 @@ static char *research_synthesize(struct session *s,
    return prose;
 }
 
+/* Completeness critic (§6 item 4): a FRESH-CONTEXT no-tools judge turn run at
+ * natural-end stop-eligibility.  Resets history to [critic prompt] + a ledger digest
+ * (coverage + WHY each question closed + stop context), suppresses all tools, and asks
+ * stop vs re-arm-with-untried-angle.  On a re-arm verdict it adds the critic's gap
+ * sub-questions straight to the ledger — which BYPASSES the plan-freeze guard (that
+ * lives only in the research_plan TOOL), exactly as intended for critic-added
+ * questions — and emits the observe event.  Returns the number of gap questions ADDED
+ * (0 = confirm stop / parse-fail / no gaps / error; every failure path stops, never
+ * runs the run away). */
+static int research_run_critic(struct session *s,
+                               const research_run_t *run0,
+                               const research_run_t *cur,
+                               const research_budgets_t *b,
+                               const char *stop_reason,
+                               int rearm_num) {
+   size_t dig_size = (b->round_digest_max_chars > 0 ? (size_t)b->round_digest_max_chars
+                                                    : RESEARCH_DEFAULT_ROUND_DIGEST_MAX_CHARS) +
+                     512;
+   char *digest = malloc(dig_size);
+   if (!digest) {
+      return 0;
+   }
+   research_render_critic_digest(run0->id, run0->brief, b, cur, stop_reason, rearm_num, digest,
+                                 dig_size);
+
+   session_init_system_prompt(s, RESEARCH_CRITIC_PROMPT); /* fresh context — no round history */
+   session_set_tools_suppressed(s, true);                 /* judge only; no tools */
+   text_input_dispatch_opts_t opts = {
+      .conversation_id = 0,
+      .auth_user_id = run0->user_id,
+      .skip_prompt_rebuild = true,
+   };
+   char *resp = core_text_input_dispatch(s, digest, NULL, NULL, NULL, 0, &opts);
+   session_set_tools_suppressed(s, false);
+   free(digest);
+
+   research_critic_verdict_t verdict;
+   research_critic_parse_verdict(resp, &verdict); /* fail-safe: bad parse -> re_arm=false */
+   free(resp);
+
+   int added = 0;
+   if (verdict.re_arm) {
+      for (int i = 0; i < verdict.n_gaps; i++) {
+         /* Injection-gate each gap before storage, mirroring research_plan (§11): a gap
+          * is free-form LLM output produced OVER untrusted web-derived evidence, and it
+          * re-enters a tool-enabled round AND persists as a RAG-retrievable note
+          * heading.  Filtering every gap leaves added=0 -> the caller confirms the stop
+          * (the fail-safe outcome). */
+         if (memory_filter_check_injection_commands(verdict.gaps[i])) {
+            OLOG_WARNING("research: critic gap refused by the injection filter (run %lld)",
+                         (long long)run0->id);
+            continue;
+         }
+         int64_t qid = 0;
+         if (research_db_question_add(run0->id, verdict.gaps[i], 0, &qid) == AUTH_DB_SUCCESS) {
+            added++;
+         }
+      }
+   }
+
+   /* Observe: the OUTCOME (did the run actually re-arm) + how many gaps opened. */
+   conv_event_emit(run0->conversation_id, run0->user_id, CONV_EVENT_RESEARCH_CRITIC,
+                   event_payload_research_critic(added > 0 ? "continue" : "stop", added,
+                                                 rearm_num));
+
+   OLOG_INFO("research: run %lld critic verdict=%s gaps_added=%d (re-arm %d/%d)",
+             (long long)run0->id, verdict.re_arm ? "continue" : "stop", added, rearm_num,
+             b->critic_max_rearm);
+   return added;
+}
+
 /* Assemble the final report: a deterministic "Researched: <date>" dateline (so a
  * fast-moving-topic report never reads as an undated, timeless snapshot), the
  * written answer, then the evidence appendix below.  Falls back to evidence-only
@@ -438,6 +543,7 @@ const char *research_run_execute(struct session *s,
    int fail_streak = 0;
    int prev_closed = -1; /* -1 so round 1 (closed >= 0) always counts as progress */
    int no_progress_rounds = 0;
+   int rearms_used = 0; /* completeness-critic re-arms so far, capped at b->critic_max_rearm */
 
    /* P1 Phase 2 staleness tracker: per-question source-count baseline + dry-round
     * streak, carried across rounds so a question that gathers no NEW source for
@@ -597,6 +703,29 @@ const char *research_run_execute(struct session *s,
       cur.input_tokens = (int64_t)tok_in; /* tool_calls no longer feeds the stop decision */
       stop_reason = research_should_stop(&cur, b, all_closed, no_progress_rounds, concluded);
       if (stop_reason) {
+         /* Completeness critic (§6 item 4): at a NATURAL-END stop (not a budget fuse),
+          * with re-arm budget and a round still to spend, let a fresh-context judge
+          * re-arm the run at an untried angle.  A fuse stop / exhausted re-arm budget /
+          * the last round all skip it — re-arming with nothing left to spend is
+          * pointless.  Fails safe: research_run_critic returns 0 (stop stands) on any
+          * parse/DB error. */
+         if (b->critic_max_rearm > 0 && rearms_used < b->critic_max_rearm && round < max_rounds &&
+             research_is_natural_end(stop_reason)) {
+            if (research_run_critic(s, run0, &cur, b, stop_reason, rearms_used + 1) > 0) {
+               rearms_used++;
+               /* Clear the sticky conclude signal: research_conclude set it (and it
+                * persists for the run), so without this reset a re-armed "concluded"
+                * stop would re-fire "concluded" on the STALE flag every next round —
+                * giving each gap only one round and, since "concluded" is checked before
+                * the token fuse, hiding a real token_budget stop for up to critic_max_
+                * rearm rounds.  The next round must earn a FRESH conclude/coverage/
+                * saturation (or surface the correct fuse).  coverage/saturation re-arms
+                * are unaffected (the flag is already false there). */
+               session_research_reset_concluded(s);
+               stop_reason = NULL; /* re-armed — research the new gap questions next round */
+               continue;
+            }
+         }
          break;
       }
    }

@@ -986,10 +986,10 @@ typedef struct {
    int plan_freeze_round; /* research_plan refuses new questions past this round (§6); min 1 */
    int stale_rounds;      /* Rounds a question gains no new source before auto-retire as
                              unanswerable (§6.3, P1 Phase 2); 0 off */
+   int critic_max_rearm;  /* Times the completeness critic may re-arm at stop-eligibility
+                             (§6 item 4); 0 disables the critic */
    /* Parsed + round-tripped but NOT yet enforced (kept out of the WebUI panel per
-    * CONFIGURATION_GUIDE — a control that silently does nothing is worse than
-    * none).  Reserved for P1 (critic) + a debug snapshot mode. */
-   int critic_max_rearm;   /* P1: times the completeness critic may extend */
+    * CONFIGURATION_GUIDE — a control that silently does nothing is worse than none). */
    bool capture_revisions; /* Debug: persist per-round report snapshots */
 } research_config_t;
 

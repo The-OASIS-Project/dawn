@@ -67,5 +67,12 @@
  * stay in research_claims and still render in the report; synthesis is honest about the
  * gap.  2 = give a question two full dry rounds before giving up on closing it. */
 #define RESEARCH_DEFAULT_STALE_ROUNDS 2
+/* Times the fresh-context completeness critic may re-arm a run at stop-eligibility
+ * (0 disables the critic entirely — a max of 0 re-arms means running it can never
+ * change the outcome, so it does not run).  Each re-arm adds the critic's targeted
+ * "untried angle" sub-questions and lets the loop continue for the remaining rounds;
+ * bounded here so a critic that keeps finding gaps can't defer a stop forever (the
+ * token/round fuses still cap the whole run regardless).  2 = at most two re-arms. */
+#define RESEARCH_DEFAULT_CRITIC_MAX_REARM 2
 
 #endif /* RESEARCH_DEFAULTS_H */

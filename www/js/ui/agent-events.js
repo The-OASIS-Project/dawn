@@ -47,6 +47,7 @@
       research_claim: true,
       research_conclude: true,
       research_unanswerable: true,
+      research_critic: true,
       research_stop: true,
    };
 
@@ -94,6 +95,18 @@
             const label =
                p.reason === 'stale' ? 'Retired — no new sources: ' : 'Marked unanswerable: ';
             return { cls: 'muted', text: label + q };
+         }
+         case 'research_critic': {
+            // Completeness critic at a natural-end stop: either confirmed the stop or
+            // re-armed the run with N new gap sub-questions to research.
+            const n = typeof p.gaps_added === 'number' ? p.gaps_added : 0;
+            if (p.decision === 'continue' && n > 0) {
+               return {
+                  cls: 'ok',
+                  text: 'Critic re-armed the run — ' + n + (n === 1 ? ' new gap' : ' new gaps'),
+               };
+            }
+            return { cls: 'muted', text: 'Critic confirmed the run is complete' };
          }
          case 'research_stop': {
             const r = p.stop_reason || '?';

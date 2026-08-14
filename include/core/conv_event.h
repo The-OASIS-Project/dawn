@@ -62,6 +62,9 @@ extern "C" {
  * path is visible in the panel, not just inferred from the terminal stop reason. */
 #define CONV_EVENT_RESEARCH_CONCLUDE "research_conclude"
 #define CONV_EVENT_RESEARCH_UNANSWERABLE "research_unanswerable"
+/* The completeness critic's verdict at a natural-end stop: stop (confirmed) or
+ * continue (re-armed with N new gap sub-questions). */
+#define CONV_EVENT_RESEARCH_CRITIC "research_critic"
 
 /**
  * @brief Persist one event and fan it out to the owner's attached clients.

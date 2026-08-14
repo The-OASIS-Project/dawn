@@ -69,7 +69,29 @@ typedef struct {
    int saturation_rounds; /**< consecutive dry rounds (0 new closures) before stopping; 0 off */
    int stale_rounds;      /**< consecutive rounds a question gains NO new source before it is
                                auto-retired as unanswerable; 0 off (§6.3, P1 Phase 2) */
+   int critic_max_rearm;  /**< times the completeness critic may re-arm at stop-eligibility;
+                               0 disables the critic (§6 item 4) */
 } research_budgets_t;
+
+/* Cap on gap sub-questions the critic may add per re-arm — bounds the denominator
+ * growth from a single critic pass (the whole run is still fuse-bounded). */
+#define RESEARCH_CRITIC_MAX_GAPS 8
+
+/**
+ * @brief A parsed completeness-critic verdict (§6 item 4).
+ *
+ * @c re_arm true  → continue: research the @c gaps (each a NEW targeted sub-question
+ *                   capturing an untried angle) for the remaining rounds.
+ * @c re_arm false → confirm the pending stop.  The parser FAILS SAFE to this: a
+ *                   malformed/absent verdict, a "stop" decision, or zero gaps all
+ *                   yield re_arm=false, so a parse miss can only end a run, never
+ *                   run it away.
+ */
+typedef struct {
+   bool re_arm;
+   int n_gaps;
+   char gaps[RESEARCH_CRITIC_MAX_GAPS][RESEARCH_QUESTION_MAX];
+} research_critic_verdict_t;
 
 /**
  * @brief One question's in-memory staleness state (P1 Phase 2).
@@ -181,6 +203,30 @@ const char *research_should_stop(const research_run_t *run,
                                  bool concluded);
 
 /**
+ * @brief True iff @p stop_reason is a NATURAL END (the run judged itself done) rather
+ *        than a hard fuse (ran out of budget).  Natural ends — "concluded" /
+ *        "coverage" / "saturation" — are the only stops the completeness critic may
+ *        re-arm; re-arming a "budget"/"token_budget" fuse is pointless (no budget
+ *        left, the same fuse fires again).  NULL/unknown → false (fail closed).
+ */
+bool research_is_natural_end(const char *stop_reason);
+
+/**
+ * @brief Parse a completeness-critic verdict from the judge turn's response text
+ *        (§6 item 4).  Tolerant: finds the first JSON object in @p response and reads
+ *        {"decision":"stop"|"continue","gaps":[{"question":"…"},…]}.
+ *
+ * FAILS SAFE to @c re_arm=false — a NULL/empty/malformed response, a non-"continue"
+ * decision, or an empty/absent gaps array all yield a "confirm stop" verdict, so a
+ * parse miss can only end a run, never re-arm it.  On a "continue" with gaps, copies
+ * up to RESEARCH_CRITIC_MAX_GAPS non-empty question strings into @p out->gaps.
+ *
+ * @return AUTH_DB_SUCCESS on any well-formed parse (including a fail-safe stop), or
+ *         AUTH_DB_INVALID on a NULL @p out.  (The verdict itself is in *@p out.)
+ */
+int research_critic_parse_verdict(const char *response, research_critic_verdict_t *out);
+
+/**
  * @brief Render the BOUNDED per-round digest into @p out (§4a.2).
  *
  * Emits, capped at @p b->round_digest_max_chars: the brief, the top-K open
@@ -196,6 +242,27 @@ int research_render_round_digest(int64_t run_id,
                                  const research_budgets_t *b,
                                  char *out,
                                  size_t out_size);
+
+/**
+ * @brief Render the completeness critic's input digest into @p out (§6 item 4).
+ *
+ * The brief + the pending-stop context (@p stop_reason, rounds/tokens used vs. their
+ * budgets, which re-arm this is) + EVERY question with its status AND resolution
+ * reason ("stale" = exhausted, "agent" = judged dead-end) + distinct-source coverage
+ * + a short claim gloss.  The reason is what lets the critic tell an exhausted gap
+ * (don't re-arm) from an un-attempted one (a legitimate untried-angle target).
+ * Bounded by @p b->round_digest_max_chars; @p out is always NUL-terminated.
+ *
+ * @return AUTH_DB_SUCCESS, or a failure code (out gets a minimal brief-only digest).
+ */
+int research_render_critic_digest(int64_t run_id,
+                                  const char *brief,
+                                  const research_budgets_t *b,
+                                  const research_run_t *cur,
+                                  const char *stop_reason,
+                                  int rearm_num,
+                                  char *out,
+                                  size_t out_size);
 
 /**
  * @brief Render the EVIDENCE section as markdown — a view over research_claims

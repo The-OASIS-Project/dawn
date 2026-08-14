@@ -2,8 +2,9 @@
 
 **Status: ✅ P0 SHIPPED + field-validated (2026-08-13).** All 11 §15 build steps landed across individual
 reviewed commits, a five-lens pre-release audit (arch/security/correctness/efficiency/standards, 0 blocking),
-and a first-live-run tuning pass. **P1 (controller-driven convergence: plan-freeze + stale-question
-auto-retirement) SHIPPED 2026-08-14, pending live test.** P2–P4 remain design-only below.
+and a first-live-run tuning pass. **P1 (controller-driven convergence) SHIPPED 2026-08-14, pending live test —
+plan-freeze + stale-question auto-retirement, then the fresh-context completeness critic (§6 item 4).** P2–P4
+remain design-only below.
 
 ## Where this stands (2026-08-13)
 
@@ -570,11 +571,18 @@ Layered stopping stack, outermost first:
    near-duplicate threshold. Embedding is done **once per round boundary, batched, with an in-run vector
    cache** — never per-`research_record` inside the tool loop — so the serialized global-embed-mutex traffic is
    `rounds` calls, not `claims` calls (eff H2). The cosine itself is O(N²) in claims but trivial at these sizes.
-4. **Completeness critic (P1)** — at stop-eligibility, a **fresh-context** LLM-judge call grades the report
-   against the outline (factual/citation/completeness/source-quality rubric) and returns `stop` or
-   `continue, targeting these named gaps`. **Bounded re-arm**: at most `critic_max_rearm` times (default 2),
-   then the run stops regardless. (Claims-as-view already subsumes Anthropic's separate CitationAgent pass —
-   every claim carries its URL + quote — so we don't need to copy it.)
+4. **Completeness critic (P1) — SHIPPED 2026-08-14, pending live test.** At a **natural-end** stop-eligibility
+   only (`concluded`/`coverage`/`saturation`, never a budget fuse — re-arming a fuse is futile), a
+   **fresh-context** no-tools LLM judge (`research_run_critic`) grades the ledger + stop context and replies in
+   strict JSON `{"decision":"stop|continue","gaps":[{"question","angle"}]}`, parsed by
+   `research_critic_parse_verdict` which **fails safe to stop** on any malformed/partial/empty verdict. On
+   `continue` it ADDS the gap sub-questions to the ledger (bypassing plan-freeze, which guards only the
+   `research_plan` tool) — injection-command-gated exactly like `research_plan` (§11) since a gap is LLM output
+   over untrusted evidence — and the loop researches them next round. **Bounded re-arm**: at most
+   `critic_max_rearm` times (config, default 2; 0 disables the critic), then the run stops regardless; the
+   re-arm resets the sticky `research_conclude` signal so a re-armed "concluded" stop doesn't re-fire on a stale
+   flag. Emits a `research_critic` observe event. (Claims-as-view already subsumes Anthropic's separate
+   CitationAgent pass — every claim carries its URL + quote — so we don't need to copy it.)
 
    > **Feed the critic the STOP CONTEXT, not just the report — or it re-derives adjudicated gaps and
    > ping-pongs against the convergence controls (added 2026-08-14).** A critic that sees only the report will

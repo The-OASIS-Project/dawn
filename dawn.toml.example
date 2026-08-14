@@ -1061,10 +1061,13 @@
                                      #   still converges instead of burning the whole
                                      #   token budget. Findings already gathered stay in
                                      #   the report. 0 disables. 0-100.
+# critic_max_rearm = 2               # When a run is about to finish on a natural end, a
+                                     #   fresh-context completeness critic may re-open it
+                                     #   to chase an important gap from a NEW angle, up to
+                                     #   this many times. 0 disables the critic. 0-10.
 #
 # Parsed and round-tripped, but NOT yet enforced — reserved for later phases.
 # Setting them has no effect yet:
-# critic_max_rearm = 2               # P1: times the completeness critic may extend.
 # capture_revisions = false          # Debug: persist per-round report snapshots.
 
 # =============================================================================

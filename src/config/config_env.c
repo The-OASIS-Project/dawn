@@ -2692,7 +2692,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
 
    /* [research] (deep-research budgets + master switch).  Emits EVERY field,
     * including the ones the panel doesn't surface (max_tool_calls — retired/
-    * unenforced; critic_max_rearm/capture_revisions — P1/debug) — the writer emits
+    * unenforced; capture_revisions — debug/unenforced) — the writer emits
     * from the in-memory config, so writing them preserves a hand-edited value across
     * a save. */
    fprintf(fp, "\n[research]\n");

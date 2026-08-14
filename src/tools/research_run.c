@@ -26,6 +26,7 @@
 
 #include "tools/research_run.h"
 
+#include <json-c/json.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,6 +53,121 @@ void research_budgets_defaults(research_budgets_t *out) {
    out->top_k_questions = RESEARCH_DEFAULT_TOP_K_QUESTIONS;
    out->saturation_rounds = RESEARCH_DEFAULT_SATURATION_ROUNDS;
    out->stale_rounds = RESEARCH_DEFAULT_STALE_ROUNDS;
+   out->critic_max_rearm = RESEARCH_DEFAULT_CRITIC_MAX_REARM;
+}
+
+bool research_is_natural_end(const char *stop_reason) {
+   if (stop_reason == NULL) {
+      return false; /* fail closed — an unknown/absent stop is not a natural end */
+   }
+   return strcmp(stop_reason, "concluded") == 0 || strcmp(stop_reason, "coverage") == 0 ||
+          strcmp(stop_reason, "saturation") == 0;
+}
+
+int research_critic_parse_verdict(const char *response, research_critic_verdict_t *out) {
+   if (out == NULL) {
+      return AUTH_DB_INVALID;
+   }
+   out->re_arm = false; /* fail-safe default: confirm the pending stop */
+   out->n_gaps = 0;
+   if (response == NULL || response[0] == '\0') {
+      return AUTH_DB_SUCCESS; /* nothing to parse — stop stands */
+   }
+
+   /* Tolerant extraction: the judge is asked for bare JSON, but models wrap it in
+    * prose/```json fences, so parse from the first '{' to its matching close rather
+    * than assuming the whole response is JSON.  A brace-depth scan (skipping string
+    * literals + escapes) finds the object bounds without a full pre-parse. */
+   const char *start = strchr(response, '{');
+   if (start == NULL) {
+      return AUTH_DB_SUCCESS; /* no JSON object at all → stop */
+   }
+   int depth = 0;
+   bool in_str = false, esc = false;
+   const char *end = NULL;
+   for (const char *p = start; *p != '\0'; p++) {
+      char c = *p;
+      if (esc) {
+         esc = false;
+         continue;
+      }
+      if (in_str) {
+         if (c == '\\') {
+            esc = true;
+         } else if (c == '"') {
+            in_str = false;
+         }
+         continue;
+      }
+      if (c == '"') {
+         in_str = true;
+      } else if (c == '{') {
+         depth++;
+      } else if (c == '}') {
+         if (--depth == 0) {
+            end = p;
+            break;
+         }
+      }
+   }
+   if (end == NULL) {
+      return AUTH_DB_SUCCESS; /* unbalanced braces → stop */
+   }
+
+   size_t len = (size_t)(end - start) + 1;
+   char *json = malloc(len + 1);
+   if (json == NULL) {
+      return AUTH_DB_SUCCESS; /* OOM → stop (safe) */
+   }
+   memcpy(json, start, len);
+   json[len] = '\0';
+
+   struct json_object *root = json_tokener_parse(json);
+   free(json);
+   if (root == NULL || !json_object_is_type(root, json_type_object)) {
+      if (root) {
+         json_object_put(root);
+      }
+      return AUTH_DB_SUCCESS; /* not an object → stop */
+   }
+
+   struct json_object *j_decision = NULL;
+   bool wants_continue = false;
+   if (json_object_object_get_ex(root, "decision", &j_decision) &&
+       json_object_is_type(j_decision, json_type_string)) {
+      wants_continue = (strcmp(json_object_get_string(j_decision), "continue") == 0);
+   }
+
+   struct json_object *j_gaps = NULL;
+   if (wants_continue && json_object_object_get_ex(root, "gaps", &j_gaps) &&
+       json_object_is_type(j_gaps, json_type_array)) {
+      size_t n = json_object_array_length(j_gaps);
+      for (size_t i = 0; i < n && out->n_gaps < RESEARCH_CRITIC_MAX_GAPS; i++) {
+         struct json_object *item = json_object_array_get_idx(j_gaps, i);
+         if (item == NULL || !json_object_is_type(item, json_type_object)) {
+            continue;
+         }
+         struct json_object *j_q = NULL;
+         if (!json_object_object_get_ex(item, "question", &j_q) ||
+             !json_object_is_type(j_q, json_type_string)) {
+            continue;
+         }
+         const char *q = json_object_get_string(j_q);
+         if (q == NULL || q[0] == '\0') {
+            continue; /* skip empty questions */
+         }
+         char *slot = out->gaps[out->n_gaps];
+         strncpy(slot, q, RESEARCH_QUESTION_MAX - 1);
+         slot[RESEARCH_QUESTION_MAX - 1] = '\0';
+         sanitize_utf8_for_json(slot); /* model-authored → keep it WS-frame-safe */
+         out->n_gaps++;
+      }
+   }
+   json_object_put(root);
+
+   /* Re-arm ONLY on a clean "continue" that actually named at least one gap. */
+   out->re_arm = (wants_continue && out->n_gaps > 0);
+   return AUTH_DB_SUCCESS;
 }
 
 int research_refresh_coverage(int64_t run_id, int min_sources, int *closed_out, int *total_out) {
@@ -348,6 +464,75 @@ int research_render_round_digest(int64_t run_id,
    }
    free(last_md);
 
+   return AUTH_DB_SUCCESS;
+}
+
+int research_render_critic_digest(int64_t run_id,
+                                  const char *brief,
+                                  const research_budgets_t *b,
+                                  const research_run_t *cur,
+                                  const char *stop_reason,
+                                  int rearm_num,
+                                  char *out,
+                                  size_t out_size) {
+   if (!out || out_size == 0 || !b || !cur) {
+      return AUTH_DB_INVALID;
+   }
+   out[0] = '\0';
+   size_t cap = out_size;
+   if (b->round_digest_max_chars > 0 && (size_t)b->round_digest_max_chars < cap) {
+      cap = (size_t)b->round_digest_max_chars;
+   }
+   size_t off = 0;
+
+   digest_append(out, cap, &off, "Research brief:\n%s\n", brief ? brief : "(none)");
+   digest_append(out, cap, &off,
+                 "\nThe run is about to stop (reason: %s). Rounds used: %d/%d. Input tokens: "
+                 "%lld/%lld. This would be re-arm %d of at most %d.\n",
+                 stop_reason ? stop_reason : "?", cur->rounds_run, b->max_rounds,
+                 (long long)cur->input_tokens, (long long)b->max_input_tokens, rearm_num,
+                 b->critic_max_rearm);
+
+   if (run_id <= 0) {
+      return AUTH_DB_INVALID;
+   }
+   research_question_t questions[RESEARCH_MAX_LEDGER_QUESTIONS];
+   int n = 0;
+   int rc = research_db_question_list(run_id, questions, RESEARCH_MAX_LEDGER_QUESTIONS, &n);
+   if (rc != AUTH_DB_SUCCESS) {
+      return rc; /* out holds the brief + stop context — degrade, don't fail hard */
+   }
+
+   digest_append(out, cap, &off, "\nQuestions and coverage (status — why — sources):\n");
+   for (int i = 0; i < n; i++) {
+      research_question_t *q = &questions[i];
+      int sources = 0;
+      research_db_question_coverage(run_id, q->id, &sources);
+      /* status[: reason] — the reason distinguishes an EXHAUSTED gap ("stale") from a
+       * model-judged dead-end ("agent"); absent for open/answered. */
+      if (q->resolution_reason[0]) {
+         if (!digest_append(out, cap, &off, "  [q%lld] %s — %s: %s (sources %d/%d)\n",
+                            (long long)q->id, q->question, q->status, q->resolution_reason, sources,
+                            b->min_sources)) {
+            break;
+         }
+      } else if (!digest_append(out, cap, &off, "  [q%lld] %s — %s (sources %d/%d)\n",
+                                (long long)q->id, q->question, q->status, sources,
+                                b->min_sources)) {
+         break;
+      }
+      research_claim_t gloss[RESEARCH_DIGEST_GLOSS_CLAIMS];
+      int gn = 0;
+      if (research_db_question_claims(run_id, q->id, gloss, RESEARCH_DIGEST_GLOSS_CLAIMS, &gn) ==
+              AUTH_DB_SUCCESS &&
+          gn > 0) {
+         for (int g = 0; g < gn; g++) {
+            if (!digest_append(out, cap, &off, "      - found: %.240s\n", gloss[g].claim)) {
+               break;
+            }
+         }
+      }
+   }
    return AUTH_DB_SUCCESS;
 }
 

@@ -997,7 +997,7 @@ dawn_add_unit_test(test_research_run
    SOURCES test_research_run.c
            ${SRC_ROOT}/src/tools/research_run.c
            ${AUTH_DB_SOURCES}
-   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
 # Header-only predicate (the read-only research allowlist, HIGH-1): no link deps.

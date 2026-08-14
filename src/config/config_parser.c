@@ -1819,8 +1819,10 @@ void config_clamp_research(research_config_t *config) {
       config->stale_rounds = 0;
    if (config->stale_rounds > 100) /* sanity ceiling; > max_rounds is inert anyway */
       config->stale_rounds = 100;
-   if (config->critic_max_rearm < 0)
+   if (config->critic_max_rearm < 0) /* 0 = disable the completeness critic */
       config->critic_max_rearm = 0;
+   if (config->critic_max_rearm > 10) /* sanity ceiling; each re-arm still costs an LLM turn */
+      config->critic_max_rearm = 10;
 }
 
 static void parse_research(toml_table_t *table, research_config_t *config) {

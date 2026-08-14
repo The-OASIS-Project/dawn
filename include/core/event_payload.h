@@ -165,6 +165,14 @@ char *event_payload_research_unanswerable(int64_t question_id,
                                           const char *reason);
 
 /**
+ * @brief Build a `research_critic` payload:
+ *        {"decision":"stop|continue","gaps_added":N,"rearm":R}. Caller frees.
+ *        @p decision is a controlled literal; @p gaps_added is how many gap
+ *        sub-questions the critic opened; @p rearm is which re-arm this was (1-based).
+ */
+char *event_payload_research_critic(const char *decision, int gaps_added, int rearm);
+
+/**
  * @brief True if @p key names a field whose value must never be persisted.
  *
  * Exposed for unit tests and for any future consumer that redacts a structure

@@ -2412,6 +2412,15 @@
                default: 2,
                advanced: true,
             },
+            critic_max_rearm: {
+               type: 'number',
+               label: 'Completeness Critic Re-arms',
+               min: 0,
+               max: 10,
+               hint: 'When a run is about to finish, a fresh-context critic may re-open it to chase an important gap from a new angle, up to this many times. 0 disables the critic.',
+               default: 2,
+               advanced: true,
+            },
          },
       },
       calendar: {
