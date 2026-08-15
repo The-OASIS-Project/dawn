@@ -60,8 +60,9 @@ bool research_is_natural_end(const char *stop_reason) {
    if (stop_reason == NULL) {
       return false; /* fail closed — an unknown/absent stop is not a natural end */
    }
-   return strcmp(stop_reason, "concluded") == 0 || strcmp(stop_reason, "coverage") == 0 ||
-          strcmp(stop_reason, "saturation") == 0;
+   return strcmp(stop_reason, RESEARCH_STOP_CONCLUDED) == 0 ||
+          strcmp(stop_reason, RESEARCH_STOP_COVERAGE) == 0 ||
+          strcmp(stop_reason, RESEARCH_STOP_SATURATION) == 0;
 }
 
 int research_critic_parse_verdict(const char *response, research_critic_verdict_t *out) {
@@ -323,7 +324,7 @@ const char *research_should_stop(const research_run_t *run,
                                  int no_progress_rounds,
                                  bool concluded) {
    if (!run || !b) {
-      return "failed";
+      return RESEARCH_STOP_FAILED;
    }
    /* Natural-end reasons first, so the stop_reason reflects WHY the run is done
     * rather than merely that a ceiling was crossed on the same round.  These never
@@ -333,18 +334,18 @@ const char *research_should_stop(const research_run_t *run,
       /* The agent judged the brief covered (research_conclude).  Advisory only —
        * the controller still owns the stop; the caller has already gated this on
        * the run having recorded findings, so an empty "conclude" can't end a run. */
-      return "concluded";
+      return RESEARCH_STOP_CONCLUDED;
    }
    if (all_closed) {
       /* Every question answered or unanswerable — the ideal stop (plan MED). */
-      return "coverage";
+      return RESEARCH_STOP_COVERAGE;
    }
    if (b->saturation_rounds > 0 && no_progress_rounds >= b->saturation_rounds) {
       /* Diminishing returns: N consecutive rounds closed no new question.  Stops a
        * run that keeps searching (and adding questions) without converging, instead
        * of grinding to the token ceiling (live run 2: round 3 spent 35% of the
        * budget and closed nothing). */
-      return "saturation";
+      return RESEARCH_STOP_SATURATION;
    }
    /* Hard fuses — the backstop for a run that keeps making progress but won't end.
     * Two, not three: the token ceiling is the real spend control, and max_rounds
@@ -353,10 +354,10 @@ const char *research_should_stop(const research_run_t *run,
     * max_rounds x LLM_TOOLS_MAX_ITERATIONS, so it added no distinct safety property
     * and, set below that structural ceiling, only guillotined productive runs early. */
    if (b->max_rounds > 0 && run->rounds_run >= b->max_rounds) {
-      return "budget";
+      return RESEARCH_STOP_BUDGET;
    }
    if (b->max_input_tokens > 0 && run->input_tokens >= b->max_input_tokens) {
-      return "token_budget";
+      return RESEARCH_STOP_TOKEN_BUDGET;
    }
    return NULL; /* continue */
 }

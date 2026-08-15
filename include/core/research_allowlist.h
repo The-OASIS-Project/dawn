@@ -35,6 +35,10 @@
 #include <stdbool.h>
 #include <string.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
  * @brief Is @p name a tool a deep-research fetch loop is allowed to run?
  *
@@ -63,5 +67,9 @@ static inline bool research_tool_is_research_only(const char *name) {
    return strcmp(name, "research_plan") == 0 || strcmp(name, "research_record") == 0 ||
           strcmp(name, "research_conclude") == 0 || strcmp(name, "research_mark_unanswerable") == 0;
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* RESEARCH_ALLOWLIST_H */

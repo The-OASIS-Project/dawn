@@ -516,12 +516,18 @@ int research_db_question_coverage(int64_t run_id, int64_t qid, int *distinct_sou
    }
    sqlite3_bind_int64(st, 1, run_id);
    sqlite3_bind_int64(st, 2, qid);
-   if (sqlite3_step(st) == SQLITE_ROW) {
+   /* A COUNT always yields exactly one ROW; a non-ROW step is a genuine step-level
+    * failure (IO error / corruption).  Report it as FAILURE rather than a
+    * trustworthy 0 — research_retire_stale_questions skips a question on any
+    * != SUCCESS, so returning SUCCESS-with-0 here would read as a "dry round" and
+    * could advance a still-answerable question's stale streak toward auto-retire. */
+   int step = sqlite3_step(st);
+   if (step == SQLITE_ROW) {
       *distinct_sources_out = sqlite3_column_int(st, 0);
    }
    sqlite3_finalize(st);
    AUTH_DB_UNLOCK();
-   return AUTH_DB_SUCCESS;
+   return (step == SQLITE_ROW) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
 }
 
 int research_db_question_belongs(int64_t run_id, int64_t qid, bool *out) {
@@ -731,12 +737,15 @@ int research_db_claim_count(int64_t run_id, int *count_out) {
       return AUTH_DB_FAILURE;
    }
    sqlite3_bind_int64(st, 1, run_id);
-   if (sqlite3_step(st) == SQLITE_ROW) {
+   /* A COUNT always yields one ROW; a non-ROW step is a step-level failure, not a
+    * real 0 — report FAILURE so callers can tell "no claims" from "read failed". */
+   int step = sqlite3_step(st);
+   if (step == SQLITE_ROW) {
       *count_out = sqlite3_column_int(st, 0);
    }
    sqlite3_finalize(st);
    AUTH_DB_UNLOCK();
-   return AUTH_DB_SUCCESS;
+   return (step == SQLITE_ROW) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
 }
 
 int research_db_claim_list(int64_t run_id, research_claim_t *out, int max, int *count_out) {
@@ -911,10 +920,13 @@ int research_db_revision_count(int64_t run_id, int *count_out) {
       return AUTH_DB_FAILURE;
    }
    sqlite3_bind_int64(st, 1, run_id);
-   if (sqlite3_step(st) == SQLITE_ROW) {
+   /* A COUNT always yields one ROW; a non-ROW step is a step-level failure, not a
+    * real 0 — report FAILURE so callers can tell "no revisions" from "read failed". */
+   int step = sqlite3_step(st);
+   if (step == SQLITE_ROW) {
       *count_out = sqlite3_column_int(st, 0);
    }
    sqlite3_finalize(st);
    AUTH_DB_UNLOCK();
-   return AUTH_DB_SUCCESS;
+   return (step == SQLITE_ROW) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
 }

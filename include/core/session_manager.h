@@ -430,14 +430,15 @@ typedef struct session {
    // BOTH schema advertisement and execution — is_tool_enabled_for_session), and
    // the research_plan/research_record tools write to this run.  research_round
    // is the current round, stamped onto recorded claims (diagnostics).
-   // Single-writer (the research controller, between dispatches).  Read during a
-   // dispatch by the tool layer — on the controller thread AND on parallel
-   // native-tool worker threads (they share the session's command context), so
-   // the read is multi-threaded.  Lock-free is safe: the value is constant for
-   // the whole dispatch (set before, cleared after), and an aligned 64-bit
-   // load/store is atomic on the target ISAs.
-   int64_t research_run_id;
-   int research_round;
+   // Single-writer (the research controller, between dispatches), but READ during a
+   // dispatch on parallel native-tool worker threads that share the session's
+   // command context — a genuine cross-thread read.  Atomic (not merely aligned) so
+   // consistency does not rely on the single-writer discipline being preserved: it
+   // matches the sibling research_concluded/tools_suppressed flags and stays correct
+   // if a future change ever writes from a second thread.  Access via atomic_load/
+   // atomic_store, never a raw field read.
+   _Atomic int64_t research_run_id;
+   _Atomic int research_round;
    // research_conclude signal: the agent's own "I've covered the brief" flag.
    // WRITTEN by a tool-worker thread (research_conclude callback), READ by the
    // controller after core_text_input_dispatch returns (which joins the tool
@@ -622,17 +623,13 @@ static inline bool session_is_background(const session_t *s) {
  *
  * Single-writer: only the research controller (on its own bare job session)
  * calls this, set-before / cleared-after each dispatch.  The read is multi-thread
- * (parallel tool-worker threads share this session's command context), and it is
- * lock-free BECAUSE of that single-writer discipline: the write happens-before
- * pthread_create of the tool workers and the clear happens only after their
- * pthread_join, so no reader ever sees a torn or stale value.  A future change
- * that set this from a second thread, or outside the join-bounded dispatch, would
- * need synchronization (atomics).
+ * (parallel tool-worker threads share this session's command context); the fields
+ * are atomic so a consistent read holds regardless of the writer discipline.
  */
 static inline void session_set_research_context(session_t *session, int64_t run_id, int round) {
    if (session != NULL) {
-      session->research_run_id = run_id;
-      session->research_round = round;
+      atomic_store(&session->research_run_id, run_id);
+      atomic_store(&session->research_round, round);
    }
 }
 

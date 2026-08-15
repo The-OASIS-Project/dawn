@@ -256,11 +256,19 @@ Open, acknowledged, and contributor help is welcome. Each maps to a tracked TODO
    and, likely, a new capability/deny flag is the fix. *(TODO: "Tool audit:
    autonomously-dangerous classification pass.")*
 
-2. **No SSRF redirect-pinning on the general web-fetch path.** `email_client.c` correctly pins
-   `CURLOPT_FOLLOWLOCATION=0`, but a validated-public URL that 302-redirects to `127.0.0.1` or
-   a cloud-metadata address (`169.254.169.254`) can re-open SSRF on the url/search fetchers.
-   Pin redirects off (or re-validate each `Location`), and always block link-local even when
-   LAN fetches are permitted. *(TODO / `ODYSSEUS_COMPARISON.md` §6.)*
+2. **SSRF on the native web-fetch path — CLOSED for `url_fetch`/`search` (2026-08, deep-research
+   branch); FlareSolverr residual remains.** The native curl path now installs a
+   `CURLOPT_OPENSOCKETFUNCTION` that validates the **actual connect IP of every hop, redirects
+   included**, and refuses loopback / link-local (`169.254/16` cloud-metadata) / all RFC-1918 +
+   CGNAT/benchmark/6to4/NAT64/multicast/reserved ranges, with `CURLOPT_REDIR_PROTOCOLS_STR`
+   restricting redirect schemes; the FlareSolverr fallback re-validates the initial hop before
+   handoff. **Residual (cannot be closed from DAWN):** FlareSolverr drives a headless Chromium
+   that does its **own** DNS resolution + redirect-following, so a redirect *it* follows
+   internally (`302 → 169.254.169.254`) still reaches internal services. FlareSolverr is opt-in
+   / off by default; where enabled it **MUST** be run network-isolated (egress-deny to link-local
+   + RFC-1918/ULA, e.g. a locked-down Docker network namespace). `email_client.c` independently
+   pins `CURLOPT_FOLLOWLOCATION=0`. *(TODO: "FlareSolverr fallback is an unguarded SSRF egress" /
+   `ODYSSEUS_COMPARISON.md` §6.)*
 
 3. **No 2FA.** Password is the only browser-login factor. Designed (TODO §6), not built. This
    is *the* reason direct internet exposure is unsupported and VPN-only is the posture.

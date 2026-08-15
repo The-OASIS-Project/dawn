@@ -1020,7 +1020,7 @@ static bool is_tool_enabled_for_session(const tool_definition_t *t, bool is_remo
    if (ctx != NULL && session_tools_suppressed(ctx)) {
       return false;
    }
-   bool research_mode = (ctx != NULL && ctx->research_run_id > 0);
+   bool research_mode = (ctx != NULL && atomic_load(&ctx->research_run_id) > 0);
    if (research_mode) {
       return research_tool_is_allowlisted(t->name);
    }

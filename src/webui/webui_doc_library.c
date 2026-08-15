@@ -267,6 +267,11 @@ void handle_doc_library_get(ws_connection_t *conn, json_object *payload) {
       } else {
          json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
          sanitize_utf8_for_json(doc.filename);
+         /* The body carries web-derived text (e.g. a research report's cited source
+          * URLs). A raw invalid-UTF-8 byte would make the browser's JSON.parse reject
+          * the whole frame, dropping the user's own report — same "sanitize at the WS
+          * sink" invariant the filename above and every sibling emitter follow. */
+         sanitize_utf8_for_json(text);
          json_object_object_add(resp_payload, "filename", json_object_new_string(doc.filename));
          json_object_object_add(resp_payload, "filetype", json_object_new_string(doc.filetype));
          json_object_object_add(resp_payload, "text", json_object_new_string(text));

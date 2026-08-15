@@ -386,12 +386,20 @@ static int research_run_critic(struct session *s,
 
    session_init_system_prompt(s, RESEARCH_CRITIC_PROMPT); /* fresh context — no round history */
    session_set_tools_suppressed(s, true);                 /* judge only; no tools */
+   /* Lift the per-round input-token ceiling for the judge turn, same as synthesis:
+    * the critic runs INSIDE the round loop while the ceiling is still set, so a
+    * natural-end stop reached near (but under) budget would truncate the judge to
+    * an empty response — parsed fail-safe as "stop" and logged as a deliberate
+    * decision when it was really a truncation.  Restore afterward so subsequent
+    * rounds stay bounded (the ceiling is set once before the loop, not per round). */
+   session_set_input_token_ceiling(s, 0);
    text_input_dispatch_opts_t opts = {
       .conversation_id = 0,
       .auth_user_id = run0->user_id,
       .skip_prompt_rebuild = true,
    };
    char *resp = core_text_input_dispatch(s, digest, NULL, NULL, NULL, 0, &opts);
+   session_set_input_token_ceiling(s, b->max_input_tokens);
    session_set_tools_suppressed(s, false);
    free(digest);
 
@@ -647,7 +655,7 @@ const char *research_run_execute(struct session *s,
       *out_summary = NULL;
    }
    if (!s || !run0 || !b) {
-      return "failed";
+      return RESEARCH_STOP_FAILED;
    }
    const int64_t run_id = run0->id;
 
@@ -660,7 +668,7 @@ const char *research_run_execute(struct session *s,
                      256;
    char *directive = malloc(dir_size);
    if (!directive) {
-      return "failed";
+      return RESEARCH_STOP_FAILED;
    }
 
    const char *stop_reason = NULL;
@@ -697,7 +705,7 @@ const char *research_run_execute(struct session *s,
       /* Per-session cancel only (SESSION_TYPE_JOB honors its own flag, not the
        * global wake-word interrupt — prereq 0b / §5.6). */
       if (atomic_load(&s->cancel_requested)) {
-         stop_reason = "cancelled";
+         stop_reason = RESEARCH_STOP_CANCELLED;
          break;
       }
 
@@ -721,7 +729,7 @@ const char *research_run_execute(struct session *s,
        * rather than burning the whole round budget on dead round-trips. */
       if (round_failed) {
          if (++fail_streak >= RESEARCH_MAX_CONSECUTIVE_FAILURES) {
-            stop_reason = "failed";
+            stop_reason = RESEARCH_STOP_FAILED;
             break;
          }
       } else {
@@ -848,6 +856,18 @@ const char *research_run_execute(struct session *s,
                 * saturation (or surface the correct fuse).  coverage/saturation re-arms
                 * are unaffected (the flag is already false there). */
                session_research_reset_concluded(s);
+               /* Reset the saturation streak: the critic just added genuinely new open
+                * gap question(s) from an untried angle, so they deserve a FRESH
+                * saturation window.  Without this, a re-arm off a SATURATION stop leaves
+                * no_progress_rounds already at threshold, so a gap needing >=2 rounds to
+                * reach min_sources re-trips saturation after a single round and can never
+                * close — making the critic inert on exactly the multi-round gaps it
+                * exists for.  Bounded by critic_max_rearm under the max_rounds fuse, so
+                * this cannot delay a legitimate stop indefinitely.  Re-baseline
+                * prev_closed too so the reset holds even if this round's coverage read
+                * failed (cov_rc != SUCCESS left prev_closed stale). */
+               no_progress_rounds = 0;
+               prev_closed = closed;
                stop_reason = NULL; /* re-armed — research the new gap questions next round */
                continue;
             }
@@ -866,7 +886,7 @@ const char *research_run_execute(struct session *s,
    session_set_input_token_ceiling(s, 0);
 
    if (!stop_reason) {
-      stop_reason = "budget"; /* completed max_rounds without an earlier stop */
+      stop_reason = RESEARCH_STOP_BUDGET; /* completed max_rounds without an earlier stop */
    }
 
    /* Synthesize: render the report from the persisted claims, store it as the
@@ -913,7 +933,7 @@ const char *research_run_execute(struct session *s,
     * spend another LLM call) or an empty run; the report then falls back to
     * evidence-only so the user still gets everything that was found. */
    char *prose = NULL;
-   bool user_cancel = (stop_reason && strcmp(stop_reason, "cancelled") == 0);
+   bool user_cancel = (stop_reason && strcmp(stop_reason, RESEARCH_STOP_CANCELLED) == 0);
    if (claim_count > 0 && !user_cancel && evidence != NULL) {
       prose = research_synthesize(s, run0, evidence, research_date);
    }

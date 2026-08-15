@@ -43,6 +43,25 @@ extern "C" {
 
 struct session; /* core/session_manager.h — full type only needed in the .c */
 
+/* Controller stop-reason vocabulary — the single source of truth for the strings
+ * research_should_stop() RETURNS and research_worker.c re-classifies to map a stop
+ * to a job/research disposition.  Shared as named constants because the same set is
+ * produced in research_run.c and consumed by strcmp in research_run_loop.c and
+ * research_worker.c: a bare-literal typo (e.g. "token_budget" vs "tokens_budget")
+ * compiles clean and silently misclassifies a run's outcome.  These are the
+ * CONTROLLER's stop reasons, distinct from the JOB-lifecycle status strings
+ * ("done"/"interrupted"/"timeout") the worker also emits.
+ *   Natural ends:  CONCLUDED, COVERAGE, SATURATION   (research_is_natural_end)
+ *   Fuse stops:    BUDGET (max_rounds), TOKEN_BUDGET (max_input_tokens)
+ *   Non-success:   CANCELLED, FAILED */
+#define RESEARCH_STOP_CONCLUDED "concluded"
+#define RESEARCH_STOP_COVERAGE "coverage"
+#define RESEARCH_STOP_SATURATION "saturation"
+#define RESEARCH_STOP_BUDGET "budget"
+#define RESEARCH_STOP_TOKEN_BUDGET "token_budget"
+#define RESEARCH_STOP_CANCELLED "cancelled"
+#define RESEARCH_STOP_FAILED "failed"
+
 /* P0 budget/shape defaults — the single source of truth for both the compile-
  * time fallback (research_budgets_defaults) and the [research] config defaults
  * (config_defaults.c, which includes the same leaf header).  See research_defaults.h. */

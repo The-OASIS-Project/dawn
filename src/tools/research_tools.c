@@ -59,16 +59,17 @@
  * research session (a hallucinated call from a non-research context). */
 static int64_t research_active_run(int *round_out) {
    session_t *ctx = session_get_command_context();
-   if (ctx == NULL || ctx->research_run_id <= 0) {
+   int64_t run_id = (ctx != NULL) ? atomic_load(&ctx->research_run_id) : 0;
+   if (run_id <= 0) {
       if (round_out) {
          *round_out = 0;
       }
       return 0;
    }
    if (round_out) {
-      *round_out = ctx->research_round;
+      *round_out = atomic_load(&ctx->research_round);
    }
-   return ctx->research_run_id;
+   return run_id;
 }
 
 /* =============================================================================

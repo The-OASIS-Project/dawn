@@ -521,7 +521,10 @@
 }
 
 .agent-event-ok {
-   color: var(--success); /* #22c55e on --bg-tertiary ≈ 5.9:1 — passes AA */
+   /* #22c55e on the boxed pill's --bg-tertiary ≈ 5.9:1; on the un-boxed
+    * .agent-event-line trail (background:none → the transcript's --bg-secondary,
+    * #1b1f24) ≈ 7.3:1 — both pass AA. */
+   color: var(--success);
    border-color: var(--success-subtle);
 }
 .agent-event-ok::before {
@@ -537,7 +540,9 @@
 }
 
 .agent-event-muted {
-   color: var(--text-secondary); /* not --text-tertiary — see jobs.css contrast note above */
+   /* not --text-tertiary — see contrast note above. #7b8794 on the trail's
+    * --bg-secondary ≈ 4.5:1, passes AA for body text. */
+   color: var(--text-secondary);
 }
 .agent-event-muted::before {
    content: '\2014'; /* — */

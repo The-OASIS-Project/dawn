@@ -1,12 +1,73 @@
 # Deep Research — Design
 
-**Status: ✅ P0 SHIPPED + field-validated (2026-08-13).** All 11 §15 build steps landed across individual
-reviewed commits, a five-lens pre-release audit (arch/security/correctness/efficiency/standards, 0 blocking),
-and a first-live-run tuning pass. **P1 (controller-driven convergence) SHIPPED 2026-08-14, pending live test —
-plan-freeze + stale-question auto-retirement, then the fresh-context completeness critic (§6 item 4).** P2–P4
-remain design-only below.
+**Status: ✅ P0 SHIPPED + field-validated (2026-08-13). ✅ P1 (controller-driven convergence) SHIPPED +
+live-validated (2026-08-14→15).** All 11 §15 build steps landed across individual reviewed commits, a five-lens
+pre-release audit (arch/security/correctness/efficiency/standards, 0 blocking), and a first-live-run tuning
+pass. **P1 = plan-freeze + stale-question auto-retirement + the fresh-context completeness critic (§6 item 4) +
+the JARVIS-style completion-commentary turn** — all shipped and live-validated (run 8: stale→coverage; run 9:
+critic re-armed once then confirm-stopped→saturation). A **full six-lens pre-merge re-audit
+(arch/security/correctness/efficiency/UI/standards, 2026-08-15)** returned 0 Critical/High and a handful of
+Low/Medium fixes, all applied (see [Post-merge review §](#post-merge-review-2026-08-15)). P2–P4 remain
+design-only below.
+
+## Post-merge review (2026-08-15)
+
+Full six-lens pre-merge re-audit of the whole `deep_research` branch (32 commits, ~10k lines) —
+architecture / security / correctness / efficiency / UI / coding-standards, run in parallel on the
+`main...deep_research` diff. **Verdict: healthy — 0 Critical, 0 High across all six lenses.** The
+load-bearing security invariants were each verified present in code (not just asserted): the CWE-918
+redirect-SSRF hole closed with a per-hop connect-IP guard, the read-only allowlist single-sourced and
+enforced at advertise + execute on both the native and legacy actuation paths, ingest-time injection
+gating on every stored field, `reinvoke_parent` genuinely disabled, SQL parameterized + owner-scoped,
+session-less callers refused for all actions. Efficiency clean (no O(rounds²), every DB query indexed,
+bounded buffers, leaf-lock copy-out); correctness clean (stop-controller provably converges, disposition
+whitelist fails closed).
+
+**Fixed in the same pass (9 items), each re-reviewed for regressions (0 found):**
+
+- **Completeness-critic saturation streak** (arch-M1, correctness-confirmed) — the re-arm now resets
+  `no_progress_rounds`/`prev_closed`, so a re-arm off a `saturation` stop no longer starves multi-round
+  gaps. See §6 item 4. *(This was the one behavioral change; both an architecture and a correctness lens
+  traced it — `no_progress_rounds` is a closed-count streak, not source-accumulation, so the reset is
+  required and the run stays hard-bounded.)*
+- **Critic token-ceiling** (correctness-L2) — the critic judge turn now lifts the per-round input-token
+  ceiling around its dispatch (restored after), so a natural-end stop near budget can't truncate the judge
+  to an empty response mislabeled as a deliberate "stop."
+- **Coverage/count accessors** (correctness-L1) — `research_db_question_coverage`/`_claim_count`/
+  `_revision_count` now return `AUTH_DB_FAILURE` on a non-ROW `sqlite3_step`, so the stale-retire skip
+  (`!= SUCCESS`) actually fires and a step error can't fabricate a "dry round" that auto-retires a live
+  question.
+- **`research_run_id`/`research_round` → `_Atomic`** (security-L2 / arch-L4) — cross-thread reads no longer
+  rely on an unenforced single-writer discipline; matches the sibling `research_concluded`/`tools_suppressed`
+  flags.
+- **`doc_library_get` UTF-8 sanitize** (security-L1) — the report body is `sanitize_utf8_for_json`'d at the
+  WS sink, so a bad byte in a stored `source_url` can't drop the frame and make the user's own report
+  unopenable.
+- **Stop-reason constants** (standards-M2) — the `RESEARCH_STOP_*` vocabulary is now shared `#define`s in
+  `research_run.h`, so a typo in the worker's success whitelist can't silently misclassify a run's
+  disposition.
+- **`research_allowlist.h` `extern "C"`** (standards-L1), the `completion_commentary` settings toggle
+  (`type: 'boolean'`→`'checkbox'`, which had been rendering as an error), and the `jobs.css` trail contrast
+  comment (recomputed for the actual `--bg-secondary` surface).
+
+**Deferred (tracked in TODO.md "Deep Research full-review (2026-08-15)"), each with a trigger:**
+
+- `research_db_question_coverage` and its count siblings use ad-hoc `prepare/finalize` (not cached into
+  `s_db.stmt_*` like `auth_db_jobs.c`), compounding the already-deferred per-round coverage `COUNT(DISTINCT)`
+  N+1. Trigger: per-run question count → ~30, or concurrent runs. Cold behind LLM latency at P0 scale.
+- Claim readers pull the unused 2 KB `quote` column into a ~6.4 KB row struct; a report-specific projection
+  would trim it. Fold in when `auth_db_research.c` is next touched.
+- `llm_tools.c` is over the 2,500-line hard limit (+47 here, for the allowlist gate that correctly belongs
+  there) — a size-trajectory row, no code move.
+- `jobs.js` crossed the 1,000-line JS soft limit; the research-event seam folds into the tracked jobs.js
+  split. The research trail rows lack `role=list`/group semantics (folds into the tracked AT work), and
+  `research_round` vs `research_claim` share a glyph (optional visual polish).
 
 ## Where this stands (2026-08-13)
+
+> **Historical snapshot (P0 ship day).** This section is the P0-era stopping point; its "remaining P1"
+> language is superseded — P1 (plan-freeze + stale-retire + completeness critic + commentary) shipped
+> 2026-08-14→15 and is live-validated. See the status block above and §"P1: Controller-driven convergence."
 
 **What works, end to end:** `deep_research start` (confirmation-gated) → detached `research_worker` on a bare
 memory-free job session → IterResearch round loop (reset history + bounded digest each round, `research_plan`
@@ -85,14 +146,14 @@ the digest shows near-complete coverage, which is the next thing to watch.
 memory@0.7324 and SAGE@P0). **Resume trigger:** after ~10 real runs, review `benchmarks/research/` baselines —
 if runs stop on `saturation`/`concluded` with good reports, the loop is healthy; runs still stopping on
 `token_budget` while surfacing novel claims are the remaining P1 signal (the fresh-context **completeness
-critic**, `critic_max_rearm`, still design-only). Deferred/tracked (none blocking): coverage `COUNT(DISTINCT)`
+critic**, `critic_max_rearm` — since SHIPPED 2026-08-14, see §6 item 4). Deferred/tracked (none blocking): coverage `COUNT(DISTINCT)`
 N+1 at scale (trigger >30 Q or concurrent runs), the round-boundary budget overshoot (a round can exceed
 `max_input_tokens` before the boundary check — saturation/conclude make it rarely bind), revision pruning,
 messaging-channel completion push, and the `url_fetch` exfil residual (the broader autonomously-dangerous
 tool-audit / per-session capability-mask initiative — sharpened by research, not P1). Multi-agent fan-out + P2
 private-corpus mode are real later directions on the (unbuilt) job-trees substrate.
 
-### P1: Controller-driven convergence — Phase 1 + Phase 2 SHIPPED 2026-08-14 (pending live test)
+### P1: Controller-driven convergence — Phase 1 + Phase 2 + completeness critic SHIPPED 2026-08-14, live-validated 2026-08-15
 
 **Problem (runs 2–5).** The reports are strong, but the model **never self-terminates** — 0 `research_conclude` /
 `research_mark_unanswerable` calls across four runs despite prompt nudges — and it **over-decomposes mid-run**
@@ -182,7 +243,9 @@ injection disabled/mode-scoped** because the output path re-enters privileged se
 **To start building:** jump to [§15 — Implementation kickoff (P0 build order)](#15-implementation-kickoff-p0-build-order). Read
 [`BACKGROUND_JOBS_DESIGN.md`](BACKGROUND_JOBS_DESIGN.md) §5/§8/§14 first — this feature is a sibling of that substrate.
 
-**Reviewer note.** `docs/TODO.md`, `docs/DONE.md`, and this doc are gitignored local working files.
+**Reviewer note.** `docs/TODO.md` and `docs/DONE.md` are gitignored local working files. **This design
+doc is tracked** (committed on the `deep_research` branch per the design-doc commit policy — it describes
+shipped code) and is kept in sync as the feature lands; treat it as the source of truth, not scratch.
 
 ---
 
@@ -571,7 +634,7 @@ Layered stopping stack, outermost first:
    near-duplicate threshold. Embedding is done **once per round boundary, batched, with an in-run vector
    cache** — never per-`research_record` inside the tool loop — so the serialized global-embed-mutex traffic is
    `rounds` calls, not `claims` calls (eff H2). The cosine itself is O(N²) in claims but trivial at these sizes.
-4. **Completeness critic (P1) — SHIPPED 2026-08-14, pending live test.** At a **natural-end** stop-eligibility
+4. **Completeness critic (P1) — SHIPPED 2026-08-14, live-validated 2026-08-15.** At a **natural-end** stop-eligibility
    only (`concluded`/`coverage`/`saturation`, never a budget fuse — re-arming a fuse is futile), a
    **fresh-context** no-tools LLM judge (`research_run_critic`) grades the ledger + stop context and replies in
    strict JSON `{"decision":"stop|continue","gaps":[{"question","angle"}]}`, parsed by
@@ -579,9 +642,16 @@ Layered stopping stack, outermost first:
    `continue` it ADDS the gap sub-questions to the ledger (bypassing plan-freeze, which guards only the
    `research_plan` tool) — injection-command-gated exactly like `research_plan` (§11) since a gap is LLM output
    over untrusted evidence — and the loop researches them next round. **Bounded re-arm**: at most
-   `critic_max_rearm` times (config, default 2; 0 disables the critic), then the run stops regardless; the
-   re-arm resets the sticky `research_conclude` signal so a re-armed "concluded" stop doesn't re-fire on a stale
-   flag. Emits a `research_critic` observe event. (Claims-as-view already subsumes Anthropic's separate
+   `critic_max_rearm` times (config, default 2; 0 disables the critic), then the run stops regardless. On each
+   re-arm the loop resets **two** pieces of stop state so the freshly-added gap questions actually get pursued:
+   (1) the sticky `research_conclude` signal, so a re-armed "concluded" stop doesn't re-fire on a stale flag;
+   and (2) — added in the 2026-08-15 post-merge review — the **saturation streak** (`no_progress_rounds`,
+   re-baselining `prev_closed`). Without (2), a re-arm off a `saturation` stop enters with the streak already at
+   threshold, so a gap needing ≥2 rounds to reach `min_sources` re-trips `saturation` after a single round and
+   can never close — making the critic **inert on exactly the multi-round gaps it exists for**. `no_progress_rounds`
+   is a *closed-count* streak (rounds where no question reached `min_sources`), so it does NOT self-reset on mere
+   source accumulation toward a still-open gap; resetting it gives the new work a fresh `saturation_rounds`
+   window, bounded by `critic_max_rearm` under the `max_rounds` fuse. Emits a `research_critic` observe event. (Claims-as-view already subsumes Anthropic's separate
    CitationAgent pass — every claim carries its URL + quote — so we don't need to copy it.)
 
    > **Feed the critic the STOP CONTEXT, not just the report — or it re-derives adjudicated gaps and

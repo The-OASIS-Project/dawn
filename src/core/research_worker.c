@@ -234,9 +234,11 @@ static void research_worker_run(research_work_t *work) {
       job_err = JOB_ERR_TIMED_OUT;
       research_status = "failed";
       research_stop = "timeout";
-   } else if (stop != NULL && (strcmp(stop, "coverage") == 0 || strcmp(stop, "budget") == 0 ||
-                               strcmp(stop, "token_budget") == 0 ||
-                               strcmp(stop, "saturation") == 0 || strcmp(stop, "concluded") == 0)) {
+   } else if (stop != NULL && (strcmp(stop, RESEARCH_STOP_COVERAGE) == 0 ||
+                               strcmp(stop, RESEARCH_STOP_BUDGET) == 0 ||
+                               strcmp(stop, RESEARCH_STOP_TOKEN_BUDGET) == 0 ||
+                               strcmp(stop, RESEARCH_STOP_SATURATION) == 0 ||
+                               strcmp(stop, RESEARCH_STOP_CONCLUDED) == 0)) {
       /* The run finished on its own terms — the ONLY stop strings that map to a
        * successful 'done' (coverage/concluded = converged, saturation = no more to
        * find, budget/token_budget = spent its allowance).  Whitelisted explicitly

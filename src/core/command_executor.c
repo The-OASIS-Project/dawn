@@ -99,7 +99,8 @@ static bool research_context_refuses(const char *device, cmd_exec_result_t *resu
       return false;
    }
    bool suppressed = session_tools_suppressed(ctx); /* synthesis turn: NO tools at all */
-   bool research = ctx->research_run_id > 0;        /* fetch loop: read-only allowlist */
+   int64_t research_run = atomic_load(&ctx->research_run_id);
+   bool research = research_run > 0; /* fetch loop: read-only allowlist */
    if (!suppressed && !research) {
       return false; /* not a research/synthesis context — normal execution */
    }
@@ -111,7 +112,7 @@ static bool research_context_refuses(const char *device, cmd_exec_result_t *resu
    }
    OLOG_WARNING("command_execute: refused '%s' in research context (run %lld, suppressed=%d) — "
                 "read-only allowlist (HIGH-1)",
-                device ? device : "(null)", (long long)ctx->research_run_id, (int)suppressed);
+                device ? device : "(null)", (long long)research_run, (int)suppressed);
    memset(result, 0, sizeof(*result));
    result->success = false;
    result->result = strdup("Tool not available during deep research (read-only allowlist).");

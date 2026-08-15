@@ -173,7 +173,7 @@ static char *search_wrap_untrusted_web(const char *body) {
 /* True when the calling session is an active deep-research run. */
 static bool search_in_research_session(void) {
    session_t *ctx = session_get_command_context();
-   return ctx != NULL && ctx->research_run_id > 0;
+   return ctx != NULL && atomic_load(&ctx->research_run_id) > 0;
 }
 
 static char *perform_search(const char *query,
