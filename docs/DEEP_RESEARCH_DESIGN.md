@@ -294,8 +294,10 @@ survive on a cost-conscious single-GPU box (or a 4B local model). See
 1. **Round-reconstruction context strategy** — history is reset to empty each round; a *bounded digest* of the
    report + ledger is carried in the round directive. The report + claims table are the memory.
 2. **A deterministic C controller over a SQLite coverage ledger** decides continue/stop — not the model's
-   self-assessment — with the report rendered as a **view over recorded claims** so compression can never
-   destroy evidence.
+   self-assessment — with the report rendered as a **view over recorded claims** so a lossy running summary
+   can never destroy evidence: the ledger retains every claim. (The synthesis *render* is bounded by a
+   generous per-report claim cap — `RESEARCH_MAX_REPORT_CLAIMS` — with an explicit truncation marker beyond
+   it; the cap is a memory backstop set well above any real run, not a compression step.)
 
 **WWFD — how DAWN differentiates** (each backed by shipped substrate, not marketing):
 - **Friday knows you — at the edges, not in the fetch loop.** "Knows me" lives where it is both valuable and

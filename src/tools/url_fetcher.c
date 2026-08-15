@@ -1145,6 +1145,17 @@ static int is_private_ipv6(const char *ip) {
    return 0;
 }
 
+/* Context for the SSRF open-socket guard.  `refused` is set when a hop is blocked
+ * (so the caller skips retries + the FlareSolverr fallback — a refusal is
+ * deterministic).  `approved_ip` is the pre-validated initial-target IP that
+ * url_is_blocked_with_resolve() already cleared (INCLUDING the operator's URL/host/
+ * IP/CIDR whitelist), so the guard must not block it even when it is private — else
+ * a configured LAN fetch would resolve+approve, then be rejected at connect time. */
+typedef struct {
+   bool refused;
+   const char *approved_ip; /* NULL when the target has no pinned/approved IP */
+} ssrf_guard_ctx_t;
+
 /**
  * @brief curl open-socket callback: SSRF guard on the ACTUAL connect IP.
  *
@@ -1153,46 +1164,55 @@ static int is_private_ipv6(const char *ip) {
  * curl is about to connect to.  Refusing here (CURL_SOCKET_BAD) is what closes
  * the redirect-SSRF hole that CURLOPT_FOLLOWLOCATION opened: a 302 to
  * 169.254.169.254 (or a rebinding DNS answer on a redirect host) is caught at
- * connect time even though curl, not us, is following the redirect.  The
- * original host is also validated up front via url_is_blocked_with_resolve();
- * this is the per-hop backstop that check cannot cover.
+ * connect time even though curl, not us, is following the redirect.
+ *
+ * A PRIVATE connect IP is allowed only when it is the pre-approved initial target
+ * (`approved_ip`, already whitelist-cleared) OR itself matches an IP/CIDR whitelist
+ * entry — so operator-configured LAN/internal fetches keep working, while a redirect
+ * to any OTHER private address stays blocked (each hop independently approved).
  */
 static curl_socket_t ssrf_guard_opensocket_cb(void *clientp,
                                               curlsocktype purpose,
                                               struct curl_sockaddr *addr) {
    (void)purpose;
-   bool *refused = (bool *)clientp; /* set when we block, so the caller skips
-                                     * retries + the fallback (a refusal is
-                                     * deterministic — the IP will not change). */
+   ssrf_guard_ctx_t *ctx = (ssrf_guard_ctx_t *)clientp;
    /* Fail CLOSED: a NULL addr or any non-IPv4/IPv6 family is refused rather than
     * opened unvalidated (defense-in-depth; curl only passes INET/INET6 here). */
    if (!addr) {
-      if (refused) {
-         *refused = true;
+      if (ctx) {
+         ctx->refused = true;
       }
       return CURL_SOCKET_BAD;
    }
    char ip_str[INET6_ADDRSTRLEN] = "";
    int is_ip_family = 0;
-   int blocked = 0;
+   int is_private = 0;
    if (addr->family == AF_INET) {
       is_ip_family = 1;
       struct sockaddr_in *sin = (struct sockaddr_in *)&addr->addr;
       /* An inet_ntop failure leaves ip_str empty, which is_private_*() would read
-       * as "not private" — treat it as blocked so the guard stays fail-closed. */
-      blocked = (inet_ntop(AF_INET, &sin->sin_addr, ip_str, sizeof(ip_str)) == NULL) ||
-                is_private_ipv4(ip_str);
+       * as "not private" — treat it as private (blocked) so the guard stays
+       * fail-closed. */
+      is_private = (inet_ntop(AF_INET, &sin->sin_addr, ip_str, sizeof(ip_str)) == NULL) ||
+                   is_private_ipv4(ip_str);
    } else if (addr->family == AF_INET6) {
       is_ip_family = 1;
       struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&addr->addr;
-      blocked = (inet_ntop(AF_INET6, &sin6->sin6_addr, ip_str, sizeof(ip_str)) == NULL) ||
-                is_private_ipv6(ip_str);
+      is_private = (inet_ntop(AF_INET6, &sin6->sin6_addr, ip_str, sizeof(ip_str)) == NULL) ||
+                   is_private_ipv6(ip_str);
    }
-   if (!is_ip_family || blocked) {
+   /* A private IP is only permitted if it is the pre-approved initial target, or an
+    * IP/CIDR whitelist entry covers it (URL/host whitelist entries can't be matched
+    * here — the callback has only the IP — but the initial host/URL-whitelisted
+    * target is still covered via approved_ip). */
+   bool private_allowed = is_private && ip_str[0] &&
+                          ((ctx && ctx->approved_ip && strcmp(ip_str, ctx->approved_ip) == 0) ||
+                           is_whitelisted(NULL, NULL, ip_str));
+   if (!is_ip_family || (is_private && !private_allowed)) {
       OLOG_WARNING("url_fetcher: SSRF guard refused connect (%s)",
                    is_ip_family ? ip_str : "unsupported address family");
-      if (refused) {
-         *refused = true;
+      if (ctx) {
+         ctx->refused = true;
       }
       return CURL_SOCKET_BAD;
    }
@@ -1468,7 +1488,11 @@ int url_fetch_content_with_base(const char *url,
    long http_code = 0;
    char *content_type = NULL;
    int retry_count = 0;
-   bool ssrf_refused = false; /* set by the open-socket guard when it blocks a hop */
+   /* The open-socket guard's context: it may connect to `resolved_ip` even if that
+    * is private (url_is_blocked_with_resolve already approved it, whitelist
+    * included), but blocks a redirect to any other private address. */
+   ssrf_guard_ctx_t ssrf_ctx = { .refused = false,
+                                 .approved_ip = resolved_ip[0] ? resolved_ip : NULL };
 
    for (retry_count = 0; retry_count <= URL_FETCH_MAX_RETRIES; retry_count++) {
       if (retry_count > 0) {
@@ -1482,7 +1506,7 @@ int url_fetch_content_with_base(const char *url,
          curl_easy_reset(curl);
       }
 
-      ssrf_refused = false;
+      ssrf_ctx.refused = false;
       curl_buffer_init_with_max(&buffer, URL_FETCH_MAX_SIZE);
 
       // Set options (need to set each retry since curl_easy_reset clears them)
@@ -1509,14 +1533,14 @@ int url_fetch_content_with_base(const char *url,
       curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, (long)(CURLPROTO_HTTP | CURLPROTO_HTTPS));
 #endif
       curl_easy_setopt(curl, CURLOPT_OPENSOCKETFUNCTION, ssrf_guard_opensocket_cb);
-      curl_easy_setopt(curl, CURLOPT_OPENSOCKETDATA, &ssrf_refused);
+      curl_easy_setopt(curl, CURLOPT_OPENSOCKETDATA, &ssrf_ctx);
 
       res = curl_easy_perform(curl);
 
       /* A guard refusal is deterministic — the blocked IP will not change on a
        * retry, and it must NOT fall through to the FlareSolverr fallback (which
        * would re-expose the same target).  Fail fast with BLOCKED_URL. */
-      if (ssrf_refused) {
+      if (ssrf_ctx.refused) {
          OLOG_WARNING("url_fetcher: blocked by SSRF guard (private/internal address): %s", url);
          curl_buffer_free(&buffer);
          curl_slist_free_all(headers);

@@ -37,9 +37,15 @@
 #include "utils/string_utils.h" /* sanitize_utf8_for_json */
 
 /* Bounds for the synthesis render. Claims per run are structurally bounded (a
- * few rounds x a handful of questions x a few claims); the caller-allocated
- * snapshot is heap, and the report buffer is capped. */
-#define RESEARCH_MAX_REPORT_CLAIMS 256
+ * few rounds x a handful of questions x a few claims), so a real run lands well
+ * under this; the cap is a memory backstop on the heap snapshot, NOT the expected
+ * case. If a run ever exceeds it, research_render_report emits an explicit
+ * "_(Report truncated…)_" marker and synthesis sees only the first N — so the
+ * evidence LEDGER still holds every claim (nothing is silently lost), but the
+ * rendered report/prose is bounded. Set generously (with the light claim
+ * projection the snapshot is ~a few MB even here, transient on the detached
+ * worker) so the truncation path is effectively unreachable in practice. */
+#define RESEARCH_MAX_REPORT_CLAIMS 1024
 #define RESEARCH_REPORT_MAX 65536
 
 void research_budgets_defaults(research_budgets_t *out) {

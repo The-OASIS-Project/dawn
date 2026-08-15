@@ -266,6 +266,21 @@ static char *research_record_callback(const char *action, char *value, int *shou
       source_url = NULL;
    }
 
+   /* Require a real HTTP(S) URL.  source_url is model-authored and feeds the
+    * controller's coverage signal via COUNT(DISTINCT source_url) — an arbitrary
+    * string ("source A", "the docs") or a non-web scheme would count as an
+    * independent web source and let a run declare `coverage` without genuinely
+    * distinct evidence.  A non-URL is dropped to NULL (the finding is still kept,
+    * just uncited) so it neither counts toward coverage nor renders a broken link.
+    * (Canonicalizing fragment/tracking-param variants of one page is a further
+    * refinement, tracked separately.) */
+   if (source_url && strncmp(source_url, "http://", 7) != 0 &&
+       strncmp(source_url, "https://", 8) != 0) {
+      OLOG_WARNING("research_record: dropped a non-HTTP(S) source_url (run %lld)",
+                   (long long)run_id);
+      source_url = NULL;
+   }
+
    /* Attribute to the plan question the model named, tolerating the "[q5]" token
     * shape (research_parse_question_id), then VALIDATE it belongs to this run: an
     * id naming no question here (a hallucinated number, or one from another run) is

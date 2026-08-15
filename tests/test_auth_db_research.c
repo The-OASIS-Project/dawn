@@ -344,6 +344,46 @@ static void test_not_found(void) {
    TEST_ASSERT_NULL(md);
 }
 
+/* ── orphan reconcile: a live run (finished_at SQL NULL) on a now-terminal job is
+ *    marked 'interrupted'; a still-running job's run is left untouched. Regression
+ *    test for the NULL-vs-0 predicate bug — run_create leaves finished_at NULL, and
+ *    `WHERE finished_at=0` matched NOTHING, so the reconcile silently repaired no
+ *    zombie runs. ───────────────────────────────────────────────────────────── */
+static void test_reconcile_orphaned(void) {
+   int64_t jobconv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_create_job(alice_id, "research job", 0, "detached", "notify", NULL,
+                                            1, "brief", &jobconv));
+   int64_t run = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_run_create(alice_id, jobconv, "brief", "web", &run));
+
+   /* While the job is still running, reconcile must NOT touch its run. */
+   int n = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_set_running(jobconv, 5000));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_reconcile_orphaned(9000, &n));
+   TEST_ASSERT_EQUAL_INT(0, n);
+   research_run_t r;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_run_get(run, alice_id, &r));
+   TEST_ASSERT_EQUAL_STRING("planning", r.status);
+
+   /* Boot job-scan marks the dead job terminal; reconcile must now catch the
+    * still-'planning' run (finished_at NULL) and interrupt it. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_job_set_terminal(jobconv, "interrupted", NULL, 6000));
+   n = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_reconcile_orphaned(9000, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_run_get(run, alice_id, &r));
+   TEST_ASSERT_EQUAL_STRING("interrupted", r.status);
+   TEST_ASSERT_EQUAL_INT64(9000, r.finished_at);
+
+   /* Idempotent: a second pass finds nothing now the run is terminal. */
+   n = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_reconcile_orphaned(9000, &n));
+   TEST_ASSERT_EQUAL_INT(0, n);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_run_create_get_ownership);
@@ -356,5 +396,6 @@ int main(void) {
    RUN_TEST(test_question_claims);
    RUN_TEST(test_revisions_latest_and_prune);
    RUN_TEST(test_not_found);
+   RUN_TEST(test_reconcile_orphaned);
    return UNITY_END();
 }

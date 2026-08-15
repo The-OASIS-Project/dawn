@@ -2807,13 +2807,22 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
    if (current_version < 76) {
       rc = sqlite3_exec(s_db.db, "ALTER TABLE research_questions ADD COLUMN resolution_reason TEXT",
                         NULL, NULL, &errmsg);
-      if (rc != SQLITE_OK) {
-         OLOG_INFO("auth_db: v76 migration note (resolution_reason): %s (may be normal)",
-                   errmsg ? errmsg : "ok");
-         sqlite3_free(errmsg);
-         errmsg = NULL;
+      /* Tolerate ONLY the expected duplicate-column result (fresh installs already
+       * have the column from base SCHEMA_SQL); a real error (I/O, read-only DB,
+       * missing table) must hold v76_ok false so the version bump is gated and the
+       * migration retries next boot — otherwise the schema advertises v76 while
+       * resolution_reason is absent, and every query on it fails.  Mirrors the
+       * SQLITE_OK && !duplicate-column pattern every other ALTER migration uses. */
+      bool duplicate = (errmsg && strstr(errmsg, "duplicate column"));
+      if (rc != SQLITE_OK && !duplicate) {
+         OLOG_ERROR("auth_db: v76 migration (resolution_reason) failed: %s",
+                    errmsg ? errmsg : "unknown");
+         v76_ok = false;
+      } else {
+         v76_ok = true;
       }
-      v76_ok = true;
+      sqlite3_free(errmsg);
+      errmsg = NULL;
    }
 
    /* Log migration if upgrading from an older version */

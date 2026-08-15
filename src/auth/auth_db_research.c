@@ -380,9 +380,15 @@ int research_db_reconcile_orphaned(time_t finished_at, int *count_out) {
     * still reads 'planning'/'researching' — without this the run is an
     * un-cancellable zombie the status/cancel surfaces can never clear.  Run AFTER
     * the job boot scan so the job rows are already terminal. */
+   /* finished_at is nullable with no default and run_create never sets it, so a
+    * live run's row has finished_at = SQL NULL (not 0).  `finished_at = 0` would
+    * never match it (NULL = 0 is NULL, not true), so the predicate must test IS
+    * NULL as well or the reconcile silently repairs nothing — leaving the exact
+    * planning/researching zombies this exists to clear.  The `= 0` arm stays for any
+    * legacy row that stored a literal 0. */
    const char *sql = "UPDATE research_runs SET status='interrupted', stop_reason='interrupted', "
                      "finished_at=? "
-                     "WHERE finished_at=0 AND conversation_id IN "
+                     "WHERE (finished_at IS NULL OR finished_at=0) AND conversation_id IN "
                      "(SELECT id FROM conversations WHERE job_status NOT IN ('queued','running'))";
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL) != SQLITE_OK) {
       OLOG_ERROR("research_db_reconcile_orphaned: prepare failed: %s", sqlite3_errmsg(s_db.db));
