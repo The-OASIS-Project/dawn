@@ -56,6 +56,12 @@
    "id, run_id, question, status, confidence, parent_qid, created_at, resolution_reason"
 #define RESEARCH_CLAIM_COLS \
    "id, run_id, question_id, claim, source_url, source_kind, quote, round, created_at"
+/* Report/digest projection: the only claim fields those readers consume
+ * (research_render_report uses question_id/claim/source_url; the digest gloss uses
+ * claim).  Omitting the two 2 KB text columns (quote, source_kind) skips fetching +
+ * copying ~4 KB/row of data that is never rendered — over a 256-claim report
+ * snapshot that is ~512 KB of quote alone.  Paired with res_unpack_claim_light. */
+#define RESEARCH_CLAIM_LIGHT_COLS "question_id, claim, source_url"
 
 /* =============================================================================
  * Helpers
@@ -120,6 +126,17 @@ static void res_unpack_claim(sqlite3_stmt *st, research_claim_t *c) {
    res_copy_text(st, 6, c->quote, sizeof(c->quote));
    c->round = sqlite3_column_int(st, 7);
    c->created_at = (time_t)sqlite3_column_int64(st, 8);
+}
+
+/* Unpack the RESEARCH_CLAIM_LIGHT_COLS projection — question_id/claim/source_url
+ * only.  memset zeroes the fields the projection omits (quote/source_kind/round/…)
+ * so a stack-allocated research_claim_t (the digest gloss) has no uninitialized
+ * reads even though the caller never touches those fields. */
+static void res_unpack_claim_light(sqlite3_stmt *st, research_claim_t *c) {
+   memset(c, 0, sizeof(*c));
+   c->question_id = res_col_int64_or_zero(st, 0);
+   res_copy_text(st, 1, c->claim, sizeof(c->claim));
+   res_copy_text(st, 2, c->source_url, sizeof(c->source_url));
 }
 
 /* Run a constant one-column-int UPDATE-by-id, returning SUCCESS on DONE.  @bind
@@ -755,8 +772,10 @@ int research_db_claim_list(int64_t run_id, research_claim_t *out, int max, int *
    *count_out = 0;
    AUTH_DB_LOCK_OR_FAIL();
    sqlite3_stmt *st = NULL;
+   /* Light projection: the report render uses only question_id/claim/source_url,
+    * so skip fetching + copying the quote/source_kind text columns (§efficiency). */
    int rc = sqlite3_prepare_v2(s_db.db,
-                               "SELECT " RESEARCH_CLAIM_COLS " FROM research_claims "
+                               "SELECT " RESEARCH_CLAIM_LIGHT_COLS " FROM research_claims "
                                "WHERE run_id=? ORDER BY question_id ASC, id ASC LIMIT ?",
                                -1, &st, NULL);
    if (rc != SQLITE_OK) {
@@ -767,7 +786,7 @@ int research_db_claim_list(int64_t run_id, research_claim_t *out, int max, int *
    sqlite3_bind_int(st, 2, max);
    int n = 0;
    while (n < max && sqlite3_step(st) == SQLITE_ROW) {
-      res_unpack_claim(st, &out[n]);
+      res_unpack_claim_light(st, &out[n]);
       n++;
    }
    sqlite3_finalize(st);
@@ -787,9 +806,10 @@ int research_db_question_claims(int64_t run_id,
    *count_out = 0;
    AUTH_DB_LOCK_OR_FAIL();
    sqlite3_stmt *st = NULL;
-   /* Constrains (run_id, question_id) so it seeks idx_research_claims_run. */
+   /* Constrains (run_id, question_id) so it seeks idx_research_claims_run.  Light
+    * projection: the digest gloss consumes only `claim`, so skip quote/source_kind. */
    int rc = sqlite3_prepare_v2(s_db.db,
-                               "SELECT " RESEARCH_CLAIM_COLS " FROM research_claims "
+                               "SELECT " RESEARCH_CLAIM_LIGHT_COLS " FROM research_claims "
                                "WHERE run_id=? AND question_id=? ORDER BY id ASC LIMIT ?",
                                -1, &st, NULL);
    if (rc != SQLITE_OK) {
@@ -801,7 +821,7 @@ int research_db_question_claims(int64_t run_id,
    sqlite3_bind_int(st, 3, max);
    int n = 0;
    while (n < max && sqlite3_step(st) == SQLITE_ROW) {
-      res_unpack_claim(st, &out[n]);
+      res_unpack_claim_light(st, &out[n]);
       n++;
    }
    sqlite3_finalize(st);

@@ -547,3 +547,15 @@
 .agent-event-muted::before {
    content: '\2014'; /* — */
 }
+
+/* Research ROUND header: anchors the group of claim rows beneath it. Brighter +
+ * heavier than the muted claim rows, with a filled marker and a little top space so
+ * the trail reads as grouped rounds rather than one undifferentiated list. */
+.agent-event-round {
+   color: var(--text-primary);
+   font-weight: 600;
+   margin-top: 8px;
+}
+.agent-event-round::before {
+   content: '\25B8'; /* ▸ */
+}

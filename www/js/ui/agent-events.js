@@ -67,8 +67,10 @@
       p = p || {};
       switch (kind) {
          case 'research_round':
+            // 'round' (not 'muted') so the round header is visually distinct from the
+            // claim rows it groups — see .agent-event-round in jobs.css.
             return {
-               cls: 'muted',
+               cls: 'round',
                text:
                   'Round ' +
                   (p.round || '?') +
