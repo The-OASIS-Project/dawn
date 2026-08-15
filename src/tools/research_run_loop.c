@@ -192,6 +192,9 @@ static const char RESEARCH_CRITIC_PROMPT[] =
     "- Do NOT re-arm a 'stale' (exhausted) question by repeating the same kind of search — that "
     "already failed. Do NOT invent busywork to keep going. If the covered questions answer the "
     "brief and the remaining gaps are genuinely exhausted or unimportant, STOP.\n"
+    "- Re-arm ONLY for gaps that MORE WEB RESEARCH can close. Do NOT re-arm a synthesis, summary, "
+    "comparison, or 'pull the findings together / make the final recommendation' task — the report "
+    "is written from the recorded evidence automatically, so those need no extra search round.\n"
     "- Budget is limited; be selective — at most a few gaps.\n\n"
     "Reply with ONLY a JSON object — no prose, no code fences:\n"
     "{\"decision\": \"stop\" | \"continue\", \"gaps\": [{\"question\": \"<new concrete "
@@ -513,6 +516,129 @@ static char *research_extract_summary(const char *prose) {
    return out;
 }
 
+/* Bounded slice of the ORIGINATING conversation for the commentary turn: the last few
+ * user/assistant turns of the chat the research was launched from, so the take can tie
+ * the findings back to what the user was actually doing (the JARVIS report-back, not a
+ * generic summary).  Only human-visible roles; each message capped. */
+#define RESEARCH_COMMENTARY_CTX_TURNS 8
+#define RESEARCH_COMMENTARY_MSG_CHARS 300
+
+typedef struct {
+   char role[RESEARCH_COMMENTARY_CTX_TURNS][16];
+   char text[RESEARCH_COMMENTARY_CTX_TURNS][RESEARCH_COMMENTARY_MSG_CHARS];
+   int count; /* total user/assistant rows seen; ring slot = count % TURNS */
+} commentary_ctx_t;
+
+static int commentary_collect_cb(const conversation_message_t *msg, void *ctx) {
+   commentary_ctx_t *c = ctx;
+   if (strcmp(msg->role, "user") != 0 && strcmp(msg->role, "assistant") != 0) {
+      return 0; /* skip system/tool rows — keep the human thread only */
+   }
+   int slot = c->count % RESEARCH_COMMENTARY_CTX_TURNS;
+   strncpy(c->role[slot], msg->role, sizeof(c->role[slot]) - 1);
+   c->role[slot][sizeof(c->role[slot]) - 1] = '\0';
+   const char *content = msg->content ? msg->content : "";
+   strncpy(c->text[slot], content, sizeof(c->text[slot]) - 1);
+   c->text[slot][sizeof(c->text[slot]) - 1] = '\0';
+   c->count++;
+   return 0; /* keep iterating; the ring retains the last TURNS */
+}
+
+/* Fetch the last few turns of the job's PARENT conversation.  NULL for a rootless/voice
+ * run (no parent) or on any read failure — the caller degrades to a context-less take. */
+static char *research_commentary_context(const research_run_t *run0) {
+   job_record_t rec;
+   if (conv_db_job_get(run0->conversation_id, run0->user_id, &rec) != AUTH_DB_SUCCESS ||
+       rec.parent_id <= 0) {
+      return NULL;
+   }
+   commentary_ctx_t c;
+   memset(&c, 0, sizeof(c));
+   if (conv_db_get_messages(rec.parent_id, run0->user_id, commentary_collect_cb, &c) !=
+           AUTH_DB_SUCCESS ||
+       c.count == 0) {
+      return NULL;
+   }
+   int n = c.count < RESEARCH_COMMENTARY_CTX_TURNS ? c.count : RESEARCH_COMMENTARY_CTX_TURNS;
+   int start = c.count < RESEARCH_COMMENTARY_CTX_TURNS ? 0
+                                                       : c.count % RESEARCH_COMMENTARY_CTX_TURNS;
+   size_t cap = (size_t)n * (RESEARCH_COMMENTARY_MSG_CHARS + 24) + 64;
+   char *out = malloc(cap);
+   if (!out) {
+      return NULL;
+   }
+   out[0] = '\0';
+   size_t off = 0;
+   for (int i = 0; i < n; i++) {
+      int slot = (start + i) % RESEARCH_COMMENTARY_CTX_TURNS;
+      int w = snprintf(out + off, cap - off, "%s: %s\n", c.role[slot], c.text[slot]);
+      if (w > 0 && (size_t)w < cap - off) {
+         off += (size_t)w;
+      }
+   }
+   return out;
+}
+
+/* Completion-commentary turn (§8): the JARVIS report-back.  A no-tools GENERATION turn
+ * (it writes a take; it needs no tools — same shape as synthesis, NOT a security posture:
+ * the report's safety for later tool-enabled turns is the capability mask's job, see
+ * docs/CAPABILITY_MASK_DESIGN.md).  Speaks AS the user's assistant (persona-carrying,
+ * unlike the persona-less synthesis/critic turns) and is seeded with the originating
+ * conversation so the take ties back to what the user was doing.  Returns the take
+ * (caller frees) or NULL on failure — caller falls back to the mechanical excerpt. */
+static char *research_commentary(struct session *s, const research_run_t *run0, const char *prose) {
+   const char *ai_name = g_config.general.ai_name[0] ? g_config.general.ai_name : "the assistant";
+   const char *persona = g_config.persona.description; /* may be "" */
+   char *convo = research_commentary_context(run0);
+
+   size_t sys_need = strlen(ai_name) + strlen(persona) + 900;
+   char *sysprompt = malloc(sys_need);
+   if (!sysprompt) {
+      free(convo);
+      return NULL;
+   }
+   snprintf(
+       sysprompt, sys_need,
+       "You are %s.%s%s\n\n"
+       "You just finished a research task the user asked you to run in the BACKGROUND, and you "
+       "are reporting back to them. Give your brief, direct TAKE — the bottom line, the one "
+       "thing worth flagging, and tie it to what they were actually trying to do. A few "
+       "sentences in your own voice, NOT a re-listing of the report; the full cited report is "
+       "in their notes and they can ask for detail. You have no tools — just write the take.",
+       ai_name, persona[0] ? " " : "", persona);
+
+   size_t dir_need = (convo ? strlen(convo) : 0) + strlen(run0->brief) + strlen(prose) + 512;
+   char *directive = malloc(dir_need);
+   if (!directive) {
+      free(sysprompt);
+      free(convo);
+      return NULL;
+   }
+   snprintf(
+       directive, dir_need,
+       "%s%s\nWhat they asked you to research:\n%s\n\nThe report you produced:\n%s\n\nNow give "
+       "them your take.",
+       convo ? "The conversation that led to this research:\n" : "", convo ? convo : "",
+       run0->brief, prose);
+   free(convo);
+
+   session_init_system_prompt(s, sysprompt); /* persona + report-back instructions */
+   session_set_tools_suppressed(s, true);    /* a take needs no tools */
+   text_input_dispatch_opts_t opts = {
+      .conversation_id = 0,
+      .auth_user_id = run0->user_id,
+      .skip_prompt_rebuild = true,
+   };
+   char *take = core_text_input_dispatch(s, directive, NULL, NULL, NULL, 0, &opts);
+   session_set_tools_suppressed(s, false);
+   free(directive);
+   free(sysprompt);
+   if (take != NULL) {
+      sanitize_utf8_for_json(take); /* becomes the chat completion body */
+   }
+   return take;
+}
+
 const char *research_run_execute(struct session *s,
                                  const research_run_t *run0,
                                  const research_budgets_t *b,
@@ -791,9 +917,21 @@ const char *research_run_execute(struct session *s,
    if (claim_count > 0 && !user_cancel && evidence != NULL) {
       prose = research_synthesize(s, run0, evidence, research_date);
    }
-   /* Hand a short lead back for the chat completion message (caller frees). */
+   /* Hand a lead back for the chat completion message (caller frees).  With commentary
+    * enabled, that lead is Friday's brief TAKE on the finished run (a JARVIS report-back
+    * tied to the originating conversation); otherwise a mechanical excerpt.  Fail safe:
+    * an empty/failed commentary turn falls back to the excerpt, so completion always
+    * delivers something. */
    if (out_summary) {
-      *out_summary = research_extract_summary(prose);
+      char *lead = NULL;
+      if (g_config.research.completion_commentary && prose && prose[0] && !user_cancel) {
+         lead = research_commentary(s, run0, prose);
+      }
+      if (lead == NULL || lead[0] == '\0') {
+         free(lead);
+         lead = research_extract_summary(prose);
+      }
+      *out_summary = lead;
    }
 
    char *report = research_assemble_report(prose, evidence, research_date);

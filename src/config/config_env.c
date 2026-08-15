@@ -1821,6 +1821,8 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_int(config->research.stale_rounds));
    json_object_object_add(research, "critic_max_rearm",
                           json_object_new_int(config->research.critic_max_rearm));
+   json_object_object_add(research, "completion_commentary",
+                          json_object_new_boolean(config->research.completion_commentary));
    json_object_object_add(research, "capture_revisions",
                           json_object_new_boolean(config->research.capture_revisions));
    json_object_object_add(root, "research", research);
@@ -2706,6 +2708,8 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "plan_freeze_round = %d\n", config->research.plan_freeze_round);
    fprintf(fp, "stale_rounds = %d\n", config->research.stale_rounds);
    fprintf(fp, "critic_max_rearm = %d\n", config->research.critic_max_rearm);
+   fprintf(fp, "completion_commentary = %s\n",
+           config->research.completion_commentary ? "true" : "false");
    fprintf(fp, "capture_revisions = %s\n", config->research.capture_revisions ? "true" : "false");
 
    /* [mcp] + [[mcp.server]] (coding harness) — round-trips so a settings save

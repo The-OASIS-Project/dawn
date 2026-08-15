@@ -1839,6 +1839,7 @@ static void parse_research(toml_table_t *table, research_config_t *config) {
                                              "plan_freeze_round",
                                              "stale_rounds",
                                              "critic_max_rearm",
+                                             "completion_commentary",
                                              "capture_revisions",
                                              NULL };
    warn_unknown_keys(table, "research", known_keys);
@@ -1853,6 +1854,7 @@ static void parse_research(toml_table_t *table, research_config_t *config) {
    PARSE_INT(table, "plan_freeze_round", config->plan_freeze_round);
    PARSE_INT(table, "stale_rounds", config->stale_rounds);
    PARSE_INT(table, "critic_max_rearm", config->critic_max_rearm);
+   PARSE_BOOL(table, "completion_commentary", config->completion_commentary);
    PARSE_BOOL(table, "capture_revisions", config->capture_revisions);
 
    config_clamp_research(config);

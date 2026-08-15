@@ -2421,6 +2421,13 @@
                default: 2,
                advanced: true,
             },
+            completion_commentary: {
+               type: 'boolean',
+               label: 'Assistant Take On Completion',
+               hint: 'When a research run finishes, the assistant writes a brief take on the results as the completion message (tied to the conversation that requested it), instead of a mechanical report excerpt.',
+               default: true,
+               advanced: true,
+            },
          },
       },
       calendar: {

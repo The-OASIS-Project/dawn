@@ -988,6 +988,9 @@ typedef struct {
                              unanswerable (§6.3, P1 Phase 2); 0 off */
    int critic_max_rearm;  /* Times the completeness critic may re-arm at stop-eligibility
                              (§6 item 4); 0 disables the critic */
+   bool completion_commentary; /* On completion, Friday writes a brief take on the finished run
+                                  (delivered as the chat completion lead) instead of a mechanical
+                                  report excerpt (§8); default on */
    /* Parsed + round-tripped but NOT yet enforced (kept out of the WebUI panel per
     * CONFIGURATION_GUIDE — a control that silently does nothing is worse than none). */
    bool capture_revisions; /* Debug: persist per-round report snapshots */

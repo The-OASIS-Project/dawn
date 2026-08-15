@@ -1065,6 +1065,11 @@
                                      #   fresh-context completeness critic may re-open it
                                      #   to chase an important gap from a NEW angle, up to
                                      #   this many times. 0 disables the critic. 0-10.
+# completion_commentary = true       # On completion, the assistant writes a brief TAKE on
+                                     #   the finished run (tied to the conversation that
+                                     #   requested it) as the chat completion message,
+                                     #   instead of a mechanical report excerpt. false =
+                                     #   fall back to the plain excerpt.
 #
 # Parsed and round-tripped, but NOT yet enforced — reserved for later phases.
 # Setting them has no effect yet:
