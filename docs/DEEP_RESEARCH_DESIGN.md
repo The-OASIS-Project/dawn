@@ -50,18 +50,20 @@ whitelist fails closed).
   (`type: 'boolean'`→`'checkbox'`, which had been rendering as an error), and the `jobs.css` trail contrast
   comment (recomputed for the actual `--bg-secondary` surface).
 
+**Shipped as an immediate follow-up (2026-08-15):** a light claim projection
+(`RESEARCH_CLAIM_LIGHT_COLS` + `res_unpack_claim_light`) so the report/digest readers stop fetching the
+unused `quote`/`source_kind` columns (was ~512 KB of `quote` over-read per report snapshot); and a distinct
+`research_round` marker glyph (`.agent-event-round`) so a round header anchors the claims beneath it.
+
 **Deferred (tracked in TODO.md "Deep Research full-review (2026-08-15)"), each with a trigger:**
 
 - `research_db_question_coverage` and its count siblings use ad-hoc `prepare/finalize` (not cached into
   `s_db.stmt_*` like `auth_db_jobs.c`), compounding the already-deferred per-round coverage `COUNT(DISTINCT)`
   N+1. Trigger: per-run question count → ~30, or concurrent runs. Cold behind LLM latency at P0 scale.
-- Claim readers pull the unused 2 KB `quote` column into a ~6.4 KB row struct; a report-specific projection
-  would trim it. Fold in when `auth_db_research.c` is next touched.
 - `llm_tools.c` is over the 2,500-line hard limit (+47 here, for the allowlist gate that correctly belongs
   there) — a size-trajectory row, no code move.
 - `jobs.js` crossed the 1,000-line JS soft limit; the research-event seam folds into the tracked jobs.js
-  split. The research trail rows lack `role=list`/group semantics (folds into the tracked AT work), and
-  `research_round` vs `research_claim` share a glyph (optional visual polish).
+  split. The research trail rows lack `role=list`/group semantics (folds into the tracked AT work).
 
 ## Where this stands (2026-08-13)
 
