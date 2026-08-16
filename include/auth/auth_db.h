@@ -854,6 +854,18 @@ int satellite_db_ensure_local_pseudo(void);
 bool satellite_local_speaker_plays_for_user(int event_user_id);
 
 /**
+ * @brief True ONLY when the local pseudo-satellite speaker is enabled AND
+ *        explicitly assigned to @p user_id.
+ *
+ * Stricter than satellite_local_speaker_plays_for_user(), which returns true for
+ * the UNASSIGNED default (plays for everyone).  Use this to gate content that is
+ * private to one user (e.g. a deep-research brief spoken at completion) so it is
+ * only voiced when the operator has bound the speaker to that user — never on the
+ * shared/unassigned default.
+ */
+bool satellite_local_speaker_is_assigned_to(int user_id);
+
+/**
  * @brief Get satellite mapping by UUID
  *
  * @param uuid Satellite UUID (36 chars)
@@ -1204,6 +1216,7 @@ int conv_db_create_continuation(int user_id,
 #define JOB_STATUS_MAX 16      /**< "interrupted" is the longest status */
 #define JOB_SPAWN_MODE_MAX 16  /**< "detached" (v1) */
 #define JOB_ON_COMPLETE_MAX 24 /**< "reinvoke_parent" (Phase 3) */
+#define JOB_KIND_MAX 16        /**< "research" discriminator; "" = ordinary job */
 #define JOB_DELIVER_TO_MAX 64  /**< messaging channel display_name */
 #define JOB_ERROR_MAX 256      /**< truncated failure reason */
 
@@ -1226,9 +1239,13 @@ typedef struct {
    time_t started_at;
    time_t finished_at;
    time_t created_at;
-   char origin[32]; /**< conversations.origin — for a job, the spawn surface
-                     *   ("voice"/"webui"/"messaging"); gates voice completion
-                     *   delivery.  Legacy job rows (pre-repurpose) read "job". */
+   char origin[32];             /**< conversations.origin — for a job, the spawn surface
+                                 *   ("voice"/"webui"/"messaging"); gates voice completion
+                                 *   delivery.  Legacy job rows (pre-repurpose) read "job". */
+   char job_kind[JOB_KIND_MAX]; /**< conversations.job_kind — "research" marks a
+                                 *   deep-research run; "" = ordinary background job.
+                                 *   Used to keep a private research brief off a
+                                 *   shared local speaker at completion. */
 } job_record_t;
 
 /**

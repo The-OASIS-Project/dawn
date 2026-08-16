@@ -314,6 +314,14 @@ int scheduler_emit_alert(int user_id,
    return atomic_load(&g_emit_alert_rc);
 }
 
+/* Local speaker is never explicitly assigned in the test harness — the voice
+ * completion path uses this only to decide whether a research job's title may be
+ * spoken; returning false exercises the generic-notice branch. */
+bool satellite_local_speaker_is_assigned_to(int user_id) {
+   (void)user_id;
+   return false;
+}
+
 /* Wait until the delivery thread has entered the send at least @n times. */
 static void stub_wait_for_emit_calls(int n) {
    for (int i = 0; i < 500 && atomic_load(&g_emit_alert_calls) < n; i++) {

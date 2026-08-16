@@ -78,6 +78,7 @@ static void job_unpack_row(sqlite3_stmt *st, job_record_t *r) {
    r->finished_at = (time_t)sqlite3_column_int64(st, 13);
    r->created_at = (time_t)sqlite3_column_int64(st, 14);
    job_copy_text(st, 15, r->origin, sizeof(r->origin));
+   job_copy_text(st, 16, r->job_kind, sizeof(r->job_kind)); /* "" for NULL/ordinary jobs */
 }
 
 /* JOB_SELECT_COLS lives in auth_db_internal.h so the cached prepared statements

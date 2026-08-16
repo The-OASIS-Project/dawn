@@ -1532,6 +1532,15 @@ int url_fetch_content_with_base(const char *url,
 #else
       curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, (long)(CURLPROTO_HTTP | CURLPROTO_HTTPS));
 #endif
+      /* Force a DIRECT connection: the open-socket guard validates the peer curl
+       * connects to, but libcurl honors http_proxy/https_proxy/all_proxy env vars
+       * by default — through a proxy the guard would see only the (public) proxy IP
+       * while the proxy itself resolves + follows the attacker-controlled target and
+       * redirects into private/metadata space, defeating the per-hop check entirely.
+       * An empty proxy string disables all proxy use (incl. the env vars). DAWN's
+       * web fetch has no proxy config; a deployment that needs egress via a proxy
+       * would require an SSRF-enforcing proxy, which is a separate feature. */
+      curl_easy_setopt(curl, CURLOPT_PROXY, "");
       curl_easy_setopt(curl, CURLOPT_OPENSOCKETFUNCTION, ssrf_guard_opensocket_cb);
       curl_easy_setopt(curl, CURLOPT_OPENSOCKETDATA, &ssrf_ctx);
 

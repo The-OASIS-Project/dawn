@@ -1220,9 +1220,12 @@ void jobs_monitor_tick(time_t now) {
           * plays for EVERYONE while the local pseudo-satellite is unassigned (the
           * default) — so on a multi-user box this speaks one user's job title to
           * whoever is present, exactly as scheduler reminders/timers already do.
-          * Only the title (the owner's own goal summary) is spoken, never results.
-          * Single-user Jetson is unaffected; the real fix rides the presence-based
-          * routing work (see TODO / project_local_speaker_satellite). */
+          * For an ORDINARY job that title is the owner's own goal summary (and
+          * results are never spoken), so it stays as-is. A RESEARCH job's title is
+          * derived from the user's brief — a potentially private question — so on a
+          * shared (unassigned) speaker it is replaced with a generic notice; the
+          * full title is only spoken when the speaker is EXPLICITLY assigned to the
+          * owner. The durable browser toast above always carries the real title. */
          if (strcmp(rows[i].origin, "voice") == 0) {
             if (notify_items == NULL) {
                notify_items = calloc((size_t)n, sizeof(job_notify_t));
@@ -1233,7 +1236,13 @@ void jobs_monitor_tick(time_t now) {
                it->user_id = rows[i].user_id;
                it->deliver_to[0] = '\0'; /* local voice, no channel */
                it->speak = true;
-               snprintf(it->text, sizeof(it->text), "%s", text);
+               bool research = (strcmp(rows[i].job_kind, "research") == 0);
+               if (research && !satellite_local_speaker_is_assigned_to(rows[i].user_id)) {
+                  snprintf(it->text, sizeof(it->text),
+                           "A research task finished. Ask me for the result.");
+               } else {
+                  snprintf(it->text, sizeof(it->text), "%s", text);
+               }
             }
          }
       }

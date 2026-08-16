@@ -311,6 +311,23 @@ int satellite_db_ensure_local_pseudo(void) {
    return rc;
 }
 
+bool satellite_local_speaker_is_assigned_to(int user_id) {
+   if (user_id <= 0) {
+      return false;
+   }
+   satellite_mapping_t m;
+   if (satellite_db_get(LOCAL_PSEUDO_SATELLITE_UUID, &m) != AUTH_DB_SUCCESS) {
+      /* No mapping / DB error: treat as NOT explicitly assigned.  Unlike
+       * plays_for_user (which fails OPEN so a needed alert is still heard), this
+       * gates PRIVATE content — failing closed keeps it off a speaker we cannot
+       * confirm is bound to this user. */
+      return false;
+   }
+   /* Enabled AND bound to exactly this user.  The unassigned default (m.user_id
+    * <= 0, "plays for all") is deliberately NOT a match. */
+   return m.enabled && m.user_id > 0 && m.user_id == user_id;
+}
+
 bool satellite_local_speaker_plays_for_user(int event_user_id) {
    satellite_mapping_t m;
    int rc = satellite_db_get(LOCAL_PSEUDO_SATELLITE_UUID, &m);
