@@ -1215,17 +1215,17 @@ void jobs_monitor_tick(time_t now) {
           * voice too but have their own speaker — routing there is future
           * presence-based work, so they stay toast-only.
           *
-          * MULTI-USER CAVEAT: scheduler_emit_alert(speak=true) routes to the
-          * shared local speaker via satellite_local_speaker_plays_for_user(), which
-          * plays for EVERYONE while the local pseudo-satellite is unassigned (the
-          * default) — so on a multi-user box this speaks one user's job title to
-          * whoever is present, exactly as scheduler reminders/timers already do.
-          * For an ORDINARY job that title is the owner's own goal summary (and
-          * results are never spoken), so it stays as-is. A RESEARCH job's title is
-          * derived from the user's brief — a potentially private question — so on a
-          * shared (unassigned) speaker it is replaced with a generic notice; the
-          * full title is only spoken when the speaker is EXPLICITLY assigned to the
-          * owner. The durable browser toast above always carries the real title. */
+          * PRIVACY: this is the daemon's local speaker, which plays for EVERYONE
+          * while the local pseudo-satellite is unassigned (the default) — so on a
+          * multi-user box the spoken title reaches whoever is present. A job's title
+          * is the owner's own goal/brief (a research title is derived from the user's
+          * brief — a potentially private question), so the TITLE is only spoken when
+          * the speaker is EXPLICITLY assigned to the owner; otherwise a generic notice
+          * is spoken (kind-specific wording, but no title). The durable browser toast
+          * above always carries the real title to the owner's own session.
+          * (Only the LOCAL speaker is affected: satellites are toast-only here — this
+          * is the origin=="voice" / SCHED_SOURCE_LOCAL path. Scheduler reminders are a
+          * separate, user-scoped routing path.) */
          if (strcmp(rows[i].origin, "voice") == 0) {
             if (notify_items == NULL) {
                notify_items = calloc((size_t)n, sizeof(job_notify_t));
@@ -1236,12 +1236,13 @@ void jobs_monitor_tick(time_t now) {
                it->user_id = rows[i].user_id;
                it->deliver_to[0] = '\0'; /* local voice, no channel */
                it->speak = true;
-               bool research = (strcmp(rows[i].job_kind, "research") == 0);
-               if (research && !satellite_local_speaker_is_assigned_to(rows[i].user_id)) {
-                  snprintf(it->text, sizeof(it->text),
-                           "A research task finished. Ask me for the result.");
+               if (satellite_local_speaker_is_assigned_to(rows[i].user_id)) {
+                  snprintf(it->text, sizeof(it->text), "%s",
+                           text); /* owner's speaker: full title */
                } else {
-                  snprintf(it->text, sizeof(it->text), "%s", text);
+                  bool research = (strcmp(rows[i].job_kind, "research") == 0);
+                  snprintf(it->text, sizeof(it->text), "%s task finished. Ask me for the result.",
+                           research ? "A research" : "A background");
                }
             }
          }
