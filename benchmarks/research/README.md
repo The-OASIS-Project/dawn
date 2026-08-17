@@ -21,6 +21,20 @@ an LLM + web search, and "is this report good?" is a judgment call, not a metric
   pulled straight from `auth.db`: budgets (rounds / tool calls / input tokens /
   wall-clock), coverage counts, claim + distinct-source counts, and the rendered
   report. Never mutates the DB.
+- **`run_benchmark.py`** — the **unattended driver** (§16). Drives runs headlessly
+  through the `dawn-admin research` verb: start → poll `research status` to a
+  terminal state (timeout → cancel) → extract the report + per-claim evidence from
+  `auth.db` (read-only) → write `<out>/<task_id>.json`. Resumable (skips existing
+  artifacts). `--extract-only <run_id>` re-extracts an existing run with no spawn.
+- **`score_exact_match.py`** — deterministic short-answer scorer (BrowseComp/GAIA
+  floor): checks whether a task's `gold` string surfaced in the report/claims. No
+  judge/API key.
+- **`score_deepresearch_bench.py`** — RACE/FACT adapter: deterministic citation +
+  coverage stats (the structural health FACT builds on — DAWN's claims already
+  carry `source_url` + a verbatim `quote`), and writes per-artifact judge-input
+  files for the external LLM-judge step.
+- **`tasks/`** — task sets for the driver (same `{queries:[{id,brief,…}]}` shape as
+  `smoke_queries.json`; add `gold` for exact-match, `reference` for RACE).
 
 ## Running the smoke
 
@@ -47,6 +61,51 @@ an LLM + web search, and "is this report good?" is a judgment call, not a metric
    metrics to diff later. (Both are run outputs — keep them out of git, like the
    other `benchmarks/bench_*.json`.)
 
+## Automated benchmark run (the driver)
+
+Instead of submitting each brief by hand, drive them headlessly. The driver spawns
+runs over the SO_PEERCRED-gated admin socket, bypassing the conversational
+confirm — the operator is the authorization (§16.4). Runs are **web-only**.
+
+1. **Enable the feature** (as above) and make sure the daemon is running the build
+   with the `research` admin verb.
+2. **Use a dedicated eval account**, not the primary user — a benchmark brief is
+   third-party text, so its conversation/report shouldn't land in your own space.
+   `--user` is required and validated against a real account.
+3. **Run the driver:**
+
+   ```bash
+   # from the repo root:
+   benchmarks/research/run_benchmark.py \
+       --tasks benchmarks/research/smoke_queries.json --user <eval_id> \
+       --admin ./build-debug/dawn-admin/dawn-admin \
+       --out benchmarks/research/results --timeout 3600
+   ```
+
+   Each task: `dawn-admin research start` → poll → extract → `results/<id>.json`
+   (report + claims + coverage). Local-model runs are slow (tens of minutes each);
+   set `--timeout` above the expected wall-clock so a healthy run isn't cancelled.
+   Run **local-first** (free-but-slow) for a baseline; a cloud pass on a subset is
+   optional for a headline.
+4. **Score offline** (never re-runs research):
+
+   ```bash
+   ./score_deepresearch_bench.py results/ --judge-out results/judge_inputs   # stats + judge prep
+   ./score_exact_match.py results/                                           # if tasks carry `gold`
+   ```
+
+   The LLM-judge (RACE quality + FACT citation-support) needs a judge model + key
+   and the DeepResearch Bench prompts
+   ([repo](https://github.com/Ayanami0730/deep_research_bench)); point it at the
+   `judge_inputs/` files. **Report the stop-reason distribution alongside the
+   score** — a good score reached mostly on `token_budget` fuses is a worse result
+   than the same score on `coverage`/`concluded` (controller health is half of what
+   the eval measures), and pin the `[research]` budgets/model the runs used.
+
+**Manual `dawn-admin` use** (spot checks): `research start --user N --brief "…"` or
+`--brief-file <path>`; `research status --user N <run_id>`; `research cancel --user
+N <run_id>`.
+
 ## What to look at (the quality dimensions)
 
 The metrics are a proxy; the **report text is the real signal**. Read each report
@@ -69,9 +128,11 @@ against its `should_cover` list and watch for:
 
 ## Notes / limits (P0)
 
-- No automated driver and no gold-answer grading — deliberate for the skeleton.
-  A WS/text driver that submits the briefs, and an LLM-judge grader against
-  `should_cover`, are natural P1 additions.
+- The **automated driver** (`run_benchmark.py`) + scorers ship the "natural P1
+  addition" the skeleton anticipated. The conversational path (`capture_baseline.py`
+  + hand-submitted briefs) still works and is fine for a quick one-off; the driver
+  is for running a *set* unattended. The RACE/FACT LLM-judge itself still needs an
+  external judge model + key (the adapter preps its inputs).
 - `capture_baseline.py` reports the latest report **revision** (the durable audit
   copy). The user-facing report also lands as a note (`report_doc_id`); the
   revision markdown is identical at P0.

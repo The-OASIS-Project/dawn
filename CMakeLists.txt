@@ -877,6 +877,7 @@ if(ENABLE_AUTH)
         src/auth/admin_socket_messaging.c
         src/auth/admin_socket_music.c
         src/auth/admin_socket_ota.c
+        src/auth/admin_socket_research.c
         src/auth/auth_db_session.c
         src/auth/auth_db_rate_limit.c
         src/auth/auth_db_audit.c

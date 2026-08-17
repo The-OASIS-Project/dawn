@@ -1808,6 +1808,74 @@ admin_resp_code_t admin_client_messaging_link_attempts(int fd,
  * OTA updates (dawn-admin ota *)
  * ============================================================================= */
 
+/* Little-endian writers — the research wire is fixed LE regardless of host. */
+static void wr_i32le(uint8_t *p, int32_t v) {
+   uint32_t u = (uint32_t)v;
+   p[0] = (uint8_t)u;
+   p[1] = (uint8_t)(u >> 8);
+   p[2] = (uint8_t)(u >> 16);
+   p[3] = (uint8_t)(u >> 24);
+}
+static void wr_i64le(uint8_t *p, int64_t v) {
+   uint64_t u = (uint64_t)v;
+   for (int i = 0; i < 8; i++) {
+      p[i] = (uint8_t)(u >> (8 * i));
+   }
+}
+
+admin_resp_code_t admin_client_research_start(int fd,
+                                              int user_id,
+                                              const char *brief,
+                                              char *response,
+                                              size_t resp_len) {
+   if (!brief || !brief[0]) {
+      return ADMIN_RESP_FAILURE;
+   }
+   size_t blen = strlen(brief);
+   /* Wire: [user_id i32][brief].  Cap at the daemon's semantic limit (mirrored)
+    * so an oversize brief fails locally with the true limit, not a round-trip; it
+    * also stays within the transport budget (RESEARCH_BRIEF_MAX + 4 < payload cap). */
+   if (blen >= DAWN_ADMIN_RESEARCH_BRIEF_MAX) {
+      return ADMIN_RESP_FAILURE;
+   }
+   uint8_t buf[ADMIN_MSG_MAX_PAYLOAD];
+   wr_i32le(buf, (int32_t)user_id);
+   memcpy(buf + 4, brief, blen);
+   uint16_t total = (uint16_t)(4 + blen);
+   if (send_message(fd, ADMIN_MSG_RESEARCH_START, (const char *)buf, total) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
+admin_resp_code_t admin_client_research_status(int fd,
+                                               int user_id,
+                                               int64_t run_id,
+                                               char *response,
+                                               size_t resp_len) {
+   uint8_t buf[12];
+   wr_i32le(buf, (int32_t)user_id);
+   wr_i64le(buf + 4, run_id);
+   if (send_message(fd, ADMIN_MSG_RESEARCH_STATUS, (const char *)buf, 12) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
+admin_resp_code_t admin_client_research_cancel(int fd,
+                                               int user_id,
+                                               int64_t run_id,
+                                               char *response,
+                                               size_t resp_len) {
+   uint8_t buf[12];
+   wr_i32le(buf, (int32_t)user_id);
+   wr_i64le(buf + 4, run_id);
+   if (send_message(fd, ADMIN_MSG_RESEARCH_CANCEL, (const char *)buf, 12) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
 admin_resp_code_t admin_client_ota_list(int fd, char *response, size_t resp_len) {
    if (send_message(fd, ADMIN_MSG_OTA_LIST, NULL, 0) != 0) {
       return ADMIN_RESP_SERVICE_ERROR;

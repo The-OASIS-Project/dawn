@@ -2148,13 +2148,20 @@ static int handle_client(int client_fd) {
       return 1;
    }
 
-   /* Read payload if present */
+   /* Read payload if present.  read() on a stream socket may return a short
+    * count, so loop until all payload_len bytes arrive — a single read was safe
+    * only while payloads were tiny (<=256 B, single-segment); the research brief
+    * (up to ~2.5 KB) is the first payload large enough to split across reads. */
    char payload[ADMIN_MSG_MAX_PAYLOAD + 1] = { 0 };
    if (header.payload_len > 0) {
-      n = read(client_fd, payload, header.payload_len);
-      if (n != header.payload_len) {
-         OLOG_WARNING("Failed to read payload: got %zd, expected %u", n, header.payload_len);
-         return 1;
+      size_t got = 0;
+      while (got < header.payload_len) {
+         ssize_t r = read(client_fd, payload + got, (size_t)header.payload_len - got);
+         if (r <= 0) { /* EOF or error before the full payload arrived */
+            OLOG_WARNING("Failed to read payload: got %zu, expected %u", got, header.payload_len);
+            return 1;
+         }
+         got += (size_t)r;
       }
    }
 
@@ -2312,6 +2319,16 @@ static int handle_client(int client_fd) {
          return handle_ota_rollout_status_cmd(client_fd);
       case ADMIN_MSG_OTA_ROLLOUT_ABORT:
          return handle_ota_rollout_abort_cmd(client_fd);
+
+#ifdef DAWN_ENABLE_DEEP_RESEARCH_TOOL
+      /* Deep-research operator commands (headless benchmark spawn path, §16). */
+      case ADMIN_MSG_RESEARCH_START:
+         return handle_research_start_cmd(client_fd, payload, header.payload_len);
+      case ADMIN_MSG_RESEARCH_STATUS:
+         return handle_research_status_cmd(client_fd, payload, header.payload_len);
+      case ADMIN_MSG_RESEARCH_CANCEL:
+         return handle_research_cancel_cmd(client_fd, payload, header.payload_len);
+#endif
 
 #ifdef DAWN_ENABLE_MCP_BRIDGE_TOOL
       case ADMIN_MSG_MCP_LIST:

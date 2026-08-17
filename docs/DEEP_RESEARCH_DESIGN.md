@@ -270,6 +270,7 @@ shipped code) and is kept in sync as the feature lands; treat it as the source o
 - [§13. Decisions (locked)](#13-decisions-locked)
 - [§14. Open items & known gaps](#14-open-items--known-gaps)
 - [§15. Implementation kickoff (P0 build order)](#15-implementation-kickoff-p0-build-order)
+- [§16. Evaluation harness & benchmark driver](#16-evaluation-harness--benchmark-driver-p1-eval--planned)
 
 ---
 
@@ -981,7 +982,7 @@ hard-budget + all-closed stopping.
 - Fresh-context completeness critic with bounded re-arm + UNANSWERABLE verdict.
 - Effort-scaling (initial question count vs budget); clarification-at-spawn + non-blocking plan visibility.
 - Ledger-resume of a research run (upgrade from P0's block).
-- Eval harness grown to 10–20 + LLM-judge rubric.
+- Eval harness grown to 10–20 + LLM-judge rubric → mechanized as the **unattended benchmark driver** ([§16](#16-evaluation-harness--benchmark-driver-p1-eval--planned)): a headless admin spawn path + Python orchestrator that runs external report-quality benchmarks (DeepResearch Bench primary) instead of hand-submitted smoke queries.
 
 ### Phase 2 — cost & speed (○)
 
@@ -1152,3 +1153,208 @@ Format clean · build 0-warning · CI green (incl. `test_config_roundtrip` with 
 `deep_research start` runs a bounded multi-round loop end-to-end and writes a cited report to notes · the run
 is cancellable at a round boundary without killing peers. Then P1 ([§6](#6-the-continuestop-controller)) is the
 controller that decides great-vs-mediocre.
+
+---
+
+## 16. Evaluation harness & benchmark driver (P1 eval — planned)
+
+**Status: ✅ shipped + live-validated (run 16), 3-lens reviewed (arch/security/efficiency, 0 blocking).** The
+driver, the `research` admin verb (daemon + `dawn-admin` client), and the two scorers are built and validated
+end-to-end; the one remaining piece is the RACE/FACT **LLM-judge** integration, which needs an external judge
+model + key (`score_deepresearch_bench.py` preps its inputs). This is the concrete build-out of the P1 "eval
+harness grown to 10–20 + LLM-judge rubric" line ([§12](#12-phased-plan)) — mechanized far enough to run
+*external* report-quality benchmarks, not just hand-picked smoke queries.
+
+### 16.1 Why — the unmeasured-quality gap
+
+The architecture is sound and the security posture is strong, but the **report quality claim is currently
+unfalsifiable**: evidence is ~9 field runs on self-chosen briefs and zero standard-benchmark numbers. The
+design's own named mediocrity risk ([§14](#14-open-items--known-gaps)) is digest/synthesis compression quality,
+and it is exactly the thing smoke-eyeballing cannot measure. The competitive read
+([`DEEP_RESEARCH_COMPARISON.md`](DEEP_RESEARCH_COMPARISON.md)) reaches the same conclusion from the outside: DAWN
+sits ahead of the published field on evidence-retention + deterministic stopping, but "how good are the reports"
+has no number under it. This section closes that.
+
+### 16.2 The gap today
+
+`benchmarks/research/` already has the **output** half: `capture_baseline.py` (read-only) snapshots executed
+runs out of `auth.db` — budgets, coverage-ledger counts, claim/distinct-source counts, and the rendered report
+— and `smoke_queries.json` holds the hand-picked briefs. What is missing is the **input** half and the
+**scorer**: there is no way to submit a brief unattended (runs are hand-submitted *conversationally* through
+Friday, which is non-deterministic — the LLM may not even route to `deep_research`), and nothing scores the
+output. So a benchmark of N tasks cannot run without a human typing N briefs and eyeballing N reports.
+
+### 16.3 Architecture — three parts, minimal daemon surface
+
+The design keeps almost all new code in the read-only Python layer and adds a small privileged surface to the
+daemon: one admin verb with three subcommands, plus **one refactor** (below) that is the actual load-bearing
+work — not the subcommands.
+
+```
+ (1) SPAWN  dawn-admin research start --brief … [--user]     →  run_id            [daemon: verb → shared spawn fn]
+ (2) POLL   dawn-admin research status <run_id>  → status/…  →  loop until terminal    [daemon: research_db_* reads]
+ (2b) CANCEL dawn-admin research cancel <run_id>             →  timeout/wedge recovery [daemon: job_manager_cancel]
+ (3) EXTRACT+SCORE   capture_baseline.py + a per-claim read  →  report + claim/URL pairs  [Python only, read-only]
+                     → per-benchmark scorer (RACE/FACT | exact-match)                            [Python only]
+```
+
+**The real daemon touchpoint is a spawn-path extraction, not the verb (arch HIGH-1).** The existing spawn entry
+`handle_start()` (`deep_research_tool.c:~96–225`) is **static, `confirm`-gated, and returns human prose**, so the
+admin verb *cannot* call it — and it must **not** re-implement the sequence, because that sequence carries the
+feature's most safety-critical ordering: the search-backend availability refusal, the `[jobs]` capacity gate,
+`conv_db_create_job_ex`, the **fail-closed `conv_db_job_set_kind("research")`** (the stamp that blocks
+plain-worker resume, [§3](#3-data-model)/[§5](#5-lifecycle)), `research_db_run_create` **before** the spawn, the
+`job_update_emit` ordering, then `research_worker_spawn(user_id, conv_id)` (which reads brief/mode from the run
+row it does *not* create). Duplicating that in the admin module silently breaks the resume invariant.
+
+So P0 of this feature extracts the post-confirm body into a shared non-static
+**`research_spawn_run(user_id, parent_conv, brief, mode, deliver_to, &run_id, &conv_id, &err)`**, called by
+**both** `handle_start` (after its confirm gate) and the admin handler. Only then is "changes nothing about the
+loop / allowlist / gates" literally true rather than aspirational. `memory_filter_check(brief)` lives inside the
+shared function, so it fires on both paths by construction.
+
+**The `research` admin verb** (`src/auth/admin_socket_research.c` — GPL header per CLAUDE.md — mirroring the
+existing `admin_socket_{messaging,music,ota,code_project}.c` modules: an `ADMIN_MSG_RESEARCH_*` enum in
+`admin_socket.h`, a handler module, client parse in `dawn-admin/main.c`, wire codec in `socket_client.c`).
+Subcommands:
+
+| Command | Effect |
+|---|---|
+| `research start --brief "<text>" [--user <id>]` | Calls the shared `research_spawn_run` (**`mode=web` only — see §16.4**). Prints `run_id` + `conv_id`. **Non-blocking** (returns immediately; the detached worker runs the loop). |
+| `research status <run_id>` | Machine-readable read model via **`research_db_run_get(run_id, user_id, …)` + `research_db_question_list`** (owner-scoped, `AUTH_DB_FORBIDDEN` on mismatch): status, stop_reason, rounds, input_tokens, open/answered/unanswerable counts, `report_doc_id`. Deliberately **reuses the `research_db_*` reads, not `handle_status`** — the tool's `handle_status` applies `memory_filter_check_injection_commands` because its output re-enters an LLM session; the Python consumer is not a session and needs no gate. |
+| `research cancel <run_id>` | Wraps `job_manager_cancel_or_retire(conv_id, user_id, …)` (`job_manager.h`, the same primitive the tool's `handle_cancel` uses). The driver's timeout→cancel path (below) needs this — the tool `cancel` action ([§7](#7-tools)) is unreachable from the socket. |
+
+**(2) Completion** is client-side polling of `research status` until `status ∈ {done, failed, cancelled}`. The
+daemon stays non-blocking (no socket held open for a multi-minute run); the Python driver owns the wait loop + a
+per-run wall-clock timeout that fires `research cancel` on a wedge. A per-run timeout is required in an
+unattended 100-run batch — the `[jobs]` runtime reap is not a substitute (it isn't driver-timed and a wedged run
+holds a `[jobs]` slot until it fires). **Spawn rate itself has no verb-level limiter** — it is bounded by the
+`[jobs]` capacity caps ([§10](#10-ownership-authorization-resource-limits-locked).2, checked inside the shared
+spawn) plus the harness being serial by default ([§16.6](#166-the-python-harness)); a future non-serial harness
+must rely on the `[jobs]` caps as the only fuse.
+
+**(3) Extraction + scoring is Python-only, read-only, off the daemon.** `capture_baseline.py` already reads the
+final report — from the **final `research_report_revisions` row** (always written unconditionally at synthesis,
+`research_run_loop.c:~959`; `capture_revisions` gates only *per-round* snapshots, so a benchmark run needs **no**
+config change) — but today it reads claims only as **aggregate counts**. The per-claim
+`{claim, source_url, quote}` projection the FACT citation scorer needs is a **new (trivial) read-only query**
+(`SELECT claim, source_url, quote FROM research_claims WHERE run_id=?`) — on the correct side of the seam (no
+daemon change), but net-new, not existing. DAWN's ledger already holds this structured provenance, which is why
+FACT can be fed it directly rather than re-extracting citations from prose.
+
+**Thread invariant (arch LOW).** The whole spawn sequence executes on the **admin-socket thread** — a new caller
+thread over `job_manager_capacity` / `job_update_emit` / `research_worker_spawn`. These are thread-safe there
+(the job-manager registry-tier locks are released before callouts, per ARCHITECTURE's lock hierarchy) and
+`research_worker_spawn` detaches its own pthread; the doc asserts this explicitly since it introduces a new
+thread of control over the job manager.
+
+### 16.4 The confirmation-bypass — deliberate, operator-authorized (security-load-bearing)
+
+The conversational spawn is confirmation-gated ([§7a](#7a-invocation-routing--confirmation), decision #17):
+Friday proposes, the user confirms, and Friday **never** spawns autonomously. The admin driver **bypasses that
+gate** — and that is correct, not a hole (confirmed by security review against the socket's real trust model):
+
+- The **admin Unix socket is a hard local operator boundary.** It is `AF_UNIX` **only** (no TCP listener
+  anywhere in `admin_socket*.c`), abstract-namespace, and every connection is gated by
+  `validate_peer_credentials()` (`admin_socket.c:~472`) via `SO_PEERCRED` — accepting only root, the daemon uid,
+  or a member of the daemon's group — *before* dispatch. The operational sibling verbs (music, OTA, memory
+  re-extract) run on peer-cred alone, so a peer-cred-gated `research` verb is consistent with precedent, not a
+  weakening. An operator invoking it *is* the human authorization the conversational confirm collects; the
+  cost-envelope half is preserved by [§16.7](#167-cost--methodology). "Operator" here means anyone in the
+  daemon's group — the population being authorized; name it, don't widen it.
+- It bypasses **only** the conversational confirm + the LLM routing decision. Every other control still fires:
+  `[research] enabled`, `memory_filter_check(brief)` (inside the shared spawn), `[jobs]` caps, owner-scoping, the
+  read-only in-loop allowlist, ingest-time injection gating, and the disabled `reinvoke_parent`. Decision #17's
+  "never autonomously" is about the *model*; an operator-initiated spawn is not the model acting.
+
+**`mode=web` only — the headless verb refuses `private`/`both` (sec HIGH).** `private`/`both` is exactly the
+mode [§11](#11-security--untrusted-content-in-an-autonomous-loop-locked).3 locks behind the P2 egress-control
+**shipping prerequisite** (the private-corpus-as-source exfil channel). This eval harness is a **P1**
+deliverable, and every benchmark it runs ([§16.5](#165-benchmark-fit-condensed-from-the-comparison-doc)) is
+public-web — so it has **no functional need** for private mode. The verb therefore accepts `web` only; exposing
+`private`/`both` here would ship the gated mode ahead of its mandatory control. (Re-add only if/when the P2
+egress gate ships.)
+
+**`--user` is a required / hard non-primary default, existence-validated (sec MED).** A benchmark brief is
+**third-party, untrusted-by-origin** text (downloaded DeepResearch Bench / BrowseComp JSON), unlike the
+conversational path where the brief is the user's own utterance — it is contained by the same read-only loop +
+disabled reinvoke, but it is *not* trusted input. So the resulting conversation + injection-gated report must
+**not** land in the primary user's space by default: the verb **refuses to spawn if `--user` is omitted** (or
+resolves to a fixed non-interactive eval uid that is never the primary user), and **validates that `--user`
+references an existing account** (not merely "is an integer"), avoiding both the codebase's documented user-1
+fallback footgun and orphan conversations under a bogus uid. A dedicated eval account also keeps 100 benchmark
+job-conversations out of the real user's retention (`CONV_MAX_PER_USER`,
+[§10](#10-ownership-authorization-resource-limits-locked).4) and lets them purge as a batch.
+
+**Audit-log every headless spawn (sec LOW).** A conversational spawn is inherently visible — it lives in a
+conversation the user watches. A headless spawn is invisible to the `--user` it runs as, so it must be logged
+via the admin socket's existing audit facility (`ADMIN_MSG_QUERY_LOG`): `{operator uid/pid from SO_PEERCRED,
+--user, mode, run_id, brief hash}`. This is the only record that a run was operator-initiated rather than
+user-confirmed.
+
+### 16.5 Benchmark fit (condensed from the comparison doc)
+
+| Benchmark | Fit | Scorer | Notes |
+|---|---|---|---|
+| **DeepResearch Bench** (100 PhD tasks) | **Primary** | LLM-judge (RACE quality dims + FACT citation accuracy), needs a judge key | Scores *cited reports* — exactly DAWN's artifact. **FACT is fed DAWN's `research_claims` claim/URL pairs directly.** This is the benchmark that validates the quality claim. |
+| **BrowseComp** | Floor | Deterministic exact-match (no judge) | Short needle answers; parse the synthesis direct-answer section. Expected to be *weak* (no RL browsing policy — the conceded loss); run it for an honest gap number, not a win. Nearly free once the driver exists. |
+| **GAIA** | Slice-only | Deterministic exact-match | Many tasks need file inputs + a code interpreter the read-only allowlist lacks → structurally unanswerable. Only a browsing-only subset is meaningful, at which point it is a custom slice, not GAIA. Deprioritized. |
+
+### 16.6 The Python harness
+
+New under `benchmarks/research/`, alongside the existing read-only `capture_baseline.py`:
+
+- `run_benchmark.py` — the orchestrator: load a task set (JSON: `{id, brief, [gold_answer], [reference_report]}`)
+  → for each, `research start` → poll `research status` to terminal (with timeout→cancel) → `capture_baseline`
+  extract → write a per-run artifact (`{run_id, brief, report_md, claims:[{claim,url}], budgets, coverage}`).
+  **Serial by default** (respects `[jobs]` caps and doesn't hammer the LLM/search); optional small fixed
+  client-side concurrency. Resumable (skip task ids already captured), so a mid-run failure doesn't restart 100
+  runs.
+- `score_deepresearch_bench.py` — adapter to the DeepResearch Bench RACE/FACT scripts (vendored or pip),
+  judge-key-driven; FACT consumes the emitted claim/URL pairs.
+- `score_exact_match.py` — BrowseComp/GAIA-slice short-answer extraction + normalized exact match.
+
+Scoring stays **out of the daemon** — it is offline analysis over captured artifacts, so a scorer change never
+touches C and a re-score never re-runs research.
+
+### 16.7 Cost & methodology
+
+- **100 runs is real spend.** At run-4 scale (~900k input tokens/run) a full DeepResearch Bench pass is ~90M
+  input tokens. Run **local-model-first** (free-but-slow — the same positional argument the feature makes to
+  users) for a baseline number; optional cloud pass on a subset for a headline. Surface the estimate before a
+  full run, matching the feature's own cost-honesty stance ([§10](#10-ownership-authorization-resource-limits-locked).6).
+- **Report the stop-reason distribution alongside the score** — a good RACE score reached mostly on
+  `token_budget` fuses is a different (worse) result than the same score on `coverage`/`concluded`, and the
+  controller health is half of what the eval is measuring ([§6](#6-the-continuestop-controller)).
+- **Pin the run config in the artifact** (`[research]` budgets, model, `min_sources`) — the score is meaningless
+  without the knobs it was produced under.
+
+### 16.8 Build order & touchpoints
+
+1. **Extract `research_spawn_run()`** (the load-bearing step, arch HIGH-1) — pull the post-confirm body of
+   `handle_start` (`deep_research_tool.c`) into a shared non-static function called by both `handle_start` (after
+   its confirm gate) and the new admin handler, preserving the exact ordering (fail-closed `job_kind` stamp,
+   `research_db_run_create` before spawn). `memory_filter_check(brief)` lives inside it. Zero behaviour change to
+   the conversational path.
+2. **`admin_socket_research.c`** (GPL header) — the `research start`/`status`/`cancel` verb, wired into the admin
+   dispatch like the sibling `admin_socket_*` modules: `ADMIN_MSG_RESEARCH_*` enum, handler module, client parse
+   in `dawn-admin/main.c` + wire codec in `socket_client.c` + usage text. `start` calls `research_spawn_run`
+   with **`mode=web` hardcoded**, refuses an omitted/primary `--user`, and validates `--user` exists; `status`
+   uses `research_db_run_get`/`research_db_question_list`; `cancel` wraps `job_manager_cancel_or_retire`. Log
+   each spawn via `ADMIN_MSG_QUERY_LOG`.
+3. **`run_benchmark.py`** — orchestrator (start → poll `status` → extract), resumable by task id, per-run
+   timeout→`cancel`. Extends `capture_baseline`'s claim read with the per-claim `{claim, source_url, quote}`
+   projection for FACT.
+4. **Scorer adapters** — `score_deepresearch_bench.py` (RACE/FACT, FACT fed the claim/URL pairs) then
+   `score_exact_match.py` (BrowseComp).
+5. **Task sets** — `benchmarks/research/tasks/` (DeepResearch Bench task JSON; a BrowseComp subset). Keep
+   `smoke_queries.json` as the fast local sanity set.
+
+### 16.9 Explicitly out of scope
+
+- No new daemon surface beyond the three admin subcommands (`start`/`status`/`cancel`) + the internal
+  `research_spawn_run` extraction — extraction/scoring is read-only Python.
+- **No `private`/`both` mode on the headless verb** until the P2 egress control ships ([§11](#11-security--untrusted-content-in-an-autonomous-loop-locked).3) — `web` only.
+- No change to the research loop, allowlist, injection gates, or delivery — a benchmark run is a normal run.
+- GAIA full set (tool mismatch); a browsing-only slice only if a specific need appears.
+- No scoring inside the daemon; no benchmark scheduling/automation (operator-run, like the memory benches).

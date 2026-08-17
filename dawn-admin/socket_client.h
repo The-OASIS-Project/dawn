@@ -899,6 +899,34 @@ admin_resp_code_t admin_client_ota_rollout_status(int fd, char *response, size_t
 /** @brief Abort an in-progress fleet rollout. */
 admin_resp_code_t admin_client_ota_rollout_abort(int fd, char *response, size_t resp_len);
 
+/* Mirror of the daemon's RESEARCH_BRIEF_MAX (auth_db.h) — KEEP IN SYNC.  The
+ * daemon rejects a brief whose length is >= this, so the client caps here to
+ * fail locally with the true limit instead of a wasted round-trip. */
+#define DAWN_ADMIN_RESEARCH_BRIEF_MAX 2048
+
+/**
+ * @brief Spawn a research run headlessly — the benchmark driver's entry point
+ *        (DEEP_RESEARCH_DESIGN.md §16).  @p user_id is required and validated
+ *        daemon-side; mode is forced to web.  Response carries "run_id=.. conv_id=..".
+ */
+admin_resp_code_t admin_client_research_start(int fd,
+                                              int user_id,
+                                              const char *brief,
+                                              char *response,
+                                              size_t resp_len);
+/** @brief Machine-readable status line for one research run (owner-scoped). */
+admin_resp_code_t admin_client_research_status(int fd,
+                                               int user_id,
+                                               int64_t run_id,
+                                               char *response,
+                                               size_t resp_len);
+/** @brief Cancel a research run at its next round boundary (owner-scoped). */
+admin_resp_code_t admin_client_research_cancel(int fd,
+                                               int user_id,
+                                               int64_t run_id,
+                                               char *response,
+                                               size_t resp_len);
+
 /**
  * @brief Push an update offer to one satellite by uuid.
  *

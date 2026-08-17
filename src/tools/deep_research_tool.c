@@ -93,6 +93,132 @@ static char *research_build_proposal(const char *brief, bool private_requested) 
    return strdup(out);
 }
 
+/* Shared spawn path (§16.3) — called by handle_start (after its confirm gate)
+ * and the headless admin verb.  Preserves the exact ordering that carries the
+ * safety invariants (fail-closed job_kind stamp; run row created BEFORE spawn);
+ * do NOT reorder.  Writes the specific failure reason into `err` so both callers
+ * relay the same message.  P0 forces mode='web'. */
+int research_spawn_run(int user_id,
+                       int64_t parent_conv,
+                       const char *brief,
+                       const char *deliver_to,
+                       int64_t *run_id_out,
+                       int64_t *conv_id_out,
+                       char *err,
+                       size_t err_len) {
+   if (run_id_out != NULL) {
+      *run_id_out = 0;
+   }
+   if (conv_id_out != NULL) {
+      *conv_id_out = 0;
+   }
+   if (brief == NULL || brief[0] == '\0') {
+      snprintf(err, err_len, "Error: 'brief' is required — the question or topic to research.");
+      return FAILURE;
+   }
+   /* Re-filter here so BOTH spawn surfaces gate the brief (§16.4); the tool also
+    * filters early, before its proposal, so a bad brief never gets a proposal. */
+   if (memory_filter_check(brief)) {
+      snprintf(err, err_len, "Error: that research brief was rejected by the safety filter.");
+      return FAILURE;
+   }
+
+   /* Web research is useless without a search backend: with search disabled the
+    * fetch loop can only plan + record, finds nothing, and would deliver a
+    * confusing empty "done" report.  Refuse up front instead.  Checked via the
+    * registry so this tracks the search tool's own availability rule (SearXNG
+    * endpoint / Tavily) without duplicating it. */
+   const tool_metadata_t *search_meta = tool_registry_find("search");
+   if (search_meta == NULL || (search_meta->is_available != NULL && !search_meta->is_available())) {
+      snprintf(err, err_len,
+               "Can't start deep research — web search isn't configured. Set up a search "
+               "backend (SearXNG or Tavily) first, then try again.");
+      return FAILURE;
+   }
+
+   /* Refuse cleanly past a running cap before creating any row. */
+   job_provider_class_t provider = job_provider_from_default();
+   int cap = job_manager_capacity(user_id, provider);
+   if (cap != JOB_MGR_OK) {
+      const char *why = (cap == JOB_MGR_CAP_GLOBAL) ? "the system is at its background-job limit"
+                        : (cap == JOB_MGR_CAP_PROVIDER)
+                            ? "too many jobs are already running on this model"
+                        : (cap == JOB_MGR_CAP_USER)
+                            ? "you already have the maximum number of background jobs running"
+                            : "background jobs are unavailable";
+      snprintf(err, err_len,
+               "Can't start that research run right now — %s. Try again once one finishes.", why);
+      return FAILURE;
+   }
+
+   char title[CONV_TITLE_MAX];
+   conv_generate_title(brief, title, sizeof(title));
+
+   /* Create the job conversation.  on_complete='notify' — research NEVER uses
+    * reinvoke_parent (§11 HIGH-2). */
+   int64_t conv_id = 0;
+   if (conv_db_create_job_ex(user_id, title, parent_conv, "detached", "notify", deliver_to, 1,
+                             brief, job_spawn_origin_string(), &conv_id) != AUTH_DB_SUCCESS) {
+      snprintf(err, err_len, "Error: failed to create the research job.");
+      return FAILURE;
+   }
+
+   /* Mark it a research job so the plain worker can never resume it (§5.5).  Set
+    * while the row is 'queued' and before the worker exists, so nothing races.
+    * This is the SOLE enforcer of the no-plain-resume invariant, so a failure to
+    * stamp must fail the start CLOSED: an unmarked research job is plain-resumable
+    * and a plain resume would corrupt the run.  The run row doesn't exist yet, so
+    * only the job row needs retiring. */
+   if (conv_db_job_set_kind(conv_id, "research") != AUTH_DB_SUCCESS) {
+      job_manager_set_terminal(conv_id, user_id, "failed", "failed to mark research job",
+                               time(NULL), 0);
+      job_manager_mark_dirty();
+      OLOG_ERROR("deep_research: failed to set job_kind on conv %lld — failing start",
+                 (long long)conv_id);
+      snprintf(err, err_len, "Error: failed to initialize the research run.");
+      return FAILURE;
+   }
+
+   /* Create the run row BEFORE spawning — the worker reads it by conversation id
+    * the instant it starts.  P0 forces mode='web'. */
+   int64_t run_id = 0;
+   if (research_db_run_create(user_id, conv_id, brief, "web", &run_id) != AUTH_DB_SUCCESS) {
+      job_manager_set_terminal(conv_id, user_id, "failed", "failed to create research run",
+                               time(NULL), 0);
+      job_manager_mark_dirty();
+      snprintf(err, err_len, "Error: failed to create the research run.");
+      return FAILURE;
+   }
+
+   /* Push the 'queued' row BEFORE the spawn (same ordering rule as job_tool: the
+    * detached worker can reach a terminal disposition immediately, so emitting
+    * after would let this thread enqueue a stale active row behind the worker's
+    * terminal frame). */
+   job_update_emit(conv_id, user_id);
+
+   /* Tree edge on the parent's event stream (the panel shows the spawn). */
+   if (parent_conv > 0) {
+      conv_event_emit(parent_conv, user_id, CONV_EVENT_SPAWN, event_payload_spawn(conv_id, title));
+   }
+
+   if (research_worker_spawn(user_id, conv_id) != SUCCESS) {
+      research_db_run_set_terminal(run_id, "failed", "failed", time(NULL));
+      job_manager_set_terminal(conv_id, user_id, "failed", "research worker spawn failed",
+                               time(NULL), 0);
+      job_manager_mark_dirty();
+      snprintf(err, err_len, "Error: failed to start the research worker.");
+      return FAILURE;
+   }
+
+   if (run_id_out != NULL) {
+      *run_id_out = run_id;
+   }
+   if (conv_id_out != NULL) {
+      *conv_id_out = conv_id;
+   }
+   return SUCCESS;
+}
+
 static char *handle_start(struct json_object *details, int user_id, int64_t parent_conv) {
    struct json_object *jbrief = NULL, *jmode = NULL, *jdt = NULL, *jconfirm = NULL;
 
@@ -134,88 +260,19 @@ static char *handle_start(struct json_object *details, int user_id, int64_t pare
       deliver_to = NULL; /* ignore empty / suspicious delivery target */
    }
 
-   /* Web research is useless without a search backend: with search disabled the
-    * fetch loop can only plan + record, finds nothing, and would deliver a
-    * confusing empty "done" report.  Refuse up front instead.  Checked via the
-    * registry so this tracks the search tool's own availability rule (SearXNG
-    * endpoint / Tavily) without duplicating it. */
-   const tool_metadata_t *search_meta = tool_registry_find("search");
-   if (search_meta == NULL || (search_meta->is_available != NULL && !search_meta->is_available())) {
-      return strdup("Can't start deep research — web search isn't configured. Set up a search "
-                    "backend (SearXNG or Tavily) first, then try again.");
-   }
-
-   /* Refuse cleanly past a running cap before creating any row. */
-   job_provider_class_t provider = job_provider_from_default();
-   int cap = job_manager_capacity(user_id, provider);
-   if (cap != JOB_MGR_OK) {
-      const char *why = (cap == JOB_MGR_CAP_GLOBAL) ? "the system is at its background-job limit"
-                        : (cap == JOB_MGR_CAP_PROVIDER)
-                            ? "too many jobs are already running on this model"
-                        : (cap == JOB_MGR_CAP_USER)
-                            ? "you already have the maximum number of background jobs running"
-                            : "background jobs are unavailable";
-      char buf[256];
-      snprintf(buf, sizeof(buf),
-               "Can't start that research run right now — %s. Try again once one finishes.", why);
-      return strdup(buf);
+   /* All the ordering-sensitive spawn work (search-backend check, capacity, job
+    * creation, fail-closed research stamp, run row before spawn, spawn) lives in
+    * the shared research_spawn_run so the headless admin verb runs the identical
+    * sequence (§16.3). */
+   int64_t run_id = 0, conv_id = 0;
+   char err[256];
+   if (research_spawn_run(user_id, parent_conv, brief, deliver_to, &run_id, &conv_id, err,
+                          sizeof(err)) != SUCCESS) {
+      return strdup(err);
    }
 
    char title[CONV_TITLE_MAX];
    conv_generate_title(brief, title, sizeof(title));
-
-   /* Create the job conversation.  on_complete='notify' — research NEVER uses
-    * reinvoke_parent (§11 HIGH-2). */
-   int64_t conv_id = 0;
-   if (conv_db_create_job_ex(user_id, title, parent_conv, "detached", "notify", deliver_to, 1,
-                             brief, job_spawn_origin_string(), &conv_id) != AUTH_DB_SUCCESS) {
-      return strdup("Error: failed to create the research job.");
-   }
-
-   /* Mark it a research job so the plain worker can never resume it (§5.5).  Set
-    * while the row is 'queued' and before the worker exists, so nothing races.
-    * This is the SOLE enforcer of the no-plain-resume invariant, so a failure to
-    * stamp must fail the start CLOSED: an unmarked research job is plain-resumable
-    * and a plain resume would corrupt the run.  The run row doesn't exist yet, so
-    * only the job row needs retiring. */
-   if (conv_db_job_set_kind(conv_id, "research") != AUTH_DB_SUCCESS) {
-      job_manager_set_terminal(conv_id, user_id, "failed", "failed to mark research job",
-                               time(NULL), 0);
-      job_manager_mark_dirty();
-      OLOG_ERROR("deep_research: failed to set job_kind on conv %lld — failing start",
-                 (long long)conv_id);
-      return strdup("Error: failed to initialize the research run.");
-   }
-
-   /* Create the run row BEFORE spawning — the worker reads it by conversation id
-    * the instant it starts.  P0 forces mode='web'. */
-   int64_t run_id = 0;
-   if (research_db_run_create(user_id, conv_id, brief, "web", &run_id) != AUTH_DB_SUCCESS) {
-      job_manager_set_terminal(conv_id, user_id, "failed", "failed to create research run",
-                               time(NULL), 0);
-      job_manager_mark_dirty();
-      return strdup("Error: failed to create the research run.");
-   }
-
-   /* Push the 'queued' row BEFORE the spawn (same ordering rule as job_tool: the
-    * detached worker can reach a terminal disposition immediately, so emitting
-    * after would let this thread enqueue a stale active row behind the worker's
-    * terminal frame). */
-   job_update_emit(conv_id, user_id);
-
-   /* Tree edge on the parent's event stream (the panel shows the spawn). */
-   if (parent_conv > 0) {
-      conv_event_emit(parent_conv, user_id, CONV_EVENT_SPAWN, event_payload_spawn(conv_id, title));
-   }
-
-   if (research_worker_spawn(user_id, conv_id) != SUCCESS) {
-      research_db_run_set_terminal(run_id, "failed", "failed", time(NULL));
-      job_manager_set_terminal(conv_id, user_id, "failed", "research worker spawn failed",
-                               time(NULL), 0);
-      job_manager_mark_dirty();
-      return strdup("Error: failed to start the research worker.");
-   }
-
    char buf[CONV_TITLE_MAX + 224];
    snprintf(buf, sizeof(buf),
             "Started deep-research run #%lld: \"%s\". I'll research this in the background and let "

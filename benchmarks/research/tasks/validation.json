@@ -1,0 +1,16 @@
+{
+  "_comment": "Single focused task to validate the benchmark driver end-to-end (DEEP_RESEARCH_DESIGN.md §16). Narrow enough to converge in a few rounds; genuinely research-worthy (current/aggregated, not one-shottable).",
+  "queries": [
+    {
+      "id": "jetson_whisper_asr",
+      "shape": "decision support — which config for my constraint",
+      "brief": "What is the current best way (as of 2026) to run Whisper speech recognition on an NVIDIA Jetson Orin with CUDA? Cover whisper.cpp vs faster-whisper on Jetson/aarch64+CUDA, which model size (tiny/base/small) gives the best latency-vs-accuracy tradeoff for real-time voice, the relevant build flags / quantization, and the known gotchas on Jetson specifically.",
+      "should_cover": [
+        "whisper.cpp CUDA build on Jetson (GGML_CUDA) vs faster-whisper/CTranslate2 aarch64 support",
+        "model-size latency/accuracy tradeoff for real-time (tiny/base/small)",
+        "quantization / build flags that matter on Jetson",
+        "a concrete recommendation with sources, plus known Jetson gotchas"
+      ]
+    }
+  ]
+}
