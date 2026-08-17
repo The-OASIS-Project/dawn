@@ -40,6 +40,21 @@ judge model + key and the DeepResearch Bench prompts
 (https://github.com/Ayanami0730/deep_research_bench); point it at the judge-input
 files written here — see the printed next-steps.
 
+For the OFFICIAL DeepResearch-Bench harness, --dr-bench does the two format
+conversions its runner needs, so you never hand-write the glue:
+  * --query <query.jsonl>  : their data/prompt_data/query.jsonl -> our task set
+                             ({queries:[{id,brief}]}) to feed run_benchmark.py.
+  * --dr-bench <model>     : our artifacts -> their data/test_data/raw_data/<model>.jsonl
+                             ({id, prompt, article}); drop into the bench repo and
+                             run run_benchmark.sh with TARGET_MODELS=(<model>).
+
+  # 1. convert their tasks, run them through DAWN
+  ./score_deepresearch_bench.py --query deep_research_bench/.../query.jsonl --tasks-out dr_tasks.json
+  ./run_benchmark.py --tasks dr_tasks.json --user 2 --out results/dr
+  # 2. emit the bench's raw_data line file for RACE/FACT
+  ./score_deepresearch_bench.py results/dr --dr-bench dawn-sonnet-5 --raw-out raw_data
+
+  # local stats / judge-input prep (no bench repo needed)
   ./score_deepresearch_bench.py results/ --judge-out results/judge_inputs
   ./score_deepresearch_bench.py results/one.json
 """
@@ -96,16 +111,83 @@ def _artifacts(path):
     return [path]
 
 
+def _query_to_tasks(query_jsonl):
+    """DeepResearch-Bench data/prompt_data/query.jsonl -> our task list.  Each line
+    is {"id":..., "prompt":...}; we map prompt->brief and PRESERVE the id verbatim
+    (RACE aligns raw_data ids to reference ids, so the type must match theirs)."""
+    tasks = []
+    with open(query_jsonl, encoding="utf-8") as f:
+        for ln, raw in enumerate(f, 1):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                o = json.loads(raw)
+            except json.JSONDecodeError as e:
+                print(f"skip {query_jsonl}:{ln}: {e}", file=sys.stderr)
+                continue
+            tid = o.get("id")
+            brief = o.get("prompt") or o.get("brief") or o.get("query")
+            if tid is None or not brief:
+                print(f"skip {query_jsonl}:{ln}: needs id + prompt", file=sys.stderr)
+                continue
+            t = {"id": tid, "brief": brief}
+            if "language" in o:
+                t["language"] = o["language"]
+            tasks.append(t)
+    return tasks
+
+
+def _write_raw_data(arts, model, raw_out):
+    """Our artifacts -> DeepResearch-Bench data/test_data/raw_data/<model>.jsonl,
+    one line per report: {"id", "prompt": brief, "article": report_md}.  Skips an
+    artifact with an empty report (a failed run contributes no gradable article)."""
+    os.makedirs(raw_out, exist_ok=True)
+    outpath = os.path.join(raw_out, f"{model}.jsonl")
+    n, skipped = 0, 0
+    with open(outpath, "w", encoding="utf-8") as out:
+        for art in arts:
+            report = art.get("report_md", "")
+            if not report:
+                skipped += 1
+                continue
+            rec = {"id": art.get("task_id"), "prompt": art.get("brief"), "article": report}
+            out.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            n += 1
+    return outpath, n, skipped
+
+
 def main():
     ap = argparse.ArgumentParser(description="DeepResearch-Bench RACE/FACT adapter (prep + stats).")
-    ap.add_argument("path", help="artifact dir or a single artifact JSON")
+    ap.add_argument("path", nargs="?", help="artifact dir or a single artifact JSON")
     ap.add_argument("--judge-out", help="dir to write per-artifact judge-input JSON files")
+    ap.add_argument("--query", help="DeepResearch-Bench query.jsonl to convert to our task set")
+    ap.add_argument("--tasks-out", help="where --query writes the task set (default: stdout)")
+    ap.add_argument("--dr-bench", metavar="MODEL",
+                    help="emit artifacts as the bench's raw_data/<MODEL>.jsonl")
+    ap.add_argument("--raw-out", default="raw_data", help="output dir for --dr-bench (default raw_data)")
     args = ap.parse_args()
+
+    # --query: convert their tasks and exit (the "before running" prep step).
+    if args.query:
+        tasks = _query_to_tasks(args.query)
+        blob = {"queries": tasks}
+        if args.tasks_out:
+            with open(args.tasks_out, "w", encoding="utf-8") as f:
+                json.dump(blob, f, indent=2)
+            print(f"{len(tasks)} task(s) -> {args.tasks_out}")
+        else:
+            print(json.dumps(blob, indent=2))
+        return
+
+    if not args.path:
+        ap.error("path (artifact dir/JSON) is required unless using --query")
 
     if args.judge_out:
         os.makedirs(args.judge_out, exist_ok=True)
 
     rows = []
+    arts = []
     for f in _artifacts(args.path):
         try:
             art = json.load(open(f))
@@ -114,6 +196,7 @@ def main():
             continue
         if "report_md" not in art:
             continue
+        arts.append(art)
         rows.append(_stats(art))
         if args.judge_out:
             base = os.path.splitext(os.path.basename(f))[0]
@@ -123,6 +206,13 @@ def main():
     if not rows:
         print("No artifacts with a report found.")
         return
+
+    if args.dr_bench:
+        outpath, n_written, skipped = _write_raw_data(arts, args.dr_bench, args.raw_out)
+        note = f" ({skipped} empty-report artifact(s) skipped)" if skipped else ""
+        print(f"raw_data: {n_written} report(s) -> {outpath}{note}\n"
+              f"  drop into deep_research_bench/data/test_data/raw_data/ and run their\n"
+              f"  run_benchmark.sh with TARGET_MODELS=(\"{args.dr_bench}\").\n")
 
     print(f"{'task':<26} {'status':<16} {'claims':>6} {'cited%':>7} {'quote%':>7} "
           f"{'srcs':>5} {'ans/tot':>8} {'chars':>7}")

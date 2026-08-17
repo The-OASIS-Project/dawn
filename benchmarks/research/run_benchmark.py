@@ -55,6 +55,20 @@ DEFAULT_ADMIN = "./build-debug/dawn-admin/dawn-admin"
 TERMINAL = {"done", "failed", "cancelled"}
 _KV = re.compile(r"(\w+)=(\S+)")
 
+# dawn's own config search order (highest priority first).  The driver usually
+# runs from the repo root where ./dawn.toml lives, so that is the common hit.
+CONFIG_CANDIDATES = [
+    os.path.expanduser("~/.config/dawn/dawn.toml"),
+    "dawn.toml",
+    "/etc/dawn/dawn.toml",
+]
+# The [research] budget/shape knobs worth pinning to a score (A1).
+RESEARCH_STAMP_KEYS = (
+    "max_rounds", "max_input_tokens", "min_sources", "round_digest_max_chars",
+    "saturation_rounds", "plan_freeze_round", "stale_rounds", "critic_max_rearm",
+    "max_tool_calls", "completion_commentary", "capture_revisions",
+)
+
 
 def _run_admin(admin, args, timeout=60):
     """Invoke `dawn-admin <args>`; return (rc, stdout, stderr)."""
@@ -199,6 +213,103 @@ def _artifact_path(out_dir, task_id):
     return os.path.join(out_dir, f"{safe}.json")
 
 
+def _git_rev():
+    """Short HEAD sha of the repo the driver runs in, '-dirty' if the tree has
+    uncommitted changes (so a B2 prompt-tuning run isn't scored as if it were the
+    committed prompt).  None if git is unavailable."""
+    try:
+        p = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if p.returncode != 0:
+            return None
+        rev = p.stdout.strip()
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain"], capture_output=True, text=True, timeout=5
+        )
+        if dirty.returncode == 0 and dirty.stdout.strip():
+            rev += "-dirty"
+        return rev
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _find_config(explicit):
+    if explicit:
+        return explicit if os.path.exists(explicit) else None
+    for c in CONFIG_CANDIDATES:
+        if os.path.exists(c):
+            return c
+    return None
+
+
+def _read_toml_flat(path):
+    """Minimal reader for flat scalar keys under [section] headers — enough for
+    dawn.toml's [llm*]/[research] scalars (bool/int/quoted-string, with trailing
+    '# comments' tolerated).  NOT a general TOML parser (no arrays/multiline/dotted
+    keys); returns {section: {key: value}}."""
+    sections = {}
+    cur = None
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            m = re.match(r"\[([^\]]+)\]", line)
+            if m:
+                cur = m.group(1).strip()
+                sections.setdefault(cur, {})
+                continue
+            if cur is None or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key, val = key.strip(), val.strip()
+            if val.startswith('"'):
+                end = val.find('"', 1)
+                sections[cur][key] = val[1:end] if end > 0 else val.strip('"')
+                continue
+            tok = val.split("#", 1)[0].split()
+            tok = tok[0] if tok else ""
+            if tok in ("true", "false"):
+                sections[cur][key] = (tok == "true")
+            else:
+                try:
+                    sections[cur][key] = int(tok)
+                except ValueError:
+                    sections[cur][key] = tok
+    return sections
+
+
+def _run_config(config_path, prompt_tag):
+    """Snapshot what produced this batch: code revision, the daemon's active model,
+    and the [research] budgets — stamped on every artifact so a score is never a
+    naked number (A1).  Best-effort: a missing/unreadable config still yields the
+    code_rev + prompt_tag, with a note."""
+    rc = {"code_rev": _git_rev(), "prompt_tag": prompt_tag, "config_path": config_path}
+    if not config_path:
+        rc["note"] = "no dawn.toml found (pass --config); model/budgets not stamped"
+        return rc
+    try:
+        cfg = _read_toml_flat(config_path)
+    except OSError as e:
+        rc["note"] = f"config read failed: {e}"
+        return rc
+    llm = cfg.get("llm", {})
+    ltype = llm.get("type", "cloud")
+    lc = cfg.get("llm.local" if ltype == "local" else "llm.cloud", {})
+    rc["llm"] = {"type": ltype, "provider": lc.get("provider"), "model": lc.get("model")}
+    if ltype == "local" and "endpoint" in lc:
+        # local dawn.toml names no model (the endpoint serves it) — record the
+        # server so a local-mode artifact still identifies what ran.
+        rc["llm"]["endpoint"] = lc["endpoint"]
+    if "use_openrouter" in lc:
+        rc["llm"]["use_openrouter"] = lc["use_openrouter"]
+    res = cfg.get("research", {})
+    rc["research"] = {k: res[k] for k in RESEARCH_STAMP_KEYS if k in res}
+    return rc
+
+
 def _load_tasks(path):
     with open(path) as f:
         data = json.load(f)
@@ -223,6 +334,8 @@ def main():
     ap.add_argument("--poll", type=int, default=20, help="status poll interval (s)")
     ap.add_argument("--only", help="run only the task with this id")
     ap.add_argument("--force", action="store_true", help="re-run tasks whose artifact exists")
+    ap.add_argument("--config", help="dawn.toml to stamp on artifacts (default: dawn's search path)")
+    ap.add_argument("--prompt-tag", help="free-text marker for the prompt/config variant under test")
     ap.add_argument("--extract-only", type=int, metavar="RUN_ID",
                     help="re-extract an existing run to stdout and exit (no spawn)")
     args = ap.parse_args()
@@ -248,6 +361,16 @@ def main():
         if not tasks:
             sys.exit(f"error: no task with id '{args.only}'")
     os.makedirs(args.out, exist_ok=True)
+
+    # Snapshot code rev + daemon model + [research] budgets ONCE for the batch —
+    # the whole batch runs against one daemon config, so this is accurate (A1).
+    run_cfg = _run_config(_find_config(args.config), args.prompt_tag)
+    if "note" in run_cfg:
+        print(f"[config] {run_cfg['note']}", flush=True)
+    else:
+        _m = run_cfg.get("llm", {}).get("model")
+        print(f"[config] code={run_cfg.get('code_rev')} model={_m} "
+              f"config={run_cfg.get('config_path')}", flush=True)
 
     summary = []
     for i, task in enumerate(tasks, 1):
@@ -280,6 +403,7 @@ def main():
 
         art["task_id"] = tid
         art["brief"] = task["brief"]
+        art["run_config"] = run_cfg
         for k in ("gold", "reference", "should_cover", "shape"):
             if k in task:
                 art[k] = task[k]

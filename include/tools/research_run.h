@@ -296,6 +296,38 @@ int research_render_critic_digest(int64_t run_id,
 int research_render_report(int64_t run_id, const char *brief, char **out_markdown);
 
 /**
+ * @brief Canonicalize a source URL for honest DISTINCT-source counting (B1).
+ *
+ * The coverage stop-controller decides `coverage` from COUNT(DISTINCT source_url)
+ * (§6.2).  Taken verbatim, that count is gameable: two links to the SAME page that
+ * differ only cosmetically — scheme/host case, a leading "www.", an explicit
+ * default port, a trailing slash, a "#fragment", or tracking query params
+ * (utm_*, fbclid, gclid, …) — would each count as an independent source and let a
+ * run declare coverage without genuinely distinct evidence.  Canonicalizing at the
+ * record path collapses those variants to one string so the DISTINCT count is honest
+ * (and the stored citation renders clean).
+ *
+ * Transforms (host/scheme only — the PATH is left byte-exact because paths are
+ * case-sensitive on many servers):
+ *   - lowercase the scheme and host; drop a leading "www."; drop an explicit
+ *     default port (:80 http / :443 https)
+ *   - drop the "#fragment"
+ *   - drop known tracking query params, preserving every other param in order
+ *     (an emptied query drops the "?" entirely)
+ *   - drop a single trailing "/"
+ *
+ * Conservative: a non-HTTP(S) input (or anything it cannot confidently parse) is
+ * copied through verbatim — the caller drops non-web URLs separately.  Pure and
+ * deterministic (no ledger/LLM), so it is unit-tested directly.
+ *
+ * @param in        the raw source_url (may be NULL → empty out)
+ * @param out       destination buffer (always NUL-terminated on return)
+ * @param out_size  capacity of @p out
+ * @return @p out.
+ */
+char *research_canonicalize_url(const char *in, char *out, size_t out_size);
+
+/**
  * @brief Run the research controller loop on a prepared bare job session (§4).
  *
  * setup (research system prompt) → round loop { reset history to [system] +

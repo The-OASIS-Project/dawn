@@ -362,9 +362,64 @@ static void test_render_report_empty(void) {
    free(md);
 }
 
+/* ── URL canonicalization (B1) — cosmetic variants of one page collapse ───────── */
+
+static void canon_eq(const char *in, const char *expect) {
+   char out[RESEARCH_URL_MAX];
+   research_canonicalize_url(in, out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING(expect, out);
+}
+
+static void test_canonicalize_url(void) {
+   /* scheme + host lowercased, path left byte-exact (paths are case-sensitive) */
+   canon_eq("HTTPS://Example.COM/Path/Page", "https://example.com/Path/Page");
+   /* leading www. dropped */
+   canon_eq("https://www.example.com/a", "https://example.com/a");
+   /* default ports dropped, non-default kept */
+   canon_eq("http://example.com:80/a", "http://example.com/a");
+   canon_eq("https://example.com:443/a", "https://example.com/a");
+   canon_eq("https://example.com:8443/a", "https://example.com:8443/a");
+   /* fragment dropped */
+   canon_eq("https://example.com/a#section", "https://example.com/a");
+   /* trailing slash dropped; root "/" collapses to bare host */
+   canon_eq("https://example.com/a/", "https://example.com/a");
+   canon_eq("https://example.com/", "https://example.com");
+   canon_eq("https://example.com", "https://example.com");
+   /* tracking params stripped, real params kept in order */
+   canon_eq("https://example.com/a?utm_source=x&id=7&fbclid=abc", "https://example.com/a?id=7");
+   canon_eq("https://example.com/a?utm_source=x&utm_medium=y", "https://example.com/a");
+   canon_eq("https://example.com/a?q=hi&gclid=z&page=2", "https://example.com/a?q=hi&page=2");
+   /* the whole point: two cosmetic variants of ONE page canonicalize identically */
+   char u1[RESEARCH_URL_MAX], u2[RESEARCH_URL_MAX];
+   research_canonicalize_url("https://WWW.Example.com/Doc/?utm_campaign=q#top", u1, sizeof(u1));
+   research_canonicalize_url("https://example.com/Doc?", u2, sizeof(u2));
+   TEST_ASSERT_EQUAL_STRING(u1, u2);
+   /* userinfo dropped (never distinguishes a page) */
+   canon_eq("https://user:pass@example.com/a", "https://example.com/a");
+   /* multiple trailing slashes and stacked www. collapse fully (fixed point) */
+   canon_eq("https://example.com/a//", "https://example.com/a");
+   canon_eq("https://www.www.example.com/a", "https://example.com/a");
+   /* an absurdly long port is not treated as default; kept verbatim, no overflow */
+   canon_eq("http://example.com:99999999999999999999/a",
+            "http://example.com:99999999999999999999/a");
+   /* idempotency: canonicalizing an already-canonical URL is a no-op */
+   char once[RESEARCH_URL_MAX], twice[RESEARCH_URL_MAX];
+   research_canonicalize_url("https://WWW.Example.com:443/A/b/?utm_source=x&k=1#f", once,
+                             sizeof(once));
+   research_canonicalize_url(once, twice, sizeof(twice));
+   TEST_ASSERT_EQUAL_STRING(once, twice);
+   /* non-HTTP(S) input passes through verbatim; NULL → empty */
+   canon_eq("ftp://example.com/x", "ftp://example.com/x");
+   canon_eq("not a url", "not a url");
+   char out[RESEARCH_URL_MAX];
+   research_canonicalize_url(NULL, out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("", out);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_budgets_defaults);
+   RUN_TEST(test_canonicalize_url);
    RUN_TEST(test_refresh_coverage_promotes);
    RUN_TEST(test_retire_stale_questions);
    RUN_TEST(test_is_natural_end);

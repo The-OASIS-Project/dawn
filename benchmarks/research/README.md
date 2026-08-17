@@ -32,7 +32,10 @@ an LLM + web search, and "is this report good?" is a judgment call, not a metric
 - **`score_deepresearch_bench.py`** — RACE/FACT adapter: deterministic citation +
   coverage stats (the structural health FACT builds on — DAWN's claims already
   carry `source_url` + a verbatim `quote`), and writes per-artifact judge-input
-  files for the external LLM-judge step.
+  files for the external LLM-judge step. Also does the two format conversions the
+  **official** DeepResearch-Bench harness needs: `--query <query.jsonl>` turns their
+  task file into our task set, and `--dr-bench <model>` turns our artifacts into
+  their `raw_data/<model>.jsonl`.
 - **`tasks/`** — task sets for the driver (same `{queries:[{id,brief,…}]}` shape as
   `smoke_queries.json`; add `gold` for exact-match, `reference` for RACE).
 
@@ -87,6 +90,13 @@ confirm — the operator is the authorization (§16.4). Runs are **web-only**.
    set `--timeout` above the expected wall-clock so a healthy run isn't cancelled.
    Run **local-first** (free-but-slow) for a baseline; a cloud pass on a subset is
    optional for a headline.
+
+   Every artifact is stamped with a `run_config` block — the code revision
+   (`git`, `-dirty` if the tree has uncommitted prompt edits), the daemon's active
+   model, and the `[research]` budgets — read once per batch from `dawn.toml`
+   (override with `--config`, and add a human label with `--prompt-tag`). This is
+   what keeps a score honest: it says *which* prompt/model/budgets produced it. So a
+   B2 prompt-tuning score is never a naked number.
 4. **Score offline** (never re-runs research):
 
    ```bash
@@ -105,6 +115,42 @@ confirm — the operator is the authorization (§16.4). Runs are **web-only**.
 **Manual `dawn-admin` use** (spot checks): `research start --user N --brief "…"` or
 `--brief-file <path>`; `research status --user N <run_id>`; `research cancel --user
 N <run_id>`.
+
+## Running against the official DeepResearch-Bench
+
+DAWN is the *harness*; a run is (model × harness), so the score is system-level —
+hold a strong model constant (e.g. Sonnet 5 in `dawn.toml`) to judge the harness.
+DeepResearch-Bench scores exactly the reports you submit, so a **subset run is
+valid for iteration** (it is NOT leaderboard-comparable — a different task mix — but
+it is the right signal for tuning). Clone the bench
+([repo](https://github.com/Ayanami0730/deep_research_bench)); its tasks live in
+`data/prompt_data/query.jsonl` (100 `{id, prompt}` lines).
+
+```bash
+cd benchmarks/research
+
+# 1. their query.jsonl -> our task set (ids preserved, so RACE aligns to references).
+#    Slice to a subset first for a cheap iteration pass.
+./score_deepresearch_bench.py --query <bench>/data/prompt_data/query.jsonl \
+    --tasks-out dr_tasks.json
+
+# 2. run them through DAWN (dedicated eval user; long timeout for cloud too).
+./run_benchmark.py --tasks dr_tasks.json --user <eval_id> \
+    --admin ../../build-debug/dawn-admin/dawn-admin \
+    --out results/dr --timeout 3600 --prompt-tag sonnet5-baseline
+
+# 3. our artifacts -> their raw_data line file, + the deterministic stats table.
+./score_deepresearch_bench.py results/dr --dr-bench dawn-sonnet-5 --raw-out raw_data
+
+# 4. drop raw_data/dawn-sonnet-5.jsonl into <bench>/data/test_data/raw_data/ and run
+#    THEIR judge (needs OPENROUTER_API_KEY + JINA_API_KEY):
+#      TARGET_MODELS=("dawn-sonnet-5") bash run_benchmark.sh
+```
+
+Report the **stop-reason distribution and the pinned `run_config`** next to the
+score — a number reached mostly on `token_budget` fuses is a worse result than the
+same number on `coverage`/`concluded` (controller health is half of what the eval
+measures).
 
 ## What to look at (the quality dimensions)
 

@@ -49,6 +49,7 @@
 #include "core/memory_filter.h"
 #include "core/session_manager.h"
 #include "logging.h"
+#include "tools/research_run.h" /* research_canonicalize_url (B1) */
 #include "tools/tool_registry.h"
 
 /* Bound how many questions one research_plan call may add (keeps a single call
@@ -323,14 +324,23 @@ static char *research_record_callback(const char *action, char *value, int *shou
     * string ("source A", "the docs") or a non-web scheme would count as an
     * independent web source and let a run declare `coverage` without genuinely
     * distinct evidence.  A non-URL is dropped to NULL (the finding is still kept,
-    * just uncited) so it neither counts toward coverage nor renders a broken link.
-    * (Canonicalizing fragment/tracking-param variants of one page is a further
-    * refinement, tracked separately.) */
+    * just uncited) so it neither counts toward coverage nor renders a broken link. */
    if (source_url && strncmp(source_url, "http://", 7) != 0 &&
        strncmp(source_url, "https://", 8) != 0) {
       OLOG_WARNING("research_record: dropped a non-HTTP(S) source_url (run %lld)",
                    (long long)run_id);
       source_url = NULL;
+   }
+
+   /* Canonicalize the surviving URL (B1) so cosmetic variants of the SAME page —
+    * scheme/host case, "www.", a default port, a trailing slash, a "#fragment",
+    * tracking params — collapse to one string.  This is what makes the controller's
+    * COUNT(DISTINCT source_url) coverage signal honest (near-dup links can't fake
+    * distinct evidence), and stores a clean citation for the report. */
+   char canon_url[RESEARCH_URL_MAX];
+   if (source_url && source_url[0]) {
+      research_canonicalize_url(source_url, canon_url, sizeof(canon_url));
+      source_url = canon_url;
    }
 
    /* Attribute to the plan question the model named, tolerating the "[q5]" token

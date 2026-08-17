@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h> /* strncasecmp — URL canonicalization (B1) */
 
 #include "auth/auth_db.h"
 #include "logging.h"
@@ -47,6 +48,173 @@
  * worker) so the truncation path is effectively unreachable in practice. */
 #define RESEARCH_MAX_REPORT_CLAIMS 1024
 #define RESEARCH_REPORT_MAX 65536
+
+/* True iff @p name (length @p len, not NUL-terminated) is a known analytics/click
+ * tracking query parameter that never identifies a distinct page — dropped during
+ * URL canonicalization so utm_/click-id variants of one link collapse to one
+ * DISTINCT source.  Case-insensitive; the utm_* family matches by prefix. */
+static bool research_url_param_is_tracking(const char *name, size_t len) {
+   if (len >= 4 && strncasecmp(name, "utm_", 4) == 0) {
+      return true; /* utm_source/medium/campaign/term/content/id/… */
+   }
+   static const char *const exact[] = {
+      "fbclid", "gclid",  "gclsrc",  "dclid",      "wbraid",      "gbraid", "msclkid",
+      "yclid",  "twclid", "ttclid",  "mc_cid",     "mc_eid",      "igshid", "mkt_tok",
+      "_ga",    "_gl",    "vero_id", "oly_enc_id", "oly_anon_id",
+   };
+   for (size_t i = 0; i < sizeof(exact) / sizeof(exact[0]); i++) {
+      size_t el = strlen(exact[i]);
+      if (el == len && strncasecmp(name, exact[i], len) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
+char *research_canonicalize_url(const char *in, char *out, size_t out_size) {
+   if (!out || out_size == 0) {
+      return out;
+   }
+   out[0] = '\0';
+   if (!in) {
+      return out;
+   }
+
+   /* Scheme (case-insensitive) + its default port.  A non-HTTP(S) input is passed
+    * through verbatim — the caller validates/drops non-web URLs separately. */
+   const char *scheme = NULL;
+   size_t scheme_len = 0;
+   int default_port = 0;
+   if (strncasecmp(in, "http://", 7) == 0) {
+      scheme = "http://";
+      scheme_len = 7;
+      default_port = 80;
+   } else if (strncasecmp(in, "https://", 8) == 0) {
+      scheme = "https://";
+      scheme_len = 8;
+      default_port = 443;
+   } else {
+      snprintf(out, out_size, "%s", in);
+      return out;
+   }
+
+   const char *authority = in + scheme_len;
+   const char *auth_end = authority + strcspn(authority, "/?#"); /* path/query/frag start */
+
+   /* Drop any "user:pass@" userinfo — it never distinguishes a page, and dropping
+    * it (rather than lowercasing a credential) collapses cred-bearing variants of
+    * one URL to a single DISTINCT source.  Canonicalize the host after '@'. */
+   const char *host = authority;
+   const char *at = memchr(authority, '@', (size_t)(auth_end - authority));
+   if (at) {
+      host = at + 1;
+   }
+
+   /* Host ends at ':' (port) or auth_end. */
+   const char *host_end = host;
+   while (host_end < auth_end && *host_end != ':') {
+      host_end++;
+   }
+   const char *port = (host_end < auth_end && *host_end == ':') ? host_end + 1 : NULL;
+
+   /* Drop leading "www." label(s) (case-insensitive) from the host.  Looped so the
+    * result is a fixed point (canon(canon(x)) == canon(x)) — the stored value is
+    * later compared by equality, so stability matters. */
+   size_t host_len = (size_t)(host_end - host);
+   while (host_len > 4 && strncasecmp(host, "www.", 4) == 0) {
+      host += 4;
+      host_len -= 4;
+   }
+
+   /* Keep the port only when it is non-default (or non-numeric → keep verbatim). */
+   int keep_port = 0;
+   if (port) {
+      long p = 0;
+      int numeric = (port < auth_end);
+      int digits = 0;
+      for (const char *pp = port; pp < auth_end; pp++) {
+         if (*pp < '0' || *pp > '9' || ++digits > 5) {
+            numeric = 0; /* non-numeric OR > 5 digits (no real port, and avoids
+                          * signed overflow accumulating a huge model-authored port) */
+            break;
+         }
+         p = p * 10 + (*pp - '0');
+      }
+      keep_port = (!numeric || p != default_port);
+   }
+
+   size_t n = 0;
+   for (const char *s = scheme; *s && n + 1 < out_size; s++) {
+      out[n++] = *s; /* scheme literal is already lowercase */
+   }
+   for (size_t i = 0; i < host_len && n + 1 < out_size; i++) {
+      char c = host[i];
+      if (c >= 'A' && c <= 'Z') {
+         c = (char)(c - 'A' + 'a');
+      }
+      out[n++] = c;
+   }
+   if (keep_port && port) {
+      if (n + 1 < out_size) {
+         out[n++] = ':';
+      }
+      for (const char *pp = port; pp < auth_end && n + 1 < out_size; pp++) {
+         out[n++] = *pp;
+      }
+   }
+
+   /* Split path / query / fragment.  The fragment ("#…") is dropped entirely. */
+   const char *path = auth_end;
+   const char *path_end = path + strcspn(path, "?#");
+   const char *query = NULL, *query_end = NULL;
+   if (*path_end == '?') {
+      query = path_end + 1;
+      query_end = query + strcspn(query, "#");
+   }
+
+   /* Emit the path minus trailing '/'(s) (so "…/", "…//" and "…" all collapse —
+    * looped for the same fixed-point stability as the "www." strip). */
+   size_t path_len = (size_t)(path_end - path);
+   while (path_len > 0 && path[path_len - 1] == '/') {
+      path_len--;
+   }
+   for (size_t i = 0; i < path_len && n + 1 < out_size; i++) {
+      out[n++] = path[i];
+   }
+
+   /* Emit surviving (non-tracking) query params in original order. */
+   if (query) {
+      int wrote = 0;
+      const char *seg = query;
+      while (seg < query_end) {
+         const char *seg_end = seg;
+         while (seg_end < query_end && *seg_end != '&') {
+            seg_end++;
+         }
+         const char *eq = seg;
+         while (eq < seg_end && *eq != '=') {
+            eq++;
+         }
+         size_t name_len = (size_t)(eq - seg);
+         if (name_len > 0 && !research_url_param_is_tracking(seg, name_len)) {
+            /* Mark `wrote` only if the separator ACTUALLY landed — otherwise a
+             * buffer that fills exactly at the first param's separator would later
+             * emit '&' as the leading separator instead of '?'. */
+            if (n + 1 < out_size) {
+               out[n++] = wrote ? '&' : '?';
+               wrote = 1;
+            }
+            for (const char *c = seg; c < seg_end && n + 1 < out_size; c++) {
+               out[n++] = *c;
+            }
+         }
+         seg = (seg_end < query_end) ? seg_end + 1 : query_end;
+      }
+   }
+
+   out[n] = '\0';
+   return out;
+}
 
 void research_budgets_defaults(research_budgets_t *out) {
    if (!out) {
