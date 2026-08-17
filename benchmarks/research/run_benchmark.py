@@ -245,40 +245,63 @@ def _find_config(explicit):
 
 
 def _read_toml_flat(path):
-    """Minimal reader for flat scalar keys under [section] headers — enough for
-    dawn.toml's [llm*]/[research] scalars (bool/int/quoted-string, with trailing
-    '# comments' tolerated).  NOT a general TOML parser (no arrays/multiline/dotted
-    keys); returns {section: {key: value}}."""
-    sections = {}
-    cur = None
+    """Minimal reader for keys under [section] headers — enough for dawn.toml's
+    [llm*]/[research] scalars (bool/int/quoted-string, trailing '# comments'
+    tolerated) PLUS multi-line string arrays (the <provider>_models lists, needed to
+    resolve the active cloud model).  NOT a general TOML parser; returns {section:
+    {key: value}} with values coerced to bool/int/str/list-of-str."""
     with open(path, encoding="utf-8", errors="replace") as f:
-        for raw in f:
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            m = re.match(r"\[([^\]]+)\]", line)
-            if m:
-                cur = m.group(1).strip()
-                sections.setdefault(cur, {})
-                continue
-            if cur is None or "=" not in line:
-                continue
-            key, _, val = line.partition("=")
-            key, val = key.strip(), val.strip()
-            if val.startswith('"'):
-                end = val.find('"', 1)
-                sections[cur][key] = val[1:end] if end > 0 else val.strip('"')
-                continue
-            tok = val.split("#", 1)[0].split()
-            tok = tok[0] if tok else ""
-            if tok in ("true", "false"):
-                sections[cur][key] = (tok == "true")
-            else:
-                try:
-                    sections[cur][key] = int(tok)
-                except ValueError:
-                    sections[cur][key] = tok
+        lines = f.readlines()
+    sections, cur, i = {}, None, 0
+    while i < len(lines):
+        line = lines[i].strip()
+        i += 1
+        if not line or line.startswith("#"):
+            continue
+        m = re.match(r"\[([^\]]+)\]", line)
+        if m:
+            cur = m.group(1).strip()
+            sections.setdefault(cur, {})
+            continue
+        if cur is None or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key, val = key.strip(), val.strip()
+        if val.startswith("["):
+            # string array, possibly multi-line: collect quoted items through ']'.
+            items = re.findall(r'"([^"]*)"', val)
+            while "]" not in val and i < len(lines):
+                val = lines[i].strip()
+                i += 1
+                items += re.findall(r'"([^"]*)"', val)
+            sections[cur][key] = items
+            continue
+        if val.startswith('"'):
+            end = val.find('"', 1)
+            sections[cur][key] = val[1:end] if end > 0 else val.strip('"')
+            continue
+        tok = val.split("#", 1)[0].split()
+        tok = tok[0] if tok else ""
+        if tok in ("true", "false"):
+            sections[cur][key] = (tok == "true")
+        else:
+            try:
+                sections[cur][key] = int(tok)
+            except ValueError:
+                sections[cur][key] = tok
     return sections
+
+
+def _resolve_cloud_model(lc):
+    """The ACTIVE cloud model: <provider>_models[<provider>_default_model_idx], or
+    the openrouter_models list when the gateway is on — dawn.toml selects the cloud
+    model by array index, not a single 'model' key.  Falls back to a bare 'model'."""
+    prov = "openrouter" if lc.get("use_openrouter") is True else lc.get("provider", "")
+    arr = lc.get(f"{prov}_models")
+    idx = lc.get(f"{prov}_default_model_idx", 0)
+    if isinstance(arr, list) and isinstance(idx, int) and 0 <= idx < len(arr):
+        return arr[idx]
+    return lc.get("model")
 
 
 def _run_config(config_path, prompt_tag):
@@ -298,13 +321,15 @@ def _run_config(config_path, prompt_tag):
     llm = cfg.get("llm", {})
     ltype = llm.get("type", "cloud")
     lc = cfg.get("llm.local" if ltype == "local" else "llm.cloud", {})
-    rc["llm"] = {"type": ltype, "provider": lc.get("provider"), "model": lc.get("model")}
-    if ltype == "local" and "endpoint" in lc:
+    if ltype == "local":
         # local dawn.toml names no model (the endpoint serves it) — record the
         # server so a local-mode artifact still identifies what ran.
-        rc["llm"]["endpoint"] = lc["endpoint"]
-    if "use_openrouter" in lc:
-        rc["llm"]["use_openrouter"] = lc["use_openrouter"]
+        rc["llm"] = {"type": "local", "model": lc.get("model"), "endpoint": lc.get("endpoint")}
+    else:
+        rc["llm"] = {"type": "cloud", "provider": lc.get("provider"),
+                     "model": _resolve_cloud_model(lc)}
+        if "use_openrouter" in lc:
+            rc["llm"]["use_openrouter"] = lc["use_openrouter"]
     res = cfg.get("research", {})
     rc["research"] = {k: res[k] for k in RESEARCH_STAMP_KEYS if k in res}
     return rc
