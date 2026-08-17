@@ -153,20 +153,42 @@ static const char RESEARCH_SYSTEM_PROMPT[] =
  * recorded evidence into a written answer.  No tools are available on this turn
  * (the controller sets the synthesis flag, which denies every tool), so the model
  * can only write.  The recorded claims are the evidence appendix; this prose is the
- * answer the user actually reads. */
+ * answer the user actually reads.
+ *
+ * "Comprehensiveness-max" phrasing (validated 2026-08-17 via a DeepResearch-Bench
+ * RACE A/B on 12 tasks, gpt-5.5 judge): telling synthesis to INTEGRATE every
+ * sub-question's findings into the body — rather than summarize and defer detail to
+ * the auto-appended claims appendix — lifted comprehensiveness 0.488→0.503 and
+ * overall 0.498→0.505 (below→above reference parity) at ZERO extra gather cost,
+ * with instruction-following holding (+0.007).  The gain came from evidence we
+ * ALREADY had; the earlier "do not restate the claims, they're appended" rule was
+ * leaving coverage on the table.  See DEEP_RESEARCH_DESIGN.md §"Synthesis A/B". */
 static const char RESEARCH_SYNTHESIS_PROMPT[] =
     "You are writing the FINAL research report for the user, from the evidence you gathered. You "
-    "have no tools — do not try to search or fetch; just write.\n\n"
-    "Structure the report in markdown:\n"
-    "1. A short executive summary (2-4 sentences) of what you found.\n"
-    "2. A DIRECT answer to the user's brief. If the brief asked a decision or comparison question "
-    "(which X should I use, compare A vs B), give a clear recommendation and the reasoning; if it "
-    "asked to survey or explain, give the organized synthesis.\n"
-    "3. A short 'What I could not determine' section naming any sub-questions you could not answer "
-    "or that remained uncertain — be honest about gaps rather than papering over them.\n\n"
-    "Write for the user, in plain prose and tables where useful. Base every claim on the recorded "
-    "findings below; do not invent facts not in the evidence. Do not include a raw list of every "
-    "claim — that evidence is appended to the report automatically.\n"
+    "have no tools — do not search or fetch; just write.\n\n"
+    "Write a THOROUGH, COMPREHENSIVE report in markdown. Address EVERY sub-question the evidence "
+    "speaks to, and integrate the specific findings — numbers, dates, named entities, comparisons "
+    "— DIRECTLY into the report body. Do NOT summarize at a high level and defer the detail to an "
+    "appendix; the report body itself must be complete and self-contained.\n\n"
+    "Structure:\n"
+    "1. A short executive summary (3-5 sentences) of the key findings.\n"
+    "2. A DIRECT, COMPLETE answer to the brief, organized by its sub-topics. For each sub-topic, "
+    "present the concrete evidence: cite specific figures, use markdown TABLES for anything "
+    "quantitative or comparative (per-category, per-year, per-option breakdowns), and weave the "
+    "findings into flowing prose. If the brief asked a decision or comparison (which X should I "
+    "use, compare A vs B), give a clear recommendation and the reasoning; if it asked to survey or "
+    "explain, give the full organized synthesis. Be exhaustive WITHIN the evidence — prefer "
+    "specificity and coverage over brevity.\n"
+    "3. Where sources conflict on a value, commit to a single best-estimate (a number or a tight "
+    "range) and note the variance in one clause, rather than dropping the figure or listing every "
+    "source separately.\n"
+    "4. A short 'What I could not determine' section naming GENUINE gaps — be honest, but do not "
+    "pad it with things the evidence actually covers.\n\n"
+    "Keep the report navigable: clear section headings, and prefer tables and tight structure over "
+    "long undivided walls of prose.\n"
+    "Base every claim on the recorded findings below; do not invent facts not in the evidence. You "
+    "MAY and SHOULD restate the evidence's specifics in the body — the goal is a complete "
+    "standalone report, not a teaser.\n"
     "This report is a SNAPSHOT and the reader may see it weeks later: when a finding is "
     "time-sensitive (a count, price, version, ranking, or anything described as 'current'/'latest'/"
     "'now'), state it as of the research date given in the directive rather than as a timeless "

@@ -1358,3 +1358,33 @@ touches C and a re-score never re-runs research.
 - No change to the research loop, allowlist, injection gates, or delivery — a benchmark run is a normal run.
 - GAIA full set (tool mismatch); a browsing-only slice only if a specific need appears.
 - No scoring inside the daemon; no benchmark scheduling/automation (operator-run, like the memory benches).
+
+## 17. Synthesis A/B — comprehensiveness-max (SHIPPED 2026-08-17)
+
+First tuning driven by the §16 harness. A 12-task English DeepResearch-Bench subset (`claude-sonnet-5`
+harness, **gpt-5.5 RACE / gpt-5.4-mini FACT** — the current official evaluator) established a baseline of
+**RACE overall 0.498 (parity with the reference reports), FACT valid_rate 0.852**. Per-dimension,
+comprehensiveness (0.488) was the one sub-parity dimension; instruction-following (0.505) the strongest —
+i.e. DAWN reasoned and followed instructions at reference parity but lost on coverage breadth.
+
+Root cause was **synthesis, not gather**: the reports were "summary prose + a large raw-claims appendix,"
+and the old `RESEARCH_SYNTHESIS_PROMPT` explicitly told the model *not* to restate the claims ("that
+evidence is appended automatically"). The evidence was already recorded; the prose just wasn't using it.
+
+**The change** (`RESEARCH_SYNTHESIS_PROMPT`, `research_run_loop.c`): tell synthesis to INTEGRATE every
+sub-question's findings into the report body — specific numbers/dates/entities woven into prose + markdown
+tables for anything quantitative/comparative, conflicting figures reconciled to a single best-estimate with
+a variance note — plus a readability guard (clear headings, tables over walls of prose). Structure (exec
+summary / direct answer / honest gaps) and the time-sensitivity rule are unchanged.
+
+**Validation.** Offline A/B (regenerate only the prose over the *same* stored evidence appendix, RACE-rejudge
+the 12): comprehensiveness **0.488→0.503**, overall **0.498→0.505** (below→above parity),
+instruction-following held (**+0.007**), readability −0.005 (noise); 11/12 tasks up-or-flat, gains
+concentrated on the weakest reports (51 +0.020, 83 +0.016, 90 +0.011). Live 2-task daemon re-run (fresh
+gather + ported prompt) reproduced it and slightly beat offline-B — task 51 overall 0.468→**0.497**, task 90
+0.512→**0.525**, **every dimension up vs. A, readability now up** (the guard worked). Zero extra gather cost
+— the lift came entirely from evidence already recorded.
+
+**Not done here** (deliberate, separate cost decision): gather-side depth (more sources/rounds — `min_sources`)
+for the *remaining* comprehensiveness ceiling, visible on evidence-thin tasks like 85 (piezo hardware, barely
+moved). That one spends real tokens/time; this one was free.
