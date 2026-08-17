@@ -759,9 +759,23 @@ const char *research_run_execute(struct session *s,
             stop_reason = RESEARCH_STOP_FAILED;
             break;
          }
-      } else {
-         fail_streak = 0;
+         /* A failed dispatch (transient network / provider error) produced NO tool
+          * calls and NO coverage change — it is NOT a legitimate "dry round".  Skip
+          * the coverage / saturation / stop-decision logic entirely and go straight
+          * to the next round: otherwise a single-round outage reads as zero progress
+          * and trips `saturation` (default saturation_rounds=1) BEFORE the fail-streak
+          * threshold, mis-disposing a network-dead run as a natural-end `done` with an
+          * empty report.  If the outage persists, the streak hits the FAILED break
+          * above (→ job `failed`); if the network recovers, fail_streak resets below
+          * and the run continues normally.  (Observed live: a ~50s outage mid-run
+          * produced a `saturation`/`done` run with 0 claims and input_tokens=0.) */
+         OLOG_WARNING(
+             "research: run %lld round %d dispatch failed (streak %d/%d) — round skipped, not "
+             "counted toward saturation",
+             (long long)run_id, round, fail_streak, RESEARCH_MAX_CONSECUTIVE_FAILURES);
+         continue;
       }
+      fail_streak = 0;
 
       /* Meter running totals from the session metrics (they accumulate across
        * rounds; `queries` counts LLM round-trips — a loose proxy for tool
@@ -913,7 +927,17 @@ const char *research_run_execute(struct session *s,
    session_set_input_token_ceiling(s, 0);
 
    if (!stop_reason) {
-      stop_reason = RESEARCH_STOP_BUDGET; /* completed max_rounds without an earlier stop */
+      /* Completed max_rounds without an earlier stop.  But if the final round(s)
+       * failed on transient errors AND the run recorded NOTHING, it exhausted its
+       * budget doing nothing but fail — that is `failed`, not a legitimate
+       * budget-exhausted run.  Closes the max_rounds < RESEARCH_MAX_CONSECUTIVE_FAILURES
+       * edge where an all-failed run never reaches the streak FAILED break (so the
+       * whole "network-dead run reads as a natural-end success" bug class is closed,
+       * not just the default max_rounds=6 case). */
+      int final_claims = 0;
+      research_db_claim_count(run_id, &final_claims);
+      stop_reason = (fail_streak > 0 && final_claims == 0) ? RESEARCH_STOP_FAILED
+                                                           : RESEARCH_STOP_BUDGET;
    }
 
    /* Synthesize: render the report from the persisted claims, store it as the
