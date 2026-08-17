@@ -1385,6 +1385,47 @@ gather + ported prompt) reproduced it and slightly beat offline-B — task 51 ov
 0.512→**0.525**, **every dimension up vs. A, readability now up** (the guard worked). Zero extra gather cost
 — the lift came entirely from evidence already recorded.
 
-**Not done here** (deliberate, separate cost decision): gather-side depth (more sources/rounds — `min_sources`)
-for the *remaining* comprehensiveness ceiling, visible on evidence-thin tasks like 85 (piezo hardware, barely
-moved). That one spends real tokens/time; this one was free.
+**Gather-depth (`min_sources` 2→3) — TESTED & DECLINED (2026-08-17). Do not re-try without new evidence.**
+Clean A/B on the 3 evidence-thin tasks (85/66/87), comp-max synthesis held constant, only `min_sources`
+varied. Mean overall +0.007, but noisy and one-task-driven (87 +0.016; 66 flat; 85 +0.004), **within the
+run-to-run variance** we measured, and it costs **~+15% input tokens on every run, permanently** (min_sources
+is global). Decisively, it did **not** move the ceiling: task 85 (precision-piezo hardware) went 0.469→0.473,
+still below parity, **despite min_sources=3 giving it 39 distinct sources and 12-of-12 questions answered.**
+Conclusion: **the residual comprehensiveness ceiling on hard tasks is topic/reference difficulty, not
+gather-starvation** — no gather knob we have moves it. `dawn.toml` reverted to `min_sources = 2`. The tuning
+workstream is complete: comp-max (free, broad) shipped; gather-depth (expensive, marginal, non-ceiling) declined.
+
+## 18. Search backend — Tavily vs. SearXNG (measured 2026-08-17)
+
+Deep research is only as good as its evidence, so "which search backend?" is a first-order quality question.
+Measured with the §16 harness (Sonnet 5, comp-max synthesis, 5-task DeepResearch-Bench subset, gpt-5.5 RACE /
+gpt-5.4-mini FACT). **SearXNG version 2026.8.17**, tuned (see below).
+
+| Axis | Tavily | SearXNG (2026.8.17, tuned) |
+|---|---|---|
+| Sources gathered (mean/run) | 34 (consistent 30–37) | 26 (erratic 11–46) |
+| RACE report quality | 0.499 | 0.482 (~97% of Tavily) |
+| FACT citation validity | 0.795 | **0.882** |
+| Latency per query (warm) | ~2.3s | ~0.55s (cold 5–8s) |
+
+**Findings:** Tavily gathers more + more consistent sources and is modestly better on RACE (direction-consistent
+across 4/5 tasks, above the ±0.007 noise floor), pulling clearly ahead only on **niche/technical topics** (task
+85, piezo hardware: SearXNG dropped 0.078). SearXNG is competitive on mainstream topics, faster per query, and
+*more* citation-accurate (its bing/google sources verify more cleanly than Tavily's niche snippets). Net: Tavily
+for best quality/zero-ops; SearXNG a legitimate free/local/private alternative at ~3% quality cost.
+
+**Two operational findings from the run (both fixed):**
+1. **SearXNG's default ~3s `request_timeout` times out the major engines → near-empty results**, which silently
+   breaks the Tavily→SearXNG fallback. Fix = an `outgoing.request_timeout: 8.0` block in `settings.yml` (now in
+   the GETTING_STARTED.md template). Mandatory for a working SearXNG or fallback.
+2. **A mid-run network outage was mis-disposed** — a research run whose rounds all failed on transient
+   provider/network errors terminated `saturation` → job `done` with an empty report (`input_tokens=0`), because
+   a failed round fed the coverage/saturation logic as a "dry round." Fixed in `research_run_loop.c`: a failed
+   dispatch now skips the round's coverage/stop-decision entirely (not counted toward saturation); persistent
+   failures hit the existing `RESEARCH_MAX_CONSECUTIVE_FAILURES` → `failed` break, and a recovered network resets
+   the streak and continues.
+
+**Fallback recommendation:** run **Tavily primary + a *tuned* SearXNG fallback**. Because tuned SearXNG is only
+~3% behind, the automatic degradation on the free Tavily tier's rate limit is cheap — so there is deliberately
+**no** "pace requests under the Tavily limit" (block-and-pace) mode; the fallback is good enough that the
+complexity isn't warranted. See GETTING_STARTED.md § Tavily for the full user-facing writeup.
