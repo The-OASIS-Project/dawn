@@ -72,6 +72,42 @@ static int64_t research_active_run(int *round_out) {
    return run_id;
 }
 
+/* Coerce a model-supplied object field to a JSON array, tolerating a STRINGIFIED
+ * array.  Some local models (Qwen3.x via llama.cpp, observed on run 10) double-
+ * encode array args as a JSON string containing the array —
+ * {"questions":"[\"a\",\"b\"]"} instead of {"questions":["a","b"]} — copying the
+ * stringified-`details`/`value` convention other DAWN tools use.  A strict
+ * json_type_array check rejects every such call, so the run plans nothing and
+ * saturates over an empty ledger.  Mirrors the tolerant question_id parse below.
+ *
+ * Returns the array (json_type_array) or NULL.  When the tolerated string form is
+ * re-parsed, *reparsed is set to a NEW object the caller must json_object_put()
+ * (it is independent of `root`); otherwise *reparsed is NULL and the returned
+ * array is borrowed from `root`. */
+static struct json_object *research_field_as_array(struct json_object *root,
+                                                   const char *key,
+                                                   struct json_object **reparsed) {
+   *reparsed = NULL;
+   struct json_object *val = NULL;
+   if (!json_object_object_get_ex(root, key, &val)) {
+      return NULL;
+   }
+   if (json_object_is_type(val, json_type_array)) {
+      return val;
+   }
+   if (json_object_is_type(val, json_type_string)) {
+      struct json_object *inner = json_tokener_parse(json_object_get_string(val));
+      if (inner != NULL && json_object_is_type(inner, json_type_array)) {
+         *reparsed = inner;
+         return inner;
+      }
+      if (inner != NULL) {
+         json_object_put(inner);
+      }
+   }
+   return NULL;
+}
+
 /* =============================================================================
  * research_plan — seed the coverage ledger
  * ============================================================================= */
@@ -100,7 +136,8 @@ static char *research_plan_callback(const char *action, char *value, int *should
           "research_mark_unanswerable, or call research_conclude if you're done.");
    }
    if (!value || value[0] == '\0') {
-      return strdup("Error: research_plan needs a JSON object: {\"questions\": [\"...\"]}.");
+      return strdup("Error: research_plan needs a JSON array of sub-question strings, e.g. "
+                    "[\"question 1\", \"question 2\"].");
    }
 
    struct json_object *root = json_tokener_parse(value);
@@ -108,11 +145,23 @@ static char *research_plan_callback(const char *action, char *value, int *should
       return strdup("Error: research_plan arguments were not valid JSON.");
    }
 
+   /* `questions` maps_to VALUE, so the tool marshaller (llm_tools.c) delivers
+    * `value` as the questions payload itself via json_object_get_string() — which
+    * normalizes both a real array AND a stringified array to the array TEXT.  So
+    * the parsed root is normally the BARE ARRAY ["q1","q2",...] (this is why a
+    * key-lookup for "questions" always missed).  Tolerate that common shape, plus
+    * the legacy nested object {"questions":[...]} and a stringified inner array. */
+   struct json_object *questions_owned = NULL;
    struct json_object *questions = NULL;
-   if (!json_object_object_get_ex(root, "questions", &questions) ||
-       !json_object_is_type(questions, json_type_array)) {
+   if (json_object_is_type(root, json_type_array)) {
+      questions = root; /* borrowed from root */
+   } else if (json_object_is_type(root, json_type_object)) {
+      questions = research_field_as_array(root, "questions", &questions_owned);
+   }
+   if (questions == NULL) {
       json_object_put(root);
-      return strdup("Error: research_plan needs a \"questions\" array of sub-question strings.");
+      return strdup("Error: research_plan needs a JSON array of sub-question strings, "
+                    "e.g. [\"question 1\", \"question 2\"].");
    }
 
    /* Accumulate the "[qID] text" list of what was added, so the model can attach
@@ -150,6 +199,9 @@ static char *research_plan_callback(const char *action, char *value, int *should
       }
    }
    json_object_put(root);
+   if (questions_owned != NULL) {
+      json_object_put(questions_owned); /* independent of root when the string form was re-parsed */
+   }
 
    char buf[1024 + 256];
    if (added == 0) {
@@ -327,12 +379,11 @@ static char *research_record_callback(const char *action, char *value, int *shou
 static const treg_param_t research_plan_params[] = {
    {
        .name = "questions",
-       .description =
-           "JSON object {\"questions\": [\"sub-question 1\", \"sub-question 2\", ...]} — "
-           "the specific open questions this research must answer.  Add concrete, "
-           "independently-answerable sub-questions as you discover the shape of the "
-           "topic.  Question STATUS is tracked automatically from source coverage; you "
-           "do not mark questions answered.",
+       .description = "A JSON array of sub-question strings, e.g. [\"What is X?\", \"How does Y "
+                      "work?\"] — the specific open questions this research must answer.  Add "
+                      "concrete, independently-answerable sub-questions as you discover the shape "
+                      "of the topic.  Question STATUS is tracked automatically from source "
+                      "coverage; you do not mark questions answered.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = true,
        .maps_to = TOOL_MAPS_TO_VALUE,
