@@ -781,9 +781,24 @@ routes a request to `deep_research`, the `start` action's first step is a **pre-
    yes, so it is load-bearing, not decoration.
 3. **Spawn only on confirmation.**
 
-This reuses DAWN's existing two-step-confirm pattern (email send, phone dial). The one exception is a **P4
-SAGE-triggered** run, which is governed by the watch's own configured policy rather than an interactive
-confirm.
+**Mechanism — a real two-call handshake at email-parity, not a model-authored boolean** (hardened 2026-08-18
+after a code-review flagged that a bare `confirm=true` is model-self-asserted). The unconfirmed `start` mints a
+random, single-use, user-bound, 10-minute-TTL **pending token** (7-byte `randombytes_buf`, byte-identical to
+email's `generate_draft_id`), stashes the *exact* proposed run (brief / deliver_to / parent), and returns the
+token in the proposal; the confirmed `start` must present that token and spawns the **stored** brief — never the
+confirm-call's args, so there's no propose-innocuous-then-confirm-malicious — with a 3-fail/60s throttle. A lone
+self-asserted `confirm=true` with no valid token (including one produced by a prompt injection) spawns nothing.
+This is the same mechanism as email send/trash (`email_service.c`).
+
+**Honest scope.** Like email's, the token is *relayed through the model*, so this is a **cost guardrail** (it
+stops an un-proposed paid run), **not** proof-of-human-consent — a compromised model that also sees the proposal
+could relay the token. The durable consent control for outward/irreversible tools is the per-session
+**capability mask** ([§11](#11-security--untrusted-content-in-an-autonomous-loop-locked)); deep_research's actual
+security boundary is the §11 sandbox (read-only allowlist + no `reinvoke_parent`), and the hard kill switch is
+`[research] enabled`.
+
+The one exception is a **P4 SAGE-triggered** run, which is governed by the watch's own configured policy rather
+than an interactive confirm.
 
 **Completion & the originating chat.** Yes — the chat a run was started from is notified on completion, the
 same observe-side mechanism a `job` uses: the sidebar shows a done/unread indicator on the run (and the
