@@ -71,7 +71,9 @@ typedef struct {
  * @param is_global Whether document should be visible to all users
  * @param original_blob_id Stored original-file blob id (NULL if none, e.g. notes
  *                         and the LLM tool path)
- * @param out Result struct (always populated)
+ * @param out Result struct (always populated). On DOC_INDEX_ERROR_DUPLICATE,
+ *            out->doc_id carries the EXISTING document's id (not -1) so a caller
+ *            can adopt the already-stored copy; on every other error it is -1.
  * @return DOC_INDEX_SUCCESS or error code
  */
 int document_index_text(int user_id,

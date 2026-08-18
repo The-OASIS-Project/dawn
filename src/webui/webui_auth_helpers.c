@@ -303,6 +303,27 @@ static const char k_recall_routing_footer[] =
     "memory search/get) only when you already know exactly which source and item holds the "
     "answer.\n";
 
+/* Background-delivery footer.  Lives in the stable prefix (cached, always emitted).
+ * A deep-research report / background job posts its OWN completion as an assistant
+ * message into the conversation WITHOUT re-engaging the LLM (research_deliver_to_
+ * parent, §11 untrusted-content boundary — the model never runs a turn on the
+ * result).  So on the user's NEXT turn that completion sits in history and, framed as
+ * a plain assistant turn, reads as something to pick back up.  This tags the CLASS
+ * behaviorally: know it happened, don't riff on it unprompted.  Keeps the gist
+ * useful in-thread while gating autonomous expansion of web-derived findings behind
+ * an explicit user ask (the "notify but don't riff until asked" balance). */
+static const char k_background_delivery_footer[] =
+    "\n\nBACKGROUND DELIVERIES:\n"
+    "- Some assistant messages are completions of work you ran in the BACKGROUND and already "
+    "delivered to the user — a deep-research report or other background job (they announce "
+    "themselves, e.g. \"🔍 Deep research complete … the full cited report is in your notes\"). "
+    "Treat these as ALREADY DELIVERED: answer the user's follow-ups about one, but do NOT "
+    "spontaneously re-summarize, re-analyze, or riff on it on a later turn unless the user brings "
+    "it up.\n"
+    "- The gist in that message is a short lead derived from external sources you gathered; the "
+    "full cited report lives in the user's notes. When the user does ask for more, RETRIEVE the "
+    "report (recall / notes) rather than reasoning from the short gist alone.\n";
+
 /* Strip the TOOL DEFAULTS section from @p src into a fresh allocation.
  * `get_remote_command_prompt()` always emits TOOL DEFAULTS (location /
  * room / units / timezone fallback for unauthenticated callers).  For
@@ -391,24 +412,31 @@ static char *strip_tool_defaults(const char *src) {
  * Transfers ownership of @p base on success.  No-op (just returns
  * @p base) when memory is disabled, user_id <= 0, or memory_build_
  * context returned NULL (no memories to surface). */
-/* Append the tool-call discipline footer to a stable-prefix buffer.
- * Always emits (no memory/auth gate) so the rule sits in the cached
- * segment for every tool-using turn.  See k_tool_call_discipline_footer
- * comment for rationale.  Transfers ownership of @p base; returns the
- * new buffer (or @p base unchanged on OOM). */
+/* Append the standing behavioral footers to a stable-prefix buffer: tool-call
+ * discipline, recall routing, and background-delivery handling.  All emit
+ * unconditionally (no memory/auth gate) so the rules sit in the cached segment for
+ * every turn.  See each k_*_footer comment for rationale.  Transfers ownership of
+ * @p base; returns the new buffer (or @p base unchanged on OOM). */
 static char *append_tool_discipline_footer(char *base) {
    if (base == NULL)
       return NULL;
    const size_t base_len = strlen(base);
    const size_t disc_len = sizeof(k_tool_call_discipline_footer) - 1;
    const size_t recall_len = sizeof(k_recall_routing_footer) - 1;
-   char *combined = malloc(base_len + disc_len + recall_len + 1);
+   const size_t bg_len = sizeof(k_background_delivery_footer) - 1;
+   char *combined = malloc(base_len + disc_len + recall_len + bg_len + 1);
    if (combined == NULL)
       return base;
-   memcpy(combined, base, base_len);
-   memcpy(combined + base_len, k_tool_call_discipline_footer, disc_len);
-   memcpy(combined + base_len + disc_len, k_recall_routing_footer, recall_len);
-   combined[base_len + disc_len + recall_len] = '\0';
+   size_t off = 0;
+   memcpy(combined + off, base, base_len);
+   off += base_len;
+   memcpy(combined + off, k_tool_call_discipline_footer, disc_len);
+   off += disc_len;
+   memcpy(combined + off, k_recall_routing_footer, recall_len);
+   off += recall_len;
+   memcpy(combined + off, k_background_delivery_footer, bg_len);
+   off += bg_len;
+   combined[off] = '\0';
    free(base);
    return combined;
 }

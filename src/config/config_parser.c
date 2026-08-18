@@ -1783,6 +1783,83 @@ void config_clamp_jobs(jobs_config_t *config) {
       config->max_runtime_sec = 0;
 }
 
+void config_clamp_research(research_config_t *config) {
+   if (!config) {
+      return;
+   }
+   if (config->max_rounds < 1)
+      config->max_rounds = 1;
+   if (config->max_rounds > 100)
+      config->max_rounds = 100;
+   if (config->max_tool_calls < 1)
+      config->max_tool_calls = 1;
+   if (config->max_tool_calls > 1000)
+      config->max_tool_calls = 1000;
+   if (config->max_input_tokens < 1000)
+      config->max_input_tokens = 1000;
+   if (config->max_input_tokens > 100000000) /* 100M tokens — sanity ceiling */
+      config->max_input_tokens = 100000000;
+   if (config->round_digest_max_chars < 256)
+      config->round_digest_max_chars = 256;
+   if (config->round_digest_max_chars > 65536)
+      config->round_digest_max_chars = 65536;
+   if (config->min_sources < 1)
+      config->min_sources = 1;
+   if (config->min_sources > 100)
+      config->min_sources = 100;
+   if (config->saturation_rounds < 0) /* 0 = disable the saturation stop */
+      config->saturation_rounds = 0;
+   if (config->saturation_rounds > 100) /* sanity ceiling; > max_rounds is inert anyway */
+      config->saturation_rounds = 100;
+   if (config->plan_freeze_round < 1) /* min 1 so round-1 planning always works */
+      config->plan_freeze_round = 1;
+   if (config->plan_freeze_round > 100) /* >= max_rounds effectively disables the freeze */
+      config->plan_freeze_round = 100;
+   if (config->stale_rounds < 0) /* 0 = disable stale-question auto-retirement */
+      config->stale_rounds = 0;
+   if (config->stale_rounds > 100) /* sanity ceiling; > max_rounds is inert anyway */
+      config->stale_rounds = 100;
+   if (config->critic_max_rearm < 0) /* 0 = disable the completeness critic */
+      config->critic_max_rearm = 0;
+   if (config->critic_max_rearm > 10) /* sanity ceiling; each re-arm still costs an LLM turn */
+      config->critic_max_rearm = 10;
+}
+
+static void parse_research(toml_table_t *table, research_config_t *config) {
+   if (!table)
+      return;
+
+   static const char *const known_keys[] = { "enabled",
+                                             "max_rounds",
+                                             "max_tool_calls",
+                                             "max_input_tokens",
+                                             "round_digest_max_chars",
+                                             "min_sources",
+                                             "saturation_rounds",
+                                             "plan_freeze_round",
+                                             "stale_rounds",
+                                             "critic_max_rearm",
+                                             "completion_commentary",
+                                             "capture_revisions",
+                                             NULL };
+   warn_unknown_keys(table, "research", known_keys);
+
+   PARSE_BOOL(table, "enabled", config->enabled);
+   PARSE_INT(table, "max_rounds", config->max_rounds);
+   PARSE_INT(table, "max_tool_calls", config->max_tool_calls);
+   PARSE_INT(table, "max_input_tokens", config->max_input_tokens);
+   PARSE_INT(table, "round_digest_max_chars", config->round_digest_max_chars);
+   PARSE_INT(table, "min_sources", config->min_sources);
+   PARSE_INT(table, "saturation_rounds", config->saturation_rounds);
+   PARSE_INT(table, "plan_freeze_round", config->plan_freeze_round);
+   PARSE_INT(table, "stale_rounds", config->stale_rounds);
+   PARSE_INT(table, "critic_max_rearm", config->critic_max_rearm);
+   PARSE_BOOL(table, "completion_commentary", config->completion_commentary);
+   PARSE_BOOL(table, "capture_revisions", config->capture_revisions);
+
+   config_clamp_research(config);
+}
+
 static void parse_jobs(toml_table_t *table, jobs_config_t *config) {
    if (!table)
       return;
@@ -2101,6 +2178,7 @@ int config_parse_file(const char *path, dawn_config_t *config) {
    parse_music(toml_table_in(root, "music"), &config->music);
    parse_scheduler(toml_table_in(root, "scheduler"), &config->scheduler);
    parse_jobs(toml_table_in(root, "jobs"), &config->jobs);
+   parse_research(toml_table_in(root, "research"), &config->research);
    parse_calendar(toml_table_in(root, "calendar"), &config->calendar);
    parse_messaging(toml_table_in(root, "messaging"), &config->messaging);
    parse_ota(toml_table_in(root, "ota"), &config->ota);

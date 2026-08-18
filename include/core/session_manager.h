@@ -423,6 +423,44 @@ typedef struct session {
    // Cleared before a job dispatches so a pooled session can't read a stale value.
    char last_finish_reason[32];
 
+   // Deep-research context (DEEP_RESEARCH_DESIGN.md §4a/§7/§11).  Set by the
+   // research controller on its bare job session; 0 = not a research session.
+   // When research_run_id > 0 the tool layer enforces the read-only research
+   // allowlist (search / url_fetch / research_plan / research_record ONLY, at
+   // BOTH schema advertisement and execution — is_tool_enabled_for_session), and
+   // the research_plan/research_record tools write to this run.  research_round
+   // is the current round, stamped onto recorded claims (diagnostics).
+   // Single-writer (the research controller, between dispatches), but READ during a
+   // dispatch on parallel native-tool worker threads that share the session's
+   // command context — a genuine cross-thread read.  Atomic (not merely aligned) so
+   // consistency does not rely on the single-writer discipline being preserved: it
+   // matches the sibling research_concluded/tools_suppressed flags and stays correct
+   // if a future change ever writes from a second thread.  Access via atomic_load/
+   // atomic_store, never a raw field read.
+   _Atomic int64_t research_run_id;
+   _Atomic int research_round;
+   // research_conclude signal: the agent's own "I've covered the brief" flag.
+   // WRITTEN by a tool-worker thread (research_conclude callback), READ by the
+   // controller after core_text_input_dispatch returns (which joins the tool
+   // workers, giving the happens-before edge).  Atomic because the writer is a
+   // DIFFERENT thread from the reader (unlike research_run_id, single-writer on the
+   // controller): concurrent research_conclude calls store the same value.  The
+   // controller weighs it as ONE input to the deterministic stop decision — the
+   // agent never OWNS the stop (§6), it only advises.
+   atomic_bool research_concluded;
+   // No-tools turn: while set, is_tool_enabled_for_session() denies EVERY tool, so
+   // the turn is structurally pure text.  Domain-neutral (the shared tool gate reads
+   // it without knowing "research"); the deep-research controller sets it around its
+   // final synthesis turn (write the report from the ledger, fetch nothing more).
+   atomic_bool tools_suppressed;
+   // Cumulative-session input-token ceiling for the tool loop (0 = unlimited).  When
+   // > 0, llm_tool_iteration_loop stops the turn once the session's total input
+   // tokens reach it — bounding a single multi-tool turn's spend so it can't blow far
+   // past a budget between round boundaries (the deep-research per-round overshoot).
+   // Single-writer (the research controller, set before a round dispatch, cleared
+   // before synthesis); read on the dispatch thread at loop-params construction.
+   int64_t input_token_ceiling;
+
    // Streaming metrics for UI visualization
    uint64_t stream_start_ms;     // Timestamp when LLM call started
    uint64_t first_token_ms;      // Timestamp of first token (0 if none yet)
@@ -558,6 +596,87 @@ static inline void session_begin_turn_flags(session_t *s) {
    if (s != NULL && !atomic_load(&s->being_destroyed)) {
       atomic_store(&s->disconnected, false);
       atomic_store(&s->cancel_requested, false);
+   }
+}
+
+/**
+ * True if this session runs a BACKGROUND turn — one that must break only on its
+ * own cancel flag, NOT the global wake-word / Ctrl+C interrupt (which is the
+ * foreground voice barge-in).  Single source of truth for that classification:
+ * the tool loop's is_background, the transfer-level honor_global opt-out
+ * (llm_set_cancel_flag_ex), and any future consumer derive from HERE, so the
+ * two layers of the isolation policy cannot drift.  Today that is exactly the
+ * job/research pool (SESSION_TYPE_JOB); when a second background context lands
+ * (e.g. a live reinvoke on a foreground session), widen this ONE predicate.
+ */
+static inline bool session_is_background(const session_t *s) {
+   return s != NULL && s->type == SESSION_TYPE_JOB;
+}
+
+/**
+ * @brief Mark @p session as a deep-research fetch session (or clear it).
+ *
+ * @param run_id  research_runs.id this session's research_plan/research_record
+ *                calls write to; > 0 also enables the read-only research tool
+ *                allowlist for the session.  0 clears research mode.
+ * @param round   current research round, stamped onto recorded claims.
+ *
+ * Single-writer: only the research controller (on its own bare job session)
+ * calls this, set-before / cleared-after each dispatch.  The read is multi-thread
+ * (parallel tool-worker threads share this session's command context); the fields
+ * are atomic so a consistent read holds regardless of the writer discipline.
+ */
+static inline void session_set_research_context(session_t *session, int64_t run_id, int round) {
+   if (session != NULL) {
+      atomic_store(&session->research_run_id, run_id);
+      atomic_store(&session->research_round, round);
+   }
+}
+
+/**
+ * @brief Raise the agent's research_conclude signal on @p session (called from the
+ *        research_conclude tool callback, i.e. a tool-worker thread).
+ */
+static inline void session_research_mark_concluded(session_t *session) {
+   if (session != NULL) {
+      atomic_store(&session->research_concluded, true);
+   }
+}
+
+/** @brief Has the agent signalled research_conclude on @p session? */
+static inline bool session_research_is_concluded(session_t *session) {
+   return session != NULL && atomic_load(&session->research_concluded);
+}
+
+/** @brief Clear the research_conclude signal (controller, at run start). */
+static inline void session_research_reset_concluded(session_t *session) {
+   if (session != NULL) {
+      atomic_store(&session->research_concluded, false);
+   }
+}
+
+/** @brief Suppress/restore ALL tools for @p session (a no-tools generation turn). */
+static inline void session_set_tools_suppressed(session_t *session, bool on) {
+   if (session != NULL) {
+      atomic_store(&session->tools_suppressed, on);
+   }
+}
+
+/** @brief Are all tools suppressed for @p session (a no-tools turn)?
+ *  NB: distinct from llm_tools.c's thread-local llm_tools_suppressed() (a
+ *  suppress-COUNT for internal utility LLM calls) — this is a per-session gate. */
+static inline bool session_tools_suppressed(session_t *session) {
+   return session != NULL && atomic_load(&session->tools_suppressed);
+}
+
+/**
+ * @brief Set the cumulative-session input-token ceiling for the tool loop
+ *        (0 = unlimited).  Single-writer: the research controller, before a round
+ *        dispatch; cleared to 0 before synthesis.
+ */
+static inline void session_set_input_token_ceiling(session_t *session, int64_t ceiling) {
+   if (session != NULL) {
+      session->input_token_ceiling = ceiling;
    }
 }
 
@@ -1667,6 +1786,17 @@ void session_record_query(session_t *session,
                           double llm_ttft_ms,
                           double llm_total_ms,
                           bool is_error);
+
+/**
+ * @brief Sum the session's running input-token and query totals across providers.
+ *
+ * Owns the metrics_mutex + the provider loop so callers (the deep-research
+ * controller's per-round metering, the job worker) don't reach into the metrics
+ * internals or the lock directly.  Either out-pointer may be NULL.
+ *
+ * @locks session->metrics_mutex
+ */
+void session_metrics_totals(session_t *session, uint64_t *tokens_in_out, uint32_t *queries_out);
 
 /**
  * @brief Record ASR timing for session metrics

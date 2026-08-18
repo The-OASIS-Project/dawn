@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include "config/dawn_config.h"
+#include "config/research_defaults.h" /* RESEARCH_DEFAULT_* — single source for [research] defaults */
 #include "memory/memory_db.h"
 
 /* =============================================================================
@@ -592,6 +593,23 @@ void config_set_defaults(dawn_config_t *config) {
    config->jobs.max_runtime_sec = 1800;
    config->jobs.event_chunk_cap = 16384;
    config->jobs.event_retention_days = 30;
+
+   /* Deep research — master switch OFF by default (opt-in; the tool is compiled in
+    * but refuses until enabled).  Budgets come from the SHARED RESEARCH_DEFAULT_*
+    * constants (config/research_defaults.h), the same source research_budgets_defaults()
+    * uses — config default and compile-time fallback cannot drift. */
+   config->research.enabled = false;
+   config->research.max_rounds = RESEARCH_DEFAULT_MAX_ROUNDS;
+   config->research.max_tool_calls = RESEARCH_DEFAULT_MAX_TOOL_CALLS;
+   config->research.max_input_tokens = RESEARCH_DEFAULT_MAX_INPUT_TOKENS;
+   config->research.round_digest_max_chars = RESEARCH_DEFAULT_ROUND_DIGEST_MAX_CHARS;
+   config->research.min_sources = RESEARCH_DEFAULT_MIN_SOURCES;
+   config->research.saturation_rounds = RESEARCH_DEFAULT_SATURATION_ROUNDS; /* enforced (§6) */
+   config->research.plan_freeze_round = RESEARCH_DEFAULT_PLAN_FREEZE_ROUND; /* enforced (§6) */
+   config->research.stale_rounds = RESEARCH_DEFAULT_STALE_ROUNDS;           /* enforced (§6.3) */
+   config->research.critic_max_rearm = RESEARCH_DEFAULT_CRITIC_MAX_REARM; /* enforced (§6 item 4) */
+   config->research.completion_commentary = true; /* enforced (§8); JARVIS report-back on */
+   config->research.capture_revisions = false;    /* debug, not yet enforced */
 
    /* Proactive attention (SAGE) — master switch OFF by default (opt-in). Watch
     * rules are DB-backed, not config. Numeric defaults mirror the module's

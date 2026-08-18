@@ -52,6 +52,19 @@ extern "C" {
 #define CONV_EVENT_COMPLETE "complete"
 #define CONV_EVENT_RESUME \
    "resume" /* boundary marker when an interrupted/failed/cancelled job restarts */
+/* Deep-research observe/replay (§10): a per-round progress snapshot, one per
+ * recorded evidence claim, and a terminal stop with the controller's reason. */
+#define CONV_EVENT_RESEARCH_ROUND "research_round"
+#define CONV_EVENT_RESEARCH_CLAIM "research_claim"
+#define CONV_EVENT_RESEARCH_STOP "research_stop"
+/* The agent's own signals: it judged the brief covered (research_conclude) or a
+ * sub-question unanswerable (research_mark_unanswerable) — so the agent-judgment
+ * path is visible in the panel, not just inferred from the terminal stop reason. */
+#define CONV_EVENT_RESEARCH_CONCLUDE "research_conclude"
+#define CONV_EVENT_RESEARCH_UNANSWERABLE "research_unanswerable"
+/* The completeness critic's verdict at a natural-end stop: stop (confirmed) or
+ * continue (re-armed with N new gap sub-questions). */
+#define CONV_EVENT_RESEARCH_CRITIC "research_critic"
 
 /**
  * @brief Persist one event and fan it out to the owner's attached clients.

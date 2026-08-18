@@ -503,8 +503,28 @@
    font-weight: 600;
 }
 
+/* Research progress TRAIL: a run emits a per-round marker + one row per finding
+ * (~35). The default centered, bordered, fit-content pill is a one-shot-status
+ * treatment; reused for a trail it stacks ~35 boxes marching down the transcript.
+ * This modifier makes those rows read as a left-aligned list instead: full-width,
+ * un-boxed, tight vertical rhythm. The tone glyph (::before ✓/—) stays as the row
+ * marker. */
+.agent-event-line {
+   width: auto;
+   max-width: 100%;
+   margin: 2px 0;
+   padding: 2px 0;
+   border: none;
+   background: none;
+   text-align: left;
+   font-weight: 400;
+}
+
 .agent-event-ok {
-   color: var(--success); /* #22c55e on --bg-tertiary ≈ 5.9:1 — passes AA */
+   /* #22c55e on the boxed pill's --bg-tertiary ≈ 5.9:1; on the un-boxed
+    * .agent-event-line trail (background:none → the transcript's --bg-secondary,
+    * #1b1f24) ≈ 7.3:1 — both pass AA. */
+   color: var(--success);
    border-color: var(--success-subtle);
 }
 .agent-event-ok::before {
@@ -520,8 +540,22 @@
 }
 
 .agent-event-muted {
-   color: var(--text-secondary); /* not --text-tertiary — see jobs.css contrast note above */
+   /* not --text-tertiary — see contrast note above. #7b8794 on the trail's
+    * --bg-secondary ≈ 4.5:1, passes AA for body text. */
+   color: var(--text-secondary);
 }
 .agent-event-muted::before {
    content: '\2014'; /* — */
+}
+
+/* Research ROUND header: anchors the group of claim rows beneath it. Brighter +
+ * heavier than the muted claim rows, with a filled marker and a little top space so
+ * the trail reads as grouped rounds rather than one undifferentiated list. */
+.agent-event-round {
+   color: var(--text-primary);
+   font-weight: 600;
+   margin-top: 8px;
+}
+.agent-event-round::before {
+   content: '\25B8'; /* ▸ */
 }

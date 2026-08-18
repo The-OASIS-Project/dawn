@@ -255,6 +255,20 @@ typedef enum {
    ADMIN_MSG_OTA_ROLLOUT_STATUS = 0xC4, /**< current/last rollout status (no payload) */
    ADMIN_MSG_OTA_ROLLOUT_ABORT = 0xC5,  /**< abort an in-progress rollout (no payload) */
    /* Next free OTA opcode: 0xC6.  (Range ends 0xCF.) */
+
+   /* Deep-research operator surface — the HEADLESS benchmark spawn path
+    * (DEEP_RESEARCH_DESIGN.md §16).  Trusts SO_PEERCRED like the OTA/messaging
+    * operator commands (no admin-auth prefix).  Range 0xE0..0xEF reserved.
+    * Wire formats (little-endian):
+    *   RESEARCH_START:  [user_id i32][brief bytes; len = payload_len-4, < 2048]
+    *   RESEARCH_STATUS: [user_id i32][run_id i64]
+    *   RESEARCH_CANCEL: [user_id i32][run_id i64]
+    * user_id is REQUIRED and validated against a real account (§16.4); mode is
+    * forced to web; start is gated on [research].enabled. */
+   ADMIN_MSG_RESEARCH_START = 0xE0,  /**< spawn a research run headlessly */
+   ADMIN_MSG_RESEARCH_STATUS = 0xE1, /**< machine-readable run status line */
+   ADMIN_MSG_RESEARCH_CANCEL = 0xE2, /**< cancel a run at its next round boundary */
+   /* Next free research opcode: 0xE3.  (Range ends 0xEF.) */
 } admin_msg_type_t;
 
 /**
@@ -277,10 +291,14 @@ typedef enum {
 /**
  * @brief Maximum payload size in bytes.
  *
- * Setup token is 24 bytes (DAWN-XXXX-XXXX-XXXX-XXXX).
- * 256 bytes provides room for future expansion.
+ * Sized to carry a full research brief (RESEARCH_BRIEF_MAX = 2048) plus the
+ * headless-spawn header field (DEEP_RESEARCH_DESIGN.md §16 — the largest verb
+ * payload by far; every other command is well under 256 bytes).  The wire
+ * payload_len is a uint16, so this is a receive-buffer bound, not a protocol
+ * limit; on the local SO_PEERCRED-gated socket a larger frame from an already-
+ * privileged caller grants no new capability.
  */
-#define ADMIN_MSG_MAX_PAYLOAD 256
+#define ADMIN_MSG_MAX_PAYLOAD 2560
 
 /**
  * @brief Message header size in bytes.

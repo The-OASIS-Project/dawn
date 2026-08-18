@@ -320,3 +320,147 @@ char *event_payload_spawn(int64_t child_conv_id, const char *title) {
    json_object_put(root);
    return out;
 }
+
+char *event_payload_research_round(int round,
+                                   int questions_closed,
+                                   int questions_total,
+                                   int tool_calls,
+                                   int64_t input_tokens) {
+   struct json_object *root = json_object_new_object();
+   if (root == NULL) {
+      return NULL;
+   }
+   json_object_object_add(root, "round", json_object_new_int(round));
+   json_object_object_add(root, "questions_closed", json_object_new_int(questions_closed));
+   json_object_object_add(root, "questions_total", json_object_new_int(questions_total));
+   json_object_object_add(root, "tool_calls", json_object_new_int(tool_calls));
+   json_object_object_add(root, "input_tokens", json_object_new_int64(input_tokens));
+   const char *rendered = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+   char *out = rendered ? strdup(rendered) : NULL; /* all-integer: no sanitize needed */
+   json_object_put(root);
+   return out;
+}
+
+char *event_payload_research_claim(int round,
+                                   int64_t question_id,
+                                   const char *source_url,
+                                   const char *source_kind,
+                                   const char *claim) {
+   struct json_object *root = json_object_new_object();
+   if (root == NULL) {
+      return NULL;
+   }
+   json_object_object_add(root, "round", json_object_new_int(round));
+   json_object_object_add(root, "question_id", json_object_new_int64(question_id));
+   /* Cap source_url/source_kind before embedding (the claim is truncate_middle'd
+    * below; these two were previously embedded whole).  A URL over ~1 KB or a
+    * multi-KB "kind" is model-output-bounded but has no legitimate size — a mid-
+    * codepoint cut is cleaned by the sanitize pass over the rendered output. */
+#define EVENT_RESEARCH_URL_CAP 1024
+#define EVENT_RESEARCH_KIND_CAP 32
+   const char *u = source_url ? source_url : "";
+   const char *k = source_kind ? source_kind : "";
+   size_t ulen = strlen(u), klen = strlen(k);
+   json_object_object_add(root, "source_url",
+                          json_object_new_string_len(u, (int)(ulen < EVENT_RESEARCH_URL_CAP
+                                                                  ? ulen
+                                                                  : EVENT_RESEARCH_URL_CAP)));
+   json_object_object_add(root, "source_kind",
+                          json_object_new_string_len(k, (int)(klen < EVENT_RESEARCH_KIND_CAP
+                                                                  ? klen
+                                                                  : EVENT_RESEARCH_KIND_CAP)));
+#undef EVENT_RESEARCH_URL_CAP
+#undef EVENT_RESEARCH_KIND_CAP
+   /* Cap the claim to the payload budget before embedding, like tool_result. */
+   char *body = truncate_middle(claim ? claim : "");
+   if (body == NULL) {
+      json_object_put(root);
+      return NULL;
+   }
+   json_object_object_add(root, "claim", json_object_new_string(body));
+   free(body);
+   const char *rendered = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+   char *out = rendered ? strdup(rendered) : NULL;
+   /* claim/source_url/source_kind are web-derived — a non-UTF-8 byte would wedge
+    * the WS event frame on every replay. */
+   if (out != NULL) {
+      sanitize_utf8_for_json(out);
+   }
+   json_object_put(root);
+   return out;
+}
+
+char *event_payload_research_stop(const char *stop_reason, int rounds, int claims_total) {
+   struct json_object *root = json_object_new_object();
+   if (root == NULL) {
+      return NULL;
+   }
+   json_object_object_add(root, "stop_reason",
+                          json_object_new_string(stop_reason ? stop_reason : "?"));
+   json_object_object_add(root, "rounds", json_object_new_int(rounds));
+   json_object_object_add(root, "claims_total", json_object_new_int(claims_total));
+   const char *rendered = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+   /* stop_reason is a controlled literal, but sanitize defensively (cheap). */
+   char *out = rendered ? strdup(rendered) : NULL;
+   if (out != NULL) {
+      sanitize_utf8_for_json(out);
+   }
+   json_object_put(root);
+   return out;
+}
+
+char *event_payload_research_conclude(int round) {
+   struct json_object *root = json_object_new_object();
+   if (root == NULL) {
+      return NULL;
+   }
+   json_object_object_add(root, "round", json_object_new_int(round));
+   const char *rendered = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+   char *out = rendered ? strdup(rendered) : NULL;
+   json_object_put(root);
+   return out;
+}
+
+char *event_payload_research_unanswerable(int64_t question_id,
+                                          const char *question,
+                                          const char *reason) {
+   struct json_object *root = json_object_new_object();
+   if (root == NULL) {
+      return NULL;
+   }
+   json_object_object_add(root, "question_id", json_object_new_int64(question_id));
+   /* question text is model-authored — cap + sanitize before it reaches the WS frame. */
+   char *q = truncate_middle(question ? question : "");
+   if (q == NULL) {
+      json_object_put(root);
+      return NULL;
+   }
+   json_object_object_add(root, "question", json_object_new_string(q));
+   free(q);
+   /* reason is a controlled literal ("agent" | "stale"); default to "agent". */
+   json_object_object_add(root, "reason",
+                          json_object_new_string((reason && reason[0]) ? reason : "agent"));
+   const char *rendered = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+   char *out = rendered ? strdup(rendered) : NULL;
+   if (out != NULL) {
+      sanitize_utf8_for_json(out);
+   }
+   json_object_put(root);
+   return out;
+}
+
+char *event_payload_research_critic(const char *decision, int gaps_added, int rearm) {
+   struct json_object *root = json_object_new_object();
+   if (root == NULL) {
+      return NULL;
+   }
+   /* decision is a controlled literal ("stop" | "continue"). */
+   json_object_object_add(root, "decision",
+                          json_object_new_string((decision && decision[0]) ? decision : "stop"));
+   json_object_object_add(root, "gaps_added", json_object_new_int(gaps_added));
+   json_object_object_add(root, "rearm", json_object_new_int(rearm));
+   const char *rendered = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+   char *out = rendered ? strdup(rendered) : NULL;
+   json_object_put(root);
+   return out;
+}

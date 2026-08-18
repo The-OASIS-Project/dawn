@@ -696,6 +696,11 @@ if(ENABLE_WEBUI)
         src/core/job_worker.c
         src/core/job_reinvoke.c
         src/core/job_dispatch.c
+        # Deep-research live orchestration (rides on the job session + dispatch).
+        # The deterministic core (research_run.c) stays in unconditional
+        # TOOL_SOURCES; only this loop half + the worker are ENABLE_WEBUI-coupled.
+        src/tools/research_run_loop.c
+        src/core/research_worker.c
         src/core/text_input_dispatch.c
         src/core/prompt_compose.c
         src/core/session_dedup.c
@@ -801,6 +806,7 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v72.c
     src/auth/auth_db_migrations_v73.c
     src/auth/auth_db_migrations_v74.c
+    src/auth/auth_db_migrations_v75.c
     src/auth/auth_db_attention.c
     src/auth/auth_db_statements.c
     # DB-layer tables depended on by the always-compiled memory / OTA / tool
@@ -809,6 +815,7 @@ list(APPEND DAWN_SOURCES
     # WEBUI off).  The admin-socket transports that USE these stay AUTH-gated.
     src/auth/auth_db_conv.c
     src/auth/auth_db_jobs.c
+    src/auth/auth_db_research.c
     src/auth/auth_db_events.c
     src/auth/auth_db_user.c
     src/auth/auth_db_settings.c
@@ -870,6 +877,7 @@ if(ENABLE_AUTH)
         src/auth/admin_socket_messaging.c
         src/auth/admin_socket_music.c
         src/auth/admin_socket_ota.c
+        src/auth/admin_socket_research.c
         src/auth/auth_db_session.c
         src/auth/auth_db_rate_limit.c
         src/auth/auth_db_audit.c

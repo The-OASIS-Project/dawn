@@ -1212,6 +1212,26 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       config_clamp_jobs(&config->jobs);
    }
 
+   /* [research] — deep-research budgets + master switch. The parsed-but-not-yet-
+    * enforced field (capture_revisions) is applied here too so a hand-edited value
+    * round-trips, even though the panel doesn't surface it. */
+   if (json_object_object_get_ex(payload, "research", &section)) {
+      JSON_TO_CONFIG_BOOL(section, "enabled", config->research.enabled);
+      JSON_TO_CONFIG_INT(section, "max_rounds", config->research.max_rounds);
+      JSON_TO_CONFIG_INT(section, "max_tool_calls", config->research.max_tool_calls);
+      JSON_TO_CONFIG_INT(section, "max_input_tokens", config->research.max_input_tokens);
+      JSON_TO_CONFIG_INT(section, "round_digest_max_chars",
+                         config->research.round_digest_max_chars);
+      JSON_TO_CONFIG_INT(section, "min_sources", config->research.min_sources);
+      JSON_TO_CONFIG_INT(section, "saturation_rounds", config->research.saturation_rounds);
+      JSON_TO_CONFIG_INT(section, "plan_freeze_round", config->research.plan_freeze_round);
+      JSON_TO_CONFIG_INT(section, "stale_rounds", config->research.stale_rounds);
+      JSON_TO_CONFIG_INT(section, "critic_max_rearm", config->research.critic_max_rearm);
+      JSON_TO_CONFIG_BOOL(section, "completion_commentary", config->research.completion_commentary);
+      JSON_TO_CONFIG_BOOL(section, "capture_revisions", config->research.capture_revisions);
+      config_clamp_research(&config->research);
+   }
+
    /* [mcp] — coding-harness MCP bridge. Only the scalars are settings-editable;
     * the [[mcp.server]] array is TOML-managed and intentionally not applied here. */
    if (json_object_object_get_ex(payload, "mcp", &section)) {

@@ -131,8 +131,8 @@ static char *handle_spawn(struct json_object *details,
    conv_generate_title(goal, title, sizeof(title));
 
    int64_t conv_id = 0;
-   if (conv_db_create_job(user_id, title, parent_conv, "detached", on_complete, deliver_to, 1, goal,
-                          &conv_id) != AUTH_DB_SUCCESS) {
+   if (conv_db_create_job_ex(user_id, title, parent_conv, "detached", on_complete, deliver_to, 1,
+                             goal, job_spawn_origin_string(), &conv_id) != AUTH_DB_SUCCESS) {
       return strdup("Error: failed to create the background job.");
    }
 
@@ -216,10 +216,11 @@ static char *handle_status(struct json_object *details, int user_id) {
 
    job_record_t r;
    int rc = conv_db_job_get(conv_id, user_id, &r);
-   if (rc == AUTH_DB_FORBIDDEN) {
-      return strdup("That background job belongs to someone else.");
-   }
    if (rc != AUTH_DB_SUCCESS) {
+      /* Collapse FORBIDDEN and NOT_FOUND to ONE message: job ids are conversation
+       * ids — small, sequential, global across users — so a distinct "belongs to
+       * someone else" reply would be a job-id enumeration oracle. Matches
+       * handle_resume / handle_cancel, which say the same. */
       return strdup("No such background job.");
    }
 
@@ -228,13 +229,30 @@ static char *handle_status(struct json_object *details, int user_id) {
 
    char *out = NULL;
    if (strcmp(r.job_status, "done") == 0 && f.last_assistant != NULL) {
-      /* Header adds the title (up to CONV_TITLE_MAX) + the id + fixed chars; size
-       * for all of them so a long title never truncates the result tail. */
-      size_t need = strlen(f.last_assistant) + strlen(r.title) + 64;
-      out = malloc(need);
-      if (out != NULL) {
-         snprintf(out, need, "Job #%lld (\"%s\") is done:\n\n%s", (long long)conv_id, r.title,
-                  f.last_assistant);
+      if (memory_filter_check_injection_commands(f.last_assistant)) {
+         /* The result is LLM/tool output over external (web/document) content, and
+          * it re-enters the CALLER's full-tool session here (should_respond=1 in
+          * the callback). If it carries an injection-command pattern, do NOT surface
+          * the body inline — hand back a neutral pointer to the panel. Mirrors the
+          * reinvoke path (job_reinvoke.c, same narrowed command-subset check) so the
+          * two untrusted-output→session boundaries can't drift; the full blocklist
+          * is deliberately NOT used (it false-positives on "api key"/"bearer"/etc.
+          * that a legitimate research result contains). */
+         char buf[CONV_TITLE_MAX + 128];
+         snprintf(buf, sizeof(buf),
+                  "Job #%lld (\"%s\") is done, but its result couldn't be safely shown inline. "
+                  "Open it in the jobs panel to read it.",
+                  (long long)conv_id, r.title);
+         out = strdup(buf);
+      } else {
+         /* Header adds the title (up to CONV_TITLE_MAX) + the id + fixed chars; size
+          * for all of them so a long title never truncates the result tail. */
+         size_t need = strlen(f.last_assistant) + strlen(r.title) + 64;
+         out = malloc(need);
+         if (out != NULL) {
+            snprintf(out, need, "Job #%lld (\"%s\") is done:\n\n%s", (long long)conv_id, r.title,
+                     f.last_assistant);
+         }
       }
    } else if (strcmp(r.job_status, "failed") == 0) {
       char buf[CONV_TITLE_MAX + JOB_ERROR_MAX + 64];

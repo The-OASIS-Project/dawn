@@ -32,12 +32,14 @@
 #include <time.h>
 
 #include "auth/auth_db.h"
+#include "blob_store.h" /* BLOB_ID_LEN */
 #include "config/dawn_config.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_note_bridge.h"
 #include "tools/document_db.h"
 #include "tools/document_index_pipeline.h"
+#include "utils/string_utils.h" /* sanitize_utf8_for_json */
 #include "webui/webui_internal.h"
 
 /* =============================================================================
@@ -180,6 +182,9 @@ void handle_doc_library_list(ws_connection_t *conn, json_object *payload) {
          json_object *doc = json_object_new_object();
          bool is_note = (strcmp(docs[i].filetype, "note") == 0);
          json_object_object_add(doc, "id", json_object_new_int64(docs[i].id));
+         /* Sanitize before emit: a malformed-UTF-8 filename breaks the browser's
+          * JSON.parse and drops the WHOLE list frame (tool_desc_utf8_truncation). */
+         sanitize_utf8_for_json(docs[i].filename);
          json_object_object_add(doc, "filename", json_object_new_string(docs[i].filename));
          json_object_object_add(doc, "filetype", json_object_new_string(docs[i].filetype));
          json_object_object_add(doc, "is_note", json_object_new_boolean(is_note));
@@ -194,6 +199,21 @@ void handle_doc_library_list(ws_connection_t *conn, json_object *payload) {
          json_object_object_add(doc, "num_chunks", json_object_new_int(docs[i].num_chunks));
          json_object_object_add(doc, "is_global", json_object_new_boolean(docs[i].is_global));
          json_object_object_add(doc, "created_at", json_object_new_int64(docs[i].created_at));
+         /* Documents (not notes) may have a stored original file: surface its blob id +
+          * a has_original flag so a client can fetch/download the original. Notes carry
+          * their body inline (above) and have no separate original file. Emit ONLY for
+          * docs the requester owns: the download path (doc_can_read) is owner-only, so
+          * advertising has_original on a listed GLOBAL doc would offer a download the
+          * server always refuses. Gating here also skips the accessor query for those. */
+         if (!is_note && docs[i].user_id == conn->auth_user_id) {
+            char blob_id[BLOB_ID_LEN] = { 0 };
+            bool has_original = document_db_get_original_blob_id(docs[i].id, blob_id,
+                                                                 sizeof(blob_id)) == SUCCESS &&
+                                blob_id[0];
+            json_object_object_add(doc, "has_original", json_object_new_boolean(has_original));
+            if (has_original)
+               json_object_object_add(doc, "original_blob_id", json_object_new_string(blob_id));
+         }
          if (show_all) {
             json_object_object_add(doc, "user_id", json_object_new_int(docs[i].user_id));
             json_object_object_add(doc, "owner_name", json_object_new_string(docs[i].owner_name));
@@ -203,6 +223,60 @@ void handle_doc_library_list(ws_connection_t *conn, json_object *payload) {
       json_object_object_add(resp_payload, "documents", docs_array);
       json_object_object_add(resp_payload, "count", json_object_new_int(count));
       json_object_object_add(resp_payload, "has_more", json_object_new_boolean(has_more));
+   }
+
+   json_object_object_add(response, "payload", resp_payload);
+   send_json_response(conn, response);
+   json_object_put(response);
+}
+
+/* =============================================================================
+ * Get Document Full Text (the reassembled body of a multi-chunk document)
+ * ============================================================================= */
+
+void handle_doc_library_get(ws_connection_t *conn, json_object *payload) {
+   if (!conn_require_auth(conn))
+      return;
+
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("doc_library_get_response"));
+
+   json_object *resp_payload = json_object_new_object();
+
+   json_object *id_obj;
+   if (!payload || !json_object_object_get_ex(payload, "id", &id_obj)) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error", json_object_new_string("Missing document id"));
+   } else {
+      int64_t doc_id = json_object_get_int64(id_obj);
+      /* Echo the id on every branch (incl. errors) so a client can correlate the async
+       * response - "unavailable" is a common, expected outcome for global/legacy docs. */
+      json_object_object_add(resp_payload, "id", json_object_new_int64(doc_id));
+      /* Short-circuit: metadata read (unscoped, for filename/filetype) THEN the
+       * owner-scoped full-text read. A missing id and a not-owned/global/pre-v63 doc
+       * both fall to ONE generic error, so this verb is not a document-existence oracle
+       * (full_text_get already gates content by owner). */
+      document_t doc;
+      char *text = NULL;
+      bool ok = document_db_get(doc_id, &doc) == SUCCESS &&
+                document_db_full_text_get(doc_id, conn->auth_user_id, &text) == SUCCESS && text;
+      if (!ok) {
+         json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+         json_object_object_add(resp_payload, "error",
+                                json_object_new_string("Document unavailable"));
+      } else {
+         json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+         sanitize_utf8_for_json(doc.filename);
+         /* The body carries web-derived text (e.g. a research report's cited source
+          * URLs). A raw invalid-UTF-8 byte would make the browser's JSON.parse reject
+          * the whole frame, dropping the user's own report — same "sanitize at the WS
+          * sink" invariant the filename above and every sibling emitter follow. */
+         sanitize_utf8_for_json(text);
+         json_object_object_add(resp_payload, "filename", json_object_new_string(doc.filename));
+         json_object_object_add(resp_payload, "filetype", json_object_new_string(doc.filetype));
+         json_object_object_add(resp_payload, "text", json_object_new_string(text));
+      }
+      free(text); /* NULL-safe on every error path */
    }
 
    json_object_object_add(response, "payload", resp_payload);
@@ -541,6 +615,8 @@ void handle_doc_library_version_list(ws_connection_t *conn, json_object *payload
       for (int i = 0; i < n; i++) {
          json_object *row = json_object_new_object();
          json_object_object_add(row, "id", json_object_new_int64(v[i].id));
+         sanitize_utf8_for_json(v[i].filename);
+         sanitize_utf8_for_json(v[i].preview);
          json_object_object_add(row, "filename", json_object_new_string(v[i].filename));
          json_object_object_add(row, "preview", json_object_new_string(v[i].preview));
          json_object_object_add(row, "archived_at", json_object_new_int64(v[i].archived_at));
@@ -577,6 +653,8 @@ void handle_doc_library_deleted_list(ws_connection_t *conn, json_object *payload
    for (int i = 0; i < n; i++) {
       json_object *row = json_object_new_object();
       json_object_object_add(row, "version_id", json_object_new_int64(v[i].id));
+      sanitize_utf8_for_json(v[i].filename);
+      sanitize_utf8_for_json(v[i].preview);
       json_object_object_add(row, "filename", json_object_new_string(v[i].filename));
       json_object_object_add(row, "preview", json_object_new_string(v[i].preview));
       json_object_object_add(row, "archived_at", json_object_new_int64(v[i].archived_at));

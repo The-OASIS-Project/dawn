@@ -95,6 +95,34 @@ static void test_status_transitions(void) {
    TEST_ASSERT_TRUE(r.on_complete_fired);
 }
 
+/* ── origin (spawn surface) round-trips; plain wrapper defaults to "job" ────── */
+
+static void test_create_job_ex_records_origin(void) {
+   int64_t voice_job = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_create_job_ex(alice_id, "voice job", 0, "detached", "notify", NULL,
+                                               1, "goal text", "voice", &voice_job));
+   job_record_t r;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(voice_job, alice_id, &r));
+   TEST_ASSERT_EQUAL_STRING("voice", r.origin);
+
+   /* The plain wrapper preserves the pre-repurpose value. */
+   int64_t plain_job = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_create_job(alice_id, "plain job", 0, "detached", "notify", NULL, 1,
+                                            "goal text", &plain_job));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(plain_job, alice_id, &r));
+   TEST_ASSERT_EQUAL_STRING("job", r.origin);
+
+   /* NULL/empty origin falls back to "job". */
+   int64_t null_origin_job = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_create_job_ex(alice_id, "null origin", 0, "detached", "notify",
+                                               NULL, 1, "goal text", NULL, &null_origin_job));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(null_origin_job, alice_id, &r));
+   TEST_ASSERT_EQUAL_STRING("job", r.origin);
+}
+
 /* ── follow-up scan: terminal + unfired only, disappears after fired ───────── */
 
 static void test_pending_followups_scan(void) {
@@ -255,6 +283,34 @@ static void test_resume_claim_is_exclusive(void) {
 
    /* Second caller loses: the row already left the resumable set. */
    TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(job, alice_id, false));
+}
+
+/* A job_kind='research' row is NEVER handed to the plain job worker's resume: the
+ * research controller drives it, so a plain-worker resume would run the generic
+ * loop on a message-less research conversation and corrupt the run (DEEP_RESEARCH
+ * §5.5, plan HIGH-2).  The exclusion lives in the reset_for_resume CLAIM, so it
+ * holds for BOTH origins (tool = allow_cancelled false, user = true). */
+static void test_research_job_is_not_plain_resumable(void) {
+   int64_t rjob = 0;
+   conv_db_create_job(alice_id, "research run", 0, "detached", "notify", NULL, 1, "brief", &rjob);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_set_kind(rjob, "research"));
+   conv_db_job_set_terminal(rjob, "failed", "boom", 100);
+
+   /* Refused for the tool origin (allow_cancelled=false)... */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(rjob, alice_id, false));
+   /* ...and the user origin (allow_cancelled=true) — the exclusion is in the claim. */
+   conv_db_job_set_terminal(rjob, "cancelled", NULL, 100);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(rjob, alice_id, true));
+   /* It stays failed/cancelled, never re-queued. */
+   job_record_t r;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(rjob, alice_id, &r));
+   TEST_ASSERT_EQUAL_STRING("cancelled", r.job_status);
+
+   /* Control: an ordinary (NULL job_kind) failed job resumes fine. */
+   int64_t pjob = 0;
+   conv_db_create_job(alice_id, "plain", 0, "detached", "notify", NULL, 1, "goal", &pjob);
+   conv_db_job_set_terminal(pjob, "failed", "boom", 100);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_reset_for_resume(pjob, alice_id, false));
 }
 
 /* The goal is durable from CREATE, not from a successful dispatch (v74).
@@ -662,6 +718,7 @@ int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_create_and_get);
    RUN_TEST(test_status_transitions);
+   RUN_TEST(test_create_job_ex_records_origin);
    RUN_TEST(test_pending_followups_scan);
    RUN_TEST(test_active_scan);
    RUN_TEST(test_active_and_history_partition);
@@ -669,6 +726,7 @@ int main(void) {
    RUN_TEST(test_history_pagination_no_gaps_or_dupes);
    RUN_TEST(test_goal_is_stored_at_create);
    RUN_TEST(test_resume_claim_is_exclusive);
+   RUN_TEST(test_research_job_is_not_plain_resumable);
    RUN_TEST(test_resume_claim_is_ownership_scoped);
    RUN_TEST(test_set_running_loses_to_a_cancel);
    RUN_TEST(test_resume_rejects_non_resumable_states);

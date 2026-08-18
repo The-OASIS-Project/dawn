@@ -954,6 +954,49 @@ typedef struct {
 } jobs_config_t;
 
 /* =============================================================================
+ * Deep-Research Configuration
+ *
+ * Per-run budgets + the master switch for the deep_research tool (a research run
+ * IS a background job, so it also obeys the [jobs] caps).  The budget defaults
+ * come from the SHARED RESEARCH_DEFAULT_* constants in
+ * include/config/research_defaults.h — a pure-macro leaf header both this Layer-0
+ * config and the Layer-3 core (research_run.c) include, so the config default and
+ * the compile-time fallback are ONE source and cannot drift.
+ * research_budgets_load() applies these over research_budgets_defaults() at run
+ * start.  See docs/DEEP_RESEARCH_DESIGN.md §9.
+ * ============================================================================= */
+typedef struct {
+   bool enabled;       /* Master switch for the deep_research tool (default OFF) */
+   int max_rounds;     /* Hard per-run round cap (§6.1) */
+   int max_tool_calls; /* RETIRED as a stop condition (§6.1): metered LLM round-trips, which are
+                        * already bounded by max_rounds x the per-round iteration cap, so it added
+                        * no distinct fuse. Still parsed/round-tripped for back-compat but NOT
+                        * enforced and NOT surfaced in the panel. The real fuses are
+                        * max_input_tokens (cost) + max_rounds (loop depth). */
+   /* Per-run input-token ceiling — a HIGH runaway backstop, not the primary stop
+    * (§6.1); the natural-end signals end healthy runs well under it.
+    * Deliberately `int` though research_budgets_t.max_input_tokens is int64: the
+    * clamp bounds this to 100M (« INT32_MAX), so it uses the plain int config
+    * macros (PARSE_INT / JSON_TO_CONFIG_INT / "%d") and research_budgets_load()
+    * widens it to int64 at the one read site. */
+   int max_input_tokens;
+   int round_digest_max_chars; /* Cap on the reconstructed round prompt (§4a) */
+   int min_sources;            /* DISTINCT source_url before a question is 'answered' (§3/§6) */
+   int saturation_rounds;      /* Consecutive dry rounds before the saturation stop (§6); 0 off */
+   int plan_freeze_round; /* research_plan refuses new questions past this round (§6); min 1 */
+   int stale_rounds;      /* Rounds a question gains no new source before auto-retire as
+                             unanswerable (§6.3, P1 Phase 2); 0 off */
+   int critic_max_rearm;  /* Times the completeness critic may re-arm at stop-eligibility
+                             (§6 item 4); 0 disables the critic */
+   bool completion_commentary; /* On completion, Friday writes a brief take on the finished run
+                                  (delivered as the chat completion lead) instead of a mechanical
+                                  report excerpt (§8); default on */
+   /* Parsed + round-tripped but NOT yet enforced (kept out of the WebUI panel per
+    * CONFIGURATION_GUIDE — a control that silently does nothing is worse than none). */
+   bool capture_revisions; /* Debug: persist per-round report snapshots */
+} research_config_t;
+
+/* =============================================================================
  * Music Configuration
  * ============================================================================= */
 
@@ -1184,6 +1227,7 @@ typedef struct {
    music_config_t music;
    scheduler_config_t scheduler;
    jobs_config_t jobs;
+   research_config_t research;
    calendar_config_t calendar;
    messaging_config_t messaging;
    ota_config_t ota;
@@ -1230,6 +1274,16 @@ void config_set_secrets_defaults(secrets_config_t *secrets);
  * @param config Jobs config to clamp in place (NULL-safe).
  */
 void config_clamp_jobs(jobs_config_t *config);
+
+/**
+ * @brief Clamp [research] budgets to their safe bounds.
+ *
+ * Shared by the TOML parse path and the WebUI settings POST handler so the two
+ * entry points cannot drift.
+ *
+ * @param config Research config to clamp in place (NULL-safe).
+ */
+void config_clamp_research(research_config_t *config);
 
 /**
  * @brief Get the global config instance (read-only after init)

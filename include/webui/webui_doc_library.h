@@ -36,6 +36,14 @@
 void handle_doc_library_list(ws_connection_t *conn, json_object *payload);
 
 /**
+ * @brief Fetch a document's reassembled full text for reading (owner-scoped, v63+).
+ * Payload: { "id": <document_id> }
+ * Response type: doc_library_get_response
+ * { success, id, filename, filetype, text } on success; success:false otherwise.
+ */
+void handle_doc_library_get(ws_connection_t *conn, json_object *payload);
+
+/**
  * @brief Delete a document (and all its chunks)
  * Payload: { "id": <document_id> }
  * Response type: doc_library_delete_response

@@ -113,6 +113,16 @@ int conv_db_job_scan_active(job_record_t *out, int max, int *count_out) {
    return AUTH_DB_SUCCESS;
 }
 
+/* Deep-research boot reconcile (called by job_manager_init after the job scan);
+ * no research rows in this harness, so it's a no-op that reports zero. */
+int research_db_reconcile_orphaned(time_t finished_at, int *count_out) {
+   (void)finished_at;
+   if (count_out) {
+      *count_out = 0;
+   }
+   return AUTH_DB_SUCCESS;
+}
+
 /* Records what the boot scan wrote, so a test can assert the stamp it chose. */
 static struct {
    int64_t conv_id;
@@ -302,6 +312,14 @@ int scheduler_emit_alert(int user_id,
       nanosleep(&ts, NULL);
    }
    return atomic_load(&g_emit_alert_rc);
+}
+
+/* Local speaker is never explicitly assigned in the test harness — the voice
+ * completion path uses this only to decide whether a research job's title may be
+ * spoken; returning false exercises the generic-notice branch. */
+bool satellite_local_speaker_is_assigned_to(int user_id) {
+   (void)user_id;
+   return false;
 }
 
 /* Wait until the delivery thread has entered the send at least @n times. */

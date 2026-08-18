@@ -102,6 +102,14 @@ int handle_ota_push_all_cmd(int client_fd, const char *payload, uint16_t payload
 int handle_ota_rollout_status_cmd(int client_fd);
 int handle_ota_rollout_abort_cmd(int client_fd);
 
+#ifdef DAWN_ENABLE_DEEP_RESEARCH_TOOL
+/* Deep-research operator commands (admin_socket_research.c) — the headless
+ * benchmark spawn path (DEEP_RESEARCH_DESIGN.md §16). */
+int handle_research_start_cmd(int client_fd, const char *payload, uint16_t payload_len);
+int handle_research_status_cmd(int client_fd, const char *payload, uint16_t payload_len);
+int handle_research_cancel_cmd(int client_fd, const char *payload, uint16_t payload_len);
+#endif
+
 /* Music-DB handlers (admin_socket_music.c).  Dispatched from handle_client()
  * in admin_socket.c against ADMIN_MSG_MUSIC_* opcodes. */
 int admin_handle_music_stats(int client_fd);

@@ -2331,6 +2331,105 @@
             },
          },
       },
+      research: {
+         label: 'Deep Research',
+         icon: '&#x1F50E;',
+         fields: {
+            enabled: {
+               type: 'checkbox',
+               label: 'Enable Deep Research',
+               hint: 'Let the assistant run multi-round, multi-source research jobs that write a cited report to notes',
+               default: false,
+            },
+            max_rounds: {
+               type: 'number',
+               label: 'Max Rounds Per Run',
+               min: 1,
+               max: 100,
+               hint: 'Hard cap on research rounds before a run must stop',
+               default: 6,
+               advanced: true,
+            },
+            // max_tool_calls: RETIRED as a stop condition (redundant with max_rounds x the
+            // per-round iteration cap). Parsed/round-tripped for back-compat but not enforced,
+            // so — per CONFIGURATION_GUIDE — it is NOT surfaced here (a control that does
+            // nothing is worse than none).
+            max_input_tokens: {
+               type: 'number',
+               label: 'Max Input Tokens Per Run',
+               // min on the 100k step grid so the default/max sit on clean values; the
+               // server clamp (config_clamp_research, floor 1000) is the real backstop,
+               // so a hand-edited dawn.toml can still go lower or up to 100M.
+               min: 100000,
+               max: 5000000,
+               step: 100000,
+               hint: 'High runaway backstop; healthy runs stop well under it (converged / concluded / saturated)',
+               default: 1000000,
+               advanced: true,
+            },
+            round_digest_max_chars: {
+               type: 'number',
+               label: 'Round Context Cap (chars)',
+               min: 256,
+               max: 65536,
+               hint: 'Cap on the per-round reconstructed prompt (the bounded-context knob)',
+               default: 6000,
+               advanced: true,
+            },
+            min_sources: {
+               type: 'number',
+               label: 'Sources To Answer a Question',
+               min: 1,
+               max: 100,
+               hint: 'Distinct sources required before a sub-question counts as answered',
+               default: 2,
+               advanced: true,
+            },
+            saturation_rounds: {
+               type: 'number',
+               label: 'Stop After Dry Rounds',
+               min: 0,
+               max: 10,
+               hint: 'Stop when this many rounds in a row close no new question (diminishing returns). 0 disables.',
+               default: 1,
+               advanced: true,
+            },
+            plan_freeze_round: {
+               type: 'number',
+               label: 'Freeze Plan After Round',
+               min: 1,
+               max: 10,
+               hint: 'After this round the agent stops adding new sub-questions and converges on the plan it has (curbs runaway late plan growth). Does not cap the initial plan size.',
+               default: 2,
+               advanced: true,
+            },
+            stale_rounds: {
+               type: 'number',
+               label: 'Retire Stale Questions After',
+               min: 0,
+               max: 10,
+               hint: 'Auto-retire a sub-question as unanswerable after this many rounds with no new source, so a run stuck on unclosable questions still finishes. Its findings stay in the report. 0 disables.',
+               default: 2,
+               advanced: true,
+            },
+            critic_max_rearm: {
+               type: 'number',
+               label: 'Completeness Critic Re-arms',
+               min: 0,
+               max: 10,
+               hint: 'When a run is about to finish, a fresh-context critic may re-open it to chase an important gap from a new angle, up to this many times. 0 disables the critic.',
+               default: 2,
+               advanced: true,
+            },
+            completion_commentary: {
+               type: 'checkbox',
+               label: 'Assistant Take On Completion',
+               hint: 'When a research run finishes, the assistant writes a brief take on the results as the completion message (tied to the conversation that requested it), instead of a mechanical report excerpt.',
+               default: true,
+               advanced: true,
+            },
+         },
+      },
       calendar: {
          label: 'Calendar',
          icon: '&#x1F4C5;',
@@ -2541,7 +2640,7 @@
          // Both were defined in SETTINGS_SCHEMA but listed in no category, so
          // their panels never rendered — see check_settings_sections_rendered.sh,
          // which fails CI if a section is ever orphaned this way again.
-         sections: ['scheduler', 'attention', 'jobs', 'calendar'],
+         sections: ['scheduler', 'attention', 'jobs', 'research', 'calendar'],
       },
       {
          id: 'network',

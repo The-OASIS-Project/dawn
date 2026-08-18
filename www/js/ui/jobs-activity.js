@@ -274,18 +274,30 @@ window.DawnJobsActivity = (function () {
       if (job.resumed) {
          unmarkTerminal(key);
       }
+      var trackedWentTerminal = false;
       if (!isActive(job.status)) {
          markTerminal(key);
          if (!(key in jobs)) {
             return; // terminal row for a job we never tracked — nothing changed
          }
          delete jobs[key];
+         trackedWentTerminal = true;
       } else {
          // Applied unconditionally: live frames are ordered at the source.
          jobs[key] = job;
       }
       recount();
       renderAll();
+      // A tracked job just crossed the active→terminal partition. The active side
+      // self-heals above, but the panel's HISTORY page is separately paginated and
+      // stays stale unless updated — and handleActionResult only refetches for
+      // PANEL-initiated actions, so a terminal transition arriving any other way
+      // (conversation Stop, voice, another tab, or self-completion) would leave the
+      // row in neither list until a manual refresh. Hand the panel the full row so
+      // it can move it into History in place (no reset/refetch).
+      if (trackedWentTerminal && typeof DawnJobs !== 'undefined' && DawnJobs.onJobTerminal) {
+         DawnJobs.onJobTerminal(job);
+      }
       // Patch just the affected conversation's sidebar badge (no list re-render).
       // A job's parent never changes, so the row carries the right parent whether
       // it just joined the set or just left it. A rootless job (parent_id 0) has

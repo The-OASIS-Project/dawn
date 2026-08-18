@@ -208,6 +208,11 @@ static const char *SCHEMA_SQL =
      * conversation with its goal nowhere, and resuming it re-engaged the model
      * with no task at all.  `title` is a generated summary, not the goal. */
     "   job_goal TEXT DEFAULT NULL,"
+    /* job_kind (v75): discriminates a deep-research run ('research') from an
+     * ordinary background job (NULL) so the plain resume path refuses to
+     * re-dispatch the ordinary worker against a research conversation.  The
+     * idx_conv_jobs_user partial index lives in the v75 migration, not here. */
+    "   job_kind TEXT DEFAULT NULL,"
     "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
     "   FOREIGN KEY (continued_from) REFERENCES conversations(id) ON DELETE SET NULL,"
     "   FOREIGN KEY (parent_id) REFERENCES conversations(id) ON DELETE SET NULL"
@@ -254,6 +259,13 @@ static const char *SCHEMA_SQL =
      * layer (seq is assigned MAX(seq)+1 under the auth_db mutex). */
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_events ON conversation_events(conversation_id, seq "
     "ASC);"
+
+    /* Deep-research tables (v75).  All research state is SQLite rows (never an
+     * in-memory graph) so a run is restart-durable and the report is a VIEW over
+     * research_claims.  The DDL is shared verbatim with the v75 migration via
+     * AUTH_DB_RESEARCH_SCHEMA_SQL (auth_db_internal.h) so fresh installs and
+     * migrated DBs can never diverge.  See docs/DEEP_RESEARCH_DESIGN.md §3. */
+    AUTH_DB_RESEARCH_SCHEMA_SQL
 
     /* Session metrics table (added in schema v8) */
     "CREATE TABLE IF NOT EXISTS session_metrics ("

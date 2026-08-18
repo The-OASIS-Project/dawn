@@ -529,6 +529,19 @@ search:
     - json
   max_page: 3
 
+# Outbound HTTP to the upstream engines. REQUIRED for good results: SearXNG's
+# default request_timeout (~3s) is too tight for the slow major engines
+# (Google/Bing), which times them ALL out and returns near-empty result sets —
+# which in turn silently breaks the Tavily->SearXNG fallback (it "falls back" to
+# nothing). Widening the timeout lets the majors respond. Verified on SearXNG
+# 2026.8.17: without this, the five deep-research benchmark queries returned 0
+# results; with it, 26-40 each. (Benchmarked 2026-08-17.)
+outgoing:
+  request_timeout: 8.0
+  max_request_timeout: 15.0
+  pool_connections: 100
+  pool_maxsize: 20
+
 ui:
   static_use_hash: true
 
@@ -671,9 +684,20 @@ endpoint = "http://localhost:8191"
 
 When and why you'd want it:
 
-- **More reliable search results** — SearXNG depends on scraping public engines that intermittently rate-limit or block; Tavily provides a stable LLM-tuned ranking.
+- **More consistent search results** — SearXNG depends on scraping public engines that intermittently rate-limit, block, or time out; Tavily provides a stable LLM-tuned ranking with no per-engine variance. (SearXNG, properly tuned, is competitive on quality — see the measured comparison below — but Tavily is steadier.)
 - **JavaScript-rendered content without running a headless browser** — Tavily's `/extract` returns clean article text from sites that would otherwise need FlareSolverr.
 - **No local containers to run** — replaces both Docker services if you don't want the operational overhead.
+
+**Measured: Tavily vs. SearXNG (deep-research benchmark, 2026-08-17).** We ran DAWN's deep-research harness (Sonnet 5) on a 5-task [DeepResearch-Bench](https://github.com/Ayanami0730/deep_research_bench) subset against each backend, judged by the official gpt-5.5 (RACE) / gpt-5.4-mini (FACT) evaluators. SearXNG version **2026.8.17**, with the `outgoing.request_timeout` fix from the config above.
+
+| Axis | Tavily | SearXNG (2026.8.17, tuned) |
+|---|---|---|
+| Sources gathered (mean/run) | 34 — consistent (30–37) | 26 — erratic (11–46) |
+| RACE report quality (vs reference) | 0.499 | 0.482 (~97% of Tavily) |
+| FACT citation validity | 0.795 | **0.882** — SearXNG's sources are more verifiable |
+| Latency per query (warm) | ~2.3s | **~0.55s** (but cold/novel: 5–8s) |
+
+**Verdict:** Tavily is the better *research* backend — more sources, more consistent, modestly higher report quality (the edge is ~3% RACE), and clearly ahead on **niche/technical topics** (where SearXNG's thinner engine coverage bites). But SearXNG is a legitimate free alternative: competitive on mainstream topics, **faster**, and **more citation-accurate**. Choose **Tavily** for best quality + zero ops (especially technical research); choose **SearXNG** for free/local/private + speed, accepting more variance and weaker niche coverage. ⚠️ Either way, SearXNG **requires the `outgoing.request_timeout` fix** above — without it the major engines time out and it returns near-nothing (which also silently breaks the Tavily→SearXNG fallback).
 
 **1. Get a Tavily API key:** sign up at [tavily.com](https://tavily.com) and copy your API key (starts with `tvly-`).
 
@@ -706,6 +730,8 @@ extract_depth = "advanced"  # "basic" | "advanced" (2× credit cost; better on h
 The two toggles are independent — you can use Tavily for search while keeping FlareSolverr for URL fetch, or vice versa.
 
 **Resilience:** if Tavily returns an error or you exhaust the per-user rate limit (10/min, 100/hr), DAWN falls back to SearXNG/FlareSolverr automatically when those are also configured. The Tavily handoff is gated by DAWN's local SSRF allowlist (`url_is_blocked()`) — internal IPs are never forwarded upstream.
+
+**Recommended setup — Tavily primary + a *tuned* SearXNG fallback.** The 2026-08-17 benchmark makes the fallback story clear: a properly-tuned SearXNG is only ~3% behind Tavily on report quality (and ahead on citation accuracy), so the automatic degradation when you hit the free Tavily tier's rate limit costs very little — **as long as your SearXNG actually returns results.** The one failure mode to avoid is a default (untuned) SearXNG: without the `outgoing.request_timeout` fix above, it returns near-nothing, so the "fallback" silently falls back to an empty result set. Apply the timeout fix and the fallback is a genuinely good safety net; skip it and you have no real fallback at all. (There is deliberately **no** "pace requests to stay under Tavily's limit" mode — the fallback is good enough that it isn't worth the complexity.)
 
 **Test it:** Ask DAWN to *"search for the latest news on Mars exploration"* or *"fetch the article at https://example.com/long-page"*. Watch the daemon log for `tavily_search` / `tavily_extract` lines to confirm the path.
 

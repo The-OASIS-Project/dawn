@@ -533,6 +533,19 @@ int llm_is_interrupt_requested(void);
 void llm_set_cancel_flag(void *flag);
 
 /**
+ * @brief Set the per-session cancel flag AND whether the in-flight transfer also
+ *        honors the global interrupt flag (foreground wake-word / Ctrl+C).
+ *
+ * A background/job transfer passes honor_global=false so a foreground wake word
+ * cannot abort its HTTP call (which would misfile as a transient network error).
+ * llm_set_cancel_flag(flag) is the honor_global=true foreground shorthand.
+ *
+ * @param flag         Session cancel flag (atomic_bool cast to void*), or NULL.
+ * @param honor_global True to also break on the global interrupt flag.
+ */
+void llm_set_cancel_flag_ex(void *flag, bool honor_global);
+
+/**
  * @brief Get current thread-local cancel flag
  *
  * @return Current cancel flag pointer, or NULL if not set

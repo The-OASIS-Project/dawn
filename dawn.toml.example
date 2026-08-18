@@ -1028,6 +1028,54 @@
 # max_children_per_tree = 4          # Phase 3: active children per parent.
 
 # =============================================================================
+# Deep Research (multi-round, multi-source investigation → cited report in notes)
+#
+# A research run IS a background job, so it also obeys the [jobs] caps above (the
+# wall-clock ceiling reuses the [jobs] runtime reap). These are the per-run
+# research budgets. OFF by default — the deep_research tool refuses until enabled.
+# =============================================================================
+[research]
+# enabled = false                    # Master switch for the deep_research tool.
+# max_rounds = 6                     # Hard per-run round cap (a real fuse). 1-100.
+# max_tool_calls = 40                # RETIRED — no longer enforced (redundant with max_rounds x
+                                     #   the per-round iteration cap). Parsed for back-compat only.
+# max_input_tokens = 1000000         # Per-run input-token ceiling — a HIGH runaway
+                                     #   backstop, not the normal stop (the natural-end
+                                     #   signals end healthy runs well under it).
+                                     #   1000 - 100000000.
+# round_digest_max_chars = 6000      # Cap on the per-round reconstructed prompt
+                                     #   (the bounded-context knob). 256-65536.
+# min_sources = 2                    # DISTINCT sources before a sub-question is
+                                     #   counted 'answered'. 1-100.
+# saturation_rounds = 1              # Stop after this many consecutive rounds that
+                                     #   close no new question (diminishing returns).
+                                     #   0 disables. The agent can also end a run
+                                     #   itself via research_conclude. 0-100.
+# plan_freeze_round = 2              # After this round the agent stops adding NEW
+                                     #   sub-questions and converges on the plan it has
+                                     #   (curbs runaway late plan growth; does not cap
+                                     #   the initial plan). Min 1; >= max_rounds = off.
+# stale_rounds = 2                   # Auto-retire a sub-question as unanswerable after
+                                     #   this many rounds in which it gains NO new source,
+                                     #   so a run stuck on genuinely-unclosable questions
+                                     #   still converges instead of burning the whole
+                                     #   token budget. Findings already gathered stay in
+                                     #   the report. 0 disables. 0-100.
+# critic_max_rearm = 2               # When a run is about to finish on a natural end, a
+                                     #   fresh-context completeness critic may re-open it
+                                     #   to chase an important gap from a NEW angle, up to
+                                     #   this many times. 0 disables the critic. 0-10.
+# completion_commentary = true       # On completion, the assistant writes a brief TAKE on
+                                     #   the finished run (tied to the conversation that
+                                     #   requested it) as the chat completion message,
+                                     #   instead of a mechanical report excerpt. false =
+                                     #   fall back to the plain excerpt.
+#
+# Parsed and round-tripped, but NOT yet enforced — reserved for later phases.
+# Setting them has no effect yet:
+# capture_revisions = false          # Debug: persist per-round report snapshots.
+
+# =============================================================================
 # OTA (over-the-air satellite updates)
 # =============================================================================
 # Server→satellite firmware updates. Release artifacts are signed OFFLINE with

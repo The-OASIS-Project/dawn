@@ -854,6 +854,18 @@ int satellite_db_ensure_local_pseudo(void);
 bool satellite_local_speaker_plays_for_user(int event_user_id);
 
 /**
+ * @brief True ONLY when the local pseudo-satellite speaker is enabled AND
+ *        explicitly assigned to @p user_id.
+ *
+ * Stricter than satellite_local_speaker_plays_for_user(), which returns true for
+ * the UNASSIGNED default (plays for everyone).  Use this to gate content that is
+ * private to one user (e.g. a deep-research brief spoken at completion) so it is
+ * only voiced when the operator has bound the speaker to that user — never on the
+ * shared/unassigned default.
+ */
+bool satellite_local_speaker_is_assigned_to(int user_id);
+
+/**
  * @brief Get satellite mapping by UUID
  *
  * @param uuid Satellite UUID (36 chars)
@@ -1000,10 +1012,15 @@ int auth_db_backup(const char *dest_path);
 
 /**
  * @brief Maximum conversations per user (0 = unlimited)
- * Default 1000 to prevent potential DoS via conversation spam.
+ * Raised to 5000 in v75: a background job / deep-research run consumes a
+ * conversation slot, so automation was evicting chat history against the old
+ * 1000 cap.  The bump ships WITH the v75 `idx_conv_jobs_user` partial index —
+ * a 5000-row scan without it is the regression (see DEEP_RESEARCH_DESIGN §10.4/.5).
+ * Separate retention accounting for job/research conversations is the real fix,
+ * tracked in TODO.md; this is the pragmatic P0 floor.
  * Users can archive old conversations to free up slots.
  */
-#define CONV_MAX_PER_USER 1000
+#define CONV_MAX_PER_USER 5000
 
 /**
  * @brief Maximum compaction summary length
@@ -1199,6 +1216,7 @@ int conv_db_create_continuation(int user_id,
 #define JOB_STATUS_MAX 16      /**< "interrupted" is the longest status */
 #define JOB_SPAWN_MODE_MAX 16  /**< "detached" (v1) */
 #define JOB_ON_COMPLETE_MAX 24 /**< "reinvoke_parent" (Phase 3) */
+#define JOB_KIND_MAX 16        /**< "research" discriminator; "" = ordinary job */
 #define JOB_DELIVER_TO_MAX 64  /**< messaging channel display_name */
 #define JOB_ERROR_MAX 256      /**< truncated failure reason */
 
@@ -1221,6 +1239,13 @@ typedef struct {
    time_t started_at;
    time_t finished_at;
    time_t created_at;
+   char origin[32];             /**< conversations.origin — for a job, the spawn surface
+                                 *   ("voice"/"webui"/"messaging"); gates voice completion
+                                 *   delivery.  Legacy job rows (pre-repurpose) read "job". */
+   char job_kind[JOB_KIND_MAX]; /**< conversations.job_kind — "research" marks a
+                                 *   deep-research run; "" = ordinary background job.
+                                 *   Used to keep a private research brief off a
+                                 *   shared local speaker at completion. */
 } job_record_t;
 
 /**
@@ -1235,6 +1260,7 @@ typedef struct {
  * @param on_complete "notify" | "none".
  * @param deliver_to Messaging channel display_name, or NULL/"" for local delivery.
  * @param spawn_depth parent.spawn_depth + 1 (0 = root).
+ * @param goal The instruction the job was created with (durable from creation).
  * @param conv_id_out Receives the new job conversation id.
  * @return AUTH_DB_SUCCESS, AUTH_DB_LIMIT_EXCEEDED, or AUTH_DB_FAILURE.
  */
@@ -1247,6 +1273,25 @@ int conv_db_create_job(int user_id,
                        int spawn_depth,
                        const char *goal,
                        int64_t *conv_id_out);
+
+/**
+ * @brief As conv_db_create_job(), but records the spawn surface in
+ *        conversations.origin.
+ *
+ * @param origin Spawn surface ("voice"/"webui"/"messaging"/"satellite"); gates
+ *        voice completion delivery. NULL/"" → "job". Job identity is
+ *        job_status, not this field. The plain conv_db_create_job() passes "job".
+ */
+int conv_db_create_job_ex(int user_id,
+                          const char *title,
+                          int64_t parent_id,
+                          const char *spawn_mode,
+                          const char *on_complete,
+                          const char *deliver_to,
+                          int spawn_depth,
+                          const char *goal,
+                          const char *origin,
+                          int64_t *conv_id_out);
 
 /**
  * @brief Ownership-scoped: the instruction a job was created with.
@@ -1283,6 +1328,18 @@ int conv_db_job_set_terminal(int64_t conv_id,
  * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
  */
 int conv_db_job_mark_fired(int64_t conv_id);
+
+/**
+ * @brief System-caller: stamp the job-kind discriminator on a job conversation.
+ *
+ * NULL job_kind is an ordinary background job; 'research' marks a deep-research
+ * run so conv_db_job_reset_for_resume() refuses to hand it to the plain job
+ * worker (DEEP_RESEARCH_DESIGN §5.5). Set once, right after conv_db_create_job_ex
+ * and before the worker is spawned.
+ * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND (no such row), AUTH_DB_INVALID (bad
+ *         args), or AUTH_DB_FAILURE.
+ */
+int conv_db_job_set_kind(int64_t conv_id, const char *kind);
 
 /**
  * @brief Ownership-checked: load a job's lifecycle record.
@@ -1444,6 +1501,257 @@ int conv_db_job_list_history_by_user(int user_id,
  * @return AUTH_DB_SUCCESS (even when *out is NULL), AUTH_DB_INVALID, or AUTH_DB_FAILURE.
  */
 int conv_db_job_last_assistant_text(int64_t conv_id, int user_id, char **out);
+
+/* =============================================================================
+ * Deep-research accessors (v75)
+ *
+ * The entire state of a research run is SQLite rows (design invariant): the run
+ * header (research_runs), the coverage ledger (research_questions), the
+ * load-bearing evidence (research_claims), and intermediate report snapshots
+ * (research_report_revisions).  A run is 1:1 with a background-job conversation
+ * (research_runs.conversation_id UNIQUE), so FK ON DELETE CASCADE off the parent
+ * conversation collapses the whole run.
+ *
+ * Ownership: the ONLY user-facing read path is research_db_run_get(), which
+ * binds user_id.  Everything else is a system caller (the research worker /
+ * controller / report renderer) operating on a run_id it already ownership-
+ * checked, mirroring the job system-setters that take no user_id.
+ *
+ * Statements are prepared ad-hoc (prepare/step/finalize), like auth_db_jobs.c:
+ * every path is low-frequency (a handful of writes per round, a few rounds per
+ * run).  Per-round claim inserts batch under one BEGIN/COMMIT (eff M1).  All SQL
+ * is constant or parameterized.  See docs/DEEP_RESEARCH_DESIGN.md §3/§6.
+ * ============================================================================= */
+
+#define RESEARCH_BRIEF_MAX 2048     /**< the (possibly clarified) research question */
+#define RESEARCH_MODE_MAX 8         /**< "web" | "private" | "both" */
+#define RESEARCH_STATUS_MAX 16      /**< planning|researching|synthesizing|done|failed|cancelled */
+#define RESEARCH_STOP_REASON_MAX 24 /**< budget|token_budget|coverage|saturation|... */
+#define RESEARCH_QUESTION_MAX 512   /**< one sub-question */
+#define RESEARCH_QSTATUS_MAX 16     /**< open|answered|unanswerable */
+#define RESEARCH_REASON_MAX 16      /**< resolution reason: ""|stale|agent */
+#define RESEARCH_CLAIM_MAX 2048     /**< an extracted assertion */
+#define RESEARCH_URL_MAX 2048       /**< provenance source_url */
+#define RESEARCH_SOURCE_KIND_MAX 16 /**< web|document|memory|note|calendar|email */
+#define RESEARCH_QUOTE_MAX 2048     /**< supporting excerpt */
+
+/** A research run's header row (research_runs). */
+typedef struct {
+   int64_t id;
+   int64_t conversation_id;
+   int user_id;
+   char brief[RESEARCH_BRIEF_MAX];
+   char mode[RESEARCH_MODE_MAX];
+   char status[RESEARCH_STATUS_MAX];
+   int64_t report_doc_id; /**< 0 = none yet */
+   int rounds_run;
+   int tool_calls;
+   int64_t input_tokens;
+   char stop_reason[RESEARCH_STOP_REASON_MAX]; /**< empty until terminal */
+   time_t created_at;
+   time_t finished_at; /**< 0 = not finished */
+} research_run_t;
+
+/** A coverage-ledger question (research_questions). */
+typedef struct {
+   int64_t id;
+   int64_t run_id;
+   char question[RESEARCH_QUESTION_MAX];
+   char status[RESEARCH_QSTATUS_MAX];
+   double confidence;
+   int64_t parent_qid; /**< 0 = top-level */
+   time_t created_at;
+   /** Why the question reached its terminal state, beyond what `status` says: empty
+    *  for open/answered, "stale" (controller auto-retired — no new source for N
+    *  rounds) or "agent" (research_mark_unanswerable) for an unanswerable row.  Lets
+    *  a reader (the P1 completeness critic) distinguish an exhausted gap from a
+    *  model-judged dead-end without joining the observe-event stream. */
+   char resolution_reason[RESEARCH_REASON_MAX];
+} research_question_t;
+
+/** A load-bearing evidence claim (research_claims). */
+typedef struct {
+   int64_t id;
+   int64_t run_id;
+   int64_t question_id; /**< 0 = general (not tied to one sub-question) */
+   char claim[RESEARCH_CLAIM_MAX];
+   char source_url[RESEARCH_URL_MAX]; /**< empty = private corpus/memory */
+   char source_kind[RESEARCH_SOURCE_KIND_MAX];
+   char quote[RESEARCH_QUOTE_MAX];
+   int round;
+   time_t created_at;
+} research_claim_t;
+
+/* ── Runs ──────────────────────────────────────────────────────────────────── */
+
+/**
+ * @brief Create a research run (status='planning') bound to a job conversation.
+ * @param mode NULL/"" → "web".
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE (incl. UNIQUE(conversation_id)).
+ */
+int research_db_run_create(int user_id,
+                           int64_t conversation_id,
+                           const char *brief,
+                           const char *mode,
+                           int64_t *run_id_out);
+
+/**
+ * @brief Ownership-scoped run fetch (the user-facing `status` path).
+ * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND (absent or not owned), or FAILURE.
+ */
+int research_db_run_get(int64_t run_id, int user_id, research_run_t *out);
+
+/**
+ * @brief System-caller run fetch by its job conversation id (the worker owns the
+ *        conv, so no user_id is required — mirrors conv_db_job_set_running).
+ * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, or FAILURE.
+ */
+int research_db_run_get_by_conversation(int64_t conversation_id, research_run_t *out);
+
+/** @brief Set run.status (system). */
+int research_db_run_set_status(int64_t run_id, const char *status);
+
+/** @brief Record the final report note/document id (system). */
+int research_db_run_set_report_doc(int64_t run_id, int64_t report_doc_id);
+
+/** @brief Absolute progress meters — single-writer per run, so no read-modify-write. */
+int research_db_run_update_progress(int64_t run_id,
+                                    int rounds_run,
+                                    int tool_calls,
+                                    int64_t input_tokens);
+
+/** @brief Terminal transition: status + stop_reason + finished_at (system). */
+int research_db_run_set_terminal(int64_t run_id,
+                                 const char *status,
+                                 const char *stop_reason,
+                                 time_t finished_at);
+
+/**
+ * @brief Boot reconcile: mark every non-terminal run whose job conversation is
+ *        already terminal as 'interrupted' (finished_at=@p finished_at).
+ *
+ * Repairs runs stranded by a HARD kill (SIGKILL/crash/power loss), where the
+ * worker never ran its terminal disposition but the job boot scan marked the job
+ * 'interrupted'.  Call ONCE at startup, AFTER the job boot scan.  A no-op when no
+ * run is orphaned.
+ * @param count_out Receives the number of runs reconciled (may be NULL).
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int research_db_reconcile_orphaned(time_t finished_at, int *count_out);
+
+/* ── Questions (coverage ledger) ───────────────────────────────────────────── */
+
+/** @brief Add a ledger question (status='open', confidence=0). @p parent_qid 0 = top-level. */
+int research_db_question_add(int64_t run_id,
+                             const char *question,
+                             int64_t parent_qid,
+                             int64_t *qid_out);
+
+/** @brief Update a question's status + confidence + resolution reason.
+ *  @p reason records WHY (e.g. "stale" | "agent" for an `unanswerable` row); pass
+ *  NULL for a status carrying no reason (e.g. "answered"), which stores SQL NULL. */
+int research_db_question_set_status(int64_t qid,
+                                    const char *status,
+                                    double confidence,
+                                    const char *reason);
+
+/** @brief List all questions for a run (id ASC). System caller (run_id pre-checked). */
+int research_db_question_list(int64_t run_id, research_question_t *out, int max, int *count_out);
+
+/**
+ * @brief Distinct independent sources for a question — COUNT(DISTINCT source_url).
+ *
+ * SQLite's COUNT(DISTINCT source_url) ignores NULLs, so private/memory claims
+ * (source_url NULL) correctly do NOT count toward web-source coverage.  A
+ * question is `answered` when this reaches min_sources (§6).
+ *
+ * @p run_id is required (not redundant despite question_id being globally
+ * unique): constraining both columns lets the query seek idx_research_claims_run
+ * (run_id, question_id) instead of full-scanning the globally-growing claims
+ * table.  Callers hold run_id at the round boundary anyway.
+ */
+int research_db_question_coverage(int64_t run_id, int64_t qid, int *distinct_sources_out);
+
+/**
+ * @brief Does question @p qid belong to run @p run_id?
+ *
+ * Existence check used to validate a model-supplied question_id before storing a
+ * claim against it: an id that names no question in this run is de-attributed to 0
+ * (general) so it neither silently fails coverage nor spawns an orphan report
+ * heading.  Sets *@p out true only on a confirmed match.
+ *
+ * @return AUTH_DB_SUCCESS with *out set on a clean read; AUTH_DB_INVALID on a bad
+ *         argument; AUTH_DB_FAILURE on a DB error (leaves *out false).
+ */
+int research_db_question_belongs(int64_t run_id, int64_t qid, bool *out);
+
+/**
+ * @brief Fetch one question row by id, scoped to its run.
+ * @return AUTH_DB_SUCCESS (row copied into @p out), AUTH_DB_NOT_FOUND (no such
+ *         question in this run), AUTH_DB_INVALID (bad args), or AUTH_DB_FAILURE.
+ */
+int research_db_question_get(int64_t run_id, int64_t qid, research_question_t *out);
+
+/* ── Claims (evidence) ─────────────────────────────────────────────────────── */
+
+/**
+ * @brief Record one claim.  @p source_url/@p quote may be NULL/"" (private);
+ *        @p question_id 0 = general.
+ */
+int research_db_claim_add(int64_t run_id,
+                          int64_t question_id,
+                          const char *claim,
+                          const char *source_url,
+                          const char *source_kind,
+                          const char *quote,
+                          int round);
+
+/**
+ * @brief Batch-record @p n claims under one transaction (per-round ingest,
+ *        eff M1).  Each row's run_id is forced to @p run_id; the struct's
+ *        id/created_at are ignored (assigned by the DB).
+ */
+int research_db_claims_add(int64_t run_id, const research_claim_t *claims, int n);
+
+/** @brief Count claims for a run (to size a research_db_claim_list buffer). */
+int research_db_claim_count(int64_t run_id, int *count_out);
+
+/**
+ * @brief List a run's claims (question_id ASC, id ASC) for report rendering.
+ *        System caller (run_id pre-checked).
+ */
+int research_db_claim_list(int64_t run_id, research_claim_t *out, int max, int *count_out);
+
+/**
+ * @brief Up to @p max earliest claims for ONE question (id ASC) — the per-question
+ *        "findings so far" gloss the round digest carries across the history reset.
+ *        Constrains (run_id, question_id) so it seeks idx_research_claims_run.
+ */
+int research_db_question_claims(int64_t run_id,
+                                int64_t question_id,
+                                research_claim_t *out,
+                                int max,
+                                int *count_out);
+
+/* ── Report revisions (churn) ──────────────────────────────────────────────── */
+
+/** @brief Snapshot a round's intermediate report markdown. */
+int research_db_revision_add(int64_t run_id, int round, const char *markdown);
+
+/**
+ * @brief Fetch the highest-round report markdown for a run.  Allocates *out
+ *        (caller frees).  AUTH_DB_NOT_FOUND if the run has no revision yet.
+ */
+int research_db_revision_get_latest(int64_t run_id, char **markdown_out);
+
+/**
+ * @brief Prune all but the highest-round revision (completion churn cleanup,
+ *        §3).  Only call once rounds are reconstructable from claims + events.
+ */
+int research_db_revisions_prune_to_latest(int64_t run_id);
+
+/** @brief Count report revisions for a run (diagnostics + prune verification). */
+int research_db_revision_count(int64_t run_id, int *count_out);
 
 /* =============================================================================
  * Conversation event log (background-jobs Phase 2 — the observe half)

@@ -211,10 +211,19 @@ check_searxng() {
       echo "SKIP|Not configured"
       return
    fi
-   if curl -sf "http://localhost:8384/search?q=test&format=json" >/dev/null 2>&1; then
-      echo "PASS|Reachable (port 8384)"
-   else
+   # Reachability alone is NOT enough: a SearXNG whose upstream engines all time out
+   # (default request_timeout too tight — see GETTING_STARTED.md settings.yml) returns
+   # HTTP 200 with an EMPTY results array, which passed this check while silently
+   # returning nothing (and breaking the Tavily->SearXNG fallback). So verify results.
+   local body
+   body="$(curl -sf "http://localhost:8384/search?q=wikipedia&format=json" 2>/dev/null)" || {
       echo "FAIL|Not reachable"
+      return
+   }
+   if ! echo "$body" | grep -q '"url"'; then
+      echo "FAIL|Reachable but 0 results — engines timing out? add outgoing.request_timeout (GETTING_STARTED.md)"
+   else
+      echo "PASS|Reachable + returning results (port 8384)"
    fi
 }
 

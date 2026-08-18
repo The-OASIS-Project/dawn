@@ -1,0 +1,401 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s).
+ *
+ * Unit tests for the deep-research accessor layer (src/auth/auth_db_research.c):
+ * run create/get round-trip + ownership isolation, status/progress/terminal
+ * setters, the coverage ledger (questions), COUNT(DISTINCT source_url) coverage
+ * semantics (dedup + NULL exclusion), batched claim ingest, and report-revision
+ * latest/prune.
+ */
+
+#include <stdlib.h>
+#include <string.h>
+
+#include "auth/auth_db.h"
+#include "unity.h"
+
+static int alice_id = 0;
+static int bob_id = 0;
+static int64_t conv = 0;
+
+void setUp(void) {
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(":memory:"));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_create_user("alice", "h", true));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_create_user("bob", "h", false));
+   auth_user_t u;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_get_user("alice", &u));
+   alice_id = u.id;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_get_user("bob", &u));
+   bob_id = u.id;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "research conv", &conv));
+}
+
+void tearDown(void) {
+   auth_db_shutdown();
+}
+
+/* ── run create → get round-trips; ownership isolates; by-conversation works ── */
+
+static void test_run_create_get_ownership(void) {
+   int64_t run = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_run_create(
+                                              alice_id, conv, "why is the sky blue?", "web", &run));
+   TEST_ASSERT_TRUE(run > 0);
+
+   research_run_t r;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_run_get(run, alice_id, &r));
+   TEST_ASSERT_EQUAL_INT64(run, r.id);
+   TEST_ASSERT_EQUAL_INT64(conv, r.conversation_id);
+   TEST_ASSERT_EQUAL_INT(alice_id, r.user_id);
+   TEST_ASSERT_EQUAL_STRING("why is the sky blue?", r.brief);
+   TEST_ASSERT_EQUAL_STRING("web", r.mode);
+   TEST_ASSERT_EQUAL_STRING("planning", r.status);
+   TEST_ASSERT_EQUAL_INT64(0, r.report_doc_id);
+   TEST_ASSERT_EQUAL_INT64(0, r.finished_at);
+
+   /* bob cannot read alice's run. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, research_db_run_get(run, bob_id, &r));
+
+   /* system-caller by-conversation lookup. */
+   research_run_t r2;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_run_get_by_conversation(conv, &r2));
+   TEST_ASSERT_EQUAL_INT64(run, r2.id);
+}
+
+/* ── mode default; UNIQUE(conversation_id) rejects a second run per conv ─────── */
+
+static void test_run_mode_default_and_unique(void) {
+   int64_t run = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_run_create(alice_id, conv, "q", NULL, &run));
+   research_run_t r;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_run_get(run, alice_id, &r));
+   TEST_ASSERT_EQUAL_STRING("web", r.mode); /* NULL mode -> 'web' */
+
+   int64_t dup = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_FAILURE,
+                         research_db_run_create(alice_id, conv, "q2", "web", &dup));
+}
+
+/* ── status / progress / report_doc / terminal setters ──────────────────────── */
+
+static void test_run_setters(void) {
+   int64_t run = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_run_create(alice_id, conv, "q", "web", &run));
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_run_set_status(run, "researching"));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_run_update_progress(run, 3, 12, 45000));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_run_set_report_doc(run, 777));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_run_set_terminal(run, "done", "coverage", 1234567));
+
+   research_run_t r;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_run_get(run, alice_id, &r));
+   TEST_ASSERT_EQUAL_STRING("done", r.status);
+   TEST_ASSERT_EQUAL_STRING("coverage", r.stop_reason);
+   TEST_ASSERT_EQUAL_INT(3, r.rounds_run);
+   TEST_ASSERT_EQUAL_INT(12, r.tool_calls);
+   TEST_ASSERT_EQUAL_INT64(45000, r.input_tokens);
+   TEST_ASSERT_EQUAL_INT64(777, r.report_doc_id);
+   TEST_ASSERT_EQUAL_INT64(1234567, r.finished_at);
+}
+
+/* ── questions: add / list / set_status / parent_qid ────────────────────────── */
+
+static void test_questions(void) {
+   int64_t run = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_run_create(alice_id, conv, "q", "web", &run));
+
+   int64_t q1 = 0, q2 = 0, sub = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_add(run, "top A", 0, &q1));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_add(run, "top B", 0, &q2));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_add(run, "sub of A", q1, &sub));
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_question_set_status(q1, "answered", 0.9, NULL));
+   /* Unanswerable carries a resolution reason; answered/open leave it empty. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_question_set_status(q2, "unanswerable", 0.0, "agent"));
+
+   research_question_t out[8];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_list(run, out, 8, &n));
+   TEST_ASSERT_EQUAL_INT(3, n);
+   TEST_ASSERT_EQUAL_STRING("top A", out[0].question);
+   TEST_ASSERT_EQUAL_STRING("answered", out[0].status);
+   TEST_ASSERT_EQUAL_FLOAT(0.9, out[0].confidence);
+   TEST_ASSERT_EQUAL_INT64(0, out[0].parent_qid);
+   TEST_ASSERT_EQUAL_STRING("", out[0].resolution_reason);      /* answered -> no reason */
+   TEST_ASSERT_EQUAL_STRING("unanswerable", out[1].status);     /* q2 */
+   TEST_ASSERT_EQUAL_STRING("agent", out[1].resolution_reason); /* reason round-trips */
+   TEST_ASSERT_EQUAL_INT64(q1, out[2].parent_qid);              /* sub links to A */
+}
+
+/* ── question_belongs: validate a model-supplied question_id against its run ───── */
+
+static void test_question_belongs(void) {
+   /* A second run needs its own conversation: research_runs.conversation_id is
+    * UNIQUE and FK-constrained to a real conversations row. */
+   int64_t conv_b = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "research conv b", &conv_b));
+   int64_t run_a = 0, run_b = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_run_create(alice_id, conv, "a", "web", &run_a));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_run_create(alice_id, conv_b, "b", "web", &run_b));
+
+   int64_t qa = 0, qb = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_add(run_a, "in A", 0, &qa));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_add(run_b, "in B", 0, &qb));
+
+   bool belongs = false;
+   /* A question belongs to its own run. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_belongs(run_a, qa, &belongs));
+   TEST_ASSERT_TRUE(belongs);
+   /* ...but NOT to a different run (the cross-run de-attribution case). */
+   belongs = true;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_belongs(run_a, qb, &belongs));
+   TEST_ASSERT_FALSE(belongs);
+   /* A nonexistent id reads clean-false, never an error. */
+   belongs = true;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_belongs(run_a, 999999, &belongs));
+   TEST_ASSERT_FALSE(belongs);
+   /* Bad args are rejected and leave *out false. */
+   belongs = true;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_INVALID, research_db_question_belongs(run_a, 0, &belongs));
+   TEST_ASSERT_FALSE(belongs);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_INVALID, research_db_question_belongs(run_a, qa, NULL));
+
+   /* research_db_question_get: validates run-scope AND returns the row (used by
+    * research_mark_unanswerable to fill the observe event's question text). */
+   research_question_t q;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_get(run_a, qa, &q));
+   TEST_ASSERT_EQUAL_INT64(qa, q.id);
+   TEST_ASSERT_EQUAL_STRING("in A", q.question);
+   /* cross-run and nonexistent ids are NOT_FOUND, not SUCCESS. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, research_db_question_get(run_a, qb, &q));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, research_db_question_get(run_a, 999999, &q));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_INVALID, research_db_question_get(run_a, 0, &q));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_INVALID, research_db_question_get(run_a, qa, NULL));
+}
+
+/* ── coverage = COUNT(DISTINCT source_url): dedup + NULL exclusion ───────────── */
+
+static void test_coverage_distinct_and_null(void) {
+   int64_t run = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_run_create(alice_id, conv, "q", "web", &run));
+   int64_t qid = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_add(run, "the question", 0, &qid));
+
+   /* two claims from the SAME url (counts once), one from a distinct url, one
+    * with a NULL source (private/memory — excluded from the distinct count). */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_claim_add(run, qid, "c1", "http://a", "web", "qa", 0));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_claim_add(run, qid, "c2", "http://a", "web", "qb", 0));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_claim_add(run, qid, "c3", "http://b", "web", "qc", 1));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_claim_add(run, qid, "c4", NULL, "memory", NULL, 1));
+
+   int cov = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_coverage(run, qid, &cov));
+   TEST_ASSERT_EQUAL_INT(2, cov); /* http://a (dedup) + http://b; NULL excluded */
+}
+
+/* ── batched claim ingest + count + list ordering ───────────────────────────── */
+
+static void test_claims_batch_count_list(void) {
+   int64_t run = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_run_create(alice_id, conv, "q", "web", &run));
+   int64_t qa = 0, qb = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_add(run, "A", 0, &qa));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_add(run, "B", 0, &qb));
+
+   research_claim_t batch[3];
+   memset(batch, 0, sizeof(batch));
+   batch[0].question_id = qb;
+   strcpy(batch[0].claim, "b-claim");
+   strcpy(batch[0].source_url, "http://b");
+   batch[0].round = 2;
+   batch[1].question_id = qa;
+   strcpy(batch[1].claim, "a-claim");
+   strcpy(batch[1].source_url, "http://a");
+   batch[1].round = 2;
+   batch[2].question_id = 0; /* general */
+   strcpy(batch[2].claim, "gen-claim");
+   batch[2].round = 2;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_claims_add(run, batch, 3));
+
+   /* an all-empty batch (no claim text anywhere) is rejected, not a silent no-op. */
+   research_claim_t empties[2];
+   memset(empties, 0, sizeof(empties));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_INVALID, research_db_claims_add(run, empties, 2));
+
+   int count = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_claim_count(run, &count));
+   TEST_ASSERT_EQUAL_INT(3, count); /* still 3 — the empty batch inserted nothing */
+
+   research_claim_t out[8];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_claim_list(run, out, 8, &n));
+   TEST_ASSERT_EQUAL_INT(3, n);
+   /* ordered by question_id ASC (0/general first), then id ASC. */
+   TEST_ASSERT_EQUAL_INT64(0, out[0].question_id);
+   TEST_ASSERT_EQUAL_STRING("gen-claim", out[0].claim);
+   TEST_ASSERT_EQUAL_INT64(qa, out[1].question_id);
+   TEST_ASSERT_EQUAL_STRING("a-claim", out[1].claim);
+   TEST_ASSERT_EQUAL_INT64(qb, out[2].question_id);
+}
+
+/* ── per-question claims (the round-digest gloss source) ─────────────────────── */
+static void test_question_claims(void) {
+   int64_t run = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_run_create(alice_id, conv, "q", "web", &run));
+   int64_t qa = 0, qb = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_add(run, "A", 0, &qa));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_add(run, "B", 0, &qb));
+   /* three claims for qa (id order = insert order), one for qb, one general. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_claim_add(run, qa, "a1", "http://a1", "web", NULL, 0));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_claim_add(run, qa, "a2", "http://a2", "web", NULL, 0));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_claim_add(run, qa, "a3", "http://a3", "web", NULL, 1));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_claim_add(run, qb, "b1", "http://b1", "web", NULL, 0));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_claim_add(run, 0, "gen", NULL, "memory", NULL, 0));
+
+   research_claim_t out[2];
+   int n = -1;
+   /* LIMIT 2 → only the two EARLIEST claims for qa, in id order, none from qb/general. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_claims(run, qa, out, 2, &n));
+   TEST_ASSERT_EQUAL_INT(2, n);
+   TEST_ASSERT_EQUAL_STRING("a1", out[0].claim);
+   TEST_ASSERT_EQUAL_STRING("a2", out[1].claim);
+   TEST_ASSERT_EQUAL_INT64(qa, out[0].question_id);
+
+   /* a question with a single claim returns exactly one. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_claims(run, qb, out, 2, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_STRING("b1", out[0].claim);
+
+   /* a question with no claims returns zero, not an error. */
+   int64_t qc = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_add(run, "C", 0, &qc));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_claims(run, qc, out, 2, &n));
+   TEST_ASSERT_EQUAL_INT(0, n);
+}
+
+/* ── report revisions: latest returns highest round; prune keeps only it ────── */
+
+static void test_revisions_latest_and_prune(void) {
+   int64_t run = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_run_create(alice_id, conv, "q", "web", &run));
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_revision_add(run, 0, "round0"));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_revision_add(run, 1, "round1"));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_revision_add(run, 2, "round2 FINAL"));
+
+   int rc = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_revision_count(run, &rc));
+   TEST_ASSERT_EQUAL_INT(3, rc);
+
+   char *md = NULL;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_revision_get_latest(run, &md));
+   TEST_ASSERT_NOT_NULL(md);
+   TEST_ASSERT_EQUAL_STRING("round2 FINAL", md);
+   free(md);
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_revisions_prune_to_latest(run));
+   /* the two earlier rounds are actually deleted — only the final remains. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_revision_count(run, &rc));
+   TEST_ASSERT_EQUAL_INT(1, rc);
+   md = NULL;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_revision_get_latest(run, &md));
+   TEST_ASSERT_EQUAL_STRING("round2 FINAL", md);
+   free(md);
+}
+
+/* ── get on a missing run / revision returns NOT_FOUND ──────────────────────── */
+
+static void test_not_found(void) {
+   research_run_t r;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, research_db_run_get(99999, alice_id, &r));
+   int64_t run = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_run_create(alice_id, conv, "q", "web", &run));
+   char *md = NULL;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, research_db_revision_get_latest(run, &md));
+   TEST_ASSERT_NULL(md);
+}
+
+/* ── orphan reconcile: a live run (finished_at SQL NULL) on a now-terminal job is
+ *    marked 'interrupted'; a still-running job's run is left untouched. Regression
+ *    test for the NULL-vs-0 predicate bug — run_create leaves finished_at NULL, and
+ *    `WHERE finished_at=0` matched NOTHING, so the reconcile silently repaired no
+ *    zombie runs. ───────────────────────────────────────────────────────────── */
+static void test_reconcile_orphaned(void) {
+   int64_t jobconv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_create_job(alice_id, "research job", 0, "detached", "notify", NULL,
+                                            1, "brief", &jobconv));
+   int64_t run = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_run_create(alice_id, jobconv, "brief", "web", &run));
+
+   /* While the job is still running, reconcile must NOT touch its run. */
+   int n = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_set_running(jobconv, 5000));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_reconcile_orphaned(9000, &n));
+   TEST_ASSERT_EQUAL_INT(0, n);
+   research_run_t r;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_run_get(run, alice_id, &r));
+   TEST_ASSERT_EQUAL_STRING("planning", r.status);
+
+   /* Boot job-scan marks the dead job terminal; reconcile must now catch the
+    * still-'planning' run (finished_at NULL) and interrupt it. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_job_set_terminal(jobconv, "interrupted", NULL, 6000));
+   n = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_reconcile_orphaned(9000, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_run_get(run, alice_id, &r));
+   TEST_ASSERT_EQUAL_STRING("interrupted", r.status);
+   TEST_ASSERT_EQUAL_INT64(9000, r.finished_at);
+
+   /* Idempotent: a second pass finds nothing now the run is terminal. */
+   n = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_reconcile_orphaned(9000, &n));
+   TEST_ASSERT_EQUAL_INT(0, n);
+}
+
+int main(void) {
+   UNITY_BEGIN();
+   RUN_TEST(test_run_create_get_ownership);
+   RUN_TEST(test_run_mode_default_and_unique);
+   RUN_TEST(test_run_setters);
+   RUN_TEST(test_questions);
+   RUN_TEST(test_question_belongs);
+   RUN_TEST(test_coverage_distinct_and_null);
+   RUN_TEST(test_claims_batch_count_list);
+   RUN_TEST(test_question_claims);
+   RUN_TEST(test_revisions_latest_and_prune);
+   RUN_TEST(test_not_found);
+   RUN_TEST(test_reconcile_orphaned);
+   return UNITY_END();
+}

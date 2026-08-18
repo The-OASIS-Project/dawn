@@ -1,0 +1,78 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s).
+ *
+ * Deep-research P0 budget defaults — the SINGLE source of truth.
+ *
+ * A pure-constant leaf header (no includes, no code) so BOTH the deterministic
+ * core (research_budgets_defaults() in research_run.c) AND the config-default
+ * initializer (config_defaults.c, a Layer-0 file that must not pull in the full
+ * research_run.h → auth_db.h chain) reference one place.  research_budgets_load()
+ * overlays the [research] config over these at run start, and config_defaults.c
+ * seeds the config from these same constants — so a bump here propagates to both
+ * the compile-time fallback and the runtime default with no drift.
+ */
+
+#ifndef RESEARCH_DEFAULTS_H
+#define RESEARCH_DEFAULTS_H
+
+#define RESEARCH_DEFAULT_MAX_ROUNDS 6
+#define RESEARCH_DEFAULT_MAX_TOOL_CALLS 40
+/* 1M: a HIGH runaway backstop, not the normal stop.  The natural-end signals
+ * (concluded / coverage / saturation / unanswerable) are what should end a healthy
+ * run — well under this — so the ceiling only catches a genuine runaway (a loop
+ * that never converges or self-terminates).  Set it low and it guillotines a
+ * productive run mid-progress (live: a 400k ceiling cut a run off at 7/8); set it
+ * high and, because the natural-ends fire first, it is rarely reached. */
+#define RESEARCH_DEFAULT_MAX_INPUT_TOKENS 1000000
+#define RESEARCH_DEFAULT_MIN_SOURCES 2
+#define RESEARCH_DEFAULT_ROUND_DIGEST_MAX_CHARS 6000
+#define RESEARCH_DEFAULT_TOP_K_QUESTIONS 8
+/* Consecutive rounds that close NO new question before the saturation stop fires
+ * (0 disables).  1 = stop the first dry round: live run 2 spent 35% of its whole
+ * token budget on a 3rd round that closed nothing, so one dry round is already the
+ * signal to stop rather than grind the budget.  The agent can also end a run early
+ * itself via research_conclude; this is the controller's backstop for a run that
+ * stalls without concluding. */
+#define RESEARCH_DEFAULT_SATURATION_ROUNDS 1
+/* Freeze the plan after this round: research_plan refuses NEW sub-questions once the
+ * round number exceeds this, so the model decomposes freely early (rounds 1..N) then
+ * converges on that plan instead of expanding the denominator every round (runs 2/4/5
+ * grew the plan mid-run, tanking the coverage fraction and driving spend to the fuse).
+ * Min 1 so round-1 planning always works; a value >= max_rounds effectively disables
+ * the freeze.  This is NOT a cap on how many questions the initial plan may hold —
+ * only on runaway LATE growth. */
+#define RESEARCH_DEFAULT_PLAN_FREEZE_ROUND 2
+/* Auto-retire an open sub-question as unanswerable after this many consecutive rounds
+ * in which it gained NO new distinct source (0 disables).  The controller's answer to
+ * a run stuck on genuinely-unclosable questions (a compound/synthesis/subjective
+ * question the agent never marks unanswerable itself): without it the open set never
+ * empties, coverage/saturation can't fire, and an expensive broad survey grinds to the
+ * max_input_tokens fuse (live run 7: 3 such questions drove it to the 1M ceiling).
+ * Retiring is convergence, not data loss — the claims already gathered for the question
+ * stay in research_claims and still render in the report; synthesis is honest about the
+ * gap.  2 = give a question two full dry rounds before giving up on closing it. */
+#define RESEARCH_DEFAULT_STALE_ROUNDS 2
+/* Times the fresh-context completeness critic may re-arm a run at stop-eligibility
+ * (0 disables the critic entirely — a max of 0 re-arms means running it can never
+ * change the outcome, so it does not run).  Each re-arm adds the critic's targeted
+ * "untried angle" sub-questions and lets the loop continue for the remaining rounds;
+ * bounded here so a critic that keeps finding gaps can't defer a stop forever (the
+ * token/round fuses still cap the whole run regardless).  2 = at most two re-arms. */
+#define RESEARCH_DEFAULT_CRITIC_MAX_REARM 2
+
+#endif /* RESEARCH_DEFAULTS_H */

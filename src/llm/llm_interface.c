@@ -207,6 +207,14 @@ static _Atomic sig_atomic_t llm_interrupt_requested = 0;
 // When set, this takes precedence over the global interrupt flag
 static __thread _Atomic bool *tls_cancel_flag = NULL;
 
+// Whether the in-flight transfer should ALSO honor the global interrupt flag
+// (the foreground wake-word / Ctrl+C barge-in).  False for a background/job
+// transfer, so one local wake word can't abort a concurrent job's HTTP call and
+// have it misfile as a transient network error.  Mirrors the tool loop's
+// llm_interrupt_ctx_t at the transfer level.  Defaults true; a plain
+// llm_set_cancel_flag() resets it to true, so only an explicit _ex() opts out.
+static __thread bool tls_cancel_honor_global = true;
+
 int llm_get_current_resolved_config(llm_resolved_config_t *config_out) {
    if (!config_out) {
       return 1;
@@ -981,8 +989,14 @@ int llm_is_interrupt_requested(void) {
    return llm_interrupt_requested;
 }
 
-void llm_set_cancel_flag(void *flag) {
+void llm_set_cancel_flag_ex(void *flag, bool honor_global) {
    tls_cancel_flag = (_Atomic bool *)flag;
+   tls_cancel_honor_global = honor_global;
+}
+
+void llm_set_cancel_flag(void *flag) {
+   /* Foreground default: a background caller uses llm_set_cancel_flag_ex(flag, false). */
+   llm_set_cancel_flag_ex(flag, true);
 }
 
 void *llm_get_cancel_flag(void) {
@@ -993,8 +1007,9 @@ void *llm_get_cancel_flag(void) {
  * @brief CURL progress callback to check for interruption requests
  *
  * Called periodically by CURL during transfer. Returns non-zero to abort.
- * Checks per-session cancel flag first (for multi-user WebUI support),
- * then falls back to global interrupt flag (for local wake word detection).
+ * Checks per-session cancel flag first (for multi-user WebUI support), then
+ * falls back to the global interrupt flag (local wake-word detection) UNLESS
+ * this is a background/job transfer (tls_cancel_honor_global=false).
  *
  * @param clientp User data pointer (unused)
  * @param dltotal Total bytes to download
@@ -1020,8 +1035,10 @@ int llm_curl_progress_callback(void *clientp,
       return 1;  // Non-zero aborts transfer
    }
 
-   // Fall back to global interrupt flag (local wake word detection)
-   if (llm_interrupt_requested) {
+   // Fall back to the global interrupt flag (local wake-word detection) — but a
+   // background/job transfer opts out (tls_cancel_honor_global=false) so a
+   // foreground wake word can't abort it.  See llm_set_cancel_flag_ex.
+   if (tls_cancel_honor_global && llm_interrupt_requested) {
       OLOG_INFO("LLM transfer interrupted by wake word");
       return 1;  // Non-zero aborts transfer
    }
@@ -1074,7 +1091,11 @@ char *llm_chat_completion(struct json_object *conversation_history,
       }
    }
 
-   /* Gate cloud API calls through rate limiter */
+   /* Gate cloud API calls through rate limiter.  Single-shot (non-tool-loop)
+    * completion path — intentionally on the global-only wait (no per-turn ctx).
+    * Background/job turns run through the streaming tool loop, which uses the
+    * session-aware llm_rate_limit_wait_ctx; these bare completions are foreground
+    * / auxiliary (briefings, memory extraction) with no background-cancel need. */
    if (type != LLM_LOCAL) {
       if (llm_rate_limit_wait())
          return NULL; /* interrupted */
@@ -1114,8 +1135,13 @@ char *llm_chat_completion(struct json_object *conversation_history,
       }
    }
 
-   /* If cloud LLM failed (but not interrupted by user), try falling back to local */
-   if (response == NULL && type == LLM_CLOUD && allow_fallback && !llm_is_interrupt_requested()) {
+   /* If cloud LLM failed (but not interrupted by user), try falling back to local.
+    * "Interrupted" is global OR session cancel (see the loop's ictx), so the
+    * suppression must check BOTH — a turn aborted purely by its session cancel
+    * flag (global unset) must not fall through to a spoken "Unable to contact
+    * cloud LLM" + a global provider switch. */
+   if (response == NULL && type == LLM_CLOUD && allow_fallback && !llm_is_interrupt_requested() &&
+       !(session && atomic_load(&session->cancel_requested))) {
       if (strcmp(CLOUDAI_URL, url) == 0 || strcmp(CLAUDE_URL, url) == 0 ||
           strcmp(GEMINI_URL, url) == 0 || strcmp(OPENROUTER_URL, url) == 0) {
          OLOG_WARNING("Falling back to local LLM due to connection failure.");
@@ -1226,12 +1252,24 @@ char *llm_chat_completion_streaming(struct json_object *conversation_history,
       .session_id = session_id,
       .llm_type = type,
       .cloud_provider = provider,
+      /* cancel_flag borrows &session->cancel_requested for the loop's lifetime.
+       * Safe because the caller holds a session ref for the whole synchronous
+       * loop and session teardown sets cancel_requested BEFORE freeing (see
+       * session_destroy ordering) — the loop observes the flag and exits first. */
+      .cancel_flag = session ? &session->cancel_requested : NULL,
+      .is_background = session_is_background(session),
+      .cumulative_input_token_ceiling = session ? session->input_token_ceiling : 0,
    };
 
    response = llm_tool_iteration_loop(&loop_params);
 
-   /* If cloud LLM failed (but not interrupted by user), try falling back to local */
-   if (response == NULL && type == LLM_CLOUD && allow_fallback && !llm_is_interrupt_requested()) {
+   /* If cloud LLM failed (but not interrupted by user), try falling back to local.
+    * "Interrupted" is global OR session cancel (see the loop's ictx), so the
+    * suppression must check BOTH — a turn aborted purely by its session cancel
+    * flag (global unset) must not fall through to a spoken "Unable to contact
+    * cloud LLM" + a global provider switch. */
+   if (response == NULL && type == LLM_CLOUD && allow_fallback && !llm_is_interrupt_requested() &&
+       !(session && atomic_load(&session->cancel_requested))) {
       if (strcmp(CLOUDAI_URL, url) == 0 || strcmp(CLAUDE_URL, url) == 0 ||
           strcmp(GEMINI_URL, url) == 0 || strcmp(OPENROUTER_URL, url) == 0) {
          OLOG_WARNING("Falling back to local LLM due to connection failure.");
@@ -1644,7 +1682,11 @@ char *llm_chat_completion_with_config(struct json_object *conversation_history,
       s_tl_timeout_ms = config->timeout_ms;
    }
 
-   /* Gate cloud API calls through rate limiter */
+   /* Gate cloud API calls through rate limiter.  Single-shot (non-tool-loop)
+    * completion path — intentionally on the global-only wait (no per-turn ctx).
+    * Background/job turns run through the streaming tool loop, which uses the
+    * session-aware llm_rate_limit_wait_ctx; these bare completions are foreground
+    * / auxiliary (briefings, memory extraction) with no background-cancel need. */
    if (config->type != LLM_LOCAL) {
       if (llm_rate_limit_wait())
          return NULL; /* interrupted */
@@ -1756,6 +1798,13 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
       .session_id = session_id,
       .llm_type = config->type,
       .cloud_provider = config->cloud_provider,
+      /* cancel_flag borrows &session->cancel_requested for the loop's lifetime.
+       * Safe because the caller holds a session ref for the whole synchronous
+       * loop and session teardown sets cancel_requested BEFORE freeing (see
+       * session_destroy ordering) — the loop observes the flag and exits first. */
+      .cancel_flag = session ? &session->cancel_requested : NULL,
+      .is_background = session_is_background(session),
+      .cumulative_input_token_ceiling = session ? session->input_token_ceiling : 0,
    };
 
    response = llm_tool_iteration_loop(&loop_params);

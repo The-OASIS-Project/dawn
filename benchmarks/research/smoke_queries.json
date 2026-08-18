@@ -1,0 +1,112 @@
+{
+  "_comment": [
+    "Deep-research P0 smoke query set (DEEP_RESEARCH_DESIGN.md §15 Step 11).",
+    "",
+    "These are chosen to be BOTH (a) genuine research — current/aggregated/niche",
+    "material a capable model can't one-shot from training, so the multi-round loop",
+    "and per-question coverage actually do work — AND (b) useful to the developer:",
+    "each maps to a real DAWN subsystem decision (which LLM/embedding/TTS/ASR to run",
+    "on Jetson, AR-glasses HUD hardware, cellular modem, competitive landscape).",
+    "The evergreen-textbook topics were removed because a strong model answers them",
+    "in one search and never spawns a run.",
+    "",
+    "Not an automated benchmark: a run needs the live daemon + LLM + web search, and",
+    "quality is judged by reading the report (compression loss + synthesis coherence",
+    "are the named risks, §14). Submit each brief and let it run, then snapshot with",
+    "capture_baseline.py. 'shape' groups by research pattern; 'should_cover' is the",
+    "eyeball checklist for a GOOD report, NOT a machine-graded gold answer.",
+    "",
+    "Tip: these are open enough to route to deep_research on their own, but if the",
+    "model answers with a single search instead, say 'use the deep_research tool'."
+  ],
+  "queries": [
+    {
+      "id": "jetson_llm_serving",
+      "shape": "decision support — which tool for my constraint",
+      "brief": "What are the current best ways to serve a local LLM on an NVIDIA Jetson Orin (as of 2026)? Compare llama.cpp, Ollama, MLC-LLM, TensorRT-LLM, and vLLM on Jetson/CUDA support, tokens/sec and memory footprint for 4-8B models, quantization options, streaming + tool-calling support, and setup friction.",
+      "should_cover": [
+        "which actually support the Jetson/aarch64 + CUDA target (not just x86)",
+        "per-engine throughput / memory tradeoffs for a 4-8B model",
+        "quantization (GGUF/AWQ/INT4) and tool-calling / streaming support",
+        "a concrete recommendation for a Jetson-class device, with sources"
+      ]
+    },
+    {
+      "id": "local_embedding_models",
+      "shape": "multi-entity comparison + benchmark aggregation",
+      "brief": "Compare the current small local text-embedding models suitable for on-device semantic memory and RAG on a Jetson (e.g. bge-small/large, gte, nomic-embed-text, e5, arctic-embed, mxbai) — embedding dimensions, MTEB/retrieval quality, model size and inference latency, max sequence length, license, and ONNX/GGUF availability.",
+      "should_cover": [
+        "retrieval-quality ranking (MTEB or similar) with the actual numbers",
+        "size/latency and dimensions per model (matters for on-device)",
+        "license + ONNX/GGUF availability (deployability on Jetson)",
+        "a recommendation balancing quality vs on-device cost"
+      ]
+    },
+    {
+      "id": "ar_glasses_hud",
+      "shape": "current-hardware comparison (niche specs)",
+      "brief": "Compare the current (2026) consumer AR / smart glasses usable as a wearable HUD display driven by a self-hosted assistant — XREAL, RayNeo, Rokid, Viture, and any notable others — on display resolution/FOV/brightness, DisplayPort-alt-mode over USB-C and Linux compatibility, tethered vs onboard compute, SDK/openness for custom overlays, weight, and price.",
+      "should_cover": [
+        "several current models with per-spec comparison (res/FOV/brightness)",
+        "USB-C DP-alt-mode + Linux driving compatibility (the load-bearing detail)",
+        "SDK openness for custom HUD content vs locked ecosystems",
+        "which is the best fit for a Linux/Jetson-driven custom HUD, cited"
+      ]
+    },
+    {
+      "id": "edge_streaming_asr",
+      "shape": "decision support — latency-constrained pick",
+      "brief": "What are the current best options for low-latency, near-real-time speech recognition on an edge device (whisper.cpp, faster-whisper, Vosk, NVIDIA Parakeet/Canary, Moonshine, and any newer ones)? Compare accuracy, streaming vs batch, latency/RTF on CPU vs a Jetson GPU, memory, language support, and license.",
+      "should_cover": [
+        "streaming vs batch capability per engine (critical for a voice loop)",
+        "accuracy (WER) vs latency tradeoff, with numbers where available",
+        "CUDA / Jetson support and memory footprint",
+        "a recommendation for a real-time on-device voice assistant"
+      ]
+    },
+    {
+      "id": "local_neural_tts",
+      "shape": "multi-entity comparison — quality vs latency",
+      "brief": "Compare current local/offline neural text-to-speech engines suitable for a real-time voice assistant on edge hardware (Piper, Kokoro, XTTS/Coqui successors, Parler-TTS, and newer 2026 options) — voice naturalness, latency/real-time-factor on CPU vs GPU, streaming support, voice cloning, available voices, and license.",
+      "should_cover": [
+        "naturalness vs latency tradeoff per engine (with RTF numbers if cited)",
+        "streaming support and edge/CPU viability",
+        "licensing (commercial-use viability) and available/clonable voices",
+        "a recommendation vs the current Piper baseline"
+      ]
+    },
+    {
+      "id": "new_small_llms_2026",
+      "shape": "recent releases (forces current web info)",
+      "brief": "What notable open-weight LLMs released or updated in 2026 fit in roughly 8 GB of VRAM (a Jetson Orin class device) after 4-bit quantization? For each: benchmark standing (reasoning/coding), context length, tool-calling/function-calling support, and license — and which are the strongest current picks for a local assistant.",
+      "should_cover": [
+        "actually-2026 releases (proves it fetched current info, not training memory)",
+        "per-model benchmark standing + context length + tool-calling support",
+        "licenses (open-weight vs restricted)",
+        "a shortlist of the strongest ~8GB local-assistant picks, cited"
+      ]
+    },
+    {
+      "id": "selfhosted_assistant_landscape",
+      "shape": "landscape survey — competitive intel",
+      "brief": "Survey the current (2025-2026) landscape of open-source / self-hosted personal AI assistant and 'JARVIS-like' projects — for each notable one, its architecture, local-vs-cloud LLM support, long-term memory / RAG approach, voice pipeline (ASR/TTS), home-automation or device integration, and what it does that's genuinely novel.",
+      "should_cover": [
+        "several distinct current projects (not just the one or two famous ones)",
+        "per-project: LLM support, memory/RAG approach, voice pipeline",
+        "what's novel/differentiating about each",
+        "an honest read of where the field is and gaps still open"
+      ]
+    },
+    {
+      "id": "embedded_cellular_modems",
+      "shape": "current-hardware comparison (feature-matrix)",
+      "brief": "Compare the current cellular modem modules for an embedded Linux voice + SMS + data project (SIM7600 family, Quectel EC25/EG25/RG500, u-blox, and any newer LTE/5G options) — AT-command feature coverage (voice, USB PCM audio, SMS/MMS, VoLTE), Linux driver maturity, form factor/interface, North American carrier compatibility, and price.",
+      "should_cover": [
+        "per-module feature matrix (voice/PCM/MMS/VoLTE) — the deciding factors",
+        "Linux driver maturity and interface (USB/mini-PCIe/UART)",
+        "North American carrier / band compatibility",
+        "a recommendation for an embedded voice+SMS device, cited"
+      ]
+    }
+  ]
+}

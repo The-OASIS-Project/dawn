@@ -51,9 +51,10 @@
 /* Canonical background-job column projection, in the order job_unpack_row()
  * (auth_db_jobs.c) reads.  Shared so the cached prepared statements in
  * auth_db_statements.c stay column-aligned with the readers. */
-#define JOB_SELECT_COLS                                                                      \
-   "id, user_id, parent_id, title, spawn_mode, on_complete, on_complete_fired, job_status, " \
-   "job_error, deliver_to, spawn_depth, reinvoke_count, started_at, finished_at, created_at"
+#define JOB_SELECT_COLS                                                                        \
+   "id, user_id, parent_id, title, spawn_mode, on_complete, on_complete_fired, job_status, "   \
+   "job_error, deliver_to, spawn_depth, reinvoke_count, started_at, finished_at, created_at, " \
+   "origin, job_kind"
 
 /* Current schema version.
  * NOTE: the schema version is GLOBAL and must advance uniformly across every
@@ -63,7 +64,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 74
+#define AUTH_DB_SCHEMA_VERSION 76
 
 /* Retention periods */
 #define LOGIN_ATTEMPT_RETENTION_SEC (7 * 24 * 60 * 60) /* 7 days */
@@ -72,6 +73,85 @@
 /* Helper macro for stringifying values in SQL */
 #define STRINGIFY_HELPER(x) #x
 #define STRINGIFY(x) STRINGIFY_HELPER(x)
+
+/* Deep-research tables (v75), as ONE shared DDL string so the base SCHEMA_SQL
+ * (auth_db_schema.c, fresh installs) and the v75 migration
+ * (auth_db_migrations_v75.c, existing DBs) can never silently diverge — both
+ * build the identical research_* schema from this single source.  Safe in both
+ * paths: every statement is CREATE ... IF NOT EXISTS and references no
+ * migration-only column.  Deliberately NOT included here: the `job_kind` ALTER
+ * (an inline column in the base CREATE, an ALTER in the migration — structurally
+ * different) and `idx_conv_jobs_user` (references conversations.job_status,
+ * which does not exist when the base schema runs on a pre-v72 DB).
+ *
+ * Design notes (see docs/DEEP_RESEARCH_DESIGN.md §3):
+ *  - research_runs.conversation_id is UNIQUE: a run IS its bare-session
+ *    conversation, strictly 1:1 (P0 blocks research resume; P1 ledger-resume
+ *    reuses the same run, never mints a second row per conversation).
+ *  - research_questions.parent_qid and research_claims.question_id are FK-less
+ *    soft links BY DESIGN: questions/claims are only ever deleted via the run
+ *    cascade, so nothing dangles, and parent_qid is a self-reference whose FK
+ *    would only add ordering friction.  Add a real FK only if standalone
+ *    question deletion is ever introduced.
+ *  - Coverage is COUNT(DISTINCT source_url); there is deliberately no
+ *    sources_count cache column (it would be a denormalized value that lies). */
+#define AUTH_DB_RESEARCH_SCHEMA_SQL                                                  \
+   "CREATE TABLE IF NOT EXISTS research_runs ("                                      \
+   "   id INTEGER PRIMARY KEY AUTOINCREMENT,"                                        \
+   "   conversation_id INTEGER NOT NULL,"                                            \
+   "   user_id INTEGER NOT NULL,"                                                    \
+   "   brief TEXT NOT NULL,"                                                         \
+   "   mode TEXT NOT NULL DEFAULT 'web',"                                            \
+   "   status TEXT NOT NULL,"                                                        \
+   "   report_doc_id INTEGER,"                                                       \
+   "   rounds_run INTEGER NOT NULL DEFAULT 0,"                                       \
+   "   tool_calls INTEGER NOT NULL DEFAULT 0,"                                       \
+   "   input_tokens INTEGER NOT NULL DEFAULT 0,"                                     \
+   "   stop_reason TEXT,"                                                            \
+   "   created_at INTEGER NOT NULL,"                                                 \
+   "   finished_at INTEGER,"                                                         \
+   "   UNIQUE (conversation_id),"                                                    \
+   "   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE" \
+   ");"                                                                              \
+   "CREATE INDEX IF NOT EXISTS idx_research_runs_user "                              \
+   "ON research_runs(user_id, created_at DESC);"                                     \
+   "CREATE TABLE IF NOT EXISTS research_questions ("                                 \
+   "   id INTEGER PRIMARY KEY AUTOINCREMENT,"                                        \
+   "   run_id INTEGER NOT NULL,"                                                     \
+   "   question TEXT NOT NULL,"                                                      \
+   "   status TEXT NOT NULL DEFAULT 'open',"                                         \
+   "   confidence REAL NOT NULL DEFAULT 0.0,"                                        \
+   "   parent_qid INTEGER,"                                                          \
+   "   created_at INTEGER NOT NULL,"                                                 \
+   "   resolution_reason TEXT,"                                                      \
+   "   FOREIGN KEY (run_id) REFERENCES research_runs(id) ON DELETE CASCADE"          \
+   ");"                                                                              \
+   "CREATE INDEX IF NOT EXISTS idx_research_questions_run "                          \
+   "ON research_questions(run_id, status);"                                          \
+   "CREATE TABLE IF NOT EXISTS research_claims ("                                    \
+   "   id INTEGER PRIMARY KEY AUTOINCREMENT,"                                        \
+   "   run_id INTEGER NOT NULL,"                                                     \
+   "   question_id INTEGER,"                                                         \
+   "   claim TEXT NOT NULL,"                                                         \
+   "   source_url TEXT,"                                                             \
+   "   source_kind TEXT NOT NULL DEFAULT 'web',"                                     \
+   "   quote TEXT,"                                                                  \
+   "   round INTEGER NOT NULL,"                                                      \
+   "   created_at INTEGER NOT NULL,"                                                 \
+   "   FOREIGN KEY (run_id) REFERENCES research_runs(id) ON DELETE CASCADE"          \
+   ");"                                                                              \
+   "CREATE INDEX IF NOT EXISTS idx_research_claims_run "                             \
+   "ON research_claims(run_id, question_id);"                                        \
+   "CREATE TABLE IF NOT EXISTS research_report_revisions ("                          \
+   "   id INTEGER PRIMARY KEY AUTOINCREMENT,"                                        \
+   "   run_id INTEGER NOT NULL,"                                                     \
+   "   round INTEGER NOT NULL,"                                                      \
+   "   markdown TEXT NOT NULL,"                                                      \
+   "   created_at INTEGER NOT NULL,"                                                 \
+   "   FOREIGN KEY (run_id) REFERENCES research_runs(id) ON DELETE CASCADE"          \
+   ");"                                                                              \
+   "CREATE INDEX IF NOT EXISTS idx_research_revisions_run "                          \
+   "ON research_report_revisions(run_id, round);"
 
 /* Default email read-body cap baked into the email_accounts schema column and
  * applied by the v55 migration.  The auth layer cannot include tools/ headers,
@@ -603,6 +683,14 @@ int auth_db_migrations_v72(sqlite3 *db);
  */
 int auth_db_migrations_v73(sqlite3 *db);
 int auth_db_migrations_v74(sqlite3 *db);
+
+/**
+ * @brief v75: deep-research foundation — `job_kind` discriminator on
+ *        `conversations`, the four `research_*` tables, and the paginated
+ *        job/research list partial index (`idx_conv_jobs_user`).
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int auth_db_migrations_v75(sqlite3 *db);
 
 /**
  * @brief Prepare every cached sqlite3_stmt* in s_db.

@@ -140,6 +140,68 @@ static void test_non_utf8_result_is_sanitized(void) {
    free(p);
 }
 
+/* --- deep-research event payloads (§10) ------------------------------------ */
+
+static void test_research_round_shape(void) {
+   char *p = event_payload_research_round(3, 2, 5, 11, 40000);
+   TEST_ASSERT_NOT_NULL(p);
+   struct json_object *root = json_tokener_parse(p);
+   TEST_ASSERT_NOT_NULL(root);
+   struct json_object *v = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(root, "round", &v));
+   TEST_ASSERT_EQUAL_INT(3, json_object_get_int(v));
+   TEST_ASSERT_TRUE(json_object_object_get_ex(root, "questions_closed", &v));
+   TEST_ASSERT_EQUAL_INT(2, json_object_get_int(v));
+   TEST_ASSERT_TRUE(json_object_object_get_ex(root, "questions_total", &v));
+   TEST_ASSERT_EQUAL_INT(5, json_object_get_int(v));
+   TEST_ASSERT_TRUE(json_object_object_get_ex(root, "input_tokens", &v));
+   TEST_ASSERT_EQUAL_INT64(40000, json_object_get_int64(v));
+   json_object_put(root);
+   free(p);
+}
+
+/* A web-derived claim/source with a non-UTF-8 byte must not wedge the WS frame. */
+static void test_research_claim_is_sanitized(void) {
+   char *p = event_payload_research_claim(1, 7, "http://x/\xff", "web",
+                                          "found\xff"
+                                          "thing");
+   TEST_ASSERT_NOT_NULL(p);
+   TEST_ASSERT_NULL(strchr(p, (char)0xFF)); /* invalid bytes gone */
+   struct json_object *root = json_tokener_parse(p);
+   TEST_ASSERT_NOT_NULL(root); /* still valid JSON */
+   struct json_object *v = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(root, "question_id", &v));
+   TEST_ASSERT_EQUAL_INT64(7, json_object_get_int64(v));
+   TEST_ASSERT_TRUE(json_object_object_get_ex(root, "claim", &v));
+   TEST_ASSERT_EQUAL_STRING("found?thing", json_object_get_string(v));
+   json_object_put(root);
+   free(p);
+}
+
+/* NULL claim/source must not crash and must produce valid JSON. */
+static void test_research_claim_null_safe(void) {
+   char *p = event_payload_research_claim(0, 0, NULL, NULL, NULL);
+   TEST_ASSERT_NOT_NULL(p);
+   struct json_object *root = json_tokener_parse(p);
+   TEST_ASSERT_NOT_NULL(root);
+   json_object_put(root);
+   free(p);
+}
+
+static void test_research_stop_shape(void) {
+   char *p = event_payload_research_stop("coverage", 4, 12);
+   TEST_ASSERT_NOT_NULL(p);
+   struct json_object *root = json_tokener_parse(p);
+   TEST_ASSERT_NOT_NULL(root);
+   struct json_object *v = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(root, "stop_reason", &v));
+   TEST_ASSERT_EQUAL_STRING("coverage", json_object_get_string(v));
+   TEST_ASSERT_TRUE(json_object_object_get_ex(root, "claims_total", &v));
+   TEST_ASSERT_EQUAL_INT(12, json_object_get_int(v));
+   json_object_put(root);
+   free(p);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_result_body_is_readable);
@@ -148,5 +210,9 @@ int main(void) {
    RUN_TEST(test_home_assistant_args_are_readable);
    RUN_TEST(test_array_nested_secret_is_redacted);
    RUN_TEST(test_non_utf8_result_is_sanitized);
+   RUN_TEST(test_research_round_shape);
+   RUN_TEST(test_research_claim_is_sanitized);
+   RUN_TEST(test_research_claim_null_safe);
+   RUN_TEST(test_research_stop_shape);
    return UNITY_END();
 }

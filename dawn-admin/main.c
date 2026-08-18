@@ -143,6 +143,12 @@ static void print_usage(const char *prog) {
            "  ota list                               List available OTA releases.\n"
            "  ota push --uuid <uuid> --version <v> [--allow-downgrade]\n"
            "                                       Offer an update to one online satellite.\n");
+   fprintf(stderr, "\nDeep Research (headless benchmark driver):\n");
+   fprintf(stderr,
+           "  research start --user <id> --brief \"<text>\" | --brief-file <path>\n"
+           "                                       Spawn a headless research run (web-only).\n"
+           "  research status --user <id> <run_id> Machine-readable run status line.\n"
+           "  research cancel --user <id> <run_id> Cancel a run at its next round boundary.\n");
    fprintf(stderr, "\nMCP Bridge (coding harness):\n");
    fprintf(stderr,
            "  mcp list                             List connected MCP servers + tool counts\n"
@@ -173,6 +179,44 @@ static void print_usage(const char *prog) {
    fprintf(stderr, "  %s music stats\n", prog);
    fprintf(stderr, "  %s music search \"pink floyd\"\n", prog);
    fprintf(stderr, "  %s music list --limit 50\n", prog);
+}
+
+/* Read a research brief from a file for `research start --brief-file` (client-side
+ * — the daemon never opens operator files).  Trims a trailing newline; caps at
+ * the wire budget.  Returns a malloc'd string (caller frees) or NULL on error
+ * (message already printed). */
+static char *read_brief_file(const char *path) {
+   FILE *f = fopen(path, "rb");
+   if (!f) {
+      fprintf(stderr, "Error: cannot open brief file '%s': %s\n", path, strerror(errno));
+      return NULL;
+   }
+   size_t cap = DAWN_ADMIN_RESEARCH_BRIEF_MAX -
+                1; /* daemon accepts brief_len < RESEARCH_BRIEF_MAX */
+   char *buf = malloc(cap + 1);
+   if (!buf) {
+      fclose(f);
+      fprintf(stderr, "Error: out of memory reading brief file\n");
+      return NULL;
+   }
+   size_t n = fread(buf, 1, cap, f);
+   int too_long = (n == cap && fgetc(f) != EOF); /* more bytes than the wire holds */
+   fclose(f);
+   buf[n] = '\0';
+   while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) {
+      buf[--n] = '\0';
+   }
+   if (too_long) {
+      fprintf(stderr, "Error: brief file '%s' is too large (max %zu bytes)\n", path, cap);
+      free(buf);
+      return NULL;
+   }
+   if (n == 0) {
+      fprintf(stderr, "Error: brief file '%s' is empty\n", path);
+      free(buf);
+      return NULL;
+   }
+   return buf;
 }
 
 static int cmd_ping(void) {
@@ -2236,6 +2280,109 @@ int main(int argc, char *argv[]) {
    }
 
    /* OTA updates */
+   if (strcmp(cmd, "research") == 0) {
+      if (argc < 3) {
+         fprintf(stderr, "Error: Missing research subcommand\n");
+         fprintf(stderr, "Usage: %s research start --user <id> --brief \"<text>\"\n", argv[0]);
+         fprintf(stderr, "       %s research start --user <id> --brief-file <path>\n", argv[0]);
+         fprintf(stderr, "       %s research status --user <id> <run_id>\n", argv[0]);
+         fprintf(stderr, "       %s research cancel --user <id> <run_id>\n", argv[0]);
+         return 1;
+      }
+      const char *subcmd = argv[2];
+
+      if (strcmp(subcmd, "start") == 0) {
+         int user_id = 0;
+         const char *brief = NULL;
+         const char *brief_file = NULL;
+         for (int i = 3; i < argc; i++) {
+            if (strcmp(argv[i], "--user") == 0 && i + 1 < argc) {
+               user_id = atoi(argv[++i]);
+            } else if (strcmp(argv[i], "--brief") == 0 && i + 1 < argc) {
+               brief = argv[++i];
+            } else if (strcmp(argv[i], "--brief-file") == 0 && i + 1 < argc) {
+               brief_file = argv[++i];
+            } else {
+               fprintf(stderr, "Error: Unknown option for research start: %s\n", argv[i]);
+               return 1;
+            }
+         }
+         if (user_id <= 0) {
+            fprintf(stderr, "Error: --user <id> is required (use a dedicated eval account, not the "
+                            "primary user)\n");
+            return 1;
+         }
+         if ((brief == NULL) == (brief_file == NULL)) {
+            fprintf(stderr,
+                    "Error: provide exactly one of --brief \"<text>\" or --brief-file <path>\n");
+            return 1;
+         }
+         char *filebuf = NULL;
+         if (brief_file != NULL) {
+            filebuf = read_brief_file(brief_file);
+            if (filebuf == NULL) {
+               return 1; /* read_brief_file printed the error */
+            }
+            brief = filebuf;
+         }
+         int fd = admin_client_connect();
+         if (fd < 0) {
+            free(filebuf);
+            return 1;
+         }
+         char response[256];
+         admin_resp_code_t resp = admin_client_research_start(fd, user_id, brief, response,
+                                                              sizeof(response));
+         admin_client_disconnect(fd);
+         free(filebuf);
+         if (resp == ADMIN_RESP_SUCCESS) {
+            printf("%s\n", response);
+            return 0;
+         }
+         fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
+         return 1;
+      }
+
+      if (strcmp(subcmd, "status") == 0 || strcmp(subcmd, "cancel") == 0) {
+         int user_id = 0;
+         int64_t run_id = 0;
+         for (int i = 3; i < argc; i++) {
+            if (strcmp(argv[i], "--user") == 0 && i + 1 < argc) {
+               user_id = atoi(argv[++i]);
+            } else if (argv[i][0] != '-') {
+               run_id = strtoll(argv[i], NULL, 10);
+            } else {
+               fprintf(stderr, "Error: Unknown option for research %s: %s\n", subcmd, argv[i]);
+               return 1;
+            }
+         }
+         if (user_id <= 0 || run_id <= 0) {
+            fprintf(stderr, "Error: research %s needs --user <id> and a <run_id>\n", subcmd);
+            return 1;
+         }
+         int fd = admin_client_connect();
+         if (fd < 0) {
+            return 1;
+         }
+         char response[512];
+         admin_resp_code_t resp = (strcmp(subcmd, "status") == 0)
+                                      ? admin_client_research_status(fd, user_id, run_id, response,
+                                                                     sizeof(response))
+                                      : admin_client_research_cancel(fd, user_id, run_id, response,
+                                                                     sizeof(response));
+         admin_client_disconnect(fd);
+         if (resp == ADMIN_RESP_SUCCESS) {
+            printf("%s\n", response);
+            return 0;
+         }
+         fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
+         return 1;
+      }
+
+      fprintf(stderr, "Error: Unknown research subcommand: %s\n", subcmd);
+      return 1;
+   }
+
    if (strcmp(cmd, "ota") == 0) {
       if (argc < 3) {
          fprintf(stderr, "Error: Missing ota subcommand\n");

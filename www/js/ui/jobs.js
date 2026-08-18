@@ -393,11 +393,12 @@
       return { jobId: a.dataset.jobId, action: a.dataset.action };
    }
 
-   function restoreFocus(mark) {
-      if (!mark || !el.activeList) {
+   function restoreFocus(mark, listEl) {
+      const list = listEl || el.activeList;
+      if (!mark || !list) {
          return;
       }
-      const nodes = el.activeList.querySelectorAll('.jobs-action-btn, .jobs-open-btn');
+      const nodes = list.querySelectorAll('.jobs-action-btn, .jobs-open-btn');
       for (let i = 0; i < nodes.length; i++) {
          if (nodes[i].dataset.jobId === mark.jobId && nodes[i].dataset.action === mark.action) {
             nodes[i].focus();
@@ -502,6 +503,19 @@
       if (!el.historyList) {
          return;
       }
+      /* Preserve keyboard focus across the full teardown+rebuild below. This runs
+       * on user actions (Retry, Load more) AND passively (a job completing while
+       * the panel is open, via onJobTerminal), so a keyboard user must never be
+       * ejected to <body>. captureFocus tracks a row button by {jobId, action};
+       * we also record whether focus was anywhere in the history region, so a
+       * control with no such key — the Retry button, or the Load-more button when
+       * it hides on the final page — gets a sensible landing spot instead of the
+       * document body (WCAG 2.4.3). Self-wrapped here so no caller can forget. */
+      const focusMark = captureFocus();
+      const focusWasInRegion =
+         el.historyList.contains(document.activeElement) ||
+         (el.moreBtn && document.activeElement === el.moreBtn);
+
       el.historyList.textContent = '';
       if (historyRows.length === 0 && historyLoading) {
          el.historyList.appendChild(elem('div', 'jobs-empty', 'Loading…'));
@@ -534,6 +548,28 @@
       if (el.moreBtn) {
          el.moreBtn.classList.toggle('hidden', !historyHasMore);
          el.moreBtn.disabled = historyLoading;
+      }
+
+      /* Restore focus: the same row button if it survived the rebuild; otherwise,
+       * if focus had been in the region and the rebuild dropped it to <body>,
+       * land on the last history row's first button (keeps the keyboard user near
+       * where they were), then Load-more if still actionable, then the close
+       * button — never <body>. */
+      if (focusMark) {
+         restoreFocus(focusMark, el.historyList);
+      }
+      if (focusWasInRegion && document.activeElement === document.body) {
+         const fallback =
+            el.historyList.querySelector(
+               '.jobs-row:last-child .jobs-open-btn, .jobs-row:last-child .jobs-action-btn'
+            ) ||
+            (el.moreBtn && !el.moreBtn.classList.contains('hidden') && !el.moreBtn.disabled
+               ? el.moreBtn
+               : null) ||
+            el.closeBtn;
+         if (fallback && typeof fallback.focus === 'function') {
+            fallback.focus();
+         }
       }
    }
 
@@ -605,18 +641,16 @@
          return;
       }
       const rows = Array.isArray(payload.jobs) ? payload.jobs : [];
-      /* Keyset pagination cannot repeat a row, but a reset racing an in-flight
-       * page can, so dedupe on conversation_id rather than trusting arrival
-       * order. */
-      const seen = Object.create(null);
-      historyRows.forEach(function (j) {
-         seen[String(j.conversation_id)] = true;
-      });
+      /* Merge each page row at its sorted position rather than tail-appending.
+       * A plain push assumes historyRows only ever grows by older pages, which an
+       * optimistic terminal insert (onJobTerminal) violates — a just-completed
+       * OLD job spliced in before the first page returns would then get newer page
+       * rows pushed below it, corrupting the order until a reset. mergeHistoryRow
+       * dedupes on conversation_id (so a reset racing an in-flight page can't
+       * duplicate) and keeps the list server-ordered regardless of arrival order.
+       * skipBelowWindow=false: a genuine page row always belongs in the list. */
       rows.forEach(function (j) {
-         if (j && j.conversation_id != null && !seen[String(j.conversation_id)]) {
-            seen[String(j.conversation_id)] = true;
-            historyRows.push(j);
-         }
+         mergeHistoryRow(j, /*skipBelowWindow=*/ false);
       });
       historyHasMore = !!payload.has_more;
       historyCursor =
@@ -713,6 +747,72 @@
        * active side self-heals (its job_update arrives on its own). Refetch the
        * first history page so the row is not shown on both sides or neither. */
       requestHistory(true);
+   }
+
+   /* True if row `r` sorts strictly BEFORE `job` in the server's list_jobs order
+    * (created_at DESC, conversation_id/id DESC) — i.e. `job` belongs after `r`.
+    * conversation_id IS the server keyset id (webui_jobs.c emits r->id as
+    * conversation_id and pages on it), so this reproduces the server ordering. */
+   function historyRowBefore(r, job) {
+      const rca = r.created_at || 0;
+      const jca = job.created_at || 0;
+      return rca > jca || (rca === jca && r.conversation_id > job.conversation_id);
+   }
+
+   /* Merge one job into historyRows at its sorted position, deduped by
+    * conversation_id (replaced in place if already present). This is the SINGLE
+    * ordered-insert both the paginated page loader (handleHistoryPage) and the
+    * optimistic terminal insert (onJobTerminal) go through, so historyRows stays
+    * server-ordered no matter which path adds a row or in what order — the
+    * property that makes an optimistic row and an in-flight page coexist
+    * correctly. With skipBelowWindow, a job sorting after every loaded row while
+    * more pages remain is left for its own (unloaded, older) page instead of
+    * being pinned out of position at the bottom; returns -1 in that case, else
+    * the insert/replace index. */
+   function mergeHistoryRow(job, skipBelowWindow) {
+      if (!job || job.conversation_id == null) {
+         return -1;
+      }
+      const key = String(job.conversation_id);
+      const existing = historyRows.findIndex(function (r) {
+         return String(r.conversation_id) === key;
+      });
+      if (existing !== -1) {
+         historyRows[existing] = job;
+         return existing;
+      }
+      let idx = 0;
+      while (idx < historyRows.length && historyRowBefore(historyRows[idx], job)) {
+         idx++;
+      }
+      if (skipBelowWindow && idx === historyRows.length && historyHasMore) {
+         return -1;
+      }
+      historyRows.splice(idx, 0, job);
+      return idx;
+   }
+
+   /* Fired by DawnJobsActivity when a TRACKED job crosses into a terminal state
+    * by ANY path (not just this panel's Cancel/Resume — also a conversation Stop,
+    * a voice/tool cancel, another tab, or self-completion). The active side has
+    * already self-healed; move the row into History IN PLACE.
+    *
+    * Deliberately NOT requestHistory(true): this now fires PASSIVELY as jobs
+    * finish while the panel is watched, and a full reset+refetch would blank the
+    * list with "Loading…", discard any "Load more" pages, and collapse keyboard
+    * focus to <body> on every completion. An optimistic sorted insert keeps the
+    * list consistent with a refetch while preserving scroll, loaded pages, and
+    * focus. No-op when closed — open() loads history fresh. */
+   function onJobTerminal(job) {
+      if (!isOpen || !el.historyList || !job || job.conversation_id == null) {
+         return;
+      }
+      /* renderHistory() self-preserves focus, so the insert path needs no explicit
+       * capture/restore here; the skip path renders nothing and leaves focus intact. */
+      if (mergeHistoryRow(job, /*skipBelowWindow=*/ true) === -1) {
+         return; // belongs on an unloaded older page — nothing rendered
+      }
+      renderHistory();
    }
 
    /* ---- open / close ----------------------------------------------------- */
@@ -960,5 +1060,6 @@
       refresh: handleReconnect,
       handleHistoryPage: handleHistoryPage,
       handleActionResult: handleActionResult,
+      onJobTerminal: onJobTerminal,
    };
 })(window);

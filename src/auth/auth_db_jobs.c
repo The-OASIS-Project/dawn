@@ -77,6 +77,8 @@ static void job_unpack_row(sqlite3_stmt *st, job_record_t *r) {
    r->started_at = (time_t)sqlite3_column_int64(st, 12);
    r->finished_at = (time_t)sqlite3_column_int64(st, 13);
    r->created_at = (time_t)sqlite3_column_int64(st, 14);
+   job_copy_text(st, 15, r->origin, sizeof(r->origin));
+   job_copy_text(st, 16, r->job_kind, sizeof(r->job_kind)); /* "" for NULL/ordinary jobs */
 }
 
 /* JOB_SELECT_COLS lives in auth_db_internal.h so the cached prepared statements
@@ -125,6 +127,22 @@ int conv_db_create_job(int user_id,
                        int spawn_depth,
                        const char *goal,
                        int64_t *conv_id_out) {
+   /* Preserves the pre-repurpose behavior (origin = "job") for every caller that
+    * doesn't care about the spawn surface — chiefly the tests. */
+   return conv_db_create_job_ex(user_id, title, parent_id, spawn_mode, on_complete, deliver_to,
+                                spawn_depth, goal, "job", conv_id_out);
+}
+
+int conv_db_create_job_ex(int user_id,
+                          const char *title,
+                          int64_t parent_id,
+                          const char *spawn_mode,
+                          const char *on_complete,
+                          const char *deliver_to,
+                          int spawn_depth,
+                          const char *goal,
+                          const char *origin,
+                          int64_t *conv_id_out) {
    if (user_id <= 0 || !conv_id_out) {
       return AUTH_DB_INVALID;
    }
@@ -191,7 +209,7 @@ int conv_db_create_job(int user_id,
        "(user_id, title, created_at, updated_at, anchor_date, origin, "
        " parent_id, spawn_mode, on_complete, deliver_to, spawn_depth, job_goal, job_status, "
        " is_private) "
-       "VALUES (?, ?, ?, ?, ?, 'job', ?, ?, ?, ?, ?, ?, 'queued', ?)",
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)",
        -1, &st, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("conv_db_create_job: prepare failed: %s", sqlite3_errmsg(s_db.db));
@@ -205,29 +223,33 @@ int conv_db_create_job(int user_id,
    sqlite3_bind_int64(st, 3, (int64_t)now);
    sqlite3_bind_int64(st, 4, (int64_t)now);
    sqlite3_bind_int64(st, 5, (int64_t)now); /* anchor_date */
+   /* origin = spawn surface ("voice"/"webui"/"messaging"), replacing the former
+    * hardcoded "job".  Job identity is job_status IS NOT NULL, not this field, so
+    * repurposing it is safe; it now gates voice completion delivery. NULL → "job". */
+   sqlite3_bind_text(st, 6, (origin && origin[0]) ? origin : "job", -1, SQLITE_TRANSIENT);
    if (parent_id > 0) {
-      sqlite3_bind_int64(st, 6, parent_id);
+      sqlite3_bind_int64(st, 7, parent_id);
    } else {
-      sqlite3_bind_null(st, 6);
+      sqlite3_bind_null(st, 7);
    }
-   sqlite3_bind_text(st, 7, spawn_mode ? spawn_mode : "detached", -1, SQLITE_TRANSIENT);
-   sqlite3_bind_text(st, 8, on_complete ? on_complete : "notify", -1, SQLITE_TRANSIENT);
+   sqlite3_bind_text(st, 8, spawn_mode ? spawn_mode : "detached", -1, SQLITE_TRANSIENT);
+   sqlite3_bind_text(st, 9, on_complete ? on_complete : "notify", -1, SQLITE_TRANSIENT);
    if (deliver_to && deliver_to[0] != '\0') {
-      sqlite3_bind_text(st, 9, deliver_to, -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text(st, 10, deliver_to, -1, SQLITE_TRANSIENT);
    } else {
-      sqlite3_bind_null(st, 9);
+      sqlite3_bind_null(st, 10);
    }
-   sqlite3_bind_int(st, 10, spawn_depth);
+   sqlite3_bind_int(st, 11, spawn_depth);
    /* The goal, durable from creation.  Stored here rather than left to emerge as
     * the first `messages` row, because a job that never dispatches (capacity
     * refusal, worker-spawn failure) writes no messages at all and would
     * otherwise lose the instruction entirely — see the v74 migration. */
    if (goal && goal[0] != '\0') {
-      sqlite3_bind_text(st, 11, goal, -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text(st, 12, goal, -1, SQLITE_TRANSIENT);
    } else {
-      sqlite3_bind_null(st, 11);
+      sqlite3_bind_null(st, 12);
    }
-   sqlite3_bind_int(st, 12, inherited_private);
+   sqlite3_bind_int(st, 13, inherited_private);
 
    rc = sqlite3_step(st);
    sqlite3_finalize(st);
@@ -393,6 +415,35 @@ int conv_db_job_mark_fired(int64_t conv_id) {
        bind_conv_id_only, &conv_id, "mark_fired");
 }
 
+int conv_db_job_set_kind(int64_t conv_id, const char *kind) {
+   if (conv_id <= 0 || kind == NULL || kind[0] == '\0') {
+      return AUTH_DB_INVALID;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   /* Stamp the discriminator on a job row (e.g. 'research').  Set once, right
+    * after conv_db_create_job_ex, before the worker is spawned — the row is still
+    * 'queued' so nothing can resume it in the window, and reset_for_resume then
+    * excludes it for the run's whole life (DEEP_RESEARCH_DESIGN §5.5). */
+   if (sqlite3_prepare_v2(s_db.db, "UPDATE conversations SET job_kind=? WHERE id=?", -1, &st,
+                          NULL) != SQLITE_OK) {
+      OLOG_ERROR("auth_db_jobs: prepare set_kind failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_text(st, 1, kind, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int64(st, 2, conv_id);
+   int rc = sqlite3_step(st);
+   int changed = sqlite3_changes(s_db.db);
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("auth_db_jobs: set_kind failed for conv %lld", (long long)conv_id);
+      return AUTH_DB_FAILURE;
+   }
+   return changed == 1 ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
+}
+
 int conv_db_job_get_goal(int64_t conv_id, int user_id, char **out) {
    if (conv_id <= 0 || user_id <= 0 || !out) {
       return AUTH_DB_INVALID;
@@ -456,15 +507,25 @@ int conv_db_job_reset_for_resume(int64_t conv_id, int user_id, bool allow_cancel
     * That difference is only safe to ignore when a human is asking — hence the
     * flag, set by the WebUI click path and cleared by the `job` tool, so the
     * model cannot restart work a person deliberately stopped.  See the
-    * job_worker_resume() contract for why the split lives at the surface. */
+    * job_worker_resume() contract for why the split lives at the surface.
+    *
+    * job_kind='research' rows are EXCLUDED from the predicate: a research run is
+    * driven by research_worker + the controller, not the plain job tool loop, so
+    * a plain-worker resume would run the generic loop on a message-less research
+    * conversation and corrupt the run (DEEP_RESEARCH_DESIGN §5.5, plan HIGH-2).
+    * P0 has no research resume at all; P1 adds a ledger-aware one. Folding the
+    * exclusion into the CLAIM keeps it race-free — a research job can never leave
+    * the resumable set here regardless of caller or origin. */
    const char *sql =
        allow_cancelled
            ? "UPDATE conversations SET job_status='queued', job_error=NULL, "
              "started_at=0, finished_at=0, on_complete_fired=0 "
-             "WHERE id=? AND user_id=? AND job_status IN ('interrupted','failed','cancelled')"
+             "WHERE id=? AND user_id=? AND job_status IN ('interrupted','failed','cancelled') "
+             "AND (job_kind IS NULL OR job_kind != 'research')"
            : "UPDATE conversations SET job_status='queued', job_error=NULL, "
              "started_at=0, finished_at=0, on_complete_fired=0 "
-             "WHERE id=? AND user_id=? AND job_status IN ('interrupted','failed')";
+             "WHERE id=? AND user_id=? AND job_status IN ('interrupted','failed') "
+             "AND (job_kind IS NULL OR job_kind != 'research')";
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL) != SQLITE_OK) {
       OLOG_ERROR("auth_db_jobs: prepare reset_for_resume failed: %s", sqlite3_errmsg(s_db.db));
       AUTH_DB_UNLOCK();

@@ -105,11 +105,13 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v72.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v73.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v74.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v75.c
     ${SRC_ROOT}/src/auth/auth_db_statements.c
     ${SRC_ROOT}/src/auth/auth_db_user.c
     ${SRC_ROOT}/src/auth/auth_db_session.c
     ${SRC_ROOT}/src/auth/auth_db_conv.c
     ${SRC_ROOT}/src/auth/auth_db_jobs.c
+    ${SRC_ROOT}/src/auth/auth_db_research.c
     ${SRC_ROOT}/src/auth/auth_db_events.c
     ${SRC_ROOT}/src/auth/auth_db_settings.c
     ${SRC_ROOT}/src/auth/auth_db_satellite.c
@@ -910,6 +912,12 @@ dawn_add_unit_test(test_rate_limiter
    LIBS    unity pthread
    LABEL   ci)
 
+dawn_add_unit_test(test_llm_interrupt_ctx
+   SOURCES test_llm_interrupt_ctx.c
+           ${SRC_ROOT}/src/llm/llm_rate_limit.c
+   LIBS    dawn_common unity pthread
+   LABEL   ci)
+
 dawn_add_unit_test(test_utterance_dedup
    SOURCES test_utterance_dedup.c
            ${SRC_ROOT}/src/core/utterance_dedup.c
@@ -960,6 +968,13 @@ dawn_add_unit_test(test_auth_db_migrations_v73
    LIBS    dawn_common unity sqlite3 pthread
    LABEL   ci)
 
+dawn_add_unit_test(test_auth_db_migrations_v75
+   SOURCES test_auth_db_migrations_v75.c
+           ${SRC_ROOT}/src/auth/auth_db_migrations_v72.c
+           ${SRC_ROOT}/src/auth/auth_db_migrations_v75.c
+   LIBS    dawn_common unity sqlite3 pthread
+   LABEL   ci)
+
 dawn_add_unit_test(test_conv_db_events
    SOURCES test_conv_db_events.c
            ${AUTH_DB_SOURCES}
@@ -970,6 +985,25 @@ dawn_add_unit_test(test_conv_db_jobs
    SOURCES test_conv_db_jobs.c
            ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LABEL   ci)
+
+dawn_add_unit_test(test_auth_db_research
+   SOURCES test_auth_db_research.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LABEL   ci)
+
+dawn_add_unit_test(test_research_run
+   SOURCES test_research_run.c
+           ${SRC_ROOT}/src/tools/research_run.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# Header-only predicate (the read-only research allowlist, HIGH-1): no link deps.
+dawn_add_unit_test(test_research_allowlist
+   SOURCES test_research_allowlist.c
+   LIBS    unity
    LABEL   ci)
 
 # Pure string transform shared by six history-hydration callers  (json-c is for

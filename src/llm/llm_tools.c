@@ -43,6 +43,7 @@
 #include "core/command_executor.h"
 #include "core/component_status.h"
 #include "core/ocp_helpers.h"
+#include "core/research_allowlist.h"
 #include "core/session_manager.h"
 #include "core/worker_pool.h"
 #include "dawn.h"
@@ -704,6 +705,16 @@ void llm_tools_refresh(void) {
       if (strcmp(t->name, "memory") == 0) {
          t->enabled = g_config.memory.enabled;
       }
+
+      /* Deep research is opt-in (costs real tokens/time): the [research] master
+       * switch gates the NATIVE schema here.  is_available() alone is NOT enough
+       * — it is consulted only in the armor block above and on the legacy
+       * <command> path, so a non-armor tool must be gated by name like search /
+       * memory or it stays advertised.  deep_research_callback also refuses at
+       * execution as a backstop for any non-schema path. */
+      if (strcmp(t->name, "deep_research") == 0) {
+         t->enabled = g_config.research.enabled;
+      }
    }
 
    /* Update cached enabled count (total capability-enabled) */
@@ -972,6 +983,14 @@ struct json_object *llm_tools_get_claude_format(void) {
  * Schema Generation - Filtered by Session Type
  * ============================================================================= */
 
+/* The deep-research fetch loop runs on a read-only tool allowlist: while a
+ * research session is active, ONLY these tools are reachable — no email, HA,
+ * phone, shutdown, or any other side-effecting verb (DEEP_RESEARCH_DESIGN §7/§11
+ * plan HIGH-1).  research_plan/research_record are ALSO research-only: hidden
+ * from every non-research session.  The name list is single-sourced in
+ * core/research_allowlist.h so the native gate here and the command_execute
+ * defense-in-depth close (HIGH-1) cannot drift. */
+
 /**
  * @brief Check if a tool is enabled for a given session type
  */
@@ -979,13 +998,41 @@ static bool is_tool_enabled_for_session(const tool_definition_t *t, bool is_remo
    if (!t->enabled) {
       return false; /* Capability not available */
    }
+
+   /* Research read-only allowlist (enforced identically at schema advertisement
+    * AND execution — both the *_format_filtered() schema builders and
+    * llm_tools_execute() route through this one function, so the two points
+    * cannot drift).  When the command-context session is a research run, ONLY the
+    * allowlisted tools are visible/executable; when it is NOT, the two
+    * research-only tools are hidden.  t->enabled is still honored (a globally-
+    * disabled web tool stays off even for research).
+    *
+    * NOTE: this gates only the NATIVE tool path.  The legacy <command>-tag path
+    * (command_execute) does NOT consult this, so it is NOT closed here — the
+    * research fetch loop must run native-tools-only, and command_execute needs a
+    * research-aware refusal as defense-in-depth (DEEP_RESEARCH_DESIGN §11 HIGH-1).
+    * Both are the research_worker's session-setup responsibility (Step 6), with a
+    * regression test that a research-context command_execute is refused. */
+   session_t *ctx = session_get_command_context();
+   /* No-tools turn (e.g. the deep-research synthesis turn): deny EVERY tool so the
+    * turn is pure text.  Checked before the allowlist so it also suppresses the read
+    * tools. */
+   if (ctx != NULL && session_tools_suppressed(ctx)) {
+      return false;
+   }
+   bool research_mode = (ctx != NULL && atomic_load(&ctx->research_run_id) > 0);
+   if (research_mode) {
+      return research_tool_is_allowlisted(t->name);
+   }
+   if (research_tool_is_research_only(t->name)) {
+      return false; /* research_plan/research_record never appear outside a research session */
+   }
+
    /* Headless background-job workers must not fan out into more jobs — hide the
     * job-spawn tool from a SESSION_TYPE_JOB context's schema so the model never
     * sees it.  (handle_spawn also hard-refuses a job-context caller as a backstop
-    * for any non-schema path, e.g. a legacy <command> tag.)  The session lookup
-    * runs only for the "job" tool, so it costs nothing for every other tool. */
+    * for any non-schema path, e.g. a legacy <command> tag.) */
    if (strcmp(t->name, "job") == 0) {
-      session_t *ctx = session_get_command_context();
       if (ctx != NULL && ctx->type == SESSION_TYPE_JOB) {
          return false;
       }

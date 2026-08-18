@@ -1162,6 +1162,10 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
    /* Document library (RAG) */
    else if (strcmp(type, "doc_library_list") == 0) {
       handle_doc_library_list(conn, payload);
+   } else if (strcmp(type, "doc_library_get") == 0) {
+      /* No payload guard: the handler emits a "Missing document id" response for a
+         payload-less frame, so the client's async request always resolves. */
+      handle_doc_library_get(conn, payload);
    } else if (strcmp(type, "doc_library_delete") == 0) {
       if (payload) {
          handle_doc_library_delete(conn, payload);

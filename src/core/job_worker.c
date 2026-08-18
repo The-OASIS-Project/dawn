@@ -233,16 +233,18 @@ static void job_worker_run(job_work_t *work) {
 
    time_t now = time(NULL);
 
-   /* Disposition. Order matters, because a runtime reap ALSO raises
-    * cancel_requested — the two are told apart only by the reap claim:
-    *   - snapshot cancel_requested BEFORE claiming, so a reap landing between
-    *     the two reads can't masquerade as a user cancel (which would
-    *     mark_fired and silently swallow the timeout's follow-up);
-    *   - claim_reaped() also stops the reap clock, so nothing can flag this job
-    *     while the terminal writes below are in flight. */
-   bool cancelled = atomic_load(&s->cancel_requested);
-   bool user_cancelled = false;
-   bool reaped = job_manager_claim_reaped(s, &user_cancelled);
+   /* Disposition. Resolve the three authoritative signals up front via the shared
+    * helper (job_disposition_signals): `user_cancelled` (a human asked to stop —
+    * race-free because job_manager_cancel() sets it under the pool lock BEFORE
+    * raising cancel_requested, and claim_reaped reads it under the same lock; keying
+    * on the bare cancel_requested snapshot instead once filed real Cancels/Ctrl+C as
+    * "failed: no response", conv 1038), `reaped` (the runtime deadline fired;
+    * claim_reaped also stops the reap clock so nothing re-flags this job mid-
+    * teardown), and `shutdown_stop` (the daemon pulled the rug). The mapping to
+    * status strings below stays job_worker-specific — it keys 'done' on a produced
+    * answer, which research_worker (no answer) does not. */
+   bool user_cancelled = false, reaped = false, shutdown_stop = false;
+   job_disposition_signals(s, &user_cancelled, &reaped, &shutdown_stop);
    bool have_answer = (response != NULL && response[0] != '\0');
 
    /* Persist a produced answer no matter how the turn ended. A job that finished
@@ -302,22 +304,12 @@ static void job_worker_run(job_work_t *work) {
                                          response);
    }
 
-   /* The daemon pulled the rug, as opposed to a human asking for the stop.
-    *
-    * Deliberately does NOT require cancel_requested.  On SIGINT the thing that
-    * actually stops a job is llm_request_interrupt() — a GLOBAL flag the tool
-    * loop polls (llm_tool_loop.c, step 11) — not this session's cancel flag,
-    * which job_manager_shutdown() sets up to a second later.  Keying on
-    * cancel_requested made this branch unreachable for every real Ctrl+C: the
-    * worker returned no answer, saw no cancel, and filed itself as "failed: no
-    * response from model" (live-verified on conv 1038).  Shutting down plus no
-    * answer IS an interruption, however the stop arrived.
-    *
-    * The !user_cancelled term stays: a Cancel that lands as the daemon goes down
-    * would otherwise be filed 'interrupted', which is tool-resumable, so the LLM
-    * could quietly restart work the user just stopped. */
-   const bool shutdown_stop = !reaped && !user_cancelled && job_manager_is_shutting_down();
-
+   /* `shutdown_stop` (the daemon pulled the rug, vs a human asking for the stop) was
+    * resolved with the other two signals above.  Its !user_cancelled term matters
+    * here: a Cancel that lands as the daemon goes down must file as 'cancelled', not
+    * 'interrupted' (which is tool-resumable) so the LLM can't quietly restart work
+    * the user just stopped.  Shutting down plus no answer IS an interruption, however
+    * the stop arrived. */
    if (shutdown_stop && !have_answer) {
       /* Recording this as 'cancelled' would be wrong twice over: it suppresses
        * the completion notice on the grounds that the user asked for the stop,
@@ -330,9 +322,12 @@ static void job_worker_run(job_work_t *work) {
       job_manager_set_terminal(work->conv_id, work->user_id, "interrupted", "daemon shutting down",
                                now, 0);
       OLOG_INFO("job_worker: job conv %lld interrupted by shutdown", (long long)work->conv_id);
-   } else if (cancelled && !reaped && !shutdown_stop) {
-      /* User cancel wins even if an answer landed: they asked it to stop, so no
-       * completion notification. The answer above is still retrievable. */
+   } else if (user_cancelled) {
+      /* User cancel wins over the answer/reap/failed paths below: they asked it
+       * to stop, so no completion notification and no re-engagement, even if an
+       * answer landed (still retrievable) or the reap also fired. shutdown_stop
+       * already excludes user_cancelled, so a Cancel that raced the daemon going
+       * down lands here rather than as 'interrupted'. */
       job_manager_set_terminal(work->conv_id, work->user_id, "cancelled", NULL, now, 0);
       conv_db_job_mark_fired(work->conv_id);
       OLOG_INFO("job_worker: job conv %lld cancelled%s", (long long)work->conv_id,

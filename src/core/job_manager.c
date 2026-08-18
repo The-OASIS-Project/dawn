@@ -283,6 +283,18 @@ int job_manager_init(void) {
       OLOG_INFO("job_manager: marked %d interrupted job(s) from a previous run", n_stale);
    }
 
+   /* Reconcile deep-research runs stranded by the same restart: a research job's
+    * worker mirrors the terminal onto research_runs, but a HARD kill skips that,
+    * leaving the run at 'planning'/'researching' with a now-'interrupted' job —
+    * an un-cancellable zombie on the status surface.  Run AFTER the job scan so
+    * the job rows are already terminal (DEEP_RESEARCH_DESIGN §5.5). */
+   int n_research = 0;
+   if (research_db_reconcile_orphaned(pre_boot_ts, &n_research) == AUTH_DB_SUCCESS &&
+       n_research > 0) {
+      OLOG_INFO("job_manager: reconciled %d interrupted research run(s) from a previous run",
+                n_research);
+   }
+
    /* Open the dirty gate unconditionally so the first tick looks once.
     *
     * Setting it only when the scan above found something was a silent stranding
@@ -778,12 +790,20 @@ void job_manager_mark_dirty(void) {
    atomic_store(&s_jobs_dirty, true);
 }
 
-/* One queued completion notification (copied out so delivery holds no lock). */
+/* One queued completion notification (copied out so delivery holds no lock).
+ *
+ * Two item kinds share this batch, distinguished by deliver_to:
+ *   - MESSAGING (deliver_to != ""): a claimed, bookkept channel send.
+ *   - LOCAL VOICE (deliver_to == "" && speak): a supplementary local-speaker TTS
+ *     announcement (voice-sourced job); durability is already handled by the
+ *     drain's job_notify_user call, so this item holds NO delivery claim and is
+ *     never mark_fired / delivery_release'd. */
 typedef struct {
    int64_t job_id;
    int user_id;
    char deliver_to[JOB_DELIVER_TO_MAX];
    char text[512];
+   bool speak; /* local-speaker TTS (only meaningful when deliver_to == "") */
 } job_notify_t;
 
 typedef struct {
@@ -951,19 +971,32 @@ int job_manager_delivery_stale_sec_for_test(void) {
    return JOB_NOTIFY_TRACK_STALE_SEC;
 }
 
-/* Detached delivery thread for MESSAGING-channel completions only:
- * scheduler_send_to_messaging_channel (via scheduler_emit_alert) does blocking
- * curl, so it must not run on the main-loop heartbeat (arch-HIGH-3).  Voice is
- * OFF — jobs notify via the browser toast / messaging channel, never the local
- * speaker.
+/* Detached delivery thread for completions that must run OFF the main-loop
+ * heartbeat, because scheduler_emit_alert does blocking work (curl for a
+ * messaging channel; TTS synthesis for a local voice announcement) and the tick
+ * must stay non-blocking (arch-HIGH-3).  Two item kinds (see job_notify_t):
  *
- * The row is fired HERE, on success, rather than by the tick that queued it:
- * marking it up front makes "we tried" indistinguishable from "they heard", and
- * a channel that is down at that moment loses the completion permanently. */
+ *   - MESSAGING (deliver_to != ""): blocking channel send.  The row is fired
+ *     HERE, on success, rather than by the queuing tick — marking it up front
+ *     makes "we tried" indistinguishable from "they heard", and a channel that
+ *     is down loses the completion permanently.  Holds a delivery claim.
+ *   - LOCAL VOICE (deliver_to == "" && speak): a supplementary local-speaker
+ *     announcement for a voice-sourced job (scheduler_emit_alert with an empty
+ *     deliver_to speaks via route_tts_announcement).  Durability is already
+ *     owned by the drain's job_notify_user, so this holds NO claim and is never
+ *     mark_fired / delivery_release'd. */
 static void *job_notify_thread(void *arg) {
    job_notify_batch_t *b = (job_notify_batch_t *)arg;
    for (int i = 0; i < b->count; i++) {
       const job_notify_t *it = &b->items[i];
+      if (it->deliver_to[0] == '\0') {
+         /* Local voice: speak-only, best-effort, no bookkeeping. */
+         if (it->speak) {
+            (void)scheduler_emit_alert(it->user_id, it->text, SCHED_EVENT_REMINDER,
+                                       /*deliver_to=*/"", /*speak=*/true);
+         }
+         continue;
+      }
       bool delivered = (scheduler_emit_alert(it->user_id, it->text, SCHED_EVENT_REMINDER,
                                              it->deliver_to, /*speak=*/false) == SUCCESS);
       if (delivered) {
@@ -1043,13 +1076,15 @@ void jobs_monitor_tick(time_t now) {
    job_record_t reinvoke_rows[JOB_MONITOR_MAX_PER_TICK];
    int n_reinvoke = 0;
 
-   /* Messaging-channel completions deliver off-thread (blocking curl); local
-    * completions get a silent browser toast, pushed here (non-blocking).
-    * msg_items is allocated lazily on the first channel completion (below): the
-    * common all-toast batch never touches it, so an eager per-tick calloc
-    * (~10 KB) would be pure waste on the 1 Hz heartbeat. */
-   job_notify_t *msg_items = NULL;
-   int msg_count = 0;
+   /* The off-thread delivery batch (see job_notify_t): messaging-channel sends
+    * (blocking curl) AND supplementary local-voice speaks (blocking TTS), both of
+    * which must stay off the 1 Hz heartbeat.  Local completions also get a silent
+    * browser toast, pushed here directly (non-blocking).  notify_items is
+    * allocated lazily on the first row that needs the thread (channel or voice):
+    * the common all-toast batch never touches it, so an eager per-tick calloc
+    * (~10 KB) would be pure waste on the heartbeat. */
+   job_notify_t *notify_items = NULL;
+   int notify_count = 0;
 
    /* Rows whose notice is handled synchronously here (none / staleness / toast /
     * channel give-up) are marked fired in ONE batched UPDATE after the loop —
@@ -1125,15 +1160,15 @@ void jobs_monitor_tick(time_t now) {
       snprintf(text, sizeof(text), "Background job \"%s\" %s.%s", rows[i].title, verb, tail);
 
       /* Lazily allocate the messaging queue on the first channel completion; an
-       * allocation failure leaves msg_items NULL and the row degrades to the
+       * allocation failure leaves notify_items NULL and the row degrades to the
        * durable browser/missed-notification path below (same as before). */
-      if (rows[i].deliver_to[0] != '\0' && msg_items == NULL) {
-         msg_items = calloc((size_t)n, sizeof(job_notify_t));
+      if (rows[i].deliver_to[0] != '\0' && notify_items == NULL) {
+         notify_items = calloc((size_t)n, sizeof(job_notify_t));
       }
 
-      if (rows[i].deliver_to[0] != '\0' && msg_items != NULL) {
+      if (rows[i].deliver_to[0] != '\0' && notify_items != NULL) {
          /* Messaging channel: blocking curl, so it is queued to the delivery
-          * thread and fired there, on success only.  Claim AFTER the msg_items
+          * thread and fired there, on success only.  Claim AFTER the notify_items
           * check — claiming first would burn an attempt on an allocation failure
           * that never reached the wire. */
          bool give_up = false;
@@ -1152,7 +1187,7 @@ void jobs_monitor_tick(time_t now) {
             }
             continue; /* otherwise a thread already owns it, or the table is full */
          }
-         job_notify_t *it = &msg_items[msg_count++];
+         job_notify_t *it = &notify_items[notify_count++];
          it->job_id = rows[i].id;
          it->user_id = rows[i].user_id;
          snprintf(it->deliver_to, sizeof(it->deliver_to), "%s", rows[i].deliver_to);
@@ -1169,6 +1204,48 @@ void jobs_monitor_tick(time_t now) {
          job_notify_user(rows[i].user_id, text, rows[i].id, running);
          fired_ids[n_fired++] = rows[i].id;
          progressed = true;
+
+         /* Voice-sourced job (spawned from the local mic): ALSO speak the notice
+          * on the local speaker.  This is the ELSE branch — reached only when the
+          * job has NO deliver_to; a voice-origin job that set a messaging channel
+          * took the exclusive channel path above and does not also speak.
+          * Supplementary to the durable toast above, and routed through the
+          * detached delivery thread because TTS synthesis blocks and this drain
+          * runs on the main-loop heartbeat.  Satellites ("satellite" origin) are
+          * voice too but have their own speaker — routing there is future
+          * presence-based work, so they stay toast-only.
+          *
+          * PRIVACY: this is the daemon's local speaker, which plays for EVERYONE
+          * while the local pseudo-satellite is unassigned (the default) — so on a
+          * multi-user box the spoken title reaches whoever is present. A job's title
+          * is the owner's own goal/brief (a research title is derived from the user's
+          * brief — a potentially private question), so the TITLE is only spoken when
+          * the speaker is EXPLICITLY assigned to the owner; otherwise a generic notice
+          * is spoken (kind-specific wording, but no title). The durable browser toast
+          * above always carries the real title to the owner's own session.
+          * (Only the LOCAL speaker is affected: satellites are toast-only here — this
+          * is the origin=="voice" / SCHED_SOURCE_LOCAL path. Scheduler reminders are a
+          * separate, user-scoped routing path.) */
+         if (strcmp(rows[i].origin, "voice") == 0) {
+            if (notify_items == NULL) {
+               notify_items = calloc((size_t)n, sizeof(job_notify_t));
+            }
+            if (notify_items != NULL) {
+               job_notify_t *it = &notify_items[notify_count++];
+               it->job_id = rows[i].id;
+               it->user_id = rows[i].user_id;
+               it->deliver_to[0] = '\0'; /* local voice, no channel */
+               it->speak = true;
+               if (satellite_local_speaker_is_assigned_to(rows[i].user_id)) {
+                  snprintf(it->text, sizeof(it->text), "%s",
+                           text); /* owner's speaker: full title */
+               } else {
+                  bool research = (strcmp(rows[i].job_kind, "research") == 0);
+                  snprintf(it->text, sizeof(it->text), "%s task finished. Ask me for the result.",
+                           research ? "A research" : "A background");
+               }
+            }
+         }
       }
    }
 
@@ -1195,8 +1272,8 @@ void jobs_monitor_tick(time_t now) {
       s_reinvoke_processor(reinvoke_rows, n_reinvoke);
    }
 
-   if (msg_count == 0 || msg_items == NULL) {
-      free(msg_items);
+   if (notify_count == 0 || notify_items == NULL) {
+      free(notify_items);
       return;
    }
 
@@ -1212,19 +1289,25 @@ void jobs_monitor_tick(time_t now) {
    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
    bool handed_off = false;
    if (batch != NULL) {
-      batch->items = msg_items;
-      batch->count = msg_count;
+      batch->items = notify_items;
+      batch->count = notify_count;
       handed_off = (pthread_create(&thread, &attr, job_notify_thread, batch) == 0);
    }
    pthread_attr_destroy(&attr);
 
    if (!handed_off) {
       OLOG_WARNING("jobs_monitor_tick: could not spawn delivery thread; %d notice(s) requeued",
-                   msg_count);
-      for (int i = 0; i < msg_count; i++) {
-         delivery_release(msg_items[i].job_id, /*finished=*/false);
+                   notify_count);
+      for (int i = 0; i < notify_count; i++) {
+         /* Only messaging items hold a claim; local-voice items (deliver_to == "")
+          * are claimless supplementary speaks — releasing a claim they never took
+          * would corrupt the delivery table.  A dropped voice speak is silent (the
+          * durable toast already fired); a dropped channel send must be requeued. */
+         if (notify_items[i].deliver_to[0] != '\0') {
+            delivery_release(notify_items[i].job_id, /*finished=*/false);
+         }
       }
-      free(msg_items);
+      free(notify_items);
       free(batch);
       atomic_store(&s_jobs_dirty, true); /* still owed — try again next tick */
    }

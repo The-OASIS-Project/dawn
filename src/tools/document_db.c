@@ -1310,6 +1310,31 @@ int document_db_full_text_get(int64_t doc_id, int user_id, char **text_out) {
    return result;
 }
 
+/* Fetch just a document's stored original-file blob id. Kept as an isolated one-off
+ * query (not folded into the shared row_to_document / list SELECTs, whose column indices
+ * are load-bearing and vary — e.g. list_all reads owner_name at column 9). col_text_copy
+ * maps a NULL/absent original to "". */
+int document_db_get_original_blob_id(int64_t doc_id, char *out, size_t out_sz) {
+   if (!out || out_sz == 0)
+      return FAILURE;
+   out[0] = '\0';
+
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   int result = FAILURE;
+   if (sqlite3_prepare_v2(s_db.db, "SELECT original_blob_id FROM documents WHERE id = ?", -1, &st,
+                          NULL) == SQLITE_OK) {
+      sqlite3_bind_int64(st, 1, doc_id);
+      if (sqlite3_step(st) == SQLITE_ROW) {
+         col_text_copy(out, out_sz, st, 0); /* NULL original → "" */
+         result = SUCCESS;
+      }
+      sqlite3_finalize(st);
+   }
+   AUTH_DB_UNLOCK();
+   return result;
+}
+
 /* Read a multi-chunk document for in-place editing (B1b): owner-checked, must
  * have stored full text.  Returns the filename, full text (heap), and the old
  * chunk ids + body texts (heap arrays, for the caller to stem outside the lock

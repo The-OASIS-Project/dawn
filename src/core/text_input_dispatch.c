@@ -121,8 +121,15 @@ char *core_text_input_dispatch(session_t *session,
    /* Step 4: per-turn focus injection (memory + entity + relation +
     * summary + document + calendar candidates ranked into the system
     * prompt for this turn only).  Returns SUCCESS even on focus
-    * failure; LLM dispatch is never blocked by this. */
-   session_dispatch_user_turn(session, text);
+    * failure; LLM dispatch is never blocked by this.
+    *
+    * skip_prompt_rebuild bypasses the WHOLE rebuild (persona + memory + focus +
+    * tools): the deep-research controller drives a bare session whose research
+    * system prompt it set once, and skipping here is what structurally keeps
+    * private memory out of the fetch loop (DEEP_RESEARCH_DESIGN.md §4a). */
+   if (!(opts && opts->skip_prompt_rebuild)) {
+      session_dispatch_user_turn(session, text);
+   }
 
    /* Step 4.5: optional channel hint.  When the caller (e.g. the
     * messaging engine for SMS) wants to give the LLM a one-turn
