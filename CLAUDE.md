@@ -12,6 +12,7 @@ See @ARCHITECTURE.md for subsystem breakdowns, data flow, and module dependencie
 
 - **NEVER delete files.** Tell the developer which files to delete. Files may hold secrets or unrecoverable data.
 - **NEVER run `git add`, `git commit`, or `git push`.** Suggest the command and message; let the developer run it.
+- **Merge strategy: merge commits (not rebase), since 2026-08-18.** PRs land as merge commits, which **preserve each branch commit's original SHA on `main`** — so a commit hash is a durable reference: cite hashes freely in TODO.md/DONE.md/design docs. `PR #N` is still richer (diff + all commits + review threads + CI) when the review context matters, so prefer it there, but it's a preference now, not a correctness rule. (This reverses the old rebase-era "cite PRs, not branch hashes" convention — branch SHAs no longer die at merge.)
 - **Feedback before implementation.** When the developer asks a question, provide analysis, trade-offs, and a recommendation *first*. Wait for explicit confirmation ("go ahead", "do it", "yes") before coding.
 - **Format before committing.** Every change must pass `./format_code.sh --check`. The pre-commit hook enforces this.
 - **GPL header on every new `.c`/`.cpp`/`.h`.** Template at the bottom of this file.
