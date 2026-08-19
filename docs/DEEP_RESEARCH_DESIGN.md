@@ -7,8 +7,14 @@ pass. **P1 = plan-freeze + stale-question auto-retirement + the fresh-context co
 the JARVIS-style completion-commentary turn** — all shipped and live-validated (run 8: stale→coverage; run 9:
 critic re-armed once then confirm-stopped→saturation). A **full six-lens pre-merge re-audit
 (arch/security/correctness/efficiency/UI/standards, 2026-08-15)** returned 0 Critical/High and a handful of
-Low/Medium fixes, all applied (see [Post-merge review §](#post-merge-review-2026-08-15)). P2–P4 remain
-design-only below.
+Low/Medium fixes, all applied (see [Post-merge review §](#post-merge-review-2026-08-15)). **✅ Eval harness +
+quality tuning SHIPPED 2026-08-17→18** ([§16](#16-evaluation-harness--benchmark-driver) built; [§17](#17-synthesis-ab--comprehensiveness-max-shipped-2026-08-17)
+comp-max synthesis; [§18](#18-search-backend--tavily-vs-searxng-measured-2026-08-17) search-backend): DAWN
+benchmarked at **RACE 0.498→0.505 (reference parity) / FACT 0.852** on a DeepResearch-Bench subset (gpt-5.5 RACE /
+gpt-5.4-mini FACT, the current official evaluator), the comprehensiveness-max synthesis tune landed the +0.007,
+gather-depth was tested & declined, and the confirmation gate was hardened to a real email-parity pending token
+([§7a](#7a-invocation-routing--confirmation)). The quality workstream is complete; **P2–P4 remain design-only
+below.**
 
 ## Post-merge review (2026-08-15)
 
@@ -269,6 +275,10 @@ shipped code) and is kept in sync as the feature lands; treat it as the source o
 - [§12. Phased plan](#12-phased-plan)
 - [§13. Decisions (locked)](#13-decisions-locked)
 - [§14. Open items & known gaps](#14-open-items--known-gaps)
+- [§15. Implementation kickoff (P0 build order)](#15-implementation-kickoff-p0-build-order)
+- [§16. Evaluation harness & benchmark driver (SHIPPED)](#16-evaluation-harness--benchmark-driver-shipped-2026-08-17)
+- [§17. Synthesis A/B — comprehensiveness-max (SHIPPED)](#17-synthesis-ab--comprehensiveness-max-shipped-2026-08-17)
+- [§18. Search backend — Tavily vs. SearXNG (measured)](#18-search-backend--tavily-vs-searxng-measured-2026-08-17)
 - [§15. Implementation kickoff (P0 build order)](#15-implementation-kickoff-p0-build-order)
 - [§16. Evaluation harness & benchmark driver](#16-evaluation-harness--benchmark-driver-p1-eval--planned)
 
@@ -1065,33 +1075,37 @@ hard-budget + all-closed stopping.
 
 ## 14. Open items & known gaps
 
-- **Hardest problem: lossy digest/compression dropping a load-bearing fact mid-run.** De-risked by
-  claims-in-SQLite (#3) + synthesis-reads-claims + full round replay in `conversation_events`, but the digest
-  and synthesis prompt quality still needs the P0 eval skeleton → P1 harness to measure. Most likely to make v1
-  mediocre if under-invested.
-- **`skip_prompt_rebuild` dispatch option is new plumbing** on `text_input_dispatch_opts_t` — it gates the whole
-  step-4 per-turn builder (`session_dispatch_user_turn`); small, but it changes a shared entry point every worker
-  uses, so verify no other caller regresses.
-- **Two build-time confirmations from the pressure-test** (low risk, do before P0): (a)
-  `session_llm_call_with_tts_vision_no_add` must not re-inject memory itself — the per-turn builder should be the
-  only composer, so skipping it is sufficient; (b) native tool schemas must attach from the registry at the LLM
-  call independent of the prompt text, so the read-only allowlist is the real enforcement point.
-- **Persona-less research session.** The research prompt is deliberately not Friday's persona; the user-facing
-  spoken briefing / executive summary must be generated in a persona-carrying context (§8), not the bare research
-  session, if it should *sound* like Friday.
-- **Per-session cancel** (TODO.md debt, #15): the shared tool loop honors the *global* interrupt today.
-  Research must key on the session cancel — a P0 prerequisite that may want to land as its own change first.
-- **`worker_pool` is not a task pool.** P2 parallel fetch needs the detached-thread pattern or new bounded
-  infrastructure — decide at P2, don't assume reuse.
-- **Retention lane** (#10.4): P0 bumps the cap + adds the index as the floor; the separate research/job
-  retention accounting is the real fix and should be scoped deliberately.
-- **Exfiltration residual** (#11.3): the read-only set + bare fetch-loop session (memory only at the edges) close
-  action-injection and the default private-data path; the P2 egress allowlist/taint control closes the
-  private-mode read-tool exfil. A full egress allowlist / data-tainting model beyond discovered-URL restriction is
-  deferred and named.
-- **P2 attach/replay** must special-case research (events + ledger, not `messages`) — the shipped jobs attach
-  path assumes `messages` (arch LOW-2).
-- **Large-report storage path**: single-chunk note vs multi-chunk document — pick by rendered length; only the
+**Resolved since P0/P1 (kept for the record):**
+- ✅ **Digest/synthesis compression quality** — the named "hardest problem." Now MEASURED, not eyeballed: the §16
+  harness + gpt-5.5/gpt-5.4-mini judges put report quality at reference parity (RACE 0.498), and the §17 comp-max
+  synthesis tune lifted comprehensiveness below→above parity (+0.007). Claims-in-SQLite (#3) + synthesis-reads-claims
+  mean nothing recorded is lost; the residual ceiling is topic difficulty on niche tasks (§18), not a compression bug.
+- ✅ **`skip_prompt_rebuild` dispatch option** — shipped, verified clean across the pre-merge audits; no other caller
+  regressed.
+- ✅ **Two build-time confirmations from the pressure-test** — both confirmed at P0: (a)
+  `session_llm_call_with_tts_vision_no_add` does not re-inject memory; (b) native tool schemas attach from the
+  registry independent of prompt text → the read-only allowlist is the real enforcement point.
+- ✅ **Persona-less research session** — addressed: the user-facing take is the completion-commentary turn
+  ([§7a](#7a-invocation-routing--confirmation)), generated in a persona-carrying context, not the bare research session.
+
+**Still open:**
+- **Per-session cancel** (TODO.md debt): the shared tool loop still honors the *global* interrupt; research must key
+  on the session cancel flag. The 2026-08-17 network-dead-run disposition fix is adjacent but distinct; the
+  global-vs-session cancel item is still tracked in TODO.md.
+- **`worker_pool` is not a task pool** — P2 parallel fetch would need the detached-thread pattern or new bounded
+  infra. **Investigated & DECLINED 2026-08-17 for latency:** fetch is ~2% of a run's wall-clock (runs are
+  LLM-inference-bound) and the model already batches fetches through the existing intra-turn parallel executor
+  (`llm_tools_execute_all`), so a dedicated parallel-fetch slice buys ~nothing. Revisit only on a real latency signal.
+- **Retention lane** (#10.4): P0 bumped the cap + added the index as the floor; separate research/job retention
+  accounting is the real fix, still to be scoped.
+- **Exfiltration residual** (#11.3) + **the confirm-gate consent problem**: the read-only set + bare fetch-loop
+  session close action-injection + the default private-data path; the P2 egress allowlist/taint control (private-mode
+  read-tool exfil) and the broader **per-session capability mask** are deferred and named. The capability mask is
+  also the durable home for the [§7a](#7a-invocation-routing--confirmation) consent gap — the pending token is a
+  *cost* guardrail; the mask is the *consent* control for outward/irreversible tools.
+- **P2 attach/replay** must special-case research (events + ledger, not `messages`) — the shipped jobs attach path
+  assumes `messages` (arch LOW-2).
+- **Large-report storage path**: single-chunk note vs multi-chunk document — P0 picks by rendered length; only the
   multi-chunk path gets version history (needed for P3 standing research).
 
 ---
@@ -1171,14 +1185,15 @@ controller that decides great-vs-mediocre.
 
 ---
 
-## 16. Evaluation harness & benchmark driver (P1 eval — planned)
+## 16. Evaluation harness & benchmark driver (SHIPPED 2026-08-17)
 
-**Status: ✅ shipped + live-validated (run 16), 3-lens reviewed (arch/security/efficiency, 0 blocking).** The
-driver, the `research` admin verb (daemon + `dawn-admin` client), and the two scorers are built and validated
-end-to-end; the one remaining piece is the RACE/FACT **LLM-judge** integration, which needs an external judge
-model + key (`score_deepresearch_bench.py` preps its inputs). This is the concrete build-out of the P1 "eval
-harness grown to 10–20 + LLM-judge rubric" line ([§12](#12-phased-plan)) — mechanized far enough to run
-*external* report-quality benchmarks, not just hand-picked smoke queries.
+**Status: ✅ SHIPPED + used end-to-end.** The driver, the `research` admin verb (daemon + `dawn-admin` client),
+the two scorers, B1 source-URL canonicalization, per-artifact `run_config` stamping, and the DeepResearch-Bench
+glue (`--query` / `--dr-bench`) are all built, reviewed, and were run against the **official gpt-5.5 (RACE) /
+gpt-5.4-mini (FACT)** judges — no longer just prepping judge inputs. This is the concrete build-out of the P1
+"eval harness grown to 10–20 + LLM-judge rubric" line ([§12](#12-phased-plan)). **Results:
+[§17](#17-synthesis-ab--comprehensiveness-max-shipped-2026-08-17)** (baseline RACE 0.498 / FACT 0.852; the
+comp-max tune → 0.505) and **[§18](#18-search-backend--tavily-vs-searxng-measured-2026-08-17)** (Tavily-vs-SearXNG).
 
 ### 16.1 Why — the unmeasured-quality gap
 
@@ -1188,7 +1203,8 @@ design's own named mediocrity risk ([§14](#14-open-items--known-gaps)) is diges
 and it is exactly the thing smoke-eyeballing cannot measure. The competitive read
 ([`DEEP_RESEARCH_COMPARISON.md`](DEEP_RESEARCH_COMPARISON.md)) reaches the same conclusion from the outside: DAWN
 sits ahead of the published field on evidence-retention + deterministic stopping, but "how good are the reports"
-has no number under it. This section closes that.
+has no number under it. This section closes that. **(Closed 2026-08-17: the number is now RACE 0.498→0.505 /
+FACT 0.852 — reference parity on the gpt-5.5 axis; see [§17](#17-synthesis-ab--comprehensiveness-max-shipped-2026-08-17).)**
 
 ### 16.2 The gap today
 
