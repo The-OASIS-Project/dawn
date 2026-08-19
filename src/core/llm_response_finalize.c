@@ -25,6 +25,7 @@
 #include <string.h>
 
 #include "dawn_error.h"
+#include "memory/memory_citation.h"
 
 /* Remove every `<command>…</command>` pair in place, then truncate at the first
  * `<end_of_turn>` marker (emitted by some local models).  Mirrors the historical
@@ -51,6 +52,27 @@ static void strip_residual_tags(char *text) {
    }
 }
 
+/* Remove every `<cited>…</cited>` tag in place (memory citation bookkeeping —
+ * never user-facing).  An orphan opener with no closer (e.g. a truncated
+ * response) drops from the opener to end-of-string so a partial tag can never
+ * surface.  Always applied, regardless of whether citation is enabled. */
+static void strip_cited_tags(char *text) {
+   static const char *const open = "<cited>";
+   static const char *const close = "</cited>";
+   const size_t close_len = strlen(close);
+
+   char *s;
+   while ((s = strstr(text, open)) != NULL) {
+      char *e = strstr(s, close);
+      if (e == NULL) {
+         *s = '\0'; /* orphan opener — drop the trailing fragment */
+         break;
+      }
+      e += close_len;
+      memmove(s, e, strlen(e) + 1);
+   }
+}
+
 /* Trim trailing ASCII whitespace in place (Claude rejects assistant turns that
  * end in whitespace; harmless-to-beneficial for every other surface). */
 static void rtrim(char *text) {
@@ -65,8 +87,6 @@ static void rtrim(char *text) {
 }
 
 int llm_response_finalize(session_t *session, const char *raw_response, response_final_t *out) {
-   (void)session; /* reserved for Phase-1 citation resolution */
-
    if (out == NULL) {
       return FAILURE;
    }
@@ -78,7 +98,13 @@ int llm_response_finalize(session_t *session, const char *raw_response, response
       return FAILURE;
    }
 
-   strip_residual_tags(clean);
+   /* Memory citation capture (self-gating no-op unless enabled + session has a
+    * stash).  Runs BEFORE stripping so an <end_of_turn> truncation cannot hide a
+    * trailing <cited> tag from the parser. */
+   memory_citation_capture(session, clean);
+
+   strip_residual_tags(clean); /* <command> + <end_of_turn> */
+   strip_cited_tags(clean);    /* <cited>…</cited> (always removed) */
    rtrim(clean);
 
    out->text = clean;

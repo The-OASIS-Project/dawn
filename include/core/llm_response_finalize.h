@@ -26,9 +26,10 @@
  *
  * It does NOT execute anything (the legacy `<command>` transport was retired)
  * and does NOT touch TTS-specific cleaning (markdown `*`, emojis) — that stays
- * on the spoken-output path.  Phase 1 will add `<cited>` extraction plus a
- * citation audit/reinforce pass keyed on a per-turn stash carried on `session`;
- * the `session` parameter is reserved for that and unused in Phase 0.
+ * on the spoken-output path.  It also strips `<cited>` memory-citation tags and,
+ * via `memory_citation_capture(session, …)`, audits which surfaced `[M#]` items
+ * the model cited (self-gating on `g_config.memory.citation_enabled`); the
+ * `session` carries the per-turn citation stash used for that.
  *
  * WEBUI-header-free by design: depends only on the session type and libc, so it
  * relocates cleanly if/when core session code leaves the ENABLE_WEBUI build
@@ -74,7 +75,8 @@ typedef struct {
  * Strips `<command>…</command>` pairs and truncates at `<end_of_turn>`, then
  * trims trailing whitespace.  The input is not modified.
  *
- * @param session      Reserved for Phase-1 citation resolution; unused here.
+ * @param session      The turn's session (carries the citation stash); may be NULL
+ *                     (citation capture then no-ops).
  * @param raw_response  The completed LLM response text (NULL/empty → empty result).
  * @param out           Result; on SUCCESS out->text is allocated and non-NULL.
  * @return SUCCESS with out populated, or FAILURE with out zeroed (alloc failure).

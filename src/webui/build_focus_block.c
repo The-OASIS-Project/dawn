@@ -408,17 +408,61 @@ int build_focus_block(int user_id,
             }
          }
       }
+      /* Memory citation signal (Phase 1): when enabled, number each surfaced
+       * memory as [M# source] and stash ordinal->item_id so the response
+       * finalizer can resolve a <cited>M#</cited> back to its item.  When
+       * disabled, render the plain [source] form (unchanged). */
+      const bool citation_on = g_config.memory.citation_enabled;
+      citation_stash_t local_stash;
+      memset(&local_stash, 0, sizeof(local_stash));
+      int m_ordinal = 0;
+
       for (int i = 0; i < result.candidate_count; i++) {
          const focus_candidate_t *c = &result.candidates[i];
          if (c->text == NULL || c->text[0] == '\0')
             continue;
-         if (strbuf_appendf(&sb, "[%s] %s\n", c->source_id, c->text) < 0) {
-            /* strbuf max-cap hit — stop appending; surface the partial
-             * block so the LLM still sees the highest-ranked items. */
+
+         /* Number a candidate [M#] ONLY when it is citeable (has an item_id) AND
+          * the stash still has room — so every rendered [M#] maps 1:1 to a stash
+          * slot.  Non-citeable / overflow candidates render the plain [source]
+          * form so the model never sees an [M#] it can't be resolved back to
+          * (which would mis-score a real citation as a hallucination). */
+         const bool numbered = citation_on && c->item_id != NULL && m_ordinal < MAX_CITATION_STASH;
+
+         int rc_append;
+         if (numbered) {
+            const int next_ordinal = m_ordinal + 1;
+            rc_append = strbuf_appendf(&sb, "[M%d %s] %s\n", next_ordinal, c->source_id, c->text);
+            if (rc_append >= 0) {
+               /* Commit the ordinal only after the text is in the block. */
+               m_ordinal = next_ordinal;
+               strncpy(local_stash.entries[m_ordinal - 1].item_id, c->item_id,
+                       sizeof(local_stash.entries[0].item_id) - 1);
+               local_stash.entries[m_ordinal - 1]
+                   .item_id[sizeof(local_stash.entries[0].item_id) - 1] = '\0';
+               local_stash.count = m_ordinal;
+            }
+         } else {
+            rc_append = strbuf_appendf(&sb, "[%s] %s\n", c->source_id, c->text);
+         }
+
+         if (rc_append < 0) {
+            /* strbuf max-cap hit — stop appending; surface the partial block so
+             * the LLM still sees the highest-ranked items. */
             OLOG_WARNING("focus: strbuf max cap reached at candidate %d/%d — truncating", i,
                          result.candidate_count);
             break;
          }
+      }
+
+      /* Publish the per-turn citation map onto the dispatch session.  PER_TURN
+       * path only (dedup_session != NULL); SESSION_START/standalone builds leave
+       * it NULL and need no stash.  Cleared at dispatch entry, so a short-
+       * circuited later turn cannot inherit this map. */
+      if (citation_on && dedup_session != NULL) {
+         pthread_mutex_lock(&dedup_session->history_mutex);
+         dedup_session->citation_stash = local_stash;
+         pthread_mutex_unlock(&dedup_session->history_mutex);
       }
 
       /* Lift ownership of the strbuf-internal buffer into out_block.

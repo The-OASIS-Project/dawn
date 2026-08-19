@@ -346,6 +346,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->memory.decay_prune_threshold = 0.25f;      /* Prune facts below 25% */
    config->memory.summary_retention_days = 30;        /* Delete summaries after 30 days */
    config->memory.access_reinforcement_boost = 0.05f; /* +5% on access */
+   config->memory.citation_enabled = false;           /* Memory citation signal: off by default */
 
    /* Memory embeddings (semantic search) */
    SAFE_COPY(config->memory.embedding_provider, "onnx");

@@ -501,6 +501,23 @@ static const char *SCHEMA_SQL =
     "CREATE INDEX IF NOT EXISTS idx_memory_summaries_user ON "
     "memory_summaries(user_id, created_at DESC);"
 
+    /* Memory citation audit (v77).  One row per assistant turn that surfaced
+     * numbered [M#] memories AND had the citation signal enabled: which item_ids
+     * were injected vs which the model cited, for measuring injection precision.
+     * Log-only telemetry — retention-prunable; no FK cascade needed. */
+    "CREATE TABLE IF NOT EXISTS memory_citation_audit ("
+    "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "   conversation_id INTEGER DEFAULT 0,"
+    "   message_id INTEGER DEFAULT 0,"
+    "   user_id INTEGER NOT NULL,"
+    "   ts INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
+    "   injected_ids TEXT,"              /* CSV of surfaced item_ids, e.g. "fact:12,entity:7" */
+    "   cited_ids TEXT,"                 /* CSV of the validated cited subset */
+    "   dropped_count INTEGER DEFAULT 0" /* cited ordinals rejected (out-of-range/dup) */
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_memory_citation_audit_user_ts ON "
+    "memory_citation_audit(user_id, ts);"
+
     /* Entity/relation tables (v19).  canonical_id + is_user_self added in v43
      * for the entity-merge / user-identity-dedup workstream:
      *   canonical_id  — NULL = self is canonical; non-NULL = soft alias of that

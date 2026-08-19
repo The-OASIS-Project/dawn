@@ -1505,6 +1505,8 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_int(config->memory.summary_retention_days));
    json_object_object_add(memory, "access_reinforcement_boost",
                           json_object_new_double(config->memory.access_reinforcement_boost));
+   json_object_object_add(memory, "citation_enabled",
+                          json_object_new_boolean(config->memory.citation_enabled));
    json_object_object_add(memory, "embedding_provider",
                           json_object_new_string(config->memory.embedding_provider));
    json_object_object_add(memory, "embedding_model",
@@ -2447,6 +2449,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "prune_threshold = %.2f\n", config->memory.decay_prune_threshold);
    fprintf(fp, "summary_retention_days = %d\n", config->memory.summary_retention_days);
    fprintf(fp, "access_reinforcement_boost = %.2f\n", config->memory.access_reinforcement_boost);
+   fprintf(fp, "citation_enabled = %s\n", config->memory.citation_enabled ? "true" : "false");
 
    fprintf(fp, "\n[memory.embeddings]\n");
    {

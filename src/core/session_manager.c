@@ -2330,6 +2330,12 @@ int session_dispatch_user_turn(session_t *session, const char *user_turn_text) {
    if (session == NULL || user_turn_text == NULL)
       return SUCCESS;
 
+   /* Memory citation signal: clear the per-turn [M#]->item_id stash at the start
+    * of every dispatch.  build_focus_block repopulates it below iff citation is
+    * enabled and this turn surfaces memories; clearing here means a turn whose
+    * focus block short-circuits cannot inherit the previous turn's map. */
+   session_citation_stash_clear(session);
+
    session_prompt_builder_t builder = atomic_load_explicit(&s_prompt_builder, memory_order_acquire);
    if (builder == NULL)
       return SUCCESS; /* No builder registered — leave system prompt as-is. */

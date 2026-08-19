@@ -470,6 +470,21 @@ static void dawn_tts_sentence_callback(const char *sentence, void *userdata) {
       }
    }
 
+   // Remove <cited> memory-citation tags (streamed at end of response; bookkeeping,
+   // never spoken).  Same incomplete-tag failsafe as <command> so a stream that
+   // breaks mid-tag can't leak "M one" into TTS.
+   char *cite_start, *cite_end;
+   while ((cite_start = strstr(cleaned, "<cited>")) != NULL) {
+      cite_end = strstr(cite_start, "</cited>");
+      if (cite_end) {
+         cite_end += strlen("</cited>");
+         memmove(cite_start, cite_end, strlen(cite_end) + 1);
+      } else {
+         *cite_start = '\0';
+         break;
+      }
+   }
+
    // Remove <end_of_turn> tags (local AI models)
    char *match = NULL;
    if ((match = strstr(cleaned, "<end_of_turn>")) != NULL) {
@@ -2665,7 +2680,8 @@ mqtt_disabled:
             // never sees stray tags on the next turn.  (Phase 1 will thread the
             // local session here for citation resolution.)
             response_final_t fin;
-            const char *history_text = (llm_response_finalize(NULL, response_text, &fin) == SUCCESS)
+            const char *history_text = (llm_response_finalize(session_get_local(), response_text,
+                                                              &fin) == SUCCESS)
                                            ? fin.text
                                            : response_text;
 

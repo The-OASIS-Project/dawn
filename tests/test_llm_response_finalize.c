@@ -23,7 +23,16 @@
 
 #include "core/llm_response_finalize.h"
 #include "dawn_error.h"
+#include "memory/memory_citation.h"
 #include "unity.h"
+
+/* The finalizer calls memory_citation_capture(); these strip tests pass a NULL
+ * session (capture would no-op anyway) and don't link the memory subsystem, so
+ * stub it here. */
+void memory_citation_capture(session_t *session, const char *response_text) {
+   (void)session;
+   (void)response_text;
+}
 
 void setUp(void) {
 }
@@ -84,6 +93,23 @@ static void test_unclosed_command_tag_left_intact(void) {
    expect_clean("oops <command>{\"a\":1} no close", "oops <command>{\"a\":1} no close");
 }
 
+static void test_cited_tag_removed(void) {
+   expect_clean("Sasha is a Persian cat.<cited>M1,M7</cited>", "Sasha is a Persian cat.");
+}
+
+static void test_cited_tag_midtext_preserves_surrounding(void) {
+   expect_clean("a<cited>M1</cited>b", "ab");
+}
+
+static void test_orphan_cited_opener_drops_to_end(void) {
+   /* A stream that breaks mid-tag leaves an unclosed opener — drop it entirely. */
+   expect_clean("The answer is 42.<cited>M1,M", "The answer is 42.");
+}
+
+static void test_cited_with_command_and_eot(void) {
+   expect_clean("Done.<command>{\"a\":1}</command> <cited>M2</cited><end_of_turn>x", "Done.");
+}
+
 static void test_null_input_yields_empty(void) {
    expect_clean(NULL, "");
 }
@@ -114,6 +140,10 @@ int main(void) {
    RUN_TEST(test_command_and_end_of_turn);
    RUN_TEST(test_trailing_whitespace_trimmed);
    RUN_TEST(test_unclosed_command_tag_left_intact);
+   RUN_TEST(test_cited_tag_removed);
+   RUN_TEST(test_cited_tag_midtext_preserves_surrounding);
+   RUN_TEST(test_orphan_cited_opener_drops_to_end);
+   RUN_TEST(test_cited_with_command_and_eot);
    RUN_TEST(test_null_input_yields_empty);
    RUN_TEST(test_empty_input_yields_empty);
    RUN_TEST(test_null_out_returns_failure);

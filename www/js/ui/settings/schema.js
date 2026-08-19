@@ -1125,6 +1125,12 @@
                hint: 'Confidence boost when a fact is accessed (time-gated to once per hour)',
                advanced: true,
             },
+            citation_enabled: {
+               type: 'checkbox',
+               label: 'Memory Citation Signal',
+               hint: 'Tag surfaced memories [M#] and record which the assistant cites (audit-only)',
+               advanced: true,
+            },
             embedding_settings: {
                type: 'group',
                label: 'Semantic Search',

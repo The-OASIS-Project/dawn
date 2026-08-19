@@ -256,6 +256,32 @@ typedef struct {
                                        runaway suppression) */
 } injected_set_t;
 
+/* Maximum [M#] ordinals stashed per turn.  Sized to the focus-injection top_k
+ * validation ceiling (memory.focus_injection.top_k is clamped to [1,64] in
+ * config_validate.c), so every surfaced-and-numbered candidate can be stashed —
+ * a smaller cap would render [M#] beyond the stash and mis-score a real citation
+ * as a hallucination in the audit.  64 × 64B = 4 KB/session. */
+#define MAX_CITATION_STASH 64
+
+/**
+ * @brief Per-turn map from a rendered [M#] ordinal to the surfaced item_id.
+ *
+ * Populated in build_focus_block() when memory citation is enabled (M1 =
+ * entries[0], …), read by the response finalizer to resolve a `<cited>M#</cited>`
+ * back to its memory item (e.g. "fact:123").  CLEARED at dispatch entry so a
+ * turn whose focus block is short-circuited can never inherit a stale map and
+ * false-validate a citation.  Guarded by session->history_mutex.
+ */
+typedef struct {
+   char item_id[64]; /* Opaque item key, e.g. "fact:123"; matches FOCUS_ITEM_ID_BUFLEN.
+                        Static literal — session_manager.h cannot include L2 headers. */
+} citation_stash_entry_t;
+
+typedef struct {
+   citation_stash_entry_t entries[MAX_CITATION_STASH]; /* indexed by ordinal-1 */
+   int count;                                          /* number of [M#] tags rendered this turn */
+} citation_stash_t;
+
 typedef struct {
    _Atomic int state;
    pthread_t thread_id;
@@ -513,6 +539,11 @@ typedef struct session {
    // dies with it) and the never-hold-two-L4-locks rule keeps us out of a
    // dedicated lock here.  See injected_set_t above for the full contract.
    injected_set_t injected_set;
+
+   // Memory citation signal (Phase 1): per-turn [M#] ordinal -> item_id map,
+   // populated in build_focus_block when citation is enabled and read by the
+   // response finalizer.  Shares history_mutex (same rationale as injected_set).
+   citation_stash_t citation_stash;
 
    // Phase 1g-i: most-recently-stamped user-message DB id.  Set by
    // session_stamp_last_message_id when role == "user"; read as `turn_id`
@@ -857,6 +888,15 @@ int session_injected_set_advance_turn_locked(session_t *session);
  * fresh and once-per-session log lines re-arm.
  */
 void session_injected_set_clear(session_t *session);
+
+/**
+ * @brief Clear the per-turn citation stash (memory citation signal).
+ *
+ * SELF-LOCKING — acquires `session->history_mutex` internally.  Called at
+ * dispatch entry so a turn whose focus block is short-circuited cannot inherit
+ * the previous turn's [M#]→item_id map and false-validate a stale `<cited>`.
+ */
+void session_citation_stash_clear(session_t *session);
 
 /**
  * @brief Set/get the thread-local session pointer used by the per-turn
@@ -2160,6 +2200,10 @@ static inline int session_injected_set_advance_turn_locked(session_t *session) {
 }
 
 static inline void session_injected_set_clear(session_t *session) {
+   (void)session;
+}
+
+static inline void session_citation_stash_clear(session_t *session) {
    (void)session;
 }
 

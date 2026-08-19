@@ -216,6 +216,19 @@ static void test_llm_tools_roundtrip(void) {
    TEST_ASSERT_FALSE(g_read.llm.tools.enabled);
 }
 
+/* --- [memory.decay] citation_enabled --------------------------------------- */
+
+static void test_memory_citation_roundtrip(void) {
+   /* Default is false; writing true and reading it back proves the writer emits
+    * the key (a dropped key would revert to the false default and be lost on the
+    * next WebUI settings save). */
+   g_written.memory.citation_enabled = true;
+
+   round_trip();
+
+   TEST_ASSERT_TRUE(g_read.memory.citation_enabled);
+}
+
 /* --- section coverage ------------------------------------------------------
  * The generic half: every section config_write_toml is responsible for must
  * appear in its output.  A new section wired into the parser but not the writer
@@ -383,6 +396,7 @@ int main(void) {
    RUN_TEST(test_event_chunk_cap_has_a_floor);
    RUN_TEST(test_scheduler_roundtrip);
    RUN_TEST(test_llm_tools_roundtrip);
+   RUN_TEST(test_memory_citation_roundtrip);
    RUN_TEST(test_all_writer_owned_sections_present);
    RUN_TEST(test_written_file_reparses);
    RUN_TEST(test_string_values_cannot_forge_toml);

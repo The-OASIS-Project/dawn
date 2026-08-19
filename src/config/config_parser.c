@@ -1327,6 +1327,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                                 "prune_threshold",
                                                 "summary_retention_days",
                                                 "access_reinforcement_boost",
+                                                "citation_enabled",
                                                 NULL };
       warn_unknown_keys(decay, "memory.decay", decay_keys);
 
@@ -1341,6 +1342,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       PARSE_DOUBLE(decay, "prune_threshold", config->decay_prune_threshold);
       PARSE_INT(decay, "summary_retention_days", config->summary_retention_days);
       PARSE_DOUBLE(decay, "access_reinforcement_boost", config->access_reinforcement_boost);
+      PARSE_BOOL(decay, "citation_enabled", config->citation_enabled);
    }
 
    /* Clamp decay values to sane ranges */

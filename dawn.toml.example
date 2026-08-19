@@ -593,6 +593,9 @@
 # summary_retention_days = 30     # Delete conversation summaries older than N days
 # access_reinforcement_boost = 0.05  # Confidence boost when a fact is accessed (+5%)
                                   # Time-gated: only boosts once per hour to prevent pinning
+# citation_enabled = false        # Memory citation signal: tag surfaced memories [M#], have the
+                                  # assistant emit <cited>, and record which were used in an audit
+                                  # table.  Audit-only in this phase (no confidence change).
 
 [memory.embeddings]
 # provider = "onnx"               # Embedding provider: "onnx" (local), "ollama", or "openai"

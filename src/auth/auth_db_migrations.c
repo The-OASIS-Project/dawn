@@ -2825,6 +2825,37 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       errmsg = NULL;
    }
 
+   /* v77: memory_citation_audit table (memory citation signal).  A NEW table, so
+    * CREATE IF NOT EXISTS is idempotent — base SCHEMA_SQL adds it on fresh
+    * installs, this adds it on existing DBs.  Gated `< 77`; on failure v77_ok
+    * stays false so the version bump is deferred and the migration retries. */
+   bool v77_ok = (current_version >= 77);
+   if (current_version < 77) {
+      rc = sqlite3_exec(s_db.db,
+                        "CREATE TABLE IF NOT EXISTS memory_citation_audit ("
+                        "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                        "   conversation_id INTEGER DEFAULT 0,"
+                        "   message_id INTEGER DEFAULT 0,"
+                        "   user_id INTEGER NOT NULL,"
+                        "   ts INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
+                        "   injected_ids TEXT,"
+                        "   cited_ids TEXT,"
+                        "   dropped_count INTEGER DEFAULT 0"
+                        ");"
+                        "CREATE INDEX IF NOT EXISTS idx_memory_citation_audit_user_ts ON "
+                        "memory_citation_audit(user_id, ts);",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v77 migration (memory_citation_audit) failed: %s",
+                    errmsg ? errmsg : "unknown");
+         v77_ok = false;
+      } else {
+         v77_ok = true;
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
    /* Log migration if upgrading from an older version */
    if (current_version > 0 && current_version < AUTH_DB_SCHEMA_VERSION) {
       OLOG_INFO("auth_db: migrated schema from v%d to v%d", current_version,
@@ -2847,7 +2878,7 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
                               v55_ok && v56_ok && v57_ok && v58_ok && v59_ok && v60_ok && v61_ok &&
                               v62_ok && v63_ok && v64_ok && v65_ok && v66_ok && v67_ok && v68_ok &&
                               v69_ok && v70_ok && v71_ok && v72_ok && v73_ok && v74_ok && v75_ok &&
-                              v76_ok;
+                              v76_ok && v77_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

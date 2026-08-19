@@ -674,6 +674,8 @@ typedef struct {
    float decay_prune_threshold;      /* Delete facts below this (0.25) */
    int summary_retention_days;       /* Delete summaries older than N days (30) */
    float access_reinforcement_boost; /* Confidence boost on access (0.05) */
+   bool citation_enabled;            /* Memory citation signal: inject [M#], capture <cited>, audit
+                                        (log-only in Phase 1; default off) */
 
    /* Embeddings (semantic search) */
    char embedding_provider[16];        /* "onnx", "ollama", "openai", "" (disabled) */

@@ -833,6 +833,7 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_INT(section, "summary_retention_days", config->memory.summary_retention_days);
       JSON_TO_CONFIG_DOUBLE(section, "access_reinforcement_boost",
                             config->memory.access_reinforcement_boost);
+      JSON_TO_CONFIG_BOOL(section, "citation_enabled", config->memory.citation_enabled);
       /* Clamp decay values to sane ranges */
       if (config->memory.decay_hour < 0)
          config->memory.decay_hour = 0;
