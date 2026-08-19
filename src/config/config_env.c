@@ -208,7 +208,7 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
    ENV_BOOL("DAWN_LLM_LOCAL_VISION_ENABLED", config->llm.local.vision_enabled);
 
    /* [llm.tools] */
-   ENV_STRING("DAWN_LLM_TOOLS_MODE", config->llm.tools.mode);
+   ENV_BOOL("DAWN_LLM_TOOLS_ENABLED", config->llm.tools.enabled);
 
    /* [llm.silent_observe] */
    ENV_STRING("DAWN_LLM_SILENT_OBSERVE_PROVIDER", config->llm.silent_observe.provider);
@@ -772,9 +772,9 @@ void config_dump_settings(const dawn_config_t *config,
 
    /* [llm.tools] */
    printf("[llm.tools]\n");
-   PRINT_SETTING_STR("mode", config->llm.tools.mode, "DAWN_LLM_TOOLS_MODE",
-                     detect_source_str(config->llm.tools.mode, defaults.llm.tools.mode,
-                                       "DAWN_LLM_TOOLS_MODE"));
+   PRINT_SETTING_BOOL("enabled", config->llm.tools.enabled, "DAWN_LLM_TOOLS_ENABLED",
+                      detect_source_bool(config->llm.tools.enabled, defaults.llm.tools.enabled,
+                                         "DAWN_LLM_TOOLS_ENABLED"));
 
    /* [search] */
    printf("[search]\n");
@@ -1213,7 +1213,7 @@ json_object *config_to_json(const dawn_config_t *config) {
 
    /* [llm.tools] */
    json_object *tools = json_object_new_object();
-   json_object_object_add(tools, "mode", json_object_new_string(config->llm.tools.mode));
+   json_object_object_add(tools, "enabled", json_object_new_boolean(config->llm.tools.enabled));
    json_object_object_add(llm, "tools", tools);
 
    /* [llm.silent_observe] */
@@ -2221,7 +2221,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "vision_enabled = %s\n", config->llm.local.vision_enabled ? "true" : "false");
 
    fprintf(fp, "\n[llm.tools]\n");
-   write_toml_string(fp, "mode", config->llm.tools.mode);
+   fprintf(fp, "enabled = %s\n", config->llm.tools.enabled ? "true" : "false");
    /* Write local_enabled array if configured (even if empty - empty means none enabled) */
    if (config->llm.tools.local_enabled_configured || config->llm.tools.local_enabled_count > 0) {
       if (config->llm.tools.local_enabled_count > 0) {

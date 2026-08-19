@@ -32,7 +32,6 @@
  */
 
 #include <json-c/json.h>
-#include <mosquitto.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -40,9 +39,7 @@
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
-#include "core/command_router.h"
 #include "core/conv_event.h"
-#include "core/ocp_helpers.h"
 #include "core/session_manager.h"
 #include "core/text_input_dispatch.h"
 #include "core/turn_queue.h"
@@ -60,11 +57,6 @@
  * Phase 4 may integrate with the worker pool for audio + text.
  * ============================================================================= */
 
-/* Command processing constants */
-#define MAX_TOOL_RESULTS 8
-#define TOOL_RESULT_MSG_SIZE 1024
-#define WEBUI_WORKER_ID 100 /* Virtual worker ID for command router */
-
 typedef struct {
    session_t *session;
    char *text;
@@ -81,240 +73,6 @@ typedef struct {
    char vision_mimes[WEBUI_MAX_VISION_IMAGES_CAP][WEBUI_VISION_MIME_MAX]; /* MIME types */
    int vision_image_count;                                                /* Number of images */
 } text_work_t;
-
-/**
- * @brief Process commands in LLM response and make follow-up calls
- *
- * Searches for <command> tags in the response, executes them via MQTT,
- * and makes follow-up LLM calls with the results.
- *
- * @param llm_response The LLM response to process
- * @param session Session for follow-up LLM calls
- * @return Final response text (caller must free), or NULL if no commands
- */
-char *webui_process_commands(const char *llm_response, session_t *session) {
-   if (!llm_response || !session) {
-      return NULL;
-   }
-
-   /* Bail only if the turn was CANCELLED (Stop / teardown).  A mere client
-    * disconnect no longer aborts — the turn survives, so command follow-ups
-    * must still run for the full answer to be persisted (background-jobs Ph1). */
-   if (session->cancel_requested) {
-      return NULL;
-   }
-
-   struct mosquitto *mosq = worker_pool_get_mosq();
-   if (!mosq) {
-      OLOG_WARNING("WebUI: No MQTT connection, cannot process commands");
-      return NULL;
-   }
-
-   /* Collect all tool results */
-   char *tool_results[MAX_TOOL_RESULTS] = { 0 };
-   int num_results = 0;
-
-   /* Search for <command> tags and process each one */
-   const char *search_ptr = llm_response;
-   const char *cmd_start;
-
-   while ((cmd_start = strstr(search_ptr, "<command>")) != NULL && num_results < MAX_TOOL_RESULTS) {
-      const char *cmd_end = strstr(cmd_start, "</command>");
-      if (!cmd_end) {
-         OLOG_WARNING("WebUI: Unclosed <command> tag");
-         break;
-      }
-
-      /* Extract command JSON */
-      const char *json_start = cmd_start + strlen("<command>");
-      size_t json_len = cmd_end - json_start;
-
-      char *cmd_json = malloc(json_len + 1);
-      if (!cmd_json) {
-         OLOG_ERROR("WebUI: Failed to allocate command JSON");
-         break;
-      }
-      memcpy(cmd_json, json_start, json_len);
-      cmd_json[json_len] = '\0';
-
-      /* Send command to WebUI debug panel (wraps in tags for JS extraction)
-       * Only send if we had streamed content - otherwise the "didn't stream" fallback
-       * in session_manager.c already sends the full response with command tags */
-      if (session->stream_had_content) {
-         char *debug_cmd = malloc(json_len + 32);
-         if (debug_cmd) {
-            snprintf(debug_cmd, json_len + 32, "<command>%s</command>", cmd_json);
-            webui_send_transcript(session, "assistant", debug_cmd);
-            free(debug_cmd);
-         }
-      }
-
-      OLOG_INFO("WebUI: Processing command: %s", cmd_json);
-
-      /* Parse JSON to extract device/action */
-      struct json_object *parsed_json = json_tokener_parse(cmd_json);
-      if (!parsed_json) {
-         OLOG_WARNING("WebUI: Invalid command JSON: %s", cmd_json);
-         free(cmd_json);
-         search_ptr = cmd_end + strlen("</command>");
-         continue;
-      }
-
-      /* Get device and action - both required for valid command */
-      struct json_object *device_obj = NULL;
-      struct json_object *action_obj = NULL;
-
-      if (!json_object_object_get_ex(parsed_json, "device", &device_obj) || !device_obj) {
-         OLOG_WARNING("WebUI: Skipping malformed command - missing 'device' field: %s", cmd_json);
-         json_object_put(parsed_json);
-         free(cmd_json);
-         search_ptr = cmd_end + strlen("</command>");
-         continue;
-      }
-
-      const char *device_name = json_object_get_string(device_obj);
-      if (!device_name || device_name[0] == '\0') {
-         OLOG_WARNING("WebUI: Skipping malformed command - empty 'device' field: %s", cmd_json);
-         json_object_put(parsed_json);
-         free(cmd_json);
-         search_ptr = cmd_end + strlen("</command>");
-         continue;
-      }
-
-      /* Action is optional for some commands (e.g., triggers), default to "unknown" */
-      const char *action_name = "unknown";
-      if (json_object_object_get_ex(parsed_json, "action", &action_obj) && action_obj) {
-         const char *action_str = json_object_get_string(action_obj);
-         if (action_str && action_str[0] != '\0') {
-            action_name = action_str;
-         }
-      }
-
-      /* Register pending request */
-      pending_request_t *req = command_router_register(WEBUI_WORKER_ID);
-      if (!req) {
-         OLOG_ERROR("WebUI: Failed to register pending request");
-         json_object_put(parsed_json);
-         free(cmd_json);
-         search_ptr = cmd_end + strlen("</command>");
-         continue;
-      }
-
-      const char *request_id = command_router_get_id(req);
-      OLOG_INFO("WebUI: Registered request %s", request_id);
-
-      /* Add request_id, session_id, and timestamp to command JSON (OCP v1.1) */
-      json_object_object_add(parsed_json, "request_id", json_object_new_string(request_id));
-      json_object_object_add(parsed_json, "session_id",
-                             json_object_new_int((int32_t)session->session_id));
-      json_object_object_add(parsed_json, "timestamp",
-                             json_object_new_int64(ocp_get_timestamp_ms()));
-      const char *cmd_with_id = json_object_to_json_string(parsed_json);
-
-      /* Send tool call status to UI (works for both WebUI and satellites) */
-      char tool_detail[128];
-      snprintf(tool_detail, sizeof(tool_detail), "Calling %s...", device_name);
-      webui_send_state_with_detail(session, "tool_call", tool_detail);
-
-      /* Publish command via MQTT */
-      int rc = mosquitto_publish(mosq, NULL, APPLICATION_NAME, strlen(cmd_with_id), cmd_with_id, 0,
-                                 false);
-      if (rc != MOSQ_ERR_SUCCESS) {
-         OLOG_ERROR("WebUI: MQTT publish failed: %d", rc);
-         command_router_cancel(req);
-         json_object_put(parsed_json);
-         free(cmd_json);
-         search_ptr = cmd_end + strlen("</command>");
-         continue;
-      }
-      OLOG_INFO("WebUI: Published command to %s", APPLICATION_NAME);
-
-      /* Wait for result */
-      char *callback_result = command_router_wait(req, COMMAND_RESULT_TIMEOUT_MS);
-
-      /* Format result for LLM */
-      tool_results[num_results] = malloc(TOOL_RESULT_MSG_SIZE);
-      if (tool_results[num_results]) {
-         if (callback_result && strlen(callback_result) > 0) {
-            OLOG_INFO("WebUI: Received callback result: %.50s%s", callback_result,
-                      strlen(callback_result) > 50 ? "..." : "");
-            snprintf(tool_results[num_results], TOOL_RESULT_MSG_SIZE,
-                     "[Tool Result: %s.%s returned: %s]", device_name, action_name,
-                     callback_result);
-         } else {
-            OLOG_WARNING("WebUI: No callback result (timeout or empty)");
-            snprintf(tool_results[num_results], TOOL_RESULT_MSG_SIZE,
-                     "[Tool Result: %s.%s completed successfully]", device_name, action_name);
-         }
-
-         /* Send tool result to WebUI for debug display */
-         webui_send_transcript(session, "assistant", tool_results[num_results]);
-
-         num_results++;
-      }
-
-      if (callback_result) {
-         free(callback_result);
-      }
-
-      json_object_put(parsed_json);
-      free(cmd_json);
-      search_ptr = cmd_end + strlen("</command>");
-   }
-
-   /* If no results collected, return NULL (no commands processed) */
-   if (num_results == 0) {
-      return NULL;
-   }
-
-   /* Build combined tool results message for LLM */
-   size_t total_len = 1; /* For null terminator */
-   for (int i = 0; i < num_results; i++) {
-      if (tool_results[i]) {
-         total_len += strlen(tool_results[i]) + 1; /* +1 for newline */
-      }
-   }
-
-   char *combined_results = malloc(total_len);
-   if (!combined_results) {
-      OLOG_ERROR("WebUI: Failed to allocate combined results");
-      for (int i = 0; i < num_results; i++) {
-         free(tool_results[i]);
-      }
-      return NULL;
-   }
-
-   char *ptr = combined_results;
-   for (int i = 0; i < num_results; i++) {
-      if (tool_results[i]) {
-         size_t len = strlen(tool_results[i]);
-         memcpy(ptr, tool_results[i], len);
-         ptr += len;
-         if (i < num_results - 1) {
-            *ptr++ = '\n';
-         }
-         free(tool_results[i]);
-      }
-   }
-   *ptr = '\0';
-
-   OLOG_INFO("WebUI: Sending tool results to LLM: %s", combined_results);
-
-   /* Make follow-up LLM call with tool results */
-   char *final_response = session_llm_call(session, combined_results);
-
-   free(combined_results);
-
-   if (!final_response) {
-      OLOG_ERROR("WebUI: Follow-up LLM call failed");
-      return NULL;
-   }
-
-   OLOG_INFO("WebUI: LLM final response: %.50s%s", final_response,
-             strlen(final_response) > 50 ? "..." : "");
-
-   return final_response;
-}
 
 /* strip_command_tags() is shared across webui modules — see webui_satellite.c */
 
@@ -568,73 +326,9 @@ static void *text_worker_thread(void *arg) {
       return NULL;
    }
 
-   /* Check for command tags and process them */
+   /* Native tool calling actuated any device actions during the LLM call.
+    * Defensively strip residual tags from the final response before persist. */
    char *final_response = response;
-   if (strstr(response, "<command>")) {
-      OLOG_INFO("WebUI: Response contains commands, processing...");
-
-      /* Note: Don't send intermediate response here - streaming already delivered it */
-
-      /* Process commands and get follow-up response */
-      char *processed = webui_process_commands(response, session);
-      if (processed) {
-         /* Check if request was superseded after command processing */
-         if (REQUEST_SUPERSEDED(session, expected_gen)) {
-            OLOG_INFO("WebUI: Session %u request superseded during command processing",
-                      session->session_id);
-            text_worker_end(session);
-            free(response);
-            free(processed);
-            free(text);
-            free(work);
-            return NULL;
-         }
-
-         /* Recursively process if the follow-up also contains commands.
-          * Limit iterations to prevent infinite loops from confused LLMs. */
-         int follow_up_iterations = 0;
-         const int MAX_FOLLOW_UP_ITERATIONS = 5;
-
-         while (strstr(processed, "<command>") && !REQUEST_SUPERSEDED(session, expected_gen)) {
-            follow_up_iterations++;
-            if (follow_up_iterations > MAX_FOLLOW_UP_ITERATIONS) {
-               OLOG_WARNING("WebUI: Command loop limit reached (%d iterations), breaking",
-                            MAX_FOLLOW_UP_ITERATIONS);
-               break;
-            }
-
-            OLOG_INFO(
-                "WebUI: Follow-up response contains more commands, processing... (iter %d/%d)",
-                follow_up_iterations, MAX_FOLLOW_UP_ITERATIONS);
-            /* Note: Don't send transcript - streaming already delivered it */
-
-            char *next_processed = webui_process_commands(processed, session);
-            free(processed);
-            if (!next_processed) {
-               processed = NULL;
-               break;
-            }
-            processed = next_processed;
-         }
-
-         if (processed) {
-            free(response);
-            final_response = processed;
-
-            /* Generate TTS for the command result (follow-up response) */
-            if (tts_enabled && strlen(processed) > 0) {
-               OLOG_INFO("WebUI: Generating TTS for command result: %.60s%s", processed,
-                         strlen(processed) > 60 ? "..." : "");
-               webui_sentence_audio_callback(processed, session);
-            }
-         } else {
-            /* Command processing failed, use original response */
-            final_response = response;
-         }
-      }
-   }
-
-   /* Strip any remaining command tags from final response */
    strip_command_tags(final_response);
 
    /* Send audio end marker if TTS was enabled (use_opus captured at worker

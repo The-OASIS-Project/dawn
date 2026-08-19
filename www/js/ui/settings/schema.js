@@ -690,16 +690,11 @@
          icon: '&#x1F527;',
          adminOnly: true,
          fields: {
-            mode: {
-               type: 'select',
-               label: 'Mode',
-               options: [
-                  { value: 'native', label: 'Native Tools' },
-                  { value: 'command_tags', label: 'Command Tags (Legacy)' },
-                  { value: 'disabled', label: 'Disabled' },
-               ],
-               hint: 'Native Tools: LLM function calling, Command Tags: XML-style <command> tags, Disabled: no tool use',
-               configPath: 'llm.tools.mode',
+            enabled: {
+               type: 'checkbox',
+               label: 'Enable Tool Calling',
+               hint: 'Native LLM function calling. Off = no tool use.',
+               configPath: 'llm.tools.enabled',
             },
          },
          customContent: 'tools_list', // Special marker for injecting tools list

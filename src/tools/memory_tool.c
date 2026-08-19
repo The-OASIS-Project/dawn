@@ -328,7 +328,6 @@ static const tool_metadata_t memory_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_FILESYSTEM,
-   .is_getter = false, /* remember/forget have side effects */
    .skip_followup = false,
    .default_remote = true,
 

@@ -798,18 +798,6 @@ int dawn_build_prompt(int user_id,
                       prompt_refresh_kind_t kind,
                       composed_prompt_t *out);
 
-/**
- * @brief Process command tags in LLM response
- *
- * Extracts <command> tags, publishes to MQTT, and collects results.
- *
- * @param llm_response The LLM response containing command tags
- * @param session The session for context
- * @return Allocated string with follow-up response, or NULL on error
- */
-char *webui_process_commands(const char *llm_response, session_t *session);
-
-
 /* =============================================================================
  * Connection Iterator (defined in webui_server.c, used by webui_music.c)
  * ============================================================================= */

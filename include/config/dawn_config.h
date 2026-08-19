@@ -286,7 +286,7 @@ typedef struct {
 #define LLM_TOOL_NAME_MAX 64
 
 typedef struct llm_tools_config {
-   char mode[16]; /* "native", "command_tags", or "disabled" (default: native) */
+   bool enabled; /* Native tool/function calling on (default) or off */
 
    /* Per-tool enable lists — WHITELIST (legacy): only listed (non-dangerous) tools
     * are enabled. Also the opt-in mechanism for TOOL_CAP_DANGEROUS tools under

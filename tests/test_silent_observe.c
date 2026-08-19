@@ -124,6 +124,12 @@ char *llm_chat_completion_with_config(struct json_object *conversation_history,
    return strdup(s_mock_response);
 }
 
+/* Stubs for the thread-local tool-suppression guard bracketing the LLM call. */
+void llm_tools_suppress_push(void) {
+}
+void llm_tools_suppress_pop(void) {
+}
+
 /* Stub the memory filter — return programmed blocking decision.
  *
  * silent_observe.c calls memory_filter_check() exactly twice along the

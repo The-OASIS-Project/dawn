@@ -97,16 +97,16 @@
 
 /* =============================================================================
  * Unified LLM Controls Grid
- * Both rows share a single CSS grid so columns align perfectly like a table.
- * Inner divs (#llm-controls, #llm-conversation-controls) use display:contents
- * so their children participate directly in this grid.
+ * Both rows (#llm-controls, #llm-conversation-controls) use display:contents so
+ * their children share ONE 7-col grid and align column-for-column like a table:
+ * Reasoning↔Mode, Effort↔Provider, Privacy↔Model.
  *
- * Desktop layout (7 columns × 5 rows):
- *   col:  1(label)    2(select)  3(label)    4(select)   5(label)  6(select)  7(accessory)
- * row 1:  MODE:       [Local▾]   PROVIDER:   [llama▾]    MODEL:    [Qwen..▾]  [▲ collapse]
- * row 2:                                     (prov-hint)           (mod-hint)
+ * Desktop layout (7 columns):
+ *   col:  1(label)    2(select)  3(label)    4(select)   5(label)   6(select)  7(accessory)
+ * row 1:  MODE:       [Local▾]   PROVIDER:   [llama▾]    MODEL:     [Qwen..▾]  [▲ collapse]
+ * row 2:                                     (prov-hint)            (mod-hint)
  * row 3:  [----------------------- separator line -----------------------]
- * row 4:  REASONING:  [Dis▾]     EFFORT:     [Low▾]      TOOLS:    [Native▾?] [eye/lock]
+ * row 4:  REASONING:  [Dis▾]     EFFORT:     [Low▾]      PRIVACY:   (eye)
  * row 5:                                     (eff-hint)
  *
  * Mobile: collapses to 2-column (auto 1fr) vertical stack with mini bar.
@@ -129,6 +129,8 @@
       padding 0.3s ease;
 }
 
+/* Both control rows flow directly into the shared 7-col grid so row 4 aligns
+ * column-for-column with row 1 (Reasoning↔Mode, Effort↔Provider, Privacy↔Model). */
 #llm-controls,
 #llm-conversation-controls {
    display: contents;
@@ -199,10 +201,6 @@
    width: 7rem;
 }
 
-#tools-mode-select {
-   width: 8.5rem;
-}
-
 /* Row 1, col 7 is reserved for the collapse toggle (positioned absolutely) */
 .llm-grid-spacer {
    display: none;
@@ -245,7 +243,7 @@
    margin: 0.25rem 0;
 }
 
-/* === Row 4: conversation controls — explicit placement === */
+/* === Row 4: conversation controls — columns align with row 1 === */
 #reasoning-label {
    grid-row: 4;
    grid-column: 1;
@@ -262,32 +260,21 @@
    grid-row: 4;
    grid-column: 4;
 }
-#tools-label {
+#privacy-label {
    grid-row: 4;
    grid-column: 5;
 }
 #tools-group {
    grid-row: 4;
    grid-column: 6;
+   justify-self: start;
    display: flex;
    align-items: center;
    gap: 0.5rem;
    position: relative;
 }
-#llm-lock-indicator {
-   grid-row: 4;
-   grid-column: 7;
-   align-self: center;
-   justify-self: center;
-   color: var(--text-secondary);
-   display: flex;
-   align-items: center;
-}
-#llm-lock-indicator.hidden {
-   display: none;
-}
 
-/* Row 5: effort hint */
+/* Row 5: effort hint, under the effort select */
 #effort-hint {
    grid-row: 5;
    grid-column: 4;
@@ -422,17 +409,6 @@
    to {
       transform: rotate(360deg);
    }
-}
-
-/* Locked state — only tool mode is frozen after the first message. Reasoning
- * mode and effort stay editable: effort never errors mid-conversation on any
- * provider, and reasoning-mode changes are made safe server-side (Claude clamps
- * an incompatible thinking toggle rather than 400ing). Tool mode stays locked
- * pending a per-provider mid-conversation switch test. */
-#llm-controls-grid.locked #tools-mode-select {
-   opacity: 0.6;
-   cursor: not-allowed;
-   pointer-events: none;
 }
 
 /* =============================================================================
@@ -664,21 +640,19 @@
 
    /* Override ID-specificity desktop placements — place under select column */
    #provider-hint,
-   #model-hint,
-   #effort-hint {
+   #model-hint {
       grid-row: auto;
       grid-column: 2;
       text-align: left;
    }
 
-   /* Override ID-specificity grid placements for vertical stacking */
+   /* Reset desktop grid placements so row-4 items stack vertically on mobile */
    #reasoning-label,
    #reasoning-mode-select,
    #effort-label,
    #reasoning-effort-select,
-   #tools-label,
-   #tools-group,
-   #llm-lock-indicator {
+   #privacy-label,
+   #tools-group {
       grid-row: auto;
       grid-column: auto;
    }
@@ -687,11 +661,6 @@
    #llm-provider-select,
    #reasoning-effort-select {
       margin-top: 0.4rem;
-   }
-
-   #llm-lock-indicator {
-      grid-column: 1 / -1;
-      justify-self: end;
    }
 
    .help-popup {

@@ -166,7 +166,6 @@ static const tool_metadata_t s_meta = {
    .param_count = 2,
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NONE,
-   .is_getter = true,
    .default_local = true,
    .default_remote = true,
    .callback = code_project_callback,

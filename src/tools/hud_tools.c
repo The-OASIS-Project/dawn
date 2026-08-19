@@ -116,7 +116,6 @@ static const tool_metadata_t hud_control_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_BOOLEAN,
    .capabilities = TOOL_CAP_ARMOR_FEATURE,
-   .is_getter = false,
    .skip_followup = false,
    .mqtt_only = true,
    .sync_wait = false,
@@ -182,7 +181,6 @@ static const tool_metadata_t hud_mode_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_ANALOG,
    .capabilities = TOOL_CAP_ARMOR_FEATURE,
-   .is_getter = false,
    .skip_followup = false,
    .mqtt_only = true,
    .sync_wait = false,
@@ -233,7 +231,6 @@ static const tool_metadata_t faceplate_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_BOOLEAN,
    .capabilities = TOOL_CAP_ARMOR_FEATURE,
-   .is_getter = false,
    .skip_followup = false,
    .mqtt_only = true,
    .sync_wait = false,
@@ -301,7 +298,6 @@ static const tool_metadata_t recording_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_BOOLEAN,
    .capabilities = TOOL_CAP_ARMOR_FEATURE,
-   .is_getter = false,
    .skip_followup = false,
    .mqtt_only = true,
    .sync_wait = false,
@@ -348,7 +344,6 @@ static const tool_metadata_t visual_offset_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_ANALOG,
    .capabilities = TOOL_CAP_ARMOR_FEATURE,
-   .is_getter = false,
    .skip_followup = false,
    .mqtt_only = true,
    .sync_wait = false,

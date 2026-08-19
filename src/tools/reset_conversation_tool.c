@@ -53,7 +53,6 @@ static const tool_metadata_t reset_conversation_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NONE,
-   .is_getter = false,
    .skip_followup = true, /* Must be true - conversation history is invalidated after reset */
    .default_remote = true,
 

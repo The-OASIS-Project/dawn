@@ -1057,7 +1057,6 @@ static const tool_metadata_t scheduler_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NONE,
-   .is_getter = false,
    .default_local = true,
    .default_remote = true,
 

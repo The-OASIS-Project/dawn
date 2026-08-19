@@ -709,7 +709,7 @@ static void briefing_build_llm_config(llm_resolved_config_t *cfg,
       cfg->endpoint = endpoint_buf;
    }
 
-   strncpy(cfg->tool_mode, "disabled", sizeof(cfg->tool_mode) - 1);
+   cfg->suppress_tools = true;
    strncpy(cfg->thinking_mode, "disabled", sizeof(cfg->thinking_mode) - 1);
    cfg->timeout_ms = 30000;
 }

@@ -143,7 +143,7 @@ static __thread int tl_suppress_count = 0;
 
 /* Thread-local pointer to current resolved config.
  * Set by llm_tools_set_current_config() before LLM calls so that
- * llm_tools_enabled() can check session-specific tool_mode. */
+ * llm_tools_enabled() can check session-specific suppress_tools. */
 static __thread const llm_resolved_config_t *tl_current_config = NULL;
 
 /* =============================================================================
@@ -2375,13 +2375,16 @@ bool llm_tools_enabled(const llm_resolved_config_t *config) {
       return false;
    }
 
-   /* Check config option - only "native" mode enables native tool calling.
-    * Priority: explicit config > thread-local config > global config */
+   /* Per-call suppression: internal callers (extraction, compaction,
+    * silent-observe, briefings) force tools off via the resolved config.
+    * Priority: explicit config > thread-local config. */
    const llm_resolved_config_t *effective_config = config ? config : tl_current_config;
-   const char *tool_mode = (effective_config && effective_config->tool_mode[0] != '\0')
-                               ? effective_config->tool_mode
-                               : g_config.llm.tools.mode;
-   if (strcmp(tool_mode, "native") != 0) {
+   if (effective_config && effective_config->suppress_tools) {
+      return false;
+   }
+
+   /* Global on/off switch for native tool calling. */
+   if (!g_config.llm.tools.enabled) {
       return false;
    }
 

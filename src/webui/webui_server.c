@@ -3161,8 +3161,9 @@ int webui_restore_conversation_context(ws_connection_t *conn,
       }
    }
 
-   /* Restore LLM config from conversation DB (reflects last-used settings) */
-   if (conv->llm_type[0] != '\0' || conv->tools_mode[0] != '\0') {
+   /* Restore LLM config from conversation DB (reflects last-used settings).
+    * tools_mode is a retired dead column — no longer hydrated. */
+   if (conv->llm_type[0] != '\0') {
       session_llm_config_t cfg;
       session_get_llm_config(conn->session, &cfg);
 
@@ -3207,10 +3208,6 @@ int webui_restore_conversation_context(ws_connection_t *conn,
        * in llm_resolve_config at request time (the single choke point). */
       if (cfg.type == LLM_CLOUD && llm_openrouter_gateway_enabled()) {
          cfg.cloud_provider = CLOUD_PROVIDER_OPENROUTER;
-      }
-      if (conv->tools_mode[0] != '\0') {
-         strncpy(cfg.tool_mode, conv->tools_mode, sizeof(cfg.tool_mode) - 1);
-         cfg.tool_mode[sizeof(cfg.tool_mode) - 1] = '\0';
       }
       /* Fix #6: Restore thinking_mode from conversation DB */
       if (conv->thinking_mode[0] != '\0') {

@@ -396,7 +396,6 @@ static const tool_metadata_t doc_index_metadata = {
    .param_count = 2,
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NETWORK,
-   .is_getter = false,
    .callback = doc_index_callback,
    .is_available = doc_index_is_available,
 };

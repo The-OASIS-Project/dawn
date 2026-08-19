@@ -96,7 +96,6 @@
 
    // Per-conversation LLM settings state
    let conversationLlmState = {
-      tools_mode: 'native',
       thinking_mode: 'enabled',
       reasoning_effort: 'medium',
       locked: false,
@@ -113,7 +112,6 @@
       claude_model: '',
       gemini_model: '',
       openrouter_model: '',
-      tools_mode: 'native',
       thinking_mode: 'disabled', // disabled/enabled
       reasoning_effort: 'medium', // low/medium/high - controls token budget
    };
@@ -265,25 +263,16 @@
    function setConversationLlmLocked(locked) {
       conversationLlmState.locked = locked;
       const grid = document.getElementById('llm-controls-grid');
-      const indicator = document.getElementById('llm-lock-indicator');
       const reasoningSelect = document.getElementById('reasoning-mode-select');
-      const toolsSelect = document.getElementById('tools-mode-select');
 
       if (grid) {
          grid.classList.toggle('locked', locked);
       }
       // Reasoning mode + effort stay editable mid-conversation. Effort never
       // errors on any provider; a reasoning-mode change is made safe server-side
-      // (Claude clamps an incompatible thinking toggle instead of 400ing). Only
-      // tool mode is frozen after the first message (pending a per-provider test).
+      // (Claude clamps an incompatible thinking toggle instead of 400ing).
       if (reasoningSelect) {
          reasoningSelect.disabled = false;
-      }
-      if (toolsSelect) {
-         toolsSelect.disabled = locked;
-      }
-      if (indicator) {
-         indicator.classList.toggle('hidden', !locked);
       }
    }
 
@@ -293,7 +282,6 @@
    function initConversationLlmControls() {
       const reasoningSelect = document.getElementById('reasoning-mode-select');
       const depthSelect = document.getElementById('reasoning-effort-select');
-      const toolsSelect = document.getElementById('tools-mode-select');
 
       // Helper to update depth selector enabled state based on reasoning mode
       function updateDepthEnabled() {
@@ -328,60 +316,7 @@
          updateDepthEnabled();
       }
 
-      if (toolsSelect) {
-         toolsSelect.addEventListener('change', () => {
-            conversationLlmState.tools_mode = toolsSelect.value;
-            // Immediately update session config so tool_mode takes effect
-            if (!conversationLlmState.locked) {
-               setSessionLlm({ tool_mode: toolsSelect.value });
-            }
-         });
-      }
-
       // Initial session defaults are applied after config loads via applyGlobalDefaultsToControls()
-
-      // Tools help button popup
-      const toolsHelpBtn = document.getElementById('tools-help-btn');
-      const toolsHelpPopup = document.getElementById('tools-help-popup');
-
-      if (toolsHelpBtn && toolsHelpPopup) {
-         // Escape close goes through DawnEscStack (registered while shown) so it
-         // stacks correctly under any layer opened above the popup.
-         let escToken = null;
-         const closePopup = () => {
-            toolsHelpPopup.classList.add('hidden');
-            if (escToken !== null) {
-               DawnEscStack.unregister(escToken);
-               escToken = null;
-            }
-         };
-         const openPopup = () => {
-            toolsHelpPopup.classList.remove('hidden');
-            if (escToken === null) {
-               escToken = DawnEscStack.register(() => {
-                  closePopup();
-                  return true;
-               });
-            }
-         };
-
-         // Toggle popup on button click
-         toolsHelpBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            if (toolsHelpPopup.classList.contains('hidden')) openPopup();
-            else closePopup();
-         });
-
-         // Close popup when clicking outside.
-         // NOTE: This document-level listener is intentionally not removed — the
-         // popup is a session-lived singleton; closePopup is a safe no-op when
-         // already hidden.
-         document.addEventListener('click', (e) => {
-            if (!toolsHelpPopup.contains(e.target) && e.target !== toolsHelpBtn) {
-               closePopup();
-            }
-         });
-      }
 
       // Privacy toggle button
       initPrivacyToggle();
@@ -579,7 +514,6 @@
       const modelSelect = document.getElementById('llm-model-select');
       const reasoningSelect = document.getElementById('reasoning-mode-select');
       const depthSelect = document.getElementById('reasoning-effort-select');
-      const toolsSelect = document.getElementById('tools-mode-select');
 
       // Reset type (local/cloud)
       if (typeSelect) {
@@ -589,7 +523,6 @@
       // Build session reset payload
       const sessionReset = {
          type: globalDefaults.type,
-         tool_mode: globalDefaults.tools_mode,
          thinking_mode: globalDefaults.thinking_mode,
          reasoning_effort: globalDefaults.reasoning_effort,
       };
@@ -638,12 +571,6 @@
          );
       }
 
-      // Reset tools dropdown
-      if (toolsSelect) {
-         toolsSelect.value = globalDefaults.tools_mode;
-         conversationLlmState.tools_mode = globalDefaults.tools_mode;
-      }
-
       // Update runtime state
       llmRuntimeState.type = globalDefaults.type;
       llmRuntimeState.provider = globalDefaults.provider;
@@ -673,7 +600,6 @@
    function applyConversationLlmSettings(settings, isLocked) {
       const reasoningSelect = document.getElementById('reasoning-mode-select');
       const depthSelect = document.getElementById('reasoning-effort-select');
-      const toolsSelect = document.getElementById('tools-mode-select');
 
       if (settings) {
          if (settings.thinking_mode && reasoningSelect) {
@@ -698,11 +624,6 @@
             setControlHint('effort-hint', disabled ? 'Enable reasoning first' : null);
          }
 
-         if (settings.tools_mode && toolsSelect) {
-            toolsSelect.value = settings.tools_mode;
-            conversationLlmState.tools_mode = settings.tools_mode;
-         }
-
          // Push restored settings back to the server session. Without this, the
          // session keeps whichever defaults were sent by applyGlobalDefaultsToControls
          // at page load — the UI shows the conversation's value but the server
@@ -711,7 +632,6 @@
          if (settings.llm_type) sessionPayload.type = settings.llm_type;
          if (settings.cloud_provider) sessionPayload.provider = settings.cloud_provider;
          if (settings.model) sessionPayload.model = settings.model;
-         if (settings.tools_mode) sessionPayload.tool_mode = settings.tools_mode;
          if (settings.thinking_mode) sessionPayload.thinking_mode = settings.thinking_mode;
          if (settings.reasoning_effort) sessionPayload.reasoning_effort = settings.reasoning_effort;
 
@@ -753,7 +673,6 @@
          llm_type: llmRuntimeState.type,
          cloud_provider: llmRuntimeState.provider,
          model: llmRuntimeState.model,
-         tools_mode: conversationLlmState.tools_mode,
          thinking_mode: conversationLlmState.thinking_mode,
          reasoning_effort: conversationLlmState.reasoning_effort,
       };
@@ -1066,11 +985,6 @@
             openrouterModels[openrouterIdx] || openrouterModels[0] || '';
       }
 
-      // Tools mode
-      if (config.llm?.tools?.mode) {
-         globalDefaults.tools_mode = config.llm.tools.mode;
-      }
-
       // Thinking mode (Claude/local) — normalize legacy "auto" to "enabled"
       if (config.llm?.thinking?.mode) {
          globalDefaults.thinking_mode = normalizeThinkingMode(config.llm.thinking.mode);
@@ -1089,7 +1003,6 @@
    function applyGlobalDefaultsToControls() {
       const reasoningSelect = document.getElementById('reasoning-mode-select');
       const depthSelect = document.getElementById('reasoning-effort-select');
-      const toolsSelect = document.getElementById('tools-mode-select');
 
       if (reasoningSelect) {
          reasoningSelect.value = globalDefaults.thinking_mode;
@@ -1106,16 +1019,10 @@
          );
       }
 
-      if (toolsSelect) {
-         toolsSelect.value = globalDefaults.tools_mode;
-         conversationLlmState.tools_mode = globalDefaults.tools_mode;
-      }
-
       // Send initial defaults to session. from_restore: this fires at config-load
       // time, which on a page reload may happen WHILE a conversation is already
       // active server-side — defaults must not cascade onto that conv's row.
       setSessionLlm({
-         tool_mode: globalDefaults.tools_mode,
          thinking_mode: globalDefaults.thinking_mode,
          reasoning_effort: globalDefaults.reasoning_effort,
          from_restore: true,

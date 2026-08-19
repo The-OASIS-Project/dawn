@@ -123,7 +123,6 @@ static const tool_metadata_t doc_grep_metadata = {
    .param_count = 4,
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = 0,
-   .is_getter = true,
    .is_available = doc_grep_is_available,
    .callback = doc_grep_callback,
 };

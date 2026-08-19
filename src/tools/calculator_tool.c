@@ -96,7 +96,6 @@ static const tool_metadata_t calculator_metadata = {
     * (plan_tool_is_allowed gates on this flag).  NOT dangerous, so it clears the
     * plan executor's denylist too. */
    .capabilities = TOOL_CAP_SCHEDULABLE,
-   .is_getter = true,
    .skip_followup = false,
    .default_remote = true,
 

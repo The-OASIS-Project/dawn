@@ -71,7 +71,6 @@ static const tool_metadata_t viewing_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_ARMOR_FEATURE,
-   .is_getter = true,
    .skip_followup = false,
    .mqtt_only = true, /* Commands sent via MQTT to external vision system */
    .sync_wait = true, /* Wait for MQTT response */

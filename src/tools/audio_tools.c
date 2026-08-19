@@ -149,7 +149,6 @@ static const tool_metadata_t voice_amplifier_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_BOOLEAN,
    .capabilities = TOOL_CAP_ARMOR_FEATURE,
-   .is_getter = false,
    .skip_followup = false,
    .mqtt_only = false,
    .sync_wait = false,
@@ -219,7 +218,6 @@ static const tool_metadata_t audio_device_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_ANALOG,
    .capabilities = TOOL_CAP_NONE,
-   .is_getter = false,
    .skip_followup = false,
    .mqtt_only = false,
    .sync_wait = false,

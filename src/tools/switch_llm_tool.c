@@ -106,7 +106,6 @@ static const tool_metadata_t switch_llm_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_ANALOG,
    .capabilities = TOOL_CAP_NONE,
-   .is_getter = false,
    .skip_followup = false,
    .default_remote = true,
 
@@ -258,9 +257,10 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
       const char *prov_str = (applied.type == LLM_CLOUD)
                                  ? cloud_provider_to_string(applied.cloud_provider)
                                  : "";
+      /* tools_mode column is retired (dead) — pass empty. */
       int prc = conv_db_update_llm_settings(session->messaging_identity.conversation_id,
                                             session->metrics.user_id, type_str, prov_str,
-                                            applied.model, applied.tool_mode, applied.thinking_mode,
+                                            applied.model, "", applied.thinking_mode,
                                             applied.reasoning_effort);
       if (prc != AUTH_DB_SUCCESS) {
          /* Best-effort: the live session changed but the row didn't, so the

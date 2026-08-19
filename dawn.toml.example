@@ -236,11 +236,10 @@
                                   # Env: DAWN_LLM_LOCAL_PROVIDER
 
 [llm.tools]
-# mode = "native"                 # Tool/function calling mode:
-                                  # "native": Use provider's native tool calling (recommended)
-                                  # "command_tags": Extract JSON from <command> tags (legacy)
-                                  # "disabled": No tool calling
-                                  # Env: DAWN_LLM_TOOLS_MODE
+# enabled = true                  # Native tool/function calling on (true) or off (false).
+                                  # Env: DAWN_LLM_TOOLS_ENABLED
+                                  # (Legacy `mode = "native"/"command_tags"/"disabled"` is still
+                                  #  read for back-compat — "disabled" maps to enabled=false.)
 # Per-tool gating — two models, chosen per surface (local = voice mic, remote =
 # WebUI/satellite). DANGEROUS tools (shutdown, email, phone, document_manage)
 # are NEVER auto-enabled under either model; list them in *_enabled to opt in.

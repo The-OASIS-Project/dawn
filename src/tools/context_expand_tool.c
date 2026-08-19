@@ -111,7 +111,6 @@ static const tool_metadata_t context_expand_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NONE,
-   .is_getter = true,
    .skip_followup = false,
 
    .is_available = NULL,

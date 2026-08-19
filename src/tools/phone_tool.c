@@ -1237,7 +1237,6 @@ static const tool_metadata_t phone_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NETWORK | TOOL_CAP_DANGEROUS,
-   .is_getter = false,
    .skip_followup = false,
    .default_local = true,
    .default_remote = true,

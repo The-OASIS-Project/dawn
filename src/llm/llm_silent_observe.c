@@ -25,7 +25,7 @@
  *     non-streaming path.  No streaming family is invoked → no sentence callback,
  *     no TTS path to suppress.
  *  2. Tool-call dispatch is architecturally inaccessible.  Resolved-config
- *     tool_mode = "disabled" suppresses the tools array in the request body
+ *     suppress_tools = true suppresses the tools array in the request body
  *     before the provider builds it (see llm_tools_enabled() in llm_tools.c).
  *     Schema validation rejects any tool-call leakage in the response.
  *  3. No conv_db_* / session_manager_append_* calls — silent calls do not
@@ -34,7 +34,7 @@
  *  4. No text_to_speech() invocation — non-streaming path returns extracted
  *     text directly.
  *  5. Tool-call rejection at this entry point.  Multi-layer defense:
- *     (a) tool_mode disabled → tools never sent.
+ *     (a) suppress_tools=true → tools never sent.
  *     (b) Provider non-streaming path returns the apology placeholder string
  *         when a tool_calls-only response arrives (existing handling in
  *         llm_openai_chat_completions.c) — schema validation rejects it.
@@ -55,6 +55,7 @@
 #include "core/memory_filter.h"
 #include "dawn_error.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_tools.h"
 #include "logging.h"
 
 /* -----------------------------------------------------------------------------
@@ -264,8 +265,7 @@ static int resolve_silent_observe_config(llm_resolved_config_t *cfg,
    }
 
    /* Tools off, thinking off — invariants 2 and 4. */
-   strncpy(cfg->tool_mode, "disabled", sizeof(cfg->tool_mode) - 1);
-   cfg->tool_mode[sizeof(cfg->tool_mode) - 1] = '\0';
+   cfg->suppress_tools = true;
    strncpy(cfg->thinking_mode, "disabled", sizeof(cfg->thinking_mode) - 1);
    cfg->thinking_mode[sizeof(cfg->thinking_mode) - 1] = '\0';
 
@@ -342,7 +342,7 @@ static void sanitize_for_log(const char *src, char *dst, size_t dst_size) {
  *
  * Note: the "tool_calls"/"tool_use" substring scan is advisory belt-and-
  * suspenders, not load-bearing.  The actual tool-call protection is the
- * resolved-config tool_mode = "disabled" flag set in
+ * resolved-config suppress_tools flag set in
  * resolve_silent_observe_config(), which suppresses tools at request-build
  * time before the LLM is ever told they exist.  The substring scan here
  * exists only to surface a forensic anomaly if a misbehaving provider
@@ -357,7 +357,7 @@ static int validate_response_schema(const char *raw,
       return FAILURE;
    }
 
-   /* Advisory scan — see header comment.  tool_mode=disabled is the
+   /* Advisory scan — see header comment.  suppress_tools is the
     * authoritative protection. */
    if (strstr(raw, "\"tool_calls\"") || strstr(raw, "\"tool_use\"")) {
       snprintf(fail_reason, fail_reason_size, "tool_call_leakage");
@@ -592,7 +592,13 @@ int llm_silent_observe(const char *input_text,
       cfg.timeout_ms = 15000;
    }
 
+   /* Defense-in-depth: config-independent tools-off guard around the untrusted-
+    * content call, matching compaction.  The resolved-config suppress_tools flag
+    * already disables tools; this second thread-local mechanism holds even if a
+    * future refactor routes the call past the config-setting entry point. */
+   llm_tools_suppress_push();
    char *raw_response = llm_chat_completion_with_config(history, wrapped, NULL, NULL, 0, &cfg);
+   llm_tools_suppress_pop();
 
    json_object_put(history);
    free(wrapped);

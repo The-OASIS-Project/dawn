@@ -805,22 +805,6 @@ void tool_registry_foreach(tool_foreach_callback_t callback, void *user_data) {
    pthread_mutex_unlock(&s_registry_mutex);
 }
 
-void tool_registry_foreach_enabled(tool_foreach_callback_t callback, void *user_data) {
-   if (!callback || !s_initialized) {
-      return;
-   }
-
-   pthread_mutex_lock(&s_registry_mutex);
-
-   for (int i = 0; i < s_tool_count; i++) {
-      if (s_tools[i].registered && s_tools[i].enabled) {
-         callback(&s_tools[i].metadata, user_data);
-      }
-   }
-
-   pthread_mutex_unlock(&s_registry_mutex);
-}
-
 int tool_registry_count(void) {
    return s_tool_count;
 }

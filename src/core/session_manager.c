@@ -69,7 +69,7 @@ __attribute__((weak)) void webui_send_purge_session(const session_t *s) {
  * Thread-local command context - allows device callbacks to access the current session
  *
  * EXPECTED CALLERS:
- *   - Main thread: for local voice commands (dawn.c parse_llm_response_for_commands)
+ *   - Main thread: for local voice tool/direct-regex execution (dawn.c)
  *   - MQTT thread: for WebUI/DAP commands (mosquitto_comms.c execute_command_for_worker)
  *
  * THREAD SAFETY:
@@ -81,8 +81,8 @@ __attribute__((weak)) void webui_send_purge_session(const session_t *s) {
  *
  * CRITICAL ASSUMPTION:
  *   This works because all paths that set/use this variable execute in the same thread:
- *   - Local voice: main thread sets context, calls parse_llm_response_for_commands(),
- *     callbacks execute in main thread, context cleared
+ *   - Local voice: main thread sets context, runs native tool / direct-regex
+ *     execution, callbacks execute in main thread, context cleared
  *   - WebUI/DAP: MQTT on_message() callback sets context, executes device callback,
  *     clears context - all in the single MQTT callback thread
  *

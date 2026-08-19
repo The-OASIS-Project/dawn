@@ -319,7 +319,6 @@ typedef struct {
    /* Behavior Flags */
    tool_device_type_t device_type; /**< boolean, analog, getter, etc. */
    tool_capability_t capabilities; /**< Capability flags */
-   bool is_getter;                 /**< Read-only, no side effects */
    bool skip_followup;             /**< Skip LLM follow-up response (see guide for details) */
    bool mqtt_only;                 /**< Only available via MQTT */
    bool sync_wait;                 /**< Wait for MQTT response */
@@ -629,14 +628,6 @@ typedef void (*tool_foreach_callback_t)(const tool_metadata_t *metadata, void *u
  * @param user_data Opaque pointer passed to callback
  */
 void tool_registry_foreach(tool_foreach_callback_t callback, void *user_data);
-
-/**
- * @brief Iterate over enabled tools only
- *
- * @param callback Function to call for each enabled tool
- * @param user_data Opaque pointer passed to callback
- */
-void tool_registry_foreach_enabled(tool_foreach_callback_t callback, void *user_data);
 
 /**
  * @brief Get count of registered tools

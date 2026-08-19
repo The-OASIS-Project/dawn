@@ -1207,7 +1207,7 @@ static bool build_compaction_config(llm_resolved_config_t *cfg) {
    } else {
       cfg->model = g_config.llm.compact_model[0] ? g_config.llm.compact_model : NULL;
    }
-   strncpy(cfg->tool_mode, "disabled", sizeof(cfg->tool_mode) - 1);
+   cfg->suppress_tools = true;
    strncpy(cfg->thinking_mode, "disabled", sizeof(cfg->thinking_mode) - 1);
    cfg->timeout_ms = g_config.network.summarization_timeout_ms;
 

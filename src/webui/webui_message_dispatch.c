@@ -420,11 +420,6 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
          bool has_changes = false;
          bool thinking_clamped_on = false; /* set-time thinking-disable clamp fired */
 
-         /* Track old tool_mode for prompt rebuild */
-         char old_tool_mode[LLM_TOOL_MODE_MAX];
-         strncpy(old_tool_mode, config.tool_mode, sizeof(old_tool_mode) - 1);
-         old_tool_mode[sizeof(old_tool_mode) - 1] = '\0';
-
          /* Track old model + type for context cache invalidation */
          char old_model[LLM_MODEL_NAME_MAX];
          strncpy(old_model, config.model, sizeof(old_model) - 1);
@@ -531,25 +526,6 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
             config.cloud_provider = CLOUD_PROVIDER_OPENROUTER;
          }
 
-         /* Parse tool_mode (native/command_tags/disabled) */
-         struct json_object *tool_mode_obj;
-         if (json_object_object_get_ex(payload, "tool_mode", &tool_mode_obj)) {
-            const char *new_tool_mode = json_object_get_string(tool_mode_obj);
-            if (new_tool_mode) {
-               /* Validate tool mode value */
-               if (strcmp(new_tool_mode, "native") == 0 ||
-                   strcmp(new_tool_mode, "command_tags") == 0 ||
-                   strcmp(new_tool_mode, "disabled") == 0) {
-                  has_changes = true;
-                  strncpy(config.tool_mode, new_tool_mode, sizeof(config.tool_mode) - 1);
-                  config.tool_mode[sizeof(config.tool_mode) - 1] = '\0';
-                  OLOG_INFO("WebUI: Session tool_mode set to '%s'", config.tool_mode);
-               } else {
-                  OLOG_WARNING("WebUI: Rejected invalid tool_mode '%s' from client", new_tool_mode);
-               }
-            }
-         }
-
          /* Parse thinking_mode (disabled/auto/enabled) */
          struct json_object *thinking_mode_obj;
          if (json_object_object_get_ex(payload, "thinking_mode", &thinking_mode_obj)) {
@@ -644,18 +620,6 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                   llm_context_refresh_local();
                }
 
-               /* If tool_mode changed, rebuild and update the session's system prompt */
-               if (strcmp(old_tool_mode, config.tool_mode) != 0) {
-                  invalidate_system_instructions(); /* Clear cached prompt first */
-                  char *new_prompt = build_remote_prompt_for_mode(config.tool_mode);
-                  if (new_prompt) {
-                     session_update_system_prompt(conn->session, new_prompt);
-                     OLOG_INFO("WebUI: Updated session prompt for tool_mode change to '%s'",
-                               config.tool_mode);
-                     free(new_prompt);
-                  }
-               }
-
                /* Persist LLM settings to the active conversation DB so that
                 * session recreation (after timeout) restores the latest config.
                 *
@@ -672,10 +636,11 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                }
                if (!from_restore && conn->active_conversation_id > 0) {
                   const char *type_str = config.type == LLM_LOCAL ? "local" : "cloud";
+                  /* tools_mode column is retired (dead) — pass empty. */
                   conv_db_update_llm_settings(conn->active_conversation_id, conn->auth_user_id,
                                               type_str,
                                               cloud_provider_to_string(config.cloud_provider),
-                                              config.model, config.tool_mode, config.thinking_mode,
+                                              config.model, "", config.thinking_mode,
                                               config.reasoning_effort);
                }
             }

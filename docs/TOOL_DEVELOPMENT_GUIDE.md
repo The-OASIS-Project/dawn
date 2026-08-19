@@ -187,7 +187,6 @@ typedef struct {
    /* Behavior Flags */
    tool_device_type_t device_type;                    /* boolean, analog, getter, etc. */
    tool_capability_t capabilities;                    /* Security/capability flags */
-   bool is_getter;                                    /* Read-only, no side effects */
    bool skip_followup;                                /* Don't send result back to LLM */
    bool mqtt_only;                                    /* Only available via MQTT */
    bool sync_wait;                                    /* Wait for MQTT response */
@@ -267,7 +266,6 @@ static const tool_device_map_t audio_device_map[] = {
 |-------|---------|-------------|
 | `device_type` | - | Classification affecting action word parsing (see Device Types) |
 | `capabilities` | `TOOL_CAP_NONE` | Security capabilities (see Capabilities) |
-| `is_getter` | `false` | `true` if tool only reads data (no side effects) |
 | `skip_followup` | `false` | `true` to skip LLM follow-up (see [skip_followup Behavior](#skip_followup-behavior) below) |
 | `mqtt_only` | `false` | `true` if tool only works via MQTT (not voice/WebUI) |
 | `sync_wait` | `false` | `true` to wait for MQTT response before continuing |
@@ -668,7 +666,6 @@ static const tool_metadata_t mytool_metadata = {
    /* Behavior Flags */
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NETWORK,  /* This tool makes network calls */
-   .is_getter = true,                 /* Primarily reads data */
    .skip_followup = false,            /* Return results to LLM */
    .mqtt_only = false,                /* Available via voice/WebUI */
    .sync_wait = false,                /* Don't wait for MQTT response */
@@ -881,7 +878,6 @@ const char *tool_registry_get_config_string(const char *path);
 ### Iteration
 ```c
 void tool_registry_foreach(tool_foreach_callback_t callback, void *user_data);
-void tool_registry_foreach_enabled(tool_foreach_callback_t callback, void *user_data);
 int tool_registry_count(void);
 int tool_registry_enabled_count(void);
 ```
@@ -992,7 +988,6 @@ static const tool_metadata_t load_metadata = {
    .param_count = 1,
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_FILESYSTEM,
-   .is_getter = true,
    .callback = load_instructions_callback,
    /* ... */
 };

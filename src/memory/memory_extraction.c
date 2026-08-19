@@ -41,6 +41,7 @@
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_tools.h"
 #include "logging.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_aliases.h"
@@ -1632,9 +1633,13 @@ static void *extraction_thread(void *arg) {
    json_object_object_add(user_msg, "content", json_object_new_string(prompt));
    json_object_array_add(extraction_history, user_msg);
 
-   /* Use the configured LLM for extraction */
+   /* Use the configured LLM for extraction.  Extraction runs over untrusted
+    * conversation content, so bracket the call with the config-independent
+    * tools-off guard (belt-and-suspenders alongside suppress_tools). */
+   llm_tools_suppress_push();
    response = llm_chat_completion_with_config(extraction_history, prompt, NULL, NULL, 0,
                                               &extraction_config);
+   llm_tools_suppress_pop();
 
    /* Capture primary's transient status BEFORE any fallback runs.  The
     * fallback call resets llm_last_error() at entry, so if the primary
@@ -1662,7 +1667,7 @@ static void *extraction_thread(void *arg) {
          fallback_config.cloud_provider = ctx->fallback.cloud_provider;
          fallback_config.endpoint = ctx->fallback.endpoint;
          fallback_config.model = ctx->fallback.model;
-         strncpy(fallback_config.tool_mode, "disabled", sizeof(fallback_config.tool_mode) - 1);
+         fallback_config.suppress_tools = true;
          strncpy(fallback_config.thinking_mode, "disabled",
                  sizeof(fallback_config.thinking_mode) - 1);
 
@@ -1689,8 +1694,10 @@ static void *extraction_thread(void *arg) {
             }
          }
 
+         llm_tools_suppress_push();
          response = llm_chat_completion_with_config(extraction_history, prompt, NULL, NULL, 0,
                                                     &fallback_config);
+         llm_tools_suppress_pop();
          if (response) {
             used_fallback = true;
          }
@@ -2250,7 +2257,7 @@ int memory_extraction_resolve_config(llm_resolved_config_t *cfg,
       cfg->model = model_buf;
    }
 
-   strncpy(cfg->tool_mode, "disabled", sizeof(cfg->tool_mode) - 1);
+   cfg->suppress_tools = true;
    strncpy(cfg->thinking_mode, "disabled", sizeof(cfg->thinking_mode) - 1);
    cfg->timeout_ms = g_config.memory.extraction_timeout_ms;
 

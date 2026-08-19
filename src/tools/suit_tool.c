@@ -150,7 +150,6 @@ static const tool_metadata_t suit_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_SCHEDULABLE | TOOL_CAP_INFORMATIONAL,
-   .is_getter = true,
    .skip_followup = false,
    .default_local = true,
    .default_remote = true,

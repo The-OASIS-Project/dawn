@@ -276,7 +276,6 @@ Configure LLM settings for this session only (does not affect other clients).
       "type": "cloud",
       "provider": "openai",
       "model": "gpt-5-mini",
-      "tool_mode": "native",
       "thinking_mode": "enabled",
       "reasoning_effort": "medium"
    }
@@ -284,7 +283,6 @@ Configure LLM settings for this session only (does not affect other clients).
 ```
 - All fields are optional, only provided fields are changed
 - `type`: `"local"`, `"cloud"`, or `"reset"` (revert to defaults)
-- `tool_mode`: `"native"`, `"command_tags"`, or `"disabled"`
 - `thinking_mode`: `"disabled"`, `"auto"`, or `"enabled"`
 - `reasoning_effort`: `"low"`, `"medium"`, or `"high"`
 - Response: `set_session_llm_response`

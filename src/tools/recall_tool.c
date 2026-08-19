@@ -74,7 +74,6 @@ static const tool_metadata_t recall_metadata = {
    .param_count = 1,
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = 0,
-   .is_getter = true,
    .is_available = recall_is_available,
    .callback = recall_callback,
 };

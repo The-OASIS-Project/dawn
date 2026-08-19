@@ -556,32 +556,33 @@ static void parse_llm_tools(toml_table_t *table, llm_tools_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = { "mode",
-                                             "native_enabled",
-                                             "local_enabled",
-                                             "remote_enabled",
-                                             "local_disabled",
-                                             "remote_disabled",
-                                             NULL };
+   static const char *const known_keys[] = {
+      "enabled",        "mode", /* legacy, accepted for back-compat */
+      "native_enabled",         /* legacy, accepted for back-compat */
+      "local_enabled",  "remote_enabled", "local_disabled", "remote_disabled", NULL
+   };
    warn_unknown_keys(table, "llm.tools", known_keys);
 
-   /* Parse mode (preferred) or fall back to native_enabled for backwards compatibility */
-   PARSE_STRING(table, "mode", config->mode);
-
-   /* Validate mode if set */
-   if (config->mode[0] != '\0') {
-      if (strcmp(config->mode, "native") != 0 && strcmp(config->mode, "command_tags") != 0 &&
-          strcmp(config->mode, "disabled") != 0) {
-         OLOG_WARNING("Invalid llm.tools.mode '%s', using 'native'", config->mode);
-         safe_strncpy(config->mode, "native", sizeof(config->mode));
-      }
+   /* Preferred: boolean master switch for native tool calling. */
+   toml_datum_t enabled = toml_bool_in(table, "enabled");
+   if (enabled.ok) {
+      config->enabled = enabled.u.b;
    } else {
-      /* Backwards compatibility: convert native_enabled bool to mode */
-      toml_datum_t native = toml_bool_in(table, "native_enabled");
-      if (native.ok) {
-         safe_strncpy(config->mode, native.u.b ? "native" : "command_tags", sizeof(config->mode));
+      /* Backwards compatibility with the retired <command> transport: the legacy
+       * string `mode` had values native/command_tags/disabled — only "disabled"
+       * turned tools off, so map anything else to on.  Older `native_enabled` bool
+       * still maps directly. */
+      toml_datum_t mode = toml_string_in(table, "mode");
+      if (mode.ok) {
+         config->enabled = (strcmp(mode.u.s, "disabled") != 0);
+         free(mode.u.s);
+      } else {
+         toml_datum_t native = toml_bool_in(table, "native_enabled");
+         if (native.ok) {
+            config->enabled = native.u.b;
+         }
+         /* If none set, default (true) from config_defaults.c stands. */
       }
-      /* If neither is set, default will be applied from config_defaults.c */
    }
 
    /* Parse local_enabled array */

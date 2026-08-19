@@ -4,7 +4,7 @@ Part of the [D.A.W.N. architecture](../../ARCHITECTURE.md) — see the main doc 
 
 ---
 
-DAWN supports three parallel command processing paths that all converge on a unified executor.
+DAWN supports two parallel command processing paths that both converge on a unified executor.
 
 ## Tool Registry System
 
@@ -19,7 +19,6 @@ static const tool_metadata_t my_tool_metadata = {
    .param_count = 2,
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NETWORK,
-   .is_getter = true,
    .default_remote = true,
    .callback = my_tool_callback,
 };
@@ -61,35 +60,32 @@ static const tool_metadata_t my_tool_metadata = {
 │   PATH 1: DIRECT MATCHING    │       │         PATH 2: LLM INVOCATION       │
 │   (text_to_command_nuevo.c)  │       │                                      │
 │                              │       │    ┌────────────────────────────┐    │
-│  Regex patterns from JSON:   │       │    │  native_enabled = true?    │    │
+│  Regex patterns from JSON:   │       │    │  tools enabled = true?     │    │
 │  "turn on %device_name%"     │       │    └────────────┬───────────────┘    │
 │  "play %value%"              │       │                 │                    │
-│                              │       │     ┌───────────┴───────────┐        │
-│  Extracts device/action/val  │       │     ▼                       ▼        │
-└──────────────┬───────────────┘       │ ┌───────────┐       ┌─────────────┐  │
-               │                       │ │PATH 2A:   │       │PATH 2B:     │  │
-               │                       │ │NATIVE     │       │LEGACY       │  │
-               │                       │ │TOOLS      │       │<command>    │  │
-               │                       │ │           │       │TAGS         │  │
-               │                       │ │LLM returns│       │             │  │
-               │                       │ │structured │       │LLM returns  │  │
-               │                       │ │tool_calls │       │<command>JSON│  │
-               │                       │ └─────┬─────┘       └──────┬──────┘  │
-               │                       │       │                    │         │
-               │                       └───────┼────────────────────┼─────────┘
-               │                               │                    │
-               │                               ▼                    ▼
-               │                       ┌─────────────┐      ┌─────────────────┐
-               │                       │llm_tools_   │      │webui_process_   │
-               │                       │execute()    │      │commands()       │
-               │                       │             │      │                 │
-               │                       │Parses tool  │      │Parses <command> │
-               │                       │call struct  │      │tags from text   │
-               │                       └─────┬───────┘      └────────┬────────┘
-               │                             │                       │
-               └─────────────────────────────┼───────────────────────┘
-                                             │
-                                             ▼
+│                              │       │                 ▼                    │
+│  Extracts device/action/val  │       │         ┌───────────────┐            │
+└──────────────┬───────────────┘       │         │ NATIVE TOOLS  │            │
+               │                       │         │               │            │
+               │                       │         │ LLM returns   │            │
+               │                       │         │ structured    │            │
+               │                       │         │ tool_calls    │            │
+               │                       │         └───────┬───────┘            │
+               │                       │                 │                    │
+               │                       └─────────────────┼────────────────────┘
+               │                                         │
+               │                                         ▼
+               │                                 ┌─────────────┐
+               │                                 │llm_tools_   │
+               │                                 │execute()    │
+               │                                 │             │
+               │                                 │Parses tool  │
+               │                                 │call struct  │
+               │                                 └─────┬───────┘
+               │                                       │
+               └───────────────────────────────────────┤
+                                                       │
+                                                       ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                    UNIFIED COMMAND EXECUTOR (command_executor.c)            │
 │                                                                             │
@@ -128,20 +124,26 @@ Commands are defined via the **modular tool_registry** system:
    - `deviceCallbackArray[]` maps device types to C functions
    - Core system devices: weather, music, search, homeassistant, etc.
 
-## Native Tools vs Legacy `<command>` Tags
+## Native Tool Calling
 
-| Aspect         | Native Tools                              | Legacy `<command>` Tags             |
-| -------------- | ----------------------------------------- | ----------------------------------- |
-| **Definition** | command_registry → llm_tools              | Raw JSON in prompt                  |
-| **Prompt**     | Minimal (tools sent as API params)        | Full `<command>` instructions       |
-| **Response**   | Structured `tool_calls` array             | Text with `<command>JSON</command>` |
-| **Filtering**  | `enabled_local`/`enabled_remote` per tool | Same flags                          |
-| **Execution**  | `command_execute()`                       | `command_execute()`                 |
+Native function calling is the only LLM tool transport. Tools are sent to the provider as API
+parameters, and the LLM replies with a structured `tool_calls` array that `llm_tools_execute()`
+parses and dispatches through `command_execute()`.
+
+| Aspect         | Native Tools                              |
+| -------------- | ----------------------------------------- |
+| **Definition** | command_registry → llm_tools              |
+| **Prompt**     | Minimal (tools sent as API params)        |
+| **Response**   | Structured `tool_calls` array             |
+| **Filtering**  | `enabled_local`/`enabled_remote` per tool |
+| **Execution**  | `command_execute()`                       |
+
+This is distinct from **Path 1 (direct matching)**, which regex-matches the raw ASR/text input
+*before* any LLM call and never involves the model.
 
 ## Tool Enable/Disable
 
 Tools can be enabled/disabled per session type (local vs remote):
 
 - Settings UI provides per-tool toggles.
-- Legacy `<command>` prompt is filtered by the same enabled flags.
-- Disabled tools are omitted from both native tool schemas and legacy prompt.
+- Disabled tools are omitted from the native tool schemas sent to the LLM.

@@ -147,7 +147,6 @@ static const tool_metadata_t image_search_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NETWORK,
-   .is_getter = true,
    .skip_followup = false,
    .default_remote = true,
 

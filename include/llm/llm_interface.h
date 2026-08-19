@@ -116,9 +116,6 @@ typedef enum {
 /** CURL connect timeout in milliseconds (TCP + TLS handshake) */
 #define LLM_CONNECT_TIMEOUT_MS 10000L
 
-/** Maximum length for tool mode strings */
-#define LLM_TOOL_MODE_MAX 16
-
 /** Maximum length for thinking mode strings */
 #define LLM_THINKING_MODE_MAX 16
 
@@ -134,7 +131,7 @@ typedef struct {
    cloud_provider_t cloud_provider;              /**< Cloud provider (OpenAI, Claude, etc.) */
    char endpoint[128];                           /**< Endpoint URL (empty = use provider default) */
    char model[LLM_MODEL_NAME_MAX];               /**< Model name (empty = use provider default) */
-   char tool_mode[LLM_TOOL_MODE_MAX];            /**< Tool mode: native, command_tags, disabled */
+   bool suppress_tools;                          /**< Force tools off for this call (internal) */
    char thinking_mode[LLM_THINKING_MODE_MAX];    /**< Thinking: disabled, auto, enabled */
    char reasoning_effort[LLM_THINKING_MODE_MAX]; /**< Reasoning effort: low, medium, high */
 } session_llm_config_t;
@@ -159,7 +156,7 @@ typedef struct {
                                                     struct's lifetime) */
    char model_buf[LLM_MODEL_NAME_MAX];           /**< Backs `model` when remapped to an
                                                     OpenRouter slug (stable, in-struct) */
-   char tool_mode[LLM_TOOL_MODE_MAX];            /**< Tool mode: native, command_tags, disabled */
+   bool suppress_tools;                          /**< Force tools off for this call (internal) */
    char thinking_mode[LLM_THINKING_MODE_MAX];    /**< Thinking: disabled, auto, enabled */
    char reasoning_effort[LLM_THINKING_MODE_MAX]; /**< Reasoning effort: low, medium, high */
    int timeout_ms; /**< Per-request timeout (0 = use global default) */
@@ -773,7 +770,7 @@ void llm_set_timeout_override(int timeout_ms);
  *      are not part of any user-facing conversation history.
  *   4. Never invokes text_to_speech() directly or indirectly.
  *   5. Tool-call rejection lives at this entry point, not inside any provider
- *      implementation: tool_mode = "disabled" suppresses tools in the request,
+ *      implementation: suppress_tools = true suppresses tools in the request,
  *      and any leakage in the response is caught by schema validation.
  *
  * Hardening (mandatory, not optional):

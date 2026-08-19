@@ -327,7 +327,6 @@ static const tool_metadata_t load_guidelines_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_FILESYSTEM,
-   .is_getter = true,
    .default_local = true,
    .default_remote = true,
 
@@ -378,7 +377,6 @@ static const tool_metadata_t render_visual_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NONE,
-   .is_getter = false,
    .default_local = true,
    .default_remote = true,
 

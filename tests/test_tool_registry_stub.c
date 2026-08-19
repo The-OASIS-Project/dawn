@@ -159,7 +159,7 @@ void llm_get_default_config(session_llm_config_t *config) {
       config->cloud_provider = CLOUD_PROVIDER_NONE;
       config->endpoint[0] = '\0';
       config->model[0] = '\0';
-      config->tool_mode[0] = '\0';
+      config->suppress_tools = false;
       config->thinking_mode[0] = '\0';
       config->reasoning_effort[0] = '\0';
    }

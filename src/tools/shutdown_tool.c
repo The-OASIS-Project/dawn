@@ -205,7 +205,6 @@ static const tool_metadata_t shutdown_metadata = {
    /* Behavior Flags */
    .device_type = TOOL_DEVICE_TYPE_PASSPHRASE,
    .capabilities = TOOL_CAP_DANGEROUS,
-   .is_getter = false,
    .skip_followup = false,
    .mqtt_only = false,
    .sync_wait = false,

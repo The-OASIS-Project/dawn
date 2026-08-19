@@ -337,10 +337,9 @@ void handle_set_channel_llm(ws_connection_t *conn, struct json_object *payload) 
       return;
    }
 
-   /* Fetch the current row to (a) verify ownership, (b) preserve tools_mode
-    * (this panel doesn't edit it; conv_db_update_llm_settings overwrites all
-    * columns), and (c) confirm it's a messaging conversation — this endpoint is
-    * for messaging channels, not arbitrary owned conversations. */
+   /* Fetch the current row to (a) verify ownership and (b) confirm it's a
+    * messaging conversation — this endpoint is for messaging channels, not
+    * arbitrary owned conversations. */
    conversation_t conv;
    if (conv_db_get(conv_id, conn->auth_user_id, &conv) != AUTH_DB_SUCCESS) {
       send_error_impl(conn->wsi, "NOT_FOUND", "No such conversation");
@@ -351,8 +350,9 @@ void handle_set_channel_llm(ws_connection_t *conn, struct json_object *payload) 
       send_error_impl(conn->wsi, "INVALID_PARAM", "Not a messaging conversation");
       return;
    }
+   /* tools_mode column is retired (dead) — pass empty. */
    int rc = conv_db_update_llm_settings(conv_id, conn->auth_user_id, llm_type, cloud_provider,
-                                        model, conv.tools_mode, thinking_mode, reasoning_effort);
+                                        model, "", thinking_mode, reasoning_effort);
    conv_free(&conv);
 
    if (rc != AUTH_DB_SUCCESS) {

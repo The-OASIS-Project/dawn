@@ -93,7 +93,6 @@ static const tool_metadata_t doc_search_metadata = {
    .param_count = 1,
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = 0,
-   .is_getter = true,
    .is_available = doc_search_is_available,
    .callback = doc_search_callback,
 };

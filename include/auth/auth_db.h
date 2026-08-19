@@ -1062,7 +1062,7 @@ typedef struct {
    char llm_type[16];         /**< "local" or "cloud" */
    char cloud_provider[16];   /**< "openai" or "claude" */
    char model[64];            /**< Model name */
-   char tools_mode[16];       /**< "native", "command_tags", or "disabled" */
+   char tools_mode[16];       /**< RETIRED/dead column — no longer read or written (always "") */
    char thinking_mode[16];    /**< "disabled"/"auto"/"enabled" or "low"/"medium"/"high" */
    char reasoning_effort[16]; /**< "none"/"minimal"/"low"/"medium"/"high"/"xhigh" (v36) */
    bool is_private;           /**< If true, no memory extraction for this conversation (v16) */
@@ -2064,7 +2064,7 @@ void conv_db_format_compaction_context(int64_t conv_id,
  * @param llm_type "local" or "cloud" (or NULL to keep current)
  * @param cloud_provider "openai" or "claude" (or NULL to keep current)
  * @param model Model name (or NULL to keep current)
- * @param tools_mode "native", "command_tags", or "disabled"
+ * @param tools_mode RETIRED/dead column — pass "" (no longer read or written)
  * @param thinking_mode "disabled", "auto", "enabled", "low", "medium", or "high"
  * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND (no row updated), or AUTH_DB_FAILURE
  */

@@ -174,7 +174,7 @@ void config_set_defaults(dawn_config_t *config) {
    SAFE_COPY(config->llm.local.provider, "auto"); /* Auto-detect Ollama vs llama.cpp */
 
    /* LLM Tools */
-   SAFE_COPY(config->llm.tools.mode, "native"); /* "native", "command_tags", or "disabled" */
+   config->llm.tools.enabled = true; /* Native tool calling on by default */
 
    /* LLM Silent-Observe (Phase 0 of Dynamic Context Injection)
     * Default to local provider so background observations don't accrue cloud

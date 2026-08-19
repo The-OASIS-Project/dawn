@@ -689,9 +689,7 @@ static json_object *build_conv_llm_settings_json(const conversation_t *conv) {
    json_object_object_add(llm, "model",
                           json_object_new_string(conv->model[0] ? conv->model
                                                                 : (def_model ? def_model : "")));
-   json_object_object_add(llm, "tools_mode",
-                          json_object_new_string(conv->tools_mode[0] ? conv->tools_mode
-                                                                     : def_r.tool_mode));
+   /* tools_mode is a retired dead column — no longer surfaced to the client. */
    json_object_object_add(llm, "thinking_mode",
                           json_object_new_string(conv->thinking_mode[0] ? conv->thinking_mode
                                                                         : def_r.thinking_mode));
@@ -730,9 +728,10 @@ void webui_conv_stamp_llm_settings(session_t *session, int64_t conv_id, int user
    snprintf(model, sizeof(model), "%s", webui_effective_model_name(&r));
 
    const char *type_str = r.type == LLM_LOCAL ? "local" : "cloud";
+   /* tools_mode column is retired (dead) — pass empty. */
    conv_db_fill_llm_settings_if_empty(conv_id, user_id, type_str,
-                                      cloud_provider_to_string(r.cloud_provider), model,
-                                      r.tool_mode, r.thinking_mode, r.reasoning_effort);
+                                      cloud_provider_to_string(r.cloud_provider), model, "",
+                                      r.thinking_mode, r.reasoning_effort);
 }
 
 /**
@@ -1677,7 +1676,6 @@ void handle_lock_conversation_llm(ws_connection_t *conn, struct json_object *pay
    const char *llm_type = NULL;
    const char *cloud_provider = NULL;
    const char *model = NULL;
-   const char *tools_mode = NULL;
    const char *thinking_mode = NULL;
    const char *reasoning_effort = NULL;
 
@@ -1691,9 +1689,6 @@ void handle_lock_conversation_llm(ws_connection_t *conn, struct json_object *pay
    if (json_object_object_get_ex(settings_obj, "model", &val)) {
       model = json_object_get_string(val);
    }
-   if (json_object_object_get_ex(settings_obj, "tools_mode", &val)) {
-      tools_mode = json_object_get_string(val);
-   }
    if (json_object_object_get_ex(settings_obj, "thinking_mode", &val)) {
       thinking_mode = json_object_get_string(val);
    }
@@ -1703,8 +1698,7 @@ void handle_lock_conversation_llm(ws_connection_t *conn, struct json_object *pay
 
    /* Validate input lengths against database field sizes */
    if ((llm_type && strlen(llm_type) > 15) || (cloud_provider && strlen(cloud_provider) > 15) ||
-       (model && strlen(model) > 63) || (tools_mode && strlen(tools_mode) > 15) ||
-       (thinking_mode && strlen(thinking_mode) > 15) ||
+       (model && strlen(model) > 63) || (thinking_mode && strlen(thinking_mode) > 15) ||
        (reasoning_effort && strlen(reasoning_effort) > 15)) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error", json_object_new_string("Field value too long"));
@@ -1714,9 +1708,10 @@ void handle_lock_conversation_llm(ws_connection_t *conn, struct json_object *pay
       return;
    }
 
-   /* Lock settings in database (only works if message_count == 0) */
+   /* Lock settings in database (only works if message_count == 0).
+    * tools_mode column is retired (dead) — pass empty. */
    int result = conv_db_lock_llm_settings(conv_id, conn->auth_user_id, llm_type, cloud_provider,
-                                          model, tools_mode, thinking_mode, reasoning_effort);
+                                          model, "", thinking_mode, reasoning_effort);
 
    if (result == AUTH_DB_SUCCESS) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));

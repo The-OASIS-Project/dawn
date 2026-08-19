@@ -127,7 +127,6 @@ static const tool_metadata_t plan_executor_metadata = {
    .param_count = 1,
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = 0,
-   .is_getter = true,
 
    .config = &s_config,
    .config_size = sizeof(s_config),

@@ -626,7 +626,6 @@ static const tool_metadata_t calendar_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NETWORK | TOOL_CAP_SECRETS | TOOL_CAP_SCHEDULABLE,
-   .is_getter = false,
    .default_local = true,
    .default_remote = true,
 

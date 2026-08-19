@@ -576,10 +576,10 @@ void llm_tools_suppress_pop(void);
 bool llm_tools_suppressed(void);
 
 /**
- * @brief Set current resolved config for thread-local tool_mode checking
+ * @brief Set current resolved config for thread-local suppress_tools checking
  *
  * Called by llm_chat_completion_*_with_config() before invoking provider
- * functions, so that llm_tools_enabled() can check session-specific tool_mode.
+ * functions, so that llm_tools_enabled() can check session-specific suppress_tools.
  * Set to NULL after the LLM call completes.
  *
  * Thread-safe: Uses thread-local storage.

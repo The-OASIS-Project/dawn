@@ -289,7 +289,7 @@ DAWN uses native LLM tool calling (function calling) for all providers.
 
 ```toml
 [llm.tools]
-mode = "native"             # "native" (recommended), "command_tags" (legacy), "disabled"
+enabled = true              # native tool/function calling on (true) or off (false)
 local_enabled = []          # Tools for local voice (empty = all)
 remote_enabled = []         # Tools for WebUI/remote (empty = all)
 ```
@@ -386,7 +386,7 @@ provider = "auto"               # "auto", "ollama", "llama_cpp", "generic"
 vision_enabled = false
 
 [llm.tools]
-mode = "native"                 # "native", "command_tags", "disabled"
+enabled = true              # native tool/function calling on (true) or off (false)
 
 [llm.thinking]
 mode = "disabled"               # "disabled" or "enabled"

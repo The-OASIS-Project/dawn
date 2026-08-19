@@ -60,7 +60,6 @@ static const tool_metadata_t tts_tool_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_ANALOG,
    .capabilities = TOOL_CAP_NONE,
-   .is_getter = false,
    .skip_followup = true,
    .default_remote = false,
 

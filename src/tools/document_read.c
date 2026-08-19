@@ -111,7 +111,6 @@ static const tool_metadata_t doc_read_metadata = {
    .param_count = 4,
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = 0,
-   .is_getter = true,
    .is_available = doc_read_is_available,
    .callback = doc_read_callback,
 };

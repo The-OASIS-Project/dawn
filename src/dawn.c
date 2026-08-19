@@ -2657,18 +2657,10 @@ mqtt_disabled:
             // Create cleaned version for TTS (keep original for conversation history)
             char *tts_response = strdup(response_text);
 
-            // Process any commands in the LLM response
+            // Native tool calling actuates devices during the LLM call; here we
+            // only strip any residual tags from the spoken/display copy.
             if (command_processing_mode == CMD_MODE_LLM_ONLY ||
                 command_processing_mode == CMD_MODE_DIRECT_FIRST) {
-               int cmds_processed;
-               {
-                  // Set command context so LLM callbacks use local session's config
-                  SESSION_SCOPED_COMMAND_CONTEXT(session_get_local());
-                  cmds_processed = parse_llm_response_for_commands(response_text, mosq);
-               }
-               if (cmds_processed > 0) {
-                  OLOG_INFO("Processed %d commands from LLM response", cmds_processed);
-               }
                if (tts_response) {
                   // Remove command tags
                   char *cmd_start, *cmd_end;

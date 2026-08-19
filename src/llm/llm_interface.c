@@ -1446,13 +1446,9 @@ void llm_get_default_config(session_llm_config_t *config) {
    config->endpoint[0] = '\0';
    config->model[0] = '\0';
 
-   // Copy tool mode from global config
-   if (g_config.llm.tools.mode[0] != '\0') {
-      strncpy(config->tool_mode, g_config.llm.tools.mode, sizeof(config->tool_mode) - 1);
-      config->tool_mode[sizeof(config->tool_mode) - 1] = '\0';
-   } else {
-      strncpy(config->tool_mode, "native", sizeof(config->tool_mode) - 1);
-   }
+   // Tools follow the global on/off switch by default; internal callers
+   // (extraction, compaction, silent-observe, briefings) set suppress_tools.
+   config->suppress_tools = false;
 
    // Copy thinking mode from global config
    if (g_config.llm.thinking.mode[0] != '\0') {
@@ -1577,16 +1573,9 @@ int llm_resolve_config(const session_llm_config_t *session_config,
       }
    }
 
-   // Resolve tool_mode - use session config if set, otherwise global config
-   if (session_config->tool_mode[0] != '\0') {
-      strncpy(resolved->tool_mode, session_config->tool_mode, sizeof(resolved->tool_mode) - 1);
-      resolved->tool_mode[sizeof(resolved->tool_mode) - 1] = '\0';
-   } else if (g_config.llm.tools.mode[0] != '\0') {
-      strncpy(resolved->tool_mode, g_config.llm.tools.mode, sizeof(resolved->tool_mode) - 1);
-      resolved->tool_mode[sizeof(resolved->tool_mode) - 1] = '\0';
-   } else {
-      strncpy(resolved->tool_mode, "native", sizeof(resolved->tool_mode) - 1);
-   }
+   // Propagate the per-call tool suppression flag (global on/off is checked
+   // directly in llm_tools_enabled()).
+   resolved->suppress_tools = session_config->suppress_tools;
 
    // Resolve thinking_mode - use session config if set, otherwise global config
    if (session_config->thinking_mode[0] != '\0') {
@@ -1673,7 +1662,7 @@ char *llm_chat_completion_with_config(struct json_object *conversation_history,
       }
    }
 
-   // Set thread-local config so llm_tools_enabled() can check session-specific tool_mode
+   // Set thread-local config so llm_tools_enabled() can check session-specific suppress_tools
    llm_tools_set_current_config(config);
 
    /* Set thread-local timeout override if specified (avoids global config race) */
@@ -1764,7 +1753,7 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
    // Record query metrics
    metrics_record_llm_query(config->type);
 
-   // Set thread-local config so llm_tools_enabled() can check session-specific tool_mode
+   // Set thread-local config so llm_tools_enabled() can check session-specific suppress_tools
    llm_tools_set_current_config(config);
 
    // Determine provider function and history format

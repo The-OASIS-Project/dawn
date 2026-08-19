@@ -52,7 +52,6 @@ static const tool_metadata_t date_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NONE,
-   .is_getter = true,
    .skip_followup = false,
    .default_remote = true,
 
@@ -81,7 +80,6 @@ static const tool_metadata_t time_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NONE,
-   .is_getter = true,
    .skip_followup = false,
    .default_remote = true,
 

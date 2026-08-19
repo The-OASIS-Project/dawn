@@ -204,6 +204,18 @@ static void test_scheduler_roundtrip(void) {
    TEST_ASSERT_TRUE(g_read.scheduler.briefing_speak_aloud_on_webui_source);
 }
 
+/* --- [llm.tools] ----------------------------------------------------------- */
+
+static void test_llm_tools_roundtrip(void) {
+   /* Default is enabled=true, so writing false and reading it back proves the
+    * writer emits the key (a dropped key would revert to the true default). */
+   g_written.llm.tools.enabled = false;
+
+   round_trip();
+
+   TEST_ASSERT_FALSE(g_read.llm.tools.enabled);
+}
+
 /* --- section coverage ------------------------------------------------------
  * The generic half: every section config_write_toml is responsible for must
  * appear in its output.  A new section wired into the parser but not the writer
@@ -370,6 +382,7 @@ int main(void) {
    RUN_TEST(test_research_roundtrip);
    RUN_TEST(test_event_chunk_cap_has_a_floor);
    RUN_TEST(test_scheduler_roundtrip);
+   RUN_TEST(test_llm_tools_roundtrip);
    RUN_TEST(test_all_writer_owned_sections_present);
    RUN_TEST(test_written_file_reparses);
    RUN_TEST(test_string_values_cannot_forge_toml);

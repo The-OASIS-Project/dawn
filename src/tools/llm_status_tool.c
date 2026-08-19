@@ -55,7 +55,6 @@ static const tool_metadata_t llm_status_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NONE,
-   .is_getter = true,
    .skip_followup = false,
    .default_remote = true,
 

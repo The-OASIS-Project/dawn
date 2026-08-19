@@ -596,14 +596,7 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
 
       struct json_object *tools;
       if (json_object_object_get_ex(section, "tools", &tools)) {
-         JSON_TO_CONFIG_STR(tools, "mode", config->llm.tools.mode);
-         /* Validate tool mode - must be one of: native, command_tags, disabled */
-         if (config->llm.tools.mode[0] != '\0' && strcmp(config->llm.tools.mode, "native") != 0 &&
-             strcmp(config->llm.tools.mode, "command_tags") != 0 &&
-             strcmp(config->llm.tools.mode, "disabled") != 0) {
-            OLOG_WARNING("WebUI: Invalid tools.mode '%s', using 'native'", config->llm.tools.mode);
-            strncpy(config->llm.tools.mode, "native", sizeof(config->llm.tools.mode) - 1);
-         }
+         JSON_TO_CONFIG_BOOL(tools, "enabled", config->llm.tools.enabled);
       }
 
       struct json_object *thinking;
@@ -1354,10 +1347,8 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
       /* Continue anyway - backup is optional */
    }
 
-   /* Track tools mode changes for prompt rebuild */
-   char old_tools_mode[16];
-   strncpy(old_tools_mode, g_config.llm.tools.mode, sizeof(old_tools_mode) - 1);
-   old_tools_mode[sizeof(old_tools_mode) - 1] = '\0';
+   /* Track tools enable/disable changes for prompt rebuild */
+   bool old_tools_enabled = g_config.llm.tools.enabled;
 
    /* Track voice-directive changes.  These feed the cached LOCAL-mic prompt
     * (initialize_command_prompt), which only rebuilds on
@@ -1388,7 +1379,7 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
    pthread_rwlock_wrlock(&s_config_rwlock);
    dawn_config_t *mutable_config = (dawn_config_t *)config_get();
    apply_config_from_json(mutable_config, payload);
-   bool tools_mode_changed = (strcmp(old_tools_mode, g_config.llm.tools.mode) != 0);
+   bool tools_mode_changed = (old_tools_enabled != g_config.llm.tools.enabled);
    /* Name reflects intent: gates the LOCAL static-prompt rebuild.  Both fields
     * baked into that prompt are tracked (tts.voice_directive AND the [asr]
     * disambiguation_hint); a new field baked into the local prompt must be added
@@ -1524,11 +1515,11 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
       }
 #endif
 
-      /* If tool calling mode changed, rebuild system prompt for current session */
+      /* If tool calling was toggled on/off, rebuild system prompt for current session */
       if (tools_mode_changed) {
          invalidate_system_instructions();
-         OLOG_INFO("Tool calling mode changed (mode=%s), rebuilding prompt",
-                   g_config.llm.tools.mode);
+         OLOG_INFO("Tool calling %s, rebuilding prompt",
+                   g_config.llm.tools.enabled ? "enabled" : "disabled");
 
          /* Update current session's system prompt so change takes effect immediately */
          if (conn->session) {

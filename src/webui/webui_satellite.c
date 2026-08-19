@@ -309,49 +309,11 @@ static void *satellite_worker_thread(void *arg) {
       goto cleanup;
    }
 
-   /* Check for command tags and process them using the existing infrastructure */
-   if (strstr(response, "<command>")) {
-      OLOG_INFO("Satellite: Response contains commands, processing...");
-
-      char *processed = webui_process_commands(response, session);
-      if (processed && !REQUEST_SUPERSEDED(session, expected_gen) && !session->disconnected) {
-         /* Recursively process if the follow-up also contains commands */
-         int iterations = 0;
-         const int MAX_ITERATIONS = 5;
-
-         while (strstr(processed, "<command>") && !REQUEST_SUPERSEDED(session, expected_gen) &&
-                !session->disconnected) {
-            if (++iterations > MAX_ITERATIONS) {
-               OLOG_WARNING("Satellite: Command loop limit reached (%d iterations)",
-                            MAX_ITERATIONS);
-               break;
-            }
-
-            OLOG_INFO("Satellite: Follow-up contains more commands, processing (iter %d/%d)",
-                      iterations, MAX_ITERATIONS);
-
-            char *next_processed = webui_process_commands(processed, session);
-            free(processed);
-            if (!next_processed) {
-               processed = NULL;
-               break;
-            }
-            processed = next_processed;
-         }
-
-         if (processed) {
-            free(response);
-            response = processed;
-         }
-      } else {
-         free(processed);
-      }
-   }
-
    if (REQUEST_SUPERSEDED(session, expected_gen))
       goto cleanup;
 
-   /* Strip any remaining command tags from final response */
+   /* Native tool calling actuated any device actions during the LLM call.
+    * Defensively strip residual tags from the final response. */
    strip_command_tags(response);
 
    /* Send stream end if streaming was active */

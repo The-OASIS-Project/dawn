@@ -862,7 +862,7 @@ void webui_sentence_audio_callback(const char *sentence, void *userdata) {
       if (!cleaned)
          return;
 
-      /* Remove command tags (they'll be processed from the full response later) */
+      /* Defensively strip residual command/end-of-turn tags from spoken text */
       strip_command_tags(cleaned);
 
       /* Remove special characters that cause TTS issues */
@@ -1267,22 +1267,8 @@ static void *audio_worker_thread(void *arg) {
       return NULL;
    }
 
-   /* Process commands if present (audio already sent via streaming callback) */
-   if (strstr(response, "<command>")) {
-      OLOG_INFO("WebUI: Audio response contains commands, processing...");
-      webui_send_state(session, "processing");
-
-      char *processed = webui_process_commands(response, session);
-      if (processed && !REQUEST_SUPERSEDED(session, expected_gen)) {
-         free(response);
-         response = processed;
-
-         /* Generate TTS for the follow-up response (command results) */
-         OLOG_INFO("WebUI: Generating TTS for command result: %.60s%s", processed,
-                   strlen(processed) > 60 ? "..." : "");
-         webui_sentence_audio_callback(processed, session);
-      }
-   }
+   /* Native tool calling actuated any device actions during the LLM call;
+    * the audio was already streamed via the sentence callback. */
 
    /* Send audio end marker (all audio chunks have been sent) */
    webui_send_audio_end(session, conn ? conn->use_opus : false);

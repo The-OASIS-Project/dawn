@@ -1874,7 +1874,8 @@ Format rules:
 
             <!-- Per-Conversation LLM Settings (locked after first message) -->
             <div id="llm-conversation-controls">
-               <!-- Row 3: Reasoning / Effort / Tools -->
+               <!-- Row 4: columns align with row 1 —
+                    Reasoning↔Mode, Effort↔Provider, Privacy↔Model -->
                <label for="reasoning-mode-select" class="llm-label" id="reasoning-label"
                   >Reasoning:</label
                >
@@ -1902,39 +1903,8 @@ Format rules:
                </select>
                <span class="control-hint hidden" id="effort-hint"></span>
 
-               <label for="tools-mode-select" class="llm-label" id="tools-label">Tools:</label>
+               <label for="privacy-toggle" class="llm-label" id="privacy-label">Privacy:</label>
                <div id="tools-group">
-                  <select id="tools-mode-select" title="Tool calling mode for this conversation">
-                     <option value="native" selected>Native Tools</option>
-                     <option value="command_tags">Command Tags</option>
-                     <option value="disabled">Disabled</option>
-                  </select>
-                  <button
-                     type="button"
-                     id="tools-help-btn"
-                     class="help-icon-btn"
-                     aria-label="Tools mode help"
-                  >
-                     ?
-                  </button>
-                  <div id="tools-help-popup" class="help-popup hidden">
-                     <div class="help-popup-content">
-                        <strong>Native Tools</strong>
-                        <p>
-                           Uses the LLM's built-in tool calling API. Most reliable for models that
-                           support it (GPT-4, Claude, etc.). The AI can call multiple tools in
-                           parallel.
-                        </p>
-                        <strong>Command Tags</strong>
-                        <p>
-                           Prompts the LLM to output commands in special XML tags. Works with any
-                           model but may be less reliable. Use this for models without native tool
-                           support.
-                        </p>
-                        <strong>Disabled</strong>
-                        <p>No tool calling. The AI will respond conversationally only.</p>
-                     </div>
-                  </div>
                   <!-- Privacy toggle (inside tools-group flex container) -->
                   <button
                      type="button"
@@ -1977,25 +1947,6 @@ Format rules:
                      </svg>
                   </button>
                </div>
-
-               <span
-                  id="llm-lock-indicator"
-                  class="hidden"
-                  title="Tool mode is locked for this conversation. Reasoning mode and effort can still be changed."
-               >
-                  <svg
-                     xmlns="http://www.w3.org/2000/svg"
-                     width="14"
-                     height="14"
-                     viewBox="0 0 24 24"
-                     fill="none"
-                     stroke="currentColor"
-                     stroke-width="2"
-                  >
-                     <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-                     <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-                  </svg>
-               </span>
             </div>
          </div>
 
