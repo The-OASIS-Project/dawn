@@ -759,6 +759,12 @@ dawn_add_unit_test(test_text_filter
    LIBS    unity
    LABEL   ci)
 
+dawn_add_unit_test(test_llm_response_finalize
+   SOURCES test_llm_response_finalize.c
+           ${SRC_ROOT}/src/core/llm_response_finalize.c
+   LIBS    unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_iso8601
    SOURCES test_iso8601.c
            ${SRC_ROOT}/src/core/iso8601.c

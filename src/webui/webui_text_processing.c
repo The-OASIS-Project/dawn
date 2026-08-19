@@ -326,10 +326,9 @@ static void *text_worker_thread(void *arg) {
       return NULL;
    }
 
-   /* Native tool calling actuated any device actions during the LLM call.
-    * Defensively strip residual tags from the final response before persist. */
+   /* Response is already canonical clean text (finalized centrally in
+    * llm_call_finalize).  Keep the `final_response` alias for the block below. */
    char *final_response = response;
-   strip_command_tags(final_response);
 
    /* Send audio end marker if TTS was enabled (use_opus captured at worker
     * start — conn may be freed by now if the client disconnected mid-turn). */

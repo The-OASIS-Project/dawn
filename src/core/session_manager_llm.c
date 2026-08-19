@@ -37,6 +37,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "core/llm_response_finalize.h"
 #include "core/session_manager.h"
 #include "core/text_filter.h"
 #include "llm/llm_interface.h"
@@ -295,6 +296,22 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
          OLOG_ERROR("Session %u: LLM call failed", session->session_id);
       }
       return NULL;
+   }
+
+   // Finalize to canonical clean text (strip residual tags + trailing whitespace)
+   // BEFORE the response enters history (which feeds the next turn) and is returned
+   // to the caller for persistence/delivery.  This is the single choke point for
+   // every session-based surface — WebUI text/audio, satellite, messaging, jobs,
+   // reinvoke all reach here via one of the session_llm_call* variants, so their
+   // history + persisted rows are clean without per-seam stripping.
+   // (Phase 1 will thread `session` here for citation resolution.)
+   if (*response) {
+      response_final_t fin;
+      if (llm_response_finalize(session, response, &fin) == SUCCESS) {
+         free(response);
+         response = fin.text;  // take ownership of the clean buffer
+      }
+      // else: finalize alloc failure — keep the raw response (degraded, not fatal)
    }
 
    // Add assistant response to history (only if non-empty to avoid Claude API errors)

@@ -312,9 +312,8 @@ static void *satellite_worker_thread(void *arg) {
    if (REQUEST_SUPERSEDED(session, expected_gen))
       goto cleanup;
 
-   /* Native tool calling actuated any device actions during the LLM call.
-    * Defensively strip residual tags from the final response. */
-   strip_command_tags(response);
+   /* Response is already canonical clean text (finalized centrally in
+    * llm_call_finalize) — no per-seam strip needed. */
 
    /* Send stream end if streaming was active */
    if (atomic_load(&session->llm_streaming_active)) {

@@ -69,6 +69,7 @@
 #include "core/job_manager.h" /* job subsystem compiles only under ENABLE_WEBUI */
 #include "core/job_reinvoke.h"
 #endif
+#include "core/llm_response_finalize.h"
 #include "core/ocp_helpers.h"
 #include "core/ota.h"
 #include "core/ota_rollout.h"
@@ -2651,76 +2652,35 @@ mqtt_disabled:
             // Process successful response
             OLOG_WARNING("AI: %s\n", response_text);
 
-            // Update TUI with full LLM response (including commands for debugging)
+            // Update TUI with full raw LLM response (tags included, for debugging)
             metrics_set_last_ai_response(response_text);
 
-            // Create cleaned version for TTS (keep original for conversation history)
-            char *tts_response = strdup(response_text);
+            // TTS already handled by streaming callback - no need to call text_to_speech here.
+            // Note: We don't touch TTS state here - let the state machine handle it.
+            // If user interrupts with wake word, state machine will discard TTS;
+            // without wake word, state machine will resume TTS.
 
-            // Native tool calling actuates devices during the LLM call; here we
-            // only strip any residual tags from the spoken/display copy.
-            if (command_processing_mode == CMD_MODE_LLM_ONLY ||
-                command_processing_mode == CMD_MODE_DIRECT_FIRST) {
-               if (tts_response) {
-                  // Remove command tags
-                  char *cmd_start, *cmd_end;
-                  while ((cmd_start = strstr(tts_response, "<command>")) != NULL) {
-                     cmd_end = strstr(cmd_start, "</command>");
-                     if (cmd_end) {
-                        cmd_end += strlen("</command>");
-                        memmove(cmd_start, cmd_end, strlen(cmd_end) + 1);
-                     } else {
-                        break;
-                     }
-                  }
+            // Finalize to canonical clean text (strip residual tags + trailing
+            // whitespace) and persist THAT to conversation history so the model
+            // never sees stray tags on the next turn.  (Phase 1 will thread the
+            // local session here for citation resolution.)
+            response_final_t fin;
+            const char *history_text = (llm_response_finalize(NULL, response_text, &fin) == SUCCESS)
+                                           ? fin.text
+                                           : response_text;
 
-                  // Remove <end_of_turn> tags (local AI models)
-                  char *match = NULL;
-                  if ((match = strstr(tts_response, "<end_of_turn>")) != NULL) {
-                     *match = '\0';
-                  }
-
-                  // Remove special characters that cause problems
-                  remove_chars(tts_response, "*");
-                  remove_emojis(tts_response);
-
-                  // Trim trailing whitespace
-                  size_t len = strlen(tts_response);
-                  while (len > 0 &&
-                         (tts_response[len - 1] == ' ' || tts_response[len - 1] == '\t' ||
-                          tts_response[len - 1] == '\n' || tts_response[len - 1] == '\r')) {
-                     tts_response[--len] = '\0';
-                  }
-               }
+            // Skip empty content (an all-tags or whitespace-only response finalizes
+            // to "") — an empty assistant message makes Claude reject the next turn.
+            // Mirrors the guard in llm_call_finalize.
+            if (history_text[0] != '\0') {
+               struct json_object *ai_message = json_object_new_object();
+               json_object_object_add(ai_message, "role", json_object_new_string("assistant"));
+               json_object_object_add(ai_message, "content", json_object_new_string(history_text));
+               json_object_array_add(conversation_history, ai_message);
             }
 
-            // TTS already handled by streaming callback - no need to call text_to_speech here
-            // Note: We don't touch TTS state here - let the state machine handle it
-            // If user interrupts with wake word, state machine will discard TTS
-            // If user interrupts without wake word, state machine will resume TTS
-
-            // Save original response (with command tags) to conversation history
-            // but trim trailing whitespace for Claude API compatibility
-            char *history_response = strdup(response_text);
-            if (history_response) {
-               size_t len = strlen(history_response);
-               while (len > 0 &&
-                      (history_response[len - 1] == ' ' || history_response[len - 1] == '\t' ||
-                       history_response[len - 1] == '\n' || history_response[len - 1] == '\r')) {
-                  history_response[--len] = '\0';
-               }
-            }
-
-            struct json_object *ai_message = json_object_new_object();
-            json_object_object_add(ai_message, "role", json_object_new_string("assistant"));
-            json_object_object_add(ai_message, "content",
-                                   json_object_new_string(history_response ? history_response
-                                                                           : response_text));
-            json_object_array_add(conversation_history, ai_message);
-
+            response_final_free(&fin);  // safe: fin.text is NULL on the finalize-failure path
             free(response_text);
-            free(tts_response);
-            free(history_response);
 
 #ifdef ENABLE_MULTI_CLIENT
             /* Mark successful interaction complete for idle timeout tracking */
