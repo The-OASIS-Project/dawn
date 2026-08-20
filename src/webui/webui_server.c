@@ -2226,6 +2226,18 @@ void webui_send_stream_start(session_t *session) {
    queue_response(&resp);
    OLOG_INFO("WebUI: Stream start id=%u conv=%lld for session %u", sid, (long long)conv_id,
              session->session_id);
+
+   /* Orphan tripwire: a WebUI turn should always have conv>0 by stream time (a
+    * fresh chat's new_conversation back-fills the id before streaming).  conv=0
+    * here means the turn won't persist — typically the client failed to re-tag
+    * conversation_id after a reconnect.  Gated to WebUI: DAP2/local voice turns
+    * legitimately stream at conv=0 (a harmless no-op), so warning on them would
+    * be noise, not signal. */
+   if (conv_id == 0 && session->type == SESSION_TYPE_WEBUI) {
+      OLOG_WARNING("WebUI: Stream start id=%u for session %u is ORPHANED (conv=0) — turn will "
+                   "not persist; client likely did not tag conversation_id after reconnect",
+                   sid, session->session_id);
+   }
 }
 
 /* Command tag filter uses shared constants from core/text_filter.h */

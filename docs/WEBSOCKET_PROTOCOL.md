@@ -492,6 +492,25 @@ Load a saved conversation into the current session.
 ```
 Response: `load_conversation_response`
 
+#### `set_active_conversation`
+Re-anchor the connection's active conversation **without** replaying history — a
+lightweight alternative to `load_conversation` for the reconnect case, where the
+client only needs to reset which conversation its turns persist into (not reload
+the transcript).
+```json
+{
+   "type": "set_active_conversation",
+   "payload": {
+      "conversation_id": 42
+   }
+}
+```
+Response: `set_active_conversation_response` — `{success, conversation_id, is_private}`
+on success; `{success:false, conversation_id, error}` on failure. Ownership-checked
+(owner-scoped, non-oracle): a conversation the caller does not own returns
+`error: "Conversation unavailable"`, indistinguishable from an absent id. Does not
+touch `stream_conversation_id`.
+
 #### `delete_conversation`
 Delete a saved conversation.
 ```json
@@ -1737,6 +1756,7 @@ Satellites also receive the same streaming messages as WebUI clients:
 | `list_conversations` | `list_conversations_response` |
 | `new_conversation` | `new_conversation_response` |
 | `load_conversation` | `load_conversation_response` |
+| `set_active_conversation` | `set_active_conversation_response` |
 | `delete_conversation` | `delete_conversation_response` |
 | `rename_conversation` | `rename_conversation_response` |
 | `set_private` | `set_private_response` |

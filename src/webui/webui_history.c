@@ -735,6 +735,85 @@ void webui_conv_stamp_llm_settings(session_t *session, int64_t conv_id, int user
 }
 
 /**
+ * @brief Re-anchor a connection's active conversation to @p req_conv, ownership-checked.
+ *
+ * Sets conn->active_conversation_id AND conn->active_conversation_private together
+ * from the same owned conversation row, or leaves @p conn untouched and returns
+ * false.  The two fields MUST move as a pair: active_conversation_private gates
+ * memory extraction (a private conversation must not be extracted), so a private
+ * flag left stale relative to the id is a privacy-leak-class bug.  Centralizing
+ * that invariant here is why both the `text`-tag heal path
+ * (webui_message_dispatch.c) and handle_set_active_conversation call this rather
+ * than open-coding the conv_db_get→set→free dance.  Does NOT replay history or
+ * touch stream_conversation_id (turns derive their stream conv from
+ * active_conversation_id at enqueue).
+ *
+ * @return true if re-anchored (conn owns @p req_conv); false otherwise.
+ */
+bool conn_reanchor_conversation(ws_connection_t *conn, int64_t req_conv) {
+   if (!conn || req_conv <= 0 || conn->auth_user_id <= 0) {
+      return false;
+   }
+   conversation_t conv = { 0 };
+   if (conv_db_get(req_conv, conn->auth_user_id, &conv) != AUTH_DB_SUCCESS) {
+      return false;
+   }
+   conn->active_conversation_id = req_conv;
+   conn->active_conversation_private = conv.is_private;
+   conv_free(&conv);
+   return true;
+}
+
+/**
+ * @brief Re-anchor the connection's active conversation without replaying history.
+ *
+ * Lightweight counterpart to handle_load_conversation: a text/voice turn derives
+ * its stream conversation from conn->active_conversation_id captured at enqueue,
+ * so a reconnecting client only needs to reset that field (via
+ * conn_reanchor_conversation) — NOT replay the full message history nor touch
+ * stream_conversation_id.  Owner-scoped and non-oracle on failure.  Tolerates a
+ * NULL/absent payload (replies with the missing-id error rather than dropping).
+ */
+void handle_set_active_conversation(ws_connection_t *conn, struct json_object *payload) {
+   if (!conn_require_auth(conn)) {
+      return;
+   }
+
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type",
+                          json_object_new_string("set_active_conversation_response"));
+   json_object *resp_payload = json_object_new_object();
+
+   json_object *id_obj;
+   int64_t req_conv = 0;
+   if (payload && json_object_object_get_ex(payload, "conversation_id", &id_obj)) {
+      req_conv = json_object_get_int64(id_obj);
+   }
+
+   if (req_conv <= 0) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Missing conversation id"));
+   } else if (conn_reanchor_conversation(conn, req_conv)) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+      json_object_object_add(resp_payload, "conversation_id", json_object_new_int64(req_conv));
+      json_object_object_add(resp_payload, "is_private",
+                             json_object_new_boolean(conn->active_conversation_private));
+   } else {
+      /* Owner-scoped, non-oracle: a foreign or absent conversation gets one
+       * indistinguishable answer (same shape as doc_library_get). */
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "conversation_id", json_object_new_int64(req_conv));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Conversation unavailable"));
+   }
+
+   json_object_object_add(response, "payload", resp_payload);
+   send_json_response(conn, response);
+   json_object_put(response);
+}
+
+/**
  * @brief Load a conversation and all of its messages
  *
  * Returns the WHOLE conversation in one response (no pagination): message text is cheap

@@ -115,20 +115,13 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                 * client sends the conversation this message belongs to, so the
                 * server never has to infer it from the live view — robust across
                 * reconnect and multi-tab, where server-side active_conversation_id
-                * can be stale or 0.  Validate ownership first (a client must not
-                * tag/persist into another user's conversation), then heal both the
-                * active id and its privacy flag (which gates memory extraction). */
+                * can be stale or 0.  conn_reanchor_conversation validates ownership
+                * (a client must not tag/persist into another user's conversation)
+                * then heals both the active id and its privacy flag together; a
+                * bad/foreign id is a no-op heal (the turn keeps the prior anchor). */
                struct json_object *conv_id_obj;
                if (json_object_object_get_ex(payload, "conversation_id", &conv_id_obj)) {
-                  int64_t req_conv = json_object_get_int64(conv_id_obj);
-                  if (req_conv > 0 && conn->auth_user_id > 0) {
-                     conversation_t conv;
-                     if (conv_db_get(req_conv, conn->auth_user_id, &conv) == AUTH_DB_SUCCESS) {
-                        conn->active_conversation_id = req_conv;
-                        conn->active_conversation_private = conv.is_private;
-                        conv_free(&conv);
-                     }
-                  }
+                  conn_reanchor_conversation(conn, json_object_get_int64(conv_id_obj));
                }
 
                /* Extract optional images for vision (array format) */
@@ -971,6 +964,10 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       if (payload) {
          handle_load_conversation(conn, payload);
       }
+   } else if (strcmp(type, "set_active_conversation") == 0) {
+      /* Lightweight reconnect re-anchor: reset conn->active_conversation_id
+       * without the full history replay a load_conversation does. */
+      handle_set_active_conversation(conn, payload);
    } else if (strcmp(type, "attach_conversation") == 0) {
       /* Same handler as load_conversation — an attach IS a load that also asks
        * for the durable event log.  The distinction is the `last_seq` cursor in
