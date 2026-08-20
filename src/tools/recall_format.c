@@ -26,6 +26,7 @@
 
 #include "core/strbuf.h"
 #include "dawn_error.h"
+#include "utils/string_utils.h"
 
 /* Per-line one-liner cap — keeps a single candidate from dominating the budget
  * the engine already bounded; the read-pointer tells the LLM where the full
@@ -267,5 +268,13 @@ char *recall_format_result(const char *query,
    }
    char *out = strbuf_steal(&sb);
    strbuf_free(&sb);
+   /* Guarantee the tool result is valid UTF-8.  The per-line byte-count caps
+    * (append_oneline / filename_from_text) can stop mid-codepoint, leaving a
+    * lone lead byte — one such byte 400s the Claude request ("surrogates not
+    * allowed") AND wedges the WebUI socket ("Invalid UTF-8 in text frame") into
+    * a reconnect loop.  sanitize repairs any partial/invalid sequence in place. */
+   if (out != NULL) {
+      sanitize_utf8_for_json(out);
+   }
    return out ? out : strdup("recall: allocation failed.");
 }
