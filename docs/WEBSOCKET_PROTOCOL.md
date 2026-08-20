@@ -957,6 +957,22 @@ Application-level keepalive (every 10 seconds).
 ```
 Response: `satellite_pong`
 
+#### `ping`
+Application-level liveness probe for **browser (WebUI)** clients — the
+authenticated counterpart to `satellite_ping`. Sent on an idle-gated heartbeat
+(~10 s) so a client can detect a stale/timed-out session.
+```json
+{"type": "ping", "payload": {"seq": 42}}
+```
+- `seq` (optional): correlation token echoed verbatim in the `pong` so the
+  client can match replies and discard stale ones.
+
+Response: `pong` — but **only** for a valid, authenticated session
+(`conn_require_auth`). A revoked/expired/unauthenticated connection receives an
+`UNAUTHORIZED` `error` and no `pong`; that absence is the client's staleness
+signal. The reply carries `{seq?, server_time_ms}` (same payload shape as
+[`satellite_pong`](#satellite_pong)).
+
 #### OTA (over-the-air updates)
 Server→satellite firmware updates. Control plane is on this WebSocket; the image
 itself is pulled over HTTPS. The signing key never touches the daemon — devices
@@ -1673,10 +1689,18 @@ Response to `satellite_ping`.
 {
    "type": "satellite_pong",
    "payload": {
-      "timestamp": 1708300000
+      "server_time_ms": 1708300000000
    }
 }
 ```
+- `server_time_ms`: server wall-clock at reply time (epoch milliseconds).
+
+Browser (WebUI) clients use the parallel `ping` → `pong` verb, which shares
+this exact payload shape and additionally echoes a client-supplied `seq` (see
+[`ping`](#ping) above). The two verbs differ only in the liveness gate: a
+satellite `satellite_ping` is accepted on `is_satellite`, a browser `ping` is
+authenticated via `conn_require_auth` (so a revoked/expired session gets an
+`error` frame and **no** `pong`).
 
 Satellites also receive the same streaming messages as WebUI clients:
 `state`, `error`, `transcript`, `stream_start`, `stream_delta`, `stream_end`.
@@ -1738,6 +1762,7 @@ Satellites also receive the same streaming messages as WebUI clients:
 | `calendar_upcoming_events` | `calendar_upcoming_events_response` |
 | `satellite_register` | `satellite_register_ack` |
 | `satellite_ping` | `satellite_pong` |
+| `ping` | `pong` |
 
 ---
 

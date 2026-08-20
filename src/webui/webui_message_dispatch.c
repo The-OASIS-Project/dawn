@@ -68,8 +68,9 @@
 #include "webui/webui_ota.h"
 #include "webui/webui_server.h"
 
-/* handle_cancel_message is defined at the bottom of this TU. */
+/* handle_cancel_message and handle_ping are defined at the bottom of this TU. */
 static void handle_cancel_message(ws_connection_t *conn);
+static void handle_ping(ws_connection_t *conn, struct json_object *payload);
 
 /* handle_always_on_enable / handle_always_on_disable moved to
  * webui_always_on.c (next to always_on_create / always_on_destroy);
@@ -1496,6 +1497,11 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                                    ? always_on_state_name(always_on_get_state(conn->always_on))
                                    : "disabled";
       send_always_on_state(conn->wsi, state_name);
+   } else if (strcmp(type, "ping") == 0) {
+      /* App-level liveness probe from a browser client (client→server).  Gated
+       * on auth so only a valid, registered session gets a pong; the missing
+       * pong (or the UNAUTHORIZED error) is the client's staleness signal. */
+      handle_ping(conn, payload);
    }
    /* Satellite (DAP2 Tier 1) messages — only accept from existing satellites.
     * Initial registration is handled in the init block above (line ~2924).
@@ -1552,4 +1558,20 @@ static void handle_cancel_message(ws_connection_t *conn) {
       session_cancel_turn(conn->session);
       send_state_impl(conn->wsi, "idle", NULL);
    }
+}
+
+/*
+ * Browser (SESSION_TYPE_WEBUI) app-level liveness probe.  The counterpart to
+ * handle_satellite_ping, gated on user auth rather than device registration:
+ * conn_require_auth() re-validates the session token against the DB on every
+ * call, so a revoked or expired session receives an UNAUTHORIZED error and NO
+ * pong — precisely the "session no longer alive" signal the client keys off to
+ * fall back to re-authentication.  A valid session gets a pong (with any echoed
+ * seq + server_time_ms) and has its last_activity refreshed by webui_send_pong.
+ */
+static void handle_ping(ws_connection_t *conn, struct json_object *payload) {
+   if (!conn_require_auth(conn)) {
+      return;
+   }
+   webui_send_pong(conn, "pong", payload);
 }

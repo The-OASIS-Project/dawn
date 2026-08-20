@@ -675,6 +675,20 @@ void handle_satellite_query(ws_connection_t *conn, struct json_object *payload);
 void handle_satellite_ping(ws_connection_t *conn);
 
 /**
+ * @brief Emit a uniform app-level pong to any WebSocket client.
+ *
+ * Shared by the browser `ping` handler and the DAP2 `satellite_ping` handler.
+ * Echoes the request's `seq` (if present), stamps `server_time_ms`, and touches
+ * the session.  The liveness gate is the CALLER's responsibility — see the
+ * definition in webui_satellite.c.
+ *
+ * @param conn        Connection to reply on
+ * @param pong_type   Response "type" string ("pong" or "satellite_pong")
+ * @param req_payload Inbound message "payload" object, or NULL
+ */
+void webui_send_pong(ws_connection_t *conn, const char *pong_type, struct json_object *req_payload);
+
+/**
  * @brief Handle volume_state message from satellite
  */
 void handle_satellite_volume_state(ws_connection_t *conn, struct json_object *payload);
