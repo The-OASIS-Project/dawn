@@ -45,8 +45,10 @@
 #include "core/turn_queue.h"
 #include "core/worker_pool.h"
 #include "dawn.h"
+#include "image_store.h"
 #include "llm/llm_context.h"
 #include "logging.h"
+#include "webui/webui_image_rehydrate.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_server.h"
 
@@ -72,6 +74,8 @@ typedef struct {
    size_t vision_image_sizes[WEBUI_MAX_VISION_IMAGES_CAP]; /* Size of each image */
    char vision_mimes[WEBUI_MAX_VISION_IMAGES_CAP][WEBUI_VISION_MIME_MAX]; /* MIME types */
    int vision_image_count;                                                /* Number of images */
+   char *persist_content; /* Server-authoritative persisted form (text + [IMAGE:<id>] markers)
+                           * for an image turn; NULL persists plain text. Owned/freed here. */
 } text_work_t;
 
 /* strip_command_tags() is shared across webui modules — see webui_satellite.c */
@@ -180,6 +184,7 @@ static void text_worker_cleanup(text_work_t *work, session_t *session, char *tex
          }
       }
       work->vision_image_count = 0;
+      free(work->persist_content); /* separate alloc from `text` (work->text alias) */
       free(work);
    }
 }
@@ -267,6 +272,7 @@ static void *text_worker_thread(void *arg) {
    text_input_dispatch_opts_t dispatch_opts = {
       .conversation_id = turn_conv,
       .auth_user_id = conn ? conn->auth_user_id : 0,
+      .persist_content_override = work->persist_content, /* text + [IMAGE:<id>] for image turns */
       .sentence_cb = tts_enabled ? webui_sentence_audio_callback : NULL,
       .sentence_userdata = tts_enabled ? session : NULL,
       .on_user_msg_added = webui_text_dispatch_on_user_msg,
@@ -296,6 +302,25 @@ static void *text_worker_thread(void *arg) {
    session_set_tool_persist_hook(session, NULL, NULL); /* persist_ctx goes out of scope below */
    session_set_tool_iteration_hook(session, NULL, NULL);
 
+   /* Promote the persisted image turn's images to permanent retention — AFTER
+    * dispatch persisted the row, so images are pinned only for turns that reached
+    * here (queue-full/superseded-before-dequeue rejections never do).  Images have
+    * no orphan sweep and PERMANENT is LRU-exempt, so pinning a never-persisted turn
+    * would leak forever.  Re-collect ids from the persisted marker string with the
+    * same parser the reload path uses, so we pin exactly what the row references —
+    * keeping image_store in the WebUI layer, off core. */
+   if (work->persist_content && conn) {
+      char persisted_ids[WEBUI_MAX_VISION_IMAGES_CAP][IMAGE_ID_LEN];
+      int persisted_id_count = 0;
+      if (webui_collect_image_ids(work->persist_content, persisted_ids, WEBUI_MAX_VISION_IMAGES_CAP,
+                                  &persisted_id_count) == SUCCESS) {
+         for (int i = 0; i < persisted_id_count; i++) {
+            image_store_update_retention(persisted_ids[i], conn->auth_user_id,
+                                         IMAGE_RETAIN_PERMANENT);
+         }
+      }
+   }
+
    /* Free vision data after LLM call (it's been sent over HTTP, no longer needed) */
    for (int i = 0; i < work->vision_image_count; i++) {
       if (work->vision_images[i]) {
@@ -312,6 +337,7 @@ static void *text_worker_thread(void *arg) {
       text_worker_end(session);
       free(response);
       free(text);
+      free(work->persist_content);
       free(work);
       return NULL;
    }
@@ -322,6 +348,7 @@ static void *text_worker_thread(void *arg) {
       webui_send_state(session, "idle");
       text_worker_end(session);
       free(text);
+      free(work->persist_content);
       free(work);
       return NULL;
    }
@@ -395,6 +422,7 @@ static void *text_worker_thread(void *arg) {
    text_worker_end(session);
 
    free(text);
+   free(work->persist_content);
    free(work);
    return NULL;
 }
@@ -414,6 +442,7 @@ static void webui_text_turn_free(void *work) {
       session_release(w->session);
    }
    free(w->text);
+   free(w->persist_content);
    for (int i = 0; i < w->vision_image_count; i++) {
       free(w->vision_images[i]);
    }
@@ -480,6 +509,7 @@ int webui_process_text_input_with_vision(session_t *session,
                                          const size_t *vision_image_sizes,
                                          const char **vision_mimes,
                                          int vision_image_count,
+                                         const char *persist_content,
                                          bool input_was_voice) {
    if (!session || !text || strlen(text) == 0) {
       return 1;
@@ -523,6 +553,15 @@ int webui_process_text_input_with_vision(session_t *session,
       free(work);
       return 1;
    }
+   if (persist_content) {
+      work->persist_content = strdup(persist_content);
+      if (!work->persist_content) {
+         OLOG_ERROR("WebUI: Failed to allocate persist_content copy");
+         free(work->text);
+         free(work);
+         return 1;
+      }
+   }
 
    /* Copy vision images if present */
    if (vision_images && vision_image_count > 0) {
@@ -539,6 +578,7 @@ int webui_process_text_input_with_vision(session_t *session,
                free(work->vision_images[j]);
             }
             free(work->text);
+            free(work->persist_content);
             free(work);
             return 1;
          }
@@ -575,5 +615,6 @@ int webui_process_text_input_with_vision(session_t *session,
 }
 
 int webui_process_text_input(session_t *session, const char *text, bool input_was_voice) {
-   return webui_process_text_input_with_vision(session, text, NULL, NULL, NULL, 0, input_was_voice);
+   return webui_process_text_input_with_vision(session, text, NULL, NULL, NULL, 0,
+                                               /*persist_content=*/NULL, input_was_voice);
 }

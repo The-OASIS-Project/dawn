@@ -49,6 +49,7 @@
 #include "core/scheduler_db.h"
 #include "core/session_manager.h"
 #include "dawn.h"
+#include "image_store.h"
 #include "llm/llm_claude_format.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_context.h"
@@ -59,6 +60,7 @@
 #include "webui/webui_attention.h"
 #include "webui/webui_contacts.h"
 #include "webui/webui_doc_library.h"
+#include "webui/webui_image_rehydrate.h"
 #ifdef DAWN_ENABLE_CODE_PROJECTS
 #include "webui/webui_code_projects.h"
 #endif
@@ -188,8 +190,65 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                   }
                }
 
+               /* Parse image_ids[] — the /api/images persistence keys the client
+                * holds, ordered to match images[].  The daemon is authoritative for
+                * user-turn persistence, so it builds the [IMAGE:<id>] markers itself
+                * (no client save).  Retention promotion is NOT done here: it happens
+                * post-persist in the worker so images are pinned only for turns that
+                * actually persisted (a turn rejected before persist — queue-full,
+                * superseded — would otherwise permanently pin images that have no
+                * orphan sweep).  The images[]<->image_ids[] correspondence is a
+                * client convention (both mapped from one array, see dawn.js); the
+                * server does not cross-check them — a bad pairing only mis-persists
+                * the sender's own turn. */
+               char image_ids[WEBUI_MAX_VISION_IMAGES_CAP][IMAGE_ID_LEN];
+               int image_id_count = 0;
+               struct json_object *image_ids_obj;
+               if (json_object_object_get_ex(payload, "image_ids", &image_ids_obj) &&
+                   json_object_is_type(image_ids_obj, json_type_array)) {
+                  int id_len = json_object_array_length(image_ids_obj);
+                  /* Cap at the SAME effective limit as images[] (runtime, may be <
+                   * the array bound), then belt-and-suspenders at the array bound. */
+                  if (id_len > max_vision_images) {
+                     id_len = max_vision_images;
+                  }
+                  if (id_len > WEBUI_MAX_VISION_IMAGES_CAP) {
+                     id_len = WEBUI_MAX_VISION_IMAGES_CAP;
+                  }
+                  for (int i = 0; i < id_len; i++) {
+                     const char *img_id = json_object_get_string(
+                         json_object_array_get_idx(image_ids_obj, i));
+                     if (!img_id || !image_store_validate_id(img_id)) {
+                        OLOG_WARNING("WebUI: ignoring invalid image_id in turn frame");
+                        continue;
+                     }
+                     snprintf(image_ids[image_id_count], IMAGE_ID_LEN, "%s", img_id);
+                     image_id_count++;
+                  }
+               }
+
+               /* Server-authoritative persisted form for an image turn: clean text
+                * + [IMAGE:<id>] markers.  NULL for text-only turns (persist plain
+                * text).  Freed after the call — the worker strdup's what it needs. */
+               char *persist_content = NULL;
+               if (image_id_count > 0) {
+                  persist_content = webui_build_image_marker_content(text, image_ids,
+                                                                     image_id_count);
+                  if (!persist_content) {
+                     /* OOM building markers — persist plain text rather than fail the
+                      * turn.  Log loudly: the images won't re-render on reload (no
+                      * markers persisted) and won't be pinned (worker promotes only
+                      * what's in the marker string), so they LRU-evict normally — a
+                      * silent-on-reload degradation bounded to this OOM-gated turn. */
+                     OLOG_ERROR("WebUI: failed to build image markers (OOM); persisting text-only, "
+                                "%d image(s) will not re-render on reload",
+                                image_id_count);
+                  }
+               }
+
                handle_text_message(conn, text, strlen(text), vision_images, vision_image_sizes,
-                                   vision_mimes, vision_image_count);
+                                   vision_mimes, vision_image_count, persist_content);
+               free(persist_content);
             }
          }
       }

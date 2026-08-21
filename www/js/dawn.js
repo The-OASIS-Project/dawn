@@ -1322,11 +1322,20 @@
             data: img.data,
             mime_type: img.mimeType,
          }));
-         // Save image IDs for history storage (before clearing)
-         // Images are now stored server-side and referenced by ID
-         pendingThumbnailsForSave = DawnVision.getPendingImageIds
+         // Persistence keys (from /api/images). NOTE: getPendingImages() above
+         // intentionally returns only {data, mimeType} (no id), so read the ids via
+         // getPendingImageIds() — which maps the SAME pendingImages array in order,
+         // keeping them aligned with images[]. The DAEMON is authoritative for
+         // user-turn persistence: it builds the [IMAGE:<id>] markers and persists the
+         // turn itself, then echoes server_saved=true so the client skips its own save.
+         // image_ids is MANDATORY on an image turn — without valid ids the daemon
+         // persists text-only and the images are lost on reload (hard cut-over).
+         const pendingImageIds = DawnVision.getPendingImageIds
             ? DawnVision.getPendingImageIds()
             : [];
+         msg.payload.image_ids = pendingImageIds;
+         // Retained only for local display of the just-sent turn (no longer a save key).
+         pendingThumbnailsForSave = pendingImageIds;
          DawnVision.clearImages(); // Clear after adding to message
       } else {
          pendingThumbnailsForSave = [];

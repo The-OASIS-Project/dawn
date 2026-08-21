@@ -88,6 +88,26 @@ int webui_rehydrate_message_into_session(session_t *session,
                                          const char *role,
                                          const char *content);
 
+/**
+ * @brief Build the persisted form of an image turn: @p text + one `\n[IMAGE:<id>]`
+ *        marker per id.
+ *
+ * The server-authoritative build-side twin of webui_collect_image_ids' parse: the
+ * daemon now persists user image turns itself (no client save), so it constructs
+ * the same marker grammar the browser used to (`\n[IMAGE:` + id + `]`, one per
+ * image, appended after the prose).  Each id is validated with
+ * image_store_validate_id; invalid ids are skipped.  Pure string assembly — no
+ * image-store fetch — so the marker format lives only in this WebUI module, never
+ * in core.
+ *
+ * @param text  Clean user text (the prose half).
+ * @param ids   Caller array of NUL-terminated image ids.
+ * @param count Number of ids.
+ * @return Heap string (caller frees) = text + markers, or a plain strdup(text) when
+ *         no valid ids, or NULL on OOM / NULL text.
+ */
+char *webui_build_image_marker_content(const char *text, const char ids[][IMAGE_ID_LEN], int count);
+
 #ifdef __cplusplus
 }
 #endif

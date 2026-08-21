@@ -1533,9 +1533,18 @@ void handle_search_conversations(ws_connection_t *conn, struct json_object *payl
  * MESSAGE-ROW OWNERSHIP MAP (one tool-using turn writes several `messages` rows from
  * three different writers — keep these partitions disjoint to avoid double-writes/drops):
  *
- *   - User turn .......... CLIENT here (handle_save_message), EXCEPT a vision turn, which
- *                          text_input_dispatch.c persists server-side (it owns the image
- *                          markers); the client skips the save when vision_image_count > 0.
+ *   - User turn .......... DAEMON.  Every TYPED/text-dispatch user turn is persisted in
+ *                          text_input_dispatch.c (core_text_input_dispatch) — text and image
+ *                          alike; for an image turn the WebUI hands it
+ *                          `persist_content_override` = text + [IMAGE:<id>] markers (built
+ *                          from the client's image_ids).  The daemon echoes server_saved=true
+ *                          so the client never saves a user row (handle_save_message no longer
+ *                          writes them).  Durability is now load-bearing on conv_id > 0 at
+ *                          dispatch (a conv_id==0 dispatch persists nothing — same as the old
+ *                          client path when no conversation existed).  Voice/ASR user turns are
+ *                          a SEPARATE server-side writer (webui_audio.c persists the transcript
+ *                          directly, not via core_text_input_dispatch) — still one writer per
+ *                          row, just a different one for that path.
  *   - Tool iteration rows  DAEMON, via the persist hook (persist_appended_tool_turn →
  *     (assistant+tool) .... webui_tool_persist_cb), once per LLM tool-loop iteration; this
  *                          is also where per-iteration display-only `reasoning` is attached.
@@ -1585,6 +1594,20 @@ void handle_save_message(ws_connection_t *conn, struct json_object *payload) {
    if (!role || (strcmp(role, "user") != 0 && strcmp(role, "assistant") != 0)) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error", json_object_new_string("Invalid role"));
+      json_object_object_add(response, "payload", resp_payload);
+      send_json_response(conn, response);
+      json_object_put(response);
+      return;
+   }
+
+   /* User turns are DAEMON-persisted now (server-authoritative — see the OWNERSHIP
+    * MAP above; text_input_dispatch.c writes every user turn, image markers included).
+    * A client user-role save is therefore a no-op: the row already exists and the
+    * turn echoed server_saved=true.  Accept-and-drop (answer success so a stale client
+    * doesn't retry) rather than write a duplicate row.  Mirrors the job-conv drop below. */
+   if (strcmp(role, "user") == 0) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+      json_object_object_add(resp_payload, "conversation_id", json_object_new_int64(conv_id));
       json_object_object_add(response, "payload", resp_payload);
       send_json_response(conn, response);
       json_object_put(response);

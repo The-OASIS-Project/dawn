@@ -3367,7 +3367,8 @@ void handle_text_message(ws_connection_t *conn,
                          const char **vision_images,
                          const size_t *vision_image_sizes,
                          const char **vision_mimes,
-                         int vision_image_count) {
+                         int vision_image_count,
+                         const char *persist_content) {
    (void)len; /* Length already validated by caller */
 
    /* SECURITY: Require authentication for text processing */
@@ -3399,7 +3400,8 @@ void handle_text_message(ws_connection_t *conn,
     * flag right before dispatch and the prompt builder omits the ASR hint. */
    int ret = webui_process_text_input_with_vision(conn->session, text, vision_images,
                                                   vision_image_sizes, vision_mimes,
-                                                  vision_image_count, /*input_was_voice=*/false);
+                                                  vision_image_count, persist_content,
+                                                  /*input_was_voice=*/false);
    if (ret != 0) {
       send_error_impl(conn->wsi, "PROCESSING_ERROR", "Failed to process text input");
    }

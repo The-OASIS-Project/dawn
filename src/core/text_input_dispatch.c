@@ -85,24 +85,23 @@ char *core_text_input_dispatch(session_t *session,
 
    /* Step 2: persist to conv_db if requested.  The conv_db row ID is
     * stamped back into the in-memory history entry so subsequent
-    * memory-extraction / context-injection code paths can reference
-    * it.
+    * memory-extraction / context-injection code paths can reference it.
     *
-    * EXCEPTION — vision turns: skip the server-side persist when the turn
-    * carries images and defer to the browser's client save.  The daemon
-    * only has the raw text here, not the image IDs (the browser holds them
-    * from the /api/images upload), so a server save would write a text-only
-    * row AND its server_saved=true echo would make the browser skip its own
-    * richer save — dropping the [IMAGE:img_id] markers.  Letting the client
-    * save win keeps the image references in the persisted message so they
-    * re-render on reload (and can later be rehydrated into the LLM history).
-    * The client save path (handle_save_message) stamps the msg_id itself, so
-    * nothing is lost by skipping it here.  Non-WebUI callers (messaging) pass
-    * vision_image_count == 0 and are unaffected. */
+    * Server-authoritative: EVERY user turn is persisted here (there is no
+    * vision exception — the daemon owns user-turn persistence for all payload
+    * shapes).  For an image turn the WebUI hands us `persist_content_override`
+    * = `text` + `[IMAGE:<id>]` markers so the images re-render on reload; the
+    * in-memory history (Step 1) and the transcript echo keep the clean `text`.
+    * The persisted-vs-echoed split is deliberate: `persisted == true` makes the
+    * echo carry server_saved=true, which is what tells the browser NOT to
+    * double-save.  Non-WebUI callers (messaging) leave the override NULL and
+    * persist plain text. */
    bool persisted = false;
-   if (opts && opts->conversation_id > 0 && vision_image_count == 0) {
+   if (opts && opts->conversation_id > 0) {
+      const char *persist_text = opts->persist_content_override ? opts->persist_content_override
+                                                                : text;
       int64_t msg_id = 0;
-      if (conv_db_add_message_ex(opts->conversation_id, opts->auth_user_id, "user", text,
+      if (conv_db_add_message_ex(opts->conversation_id, opts->auth_user_id, "user", persist_text,
                                  &msg_id) == AUTH_DB_SUCCESS) {
          persisted = true;
          session_stamp_last_message_id(session, "user", msg_id);

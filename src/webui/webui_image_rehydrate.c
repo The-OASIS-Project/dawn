@@ -89,6 +89,35 @@ static bool append_image_url_part(struct json_object *arr, const char *data_uri)
    return true;
 }
 
+char *webui_build_image_marker_content(const char *text,
+                                       const char ids[][IMAGE_ID_LEN],
+                                       int count) {
+   if (!text) {
+      return NULL;
+   }
+   strbuf_t sb;
+   strbuf_init(&sb, strlen(text) + 32);
+   if (strbuf_append(&sb, text) < 0) {
+      strbuf_free(&sb);
+      return NULL;
+   }
+   for (int i = 0; i < count; i++) {
+      /* image_store_validate_id is the single authoritative id validator — mirrors
+       * the parse side (webui_collect_image_ids), so a bad id can't forge a marker. */
+      if (!ids || !image_store_validate_id(ids[i])) {
+         OLOG_WARNING("WebUI: skipping invalid image id while building persist markers");
+         continue;
+      }
+      if (strbuf_appendf(&sb, "\n[IMAGE:%s]", ids[i]) < 0) {
+         strbuf_free(&sb);
+         return NULL;
+      }
+   }
+   char *out = strbuf_steal(&sb); /* text is non-empty, so never NULL */
+   strbuf_free(&sb);
+   return out;
+}
+
 int webui_collect_image_ids(const char *content,
                             char ids_out[][IMAGE_ID_LEN],
                             int max,

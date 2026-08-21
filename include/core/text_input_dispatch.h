@@ -72,6 +72,15 @@ typedef struct {
    int64_t conversation_id;
    int auth_user_id;
 
+   /* Optional persisted-form override for the user message.  When non-NULL, this
+    * exact string is what gets written to conv_db (and stamped) instead of `text`;
+    * the in-memory history and the transcript echo still use the clean `text`.
+    * Used by the WebUI to persist an image turn as `text` + `[IMAGE:<id>]` markers
+    * (built caller-side) so it re-renders on reload — keeping BOTH the image store
+    * AND the marker format out of core: this module just persists the string it's
+    * handed.  NULL for text-only turns and all non-WebUI callers. */
+   const char *persist_content_override;
+
    /* TTS sentence streaming.  Pass NULL to skip TTS (text-only mode).
     * When non-NULL, the LLM call uses sentence buffering and invokes
     * sentence_cb for each complete sentence with sentence_userdata. */

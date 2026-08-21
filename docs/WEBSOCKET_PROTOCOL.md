@@ -70,12 +70,14 @@ Send a text message to the AI (with optional vision images).
             "data": "<base64-encoded image>",
             "mime_type": "image/jpeg"
          }
-      ]
+      ],
+      "image_ids": ["img_a1b2c3d4e5f6"]
    }
 }
 ```
-- `images` is optional, max 5 images, max 4MB each
+- `images` is optional, max 5 images, max 4MB each — the base64 data sent to the LLM for this turn.
 - Supported MIME types: `image/jpeg`, `image/png`, `image/gif`, `image/webp`
+- `image_ids` — the ids for those images returned by the `POST /api/images` HTTP upload (see `docs/arch/subsystems/vision-documents.md`), **ordered to match `images[]`**. The daemon is authoritative for user-turn persistence: it builds `[IMAGE:<id>]` markers from these ids and persists the turn itself, then echoes `server_saved: true` on the transcript so the client does **not** save the user row. **Mandatory on any image turn** — an image turn sent without `image_ids` persists text-only and the images will not re-render on reload (there is no client-save fallback). Omit for text-only turns.
 - Requires authentication
 
 #### `cancel`
@@ -575,7 +577,8 @@ Search through conversation history.
 Response: `search_conversations_response`
 
 #### `save_message`
-Save a message to the current conversation in the database.
+Save a message to the current conversation in the database. Used by the client to
+persist the **assistant's final answer** (role `assistant`).
 ```json
 {
    "type": "save_message",
@@ -588,6 +591,12 @@ Save a message to the current conversation in the database.
    }
 }
 ```
+- **`role: "user"` is a no-op** (answers success, writes nothing). The daemon is the
+  sole writer of user rows — every typed/text-dispatch user turn is persisted server-side
+  in `text_input_dispatch.c`, image markers included, and the turn echoes `server_saved: true`.
+  A client should not send user-role saves; a stale one is accepted-and-dropped so it cannot
+  double-write. `system`/`tool` roles are rejected outright (daemon-owned).
+
 Response: `save_message_response`
 
 #### `update_context`
@@ -1274,11 +1283,16 @@ Complete message (non-streaming, or replayed history).
    "payload": {
       "role": "user|assistant|satellite_response",
       "text": "Hello, how are you?",
-      "replay": true
+      "replay": true,
+      "server_saved": true
    }
 }
 ```
 - `replay`: true when sending conversation history on reconnect
+- `server_saved`: present and `true` on a user-turn echo when the daemon already persisted
+  the row (the normal case — the daemon owns user-turn persistence). The client uses it to
+  skip its own save. The echo `text` is the clean user text; any `[IMAGE:<id>]` markers were
+  persisted server-side, not sent here.
 
 #### `stream_start`
 Start of LLM token stream.
@@ -1420,6 +1434,27 @@ Notification that conversation context was reset (via tool).
 ```json
 {"type": "conversation_reset"}
 ```
+
+#### `context_citations`
+Memory-citation signal (feature-gated on `[memory] citation_enabled`). Emitted at turn
+end when the model cited ≥1 injected memory, so a "Context for this turn" panel can
+gold-highlight the rows the model actually used. Delivered only to the WEBUI session on
+the matching active conversation.
+```json
+{
+   "type": "context_citations",
+   "conversation_id": 1163,
+   "turn_id": 23474,
+   "cited_item_ids": ["fact:8502", "summary:2496"]
+}
+```
+- Fields are flat at the root (not under `payload`).
+- `turn_id` is the triggering user message id; it pairs this frame to the per-turn
+  focus block (the `context_injection` panel broadcast) by `(conversation_id, turn_id)`.
+  `turn_id` is globally unique, so a consumer can match on it alone.
+- `cited_item_ids` are the **validated** cited subset (hallucinated/out-of-range ordinals
+  are already dropped server-side); each maps to a focus-block row's `item_id`. Only memory
+  rows carry a citeable `item_id`.
 
 ---
 

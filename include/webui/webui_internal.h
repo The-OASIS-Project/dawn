@@ -412,7 +412,8 @@ void handle_text_message(ws_connection_t *conn,
                          const char **vision_images,
                          const size_t *vision_image_sizes,
                          const char **vision_mimes,
-                         int vision_image_count);
+                         int vision_image_count,
+                         const char *persist_content);
 
 /**
  * @brief Handle a `get_metrics` message — emit the current session-metrics

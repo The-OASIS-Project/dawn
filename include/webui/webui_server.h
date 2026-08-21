@@ -544,6 +544,7 @@ int webui_process_text_input_with_vision(struct session *session,
                                          const size_t *vision_image_sizes,
                                          const char **vision_mimes,
                                          int vision_image_count,
+                                         const char *persist_content,
                                          bool input_was_voice);
 
 /* =============================================================================
