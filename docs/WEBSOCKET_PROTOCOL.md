@@ -100,6 +100,10 @@ Reconnect to an existing session using a stored token.
 - If token is valid, session is restored with conversation history
 - If token is invalid/expired, a new session is created
 - `audio_codecs` is optional, used to detect Opus support
+- **Single-connection-per-session:** if the target session is already held by another
+  live connection, that connection is **evicted** — it receives a `session_superseded`
+  frame + a `4001` close (see below). Last deliberate reconnect wins; the reconnecting
+  client gets `reconnected:true` on its `session` frame.
 
 #### `capabilities_update`
 Update client capabilities after initial connection.
@@ -1201,10 +1205,38 @@ Session token and auth state (sent on connect/reconnect).
       "token": "a1b2c3d4...",
       "authenticated": true,
       "username": "alice",
-      "is_admin": false
+      "is_admin": false,
+      "reconnected": true,
+      "session_id": 42
    }
 }
 ```
+- `reconnected` — `true` when the connection adopted its **own** existing session via a
+  valid reconnect token; `false` when it landed on a **fresh** session (server restart,
+  idle-expiry, or a reconnect that was evicted onto a new session). Clients use it to
+  decide recovery: `reconnected:false` → issue `load_conversation` to rebuild LLM
+  context; `true` → the lightweight `set_active_conversation` re-anchor suffices.
+  Feature-detect it (older servers omit it → treat as "load").
+- `session_id` — the adopted session's numeric id (correlation). Emitted **only on the
+  authenticated frame** (omitted pre-auth).
+
+#### `session_superseded`
+Another connection (a second tab, or the same browser reconnecting) has taken over this
+session, so this connection is about to be closed. Emitted **immediately before** the
+server closes the socket with WS close code **`4001` "superseded"**.
+```json
+{
+   "type": "session_superseded",
+   "payload": { "reason": "superseded" }
+}
+```
+- Both signals are sent — the data frame **and** the 4001 close code — because a reverse
+  proxy (dev http-proxy, nginx) **strips a custom WS close code** (a proxied browser sees
+  a generic `1006`). The data frame proxies through intact, so it is the proxy-robust
+  signal; the 4001 code covers the same-origin/prod path.
+- Client contract: on this frame **or** `close.code === 4001`, do **not** auto-reconnect
+  (that would ping-pong the two tabs) — show a takeover state and reclaim only on an
+  explicit user gesture (which cleanly evicts the other connection). `reason` is optional.
 
 #### `config`
 WebUI configuration (sent after session).

@@ -110,7 +110,11 @@ typedef struct {
                                                  * conn_get_session/conn_set_session for
                                                  * cross-thread access) */
    char session_token[WEBUI_SESSION_TOKEN_LEN]; /* Reconnection token */
-   uint8_t *audio_buffer;                       /* Opus audio accumulation */
+   bool session_was_reconnected; /* True iff this conn adopted its OWN existing session via a
+                                  * reconnect token (vs a fresh/throwaway auto-create); emitted
+                                  * as `reconnected` on the session frame so the client knows
+                                  * whether to load_conversation (fresh) or just re-anchor. */
+   uint8_t *audio_buffer;        /* Opus audio accumulation */
    size_t audio_buffer_len;
    size_t audio_buffer_capacity;
    bool in_binary_fragment; /* True if receiving fragmented binary frame */
@@ -439,6 +443,24 @@ bool handle_smart_home_message(ws_connection_t *conn,
  * webui_message_dispatch.c on session_init / login.
  */
 void queue_init_messages(ws_connection_t *conn, const char *token);
+
+/* Private-range (RFC 6455 4000-4999) WS close code sent to a connection whose
+ * session a newer reconnect has taken over.  The client reads event.code === 4001
+ * in onclose and backs off (does NOT auto-reconnect) instead of re-stealing the
+ * session, which would ping-pong two tabs.  Kept in sync with www/js client. */
+#define WEBUI_CLOSE_SUPERSEDED 4001
+
+/**
+ * @brief Evict the connection currently owning @p existing so a newer reconnect
+ *        can take over, closing it with WS code 4001 "superseded".
+ *
+ * No-op when @p existing has no owner, the owner IS @p new_conn, or the owner has
+ * no live wsi.  The caller assigns `existing->client_data = new_conn` immediately
+ * after; the evicted connection's LWS_CALLBACK_CLOSED then sees it is no longer the
+ * owner (client_data != it) and leaves the session intact, only dropping its own
+ * ref.  Must run on the lws service thread (reconnect dispatch).
+ */
+void webui_evict_session_owner(session_t *existing, ws_connection_t *new_conn);
 
 /**
  * @brief Validate base64-encoded image data (security-hardened).

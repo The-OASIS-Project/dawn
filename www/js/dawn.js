@@ -269,6 +269,17 @@
                }
                break;
             }
+            case 'session_superseded':
+               // Another tab/device reconnected and took over this session. This is
+               // the proxy-robust takeover signal — a reverse proxy strips the 4001
+               // close code down to a generic 1006, so we can't rely on the code
+               // alone. Mark superseded so the close that follows this frame backs
+               // off (no auto-reconnect), and show the takeover state now. Reclaim
+               // is a deliberate click on the connection status (forceReconnect).
+               console.log('Session superseded by another connection (data frame)');
+               DawnWS.markSuperseded();
+               updateConnectionStatus('superseded', (msg.payload && msg.payload.reason) || null);
+               break;
             case 'session':
                console.log('Session token received');
                DawnStore.set(DawnStore.KEYS.SESSION_TOKEN, msg.payload.token);
@@ -324,11 +335,20 @@
                if (typeof DawnAlwaysOn !== 'undefined') {
                   DawnAlwaysOn.resumeAfterReconnectIfNeeded();
                }
-               // Restore active conversation context (backend session may have lost it on restart)
-               // This loads the conversation history into the LLM context so subsequent
-               // messages have proper context
+               // Restore active conversation context. Three cases:
+               //  - FRESH session (reconnected:false — restart/idle-expiry/evicted-to-fresh):
+               //    backend has no LLM context → full load_conversation (also re-renders).
+               //  - RECLAIM after takeover: another tab held the session and may have added
+               //    turns behind this tab's back → full load_conversation to RE-RENDER the
+               //    (possibly stale) transcript, even though the backend still has context.
+               //  - Normal TRUE reconnect (display already current): skip the reload, just
+               //    lightweight re-anchor.
+               // Feature-detect: an older backend omits `reconnected`, so absent === load
+               // (prior always-restore behavior). consumeReclaiming() is a one-shot.
+               const reclaiming = DawnWS.consumeReclaiming ? DawnWS.consumeReclaiming() : false;
                const savedConvId = DawnHistory.getActiveConversationId();
                if (
+                  (msg.payload.reconnected !== true || reclaiming) &&
                   savedConvId &&
                   DawnState.authState.authenticated &&
                   savedConvId !== restoredConvIdThisConnection
@@ -336,9 +356,32 @@
                   // First 'session' of this connection for this conversation — restore once.
                   // Later duplicate 'session' messages (capability update) are skipped.
                   restoredConvIdThisConnection = savedConvId;
-                  console.log('Restoring active conversation:', savedConvId);
+                  console.log(
+                     reclaiming
+                        ? 'Reclaim after takeover — full reload:'
+                        : 'Restoring active conversation:',
+                     savedConvId
+                  );
                   DawnWS.send({
                      type: 'load_conversation',
+                     payload: { conversation_id: savedConvId },
+                  });
+               } else if (
+                  msg.payload.reconnected === true &&
+                  savedConvId &&
+                  DawnState.authState.authenticated &&
+                  savedConvId !== restoredConvIdThisConnection
+               ) {
+                  // True reconnect: the server session still holds LLM context, so we
+                  // skip the history reload — but the reconnected connection is a NEW
+                  // ws_connection with active_conversation_id=0, so we must lightweight
+                  // re-anchor it (no replay). Without this a voice-first turn would
+                  // persist to conv=0 (lost on reload / orphan tripwire); text turns
+                  // self-heal by carrying conversation_id, voice turns don't.
+                  restoredConvIdThisConnection = savedConvId;
+                  console.log('Re-anchoring active conversation (no reload):', savedConvId);
+                  DawnWS.send({
+                     type: 'set_active_conversation',
                      payload: { conversation_id: savedConvId },
                   });
                }
@@ -1385,10 +1428,22 @@
       } else if (status === 'connecting') {
          DawnElements.connectionStatus.textContent = 'Connecting...';
       } else {
-         // Show disconnect reason if available (truncate for display)
-         DawnElements.connectionStatus.textContent = reason
-            ? 'Disconnected: ' + (reason.length > 30 ? reason.substring(0, 30) + '...' : reason)
-            : 'Disconnected';
+         if (status === 'superseded') {
+            // Another tab/device took over this session. Reuse the 'disconnected'
+            // visual (not connected here), but tell the user how to reclaim — the
+            // connection-status click handler forceReconnects (evicting the other).
+            DawnElements.connectionStatus.className = 'disconnected';
+            // Short label to fit the status pill (sized for "Connecting..."); the full
+            // explanation lives in the tooltip.
+            DawnElements.connectionStatus.textContent = 'Use DAWN here';
+            DawnElements.connectionStatus.title =
+               'This session is active in another tab or device. Click to make it active here.';
+         } else {
+            // Show disconnect reason if available (truncate for display)
+            DawnElements.connectionStatus.textContent = reason
+               ? 'Disconnected: ' + (reason.length > 30 ? reason.substring(0, 30) + '...' : reason)
+               : 'Disconnected';
+         }
          // Tear down stale phone call UI — a persistent "On call" pill must not
          // outlive the connection that authenticates its state.
          if (typeof DawnPhone !== 'undefined') {
@@ -2427,9 +2482,12 @@
       });
       DawnElements.connectionStatus.style.cursor = 'pointer';
 
-      // Reconnect on visibility change
+      // Reconnect on visibility change — but NOT if the server superseded us
+      // (another tab took over). Otherwise focusing the superseded tab would
+      // silently re-steal the session and restart the tab war. Reclaim is only via
+      // an explicit click on the connection status (forceReconnect).
       document.addEventListener('visibilitychange', function () {
-         if (!document.hidden && !DawnWS.isConnected()) {
+         if (!document.hidden && !DawnWS.isConnected() && !DawnWS.isSuperseded()) {
             DawnWS.forceReconnect();
          }
       });

@@ -333,6 +333,39 @@ session_t *lookup_session_by_token(const char *token) {
    return NULL;
 }
 
+void webui_evict_session_owner(session_t *existing, ws_connection_t *new_conn) {
+   if (!existing) {
+      return;
+   }
+   ws_connection_t *old = (ws_connection_t *)existing->client_data;
+   if (!old || old == new_conn || !old->wsi) {
+      return; /* no live owner, or the same connection reconnecting to itself */
+   }
+   OLOG_INFO("WebUI: Evicting superseded connection from session %u (a newer reconnect took over)",
+             existing->session_id);
+
+   /* Signal the takeover with a DATA frame FIRST, then a WS close.  Both are
+    * needed: the 4001 close code is the clean signal on the same-origin/prod path,
+    * but reverse proxies (Vite dev http-proxy, nginx) STRIP a custom WS close code
+    * — a proxied browser sees a generic 1006 and would treat it as a normal drop
+    * and auto-reconnect (re-storming).  A data frame proxies through intact, so it
+    * is the proxy-robust signal the client keys off.  Send the frame synchronously
+    * so it is buffered before the close, then arm PENDING_TIMEOUT_CLOSE_SEND, which
+    * waits for pending output to flush before actually closing. */
+   send_json_message(old->wsi,
+                     "{\"type\":\"session_superseded\",\"payload\":{\"reason\":\"superseded\"}}");
+
+   /* Clean WS close with the private-range code the client keys off.  Same pattern
+    * as the admin force-disconnect below: set the reason, then arm the close send
+    * on the lws service thread.  Do NOT clear old->session — the evicted
+    * connection's close handler must still see a non-NULL session to release its
+    * per-connection ref (the ownership guard there leaves the session intact since
+    * client_data will already point at new_conn). */
+   lws_close_reason(old->wsi, (enum lws_close_status)WEBUI_CLOSE_SUPERSEDED,
+                    (unsigned char *)"superseded", 10);
+   lws_set_timeout(old->wsi, PENDING_TIMEOUT_CLOSE_SEND, 3);
+}
+
 /* Discovery cache and allowed path prefixes moved to webui_config.c */
 
 /* =============================================================================
@@ -825,12 +858,27 @@ static int callback_websocket(struct lws *wsi,
                    closing_session ? closing_session->session_id : 0);
 
          if (closing_session) {
-            /* Client left: gate emission only.  Post background-jobs Phase 1 the
+            /* OWNERSHIP GUARD: only tear down session-visible state (mark
+             * disconnected + drop the client_data pointer) if THIS connection is
+             * still the session's current owner.  If another connection has since
+             * reconnected and taken ownership (client_data != conn), this is a
+             * stale/superseded connection — clobbering the session here would
+             * kill the LIVE owner's frame delivery and trigger a reconnect storm
+             * (the one-connection-per-session collision).  Either way we always
+             * drop OUR ref and clear conn->session, since the ref is per-connection.
+             *
+             * Client left: gate emission only.  Post background-jobs Phase 1 the
              * in-flight turn KEEPS generating and is persisted server-side — we
              * do NOT cancel it here (that is session_teardown_flags' job, on
              * actual destroy).  A reconnect or a new request supersedes it. */
-            session_mark_disconnected(closing_session);
-            closing_session->client_data = NULL;
+            if (closing_session->client_data == conn) {
+               session_mark_disconnected(closing_session);
+               closing_session->client_data = NULL;
+            } else {
+               OLOG_INFO("WebUI: Superseded connection closing — session %u owned by another "
+                         "connection, leaving its state intact",
+                         closing_session->session_id);
+            }
 
             /* Release our reference to the session.
              * Session manager will clean it up when ref_count reaches 0. */
@@ -941,7 +989,12 @@ static int callback_websocket(struct lws *wsi,
                         existing_session = lookup_session_by_token(token);
                         if (existing_session) {
                            is_reconnect = true;
+                           /* Evict any other connection that still owns this session
+                            * BEFORE taking ownership, so the superseded tab backs off
+                            * (WS 4001) instead of fighting to re-steal it. */
+                           webui_evict_session_owner(existing_session, conn);
                            conn->session = existing_session;
+                           conn->session_was_reconnected = true;
                            existing_session->client_data = conn;
                            existing_session->disconnected = false;
                            strncpy(conn->session_token, token, WEBUI_SESSION_TOKEN_LEN - 1);
@@ -1054,6 +1107,7 @@ static int callback_websocket(struct lws *wsi,
                                              prompt ? prompt : get_remote_command_prompt());
                   free(prompt);
                   conn->session->client_data = conn;
+                  conn->session_was_reconnected = false; /* brand-new session, not a reconnect */
 
                   /* Check for Opus codec support */
                   conn->use_opus = check_opus_capability(payload);
@@ -3309,6 +3363,9 @@ static bool webui_conn_create_session(ws_connection_t *conn) {
 
    session_set_metrics_user(conn->session, conn->auth_user_id);
    conn->session->client_data = conn;
+   /* Fresh/throwaway session — NOT the client's own reconnected one, so the
+    * session frame reports reconnected:false and the client load_conversations. */
+   conn->session_was_reconnected = false;
 
    /* Re-enable missed-notification replay on the new session. Any notifications
     * that arrived during the conversation-session-expired window would have

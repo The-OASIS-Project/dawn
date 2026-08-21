@@ -806,7 +806,17 @@ void webui_send_pong(ws_connection_t *conn,
                                                 now.tv_nsec / 1000000));
    json_object_object_add(response, "payload", out);
 
-   send_json_response(conn, response);
+   /* Deliver the pong DIRECTLY to this connection's socket — NOT via
+    * send_json_response(), which routes through session->client_data.  A pong must
+    * reach the exact connection that pinged: if this connection is not the current
+    * client_data owner (a superseded/detached tab), routing via client_data would
+    * send its pong to the OWNER's socket, so it would see silence and its watchdog
+    * would false-fire — the reconnect-storm D1.  Safe: this runs on the lws service
+    * thread (ping dispatch). */
+   const char *pong_json = json_object_to_json_string(response);
+   if (pong_json && conn->wsi) {
+      send_json_message(conn->wsi, pong_json);
+   }
    json_object_put(response);
 
    /* Touch the session so a live-but-idle client keeps its last_activity fresh

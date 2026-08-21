@@ -462,6 +462,13 @@ void send_force_logout_impl(struct lws *wsi, const char *reason) {
 void send_session_token_impl(ws_connection_t *conn, const char *token) {
    char json[512];
 
+   /* reconnected: did this connection adopt its OWN existing session (true) or land
+    * on a fresh/throwaway one (false — restart, idle-expiry, or evicted-to-fresh)?
+    * The client uses it to decide load_conversation vs a lightweight re-anchor.
+    * session_id lets the client correlate. */
+   const char *reconnected = conn->session_was_reconnected ? "true" : "false";
+   uint32_t session_id = conn->session ? conn->session->session_id : 0;
+
    /* Include auth state in session response to avoid separate config fetch */
    if (conn->authenticated) {
       /* Fetch is_admin from DB (not cached to prevent stale state) */
@@ -472,9 +479,13 @@ void send_session_token_impl(ws_connection_t *conn, const char *token) {
       }
       snprintf(json, sizeof(json),
                "{\"type\":\"session\",\"payload\":{\"token\":\"%s\","
-               "\"authenticated\":true,\"username\":\"%s\",\"is_admin\":%s}}",
-               token, conn->username, is_admin ? "true" : "false");
+               "\"authenticated\":true,\"username\":\"%s\",\"is_admin\":%s,"
+               "\"reconnected\":%s,\"session_id\":%u}}",
+               token, conn->username, is_admin ? "true" : "false", reconnected, session_id);
    } else {
+      /* Unauthenticated clients don't drive reconnect/load_conversation logic (it's
+       * auth-gated), so omit reconnected/session_id here — no reason to hand the
+       * global session counter to a pre-auth observer. */
       snprintf(json, sizeof(json),
                "{\"type\":\"session\",\"payload\":{\"token\":\"%s\","
                "\"authenticated\":false}}",

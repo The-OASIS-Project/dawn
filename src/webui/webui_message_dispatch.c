@@ -804,7 +804,12 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                      unregister_tokens_for_session(abandoned_id);
                      OLOG_INFO("WebUI: Destroyed abandoned session %u", abandoned_id);
                   }
+                  /* Evict any other connection still owning this session BEFORE
+                   * taking ownership, so the superseded tab backs off (WS 4001)
+                   * rather than fighting to re-steal it. */
+                  webui_evict_session_owner(existing, conn);
                   conn->session = existing;
+                  conn->session_was_reconnected = true;
                   existing->client_data = conn;
                   existing->disconnected = false;
                   strncpy(conn->session_token, token, WEBUI_SESSION_TOKEN_LEN - 1);
@@ -850,6 +855,10 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                                                    prompt ? prompt : get_remote_command_prompt());
                         free(prompt);
                         conn->session->client_data = conn;
+                        /* Fresh session (reconnect token stale) — not a true reconnect,
+                         * so the session frame must report reconnected:false.  Enforced
+                         * locally at all four fresh-create sites. */
+                        conn->session_was_reconnected = false;
                         if (generate_session_token(conn->session_token) != 0) {
                            OLOG_ERROR("WebUI: Failed to generate session token");
                            session_destroy(conn->session->session_id);
