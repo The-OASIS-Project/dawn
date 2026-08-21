@@ -440,6 +440,12 @@ int build_focus_block(int user_id,
                        sizeof(local_stash.entries[0].item_id) - 1);
                local_stash.entries[m_ordinal - 1]
                    .item_id[sizeof(local_stash.entries[0].item_id) - 1] = '\0';
+               /* Capture the ranker composite this item was injected at (parallel
+                * score_breakdowns[i]); FOCUS_SCORE_NA if the breakdown is absent so
+                * the audit can tell "no score recorded" from a real 0. */
+               local_stash.entries[m_ordinal - 1].final_score =
+                   (result.score_breakdowns != NULL) ? result.score_breakdowns[i].final_score
+                                                     : FOCUS_SCORE_NA;
                local_stash.count = m_ordinal;
             }
          } else {

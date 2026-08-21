@@ -2336,6 +2336,12 @@ int session_dispatch_user_turn(session_t *session, const char *user_turn_text) {
     * focus block short-circuits cannot inherit the previous turn's map. */
    session_citation_stash_clear(session);
 
+   /* Reset the live <cited> stream-strip filter at the same turn boundary.  It
+    * must be clean before this turn's first stream delta; resetting in
+    * webui_send_stream_start would be too late (the strip runs before start is
+    * triggered on first content) and could wipe a mid-turn held-back partial. */
+   text_filter_cited_reset(&session->cited_tag_filter);
+
    session_prompt_builder_t builder = atomic_load_explicit(&s_prompt_builder, memory_order_acquire);
    if (builder == NULL)
       return SUCCESS; /* No builder registered — leave system prompt as-is. */

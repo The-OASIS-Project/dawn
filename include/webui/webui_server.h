@@ -731,6 +731,26 @@ void webui_broadcast_context_injection(int user_id,
                                        int64_t turn_id,
                                        const focus_compose_result_t *result);
 
+/**
+ * @brief Push the validated cited item_ids for a turn to the browser.
+ *
+ * Companion to context_injection: after the response finalizer parses the
+ * model's `<cited>` tag, this delivers the cited subset so the Context panel can
+ * gold-highlight the rows that were actually used.  Keyed to context_injection by
+ * (@p conv_id, @p turn_id) — turn_id is the triggering user message id on both
+ * paths — and matched per row by item_id.  No-op when the CSV is empty.  A weak
+ * no-op lives in memory_citation.c so the Layer-2 capture stays WebUI-agnostic.
+ *
+ * @param user_id       Target user (> 0)
+ * @param conv_id       Active conversation id (> 0)
+ * @param turn_id       Triggering user message id (== context_injection turn_id)
+ * @param cited_ids_csv Validated cited item_ids, comma-separated ("fact:8502,...")
+ */
+void webui_broadcast_context_citations(int user_id,
+                                       int64_t conv_id,
+                                       int64_t turn_id,
+                                       const char *cited_ids_csv);
+
 #ifdef __cplusplus
 }
 #endif

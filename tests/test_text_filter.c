@@ -27,9 +27,11 @@
 #include "unity.h"
 
 static cmd_tag_filter_state_t s_state;
+static cited_tag_filter_state_t s_cited;
 
 void setUp(void) {
    text_filter_reset(&s_state);
+   text_filter_cited_reset(&s_cited);
 }
 
 void tearDown(void) {
@@ -171,6 +173,149 @@ static void test_deeply_nested(void) {
    TEST_ASSERT_EQUAL_STRING("", buf);
 }
 
+/* ── <cited> memory-citation stream filter ──────────────────────────────── */
+
+/* Feed one delta; append the stripped output onto `acc`. */
+static void cited_feed(char *acc, size_t acc_size, const char *delta) {
+   char tmp[256];
+   text_filter_cited_tags_to_buffer(&s_cited, delta, tmp, sizeof(tmp));
+   strncat(acc, tmp, acc_size - strlen(acc) - 1);
+}
+
+/* Flush at stream end; append any released trailing bytes onto `acc`. */
+static void cited_flush(char *acc, size_t acc_size) {
+   char tmp[CITED_TAG_BUF_SIZE];
+   text_filter_cited_flush_to_buffer(&s_cited, tmp, sizeof(tmp));
+   strncat(acc, tmp, acc_size - strlen(acc) - 1);
+}
+
+static void test_cited_no_tag(void) {
+   char out[128] = "";
+   cited_feed(out, sizeof(out), "just a normal answer");
+   cited_flush(out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("just a normal answer", out);
+}
+
+static void test_cited_whole_tag_one_delta(void) {
+   char out[128] = "";
+   cited_feed(out, sizeof(out), "The answer.<cited>M1,M5,M11</cited>");
+   cited_flush(out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("The answer.", out);
+}
+
+static void test_cited_split_opener_across_deltas(void) {
+   /* The exact leak shape: opener split "<cit" | "ed>..." */
+   char out[128] = "";
+   cited_feed(out, sizeof(out), "The answer.<cit");
+   cited_feed(out, sizeof(out), "ed>M1,M5,M11</cited>");
+   cited_flush(out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("The answer.", out);
+}
+
+static void test_cited_split_closer_across_deltas(void) {
+   char out[128] = "";
+   cited_feed(out, sizeof(out), "answer<cited>M1</cit");
+   cited_feed(out, sizeof(out), "ed>");
+   cited_flush(out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("answer", out);
+}
+
+static void test_cited_char_by_char(void) {
+   /* Worst-case fragmentation: one byte per delta. Nothing must leak. */
+   const char *s = "Hi.<cited>M1,M5,M11</cited>";
+   char out[128] = "";
+   char one[2] = { 0, 0 };
+   for (const char *p = s; *p; p++) {
+      one[0] = *p;
+      cited_feed(out, sizeof(out), one);
+   }
+   cited_flush(out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("Hi.", out);
+}
+
+static void test_cited_false_opener_passes_through(void) {
+   /* A '<' run that is NOT the tag must be emitted intact. */
+   char out[128] = "";
+   cited_feed(out, sizeof(out), "1 < 2 and <ci is fine");
+   cited_flush(out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("1 < 2 and <ci is fine", out);
+}
+
+static void test_cited_partial_opener_at_end_flushed(void) {
+   /* A reply legitimately ending in a tag-prefix must NOT be lost. */
+   char out[128] = "";
+   cited_feed(out, sizeof(out), "ends with <cit");
+   cited_flush(out, sizeof(out)); /* no more input — held bytes were real text */
+   TEST_ASSERT_EQUAL_STRING("ends with <cit", out);
+}
+
+static void test_cited_truncated_tag_dropped(void) {
+   /* Opener completed but closer never arrived (truncated stream): drop the tail. */
+   char out[128] = "";
+   cited_feed(out, sizeof(out), "answer<cited>M1,M5");
+   cited_flush(out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("answer", out);
+}
+
+static void test_cited_reset_between_turns(void) {
+   char out[128] = "";
+   cited_feed(out, sizeof(out), "turn one<cited>M1</cited>");
+   cited_flush(out, sizeof(out));
+   text_filter_cited_reset(&s_cited); /* dispatch-entry boundary */
+   char out2[128] = "";
+   cited_feed(out2, sizeof(out2), "turn two clean");
+   cited_flush(out2, sizeof(out2));
+   TEST_ASSERT_EQUAL_STRING("turn one", out);
+   TEST_ASSERT_EQUAL_STRING("turn two clean", out2);
+}
+
+static void test_cited_double_open_bracket(void) {
+   /* "<<cited>" — the held '<' must NOT be dropped when the next '<' restarts. */
+   char out[128] = "";
+   cited_feed(out, sizeof(out), "5 <<cited>M1</cited>");
+   cited_flush(out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("5 <", out);
+}
+
+static void test_cited_double_open_bracket_split(void) {
+   /* Held '<' from one delta, '<cited>' opener in the next — '<' must survive. */
+   char out[128] = "";
+   cited_feed(out, sizeof(out), "a<");
+   cited_feed(out, sizeof(out), "<cited>M1</cited>");
+   cited_flush(out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("a<", out);
+}
+
+static void test_cited_stray_bracket_in_closer(void) {
+   /* Stray '<' inside the tag body must restart the closer match, not leak. */
+   char out[128] = "";
+   cited_feed(out, sizeof(out), "a<cited>x<y</cited>b");
+   cited_flush(out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("ab", out);
+}
+
+static void test_cited_near_full_false_opener(void) {
+   /* "<cited x>" is not the tag (space breaks the match) — must pass through. */
+   char out[128] = "";
+   cited_feed(out, sizeof(out), "<cited x> stays");
+   cited_flush(out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("<cited x> stays", out);
+}
+
+static void test_cited_two_blocks_one_stream(void) {
+   char out[128] = "";
+   cited_feed(out, sizeof(out), "a<cited>M1</cited>b<cited>M2</cited>c");
+   cited_flush(out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("abc", out);
+}
+
+static void test_command_double_open_bracket(void) {
+   /* Lockstep regression for the same held-'<' fix in the command filter. */
+   char buf[128];
+   filter_to_buf("5 <<command>x</command>", buf, sizeof(buf));
+   TEST_ASSERT_EQUAL_STRING("5 <", buf);
+}
+
 /* ── main ───────────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -189,5 +334,20 @@ int main(void) {
    RUN_TEST(test_reset_mid_tag);
    RUN_TEST(test_callback_receives_chunks);
    RUN_TEST(test_deeply_nested);
+   RUN_TEST(test_cited_no_tag);
+   RUN_TEST(test_cited_whole_tag_one_delta);
+   RUN_TEST(test_cited_split_opener_across_deltas);
+   RUN_TEST(test_cited_split_closer_across_deltas);
+   RUN_TEST(test_cited_char_by_char);
+   RUN_TEST(test_cited_false_opener_passes_through);
+   RUN_TEST(test_cited_partial_opener_at_end_flushed);
+   RUN_TEST(test_cited_truncated_tag_dropped);
+   RUN_TEST(test_cited_reset_between_turns);
+   RUN_TEST(test_cited_double_open_bracket);
+   RUN_TEST(test_cited_double_open_bracket_split);
+   RUN_TEST(test_cited_stray_bracket_in_closer);
+   RUN_TEST(test_cited_near_full_false_opener);
+   RUN_TEST(test_cited_two_blocks_one_stream);
+   RUN_TEST(test_command_double_open_bracket);
    return UNITY_END();
 }

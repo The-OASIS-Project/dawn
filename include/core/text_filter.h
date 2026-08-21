@@ -104,4 +104,82 @@ int text_filter_command_tags_to_buffer(cmd_tag_filter_state_t *state,
  */
 void text_filter_reset(cmd_tag_filter_state_t *state);
 
+/* =============================================================================
+ * Memory-Citation Tag Constants
+ *
+ * The `<cited>M1,M5,M11</cited>` bookkeeping tag the model appends when the
+ * memory-citation signal is on.  It is stripped from the COMPLETED response by
+ * llm_response_finalize, but WebUI/DAP2/JOB stream token-by-token, so the tag
+ * would reach the browser live (DOMPurify drops the unknown element but keeps
+ * its inner text, leaking `M1,M5,M11`) before finalization runs.  This filter is
+ * the live-stream strip seam — the streaming twin of the finalizer's strip.
+ * Unlike command tags there is no nesting: everything between the open and close
+ * is suppressed.
+ * ============================================================================= */
+
+#define CITED_TAG_OPEN "<cited>"
+#define CITED_TAG_CLOSE "</cited>"
+#define CITED_TAG_OPEN_LEN 7
+#define CITED_TAG_CLOSE_LEN 8
+#define CITED_TAG_BUF_SIZE 16 /* Enough for "</cited>" (8) + margin */
+
+/**
+ * @brief Memory-citation tag filter state.
+ *
+ * Tracks streaming state for stripping <cited>...</cited>. Must be zero-initialized
+ * before first use. No nesting; `in_tag` marks "open seen, close pending."
+ */
+typedef struct {
+   char buffer[CITED_TAG_BUF_SIZE]; /**< Partial-tag holdback buffer */
+   unsigned char len;               /**< Current partial-tag buffer length */
+   bool in_tag;                     /**< true = between <cited> and </cited> (suppressing) */
+} cited_tag_filter_state_t;
+
+/**
+ * @brief Strip <cited>...</cited> tags from streaming text.
+ *
+ * Character-by-character state machine tolerant of a tag split across chunk
+ * boundaries (e.g. "<cit" then "ed>").  Non-tag text is emitted via callback;
+ * held-back partial-opener bytes persist in @p state and surface on a later
+ * chunk (if they prove not to be a tag) or via text_filter_cited_flush_to_buffer.
+ *
+ * @param state    Filter state (zeroed before first chunk)
+ * @param text     Input chunk
+ * @param output_fn Callback to emit stripped text
+ * @param ctx      User context passed to output_fn
+ */
+void text_filter_cited_tags(cited_tag_filter_state_t *state,
+                            const char *text,
+                            text_filter_output_fn output_fn,
+                            void *ctx);
+
+/**
+ * @brief Strip <cited> tags into a fixed-size buffer.
+ *
+ * @return Length written (excluding NUL).  0 when the whole chunk was tag or was
+ *         held back pending more input.
+ */
+int text_filter_cited_tags_to_buffer(cited_tag_filter_state_t *state,
+                                     const char *text,
+                                     char *out_buf,
+                                     size_t out_size);
+
+/**
+ * @brief Flush held-back bytes at stream end into a buffer.
+ *
+ * A partial <cited> OPENER that never completed is real text and is emitted.
+ * If mid-tag (open seen, close never arrived — truncated stream), the suppressed
+ * remainder is DROPPED (citation bookkeeping, not user text).  Resets @p state.
+ *
+ * @return Length written (excluding NUL); 0 if nothing to flush.
+ */
+int text_filter_cited_flush_to_buffer(cited_tag_filter_state_t *state,
+                                      char *out_buf,
+                                      size_t out_size);
+
+/**
+ * @brief Reset citation-tag filter state (new stream / clear partial state).
+ */
+void text_filter_cited_reset(cited_tag_filter_state_t *state);
+
 #endif /* TEXT_FILTER_H */

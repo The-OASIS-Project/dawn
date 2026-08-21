@@ -37,6 +37,20 @@
  * ordinals -> ~1 KB is generous headroom. */
 #define CITE_CSV_MAX 1280
 
+/* WebUI Context-panel gold-highlight delivery.  Weak no-op here keeps this
+ * Layer-2 capture WebUI-agnostic; webui_broadcasts.c provides the strong impl
+ * (Layer 4).  When ENABLE_WEBUI is off (or no browser is connected) the call is
+ * a no-op and the audit still runs. */
+__attribute__((weak)) void webui_broadcast_context_citations(int user_id,
+                                                             int64_t conv_id,
+                                                             int64_t turn_id,
+                                                             const char *cited_ids_csv) {
+   (void)user_id;
+   (void)conv_id;
+   (void)turn_id;
+   (void)cited_ids_csv;
+}
+
 /* Append `s` to a comma-separated CSV buffer, bounded (never overflows). */
 static void csv_append(char *buf, size_t bufsz, size_t *len, const char *s) {
    if (*len >= bufsz - 1) {
@@ -54,13 +68,15 @@ static void audit_insert(int64_t conv_id,
                          int user_id,
                          const char *injected,
                          const char *cited,
+                         const char *injected_scores,
                          int dropped) {
    AUTH_DB_LOCK_OR_RETURN_VOID();
    sqlite3_stmt *stmt = NULL;
    const char *sql =
        "INSERT INTO memory_citation_audit "
-       "(conversation_id, message_id, user_id, ts, injected_ids, cited_ids, dropped_count) "
-       "VALUES (?, ?, ?, strftime('%s','now'), ?, ?, ?)";
+       "(conversation_id, message_id, user_id, ts, injected_ids, cited_ids, injected_scores, "
+       "dropped_count) "
+       "VALUES (?, ?, ?, strftime('%s','now'), ?, ?, ?, ?)";
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
       OLOG_ERROR("memory_citation: audit insert prepare failed: %s", sqlite3_errmsg(s_db.db));
       AUTH_DB_UNLOCK();
@@ -71,7 +87,8 @@ static void audit_insert(int64_t conv_id,
    sqlite3_bind_int(stmt, 3, user_id);
    sqlite3_bind_text(stmt, 4, injected ? injected : "", -1, SQLITE_TRANSIENT);
    sqlite3_bind_text(stmt, 5, cited ? cited : "", -1, SQLITE_TRANSIENT);
-   sqlite3_bind_int(stmt, 6, dropped);
+   sqlite3_bind_text(stmt, 6, injected_scores ? injected_scores : "", -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int(stmt, 7, dropped);
    if (sqlite3_step(stmt) != SQLITE_DONE) {
       OLOG_WARNING("memory_citation: audit insert failed: %s", sqlite3_errmsg(s_db.db));
    }
@@ -101,12 +118,24 @@ void memory_citation_capture(session_t *session, const char *response_text) {
       stash.count = MAX_CITATION_STASH; /* defensive */
    }
 
-   /* All surfaced item_ids -> injected CSV. */
+   /* All surfaced item_ids -> injected CSV, with a parallel CSV of the per-item
+    * final_score (same order) so the audit can split score by used-vs-unused.
+    * Both share the CITE_CSV_MAX bound; under extreme pressure `injected` (wider
+    * elements) truncates first, so a boundary row's two CSVs can differ in count.
+    * The analyzer only attributes scores when the two lengths match exactly
+    * (else it skips the row), so a mismatch loses that row's analytics but never
+    * mis-pairs a score to the wrong id. */
    char injected[CITE_CSV_MAX];
+   char inj_scores[CITE_CSV_MAX];
    size_t inj_len = 0;
+   size_t inj_scores_len = 0;
    injected[0] = '\0';
+   inj_scores[0] = '\0';
    for (int i = 0; i < stash.count; i++) {
       csv_append(injected, sizeof(injected), &inj_len, stash.entries[i].item_id);
+      char score_str[16];
+      snprintf(score_str, sizeof(score_str), "%.4f", stash.entries[i].final_score);
+      csv_append(inj_scores, sizeof(inj_scores), &inj_scores_len, score_str);
    }
 
    /* Parse EVERY <cited>…</cited> block, validating ordinals against the stash.
@@ -161,7 +190,14 @@ void memory_citation_capture(session_t *session, const char *response_text) {
    int user_id = session->metrics.user_id;
    pthread_mutex_unlock(&session->metrics_mutex);
 
-   audit_insert(conv_id, msg_id, user_id, injected, cited, dropped);
+   audit_insert(conv_id, msg_id, user_id, injected, cited, inj_scores, dropped);
+
+   /* Feed the Context panel: gold-highlight the rows the model actually cited.
+    * turn_id == msg_id (both last_user_msg_id) aligns this to the context_injection
+    * frame; per-row match is by item_id.  Only when something was cited. */
+   if (cited_count > 0) {
+      webui_broadcast_context_citations(user_id, conv_id, msg_id, cited);
+   }
 
    OLOG_INFO("memory_citation: turn audited (user=%d conv=%lld injected=%d cited=%d dropped=%d)",
              user_id, (long long)conv_id, stash.count, cited_count, dropped);

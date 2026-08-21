@@ -946,6 +946,11 @@ void webui_broadcast_context_injection(int user_id,
       json_object *item = json_object_new_object();
       json_object_object_add(item, "source_id",
                              json_object_new_string(c->source_id ? c->source_id : ""));
+      /* Per-row unique key ("fact:8502") — the SAME vocabulary the citation stash
+       * and the context_citations frame speak, so the browser can map a cited id
+       * back to its row.  Empty for non-citeable rows (calendar/document/etc.),
+       * which never carry an item_id and are never gold-highlighted. */
+      json_object_object_add(item, "item_id", json_object_new_string(c->item_id ? c->item_id : ""));
       json_object_object_add(item, "source_type",
                              json_object_new_string(focus_source_type_str(c->source_type)));
 
@@ -1052,6 +1057,85 @@ void webui_broadcast_context_injection(int user_id,
       OLOG_DEBUG("WebUI: Broadcast context_injection (user=%d conv=%lld turn=%lld items=%d) to %d "
                  "client(s)",
                  user_id, (long long)conv_id, (long long)turn_id, result->candidate_count, sent);
+   }
+}
+
+/* Phase 1 (memory citation): after a turn's <cited> tag is parsed and validated,
+ * push the cited item_ids to the browser so the Context panel can gold-highlight
+ * the rows the model actually used.  Keyed to the context_injection frame by
+ * (conversation_id, turn_id) — turn_id is last_user_msg_id on both paths — and by
+ * per-row item_id.  Strong override of the weak no-op in memory_citation.c, so the
+ * Layer-2 capture stays WebUI-agnostic.  `cited_ids_csv` is the validated cited
+ * subset ("fact:8502,summary:2496"); item_ids are opaque ASCII keys. */
+void webui_broadcast_context_citations(int user_id,
+                                       int64_t conv_id,
+                                       int64_t turn_id,
+                                       const char *cited_ids_csv) {
+   if (user_id <= 0 || conv_id <= 0 || cited_ids_csv == NULL || cited_ids_csv[0] == '\0')
+      return;
+
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("context_citations"));
+   json_object_object_add(root, "conversation_id", json_object_new_int64(conv_id));
+   json_object_object_add(root, "turn_id", json_object_new_int64(turn_id));
+
+   json_object *ids = json_object_new_array();
+   int n = 0;
+   const char *p = cited_ids_csv;
+   while (*p) {
+      const char *comma = strchr(p, ',');
+      size_t len = comma ? (size_t)(comma - p) : strlen(p);
+      if (len > 0) {
+         char id[64];
+         if (len >= sizeof(id))
+            len = sizeof(id) - 1;
+         memcpy(id, p, len);
+         id[len] = '\0';
+         json_object_array_add(ids, json_object_new_string(id));
+         n++;
+      }
+      if (!comma)
+         break;
+      p = comma + 1;
+   }
+   json_object_object_add(root, "cited_item_ids", ids);
+
+   const char *json_canonical_ro = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+   char *json_canonical = json_canonical_ro ? strdup(json_canonical_ro) : NULL;
+   json_object_put(root);
+   if (json_canonical == NULL)
+      return;
+
+   int sent = 0;
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      ws_connection_t *conn = s_active_connections[i];
+      if (!conn || !conn->session || !conn->authenticated || !conn->wsi)
+         continue;
+      if (conn->session->type != SESSION_TYPE_WEBUI)
+         continue;
+      if (conn->auth_user_id != user_id)
+         continue;
+      if (webui_get_active_conversation_id(conn->session) != conv_id)
+         continue;
+
+      char *json_copy = strdup(json_canonical);
+      if (json_copy == NULL)
+         continue;
+      ws_response_t resp = { .session = conn->session,
+                             .type = WS_RESP_JSON,
+                             .generic_json = { .json = json_copy } };
+      queue_response(&resp);
+      sent++;
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+
+   free(json_canonical);
+
+   if (sent > 0) {
+      OLOG_DEBUG("WebUI: Broadcast context_citations (user=%d conv=%lld turn=%lld cited=%d) to %d "
+                 "client(s)",
+                 user_id, (long long)conv_id, (long long)turn_id, n, sent);
    }
 }
 

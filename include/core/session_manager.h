@@ -260,7 +260,7 @@ typedef struct {
  * validation ceiling (memory.focus_injection.top_k is clamped to [1,64] in
  * config_validate.c), so every surfaced-and-numbered candidate can be stashed —
  * a smaller cap would render [M#] beyond the stash and mis-score a real citation
- * as a hallucination in the audit.  64 × 64B = 4 KB/session. */
+ * as a hallucination in the audit.  64 × 68B ≈ 4.25 KB/session. */
 #define MAX_CITATION_STASH 64
 
 /**
@@ -273,8 +273,11 @@ typedef struct {
  * false-validate a citation.  Guarded by session->history_mutex.
  */
 typedef struct {
-   char item_id[64]; /* Opaque item key, e.g. "fact:123"; matches FOCUS_ITEM_ID_BUFLEN.
-                        Static literal — session_manager.h cannot include L2 headers. */
+   char item_id[64];  /* Opaque item key, e.g. "fact:123"; matches FOCUS_ITEM_ID_BUFLEN.
+                         Static literal — session_manager.h cannot include L2 headers. */
+   float final_score; /* Ranker composite (focus_score_breakdown_t.final_score) this item
+                         was injected at — audited to measure used-vs-unused score
+                         distributions for a data-driven injection floor. */
 } citation_stash_entry_t;
 
 typedef struct {
@@ -502,6 +505,8 @@ typedef struct session {
    // Used when native tool calling is disabled (legacy command tag mode)
    cmd_tag_filter_state_t cmd_tag_filter;  // State for text_filter_command_tags()
    bool cmd_tag_filter_bypass;             // Cached: true if native tools enabled (skip filtering)
+   cited_tag_filter_state_t
+       cited_tag_filter;  // Live-stream <cited>…</cited> strip (all stream paths)
 
    // Active tool tracking (for parallel tool status display)
    char active_tools[8][32];     // Tool names currently executing (max 8 parallel)

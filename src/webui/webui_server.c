@@ -2395,6 +2395,54 @@ int webui_filter_command_tags(session_t *session,
    return text_filter_command_tags_to_buffer(&session->cmd_tag_filter, text, out_buf, out_size);
 }
 
+/* Per-delta stream working-buffer size.  The frame field `ws_response_t.stream.text`
+ * is 1024 bytes and snprintf-truncates there, so the intermediate strip/spacing
+ * buffers never need to exceed it (the +64 margin covers a sentence-spacing
+ * prepended space and keeps a round number).  Replaces an inconsistent 4096/4098
+ * magic pair that was 4× the transmittable ceiling. */
+#define WEBUI_STREAM_DELTA_BUF 1088
+
+/**
+ * @brief Emit one already-tag-stripped delta chunk to the stream.
+ *
+ * Shared tail of the native-tools stream path: opens the bubble on first real
+ * content, fixes sentence spacing, appends to the replay ring, and queues the
+ * frame.  Callers must pass text that has already passed through any tag filter
+ * (it is NOT re-filtered here) — used by both the live delta path and the
+ * stream-end <cited> flush.
+ */
+static void webui_emit_clean_delta(session_t *session, const char *text) {
+   if (!text || text[0] == '\0') {
+      return;
+   }
+   /* Don't open a bubble for whitespace-only first content (iteration-boundary flush). */
+   if (!session->llm_streaming_active && stream_text_is_all_whitespace(text, strlen(text))) {
+      return;
+   }
+   if (!session->llm_streaming_active) {
+      webui_send_stream_start(session);
+   }
+
+   /* Fix sentence spacing (LLM sometimes omits space after period) */
+   char spaced_buf[WEBUI_STREAM_DELTA_BUF];
+   const char *fixed_text = fix_sentence_spacing(session, text, spaced_buf, sizeof(spaced_buf));
+
+   ws_response_t resp = { .session = session,
+                          .type = WS_RESP_STREAM_DELTA,
+                          .stream = {
+                              .stream_id = session->current_stream_id,
+                              .conversation_id = session->stream_conversation_id,
+                          } };
+   snprintf(resp.stream.text, sizeof(resp.stream.text), "%s", fixed_text);
+   session->stream_had_content = true;
+   update_stream_last_char(session, resp.stream.text);
+   /* Accumulate into the replay ring so a client attaching mid-turn (or the
+    * one that switched away) can replay the partial. */
+   conv_stream_append(session->stream_conversation_id, session->current_stream_id,
+                      resp.stream.text);
+   queue_response(&resp);
+}
+
 /**
  * @brief Send streaming text to WebUI with command tag filtering
  *
@@ -2411,45 +2459,53 @@ void webui_send_stream_delta(session_t *session, const char *text) {
       return;
    }
 
-   /* If native tools are enabled, pass through without filtering */
+   /* Strip the live <cited> memory-citation tag on EVERY stream path.  The
+    * finalizer only cleans the completed/persisted copy; the browser renders
+    * deltas live, so an unstripped tag leaks its inner text.  The tag is gated
+    * purely on citation_enabled (independent of tool mode), so both the native
+    * and legacy branches below can carry it — run the strip before the branch
+    * rather than inside the native one.  Stateful: a tag may split across deltas;
+    * held-back partial-opener bytes surface on a later delta or the stream-end
+    * flush. */
+   char cited_clean[WEBUI_STREAM_DELTA_BUF];
+   text_filter_cited_tags_to_buffer(&session->cited_tag_filter, text, cited_clean,
+                                    sizeof(cited_clean));
+   if (cited_clean[0] == '\0') {
+      return; /* whole delta was tag content, or held back pending more input */
+   }
+
+   /* Native tools: pass through without command-tag filtering. */
    if (session->cmd_tag_filter_bypass) {
-      /* Don't open a bubble for whitespace-only first content (iteration-boundary flush). */
-      if (!session->llm_streaming_active && stream_text_is_all_whitespace(text, strlen(text))) {
-         return;
-      }
-      if (!session->llm_streaming_active) {
-         webui_send_stream_start(session);
-      }
-
-      /* Fix sentence spacing (LLM sometimes omits space after period) */
-      char spaced_buf[4098];
-      const char *fixed_text = fix_sentence_spacing(session, text, spaced_buf, sizeof(spaced_buf));
-
-      ws_response_t resp = { .session = session,
-                             .type = WS_RESP_STREAM_DELTA,
-                             .stream = {
-                                 .stream_id = session->current_stream_id,
-                                 .conversation_id = session->stream_conversation_id,
-                             } };
-      snprintf(resp.stream.text, sizeof(resp.stream.text), "%s", fixed_text);
-      session->stream_had_content = true;
-      update_stream_last_char(session, resp.stream.text);
-      /* Accumulate into the replay ring so a client attaching mid-turn (or the
-       * one that switched away) can replay the partial. */
-      conv_stream_append(session->stream_conversation_id, session->current_stream_id,
-                         resp.stream.text);
-      queue_response(&resp);
+      webui_emit_clean_delta(session, cited_clean);
       return;
    }
 
-   /* Legacy command tag mode: filter using shared state machine */
-   text_filter_command_tags(&session->cmd_tag_filter, text, webui_filter_output, session);
+   /* Legacy command tag mode: filter the cited-stripped text for <command> tags. */
+   text_filter_command_tags(&session->cmd_tag_filter, cited_clean, webui_filter_output, session);
 }
 
 void webui_send_stream_end(session_t *session, const char *reason) {
    if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_DAP2 &&
                     session->type != SESSION_TYPE_JOB)) {
       return;
+   }
+
+   /* Flush any held-back <cited> filter bytes as a final delta while the stream
+    * is still active.  A partial-opener that never completed is real trailing
+    * text and must reach the browser + replay ring; a mid-tag remainder (closer
+    * never arrived) is dropped inside the flush.  Route by path exactly as the
+    * delta does — native emits directly (NOT back through webui_send_stream_delta,
+    * which would re-filter the clean bytes); legacy feeds the command filter, since
+    * a held '<' could begin a <command> tag. */
+   char cited_flush[CITED_TAG_BUF_SIZE];
+   if (text_filter_cited_flush_to_buffer(&session->cited_tag_filter, cited_flush,
+                                         sizeof(cited_flush)) > 0) {
+      if (session->cmd_tag_filter_bypass) {
+         webui_emit_clean_delta(session, cited_flush);
+      } else {
+         text_filter_command_tags(&session->cmd_tag_filter, cited_flush, webui_filter_output,
+                                  session);
+      }
    }
 
    /* Mark streaming inactive */
