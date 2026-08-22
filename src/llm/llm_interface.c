@@ -188,6 +188,11 @@ cloud_provider_t llm_detect_available_provider(void) {
       return CLOUD_PROVIDER_OPENAI;
    if (is_gemini_available())
       return CLOUD_PROVIDER_GEMINI;
+   /* OpenRouter is a valid fallback (an OpenRouter-only install still boots cloud) but
+    * deliberately does NOT jump ahead of the direct providers in the auto-default order
+    * (decision O1). */
+   if (is_openrouter_available())
+      return CLOUD_PROVIDER_OPENROUTER;
    return CLOUD_PROVIDER_NONE;
 }
 
@@ -390,12 +395,10 @@ void llm_init(const char *cloud_provider_override) {
       llm_tools_apply_config(&g_config.llm.tools);
    }
 
-   /* CLI alias: "-P openrouter" enables the gateway by flipping the config bool,
-    * so the bool remains the single authority for the bool->enum conversion
-    * (see llm_openrouter_gateway_enabled / the single-authority rule). */
-   if (cloud_provider_override != NULL && strcmp(cloud_provider_override, "openrouter") == 0) {
-      g_config.llm.cloud.use_openrouter = true;
-   }
+   /* NOTE: "-P openrouter" no longer flips the gateway bool (2a-0) — OpenRouter is a
+    * first-class provider, so the override flows through the provider ladder below like
+    * any other provider. The legacy use_openrouter gateway short-circuit still applies
+    * to an existing use_openrouter=true config (retired by config_migrate in 2a). */
 
    /* OpenRouter gateway: SINGLE AUTHORITY for use_openrouter -> CLOUD_PROVIDER_OPENROUTER.
     * When on, force the provider and skip the direct-provider CLI>config>auto-detect
@@ -418,8 +421,9 @@ void llm_init(const char *cloud_provider_override) {
    bool openai_available = is_openai_available();
    bool claude_available = is_claude_available();
    bool gemini_available = is_gemini_available();
+   bool openrouter_available = is_openrouter_available();
 
-   if (!openai_available && !claude_available && !gemini_available) {
+   if (!openai_available && !claude_available && !gemini_available && !openrouter_available) {
       OLOG_WARNING("No cloud LLM providers configured (check secrets.toml)");
       current_cloud_provider = CLOUD_PROVIDER_NONE;
       llm_set_type(LLM_LOCAL);
@@ -450,6 +454,11 @@ void llm_init(const char *cloud_provider_override) {
          current_cloud_provider = CLOUD_PROVIDER_GEMINI;
          provider_ok = true;
          OLOG_INFO("Cloud provider set to Gemini (%s)",
+                   cloud_provider_override ? "CLI override" : "config file");
+      } else if (strcmp(provider_source, "openrouter") == 0 && openrouter_available) {
+         current_cloud_provider = CLOUD_PROVIDER_OPENROUTER;
+         provider_ok = true;
+         OLOG_INFO("Cloud provider set to OpenRouter (%s)",
                    cloud_provider_override ? "CLI override" : "config file");
       }
 
@@ -523,11 +532,26 @@ int llm_refresh_providers(void) {
    bool openai_available = is_openai_available();
    bool claude_available = is_claude_available();
    bool gemini_available = is_gemini_available();
+   bool openrouter_available = is_openrouter_available();
 
-   if (!openai_available && !claude_available && !gemini_available) {
+   if (!openai_available && !claude_available && !gemini_available && !openrouter_available) {
       OLOG_INFO("LLM refresh: No cloud providers available");
       current_cloud_provider = CLOUD_PROVIDER_NONE;
       return 0;
+   }
+
+   /* An explicit OpenRouter session stays on OpenRouter while its key is present; if the
+    * key was removed, fall back to auto-detect rather than silently keeping a dead
+    * provider. (Direct providers get the same per-provider validity checks below; an
+    * OpenRouter session whose key is still present falls through them unchanged.) */
+   if (current_cloud_provider == CLOUD_PROVIDER_OPENROUTER && !openrouter_available) {
+      current_cloud_provider = llm_detect_available_provider();
+      if (current_cloud_provider == CLOUD_PROVIDER_NONE) {
+         OLOG_INFO("LLM refresh: OpenRouter key removed, no cloud providers available");
+         return 0;
+      }
+      OLOG_INFO("LLM refresh: OpenRouter key removed, switched to %s",
+                cloud_provider_to_string(current_cloud_provider));
    }
 
    // Check if current provider is still valid
@@ -1432,6 +1456,9 @@ void llm_get_default_config(session_llm_config_t *config) {
       } else if (strcasecmp(g_config.llm.cloud.provider, "openai") == 0) {
          configured = CLOUD_PROVIDER_OPENAI;
          configured_has_key = is_openai_available();
+      } else if (strcasecmp(g_config.llm.cloud.provider, "openrouter") == 0) {
+         configured = CLOUD_PROVIDER_OPENROUTER;
+         configured_has_key = is_openrouter_available();
       }
 
       if (configured != CLOUD_PROVIDER_NONE && configured_has_key) {
