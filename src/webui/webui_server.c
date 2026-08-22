@@ -1430,6 +1430,8 @@ static void webui_send_llm_state_update(session_t *session) {
                           json_object_new_boolean(llm_has_claude_key()));
    json_object_object_add(payload, "gemini_available",
                           json_object_new_boolean(llm_has_gemini_key()));
+   json_object_object_add(payload, "openrouter_available",
+                          json_object_new_boolean(llm_has_openrouter_key()));
 
    json_object_object_add(response, "payload", payload);
 

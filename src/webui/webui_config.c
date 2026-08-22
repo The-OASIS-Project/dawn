@@ -236,6 +236,8 @@ void handle_get_config(ws_connection_t *conn) {
                           json_object_new_boolean(llm_has_claude_key()));
    json_object_object_add(llm_runtime, "gemini_available",
                           json_object_new_boolean(llm_has_gemini_key()));
+   json_object_object_add(llm_runtime, "openrouter_available",
+                          json_object_new_boolean(llm_has_openrouter_key()));
    /* Include model-specific context size so frontend gauge shows correct max early.
     * Omit if 0 (unknown model) — frontend falls back to knownContextMax or default. */
    int ctx_max = llm_context_get_size(resolved.type, resolved.cloud_provider, resolved.model);

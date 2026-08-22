@@ -845,7 +845,19 @@
       if (!modelSelect || !providerSelect) return;
 
       const provider = providerSelect.value?.toLowerCase() || '';
-      const models = cloudModelLists[provider] || [];
+      const baseModels = cloudModelLists[provider] || [];
+
+      // On a passive render (load/reconnect) the runtime provider+model are
+      // consistent, so a live model outside the curated list (common for OpenRouter
+      // vendor/model slugs) is shown honestly — prepended and selected — instead of
+      // snapping to the provider default. On an ACTIVE switch (sendToSession) the
+      // current model still belongs to the OLD provider, so it must NOT be prepended;
+      // fall through to the new provider's default and push that to the session.
+      const currentModel = llmRuntimeState?.model;
+      const models =
+         !sendToSession && currentModel && !baseModels.includes(currentModel)
+            ? [currentModel, ...baseModels]
+            : baseModels;
 
       modelSelect.innerHTML = '';
 
@@ -868,8 +880,7 @@
          modelSelect.appendChild(opt);
       });
 
-      // Select current model if in list, otherwise use provider's default
-      const currentModel = llmRuntimeState?.model;
+      // Select current model if present, otherwise use provider's default
       if (currentModel && models.includes(currentModel)) {
          modelSelect.value = currentModel;
       } else {
@@ -1114,8 +1125,25 @@
             providerSelect.appendChild(opt);
          }
 
+         // OpenRouter is a first-class per-session provider, distinct from the global
+         // use_openrouter gateway. Surface it whenever a key is present OR the session
+         // is actively on it, so a session resolved to OpenRouter with the gateway OFF
+         // shows/keeps the right provider instead of falling through to a stale value.
+         if (runtime.openrouter_available || runtime.provider?.toLowerCase() === 'openrouter') {
+            const opt = document.createElement('option');
+            opt.value = 'openrouter';
+            opt.textContent = 'OpenRouter';
+            providerSelect.appendChild(opt);
+         }
+
          // If no providers available, show disabled message
-         if (!runtime.openai_available && !runtime.claude_available && !runtime.gemini_available) {
+         if (
+            !runtime.openai_available &&
+            !runtime.claude_available &&
+            !runtime.gemini_available &&
+            !runtime.openrouter_available &&
+            runtime.provider?.toLowerCase() !== 'openrouter'
+         ) {
             const opt = document.createElement('option');
             opt.value = '';
             opt.textContent = 'No API keys configured';
@@ -1147,7 +1175,9 @@
          } else if (
             runtime.openai_available ||
             runtime.claude_available ||
-            runtime.gemini_available
+            runtime.gemini_available ||
+            runtime.openrouter_available ||
+            runtime.provider?.toLowerCase() === 'openrouter'
          ) {
             providerSelect.disabled = false;
             providerSelect.title = 'Switch cloud provider';
