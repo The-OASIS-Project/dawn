@@ -125,7 +125,7 @@ Each row points to a detail doc in [`docs/arch/subsystems/`](docs/arch/subsystem
 |---|---|---|
 | **Core** (`src/` root + `src/core/`) | Main entry, MQTT integration, legacy command parsing. `src/dawn.c` hosts the state machine; `src/mosquitto_comms.c/h` wires MQTT; `src/text_to_command_nuevo.c/h` extracts `<command>` tags from LLM output; `src/word_to_number.c/h` converts "twenty-three" → 23; `src/core/` contains the session manager, scheduler, command executor/router, worker pool, and wake-word detector. Logging macros (`LOG_INFO/WARNING/ERROR`) come from `common/include/logging.h`, shared with the satellite. | *(inlined above)* |
 | **ASR** | Speech recognition abstraction (Strategy pattern) over Whisper and Vosk, plus Silero VAD and chunking for long utterances. Whisper on Jetson GPU is the default; Vosk is retained for CPU-only builds. | [asr.md](docs/arch/subsystems/asr.md) |
-| **LLM** | Unified interface for OpenAI, Claude, Gemini, and local (llama.cpp/Ollama), plus an optional **OpenRouter gateway** (`[llm.cloud] use_openrouter`) that fronts all cloud traffic through one OpenAI-compatible endpoint with per-purpose model overrides. Streaming via SSE feeds a sentence buffer that hands complete sentences to TTS while the response is still generating. System prompts are composed in two segments — a stable prefix + a volatile tail (`src/core/prompt_compose.c`) — so providers can cache the prefix across turns. Runs on a dedicated worker thread so the main audio loop never blocks; wake-word interrupts abort in-flight API calls. | [llm.md](docs/arch/subsystems/llm.md) |
+| **LLM** | Unified interface for OpenAI, Claude, Gemini, **OpenRouter** (a first-class `provider` fronting many vendors through one OpenAI-compatible key/endpoint), and local (llama.cpp/Ollama). Streaming via SSE feeds a sentence buffer that hands complete sentences to TTS while the response is still generating. System prompts are composed in two segments — a stable prefix + a volatile tail (`src/core/prompt_compose.c`) — so providers can cache the prefix across turns. Runs on a dedicated worker thread so the main audio loop never blocks; wake-word interrupts abort in-flight API calls. | [llm.md](docs/arch/subsystems/llm.md) |
 | **TTS** | Piper + ONNX Runtime with preprocessing for natural phrasing. Mutex-protected so the main loop, network server, and streaming buffer can all synthesize safely. | [tts.md](docs/arch/subsystems/tts.md) |
 | **DAP2 Satellite** | WebSocket protocol for all remote clients: WebUI browser (Opus), Tier 1 Raspberry Pi (local ASR/TTS, text-only), and Tier 2 ESP32 (raw PCM). A single server on port 3000 serves all three — adding a new client type means a new registration handler, not a new server. | [satellite.md](docs/arch/subsystems/satellite.md) |
 | **Satellite OTA** | Signed over-the-air updates for Tier 1 Pi (.deb) and Tier 2 ESP32 (device-apply). Releases are libsodium-signed binary manifests (TweetNaCl verify on the ESP32); the signing key lives offline and never on the daemon (`tools/ota_keytool.c`). Fleet rollout does a canary wave then deferred fan-out, driven off the main-loop 1-second heartbeat (no dedicated thread). WebUI fleet panel + `dawn-admin ota` CLI + runtime release rescan. | [OTA_DESIGN.md](docs/OTA_DESIGN.md) |
@@ -614,9 +614,8 @@ timezone = "America/New_York"
 type = "cloud"                    # "cloud" or "local"
 
 [llm.cloud]
-provider = "openai"               # "openai", "anthropic", "gemini"
+provider = "openai"               # "openai", "anthropic", "gemini", "openrouter"
 model = "gpt-4o"
-use_openrouter = false            # route all cloud traffic through the OpenRouter gateway
 
 [llm.local]
 endpoint = "http://localhost:8080"
@@ -661,7 +660,7 @@ The WebUI settings panel (`www/js/ui/settings.js`) defines a `SETTINGS_SCHEMA` t
 
 | WebUI Section      | Config Section                        | Notes                                           |
 | ------------------ | ------------------------------------- | ----------------------------------------------- |
-| Language Model     | `[llm]`, `[llm.cloud]`, `[llm.local]` | Provider, model selection, OpenRouter gateway toggle |
+| Language Model     | `[llm]`, `[llm.cloud]`, `[llm.local]` | Provider (incl. OpenRouter) + model selection |
 | Speech Recognition | `[asr]`                               | Model, language, cross-device dedup window      |
 | Text-to-Speech     | `[tts]`                               | Voice model, rate                               |
 | Audio              | `[audio]`                             | Backend, devices                                |

@@ -242,7 +242,7 @@ nano secrets.toml
 openai_api_key = "sk-your-openai-key"
 # claude_api_key = "sk-ant-your-claude-key"
 # gemini_api_key = "your-gemini-key"
-# openrouter_api_key = "sk-or-your-key"   # Optional: OpenRouter gateway (one key, any model) — set [llm.cloud] use_openrouter = true
+# openrouter_api_key = "sk-or-your-key"   # Optional: OpenRouter (one key, any model) — set [llm.cloud] provider = "openrouter"
 # plex_token = "your-plex-token"          # Optional: adds Plex library to unified music DB
 # home_assistant_token = "your-ha-token"  # Optional: for Home Assistant smart home control
 # tavily_api_key = "tvly-your-tavily-key" # Optional: commercial search + URL extract (see Tavily section)

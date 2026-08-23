@@ -2,7 +2,7 @@
 
 ## Overview
 
-DAWN supports **three direct cloud providers** (OpenAI, Claude, Gemini), the **OpenRouter gateway** (one key, hundreds of models from many vendors), and **local LLM** (llama.cpp or Ollama) for voice command processing. All configuration is done at runtime via `dawn.toml` — no recompilation needed to switch providers or models.
+DAWN supports **four cloud providers** (OpenAI, Claude, Gemini, and OpenRouter — one key, hundreds of models from many vendors) and **local LLM** (llama.cpp or Ollama) for voice command processing. All configuration is done at runtime via `dawn.toml` — no recompilation needed to switch providers or models.
 
 After testing 31+ configurations across 5 local models, we achieved **81.9% quality (B grade)** with local inference — production-ready for voice assistants.
 
@@ -112,35 +112,38 @@ provider = "auto"    # Auto-detects llama.cpp vs Ollama
 | Tools | Native function calling |
 | Thinking | Supported via `reasoning_effort` (Gemini 2.5+; cannot fully disable) |
 
-### OpenRouter (Gateway)
+### OpenRouter (Provider)
 
 [OpenRouter](https://openrouter.ai) is a single API that fronts models from
-many vendors. It's a **gateway toggle**, not a fourth `provider` value: when
-enabled, **all** cloud traffic — chat *and* the auxiliary memory-extraction /
-compaction / silent-observe / scheduler calls — routes through OpenRouter using
-one key, regardless of the `provider` setting. This keeps billing unambiguous:
-either fully direct, or fully OpenRouter.
+many vendors. It's a **first-class `provider` value** (not a mode): set
+`provider = "openrouter"` and the main chat routes through OpenRouter with one
+key. Its model list uses `vendor/model` IDs.
 
 | Setting | Value |
 |---------|-------|
 | API Key | `secrets.toml`: `openrouter_api_key = "sk-or-..."` (get one at [openrouter.ai/keys](https://openrouter.ai/keys)) |
-| Enable | `dawn.toml`: `[llm.cloud] use_openrouter = true` |
+| Enable | `dawn.toml`: `[llm.cloud] provider = "openrouter"` |
 | Endpoint | `https://openrouter.ai/api/v1` (fixed) |
 | Models | `vendor/model` IDs, e.g. `anthropic/claude-sonnet-4`, `openai/gpt-5.4`, `google/gemini-2.5-flash` |
 | Vision / Tools / Thinking | Depend on the selected upstream model |
 
 ```toml
 [llm.cloud]
-use_openrouter = true
+provider = "openrouter"
 # Curated shortlist shown in the WebUI/voice model switcher (vendor/model IDs):
 openrouter_models = ["anthropic/claude-sonnet-4", "openai/gpt-5.4", "google/gemini-2.5-flash", "meta-llama/llama-3.3-70b-instruct"]
 openrouter_default_model_idx = 0
 ```
 
-> When `use_openrouter = true`, any auxiliary model strings you set
-> (`compact_model`, `[llm.silent_observe] model`, `memory.extraction_model`)
-> must also be OpenRouter `vendor/model` IDs, since those calls route through the
-> gateway too.
+> The background tasks (memory-extraction, compaction, silent-observe, scheduler)
+> each follow their OWN provider setting — they do **not** inherit the main
+> provider. To run one through OpenRouter, set that task's provider to
+> `"openrouter"` and put a `vendor/model` slug in its normal model field
+> (`compact_model`, `[llm.silent_observe] model`, `memory.extraction_model`);
+> empty = the main OpenRouter default.
+>
+> *(A legacy `use_openrouter = true` config is auto-migrated to
+> `provider = "openrouter"` at load and rewritten on the next settings save.)*
 
 ### Model Lists and Runtime Switching
 

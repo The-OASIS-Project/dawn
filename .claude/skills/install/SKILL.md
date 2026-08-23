@@ -95,7 +95,7 @@ Present these as a checklist with defaults. Let the user answer all at once.
    - [ ] Email (IMAP/SMTP + Gmail OAuth) (default: no, needs `-DDAWN_ENABLE_EMAIL_TOOL=ON`)
    - [ ] Messaging channels — Telegram / Slack / Discord / SMS (default: no, per-provider bot tokens)
    - [ ] Phone & SMS via ECHO modem daemon (default: no, needs ECHO + `[phone] enabled`)
-   - [ ] OpenRouter gateway — one key fronts any cloud model (default: no)
+   - [ ] OpenRouter provider — one key fronts any cloud model (default: no)
    - [ ] MQTT integration (default: yes)
 
    For the key-only integrations (Tavily, OpenRouter, messaging bot tokens), collect the key/token
@@ -371,7 +371,7 @@ Reference: `GETTING_STARTED.md` — SearXNG section.
 
 ### OpenRouter (if selected)
 1. `openrouter_api_key` (starts `sk-or-`) should be in `secrets.toml` from Phase 5
-2. Set `[llm.cloud] use_openrouter = true` in `dawn.toml`
+2. Set `[llm.cloud] provider = "openrouter"` in `dawn.toml`
 3. **Verify**: `curl -s -o /dev/null -w "%{http_code}" https://openrouter.ai/api/v1/models -H "Authorization: Bearer <key>"` → `200`
 
 ### Messaging channels (if selected)

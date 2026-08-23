@@ -229,8 +229,8 @@ channel:
 - **Model** — shown read-only (e.g. `Model: Default (claude-sonnet-4.6)`).
   Change it **from within the chat**: ask the assistant, e.g. "switch to Claude"
   or "use the local model". That change persists to the channel's conversation
-  and survives restarts. Under the OpenRouter gateway all channels route through
-  OpenRouter using its default model.
+  and survives restarts. A channel whose conversation resolves to the OpenRouter
+  provider routes through OpenRouter with its stored/default model.
 
 Changes apply to that channel's conversation; an in-progress session picks them
 up on its next session (re)creation. "Default" everywhere means "inherit the

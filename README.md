@@ -46,7 +46,7 @@ Everything is GPLv3. Cloud LLMs are optional — DAWN runs fully local if you wa
 ### Voice Intelligence
 
 - **Speech Recognition** — Whisper ASR with GPU acceleration on Jetson (2.3x–5.5x faster than real-time). Intelligent voice activity detection knows when you're speaking and when you've stopped.
-- **Multi-Provider LLM** — Cloud: OpenAI GPT-5, Anthropic Claude 4.6, Google Gemini 2.5/3, or any model through the OpenRouter gateway. Local: llama.cpp or Ollama for fully offline operation. Runtime model switching via WebUI or voice.
+- **Multi-Provider LLM** — Cloud: OpenAI GPT-5, Anthropic Claude 4.6, Google Gemini 2.5/3, or any model via OpenRouter (one key, many vendors). Local: llama.cpp or Ollama for fully offline operation. Runtime model switching via WebUI or voice.
 - **Text-to-Speech** — Piper TTS with ONNX Runtime. Multiple voices included. Text preprocessing for natural phrasing.
 - **Speech-Shaped Replies** — On voice interfaces (satellites, local mic, WebUI voice) DAWN tells the model its reply will be read aloud, so answers stay concise and skip on-screen-only formatting; it also warns the model that speech-transcribed input may contain homophone mishearings to interpret from context. All three directives are editable in Settings (Text-to-Speech / Speech Recognition), and the WebUI voice variant keeps the screen free for visuals.
 - **Extended Thinking** — Deep reasoning mode for complex queries:
