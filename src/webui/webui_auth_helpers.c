@@ -40,6 +40,7 @@
 #include "core/buf_printf.h"
 #include "core/prompt_compose.h"
 #include "core/session_manager.h"
+#include "core/text_filter.h"
 #include "llm/llm_command_parser.h"
 #include "logging.h"
 #include "memory/memory_context.h"
@@ -264,18 +265,22 @@ static const char k_memory_instructions_footer[] =
 
 /* Memory citation footer.  Emitted in the stable (cached) prefix only when the
  * citation signal is enabled (g_config.memory.citation_enabled) and memory is on
- * for this user, so it costs nothing per turn.  The per-turn focus block renders
- * surfaced memories as [M1], [M2], … and the model echoes the ones it used in a
- * terminator-free <cited>M1,M7</cited> tag that the response finalizer strips and
- * audits.  Terminator-free grammar (no spaces) keeps a compliant tag from being
- * split across streamed chunks. */
+ * for this user, so it costs nothing per turn.  This teaches the tag grammar once
+ * in the free cached prefix; a short salient reminder is DUPLICATED at point-of-
+ * use in the per-turn focus block (build_focus_block.c), directly under the
+ * numbered [M#] items — the cached-prefix-only placement held compliance at ~13%.
+ * The per-turn focus block renders surfaced memories as [M1], [M2], … and the
+ * model echoes the ones it used in a terminator-free <cited>M1,M7</cited> tag that
+ * the response finalizer strips and audits.  Terminator-free grammar (no spaces)
+ * keeps a compliant tag from being split across streamed chunks. */
 static const char k_citation_footer[] =
     "\n\nMEMORY CITATIONS:\n"
     "- The turn context may include numbered memory items tagged [M1], [M2], etc.\n"
     "- If your reply relies on any of them, end your ENTIRE reply with a citation tag listing the "
-    "ones you actually used: <cited>M1,M7</cited> (comma-separated, no spaces, numbers only).\n"
+    "ones you actually used: " CITED_TAG_EXAMPLE " (comma-separated, no spaces, numbers only).\n"
     "- Use the tag only for items you genuinely drew on; omit it entirely if you used none.\n"
-    "- The tag is stripped before the user sees it — it is bookkeeping, not part of your reply.\n";
+    "- The tag is removed before the user sees it, so it never disrupts your reply — always "
+    "include it when you drew on any memory item.\n";
 
 /* Tool-call discipline footer.  Universal rule against verbal-commitment-
  * without-tool-call bluffs.  Lives in the stable prefix (always emitted

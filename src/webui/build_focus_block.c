@@ -36,6 +36,7 @@
 #include "core/focus/focus_source.h"
 #include "core/session_manager.h"
 #include "core/strbuf.h"
+#include "core/text_filter.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_embeddings.h"
@@ -459,6 +460,26 @@ int build_focus_block(int user_id,
                          result.candidate_count);
             break;
          }
+      }
+
+      /* Salience reminder (citation Phase 2, step 1): restate the citation
+       * instruction in the volatile block, directly under the numbered items —
+       * close to the [M#]s and last before the user turn, instead of buried in
+       * the cached prefix under louder footers (which held compliance at ~13%).
+       * Gated on m_ordinal > 0 so it never dangles without items.  Naming the
+       * valid range [M1]..[M#] also fences off hallucinated ordinals.  The
+       * <cited> grammar here MUST stay byte-identical to k_citation_footer and
+       * the parse/strip filters (memory_citation.c / text_filter_cited_tags) so
+       * the tag still resolves and strips.  A max-cap append failure is
+       * harmless — the reminder is simply absent that turn. */
+      if (citation_on && m_ordinal > 0) {
+         (void)strbuf_appendf(
+             &sb,
+             "[memory citations] The memory items above are numbered [M1] through [M%d].  If any "
+             "of them informed your reply, end your ENTIRE reply with a citation tag listing the "
+             "ones you used, e.g. " CITED_TAG_EXAMPLE " (comma-separated, valid numbers only, no "
+             "spaces).  Cite only what you drew on; omit the tag if you used none.\n",
+             m_ordinal);
       }
 
       /* Publish the per-turn citation map onto the dispatch session.  PER_TURN
