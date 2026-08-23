@@ -316,6 +316,64 @@ static void test_command_double_open_bracket(void) {
    TEST_ASSERT_EQUAL_STRING("5 <", buf);
 }
 
+/* ── whole-string cited strip (text_filter_cited_strip) ──────────────────── */
+
+static void test_cited_strip_trailing_tag(void) {
+   /* The common case: a trailing citation tag on an assembled response/sentence. */
+   char s[128] = "The answer is 42. <cited>M1,M4</cited>";
+   text_filter_cited_strip(s);
+   TEST_ASSERT_EQUAL_STRING("The answer is 42. ", s);
+}
+
+static void test_cited_strip_multiple_tags(void) {
+   char s[128] = "a<cited>M1</cited>b<cited>M2</cited>c";
+   text_filter_cited_strip(s);
+   TEST_ASSERT_EQUAL_STRING("abc", s);
+}
+
+static void test_cited_strip_orphan_opener_truncates(void) {
+   /* Orphan opener (truncated response): drop from the opener to end-of-string. */
+   char s[128] = "answer<cited>M1,M5";
+   text_filter_cited_strip(s);
+   TEST_ASSERT_EQUAL_STRING("answer", s);
+}
+
+static void test_cited_strip_no_tag_unchanged(void) {
+   char s[128] = "plain reply, no tag";
+   text_filter_cited_strip(s);
+   TEST_ASSERT_EQUAL_STRING("plain reply, no tag", s);
+}
+
+static void test_cited_strip_null_safe(void) {
+   text_filter_cited_strip(NULL); /* must not crash */
+}
+
+/* ── whole-string command strip (text_filter_command_strip) ──────────────── */
+
+static void test_command_strip_pair_and_eot(void) {
+   char s[128] = "hi <command>{\"a\":1}</command> there<end_of_turn>trailing";
+   text_filter_command_strip(s, true);
+   TEST_ASSERT_EQUAL_STRING("hi  there", s);
+}
+
+static void test_command_strip_orphan_truncates_when_true(void) {
+   /* Per-sentence TTS intent: drop a mid-split opener. */
+   char s[128] = "oops <command>{\"a\":1} no close";
+   text_filter_command_strip(s, true);
+   TEST_ASSERT_EQUAL_STRING("oops ", s);
+}
+
+static void test_command_strip_orphan_left_when_false(void) {
+   /* Complete-response intent: an unclosed <command> is left as literal text. */
+   char s[128] = "oops <command>{\"a\":1} no close";
+   text_filter_command_strip(s, false);
+   TEST_ASSERT_EQUAL_STRING("oops <command>{\"a\":1} no close", s);
+}
+
+static void test_command_strip_null_safe(void) {
+   text_filter_command_strip(NULL, true); /* must not crash */
+}
+
 /* ── main ───────────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -349,5 +407,14 @@ int main(void) {
    RUN_TEST(test_cited_near_full_false_opener);
    RUN_TEST(test_cited_two_blocks_one_stream);
    RUN_TEST(test_command_double_open_bracket);
+   RUN_TEST(test_cited_strip_trailing_tag);
+   RUN_TEST(test_cited_strip_multiple_tags);
+   RUN_TEST(test_cited_strip_orphan_opener_truncates);
+   RUN_TEST(test_cited_strip_no_tag_unchanged);
+   RUN_TEST(test_cited_strip_null_safe);
+   RUN_TEST(test_command_strip_pair_and_eot);
+   RUN_TEST(test_command_strip_orphan_truncates_when_true);
+   RUN_TEST(test_command_strip_orphan_left_when_false);
+   RUN_TEST(test_command_strip_null_safe);
    return UNITY_END();
 }

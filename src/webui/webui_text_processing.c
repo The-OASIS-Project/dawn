@@ -78,8 +78,6 @@ typedef struct {
                            * for an image turn; NULL persists plain text. Owned/freed here. */
 } text_work_t;
 
-/* strip_command_tags() is shared across webui modules — see webui_satellite.c */
-
 /* REQUEST_SUPERSEDED macro now defined in webui_internal.h */
 
 /* Context + callback for the LLM tool loop's structured tool-turn persistence (E2).

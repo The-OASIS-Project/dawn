@@ -35,6 +35,7 @@
 #include "audio/resampler.h"
 #include "auth/auth_db.h"
 #include "core/session_manager.h"
+#include "core/text_filter.h"
 #include "core/turn_queue.h"
 #include "core/utterance_dedup.h"
 #include "core/worker_pool.h"
@@ -854,7 +855,7 @@ void webui_sentence_audio_callback(const char *sentence, void *userdata) {
    /* Fast path: skip strdup + 4 string scans if sentence has no special content */
    bool needs_cleaning = (strstr(sentence, "<command>") != NULL ||
                           strstr(sentence, "<end_of_turn>") != NULL ||
-                          strchr(sentence, '*') != NULL);
+                          strstr(sentence, "<cited>") != NULL || strchr(sentence, '*') != NULL);
 
    char *cleaned;
    if (needs_cleaning) {
@@ -862,8 +863,11 @@ void webui_sentence_audio_callback(const char *sentence, void *userdata) {
       if (!cleaned)
          return;
 
-      /* Defensively strip residual command/end-of-turn tags from spoken text */
-      strip_command_tags(cleaned);
+      /* Defensively strip residual command/end-of-turn tags + the memory-citation
+       * tag from spoken text — shared whole-string strips (the text stream path
+       * strips <cited> separately via the streaming text_filter_cited_tags). */
+      text_filter_command_strip(cleaned, true); /* per-sentence TTS: drop a mid-split tag */
+      text_filter_cited_strip(cleaned);
 
       /* Remove special characters that cause TTS issues */
       remove_chars(cleaned, "*");

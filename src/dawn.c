@@ -76,6 +76,7 @@
 #include "core/path_utils.h"
 #include "core/pending_system_msg.h"
 #include "core/session_manager.h"
+#include "core/text_filter.h"
 #include "core/utterance_dedup.h"
 #include "core/wake_word.h"
 #include "core/worker_pool.h"
@@ -455,41 +456,12 @@ static void dawn_tts_sentence_callback(const char *sentence, void *userdata) {
       return;
    }
 
-   // Remove command tags (they'll be processed from the full response later)
-   char *cmd_start, *cmd_end;
-   while ((cmd_start = strstr(cleaned, "<command>")) != NULL) {
-      cmd_end = strstr(cmd_start, "</command>");
-      if (cmd_end) {
-         cmd_end += strlen("</command>");
-         memmove(cmd_start, cmd_end, strlen(cmd_end) + 1);
-      } else {
-         // Incomplete command tag - strip from <command> to end of string
-         // This handles cases where the stream breaks between tags
-         *cmd_start = '\0';
-         break;
-      }
-   }
-
-   // Remove <cited> memory-citation tags (streamed at end of response; bookkeeping,
-   // never spoken).  Same incomplete-tag failsafe as <command> so a stream that
-   // breaks mid-tag can't leak "M one" into TTS.
-   char *cite_start, *cite_end;
-   while ((cite_start = strstr(cleaned, "<cited>")) != NULL) {
-      cite_end = strstr(cite_start, "</cited>");
-      if (cite_end) {
-         cite_end += strlen("</cited>");
-         memmove(cite_start, cite_end, strlen(cite_end) + 1);
-      } else {
-         *cite_start = '\0';
-         break;
-      }
-   }
-
-   // Remove <end_of_turn> tags (local AI models)
-   char *match = NULL;
-   if ((match = strstr(cleaned, "<end_of_turn>")) != NULL) {
-      *match = '\0';
-   }
+   // Remove command tags + <end_of_turn> (processed from the full response later),
+   // then the <cited> memory-citation tag — shared whole-string strips, the same
+   // ones the response finalizer and WebUI-audio TTS use.  Both truncate on an
+   // orphan opener so a sentence that breaks mid-tag can't leak a partial into TTS.
+   text_filter_command_strip(cleaned, true); /* per-sentence TTS: drop a mid-split tag */
+   text_filter_cited_strip(cleaned);
 
    // Remove special characters that cause problems
    remove_chars(cleaned, "*");

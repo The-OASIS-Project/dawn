@@ -671,12 +671,6 @@ void handle_set_channel_llm(ws_connection_t *conn, struct json_object *payload);
  * Satellite Handler Functions (defined in webui_satellite.c)
  * ============================================================================= */
 
-/**
- * @brief Strip <command>...</command> and <end_of_turn> tags from text in-place
- *
- * Shared utility used by satellite worker and audio sentence callback.
- */
-void strip_command_tags(char *text);
 
 /**
  * @brief Handle satellite_register message

@@ -222,31 +222,6 @@ typedef struct {
    unsigned int request_gen;
 } satellite_work_t;
 
-/**
- * @brief Strip command tags from text in-place (shared by satellite + audio workers)
- */
-void strip_command_tags(char *text) {
-   if (!text)
-      return;
-
-   char *cmd_start, *cmd_end;
-   while ((cmd_start = strstr(text, "<command>")) != NULL) {
-      cmd_end = strstr(cmd_start, "</command>");
-      if (cmd_end) {
-         cmd_end += strlen("</command>");
-         memmove(cmd_start, cmd_end, strlen(cmd_end) + 1);
-      } else {
-         break;
-      }
-   }
-
-   /* Also remove <end_of_turn> tags (local AI models) */
-   char *match = strstr(text, "<end_of_turn>");
-   if (match) {
-      *match = '\0';
-   }
-}
-
 static void *satellite_worker_thread(void *arg) {
    satellite_work_t *work = (satellite_work_t *)arg;
    session_t *session = work->session;

@@ -123,6 +123,20 @@ void text_filter_reset(cmd_tag_filter_state_t *state);
 #define CITED_TAG_CLOSE_LEN 8
 #define CITED_TAG_BUF_SIZE 16 /* Enough for "</cited>" (8) + margin */
 
+/* Canonical spoken/written example of the citation tag for PROMPT text.  Single-
+ * sourced from the same opener/closer the filter strips, so the prompt-builders
+ * (k_citation_footer, the focus-block reminder) and the strip/parse paths can
+ * never drift on grammar.  The ordinals are illustrative. */
+#define CITED_TAG_EXAMPLE CITED_TAG_OPEN "M1,M4" CITED_TAG_CLOSE
+
+/* Command / end-of-turn tag grammar — the legacy `<command>…</command>` transport
+ * and the `<end_of_turn>` marker some local models emit.  Shared by
+ * text_filter_command_strip so the finalizer + every TTS path key off one source. */
+#define COMMAND_TAG_OPEN "<command>"
+#define COMMAND_TAG_CLOSE "</command>"
+#define COMMAND_TAG_CLOSE_LEN 10
+#define END_OF_TURN_TAG "<end_of_turn>"
+
 /**
  * @brief Memory-citation tag filter state.
  *
@@ -142,6 +156,8 @@ typedef struct {
  * boundaries (e.g. "<cit" then "ed>").  Non-tag text is emitted via callback;
  * held-back partial-opener bytes persist in @p state and surface on a later
  * chunk (if they prove not to be a tag) or via text_filter_cited_flush_to_buffer.
+ * For already-assembled text (no cross-chunk splitting), use the whole-string
+ * text_filter_cited_strip() instead.
  *
  * @param state    Filter state (zeroed before first chunk)
  * @param text     Input chunk
@@ -181,5 +197,40 @@ int text_filter_cited_flush_to_buffer(cited_tag_filter_state_t *state,
  * @brief Reset citation-tag filter state (new stream / clear partial state).
  */
 void text_filter_cited_reset(cited_tag_filter_state_t *state);
+
+/**
+ * @brief Strip every <cited>…</cited> tag from an already-assembled string, in place.
+ *
+ * The whole-string counterpart to the streaming text_filter_cited_tags: for text
+ * that is complete (a finalized response, one TTS sentence), not arriving as
+ * deltas. An orphan opener with no closer (truncated stream) drops from the opener
+ * to end-of-string so a partial tag can never surface. The single shared strip for
+ * every non-streaming surface — response finalizer, local-voice TTS, WebUI-audio
+ * TTS — so the citation tag is never spoken or persisted.
+ *
+ * Opener-anchored, matching the streaming filter: a lone `</cited>` closer with no
+ * preceding opener is left as literal text (it carries no citation content).
+ *
+ * @param text NUL-terminated, mutable C string (the body uses strstr/strlen and
+ *             compacts in place). NULL is tolerated (no-op).
+ */
+void text_filter_cited_strip(char *text);
+
+/**
+ * @brief Strip <command>…</command> pairs and truncate at <end_of_turn>, in place.
+ *
+ * The whole-string residual-tag scrub for the legacy command transport plus the
+ * end-of-turn marker some local models emit. The single shared strip for the
+ * response finalizer, local-voice TTS, and WebUI-audio TTS.
+ *
+ * @param text NUL-terminated, mutable C string. NULL is tolerated (no-op).
+ * @param truncate_orphan How to handle an orphan `<command>` opener (no closer):
+ *   - true  (per-sentence TTS): drop from the opener to end-of-string, so a
+ *           sentence that split mid-tag can't speak a partial `<command>`.
+ *   - false (a complete response): leave the remainder as literal text — in an
+ *           assembled response an unclosed `<command>` is more likely real prose
+ *           than a truncated tag, so it is not destroyed.
+ */
+void text_filter_command_strip(char *text, bool truncate_orphan);
 
 #endif /* TEXT_FILTER_H */

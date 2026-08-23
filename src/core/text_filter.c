@@ -215,6 +215,46 @@ void text_filter_cited_reset(cited_tag_filter_state_t *state) {
    }
 }
 
+void text_filter_cited_strip(char *text) {
+   if (!text)
+      return;
+
+   /* Same tag grammar as the streaming filter below — keyed on the shared
+    * CITED_TAG_* macros so the two paths can never drift. */
+   char *s;
+   while ((s = strstr(text, CITED_TAG_OPEN)) != NULL) {
+      char *e = strstr(s, CITED_TAG_CLOSE);
+      if (e == NULL) {
+         *s = '\0'; /* orphan opener (truncated stream) — drop the fragment */
+         break;
+      }
+      e += CITED_TAG_CLOSE_LEN;
+      memmove(s, e, strlen(e) + 1);
+   }
+}
+
+void text_filter_command_strip(char *text, bool truncate_orphan) {
+   if (!text)
+      return;
+
+   char *s;
+   while ((s = strstr(text, COMMAND_TAG_OPEN)) != NULL) {
+      char *e = strstr(s, COMMAND_TAG_CLOSE);
+      if (e == NULL) {
+         if (truncate_orphan)
+            *s = '\0'; /* mid-stream split — drop the partial so it isn't spoken */
+         break;        /* else: unclosed in a complete response — leave as literal */
+      }
+      e += COMMAND_TAG_CLOSE_LEN;
+      memmove(s, e, strlen(e) + 1);
+   }
+
+   char *eot = strstr(text, END_OF_TURN_TAG);
+   if (eot != NULL) {
+      *eot = '\0';
+   }
+}
+
 void text_filter_cited_tags(cited_tag_filter_state_t *state,
                             const char *text,
                             text_filter_output_fn output_fn,

@@ -24,54 +24,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "core/text_filter.h"
 #include "dawn_error.h"
 #include "memory/memory_citation.h"
-
-/* Remove every `<command>…</command>` pair in place, then truncate at the first
- * `<end_of_turn>` marker (emitted by some local models).  Mirrors the historical
- * strip_command_tags() so finalized output matches the per-seam strips it
- * replaces; kept here as the one canonical definition. */
-static void strip_residual_tags(char *text) {
-   static const char *const open = "<command>";
-   static const char *const close = "</command>";
-   const size_t close_len = strlen(close);
-
-   char *cmd_start;
-   while ((cmd_start = strstr(text, open)) != NULL) {
-      char *cmd_end = strstr(cmd_start, close);
-      if (cmd_end == NULL) {
-         break; /* unclosed tag — leave the remainder untouched */
-      }
-      cmd_end += close_len;
-      memmove(cmd_start, cmd_end, strlen(cmd_end) + 1);
-   }
-
-   char *eot = strstr(text, "<end_of_turn>");
-   if (eot != NULL) {
-      *eot = '\0';
-   }
-}
-
-/* Remove every `<cited>…</cited>` tag in place (memory citation bookkeeping —
- * never user-facing).  An orphan opener with no closer (e.g. a truncated
- * response) drops from the opener to end-of-string so a partial tag can never
- * surface.  Always applied, regardless of whether citation is enabled. */
-static void strip_cited_tags(char *text) {
-   static const char *const open = "<cited>";
-   static const char *const close = "</cited>";
-   const size_t close_len = strlen(close);
-
-   char *s;
-   while ((s = strstr(text, open)) != NULL) {
-      char *e = strstr(s, close);
-      if (e == NULL) {
-         *s = '\0'; /* orphan opener — drop the trailing fragment */
-         break;
-      }
-      e += close_len;
-      memmove(s, e, strlen(e) + 1);
-   }
-}
 
 /* Trim trailing ASCII whitespace in place (Claude rejects assistant turns that
  * end in whitespace; harmless-to-beneficial for every other surface). */
@@ -103,8 +58,8 @@ int llm_response_finalize(session_t *session, const char *raw_response, response
     * trailing <cited> tag from the parser. */
    memory_citation_capture(session, clean);
 
-   strip_residual_tags(clean); /* <command> + <end_of_turn> */
-   strip_cited_tags(clean);    /* <cited>…</cited> (always removed) */
+   text_filter_command_strip(clean, false); /* complete response: leave an orphan <command> */
+   text_filter_cited_strip(clean);          /* <cited>…</cited> (always removed) */
    rtrim(clean);
 
    out->text = clean;

@@ -762,6 +762,7 @@ dawn_add_unit_test(test_text_filter
 dawn_add_unit_test(test_llm_response_finalize
    SOURCES test_llm_response_finalize.c
            ${SRC_ROOT}/src/core/llm_response_finalize.c
+           ${SRC_ROOT}/src/core/text_filter.c
    LIBS    unity
    LABEL   ci)
 
