@@ -180,8 +180,7 @@ void config_set_defaults(dawn_config_t *config) {
     * Default to local provider so background observations don't accrue cloud
     * spend.  Operator can flip to a cloud provider with a configured key. */
    SAFE_COPY(config->llm.silent_observe.provider, "local");
-   config->llm.silent_observe.model[0] = '\0';            /* Empty = let provider pick */
-   config->llm.silent_observe.openrouter_model[0] = '\0'; /* Empty = main OpenRouter default */
+   config->llm.silent_observe.model[0] = '\0'; /* Empty = let provider pick */
 
    /* LLM Thinking/Reasoning */
    SAFE_COPY(config->llm.thinking.mode, "disabled");           /* "disabled", "enabled", "auto" */
@@ -192,16 +191,15 @@ void config_set_defaults(dawn_config_t *config) {
    config->llm.thinking.budget_xhigh = LLM_THINKING_BUDGET_XHIGH_DEFAULT;
 
    /* LLM Context Management */
-   config->llm.summarize_threshold = 0.85f;        /* Legacy alias — maps to hard threshold */
-   config->llm.compact_soft_threshold = 0.60f;     /* Async compaction trigger (background) */
-   config->llm.compact_hard_threshold = 0.85f;     /* Blocking compaction trigger (safety net) */
-   config->llm.compact_use_session = true;         /* Use session's provider for compaction */
-   config->llm.compact_provider[0] = '\0';         /* Dedicated provider (empty = none) */
-   config->llm.compact_model[0] = '\0';            /* Dedicated model (empty = none) */
-   config->llm.compact_openrouter_model[0] = '\0'; /* Empty = main OpenRouter default */
-   config->llm.conversation_logging = false; /* Disabled: WebUI saves to DB, set true for debug */
-   config->llm.rate_limit_enabled = true;    /* Throttle cloud API calls by default */
-   config->llm.rate_limit_rpm = 40;          /* 20% headroom under typical 50 RPM limit */
+   config->llm.summarize_threshold = 0.85f;    /* Legacy alias — maps to hard threshold */
+   config->llm.compact_soft_threshold = 0.60f; /* Async compaction trigger (background) */
+   config->llm.compact_hard_threshold = 0.85f; /* Blocking compaction trigger (safety net) */
+   config->llm.compact_use_session = true;     /* Use session's provider for compaction */
+   config->llm.compact_provider[0] = '\0';     /* Dedicated provider (empty = none) */
+   config->llm.compact_model[0] = '\0';        /* Dedicated model (empty = none) */
+   config->llm.conversation_logging = false;   /* Disabled: WebUI saves to DB, set true for debug */
+   config->llm.rate_limit_enabled = true;      /* Throttle cloud API calls by default */
+   config->llm.rate_limit_rpm = 40;            /* 20% headroom under typical 50 RPM limit */
 
    /* Search */
    SAFE_COPY(config->search.engine, "searxng");
@@ -321,8 +319,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->memory.source_budget_chars = 3072;
    SAFE_COPY(config->memory.extraction_provider, "local");
    SAFE_COPY(config->memory.extraction_model, "qwen2.5:7b");
-   config->memory.extraction_openrouter_model[0] = '\0'; /* Empty = main OpenRouter default */
-   config->memory.extraction_timeout_ms = 120000;        /* 2 minutes for fact extraction */
+   config->memory.extraction_timeout_ms = 120000; /* 2 minutes for fact extraction */
    config->memory.pruning_enabled = true;
    config->memory.prune_superseded_days = 30; /* Delete old superseded facts after 30 days */
    config->memory.prune_stale_days = 180; /* Delete unused low-confidence facts after 6 months */

@@ -1189,6 +1189,11 @@ static bool build_compaction_config(llm_resolved_config_t *cfg) {
       cfg->cloud_provider = CLOUD_PROVIDER_GEMINI;
       cfg->endpoint = GEMINI_URL;
       cfg->api_key = g_secrets.gemini_api_key;
+   } else if (strcmp(p, "openrouter") == 0) {
+      cfg->type = LLM_CLOUD;
+      cfg->cloud_provider = CLOUD_PROVIDER_OPENROUTER;
+      cfg->endpoint = OPENROUTER_URL;
+      cfg->api_key = g_secrets.openrouter_api_key;
    } else if (strcmp(p, "local") == 0) {
       cfg->type = LLM_LOCAL;
       cfg->cloud_provider = CLOUD_PROVIDER_NONE;
@@ -1197,16 +1202,12 @@ static bool build_compaction_config(llm_resolved_config_t *cfg) {
       return false;
    }
 
-   /* OpenRouter gateway: reroute the dedicated compaction provider through OpenRouter.
-    * Under the gateway, use the OpenRouter-formatted compaction model (vendor/model),
-    * falling back to the main OpenRouter default when unset — the direct compact_model
-    * naming would not resolve on OpenRouter. */
-   if (llm_apply_openrouter_gateway(&cfg->cloud_provider, &cfg->endpoint, &cfg->api_key)) {
-      cfg->model = g_config.llm.compact_openrouter_model[0] ? g_config.llm.compact_openrouter_model
-                                                            : llm_get_default_openrouter_model();
-   } else {
-      cfg->model = g_config.llm.compact_model[0] ? g_config.llm.compact_model : NULL;
-   }
+   /* compact_model is a provider-native name, or a "vendor/model" slug when
+    * compact_provider is "openrouter"; an empty value under OpenRouter uses the main
+    * OpenRouter default. */
+   cfg->model = g_config.llm.compact_model[0] ? g_config.llm.compact_model : NULL;
+   if (cfg->cloud_provider == CLOUD_PROVIDER_OPENROUTER && !cfg->model)
+      cfg->model = llm_get_default_openrouter_model();
    cfg->suppress_tools = true;
    strncpy(cfg->thinking_mode, "disabled", sizeof(cfg->thinking_mode) - 1);
    cfg->timeout_ms = g_config.network.summarization_timeout_ms;

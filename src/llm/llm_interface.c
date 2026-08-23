@@ -153,34 +153,8 @@ bool llm_has_openrouter_key(void) {
 }
 
 /* Resolved global cloud provider (the effective default). Written by the init/refresh
- * ladder; read here and throughout resolution. Defined ahead of its first use in
- * llm_apply_openrouter_gateway() just below. */
+ * ladder; read throughout resolution. */
 static cloud_provider_t current_cloud_provider = CLOUD_PROVIDER_NONE;
-
-bool llm_apply_openrouter_gateway(cloud_provider_t *provider,
-                                  const char **endpoint,
-                                  const char **api_key) {
-   /* Effective-provider gate (was the retired use_openrouter bool): when the resolved
-    * GLOBAL provider is OpenRouter, auxiliary purposes (extraction/compaction/
-    * silent-observe) route through OpenRouter too. Keyed on the global current_cloud_provider
-    * (NOT the session-first llm_get_cloud_provider) so it matches the global shadow-model
-    * editors in Settings. Per-conversation aux routing is a 2b item. */
-   if (!provider || current_cloud_provider != CLOUD_PROVIDER_OPENROUTER) {
-      return false;
-   }
-   /* Only rewrite cloud targets; local stays local. */
-   if (*provider == CLOUD_PROVIDER_NONE) {
-      return false;
-   }
-   *provider = CLOUD_PROVIDER_OPENROUTER;
-   if (endpoint) {
-      *endpoint = OPENROUTER_URL; /* unconditional — do not rely on downstream fallback */
-   }
-   if (api_key) {
-      *api_key = get_openrouter_api_key();
-   }
-   return true;
-}
 
 cloud_provider_t llm_detect_available_provider(void) {
    if (is_claude_available())
@@ -200,7 +174,7 @@ cloud_provider_t llm_detect_available_provider(void) {
 // Global state
 // current_type: written on the main/config thread, read on the mosquitto
 // HUD-discovery thread — atomic so those cross-thread accesses are race-free.
-// (current_cloud_provider is defined earlier, ahead of its use in the aux gate.)
+// (current_cloud_provider is defined earlier in this file.)
 static _Atomic llm_type_t current_type = LLM_UNDEFINED;
 static char llm_url[2048] = "";
 

@@ -1240,8 +1240,6 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_string(config->llm.silent_observe.provider));
    json_object_object_add(silent_observe, "model",
                           json_object_new_string(config->llm.silent_observe.model));
-   json_object_object_add(silent_observe, "openrouter_model",
-                          json_object_new_string(config->llm.silent_observe.openrouter_model));
    json_object_object_add(llm, "silent_observe", silent_observe);
 
    /* [llm.thinking] */
@@ -1274,8 +1272,6 @@ json_object *config_to_json(const dawn_config_t *config) {
       json_object_object_add(llm, "compact_model",
                              json_object_new_string(config->llm.compact_model));
    }
-   json_object_object_add(llm, "compact_openrouter_model",
-                          json_object_new_string(config->llm.compact_openrouter_model));
    json_object_object_add(llm, "conversation_logging",
                           json_object_new_boolean(config->llm.conversation_logging));
    json_object_object_add(llm, "rate_limit_enabled",
@@ -1474,8 +1470,6 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_string(config->memory.extraction_provider));
    json_object_object_add(memory, "extraction_model",
                           json_object_new_string(config->memory.extraction_model));
-   json_object_object_add(memory, "extraction_openrouter_model",
-                          json_object_new_string(config->memory.extraction_openrouter_model));
    json_object_object_add(memory, "extraction_timeout_ms",
                           json_object_new_int(config->memory.extraction_timeout_ms));
    json_object_object_add(memory, "paraphrase_dedup_enabled",
@@ -2185,8 +2179,6 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
       write_toml_string(fp, "compact_provider", config->llm.compact_provider);
    if (config->llm.compact_model[0])
       write_toml_string(fp, "compact_model", config->llm.compact_model);
-   if (config->llm.compact_openrouter_model[0])
-      write_toml_string(fp, "compact_openrouter_model", config->llm.compact_openrouter_model);
    fprintf(fp, "conversation_logging = %s\n", config->llm.conversation_logging ? "true" : "false");
 
    fprintf(fp, "\n[llm.cloud]\n");
@@ -2317,7 +2309,6 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "\n[llm.silent_observe]\n");
    write_toml_string(fp, "provider", config->llm.silent_observe.provider);
    write_toml_string(fp, "model", config->llm.silent_observe.model);
-   write_toml_string(fp, "openrouter_model", config->llm.silent_observe.openrouter_model);
 
    fprintf(fp, "\n[search]\n");
    write_toml_string(fp, "engine", config->search.engine);
@@ -2438,7 +2429,6 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "source_budget_chars = %d\n", config->memory.source_budget_chars);
    write_toml_string(fp, "extraction_provider", config->memory.extraction_provider);
    write_toml_string(fp, "extraction_model", config->memory.extraction_model);
-   write_toml_string(fp, "extraction_openrouter_model", config->memory.extraction_openrouter_model);
    fprintf(fp, "extraction_timeout_ms = %d\n", config->memory.extraction_timeout_ms);
    fprintf(fp, "paraphrase_dedup_enabled = %s\n",
            config->memory.paraphrase_dedup_enabled ? "true" : "false");

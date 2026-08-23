@@ -141,10 +141,10 @@ int config_validate(const dawn_config_t *config,
                 (double)config->llm.compact_hard_threshold);
    }
    if (config->llm.compact_provider[0]) {
-      const char *valid_providers[] = { "claude", "openai", "gemini", "local" };
-      if (!string_in_list(config->llm.compact_provider, valid_providers, 4)) {
+      const char *valid_providers[] = { "claude", "openai", "gemini", "openrouter", "local" };
+      if (!string_in_list(config->llm.compact_provider, valid_providers, 5)) {
          ADD_ERROR("llm.compact_provider",
-                   "must be one of: claude, openai, gemini, local (got '%s')",
+                   "must be one of: claude, openai, gemini, openrouter, local (got '%s')",
                    config->llm.compact_provider);
       }
    }

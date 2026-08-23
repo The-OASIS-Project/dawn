@@ -586,30 +586,6 @@ bool llm_has_gemini_key(void);
 bool llm_has_openrouter_key(void);
 
 /**
- * @brief Rewrite an auxiliary resolver's cloud target to OpenRouter when the
- *        gateway is on.
- *
- * Used by the string-keyed auxiliary resolvers (compaction, extraction,
- * silent-observe, scheduler) that do not go through the session path.  When the
- * gateway is enabled and *provider indicates a cloud provider, this sets
- * *provider = CLOUD_PROVIDER_OPENROUTER, writes *endpoint = OPENROUTER base URL
- * UNCONDITIONALLY (callers must not rely on downstream endpoint fallback), and
- * sets *api_key to the OpenRouter key.  The model string is left untouched — the
- * caller's configured model (e.g. an "anthropic/..." OpenRouter ID) is preserved.
- *
- * Reads global config; not reentrant across a mid-flight config change (matches
- * every other resolver's convention).
- *
- * @param provider [in,out] provider enum to (possibly) rewrite
- * @param endpoint [out]    receives the OpenRouter base URL when applied; may be NULL (skipped)
- * @param api_key  [out]    receives the OpenRouter key when applied; may be NULL (skipped)
- * @return true if the override was applied, false otherwise (advisory — callers may ignore)
- */
-bool llm_apply_openrouter_gateway(cloud_provider_t *provider,
-                                  const char **endpoint,
-                                  const char **api_key);
-
-/**
  * @brief Auto-detect the first cloud provider with an available API key
  *
  * When the OpenRouter gateway is on, returns CLOUD_PROVIDER_OPENROUTER if its

@@ -169,11 +169,10 @@
 # compact_soft_threshold = 0.60   # Async background compaction trigger
 # compact_hard_threshold = 0.85   # Blocking compaction trigger (safety net)
 # compact_use_session = true      # Use session's LLM for compaction (false = dedicated)
-# compact_provider = ""           # Dedicated compaction provider: claude/openai/gemini/local
-# compact_model = ""              # Dedicated compaction model (e.g., claude-haiku-4-5)
-# compact_openrouter_model = ""   # Compaction model when the OpenRouter gateway is on
-                                  # ("vendor/model", e.g. anthropic/claude-3.5-haiku).
-                                  # Empty = use the main OpenRouter default model.
+# compact_provider = ""           # Dedicated compaction provider: claude/openai/gemini/openrouter/local
+# compact_model = ""              # Dedicated compaction model (e.g., claude-haiku-4-5). A
+                                  # "vendor/model" slug when compact_provider = "openrouter"
+                                  # (empty = main OpenRouter default).
 # conversation_logging = false    # Save chat history to log files (WebUI saves to DB)
                                   # Env: DAWN_LLM_CONVERSATION_LOGGING
 # rate_limit_enabled = true       # Throttle cloud API calls to avoid 429 errors
@@ -189,13 +188,12 @@
 # vision_enabled = true           # Cloud models typically support vision/images
                                   # Env: DAWN_LLM_CLOUD_VISION_ENABLED
 
-# OpenRouter is a first-class provider: set provider = "openrouter" to route cloud traffic
-# — chat AND the auxiliary memory-extraction / compaction / silent-observe / scheduler
-# calls — through OpenRouter (https://openrouter.ai/api/v1) using openrouter_api_key from
-# secrets.toml. Its model list (openrouter_models below) uses "vendor/model" IDs. The
-# background tasks each have a SEPARATE OpenRouter model setting (compact_openrouter_model,
-# memory.extraction_openrouter_model, llm.silent_observe.openrouter_model) used only when
-# provider = "openrouter"; each falls back to openrouter_default_model_idx when left empty.
+# OpenRouter is a first-class provider: set provider = "openrouter" to route your main chat
+# through OpenRouter (https://openrouter.ai/api/v1) using openrouter_api_key from secrets.toml.
+# Its model list (openrouter_models below) uses "vendor/model" IDs. The background tasks
+# (memory extraction, compaction, silent-observe) each follow their OWN provider setting
+# (extraction_provider / compact_provider / silent_observe.provider) — set one to "openrouter"
+# and put a "vendor/model" slug in that task's model field (empty = the main OpenRouter default).
 #
 # NOTE: the retired [llm.cloud] use_openrouter gateway bool is auto-migrated to
 # provider = "openrouter" on load — an old use_openrouter = true config keeps working and
@@ -288,12 +286,11 @@
 # tasks, satellite registrations, etc.  Calls are non-streaming, no tools, no
 # TTS, schema-validated, and audit-logged.  See
 # docs/DYNAMIC_CONTEXT_INJECTION_DESIGN.md.
-# provider = "local"              # "local" | "ollama" | "openai" | "claude" | "anthropic" | "gemini"
+# provider = "local"              # "local"|"ollama"|"openai"|"claude"|"anthropic"|"gemini"|"openrouter"
                                   # Env: DAWN_LLM_SILENT_OBSERVE_PROVIDER
-# model = ""                      # Model name; empty = let provider pick a default
+# model = ""                      # Model name; empty = let provider pick a default. A
+                                  # "vendor/model" slug when provider = "openrouter".
                                   # Env: DAWN_LLM_SILENT_OBSERVE_MODEL
-# openrouter_model = ""           # Model when the OpenRouter gateway is on ("vendor/model",
-                                  # e.g. anthropic/claude-3.5-haiku). Empty = main OpenRouter default.
 
 # =============================================================================
 # Web Search (SearXNG)
@@ -543,17 +540,15 @@
 [memory]
 # enabled = true                  # Enable persistent user memory
 # context_budget_tokens = 800     # Max tokens for memory context in system prompt
-# extraction_provider = "local"   # LLM provider for fact extraction: "local", "openai", "claude"
-# extraction_model = "qwen2.5:7b" # Model for memory extraction
+# extraction_provider = "local"   # Fact-extraction provider: "local", "openai", "claude", "openrouter"
+# extraction_model = "qwen2.5:7b" # Model for memory extraction (a "vendor/model" slug when
+                                  # extraction_provider = "openrouter"; empty = OpenRouter default)
                                   # Recommended: claude-haiku-4-5 (validated by the four-model
                                   # LoCoMo sweep — see benchmarks/README.md "four-model extraction
                                   # sweep results"). Sonnet only beats Haiku by +1.7 pp on
                                   # recall_generation; Opus is *worse* than Haiku (entity over-
                                   # fragmentation). Going to a larger Claude tier is not a free
                                   # win for extraction.
-# extraction_openrouter_model = "" # Extraction model when the OpenRouter gateway is on
-                                  # ("vendor/model", e.g. anthropic/claude-3.5-haiku).
-                                  # Empty = main OpenRouter default.
 # extraction_timeout_ms = 120000  # LLM timeout for fact extraction (2 min)
                                   # Env: DAWN_MEMORY_EXTRACTION_TIMEOUT_MS
 # note_extraction_guard = true    # Keep reference text filed via the document_manage

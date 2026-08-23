@@ -1681,16 +1681,13 @@ static void *extraction_thread(void *arg) {
                fallback_config.api_key = g_secrets.claude_api_key;
             else if (fallback_config.cloud_provider == CLOUD_PROVIDER_GEMINI)
                fallback_config.api_key = g_secrets.gemini_api_key;
-            /* OpenRouter gateway: reroute the fallback (session) provider through
-             * OpenRouter too, so it doesn't issue a NULL-key request under gateway.
-             * The session model is a direct-API name (claude-sonnet-4-6, not a
-             * vendor/model slug) — swap to the OpenRouter extraction model, matching
-             * the primary resolver, or OpenRouter would reject the unrecognized id. */
-            if (llm_apply_openrouter_gateway(&fallback_config.cloud_provider,
-                                             &fallback_config.endpoint, &fallback_config.api_key)) {
-               fallback_config.model = g_config.memory.extraction_openrouter_model[0]
-                                           ? g_config.memory.extraction_openrouter_model
-                                           : llm_get_default_openrouter_model();
+            else if (fallback_config.cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
+               /* Session provider is OpenRouter: its model is already a "vendor/model"
+                * slug, so keep it (fall back to the main OpenRouter default if unset). */
+               fallback_config.api_key = g_secrets.openrouter_api_key;
+               fallback_config.endpoint = OPENROUTER_URL;
+               if (!fallback_config.model || !fallback_config.model[0])
+                  fallback_config.model = llm_get_default_openrouter_model();
             }
          }
 
@@ -2233,9 +2230,21 @@ int memory_extraction_resolve_config(llm_resolved_config_t *cfg,
       cfg->cloud_provider = CLOUD_PROVIDER_CLAUDE;
       cfg->api_key = g_secrets.claude_api_key;
       cfg->endpoint = NULL;
+   } else if (strcmp(provider, "openrouter") == 0) {
+      cfg->type = LLM_CLOUD;
+      cfg->cloud_provider = CLOUD_PROVIDER_OPENROUTER;
+      cfg->api_key = g_secrets.openrouter_api_key;
+      cfg->endpoint = OPENROUTER_URL;
+      /* extraction_model is a "vendor/model" slug here; fall back to the main OpenRouter
+       * default when unset. */
+      if (!cfg->model || cfg->model[0] == '\0') {
+         strncpy(model_buf, llm_get_default_openrouter_model(), model_buf_sz - 1);
+         model_buf[model_buf_sz - 1] = '\0';
+         cfg->model = model_buf;
+      }
    } else {
       OLOG_WARNING("%s: unknown provider '%s' in config "
-                   "(valid: local, ollama, openai, claude) - falling back to local",
+                   "(valid: local, ollama, openai, claude, openrouter) - falling back to local",
                    prefix, provider);
       cfg->type = LLM_LOCAL;
       cfg->cloud_provider = CLOUD_PROVIDER_NONE;
@@ -2244,17 +2253,12 @@ int memory_extraction_resolve_config(llm_resolved_config_t *cfg,
       cfg->endpoint = endpoint_buf;
    }
 
-   /* OpenRouter gateway: reroute cloud extraction through OpenRouter.  Under the gateway,
-    * swap in the OpenRouter-formatted extraction model (vendor/model), falling back to the
-    * main OpenRouter default when unset — the direct extraction_model naming would not
-    * resolve on OpenRouter. */
-   if (llm_apply_openrouter_gateway(&cfg->cloud_provider, &cfg->endpoint, &cfg->api_key)) {
-      const char *or_model = g_config.memory.extraction_openrouter_model[0]
-                                 ? g_config.memory.extraction_openrouter_model
-                                 : llm_get_default_openrouter_model();
-      strncpy(model_buf, or_model, model_buf_sz - 1);
-      model_buf[model_buf_sz - 1] = '\0';
-      cfg->model = model_buf;
+   /* Cloud calls require a key; fail early with a legible error rather than issuing a
+    * null-key request that surfaces as a downstream 401 (P1 — same guard as
+    * resolve_silent_observe_config). */
+   if (cfg->type == LLM_CLOUD && (!cfg->api_key || cfg->api_key[0] == '\0')) {
+      OLOG_ERROR("%s: cloud provider '%s' has no API key", prefix, provider);
+      return FAILURE;
    }
 
    cfg->suppress_tools = true;

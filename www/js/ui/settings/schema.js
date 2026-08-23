@@ -595,7 +595,7 @@
             compact_provider: {
                type: 'select',
                label: 'Compaction Provider',
-               options: ['claude', 'openai', 'gemini', 'local'],
+               options: ['claude', 'openai', 'gemini', 'openrouter', 'local'],
                hint: 'Provider to use for context compaction summaries',
                advanced: true,
                showWhen: [{ key: 'llm.compact_use_session', value: false }],
@@ -604,24 +604,11 @@
                type: 'text',
                label: 'Compaction Model',
                hint:
-                  'Model name for compaction (e.g., claude-haiku-4-5 — the same ' +
-                  'tier validated for memory extraction). Leave empty for provider default.',
+                  'Model name for compaction (e.g., claude-haiku-4-5 — the same tier validated for ' +
+                  'memory extraction). A "vendor/model" slug when the provider is OpenRouter. Leave ' +
+                  'empty for provider default.',
                advanced: true,
                showWhen: [{ key: 'llm.compact_use_session', value: false }],
-            },
-            compact_openrouter_model: {
-               type: 'model_source_select',
-               sourceKey: 'llm.cloud.openrouter_models',
-               label: 'Compaction Model (OpenRouter)',
-               hint:
-                  'OpenRouter model for compaction when the cloud provider is OpenRouter. Chosen ' +
-                  'from your OpenRouter Models list (Language Model settings). "(Use default)" = ' +
-                  'the main OpenRouter default model.',
-               advanced: true,
-               showWhen: [
-                  { key: 'llm.compact_use_session', value: false },
-                  { key: 'llm.cloud.provider', value: 'openrouter' },
-               ],
             },
             conversation_logging: {
                type: 'checkbox',
@@ -858,7 +845,7 @@
             extraction_provider: {
                type: 'select',
                label: 'Extraction Provider',
-               options: ['local', 'openai', 'claude'],
+               options: ['local', 'openai', 'claude', 'openrouter'],
                hint: 'LLM provider for extracting facts from conversations',
                id: 'memory-extraction-provider',
                advanced: true,
@@ -869,21 +856,11 @@
                hint:
                   'Model for memory extraction (populated based on provider). ' +
                   'Haiku-tier validated as the sweet spot — larger Claude models do ' +
-                  'not produce better extraction (see benchmarks/README.md).',
+                  'not produce better extraction (see benchmarks/README.md). A "vendor/model" ' +
+                  'slug when the provider is OpenRouter; empty = OpenRouter default.',
                dynamicKey: 'memory_extraction_models',
                id: 'memory-extraction-model',
                advanced: true,
-            },
-            extraction_openrouter_model: {
-               type: 'model_source_select',
-               sourceKey: 'llm.cloud.openrouter_models',
-               label: 'Extraction Model (OpenRouter)',
-               hint:
-                  'OpenRouter model for memory extraction when the cloud provider is OpenRouter. ' +
-                  'Chosen from your OpenRouter Models list (Language Model settings). "(Use ' +
-                  'default)" = the main OpenRouter default model.',
-               advanced: true,
-               showWhen: { key: 'llm.cloud.provider', value: 'openrouter' },
             },
             extraction_timeout_ms: {
                type: 'number',
@@ -897,7 +874,15 @@
             silent_observe_provider: {
                type: 'select',
                label: 'Silent-Observe Provider',
-               options: ['local', 'ollama', 'openai', 'claude', 'anthropic', 'gemini'],
+               options: [
+                  'local',
+                  'ollama',
+                  'openai',
+                  'claude',
+                  'anthropic',
+                  'gemini',
+                  'openrouter',
+               ],
                hint:
                   'LLM provider for the Silent-Observe primitive (Phase 0 of ' +
                   'Dynamic Context Injection). Background observations are non-streaming, ' +
@@ -909,22 +894,10 @@
                type: 'text',
                label: 'Silent-Observe Model',
                hint:
-                  'Model name for silent observations. Empty = let provider pick. ' +
-                  'A small/fast model is fine.',
+                  'Model name for silent observations. Empty = let provider pick. A small/fast ' +
+                  'model is fine. A "vendor/model" slug when the provider is OpenRouter.',
                configPath: 'llm.silent_observe.model',
                advanced: true,
-            },
-            silent_observe_openrouter_model: {
-               type: 'model_source_select',
-               sourceKey: 'llm.cloud.openrouter_models',
-               label: 'Silent-Observe Model (OpenRouter)',
-               hint:
-                  'OpenRouter model for silent observations when the cloud provider is OpenRouter. ' +
-                  'Chosen from your OpenRouter Models list (Language Model settings). "(Use ' +
-                  'default)" = the main OpenRouter default model.',
-               configPath: 'llm.silent_observe.openrouter_model',
-               advanced: true,
-               showWhen: { key: 'llm.cloud.provider', value: 'openrouter' },
             },
             note_extraction_guard: {
                type: 'checkbox',

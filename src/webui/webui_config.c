@@ -617,8 +617,6 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       if (json_object_object_get_ex(section, "silent_observe", &silent_observe)) {
          JSON_TO_CONFIG_STR(silent_observe, "provider", config->llm.silent_observe.provider);
          JSON_TO_CONFIG_STR(silent_observe, "model", config->llm.silent_observe.model);
-         JSON_TO_CONFIG_STR(silent_observe, "openrouter_model",
-                            config->llm.silent_observe.openrouter_model);
          /* Single source of truth — see llm_silent_observe_provider_is_valid(). */
          if (config->llm.silent_observe.provider[0] != '\0' &&
              !llm_silent_observe_provider_is_valid(config->llm.silent_observe.provider)) {
@@ -637,7 +635,6 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_BOOL(section, "compact_use_session", config->llm.compact_use_session);
       JSON_TO_CONFIG_STR(section, "compact_provider", config->llm.compact_provider);
       JSON_TO_CONFIG_STR(section, "compact_model", config->llm.compact_model);
-      JSON_TO_CONFIG_STR(section, "compact_openrouter_model", config->llm.compact_openrouter_model);
 
       JSON_TO_CONFIG_BOOL(section, "conversation_logging", config->llm.conversation_logging);
       JSON_TO_CONFIG_BOOL(section, "rate_limit_enabled", config->llm.rate_limit_enabled);
@@ -783,8 +780,6 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_INT(section, "context_budget_tokens", config->memory.context_budget_tokens);
       JSON_TO_CONFIG_STR(section, "extraction_provider", config->memory.extraction_provider);
       JSON_TO_CONFIG_STR(section, "extraction_model", config->memory.extraction_model);
-      JSON_TO_CONFIG_STR(section, "extraction_openrouter_model",
-                         config->memory.extraction_openrouter_model);
       JSON_TO_CONFIG_INT(section, "extraction_timeout_ms", config->memory.extraction_timeout_ms);
       JSON_TO_CONFIG_BOOL(section, "note_extraction_guard", config->memory.note_extraction_guard);
       JSON_TO_CONFIG_BOOL(section, "pruning_enabled", config->memory.pruning_enabled);

@@ -731,7 +731,6 @@ static void parse_llm(toml_table_t *table, llm_config_t *config) {
                                              "compact_use_session",
                                              "compact_provider",
                                              "compact_model",
-                                             "compact_openrouter_model",
                                              "conversation_logging",
                                              "rate_limit_enabled",
                                              "rate_limit_rpm",
@@ -783,7 +782,6 @@ static void parse_llm(toml_table_t *table, llm_config_t *config) {
    PARSE_BOOL(table, "compact_use_session", config->compact_use_session);
    PARSE_STRING(table, "compact_provider", config->compact_provider);
    PARSE_STRING(table, "compact_model", config->compact_model);
-   PARSE_STRING(table, "compact_openrouter_model", config->compact_openrouter_model);
 
    PARSE_BOOL(table, "conversation_logging", config->conversation_logging);
    PARSE_BOOL(table, "rate_limit_enabled", config->rate_limit_enabled);
@@ -805,11 +803,10 @@ static void parse_llm(toml_table_t *table, llm_config_t *config) {
    /* [llm.silent_observe] — Phase 0 of Dynamic Context Injection */
    toml_table_t *silent = toml_table_in(table, "silent_observe");
    if (silent) {
-      static const char *const silent_keys[] = { "provider", "model", "openrouter_model", NULL };
+      static const char *const silent_keys[] = { "provider", "model", NULL };
       warn_unknown_keys(silent, "llm.silent_observe", silent_keys);
       PARSE_STRING(silent, "provider", config->silent_observe.provider);
       PARSE_STRING(silent, "model", config->silent_observe.model);
-      PARSE_STRING(silent, "openrouter_model", config->silent_observe.openrouter_model);
    }
 }
 
@@ -1187,7 +1184,6 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                              "source_budget_chars",
                                              "extraction_provider",
                                              "extraction_model",
-                                             "extraction_openrouter_model",
                                              "extraction_timeout_ms",
                                              "paraphrase_dedup_enabled",
                                              "paraphrase_dedup_threshold",
@@ -1216,7 +1212,6 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
    PARSE_INT(table, "source_budget_chars", config->source_budget_chars);
    PARSE_STRING(table, "extraction_provider", config->extraction_provider);
    PARSE_STRING(table, "extraction_model", config->extraction_model);
-   PARSE_STRING(table, "extraction_openrouter_model", config->extraction_openrouter_model);
    PARSE_INT(table, "extraction_timeout_ms", config->extraction_timeout_ms);
    PARSE_BOOL(table, "paraphrase_dedup_enabled", config->paraphrase_dedup_enabled);
    PARSE_DOUBLE(table, "paraphrase_dedup_threshold", config->paraphrase_dedup_threshold);

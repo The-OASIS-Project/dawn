@@ -332,10 +332,8 @@ typedef struct {
  * Provider config is dedicated so background observations can run on a cheap
  * model without affecting user-facing chat.  See src/llm/llm_silent_observe.c. */
 typedef struct {
-   char provider[16]; /* "local" | "ollama" | "openai" | "claude" | "anthropic" | "gemini" */
-   char model[64];    /* Model name (provider-specific, direct-API naming) */
-   char openrouter_model[64]; /* Model when OpenRouter gateway is on ("vendor/model");
-                               * empty = use main OpenRouter default */
+   char provider[16]; /* "local"|"ollama"|"openai"|"claude"|"anthropic"|"gemini"|"openrouter" */
+   char model[64];    /* Model name; a "vendor/model" slug when provider = "openrouter" */
 } llm_silent_observe_config_t;
 
 typedef struct {
@@ -351,13 +349,12 @@ typedef struct {
    float compact_soft_threshold; /* Async compaction trigger (default: 0.60) */
    float compact_hard_threshold; /* Blocking compaction trigger (default: 0.85) */
    bool compact_use_session;     /* Use session's provider for compaction (default: true) */
-   char compact_provider[32];    /* Dedicated compaction provider: openai/claude/gemini/local */
-   char compact_model[128];      /* Dedicated compaction model name (direct-API naming) */
-   char compact_openrouter_model[128]; /* Compaction model when OpenRouter gateway is on
-                                        * ("vendor/model"); empty = use main OpenRouter default */
-   bool conversation_logging;          /* Save chat history to log files (default: false) */
-   bool rate_limit_enabled;            /* Throttle cloud API calls (default: true) */
-   int rate_limit_rpm;                 /* Max cloud API calls per minute (default: 40) */
+   char compact_provider[32];    /* Compaction provider: openai/claude/gemini/openrouter/local */
+   char compact_model[128]; /* Compaction model; a "vendor/model" slug when provider = "openrouter"
+                             */
+   bool conversation_logging; /* Save chat history to log files (default: false) */
+   bool rate_limit_enabled;   /* Throttle cloud API calls (default: true) */
+   int rate_limit_rpm;        /* Max cloud API calls per minute (default: 40) */
 } llm_config_t;
 
 /* =============================================================================
@@ -624,22 +621,21 @@ typedef struct {
 } recall_config_t;
 
 typedef struct {
-   bool enabled;                         /* Enable memory system */
-   int context_budget_tokens;            /* Max tokens for memory context (~800) */
-   int source_budget_chars;              /* Max chars of verbatim source excerpts per
-                                          * memory_callback "search"/"recent" call when
-                                          * with_source=true.  Default 3072 (~768 tokens).
-                                          * Bench validation (May 2026, LoCoMo Haiku):
-                                          * 0=baseline 0.368, 1024=+3.5pp, 3072=+7.7pp,
-                                          * 6144=+9.5pp, 12288=+TBD recall_generation.
-                                          * Tune up for higher answer quality, down for
-                                          * lower per-call token cost.  Hard-clamped at
-                                          * MEMORY_SOURCE_BUDGET_MAX (32 KiB). */
-   char extraction_provider[16];         /* LLM provider for extraction */
-   char extraction_model[64];            /* Model for extraction (direct-API naming) */
-   char extraction_openrouter_model[64]; /* Extraction model when OpenRouter gateway is on
-                                          * ("vendor/model"); empty = use main OpenRouter default */
-   int extraction_timeout_ms;            /* LLM timeout for fact extraction (default 120s) */
+   bool enabled;                 /* Enable memory system */
+   int context_budget_tokens;    /* Max tokens for memory context (~800) */
+   int source_budget_chars;      /* Max chars of verbatim source excerpts per
+                                  * memory_callback "search"/"recent" call when
+                                  * with_source=true.  Default 3072 (~768 tokens).
+                                  * Bench validation (May 2026, LoCoMo Haiku):
+                                  * 0=baseline 0.368, 1024=+3.5pp, 3072=+7.7pp,
+                                  * 6144=+9.5pp, 12288=+TBD recall_generation.
+                                  * Tune up for higher answer quality, down for
+                                  * lower per-call token cost.  Hard-clamped at
+                                  * MEMORY_SOURCE_BUDGET_MAX (32 KiB). */
+   char extraction_provider[16]; /* LLM provider for extraction (incl. "openrouter") */
+   char extraction_model[64];    /* Extraction model; a "vendor/model" slug when provider =
+                                    "openrouter" */
+   int extraction_timeout_ms;    /* LLM timeout for fact extraction (default 120s) */
 
    /* Pruning settings */
    bool pruning_enabled;             /* Enable automatic fact pruning */

@@ -79,7 +79,7 @@ static const char *const SILENT_OBSERVE_CATEGORIES[] = {
  * WebUI POST handler in webui_config.c.
  * --------------------------------------------------------------------------- */
 static const char *const SILENT_OBSERVE_PROVIDERS[] = {
-   "local", "ollama", "openai", "claude", "anthropic", "gemini",
+   "local", "ollama", "openai", "claude", "anthropic", "gemini", "openrouter",
 };
 
 #define SILENT_OBSERVE_PROVIDERS_COUNT \
@@ -210,7 +210,7 @@ static int resolve_silent_observe_config(llm_resolved_config_t *cfg,
    }
    if (!llm_silent_observe_provider_is_valid(provider)) {
       OLOG_ERROR("silent_observe: unknown provider '%s' (allow: local|ollama|openai|claude|"
-                 "anthropic|gemini)",
+                 "anthropic|gemini|openrouter)",
                  provider);
       return FAILURE;
    }
@@ -244,24 +244,23 @@ static int resolve_silent_observe_config(llm_resolved_config_t *cfg,
       cfg->cloud_provider = CLOUD_PROVIDER_GEMINI;
       cfg->api_key = g_secrets.gemini_api_key;
       cfg->endpoint = NULL;
+   } else if (strcmp(provider, "openrouter") == 0) {
+      cfg->type = LLM_CLOUD;
+      cfg->cloud_provider = CLOUD_PROVIDER_OPENROUTER;
+      cfg->api_key = g_secrets.openrouter_api_key;
+      cfg->endpoint = OPENROUTER_URL;
+      /* silent_observe.model is a "vendor/model" slug here; fall back to the main
+       * OpenRouter default when unset. */
+      if (!cfg->model || cfg->model[0] == '\0') {
+         strncpy(model_buf, llm_get_default_openrouter_model(), model_buf_size - 1);
+         model_buf[model_buf_size - 1] = '\0';
+         cfg->model = model_buf;
+      }
    } else {
       /* Unreachable — caught by llm_silent_observe_provider_is_valid above. */
       OLOG_ERROR("silent_observe: provider '%s' passed allowlist but had no resolver case",
                  provider);
       return FAILURE;
-   }
-
-   /* OpenRouter gateway: reroute cloud silent-observe through OpenRouter.  Under the
-    * gateway, swap in the OpenRouter-formatted model (vendor/model), falling back to the
-    * main OpenRouter default when unset — the direct model naming would not resolve on
-    * OpenRouter. */
-   if (llm_apply_openrouter_gateway(&cfg->cloud_provider, &cfg->endpoint, &cfg->api_key)) {
-      const char *or_model = g_config.llm.silent_observe.openrouter_model[0]
-                                 ? g_config.llm.silent_observe.openrouter_model
-                                 : llm_get_default_openrouter_model();
-      strncpy(model_buf, or_model, model_buf_size - 1);
-      model_buf[model_buf_size - 1] = '\0';
-      cfg->model = model_buf;
    }
 
    /* Tools off, thinking off — invariants 2 and 4. */
