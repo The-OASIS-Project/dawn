@@ -107,7 +107,6 @@
    let globalDefaults = {
       type: 'cloud',
       provider: '',
-      use_openrouter: false,
       openai_model: '',
       claude_model: '',
       gemini_model: '',
@@ -191,10 +190,6 @@
             // Request local models when switching to local mode
             if (newType === 'local') {
                requestLocalModels();
-            } else if (globalDefaults.use_openrouter) {
-               // Gateway on: reflect a read-only OpenRouter provider + slug model list
-               // instead of a direct provider picker the gateway would override.
-               applyGatewayCloudUI(true);
             } else {
                // Switching to cloud (direct providers): restore provider dropdown and update model
                if (providerSelect) {
@@ -916,30 +911,6 @@
    }
 
    /**
-    * Reflect OpenRouter gateway mode in the cloud provider/model controls: a single
-    * read-only "OpenRouter" provider plus the vendor/model slug list. Shared by the
-    * initial render and the Type->Cloud switch so both honor the gateway. Without this
-    * on the switch path, picking Cloud rebuilt a direct OpenAI/Claude/Gemini picker and
-    * let the user select a bare model that the gateway then silently replaced with a
-    * different vendor's default.
-    * @param {boolean} sendToSession - Whether to push the selected slug to the session
-    */
-   function applyGatewayCloudUI(sendToSession = false) {
-      const providerSelect = document.getElementById('llm-provider-select');
-      if (!providerSelect) return;
-      providerSelect.innerHTML = '';
-      const opt = document.createElement('option');
-      opt.value = 'openrouter';
-      opt.textContent = 'OpenRouter';
-      providerSelect.appendChild(opt);
-      providerSelect.value = 'openrouter';
-      providerSelect.disabled = true;
-      providerSelect.title = 'Gateway mode — all cloud models routed through OpenRouter';
-      setControlHint('provider-hint', 'Gateway: OpenRouter');
-      updateModelDropdownForCloud(sendToSession);
-   }
-
-   /**
     * Update cloud model lists from config
     * @param {Object} config - Config object
     */
@@ -974,9 +945,6 @@
       if (config.llm?.cloud?.provider) {
          globalDefaults.provider = config.llm.cloud.provider;
       }
-      // OpenRouter gateway flag
-      globalDefaults.use_openrouter = !!config.llm?.cloud?.use_openrouter;
-
       // Default models (resolve idx to model name)
       if (config.llm?.cloud) {
          const cloud = config.llm.cloud;
@@ -1083,23 +1051,6 @@
          typeSelect.value = runtime.type || 'cloud';
       }
 
-      // OpenRouter gateway: the backend forces every cloud session through OpenRouter,
-      // so reflect that honestly as a read-only "OpenRouter" provider instead of leaving
-      // a stale direct-provider dropdown that contradicts the actual routing. The full
-      // interactive switcher under gateway is a Phase 2 item.
-      const gatewayOn = !!globalDefaults.use_openrouter;
-      if (providerSelect && gatewayOn && runtime.type !== 'local') {
-         applyGatewayCloudUI(false);
-         if (runtime.model) {
-            syncEffortDropdownToModel(runtime.model, true);
-         }
-         applyRuntimeReasoning(runtime);
-         if (typeof DAWN !== 'undefined' && DAWN.updateLlmMiniSummary) {
-            DAWN.updateLlmMiniSummary();
-         }
-         return;
-      }
-
       if (providerSelect) {
          // Update available options based on API key availability
          providerSelect.innerHTML = '';
@@ -1125,10 +1076,9 @@
             providerSelect.appendChild(opt);
          }
 
-         // OpenRouter is a first-class per-session provider, distinct from the global
-         // use_openrouter gateway. Surface it whenever a key is present OR the session
-         // is actively on it, so a session resolved to OpenRouter with the gateway OFF
-         // shows/keeps the right provider instead of falling through to a stale value.
+         // OpenRouter is a first-class provider. Surface it whenever a key is present OR
+         // the session is actively on it, so a session resolved to OpenRouter shows/keeps
+         // the right provider instead of falling through to a stale value.
          if (runtime.openrouter_available || runtime.provider?.toLowerCase() === 'openrouter') {
             const opt = document.createElement('option');
             opt.value = 'openrouter';

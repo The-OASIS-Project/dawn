@@ -1734,6 +1734,10 @@ int main(int argc, char *argv[]) {
    // Step 4: Apply environment variable overrides (highest priority before CLI)
    config_apply_env(&g_config, &g_secrets);
 
+   // Step 4a: Apply forward migrations of retired settings (must run after env
+   // overrides can set a legacy value, and before config_validate below).
+   config_migrate(&g_config);
+
    // Step 4b: Apply config-based settings (CLI overrides take precedence)
    if (!(cli_overrides & CLI_OVERRIDE_COMMAND_MODE) &&
        g_config.commands.processing_mode[0] != '\0') {
@@ -2393,8 +2397,9 @@ mqtt_disabled:
       llm_set_type(LLM_CLOUD);
    } else if (strcmp(g_config.llm.type, "local") == 0) {
       llm_set_type(LLM_LOCAL);
-   } else if (llm_check_connection(llm_openrouter_gateway_enabled() ? "https://openrouter.ai"
-                                                                    : "https://api.openai.com",
+   } else if (llm_check_connection(strcmp(g_config.llm.cloud.provider, "openrouter") == 0
+                                       ? "https://openrouter.ai"
+                                       : "https://api.openai.com",
                                    4)) {
       llm_set_type(LLM_CLOUD);
    } else {

@@ -586,18 +586,6 @@ bool llm_has_gemini_key(void);
 bool llm_has_openrouter_key(void);
 
 /**
- * @brief Whether OpenRouter gateway mode is active.
- *
- * Reads g_config.llm.cloud.use_openrouter.  When true, ALL cloud traffic
- * (main chat + auxiliary extraction/compaction/silent-observe/scheduler calls)
- * routes through OpenRouter.  This is the single source of truth for the
- * bool→CLOUD_PROVIDER_OPENROUTER conversion done in llm_init/llm_refresh_providers.
- *
- * @return true if the gateway is enabled in config
- */
-bool llm_openrouter_gateway_enabled(void);
-
-/**
  * @brief Rewrite an auxiliary resolver's cloud target to OpenRouter when the
  *        gateway is on.
  *

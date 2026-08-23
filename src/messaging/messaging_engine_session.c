@@ -531,14 +531,6 @@ session_t *get_or_create_messaging_session(const char *provider,
             mcfg.reasoning_effort[sizeof(mcfg.reasoning_effort) - 1] = '\0';
          }
 
-         /* OpenRouter gateway: force the provider enum so session_set_llm_config
-          * validates the OpenRouter key (not the stored direct provider's).  A stored
-          * bare model ID is remapped to the right vendor/model slug canonically in
-          * llm_resolve_config at request time.  A local session keeps its local model. */
-         if (mcfg.type == LLM_CLOUD && llm_openrouter_gateway_enabled()) {
-            mcfg.cloud_provider = CLOUD_PROVIDER_OPENROUTER;
-         }
-
          if (session_set_llm_config(s, &mcfg) != SUCCESS) {
             OLOG_WARNING(
                 "messaging: conv %lld LLM settings rejected; session %u uses global default",

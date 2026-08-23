@@ -111,6 +111,30 @@
    } while (0)
 
 /* =============================================================================
+ * Forward Config Migration
+ * ============================================================================= */
+
+/* One-time, idempotent migration of retired settings on the loaded config. Runs
+ * AFTER config_apply_env (an env var can still set a legacy value) and BEFORE
+ * config_validate (which requires provider="openrouter" to be valid). */
+void config_migrate(dawn_config_t *config) {
+   if (!config)
+      return;
+
+   /* Retired: the [llm.cloud] use_openrouter gateway bool is folded into the
+    * first-class provider value. A legacy gateway install comes up as
+    * provider="openrouter" (functionally identical — same OpenRouter transport and
+    * key), and the bool is cleared so it is never consulted for resolution again. */
+   if (config->llm.cloud.use_openrouter && strcmp(config->llm.cloud.provider, "openrouter") != 0) {
+      OLOG_INFO(
+          "config: migrated retired use_openrouter=true -> llm.cloud.provider=\"openrouter\"");
+      strncpy(config->llm.cloud.provider, "openrouter", sizeof(config->llm.cloud.provider) - 1);
+      config->llm.cloud.provider[sizeof(config->llm.cloud.provider) - 1] = '\0';
+   }
+   config->llm.cloud.use_openrouter = false;
+}
+
+/* =============================================================================
  * Environment Variable Application
  * ============================================================================= */
 
@@ -364,7 +388,6 @@ void config_dump(const dawn_config_t *config) {
    printf("\n[llm.cloud]\n");
    printf("  provider = \"%s\"\n", config->llm.cloud.provider);
    printf("  endpoint = \"%s\"\n", config->llm.cloud.endpoint);
-   printf("  use_openrouter = %s\n", config->llm.cloud.use_openrouter ? "true" : "false");
    printf("  openai_use_responses_api = \"%s\"\n", config->llm.cloud.openai_use_responses_api);
    printf("  openai_default_model_idx = %d\n", config->llm.cloud.openai_default_model_idx);
    printf("  claude_default_model_idx = %d\n", config->llm.cloud.claude_default_model_idx);
@@ -750,11 +773,6 @@ void config_dump_settings(const dawn_config_t *config,
                       detect_source_bool(config->llm.cloud.vision_enabled,
                                          defaults.llm.cloud.vision_enabled,
                                          "DAWN_LLM_CLOUD_VISION_ENABLED"));
-   PRINT_SETTING_BOOL("use_openrouter", config->llm.cloud.use_openrouter,
-                      "DAWN_LLM_CLOUD_USE_OPENROUTER",
-                      detect_source_bool(config->llm.cloud.use_openrouter,
-                                         defaults.llm.cloud.use_openrouter,
-                                         "DAWN_LLM_CLOUD_USE_OPENROUTER"));
 
    /* [llm.local] */
    printf("[llm.local]\n");
@@ -1157,8 +1175,8 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object_object_add(cloud, "endpoint", json_object_new_string(config->llm.cloud.endpoint));
    json_object_object_add(cloud, "vision_enabled",
                           json_object_new_boolean(config->llm.cloud.vision_enabled));
-   json_object_object_add(cloud, "use_openrouter",
-                          json_object_new_boolean(config->llm.cloud.use_openrouter));
+   /* use_openrouter retired (folded into provider="openrouter" by config_migrate) —
+    * not emitted to the client or written back. */
    /* Key presence only (never the value) so the WebUI can warn when the gateway
     * is on but no key is configured. */
    json_object_object_add(cloud, "openrouter_key_present",
@@ -2176,7 +2194,8 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    if (config->llm.cloud.endpoint[0])
       write_toml_string(fp, "endpoint", config->llm.cloud.endpoint);
    fprintf(fp, "vision_enabled = %s\n", config->llm.cloud.vision_enabled ? "true" : "false");
-   fprintf(fp, "use_openrouter = %s\n", config->llm.cloud.use_openrouter ? "true" : "false");
+   /* use_openrouter retired: never written back (folded into provider="openrouter" by
+    * config_migrate at load). A legacy true value migrates once, then disappears here. */
 
    /* Helper macro for writing model arrays with proper escaping.
     * Model names are expected to be ASCII alphanumeric (e.g., "gpt-4o", "gemini-2.5-flash"),

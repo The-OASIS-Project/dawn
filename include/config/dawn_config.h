@@ -237,15 +237,14 @@ typedef struct {
 #define LLM_DEFAULT_OPENROUTER_MODEL "anthropic/claude-sonnet-4.6"
 
 typedef struct {
-   char provider[16];              /* "openai", "claude", or "gemini" */
+   char provider[16];              /* "openai", "claude", "gemini", or "openrouter" */
    char endpoint[CONFIG_PATH_MAX]; /* Empty = default, or custom endpoint */
    bool vision_enabled;            /* Model supports vision/image analysis */
 
-   /* OpenRouter gateway mode: when true, ALL cloud traffic (main chat AND the
-    * auxiliary extraction/compaction/silent-observe/scheduler calls) routes
-    * through OpenRouter using openrouter_api_key, regardless of the provider
-    * field above.  Direct-provider settings are hidden in the WebUI but
-    * preserved.  See docs/arch/subsystems/llm.md "OpenRouter gateway". */
+   /* RETIRED gateway bool — no longer a live setting. config_migrate() folds a legacy
+    * use_openrouter=true into provider="openrouter" at load and clears this; it is never
+    * written back or read for resolution. Retained only as the one-shot migration input
+    * (parser still reads it from an old file). OpenRouter is now a first-class provider. */
    bool use_openrouter;
 
    /* OpenAI endpoint selection: "auto" (route gpt-5.4* to /v1/responses),
@@ -266,9 +265,8 @@ typedef struct {
    int gemini_models_count;
    int gemini_default_model_idx; /* Index into gemini_models for default */
 
-   /* OpenRouter model list (used when use_openrouter is true).  These are the
-    * curated "favorites" shown in the header model switcher; the full live
-    * catalog (Phase 2) is browsed in Settings.  IDs are "vendor/model"
+   /* OpenRouter model list (used when provider = "openrouter").  These are the
+    * curated "favorites" shown in the header model switcher.  IDs are "vendor/model"
     * (e.g. "anthropic/claude-sonnet-4"). */
    char openrouter_models[LLM_CLOUD_MAX_MODELS][LLM_CLOUD_MODEL_NAME_MAX];
    int openrouter_models_count;

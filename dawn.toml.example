@@ -182,24 +182,24 @@
                                   # Env: DAWN_LLM_RATE_LIMIT_RPM
 
 [llm.cloud]
-# provider = "openai"             # "openai", "claude", or "gemini"
+# provider = "openai"             # "openai", "claude", "gemini", or "openrouter"
                                   # Env: DAWN_LLM_CLOUD_PROVIDER
 # endpoint = ""                   # Custom endpoint (empty = default provider URL)
                                   # Env: DAWN_LLM_CLOUD_ENDPOINT
 # vision_enabled = true           # Cloud models typically support vision/images
                                   # Env: DAWN_LLM_CLOUD_VISION_ENABLED
 
-# OpenRouter gateway mode. When true, ALL cloud traffic — chat AND the auxiliary
-# memory-extraction / compaction / silent-observe / scheduler calls — routes through
-# OpenRouter (https://openrouter.ai/api/v1) using openrouter_api_key from secrets.toml,
-# regardless of the "provider" setting above. The direct provider/key fields are then
-# unused. This keeps "which key am I using" unambiguous: either fully direct, or fully
-# OpenRouter. The background tasks each have a SEPARATE OpenRouter-formatted model setting
-# (compact_openrouter_model, memory.extraction_openrouter_model,
-# llm.silent_observe.openrouter_model) used only when the gateway is on — so you don't have
-# to rewrite the direct-API model names every time you toggle. Each falls back to the main
-# OpenRouter default (openrouter_default_model_idx) when left empty.
-# use_openrouter = false          # Env: DAWN_LLM_CLOUD_USE_OPENROUTER
+# OpenRouter is a first-class provider: set provider = "openrouter" to route cloud traffic
+# — chat AND the auxiliary memory-extraction / compaction / silent-observe / scheduler
+# calls — through OpenRouter (https://openrouter.ai/api/v1) using openrouter_api_key from
+# secrets.toml. Its model list (openrouter_models below) uses "vendor/model" IDs. The
+# background tasks each have a SEPARATE OpenRouter model setting (compact_openrouter_model,
+# memory.extraction_openrouter_model, llm.silent_observe.openrouter_model) used only when
+# provider = "openrouter"; each falls back to openrouter_default_model_idx when left empty.
+#
+# NOTE: the retired [llm.cloud] use_openrouter gateway bool is auto-migrated to
+# provider = "openrouter" on load — an old use_openrouter = true config keeps working and
+# is rewritten to the provider form on the next settings save.
 
 # OpenAI endpoint selection. "auto" routes gpt-5.4* to /v1/responses (where
 # function tools + reasoning are supported); other models continue to use
@@ -217,7 +217,7 @@
 # claude_default_model_idx = 0
 # gemini_models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash-preview", "gemini-3-pro-preview"]
 # gemini_default_model_idx = 0
-# OpenRouter favorites (used when use_openrouter = true). IDs are "vendor/model".
+# OpenRouter favorites (used when provider = "openrouter"). IDs are "vendor/model".
 # These are the curated shortlist shown in the header model switcher.
 # openrouter_models = ["anthropic/claude-opus-4.7", "anthropic/claude-sonnet-4.6", "anthropic/claude-haiku-4.5", "openai/gpt-5.5", "openai/gpt-5.4-mini", "openai/gpt-5.4-nano", "google/gemini-3.1-pro-preview", "google/gemini-3.5-flash"]
 # openrouter_default_model_idx = 1   # anthropic/claude-sonnet-4.6

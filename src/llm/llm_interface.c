@@ -152,14 +152,20 @@ bool llm_has_openrouter_key(void) {
    return is_openrouter_available();
 }
 
-bool llm_openrouter_gateway_enabled(void) {
-   return g_config.llm.cloud.use_openrouter;
-}
+/* Resolved global cloud provider (the effective default). Written by the init/refresh
+ * ladder; read here and throughout resolution. Defined ahead of its first use in
+ * llm_apply_openrouter_gateway() just below. */
+static cloud_provider_t current_cloud_provider = CLOUD_PROVIDER_NONE;
 
 bool llm_apply_openrouter_gateway(cloud_provider_t *provider,
                                   const char **endpoint,
                                   const char **api_key) {
-   if (!provider || !llm_openrouter_gateway_enabled()) {
+   /* Effective-provider gate (was the retired use_openrouter bool): when the resolved
+    * GLOBAL provider is OpenRouter, auxiliary purposes (extraction/compaction/
+    * silent-observe) route through OpenRouter too. Keyed on the global current_cloud_provider
+    * (NOT the session-first llm_get_cloud_provider) so it matches the global shadow-model
+    * editors in Settings. Per-conversation aux routing is a 2b item. */
+   if (!provider || current_cloud_provider != CLOUD_PROVIDER_OPENROUTER) {
       return false;
    }
    /* Only rewrite cloud targets; local stays local. */
@@ -177,11 +183,6 @@ bool llm_apply_openrouter_gateway(cloud_provider_t *provider,
 }
 
 cloud_provider_t llm_detect_available_provider(void) {
-   /* Gateway mode is the single authority for bool→enum: when on, OpenRouter
-    * (if keyed) wins over any direct provider. */
-   if (llm_openrouter_gateway_enabled()) {
-      return is_openrouter_available() ? CLOUD_PROVIDER_OPENROUTER : CLOUD_PROVIDER_NONE;
-   }
    if (is_claude_available())
       return CLOUD_PROVIDER_CLAUDE;
    if (is_openai_available())
@@ -199,8 +200,8 @@ cloud_provider_t llm_detect_available_provider(void) {
 // Global state
 // current_type: written on the main/config thread, read on the mosquitto
 // HUD-discovery thread — atomic so those cross-thread accesses are race-free.
+// (current_cloud_provider is defined earlier, ahead of its use in the aux gate.)
 static _Atomic llm_type_t current_type = LLM_UNDEFINED;
-static cloud_provider_t current_cloud_provider = CLOUD_PROVIDER_NONE;
 static char llm_url[2048] = "";
 
 // Global interrupt flag - set by main thread (signal handler / wake word) during
@@ -395,27 +396,9 @@ void llm_init(const char *cloud_provider_override) {
       llm_tools_apply_config(&g_config.llm.tools);
    }
 
-   /* NOTE: "-P openrouter" no longer flips the gateway bool (2a-0) — OpenRouter is a
-    * first-class provider, so the override flows through the provider ladder below like
-    * any other provider. The legacy use_openrouter gateway short-circuit still applies
-    * to an existing use_openrouter=true config (retired by config_migrate in 2a). */
-
-   /* OpenRouter gateway: SINGLE AUTHORITY for use_openrouter -> CLOUD_PROVIDER_OPENROUTER.
-    * When on, force the provider and skip the direct-provider CLI>config>auto-detect
-    * ladder entirely.  Mirrored in llm_refresh_providers().  A direct-provider CLI
-    * override (-P claude, etc.) does NOT override the gateway. */
-   if (llm_openrouter_gateway_enabled()) {
-      if (is_openrouter_available()) {
-         current_cloud_provider = CLOUD_PROVIDER_OPENROUTER;
-         OLOG_INFO("Cloud provider set to OpenRouter (gateway mode)");
-      } else {
-         OLOG_WARNING("OpenRouter gateway enabled but openrouter_api_key not configured — "
-                      "staying on local LLM");
-         current_cloud_provider = CLOUD_PROVIDER_NONE;
-         llm_set_type(LLM_LOCAL);
-      }
-      return;
-   }
+   /* OpenRouter is a first-class provider (the use_openrouter gateway was retired and
+    * folded into provider="openrouter" by config_migrate). "-P openrouter" and a config
+    * provider="openrouter" both flow through the normal provider ladder below. */
 
    // Detect available providers from runtime config (secrets.toml)
    bool openai_available = is_openai_available();
@@ -514,21 +497,6 @@ static void refresh_cloud_llm_url(void) {
 }
 
 int llm_refresh_providers(void) {
-   /* OpenRouter gateway short-circuit (mirrors llm_init): the gateway bool is the
-    * single authority, so skip the direct-provider availability dance entirely.
-    * Without this, a secrets/settings reload would silently un-set OpenRouter. */
-   if (llm_openrouter_gateway_enabled()) {
-      if (is_openrouter_available()) {
-         current_cloud_provider = CLOUD_PROVIDER_OPENROUTER;
-         refresh_cloud_llm_url();
-         OLOG_INFO("LLM refresh: OpenRouter gateway ready");
-         return 1;
-      }
-      OLOG_INFO("LLM refresh: OpenRouter gateway on but no key available");
-      current_cloud_provider = CLOUD_PROVIDER_NONE;
-      return 0;
-   }
-
    bool openai_available = is_openai_available();
    bool claude_available = is_claude_available();
    bool gemini_available = is_gemini_available();
@@ -1439,12 +1407,9 @@ void llm_get_default_config(session_llm_config_t *config) {
    }
 
    // Set default cloud provider (used when switching from local to cloud).
-   // OpenRouter gateway is the single authority: when on, the default provider is
-   // always OpenRouter regardless of the provider string (mirrors llm_init).
-   if (llm_openrouter_gateway_enabled()) {
-      config->cloud_provider = CLOUD_PROVIDER_OPENROUTER;
-   } else {
-      // If config specifies a provider AND it has a key, use it; otherwise auto-detect
+   // If config specifies a provider AND it has a key, use it; otherwise auto-detect.
+   // (OpenRouter is a first-class provider here — the gateway bool was retired.)
+   {
       cloud_provider_t configured = CLOUD_PROVIDER_NONE;
       bool configured_has_key = false;
       if (strcasecmp(g_config.llm.cloud.provider, "claude") == 0) {
@@ -1512,24 +1477,16 @@ int llm_resolve_config(const session_llm_config_t *session_config,
    resolved->model = session_config->model[0] != '\0' ? session_config->model : NULL;
    resolved->api_key = NULL;
 
-   /* OpenRouter gateway: canonical, inescapable enforcement of the single-authority
-    * rule.  Even a session whose stored cloud_provider predates a runtime gateway
-    * toggle resolves to OpenRouter here.  Forcing the enum (not the helper) keeps the
-    * existing per-provider endpoint resolution below intact, so a custom
-    * llm.cloud.endpoint still overrides the default OpenRouter URL.  The model is left
-    * as-is (session model, or the OpenRouter default filled in below). */
-   if (resolved->type == LLM_CLOUD && llm_openrouter_gateway_enabled()) {
-      cloud_provider_t provider_hint = resolved->cloud_provider; /* stored provider, pre-force */
-      resolved->cloud_provider = CLOUD_PROVIDER_OPENROUTER;
-      /* Canonical bare-model remap — the single choke point every cloud request passes
-       * through.  Any session model that isn't already a "vendor/model" slug (legacy
-       * conversations, non-gateway-aware clients, or a future call site that forgot to
-       * remap) is mapped to the right OpenRouter slug here, so a bare id is never sent
-       * verbatim nor silently swapped for the gateway default.  The catalog tail-match in
-       * the helper resolves it even when the provider hint has already been forced to
-       * OPENROUTER upstream.  Transient: the session's stored model is untouched. */
+   /* Canonical bare-model remap for OpenRouter sessions — the single request choke
+    * point. When this session resolves to OpenRouter, a stored model that isn't already
+    * a "vendor/model" slug (a legacy conversation, or a bare default) is mapped to the
+    * right OpenRouter slug here, so a bare id is never sent verbatim. The catalog
+    * tail-match in the helper resolves it from the model name alone. Post-2a the
+    * provider enum is authoritative (no gateway force). Transient: the stored model is
+    * untouched. */
+   if (resolved->type == LLM_CLOUD && resolved->cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
       if (resolved->model != NULL && strchr(resolved->model, '/') == NULL) {
-         if (llm_openrouter_slug_for(provider_hint, resolved->model, resolved->model_buf,
+         if (llm_openrouter_slug_for(resolved->cloud_provider, resolved->model, resolved->model_buf,
                                      sizeof(resolved->model_buf))) {
             resolved->model = resolved->model_buf;
          } else {

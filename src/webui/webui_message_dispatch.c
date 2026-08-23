@@ -379,17 +379,17 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                   llm_set_type(LLM_LOCAL);
                   OLOG_INFO("WebUI: Switched to local LLM");
                } else if (strcmp(new_type, "cloud") == 0) {
-                  /* When switching to cloud, ensure we have a valid provider selected.
-                   * Under the OpenRouter gateway, the provider is always OpenRouter;
-                   * otherwise prefer OpenAI, then Claude, then Gemini. */
-                  if (llm_openrouter_gateway_enabled() && llm_has_openrouter_key()) {
-                     llm_set_cloud_provider(CLOUD_PROVIDER_OPENROUTER);
-                  } else if (llm_has_openai_key()) {
+                  /* When switching to cloud, ensure a provider with a key is selected.
+                   * OpenRouter is a normal provider now; it is picked last so it does
+                   * not preempt a configured direct provider (decision O1). */
+                  if (llm_has_openai_key()) {
                      llm_set_cloud_provider(CLOUD_PROVIDER_OPENAI);
                   } else if (llm_has_claude_key()) {
                      llm_set_cloud_provider(CLOUD_PROVIDER_CLAUDE);
                   } else if (llm_has_gemini_key()) {
                      llm_set_cloud_provider(CLOUD_PROVIDER_GEMINI);
+                  } else if (llm_has_openrouter_key()) {
+                     llm_set_cloud_provider(CLOUD_PROVIDER_OPENROUTER);
                   }
                   int rc = llm_set_type(LLM_CLOUD);
                   if (rc != 0) {
@@ -548,9 +548,9 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                   /* Infer provider from model name if not explicitly set
                    * (handles old conversations and frontend bugs).
                    * Only infer if the inferred provider has an API key available.
-                   * Skipped under the OpenRouter gateway — IDs are "vendor/model"
-                   * and the gateway forces OPENROUTER below. */
-                  if (!provider_explicitly_set && !llm_openrouter_gateway_enabled()) {
+                   * OpenRouter IDs are "vendor/model" slugs and match none of the bare
+                   * prefixes below, so an OpenRouter session's model is left untouched. */
+                  if (!provider_explicitly_set) {
                      if ((strncmp(new_model, "gpt-", 4) == 0 || strncmp(new_model, "o1-", 3) == 0 ||
                           strncmp(new_model, "o3-", 3) == 0) &&
                          llm_has_openai_key()) {
@@ -568,15 +568,6 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                   OLOG_WARNING("WebUI: Rejected invalid model name from client");
                }
             }
-         }
-
-         /* OpenRouter gateway is the single authority: force the provider enum so key
-          * validation uses the OpenRouter key.  A bare model ID is remapped to a
-          * vendor/model slug canonically in llm_resolve_config at request time (the
-          * gateway-aware UI already sends vendor/model slugs, so this path only ever
-          * carried a bare id for a stale/non-gateway-aware client). */
-         if (config.type == LLM_CLOUD && llm_openrouter_gateway_enabled()) {
-            config.cloud_provider = CLOUD_PROVIDER_OPENROUTER;
          }
 
          /* Parse thinking_mode (disabled/auto/enabled) */

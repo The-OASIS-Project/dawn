@@ -239,6 +239,45 @@ static void test_memory_citation_roundtrip(void) {
  * [api_keys] is excluded too: it is the legacy secrets spelling, superseded by
  * [secrets], and deliberately never written back. */
 
+/* --- [llm.cloud] use_openrouter retirement (2a) --------------------------- */
+
+/* config_migrate folds a legacy use_openrouter=true into provider="openrouter" and
+ * clears the bool, so an existing gateway install upgrades transparently. Idempotent. */
+static void test_use_openrouter_migrates_to_provider(void) {
+   g_written.llm.cloud.use_openrouter = true;
+   strncpy(g_written.llm.cloud.provider, "claude", sizeof(g_written.llm.cloud.provider) - 1);
+
+   config_migrate(&g_written);
+   TEST_ASSERT_EQUAL_STRING("openrouter", g_written.llm.cloud.provider);
+   TEST_ASSERT_FALSE(g_written.llm.cloud.use_openrouter);
+
+   /* Idempotent: a second pass changes nothing. */
+   config_migrate(&g_written);
+   TEST_ASSERT_EQUAL_STRING("openrouter", g_written.llm.cloud.provider);
+   TEST_ASSERT_FALSE(g_written.llm.cloud.use_openrouter);
+}
+
+/* The retired use_openrouter key is NEVER written back — a stale in-memory true value
+ * must not reappear in the emitted TOML (it is silently dropped, then migrated away on
+ * the next load). This is the inverse of the silent-data-loss guard above. */
+static void test_use_openrouter_not_written(void) {
+   g_written.llm.cloud.use_openrouter = true;
+   TEST_ASSERT_EQUAL_INT(0, config_write_toml(&g_written, RT_PATH));
+
+   FILE *fp = fopen(RT_PATH, "r");
+   TEST_ASSERT_NOT_NULL(fp);
+   char line[512];
+   bool found = false;
+   while (fgets(line, sizeof(line), fp)) {
+      if (strstr(line, "use_openrouter")) {
+         found = true;
+         break;
+      }
+   }
+   fclose(fp);
+   TEST_ASSERT_FALSE_MESSAGE(found, "retired use_openrouter must not be written to dawn.toml");
+}
+
 static void test_all_writer_owned_sections_present(void) {
    /* Every section config_write_toml() emits, INCLUDING sub-tables. Parent-only
     * coverage would let an entire [llm.tools] or [memory.embeddings] writer block
@@ -397,6 +436,8 @@ int main(void) {
    RUN_TEST(test_scheduler_roundtrip);
    RUN_TEST(test_llm_tools_roundtrip);
    RUN_TEST(test_memory_citation_roundtrip);
+   RUN_TEST(test_use_openrouter_migrates_to_provider);
+   RUN_TEST(test_use_openrouter_not_written);
    RUN_TEST(test_all_writer_owned_sections_present);
    RUN_TEST(test_written_file_reparses);
    RUN_TEST(test_string_values_cannot_forge_toml);

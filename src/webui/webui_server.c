@@ -3311,10 +3311,10 @@ int webui_restore_conversation_context(ws_connection_t *conn,
          strncpy(cfg.model, conv->model, sizeof(cfg.model) - 1);
          cfg.model[sizeof(cfg.model) - 1] = '\0';
 
-         /* Infer provider from model name if not explicitly stored.  Skipped under
-          * the OpenRouter gateway (model-name prefixes don't apply to "vendor/model"
-          * OpenRouter IDs — the gateway override below forces OPENROUTER anyway). */
-         if (conv->cloud_provider[0] == '\0' && !llm_openrouter_gateway_enabled()) {
+         /* Infer provider from model name if not explicitly stored. OpenRouter IDs are
+          * "vendor/model" slugs and match none of the bare prefixes below, so an
+          * OpenRouter conversation's provider/model are left as stored. */
+         if (conv->cloud_provider[0] == '\0') {
             if (strncmp(conv->model, "gpt-", 4) == 0 || strncmp(conv->model, "o1-", 3) == 0 ||
                 strncmp(conv->model, "o3-", 3) == 0) {
                cfg.cloud_provider = CLOUD_PROVIDER_OPENAI;
@@ -3326,13 +3326,6 @@ int webui_restore_conversation_context(ws_connection_t *conn,
          }
       }
 
-      /* OpenRouter gateway is the single authority: a restored conversation always runs
-       * through OpenRouter regardless of its stored/inferred provider.  Force the provider
-       * enum; a stored bare model ID is remapped to the right vendor/model slug canonically
-       * in llm_resolve_config at request time (the single choke point). */
-      if (cfg.type == LLM_CLOUD && llm_openrouter_gateway_enabled()) {
-         cfg.cloud_provider = CLOUD_PROVIDER_OPENROUTER;
-      }
       /* Fix #6: Restore thinking_mode from conversation DB */
       if (conv->thinking_mode[0] != '\0') {
          strncpy(cfg.thinking_mode, conv->thinking_mode, sizeof(cfg.thinking_mode) - 1);

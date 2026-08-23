@@ -57,6 +57,17 @@ extern "C" {
 void config_apply_env(dawn_config_t *config, secrets_config_t *secrets);
 
 /**
+ * @brief Apply one-time forward migrations of retired settings to a loaded config.
+ *
+ * Idempotent. Must run AFTER config_apply_env() and BEFORE config_validate().
+ * Currently folds the retired [llm.cloud] use_openrouter gateway bool into the
+ * first-class provider value (provider="openrouter") and clears the bool.
+ *
+ * @param config Config to migrate in place.
+ */
+void config_migrate(dawn_config_t *config);
+
+/**
  * @brief Dump configuration to stdout
  *
  * Prints all configuration values in a readable format.

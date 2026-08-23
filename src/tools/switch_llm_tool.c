@@ -194,15 +194,6 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
       return result;
    }
 
-   /* Under the OpenRouter gateway, switching to a specific DIRECT cloud provider is
-    * meaningless — all cloud traffic routes through OpenRouter.  Allow local / cloud /
-    * openrouter; refuse openai/claude/gemini with an explanation. */
-   if (llm_openrouter_gateway_enabled() && entry->type == LLM_CLOUD &&
-       entry->provider != CLOUD_PROVIDER_NONE && entry->provider != CLOUD_PROVIDER_OPENROUTER) {
-      return strdup("All cloud language models are routed through OpenRouter on this system. "
-                    "Say 'switch to local' or 'switch to OpenRouter' instead.");
-   }
-
    /* Get session from command context, fall back to local session for external MQTT */
    session_t *session = session_get_command_context();
    if (!session) {
@@ -248,12 +239,6 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
       session_llm_config_t applied;
       session_get_llm_config(session, &applied);
       const char *type_str = (applied.type == LLM_LOCAL) ? "local" : "cloud";
-      /* Under the OpenRouter gateway the applied provider is OPENROUTER (the
-       * session was force-routed), so that is what gets persisted — correct
-       * while the gateway stays on.  If the operator later disables the gateway
-       * the row reads "openrouter" and session_set_llm_config falls back to the
-       * global default at that point; benign display/semantic drift, not data
-       * corruption. */
       const char *prov_str = (applied.type == LLM_CLOUD)
                                  ? cloud_provider_to_string(applied.cloud_provider)
                                  : "";
