@@ -40,6 +40,7 @@
 #include "core/hash_util.h"
 #include "document_original_store.h"
 #include "logging.h"
+#include "tools/document_db.h"
 #include "tools/document_extract.h"
 #include "tools/tfidf_summarizer.h"
 #include "utils/string_utils.h"
@@ -747,9 +748,19 @@ int webui_documents_handle_original_download(struct lws *wsi, const char *blob_i
       return send_doc_error(wsi, HTTP_STATUS_BAD_REQUEST, "Invalid document ID");
    }
 
+   /* Resolve the effective reader: the owner reads their own original, and any user
+    * reads a global doc's original (honoring is_global the same way the full-text
+    * reader and library list do — the documents layer owns that decision since the
+    * blob store is owner-only and global-blind).  On no referencing row, fall back to
+    * the requester so the blob store still enforces owner-only. */
+   int reader_id = user_id;
+   int owner_id = 0;
+   if (document_db_original_blob_reader(blob_id, user_id, &owner_id) == SUCCESS)
+      reader_id = owner_id;
+
    char filepath[BLOB_PATH_MAX];
    char mime_type[BLOB_MIME_MAX];
-   int result = document_original_get_path(blob_id, user_id, filepath, mime_type);
+   int result = document_original_get_path(blob_id, reader_id, filepath, mime_type);
    switch (result) {
       case BLOB_STORE_SUCCESS:
          break;
@@ -762,7 +773,7 @@ int webui_documents_handle_original_download(struct lws *wsi, const char *blob_i
    }
 
    char orig_name[BLOB_FILENAME_ORIGINAL_MAX];
-   if (document_original_get_filename(blob_id, user_id, orig_name, sizeof(orig_name)) !=
+   if (document_original_get_filename(blob_id, reader_id, orig_name, sizeof(orig_name)) !=
            BLOB_STORE_SUCCESS ||
        orig_name[0] == '\0') {
       snprintf(orig_name, sizeof(orig_name), "document");

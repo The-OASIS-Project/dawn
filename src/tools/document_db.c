@@ -1282,9 +1282,13 @@ int document_db_full_text_set(int64_t doc_id, const char *text) {
    return result;
 }
 
-/* Fetch a document's canonical full text, owner-scoped.  *text_out is a heap
- * string (caller frees); FAILURE if the document has no stored full text (a
- * pre-v63 upload that must be re-saved before it can be edited). */
+/* Fetch a document's canonical full text.  Access mirrors document_db_find_by_name
+ * and the library list query: the owner reads their own docs, and ANY user reads a
+ * global doc (is_global) — a global doc's text is already exposed to all users via
+ * RAG + the library listing, so the reader honors the same scope.  Editing/version
+ * history stay owner-only (a separate, deliberate mutation/audit scope).  *text_out
+ * is a heap string (caller frees); FAILURE if the document has no stored full text
+ * (a pre-v63 upload that must be re-saved before it can be edited). */
 int document_db_full_text_get(int64_t doc_id, int user_id, char **text_out) {
    if (!text_out)
       return FAILURE;
@@ -1295,7 +1299,7 @@ int document_db_full_text_get(int64_t doc_id, int user_id, char **text_out) {
    if (sqlite3_prepare_v2(s_db.db,
                           "SELECT f.text FROM document_full_text f "
                           "JOIN documents d ON d.id = f.document_id "
-                          "WHERE f.document_id = ? AND d.user_id = ?",
+                          "WHERE f.document_id = ? AND (d.user_id = ? OR d.is_global = 1)",
                           -1, &st, NULL) == SQLITE_OK) {
       sqlite3_bind_int64(st, 1, doc_id);
       sqlite3_bind_int(st, 2, user_id);
@@ -1328,6 +1332,45 @@ int document_db_get_original_blob_id(int64_t doc_id, char *out, size_t out_sz) {
       if (sqlite3_step(st) == SQLITE_ROW) {
          col_text_copy(out, out_sz, st, 0); /* NULL original → "" */
          result = SUCCESS;
+      }
+      sqlite3_finalize(st);
+   }
+   AUTH_DB_UNLOCK();
+   return result;
+}
+
+/* Authorize an original-file download by blob id, honoring is_global the same way
+ * document_db_full_text_get does.  Resolves the blob back to the document(s) that
+ * reference it and yields the owning user in *owner_out when the requester may read
+ * it: the requester owns a referencing doc, OR any referencing doc is global.  The
+ * generic blob store enforces owner-only (doc_can_read) and knows nothing about
+ * is_global — that flag lives here in `documents` — so the global-share decision is
+ * made at this layer and *owner_out is passed down as the effective reader.
+ * Returns SUCCESS (authorized) / FAILURE (deny or no referencing row → caller falls
+ * back to the owner-only path). */
+int document_db_original_blob_reader(const char *blob_id, int requester_id, int *owner_out) {
+   if (!blob_id || !blob_id[0] || !owner_out)
+      return FAILURE;
+   *owner_out = 0;
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   int result = FAILURE;
+   /* Prefer a global referencing row, then a requester-owned one, so a blob shared
+    * by dedup across a private + a global doc authorizes via the global side. */
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT user_id, is_global FROM documents "
+                          "WHERE original_blob_id = ? "
+                          "ORDER BY (is_global = 1) DESC, (user_id = ?) DESC LIMIT 1",
+                          -1, &st, NULL) == SQLITE_OK) {
+      sqlite3_bind_text(st, 1, blob_id, -1, SQLITE_STATIC);
+      sqlite3_bind_int(st, 2, requester_id);
+      if (sqlite3_step(st) == SQLITE_ROW) {
+         int owner = sqlite3_column_int(st, 0);
+         bool is_global = sqlite3_column_int(st, 1) != 0;
+         if (is_global || owner == requester_id) {
+            *owner_out = owner;
+            result = SUCCESS;
+         }
       }
       sqlite3_finalize(st);
    }

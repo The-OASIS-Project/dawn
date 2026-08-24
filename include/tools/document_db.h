@@ -331,6 +331,20 @@ int document_db_full_text_get(int64_t doc_id, int user_id, char **text_out);
  */
 int document_db_get_original_blob_id(int64_t doc_id, char *out, size_t out_sz);
 
+/**
+ * @brief Authorize an original-file download by blob id, honoring is_global.
+ *
+ * Resolves the blob back to its referencing document(s) and authorizes when the
+ * requester owns a referencing doc OR any referencing doc is global (mirroring the
+ * read scope of document_db_full_text_get / the library list).  The generic blob
+ * store enforces owner-only and has no is_global knowledge, so this documents-layer
+ * check yields the owning user in *owner_out to pass down as the effective reader.
+ *
+ * @param owner_out Owning user id on success (pass to document_original_get_path).
+ * @return SUCCESS if authorized; FAILURE to deny or when no doc references the blob.
+ */
+int document_db_original_blob_reader(const char *blob_id, int requester_id, int *owner_out);
+
 /* One prepared chunk for an in-place document replace (all borrowed). */
 typedef struct {
    const char *text;
