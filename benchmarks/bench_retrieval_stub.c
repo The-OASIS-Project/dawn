@@ -27,6 +27,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "auth/auth_db_internal.h"
@@ -163,6 +164,75 @@ void session_record_query(session_t *session,
    (void)llm_ttft_ms;
    (void)llm_total_ms;
    (void)is_error;
+}
+
+/* Conversation-event ring + reconnect/metrics accessors gained by
+ * llm_tool_loop.c in the background-jobs era.  The bench drives extraction
+ * directly (no live session, no conversation stream), so these no-op — but
+ * conv_event_emit takes ownership of payload_owned, so free it to stay
+ * leak-clean. */
+void conv_event_emit(int64_t conv_id, int user_id, const char *kind, char *payload_owned) {
+   (void)conv_id;
+   (void)user_id;
+   (void)kind;
+   free(payload_owned);
+}
+session_t *session_get_for_reconnect(uint32_t session_id) {
+   (void)session_id;
+   return NULL;
+}
+void session_metrics_totals(session_t *session, uint64_t *tokens_in_out, uint32_t *queries_out) {
+   (void)session;
+   if (tokens_in_out != NULL) {
+      *tokens_in_out = 0;
+   }
+   if (queries_out != NULL) {
+      *queries_out = 0;
+   }
+}
+
+/* Memory-citation signal (Option B): memory_callback.c + recall_format.c record
+ * tool-surfaced facts as citeable and gate a cite hint on whether the signal is
+ * on.  The bench has no live session/citation stash, so citation is disabled and
+ * recording is a no-op. */
+bool memory_citation_enabled(void) {
+   return false;
+}
+void memory_citation_record_tool_fact_current(int64_t fact_id) {
+   (void)fact_id;
+}
+
+/* conversation_events tool-call/result payload builders (background-jobs era).
+ * llm_tool_loop.c emits these into conv_event_emit, whose bench stub frees the
+ * returned string — so NULL is safe (free(NULL) is a no-op) and the bench never
+ * drives the job-event path. */
+char *event_payload_tool_call(const char *tool_name, const char *args_json) {
+   (void)tool_name;
+   (void)args_json;
+   return NULL;
+}
+char *event_payload_tool_result(const char *tool_name, const char *result_text) {
+   (void)tool_name;
+   (void)result_text;
+   return NULL;
+}
+
+/* Mirror of ws_error_severity_t (webui/webui_server.h) — replicated here rather
+ * than including that header, which drags in the libwebsockets-dependent server
+ * surface the headless bench can't (and needn't) link. */
+typedef enum {
+   WS_SEVERITY_ERROR = 0,
+   WS_SEVERITY_WARNING,
+   WS_SEVERITY_INFO,
+} ws_error_severity_t;
+void webui_send_error_ex(session_t *session,
+                         const char *code,
+                         const char *message,
+                         ws_error_severity_t severity) {
+   (void)session;
+   (void)code;
+   (void)message;
+   (void)severity;
 }
 
 /* WebUI server entry points the daemon uses; bench is headless */
