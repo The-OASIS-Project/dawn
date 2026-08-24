@@ -318,18 +318,62 @@ Day-level after the fix (`citation_audit_summary.py --days 1`): citation rate **
 focus-only baseline), tool facts surfaced **82**, tool-cited **10**, tool-cite precision **12.2%**,
 **`dropped_tool = 0`** (no mis-copied ids across every tool cite observed).
 
-Per-model (identical query, 10 tool facts surfaced each):
+Per-model **citation counts** (identical query; 10 tool facts surfaced each except where noted):
 
 | Model | cited_tool | cited_focus | dropped (focus) | dropped_tool | Read |
 |---|---|---|---|---|---|
+| gpt-5.6-sol | 9 | 0 | 0 | 0 | surgical — most tool cites, selective |
+| gpt-5.6-luna | 8 | 0 | 0 | 0 | selective + spotless |
+| gpt-5.4-mini | 10 | 0 | 0 | 0 | clean, but cited *every* tool fact |
+| Sonnet 5 | 8 | 0 | 0 | 0 | surgical — but only on a forced-tool re-run; skipped the plain-query search first |
+| Opus 5 | 4 | 9 | 0 | 0 | comprehensive cross-channel (13 total cites) |
 | Haiku 4.5 | 5 | 2 | 0 | 0 | selective, clean |
-| gpt-5.4-mini | 10 | 0 | 0 | 0 | cited every tool fact, zero errors — cleanest |
+| Opus 4.8 | 0 | 8 | 0 | 0 | **skipped the tool** — answered from focus injection |
 | gemini-3.5-flash | 1 | 7 | 11 | 0 | cited, but hallucinated 11 `[M#]` ordinals |
 | Local (Qwen3.6-27B Q4) | 0 | 0 | 0 | 0 | emitted no `<cited>` tag at all |
 
-Reads: 3 of 4 models produce valid tool citations; the local Qwen doesn't engage the grammar (a
-small-model output-format limit, not a mechanism bug — facts still surfaced + recorded). Notable design
-confirmation: **gemini hallucinated 11 `[M#]` ordinals but 0 `ID:` numbers** — the explicit `[ID:x]` marker
-is harder to fabricate than a bare ordinal, so the tool path is structurally more robust to sloppy models
-than the focus-`[M#]` path (the failure-direction asymmetry that sealed Approach B, §4). Caveat: `cited_tool`
-counts don't distinguish genuine selection from cite-everything; a real precision read needs more queries.
+Count-level reads: the tool path works on every capable model; only the local Qwen doesn't engage the
+grammar, and Opus 4.8 opted out by answering from the focus injection instead of searching. **`dropped_tool = 0`
+across all eight models** — nobody has ever fabricated an `[ID:x]`. Design confirmation: **gemini hallucinated
+11 `[M#]` ordinals but 0 `ID:` numbers** — the explicit `[ID:x]` marker is harder to fabricate than a bare
+ordinal, so the tool path is structurally more robust to sloppy models than the focus-`[M#]` path (the
+failure-direction asymmetry that sealed Approach B, §4).
+
+### 15.1 Answer-vs-cite deep read (5 models)
+
+Read each model's actual answer against the facts it cited (the count table above can't distinguish genuine
+selection from cite-everything). **Headline: cite *count* ≠ cite *quality*, and answer quality is decoupled
+from citation compliance.**
+
+| Model | Answer | Cite honesty | Notes |
+|---|---|---|---|
+| gpt-5.6-sol | A | **A** | Excellent answer; every one of its 9 cites is earned (incl. hard ones like `9949` carrier-board gate). Cleanest grounding. |
+| gpt-5.6-luna | A- | A- | Clean, honest cites; a touch less *current* than the others. |
+| Sonnet 5 | A | A- | Surgical tool run — 8 clean cites, no spurious; best temporal structure, and framed the stale MomoCon fact *correctly* (a past delay) where Opus 5 cited it as current. Needed a tool hint to search at all. |
+| Opus 5 | **A (best answer)** | B- | Richest/most actionable answer (Aug 12-16 progression, phone #, "~25h to go/no-go"), but its 13 cites are the *least precise*: cited a **stale fact its own answer contradicts** (`6997` "has not resumed work"), and **used** but didn't cite `10256`/`10306`. |
+| Haiku 4.5 | A- | B | Accurate cites but **under-cited** — used ~9 facts (sponsorship, full workflow), cited 5. |
+| Qwen3.6-27B (local) | **A (answer)** | F | Top-tier *answer* — alone surfaced the panel specifics (Galleria 8, 2:30 PM), satellite prints, MIRAGE carrier-board gate, no hallucinations — but **zero `<cited>` tags**. |
+
+Findings:
+- **More cites is not better cites.** Opus 5 cited the most (13) and graded worst on precision (a spurious
+  stale cite + two used-but-uncited facts); sol cited fewer (9) and every one was earned. A raw `cited_tool`
+  count overstates a cite-a-lot model.
+- **Under-citing is the common failure**, not over-citing: every citer omitted the paint-colors / sponsorship
+  facts it clearly used.
+- **The local model's gap is citation *compliance*, not comprehension.** Qwen's answer matched or beat the
+  frontier models on completeness/accuracy; it simply won't emit the `<cited>` grammar. That's a
+  prompt-engineering lever for small models, not a capability ceiling — encouraging for local-model use.
+- **Triggering the tool is its own reliability axis.** 2 of 4 Claude models (Opus 4.8, Sonnet 5) *skipped*
+  `memory.search` on the plain query and answered from the focus injection — no tool cites at all; every
+  OpenAI model plus Haiku and Opus 5 searched unprompted. A model that won't fire the tool yields no tool
+  citations regardless of how good it'd be at them.
+
+**Price/quality takeaway (short-context pricing, ~1 query):** `cited_tool`-per-dollar ranks
+**gpt-5.6-luna** first by a wide margin (A-/A cites at $1.20/MTok output). **Sonnet 5** ($10) matches luna's
+cite quality at ~8× the cost, so luna dominates it on pure value — but Sonnet 5 is the **premium/Claude-tier
+pick**: it beats **Opus 5** ($25) on *both* price and cite precision (surgical/clean vs comprehensive/stale),
+retiring the count-ranking's illusion that Opus 5 was on top. Order within the paid tier: Sonnet 5 > sol >
+Opus 5 on value.
+
+Caveat: still one query, qualitative judgment against the stored fact set — a real precision/recall read
+needs many queries and a rubric.
