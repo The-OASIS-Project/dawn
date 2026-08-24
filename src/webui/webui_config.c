@@ -1533,6 +1533,11 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
          session_manager_refresh_all_prompts();
          OLOG_INFO("WebUI: Voice directive changed, rebuilt prompts");
       }
+
+      /* Nudge other admin browsers (a second tab, Aurora) to re-pull config so
+       * their config-derived panels (e.g. the model lists) don't show a stale
+       * view until the next reconnect.  Fires only on a successful save. */
+      webui_broadcast_config_changed();
    } else {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error",

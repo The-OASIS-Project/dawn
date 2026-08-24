@@ -435,6 +435,27 @@ typedef struct session {
     * Atomic for ARM64 visibility across worker threads. */
    atomic_bool input_was_voice;
 
+   /* WebUI: did a SPECIFIC error-severity frame already go out for the in-flight
+    * turn?  The provider layer emits a precise error (e.g. "model access denied")
+    * via webui_send_error_ex on a failed streaming turn, which then returns a NULL
+    * response to the text worker.  Without this flag the worker's NULL-response
+    * fallback would emit a second, generic "Failed to get response from AI",
+    * showing the user the same failure twice.  Reset by the WebUI text worker
+    * immediately before the LLM call and checked right after, so set/reset/check
+    * for a turn all run on that one worker thread around the synchronous dispatch.
+    * The setter in webui_send_error_ex is guarded three ways (severity==ERROR &&
+    * type==WEBUI && command-context==this session) so only a real error from the
+    * worker running THIS turn sets it — an INFO notice, a cross-thread
+    * TURN_QUEUE_FULL, or a DAP2 emit cannot spuriously suppress the fallback.
+    * Atomic for ARM64 visibility; only consumed on the SESSION_TYPE_WEBUI text path.
+    * Known accepted edge: the flag is set on ENQUEUE, not delivery, so if the
+    * specific error frame is dropped under queue backpressure AND the turn then
+    * NULLs, the generic fallback is also suppressed (silent turn).  Window is
+    * tiny (queue saturation exactly at error emission) and no worse than the
+    * pre-existing single-frame drop risk; not worth widening the void funnel's
+    * contract to a delivery-status return. */
+   atomic_bool turn_error_emitted;
+
    /* Idle-timeout-sweep exemption.
     *
     * Set by subsystems that retain a long-lived reference to this

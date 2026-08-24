@@ -292,6 +292,11 @@ static void *text_worker_thread(void *arg) {
       session_set_tool_iteration_hook(session, webui_tool_iteration_cb, NULL);
    }
 
+   /* Clear the per-turn error flag before the call; the provider layer sets it via
+    * webui_send_error_ex if it emits a specific error, which we then honor below to
+    * skip the redundant generic fallback. */
+   atomic_store(&session->turn_error_emitted, false);
+
    char *response = core_text_input_dispatch(
        session, text, (const char **)work->vision_images, work->vision_image_sizes,
        (const char(*)[WEBUI_VISION_MIME_MAX])work->vision_mimes, work->vision_image_count,
@@ -341,8 +346,12 @@ static void *text_worker_thread(void *arg) {
    }
 
    if (!response) {
-      /* LLM call failed */
-      webui_send_error(session, "LLM_ERROR", "Failed to get response from AI");
+      /* LLM call failed.  Emit the generic error ONLY if the provider layer did
+       * not already surface a specific one for this turn — otherwise the user
+       * sees the same failure twice (the precise message, then this fallback). */
+      if (!atomic_load(&session->turn_error_emitted)) {
+         webui_send_error(session, "LLM_ERROR", "Failed to get response from AI");
+      }
       webui_send_state(session, "idle");
       text_worker_end(session);
       free(text);

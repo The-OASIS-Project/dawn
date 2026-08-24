@@ -2120,6 +2120,25 @@ void webui_send_error_ex(session_t *session,
       return;
    }
 
+   /* Record that a specific ERROR surfaced for THIS turn so the WebUI text worker's
+    * NULL-response path can skip its generic fallback (avoids a double error).  The
+    * worker resets this before each LLM call; see session_t.turn_error_emitted.
+    * Three guards keep the signal honest — miss any one and we could suppress a
+    * real failure (silent turn), which is worse than the double error we're fixing:
+    *   - severity == ERROR: INFO/WARNING notices (e.g. the thinking-clamp notice,
+    *     emitted mid-dispatch) must NOT count as "an error was shown."
+    *   - command context == session: only the worker actually running THIS turn's
+    *     LLM call may set it — excludes cross-thread emits for other turns of the
+    *     same session (TURN_QUEUE_FULL on the lws thread, audio-worker validation),
+    *     which are ERROR-severity but belong to a different logical turn.
+    *   - type == WEBUI: the reset+check live only in the WebUI text worker; the
+    *     DAP2/satellite worker has its own fallback and never consumes this flag,
+    *     so setting it there would only strand a stale value. */
+   if (severity == WS_SEVERITY_ERROR && session->type == SESSION_TYPE_WEBUI &&
+       session_get_command_context() == session) {
+      atomic_store(&session->turn_error_emitted, true);
+   }
+
    ws_response_t resp = { .session = session,
                           .type = WS_RESP_ERROR,
                           .error = {

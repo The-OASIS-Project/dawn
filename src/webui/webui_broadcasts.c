@@ -1334,6 +1334,26 @@ void calendar_broadcast_events_changed(int user_id) {
    }
 }
 
+/*
+ * Nudge every admin browser to re-pull config after a successful set_config save.
+ * DAWN config is daemon-global and admin-only (single dawn.toml), so this fans to
+ * ALL admin browsers rather than scoping to a user like the calendar/scheduler
+ * broadcasts.  Empty payload — the "something changed, re-fetch" contract that
+ * calendar_events_changed uses; clients respond by re-sending get_config.  The
+ * editing tab already refreshes from its set_config_response, so its extra refetch
+ * here is redundant-but-harmless (idempotent), not worth excluding.  Browsers only:
+ * a satellite renders no settings panel. */
+void webui_broadcast_config_changed(void) {
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("config_changed"));
+   json_object_object_add(root, "payload", json_object_new_object());
+
+   int sent = broadcast_json_to_admins(root, /*browsers_only=*/true);
+   if (sent > 0) {
+      OLOG_INFO("WebUI: Broadcast config_changed to %d admin client(s)", sent);
+   }
+}
+
 #ifdef DAWN_ENABLE_CODE_PROJECTS
 #include "tools/code_project_service.h"
 

@@ -1150,6 +1150,15 @@
                   DawnCalendar.onEventsChanged();
                }
                break;
+            case 'config_changed':
+               /* Another admin session saved config; re-pull so config-derived
+                * panels (model lists, etc.) refresh instead of showing a stale
+                * view.  Only admins receive this frame, but gate defensively.
+                * requestConfig() no-ops if the socket is down. */
+               if (DawnState.authState.isAdmin && typeof DawnSettingsConfig !== 'undefined') {
+                  DawnSettingsConfig.requestConfig();
+               }
+               break;
             case 'memory_extraction_notice':
                if (msg.payload) {
                   showMemoryExtractionNotice(msg.payload.level, msg.payload.message);

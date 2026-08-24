@@ -706,6 +706,16 @@ int webui_broadcast_json_to_user(int user_id, json_object *root, bool browsers_o
 int broadcast_json_to_admins(json_object *root, bool browsers_only);
 
 /**
+ * @brief Broadcast a "config_changed" nudge to every admin browser.
+ *
+ * Empty-payload signal ("something changed, re-fetch") emitted after a successful
+ * set_config save so other admin sessions (a second WebUI tab, Aurora) refresh
+ * their config-derived panels instead of showing a stale view until reconnect.
+ * Config is daemon-global + admin-only, so it fans to all admins (browsers only).
+ */
+void webui_broadcast_config_changed(void);
+
+/**
  * @brief Effective model name for a resolved LLM config (session model if set,
  *        else the provider/type default). Never empty for a valid provider.
  * @param resolved Resolved LLM config to read the model from.
