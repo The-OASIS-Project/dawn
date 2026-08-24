@@ -25,7 +25,9 @@
 #include <string.h>
 
 #include "core/strbuf.h"
+#include "core/text_filter.h" /* SURFACED_ID_FMT, CITED_TAG_ID_EXAMPLE */
 #include "dawn_error.h"
+#include "memory/memory_citation.h" /* record_tool_fact_current + memory_citation_enabled (Option B) */
 #include "utils/string_utils.h"
 
 /* Per-line one-liner cap — keeps a single candidate from dominating the budget
@@ -148,14 +150,19 @@ static void append_candidate_line(strbuf_t *sb, const focus_candidate_t *c, reca
           * self-describing context, no precise fetch verb. */
          if (c->source_id && strcmp(c->source_id, "memory_fact") == 0) {
             const char *id = id_after_colon(c->item_id);
-            if (id)
-               (void)strbuf_appendf(sb, "   [memory id %s]", id);
+            if (id) {
+               /* One marker for both memory renderers (SURFACED_ID_FMT), and record
+                * the fact as citeable this turn (Option B). */
+               long long fid = atoll(id);
+               (void)strbuf_appendf(sb, "   " SURFACED_ID_FMT, fid);
+               memory_citation_record_tool_fact_current(fid);
+            }
          }
          break;
       case FAM_SUMMARY:
          /* No fetch pointer: summary item_ids are `summary:<id>`, a different
-          * id space than facts, and `memory get` resolves only fact ids — a
-          * `[memory id N]` here would dead-end.  Summaries are self-describing
+          * id space than facts, and `memory get` resolves only fact ids — an
+          * `[ID:x]` marker here would dead-end.  Summaries are self-describing
           * narrative context, like entities/relations above. */
          break;
       case FAM_DOC: {
@@ -238,6 +245,18 @@ char *recall_format_result(const char *query,
    (void)strbuf_append(&sb,
                        "For exact/full text, follow a pointer: document_read \"<label>\" for a "
                        "note/document, or memory get <id> for a fact.\n");
+
+   /* Citation hint AT the tool result (adjacency — the Phase-1 salience lesson:
+    * the cite reminder must sit next to the [ID:x] items, not only in the far
+    * system footer).  Only [ID:x]-bearing memory facts are citeable, so gate on
+    * a memory-family candidate having been rendered (matches memory_callback.c's
+    * fact_count guard); a doc/calendar-only recall emits no hint. */
+   if (memory_citation_enabled() && per_family[FAM_MEMORY] > 0) {
+      (void)strbuf_append(&sb, "If any " SURFACED_ID_HINT
+                               " fact above informed your reply, end your reply with a "
+                               "citation tag listing the ids you used, e.g. " CITED_TAG_ID_EXAMPLE
+                               " (comma-separated, no spaces).\n");
+   }
 
    strbuf_t empties;
    strbuf_init(&empties, 64);

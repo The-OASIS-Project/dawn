@@ -511,12 +511,16 @@ static const char *SCHEMA_SQL =
     "   message_id INTEGER DEFAULT 0,"
     "   user_id INTEGER NOT NULL,"
     "   ts INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
-    "   injected_ids TEXT,"    /* CSV of surfaced item_ids, e.g. "fact:12,entity:7" */
-    "   cited_ids TEXT,"       /* CSV of the validated cited subset */
-    "   injected_scores TEXT," /* CSV of per-item final_score, aligned 1:1 with injected_ids.
-                                  Analysis-only (read by citation_audit_summary.py, not the daemon).
-                                */
-    "   dropped_count INTEGER DEFAULT 0" /* cited ordinals rejected (out-of-range/dup) */
+    "   injected_ids TEXT,"      /* CSV of surfaced item_ids, e.g. "fact:12,entity:7" */
+    "   cited_ids TEXT,"         /* CSV of the validated cited subset */
+    "   injected_scores TEXT,"   /* CSV of per-item final_score, aligned 1:1 with injected_ids.
+                                    Analysis-only (read by citation_audit_summary.py, not the daemon).
+                                  */
+    "   tool_surfaced_ids TEXT," /* v79: CSV of facts shown via a memory tool this turn,
+                                    canonical "fact:x" — the tool-cite universe (Option B) */
+    "   dropped_count INTEGER DEFAULT 0,"     /* cited ordinals rejected (out-of-range/dup) */
+    "   dropped_tool_count INTEGER DEFAULT 0" /* v79: cited ID:x not in the surfaced set
+                                                 (mis-copied / hallucinated tool id) */
     ");"
     "CREATE INDEX IF NOT EXISTS idx_memory_citation_audit_user_ts ON "
     "memory_citation_audit(user_id, ts);"

@@ -827,6 +827,7 @@ list(APPEND DAWN_SOURCES
     src/image_store.c
     src/memory/memory_db.c
     src/memory/memory_citation.c
+    src/memory/memory_citation_parse.c
     src/memory/memory_db_facts.c
     src/memory/memory_db_summaries.c
     src/memory/memory_db_prefs.c

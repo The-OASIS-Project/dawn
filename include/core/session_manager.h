@@ -285,6 +285,37 @@ typedef struct {
    int count;                                          /* number of [M#] tags rendered this turn */
 } citation_stash_t;
 
+/* Kind of a tool-surfaced citeable item.  A seam: fact is the only value today
+ * (memory tool results are facts); summaries/entities are a future additive value
+ * so their id space (summary:x / entity:x) slots in without a struct change. */
+#define MEM_CITED_KIND_FACT 0
+
+/* Maximum tool-surfaced fact ids stashed per turn for citation.  A turn can call
+ * memory search several times (~10 results each) under the 8-iteration tool-loop
+ * cap; 96 covers the realistic multi-search case, drop-with-log past it.
+ * 96 × 16B ≈ 1.5 KB/session. */
+#define MAX_TOOL_CITED_FACTS 96
+
+/**
+ * @brief One fact the model was shown via a memory TOOL result this turn.
+ *
+ * Distinct from the focus stash (build-once, single-writer): this set is written
+ * by PARALLEL native-tool worker threads (session_get_command_context() is
+ * per-worker), so every record MUST go through history_mutex.  Populated by
+ * memory_citation_record_tool_fact() at each retrieval render path; the model may
+ * cite an entry as <cited>ID:123</cited>, validated against this set at capture.
+ * CLEARED at dispatch entry alongside the focus stash.
+ */
+typedef struct {
+   int64_t fact_id; /* the surfaced memory fact id (model cites the bare int) */
+   int kind;        /* MEM_CITED_KIND_FACT today; see the kind seam above */
+} tool_cited_entry_t;
+
+typedef struct {
+   tool_cited_entry_t entries[MAX_TOOL_CITED_FACTS];
+   int count;
+} tool_cited_set_t;
+
 typedef struct {
    _Atomic int state;
    pthread_t thread_id;
@@ -549,6 +580,12 @@ typedef struct session {
    // populated in build_focus_block when citation is enabled and read by the
    // response finalizer.  Shares history_mutex (same rationale as injected_set).
    citation_stash_t citation_stash;
+
+   // Memory citation — tool-sourced facts (Option B): per-turn set of fact ids the
+   // model was shown via a memory search/recall tool result, eligible to be cited
+   // by <cited>ID:x</cited>.  Multi-writer (parallel tool workers) — every record
+   // via history_mutex.  Cleared at dispatch entry beside citation_stash.
+   tool_cited_set_t tool_cited_set;
 
    // Phase 1g-i: most-recently-stamped user-message DB id.  Set by
    // session_stamp_last_message_id when role == "user"; read as `turn_id`

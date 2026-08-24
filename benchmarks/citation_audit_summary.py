@@ -106,12 +106,13 @@ def main():
     try:
         rows = db.execute(
             f"SELECT id, ts, conversation_id, message_id, user_id, "
-            f"injected_ids, cited_ids, injected_scores, dropped_count "
+            f"injected_ids, cited_ids, injected_scores, dropped_count, "
+            f"tool_surfaced_ids, dropped_tool_count "
             f"FROM memory_citation_audit {clause} ORDER BY id",
             params,
         ).fetchall()
     except sqlite3.Error as e:
-        sys.exit(f"query failed (is the schema >= v78?): {e}")
+        sys.exit(f"query failed (is the schema >= v79?): {e}")
 
     if not rows:
         print("No audit rows match. (Feature off, or no turns surfaced memories yet.)")
@@ -121,6 +122,10 @@ def main():
     turns_cited = 0
     tot_inj = tot_cit = tot_drop = 0
     recall_inj = recall_cit = 0
+    # Option B: tool-sourced citation universe (facts shown via a memory tool this
+    # turn) vs the focus-injection universe.
+    tot_tool_surf = tot_tool_cit = tot_drop_tool = 0
+    turns_tool = 0  # turns that surfaced >=1 tool fact
     cited_kind = Counter()
     waste_kind = Counter()      # injected but not cited, by kind
     inj_kind = Counter()        # all injected, by kind
@@ -136,12 +141,24 @@ def main():
     nocite_top, nocite_bot, nocite_avg = [], [], []  # per no-citation turn: max/min/mean
     scored_rows = 0                          # rows carrying aligned scores (>= v78)
 
-    for _id, _ts, _conv, _msg, _uid, inj_csv, cit_csv, sc_csv, drop in rows:
+    for (_id, _ts, _conv, _msg, _uid, inj_csv, cit_csv, sc_csv, drop, tool_csv,
+         drop_tool) in rows:
         inj, cit = ids(inj_csv), ids(cit_csv)
         cited_set = set(cit)
         tot_inj += len(inj)
         tot_cit += len(cit)
         tot_drop += drop
+
+        # Tool-sourced universe (Option B). tool_surfaced_ids may be NULL on pre-v79
+        # rows; ids() tolerates that. A cited id is a "tool cite" when it is in the
+        # tool universe (provenance derived by set membership).
+        tool = ids(tool_csv)
+        tool_set = set(tool)
+        tot_tool_surf += len(tool)
+        tot_drop_tool += (drop_tool or 0)
+        if tool:
+            turns_tool += 1
+        tot_tool_cit += len(cited_set & tool_set)
         for it in inj:
             inj_kind[kind(it)] += 1
             if it not in cited_set:
@@ -193,6 +210,14 @@ def main():
     print(f" cited (total)                   : {tot_cit}")
     print(f" injection precision (all turns) : {pct(tot_cit, tot_inj)}")
     print(f" injection precision (recall only): {pct(recall_cit, recall_inj)}   ({recall_cit}/{recall_inj})")
+    print()
+    # Option B: tool-sourced citation (facts shown via a memory search/recall tool).
+    print(" TOOL-SOURCED (Option B)")
+    print(f"   turns surfacing a tool fact   : {turns_tool}")
+    print(f"   tool facts surfaced (total)   : {tot_tool_surf}")
+    print(f"   tool facts cited (total)      : {tot_tool_cit}")
+    print(f"   tool-cite precision           : {pct(tot_tool_cit, tot_tool_surf)}")
+    print(f"   dropped tool ids (mis-copied) : {tot_drop_tool}   <- want 0")
     print()
     print(" cited by kind      :", dict(cited_kind) or "{}")
     print(" injected by kind   :", dict(inj_kind) or "{}")

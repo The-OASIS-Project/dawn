@@ -650,6 +650,14 @@ dawn_add_unit_test(test_recall_format
    LIBS    dawn_common unity pthread
    LABEL   ci)
 
+# Memory-citation <cited> tokenizer + two-set validation (Option B).  Links the
+# pure parse core only — no session/DB/config.
+dawn_add_unit_test(test_memory_citation_parse
+   SOURCES test_memory_citation_parse.c
+           ${SRC_ROOT}/src/memory/memory_citation_parse.c
+   LIBS    dawn_common unity pthread
+   LABEL   ci)
+
 # Phase 1c: extracted fact-search helper.  Links the production helper
 # against programmable memory_db_*/memory_embeddings_* stubs so the
 # pipeline's tokenize → multi-token-keyword → hybrid re-rank flow can

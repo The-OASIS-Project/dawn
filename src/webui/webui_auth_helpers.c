@@ -278,6 +278,8 @@ static const char k_citation_footer[] =
     "- The turn context may include numbered memory items tagged [M1], [M2], etc.\n"
     "- If your reply relies on any of them, end your ENTIRE reply with a citation tag listing the "
     "ones you actually used: " CITED_TAG_EXAMPLE " (comma-separated, no spaces, numbers only).\n"
+    "- A memory search/recall result may also tag facts " SURFACED_ID_HINT "; cite those the same "
+    "way by id, e.g. " CITED_TAG_ID_EXAMPLE ".  Cite only ids shown in this turn's results.\n"
     "- Use the tag only for items you genuinely drew on; omit it entirely if you used none.\n"
     "- The tag is removed before the user sees it, so it never disrupts your reply — always "
     "include it when you drew on any memory item.\n";

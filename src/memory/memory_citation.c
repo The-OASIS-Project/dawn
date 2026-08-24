@@ -30,12 +30,17 @@
 #define AUTH_DB_INTERNAL_ALLOWED   /* this module owns a memory-table writer */
 #include "auth/auth_db_internal.h" /* s_db, AUTH_DB_LOCK_* */
 #include "config/dawn_config.h"    /* g_config */
-#include "core/session_manager.h"  /* session_t, citation_stash_t, MAX_CITATION_STASH */
+#include "core/session_manager.h"  /* session_t, citation_stash_t, tool_cited_set_t */
 #include "logging.h"
+#include "memory/memory_citation_internal.h" /* memory_citation_csv_append + resolve_cited */
 
-/* CSV buffer for injected/cited item_ids.  Each item_id <= 64 bytes; 16 max
- * ordinals -> ~1 KB is generous headroom. */
-#define CITE_CSV_MAX 1280
+/* CSV buffer for the injected / tool-surfaced / cited id lists.  Sized for the
+ * realistic worst case: the tool universe can hold MAX_TOOL_CITED_FACTS (96)
+ * "fact:<id>," entries (~25 B each at 19-digit ids => ~2.4 KB), wider than the
+ * 64-slot focus universe.  Beyond this the CSV truncates bounded-safe (the
+ * analyzer counts what's present); an absurd all-items citation is the only way
+ * to reach it. */
+#define CITE_CSV_MAX 2560
 
 /* WebUI Context-panel gold-highlight delivery.  Weak no-op here keeps this
  * Layer-2 capture WebUI-agnostic; webui_broadcasts.c provides the strong impl
@@ -51,17 +56,6 @@ __attribute__((weak)) void webui_broadcast_context_citations(int user_id,
    (void)cited_ids_csv;
 }
 
-/* Append `s` to a comma-separated CSV buffer, bounded (never overflows). */
-static void csv_append(char *buf, size_t bufsz, size_t *len, const char *s) {
-   if (*len >= bufsz - 1) {
-      return;
-   }
-   int n = snprintf(buf + *len, bufsz - *len, "%s%s", (*len > 0) ? "," : "", s);
-   if (n > 0) {
-      *len += ((size_t)n < bufsz - *len) ? (size_t)n : (bufsz - *len - 1);
-   }
-}
-
 /* Insert one audit row.  Best-effort telemetry: logs and returns on any failure. */
 static void audit_insert(int64_t conv_id,
                          int64_t msg_id,
@@ -69,14 +63,16 @@ static void audit_insert(int64_t conv_id,
                          const char *injected,
                          const char *cited,
                          const char *injected_scores,
-                         int dropped) {
+                         const char *tool_surfaced,
+                         int dropped,
+                         int dropped_tool) {
    AUTH_DB_LOCK_OR_RETURN_VOID();
    sqlite3_stmt *stmt = NULL;
    const char *sql =
        "INSERT INTO memory_citation_audit "
        "(conversation_id, message_id, user_id, ts, injected_ids, cited_ids, injected_scores, "
-       "dropped_count) "
-       "VALUES (?, ?, ?, strftime('%s','now'), ?, ?, ?, ?)";
+       "tool_surfaced_ids, dropped_count, dropped_tool_count) "
+       "VALUES (?, ?, ?, strftime('%s','now'), ?, ?, ?, ?, ?, ?)";
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
       OLOG_ERROR("memory_citation: audit insert prepare failed: %s", sqlite3_errmsg(s_db.db));
       AUTH_DB_UNLOCK();
@@ -88,7 +84,9 @@ static void audit_insert(int64_t conv_id,
    sqlite3_bind_text(stmt, 4, injected ? injected : "", -1, SQLITE_TRANSIENT);
    sqlite3_bind_text(stmt, 5, cited ? cited : "", -1, SQLITE_TRANSIENT);
    sqlite3_bind_text(stmt, 6, injected_scores ? injected_scores : "", -1, SQLITE_TRANSIENT);
-   sqlite3_bind_int(stmt, 7, dropped);
+   sqlite3_bind_text(stmt, 7, tool_surfaced ? tool_surfaced : "", -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int(stmt, 8, dropped);
+   sqlite3_bind_int(stmt, 9, dropped_tool);
    if (sqlite3_step(stmt) != SQLITE_DONE) {
       OLOG_WARNING("memory_citation: audit insert failed: %s", sqlite3_errmsg(s_db.db));
    }
@@ -96,35 +94,75 @@ static void audit_insert(int64_t conv_id,
    AUTH_DB_UNLOCK();
 }
 
+/* Record a tool-surfaced fact into the per-turn set (Option B).  See header. */
+void memory_citation_record_tool_fact(session_t *session, int64_t fact_id) {
+   if (session == NULL || fact_id <= 0 || !g_config.memory.citation_enabled) {
+      return;
+   }
+   pthread_mutex_lock(&session->history_mutex);
+   tool_cited_set_t *set = &session->tool_cited_set;
+   for (int i = 0; i < set->count; i++) {
+      if (set->entries[i].fact_id == fact_id) {
+         pthread_mutex_unlock(&session->history_mutex); /* already recorded this turn */
+         return;
+      }
+   }
+   if (set->count >= MAX_TOOL_CITED_FACTS) {
+      pthread_mutex_unlock(&session->history_mutex);
+      OLOG_WARNING("memory_citation: tool-cited set full (%d) — fact %lld not citeable this turn",
+                   MAX_TOOL_CITED_FACTS, (long long)fact_id);
+      return;
+   }
+   set->entries[set->count].fact_id = fact_id;
+   set->entries[set->count].kind = MEM_CITED_KIND_FACT;
+   set->count++;
+   pthread_mutex_unlock(&session->history_mutex);
+}
+
+void memory_citation_record_tool_fact_current(int64_t fact_id) {
+   memory_citation_record_tool_fact(session_get_command_context(), fact_id);
+}
+
+bool memory_citation_enabled(void) {
+   return g_config.memory.citation_enabled;
+}
+
+
 void memory_citation_capture(session_t *session, const char *response_text) {
    if (session == NULL || response_text == NULL || !g_config.memory.citation_enabled) {
       return;
    }
 
-   /* Snapshot the per-turn stash under history_mutex (its documented guard).
-    * INVARIANT: correctness depends on every finalizer call site being preceded,
-    * on the SAME session, by session_dispatch_user_turn()'s stash-clear.  A new
-    * finalizer caller that reaches here without a dispatch-clear would attribute
-    * a stale injected/cited set to the wrong turn. */
+   /* Snapshot BOTH per-turn citation structures under ONE history_mutex critical
+    * section (they share the lock) so validation sees a consistent pair.  The tool
+    * set is written by parallel tool workers, so this copy-out MUST be under lock.
+    * INVARIANT: every finalizer call site is preceded, on the SAME session, by
+    * session_dispatch_user_turn()'s clear of both — else a stale set attributes to
+    * the wrong turn. */
    citation_stash_t stash;
+   tool_cited_set_t tool_set;
    pthread_mutex_lock(&session->history_mutex);
    stash = session->citation_stash;
+   tool_set = session->tool_cited_set;
    pthread_mutex_unlock(&session->history_mutex);
 
-   if (stash.count <= 0) {
-      return; /* no [M#] surfaced this turn — nothing to audit */
+   /* Proceed when EITHER channel surfaced something.  A tool-only turn (focus
+    * disabled / short-circuited but memory searched) is exactly what Option B
+    * exists to measure, so an empty focus stash is no longer a bail-out. */
+   if (stash.count <= 0 && tool_set.count <= 0) {
+      return;
    }
    if (stash.count > MAX_CITATION_STASH) {
       stash.count = MAX_CITATION_STASH; /* defensive */
    }
+   if (tool_set.count > MAX_TOOL_CITED_FACTS) {
+      tool_set.count = MAX_TOOL_CITED_FACTS; /* defensive */
+   }
 
-   /* All surfaced item_ids -> injected CSV, with a parallel CSV of the per-item
-    * final_score (same order) so the audit can split score by used-vs-unused.
-    * Both share the CITE_CSV_MAX bound; under extreme pressure `injected` (wider
-    * elements) truncates first, so a boundary row's two CSVs can differ in count.
-    * The analyzer only attributes scores when the two lengths match exactly
-    * (else it skips the row), so a mismatch loses that row's analytics but never
-    * mis-pairs a score to the wrong id. */
+   /* Focus-injected item_ids -> injected CSV + a parallel per-item final_score CSV
+    * (same order) — unchanged from Phase 1 (focus injection precision).  Both share
+    * the CITE_CSV_MAX bound; the analyzer attributes scores only when the two
+    * lengths match, so a truncation loses analytics but never mis-pairs. */
    char injected[CITE_CSV_MAX];
    char inj_scores[CITE_CSV_MAX];
    size_t inj_len = 0;
@@ -132,57 +170,38 @@ void memory_citation_capture(session_t *session, const char *response_text) {
    injected[0] = '\0';
    inj_scores[0] = '\0';
    for (int i = 0; i < stash.count; i++) {
-      csv_append(injected, sizeof(injected), &inj_len, stash.entries[i].item_id);
+      memory_citation_csv_append(injected, sizeof(injected), &inj_len, stash.entries[i].item_id);
       char score_str[16];
       snprintf(score_str, sizeof(score_str), "%.4f", stash.entries[i].final_score);
-      csv_append(inj_scores, sizeof(inj_scores), &inj_scores_len, score_str);
+      memory_citation_csv_append(inj_scores, sizeof(inj_scores), &inj_scores_len, score_str);
    }
 
-   /* Parse EVERY <cited>…</cited> block, validating ordinals against the stash.
-    * A well-behaved model emits one trailing tag, but iterate all so a stray
-    * extra tag can't silently drop citations; `seen[]` dedups across blocks. */
-   char cited[CITE_CSV_MAX];
-   size_t cit_len = 0;
-   cited[0] = '\0';
-   int cited_count = 0;
+   /* Tool-surfaced facts -> the tool universe CSV, canonical "fact:<id>" (the
+    * analyzer derives tool-cite precision from cited ∩ this; summaries would slot
+    * in as "summary:x" with no schema change). */
+   char tool_surfaced[CITE_CSV_MAX];
+   size_t tool_len = 0;
+   tool_surfaced[0] = '\0';
+   for (int i = 0; i < tool_set.count; i++) {
+      char canon[32];
+      snprintf(canon, sizeof(canon), "fact:%lld", (long long)tool_set.entries[i].fact_id);
+      memory_citation_csv_append(tool_surfaced, sizeof(tool_surfaced), &tool_len, canon);
+   }
+
+   /* Parse EVERY <cited>…</cited> block and validate against BOTH sets (extracted
+    * to memory_citation_resolve_cited so the tokenizer is unit-testable).
+    * cited_all (focus + tool) feeds the audit; cited_focus (focus only) feeds the
+    * Aurora broadcast — a tool fact has no Context-panel row, so it must NOT ride
+    * the context_citations frame (keeps B1 wire-clean). */
+   char cited_all[CITE_CSV_MAX];
+   char cited_focus[CITE_CSV_MAX];
+   int cited_focus_count = 0;
+   int cited_tool_count = 0;
    int dropped = 0;
-   bool seen[MAX_CITATION_STASH + 1] = { false }; /* dedup by ordinal */
-
-   const char *scan = response_text;
-   const char *open;
-   while ((open = strstr(scan, "<cited>")) != NULL) {
-      const char *inner = open + strlen("<cited>");
-      const char *close = strstr(inner, "</cited>");
-      const char *end = (close != NULL) ? close : (inner + strlen(inner)); /* orphan-tolerant */
-      const char *p = inner;
-      while (p < end) {
-         while (p < end && !isdigit((unsigned char)*p)) {
-            p++; /* tolerate the 'M'/'m' prefix, commas, spaces */
-         }
-         if (p >= end) {
-            break;
-         }
-         int ord = 0;
-         while (p < end && isdigit((unsigned char)*p)) {
-            ord = ord * 10 + (*p - '0');
-            p++;
-            if (ord > 100000) {
-               break; /* overflow guard for a garbage run of digits */
-            }
-         }
-         if (ord >= 1 && ord <= stash.count && !seen[ord]) {
-            seen[ord] = true;
-            csv_append(cited, sizeof(cited), &cit_len, stash.entries[ord - 1].item_id);
-            cited_count++;
-         } else {
-            dropped++; /* out-of-range (hallucinated/stale) or duplicate ordinal */
-         }
-      }
-      if (close == NULL) {
-         break; /* orphan opener — no further well-formed tags */
-      }
-      scan = close + strlen("</cited>");
-   }
+   int dropped_tool = 0;
+   memory_citation_resolve_cited(response_text, &stash, &tool_set, cited_all, sizeof(cited_all),
+                                 cited_focus, sizeof(cited_focus), &cited_focus_count,
+                                 &cited_tool_count, &dropped, &dropped_tool);
 
    int64_t conv_id = atomic_load(&session->stream_conversation_id);
    int64_t msg_id = session_get_last_user_msg_id(session); /* the user turn this reply answers */
@@ -190,15 +209,18 @@ void memory_citation_capture(session_t *session, const char *response_text) {
    int user_id = session->metrics.user_id;
    pthread_mutex_unlock(&session->metrics_mutex);
 
-   audit_insert(conv_id, msg_id, user_id, injected, cited, inj_scores, dropped);
+   audit_insert(conv_id, msg_id, user_id, injected, cited_all, inj_scores, tool_surfaced, dropped,
+                dropped_tool);
 
-   /* Feed the Context panel: gold-highlight the rows the model actually cited.
-    * turn_id == msg_id (both last_user_msg_id) aligns this to the context_injection
-    * frame; per-row match is by item_id.  Only when something was cited. */
-   if (cited_count > 0) {
-      webui_broadcast_context_citations(user_id, conv_id, msg_id, cited);
+   /* Feed the Context panel: gold-highlight ONLY the focus-injected rows the model
+    * cited (a tool fact has no panel row).  Focus subset only — keeps the reviewed
+    * context_citations wire contract unchanged for B1. */
+   if (cited_focus_count > 0) {
+      webui_broadcast_context_citations(user_id, conv_id, msg_id, cited_focus);
    }
 
-   OLOG_INFO("memory_citation: turn audited (user=%d conv=%lld injected=%d cited=%d dropped=%d)",
-             user_id, (long long)conv_id, stash.count, cited_count, dropped);
+   OLOG_INFO("memory_citation: turn audited (user=%d conv=%lld injected=%d tool_surfaced=%d "
+             "cited_focus=%d cited_tool=%d dropped=%d dropped_tool=%d)",
+             user_id, (long long)conv_id, stash.count, tool_set.count, cited_focus_count,
+             cited_tool_count, dropped, dropped_tool);
 }

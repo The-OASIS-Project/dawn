@@ -129,6 +129,19 @@ void text_filter_reset(cmd_tag_filter_state_t *state);
  * never drift on grammar.  The ordinals are illustrative. */
 #define CITED_TAG_EXAMPLE CITED_TAG_OPEN "M1,M4" CITED_TAG_CLOSE
 
+/* Marker a memory TOOL result prints before each surfaced fact, e.g. "[ID:6432]".
+ * Single-sourced so both renderers (memory_callback.c search/recall and
+ * recall_format.c) print ONE marker and the model learns ONE grammar; the capture
+ * tokenizer keys on the same "ID:" prefix.  printf-format: one %lld (the fact id). */
+#define SURFACED_ID_FMT "[ID:%lld]"
+
+/* Literal `[ID:x]` for PROMPT prose (SURFACED_ID_FMT carries a %lld and can't be
+ * used as plain text). */
+#define SURFACED_ID_HINT "[ID:x]"
+
+/* Prompt example of citing a tool-surfaced fact by id (see SURFACED_ID_FMT). */
+#define CITED_TAG_ID_EXAMPLE CITED_TAG_OPEN "ID:6432" CITED_TAG_CLOSE
+
 /* Command / end-of-turn tag grammar — the legacy `<command>…</command>` transport
  * and the `<end_of_turn>` marker some local models emit.  Shared by
  * text_filter_command_strip so the finalizer + every TTS path key off one source. */

@@ -39,10 +39,12 @@
 #include "core/iso8601.h"
 #include "core/session_manager.h"
 #include "core/strbuf.h"
+#include "core/text_filter.h" /* SURFACED_ID_FMT — one marker for both memory renderers */
 #include "core/time_query_parser.h"
 #include "logging.h"
 #include "memory/contacts_db.h"
 #include "memory/memory_callback_internal.h"
+#include "memory/memory_citation.h" /* memory_citation_record_tool_fact_current (Option B) */
 #include "memory/memory_db.h"
 #include "memory/memory_db_aliases.h"
 #include "memory/memory_db_provenance.h"
@@ -522,6 +524,49 @@ static void append_graph_context(int user_id,
  * Action: Search
  * ============================================================================= */
 
+/* Append the tool-result citation hint (Option B) when the signal is on — the
+ * adjacency salience lever: the cite reminder sits right under the [ID:x] facts
+ * the model just saw, not only in the far cached prefix.  Same wording as the
+ * recall tool's footer (recall_format.c).  Callers gate on having rendered >=1
+ * [ID:x] fact so it never trails an empty result. */
+static void append_tool_citation_hint(strbuf_t *sb) {
+   if (!memory_citation_enabled())
+      return;
+   strbuf_appendf(sb,
+                  "\nIf any " SURFACED_ID_HINT " fact above informed your reply, end your reply "
+                  "with a citation tag listing the ids you used, e.g. " CITED_TAG_ID_EXAMPLE
+                  " (comma-separated, no spaces).\n");
+}
+
+/* Every TOOL_MAPS_TO_CUSTOM field the `memory` tool declares (memory_tool.c),
+ * flattened into the callback value as "::field::value" (tool_registry.h).
+ * `remember` stores its input verbatim as fact_text, so ANY of these that the
+ * flattening appends must be trimmed first — a stray param tail poisons the
+ * fact_text, its embedding, and its dedup hash (observed: a remember call that
+ * carried spurious search/recent params). Keep in sync with memory_tool.c. */
+static const char *const kMemoryParamMarkers[] = {
+   "::time_range::",  "::limit::",           "::sort::",        "::before::",
+   "::target_name::", "::category::",        "::as_of::",       "::include_historical::",
+   "::with_source::", "::confirm_private::", "::replaced_by::",
+};
+
+/* Length of `value` up to the EARLIEST known custom-param marker (or the whole
+ * length if none). Matches on the known "::field::" names rather than a bare
+ * "::", so a fact that legitimately contains "::" (e.g. "the ratio is 3::1") is
+ * never truncated. */
+static size_t memory_value_base_len(const char *value) {
+   size_t base = strlen(value);
+   for (size_t i = 0; i < sizeof(kMemoryParamMarkers) / sizeof(kMemoryParamMarkers[0]); i++) {
+      const char *m = strstr(value, kMemoryParamMarkers[i]);
+      if (m != NULL) {
+         size_t len = (size_t)(m - value);
+         if (len < base)
+            base = len;
+      }
+   }
+   return base;
+}
+
 /* category (v34): when non-NULL/non-empty, pre-filters fact-ID set by exact category
  *   match before hybrid scoring.  Bypasses time_range path (categories layer above
  *   recency for now — combinable in a follow-up if useful).
@@ -679,7 +724,9 @@ char *memory_action_search(int user_id,
          if (minimal) {
             /* Stripped per-fact line: just `- text`.  Date stays in fact_text
              * when extraction included it (Phase 0 prompt v2). */
-            strbuf_appendf(&sb, "- [ID:%lld] %s\n", (long long)facts[i].id, facts[i].fact_text);
+            strbuf_appendf(&sb, "- " SURFACED_ID_FMT " %s\n", (long long)facts[i].id,
+                           facts[i].fact_text);
+            memory_citation_record_tool_fact_current(facts[i].id);
             /* Capture provenance for the deferred global Source evidence block. */
             if (with_source && fact_conv[i] > 0 && min_src_count < MINIMAL_SOURCE_TOP_FACTS) {
                min_src_conv[min_src_count] = fact_conv[i];
@@ -691,8 +738,10 @@ char *memory_action_search(int user_id,
          } else {
             char time_str[32];
             format_time_ago(facts[i].created_at, time_str, sizeof(time_str));
-            strbuf_appendf(&sb, "- [ID:%lld] %s (confidence: %.0f%%, %s)\n", (long long)facts[i].id,
-                           facts[i].fact_text, facts[i].confidence * 100, time_str);
+            strbuf_appendf(&sb, "- " SURFACED_ID_FMT " %s (confidence: %.0f%%, %s)\n",
+                           (long long)facts[i].id, facts[i].fact_text, facts[i].confidence * 100,
+                           time_str);
+            memory_citation_record_tool_fact_current(facts[i].id);
 
             if (with_source && source_budget > 0 && fact_conv[i] > 0) {
                append_source_excerpt_from_range(user_id, fact_conv[i], fact_start[i], fact_end[i],
@@ -858,6 +907,10 @@ char *memory_action_search(int user_id,
             break;
       }
    }
+
+   /* Cite hint next to the [ID:x] facts (adjacency), only when facts were rendered. */
+   if (fact_count > 0)
+      append_tool_citation_hint(&sb);
 
    /* Empty result: surface a friendly fallback (must not be NULL — callers
     * expect a heap-allocated string). */
@@ -1049,8 +1102,9 @@ static char *memory_action_remember_single(int user_id,
          memory_fact_t nf;
          if (memory_db_fact_get(neighbor_ids[i], user_id, &nf) != MEMORY_DB_SUCCESS)
             continue; /* vanished between scan and render — skip */
-         strbuf_appendf(&sb, "\n  - [ID:%lld] %.200s (sim %.2f)", (long long)neighbor_ids[i],
-                        nf.fact_text, neighbor_scores[i]);
+         strbuf_appendf(&sb, "\n  - " SURFACED_ID_FMT " %.200s (sim %.2f)",
+                        (long long)neighbor_ids[i], nf.fact_text, neighbor_scores[i]);
+         memory_citation_record_tool_fact_current(neighbor_ids[i]);
       }
    }
 
@@ -1357,7 +1411,8 @@ static char *memory_action_get(int user_id, const char *value) {
       /* memory_db_fact_get is user-scoped at the SQL layer, so a foreign or
        * absent ID simply misses — no cross-user leak. */
       if (memory_db_fact_get(ids[i], user_id, &fact) == MEMORY_DB_SUCCESS) {
-         strbuf_appendf(&sb, "- [ID:%lld] %s\n", (long long)ids[i], fact.fact_text);
+         strbuf_appendf(&sb, "- " SURFACED_ID_FMT " %s\n", (long long)ids[i], fact.fact_text);
+         memory_citation_record_tool_fact_current(ids[i]);
          found++;
       } else if (nf_len < sizeof(nf_ids) - 1) {
          nf_len += (size_t)snprintf(nf_ids + nf_len, sizeof(nf_ids) - nf_len, "%s%lld",
@@ -1441,8 +1496,9 @@ static char *memory_action_find_duplicates(int user_id, const char *value) {
          memory_fact_t fact;
          /* Skip NOT_FOUND (a just-deleted fact / cache-vs-DB race). */
          if (memory_db_fact_get(clusters[c].ids[k], user_id, &fact) == MEMORY_DB_SUCCESS) {
-            strbuf_appendf(&sb, "  - [ID:%lld] %.160s%s\n", (long long)clusters[c].ids[k],
+            strbuf_appendf(&sb, "  - " SURFACED_ID_FMT " %.160s%s\n", (long long)clusters[c].ids[k],
                            fact.fact_text, strlen(fact.fact_text) > 160 ? "..." : "");
+            memory_citation_record_tool_fact_current(clusters[c].ids[k]);
          }
       }
    }
@@ -1573,7 +1629,9 @@ char *memory_action_recent(int user_id,
       int elided = 0;
       for (int i = 0; i < fact_count; i++) {
          if (minimal) {
-            strbuf_appendf(&sb, "- [ID:%lld] %s\n", (long long)facts[i].id, facts[i].fact_text);
+            strbuf_appendf(&sb, "- " SURFACED_ID_FMT " %s\n", (long long)facts[i].id,
+                           facts[i].fact_text);
+            memory_citation_record_tool_fact_current(facts[i].id);
             if (with_source && fact_conv[i] > 0 &&
                 min_src_count < MINIMAL_RECENT_SOURCE_TOP_FACTS) {
                min_src_conv[min_src_count] = fact_conv[i];
@@ -1585,8 +1643,9 @@ char *memory_action_recent(int user_id,
          } else {
             char time_str[32];
             format_time_ago(facts[i].created_at, time_str, sizeof(time_str));
-            strbuf_appendf(&sb, "- [ID:%lld] %s (%s, %s)\n", (long long)facts[i].id,
+            strbuf_appendf(&sb, "- " SURFACED_ID_FMT " %s (%s, %s)\n", (long long)facts[i].id,
                            facts[i].fact_text, facts[i].source, time_str);
+            memory_citation_record_tool_fact_current(facts[i].id);
             if (with_source && source_budget > 0 && fact_conv[i] > 0) {
                /* memory_action_recent is time-windowed, not query-driven — pass
                 * NULL for the query scoring slot and use the fact_text alone
@@ -1684,6 +1743,8 @@ char *memory_action_recent(int user_id,
       strbuf_appendf(&sb, "No memories found in the past %s.", period_resolved);
    } else {
       strbuf_appendf(&sb, "\nTotal: %d facts, %d conversations", fact_count, summary_count);
+      if (fact_count > 0)
+         append_tool_citation_hint(&sb); /* adjacency cite hint, only when [ID:x] facts shown */
    }
 
    if (strbuf_oom(&sb)) {
@@ -2124,29 +2185,39 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
          return gate; /* private conversation, not yet confirmed */
       }
       /* Strip the packed custom-param suffix before the text is stored.
-       * TOOL_MAPS_TO_CUSTOM params ride INSIDE `value` as
-       * "base::field::val" (tool_registry.h), and remember stores its input
-       * verbatim as fact_text.  `remember` had no custom param until
-       * confirm_private, so passing `value` straight through used to be safe;
-       * now the confirmed retry — the very thing the refusal string tells the
-       * model to do — would persist "…the 14th::confirm_private::true" as the
-       * fact, poisoning its embedding, its dedup hash and every later recall.
+       * TOOL_MAPS_TO_CUSTOM params ride INSIDE `value` as "base::field::val"
+       * (tool_registry.h), and remember stores its input verbatim as fact_text.
+       * ANY declared param the flattening appends (not just confirm_private —
+       * a remember call has been seen carrying spurious search/recent params)
+       * would otherwise persist "…the 14th::confirm_private::true" /
+       * "…::time_range::…" as the fact, poisoning its embedding, its dedup hash
+       * and every later recall.
        *
-       * Trimmed at OUR marker specifically rather than via
+       * Trimmed at the earliest KNOWN "::field::" marker rather than via
        * tool_param_extract_base(), which cuts at the FIRST "::" — fine for the
        * ID lists `forget` passes, but a fact is free-form user text and may
        * legitimately contain "::" ("the ratio is 3::1"), which base-extraction
        * would silently truncate. */
-      static const char kConfirmMarker[] = "::confirm_private::";
-      char *marker = strstr(value, kConfirmMarker);
-      char *trimmed = NULL;
-      if (marker != NULL) {
-         size_t base_len = (size_t)(marker - value);
-         trimmed = strndup(value, base_len);
+      size_t base_len = memory_value_base_len(value);
+      if (base_len < strlen(value)) {
+         /* A param tail was appended — trim it before storing.  Warn: a normal
+          * remember carries no flattened params, so a trim means the model
+          * over-populated the call (the observed poisoning path) or, very rarely,
+          * a fact legitimately contained a "::field::" token — either way worth a
+          * breadcrumb. */
+         OLOG_WARNING("memory remember: stripped %zu-byte custom-param tail before storing fact",
+                      strlen(value) - base_len);
+         char *trimmed = strndup(value, base_len);
+         if (trimmed == NULL) {
+            /* Fail SAFE: never fall back to the untrimmed value — that would
+             * persist the param tail this strip exists to remove. */
+            return strdup("Memory remember failed: out of memory.");
+         }
+         char *res = memory_action_remember(user_id, trimmed);
+         free(trimmed);
+         return res;
       }
-      char *res = memory_action_remember(user_id, trimmed ? trimmed : value);
-      free(trimmed);
-      return res;
+      return memory_action_remember(user_id, value);
    } else if (strcmp(actionName, "forget") == 0) {
       /* IDs are the base value; optional replaced_by switches delete -> supersede (merge).
        * Base-extract so the ID parser doesn't choke on the ::replaced_by:: suffix. */
