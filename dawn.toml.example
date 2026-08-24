@@ -168,11 +168,14 @@
                                   # Env: DAWN_LLM_MAX_TOKENS
 # compact_soft_threshold = 0.60   # Async background compaction trigger
 # compact_hard_threshold = 0.85   # Blocking compaction trigger (safety net)
-# compact_use_session = true      # Use session's LLM for compaction (false = dedicated)
-# compact_provider = ""           # Dedicated compaction provider: claude/openai/gemini/openrouter/local
-# compact_model = ""              # Dedicated compaction model (e.g., claude-haiku-4-5). A
-                                  # "vendor/model" slug when compact_provider = "openrouter"
-                                  # (empty = main OpenRouter default).
+# compact_use_session = true      # Use session's LLM for compaction. Set false to compact with a
+                                  # dedicated (cheaper) model instead of your chat model — RECOMMENDED.
+# compact_provider = "claude"     # Dedicated compaction provider: claude/openai/gemini/openrouter/local
+                                  # (used only when compact_use_session = false).
+# compact_model = "claude-haiku-4-5"  # Dedicated compaction model. RECOMMENDED: claude-haiku-4-5 —
+                                  # compaction is a summarization pass, so a small fast model keeps it
+                                  # cheap (same reasoning as extraction; not separately benchmarked). A
+                                  # "vendor/model" slug when compact_provider = "openrouter".
 # conversation_logging = false    # Save chat history to log files (WebUI saves to DB)
                                   # Env: DAWN_LLM_CONVERSATION_LOGGING
 # rate_limit_enabled = true       # Throttle cloud API calls to avoid 429 errors
@@ -208,17 +211,17 @@
                                   # Env: DAWN_LLM_CLOUD_OPENAI_USE_RESPONSES_API
 
 # Model lists for quick switching via WebUI or voice
-# First model in list is used when switching to that provider
-# openai_models = ["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.2", "gpt-5-mini", "gpt-5-nano", "o4-mini"]
+# First model in list is used when switching to that provider (up to 32 models per provider)
+# openai_models = ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4-mini", "gpt-5.4-nano"]
 # openai_default_model_idx = 0
-# claude_models = ["claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5"]
+# claude_models = ["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-4-8", "claude-opus-5"]
 # claude_default_model_idx = 0
-# gemini_models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash-preview", "gemini-3-pro-preview"]
+# gemini_models = ["gemini-3.7-flash", "gemini-3.1-pro-preview"]
 # gemini_default_model_idx = 0
 # OpenRouter favorites (used when provider = "openrouter"). IDs are "vendor/model".
 # These are the curated shortlist shown in the header model switcher.
-# openrouter_models = ["anthropic/claude-opus-4.7", "anthropic/claude-sonnet-4.6", "anthropic/claude-haiku-4.5", "openai/gpt-5.5", "openai/gpt-5.4-mini", "openai/gpt-5.4-nano", "google/gemini-3.1-pro-preview", "google/gemini-3.5-flash"]
-# openrouter_default_model_idx = 1   # anthropic/claude-sonnet-4.6
+# openrouter_models = ["openai/gpt-5.6-luna", "openai/gpt-5.6-terra", "openai/gpt-5.6-sol", "openai/gpt-5.5", "openai/gpt-5.4-mini", "openai/gpt-5.4-nano", "anthropic/claude-haiku-4.5", "anthropic/claude-sonnet-5", "anthropic/claude-opus-4.8", "anthropic/claude-opus-5", "google/gemini-3.7-flash", "google/gemini-3.1-pro-preview"]
+# openrouter_default_model_idx = 0   # openai/gpt-5.6-luna
                                   # Verify slugs against https://openrouter.ai/models
 
 [llm.local]
@@ -540,15 +543,15 @@
 [memory]
 # enabled = true                  # Enable persistent user memory
 # context_budget_tokens = 800     # Max tokens for memory context in system prompt
-# extraction_provider = "local"   # Fact-extraction provider: "local", "openai", "claude", "openrouter"
-# extraction_model = "qwen2.5:7b" # Model for memory extraction (a "vendor/model" slug when
-                                  # extraction_provider = "openrouter"; empty = OpenRouter default)
-                                  # Recommended: claude-haiku-4-5 (validated by the four-model
-                                  # LoCoMo sweep — see benchmarks/README.md "four-model extraction
-                                  # sweep results"). Sonnet only beats Haiku by +1.7 pp on
-                                  # recall_generation; Opus is *worse* than Haiku (entity over-
-                                  # fragmentation). Going to a larger Claude tier is not a free
-                                  # win for extraction.
+# extraction_provider = "claude"  # Fact-extraction provider: "local", "openai", "claude", "openrouter"
+# extraction_model = "claude-haiku-4-5"  # RECOMMENDED. A "vendor/model" slug when extraction_provider
+                                  # = "openrouter" (empty = OpenRouter default). Needs claude_api_key in
+                                  # secrets.toml; for a fully-offline setup use provider = "local" plus
+                                  # a local model such as "qwen2.5:7b".
+                                  # Why Haiku: validated by the four-model LoCoMo sweep (see
+                                  # benchmarks/README.md "four-model extraction sweep results") — Sonnet
+                                  # beats Haiku by only +1.7 pp recall_generation and Opus is *worse*
+                                  # (entity over-fragmentation). A larger tier is not a free win here.
 # extraction_timeout_ms = 120000  # LLM timeout for fact extraction (2 min)
                                   # Env: DAWN_MEMORY_EXTRACTION_TIMEOUT_MS
 # note_extraction_guard = true    # Keep reference text filed via the document_manage

@@ -126,46 +126,48 @@ void config_set_defaults(dawn_config_t *config) {
    SAFE_COPY(config->llm.cloud.openai_use_responses_api, "auto");
 
    /* Default OpenAI model list (first entry is default).
-    * gpt-5.4 family routes through /v1/responses; older entries use chat completions. */
-   config->llm.cloud.openai_models_count = 7;
-   SAFE_COPY(config->llm.cloud.openai_models[0], LLM_DEFAULT_OPENAI_MODEL); /* gpt-5.4 */
-   SAFE_COPY(config->llm.cloud.openai_models[1], "gpt-5.4-mini");
-   SAFE_COPY(config->llm.cloud.openai_models[2], "gpt-5.4-nano");
-   SAFE_COPY(config->llm.cloud.openai_models[3], "gpt-5.2");
-   SAFE_COPY(config->llm.cloud.openai_models[4], "gpt-5-mini");
-   SAFE_COPY(config->llm.cloud.openai_models[5], "gpt-5-nano");
-   SAFE_COPY(config->llm.cloud.openai_models[6], "o4-mini");
+    * gpt-5.x families route through /v1/responses; older entries use chat completions. */
+   config->llm.cloud.openai_models_count = 6;
+   SAFE_COPY(config->llm.cloud.openai_models[0], LLM_DEFAULT_OPENAI_MODEL); /* gpt-5.6-luna */
+   SAFE_COPY(config->llm.cloud.openai_models[1], "gpt-5.6-terra");
+   SAFE_COPY(config->llm.cloud.openai_models[2], "gpt-5.6-sol");
+   SAFE_COPY(config->llm.cloud.openai_models[3], "gpt-5.5");
+   SAFE_COPY(config->llm.cloud.openai_models[4], "gpt-5.4-mini");
+   SAFE_COPY(config->llm.cloud.openai_models[5], "gpt-5.4-nano");
    config->llm.cloud.openai_default_model_idx = 0;
 
    /* Default Claude model list (first entry is default) */
-   config->llm.cloud.claude_models_count = 3;
-   SAFE_COPY(config->llm.cloud.claude_models[0], LLM_DEFAULT_CLAUDE_MODEL);
-   SAFE_COPY(config->llm.cloud.claude_models[1], "claude-opus-4-6");
-   SAFE_COPY(config->llm.cloud.claude_models[2], "claude-haiku-4-5");
+   config->llm.cloud.claude_models_count = 4;
+   SAFE_COPY(config->llm.cloud.claude_models[0], LLM_DEFAULT_CLAUDE_MODEL); /* claude-haiku-4-5 */
+   SAFE_COPY(config->llm.cloud.claude_models[1], "claude-sonnet-5");
+   SAFE_COPY(config->llm.cloud.claude_models[2], "claude-opus-4-8");
+   SAFE_COPY(config->llm.cloud.claude_models[3], "claude-opus-5");
    config->llm.cloud.claude_default_model_idx = 0;
 
    /* Default Gemini model list (first entry is default) */
-   config->llm.cloud.gemini_models_count = 5;
-   SAFE_COPY(config->llm.cloud.gemini_models[0], LLM_DEFAULT_GEMINI_MODEL);
-   SAFE_COPY(config->llm.cloud.gemini_models[1], "gemini-2.5-pro");
-   SAFE_COPY(config->llm.cloud.gemini_models[2], "gemini-2.5-flash-lite");
-   SAFE_COPY(config->llm.cloud.gemini_models[3], "gemini-3-flash-preview");
-   SAFE_COPY(config->llm.cloud.gemini_models[4], "gemini-3-pro-preview");
+   config->llm.cloud.gemini_models_count = 2;
+   SAFE_COPY(config->llm.cloud.gemini_models[0], LLM_DEFAULT_GEMINI_MODEL); /* gemini-3.7-flash */
+   SAFE_COPY(config->llm.cloud.gemini_models[1], "gemini-3.1-pro-preview");
    config->llm.cloud.gemini_default_model_idx = 0;
 
    /* Default OpenRouter model list (curated favorites shown in the header switcher;
     * full live catalog browsing is Phase 2).  IDs are OpenRouter "vendor/model" slugs —
-    * verify against https://openrouter.ai/models as the catalog shifts. */
-   config->llm.cloud.openrouter_models_count = 8;
-   SAFE_COPY(config->llm.cloud.openrouter_models[0], "anthropic/claude-opus-4.7");
-   SAFE_COPY(config->llm.cloud.openrouter_models[1], "anthropic/claude-sonnet-4.6");
-   SAFE_COPY(config->llm.cloud.openrouter_models[2], "anthropic/claude-haiku-4.5");
+    * verify against https://openrouter.ai/models as the catalog shifts.  Mirrors the
+    * per-provider lists above (default gpt-5.6-luna to match the OpenAI default). */
+   config->llm.cloud.openrouter_models_count = 12;
+   SAFE_COPY(config->llm.cloud.openrouter_models[0], "openai/gpt-5.6-luna");
+   SAFE_COPY(config->llm.cloud.openrouter_models[1], "openai/gpt-5.6-terra");
+   SAFE_COPY(config->llm.cloud.openrouter_models[2], "openai/gpt-5.6-sol");
    SAFE_COPY(config->llm.cloud.openrouter_models[3], "openai/gpt-5.5");
    SAFE_COPY(config->llm.cloud.openrouter_models[4], "openai/gpt-5.4-mini");
    SAFE_COPY(config->llm.cloud.openrouter_models[5], "openai/gpt-5.4-nano");
-   SAFE_COPY(config->llm.cloud.openrouter_models[6], "google/gemini-3.1-pro-preview");
-   SAFE_COPY(config->llm.cloud.openrouter_models[7], "google/gemini-3.5-flash");
-   config->llm.cloud.openrouter_default_model_idx = 1; /* anthropic/claude-sonnet-4.6 */
+   SAFE_COPY(config->llm.cloud.openrouter_models[6], "anthropic/claude-haiku-4.5");
+   SAFE_COPY(config->llm.cloud.openrouter_models[7], "anthropic/claude-sonnet-5");
+   SAFE_COPY(config->llm.cloud.openrouter_models[8], "anthropic/claude-opus-4.8");
+   SAFE_COPY(config->llm.cloud.openrouter_models[9], "anthropic/claude-opus-5");
+   SAFE_COPY(config->llm.cloud.openrouter_models[10], "google/gemini-3.7-flash");
+   SAFE_COPY(config->llm.cloud.openrouter_models[11], "google/gemini-3.1-pro-preview");
+   config->llm.cloud.openrouter_default_model_idx = 0; /* openai/gpt-5.6-luna */
 
    /* LLM Local */
    SAFE_COPY(config->llm.local.endpoint, "http://127.0.0.1:8080");

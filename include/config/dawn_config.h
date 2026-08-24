@@ -225,16 +225,19 @@ typedef struct {
 /* =============================================================================
  * LLM (Large Language Model) Configuration
  * ============================================================================= */
-/* Maximum models per provider in the configurable model list */
-#define LLM_CLOUD_MAX_MODELS 8
+/* Maximum models per provider in the configurable model list. 32 leaves ample
+ * room for users curating a large OpenRouter shortlist to test many vendors.
+ * Longest slug in use (~29 chars, "google/gemini-3.1-pro-preview") fits well
+ * inside NAME_MAX below, so that cap does not need to grow alongside it. */
+#define LLM_CLOUD_MAX_MODELS 32
 #define LLM_CLOUD_MODEL_NAME_MAX 64
 
 /* Default fallback models when no models are configured
- * Updated: 2026-02 - Update these when new model generations are released */
-#define LLM_DEFAULT_OPENAI_MODEL "gpt-5.4"
-#define LLM_DEFAULT_CLAUDE_MODEL "claude-sonnet-4-6"
-#define LLM_DEFAULT_GEMINI_MODEL "gemini-2.5-flash"
-#define LLM_DEFAULT_OPENROUTER_MODEL "anthropic/claude-sonnet-4.6"
+ * Updated: 2026-08 - Update these when new model generations are released */
+#define LLM_DEFAULT_OPENAI_MODEL "gpt-5.6-luna"
+#define LLM_DEFAULT_CLAUDE_MODEL "claude-haiku-4-5"
+#define LLM_DEFAULT_GEMINI_MODEL "gemini-3.7-flash"
+#define LLM_DEFAULT_OPENROUTER_MODEL "openai/gpt-5.6-luna"
 
 typedef struct {
    char provider[16];              /* "openai", "claude", "gemini", or "openrouter" */

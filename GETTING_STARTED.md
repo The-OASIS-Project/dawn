@@ -260,6 +260,18 @@ export OPENAI_API_KEY="sk-your-openai-key"
 
 > **Tip**: Many settings can be changed live in the Web UI without editing files.
 
+### Recommended models
+
+DAWN uses an LLM in three independent roles. They don't have to be the same model — or even the same provider — so long as each provider's key is in `secrets.toml`.
+
+| Role | `dawn.toml` setting | Recommendation |
+|------|---------------------|----------------|
+| **Chat** — what you actually talk to | `[llm.cloud]` `provider` + `model` | Your main quality/latency lever; pick a capable current model from your provider. We run `gpt-5.6-luna` (OpenAI) as a strong value default. |
+| **Memory extraction** — background fact-building at session end | `[memory]` `extraction_provider` + `extraction_model` | **`claude-haiku-4-5`.** Benchmark-validated: a bigger/"smarter" model does *not* extract better (larger models over-fragment the entity graph and retrieve less reliably), so a small fast model is the correct pick, not a compromise. |
+| **Compaction** — background summarization of long conversations | `[llm]` `compact_provider` + `compact_model` | **`claude-haiku-4-5`**, by the same reasoning — compaction is a summarization pass that doesn't need your top model. (Not separately benchmarked; extraction is.) |
+
+The two background roles run constantly, so keeping them on a small fast model keeps cost and latency down without hurting quality. If you chat on one provider but want Haiku for extraction/compaction (a common, sensible split), add `claude_api_key` to `secrets.toml` and set the `*_provider` fields to `claude`.
+
 ## 6. Create Admin Account
 
 The Web UI requires authentication. On first run, DAWN displays a setup token in the console:
