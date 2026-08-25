@@ -974,7 +974,8 @@
 [attention]
 # enabled = false                 # Master switch (evaluation + delivery).
 # max_alerts_per_hour = 4         # Global spoken-alert budget; over-budget
-                                  #   alerts degrade to a silent banner. 0-100.
+                                  #   alerts degrade to a silent banner. 0-100;
+                                  #   0 = no limit (every alert is always spoken).
 # inject_into_sessions = false    # Also make an active conversation aware of a
                                   #   fired alert (so Friday can reference it).
 # judge_enabled = false           # P2 LLM salience judge (not yet active).

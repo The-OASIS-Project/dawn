@@ -64,6 +64,7 @@ int auth_db_migrations_v71(sqlite3 *db) {
        "  notify INTEGER NOT NULL,"
        "  ttl_min INTEGER,"
        "  enabled INTEGER NOT NULL DEFAULT 1,"
+       "  named INTEGER NOT NULL DEFAULT 0,"
        "  muted_until INTEGER,"
        "  source TEXT,"
        "  created_at INTEGER,"

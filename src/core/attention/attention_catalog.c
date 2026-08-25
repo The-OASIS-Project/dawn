@@ -367,6 +367,21 @@ bool attention_catalog_has(const char *key) {
    return attention_catalog_lookup(key) != NULL;
 }
 
+const char *attention_catalog_rule_type(const char *key) {
+   const attention_catalog_entry_t *e = attention_catalog_lookup(key);
+   return e ? sage_rule_type_to_str(e->default_rule_type) : NULL;
+}
+
+const char *attention_catalog_default_direction(const char *key) {
+   const attention_catalog_entry_t *e = attention_catalog_lookup(key);
+   return e ? sage_direction_to_str(e->default_direction) : NULL;
+}
+
+double attention_catalog_default_threshold(const char *key) {
+   const attention_catalog_entry_t *e = attention_catalog_lookup(key);
+   return e ? e->default_threshold : 0.0;
+}
+
 /* =============================================================================
  * Enum <-> wire-string serialization (canonical; shared by the `attention` tool
  * and the WebUI Watches panel — see the contract note in attention.h).

@@ -20,8 +20,9 @@
  *
  * The visual counterpart to the conversational `attention` LLM tool
  * (src/tools/attention_tool.c).  Both surfaces drive the same attention_watch_*
- * core API and preserve its one-watch-per-metric model, so a watch created by
- * voice is editable in the panel and vice-versa.  Every handler is scoped to
+ * core API — a metric may hold several named watches (min AND max, tiers), edits
+ * go by id, and an add dedups only on an identical condition — so a watch created
+ * by voice is editable in the panel and vice-versa.  Every handler is scoped to
  * conn->auth_user_id — the client payload is never trusted for identity, and
  * the core API is itself user-scoped (WHERE user_id = ?).
  */
@@ -66,6 +67,7 @@ static json_object *watch_to_json(const sage_watch_t *w) {
    json_object *o = json_object_new_object();
    json_object_object_add(o, "id", json_object_new_int64(w->id));
    json_object_object_add(o, "name", json_object_new_string(w->name));
+   json_object_object_add(o, "named", json_object_new_boolean(w->named));
    json_object_object_add(o, "metric", json_object_new_string(w->metric));
    const char *label = attention_catalog_label(w->metric);
    json_object_object_add(o, "label", json_object_new_string(label ? label : w->metric));
@@ -126,6 +128,16 @@ static bool find_watch_by_id(int user_id, int64_t id, sage_watch_t *out) {
  * watch template (shared by add + update). */
 static void apply_overrides(sage_watch_t *w, json_object *payload) {
    json_object *o = NULL;
+   /* Optional user-chosen name (marks the watch user-named so the system won't
+    * regenerate it and it's spoken in alerts).  Blank => leave as-is. */
+   if (json_object_object_get_ex(payload, "name", &o)) {
+      const char *nm = json_object_get_string(o);
+      if (nm && nm[0]) {
+         snprintf(w->name, sizeof(w->name), "%s", nm);
+         attention_sanitize_name(w->name); /* strip controls (shared with the tool) */
+         w->named = (w->name[0] != '\0');
+      }
+   }
    if (json_object_object_get_ex(payload, "direction", &o)) {
       w->direction = sage_direction_from_str(json_object_get_string(o), w->direction);
    }
@@ -159,13 +171,10 @@ static void apply_overrides(sage_watch_t *w, json_object *payload) {
    }
 }
 
-/* Resolve the rule KIND from an optional "rule_type" override, seeding sane
- * direction defaults for the new kind.  Shared by add + update so switching a
- * watch's kind (e.g. a level "above" watch -> a rate "rising" watch) works on BOTH
- * paths — otherwise an in-place edit that changes the kind would write trigger
- * fields the gate ignores (a silent no-op).  "slope"/"threshold" are the two
- * user-selectable numeric kinds; absence is a catalog property, not switchable
- * here.  On an invalid request it sends the error reply and returns false. */
+/* Thin WS wrappers over the shared core validators (attention_resolve_rule_kind /
+ * attention_validate_watch_trigger) — extract the payload field, delegate the
+ * rules to the core so the tool and panel can't drift, and render any error as the
+ * WS reply.  Return false (after replying) on failure. */
 static bool resolve_rule_kind(ws_connection_t *conn,
                               sage_watch_t *w,
                               json_object *payload,
@@ -175,69 +184,22 @@ static bool resolve_rule_kind(ws_connection_t *conn,
    if (json_object_object_get_ex(payload, "rule_type", &o)) {
       rule_type = json_object_get_string(o);
    }
-   if (!rule_type || !rule_type[0]) {
-      return true; /* keep the current / template kind */
-   }
-
-   /* Only the two numeric kinds are user-selectable; any other value (incl. a
-    * re-sent "absence"/"match") is a no-op that leaves the current kind alone. */
-   sage_rule_type_t requested;
-   if (strcmp(rule_type, "slope") == 0) {
-      requested = SAGE_RULE_SLOPE;
-   } else if (strcmp(rule_type, "threshold") == 0) {
-      requested = SAGE_RULE_THRESHOLD;
-   } else {
-      return true;
-   }
-   if (w->rule_type == requested) {
-      return true; /* same kind — nothing to switch (a same-kind re-send is fine) */
-   }
-   /* An actual switch: only a numeric level/rate metric can change kind.  Absence
-    * (feed-silence) and match (P1 discrete-event push) metrics have no value to
-    * compare against, so their kind is fixed. */
-   if (w->rule_type == SAGE_RULE_ABSENCE || w->rule_type == SAGE_RULE_MATCH) {
-      respond_status(conn, resp_type, false, "This metric's rule kind can't be changed");
+   const char *err = NULL;
+   if (attention_resolve_rule_kind(w, rule_type, &err) != SUCCESS) {
+      respond_status(conn, resp_type, false,
+                     err ? err : "This metric's rule kind can't be changed");
       return false;
-   }
-   w->rule_type = requested;
-   if (requested == SAGE_RULE_SLOPE) {
-      if (w->direction != SAGE_DIR_RISING && w->direction != SAGE_DIR_FALLING) {
-         w->direction = SAGE_DIR_RISING; /* default; apply_overrides may set falling */
-      }
-   } else { /* SAGE_RULE_THRESHOLD */
-      if (w->direction != SAGE_DIR_ABOVE && w->direction != SAGE_DIR_BELOW) {
-         w->direction = SAGE_DIR_ABOVE; /* default; apply_overrides may set below */
-      }
    }
    return true;
 }
 
-/* Post-override trigger validation.  A slope watch fires on rate, so it needs a
- * positive slope_per_min or `slope >= 0` would trip every tick.  On failure sends
- * the error reply and returns false. */
 static bool validate_watch_trigger(ws_connection_t *conn,
                                    const sage_watch_t *w,
                                    const char *resp_type) {
-   if (w->rule_type == SAGE_RULE_SLOPE) {
-      if (!(w->slope_per_min > 0.0)) {
-         respond_status(conn, resp_type, false,
-                        "A rising/falling watch needs a rate (slope_per_min > 0)");
-         return false;
-      }
-      /* Reject cross-vocabulary direction rather than silently defaulting it: a
-       * slope watch must speak rising/falling, not above/below (the gate would
-       * otherwise treat a stray above/below as the wrong direction). */
-      if (w->direction != SAGE_DIR_RISING && w->direction != SAGE_DIR_FALLING) {
-         respond_status(conn, resp_type, false,
-                        "A rising/falling watch needs direction 'rising' or 'falling'");
-         return false;
-      }
-   } else if (w->rule_type == SAGE_RULE_THRESHOLD) {
-      if (w->direction != SAGE_DIR_ABOVE && w->direction != SAGE_DIR_BELOW) {
-         respond_status(conn, resp_type, false,
-                        "An above/below watch needs direction 'above' or 'below'");
-         return false;
-      }
+   const char *err = NULL;
+   if (attention_validate_watch_trigger(w, &err) != SUCCESS) {
+      respond_status(conn, resp_type, false, err ? err : "Invalid watch trigger");
+      return false;
    }
    return true;
 }
@@ -308,6 +270,18 @@ void handle_watch_list(ws_connection_t *conn) {
          const char *label = attention_catalog_label(key);
          json_object_object_add(c, "label", json_object_new_string(label ? label : key));
          json_object_object_add(c, "unit", json_object_new_string(attention_catalog_unit(key)));
+         /* rule_type + defaults let the panel gate its condition editor (offer
+          * rising/falling only on numeric metrics, seed the threshold/direction). */
+         const char *rt = attention_catalog_rule_type(key);
+         if (rt) {
+            json_object_object_add(c, "rule_type", json_object_new_string(rt));
+         }
+         const char *dd = attention_catalog_default_direction(key);
+         if (dd) {
+            json_object_object_add(c, "default_direction", json_object_new_string(dd));
+         }
+         json_object_object_add(c, "default_threshold",
+                                json_object_new_double(attention_catalog_default_threshold(key)));
          json_object_array_add(cat, c);
       }
       json_object_object_add(payload, "catalog", cat);
@@ -347,19 +321,17 @@ void handle_watch_add(ws_connection_t *conn, json_object *payload) {
       return;
    }
 
-   /* One watch per metric (mirrors the tool's do_watch): update the existing
-    * row if the user already watches this metric, so the two surfaces agree.
-    * NOTE: attention_watch_find_by_metric is the SOLE enforcer of the
-    * one-watch-per-metric invariant — there is no UNIQUE(user_id, metric) DB
-    * constraint.  This is now more load-bearing than it was: a metric's kind is
-    * user-mutable (threshold <-> slope), so a duplicate row would surface as two
-    * different-kind watches fighting over one metric.  A DB unique index is the
-    * durable hardening if that invariant ever needs to be enforced below the app. */
+   /* Multiple watches per metric are allowed (min AND max, tiers).  Dedup only on
+    * an IDENTICAL condition so a repeated add updates rather than duplicating;
+    * otherwise create a new watch.  (Panel edits go by id via watch_update.) */
    sage_watch_t existing;
-   bool updating = (attention_watch_find_by_metric(conn->auth_user_id, metric, &existing) ==
-                    SUCCESS);
+   bool updating = (attention_watch_find_identical(conn->auth_user_id, &w, &existing) == SUCCESS);
    int rc = updating ? attention_watch_update(conn->auth_user_id, existing.id, &w)
                      : attention_watch_add(&w, NULL);
+   if (rc == ATTENTION_NAME_TAKEN) {
+      respond_status(conn, "watch_add_response", false, "A watch with that name already exists");
+      return;
+   }
    if (rc != SUCCESS) {
       respond_status(conn, "watch_add_response", false,
                      "Couldn't save the watch (you may be at the watch limit)");
@@ -394,7 +366,12 @@ void handle_watch_update(ws_connection_t *conn, json_object *payload) {
       return;
    }
 
-   if (attention_watch_update(conn->auth_user_id, id, &w) != SUCCESS) {
+   int rc = attention_watch_update(conn->auth_user_id, id, &w);
+   if (rc == ATTENTION_NAME_TAKEN) {
+      respond_status(conn, "watch_update_response", false, "A watch with that name already exists");
+      return;
+   }
+   if (rc != SUCCESS) {
       respond_status(conn, "watch_update_response", false, "Couldn't update the watch");
       return;
    }

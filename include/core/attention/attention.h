@@ -50,7 +50,8 @@ extern "C" {
  * for now — P2 can enlarge it or move it to a heap/side table when the judge
  * lands.  Carrying 1 KB by value through the event queue/batch is dead weight. */
 #define SAGE_RAW_JSON_LEN 256
-#define SAGE_GATE_RULE_LEN 32
+#define SAGE_GATE_RULE_LEN \
+   64 /* >= SAGE_WATCH_NAME_LEN so a watch name isn't truncated in the log */
 #define SAGE_PRIVACY_LEN 8
 #define SAGE_DELIVER_TO_LEN 64
 
@@ -145,7 +146,9 @@ typedef struct {
    sage_notify_t notify;
    int ttl_min;
    bool enabled;
-   int64_t muted_until;                  /* 0 = not muted (P1 timed-snooze) */
+   bool named;          /* true => name is user-chosen (spoken in alerts + system won't
+                         * regenerate it); false => system-owned auto-name */
+   int64_t muted_until; /* 0 = not muted (P1 timed-snooze) */
    char source_tag[SAGE_SOURCE_TAG_LEN]; /* voice|webui|seed */
 } sage_watch_t;
 
@@ -227,6 +230,17 @@ const char *attention_catalog_unit(const char *key);
 /** True if @key is a known catalog metric. */
 bool attention_catalog_has(const char *key);
 
+/** Default rule-kind for @key ("threshold"/"slope"/"absence"/"match"), or NULL.
+ * Lets the panel gate its condition editor (e.g. offer rising/falling only on a
+ * numeric level metric, not an absence feed). */
+const char *attention_catalog_rule_type(const char *key);
+
+/** Default direction wire-string for @key ("above"/"below"/…), or NULL. */
+const char *attention_catalog_default_direction(const char *key);
+
+/** Default threshold for @key (0.0 if unknown). */
+double attention_catalog_default_threshold(const char *key);
+
 /**
  * Current live value for a catalog metric (snapshots its source, runs the
  * reader).  For absence metrics @value is the feed age in seconds.
@@ -288,6 +302,30 @@ int attention_clamp_seconds(double v);
  * Watch management (tool + WebUI CRUD; each mutation reloads the cache)
  * ============================================================================= */
 
+/* attention_watch_add/update return this (in addition to SUCCESS/FAILURE) when a
+ * user-supplied name collides with another of the user's watches. */
+#define ATTENTION_NAME_TAKEN 2
+
+/** Strip C0 control chars + DEL from a user-supplied watch @name, in place (the
+ * name is spoken + broadcast verbatim).  Shared by the tool + WebUI ingest paths. */
+void attention_sanitize_name(char *name);
+
+/**
+ * Resolve a rule-KIND override ("slope"/"threshold"; NULL/empty/other = no change)
+ * onto @w, seeding sane direction defaults for the new kind.  Shared by the WebUI
+ * panel and the `attention` tool so kind-switch rules can't drift.  Absence/match
+ * kinds are not switchable.  @return SUCCESS, or FAILURE with *err_out set to a
+ * static message on an illegal switch.
+ */
+int attention_resolve_rule_kind(sage_watch_t *w, const char *rule_type_str, const char **err_out);
+
+/**
+ * Validate a watch's trigger/direction after overrides: a slope watch needs a
+ * positive rate + a rising/falling direction; a threshold watch needs above/below.
+ * Shared validator (WS-agnostic).  @return SUCCESS, or FAILURE with *err_out set.
+ */
+int attention_validate_watch_trigger(const sage_watch_t *w, const char **err_out);
+
 /**
  * Populate @out with the catalog defaults for @metric (rule type, direction,
  * threshold, hysteresis, absence window, notify level) for @user_id — the
@@ -311,8 +349,37 @@ int attention_watch_remove(int user_id, int64_t id);
 /** Copy up to @max watches for @user_id into @out; returns count via @out_count. */
 int attention_watch_list(int user_id, sage_watch_t *out, int max, int *out_count);
 
-/** Find the first watch on @metric for @user_id (for "ignore that temp"). */
-int attention_watch_find_by_metric(int user_id, const char *metric, sage_watch_t *out);
+/**
+ * Find an existing watch with the SAME metric AND identical firing config as @w
+ * (compared post-default-resolution) — the identical-condition dedup target for an
+ * additive `watch` create, so a repeated identical request updates rather than
+ * duplicates.  @return SUCCESS + @out on a match; FAILURE otherwise.
+ */
+int attention_watch_find_identical(int user_id, const sage_watch_t *w, sage_watch_t *out);
+
+/** Find a watch by its (case-insensitive, per-user-unique) @name.  DB-backed. */
+int attention_watch_find_by_name(int user_id, const char *name, sage_watch_t *out);
+
+/** Find a watch by @id (user-scoped).  DB-backed. */
+int attention_watch_find_by_id(int user_id, int64_t id, sage_watch_t *out);
+
+/**
+ * List all of @user_id's watches whose metric is @prefix exactly or lives under it
+ * as a component (e.g. "stat.cpu" matches "stat.cpu.temp"; "stat" matches all
+ * "stat.*").  Fills up to @max into @out; count via @out_count.  DB-backed.
+ */
+int attention_watch_list_by_metric_prefix(int user_id,
+                                          const char *prefix,
+                                          sage_watch_t *out,
+                                          int max,
+                                          int *out_count);
+
+/**
+ * Generate a readable, per-user-unique auto-name for @w from its condition
+ * (e.g. "CO2 above 1200", "temp rising", "helmet link silent"), excluding @w's own
+ * row so a regenerated name doesn't collide with itself.  Writes into @out.
+ */
+int attention_watch_auto_name(const sage_watch_t *w, char *out, size_t out_sz);
 
 #ifdef __cplusplus
 }

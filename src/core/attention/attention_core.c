@@ -350,8 +350,97 @@ static int resolve_watch_defaults(sage_watch_t *w) {
    if (w->ttl_min <= 0) {
       w->ttl_min = SAGE_TTL_DEFAULT_MIN;
    }
-   if (w->name[0] == '\0') {
-      safe_strncpy(w->name, cat->label, sizeof(w->name));
+   /* NOTE: name is deliberately NOT filled here.  Name assignment is owned by the
+    * create/update paths (auto-namer for system-owned names, kept as-is for
+    * user-named watches) so a blank name never resurrects a stale/colliding
+    * catalog-label name on the update path. */
+   return SUCCESS;
+}
+
+/* =============================================================================
+ * Shared rule-kind resolution + trigger validation
+ *
+ * WS-agnostic so BOTH the WebUI panel and the `attention` LLM tool drive one
+ * validator — reimplementing these rules per surface would let the two drift
+ * (the "two surfaces can't drift" invariant).  On failure they return FAILURE and
+ * set *err_out to a caller-owned static message; the caller renders it (WS reply
+ * or tool error string).
+ * ============================================================================= */
+
+int attention_resolve_rule_kind(sage_watch_t *w, const char *rule_type_str, const char **err_out) {
+   if (err_out) {
+      *err_out = NULL;
+   }
+   if (!w) {
+      return FAILURE;
+   }
+   if (!rule_type_str || !rule_type_str[0]) {
+      return SUCCESS; /* keep the current / template kind */
+   }
+   /* Only the two numeric kinds are user-selectable; any other value (incl. a
+    * re-sent "absence"/"match") is a no-op that leaves the current kind alone. */
+   sage_rule_type_t requested;
+   if (strcmp(rule_type_str, "slope") == 0) {
+      requested = SAGE_RULE_SLOPE;
+   } else if (strcmp(rule_type_str, "threshold") == 0) {
+      requested = SAGE_RULE_THRESHOLD;
+   } else {
+      return SUCCESS;
+   }
+   if (w->rule_type == requested) {
+      return SUCCESS; /* same kind — nothing to switch */
+   }
+   /* An actual switch: only a numeric level/rate metric can change kind.  Absence
+    * (feed-silence) and match (P1 discrete-event push) have no value to compare. */
+   if (w->rule_type == SAGE_RULE_ABSENCE || w->rule_type == SAGE_RULE_MATCH) {
+      if (err_out) {
+         *err_out = "This metric's rule kind can't be changed";
+      }
+      return FAILURE;
+   }
+   w->rule_type = requested;
+   if (requested == SAGE_RULE_SLOPE) {
+      if (w->direction != SAGE_DIR_RISING && w->direction != SAGE_DIR_FALLING) {
+         w->direction = SAGE_DIR_RISING; /* default; an explicit direction may set falling */
+      }
+   } else { /* SAGE_RULE_THRESHOLD */
+      if (w->direction != SAGE_DIR_ABOVE && w->direction != SAGE_DIR_BELOW) {
+         w->direction = SAGE_DIR_ABOVE; /* default; an explicit direction may set below */
+      }
+   }
+   return SUCCESS;
+}
+
+int attention_validate_watch_trigger(const sage_watch_t *w, const char **err_out) {
+   if (err_out) {
+      *err_out = NULL;
+   }
+   if (!w) {
+      return FAILURE;
+   }
+   if (w->rule_type == SAGE_RULE_SLOPE) {
+      /* A slope watch fires on rate — a non-positive rate would trip `slope >= 0`
+       * every tick. */
+      if (!(w->slope_per_min > 0.0)) {
+         if (err_out) {
+            *err_out = "A rising/falling watch needs a rate (slope_per_min > 0)";
+         }
+         return FAILURE;
+      }
+      /* Reject cross-vocabulary direction rather than silently defaulting it. */
+      if (w->direction != SAGE_DIR_RISING && w->direction != SAGE_DIR_FALLING) {
+         if (err_out) {
+            *err_out = "A rising/falling watch needs direction 'rising' or 'falling'";
+         }
+         return FAILURE;
+      }
+   } else if (w->rule_type == SAGE_RULE_THRESHOLD) {
+      if (w->direction != SAGE_DIR_ABOVE && w->direction != SAGE_DIR_BELOW) {
+         if (err_out) {
+            *err_out = "An above/below watch needs direction 'above' or 'below'";
+         }
+         return FAILURE;
+      }
    }
    return SUCCESS;
 }
@@ -380,6 +469,46 @@ int attention_watch_template(const char *metric, int user_id, sage_watch_t *out)
    return SUCCESS;
 }
 
+/* True if @name (case-insensitive, post-truncation) is already used by one of
+ * @user_id's watches OTHER than @exclude_id.  The single seam for user-name
+ * uniqueness across create + rename. */
+static bool name_taken_by_other(int user_id, const char *name, int64_t exclude_id) {
+   if (!name || !name[0]) {
+      return false;
+   }
+   sage_watch_t buf[SAGE_MAX_WATCHES_PER_USER];
+   int count = 0;
+   if (auth_db_attention_rule_list(user_id, buf, SAGE_MAX_WATCHES_PER_USER, &count) !=
+       AUTH_DB_SUCCESS) {
+      return false;
+   }
+   for (int i = 0; i < count; i++) {
+      if (buf[i].id != exclude_id && strcasecmp(buf[i].name, name) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
+void attention_sanitize_name(char *name) {
+   if (!name) {
+      return;
+   }
+   /* Drop C0 controls + DEL (the name is spoken and broadcast verbatim); the field
+    * is already length-clamped by the fixed buffer at copy time. */
+   size_t o = 0;
+   for (size_t i = 0; name[i]; i++) {
+      unsigned char c = (unsigned char)name[i];
+      if (c >= 0x20 && c != 0x7f) {
+         name[o++] = (char)c;
+      }
+   }
+   name[o] = '\0';
+   while (o > 0 && name[o - 1] == ' ') {
+      name[--o] = '\0'; /* trim trailing spaces */
+   }
+}
+
 int attention_watch_add(const sage_watch_t *watch, int64_t *out_id) {
    if (!watch) {
       return FAILURE;
@@ -387,6 +516,17 @@ int attention_watch_add(const sage_watch_t *watch, int64_t *out_id) {
    sage_watch_t w = *watch;
    if (resolve_watch_defaults(&w) != SUCCESS) {
       return FAILURE;
+   }
+   /* Name assignment (single seam).  A blank OR system-owned name (named=false)
+    * gets a unique auto-name — note attention_watch_template pre-fills name with the
+    * catalog label, so the `named` flag (not emptiness) is what distinguishes a
+    * user name here.  A user-supplied name (named=true) must be unique across the
+    * user's watches. */
+   if (!w.named || w.name[0] == '\0') {
+      w.named = false;
+      attention_watch_auto_name(&w, w.name, sizeof(w.name));
+   } else if (name_taken_by_other(w.user_id, w.name, 0)) {
+      return ATTENTION_NAME_TAKEN;
    }
 
    int existing = 0;
@@ -410,10 +550,22 @@ int attention_watch_update(int user_id, int64_t id, const sage_watch_t *watch) {
    if (resolve_watch_defaults(&w) != SUCCESS) {
       return FAILURE;
    }
+   /* H-A auto-name staleness: while the name is system-owned (named=false),
+    * regenerate it from the (possibly edited) condition so a name like
+    * "CO2 above 1200" never lies after a threshold change.  A user-named watch
+    * (named=true) keeps its name; a blank name is auto-filled. */
+   if (!w.named || w.name[0] == '\0') {
+      w.named = false;
+      attention_watch_auto_name(&w, w.name, sizeof(w.name));
+   } else if (name_taken_by_other(user_id, w.name, id)) {
+      /* User-named: unique across the user's watches, EXCLUDING this one (renaming
+       * a watch to its own name is fine). */
+      return ATTENTION_NAME_TAKEN;
+   }
    /* Normalize auth_db codes to SUCCESS/FAILURE at this boundary — the public
     * attention API contract is SUCCESS/FAILURE (callers must not see auth_db
-    * enums).  "Not found" collapses to FAILURE; the tool already resolves the
-    * target via a user-scoped find_by_metric first, so this is a plain failure. */
+    * enums).  "Not found" collapses to FAILURE; callers resolve the target via a
+    * user-scoped finder first, so this is a plain failure. */
    if (auth_db_attention_rule_update(user_id, id, &w) != AUTH_DB_SUCCESS) {
       return FAILURE;
    }
@@ -441,12 +593,16 @@ int attention_watch_list(int user_id, sage_watch_t *out, int max, int *out_count
    return SUCCESS;
 }
 
-int attention_watch_find_by_metric(int user_id, const char *metric, sage_watch_t *out) {
-   if (!metric || !out) {
+int attention_watch_find_identical(int user_id, const sage_watch_t *w, sage_watch_t *out) {
+   if (!w || !out) {
       return FAILURE;
    }
-   /* Local (not static): CRUD runs on parallel tool-execution threads, so a
-    * shared buffer would race.  ~13.8 KB on the 512 KB tool stack is fine. */
+   /* Compare POST-default-resolution: a fresh template carries NAN threshold until
+    * defaults run, so an un-resolved compare would never match. */
+   sage_watch_t probe = *w;
+   if (resolve_watch_defaults(&probe) != SUCCESS) {
+      return FAILURE;
+   }
    sage_watch_t buf[SAGE_MAX_WATCHES_PER_USER];
    int count = 0;
    if (auth_db_attention_rule_list(user_id, buf, SAGE_MAX_WATCHES_PER_USER, &count) !=
@@ -454,12 +610,150 @@ int attention_watch_find_by_metric(int user_id, const char *metric, sage_watch_t
       return FAILURE;
    }
    for (int i = 0; i < count; i++) {
-      if (strcmp(buf[i].metric, metric) == 0) {
+      if (strcmp(buf[i].metric, probe.metric) == 0 && same_gate_config(&buf[i], &probe)) {
+         *out = buf[i];
+         return SUCCESS; /* same metric + identical firing config => the same watch */
+      }
+   }
+   return FAILURE;
+}
+
+int attention_watch_find_by_name(int user_id, const char *name, sage_watch_t *out) {
+   if (!name || !name[0] || !out) {
+      return FAILURE;
+   }
+   sage_watch_t buf[SAGE_MAX_WATCHES_PER_USER];
+   int count = 0;
+   if (auth_db_attention_rule_list(user_id, buf, SAGE_MAX_WATCHES_PER_USER, &count) !=
+       AUTH_DB_SUCCESS) {
+      return FAILURE;
+   }
+   for (int i = 0; i < count; i++) {
+      if (strcasecmp(buf[i].name, name) == 0) { /* case-insensitive, unique per user */
          *out = buf[i];
          return SUCCESS;
       }
    }
-   return FAILURE; /* not found — SUCCESS/FAILURE only across the public boundary */
+   return FAILURE;
+}
+
+int attention_watch_find_by_id(int user_id, int64_t id, sage_watch_t *out) {
+   if (id <= 0 || !out) {
+      return FAILURE;
+   }
+   sage_watch_t buf[SAGE_MAX_WATCHES_PER_USER];
+   int count = 0;
+   if (auth_db_attention_rule_list(user_id, buf, SAGE_MAX_WATCHES_PER_USER, &count) !=
+       AUTH_DB_SUCCESS) {
+      return FAILURE;
+   }
+   for (int i = 0; i < count; i++) {
+      if (buf[i].id == id) {
+         *out = buf[i];
+         return SUCCESS;
+      }
+   }
+   return FAILURE;
+}
+
+/* True if @metric is @prefix exactly, or lives under it as a component
+ * (prefix "stat.cpu" matches "stat.cpu.temp"/"stat.cpu.load"; "stat" matches all
+ * "stat.*").  The '.' guard stops "stat.cpu" from matching "stat.cpuidle". */
+static bool metric_under_prefix(const char *metric, const char *prefix) {
+   size_t plen = strlen(prefix);
+   if (strncmp(metric, prefix, plen) != 0) {
+      return false;
+   }
+   return metric[plen] == '\0' || metric[plen] == '.';
+}
+
+int attention_watch_list_by_metric_prefix(int user_id,
+                                          const char *prefix,
+                                          sage_watch_t *out,
+                                          int max,
+                                          int *out_count) {
+   if (!prefix || !prefix[0] || !out || max <= 0 || !out_count) {
+      return FAILURE;
+   }
+   *out_count = 0;
+   sage_watch_t buf[SAGE_MAX_WATCHES_PER_USER];
+   int count = 0;
+   if (auth_db_attention_rule_list(user_id, buf, SAGE_MAX_WATCHES_PER_USER, &count) !=
+       AUTH_DB_SUCCESS) {
+      return FAILURE;
+   }
+   int n = 0;
+   for (int i = 0; i < count && n < max; i++) {
+      if (metric_under_prefix(buf[i].metric, prefix)) {
+         out[n++] = buf[i];
+      }
+   }
+   *out_count = n;
+   return SUCCESS;
+}
+
+/* Build the base (pre-uniqueness) auto-name for a watch from its condition, e.g.
+ * "CO2 above 1200", "temp rising", "helmet link silent". */
+static void auto_name_base(const sage_watch_t *w, char *buf, size_t sz) {
+   const char *label = attention_catalog_label(w->metric);
+   if (!label || !label[0]) {
+      label = w->metric;
+   }
+   const char *unit = attention_catalog_unit(w->metric);
+   if (w->rule_type == SAGE_RULE_SLOPE) {
+      snprintf(buf, sz, "%s %s", label, (w->direction == SAGE_DIR_FALLING) ? "falling" : "rising");
+   } else if (w->rule_type == SAGE_RULE_ABSENCE) {
+      snprintf(buf, sz, "%s silent", label);
+   } else {
+      snprintf(buf, sz, "%s %s %g%s", label, (w->direction == SAGE_DIR_BELOW) ? "below" : "above",
+               w->threshold, (unit && unit[0]) ? unit : "");
+   }
+}
+
+int attention_watch_auto_name(const sage_watch_t *w, char *out, size_t out_sz) {
+   if (!w || !out || out_sz == 0) {
+      return FAILURE;
+   }
+   char base[SAGE_WATCH_NAME_LEN];
+   auto_name_base(w, base, sizeof(base));
+
+   /* Load the user's existing names for a unique, case-insensitive, post-truncation
+    * choice.  A finder failure is non-fatal — fall back to the base name. */
+   sage_watch_t buf[SAGE_MAX_WATCHES_PER_USER];
+   int count = 0;
+   if (auth_db_attention_rule_list(w->user_id, buf, SAGE_MAX_WATCHES_PER_USER, &count) !=
+       AUTH_DB_SUCCESS) {
+      safe_strncpy(out, base, out_sz);
+      return SUCCESS;
+   }
+
+   /* base, then "base 2", "base 3", … (excluding this watch's own row so a
+    * regenerated auto-name doesn't collide with itself). */
+   for (int suffix = 1; suffix <= SAGE_MAX_WATCHES_PER_USER + 1; suffix++) {
+      char cand[SAGE_WATCH_NAME_LEN];
+      if (suffix == 1) {
+         safe_strncpy(cand, base, sizeof(cand));
+      } else {
+         /* Wide intermediate so the compiler can prove no truncation in the
+          * snprintf; then clip to the name field (post-truncation uniqueness). */
+         char wide[SAGE_WATCH_NAME_LEN + 16];
+         snprintf(wide, sizeof(wide), "%s %d", base, suffix);
+         safe_strncpy(cand, wide, sizeof(cand));
+      }
+      bool taken = false;
+      for (int i = 0; i < count; i++) {
+         if (buf[i].id != w->id && strcasecmp(buf[i].name, cand) == 0) {
+            taken = true;
+            break;
+         }
+      }
+      if (!taken) {
+         safe_strncpy(out, cand, out_sz);
+         return SUCCESS;
+      }
+   }
+   safe_strncpy(out, base, out_sz); /* pathological fallback */
+   return SUCCESS;
 }
 
 /* =============================================================================
@@ -586,6 +880,7 @@ static void seed_safety_watches(void) {
       w.user_id = ATTENTION_OWNER_USER_ID;
       safe_strncpy(w.metric, seeds[i].metric, sizeof(w.metric));
       safe_strncpy(w.name, seeds[i].name, sizeof(w.name));
+      w.named = true; /* curated seed names ("battery critical") — keep, don't auto-rename */
       w.rule_type = seeds[i].type;
       w.direction = seeds[i].dir;
       w.notify = seeds[i].notify;

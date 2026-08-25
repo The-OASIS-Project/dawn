@@ -2059,7 +2059,7 @@
                label: 'Max Spoken Alerts / Hour',
                min: 0,
                max: 100,
-               hint: 'Global budget for spoken alerts; over-budget alerts degrade to a silent banner.',
+               hint: 'Global budget for spoken alerts; over-budget alerts degrade to a silent banner. Set to 0 for no limit (every alert is always spoken).',
             },
             inject_into_sessions: {
                type: 'checkbox',

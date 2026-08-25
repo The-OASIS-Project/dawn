@@ -20,9 +20,15 @@
  * tell DAWN what to keep an eye on and what to ignore, at runtime:
  *   "keep an eye on the CO2"                 -> watch (catalog default threshold)
  *   "tell me if CO2 goes above 1200"         -> watch (explicit threshold)
- *   "what are you watching?"                 -> list (with live values)
- *   "ignore that temperature for now"        -> ignore (disable)
+ *   "warn me if the temp is rising fast"     -> watch (rate/slope: direction+rate)
+ *   "call the high one 'we're going to die'" -> watch (custom name)
+ *   "what are you watching?"                 -> list (with live values + ids)
+ *   "ignore that temperature for now"        -> ignore (by name/id, or a whole
+ *                                               signal/component group)
+ *   "turn the CO2 alert back on"             -> resume
  *   "stop watching the battery"              -> remove
+ * A metric can hold several named watches (min AND max, tiers).  Targeted actions
+ * resolve id > name > metric/prefix, list-and-ask on an ambiguous set/remove.
  * Watches persist as per-user attention_rules rows; this tool is the primary
  * management surface (the WebUI Watches panel is the other).
  */
@@ -38,6 +44,8 @@
 
 #include "config/dawn_config.h"
 #include "core/attention/attention.h"
+#include "core/path_utils.h"      /* safe_strncpy */
+#include "core/session_manager.h" /* session_get_command_context — no-session backstop */
 #include "dawn_error.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
@@ -55,14 +63,17 @@ static bool attention_tool_is_available(void);
 static treg_param_t attention_params[] = {
    {
        .name = "action",
-       .description = "watch (start watching a metric), list (what am I watching, with live "
-                      "values), ignore (disable a watch), set (change a watch's threshold/level), "
-                      "or remove (delete a watch).",
+       .description =
+           "watch (start a NEW watch — a signal can have several, e.g. a min AND a max, or "
+           "warn/critical tiers), list (what am I watching, with live values + ids), set (change "
+           "an existing watch's trigger/level/name — target it by name or id), ignore (pause), "
+           "resume (unpause), or remove (delete). ignore/resume/remove can target one watch (name "
+           "or id) OR a whole signal/component group (metric).",
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
-       .enum_values = { "watch", "list", "ignore", "set", "remove" },
-       .enum_count = 5,
+       .enum_values = { "watch", "list", "set", "ignore", "resume", "remove" },
+       .enum_count = 6,
    },
    {
        .name = "metric",
@@ -76,6 +87,25 @@ static treg_param_t attention_params[] = {
        .maps_to = TOOL_MAPS_TO_VALUE,
    },
    {
+       .name = "name",
+       .description = "The name of a SPECIFIC watch — the main way to target one when a signal "
+                      "has several (e.g. \"we're going to die\"). For 'watch', an optional custom "
+                      "name for the new watch (omit to auto-name it from the condition).",
+       .type = TOOL_PARAM_TYPE_STRING,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "name",
+   },
+   {
+       .name = "id",
+       .description = "A watch's numeric id from 'list' — the exact way to target one watch when "
+                      "a name is ambiguous.",
+       .type = TOOL_PARAM_TYPE_STRING,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "id",
+   },
+   {
        .name = "threshold",
        .description = "Optional numeric trigger point (e.g. 1200 for CO2 ppm, 20 for battery %). "
                       "If omitted a sensible default for the metric is used. For a 'silent feed' "
@@ -86,15 +116,26 @@ static treg_param_t attention_params[] = {
        .field_name = "threshold",
    },
    {
+       .name = "rate",
+       .description =
+           "For a rising/falling watch: the rate of change per MINUTE that triggers it "
+           "(e.g. 5 for 5 per minute). A positive number; the sign comes from direction.",
+       .type = TOOL_PARAM_TYPE_STRING,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "rate",
+   },
+   {
        .name = "direction",
-       .description = "Optional: 'above' or 'below' the threshold (defaults to the natural "
-                      "direction for the metric — below for battery/voltage, above for CO2/temp).",
+       .description = "How the watch triggers: 'above'/'below' a level (a threshold watch), or "
+                      "'rising'/'falling' fast (a rate watch — requires 'rate'). Defaults to the "
+                      "metric's natural direction.",
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
        .field_name = "direction",
-       .enum_values = { "above", "below" },
-       .enum_count = 2,
+       .enum_values = { "above", "below", "rising", "falling" },
+       .enum_count = 4,
    },
    {
        .name = "level",
@@ -111,6 +152,16 @@ static treg_param_t attention_params[] = {
        .field_name = "level",
        .enum_values = { "alert", "ambient" },
        .enum_count = 2,
+   },
+   {
+       .name = "duration",
+       .description =
+           "Optional: how long to 'ignore' for (e.g. '1 hour'). NOT YET SUPPORTED — "
+           "omit it; ignore lasts until you 'resume'. Reserved for a future timed snooze.",
+       .type = TOOL_PARAM_TYPE_STRING,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "duration",
    },
 };
 
@@ -131,7 +182,7 @@ static const tool_metadata_t attention_metadata = {
        "for setting up PROACTIVE alerts — to read a current value right now, use suit_status or "
        "system_status instead.",
    .params = attention_params,
-   .param_count = 5,
+   .param_count = 9,
 
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NONE,
@@ -192,6 +243,69 @@ static void append_fmt(char *buf, size_t sz, size_t *off, const char *fmt, ...) 
 
 /* ========== Actions ========== */
 
+/* Render a watch's trigger condition, e.g. "above 1200 ppm" / "rising 5 /min" /
+ * "silent over 30s". */
+static void describe_condition(const sage_watch_t *w, char *buf, size_t sz) {
+   const char *unit = attention_catalog_unit(w->metric);
+   if (w->rule_type == SAGE_RULE_ABSENCE) {
+      snprintf(buf, sz, "silent over %ds", w->absence_after_sec);
+   } else if (w->rule_type == SAGE_RULE_SLOPE) {
+      snprintf(buf, sz, "%s %g%s/min", (w->direction == SAGE_DIR_FALLING) ? "falling" : "rising",
+               w->slope_per_min, unit[0] ? unit : "");
+   } else {
+      snprintf(buf, sz, "%s %g%s", (w->direction == SAGE_DIR_BELOW) ? "below" : "above",
+               w->threshold, unit[0] ? unit : "");
+   }
+}
+
+/* Resolve target watches for a targeted action from the id / name / metric
+ * selectors, in that priority:
+ *   id -> that one watch (0 or 1); else
+ *   name -> that one watch (0 or 1); a name miss falls through to metric; else
+ *   metric -> all watches on that metric or component prefix (0..N).
+ * Fills up to @max into @out, count via @out_count.  SUCCESS even for 0 matches;
+ * FAILURE only on a DB error. */
+static int resolve_targets(int user_id,
+                           int64_t id,
+                           const char *name,
+                           const char *metric,
+                           sage_watch_t *out,
+                           int max,
+                           int *out_count) {
+   *out_count = 0;
+   if (id > 0) {
+      if (attention_watch_find_by_id(user_id, id, &out[0]) == SUCCESS) {
+         *out_count = 1;
+      }
+      return SUCCESS;
+   }
+   if (name && name[0]) {
+      if (attention_watch_find_by_name(user_id, name, &out[0]) == SUCCESS) {
+         *out_count = 1;
+         return SUCCESS;
+      }
+      if (!(metric && metric[0])) {
+         return SUCCESS; /* name miss, no metric to fall back to */
+      }
+   }
+   if (metric && metric[0]) {
+      return attention_watch_list_by_metric_prefix(user_id, metric, out, max, out_count);
+   }
+   return SUCCESS;
+}
+
+/* Render a numbered "which one?" reply for an ambiguous single-target action. */
+static char *ambiguity_reply(const sage_watch_t *ws, int n, const char *verb, char *out) {
+   size_t off = 0;
+   append_fmt(out, ATTN_RESULT_MAX, &off, "That matches %d watches — which one to %s? ", n, verb);
+   for (int i = 0; i < n && off < ATTN_RESULT_MAX; i++) {
+      append_fmt(out, ATTN_RESULT_MAX, &off, "%s'%s' [id=%lld]", i ? ", " : "", ws[i].name,
+                 (long long)ws[i].id);
+   }
+   append_fmt(out, ATTN_RESULT_MAX, &off, ". Say the name or the id.");
+   return out;
+}
+
 static char *do_list(int user_id, char *out) {
    sage_watch_t watches[SAGE_MAX_WATCHES_PER_USER];
    int count = 0;
@@ -208,12 +322,13 @@ static char *do_list(int user_id, char *out) {
    append_fmt(out, ATTN_RESULT_MAX, &off, "Watching %d thing%s: ", count, count == 1 ? "" : "s");
    for (int i = 0; i < count && off < ATTN_RESULT_MAX; i++) {
       const sage_watch_t *w = &watches[i];
-      const char *label = attention_catalog_label(w->metric);
       const char *unit = attention_catalog_unit(w->metric);
       double cur = 0.0;
       bool have = attention_metric_current(w->metric, &cur);
+      char cond[96];
+      describe_condition(w, cond, sizeof(cond));
 
-      append_fmt(out, ATTN_RESULT_MAX, &off, "%s", label ? label : w->metric);
+      append_fmt(out, ATTN_RESULT_MAX, &off, "'%s' [id=%lld]", w->name, (long long)w->id);
       if (have) {
          if (w->rule_type == SAGE_RULE_ABSENCE) {
             append_fmt(out, ATTN_RESULT_MAX, &off, " (silent %.0fs)", cur);
@@ -221,14 +336,7 @@ static char *do_list(int user_id, char *out) {
             append_fmt(out, ATTN_RESULT_MAX, &off, " (now %g%s%s)", cur, unit[0] ? " " : "", unit);
          }
       }
-      if (w->rule_type == SAGE_RULE_ABSENCE) {
-         append_fmt(out, ATTN_RESULT_MAX, &off, " — alerts if silent over %ds",
-                    w->absence_after_sec);
-      } else {
-         append_fmt(out, ATTN_RESULT_MAX, &off, " — %s %s %g%s", sage_notify_to_str(w->notify),
-                    w->direction == SAGE_DIR_BELOW ? "below" : "above", w->threshold,
-                    unit[0] ? unit : "");
-      }
+      append_fmt(out, ATTN_RESULT_MAX, &off, " — %s", cond);
       if (!w->enabled) {
          append_fmt(out, ATTN_RESULT_MAX, &off, " [paused]");
       }
@@ -255,6 +363,12 @@ static void append_current_value(char *out, size_t sz, const sage_watch_t *w) {
       return;
    }
    const char *unit = attention_catalog_unit(w->metric);
+   if (w->rule_type == SAGE_RULE_SLOPE) {
+      /* A rate watch's threshold field is a meaningless catalog default — just
+       * state the current level, no "past the threshold". */
+      append_fmt(out, sz, &off, " Currently %g%s%s.", cur, unit[0] ? " " : "", unit);
+      return;
+   }
    bool tripped = (w->direction == SAGE_DIR_BELOW) ? (cur < w->threshold) : (cur > w->threshold);
    append_fmt(out, sz, &off, " Currently %g%s%s%s.", cur, unit[0] ? " " : "", unit,
               tripped ? " — already past the threshold" : "");
@@ -294,9 +408,44 @@ static bool apply_threshold(sage_watch_t *w, const char *threshold, char **err_o
    return true;
 }
 
+/* Apply direction (+ infer slope kind) and the trigger value (rate for slope,
+ * threshold otherwise) onto @w.  Returns NULL on success, or an error string. */
+static char *apply_condition(sage_watch_t *w,
+                             const char *direction,
+                             const char *threshold,
+                             const char *rate) {
+   if (direction && direction[0]) {
+      w->direction = sage_direction_from_str(direction, w->direction);
+   }
+   /* rising/falling => a rate (slope) watch (shared validator rejects absence). */
+   if (w->direction == SAGE_DIR_RISING || w->direction == SAGE_DIR_FALLING) {
+      const char *kerr = NULL;
+      if (attention_resolve_rule_kind(w, "slope", &kerr) != SUCCESS) {
+         return err(kerr ? kerr : "attention: that signal can't be watched by rate of change.");
+      }
+   }
+   if (w->rule_type == SAGE_RULE_SLOPE) {
+      if (rate && rate[0]) {
+         double r;
+         if (!parse_threshold(rate, &r)) {
+            return err("attention: I didn't catch a number for that rate.");
+         }
+         w->slope_per_min = r;
+      }
+   } else {
+      char *terr = NULL;
+      if (!apply_threshold(w, threshold, &terr)) {
+         return terr;
+      }
+   }
+   return NULL;
+}
+
 static char *do_watch(int user_id,
                       const char *metric,
+                      const char *name,
                       const char *threshold,
+                      const char *rate,
                       const char *direction,
                       const char *level,
                       char *out) {
@@ -305,113 +454,173 @@ static char *do_watch(int user_id,
       return err("attention: I don't have a sensor for that. Try CO2, battery, temperature, "
                  "humidity, armor voltage, or the helmet link.");
    }
-   if (direction && direction[0]) {
-      w.direction = (strcasecmp(direction, "below") == 0) ? SAGE_DIR_BELOW : SAGE_DIR_ABOVE;
+   char *cerr = apply_condition(&w, direction, threshold, rate);
+   if (cerr) {
+      return cerr;
    }
    w.notify = sage_notify_from_str(level, w.notify);
-   char *terr = NULL;
-   if (!apply_threshold(&w, threshold, &terr)) {
-      return terr;
+
+   /* Optional user-chosen name (sanitized here; core enforces uniqueness). */
+   if (name && name[0]) {
+      safe_strncpy(w.name, name, sizeof(w.name));
+      attention_sanitize_name(w.name);
+      w.named = (w.name[0] != '\0');
    }
 
-   /* Update-or-create: one watch per metric keeps the conversational model
-    * coherent (set/ignore/remove address it unambiguously by metric). */
-   sage_watch_t existing;
-   bool updating = (attention_watch_find_by_metric(user_id, metric, &existing) == SUCCESS);
-   int rc = updating ? attention_watch_update(user_id, existing.id, &w)
-                     : attention_watch_add(&w, NULL);
+   const char *verr = NULL;
+   if (attention_validate_watch_trigger(&w, &verr) != SUCCESS) {
+      return err(verr ? verr : "attention: that watch isn't valid.");
+   }
+
+   /* Additive with identical-condition dedup: a repeated identical request updates
+    * the matching watch (and re-enables it) rather than creating a duplicate. */
+   sage_watch_t same;
+   bool dedup = (attention_watch_find_identical(user_id, &w, &same) == SUCCESS);
+   int rc;
+   if (dedup) {
+      if (w.name[0] == '\0') {
+         safe_strncpy(w.name, same.name, sizeof(w.name));
+         w.named = same.named;
+      }
+      rc = attention_watch_update(user_id, same.id, &w);
+      if (rc == SUCCESS && !same.enabled) {
+         attention_watch_set_enabled(user_id, same.id, true);
+      }
+   } else {
+      rc = attention_watch_add(&w, NULL);
+   }
+   if (rc == ATTENTION_NAME_TAKEN) {
+      snprintf(out, ATTN_RESULT_MAX,
+               "You already have a watch called '%s' — pick a different name.", w.name);
+      return out;
+   }
    if (rc != SUCCESS) {
       return err("attention: couldn't set that watch (you may be at the watch limit).");
    }
-   if (updating && !existing.enabled) {
-      attention_watch_set_enabled(user_id, existing.id, true); /* re-watching re-activates */
-   }
 
-   const char *unit = attention_catalog_unit(metric);
-   if (w.rule_type == SAGE_RULE_ABSENCE) {
-      snprintf(out, ATTN_RESULT_MAX, "Watching %s — I'll speak up if it goes silent for over %ds.",
-               w.name, w.absence_after_sec);
-   } else {
-      snprintf(out, ATTN_RESULT_MAX, "Watching %s — %s if it goes %s %g%s.", w.name,
-               w.notify == SAGE_NOTIFY_ALERT ? "I'll tell you" : "I'll flag it quietly",
-               w.direction == SAGE_DIR_BELOW ? "below" : "above", w.threshold, unit[0] ? unit : "");
+   /* Re-fetch the stored form so the confirmation says the final (auto or given)
+    * name. */
+   sage_watch_t stored;
+   if (attention_watch_find_identical(user_id, &w, &stored) != SUCCESS) {
+      stored = w;
    }
-   append_current_value(out, ATTN_RESULT_MAX, &w);
+   char cond[96];
+   describe_condition(&stored, cond, sizeof(cond));
+   snprintf(out, ATTN_RESULT_MAX, "Watching '%s' — %s if %s.", stored.name,
+            stored.notify == SAGE_NOTIFY_ALERT ? "I'll tell you" : "I'll flag it quietly", cond);
+   append_current_value(out, ATTN_RESULT_MAX, &stored);
    append_disabled_note(out, ATTN_RESULT_MAX);
    return out;
 }
 
-static char *do_ignore(int user_id, const char *metric, char *out) {
-   sage_watch_t w;
-   int rc = attention_watch_find_by_metric(user_id, metric, &w);
-   if (rc != SUCCESS) {
-      return err("attention: I'm not watching that, so there's nothing to ignore.");
+/* ignore (enable=false) / resume (enable=true): act on ALL matching watches — a
+ * name/id targets one, a metric/prefix targets the whole group. */
+static char *do_toggle(int user_id,
+                       bool enable,
+                       int64_t id,
+                       const char *name,
+                       const char *metric,
+                       const char *duration,
+                       char *out) {
+   if (!enable && duration && duration[0]) {
+      /* P1 seam: timed snooze isn't wired yet — be honest rather than silently
+       * ignoring the duration. */
+      return err("attention: timed snooze isn't supported yet — I can ignore it until you ask me "
+                 "to resume. Leave off the duration.");
    }
-   if (attention_watch_set_enabled(user_id, w.id, false) != SUCCESS) {
-      return err("attention: couldn't pause that watch.");
+   sage_watch_t ws[SAGE_MAX_WATCHES_PER_USER];
+   int n = 0;
+   if (resolve_targets(user_id, id, name, metric, ws, SAGE_MAX_WATCHES_PER_USER, &n) != SUCCESS) {
+      return err("attention: couldn't read your watches.");
    }
-   snprintf(out, ATTN_RESULT_MAX, "Okay, I'll stop watching %s.", w.name);
+   if (n == 0) {
+      return err(enable ? "attention: I couldn't find that watch to resume."
+                        : "attention: I couldn't find that watch to ignore.");
+   }
+   int done = 0;
+   for (int i = 0; i < n; i++) {
+      if (attention_watch_set_enabled(user_id, ws[i].id, enable) == SUCCESS) {
+         done++;
+      }
+   }
+   if (done == 0) {
+      return err(enable ? "attention: couldn't resume that watch."
+                        : "attention: couldn't pause that watch.");
+   }
+   if (done == 1) {
+      snprintf(out, ATTN_RESULT_MAX,
+               enable ? "Resumed '%s'." : "Ignoring '%s' until you say resume.", ws[0].name);
+   } else {
+      snprintf(out, ATTN_RESULT_MAX, enable ? "Resumed %d watches." : "Ignoring %d watches.", done);
+   }
    return out;
 }
 
-static char *do_remove(int user_id, const char *metric, char *out) {
-   sage_watch_t w;
-   int rc = attention_watch_find_by_metric(user_id, metric, &w);
-   if (rc != SUCCESS) {
-      return err("attention: I'm not watching that.");
+static char *do_remove(int user_id, int64_t id, const char *name, const char *metric, char *out) {
+   sage_watch_t ws[SAGE_MAX_WATCHES_PER_USER];
+   int n = 0;
+   if (resolve_targets(user_id, id, name, metric, ws, SAGE_MAX_WATCHES_PER_USER, &n) != SUCCESS) {
+      return err("attention: couldn't read your watches.");
    }
-   if (attention_watch_remove(user_id, w.id) != SUCCESS) {
+   if (n == 0) {
+      return err("attention: I couldn't find that watch.");
+   }
+   if (n > 1) {
+      /* Destructive: never bulk-delete on an ambiguous match — list and ask. */
+      return ambiguity_reply(ws, n, "remove", out);
+   }
+   if (attention_watch_remove(user_id, ws[0].id) != SUCCESS) {
       return err("attention: couldn't remove that watch.");
    }
-   snprintf(out, ATTN_RESULT_MAX, "Removed the watch on %s.", w.name);
+   snprintf(out, ATTN_RESULT_MAX, "Removed '%s'.", ws[0].name);
    return out;
 }
 
 static char *do_set(int user_id,
+                    int64_t id,
+                    const char *name,
                     const char *metric,
                     const char *threshold,
+                    const char *rate,
                     const char *direction,
                     const char *level,
                     char *out) {
-   sage_watch_t w;
-   int rc = attention_watch_find_by_metric(user_id, metric, &w);
-   if (rc != SUCCESS) {
-      /* Nothing to change yet — treat as a fresh watch. */
-      return do_watch(user_id, metric, threshold, direction, level, out);
+   sage_watch_t ws[SAGE_MAX_WATCHES_PER_USER];
+   int n = 0;
+   if (resolve_targets(user_id, id, name, metric, ws, SAGE_MAX_WATCHES_PER_USER, &n) != SUCCESS) {
+      return err("attention: couldn't read your watches.");
    }
-   if (w.rule_type == SAGE_RULE_SLOPE) {
-      /* do_set speaks threshold vocabulary (below/above + a threshold value).
-       * Applying it to a rate-of-change (rising/falling) watch would write fields
-       * the slope gate ignores and silently mis-configure it.  The voice tool is
-       * threshold-only for now — point at the explicit convert path rather than
-       * mangling the watch (see the WebUI Watches panel for rate edits). */
-      snprintf(
-          out, ATTN_RESULT_MAX,
-          "%s is a rising/falling (rate) watch — I can't adjust that by voice yet. Say "
-          "\"watch %s above <value>\" to switch it to a level, or edit it in the Watches panel.",
-          w.name, metric);
-      return out;
+   if (n == 0) {
+      return err("attention: I couldn't find that watch to change. Use 'watch' to create one.");
    }
-   if (direction && direction[0]) {
-      w.direction = (strcasecmp(direction, "below") == 0) ? SAGE_DIR_BELOW : SAGE_DIR_ABOVE;
+   if (n > 1) {
+      return ambiguity_reply(ws, n, "change", out);
    }
-   w.notify = sage_notify_from_str(level, w.notify);
-   char *terr = NULL;
-   if (!apply_threshold(&w, threshold, &terr)) {
-      return terr;
+
+   sage_watch_t w = ws[0];
+   char *cerr = apply_condition(&w, direction, threshold, rate);
+   if (cerr) {
+      return cerr;
+   }
+   if (level && level[0]) {
+      w.notify = sage_notify_from_str(level, w.notify);
+   }
+   const char *verr = NULL;
+   if (attention_validate_watch_trigger(&w, &verr) != SUCCESS) {
+      return err(verr ? verr : "attention: that change isn't valid.");
    }
    if (attention_watch_update(user_id, w.id, &w) != SUCCESS) {
       return err("attention: couldn't update that watch.");
    }
-   const char *unit = attention_catalog_unit(metric);
-   if (w.rule_type == SAGE_RULE_ABSENCE) {
-      snprintf(out, ATTN_RESULT_MAX, "Updated %s — silent over %ds.", w.name, w.absence_after_sec);
-   } else {
-      snprintf(out, ATTN_RESULT_MAX, "Updated %s — %s %s %g%s.", w.name,
-               sage_notify_to_str(w.notify), w.direction == SAGE_DIR_BELOW ? "below" : "above",
-               w.threshold, unit[0] ? unit : "");
+   /* Re-fetch so an auto-named watch reports its regenerated name. */
+   sage_watch_t stored;
+   if (attention_watch_find_by_id(user_id, w.id, &stored) != SUCCESS) {
+      stored = w;
    }
-   append_current_value(out, ATTN_RESULT_MAX, &w);
+   char cond[96];
+   describe_condition(&stored, cond, sizeof(cond));
+   snprintf(out, ATTN_RESULT_MAX, "Updated '%s' — %s.", stored.name, cond);
+   append_current_value(out, ATTN_RESULT_MAX, &stored);
    return out;
 }
 
@@ -423,18 +632,36 @@ static char *attention_tool_callback(const char *action, char *value, int *shoul
       return err("attention: missing action.");
    }
 
+   /* Fail closed for MUTATIONS from a caller with no session context — an
+    * unauthenticated MQTT publish would otherwise mutate as user 1
+    * (tool_get_current_user_id() defaults to 1 with no session).  Reads (list) are
+    * user-scoped + harmless, so they stay open.  Mirrors job_tool.c. */
+   if (strcasecmp(action, "list") != 0 && session_get_command_context() == NULL) {
+      OLOG_WARNING("attention: refused '%s' from a caller with no session context", action);
+      return err("attention: I can only change what I'm watching from a user session.");
+   }
+
    int user_id = tool_get_current_user_id();
 
    char metric[SAGE_METRIC_LEN] = { 0 };
+   char name[SAGE_WATCH_NAME_LEN] = { 0 };
+   char id_str[24] = { 0 };
    char threshold[32] = { 0 };
+   char rate[32] = { 0 };
    char direction[16] = { 0 };
    char level[16] = { 0 };
+   char duration[32] = { 0 };
    if (value) {
       tool_param_extract_base(value, metric, sizeof(metric));
+      tool_param_extract_custom(value, "name", name, sizeof(name));
+      tool_param_extract_custom(value, "id", id_str, sizeof(id_str));
       tool_param_extract_custom(value, "threshold", threshold, sizeof(threshold));
+      tool_param_extract_custom(value, "rate", rate, sizeof(rate));
       tool_param_extract_custom(value, "direction", direction, sizeof(direction));
       tool_param_extract_custom(value, "level", level, sizeof(level));
+      tool_param_extract_custom(value, "duration", duration, sizeof(duration));
    }
+   int64_t id = (id_str[0]) ? (int64_t)strtoll(id_str, NULL, 10) : 0;
 
    char *out = malloc(ATTN_RESULT_MAX);
    if (!out) {
@@ -442,45 +669,49 @@ static char *attention_tool_callback(const char *action, char *value, int *shoul
    }
    out[0] = '\0';
 
-   if (strcasecmp(action, "list") == 0) {
-      char *r = do_list(user_id, out);
-      if (r != out) {
-         free(out);
-      }
-      return r;
-   }
-
-   /* All other actions need a metric. */
-   if (!metric[0]) {
-      free(out);
-      return err("attention: which signal? (e.g. CO2, battery, helmet link)");
-   }
-   if (!attention_catalog_has(metric)) {
-      /* Self-correcting: list what IS watchable (from the catalog) so the model
-       * can retry with a valid key. */
-      size_t off = 0;
-      append_fmt(out, ATTN_RESULT_MAX, &off,
-                 "%sattention: no sensor called '%s'. I can watch: ", TOOL_RESULT_ERROR_MARK,
-                 metric);
-      int n = attention_catalog_count();
-      for (int i = 0; i < n; i++) {
-         const char *key = attention_catalog_key(i);
-         append_fmt(out, ATTN_RESULT_MAX, &off, "%s%s", i ? ", " : "",
-                    attention_catalog_label(key));
-      }
-      append_fmt(out, ATTN_RESULT_MAX, &off, ".");
-      return out;
-   }
-
    char *r = out;
-   if (strcasecmp(action, "watch") == 0) {
-      r = do_watch(user_id, metric, threshold, direction, level, out);
-   } else if (strcasecmp(action, "ignore") == 0) {
-      r = do_ignore(user_id, metric, out);
-   } else if (strcasecmp(action, "remove") == 0) {
-      r = do_remove(user_id, metric, out);
-   } else if (strcasecmp(action, "set") == 0) {
-      r = do_set(user_id, metric, threshold, direction, level, out);
+   if (strcasecmp(action, "list") == 0) {
+      r = do_list(user_id, out);
+   } else if (strcasecmp(action, "watch") == 0) {
+      /* Creating a NEW watch needs a real catalog metric. */
+      if (!metric[0]) {
+         free(out);
+         return err("attention: which signal? (e.g. CO2, battery, helmet link)");
+      }
+      if (!attention_catalog_has(metric)) {
+         /* Self-correcting: list what IS watchable so the model can retry. */
+         size_t off = 0;
+         append_fmt(out, ATTN_RESULT_MAX, &off,
+                    "%sattention: no sensor called '%s'. I can watch: ", TOOL_RESULT_ERROR_MARK,
+                    metric);
+         int n = attention_catalog_count();
+         for (int i = 0; i < n; i++) {
+            const char *key = attention_catalog_key(i);
+            append_fmt(out, ATTN_RESULT_MAX, &off, "%s%s", i ? ", " : "",
+                       attention_catalog_label(key));
+         }
+         append_fmt(out, ATTN_RESULT_MAX, &off, ".");
+         return out;
+      }
+      r = do_watch(user_id, metric, name, threshold, rate, direction, level, out);
+   } else if (strcasecmp(action, "set") == 0 || strcasecmp(action, "ignore") == 0 ||
+              strcasecmp(action, "resume") == 0 || strcasecmp(action, "remove") == 0) {
+      /* Targeted actions need a selector (name / id / signal); the metric here may
+       * be a component prefix, so it is NOT catalog-validated — a no-match is
+       * reported gracefully by the action. */
+      if (id <= 0 && !name[0] && !metric[0]) {
+         free(out);
+         return err("attention: which watch? Give its name, its id, or the signal.");
+      }
+      if (strcasecmp(action, "set") == 0) {
+         r = do_set(user_id, id, name, metric, threshold, rate, direction, level, out);
+      } else if (strcasecmp(action, "ignore") == 0) {
+         r = do_toggle(user_id, false, id, name, metric, duration, out);
+      } else if (strcasecmp(action, "resume") == 0) {
+         r = do_toggle(user_id, true, id, name, metric, NULL, out);
+      } else {
+         r = do_remove(user_id, id, name, metric, out);
+      }
    } else {
       free(out);
       return err("attention: unknown action.");
