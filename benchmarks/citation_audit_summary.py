@@ -271,7 +271,10 @@ def main():
     print()
     print(f" --- {min(args.recent, turns)} most recent turns ---")
     print(f" {'when':<19} {'conv':>6} {'msg':>7} {'inj':>4} {'cit':>4} {'drop':>4} {'top':>6} {'used_lo':>7}")
-    for _id, ts, conv, msg, _uid, inj_csv, cit_csv, sc_csv, drop in rows[-args.recent:]:
+    for row in rows[-args.recent:]:
+        # Slice the leading fields this view needs; robust to trailing columns
+        # (tool_surfaced_ids/dropped_tool_count and any future additions).
+        _id, ts, conv, msg, _uid, inj_csv, cit_csv, sc_csv, drop = row[:9]
         when = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "?"
         inj, cit = ids(inj_csv), ids(cit_csv)
         sc = scores(sc_csv)
