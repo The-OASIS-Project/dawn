@@ -37,6 +37,7 @@
  */
 
 #include <json-c/json.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -464,6 +465,79 @@ int webui_broadcast_json_to_user(int user_id, json_object *root, bool browsers_o
       return 0;
    }
    return broadcast_json_to_user_ex(user_id, root, browsers_only);
+}
+
+/* Build a {type:"watch_readings", payload:{readings:[...]}} frame from a user's
+ * reading snapshot.  Only the moving numbers — the rule structure travels via
+ * watch_list.  Mirrors watch_to_json's has_current/current + isfinite guard so a
+ * live gauge and the initial list agree on when a value is absent. */
+static json_object *build_watch_readings_frame(const sage_reading_t *readings, int n) {
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("watch_readings"));
+   json_object *payload = json_object_new_object();
+   json_object *arr = json_object_new_array();
+   for (int i = 0; i < n; i++) {
+      json_object *o = json_object_new_object();
+      json_object_object_add(o, "id", json_object_new_int64(readings[i].id));
+      json_object_object_add(o, "has_current", json_object_new_boolean(readings[i].has_current));
+      if (readings[i].has_current && isfinite(readings[i].value)) {
+         json_object_object_add(o, "current", json_object_new_double(readings[i].value));
+      }
+      json_object_array_add(arr, o);
+   }
+   json_object_object_add(payload, "readings", arr);
+   json_object_object_add(root, "payload", payload);
+   return root;
+}
+
+void webui_watch_readings_tick(void) {
+   /* Master switch off => the panel already shows "attention is off" and no watch
+    * can fire; skip the stream entirely (also the cheapest early-out). */
+   if (!attention_is_enabled()) {
+      return;
+   }
+
+   /* Collect the subscribed browser connections under the registry lock, then
+    * release it BEFORE sampling.  attention_readings_snapshot pulls in the
+    * attention + stat/suit/component service locks; running that under the
+    * heavily-contended registry lock would nest those cross-module locks beneath
+    * it once per subscriber per second.  conn pointers are lws-owned and stable
+    * for the process lifetime, so using them post-unlock is safe — this is the
+    * same capture-then-send_json_response pattern the detached job/reinvoke
+    * workers use.  When the panel is closed everywhere this is the only cost: one
+    * registry scan and no metric snapshot at all. */
+   ws_connection_t *subs[MAX_ACTIVE_CONNECTIONS];
+   int nsub = 0;
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      ws_connection_t *conn = s_active_connections[i];
+      if (conn && conn->authenticated && !conn->is_satellite && conn->session &&
+          conn->watch_readings_subscribed) {
+         subs[nsub++] = conn;
+      }
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+
+   for (int i = 0; i < nsub; i++) {
+      ws_connection_t *conn = subs[i];
+      /* Re-check liveness: a connection can detach between collection and send.
+       * (Per-connection ingest is intentional — one snapshot per subscribed conn;
+       * at 1-2 viewers the redundant sample is negligible and now outside the
+       * registry lock.  Dedup per user only if concurrent viewers ever grow.) */
+      if (!conn_get_session(conn)) {
+         continue;
+      }
+      sage_reading_t readings[SAGE_MAX_WATCHES_PER_USER];
+      int n = 0;
+      if (attention_readings_snapshot(conn->auth_user_id, readings, SAGE_MAX_WATCHES_PER_USER,
+                                      &n) != SUCCESS ||
+          n == 0) {
+         continue;
+      }
+      json_object *root = build_watch_readings_frame(readings, n);
+      send_json_response(conn, root);
+      json_object_put(root);
+   }
 }
 
 /* Collect admin user_ids via auth_db_list_users (callback ctx). */

@@ -147,6 +147,18 @@ typedef struct {
 } sage_watch_t;
 
 /**
+ * One watch's live reading — the volatile half of a watch, streamed at ~1 Hz to
+ * a subscribed Watches panel so its gauges tick live (see
+ * attention_readings_snapshot / the WebUI watch_readings push).  Carries only the
+ * moving number keyed by watch id; the rule structure travels once via watch_list.
+ */
+typedef struct {
+   int64_t id;       /* watch id (the client indexes readings by this) */
+   bool has_current; /* false => the metric source hasn't reported */
+   double value;     /* live value; meaningful iff has_current && isfinite(value) */
+} sage_reading_t;
+
+/**
  * Cumulative self-monitoring counters (never reset; a consumer computes deltas).
  * `evaluations` counts watch evaluations (one per enabled watch per tick), not
  * distinct ingested events.  The §9.9 per-source liveness check is a P0 deferral.
@@ -216,6 +228,22 @@ bool attention_catalog_has(const char *key);
  * @return true if the value is present, false if the source hasn't reported.
  */
 bool attention_metric_current(const char *key, double *value);
+
+/**
+ * Snapshot the live reading of every watch owned by @user_id.  Samples all metric
+ * sources ONCE, then reads each of the user's watches from the in-memory cache —
+ * so N watches cost one ingest, unlike N separate attention_metric_current calls.
+ * Fills up to @max entries into @out and returns the count via @out_count.  A user
+ * with no watches yields count 0 (still SUCCESS).  This is the per-tick source for
+ * the WebUI watch_readings gauge stream.
+ *
+ * Unlike attention_tick (which skips disabled/muted watches from evaluation), this
+ * reports ALL of the user's watches regardless of enabled/muted state — the panel
+ * gauge shows the live value even for a paused watch, so the reading set matches
+ * the watch_list set the client already renders.
+ * @return SUCCESS (even for 0 watches); FAILURE only on a bad argument.
+ */
+int attention_readings_snapshot(int user_id, sage_reading_t *out, int max, int *out_count);
 
 /* =============================================================================
  * Enum <-> wire-string serialization

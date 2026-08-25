@@ -309,3 +309,22 @@ void handle_watch_remove(ws_connection_t *conn, json_object *payload) {
    }
    respond_status(conn, "watch_remove_response", true, NULL);
 }
+
+void handle_watch_readings_subscribe(ws_connection_t *conn, json_object *payload) {
+   if (!conn_require_auth(conn)) {
+      return;
+   }
+
+   /* Opt in/out of the 1 Hz live-gauge stream.  The panel subscribes when it's
+    * shown and unsubscribes when hidden, so the stream only flows while someone is
+    * actually looking at it.  Default OFF when the flag is absent: a malformed or
+    * partial payload must not silently start a recurring stream (the real client
+    * always sends an explicit `enabled`). */
+   bool enabled = false;
+   json_object *o = NULL;
+   if (payload && json_object_object_get_ex(payload, "enabled", &o)) {
+      enabled = json_object_get_boolean(o);
+   }
+   conn->watch_readings_subscribed = enabled;
+   respond_status(conn, "watch_readings_subscribe_response", true, NULL);
+}

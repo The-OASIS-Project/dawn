@@ -46,4 +46,7 @@ void handle_watch_set_enabled(ws_connection_t *conn, json_object *payload);
 /** Delete a watch (by id). */
 void handle_watch_remove(ws_connection_t *conn, json_object *payload);
 
+/** Opt this connection in/out of the 1 Hz live watch_readings gauge stream. */
+void handle_watch_readings_subscribe(ws_connection_t *conn, json_object *payload);
+
 #endif /* WEBUI_ATTENTION_H */

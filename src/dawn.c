@@ -2566,6 +2566,7 @@ mqtt_disabled:
          conv_stream_evict_stale(now_srv);
 #ifdef ENABLE_WEBUI
          jobs_monitor_tick(now_srv);
+         webui_watch_readings_tick();
 #endif
 #ifdef ENABLE_MULTI_CLIENT
          /* Apply deferred device/system-context messages.  Server mode drives no
@@ -2594,6 +2595,8 @@ mqtt_disabled:
 #ifdef ENABLE_WEBUI
             /* Background-job completion monitor (dirty-gated). */
             jobs_monitor_tick(now_rollout);
+            /* Live watch_readings gauge stream to subscribed Watches panels. */
+            webui_watch_readings_tick();
 #endif
          }
       }

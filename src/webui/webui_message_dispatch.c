@@ -1350,6 +1350,8 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       if (payload) {
          handle_watch_remove(conn, payload);
       }
+   } else if (strcmp(type, "watch_readings_subscribe") == 0) {
+      handle_watch_readings_subscribe(conn, payload);
    }
    /* TTS control (per-connection) */
    else if (strcmp(type, "set_tts_enabled") == 0) {

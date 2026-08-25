@@ -140,6 +140,12 @@ typedef struct {
     * client so the delivery only happens on the first ready message per connection. */
    bool missed_notif_delivered;
 
+   /* Watches-panel live gauge stream: while set, the 1 Hz heartbeat pushes a
+    * compact watch_readings frame to this connection (opt-in via
+    * watch_readings_subscribe, browsers only).  Plain bool — needs no teardown;
+    * the connection's user data is zero-initialized and slot reuse re-clears it. */
+   bool watch_readings_subscribed;
+
    /* Client IP address (captured at connection establishment for reliable logging) */
    char client_ip[64];
 
@@ -691,6 +697,18 @@ void send_json_response(ws_connection_t *conn, json_object *response);
  * @return Number of connections the frame was queued to.
  */
 int webui_broadcast_json_to_user(int user_id, json_object *root, bool browsers_only);
+
+/**
+ * @brief Push a live watch_readings frame to every subscribed Watches panel.
+ *
+ * The 1 Hz heartbeat entry (driven from the dawn main loop beside attention_tick).
+ * No-op unless proactive attention is enabled AND a browser has opted in via
+ * watch_readings_subscribe — so an idle tick with the panel closed costs one
+ * registry scan and takes no metric snapshot.  For each subscribed browser it
+ * snapshots that user's watch readings and queues a compact
+ * {type:"watch_readings", payload:{readings:[{id,has_current,current?}]}} frame.
+ */
+void webui_watch_readings_tick(void);
 
 /**
  * @brief Broadcast a JSON frame to every admin user's browser sessions.

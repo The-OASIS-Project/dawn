@@ -477,6 +477,42 @@ bool attention_metric_current(const char *key, double *value) {
    return present;
 }
 
+int attention_readings_snapshot(int user_id, sage_reading_t *out, int max, int *out_count) {
+   if (!out || max <= 0 || !out_count) {
+      return FAILURE;
+   }
+   *out_count = 0;
+   if (!s_initialized || user_id <= 0) {
+      return SUCCESS; /* nothing to report — not an error */
+   }
+
+   /* Sample every source ONCE (like attention_tick), then read each watch off the
+    * shared context — so a user's N watches cost one ingest, not N. */
+   int64_t now_ms = (int64_t)time(NULL) * 1000;
+   attention_sample_ctx_t ctx;
+   attention_ingest_sample(&ctx, now_ms);
+
+   int count = 0;
+   pthread_mutex_lock(&s_mutex);
+   for (int i = 0; i < s_watch_count && count < max; i++) {
+      const sage_watch_t *w = &s_watches[i];
+      if (w->user_id != user_id) {
+         continue;
+      }
+      double value = 0.0;
+      bool present = false;
+      resolve_and_read(&ctx, w->metric, &value, &present);
+      out[count].id = w->id;
+      out[count].has_current = present;
+      out[count].value = value;
+      count++;
+   }
+   pthread_mutex_unlock(&s_mutex);
+
+   *out_count = count;
+   return SUCCESS;
+}
+
 void attention_get_metrics(attention_metrics_t *out) {
    if (!out) {
       return;
