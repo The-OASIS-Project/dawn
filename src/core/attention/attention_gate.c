@@ -203,8 +203,8 @@ bool attention_gate_eval(const sage_watch_t *w,
       if (!slope_over_window(w, st, value, now_ms, &slope)) {
          return false;
       }
-      met = (w->direction == SAGE_DIR_BELOW) ? (slope <= -w->slope_per_min)
-                                             : (slope >= w->slope_per_min);
+      met = (w->direction == SAGE_DIR_FALLING) ? (slope <= -w->slope_per_min)
+                                               : (slope >= w->slope_per_min);
    } else {
       met = condition_met(w, value);
    }

@@ -103,8 +103,11 @@ int auth_db_attention_rule_update(int user_id, int64_t id, const sage_watch_t *w
 
    AUTH_DB_LOCK_OR_FAIL();
 
+   /* rule_type is updatable so a metric's single watch can switch kind (e.g.
+    * threshold -> slope) on edit; without it a re-add with a new rule_type would
+    * silently keep the old kind and ignore the new trigger fields. */
    const char *sql =
-       "UPDATE attention_rules SET name=?, direction=?, threshold=?, hysteresis=?, "
+       "UPDATE attention_rules SET name=?, rule_type=?, direction=?, threshold=?, hysteresis=?, "
        "slope_per_min=?, slope_window_sec=?, absence_after_sec=?, notify=?, ttl_min=?, "
        "updated_at=? WHERE id=? AND user_id=?";
    sqlite3_stmt *stmt = NULL;
@@ -115,17 +118,18 @@ int auth_db_attention_rule_update(int user_id, int64_t id, const sage_watch_t *w
    }
 
    sqlite3_bind_text(stmt, 1, w->name, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_int(stmt, 2, (int)w->direction);
-   sqlite3_bind_double(stmt, 3, w->threshold);
-   sqlite3_bind_double(stmt, 4, w->hysteresis);
-   sqlite3_bind_double(stmt, 5, w->slope_per_min);
-   sqlite3_bind_int(stmt, 6, w->slope_window_sec);
-   sqlite3_bind_int(stmt, 7, w->absence_after_sec);
-   sqlite3_bind_int(stmt, 8, (int)w->notify);
-   sqlite3_bind_int(stmt, 9, w->ttl_min);
-   sqlite3_bind_int64(stmt, 10, (sqlite3_int64)now_ms());
-   sqlite3_bind_int64(stmt, 11, (sqlite3_int64)id);
-   sqlite3_bind_int(stmt, 12, user_id);
+   sqlite3_bind_int(stmt, 2, (int)w->rule_type);
+   sqlite3_bind_int(stmt, 3, (int)w->direction);
+   sqlite3_bind_double(stmt, 4, w->threshold);
+   sqlite3_bind_double(stmt, 5, w->hysteresis);
+   sqlite3_bind_double(stmt, 6, w->slope_per_min);
+   sqlite3_bind_int(stmt, 7, w->slope_window_sec);
+   sqlite3_bind_int(stmt, 8, w->absence_after_sec);
+   sqlite3_bind_int(stmt, 9, (int)w->notify);
+   sqlite3_bind_int(stmt, 10, w->ttl_min);
+   sqlite3_bind_int64(stmt, 11, (sqlite3_int64)now_ms());
+   sqlite3_bind_int64(stmt, 12, (sqlite3_int64)id);
+   sqlite3_bind_int(stmt, 13, user_id);
 
    int rc = sqlite3_step(stmt);
    int changes = sqlite3_changes(s_db.db);

@@ -379,6 +379,19 @@ static char *do_set(int user_id,
       /* Nothing to change yet — treat as a fresh watch. */
       return do_watch(user_id, metric, threshold, direction, level, out);
    }
+   if (w.rule_type == SAGE_RULE_SLOPE) {
+      /* do_set speaks threshold vocabulary (below/above + a threshold value).
+       * Applying it to a rate-of-change (rising/falling) watch would write fields
+       * the slope gate ignores and silently mis-configure it.  The voice tool is
+       * threshold-only for now — point at the explicit convert path rather than
+       * mangling the watch (see the WebUI Watches panel for rate edits). */
+      snprintf(
+          out, ATTN_RESULT_MAX,
+          "%s is a rising/falling (rate) watch — I can't adjust that by voice yet. Say "
+          "\"watch %s above <value>\" to switch it to a level, or edit it in the Watches panel.",
+          w.name, metric);
+      return out;
+   }
    if (direction && direction[0]) {
       w.direction = (strcasecmp(direction, "below") == 0) ? SAGE_DIR_BELOW : SAGE_DIR_ABOVE;
    }

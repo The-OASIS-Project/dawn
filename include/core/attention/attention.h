@@ -90,11 +90,14 @@ typedef enum {
    SAGE_RULE_MATCH = 3      /* discrete event pattern (P1 push sources) */
 } sage_rule_type_t;
 
-/** Threshold/slope direction. */
+/** Rule direction.  Threshold rules use BELOW/ABOVE (a level); slope rules use
+ * RISING/FALLING (a rate of change).  The two vocabularies don't mix on the wire:
+ * a threshold watch speaks above/below, a slope watch speaks rising/falling. */
 typedef enum {
    SAGE_DIR_BELOW = 0,
    SAGE_DIR_ABOVE = 1,
-   SAGE_DIR_RISING = 2 /* slope only */
+   SAGE_DIR_RISING = 2, /* slope only: rate climbing >= slope_per_min */
+   SAGE_DIR_FALLING = 3 /* slope only: rate dropping <= -slope_per_min */
 } sage_direction_t;
 
 /**

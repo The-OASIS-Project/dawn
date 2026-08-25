@@ -75,9 +75,18 @@ static json_object *watch_to_json(const sage_watch_t *w) {
    json_object_object_add(o, "direction",
                           json_object_new_string(sage_direction_to_str(w->direction)));
    /* threshold is a concrete number for stored rows (the template resolves the
-    * catalog default); guard NAN anyway so we never emit invalid JSON. */
-   if (isfinite(w->threshold)) {
+    * catalog default); guard NAN anyway so we never emit invalid JSON.  A slope
+    * row still carries the template's default threshold, but it's meaningless for a
+    * rate rule — omit it so the panel can't render a stale/misleading value. */
+   if (w->rule_type != SAGE_RULE_SLOPE && isfinite(w->threshold)) {
       json_object_object_add(o, "threshold", json_object_new_double(w->threshold));
+   }
+   /* Slope rules carry their trigger in slope_per_min (units/min, canonical) + a
+    * rolling window, NOT threshold — surface both so the panel can read and edit a
+    * rising/falling watch's real trigger. */
+   if (w->rule_type == SAGE_RULE_SLOPE) {
+      json_object_object_add(o, "slope_per_min", json_object_new_double(w->slope_per_min));
+      json_object_object_add(o, "slope_window_sec", json_object_new_int(w->slope_window_sec));
    }
    json_object_object_add(o, "absence_after_sec", json_object_new_int(w->absence_after_sec));
    json_object_object_add(o, "notify", json_object_new_string(sage_notify_to_str(w->notify)));
@@ -133,6 +142,104 @@ static void apply_overrides(sage_watch_t *w, json_object *payload) {
          }
       }
    }
+   /* Slope trigger travels under distinct keys (never overloading `threshold`) so
+    * the mapping is unambiguous.  slope_per_min is a positive magnitude (units/min);
+    * the sign comes from direction (rising vs falling). */
+   if (json_object_object_get_ex(payload, "slope_per_min", &o)) {
+      double s = json_object_get_double(o);
+      if (isfinite(s) && s > 0.0) {
+         w->slope_per_min = s;
+      }
+   }
+   if (json_object_object_get_ex(payload, "slope_window_sec", &o)) {
+      int win = json_object_get_int(o);
+      if (win > 0) {
+         w->slope_window_sec = attention_clamp_seconds((double)win);
+      }
+   }
+}
+
+/* Resolve the rule KIND from an optional "rule_type" override, seeding sane
+ * direction defaults for the new kind.  Shared by add + update so switching a
+ * watch's kind (e.g. a level "above" watch -> a rate "rising" watch) works on BOTH
+ * paths — otherwise an in-place edit that changes the kind would write trigger
+ * fields the gate ignores (a silent no-op).  "slope"/"threshold" are the two
+ * user-selectable numeric kinds; absence is a catalog property, not switchable
+ * here.  On an invalid request it sends the error reply and returns false. */
+static bool resolve_rule_kind(ws_connection_t *conn,
+                              sage_watch_t *w,
+                              json_object *payload,
+                              const char *resp_type) {
+   json_object *o = NULL;
+   const char *rule_type = NULL;
+   if (json_object_object_get_ex(payload, "rule_type", &o)) {
+      rule_type = json_object_get_string(o);
+   }
+   if (!rule_type || !rule_type[0]) {
+      return true; /* keep the current / template kind */
+   }
+
+   /* Only the two numeric kinds are user-selectable; any other value (incl. a
+    * re-sent "absence"/"match") is a no-op that leaves the current kind alone. */
+   sage_rule_type_t requested;
+   if (strcmp(rule_type, "slope") == 0) {
+      requested = SAGE_RULE_SLOPE;
+   } else if (strcmp(rule_type, "threshold") == 0) {
+      requested = SAGE_RULE_THRESHOLD;
+   } else {
+      return true;
+   }
+   if (w->rule_type == requested) {
+      return true; /* same kind — nothing to switch (a same-kind re-send is fine) */
+   }
+   /* An actual switch: only a numeric level/rate metric can change kind.  Absence
+    * (feed-silence) and match (P1 discrete-event push) metrics have no value to
+    * compare against, so their kind is fixed. */
+   if (w->rule_type == SAGE_RULE_ABSENCE || w->rule_type == SAGE_RULE_MATCH) {
+      respond_status(conn, resp_type, false, "This metric's rule kind can't be changed");
+      return false;
+   }
+   w->rule_type = requested;
+   if (requested == SAGE_RULE_SLOPE) {
+      if (w->direction != SAGE_DIR_RISING && w->direction != SAGE_DIR_FALLING) {
+         w->direction = SAGE_DIR_RISING; /* default; apply_overrides may set falling */
+      }
+   } else { /* SAGE_RULE_THRESHOLD */
+      if (w->direction != SAGE_DIR_ABOVE && w->direction != SAGE_DIR_BELOW) {
+         w->direction = SAGE_DIR_ABOVE; /* default; apply_overrides may set below */
+      }
+   }
+   return true;
+}
+
+/* Post-override trigger validation.  A slope watch fires on rate, so it needs a
+ * positive slope_per_min or `slope >= 0` would trip every tick.  On failure sends
+ * the error reply and returns false. */
+static bool validate_watch_trigger(ws_connection_t *conn,
+                                   const sage_watch_t *w,
+                                   const char *resp_type) {
+   if (w->rule_type == SAGE_RULE_SLOPE) {
+      if (!(w->slope_per_min > 0.0)) {
+         respond_status(conn, resp_type, false,
+                        "A rising/falling watch needs a rate (slope_per_min > 0)");
+         return false;
+      }
+      /* Reject cross-vocabulary direction rather than silently defaulting it: a
+       * slope watch must speak rising/falling, not above/below (the gate would
+       * otherwise treat a stray above/below as the wrong direction). */
+      if (w->direction != SAGE_DIR_RISING && w->direction != SAGE_DIR_FALLING) {
+         respond_status(conn, resp_type, false,
+                        "A rising/falling watch needs direction 'rising' or 'falling'");
+         return false;
+      }
+   } else if (w->rule_type == SAGE_RULE_THRESHOLD) {
+      if (w->direction != SAGE_DIR_ABOVE && w->direction != SAGE_DIR_BELOW) {
+         respond_status(conn, resp_type, false,
+                        "An above/below watch needs direction 'above' or 'below'");
+         return false;
+      }
+   }
+   return true;
 }
 
 /* Extract a positive int64 watch id from @payload.  On a missing/non-positive
@@ -231,10 +338,23 @@ void handle_watch_add(ws_connection_t *conn, json_object *payload) {
       respond_status(conn, "watch_add_response", false, "Unknown metric");
       return;
    }
+
+   if (!resolve_rule_kind(conn, &w, payload, "watch_add_response")) {
+      return;
+   }
    apply_overrides(&w, payload);
+   if (!validate_watch_trigger(conn, &w, "watch_add_response")) {
+      return;
+   }
 
    /* One watch per metric (mirrors the tool's do_watch): update the existing
-    * row if the user already watches this metric, so the two surfaces agree. */
+    * row if the user already watches this metric, so the two surfaces agree.
+    * NOTE: attention_watch_find_by_metric is the SOLE enforcer of the
+    * one-watch-per-metric invariant — there is no UNIQUE(user_id, metric) DB
+    * constraint.  This is now more load-bearing than it was: a metric's kind is
+    * user-mutable (threshold <-> slope), so a duplicate row would surface as two
+    * different-kind watches fighting over one metric.  A DB unique index is the
+    * durable hardening if that invariant ever needs to be enforced below the app. */
    sage_watch_t existing;
    bool updating = (attention_watch_find_by_metric(conn->auth_user_id, metric, &existing) ==
                     SUCCESS);
@@ -266,7 +386,13 @@ void handle_watch_update(ws_connection_t *conn, json_object *payload) {
       respond_status(conn, "watch_update_response", false, "Watch not found");
       return;
    }
+   if (!resolve_rule_kind(conn, &w, payload, "watch_update_response")) {
+      return;
+   }
    apply_overrides(&w, payload);
+   if (!validate_watch_trigger(conn, &w, "watch_update_response")) {
+      return;
+   }
 
    if (attention_watch_update(conn->auth_user_id, id, &w) != SUCCESS) {
       respond_status(conn, "watch_update_response", false, "Couldn't update the watch");
