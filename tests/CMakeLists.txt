@@ -781,6 +781,12 @@ dawn_add_unit_test(test_llm_model_version
    LIBS    unity
    LABEL   ci)
 
+dawn_add_unit_test(test_responses_input
+   SOURCES test_responses_input.c
+           ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
+   LIBS    unity ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 dawn_add_unit_test(test_iso8601
    SOURCES test_iso8601.c
            ${SRC_ROOT}/src/core/iso8601.c
@@ -1272,6 +1278,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_tools.c
            ${SRC_ROOT}/src/llm/llm_rate_limit.c
            ${SRC_ROOT}/src/llm/llm_openai_responses.c
+           ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
            ${SRC_ROOT}/src/llm/llm_context.c
            ${SRC_ROOT}/src/llm/llm_command_parser.c
            ${SRC_ROOT}/src/llm/llm_tool_loop.c

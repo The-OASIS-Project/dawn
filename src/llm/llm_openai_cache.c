@@ -139,7 +139,17 @@ void llm_openai_add_anthropic_cache(json_object *root,
 
 /* Collapse the leading run of plain-string system messages into one.  See the
  * header for the full rationale (DAWN's two-segment system prompt vs strict local
- * Jinja templates) and the copy-on-write contract. */
+ * Jinja templates) and the copy-on-write contract.
+ *
+ * CACHING NOTE: this front-loads the per-turn volatile block into one system block,
+ * which busts native-OpenAI /v1/chat-completions automatic prefix caching cross-turn
+ * (same latent gap the Responses path had). Not fixed here. If native-OpenAI CC
+ * cross-turn caching is ever pursued, mirror the Responses fix — keep only the stable
+ * segment up front and reposition the volatile block as a user message just before
+ * the current question (see extract_stable_instructions / build_responses_input in
+ * llm_openai_responses.c and docs/RESPONSES_CACHE_REORDER_PLAN.md). Anthropic (the
+ * add_anthropic_cache path above) needs no such move — its cache_control breakpoints
+ * make placement irrelevant. */
 void llm_openai_merge_leading_system_messages(json_object *root) {
    if (!root) {
       return;

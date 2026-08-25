@@ -550,6 +550,7 @@ set(DAWN_SOURCES
     src/llm/llm_openai_chat_completions.c
     src/llm/llm_openai_history.c
     src/llm/llm_openai_responses.c
+    src/llm/llm_openai_responses_input.c
     src/llm/llm_claude.c
     src/llm/llm_claude_format.c
     src/llm/llm_streaming.c
