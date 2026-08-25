@@ -842,3 +842,66 @@ A1 → A2 → B1 (parallelizable with A) → A3 → C1/C2 → A4/A5 → B2/B3 �
 Anticipation (ProAct-style idle-time prepare-before-asked, §11 note) slots after B2 as a
 jobs-side feature. TODO.md should absorb this section as the program-of-record when SAGE
 work starts, replacing the "Proactive background observation (memory Phase 2)" item.
+
+---
+
+## 16. Multi-named watches per metric — SHIPPED 2026-08-25 (post-P0 evolution)
+
+P0 stored **one watch per metric**. That was pure app convention — `attention_rules`
+already stored multi-row with a `name` column and the gate already keyed identity per-watch
+(`event_key = "metric#id"`), so nothing in storage or evaluation enforced it; the constraint
+lived only in `attention_watch_find_by_metric` (find-then-update) and in keeping conversational
+addressing ("ignore the temperature") unambiguous. It blocked three real patterns: **band
+alerts** (min AND max), **tiered thresholds** ("warm at 75, *we're going to die* at 120"), and
+**named, specifically-spoken alerts**. This evolution lifts it to **N named watches per metric**.
+
+Full design + the plan-/arch-review resolution log lived in the working doc
+`docs/ATTENTION_MULTI_WATCH_DESIGN.md` (untracked; retired once this section landed). Summary:
+
+- **Model.** `name` becomes the user-facing identity and primary conversational address,
+  **unique per user** (case-insensitive). A metric is now a *group*. `event_key` stays per-watch
+  so two watches on one metric never cross-suppress.
+- **Naming.** A `named` bool column (**schema v80**) distinguishes a user-chosen name (spoken in
+  alerts, never regenerated) from a system **auto-name** (condition-derived, e.g. `"CO2 above
+  1200"`, regenerated on edit while unnamed so it never lies). User-name uniqueness is enforced at
+  **one core seam** (`attention_watch_add`/`_update`, surfaced as `ATTENTION_NAME_TAKEN`); the
+  auto-namer dedups system names.
+- **Tool grammar** (`attention_tool.c`), chosen to match DAWN's dominant tool pattern (survey of
+  scheduler/memory/HA/calendar/email/document_manage): `watch` (additive; dedups only on an
+  *identical* condition via `same_gate_config`) / `list` (name + `[id]`) / `set` (edit one) /
+  `ignore` / `resume` (new enable verb) / `remove`. Selectors: **name** (specific), **metric or
+  component-prefix** (group, e.g. `stat.cpu`), **id** (exact, from `list`); resolution order
+  id > name > metric/prefix. `ignore`/`resume` act on **all** matches (reversible → group is the
+  intent); `set`/`remove` **list-and-ask** on >1 (never a silent bulk mutation).
+- **Slope creation folded in.** Rising/falling watches (§6 slope rules) are now creatable by
+  voice/chat — `direction` extended to {above,below,rising,falling} + a `rate` param; `rule_type=slope`
+  inferred. (Previously the gate evaluated slope but nothing could create one.)
+- **Name-aware alerts.** `build_summary` speaks the user name when set — *"you're over the
+  '<name>' threshold — <value>"* — else P0's exact format. Kept actionable (name **+** value).
+- **Shared validators.** Rule-kind + trigger validation extracted from the WebUI into the core
+  (`attention_resolve_rule_kind`/`attention_validate_watch_trigger`), so the tool and panel share
+  one definition and can't drift.
+- **Wire (additive):** `watch_add`/`watch_update` accept `name`; `watch_list_response` emits
+  `named` + catalog `rule_type`/`default_direction`/`default_threshold`; add no longer dedups by
+  metric. The WebUI panel (multi-row + name + slope selector) is built off this in lockstep.
+- **Hardening:** mutating tool actions are refused for callers with no session context
+  (unauth-MQTT-as-user-1 backstop, mirroring `job_tool`); user names are C0-sanitized at one shared
+  ingest helper.
+
+**Alert budget clarification** (§8 policy). `[attention] max_alerts_per_hour` (default **4**) is a
+**global** spoken-alert budget: over-budget ALERTs demote to a silent AMBIENT banner
+(`attention_policy_decide`). **`0` disables it** (every alert always spoken; guarded by
+`s_max_per_hour > 0`). Multi-watch makes the global cap easier to hit, which surfaces the natural
+P1+ refinement below.
+
+**Deferreds** (none blocking): voice **rename** via the tool (`new_name` on `set` — today `name` is
+the selector there; the panel is the rename surface); a `UNIQUE(user_id, name COLLATE NOCASE)` DB
+index (needs a dedup backfill + provably collision-free auto-namer first — uniqueness is
+core-app-enforced today); and a **per-priority / per-level alert budget** so a life-safety watch is
+never silenced by chatty ones consuming the global quota — newly relevant now that tiered/named
+alerts make the priority distinction real. Fold the per-priority budget into P1 (§11 A3 urgency
+tiers + budgets), where it belongs.
+
+**Code map:** `attention_core.c` (naming, uniqueness, finders, shared validators), `attention_tool.c`
+(grammar), `attention_gate.c` (name-aware summary), `webui_attention.c` (wire), `auth_db_attention.c`
++ v71/v80 migrations (`named` column), `attention_catalog.c` (catalog wire accessors).
