@@ -477,6 +477,16 @@ bool attention_metric_current(const char *key, double *value) {
    return present;
 }
 
+/* Authoritative hysteresis-aware breach state, read from the gate's persisted
+ * `armed` latch (the same bit that gates a fire).  True only for an enabled watch
+ * the tick has actually evaluated (rule_id set) and that is currently latched
+ * in-breach (!armed); disabled / never-evaluated / recovered => false.  The single
+ * definition shared by the readings snapshot and attention_watch_breaching so the
+ * two surfaces can't drift.  Caller holds s_mutex. */
+static bool watch_is_breaching_locked(const sage_watch_t *w, const sage_rule_state_t *st) {
+   return w->enabled && st->rule_id == w->id && !st->armed;
+}
+
 int attention_readings_snapshot(int user_id, sage_reading_t *out, int max, int *out_count) {
    if (!out || max <= 0 || !out_count) {
       return FAILURE;
@@ -505,12 +515,29 @@ int attention_readings_snapshot(int user_id, sage_reading_t *out, int max, int *
       out[count].id = w->id;
       out[count].has_current = present;
       out[count].value = value;
+      out[count].breaching = watch_is_breaching_locked(w, &s_states[i]);
       count++;
    }
    pthread_mutex_unlock(&s_mutex);
 
    *out_count = count;
    return SUCCESS;
+}
+
+bool attention_watch_breaching(int user_id, int64_t id) {
+   if (!s_initialized || user_id <= 0 || id <= 0) {
+      return false;
+   }
+   bool breaching = false;
+   pthread_mutex_lock(&s_mutex);
+   for (int i = 0; i < s_watch_count; i++) {
+      if (s_watches[i].id == id && s_watches[i].user_id == user_id) {
+         breaching = watch_is_breaching_locked(&s_watches[i], &s_states[i]);
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_mutex);
+   return breaching;
 }
 
 void attention_get_metrics(attention_metrics_t *out) {

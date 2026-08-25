@@ -156,6 +156,8 @@ typedef struct {
    int64_t id;       /* watch id (the client indexes readings by this) */
    bool has_current; /* false => the metric source hasn't reported */
    double value;     /* live value; meaningful iff has_current && isfinite(value) */
+   bool breaching;   /* authoritative hysteresis-aware breach state (see
+                      * attention_watch_breaching) — powers the live panel tint */
 } sage_reading_t;
 
 /**
@@ -244,6 +246,21 @@ bool attention_metric_current(const char *key, double *value);
  * @return SUCCESS (even for 0 watches); FAILURE only on a bad argument.
  */
 int attention_readings_snapshot(int user_id, sage_reading_t *out, int max, int *out_count);
+
+/**
+ * Authoritative "is this watch currently in breach" — the same hysteresis-aware
+ * latch that gates whether an alert fires (the gate's per-watch `armed` state), NOT
+ * a raw current-vs-threshold compare (which flickers in the hysteresis band).  True
+ * only for an enabled watch the heartbeat has actually evaluated and that is
+ * currently latched in-breach; disabled / never-evaluated / recovered => false.
+ * Reads the live in-memory cache by (@user_id, @id) — user-scoped like the rest of
+ * the SAGE surface, so a mismatched owner returns false and it can't become a
+ * cross-user breach oracle.  The value is up to one tick / ~1s stale, and for a
+ * threshold watch whose source went silent it reflects the last known state (pair
+ * with the reading's has_current if that matters).  Returns false for an unknown or
+ * non-owned id.
+ */
+bool attention_watch_breaching(int user_id, int64_t id);
 
 /* =============================================================================
  * Enum <-> wire-string serialization

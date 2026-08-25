@@ -90,6 +90,10 @@ static json_object *watch_to_json(const sage_watch_t *w) {
    if (have && isfinite(cur)) {
       json_object_object_add(o, "current", json_object_new_double(cur));
    }
+   /* Authoritative hysteresis-aware breach state (same value the readings stream
+    * carries) so the panel tint is correct on open, before the first live tick. */
+   json_object_object_add(o, "breaching",
+                          json_object_new_boolean(attention_watch_breaching(w->user_id, w->id)));
    return o;
 }
 

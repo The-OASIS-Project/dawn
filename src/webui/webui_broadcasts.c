@@ -483,6 +483,7 @@ static json_object *build_watch_readings_frame(const sage_reading_t *readings, i
       if (readings[i].has_current && isfinite(readings[i].value)) {
          json_object_object_add(o, "current", json_object_new_double(readings[i].value));
       }
+      json_object_object_add(o, "breaching", json_object_new_boolean(readings[i].breaching));
       json_object_array_add(arr, o);
    }
    json_object_object_add(payload, "readings", arr);
