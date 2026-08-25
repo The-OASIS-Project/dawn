@@ -1169,22 +1169,10 @@ dawn_add_unit_test(test_email_db
 # Hardware-dependent tests (require ONNX, CUDA, or external APIs)
 # =============================================================================
 
-dawn_add_unit_test(test_streaming
-   SOURCES test_streaming.c
-           ${SRC_ROOT}/src/llm/llm_interface.c
-           ${SRC_ROOT}/src/llm/llm_model_version.c
-           ${SRC_ROOT}/src/llm/llm_openai.c
-           ${SRC_ROOT}/src/llm/llm_claude.c
-           ${SRC_ROOT}/src/llm/llm_streaming.c
-           ${SRC_ROOT}/src/llm/sse_parser.c
-           ${SRC_ROOT}/src/config/config_parser.c
-           ${SRC_ROOT}/src/config/config_defaults.c
-           ${SRC_ROOT}/src/config/config_env.c
-           ${SRC_ROOT}/src/tools/toml.c
-           ${SRC_ROOT}/src/ui/metrics.c
-   LIBS    dawn_common ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
-           OpenSSL::SSL OpenSSL::Crypto
-   LABEL   hardware)
+# NOTE: test_streaming (manual live-API streaming smoke, no assertions, LABEL
+# hardware) was dropped + removed 2026-08-25 — bit-rotted uncompilable, needs live
+# keys so never in CI, and its testable surface is covered by test_sse_parser (SSE
+# parse) + test_responses_input (Responses request shaping) + live usage.
 
 dawn_add_unit_test(asr_benchmark
    SOURCES asr_benchmark.c

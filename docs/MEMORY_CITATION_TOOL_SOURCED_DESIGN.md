@@ -339,6 +339,29 @@ across all eight models** — nobody has ever fabricated an `[ID:x]`. Design con
 ordinal, so the tool path is structurally more robust to sloppy models than the focus-`[M#]` path (the
 failure-direction asymmetry that sealed Approach B, §4).
 
+#### Post-reorder re-verification (2026-08-25) — Responses prompt-cache reorder did NOT regress citation
+
+Re-ran the same query (*"Tell me what you know about my Mark 47 build"*) on **gpt-5.6-luna** after the
+OpenAI Responses prompt-cache reorder (volatile block moved out of `instructions` to a user item just
+before the question — see `docs/RESPONSES_CACHE_REORDER_PLAN.md`). The concern was that repositioning the
+`[M#]`-bearing block could corrupt the ordinal→item mapping and spike hallucinated ordinals. It did not:
+
+| | cited_tool | cited_focus | dropped (focus) | dropped_tool |
+|---|---|---|---|---|
+| luna baseline (above) | 8 | 0 | 0 | 0 |
+| luna **post-reorder** (audit row 130) | 7 | 0 | 0 | 0 |
+
+Same shape: all-tool cites, zero focus, **zero drops of either kind** — "selective + spotless," identical
+to baseline (7-vs-8 is single-query selectivity noise). Verified on the *same* turns that triggered the new
+cross-turn cache (0 → ~93% cached), so citation quality was measured *with* the reorder active. The reorder
+is request-side; capture/audit is response-side and untouched.
+
+*UI aside:* the cite tags did not light up the WebUI — expected and pre-existing, not the reorder. This
+turn cited via the tool path (`cited_focus=0`), and `webui_broadcast_context_citations` only carries focus
+cites (early-returns on empty); more fundamentally the client has **no** `context_citations` renderer at
+all (`www/` has no handler; `format.js` strips `<cited>`). Citation is Phase-1 audit-only today — a
+user-facing cite-highlight (client renderer + extending the broadcast to tool cites) is unbuilt future work.
+
 ### 15.1 Answer-vs-cite deep read (5 models)
 
 Read each model's actual answer against the facts it cited (the count table above can't distinguish genuine
