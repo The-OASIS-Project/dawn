@@ -443,14 +443,20 @@
       /* Resolve vendor script tags: replace <script src="/js/vendor/X"> with
        * inline <script>...code...</script>. srcdoc iframes can't load external
        * scripts (no base URL), so we fetch once, cache, and inline.
+       * Quote-agnostic (single OR double): the model reaches for single-quoted
+       * HTML attributes to avoid escaping double-quotes inside render_visual's
+       * nested-JSON `details`, so a "-only match would silently skip inlining and
+       * leave a dead external <script>, blanking the chart.
        * Escape </script in vendor content to prevent premature tag close. */
-      var vendorMatch = content.match(/<script src="(\/js\/vendor\/[^"]+)"><\/script>/g);
+      var vendorMatch = content.match(
+         /<script\s+src=(["'])(\/js\/vendor\/[^"']+)\1\s*>\s*<\/script>/gi
+      );
       if (vendorMatch && vendorMatch.length > 0) {
          var pendingFetches = [];
          vendorMatch.forEach(function (tag) {
-            var srcMatch = tag.match(/src="([^"]+)"/);
+            var srcMatch = tag.match(/src=(["'])([^"']+)\1/);
             if (!srcMatch) return;
-            var src = srcMatch[1];
+            var src = srcMatch[2];
             if (vendorScriptCache[src]) {
                content = content.replace(
                   tag,

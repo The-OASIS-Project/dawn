@@ -1,5 +1,13 @@
 # Visual rendering design system
 
+## Quoting (your code is embedded in JSON)
+The `code` you send is carried inside a JSON string, so every double-quote in it
+must be escaped — a miscount produces "invalid JSON" and the render fails. In
+HTML-type visuals, prefer SINGLE quotes for HTML attributes and JS string
+literals so there is nothing to escape: `<canvas id='c'></canvas>`,
+`<script src='/js/vendor/chart.umd.js'></script>`, `const labels=['a','b']`.
+(Single- and double-quoted `/js/vendor/*` script tags both inline correctly.)
+
 ## SVG Setup
 - ViewBox: `<svg width="100%" viewBox="0 0 680 H">` — 680px wide, H computed to fit content.
 - Safe area: x=40 to x=640, y=40 to y=(H-40).

@@ -2,11 +2,14 @@
 
 Use Chart.js for data visualization. Load from the local server inside HTML type visuals.
 
+Use SINGLE quotes for HTML attributes and JS strings (the code is embedded in
+JSON — see `_core.md` § Quoting); the examples below already do.
+
 ## Setup
 ```html
-<script src="/js/vendor/chart.umd.js"></script>
+<script src='/js/vendor/chart.umd.js'></script>
 
-<canvas id="myChart"></canvas>
+<canvas id='myChart'></canvas>
 <script>
 const ctx = document.getElementById('myChart');
 new Chart(ctx, {
@@ -67,18 +70,18 @@ The band is two datasets (`min`, then `max` with `fill: '-1'` to fill down to
 `min`/`max` (cpu/memory/fan/power/voltage) — just plot `avg`.
 
 ```html
-<script src="/js/vendor/chart.umd.js"></script>
-<canvas id="c"></canvas>
+<script src='/js/vendor/chart.umd.js'></script>
+<canvas id='c'></canvas>
 <script>
 const style = getComputedStyle(document.documentElement);
 Chart.defaults.color = style.getPropertyValue('--color-text-primary').trim();
 Chart.defaults.borderColor = style.getPropertyValue('--color-border').trim();
 
 // Paste the arrays from the tool result exactly as given:
-const labels = ["00:00","00:30","01:00"];   // "labels"
-const avg    = [44.1, 45.2, 46.0];          // "avg"
-const min    = [39.1, 40.0, 41.2];          // "min"  (omit if absent)
-const max    = [47.2, 49.1, 50.3];          // "max"  (omit if absent)
+const labels = ['00:00','00:30','01:00'];   // 'labels'
+const avg    = [44.1, 45.2, 46.0];          // 'avg'
+const min    = [39.1, 40.0, 41.2];          // 'min'  (omit if absent)
+const max    = [47.2, 49.1, 50.3];          // 'max'  (omit if absent)
 
 new Chart(document.getElementById('c'), {
    type: 'line',
