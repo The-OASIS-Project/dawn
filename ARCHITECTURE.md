@@ -652,6 +652,8 @@ gemini_api_key = "..."
 
 **`dawn.h`** — compile-time fallbacks: `AI_NAME`, `AI_DESCRIPTION`, `DEFAULT_PCM_PLAYBACK_DEVICE`, `DEFAULT_PCM_CAPTURE_DEVICE`, `MQTT_IP`, `MQTT_PORT`.
 
+**`models.toml`** — model context-window registry (per-model-prefix → max input tokens for OpenAI/Anthropic/Gemini). Read-only reference data loaded once by `llm_context.c` at startup; **exempt from the `dawn.toml` settings round-trip** (never rewritten). Edit + restart to update; no rebuild. OpenRouter/local windows are fetched live and not listed. See [MODELS_TOML_DESIGN.md](docs/MODELS_TOML_DESIGN.md).
+
 **Tool registry** — tools are defined as compile-time `tool_metadata_t` structs in `src/tools/*.c` and registered in `src/tools/tools_init.c` via `tools_register_all()`. See [command-processing.md](docs/arch/command-processing.md).
 
 ### WebUI Settings Panel Mapping

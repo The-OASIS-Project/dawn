@@ -90,6 +90,12 @@ uninstall() {
         rm -f "$DATA_DIR/secrets.toml"
     fi
 
+    # 5b. Remove models.toml symlink
+    if [ -L "$DATA_DIR/models.toml" ]; then
+        log "Removing models.toml symlink from $DATA_DIR"
+        rm -f "$DATA_DIR/models.toml"
+    fi
+
     # 6. Prompt for database removal
     local remove_db=false
     local db_dir="$DATA_DIR/db"
@@ -496,6 +502,32 @@ chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/secrets.toml"
 if [ ! -L "$DATA_DIR/secrets.toml" ]; then
     log "Creating secrets.toml symlink in $DATA_DIR"
     ln -sf "$CONFIG_DIR/secrets.toml" "$DATA_DIR/secrets.toml"
+fi
+
+# Install models.toml (model context-window registry) and symlink into the
+# WorkingDirectory so llm_context's cwd-relative search finds it (same pattern as
+# secrets.toml above). A missing file only degrades to per-provider defaults.
+# Do NOT overwrite an operator-edited copy on re-install — the file is an
+# edit-to-update surface (drop a .new beside it instead), mirroring the dawn.toml
+# handling above.
+if [ -f "$PROJECT_ROOT/models.toml" ]; then
+    if [ -f "$CONFIG_DIR/models.toml" ]; then
+        if ! cmp -s "$PROJECT_ROOT/models.toml" "$CONFIG_DIR/models.toml"; then
+            warn "models.toml already exists: $CONFIG_DIR/models.toml (not overwriting)"
+            warn "Shipped version saved to: $CONFIG_DIR/models.toml.new"
+            cp "$PROJECT_ROOT/models.toml" "$CONFIG_DIR/models.toml.new"
+            chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/models.toml.new"
+        fi
+    else
+        log "Installing models.toml"
+        cp "$PROJECT_ROOT/models.toml" "$CONFIG_DIR/models.toml"
+        chmod 644 "$CONFIG_DIR/models.toml"
+        chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/models.toml"
+    fi
+    if [ ! -L "$DATA_DIR/models.toml" ]; then
+        log "Creating models.toml symlink in $DATA_DIR"
+        ln -sf "$CONFIG_DIR/models.toml" "$DATA_DIR/models.toml"
+    fi
 fi
 
 # Install environment file
