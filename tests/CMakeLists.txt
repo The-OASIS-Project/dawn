@@ -575,6 +575,7 @@ dawn_add_unit_test(test_messaging_format
 dawn_add_unit_test(test_claude_format
    SOURCES test_claude_format.c
            ${SRC_ROOT}/src/llm/llm_claude_format.c
+           ${SRC_ROOT}/src/llm/llm_model_version.c
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -771,6 +772,12 @@ dawn_add_unit_test(test_llm_response_finalize
    SOURCES test_llm_response_finalize.c
            ${SRC_ROOT}/src/core/llm_response_finalize.c
            ${SRC_ROOT}/src/core/text_filter.c
+   LIBS    unity
+   LABEL   ci)
+
+dawn_add_unit_test(test_llm_model_version
+   SOURCES test_llm_model_version.c
+           ${SRC_ROOT}/src/llm/llm_model_version.c
    LIBS    unity
    LABEL   ci)
 
@@ -1159,6 +1166,7 @@ dawn_add_unit_test(test_email_db
 dawn_add_unit_test(test_streaming
    SOURCES test_streaming.c
            ${SRC_ROOT}/src/llm/llm_interface.c
+           ${SRC_ROOT}/src/llm/llm_model_version.c
            ${SRC_ROOT}/src/llm/llm_openai.c
            ${SRC_ROOT}/src/llm/llm_claude.c
            ${SRC_ROOT}/src/llm/llm_streaming.c
@@ -1255,6 +1263,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_local_provider.c
            ${SRC_ROOT}/src/llm/llm_claude.c
            ${SRC_ROOT}/src/llm/llm_claude_format.c
+           ${SRC_ROOT}/src/llm/llm_model_version.c
            ${SRC_ROOT}/src/llm/llm_openai.c
            ${SRC_ROOT}/src/llm/llm_openai_cache.c
            ${SRC_ROOT}/src/llm/llm_openai_chat_completions.c

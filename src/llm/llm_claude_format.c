@@ -33,6 +33,7 @@
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_model_version.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
 #include "utils/string_utils.h"
@@ -538,35 +539,6 @@ static void add_vision_to_claude_messages(json_object *messages_array,
 }
 
 /**
- * @brief Parse the leading version number out of a Claude model id.
- *
- * Takes the first numeric token that follows a delimiter, e.g.
- * "claude-opus-4-8" -> 4.8, "claude-sonnet-5" -> 5.0, "claude-haiku-4-5" -> 4.5,
- * "claude-fable-5" -> 5.0, "claude-3-5-sonnet-20241022" -> 3.5.  The version is
- * always the first version token in current Claude ids, so a trailing date
- * suffix does not interfere.
- */
-static void claude_parse_model_version(const char *model_name, int *major_out, int *minor_out) {
-   int major = 0, minor = 0;
-   const char *p = model_name ? model_name : "";
-   while (*p) {
-      if ((*p >= '0' && *p <= '9') && (p == model_name || *(p - 1) == '-' || *(p - 1) == '.')) {
-         major = atoi(p);
-         while (*p >= '0' && *p <= '9') {
-            p++;
-         }
-         if ((*p == '-' || *p == '.') && (*(p + 1) >= '0' && *(p + 1) <= '9')) {
-            minor = atoi(p + 1);
-         }
-         break;
-      }
-      p++;
-   }
-   *major_out = major;
-   *minor_out = minor;
-}
-
-/**
  * @brief Whether a Claude model requires adaptive thinking instead of the
  *        legacy `thinking.type=enabled` + `budget_tokens` shape.
  *
@@ -577,7 +549,7 @@ static void claude_parse_model_version(const char *model_name, int *major_out, i
  */
 static bool claude_model_requires_adaptive_thinking(const char *model_name) {
    int major = 0, minor = 0;
-   claude_parse_model_version(model_name, &major, &minor);
+   llm_parse_model_version(model_name, &major, &minor);
    if (major >= 5) {
       return true; /* Sonnet 5, Fable 5, Mythos 5, and future 5.x */
    }
@@ -635,28 +607,10 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
    bool model_supports_thinking = false;
    {
       int major = 0, minor = 0;
-      const char *p = model_name;
-      while (*p) {
-         // Look for version patterns like "-3-5-", "-4-", "3.5", etc.
-         if ((*p >= '0' && *p <= '9') && (p == model_name || *(p - 1) == '-' || *(p - 1) == '.')) {
-            major = atoi(p);
-            // Look for minor version after - or .
-            while (*p >= '0' && *p <= '9')
-               p++;
-            if (*p == '-' || *p == '.') {
-               p++;
-               if (*p >= '0' && *p <= '9') {
-                  minor = atoi(p);
-               }
-            }
-            // Version >= 3.5 supports thinking
-            if (major > 3 || (major == 3 && minor >= 5)) {
-               model_supports_thinking = true;
-               break;
-            }
-         }
-         p++;
-      }
+      llm_parse_model_version(model_name, &major, &minor);
+      // Extended thinking is supported on Claude 3.5+ (the version is always the
+      // first token in a Claude id, so the shared first-token parser matches).
+      model_supports_thinking = (major > 3 || (major == 3 && minor >= 5));
       OLOG_INFO("Claude: version detected %d.%d, model_supports=%d", major, minor,
                 model_supports_thinking);
    }
