@@ -1173,6 +1173,306 @@ static void test_deliver_to_recurrence_carry(void) {
 }
 
 /* ============================================================================
+ * Test: scheduler_db_briefing_steps_update — the guarded editor (update action)
+ * ============================================================================ */
+
+/* Small helper: make a pending briefing owned by user 1 with `n` search steps. */
+static int64_t make_briefing_with_steps(int user_id, int n) {
+   sched_event_t ev = make_event();
+   ev.event_type = SCHED_EVENT_BRIEFING;
+   ev.user_id = user_id;
+   int64_t id = 0;
+   scheduler_db_insert(&ev, &id);
+   if (n > 0) {
+      sched_briefing_step_t steps[SCHED_BRIEFING_STEPS_MAX];
+      memset(steps, 0, sizeof(steps));
+      for (int i = 0; i < n; i++) {
+         strncpy(steps[i].tool_name, "search", SCHED_TOOL_NAME_MAX - 1);
+         strncpy(steps[i].tool_action, "news", SCHED_TOOL_NAME_MAX - 1);
+         snprintf(steps[i].tool_value, SCHED_TOOL_VALUE_MAX, "topic %d", i);
+      }
+      scheduler_db_briefing_steps_set(id, steps, n);
+   }
+   return id;
+}
+
+static sched_briefing_step_t one_step(const char *name, const char *action, const char *value) {
+   sched_briefing_step_t s;
+   memset(&s, 0, sizeof(s));
+   strncpy(s.tool_name, name, SCHED_TOOL_NAME_MAX - 1);
+   if (action)
+      strncpy(s.tool_action, action, SCHED_TOOL_NAME_MAX - 1);
+   if (value)
+      strncpy(s.tool_value, value, SCHED_TOOL_VALUE_MAX - 1);
+   return s;
+}
+
+static void test_briefing_steps_update_append(void) {
+   int64_t id = make_briefing_with_steps(1, 1);
+   sched_briefing_step_t add = one_step("search", "news", "stock holdings");
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS,
+                         scheduler_db_briefing_steps_update(id, 1, &add, 1, /*append=*/true));
+
+   sched_briefing_step_t out[SCHED_BRIEFING_STEPS_MAX];
+   int count = 0;
+   scheduler_db_briefing_steps_list(id, out, SCHED_BRIEFING_STEPS_MAX, &count);
+   TEST_ASSERT_EQUAL_INT(2, count);
+   TEST_ASSERT_EQUAL_STRING("topic 0", out[0].tool_value);        /* original kept */
+   TEST_ASSERT_EQUAL_STRING("stock holdings", out[1].tool_value); /* appended last */
+}
+
+static void test_briefing_steps_update_replace(void) {
+   int64_t id = make_briefing_with_steps(1, 3);
+   sched_briefing_step_t repl = one_step("weather", "get", "Atlanta");
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS,
+                         scheduler_db_briefing_steps_update(id, 1, &repl, 1, /*append=*/false));
+
+   sched_briefing_step_t out[SCHED_BRIEFING_STEPS_MAX];
+   int count = 0;
+   scheduler_db_briefing_steps_list(id, out, SCHED_BRIEFING_STEPS_MAX, &count);
+   TEST_ASSERT_EQUAL_INT(1, count);
+   TEST_ASSERT_EQUAL_STRING("weather", out[0].tool_name);
+}
+
+static void test_briefing_steps_update_ownership(void) {
+   int64_t id = make_briefing_with_steps(1, 1); /* owned by user 1 */
+   sched_briefing_step_t add = one_step("search", "news", "intrusion");
+   /* user 2 cannot edit user 1's briefing */
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_NOT_EDITABLE,
+                         scheduler_db_briefing_steps_update(id, 2, &add, 1, /*append=*/true));
+   /* steps unchanged */
+   sched_briefing_step_t out[SCHED_BRIEFING_STEPS_MAX];
+   int count = 0;
+   scheduler_db_briefing_steps_list(id, out, SCHED_BRIEFING_STEPS_MAX, &count);
+   TEST_ASSERT_EQUAL_INT(1, count);
+}
+
+static void test_briefing_steps_update_not_editable_status(void) {
+   int64_t id = make_briefing_with_steps(1, 1);
+   scheduler_db_update_status(id, SCHED_STATUS_FIRED); /* out of pending/snoozed */
+   sched_briefing_step_t add = one_step("search", "news", "late");
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_NOT_EDITABLE,
+                         scheduler_db_briefing_steps_update(id, 1, &add, 1, /*append=*/true));
+}
+
+static void test_briefing_steps_update_rejects_non_briefing(void) {
+   sched_event_t ev = make_event();
+   ev.event_type = SCHED_EVENT_TASK;
+   int64_t id = 0;
+   scheduler_db_insert(&ev, &id);
+   sched_briefing_step_t add = one_step("search", "news", "x");
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_NOT_EDITABLE,
+                         scheduler_db_briefing_steps_update(id, 1, &add, 1, /*append=*/true));
+}
+
+static void test_briefing_steps_update_legacy_materialization(void) {
+   /* A pre-v50 briefing: legacy tool_* on the row, zero rows in briefing_steps. */
+   sched_event_t ev = make_event();
+   ev.event_type = SCHED_EVENT_BRIEFING;
+   strncpy(ev.tool_name, "weather", SCHED_TOOL_NAME_MAX - 1);
+   strncpy(ev.tool_action, "get", SCHED_TOOL_NAME_MAX - 1);
+   strncpy(ev.tool_value, "Sugar Hill", SCHED_TOOL_VALUE_MAX - 1);
+   int64_t id = 0;
+   scheduler_db_insert(&ev, &id);
+
+   sched_briefing_step_t add = one_step("search", "news", "stock holdings");
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS,
+                         scheduler_db_briefing_steps_update(id, 1, &add, 1, /*append=*/true));
+
+   /* The legacy tool must survive as step[0], with the new step appended. */
+   sched_briefing_step_t out[SCHED_BRIEFING_STEPS_MAX];
+   int count = 0;
+   scheduler_db_briefing_steps_list(id, out, SCHED_BRIEFING_STEPS_MAX, &count);
+   TEST_ASSERT_EQUAL_INT(2, count);
+   TEST_ASSERT_EQUAL_STRING("weather", out[0].tool_name);
+   TEST_ASSERT_EQUAL_STRING("Sugar Hill", out[0].tool_value);
+   TEST_ASSERT_EQUAL_STRING("search", out[1].tool_name);
+   TEST_ASSERT_EQUAL_STRING("stock holdings", out[1].tool_value);
+}
+
+static void test_briefing_steps_update_cap_overflow(void) {
+   int64_t id = make_briefing_with_steps(1, SCHED_BRIEFING_STEPS_MAX); /* already full */
+   sched_briefing_step_t add = one_step("search", "news", "one too many");
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_FAILURE,
+                         scheduler_db_briefing_steps_update(id, 1, &add, 1, /*append=*/true));
+   /* Original list intact (append rolled back). */
+   sched_briefing_step_t out[SCHED_BRIEFING_STEPS_MAX];
+   int count = 0;
+   scheduler_db_briefing_steps_list(id, out, SCHED_BRIEFING_STEPS_MAX, &count);
+   TEST_ASSERT_EQUAL_INT(SCHED_BRIEFING_STEPS_MAX, count);
+}
+
+static void test_briefing_steps_update_append_dedup(void) {
+   int64_t id = make_briefing_with_steps(1, 1); /* step: search/news/"topic 0" */
+   sched_briefing_step_t dup = one_step("search", "news", "topic 0"); /* exact duplicate */
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS,
+                         scheduler_db_briefing_steps_update(id, 1, &dup, 1, /*append=*/true));
+   /* Idempotent: no second copy added. */
+   sched_briefing_step_t out[SCHED_BRIEFING_STEPS_MAX];
+   int count = 0;
+   scheduler_db_briefing_steps_list(id, out, SCHED_BRIEFING_STEPS_MAX, &count);
+   TEST_ASSERT_EQUAL_INT(1, count);
+}
+
+/* Pins design §6: editing the pending row's steps propagates to the next
+ * occurrence, because the recurrence clone copies from the just-fired row. */
+static void test_briefing_steps_update_clone_propagation(void) {
+   sched_event_t src = make_event();
+   src.event_type = SCHED_EVENT_BRIEFING;
+   src.recurrence = SCHED_RECUR_DAILY;
+   int64_t src_id = 0;
+   scheduler_db_insert(&src, &src_id);
+   sched_briefing_step_t base = one_step("weather", "get", "Sugar Hill");
+   scheduler_db_briefing_steps_set(src_id, &base, 1);
+
+   /* Edit the pending row: add stock news. */
+   sched_briefing_step_t add = one_step("search", "news", "stock holdings");
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS,
+                         scheduler_db_briefing_steps_update(src_id, 1, &add, 1, /*append=*/true));
+
+   /* Simulate the rollover: clone the next occurrence from the edited row. */
+   sched_event_t next = src;
+   next.id = 0;
+   next.status = SCHED_STATUS_PENDING;
+   next.fire_at = src.fire_at + 86400;
+   next.fired_at = 0;
+   int64_t new_id = 0;
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS,
+                         scheduler_db_insert_with_step_clone(&next, src_id, &new_id));
+
+   sched_briefing_step_t out[SCHED_BRIEFING_STEPS_MAX];
+   int count = 0;
+   scheduler_db_briefing_steps_list(new_id, out, SCHED_BRIEFING_STEPS_MAX, &count);
+   TEST_ASSERT_EQUAL_INT(2, count);
+   TEST_ASSERT_EQUAL_STRING("weather", out[0].tool_name);
+   TEST_ASSERT_EQUAL_STRING("stock holdings", out[1].tool_value);
+}
+
+static void test_briefing_steps_update_missing_row(void) {
+   sched_briefing_step_t add = one_step("search", "news", "x");
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_NOT_EDITABLE,
+                         scheduler_db_briefing_steps_update(999999, 1, &add, 1, /*append=*/true));
+}
+
+/* ============================================================================
+ * Test: scheduler_db_update_fields — scalar-field editor (Phase 2)
+ * ============================================================================ */
+
+static void test_update_fields_name_and_recurrence(void) {
+   sched_event_t ev = make_event();
+   ev.recurrence = SCHED_RECUR_DAILY;
+   int64_t id = 0;
+   scheduler_db_insert(&ev, &id);
+
+   sched_event_t fields;
+   memset(&fields, 0, sizeof(fields));
+   strncpy(fields.name, "Renamed Alarm", SCHED_NAME_MAX - 1);
+   fields.recurrence = SCHED_RECUR_WEEKDAYS;
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS,
+                         scheduler_db_update_fields(id, 1, &fields,
+                                                    SCHED_FIELD_NAME | SCHED_FIELD_RECURRENCE));
+
+   sched_event_t got;
+   scheduler_db_get(id, &got);
+   TEST_ASSERT_EQUAL_STRING("Renamed Alarm", got.name);
+   TEST_ASSERT_EQUAL_INT(SCHED_RECUR_WEEKDAYS, got.recurrence);
+   /* Unmasked fields untouched. */
+   TEST_ASSERT_EQUAL_STRING("Wake up!", got.message);
+}
+
+static void test_update_fields_fire_at_and_original_time(void) {
+   sched_event_t ev = make_event();
+   int64_t id = 0;
+   scheduler_db_insert(&ev, &id);
+
+   time_t new_fire = time(NULL) + 7200;
+   sched_event_t fields;
+   memset(&fields, 0, sizeof(fields));
+   fields.fire_at = new_fire;
+   strncpy(fields.original_time, "09:30", SCHED_ORIGINAL_TIME_MAX - 1);
+   TEST_ASSERT_EQUAL_INT(
+       SCHED_DB_SUCCESS,
+       scheduler_db_update_fields(id, 1, &fields, SCHED_FIELD_FIRE_AT | SCHED_FIELD_ORIGINAL_TIME));
+
+   sched_event_t got;
+   scheduler_db_get(id, &got);
+   TEST_ASSERT_EQUAL_INT64(new_fire, got.fire_at);
+   TEST_ASSERT_EQUAL_STRING("09:30", got.original_time);
+}
+
+static void test_update_fields_deliver_to_clear(void) {
+   sched_event_t ev = make_event();
+   ev.event_type = SCHED_EVENT_BRIEFING;
+   strncpy(ev.deliver_to, "slack_main", SCHED_DELIVER_TO_MAX - 1);
+   int64_t id = 0;
+   scheduler_db_insert(&ev, &id);
+
+   /* Empty deliver_to clears the fan-out. */
+   sched_event_t fields;
+   memset(&fields, 0, sizeof(fields));
+   fields.deliver_to[0] = '\0';
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS,
+                         scheduler_db_update_fields(id, 1, &fields, SCHED_FIELD_DELIVER_TO));
+   sched_event_t got;
+   scheduler_db_get(id, &got);
+   TEST_ASSERT_EQUAL_INT(0, got.deliver_to[0]);
+}
+
+static void test_update_fields_ownership(void) {
+   sched_event_t ev = make_event(); /* user 1 */
+   int64_t id = 0;
+   scheduler_db_insert(&ev, &id);
+
+   sched_event_t fields;
+   memset(&fields, 0, sizeof(fields));
+   strncpy(fields.name, "Hijacked", SCHED_NAME_MAX - 1);
+   /* user 2 cannot edit user 1's event */
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_NOT_EDITABLE,
+                         scheduler_db_update_fields(id, 2, &fields, SCHED_FIELD_NAME));
+   sched_event_t got;
+   scheduler_db_get(id, &got);
+   TEST_ASSERT_EQUAL_STRING("Test Alarm", got.name); /* unchanged */
+}
+
+static void test_update_fields_not_editable_status(void) {
+   sched_event_t ev = make_event();
+   int64_t id = 0;
+   scheduler_db_insert(&ev, &id);
+   scheduler_db_update_status(id, SCHED_STATUS_FIRED);
+
+   sched_event_t fields;
+   memset(&fields, 0, sizeof(fields));
+   strncpy(fields.name, "Too Late", SCHED_NAME_MAX - 1);
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_NOT_EDITABLE,
+                         scheduler_db_update_fields(id, 1, &fields, SCHED_FIELD_NAME));
+}
+
+static void test_update_fields_empty_mask_rejected(void) {
+   sched_event_t ev = make_event();
+   int64_t id = 0;
+   scheduler_db_insert(&ev, &id);
+   sched_event_t fields;
+   memset(&fields, 0, sizeof(fields));
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_FAILURE, scheduler_db_update_fields(id, 1, &fields, 0));
+}
+
+/* A no-op edit (new value == current value) still matches the WHERE row, so
+ * sqlite3_changes() > 0 and the primitive returns SUCCESS — NOT a false
+ * NOT_EDITABLE.  Pins the contract against a future switch to a diff-based
+ * change count. */
+static void test_update_fields_noop_returns_success(void) {
+   sched_event_t ev = make_event(); /* name == "Test Alarm" */
+   int64_t id = 0;
+   scheduler_db_insert(&ev, &id);
+
+   sched_event_t fields;
+   memset(&fields, 0, sizeof(fields));
+   strncpy(fields.name, "Test Alarm", SCHED_NAME_MAX - 1); /* identical value */
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS,
+                         scheduler_db_update_fields(id, 1, &fields, SCHED_FIELD_NAME));
+}
+
+/* ============================================================================
  * Main
  * ============================================================================ */
 
@@ -1207,5 +1507,22 @@ int main(void) {
    RUN_TEST(test_say_aloud_persistence);
    RUN_TEST(test_deliver_to_persistence);
    RUN_TEST(test_deliver_to_recurrence_carry);
+   RUN_TEST(test_briefing_steps_update_append);
+   RUN_TEST(test_briefing_steps_update_replace);
+   RUN_TEST(test_briefing_steps_update_ownership);
+   RUN_TEST(test_briefing_steps_update_not_editable_status);
+   RUN_TEST(test_briefing_steps_update_rejects_non_briefing);
+   RUN_TEST(test_briefing_steps_update_legacy_materialization);
+   RUN_TEST(test_briefing_steps_update_cap_overflow);
+   RUN_TEST(test_briefing_steps_update_append_dedup);
+   RUN_TEST(test_briefing_steps_update_clone_propagation);
+   RUN_TEST(test_briefing_steps_update_missing_row);
+   RUN_TEST(test_update_fields_name_and_recurrence);
+   RUN_TEST(test_update_fields_fire_at_and_original_time);
+   RUN_TEST(test_update_fields_deliver_to_clear);
+   RUN_TEST(test_update_fields_ownership);
+   RUN_TEST(test_update_fields_not_editable_status);
+   RUN_TEST(test_update_fields_empty_mask_rejected);
+   RUN_TEST(test_update_fields_noop_returns_success);
    return UNITY_END();
 }

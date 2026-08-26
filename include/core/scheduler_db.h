@@ -47,6 +47,10 @@ extern "C" {
 #define SCHED_DB_FAILURE FAILURE
 #define SCHED_DB_USER_LIMIT 2
 #define SCHED_DB_GLOBAL_LIMIT 3
+/* Row exists but cannot be edited: not owned by the caller, not a briefing, or
+ * no longer in an editable status (already fired/cancelled/ringing). Distinct
+ * from SCHED_DB_FAILURE (a real DB error) so the tool can report the difference. */
+#define SCHED_DB_NOT_EDITABLE 4
 
 #define SCHED_NAME_MAX 128
 #define SCHED_MESSAGE_MAX 512
@@ -420,6 +424,77 @@ int scheduler_db_get_missed_events(sched_event_t *events, int max_count);
 int scheduler_db_briefing_steps_set(int64_t event_id,
                                     const sched_briefing_step_t *steps,
                                     int step_count);
+
+/**
+ * @brief Ownership- and status-guarded edit of a briefing's steps (append or replace)
+ *
+ * The guarded editor behind the scheduler `update` action.  Unlike
+ * scheduler_db_briefing_steps_set (an unconditional writer used by create + the
+ * recurrence clone), this performs the guard AND the write inside a single
+ * lock + BEGIN IMMEDIATE, so a fire-thread transition (pending → fired + clone)
+ * cannot race between the caller's check and the write and silently drop the
+ * edit.  Within the transaction it:
+ *   1. reads status, user_id, event_type for @p event_id;
+ *   2. rejects with SCHED_DB_NOT_EDITABLE unless the row is owned by @p user_id,
+ *      is a briefing, and is still pending or snoozed;
+ *   3. on @p append, seeds the list from the current steps — materializing a
+ *      pre-v50 legacy single-tool briefing's tool_name/action/value as step[0]
+ *      first (otherwise appending would orphan the original tool, since the
+ *      steps table takes total precedence at fire time) — then appends @p steps;
+ *      on replace, uses @p steps as the whole list;
+ *   4. caps the result at SCHED_BRIEFING_STEPS_MAX (SCHED_DB_FAILURE on overflow);
+ *   5. replaces the stored steps atomically.
+ * On append, a new step exactly matching an existing (tool_name, tool_action,
+ * tool_value) is skipped as a duplicate (idempotent LLM retry-after-timeout).
+ *
+ * @param event_id Briefing event ID
+ * @param user_id  Owning user (must match the row's user_id)
+ * @param steps    Steps to append or the full replacement list (already validated)
+ * @param step_count Number of steps in @p steps
+ * @param append   true = append to existing steps, false = replace all
+ * @return SCHED_DB_SUCCESS, SCHED_DB_NOT_EDITABLE (guard failed),
+ *         or SCHED_DB_FAILURE (DB error or step cap exceeded)
+ */
+int scheduler_db_briefing_steps_update(int64_t event_id,
+                                       int user_id,
+                                       const sched_briefing_step_t *steps,
+                                       int step_count,
+                                       bool append);
+
+/* Field mask bits for scheduler_db_update_fields — only the masked columns are
+ * written.  ORIGINAL_TIME is set together with FIRE_AT by the tool layer (the
+ * recurrence engine derives time-of-day from original_time), never independently. */
+#define SCHED_FIELD_NAME (1u << 0)
+#define SCHED_FIELD_MESSAGE (1u << 1)
+#define SCHED_FIELD_FIRE_AT (1u << 2)
+#define SCHED_FIELD_ORIGINAL_TIME (1u << 3)
+#define SCHED_FIELD_RECURRENCE (1u << 4)
+#define SCHED_FIELD_RECURRENCE_DAYS (1u << 5)
+#define SCHED_FIELD_DELIVER_TO (1u << 6)
+#define SCHED_FIELD_SAY_ALOUD (1u << 7)
+
+/**
+ * @brief Ownership- and status-guarded scalar-field edit of a scheduled event
+ *
+ * The scalar half of the `update` action (steps are handled by
+ * scheduler_db_briefing_steps_update).  Writes ONLY the columns named in
+ * @p field_mask, in a single UPDATE guarded by
+ * `WHERE id=? AND user_id=? AND status IN ('pending','snoozed')` — so it edits
+ * only a row the caller owns that has not yet fired.  Applies to any event type
+ * (alarm/reminder/task/briefing); per-occurrence edits of a recurring series are
+ * out of scope (the pending row is the series handle).
+ *
+ * @param id       Event ID
+ * @param user_id  Owning user (SQL-enforced)
+ * @param fields   Source values; only masked members are read
+ * @param field_mask OR of SCHED_FIELD_* bits (0 → SCHED_DB_FAILURE)
+ * @return SCHED_DB_SUCCESS, SCHED_DB_NOT_EDITABLE (no owned/editable row matched),
+ *         or SCHED_DB_FAILURE (bad args or DB error)
+ */
+int scheduler_db_update_fields(int64_t id,
+                               int user_id,
+                               const sched_event_t *fields,
+                               uint32_t field_mask);
 
 /**
  * @brief List steps for a briefing event in seq order
