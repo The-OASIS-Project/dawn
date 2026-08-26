@@ -137,7 +137,7 @@ void test_volatile_before_question_in_history(void) {
    json_object_array_add(h, msg("assistant", "A1"));
    json_object_array_add(h, msg("user", "Q2"));
 
-   struct json_object *in = llm_responses_build_input(h, "", NULL, NULL, 0, "VOLATILE", 2);
+   struct json_object *in = llm_responses_build_input(h, "", NULL, NULL, 0, "VOLATILE", 2, true);
    TEST_ASSERT_NOT_NULL(in);
 
    /* No system message from the leading run leaks into input. */
@@ -165,7 +165,7 @@ void test_volatile_before_question_via_input_text(void) {
    json_object_array_add(h, msg("user", "Q1"));
    json_object_array_add(h, msg("assistant", "A1"));
 
-   struct json_object *in = llm_responses_build_input(h, "Q2", NULL, NULL, 0, "VOLATILE", 2);
+   struct json_object *in = llm_responses_build_input(h, "Q2", NULL, NULL, 0, "VOLATILE", 2, true);
    int lu = last_user_index(in);
    TEST_ASSERT_EQUAL_STRING("Q2", item_text(in, lu));
    TEST_ASSERT_EQUAL_STRING("VOLATILE", item_text(in, lu - 1));
@@ -192,7 +192,7 @@ void test_mid_history_broadcast_emitted_inline(void) {
    TEST_ASSERT_EQUAL_STRING("VOLATILE", vol);
    free(vol);
 
-   struct json_object *in = llm_responses_build_input(h, "", NULL, NULL, 0, "VOLATILE", 2);
+   struct json_object *in = llm_responses_build_input(h, "", NULL, NULL, 0, "VOLATILE", 2, true);
 
    /* The broadcast survives inline as a system item (not dropped). */
    int n = json_object_array_length(in);
@@ -224,7 +224,7 @@ void test_vision_stays_on_question(void) {
 
    const char *imgs[] = { "BASE64IMG" };
    const size_t sizes[] = { 9 };
-   struct json_object *in = llm_responses_build_input(h, "Q2", imgs, sizes, 1, "VOLATILE", 2);
+   struct json_object *in = llm_responses_build_input(h, "Q2", imgs, sizes, 1, "VOLATILE", 2, true);
 
    int lu = last_user_index(in); /* the question Q2 */
    TEST_ASSERT_EQUAL_STRING("Q2", item_text(in, lu));

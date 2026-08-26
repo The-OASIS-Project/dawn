@@ -30,6 +30,7 @@
 #include "llm/llm_openai_responses.h"
 
 #include <curl/curl.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,6 +42,7 @@
 #include "core/session_manager.h"
 #include "llm/llm_context.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_model_version.h"
 #include "llm/llm_openai_internal.h"
 #include "llm/llm_openai_responses_input.h"
 #include "llm/llm_streaming.h"
@@ -246,6 +248,58 @@ static struct json_object *build_responses_request(struct json_object *history,
    /* Stateless: don't persist on the server. Mode B echoes reasoning items in input. */
    json_object_object_add(root, "store", json_object_new_boolean(0));
 
+   /* Explicit prompt caching (prompt_cache_options + prompt_cache_breakpoint) is a
+    * GPT-5.6+ feature; gpt-5.4/5.5 also route through this Responses path
+    * (llm_openai_model_prefers_responses_api: minor >= 4) and reject those fields as
+    * unknown params. Gate both on model >= 5.6. */
+   int cache_major = 0, cache_minor = 0;
+   llm_parse_model_version(model_name, &cache_major, &cache_minor);
+   const bool cache_explicit_supported = (cache_major > 5) ||
+                                         (cache_major == 5 && cache_minor >= 6);
+
+   /* Prompt-cache routing key. Pins same-conversation turns to the same OpenAI cache
+    * shard so the large `input` prefix (conversation history) stays warm cross-turn.
+    * Without it, live measurement shows only the static instructions+tools header
+    * caches; the dynamic conversation prefix never re-hits (see
+    * docs/RESPONSES_CACHE_REORDER_PLAN.md). Stable per conversation, falling back to
+    * per-session, then omitted when no session context is on this thread. Content-
+    * neutral hint scoped to our org — a key collision only costs a cache miss on a
+    * differing prefix, it never returns another request's content. */
+   {
+      session_t *cache_sess = session_get_command_context();
+      if (cache_sess != NULL) {
+         char cache_key[64];
+         int64_t conv = atomic_load(&cache_sess->stream_conversation_id);
+         if (conv > 0)
+            snprintf(cache_key, sizeof(cache_key), "dawn-conv-%lld", (long long)conv);
+         else
+            snprintf(cache_key, sizeof(cache_key), "dawn-sess-%u", cache_sess->session_id);
+         json_object_object_add(root, "prompt_cache_key", json_object_new_string(cache_key));
+      }
+   }
+
+   /* Prompt-cache mode (GPT-5.6+ only — see cache_explicit_supported). "implicit" keeps
+    * OpenAI's automatic end-of-messages breakpoint (preserves the within-turn tool-loop
+    * hit) AND honors the explicit prompt_cache_breakpoint that build_input stamps on the
+    * last stable input_text before the volatile block — that explicit breakpoint is what
+    * makes the conversation history cache CROSS-turn (the documented "a shared prefix is
+    * not always a cached prefix" fix). Raw-JSON path, so this works regardless of the
+    * Python SDK's type lag. TTL defaults to 30m on 5.6, so it is left unset.
+    *
+    * Deliberate cost tradeoff: implicit mode re-writes the ~2K changing volatile+question
+    * suffix each turn at the 1.25x cache-write rate. That is dwarfed by now reading the
+    * large stable history prefix at 0.1x instead of re-writing it, and — unlike an
+    * explicit-only mode — it preserves within-turn tool-loop caching (tool outputs are
+    * appended after the question, so the implicit end breakpoint caches the growing prefix
+    * iteration-to-iteration). Do not "optimize" to explicit-only without re-measuring. */
+   if (cache_explicit_supported) {
+      struct json_object *pco = json_object_new_object();
+      if (pco != NULL) {
+         json_object_object_add(pco, "mode", json_object_new_string("implicit"));
+         json_object_object_add(root, "prompt_cache_options", pco);
+      }
+   }
+
    /* Always request encrypted_content so we can round-trip reasoning items */
    struct json_object *include_arr = json_object_new_array();
    json_object_array_add(include_arr, json_object_new_string("reasoning.encrypted_content"));
@@ -300,7 +354,8 @@ static struct json_object *build_responses_request(struct json_object *history,
    } else {
       struct json_object *input = llm_responses_build_input(history, input_text, vision_images,
                                                             vision_image_sizes, vision_image_count,
-                                                            volatile_ctx, leading_run);
+                                                            volatile_ctx, leading_run,
+                                                            cache_explicit_supported);
       free(volatile_ctx);
       if (!input) {
          json_object_put(root);
@@ -651,13 +706,19 @@ static void responses_handle_event(const char *event_type, const char *event_dat
             if (json_object_object_get_ex(usage_obj, "output_tokens", &tok_obj))
                output_tokens = json_object_get_int(tok_obj);
 
+            int cache_write_tokens = 0;
             struct json_object *in_details;
             if (json_object_object_get_ex(usage_obj, "input_tokens_details", &in_details)) {
-               if (json_object_object_get_ex(in_details, "cached_tokens", &tok_obj)) {
+               if (json_object_object_get_ex(in_details, "cached_tokens", &tok_obj))
                   cached_tokens = json_object_get_int(tok_obj);
-                  if (cached_tokens > 0)
-                     OLOG_INFO("OpenAI Responses cache hit: %d tokens cached", cached_tokens);
-               }
+               /* GPT-5.6+ also reports cache_write_tokens (prefix newly written to cache,
+                * billed 1.25x). Tracking it confirms the explicit breakpoint is creating a
+                * reusable write and shows the cross-turn read/write split. */
+               if (json_object_object_get_ex(in_details, "cache_write_tokens", &tok_obj))
+                  cache_write_tokens = json_object_get_int(tok_obj);
+               if (cached_tokens > 0 || cache_write_tokens > 0)
+                  OLOG_INFO("OpenAI Responses cache: %d read, %d write tokens", cached_tokens,
+                            cache_write_tokens);
             }
 
             struct json_object *out_details;
@@ -678,8 +739,8 @@ static void responses_handle_event(const char *event_type, const char *event_dat
                uint32_t session_id = 0;
 #endif
                llm_context_update_usage(session_id, input_tokens, output_tokens, cached_tokens);
-               OLOG_INFO("Responses usage: %d input, %d output, %d cached tokens", input_tokens,
-                         output_tokens, cached_tokens);
+               OLOG_INFO("Responses usage: %d input, %d output, %d cached, %d write tokens",
+                         input_tokens, output_tokens, cached_tokens, cache_write_tokens);
             }
          }
       }

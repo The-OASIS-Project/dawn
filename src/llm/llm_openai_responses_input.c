@@ -38,13 +38,20 @@
  * A later `role:"system"` message is NOT part of that pair — it is a mid-history
  * broadcast (session_broadcast_system_message(), e.g. an incoming-call notice).
  *
- * For OpenAI Responses (automatic prefix caching, no cache_control breakpoints —
- * unlike the Anthropic path in llm_openai_cache.c), only the STABLE segment goes in
- * `instructions` (kept byte-stable so [instructions][tools][history] caches
- * cross-turn); the VOLATILE segment is repositioned to a user-role input item just
- * before the current question (llm_responses_build_input), and mid-history broadcasts
- * are emitted inline at their position. If the CC path (llm_openai_cache.c) is ever
- * taught to cache cross-turn, use this same "volatile as a user item before the
+ * For OpenAI Responses the STABLE segment goes in `instructions` (kept byte-stable so
+ * [instructions][tools][history] forms a reusable prefix); the VOLATILE segment is
+ * repositioned to a user-role input item just before the current question
+ * (llm_responses_build_input), and mid-history broadcasts are emitted inline at their
+ * position. Because the volatile changes every turn and sits before the question,
+ * implicit-only caching cannot reuse the stable prefix cross-turn (OpenAI's "a shared
+ * prefix is not always a cached prefix" gotcha). GPT-5.6+ resolves this with an EXPLICIT
+ * `prompt_cache_breakpoint` stamped on the last stable input_text before the volatile,
+ * paired with request-root `prompt_cache_options:{mode:implicit}` (set in
+ * llm_openai_responses.c) — implicit keeps the within-turn end breakpoint, the explicit
+ * one makes the history cache cross-turn. This differs from the Anthropic `cache_control`
+ * mechanism (llm_openai_cache.c), which is position-independent; the breakpoint here is
+ * gated on model >= 5.6 (pre-5.6 Responses models reject the field). If the CC path is
+ * ever taught to cache cross-turn, reuse this "volatile as a user item before the
  * question" pattern.
  */
 
@@ -139,13 +146,55 @@ void llm_responses_append_vision_parts(struct json_object *content_array,
    }
 }
 
+/*
+ * Stamp an explicit prompt-cache breakpoint on the last stable input_text block.
+ *
+ * GPT-5.6+ prompt caching (docs/RESPONSES_CACHE_REORDER_PLAN.md, OpenAI "Prompt caching"
+ * guide): implicit caching writes ONE breakpoint at the end of the latest message, so the
+ * stable [instructions][tools][history] prefix in front of DAWN's per-turn volatile block
+ * ([system_time] + memory retrieval, which changes every turn) is never independently
+ * reusable — the documented "a shared prefix is not always a cached prefix" gotcha
+ * (live-measured: within-turn cached ~full, each NEW turn fell back to header-only ~21K).
+ * An explicit breakpoint after the stable content makes that prefix cache cross-turn. It
+ * is honored ALONGSIDE the implicit end breakpoint (mode stays "implicit"), so within-turn
+ * tool-loop caching is preserved. OpenAI accepts breakpoints only on input-side text
+ * blocks (input_text in user/developer/tool messages) — NOT assistant output_text and NOT
+ * the top-level `instructions` field — so the walk-back skips assistant turns. Returns true
+ * once placed. Adapted from the OpenAI multi-turn-agent caching example.
+ */
+static bool responses_mark_cache_breakpoint(struct json_object *item) {
+   if (item == NULL)
+      return false;
+   struct json_object *content;
+   if (!json_object_object_get_ex(item, "content", &content) ||
+       json_object_get_type(content) != json_type_array)
+      return false; /* function_call/function_call_output carry no content array here — skip */
+   int cn = json_object_array_length(content);
+   if (cn == 0)
+      return false;
+   struct json_object *last_part = json_object_array_get_idx(content, cn - 1);
+   if (last_part == NULL || json_object_get_type(last_part) != json_type_object)
+      return false;
+   struct json_object *pt;
+   if (!json_object_object_get_ex(last_part, "type", &pt) || json_object_get_string(pt) == NULL ||
+       strcmp(json_object_get_string(pt), "input_text") != 0)
+      return false; /* only input_text blocks accept a breakpoint */
+   struct json_object *bp = json_object_new_object();
+   if (bp == NULL)
+      return false;
+   json_object_object_add(bp, "mode", json_object_new_string("explicit"));
+   json_object_object_add(last_part, "prompt_cache_breakpoint", bp);
+   return true;
+}
+
 struct json_object *llm_responses_build_input(struct json_object *history,
                                               const char *input_text,
                                               const char **vision_images,
                                               const size_t *vision_image_sizes,
                                               int vision_image_count,
                                               const char *volatile_block,
-                                              int leading_system_run) {
+                                              int leading_system_run,
+                                              bool enable_cache_breakpoint) {
    struct json_object *input = json_object_new_array();
    if (!input)
       return NULL;
@@ -322,8 +371,58 @@ struct json_object *llm_responses_build_input(struct json_object *history,
       }
    }
 
-   /* Append the new user input + vision (if not already part of history) */
-   if (input_text && *input_text) {
+   /* Append the new user input — but ONLY if the question isn't already the last item.
+    * The caller may have already added the user turn to history (the "no-add" path in
+    * session_manager_llm.c: the WebUI/voice layer appends it, then passes it here as
+    * `input_text` too). Appending unconditionally then DUPLICATES the question — once
+    * from history, once here — which the reorder made visible as [Q][volatile][Q] and
+    * which also poisons cross-turn prompt caching. The chat-completions builder guards
+    * this with the identical last-is-user check (llm_openai_history.c:638); mirror it so
+    * the Responses request carries the question exactly once. When the last item already
+    * IS the user turn, attach any vision to it instead of emitting a duplicate. */
+   int tail_n = json_object_array_length(input);
+   struct json_object *tail_item = (tail_n > 0) ? json_object_array_get_idx(input, tail_n - 1)
+                                                : NULL;
+   bool tail_is_user = false;
+   if (tail_item != NULL) {
+      struct json_object *tr;
+      if (json_object_object_get_ex(tail_item, "role", &tr) && json_object_get_string(tr) &&
+          strcmp(json_object_get_string(tr), "user") == 0)
+         tail_is_user = true;
+   }
+
+   if (tail_is_user && input_text && *input_text) {
+      /* Question already present as the last history item — REPLACE its content with
+       * input_text (+ vision) rather than appending a duplicate. input_text is
+       * authoritative for the current question, so this mirrors the CC builder
+       * (llm_openai_history.c: last_is_user → rebuild the last user message's content).
+       * PRECONDITION (holds on every live call path): the trailing user item IS the
+       * current question — the add-path leaves history ending in an assistant turn, and
+       * the no-add path's trailing user is the same text passed here. If a caller ever
+       * violated it (trailing user is an older, different unanswered turn), that turn's
+       * text would be overwritten rather than preserved — same as the CC builder.
+       * tail_item is a fresh object this function built in the history loop, so
+       * replacing its "content" key (json_object_object_add frees the old value) is safe. */
+      struct json_object *content_array = json_object_new_array();
+      struct json_object *part = json_object_new_object();
+      json_object_object_add(part, "type", json_object_new_string("input_text"));
+      json_object_object_add(part, "text", json_object_new_string(input_text));
+      json_object_array_add(content_array, part);
+      llm_responses_append_vision_parts(content_array, vision_images, vision_image_sizes,
+                                        vision_image_count);
+      json_object_object_add(tail_item, "content", content_array);
+   } else if (tail_is_user) {
+      /* No new input_text (e.g. a tool-loop iteration) — keep the existing question,
+       * just attach vision to it if any images were supplied. */
+      if (vision_image_count > 0) {
+         struct json_object *content_obj;
+         if (json_object_object_get_ex(tail_item, "content", &content_obj) &&
+             json_object_get_type(content_obj) == json_type_array) {
+            llm_responses_append_vision_parts(content_obj, vision_images, vision_image_sizes,
+                                              vision_image_count);
+         }
+      }
+   } else if (input_text && *input_text) {
       struct json_object *item = json_object_new_object();
       json_object_object_add(item, "type", json_object_new_string("message"));
       json_object_object_add(item, "role", json_object_new_string("user"));
@@ -336,21 +435,6 @@ struct json_object *llm_responses_build_input(struct json_object *history,
                                         vision_image_count);
       json_object_object_add(item, "content", content_array);
       json_object_array_add(input, item);
-   } else if (vision_image_count > 0) {
-      /* Vision attached to last user message in history is the chat-completions pattern;
-       * replicate by appending images to that message if we just emitted it. */
-      int n = json_object_array_length(input);
-      if (n > 0) {
-         struct json_object *last = json_object_array_get_idx(input, n - 1);
-         struct json_object *role_obj, *content_obj;
-         if (json_object_object_get_ex(last, "role", &role_obj) &&
-             strcmp(json_object_get_string(role_obj), "user") == 0 &&
-             json_object_object_get_ex(last, "content", &content_obj) &&
-             json_object_get_type(content_obj) == json_type_array) {
-            llm_responses_append_vision_parts(content_obj, vision_images, vision_image_sizes,
-                                              vision_image_count);
-         }
-      }
    }
 
    /* Reposition the volatile TURN CONTEXT block as a user item IMMEDIATELY BEFORE the
@@ -371,6 +455,20 @@ struct json_object *llm_responses_build_input(struct json_object *history,
              strcmp(json_object_get_string(r), "user") == 0) {
             last_user = i;
             break;
+         }
+      }
+
+      /* Explicit cache breakpoint at the end of the stable prefix — the last input_text
+       * block BEFORE the volatile lands (i.e. below last_user). Walk back past assistant
+       * turns and content-less tool items to the nearest input_text-bearing message. This
+       * is what makes [instructions][tools][history] cache cross-turn (see
+       * responses_mark_cache_breakpoint). Stamped before the splice so the extra
+       * ref-counted references carry it through. Gated on GPT-5.6+ by the caller — pre-5.6
+       * Responses models (gpt-5.4/5.5) reject prompt_cache_breakpoint. */
+      if (enable_cache_breakpoint) {
+         for (int i = last_user - 1; i >= 0; i--) {
+            if (responses_mark_cache_breakpoint(json_object_array_get_idx(input, i)))
+               break;
          }
       }
 

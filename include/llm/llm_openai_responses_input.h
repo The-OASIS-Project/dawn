@@ -30,6 +30,7 @@
 #define LLM_OPENAI_RESPONSES_INPUT_H
 
 #include <json-c/json.h>
+#include <stdbool.h>
 #include <stddef.h>
 
 #ifdef __cplusplus
@@ -58,15 +59,19 @@ char *llm_responses_extract_volatile_context(struct json_object *history);
 /* Build a Responses-format `input` array from chat-completions history.
  * `volatile_block` (may be NULL) is repositioned as a user item immediately before
  * the current question; `leading_system_run` marks which leading system messages to
- * skip (later system messages are emitted inline). New array (caller json_object_put),
- * or NULL on error. */
+ * skip (later system messages are emitted inline). When `enable_cache_breakpoint` is
+ * true, an explicit GPT-5.6+ `prompt_cache_breakpoint` is stamped on the last stable
+ * input_text block before the volatile (caller must pass false for pre-5.6 models, which
+ * reject the field, and must pair a true value with root `prompt_cache_options`). New
+ * array (caller json_object_put), or NULL on error. */
 struct json_object *llm_responses_build_input(struct json_object *history,
                                               const char *input_text,
                                               const char **vision_images,
                                               const size_t *vision_image_sizes,
                                               int vision_image_count,
                                               const char *volatile_block,
-                                              int leading_system_run);
+                                              int leading_system_run,
+                                              bool enable_cache_breakpoint);
 
 #ifdef __cplusplus
 }
