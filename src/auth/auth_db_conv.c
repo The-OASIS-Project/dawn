@@ -112,8 +112,18 @@ int conv_db_create(int user_id, const char *title, int64_t *conv_id_out) {
    /* Use default title if none provided, truncate if too long */
    char safe_title[CONV_TITLE_MAX];
    if (title && title[0] != '\0') {
-      strncpy(safe_title, title, CONV_TITLE_MAX - 1);
-      safe_title[CONV_TITLE_MAX - 1] = '\0';
+      size_t cut = strlen(title);
+      if (cut > CONV_TITLE_MAX - 1) {
+         cut = CONV_TITLE_MAX - 1;
+         /* Don't split a multibyte UTF-8 codepoint at the truncation point — invalid
+          * UTF-8 in a stored title breaks the whole conversation-list JSON frame on
+          * the client.  Back up while the cut lands on a 10xxxxxx continuation byte. */
+         while (cut > 0 && ((unsigned char)title[cut] & 0xC0) == 0x80) {
+            cut--;
+         }
+      }
+      memcpy(safe_title, title, cut);
+      safe_title[cut] = '\0';
    } else {
       strcpy(safe_title, "New Conversation");
    }
@@ -1840,6 +1850,15 @@ void conv_generate_title(const char *content, char *title_out, size_t max_len) {
    /* If no word boundary found, just cut at target_len */
    if (cut_pos == 0) {
       cut_pos = target_len;
+   }
+
+   /* Never split a multibyte UTF-8 codepoint: if the cut lands mid-sequence (the
+    * byte at cut_pos is a 10xxxxxx continuation byte), back up to the codepoint
+    * boundary.  Invalid UTF-8 in a stored title breaks the ENTIRE conversation-list
+    * JSON frame on the client (JSON.parse throws), not just this row — and voice
+    * transcripts route non-ASCII text through here. */
+   while (cut_pos > 0 && ((unsigned char)content[cut_pos] & 0xC0) == 0x80) {
+      cut_pos--;
    }
 
    /* Copy and add ellipsis */

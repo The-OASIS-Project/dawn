@@ -1224,6 +1224,19 @@ static void *audio_worker_thread(void *arg) {
 
    /* Persist to conversation DB immediately (prevents race with client reload) */
    ws_connection_t *conn = (ws_connection_t *)session->client_data;
+   /* Voice turn: server-dispatched, so the browser never ran its conversation
+    * pre-create.  Bind (lazily creating) a conversation so this transcript AND the
+    * reply persist instead of evaporating on reload.  The assistant/tool rows
+    * persist off session->stream_conversation_id (set from the enqueue-captured,
+    * possibly 0, conv at dequeue with no active-conversation fallback), so point it
+    * at the freshly-bound conversation too. */
+   if (conn && conn->active_conversation_id <= 0 &&
+       webui_voice_transcript_substantive(transcript)) {
+      int64_t bound = webui_ensure_active_conversation(conn, transcript);
+      if (bound > 0) {
+         atomic_store(&session->stream_conversation_id, bound);
+      }
+   }
    bool saved_to_db = false;
    if (conn && conn->active_conversation_id > 0) {
       int64_t msg_id = 0;

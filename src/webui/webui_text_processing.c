@@ -539,6 +539,18 @@ int webui_process_text_input_with_vision(session_t *session,
     * is replaced by the queue; Stop still works via cancel_requested. */
    unsigned int new_gen = atomic_load(&session->request_generation);
 
+   /* Voice turns are server-dispatched, so the browser never ran its conversation
+    * pre-create.  Bind (lazily creating) a conversation here — titled from the
+    * transcript — or this turn's user row + reply evaporate on the next reload.
+    * No-op when a conversation is already selected; leaves the typed-text path
+    * (client pre-creates) untouched. */
+   if (input_was_voice && webui_voice_transcript_substantive(text)) {
+      ws_connection_t *vconn = session ? (ws_connection_t *)session->client_data : NULL;
+      if (vconn && vconn->active_conversation_id <= 0) {
+         webui_ensure_active_conversation(vconn, text);
+      }
+   }
+
    /* Conversation this turn was sent for — captured NOW (the viewed conversation)
     * and applied to session->stream_conversation_id at dequeue. */
    int64_t turn_conv_id = webui_get_active_conversation_id(session);

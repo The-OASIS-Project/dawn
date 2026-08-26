@@ -41,6 +41,7 @@
 #include "llm/llm_tools.h"
 #include "logging.h"
 #include "memory/memory_extraction.h"
+#include "utils/string_utils.h" /* sanitize_utf8_for_json */
 #include "version.h"
 #include "webui/webui_image_rehydrate.h"
 #include "webui/webui_internal.h"
@@ -229,7 +230,14 @@ static int list_conv_callback(const conversation_t *conv, void *context) {
    json_object *conv_obj = json_object_new_object();
 
    json_object_object_add(conv_obj, "id", json_object_new_int64(conv->id));
-   json_object_object_add(conv_obj, "title", json_object_new_string(conv->title));
+   /* Sanitize the title's UTF-8 at the WS emit sink: an invalid byte (e.g. a
+    * codepoint split by a byte-truncated title from any source) makes the browser's
+    * JSON.parse reject the ENTIRE conversation-list frame, not just this row. conv
+    * is const, so sanitize a local copy. */
+   char safe_title[CONV_TITLE_MAX];
+   snprintf(safe_title, sizeof(safe_title), "%s", conv->title);
+   sanitize_utf8_for_json(safe_title);
+   json_object_object_add(conv_obj, "title", json_object_new_string(safe_title));
    json_object_object_add(conv_obj, "created_at", json_object_new_int64(conv->created_at));
    json_object_object_add(conv_obj, "updated_at", json_object_new_int64(conv->updated_at));
    json_object_object_add(conv_obj, "message_count", json_object_new_int(conv->message_count));
@@ -363,6 +371,45 @@ static bool should_skip_memory_extraction(ws_connection_t *conn) {
 }
 
 /**
+ * @brief Shared create+bind seam for a new conversation on this connection.
+ *
+ * Creates the row, makes it the active conversation, marks it public (a fresh
+ * conversation is never private until the user toggles it), stamps the session's
+ * LLM settings, and audit-logs it. Both the client-driven handler
+ * (handle_new_conversation) and the server-driven voice auto-bind
+ * (webui_ensure_active_conversation) go through here so create semantics live in
+ * ONE place. Callers own their own framing (a solicited response vs. an
+ * unsolicited push) and their own turn-tagging.
+ *
+ * @return conv_db_create's rc (AUTH_DB_SUCCESS / AUTH_DB_LIMIT_EXCEEDED / failure).
+ *         Callers MUST pre-initialize *conv_id_out to 0 and consume it only on
+ *         AUTH_DB_SUCCESS — conv_db_create may touch the out-param before its rc is
+ *         known, so this function does not guarantee it untouched on failure.
+ */
+static int webui_conv_create_bind(ws_connection_t *conn,
+                                  const char *title,
+                                  const char *log_detail,
+                                  int64_t *conv_id_out) {
+   int rc = conv_db_create(conn->auth_user_id, title, conv_id_out);
+   if (rc != AUTH_DB_SUCCESS) {
+      return rc;
+   }
+
+   conn->active_conversation_id = *conv_id_out;
+   /* A fresh conversation is public; active_conversation_id + active_conversation_private
+    * move together as a pair (see the invariant note where should_skip_memory_extraction
+    * reads it) so the cache can't report a public row as private. */
+   conn->active_conversation_private = false;
+   /* Stamp the session's current LLM settings onto the fresh row so it records the
+    * model/reasoning it runs with instead of leaving NULL columns (which the client
+    * would render as stale defaults). Safe no-op once a message lands. */
+   webui_conv_stamp_llm_settings(conn->session, *conv_id_out, conn->auth_user_id);
+   auth_db_log_event("CONVERSATION_CREATED", conn->username, conn->client_ip,
+                     log_detail ? log_detail : "New conversation");
+   return rc;
+}
+
+/**
  * @brief Create a new conversation
  */
 void handle_new_conversation(ws_connection_t *conn, struct json_object *payload) {
@@ -406,8 +453,8 @@ void handle_new_conversation(ws_connection_t *conn, struct json_object *payload)
       }
    }
 
-   int64_t conv_id;
-   int result = conv_db_create(conn->auth_user_id, title, &conv_id);
+   int64_t conv_id = 0;
+   int result = webui_conv_create_bind(conn, title, "New conversation", &conv_id);
 
    if (result == AUTH_DB_SUCCESS) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
@@ -430,17 +477,6 @@ void handle_new_conversation(ws_connection_t *conn, struct json_object *payload)
        * - User starts a new chat via UI (which sends clear_history first)
        */
 
-      auth_db_log_event("CONVERSATION_CREATED", conn->username, conn->client_ip,
-                        "New conversation");
-
-      /* Update active conversation tracking */
-      conn->active_conversation_id = conv_id;
-
-      /* Stamp the session's current LLM settings onto the fresh row so it records
-       * the model/reasoning it runs with instead of leaving NULL columns (which the
-       * client would render as stale defaults). Safe no-op once a message lands. */
-      webui_conv_stamp_llm_settings(conn->session, conv_id, conn->auth_user_id);
-
       /* Back-fill the in-flight turn's conversation tag if it was dispatched
        * before this row existed (fresh-chat first message: the text is dispatched,
        * then this new_conversation creates the row).  Only overwrite the
@@ -462,6 +498,94 @@ void handle_new_conversation(ws_connection_t *conn, struct json_object *payload)
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);
+}
+
+bool webui_voice_transcript_substantive(const char *text) {
+   if (!text) {
+      return false;
+   }
+   int words = 0;
+   const char *p = text;
+   while (*p) {
+      while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') {
+         p++;
+      }
+      if (!*p) {
+         break;
+      }
+      words++;
+      if (words >= WEBUI_VOICE_AUTO_CONV_MIN_WORDS) {
+         return true; /* short-circuit once the floor is met */
+      }
+      while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') {
+         p++;
+      }
+   }
+   return false;
+}
+
+int64_t webui_ensure_active_conversation(ws_connection_t *conn, const char *title_hint) {
+   if (!conn || conn->auth_user_id <= 0) {
+      return 0;
+   }
+
+   int64_t existing = conn->active_conversation_id;
+   if (existing > 0) {
+      return existing; /* already bound — nothing to create */
+   }
+
+   /* Derive a human title from the transcript instead of a bare "New
+    * Conversation" (voice turns carry no user-typed title). */
+   char title[CONV_TITLE_MAX];
+   title[0] = '\0';
+   if (title_hint && title_hint[0] != '\0') {
+      conv_generate_title(title_hint, title, sizeof(title));
+      /* Sanitize once at the source: conv_generate_title's boundary trim keeps valid
+       * UTF-8 valid but does not repair a transcript's pre-existing bad bytes.  Doing
+       * it here keeps BOTH the stored row and the unsolicited push frame valid. */
+      sanitize_utf8_for_json(title);
+   }
+
+   int64_t conv_id = 0;
+   int rc = webui_conv_create_bind(conn, title[0] ? title : NULL, "Voice conversation (auto)",
+                                   &conv_id);
+   if (rc != AUTH_DB_SUCCESS || conv_id <= 0) {
+      OLOG_WARNING("WebUI: voice-turn conversation auto-create failed (rc=%d)", rc);
+      return 0;
+   }
+
+   /* NOTE: no stream_conversation_id back-fill here — the caller owns turn-tagging.
+    * The text/always-on path binds active_conversation_id BEFORE its turn captures
+    * work->conv_id (→ stream at dequeue, webui_text_processing.c), and the audio
+    * caller atomic_stores the returned id directly.  A back-fill here would be
+    * dead-on-arrival (immediately overwritten) and non-atomic against the worker. */
+
+   /* Push an unsolicited new_conversation_response so a live client rebinds its
+    * active conversation (handleNewConversationResponse -> setActiveConversationId),
+    * keeping a still-open tab from minting a second conversation on the next typed
+    * turn. A reload finds the row via the conversation list regardless. */
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("new_conversation_response"));
+   json_object *resp_payload = json_object_new_object();
+   json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+   json_object_object_add(resp_payload, "conversation_id", json_object_new_int64(conv_id));
+   /* Include the transcript-derived title so a client can reflect it immediately
+    * instead of blanking the title until a later refresh (voice turns clear the
+    * >=3-word floor, so `title` is populated here). */
+   if (title[0]) {
+      json_object_object_add(resp_payload, "title", json_object_new_string(title));
+   }
+   /* Marks this as a server-initiated (unsolicited) bind, NOT a reply to a client
+    * new_conversation request.  The client uses it to skip request-flow side
+    * effects (the "created" toast, re-applying a pending-privacy state) that would
+    * be wrong mid-voice-turn. */
+   json_object_object_add(resp_payload, "server_initiated", json_object_new_boolean(1));
+   json_object_object_add(response, "payload", resp_payload);
+   send_json_response(conn, response);
+   json_object_put(response);
+
+   OLOG_INFO("WebUI: bound voice turn to auto-created conversation %lld", (long long)conv_id);
+   return conv_id;
 }
 
 /**
@@ -969,6 +1093,7 @@ void handle_load_conversation(ws_connection_t *conn, struct json_object *payload
          {
             json_object_object_add(resp_payload, "is_archived",
                                    json_object_new_boolean(conv.is_archived));
+            sanitize_utf8_for_json(conv.title); /* valid UTF-8 at the WS sink (see list emit) */
             json_object_object_add(resp_payload, "title", json_object_new_string(conv.title));
             json_object_object_add(resp_payload, "message_count",
                                    json_object_new_int(total_messages));
@@ -2044,6 +2169,7 @@ void handle_export_conversation(ws_connection_t *conn, struct json_object *paylo
    /* Conversation metadata */
    json_object *conv_obj = json_object_new_object();
    json_object_object_add(conv_obj, "id", json_object_new_int64(conv.id));
+   sanitize_utf8_for_json(conv.title); /* valid UTF-8 in the export JSON */
    json_object_object_add(conv_obj, "title", json_object_new_string(conv.title));
 
    char ts_buf[32];

@@ -754,6 +754,37 @@ const char *webui_effective_model_name(const llm_resolved_config_t *resolved);
 void webui_conv_stamp_llm_settings(session_t *session, int64_t conv_id, int user_id);
 
 /**
+ * @brief Ensure the connection has a bound conversation, lazily creating one.
+ *
+ * Server-side mirror of the browser's `beginConversationBeforeSend`. Voice turns
+ * (always-on wake-word and push-to-talk) are dispatched by the daemon, not by a
+ * client "send", so they never trigger the client-side conversation pre-create.
+ * A voice turn taken with nothing selected therefore ran against
+ * `active_conversation_id == 0`, and the persistence gates on both voice paths
+ * skipped the ASR user row AND the assistant reply — the exchange vanished on the
+ * next reload. This binds (creating if needed) a conversation so those rows
+ * persist. No-op returning the existing id when one is already bound, so it is
+ * safe to call unconditionally on the voice paths.
+ *
+ * @param conn        Connection (must be authenticated).
+ * @param title_hint  Text to auto-title from (the transcript); may be NULL.
+ * @return The bound conversation id (existing or new), or 0 on failure.
+ */
+int64_t webui_ensure_active_conversation(ws_connection_t *conn, const char *title_hint);
+
+/* Minimum word count for a voice transcript to auto-create a conversation.
+ * Skips 1-2 word ASR fragments (false-wake / ambient-speech guard) so stray
+ * wake-word turns don't mint durable, public, memory-extractable conversations. */
+#define WEBUI_VOICE_AUTO_CONV_MIN_WORDS 3
+
+/**
+ * @brief True if a voice transcript is substantive enough to auto-create a
+ *        conversation (>= WEBUI_VOICE_AUTO_CONV_MIN_WORDS whitespace-separated words).
+ * @param text Transcript (may be NULL → false).
+ */
+bool webui_voice_transcript_substantive(const char *text);
+
+/**
  * @brief Send an error message to a client (severity = error).
  * @param wsi     Target libwebsockets connection.
  * @param code    Machine-readable error code string.

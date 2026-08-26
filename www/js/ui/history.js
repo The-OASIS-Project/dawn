@@ -569,6 +569,13 @@
 
       setActiveConversationId(payload.conversation_id);
 
+      // Server-initiated bind (unsolicited, e.g. an always-on voice turn auto-creating
+      // a conversation): skip the request-flow side effects below. Re-applying a
+      // pending-privacy state here would flip the server's public voice conversation
+      // to private behind the user's back, and the "created" toast is a surprise
+      // mid-voice-turn. The active-id bind above is all a server-initiated push needs.
+      const serverInitiated = !!payload.server_initiated;
+
       // Update privacy toggle with new conversation ID, preserving pending privacy state
       if (typeof DawnSettingsLlm !== 'undefined' && DawnSettingsLlm.setCurrentConversation) {
          // Get the pending privacy state (may have been set before conversation was created)
@@ -578,7 +585,7 @@
          DawnSettingsLlm.setCurrentConversation(payload.conversation_id);
 
          // If privacy was set before conversation was created, apply it now
-         if (pendingPrivacy && DawnSettingsLlm.setPrivacy) {
+         if (!serverInitiated && pendingPrivacy && DawnSettingsLlm.setPrivacy) {
             DawnSettingsLlm.setPrivacy(true);
          }
       }
@@ -588,8 +595,11 @@
          DawnSettings.lockConversationLlmSettings(payload.conversation_id);
       }
 
-      // Process any pending messages
-      if (historyState.pendingMessages.length > 0) {
+      // Process any pending messages. Skip for a server-initiated bind: those pending
+      // messages belong to a client-initiated create the user typed, NOT to this
+      // auto-created voice conversation — flushing them here would misfile the user's
+      // queued text into the voice conversation.
+      if (!serverInitiated && historyState.pendingMessages.length > 0) {
          historyState.pendingMessages.forEach((msg) => {
             requestSaveMessage(payload.conversation_id, msg.role, msg.content, msg.reasoning);
          });
@@ -600,7 +610,11 @@
       // Note: We don't clear transcript here - startNewChat() already handles that,
       // and if this was an auto-created conversation from sending a message, we
       // definitely don't want to clear (the message is already displayed)
-      if (historyElements.panel && !historyElements.panel.classList.contains('hidden')) {
+      if (
+         !serverInitiated &&
+         historyElements.panel &&
+         !historyElements.panel.classList.contains('hidden')
+      ) {
          if (typeof DawnToast !== 'undefined') {
             DawnToast.show('New conversation created', 'success');
          }
