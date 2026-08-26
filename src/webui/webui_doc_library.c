@@ -219,6 +219,7 @@ void handle_doc_library_list(ws_connection_t *conn, json_object *payload) {
          }
          if (show_all) {
             json_object_object_add(doc, "user_id", json_object_new_int(docs[i].user_id));
+            sanitize_utf8_for_json(docs[i].owner_name); /* DB-sourced label at the WS sink */
             json_object_object_add(doc, "owner_name", json_object_new_string(docs[i].owner_name));
          }
          json_object_array_add(docs_array, doc);
