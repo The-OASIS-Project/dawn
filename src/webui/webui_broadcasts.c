@@ -746,15 +746,10 @@ void webui_broadcast_message_appended(int user_id,
    json_object_object_add(p, "stream_id", json_object_new_int64((int64_t)stream_id));
    json_object_object_add(root, "payload", p);
 
-   /* broadcast_json_to_user TAKES OWNERSHIP — no json_object_put here. */
-   broadcast_json_to_user_ex(user_id, root, false);
-}
-
-/* Strong override of the job_reinvoke (Layer 2) weak seam: when a reinvoke_parent
- * re-engagement persists its reply to the parent conversation, refresh any open
- * tab viewing it by reusing the conversation_messages_appended broadcast. */
-void job_reinvoke_notify_conv_appended(int user_id, int64_t conversation_id) {
-   webui_broadcast_conversation_messages_appended(user_id, conversation_id);
+   /* browsers_only (SERVER_AUTHORITATIVE §8): message_appended is a transcript frame
+    * a satellite renders nothing for — keep it strictly WEBUI, matching the
+    * frame-delivery capability matrix.  broadcast_json_to_user TAKES OWNERSHIP. */
+   broadcast_json_to_user_ex(user_id, root, /*browsers_only=*/true);
 }
 
 void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id) {
@@ -1313,7 +1308,15 @@ session_t *webui_find_reinvoke_viewer(int64_t conv_id, int user_id) {
    if (conv_id <= 0 || user_id <= 0) {
       return NULL;
    }
-   session_t *found = NULL;
+   /* Prefer a TTS-enabled viewer (SERVER_AUTHORITATIVE §6d): the reinvoke is streamed
+    * text-only to ONE viewer, so pick the one that actually wants audio — the TTS user
+    * hears the re-engagement, a text viewer gets it via the fanned-out message_appended.
+    * Two-pass in one scan: `pick` is the first eligible viewer (fallback); upgrade to
+    * the first TTS-on viewer and stop.  Retain exactly ONCE, still under the registry
+    * lock (so the chosen session can't be freed before the retain), so there is no
+    * release-under-lock. */
+   session_t *pick = NULL;
+   bool pick_tts = false;
    pthread_mutex_lock(&s_conn_registry_mutex);
    for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
       ws_connection_t *conn = s_active_connections[i];
@@ -1340,19 +1343,26 @@ session_t *webui_find_reinvoke_viewer(int64_t conv_id, int user_id) {
       if (atomic_load(&s->disconnected) || atomic_load(&s->being_destroyed)) {
          continue;
       }
-      session_retain(s);
-      found = s;
-      break;
+      bool tts_on = atomic_load(&conn->tts_enabled);
+      if (pick == NULL) {
+         pick = s;
+         pick_tts = tts_on;
+         if (tts_on) {
+            break; /* best possible: first eligible AND wants audio */
+         }
+      } else if (tts_on && !pick_tts) {
+         pick = s; /* upgrade the non-TTS fallback to a TTS viewer */
+         pick_tts = true;
+         break;
+      }
+   }
+   if (pick != NULL) {
+      session_retain(pick);
    }
    pthread_mutex_unlock(&s_conn_registry_mutex);
-   return found;
+   return pick;
 }
 
-/* Strong override of the Layer-2 weak seam: the conversation the session's client
- * is currently viewing (used by the reinvoke closure's server-persist decision). */
-int64_t webui_session_active_conversation(session_t *s) {
-   return webui_get_active_conversation_id(s);
-}
 
 /* Strong override: wire TTS onto a live reinvoke turn when the viewer has it on.
  * live is a SESSION_TYPE_WEBUI viewer (webui_find_reinvoke_viewer guarantees the

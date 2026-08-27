@@ -667,13 +667,20 @@ void send_stream_delta_impl(struct lws *wsi,
 void send_stream_end_impl(struct lws *wsi,
                           uint32_t stream_id,
                           int64_t conversation_id,
-                          const char *reason) {
+                          const char *reason,
+                          bool will_persist) {
    struct json_object *obj = json_object_new_object();
    struct json_object *payload = json_object_new_object();
 
    json_object_object_add(payload, "stream_id", json_object_new_int((int32_t)stream_id));
    json_object_object_add(payload, "conversation_id", json_object_new_int64(conversation_id));
    json_object_object_add(payload, "reason", json_object_new_string(reason ? reason : "complete"));
+   /* Model A intent (SERVER_AUTHORITATIVE §6 step 2): when set, the server owns the
+    * save of this turn, so the streamed viewer must NOT client-save it.  Only the
+    * final stream_end carries it (never reason=tool_iteration — filtered upstream). */
+   if (will_persist) {
+      json_object_object_add(payload, "will_persist", json_object_new_boolean(true));
+   }
    json_object_object_add(obj, "type", json_object_new_string("stream_end"));
    json_object_object_add(obj, "payload", payload);
 
@@ -945,7 +952,7 @@ void process_one_response(void) {
          break;
       case WS_RESP_STREAM_END:
          send_stream_end_impl(conn->wsi, resp.stream.stream_id, resp.stream.conversation_id,
-                              resp.stream.text);
+                              resp.stream.text, resp.stream.will_persist);
          /* text[] is inline buffer - no free needed */
          break;
       case WS_RESP_METRICS_UPDATE:

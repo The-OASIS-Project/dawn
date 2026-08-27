@@ -471,7 +471,14 @@ static void *reinvoke_turn_entry(void *arg) {
        * WebUI build, and the shared opts builder keeps the detached path silent. */
       bool tts_use_opus = false;
       bool tts_wired = webui_reinvoke_tts_begin(live, &opts, &tts_use_opus);
+      /* Server-authoritative (SERVER_AUTHORITATIVE_PERSISTENCE_DESIGN §7, Phase 1):
+       * the server is now the SOLE writer of this reply.  Arm the Model A promise so
+       * the FINAL stream_end tells the streamed viewer to stand down from its
+       * client-save; the unconditional persist below honors it.  Disarm right after
+       * dispatch (the promise is read only at the in-dispatch stream_end). */
+      atomic_store(&live->will_persist_turn, true);
       char *response = core_text_input_dispatch(live, envelope, NULL, NULL, NULL, 0, &opts);
+      atomic_store(&live->will_persist_turn, false);
       if (tts_wired) {
          /* Codec captured at begin (pre-dispatch) so this close never derefs a
           * client_data the lws thread may have freed during a long tool loop. */
@@ -480,51 +487,43 @@ static void *reinvoke_turn_entry(void *arg) {
       session_set_tool_iteration_hook(live, NULL, NULL);
       session_set_tool_persist_hook(live, NULL, NULL);
 
-      /* C3: mark fired ONLY if the reply is actually saved somewhere.  A
-       * foreground, connected viewer's client saves the streamed reply; if the
-       * viewer switched conversations or the client vanished mid-turn, persist
-       * server-side FIRST — never fire a re-engagement that exists nowhere. */
-      bool cancelled = atomic_load(&live->cancel_requested);
-      if (cancelled || response == NULL || response[0] == '\0') {
+      /* ALWAYS persist server-side — the single writer (Phase 1).  A cancel-at-buzzer
+       * (§9/G4) freed the completed reply inside dispatch and returned NULL, so recover
+       * it from the will_persist stash; `reply` takes ownership either way.  Mark the
+       * jobs fired ONLY on a durable insert (invariant C3): a persist failure leaves
+       * them for the monitor to retry rather than silently dropping the reply. */
+      char *reply = response;
+      if (reply == NULL) {
+         reply = live->cancelled_final_response;
+         live->cancelled_final_response = NULL;
+      }
+      if (reply == NULL || reply[0] == '\0') {
          OLOG_INFO("job_reinvoke: live re-engage of parent %lld empty/cancelled; will retry",
                    (long long)parent);
       } else {
-         bool client_gone = atomic_load(&live->disconnected);
-         bool backgrounded = (webui_session_active_conversation(live) != parent);
-         bool persisted_ok = true;
-         if (client_gone || backgrounded) {
-            int64_t appended_id = 0;
-            persisted_ok = (conv_db_add_message_with_tools(parent, user_id, "assistant", response,
-                                                           NULL, NULL, NULL,
-                                                           &appended_id) == AUTH_DB_SUCCESS);
-            if (persisted_ok) {
-               job_reinvoke_notify_conv_appended(user_id, parent);
-               /* Live reinvoke streamed to `live`; stamp its stream_id so if that
-                * viewer returns to the parent it adopts rather than re-renders. */
-               conv_event_notify_message_appended(parent, user_id, appended_id, "assistant",
-                                                  response, NULL,
-                                                  atomic_load(&live->current_stream_id));
-            }
-         }
+         int64_t appended_id = 0;
+         bool persisted_ok = (conv_db_add_message_with_tools(parent, user_id, "assistant", reply,
+                                                             NULL, NULL, NULL,
+                                                             &appended_id) == AUTH_DB_SUCCESS);
          if (persisted_ok) {
-            /* LOAD-BEARING CONTRACT: in the "client-saved" case (foreground +
-             * connected, so we did NOT persist server-side above) we mark the jobs
-             * fired trusting the browser to save the foreground-streamed reply via
-             * its conversation-tagged background save path.  If a future client
-             * refactor breaks that save, a fired-but-unsaved re-engagement is lost
-             * and never retries.  Keep the client save tied to this decision. */
             conv_db_job_mark_fired_many(fired_ids, n_fired);
-            OLOG_INFO(
-                "job_reinvoke: streamed re-engagement into live parent %lld (%d result(s), %s)",
-                (long long)parent, n_fired,
-                (client_gone || backgrounded) ? "persisted server-side" : "client-saved");
+            /* Sole active-view channel (§6b): message_appended carries the body inline
+             * for viewers of the parent and marks the rest unread — the
+             * conversation_messages_appended refetch is retired here.  The streamed
+             * viewer's stream_id lets it adopt (having stood down on will_persist)
+             * rather than re-render its own reply. */
+            conv_event_notify_message_appended(parent, user_id, appended_id, "assistant", reply,
+                                               NULL, atomic_load(&live->current_stream_id));
+            OLOG_INFO("job_reinvoke: streamed re-engagement into live parent %lld "
+                      "(%d result(s), persisted server-side)",
+                      (long long)parent, n_fired);
          } else {
             OLOG_WARNING(
                 "job_reinvoke: re-engage of parent %lld persisted nowhere; leaving unfired",
                 (long long)parent);
          }
       }
-      free(response);
+      free(reply);
    }
    free(envelope);
 
@@ -601,8 +600,10 @@ static void reinvoke_run_detached(reinvoke_work_t *w,
       if (conv_db_add_message_with_tools(w->parent_conv, w->user_id, "assistant", response, NULL,
                                          NULL, NULL, &appended_id) == AUTH_DB_SUCCESS) {
          conv_db_job_mark_fired_many(fired_ids, n_fired);
-         job_reinvoke_notify_conv_appended(w->user_id, w->parent_conv);
-         /* Detached: no viewer streamed this → stream_id 0 (all viewers render inline). */
+         /* Sole active-view channel (§6b): message_appended carries the body inline for
+          * viewers of the parent and marks the rest unread — the
+          * conversation_messages_appended refetch is retired here.  Detached: no viewer
+          * streamed this → stream_id 0 (every viewer renders inline). */
          conv_event_notify_message_appended(w->parent_conv, w->user_id, appended_id, "assistant",
                                             response, NULL, 0);
          OLOG_INFO("job_reinvoke: re-engaged parent %lld (detached) with %d job result(s)",
@@ -829,24 +830,11 @@ void job_reinvoke_init(void) {
    OLOG_INFO("job_reinvoke: reinvoke_parent processor registered");
 }
 
-/* Weak default: no-op unless the WebUI provides the strong override. */
-__attribute__((weak)) void job_reinvoke_notify_conv_appended(int user_id, int64_t conversation_id) {
-   (void)user_id;
-   (void)conversation_id;
-}
-
 /* Weak default: no live viewer without WebUI → always take the detached path. */
 __attribute__((weak)) session_t *webui_find_reinvoke_viewer(int64_t conv_id, int user_id) {
    (void)conv_id;
    (void)user_id;
    return NULL;
-}
-
-/* Weak default: 0 (no client view) without WebUI — the reinvoke closure then
- * always persists server-side, which is the safe choice for a headless build. */
-__attribute__((weak)) int64_t webui_session_active_conversation(session_t *s) {
-   (void)s;
-   return 0;
 }
 
 /* Weak default: no WebUI → no TTS wiring, so a reinvoke turn stays silent. */

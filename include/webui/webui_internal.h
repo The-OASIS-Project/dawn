@@ -270,6 +270,8 @@ typedef struct {
          uint32_t stream_id;
          int64_t conversation_id; /* Conversation this turn belongs to (0 = none) */
          char text[1024];         /* Buffer for delta/end text (increased for thinking) */
+         bool will_persist;       /* stream_end only: server promises to persist this turn
+                                     (Model A intent, SERVER_AUTHORITATIVE §6 step 2) */
       } stream;
       struct {
          char state[16];   /* idle, listening, thinking, speaking, error */

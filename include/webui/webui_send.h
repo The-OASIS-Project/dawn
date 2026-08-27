@@ -137,7 +137,8 @@ void send_stream_delta_impl(struct lws *wsi,
 void send_stream_end_impl(struct lws *wsi,
                           uint32_t stream_id,
                           int64_t conversation_id,
-                          const char *reason);
+                          const char *reason,
+                          bool will_persist);
 void send_thinking_start_impl(struct lws *wsi,
                               uint32_t stream_id,
                               int64_t conversation_id,

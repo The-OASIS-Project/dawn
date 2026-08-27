@@ -2591,15 +2591,29 @@ void webui_send_stream_end(session_t *session, const char *reason) {
    /* Finalize the replay-ring partial (kept for a short grace window). */
    conv_stream_end(session->stream_conversation_id, atomic_load(&session->current_stream_id));
 
+   /* Copy reason into fixed buffer (no malloc/free churn) */
+   const char *r = reason ? reason : "complete";
+
+   /* Model A intent (SERVER_AUTHORITATIVE §6 step 2): stamp will_persist ONLY when a
+    * row will actually be persisted, so the browser never stands down on a turn the
+    * server won't save.  That is: the persist-owning caller armed will_persist_turn,
+    * AND this is the successful FINAL stream_end (reason "complete" — excludes the
+    * per-tool-iteration segment end AND the error/transient_error ends), AND content
+    * actually streamed (stream_had_content — a completed streamed reply, i.e. the
+    * happy path or a cancel-at-buzzer; a non-streamed turn promises via the transcript
+    * fallback's server_saved instead).  Over-promising here would make the viewer drop
+    * its streamed partial while the server persists nothing (correctness MEDIUM). */
+   bool will_persist = atomic_load(&session->will_persist_turn) && strcmp(r, "complete") == 0 &&
+                       atomic_load(&session->stream_had_content);
+
    ws_response_t resp = { .session = session,
                           .type = WS_RESP_STREAM_END,
                           .stream = {
                               .stream_id = atomic_load(&session->current_stream_id),
                               .conversation_id = session->stream_conversation_id,
+                              .will_persist = will_persist,
                           } };
 
-   /* Copy reason into fixed buffer (no malloc/free churn) */
-   const char *r = reason ? reason : "complete";
    strncpy(resp.stream.text, r, sizeof(resp.stream.text) - 1);
    resp.stream.text[sizeof(resp.stream.text) - 1] = '\0';
 

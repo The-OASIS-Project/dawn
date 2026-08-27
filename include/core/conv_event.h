@@ -29,8 +29,8 @@
  * frame races the replay batch during attach.
  *
  * Layering: this module sits above auth_db (Layer 2) and reaches the WebUI
- * (Layer 4) only through a weak symbol, matching the
- * job_reinvoke_notify_conv_appended idiom — no upward dependency.
+ * (Layer 4) only through a weak symbol (webui_broadcast_message_appended) —
+ * no upward dependency.
  */
 
 #ifndef CONV_EVENT_H

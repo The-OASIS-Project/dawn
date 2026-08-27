@@ -271,6 +271,10 @@ static void session_free(session_t *session) {
    free(session->pending_visual);
    session->pending_visual = NULL;
 
+   // Free any unconsumed cancel-at-buzzer stash (SERVER_AUTHORITATIVE §9/G4)
+   free(session->cancelled_final_response);
+   session->cancelled_final_response = NULL;
+
    // Free async compaction resources
    if (session->async_compact.pending_history) {
       json_object_put(session->async_compact.pending_history);

@@ -86,6 +86,7 @@
       DawnState.streamingState.content = '';
       DawnState.streamingState.preVisualContent = '';
       DawnState.streamingState.pendingRender = false;
+      DawnState.streamingState.willPersist = false;
       // Drop any stale thinking + reasoning state (it belonged to the conversation
       // we left — otherwise the next conversation's finalizeStream would prepend
       // this turn's pre-visual text / attach its reasoning to the wrong message).
@@ -160,6 +161,9 @@
          DawnState.streamingState.entryElement = entry;
          DawnState.streamingState.textElement = entry.querySelector('.text');
          DawnState.streamingState.content = '';
+         // Phase 1 (server-authoritative §6 step 2): default to client-saving; the
+         // final stream_end sets this true if the server promised to persist the turn.
+         DawnState.streamingState.willPersist = false;
 
          // Reset thinking tokens for new stream (will be populated by reasoning_summary if applicable)
          DawnState.metricsState.last_thinking_tokens = 0;
@@ -315,6 +319,12 @@
          finalizeStreamBubble();
          return;
       }
+
+      // Phase 1 (server-authoritative §6 step 2): if the server promised to persist
+      // this turn, stand down from the client-save in finalizeStream — the server
+      // wrote the row and fans it back as message_appended, which the adopt-map
+      // reconciles onto this same bubble.
+      DawnState.streamingState.willPersist = !!payload.will_persist;
 
       finalizeStream();
    }
@@ -584,7 +594,11 @@
          DawnState.streamingState.content;
       /* Strip self-inserted <thinking> tags from save content */
       fullContent = fullContent.replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, '');
-      if (fullContent && callbacks.onSaveMessage) {
+      // Phase 1 (server-authoritative §6 step 2): when the server promised to persist
+      // this turn (will_persist on the final stream_end), skip the client-save — the
+      // server is the sole writer.  recordFinalized below still runs so the fanned-out
+      // message_appended adopts its message_id onto this bubble instead of re-rendering.
+      if (fullContent && !DawnState.streamingState.willPersist && callbacks.onSaveMessage) {
          // E3: reasoning is persisted server-side as a structured field (NOT inline
          // <dawn:thinking>/<dawn:reasoning> markers in content). Build the reasoning object
          // {provider, duration, content?, tokens?} from the finalized thinking state; the
@@ -647,6 +661,7 @@
       DawnState.streamingState.preVisualContent = '';
       DawnState.streamingState.pendingRender = false;
       DawnState.streamingState.reasoningTokens = 0;
+      DawnState.streamingState.willPersist = false;
    }
 
    /**

@@ -488,6 +488,27 @@ typedef struct session {
    // start can write it while a superseded turn's tail still reads).
    _Atomic int64_t stream_conversation_id;
 
+   // Server-authoritative persistence, Model A intent flag (SERVER_AUTHORITATIVE_
+   // PERSISTENCE_DESIGN §5/§6 step 2).  Set true by the persist-owning caller
+   // (the reinvoke worker in Phase 1) BEFORE dispatch and cleared after; read at
+   // the final-stream_end emit (webui_send_stream_end) to stamp `will_persist:true`
+   // so the streamed viewer stands down from client-saving.  Default false → every
+   // non-opted surface's stream_end is unchanged.  Atomic for parity with the
+   // sibling stream flags (a superseded turn's tail could read while a new turn
+   // begins), though the turn queue serializes turns per session.
+   _Atomic bool will_persist_turn;
+
+   // Cancel-at-buzzer stash (SERVER_AUTHORITATIVE §9/G4).  When will_persist_turn
+   // is set and a cancel lands AFTER the reply completed (llm_call_finalize frees
+   // the completed response and returns NULL), the finalized text is stashed HERE
+   // instead of freed, so the persist-owning caller can still persist it post-
+   // dispatch (the browser already stood down on will_persist → a naive free would
+   // lose the reply from the DB).  Owned by the session; the consuming caller takes
+   // it (sets NULL) + frees.  Cleared at turn start (llm_call_prepare) and freed at
+   // session teardown.  Single-writer per turn on the dispatch thread, read by the
+   // same worker after dispatch returns (turn-queue serialized) — no lock needed.
+   char *cancelled_final_response;
+
    // Whether THIS turn's step events (tool_call/tool_result) should be persisted
    // to conversation_events and fanned out.  Set at dispatch from the same
    // observe-scope predicate as the `status` event (job session / background turn
@@ -678,6 +699,17 @@ static inline void session_teardown_flags(session_t *s) {
 
 /** Clear both flags at the start of a fresh turn (client present, not cancelled). */
 static inline void session_begin_turn_flags(session_t *s) {
+   /* Structural clean-slate for the Model A persist promise (SERVER_AUTHORITATIVE
+    * §6 step 2): a turn is not persist-promised unless its persist-owning caller
+    * arms will_persist_turn AFTER this point (the reinvoke worker, Phase 2's text
+    * worker).  Reset it here — the turn-start hook every WEBUI turn path runs before
+    * arming — so a leaked promise from a caller that forgot to disarm can never make
+    * the NEXT turn's browser stand down from a save the server won't take.  Done
+    * unconditionally (even mid-teardown): a stale promise must never survive a turn
+    * boundary.  NOT in llm_call_prepare, which runs INSIDE dispatch after the arm. */
+   if (s != NULL) {
+      atomic_store(&s->will_persist_turn, false);
+   }
    /* Never resurrect a session whose teardown has begun: if being_destroyed is
     * set, leave the teardown-set cancel/disconnected flags standing so an
     * in-flight worker still aborts at its next LLM gate.  This NARROWS the

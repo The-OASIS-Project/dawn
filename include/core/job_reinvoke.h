@@ -63,17 +63,10 @@ extern "C" {
  */
 session_t *webui_find_reinvoke_viewer(int64_t conv_id, int user_id);
 
-/**
- * @brief Weak Layer-4 seam: the conversation id the WebUI client on @p s is
- *        currently viewing (0 without WebUI / no attached client).
- *
- * The reinvoke closure uses this at dequeue to decide whether the streamed reply
- * will be client-saved (viewer still on the parent conv → skip server persist to
- * avoid a duplicate row) or must be persisted server-side (viewer switched
- * conversations → the client saver only writes the on-screen conv, so the reply
- * would otherwise be lost).  Weak default returns 0.
- */
-int64_t webui_session_active_conversation(session_t *s);
+/* NOTE: the former webui_session_active_conversation weak seam was retired in
+ * Phase 1 of SERVER_AUTHORITATIVE_PERSISTENCE — the reinvoke reply is now ALWAYS
+ * persisted server-side (single writer), so the backgrounded-vs-foreground save
+ * decision it drove no longer exists. */
 
 /**
  * @brief Weak Layer-4 seam: wire TTS onto a LIVE reinvoke turn streaming into a
@@ -144,17 +137,10 @@ void job_reinvoke_init(void);
  */
 void job_reinvoke_process_pending(const job_record_t *rows, int n);
 
-/**
- * @brief Nudge a user's open tabs to refresh a conversation that just grew.
- *
- * Weak Layer-2 seam (a no-op unless WebUI links its strong override), so a user
- * viewing the parent conversation sees the reinvoked reply appear.  The reply is
- * already persisted, so a not-viewing/absent client simply sees it on next load.
- * The strong override delegates to the existing conversation_messages_appended
- * broadcast.  (v1.1 will additionally reuse a live session's warm cache to stream
- * token-by-token; v1 surfaces the completed message.)
- */
-void job_reinvoke_notify_conv_appended(int user_id, int64_t conversation_id);
+/* NOTE: the former job_reinvoke_notify_conv_appended weak seam (a
+ * conversation_messages_appended refetch nudge) was retired in Phase 1 of
+ * SERVER_AUTHORITATIVE_PERSISTENCE — the reinvoke reply now fans out inline via
+ * conv_event_notify_message_appended (§6b), the sole active-view channel. */
 
 #ifdef __cplusplus
 }
