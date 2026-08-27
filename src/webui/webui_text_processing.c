@@ -147,18 +147,24 @@ void webui_tool_iteration_cb(session_t *session, void *userdata) {
  * focus injection and the LLM call.  Preserves the WebUI's "transcript
  * echoes immediately after the user types" UX while keeping the
  * add/persist/focus/LLM sequence inside the Layer 2 helper. */
-static void webui_text_dispatch_on_user_msg(void *ctx, const char *text, int64_t message_id) {
+static void webui_text_dispatch_on_user_msg(void *ctx,
+                                            const char *text,
+                                            const char *persist_text,
+                                            int64_t message_id) {
    session_t *session = (session_t *)ctx;
    if (!session || !text) {
       return;
    }
-   /* Echo to the origin, carrying the DB row id so the origin stamps
-    * data-message-id on its user bubble (and dedups its own fan-out copy). */
+   /* Echo to the origin with the CLEAN text — the origin already rendered its own image
+    * locally at upload time, so the echo mirrors what the user typed.  Carries the DB row
+    * id so the origin stamps data-message-id on its user bubble (and dedups its fan-out copy). */
    webui_send_transcript_ex(session, "user", text, message_id > 0, message_id);
    /* Fan the user message out to every OTHER viewer of this conversation so a
-    * second open client sees the question, not just the answer (§12c).  The
-    * origin's own copy dedups on message_id via the echo above.  User messages are
-    * never streamed → stream_id 0, reasoning NULL.
+    * second open client sees the question, not just the answer (§12c).  Use the PERSISTED
+    * form (persist_text) — for an image turn that carries the `[IMAGE:<id>]` markers, so a
+    * non-origin viewer rehydrates the image LIVE (its addNormalEntry parses the marker and
+    * fetches /api/images/<id>), not only on reload.  The origin's own copy dedups on
+    * message_id via the echo above.  User messages are never streamed → stream_id 0.
     * INVARIANT (mirrored in webui_audio.c): guard on message_id > 0 so a user turn
     * only ever emits TWO frames (echo + fan-out) when they carry the SAME positive
     * id — a save failure (id 0) emits only the echo, never an undedup-able double. */
@@ -166,8 +172,8 @@ static void webui_text_dispatch_on_user_msg(void *ctx, const char *text, int64_t
       ws_connection_t *conn = (ws_connection_t *)session->client_data;
       int64_t conv_id = atomic_load(&session->stream_conversation_id);
       if (conn && conn->auth_user_id > 0 && conv_id > 0) {
-         conv_event_notify_message_appended(conv_id, conn->auth_user_id, message_id, "user", text,
-                                            NULL, 0);
+         conv_event_notify_message_appended(conv_id, conn->auth_user_id, message_id, "user",
+                                            persist_text ? persist_text : text, NULL, 0);
       }
    }
 }
@@ -201,6 +207,26 @@ static void text_worker_cleanup(text_work_t *work, session_t *session, char *tex
       work->vision_image_count = 0;
       free(work->persist_content); /* separate alloc from `text` (work->text alias) */
       free(work);
+   }
+}
+
+/* 2b: the foreground server-authoritative final-answer persist.  Wraps the shared
+ * webui_persist_final_answer (which does the splice + row + retention + id-stamp + fan-out
+ * with a bounded DB retry) and adds the foreground-only "tell the user it failed" frame on
+ * a hard failure — the reply is on screen, but the row didn't save.  turn_conv/turn_user_id
+ * are the pre-dispatch, disconnect-safe captures — NEVER conn. */
+static void text_worker_persist_final(session_t *session,
+                                      int64_t turn_conv,
+                                      int turn_user_id,
+                                      const char *body) {
+   if (turn_conv <= 0 || turn_user_id <= 0 || body == NULL || body[0] == '\0') {
+      return;
+   }
+   if (webui_persist_final_answer(session, turn_conv, turn_user_id, body, NULL) !=
+       AUTH_DB_SUCCESS) {
+      OLOG_ERROR("WebUI: failed to persist final answer to conv %lld after retries",
+                 (long long)turn_conv);
+      webui_send_error(session, "PERSIST_ERROR", "Your reply was shown but could not be saved.");
    }
 }
 
@@ -314,10 +340,17 @@ static void *text_worker_thread(void *arg) {
     * skip the redundant generic fallback. */
    atomic_store(&session->turn_error_emitted, false);
 
+   /* Server-authoritative (SERVER_AUTHORITATIVE Phase 2b-i): the server is now the sole
+    * writer of this reply.  Arm the Model A promise so the FINAL stream_end tells the
+    * browser to stand down from its client-save; disarm right after dispatch (the promise
+    * is read only at the in-dispatch stream_end).  session_begin_turn_flags at dequeue
+    * (text_turn_thread_entry) reset it before this worker ran, so reset-then-arm holds. */
+   atomic_store(&session->will_persist_turn, true);
    char *response = core_text_input_dispatch(
        session, text, (const char **)work->vision_images, work->vision_image_sizes,
        (const char(*)[WEBUI_VISION_MIME_MAX])work->vision_mimes, work->vision_image_count,
        &dispatch_opts);
+   atomic_store(&session->will_persist_turn, false);
 
    session_set_tool_persist_hook(session, NULL, NULL); /* persist_ctx goes out of scope below */
    session_set_tool_iteration_hook(session, NULL, NULL);
@@ -352,10 +385,24 @@ static void *text_worker_thread(void *arg) {
 
    /* Check if request was superseded during LLM call */
    if (REQUEST_SUPERSEDED(session, expected_gen)) {
-      /* Request superseded - don't try to send response */
+      /* Request superseded - don't send the response live.  G4 (SERVER_AUTHORITATIVE §9):
+       * but if this turn made a will_persist promise and the reply COMPLETED, the browser
+       * already stood down, so persist it before discarding — the in-hand `response`, or the
+       * cancel-at-buzzer stash if dispatch already freed it (cancelled-THEN-superseded, the
+       * cross case).  current_stream_id is still THIS turn's (the superseding turn is queued,
+       * not yet streaming), so the helper's fan-out stamps correctly. */
       OLOG_INFO("WebUI: Session %u request superseded during LLM call", session->session_id);
+      char *superseded_reply = response;
+      if (superseded_reply == NULL) {
+         superseded_reply = session->cancelled_final_response;
+         session->cancelled_final_response = NULL;
+      }
+      if (superseded_reply != NULL && superseded_reply[0] != '\0') {
+         text_worker_persist_final(session, session->stream_conversation_id, turn_user_id,
+                                   superseded_reply);
+      }
       text_worker_end(session);
-      free(response);
+      free(superseded_reply); /* frees response OR the taken stash (mutually exclusive) */
       free(text);
       free(work->persist_content);
       free(work);
@@ -363,7 +410,26 @@ static void *text_worker_thread(void *arg) {
    }
 
    if (!response) {
-      /* LLM call failed.  Emit the generic error ONLY if the provider layer did
+      /* G4 cancel-at-buzzer (SERVER_AUTHORITATIVE §9): a cancel that landed AFTER the reply
+       * completed stashed the finalized text and returned NULL — and will_persist was already
+       * stamped on the final stream_end, so the browser stood down.  Recover + persist it here,
+       * BEFORE any error path, rather than showing a spurious "Failed to get response" for a
+       * reply the user just saw/heard. */
+      char *stashed = session->cancelled_final_response;
+      session->cancelled_final_response = NULL;
+      if (stashed != NULL && stashed[0] != '\0') {
+         text_worker_persist_final(session, session->stream_conversation_id, turn_user_id, stashed);
+         free(stashed);
+         webui_send_state(session, "idle");
+         text_worker_end(session);
+         free(text);
+         free(work->persist_content);
+         free(work);
+         return NULL;
+      }
+      free(stashed); /* NULL-safe; no completed reply to recover */
+
+      /* Genuine failure.  Emit the generic error ONLY if the provider layer did
        * not already surface a specific one for this turn — otherwise the user
        * sees the same failure twice (the precise message, then this fallback). */
       if (!atomic_load(&session->turn_error_emitted)) {
@@ -391,38 +457,17 @@ static void *text_worker_thread(void *arg) {
     * The LLM call uses webui_send_stream_start/delta/end for real-time delivery.
     * Assistant response is already added to history inside the LLM call. */
 
-   /* Server-authoritative persistence of the final assistant answer when the
-    * client won't save it — two cases (background-jobs Phase 1):
-    *   (a) BACKGROUNDED: the turn finished while the client was viewing a
-    *       DIFFERENT conversation (the client saver only writes the on-screen
-    *       conversation), or
-    *   (b) CLIENT GONE: the client disconnected mid-turn — the turn survived and
-    *       completed, but there is no client left to save it (Arch-H1).
-    * A foreground, still-connected turn is saved by the client → skip to avoid a
-    * duplicate row.  Uses turn_user_id + the captured conversation — NEVER conn,
-    * which libwebsockets may have freed after a mid-turn disconnect.  Tool-turn
-    * rows were already persisted server-side by webui_tool_persist_cb. */
+   /* Server-authoritative persistence (SERVER_AUTHORITATIVE Phase 2b-i): the SERVER is now
+    * the single writer of every foreground reply — persist UNCONDITIONALLY (was gated on
+    * backgrounded/client-gone in Phase 1).  will_persist was stamped on the final stream_end,
+    * so the browser stood down; no duplicate row.  Uses turn_user_id + the captured
+    * conversation — NEVER conn, which libwebsockets may have freed after a mid-turn
+    * disconnect.  Tool-turn rows were already persisted server-side by webui_tool_persist_cb;
+    * the helper attaches the final-answer reasoning + accumulated visual, promotes reply-body
+    * images, stamps the history id, and fans out message_appended. */
    if (final_response && final_response[0] != '\0') {
       int64_t turn_conv = session->stream_conversation_id;
-      bool client_gone = atomic_load(&session->disconnected);
-      bool backgrounded = (turn_conv > 0 && turn_conv != webui_get_active_conversation_id(session));
-      if (turn_conv > 0 && turn_user_id > 0 && (backgrounded || client_gone)) {
-         int64_t appended_id = 0;
-         if (conv_db_add_message_with_tools(turn_conv, turn_user_id, "assistant", final_response,
-                                            NULL, NULL, NULL, &appended_id) != AUTH_DB_SUCCESS) {
-            OLOG_WARNING("WebUI: failed to persist final assistant answer to conv %lld",
-                         (long long)turn_conv);
-         } else {
-            OLOG_INFO("WebUI: persisted final assistant answer server-side to conv %lld (%s)",
-                      (long long)turn_conv, client_gone ? "client gone" : "backgrounded");
-            /* This turn streamed to `session`; stamp its stream_id so a returning
-             * origin adopts. Reasoning NULL here (server-side final-reasoning
-             * capture is Phase 1 — this backgrounded/gone path already omitted it). */
-            conv_event_notify_message_appended(turn_conv, turn_user_id, appended_id, "assistant",
-                                               final_response, NULL,
-                                               atomic_load(&session->current_stream_id));
-         }
-      }
+      text_worker_persist_final(session, turn_conv, turn_user_id, final_response);
    }
 
    /* Free the final response (either original response or processed copy) */

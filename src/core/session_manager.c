@@ -275,6 +275,10 @@ static void session_free(session_t *session) {
    free(session->cancelled_final_response);
    session->cancelled_final_response = NULL;
 
+   // Free any unconsumed final-answer reasoning stash (SERVER_AUTHORITATIVE §6c-G1)
+   free(session->final_reasoning_json);
+   session->final_reasoning_json = NULL;
+
    // Free async compaction resources
    if (session->async_compact.pending_history) {
       json_object_put(session->async_compact.pending_history);

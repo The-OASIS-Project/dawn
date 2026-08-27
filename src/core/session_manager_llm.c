@@ -151,6 +151,16 @@ static int llm_call_prepare(session_t *session,
       session->cancelled_final_response = NULL;
    }
 
+   /* Turn-start reset of the final-answer reasoning stash (SERVER_AUTHORITATIVE §6c-G1):
+    * the tool loop writes it DURING this dispatch and the post-dispatch persist takes it,
+    * so a leftover from a prior turn (a persist that never consumed it) must not attach to
+    * this row.  Safe here precisely because the write is in-dispatch (after prepare) — a
+    * prepare-clear cannot clobber the current turn's stash. */
+   if (session->final_reasoning_json != NULL) {
+      free(session->final_reasoning_json);
+      session->final_reasoning_json = NULL;
+   }
+
    // Add user message to history (unless caller already did)
    if (!skip_add_message) {
       session_add_message(session, "user", user_text);

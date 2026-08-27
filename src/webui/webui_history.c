@@ -1757,94 +1757,21 @@ void handle_save_message(ws_connection_t *conn, struct json_object *payload) {
       return;
    }
 
-   /* Optional display-only reasoning JSON for the final answer (E3).  Bounded by the same
-    * limit as message content; over-limit is dropped (the "AI thought" panel simply won't
-    * render for that message rather than storing an unbounded blob). */
-   const char *reasoning = NULL;
-   json_object *reasoning_obj;
-   if (json_object_object_get_ex(payload, "reasoning", &reasoning_obj) &&
-       json_object_is_type(reasoning_obj, json_type_string)) {
-      const char *r = json_object_get_string(reasoning_obj);
-      if (r && r[0] && strlen(r) <= CONV_MESSAGE_MAX) {
-         reasoning = r;
-      }
-   }
-
-   /* Phase-0 R1 (SERVER_AUTHORITATIVE_PERSISTENCE_DESIGN §6a): the client sends the
-    * stream this reply was delivered on, so we echo it into the fanned-out
-    * message_appended below and the ORIGIN viewer recognizes its own save-echo
-    * (adopts the msg_id onto the already-streamed bubble instead of re-rendering).
-    * Transitional field — removed in Phase 2 when the client-save is retired. */
-   unsigned client_stream_id = 0;
-   json_object *sid_obj;
-   if (json_object_object_get_ex(payload, "stream_id", &sid_obj) &&
-       json_object_is_type(sid_obj, json_type_int)) {
-      int64_t sid = json_object_get_int64(sid_obj);
-      if (sid > 0 && sid <= (int64_t)UINT32_MAX) {
-         client_stream_id = (unsigned)sid;
-      }
-   }
-
-   /* SECURITY: Validate any embedded image thumbnails (size limit, safe prefix) */
-   if (!validate_image_marker(content)) {
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-      json_object_object_add(resp_payload, "error",
-                             json_object_new_string("Invalid or oversized image data"));
-      json_object_object_add(response, "payload", resp_payload);
-      send_json_response(conn, response);
-      json_object_put(response);
-      return;
-   }
-
-   /* Clear pending_visual if present — the client-side streaming save
-    * already interleaves the visual content at the correct position
-    * (pre-visual text + <dawn-visual> tag + post-visual text). */
-   if (strcmp(role, "assistant") == 0 && conn->session) {
-      pthread_mutex_lock(&conn->session->tools_mutex);
-      free(conn->session->pending_visual);
-      conn->session->pending_visual = NULL;
-      pthread_mutex_unlock(&conn->session->tools_mutex);
-   }
-
-   int64_t msg_id = 0;
-   int result = conv_db_add_message_with_tools(conv_id, conn->auth_user_id, role, content, NULL,
-                                               NULL, reasoning, &msg_id);
-
-   if (result == AUTH_DB_SUCCESS) {
-      if (conn->session && msg_id > 0)
-         session_stamp_last_message_id(conn->session, role, msg_id);
-      /* §6.3 — the SUBTLE one.  A foreground WebUI turn is saved by the BROWSER,
-       * not the server, so this is the only place its body becomes durable.  An
-       * event-only consumer tailing a conversation that happens to have a tab
-       * open would otherwise never receive the answer.  Assistant rows only:
-       * user text is echoed to the sender already. */
-      if (role && strcmp(role, "assistant") == 0) {
-         conv_event_notify_message_appended(conv_id, conn->auth_user_id, msg_id, role, content,
-                                            reasoning, client_stream_id);
-      }
-      /* Promote any referenced images to PERMANENT so they survive age/LRU eviction
-       * for the life of the conversation (conversation-lifecycle-owned).  Owner-checked
-       * via conn->auth_user_id; an injected foreign id no-ops.  Per-message scan: the
-       * collect cap equals the per-turn upload cap, so no referenced id is missed. */
-      char img_ids[WEBUI_MAX_VISION_IMAGES_CAP][IMAGE_ID_LEN];
-      int img_count = 0;
-      if (webui_collect_image_ids(content, img_ids, WEBUI_MAX_VISION_IMAGES_CAP, &img_count) ==
-          SUCCESS) {
-         for (int i = 0; i < img_count; i++) {
-            image_store_update_retention(img_ids[i], conn->auth_user_id, IMAGE_RETAIN_PERMANENT);
-         }
-      }
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
-   } else if (result == AUTH_DB_FORBIDDEN) {
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-      json_object_object_add(resp_payload, "error",
-                             json_object_new_string("Access denied to conversation"));
-   } else {
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-      json_object_object_add(resp_payload, "error",
-                             json_object_new_string("Failed to save message"));
-   }
-
+   /* Server-authoritative (SERVER_AUTHORITATIVE_PERSISTENCE_DESIGN Phase 2b-ii, §9/Q4): the
+    * assistant reply is now persisted ENTIRELY server-side — the foreground text/voice
+    * workers write the row via webui_persist_final_answer (which attaches reasoning +
+    * accumulated visual, promotes reply-body images, stamps the history id, and fans out
+    * message_appended).  This fall-through is assistant-only in practice (the role whitelist
+    * above rejects everything but user/assistant, and user drops earlier), so a client
+    * save_message here is a no-op.  ACCEPT-AND-DROP: answer success so a stale/lagging client
+    * (incl. one
+    * behind a deploy, or Aurora before it retires its client-save) neither retries nor errors.
+    * PURE drop — no row, and deliberately NO pending_visual clear (a race with the worker's
+    * take could free the visual out from under the append) and NO fan-out (no msg_id exists).
+    * Mirrors the user-role + job-conv drops above; the handler stays forever as the
+    * stale-client sink. */
+   json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+   json_object_object_add(resp_payload, "conversation_id", json_object_new_int64(conv_id));
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);

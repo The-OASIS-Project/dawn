@@ -509,6 +509,23 @@ typedef struct session {
    // same worker after dispatch returns (turn-queue serialized) — no lock needed.
    char *cancelled_final_response;
 
+   // Final-answer reasoning stash (SERVER_AUTHORITATIVE_PERSISTENCE §6c-G1 / Phase 2).
+   // The tool loop persists per-tool-iteration reasoning via the persist hook, but the
+   // FINAL answer's reasoning (E3 "AI thought" panel) is dropped server-side — only the
+   // browser client-save carried it.  The tool loop stashes build_reasoning_json() of the
+   // final turn HERE (tool_loop_stash_final_reasoning) at every text-returning path; the
+   // post-dispatch persist (webui_persist_final_answer) takes it and writes it to the
+   // messages.reasoning column + the message_appended fan-out.  Owned by the session;
+   // the consuming caller takes it (sets NULL) + frees.
+   //
+   // LIFETIME (differs from will_persist_turn — do NOT "consistency-fix"): WRITTEN during
+   // dispatch (inside the tool loop) and READ post-dispatch, so cleared at turn start in
+   // llm_call_prepare (a prepare-clear cannot clobber an in-dispatch write).  will_persist_turn
+   // is armed BEFORE dispatch, so it must reset in session_begin_turn_flags instead.  This
+   // asymmetry is intentional.  No lock (single-writer-in-dispatch / read-post-dispatch,
+   // same discipline as stream_conversation_id).  Freed at session teardown.
+   char *final_reasoning_json;
+
    // Whether THIS turn's step events (tool_call/tool_result) should be persisted
    // to conversation_events and fanned out.  Set at dispatch from the same
    // observe-scope predicate as the `status` event (job session / background turn

@@ -594,49 +594,16 @@
          DawnState.streamingState.content;
       /* Strip self-inserted <thinking> tags from save content */
       fullContent = fullContent.replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, '');
-      // Phase 1 (server-authoritative §6 step 2): when the server promised to persist
-      // this turn (will_persist on the final stream_end), skip the client-save — the
-      // server is the sole writer.  recordFinalized below still runs so the fanned-out
-      // message_appended adopts its message_id onto this bubble instead of re-rendering.
-      if (fullContent && !DawnState.streamingState.willPersist && callbacks.onSaveMessage) {
-         // E3: reasoning is persisted server-side as a structured field (NOT inline
-         // <dawn:thinking>/<dawn:reasoning> markers in content). Build the reasoning object
-         // {provider, duration, content?, tokens?} from the finalized thinking state; the
-         // server writes it to the messages.reasoning column on this (final-answer) row.
-         const finContent = DawnState.thinkingState.finalizedContent;
-         const finProvider = DawnState.thinkingState.finalizedProvider || 'unknown';
-         const finDuration = DawnState.thinkingState.finalizedDuration || '0';
-         const hasThinkingContent = finContent && finContent.trim();
-         const hasReasoningTokens = DawnState.streamingState.reasoningTokens > 0;
-         let reasoning = null;
-         if (hasThinkingContent || hasReasoningTokens) {
-            reasoning = { provider: finProvider, duration: finDuration };
-            if (hasThinkingContent) reasoning.content = finContent;
-            if (hasReasoningTokens) reasoning.tokens = DawnState.streamingState.reasoningTokens;
-         }
-
-         /* Note: visual content is NOT appended here for client-side save.
-          * The server appends pending_visual to the assistant message in
-          * session_add_message(), so the DB copy already includes it.
-          * The client save_message is a backup that may be skipped on
-          * server_saved replay. Visual rendering on replay is handled by
-          * extractVisuals() in addNormalEntry. */
-
-         /* Phase-0: pass the stream_id so the client-save echoes it into the
-          * fanned-out message_appended, and record this bubble in the adopt-map so
-          * the returning echo adopts the id instead of re-rendering. */
-         callbacks.onSaveMessage(
-            'assistant',
-            fullContent,
-            reasoning,
-            DawnState.streamingState.streamId
-         );
-
-         // Clear finalized thinking content after saving
-         DawnState.thinkingState.finalizedContent = '';
-         DawnState.thinkingState.finalizedDuration = '0';
-         DawnState.thinkingState.finalizedProvider = null;
-      }
+      // Server-authoritative (SERVER_AUTHORITATIVE Phase 2c): the client-save of the assistant
+      // reply is RETIRED — the server is the sole writer, and the fanned-out message_appended
+      // adopts its message_id onto this already-streamed bubble (recordFinalized below).
+      // `fullContent` is still assembled above: it drains getPendingVisuals() (so a visual
+      // can't leak into the next turn) and gates recordFinalized.  The finalized-thinking
+      // reset used to live inside the deleted save block — run it unconditionally now, else
+      // stale thinking state leaks into the next turn.
+      DawnState.thinkingState.finalizedContent = '';
+      DawnState.thinkingState.finalizedDuration = '0';
+      DawnState.thinkingState.finalizedProvider = null;
 
       // Phase-0 adopt-map: record (conv, streamId) → bubble BEFORE the reset nulls
       // them, so the post-persist message_appended can adopt onto this bubble.  Only

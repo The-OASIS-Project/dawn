@@ -52,13 +52,21 @@ extern "C" {
  * pipeline as the existing WebUI behavior.
  *
  * @param ctx Caller-supplied context pointer (`opts->user_msg_added_ctx`).
- * @param text The user message text that was just added.
+ * @param text The CLEAN user message text that was just added (no persist markers) — for
+ *             the origin echo, which mirrors what the user typed.
+ * @param persist_text The PERSISTED form (== `persist_content_override` when set, else equal
+ *                   to `text`): `text` + `[IMAGE:<id>]` markers for an image turn.  Use this
+ *                   for the cross-viewer fan-out so a non-origin viewer can rehydrate the
+ *                   image live (the origin already has it locally, so its echo stays clean).
  * @param message_id The persisted DB row id of the user message (0 = not persisted;
  *                   `persisted == message_id > 0`).  Lets the WebUI hook stamp + fan
  *                   out the user message by its real id (replaced the old
  *                   `bool persisted_to_db`).
  */
-typedef void (*text_input_user_msg_added_fn)(void *ctx, const char *text, int64_t message_id);
+typedef void (*text_input_user_msg_added_fn)(void *ctx,
+                                             const char *text,
+                                             const char *persist_text,
+                                             int64_t message_id);
 
 /**
  * @brief Per-call options for `core_text_input_dispatch()`.

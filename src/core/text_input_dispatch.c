@@ -114,7 +114,12 @@ char *core_text_input_dispatch(session_t *session,
     * message render immediately while the server is still preparing
     * the response. */
    if (opts && opts->on_user_msg_added) {
-      opts->on_user_msg_added(opts->user_msg_added_ctx, text, user_msg_id);
+      /* Hand the hook BOTH forms: clean `text` for the origin echo, and the persisted
+       * marker-bearing form for the cross-viewer fan-out (so an image turn rehydrates on a
+       * non-origin viewer live, not only on reload).  persist_text mirrors the Step-2 write. */
+      const char *persist_text = opts->persist_content_override ? opts->persist_content_override
+                                                                : text;
+      opts->on_user_msg_added(opts->user_msg_added_ctx, text, persist_text, user_msg_id);
    }
 
    /* Step 4: per-turn focus injection (memory + entity + relation +

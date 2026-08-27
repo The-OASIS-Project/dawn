@@ -85,6 +85,27 @@ __attribute__((weak)) void webui_broadcast_message_appended(int user_id,
    (void)stream_id;
 }
 
+/* Weak link-safety stub: never runs in a real build (every caller compiles under
+ * ENABLE_WEBUI, which links the strong def in webui_broadcasts.c).  Loud + fail-closed so
+ * a future headless-caller misconfiguration is caught rather than silently dropping the
+ * assistant reply. */
+__attribute__((weak)) int webui_persist_final_answer(struct session *session,
+                                                     int64_t conv_id,
+                                                     int64_t user_id,
+                                                     const char *body,
+                                                     int64_t *out_msg_id) {
+   (void)session;
+   (void)user_id;
+   (void)body;
+   if (out_msg_id != NULL) {
+      *out_msg_id = 0;
+   }
+   OLOG_ERROR("webui_persist_final_answer: no WebUI strong symbol linked — assistant reply to "
+              "conv %lld NOT persisted",
+              (long long)conv_id);
+   return 1; /* non-zero = failure (AUTH_DB_SUCCESS is 0) */
+}
+
 void conv_event_notify_message_appended(int64_t conv_id,
                                         int user_id,
                                         int64_t msg_id,

@@ -142,6 +142,41 @@ void webui_broadcast_message_appended(int user_id,
                                       const char *reasoning,
                                       unsigned stream_id);
 
+struct session; /* forward decl — avoids pulling session_manager.h into this low header */
+
+/**
+ * @brief The single server-authoritative "persist one final assistant answer" seam
+ *        (SERVER_AUTHORITATIVE_PERSISTENCE_DESIGN, Phase 2, arch HIGH-1).
+ *
+ * Splices the session's accumulated `pending_visual` + `final_reasoning_json` — TAKING
+ * ownership of BOTH from @p session — into @p body, writes ONE assistant row to @p conv_id,
+ * promotes the reply body's image markers to PERMANENT retention, stamps the in-memory
+ * history id, and fans out `message_appended` stamped with the turn's `current_stream_id`
+ * (browsers_only).  ONE DB write + ONE fan-out + ONE place the addressing metadata is
+ * stamped.  The three foreground persist paths (text, voice, and the backgrounded/client-gone
+ * case) route through it today; the reinvoke path (job_reinvoke.c) still persists inline and
+ * folds in as its own follow-up commit (it already reaches this seam with no include change).
+ *
+ * Callers own everything OUTSIDE this middle: arming `will_persist_turn`, bounded retry +
+ * error frame, and post-persist side effects (a job's mark-fired).  Gate those on the return.
+ *
+ * Weak seam: the strong definition lives in the WebUI layer (webui_broadcasts.c) so a
+ * Layer-2 core caller (job_reinvoke.c) reaches it with no upward include — exactly like
+ * conv_event_notify_message_appended.  The weak default is a loud link-safety stub that
+ * never runs in a real build (every caller compiles under ENABLE_WEBUI, which links the
+ * strong def).
+ *
+ * @param body        The final assistant text (NOT owned; the helper builds its own copy
+ *                    when a visual is spliced).
+ * @param out_msg_id  Set to the persisted row id on success (may be NULL).
+ * @return AUTH_DB_SUCCESS (0) on a durable write; non-zero otherwise.
+ */
+int webui_persist_final_answer(struct session *session,
+                               int64_t conv_id,
+                               int64_t user_id,
+                               const char *body,
+                               int64_t *out_msg_id);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1278,42 +1278,80 @@ static void *audio_worker_thread(void *arg) {
    /* Send "thinking" state while LLM processes - streaming callback will switch to "speaking" */
    webui_send_state_with_detail(session, "thinking", "Processing request...");
 
+   /* Disconnect-safe captures (SERVER_AUTHORITATIVE Phase 2b-ii, correctness H1): a voice
+    * turn survives a mid-turn client disconnect (turn_in_flight held), after which
+    * libwebsockets frees `conn`.  The post-dispatch persist + audio_end MUST NOT deref
+    * conn — capture everything now, use only the locals in the tail.  turn_conv reads
+    * stream_conversation_id AFTER the lazy bind above. */
+   int64_t turn_conv = atomic_load(&session->stream_conversation_id);
+   int turn_user_id = conn ? conn->auth_user_id : (int)session->metrics.user_id;
+   bool use_opus = conn ? atomic_load(&conn->use_opus) : false;
+
+   /* Clear any stale visual stranded by a prior errored/cancelled turn (master-R5): once
+    * the server APPENDS pending_visual, a leftover would attach to THIS turn's row.  The
+    * text worker does the same at turn start; the voice worker never did.  Under tools_mutex
+    * like every other pending_visual access — the render_visual callback writes it from a
+    * pool thread, so the invariant must hold even though turn serialization makes a race
+    * impossible at this exact point today. */
+   pthread_mutex_lock(&session->tools_mutex);
+   free(session->pending_visual);
+   session->pending_visual = NULL;
+   pthread_mutex_unlock(&session->tools_mutex);
+
    /* Call LLM with TTS streaming - audio is generated and sent per-sentence
-    * No vision images for voice input (pass NULL for vision params) */
+    * No vision images for voice input (pass NULL for vision params).
+    * Arm the Model A promise so the final stream_end stands the browser down from its
+    * client-save; the server persists the reply in the tail (the path the voice worker
+    * previously lacked entirely). */
+   atomic_store(&session->will_persist_turn, true);
    char *response = session_llm_call_with_tts_vision_no_add(session, transcript, NULL, NULL, NULL,
                                                             0, webui_sentence_audio_callback,
                                                             session);
+   atomic_store(&session->will_persist_turn, false);
    free(transcript);
 
-   if (!response || REQUEST_SUPERSEDED(session, expected_gen)) {
-      OLOG_WARNING("WebUI: LLM call failed or request superseded");
-      if (!REQUEST_SUPERSEDED(session, expected_gen)) {
-         webui_send_error(session, "LLM_ERROR", "Failed to get response");
-      }
-      webui_send_state(session, "idle");
-      audio_worker_end(session);
-      free(response);
-      free(work);
-      return NULL;
+   bool superseded = REQUEST_SUPERSEDED(session, expected_gen);
+
+   /* Resolve the reply to persist (G4, SERVER_AUTHORITATIVE §9): the in-hand response, or the
+    * cancel-at-buzzer stash if a cancel freed a completed reply inside dispatch and returned
+    * NULL.  Every exit below persists it (or a genuine failure) before returning. */
+   char *reply = response;
+   if (reply == NULL) {
+      reply = session->cancelled_final_response;
+      session->cancelled_final_response = NULL;
    }
 
-   /* Native tool calling actuated any device actions during the LLM call;
-    * the audio was already streamed via the sentence callback. */
+   /* Close the TTS audio stream — use_opus captured PRE-dispatch (H1: conn may be freed now). */
+   webui_send_audio_end(session, use_opus);
 
-   /* Send audio end marker (all audio chunks have been sent) */
-   webui_send_audio_end(session, conn ? conn->use_opus : false);
+   if (reply != NULL && reply[0] != '\0') {
+      /* Server-authoritative persist of the voice assistant reply — the path the voice worker
+       * previously lacked entirely (it just free'd the reply, relying on the browser
+       * client-save).  Persist even when superseded-but-complete: the browser stood down on
+       * will_persist.  turn_conv/turn_user_id are the pre-dispatch captures — NEVER conn (H1).
+       * A voice turn with no bound conversation (turn_conv == 0) streams ephemerally, same as
+       * before — no row, and NO error frame (nothing failed). */
+      if (turn_conv > 0 && turn_user_id > 0) {
+         if (webui_persist_final_answer(session, turn_conv, turn_user_id, reply, NULL) !=
+             AUTH_DB_SUCCESS) {
+            OLOG_ERROR("WebUI: failed to persist voice reply to conv %lld after retries",
+                       (long long)turn_conv);
+            webui_send_error(session, "PERSIST_ERROR",
+                             "Your reply was played but could not be saved.");
+         }
+      }
 
-   /* Free response */
-   free(response);
-
-   /* Send context usage update to WebUI */
-   {
+      /* Send context usage update to WebUI (only meaningful when a reply was produced). */
       int current_tokens, max_tokens;
       float threshold;
       llm_context_get_last_usage(&current_tokens, &max_tokens, &threshold);
       if (max_tokens > 0) {
          webui_send_context(session, current_tokens, max_tokens, threshold);
       }
+   } else if (!superseded) {
+      /* Genuine failure: no reply and not superseded. */
+      OLOG_WARNING("WebUI: LLM call failed");
+      webui_send_error(session, "LLM_ERROR", "Failed to get response");
    }
 
    webui_send_state(session, "idle");
@@ -1325,6 +1363,7 @@ static void *audio_worker_thread(void *arg) {
     * thread creation. */
    audio_worker_end(session);
 
+   free(reply); /* frees response OR the taken stash (mutually exclusive) */
    free(work);
    return NULL;
 }

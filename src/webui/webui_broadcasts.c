@@ -56,10 +56,13 @@
 #include "core/job_reinvoke.h"
 #include "core/missed_notifications_db.h"
 #include "core/scheduler.h"
+#include "dawn_error.h"
+#include "image_store.h"
 #include "logging.h"
 #include "memory/memory_db_aliases.h"
 #include "tools/calendar_service.h"
 #include "utils/string_utils.h"
+#include "webui/webui_image_rehydrate.h" /* webui_collect_image_ids (reply-body image retention) */
 #include "webui/webui_internal.h"
 #include "webui/webui_send.h" /* webui_sentence_audio_callback, webui_send_audio_end/_state */
 #include "webui/webui_server.h"
@@ -750,6 +753,104 @@ void webui_broadcast_message_appended(int user_id,
     * a satellite renders nothing for — keep it strictly WEBUI, matching the
     * frame-delivery capability matrix.  broadcast_json_to_user TAKES OWNERSHIP. */
    broadcast_json_to_user_ex(user_id, root, /*browsers_only=*/true);
+}
+
+/* Strong override of the Layer-2 weak seam (conv_event.h): the ONE server-authoritative
+ * "persist a final assistant answer" path (SERVER_AUTHORITATIVE_PERSISTENCE §6c, Phase 2).
+ * See the header for the contract.  Callers own arming/retry/mark-fired; this owns the
+ * splice + row + retention + id-stamp + fan-out.  Adopted by the three foreground persist
+ * paths (text, voice, backgrounded/client-gone); reinvoke folds in as its own commit. */
+int webui_persist_final_answer(session_t *session,
+                               int64_t conv_id,
+                               int64_t user_id,
+                               const char *body,
+                               int64_t *out_msg_id) {
+   if (out_msg_id != NULL) {
+      *out_msg_id = 0;
+   }
+   if (session == NULL || conv_id <= 0 || user_id <= 0 || body == NULL || body[0] == '\0') {
+      return 1; /* nothing to persist */
+   }
+
+   /* Take the final-answer reasoning stash.  No lock: single-writer-in-dispatch, read
+    * post-dispatch on the same worker (turn-queue serialized) — same discipline as
+    * stream_conversation_id.  (Deliberately different from the visual take just below,
+    * which IS under tools_mutex because the render_visual tool callback writes it from a
+    * tool-worker thread — do NOT "consistency-fix" the two to match.) */
+   char *reasoning = session->final_reasoning_json;
+   session->final_reasoning_json = NULL;
+
+   /* Take the accumulated visual under tools_mutex, then RELEASE before the body build /
+    * DB write / fan-out — never hold a leaf lock across the persist (lock-ordering). */
+   pthread_mutex_lock(&session->tools_mutex);
+   char *visual = session->pending_visual;
+   session->pending_visual = NULL;
+   pthread_mutex_unlock(&session->tools_mutex);
+
+   /* Splice the visual at the END of the body (mid-body interleave is unrecoverable
+    * server-side — §6c-G2 accepted tradeoff; the '\n' wrapping matches the browser's
+    * visuals.join('\n') so replay's extractVisuals() sees a well-formed tag). */
+   const char *persist_body = body;
+   char *combined = NULL;
+   if (visual != NULL && visual[0] != '\0') {
+      size_t blen = strlen(body);
+      size_t vlen = strlen(visual);
+      combined = malloc(blen + 1 + vlen + 2); /* body '\n' visual '\n' '\0' */
+      if (combined != NULL) {
+         memcpy(combined, body, blen);
+         combined[blen] = '\n';
+         memcpy(combined + blen + 1, visual, vlen);
+         combined[blen + 1 + vlen] = '\n';
+         combined[blen + 1 + vlen + 1] = '\0';
+         persist_body = combined;
+      }
+      /* malloc failure: persist the bare body rather than lose the row. */
+   }
+
+   /* Bounded retry around the DB write ONLY (SERVER_AUTHORITATIVE §5/§9): reuses the same
+    * spliced body + reasoning every attempt, so a transient failure doesn't lose fidelity.
+    * The error FRAME stays in the foreground caller (reinvoke wants silent leave-unfired,
+    * not a user error). */
+   int64_t msg_id = 0;
+   int rc = 1;
+   for (int attempt = 0; attempt < 3; attempt++) {
+      rc = conv_db_add_message_with_tools(conv_id, (int)user_id, "assistant", persist_body, NULL,
+                                          NULL, reasoning, &msg_id);
+      if (rc == AUTH_DB_SUCCESS) {
+         break;
+      }
+      OLOG_WARNING("webui_persist_final_answer: DB write attempt %d failed for conv %lld",
+                   attempt + 1, (long long)conv_id);
+   }
+   if (rc == AUTH_DB_SUCCESS) {
+      if (out_msg_id != NULL) {
+         *out_msg_id = msg_id;
+      }
+      /* Stamp the in-memory history entry id (parity with the retired handle_save_message). */
+      session_stamp_last_message_id(session, "assistant", msg_id);
+
+      /* Promote the REPLY BODY's image markers to PERMANENT retention.  The retired
+       * client-save did this; the foreground workers' existing promotion covers only the
+       * user upload, not the reply — so a render_visual/generated-image reply's images
+       * would otherwise LRU-evict later (invisible to a reload-now fidelity test). */
+      char reply_ids[WEBUI_MAX_VISION_IMAGES_CAP][IMAGE_ID_LEN];
+      int reply_id_count = 0;
+      if (webui_collect_image_ids(persist_body, reply_ids, WEBUI_MAX_VISION_IMAGES_CAP,
+                                  &reply_id_count) == SUCCESS) {
+         for (int i = 0; i < reply_id_count; i++) {
+            image_store_update_retention(reply_ids[i], (int)user_id, IMAGE_RETAIN_PERMANENT);
+         }
+      }
+
+      /* One fan-out, stamped with this turn's stream_id so the origin adopts (browsers_only). */
+      conv_event_notify_message_appended(conv_id, (int)user_id, msg_id, "assistant", persist_body,
+                                         reasoning, atomic_load(&session->current_stream_id));
+   }
+
+   free(combined);
+   free(visual);
+   free(reasoning);
+   return rc;
 }
 
 void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id) {

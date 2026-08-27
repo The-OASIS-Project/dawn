@@ -283,6 +283,32 @@ static void tool_loop_stash_finish_reason(uint32_t session_id, const char *reaso
    session_release(s);
 }
 
+/* Stash the FINAL answer's display-only reasoning (E3 "AI thought" panel) on the
+ * session so the post-dispatch server persist (webui_persist_final_answer) can write it
+ * to the messages.reasoning column + fan it out — the browser client-save carried this
+ * today, and retiring that save drops it server-side otherwise (SERVER_AUTHORITATIVE
+ * §6c-G1).  Mirrors tool_loop_stash_finish_reason: reach the session by id, write a
+ * session field, release.  Best-effort — a turn with no thinking content AND no reasoning
+ * tokens leaves the stash NULL (build_reasoning_json returns NULL), and the turn-start
+ * clear in llm_call_prepare guarantees a reasoning-less turn never inherits a stale value.
+ * TAKES ownership of the built JSON into the session (the consuming persist frees it). */
+static void tool_loop_stash_final_reasoning(uint32_t session_id,
+                                            const llm_tool_response_t *result,
+                                            const char *provider_label) {
+   char *json = build_reasoning_json(result, provider_label);
+   if (json == NULL) {
+      return;
+   }
+   session_t *s = session_get_for_reconnect(session_id);
+   if (s == NULL) {
+      free(json);
+      return;
+   }
+   free(s->final_reasoning_json);
+   s->final_reasoning_json = json; /* take ownership */
+   session_release(s);
+}
+
 /* Fire the per-session iteration-boundary hook (if installed).  Called when an
  * iteration produced tool calls, just before the tools execute, so the WebUI can
  * close the current streaming bubble — the next iteration's text then opens a fresh
@@ -717,6 +743,9 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
             return empty;
          }
          tool_loop_stash_finish_reason(params->session_id, result.finish_reason);
+         tool_loop_stash_final_reasoning(params->session_id, &result,
+                                         reasoning_provider_label(params->llm_type,
+                                                                  params->cloud_provider));
          final_response = result.text;
          result.text = NULL; /* Transfer ownership to caller */
          llm_tool_response_free(&result);
@@ -782,6 +811,9 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
          }
 
          tool_loop_stash_finish_reason(params->session_id, result.finish_reason);
+         tool_loop_stash_final_reasoning(params->session_id, &result,
+                                         reasoning_provider_label(params->llm_type,
+                                                                  params->cloud_provider));
          final_response = result.text;
          result.text = NULL;
          llm_tool_response_free(&result);
@@ -823,6 +855,9 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
          free_tool_result_resources(results);
          free(results);
          llm_tool_response_free(&result);
+         /* No final-reasoning stash: direct_response is a tool's own canned text, not a
+          * model turn, so it carries no E3 reasoning.  The turn-start clear leaves the
+          * stash NULL here — do NOT "fix" this by stashing result's reasoning. */
          return followup.direct_response; /* Caller must free */
       }
 
@@ -883,6 +918,13 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
          char *final_text = NULL;
          if (final_rc == 0 && result.text) {
             final_text = strdup(result.text);
+            /* Parity with the other final-answer paths (this one lacked even the
+             * finish-reason stash): record both so a max-iter forced answer still
+             * reports its stop reason and renders its E3 panel on reload. */
+            tool_loop_stash_finish_reason(params->session_id, result.finish_reason);
+            tool_loop_stash_final_reasoning(params->session_id, &result,
+                                            reasoning_provider_label(params->llm_type,
+                                                                     params->cloud_provider));
          }
          llm_tool_response_free(&result);
          return final_text;

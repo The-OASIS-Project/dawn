@@ -1679,10 +1679,25 @@ static void webui_tool_execution_callback(void *session_ptr,
       /* Stash visual content on the session so it gets appended to the
        * assistant message when saved to the conversation DB. This enables
        * visual replay when the conversation is reloaded.
-       * Protected by tools_mutex — consumed by handle_save_message. */
+       * Protected by tools_mutex — consumed by the server persist
+       * (webui_persist_final_answer) or handle_save_message.
+       * ACCUMULATE all visuals of a turn (a multi-render_visual turn must keep
+       * every one, in order — SERVER_AUTHORITATIVE §6c-G2); the '\n' separator
+       * matches the browser's visuals.join('\n') interleave. */
       pthread_mutex_lock(&session->tools_mutex);
-      free(session->pending_visual);
-      session->pending_visual = strdup(result);
+      if (session->pending_visual == NULL) {
+         session->pending_visual = strdup(result);
+      } else {
+         size_t old_len = strlen(session->pending_visual);
+         size_t add_len = strlen(result);
+         char *combined = realloc(session->pending_visual, old_len + 1 + add_len + 1);
+         if (combined != NULL) {
+            combined[old_len] = '\n';
+            memcpy(combined + old_len + 1, result, add_len + 1);
+            session->pending_visual = combined;
+         }
+         /* realloc failure: keep the existing accumulation rather than lose all. */
+      }
       pthread_mutex_unlock(&session->tools_mutex);
    }
 
@@ -2601,10 +2616,14 @@ void webui_send_stream_end(session_t *session, const char *reason) {
     * per-tool-iteration segment end AND the error/transient_error ends), AND content
     * actually streamed (stream_had_content — a completed streamed reply, i.e. the
     * happy path or a cancel-at-buzzer; a non-streamed turn promises via the transcript
-    * fallback's server_saved instead).  Over-promising here would make the viewer drop
-    * its streamed partial while the server persists nothing (correctness MEDIUM). */
+    * fallback's server_saved instead), AND the turn has a conversation to persist TO
+    * (stream_conversation_id > 0 — the workers only persist when turn_conv > 0, so a
+    * conv-less turn, or one whose conversation creation failed mid-dispatch, must not
+    * promise a save it won't make).  Over-promising on any of these would make the viewer
+    * drop its streamed partial while the server persists nothing (correctness MEDIUM). */
    bool will_persist = atomic_load(&session->will_persist_turn) && strcmp(r, "complete") == 0 &&
-                       atomic_load(&session->stream_had_content);
+                       atomic_load(&session->stream_had_content) &&
+                       atomic_load(&session->stream_conversation_id) > 0;
 
    ws_response_t resp = { .session = session,
                           .type = WS_RESP_STREAM_END,
