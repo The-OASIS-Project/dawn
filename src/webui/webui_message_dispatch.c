@@ -570,6 +570,33 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
             }
          }
 
+         /* Reconcile type with the selected cloud model/provider (frontend-bug guard).
+          * `type` and `model`/`provider` are independent fields; a client that switches to a
+          * cloud model/provider but OMITS type='cloud' leaves the session's prior LOCAL type
+          * standing, and `type` wins at dispatch — so the turn runs on the local endpoint
+          * despite the cloud model name (observed: an Aurora gpt-5.6-luna pick kept a stale
+          * local type, and the follow-up ran on llama.cpp).  The existing provider inference
+          * above only corrects the PROVIDER and is gated on !provider_explicitly_set, so it
+          * misses this.  Force type=cloud on either cloud signal:
+          *   (a) the effective model name matches a bare cloud prefix — local models are gguf
+          *       paths that match none, so this never misfires on a local pick; or
+          *   (b) the client explicitly set a cloud provider this request (covers OpenRouter,
+          *       whose "vendor/model" slug matches no prefix) — an active cloud selection.
+          * A missing key then fails loudly in session_set_llm_config below rather than
+          * silently substituting local. */
+         bool model_is_cloud = strncmp(config.model, "gpt-", 4) == 0 ||
+                               strncmp(config.model, "o1-", 3) == 0 ||
+                               strncmp(config.model, "o3-", 3) == 0 ||
+                               strncmp(config.model, "claude-", 7) == 0 ||
+                               strncmp(config.model, "gemini-", 7) == 0;
+         bool provider_is_cloud = provider_explicitly_set &&
+                                  config.cloud_provider != CLOUD_PROVIDER_NONE;
+         if (config.type != LLM_CLOUD && (model_is_cloud || provider_is_cloud)) {
+            config.type = LLM_CLOUD;
+            has_changes = true;
+            OLOG_INFO("WebUI: Corrected stale local type to cloud for model '%s'", config.model);
+         }
+
          /* Parse thinking_mode (disabled/auto/enabled) */
          struct json_object *thinking_mode_obj;
          if (json_object_object_get_ex(payload, "thinking_mode", &thinking_mode_obj)) {
