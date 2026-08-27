@@ -243,7 +243,8 @@ void webui_send_transcript(struct session *session, const char *role, const char
 void webui_send_transcript_ex(struct session *session,
                               const char *role,
                               const char *text,
-                              bool server_saved);
+                              bool server_saved,
+                              int64_t message_id);
 
 /**
  * @brief Send state update to WebSocket client

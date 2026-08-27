@@ -73,21 +73,28 @@ __attribute__((weak)) void webui_broadcast_message_appended(int user_id,
                                                             int64_t conv_id,
                                                             int64_t msg_id,
                                                             const char *role,
-                                                            const char *text) {
+                                                            const char *text,
+                                                            const char *reasoning,
+                                                            unsigned stream_id) {
    (void)user_id;
    (void)conv_id;
    (void)msg_id;
    (void)role;
    (void)text;
+   (void)reasoning;
+   (void)stream_id;
 }
 
 void conv_event_notify_message_appended(int64_t conv_id,
                                         int user_id,
                                         int64_t msg_id,
                                         const char *role,
-                                        const char *text) {
+                                        const char *text,
+                                        const char *reasoning,
+                                        unsigned stream_id) {
    if (conv_id <= 0 || user_id <= 0 || text == NULL || text[0] == '\0') {
       return;
    }
-   webui_broadcast_message_appended(user_id, conv_id, msg_id, role ? role : "assistant", text);
+   webui_broadcast_message_appended(user_id, conv_id, msg_id, role ? role : "assistant", text,
+                                    reasoning, stream_id);
 }

@@ -245,6 +245,8 @@ typedef struct {
          char *text;
          bool server_saved;       /* Message already persisted to DB server-side */
          int64_t conversation_id; /* Live-turn conversation (0 = none); routes tool/visual frames */
+         int64_t message_id; /* DB row id (0 = none); lets the client stamp data-message-id so a
+                              * fanned-out message_appended dedups (server-authoritative §12c) */
       } transcript;
       struct {
          char *code;

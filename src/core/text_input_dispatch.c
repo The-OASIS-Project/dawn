@@ -96,15 +96,15 @@ char *core_text_input_dispatch(session_t *session,
     * echo carry server_saved=true, which is what tells the browser NOT to
     * double-save.  Non-WebUI callers (messaging) leave the override NULL and
     * persist plain text. */
-   bool persisted = false;
+   int64_t user_msg_id = 0;
    if (opts && opts->conversation_id > 0) {
       const char *persist_text = opts->persist_content_override ? opts->persist_content_override
                                                                 : text;
-      int64_t msg_id = 0;
       if (conv_db_add_message_ex(opts->conversation_id, opts->auth_user_id, "user", persist_text,
-                                 &msg_id) == AUTH_DB_SUCCESS) {
-         persisted = true;
-         session_stamp_last_message_id(session, "user", msg_id);
+                                 &user_msg_id) == AUTH_DB_SUCCESS) {
+         session_stamp_last_message_id(session, "user", user_msg_id);
+      } else {
+         user_msg_id = 0;
       }
    }
 
@@ -114,7 +114,7 @@ char *core_text_input_dispatch(session_t *session,
     * message render immediately while the server is still preparing
     * the response. */
    if (opts && opts->on_user_msg_added) {
-      opts->on_user_msg_added(opts->user_msg_added_ctx, text, persisted);
+      opts->on_user_msg_added(opts->user_msg_added_ctx, text, user_msg_id);
    }
 
    /* Step 4: per-turn focus injection (memory + entity + relation +

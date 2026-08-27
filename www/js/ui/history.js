@@ -387,7 +387,7 @@
       });
    }
 
-   function requestSaveMessage(convId, role, content, reasoning) {
+   function requestSaveMessage(convId, role, content, reasoning, streamId) {
       if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
       if (!convId || !role || !content) return;
 
@@ -399,6 +399,12 @@
       // E3: display-only reasoning persisted server-side as a JSON string field.
       if (reasoning && typeof reasoning === 'object') {
          payload.reasoning = JSON.stringify(reasoning);
+      }
+      // Phase-0 (server-authoritative persistence §6a): the stream this reply was
+      // delivered on, so the server echoes it into message_appended and THIS client
+      // recognizes its own save-echo (adopt, don't re-render). Transitional field.
+      if (streamId) {
+         payload.stream_id = streamId;
       }
       DawnWS.send({ type: 'save_message', payload });
    }
@@ -601,7 +607,13 @@
       // queued text into the voice conversation.
       if (!serverInitiated && historyState.pendingMessages.length > 0) {
          historyState.pendingMessages.forEach((msg) => {
-            requestSaveMessage(payload.conversation_id, msg.role, msg.content, msg.reasoning);
+            requestSaveMessage(
+               payload.conversation_id,
+               msg.role,
+               msg.content,
+               msg.reasoning,
+               msg.streamId
+            );
          });
          historyState.pendingMessages = [];
       }
@@ -737,9 +749,15 @@
          // CP4b: stamp each rendered entry with its message's created_at so
          // DawnAgentEvents can slot a durable-event marker (e.g. a `resume` boundary)
          // at the right spot by timestamp.  Tags the entries this message just added.
-         const tagEntries = (fromLen, ts) => {
+         const tagEntries = (fromLen, ts, msgId) => {
             for (let k = fromLen; k < transcript.children.length; k++) {
                transcript.children[k].setAttribute('data-ts', String(ts || 0));
+               // Phase-0 (server-authoritative persistence §6a): stamp the DB message_id
+               // on every reloaded bubble so a message_appended arriving after a reload
+               // dedups instead of double-rendering.
+               if (msgId != null) {
+                  transcript.children[k].setAttribute('data-message-id', String(msgId));
+               }
             }
          };
          (async () => {
@@ -759,7 +777,7 @@
                   if (msg.tool_call_id && !consumedResultIds.has(msg.tool_call_id)) {
                      DawnTranscript.addDebug('tool result', `[Tool Result: ${msg.content || ''}]`);
                   }
-                  tagEntries(entryStart, msg.created_at);
+                  tagEntries(entryStart, msg.created_at, msg.id);
                   continue;
                }
 
@@ -786,12 +804,12 @@
                      // the debug badge/colour matches the live 'tool call' rendering.
                      DawnTranscript.addDebug('tool call', combined);
                   }
-                  tagEntries(entryStart, msg.created_at);
+                  tagEntries(entryStart, msg.created_at, msg.id);
                   continue;
                }
 
                await DawnTranscript.addEntry(msg.role, msg.content, msg.reasoning);
-               tagEntries(entryStart, msg.created_at);
+               tagEntries(entryStart, msg.created_at, msg.id);
             }
 
             // Add continuation link at bottom for archived conversations (after all messages)
@@ -1716,7 +1734,7 @@
    /**
     * Save a message to the current conversation (auto-creates conversation if needed)
     */
-   function saveMessageToHistory(role, content, reasoning) {
+   function saveMessageToHistory(role, content, reasoning, streamId) {
       if (role !== 'user' && role !== 'assistant' && role !== 'tool') return;
       if (!content || !content.trim()) return;
 
@@ -1728,7 +1746,7 @@
          if (role === 'user' && typeof DawnSettings !== 'undefined') {
             DawnSettings.lockConversationLlmSettings(historyState.activeConversationId);
          }
-         requestSaveMessage(historyState.activeConversationId, role, content, reasoning);
+         requestSaveMessage(historyState.activeConversationId, role, content, reasoning, streamId);
          return;
       }
 
@@ -1741,7 +1759,8 @@
             requestNewConversation(title);
          }
       } else {
-         historyState.pendingMessages.push({ role, content, reasoning });
+         // Carry streamId so the flush after conv-create still echoes it (Phase-0).
+         historyState.pendingMessages.push({ role, content, reasoning, streamId });
       }
    }
 

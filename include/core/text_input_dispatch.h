@@ -53,10 +53,12 @@ extern "C" {
  *
  * @param ctx Caller-supplied context pointer (`opts->user_msg_added_ctx`).
  * @param text The user message text that was just added.
- * @param persisted_to_db True if the message was successfully written
- *                        to conv_db (only when `opts->conversation_id > 0`).
+ * @param message_id The persisted DB row id of the user message (0 = not persisted;
+ *                   `persisted == message_id > 0`).  Lets the WebUI hook stamp + fan
+ *                   out the user message by its real id (replaced the old
+ *                   `bool persisted_to_db`).
  */
-typedef void (*text_input_user_msg_added_fn)(void *ctx, const char *text, bool persisted_to_db);
+typedef void (*text_input_user_msg_added_fn)(void *ctx, const char *text, int64_t message_id);
 
 /**
  * @brief Per-call options for `core_text_input_dispatch()`.

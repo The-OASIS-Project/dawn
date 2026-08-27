@@ -300,8 +300,11 @@ static void job_worker_run(job_work_t *work) {
     * tailing this job sees every step and then never learns the conclusion.  Skip
     * when the row was already persisted (item 2) — the body is already on the stream. */
    if (have_answer && !already_persisted) {
+      /* A user watching this job streams the answer via the conversation-tagged
+       * fan-out on session `s`; stamp its stream_id so the watcher adopts rather
+       * than double-renders (0 would re-render). Reasoning capture is Phase 1. */
       conv_event_notify_message_appended(work->conv_id, work->user_id, final_msg_id, "assistant",
-                                         response);
+                                         response, NULL, atomic_load(&s->current_stream_id));
    }
 
    /* `shutdown_stop` (the daemon pulled the rug, vs a human asking for the stop) was

@@ -465,7 +465,18 @@ static void *reinvoke_turn_entry(void *arg) {
        * entries pile below it.  A live viewer is a WEBUI session, so this renders. */
       session_set_tool_iteration_hook(live, webui_tool_iteration_cb, NULL);
       text_input_dispatch_opts_t opts = reinvoke_dispatch_opts(user_id);
+      /* LIVE path only: if this viewer has TTS on, speak the re-engagement like a
+       * normal turn (state:speaking + streamed audio via the wired callback,
+       * closed by _finish → audio_end + state:idle).  No-op weak default off the
+       * WebUI build, and the shared opts builder keeps the detached path silent. */
+      bool tts_use_opus = false;
+      bool tts_wired = webui_reinvoke_tts_begin(live, &opts, &tts_use_opus);
       char *response = core_text_input_dispatch(live, envelope, NULL, NULL, NULL, 0, &opts);
+      if (tts_wired) {
+         /* Codec captured at begin (pre-dispatch) so this close never derefs a
+          * client_data the lws thread may have freed during a long tool loop. */
+         webui_reinvoke_tts_finish(live, tts_use_opus);
+      }
       session_set_tool_iteration_hook(live, NULL, NULL);
       session_set_tool_persist_hook(live, NULL, NULL);
 
@@ -488,8 +499,11 @@ static void *reinvoke_turn_entry(void *arg) {
                                                            &appended_id) == AUTH_DB_SUCCESS);
             if (persisted_ok) {
                job_reinvoke_notify_conv_appended(user_id, parent);
+               /* Live reinvoke streamed to `live`; stamp its stream_id so if that
+                * viewer returns to the parent it adopts rather than re-renders. */
                conv_event_notify_message_appended(parent, user_id, appended_id, "assistant",
-                                                  response);
+                                                  response, NULL,
+                                                  atomic_load(&live->current_stream_id));
             }
          }
          if (persisted_ok) {
@@ -588,8 +602,9 @@ static void reinvoke_run_detached(reinvoke_work_t *w,
                                          NULL, NULL, &appended_id) == AUTH_DB_SUCCESS) {
          conv_db_job_mark_fired_many(fired_ids, n_fired);
          job_reinvoke_notify_conv_appended(w->user_id, w->parent_conv);
+         /* Detached: no viewer streamed this → stream_id 0 (all viewers render inline). */
          conv_event_notify_message_appended(w->parent_conv, w->user_id, appended_id, "assistant",
-                                            response);
+                                            response, NULL, 0);
          OLOG_INFO("job_reinvoke: re-engaged parent %lld (detached) with %d job result(s)",
                    (long long)w->parent_conv, n_fired);
       } else {
@@ -832,4 +847,22 @@ __attribute__((weak)) session_t *webui_find_reinvoke_viewer(int64_t conv_id, int
 __attribute__((weak)) int64_t webui_session_active_conversation(session_t *s) {
    (void)s;
    return 0;
+}
+
+/* Weak default: no WebUI → no TTS wiring, so a reinvoke turn stays silent. */
+__attribute__((weak)) bool webui_reinvoke_tts_begin(session_t *live,
+                                                    text_input_dispatch_opts_t *opts,
+                                                    bool *use_opus_out) {
+   (void)live;
+   (void)opts;
+   if (use_opus_out != NULL) {
+      *use_opus_out = false;
+   }
+   return false;
+}
+
+/* Weak default: nothing to close without WebUI. */
+__attribute__((weak)) void webui_reinvoke_tts_finish(session_t *live, bool use_opus) {
+   (void)live;
+   (void)use_opus;
 }

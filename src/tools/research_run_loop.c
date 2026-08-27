@@ -509,8 +509,9 @@ static void research_persist_report_to_job_conv(const research_run_t *run0, cons
                    (long long)run0->conversation_id);
       return;
    }
+   /* Research runs detached (no viewer streamed this) → stream_id 0. */
    conv_event_notify_message_appended(run0->conversation_id, run0->user_id, msg_id, "assistant",
-                                      body);
+                                      body, NULL, 0);
 }
 
 /* A short lead from the synthesized report for the chat completion message: the

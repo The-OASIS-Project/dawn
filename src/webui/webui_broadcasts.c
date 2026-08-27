@@ -61,6 +61,7 @@
 #include "tools/calendar_service.h"
 #include "utils/string_utils.h"
 #include "webui/webui_internal.h"
+#include "webui/webui_send.h" /* webui_sentence_audio_callback, webui_send_audio_end/_state */
 #include "webui/webui_server.h"
 
 /* =============================================================================
@@ -716,7 +717,9 @@ void webui_broadcast_message_appended(int user_id,
                                       int64_t conv_id,
                                       int64_t msg_id,
                                       const char *role,
-                                      const char *text) {
+                                      const char *text,
+                                      const char *reasoning,
+                                      unsigned stream_id) {
    if (user_id <= 0 || conv_id <= 0 || text == NULL) {
       return;
    }
@@ -734,6 +737,13 @@ void webui_broadcast_message_appended(int user_id,
    json_object_object_add(p, "message_id", json_object_new_int64(msg_id));
    json_object_object_add(p, "role", json_object_new_string(role ? role : "assistant"));
    json_object_object_add(p, "text", json_object_new_string(text));
+   /* Phase-0 cross-viewer fan-out fields (SERVER_AUTHORITATIVE_PERSISTENCE_DESIGN §6a):
+    * reasoning lets a non-origin viewer render the E3 panel; stream_id lets the
+    * origin correlate + adopt instead of re-rendering. */
+   if (reasoning && reasoning[0]) {
+      json_object_object_add(p, "reasoning", json_object_new_string(reasoning));
+   }
+   json_object_object_add(p, "stream_id", json_object_new_int64((int64_t)stream_id));
    json_object_object_add(root, "payload", p);
 
    /* broadcast_json_to_user TAKES OWNERSHIP — no json_object_put here. */
@@ -1342,6 +1352,50 @@ session_t *webui_find_reinvoke_viewer(int64_t conv_id, int user_id) {
  * is currently viewing (used by the reinvoke closure's server-persist decision). */
 int64_t webui_session_active_conversation(session_t *s) {
    return webui_get_active_conversation_id(s);
+}
+
+/* Strong override: wire TTS onto a live reinvoke turn when the viewer has it on.
+ * live is a SESSION_TYPE_WEBUI viewer (webui_find_reinvoke_viewer guarantees the
+ * type), so client_data is its ws_connection_t.  Pointing sentence_cb at
+ * webui_sentence_audio_callback gives the re-engagement the same streamed-audio +
+ * state:speaking behavior as a normal turn. */
+bool webui_reinvoke_tts_begin(session_t *live,
+                              text_input_dispatch_opts_t *opts,
+                              bool *use_opus_out) {
+   if (use_opus_out != NULL) {
+      *use_opus_out = false;
+   }
+   if (!live || !opts) {
+      return false;
+   }
+   ws_connection_t *conn = (ws_connection_t *)live->client_data;
+   if (!conn || !atomic_load(&conn->tts_enabled)) {
+      return false;
+   }
+   opts->sentence_cb = webui_sentence_audio_callback;
+   opts->sentence_userdata = live;
+   /* Capture the codec now, while conn is known live, so _finish (post-dispatch)
+    * needs no client_data deref — the lws thread may free conn during a long
+    * re-engagement, and this mirrors the normal turn's early-capture. */
+   if (use_opus_out != NULL) {
+      *use_opus_out = atomic_load(&conn->use_opus);
+   }
+   return true;
+}
+
+/* Strong override: close the reinvoke's TTS audio stream + settle to idle.  Only
+ * called when _tts_begin returned true (TTS was on).  When the turn actually
+ * spoke, the sentence callback already emitted state:speaking and this brackets
+ * it with audio_end + state:idle (a normal turn's envelope, so echo-mute
+ * disengages and clients settle); on an empty/cancelled turn no speaking preceded
+ * and these two frames simply close an empty audio buffer + settle to idle, both
+ * harmless/idempotent.  Uses the codec captured at begin — no client_data deref. */
+void webui_reinvoke_tts_finish(session_t *live, bool use_opus) {
+   if (!live) {
+      return;
+   }
+   webui_send_audio_end(live, use_opus);
+   webui_send_state(live, "idle");
 }
 
 void webui_broadcast_memory_proposals_changed(int user_id) {

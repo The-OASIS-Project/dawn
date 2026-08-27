@@ -2021,7 +2021,8 @@ int webui_server_get_port(void) {
 void webui_send_transcript_ex(session_t *session,
                               const char *role,
                               const char *text,
-                              bool server_saved) {
+                              bool server_saved,
+                              int64_t message_id) {
    if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_JOB)) {
       return;
    }
@@ -2033,6 +2034,7 @@ void webui_send_transcript_ex(session_t *session,
                               .text = strdup(text),
                               .server_saved = server_saved,
                               .conversation_id = session->stream_conversation_id,
+                              .message_id = message_id,
                           } };
 
    if (!resp.transcript.role || !resp.transcript.text) {
@@ -2046,7 +2048,7 @@ void webui_send_transcript_ex(session_t *session,
 }
 
 void webui_send_transcript(session_t *session, const char *role, const char *text) {
-   webui_send_transcript_ex(session, role, text, false);
+   webui_send_transcript_ex(session, role, text, false, 0);
 }
 
 void webui_send_state_with_detail(session_t *session, const char *state, const char *detail) {

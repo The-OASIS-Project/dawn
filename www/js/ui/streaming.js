@@ -80,6 +80,7 @@
       }
       DawnState.streamingState.active = false;
       DawnState.streamingState.streamId = null;
+      DawnState.streamingState.conversationId = null;
       DawnState.streamingState.entryElement = null;
       DawnState.streamingState.textElement = null;
       DawnState.streamingState.content = '';
@@ -152,6 +153,10 @@
          // Update streaming state
          DawnState.streamingState.active = true;
          DawnState.streamingState.streamId = payload.stream_id;
+         // Phase-0 (server-authoritative persistence §6a): remember which conversation
+         // this stream belongs to so finalize can record (conv, streamId) → bubble for
+         // the message_appended adopt-map.
+         DawnState.streamingState.conversationId = payload.conversation_id;
          DawnState.streamingState.entryElement = entry;
          DawnState.streamingState.textElement = entry.querySelector('.text');
          DawnState.streamingState.content = '';
@@ -355,6 +360,10 @@
 
       DawnState.streamingState.active = true;
       DawnState.streamingState.streamId = payload.stream_id;
+      // Phase-0 adopt-map (§6a): a resumed viewer streamed this reply too, so it
+      // must record (conv, streamId) at finalize to adopt the fanned message_appended
+      // instead of double-rendering. Without this the resumed viewer re-renders.
+      DawnState.streamingState.conversationId = payload.conversation_id;
       DawnState.streamingState.entryElement = entry;
       DawnState.streamingState.textElement = entry.querySelector('.text');
       DawnState.streamingState.content = payload.partial;
@@ -419,6 +428,91 @@
       DawnState.thinkingState.finalizedContent = '';
       DawnState.thinkingState.finalizedDuration = '0';
       DawnState.thinkingState.finalizedProvider = null;
+   }
+
+   /* Phase-0 cross-viewer adopt-map (server-authoritative persistence §6a): a small
+    * ring of recently-finalized assistant bubbles awaiting their DB message_id.  The
+    * ORIGIN viewer streamed the reply and rendered the bubble; the post-persist
+    * `message_appended` (carrying the same stream_id) lets it ADOPT the message_id
+    * onto that bubble instead of re-rendering.  Deliberately survives finalizeStream's
+    * state reset — the correlating frame arrives AFTER finalize. */
+   var finalizedRing = [];
+   var FINALIZED_RING_MAX = 12;
+
+   function recordFinalized(conv, streamId, el) {
+      if (conv == null || !streamId || !el) return;
+      finalizedRing.push({ conv: String(conv), streamId: streamId, el: el, messageId: null });
+      if (finalizedRing.length > FINALIZED_RING_MAX) finalizedRing.shift();
+   }
+
+   /**
+    * Handle a `message_appended` fan-out frame (server-authoritative persistence §6a).
+    *   ORIGIN: (conv, stream_id) matches a finalized bubble still awaiting an id →
+    *           adopt message_id onto it, do NOT re-render (already on screen).
+    *   NON-ORIGIN, active view → render the pushed reply inline (+ reasoning panel),
+    *           tagged with its message_id.  Dedup: a bubble already carrying that
+    *           message_id is never re-rendered (covers stream / appended / reload).
+    *   NON-ACTIVE → mark the conversation unread (existing behavior).
+    */
+   async function handleMessageAppended(payload) {
+      if (!payload) return;
+      var conv = payload.conversation_id;
+      var msgId = payload.message_id;
+      var streamId = payload.stream_id;
+
+      // 1. Origin adopt — my own already-streamed bubble.
+      if (streamId) {
+         for (var i = 0; i < finalizedRing.length; i++) {
+            var e = finalizedRing[i];
+            if (e.messageId == null && e.streamId === streamId && String(e.conv) === String(conv)) {
+               e.messageId = msgId;
+               if (e.el && msgId != null) {
+                  e.el.setAttribute('data-message-id', String(msgId));
+               }
+               return;
+            }
+         }
+      }
+
+      var activeConv =
+         typeof DawnHistory !== 'undefined' && DawnHistory.getActiveConversationId
+            ? DawnHistory.getActiveConversationId()
+            : null;
+      var isActive = activeConv != null && String(conv) === String(activeConv);
+
+      if (!isActive) {
+         if (typeof DawnHistory !== 'undefined' && DawnHistory.setConversationUnread) {
+            DawnHistory.setConversationUnread(conv, true);
+         }
+         return;
+      }
+
+      // 2. Dedup — never re-render a message_id already on screen.
+      var transcript = DawnElements.transcript;
+      if (
+         msgId != null &&
+         transcript &&
+         transcript.querySelector('[data-message-id="' + String(msgId) + '"]')
+      ) {
+         return;
+      }
+
+      // 3. Non-origin inline render (+ reasoning panel), stamped with message_id.
+      if (typeof DawnTranscript === 'undefined' || !DawnTranscript.addEntry) return;
+      var reasoningObj = null;
+      if (payload.reasoning) {
+         try {
+            reasoningObj = JSON.parse(payload.reasoning);
+         } catch (err) {
+            reasoningObj = null;
+         }
+      }
+      await DawnTranscript.addEntry(
+         payload.role || 'assistant',
+         payload.text || '',
+         reasoningObj,
+         msgId
+      );
    }
 
    /**
@@ -514,7 +608,15 @@
           * server_saved replay. Visual rendering on replay is handled by
           * extractVisuals() in addNormalEntry. */
 
-         callbacks.onSaveMessage('assistant', fullContent, reasoning);
+         /* Phase-0: pass the stream_id so the client-save echoes it into the
+          * fanned-out message_appended, and record this bubble in the adopt-map so
+          * the returning echo adopts the id instead of re-rendering. */
+         callbacks.onSaveMessage(
+            'assistant',
+            fullContent,
+            reasoning,
+            DawnState.streamingState.streamId
+         );
 
          // Clear finalized thinking content after saving
          DawnState.thinkingState.finalizedContent = '';
@@ -522,9 +624,23 @@
          DawnState.thinkingState.finalizedProvider = null;
       }
 
+      // Phase-0 adopt-map: record (conv, streamId) → bubble BEFORE the reset nulls
+      // them, so the post-persist message_appended can adopt onto this bubble.  Only
+      // when content was actually saved — an empty-reply turn produces no
+      // message_appended, so recording it would leave a stale null-id ring entry that
+      // a later same-numbered stream from another session could false-adopt.
+      if (fullContent) {
+         recordFinalized(
+            DawnState.streamingState.conversationId,
+            DawnState.streamingState.streamId,
+            DawnState.streamingState.entryElement
+         );
+      }
+
       // Reset state
       DawnState.streamingState.active = false;
       DawnState.streamingState.streamId = null;
+      DawnState.streamingState.conversationId = null;
       DawnState.streamingState.entryElement = null;
       DawnState.streamingState.textElement = null;
       DawnState.streamingState.content = '';
@@ -931,6 +1047,7 @@
       handleDelta: handleStreamDelta,
       handleEnd: handleStreamEnd,
       handleResume: handleStreamResume,
+      handleMessageAppended: handleMessageAppended,
       resetSilently: resetStreamingStateSilently,
       finalize: finalizeStream,
       setCallbacks: setCallbacks,

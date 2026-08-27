@@ -396,7 +396,8 @@ void send_transcript_impl_ex(struct lws *wsi,
                              const char *text,
                              bool replay,
                              bool server_saved,
-                             int64_t conversation_id) {
+                             int64_t conversation_id,
+                             int64_t message_id) {
    /* Escape JSON special characters in text */
    struct json_object *obj = json_object_new_object();
    struct json_object *payload = json_object_new_object();
@@ -405,6 +406,11 @@ void send_transcript_impl_ex(struct lws *wsi,
    json_object_object_add(payload, "text", json_object_new_string(text));
    if (conversation_id > 0) {
       json_object_object_add(payload, "conversation_id", json_object_new_int64(conversation_id));
+   }
+   /* DB row id so the client stamps data-message-id on the echoed bubble and the
+    * fanned-out message_appended for the same row dedups (server-authoritative §12c). */
+   if (message_id > 0) {
+      json_object_object_add(payload, "message_id", json_object_new_int64(message_id));
    }
    if (replay) {
       json_object_object_add(payload, "replay", json_object_new_boolean(true));
@@ -421,7 +427,7 @@ void send_transcript_impl_ex(struct lws *wsi,
 }
 
 static void send_transcript_impl(struct lws *wsi, const char *role, const char *text) {
-   send_transcript_impl_ex(wsi, role, text, false, false, 0);
+   send_transcript_impl_ex(wsi, role, text, false, false, 0, 0);
 }
 
 void send_error_impl(struct lws *wsi, const char *code, const char *message) {
@@ -897,7 +903,8 @@ void process_one_response(void) {
          break;
       case WS_RESP_TRANSCRIPT:
          send_transcript_impl_ex(conn->wsi, resp.transcript.role, resp.transcript.text, false,
-                                 resp.transcript.server_saved, resp.transcript.conversation_id);
+                                 resp.transcript.server_saved, resp.transcript.conversation_id,
+                                 resp.transcript.message_id);
          free(resp.transcript.role);
          free(resp.transcript.text);
          break;

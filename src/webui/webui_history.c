@@ -1770,6 +1770,21 @@ void handle_save_message(ws_connection_t *conn, struct json_object *payload) {
       }
    }
 
+   /* Phase-0 R1 (SERVER_AUTHORITATIVE_PERSISTENCE_DESIGN §6a): the client sends the
+    * stream this reply was delivered on, so we echo it into the fanned-out
+    * message_appended below and the ORIGIN viewer recognizes its own save-echo
+    * (adopts the msg_id onto the already-streamed bubble instead of re-rendering).
+    * Transitional field — removed in Phase 2 when the client-save is retired. */
+   unsigned client_stream_id = 0;
+   json_object *sid_obj;
+   if (json_object_object_get_ex(payload, "stream_id", &sid_obj) &&
+       json_object_is_type(sid_obj, json_type_int)) {
+      int64_t sid = json_object_get_int64(sid_obj);
+      if (sid > 0 && sid <= (int64_t)UINT32_MAX) {
+         client_stream_id = (unsigned)sid;
+      }
+   }
+
    /* SECURITY: Validate any embedded image thumbnails (size limit, safe prefix) */
    if (!validate_image_marker(content)) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
@@ -1804,7 +1819,8 @@ void handle_save_message(ws_connection_t *conn, struct json_object *payload) {
        * open would otherwise never receive the answer.  Assistant rows only:
        * user text is echoed to the sender already. */
       if (role && strcmp(role, "assistant") == 0) {
-         conv_event_notify_message_appended(conv_id, conn->auth_user_id, msg_id, role, content);
+         conv_event_notify_message_appended(conv_id, conn->auth_user_id, msg_id, role, content,
+                                            reasoning, client_stream_id);
       }
       /* Promote any referenced images to PERMANENT so they survive age/LRU eviction
        * for the life of the conversation (conversation-lifecycle-owned).  Owner-checked

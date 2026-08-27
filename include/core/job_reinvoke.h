@@ -39,6 +39,7 @@
 
 #include "auth/auth_db.h"
 #include "core/session_manager.h"
+#include "core/text_input_dispatch.h" /* text_input_dispatch_opts_t (TTS-wire seam) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -73,6 +74,51 @@ session_t *webui_find_reinvoke_viewer(int64_t conv_id, int user_id);
  * would otherwise be lost).  Weak default returns 0.
  */
 int64_t webui_session_active_conversation(session_t *s);
+
+/**
+ * @brief Weak Layer-4 seam: wire TTS onto a LIVE reinvoke turn streaming into a
+ *        WebUI viewer, when that viewer has TTS enabled.
+ *
+ * A background-job re-engagement into a live viewer is a first-class spoken turn
+ * when the viewer has TTS on — but its dispatch opts default `sentence_cb` to
+ * NULL (the shared opts builder also serves the detached, client-less path).
+ * The strong override reads @p live's connection `tts_enabled`; if set, it points
+ * @p opts->sentence_cb at the WebUI sentence-audio callback (which emits
+ * state:speaking and streams audio) with @p live as userdata, captures the
+ * client's codec into @p use_opus_out, and returns true.  Call ONLY on the live
+ * path; pair a true return with webui_reinvoke_tts_finish(live, *use_opus_out)
+ * after dispatch.  Weak default returns false (headless / non-WebUI → the turn
+ * stays silent, as before).
+ *
+ * The codec is captured HERE (at dispatch start, while the connection is known
+ * live) rather than re-read at finish time — mirroring the normal turn's
+ * early-capture, so the post-dispatch finish never derefs a `client_data` that
+ * an lws-thread disconnect may have freed mid-turn.
+ *
+ * @param live The retained live viewer session (SESSION_TYPE_WEBUI).
+ * @param opts Dispatch opts to mutate in place.
+ * @param use_opus_out Out: the client's Opus codec flag (only valid on true).
+ * @return true if TTS was wired (caller must call _finish), false otherwise.
+ */
+bool webui_reinvoke_tts_begin(session_t *live,
+                              text_input_dispatch_opts_t *opts,
+                              bool *use_opus_out);
+
+/**
+ * @brief Weak Layer-4 seam: close a live reinvoke's TTS audio stream and settle
+ *        the client back to idle.
+ *
+ * Called after dispatch ONLY when webui_reinvoke_tts_begin() returned true, with
+ * the @p use_opus it captured.  Emits the audio-end marker (@p use_opus codec)
+ * then state:idle.  When the turn actually spoke, the sentence callback already
+ * emitted state:speaking, so this brackets it in the normal state:speaking→idle
+ * envelope (echo-mute disengages, both UIs settle); on an empty/cancelled turn no
+ * speaking preceded and the two frames merely close an empty audio buffer + settle
+ * to idle — both harmless/idempotent.  Operates only on @p live (retained across
+ * the turn); does NOT read `client_data`, so it is free of the mid-turn freed-conn
+ * window.  Weak default is a no-op.
+ */
+void webui_reinvoke_tts_finish(session_t *live, bool use_opus);
 
 /**
  * @brief Register the reinvoke processor with the completion monitor.

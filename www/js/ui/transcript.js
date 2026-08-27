@@ -495,7 +495,7 @@
     * @param {string} role - Message role (user, assistant, system)
     * @param {string} text - Message text
     */
-   async function addNormalEntry(role, text, extractedDocs) {
+   async function addNormalEntry(role, text, extractedDocs, messageId) {
       const transcript = DawnElements.transcript;
       if (!transcript) return;
 
@@ -563,6 +563,13 @@
       <div class="text">${DawnFormat.markdown(firstText)}</div>
     `;
       transcript.appendChild(entry);
+      // Server-authoritative persistence (§6a/§12c): stamp the DB message_id on THIS
+      // node SYNCHRONOUSLY (before the image-load await below), so a fanned-out
+      // message_appended for the same row dedups even when this render parks on an
+      // async image fetch, and so the id lands on the bubble — never a later sibling.
+      if (messageId != null) {
+         entry.setAttribute('data-message-id', String(messageId));
+      }
 
       // Append remaining segments (visuals + text blocks)
       for (let i = firstText ? 1 : 0; i < segments.length; i++) {
@@ -621,7 +628,7 @@
     * @param {string} role - Message role
     * @param {string} text - Message text
     */
-   async function addTranscriptEntry(role, text, reasoning) {
+   async function addTranscriptEntry(role, text, reasoning, messageId) {
       const transcript = DawnElements.transcript;
       if (!transcript) return;
 
@@ -758,14 +765,17 @@
 
       const hasDebugContent = containsCommandTags(text);
 
+      // messageId is passed into addNormalEntry so it stamps data-message-id on the
+      // bubble SYNCHRONOUSLY at creation (§6a/§12c) — robust against the fan-out dedup
+      // racing an async image render, and correct even when other entries interleave.
       if (!hasDebugContent) {
          // Pure user-facing message - show normally
-         await addNormalEntry(role, text, extractedDocs);
+         await addNormalEntry(role, text, extractedDocs, messageId);
       } else if (isOnlyDebugContent(text)) {
          // Pure debug message (only commands/tool results) - debug only
          // Still render document chips if present
          if (extractedDocs.length > 0) {
-            await addNormalEntry(role, '', extractedDocs);
+            await addNormalEntry(role, '', extractedDocs, messageId);
          } else {
             addDebugEntry(`debug (${role})`, text);
          }
@@ -786,7 +796,7 @@
 
          // Add user-facing text if any (or if documents are attached)
          if (userText.length > 0 || extractedDocs.length > 0) {
-            await addNormalEntry(role, userText, extractedDocs);
+            await addNormalEntry(role, userText, extractedDocs, messageId);
          }
       }
 

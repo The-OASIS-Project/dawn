@@ -34,6 +34,7 @@
 #include "asr/asr_interface.h"
 #include "audio/resampler.h"
 #include "auth/auth_db.h"
+#include "core/conv_event.h"
 #include "core/session_manager.h"
 #include "core/text_filter.h"
 #include "core/turn_queue.h"
@@ -1238,17 +1239,29 @@ static void *audio_worker_thread(void *arg) {
       }
    }
    bool saved_to_db = false;
+   int64_t user_msg_id = 0;
    if (conn && conn->active_conversation_id > 0) {
-      int64_t msg_id = 0;
       if (conv_db_add_message_ex(conn->active_conversation_id, conn->auth_user_id, "user",
-                                 transcript, &msg_id) == AUTH_DB_SUCCESS) {
+                                 transcript, &user_msg_id) == AUTH_DB_SUCCESS) {
          saved_to_db = true;
-         session_stamp_last_message_id(session, "user", msg_id);
+         session_stamp_last_message_id(session, "user", user_msg_id);
+      } else {
+         user_msg_id = 0;
       }
    }
 
-   /* Echo transcription as user message (server_saved prevents duplicate client save) */
-   webui_send_transcript_ex(session, "user", transcript, saved_to_db);
+   /* Echo transcription as user message, carrying the DB row id so the origin
+    * stamps data-message-id + dedups its own fan-out copy (server_saved also
+    * prevents duplicate client save). */
+   webui_send_transcript_ex(session, "user", transcript, saved_to_db, user_msg_id);
+   /* Fan the user message out to every OTHER viewer of this conversation (§12c).
+    * INVARIANT (mirrors webui_text_processing.c): guard on user_msg_id > 0 so a save
+    * failure (id 0) emits ONLY the echo, never a second frame the client can't dedup —
+    * a spoken turn has no optimistic bubble, so an id-0 fan-out would double it. */
+   if (user_msg_id > 0 && conn && conn->auth_user_id > 0 && conn->active_conversation_id > 0) {
+      conv_event_notify_message_appended(conn->active_conversation_id, conn->auth_user_id,
+                                         user_msg_id, "user", transcript, NULL, 0);
+   }
 
    /* This turn's input is ASR-transcribed (voice) — flag it before dispatch so
     * the prompt builder injects the ASR-disambiguation hint for this turn.

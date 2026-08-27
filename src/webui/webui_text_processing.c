@@ -147,12 +147,29 @@ void webui_tool_iteration_cb(session_t *session, void *userdata) {
  * focus injection and the LLM call.  Preserves the WebUI's "transcript
  * echoes immediately after the user types" UX while keeping the
  * add/persist/focus/LLM sequence inside the Layer 2 helper. */
-static void webui_text_dispatch_on_user_msg(void *ctx, const char *text, bool persisted_to_db) {
+static void webui_text_dispatch_on_user_msg(void *ctx, const char *text, int64_t message_id) {
    session_t *session = (session_t *)ctx;
    if (!session || !text) {
       return;
    }
-   webui_send_transcript_ex(session, "user", text, persisted_to_db);
+   /* Echo to the origin, carrying the DB row id so the origin stamps
+    * data-message-id on its user bubble (and dedups its own fan-out copy). */
+   webui_send_transcript_ex(session, "user", text, message_id > 0, message_id);
+   /* Fan the user message out to every OTHER viewer of this conversation so a
+    * second open client sees the question, not just the answer (§12c).  The
+    * origin's own copy dedups on message_id via the echo above.  User messages are
+    * never streamed → stream_id 0, reasoning NULL.
+    * INVARIANT (mirrored in webui_audio.c): guard on message_id > 0 so a user turn
+    * only ever emits TWO frames (echo + fan-out) when they carry the SAME positive
+    * id — a save failure (id 0) emits only the echo, never an undedup-able double. */
+   if (message_id > 0) {
+      ws_connection_t *conn = (ws_connection_t *)session->client_data;
+      int64_t conv_id = atomic_load(&session->stream_conversation_id);
+      if (conn && conn->auth_user_id > 0 && conv_id > 0) {
+         conv_event_notify_message_appended(conv_id, conn->auth_user_id, message_id, "user", text,
+                                            NULL, 0);
+      }
+   }
 }
 
 /* Balanced exit for a worker that has passed its initial supersede check and
@@ -398,8 +415,12 @@ static void *text_worker_thread(void *arg) {
          } else {
             OLOG_INFO("WebUI: persisted final assistant answer server-side to conv %lld (%s)",
                       (long long)turn_conv, client_gone ? "client gone" : "backgrounded");
+            /* This turn streamed to `session`; stamp its stream_id so a returning
+             * origin adopts. Reasoning NULL here (server-side final-reasoning
+             * capture is Phase 1 — this backgrounded/gone path already omitted it). */
             conv_event_notify_message_appended(turn_conv, turn_user_id, appended_id, "assistant",
-                                               final_response);
+                                               final_response, NULL,
+                                               atomic_load(&session->current_stream_id));
          }
       }
    }

@@ -115,18 +115,32 @@ void webui_broadcast_conversation_event(int user_id,
  *
  * @param text May be NULL/empty; the frame is then skipped.
  */
+/*
+ * @p reasoning  Optional E3 "AI thought" JSON for the final answer (NULL/empty ok).
+ *               Lets a NON-origin viewer render the panel for a fanned-out reply.
+ * @p stream_id  The stream this reply was delivered on, so an ORIGIN viewer can
+ *               correlate its already-streamed bubble and adopt @p msg_id instead
+ *               of re-rendering (server-authoritative persistence, Phase 0).  0 =
+ *               "no live stream" (never matches a rendered bubble). Per-session,
+ *               per-tool-iteration counter — the client keys on (conv, stream_id)
+ *               and only a freshly-finalized, id-less bubble may adopt.
+ */
 void conv_event_notify_message_appended(int64_t conv_id,
                                         int user_id,
                                         int64_t msg_id,
                                         const char *role,
-                                        const char *text);
+                                        const char *text,
+                                        const char *reasoning,
+                                        unsigned stream_id);
 
 /** Weak seam for the above; strong override in webui_broadcasts.c. */
 void webui_broadcast_message_appended(int user_id,
                                       int64_t conv_id,
                                       int64_t msg_id,
                                       const char *role,
-                                      const char *text);
+                                      const char *text,
+                                      const char *reasoning,
+                                      unsigned stream_id);
 
 #ifdef __cplusplus
 }

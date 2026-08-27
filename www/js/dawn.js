@@ -207,7 +207,14 @@
                      pendingVisualsForSave = [];
                   }
 
-                  DawnTranscript.addEntry(msg.payload.role, displayContent);
+                  // Pass message_id (present on server-persisted echoes) so the bubble is
+                  // stamped and a fanned-out message_appended for the same row dedups (§12c).
+                  DawnTranscript.addEntry(
+                     msg.payload.role,
+                     displayContent,
+                     null,
+                     msg.payload.message_id
+                  );
 
                   // Save to conversation history (auto-creates conversation on first message)
                   // Skip replay messages (history replay on reconnect, already in DB)
@@ -584,8 +591,13 @@
                }
                break;
             case 'message_appended':
-               // Final assistant text for an event-only consumer. The browser
-               // already has it from the stream, so this is a no-op here.
+               // Phase-0 cross-viewer fan-out (server-authoritative persistence §6a):
+               // a reply persisted for THIS conversation. The origin (which streamed
+               // it) adopts the message_id onto its bubble; a second viewer of the
+               // same conversation renders it inline; a non-active viewer marks unread.
+               if (typeof DawnStreaming !== 'undefined' && DawnStreaming.handleMessageAppended) {
+                  DawnStreaming.handleMessageAppended(msg.payload);
+               }
                break;
             case 'thinking_start':
                DawnStreaming.handleThinkingStart(msg.payload);
