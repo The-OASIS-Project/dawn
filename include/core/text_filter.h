@@ -230,6 +230,26 @@ void text_filter_cited_reset(cited_tag_filter_state_t *state);
 void text_filter_cited_strip(char *text);
 
 /**
+ * @brief Canonicalize whitespace-malformed citation tags in place.
+ *
+ * Some models emit the citation tag with stray interior whitespace —
+ * `< cited>`, `<cited >`, `</ cited >` — which the exact-`strstr` grammar used by
+ * the strip AND the capture parser both miss, so the tag both leaks (into the
+ * persisted body / rendered text) AND loses its citation (never recorded).
+ * Rewrite any `< [ws] [/] [ws] cited [ws] >` to the canonical `<cited>` / `</cited>`
+ * so the downstream capture + strip see a well-formed tag.  Idempotent; the
+ * canonical form is never longer than the input, so it compacts in place.
+ *
+ * Call on a complete buffer BEFORE memory_citation_capture + text_filter_cited_strip
+ * (e.g. in llm_response_finalize).  Does NOT cover the streaming filter (a
+ * char-by-char state machine) — the live origin stream may still flash a malformed
+ * tag until reload.
+ *
+ * @param text NUL-terminated mutable C string; NULL tolerated (no-op).
+ */
+void text_filter_cited_normalize(char *text);
+
+/**
  * @brief Strip <command>…</command> pairs and truncate at <end_of_turn>, in place.
  *
  * The whole-string residual-tag scrub for the legacy command transport plus the

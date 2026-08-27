@@ -348,6 +348,48 @@ static void test_cited_strip_null_safe(void) {
    text_filter_cited_strip(NULL); /* must not crash */
 }
 
+/* ── whitespace-tolerant normalize (text_filter_cited_normalize) ──────────── */
+
+static void test_cited_normalize_space_after_open(void) {
+   /* The exact production leak: "< cited>...</cited>" with a space after '<'. */
+   char s[128] = "The answer. < cited>M1,M2</cited>";
+   text_filter_cited_normalize(s);
+   TEST_ASSERT_EQUAL_STRING("The answer. <cited>M1,M2</cited>", s);
+   text_filter_cited_strip(s); /* now the exact grammar matches → stripped */
+   TEST_ASSERT_EQUAL_STRING("The answer. ", s);
+}
+
+static void test_cited_normalize_space_before_close_bracket(void) {
+   char s[128] = "x<cited >M1</cited>y";
+   text_filter_cited_normalize(s);
+   TEST_ASSERT_EQUAL_STRING("x<cited>M1</cited>y", s);
+}
+
+static void test_cited_normalize_closing_variants(void) {
+   char s[128] = "a< cited >M1< / cited >b";
+   text_filter_cited_normalize(s);
+   TEST_ASSERT_EQUAL_STRING("a<cited>M1</cited>b", s);
+   text_filter_cited_strip(s);
+   TEST_ASSERT_EQUAL_STRING("ab", s);
+}
+
+static void test_cited_normalize_wellformed_unchanged(void) {
+   char s[128] = "already <cited>M1</cited> fine";
+   text_filter_cited_normalize(s);
+   TEST_ASSERT_EQUAL_STRING("already <cited>M1</cited> fine", s);
+}
+
+static void test_cited_normalize_non_tag_untouched(void) {
+   /* A bare '<' that is not a citation tag must be left alone. */
+   char s[128] = "1 < 2 and x<y, no < cite here";
+   text_filter_cited_normalize(s);
+   TEST_ASSERT_EQUAL_STRING("1 < 2 and x<y, no < cite here", s);
+}
+
+static void test_cited_normalize_null_safe(void) {
+   text_filter_cited_normalize(NULL); /* must not crash */
+}
+
 /* ── whole-string command strip (text_filter_command_strip) ──────────────── */
 
 static void test_command_strip_pair_and_eot(void) {
@@ -412,6 +454,12 @@ int main(void) {
    RUN_TEST(test_cited_strip_orphan_opener_truncates);
    RUN_TEST(test_cited_strip_no_tag_unchanged);
    RUN_TEST(test_cited_strip_null_safe);
+   RUN_TEST(test_cited_normalize_space_after_open);
+   RUN_TEST(test_cited_normalize_space_before_close_bracket);
+   RUN_TEST(test_cited_normalize_closing_variants);
+   RUN_TEST(test_cited_normalize_wellformed_unchanged);
+   RUN_TEST(test_cited_normalize_non_tag_untouched);
+   RUN_TEST(test_cited_normalize_null_safe);
    RUN_TEST(test_command_strip_pair_and_eot);
    RUN_TEST(test_command_strip_orphan_truncates_when_true);
    RUN_TEST(test_command_strip_orphan_left_when_false);

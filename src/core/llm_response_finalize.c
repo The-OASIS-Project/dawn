@@ -53,6 +53,12 @@ int llm_response_finalize(session_t *session, const char *raw_response, response
       return FAILURE;
    }
 
+   /* Canonicalize whitespace-malformed citation tags (`< cited>`, `<cited >`, …)
+    * BEFORE capture + strip: the exact-match grammar both paths use would otherwise
+    * miss a space-bearing tag, so it would both lose its citation AND leak into the
+    * persisted/rendered body. */
+   text_filter_cited_normalize(clean);
+
    /* Memory citation capture (self-gating no-op unless enabled + session has a
     * stash).  Runs BEFORE stripping so an <end_of_turn> truncation cannot hide a
     * trailing <cited> tag from the parser. */

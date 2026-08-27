@@ -233,6 +233,46 @@ void text_filter_cited_strip(char *text) {
    }
 }
 
+void text_filter_cited_normalize(char *text) {
+   if (!text)
+      return;
+
+   char *p = text;
+   while ((p = strchr(p, '<')) != NULL) {
+      const char *q = p + 1;
+      while (*q == ' ' || *q == '\t')
+         q++; /* whitespace after '<' */
+      bool closing = false;
+      if (*q == '/') {
+         closing = true;
+         q++;
+         while (*q == ' ' || *q == '\t')
+            q++; /* whitespace after '/' */
+      }
+      if (strncmp(q, "cited", 5) != 0) {
+         p++; /* not a citation tag — step past this '<' */
+         continue;
+      }
+      q += 5;
+      while (*q == ' ' || *q == '\t')
+         q++; /* whitespace before '>' */
+      if (*q != '>') {
+         p++; /* "< cited" with no closing '>' on this run — not a tag */
+         continue;
+      }
+      q++; /* consume '>' — [p, q) is the malformed tag */
+
+      /* Rewrite the malformed span to the canonical tag.  The canonical form is
+       * never longer than the matched span (we only removed interior whitespace),
+       * so this compacts in place: shift the tail left, then write the tag. */
+      const char *canon = closing ? CITED_TAG_CLOSE : CITED_TAG_OPEN;
+      size_t clen = closing ? CITED_TAG_CLOSE_LEN : CITED_TAG_OPEN_LEN;
+      memmove(p + clen, q, strlen(q) + 1);
+      memcpy(p, canon, clen);
+      p += clen;
+   }
+}
+
 void text_filter_command_strip(char *text, bool truncate_orphan) {
    if (!text)
       return;
