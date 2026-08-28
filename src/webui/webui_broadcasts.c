@@ -936,6 +936,110 @@ static bool any_session_matches(int user_id, int64_t conv_id_or_zero) {
    return found;
 }
 
+/* Cost-gate for the ephemeral tool-step fan (SERVER_AUTHORITATIVE_PERSISTENCE §Phase-3):
+ * is there an authenticated WEBUI browser for this user OTHER than the origin session?  If
+ * not, the fan is pure waste (the origin is excluded from recipients and renders its own
+ * steps), so the caller skips serialization entirely — the common single-viewer case pays
+ * only this cheap walk.
+ *
+ * Deliberately user-scoped, NOT conv-scoped: conv-scoping would deref client_data via
+ * webui_get_active_conversation_id (the tracked TOCTOU / voice-auto-bind race, TODO (d)),
+ * and the client already drops frames for a non-active conversation — so a 2nd browser on a
+ * different conv gets a few frames it discards (bounded, browsers_only).  Conv-scoping is a
+ * deferred optimization gated on the atomic-client_data fix.  session_id (monotonic), not the
+ * pointer, identifies the origin — matches the job_manager_claim_reaped convention.
+ *
+ * NOTE (deferred refactor): this + any_session_matches + broadcast_json_to_user_ex are three
+ * near-identical s_conn_registry_mutex walks; a shared for_each_user_browser(user_id,
+ * exclude_session_id, visitor) would retire the duplication and is the reuse seam for #4
+ * (multi-target TTS).  Kept separate here to avoid a hot-broadcast-path refactor riding in on
+ * a feature add. */
+static bool webui_user_has_other_browser(int user_id, uint32_t origin_session_id) {
+   if (user_id <= 0)
+      return false;
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   bool found = false;
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      ws_connection_t *conn = s_active_connections[i];
+      if (!conn || !conn->session || !conn->authenticated || !conn->wsi)
+         continue;
+      if (conn->session->type != SESSION_TYPE_WEBUI)
+         continue;
+      if (conn->auth_user_id != user_id)
+         continue;
+      if (conn->session->session_id == origin_session_id)
+         continue; /* the origin renders its own steps — never a bystander */
+      found = true;
+      break;
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+   return found;
+}
+
+/* Strong override of the conv_event (Layer 2) weak seam: fan ONE ephemeral tool step to the
+ * user's OTHER browsers viewing this conversation (SERVER_AUTHORITATIVE_PERSISTENCE §Phase-3).
+ *
+ * Ephemeral: no DB write, no seq (the messages table already persists the step; this is
+ * live-view sugar).  The ORIGIN session is excluded from the recipient set — so the client
+ * needs no load-bearing origin-suppression (a client-side "am I streaming" check is
+ * deterministically false by the time this arrives: the tool-iteration stream_end clears the
+ * streaming flag before the step emits, master-plan §5).  browsers_only + WEBUI-only cell:
+ * a satellite renders no debug transcript.  stream_id is best-effort/informational. */
+void webui_broadcast_tool_step(int user_id,
+                               int64_t conv_id,
+                               uint32_t origin_session_id,
+                               unsigned stream_id,
+                               const char *kind,
+                               const char *payload) {
+   if (user_id <= 0 || conv_id <= 0 || kind == NULL)
+      return;
+   /* Cost-gate: serialize + walk ONLY when a non-origin browser exists. */
+   if (!webui_user_has_other_browser(user_id, origin_session_id))
+      return;
+
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("tool_step"));
+   json_object *p = json_object_new_object();
+   json_object_object_add(p, "conversation_id", json_object_new_int64(conv_id));
+   json_object_object_add(p, "stream_id", json_object_new_int64((int64_t)stream_id));
+   json_object_object_add(p, "kind", json_object_new_string(kind));
+   /* payload is pre-redacted + pre-capped opaque JSON (event_payload.c).  Forwarded as a
+    * STRING, not re-parsed — the renderer treats it as untrusted text (§8.7). */
+   if (payload)
+      json_object_object_add(p, "payload", json_object_new_string(payload));
+   json_object_object_add(root, "payload", p);
+
+   const char *json_str = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+   char *json_cached = json_str ? strdup(json_str) : NULL;
+   json_object_put(root);
+   if (!json_cached)
+      return;
+
+   /* Send walk: every authenticated WEBUI browser for this user EXCEPT the origin.  Uses the
+    * WS-send funnel (queue_response), never direct lws_write (CI-enforced). */
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      ws_connection_t *conn = s_active_connections[i];
+      if (!conn || !conn->session || !conn->authenticated)
+         continue;
+      if (conn->session->type != SESSION_TYPE_WEBUI)
+         continue;
+      if (conn->auth_user_id != user_id)
+         continue;
+      if (conn->session->session_id == origin_session_id)
+         continue; /* origin excluded — it renders its own steps inline */
+      char *json_copy = strdup(json_cached);
+      if (!json_copy)
+         continue;
+      ws_response_t resp = { .session = conn->session,
+                             .type = WS_RESP_JSON,
+                             .generic_json = { .json = json_copy } };
+      queue_response(&resp);
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+   free(json_cached);
+}
+
 /* =============================================================================
  * Memory Extraction Notice Broadcast
  * ============================================================================= */

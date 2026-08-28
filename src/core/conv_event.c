@@ -68,6 +68,38 @@ void conv_event_emit(int64_t conv_id, int user_id, const char *kind, char *paylo
    free(payload_owned);
 }
 
+/* Weak default: no WebUI linked (WEBUI-off builds, unit tests).  Strong
+ * override in src/webui/webui_broadcasts.c. */
+__attribute__((weak)) void webui_broadcast_tool_step(int user_id,
+                                                     int64_t conv_id,
+                                                     uint32_t origin_session_id,
+                                                     unsigned stream_id,
+                                                     const char *kind,
+                                                     const char *payload) {
+   (void)user_id;
+   (void)conv_id;
+   (void)origin_session_id;
+   (void)stream_id;
+   (void)kind;
+   (void)payload;
+}
+
+void conv_event_tool_step_fanout(int64_t conv_id,
+                                 int user_id,
+                                 uint32_t origin_session_id,
+                                 unsigned stream_id,
+                                 const char *kind,
+                                 char *payload_owned) {
+   /* Ephemeral: NO conv_db_event_append — the messages table already persists the step; this
+    * is live-only cross-viewer sugar (§Phase-3).  Fan then free, mirroring conv_event_emit's
+    * ownership contract (frees on every path, incl. the skip). */
+   if (conv_id > 0 && user_id > 0 && kind != NULL) {
+      webui_broadcast_tool_step(user_id, conv_id, origin_session_id, stream_id, kind,
+                                payload_owned);
+   }
+   free(payload_owned);
+}
+
 /* Weak default: no WebUI linked.  Strong override in webui_broadcasts.c. */
 __attribute__((weak)) void webui_broadcast_message_appended(int user_id,
                                                             int64_t conv_id,

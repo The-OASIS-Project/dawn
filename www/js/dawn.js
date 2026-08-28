@@ -599,6 +599,15 @@
                   DawnStreaming.handleMessageAppended(msg.payload);
                }
                break;
+            case 'tool_step':
+               // Phase-3 ephemeral cross-viewer tool step: a LIVE tool_call/tool_result for a
+               // turn another browser is driving. The server excludes the origin, so this only
+               // reaches a bystander; render it into the active conversation's transcript.
+               // Not persisted — reload rebuilds these from the messages table.
+               if (typeof DawnStreaming !== 'undefined' && DawnStreaming.handleToolStep) {
+                  DawnStreaming.handleToolStep(msg.payload);
+               }
+               break;
             case 'thinking_start':
                DawnStreaming.handleThinkingStart(msg.payload);
                break;

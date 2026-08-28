@@ -97,6 +97,48 @@ void webui_broadcast_conversation_event(int user_id,
                                         const char *payload);
 
 /**
+ * @brief Ephemeral cross-viewer tool step (SERVER_AUTHORITATIVE_PERSISTENCE §Phase-3).
+ *
+ * Fan a single tool_call / tool_result step LIVE to the user's OTHER browsers viewing
+ * this conversation, with NO conversation_events write — the messages table already
+ * persists the step (tool-persist hook), so reload rebuilds it; this frame is pure
+ * live-view sugar for a bystander who is watching the turn in real time.
+ *
+ * Unlike conv_event_emit this does NOT persist and assigns no seq.  The ORIGIN session
+ * is excluded from the recipient set (it renders its own steps inline), so the client
+ * needs no load-bearing origin-suppression.
+ *
+ * TAKES OWNERSHIP of @p payload_owned and frees it on every path (like conv_event_emit).
+ *
+ * @param conv_id            Conversation the step belongs to (captured at dispatch).
+ * @param user_id            Owner, for browser-scoped fan-out. <= 0 skips the fan.
+ * @param origin_session_id  The turn's own session id — excluded from recipients.
+ * @param stream_id          Best-effort correlation handle (may be 0/stale on a
+ *                           tool-only first iteration); informational only.
+ * @param kind               CONV_EVENT_TOOL_CALL or CONV_EVENT_TOOL_RESULT.
+ * @param payload_owned      malloc'd redacted JSON, or NULL. Freed here.
+ */
+void conv_event_tool_step_fanout(int64_t conv_id,
+                                 int user_id,
+                                 uint32_t origin_session_id,
+                                 unsigned stream_id,
+                                 const char *kind,
+                                 char *payload_owned);
+
+/**
+ * @brief Push one ephemeral tool step to a user's OTHER browsers (origin excluded).
+ *
+ * Weak default is a no-op (WEBUI-off builds / unit tests); webui_broadcasts.c provides
+ * the strong override.  browsers_only, WEBUI-only capability cell.
+ */
+void webui_broadcast_tool_step(int user_id,
+                               int64_t conv_id,
+                               uint32_t origin_session_id,
+                               unsigned stream_id,
+                               const char *kind,
+                               const char *payload);
+
+/**
  * @brief Announce that an assistant message was persisted, WITH its body (§6.3).
  *
  * NOT an entry in conversation_events — deliberately.  Final assistant text

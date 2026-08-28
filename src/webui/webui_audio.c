@@ -1269,6 +1269,16 @@ static void *audio_worker_thread(void *arg) {
     * per session); atomic_bool guards visibility, not logical interleave. */
    session->input_was_voice = true;
 
+   /* Refresh events_observable for THIS turn.  The voice worker calls the LLM directly
+    * (session_llm_call_with_tts_vision_no_add below) and never passes through
+    * core_text_input_dispatch, which is the ONLY other writer of this flag (it "sets every
+    * dispatch to reflect THIS turn", text_input_dispatch.c).  Without this the flag is stale
+    * from a prior turn on this session: a preceding turn into a job conversation leaves it
+    * true, so a normal voice turn's tool steps would wrongly take the durable conv_event
+    * persist path (write-amp) instead of the ephemeral cross-viewer fan.  A push-to-talk voice
+    * turn is never a job/background turn, so the correct value is always false here. */
+   atomic_store(&session->events_observable, false);
+
    /* Phase 1e: per-turn focus injection.  Synchronous; runs on this
     * audio_worker_thread (spawned via pthread_create — NEVER on the
     * lws service thread).  Uses the post-ASR transcript as the turn

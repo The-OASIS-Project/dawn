@@ -526,6 +526,74 @@
    }
 
    /**
+    * Handle a `tool_step` fan-out frame (server-authoritative persistence §Phase-3):
+    * a LIVE, EPHEMERAL tool_call / tool_result step for a turn ANOTHER browser is driving.
+    *
+    * The server excludes the origin from recipients, so this only ever reaches a BYSTANDER
+    * — no client-side origin-suppression is needed (and would be unreliable anyway: the
+    * tool-iteration stream_end clears the streaming flag before the step emits). We keep
+    * ONLY the active-conversation check.
+    *
+    * Not persisted and not message-id-stamped: on reload the transcript rebuilds these from
+    * the messages table (same debug entries), so the live entries are simply replaced. We
+    * render the SAME debug entry the origin/reload render (DawnTranscript.addDebug), so the
+    * live view matches the reloaded view.
+    *
+    * @param {Object} payload - { conversation_id, stream_id, kind, payload:"<opaque JSON>" }
+    */
+   function handleToolStep(payload) {
+      if (!payload) return;
+      var conv = payload.conversation_id;
+      var kind = payload.kind;
+
+      // Active-conversation routing: only render into the conversation on screen. A step for
+      // a non-active conversation is dropped (the final message_appended marks it unread;
+      // switching to it reloads the tool rows from the messages table).
+      var activeConv =
+         typeof DawnHistory !== 'undefined' && DawnHistory.getActiveConversationId
+            ? DawnHistory.getActiveConversationId()
+            : null;
+      if (activeConv == null || String(conv) !== String(activeConv)) return;
+
+      if (typeof DawnTranscript === 'undefined' || !DawnTranscript.addDebug) return;
+
+      // Parse the opaque, untrusted payload defensively (§8.7); never trust-parse for logic,
+      // only to extract display fields. addDebug escapes the content before rendering.
+      var obj = null;
+      try {
+         obj = JSON.parse(payload.payload || '{}');
+      } catch (e) {
+         return;
+      }
+      if (!obj || typeof obj !== 'object') return;
+      var tool = typeof obj.tool === 'string' ? obj.tool : '?';
+
+      if (kind === 'tool_call') {
+         var argsStr = '';
+         if (obj.args && typeof obj.args === 'object') {
+            try {
+               argsStr = JSON.stringify(obj.args, null, 2);
+            } catch (e) {
+               argsStr = '';
+            }
+         } else if (typeof obj.args === 'string') {
+            argsStr = obj.args; // redacted marker
+         }
+         DawnTranscript.addDebug('tool call', '[Tool Call: ' + tool + ']\n' + argsStr);
+      } else if (kind === 'tool_result') {
+         var result = typeof obj.result === 'string' ? obj.result : '';
+         DawnTranscript.addDebug('tool result', '[Tool Result: ' + tool + ']\n' + result);
+      } else {
+         return;
+      }
+
+      // Follow the new entry, matching every other transcript-append site (the origin's own
+      // role:'tool' render scrolls the same way in transcript.js).  addDebug does not scroll.
+      var transcript = DawnElements && DawnElements.transcript;
+      if (transcript) transcript.scrollTop = transcript.scrollHeight;
+   }
+
+   /**
     * Finalize the current streaming entry
     */
    function finalizeStream() {
@@ -1030,6 +1098,7 @@
       handleEnd: handleStreamEnd,
       handleResume: handleStreamResume,
       handleMessageAppended: handleMessageAppended,
+      handleToolStep: handleToolStep,
       resetSilently: resetStreamingStateSilently,
       finalize: finalizeStream,
       setCallbacks: setCallbacks,
