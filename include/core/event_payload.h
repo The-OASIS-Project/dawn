@@ -78,9 +78,13 @@ size_t event_payload_utf8_floor(const char *s, size_t len);
  *
  * @param tool_name Tool being invoked (recorded in the payload for display).
  * @param args_json Raw arguments JSON (LLM-generated); may be NULL.
+ * @param tool_call_id Provider correlation id (emitted as `tool_call_id` when non-empty) so a
+ *        consumer can pair a later tool_result to this call; may be NULL.
  * @return malloc'd JSON, or NULL on OOM. Caller frees.
  */
-char *event_payload_tool_call(const char *tool_name, const char *args_json);
+char *event_payload_tool_call(const char *tool_name,
+                              const char *args_json,
+                              const char *tool_call_id);
 
 /**
  * @brief Build a redacted, capped `tool_result` payload.
@@ -89,9 +93,13 @@ char *event_payload_tool_call(const char *tool_name, const char *args_json);
  * capped and stored as an opaque string — never parsed here, and rendered as
  * text only at every consumer (§8.7).
  *
+ * @param tool_call_id Provider correlation id back to the originating tool_call (emitted as
+ *        `tool_call_id` when non-empty); may be NULL.
  * @return malloc'd JSON, or NULL on OOM. Caller frees.
  */
-char *event_payload_tool_result(const char *tool_name, const char *result_text);
+char *event_payload_tool_result(const char *tool_name,
+                                const char *result_text,
+                                const char *tool_call_id);
 
 /**
  * @brief Build a `status` payload: {"state":"generating"|"idle"}.

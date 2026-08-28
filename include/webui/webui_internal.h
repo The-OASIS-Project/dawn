@@ -122,7 +122,12 @@ typedef struct {
    _Atomic bool
        use_opus; /* True if client supports Opus codec (atomic: set by LWS, read by worker) */
    _Atomic bool tts_enabled; /* True if TTS output enabled (atomic: set by LWS, read by worker) */
-   bool is_satellite;        /* True if this is a DAP2 satellite connection */
+   _Atomic bool
+       tool_step_origin; /* True if this client renders its OWN turn's tool steps from the
+                          * tool_step frame (uniform-pill clients); server then includes it
+                          * in its own tool_step fan. Default off = #3 origin-excluded
+                          * behavior (stock www). Set by LWS at handshake, read by worker. */
+   bool is_satellite;    /* True if this is a DAP2 satellite connection */
 
    /* Text message fragmentation support (for large JSON payloads) */
    char *text_buffer;      /* Accumulation buffer for fragmented text messages */

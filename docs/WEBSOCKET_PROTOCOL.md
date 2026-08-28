@@ -93,13 +93,22 @@ Reconnect to an existing session using a stored token.
    "type": "reconnect",
    "payload": {
       "token": "a1b2c3d4...",
-      "audio_codecs": ["opus", "pcm"]
+      "audio_codecs": ["opus", "pcm"],
+      "tts_enabled": true,
+      "tool_step_origin": true
    }
 }
 ```
 - If token is valid, session is restored with conversation history
 - If token is invalid/expired, a new session is created
 - `audio_codecs` is optional, used to detect Opus support
+- `tts_enabled` (optional, default false): server synthesizes and streams TTS audio to this connection
+- `tool_step_origin` (optional, default false): a **client capability** — set it if this client
+  renders its own turn's tool steps from the `tool_step` frame (uniform "tool pill" UI) rather than
+  from its live text stream. When set, the server includes this connection in its **own** turn's
+  `tool_step` fan (see `tool_step` under Server → Client). Default off preserves the origin-excluded
+  behavior for clients that render tool steps inline from the stream. **The same two fields are
+  accepted on the initial connect handshake**, not only on `reconnect`.
 - **Single-connection-per-session:** if the target session is already held by another
   live connection, that connection is **evicted** — it receives a `session_superseded`
   frame + a `4001` close (see below). Last deliberate reconnect wins; the reconnecting
@@ -1412,6 +1421,37 @@ OpenAI o-series reasoning token summary (content not available).
    }
 }
 ```
+
+#### `tool_step`
+Live cross-viewer tool step (server-authoritative fan-out; see
+[SERVER_AUTHORITATIVE_PERSISTENCE_DESIGN.md](https://github.com/The-OASIS-Project/atlas/blob/main/dawn/archive/SERVER_AUTHORITATIVE_PERSISTENCE_DESIGN.md) §12h).
+Fans one `tool_call` or `tool_result` to the user's OTHER browsers viewing the conversation **as
+the turn runs**, so a bystander sees tool activity live. **Ephemeral** — no durable event is
+written for this frame; the step is already persisted with the turn, so reload rebuilds it.
+```json
+{
+   "type": "tool_step",
+   "payload": {
+      "conversation_id": 1204,
+      "stream_id": 7,
+      "kind": "tool_call",
+      "payload": "{\"tool\":\"search\",\"tool_call_id\":\"toolu_015abc\",\"args\":{\"q\":\"...\"}}"
+   }
+}
+```
+- `kind`: `tool_call` or `tool_result`.
+- `payload`: an **opaque, pre-redacted, size-capped JSON string** — forwarded verbatim and rendered
+  as text, never re-parsed as trusted. Its inner object carries `tool` (name), an optional
+  `tool_call_id`, and (`args` | `result`).
+- `tool_call_id` (inside the inner `payload`): provider correlation id — the **same key**
+  `load_conversation` emits on the `tool_calls` / `role:tool` rows, so a client pairs a live result
+  to its call with one implementation across live and reload. Present on both `tool_call` and
+  `tool_result`; omitted when the provider supplied none.
+- `stream_id` is best-effort / informational.
+- **Recipients**: the user's authenticated WEBUI browsers viewing the conversation, **excluding the
+  origin by default** (the origin renders its own steps from its live stream). A connection that
+  advertised the `tool_step_origin` capability (see `reconnect`) instead receives its **own** turn's
+  `tool_step` frames and renders every step uniformly from this frame — no stream-derived path.
 
 ---
 

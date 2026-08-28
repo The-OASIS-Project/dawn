@@ -1010,6 +1010,14 @@ static int callback_websocket(struct lws *wsi,
                               conn->tts_enabled = json_object_get_boolean(tts_obj);
                            }
 
+                           /* Capability: does this client render its own tool steps from the
+                            * tool_step frame? (default off = stock-www origin-excluded behavior) */
+                           conn->tool_step_origin = false;
+                           struct json_object *tso_obj;
+                           if (json_object_object_get_ex(payload, "tool_step_origin", &tso_obj)) {
+                              conn->tool_step_origin = json_object_get_boolean(tso_obj);
+                           }
+
                            /* Reconnections still count against client limit */
                            pthread_mutex_lock(&s_mutex);
                            s_client_count++;
@@ -1117,6 +1125,14 @@ static int callback_websocket(struct lws *wsi,
                   struct json_object *tts_obj;
                   if (json_object_object_get_ex(payload, "tts_enabled", &tts_obj)) {
                      conn->tts_enabled = json_object_get_boolean(tts_obj);
+                  }
+
+                  /* Capability: does this client render its own tool steps from the tool_step
+                   * frame? (default off = stock-www origin-excluded behavior) */
+                  conn->tool_step_origin = false;
+                  struct json_object *tso_obj;
+                  if (json_object_object_get_ex(payload, "tool_step_origin", &tso_obj)) {
+                     conn->tool_step_origin = json_object_get_boolean(tso_obj);
                   }
 
                   if (generate_session_token(conn->session_token) != 0) {

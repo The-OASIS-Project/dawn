@@ -177,6 +177,23 @@ void conv_event_emit(int64_t conv_id, int user_id, const char *kind, char *paylo
    (void)kind;
    free(payload_owned);
 }
+/* Ephemeral tool-step fan (§Phase-3); same ownership contract as conv_event_emit — frees
+ * payload_owned on every path.  Added 2026-08-28 to unblock bench_retrieval: fa5e8bc added the
+ * call to llm_tool_loop.c without updating this stub (latent — make dawn doesn't relink the
+ * bench). */
+void conv_event_tool_step_fanout(int64_t conv_id,
+                                 int user_id,
+                                 uint32_t origin_session_id,
+                                 unsigned stream_id,
+                                 const char *kind,
+                                 char *payload_owned) {
+   (void)conv_id;
+   (void)user_id;
+   (void)origin_session_id;
+   (void)stream_id;
+   (void)kind;
+   free(payload_owned);
+}
 session_t *session_get_for_reconnect(uint32_t session_id) {
    (void)session_id;
    return NULL;
@@ -206,14 +223,20 @@ void memory_citation_record_tool_fact_current(int64_t fact_id) {
  * llm_tool_loop.c emits these into conv_event_emit, whose bench stub frees the
  * returned string — so NULL is safe (free(NULL) is a no-op) and the bench never
  * drives the job-event path. */
-char *event_payload_tool_call(const char *tool_name, const char *args_json) {
+char *event_payload_tool_call(const char *tool_name,
+                              const char *args_json,
+                              const char *tool_call_id) {
    (void)tool_name;
    (void)args_json;
+   (void)tool_call_id;
    return NULL;
 }
-char *event_payload_tool_result(const char *tool_name, const char *result_text) {
+char *event_payload_tool_result(const char *tool_name,
+                                const char *result_text,
+                                const char *tool_call_id) {
    (void)tool_name;
    (void)result_text;
+   (void)tool_call_id;
    return NULL;
 }
 

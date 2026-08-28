@@ -911,7 +911,7 @@ void for_each_user_conn(int user_id,
    pthread_mutex_unlock(&s_conn_registry_mutex);
 }
 
-/* Existence-check visitor shared by any_session_matches + webui_user_has_other_browser:
+/* Existence-check visitor for any_session_matches:
  * an authenticated WEBUI session, optionally on a specific active conversation. */
 typedef struct {
    int64_t conv_id; /* > 0 = require this active conv; 0 = any */
@@ -980,30 +980,40 @@ static bool any_session_matches(int user_id, int64_t conv_id_or_zero) {
    return ctx.found;
 }
 
-/* Cost-gate for the ephemeral tool-step fan (SERVER_AUTHORITATIVE_PERSISTENCE §Phase-3):
- * is there an authenticated WEBUI browser for this user OTHER than the origin session?  If
- * not, the fan is pure waste (the origin is excluded from recipients and renders its own
- * steps), so the caller skips serialization entirely — the common single-viewer case pays
- * only this cheap walk.
+/* Cost-gate pre-flight for the ephemeral tool-step fan (SERVER_AUTHORITATIVE_PERSISTENCE
+ * §Phase-3, extended §living-tool-pills): is there ANY recipient?  A recipient is either a
+ * non-origin authenticated WEBUI browser (bystander — always a recipient), OR the origin's OWN
+ * connection when it advertised `tool_step_origin` (a uniform-pill client that renders its own
+ * steps from the frame, e.g. Aurora — often the lone dashboard, so this is the primary case).
+ * If none, the fan is pure waste and the caller skips serialization entirely.
  *
- * Deliberately user-scoped, NOT conv-scoped: conv-scoping would deref client_data via
- * webui_get_active_conversation_id (the tracked TOCTOU / voice-auto-bind race, TODO (d)),
- * and the client already drops frames for a non-active conversation — so a 2nd browser on a
- * different conv gets a few frames it discards (bounded, browsers_only).  Conv-scoping is a
- * deferred optimization gated on the atomic-client_data fix.  session_id (monotonic), not the
- * pointer, identifies the origin — matches the job_manager_claim_reaped convention.
- *
- * Migrated to the shared for_each_user_conn walk (§Phase-4).  broadcast_json_to_user_ex is
- * deliberately NOT migrated: it has a different shape (serialize-once → strdup + queue under
- * the lock) and is the hottest fan path + the subject of the tracked addressing-model refactor
- * — don't touch it twice. */
-static bool webui_user_has_other_browser(int user_id, uint32_t origin_session_id) {
+ * One walk over the whole user set (exclude_session_id=0) so the origin conn is visited and its
+ * flag consulted.  Deliberately user-scoped, NOT conv-scoped: conv-scoping would deref
+ * client_data via webui_get_active_conversation_id (the tracked TOCTOU / voice-auto-bind race,
+ * TODO (d)), and the client already drops frames for a non-active conversation.  session_id
+ * (monotonic), not the pointer, identifies the origin — matches job_manager_claim_reaped. */
+typedef struct {
+   uint32_t origin_session_id;
+   bool found;
+} tool_step_recipient_ctx_t;
+
+static bool visit_tool_step_recipient(ws_connection_t *conn, void *vctx) {
+   tool_step_recipient_ctx_t *ctx = (tool_step_recipient_ctx_t *)vctx;
+   if (!conn->wsi || conn->session->type != SESSION_TYPE_WEBUI)
+      return true;
+   bool is_origin = (conn->session->session_id == ctx->origin_session_id);
+   if (!is_origin || atomic_load(&conn->tool_step_origin)) {
+      ctx->found = true;
+      return false; /* a bystander always counts; the origin only if it opted in — stop */
+   }
+   return true;
+}
+
+static bool webui_tool_step_has_recipient(int user_id, uint32_t origin_session_id) {
    if (user_id <= 0)
       return false;
-   /* Exclude the origin (renders its own steps) via for_each_user_conn's session_id filter;
-    * conv-agnostic (see the user-scoped rationale above). */
-   webui_match_ctx_t ctx = { .conv_id = 0, .found = false };
-   for_each_user_conn(user_id, origin_session_id, visit_webui_match, &ctx);
+   tool_step_recipient_ctx_t ctx = { .origin_session_id = origin_session_id, .found = false };
+   for_each_user_conn(user_id, 0, visit_tool_step_recipient, &ctx);
    return ctx.found;
 }
 
@@ -1011,11 +1021,14 @@ static bool webui_user_has_other_browser(int user_id, uint32_t origin_session_id
  * user's OTHER browsers viewing this conversation (SERVER_AUTHORITATIVE_PERSISTENCE §Phase-3).
  *
  * Ephemeral: no DB write, no seq (the messages table already persists the step; this is
- * live-view sugar).  The ORIGIN session is excluded from the recipient set — so the client
- * needs no load-bearing origin-suppression (a client-side "am I streaming" check is
- * deterministically false by the time this arrives: the tool-iteration stream_end clears the
- * streaming flag before the step emits, master-plan §5).  browsers_only + WEBUI-only cell:
- * a satellite renders no debug transcript.  stream_id is best-effort/informational. */
+ * live-view sugar).  The ORIGIN session is excluded from the recipient set BY DEFAULT — stock
+ * www renders its own steps from its live stream (`addDebug`), and needs no load-bearing
+ * origin-suppression (a client-side "am I streaming" check is deterministically false by the
+ * time this arrives: the tool-iteration stream_end clears the streaming flag before the step
+ * emits, master-plan §5).  EXCEPTION (§living-tool-pills): a client that advertised
+ * `tool_step_origin` has NO stream-derived tool path and renders every pill uniformly from this
+ * frame, so its OWN origin connection IS included.  WEBUI-only cell: a satellite renders no
+ * debug transcript.  stream_id is best-effort/informational. */
 void webui_broadcast_tool_step(int user_id,
                                int64_t conv_id,
                                uint32_t origin_session_id,
@@ -1024,8 +1037,9 @@ void webui_broadcast_tool_step(int user_id,
                                const char *payload) {
    if (user_id <= 0 || conv_id <= 0 || kind == NULL)
       return;
-   /* Cost-gate: serialize + walk ONLY when a non-origin browser exists. */
-   if (!webui_user_has_other_browser(user_id, origin_session_id))
+   /* Cost-gate: serialize + walk ONLY when a recipient exists (a non-origin browser, OR the
+    * origin itself if it advertised tool_step_origin). */
+   if (!webui_tool_step_has_recipient(user_id, origin_session_id))
       return;
 
    json_object *root = json_object_new_object();
@@ -1057,8 +1071,8 @@ void webui_broadcast_tool_step(int user_id,
          continue;
       if (conn->auth_user_id != user_id)
          continue;
-      if (conn->session->session_id == origin_session_id)
-         continue; /* origin excluded — it renders its own steps inline */
+      if (conn->session->session_id == origin_session_id && !atomic_load(&conn->tool_step_origin))
+         continue; /* origin excluded UNLESS it advertised tool_step_origin (uniform-pill client) */
       char *json_copy = strdup(json_cached);
       if (!json_copy)
          continue;

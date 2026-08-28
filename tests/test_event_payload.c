@@ -59,7 +59,7 @@ static void assert_field_equals(const char *payload,
  * the home_assistant / calendar case: their secret is a config credential, not
  * echoed in the response, so device/event state must survive. */
 static void test_result_body_is_readable(void) {
-   char *p = event_payload_tool_result("home_assistant", "living room light is on, 72F");
+   char *p = event_payload_tool_result("home_assistant", "living room light is on, 72F", NULL);
    TEST_ASSERT_NOT_NULL(p);
    struct json_object *root = json_tokener_parse(p);
    struct json_object *tool = NULL, *result = NULL;
@@ -74,7 +74,8 @@ static void test_result_body_is_readable(void) {
 /* A sensitive KEY NAME still redacts its value; a benign sibling stays readable. */
 static void test_sensitive_key_is_redacted(void) {
    char *p = event_payload_tool_call("some_tool",
-                                     "{\"api_key\":\"whatever\",\"entity\":\"light.kitchen\"}");
+                                     "{\"api_key\":\"whatever\",\"entity\":\"light.kitchen\"}",
+                                     NULL);
    TEST_ASSERT_NOT_NULL(p);
    assert_field_equals(p, "args", "api_key", EVENT_REDACTED_MARKER);
    assert_field_equals(p, "args", "entity", "light.kitchen");
@@ -83,7 +84,7 @@ static void test_sensitive_key_is_redacted(void) {
 
 /* A secret-SHAPED value in an innocuously named field still redacts. */
 static void test_secret_shaped_value_is_redacted(void) {
-   char *p = event_payload_tool_call("some_tool", "{\"note\":\"sk-abcdef0123456789\"}");
+   char *p = event_payload_tool_call("some_tool", "{\"note\":\"sk-abcdef0123456789\"}", NULL);
    TEST_ASSERT_NOT_NULL(p);
    assert_field_equals(p, "args", "note", EVENT_REDACTED_MARKER);
    free(p);
@@ -93,7 +94,8 @@ static void test_secret_shaped_value_is_redacted(void) {
  * whole-redacted just because the tool declares TOOL_CAP_SECRETS in config. */
 static void test_home_assistant_args_are_readable(void) {
    char *p = event_payload_tool_call("home_assistant",
-                                     "{\"action\":\"turn_on\",\"entity_id\":\"light.kitchen\"}");
+                                     "{\"action\":\"turn_on\",\"entity_id\":\"light.kitchen\"}",
+                                     NULL);
    TEST_ASSERT_NOT_NULL(p);
    assert_field_equals(p, "args", "action", "turn_on");
    assert_field_equals(p, "args", "entity_id", "light.kitchen");
@@ -105,7 +107,8 @@ static void test_home_assistant_args_are_readable(void) {
 static void test_array_nested_secret_is_redacted(void) {
    char *p = event_payload_tool_call(
        "fetch",
-       "{\"headers\":[{\"name\":\"Authorization\",\"value\":\"Bearer sk-abcdef0123456789\"}]}");
+       "{\"headers\":[{\"name\":\"Authorization\",\"value\":\"Bearer sk-abcdef0123456789\"}]}",
+       NULL);
    TEST_ASSERT_NOT_NULL(p);
    struct json_object *root = json_tokener_parse(p);
    TEST_ASSERT_NOT_NULL(root);
@@ -127,8 +130,10 @@ static void test_array_nested_secret_is_redacted(void) {
  * be an invalid frame that persists and re-wedges every replay). */
 static void test_non_utf8_result_is_sanitized(void) {
    /* Split literal so \xff doesn't greedily absorb the following 'b' as a hex digit. */
-   char *p = event_payload_tool_result("search", "clean\xff"
-                                                 "bytes");
+   char *p = event_payload_tool_result("search",
+                                       "clean\xff"
+                                       "bytes",
+                                       NULL);
    TEST_ASSERT_NOT_NULL(p);
    TEST_ASSERT_NULL(strchr(p, (char)0xFF)); /* invalid byte gone */
    struct json_object *root = json_tokener_parse(p);
@@ -138,6 +143,57 @@ static void test_non_utf8_result_is_sanitized(void) {
    TEST_ASSERT_EQUAL_STRING("clean?bytes", json_object_get_string(result));
    json_object_put(root);
    free(p);
+}
+
+/* tool_call_id correlation key (living tool-pill UI): present on both call + result payloads
+ * when supplied, and OMITTED when NULL/empty so the frame stays minimal. */
+static void test_tool_call_id_present_and_omitted(void) {
+   /* Present on tool_call */
+   char *pc = event_payload_tool_call("search", "{\"q\":\"x\"}", "toolu_015abc");
+   TEST_ASSERT_NOT_NULL(pc);
+   struct json_object *rc = json_tokener_parse(pc);
+   struct json_object *idc = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(rc, "tool_call_id", &idc));
+   TEST_ASSERT_EQUAL_STRING("toolu_015abc", json_object_get_string(idc));
+   json_object_put(rc);
+   free(pc);
+
+   /* Present on tool_result, same id (pairing key) */
+   char *pr = event_payload_tool_result("search", "3 results", "toolu_015abc");
+   TEST_ASSERT_NOT_NULL(pr);
+   struct json_object *rr = json_tokener_parse(pr);
+   struct json_object *idr = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(rr, "tool_call_id", &idr));
+   TEST_ASSERT_EQUAL_STRING("toolu_015abc", json_object_get_string(idr));
+   json_object_put(rr);
+   free(pr);
+
+   /* Omitted when NULL (tool_call) */
+   char *pn = event_payload_tool_call("search", "{}", NULL);
+   TEST_ASSERT_NOT_NULL(pn);
+   struct json_object *rn = json_tokener_parse(pn);
+   struct json_object *idn = NULL;
+   TEST_ASSERT_FALSE(json_object_object_get_ex(rn, "tool_call_id", &idn));
+   json_object_put(rn);
+   free(pn);
+
+   /* Omitted when NULL (tool_result) — both kinds honor the same guard */
+   char *pnr = event_payload_tool_result("search", "ok", NULL);
+   TEST_ASSERT_NOT_NULL(pnr);
+   struct json_object *rnr = json_tokener_parse(pnr);
+   struct json_object *idnr = NULL;
+   TEST_ASSERT_FALSE(json_object_object_get_ex(rnr, "tool_call_id", &idnr));
+   json_object_put(rnr);
+   free(pnr);
+
+   /* Omitted when empty string ("" hits the same id[0] guard as NULL) */
+   char *pe = event_payload_tool_call("search", "{}", "");
+   TEST_ASSERT_NOT_NULL(pe);
+   struct json_object *re = json_tokener_parse(pe);
+   struct json_object *ide = NULL;
+   TEST_ASSERT_FALSE(json_object_object_get_ex(re, "tool_call_id", &ide));
+   json_object_put(re);
+   free(pe);
 }
 
 /* --- deep-research event payloads (§10) ------------------------------------ */
@@ -210,6 +266,7 @@ int main(void) {
    RUN_TEST(test_home_assistant_args_are_readable);
    RUN_TEST(test_array_nested_secret_is_redacted);
    RUN_TEST(test_non_utf8_result_is_sanitized);
+   RUN_TEST(test_tool_call_id_present_and_omitted);
    RUN_TEST(test_research_round_shape);
    RUN_TEST(test_research_claim_is_sanitized);
    RUN_TEST(test_research_claim_null_safe);
