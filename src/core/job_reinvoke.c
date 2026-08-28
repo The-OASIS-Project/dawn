@@ -449,6 +449,18 @@ static void *reinvoke_turn_entry(void *arg) {
    session_begin_turn_flags(live);
    atomic_fetch_add(&live->turn_in_flight, 1);
 
+   /* Clear a stale pending_visual left by a PRIOR turn on this viewer's session (e.g. a
+    * render_visual whose turn was interrupted before its final answer persisted).  The
+    * server-authoritative persist below now CONSUMES pending_visual (via
+    * webui_persist_final_answer), so without this a leftover chart would splice onto — and
+    * durably persist with — an unrelated re-engagement reply.  Mirrors the identical
+    * turn-start clear the text/voice workers carry (webui_text_processing.c / webui_audio.c);
+    * session_begin_turn_flags deliberately does NOT touch it (tools_mutex-guarded state). */
+   pthread_mutex_lock(&live->tools_mutex);
+   free(live->pending_visual);
+   live->pending_visual = NULL;
+   pthread_mutex_unlock(&live->tools_mutex);
+
    int64_t fired_ids[JOB_MONITOR_MAX_PER_TICK];
    int n_fired = 0;
    char *envelope = build_envelope(parent, user_id, fired_ids, &n_fired);
@@ -501,19 +513,15 @@ static void *reinvoke_turn_entry(void *arg) {
          OLOG_INFO("job_reinvoke: live re-engage of parent %lld empty/cancelled; will retry",
                    (long long)parent);
       } else {
-         int64_t appended_id = 0;
-         bool persisted_ok = (conv_db_add_message_with_tools(parent, user_id, "assistant", reply,
-                                                             NULL, NULL, NULL,
-                                                             &appended_id) == AUTH_DB_SUCCESS);
-         if (persisted_ok) {
+         /* Single server-authoritative persist path (SERVER_AUTHORITATIVE §6c): the shared
+          * helper splices this session's final-answer reasoning + accumulated render_visual
+          * output into the row, promotes the reply body's image markers to permanent, stamps
+          * the id, and fans out ONE message_appended for viewers of the parent — the streamed
+          * viewer's current_stream_id lets it adopt (having stood down on will_persist).  Mark
+          * the jobs fired ONLY on a durable insert (invariant C3): a persist failure leaves
+          * them for the monitor to retry rather than silently dropping the reply. */
+         if (webui_persist_final_answer(live, parent, user_id, reply, NULL) == AUTH_DB_SUCCESS) {
             conv_db_job_mark_fired_many(fired_ids, n_fired);
-            /* Sole active-view channel (§6b): message_appended carries the body inline
-             * for viewers of the parent and marks the rest unread — the
-             * conversation_messages_appended refetch is retired here.  The streamed
-             * viewer's stream_id lets it adopt (having stood down on will_persist)
-             * rather than re-render its own reply. */
-            conv_event_notify_message_appended(parent, user_id, appended_id, "assistant", reply,
-                                               NULL, atomic_load(&live->current_stream_id));
             OLOG_INFO("job_reinvoke: streamed re-engagement into live parent %lld "
                       "(%d result(s), persisted server-side)",
                       (long long)parent, n_fired);
@@ -596,16 +604,21 @@ static void reinvoke_run_detached(reinvoke_work_t *w,
        * unfired lets the monitor retry on a later tick; retries stay bounded
        * because build_envelope() bumps each job's reinvoke count per attempt and
        * force-fires past max_reinvokes_per_tree. */
-      int64_t appended_id = 0;
-      if (conv_db_add_message_with_tools(w->parent_conv, w->user_id, "assistant", response, NULL,
-                                         NULL, NULL, &appended_id) == AUTH_DB_SUCCESS) {
+      /* Single server-authoritative persist path (SERVER_AUTHORITATIVE §6c): same shared
+       * helper as the live path, gaining final-answer reasoning + visual fidelity for the
+       * detached re-engagement too.  The helper fans out with THIS turn's own
+       * current_stream_id (a job session still bumps it on first streamed content, so it is
+       * generally non-zero — not the old hardcoded 0).  With no browser watching this job
+       * live there is no matching client adopt entry, so every viewer renders inline as
+       * before; if a browser IS watching the stream, the real id yields a correct adopt
+       * (strictly better than the old 0, which would have double-rendered).
+       * Mark fired ONLY on a durable insert (invariant C3): this path has no client to
+       * client-save the reply, so the insert is the only durable store — firing on a failed
+       * persist would permanently suppress the follow-up AND lose the output.  Leaving the
+       * rows unfired lets the monitor retry on a later tick (bounded by the reinvoke ceiling). */
+      if (webui_persist_final_answer(s, w->parent_conv, w->user_id, response, NULL) ==
+          AUTH_DB_SUCCESS) {
          conv_db_job_mark_fired_many(fired_ids, n_fired);
-         /* Sole active-view channel (§6b): message_appended carries the body inline for
-          * viewers of the parent and marks the rest unread — the
-          * conversation_messages_appended refetch is retired here.  Detached: no viewer
-          * streamed this → stream_id 0 (every viewer renders inline). */
-         conv_event_notify_message_appended(w->parent_conv, w->user_id, appended_id, "assistant",
-                                            response, NULL, 0);
          OLOG_INFO("job_reinvoke: re-engaged parent %lld (detached) with %d job result(s)",
                    (long long)w->parent_conv, n_fired);
       } else {
