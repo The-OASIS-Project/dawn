@@ -184,6 +184,11 @@ static void webui_text_dispatch_on_user_msg(void *ctx,
  * concurrent session_destroy proceeds, turn_in_flight already reads 0. */
 static void text_worker_end(session_t *session) {
    if (session) {
+      /* Close the multi-target TTS bracket on non-origin listeners (§Phase-4) BEFORE releasing
+       * the turn ref — this teardown is the single funnel every text-worker exit passes through,
+       * so a fanned bystander always returns to idle regardless of which exit ran. No-op when the
+       * turn fanned to no one. */
+      webui_fanout_tts_idle(session);
       atomic_fetch_sub(&session->turn_in_flight, 1);
       session_release(session);
    }
@@ -310,12 +315,20 @@ static void *text_worker_thread(void *arg) {
    if (turn_conv <= 0 && conn && conn->active_conversation_id > 0) {
       turn_conv = conn->active_conversation_id;
    }
+
+   /* Multi-target TTS (SERVER_AUTHORITATIVE_PERSISTENCE §Phase-4): arm synthesis when the origin
+    * has TTS on OR any OTHER speaker-capable viewer of this conversation exists, so a silent-origin
+    * turn still speaks on a remote listener's device.  Keeping origin.tts_enabled as an independent
+    * sufficient condition preserves origin-speaks even before turn_conv is bound (arch HIGH-2). The
+    * fanout callback synthesizes once and fans to every speaker viewer (the origin included). */
+   bool fanout_tts = tts_enabled ||
+                     webui_audio_has_other_speaker(turn_user_id, turn_conv, session->session_id);
    text_input_dispatch_opts_t dispatch_opts = {
       .conversation_id = turn_conv,
       .auth_user_id = conn ? conn->auth_user_id : 0,
       .persist_content_override = work->persist_content, /* text + [IMAGE:<id>] for image turns */
-      .sentence_cb = tts_enabled ? webui_sentence_audio_callback : NULL,
-      .sentence_userdata = tts_enabled ? session : NULL,
+      .sentence_cb = fanout_tts ? webui_sentence_audio_fanout_callback : NULL,
+      .sentence_userdata = fanout_tts ? session : NULL,
       .on_user_msg_added = webui_text_dispatch_on_user_msg,
       .user_msg_added_ctx = session,
    };

@@ -74,6 +74,7 @@ Everything is GPLv3. Cloud LLMs are optional — DAWN runs fully local if you wa
 - **Browser-Based** — Accessible on port 3000 from any device on your network.
 - **Voice & Text Input** — Three input modes via unified action button: Send Text, Hold to Talk (push-to-talk), and Continuous Listening (always-on wake word detection with server-side VAD). Smart typing override temporarily switches voice modes to Send when text is present.
 - **Real-Time Communication** — WebSocket-based with session persistence across page refreshes (30-minute timeout).
+- **Multi-Device Sync** — Open the same conversation on two browsers (say a phone and a laptop) and they stay in lockstep: messages, live tool-call activity, and **spoken replies** all fan out to every viewer in real time, with the server as the single source of truth. Trigger a reply on one device and it's read aloud on every device viewing that conversation that has text-to-speech on — synthesized once on the server, no matter how many are listening.
 - **Settings Panel** — Live configuration editing from the browser. API keys with secure handling. Restart indicators for settings that require it.
 - **User Management** — Cookie-based authentication with "Remember Me" (30-day sessions). Admin tools: create/delete users, reset passwords, unlock accounts. Per-user persona, location, timezone, units, and TTS speed preferences.
 - **Conversation History** — Browse, search, continue, delete, and export (JSON/HTML) past conversations. One-click message copy. Per-conversation LLM settings (reasoning mode, tools mode).

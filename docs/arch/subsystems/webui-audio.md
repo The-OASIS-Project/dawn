@@ -96,6 +96,52 @@ The WebUI uses Opus audio compression for efficient bidirectional audio streamin
 
 ---
 
+## Multi-Target TTS (Cross-Viewer)
+
+Source: `webui_audio.c` (`webui_sentence_audio_fanout_callback`), `webui_broadcasts.c` (`for_each_user_conn`).
+
+A turn's synthesized speech is **not bound to the connection that started it**. When more than one browser
+views the same conversation, the reply is spoken on **every TTS-enabled WEBUI browser** viewing it — the
+origin included if its own TTS is on. This is the audio half of server-authoritative multi-viewer fan-out
+(the transcript/tool-step halves are covered by the persistence subsystem; see
+[SERVER_AUTHORITATIVE_PERSISTENCE_DESIGN.md](https://github.com/The-OASIS-Project/atlas/blob/main/dawn/archive/SERVER_AUTHORITATIVE_PERSISTENCE_DESIGN.md) §12i).
+
+**The one invariant that makes it cheap:** synthesis (`text_to_speech_to_pcm`, under the global
+`tts_mutex`) runs **once per sentence** regardless of how many browsers listen. The 22kHz→48kHz resample
+and the Opus encode also run once each and are **shared** across all recipients of that format (a browser
+without WebCodecs reuses the same 48kHz PCM buffer). So adding listeners costs one memcpy + queue per
+listener, never another synthesis — synthesis load stays flat vs. viewer count.
+
+**Per-sentence flow:**
+
+```
+1. Phase-1 scan  — walk the connection registry: which recipients exist, which formats (Opus / PCM48)?
+   ↓  (registry lock released)
+2. Synthesize the sentence PCM ONCE   (tts_mutex)
+   ↓
+3. Resample 22k→48k ONCE; Opus-encode ONCE   (only the formats the scan found)
+   ↓
+4. Phase-2 send  — re-walk the registry UNDER the lock, re-validating each recipient, and queue its
+                   format's bytes. Queuing under the registry lock (which session-destroy also holds to
+                   purge the queue) is what makes a mid-synth disconnect safe — no dangling send.
+```
+
+- **Membership** is one shared predicate, `conn_is_audio_target`: TTS-enabled, WEBUI, and either the origin
+  (unconditional, so it hears its own reply regardless of which conversation it is currently viewing) or a
+  non-origin viewer whose active conversation matches this turn's.
+- **State bracket:** `state:speaking` fans per sentence and `state:idle` fans once at turn end (from each
+  worker's teardown funnel) to the **same** recipient set, so a bystander's speaking indicator opens and
+  closes cleanly.
+- **Arming:** a turn synthesizes when the origin has TTS on **or** any other speaker-capable viewer exists,
+  so a silent origin (someone typing with TTS off) still speaks the reply on a listener's device.
+- **Reinvoke and Tier-2 satellites keep the single-target path** (`webui_sentence_audio_callback`): a
+  background-job re-engagement picks exactly one viewer (§6d), and a satellite speaks its own turn.
+- **v1 scope is browser-to-browser.** A non-origin Tier-2 satellite is not yet a fan target — a satellite
+  has no per-conversation membership signal to match (`webui_get_active_conversation_id` returns 0 for
+  non-WEBUI sessions). A satellite that *originates* a turn is unaffected.
+
+---
+
 ## Always-On Voice Mode
 
 Source: `src/webui/webui_always_on.c`, `www/js/audio/always-on.js`

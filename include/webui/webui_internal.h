@@ -384,6 +384,27 @@ extern ws_connection_t *s_active_connections[MAX_ACTIVE_CONNECTIONS];
 extern pthread_mutex_t s_conn_registry_mutex;
 
 /**
+ * @brief Visitor invoked under s_conn_registry_mutex for each candidate connection.
+ *
+ * Return false to stop the walk early (existence checks); true to continue.  The
+ * visitor runs WITH s_conn_registry_mutex held: it may queue_response (the
+ * registry -> response-queue nesting is the established order) but MUST NOT
+ * re-acquire s_conn_registry_mutex or block on TTS synthesis.
+ */
+typedef bool (*conn_visitor_fn)(ws_connection_t *conn, void *ctx);
+
+/**
+ * @brief Walk every authenticated connection for @user_id, invoking @visit.
+ *
+ * Bakes in ONLY the auth + user + excluded-origin filters (user_id <= 0 = all
+ * users; exclude_session_id == 0 = exclude none).  All secondary predicates
+ * (wsi liveness, session type, active conversation, satellite tier) belong in
+ * the visitor.  Defined in webui_broadcasts.c; the §Phase-4 multi-target TTS
+ * fan in webui_audio.c is the second caller.
+ */
+void for_each_user_conn(int user_id, uint32_t exclude_session_id, conn_visitor_fn visit, void *ctx);
+
+/**
  * @brief Deliver queued missed scheduler notifications to a connection.
  *
  * Called after cookie-based auth completes at WebSocket open.  Reads up

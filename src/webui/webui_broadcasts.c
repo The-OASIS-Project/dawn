@@ -872,6 +872,63 @@ void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id
 }
 
 /* =============================================================================
+ * Generalized connection walk (SERVER_AUTHORITATIVE_PERSISTENCE §Phase-4 reuse seam)
+ *
+ * The registry walks scattered across this file share one loop body: lock
+ * s_conn_registry_mutex, iterate s_active_connections, filter by auth + user +
+ * (optionally) an excluded origin session, then act.  This helper owns exactly
+ * those THREE baked-in filters and delegates everything else — wsi liveness,
+ * session type, active conversation, satellite gating — to the visitor, because
+ * the call sites genuinely diverge on those secondary predicates.  A future
+ * migrator must NOT add a wsi/type check here: broadcast_json_to_user_ex
+ * (deliberately un-migrated — different shape: serialize-once → strdup + queue
+ * under the lock) checks neither, and baking one in would silently change its
+ * reach.
+ *
+ * The visitor runs UNDER s_conn_registry_mutex; it may queue_response (the
+ * registry → response-queue nesting is the established order) but MUST NOT
+ * re-acquire the registry mutex or block on TTS synthesis.  Return false from
+ * the visitor to stop the walk early (existence checks); true to continue.
+ * conn_visitor_fn + this prototype are declared in webui_internal.h so the
+ * §Phase-4 multi-target TTS fan (webui_audio.c) can share the one walk.
+ * ============================================================================= */
+void for_each_user_conn(int user_id,
+                        uint32_t exclude_session_id,
+                        conn_visitor_fn visit,
+                        void *ctx) {
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      ws_connection_t *conn = s_active_connections[i];
+      if (!conn || !conn->session || !conn->authenticated)
+         continue;
+      if (user_id > 0 && conn->auth_user_id != user_id)
+         continue;
+      if (exclude_session_id != 0 && conn->session->session_id == exclude_session_id)
+         continue;
+      if (!visit(conn, ctx))
+         break;
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+}
+
+/* Existence-check visitor shared by any_session_matches + webui_user_has_other_browser:
+ * an authenticated WEBUI session, optionally on a specific active conversation. */
+typedef struct {
+   int64_t conv_id; /* > 0 = require this active conv; 0 = any */
+   bool found;
+} webui_match_ctx_t;
+
+static bool visit_webui_match(ws_connection_t *conn, void *vctx) {
+   webui_match_ctx_t *ctx = (webui_match_ctx_t *)vctx;
+   if (!conn->wsi || conn->session->type != SESSION_TYPE_WEBUI)
+      return true; /* keep looking */
+   if (ctx->conv_id > 0 && webui_get_active_conversation_id(conn->session) != ctx->conv_id)
+      return true;
+   ctx->found = true;
+   return false; /* stop */
+}
+
+/* =============================================================================
  * Pre-flight registry scan (Phase 1j optimization)
  *
  * Several broadcasters today build a JSON payload, then iterate the
@@ -913,27 +970,14 @@ void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id
  * no correctness regression.
  * ============================================================================= */
 static bool any_session_matches(int user_id, int64_t conv_id_or_zero) {
-   pthread_mutex_lock(&s_conn_registry_mutex);
-   bool found = false;
-   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
-      ws_connection_t *conn = s_active_connections[i];
-      if (!conn || !conn->session || !conn->authenticated || !conn->wsi)
-         continue;
-      if (conn->session->type != SESSION_TYPE_WEBUI)
-         continue;
-      /* user_id == 0: broadcast-to-all; any authenticated WebUI session
-       * matches.  user_id > 0: per-user. */
-      if (user_id > 0 && conn->auth_user_id != user_id)
-         continue;
-      if (conv_id_or_zero > 0 && webui_get_active_conversation_id(conn->session) != conv_id_or_zero)
-         continue;
-      found = true;
-      break;
-   }
-   pthread_mutex_unlock(&s_conn_registry_mutex);
+   /* user_id == 0 → broadcast-to-all; user_id > 0 → per-user (both handled by
+    * for_each_user_conn's baked-in user filter).  WEBUI-type + conv gating live in
+    * the visitor. */
+   webui_match_ctx_t ctx = { .conv_id = conv_id_or_zero, .found = false };
+   for_each_user_conn(user_id, 0, visit_webui_match, &ctx);
    OLOG_DEBUG("any_session_matches: user=%d conv=%lld → %d", user_id, (long long)conv_id_or_zero,
-              found ? 1 : 0);
-   return found;
+              ctx.found ? 1 : 0);
+   return ctx.found;
 }
 
 /* Cost-gate for the ephemeral tool-step fan (SERVER_AUTHORITATIVE_PERSISTENCE §Phase-3):
@@ -949,31 +993,18 @@ static bool any_session_matches(int user_id, int64_t conv_id_or_zero) {
  * deferred optimization gated on the atomic-client_data fix.  session_id (monotonic), not the
  * pointer, identifies the origin — matches the job_manager_claim_reaped convention.
  *
- * NOTE (deferred refactor): this + any_session_matches + broadcast_json_to_user_ex are three
- * near-identical s_conn_registry_mutex walks; a shared for_each_user_browser(user_id,
- * exclude_session_id, visitor) would retire the duplication and is the reuse seam for #4
- * (multi-target TTS).  Kept separate here to avoid a hot-broadcast-path refactor riding in on
- * a feature add. */
+ * Migrated to the shared for_each_user_conn walk (§Phase-4).  broadcast_json_to_user_ex is
+ * deliberately NOT migrated: it has a different shape (serialize-once → strdup + queue under
+ * the lock) and is the hottest fan path + the subject of the tracked addressing-model refactor
+ * — don't touch it twice. */
 static bool webui_user_has_other_browser(int user_id, uint32_t origin_session_id) {
    if (user_id <= 0)
       return false;
-   pthread_mutex_lock(&s_conn_registry_mutex);
-   bool found = false;
-   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
-      ws_connection_t *conn = s_active_connections[i];
-      if (!conn || !conn->session || !conn->authenticated || !conn->wsi)
-         continue;
-      if (conn->session->type != SESSION_TYPE_WEBUI)
-         continue;
-      if (conn->auth_user_id != user_id)
-         continue;
-      if (conn->session->session_id == origin_session_id)
-         continue; /* the origin renders its own steps — never a bystander */
-      found = true;
-      break;
-   }
-   pthread_mutex_unlock(&s_conn_registry_mutex);
-   return found;
+   /* Exclude the origin (renders its own steps) via for_each_user_conn's session_id filter;
+    * conv-agnostic (see the user-scoped rationale above). */
+   webui_match_ctx_t ctx = { .conv_id = 0, .found = false };
+   for_each_user_conn(user_id, origin_session_id, visit_webui_match, &ctx);
+   return ctx.found;
 }
 
 /* Strong override of the conv_event (Layer 2) weak seam: fan ONE ephemeral tool step to the
