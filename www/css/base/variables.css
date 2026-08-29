@@ -50,6 +50,17 @@
    --tool-color-alt: #a855f7; /* Purple variant - assistant tool entries */
    --system-color: #eab308; /* Yellow - system messages */
 
+   /* Living tool pills — NEUTRAL surface: pills sit on the standard dark transcript
+      surface; purple identity lives on the tool NAME + state rail, not a fill. Kept as
+      tokens so the surface can be retuned (or tinted) in one place. */
+   --tool-subtle: var(--bg-secondary); /* pill / group resting surface */
+   --tool-hover: var(--bg-tertiary); /* pill / group hover surface     */
+   --tool-border: var(--border-color); /* pill / group resting border  */
+   /* Tool-pill NAME + glyph tint — decoupled from --tool-color (which the visualizer owns) so it
+      can be tuned independently. Theme accent: the name follows the active accent, so it reads as
+      part of the system and recolours per theme. */
+   --dawn-toolpill-name: var(--accent);
+
    /* Semantic Surface Colors */
    --surface-elevated: var(--bg-tertiary);
    --border-color: var(--ring-inactive);

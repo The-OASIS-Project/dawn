@@ -121,6 +121,17 @@
          return;
       }
 
+      // Seal the previous tool-loop iteration's pill group before this iteration's text opens.
+      // Tools arrive AFTER their iteration's tool_iteration seal and BEFORE the next iteration's
+      // stream_start, so closing here splits groups per iteration — matching the reload
+      // per-message split (living tool pills). This mirrors the Aurora client's grouping.
+      // KNOWN LIMIT: an iteration that emits NO stream_start (e.g. a reasoning-only/tool-only
+      // iteration with no text bubble) won't seal here, so its tools merge into the prior group —
+      // live then shows one group where reload (per tool_calls message) shows two. Rare, no data
+      // loss (all pills render). The clean fix is a daemon-supplied per-iteration marker on
+      // tool_step (a future follow-up both clients would adopt), not a client heuristic.
+      if (typeof DawnToolPills !== 'undefined') DawnToolPills.closeGroup();
+
       // Update status to show responding
       if (callbacks.onStateChange) {
          callbacks.onStateChange('speaking', 'Responding');
@@ -507,6 +518,18 @@
          return;
       }
 
+      // Tool activity renders as living tool pills (from the tool_step frame), NEVER as a
+      // message_appended debug entry. The server does not fan message_appended for role:'tool'
+      // rows, but guard anyway so a tool-content row can't double-render alongside its pill.
+      var maText = typeof payload.text === 'string' ? payload.text : '';
+      if (
+         payload.role === 'tool' ||
+         maText.startsWith('[Tool Call:') ||
+         maText.startsWith('[Tool Result:')
+      ) {
+         return;
+      }
+
       // 3. Non-origin inline render (+ reasoning panel), stamped with message_id.
       if (typeof DawnTranscript === 'undefined' || !DawnTranscript.addEntry) return;
       var reasoningObj = null;
@@ -526,18 +549,18 @@
    }
 
    /**
-    * Handle a `tool_step` fan-out frame (server-authoritative persistence §Phase-3):
-    * a LIVE, EPHEMERAL tool_call / tool_result step for a turn ANOTHER browser is driving.
+    * Handle a `tool_step` fan-out frame (server-authoritative persistence §Phase-3 +
+    * §living-tool-pills): a LIVE, EPHEMERAL tool_call / tool_result step.
     *
-    * The server excludes the origin from recipients, so this only ever reaches a BYSTANDER
-    * — no client-side origin-suppression is needed (and would be unreliable anyway: the
-    * tool-iteration stream_end clears the streaming flag before the step emits). We keep
-    * ONLY the active-conversation check.
+    * We advertise `tool_step_origin` (websocket.js), so the server includes THIS connection in
+    * its fan — this reaches us for our OWN turn AND for a turn another browser is driving. Either
+    * way we render it as a living tool pill (DawnToolPills). No double-render on our own turn: the
+    * origin's redundant role:'tool' transcript frame is NOT rendered (dawn.js keeps only its
+    * reasoning-discard side effect). We keep ONLY the active-conversation check here.
     *
-    * Not persisted and not message-id-stamped: on reload the transcript rebuilds these from
-    * the messages table (same debug entries), so the live entries are simply replaced. We
-    * render the SAME debug entry the origin/reload render (DawnTranscript.addDebug), so the
-    * live view matches the reloaded view.
+    * Not persisted and not message-id-stamped: on reload the transcript rebuilds tool activity
+    * from the messages table (history.js -> DawnToolPills.renderReloadGroup, same tool_call_id
+    * pairing), so the live pills are simply replaced by the reloaded ones.
     *
     * @param {Object} payload - { conversation_id, stream_id, kind, payload:"<opaque JSON>" }
     */
@@ -555,10 +578,14 @@
             : null;
       if (activeConv == null || String(conv) !== String(activeConv)) return;
 
-      if (typeof DawnTranscript === 'undefined' || !DawnTranscript.addDebug) return;
+      if (typeof DawnToolPills === 'undefined') return;
+
+      // Belt-and-suspenders size bound on the opaque payload (the daemon already caps event
+      // payloads; this guards against a future cap regression handing JSON.parse a huge string).
+      if (typeof payload.payload === 'string' && payload.payload.length > 65536) return;
 
       // Parse the opaque, untrusted payload defensively (§8.7); never trust-parse for logic,
-      // only to extract display fields. addDebug escapes the content before rendering.
+      // only to extract display fields. DawnToolPills renders via textContent (escaped).
       var obj = null;
       try {
          obj = JSON.parse(payload.payload || '{}');
@@ -566,7 +593,10 @@
          return;
       }
       if (!obj || typeof obj !== 'object') return;
-      var tool = typeof obj.tool === 'string' ? obj.tool : '?';
+      var tool = typeof obj.tool === 'string' ? obj.tool : 'tool';
+      // tool_call_id lives INSIDE the opaque payload (same key load_conversation emits on
+      // tool_calls/role:tool rows) — the correlation that pairs a result to its call's pill.
+      var id = typeof obj.tool_call_id === 'string' ? obj.tool_call_id : '';
 
       if (kind === 'tool_call') {
          var argsStr = '';
@@ -579,18 +609,12 @@
          } else if (typeof obj.args === 'string') {
             argsStr = obj.args; // redacted marker
          }
-         DawnTranscript.addDebug('tool call', '[Tool Call: ' + tool + ']\n' + argsStr);
+         DawnToolPills.toolCall(id, tool, argsStr);
       } else if (kind === 'tool_result') {
          var result = typeof obj.result === 'string' ? obj.result : '';
-         DawnTranscript.addDebug('tool result', '[Tool Result: ' + tool + ']\n' + result);
-      } else {
-         return;
+         DawnToolPills.toolResult(id, result);
       }
-
-      // Follow the new entry, matching every other transcript-append site (the origin's own
-      // role:'tool' render scrolls the same way in transcript.js).  addDebug does not scroll.
-      var transcript = DawnElements && DawnElements.transcript;
-      if (transcript) transcript.scrollTop = transcript.scrollHeight;
+      // Scroll-to-follow is handled inside DawnToolPills.
    }
 
    /**
@@ -600,6 +624,10 @@
       if (!DawnState.streamingState.active) {
          return;
       }
+
+      // Seal any still-open tool-pill group at turn end (usually already closed by the final
+      // answer's stream_start; this covers a turn that ends right after tools).
+      if (typeof DawnToolPills !== 'undefined') DawnToolPills.closeGroup();
 
       // Update status back to idle
       if (callbacks.onStateChange) {

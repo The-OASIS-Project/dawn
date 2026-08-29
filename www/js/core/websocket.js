@@ -110,6 +110,9 @@
                      token: savedToken,
                      capabilities: capabilities,
                      tts_enabled: ttsEnabled,
+                     // Living tool pills: we render our OWN turn's tool steps from the
+                     // tool_step frame, so ask the server to include us in its fan.
+                     tool_step_origin: true,
                   },
                })
             );
@@ -118,7 +121,11 @@
             ws.send(
                JSON.stringify({
                   type: 'init',
-                  payload: { capabilities: capabilities, tts_enabled: ttsEnabled },
+                  payload: {
+                     capabilities: capabilities,
+                     tts_enabled: ttsEnabled,
+                     tool_step_origin: true,
+                  },
                })
             );
          }

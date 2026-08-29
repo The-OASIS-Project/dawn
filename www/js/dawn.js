@@ -118,7 +118,10 @@
                   ) {
                      DawnStreaming.clearReasoningState();
                   }
-                  DawnTranscript.addEntry(msg.payload.role, msg.payload.text);
+                  // Living tool pills: tool rendering now comes from the tool_step frame (we
+                  // advertise tool_step_origin, so the server fans our own turn's steps to us).
+                  // The role:'tool' transcript frame is kept ONLY for the reasoning-discard side
+                  // effect above — NOT rendered here, or it would double the pill.
                } else if (msg.payload.role === 'visual') {
                   // Render visual inline. If a progress placeholder exists (from
                   // visual_progress_start), swap it in-place. Otherwise, split the
@@ -600,10 +603,11 @@
                }
                break;
             case 'tool_step':
-               // Phase-3 ephemeral cross-viewer tool step: a LIVE tool_call/tool_result for a
-               // turn another browser is driving. The server excludes the origin, so this only
-               // reaches a bystander; render it into the active conversation's transcript.
-               // Not persisted — reload rebuilds these from the messages table.
+               // Ephemeral LIVE tool_call/tool_result (living tool pills). We advertise
+               // tool_step_origin, so the server fans this for our OWN turn AND bystander turns;
+               // either way it renders as a pill in the active conversation's transcript. No
+               // double-render on our own turn — the redundant role:'tool' frame is not rendered.
+               // Not persisted — reload rebuilds tool activity from the messages table.
                if (typeof DawnStreaming !== 'undefined' && DawnStreaming.handleToolStep) {
                   DawnStreaming.handleToolStep(msg.payload);
                }

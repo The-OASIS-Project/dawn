@@ -692,6 +692,8 @@
       // Clear transcript
       if (transcript) {
          transcript.innerHTML = '';
+         // Drop any open live tool-pill group whose DOM just got cleared (living tool pills).
+         if (typeof DawnToolPills !== 'undefined') DawnToolPills.reset();
 
          // Add archived notice at top for archived conversations
          if (isArchived) {
@@ -774,8 +776,16 @@
                   // tool turn at the 50-message boundary), there's no call in this page to
                   // pair with — render the result inline at its real position rather than
                   // dropping it or dumping it out of order at the end of the transcript.
-                  if (msg.tool_call_id && !consumedResultIds.has(msg.tool_call_id)) {
-                     DawnTranscript.addDebug('tool result', `[Tool Result: ${msg.content || ''}]`);
+                  if (
+                     msg.tool_call_id &&
+                     !consumedResultIds.has(msg.tool_call_id) &&
+                     typeof DawnToolPills !== 'undefined'
+                  ) {
+                     // Orphan result (its call is on an earlier, not-yet-loaded page): render a
+                     // lone result-only pill in place rather than dropping it.
+                     DawnToolPills.renderReloadGroup([
+                        { id: msg.tool_call_id, name: 'tool', args: '', result: msg.content || '' },
+                     ]);
                   }
                   tagEntries(entryStart, msg.created_at, msg.id);
                   continue;
@@ -790,19 +800,25 @@
                   if ((msg.content && msg.content.trim()) || msg.reasoning) {
                      await DawnTranscript.addEntry(msg.role, msg.content || '', msg.reasoning);
                   }
+                  // Living tool pills: one group per tool_calls message (per-iteration split,
+                  // matching the live per-iteration groups). Pair each call to its result by
+                  // tool_call_id — the SAME key the live tool_step frame carries.
+                  const items = [];
                   for (const tc of msg.tool_calls) {
                      const fn = tc.function || {};
                      const name = fn.name || 'tool';
-                     const args = fn.arguments || ''; // already a compact JSON string
+                     let args = fn.arguments || ''; // compact JSON string; pretty-print if parseable
+                     try {
+                        args = JSON.stringify(JSON.parse(args), null, 2);
+                     } catch (e) {
+                        /* leave as-is (redacted marker or non-JSON) */
+                     }
                      const result = toolResultsById[tc.id];
                      if (result !== undefined) consumedResultIds.add(tc.id);
-                     const combined =
-                        result !== undefined
-                           ? `[Tool Call: ${name}(${args}) -> ${result}]`
-                           : `[Tool Call: ${name}(${args})]`;
-                     // Label as a call (the entry IS the call, with its result inlined) so
-                     // the debug badge/colour matches the live 'tool call' rendering.
-                     DawnTranscript.addDebug('tool call', combined);
+                     items.push({ id: tc.id, name: name, args: args, result: result || '' });
+                  }
+                  if (typeof DawnToolPills !== 'undefined') {
+                     DawnToolPills.renderReloadGroup(items);
                   }
                   tagEntries(entryStart, msg.created_at, msg.id);
                   continue;
@@ -1798,6 +1814,7 @@
       const transcript = document.getElementById('transcript');
       if (transcript) {
          transcript.innerHTML = '';
+         if (typeof DawnToolPills !== 'undefined') DawnToolPills.reset();
       }
 
       // Reset per-conversation LLM settings
