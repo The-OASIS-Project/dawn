@@ -839,6 +839,12 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                   if (json_object_object_get_ex(payload, "tts_enabled", &tts_obj)) {
                      conn->tts_enabled = json_object_get_boolean(tts_obj);
                   }
+                  /* Living tool pills: client renders its OWN turn's tool steps from the
+                   * tool_step frame, so the server includes it in the fan (default off). */
+                  struct json_object *tso_obj;
+                  if (json_object_object_get_ex(payload, "tool_step_origin", &tso_obj)) {
+                     conn->tool_step_origin = json_object_get_boolean(tso_obj);
+                  }
 
                   OLOG_INFO("WebUI: Reconnected to session %u with token %.4s... "
                             "(opus: %s, tts: %s)",
@@ -897,6 +903,10 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                      if (json_object_object_get_ex(payload, "tts_enabled", &tts_obj)) {
                         conn->tts_enabled = json_object_get_boolean(tts_obj);
                      }
+                     struct json_object *tso_obj;
+                     if (json_object_object_get_ex(payload, "tool_step_origin", &tso_obj)) {
+                        conn->tool_step_origin = json_object_get_boolean(tso_obj);
+                     }
                      OLOG_INFO("WebUI: Session %u capabilities synced (opus: %s, tts: %s)",
                                conn->session->session_id, conn->use_opus ? "yes" : "no",
                                conn->tts_enabled ? "yes" : "no");
@@ -913,6 +923,10 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
          struct json_object *tts_obj;
          if (json_object_object_get_ex(payload, "tts_enabled", &tts_obj)) {
             conn->tts_enabled = json_object_get_boolean(tts_obj);
+         }
+         struct json_object *tso_obj;
+         if (json_object_object_get_ex(payload, "tool_step_origin", &tso_obj)) {
+            conn->tool_step_origin = json_object_get_boolean(tso_obj);
          }
          OLOG_INFO("WebUI: Session %u init capabilities synced (opus: %s, tts: %s)",
                    conn->session ? conn->session->session_id : 0, conn->use_opus ? "yes" : "no",
