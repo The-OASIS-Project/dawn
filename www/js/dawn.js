@@ -17,6 +17,14 @@
    // 'session' messages per (re)connect (reconnect + capability-update), and each would
    // otherwise re-issue a full load_conversation. Reset on disconnect (updateConnectionStatus).
    let restoredConvIdThisConnection = null;
+   // Page-load-lifetime latch — NOT reset per socket (a HARD REFRESH is a fresh JS context where
+   // this starts false again; a transient in-context socket reconnect keeps it true). A true
+   // reconnect normally skips the reload because the transcript DOM is already current — but a
+   // hard refresh WIPES the DOM while the server session often SURVIVES the brief drop
+   // (reconnected:true), so the first restore after a page load must still full-load or the
+   // transcript stays blank with the sidebar showing the conversation selected. Flips true once
+   // the first restore issues that load.
+   let transcriptRestoredSincePageLoad = false;
    // Last authenticated state the popover fan-out saw, so it can tell an actual
    // auth TRANSITION from the many unchanged-auth calls updateAuthVisibility()
    // makes (every get_config_response).  Only the transition warrants a refetch.
@@ -345,12 +353,19 @@
                if (typeof DawnAlwaysOn !== 'undefined') {
                   DawnAlwaysOn.resumeAfterReconnectIfNeeded();
                }
-               // Restore active conversation context. Three cases:
+               // Restore active conversation context. Four cases force a full render:
                //  - FRESH session (reconnected:false — restart/idle-expiry/evicted-to-fresh):
                //    backend has no LLM context → full load_conversation (also re-renders).
                //  - RECLAIM after takeover: another tab held the session and may have added
                //    turns behind this tab's back → full load_conversation to RE-RENDER the
                //    (possibly stale) transcript, even though the backend still has context.
+               //  - HARD REFRESH while the server session survived (reconnected:true, but the
+               //    DOM was wiped): the first restore since page load must full-load, else the
+               //    transcript stays blank while the sidebar shows the conversation selected.
+               //    Detected via the page-load latch, NOT `reconnected` (the server can't tell a
+               //    DOM-preserving socket reconnect from a page reload — both survive as the same
+               //    session). load_conversation also sets active_conversation_id server-side, so
+               //    it subsumes the re-anchor below.
                //  - Normal TRUE reconnect (display already current): skip the reload, just
                //    lightweight re-anchor.
                // Feature-detect: an older backend omits `reconnected`, so absent === load
@@ -358,7 +373,9 @@
                const reclaiming = DawnWS.consumeReclaiming ? DawnWS.consumeReclaiming() : false;
                const savedConvId = DawnHistory.getActiveConversationId();
                if (
-                  (msg.payload.reconnected !== true || reclaiming) &&
+                  (msg.payload.reconnected !== true ||
+                     reclaiming ||
+                     !transcriptRestoredSincePageLoad) &&
                   savedConvId &&
                   DawnState.authState.authenticated &&
                   savedConvId !== restoredConvIdThisConnection
@@ -366,6 +383,7 @@
                   // First 'session' of this connection for this conversation — restore once.
                   // Later duplicate 'session' messages (capability update) are skipped.
                   restoredConvIdThisConnection = savedConvId;
+                  transcriptRestoredSincePageLoad = true;
                   console.log(
                      reclaiming
                         ? 'Reclaim after takeover — full reload:'
