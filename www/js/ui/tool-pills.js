@@ -15,7 +15,7 @@
  * SVG caret/glyph, which carry no external data.
  *
  * Usage:
- *   DawnToolPills.toolCall(id, name, argsJson)          // live: open pending pill
+ *   DawnToolPills.toolCall(id, name, argsJson, iter)    // live: open pending pill (iter optional)
  *   DawnToolPills.toolResult(id, resultText)            // live: resolve it
  *   DawnToolPills.closeGroup()                          // live: seal current group (per iteration)
  *   DawnToolPills.reset()                               // conversation switch / clear
@@ -236,6 +236,7 @@
    // ---- Live API -------------------------------------------------------------
 
    var currentGroup = null;
+   var lastIter = null; // last-seen tool-loop iteration index (per-iteration group sealing)
 
    function ensureGroup() {
       // Self-heal if the transcript was cleared (conversation switch) out from under a
@@ -250,7 +251,16 @@
       return currentGroup;
    }
 
-   function toolCall(id, name, args) {
+   // `iter` (optional) is the daemon's 0-based tool-loop iteration index. When it CHANGES from the
+   // last-seen value while a group is still open, this is an iteration boundary the stream_start
+   // seal missed (a tool-only iteration renders no text bubble) — seal here so its tools start a
+   // fresh group, matching reload's per-assistant-message grouping. Keyed on "differs" (not
+   // "increments") so a per-turn reset (…3 -> 0) also seals. Absent iter -> stream_start seal only.
+   function toolCall(id, name, args, iter) {
+      if (typeof iter === 'number') {
+         if (currentGroup && iter !== lastIter) closeGroup();
+         lastIter = iter;
+      }
       var g = ensureGroup();
       if (!g) return;
       var pill = createPill(id, name);
@@ -303,6 +313,7 @@
 
    function reset() {
       currentGroup = null;
+      lastIter = null;
    }
 
    // ---- Reload API -----------------------------------------------------------

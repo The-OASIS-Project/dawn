@@ -225,18 +225,22 @@ void memory_citation_record_tool_fact_current(int64_t fact_id) {
  * drives the job-event path. */
 char *event_payload_tool_call(const char *tool_name,
                               const char *args_json,
-                              const char *tool_call_id) {
+                              const char *tool_call_id,
+                              int iteration) {
    (void)tool_name;
    (void)args_json;
    (void)tool_call_id;
+   (void)iteration;
    return NULL;
 }
 char *event_payload_tool_result(const char *tool_name,
                                 const char *result_text,
-                                const char *tool_call_id) {
+                                const char *tool_call_id,
+                                int iteration) {
    (void)tool_name;
    (void)result_text;
    (void)tool_call_id;
+   (void)iteration;
    return NULL;
 }
 

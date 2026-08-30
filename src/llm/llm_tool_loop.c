@@ -146,7 +146,8 @@ static char *build_reasoning_json(const llm_tool_response_t *result, const char 
  * reconnect/reload — same as before this feature existed. */
 static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
                                        int before_len,
-                                       const char *reasoning_json) {
+                                       const char *reasoning_json,
+                                       int iteration) {
    /* for_reconnect (not session_get): a turn that survives a client disconnect
     * (background-jobs Phase 1) must STILL persist its tool-iteration rows
     * server-side.  session_get() skips disconnected sessions and would return
@@ -247,7 +248,7 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
                /* ev_observe (jobs) → durable conv_event_emit (persist + fan); else
                 * fan_ephemeral (interactive/voice) → live-only cross-viewer fan, no DB row.
                 * Both TAKE OWNERSHIP of the payload. */
-               char *tc_payload = event_payload_tool_call(tool_name, args, call_id);
+               char *tc_payload = event_payload_tool_call(tool_name, args, call_id, iteration);
                if (ev_observe) {
                   conv_event_emit(ev_conv, ev_user, CONV_EVENT_TOOL_CALL, tc_payload);
                } else {
@@ -275,7 +276,7 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
                                  json_object_object_get_ex(tcid_to_name, tcid, &nmo))
                                     ? json_object_get_string(nmo)
                                     : NULL;
-            char *tr_payload = event_payload_tool_result(rtool, content, tcid);
+            char *tr_payload = event_payload_tool_result(rtool, content, tcid, iteration);
             if (ev_observe) {
                conv_event_emit(ev_conv, ev_user, CONV_EVENT_TOOL_RESULT, tr_payload);
             } else {
@@ -890,7 +891,7 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
        * display-only reasoning (E3) attached to its assistant row. */
       char *reasoning_json = build_reasoning_json(
           &result, reasoning_provider_label(params->llm_type, params->cloud_provider));
-      persist_appended_tool_turn(params, hist_before, reasoning_json);
+      persist_appended_tool_turn(params, hist_before, reasoning_json, iteration);
       free(reasoning_json);
       reasoning_json = NULL;
 

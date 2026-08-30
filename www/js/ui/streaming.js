@@ -125,11 +125,11 @@
       // Tools arrive AFTER their iteration's tool_iteration seal and BEFORE the next iteration's
       // stream_start, so closing here splits groups per iteration — matching the reload
       // per-message split (living tool pills). This mirrors the Aurora client's grouping.
-      // KNOWN LIMIT: an iteration that emits NO stream_start (e.g. a reasoning-only/tool-only
-      // iteration with no text bubble) won't seal here, so its tools merge into the prior group —
-      // live then shows one group where reload (per tool_calls message) shows two. Rare, no data
-      // loss (all pills render). The clean fix is a daemon-supplied per-iteration marker on
-      // tool_step (a future follow-up both clients would adopt), not a client heuristic.
+      // The former KNOWN LIMIT (a text-less/tool-only iteration emits no stream_start, so its
+      // tools merged into the prior group) is now covered by the daemon's per-iteration `iter`
+      // marker on tool_step: handleToolStep seals on iter change too, so this stream_start seal
+      // and the iter seal are complementary (both idempotent — closeGroup on a null group is a
+      // no-op). An older daemon that omits `iter` falls back to this seal alone (limit persists).
       if (typeof DawnToolPills !== 'undefined') DawnToolPills.closeGroup();
 
       // Update status to show responding
@@ -530,6 +530,14 @@
          return;
       }
 
+      // Bystander final-group seal: a viewer watching ANOTHER session's turn never receives that
+      // turn's stream_start/finalizeStream (3c: narration isn't fanned live), so the iter marker
+      // seals BETWEEN iterations but nothing seals the LAST tool group. The turn's final answer
+      // landing as message_appended is that seal — it renders below the (now-closed) group, and
+      // closeGroup is idempotent (no-op for the origin, which returned at the adopt path above, and
+      // when no group is open, e.g. a plain user turn).
+      if (typeof DawnToolPills !== 'undefined') DawnToolPills.closeGroup();
+
       // 3. Non-origin inline render (+ reasoning panel), stamped with message_id.
       if (typeof DawnTranscript === 'undefined' || !DawnTranscript.addEntry) return;
       var reasoningObj = null;
@@ -597,6 +605,11 @@
       // tool_call_id lives INSIDE the opaque payload (same key load_conversation emits on
       // tool_calls/role:tool rows) — the correlation that pairs a result to its call's pill.
       var id = typeof obj.tool_call_id === 'string' ? obj.tool_call_id : '';
+      // Per-iteration grouping marker: seals the pill group at a tool-loop iteration boundary
+      // even when that iteration streamed no text (so no stream_start seal fired) — closing the
+      // known-limit merge documented at handleStreamStart. Absent (older daemon) -> undefined ->
+      // DawnToolPills falls back to the stream_start seal alone.
+      var iter = typeof obj.iter === 'number' ? obj.iter : undefined;
 
       if (kind === 'tool_call') {
          var argsStr = '';
@@ -609,7 +622,7 @@
          } else if (typeof obj.args === 'string') {
             argsStr = obj.args; // redacted marker
          }
-         DawnToolPills.toolCall(id, tool, argsStr);
+         DawnToolPills.toolCall(id, tool, argsStr, iter);
       } else if (kind === 'tool_result') {
          var result = typeof obj.result === 'string' ? obj.result : '';
          DawnToolPills.toolResult(id, result);

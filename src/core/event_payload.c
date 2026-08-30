@@ -208,15 +208,29 @@ static void add_tool_call_id(struct json_object *root, const char *tool_call_id)
    json_object_object_add(root, "tool_call_id", json_object_new_string(id_buf));
 }
 
+/* Per-iteration grouping marker (living tool-pill UI): a live consumer seals its pill group
+ * when `iter` changes, so a reasoning-only/tool-only iteration (which streams no text and thus
+ * no stream_start boundary) still starts a fresh group — keeping live grouping identical to
+ * reload's per-assistant-message grouping.  Omitted when negative so an unmarked step stays
+ * minimal and older payloads are unaffected. */
+static void add_iter(struct json_object *root, int iteration) {
+   if (iteration < 0) {
+      return;
+   }
+   json_object_object_add(root, "iter", json_object_new_int(iteration));
+}
+
 char *event_payload_tool_call(const char *tool_name,
                               const char *args_json,
-                              const char *tool_call_id) {
+                              const char *tool_call_id,
+                              int iteration) {
    struct json_object *root = json_object_new_object();
    if (root == NULL) {
       return NULL;
    }
    json_object_object_add(root, "tool", json_object_new_string(tool_name ? tool_name : "?"));
    add_tool_call_id(root, tool_call_id);
+   add_iter(root, iteration);
 
    struct json_object *args = NULL;
    if (args_json && args_json[0]) {
@@ -249,13 +263,15 @@ char *event_payload_tool_call(const char *tool_name,
 
 char *event_payload_tool_result(const char *tool_name,
                                 const char *result_text,
-                                const char *tool_call_id) {
+                                const char *tool_call_id,
+                                int iteration) {
    struct json_object *root = json_object_new_object();
    if (root == NULL) {
       return NULL;
    }
    json_object_object_add(root, "tool", json_object_new_string(tool_name ? tool_name : "?"));
    add_tool_call_id(root, tool_call_id);
+   add_iter(root, iteration);
 
    /* Cap the result BEFORE embedding it, so the cap governs the payload the way
     * an operator expects rather than being diluted by JSON escaping.  Results are

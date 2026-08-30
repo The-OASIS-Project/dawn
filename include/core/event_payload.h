@@ -80,11 +80,15 @@ size_t event_payload_utf8_floor(const char *s, size_t len);
  * @param args_json Raw arguments JSON (LLM-generated); may be NULL.
  * @param tool_call_id Provider correlation id (emitted as `tool_call_id` when non-empty) so a
  *        consumer can pair a later tool_result to this call; may be NULL.
+ * @param iteration Tool-loop iteration index (0-based) this step belongs to, emitted as `iter`
+ *        so a live consumer seals its pill group per iteration — matching reload's
+ *        per-assistant-message grouping even when an iteration streams no text. Negative to omit.
  * @return malloc'd JSON, or NULL on OOM. Caller frees.
  */
 char *event_payload_tool_call(const char *tool_name,
                               const char *args_json,
-                              const char *tool_call_id);
+                              const char *tool_call_id,
+                              int iteration);
 
 /**
  * @brief Build a redacted, capped `tool_result` payload.
@@ -95,11 +99,14 @@ char *event_payload_tool_call(const char *tool_name,
  *
  * @param tool_call_id Provider correlation id back to the originating tool_call (emitted as
  *        `tool_call_id` when non-empty); may be NULL.
+ * @param iteration Tool-loop iteration index (0-based) this step belongs to, emitted as `iter`
+ *        (see event_payload_tool_call). Negative to omit.
  * @return malloc'd JSON, or NULL on OOM. Caller frees.
  */
 char *event_payload_tool_result(const char *tool_name,
                                 const char *result_text,
-                                const char *tool_call_id);
+                                const char *tool_call_id,
+                                int iteration);
 
 /**
  * @brief Build a `status` payload: {"state":"generating"|"idle"}.
