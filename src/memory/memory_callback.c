@@ -921,7 +921,8 @@ char *memory_action_search(int user_id,
    /* OOM during build: return a sentinel; consumer (LLM) sees the failure. */
    if (strbuf_oom(&sb)) {
       strbuf_free(&sb);
-      return strdup("Memory search failed: response too large or out of memory.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Memory search failed: response too large or out of memory.");
    }
 
    char *out = strbuf_steal(&sb);
@@ -976,7 +977,8 @@ static char *memory_action_remember_single(int user_id,
 
    /* Check for injection patterns */
    if (memory_filter_check(fact_text)) {
-      return strdup("I cannot store that as a fact. It contains patterns that could affect my "
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "I cannot store that as a fact. It contains patterns that could affect my "
                     "behavior in unintended ways.");
    }
 
@@ -1062,7 +1064,7 @@ static char *memory_action_remember_single(int user_id,
                                          &fact_id);
 
    if (create_rc != MEMORY_DB_SUCCESS) {
-      return strdup("Failed to store the fact. Please try again.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Failed to store the fact. Please try again.");
    }
 
    /* AI-decided expiry (v58/C3): if the model attached a reference date and
@@ -1273,7 +1275,8 @@ static char *memory_action_forget(int user_id, const char *fact_text, int64_t re
    if (merge) {
       memory_fact_t keep;
       if (memory_db_fact_get(replaced_by, user_id, &keep) != MEMORY_DB_SUCCESS) {
-         return strdup("The 'replaced_by' keeper ID wasn't found (or isn't yours). "
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "The 'replaced_by' keeper ID wasn't found (or isn't yours). "
                        "Nothing was changed.");
       }
       for (int i = 0; i < id_count; i++) {
@@ -1438,7 +1441,8 @@ static char *memory_action_get(int user_id, const char *value) {
 
    if (strbuf_oom(&sb)) {
       strbuf_free(&sb);
-      return strdup("Memory query failed: response too large or out of memory.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Memory query failed: response too large or out of memory.");
    }
    char *out = strbuf_steal(&sb);
    return out ? out : strdup("Memory query failed: out of memory.");
@@ -1466,7 +1470,8 @@ static char *memory_action_find_duplicates(int user_id, const char *value) {
    if (memory_embeddings_find_duplicate_clusters(user_id, threshold, clusters,
                                                  MEMORY_DUP_MAX_CLUSTERS,
                                                  &cluster_count) != MEMORY_DB_SUCCESS) {
-      return strdup("Couldn't scan memories for duplicates (embeddings may be unavailable).");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Couldn't scan memories for duplicates (embeddings may be unavailable).");
    }
 
    if (cluster_count == 0) {
@@ -1505,7 +1510,8 @@ static char *memory_action_find_duplicates(int user_id, const char *value) {
 
    if (strbuf_oom(&sb)) {
       strbuf_free(&sb);
-      return strdup("Duplicate scan succeeded but the result was too large to render.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Duplicate scan succeeded but the result was too large to render.");
    }
    char *out = strbuf_steal(&sb);
    return out ? out : strdup("Memory updated.");
@@ -1538,7 +1544,8 @@ char *memory_action_recent(int user_id,
    const char *period_resolved = (period && period[0]) ? period : "7d";
    time_t seconds = parse_time_period(period_resolved);
    if (seconds <= 0) {
-      return strdup("Invalid time period. Use format like '24h', '7d', '1w', or '30m'.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Invalid time period. Use format like '24h', '7d', '1w', or '30m'.");
    }
    time_t now_ts = time(NULL);
    time_t since = now_ts - seconds;
@@ -1551,7 +1558,8 @@ char *memory_action_recent(int user_id,
    if (before && before[0]) {
       time_t before_seconds = parse_time_period(before);
       if (before_seconds <= 0) {
-         return strdup("Invalid 'before' time period. Use format like '3d', '30d', '1w'.");
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Invalid 'before' time period. Use format like '3d', '30d', '1w'.");
       }
       until = now_ts - before_seconds;
       if (until < 0)
@@ -1749,7 +1757,8 @@ char *memory_action_recent(int user_id,
 
    if (strbuf_oom(&sb)) {
       strbuf_free(&sb);
-      return strdup("Memory query failed: response too large or out of memory.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Memory query failed: response too large or out of memory.");
    }
 
    char *out = strbuf_steal(&sb);
@@ -1763,7 +1772,8 @@ char *memory_action_recent(int user_id,
 static char *memory_action_save_contact(int user_id, const char *value) {
    /* value format: "entity_name::field_type::type::value::val::label::lbl" */
    if (!value || !value[0])
-      return strdup("Error: save_contact requires entity name, field_type, and value");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: save_contact requires entity name, field_type, and value");
 
    char entity_name[128] = "";
    tool_param_extract_base(value, entity_name, sizeof(entity_name));
@@ -1782,7 +1792,8 @@ static char *memory_action_save_contact(int user_id, const char *value) {
    tool_param_extract_custom(value, "entity_id", entity_id_str, sizeof(entity_id_str));
 
    if (!entity_name[0] || !field_type[0] || !contact_value[0])
-      return strdup("Error: save_contact requires entity name, field_type, and value");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: save_contact requires entity name, field_type, and value");
 
    int64_t entity_id;
 
@@ -1790,7 +1801,7 @@ static char *memory_action_save_contact(int user_id, const char *value) {
       /* Explicit entity_id provided — use it directly (disambiguation resolved) */
       entity_id = atoll(entity_id_str);
       if (entity_id <= 0)
-         return strdup("Error: invalid entity_id");
+         return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid entity_id");
    } else {
       /* Check for exact canonical match first */
       char canonical[64];
@@ -1821,7 +1832,7 @@ static char *memory_action_save_contact(int user_id, const char *value) {
             /* Similar people found — return disambiguation prompt */
             char *buf = malloc(2048);
             if (!buf)
-               return strdup("Error: memory allocation failed");
+               return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
             int pos = snprintf(buf, 2048,
                                "Similar people already exist. Which person should receive "
                                "this contact info?\n");
@@ -1841,7 +1852,7 @@ static char *memory_action_save_contact(int user_id, const char *value) {
          bool created = false;
          if (memory_db_entity_upsert(user_id, entity_name, "person", canonical, &created,
                                      &entity_id) != MEMORY_DB_SUCCESS)
-            return strdup("Error: failed to create entity");
+            return strdup(TOOL_RESULT_ERROR_MARK "Error: failed to create entity");
       }
    }
 
@@ -1852,11 +1863,11 @@ static char *memory_action_save_contact(int user_id, const char *value) {
       bool created = false;
       if (memory_db_entity_upsert(user_id, entity_name, "person", canonical, &created,
                                   &entity_id) != MEMORY_DB_SUCCESS)
-         return strdup("Error: failed to create entity");
+         return strdup(TOOL_RESULT_ERROR_MARK "Error: failed to create entity");
    }
 
    if (contacts_add(user_id, entity_id, field_type, contact_value, label) != 0)
-      return strdup("Error: failed to save contact information");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: failed to save contact information");
 
    char *result = malloc(512);
    if (result)
@@ -1871,7 +1882,7 @@ static char *memory_action_save_contact(int user_id, const char *value) {
 
 static char *memory_action_find_contact(int user_id, const char *value) {
    if (!value || !value[0])
-      return strdup("Error: find_contact requires a name to search for");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: find_contact requires a name to search for");
 
    char name[128] = "";
    tool_param_extract_base(value, name, sizeof(name));
@@ -1889,7 +1900,7 @@ static char *memory_action_find_contact(int user_id, const char *value) {
 
    char *buf = malloc(2048);
    if (!buf)
-      return strdup("Error: memory allocation failed");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
    int pos = snprintf(buf, 2048, "Contact results (%d):\n", count);
    for (int i = 0; i < count && pos < 1900; i++) {
       pos += snprintf(buf + pos, 2048 - pos, "- %s: %s = %s%s%s%s [id:%lld]\n",
@@ -1918,7 +1929,7 @@ static char *memory_action_list_contacts(int user_id, const char *value) {
 
    char *buf = malloc(4096);
    if (!buf)
-      return strdup("Error: memory allocation failed");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
    int pos = snprintf(buf, 4096, "All contacts (%d):\n", count);
    for (int i = 0; i < count && pos < 3900; i++) {
       pos += snprintf(buf + pos, 4096 - pos, "- %s: %s = %s%s%s%s\n", results[i].entity_name,
@@ -1934,7 +1945,8 @@ static char *memory_action_list_contacts(int user_id, const char *value) {
 
 static char *memory_action_merge_entities(int user_id, const char *value) {
    if (!value || !value[0])
-      return strdup("Error: merge_entities requires source_name (query) and target_name");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: merge_entities requires source_name (query) and target_name");
 
    char source_name[128] = "";
    tool_param_extract_base(value, source_name, sizeof(source_name));
@@ -1943,14 +1955,15 @@ static char *memory_action_merge_entities(int user_id, const char *value) {
    tool_param_extract_custom(value, "target_name", target_name, sizeof(target_name));
 
    if (!source_name[0] || !target_name[0])
-      return strdup("Error: merge_entities requires both source_name (query) and target_name");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: merge_entities requires both source_name (query) and target_name");
 
    /* Run prompt-injection filter on both names before any DB lookup —
     * mirrors what the resolver path will do at extraction time, and
     * prevents a poisoned name from sliding into a downstream
     * canonical_name field via a misdirected merge. */
    if (memory_filter_check(source_name) || memory_filter_check(target_name)) {
-      return strdup("Error: entity name failed prompt-injection filter");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: entity name failed prompt-injection filter");
    }
 
    /* Look up both entities by canonical name */
@@ -1960,9 +1973,9 @@ static char *memory_action_merge_entities(int user_id, const char *value) {
 
    memory_entity_t src_entity, tgt_entity;
    if (memory_db_entity_get_by_name(user_id, src_canonical, &src_entity) != MEMORY_DB_SUCCESS)
-      return strdup("Error: source entity not found");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: source entity not found");
    if (memory_db_entity_get_by_name(user_id, tgt_canonical, &tgt_entity) != MEMORY_DB_SUCCESS)
-      return strdup("Error: target entity not found");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: target entity not found");
 
    /* Soft-link by default (entity-merge Phase 1, design §14): set
     * canonical_id on the source row + audit-row insert.  The link is
@@ -1988,12 +2001,14 @@ static char *memory_action_merge_entities(int user_id, const char *value) {
       OLOG_WARNING("memory_callback: merge_entities race — entity vanished between lookup and "
                    "link (source='%s', target='%s')",
                    source_name, target_name);
-      return strdup("Error: one or both entities no longer exist (may have been deleted)");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: one or both entities no longer exist (may have been deleted)");
    } else {
       /* alias_link refuses self-link, source-with-existing-aliases (would
        * orphan the equivalence class), and DB failures.  Distinct return
        * codes aren't surfaced; report the operation refused. */
-      return strdup("Error: cannot link these entities "
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: cannot link these entities "
                     "(source may already be a canonical with its own aliases, or "
                     "source and target are the same)");
    }
@@ -2005,16 +2020,16 @@ static char *memory_action_merge_entities(int user_id, const char *value) {
 
 static char *memory_action_delete_contact(int user_id, const char *value) {
    if (!value || !value[0])
-      return strdup("Error: delete_contact requires a contact ID");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: delete_contact requires a contact ID");
 
    char id_str[32] = "";
    tool_param_extract_base(value, id_str, sizeof(id_str));
    int64_t contact_id = strtoll(id_str[0] ? id_str : value, NULL, 10);
    if (contact_id <= 0)
-      return strdup("Error: invalid contact ID");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid contact ID");
 
    if (contacts_delete(user_id, contact_id) != 0)
-      return strdup("Error: contact not found or already deleted");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: contact not found or already deleted");
 
    return strdup("Contact deleted.");
 }
@@ -2085,17 +2100,17 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
 
    /* Check if memory system is enabled */
    if (!g_config.memory.enabled) {
-      return strdup("Memory system is disabled.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Memory system is disabled.");
    }
 
    /* Get current user ID */
    int user_id = get_current_user_id();
    if (user_id <= 0) {
-      return strdup("Memory system requires authentication. Please log in.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Memory system requires authentication. Please log in.");
    }
 
    if (!actionName) {
-      return strdup("Invalid memory action.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Invalid memory action.");
    }
 
    OLOG_INFO("memory_callback: action='%s', value='%s', user_id=%d", actionName,
@@ -2211,7 +2226,7 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
          if (trimmed == NULL) {
             /* Fail SAFE: never fall back to the untrimmed value — that would
              * persist the param tail this strip exists to remove. */
-            return strdup("Memory remember failed: out of memory.");
+            return strdup(TOOL_RESULT_ERROR_MARK "Memory remember failed: out of memory.");
          }
          char *res = memory_action_remember(user_id, trimmed);
          free(trimmed);
@@ -2301,9 +2316,9 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
    } else {
       char *msg = malloc(128);
       if (msg) {
-         snprintf(msg, 128, "Unknown memory action: '%s'", actionName);
+         snprintf(msg, 128, TOOL_RESULT_ERROR_MARK "Unknown memory action: '%s'", actionName);
          return msg;
       }
-      return strdup("Unknown memory action.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Unknown memory action.");
    }
 }
