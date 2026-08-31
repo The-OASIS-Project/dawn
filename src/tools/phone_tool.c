@@ -297,10 +297,30 @@ static int estimate_sms_segments(const char *body) {
  * Action Handlers
  * ============================================================================= */
 
+/* Wrap a phone_service_* result. The service writes a human-readable message into `result` and
+ * returns 0 on success / 1 on error (phone_service.h). Prefix the WebUI failure mark from the
+ * STATUS code — never parsed from the text — so a failed call/answer/hangup/SMS reds the pill.
+ * NOTE: the multi-contact disambiguation path also returns 1 (a "which contact?" prompt), so it
+ * reds too; accepted (distinguishing it would need a dedicated service return code). */
+static char *phone_service_result_dup(int rc, const char *result) {
+   if (rc == 0 || result == NULL) { /* 0 == success per phone_service.h */
+      return strdup(result ? result : "");
+   }
+   size_t n = strlen(result);
+   char *out = malloc(n + 2);
+   if (out == NULL) {
+      return strdup(result); /* degrade: unmarked rather than drop the message */
+   }
+   out[0] = TOOL_RESULT_ERROR_MARK[0];
+   memcpy(out + 1, result, n + 1);
+   return out;
+}
+
 static char *handle_call(struct json_object *details, int user_id) {
    const char *target = json_get_str(details, "target");
    if (!target || target[0] == '\0') {
-      return strdup("Error: 'target' is required (phone number or contact name)");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: 'target' is required (phone number or contact name)");
    }
 
    if (s_config.confirm_outbound) {
@@ -331,38 +351,39 @@ static char *handle_call(struct json_object *details, int user_id) {
 
    /* No confirmation — dial immediately (service layer applies the same guard) */
    char result[RESULT_BUF_SIZE];
-   phone_service_call(user_id, target, result, sizeof(result));
-   return strdup(result);
+   int rc = phone_service_call(user_id, target, result, sizeof(result));
+   return phone_service_result_dup(rc, result);
 }
 
 static char *handle_confirm_call(int user_id) {
    if (s_pending_call_number[0] == '\0') {
-      return strdup("Error: no pending call to confirm");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: no pending call to confirm");
    }
    if (time(NULL) - s_pending_call_at > PHONE_TOOL_PENDING_TTL_SEC) {
       s_pending_call_number[0] = '\0';
       s_pending_call_at = 0;
-      return strdup("Error: confirmation expired. Please retry the call request.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: confirmation expired. Please retry the call request.");
    }
 
    char result[RESULT_BUF_SIZE];
-   phone_service_call(user_id, s_pending_call_number, result, sizeof(result));
+   int rc = phone_service_call(user_id, s_pending_call_number, result, sizeof(result));
 
    s_pending_call_number[0] = '\0';
    s_pending_call_at = 0;
-   return strdup(result);
+   return phone_service_result_dup(rc, result);
 }
 
 static char *handle_answer(int user_id) {
    char result[RESULT_BUF_SIZE];
-   phone_service_answer(user_id, result, sizeof(result));
-   return strdup(result);
+   int rc = phone_service_answer(user_id, result, sizeof(result));
+   return phone_service_result_dup(rc, result);
 }
 
 static char *handle_hang_up(int user_id) {
    char result[RESULT_BUF_SIZE];
-   phone_service_hangup(user_id, result, sizeof(result));
-   return strdup(result);
+   int rc = phone_service_hangup(user_id, result, sizeof(result));
+   return phone_service_result_dup(rc, result);
 }
 
 static char *handle_send_sms(struct json_object *details, int user_id) {
@@ -370,10 +391,11 @@ static char *handle_send_sms(struct json_object *details, int user_id) {
    const char *body = json_get_str(details, "body");
 
    if (!target || target[0] == '\0') {
-      return strdup("Error: 'target' is required (phone number or contact name)");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: 'target' is required (phone number or contact name)");
    }
    if (!body || body[0] == '\0') {
-      return strdup("Error: 'body' is required (message text)");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: 'body' is required (message text)");
    }
 
    if (s_config.confirm_outbound) {
@@ -410,29 +432,30 @@ static char *handle_send_sms(struct json_object *details, int user_id) {
    }
 
    char result[RESULT_BUF_SIZE];
-   phone_service_send_sms(user_id, target, body, result, sizeof(result));
-   return strdup(result);
+   int rc = phone_service_send_sms(user_id, target, body, result, sizeof(result));
+   return phone_service_result_dup(rc, result);
 }
 
 static char *handle_confirm_sms(int user_id) {
    if (s_pending_sms_number[0] == '\0') {
-      return strdup("Error: no pending SMS to confirm");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: no pending SMS to confirm");
    }
    if (time(NULL) - s_pending_sms_at > PHONE_TOOL_PENDING_TTL_SEC) {
       s_pending_sms_number[0] = '\0';
       s_pending_sms_body[0] = '\0';
       s_pending_sms_at = 0;
-      return strdup("Error: confirmation expired. Please retry the send request.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: confirmation expired. Please retry the send request.");
    }
 
    char result[RESULT_BUF_SIZE];
-   phone_service_send_sms(user_id, s_pending_sms_number, s_pending_sms_body, result,
-                          sizeof(result));
+   int rc = phone_service_send_sms(user_id, s_pending_sms_number, s_pending_sms_body, result,
+                                   sizeof(result));
 
    s_pending_sms_number[0] = '\0';
    s_pending_sms_body[0] = '\0';
    s_pending_sms_at = 0;
-   return strdup(result);
+   return phone_service_result_dup(rc, result);
 }
 
 static char *handle_read_sms(int user_id) {
@@ -443,7 +466,7 @@ static char *handle_read_sms(int user_id) {
 
    char *buf = malloc(RESULT_BUF_SIZE);
    if (!buf) {
-      return strdup("Error: memory allocation failed");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
    }
 
    int pos = 0;
@@ -498,7 +521,8 @@ static void format_short_date(time_t t, char *out, size_t out_size) {
 
 static char *handle_delete_sms(struct json_object *details, int user_id) {
    if (!details)
-      return strdup("Error: delete_sms requires one of {id, number, older_than_days}.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: delete_sms requires one of {id, number, older_than_days}.");
 
    struct json_object *id_obj = NULL;
    struct json_object *num_obj = NULL;
@@ -509,8 +533,8 @@ static char *handle_delete_sms(struct json_object *details, int user_id) {
 
    int criteria_count = (id_obj ? 1 : 0) + (num_obj ? 1 : 0) + (older_obj ? 1 : 0);
    if (criteria_count != 1)
-      return strdup("Error: delete_sms requires exactly one of "
-                    "{id, number, older_than_days}.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: delete_sms requires exactly one of "
+                                           "{id, number, older_than_days}.");
 
    char buf[1024];
 
@@ -527,7 +551,7 @@ static char *handle_delete_sms(struct json_object *details, int user_id) {
       }
       if (rc != PHONE_DB_SUCCESS) {
          clear_pending_delete();
-         return strdup("Error: database error looking up SMS record.");
+         return strdup(TOOL_RESULT_ERROR_MARK "Error: database error looking up SMS record.");
       }
 
       /* Truncate body preview */
@@ -557,12 +581,12 @@ static char *handle_delete_sms(struct json_object *details, int user_id) {
       const char *number = json_object_get_string(num_obj);
       if (!number || !*number) {
          clear_pending_delete();
-         return strdup("Error: 'number' must be a non-empty phone number.");
+         return strdup(TOOL_RESULT_ERROR_MARK "Error: 'number' must be a non-empty phone number.");
       }
       int match_count = 0;
       if (phone_db_sms_log_count_by_number(user_id, number, &match_count) != PHONE_DB_SUCCESS) {
          clear_pending_delete();
-         return strdup("Error: database error counting SMS by number.");
+         return strdup(TOOL_RESULT_ERROR_MARK "Error: database error counting SMS by number.");
       }
       if (match_count == 0) {
          clear_pending_delete();
@@ -583,14 +607,14 @@ static char *handle_delete_sms(struct json_object *details, int user_id) {
    int days = json_object_get_int(older_obj);
    if (days <= 0) {
       clear_pending_delete();
-      return strdup("Error: 'older_than_days' must be a positive integer.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: 'older_than_days' must be a positive integer.");
    }
    time_t cutoff = time(NULL) - (time_t)days * 86400;
 
    int match_count = 0;
    if (phone_db_sms_log_count_older_than(user_id, cutoff, &match_count) != PHONE_DB_SUCCESS) {
       clear_pending_delete();
-      return strdup("Error: database error counting older SMS.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: database error counting older SMS.");
    }
    if (match_count == 0) {
       clear_pending_delete();
@@ -641,22 +665,24 @@ static char *validate_pending_delete(const char *expected_kind, int user_id) {
 
    if (!s_pending_delete_kind[0]) {
       pthread_mutex_unlock(&s_phone_tool_mutex);
-      return strdup("Error: no pending deletion to confirm.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: no pending deletion to confirm.");
    }
    if (s_pending_delete_user_id != user_id) {
       /* Don't clear — another user's pending; leave it alone. */
       pthread_mutex_unlock(&s_phone_tool_mutex);
-      return strdup("Error: no pending deletion to confirm.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: no pending deletion to confirm.");
    }
    if (strcmp(s_pending_delete_kind, expected_kind) != 0) {
       clear_pending_delete_locked();
       pthread_mutex_unlock(&s_phone_tool_mutex);
-      return strdup("Error: pending deletion is for a different record type.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: pending deletion is for a different record type.");
    }
    if (time(NULL) - s_pending_delete_at > PHONE_TOOL_PENDING_TTL_SEC) {
       clear_pending_delete_locked();
       pthread_mutex_unlock(&s_phone_tool_mutex);
-      return strdup("Error: confirmation expired. Please retry the delete request.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: confirmation expired. Please retry the delete request.");
    }
    pthread_mutex_unlock(&s_phone_tool_mutex);
    return NULL;
@@ -671,7 +697,8 @@ static char *handle_confirm_delete_sms(int user_id) {
       OLOG_WARNING("phone_tool: user=%d delete rate-limited (>%d/hour)", user_id,
                    s_config.delete_rate_limit_per_hour);
       clear_pending_delete();
-      return strdup("Error: too many deletions in the last hour. Try again later.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: too many deletions in the last hour. Try again later.");
    }
 
    /* Snapshot pending state under the mutex so a concurrent arm can't alter
@@ -729,7 +756,8 @@ static char *handle_confirm_delete_sms(int user_id) {
 
 static char *handle_delete_call(struct json_object *details, int user_id) {
    if (!details)
-      return strdup("Error: delete_call requires one of {id, older_than_days}.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: delete_call requires one of {id, older_than_days}.");
 
    struct json_object *id_obj = NULL;
    struct json_object *older_obj = NULL;
@@ -738,7 +766,8 @@ static char *handle_delete_call(struct json_object *details, int user_id) {
 
    int criteria_count = (id_obj ? 1 : 0) + (older_obj ? 1 : 0);
    if (criteria_count != 1)
-      return strdup("Error: delete_call requires exactly one of {id, older_than_days}.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: delete_call requires exactly one of {id, older_than_days}.");
 
    char buf[768];
 
@@ -754,7 +783,7 @@ static char *handle_delete_call(struct json_object *details, int user_id) {
       }
       if (rc != PHONE_DB_SUCCESS) {
          clear_pending_delete();
-         return strdup("Error: database error looking up call record.");
+         return strdup(TOOL_RESULT_ERROR_MARK "Error: database error looking up call record.");
       }
 
       char date[32];
@@ -774,13 +803,13 @@ static char *handle_delete_call(struct json_object *details, int user_id) {
    int days = json_object_get_int(older_obj);
    if (days <= 0) {
       clear_pending_delete();
-      return strdup("Error: 'older_than_days' must be a positive integer.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: 'older_than_days' must be a positive integer.");
    }
    time_t cutoff = time(NULL) - (time_t)days * 86400;
    int match_count = 0;
    if (phone_db_call_log_count_older_than(user_id, cutoff, &match_count) != PHONE_DB_SUCCESS) {
       clear_pending_delete();
-      return strdup("Error: database error counting older calls.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: database error counting older calls.");
    }
    if (match_count == 0) {
       clear_pending_delete();
@@ -808,7 +837,8 @@ static char *handle_confirm_delete_call(int user_id) {
       OLOG_WARNING("phone_tool: user=%d delete rate-limited (>%d/hour)", user_id,
                    s_config.delete_rate_limit_per_hour);
       clear_pending_delete();
-      return strdup("Error: too many deletions in the last hour. Try again later.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: too many deletions in the last hour. Try again later.");
    }
 
    /* Snapshot pending state under the mutex. */
@@ -866,7 +896,7 @@ static char *handle_call_log(struct json_object *details, int user_id) {
 
    char *buf = malloc(RESULT_BUF_SIZE);
    if (!buf) {
-      return strdup("Error: memory allocation failed");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
    }
 
    int pos = 0;
@@ -915,7 +945,7 @@ static char *handle_sms_log(struct json_object *details, int user_id) {
 
    char *buf = malloc(RESULT_BUF_SIZE);
    if (!buf) {
-      return strdup("Error: memory allocation failed");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
    }
 
    int pos = 0;
