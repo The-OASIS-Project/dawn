@@ -330,6 +330,53 @@ char *my_callback(const char *action, char *value, int *should_respond);
 - `should_respond`: Set to 1 to return result to LLM, 0 to handle silently
 - **Returns**: Heap-allocated string (caller frees), or NULL
 
+#### Signaling a Failure (`TOOL_RESULT_ERROR_MARK`)
+
+**A tool result is opaque text — DAWN cannot tell your `"Entity not found"` from a
+success unless you say so.** The framework's own `success` flag is *structural* only (did the
+callback run at all): a callback that returns normally is `success=true` even when the string it
+returns describes a failure. So if your tool can fail *while still returning a string*, mark that
+string as a hard failure by prefixing it with `TOOL_RESULT_ERROR_MARK` (`"\x01"`, from
+`tool_registry.h`):
+
+```c
+#include "tools/tool_registry.h"
+
+if (!entity_found) {
+   return strdup(TOOL_RESULT_ERROR_MARK "Entity '" /* … */ "' not found");
+}
+```
+
+For a `snprintf`'d buffer, write the mark as the first byte:
+
+```c
+char *msg = malloc(256);
+snprintf(msg, 256, TOOL_RESULT_ERROR_MARK "Failed to fetch URL: %s", err);
+return msg;
+```
+
+**What the mark does** (and does not):
+- **Drives the red WebUI "tool pill"** — a marked result renders red; an unmarked one stays neutral.
+- **Keeps the scheduler's briefing step-accounting honest** — a marked step counts as failed.
+- **Is stripped before the LLM sees it** (`tool_result_strip_error_mark()` runs on every
+  callback-dispatch path), so the human-readable error text still reaches the model unchanged. Marking
+  is purely a side-channel; it never alters what the LLM reads or how the user hears the reply.
+
+**Mark ONLY genuine hard failures** — the operation could not complete: not found, failed to X,
+API/network/HTTP error, invalid arguments, capability offline / not configured, permission denied,
+timeout. **Do NOT mark:**
+- **Valid empty results** — a search/query that *ran* but found nothing is a success (`"No events
+  today"`, `"No results found"`, `"Nothing scheduled"` → **no mark**).
+- **Input guidance** — `"Please provide a value"` is a prompt, not a failure.
+- **Confirmations / normal getter output.**
+
+The rule of thumb mirrors the red-pill design: **neutral = success or empty; red = the tool tried and
+could not.** When unsure, leave it unmarked — a missed red is harmless; a false red misleads.
+
+Helpers (all in `tool_registry.h`): `tool_result_is_error(s)` tests the first byte;
+`tool_result_strip_error_mark(s)` removes it in place. You normally only need the `TOOL_RESULT_ERROR_MARK`
+prefix on your return — the framework calls the other two.
+
 ---
 
 ### Device Types (`tool_device_type_t`)

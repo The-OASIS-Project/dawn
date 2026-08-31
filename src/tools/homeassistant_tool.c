@@ -317,12 +317,17 @@ static const int color_count = sizeof(color_names) / sizeof(color_names[0]);
       friendly_name_buf[sizeof(friendly_name_buf) - 1] = '\0';                            \
    } while (0)
 
+/* Every make_error_msg() caller is a genuine failure (entity/lock not found, "Failed to <op>",
+ * "Failed to list…"), so prepend TOOL_RESULT_ERROR_MARK here once to red the WebUI tool pill for
+ * all of them. The mark is stripped before the text reaches the LLM (see TOOL_DEVELOPMENT_GUIDE.md
+ * § Signaling a Failure). */
 static char *make_error_msg(const char *fmt, const char *arg) {
    char *msg = malloc(256);
    if (msg) {
-      snprintf(msg, 256, fmt, arg);
+      msg[0] = TOOL_RESULT_ERROR_MARK[0];
+      snprintf(msg + 1, 255, fmt, arg);
    }
-   return msg ? msg : strdup("Error");
+   return msg ? msg : strdup(TOOL_RESULT_ERROR_MARK "Error");
 }
 
 static char *make_success_msg(const char *fmt, const char *arg) {
@@ -466,7 +471,7 @@ static char *handle_list(void) {
       buf_size = 65536;
    char *buf = malloc(buf_size);
    if (!buf)
-      return strdup("Memory allocation failed");
+      return strdup(TOOL_RESULT_ERROR_MARK "Memory allocation failed");
 
    size_t len = 0;
    size_t rem = buf_size;
@@ -549,7 +554,7 @@ static char *handle_status(const char *value) {
 
    char *buf = malloc(1024);
    if (!buf)
-      return strdup("Memory allocation failed");
+      return strdup(TOOL_RESULT_ERROR_MARK "Memory allocation failed");
 
    size_t len = 0;
    size_t rem = 1024;
@@ -905,12 +910,14 @@ static char *ha_tool_callback(const char *action, char *value, int *should_respo
    *should_respond = 1;
 
    if (!homeassistant_is_configured()) {
-      return strdup("Home Assistant is not configured. Please set url in dawn.toml "
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Home Assistant is not configured. Please set url in dawn.toml "
                     "[home_assistant] and token in secrets.toml [secrets.home_assistant].");
    }
 
    if (!homeassistant_is_connected()) {
-      return strdup("Home Assistant is not connected. Check the URL and token in settings.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Home Assistant is not connected. Check the URL and token in settings.");
    }
 
    /* Dispatch to action handlers */
@@ -948,7 +955,7 @@ static char *ha_tool_callback(const char *action, char *value, int *should_respo
       return handle_automation(value);
 
    char buf[256];
-   snprintf(buf, sizeof(buf), "Unknown Home Assistant action '%s'.", action);
+   snprintf(buf, sizeof(buf), TOOL_RESULT_ERROR_MARK "Unknown Home Assistant action '%s'.", action);
    return strdup(buf);
 }
 
