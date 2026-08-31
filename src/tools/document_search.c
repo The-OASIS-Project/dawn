@@ -268,17 +268,17 @@ static char *doc_search_callback(const char *action, char *value, int *should_re
    int dims = embedding_engine_dims();
 
    if (dims <= 0)
-      return strdup("Error: embedding engine not initialized.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: embedding engine not initialized.");
 
    /* Embed the query */
    float *query_vec = malloc((size_t)dims * sizeof(float));
    if (!query_vec)
-      return strdup("Error: memory allocation failed.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed.");
 
    int out_dims = 0;
    if (embedding_engine_embed(value, query_vec, dims, &out_dims) != 0 || out_dims != dims) {
       free(query_vec);
-      return strdup("Error: failed to generate query embedding.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: failed to generate query embedding.");
    }
    float query_norm = embedding_engine_l2_norm(query_vec, dims);
 
@@ -290,7 +290,7 @@ static char *doc_search_callback(const char *action, char *value, int *should_re
       free(query_vec);
       free(chunks);
       free(emb_buf);
-      return strdup("Error: memory allocation failed.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed.");
    }
 
    int chunk_count = 0;
@@ -331,7 +331,7 @@ static char *doc_search_callback(const char *action, char *value, int *should_re
       free(emb_buf);
       free(lex);
       free(lex_scores);
-      return strdup("Error: memory allocation failed.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed.");
    }
 
    const float vec_w = g_config.documents.hybrid_vector_weight;
@@ -424,7 +424,7 @@ static char *doc_search_callback(const char *action, char *value, int *should_re
       free(lex);
       free(lex_scores);
       free(cand);
-      return strdup("Error: memory allocation failed.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed.");
    }
 
    if (total_matches == 0) {

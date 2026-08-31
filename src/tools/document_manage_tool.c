@@ -369,7 +369,8 @@ static char *do_save_note(int user_id, const char *label, const char *text) {
    }
    if (rc != DOC_INDEX_SUCCESS) {
       char msg[256];
-      snprintf(msg, sizeof(msg), "Couldn't save the note: %s", res.error_msg);
+      snprintf(msg, sizeof(msg), TOOL_RESULT_ERROR_MARK "Couldn't save the note: %s",
+               res.error_msg);
       return strdup(msg);
    }
    /* Memory→note bridge (v61): refresh the gloss pointer so a fuzzy recall of
@@ -404,7 +405,8 @@ static char *do_save_text(int user_id, const char *title, const char *text) {
          int rc = document_doc_update(user_id, existing.id, text, strlen(text), &res);
          if (rc != DOC_INDEX_SUCCESS) {
             char msg[256];
-            snprintf(msg, sizeof(msg), "Couldn't save the document: %s", res.error_msg);
+            snprintf(msg, sizeof(msg), TOOL_RESULT_ERROR_MARK "Couldn't save the document: %s",
+                     res.error_msg);
             return strdup(msg);
          }
          char msg[256];
@@ -434,7 +436,8 @@ static char *do_save_text(int user_id, const char *title, const char *text) {
    int rc = document_index_text(user_id, title, "text", text, strlen(text), false, NULL, &res);
    if (rc != DOC_INDEX_SUCCESS) {
       char msg[256];
-      snprintf(msg, sizeof(msg), "Couldn't save the document: %s", res.error_msg);
+      snprintf(msg, sizeof(msg), TOOL_RESULT_ERROR_MARK "Couldn't save the document: %s",
+               res.error_msg);
       return strdup(msg);
    }
    char msg[256];
@@ -480,7 +483,8 @@ static int load_editable_text(int user_id,
       return FAILURE;
    }
    if (resolve_owned_doc(user_id, label, id, doc_out) != SUCCESS) {
-      *err = "No editable note or document was found (it may be global or not yours).";
+      *err = TOOL_RESULT_ERROR_MARK
+          "No editable note or document was found (it may be global or not yours).";
       return FAILURE;
    }
 
@@ -489,7 +493,7 @@ static int load_editable_text(int user_id,
       document_chunk_t chunk;
       int n = 0;
       if (document_db_chunk_read(doc_out->id, &chunk, 1, 0, &n) != SUCCESS || n < 1) {
-         *err = "Couldn't read the note's current text.";
+         *err = TOOL_RESULT_ERROR_MARK "Couldn't read the note's current text.";
          return FAILURE;
       }
       *text_out = strdup(chunk.text);
@@ -497,13 +501,14 @@ static int load_editable_text(int user_id,
       /* Multi-chunk document — editable only if its canonical full text is stored
        * (v63).  Pre-v63 uploads have none and must be re-saved first. */
       if (document_db_full_text_get(doc_out->id, user_id, text_out) != SUCCESS) {
-         *err = "That document predates editable storage — re-save it (save_text) to enable "
-                "editing.";
+         *err = TOOL_RESULT_ERROR_MARK
+             "That document predates editable storage — re-save it (save_text) to enable "
+             "editing.";
          return FAILURE;
       }
    }
    if (!*text_out) {
-      *err = "Out of memory.";
+      *err = TOOL_RESULT_ERROR_MARK "Out of memory.";
       return FAILURE;
    }
    return SUCCESS;
@@ -523,7 +528,8 @@ static char *commit_edit(int user_id,
                     : document_doc_update(user_id, doc->id, new_text, strlen(new_text), &res);
    if (rc != DOC_INDEX_SUCCESS) {
       char msg[256];
-      snprintf(msg, sizeof(msg), "Couldn't apply the edit: %s", res.error_msg);
+      snprintf(msg, sizeof(msg), TOOL_RESULT_ERROR_MARK "Couldn't apply the edit: %s",
+               res.error_msg);
       return strdup(msg);
    }
    return strdup(ok_msg);
@@ -576,7 +582,7 @@ static char *do_edit(int user_id, const char *label, int64_t id, const char *cha
          result = strdup("That text appears more than once — include more surrounding text in "
                          "'find' to make it unique.");
       } else if (!new_text) {
-         result = strdup("Out of memory.");
+         result = strdup(TOOL_RESULT_ERROR_MARK "Out of memory.");
       } else {
          char ok[DOCMGMT_CONFIRM_MSG_MAX];
          snprintf(ok, sizeof(ok), "Edited %s '%s' (replaced 1 occurrence).",
@@ -610,7 +616,7 @@ static char *do_append(int user_id, const char *label, int64_t id, const char *t
    } else {
       char *new_text = docmgmt_append_text(old, text);
       if (!new_text) {
-         result = strdup("Out of memory.");
+         result = strdup(TOOL_RESULT_ERROR_MARK "Out of memory.");
       } else {
          char ok[DOCMGMT_CONFIRM_MSG_MAX];
          snprintf(ok, sizeof(ok), "Appended to %s '%s'.", is_note ? "note" : "document",
@@ -630,7 +636,7 @@ static char *do_list(int user_id) {
    document_t docs[DOC_MAX_RESULTS];
    int count = 0;
    if (document_db_list(user_id, docs, DOC_MAX_RESULTS, 0, &count) != SUCCESS)
-      return strdup("Couldn't list your documents.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Couldn't list your documents.");
    if (count == 0)
       return strdup("You have no saved documents or notes.");
 
@@ -644,10 +650,10 @@ static char *do_list(int user_id) {
    }
    if (strbuf_oom(&sb)) {
       strbuf_free(&sb);
-      return strdup("Your document list is too long to display in full.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Your document list is too long to display in full.");
    }
    char *out = strbuf_steal(&sb);
-   return out ? out : strdup("Couldn't list your documents.");
+   return out ? out : strdup(TOOL_RESULT_ERROR_MARK "Couldn't list your documents.");
 }
 
 /* list_deleted: show recently-deleted notes/documents still recoverable. */
@@ -655,7 +661,7 @@ static char *do_list_deleted(int user_id) {
    document_version_meta_t v[DOC_VERSION_MAX_LIST];
    int n = 0;
    if (document_db_version_list_deleted(user_id, v, DOC_VERSION_MAX_LIST, &n) != SUCCESS)
-      return strdup("Couldn't check recently deleted items.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Couldn't check recently deleted items.");
    if (n == 0)
       return strdup("Nothing recoverable — no items were deleted within the retention window.");
 
@@ -666,10 +672,10 @@ static char *do_list_deleted(int user_id) {
       strbuf_appendf(&sb, "- '%s'\n", v[i].filename);
    if (strbuf_oom(&sb)) {
       strbuf_free(&sb);
-      return strdup("The deleted-items list is too long to show in full.");
+      return strdup(TOOL_RESULT_ERROR_MARK "The deleted-items list is too long to show in full.");
    }
    char *out = strbuf_steal(&sb);
-   return out ? out : strdup("Couldn't list deleted items.");
+   return out ? out : strdup(TOOL_RESULT_ERROR_MARK "Couldn't list deleted items.");
 }
 
 /* recover: undo the last change to an item, OR bring a deleted item back.
@@ -695,7 +701,8 @@ static char *do_recover(int user_id, const char *label, int64_t id) {
       char *vtext = NULL;
       if (document_db_version_get_text(ev[0].id, user_id, &vtext, NULL, 0, NULL) != SUCCESS ||
           !vtext)
-         return strdup("Couldn't read the saved version to undo the change.");
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Couldn't read the saved version to undo the change.");
       bool is_note = (strcmp(doc.filetype, "note") == 0 && doc.num_chunks == 1);
       char ok[DOCMGMT_CONFIRM_MSG_MAX];
       snprintf(ok, sizeof(ok), "Undid the last change to %s '%s' (restored the previous version).",
@@ -736,7 +743,7 @@ static char *do_recover(int user_id, const char *label, int64_t id) {
    if (document_db_version_get_text(version_id, user_id, &text, fname, sizeof(fname), NULL) !=
            SUCCESS ||
        !text)
-      return strdup("Couldn't read the saved version to recover it.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Couldn't read the saved version to recover it.");
 
    doc_index_result_t res;
    int rc = document_index_note(user_id, fname, text, strlen(text), false, &res);
@@ -747,7 +754,8 @@ static char *do_recover(int user_id, const char *label, int64_t id) {
 
    if (rc != DOC_INDEX_SUCCESS) {
       char msg[DOC_FILENAME_MAX + 160]; /* label + error_msg + prefix */
-      snprintf(msg, sizeof(msg), "Couldn't recover '%s': %s", fname, res.error_msg);
+      snprintf(msg, sizeof(msg), TOOL_RESULT_ERROR_MARK "Couldn't recover '%s': %s", fname,
+               res.error_msg);
       return strdup(msg);
    }
    if (as_note && res.doc_id > 0)
@@ -775,7 +783,8 @@ static char *do_delete_request(int user_id, const char *label, int64_t id) {
     * performs no ownership check of its own). */
    document_t doc;
    if (resolve_owned_doc(user_id, label, id, &doc) != SUCCESS)
-      return strdup("No note or document by that name was found (it may not be yours).");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "No note or document by that name was found (it may not be yours).");
 
    bool is_note = (strcmp(doc.filetype, "note") == 0);
    pthread_mutex_lock(&s_pending_mutex);
@@ -805,7 +814,7 @@ static char *do_confirm_delete(int user_id) {
     * before deleting (TOCTOU / CWE-367 guard). */
    document_t doc;
    if (document_db_get(doc_id, &doc) != SUCCESS || doc.user_id != user_id)
-      return strdup("That item is no longer available to delete.");
+      return strdup(TOOL_RESULT_ERROR_MARK "That item is no longer available to delete.");
 
    /* Drop the memory→note bridge gloss BEFORE the note row is deleted (the FK
     * nulls note_doc_id on delete, after which the gloss can't be found by it).
@@ -813,7 +822,8 @@ static char *do_confirm_delete(int user_id) {
    (void)memory_note_bridge_delete_gloss(user_id, doc_id);
 
    if (document_db_delete_indexed(doc_id) != SUCCESS)
-      return strdup("The deletion failed — the item may have already been removed.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "The deletion failed — the item may have already been removed.");
 
    char msg[DOCMGMT_CONFIRM_MSG_MAX];
    snprintf(msg, sizeof(msg), "Deleted the %s '%s'.", is_note ? "note" : "document", label);
@@ -831,7 +841,8 @@ static char *do_rename(int user_id, const char *label, int64_t id, const char *n
 
    document_t doc;
    if (resolve_owned_doc(user_id, label, id, &doc) != SUCCESS)
-      return strdup("No note or document by that name was found (it may not be yours).");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "No note or document by that name was found (it may not be yours).");
 
    if (strcmp(doc.filename, new_name) == 0) {
       char msg[DOCMGMT_CONFIRM_MSG_MAX];
@@ -855,7 +866,7 @@ static char *do_rename(int user_id, const char *label, int64_t id, const char *n
 
    bool is_note = (strcmp(doc.filetype, "note") == 0);
    if (document_db_rename(user_id, doc.id, new_name) != SUCCESS)
-      return strdup("Couldn't rename it — please try again.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Couldn't rename it — please try again.");
 
    /* Memory→note bridge (v61): the gloss maps note_doc_id → label, so a rename
     * must refresh it or fuzzy recall keeps routing to the old name.  Best-effort;
@@ -916,7 +927,7 @@ static char *doc_manage_callback(const char *action, char *value, int *should_re
    if (strcmp(act, "edit") == 0) {
       char *change = malloc(DOCMGMT_SAVE_TEXT_MAX);
       if (!change)
-         return strdup("Out of memory.");
+         return strdup(TOOL_RESULT_ERROR_MARK "Out of memory.");
       change[0] = '\0';
       tool_param_extract_custom_tail(value, "change", change, DOCMGMT_SAVE_TEXT_MAX);
       char *result = do_edit(user_id, label, id, change);
@@ -929,7 +940,7 @@ static char *doc_manage_callback(const char *action, char *value, int *should_re
     * size, so a multi-chunk save_text document isn't clipped at 4 KB. */
    char *text = malloc(DOCMGMT_SAVE_TEXT_MAX);
    if (!text)
-      return strdup("Out of memory.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Out of memory.");
    text[0] = '\0';
    tool_param_extract_custom_tail(value, "text", text, DOCMGMT_SAVE_TEXT_MAX);
 
@@ -941,7 +952,7 @@ static char *doc_manage_callback(const char *action, char *value, int *should_re
    else if (strcmp(act, "append") == 0)
       result = do_append(user_id, label, id, text);
    else
-      result = strdup("Unknown document_manage action.");
+      result = strdup(TOOL_RESULT_ERROR_MARK "Unknown document_manage action.");
 
    free(text);
    return result;

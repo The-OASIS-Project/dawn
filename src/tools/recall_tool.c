@@ -109,11 +109,11 @@ static char *recall_callback(const char *action, char *value, int *should_respon
    const int user_id = tool_get_current_user_id();
    const int dims = embedding_engine_dims();
    if (dims <= 0)
-      return strdup("Error: embedding engine not initialized.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: embedding engine not initialized.");
 
    float *qvec = malloc((size_t)dims * sizeof(float));
    if (!qvec)
-      return strdup("Error: memory allocation failed.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed.");
 
    int out_dims = 0;
    const float *qptr = qvec;
@@ -145,7 +145,8 @@ static char *recall_callback(const char *action, char *value, int *should_respon
 
    if (compose_rc != SUCCESS) {
       focus_result_free(&result);
-      return strdup("Error: couldn't gather context (recall failed). Try a targeted memory or "
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: couldn't gather context (recall failed). Try a targeted memory or "
                     "document search instead.");
    }
 
@@ -156,5 +157,5 @@ static char *recall_callback(const char *action, char *value, int *should_respon
     * of silently re-stating already-injected context. */
    char *out = recall_format_result(value, &result, NULL, 0);
    focus_result_free(&result);
-   return out ? out : strdup("recall: failed to format result.");
+   return out ? out : strdup(TOOL_RESULT_ERROR_MARK "recall: failed to format result.");
 }

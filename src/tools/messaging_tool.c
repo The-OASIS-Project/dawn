@@ -55,7 +55,7 @@ static char *make_response(const char *msg) {
 static char *handle_list_channels(int user_id) {
    char *json = messaging_engine_list_channels_json(user_id);
    if (!json) {
-      return make_response("Error: could not list channels.");
+      return make_response(TOOL_RESULT_ERROR_MARK "Error: could not list channels.");
    }
    /* Wrap the JSON in a brief sentence so the LLM has natural framing. */
    size_t needed = strlen(json) + 64;
@@ -92,18 +92,23 @@ static char *handle_send(struct json_object *details, int user_id) {
          return make_response("Message sent.");
       case MESSAGING_UNKNOWN_CHANNEL:
          return make_response(
+             TOOL_RESULT_ERROR_MARK
              "Error: no channel by that name is linked. Use action 'list_channels' to see what's "
              "available, or have the user generate a linking code in the WebUI.");
       case MESSAGING_RATE_LIMITED:
-         return make_response("Error: rate limit hit for this channel (default 10/min, 200/day). "
+         return make_response(TOOL_RESULT_ERROR_MARK
+                              "Error: rate limit hit for this channel (default 10/min, 200/day). "
                               "Wait and retry, or surface this to the user.");
       case MESSAGING_PROVIDER_RATE_LIMITED:
-         return make_response("Error: the provider's own rate limit was hit. Retry shortly.");
+         return make_response(TOOL_RESULT_ERROR_MARK
+                              "Error: the provider's own rate limit was hit. Retry shortly.");
       case MESSAGING_DRIVER_NOT_REGISTERED:
-         return make_response("Error: the driver for that channel's provider isn't configured. "
+         return make_response(TOOL_RESULT_ERROR_MARK
+                              "Error: the driver for that channel's provider isn't configured. "
                               "Check secrets.toml and dawn.toml [messaging] section.");
       default:
-         return make_response("Error: send failed (network or provider error).");
+         return make_response(TOOL_RESULT_ERROR_MARK
+                              "Error: send failed (network or provider error).");
    }
 }
 
@@ -125,10 +130,11 @@ static char *handle_reset_conversation(struct json_object *details, int user_id)
          return make_response("Conversation reset. The next message on that channel will start a "
                               "fresh thread; prior history is preserved in the WebUI.");
       case MESSAGING_UNKNOWN_CHANNEL:
-         return make_response("Error: no channel by that name is linked. Use 'list_channels' to "
+         return make_response(TOOL_RESULT_ERROR_MARK
+                              "Error: no channel by that name is linked. Use 'list_channels' to "
                               "see what's available.");
       default:
-         return make_response("Error: reset failed (internal error).");
+         return make_response(TOOL_RESULT_ERROR_MARK "Error: reset failed (internal error).");
    }
 }
 
@@ -196,11 +202,13 @@ static char *handle_read_channel(struct json_object *details, int user_id) {
          for (const char *p = b; *p; p++, blen++) {
             if (*p < '0' || *p > '9') {
                return make_response(
+                   TOOL_RESULT_ERROR_MARK
                    "Error: 'before' must be a numeric Discord message id (digits only).");
             }
          }
          if (blen > MSG_TOOL_SNOWFLAKE_MAX_DIGITS) {
-            return make_response("Error: 'before' is too long to be a Discord message id (max "
+            return make_response(TOOL_RESULT_ERROR_MARK
+                                 "Error: 'before' is too long to be a Discord message id (max "
                                  "20 digits).");
          }
          before_id = b;
@@ -222,16 +230,20 @@ static char *handle_read_channel(struct json_object *details, int user_id) {
          return out ? out : make_response("(no content)");
       case MESSAGING_UNKNOWN_CHANNEL:
          return make_response(
+             TOOL_RESULT_ERROR_MARK
              "Error: I can't see a channel by that name. The bot must be invited to the server, "
              "and I only read text/announcement channels. Try the exact channel name, or include "
              "the server name (e.g. add a 'server' field) if the name exists in multiple servers.");
       case MESSAGING_RATE_LIMITED:
-         return make_response("Error: too many channel reads recently. Wait a bit and retry.");
+         return make_response(TOOL_RESULT_ERROR_MARK
+                              "Error: too many channel reads recently. Wait a bit and retry.");
       case MESSAGING_DRIVER_NOT_REGISTERED:
-         return make_response("Error: channel reading isn't available — it requires a configured "
+         return make_response(TOOL_RESULT_ERROR_MARK
+                              "Error: channel reading isn't available — it requires a configured "
                               "Discord bot (reading is Discord-only).");
       default:
-         return make_response("Error: couldn't read that channel (network or provider error).");
+         return make_response(TOOL_RESULT_ERROR_MARK
+                              "Error: couldn't read that channel (network or provider error).");
    }
 }
 
@@ -281,15 +293,19 @@ static char *handle_read_server(struct json_object *details, int user_id) {
       case MESSAGING_SUCCESS:
          return out ? out : make_response("(no content)");
       case MESSAGING_UNKNOWN_CHANNEL:
-         return make_response("Error: I'm not in any Discord server I can read. Invite the bot to "
+         return make_response(TOOL_RESULT_ERROR_MARK
+                              "Error: I'm not in any Discord server I can read. Invite the bot to "
                               "the server (with View Channels + Read Message History).");
       case MESSAGING_RATE_LIMITED:
-         return make_response("Error: too many channel reads recently. Wait a bit and retry.");
+         return make_response(TOOL_RESULT_ERROR_MARK
+                              "Error: too many channel reads recently. Wait a bit and retry.");
       case MESSAGING_DRIVER_NOT_REGISTERED:
-         return make_response("Error: channel reading isn't available — it requires a configured "
+         return make_response(TOOL_RESULT_ERROR_MARK
+                              "Error: channel reading isn't available — it requires a configured "
                               "Discord bot (reading is Discord-only).");
       default:
-         return make_response("Error: couldn't read the server (network or provider error).");
+         return make_response(TOOL_RESULT_ERROR_MARK
+                              "Error: couldn't read the server (network or provider error).");
    }
 }
 
@@ -306,12 +322,15 @@ static char *handle_list_discord_channels(struct json_object *details, int user_
       case MESSAGING_SUCCESS:
          return out ? out : make_response("(no content)");
       case MESSAGING_RATE_LIMITED:
-         return make_response("Error: too many channel reads recently. Wait a bit and retry.");
+         return make_response(TOOL_RESULT_ERROR_MARK
+                              "Error: too many channel reads recently. Wait a bit and retry.");
       case MESSAGING_DRIVER_NOT_REGISTERED:
-         return make_response("Error: channel listing isn't available — it requires a configured "
+         return make_response(TOOL_RESULT_ERROR_MARK
+                              "Error: channel listing isn't available — it requires a configured "
                               "Discord bot (Discord-only).");
       default:
-         return make_response("Error: couldn't list channels (network or provider error).");
+         return make_response(TOOL_RESULT_ERROR_MARK
+                              "Error: couldn't list channels (network or provider error).");
    }
 }
 
@@ -325,7 +344,7 @@ static char *handle_link_status(struct json_object *details) {
    }
    const char *code = json_object_get_string(code_obj);
    if (!code) {
-      return make_response("Error: invalid code.");
+      return make_response(TOOL_RESULT_ERROR_MARK "Error: invalid code.");
    }
 
    messaging_link_state_t state = messaging_engine_link_status(code);
@@ -339,7 +358,7 @@ static char *handle_link_status(struct json_object *details) {
              "Link code has expired. Generate a new one in WebUI Settings → Messaging.");
       case MESSAGING_LINK_STATE_NOT_FOUND:
       default:
-         return make_response("Link code not recognized.");
+         return make_response(TOOL_RESULT_ERROR_MARK "Link code not recognized.");
    }
 }
 
@@ -405,7 +424,7 @@ static char *messaging_callback(const char *action, char *value, int *should_res
     * reach a schedule — but legacy rows created before this gate still fire here.
     * Shares messaging_action_is_schedulable() as the single allowlist. */
    if (is_scheduled && !messaging_action_is_schedulable(action)) {
-      return make_response("Error: " MESSAGING_SCHEDULABLE_ERR);
+      return make_response(TOOL_RESULT_ERROR_MARK "Error: " MESSAGING_SCHEDULABLE_ERR);
    }
 
    /* Parse details JSON if present. */
@@ -431,7 +450,7 @@ static char *messaging_callback(const char *action, char *value, int *should_res
       result = handle_reset_conversation(details, user_id);
    } else {
       char buf[128];
-      snprintf(buf, sizeof(buf), "Error: unknown action '%s'.", action);
+      snprintf(buf, sizeof(buf), TOOL_RESULT_ERROR_MARK "Error: unknown action '%s'.", action);
       result = make_response(buf);
    }
 

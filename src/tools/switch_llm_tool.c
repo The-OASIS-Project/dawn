@@ -187,6 +187,7 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
       char *result = malloc(128);
       if (result) {
          snprintf(result, 128,
+                  TOOL_RESULT_ERROR_MARK
                   "Unknown LLM target '%.32s'. Use 'local', 'cloud', 'openai', 'claude', "
                   "or 'gemini'.",
                   target);
@@ -201,7 +202,7 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
    }
 
    if (!session) {
-      return strdup("No active session available for LLM switch.");
+      return strdup(TOOL_RESULT_ERROR_MARK "No active session available for LLM switch.");
    }
 
    session_llm_config_t config;
@@ -220,7 +221,7 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
    if (session_set_llm_config(session, &config) != SUCCESS) {
       char *result = malloc(128);
       if (result) {
-         snprintf(result, 128, "Failed to switch to %s.%s%s", entry->label,
+         snprintf(result, 128, TOOL_RESULT_ERROR_MARK "Failed to switch to %s.%s%s", entry->label,
                   entry->fail_hint ? " " : "", entry->fail_hint ? entry->fail_hint : "");
       }
       return result;

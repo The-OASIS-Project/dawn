@@ -110,6 +110,7 @@ static char *check_oauth_revoked(void) {
    if (!msg)
       return NULL;
    snprintf(msg, 384,
+            TOOL_RESULT_ERROR_MARK
             "Error: OAuth tokens for '%s' have been revoked at the provider. Tell the user "
             "to re-link this calendar account in WebUI Settings -> Calendar.  Do NOT retry — "
             "retrying with the same tokens will keep failing until re-authorized.",
@@ -173,10 +174,10 @@ static void append_access_summary_sb(strbuf_t *sb, int user_id) {
 static char *finalize_calendar_response(strbuf_t *sb) {
    if (strbuf_oom(sb)) {
       strbuf_free(sb);
-      return strdup("Error: response buffer exceeded safety cap.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: response buffer exceeded safety cap.");
    }
    char *out = strbuf_steal(sb);
-   return out ? out : strdup("Error: out of memory.");
+   return out ? out : strdup(TOOL_RESULT_ERROR_MARK "Error: out of memory.");
 }
 
 /* =============================================================================
@@ -262,7 +263,8 @@ static char *handle_range(struct json_object *details, int user_id) {
 
    time_t start = iso8601_parse(start_str);
    if (start == (time_t)-1)
-      return strdup("Error: invalid 'start' datetime format. Use ISO 8601 — e.g. "
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: invalid 'start' datetime format. Use ISO 8601 — e.g. "
                     "'2026-05-27T14:00:00' (local time), '2026-05-27T14:00:00Z' (UTC), or "
                     "'2026-05-27' (date only).");
 
@@ -270,7 +272,8 @@ static char *handle_range(struct json_object *details, int user_id) {
    if (end_str) {
       end = iso8601_parse(end_str);
       if (end == (time_t)-1)
-         return strdup("Error: invalid 'end' datetime format. Use ISO 8601 — e.g. "
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: invalid 'end' datetime format. Use ISO 8601 — e.g. "
                        "'2026-05-27T15:00:00' (local time) or '2026-05-27T15:00:00Z' (UTC).");
    } else {
       end = start + 86400; /* Default: 24 hours */
@@ -374,7 +377,8 @@ static char *handle_add(struct json_object *details, int user_id) {
 
    time_t start = iso8601_parse(start_str);
    if (start == (time_t)-1)
-      return strdup("Error: invalid 'start' datetime format. Use ISO 8601 — e.g. "
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: invalid 'start' datetime format. Use ISO 8601 — e.g. "
                     "'2026-05-27T14:00:00' (local time), '2026-05-27T14:00:00Z' (UTC), or "
                     "'2026-05-27' (date only).");
 
@@ -383,7 +387,8 @@ static char *handle_add(struct json_object *details, int user_id) {
    if (end_str) {
       end = iso8601_parse(end_str);
       if (end == (time_t)-1)
-         return strdup("Error: invalid 'end' datetime format. Use ISO 8601 — e.g. "
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: invalid 'end' datetime format. Use ISO 8601 — e.g. "
                        "'2026-05-27T15:00:00' (local time) or '2026-05-27T15:00:00Z' (UTC).");
    }
 
@@ -398,14 +403,16 @@ static char *handle_add(struct json_object *details, int user_id) {
    int rc = calendar_service_add(user_id, summary, start, end, location, description, all_day,
                                  calendar_name, rrule, tz, uid, sizeof(uid));
    if (rc == 2)
-      return strdup("Error: the target calendar belongs to a read-only account. "
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: the target calendar belongs to a read-only account. "
                     "The user has restricted this account from AI modifications. "
                     "Try specifying a different writable calendar.");
    if (rc != 0) {
       char *revoked = check_oauth_revoked();
       if (revoked)
          return revoked;
-      return strdup("Error: failed to create event on calendar server. Either no "
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: failed to create event on calendar server. Either no "
                     "calendars are synced yet for any account (run action='calendars' to "
                     "confirm) or the CalDAV server rejected the request — retry once.");
    }
@@ -450,13 +457,15 @@ static char *handle_update(struct json_object *details, int user_id) {
 
    int rc = calendar_service_update(user_id, uid, summary, start, end, location, description);
    if (rc == 2)
-      return strdup("Error: the event belongs to a read-only account. "
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: the event belongs to a read-only account. "
                     "The user has restricted this account from AI modifications.");
    if (rc != 0) {
       char *revoked = check_oauth_revoked();
       if (revoked)
          return revoked;
-      return strdup("Error: failed to update event. Either the UID does not exist on any "
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: failed to update event. Either the UID does not exist on any "
                     "writable calendar (re-run 'today'/'range'/'search' to get current "
                     "UIDs) or the CalDAV server rejected the change. Retry once.");
    }
@@ -471,13 +480,15 @@ static char *handle_delete(struct json_object *details, int user_id) {
 
    int rc = calendar_service_delete(user_id, uid);
    if (rc == 2)
-      return strdup("Error: the event belongs to a read-only account. "
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: the event belongs to a read-only account. "
                     "The user has restricted this account from AI modifications.");
    if (rc != 0) {
       char *revoked = check_oauth_revoked();
       if (revoked)
          return revoked;
-      return strdup("Error: failed to delete event. Either the UID does not exist on any "
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: failed to delete event. Either the UID does not exist on any "
                     "writable calendar (re-run 'today'/'range'/'search' to get current "
                     "UIDs) or the CalDAV server rejected the request.");
    }
@@ -500,7 +511,7 @@ static char *calendar_tool_callback(const char *action, char *value, int *should
    if (value && value[0]) {
       details = json_tokener_parse(value);
       if (!details)
-         return strdup("Error: invalid JSON in details parameter");
+         return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid JSON in details parameter");
    } else {
       details = json_object_new_object();
    }
@@ -528,6 +539,7 @@ static char *calendar_tool_callback(const char *action, char *value, int *should
    } else {
       char buf[256];
       snprintf(buf, sizeof(buf),
+               TOOL_RESULT_ERROR_MARK
                "Error: unknown action '%s'. Valid: calendars, today, range, next, search, add, "
                "update, delete",
                action);

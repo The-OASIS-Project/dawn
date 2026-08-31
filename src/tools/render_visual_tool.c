@@ -160,7 +160,8 @@ static char *load_guidelines_callback(const char *action, char *value, int *shou
    char *content = NULL;
    int rc = instruction_loader_load(TOOL_DIR, value, &content);
    if (rc != 0 || !content) {
-      return strdup("Error: failed to load visual guidelines. Check that the "
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: failed to load visual guidelines. Check that the "
                     "tool_instructions/render_visual/ directory exists.");
    }
 
@@ -194,7 +195,7 @@ static char *render_visual_callback(const char *action, char *value, int *should
     * We need to parse it as JSON. */
    struct json_object *json = json_tokener_parse(value);
    if (!json) {
-      return strdup("Error: invalid JSON in render_visual parameters.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid JSON in render_visual parameters.");
    }
 
    struct json_object *title_obj = NULL;
@@ -283,7 +284,7 @@ static char *render_visual_callback(const char *action, char *value, int *should
    if (!result) {
       free(safe_code);
       json_object_put(json);
-      return strdup("Error: memory allocation failed.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed.");
    }
 
    snprintf(result, buf_size, "<dawn-visual title=\"%s\" type=\"%s\">\n%s\n</dawn-visual>",

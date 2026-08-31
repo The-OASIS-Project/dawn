@@ -112,7 +112,8 @@ static char *viewing_tool_callback(const char *action, char *value, int *should_
 
    OLOG_WARNING("viewing_tool_callback called directly - should use MQTT execution");
    *should_respond = 1;
-   return strdup("Viewing command could not be delivered — the vision hardware doesn't appear "
+   return strdup(TOOL_RESULT_ERROR_MARK
+                 "Viewing command could not be delivered — the vision hardware doesn't appear "
                  "to be connected right now.  Let the user know the camera/vision system is "
                  "offline.");
 }

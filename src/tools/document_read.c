@@ -193,6 +193,7 @@ static char *doc_read_callback(const char *action, char *value, int *should_resp
       if (document_db_get(doc_id, &doc) != SUCCESS || (doc.user_id != user_id && !doc.is_global)) {
          char err_buf[128];
          snprintf(err_buf, sizeof(err_buf),
+                  TOOL_RESULT_ERROR_MARK
                   "Error: no document with id %lld found (or it isn't yours). "
                   "Use document_manage 'list' to see ids.",
                   (long long)doc_id);
@@ -201,8 +202,8 @@ static char *doc_read_callback(const char *action, char *value, int *should_resp
    } else if (document_db_find_by_name(user_id, doc_name, &doc) != 0) {
       char err_buf[DOC_FILENAME_MAX + 128];
       snprintf(err_buf, sizeof(err_buf),
-               "Error: no document matching '%s' found. "
-               "Use document_search to find available documents first.",
+               TOOL_RESULT_ERROR_MARK "Error: no document matching '%s' found. "
+                                      "Use document_search to find available documents first.",
                doc_name);
       return strdup(err_buf);
    }
@@ -213,6 +214,7 @@ static char *doc_read_callback(const char *action, char *value, int *should_resp
    if (start_chunk >= doc.num_chunks) {
       char err_buf[DOC_FILENAME_MAX + 128];
       snprintf(err_buf, sizeof(err_buf),
+               TOOL_RESULT_ERROR_MARK
                "Error: start_chunk %d is beyond end of document '%s' (%d chunks total).",
                start_chunk, doc.filename, doc.num_chunks);
       return strdup(err_buf);
@@ -221,20 +223,20 @@ static char *doc_read_callback(const char *action, char *value, int *should_resp
    /* Read chunks */
    document_chunk_t *chunks = calloc((size_t)count, sizeof(document_chunk_t));
    if (!chunks)
-      return strdup("Error: memory allocation failed.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed.");
 
    int read_count = 0;
    if (document_db_chunk_read(doc.id, chunks, count, start_chunk, &read_count) != SUCCESS ||
        read_count <= 0) {
       free(chunks);
-      return strdup("Error: failed to read document chunks.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: failed to read document chunks.");
    }
 
    /* Build result string */
    char *result = malloc(DOC_READ_RESULT_BUF_SIZE);
    if (!result) {
       free(chunks);
-      return strdup("Error: memory allocation failed.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed.");
    }
 
    int end_chunk = start_chunk + read_count - 1;

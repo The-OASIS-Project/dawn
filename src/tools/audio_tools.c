@@ -65,7 +65,9 @@ static char *audio_device_callback(const char *action, char *value, int *should_
       *should_respond = 1;
       char *result = malloc(128);
       if (result) {
-         snprintf(result, 128, "Unknown device type '%s'. Use 'capture' or 'playback'.", action);
+         snprintf(result, 128,
+                  TOOL_RESULT_ERROR_MARK "Unknown device type '%s'. Use 'capture' or 'playback'.",
+                  action);
       }
       return result;
    }
@@ -92,7 +94,7 @@ static char *voice_amplifier_callback(const char *actionName, char *value, int *
       if (pthread_create(&voice_thread, NULL, voiceAmplificationThread, NULL)) {
          OLOG_ERROR("Error creating voice thread");
          if (command_processing_mode != CMD_MODE_DIRECT_ONLY) {
-            return strdup("Failed to enable voice amplifier");
+            return strdup(TOOL_RESULT_ERROR_MARK "Failed to enable voice amplifier");
          }
          *should_respond = 0;
          return NULL;

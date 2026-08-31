@@ -282,7 +282,7 @@ static char *research_build_proposal(const char *brief, bool private_requested, 
            : "",
        token);
    if (n < 0) {
-      return strdup("Error: failed to build the research proposal.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: failed to build the research proposal.");
    }
    return strdup(out);
 }
@@ -438,10 +438,12 @@ static char *handle_start(struct json_object *details, int user_id, int64_t pare
       int crc = dr_pending_claim(user_id, token, brief_buf, sizeof(brief_buf), deliver_buf,
                                  sizeof(deliver_buf), &stored_parent);
       if (crc == 3) {
-         return strdup("Error: too many failed confirmations — wait a minute and try again.");
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: too many failed confirmations — wait a minute and try again.");
       }
       if (crc != 0) {
-         return strdup("Error: no matching research proposal to confirm (it may have expired, "
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: no matching research proposal to confirm (it may have expired, "
                        "already started, or was never proposed). Call deep_research start with "
                        "confirm=false first to propose the run, then confirm with the token it "
                        "returns.");
@@ -456,7 +458,9 @@ static char *handle_start(struct json_object *details, int user_id, int64_t pare
       char err[256];
       if (research_spawn_run(user_id, stored_parent, brief_buf, deliver_to, &run_id, &conv_id, err,
                              sizeof(err)) != SUCCESS) {
-         return strdup(err);
+         char marked[sizeof(err) + 1];
+         snprintf(marked, sizeof(marked), TOOL_RESULT_ERROR_MARK "%s", err);
+         return strdup(marked);
       }
 
       char title[CONV_TITLE_MAX];
@@ -475,10 +479,12 @@ static char *handle_start(struct json_object *details, int user_id, int64_t pare
                            ? json_object_get_string(jbrief)
                            : NULL;
    if (brief == NULL || brief[0] == '\0') {
-      return strdup("Error: 'brief' is required — the question or topic to research.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: 'brief' is required — the question or topic to research.");
    }
    if (memory_filter_check(brief)) {
-      return strdup("Error: that research brief was rejected by the safety filter.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: that research brief was rejected by the safety filter.");
    }
 
    /* mode is validated but P0 supports web only (private/both need the P2 egress
@@ -487,7 +493,7 @@ static char *handle_start(struct json_object *details, int user_id, int64_t pare
                           ? json_object_get_string(jmode)
                           : "web";
    if (strcmp(mode, "web") != 0 && strcmp(mode, "private") != 0 && strcmp(mode, "both") != 0) {
-      return strdup("Error: mode must be 'web', 'private', or 'both'.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: mode must be 'web', 'private', or 'both'.");
    }
    const bool private_requested = (strcmp(mode, "web") != 0);
 
@@ -513,7 +519,8 @@ static char *handle_status(struct json_object *details, int user_id) {
                         ? json_object_get_int64(jid)
                         : 0;
    if (run_id <= 0) {
-      return strdup("Error: 'run_id' is required (the number from deep_research start).");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: 'run_id' is required (the number from deep_research start).");
    }
 
    research_run_t run;
@@ -522,7 +529,7 @@ static char *handle_status(struct json_object *details, int user_id) {
       /* Collapse NOT_FOUND and any not-owned answer to ONE message: run ids are
        * small sequential integers, so a distinct "belongs to someone else" reply
        * is an enumeration oracle (mirrors job_tool handle_status). */
-      return strdup("No such research run.");
+      return strdup(TOOL_RESULT_ERROR_MARK "No such research run.");
    }
 
    /* Tally coverage from the ledger (open / answered / unanswerable). */
@@ -579,12 +586,13 @@ static char *handle_cancel(struct json_object *details, int user_id) {
                         ? json_object_get_int64(jid)
                         : 0;
    if (run_id <= 0) {
-      return strdup("Error: 'run_id' is required to cancel a research run.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: 'run_id' is required to cancel a research run.");
    }
 
    research_run_t run;
    if (research_db_run_get(run_id, user_id, &run) != AUTH_DB_SUCCESS) {
-      return strdup("No such research run."); /* one answer — see handle_status */
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "No such research run."); /* one answer — see handle_status */
    }
    if (strcmp(run.status, "done") == 0 || strcmp(run.status, "failed") == 0 ||
        strcmp(run.status, "cancelled") == 0) {
@@ -627,7 +635,7 @@ static char *handle_cancel(struct json_object *details, int user_id) {
          break; /* one answer for both — see handle_status */
    }
    /* No default: -Wswitch flags a new enumerator instead of silently mislabeling. */
-   return strdup("No such research run.");
+   return strdup(TOOL_RESULT_ERROR_MARK "No such research run.");
 }
 
 /* --- dispatch -------------------------------------------------------------- */
@@ -637,7 +645,7 @@ static char *deep_research_callback(const char *action, char *value, int *should
       *should_respond = 1; /* results feed back to the LLM */
    }
    if (action == NULL || action[0] == '\0') {
-      return strdup("Error: action is required (start, status, cancel).");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: action is required (start, status, cancel).");
    }
 
    /* Execution backstop for the runtime master switch: the native schema already
@@ -645,7 +653,8 @@ static char *deep_research_callback(const char *action, char *value, int *should
     * non-schema entry (a legacy <command> tag, a hallucinated call replayed from
     * history) so a disabled feature can never actually run. */
    if (!g_config.research.enabled) {
-      return strdup("Deep research is turned off. Enable it in Settings → Deep Research "
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Deep research is turned off. Enable it in Settings → Deep Research "
                     "(or set [research] enabled = true in dawn.toml).");
    }
 
@@ -653,7 +662,7 @@ static char *deep_research_callback(const char *action, char *value, int *should
    if (value != NULL && value[0] != '\0') {
       details = json_tokener_parse(value);
       if (details == NULL) {
-         return strdup("Error: invalid JSON in details parameter.");
+         return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid JSON in details parameter.");
       }
    } else {
       details = json_object_new_object();
@@ -691,7 +700,8 @@ static char *deep_research_callback(const char *action, char *value, int *should
    if (ctx == NULL) {
       json_object_put(details);
       OLOG_WARNING("deep_research: refused '%s' from a caller with no session context", action);
-      return strdup("Error: deep research can only be used from a user session.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: deep research can only be used from a user session.");
    }
 
    /* A background-job/research worker runs headless and must never start research
@@ -700,7 +710,8 @@ static char *deep_research_callback(const char *action, char *value, int *should
     * non-schema path (e.g. a legacy <command> tag). */
    if (caller_is_job && starts_work) {
       json_object_put(details);
-      return strdup("Error: a background task can't start a deep-research run.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: a background task can't start a deep-research run.");
    }
 
    char *result = NULL;
@@ -712,7 +723,8 @@ static char *deep_research_callback(const char *action, char *value, int *should
       result = handle_cancel(details, user_id);
    } else {
       char buf[160];
-      snprintf(buf, sizeof(buf), "Error: unknown action '%s'. Valid: start, status, cancel.",
+      snprintf(buf, sizeof(buf),
+               TOOL_RESULT_ERROR_MARK "Error: unknown action '%s'. Valid: start, status, cancel.",
                action);
       result = strdup(buf);
    }

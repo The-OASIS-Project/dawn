@@ -159,11 +159,22 @@ MCP_TRAMPOLINE(60) MCP_TRAMPOLINE(61) MCP_TRAMPOLINE(62) MCP_TRAMPOLINE(63)
  * Dispatch
  * -------------------------------------------------------------------------- */
 
+/* Every dispatch_error() call site is a genuine hard failure (tool unavailable,
+ * auth required, access/admin denied), so prepend TOOL_RESULT_ERROR_MARK here
+ * once to red the WebUI tool pill. The mark is stripped before the text reaches
+ * the LLM (see TOOL_DEVELOPMENT_GUIDE.md § Signaling a Failure). */
 static char *dispatch_error(int *should_respond, const char *msg) {
    if (should_respond != NULL) {
       *should_respond = 1;
    }
-   return strdup(msg);
+   size_t len = strlen(msg);
+   char *out = malloc(len + 2);
+   if (out == NULL) {
+      return NULL;
+   }
+   out[0] = TOOL_RESULT_ERROR_MARK[0];
+   memcpy(out + 1, msg, len + 1);
+   return out;
 }
 
 /*
@@ -281,7 +292,7 @@ static char *mcp_bridge_dispatch(mcp_slot_t *slot,
    free(result);
    OLOG_ERROR("MCP bridge: tools/call '%s' on '%s' failed (rc=%d)", slot->upstream_tool_name,
               slot->server_alias, rc);
-   return strdup("MCP tool call failed.");
+   return strdup(TOOL_RESULT_ERROR_MARK "MCP tool call failed.");
 }
 
 /* --------------------------------------------------------------------------

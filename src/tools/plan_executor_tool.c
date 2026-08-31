@@ -157,7 +157,7 @@ static char *plan_executor_callback(const char *action, char *value, int *should
    *should_respond = 1;
 
    if (!value || !value[0]) {
-      return strdup("Error: empty plan");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: empty plan");
    }
 
    OLOG_INFO("plan_executor: received plan (%zu bytes)", strlen(value));
@@ -172,6 +172,7 @@ static char *plan_executor_callback(const char *action, char *value, int *should
    if (rc != PLAN_OK || !plan) {
       char err[768];
       snprintf(err, sizeof(err),
+               TOOL_RESULT_ERROR_MARK
                "Error: plan parse failed — %s\n"
                "Reminder: the `plan` argument must be a JSON array `[{...},{...}]`. Do NOT "
                "wrap it in `{\"plan\":[...]}` — the top-level value IS the array.",
@@ -206,9 +207,10 @@ static char *plan_executor_callback(const char *action, char *value, int *should
       result = malloc(len);
       if (result) {
          if (ctx.output[0]) {
-            snprintf(result, len, "%s\n[Plan stopped: %s]", ctx.output, ctx.error);
+            snprintf(result, len, TOOL_RESULT_ERROR_MARK "%s\n[Plan stopped: %s]", ctx.output,
+                     ctx.error);
          } else {
-            snprintf(result, len, "[Plan error: %s]", ctx.error);
+            snprintf(result, len, TOOL_RESULT_ERROR_MARK "[Plan error: %s]", ctx.error);
          }
       }
       OLOG_WARNING("plan_executor: failed (code %d): %s", rc, ctx.error);
@@ -240,6 +242,7 @@ static char *plan_executor_callback(const char *action, char *value, int *should
       result = malloc(len);
       if (result) {
          snprintf(result, len,
+                  TOOL_RESULT_ERROR_MARK
                   "Plan completed but %d of %d step(s) FAILED — the actions those steps "
                   "intended were NOT performed. Details:\n%s",
                   ctx.failed_steps, ctx.total_tool_calls,
@@ -272,7 +275,7 @@ static char *plan_executor_callback(const char *action, char *value, int *should
    plan_context_cleanup(&ctx);
    json_object_put(plan);
 
-   return result ? result : strdup("Error: allocation failed");
+   return result ? result : strdup(TOOL_RESULT_ERROR_MARK "Error: allocation failed");
 }
 
 /* =============================================================================
