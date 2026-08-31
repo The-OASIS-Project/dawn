@@ -104,7 +104,8 @@ void job_dispatch_tool_persist_cb(void *userdata,
                                   const char *content,
                                   const char *tool_calls_json,
                                   const char *tool_call_id,
-                                  const char *reasoning_json);
+                                  const char *reasoning_json,
+                                  bool is_error);
 
 #ifdef __cplusplus
 }

@@ -765,6 +765,14 @@ static int load_msg_callback(const conversation_message_t *msg, void *context) {
    if (msg->tool_call_id && msg->tool_call_id[0]) {
       json_object_object_add(msg_obj, "tool_call_id", json_object_new_string(msg->tool_call_id));
    }
+   /* Red-on-failure pill parity: surface a persisted tool-result failure so a reloaded pill reds,
+    * matching the live tool_step `error`.  Emitted only when set (omit otherwise = neutral).
+    * NOTE the key name: this reload projection uses `is_error` (the DB column name), which is the
+    * deliberate twin of the LIVE tool_step frame's `error` key — same concept, two message types.
+    * A client reads `m.is_error` here and `obj.error` there; keep both in sync if either moves. */
+   if (msg->is_error) {
+      json_object_object_add(msg_obj, "is_error", json_object_new_boolean(1));
+   }
    /* Surface display-only reasoning JSON as a parsed `reasoning` field so the browser
     * reconstructs the "AI thought" panel at this row's position (E3).  Display-only —
     * delivered here but NOT in webui_session_restore_msg_cb (the LLM-context path). */

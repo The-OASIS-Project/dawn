@@ -237,6 +237,7 @@ static const char *SCHEMA_SQL =
     "   tool_call_id TEXT," /* role='tool' rows: matching tool_call id (v56) */
     "   reasoning TEXT,"    /* assistant rows: display-only reasoning JSON (v57) */
     "   created_at INTEGER NOT NULL,"
+    "   is_error INTEGER NOT NULL DEFAULT 0," /* role='tool' rows: 1 = confirmed failure (v81) */
     "   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, id ASC);"

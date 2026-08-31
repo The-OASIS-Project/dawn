@@ -211,9 +211,10 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
    /* Parallel tcid -> is_error map for the red-only pill signal.  Built UP FRONT from `results`
     * (whose structs carry the execute-time is_error verdict), not during the row walk — the
     * canonical role:tool rows carry only stripped text, so the failure signal must come from here.
-    * Looked up when emitting each tool_result payload; a tcid with no entry / an uncorrelated
-    * result degrades to no-error (neutral), same failure-safe direction as the name lookup. */
-   struct json_object *tcid_to_error = ev_live ? json_object_new_object() : NULL;
+    * Consumed by BOTH the persist hook (cb — so a reloaded conv reds the failed pill) and the live
+    * tool_step emit; hence built whenever we persist OR fan, not only when ev_live.  A tcid with no
+    * entry / an uncorrelated result degrades to no-error (neutral), the failure-safe direction. */
+   struct json_object *tcid_to_error = (cb != NULL || ev_live) ? json_object_new_object() : NULL;
    if (tcid_to_error != NULL && results != NULL) {
       for (int r = 0; r < results->count; r++) {
          const char *rid = results->results[r].tool_call_id;
@@ -238,7 +239,9 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
       if (json_object_object_get_ex(m, "tool_calls", &tc_obj)) {
          const char *tc_json = json_object_to_json_string(tc_obj);
          if (cb) {
-            cb(ud, role, content ? content : "", tc_json, NULL, reasoning_json);
+            /* Assistant tool_calls row — never a failure verdict itself (that rides the
+             * role:tool result rows below). */
+            cb(ud, role, content ? content : "", tc_json, NULL, reasoning_json, false);
          }
          /* One tool_call event per call in the batch: an iteration can invoke
           * several tools, and a tailer wants them individually, not as one blob. */
@@ -277,8 +280,16 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
          }
       } else if (json_object_object_get_ex(m, "tool_call_id", &tcid_obj)) {
          const char *tcid = json_object_get_string(tcid_obj);
+         /* Result's confirmed-failure verdict — needed by BOTH the persist hook (so reload reds
+          * it) and the live emit below.  Uncorrelated/absent tcid -> false (neutral). */
+         bool r_is_error = false;
+         struct json_object *eo = NULL;
+         if (tcid != NULL && tcid_to_error != NULL &&
+             json_object_object_get_ex(tcid_to_error, tcid, &eo)) {
+            r_is_error = json_object_get_boolean(eo);
+         }
          if (cb) {
-            cb(ud, role, content ? content : "", NULL, tcid, NULL);
+            cb(ud, role, content ? content : "", NULL, tcid, NULL, r_is_error);
          }
          if (ev_live) {
             /* Recover the tool name from the batch's tool_calls (mapped above) so
@@ -293,12 +304,6 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
                                  json_object_object_get_ex(tcid_to_name, tcid, &nmo))
                                     ? json_object_get_string(nmo)
                                     : NULL;
-            bool r_is_error = false;
-            struct json_object *eo = NULL;
-            if (tcid != NULL && tcid_to_error != NULL &&
-                json_object_object_get_ex(tcid_to_error, tcid, &eo)) {
-               r_is_error = json_object_get_boolean(eo);
-            }
             char *tr_payload = event_payload_tool_result(rtool, content, tcid, iteration,
                                                          r_is_error);
             if (ev_observe) {

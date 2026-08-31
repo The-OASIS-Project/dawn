@@ -347,15 +347,18 @@ typedef struct {
  * form. @p tool_calls_json is the assistant's tool_calls JSON array (NULL for
  * non-assistant rows); @p tool_call_id is the matching id on role="tool" rows
  * (NULL otherwise); @p reasoning_json is display-only reasoning JSON on the assistant
- * tool_calls row (NULL otherwise, and never read into the LLM context). The
- * implementation persists to conv_db.
+ * tool_calls row (NULL otherwise, and never read into the LLM context); @p is_error is set
+ * only on role="tool" result rows (true = confirmed failure) so a reloaded conversation can
+ * red the failed tool pill, matching the live tool_step signal. The implementation persists to
+ * conv_db.
  */
 typedef void (*session_tool_persist_fn)(void *userdata,
                                         const char *role,
                                         const char *content,
                                         const char *tool_calls_json,
                                         const char *tool_call_id,
-                                        const char *reasoning_json);
+                                        const char *reasoning_json,
+                                        bool is_error);
 
 /**
  * @brief Tool-loop iteration-boundary callback.

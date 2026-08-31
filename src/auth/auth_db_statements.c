@@ -358,8 +358,8 @@ int auth_db_prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "INSERT INTO messages (conversation_id, role, content, tool_calls, tool_call_id, "
-       "reasoning, created_at) "
-       "SELECT ?, ?, ?, ?, ?, ?, ? "
+       "reasoning, created_at, is_error) "
+       "SELECT ?, ?, ?, ?, ?, ?, ?, ? "
        "WHERE EXISTS (SELECT 1 FROM conversations WHERE id = ? AND user_id = ?)",
        -1, &s_db.stmt_msg_add, NULL);
    if (rc != SQLITE_OK) {
@@ -370,7 +370,7 @@ int auth_db_prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT m.id, m.conversation_id, m.role, m.content, m.tool_calls, m.tool_call_id, "
-       "m.reasoning, m.created_at FROM messages m "
+       "m.reasoning, m.created_at, m.is_error FROM messages m "
        "INNER JOIN conversations c ON m.conversation_id = c.id "
        "WHERE m.conversation_id = ? AND c.user_id = ? ORDER BY m.id ASC",
        -1, &s_db.stmt_msg_get, NULL);
@@ -385,7 +385,7 @@ int auth_db_prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT m.id, m.conversation_id, m.role, m.content, m.tool_calls, m.tool_call_id, "
-       "m.reasoning, m.created_at FROM messages m "
+       "m.reasoning, m.created_at, m.is_error FROM messages m "
        "INNER JOIN conversations c ON m.conversation_id = c.id "
        "WHERE m.conversation_id = ? AND c.user_id = ? AND m.id > ? ORDER BY m.id ASC",
        -1, &s_db.stmt_msg_get_after, NULL);
@@ -395,11 +395,11 @@ int auth_db_prepare_statements(void) {
    }
 
    /* Admin-only: get messages without user ownership check */
-   rc = sqlite3_prepare_v2(
-       s_db.db,
-       "SELECT id, conversation_id, role, content, tool_calls, tool_call_id, reasoning, created_at "
-       "FROM messages WHERE conversation_id = ? ORDER BY id ASC",
-       -1, &s_db.stmt_msg_get_admin, NULL);
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT id, conversation_id, role, content, tool_calls, tool_call_id, "
+                           "reasoning, created_at, "
+                           "is_error FROM messages WHERE conversation_id = ? ORDER BY id ASC",
+                           -1, &s_db.stmt_msg_get_admin, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare msg_get_admin failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;

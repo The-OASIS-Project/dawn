@@ -744,7 +744,11 @@
          const toolResultsById = {};
          for (const m of messages) {
             if (m.role === 'tool' && m.tool_call_id) {
-               toolResultsById[m.tool_call_id] = m.content || '';
+               // Carry the persisted failure flag (v81) so a reloaded pill reds, matching live.
+               toolResultsById[m.tool_call_id] = {
+                  result: m.content || '',
+                  error: m.is_error === true,
+               };
             }
          }
          const consumedResultIds = new Set();
@@ -784,7 +788,13 @@
                      // Orphan result (its call is on an earlier, not-yet-loaded page): render a
                      // lone result-only pill in place rather than dropping it.
                      DawnToolPills.renderReloadGroup([
-                        { id: msg.tool_call_id, name: 'tool', args: '', result: msg.content || '' },
+                        {
+                           id: msg.tool_call_id,
+                           name: 'tool',
+                           args: '',
+                           result: msg.content || '',
+                           error: msg.is_error === true,
+                        },
                      ]);
                   }
                   tagEntries(entryStart, msg.created_at, msg.id);
@@ -813,9 +823,15 @@
                      } catch (e) {
                         /* leave as-is (redacted marker or non-JSON) */
                      }
-                     const result = toolResultsById[tc.id];
-                     if (result !== undefined) consumedResultIds.add(tc.id);
-                     items.push({ id: tc.id, name: name, args: args, result: result || '' });
+                     const tr = toolResultsById[tc.id];
+                     if (tr !== undefined) consumedResultIds.add(tc.id);
+                     items.push({
+                        id: tc.id,
+                        name: name,
+                        args: args,
+                        result: (tr && tr.result) || '',
+                        error: !!(tr && tr.error),
+                     });
                   }
                   if (typeof DawnToolPills !== 'undefined') {
                      DawnToolPills.renderReloadGroup(items);

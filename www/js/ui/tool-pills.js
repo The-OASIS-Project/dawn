@@ -136,9 +136,9 @@
    // everything else — success OR unknown — settles to a NEUTRAL "done" tone (deliberately NO
    // green, so colour marks only the exception that wants attention, and a missing signal degrades
    // to neutral rather than a false claim). The daemon's is_error is set at execute time, never
-   // parsed from result text. Live-only v1: reload (renderReloadGroup) passes no state → neutral,
-   // even for a historically-failed tool (persisting error→reload is a deferred follow-up). The
-   // 'success' branch is retained but unused — reserved if an explicit green is ever wanted.
+   // parsed from result text. Reload reds too now (persisted messages.is_error, v81): a
+   // historically-failed tool passes state='error' via renderReloadGroup. The 'success' branch is
+   // retained but unused — reserved if an explicit green is ever wanted.
    function resolvePill(pill, meta, result, state) {
       pill.classList.remove('running');
       var cls = state === 'success' || state === 'error' ? ' ' + state : '';
@@ -323,9 +323,10 @@
 
    // ---- Reload API -----------------------------------------------------------
 
-   // Build ONE terminal group from reload data. items: [{ id, name, args, result }]
-   // (already paired by tool_call_id in the caller). Appends at the current
-   // transcript position — call once per assistant tool_calls message so live and
+   // Build ONE terminal group from reload data. items: [{ id, name, args, result, error }]
+   // (already paired by tool_call_id in the caller). `error:true` reds the pill (persisted
+   // failure flag, v81) — same red-only semantics as live; absent/false → neutral. Appends at
+   // the current transcript position — call once per assistant tool_calls message so live and
    // reload split into the same per-iteration groups.
    function renderReloadGroup(items) {
       var t = transcriptEl();
@@ -336,7 +337,7 @@
          var pill = createPill(it.id, it.name);
          setPillArgs(pill, it.args);
          groupAppendPill(g, pill);
-         resolvePill(pill, '', it.result);
+         resolvePill(pill, '', it.result, it.error ? 'error' : undefined);
       });
       finalizeGroup(g);
    }

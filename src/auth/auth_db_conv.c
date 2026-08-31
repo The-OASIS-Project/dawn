@@ -1506,14 +1506,15 @@ int conv_db_update_llm_settings(int64_t conv_id,
  * Message Operations
  * ============================================================================= */
 
-int conv_db_add_message_with_tools(int64_t conv_id,
-                                   int user_id,
-                                   const char *role,
-                                   const char *content,
-                                   const char *tool_calls,
-                                   const char *tool_call_id,
-                                   const char *reasoning,
-                                   int64_t *msg_id_out) {
+int conv_db_add_message_with_tools_ex(int64_t conv_id,
+                                      int user_id,
+                                      const char *role,
+                                      const char *content,
+                                      const char *tool_calls,
+                                      const char *tool_call_id,
+                                      const char *reasoning,
+                                      bool is_error,
+                                      int64_t *msg_id_out) {
    if (msg_id_out)
       *msg_id_out = 0;
 
@@ -1549,8 +1550,9 @@ int conv_db_add_message_with_tools(int64_t conv_id,
    else
       sqlite3_bind_null(s_db.stmt_msg_add, 6);
    sqlite3_bind_int64(s_db.stmt_msg_add, 7, (int64_t)now);
-   sqlite3_bind_int64(s_db.stmt_msg_add, 8, conv_id); /* For ownership check */
-   sqlite3_bind_int(s_db.stmt_msg_add, 9, user_id);   /* For ownership check */
+   sqlite3_bind_int(s_db.stmt_msg_add, 8, is_error ? 1 : 0);
+   sqlite3_bind_int64(s_db.stmt_msg_add, 9, conv_id); /* For ownership check */
+   sqlite3_bind_int(s_db.stmt_msg_add, 10, user_id);  /* For ownership check */
 
    int rc = sqlite3_step(s_db.stmt_msg_add);
    sqlite3_reset(s_db.stmt_msg_add);
@@ -1600,6 +1602,20 @@ int conv_db_add_message_with_tools(int64_t conv_id,
    return (rc == SQLITE_DONE) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
 }
 
+/* Back-compat wrapper: assistant/user/system rows never carry a failure flag, so they persist
+ * with is_error = false. Only the tool-persist hook (role='tool' results) calls the _ex form. */
+int conv_db_add_message_with_tools(int64_t conv_id,
+                                   int user_id,
+                                   const char *role,
+                                   const char *content,
+                                   const char *tool_calls,
+                                   const char *tool_call_id,
+                                   const char *reasoning,
+                                   int64_t *msg_id_out) {
+   return conv_db_add_message_with_tools_ex(conv_id, user_id, role, content, tool_calls,
+                                            tool_call_id, reasoning, false, msg_id_out);
+}
+
 int conv_db_add_message_ex(int64_t conv_id,
                            int user_id,
                            const char *role,
@@ -1613,15 +1629,16 @@ int conv_db_add_message(int64_t conv_id, int user_id, const char *role, const ch
    return conv_db_add_message_ex(conv_id, user_id, role, content, NULL);
 }
 
-/* Read the content + tool/reasoning columns + created_at from a message-SELECT row whose
- * projection is (id, conversation_id, role, content, tool_calls, tool_call_id, reasoning,
- * created_at).  All pointers are borrowed (valid only during the callback). */
+/* Read the content + tool/reasoning columns + created_at + is_error from a message-SELECT row
+ * whose projection is (id, conversation_id, role, content, tool_calls, tool_call_id, reasoning,
+ * created_at, is_error).  All pointers are borrowed (valid only during the callback). */
 static void msg_read_columns(conversation_message_t *msg, sqlite3_stmt *stmt) {
    msg->content = (char *)sqlite3_column_text(stmt, 3);
    msg->tool_calls = (char *)sqlite3_column_text(stmt, 4);
    msg->tool_call_id = (char *)sqlite3_column_text(stmt, 5);
    msg->reasoning = (char *)sqlite3_column_text(stmt, 6);
    msg->created_at = (time_t)sqlite3_column_int64(stmt, 7);
+   msg->is_error = sqlite3_column_int(stmt, 8);
 }
 
 int conv_db_get_messages(int64_t conv_id, int user_id, message_callback_t callback, void *ctx) {

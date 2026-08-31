@@ -103,7 +103,8 @@ static void webui_tool_persist_cb(void *userdata,
                                   const char *content,
                                   const char *tool_calls_json,
                                   const char *tool_call_id,
-                                  const char *reasoning_json) {
+                                  const char *reasoning_json,
+                                  bool is_error) {
    webui_tool_persist_ctx_t *ctx = (webui_tool_persist_ctx_t *)userdata;
    if (!ctx || !ctx->session || !role) {
       return;
@@ -117,9 +118,9 @@ static void webui_tool_persist_cb(void *userdata,
    if (conv_id <= 0) {
       return; /* turn not tagged with a conversation — skip rather than guess */
    }
-   if (conv_db_add_message_with_tools(conv_id, ctx->auth_user_id, role, content ? content : "",
-                                      tool_calls_json, tool_call_id, reasoning_json,
-                                      NULL) != AUTH_DB_SUCCESS) {
+   if (conv_db_add_message_with_tools_ex(conv_id, ctx->auth_user_id, role, content ? content : "",
+                                         tool_calls_json, tool_call_id, reasoning_json, is_error,
+                                         NULL) != AUTH_DB_SUCCESS) {
       OLOG_WARNING("WebUI: failed to persist tool-turn %s row to conv %lld (may orphan on reload)",
                    role, (long long)conv_id);
    }

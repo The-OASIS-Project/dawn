@@ -1085,6 +1085,7 @@ typedef struct {
    char *reasoning;    /**< assistant rows: display-only reasoning JSON, else NULL (borrowed).
                             Delivered to the browser only — never read into the LLM context. */
    time_t created_at;
+   int is_error; /**< role='tool' rows: 1 = confirmed failure (reds the pill on reload); else 0 */
 } conversation_message_t;
 
 /**
@@ -2220,6 +2221,23 @@ int conv_db_add_message_with_tools(int64_t conv_id,
                                    const char *tool_call_id,
                                    const char *reasoning,
                                    int64_t *msg_id_out);
+
+/**
+ * @brief Like conv_db_add_message_with_tools() but also persists @p is_error.
+ *
+ * @p is_error is set only on role='tool' result rows (1 = confirmed failure) so a reloaded
+ * conversation can red the failed tool pill, matching the live tool_step signal. Every other
+ * caller uses the plain form, which persists is_error = false.
+ */
+int conv_db_add_message_with_tools_ex(int64_t conv_id,
+                                      int user_id,
+                                      const char *role,
+                                      const char *content,
+                                      const char *tool_calls,
+                                      const char *tool_call_id,
+                                      const char *reasoning,
+                                      bool is_error,
+                                      int64_t *msg_id_out);
 
 /**
  * @brief Get all messages in a conversation

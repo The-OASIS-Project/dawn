@@ -1457,12 +1457,11 @@ written for this frame; the step is already persisted with the turn, so reload r
   a consumer reds the pill solely on the explicit `true` (a red-only signal: neutral = success or
   unknown; there is deliberately no "success" value). Back-compat: absent → neutral in both
   directions; either side may land first.
-  - **Reload parity (v1)**: this is a **live-only** signal — a reloaded conversation shows tool
-    results neutral (the failure flag is not persisted on the `role:tool` row). The failing result
-    *text* is still visible in the pill body. **Exception**: on the durable job-observe path,
-    `conv_event_emit` persists the `tool_step` payload to `conversation_events`, so a **job
-    conversation's** attach/replay shows the red durably. Persisting `error` for interactive reload
-    is a deferred follow-up; it will not change this wire field.
+  - **Reload parity**: the failure is **persisted** on the `role:tool` message row
+    (`messages.is_error`, schema v81) and surfaced on reload as `is_error: true` in the
+    `load_conversation` message projection (omitted otherwise), so a reloaded conversation reds a
+    failed pill just like the live signal. (The durable job-observe path also persists the whole
+    `tool_step` payload to `conversation_events`, so a job conversation's attach/replay reds too.)
 - `stream_id` is best-effort / informational.
 - **Recipients**: the user's authenticated WEBUI browsers viewing the conversation, **excluding the
   origin by default** (the origin renders its own steps from its live stream). A connection that
