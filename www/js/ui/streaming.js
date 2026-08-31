@@ -625,7 +625,10 @@
          DawnToolPills.toolCall(id, tool, argsStr, iter);
       } else if (kind === 'tool_result') {
          var result = typeof obj.result === 'string' ? obj.result : '';
-         DawnToolPills.toolResult(id, result);
+         // Red-only failure signal: strict === true (a confirmed failure). Absent/false → neutral,
+         // so a red is never inferred from result content — only from the daemon's explicit flag.
+         var isError = obj.error === true;
+         DawnToolPills.toolResult(id, result, isError);
       }
       // Scroll-to-follow is handled inside DawnToolPills.
    }

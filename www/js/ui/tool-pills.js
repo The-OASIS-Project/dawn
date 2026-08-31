@@ -16,7 +16,7 @@
  *
  * Usage:
  *   DawnToolPills.toolCall(id, name, argsJson, iter)    // live: open pending pill (iter optional)
- *   DawnToolPills.toolResult(id, resultText)            // live: resolve it
+ *   DawnToolPills.toolResult(id, resultText, isError)   // live: resolve it (isError → red)
  *   DawnToolPills.closeGroup()                          // live: seal current group (per iteration)
  *   DawnToolPills.reset()                               // conversation switch / clear
  *   DawnToolPills.renderReloadGroup([{id,name,args,result}])  // reload: one terminal group
@@ -131,12 +131,14 @@
       if (args != null && args !== '') pill._inner.appendChild(ioBlock('args', 'Arguments', args));
    }
 
-   // Resolve a running pill to its terminal state. The daemon sends NO tool success/error signal
-   // (tool results are opaque strings — a failure and a success are both just text), so we make
-   // no colour claim we cannot back: a resolved pill settles to a NEUTRAL "done" tone (matching
-   // the Aurora client). FORWARD-LOOKING: when a real tool-status signal is plumbed daemon-side
-   // (a bool/enum on the tool_result payload + persisted on the role:tool row so reload agrees),
-   // pass state='success'|'error' here to light the green/red rail — the CSS is already in place.
+   // Resolve a running pill to its terminal state. RED-ONLY design: state==='error' lights
+   // the red rail/dot for a daemon-CONFIRMED failure (`error:true` on the tool_result payload);
+   // everything else — success OR unknown — settles to a NEUTRAL "done" tone (deliberately NO
+   // green, so colour marks only the exception that wants attention, and a missing signal degrades
+   // to neutral rather than a false claim). The daemon's is_error is set at execute time, never
+   // parsed from result text. Live-only v1: reload (renderReloadGroup) passes no state → neutral,
+   // even for a historically-failed tool (persisting error→reload is a deferred follow-up). The
+   // 'success' branch is retained but unused — reserved if an explicit green is ever wanted.
    function resolvePill(pill, meta, result, state) {
       pill.classList.remove('running');
       var cls = state === 'success' || state === 'error' ? ' ' + state : '';
@@ -289,8 +291,11 @@
    // Resolve a running pill for `id`. Pair by tool_call_id; fall back to the oldest running pill
    // when the id is empty/uncorrelated (native tool-calling always carries an id — this covers
    // id-less legacy tools + mild out-of-order), and only as a last resort open a lone pill so
-   // nothing is dropped. Neutral "done" — no success/error colour (see resolvePill).
-   function toolResult(id, result) {
+   // nothing is dropped. RED-ONLY: `isError` reds the pill's rail/dot AND its group-state dot (via
+   // resolvePill), so a failure contained in a collapsed group stays visible in the summary;
+   // success/unknown settle to a neutral "done" (no green). `isError` is the daemon's explicit
+   // confirmed-failure flag, never inferred from `result` text.
+   function toolResult(id, result, isError) {
       var pill = findPill(currentGroup, id) || oldestRunning(currentGroup);
       if (!pill) {
          var g = ensureGroup();
@@ -299,7 +304,7 @@
          groupAppendPill(g, pill);
       }
       var meta = pill._startedAt ? fmtDuration(Date.now() - pill._startedAt) : '';
-      resolvePill(pill, meta, result);
+      resolvePill(pill, meta, result, isError ? 'error' : undefined);
       refreshGroupAria(currentGroup);
       scrollToBottom();
    }

@@ -1447,6 +1447,22 @@ written for this frame; the step is already persisted with the turn, so reload r
   `load_conversation` emits on the `tool_calls` / `role:tool` rows, so a client pairs a live result
   to its call with one implementation across live and reload. Present on both `tool_call` and
   `tool_result`; omitted when the provider supplied none.
+- `iter` (inside the inner `payload`): the 0-based tool-loop **iteration index** this step belongs
+  to. Present on both `tool_call` and `tool_result` when known; omitted otherwise. A client seals its
+  per-iteration group when `iter` changes — so grouping stays correct even for a tool-only iteration
+  that streams no text (which emits no stream boundary). Absent → group by stream boundaries only.
+- `error` (inside the inner `payload`, **`tool_result` only**): `true` iff the tool step was a
+  **confirmed failure** — set at execute time from the tool result (structural failure OR a
+  tool-self-reported hard failure), **never parsed from the result text**. **Omitted otherwise**, so
+  a consumer reds the pill solely on the explicit `true` (a red-only signal: neutral = success or
+  unknown; there is deliberately no "success" value). Back-compat: absent → neutral in both
+  directions; either side may land first.
+  - **Reload parity (v1)**: this is a **live-only** signal — a reloaded conversation shows tool
+    results neutral (the failure flag is not persisted on the `role:tool` row). The failing result
+    *text* is still visible in the pill body. **Exception**: on the durable job-observe path,
+    `conv_event_emit` persists the `tool_step` payload to `conversation_events`, so a **job
+    conversation's** attach/replay shows the red durably. Persisting `error` for interactive reload
+    is a deferred follow-up; it will not change this wire field.
 - `stream_id` is best-effort / informational.
 - **Recipients**: the user's authenticated WEBUI browsers viewing the conversation, **excluding the
   origin by default** (the origin renders its own steps from its live stream). A connection that

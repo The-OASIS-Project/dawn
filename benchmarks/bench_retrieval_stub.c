@@ -236,11 +236,13 @@ char *event_payload_tool_call(const char *tool_name,
 char *event_payload_tool_result(const char *tool_name,
                                 const char *result_text,
                                 const char *tool_call_id,
-                                int iteration) {
+                                int iteration,
+                                bool is_error) {
    (void)tool_name;
    (void)result_text;
    (void)tool_call_id;
    (void)iteration;
+   (void)is_error;
    return NULL;
 }
 

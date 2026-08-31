@@ -187,10 +187,15 @@ typedef struct {
    char tool_call_id[LLM_TOOLS_ID_LEN]; /**< ID from original tool_call_t */
    char result[LLM_TOOLS_RESULT_LEN];   /**< Execution result text (fixed buffer) */
    char *result_extended; /**< Heap-allocated large result (preferred over result[] if non-NULL) */
-   bool success;          /**< true if execution succeeded */
-   bool skip_followup;    /**< If true, return result directly without LLM follow-up */
-   bool should_respond;   /**< If false, tool handled its own output — suppress follow-up */
-   char *vision_image;    /**< Base64 vision image (caller must free) */
+   bool success;       /**< true if execution succeeded (STRUCTURAL: args/dispatch/callback ran) */
+   bool is_error;      /**< true if this was a CONFIRMED failure — structural (!success) OR a tool
+                        *   self-reported hard failure via TOOL_RESULT_ERROR_MARK. Distinct from
+                        *   `success` (which stays true for a marked error, so the text still flows
+                        *   to the LLM). Drives the WebUI tool-pill red state; captured at execute
+                        *   time, never parsed from result content. */
+   bool skip_followup; /**< If true, return result directly without LLM follow-up */
+   bool should_respond;      /**< If false, tool handled its own output — suppress follow-up */
+   char *vision_image;       /**< Base64 vision image (caller must free) */
    size_t vision_image_size; /**< Size of vision image data */
 } tool_result_t;
 

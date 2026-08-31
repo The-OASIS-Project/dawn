@@ -101,12 +101,17 @@ char *event_payload_tool_call(const char *tool_name,
  *        `tool_call_id` when non-empty); may be NULL.
  * @param iteration Tool-loop iteration index (0-based) this step belongs to, emitted as `iter`
  *        (see event_payload_tool_call). Negative to omit.
+ * @param is_error true if this tool step was a CONFIRMED failure — emitted as `"error": true` so a
+ *        consumer can red the pill; OMITTED when false (a red-only signal: neutral = success or
+ *        unknown). Set at execute time from tool_result_t.is_error, never parsed from @p
+ * result_text.
  * @return malloc'd JSON, or NULL on OOM. Caller frees.
  */
 char *event_payload_tool_result(const char *tool_name,
                                 const char *result_text,
                                 const char *tool_call_id,
-                                int iteration);
+                                int iteration,
+                                bool is_error);
 
 /**
  * @brief Build a `status` payload: {"state":"generating"|"idle"}.

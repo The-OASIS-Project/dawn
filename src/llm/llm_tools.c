@@ -1572,6 +1572,21 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
                                        value_buf[0] ? value_buf : NULL, &should_respond);
       s_current_raw_args = NULL;
 
+      /* Capture the tool's self-reported hard-failure mark BEFORE stripping it: `success` stays
+       * true (the marked text still flows to the LLM as description), but the pill must red. This
+       * is the ONE site where a structurally-fine call is still a confirmed failure.
+       *
+       * ASSUMPTION (currently holds; document so it isn't silently load-bearing): marker capture
+       * lives ONLY here on the direct-callback path. The other dispatch paths — command_execute
+       * fallback (below), mqtt_only, viewing — do NOT capture the mark, and command_execute
+       * additionally strips it and forces success=true (command_executor.c), so a marker returned
+       * through those paths is unrecoverable and renders NEUTRAL, not red. Safe (a MISSED red,
+       * never a false one) and unreachable today: every marker-emitting tool
+       * (attention/stat/suit/search/ weather) is a modular direct-callback tool that hits THIS
+       * site. If a legacy MQTT/command device ever adopts TOOL_RESULT_ERROR_MARK, surface the
+       * verdict in cmd_exec_result_t and OR it in on those paths too. */
+      bool marked = tool_result_is_error(cb_result);
+
       /* Strip the opt-in tool error-marker (this native-tool path invokes the
        * callback directly, bypassing command_execute's strip). */
       tool_result_strip_error_mark(cb_result);
@@ -1591,6 +1606,7 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
          snprintf(result->result, LLM_TOOLS_RESULT_LEN, "Tool '%s' completed", call->name);
       }
       result->success = true;
+      result->is_error = marked; /* structurally OK, but the tool flagged a hard failure */
       result->skip_followup = meta->skip_followup;
       result->should_respond = (should_respond != 0);
 
@@ -1642,6 +1658,7 @@ int llm_tools_execute(const tool_call_t *call, tool_result_t *result) {
    if (!treg_meta) {
       snprintf(result->result, LLM_TOOLS_RESULT_LEN, "Error: Unknown tool '%s'", call->name);
       result->success = false;
+      result->is_error = true;
       return 1;
    }
 
@@ -1676,6 +1693,10 @@ int llm_tools_execute(const tool_call_t *call, tool_result_t *result) {
                   "right now.",
                   call->name, is_remote ? "remote" : "local");
          result->success = false;
+         /* A refused (unavailable) tool confirmedly did NOT run → red. It's a refusal, not a
+          * malfunction, so this is the one path where taste could differ (flip to false for
+          * neutral); reds by default because the call did not execute. */
+         result->is_error = true;
          result->should_respond = true;
          OLOG_WARNING("Refused tool '%s' — not enabled for %s session", call->name,
                       is_remote ? "remote" : "local");
@@ -1684,7 +1705,14 @@ int llm_tools_execute(const tool_call_t *call, tool_result_t *result) {
       }
    }
 
-   return llm_tools_execute_from_treg(call, treg_meta, result);
+   int rc = llm_tools_execute_from_treg(call, treg_meta, result);
+   /* Backstop: every from_treg path sets `success` explicitly, so folding `!success` in here
+    * retroactively covers ALL of them (structural failures — bad args, invalid JSON, encode
+    * overflow, command-exec failure) with one line. The direct-callback site sets `is_error`
+    * itself for the marked-but-structurally-OK case (success stays true), which this OR preserves.
+    */
+   result->is_error = result->is_error || !result->success;
+   return rc;
 }
 
 int llm_tools_execute_all(const tool_call_list_t *calls, tool_result_list_t *results) {

@@ -147,7 +147,8 @@ static char *build_reasoning_json(const llm_tool_response_t *result, const char 
 static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
                                        int before_len,
                                        const char *reasoning_json,
-                                       int iteration) {
+                                       int iteration,
+                                       const tool_result_list_t *results) {
    /* for_reconnect (not session_get): a turn that survives a client disconnect
     * (background-jobs Phase 1) must STILL persist its tool-iteration rows
     * server-side.  session_get() skips disconnected sessions and would return
@@ -206,6 +207,22 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
     * name) precedes its results in this same batch, so map id->name as we pass
     * it and look up when the result arrives.  Built when EITHER surface is live. */
    struct json_object *tcid_to_name = ev_live ? json_object_new_object() : NULL;
+
+   /* Parallel tcid -> is_error map for the red-only pill signal.  Built UP FRONT from `results`
+    * (whose structs carry the execute-time is_error verdict), not during the row walk — the
+    * canonical role:tool rows carry only stripped text, so the failure signal must come from here.
+    * Looked up when emitting each tool_result payload; a tcid with no entry / an uncorrelated
+    * result degrades to no-error (neutral), same failure-safe direction as the name lookup. */
+   struct json_object *tcid_to_error = ev_live ? json_object_new_object() : NULL;
+   if (tcid_to_error != NULL && results != NULL) {
+      for (int r = 0; r < results->count; r++) {
+         const char *rid = results->results[r].tool_call_id;
+         if (rid != NULL && rid[0] != '\0') {
+            json_object_object_add(tcid_to_error, rid,
+                                   json_object_new_boolean(results->results[r].is_error));
+         }
+      }
+   }
 
    int n = json_object_array_length(canonical);
    for (int i = 0; i < n; i++) {
@@ -276,7 +293,14 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
                                  json_object_object_get_ex(tcid_to_name, tcid, &nmo))
                                     ? json_object_get_string(nmo)
                                     : NULL;
-            char *tr_payload = event_payload_tool_result(rtool, content, tcid, iteration);
+            bool r_is_error = false;
+            struct json_object *eo = NULL;
+            if (tcid != NULL && tcid_to_error != NULL &&
+                json_object_object_get_ex(tcid_to_error, tcid, &eo)) {
+               r_is_error = json_object_get_boolean(eo);
+            }
+            char *tr_payload = event_payload_tool_result(rtool, content, tcid, iteration,
+                                                         r_is_error);
             if (ev_observe) {
                conv_event_emit(ev_conv, ev_user, CONV_EVENT_TOOL_RESULT, tr_payload);
             } else {
@@ -289,6 +313,7 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
    }
 
    json_object_put(tcid_to_name);
+   json_object_put(tcid_to_error);
    json_object_put(canonical);
    session_release(s);
 }
@@ -891,7 +916,7 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
        * display-only reasoning (E3) attached to its assistant row. */
       char *reasoning_json = build_reasoning_json(
           &result, reasoning_provider_label(params->llm_type, params->cloud_provider));
-      persist_appended_tool_turn(params, hist_before, reasoning_json, iteration);
+      persist_appended_tool_turn(params, hist_before, reasoning_json, iteration, results);
       free(reasoning_json);
       reasoning_json = NULL;
 

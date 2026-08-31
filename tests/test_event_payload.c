@@ -59,7 +59,8 @@ static void assert_field_equals(const char *payload,
  * the home_assistant / calendar case: their secret is a config credential, not
  * echoed in the response, so device/event state must survive. */
 static void test_result_body_is_readable(void) {
-   char *p = event_payload_tool_result("home_assistant", "living room light is on, 72F", NULL, -1);
+   char *p = event_payload_tool_result("home_assistant", "living room light is on, 72F", NULL, -1,
+                                       false);
    TEST_ASSERT_NOT_NULL(p);
    struct json_object *root = json_tokener_parse(p);
    struct json_object *tool = NULL, *result = NULL;
@@ -133,7 +134,7 @@ static void test_non_utf8_result_is_sanitized(void) {
    char *p = event_payload_tool_result("search",
                                        "clean\xff"
                                        "bytes",
-                                       NULL, -1);
+                                       NULL, -1, false);
    TEST_ASSERT_NOT_NULL(p);
    TEST_ASSERT_NULL(strchr(p, (char)0xFF)); /* invalid byte gone */
    struct json_object *root = json_tokener_parse(p);
@@ -159,7 +160,7 @@ static void test_tool_call_id_present_and_omitted(void) {
    free(pc);
 
    /* Present on tool_result, same id (pairing key) */
-   char *pr = event_payload_tool_result("search", "3 results", "toolu_015abc", -1);
+   char *pr = event_payload_tool_result("search", "3 results", "toolu_015abc", -1, false);
    TEST_ASSERT_NOT_NULL(pr);
    struct json_object *rr = json_tokener_parse(pr);
    struct json_object *idr = NULL;
@@ -178,7 +179,7 @@ static void test_tool_call_id_present_and_omitted(void) {
    free(pn);
 
    /* Omitted when NULL (tool_result) — both kinds honor the same guard */
-   char *pnr = event_payload_tool_result("search", "ok", NULL, -1);
+   char *pnr = event_payload_tool_result("search", "ok", NULL, -1, false);
    TEST_ASSERT_NOT_NULL(pnr);
    struct json_object *rnr = json_tokener_parse(pnr);
    struct json_object *idnr = NULL;
@@ -212,7 +213,7 @@ static void test_iter_present_and_omitted(void) {
    free(pc);
 
    /* Present on tool_result, nonzero */
-   char *pr = event_payload_tool_result("search", "3 results", "toolu_1", 2);
+   char *pr = event_payload_tool_result("search", "3 results", "toolu_1", 2, false);
    TEST_ASSERT_NOT_NULL(pr);
    struct json_object *rr = json_tokener_parse(pr);
    struct json_object *itr = NULL;
@@ -231,13 +232,48 @@ static void test_iter_present_and_omitted(void) {
    free(pn);
 
    /* Omitted when negative (result) */
-   char *pnr = event_payload_tool_result("search", "ok", NULL, -1);
+   char *pnr = event_payload_tool_result("search", "ok", NULL, -1, false);
    TEST_ASSERT_NOT_NULL(pnr);
    struct json_object *rnr = json_tokener_parse(pnr);
    struct json_object *itnr = NULL;
    TEST_ASSERT_FALSE(json_object_object_get_ex(rnr, "iter", &itnr));
    json_object_put(rnr);
    free(pnr);
+}
+
+/* Red-only failure signal (living tool-pill UI): `error:true` is emitted on a tool_result ONLY when
+ * the step was a CONFIRMED failure, and OMITTED otherwise so neutral = success-or-unknown.
+ * Structural failures and tool-self-reported (TOOL_RESULT_ERROR_MARK) failures both arrive here as
+ * is_error=true — this payload builder does NOT parse result text, so the flag is trustworthy by
+ * construction. */
+static void test_error_present_and_omitted(void) {
+   /* Present when is_error=true (regardless of the result body, which is just a failure message) */
+   char *pe = event_payload_tool_result("search", "Search failed: engine down", "toolu_9", 1, true);
+   TEST_ASSERT_NOT_NULL(pe);
+   struct json_object *re = json_tokener_parse(pe);
+   struct json_object *er = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(re, "error", &er));
+   TEST_ASSERT_TRUE(json_object_get_boolean(er));
+   json_object_put(re);
+   free(pe);
+
+   /* Omitted on success (is_error=false) — neutral, no false-red */
+   char *po = event_payload_tool_result("search", "3 results", "toolu_9", 1, false);
+   TEST_ASSERT_NOT_NULL(po);
+   struct json_object *ro = json_tokener_parse(po);
+   struct json_object *eo = NULL;
+   TEST_ASSERT_FALSE(json_object_object_get_ex(ro, "error", &eo));
+   json_object_put(ro);
+   free(po);
+
+   /* tool_call payload never carries error (a call in flight has no verdict) */
+   char *pc = event_payload_tool_call("search", "{\"q\":\"x\"}", "toolu_9", 1);
+   TEST_ASSERT_NOT_NULL(pc);
+   struct json_object *rc = json_tokener_parse(pc);
+   struct json_object *ec = NULL;
+   TEST_ASSERT_FALSE(json_object_object_get_ex(rc, "error", &ec));
+   json_object_put(rc);
+   free(pc);
 }
 
 /* --- deep-research event payloads (§10) ------------------------------------ */
@@ -312,6 +348,7 @@ int main(void) {
    RUN_TEST(test_non_utf8_result_is_sanitized);
    RUN_TEST(test_tool_call_id_present_and_omitted);
    RUN_TEST(test_iter_present_and_omitted);
+   RUN_TEST(test_error_present_and_omitted);
    RUN_TEST(test_research_round_shape);
    RUN_TEST(test_research_claim_is_sanitized);
    RUN_TEST(test_research_claim_null_safe);

@@ -264,7 +264,8 @@ char *event_payload_tool_call(const char *tool_name,
 char *event_payload_tool_result(const char *tool_name,
                                 const char *result_text,
                                 const char *tool_call_id,
-                                int iteration) {
+                                int iteration,
+                                bool is_error) {
    struct json_object *root = json_object_new_object();
    if (root == NULL) {
       return NULL;
@@ -272,6 +273,11 @@ char *event_payload_tool_result(const char *tool_name,
    json_object_object_add(root, "tool", json_object_new_string(tool_name ? tool_name : "?"));
    add_tool_call_id(root, tool_call_id);
    add_iter(root, iteration);
+   /* Red-only signal: emit `error` only when the step CONFIRMED a failure; omit otherwise so
+    * neutral = success-or-unknown (a consumer reds solely on the explicit true). */
+   if (is_error) {
+      json_object_object_add(root, "error", json_object_new_boolean(1));
+   }
 
    /* Cap the result BEFORE embedding it, so the cap governs the payload the way
     * an operator expects rather than being diluted by JSON escaping.  Results are
