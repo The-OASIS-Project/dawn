@@ -1373,13 +1373,16 @@ static void *webui_thread_func(void *arg) {
        * The writeable callback chain handles additional responses. */
       process_response_queue();
 
-      /* Always-on timeout checks (~1Hz, not every 5ms iteration) */
+      /* Always-on timeout checks (~4Hz, not every 5ms iteration). 4Hz not 1Hz
+       * because this tick also drives wall-clock end-of-speech detection for DTX
+       * clients (whose silence sends no frames to the per-frame VAD check), so the
+       * cadence bounds how long past the dwell an utterance can hang: ~250ms. */
       {
          static int64_t last_timeout_check_ms = 0;
          struct timespec ts;
          clock_gettime(CLOCK_MONOTONIC, &ts);
          int64_t now_ms = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-         if (now_ms - last_timeout_check_ms >= 1000) {
+         if (now_ms - last_timeout_check_ms >= 250) {
             last_timeout_check_ms = now_ms;
             pthread_mutex_lock(&s_conn_registry_mutex);
             for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {

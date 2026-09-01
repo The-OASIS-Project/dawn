@@ -1282,6 +1282,22 @@ State machine update.
 - `detail`: Optional status message during long operations
 - `tools`: Optional array of active tool calls (during parallel execution)
 
+> **Precedence trap — `state: "speaking"` vs `always_on_state: "recording"`.**
+> In the always-on bare-wake-word flow (user says only the wake word, then speaks a
+> command), DAWN plays a short greeting ("Hello.") *while the always-on state machine
+> is already in `recording`*. The greeting is normal TTS, so the client receives a
+> top-level `state: "speaking"` **concurrent with** the `always_on_state: "recording"`
+> frame. These read as contradictory. **Contract:
+> during always-on `recording`, `always_on_state: "recording"` wins** — the client
+> keeps its mic **open** and relies on client-side echo cancellation (AEC) to remove
+> the greeting from its capture; it must **not** mute on `state: "speaking"` until
+> recording clears (`recording` → `processing`, which precedes the *reply's*
+> `state: "speaking"`). A client that mutes on `state: "speaking"` will gag its own
+> command window. Corollary: the client's TTS playback must be **AEC-referenceable**
+> (route through a media element the browser's echo canceller sees, not a bare Web
+> Audio destination) or the greeting will bleed uncancelled into the live mic and
+> keep the server's VAD from ever reaching end-of-speech.
+
 #### `error`
 Error or informational notification.
 ```json

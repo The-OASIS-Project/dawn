@@ -85,7 +85,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->vad.speech_threshold = 0.5f;        /* VAD_SPEECH_THRESHOLD */
    config->vad.speech_threshold_tts = 0.92f;   /* VAD_SPEECH_THRESHOLD_TTS */
    config->vad.silence_threshold = 0.3f;       /* VAD_SILENCE_THRESHOLD */
-   config->vad.end_of_speech_duration = 1.2f;  /* VAD_END_OF_SPEECH_DURATION */
+   config->vad.end_of_speech_duration = 1.0f;  /* VAD_END_OF_SPEECH_DURATION */
    config->vad.max_recording_duration = 30.0f; /* VAD_MAX_RECORDING_DURATION */
    config->vad.preroll_ms = 500;
 

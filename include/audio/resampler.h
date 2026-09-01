@@ -63,8 +63,8 @@ typedef struct resampler_t resampler_t;
  * real-time audio threads.
  */
 typedef enum {
-   RESAMPLER_QUALITY_BEST = 0, /**< SRC_SINC_BEST_QUALITY — ASR/music (default) */
-   RESAMPLER_QUALITY_MEDIUM,   /**< SRC_SINC_MEDIUM_QUALITY — voice/TTS output */
+   RESAMPLER_QUALITY_BEST = 0, /**< SRC_SINC_BEST_QUALITY — music (default) */
+   RESAMPLER_QUALITY_MEDIUM,   /**< SRC_SINC_MEDIUM_QUALITY — WebUI ASR input + TTS output */
 } resampler_quality_t;
 
 /**

@@ -108,8 +108,14 @@ int webui_audio_init(void) {
    opus_encoder_ctl(s_encoder, OPUS_SET_COMPLEXITY(5)); /* Balanced quality/CPU (0-10 scale) */
    opus_encoder_ctl(s_encoder, OPUS_SET_SIGNAL(OPUS_AUTO));
 
-   /* Create resampler for input audio (48kHz → 16kHz for ASR) */
-   s_input_resampler = resampler_create(WEBUI_OPUS_SAMPLE_RATE, WEBUI_ASR_SAMPLE_RATE, 1);
+   /* Create resampler for input audio (48kHz → 16kHz for ASR).
+    * MEDIUM (SINC_MEDIUM) not BEST: the whole utterance is resampled single-
+    * threaded AFTER end-of-speech, and SINC_BEST costs ~48ms per second of
+    * audio (250ms @ 5s, 788ms @ 17s) of pure pre-Whisper latency. Whisper is
+    * robust to resampling artifacts, so MEDIUM (~3-4x faster) is a free win —
+    * same tradeoff already taken on the TTS output path. */
+   s_input_resampler = resampler_create_ex(WEBUI_OPUS_SAMPLE_RATE, WEBUI_ASR_SAMPLE_RATE, 1,
+                                           RESAMPLER_QUALITY_MEDIUM);
    if (!s_input_resampler) {
       OLOG_ERROR("WebUI audio: Failed to create input resampler");
       opus_encoder_destroy(s_encoder);
@@ -870,7 +876,19 @@ void webui_sentence_audio_callback(const char *sentence, void *userdata) {
 
    /* Only generate TTS if there's actual content and TTS still enabled */
    if (len > 0 && conn->tts_enabled) {
-      /* Switch to "speaking" state when first audio is ready */
+      /* Switch to "speaking" state when first audio is ready.
+       *
+       * PRECEDENCE TRAP (always-on): the bare-wake-word greeting ("Hello.") is
+       * synthesized here WHILE the always-on state machine is in RECORDING, so a
+       * client receives top-level state:speaking CONCURRENT with
+       * always_on_state:recording. These read as contradictory ("I'm speaking" vs
+       * "recording you"). A client that mutes its mic on state:speaking will gag
+       * its own command window. The contract: during always-on RECORDING,
+       * always_on_state:recording WINS — keep the mic OPEN and let client-side AEC
+       * cancel the greeting echo; do NOT mute on state:speaking until recording
+       * clears (recording->processing, before the reply's state:speaking). This
+       * cost Aurora a debug cycle (the greeting bled into its mic uncancelled AND
+       * its speaking-mute gagged the command). See docs/WEBSOCKET_PROTOCOL.md. */
       webui_send_state(session, "speaking");
 
       /* Check if client supports Opus codec (conn already validated above) */

@@ -33,6 +33,7 @@
 #include <time.h>
 
 #include "asr/asr_interface.h"
+#include "config/dawn_config.h"
 #include "core/session_manager.h"
 #include "core/utterance_dedup.h"
 #include "core/wake_word.h"
@@ -56,10 +57,10 @@ const uint32_t ALWAYS_ON_VALID_SAMPLE_RATES[] = { 8000, 16000, 22050, 44100, 480
  * full 200ms chunks at native rate (e.g., 9600 samples at 48kHz). */
 #define RAW_PCM_MAX_FRAME 12000
 
-/* VAD constants (match vad_silero.c) */
+/* VAD frame size (must match vad_silero.c). The speech gate and end-of-speech
+ * dwell are read from the shared [vad] config at use (see the state machine
+ * below) so remote always-on tracks the same knobs as the local mic path. */
 #define VAD_SAMPLE_SIZE 512 /* 32ms at 16kHz */
-#define VAD_SPEECH_THRESHOLD 0.5f
-#define VAD_END_OF_SPEECH_MS 1500 /* Default end-of-speech silence duration */
 
 /* =============================================================================
  * Helpers
@@ -738,6 +739,22 @@ void always_on_consume_wake_result(always_on_ctx_t *ctx, void *conn_ptr) {
          /* Wake word only — greet and start recording the command */
          free(ctx->wake_command);
          ctx->wake_command = NULL;
+         /* Arm end-of-speech from the first command word, not the stale wake-word
+          * speech. last_speech_ms still holds a timestamp from wake detection
+          * (already older than the dwell), so without this reset the wall-clock
+          * end-of-speech check in always_on_check_timeouts would fire on the very
+          * next tick and transcribe an empty buffer, dropping the command. 0 means
+          * "no speech yet this window"; the >0 guards defer the dwell until the
+          * user actually starts speaking (also removes any first-word grace race). */
+         ctx->last_speech_ms = 0;
+         /* Start the command recording from a clean ring. extract_buffered_audio
+          * reads wake_start_pos -> write_pos; wake_start_pos still points at the
+          * wake-word onset, so without this the command transcript is prefixed
+          * with the wake word ("Okay Friday. <command>"). Reset all three so the
+          * command captures only what is spoken after the greeting. */
+         ctx->wake_start_pos = ctx->write_pos;
+         ctx->read_pos = ctx->write_pos;
+         ctx->valid_len = 0;
          set_state(ctx, ALWAYS_ON_RECORDING);
          pthread_mutex_unlock(&ctx->mutex);
 
@@ -911,6 +928,11 @@ int always_on_process_audio(always_on_ctx_t *ctx,
    now = now_ms();
    size_t vad_offset = 0;
 
+   /* Speech gate + end-of-speech dwell from the shared [vad] config (was a
+    * hardcoded 0.5 / 1500ms) so remote always-on matches the local mic. */
+   const float speech_threshold = g_config.vad.speech_threshold;
+   const int64_t end_of_speech_ms = (int64_t)(g_config.vad.end_of_speech_duration * 1000.0f);
+
    while (vad_offset + VAD_SAMPLE_SIZE <= vad_pcm_samples) {
       float speech_prob = vad_silero_process(ctx->vad_ctx, vad_input + vad_offset, VAD_SAMPLE_SIZE);
       vad_offset += VAD_SAMPLE_SIZE;
@@ -920,7 +942,7 @@ int always_on_process_audio(always_on_ctx_t *ctx,
 
       switch (state) {
          case ALWAYS_ON_LISTENING:
-            if (speech_prob >= VAD_SPEECH_THRESHOLD) {
+            if (speech_prob >= speech_threshold) {
                ctx->last_speech_ms = now;
                ctx->wake_start_pos = ctx->read_pos; /* Save for ASR extraction */
                set_state(ctx, ALWAYS_ON_WAKE_CHECK);
@@ -929,13 +951,12 @@ int always_on_process_audio(always_on_ctx_t *ctx,
             break;
 
          case ALWAYS_ON_WAKE_CHECK: {
-            if (speech_prob >= VAD_SPEECH_THRESHOLD) {
+            if (speech_prob >= speech_threshold) {
                ctx->last_speech_ms = now;
             }
 
             /* Check if speech ended (silence exceeds pause threshold) */
-            if (speech_prob < VAD_SPEECH_THRESHOLD &&
-                (now - ctx->last_speech_ms) >= VAD_END_OF_SPEECH_MS) {
+            if (speech_prob < speech_threshold && (now - ctx->last_speech_ms) >= end_of_speech_ms) {
                /* Speech ended — dispatch ASR to worker thread */
                dispatch_wake_check(ctx, (ws_connection_t *)conn_ptr);
             }
@@ -943,12 +964,12 @@ int always_on_process_audio(always_on_ctx_t *ctx,
          }
 
          case ALWAYS_ON_RECORDING:
-            if (speech_prob >= VAD_SPEECH_THRESHOLD) {
+            if (speech_prob >= speech_threshold) {
                ctx->last_speech_ms = now;
             }
             /* End-of-speech: dispatch ASR to worker thread (non-blocking) */
-            if (speech_prob < VAD_SPEECH_THRESHOLD && ctx->last_speech_ms > 0 &&
-                (now - ctx->last_speech_ms) >= VAD_END_OF_SPEECH_MS) {
+            if (speech_prob < speech_threshold && ctx->last_speech_ms > 0 &&
+                (now - ctx->last_speech_ms) >= end_of_speech_ms) {
                send_always_on_state(ctx->wsi, "processing");
                dispatch_cmd_transcribe(ctx, (ws_connection_t *)conn_ptr);
             }
@@ -996,15 +1017,25 @@ bool always_on_check_timeouts(always_on_ctx_t *ctx, void *conn) {
    pthread_mutex_lock(&ctx->mutex);
 
    switch (state) {
-      case ALWAYS_ON_WAKE_CHECK:
-         if (elapsed >= ALWAYS_ON_WAKE_CHECK_TIMEOUT_MS) {
-            /* Timeout — dispatch ASR with whatever audio we have instead of
+      case ALWAYS_ON_WAKE_CHECK: {
+         int64_t eos_ms = (int64_t)(g_config.vad.end_of_speech_duration * 1000.0f);
+         if (ctx->last_speech_ms > 0 && (now - ctx->last_speech_ms) >= eos_ms) {
+            /* Wall-clock end-of-speech. The per-frame VAD check (process_audio)
+             * cannot fire this when the client uses Opus DTX and stops sending
+             * frames during silence — no frame arrives, so the per-frame check
+             * never runs, and end-of-speech is deferred until the next stray
+             * frame (erratic: 1-20s observed). This timer-driven path ends a DTX
+             * client's utterance on the dwell regardless of frame arrival. */
+            dispatch_wake_check(ctx, (ws_connection_t *)conn);
+         } else if (elapsed >= ALWAYS_ON_WAKE_CHECK_TIMEOUT_MS) {
+            /* Backstop — dispatch ASR with whatever audio we have instead of
              * discarding. The buffer may contain a valid wake word phrase. */
             OLOG_INFO("Always-on: WAKE_CHECK timeout (%lld ms), dispatching ASR",
                       (long long)elapsed);
             dispatch_wake_check(ctx, (ws_connection_t *)conn);
          }
          break;
+      }
 
       case ALWAYS_ON_WAKE_PENDING:
          if (elapsed >= ALWAYS_ON_WAKE_PENDING_TIMEOUT_MS) {
@@ -1018,14 +1049,21 @@ bool always_on_check_timeouts(always_on_ctx_t *ctx, void *conn) {
          }
          break;
 
-      case ALWAYS_ON_RECORDING:
-         if (elapsed >= ALWAYS_ON_RECORDING_TIMEOUT_MS) {
+      case ALWAYS_ON_RECORDING: {
+         int64_t eos_ms = (int64_t)(g_config.vad.end_of_speech_duration * 1000.0f);
+         if (ctx->last_speech_ms > 0 && (now - ctx->last_speech_ms) >= eos_ms) {
+            /* Wall-clock end-of-speech (see WAKE_CHECK above) — fires for DTX
+             * clients whose silence starves the per-frame VAD check. */
+            send_always_on_state(ctx->wsi, "processing");
+            dispatch_cmd_transcribe(ctx, (ws_connection_t *)conn);
+         } else if (elapsed >= ALWAYS_ON_RECORDING_TIMEOUT_MS) {
             OLOG_WARNING("Always-on: RECORDING timeout (%lld ms), dispatching ASR",
                          (long long)elapsed);
             send_always_on_state(ctx->wsi, "processing");
             dispatch_cmd_transcribe(ctx, (ws_connection_t *)conn);
          }
          break;
+      }
 
       case ALWAYS_ON_PROCESSING:
          if (elapsed >= ALWAYS_ON_PROCESSING_TIMEOUT_MS) {

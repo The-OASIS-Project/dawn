@@ -76,7 +76,8 @@
                                   # Env: DAWN_VAD_SPEECH_THRESHOLD_TTS
 # silence_threshold = 0.30        # Below this probability = silence
                                   # Env: DAWN_VAD_SILENCE_THRESHOLD
-# end_of_speech_duration = 1.2    # Seconds of silence to end recording
+# end_of_speech_duration = 1.0    # Seconds of silence to end recording (local
+                                  # mic AND remote WebUI always-on)
                                   # Env: DAWN_VAD_END_OF_SPEECH_DURATION
 # max_recording_duration = 30.0   # Maximum recording length in seconds
                                   # Env: DAWN_VAD_MAX_RECORDING_DURATION
