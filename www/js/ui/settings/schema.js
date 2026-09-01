@@ -342,6 +342,16 @@
                step: 1,
                hint: 'Suppress duplicate responses when two devices hear one command within this window (0 disables; default: 4)',
             },
+            audio_ctx_floor: {
+               type: 'number',
+               label: 'Whisper Audio Context Floor',
+               // min/max mirror ASR_AUDIO_CTX_FLOOR_* in include/config/dawn_config.h
+               min: 0,
+               max: 1500,
+               step: 64,
+               advanced: true,
+               hint: 'Scale Whisper’s encoder context to the utterance length (faster transcription on short commands) with this token floor. 0 disables (full 1500 = default behavior). 768 is validated safe on base.en + small.en; lower risks accuracy on smaller models.',
+            },
             disambiguation_hint: {
                type: 'textarea',
                label: 'Voice-Input Disambiguation Hint',

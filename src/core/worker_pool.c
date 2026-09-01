@@ -148,6 +148,11 @@ int worker_pool_init(asr_engine_type_t engine_type, const char *model_path) {
          goto cleanup_workers;
       }
 
+      /* E1: scale Whisper's encoder audio context to the utterance length with
+       * the configured floor (0 = disabled → full 1500 window). */
+      asr_set_audio_ctx(w->asr_ctx,
+                        g_config.asr.audio_ctx_floor > 0 ? -g_config.asr.audio_ctx_floor : 0);
+
       // Spawn worker thread
       if (pthread_create(&w->thread, NULL, worker_thread, w) != 0) {
          OLOG_ERROR("Worker %d: Failed to create thread", i);

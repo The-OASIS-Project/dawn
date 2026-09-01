@@ -99,6 +99,7 @@ void config_set_defaults(dawn_config_t *config) {
    SAFE_COPY(config->asr.model, "base.en");
    SAFE_COPY(config->asr.models_path, "models/whisper.cpp");
    config->asr.dedup_window_sec = ASR_DEDUP_WINDOW_SEC_DEFAULT;
+   config->asr.audio_ctx_floor = ASR_AUDIO_CTX_FLOOR_DEFAULT;
    /* disambiguation_hint left empty by the memset above → built-in default
     * (DEFAULT_ASR_DISAMBIGUATION_HINT) is used at prompt-build time. */
 

@@ -190,10 +190,20 @@ typedef struct {
 #define ASR_DEDUP_WINDOW_SEC_DEFAULT 4
 #define ASR_DEDUP_WINDOW_SEC_MAX 60
 
+/* Whisper encoder audio-context floor (E1 latency work). The encoder normally
+ * processes a full 30s window (audio_ctx = 1500) regardless of clip length; when
+ * this is > 0, DAWN scales audio_ctx to the actual utterance length with this
+ * value as the floor, cutting inference time on short commands. 0 disables (full
+ * 1500). 768 is validated safe (<=+1pp WER) on both base.en and small.en; going
+ * lower risks hallucination on smaller models (base.en craters at 256). */
+#define ASR_AUDIO_CTX_FLOOR_DEFAULT 768
+#define ASR_AUDIO_CTX_FLOOR_MAX 1500
+
 typedef struct {
    char model[CONFIG_NAME_MAX];       /* Whisper: "tiny", "base", "small", "medium" */
    char models_path[CONFIG_PATH_MAX]; /* Path to model files */
    int dedup_window_sec;              /* Cross-device utterance dedup window (s); 0 disables */
+   int audio_ctx_floor; /* Whisper audio_ctx auto-scale floor; 0 disables (full 1500) */
    /* Prompt hint injected on voice-input surfaces warning the LLM that its
     * input was speech-transcribed and may contain homophone/mis-recognition
     * errors to interpret from context.  Empty = built-in default

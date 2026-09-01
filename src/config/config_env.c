@@ -195,6 +195,7 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
    ENV_STRING("DAWN_ASR_MODEL", config->asr.model);
    ENV_STRING("DAWN_ASR_MODELS_PATH", config->asr.models_path);
    ENV_INT("DAWN_ASR_DEDUP_WINDOW_SEC", config->asr.dedup_window_sec);
+   ENV_INT("DAWN_ASR_AUDIO_CTX_FLOOR", config->asr.audio_ctx_floor);
    ENV_STRING("DAWN_ASR_DISAMBIGUATION_HINT", config->asr.disambiguation_hint);
 
    /* [tts] */
@@ -366,6 +367,7 @@ void config_dump(const dawn_config_t *config) {
    printf("  model = \"%s\"\n", config->asr.model);
    printf("  models_path = \"%s\"\n", config->asr.models_path);
    printf("  dedup_window_sec = %d\n", config->asr.dedup_window_sec);
+   printf("  audio_ctx_floor = %d\n", config->asr.audio_ctx_floor);
    printf("  disambiguation_hint = %s\n",
           config->asr.disambiguation_hint[0] ? "(custom)" : "(built-in default)");
 
@@ -703,6 +705,9 @@ void config_dump_settings(const dawn_config_t *config,
    PRINT_SETTING_INT("dedup_window_sec", config->asr.dedup_window_sec, "DAWN_ASR_DEDUP_WINDOW_SEC",
                      detect_source_int(config->asr.dedup_window_sec, defaults.asr.dedup_window_sec,
                                        "DAWN_ASR_DEDUP_WINDOW_SEC"));
+   PRINT_SETTING_INT("audio_ctx_floor", config->asr.audio_ctx_floor, "DAWN_ASR_AUDIO_CTX_FLOOR",
+                     detect_source_int(config->asr.audio_ctx_floor, defaults.asr.audio_ctx_floor,
+                                       "DAWN_ASR_AUDIO_CTX_FLOOR"));
    /* Prose directive: report set/default rather than dumping multi-line text. */
    printf("  disambiguation_hint = %s\n",
           config->asr.disambiguation_hint[0] ? "(custom)" : "(built-in default)");
@@ -989,6 +994,7 @@ void config_dump_toml(const dawn_config_t *config) {
    printf("model = \"%s\"\n", config->asr.model);
    printf("models_path = \"%s\"\n", config->asr.models_path);
    printf("dedup_window_sec = %d\n", config->asr.dedup_window_sec);
+   printf("audio_ctx_floor = %d\n", config->asr.audio_ctx_floor);
 
    printf("\n[tts]\n");
    printf("models_path = \"%s\"\n", config->tts.models_path);
@@ -1143,6 +1149,7 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object_object_add(asr, "models_path", json_object_new_string(config->asr.models_path));
    json_object_object_add(asr, "dedup_window_sec",
                           json_object_new_int(config->asr.dedup_window_sec));
+   json_object_object_add(asr, "audio_ctx_floor", json_object_new_int(config->asr.audio_ctx_floor));
    json_object_object_add(asr, "disambiguation_hint",
                           json_object_new_string(config->asr.disambiguation_hint));
    json_object_object_add(root, "asr", asr);
@@ -2157,6 +2164,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    write_toml_string(fp, "model", config->asr.model);
    write_toml_string(fp, "models_path", config->asr.models_path);
    fprintf(fp, "dedup_window_sec = %d\n", config->asr.dedup_window_sec);
+   fprintf(fp, "audio_ctx_floor = %d\n", config->asr.audio_ctx_floor);
    write_toml_string_multiline(fp, "disambiguation_hint", config->asr.disambiguation_hint);
 
    fprintf(fp, "\n[tts]\n");

@@ -367,13 +367,22 @@ static void parse_asr(toml_table_t *table, asr_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = { "model", "models_path", "dedup_window_sec",
-                                             "disambiguation_hint", NULL };
+   static const char *const known_keys[] = {
+      "model", "models_path", "dedup_window_sec", "audio_ctx_floor", "disambiguation_hint", NULL
+   };
    warn_unknown_keys(table, "asr", known_keys);
 
    PARSE_STRING(table, "model", config->model);
    PARSE_STRING(table, "models_path", config->models_path);
    PARSE_INT(table, "dedup_window_sec", config->dedup_window_sec);
+   PARSE_INT(table, "audio_ctx_floor", config->audio_ctx_floor);
+   /* 0 disables; otherwise clamp into [0, 1500] (1500 = full window = effectively off). */
+   if (config->audio_ctx_floor < 0) {
+      config->audio_ctx_floor = 0;
+   }
+   if (config->audio_ctx_floor > ASR_AUDIO_CTX_FLOOR_MAX) {
+      config->audio_ctx_floor = ASR_AUDIO_CTX_FLOOR_MAX;
+   }
    PARSE_STRING(table, "disambiguation_hint", config->disambiguation_hint);
 }
 

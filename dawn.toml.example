@@ -111,6 +111,14 @@
                                   # Default ASR_DEDUP_WINDOW_SEC_DEFAULT, max
                                   # ASR_DEDUP_WINDOW_SEC_MAX (dawn_config.h).
                                   # Runtime-tunable. Env: DAWN_ASR_DEDUP_WINDOW_SEC
+# audio_ctx_floor = 768           # Scale Whisper's encoder audio context to the
+                                  # utterance length (faster transcription on short
+                                  # commands) with this token floor. 0 disables
+                                  # (full 1500-token / 30s window = default Whisper).
+                                  # 768 validated safe (<=+1pp WER) on base.en AND
+                                  # small.en; lower risks hallucination on smaller
+                                  # models (base.en craters at 256). Applies at ASR
+                                  # init (next daemon start). Env: DAWN_ASR_AUDIO_CTX_FLOOR
 # disambiguation_hint = ""        # Prompt hint injected on voice-input surfaces
                                   # (satellites, local mic, WebUI voice turns) warning
                                   # the LLM its input was speech-transcribed and may

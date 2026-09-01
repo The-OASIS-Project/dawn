@@ -112,6 +112,20 @@ static void test_jobs_roundtrip(void) {
    TEST_ASSERT_EQUAL_INT(17, g_read.jobs.event_retention_days);
 }
 
+/* --- [asr] ----------------------------------------------------------------- */
+
+static void test_asr_roundtrip(void) {
+   /* audio_ctx_floor is the E1 knob; a non-default in-range value must survive
+    * the write/re-parse (the silent-deletion guard for this field). */
+   g_written.asr.audio_ctx_floor = 512;
+   g_written.asr.dedup_window_sec = 7;
+
+   round_trip();
+
+   TEST_ASSERT_EQUAL_INT(512, g_read.asr.audio_ctx_floor);
+   TEST_ASSERT_EQUAL_INT(7, g_read.asr.dedup_window_sec);
+}
+
 /* --- [research] ------------------------------------------------------------ */
 
 static void test_research_roundtrip(void) {
@@ -431,6 +445,7 @@ static void test_control_characters_survive_the_round_trip(void) {
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_jobs_roundtrip);
+   RUN_TEST(test_asr_roundtrip);
    RUN_TEST(test_research_roundtrip);
    RUN_TEST(test_event_chunk_cap_has_a_floor);
    RUN_TEST(test_scheduler_roundtrip);

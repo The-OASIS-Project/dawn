@@ -415,6 +415,10 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
        * to the validated range here before applying/persisting. */
       CONFIG_CLAMP(config->asr.dedup_window_sec, 0, ASR_DEDUP_WINDOW_SEC_MAX);
       utterance_dedup_set_window(config->asr.dedup_window_sec); /* live retune */
+      JSON_TO_CONFIG_INT(section, "audio_ctx_floor", config->asr.audio_ctx_floor);
+      CONFIG_CLAMP(config->asr.audio_ctx_floor, 0, ASR_AUDIO_CTX_FLOOR_MAX);
+      /* Applied to ASR contexts at their next init; a live change takes effect on
+       * the next daemon start (contexts are long-lived in the worker pool). */
       JSON_TO_CONFIG_STR(section, "disambiguation_hint", config->asr.disambiguation_hint);
    }
 

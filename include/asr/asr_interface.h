@@ -84,6 +84,18 @@ typedef struct asr_context asr_context_t;
 asr_context_t *asr_init(asr_engine_type_t engine_type, const char *model_path, int sample_rate);
 
 /**
+ * @brief Override the Whisper encoder audio-context size (E1 latency work)
+ *
+ * Applied on each subsequent finalize(). 0 = model default (30s window / 1500);
+ * >0 = fixed value; <0 = auto-scale to the utterance length. No-op for Vosk.
+ * See asr_whisper_set_audio_ctx().
+ *
+ * @param ctx ASR context (may be NULL — ignored)
+ * @param audio_ctx Override mode/value per above
+ */
+void asr_set_audio_ctx(asr_context_t *ctx, int audio_ctx);
+
+/**
  * @brief Process audio and get partial result
  *
  * Feeds audio data to ASR engine and returns partial transcription.

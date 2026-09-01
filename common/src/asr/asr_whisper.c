@@ -56,10 +56,53 @@ struct whisper_asr_context {
    /* Whisper processing parameters */
    struct whisper_full_params wparams;
 
+   /* Encoder audio-context override (E1 latency work). 0 = model default (1500 =
+    * a full 30s window regardless of clip length); >0 = fixed value; <0 = auto
+    * (scale to the utterance length so a short command doesn't pay for 30s of
+    * encoder). Set via asr_whisper_set_audio_ctx(); applied per whisper_full(). */
+   int audio_ctx_override;
+
    /* Optional timing callback */
    asr_timing_callback_t timing_callback;
    void *timing_callback_user_data;
 };
+
+/* Encoder audio-context tokens per second of 16kHz audio for base/small models
+ * (1500 ctx / 30s). Used to scale audio_ctx to the actual utterance length. */
+#define WHISPER_AUDIO_CTX_PER_SEC 50
+#define WHISPER_AUDIO_CTX_MAX 1500
+/* Safety headroom added on top of the audio's own token need so a slightly
+ * under-counted length never starves the encoder. The floor itself is supplied
+ * by the caller (config default ASR_AUDIO_CTX_FLOOR_DEFAULT = 768), not here. */
+#define WHISPER_AUDIO_CTX_MARGIN 32
+
+/* Resolve the audio_ctx to hand whisper_full() for a buffer of `n_samples` at
+ * `sample_rate`, honoring the override mode. Returns 0 (= whisper's own default)
+ * when no override is set, so existing behavior is byte-identical unless a caller
+ * opts in. */
+static int whisper_resolve_audio_ctx(int override, size_t n_samples, int sample_rate) {
+   if (override == 0 || sample_rate <= 0) {
+      return 0; /* model default (1500) */
+   }
+   if (override > 0) {
+      return override; /* fixed (diagnostic only — must be >= the clip length) */
+   }
+   /* override < 0: auto-scale to the clip length. The floor is encoded as
+    * -override (e.g. -384 => auto with a 384-token floor) so the benchmark can
+    * sweep floors without new plumbing; production supplies the config default
+    * (ASR_AUDIO_CTX_FLOOR_DEFAULT = 768). Auto NEVER goes below the audio's own
+    * token need + margin, which is why it is safe where a fixed value is not. */
+   int floor = -override;
+   double seconds = (double)n_samples / (double)sample_rate;
+   int ctx = (int)(seconds * WHISPER_AUDIO_CTX_PER_SEC) + WHISPER_AUDIO_CTX_MARGIN;
+   if (ctx < floor) {
+      ctx = floor;
+   }
+   if (ctx > WHISPER_AUDIO_CTX_MAX) {
+      ctx = WHISPER_AUDIO_CTX_MAX;
+   }
+   return ctx;
+}
 
 /**
  * @brief Convert int16_t PCM to float PCM
@@ -153,6 +196,9 @@ whisper_asr_context_t *asr_whisper_init(const asr_whisper_config_t *config) {
    wctx->timing_callback = NULL;
    wctx->timing_callback_user_data = NULL;
 
+   /* Default: no audio_ctx override → whisper's own default (full 30s window). */
+   wctx->audio_ctx_override = 0;
+
    DAWN_LOG_INFO("asr_whisper_init: Initialized (model: %s, gpu: %s, threads: %d)",
                  config->model_path, config->use_gpu ? "yes" : "no", wctx->wparams.n_threads);
 
@@ -166,6 +212,12 @@ void asr_whisper_set_timing_callback(whisper_asr_context_t *ctx,
       return;
    ctx->timing_callback = callback;
    ctx->timing_callback_user_data = user_data;
+}
+
+void asr_whisper_set_audio_ctx(whisper_asr_context_t *ctx, int audio_ctx) {
+   if (!ctx)
+      return;
+   ctx->audio_ctx_override = audio_ctx;
 }
 
 /**
@@ -244,6 +296,12 @@ asr_whisper_result_t *asr_whisper_finalize(whisper_asr_context_t *ctx) {
    struct timeval start, end;
    gettimeofday(&start, NULL);
 
+   /* Scale/override the encoder audio context for this utterance (E1). Returns 0
+    * (whisper's own default) unless a caller opted in, so this is a no-op on the
+    * default path. */
+   ctx->wparams.audio_ctx = whisper_resolve_audio_ctx(ctx->audio_ctx_override, ctx->buffer_size,
+                                                      ctx->sample_rate);
+
    /* Run Whisper inference */
    int ret = whisper_full(ctx->ctx, ctx->wparams, ctx->audio_buffer, ctx->buffer_size);
    if (ret != 0) {
@@ -315,8 +373,13 @@ asr_whisper_result_t *asr_whisper_finalize(whisper_asr_context_t *ctx) {
    double audio_duration = (double)ctx->buffer_size / ctx->sample_rate * 1000.0;
    double rtf = (audio_duration > 0) ? processing_time / audio_duration : 0.0;
 
-   DAWN_LOG_INFO("asr_whisper_finalize: \"%s\" (%.1fms, RTF: %.3f)",
-                 result->text ? result->text : "", processing_time, rtf);
+   /* Effective encoder window used this utterance (E1). wparams.audio_ctx==0 means
+    * whisper's own default, i.e. the full WHISPER_AUDIO_CTX_MAX window; report that
+    * as the concrete number so the log shows what actually ran (768 scaled, 1500
+    * disabled) rather than an ambiguous 0. */
+   int eff_audio_ctx = ctx->wparams.audio_ctx ? ctx->wparams.audio_ctx : WHISPER_AUDIO_CTX_MAX;
+   DAWN_LOG_INFO("asr_whisper_finalize: \"%s\" (%.1fms, RTF: %.3f, audio_ctx: %d)",
+                 result->text ? result->text : "", processing_time, rtf, eff_audio_ctx);
 
    if (ctx->timing_callback) {
       ctx->timing_callback(processing_time, rtf, ctx->timing_callback_user_data);

@@ -2144,6 +2144,10 @@ int main(int argc, char *argv[]) {
       return 1;
    }
 
+   /* E1: scale Whisper's encoder audio context to the utterance length (faster
+    * transcription) with the configured floor. 0 = disabled (full 1500 window). */
+   asr_set_audio_ctx(asr_ctx, g_config.asr.audio_ctx_floor > 0 ? -g_config.asr.audio_ctx_floor : 0);
+
    // Initialize chunking manager (Whisper only, persistent lifecycle)
    // Only if chunking is enabled in config
    chunking_manager_t *chunk_mgr = NULL;
