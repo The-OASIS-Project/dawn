@@ -72,6 +72,18 @@ static int64_t now_ms(void) {
    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+/* End-of-speech reached on the wall clock: the dwell (from [vad]
+ * end_of_speech_duration) has elapsed since the last speech frame. Shared by the
+ * per-frame VAD path (always_on_process_audio) and the timer path
+ * (always_on_check_timeouts) so the dwell logic cannot drift between them.
+ * last_speech_ms == 0 means "no speech seen yet this window" (e.g. a freshly-
+ * entered RECORDING, before the first command word), which correctly reads as
+ * not-yet-reached — do not remove that guard. */
+static inline bool always_on_eos_reached(const always_on_ctx_t *ctx, int64_t now) {
+   const int64_t eos_ms = (int64_t)(g_config.vad.end_of_speech_duration * 1000.0f);
+   return ctx->last_speech_ms > 0 && (now - ctx->last_speech_ms) >= eos_ms;
+}
+
 static void set_state(always_on_ctx_t *ctx, always_on_state_t new_state) {
    always_on_state_t old = atomic_load(&ctx->state);
    atomic_store(&ctx->state, new_state);
@@ -931,10 +943,10 @@ int always_on_process_audio(always_on_ctx_t *ctx,
    now = now_ms();
    size_t vad_offset = 0;
 
-   /* Speech gate + end-of-speech dwell from the shared [vad] config (was a
-    * hardcoded 0.5 / 1500ms) so remote always-on matches the local mic. */
+   /* Speech gate from the shared [vad] config (was a hardcoded 0.5) so remote
+    * always-on matches the local mic. The end-of-speech dwell is applied through
+    * always_on_eos_reached(), shared with the timer path. */
    const float speech_threshold = g_config.vad.speech_threshold;
-   const int64_t end_of_speech_ms = (int64_t)(g_config.vad.end_of_speech_duration * 1000.0f);
 
    while (vad_offset + VAD_SAMPLE_SIZE <= vad_pcm_samples) {
       float speech_prob = vad_silero_process(ctx->vad_ctx, vad_input + vad_offset, VAD_SAMPLE_SIZE);
@@ -959,7 +971,7 @@ int always_on_process_audio(always_on_ctx_t *ctx,
             }
 
             /* Check if speech ended (silence exceeds pause threshold) */
-            if (speech_prob < speech_threshold && (now - ctx->last_speech_ms) >= end_of_speech_ms) {
+            if (speech_prob < speech_threshold && always_on_eos_reached(ctx, now)) {
                /* Speech ended — dispatch ASR to worker thread */
                dispatch_wake_check(ctx, (ws_connection_t *)conn_ptr);
             }
@@ -971,8 +983,7 @@ int always_on_process_audio(always_on_ctx_t *ctx,
                ctx->last_speech_ms = now;
             }
             /* End-of-speech: dispatch ASR to worker thread (non-blocking) */
-            if (speech_prob < speech_threshold && ctx->last_speech_ms > 0 &&
-                (now - ctx->last_speech_ms) >= end_of_speech_ms) {
+            if (speech_prob < speech_threshold && always_on_eos_reached(ctx, now)) {
                send_always_on_state(ctx->wsi, "processing");
                dispatch_cmd_transcribe(ctx, (ws_connection_t *)conn_ptr);
             }
@@ -1020,9 +1031,8 @@ bool always_on_check_timeouts(always_on_ctx_t *ctx, void *conn) {
    pthread_mutex_lock(&ctx->mutex);
 
    switch (state) {
-      case ALWAYS_ON_WAKE_CHECK: {
-         int64_t eos_ms = (int64_t)(g_config.vad.end_of_speech_duration * 1000.0f);
-         if (ctx->last_speech_ms > 0 && (now - ctx->last_speech_ms) >= eos_ms) {
+      case ALWAYS_ON_WAKE_CHECK:
+         if (always_on_eos_reached(ctx, now)) {
             /* Wall-clock end-of-speech. The per-frame VAD check (process_audio)
              * cannot fire this when the client uses Opus DTX and stops sending
              * frames during silence — no frame arrives, so the per-frame check
@@ -1038,7 +1048,6 @@ bool always_on_check_timeouts(always_on_ctx_t *ctx, void *conn) {
             dispatch_wake_check(ctx, (ws_connection_t *)conn);
          }
          break;
-      }
 
       case ALWAYS_ON_WAKE_PENDING:
          if (elapsed >= ALWAYS_ON_WAKE_PENDING_TIMEOUT_MS) {
@@ -1053,8 +1062,7 @@ bool always_on_check_timeouts(always_on_ctx_t *ctx, void *conn) {
          break;
 
       case ALWAYS_ON_RECORDING: {
-         int64_t eos_ms = (int64_t)(g_config.vad.end_of_speech_duration * 1000.0f);
-         if (ctx->last_speech_ms > 0 && (now - ctx->last_speech_ms) >= eos_ms) {
+         if (always_on_eos_reached(ctx, now)) {
             /* Wall-clock end-of-speech (see WAKE_CHECK above) — fires for DTX
              * clients whose silence starves the per-frame VAD check. */
             send_always_on_state(ctx->wsi, "processing");
