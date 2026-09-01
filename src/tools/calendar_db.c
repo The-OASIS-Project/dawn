@@ -95,11 +95,12 @@ static void row_to_calendar(sqlite3_stmt *stmt, calendar_calendar_t *c) {
    col_str(c->color, sizeof(c->color), stmt, 4);
    c->is_active = sqlite3_column_int(stmt, 5) != 0;
    col_str(c->ctag, sizeof(c->ctag), stmt, 6);
-   c->created_at = (time_t)sqlite3_column_int64(stmt, 7);
-   /* Column 8 (account read_only) only present in active_for_user JOIN query.
-    * Standard calendar queries return 8 columns; the JOIN query returns 9. */
+   col_str(c->sync_token, sizeof(c->sync_token), stmt, 7);
+   c->created_at = (time_t)sqlite3_column_int64(stmt, 8);
+   /* Column 9 (account read_only) only present in active_for_user JOIN query.
+    * Standard calendar queries return 9 columns; the JOIN query returns 10. */
    int col_count = sqlite3_column_count(stmt);
-   c->account_read_only = (col_count >= 9) ? (sqlite3_column_int(stmt, 8) != 0) : false;
+   c->account_read_only = (col_count >= 10) ? (sqlite3_column_int(stmt, 9) != 0) : false;
 }
 
 static void row_to_event(sqlite3_stmt *stmt, calendar_event_t *e) {
@@ -121,6 +122,7 @@ static void row_to_event(sqlite3_stmt *stmt, calendar_event_t *e) {
    const char *ical = (const char *)sqlite3_column_text(stmt, 14);
    e->raw_ical = ical ? strdup(ical) : NULL;
    e->last_synced = (time_t)sqlite3_column_int64(stmt, 15);
+   col_str(e->href, sizeof(e->href), stmt, 16);
 }
 
 static void row_to_occurrence(sqlite3_stmt *stmt, calendar_occurrence_t *o) {
@@ -454,6 +456,21 @@ int calendar_db_calendar_update_ctag(int64_t id, const char *ctag) {
    return result;
 }
 
+int calendar_db_calendar_update_sync_token(int64_t id, const char *sync_token) {
+   AUTH_DB_LOCK_OR_FAIL();
+
+   sqlite3_stmt *st = s_db.stmt_cal_cal_update_sync_token;
+   sqlite3_reset(st);
+   sqlite3_bind_text(st, 1, sync_token ? sync_token : "", -1, SQLITE_STATIC);
+   sqlite3_bind_int64(st, 2, id);
+
+   int result = (sqlite3_step(st) == SQLITE_DONE) ? 0 : 1;
+   sqlite3_reset(st);
+
+   AUTH_DB_UNLOCK();
+   return result;
+}
+
 int calendar_db_calendar_set_active(int64_t id, bool active) {
    AUTH_DB_LOCK_OR_FAIL();
 
@@ -534,6 +551,7 @@ int calendar_db_event_upsert(const calendar_event_t *event, int64_t *id_out) {
    else
       sqlite3_bind_null(st, 14);
    sqlite3_bind_int64(st, 15, (int64_t)event->last_synced);
+   sqlite3_bind_text(st, 16, event->href, -1, SQLITE_STATIC);
 
    int result = FAILURE;
    if (sqlite3_step(st) == SQLITE_DONE) {
@@ -594,6 +612,54 @@ int calendar_db_event_delete_by_calendar(int64_t calendar_id) {
    sqlite3_bind_int64(st, 1, calendar_id);
 
    int result = (sqlite3_step(st) == SQLITE_DONE) ? 0 : 1;
+   sqlite3_reset(st);
+
+   AUTH_DB_UNLOCK();
+   return result;
+}
+
+int calendar_db_event_delete_by_href(int64_t calendar_id, const char *href, int *deleted_out) {
+   if (deleted_out)
+      *deleted_out = 0;
+   if (!href || !href[0])
+      return 1; /* never match the empty-href sentinel used by un-round-tripped rows */
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   sqlite3_stmt *st = s_db.stmt_cal_evt_delete_by_href;
+   sqlite3_reset(st);
+   sqlite3_bind_int64(st, 1, calendar_id);
+   sqlite3_bind_text(st, 2, href, -1, SQLITE_STATIC);
+
+   int result = (sqlite3_step(st) == SQLITE_DONE) ? 0 : 1;
+   if (result == 0 && deleted_out)
+      *deleted_out = sqlite3_changes(s_db.db);
+   sqlite3_reset(st);
+
+   AUTH_DB_UNLOCK();
+   return result;
+}
+
+int calendar_db_event_prune_window_stale(int64_t calendar_id,
+                                         time_t pass_start,
+                                         time_t range_start,
+                                         time_t range_end,
+                                         int *deleted_out) {
+   if (deleted_out)
+      *deleted_out = 0;
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   sqlite3_stmt *st = s_db.stmt_cal_evt_prune_window_stale;
+   sqlite3_reset(st);
+   sqlite3_bind_int64(st, 1, calendar_id);
+   sqlite3_bind_int64(st, 2, (int64_t)pass_start);
+   sqlite3_bind_int64(st, 3, (int64_t)range_start);
+   sqlite3_bind_int64(st, 4, (int64_t)range_end);
+
+   int result = (sqlite3_step(st) == SQLITE_DONE) ? 0 : 1;
+   if (result == 0 && deleted_out)
+      *deleted_out = sqlite3_changes(s_db.db);
    sqlite3_reset(st);
 
    AUTH_DB_UNLOCK();

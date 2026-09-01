@@ -2068,7 +2068,8 @@ int auth_db_prepare_statements(void) {
 
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, account_id, caldav_path, display_name, color, "
-                           "is_active, ctag, created_at FROM calendar_calendars WHERE id = ?",
+                           "is_active, ctag, sync_token, created_at FROM calendar_calendars "
+                           "WHERE id = ?",
                            -1, &s_db.stmt_cal_cal_get, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare cal_cal_get failed: %s", sqlite3_errmsg(s_db.db));
@@ -2077,7 +2078,7 @@ int auth_db_prepare_statements(void) {
 
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, account_id, caldav_path, display_name, color, "
-                           "is_active, ctag, created_at FROM calendar_calendars "
+                           "is_active, ctag, sync_token, created_at FROM calendar_calendars "
                            "WHERE account_id = ? ORDER BY display_name",
                            -1, &s_db.stmt_cal_cal_list, NULL);
    if (rc != SQLITE_OK) {
@@ -2089,6 +2090,13 @@ int auth_db_prepare_statements(void) {
                            &s_db.stmt_cal_cal_update_ctag, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare cal_cal_update_ctag failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db, "UPDATE calendar_calendars SET sync_token = ? WHERE id = ?", -1,
+                           &s_db.stmt_cal_cal_update_sync_token, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare cal_cal_update_sync_token failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
@@ -2108,7 +2116,7 @@ int auth_db_prepare_statements(void) {
 
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT c.id, c.account_id, c.caldav_path, c.display_name, c.color, "
-                           "c.is_active, c.ctag, c.created_at, a.read_only "
+                           "c.is_active, c.ctag, c.sync_token, c.created_at, a.read_only "
                            "FROM calendar_calendars c "
                            "JOIN calendar_accounts a ON c.account_id = a.id "
                            "WHERE a.user_id = ? AND a.enabled = 1 AND c.is_active = 1 "
@@ -2123,8 +2131,8 @@ int auth_db_prepare_statements(void) {
        s_db.db,
        "INSERT OR REPLACE INTO calendar_events (calendar_id, uid, etag, summary, "
        "description, location, dtstart, dtend, duration_sec, all_day, "
-       "dtstart_date, dtend_date, rrule, raw_ical, last_synced) "
-       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+       "dtstart_date, dtend_date, rrule, raw_ical, last_synced, href) "
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
        -1, &s_db.stmt_cal_evt_upsert, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare cal_evt_upsert failed: %s", sqlite3_errmsg(s_db.db));
@@ -2134,7 +2142,8 @@ int auth_db_prepare_statements(void) {
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT e.id, e.calendar_id, e.uid, e.etag, e.summary, e.description, "
                            "e.location, e.dtstart, e.dtend, e.duration_sec, e.all_day, "
-                           "e.dtstart_date, e.dtend_date, e.rrule, e.raw_ical, e.last_synced "
+                           "e.dtstart_date, e.dtend_date, e.rrule, e.raw_ical, e.last_synced, "
+                           "e.href "
                            "FROM calendar_events e "
                            "JOIN calendar_calendars c ON e.calendar_id = c.id "
                            "JOIN calendar_accounts a ON c.account_id = a.id "
@@ -2156,6 +2165,27 @@ int auth_db_prepare_statements(void) {
                            &s_db.stmt_cal_evt_delete_by_cal, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare cal_evt_delete_by_cal failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "DELETE FROM calendar_events WHERE calendar_id = ? AND href = ?", -1,
+                           &s_db.stmt_cal_evt_delete_by_href, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare cal_evt_delete_by_href failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   /* In-window deletion reconcile: after a complete time-range fetch re-stamps every
+    * still-live in-window event's last_synced to the pass time, any in-window row NOT
+    * re-stamped is gone upstream. Keyed on last_synced (not href), so it prunes even
+    * pre-v82 empty-href ghosts, and never touches out-of-window or just-created rows. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "DELETE FROM calendar_events WHERE calendar_id = ? "
+                           "AND last_synced < ? AND dtstart >= ? AND dtstart < ?",
+                           -1, &s_db.stmt_cal_evt_prune_window_stale, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare cal_evt_prune_window_stale failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
@@ -2815,6 +2845,8 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_cal_cal_list);
    if (s_db.stmt_cal_cal_update_ctag)
       sqlite3_finalize(s_db.stmt_cal_cal_update_ctag);
+   if (s_db.stmt_cal_cal_update_sync_token)
+      sqlite3_finalize(s_db.stmt_cal_cal_update_sync_token);
    if (s_db.stmt_cal_cal_set_active)
       sqlite3_finalize(s_db.stmt_cal_cal_set_active);
    if (s_db.stmt_cal_cal_delete)
@@ -2829,6 +2861,10 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_cal_evt_delete);
    if (s_db.stmt_cal_evt_delete_by_cal)
       sqlite3_finalize(s_db.stmt_cal_evt_delete_by_cal);
+   if (s_db.stmt_cal_evt_delete_by_href)
+      sqlite3_finalize(s_db.stmt_cal_evt_delete_by_href);
+   if (s_db.stmt_cal_evt_prune_window_stale)
+      sqlite3_finalize(s_db.stmt_cal_evt_prune_window_stale);
    if (s_db.stmt_cal_occ_insert)
       sqlite3_finalize(s_db.stmt_cal_occ_insert);
    if (s_db.stmt_cal_occ_delete_for_event)

@@ -613,6 +613,84 @@ static void expand_rrule(int64_t event_id,
 }
 #endif /* HAVE_LIBICAL */
 
+/**
+ * RFC 6578 sync-collection reconcile for one calendar.
+ *
+ * Baselines the sync-token on first sight (empty stored token → server enumerates
+ * the whole collection and mints one) and, on subsequent runs, applies the
+ * server's explicit removals (members reported with a 404 status). The whole-
+ * collection retroactive prune is deliberately deferred (the in-window sentinel in
+ * calendar_service_sync_now covers events whose master dtstart is in-window); this
+ * path is what carries deletion detection OUT of the cache window — and also covers
+ * in-window recurring series whose master predates the window, which the sentinel's
+ * dtstart bound misses. Best-effort: any failure leaves the token untouched so the
+ * next pass retries, and the sentinel has already handled the master-in-window case.
+ */
+/* Placeholder stored in sync_token after a reconcile that produced no real RFC 6578
+ * token (server lacks sync-collection, or a baseline came back incomplete). Non-empty,
+ * so the ctag gate treats the calendar as reconciled and stops forcing a full fetch
+ * every cycle; treated as "no token" below so a later pass re-attempts the baseline. A
+ * real sync-token is a URI, so a leading control byte can never collide with one. */
+#define CALENDAR_SYNC_NONE_MARKER "\x01"
+
+static void sync_collection_reconcile(const calendar_calendar_t *cal, const caldav_auth_t *auth) {
+   /* Treat the placeholder as "no token" for the request. */
+   const bool have_real_token = (cal->sync_token[0] &&
+                                 strcmp(cal->sync_token, CALENDAR_SYNC_NONE_MARKER) != 0);
+   const char *token_in = have_real_token ? cal->sync_token : "";
+
+   caldav_sync_result_t sr = { 0 };
+   caldav_error_t err = caldav_sync_collection(cal->caldav_path, auth, token_in, &sr);
+
+   if (err == CALDAV_ERR_SYNC_TOKEN_INVALID) {
+      /* Stale/expired token: clear it so the next pass re-baselines from empty. */
+      OLOG_INFO("calendar: sync-token stale for '%s' — re-baselining next pass", cal->display_name);
+      calendar_db_calendar_update_sync_token(cal->id, "");
+      caldav_sync_result_free(&sr);
+      return;
+   }
+   if (err != CALDAV_OK) {
+      /* Network, 5xx, or a server without sync-collection. Warn only if we had a real
+       * token (a failed initial baseline on an unsupported server is expected). If we've
+       * never obtained a token, record the placeholder so the ctag gate stops forcing a
+       * full fetch every cycle — a future ctag change re-enters and retries the baseline.
+       * Correctness is unaffected: the in-window sentinel already ran this pass. */
+      if (have_real_token)
+         OLOG_WARNING("calendar: sync-collection failed for '%s': %s", cal->display_name,
+                      caldav_strerror(err));
+      else if (!cal->sync_token[0])
+         calendar_db_calendar_update_sync_token(cal->id, CALENDAR_SYNC_NONE_MARKER);
+      caldav_sync_result_free(&sr);
+      return;
+   }
+
+   /* Apply explicit removals — a 404 is definitive, so this is safe even when the
+    * enumeration was incomplete (paging capped). */
+   int removed = 0;
+   for (int i = 0; i < sr.count; i++) {
+      if (!sr.changes[i].gone)
+         continue;
+      int d = 0;
+      if (calendar_db_event_delete_by_href(cal->id, sr.changes[i].href, &d) == 0)
+         removed += d;
+   }
+   if (removed > 0)
+      OLOG_INFO("calendar: sync-collection removed %d deleted event(s) from '%s'", removed,
+                cal->display_name);
+
+   if (sr.complete && sr.sync_token[0]) {
+      /* Real token obtained — persist it (replaces empty or the placeholder). */
+      if (strcmp(sr.sync_token, cal->sync_token) != 0)
+         calendar_db_calendar_update_sync_token(cal->id, sr.sync_token);
+   } else if (!cal->sync_token[0]) {
+      /* Succeeded but incomplete (no token minted): record the placeholder so we don't
+       * full-fetch every cycle; a future ctag change retries the baseline. */
+      calendar_db_calendar_update_sync_token(cal->id, CALENDAR_SYNC_NONE_MARKER);
+   }
+
+   caldav_sync_result_free(&sr);
+}
+
 int calendar_service_sync_now(int64_t account_id) {
    calendar_account_t acct;
    if (calendar_db_account_get(account_id, &acct) != 0)
@@ -652,8 +730,16 @@ int calendar_service_sync_now(int64_t account_id) {
          continue;
       }
 
-      if (new_ctag[0] && strcmp(new_ctag, cals[i].ctag) == 0) {
-         continue; /* No changes */
+      /* Skip only when the ctag is unchanged AND this calendar has been reconciled at
+       * least once (sync_token non-empty — a real RFC 6578 token, or the
+       * CALENDAR_SYNC_NONE_MARKER placeholder for a server without sync-collection). An
+       * empty sync_token means we've never run the deletion reconcile — force one full
+       * pass so the sentinel clears any pre-existing upstream-deleted ghost and (where
+       * supported) sync-collection mints its baseline token. Deletions GOING FORWARD
+       * move the ctag, so the normal path still catches them; this only closes the
+       * one-time gap for events deleted before this code existed. */
+      if (new_ctag[0] && strcmp(new_ctag, cals[i].ctag) == 0 && cals[i].sync_token[0]) {
+         continue; /* No changes, already reconciled */
       }
 
       /* Fetch events */
@@ -673,6 +759,7 @@ int calendar_service_sync_now(int64_t account_id) {
          evt.calendar_id = cals[i].id;
          snprintf(evt.uid, sizeof(evt.uid), "%s", ce->uid);
          snprintf(evt.etag, sizeof(evt.etag), "%s", ce->etag);
+         snprintf(evt.href, sizeof(evt.href), "%s", ce->href);
          snprintf(evt.summary, sizeof(evt.summary), "%s", ce->summary);
          snprintf(evt.description, sizeof(evt.description), "%s", ce->description);
          snprintf(evt.location, sizeof(evt.location), "%s", ce->location);
@@ -706,7 +793,32 @@ int calendar_service_sync_now(int64_t account_id) {
 
       caldav_event_list_free(&events);
 
-      /* Update ctag */
+      /* Deletion reconcile for events whose MASTER dtstart lands in [range_start,
+       * range_end). The fetch above re-stamped last_synced=now on every event the
+       * server still returns in that range; any such row NOT re-stamped is gone
+       * upstream. Runs only here — after a SUCCESSFUL, complete fetch (a truncated/
+       * failed fetch `continue`d above; caldav_fetch_events is all-or-error, never a
+       * silent partial) — so we never prune on partial data. Keyed on last_synced, so
+       * it also clears pre-v82 empty-href ghosts, and its dtstart bound never touches
+       * out-of-window or just-created rows.
+       *
+       * Coverage limit: a recurring series whose MASTER dtstart predates range_start
+       * but whose OCCURRENCES fall in-window is NOT caught here (its dtstart is out of
+       * bound). On a sync-collection server that gap is closed by the 404 path below;
+       * on a server without sync-collection it relies on the deferred whole-collection
+       * prune (Phase 4). An occurrence-keyed sentinel would close it directly. */
+      int pruned = 0;
+      calendar_db_event_prune_window_stale(cals[i].id, now, range_start, range_end, &pruned);
+      if (pruned > 0)
+         OLOG_INFO("calendar: pruned %d upstream-deleted event(s) from '%s'", pruned,
+                   cals[i].display_name);
+
+      /* RFC 6578 sync-collection: mint/advance the token and apply the server's
+       * explicit out-of-window removals (404 hrefs). Independent of the sentinel
+       * above; degrades silently on servers that don't support sync-collection. */
+      sync_collection_reconcile(&cals[i], &auth);
+
+      /* Update ctag last, once the calendar's events are fully reconciled. */
       if (new_ctag[0])
          calendar_db_calendar_update_ctag(cals[i].id, new_ctag);
 
@@ -1123,6 +1235,15 @@ int calendar_service_add(int user_id,
    evt.calendar_id = cals[target].id;
    snprintf(evt.uid, sizeof(evt.uid), "%s", uid);
    snprintf(evt.etag, sizeof(evt.etag), "%s", etag);
+   /* Mirror the resource path caldav_create_event PUT to (calendar_url + uid + ".ics")
+    * so the row carries a non-empty href immediately; the next full fetch overwrites it
+    * with the server's canonical href. The Phase-3 prune gates on last_synced, so an
+    * exact match here is not safety-critical — this only sharpens incremental mapping. */
+   {
+      size_t cl = strlen(cals[target].caldav_path);
+      const char *sep = (cl > 0 && cals[target].caldav_path[cl - 1] == '/') ? "" : "/";
+      snprintf(evt.href, sizeof(evt.href), "%s%s%s.ics", cals[target].caldav_path, sep, uid);
+   }
    snprintf(evt.summary, sizeof(evt.summary), "%s", summary);
    if (description)
       snprintf(evt.description, sizeof(evt.description), "%s", description);
@@ -1310,6 +1431,7 @@ int calendar_service_update(int user_id,
 
    /* Update cache */
    snprintf(evt.etag, sizeof(evt.etag), "%s", new_etag);
+   snprintf(evt.href, sizeof(evt.href), "%s", href); /* keep href in step with the PUT target */
    free(evt.raw_ical);
    evt.raw_ical = (char *)ical; /* temp pointer, copied by upsert */
    evt.last_synced = now;

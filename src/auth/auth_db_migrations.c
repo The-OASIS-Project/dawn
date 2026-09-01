@@ -2949,6 +2949,49 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       errmsg = NULL;
    }
 
+   /* v82: RFC 6578 sync-collection support — calendar_events.href (the removal key:
+    * a deleted resource reports its href with a 404 status but no UID) and
+    * calendar_calendars.sync_token (the WebDAV sync baseline).  Base SCHEMA_SQL
+    * already carries both columns; these ALTERs back-fill an existing DB.  Gated
+    * `< 82` so both run on fresh installs too (base added the columns, so the
+    * duplicate-column error is expected + tolerated — mirrors the v76 pattern).
+    * The href index goes ONLY here (never in SCHEMA_SQL, which runs before this
+    * ALTER on an existing DB → would fail "no such column: href"); the `< 82` gate
+    * makes it reachable by both fresh (column from base) and migrated (column from
+    * the ALTER above) paths. */
+   bool v82_ok = (current_version >= 82);
+   if (current_version < 82) {
+      v82_ok = true;
+      static const char *const v82_alters[] = {
+         "ALTER TABLE calendar_events ADD COLUMN href TEXT DEFAULT ''",
+         "ALTER TABLE calendar_calendars ADD COLUMN sync_token TEXT DEFAULT ''",
+      };
+      for (size_t i = 0; i < sizeof(v82_alters) / sizeof(v82_alters[0]); i++) {
+         rc = sqlite3_exec(s_db.db, v82_alters[i], NULL, NULL, &errmsg);
+         bool duplicate = (errmsg && strstr(errmsg, "duplicate column"));
+         if (rc != SQLITE_OK && !duplicate) {
+            OLOG_ERROR("auth_db: v82 migration (sync-collection) failed: %s",
+                       errmsg ? errmsg : "unknown");
+            v82_ok = false;
+         }
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      }
+      if (v82_ok) {
+         rc = sqlite3_exec(s_db.db,
+                           "CREATE INDEX IF NOT EXISTS idx_cal_events_href "
+                           "ON calendar_events(calendar_id, href)",
+                           NULL, NULL, &errmsg);
+         if (rc != SQLITE_OK) {
+            OLOG_ERROR("auth_db: v82 migration (href index) failed: %s",
+                       errmsg ? errmsg : "unknown");
+            v82_ok = false;
+         }
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      }
+   }
+
    /* Log migration if upgrading from an older version */
    if (current_version > 0 && current_version < AUTH_DB_SCHEMA_VERSION) {
       OLOG_INFO("auth_db: migrated schema from v%d to v%d", current_version,
@@ -2971,7 +3014,7 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
                               v55_ok && v56_ok && v57_ok && v58_ok && v59_ok && v60_ok && v61_ok &&
                               v62_ok && v63_ok && v64_ok && v65_ok && v66_ok && v67_ok && v68_ok &&
                               v69_ok && v70_ok && v71_ok && v72_ok && v73_ok && v74_ok && v75_ok &&
-                              v76_ok && v77_ok && v78_ok && v79_ok && v80_ok && v81_ok;
+                              v76_ok && v77_ok && v78_ok && v79_ok && v80_ok && v81_ok && v82_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

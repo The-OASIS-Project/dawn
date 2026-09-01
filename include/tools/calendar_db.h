@@ -66,6 +66,9 @@ typedef struct {
    char color[16];
    bool is_active;
    char ctag[128];
+   char sync_token[1024]; /**< RFC 6578 WebDAV sync-token; empty = never synced-collection'd.
+                           *   Headroom over typical (~100 B) tokens; a truncated token would be
+                           *   rejected by the server → perpetual re-baseline. */
    time_t created_at;
    bool account_read_only; /**< Populated by JOIN queries — reflects parent account's read_only */
 } calendar_calendar_t;
@@ -75,6 +78,9 @@ typedef struct {
    int64_t calendar_id;
    char uid[256];
    char etag[128];
+   char href[1024]; /**< Server resource path; the RFC 6578 removal key (UID is gone on delete).
+                     *   Sized to hold a locally-constructed caldav_path+uid+".ics" without
+                     *   truncation; server-fetched hrefs (caldav_event_t.href[512]) fit easily. */
    char summary[512];
    char description[1024];
    char location[256];
@@ -145,6 +151,8 @@ int calendar_db_calendar_list(int64_t account_id,
                               int max_count,
                               int *count_out);
 int calendar_db_calendar_update_ctag(int64_t id, const char *ctag);
+/** Persist the RFC 6578 sync-token baseline for a calendar. */
+int calendar_db_calendar_update_sync_token(int64_t id, const char *sync_token);
 int calendar_db_calendar_set_active(int64_t id, bool active);
 int calendar_db_calendar_delete(int64_t id);
 
@@ -166,6 +174,23 @@ int calendar_db_event_upsert(const calendar_event_t *event, int64_t *id_out);
 int calendar_db_event_get_by_uid(const char *uid, calendar_event_t *out);
 int calendar_db_event_delete(int64_t id);
 int calendar_db_event_delete_by_calendar(int64_t calendar_id);
+
+/**
+ * Delete a cached event by its server resource href (the RFC 6578 removal key).
+ * Cascades to calendar_occurrences via FK. @param deleted_out rows removed (may be NULL).
+ */
+int calendar_db_event_delete_by_href(int64_t calendar_id, const char *href, int *deleted_out);
+
+/**
+ * In-window deletion reconcile: delete events in [range_start, range_end) whose
+ * last_synced predates pass_start — i.e. still-cached but not re-stamped by the
+ * just-completed time-range fetch, so gone upstream. @param deleted_out (may be NULL).
+ */
+int calendar_db_event_prune_window_stale(int64_t calendar_id,
+                                         time_t pass_start,
+                                         time_t range_start,
+                                         time_t range_end,
+                                         int *deleted_out);
 
 /* ============================================================================
  * Occurrence CRUD

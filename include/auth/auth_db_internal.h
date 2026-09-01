@@ -64,7 +64,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 81
+#define AUTH_DB_SCHEMA_VERSION 82
 
 /* Retention periods */
 #define LOGIN_ATTEMPT_RETENTION_SEC (7 * 24 * 60 * 60) /* 7 days */
@@ -396,6 +396,7 @@ typedef struct {
    sqlite3_stmt *stmt_cal_cal_get;
    sqlite3_stmt *stmt_cal_cal_list;
    sqlite3_stmt *stmt_cal_cal_update_ctag;
+   sqlite3_stmt *stmt_cal_cal_update_sync_token;
    sqlite3_stmt *stmt_cal_cal_set_active;
    sqlite3_stmt *stmt_cal_cal_delete;
    sqlite3_stmt *stmt_cal_cal_active_for_user;
@@ -403,6 +404,8 @@ typedef struct {
    sqlite3_stmt *stmt_cal_evt_get_by_uid;
    sqlite3_stmt *stmt_cal_evt_delete;
    sqlite3_stmt *stmt_cal_evt_delete_by_cal;
+   sqlite3_stmt *stmt_cal_evt_delete_by_href;
+   sqlite3_stmt *stmt_cal_evt_prune_window_stale;
    sqlite3_stmt *stmt_cal_occ_insert;
    sqlite3_stmt *stmt_cal_occ_delete_for_event;
    sqlite3_stmt *stmt_cal_occ_in_range;
