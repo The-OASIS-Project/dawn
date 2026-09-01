@@ -137,7 +137,17 @@ whisper_asr_context_t *asr_whisper_init(const asr_whisper_config_t *config) {
    wctx->wparams.n_threads = config->n_threads > 0 ? config->n_threads : 4;
    wctx->wparams.offset_ms = 0;
    wctx->wparams.no_context = true;
-   wctx->wparams.single_segment = false;
+   /* Command/utterance audio is a single window (always-on ring caps at 30s, the
+    * local mic chunks at 10s), so force one segment and skip the multi-segment
+    * decoder passes. Truncation would only bite audio > the 30s encoder window,
+    * which no ASR path here produces. */
+   wctx->wparams.single_segment = true;
+   /* Bound worst-case latency: disable the temperature-fallback ladder. On a decode
+    * that trips the compression/logprob thresholds (blank/noisy/echo audio — the
+    * always-on false-trigger case), Whisper otherwise re-runs inference up to ~5
+    * more times. Clean speech rarely triggers it; near-zero average cost and no
+    * accuracy risk for command-length audio. */
+   wctx->wparams.temperature_inc = 0.0f;
 
    /* Initialize callbacks to NULL */
    wctx->timing_callback = NULL;

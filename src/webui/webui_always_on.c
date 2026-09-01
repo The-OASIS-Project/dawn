@@ -758,12 +758,15 @@ void always_on_consume_wake_result(always_on_ctx_t *ctx, void *conn_ptr) {
          set_state(ctx, ALWAYS_ON_RECORDING);
          pthread_mutex_unlock(&ctx->mutex);
 
+         /* The "recording" state frame IS the ready cue — the client lights its mic
+          * button on it. Deliberately NO spoken greeting here: a "Hello." TTS plays
+          * through the client speaker WHILE the recording mic is live and (without
+          * perfect client-side AEC) echoes back in, which the VAD scores as speech
+          * and which stalls or hangs end-of-speech (observed: 15s+ tails, and full
+          * hangs on clients whose TTS output isn't AEC-referenceable). An optional
+          * acknowledgement belongs on the client as a short non-speech CHIME, which
+          * the VAD won't arm on even if it bleeds into the mic. */
          send_always_on_state(ctx->wsi, "recording");
-
-         /* Play greeting TTS (matches local mic behavior) */
-         if (conn->session && conn->tts_enabled) {
-            webui_sentence_audio_callback("Hello.", conn->session);
-         }
       }
    } else {
       /* No wake word — return to listening */
@@ -1056,6 +1059,17 @@ bool always_on_check_timeouts(always_on_ctx_t *ctx, void *conn) {
              * clients whose silence starves the per-frame VAD check. */
             send_always_on_state(ctx->wsi, "processing");
             dispatch_cmd_transcribe(ctx, (ws_connection_t *)conn);
+         } else if (ctx->last_speech_ms == 0 && elapsed >= ALWAYS_ON_NO_COMMAND_TIMEOUT_MS) {
+            /* Wake word acknowledged but no command spoken (last_speech_ms stays 0
+             * until the first command word). Return to LISTENING instead of holding
+             * the mic open to RECORDING_TIMEOUT — there is nothing to transcribe. */
+            OLOG_INFO("Always-on: no command after wake word (%lld ms), returning to LISTENING",
+                      (long long)elapsed);
+            vad_silero_reset(ctx->vad_ctx);
+            ctx->valid_len = 0;
+            ctx->read_pos = 0;
+            ctx->write_pos = 0;
+            set_state(ctx, ALWAYS_ON_LISTENING);
          } else if (elapsed >= ALWAYS_ON_RECORDING_TIMEOUT_MS) {
             OLOG_WARNING("Always-on: RECORDING timeout (%lld ms), dispatching ASR",
                          (long long)elapsed);

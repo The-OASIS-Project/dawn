@@ -439,8 +439,12 @@ int webui_audio_transcribe(const int16_t *pcm_data, size_t pcm_samples, char **t
    /* Reset ASR for new utterance */
    asr_reset(asr_ctx);
 
-   /* Feed audio to ASR */
-   asr_process_partial(asr_ctx, pcm_data, pcm_samples);
+   /* Feed audio to ASR. Whisper has no streaming partials, so process_partial
+    * returns a heap-allocated empty result — free it or it leaks once per turn. */
+   asr_result_t *partial = asr_process_partial(asr_ctx, pcm_data, pcm_samples);
+   if (partial) {
+      asr_result_free(partial);
+   }
 
    /* Get final transcription */
    asr_result_t *result = asr_finalize(asr_ctx);
