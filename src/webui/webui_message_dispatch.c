@@ -480,14 +480,17 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
          int old_type = config.type;
 
          /* Parse type (local/cloud) */
+         bool type_explicitly_set = false;
          if (json_object_object_get_ex(payload, "type", &type_obj)) {
             const char *new_type = json_object_get_string(type_obj);
             if (new_type) {
                has_changes = true;
                if (strcmp(new_type, "local") == 0) {
                   config.type = LLM_LOCAL;
+                  type_explicitly_set = true;
                } else if (strcmp(new_type, "cloud") == 0) {
                   config.type = LLM_CLOUD;
+                  type_explicitly_set = true;
                   /* If no provider is set, pick the first one with an API key */
                   if (config.cloud_provider == CLOUD_PROVIDER_NONE) {
                      config.cloud_provider = llm_detect_available_provider();
@@ -583,7 +586,14 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
           *   (b) the client explicitly set a cloud provider this request (covers OpenRouter,
           *       whose "vendor/model" slug matches no prefix) — an active cloud selection.
           * A missing key then fails loudly in session_set_llm_config below rather than
-          * silently substituting local. */
+          * silently substituting local.
+          *
+          * Gated on !type_explicitly_set: this only reconciles the case where the client
+          * OMITS type. A client that explicitly sends type='local' this request means it —
+          * the carried-over cloud model name is just stale (the client updates the model in
+          * a follow-up set_session_llm once the local list arrives). Firing here on an
+          * explicit local pick reverts it straight back to cloud, which the WebUI's async
+          * flow (send {type:local}, THEN fetch models) can never recover from. */
          bool model_is_cloud = strncmp(config.model, "gpt-", 4) == 0 ||
                                strncmp(config.model, "o1-", 3) == 0 ||
                                strncmp(config.model, "o3-", 3) == 0 ||
@@ -591,7 +601,8 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                                strncmp(config.model, "gemini-", 7) == 0;
          bool provider_is_cloud = provider_explicitly_set &&
                                   config.cloud_provider != CLOUD_PROVIDER_NONE;
-         if (config.type != LLM_CLOUD && (model_is_cloud || provider_is_cloud)) {
+         if (!type_explicitly_set && config.type != LLM_CLOUD &&
+             (model_is_cloud || provider_is_cloud)) {
             config.type = LLM_CLOUD;
             has_changes = true;
             OLOG_INFO("WebUI: Corrected stale local type to cloud for model '%s'", config.model);
