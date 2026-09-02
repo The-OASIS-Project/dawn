@@ -152,50 +152,30 @@ bool llm_has_openrouter_key(void) {
    return is_openrouter_available();
 }
 
-bool llm_openrouter_gateway_enabled(void) {
-   return g_config.llm.cloud.use_openrouter;
-}
-
-bool llm_apply_openrouter_gateway(cloud_provider_t *provider,
-                                  const char **endpoint,
-                                  const char **api_key) {
-   if (!provider || !llm_openrouter_gateway_enabled()) {
-      return false;
-   }
-   /* Only rewrite cloud targets; local stays local. */
-   if (*provider == CLOUD_PROVIDER_NONE) {
-      return false;
-   }
-   *provider = CLOUD_PROVIDER_OPENROUTER;
-   if (endpoint) {
-      *endpoint = OPENROUTER_URL; /* unconditional — do not rely on downstream fallback */
-   }
-   if (api_key) {
-      *api_key = get_openrouter_api_key();
-   }
-   return true;
-}
+/* Resolved global cloud provider (the effective default). Written by the init/refresh
+ * ladder; read throughout resolution. */
+static cloud_provider_t current_cloud_provider = CLOUD_PROVIDER_NONE;
 
 cloud_provider_t llm_detect_available_provider(void) {
-   /* Gateway mode is the single authority for bool→enum: when on, OpenRouter
-    * (if keyed) wins over any direct provider. */
-   if (llm_openrouter_gateway_enabled()) {
-      return is_openrouter_available() ? CLOUD_PROVIDER_OPENROUTER : CLOUD_PROVIDER_NONE;
-   }
    if (is_claude_available())
       return CLOUD_PROVIDER_CLAUDE;
    if (is_openai_available())
       return CLOUD_PROVIDER_OPENAI;
    if (is_gemini_available())
       return CLOUD_PROVIDER_GEMINI;
+   /* OpenRouter is a valid fallback (an OpenRouter-only install still boots cloud) but
+    * deliberately does NOT jump ahead of the direct providers in the auto-default order
+    * (decision O1). */
+   if (is_openrouter_available())
+      return CLOUD_PROVIDER_OPENROUTER;
    return CLOUD_PROVIDER_NONE;
 }
 
 // Global state
 // current_type: written on the main/config thread, read on the mosquitto
 // HUD-discovery thread — atomic so those cross-thread accesses are race-free.
+// (current_cloud_provider is defined earlier in this file.)
 static _Atomic llm_type_t current_type = LLM_UNDEFINED;
-static cloud_provider_t current_cloud_provider = CLOUD_PROVIDER_NONE;
 static char llm_url[2048] = "";
 
 // Global interrupt flag - set by main thread (signal handler / wake word) during
@@ -390,36 +370,17 @@ void llm_init(const char *cloud_provider_override) {
       llm_tools_apply_config(&g_config.llm.tools);
    }
 
-   /* CLI alias: "-P openrouter" enables the gateway by flipping the config bool,
-    * so the bool remains the single authority for the bool->enum conversion
-    * (see llm_openrouter_gateway_enabled / the single-authority rule). */
-   if (cloud_provider_override != NULL && strcmp(cloud_provider_override, "openrouter") == 0) {
-      g_config.llm.cloud.use_openrouter = true;
-   }
-
-   /* OpenRouter gateway: SINGLE AUTHORITY for use_openrouter -> CLOUD_PROVIDER_OPENROUTER.
-    * When on, force the provider and skip the direct-provider CLI>config>auto-detect
-    * ladder entirely.  Mirrored in llm_refresh_providers().  A direct-provider CLI
-    * override (-P claude, etc.) does NOT override the gateway. */
-   if (llm_openrouter_gateway_enabled()) {
-      if (is_openrouter_available()) {
-         current_cloud_provider = CLOUD_PROVIDER_OPENROUTER;
-         OLOG_INFO("Cloud provider set to OpenRouter (gateway mode)");
-      } else {
-         OLOG_WARNING("OpenRouter gateway enabled but openrouter_api_key not configured — "
-                      "staying on local LLM");
-         current_cloud_provider = CLOUD_PROVIDER_NONE;
-         llm_set_type(LLM_LOCAL);
-      }
-      return;
-   }
+   /* OpenRouter is a first-class provider (the use_openrouter gateway was retired and
+    * folded into provider="openrouter" by config_migrate). "-P openrouter" and a config
+    * provider="openrouter" both flow through the normal provider ladder below. */
 
    // Detect available providers from runtime config (secrets.toml)
    bool openai_available = is_openai_available();
    bool claude_available = is_claude_available();
    bool gemini_available = is_gemini_available();
+   bool openrouter_available = is_openrouter_available();
 
-   if (!openai_available && !claude_available && !gemini_available) {
+   if (!openai_available && !claude_available && !gemini_available && !openrouter_available) {
       OLOG_WARNING("No cloud LLM providers configured (check secrets.toml)");
       current_cloud_provider = CLOUD_PROVIDER_NONE;
       llm_set_type(LLM_LOCAL);
@@ -450,6 +411,11 @@ void llm_init(const char *cloud_provider_override) {
          current_cloud_provider = CLOUD_PROVIDER_GEMINI;
          provider_ok = true;
          OLOG_INFO("Cloud provider set to Gemini (%s)",
+                   cloud_provider_override ? "CLI override" : "config file");
+      } else if (strcmp(provider_source, "openrouter") == 0 && openrouter_available) {
+         current_cloud_provider = CLOUD_PROVIDER_OPENROUTER;
+         provider_ok = true;
+         OLOG_INFO("Cloud provider set to OpenRouter (%s)",
                    cloud_provider_override ? "CLI override" : "config file");
       }
 
@@ -505,29 +471,29 @@ static void refresh_cloud_llm_url(void) {
 }
 
 int llm_refresh_providers(void) {
-   /* OpenRouter gateway short-circuit (mirrors llm_init): the gateway bool is the
-    * single authority, so skip the direct-provider availability dance entirely.
-    * Without this, a secrets/settings reload would silently un-set OpenRouter. */
-   if (llm_openrouter_gateway_enabled()) {
-      if (is_openrouter_available()) {
-         current_cloud_provider = CLOUD_PROVIDER_OPENROUTER;
-         refresh_cloud_llm_url();
-         OLOG_INFO("LLM refresh: OpenRouter gateway ready");
-         return 1;
-      }
-      OLOG_INFO("LLM refresh: OpenRouter gateway on but no key available");
+   bool openai_available = is_openai_available();
+   bool claude_available = is_claude_available();
+   bool gemini_available = is_gemini_available();
+   bool openrouter_available = is_openrouter_available();
+
+   if (!openai_available && !claude_available && !gemini_available && !openrouter_available) {
+      OLOG_INFO("LLM refresh: No cloud providers available");
       current_cloud_provider = CLOUD_PROVIDER_NONE;
       return 0;
    }
 
-   bool openai_available = is_openai_available();
-   bool claude_available = is_claude_available();
-   bool gemini_available = is_gemini_available();
-
-   if (!openai_available && !claude_available && !gemini_available) {
-      OLOG_INFO("LLM refresh: No cloud providers available");
-      current_cloud_provider = CLOUD_PROVIDER_NONE;
-      return 0;
+   /* An explicit OpenRouter session stays on OpenRouter while its key is present; if the
+    * key was removed, fall back to auto-detect rather than silently keeping a dead
+    * provider. (Direct providers get the same per-provider validity checks below; an
+    * OpenRouter session whose key is still present falls through them unchanged.) */
+   if (current_cloud_provider == CLOUD_PROVIDER_OPENROUTER && !openrouter_available) {
+      current_cloud_provider = llm_detect_available_provider();
+      if (current_cloud_provider == CLOUD_PROVIDER_NONE) {
+         OLOG_INFO("LLM refresh: OpenRouter key removed, no cloud providers available");
+         return 0;
+      }
+      OLOG_INFO("LLM refresh: OpenRouter key removed, switched to %s",
+                cloud_provider_to_string(current_cloud_provider));
    }
 
    // Check if current provider is still valid
@@ -1415,12 +1381,9 @@ void llm_get_default_config(session_llm_config_t *config) {
    }
 
    // Set default cloud provider (used when switching from local to cloud).
-   // OpenRouter gateway is the single authority: when on, the default provider is
-   // always OpenRouter regardless of the provider string (mirrors llm_init).
-   if (llm_openrouter_gateway_enabled()) {
-      config->cloud_provider = CLOUD_PROVIDER_OPENROUTER;
-   } else {
-      // If config specifies a provider AND it has a key, use it; otherwise auto-detect
+   // If config specifies a provider AND it has a key, use it; otherwise auto-detect.
+   // (OpenRouter is a first-class provider here — the gateway bool was retired.)
+   {
       cloud_provider_t configured = CLOUD_PROVIDER_NONE;
       bool configured_has_key = false;
       if (strcasecmp(g_config.llm.cloud.provider, "claude") == 0) {
@@ -1432,6 +1395,9 @@ void llm_get_default_config(session_llm_config_t *config) {
       } else if (strcasecmp(g_config.llm.cloud.provider, "openai") == 0) {
          configured = CLOUD_PROVIDER_OPENAI;
          configured_has_key = is_openai_available();
+      } else if (strcasecmp(g_config.llm.cloud.provider, "openrouter") == 0) {
+         configured = CLOUD_PROVIDER_OPENROUTER;
+         configured_has_key = is_openrouter_available();
       }
 
       if (configured != CLOUD_PROVIDER_NONE && configured_has_key) {
@@ -1446,13 +1412,9 @@ void llm_get_default_config(session_llm_config_t *config) {
    config->endpoint[0] = '\0';
    config->model[0] = '\0';
 
-   // Copy tool mode from global config
-   if (g_config.llm.tools.mode[0] != '\0') {
-      strncpy(config->tool_mode, g_config.llm.tools.mode, sizeof(config->tool_mode) - 1);
-      config->tool_mode[sizeof(config->tool_mode) - 1] = '\0';
-   } else {
-      strncpy(config->tool_mode, "native", sizeof(config->tool_mode) - 1);
-   }
+   // Tools follow the global on/off switch by default; internal callers
+   // (extraction, compaction, silent-observe, briefings) set suppress_tools.
+   config->suppress_tools = false;
 
    // Copy thinking mode from global config
    if (g_config.llm.thinking.mode[0] != '\0') {
@@ -1489,24 +1451,16 @@ int llm_resolve_config(const session_llm_config_t *session_config,
    resolved->model = session_config->model[0] != '\0' ? session_config->model : NULL;
    resolved->api_key = NULL;
 
-   /* OpenRouter gateway: canonical, inescapable enforcement of the single-authority
-    * rule.  Even a session whose stored cloud_provider predates a runtime gateway
-    * toggle resolves to OpenRouter here.  Forcing the enum (not the helper) keeps the
-    * existing per-provider endpoint resolution below intact, so a custom
-    * llm.cloud.endpoint still overrides the default OpenRouter URL.  The model is left
-    * as-is (session model, or the OpenRouter default filled in below). */
-   if (resolved->type == LLM_CLOUD && llm_openrouter_gateway_enabled()) {
-      cloud_provider_t provider_hint = resolved->cloud_provider; /* stored provider, pre-force */
-      resolved->cloud_provider = CLOUD_PROVIDER_OPENROUTER;
-      /* Canonical bare-model remap — the single choke point every cloud request passes
-       * through.  Any session model that isn't already a "vendor/model" slug (legacy
-       * conversations, non-gateway-aware clients, or a future call site that forgot to
-       * remap) is mapped to the right OpenRouter slug here, so a bare id is never sent
-       * verbatim nor silently swapped for the gateway default.  The catalog tail-match in
-       * the helper resolves it even when the provider hint has already been forced to
-       * OPENROUTER upstream.  Transient: the session's stored model is untouched. */
+   /* Canonical bare-model remap for OpenRouter sessions — the single request choke
+    * point. When this session resolves to OpenRouter, a stored model that isn't already
+    * a "vendor/model" slug (a legacy conversation, or a bare default) is mapped to the
+    * right OpenRouter slug here, so a bare id is never sent verbatim. The catalog
+    * tail-match in the helper resolves it from the model name alone. Post-2a the
+    * provider enum is authoritative (no gateway force). Transient: the stored model is
+    * untouched. */
+   if (resolved->type == LLM_CLOUD && resolved->cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
       if (resolved->model != NULL && strchr(resolved->model, '/') == NULL) {
-         if (llm_openrouter_slug_for(provider_hint, resolved->model, resolved->model_buf,
+         if (llm_openrouter_slug_for(resolved->cloud_provider, resolved->model, resolved->model_buf,
                                      sizeof(resolved->model_buf))) {
             resolved->model = resolved->model_buf;
          } else {
@@ -1577,16 +1531,9 @@ int llm_resolve_config(const session_llm_config_t *session_config,
       }
    }
 
-   // Resolve tool_mode - use session config if set, otherwise global config
-   if (session_config->tool_mode[0] != '\0') {
-      strncpy(resolved->tool_mode, session_config->tool_mode, sizeof(resolved->tool_mode) - 1);
-      resolved->tool_mode[sizeof(resolved->tool_mode) - 1] = '\0';
-   } else if (g_config.llm.tools.mode[0] != '\0') {
-      strncpy(resolved->tool_mode, g_config.llm.tools.mode, sizeof(resolved->tool_mode) - 1);
-      resolved->tool_mode[sizeof(resolved->tool_mode) - 1] = '\0';
-   } else {
-      strncpy(resolved->tool_mode, "native", sizeof(resolved->tool_mode) - 1);
-   }
+   // Propagate the per-call tool suppression flag (global on/off is checked
+   // directly in llm_tools_enabled()).
+   resolved->suppress_tools = session_config->suppress_tools;
 
    // Resolve thinking_mode - use session config if set, otherwise global config
    if (session_config->thinking_mode[0] != '\0') {
@@ -1673,7 +1620,7 @@ char *llm_chat_completion_with_config(struct json_object *conversation_history,
       }
    }
 
-   // Set thread-local config so llm_tools_enabled() can check session-specific tool_mode
+   // Set thread-local config so llm_tools_enabled() can check session-specific suppress_tools
    llm_tools_set_current_config(config);
 
    /* Set thread-local timeout override if specified (avoids global config race) */
@@ -1764,7 +1711,7 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
    // Record query metrics
    metrics_record_llm_query(config->type);
 
-   // Set thread-local config so llm_tools_enabled() can check session-specific tool_mode
+   // Set thread-local config so llm_tools_enabled() can check session-specific suppress_tools
    llm_tools_set_current_config(config);
 
    // Determine provider function and history format

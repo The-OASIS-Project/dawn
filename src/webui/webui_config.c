@@ -236,6 +236,8 @@ void handle_get_config(ws_connection_t *conn) {
                           json_object_new_boolean(llm_has_claude_key()));
    json_object_object_add(llm_runtime, "gemini_available",
                           json_object_new_boolean(llm_has_gemini_key()));
+   json_object_object_add(llm_runtime, "openrouter_available",
+                          json_object_new_boolean(llm_has_openrouter_key()));
    /* Include model-specific context size so frontend gauge shows correct max early.
     * Omit if 0 (unknown model) — frontend falls back to knownContextMax or default. */
    int ctx_max = llm_context_get_size(resolved.type, resolved.cloud_provider, resolved.model);
@@ -413,6 +415,10 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
        * to the validated range here before applying/persisting. */
       CONFIG_CLAMP(config->asr.dedup_window_sec, 0, ASR_DEDUP_WINDOW_SEC_MAX);
       utterance_dedup_set_window(config->asr.dedup_window_sec); /* live retune */
+      JSON_TO_CONFIG_INT(section, "audio_ctx_floor", config->asr.audio_ctx_floor);
+      CONFIG_CLAMP(config->asr.audio_ctx_floor, 0, ASR_AUDIO_CTX_FLOOR_MAX);
+      /* Applied to ASR contexts at their next init; a live change takes effect on
+       * the next daemon start (contexts are long-lived in the worker pool). */
       JSON_TO_CONFIG_STR(section, "disambiguation_hint", config->asr.disambiguation_hint);
    }
 
@@ -438,18 +444,20 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       struct json_object *cloud;
       if (json_object_object_get_ex(section, "cloud", &cloud)) {
          JSON_TO_CONFIG_STR(cloud, "provider", config->llm.cloud.provider);
-         /* Validate cloud provider - must be openai, claude, or gemini */
+         /* Validate cloud provider - must be openai, claude, gemini, or openrouter */
          if (config->llm.cloud.provider[0] != '\0' &&
              strcmp(config->llm.cloud.provider, "openai") != 0 &&
              strcmp(config->llm.cloud.provider, "claude") != 0 &&
-             strcmp(config->llm.cloud.provider, "gemini") != 0) {
+             strcmp(config->llm.cloud.provider, "gemini") != 0 &&
+             strcmp(config->llm.cloud.provider, "openrouter") != 0) {
             OLOG_WARNING("WebUI: Invalid cloud.provider '%s', using 'openai'",
                          config->llm.cloud.provider);
             strncpy(config->llm.cloud.provider, "openai", sizeof(config->llm.cloud.provider) - 1);
          }
          JSON_TO_CONFIG_STR(cloud, "endpoint", config->llm.cloud.endpoint);
          JSON_TO_CONFIG_BOOL(cloud, "vision_enabled", config->llm.cloud.vision_enabled);
-         JSON_TO_CONFIG_BOOL(cloud, "use_openrouter", config->llm.cloud.use_openrouter);
+         /* use_openrouter retired: the gateway is folded into provider="openrouter" by
+          * config_migrate at load; no longer accepted from the client. */
          JSON_TO_CONFIG_STR(cloud, "openai_use_responses_api",
                             config->llm.cloud.openai_use_responses_api);
          /* Validate openai_use_responses_api */
@@ -596,14 +604,7 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
 
       struct json_object *tools;
       if (json_object_object_get_ex(section, "tools", &tools)) {
-         JSON_TO_CONFIG_STR(tools, "mode", config->llm.tools.mode);
-         /* Validate tool mode - must be one of: native, command_tags, disabled */
-         if (config->llm.tools.mode[0] != '\0' && strcmp(config->llm.tools.mode, "native") != 0 &&
-             strcmp(config->llm.tools.mode, "command_tags") != 0 &&
-             strcmp(config->llm.tools.mode, "disabled") != 0) {
-            OLOG_WARNING("WebUI: Invalid tools.mode '%s', using 'native'", config->llm.tools.mode);
-            strncpy(config->llm.tools.mode, "native", sizeof(config->llm.tools.mode) - 1);
-         }
+         JSON_TO_CONFIG_BOOL(tools, "enabled", config->llm.tools.enabled);
       }
 
       struct json_object *thinking;
@@ -620,8 +621,6 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       if (json_object_object_get_ex(section, "silent_observe", &silent_observe)) {
          JSON_TO_CONFIG_STR(silent_observe, "provider", config->llm.silent_observe.provider);
          JSON_TO_CONFIG_STR(silent_observe, "model", config->llm.silent_observe.model);
-         JSON_TO_CONFIG_STR(silent_observe, "openrouter_model",
-                            config->llm.silent_observe.openrouter_model);
          /* Single source of truth — see llm_silent_observe_provider_is_valid(). */
          if (config->llm.silent_observe.provider[0] != '\0' &&
              !llm_silent_observe_provider_is_valid(config->llm.silent_observe.provider)) {
@@ -640,7 +639,6 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_BOOL(section, "compact_use_session", config->llm.compact_use_session);
       JSON_TO_CONFIG_STR(section, "compact_provider", config->llm.compact_provider);
       JSON_TO_CONFIG_STR(section, "compact_model", config->llm.compact_model);
-      JSON_TO_CONFIG_STR(section, "compact_openrouter_model", config->llm.compact_openrouter_model);
 
       JSON_TO_CONFIG_BOOL(section, "conversation_logging", config->llm.conversation_logging);
       JSON_TO_CONFIG_BOOL(section, "rate_limit_enabled", config->llm.rate_limit_enabled);
@@ -786,8 +784,6 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_INT(section, "context_budget_tokens", config->memory.context_budget_tokens);
       JSON_TO_CONFIG_STR(section, "extraction_provider", config->memory.extraction_provider);
       JSON_TO_CONFIG_STR(section, "extraction_model", config->memory.extraction_model);
-      JSON_TO_CONFIG_STR(section, "extraction_openrouter_model",
-                         config->memory.extraction_openrouter_model);
       JSON_TO_CONFIG_INT(section, "extraction_timeout_ms", config->memory.extraction_timeout_ms);
       JSON_TO_CONFIG_BOOL(section, "note_extraction_guard", config->memory.note_extraction_guard);
       JSON_TO_CONFIG_BOOL(section, "pruning_enabled", config->memory.pruning_enabled);
@@ -840,6 +836,9 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_INT(section, "summary_retention_days", config->memory.summary_retention_days);
       JSON_TO_CONFIG_DOUBLE(section, "access_reinforcement_boost",
                             config->memory.access_reinforcement_boost);
+      JSON_TO_CONFIG_BOOL(section, "citation_enabled", config->memory.citation_enabled);
+      JSON_TO_CONFIG_DOUBLE(section, "citation_reinforcement_boost",
+                            config->memory.citation_reinforcement_boost);
       /* Clamp decay values to sane ranges */
       if (config->memory.decay_hour < 0)
          config->memory.decay_hour = 0;
@@ -885,6 +884,11 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
          config->memory.access_reinforcement_boost = 0.0f;
       if (config->memory.access_reinforcement_boost > 0.5f)
          config->memory.access_reinforcement_boost = 0.5f;
+      /* Citation reinforcement boost: 0.0-0.5 (0.0 = inert) */
+      if (config->memory.citation_reinforcement_boost < 0.0f)
+         config->memory.citation_reinforcement_boost = 0.0f;
+      if (config->memory.citation_reinforcement_boost > 0.5f)
+         config->memory.citation_reinforcement_boost = 0.5f;
 
       /* Embedding settings */
       JSON_TO_CONFIG_STR(section, "embedding_provider", config->memory.embedding_provider);
@@ -1354,10 +1358,8 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
       /* Continue anyway - backup is optional */
    }
 
-   /* Track tools mode changes for prompt rebuild */
-   char old_tools_mode[16];
-   strncpy(old_tools_mode, g_config.llm.tools.mode, sizeof(old_tools_mode) - 1);
-   old_tools_mode[sizeof(old_tools_mode) - 1] = '\0';
+   /* Track tools enable/disable changes for prompt rebuild */
+   bool old_tools_enabled = g_config.llm.tools.enabled;
 
    /* Track voice-directive changes.  These feed the cached LOCAL-mic prompt
     * (initialize_command_prompt), which only rebuilds on
@@ -1378,9 +1380,6 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
    strncpy(old_local_endpoint, g_config.llm.local.endpoint, sizeof(old_local_endpoint) - 1);
    old_local_endpoint[sizeof(old_local_endpoint) - 1] = '\0';
 
-   /* Track OpenRouter gateway toggle so the global provider is re-derived on change */
-   bool old_use_openrouter = g_config.llm.cloud.use_openrouter;
-
    /* Apply changes to global config with mutex protection.
     * The write lock ensures no other threads are reading config during modification.
     * TOML write is also inside the lock to prevent concurrent reads of partial state.
@@ -1388,7 +1387,7 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
    pthread_rwlock_wrlock(&s_config_rwlock);
    dawn_config_t *mutable_config = (dawn_config_t *)config_get();
    apply_config_from_json(mutable_config, payload);
-   bool tools_mode_changed = (strcmp(old_tools_mode, g_config.llm.tools.mode) != 0);
+   bool tools_mode_changed = (old_tools_enabled != g_config.llm.tools.enabled);
    /* Name reflects intent: gates the LOCAL static-prompt rebuild.  Both fields
     * baked into that prompt are tracked (tts.voice_directive AND the [asr]
     * disambiguation_hint); a new field baked into the local prompt must be added
@@ -1435,10 +1434,7 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
           json_object_object_get_ex(llm_section, "cloud", &cloud_section) &&
           json_object_object_get_ex(cloud_section, "provider", &provider_obj)) {
          const char *new_provider = json_object_get_string(provider_obj);
-         /* Skip the direct-provider switch entirely under the OpenRouter gateway —
-          * the gateway is the single authority; honoring a direct provider here would
-          * set the global to a non-OpenRouter provider while the gateway is on. */
-         if (new_provider && !llm_openrouter_gateway_enabled()) {
+         if (new_provider) {
             int rc = 0;
             if (strcmp(new_provider, "openai") == 0) {
                rc = llm_set_cloud_provider(CLOUD_PROVIDER_OPENAI);
@@ -1446,6 +1442,8 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
                rc = llm_set_cloud_provider(CLOUD_PROVIDER_CLAUDE);
             } else if (strcmp(new_provider, "gemini") == 0) {
                rc = llm_set_cloud_provider(CLOUD_PROVIDER_GEMINI);
+            } else if (strcmp(new_provider, "openrouter") == 0) {
+               rc = llm_set_cloud_provider(CLOUD_PROVIDER_OPENROUTER);
             }
             if (rc != 0) {
                json_object_object_add(resp_payload, "warning",
@@ -1454,12 +1452,6 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
                                           "API key not configured"));
             }
          }
-      }
-
-      /* OpenRouter gateway toggled — re-derive the global cloud provider so non-session
-       * paths pick up (or drop) OpenRouter immediately, not just on restart. */
-      if (old_use_openrouter != g_config.llm.cloud.use_openrouter) {
-         llm_refresh_providers();
       }
 
       /* Invalidate local provider, models, and context cache if endpoint changed */
@@ -1524,11 +1516,11 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
       }
 #endif
 
-      /* If tool calling mode changed, rebuild system prompt for current session */
+      /* If tool calling was toggled on/off, rebuild system prompt for current session */
       if (tools_mode_changed) {
          invalidate_system_instructions();
-         OLOG_INFO("Tool calling mode changed (mode=%s), rebuilding prompt",
-                   g_config.llm.tools.mode);
+         OLOG_INFO("Tool calling %s, rebuilding prompt",
+                   g_config.llm.tools.enabled ? "enabled" : "disabled");
 
          /* Update current session's system prompt so change takes effect immediately */
          if (conn->session) {
@@ -1552,6 +1544,11 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
          session_manager_refresh_all_prompts();
          OLOG_INFO("WebUI: Voice directive changed, rebuilt prompts");
       }
+
+      /* Nudge other admin browsers (a second tab, Aurora) to re-pull config so
+       * their config-derived panels (e.g. the model lists) don't show a stale
+       * view until the next reconnect.  Fires only on a successful save. */
+      webui_broadcast_config_changed();
    } else {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error",

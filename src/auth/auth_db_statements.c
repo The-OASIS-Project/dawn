@@ -358,8 +358,8 @@ int auth_db_prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "INSERT INTO messages (conversation_id, role, content, tool_calls, tool_call_id, "
-       "reasoning, created_at) "
-       "SELECT ?, ?, ?, ?, ?, ?, ? "
+       "reasoning, created_at, is_error) "
+       "SELECT ?, ?, ?, ?, ?, ?, ?, ? "
        "WHERE EXISTS (SELECT 1 FROM conversations WHERE id = ? AND user_id = ?)",
        -1, &s_db.stmt_msg_add, NULL);
    if (rc != SQLITE_OK) {
@@ -370,7 +370,7 @@ int auth_db_prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT m.id, m.conversation_id, m.role, m.content, m.tool_calls, m.tool_call_id, "
-       "m.reasoning, m.created_at FROM messages m "
+       "m.reasoning, m.created_at, m.is_error FROM messages m "
        "INNER JOIN conversations c ON m.conversation_id = c.id "
        "WHERE m.conversation_id = ? AND c.user_id = ? ORDER BY m.id ASC",
        -1, &s_db.stmt_msg_get, NULL);
@@ -385,7 +385,7 @@ int auth_db_prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT m.id, m.conversation_id, m.role, m.content, m.tool_calls, m.tool_call_id, "
-       "m.reasoning, m.created_at FROM messages m "
+       "m.reasoning, m.created_at, m.is_error FROM messages m "
        "INNER JOIN conversations c ON m.conversation_id = c.id "
        "WHERE m.conversation_id = ? AND c.user_id = ? AND m.id > ? ORDER BY m.id ASC",
        -1, &s_db.stmt_msg_get_after, NULL);
@@ -395,11 +395,11 @@ int auth_db_prepare_statements(void) {
    }
 
    /* Admin-only: get messages without user ownership check */
-   rc = sqlite3_prepare_v2(
-       s_db.db,
-       "SELECT id, conversation_id, role, content, tool_calls, tool_call_id, reasoning, created_at "
-       "FROM messages WHERE conversation_id = ? ORDER BY id ASC",
-       -1, &s_db.stmt_msg_get_admin, NULL);
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT id, conversation_id, role, content, tool_calls, tool_call_id, "
+                           "reasoning, created_at, "
+                           "is_error FROM messages WHERE conversation_id = ? ORDER BY id ASC",
+                           -1, &s_db.stmt_msg_get_admin, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare msg_get_admin failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
@@ -965,6 +965,29 @@ int auth_db_prepare_statements(void) {
                            -1, &s_db.stmt_memory_fact_update_access, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare memory_fact_update_access failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   /* Citation-driven confidence reinforcement (Memory Citation Phase 2).
+    * Bumps confidence (ceilinged at 1.0) when the model actually CITED this fact,
+    * gated by a 1 h cooldown on last_cited — a SEPARATE column from last_accessed,
+    * because the recall render path stamps last_accessed = now on every surfaced
+    * fact seconds before the citation, so a shared cooldown would never fire.
+    * The cooldown lives in the WHERE (not a CASE) so the row is touched ONLY when
+    * eligible: the hour is measured from the last BUMP, not the last attempt, and a
+    * NULL last_cited (never cited) always bumps on the first citation.  Binds:
+    * 1=boost, 2=id, 3=user_id.  (id, user_id) filter = CWE-639 defense-in-depth. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "UPDATE memory_facts SET"
+                           "  confidence = MIN(1.0, confidence + ?),"
+                           "  last_cited = CAST(strftime('%s','now') AS INTEGER) "
+                           "WHERE id = ? AND user_id = ?"
+                           "  AND (last_cited IS NULL"
+                           "   OR (CAST(strftime('%s','now') AS REAL) - last_cited) > 3600)",
+                           -1, &s_db.stmt_memory_fact_reinforce_citation, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare memory_fact_reinforce_citation failed: %s",
+                 sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
@@ -2068,7 +2091,8 @@ int auth_db_prepare_statements(void) {
 
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, account_id, caldav_path, display_name, color, "
-                           "is_active, ctag, created_at FROM calendar_calendars WHERE id = ?",
+                           "is_active, ctag, sync_token, created_at FROM calendar_calendars "
+                           "WHERE id = ?",
                            -1, &s_db.stmt_cal_cal_get, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare cal_cal_get failed: %s", sqlite3_errmsg(s_db.db));
@@ -2077,7 +2101,7 @@ int auth_db_prepare_statements(void) {
 
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, account_id, caldav_path, display_name, color, "
-                           "is_active, ctag, created_at FROM calendar_calendars "
+                           "is_active, ctag, sync_token, created_at FROM calendar_calendars "
                            "WHERE account_id = ? ORDER BY display_name",
                            -1, &s_db.stmt_cal_cal_list, NULL);
    if (rc != SQLITE_OK) {
@@ -2089,6 +2113,13 @@ int auth_db_prepare_statements(void) {
                            &s_db.stmt_cal_cal_update_ctag, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare cal_cal_update_ctag failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db, "UPDATE calendar_calendars SET sync_token = ? WHERE id = ?", -1,
+                           &s_db.stmt_cal_cal_update_sync_token, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare cal_cal_update_sync_token failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
@@ -2108,7 +2139,7 @@ int auth_db_prepare_statements(void) {
 
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT c.id, c.account_id, c.caldav_path, c.display_name, c.color, "
-                           "c.is_active, c.ctag, c.created_at, a.read_only "
+                           "c.is_active, c.ctag, c.sync_token, c.created_at, a.read_only "
                            "FROM calendar_calendars c "
                            "JOIN calendar_accounts a ON c.account_id = a.id "
                            "WHERE a.user_id = ? AND a.enabled = 1 AND c.is_active = 1 "
@@ -2123,8 +2154,8 @@ int auth_db_prepare_statements(void) {
        s_db.db,
        "INSERT OR REPLACE INTO calendar_events (calendar_id, uid, etag, summary, "
        "description, location, dtstart, dtend, duration_sec, all_day, "
-       "dtstart_date, dtend_date, rrule, raw_ical, last_synced) "
-       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+       "dtstart_date, dtend_date, rrule, raw_ical, last_synced, href) "
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
        -1, &s_db.stmt_cal_evt_upsert, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare cal_evt_upsert failed: %s", sqlite3_errmsg(s_db.db));
@@ -2134,7 +2165,8 @@ int auth_db_prepare_statements(void) {
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT e.id, e.calendar_id, e.uid, e.etag, e.summary, e.description, "
                            "e.location, e.dtstart, e.dtend, e.duration_sec, e.all_day, "
-                           "e.dtstart_date, e.dtend_date, e.rrule, e.raw_ical, e.last_synced "
+                           "e.dtstart_date, e.dtend_date, e.rrule, e.raw_ical, e.last_synced, "
+                           "e.href "
                            "FROM calendar_events e "
                            "JOIN calendar_calendars c ON e.calendar_id = c.id "
                            "JOIN calendar_accounts a ON c.account_id = a.id "
@@ -2156,6 +2188,62 @@ int auth_db_prepare_statements(void) {
                            &s_db.stmt_cal_evt_delete_by_cal, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare cal_evt_delete_by_cal failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "DELETE FROM calendar_events WHERE calendar_id = ? AND href = ?", -1,
+                           &s_db.stmt_cal_evt_delete_by_href, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare cal_evt_delete_by_href failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   /* In-window deletion reconcile: after a complete time-range fetch re-stamps every
+    * still-live in-window event's last_synced to the pass time, any event NOT re-stamped
+    * whose OCCURRENCES fall in the window is gone upstream. Keyed on occurrence overlap
+    * (not master dtstart), so it also catches a recurring series whose master predates
+    * the window but whose occurrences are visible in it — matching exactly what the user
+    * sees. The timed/all-day overlap predicates mirror the display range queries
+    * (stmt_cal_occ_in_range / _allday_in_range). Keyed on last_synced, so it also prunes
+    * pre-v82 empty-href ghosts and never touches out-of-window or just-created rows. */
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "DELETE FROM calendar_events WHERE calendar_id = ?1 AND last_synced < ?2 "
+       "AND EXISTS (SELECT 1 FROM calendar_occurrences o "
+       "            WHERE o.event_id = calendar_events.id "
+       "              AND ((o.all_day = 0 AND o.dtstart < ?4 AND o.dtend > ?3) "
+       "                OR (o.all_day = 1 AND o.dtstart_date < ?6 AND o.dtend_date > ?5)))",
+       -1, &s_db.stmt_cal_evt_prune_window_stale, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare cal_evt_prune_window_stale failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   /* Whole-collection retroactive prune: after a COMPLETE sync-collection baseline
+    * enumeration yields the full current server href set, delete local rows for this
+    * calendar whose (non-empty) href is not in that set — i.e. deleted upstream while
+    * out of the fetch window, which the in-window sentinel above cannot see. Empty-href
+    * rows (un-round-tripped / pre-v82) are left to the sentinel. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "DELETE FROM calendar_events WHERE calendar_id = ?1 AND href <> '' "
+                           "AND href NOT IN (SELECT value FROM json_each(?2))",
+                           -1, &s_db.stmt_cal_evt_prune_not_in_hrefs, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare cal_evt_prune_not_in_hrefs failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   /* Blast-radius pre-check for the whole-collection prune: how many local non-empty-href
+    * rows actually MATCH the server set. Zero overlap against a non-empty server set means
+    * the local vs sync-collection href forms diverged (a future normalization drift) — the
+    * NOT IN prune would then wipe the whole calendar, so the caller refuses instead. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT count(*) FROM calendar_events WHERE calendar_id = ?1 "
+                           "AND href <> '' AND href IN (SELECT value FROM json_each(?2))",
+                           -1, &s_db.stmt_cal_evt_count_href_in_set, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare cal_evt_count_href_in_set failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
@@ -2607,6 +2695,8 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_memory_facts_fts_delete);
    if (s_db.stmt_memory_fact_update_access)
       sqlite3_finalize(s_db.stmt_memory_fact_update_access);
+   if (s_db.stmt_memory_fact_reinforce_citation)
+      sqlite3_finalize(s_db.stmt_memory_fact_reinforce_citation);
    if (s_db.stmt_memory_fact_update_confidence)
       sqlite3_finalize(s_db.stmt_memory_fact_update_confidence);
    if (s_db.stmt_memory_fact_supersede)
@@ -2815,6 +2905,8 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_cal_cal_list);
    if (s_db.stmt_cal_cal_update_ctag)
       sqlite3_finalize(s_db.stmt_cal_cal_update_ctag);
+   if (s_db.stmt_cal_cal_update_sync_token)
+      sqlite3_finalize(s_db.stmt_cal_cal_update_sync_token);
    if (s_db.stmt_cal_cal_set_active)
       sqlite3_finalize(s_db.stmt_cal_cal_set_active);
    if (s_db.stmt_cal_cal_delete)
@@ -2829,6 +2921,14 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_cal_evt_delete);
    if (s_db.stmt_cal_evt_delete_by_cal)
       sqlite3_finalize(s_db.stmt_cal_evt_delete_by_cal);
+   if (s_db.stmt_cal_evt_delete_by_href)
+      sqlite3_finalize(s_db.stmt_cal_evt_delete_by_href);
+   if (s_db.stmt_cal_evt_prune_window_stale)
+      sqlite3_finalize(s_db.stmt_cal_evt_prune_window_stale);
+   if (s_db.stmt_cal_evt_prune_not_in_hrefs)
+      sqlite3_finalize(s_db.stmt_cal_evt_prune_not_in_hrefs);
+   if (s_db.stmt_cal_evt_count_href_in_set)
+      sqlite3_finalize(s_db.stmt_cal_evt_count_href_in_set);
    if (s_db.stmt_cal_occ_insert)
       sqlite3_finalize(s_db.stmt_cal_occ_insert);
    if (s_db.stmt_cal_occ_delete_for_event)

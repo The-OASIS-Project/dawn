@@ -79,10 +79,11 @@ static char *handle_spawn(struct json_object *details,
                           ? json_object_get_string(jgoal)
                           : NULL;
    if (goal == NULL || goal[0] == '\0') {
-      return strdup("Error: 'goal' is required to start a background job.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: 'goal' is required to start a background job.");
    }
    if (memory_filter_check(goal)) {
-      return strdup("Error: that job goal was rejected by the safety filter.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: that job goal was rejected by the safety filter.");
    }
 
    /* Default: reinvoke_parent — bring the result back into THIS conversation and
@@ -92,7 +93,8 @@ static char *handle_spawn(struct json_object *details,
                                  : "reinvoke_parent";
    if (strcmp(on_complete, "notify") != 0 && strcmp(on_complete, "none") != 0 &&
        strcmp(on_complete, "reinvoke_parent") != 0) {
-      return strdup("Error: on_complete must be 'notify', 'none', or 'reinvoke_parent'.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: on_complete must be 'notify', 'none', or 'reinvoke_parent'.");
    }
    /* reinvoke_parent re-engages the parent conversation on completion; it only
     * makes sense with a WebUI-style parent to return to.  Fall back to notify (a)
@@ -123,7 +125,9 @@ static char *handle_spawn(struct json_object *details,
                             : "background jobs are unavailable";
       char buf[256];
       snprintf(buf, sizeof(buf),
-               "Can't start that background job right now — %s. Try again once one finishes.", why);
+               TOOL_RESULT_ERROR_MARK
+               "Can't start that background job right now — %s. Try again once one finishes.",
+               why);
       return strdup(buf);
    }
 
@@ -133,7 +137,7 @@ static char *handle_spawn(struct json_object *details,
    int64_t conv_id = 0;
    if (conv_db_create_job_ex(user_id, title, parent_conv, "detached", on_complete, deliver_to, 1,
                              goal, job_spawn_origin_string(), &conv_id) != AUTH_DB_SUCCESS) {
-      return strdup("Error: failed to create the background job.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: failed to create the background job.");
    }
 
    /* The job has entered the active set — push its row so watchers see it appear.
@@ -150,7 +154,7 @@ static char *handle_spawn(struct json_object *details,
    if (job_worker_spawn(user_id, conv_id, goal) != SUCCESS) {
       job_manager_set_terminal(conv_id, user_id, "failed", "worker spawn failed", time(NULL), 0);
       job_manager_mark_dirty(); /* terminal + unfired — wake the monitor to notify */
-      return strdup("Error: failed to start the background job worker.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: failed to start the background job worker.");
    }
 
    /* Record the spawn on the PARENT's event stream, not the child's: it is the
@@ -183,7 +187,7 @@ static char *handle_list(int user_id) {
    job_record_t jobs[JOB_TOOL_LIST_MAX];
    int n = 0;
    if (conv_db_job_list_by_user(user_id, jobs, JOB_TOOL_LIST_MAX, &n) != AUTH_DB_SUCCESS) {
-      return strdup("Error: failed to list background jobs.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: failed to list background jobs.");
    }
    if (n == 0) {
       return strdup("You have no background jobs.");
@@ -221,7 +225,7 @@ static char *handle_status(struct json_object *details, int user_id) {
        * ids — small, sequential, global across users — so a distinct "belongs to
        * someone else" reply would be a job-id enumeration oracle. Matches
        * handle_resume / handle_cancel, which say the same. */
-      return strdup("No such background job.");
+      return strdup(TOOL_RESULT_ERROR_MARK "No such background job.");
    }
 
    status_fetch_t f = { NULL };
@@ -266,7 +270,7 @@ static char *handle_status(struct json_object *details, int user_id) {
       out = strdup(buf);
    }
    free(f.last_assistant);
-   return out ? out : strdup("Error: out of memory reading job status.");
+   return out ? out : strdup(TOOL_RESULT_ERROR_MARK "Error: out of memory reading job status.");
 }
 
 /* --- cancel ---------------------------------------------------------------- */
@@ -277,7 +281,8 @@ static char *handle_resume(struct json_object *details, int user_id) {
                          ? json_object_get_int64(jid)
                          : 0;
    if (conv_id <= 0) {
-      return strdup("Error: 'job_id' is required to resume a background job.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: 'job_id' is required to resume a background job.");
    }
 
    char buf[192];
@@ -306,9 +311,11 @@ static char *handle_resume(struct json_object *details, int user_id) {
                   (long long)conv_id);
          return strdup(buf);
       case JOB_RESUME_CAPACITY:
-         return strdup("Too many jobs are running right now — try resuming it again shortly.");
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Too many jobs are running right now — try resuming it again shortly.");
       case JOB_RESUME_FAILED:
-         snprintf(buf, sizeof(buf), "Couldn't restart job #%lld.", (long long)conv_id);
+         snprintf(buf, sizeof(buf), TOOL_RESULT_ERROR_MARK "Couldn't restart job #%lld.",
+                  (long long)conv_id);
          return strdup(buf);
       case JOB_RESUME_NOTHING_TO_RUN:
          snprintf(buf, sizeof(buf),
@@ -326,7 +333,7 @@ static char *handle_resume(struct json_object *details, int user_id) {
    }
    /* No `default:` above, so -Wswitch makes a new enumerator a build error at
     * every surface rather than a silent mislabel. */
-   return strdup("No such background job.");
+   return strdup(TOOL_RESULT_ERROR_MARK "No such background job.");
 }
 
 static char *handle_cancel(struct json_object *details, int user_id) {
@@ -335,7 +342,8 @@ static char *handle_cancel(struct json_object *details, int user_id) {
                          ? json_object_get_int64(jid)
                          : 0;
    if (conv_id <= 0) {
-      return strdup("Error: 'job_id' is required to cancel a background job.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: 'job_id' is required to cancel a background job.");
    }
 
    /* Confirm it IS a job before cancelling.  The job-session pool also holds
@@ -346,7 +354,7 @@ static char *handle_cancel(struct json_object *details, int user_id) {
     * does this check; matching it here removes the asymmetry. */
    job_record_t probe;
    if (conv_db_job_get(conv_id, user_id, &probe) != AUTH_DB_SUCCESS) {
-      return strdup("No such background job.");
+      return strdup(TOOL_RESULT_ERROR_MARK "No such background job.");
    }
 
    char status[JOB_STATUS_MAX];
@@ -365,7 +373,7 @@ static char *handle_cancel(struct json_object *details, int user_id) {
       case JOB_CANCEL_NOT_FOUND:
          break; /* one answer for both — see handle_resume */
    }
-   return strdup("No such background job.");
+   return strdup(TOOL_RESULT_ERROR_MARK "No such background job.");
 }
 
 /* --- dispatch -------------------------------------------------------------- */
@@ -375,14 +383,15 @@ static char *job_tool_callback(const char *action, char *value, int *should_resp
       *should_respond = 1; /* results feed back to the LLM */
    }
    if (action == NULL || action[0] == '\0') {
-      return strdup("Error: action is required (spawn, list, status, cancel).");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: action is required (spawn, list, status, cancel).");
    }
 
    struct json_object *details = NULL;
    if (value != NULL && value[0] != '\0') {
       details = json_tokener_parse(value);
       if (details == NULL) {
-         return strdup("Error: invalid JSON in details parameter.");
+         return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid JSON in details parameter.");
       }
    } else {
       details = json_object_new_object();
@@ -419,7 +428,8 @@ static char *job_tool_callback(const char *action, char *value, int *should_resp
    if (ctx == NULL && starts_work) {
       json_object_put(details);
       OLOG_WARNING("job_tool: refused '%s' from a caller with no session context", action);
-      return strdup("Error: background jobs can only be started from a user session.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: background jobs can only be started from a user session.");
    }
 
    /* Backstop: a background-job worker runs headless and must never start further
@@ -432,7 +442,8 @@ static char *job_tool_callback(const char *action, char *value, int *should_resp
     * job the model can find with `list`. */
    if (caller_is_job && starts_work) {
       json_object_put(details);
-      return strdup("Error: background jobs can't start further background jobs.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: background jobs can't start further background jobs.");
    }
 
    char *result = NULL;
@@ -449,7 +460,9 @@ static char *job_tool_callback(const char *action, char *value, int *should_resp
    } else {
       char buf[160];
       snprintf(buf, sizeof(buf),
-               "Error: unknown action '%s'. Valid: spawn, list, status, cancel, resume.", action);
+               TOOL_RESULT_ERROR_MARK
+               "Error: unknown action '%s'. Valid: spawn, list, status, cancel, resume.",
+               action);
       result = strdup(buf);
    }
 

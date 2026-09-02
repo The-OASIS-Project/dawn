@@ -111,6 +111,30 @@
    } while (0)
 
 /* =============================================================================
+ * Forward Config Migration
+ * ============================================================================= */
+
+/* One-time, idempotent migration of retired settings on the loaded config. Runs
+ * AFTER config_apply_env (an env var can still set a legacy value) and BEFORE
+ * config_validate (which requires provider="openrouter" to be valid). */
+void config_migrate(dawn_config_t *config) {
+   if (!config)
+      return;
+
+   /* Retired: the [llm.cloud] use_openrouter gateway bool is folded into the
+    * first-class provider value. A legacy gateway install comes up as
+    * provider="openrouter" (functionally identical — same OpenRouter transport and
+    * key), and the bool is cleared so it is never consulted for resolution again. */
+   if (config->llm.cloud.use_openrouter && strcmp(config->llm.cloud.provider, "openrouter") != 0) {
+      OLOG_INFO(
+          "config: migrated retired use_openrouter=true -> llm.cloud.provider=\"openrouter\"");
+      strncpy(config->llm.cloud.provider, "openrouter", sizeof(config->llm.cloud.provider) - 1);
+      config->llm.cloud.provider[sizeof(config->llm.cloud.provider) - 1] = '\0';
+   }
+   config->llm.cloud.use_openrouter = false;
+}
+
+/* =============================================================================
  * Environment Variable Application
  * ============================================================================= */
 
@@ -171,6 +195,7 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
    ENV_STRING("DAWN_ASR_MODEL", config->asr.model);
    ENV_STRING("DAWN_ASR_MODELS_PATH", config->asr.models_path);
    ENV_INT("DAWN_ASR_DEDUP_WINDOW_SEC", config->asr.dedup_window_sec);
+   ENV_INT("DAWN_ASR_AUDIO_CTX_FLOOR", config->asr.audio_ctx_floor);
    ENV_STRING("DAWN_ASR_DISAMBIGUATION_HINT", config->asr.disambiguation_hint);
 
    /* [tts] */
@@ -208,7 +233,7 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
    ENV_BOOL("DAWN_LLM_LOCAL_VISION_ENABLED", config->llm.local.vision_enabled);
 
    /* [llm.tools] */
-   ENV_STRING("DAWN_LLM_TOOLS_MODE", config->llm.tools.mode);
+   ENV_BOOL("DAWN_LLM_TOOLS_ENABLED", config->llm.tools.enabled);
 
    /* [llm.silent_observe] */
    ENV_STRING("DAWN_LLM_SILENT_OBSERVE_PROVIDER", config->llm.silent_observe.provider);
@@ -342,6 +367,7 @@ void config_dump(const dawn_config_t *config) {
    printf("  model = \"%s\"\n", config->asr.model);
    printf("  models_path = \"%s\"\n", config->asr.models_path);
    printf("  dedup_window_sec = %d\n", config->asr.dedup_window_sec);
+   printf("  audio_ctx_floor = %d\n", config->asr.audio_ctx_floor);
    printf("  disambiguation_hint = %s\n",
           config->asr.disambiguation_hint[0] ? "(custom)" : "(built-in default)");
 
@@ -364,7 +390,6 @@ void config_dump(const dawn_config_t *config) {
    printf("\n[llm.cloud]\n");
    printf("  provider = \"%s\"\n", config->llm.cloud.provider);
    printf("  endpoint = \"%s\"\n", config->llm.cloud.endpoint);
-   printf("  use_openrouter = %s\n", config->llm.cloud.use_openrouter ? "true" : "false");
    printf("  openai_use_responses_api = \"%s\"\n", config->llm.cloud.openai_use_responses_api);
    printf("  openai_default_model_idx = %d\n", config->llm.cloud.openai_default_model_idx);
    printf("  claude_default_model_idx = %d\n", config->llm.cloud.claude_default_model_idx);
@@ -680,6 +705,9 @@ void config_dump_settings(const dawn_config_t *config,
    PRINT_SETTING_INT("dedup_window_sec", config->asr.dedup_window_sec, "DAWN_ASR_DEDUP_WINDOW_SEC",
                      detect_source_int(config->asr.dedup_window_sec, defaults.asr.dedup_window_sec,
                                        "DAWN_ASR_DEDUP_WINDOW_SEC"));
+   PRINT_SETTING_INT("audio_ctx_floor", config->asr.audio_ctx_floor, "DAWN_ASR_AUDIO_CTX_FLOOR",
+                     detect_source_int(config->asr.audio_ctx_floor, defaults.asr.audio_ctx_floor,
+                                       "DAWN_ASR_AUDIO_CTX_FLOOR"));
    /* Prose directive: report set/default rather than dumping multi-line text. */
    printf("  disambiguation_hint = %s\n",
           config->asr.disambiguation_hint[0] ? "(custom)" : "(built-in default)");
@@ -750,11 +778,6 @@ void config_dump_settings(const dawn_config_t *config,
                       detect_source_bool(config->llm.cloud.vision_enabled,
                                          defaults.llm.cloud.vision_enabled,
                                          "DAWN_LLM_CLOUD_VISION_ENABLED"));
-   PRINT_SETTING_BOOL("use_openrouter", config->llm.cloud.use_openrouter,
-                      "DAWN_LLM_CLOUD_USE_OPENROUTER",
-                      detect_source_bool(config->llm.cloud.use_openrouter,
-                                         defaults.llm.cloud.use_openrouter,
-                                         "DAWN_LLM_CLOUD_USE_OPENROUTER"));
 
    /* [llm.local] */
    printf("[llm.local]\n");
@@ -772,9 +795,9 @@ void config_dump_settings(const dawn_config_t *config,
 
    /* [llm.tools] */
    printf("[llm.tools]\n");
-   PRINT_SETTING_STR("mode", config->llm.tools.mode, "DAWN_LLM_TOOLS_MODE",
-                     detect_source_str(config->llm.tools.mode, defaults.llm.tools.mode,
-                                       "DAWN_LLM_TOOLS_MODE"));
+   PRINT_SETTING_BOOL("enabled", config->llm.tools.enabled, "DAWN_LLM_TOOLS_ENABLED",
+                      detect_source_bool(config->llm.tools.enabled, defaults.llm.tools.enabled,
+                                         "DAWN_LLM_TOOLS_ENABLED"));
 
    /* [search] */
    printf("[search]\n");
@@ -971,6 +994,7 @@ void config_dump_toml(const dawn_config_t *config) {
    printf("model = \"%s\"\n", config->asr.model);
    printf("models_path = \"%s\"\n", config->asr.models_path);
    printf("dedup_window_sec = %d\n", config->asr.dedup_window_sec);
+   printf("audio_ctx_floor = %d\n", config->asr.audio_ctx_floor);
 
    printf("\n[tts]\n");
    printf("models_path = \"%s\"\n", config->tts.models_path);
@@ -1125,6 +1149,7 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object_object_add(asr, "models_path", json_object_new_string(config->asr.models_path));
    json_object_object_add(asr, "dedup_window_sec",
                           json_object_new_int(config->asr.dedup_window_sec));
+   json_object_object_add(asr, "audio_ctx_floor", json_object_new_int(config->asr.audio_ctx_floor));
    json_object_object_add(asr, "disambiguation_hint",
                           json_object_new_string(config->asr.disambiguation_hint));
    json_object_object_add(root, "asr", asr);
@@ -1157,8 +1182,8 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object_object_add(cloud, "endpoint", json_object_new_string(config->llm.cloud.endpoint));
    json_object_object_add(cloud, "vision_enabled",
                           json_object_new_boolean(config->llm.cloud.vision_enabled));
-   json_object_object_add(cloud, "use_openrouter",
-                          json_object_new_boolean(config->llm.cloud.use_openrouter));
+   /* use_openrouter retired (folded into provider="openrouter" by config_migrate) —
+    * not emitted to the client or written back. */
    /* Key presence only (never the value) so the WebUI can warn when the gateway
     * is on but no key is configured. */
    json_object_object_add(cloud, "openrouter_key_present",
@@ -1213,7 +1238,7 @@ json_object *config_to_json(const dawn_config_t *config) {
 
    /* [llm.tools] */
    json_object *tools = json_object_new_object();
-   json_object_object_add(tools, "mode", json_object_new_string(config->llm.tools.mode));
+   json_object_object_add(tools, "enabled", json_object_new_boolean(config->llm.tools.enabled));
    json_object_object_add(llm, "tools", tools);
 
    /* [llm.silent_observe] */
@@ -1222,8 +1247,6 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_string(config->llm.silent_observe.provider));
    json_object_object_add(silent_observe, "model",
                           json_object_new_string(config->llm.silent_observe.model));
-   json_object_object_add(silent_observe, "openrouter_model",
-                          json_object_new_string(config->llm.silent_observe.openrouter_model));
    json_object_object_add(llm, "silent_observe", silent_observe);
 
    /* [llm.thinking] */
@@ -1256,8 +1279,6 @@ json_object *config_to_json(const dawn_config_t *config) {
       json_object_object_add(llm, "compact_model",
                              json_object_new_string(config->llm.compact_model));
    }
-   json_object_object_add(llm, "compact_openrouter_model",
-                          json_object_new_string(config->llm.compact_openrouter_model));
    json_object_object_add(llm, "conversation_logging",
                           json_object_new_boolean(config->llm.conversation_logging));
    json_object_object_add(llm, "rate_limit_enabled",
@@ -1456,8 +1477,6 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_string(config->memory.extraction_provider));
    json_object_object_add(memory, "extraction_model",
                           json_object_new_string(config->memory.extraction_model));
-   json_object_object_add(memory, "extraction_openrouter_model",
-                          json_object_new_string(config->memory.extraction_openrouter_model));
    json_object_object_add(memory, "extraction_timeout_ms",
                           json_object_new_int(config->memory.extraction_timeout_ms));
    json_object_object_add(memory, "paraphrase_dedup_enabled",
@@ -1505,6 +1524,10 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_int(config->memory.summary_retention_days));
    json_object_object_add(memory, "access_reinforcement_boost",
                           json_object_new_double(config->memory.access_reinforcement_boost));
+   json_object_object_add(memory, "citation_reinforcement_boost",
+                          json_object_new_double(config->memory.citation_reinforcement_boost));
+   json_object_object_add(memory, "citation_enabled",
+                          json_object_new_boolean(config->memory.citation_enabled));
    json_object_object_add(memory, "embedding_provider",
                           json_object_new_string(config->memory.embedding_provider));
    json_object_object_add(memory, "embedding_model",
@@ -2143,6 +2166,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    write_toml_string(fp, "model", config->asr.model);
    write_toml_string(fp, "models_path", config->asr.models_path);
    fprintf(fp, "dedup_window_sec = %d\n", config->asr.dedup_window_sec);
+   fprintf(fp, "audio_ctx_floor = %d\n", config->asr.audio_ctx_floor);
    write_toml_string_multiline(fp, "disambiguation_hint", config->asr.disambiguation_hint);
 
    fprintf(fp, "\n[tts]\n");
@@ -2165,8 +2189,6 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
       write_toml_string(fp, "compact_provider", config->llm.compact_provider);
    if (config->llm.compact_model[0])
       write_toml_string(fp, "compact_model", config->llm.compact_model);
-   if (config->llm.compact_openrouter_model[0])
-      write_toml_string(fp, "compact_openrouter_model", config->llm.compact_openrouter_model);
    fprintf(fp, "conversation_logging = %s\n", config->llm.conversation_logging ? "true" : "false");
 
    fprintf(fp, "\n[llm.cloud]\n");
@@ -2174,7 +2196,8 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    if (config->llm.cloud.endpoint[0])
       write_toml_string(fp, "endpoint", config->llm.cloud.endpoint);
    fprintf(fp, "vision_enabled = %s\n", config->llm.cloud.vision_enabled ? "true" : "false");
-   fprintf(fp, "use_openrouter = %s\n", config->llm.cloud.use_openrouter ? "true" : "false");
+   /* use_openrouter retired: never written back (folded into provider="openrouter" by
+    * config_migrate at load). A legacy true value migrates once, then disappears here. */
 
    /* Helper macro for writing model arrays with proper escaping.
     * Model names are expected to be ASCII alphanumeric (e.g., "gpt-4o", "gemini-2.5-flash"),
@@ -2221,7 +2244,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "vision_enabled = %s\n", config->llm.local.vision_enabled ? "true" : "false");
 
    fprintf(fp, "\n[llm.tools]\n");
-   write_toml_string(fp, "mode", config->llm.tools.mode);
+   fprintf(fp, "enabled = %s\n", config->llm.tools.enabled ? "true" : "false");
    /* Write local_enabled array if configured (even if empty - empty means none enabled) */
    if (config->llm.tools.local_enabled_configured || config->llm.tools.local_enabled_count > 0) {
       if (config->llm.tools.local_enabled_count > 0) {
@@ -2296,7 +2319,6 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "\n[llm.silent_observe]\n");
    write_toml_string(fp, "provider", config->llm.silent_observe.provider);
    write_toml_string(fp, "model", config->llm.silent_observe.model);
-   write_toml_string(fp, "openrouter_model", config->llm.silent_observe.openrouter_model);
 
    fprintf(fp, "\n[search]\n");
    write_toml_string(fp, "engine", config->search.engine);
@@ -2417,7 +2439,6 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "source_budget_chars = %d\n", config->memory.source_budget_chars);
    write_toml_string(fp, "extraction_provider", config->memory.extraction_provider);
    write_toml_string(fp, "extraction_model", config->memory.extraction_model);
-   write_toml_string(fp, "extraction_openrouter_model", config->memory.extraction_openrouter_model);
    fprintf(fp, "extraction_timeout_ms = %d\n", config->memory.extraction_timeout_ms);
    fprintf(fp, "paraphrase_dedup_enabled = %s\n",
            config->memory.paraphrase_dedup_enabled ? "true" : "false");
@@ -2447,6 +2468,9 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "prune_threshold = %.2f\n", config->memory.decay_prune_threshold);
    fprintf(fp, "summary_retention_days = %d\n", config->memory.summary_retention_days);
    fprintf(fp, "access_reinforcement_boost = %.2f\n", config->memory.access_reinforcement_boost);
+   fprintf(fp, "citation_enabled = %s\n", config->memory.citation_enabled ? "true" : "false");
+   fprintf(fp, "citation_reinforcement_boost = %.2f\n",
+           config->memory.citation_reinforcement_boost);
 
    fprintf(fp, "\n[memory.embeddings]\n");
    {

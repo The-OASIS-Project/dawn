@@ -527,6 +527,7 @@ set(DAWN_SOURCES
     # Multi-threaded core (command routing always needed)
     src/core/command_router.c
     src/core/command_executor.c
+    src/core/llm_response_finalize.c  # subsystem-neutral (libc + session_t type only); needed by voice
     src/core/component_status.c
     src/core/device_types.c
     src/core/hash_util.c
@@ -542,12 +543,14 @@ set(DAWN_SOURCES
 
     # LLM subsystem
     src/llm/llm_interface.c
+    src/llm/llm_model_version.c
     src/llm/llm_silent_observe.c
     src/llm/llm_openai.c
     src/llm/llm_openai_cache.c
     src/llm/llm_openai_chat_completions.c
     src/llm/llm_openai_history.c
     src/llm/llm_openai_responses.c
+    src/llm/llm_openai_responses_input.c
     src/llm/llm_claude.c
     src/llm/llm_claude_format.c
     src/llm/llm_streaming.c
@@ -825,6 +828,8 @@ list(APPEND DAWN_SOURCES
     src/document_original_store.c
     src/image_store.c
     src/memory/memory_db.c
+    src/memory/memory_citation.c
+    src/memory/memory_citation_parse.c
     src/memory/memory_db_facts.c
     src/memory/memory_db_summaries.c
     src/memory/memory_db_prefs.c

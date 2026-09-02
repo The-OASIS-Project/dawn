@@ -17,6 +17,14 @@
    // 'session' messages per (re)connect (reconnect + capability-update), and each would
    // otherwise re-issue a full load_conversation. Reset on disconnect (updateConnectionStatus).
    let restoredConvIdThisConnection = null;
+   // Page-load-lifetime latch — NOT reset per socket (a HARD REFRESH is a fresh JS context where
+   // this starts false again; a transient in-context socket reconnect keeps it true). A true
+   // reconnect normally skips the reload because the transcript DOM is already current — but a
+   // hard refresh WIPES the DOM while the server session often SURVIVES the brief drop
+   // (reconnected:true), so the first restore after a page load must still full-load or the
+   // transcript stays blank with the sidebar showing the conversation selected. Flips true once
+   // the first restore issues that load.
+   let transcriptRestoredSincePageLoad = false;
    // Last authenticated state the popover fan-out saw, so it can tell an actual
    // auth TRANSITION from the many unchanged-auth calls updateAuthVisibility()
    // makes (every get_config_response).  Only the transition warrants a refetch.
@@ -118,7 +126,10 @@
                   ) {
                      DawnStreaming.clearReasoningState();
                   }
-                  DawnTranscript.addEntry(msg.payload.role, msg.payload.text);
+                  // Living tool pills: tool rendering now comes from the tool_step frame (we
+                  // advertise tool_step_origin, so the server fans our own turn's steps to us).
+                  // The role:'tool' transcript frame is kept ONLY for the reasoning-discard side
+                  // effect above — NOT rendered here, or it would double the pill.
                } else if (msg.payload.role === 'visual') {
                   // Render visual inline. If a progress placeholder exists (from
                   // visual_progress_start), swap it in-place. Otherwise, split the
@@ -207,7 +218,14 @@
                      pendingVisualsForSave = [];
                   }
 
-                  DawnTranscript.addEntry(msg.payload.role, displayContent);
+                  // Pass message_id (present on server-persisted echoes) so the bubble is
+                  // stamped and a fanned-out message_appended for the same row dedups (§12c).
+                  DawnTranscript.addEntry(
+                     msg.payload.role,
+                     displayContent,
+                     null,
+                     msg.payload.message_id
+                  );
 
                   // Save to conversation history (auto-creates conversation on first message)
                   // Skip replay messages (history replay on reconnect, already in DB)
@@ -269,6 +287,17 @@
                }
                break;
             }
+            case 'session_superseded':
+               // Another tab/device reconnected and took over this session. This is
+               // the proxy-robust takeover signal — a reverse proxy strips the 4001
+               // close code down to a generic 1006, so we can't rely on the code
+               // alone. Mark superseded so the close that follows this frame backs
+               // off (no auto-reconnect), and show the takeover state now. Reclaim
+               // is a deliberate click on the connection status (forceReconnect).
+               console.log('Session superseded by another connection (data frame)');
+               DawnWS.markSuperseded();
+               updateConnectionStatus('superseded', (msg.payload && msg.payload.reason) || null);
+               break;
             case 'session':
                console.log('Session token received');
                DawnStore.set(DawnStore.KEYS.SESSION_TOKEN, msg.payload.token);
@@ -324,11 +353,29 @@
                if (typeof DawnAlwaysOn !== 'undefined') {
                   DawnAlwaysOn.resumeAfterReconnectIfNeeded();
                }
-               // Restore active conversation context (backend session may have lost it on restart)
-               // This loads the conversation history into the LLM context so subsequent
-               // messages have proper context
+               // Restore active conversation context. Four cases force a full render:
+               //  - FRESH session (reconnected:false — restart/idle-expiry/evicted-to-fresh):
+               //    backend has no LLM context → full load_conversation (also re-renders).
+               //  - RECLAIM after takeover: another tab held the session and may have added
+               //    turns behind this tab's back → full load_conversation to RE-RENDER the
+               //    (possibly stale) transcript, even though the backend still has context.
+               //  - HARD REFRESH while the server session survived (reconnected:true, but the
+               //    DOM was wiped): the first restore since page load must full-load, else the
+               //    transcript stays blank while the sidebar shows the conversation selected.
+               //    Detected via the page-load latch, NOT `reconnected` (the server can't tell a
+               //    DOM-preserving socket reconnect from a page reload — both survive as the same
+               //    session). load_conversation also sets active_conversation_id server-side, so
+               //    it subsumes the re-anchor below.
+               //  - Normal TRUE reconnect (display already current): skip the reload, just
+               //    lightweight re-anchor.
+               // Feature-detect: an older backend omits `reconnected`, so absent === load
+               // (prior always-restore behavior). consumeReclaiming() is a one-shot.
+               const reclaiming = DawnWS.consumeReclaiming ? DawnWS.consumeReclaiming() : false;
                const savedConvId = DawnHistory.getActiveConversationId();
                if (
+                  (msg.payload.reconnected !== true ||
+                     reclaiming ||
+                     !transcriptRestoredSincePageLoad) &&
                   savedConvId &&
                   DawnState.authState.authenticated &&
                   savedConvId !== restoredConvIdThisConnection
@@ -336,9 +383,33 @@
                   // First 'session' of this connection for this conversation — restore once.
                   // Later duplicate 'session' messages (capability update) are skipped.
                   restoredConvIdThisConnection = savedConvId;
-                  console.log('Restoring active conversation:', savedConvId);
+                  transcriptRestoredSincePageLoad = true;
+                  console.log(
+                     reclaiming
+                        ? 'Reclaim after takeover — full reload:'
+                        : 'Restoring active conversation:',
+                     savedConvId
+                  );
                   DawnWS.send({
                      type: 'load_conversation',
+                     payload: { conversation_id: savedConvId },
+                  });
+               } else if (
+                  msg.payload.reconnected === true &&
+                  savedConvId &&
+                  DawnState.authState.authenticated &&
+                  savedConvId !== restoredConvIdThisConnection
+               ) {
+                  // True reconnect: the server session still holds LLM context, so we
+                  // skip the history reload — but the reconnected connection is a NEW
+                  // ws_connection with active_conversation_id=0, so we must lightweight
+                  // re-anchor it (no replay). Without this a voice-first turn would
+                  // persist to conv=0 (lost on reload / orphan tripwire); text turns
+                  // self-heal by carrying conversation_id, voice turns don't.
+                  restoredConvIdThisConnection = savedConvId;
+                  console.log('Re-anchoring active conversation (no reload):', savedConvId);
+                  DawnWS.send({
+                     type: 'set_active_conversation',
                      payload: { conversation_id: savedConvId },
                   });
                }
@@ -541,8 +612,23 @@
                }
                break;
             case 'message_appended':
-               // Final assistant text for an event-only consumer. The browser
-               // already has it from the stream, so this is a no-op here.
+               // Phase-0 cross-viewer fan-out (server-authoritative persistence §6a):
+               // a reply persisted for THIS conversation. The origin (which streamed
+               // it) adopts the message_id onto its bubble; a second viewer of the
+               // same conversation renders it inline; a non-active viewer marks unread.
+               if (typeof DawnStreaming !== 'undefined' && DawnStreaming.handleMessageAppended) {
+                  DawnStreaming.handleMessageAppended(msg.payload);
+               }
+               break;
+            case 'tool_step':
+               // Ephemeral LIVE tool_call/tool_result (living tool pills). We advertise
+               // tool_step_origin, so the server fans this for our OWN turn AND bystander turns;
+               // either way it renders as a pill in the active conversation's transcript. No
+               // double-render on our own turn — the redundant role:'tool' frame is not rendered.
+               // Not persisted — reload rebuilds tool activity from the messages table.
+               if (typeof DawnStreaming !== 'undefined' && DawnStreaming.handleToolStep) {
+                  DawnStreaming.handleToolStep(msg.payload);
+               }
                break;
             case 'thinking_start':
                DawnStreaming.handleThinkingStart(msg.payload);
@@ -1107,6 +1193,15 @@
                   DawnCalendar.onEventsChanged();
                }
                break;
+            case 'config_changed':
+               /* Another admin session saved config; re-pull so config-derived
+                * panels (model lists, etc.) refresh instead of showing a stale
+                * view.  Only admins receive this frame, but gate defensively.
+                * requestConfig() no-ops if the socket is down. */
+               if (DawnState.authState.isAdmin && typeof DawnSettingsConfig !== 'undefined') {
+                  DawnSettingsConfig.requestConfig();
+               }
+               break;
             case 'memory_extraction_notice':
                if (msg.payload) {
                   showMemoryExtractionNotice(msg.payload.level, msg.payload.message);
@@ -1322,11 +1417,20 @@
             data: img.data,
             mime_type: img.mimeType,
          }));
-         // Save image IDs for history storage (before clearing)
-         // Images are now stored server-side and referenced by ID
-         pendingThumbnailsForSave = DawnVision.getPendingImageIds
+         // Persistence keys (from /api/images). NOTE: getPendingImages() above
+         // intentionally returns only {data, mimeType} (no id), so read the ids via
+         // getPendingImageIds() — which maps the SAME pendingImages array in order,
+         // keeping them aligned with images[]. The DAEMON is authoritative for
+         // user-turn persistence: it builds the [IMAGE:<id>] markers and persists the
+         // turn itself, then echoes server_saved=true so the client skips its own save.
+         // image_ids is MANDATORY on an image turn — without valid ids the daemon
+         // persists text-only and the images are lost on reload (hard cut-over).
+         const pendingImageIds = DawnVision.getPendingImageIds
             ? DawnVision.getPendingImageIds()
             : [];
+         msg.payload.image_ids = pendingImageIds;
+         // Retained only for local display of the just-sent turn (no longer a save key).
+         pendingThumbnailsForSave = pendingImageIds;
          DawnVision.clearImages(); // Clear after adding to message
       } else {
          pendingThumbnailsForSave = [];
@@ -1376,10 +1480,22 @@
       } else if (status === 'connecting') {
          DawnElements.connectionStatus.textContent = 'Connecting...';
       } else {
-         // Show disconnect reason if available (truncate for display)
-         DawnElements.connectionStatus.textContent = reason
-            ? 'Disconnected: ' + (reason.length > 30 ? reason.substring(0, 30) + '...' : reason)
-            : 'Disconnected';
+         if (status === 'superseded') {
+            // Another tab/device took over this session. Reuse the 'disconnected'
+            // visual (not connected here), but tell the user how to reclaim — the
+            // connection-status click handler forceReconnects (evicting the other).
+            DawnElements.connectionStatus.className = 'disconnected';
+            // Short label to fit the status pill (sized for "Connecting..."); the full
+            // explanation lives in the tooltip.
+            DawnElements.connectionStatus.textContent = 'Use DAWN here';
+            DawnElements.connectionStatus.title =
+               'This session is active in another tab or device. Click to make it active here.';
+         } else {
+            // Show disconnect reason if available (truncate for display)
+            DawnElements.connectionStatus.textContent = reason
+               ? 'Disconnected: ' + (reason.length > 30 ? reason.substring(0, 30) + '...' : reason)
+               : 'Disconnected';
+         }
          // Tear down stale phone call UI — a persistent "On call" pill must not
          // outlive the connection that authenticates its state.
          if (typeof DawnPhone !== 'undefined') {
@@ -2418,9 +2534,12 @@
       });
       DawnElements.connectionStatus.style.cursor = 'pointer';
 
-      // Reconnect on visibility change
+      // Reconnect on visibility change — but NOT if the server superseded us
+      // (another tab took over). Otherwise focusing the superseded tab would
+      // silently re-steal the session and restart the tab war. Reclaim is only via
+      // an explicit click on the connection status (forceReconnect).
       document.addEventListener('visibilitychange', function () {
-         if (!document.hidden && !DawnWS.isConnected()) {
+         if (!document.hidden && !DawnWS.isConnected() && !DawnWS.isSuperseded()) {
             DawnWS.forceReconnect();
          }
       });

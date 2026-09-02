@@ -76,7 +76,8 @@
                                   # Env: DAWN_VAD_SPEECH_THRESHOLD_TTS
 # silence_threshold = 0.30        # Below this probability = silence
                                   # Env: DAWN_VAD_SILENCE_THRESHOLD
-# end_of_speech_duration = 1.2    # Seconds of silence to end recording
+# end_of_speech_duration = 1.0    # Seconds of silence to end recording (local
+                                  # mic AND remote WebUI always-on)
                                   # Env: DAWN_VAD_END_OF_SPEECH_DURATION
 # max_recording_duration = 30.0   # Maximum recording length in seconds
                                   # Env: DAWN_VAD_MAX_RECORDING_DURATION
@@ -110,6 +111,14 @@
                                   # Default ASR_DEDUP_WINDOW_SEC_DEFAULT, max
                                   # ASR_DEDUP_WINDOW_SEC_MAX (dawn_config.h).
                                   # Runtime-tunable. Env: DAWN_ASR_DEDUP_WINDOW_SEC
+# audio_ctx_floor = 768           # Scale Whisper's encoder audio context to the
+                                  # utterance length (faster transcription on short
+                                  # commands) with this token floor. 0 disables
+                                  # (full 1500-token / 30s window = default Whisper).
+                                  # 768 validated safe (<=+1pp WER) on base.en AND
+                                  # small.en; lower risks hallucination on smaller
+                                  # models (base.en craters at 256). Applies at ASR
+                                  # init (next daemon start). Env: DAWN_ASR_AUDIO_CTX_FLOOR
 # disambiguation_hint = ""        # Prompt hint injected on voice-input surfaces
                                   # (satellites, local mic, WebUI voice turns) warning
                                   # the LLM its input was speech-transcribed and may
@@ -168,12 +177,14 @@
                                   # Env: DAWN_LLM_MAX_TOKENS
 # compact_soft_threshold = 0.60   # Async background compaction trigger
 # compact_hard_threshold = 0.85   # Blocking compaction trigger (safety net)
-# compact_use_session = true      # Use session's LLM for compaction (false = dedicated)
-# compact_provider = ""           # Dedicated compaction provider: claude/openai/gemini/local
-# compact_model = ""              # Dedicated compaction model (e.g., claude-haiku-4-5)
-# compact_openrouter_model = ""   # Compaction model when the OpenRouter gateway is on
-                                  # ("vendor/model", e.g. anthropic/claude-3.5-haiku).
-                                  # Empty = use the main OpenRouter default model.
+# compact_use_session = true      # Use session's LLM for compaction. Set false to compact with a
+                                  # dedicated (cheaper) model instead of your chat model — RECOMMENDED.
+# compact_provider = "claude"     # Dedicated compaction provider: claude/openai/gemini/openrouter/local
+                                  # (used only when compact_use_session = false).
+# compact_model = "claude-haiku-4-5"  # Dedicated compaction model. RECOMMENDED: claude-haiku-4-5 —
+                                  # compaction is a summarization pass, so a small fast model keeps it
+                                  # cheap (same reasoning as extraction; not separately benchmarked). A
+                                  # "vendor/model" slug when compact_provider = "openrouter".
 # conversation_logging = false    # Save chat history to log files (WebUI saves to DB)
                                   # Env: DAWN_LLM_CONVERSATION_LOGGING
 # rate_limit_enabled = true       # Throttle cloud API calls to avoid 429 errors
@@ -182,24 +193,23 @@
                                   # Env: DAWN_LLM_RATE_LIMIT_RPM
 
 [llm.cloud]
-# provider = "openai"             # "openai", "claude", or "gemini"
+# provider = "openai"             # "openai", "claude", "gemini", or "openrouter"
                                   # Env: DAWN_LLM_CLOUD_PROVIDER
 # endpoint = ""                   # Custom endpoint (empty = default provider URL)
                                   # Env: DAWN_LLM_CLOUD_ENDPOINT
 # vision_enabled = true           # Cloud models typically support vision/images
                                   # Env: DAWN_LLM_CLOUD_VISION_ENABLED
 
-# OpenRouter gateway mode. When true, ALL cloud traffic — chat AND the auxiliary
-# memory-extraction / compaction / silent-observe / scheduler calls — routes through
-# OpenRouter (https://openrouter.ai/api/v1) using openrouter_api_key from secrets.toml,
-# regardless of the "provider" setting above. The direct provider/key fields are then
-# unused. This keeps "which key am I using" unambiguous: either fully direct, or fully
-# OpenRouter. The background tasks each have a SEPARATE OpenRouter-formatted model setting
-# (compact_openrouter_model, memory.extraction_openrouter_model,
-# llm.silent_observe.openrouter_model) used only when the gateway is on — so you don't have
-# to rewrite the direct-API model names every time you toggle. Each falls back to the main
-# OpenRouter default (openrouter_default_model_idx) when left empty.
-# use_openrouter = false          # Env: DAWN_LLM_CLOUD_USE_OPENROUTER
+# OpenRouter is a first-class provider: set provider = "openrouter" to route your main chat
+# through OpenRouter (https://openrouter.ai/api/v1) using openrouter_api_key from secrets.toml.
+# Its model list (openrouter_models below) uses "vendor/model" IDs. The background tasks
+# (memory extraction, compaction, silent-observe) each follow their OWN provider setting
+# (extraction_provider / compact_provider / silent_observe.provider) — set one to "openrouter"
+# and put a "vendor/model" slug in that task's model field (empty = the main OpenRouter default).
+#
+# NOTE: the retired [llm.cloud] use_openrouter gateway bool is auto-migrated to
+# provider = "openrouter" on load — an old use_openrouter = true config keeps working and
+# is rewritten to the provider form on the next settings save.
 
 # OpenAI endpoint selection. "auto" routes gpt-5.4* to /v1/responses (where
 # function tools + reasoning are supported); other models continue to use
@@ -210,17 +220,17 @@
                                   # Env: DAWN_LLM_CLOUD_OPENAI_USE_RESPONSES_API
 
 # Model lists for quick switching via WebUI or voice
-# First model in list is used when switching to that provider
-# openai_models = ["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.2", "gpt-5-mini", "gpt-5-nano", "o4-mini"]
+# First model in list is used when switching to that provider (up to 32 models per provider)
+# openai_models = ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4-mini", "gpt-5.4-nano"]
 # openai_default_model_idx = 0
-# claude_models = ["claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5"]
+# claude_models = ["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-4-8", "claude-opus-5"]
 # claude_default_model_idx = 0
-# gemini_models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash-preview", "gemini-3-pro-preview"]
+# gemini_models = ["gemini-3.7-flash", "gemini-3.1-pro-preview"]
 # gemini_default_model_idx = 0
-# OpenRouter favorites (used when use_openrouter = true). IDs are "vendor/model".
+# OpenRouter favorites (used when provider = "openrouter"). IDs are "vendor/model".
 # These are the curated shortlist shown in the header model switcher.
-# openrouter_models = ["anthropic/claude-opus-4.7", "anthropic/claude-sonnet-4.6", "anthropic/claude-haiku-4.5", "openai/gpt-5.5", "openai/gpt-5.4-mini", "openai/gpt-5.4-nano", "google/gemini-3.1-pro-preview", "google/gemini-3.5-flash"]
-# openrouter_default_model_idx = 1   # anthropic/claude-sonnet-4.6
+# openrouter_models = ["openai/gpt-5.6-luna", "openai/gpt-5.6-terra", "openai/gpt-5.6-sol", "openai/gpt-5.5", "openai/gpt-5.4-mini", "openai/gpt-5.4-nano", "anthropic/claude-haiku-4.5", "anthropic/claude-sonnet-5", "anthropic/claude-opus-4.8", "anthropic/claude-opus-5", "google/gemini-3.7-flash", "google/gemini-3.1-pro-preview"]
+# openrouter_default_model_idx = 0   # openai/gpt-5.6-luna
                                   # Verify slugs against https://openrouter.ai/models
 
 [llm.local]
@@ -236,11 +246,10 @@
                                   # Env: DAWN_LLM_LOCAL_PROVIDER
 
 [llm.tools]
-# mode = "native"                 # Tool/function calling mode:
-                                  # "native": Use provider's native tool calling (recommended)
-                                  # "command_tags": Extract JSON from <command> tags (legacy)
-                                  # "disabled": No tool calling
-                                  # Env: DAWN_LLM_TOOLS_MODE
+# enabled = true                  # Native tool/function calling on (true) or off (false).
+                                  # Env: DAWN_LLM_TOOLS_ENABLED
+                                  # (Legacy `mode = "native"/"command_tags"/"disabled"` is still
+                                  #  read for back-compat — "disabled" maps to enabled=false.)
 # Per-tool gating — two models, chosen per surface (local = voice mic, remote =
 # WebUI/satellite). DANGEROUS tools (shutdown, email, phone, document_manage)
 # are NEVER auto-enabled under either model; list them in *_enabled to opt in.
@@ -289,12 +298,11 @@
 # tasks, satellite registrations, etc.  Calls are non-streaming, no tools, no
 # TTS, schema-validated, and audit-logged.  See
 # docs/DYNAMIC_CONTEXT_INJECTION_DESIGN.md.
-# provider = "local"              # "local" | "ollama" | "openai" | "claude" | "anthropic" | "gemini"
+# provider = "local"              # "local"|"ollama"|"openai"|"claude"|"anthropic"|"gemini"|"openrouter"
                                   # Env: DAWN_LLM_SILENT_OBSERVE_PROVIDER
-# model = ""                      # Model name; empty = let provider pick a default
+# model = ""                      # Model name; empty = let provider pick a default. A
+                                  # "vendor/model" slug when provider = "openrouter".
                                   # Env: DAWN_LLM_SILENT_OBSERVE_MODEL
-# openrouter_model = ""           # Model when the OpenRouter gateway is on ("vendor/model",
-                                  # e.g. anthropic/claude-3.5-haiku). Empty = main OpenRouter default.
 
 # =============================================================================
 # Web Search (SearXNG)
@@ -544,17 +552,15 @@
 [memory]
 # enabled = true                  # Enable persistent user memory
 # context_budget_tokens = 800     # Max tokens for memory context in system prompt
-# extraction_provider = "local"   # LLM provider for fact extraction: "local", "openai", "claude"
-# extraction_model = "qwen2.5:7b" # Model for memory extraction
-                                  # Recommended: claude-haiku-4-5 (validated by the four-model
-                                  # LoCoMo sweep — see benchmarks/README.md "four-model extraction
-                                  # sweep results"). Sonnet only beats Haiku by +1.7 pp on
-                                  # recall_generation; Opus is *worse* than Haiku (entity over-
-                                  # fragmentation). Going to a larger Claude tier is not a free
-                                  # win for extraction.
-# extraction_openrouter_model = "" # Extraction model when the OpenRouter gateway is on
-                                  # ("vendor/model", e.g. anthropic/claude-3.5-haiku).
-                                  # Empty = main OpenRouter default.
+# extraction_provider = "claude"  # Fact-extraction provider: "local", "openai", "claude", "openrouter"
+# extraction_model = "claude-haiku-4-5"  # RECOMMENDED. A "vendor/model" slug when extraction_provider
+                                  # = "openrouter" (empty = OpenRouter default). Needs claude_api_key in
+                                  # secrets.toml; for a fully-offline setup use provider = "local" plus
+                                  # a local model such as "qwen2.5:7b".
+                                  # Why Haiku: validated by the four-model LoCoMo sweep (see
+                                  # benchmarks/README.md "four-model extraction sweep results") — Sonnet
+                                  # beats Haiku by only +1.7 pp recall_generation and Opus is *worse*
+                                  # (entity over-fragmentation). A larger tier is not a free win here.
 # extraction_timeout_ms = 120000  # LLM timeout for fact extraction (2 min)
                                   # Env: DAWN_MEMORY_EXTRACTION_TIMEOUT_MS
 # note_extraction_guard = true    # Keep reference text filed via the document_manage
@@ -594,6 +600,17 @@
 # summary_retention_days = 30     # Delete conversation summaries older than N days
 # access_reinforcement_boost = 0.05  # Confidence boost when a fact is accessed (+5%)
                                   # Time-gated: only boosts once per hour to prevent pinning
+# Memory citation signal: tag surfaced memories [M#], have the assistant emit
+# <cited>, and record which were used in an audit table.  ON for fresh installs
+# (this template).  Compile-time DEFAULT is false, so an EXISTING dawn.toml that
+# omits this key stays off on upgrade (opt-in).
+citation_enabled = true
+# Phase 2: confidence boost (0.0-0.5) when the assistant CITES a fact, 1h-cooldown
+# gated on the last_cited column, ceilinged at 1.0.  Requires citation_enabled = true.
+# ON at 0.05 for fresh installs (safe: the extraction guard means a new DB accrues
+# no transient device-state junk to entrench).  Compile-time DEFAULT is 0.0, so an
+# UPGRADING user is OFF until they opt in — see UPGRADING.md (2026-09-02).
+citation_reinforcement_boost = 0.05
 
 [memory.embeddings]
 # provider = "onnx"               # Embedding provider: "onnx" (local), "ollama", or "openai"
@@ -974,7 +991,8 @@
 [attention]
 # enabled = false                 # Master switch (evaluation + delivery).
 # max_alerts_per_hour = 4         # Global spoken-alert budget; over-budget
-                                  #   alerts degrade to a silent banner. 0-100.
+                                  #   alerts degrade to a silent banner. 0-100;
+                                  #   0 = no limit (every alert is always spoken).
 # inject_into_sessions = false    # Also make an active conversation aware of a
                                   #   fired alert (so Friday can reference it).
 # judge_enabled = false           # P2 LLM salience judge (not yet active).

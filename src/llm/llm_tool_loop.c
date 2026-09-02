@@ -146,7 +146,9 @@ static char *build_reasoning_json(const llm_tool_response_t *result, const char 
  * reconnect/reload — same as before this feature existed. */
 static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
                                        int before_len,
-                                       const char *reasoning_json) {
+                                       const char *reasoning_json,
+                                       int iteration,
+                                       const tool_result_list_t *results) {
    /* for_reconnect (not session_get): a turn that survives a client disconnect
     * (background-jobs Phase 1) must STILL persist its tool-iteration rows
     * server-side.  session_get() skips disconnected sessions and would return
@@ -182,19 +184,46 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
    }
 
    /* The event log is conversation-scoped; the turn's conversation was captured
-    * at dispatch (never the live view — Phase 0's rule).  ev_observe additionally
-    * scopes step events to the same observe set as the `status` heartbeat, so
-    * ordinary interactive turns don't pay the durable-log + fan-out tax. */
+    * at dispatch (never the live view — Phase 0's rule).  ev_observe scopes DURABLE
+    * step events to the same observe set as the `status` heartbeat (jobs / background /
+    * job-conversation turns), so ordinary interactive turns don't pay the durable-log tax.
+    *
+    * fan_ephemeral is the mirror image (SERVER_AUTHORITATIVE_PERSISTENCE §Phase-3): an
+    * ordinary conversation-bound foreground turn (typed or voice) that is NOT on the durable
+    * observe path fans its tool steps LIVE to the user's OTHER browsers viewing this conv, with
+    * NO conversation_events write — the messages table already persists the step (tool-persist
+    * hook), so reload rebuilds it; the fan is pure live-view sugar.  The two are mutually
+    * exclusive (ev_observe XOR fan_ephemeral when ev_conv>0), so a step takes exactly one path
+    * and jobs never double-emit. */
    const int64_t ev_conv = atomic_load(&s->stream_conversation_id);
    const int ev_user = (int)s->metrics.user_id;
    const bool ev_observe = ev_conv > 0 && atomic_load(&s->events_observable);
+   const bool fan_ephemeral = ev_conv > 0 && !ev_observe;
+   const bool ev_live = ev_observe || fan_ephemeral; /* either surface consumes tool events */
 
    /* The canonical role:tool result row carries no tool name — only its
     * tool_call_id — but the redactor needs the name to apply the
     * TOOL_CAP_SECRETS backstop.  The assistant tool_calls row (with both id and
     * name) precedes its results in this same batch, so map id->name as we pass
-    * it and look up when the result arrives. */
-   struct json_object *tcid_to_name = ev_observe ? json_object_new_object() : NULL;
+    * it and look up when the result arrives.  Built when EITHER surface is live. */
+   struct json_object *tcid_to_name = ev_live ? json_object_new_object() : NULL;
+
+   /* Parallel tcid -> is_error map for the red-only pill signal.  Built UP FRONT from `results`
+    * (whose structs carry the execute-time is_error verdict), not during the row walk — the
+    * canonical role:tool rows carry only stripped text, so the failure signal must come from here.
+    * Consumed by BOTH the persist hook (cb — so a reloaded conv reds the failed pill) and the live
+    * tool_step emit; hence built whenever we persist OR fan, not only when ev_live.  A tcid with no
+    * entry / an uncorrelated result degrades to no-error (neutral), the failure-safe direction. */
+   struct json_object *tcid_to_error = (cb != NULL || ev_live) ? json_object_new_object() : NULL;
+   if (tcid_to_error != NULL && results != NULL) {
+      for (int r = 0; r < results->count; r++) {
+         const char *rid = results->results[r].tool_call_id;
+         if (rid != NULL && rid[0] != '\0') {
+            json_object_object_add(tcid_to_error, rid,
+                                   json_object_new_boolean(results->results[r].is_error));
+         }
+      }
+   }
 
    int n = json_object_array_length(canonical);
    for (int i = 0; i < n; i++) {
@@ -210,11 +239,13 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
       if (json_object_object_get_ex(m, "tool_calls", &tc_obj)) {
          const char *tc_json = json_object_to_json_string(tc_obj);
          if (cb) {
-            cb(ud, role, content ? content : "", tc_json, NULL, reasoning_json);
+            /* Assistant tool_calls row — never a failure verdict itself (that rides the
+             * role:tool result rows below). */
+            cb(ud, role, content ? content : "", tc_json, NULL, reasoning_json, false);
          }
          /* One tool_call event per call in the batch: an iteration can invoke
           * several tools, and a tailer wants them individually, not as one blob. */
-         if (ev_observe && json_object_is_type(tc_obj, json_type_array)) {
+         if (ev_live && json_object_is_type(tc_obj, json_type_array)) {
             int ncalls = json_object_array_length(tc_obj);
             for (int c = 0; c < ncalls; c++) {
                struct json_object *call = json_object_array_get_idx(tc_obj, c);
@@ -234,16 +265,33 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
                if (call_id && tool_name && tcid_to_name) {
                   json_object_object_add(tcid_to_name, call_id, json_object_new_string(tool_name));
                }
-               conv_event_emit(ev_conv, ev_user, CONV_EVENT_TOOL_CALL,
-                               event_payload_tool_call(tool_name, args));
+               /* ev_observe (jobs) → durable conv_event_emit (persist + fan); else
+                * fan_ephemeral (interactive/voice) → live-only cross-viewer fan, no DB row.
+                * Both TAKE OWNERSHIP of the payload. */
+               char *tc_payload = event_payload_tool_call(tool_name, args, call_id, iteration);
+               if (ev_observe) {
+                  conv_event_emit(ev_conv, ev_user, CONV_EVENT_TOOL_CALL, tc_payload);
+               } else {
+                  conv_event_tool_step_fanout(ev_conv, ev_user, s->session_id,
+                                              atomic_load(&s->current_stream_id),
+                                              CONV_EVENT_TOOL_CALL, tc_payload);
+               }
             }
          }
       } else if (json_object_object_get_ex(m, "tool_call_id", &tcid_obj)) {
          const char *tcid = json_object_get_string(tcid_obj);
-         if (cb) {
-            cb(ud, role, content ? content : "", NULL, tcid, NULL);
+         /* Result's confirmed-failure verdict — needed by BOTH the persist hook (so reload reds
+          * it) and the live emit below.  Uncorrelated/absent tcid -> false (neutral). */
+         bool r_is_error = false;
+         struct json_object *eo = NULL;
+         if (tcid != NULL && tcid_to_error != NULL &&
+             json_object_object_get_ex(tcid_to_error, tcid, &eo)) {
+            r_is_error = json_object_get_boolean(eo);
          }
-         if (ev_observe) {
+         if (cb) {
+            cb(ud, role, content ? content : "", NULL, tcid, NULL, r_is_error);
+         }
+         if (ev_live) {
             /* Recover the tool name from the batch's tool_calls (mapped above) so
              * the redactor's TOOL_CAP_SECRETS backstop can fire; without it every
              * result persisted unredacted.  A rare uncorrelated result (NULL name)
@@ -256,30 +304,61 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
                                  json_object_object_get_ex(tcid_to_name, tcid, &nmo))
                                     ? json_object_get_string(nmo)
                                     : NULL;
-            conv_event_emit(ev_conv, ev_user, CONV_EVENT_TOOL_RESULT,
-                            event_payload_tool_result(rtool, content));
+            char *tr_payload = event_payload_tool_result(rtool, content, tcid, iteration,
+                                                         r_is_error);
+            if (ev_observe) {
+               conv_event_emit(ev_conv, ev_user, CONV_EVENT_TOOL_RESULT, tr_payload);
+            } else {
+               conv_event_tool_step_fanout(ev_conv, ev_user, s->session_id,
+                                           atomic_load(&s->current_stream_id),
+                                           CONV_EVENT_TOOL_RESULT, tr_payload);
+            }
          }
       }
    }
 
    json_object_put(tcid_to_name);
+   json_object_put(tcid_to_error);
    json_object_put(canonical);
    session_release(s);
 }
 
-/* Stash the final turn's finish/stop reason on the session so a background-job
- * worker can tell a cut-off answer ("max_tokens"/"length") from a clean finish.
- * Additive + best-effort: other callers never read it, and a lookup miss is a
- * no-op (the worker then reads an empty reason = "not truncated"). */
-static void tool_loop_stash_finish_reason(uint32_t session_id, const char *reason) {
-   if (reason == NULL || reason[0] == '\0') {
-      return;
+/* Stash BOTH final-turn signals on the session in ONE lookup:
+ *   - the finish/stop reason, so a background-job worker can tell a cut-off answer
+ *     ("max_tokens"/"length") from a clean finish; and
+ *   - the FINAL answer's display-only reasoning (E3 "AI thought" panel), so the
+ *     post-dispatch server persist (webui_persist_final_answer) writes it to the
+ *     messages.reasoning column + fans it out — the browser client-save carried this
+ *     today, and retiring that save drops it server-side otherwise (SERVER_AUTHORITATIVE
+ *     §6c-G1).
+ * Both are additive + best-effort: other callers never read last_finish_reason, a lookup
+ * miss is a no-op (the worker then reads an empty reason = "not truncated"), and a turn
+ * with no thinking content leaves final_reasoning_json NULL (build_reasoning_json returns
+ * NULL; the turn-start clear in llm_call_prepare guarantees no stale inheritance).  Folded
+ * from two helpers into one so a final-answer return does a single session_get_for_reconnect
+ * rather than two.  TAKES ownership of the built reasoning JSON into the session (the
+ * consuming persist frees it). */
+static void tool_loop_stash_final(uint32_t session_id,
+                                  const llm_tool_response_t *result,
+                                  const char *provider_label) {
+   const char *reason = result != NULL ? result->finish_reason : NULL;
+   bool have_reason = (reason != NULL && reason[0] != '\0');
+   char *json = build_reasoning_json(result, provider_label);
+   if (!have_reason && json == NULL) {
+      return; /* nothing to write — skip the lookup entirely */
    }
    session_t *s = session_get_for_reconnect(session_id);
    if (s == NULL) {
+      free(json);
       return;
    }
-   snprintf(s->last_finish_reason, sizeof(s->last_finish_reason), "%s", reason);
+   if (have_reason) {
+      snprintf(s->last_finish_reason, sizeof(s->last_finish_reason), "%s", reason);
+   }
+   if (json != NULL) {
+      free(s->final_reasoning_json);
+      s->final_reasoning_json = json; /* take ownership */
+   }
    session_release(s);
 }
 
@@ -716,7 +795,8 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
             empty[0] = '\0';
             return empty;
          }
-         tool_loop_stash_finish_reason(params->session_id, result.finish_reason);
+         tool_loop_stash_final(params->session_id, &result,
+                               reasoning_provider_label(params->llm_type, params->cloud_provider));
          final_response = result.text;
          result.text = NULL; /* Transfer ownership to caller */
          llm_tool_response_free(&result);
@@ -781,7 +861,8 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
             return NULL;
          }
 
-         tool_loop_stash_finish_reason(params->session_id, result.finish_reason);
+         tool_loop_stash_final(params->session_id, &result,
+                               reasoning_provider_label(params->llm_type, params->cloud_provider));
          final_response = result.text;
          result.text = NULL;
          llm_tool_response_free(&result);
@@ -823,6 +904,9 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
          free_tool_result_resources(results);
          free(results);
          llm_tool_response_free(&result);
+         /* No final-reasoning stash: direct_response is a tool's own canned text, not a
+          * model turn, so it carries no E3 reasoning.  The turn-start clear leaves the
+          * stash NULL here — do NOT "fix" this by stashing result's reasoning. */
          return followup.direct_response; /* Caller must free */
       }
 
@@ -837,7 +921,7 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
        * display-only reasoning (E3) attached to its assistant row. */
       char *reasoning_json = build_reasoning_json(
           &result, reasoning_provider_label(params->llm_type, params->cloud_provider));
-      persist_appended_tool_turn(params, hist_before, reasoning_json);
+      persist_appended_tool_turn(params, hist_before, reasoning_json, iteration, results);
       free(reasoning_json);
       reasoning_json = NULL;
 
@@ -883,6 +967,12 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
          char *final_text = NULL;
          if (final_rc == 0 && result.text) {
             final_text = strdup(result.text);
+            /* Parity with the other final-answer paths (this one lacked even the
+             * finish-reason stash): record both so a max-iter forced answer still
+             * reports its stop reason and renders its E3 panel on reload. */
+            tool_loop_stash_final(params->session_id, &result,
+                                  reasoning_provider_label(params->llm_type,
+                                                           params->cloud_provider));
          }
          llm_tool_response_free(&result);
          return final_text;

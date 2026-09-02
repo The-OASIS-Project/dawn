@@ -88,7 +88,6 @@ static const tool_metadata_t volume_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_ANALOG,
    .capabilities = TOOL_CAP_SCHEDULABLE,
-   .is_getter = false,
    .skip_followup = false,
    .default_remote = false,
 

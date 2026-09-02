@@ -55,7 +55,8 @@ static char *mqtt_only_stub_callback(const char *action, char *value, int *shoul
 
    OLOG_WARNING("MQTT-only HUD tool callback called directly - should use MQTT execution");
    *should_respond = 1;
-   return strdup("HUD command could not be delivered — the helmet hardware doesn't appear to "
+   return strdup(TOOL_RESULT_ERROR_MARK
+                 "HUD command could not be delivered — the helmet hardware doesn't appear to "
                  "be connected right now.  Let the user know the HUD is offline.");
 }
 
@@ -116,7 +117,6 @@ static const tool_metadata_t hud_control_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_BOOLEAN,
    .capabilities = TOOL_CAP_ARMOR_FEATURE,
-   .is_getter = false,
    .skip_followup = false,
    .mqtt_only = true,
    .sync_wait = false,
@@ -182,7 +182,6 @@ static const tool_metadata_t hud_mode_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_ANALOG,
    .capabilities = TOOL_CAP_ARMOR_FEATURE,
-   .is_getter = false,
    .skip_followup = false,
    .mqtt_only = true,
    .sync_wait = false,
@@ -233,7 +232,6 @@ static const tool_metadata_t faceplate_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_BOOLEAN,
    .capabilities = TOOL_CAP_ARMOR_FEATURE,
-   .is_getter = false,
    .skip_followup = false,
    .mqtt_only = true,
    .sync_wait = false,
@@ -301,7 +299,6 @@ static const tool_metadata_t recording_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_BOOLEAN,
    .capabilities = TOOL_CAP_ARMOR_FEATURE,
-   .is_getter = false,
    .skip_followup = false,
    .mqtt_only = true,
    .sync_wait = false,
@@ -348,7 +345,6 @@ static const tool_metadata_t visual_offset_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_ANALOG,
    .capabilities = TOOL_CAP_ARMOR_FEATURE,
-   .is_getter = false,
    .skip_followup = false,
    .mqtt_only = true,
    .sync_wait = false,

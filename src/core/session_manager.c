@@ -69,7 +69,7 @@ __attribute__((weak)) void webui_send_purge_session(const session_t *s) {
  * Thread-local command context - allows device callbacks to access the current session
  *
  * EXPECTED CALLERS:
- *   - Main thread: for local voice commands (dawn.c parse_llm_response_for_commands)
+ *   - Main thread: for local voice tool/direct-regex execution (dawn.c)
  *   - MQTT thread: for WebUI/DAP commands (mosquitto_comms.c execute_command_for_worker)
  *
  * THREAD SAFETY:
@@ -81,8 +81,8 @@ __attribute__((weak)) void webui_send_purge_session(const session_t *s) {
  *
  * CRITICAL ASSUMPTION:
  *   This works because all paths that set/use this variable execute in the same thread:
- *   - Local voice: main thread sets context, calls parse_llm_response_for_commands(),
- *     callbacks execute in main thread, context cleared
+ *   - Local voice: main thread sets context, runs native tool / direct-regex
+ *     execution, callbacks execute in main thread, context cleared
  *   - WebUI/DAP: MQTT on_message() callback sets context, executes device callback,
  *     clears context - all in the single MQTT callback thread
  *
@@ -270,6 +270,14 @@ static void session_free(session_t *session) {
    // Free pending visual content
    free(session->pending_visual);
    session->pending_visual = NULL;
+
+   // Free any unconsumed cancel-at-buzzer stash (SERVER_AUTHORITATIVE §9/G4)
+   free(session->cancelled_final_response);
+   session->cancelled_final_response = NULL;
+
+   // Free any unconsumed final-answer reasoning stash (SERVER_AUTHORITATIVE §6c-G1)
+   free(session->final_reasoning_json);
+   session->final_reasoning_json = NULL;
 
    // Free async compaction resources
    if (session->async_compact.pending_history) {
@@ -2329,6 +2337,18 @@ int session_dispatch_user_turn(session_t *session, const char *user_turn_text) {
 
    if (session == NULL || user_turn_text == NULL)
       return SUCCESS;
+
+   /* Memory citation signal: clear the per-turn [M#]->item_id stash at the start
+    * of every dispatch.  build_focus_block repopulates it below iff citation is
+    * enabled and this turn surfaces memories; clearing here means a turn whose
+    * focus block short-circuits cannot inherit the previous turn's map. */
+   session_citation_stash_clear(session);
+
+   /* Reset the live <cited> stream-strip filter at the same turn boundary.  It
+    * must be clean before this turn's first stream delta; resetting in
+    * webui_send_stream_start would be too late (the strip runs before start is
+    * triggered on first content) and could wipe a mid-turn held-back partial. */
+   text_filter_cited_reset(&session->cited_tag_filter);
 
    session_prompt_builder_t builder = atomic_load_explicit(&s_prompt_builder, memory_order_acquire);
    if (builder == NULL)

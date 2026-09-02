@@ -40,6 +40,7 @@
 #include "core/buf_printf.h"
 #include "core/prompt_compose.h"
 #include "core/session_manager.h"
+#include "core/text_filter.h"
 #include "llm/llm_command_parser.h"
 #include "logging.h"
 #include "memory/memory_context.h"
@@ -262,6 +263,27 @@ static const char k_memory_instructions_footer[] =
     "- Use 'remember' to store new facts when the user shares personal "
     "information.\n";
 
+/* Memory citation footer.  Emitted in the stable (cached) prefix only when the
+ * citation signal is enabled (g_config.memory.citation_enabled) and memory is on
+ * for this user, so it costs nothing per turn.  This teaches the tag grammar once
+ * in the free cached prefix; a short salient reminder is DUPLICATED at point-of-
+ * use in the per-turn focus block (build_focus_block.c), directly under the
+ * numbered [M#] items — the cached-prefix-only placement held compliance at ~13%.
+ * The per-turn focus block renders surfaced memories as [M1], [M2], … and the
+ * model echoes the ones it used in a terminator-free <cited>M1,M7</cited> tag that
+ * the response finalizer strips and audits.  Terminator-free grammar (no spaces)
+ * keeps a compliant tag from being split across streamed chunks. */
+static const char k_citation_footer[] =
+    "\n\nMEMORY CITATIONS:\n"
+    "- The turn context may include numbered memory items tagged [M1], [M2], etc.\n"
+    "- If your reply relies on any of them, end your ENTIRE reply with a citation tag listing the "
+    "ones you actually used: " CITED_TAG_EXAMPLE " (comma-separated, no spaces, numbers only).\n"
+    "- A memory search/recall result may also tag facts " SURFACED_ID_HINT "; cite those the same "
+    "way by id, e.g. " CITED_TAG_ID_EXAMPLE ".  Cite only ids shown in this turn's results.\n"
+    "- Use the tag only for items you genuinely drew on; omit it entirely if you used none.\n"
+    "- The tag is removed before the user sees it, so it never disrupts your reply — always "
+    "include it when you drew on any memory item.\n";
+
 /* Tool-call discipline footer.  Universal rule against verbal-commitment-
  * without-tool-call bluffs.  Lives in the stable prefix (always emitted
  * regardless of memory state) so the rule is cached and applies to every
@@ -441,6 +463,23 @@ static char *append_tool_discipline_footer(char *base) {
    return combined;
 }
 
+/* Append the memory-citation instruction (gated).  Reached only on memory-ON
+ * paths, so gating on citation_enabled alone is correct.  The [M#] items it
+ * refers to come from the per-turn focus block, so the instruction applies even
+ * when memory_build_context() returns no static body.  realloc-append: on OOM
+ * the base is returned unchanged (citation instruction simply absent that build). */
+static char *append_citation_footer(char *base) {
+   if (base == NULL || !g_config.memory.citation_enabled)
+      return base;
+   const size_t base_len = strlen(base);
+   const size_t foot_len = sizeof(k_citation_footer) - 1;
+   char *out = realloc(base, base_len + foot_len + 1);
+   if (out == NULL)
+      return base;
+   memcpy(out + base_len, k_citation_footer, foot_len + 1); /* includes NUL */
+   return out;
+}
+
 static char *maybe_append_memory_body_and_footer(char *base, int user_id) {
    if (base == NULL)
       return NULL;
@@ -450,32 +489,38 @@ static char *maybe_append_memory_body_and_footer(char *base, int user_id) {
    }
 
    /* Build the memory body.  NULL when memory is enabled but the user
-    * has no preferences and no recent summaries — in that case we
-    * skip the footer too, since there's nothing to refer back to.
+    * has no preferences and no recent summaries.  Even then the citation
+    * instruction still applies — the per-turn focus block can surface [M#]
+    * items independent of this static body.
     * Token budget arg is ignored by memory_build_context now. */
    char *memory_body = memory_build_context(user_id, g_config.memory.context_budget_tokens);
-   if (memory_body == NULL)
-      return append_tool_discipline_footer(base);
 
-   const size_t base_len = strlen(base);
-   const size_t mem_len = strlen(memory_body);
-   const size_t footer_len = sizeof(k_memory_instructions_footer) - 1;
+   char *with_mem;
+   if (memory_body == NULL) {
+      with_mem = base;
+   } else {
+      const size_t base_len = strlen(base);
+      const size_t mem_len = strlen(memory_body);
+      const size_t footer_len = sizeof(k_memory_instructions_footer) - 1;
 
-   char *combined = malloc(base_len + mem_len + footer_len + 1);
-   if (combined == NULL) {
+      char *combined = malloc(base_len + mem_len + footer_len + 1);
+      if (combined == NULL) {
+         free(memory_body);
+         return append_tool_discipline_footer(base); /* OOM fallback: discipline only */
+      }
+      memcpy(combined, base, base_len);
+      memcpy(combined + base_len, memory_body, mem_len);
+      memcpy(combined + base_len + mem_len, k_memory_instructions_footer, footer_len);
+      combined[base_len + mem_len + footer_len] = '\0';
+
       free(memory_body);
-      return append_tool_discipline_footer(base); /* OOM fallback: discipline only */
+      free(base);
+      with_mem = combined;
    }
-   memcpy(combined, base, base_len);
-   memcpy(combined + base_len, memory_body, mem_len);
-   memcpy(combined + base_len + mem_len, k_memory_instructions_footer, footer_len);
-   combined[base_len + mem_len + footer_len] = '\0';
 
-   free(memory_body);
-   free(base);
-   /* Tool-call discipline lands AFTER the memory footer so the two
-    * rule blocks read as adjacent "IMPORTANT" sections. */
-   return append_tool_discipline_footer(combined);
+   /* Citation instruction (gated) then tool-call discipline, so the rule blocks
+    * read as adjacent "IMPORTANT" sections. */
+   return append_tool_discipline_footer(append_citation_footer(with_mem));
 }
 
 static char *build_stable_segment(int user_id) {
@@ -534,8 +579,9 @@ static char *build_stable_segment(int user_id) {
 
    /* Replace mode: Prepend custom persona with override instruction */
    if (is_replace_mode && has_persona) {
-      /* Build replacement prefix (persona 512 + boilerplate ~130 = ~650 max) */
-      char prefix[768];
+      /* Build replacement prefix (persona + boilerplate ~130). Sized off the
+       * persona buffer so it can't silently truncate if the cap grows. */
+      char prefix[AUTH_PERSONA_DESC_MAX + 256];
       int prefix_ret = snprintf(prefix, sizeof(prefix),
                                 "## Your Identity\n%s\n\n"
                                 "IMPORTANT: Use the identity above. Ignore any conflicting persona "
@@ -580,8 +626,10 @@ static char *build_stable_segment(int user_id) {
           append_identity_block(combined, build_identity_block(user_id)), user_id);
    }
 
-   /* Append mode: Add user context (persona 512 + loc 128 + tz 64 + units 16 + headers ~40) */
-   char user_context[1024];
+   /* Append mode: Add user context (persona + loc + tz + units + headers ~40).
+    * Sized off the field buffers so it can't silently truncate if a cap grows. */
+   char user_context[AUTH_PERSONA_DESC_MAX + AUTH_LOCATION_MAX + AUTH_TIMEZONE_MAX +
+                     AUTH_UNITS_MAX + 128];
    size_t offset = 0;
    size_t remain = sizeof(user_context);
 

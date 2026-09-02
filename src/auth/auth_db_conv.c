@@ -112,8 +112,18 @@ int conv_db_create(int user_id, const char *title, int64_t *conv_id_out) {
    /* Use default title if none provided, truncate if too long */
    char safe_title[CONV_TITLE_MAX];
    if (title && title[0] != '\0') {
-      strncpy(safe_title, title, CONV_TITLE_MAX - 1);
-      safe_title[CONV_TITLE_MAX - 1] = '\0';
+      size_t cut = strlen(title);
+      if (cut > CONV_TITLE_MAX - 1) {
+         cut = CONV_TITLE_MAX - 1;
+         /* Don't split a multibyte UTF-8 codepoint at the truncation point — invalid
+          * UTF-8 in a stored title breaks the whole conversation-list JSON frame on
+          * the client.  Back up while the cut lands on a 10xxxxxx continuation byte. */
+         while (cut > 0 && ((unsigned char)title[cut] & 0xC0) == 0x80) {
+            cut--;
+         }
+      }
+      memcpy(safe_title, title, cut);
+      safe_title[cut] = '\0';
    } else {
       strcpy(safe_title, "New Conversation");
    }
@@ -1496,14 +1506,15 @@ int conv_db_update_llm_settings(int64_t conv_id,
  * Message Operations
  * ============================================================================= */
 
-int conv_db_add_message_with_tools(int64_t conv_id,
-                                   int user_id,
-                                   const char *role,
-                                   const char *content,
-                                   const char *tool_calls,
-                                   const char *tool_call_id,
-                                   const char *reasoning,
-                                   int64_t *msg_id_out) {
+int conv_db_add_message_with_tools_ex(int64_t conv_id,
+                                      int user_id,
+                                      const char *role,
+                                      const char *content,
+                                      const char *tool_calls,
+                                      const char *tool_call_id,
+                                      const char *reasoning,
+                                      bool is_error,
+                                      int64_t *msg_id_out) {
    if (msg_id_out)
       *msg_id_out = 0;
 
@@ -1539,8 +1550,9 @@ int conv_db_add_message_with_tools(int64_t conv_id,
    else
       sqlite3_bind_null(s_db.stmt_msg_add, 6);
    sqlite3_bind_int64(s_db.stmt_msg_add, 7, (int64_t)now);
-   sqlite3_bind_int64(s_db.stmt_msg_add, 8, conv_id); /* For ownership check */
-   sqlite3_bind_int(s_db.stmt_msg_add, 9, user_id);   /* For ownership check */
+   sqlite3_bind_int(s_db.stmt_msg_add, 8, is_error ? 1 : 0);
+   sqlite3_bind_int64(s_db.stmt_msg_add, 9, conv_id); /* For ownership check */
+   sqlite3_bind_int(s_db.stmt_msg_add, 10, user_id);  /* For ownership check */
 
    int rc = sqlite3_step(s_db.stmt_msg_add);
    sqlite3_reset(s_db.stmt_msg_add);
@@ -1590,6 +1602,20 @@ int conv_db_add_message_with_tools(int64_t conv_id,
    return (rc == SQLITE_DONE) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
 }
 
+/* Back-compat wrapper: assistant/user/system rows never carry a failure flag, so they persist
+ * with is_error = false. Only the tool-persist hook (role='tool' results) calls the _ex form. */
+int conv_db_add_message_with_tools(int64_t conv_id,
+                                   int user_id,
+                                   const char *role,
+                                   const char *content,
+                                   const char *tool_calls,
+                                   const char *tool_call_id,
+                                   const char *reasoning,
+                                   int64_t *msg_id_out) {
+   return conv_db_add_message_with_tools_ex(conv_id, user_id, role, content, tool_calls,
+                                            tool_call_id, reasoning, false, msg_id_out);
+}
+
 int conv_db_add_message_ex(int64_t conv_id,
                            int user_id,
                            const char *role,
@@ -1603,15 +1629,16 @@ int conv_db_add_message(int64_t conv_id, int user_id, const char *role, const ch
    return conv_db_add_message_ex(conv_id, user_id, role, content, NULL);
 }
 
-/* Read the content + tool/reasoning columns + created_at from a message-SELECT row whose
- * projection is (id, conversation_id, role, content, tool_calls, tool_call_id, reasoning,
- * created_at).  All pointers are borrowed (valid only during the callback). */
+/* Read the content + tool/reasoning columns + created_at + is_error from a message-SELECT row
+ * whose projection is (id, conversation_id, role, content, tool_calls, tool_call_id, reasoning,
+ * created_at, is_error).  All pointers are borrowed (valid only during the callback). */
 static void msg_read_columns(conversation_message_t *msg, sqlite3_stmt *stmt) {
    msg->content = (char *)sqlite3_column_text(stmt, 3);
    msg->tool_calls = (char *)sqlite3_column_text(stmt, 4);
    msg->tool_call_id = (char *)sqlite3_column_text(stmt, 5);
    msg->reasoning = (char *)sqlite3_column_text(stmt, 6);
    msg->created_at = (time_t)sqlite3_column_int64(stmt, 7);
+   msg->is_error = sqlite3_column_int(stmt, 8);
 }
 
 int conv_db_get_messages(int64_t conv_id, int user_id, message_callback_t callback, void *ctx) {
@@ -1840,6 +1867,15 @@ void conv_generate_title(const char *content, char *title_out, size_t max_len) {
    /* If no word boundary found, just cut at target_len */
    if (cut_pos == 0) {
       cut_pos = target_len;
+   }
+
+   /* Never split a multibyte UTF-8 codepoint: if the cut lands mid-sequence (the
+    * byte at cut_pos is a 10xxxxxx continuation byte), back up to the codepoint
+    * boundary.  Invalid UTF-8 in a stored title breaks the ENTIRE conversation-list
+    * JSON frame on the client (JSON.parse throws), not just this row — and voice
+    * transcripts route non-ASCII text through here. */
+   while (cut_pos > 0 && ((unsigned char)content[cut_pos] & 0xC0) == 0x80) {
+      cut_pos--;
    }
 
    /* Copy and add ellipsis */

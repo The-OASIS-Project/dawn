@@ -189,7 +189,6 @@ static const tool_metadata_t music_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_MUSIC,
    .capabilities = TOOL_CAP_FILESYSTEM | TOOL_CAP_SCHEDULABLE,
-   .is_getter = false,
    .skip_followup = false,
    .default_remote = true,
 
@@ -516,7 +515,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
                *should_respond = 0;
                return NULL;
             }
-            return strdup("None of those tracks were found in the library");
+            return strdup(TOOL_RESULT_ERROR_MARK "None of those tracks were found in the library");
          }
          free(items_json);
       }
@@ -744,7 +743,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
       size_t buf_size = s_playlist.count * 256 + 64;
       result = malloc(buf_size);
       if (!result) {
-         return strdup("Failed to allocate playlist buffer");
+         return strdup(TOOL_RESULT_ERROR_MARK "Failed to allocate playlist buffer");
       }
 
       int offset = snprintf(result, buf_size, "Playlist (%d tracks):\n", s_playlist.count);
@@ -862,7 +861,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
                char *out = strbuf_oom(&sb) ? NULL : strbuf_steal(&sb);
                if (!out) {
                   strbuf_free(&sb);
-                  return strdup("Failed to build search results");
+                  return strdup(TOOL_RESULT_ERROR_MARK "Failed to build search results");
                }
                return out;
             }
@@ -879,7 +878,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
             *should_respond = 0;
             return NULL;
          }
-         return strdup("Search requires a query");
+         return strdup(TOOL_RESULT_ERROR_MARK "Search requires a query");
       }
 
       /* Extract query and optional limit from value */
@@ -910,7 +909,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
             *should_respond = 0;
             return NULL;
          }
-         return strdup("Search term too long");
+         return strdup(TOOL_RESULT_ERROR_MARK "Search term too long");
       }
 
       /* Allocate search results on heap (~100KB struct) */
@@ -920,7 +919,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
             *should_respond = 0;
             return NULL;
          }
-         return strdup("Failed to allocate search buffer");
+         return strdup(TOOL_RESULT_ERROR_MARK "Failed to allocate search buffer");
       }
       search_results->count = 0;
 
@@ -945,7 +944,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
       result = malloc(buf_size);
       if (!result) {
          free(search_results);
-         return strdup("Failed to allocate result buffer");
+         return strdup(TOOL_RESULT_ERROR_MARK "Failed to allocate result buffer");
       }
 
       int offset = snprintf(result, buf_size, "Found %d tracks matching '%s':\n",
@@ -976,7 +975,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
             *should_respond = 0;
             return NULL;
          }
-         return strdup("Music database not available");
+         return strdup(TOOL_RESULT_ERROR_MARK "Music database not available");
       }
 
       /* Extract page parameter (1-based, default 1) */
@@ -1003,19 +1002,19 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
       if (!lib_query[0] || strcasecmp(lib_query, "stats") == 0) {
          music_db_stats_t stats;
          if (music_db_get_stats(&stats) != 0) {
-            return strdup("Failed to get music library stats");
+            return strdup(TOOL_RESULT_ERROR_MARK "Failed to get music library stats");
          }
 
          char artists[50][AUDIO_METADATA_STRING_MAX];
          int artist_count = 0;
          if (music_db_list_artists(artists, per_page, db_offset, &artist_count) != SUCCESS) {
-            return strdup("Failed to list artists");
+            return strdup(TOOL_RESULT_ERROR_MARK "Failed to list artists");
          }
 
          size_t buf_size = 4096;
          result = malloc(buf_size);
          if (!result)
-            return strdup("Memory allocation failed");
+            return strdup(TOOL_RESULT_ERROR_MARK "Memory allocation failed");
 
          int total_pages = (stats.artist_count + per_page - 1) / per_page;
          int off = snprintf(result, buf_size,
@@ -1042,13 +1041,13 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
       } else if (strcasecmp(lib_query, "artists") == 0) {
          music_db_stats_t stats;
          if (music_db_get_stats(&stats) != 0) {
-            return strdup("Failed to get music library stats");
+            return strdup(TOOL_RESULT_ERROR_MARK "Failed to get music library stats");
          }
 
          char artists[50][AUDIO_METADATA_STRING_MAX];
          int count = 0;
          if (music_db_list_artists(artists, per_page, db_offset, &count) != SUCCESS) {
-            return strdup("Failed to list artists");
+            return strdup(TOOL_RESULT_ERROR_MARK "Failed to list artists");
          }
 
          if (count <= 0 && page == 1) {
@@ -1062,7 +1061,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
          size_t buf_size = count * 128 + 256;
          result = malloc(buf_size);
          if (!result)
-            return strdup("Memory allocation failed");
+            return strdup(TOOL_RESULT_ERROR_MARK "Memory allocation failed");
 
          int off = snprintf(result, buf_size,
                             "Artists (page %d of %d, showing %d-%d of %d total):\n", page,
@@ -1084,13 +1083,13 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
       } else if (strcasecmp(lib_query, "albums") == 0) {
          music_db_stats_t stats;
          if (music_db_get_stats(&stats) != 0) {
-            return strdup("Failed to get music library stats");
+            return strdup(TOOL_RESULT_ERROR_MARK "Failed to get music library stats");
          }
 
          char albums[50][AUDIO_METADATA_STRING_MAX];
          int count = 0;
          if (music_db_list_albums(albums, per_page, db_offset, &count) != SUCCESS) {
-            return strdup("Failed to list albums");
+            return strdup(TOOL_RESULT_ERROR_MARK "Failed to list albums");
          }
 
          if (count <= 0 && page == 1) {
@@ -1104,7 +1103,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
          size_t buf_size = count * 128 + 256;
          result = malloc(buf_size);
          if (!result)
-            return strdup("Memory allocation failed");
+            return strdup(TOOL_RESULT_ERROR_MARK "Memory allocation failed");
 
          int off = snprintf(result, buf_size,
                             "Albums (page %d of %d, showing %d-%d of %d total):\n", page,
@@ -1124,7 +1123,8 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
          return result;
 
       } else {
-         return strdup("Unknown library query. Use 'artists', 'albums', or omit for stats.");
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Unknown library query. Use 'artists', 'albums', or omit for stats.");
       }
    }
 

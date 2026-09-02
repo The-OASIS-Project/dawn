@@ -242,7 +242,7 @@ nano secrets.toml
 openai_api_key = "sk-your-openai-key"
 # claude_api_key = "sk-ant-your-claude-key"
 # gemini_api_key = "your-gemini-key"
-# openrouter_api_key = "sk-or-your-key"   # Optional: OpenRouter gateway (one key, any model) — set [llm.cloud] use_openrouter = true
+# openrouter_api_key = "sk-or-your-key"   # Optional: OpenRouter (one key, any model) — set [llm.cloud] provider = "openrouter"
 # plex_token = "your-plex-token"          # Optional: adds Plex library to unified music DB
 # home_assistant_token = "your-ha-token"  # Optional: for Home Assistant smart home control
 # tavily_api_key = "tvly-your-tavily-key" # Optional: commercial search + URL extract (see Tavily section)
@@ -259,6 +259,18 @@ export OPENAI_API_KEY="sk-your-openai-key"
 **dawn.toml** - Optional customization. Defaults work for most users. You can also adjust settings later via the Web UI.
 
 > **Tip**: Many settings can be changed live in the Web UI without editing files.
+
+### Recommended models
+
+DAWN uses an LLM in three independent roles. They don't have to be the same model — or even the same provider — so long as each provider's key is in `secrets.toml`.
+
+| Role | `dawn.toml` setting | Recommendation |
+|------|---------------------|----------------|
+| **Chat** — what you actually talk to | `[llm.cloud]` `provider` + `model` | Your main quality/latency lever; pick a capable current model from your provider. We run `gpt-5.6-luna` (OpenAI) as a strong value default. |
+| **Memory extraction** — background fact-building at session end | `[memory]` `extraction_provider` + `extraction_model` | **`claude-haiku-4-5`.** Benchmark-validated: a bigger/"smarter" model does *not* extract better (larger models over-fragment the entity graph and retrieve less reliably), so a small fast model is the correct pick, not a compromise. |
+| **Compaction** — background summarization of long conversations | `[llm]` `compact_provider` + `compact_model` | **`claude-haiku-4-5`**, by the same reasoning — compaction is a summarization pass that doesn't need your top model. (Not separately benchmarked; extraction is.) |
+
+The two background roles run constantly, so keeping them on a small fast model keeps cost and latency down without hurting quality. If you chat on one provider but want Haiku for extraction/compaction (a common, sensible split), add `claude_api_key` to `secrets.toml` and set the `*_provider` fields to `claude`.
 
 ## 6. Create Admin Account
 

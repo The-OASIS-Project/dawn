@@ -34,6 +34,7 @@
 #include <time.h>
 
 #include "auth/auth_db.h"
+#include "config/config_parser.h"
 #include "config/dawn_config.h"
 #include "core/curl_buffer.h"
 #include "core/session_manager.h"
@@ -42,6 +43,7 @@
 #include "llm/llm_local_provider.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
+#include "tools/toml.h"
 #include "tts/text_to_speech.h"
 #include "utils/string_utils.h"
 #ifdef ENABLE_WEBUI
@@ -71,91 +73,17 @@ typedef struct {
    int context_size;         /* Context size in tokens */
 } model_context_entry_t;
 
-/* OpenAI models (verified February 2026 from developers.openai.com) */
-static const model_context_entry_t s_openai_models[] = {
-   /* GPT-5.x family (400K context) */
-   { "gpt-5.2", 400000 },
-   { "gpt-5.1", 400000 },
-   { "gpt-5-mini", 400000 },
-   { "gpt-5-nano", 400000 },
-   { "gpt-5", 400000 },
-   /* GPT-4.1 family (1,047,576 context) */
-   { "gpt-4.1-mini", 1047576 },
-   { "gpt-4.1-nano", 1047576 },
-   { "gpt-4.1", 1047576 },
-   /* O-series reasoning models */
-   { "o4-mini", 200000 },
-   { "o3-pro", 200000 },
-   { "o3-mini", 200000 },
-   { "o3", 200000 },
-   { "o1-pro", 200000 },
-   { "o1-mini", 128000 },
-   { "o1-preview", 128000 },
-   { "o1", 200000 },
-   /* GPT-4o family */
-   { "gpt-4o-mini", 128000 },
-   { "gpt-4o", 128000 },
-   /* GPT-4 Turbo */
-   { "gpt-4-turbo", 128000 },
-   { "gpt-4-0125", 128000 },
-   { "gpt-4-1106", 128000 },
-   /* Legacy GPT-4 */
-   { "gpt-4-32k", 32768 },
-   { "gpt-4", 8192 },
-   /* Legacy GPT-3.5 */
-   { "gpt-3.5-turbo-16k", 16384 },
-   { "gpt-3.5-turbo", 16384 },
-   { NULL, 0 } /* Sentinel */
-};
-
-/* Claude models (verified February 2026 from platform.claude.com)
- * All Claude models use 200K context (1M available via beta header, but
- * we report the standard limit since DAWN doesn't use the beta header). */
-static const model_context_entry_t s_claude_models[] = {
-   /* Claude 4.6 family */
-   { "claude-opus-4-6", 200000 },
-   { "claude-sonnet-4-6", 200000 },
-   /* Claude 4.5 family */
-   { "claude-haiku-4-5", 200000 },
-   { "claude-opus-4-5", 200000 },
-   { "claude-sonnet-4-5", 200000 },
-   /* Claude 4.x family */
-   { "claude-opus-4.5", 200000 },
-   { "claude-sonnet-4.5", 200000 },
-   { "claude-opus-4.1", 200000 },
-   { "claude-sonnet-4.1", 200000 },
-   { "claude-opus-4", 200000 },
-   { "claude-sonnet-4", 200000 },
-   /* Claude 3.5 family */
-   { "claude-3-5-sonnet", 200000 },
-   { "claude-3-5-haiku", 200000 },
-   { "claude-3.5", 200000 },
-   /* Claude 3 family (haiku deprecated April 2026) */
-   { "claude-3-opus", 200000 },
-   { "claude-3-sonnet", 200000 },
-   { "claude-3-haiku", 200000 },
-   { NULL, 0 } /* Sentinel */
-};
-
-/* Gemini models (verified February 2026 from firebase.google.com/docs/ai-logic/models)
- * All current Gemini models use 1,048,576 (1M) input token limit. */
-static const model_context_entry_t s_gemini_models[] = {
-   /* Gemini 3.x family (preview) */
-   { "gemini-3.1-pro", 1048576 },
-   { "gemini-3-flash", 1048576 },
-   { "gemini-3-pro", 1048576 },
-   /* Gemini 2.5 family */
-   { "gemini-2.5-pro", 1048576 },
-   { "gemini-2.5-flash-lite", 1048576 },
-   { "gemini-2.5-flash", 1048576 },
-   /* Gemini 2.0 (retiring June 2026) */
-   { "gemini-2.0-flash-lite", 1048576 },
-   { "gemini-2.0-flash", 1048576 },
-   /* Legacy Gemini 1.5 */
-   { "gemini-1.5-pro", 1048576 },
-   { "gemini-1.5-flash", 1048576 },
-   { NULL, 0 } /* Sentinel */
-};
+/* Model context-window registry, loaded from models.toml at init (see
+ * load_model_registry).  NULL when the file is absent or a provider table is
+ * empty — lookup_model_context() then returns 0 and the caller applies the
+ * per-provider default (conservative for modern models; legacy sub-128K models
+ * need this file, see models.toml).  Each array is heap-allocated, sorted by
+ * prefix length (longest first, so the most-specific prefix matches), and
+ * NULL-terminated.  Set once on the startup thread before any lookup and
+ * read-only afterward, so reads need no lock.  Freed in llm_context_cleanup(). */
+static model_context_entry_t *s_openai_models = NULL;
+static model_context_entry_t *s_claude_models = NULL;
+static model_context_entry_t *s_gemini_models = NULL;
 
 /* =============================================================================
  * Module State
@@ -241,6 +169,136 @@ static int s_session_token_count = 0;
  * Lifecycle Functions
  * ============================================================================= */
 
+/* =============================================================================
+ * models.toml registry loader
+ * ============================================================================= */
+
+/* qsort comparator: longest prefix first, so lookup_model_context() (a linear
+ * first-match scan) returns the most-specific match. */
+static int model_entry_cmp_desc(const void *a, const void *b) {
+   const model_context_entry_t *ea = a;
+   const model_context_entry_t *eb = b;
+   size_t la = ea->model_prefix ? strlen(ea->model_prefix) : 0;
+   size_t lb = eb->model_prefix ? strlen(eb->model_prefix) : 0;
+   if (la < lb) {
+      return 1;
+   }
+   if (la > lb) {
+      return -1;
+   }
+   return 0;
+}
+
+/* Load one [provider] table (a map of "prefix" = <int tokens>) into a heap array,
+ * sorted longest-prefix-first and NULL-terminated.  Returns NULL for a missing or
+ * empty table (caller then falls back to the per-provider default). */
+static model_context_entry_t *load_provider_table(toml_table_t *root, const char *provider) {
+   toml_table_t *tab = toml_table_in(root, provider);
+   if (!tab) {
+      return NULL;
+   }
+   int nkval = toml_table_nkval(tab);
+   if (nkval <= 0) {
+      return NULL;
+   }
+   model_context_entry_t *arr = calloc((size_t)nkval + 1, sizeof(*arr)); /* +1 NULL sentinel */
+   if (!arr) {
+      return NULL;
+   }
+   /* Iterate every key (toml_key_in returns NULL past the end) rather than the
+    * first nkval slots — tomlc99 does not group keys by type, so a stray sub-table
+    * could otherwise shadow a real "prefix" = <int> entry. Non-int keys are skipped
+    * via toml_int_in().ok, and int keys are a subset of the nkval kvals, so `count`
+    * can never exceed the allocation. */
+   int count = 0;
+   const char *key = NULL;
+   for (int i = 0; (key = toml_key_in(tab, i)) != NULL; i++) {
+      if (!*key) {
+         continue;
+      }
+      toml_datum_t d = toml_int_in(tab, key);
+      if (!d.ok || d.u.i <= 0 || d.u.i > INT_MAX) {
+         continue;
+      }
+      char *pfx = strdup(key);
+      if (!pfx) {
+         continue;
+      }
+      arr[count].model_prefix = pfx;
+      arr[count].context_size = (int)d.u.i;
+      count++;
+   }
+   if (count == 0) {
+      free(arr);
+      return NULL;
+   }
+   arr[count].model_prefix = NULL; /* sentinel (calloc already zeroed) */
+   qsort(arr, (size_t)count, sizeof(*arr), model_entry_cmp_desc);
+   return arr;
+}
+
+/* Free a heap model table and NULL the pointer. */
+static void free_model_table(model_context_entry_t **arr) {
+   if (!arr || !*arr) {
+      return;
+   }
+   for (int i = 0; (*arr)[i].model_prefix != NULL; i++) {
+      free((void *)(*arr)[i].model_prefix);
+   }
+   free(*arr);
+   *arr = NULL;
+}
+
+/* Locate models.toml via the config search path (cwd, then ~/.config/dawn, then
+ * /etc/dawn — mirroring dawn.toml).  Returns true and fills `out` on the first hit. */
+static bool find_models_toml_path(char *out, size_t out_sz) {
+   if (config_file_readable("models.toml")) {
+      snprintf(out, out_sz, "models.toml");
+      return true;
+   }
+   const char *home = getenv("HOME");
+   if (home && *home) {
+      snprintf(out, out_sz, "%s/.config/dawn/models.toml", home);
+      if (config_file_readable(out)) {
+         return true;
+      }
+   }
+   if (config_file_readable("/etc/dawn/models.toml")) {
+      snprintf(out, out_sz, "/etc/dawn/models.toml");
+      return true;
+   }
+   return false;
+}
+
+/* Load the model context-window registry from models.toml into the three
+ * per-provider tables.  Best-effort: a missing/invalid file leaves the tables
+ * NULL, and every lookup then uses the conservative per-provider default. */
+static void load_model_registry(void) {
+   char path[512];
+   if (!find_models_toml_path(path, sizeof(path))) {
+      OLOG_INFO("llm_context: no models.toml found; using per-provider context defaults");
+      return;
+   }
+   FILE *fp = fopen(path, "r");
+   if (!fp) {
+      OLOG_WARNING("llm_context: cannot open %s (%s); using context defaults", path,
+                   strerror(errno));
+      return;
+   }
+   char errbuf[200];
+   toml_table_t *root = toml_parse_file(fp, errbuf, sizeof(errbuf));
+   fclose(fp);
+   if (!root) {
+      OLOG_WARNING("llm_context: models.toml parse error: %s; using context defaults", errbuf);
+      return;
+   }
+   s_openai_models = load_provider_table(root, "openai");
+   s_claude_models = load_provider_table(root, "anthropic");
+   s_gemini_models = load_provider_table(root, "gemini");
+   toml_free(root);
+   OLOG_INFO("llm_context: loaded model context registry from %s", path);
+}
+
 int llm_context_init(void) {
    if (s_state.initialized) {
       return 0;
@@ -259,6 +317,10 @@ int llm_context_init(void) {
    s_session_token_count = 0;
    memset(s_session_tokens, 0, sizeof(s_session_tokens));
 
+   /* Load per-model context windows from models.toml (best-effort; missing file
+    * just means the conservative per-provider defaults are used). */
+   load_model_registry();
+
    s_state.initialized = true;
    OLOG_INFO("llm_context: Initialized (default local context: %d)", s_state.local_context_size);
 
@@ -269,6 +331,13 @@ void llm_context_cleanup(void) {
    if (!s_state.initialized) {
       return;
    }
+
+   /* Lock-free readers (lookup_model_context) must be quiesced before this frees
+    * the tables — i.e. LLM worker threads joined before cleanup, the same
+    * invariant the s_state.mutex teardown below already relies on. */
+   free_model_table(&s_openai_models);
+   free_model_table(&s_claude_models);
+   free_model_table(&s_gemini_models);
 
    pthread_mutex_destroy(&s_state.mutex);
    s_state.initialized = false;
@@ -1189,6 +1258,11 @@ static bool build_compaction_config(llm_resolved_config_t *cfg) {
       cfg->cloud_provider = CLOUD_PROVIDER_GEMINI;
       cfg->endpoint = GEMINI_URL;
       cfg->api_key = g_secrets.gemini_api_key;
+   } else if (strcmp(p, "openrouter") == 0) {
+      cfg->type = LLM_CLOUD;
+      cfg->cloud_provider = CLOUD_PROVIDER_OPENROUTER;
+      cfg->endpoint = OPENROUTER_URL;
+      cfg->api_key = g_secrets.openrouter_api_key;
    } else if (strcmp(p, "local") == 0) {
       cfg->type = LLM_LOCAL;
       cfg->cloud_provider = CLOUD_PROVIDER_NONE;
@@ -1197,17 +1271,13 @@ static bool build_compaction_config(llm_resolved_config_t *cfg) {
       return false;
    }
 
-   /* OpenRouter gateway: reroute the dedicated compaction provider through OpenRouter.
-    * Under the gateway, use the OpenRouter-formatted compaction model (vendor/model),
-    * falling back to the main OpenRouter default when unset — the direct compact_model
-    * naming would not resolve on OpenRouter. */
-   if (llm_apply_openrouter_gateway(&cfg->cloud_provider, &cfg->endpoint, &cfg->api_key)) {
-      cfg->model = g_config.llm.compact_openrouter_model[0] ? g_config.llm.compact_openrouter_model
-                                                            : llm_get_default_openrouter_model();
-   } else {
-      cfg->model = g_config.llm.compact_model[0] ? g_config.llm.compact_model : NULL;
-   }
-   strncpy(cfg->tool_mode, "disabled", sizeof(cfg->tool_mode) - 1);
+   /* compact_model is a provider-native name, or a "vendor/model" slug when
+    * compact_provider is "openrouter"; an empty value under OpenRouter uses the main
+    * OpenRouter default. */
+   cfg->model = g_config.llm.compact_model[0] ? g_config.llm.compact_model : NULL;
+   if (cfg->cloud_provider == CLOUD_PROVIDER_OPENROUTER && !cfg->model)
+      cfg->model = llm_get_default_openrouter_model();
+   cfg->suppress_tools = true;
    strncpy(cfg->thinking_mode, "disabled", sizeof(cfg->thinking_mode) - 1);
    cfg->timeout_ms = g_config.network.summarization_timeout_ms;
 

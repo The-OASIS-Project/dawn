@@ -19,7 +19,6 @@
  * part of the project and are adopted by the project author(s).
  */
 
-#include <mosquitto.h> /* Needed got struct mosquitto */
 #include <stdbool.h>
 
 #ifndef LLM_COMMAND_PARSER_H
@@ -40,9 +39,6 @@ const char *get_local_command_prompt(void);
 // Function to build remote command prompt (excludes local-only topics: hud, helmet)
 // For network satellite clients (DAP/DAP2) - includes general commands like date, time
 const char *get_remote_command_prompt(void);
-
-// Function to parse LLM responses for commands
-int parse_llm_response_for_commands(const char *llm_response, struct mosquitto *mosq);
 
 /**
  * @brief Builds dynamic system instructions based on enabled features
@@ -89,17 +85,6 @@ int is_vision_enabled_for_current_llm(void);
  * get_system_instructions() rebuilds the prompt with updated capabilities.
  */
 void invalidate_system_instructions(void);
-
-/**
- * @brief Build a remote prompt for a specific tool mode
- *
- * Creates a prompt string based on the specified tool_mode, independent of
- * global config. Used for per-session tool_mode overrides.
- *
- * @param tool_mode Tool mode: "native", "command_tags", or "disabled"
- * @return Allocated prompt string (caller must free), or NULL on error
- */
-char *build_remote_prompt_for_mode(const char *tool_mode);
 
 /* =============================================================================
  * Voice-session prompt directives (effective-value accessors)

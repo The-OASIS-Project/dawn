@@ -352,7 +352,7 @@ int auth_db_unlock_user(const char *username);
 /**
  * @brief Maximum persona description length
  */
-#define AUTH_PERSONA_DESC_MAX 512
+#define AUTH_PERSONA_DESC_MAX 2048
 
 /**
  * @brief Maximum location length
@@ -1062,7 +1062,7 @@ typedef struct {
    char llm_type[16];         /**< "local" or "cloud" */
    char cloud_provider[16];   /**< "openai" or "claude" */
    char model[64];            /**< Model name */
-   char tools_mode[16];       /**< "native", "command_tags", or "disabled" */
+   char tools_mode[16];       /**< RETIRED/dead column — no longer read or written (always "") */
    char thinking_mode[16];    /**< "disabled"/"auto"/"enabled" or "low"/"medium"/"high" */
    char reasoning_effort[16]; /**< "none"/"minimal"/"low"/"medium"/"high"/"xhigh" (v36) */
    bool is_private;           /**< If true, no memory extraction for this conversation (v16) */
@@ -1085,6 +1085,7 @@ typedef struct {
    char *reasoning;    /**< assistant rows: display-only reasoning JSON, else NULL (borrowed).
                             Delivered to the browser only — never read into the LLM context. */
    time_t created_at;
+   int is_error; /**< role='tool' rows: 1 = confirmed failure (reds the pill on reload); else 0 */
 } conversation_message_t;
 
 /**
@@ -2064,7 +2065,7 @@ void conv_db_format_compaction_context(int64_t conv_id,
  * @param llm_type "local" or "cloud" (or NULL to keep current)
  * @param cloud_provider "openai" or "claude" (or NULL to keep current)
  * @param model Model name (or NULL to keep current)
- * @param tools_mode "native", "command_tags", or "disabled"
+ * @param tools_mode RETIRED/dead column — pass "" (no longer read or written)
  * @param thinking_mode "disabled", "auto", "enabled", "low", "medium", or "high"
  * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND (no row updated), or AUTH_DB_FAILURE
  */
@@ -2220,6 +2221,23 @@ int conv_db_add_message_with_tools(int64_t conv_id,
                                    const char *tool_call_id,
                                    const char *reasoning,
                                    int64_t *msg_id_out);
+
+/**
+ * @brief Like conv_db_add_message_with_tools() but also persists @p is_error.
+ *
+ * @p is_error is set only on role='tool' result rows (1 = confirmed failure) so a reloaded
+ * conversation can red the failed tool pill, matching the live tool_step signal. Every other
+ * caller uses the plain form, which persists is_error = false.
+ */
+int conv_db_add_message_with_tools_ex(int64_t conv_id,
+                                      int user_id,
+                                      const char *role,
+                                      const char *content,
+                                      const char *tool_calls,
+                                      const char *tool_call_id,
+                                      const char *reasoning,
+                                      bool is_error,
+                                      int64_t *msg_id_out);
 
 /**
  * @brief Get all messages in a conversation

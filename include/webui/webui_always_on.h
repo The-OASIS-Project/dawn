@@ -73,6 +73,10 @@ extern "C" {
 #define ALWAYS_ON_WAKE_CHECK_TIMEOUT_MS 30000
 #define ALWAYS_ON_WAKE_PENDING_TIMEOUT_MS 10000
 #define ALWAYS_ON_RECORDING_TIMEOUT_MS 30000
+/* Bare wake word acknowledged but no command word spoken yet: give up and return
+ * to LISTENING rather than holding the recording open to RECORDING_TIMEOUT (30s).
+ * Distinct from RECORDING_TIMEOUT, which bounds a command already in progress. */
+#define ALWAYS_ON_NO_COMMAND_TIMEOUT_MS 6000
 #define ALWAYS_ON_PROCESSING_TIMEOUT_MS 30000
 #define ALWAYS_ON_NO_AUDIO_TIMEOUT_MS 60000
 

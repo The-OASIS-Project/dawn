@@ -116,10 +116,25 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    ↓
 7. Browser caches in localStorage, shows preview
    ↓
-8. On send: Full base64 data sent to LLM with message
+8. On send: turn frame carries BOTH the full base64 `images[]` (sent to the LLM this
+   turn) AND `image_ids[]` (the /api/images ids, ordered to match)
    ↓
-9. History stores image ID reference (not inline data)
+9. Daemon persists the user turn itself (server-authoritative): it builds
+   `text` + `[IMAGE:<id>]` markers from image_ids and writes the row, promotes those
+   images to permanent retention (post-persist, so only persisted turns pin images),
+   and echoes `server_saved: true` so the client does NOT client-save the row
+   ↓
+10. On reload, `[IMAGE:<id>]` markers rehydrate into image_url content (owner-checked)
 ```
+
+> **Persistence ownership (hard cut-over):** the daemon is the sole writer of user rows —
+> text and image turns alike. Previously the browser client-saved image turns (it held the
+> ids); now it sends the ids on the turn frame and the daemon owns persistence. `image_ids`
+> is therefore **mandatory** on an image turn — without it the turn persists text-only and
+> the images are lost on reload (no client-save fallback). Core stays image-agnostic: the
+> marker grammar and image-store calls live in the WebUI layer
+> (`webui_message_dispatch.c`, `webui_image_rehydrate.c`); `text_input_dispatch.c` just
+> persists a caller-supplied string via `persist_content_override`.
 
 ### Vision Model Support
 

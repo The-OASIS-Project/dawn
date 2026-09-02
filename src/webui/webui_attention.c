@@ -20,8 +20,9 @@
  *
  * The visual counterpart to the conversational `attention` LLM tool
  * (src/tools/attention_tool.c).  Both surfaces drive the same attention_watch_*
- * core API and preserve its one-watch-per-metric model, so a watch created by
- * voice is editable in the panel and vice-versa.  Every handler is scoped to
+ * core API — a metric may hold several named watches (min AND max, tiers), edits
+ * go by id, and an add dedups only on an identical condition — so a watch created
+ * by voice is editable in the panel and vice-versa.  Every handler is scoped to
  * conn->auth_user_id — the client payload is never trusted for identity, and
  * the core API is itself user-scoped (WHERE user_id = ?).
  */
@@ -66,6 +67,7 @@ static json_object *watch_to_json(const sage_watch_t *w) {
    json_object *o = json_object_new_object();
    json_object_object_add(o, "id", json_object_new_int64(w->id));
    json_object_object_add(o, "name", json_object_new_string(w->name));
+   json_object_object_add(o, "named", json_object_new_boolean(w->named));
    json_object_object_add(o, "metric", json_object_new_string(w->metric));
    const char *label = attention_catalog_label(w->metric);
    json_object_object_add(o, "label", json_object_new_string(label ? label : w->metric));
@@ -75,9 +77,18 @@ static json_object *watch_to_json(const sage_watch_t *w) {
    json_object_object_add(o, "direction",
                           json_object_new_string(sage_direction_to_str(w->direction)));
    /* threshold is a concrete number for stored rows (the template resolves the
-    * catalog default); guard NAN anyway so we never emit invalid JSON. */
-   if (isfinite(w->threshold)) {
+    * catalog default); guard NAN anyway so we never emit invalid JSON.  A slope
+    * row still carries the template's default threshold, but it's meaningless for a
+    * rate rule — omit it so the panel can't render a stale/misleading value. */
+   if (w->rule_type != SAGE_RULE_SLOPE && isfinite(w->threshold)) {
       json_object_object_add(o, "threshold", json_object_new_double(w->threshold));
+   }
+   /* Slope rules carry their trigger in slope_per_min (units/min, canonical) + a
+    * rolling window, NOT threshold — surface both so the panel can read and edit a
+    * rising/falling watch's real trigger. */
+   if (w->rule_type == SAGE_RULE_SLOPE) {
+      json_object_object_add(o, "slope_per_min", json_object_new_double(w->slope_per_min));
+      json_object_object_add(o, "slope_window_sec", json_object_new_int(w->slope_window_sec));
    }
    json_object_object_add(o, "absence_after_sec", json_object_new_int(w->absence_after_sec));
    json_object_object_add(o, "notify", json_object_new_string(sage_notify_to_str(w->notify)));
@@ -90,6 +101,10 @@ static json_object *watch_to_json(const sage_watch_t *w) {
    if (have && isfinite(cur)) {
       json_object_object_add(o, "current", json_object_new_double(cur));
    }
+   /* Authoritative hysteresis-aware breach state (same value the readings stream
+    * carries) so the panel tint is correct on open, before the first live tick. */
+   json_object_object_add(o, "breaching",
+                          json_object_new_boolean(attention_watch_breaching(w->user_id, w->id)));
    return o;
 }
 
@@ -113,6 +128,16 @@ static bool find_watch_by_id(int user_id, int64_t id, sage_watch_t *out) {
  * watch template (shared by add + update). */
 static void apply_overrides(sage_watch_t *w, json_object *payload) {
    json_object *o = NULL;
+   /* Optional user-chosen name (marks the watch user-named so the system won't
+    * regenerate it and it's spoken in alerts).  Blank => leave as-is. */
+   if (json_object_object_get_ex(payload, "name", &o)) {
+      const char *nm = json_object_get_string(o);
+      if (nm && nm[0]) {
+         snprintf(w->name, sizeof(w->name), "%s", nm);
+         attention_sanitize_name(w->name); /* strip controls (shared with the tool) */
+         w->named = (w->name[0] != '\0');
+      }
+   }
    if (json_object_object_get_ex(payload, "direction", &o)) {
       w->direction = sage_direction_from_str(json_object_get_string(o), w->direction);
    }
@@ -129,6 +154,54 @@ static void apply_overrides(sage_watch_t *w, json_object *payload) {
          }
       }
    }
+   /* Slope trigger travels under distinct keys (never overloading `threshold`) so
+    * the mapping is unambiguous.  slope_per_min is a positive magnitude (units/min);
+    * the sign comes from direction (rising vs falling). */
+   if (json_object_object_get_ex(payload, "slope_per_min", &o)) {
+      double s = json_object_get_double(o);
+      if (isfinite(s) && s > 0.0) {
+         w->slope_per_min = s;
+      }
+   }
+   if (json_object_object_get_ex(payload, "slope_window_sec", &o)) {
+      int win = json_object_get_int(o);
+      if (win > 0) {
+         w->slope_window_sec = attention_clamp_seconds((double)win);
+      }
+   }
+}
+
+/* Thin WS wrappers over the shared core validators (attention_resolve_rule_kind /
+ * attention_validate_watch_trigger) — extract the payload field, delegate the
+ * rules to the core so the tool and panel can't drift, and render any error as the
+ * WS reply.  Return false (after replying) on failure. */
+static bool resolve_rule_kind(ws_connection_t *conn,
+                              sage_watch_t *w,
+                              json_object *payload,
+                              const char *resp_type) {
+   json_object *o = NULL;
+   const char *rule_type = NULL;
+   if (json_object_object_get_ex(payload, "rule_type", &o)) {
+      rule_type = json_object_get_string(o);
+   }
+   const char *err = NULL;
+   if (attention_resolve_rule_kind(w, rule_type, &err) != SUCCESS) {
+      respond_status(conn, resp_type, false,
+                     err ? err : "This metric's rule kind can't be changed");
+      return false;
+   }
+   return true;
+}
+
+static bool validate_watch_trigger(ws_connection_t *conn,
+                                   const sage_watch_t *w,
+                                   const char *resp_type) {
+   const char *err = NULL;
+   if (attention_validate_watch_trigger(w, &err) != SUCCESS) {
+      respond_status(conn, resp_type, false, err ? err : "Invalid watch trigger");
+      return false;
+   }
+   return true;
 }
 
 /* Extract a positive int64 watch id from @payload.  On a missing/non-positive
@@ -197,6 +270,18 @@ void handle_watch_list(ws_connection_t *conn) {
          const char *label = attention_catalog_label(key);
          json_object_object_add(c, "label", json_object_new_string(label ? label : key));
          json_object_object_add(c, "unit", json_object_new_string(attention_catalog_unit(key)));
+         /* rule_type + defaults let the panel gate its condition editor (offer
+          * rising/falling only on numeric metrics, seed the threshold/direction). */
+         const char *rt = attention_catalog_rule_type(key);
+         if (rt) {
+            json_object_object_add(c, "rule_type", json_object_new_string(rt));
+         }
+         const char *dd = attention_catalog_default_direction(key);
+         if (dd) {
+            json_object_object_add(c, "default_direction", json_object_new_string(dd));
+         }
+         json_object_object_add(c, "default_threshold",
+                                json_object_new_double(attention_catalog_default_threshold(key)));
          json_object_array_add(cat, c);
       }
       json_object_object_add(payload, "catalog", cat);
@@ -227,15 +312,26 @@ void handle_watch_add(ws_connection_t *conn, json_object *payload) {
       respond_status(conn, "watch_add_response", false, "Unknown metric");
       return;
    }
-   apply_overrides(&w, payload);
 
-   /* One watch per metric (mirrors the tool's do_watch): update the existing
-    * row if the user already watches this metric, so the two surfaces agree. */
+   if (!resolve_rule_kind(conn, &w, payload, "watch_add_response")) {
+      return;
+   }
+   apply_overrides(&w, payload);
+   if (!validate_watch_trigger(conn, &w, "watch_add_response")) {
+      return;
+   }
+
+   /* Multiple watches per metric are allowed (min AND max, tiers).  Dedup only on
+    * an IDENTICAL condition so a repeated add updates rather than duplicating;
+    * otherwise create a new watch.  (Panel edits go by id via watch_update.) */
    sage_watch_t existing;
-   bool updating = (attention_watch_find_by_metric(conn->auth_user_id, metric, &existing) ==
-                    SUCCESS);
+   bool updating = (attention_watch_find_identical(conn->auth_user_id, &w, &existing) == SUCCESS);
    int rc = updating ? attention_watch_update(conn->auth_user_id, existing.id, &w)
                      : attention_watch_add(&w, NULL);
+   if (rc == ATTENTION_NAME_TAKEN) {
+      respond_status(conn, "watch_add_response", false, "A watch with that name already exists");
+      return;
+   }
    if (rc != SUCCESS) {
       respond_status(conn, "watch_add_response", false,
                      "Couldn't save the watch (you may be at the watch limit)");
@@ -262,9 +358,20 @@ void handle_watch_update(ws_connection_t *conn, json_object *payload) {
       respond_status(conn, "watch_update_response", false, "Watch not found");
       return;
    }
+   if (!resolve_rule_kind(conn, &w, payload, "watch_update_response")) {
+      return;
+   }
    apply_overrides(&w, payload);
+   if (!validate_watch_trigger(conn, &w, "watch_update_response")) {
+      return;
+   }
 
-   if (attention_watch_update(conn->auth_user_id, id, &w) != SUCCESS) {
+   int rc = attention_watch_update(conn->auth_user_id, id, &w);
+   if (rc == ATTENTION_NAME_TAKEN) {
+      respond_status(conn, "watch_update_response", false, "A watch with that name already exists");
+      return;
+   }
+   if (rc != SUCCESS) {
       respond_status(conn, "watch_update_response", false, "Couldn't update the watch");
       return;
    }
@@ -308,4 +415,23 @@ void handle_watch_remove(ws_connection_t *conn, json_object *payload) {
       return;
    }
    respond_status(conn, "watch_remove_response", true, NULL);
+}
+
+void handle_watch_readings_subscribe(ws_connection_t *conn, json_object *payload) {
+   if (!conn_require_auth(conn)) {
+      return;
+   }
+
+   /* Opt in/out of the 1 Hz live-gauge stream.  The panel subscribes when it's
+    * shown and unsubscribes when hidden, so the stream only flows while someone is
+    * actually looking at it.  Default OFF when the flag is absent: a malformed or
+    * partial payload must not silently start a recurring stream (the real client
+    * always sends an explicit `enabled`). */
+   bool enabled = false;
+   json_object *o = NULL;
+   if (payload && json_object_object_get_ex(payload, "enabled", &o)) {
+      enabled = json_object_get_boolean(o);
+   }
+   conn->watch_readings_subscribed = enabled;
+   respond_status(conn, "watch_readings_subscribe_response", true, NULL);
 }

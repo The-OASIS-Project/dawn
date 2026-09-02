@@ -96,7 +96,6 @@ static const tool_metadata_t calculator_metadata = {
     * (plan_tool_is_allowed gates on this flag).  NOT dangerous, so it clears the
     * plan executor's denylist too. */
    .capabilities = TOOL_CAP_SCHEDULABLE,
-   .is_getter = true,
    .skip_followup = false,
    .default_remote = true,
 
@@ -125,7 +124,7 @@ static char *calculator_tool_callback(const char *action, char *value, int *shou
    if (strlen(value) > CALC_MAX_EXPR_LEN) {
       OLOG_WARNING("calculator_tool_callback: value exceeds %d chars (%zu)", CALC_MAX_EXPR_LEN,
                    strlen(value));
-      return strdup("Expression is too long.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Expression is too long.");
    }
 
    if (strcmp(action, "evaluate") == 0) {
@@ -136,34 +135,35 @@ static char *calculator_tool_callback(const char *action, char *value, int *shou
          OLOG_INFO("calculator_tool_callback: Result = %s", formatted);
          return formatted;
       }
-      return strdup("Failed to evaluate expression.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Failed to evaluate expression.");
    }
 
    if (strcmp(action, "exact") == 0) {
       OLOG_INFO("calculator_tool_callback: Exact evaluating '%s'", value);
       char *result = calculator_evaluate_exact_str(value);
-      return result ? result : strdup("Failed to evaluate expression.");
+      return result ? result : strdup(TOOL_RESULT_ERROR_MARK "Failed to evaluate expression.");
    }
 
    if (strcmp(action, "convert") == 0) {
       OLOG_INFO("calculator_tool_callback: Converting '%s'", value);
       char *result = calculator_convert(value);
-      return result ? result : strdup("Failed to convert units.");
+      return result ? result : strdup(TOOL_RESULT_ERROR_MARK "Failed to convert units.");
    }
 
    if (strcmp(action, "base") == 0) {
       OLOG_INFO("calculator_tool_callback: Base converting '%s'", value);
       char *result = calculator_base_convert(value);
-      return result ? result : strdup("Failed to convert base.");
+      return result ? result : strdup(TOOL_RESULT_ERROR_MARK "Failed to convert base.");
    }
 
    if (strcmp(action, "random") == 0) {
       OLOG_INFO("calculator_tool_callback: Random number '%s'", value);
       char *result = calculator_random(value);
-      return result ? result : strdup("Failed to generate random number.");
+      return result ? result : strdup(TOOL_RESULT_ERROR_MARK "Failed to generate random number.");
    }
 
-   return strdup("Unknown calculator action. Use: evaluate, exact, convert, base, or random.");
+   return strdup(TOOL_RESULT_ERROR_MARK
+                 "Unknown calculator action. Use: evaluate, exact, convert, base, or random.");
 }
 
 /* ========== Public API ========== */

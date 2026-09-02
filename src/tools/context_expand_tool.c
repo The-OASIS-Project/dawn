@@ -111,7 +111,6 @@ static const tool_metadata_t context_expand_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NONE,
-   .is_getter = true,
    .skip_followup = false,
 
    .is_available = NULL,
@@ -152,7 +151,7 @@ static char *context_expand_callback(const char *action, char *value, int *shoul
    *should_respond = 1;
 
    if (!value || value[0] == '\0')
-      return strdup("Error: no message range provided.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: no message range provided.");
 
    char tmp[32];
    int64_t start_id = 0, end_id = 0, conv_id = 0, node_id = 0;
@@ -170,17 +169,17 @@ static char *context_expand_callback(const char *action, char *value, int *shoul
    if (node_id > 0) {
       int user_id = tool_get_current_user_id();
       if (user_id <= 0)
-         return strdup("Error: no authenticated user.");
+         return strdup(TOOL_RESULT_ERROR_MARK "Error: no authenticated user.");
 
       summary_node_t node = { 0 };
       if (summary_node_get(node_id, &node) != AUTH_DB_SUCCESS)
-         return strdup("Error: summary node not found.");
+         return strdup(TOOL_RESULT_ERROR_MARK "Error: summary node not found.");
 
       /* Verify ownership via the node's conversation */
       conversation_t conv_check = { 0 };
       if (conv_db_get(node.conversation_id, user_id, &conv_check) != AUTH_DB_SUCCESS) {
          summary_node_free(&node);
-         return strdup("Error: access denied to that summary node.");
+         return strdup(TOOL_RESULT_ERROR_MARK "Error: access denied to that summary node.");
       }
       conv_free(&conv_check);
 
@@ -198,7 +197,7 @@ static char *context_expand_callback(const char *action, char *value, int *shoul
          if (has_prior)
             summary_node_free(&prior);
          summary_node_free(&node);
-         return strdup("Error: memory allocation failed.");
+         return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed.");
       }
 
       size_t offset = 0;
@@ -238,15 +237,16 @@ static char *context_expand_callback(const char *action, char *value, int *shoul
    }
 
    if (start_id <= 0 || end_id <= 0)
-      return strdup("Error: start_id and end_id are required (positive integers).");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: start_id and end_id are required (positive integers).");
    if (end_id < start_id)
-      return strdup("Error: end_id must be >= start_id.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: end_id must be >= start_id.");
    if (end_id - start_id > 500)
-      return strdup("Error: range too large (max 500 messages).");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: range too large (max 500 messages).");
 
    int user_id = tool_get_current_user_id();
    if (user_id <= 0)
-      return strdup("Error: no authenticated user.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: no authenticated user.");
 
    /* If conversation_id not provided, use current or its parent */
    if (conv_id <= 0) {
@@ -265,7 +265,8 @@ static char *context_expand_callback(const char *action, char *value, int *shoul
       }
 #endif
       if (conv_id <= 0)
-         return strdup("Error: conversation_id required (could not determine from context).");
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: conversation_id required (could not determine from context).");
    }
 
    OLOG_INFO("context_expand: expanding msgs %lld-%lld from conv %lld for user %d",
@@ -275,7 +276,7 @@ static char *context_expand_callback(const char *action, char *value, int *shoul
    ec.capacity = EXPAND_CHAR_BUDGET + 256;
    ec.buf = malloc(ec.capacity);
    if (!ec.buf)
-      return strdup("Error: memory allocation failed.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed.");
 
    int header_len = snprintf(ec.buf, ec.capacity,
                              "Original messages %lld-%lld from conversation %lld:\n\n",
@@ -294,11 +295,11 @@ static char *context_expand_callback(const char *action, char *value, int *shoul
 
    if (rc == AUTH_DB_FORBIDDEN) {
       free(ec.buf);
-      return strdup("Error: access denied to that conversation.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: access denied to that conversation.");
    }
    if (rc != AUTH_DB_SUCCESS) {
       free(ec.buf);
-      return strdup("Error: failed to retrieve messages.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: failed to retrieve messages.");
    }
 
    if (ec.count == 0) {

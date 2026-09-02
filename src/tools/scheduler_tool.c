@@ -20,7 +20,7 @@
  *
  * Scheduler Tool - LLM tool for creating/managing timers, alarms, reminders
  *
- * Actions: create, list, cancel, query, snooze, dismiss
+ * Actions: create, list, cancel, query, update, snooze, dismiss
  * The "details" parameter is a JSON string with action-specific fields.
  */
 
@@ -88,6 +88,122 @@ static bool json_get_bool(struct json_object *obj, const char *key, bool default
    return json_object_get_boolean(val);
 }
 
+/* True if csv is a well-formed recurrence_days list: a comma-separated set of
+ * day names (sun..sat), at least one, no duplicates.  Shared by create + update. */
+static bool valid_recurrence_days_csv(const char *csv) {
+   if (!csv || !csv[0])
+      return false;
+   static const char *valid_days[] = { "sun", "mon", "tue", "wed", "thu", "fri", "sat" };
+   char buf[SCHED_RECURRENCE_DAYS_MAX];
+   strncpy(buf, csv, sizeof(buf) - 1);
+   buf[sizeof(buf) - 1] = '\0';
+
+   bool valid = true;
+   char *saveptr = NULL;
+   char *tok = strtok_r(buf, ",", &saveptr);
+   int day_count = 0;
+   uint8_t seen = 0; /* bitmask for duplicate detection */
+   while (tok && valid) {
+      while (*tok == ' ')
+         tok++;
+      bool found = false;
+      for (int d = 0; d < 7; d++) {
+         if (strcasecmp(tok, valid_days[d]) == 0) {
+            if (seen & (1 << d)) {
+               valid = false; /* duplicate */
+            } else {
+               seen |= (1 << d);
+               found = true;
+               day_count++;
+            }
+            break;
+         }
+      }
+      if (!found)
+         valid = false;
+      tok = strtok_r(NULL, ",", &saveptr);
+   }
+   return valid && day_count > 0;
+}
+
+/* Parse + validate a briefing `steps` JSON array into out[] (capacity
+ * SCHED_BRIEFING_STEPS_MAX).  Shared by handle_create and handle_update so the
+ * two never drift.  Accepts the short-key aliases tool/action/value in addition
+ * to tool_name/tool_action/tool_value (the LLM intermittently emits the short
+ * forms), rejects non-string fields (json_object_get_string would otherwise
+ * coerce a nested object into a literal tool_value), and runs every step through
+ * tool_registry_validate_schedulable.  On failure writes a complete "Error: ..."
+ * message to err and returns FAILURE; on success sets *count_out and returns
+ * SUCCESS.  steps_arr must be a JSON array. */
+static int parse_validate_steps(struct json_object *steps_arr,
+                                sched_briefing_step_t *out,
+                                int *count_out,
+                                char *err,
+                                size_t errlen) {
+   if (!steps_arr || !json_object_is_type(steps_arr, json_type_array)) {
+      snprintf(err, errlen, "Error: 'steps' must be an array");
+      return FAILURE;
+   }
+   int n = (int)json_object_array_length(steps_arr);
+   if (n <= 0) {
+      snprintf(err, errlen, "Error: 'steps' array is empty");
+      return FAILURE;
+   }
+   if (n > SCHED_BRIEFING_STEPS_MAX) {
+      snprintf(err, errlen, "Error: too many steps (%d, max %d).  Split into multiple briefings.",
+               n, SCHED_BRIEFING_STEPS_MAX);
+      return FAILURE;
+   }
+   memset(out, 0, sizeof(sched_briefing_step_t) * SCHED_BRIEFING_STEPS_MAX);
+   for (int i = 0; i < n; i++) {
+      struct json_object *step = json_object_array_get_idx(steps_arr, i);
+      if (!step || !json_object_is_type(step, json_type_object)) {
+         snprintf(err, errlen, "Error: steps[%d] is not an object", i);
+         return FAILURE;
+      }
+      struct json_object *jname = NULL, *jaction = NULL, *jvalue = NULL;
+      json_object_object_get_ex(step, "tool_name", &jname) ||
+          json_object_object_get_ex(step, "tool", &jname);
+      json_object_object_get_ex(step, "tool_action", &jaction) ||
+          json_object_object_get_ex(step, "action", &jaction);
+      json_object_object_get_ex(step, "tool_value", &jvalue) ||
+          json_object_object_get_ex(step, "value", &jvalue);
+      if (jname && !json_object_is_type(jname, json_type_string)) {
+         snprintf(err, errlen, "Error: steps[%d].tool_name must be a string", i);
+         return FAILURE;
+      }
+      if (jaction && !json_object_is_type(jaction, json_type_string)) {
+         snprintf(err, errlen, "Error: steps[%d].tool_action must be a string", i);
+         return FAILURE;
+      }
+      if (jvalue && !json_object_is_type(jvalue, json_type_string)) {
+         snprintf(err, errlen, "Error: steps[%d].tool_value must be a string", i);
+         return FAILURE;
+      }
+      const char *s_name = jname ? json_object_get_string(jname) : NULL;
+      const char *s_action = jaction ? json_object_get_string(jaction) : NULL;
+      const char *s_value = jvalue ? json_object_get_string(jvalue) : NULL;
+      char verr[160];
+      if (tool_registry_validate_schedulable(s_name, s_action, s_value, verr, sizeof(verr)) !=
+          SUCCESS) {
+         snprintf(err, errlen, "Error: steps[%d]: %s", i, verr);
+         return FAILURE;
+      }
+      if (s_value && strlen(s_value) >= SCHED_TOOL_VALUE_MAX) {
+         snprintf(err, errlen, "Error: steps[%d] tool_value too long (%zu bytes, max %d)", i,
+                  strlen(s_value), SCHED_TOOL_VALUE_MAX - 1);
+         return FAILURE;
+      }
+      strncpy(out[i].tool_name, s_name, SCHED_TOOL_NAME_MAX - 1);
+      if (s_action)
+         strncpy(out[i].tool_action, s_action, SCHED_TOOL_NAME_MAX - 1);
+      if (s_value)
+         strncpy(out[i].tool_value, s_value, SCHED_TOOL_VALUE_MAX - 1);
+   }
+   *count_out = n;
+   return SUCCESS;
+}
+
 /* =============================================================================
  * Action Handlers
  * ============================================================================= */
@@ -102,6 +218,7 @@ static char *handle_create(struct json_object *details,
    const char *type_str = json_get_string(details, "type");
    if (!type_str) {
       snprintf(result, sizeof(result),
+               TOOL_RESULT_ERROR_MARK
                "Error: 'type' is required (timer, alarm, reminder, task, briefing)");
       return strdup(result);
    }
@@ -139,7 +256,8 @@ static char *handle_create(struct json_object *details,
 
    /* Validate duration_minutes range (shared by all types) */
    if (duration_min > MAX_DURATION_MINUTES) {
-      snprintf(result, sizeof(result), "Error: duration cannot exceed %d minutes (30 days)",
+      snprintf(result, sizeof(result),
+               TOOL_RESULT_ERROR_MARK "Error: duration cannot exceed %d minutes (30 days)",
                MAX_DURATION_MINUTES);
       return strdup(result);
    }
@@ -152,19 +270,22 @@ static char *handle_create(struct json_object *details,
       /* Absolute time via ISO 8601 */
       time_t fire_time = iso8601_parse(fire_at_str);
       if (fire_time <= 0) {
-         snprintf(result, sizeof(result), "Error: invalid fire_at format '%s'", fire_at_str);
+         snprintf(result, sizeof(result),
+                  TOOL_RESULT_ERROR_MARK "Error: invalid fire_at format '%s'", fire_at_str);
          return strdup(result);
       }
 
       /* Must be in the future */
       if (fire_time <= time(NULL)) {
-         snprintf(result, sizeof(result), "Error: fire_at must be in the future");
+         snprintf(result, sizeof(result),
+                  TOOL_RESULT_ERROR_MARK "Error: fire_at must be in the future");
          return strdup(result);
       }
 
       /* Must be within 1 year */
       if (fire_time > time(NULL) + 365 * 86400) {
-         snprintf(result, sizeof(result), "Error: fire_at must be within 1 year");
+         snprintf(result, sizeof(result),
+                  TOOL_RESULT_ERROR_MARK "Error: fire_at must be within 1 year");
          return strdup(result);
       }
 
@@ -181,10 +302,13 @@ static char *handle_create(struct json_object *details,
    } else {
       /* Neither provided */
       if (type == SCHED_EVENT_TIMER) {
-         snprintf(result, sizeof(result), "Error: 'duration_minutes' is required for timers");
+         snprintf(result, sizeof(result),
+                  TOOL_RESULT_ERROR_MARK "Error: 'duration_minutes' is required for timers");
       } else {
          snprintf(result, sizeof(result),
-                  "Error: 'fire_at' (ISO 8601) or 'duration_minutes' is required for %s", type_str);
+                  TOOL_RESULT_ERROR_MARK
+                  "Error: 'fire_at' (ISO 8601) or 'duration_minutes' is required for %s",
+                  type_str);
       }
       return strdup(result);
    }
@@ -196,40 +320,9 @@ static char *handle_create(struct json_object *details,
 
    const char *recur_days = json_get_string(details, "recurrence_days");
    if (recur_days) {
-      /* Validate CSV of day names */
-      static const char *valid_days[] = { "sun", "mon", "tue", "wed", "thu", "fri", "sat" };
-      char buf[SCHED_RECURRENCE_DAYS_MAX];
-      strncpy(buf, recur_days, sizeof(buf) - 1);
-      buf[sizeof(buf) - 1] = '\0';
-
-      bool valid = true;
-      char *saveptr = NULL;
-      char *tok = strtok_r(buf, ",", &saveptr);
-      int day_count = 0;
-      uint8_t seen = 0; /* bitmask for duplicate detection */
-      while (tok && valid) {
-         /* Trim whitespace */
-         while (*tok == ' ')
-            tok++;
-         bool found = false;
-         for (int d = 0; d < 7; d++) {
-            if (strcasecmp(tok, valid_days[d]) == 0) {
-               if (seen & (1 << d)) {
-                  valid = false; /* duplicate */
-               } else {
-                  seen |= (1 << d);
-                  found = true;
-                  day_count++;
-               }
-               break;
-            }
-         }
-         if (!found)
-            valid = false;
-         tok = strtok_r(NULL, ",", &saveptr);
-      }
-      if (!valid || day_count == 0) {
+      if (!valid_recurrence_days_csv(recur_days)) {
          snprintf(result, sizeof(result),
+                  TOOL_RESULT_ERROR_MARK
                   "Error: invalid recurrence_days '%s'. Use CSV of: sun,mon,tue,wed,thu,fri,sat",
                   recur_days);
          return strdup(result);
@@ -300,75 +393,16 @@ static char *handle_create(struct json_object *details,
 
    if (has_steps_array) {
       if (type != SCHED_EVENT_BRIEFING) {
-         snprintf(result, sizeof(result), "Error: 'steps' is only supported for type='briefing'");
-         return strdup(result);
-      }
-      int n = (int)json_object_array_length(steps_arr);
-      if (n <= 0) {
-         snprintf(result, sizeof(result), "Error: 'steps' array is empty");
-         return strdup(result);
-      }
-      if (n > SCHED_BRIEFING_STEPS_MAX) {
          snprintf(result, sizeof(result),
-                  "Error: too many steps (%d, max %d).  Split into multiple briefings.", n,
-                  SCHED_BRIEFING_STEPS_MAX);
+                  TOOL_RESULT_ERROR_MARK "Error: 'steps' is only supported for type='briefing'");
          return strdup(result);
       }
-      memset(parsed_steps, 0, sizeof(parsed_steps));
-      for (int i = 0; i < n; i++) {
-         struct json_object *step = json_object_array_get_idx(steps_arr, i);
-         if (!step || !json_object_is_type(step, json_type_object)) {
-            snprintf(result, sizeof(result), "Error: steps[%d] is not an object", i);
-            return strdup(result);
-         }
-         /* Per-field type check — json_object_get_string coerces non-strings
-          * (numbers, nested objects) to their JSON serialization, which would
-          * silently store e.g. `{"$cmd":"..."}` as the literal tool_value
-          * string.  Reject anything that isn't a JSON string outright. */
-         struct json_object *jname = NULL, *jaction = NULL, *jvalue = NULL;
-         /* Accept the short keys tool/action/value as aliases for
-          * tool_name/tool_action/tool_value. The LLM intermittently emits the
-          * short forms inside steps[] and would otherwise hit a validation
-          * error and retry; canonical keys win, short keys are the fallback. */
-         json_object_object_get_ex(step, "tool_name", &jname) ||
-             json_object_object_get_ex(step, "tool", &jname);
-         json_object_object_get_ex(step, "tool_action", &jaction) ||
-             json_object_object_get_ex(step, "action", &jaction);
-         json_object_object_get_ex(step, "tool_value", &jvalue) ||
-             json_object_object_get_ex(step, "value", &jvalue);
-         if (jname && !json_object_is_type(jname, json_type_string)) {
-            snprintf(result, sizeof(result), "Error: steps[%d].tool_name must be a string", i);
-            return strdup(result);
-         }
-         if (jaction && !json_object_is_type(jaction, json_type_string)) {
-            snprintf(result, sizeof(result), "Error: steps[%d].tool_action must be a string", i);
-            return strdup(result);
-         }
-         if (jvalue && !json_object_is_type(jvalue, json_type_string)) {
-            snprintf(result, sizeof(result), "Error: steps[%d].tool_value must be a string", i);
-            return strdup(result);
-         }
-         const char *s_name = jname ? json_object_get_string(jname) : NULL;
-         const char *s_action = jaction ? json_object_get_string(jaction) : NULL;
-         const char *s_value = jvalue ? json_object_get_string(jvalue) : NULL;
-         char err[160];
-         if (tool_registry_validate_schedulable(s_name, s_action, s_value, err, sizeof(err)) !=
-             SUCCESS) {
-            snprintf(result, sizeof(result), "Error: steps[%d]: %s", i, err);
-            return strdup(result);
-         }
-         if (s_value && strlen(s_value) >= SCHED_TOOL_VALUE_MAX) {
-            snprintf(result, sizeof(result),
-                     "Error: steps[%d] tool_value too long (%zu bytes, max %d)", i, strlen(s_value),
-                     SCHED_TOOL_VALUE_MAX - 1);
-            return strdup(result);
-         }
-         strncpy(parsed_steps[i].tool_name, s_name, SCHED_TOOL_NAME_MAX - 1);
-         if (s_action)
-            strncpy(parsed_steps[i].tool_action, s_action, SCHED_TOOL_NAME_MAX - 1);
-         if (s_value)
-            strncpy(parsed_steps[i].tool_value, s_value, SCHED_TOOL_VALUE_MAX - 1);
-         parsed_step_count++;
+      char err[RESULT_BUF_SIZE];
+      if (parse_validate_steps(steps_arr, parsed_steps, &parsed_step_count, err, sizeof(err)) !=
+          SUCCESS) {
+         char marked_err[RESULT_BUF_SIZE + 1];
+         snprintf(marked_err, sizeof(marked_err), TOOL_RESULT_ERROR_MARK "%s", err);
+         return strdup(marked_err);
       }
       /* New multi-step briefings leave the legacy tool_* fields empty.
        * Steps are written to briefing_steps after the insert succeeds. */
@@ -377,6 +411,7 @@ static char *handle_create(struct json_object *details,
       const char *tool_name = json_get_string(details, "tool_name");
       if ((type == SCHED_EVENT_TASK || type == SCHED_EVENT_BRIEFING) && !tool_name) {
          snprintf(result, sizeof(result),
+                  TOOL_RESULT_ERROR_MARK
                   "Error: 'tool_name' (or 'steps' array for briefings) is required for "
                   "scheduled %s. System shutdown is not available as a schedulable tool.",
                   type == SCHED_EVENT_BRIEFING ? "briefings" : "tasks");
@@ -388,7 +423,7 @@ static char *handle_create(struct json_object *details,
          char err[160];
          if (tool_registry_validate_schedulable(tool_name, tool_action, tool_value, err,
                                                 sizeof(err)) != SUCCESS) {
-            snprintf(result, sizeof(result), "Error: %s", err);
+            snprintf(result, sizeof(result), TOOL_RESULT_ERROR_MARK "Error: %s", err);
             return strdup(result);
          }
          strncpy(event.tool_name, tool_name, SCHED_TOOL_NAME_MAX - 1);
@@ -398,8 +433,8 @@ static char *handle_create(struct json_object *details,
       if (tool_value) {
          if (strlen(tool_value) >= SCHED_TOOL_VALUE_MAX) {
             snprintf(result, sizeof(result),
-                     "Error: tool_value too long (%zu bytes, max %d). "
-                     "Shorten the content and retry.",
+                     TOOL_RESULT_ERROR_MARK "Error: tool_value too long (%zu bytes, max %d). "
+                                            "Shorten the content and retry.",
                      strlen(tool_value), SCHED_TOOL_VALUE_MAX - 1);
             return strdup(result);
          }
@@ -450,17 +485,19 @@ static char *handle_create(struct json_object *details,
                                                g_config.scheduler.max_events_total, &id);
    if (insert_rc == SCHED_DB_USER_LIMIT) {
       snprintf(result, sizeof(result),
+               TOOL_RESULT_ERROR_MARK
                "Error: maximum events per user reached (%d). Cancel some events first.",
                g_config.scheduler.max_events_per_user);
       return strdup(result);
    }
    if (insert_rc == SCHED_DB_GLOBAL_LIMIT) {
-      snprintf(result, sizeof(result), "Error: maximum total events reached (%d).",
+      snprintf(result, sizeof(result),
+               TOOL_RESULT_ERROR_MARK "Error: maximum total events reached (%d).",
                g_config.scheduler.max_events_total);
       return strdup(result);
    }
    if (insert_rc != SCHED_DB_SUCCESS) {
-      snprintf(result, sizeof(result), "Error: failed to create event");
+      snprintf(result, sizeof(result), TOOL_RESULT_ERROR_MARK "Error: failed to create event");
       return strdup(result);
    }
 
@@ -477,6 +514,7 @@ static char *handle_create(struct json_object *details,
       if (set_rc != SCHED_DB_SUCCESS) {
          scheduler_db_cancel(id);
          snprintf(result, sizeof(result),
+                  TOOL_RESULT_ERROR_MARK
                   "Error: failed to store briefing steps (event marked cancelled)");
          return strdup(result);
       }
@@ -575,14 +613,16 @@ static char *handle_list(struct json_object *details, int user_id) {
             remaining = 0;
          int rm = remaining / 60;
          int rs = remaining % 60;
-         if (strbuf_appendf(&sb, "- [%s] %s: %dm %ds remaining\n", type, e->name, rm, rs) < 0)
+         if (strbuf_appendf(&sb, "- [id=%lld] [%s] %s: %dm %ds remaining\n", (long long)e->id, type,
+                            e->name, rm, rs) < 0)
             break;
       } else {
          struct tm fire_tm;
          localtime_r(&e->fire_at, &fire_tm);
          char time_str[32];
          strftime(time_str, sizeof(time_str), "%I:%M %p %b %d", &fire_tm);
-         if (strbuf_appendf(&sb, "- [%s] %s: %s", type, e->name, time_str) < 0)
+         if (strbuf_appendf(&sb, "- [id=%lld] [%s] %s: %s", (long long)e->id, type, e->name,
+                            time_str) < 0)
             break;
          if (e->recurrence != SCHED_RECUR_ONCE)
             strbuf_appendf(&sb, " (%s)", sched_recurrence_to_str(e->recurrence));
@@ -638,10 +678,10 @@ static char *handle_list(struct json_object *details, int user_id) {
 
    if (strbuf_oom(&sb)) {
       strbuf_free(&sb);
-      return strdup("Error: response buffer exceeded safety cap.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: response buffer exceeded safety cap.");
    }
    char *out = strbuf_steal(&sb);
-   return out ? out : strdup("Error: out of memory.");
+   return out ? out : strdup(TOOL_RESULT_ERROR_MARK "Error: out of memory.");
 }
 
 static char *handle_cancel(struct json_object *details, int user_id) {
@@ -655,21 +695,23 @@ static char *handle_cancel(struct json_object *details, int user_id) {
 
    if (event_id > 0) {
       if (scheduler_db_get(event_id, &event) != 0) {
-         snprintf(result, sizeof(result), "Error: event not found");
+         snprintf(result, sizeof(result), TOOL_RESULT_ERROR_MARK "Error: event not found");
          return strdup(result);
       }
       if (event.user_id != user_id) {
-         snprintf(result, sizeof(result), "Error: event not found");
+         snprintf(result, sizeof(result), TOOL_RESULT_ERROR_MARK "Error: event not found");
          return strdup(result);
       }
    } else if (name) {
       if (scheduler_db_find_by_name(user_id, name, &event) != 0) {
-         snprintf(result, sizeof(result), "No active event named '%s' found.", name);
+         snprintf(result, sizeof(result),
+                  TOOL_RESULT_ERROR_MARK "No active event named '%s' found.", name);
          return strdup(result);
       }
       event_id = event.id;
    } else {
-      snprintf(result, sizeof(result), "Error: 'event_id' or 'name' required to cancel");
+      snprintf(result, sizeof(result),
+               TOOL_RESULT_ERROR_MARK "Error: 'event_id' or 'name' required to cancel");
       return strdup(result);
    }
 
@@ -694,16 +736,18 @@ static char *handle_query(struct json_object *details, int user_id) {
 
    if (event_id > 0) {
       if (scheduler_db_get(event_id, &event) != 0 || event.user_id != user_id) {
-         snprintf(result, sizeof(result), "Event not found.");
+         snprintf(result, sizeof(result), TOOL_RESULT_ERROR_MARK "Event not found.");
          return strdup(result);
       }
    } else if (name) {
       if (scheduler_db_find_by_name(user_id, name, &event) != 0) {
-         snprintf(result, sizeof(result), "No active event named '%s' found.", name);
+         snprintf(result, sizeof(result),
+                  TOOL_RESULT_ERROR_MARK "No active event named '%s' found.", name);
          return strdup(result);
       }
    } else {
-      snprintf(result, sizeof(result), "Error: 'event_id' or 'name' required to query");
+      snprintf(result, sizeof(result),
+               TOOL_RESULT_ERROR_MARK "Error: 'event_id' or 'name' required to query");
       return strdup(result);
    }
 
@@ -731,9 +775,9 @@ static char *handle_query(struct json_object *details, int user_id) {
       localtime_r(&event.fire_at, &fire_tm);
       char time_str[32];
       strftime(time_str, sizeof(time_str), "%I:%M %p on %b %d", &fire_tm);
-      int written = snprintf(result, sizeof(result), "%s '%s' is set for %s. Status: %s.",
-                             sched_event_type_to_str(event.event_type), event.name, time_str,
-                             sched_status_to_str(event.status));
+      int written = snprintf(result, sizeof(result), "%s '%s' [id=%lld] is set for %s. Status: %s.",
+                             sched_event_type_to_str(event.event_type), event.name,
+                             (long long)event.id, time_str, sched_status_to_str(event.status));
       /* For tasks and briefings, append the tool(s) the schedule will run so
        * the LLM can describe the configured behavior without waiting for fire.
        * Briefings may have multi-step rows; render as `t1.a1(v1) → t2.a2(v2)`. */
@@ -779,6 +823,309 @@ static char *handle_query(struct json_object *details, int user_id) {
    return strdup(result);
 }
 
+/* Append a " Runs t1.a1(v1) → t2.a2(v2)" summary of a briefing's steps to sb,
+ * falling back to the legacy single-tool fields for a pre-v50 row.  Reads the
+ * steps fresh from the DB (per-event) — used only on the cold update-confirmation
+ * path, so the batched read that handle_list uses is unnecessary here. */
+static void append_run_summary(strbuf_t *sb, const sched_event_t *e) {
+   sched_briefing_step_t steps[SCHED_BRIEFING_STEPS_MAX];
+   int step_count = 0;
+   scheduler_db_briefing_steps_list(e->id, steps, SCHED_BRIEFING_STEPS_MAX, &step_count);
+   if (step_count > 0) {
+      strbuf_append(sb, " Runs ");
+      for (int s = 0; s < step_count; s++) {
+         if (s > 0)
+            strbuf_append(sb, " → ");
+         strbuf_appendf(sb, "%s", steps[s].tool_name);
+         if (steps[s].tool_action[0])
+            strbuf_appendf(sb, ".%s", steps[s].tool_action);
+         if (steps[s].tool_value[0])
+            strbuf_appendf(sb, "(%s)", steps[s].tool_value);
+      }
+   } else if (e->tool_name[0]) {
+      strbuf_appendf(sb, " Runs %s", e->tool_name);
+      if (e->tool_action[0])
+         strbuf_appendf(sb, ".%s", e->tool_action);
+      if (e->tool_value[0])
+         strbuf_appendf(sb, "(%s)", e->tool_value);
+   }
+}
+
+/* Map a briefing-steps-update return code to a user-facing error string, or NULL
+ * on success.  event_name is used only for the message text. */
+static char *steps_update_error(int rc, const char *event_name) {
+   char result[RESULT_BUF_SIZE];
+   if (rc == SCHED_DB_NOT_EDITABLE) {
+      snprintf(result, sizeof(result),
+               TOOL_RESULT_ERROR_MARK
+               "Error: '%s' can no longer be edited (it already fired, is ringing, or was "
+               "cancelled). If it recurs, the next occurrence exists now — edit that.",
+               event_name);
+      return strdup(result);
+   }
+   snprintf(result, sizeof(result),
+            TOOL_RESULT_ERROR_MARK
+            "Error: could not update '%s' (a step list can hold at most %d steps).",
+            event_name, SCHED_BRIEFING_STEPS_MAX);
+   return strdup(result);
+}
+
+/* update — edit an existing scheduled event in place, preserving its event_id
+ * and recurrence-chain identity.  Two independent edit surfaces, either or both:
+ *   • scalar fields (new_name, message, fire_at, recurrence, recurrence_days,
+ *     deliver_to, say_aloud) — any event type;
+ *   • briefing steps (add_steps append / steps replace) — briefings only.
+ * The ownership + editable-status guard is authoritative in the DB primitives
+ * (single txn each); the checks here are a friendlier pre-flight that cannot, by
+ * itself, cause a false success.  `name`/`event_id` resolve the target; renaming
+ * uses `new_name` so the lookup key and the new value don't collide. */
+static char *handle_update(struct json_object *details, int user_id) {
+   char result[RESULT_BUF_SIZE];
+
+   /* Resolve the target event by id (preferred) or name — mirrors handle_cancel. */
+   int64_t event_id = (int64_t)json_get_int(details, "event_id", 0);
+   const char *name = json_get_string(details, "name");
+   sched_event_t event;
+
+   if (event_id > 0) {
+      if (scheduler_db_get(event_id, &event) != 0 || event.user_id != user_id) {
+         snprintf(result, sizeof(result), TOOL_RESULT_ERROR_MARK "Error: event not found");
+         return strdup(result);
+      }
+   } else if (name) {
+      if (scheduler_db_find_by_name(user_id, name, &event) != 0) {
+         snprintf(result, sizeof(result),
+                  TOOL_RESULT_ERROR_MARK "No active event named '%s' found.", name);
+         return strdup(result);
+      }
+      event_id = event.id;
+   } else {
+      snprintf(result, sizeof(result),
+               TOOL_RESULT_ERROR_MARK "Error: 'event_id' or 'name' required to update");
+      return strdup(result);
+   }
+
+   /* --- Parse scalar-field edits into a masked struct (validated up front). --- */
+   sched_event_t fields;
+   memset(&fields, 0, sizeof(fields));
+   uint32_t mask = 0;
+
+   const char *new_name = json_get_string(details, "new_name");
+   if (new_name && new_name[0]) {
+      size_t cap = focus_utf8_safe_cap(new_name, SCHED_NAME_MAX - 1);
+      memcpy(fields.name, new_name, cap);
+      mask |= SCHED_FIELD_NAME;
+   }
+
+   struct json_object *jmsg = NULL;
+   if (json_object_object_get_ex(details, "message", &jmsg) &&
+       json_object_is_type(jmsg, json_type_string)) {
+      const char *msg = json_object_get_string(jmsg);
+      /* Cap on a UTF-8 boundary (fields is memset, so the tail stays NUL). */
+      size_t msg_cap = focus_utf8_safe_cap(msg, SCHED_MESSAGE_MAX - 1);
+      memcpy(fields.message, msg, msg_cap);
+      mask |= SCHED_FIELD_MESSAGE;
+   }
+
+   const char *fire_at_str = json_get_string(details, "fire_at");
+   if (fire_at_str) {
+      time_t fire_time = iso8601_parse(fire_at_str);
+      if (fire_time <= 0) {
+         snprintf(result, sizeof(result),
+                  TOOL_RESULT_ERROR_MARK "Error: invalid fire_at format '%s'", fire_at_str);
+         return strdup(result);
+      }
+      if (fire_time <= time(NULL)) {
+         snprintf(result, sizeof(result),
+                  TOOL_RESULT_ERROR_MARK "Error: fire_at must be in the future");
+         return strdup(result);
+      }
+      if (fire_time > time(NULL) + 365 * 86400) {
+         snprintf(result, sizeof(result),
+                  TOOL_RESULT_ERROR_MARK "Error: fire_at must be within 1 year");
+         return strdup(result);
+      }
+      fields.fire_at = fire_time;
+      mask |= SCHED_FIELD_FIRE_AT;
+      /* Derive original_time (HH:MM local) from the new fire_at so a recurring
+       * event's time-of-day follows the edit — the recurrence engine reads
+       * original_time, not fire_at (see calculate_next_recurrence). */
+      struct tm fire_tm;
+      localtime_r(&fire_time, &fire_tm);
+      snprintf(fields.original_time, SCHED_ORIGINAL_TIME_MAX, "%02d:%02d", fire_tm.tm_hour,
+               fire_tm.tm_min);
+      mask |= SCHED_FIELD_ORIGINAL_TIME;
+   }
+
+   const char *recur = json_get_string(details, "recurrence");
+   if (recur) {
+      sched_recurrence_t r = sched_recurrence_from_str(recur);
+      /* sched_recurrence_from_str returns ONCE for ANY unrecognized token, so an
+       * out-of-vocabulary value ("biweekly", "monthly") would silently CLEAR an
+       * existing recurrence on the edit surface.  Reject unless the input really
+       * is "once" (the only valid token that maps to ONCE). */
+      if (r == SCHED_RECUR_ONCE && strcasecmp(recur, "once") != 0) {
+         snprintf(result, sizeof(result),
+                  TOOL_RESULT_ERROR_MARK
+                  "Error: invalid recurrence '%s'. Use one of: once, daily, weekdays, weekends, "
+                  "weekly, custom",
+                  recur);
+         return strdup(result);
+      }
+      fields.recurrence = r;
+      mask |= SCHED_FIELD_RECURRENCE;
+   }
+
+   const char *recur_days = json_get_string(details, "recurrence_days");
+   if (recur_days) {
+      if (!valid_recurrence_days_csv(recur_days)) {
+         snprintf(result, sizeof(result),
+                  TOOL_RESULT_ERROR_MARK
+                  "Error: invalid recurrence_days '%s'. Use CSV of: sun,mon,tue,wed,thu,fri,sat",
+                  recur_days);
+         return strdup(result);
+      }
+      strncpy(fields.recurrence_days, recur_days, SCHED_RECURRENCE_DAYS_MAX - 1);
+      mask |= SCHED_FIELD_RECURRENCE_DAYS;
+   }
+
+   struct json_object *jdt = NULL;
+   if (json_object_object_get_ex(details, "deliver_to", &jdt) &&
+       json_object_is_type(jdt, json_type_string)) {
+      strncpy(fields.deliver_to, json_object_get_string(jdt), SCHED_DELIVER_TO_MAX - 1);
+      mask |= SCHED_FIELD_DELIVER_TO; /* empty string clears fan-out */
+   }
+
+   struct json_object *jsa = NULL;
+   if (json_object_object_get_ex(details, "say_aloud", &jsa) &&
+       json_object_is_type(jsa, json_type_boolean)) {
+      fields.say_aloud = json_object_get_boolean(jsa) ? SCHED_SAY_ALOUD_ALWAYS
+                                                      : SCHED_SAY_ALOUD_NEVER;
+      mask |= SCHED_FIELD_SAY_ALOUD;
+   }
+
+   /* --- Parse step edits (briefings only). --- */
+   struct json_object *replace_arr = NULL, *append_arr = NULL;
+   json_object_object_get_ex(details, "steps", &replace_arr);
+   json_object_object_get_ex(details, "add_steps", &append_arr);
+   bool has_replace = replace_arr && json_object_is_type(replace_arr, json_type_array);
+   bool has_append = append_arr && json_object_is_type(append_arr, json_type_array);
+
+   if (has_replace && has_append) {
+      snprintf(result, sizeof(result),
+               TOOL_RESULT_ERROR_MARK
+               "Error: pass either 'add_steps' (append) or 'steps' (replace all), not both");
+      return strdup(result);
+   }
+   bool has_steps = has_replace || has_append;
+   if (has_steps && event.event_type != SCHED_EVENT_BRIEFING) {
+      snprintf(result, sizeof(result),
+               TOOL_RESULT_ERROR_MARK
+               "Error: steps can only be edited on a briefing (this is a %s)",
+               sched_event_type_to_str(event.event_type));
+      return strdup(result);
+   }
+   if (mask == 0 && !has_steps) {
+      snprintf(result, sizeof(result),
+               "Error: nothing to update — pass add_steps/steps (briefings) or a field such as "
+               "new_name, fire_at, recurrence, deliver_to, or say_aloud");
+      return strdup(result);
+   }
+
+   sched_briefing_step_t parsed_steps[SCHED_BRIEFING_STEPS_MAX];
+   int parsed_count = 0;
+   if (has_steps) {
+      char err[RESULT_BUF_SIZE];
+      if (parse_validate_steps(has_append ? append_arr : replace_arr, parsed_steps, &parsed_count,
+                               err, sizeof(err)) != SUCCESS) {
+         char marked_err[RESULT_BUF_SIZE + 1];
+         snprintf(marked_err, sizeof(marked_err), TOOL_RESULT_ERROR_MARK "%s", err);
+         return strdup(marked_err);
+      }
+   }
+
+   /* --- Apply.  STEPS FIRST: the step edit has more ways to fail (notably the
+    * 8-step cap), so doing it first means a rejected step edit leaves the scalar
+    * fields untouched too — a combined "rename + add a step" that busts the cap
+    * changes NOTHING and reports the cap error, instead of committing the rename
+    * and then claiming total failure.  The two edits are still separate
+    * transactions (each individually guarded + atomic), so a fire-thread flip in
+    * the sub-millisecond gap between them can commit the first and reject the
+    * second; that residual race is surfaced honestly as a partial success below,
+    * never as a flat failure hiding a committed change. --- */
+   bool steps_committed = false;
+   if (has_steps) {
+      int rc = scheduler_db_briefing_steps_update(event_id, user_id, parsed_steps, parsed_count,
+                                                  has_append);
+      if (rc != SCHED_DB_SUCCESS) {
+         return steps_update_error(rc, event.name); /* nothing applied yet */
+      }
+      steps_committed = true;
+   }
+   if (mask != 0) {
+      int rc = scheduler_db_update_fields(event_id, user_id, &fields, mask);
+      if (rc != SCHED_DB_SUCCESS) {
+         if (steps_committed) {
+            /* Rare: the row changed editability between the two transactions, or
+             * a DB error hit the scalar UPDATE.  The step edit already committed —
+             * refresh listeners and report the partial state honestly rather than
+             * claim total failure.  Attribute the cause precisely (don't blame a
+             * state change on a genuine DB error). */
+            scheduler_broadcast_events_changed(user_id);
+            scheduler_notify_new_event();
+            const char *why = (rc == SCHED_DB_NOT_EDITABLE)
+                                  ? "it just fired, started ringing, or was cancelled"
+                                  : "of an unexpected error";
+            snprintf(result, sizeof(result),
+                     "Updated the steps of '%s', but its other settings could not be changed "
+                     "(%s).",
+                     event.name, why);
+            return strdup(result);
+         }
+         if (rc == SCHED_DB_NOT_EDITABLE) {
+            snprintf(result, sizeof(result),
+                     TOOL_RESULT_ERROR_MARK
+                     "Error: '%s' can no longer be edited (it already fired, is ringing, or was "
+                     "cancelled).",
+                     event.name);
+            return strdup(result);
+         }
+         snprintf(result, sizeof(result), TOOL_RESULT_ERROR_MARK "Error: could not update '%s'.",
+                  event.name);
+         return strdup(result);
+      }
+   }
+
+   scheduler_broadcast_events_changed(user_id);
+   scheduler_notify_new_event(); /* fire_at may have moved → recompute next wakeup */
+
+   /* Read-back confirmation from the freshly-persisted row so the model relays
+    * the new configuration exactly (name/time/steps all reflect the edit). */
+   sched_event_t updated;
+   if (scheduler_db_get(event_id, &updated) != 0)
+      updated = event; /* fall back to the pre-edit copy for the label */
+
+   strbuf_t sb;
+   strbuf_init(&sb, 256);
+   struct tm fire_tm;
+   localtime_r(&updated.fire_at, &fire_tm);
+   char time_str[48];
+   strftime(time_str, sizeof(time_str), "%I:%M %p on %b %d", &fire_tm);
+   strbuf_appendf(&sb, "Updated %s '%s' (fires %s", sched_event_type_to_str(updated.event_type),
+                  updated.name, time_str);
+   if (updated.recurrence != SCHED_RECUR_ONCE)
+      strbuf_appendf(&sb, ", %s", sched_recurrence_to_str(updated.recurrence));
+   strbuf_append(&sb, ").");
+   if (updated.event_type == SCHED_EVENT_BRIEFING)
+      append_run_summary(&sb, &updated);
+   if (strbuf_oom(&sb)) {
+      strbuf_free(&sb);
+      return strdup("Updated event.");
+   }
+   char *out = strbuf_steal(&sb);
+   return out ? out : strdup("Updated event.");
+}
+
 static char *handle_snooze(struct json_object *details) {
    int64_t event_id = (int64_t)json_get_int(details, "event_id", 0);
    int snooze_min = json_get_int(details, "snooze_minutes", 0);
@@ -816,14 +1163,24 @@ static char *scheduler_tool_callback(const char *action, char *value, int *shoul
    *should_respond = 1;
 
    if (!action || !action[0])
-      return strdup("Error: action is required");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: action is required");
 
    /* Parse details JSON */
    struct json_object *details = NULL;
    if (value && value[0]) {
       details = json_tokener_parse(value);
       if (!details) {
-         return strdup("Error: invalid JSON in details parameter");
+         /* `list` takes only an optional `type` filter, so a caller that passes
+          * a non-JSON details (e.g. a model emitting a prose description instead
+          * of an object) should still list everything rather than fail.  Every
+          * other action needs structured fields, so malformed JSON stays an
+          * error there — silently proceeding on a create/update/cancel with an
+          * empty details would drop the caller's real request. */
+         if (strcmp(action, "list") == 0) {
+            details = json_object_new_object();
+         } else {
+            return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid JSON in details parameter");
+         }
       }
    } else {
       details = json_object_new_object();
@@ -847,6 +1204,21 @@ static char *scheduler_tool_callback(const char *action, char *value, int *shoul
          source_client_type = SCHED_SOURCE_WEBUI;
       }
    }
+
+   /* Schedule-mutating actions act on a specific user's schedule.  A caller with
+    * no session context is an unauthenticated MQTT publish (no session_id), which
+    * resolves to user_id 1 — refuse it, mirroring job_tool's starts_work guard.
+    * Every legitimate path (LLM tool call incl. local voice, WebUI, authenticated
+    * MQTT-with-session) sets the context.  snooze/dismiss are deliberately left
+    * reachable: they act only on an already-ringing alarm, so a physical MQTT
+    * button can still silence one. */
+   const bool mutates_schedule = (strcmp(action, "create") == 0 || strcmp(action, "cancel") == 0 ||
+                                  strcmp(action, "update") == 0);
+   if (mutates_schedule && ctx == NULL) {
+      json_object_put(details);
+      OLOG_WARNING("scheduler_tool: refused '%s' from a caller with no session context", action);
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: changing a schedule requires a user session.");
+   }
 #endif
 
    char *result = NULL;
@@ -859,6 +1231,8 @@ static char *scheduler_tool_callback(const char *action, char *value, int *shoul
       result = handle_cancel(details, user_id);
    } else if (strcmp(action, "query") == 0) {
       result = handle_query(details, user_id);
+   } else if (strcmp(action, "update") == 0) {
+      result = handle_update(details, user_id);
    } else if (strcmp(action, "snooze") == 0) {
       result = handle_snooze(details);
    } else if (strcmp(action, "dismiss") == 0) {
@@ -866,8 +1240,8 @@ static char *scheduler_tool_callback(const char *action, char *value, int *shoul
    } else {
       char buf[256];
       snprintf(buf, sizeof(buf),
-               "Error: unknown action '%s'. Valid: create, list, cancel, "
-               "query, snooze, dismiss",
+               TOOL_RESULT_ERROR_MARK "Error: unknown action '%s'. Valid: create, list, cancel, "
+                                      "query, update, snooze, dismiss",
                action);
       result = strdup(buf);
    }
@@ -897,12 +1271,14 @@ static const treg_param_t scheduler_params[] = {
        .name = "action",
        .description = "The scheduler action: 'create' (new event), 'list' (show active events), "
                       "'cancel' (cancel by name/id), 'query' (check status/time remaining), "
-                      "'snooze' (snooze ringing alarm), 'dismiss' (dismiss ringing alarm)",
+                      "'update' (edit an existing briefing's steps in place, keeping its id and "
+                      "recurrence — use this to add/change what a briefing reports, NOT a memory "
+                      "note), 'snooze' (snooze ringing alarm), 'dismiss' (dismiss ringing alarm)",
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
-       .enum_values = { "create", "list", "cancel", "query", "snooze", "dismiss" },
-       .enum_count = 6,
+       .enum_values = { "create", "list", "cancel", "query", "update", "snooze", "dismiss" },
+       .enum_count = 7,
    },
    {
        .name = "details",
@@ -942,6 +1318,17 @@ static const treg_param_t scheduler_params[] = {
            "list: {type (optional filter)}.\n"
            "cancel/query: {name or event_id (event_id is the integer shown in 'list' "
            "output as '[id=N]')}.\n"
+           "update: {name or event_id to identify the event, plus any of: new_name (rename), "
+           "fire_at (reschedule, ISO 8601), recurrence, recurrence_days, message (reminders), "
+           "deliver_to (channel; empty string clears fan-out), say_aloud (briefings).  For "
+           "BRIEFINGS also: add_steps (append one or more steps — use this to ADD to a "
+           "briefing, e.g. add stock news to a morning briefing; send only the NEW steps) OR "
+           "steps (replace the WHOLE step list — you must resend every step you want kept). "
+           "Each step is {tool_name, tool_action, tool_value}, same shape as create.  Prefer "
+           "add_steps for additive requests so you can't accidentally drop existing steps.  "
+           "NOTE: 'name' identifies the event; to RENAME it, use new_name.  Editing a "
+           "recurring event's fire_at also moves its time-of-day for all future occurrences.  "
+           "'list' or 'query' the event first to get its name/id.\n"
            "snooze: {event_id (optional), snooze_minutes (1-120, optional)}.\n"
            "dismiss: {event_id (optional)}.",
        .type = TOOL_PARAM_TYPE_STRING,
@@ -991,6 +1378,13 @@ static const tool_metadata_t scheduler_metadata = {
        "arguments the tool receives (for `search`, that's the query string).  Empty "
        "tool_value for tools that require it (search, url_fetch) is rejected at create "
        "time.  Maximum 8 steps per briefing.\n\n"
+       "EDITING A BRIEFING: when the user asks to CHANGE, MODIFY, or ADD TO an existing "
+       "briefing ('add my stock holdings to the morning briefing', 'also include traffic'), "
+       "use action='update' — do NOT store a memory note and do NOT create a second "
+       "briefing.  A memory note does nothing to a schedule; only editing its steps changes "
+       "what it reports.  First 'list' to find the briefing (the id is shown as [id=N]), then "
+       "'update' with add_steps to append the new step(s).  Editing the pending occurrence "
+       "propagates to all future occurrences of a recurring briefing automatically.\n\n"
        "AUDIO (briefings only): controlled by `say_aloud` in `details` — NOT "
        "`announce_all` (which is multi-user fan-out, unrelated to TTS).  "
        "Default behavior: briefings created via voice (local mic / satellite) speak "
@@ -1051,13 +1445,16 @@ static const tool_metadata_t scheduler_metadata = {
        "\"fire_at\":\"2026-05-22T07:00:00\",\"recurrence\":\"weekdays\","
        "\"deliver_to\":\"slack_D0B6SQGB31C\","
        "\"steps\":[{\"tool_name\":\"weather\",\"tool_action\":\"get\","
-       "\"tool_value\":\"Atlanta\"}]}",
+       "\"tool_value\":\"Atlanta\"}]}\n"
+       "Example editing a briefing (user said 'add my stock holdings news to the morning "
+       "briefing' — action='update', append only the new step): "
+       "{\"name\":\"Morning Briefing\",\"add_steps\":[{\"tool_name\":\"search\","
+       "\"tool_action\":\"news\",\"tool_value\":\"AAPL NVDA TSLA stock news today\"}]}",
    .params = scheduler_params,
    .param_count = 2,
 
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NONE,
-   .is_getter = false,
    .default_local = true,
    .default_remote = true,
 

@@ -69,12 +69,14 @@
 #include "core/job_manager.h" /* job subsystem compiles only under ENABLE_WEBUI */
 #include "core/job_reinvoke.h"
 #endif
+#include "core/llm_response_finalize.h"
 #include "core/ocp_helpers.h"
 #include "core/ota.h"
 #include "core/ota_rollout.h"
 #include "core/path_utils.h"
 #include "core/pending_system_msg.h"
 #include "core/session_manager.h"
+#include "core/text_filter.h"
 #include "core/utterance_dedup.h"
 #include "core/wake_word.h"
 #include "core/worker_pool.h"
@@ -454,26 +456,12 @@ static void dawn_tts_sentence_callback(const char *sentence, void *userdata) {
       return;
    }
 
-   // Remove command tags (they'll be processed from the full response later)
-   char *cmd_start, *cmd_end;
-   while ((cmd_start = strstr(cleaned, "<command>")) != NULL) {
-      cmd_end = strstr(cmd_start, "</command>");
-      if (cmd_end) {
-         cmd_end += strlen("</command>");
-         memmove(cmd_start, cmd_end, strlen(cmd_end) + 1);
-      } else {
-         // Incomplete command tag - strip from <command> to end of string
-         // This handles cases where the stream breaks between tags
-         *cmd_start = '\0';
-         break;
-      }
-   }
-
-   // Remove <end_of_turn> tags (local AI models)
-   char *match = NULL;
-   if ((match = strstr(cleaned, "<end_of_turn>")) != NULL) {
-      *match = '\0';
-   }
+   // Remove command tags + <end_of_turn> (processed from the full response later),
+   // then the <cited> memory-citation tag — shared whole-string strips, the same
+   // ones the response finalizer and WebUI-audio TTS use.  Both truncate on an
+   // orphan opener so a sentence that breaks mid-tag can't leak a partial into TTS.
+   text_filter_command_strip(cleaned, true); /* per-sentence TTS: drop a mid-split tag */
+   text_filter_cited_strip(cleaned);
 
    // Remove special characters that cause problems
    remove_chars(cleaned, "*");
@@ -1718,6 +1706,10 @@ int main(int argc, char *argv[]) {
    // Step 4: Apply environment variable overrides (highest priority before CLI)
    config_apply_env(&g_config, &g_secrets);
 
+   // Step 4a: Apply forward migrations of retired settings (must run after env
+   // overrides can set a legacy value, and before config_validate below).
+   config_migrate(&g_config);
+
    // Step 4b: Apply config-based settings (CLI overrides take precedence)
    if (!(cli_overrides & CLI_OVERRIDE_COMMAND_MODE) &&
        g_config.commands.processing_mode[0] != '\0') {
@@ -1865,6 +1857,8 @@ int main(int argc, char *argv[]) {
          has_api_key = llm_has_claude_key();
       } else if (strcmp(provider, "gemini") == 0) {
          has_api_key = llm_has_gemini_key();
+      } else if (strcmp(provider, "openrouter") == 0) {
+         has_api_key = llm_has_openrouter_key();
       }
 
       if (!has_api_key) {
@@ -2150,6 +2144,10 @@ int main(int argc, char *argv[]) {
       return 1;
    }
 
+   /* E1: scale Whisper's encoder audio context to the utterance length (faster
+    * transcription) with the configured floor. 0 = disabled (full 1500 window). */
+   asr_set_audio_ctx(asr_ctx, g_config.asr.audio_ctx_floor > 0 ? -g_config.asr.audio_ctx_floor : 0);
+
    // Initialize chunking manager (Whisper only, persistent lifecycle)
    // Only if chunking is enabled in config
    chunking_manager_t *chunk_mgr = NULL;
@@ -2375,8 +2373,9 @@ mqtt_disabled:
       llm_set_type(LLM_CLOUD);
    } else if (strcmp(g_config.llm.type, "local") == 0) {
       llm_set_type(LLM_LOCAL);
-   } else if (llm_check_connection(llm_openrouter_gateway_enabled() ? "https://openrouter.ai"
-                                                                    : "https://api.openai.com",
+   } else if (llm_check_connection(strcmp(g_config.llm.cloud.provider, "openrouter") == 0
+                                       ? "https://openrouter.ai"
+                                       : "https://api.openai.com",
                                    4)) {
       llm_set_type(LLM_CLOUD);
    } else {
@@ -2571,6 +2570,7 @@ mqtt_disabled:
          conv_stream_evict_stale(now_srv);
 #ifdef ENABLE_WEBUI
          jobs_monitor_tick(now_srv);
+         webui_watch_readings_tick();
 #endif
 #ifdef ENABLE_MULTI_CLIENT
          /* Apply deferred device/system-context messages.  Server mode drives no
@@ -2599,6 +2599,8 @@ mqtt_disabled:
 #ifdef ENABLE_WEBUI
             /* Background-job completion monitor (dirty-gated). */
             jobs_monitor_tick(now_rollout);
+            /* Live watch_readings gauge stream to subscribed Watches panels. */
+            webui_watch_readings_tick();
 #endif
          }
       }
@@ -2651,84 +2653,36 @@ mqtt_disabled:
             // Process successful response
             OLOG_WARNING("AI: %s\n", response_text);
 
-            // Update TUI with full LLM response (including commands for debugging)
+            // Update TUI with full raw LLM response (tags included, for debugging)
             metrics_set_last_ai_response(response_text);
 
-            // Create cleaned version for TTS (keep original for conversation history)
-            char *tts_response = strdup(response_text);
+            // TTS already handled by streaming callback - no need to call text_to_speech here.
+            // Note: We don't touch TTS state here - let the state machine handle it.
+            // If user interrupts with wake word, state machine will discard TTS;
+            // without wake word, state machine will resume TTS.
 
-            // Process any commands in the LLM response
-            if (command_processing_mode == CMD_MODE_LLM_ONLY ||
-                command_processing_mode == CMD_MODE_DIRECT_FIRST) {
-               int cmds_processed;
-               {
-                  // Set command context so LLM callbacks use local session's config
-                  SESSION_SCOPED_COMMAND_CONTEXT(session_get_local());
-                  cmds_processed = parse_llm_response_for_commands(response_text, mosq);
-               }
-               if (cmds_processed > 0) {
-                  OLOG_INFO("Processed %d commands from LLM response", cmds_processed);
-               }
-               if (tts_response) {
-                  // Remove command tags
-                  char *cmd_start, *cmd_end;
-                  while ((cmd_start = strstr(tts_response, "<command>")) != NULL) {
-                     cmd_end = strstr(cmd_start, "</command>");
-                     if (cmd_end) {
-                        cmd_end += strlen("</command>");
-                        memmove(cmd_start, cmd_end, strlen(cmd_end) + 1);
-                     } else {
-                        break;
-                     }
-                  }
+            // Finalize to canonical clean text (strip residual tags + trailing
+            // whitespace) and persist THAT to conversation history so the model
+            // never sees stray tags on the next turn.  (Phase 1 will thread the
+            // local session here for citation resolution.)
+            response_final_t fin;
+            const char *history_text = (llm_response_finalize(session_get_local(), response_text,
+                                                              &fin) == SUCCESS)
+                                           ? fin.text
+                                           : response_text;
 
-                  // Remove <end_of_turn> tags (local AI models)
-                  char *match = NULL;
-                  if ((match = strstr(tts_response, "<end_of_turn>")) != NULL) {
-                     *match = '\0';
-                  }
-
-                  // Remove special characters that cause problems
-                  remove_chars(tts_response, "*");
-                  remove_emojis(tts_response);
-
-                  // Trim trailing whitespace
-                  size_t len = strlen(tts_response);
-                  while (len > 0 &&
-                         (tts_response[len - 1] == ' ' || tts_response[len - 1] == '\t' ||
-                          tts_response[len - 1] == '\n' || tts_response[len - 1] == '\r')) {
-                     tts_response[--len] = '\0';
-                  }
-               }
+            // Skip empty content (an all-tags or whitespace-only response finalizes
+            // to "") — an empty assistant message makes Claude reject the next turn.
+            // Mirrors the guard in llm_call_finalize.
+            if (history_text[0] != '\0') {
+               struct json_object *ai_message = json_object_new_object();
+               json_object_object_add(ai_message, "role", json_object_new_string("assistant"));
+               json_object_object_add(ai_message, "content", json_object_new_string(history_text));
+               json_object_array_add(conversation_history, ai_message);
             }
 
-            // TTS already handled by streaming callback - no need to call text_to_speech here
-            // Note: We don't touch TTS state here - let the state machine handle it
-            // If user interrupts with wake word, state machine will discard TTS
-            // If user interrupts without wake word, state machine will resume TTS
-
-            // Save original response (with command tags) to conversation history
-            // but trim trailing whitespace for Claude API compatibility
-            char *history_response = strdup(response_text);
-            if (history_response) {
-               size_t len = strlen(history_response);
-               while (len > 0 &&
-                      (history_response[len - 1] == ' ' || history_response[len - 1] == '\t' ||
-                       history_response[len - 1] == '\n' || history_response[len - 1] == '\r')) {
-                  history_response[--len] = '\0';
-               }
-            }
-
-            struct json_object *ai_message = json_object_new_object();
-            json_object_object_add(ai_message, "role", json_object_new_string("assistant"));
-            json_object_object_add(ai_message, "content",
-                                   json_object_new_string(history_response ? history_response
-                                                                           : response_text));
-            json_object_array_add(conversation_history, ai_message);
-
+            response_final_free(&fin);  // safe: fin.text is NULL on the finalize-failure path
             free(response_text);
-            free(tts_response);
-            free(history_response);
 
 #ifdef ENABLE_MULTI_CLIENT
             /* Mark successful interaction complete for idle timeout tracking */

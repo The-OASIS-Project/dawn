@@ -263,11 +263,62 @@
       }
    }
 
+   // Lazily-created AudioContext for the short "ready for your command" ding.
+   // Separate from the capture/playback contexts so it can't disturb them.
+   let dingCtx = null;
+
+   /**
+    * Play a short two-note chime when the server enters RECORDING (bare wake word
+    * acknowledged, listening for the command). This REPLACES the old server-side
+    * spoken "Hello." greeting, which played TTS through the speaker while the
+    * recording mic was live and echoed back in — the server VAD scored that speech
+    * echo and stalled/hung end-of-speech. A pure enveloped tone is NOT scored as
+    * speech by the server's Silero VAD, so it's echo-safe even without AEC. Kept
+    * short, low, and click-free (exponential envelope). Purely cosmetic — any
+    * failure is swallowed so it can never break the voice flow.
+    *
+    * DELIBERATELY not gated on TTS-enabled (unlike the old server greeting, which
+    * was): the ding is a UI interaction cue for "I'm listening," not Friday's
+    * voice, so it fires whenever always-on is active regardless of the TTS toggle.
+    */
+   function playRecordingDing() {
+      try {
+         if (!dingCtx) {
+            dingCtx = new (window.AudioContext || window.webkitAudioContext)();
+         }
+         if (dingCtx.state === 'suspended') {
+            dingCtx.resume();
+         }
+         const t = dingCtx.currentTime;
+         const osc = dingCtx.createOscillator();
+         const gain = dingCtx.createGain();
+         osc.type = 'sine';
+         osc.frequency.setValueAtTime(784, t); // G5
+         osc.frequency.setValueAtTime(1047, t + 0.08); // -> C6, a gentle rising "ready" tone
+         gain.gain.setValueAtTime(0.0001, t); // start near-silent so the attack ramp is click-free
+         gain.gain.exponentialRampToValueAtTime(0.12, t + 0.015); // quick, low-peak attack
+         gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.18); // smooth release (~180ms total)
+         osc.connect(gain).connect(dingCtx.destination);
+         osc.start(t);
+         osc.stop(t + 0.2);
+      } catch (e) {
+         /* cosmetic ding — never let it affect the flow */
+      }
+   }
+
    /**
     * Handle state change from server
     */
    function onStateChange(newState) {
+      const prevState = state;
       state = newState;
+
+      // Bare-wake-word "ready for your command" cue (replaces the server greeting).
+      // Fire only on the transition INTO recording so it dings once per wake, not
+      // on every state frame.
+      if (newState === 'recording' && prevState !== 'recording' && enabled) {
+         playRecordingDing();
+      }
 
       // Mic mute/unmute is driven by actual TTS PLAYBACK (onPlaybackStart /
       // onPlaybackEnd), NOT by this server state. TTS echo prevention only needs

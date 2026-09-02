@@ -21,12 +21,24 @@
  * daemon, no DB, no embedding engine.
  */
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "core/focus/focus_source.h"
 #include "tools/recall_format.h"
 #include "unity.h"
+
+/* Stubs: recall_format.c records surfaced facts + gates its citation footer via
+ * the memory_citation module (Option B).  This is a pure-formatter unit test, so
+ * stub both — recording is a no-op, citation reads as disabled (no footer hint,
+ * keeping the existing assertions stable). */
+void memory_citation_record_tool_fact_current(int64_t fact_id) {
+   (void)fact_id;
+}
+bool memory_citation_enabled(void) {
+   return false;
+}
 
 void setUp(void) {
 }
@@ -82,14 +94,14 @@ static void test_grouping_and_pointers(void) {
    TEST_ASSERT_NOT_NULL(strstr(out, "NOTES & DOCUMENTS"));
    TEST_ASSERT_NOT_NULL(strstr(out, "CALENDAR"));
 
-   /* Read-pointers: fact gets a [memory id], document gets document_read. */
-   TEST_ASSERT_NOT_NULL(strstr(out, "[memory id 7858]"));
+   /* Read-pointers: fact gets an [ID:x] marker, document gets document_read. */
+   TEST_ASSERT_NOT_NULL(strstr(out, "[ID:7858]"));
    TEST_ASSERT_NOT_NULL(strstr(out, "document_read \"spec_v3.pdf\""));
    TEST_ASSERT_NOT_NULL(strstr(out, "calendar"));
    /* Summary text is shown but gets NO fetch pointer — `memory get` can't
-    * resolve a summary id, so `[memory id 42]` must NOT appear. */
+    * resolve a summary id, so `[ID:42]` must NOT appear. */
    TEST_ASSERT_NOT_NULL(strstr(out, "slipping the beta"));
-   TEST_ASSERT_NULL(strstr(out, "[memory id 42]"));
+   TEST_ASSERT_NULL(strstr(out, "[ID:42]"));
 
    free(out);
    free_candidates(cands, 4);

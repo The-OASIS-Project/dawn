@@ -112,6 +112,20 @@ static void test_jobs_roundtrip(void) {
    TEST_ASSERT_EQUAL_INT(17, g_read.jobs.event_retention_days);
 }
 
+/* --- [asr] ----------------------------------------------------------------- */
+
+static void test_asr_roundtrip(void) {
+   /* audio_ctx_floor is the E1 knob; a non-default in-range value must survive
+    * the write/re-parse (the silent-deletion guard for this field). */
+   g_written.asr.audio_ctx_floor = 512;
+   g_written.asr.dedup_window_sec = 7;
+
+   round_trip();
+
+   TEST_ASSERT_EQUAL_INT(512, g_read.asr.audio_ctx_floor);
+   TEST_ASSERT_EQUAL_INT(7, g_read.asr.dedup_window_sec);
+}
+
 /* --- [research] ------------------------------------------------------------ */
 
 static void test_research_roundtrip(void) {
@@ -204,6 +218,36 @@ static void test_scheduler_roundtrip(void) {
    TEST_ASSERT_TRUE(g_read.scheduler.briefing_speak_aloud_on_webui_source);
 }
 
+/* --- [llm.tools] ----------------------------------------------------------- */
+
+static void test_llm_tools_roundtrip(void) {
+   /* Default is enabled=true, so writing false and reading it back proves the
+    * writer emits the key (a dropped key would revert to the true default). */
+   g_written.llm.tools.enabled = false;
+
+   round_trip();
+
+   TEST_ASSERT_FALSE(g_read.llm.tools.enabled);
+}
+
+/* --- [memory.decay] citation_enabled --------------------------------------- */
+
+static void test_memory_citation_roundtrip(void) {
+   /* Default is false; writing true and reading it back proves the writer emits
+    * the key (a dropped key would revert to the false default and be lost on the
+    * next WebUI settings save). */
+   g_written.memory.citation_enabled = true;
+   /* Phase 2: a non-default boost must survive the round-trip.  Default is 0.0
+    * (inert); a dropped key would silently revert to 0.0 and disable reinforcement
+    * on the next WebUI settings save.  0.05 survives the writer's %.2f precision. */
+   g_written.memory.citation_reinforcement_boost = 0.05f;
+
+   round_trip();
+
+   TEST_ASSERT_TRUE(g_read.memory.citation_enabled);
+   TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.05f, g_read.memory.citation_reinforcement_boost);
+}
+
 /* --- section coverage ------------------------------------------------------
  * The generic half: every section config_write_toml is responsible for must
  * appear in its output.  A new section wired into the parser but not the writer
@@ -213,6 +257,45 @@ static void test_scheduler_roundtrip(void) {
  * are emitted via tool_registry_write_configs(), which this test stubs out.
  * [api_keys] is excluded too: it is the legacy secrets spelling, superseded by
  * [secrets], and deliberately never written back. */
+
+/* --- [llm.cloud] use_openrouter retirement (2a) --------------------------- */
+
+/* config_migrate folds a legacy use_openrouter=true into provider="openrouter" and
+ * clears the bool, so an existing gateway install upgrades transparently. Idempotent. */
+static void test_use_openrouter_migrates_to_provider(void) {
+   g_written.llm.cloud.use_openrouter = true;
+   strncpy(g_written.llm.cloud.provider, "claude", sizeof(g_written.llm.cloud.provider) - 1);
+
+   config_migrate(&g_written);
+   TEST_ASSERT_EQUAL_STRING("openrouter", g_written.llm.cloud.provider);
+   TEST_ASSERT_FALSE(g_written.llm.cloud.use_openrouter);
+
+   /* Idempotent: a second pass changes nothing. */
+   config_migrate(&g_written);
+   TEST_ASSERT_EQUAL_STRING("openrouter", g_written.llm.cloud.provider);
+   TEST_ASSERT_FALSE(g_written.llm.cloud.use_openrouter);
+}
+
+/* The retired use_openrouter key is NEVER written back — a stale in-memory true value
+ * must not reappear in the emitted TOML (it is silently dropped, then migrated away on
+ * the next load). This is the inverse of the silent-data-loss guard above. */
+static void test_use_openrouter_not_written(void) {
+   g_written.llm.cloud.use_openrouter = true;
+   TEST_ASSERT_EQUAL_INT(0, config_write_toml(&g_written, RT_PATH));
+
+   FILE *fp = fopen(RT_PATH, "r");
+   TEST_ASSERT_NOT_NULL(fp);
+   char line[512];
+   bool found = false;
+   while (fgets(line, sizeof(line), fp)) {
+      if (strstr(line, "use_openrouter")) {
+         found = true;
+         break;
+      }
+   }
+   fclose(fp);
+   TEST_ASSERT_FALSE_MESSAGE(found, "retired use_openrouter must not be written to dawn.toml");
+}
 
 static void test_all_writer_owned_sections_present(void) {
    /* Every section config_write_toml() emits, INCLUDING sub-tables. Parent-only
@@ -367,9 +450,14 @@ static void test_control_characters_survive_the_round_trip(void) {
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_jobs_roundtrip);
+   RUN_TEST(test_asr_roundtrip);
    RUN_TEST(test_research_roundtrip);
    RUN_TEST(test_event_chunk_cap_has_a_floor);
    RUN_TEST(test_scheduler_roundtrip);
+   RUN_TEST(test_llm_tools_roundtrip);
+   RUN_TEST(test_memory_citation_roundtrip);
+   RUN_TEST(test_use_openrouter_migrates_to_provider);
+   RUN_TEST(test_use_openrouter_not_written);
    RUN_TEST(test_all_writer_owned_sections_present);
    RUN_TEST(test_written_file_reparses);
    RUN_TEST(test_string_values_cannot_forge_toml);

@@ -109,6 +109,12 @@ void text_filter_command_tags(cmd_tag_filter_state_t *state,
             output_fn(output_start, (size_t)(p - output_start), ctx);
             output_start = NULL;
          }
+         /* Emit any held partial-tag bytes before restarting on this '<': no tag
+          * has an interior '<', so a held partial can never continue past one —
+          * those bytes are confirmed non-tag text (fixes a dropped '<' on "<<command>"). */
+         if (state->len > 0) {
+            output_fn(state->buffer, state->len, ctx);
+         }
          state->buffer[0] = '<';
          state->len = 1;
          p++;
@@ -192,5 +198,232 @@ int text_filter_command_tags_to_buffer(cmd_tag_filter_state_t *state,
 
    text_filter_command_tags(state, text, buffer_output_fn, &ctx);
 
+   return (int)ctx.len;
+}
+
+/* =============================================================================
+ * Memory-citation tag filter — strips <cited>…</cited> from streamed text.
+ *
+ * Same chunk-spanning discipline as the command filter, minus nesting: once the
+ * opener is matched, ALL bytes are suppressed until the closer.  Mirrors the
+ * command state machine so the restart-on-mismatch behavior is identical.
+ * ============================================================================= */
+
+void text_filter_cited_reset(cited_tag_filter_state_t *state) {
+   if (state) {
+      memset(state, 0, sizeof(*state));
+   }
+}
+
+void text_filter_cited_strip(char *text) {
+   if (!text)
+      return;
+
+   /* Same tag grammar as the streaming filter below — keyed on the shared
+    * CITED_TAG_* macros so the two paths can never drift. */
+   char *s;
+   while ((s = strstr(text, CITED_TAG_OPEN)) != NULL) {
+      char *e = strstr(s, CITED_TAG_CLOSE);
+      if (e == NULL) {
+         *s = '\0'; /* orphan opener (truncated stream) — drop the fragment */
+         break;
+      }
+      e += CITED_TAG_CLOSE_LEN;
+      memmove(s, e, strlen(e) + 1);
+   }
+}
+
+void text_filter_cited_normalize(char *text) {
+   if (!text)
+      return;
+
+   char *p = text;
+   while ((p = strchr(p, '<')) != NULL) {
+      const char *q = p + 1;
+      while (*q == ' ' || *q == '\t')
+         q++; /* whitespace after '<' */
+      bool closing = false;
+      if (*q == '/') {
+         closing = true;
+         q++;
+         while (*q == ' ' || *q == '\t')
+            q++; /* whitespace after '/' */
+      }
+      if (strncmp(q, "cited", 5) != 0) {
+         p++; /* not a citation tag — step past this '<' */
+         continue;
+      }
+      q += 5;
+      while (*q == ' ' || *q == '\t')
+         q++; /* whitespace before '>' */
+      if (*q != '>') {
+         p++; /* "< cited" with no closing '>' on this run — not a tag */
+         continue;
+      }
+      q++; /* consume '>' — [p, q) is the malformed tag */
+
+      /* Rewrite the malformed span to the canonical tag.  The canonical form is
+       * never longer than the matched span (we only removed interior whitespace),
+       * so this compacts in place: shift the tail left, then write the tag. */
+      const char *canon = closing ? CITED_TAG_CLOSE : CITED_TAG_OPEN;
+      size_t clen = closing ? CITED_TAG_CLOSE_LEN : CITED_TAG_OPEN_LEN;
+      memmove(p + clen, q, strlen(q) + 1);
+      memcpy(p, canon, clen);
+      p += clen;
+   }
+}
+
+void text_filter_command_strip(char *text, bool truncate_orphan) {
+   if (!text)
+      return;
+
+   char *s;
+   while ((s = strstr(text, COMMAND_TAG_OPEN)) != NULL) {
+      char *e = strstr(s, COMMAND_TAG_CLOSE);
+      if (e == NULL) {
+         if (truncate_orphan)
+            *s = '\0'; /* mid-stream split — drop the partial so it isn't spoken */
+         break;        /* else: unclosed in a complete response — leave as literal */
+      }
+      e += COMMAND_TAG_CLOSE_LEN;
+      memmove(s, e, strlen(e) + 1);
+   }
+
+   char *eot = strstr(text, END_OF_TURN_TAG);
+   if (eot != NULL) {
+      *eot = '\0';
+   }
+}
+
+void text_filter_cited_tags(cited_tag_filter_state_t *state,
+                            const char *text,
+                            text_filter_output_fn output_fn,
+                            void *ctx) {
+   if (!state || !text || !output_fn) {
+      return;
+   }
+
+   const char *p = text;
+   const char *output_start = NULL;
+
+   while (*p) {
+      if (state->in_tag) {
+         /* Inside <cited> — suppress everything, scan for </cited> (may split). */
+         if (*p == '<') {
+            /* Potential start of the closer; (re)begin matching it. */
+            state->buffer[0] = '<';
+            state->len = 1;
+            p++;
+            continue;
+         }
+
+         if (state->len > 0) {
+            if (state->len >= CITED_TAG_BUF_SIZE - 1) {
+               state->len = 0; /* overrun guard: not a closer, keep suppressing */
+               p++;
+               continue;
+            }
+            if (*p == CITED_TAG_CLOSE[state->len]) {
+               state->buffer[state->len++] = *p;
+               if (state->len == CITED_TAG_CLOSE_LEN) {
+                  state->in_tag = false; /* closer complete — resume passthrough */
+                  state->len = 0;
+               }
+               p++;
+               continue;
+            }
+            state->len = 0; /* not the closer — discard, still suppressing */
+            p++;
+            continue;
+         }
+
+         p++; /* suppressed content byte */
+         continue;
+      }
+
+      /* Passthrough mode — look for the <cited> opener. */
+      if (*p == '<') {
+         /* Flush pending output before buffering a potential tag. */
+         if (output_start) {
+            output_fn(output_start, (size_t)(p - output_start), ctx);
+            output_start = NULL;
+         }
+         /* Emit any held partial-opener bytes before restarting on this '<' — a
+          * new '<' can't continue the previous partial (no interior '<' in the
+          * tag), so they're confirmed real text (fixes a dropped '<' on "<<cited>"). */
+         if (state->len > 0) {
+            output_fn(state->buffer, state->len, ctx);
+         }
+         state->buffer[0] = '<';
+         state->len = 1;
+         p++;
+         continue;
+      }
+
+      if (state->len > 0) {
+         if (state->len >= CITED_TAG_BUF_SIZE - 1) {
+            output_fn(state->buffer, state->len, ctx); /* not a tag — release */
+            state->len = 0;
+            continue;
+         }
+         if (*p != CITED_TAG_OPEN[state->len]) {
+            /* Partial match broke — emit held bytes and re-process current char
+             * (a '<' among them restarts a fresh match, as in the command filter). */
+            output_fn(state->buffer, state->len, ctx);
+            state->len = 0;
+            continue;
+         }
+         state->buffer[state->len++] = *p;
+         if (state->len == CITED_TAG_OPEN_LEN) {
+            state->in_tag = true; /* opener complete — begin suppressing */
+            state->len = 0;
+         }
+         p++;
+         continue;
+      }
+
+      /* Normal character — extend the passthrough span. */
+      if (!output_start) {
+         output_start = p;
+      }
+      p++;
+   }
+
+   if (output_start) {
+      output_fn(output_start, (size_t)(p - output_start), ctx);
+   }
+}
+
+int text_filter_cited_tags_to_buffer(cited_tag_filter_state_t *state,
+                                     const char *text,
+                                     char *out_buf,
+                                     size_t out_size) {
+   if (!state || !text || !out_buf || out_size == 0) {
+      return 0;
+   }
+
+   buffer_ctx_t ctx = { .buf = out_buf, .size = out_size, .len = 0 };
+   out_buf[0] = '\0';
+
+   text_filter_cited_tags(state, text, buffer_output_fn, &ctx);
+
+   return (int)ctx.len;
+}
+
+int text_filter_cited_flush_to_buffer(cited_tag_filter_state_t *state,
+                                      char *out_buf,
+                                      size_t out_size) {
+   if (!state || !out_buf || out_size == 0) {
+      return 0;
+   }
+   out_buf[0] = '\0';
+
+   buffer_ctx_t ctx = { .buf = out_buf, .size = out_size, .len = 0 };
+   /* A held partial OPENER (passthrough mode, len>0) is real text — emit it.
+    * Mid-tag (in_tag) means the closer never arrived: drop the suppressed tail. */
+   if (!state->in_tag && state->len > 0) {
+      buffer_output_fn(state->buffer, state->len, &ctx);
+   }
+   text_filter_cited_reset(state);
    return (int)ctx.len;
 }

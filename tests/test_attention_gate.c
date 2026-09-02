@@ -148,7 +148,7 @@ static void test_slope_window(void) {
    w.id = 7;
    w.user_id = 1;
    w.rule_type = SAGE_RULE_SLOPE;
-   w.direction = SAGE_DIR_ABOVE; /* rising */
+   w.direction = SAGE_DIR_RISING;
    w.slope_per_min = 400.0;
    w.slope_window_sec = 120;
    w.notify = SAGE_NOTIFY_AMBIENT;
@@ -167,6 +167,45 @@ static void test_slope_window(void) {
    memset(&st2, 0, sizeof(st2));
    TEST_ASSERT_FALSE(eval(&w, &st2, 400.0, T0));
    TEST_ASSERT_FALSE(eval(&w, &st2, 450.0, T0 + 60000)); /* 50/min */
+
+   /* A RISING watch must NOT fire on a sharp DROP (that's a falling watch's job). */
+   sage_rule_state_t st3;
+   memset(&st3, 0, sizeof(st3));
+   TEST_ASSERT_FALSE(eval(&w, &st3, 900.0, T0));
+   TEST_ASSERT_FALSE(eval(&w, &st3, 400.0, T0 + 60000)); /* -500/min */
+}
+
+/* --- slope, falling direction (rate dropping past -slope_per_min) --- */
+static void test_slope_falling(void) {
+   sage_watch_t w;
+   memset(&w, 0, sizeof(w));
+   w.id = 8;
+   w.user_id = 1;
+   w.rule_type = SAGE_RULE_SLOPE;
+   w.direction = SAGE_DIR_FALLING;
+   w.slope_per_min = 400.0;
+   w.slope_window_sec = 120;
+   w.notify = SAGE_NOTIFY_AMBIENT;
+   w.enabled = true;
+   strncpy(w.metric, "suit.co2_ppm", sizeof(w.metric) - 1);
+
+   /* A sharp drop fires: +60s, -500 => slope -500/min <= -400 => fire. */
+   sage_rule_state_t st;
+   memset(&st, 0, sizeof(st));
+   TEST_ASSERT_FALSE(eval(&w, &st, 900.0, T0));
+   TEST_ASSERT_TRUE(eval(&w, &st, 400.0, T0 + 60000));
+
+   /* A gentle drop must NOT fire. */
+   sage_rule_state_t st2;
+   memset(&st2, 0, sizeof(st2));
+   TEST_ASSERT_FALSE(eval(&w, &st2, 900.0, T0));
+   TEST_ASSERT_FALSE(eval(&w, &st2, 850.0, T0 + 60000)); /* -50/min */
+
+   /* A sharp RISE must NOT fire a falling watch. */
+   sage_rule_state_t st3;
+   memset(&st3, 0, sizeof(st3));
+   TEST_ASSERT_FALSE(eval(&w, &st3, 400.0, T0));
+   TEST_ASSERT_FALSE(eval(&w, &st3, 900.0, T0 + 60000)); /* +500/min */
 }
 
 /* --- absence --- */
@@ -286,6 +325,7 @@ int main(void) {
    RUN_TEST(test_backoff_caps);
    RUN_TEST(test_ttl_expiry);
    RUN_TEST(test_slope_window);
+   RUN_TEST(test_slope_falling);
    RUN_TEST(test_absence);
    RUN_TEST(test_gate_zero_threshold_rearms);
    RUN_TEST(test_policy_notify_and_budget);

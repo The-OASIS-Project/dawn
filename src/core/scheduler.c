@@ -657,12 +657,13 @@ static void briefing_build_llm_config(llm_resolved_config_t *cfg,
          model_buf[model_buf_size - 1] = '\0';
          cfg->model = model_buf;
       }
-   } else if (llm_openrouter_gateway_enabled()) {
-      /* OpenRouter gateway: cloud briefings route through OpenRouter regardless of
-       * key presence (consistent with the other auxiliary resolvers — a missing key
-       * fails the cloud call rather than silently leaking to a direct provider).
-       * Unlike the others (which preserve a configured model string), the scheduler
-       * picks from per-provider model lists, so select the OpenRouter default here. */
+   } else if (strcmp(provider, "openrouter") == 0) {
+      /* OpenRouter is a first-class provider (gateway retired). Cloud briefings route
+       * through OpenRouter. NO key guard (unlike the direct arms below): a
+       * provider="openrouter" briefing with a MISSING key must FAIL HONESTLY rather than
+       * silently fall through to the OpenAI catch-all — P1, surface the misconfiguration.
+       * Unlike the direct providers (which preserve a configured model string), the
+       * scheduler picks from per-provider model lists, so select the OpenRouter default. */
       cfg->type = LLM_CLOUD;
       cfg->cloud_provider = CLOUD_PROVIDER_OPENROUTER;
       cfg->api_key = g_secrets.openrouter_api_key;
@@ -709,7 +710,7 @@ static void briefing_build_llm_config(llm_resolved_config_t *cfg,
       cfg->endpoint = endpoint_buf;
    }
 
-   strncpy(cfg->tool_mode, "disabled", sizeof(cfg->tool_mode) - 1);
+   cfg->suppress_tools = true;
    strncpy(cfg->thinking_mode, "disabled", sizeof(cfg->thinking_mode) - 1);
    cfg->timeout_ms = 30000;
 }

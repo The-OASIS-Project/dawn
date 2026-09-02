@@ -123,7 +123,6 @@ static const tool_metadata_t doc_grep_metadata = {
    .param_count = 4,
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = 0,
-   .is_getter = true,
    .is_available = doc_grep_is_available,
    .callback = doc_grep_callback,
 };
@@ -246,7 +245,7 @@ static char *doc_grep_callback(const char *action, char *value, int *should_resp
    /* Fail closed rather than silently truncating to a prefix (which would match
     * the wrong, shorter term). A real search term is never this long anyway. */
    if (qlen >= sizeof(needle))
-      return strdup("Error: search term too long.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: search term too long.");
    memcpy(needle, value, qlen);
    needle[qlen] = '\0';
    if (needle[0] == '\0')
@@ -260,7 +259,7 @@ static char *doc_grep_callback(const char *action, char *value, int *should_resp
    if (document_db_chunk_grep(user_id, needle, case_sensitive, offset, hits, DOC_GREP_PAGE, &nhits,
                               &more) != SUCCESS) {
       OLOG_ERROR("document_grep: chunk_grep failed for user %d", user_id);
-      return strdup("Error: document grep failed.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: document grep failed.");
    }
 
    if (nhits == 0) {
@@ -279,7 +278,7 @@ static char *doc_grep_callback(const char *action, char *value, int *should_resp
    if (!result || !rbuf) {
       free(result);
       free(rbuf);
-      return strdup("Error: memory allocation failed.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed.");
    }
 
    int pos = 0;

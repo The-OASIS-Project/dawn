@@ -201,11 +201,14 @@ void handle_doc_library_list(ws_connection_t *conn, json_object *payload) {
          json_object_object_add(doc, "created_at", json_object_new_int64(docs[i].created_at));
          /* Documents (not notes) may have a stored original file: surface its blob id +
           * a has_original flag so a client can fetch/download the original. Notes carry
-          * their body inline (above) and have no separate original file. Emit ONLY for
-          * docs the requester owns: the download path (doc_can_read) is owner-only, so
-          * advertising has_original on a listed GLOBAL doc would offer a download the
-          * server always refuses. Gating here also skips the accessor query for those. */
-         if (!is_note && docs[i].user_id == conn->auth_user_id) {
+          * their body inline (above) and have no separate original file. Emit for docs
+          * the requester owns OR global docs: the download path honors is_global (via
+          * document_db_original_blob_reader), so a global doc's original is genuinely
+          * downloadable. Gating here also skips the accessor query for the rest.
+          * Advertise and serve agree: an original is only ever stored on an
+          * authenticated (user_id > 0) upload, and the download's doc_can_read denies
+          * user_id <= 0 — so a has_original doc always has a real owner to resolve. */
+         if (!is_note && (docs[i].user_id == conn->auth_user_id || docs[i].is_global)) {
             char blob_id[BLOB_ID_LEN] = { 0 };
             bool has_original = document_db_get_original_blob_id(docs[i].id, blob_id,
                                                                  sizeof(blob_id)) == SUCCESS &&
@@ -216,6 +219,7 @@ void handle_doc_library_list(ws_connection_t *conn, json_object *payload) {
          }
          if (show_all) {
             json_object_object_add(doc, "user_id", json_object_new_int(docs[i].user_id));
+            sanitize_utf8_for_json(docs[i].owner_name); /* DB-sourced label at the WS sink */
             json_object_object_add(doc, "owner_name", json_object_new_string(docs[i].owner_name));
          }
          json_object_array_add(docs_array, doc);
@@ -253,9 +257,9 @@ void handle_doc_library_get(ws_connection_t *conn, json_object *payload) {
        * response - "unavailable" is a common, expected outcome for global/legacy docs. */
       json_object_object_add(resp_payload, "id", json_object_new_int64(doc_id));
       /* Short-circuit: metadata read (unscoped, for filename/filetype) THEN the
-       * owner-scoped full-text read. A missing id and a not-owned/global/pre-v63 doc
-       * both fall to ONE generic error, so this verb is not a document-existence oracle
-       * (full_text_get already gates content by owner). */
+       * access-scoped full-text read (owner OR global, per document_db_full_text_get).
+       * A missing id and a not-accessible/pre-v63 doc both fall to ONE generic error,
+       * so this verb is not a document-existence oracle. */
       document_t doc;
       char *text = NULL;
       bool ok = document_db_get(doc_id, &doc) == SUCCESS &&

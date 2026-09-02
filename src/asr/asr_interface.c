@@ -555,6 +555,18 @@ int asr_reset(asr_context_t *ctx) {
 #endif
 }
 
+void asr_set_audio_ctx(asr_context_t *ctx, int audio_ctx) {
+   if (!ctx) {
+      return;
+   }
+#ifndef ENABLE_VOSK
+   /* audio_ctx is a Whisper encoder concept; Vosk has no equivalent. */
+   asr_whisper_set_audio_ctx(ctx->whisper_ctx, audio_ctx);
+#else
+   (void)audio_ctx;
+#endif
+}
+
 void asr_result_free(asr_result_t *result) {
    if (!result) {
       return;

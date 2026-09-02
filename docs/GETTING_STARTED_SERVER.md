@@ -418,7 +418,7 @@ setup guide — the common ones:
 | Feature | Setup guide |
 |---------|-------------|
 | **Messaging Channels** (Telegram / Slack / Discord / SMS) | [MESSAGING_CHANNELS_SETUP.md](MESSAGING_CHANNELS_SETUP.md) |
-| **OpenRouter gateway** (one key, any cloud model) | Set `openrouter_api_key` in `secrets.toml` + `[llm.cloud] use_openrouter = true` |
+| **OpenRouter** (one key, any cloud model) | Set `openrouter_api_key` in `secrets.toml` + `[llm.cloud] provider = "openrouter"` |
 | **Tavily** (commercial search + URL extract) | [GETTING_STARTED.md — Tavily](../GETTING_STARTED.md#tavily-commercial-search--url-extract) |
 | **Home Assistant** (smart home) | [HOMEASSISTANT_SETUP.md](HOMEASSISTANT_SETUP.md) |
 | **Google OAuth** (Calendar + Gmail) | [GOOGLE_OAUTH_SETUP.md](GOOGLE_OAUTH_SETUP.md) |

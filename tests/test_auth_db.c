@@ -422,6 +422,57 @@ static void test_message_reasoning_null(void) {
    TEST_ASSERT_TRUE(ctx.created_at > 0);
 }
 
+/* v81 messages.is_error round-trip: a role='tool' row's failure flag persists and reads back on
+ * the correct column, and the neutral case reads 0.  Pins the INSERT bind (is_error at bind 8) +
+ * SELECT projection (is_error at column 8) invariant against a future reader/writer of stmt_msg_add
+ * — a wrong index would silently corrupt content/tool_call_id/is_error. */
+struct tool_err_rt_ctx {
+   int count;
+   char content[2][64];
+   char tcid[2][64];
+   int is_error[2];
+};
+
+static int tool_err_rt_cb(const conversation_message_t *msg, void *ctx_ptr) {
+   struct tool_err_rt_ctx *ctx = (struct tool_err_rt_ctx *)ctx_ptr;
+   if (strcmp(msg->role, "tool") == 0 && ctx->count < 2) {
+      int i = ctx->count++;
+      snprintf(ctx->content[i], sizeof(ctx->content[i]), "%s", msg->content ? msg->content : "");
+      snprintf(ctx->tcid[i], sizeof(ctx->tcid[i]), "%s",
+               msg->tool_call_id ? msg->tool_call_id : "");
+      ctx->is_error[i] = msg->is_error;
+   }
+   return 0;
+}
+
+static void test_message_is_error_round_trip(void) {
+   int user_id = create_and_get_id("tool_err_user", "hash", false);
+   int64_t conv_id = 0;
+   conv_db_create(user_id, "Tool error chat", &conv_id);
+
+   /* Failing tool result (is_error=true) then a successful one (is_error=false). */
+   int rc = conv_db_add_message_with_tools_ex(conv_id, user_id, "tool", "Entity not found", NULL,
+                                              "call_fail", NULL, true, NULL);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, rc);
+   rc = conv_db_add_message_with_tools_ex(conv_id, user_id, "tool", "3 results", NULL, "call_ok",
+                                          NULL, false, NULL);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, rc);
+
+   struct tool_err_rt_ctx ctx;
+   memset(&ctx, 0, sizeof(ctx));
+   rc = conv_db_get_messages(conv_id, user_id, tool_err_rt_cb, &ctx);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(2, ctx.count);
+   /* Row 0 (failure): is_error persisted as 1, content + tool_call_id on the right columns. */
+   TEST_ASSERT_EQUAL_INT(1, ctx.is_error[0]);
+   TEST_ASSERT_EQUAL_STRING("Entity not found", ctx.content[0]);
+   TEST_ASSERT_EQUAL_STRING("call_fail", ctx.tcid[0]);
+   /* Row 1 (success): is_error 0 (neutral), projection intact. */
+   TEST_ASSERT_EQUAL_INT(0, ctx.is_error[1]);
+   TEST_ASSERT_EQUAL_STRING("3 results", ctx.content[1]);
+   TEST_ASSERT_EQUAL_STRING("call_ok", ctx.tcid[1]);
+}
+
 /* Phase B defense-in-depth: conv_db_get_messages_by_range must suppress rows
  * from private conversations when include_private=false, even though the
  * caller passes ownership-correct user_id.  Rationale lives in PROVENANCE.md
@@ -921,6 +972,7 @@ int main(void) {
    RUN_TEST(test_conversation_add_message);
    RUN_TEST(test_message_reasoning_round_trip);
    RUN_TEST(test_message_reasoning_null);
+   RUN_TEST(test_message_is_error_round_trip);
    RUN_TEST(test_get_messages_by_range_filters_private_by_default);
    RUN_TEST(test_get_messages_by_range_returns_private_when_opted_in);
    RUN_TEST(test_compaction_watermark_monotonic);

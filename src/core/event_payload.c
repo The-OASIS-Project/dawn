@@ -193,12 +193,44 @@ static void redact_args_arr(struct json_object *arr) {
    }
 }
 
-char *event_payload_tool_call(const char *tool_name, const char *args_json) {
+/* Correlation key (living tool-pill UI): lets a consumer pair a tool_result to its tool_call.
+ * Provider-generated handle (OpenAI `call_...`, Anthropic `toolu_...`), both well under the cap;
+ * clamped before embedding so a malformed/hostile provider id can't inflate the fanned frame
+ * (belt-and-suspenders for the untrusted-provider case — reinvoke/research).  Escaped by json-c
+ * and the final UTF-8 sanitize.  Omitted when NULL/empty so the frame stays minimal. */
+#define EVENT_TOOL_CALL_ID_MAX 128
+static void add_tool_call_id(struct json_object *root, const char *tool_call_id) {
+   if (tool_call_id == NULL || tool_call_id[0] == '\0') {
+      return;
+   }
+   char id_buf[EVENT_TOOL_CALL_ID_MAX + 1];
+   snprintf(id_buf, sizeof(id_buf), "%s", tool_call_id);
+   json_object_object_add(root, "tool_call_id", json_object_new_string(id_buf));
+}
+
+/* Per-iteration grouping marker (living tool-pill UI): a live consumer seals its pill group
+ * when `iter` changes, so a reasoning-only/tool-only iteration (which streams no text and thus
+ * no stream_start boundary) still starts a fresh group — keeping live grouping identical to
+ * reload's per-assistant-message grouping.  Omitted when negative so an unmarked step stays
+ * minimal and older payloads are unaffected. */
+static void add_iter(struct json_object *root, int iteration) {
+   if (iteration < 0) {
+      return;
+   }
+   json_object_object_add(root, "iter", json_object_new_int(iteration));
+}
+
+char *event_payload_tool_call(const char *tool_name,
+                              const char *args_json,
+                              const char *tool_call_id,
+                              int iteration) {
    struct json_object *root = json_object_new_object();
    if (root == NULL) {
       return NULL;
    }
    json_object_object_add(root, "tool", json_object_new_string(tool_name ? tool_name : "?"));
+   add_tool_call_id(root, tool_call_id);
+   add_iter(root, iteration);
 
    struct json_object *args = NULL;
    if (args_json && args_json[0]) {
@@ -229,12 +261,23 @@ char *event_payload_tool_call(const char *tool_name, const char *args_json) {
    return out;
 }
 
-char *event_payload_tool_result(const char *tool_name, const char *result_text) {
+char *event_payload_tool_result(const char *tool_name,
+                                const char *result_text,
+                                const char *tool_call_id,
+                                int iteration,
+                                bool is_error) {
    struct json_object *root = json_object_new_object();
    if (root == NULL) {
       return NULL;
    }
    json_object_object_add(root, "tool", json_object_new_string(tool_name ? tool_name : "?"));
+   add_tool_call_id(root, tool_call_id);
+   add_iter(root, iteration);
+   /* Red-only signal: emit `error` only when the step CONFIRMED a failure; omit otherwise so
+    * neutral = success-or-unknown (a consumer reds solely on the explicit true). */
+   if (is_error) {
+      json_object_object_add(root, "error", json_object_new_boolean(1));
+   }
 
    /* Cap the result BEFORE embedding it, so the cap governs the payload the way
     * an operator expects rather than being diluted by JSON escaping.  Results are

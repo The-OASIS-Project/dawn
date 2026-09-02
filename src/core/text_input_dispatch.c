@@ -85,27 +85,26 @@ char *core_text_input_dispatch(session_t *session,
 
    /* Step 2: persist to conv_db if requested.  The conv_db row ID is
     * stamped back into the in-memory history entry so subsequent
-    * memory-extraction / context-injection code paths can reference
-    * it.
+    * memory-extraction / context-injection code paths can reference it.
     *
-    * EXCEPTION — vision turns: skip the server-side persist when the turn
-    * carries images and defer to the browser's client save.  The daemon
-    * only has the raw text here, not the image IDs (the browser holds them
-    * from the /api/images upload), so a server save would write a text-only
-    * row AND its server_saved=true echo would make the browser skip its own
-    * richer save — dropping the [IMAGE:img_id] markers.  Letting the client
-    * save win keeps the image references in the persisted message so they
-    * re-render on reload (and can later be rehydrated into the LLM history).
-    * The client save path (handle_save_message) stamps the msg_id itself, so
-    * nothing is lost by skipping it here.  Non-WebUI callers (messaging) pass
-    * vision_image_count == 0 and are unaffected. */
-   bool persisted = false;
-   if (opts && opts->conversation_id > 0 && vision_image_count == 0) {
-      int64_t msg_id = 0;
-      if (conv_db_add_message_ex(opts->conversation_id, opts->auth_user_id, "user", text,
-                                 &msg_id) == AUTH_DB_SUCCESS) {
-         persisted = true;
-         session_stamp_last_message_id(session, "user", msg_id);
+    * Server-authoritative: EVERY user turn is persisted here (there is no
+    * vision exception — the daemon owns user-turn persistence for all payload
+    * shapes).  For an image turn the WebUI hands us `persist_content_override`
+    * = `text` + `[IMAGE:<id>]` markers so the images re-render on reload; the
+    * in-memory history (Step 1) and the transcript echo keep the clean `text`.
+    * The persisted-vs-echoed split is deliberate: `persisted == true` makes the
+    * echo carry server_saved=true, which is what tells the browser NOT to
+    * double-save.  Non-WebUI callers (messaging) leave the override NULL and
+    * persist plain text. */
+   int64_t user_msg_id = 0;
+   if (opts && opts->conversation_id > 0) {
+      const char *persist_text = opts->persist_content_override ? opts->persist_content_override
+                                                                : text;
+      if (conv_db_add_message_ex(opts->conversation_id, opts->auth_user_id, "user", persist_text,
+                                 &user_msg_id) == AUTH_DB_SUCCESS) {
+         session_stamp_last_message_id(session, "user", user_msg_id);
+      } else {
+         user_msg_id = 0;
       }
    }
 
@@ -115,7 +114,12 @@ char *core_text_input_dispatch(session_t *session,
     * message render immediately while the server is still preparing
     * the response. */
    if (opts && opts->on_user_msg_added) {
-      opts->on_user_msg_added(opts->user_msg_added_ctx, text, persisted);
+      /* Hand the hook BOTH forms: clean `text` for the origin echo, and the persisted
+       * marker-bearing form for the cross-viewer fan-out (so an image turn rehydrates on a
+       * non-origin viewer live, not only on reload).  persist_text mirrors the Step-2 write. */
+      const char *persist_text = opts->persist_content_override ? opts->persist_content_override
+                                                                : text;
+      opts->on_user_msg_added(opts->user_msg_added_ctx, text, persist_text, user_msg_id);
    }
 
    /* Step 4: per-turn focus injection (memory + entity + relation +
@@ -127,6 +131,16 @@ char *core_text_input_dispatch(session_t *session,
     * tools): the deep-research controller drives a bare session whose research
     * system prompt it set once, and skipping here is what structurally keeps
     * private memory out of the fetch loop (DEEP_RESEARCH_DESIGN.md §4a). */
+   /* The per-turn citation stash MUST be clear before this turn's finalizer runs
+    * memory_citation_capture — otherwise a stale [M#]->item_id map from a prior turn
+    * false-validates this turn's <cited> tags and (with reinforcement on) credits the
+    * bump to the wrong facts.  session_dispatch_user_turn clears it, but skip_prompt_rebuild
+    * bypasses that call, so clear here UNCONDITIONALLY.  No live trigger today (the only
+    * skip_prompt_rebuild caller is deep research, on a bare memory-free session), but this
+    * disarms the trap for any future memory-surfacing skip_prompt_rebuild caller.  The clear
+    * is idempotent, so the double-clear when the rebuild does run is harmless. */
+   session_citation_stash_clear(session);
+
    if (!(opts && opts->skip_prompt_rebuild)) {
       session_dispatch_user_turn(session, text);
    }

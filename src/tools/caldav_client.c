@@ -871,6 +871,305 @@ void caldav_event_list_free(caldav_event_list_t *list) {
 }
 
 /* ============================================================================
+ * Public: caldav_sync_collection (REPORT sync-collection, RFC 6578)
+ * ============================================================================ */
+
+#define CALDAV_SYNC_MAX_PAGES 64 /* runaway backstop for server-paged enumeration */
+/* Cumulative-bytes backstop: a hostile/broken server can return more=true with a
+ * fresh token every page, so the page-count cap alone still permits
+ * CALDAV_SYNC_MAX_PAGES * CALDAV_MAX_RESPONSE_SIZE bytes per cycle. Cap the total. */
+#define CALDAV_SYNC_MAX_TOTAL_BYTES (32 * 1024 * 1024)
+
+/** Grow the changes array to hold at least `need` entries. Returns 0 on success. */
+static int sync_changes_reserve(caldav_sync_change_t **arr, int *cap, int need) {
+   if (need <= *cap)
+      return 0;
+   int new_cap = *cap ? *cap * 2 : 64;
+   while (new_cap < need)
+      new_cap *= 2;
+   caldav_sync_change_t *grown = realloc(*arr, (size_t)new_cap * sizeof(**arr));
+   if (!grown)
+      return 1;
+   *arr = grown;
+   *cap = new_cap;
+   return 0;
+}
+
+/**
+ * Parse one sync-collection multistatus page.
+ *
+ * Appends one caldav_sync_change_t per <d:response> (gone = the response carried
+ * a 404 status), writes the page's <d:sync-token> to token_out, and sets
+ * *more_out true if the page signalled truncation (a 507 status anywhere) so the
+ * caller re-issues with the new token to fetch the next page.
+ */
+static caldav_error_t parse_sync_page(const char *xml,
+                                      int len,
+                                      const char *base_url,
+                                      caldav_sync_change_t **changes,
+                                      int *count,
+                                      int *cap,
+                                      char *token_out,
+                                      size_t token_len,
+                                      bool *more_out) {
+   *more_out = false;
+   xmlDocPtr doc = xmlReadMemory(xml, len, NULL, NULL, XML_PARSE_NONET | XML_PARSE_NOBLANKS);
+   if (!doc)
+      return CALDAV_ERR_PARSE;
+
+   xmlXPathContextPtr ctx = xmlXPathNewContext(doc);
+   if (!ctx) {
+      /* xpath_text() unconditionally derefs ctx->node; guard the OOM case. */
+      xmlFreeDoc(doc);
+      return CALDAV_ERR_PARSE;
+   }
+   register_namespaces(ctx);
+
+   /* New sync-token: the top-level <d:sync-token> child of <d:multistatus>
+    * (not the per-response ones, of which there are none). */
+   char new_token[1024] = { 0 };
+   xpath_text(ctx, xmlDocGetRootElement(doc), "/d:multistatus/d:sync-token", new_token,
+              sizeof(new_token));
+   if (new_token[0])
+      snprintf(token_out, token_len, "%s", new_token);
+
+   xmlXPathObjectPtr responses = xmlXPathEvalExpression((const xmlChar *)"//d:response", ctx);
+   if (responses && responses->nodesetval) {
+      for (int i = 0; i < responses->nodesetval->nodeNr; i++) {
+         xmlNodePtr resp_node = responses->nodesetval->nodeTab[i];
+
+         char href[512] = { 0 };
+         xpath_text(ctx, resp_node, "d:href", href, sizeof(href));
+
+         /* Status may live directly under <d:response> (removals) or under a
+          * <d:propstat> (getetag props). Gather all status strings for this node. */
+         char status_all[256] = { 0 };
+         {
+            ctx->node = resp_node;
+            xmlXPathObjectPtr st = xmlXPathEvalExpression((const xmlChar *)".//d:status", ctx);
+            if (st && st->nodesetval) {
+               for (int k = 0; k < st->nodesetval->nodeNr; k++) {
+                  xmlChar *c = xmlNodeGetContent(st->nodesetval->nodeTab[k]);
+                  if (c) {
+                     size_t used = strlen(status_all);
+                     snprintf(status_all + used, sizeof(status_all) - used, " %s", (const char *)c);
+                     xmlFree(c);
+                  }
+               }
+            }
+            xmlXPathFreeObject(st);
+         }
+
+         /* A 507 anywhere means the server truncated the result set — more pages. */
+         if (strstr(status_all, "507"))
+            *more_out = true;
+
+         if (!href[0])
+            continue; /* the collection's own truncation response has no member href */
+
+         if (sync_changes_reserve(changes, cap, *count + 1) != 0) {
+            xmlXPathFreeObject(responses);
+            xmlXPathFreeContext(ctx);
+            xmlFreeDoc(doc);
+            return CALDAV_ERR_ALLOC;
+         }
+         caldav_sync_change_t *chg = &(*changes)[*count];
+         memset(chg, 0, sizeof(*chg));
+         resolve_href(base_url, href, chg->href, sizeof(chg->href));
+         chg->gone = (strstr(status_all, "404") != NULL);
+         (*count)++;
+      }
+   }
+   xmlXPathFreeObject(responses);
+   xmlXPathFreeContext(ctx);
+   xmlFreeDoc(doc);
+   return CALDAV_OK;
+}
+
+caldav_error_t caldav_sync_collection(const char *calendar_url,
+                                      const caldav_auth_t *auth,
+                                      const char *sync_token_in,
+                                      caldav_sync_result_t *result_out) {
+   if (!result_out)
+      return CALDAV_ERR_NETWORK;
+   memset(result_out, 0, sizeof(*result_out));
+   if (!calendar_url || !auth)
+      return CALDAV_ERR_NETWORK;
+
+   const bool had_token = (sync_token_in && sync_token_in[0]);
+   char token[1024] = { 0 };
+   if (had_token)
+      snprintf(token, sizeof(token), "%s", sync_token_in);
+
+   caldav_sync_change_t *changes = NULL;
+   int count = 0, cap = 0;
+   char latest_token[1024] = { 0 };
+   bool complete = false;
+   size_t total_bytes = 0; /* cumulative response bytes across pages (amplification cap) */
+
+   curl_buffer_t resp;
+   curl_buffer_init_with_max(&resp, CALDAV_MAX_RESPONSE_SIZE);
+
+   caldav_error_t rc = CALDAV_OK;
+   for (int page = 0; page < CALDAV_SYNC_MAX_PAGES; page++) {
+      /* Build the REPORT body. An empty <d:sync-token/> requests a baseline. */
+      char body[1536]; /* holds the XML wrapper + a fully entity-escaped esc_token[1152] */
+      if (token[0]) {
+         /* token is server-opaque; XML-escape defensively (Google tokens are URL-safe,
+          * but a stray &, <, or > would break the body). Fixed-length appends with an
+          * explicit end pointer — no reliance on snprintf's return value. */
+         char esc_token[1152];
+         char *w = esc_token;
+         char *const end = esc_token + sizeof(esc_token) -
+                           6; /* room for the longest entity + NUL */
+         for (const char *p = token; *p && w < end; p++) {
+            switch (*p) {
+               case '&':
+                  memcpy(w, "&amp;", 5);
+                  w += 5;
+                  break;
+               case '<':
+                  memcpy(w, "&lt;", 4);
+                  w += 4;
+                  break;
+               case '>':
+                  memcpy(w, "&gt;", 4);
+                  w += 4;
+                  break;
+               default:
+                  *w++ = *p;
+                  break;
+            }
+         }
+         *w = '\0';
+         snprintf(body, sizeof(body),
+                  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+                  "<d:sync-collection xmlns:d=\"DAV:\">"
+                  "<d:sync-token>%s</d:sync-token>"
+                  "<d:sync-level>1</d:sync-level>"
+                  "<d:prop><d:getetag/></d:prop>"
+                  "</d:sync-collection>",
+                  esc_token);
+      } else {
+         snprintf(body, sizeof(body),
+                  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+                  "<d:sync-collection xmlns:d=\"DAV:\">"
+                  "<d:sync-token/>"
+                  "<d:sync-level>1</d:sync-level>"
+                  "<d:prop><d:getetag/></d:prop>"
+                  "</d:sync-collection>");
+      }
+
+      curl_buffer_reset(&resp);
+      CURL *curl = caldav_curl_init(auth, &resp);
+      if (!curl) {
+         rc = CALDAV_ERR_NETWORK;
+         break;
+      }
+      curl_easy_setopt(curl, CURLOPT_URL, calendar_url);
+      curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "REPORT");
+      curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
+      curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
+      struct curl_slist *headers = NULL;
+      headers = curl_slist_append(headers, "Content-Type: application/xml; charset=utf-8");
+      headers = curl_slist_append(headers, "Depth: 0");
+      curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+      CURLcode cres = curl_easy_perform(curl);
+      curl_slist_free_all(headers);
+      if (cres != CURLE_OK) {
+         OLOG_WARNING("caldav: sync-collection %s failed: %s", calendar_url,
+                      curl_easy_strerror(cres));
+         curl_easy_cleanup(curl);
+         rc = CALDAV_ERR_NETWORK;
+         break;
+      }
+      if (resp.truncated) {
+         /* Response bigger than the cap — cannot trust completeness; leave complete=false. */
+         OLOG_WARNING("caldav: sync-collection %s exceeded %d byte cap", calendar_url,
+                      CALDAV_MAX_RESPONSE_SIZE);
+         curl_easy_cleanup(curl);
+         rc = CALDAV_OK; /* not a hard error; just incomplete */
+         break;
+      }
+
+      long status = 0;
+      curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+      curl_easy_cleanup(curl);
+
+      total_bytes += resp.size;
+      if (total_bytes > CALDAV_SYNC_MAX_TOTAL_BYTES) {
+         /* Amplification backstop: stop as incomplete (token not persisted, so no
+          * spin — the sentinel still covers the in-window case). */
+         OLOG_WARNING("caldav: sync-collection %s exceeded %d total bytes across pages",
+                      calendar_url, CALDAV_SYNC_MAX_TOTAL_BYTES);
+         break;
+      }
+
+      if (status == 401) {
+         rc = CALDAV_ERR_AUTH;
+         break;
+      }
+      if (status >= 400 && status < 500) {
+         /* A non-empty token rejected with a 4xx (403 valid-sync-token, 409, 410, 400…)
+          * means the token is stale — signal re-baseline. A 4xx on the *baseline*
+          * (empty-token) request means the server does not support sync-collection. */
+         rc = had_token ? CALDAV_ERR_SYNC_TOKEN_INVALID : http_status_to_error(status);
+         break;
+      }
+      if (status >= 500) {
+         rc = CALDAV_ERR_SERVER;
+         break;
+      }
+      if (status != 207 && status != 200) {
+         rc = CALDAV_ERR_PARSE;
+         break;
+      }
+
+      bool more = false;
+      caldav_error_t prc = parse_sync_page(resp.data, (int)resp.size, calendar_url, &changes,
+                                           &count, &cap, latest_token, sizeof(latest_token), &more);
+      if (prc != CALDAV_OK) {
+         rc = prc;
+         break;
+      }
+
+      if (!more) {
+         complete = true;
+         break;
+      }
+      /* More pages: continue from the token this page returned. Stop as incomplete
+       * (rather than spin) if the server signalled 507 but gave no continuation token,
+       * OR returned the same token we just sent (no forward progress — a broken or
+       * hostile server). Either way the token isn't persisted, so no re-fetch loop. */
+      if (!latest_token[0] || strcmp(latest_token, token) == 0)
+         break;
+      snprintf(token, sizeof(token), "%s", latest_token);
+   }
+
+   curl_buffer_free(&resp);
+
+   if (rc != CALDAV_OK) {
+      free(changes);
+      return rc;
+   }
+
+   result_out->changes = changes;
+   result_out->count = count;
+   result_out->complete = complete;
+   snprintf(result_out->sync_token, sizeof(result_out->sync_token), "%s", latest_token);
+   return CALDAV_OK;
+}
+
+void caldav_sync_result_free(caldav_sync_result_t *result) {
+   if (!result)
+      return;
+   free(result->changes);
+   result->changes = NULL;
+   result->count = 0;
+}
+
+/* ============================================================================
  * Public: caldav_create_event (PUT with If-None-Match: *)
  * ============================================================================ */
 
@@ -1064,6 +1363,8 @@ const char *caldav_strerror(caldav_error_t err) {
          return "no calendar collections found";
       case CALDAV_ERR_ALLOC:
          return "memory allocation failure";
+      case CALDAV_ERR_SYNC_TOKEN_INVALID:
+         return "sync-token invalid/expired (re-baseline)";
    }
    return "unknown error";
 }

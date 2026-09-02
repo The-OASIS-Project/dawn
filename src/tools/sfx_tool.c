@@ -292,7 +292,8 @@ static char *sfx_callback(const char *action, char *value, int *should_respond) 
    *should_respond = 1;
 
    if (!action) {
-      return strdup("Error: sfx tool called without an action. Valid: play, stop, list.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: sfx tool called without an action. Valid: play, stop, list.");
    }
 
    if (strcmp(action, "list") == 0) {
@@ -301,19 +302,19 @@ static char *sfx_callback(const char *action, char *value, int *should_respond) 
 
       char resolved_base[PATH_MAX];
       if (!realpath(sfx_config.sound_path, resolved_base)) {
-         return strdup("Sound effects directory not found.");
+         return strdup(TOOL_RESULT_ERROR_MARK "Sound effects directory not found.");
       }
 
       DIR *dir = opendir(resolved_base);
       if (!dir) {
-         return strdup("Cannot open sound effects directory.");
+         return strdup(TOOL_RESULT_ERROR_MARK "Cannot open sound effects directory.");
       }
 
       /* Build response with available files */
       char *result = malloc(2048);
       if (!result) {
          closedir(dir);
-         return strdup("Memory error.");
+         return strdup(TOOL_RESULT_ERROR_MARK "Memory error.");
       }
 
       int offset = snprintf(result, 2048, "Available sound effects:\n");
@@ -366,10 +367,11 @@ static char *sfx_callback(const char *action, char *value, int *should_respond) 
          char *msg = malloc(160);
          if (msg)
             snprintf(msg, 160,
+                     TOOL_RESULT_ERROR_MARK
                      "Error: sfx rate-limited (less than %d ms since last play). Wait and "
                      "retry.",
                      SFX_MIN_INTERVAL_MS);
-         return msg ? msg : strdup("Error: sfx rate-limited.");
+         return msg ? msg : strdup(TOOL_RESULT_ERROR_MARK "Error: sfx rate-limited.");
       }
 
       /* Validate filename */
@@ -378,11 +380,12 @@ static char *sfx_callback(const char *action, char *value, int *should_respond) 
          char *msg = malloc(256);
          if (msg)
             snprintf(msg, 256,
+                     TOOL_RESULT_ERROR_MARK
                      "Error: invalid sfx filename '%s'. Bare filename only (no path), "
                      "extension .ogg/.wav/.flac/.mp3. Call action='list' to see available "
                      "files.",
                      value);
-         return msg ? msg : strdup("Error: invalid sfx filename.");
+         return msg ? msg : strdup(TOOL_RESULT_ERROR_MARK "Error: invalid sfx filename.");
       }
 
       /* Build full path */
@@ -390,7 +393,8 @@ static char *sfx_callback(const char *action, char *value, int *should_respond) 
       int n = snprintf(filepath, sizeof(filepath), "%s%s", sfx_config.sound_path, value);
       if (n < 0 || (size_t)n >= sizeof(filepath)) {
          OLOG_ERROR("SFX: Path too long");
-         return strdup("Error: sfx file path too long (internal limit exceeded).");
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: sfx file path too long (internal limit exceeded).");
       }
 
       /* Verify realpath stays within sound_path.
@@ -403,18 +407,21 @@ static char *sfx_callback(const char *action, char *value, int *should_respond) 
          char *msg = malloc(256);
          if (msg)
             snprintf(msg, 256,
+                     TOOL_RESULT_ERROR_MARK
                      "Error: sfx file '%s' not found. Call action='list' to see available "
                      "files.",
                      value);
-         return msg ? msg : strdup("Error: sfx file not found.");
+         return msg ? msg : strdup(TOOL_RESULT_ERROR_MARK "Error: sfx file not found.");
       }
       if (!realpath(sfx_config.sound_path, resolved_base)) {
          OLOG_ERROR("SFX: Sound path not found: %s", sfx_config.sound_path);
-         return strdup("Error: sfx sound directory unreachable (server config issue).");
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: sfx sound directory unreachable (server config issue).");
       }
       if (strncmp(resolved, resolved_base, strlen(resolved_base)) != 0) {
          OLOG_ERROR("SFX: Path traversal blocked: %s", filepath);
-         return strdup("Error: sfx filename rejected (path traversal blocked).");
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: sfx filename rejected (path traversal blocked).");
       }
 
       pthread_mutex_lock(&sfx_mutex);
@@ -439,10 +446,11 @@ static char *sfx_callback(const char *action, char *value, int *should_respond) 
          char *msg = malloc(160);
          if (msg)
             snprintf(msg, 160,
+                     TOOL_RESULT_ERROR_MARK
                      "Error: all %d sfx playback slots busy. Stop a current sound with "
                      "action='stop' before starting a new one.",
                      SFX_MAX_CONCURRENT);
-         return msg ? msg : strdup("Error: all sfx slots busy.");
+         return msg ? msg : strdup(TOOL_RESULT_ERROR_MARK "Error: all sfx slots busy.");
       }
 
       sfx_slot_t *slot = &sfx_slots[slot_idx];
@@ -455,7 +463,7 @@ static char *sfx_callback(const char *action, char *value, int *should_respond) 
          atomic_store(&slot->active, 0);
          pthread_mutex_unlock(&sfx_mutex);
          OLOG_ERROR("SFX: Failed to allocate thread args");
-         return strdup("Error: sfx playback failed (memory allocation).");
+         return strdup(TOOL_RESULT_ERROR_MARK "Error: sfx playback failed (memory allocation).");
       }
 
       targs->slot_index = slot_idx;
@@ -474,7 +482,7 @@ static char *sfx_callback(const char *action, char *value, int *should_respond) 
          free(targs);
          pthread_mutex_unlock(&sfx_mutex);
          OLOG_ERROR("SFX: Failed to create thread: %d", rc);
-         return strdup("Error: sfx playback failed (thread spawn failed).");
+         return strdup(TOOL_RESULT_ERROR_MARK "Error: sfx playback failed (thread spawn failed).");
       }
 
       /* Detach not needed - we join on reuse or shutdown */
@@ -511,7 +519,7 @@ static char *sfx_callback(const char *action, char *value, int *should_respond) 
       return msg ? msg : strdup("Stop request processed.");
    }
 
-   return strdup("Error: unknown sfx action. Valid: play, stop, list.");
+   return strdup(TOOL_RESULT_ERROR_MARK "Error: unknown sfx action. Valid: play, stop, list.");
 }
 
 /* =============================================================================

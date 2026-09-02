@@ -367,6 +367,244 @@ body.debug-mode .transcript-entry.debug {
    color: var(--tool-color-alt);
 }
 
+/* ============================================================================
+ * Living Tool Pills — always-visible tool-call/result activity (replaces the
+ * hidden .transcript-entry.debug.tool-call/-result entries above). Neutral
+ * surface; purple --tool-color is the tool IDENTITY (name), the left rail + dot
+ * carry STATE (accent while running, green done, red error). Theme-aware via
+ * tokens. See www/js/ui/tool-pills.js + SERVER_AUTHORITATIVE_PERSISTENCE §pills.
+ * ============================================================================ */
+.dawn-toolgroup {
+   margin: 8px 0;
+   display: flex;
+   flex-direction: column;
+   gap: 6px;
+}
+.dawn-toolgroup-summary {
+   display: flex;
+   align-items: center;
+   gap: 8px;
+   width: 100%;
+   padding: 6px 10px;
+   font-family: var(--font-mono);
+   font-size: 0.8125rem;
+   color: var(--text-primary);
+   background: var(--tool-subtle);
+   border: 1px solid var(--tool-border);
+   border-radius: var(--border-radius-sm);
+   cursor: pointer;
+   text-align: left;
+   transition: background var(--transition-fast) ease;
+}
+.dawn-toolgroup-summary:hover {
+   background: var(--tool-hover);
+}
+.dawn-toolgroup-summary:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+}
+.dawn-toolgroup-glyph {
+   display: inline-flex;
+   color: var(--dawn-toolpill-name);
+   flex: 0 0 auto;
+}
+.dawn-toolgroup-glyph svg {
+   width: 14px;
+   height: 14px;
+}
+.dawn-toolgroup-label {
+   flex: 0 0 auto;
+}
+.dawn-toolgroup-states {
+   display: inline-flex;
+   align-items: center;
+   gap: 4px;
+   margin-left: 4px;
+}
+.dawn-toolgroup-summary .dawn-toolpill-caret {
+   margin-left: auto;
+}
+/* Inline group (1-2 tools): no summary chrome, pills shown bare. */
+.dawn-toolgroup.inline .dawn-toolgroup-summary {
+   display: none;
+}
+.dawn-toolgroup-pills {
+   display: flex;
+   flex-direction: column;
+   gap: 6px;
+   padding-left: 10px;
+   border-left: 1px solid var(--tool-border);
+   margin-left: 4px;
+}
+.dawn-toolgroup.inline .dawn-toolgroup-pills {
+   padding-left: 0;
+   border-left: none;
+   margin-left: 0;
+}
+.dawn-toolgroup.collapsed .dawn-toolgroup-pills {
+   display: none;
+}
+
+.dawn-toolpill {
+   position: relative;
+   background: var(--tool-subtle);
+   border: 1px solid var(--tool-border);
+   border-left: 2px solid var(--text-tertiary); /* state rail */
+   border-radius: var(--border-radius-sm);
+   overflow: hidden;
+}
+.dawn-toolpill-head {
+   display: flex;
+   align-items: center;
+   gap: 8px;
+   width: 100%;
+   padding: 5px 10px;
+   background: transparent;
+   border: none;
+   cursor: pointer;
+   font-family: var(--font-mono);
+   text-align: left;
+   color: var(--text-primary);
+   transition: background var(--transition-fast) ease;
+}
+.dawn-toolpill-head:hover {
+   background: var(--tool-hover);
+}
+.dawn-toolpill-head:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: -2px;
+}
+.dawn-toolpill-name {
+   font-size: 0.8125rem;
+   font-weight: 500;
+   color: var(--dawn-toolpill-name);
+   white-space: nowrap;
+   overflow: hidden;
+   text-overflow: ellipsis;
+}
+.dawn-toolpill-meta {
+   margin-left: auto;
+   font-size: 0.75rem;
+   color: var(--text-secondary);
+   white-space: nowrap;
+   flex: 0 0 auto;
+}
+.dawn-toolpill-caret {
+   display: inline-flex;
+   color: var(--text-tertiary);
+   transition: transform var(--transition-fast) ease;
+   flex: 0 0 auto;
+}
+.dawn-toolpill-caret svg {
+   width: 12px;
+   height: 12px;
+}
+.dawn-toolpill.expanded > .dawn-toolpill-head .dawn-toolpill-caret,
+.dawn-toolgroup.expanded > .dawn-toolgroup-summary .dawn-toolpill-caret {
+   transform: rotate(90deg);
+}
+
+/* State: rail + dot + meta (identity/name stays --tool-color in every state) */
+.dawn-toolpill.running {
+   border-left-color: var(--accent);
+   box-shadow:
+      0 0 0 1px var(--accent-border),
+      0 0 8px -2px var(--accent-glow);
+}
+.dawn-toolpill.success {
+   border-left-color: var(--success);
+}
+.dawn-toolpill.error {
+   border-left-color: var(--error);
+}
+.dawn-toolpill.running .dawn-toolpill-meta {
+   color: var(--accent);
+}
+.dawn-toolpill.error .dawn-toolpill-meta {
+   color: var(--error-text);
+}
+.dawn-toolpill.running .dawn-status-dot,
+.dawn-toolgroup-states .dawn-status-dot.running {
+   background: var(--accent);
+   animation: tool-pulse 1.4s ease-in-out infinite;
+}
+@keyframes tool-pulse {
+   0%,
+   100% {
+      opacity: 1;
+      box-shadow: 0 0 0 0 var(--accent-glow);
+   }
+   50% {
+      opacity: 0.5;
+      box-shadow: 0 0 0 3px transparent;
+   }
+}
+
+/* Expandable detail (grid-rows 0fr->1fr, no JS measurement) */
+.dawn-toolpill-detail {
+   display: grid;
+   grid-template-rows: 0fr;
+   visibility: hidden;
+   transition:
+      grid-template-rows var(--transition-medium) ease,
+      visibility 0s linear var(--transition-medium);
+}
+.dawn-toolpill.expanded > .dawn-toolpill-detail {
+   grid-template-rows: 1fr;
+   visibility: visible;
+   transition:
+      grid-template-rows var(--transition-medium) ease,
+      visibility 0s;
+}
+.dawn-toolpill-detail > .dawn-toolpill-detail-inner {
+   overflow: hidden;
+   padding: 0 10px;
+}
+.dawn-toolpill.expanded > .dawn-toolpill-detail > .dawn-toolpill-detail-inner {
+   padding: 4px 10px 10px;
+}
+.dawn-toolpill-io {
+   margin-top: 8px;
+}
+.dawn-toolpill-io-label {
+   font-family: var(--font-mono);
+   font-size: 0.6875rem;
+   font-weight: 600;
+   text-transform: uppercase;
+   letter-spacing: 0.5px;
+   color: var(--text-tertiary);
+   margin-bottom: 4px;
+}
+.dawn-toolpill.error .dawn-toolpill-io.result .dawn-toolpill-io-label {
+   color: var(--error-text);
+}
+.dawn-toolpill-io-body {
+   margin: 0;
+   font-family: var(--font-mono);
+   font-size: 0.75rem;
+   line-height: 1.5;
+   color: var(--text-primary);
+   background: var(--bg-primary);
+   border: 1px solid var(--border-color);
+   border-radius: var(--border-radius-sm);
+   padding: 8px;
+   max-height: 320px;
+   overflow: auto;
+   white-space: pre-wrap;
+   word-break: break-word;
+}
+
+@media (prefers-reduced-motion: reduce) {
+   .dawn-toolpill.running .dawn-status-dot,
+   .dawn-toolgroup-states .dawn-status-dot.running {
+      animation: none;
+   }
+   .dawn-toolpill-detail,
+   .dawn-toolpill-caret {
+      transition: none;
+   }
+}
+
 /* System prompt styling (collapsible, yellow/gold theme) */
 .transcript-entry.debug.system-prompt {
    background-color: rgba(234, 179, 8, 0.1);

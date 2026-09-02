@@ -85,7 +85,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->vad.speech_threshold = 0.5f;        /* VAD_SPEECH_THRESHOLD */
    config->vad.speech_threshold_tts = 0.92f;   /* VAD_SPEECH_THRESHOLD_TTS */
    config->vad.silence_threshold = 0.3f;       /* VAD_SILENCE_THRESHOLD */
-   config->vad.end_of_speech_duration = 1.2f;  /* VAD_END_OF_SPEECH_DURATION */
+   config->vad.end_of_speech_duration = 1.0f;  /* VAD_END_OF_SPEECH_DURATION */
    config->vad.max_recording_duration = 30.0f; /* VAD_MAX_RECORDING_DURATION */
    config->vad.preroll_ms = 500;
 
@@ -99,6 +99,7 @@ void config_set_defaults(dawn_config_t *config) {
    SAFE_COPY(config->asr.model, "base.en");
    SAFE_COPY(config->asr.models_path, "models/whisper.cpp");
    config->asr.dedup_window_sec = ASR_DEDUP_WINDOW_SEC_DEFAULT;
+   config->asr.audio_ctx_floor = ASR_AUDIO_CTX_FLOOR_DEFAULT;
    /* disambiguation_hint left empty by the memset above → built-in default
     * (DEFAULT_ASR_DISAMBIGUATION_HINT) is used at prompt-build time. */
 
@@ -126,46 +127,48 @@ void config_set_defaults(dawn_config_t *config) {
    SAFE_COPY(config->llm.cloud.openai_use_responses_api, "auto");
 
    /* Default OpenAI model list (first entry is default).
-    * gpt-5.4 family routes through /v1/responses; older entries use chat completions. */
-   config->llm.cloud.openai_models_count = 7;
-   SAFE_COPY(config->llm.cloud.openai_models[0], LLM_DEFAULT_OPENAI_MODEL); /* gpt-5.4 */
-   SAFE_COPY(config->llm.cloud.openai_models[1], "gpt-5.4-mini");
-   SAFE_COPY(config->llm.cloud.openai_models[2], "gpt-5.4-nano");
-   SAFE_COPY(config->llm.cloud.openai_models[3], "gpt-5.2");
-   SAFE_COPY(config->llm.cloud.openai_models[4], "gpt-5-mini");
-   SAFE_COPY(config->llm.cloud.openai_models[5], "gpt-5-nano");
-   SAFE_COPY(config->llm.cloud.openai_models[6], "o4-mini");
+    * gpt-5.x families route through /v1/responses; older entries use chat completions. */
+   config->llm.cloud.openai_models_count = 6;
+   SAFE_COPY(config->llm.cloud.openai_models[0], LLM_DEFAULT_OPENAI_MODEL); /* gpt-5.6-luna */
+   SAFE_COPY(config->llm.cloud.openai_models[1], "gpt-5.6-terra");
+   SAFE_COPY(config->llm.cloud.openai_models[2], "gpt-5.6-sol");
+   SAFE_COPY(config->llm.cloud.openai_models[3], "gpt-5.5");
+   SAFE_COPY(config->llm.cloud.openai_models[4], "gpt-5.4-mini");
+   SAFE_COPY(config->llm.cloud.openai_models[5], "gpt-5.4-nano");
    config->llm.cloud.openai_default_model_idx = 0;
 
    /* Default Claude model list (first entry is default) */
-   config->llm.cloud.claude_models_count = 3;
-   SAFE_COPY(config->llm.cloud.claude_models[0], LLM_DEFAULT_CLAUDE_MODEL);
-   SAFE_COPY(config->llm.cloud.claude_models[1], "claude-opus-4-6");
-   SAFE_COPY(config->llm.cloud.claude_models[2], "claude-haiku-4-5");
+   config->llm.cloud.claude_models_count = 4;
+   SAFE_COPY(config->llm.cloud.claude_models[0], LLM_DEFAULT_CLAUDE_MODEL); /* claude-haiku-4-5 */
+   SAFE_COPY(config->llm.cloud.claude_models[1], "claude-sonnet-5");
+   SAFE_COPY(config->llm.cloud.claude_models[2], "claude-opus-4-8");
+   SAFE_COPY(config->llm.cloud.claude_models[3], "claude-opus-5");
    config->llm.cloud.claude_default_model_idx = 0;
 
    /* Default Gemini model list (first entry is default) */
-   config->llm.cloud.gemini_models_count = 5;
-   SAFE_COPY(config->llm.cloud.gemini_models[0], LLM_DEFAULT_GEMINI_MODEL);
-   SAFE_COPY(config->llm.cloud.gemini_models[1], "gemini-2.5-pro");
-   SAFE_COPY(config->llm.cloud.gemini_models[2], "gemini-2.5-flash-lite");
-   SAFE_COPY(config->llm.cloud.gemini_models[3], "gemini-3-flash-preview");
-   SAFE_COPY(config->llm.cloud.gemini_models[4], "gemini-3-pro-preview");
+   config->llm.cloud.gemini_models_count = 2;
+   SAFE_COPY(config->llm.cloud.gemini_models[0], LLM_DEFAULT_GEMINI_MODEL); /* gemini-3.7-flash */
+   SAFE_COPY(config->llm.cloud.gemini_models[1], "gemini-3.1-pro-preview");
    config->llm.cloud.gemini_default_model_idx = 0;
 
    /* Default OpenRouter model list (curated favorites shown in the header switcher;
     * full live catalog browsing is Phase 2).  IDs are OpenRouter "vendor/model" slugs —
-    * verify against https://openrouter.ai/models as the catalog shifts. */
-   config->llm.cloud.openrouter_models_count = 8;
-   SAFE_COPY(config->llm.cloud.openrouter_models[0], "anthropic/claude-opus-4.7");
-   SAFE_COPY(config->llm.cloud.openrouter_models[1], "anthropic/claude-sonnet-4.6");
-   SAFE_COPY(config->llm.cloud.openrouter_models[2], "anthropic/claude-haiku-4.5");
+    * verify against https://openrouter.ai/models as the catalog shifts.  Mirrors the
+    * per-provider lists above (default gpt-5.6-luna to match the OpenAI default). */
+   config->llm.cloud.openrouter_models_count = 12;
+   SAFE_COPY(config->llm.cloud.openrouter_models[0], "openai/gpt-5.6-luna");
+   SAFE_COPY(config->llm.cloud.openrouter_models[1], "openai/gpt-5.6-terra");
+   SAFE_COPY(config->llm.cloud.openrouter_models[2], "openai/gpt-5.6-sol");
    SAFE_COPY(config->llm.cloud.openrouter_models[3], "openai/gpt-5.5");
    SAFE_COPY(config->llm.cloud.openrouter_models[4], "openai/gpt-5.4-mini");
    SAFE_COPY(config->llm.cloud.openrouter_models[5], "openai/gpt-5.4-nano");
-   SAFE_COPY(config->llm.cloud.openrouter_models[6], "google/gemini-3.1-pro-preview");
-   SAFE_COPY(config->llm.cloud.openrouter_models[7], "google/gemini-3.5-flash");
-   config->llm.cloud.openrouter_default_model_idx = 1; /* anthropic/claude-sonnet-4.6 */
+   SAFE_COPY(config->llm.cloud.openrouter_models[6], "anthropic/claude-haiku-4.5");
+   SAFE_COPY(config->llm.cloud.openrouter_models[7], "anthropic/claude-sonnet-5");
+   SAFE_COPY(config->llm.cloud.openrouter_models[8], "anthropic/claude-opus-4.8");
+   SAFE_COPY(config->llm.cloud.openrouter_models[9], "anthropic/claude-opus-5");
+   SAFE_COPY(config->llm.cloud.openrouter_models[10], "google/gemini-3.7-flash");
+   SAFE_COPY(config->llm.cloud.openrouter_models[11], "google/gemini-3.1-pro-preview");
+   config->llm.cloud.openrouter_default_model_idx = 0; /* openai/gpt-5.6-luna */
 
    /* LLM Local */
    SAFE_COPY(config->llm.local.endpoint, "http://127.0.0.1:8080");
@@ -174,14 +177,13 @@ void config_set_defaults(dawn_config_t *config) {
    SAFE_COPY(config->llm.local.provider, "auto"); /* Auto-detect Ollama vs llama.cpp */
 
    /* LLM Tools */
-   SAFE_COPY(config->llm.tools.mode, "native"); /* "native", "command_tags", or "disabled" */
+   config->llm.tools.enabled = true; /* Native tool calling on by default */
 
    /* LLM Silent-Observe (Phase 0 of Dynamic Context Injection)
     * Default to local provider so background observations don't accrue cloud
     * spend.  Operator can flip to a cloud provider with a configured key. */
    SAFE_COPY(config->llm.silent_observe.provider, "local");
-   config->llm.silent_observe.model[0] = '\0';            /* Empty = let provider pick */
-   config->llm.silent_observe.openrouter_model[0] = '\0'; /* Empty = main OpenRouter default */
+   config->llm.silent_observe.model[0] = '\0'; /* Empty = let provider pick */
 
    /* LLM Thinking/Reasoning */
    SAFE_COPY(config->llm.thinking.mode, "disabled");           /* "disabled", "enabled", "auto" */
@@ -192,16 +194,15 @@ void config_set_defaults(dawn_config_t *config) {
    config->llm.thinking.budget_xhigh = LLM_THINKING_BUDGET_XHIGH_DEFAULT;
 
    /* LLM Context Management */
-   config->llm.summarize_threshold = 0.85f;        /* Legacy alias — maps to hard threshold */
-   config->llm.compact_soft_threshold = 0.60f;     /* Async compaction trigger (background) */
-   config->llm.compact_hard_threshold = 0.85f;     /* Blocking compaction trigger (safety net) */
-   config->llm.compact_use_session = true;         /* Use session's provider for compaction */
-   config->llm.compact_provider[0] = '\0';         /* Dedicated provider (empty = none) */
-   config->llm.compact_model[0] = '\0';            /* Dedicated model (empty = none) */
-   config->llm.compact_openrouter_model[0] = '\0'; /* Empty = main OpenRouter default */
-   config->llm.conversation_logging = false; /* Disabled: WebUI saves to DB, set true for debug */
-   config->llm.rate_limit_enabled = true;    /* Throttle cloud API calls by default */
-   config->llm.rate_limit_rpm = 40;          /* 20% headroom under typical 50 RPM limit */
+   config->llm.summarize_threshold = 0.85f;    /* Legacy alias — maps to hard threshold */
+   config->llm.compact_soft_threshold = 0.60f; /* Async compaction trigger (background) */
+   config->llm.compact_hard_threshold = 0.85f; /* Blocking compaction trigger (safety net) */
+   config->llm.compact_use_session = true;     /* Use session's provider for compaction */
+   config->llm.compact_provider[0] = '\0';     /* Dedicated provider (empty = none) */
+   config->llm.compact_model[0] = '\0';        /* Dedicated model (empty = none) */
+   config->llm.conversation_logging = false;   /* Disabled: WebUI saves to DB, set true for debug */
+   config->llm.rate_limit_enabled = true;      /* Throttle cloud API calls by default */
+   config->llm.rate_limit_rpm = 40;            /* 20% headroom under typical 50 RPM limit */
 
    /* Search */
    SAFE_COPY(config->search.engine, "searxng");
@@ -321,8 +322,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->memory.source_budget_chars = 3072;
    SAFE_COPY(config->memory.extraction_provider, "local");
    SAFE_COPY(config->memory.extraction_model, "qwen2.5:7b");
-   config->memory.extraction_openrouter_model[0] = '\0'; /* Empty = main OpenRouter default */
-   config->memory.extraction_timeout_ms = 120000;        /* 2 minutes for fact extraction */
+   config->memory.extraction_timeout_ms = 120000; /* 2 minutes for fact extraction */
    config->memory.pruning_enabled = true;
    config->memory.prune_superseded_days = 30; /* Delete old superseded facts after 30 days */
    config->memory.prune_stale_days = 180; /* Delete unused low-confidence facts after 6 months */
@@ -346,6 +346,9 @@ void config_set_defaults(dawn_config_t *config) {
    config->memory.decay_prune_threshold = 0.25f;      /* Prune facts below 25% */
    config->memory.summary_retention_days = 30;        /* Delete summaries after 30 days */
    config->memory.access_reinforcement_boost = 0.05f; /* +5% on access */
+   config->memory.citation_enabled = false;           /* Memory citation signal: off by default */
+   config->memory.citation_reinforcement_boost =
+       0.0f; /* Phase 2: inert until deliberately enabled */
 
    /* Memory embeddings (semantic search) */
    SAFE_COPY(config->memory.embedding_provider, "onnx");

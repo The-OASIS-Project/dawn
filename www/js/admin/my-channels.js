@@ -161,15 +161,13 @@
       const cloud = llm.cloud || {};
       const type = ch.llm_type || llm.type || 'cloud';
       if (type === 'local') return (llm.local && llm.local.model) || '';
-      if (cloud.use_openrouter) {
-         const a = cloud.openrouter_models || [];
-         return a[cloud.openrouter_default_model_idx || 0] || a[0] || '';
-      }
       const p = (ch.cloud_provider || cloud.provider || '').toLowerCase();
       const pick = (arr, idx) => (arr || [])[idx || 0] || (arr || [])[0] || '';
       if (p === 'claude') return pick(cloud.claude_models, cloud.claude_default_model_idx);
       if (p === 'gemini') return pick(cloud.gemini_models, cloud.gemini_default_model_idx);
       if (p === 'openai') return pick(cloud.openai_models, cloud.openai_default_model_idx);
+      if (p === 'openrouter')
+         return pick(cloud.openrouter_models, cloud.openrouter_default_model_idx);
       return ''; // auto/unknown provider — resolved at runtime, not knowable here
    }
 

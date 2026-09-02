@@ -241,6 +241,17 @@ static void test_invalid_cloud_provider(void) {
    TEST_ASSERT_TRUE_MESSAGE(found, "expected error for llm.cloud.provider");
 }
 
+/* "openrouter" is a first-class cloud provider value (2a-0) and must validate. */
+static void test_openrouter_is_valid_provider(void) {
+   strncpy(s_config.llm.cloud.provider, "openrouter", sizeof(s_config.llm.cloud.provider) - 1);
+   int n = config_validate(&s_config, NULL, s_errors, MAX_ERRORS);
+   for (int i = 0; i < n; i++) {
+      TEST_ASSERT_NOT_EQUAL_MESSAGE(
+          0, strcmp(s_errors[i].field, "llm.cloud.provider"),
+          "provider=\"openrouter\" must not raise a provider validation error");
+   }
+}
+
 /* ── OpenRouter gateway ──────────────────────────────────────────────────── */
 
 /* use_openrouter is a separate bool, NOT a provider-string value — turning it on
@@ -353,6 +364,7 @@ int main(void) {
    RUN_TEST(test_invalid_processing_mode);
    RUN_TEST(test_invalid_llm_type);
    RUN_TEST(test_invalid_cloud_provider);
+   RUN_TEST(test_openrouter_is_valid_provider);
    RUN_TEST(test_openrouter_gateway_provider_still_validated);
    RUN_TEST(test_openrouter_gateway_missing_key_is_not_fatal);
    RUN_TEST(test_invalid_summarizer_backend);

@@ -37,6 +37,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "core/llm_response_finalize.h"
 #include "core/session_manager.h"
 #include "core/text_filter.h"
 #include "llm/llm_interface.h"
@@ -139,6 +140,26 @@ static int llm_call_prepare(session_t *session,
                             llm_call_ctx_t *ctx,
                             bool skip_add_message) {
    memset(ctx, 0, sizeof(*ctx));
+
+   /* Turn-start reset of the cancel-at-buzzer stash (SERVER_AUTHORITATIVE §9/G4):
+    * free any completed-but-cancelled reply a PRIOR turn stashed and no caller
+    * consumed (only the persist-owning reinvoke worker takes it; other surfaces
+    * leave it), so it can never persist onto the wrong row.  The current turn's
+    * stash, if any, is written later in llm_call_finalize. */
+   if (session->cancelled_final_response != NULL) {
+      free(session->cancelled_final_response);
+      session->cancelled_final_response = NULL;
+   }
+
+   /* Turn-start reset of the final-answer reasoning stash (SERVER_AUTHORITATIVE §6c-G1):
+    * the tool loop writes it DURING this dispatch and the post-dispatch persist takes it,
+    * so a leftover from a prior turn (a persist that never consumed it) must not attach to
+    * this row.  Safe here precisely because the write is in-dispatch (after prepare) — a
+    * prepare-clear cannot clobber the current turn's stash. */
+   if (session->final_reasoning_json != NULL) {
+      free(session->final_reasoning_json);
+      session->final_reasoning_json = NULL;
+   }
 
    // Add user message to history (unless caller already did)
    if (!skip_add_message) {
@@ -258,7 +279,16 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
          if (*response) {
             OLOG_INFO("Session %u: LLM didn't stream, sending full transcript",
                       session->session_id);
-            webui_send_transcript(session, "assistant", response);
+            /* Server-authoritative (SERVER_AUTHORITATIVE §7/§13 G3): a non-streaming
+             * turn delivers via transcript, not stream_end, so it carries no
+             * will_persist.  When the persist-owning caller armed will_persist_turn
+             * (Phase 1: the reinvoke worker persists server-side unconditionally),
+             * stamp server_saved so the browser stands down — otherwise it client-
+             * saves a row the server also writes (duplicate).  server_saved here is a
+             * pre-write PROMISE, same intent as will_persist; the client's existing
+             * !server_saved save-gate already honors it (no client change). */
+            webui_send_transcript_ex(session, "assistant", response,
+                                     atomic_load(&session->will_persist_turn), 0);
          } else {
             /* Empty completion AND nothing streamed — the model produced no text and no
              * user-visible tool output (observed with some preview models returning an empty
@@ -283,7 +313,31 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
    // Check for cancellation after LLM call
    if (session->cancel_requested) {
       OLOG_INFO("Session %u cancelled during LLM call", session->session_id);
-      free(response);
+      /* Cancel-at-buzzer (SERVER_AUTHORITATIVE §9/G4): if this turn made a Model A
+       * persist PROMISE (will_persist_turn) AND the reply actually completed, the
+       * streamed viewer already stood down from client-saving — a plain free would
+       * lose a finished reply.  Finalize + stash it so the persist-owning caller
+       * (the reinvoke worker) can persist it post-dispatch.  Only under the promise:
+       * an ordinary barge-in (no will_persist) keeps today's abort semantics, so
+       * voice/messaging/local/research are byte-for-byte unaffected. */
+      if (response && *response && atomic_load(&session->will_persist_turn)) {
+         response_final_t fin;
+         if (llm_response_finalize(session, response, &fin) == SUCCESS) {
+            free(response);
+            session->cancelled_final_response = fin.text; /* caller takes + frees */
+         } else {
+            /* Degraded (llm_response_finalize alloc-failed): strip the tag grammar in
+             * place — the strips need no allocation — so residual <cited>/<command>/
+             * <end_of_turn> markers can never reach the persisted row or the browser,
+             * then stash the response itself (caller takes + frees). */
+            text_filter_cited_normalize(response);
+            text_filter_command_strip(response, false);
+            text_filter_cited_strip(response);
+            session->cancelled_final_response = response;
+         }
+      } else {
+         free(response);
+      }
       return NULL;
    }
 
@@ -295,6 +349,22 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
          OLOG_ERROR("Session %u: LLM call failed", session->session_id);
       }
       return NULL;
+   }
+
+   // Finalize to canonical clean text (strip residual tags + trailing whitespace)
+   // BEFORE the response enters history (which feeds the next turn) and is returned
+   // to the caller for persistence/delivery.  This is the single choke point for
+   // every session-based surface — WebUI text/audio, satellite, messaging, jobs,
+   // reinvoke all reach here via one of the session_llm_call* variants, so their
+   // history + persisted rows are clean without per-seam stripping.
+   // (Phase 1 will thread `session` here for citation resolution.)
+   if (*response) {
+      response_final_t fin;
+      if (llm_response_finalize(session, response, &fin) == SUCCESS) {
+         free(response);
+         response = fin.text;  // take ownership of the clean buffer
+      }
+      // else: finalize alloc failure — keep the raw response (degraded, not fatal)
    }
 
    // Add assistant response to history (only if non-empty to avoid Claude API errors)

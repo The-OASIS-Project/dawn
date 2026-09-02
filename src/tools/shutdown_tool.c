@@ -144,14 +144,15 @@ static char *shutdown_tool_callback(const char *action, char *value, int *should
    /* Security check 1: Must be explicitly enabled in config */
    if (!s_config.enabled) {
       OLOG_WARNING("Shutdown command rejected: shutdown.enabled = false in config");
-      return strdup("Shutdown command is disabled. Enable it in settings first.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Shutdown command is disabled. Enable it in settings first.");
    }
 
    /* Security check 2: If passphrase is configured, it must match */
    if (s_config.passphrase[0] != '\0') {
       if (value == NULL || constant_time_compare(value, s_config.passphrase) != 0) {
          OLOG_WARNING("Shutdown command rejected: incorrect or missing passphrase");
-         return strdup("Shutdown command rejected: incorrect passphrase.");
+         return strdup(TOOL_RESULT_ERROR_MARK "Shutdown command rejected: incorrect passphrase.");
       }
       OLOG_INFO("Shutdown passphrase verified");
    }
@@ -162,7 +163,7 @@ static char *shutdown_tool_callback(const char *action, char *value, int *should
    int ret = system("sudo shutdown -h now");
    if (ret != 0) {
       OLOG_ERROR("Shutdown command failed with return code: %d", ret);
-      return strdup("Shutdown command failed to execute.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Shutdown command failed to execute.");
    }
 
    return strdup("Shutdown authorized. Initiating system shutdown. Goodbye.");
@@ -205,7 +206,6 @@ static const tool_metadata_t shutdown_metadata = {
    /* Behavior Flags */
    .device_type = TOOL_DEVICE_TYPE_PASSPHRASE,
    .capabilities = TOOL_CAP_DANGEROUS,
-   .is_getter = false,
    .skip_followup = false,
    .mqtt_only = false,
    .sync_wait = false,

@@ -51,8 +51,8 @@ int auth_db_attention_rule_insert(const sage_watch_t *w, int64_t *out_id) {
    const char *sql =
        "INSERT INTO attention_rules (user_id, name, metric, rule_type, direction, threshold, "
        "hysteresis, slope_per_min, slope_window_sec, absence_after_sec, notify, ttl_min, enabled, "
-       "muted_until, source, created_at, updated_at) "
-       "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+       "named, muted_until, source, created_at, updated_at) "
+       "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
    sqlite3_stmt *stmt = NULL;
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare attention_rule_insert failed: %s", sqlite3_errmsg(s_db.db));
@@ -74,10 +74,11 @@ int auth_db_attention_rule_insert(const sage_watch_t *w, int64_t *out_id) {
    sqlite3_bind_int(stmt, 11, (int)w->notify);
    sqlite3_bind_int(stmt, 12, w->ttl_min);
    sqlite3_bind_int(stmt, 13, w->enabled ? 1 : 0);
-   sqlite3_bind_int64(stmt, 14, (sqlite3_int64)w->muted_until);
-   sqlite3_bind_text(stmt, 15, w->source_tag, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_int64(stmt, 16, (sqlite3_int64)ts);
+   sqlite3_bind_int(stmt, 14, w->named ? 1 : 0);
+   sqlite3_bind_int64(stmt, 15, (sqlite3_int64)w->muted_until);
+   sqlite3_bind_text(stmt, 16, w->source_tag, -1, SQLITE_TRANSIENT);
    sqlite3_bind_int64(stmt, 17, (sqlite3_int64)ts);
+   sqlite3_bind_int64(stmt, 18, (sqlite3_int64)ts);
 
    int rc = sqlite3_step(stmt);
    int64_t new_id = (rc == SQLITE_DONE) ? (int64_t)sqlite3_last_insert_rowid(s_db.db) : 0;
@@ -103,9 +104,12 @@ int auth_db_attention_rule_update(int user_id, int64_t id, const sage_watch_t *w
 
    AUTH_DB_LOCK_OR_FAIL();
 
+   /* rule_type is updatable so a metric's single watch can switch kind (e.g.
+    * threshold -> slope) on edit; without it a re-add with a new rule_type would
+    * silently keep the old kind and ignore the new trigger fields. */
    const char *sql =
-       "UPDATE attention_rules SET name=?, direction=?, threshold=?, hysteresis=?, "
-       "slope_per_min=?, slope_window_sec=?, absence_after_sec=?, notify=?, ttl_min=?, "
+       "UPDATE attention_rules SET name=?, rule_type=?, direction=?, threshold=?, hysteresis=?, "
+       "slope_per_min=?, slope_window_sec=?, absence_after_sec=?, notify=?, ttl_min=?, named=?, "
        "updated_at=? WHERE id=? AND user_id=?";
    sqlite3_stmt *stmt = NULL;
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
@@ -115,17 +119,19 @@ int auth_db_attention_rule_update(int user_id, int64_t id, const sage_watch_t *w
    }
 
    sqlite3_bind_text(stmt, 1, w->name, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_int(stmt, 2, (int)w->direction);
-   sqlite3_bind_double(stmt, 3, w->threshold);
-   sqlite3_bind_double(stmt, 4, w->hysteresis);
-   sqlite3_bind_double(stmt, 5, w->slope_per_min);
-   sqlite3_bind_int(stmt, 6, w->slope_window_sec);
-   sqlite3_bind_int(stmt, 7, w->absence_after_sec);
-   sqlite3_bind_int(stmt, 8, (int)w->notify);
-   sqlite3_bind_int(stmt, 9, w->ttl_min);
-   sqlite3_bind_int64(stmt, 10, (sqlite3_int64)now_ms());
-   sqlite3_bind_int64(stmt, 11, (sqlite3_int64)id);
-   sqlite3_bind_int(stmt, 12, user_id);
+   sqlite3_bind_int(stmt, 2, (int)w->rule_type);
+   sqlite3_bind_int(stmt, 3, (int)w->direction);
+   sqlite3_bind_double(stmt, 4, w->threshold);
+   sqlite3_bind_double(stmt, 5, w->hysteresis);
+   sqlite3_bind_double(stmt, 6, w->slope_per_min);
+   sqlite3_bind_int(stmt, 7, w->slope_window_sec);
+   sqlite3_bind_int(stmt, 8, w->absence_after_sec);
+   sqlite3_bind_int(stmt, 9, (int)w->notify);
+   sqlite3_bind_int(stmt, 10, w->ttl_min);
+   sqlite3_bind_int(stmt, 11, w->named ? 1 : 0);
+   sqlite3_bind_int64(stmt, 12, (sqlite3_int64)now_ms());
+   sqlite3_bind_int64(stmt, 13, (sqlite3_int64)id);
+   sqlite3_bind_int(stmt, 14, user_id);
 
    int rc = sqlite3_step(stmt);
    int changes = sqlite3_changes(s_db.db);
@@ -212,10 +218,10 @@ int auth_db_attention_rule_list(int user_id, sage_watch_t *out, int max, int *ou
        (user_id > 0)
            ? "SELECT id, user_id, name, metric, rule_type, direction, threshold, hysteresis, "
              "slope_per_min, slope_window_sec, absence_after_sec, notify, ttl_min, enabled, "
-             "muted_until, source FROM attention_rules WHERE user_id=? ORDER BY id"
+             "muted_until, source, named FROM attention_rules WHERE user_id=? ORDER BY id"
            : "SELECT id, user_id, name, metric, rule_type, direction, threshold, hysteresis, "
              "slope_per_min, slope_window_sec, absence_after_sec, notify, ttl_min, enabled, "
-             "muted_until, source FROM attention_rules ORDER BY user_id, id";
+             "muted_until, source, named FROM attention_rules ORDER BY user_id, id";
    sqlite3_stmt *stmt = NULL;
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare attention_rule_list failed: %s", sqlite3_errmsg(s_db.db));
@@ -255,6 +261,7 @@ int auth_db_attention_rule_list(int user_id, sage_watch_t *out, int max, int *ou
       if (src) {
          safe_strncpy(w->source_tag, src, sizeof(w->source_tag));
       }
+      w->named = sqlite3_column_int(stmt, 16) != 0;
       n++;
    }
    sqlite3_finalize(stmt);

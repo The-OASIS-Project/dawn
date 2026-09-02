@@ -333,6 +333,39 @@ session_t *lookup_session_by_token(const char *token) {
    return NULL;
 }
 
+void webui_evict_session_owner(session_t *existing, ws_connection_t *new_conn) {
+   if (!existing) {
+      return;
+   }
+   ws_connection_t *old = (ws_connection_t *)existing->client_data;
+   if (!old || old == new_conn || !old->wsi) {
+      return; /* no live owner, or the same connection reconnecting to itself */
+   }
+   OLOG_INFO("WebUI: Evicting superseded connection from session %u (a newer reconnect took over)",
+             existing->session_id);
+
+   /* Signal the takeover with a DATA frame FIRST, then a WS close.  Both are
+    * needed: the 4001 close code is the clean signal on the same-origin/prod path,
+    * but reverse proxies (Vite dev http-proxy, nginx) STRIP a custom WS close code
+    * — a proxied browser sees a generic 1006 and would treat it as a normal drop
+    * and auto-reconnect (re-storming).  A data frame proxies through intact, so it
+    * is the proxy-robust signal the client keys off.  Send the frame synchronously
+    * so it is buffered before the close, then arm PENDING_TIMEOUT_CLOSE_SEND, which
+    * waits for pending output to flush before actually closing. */
+   send_json_message(old->wsi,
+                     "{\"type\":\"session_superseded\",\"payload\":{\"reason\":\"superseded\"}}");
+
+   /* Clean WS close with the private-range code the client keys off.  Same pattern
+    * as the admin force-disconnect below: set the reason, then arm the close send
+    * on the lws service thread.  Do NOT clear old->session — the evicted
+    * connection's close handler must still see a non-NULL session to release its
+    * per-connection ref (the ownership guard there leaves the session intact since
+    * client_data will already point at new_conn). */
+   lws_close_reason(old->wsi, (enum lws_close_status)WEBUI_CLOSE_SUPERSEDED,
+                    (unsigned char *)"superseded", 10);
+   lws_set_timeout(old->wsi, PENDING_TIMEOUT_CLOSE_SEND, 3);
+}
+
 /* Discovery cache and allowed path prefixes moved to webui_config.c */
 
 /* =============================================================================
@@ -825,12 +858,27 @@ static int callback_websocket(struct lws *wsi,
                    closing_session ? closing_session->session_id : 0);
 
          if (closing_session) {
-            /* Client left: gate emission only.  Post background-jobs Phase 1 the
+            /* OWNERSHIP GUARD: only tear down session-visible state (mark
+             * disconnected + drop the client_data pointer) if THIS connection is
+             * still the session's current owner.  If another connection has since
+             * reconnected and taken ownership (client_data != conn), this is a
+             * stale/superseded connection — clobbering the session here would
+             * kill the LIVE owner's frame delivery and trigger a reconnect storm
+             * (the one-connection-per-session collision).  Either way we always
+             * drop OUR ref and clear conn->session, since the ref is per-connection.
+             *
+             * Client left: gate emission only.  Post background-jobs Phase 1 the
              * in-flight turn KEEPS generating and is persisted server-side — we
              * do NOT cancel it here (that is session_teardown_flags' job, on
              * actual destroy).  A reconnect or a new request supersedes it. */
-            session_mark_disconnected(closing_session);
-            closing_session->client_data = NULL;
+            if (closing_session->client_data == conn) {
+               session_mark_disconnected(closing_session);
+               closing_session->client_data = NULL;
+            } else {
+               OLOG_INFO("WebUI: Superseded connection closing — session %u owned by another "
+                         "connection, leaving its state intact",
+                         closing_session->session_id);
+            }
 
             /* Release our reference to the session.
              * Session manager will clean it up when ref_count reaches 0. */
@@ -941,7 +989,12 @@ static int callback_websocket(struct lws *wsi,
                         existing_session = lookup_session_by_token(token);
                         if (existing_session) {
                            is_reconnect = true;
+                           /* Evict any other connection that still owns this session
+                            * BEFORE taking ownership, so the superseded tab backs off
+                            * (WS 4001) instead of fighting to re-steal it. */
+                           webui_evict_session_owner(existing_session, conn);
                            conn->session = existing_session;
+                           conn->session_was_reconnected = true;
                            existing_session->client_data = conn;
                            existing_session->disconnected = false;
                            strncpy(conn->session_token, token, WEBUI_SESSION_TOKEN_LEN - 1);
@@ -955,6 +1008,14 @@ static int callback_websocket(struct lws *wsi,
                            struct json_object *tts_obj;
                            if (json_object_object_get_ex(payload, "tts_enabled", &tts_obj)) {
                               conn->tts_enabled = json_object_get_boolean(tts_obj);
+                           }
+
+                           /* Capability: does this client render its own tool steps from the
+                            * tool_step frame? (default off = stock-www origin-excluded behavior) */
+                           conn->tool_step_origin = false;
+                           struct json_object *tso_obj;
+                           if (json_object_object_get_ex(payload, "tool_step_origin", &tso_obj)) {
+                              conn->tool_step_origin = json_object_get_boolean(tso_obj);
                            }
 
                            /* Reconnections still count against client limit */
@@ -1054,6 +1115,7 @@ static int callback_websocket(struct lws *wsi,
                                              prompt ? prompt : get_remote_command_prompt());
                   free(prompt);
                   conn->session->client_data = conn;
+                  conn->session_was_reconnected = false; /* brand-new session, not a reconnect */
 
                   /* Check for Opus codec support */
                   conn->use_opus = check_opus_capability(payload);
@@ -1063,6 +1125,14 @@ static int callback_websocket(struct lws *wsi,
                   struct json_object *tts_obj;
                   if (json_object_object_get_ex(payload, "tts_enabled", &tts_obj)) {
                      conn->tts_enabled = json_object_get_boolean(tts_obj);
+                  }
+
+                  /* Capability: does this client render its own tool steps from the tool_step
+                   * frame? (default off = stock-www origin-excluded behavior) */
+                  conn->tool_step_origin = false;
+                  struct json_object *tso_obj;
+                  if (json_object_object_get_ex(payload, "tool_step_origin", &tso_obj)) {
+                     conn->tool_step_origin = json_object_get_boolean(tso_obj);
                   }
 
                   if (generate_session_token(conn->session_token) != 0) {
@@ -1303,13 +1373,16 @@ static void *webui_thread_func(void *arg) {
        * The writeable callback chain handles additional responses. */
       process_response_queue();
 
-      /* Always-on timeout checks (~1Hz, not every 5ms iteration) */
+      /* Always-on timeout checks (~4Hz, not every 5ms iteration). 4Hz not 1Hz
+       * because this tick also drives wall-clock end-of-speech detection for DTX
+       * clients (whose silence sends no frames to the per-frame VAD check), so the
+       * cadence bounds how long past the dwell an utterance can hang: ~250ms. */
       {
          static int64_t last_timeout_check_ms = 0;
          struct timespec ts;
          clock_gettime(CLOCK_MONOTONIC, &ts);
          int64_t now_ms = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-         if (now_ms - last_timeout_check_ms >= 1000) {
+         if (now_ms - last_timeout_check_ms >= 250) {
             last_timeout_check_ms = now_ms;
             pthread_mutex_lock(&s_conn_registry_mutex);
             for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
@@ -1376,6 +1449,8 @@ static void webui_send_llm_state_update(session_t *session) {
                           json_object_new_boolean(llm_has_claude_key()));
    json_object_object_add(payload, "gemini_available",
                           json_object_new_boolean(llm_has_gemini_key()));
+   json_object_object_add(payload, "openrouter_available",
+                          json_object_new_boolean(llm_has_openrouter_key()));
 
    json_object_object_add(response, "payload", payload);
 
@@ -1623,10 +1698,25 @@ static void webui_tool_execution_callback(void *session_ptr,
       /* Stash visual content on the session so it gets appended to the
        * assistant message when saved to the conversation DB. This enables
        * visual replay when the conversation is reloaded.
-       * Protected by tools_mutex — consumed by handle_save_message. */
+       * Protected by tools_mutex — consumed by the server persist
+       * (webui_persist_final_answer) or handle_save_message.
+       * ACCUMULATE all visuals of a turn (a multi-render_visual turn must keep
+       * every one, in order — SERVER_AUTHORITATIVE §6c-G2); the '\n' separator
+       * matches the browser's visuals.join('\n') interleave. */
       pthread_mutex_lock(&session->tools_mutex);
-      free(session->pending_visual);
-      session->pending_visual = strdup(result);
+      if (session->pending_visual == NULL) {
+         session->pending_visual = strdup(result);
+      } else {
+         size_t old_len = strlen(session->pending_visual);
+         size_t add_len = strlen(result);
+         char *combined = realloc(session->pending_visual, old_len + 1 + add_len + 1);
+         if (combined != NULL) {
+            combined[old_len] = '\n';
+            memcpy(combined + old_len + 1, result, add_len + 1);
+            session->pending_visual = combined;
+         }
+         /* realloc failure: keep the existing accumulation rather than lose all. */
+      }
       pthread_mutex_unlock(&session->tools_mutex);
    }
 
@@ -1965,7 +2055,8 @@ int webui_server_get_port(void) {
 void webui_send_transcript_ex(session_t *session,
                               const char *role,
                               const char *text,
-                              bool server_saved) {
+                              bool server_saved,
+                              int64_t message_id) {
    if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_JOB)) {
       return;
    }
@@ -1977,6 +2068,7 @@ void webui_send_transcript_ex(session_t *session,
                               .text = strdup(text),
                               .server_saved = server_saved,
                               .conversation_id = session->stream_conversation_id,
+                              .message_id = message_id,
                           } };
 
    if (!resp.transcript.role || !resp.transcript.text) {
@@ -1990,7 +2082,7 @@ void webui_send_transcript_ex(session_t *session,
 }
 
 void webui_send_transcript(session_t *session, const char *role, const char *text) {
-   webui_send_transcript_ex(session, role, text, false);
+   webui_send_transcript_ex(session, role, text, false, 0);
 }
 
 void webui_send_state_with_detail(session_t *session, const char *state, const char *detail) {
@@ -2062,6 +2154,25 @@ void webui_send_error_ex(session_t *session,
                          ws_error_severity_t severity) {
    if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_DAP2)) {
       return;
+   }
+
+   /* Record that a specific ERROR surfaced for THIS turn so the WebUI text worker's
+    * NULL-response path can skip its generic fallback (avoids a double error).  The
+    * worker resets this before each LLM call; see session_t.turn_error_emitted.
+    * Three guards keep the signal honest — miss any one and we could suppress a
+    * real failure (silent turn), which is worse than the double error we're fixing:
+    *   - severity == ERROR: INFO/WARNING notices (e.g. the thinking-clamp notice,
+    *     emitted mid-dispatch) must NOT count as "an error was shown."
+    *   - command context == session: only the worker actually running THIS turn's
+    *     LLM call may set it — excludes cross-thread emits for other turns of the
+    *     same session (TURN_QUEUE_FULL on the lws thread, audio-worker validation),
+    *     which are ERROR-severity but belong to a different logical turn.
+    *   - type == WEBUI: the reset+check live only in the WebUI text worker; the
+    *     DAP2/satellite worker has its own fallback and never consumes this flag,
+    *     so setting it there would only strand a stale value. */
+   if (severity == WS_SEVERITY_ERROR && session->type == SESSION_TYPE_WEBUI &&
+       session_get_command_context() == session) {
+      atomic_store(&session->turn_error_emitted, true);
    }
 
    ws_response_t resp = { .session = session,
@@ -2226,6 +2337,18 @@ void webui_send_stream_start(session_t *session) {
    queue_response(&resp);
    OLOG_INFO("WebUI: Stream start id=%u conv=%lld for session %u", sid, (long long)conv_id,
              session->session_id);
+
+   /* Orphan tripwire: a WebUI turn should always have conv>0 by stream time (a
+    * fresh chat's new_conversation back-fills the id before streaming).  conv=0
+    * here means the turn won't persist — typically the client failed to re-tag
+    * conversation_id after a reconnect.  Gated to WebUI: DAP2/local voice turns
+    * legitimately stream at conv=0 (a harmless no-op), so warning on them would
+    * be noise, not signal. */
+   if (conv_id == 0 && session->type == SESSION_TYPE_WEBUI) {
+      OLOG_WARNING("WebUI: Stream start id=%u for session %u is ORPHANED (conv=0) — turn will "
+                   "not persist; client likely did not tag conversation_id after reconnect",
+                   sid, session->session_id);
+   }
 }
 
 /* Command tag filter uses shared constants from core/text_filter.h */
@@ -2383,6 +2506,54 @@ int webui_filter_command_tags(session_t *session,
    return text_filter_command_tags_to_buffer(&session->cmd_tag_filter, text, out_buf, out_size);
 }
 
+/* Per-delta stream working-buffer size.  The frame field `ws_response_t.stream.text`
+ * is 1024 bytes and snprintf-truncates there, so the intermediate strip/spacing
+ * buffers never need to exceed it (the +64 margin covers a sentence-spacing
+ * prepended space and keeps a round number).  Replaces an inconsistent 4096/4098
+ * magic pair that was 4× the transmittable ceiling. */
+#define WEBUI_STREAM_DELTA_BUF 1088
+
+/**
+ * @brief Emit one already-tag-stripped delta chunk to the stream.
+ *
+ * Shared tail of the native-tools stream path: opens the bubble on first real
+ * content, fixes sentence spacing, appends to the replay ring, and queues the
+ * frame.  Callers must pass text that has already passed through any tag filter
+ * (it is NOT re-filtered here) — used by both the live delta path and the
+ * stream-end <cited> flush.
+ */
+static void webui_emit_clean_delta(session_t *session, const char *text) {
+   if (!text || text[0] == '\0') {
+      return;
+   }
+   /* Don't open a bubble for whitespace-only first content (iteration-boundary flush). */
+   if (!session->llm_streaming_active && stream_text_is_all_whitespace(text, strlen(text))) {
+      return;
+   }
+   if (!session->llm_streaming_active) {
+      webui_send_stream_start(session);
+   }
+
+   /* Fix sentence spacing (LLM sometimes omits space after period) */
+   char spaced_buf[WEBUI_STREAM_DELTA_BUF];
+   const char *fixed_text = fix_sentence_spacing(session, text, spaced_buf, sizeof(spaced_buf));
+
+   ws_response_t resp = { .session = session,
+                          .type = WS_RESP_STREAM_DELTA,
+                          .stream = {
+                              .stream_id = session->current_stream_id,
+                              .conversation_id = session->stream_conversation_id,
+                          } };
+   snprintf(resp.stream.text, sizeof(resp.stream.text), "%s", fixed_text);
+   session->stream_had_content = true;
+   update_stream_last_char(session, resp.stream.text);
+   /* Accumulate into the replay ring so a client attaching mid-turn (or the
+    * one that switched away) can replay the partial. */
+   conv_stream_append(session->stream_conversation_id, session->current_stream_id,
+                      resp.stream.text);
+   queue_response(&resp);
+}
+
 /**
  * @brief Send streaming text to WebUI with command tag filtering
  *
@@ -2399,39 +2570,29 @@ void webui_send_stream_delta(session_t *session, const char *text) {
       return;
    }
 
-   /* If native tools are enabled, pass through without filtering */
+   /* Strip the live <cited> memory-citation tag on EVERY stream path.  The
+    * finalizer only cleans the completed/persisted copy; the browser renders
+    * deltas live, so an unstripped tag leaks its inner text.  The tag is gated
+    * purely on citation_enabled (independent of tool mode), so both the native
+    * and legacy branches below can carry it — run the strip before the branch
+    * rather than inside the native one.  Stateful: a tag may split across deltas;
+    * held-back partial-opener bytes surface on a later delta or the stream-end
+    * flush. */
+   char cited_clean[WEBUI_STREAM_DELTA_BUF];
+   text_filter_cited_tags_to_buffer(&session->cited_tag_filter, text, cited_clean,
+                                    sizeof(cited_clean));
+   if (cited_clean[0] == '\0') {
+      return; /* whole delta was tag content, or held back pending more input */
+   }
+
+   /* Native tools: pass through without command-tag filtering. */
    if (session->cmd_tag_filter_bypass) {
-      /* Don't open a bubble for whitespace-only first content (iteration-boundary flush). */
-      if (!session->llm_streaming_active && stream_text_is_all_whitespace(text, strlen(text))) {
-         return;
-      }
-      if (!session->llm_streaming_active) {
-         webui_send_stream_start(session);
-      }
-
-      /* Fix sentence spacing (LLM sometimes omits space after period) */
-      char spaced_buf[4098];
-      const char *fixed_text = fix_sentence_spacing(session, text, spaced_buf, sizeof(spaced_buf));
-
-      ws_response_t resp = { .session = session,
-                             .type = WS_RESP_STREAM_DELTA,
-                             .stream = {
-                                 .stream_id = session->current_stream_id,
-                                 .conversation_id = session->stream_conversation_id,
-                             } };
-      snprintf(resp.stream.text, sizeof(resp.stream.text), "%s", fixed_text);
-      session->stream_had_content = true;
-      update_stream_last_char(session, resp.stream.text);
-      /* Accumulate into the replay ring so a client attaching mid-turn (or the
-       * one that switched away) can replay the partial. */
-      conv_stream_append(session->stream_conversation_id, session->current_stream_id,
-                         resp.stream.text);
-      queue_response(&resp);
+      webui_emit_clean_delta(session, cited_clean);
       return;
    }
 
-   /* Legacy command tag mode: filter using shared state machine */
-   text_filter_command_tags(&session->cmd_tag_filter, text, webui_filter_output, session);
+   /* Legacy command tag mode: filter the cited-stripped text for <command> tags. */
+   text_filter_command_tags(&session->cmd_tag_filter, cited_clean, webui_filter_output, session);
 }
 
 void webui_send_stream_end(session_t *session, const char *reason) {
@@ -2440,21 +2601,57 @@ void webui_send_stream_end(session_t *session, const char *reason) {
       return;
    }
 
+   /* Flush any held-back <cited> filter bytes as a final delta while the stream
+    * is still active.  A partial-opener that never completed is real trailing
+    * text and must reach the browser + replay ring; a mid-tag remainder (closer
+    * never arrived) is dropped inside the flush.  Route by path exactly as the
+    * delta does — native emits directly (NOT back through webui_send_stream_delta,
+    * which would re-filter the clean bytes); legacy feeds the command filter, since
+    * a held '<' could begin a <command> tag. */
+   char cited_flush[CITED_TAG_BUF_SIZE];
+   if (text_filter_cited_flush_to_buffer(&session->cited_tag_filter, cited_flush,
+                                         sizeof(cited_flush)) > 0) {
+      if (session->cmd_tag_filter_bypass) {
+         webui_emit_clean_delta(session, cited_flush);
+      } else {
+         text_filter_command_tags(&session->cmd_tag_filter, cited_flush, webui_filter_output,
+                                  session);
+      }
+   }
+
    /* Mark streaming inactive */
    atomic_store(&session->llm_streaming_active, false);
 
    /* Finalize the replay-ring partial (kept for a short grace window). */
    conv_stream_end(session->stream_conversation_id, atomic_load(&session->current_stream_id));
 
+   /* Copy reason into fixed buffer (no malloc/free churn) */
+   const char *r = reason ? reason : "complete";
+
+   /* Model A intent (SERVER_AUTHORITATIVE §6 step 2): stamp will_persist ONLY when a
+    * row will actually be persisted, so the browser never stands down on a turn the
+    * server won't save.  That is: the persist-owning caller armed will_persist_turn,
+    * AND this is the successful FINAL stream_end (reason "complete" — excludes the
+    * per-tool-iteration segment end AND the error/transient_error ends), AND content
+    * actually streamed (stream_had_content — a completed streamed reply, i.e. the
+    * happy path or a cancel-at-buzzer; a non-streamed turn promises via the transcript
+    * fallback's server_saved instead), AND the turn has a conversation to persist TO
+    * (stream_conversation_id > 0 — the workers only persist when turn_conv > 0, so a
+    * conv-less turn, or one whose conversation creation failed mid-dispatch, must not
+    * promise a save it won't make).  Over-promising on any of these would make the viewer
+    * drop its streamed partial while the server persists nothing (correctness MEDIUM). */
+   bool will_persist = atomic_load(&session->will_persist_turn) && strcmp(r, "complete") == 0 &&
+                       atomic_load(&session->stream_had_content) &&
+                       atomic_load(&session->stream_conversation_id) > 0;
+
    ws_response_t resp = { .session = session,
                           .type = WS_RESP_STREAM_END,
                           .stream = {
                               .stream_id = atomic_load(&session->current_stream_id),
                               .conversation_id = session->stream_conversation_id,
+                              .will_persist = will_persist,
                           } };
 
-   /* Copy reason into fixed buffer (no malloc/free churn) */
-   const char *r = reason ? reason : "complete";
    strncpy(resp.stream.text, r, sizeof(resp.stream.text) - 1);
    resp.stream.text[sizeof(resp.stream.text) - 1] = '\0';
 
@@ -3161,8 +3358,9 @@ int webui_restore_conversation_context(ws_connection_t *conn,
       }
    }
 
-   /* Restore LLM config from conversation DB (reflects last-used settings) */
-   if (conv->llm_type[0] != '\0' || conv->tools_mode[0] != '\0') {
+   /* Restore LLM config from conversation DB (reflects last-used settings).
+    * tools_mode is a retired dead column — no longer hydrated. */
+   if (conv->llm_type[0] != '\0') {
       session_llm_config_t cfg;
       session_get_llm_config(conn->session, &cfg);
 
@@ -3186,10 +3384,10 @@ int webui_restore_conversation_context(ws_connection_t *conn,
          strncpy(cfg.model, conv->model, sizeof(cfg.model) - 1);
          cfg.model[sizeof(cfg.model) - 1] = '\0';
 
-         /* Infer provider from model name if not explicitly stored.  Skipped under
-          * the OpenRouter gateway (model-name prefixes don't apply to "vendor/model"
-          * OpenRouter IDs — the gateway override below forces OPENROUTER anyway). */
-         if (conv->cloud_provider[0] == '\0' && !llm_openrouter_gateway_enabled()) {
+         /* Infer provider from model name if not explicitly stored. OpenRouter IDs are
+          * "vendor/model" slugs and match none of the bare prefixes below, so an
+          * OpenRouter conversation's provider/model are left as stored. */
+         if (conv->cloud_provider[0] == '\0') {
             if (strncmp(conv->model, "gpt-", 4) == 0 || strncmp(conv->model, "o1-", 3) == 0 ||
                 strncmp(conv->model, "o3-", 3) == 0) {
                cfg.cloud_provider = CLOUD_PROVIDER_OPENAI;
@@ -3201,17 +3399,6 @@ int webui_restore_conversation_context(ws_connection_t *conn,
          }
       }
 
-      /* OpenRouter gateway is the single authority: a restored conversation always runs
-       * through OpenRouter regardless of its stored/inferred provider.  Force the provider
-       * enum; a stored bare model ID is remapped to the right vendor/model slug canonically
-       * in llm_resolve_config at request time (the single choke point). */
-      if (cfg.type == LLM_CLOUD && llm_openrouter_gateway_enabled()) {
-         cfg.cloud_provider = CLOUD_PROVIDER_OPENROUTER;
-      }
-      if (conv->tools_mode[0] != '\0') {
-         strncpy(cfg.tool_mode, conv->tools_mode, sizeof(cfg.tool_mode) - 1);
-         cfg.tool_mode[sizeof(cfg.tool_mode) - 1] = '\0';
-      }
       /* Fix #6: Restore thinking_mode from conversation DB */
       if (conv->thinking_mode[0] != '\0') {
          strncpy(cfg.thinking_mode, conv->thinking_mode, sizeof(cfg.thinking_mode) - 1);
@@ -3244,6 +3431,9 @@ static bool webui_conn_create_session(ws_connection_t *conn) {
 
    session_set_metrics_user(conn->session, conn->auth_user_id);
    conn->session->client_data = conn;
+   /* Fresh/throwaway session — NOT the client's own reconnected one, so the
+    * session frame reports reconnected:false and the client load_conversations. */
+   conn->session_was_reconnected = false;
 
    /* Re-enable missed-notification replay on the new session. Any notifications
     * that arrived during the conversation-session-expired window would have
@@ -3302,7 +3492,8 @@ void handle_text_message(ws_connection_t *conn,
                          const char **vision_images,
                          const size_t *vision_image_sizes,
                          const char **vision_mimes,
-                         int vision_image_count) {
+                         int vision_image_count,
+                         const char *persist_content) {
    (void)len; /* Length already validated by caller */
 
    /* SECURITY: Require authentication for text processing */
@@ -3334,7 +3525,8 @@ void handle_text_message(ws_connection_t *conn,
     * flag right before dispatch and the prompt builder omits the ASR hint. */
    int ret = webui_process_text_input_with_vision(conn->session, text, vision_images,
                                                   vision_image_sizes, vision_mimes,
-                                                  vision_image_count, /*input_was_voice=*/false);
+                                                  vision_image_count, persist_content,
+                                                  /*input_was_voice=*/false);
    if (ret != 0) {
       send_error_impl(conn->wsi, "PROCESSING_ERROR", "Failed to process text input");
    }

@@ -367,6 +367,21 @@ bool attention_catalog_has(const char *key) {
    return attention_catalog_lookup(key) != NULL;
 }
 
+const char *attention_catalog_rule_type(const char *key) {
+   const attention_catalog_entry_t *e = attention_catalog_lookup(key);
+   return e ? sage_rule_type_to_str(e->default_rule_type) : NULL;
+}
+
+const char *attention_catalog_default_direction(const char *key) {
+   const attention_catalog_entry_t *e = attention_catalog_lookup(key);
+   return e ? sage_direction_to_str(e->default_direction) : NULL;
+}
+
+double attention_catalog_default_threshold(const char *key) {
+   const attention_catalog_entry_t *e = attention_catalog_lookup(key);
+   return e ? e->default_threshold : 0.0;
+}
+
 /* =============================================================================
  * Enum <-> wire-string serialization (canonical; shared by the `attention` tool
  * and the WebUI Watches panel — see the contract note in attention.h).
@@ -406,6 +421,8 @@ const char *sage_direction_to_str(sage_direction_t d) {
          return "below";
       case SAGE_DIR_RISING:
          return "rising";
+      case SAGE_DIR_FALLING:
+         return "falling";
       case SAGE_DIR_ABOVE:
       default:
          return "above";
@@ -424,6 +441,9 @@ sage_direction_t sage_direction_from_str(const char *s, sage_direction_t fallbac
    }
    if (strcasecmp(s, "rising") == 0) {
       return SAGE_DIR_RISING;
+   }
+   if (strcasecmp(s, "falling") == 0) {
+      return SAGE_DIR_FALLING;
    }
    return fallback;
 }

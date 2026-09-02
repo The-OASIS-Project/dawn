@@ -265,6 +265,21 @@ int memory_db_fact_search_bm25_since(int user_id,
 int memory_db_fact_update_access(int64_t fact_id, int user_id);
 
 /**
+ * @brief Reinforce a fact's confidence because the model CITED it (Phase 2)
+ *
+ * Bumps confidence by `citation_reinforcement_boost` (ceilinged at 1.0), gated
+ * by a 1 h cooldown on the dedicated `last_cited` column (distinct from
+ * last_accessed, which the recall path stamps at injection time — see
+ * auth_db_statements.c).  A cooldown-blocked or foreign-user call is a legitimate
+ * no-op (0 rows changed) and still returns MEMORY_DB_SUCCESS.  Facts only (v1).
+ *
+ * @param fact_id Fact ID that was cited
+ * @param user_id User ID (ownership check — SQL filter, defense-in-depth)
+ * @return MEMORY_DB_SUCCESS (incl. cooldown no-op) or MEMORY_DB_FAILURE
+ */
+int memory_db_fact_reinforce_citation(int64_t fact_id, int user_id);
+
+/**
  * @brief Update fact confidence
  *
  * @param fact_id Fact ID

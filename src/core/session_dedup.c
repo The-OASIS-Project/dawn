@@ -183,4 +183,15 @@ void session_injected_set_clear(session_t *session) {
    pthread_mutex_unlock(&session->history_mutex);
 }
 
+void session_citation_stash_clear(session_t *session) {
+   if (session == NULL)
+      return;
+   pthread_mutex_lock(&session->history_mutex);
+   memset(&session->citation_stash, 0, sizeof(session->citation_stash));
+   /* Clear the tool-sourced citation set on the SAME seam — one per-turn clear for
+    * both citation structures (Option B). */
+   memset(&session->tool_cited_set, 0, sizeof(session->tool_cited_set));
+   pthread_mutex_unlock(&session->history_mutex);
+}
+
 #endif /* ENABLE_MULTI_CLIENT */

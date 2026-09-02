@@ -125,14 +125,32 @@ static void build_summary(const sage_watch_t *w,
                           size_t out_sz) {
    const char *label = (cat && cat->label) ? cat->label : w->metric;
    const char *unit = (cat && cat->unit) ? cat->unit : "";
+
+   /* The reading clause (unnamed watches speak exactly this; named watches append
+    * it after the name so the alert stays actionable — D2: name + value). */
+   char reading[SAGE_SUMMARY_LEN];
    if (w->rule_type == SAGE_RULE_ABSENCE) {
-      snprintf(out, out_sz, "%s has been silent for %.0f seconds", label, value);
+      snprintf(reading, sizeof(reading), "%s has been silent for %.0f seconds", label, value);
    } else if (w->rule_type == SAGE_RULE_SLOPE) {
-      snprintf(out, out_sz, "%s is changing rapidly (now %g %s)", label, value, unit);
+      snprintf(reading, sizeof(reading), "%s is changing rapidly (now %g %s)", label, value, unit);
    } else if (unit[0]) {
-      snprintf(out, out_sz, "%s is %g %s", label, value, unit);
+      snprintf(reading, sizeof(reading), "%s is %g %s", label, value, unit);
    } else {
-      snprintf(out, out_sz, "%s is %g", label, value);
+      snprintf(reading, sizeof(reading), "%s is %g", label, value);
+   }
+
+   if (!w->named || !w->name[0]) {
+      snprintf(out, out_sz, "%s", reading); /* unnamed: today's format, unchanged */
+      return;
+   }
+   /* Named watch: speak the user's name so the alert is specific.  Threshold
+    * watches get the "over/under the '<name>' threshold" flavour; other kinds use a
+    * neutral "'<name>':" prefix. */
+   if (w->rule_type == SAGE_RULE_THRESHOLD) {
+      snprintf(out, out_sz, "you're %s the '%s' threshold — %s",
+               (w->direction == SAGE_DIR_BELOW) ? "under" : "over", w->name, reading);
+   } else {
+      snprintf(out, out_sz, "'%s' — %s", w->name, reading);
    }
 }
 
@@ -203,8 +221,8 @@ bool attention_gate_eval(const sage_watch_t *w,
       if (!slope_over_window(w, st, value, now_ms, &slope)) {
          return false;
       }
-      met = (w->direction == SAGE_DIR_BELOW) ? (slope <= -w->slope_per_min)
-                                             : (slope >= w->slope_per_min);
+      met = (w->direction == SAGE_DIR_FALLING) ? (slope <= -w->slope_per_min)
+                                               : (slope >= w->slope_per_min);
    } else {
       met = condition_met(w, value);
    }

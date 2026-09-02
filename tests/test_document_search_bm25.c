@@ -337,6 +337,23 @@ void test_full_text_set_get(void) {
    TEST_ASSERT_NULL(t2);
 }
 
+/* A GLOBAL doc's full text is readable by a non-owner (mirrors find_by_name/list). */
+void test_full_text_get_global_readable(void) {
+   int64_t id = 0;
+   document_db_create(1, "shared.txt", "shared.txt", "txt", "gfthash", 1, /*is_global=*/true, &id);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_full_text_set(id, "globally shared body"));
+   /* Owner reads it. */
+   char *t1 = NULL;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_full_text_get(id, 1, &t1));
+   TEST_ASSERT_EQUAL_STRING("globally shared body", t1);
+   free(t1);
+   /* Non-owner reads it because it is global. */
+   char *t2 = NULL;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_full_text_get(id, 2, &t2));
+   TEST_ASSERT_EQUAL_STRING("globally shared body", t2);
+   free(t2);
+}
+
 /* A document with no stored full text (pre-v63 upload) is not editable in place. */
 void test_doc_read_for_edit_requires_full_text(void) {
    int64_t id = 0;
@@ -529,6 +546,7 @@ int main(void) {
    RUN_TEST(test_version_per_doc_cap);
    RUN_TEST(test_version_disabled_archives_nothing);
    RUN_TEST(test_full_text_set_get);
+   RUN_TEST(test_full_text_get_global_readable);
    RUN_TEST(test_doc_read_for_edit_requires_full_text);
    RUN_TEST(test_doc_replace_in_place);
    RUN_TEST(test_version_list_deleted);

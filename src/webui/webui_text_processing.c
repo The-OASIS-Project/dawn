@@ -32,7 +32,6 @@
  */
 
 #include <json-c/json.h>
-#include <mosquitto.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -40,16 +39,16 @@
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
-#include "core/command_router.h"
 #include "core/conv_event.h"
-#include "core/ocp_helpers.h"
 #include "core/session_manager.h"
 #include "core/text_input_dispatch.h"
 #include "core/turn_queue.h"
 #include "core/worker_pool.h"
 #include "dawn.h"
+#include "image_store.h"
 #include "llm/llm_context.h"
 #include "logging.h"
+#include "webui/webui_image_rehydrate.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_server.h"
 
@@ -59,11 +58,6 @@
  * For Phase 2, we use a simple detached thread for text processing.
  * Phase 4 may integrate with the worker pool for audio + text.
  * ============================================================================= */
-
-/* Command processing constants */
-#define MAX_TOOL_RESULTS 8
-#define TOOL_RESULT_MSG_SIZE 1024
-#define WEBUI_WORKER_ID 100 /* Virtual worker ID for command router */
 
 typedef struct {
    session_t *session;
@@ -80,243 +74,9 @@ typedef struct {
    size_t vision_image_sizes[WEBUI_MAX_VISION_IMAGES_CAP]; /* Size of each image */
    char vision_mimes[WEBUI_MAX_VISION_IMAGES_CAP][WEBUI_VISION_MIME_MAX]; /* MIME types */
    int vision_image_count;                                                /* Number of images */
+   char *persist_content; /* Server-authoritative persisted form (text + [IMAGE:<id>] markers)
+                           * for an image turn; NULL persists plain text. Owned/freed here. */
 } text_work_t;
-
-/**
- * @brief Process commands in LLM response and make follow-up calls
- *
- * Searches for <command> tags in the response, executes them via MQTT,
- * and makes follow-up LLM calls with the results.
- *
- * @param llm_response The LLM response to process
- * @param session Session for follow-up LLM calls
- * @return Final response text (caller must free), or NULL if no commands
- */
-char *webui_process_commands(const char *llm_response, session_t *session) {
-   if (!llm_response || !session) {
-      return NULL;
-   }
-
-   /* Bail only if the turn was CANCELLED (Stop / teardown).  A mere client
-    * disconnect no longer aborts — the turn survives, so command follow-ups
-    * must still run for the full answer to be persisted (background-jobs Ph1). */
-   if (session->cancel_requested) {
-      return NULL;
-   }
-
-   struct mosquitto *mosq = worker_pool_get_mosq();
-   if (!mosq) {
-      OLOG_WARNING("WebUI: No MQTT connection, cannot process commands");
-      return NULL;
-   }
-
-   /* Collect all tool results */
-   char *tool_results[MAX_TOOL_RESULTS] = { 0 };
-   int num_results = 0;
-
-   /* Search for <command> tags and process each one */
-   const char *search_ptr = llm_response;
-   const char *cmd_start;
-
-   while ((cmd_start = strstr(search_ptr, "<command>")) != NULL && num_results < MAX_TOOL_RESULTS) {
-      const char *cmd_end = strstr(cmd_start, "</command>");
-      if (!cmd_end) {
-         OLOG_WARNING("WebUI: Unclosed <command> tag");
-         break;
-      }
-
-      /* Extract command JSON */
-      const char *json_start = cmd_start + strlen("<command>");
-      size_t json_len = cmd_end - json_start;
-
-      char *cmd_json = malloc(json_len + 1);
-      if (!cmd_json) {
-         OLOG_ERROR("WebUI: Failed to allocate command JSON");
-         break;
-      }
-      memcpy(cmd_json, json_start, json_len);
-      cmd_json[json_len] = '\0';
-
-      /* Send command to WebUI debug panel (wraps in tags for JS extraction)
-       * Only send if we had streamed content - otherwise the "didn't stream" fallback
-       * in session_manager.c already sends the full response with command tags */
-      if (session->stream_had_content) {
-         char *debug_cmd = malloc(json_len + 32);
-         if (debug_cmd) {
-            snprintf(debug_cmd, json_len + 32, "<command>%s</command>", cmd_json);
-            webui_send_transcript(session, "assistant", debug_cmd);
-            free(debug_cmd);
-         }
-      }
-
-      OLOG_INFO("WebUI: Processing command: %s", cmd_json);
-
-      /* Parse JSON to extract device/action */
-      struct json_object *parsed_json = json_tokener_parse(cmd_json);
-      if (!parsed_json) {
-         OLOG_WARNING("WebUI: Invalid command JSON: %s", cmd_json);
-         free(cmd_json);
-         search_ptr = cmd_end + strlen("</command>");
-         continue;
-      }
-
-      /* Get device and action - both required for valid command */
-      struct json_object *device_obj = NULL;
-      struct json_object *action_obj = NULL;
-
-      if (!json_object_object_get_ex(parsed_json, "device", &device_obj) || !device_obj) {
-         OLOG_WARNING("WebUI: Skipping malformed command - missing 'device' field: %s", cmd_json);
-         json_object_put(parsed_json);
-         free(cmd_json);
-         search_ptr = cmd_end + strlen("</command>");
-         continue;
-      }
-
-      const char *device_name = json_object_get_string(device_obj);
-      if (!device_name || device_name[0] == '\0') {
-         OLOG_WARNING("WebUI: Skipping malformed command - empty 'device' field: %s", cmd_json);
-         json_object_put(parsed_json);
-         free(cmd_json);
-         search_ptr = cmd_end + strlen("</command>");
-         continue;
-      }
-
-      /* Action is optional for some commands (e.g., triggers), default to "unknown" */
-      const char *action_name = "unknown";
-      if (json_object_object_get_ex(parsed_json, "action", &action_obj) && action_obj) {
-         const char *action_str = json_object_get_string(action_obj);
-         if (action_str && action_str[0] != '\0') {
-            action_name = action_str;
-         }
-      }
-
-      /* Register pending request */
-      pending_request_t *req = command_router_register(WEBUI_WORKER_ID);
-      if (!req) {
-         OLOG_ERROR("WebUI: Failed to register pending request");
-         json_object_put(parsed_json);
-         free(cmd_json);
-         search_ptr = cmd_end + strlen("</command>");
-         continue;
-      }
-
-      const char *request_id = command_router_get_id(req);
-      OLOG_INFO("WebUI: Registered request %s", request_id);
-
-      /* Add request_id, session_id, and timestamp to command JSON (OCP v1.1) */
-      json_object_object_add(parsed_json, "request_id", json_object_new_string(request_id));
-      json_object_object_add(parsed_json, "session_id",
-                             json_object_new_int((int32_t)session->session_id));
-      json_object_object_add(parsed_json, "timestamp",
-                             json_object_new_int64(ocp_get_timestamp_ms()));
-      const char *cmd_with_id = json_object_to_json_string(parsed_json);
-
-      /* Send tool call status to UI (works for both WebUI and satellites) */
-      char tool_detail[128];
-      snprintf(tool_detail, sizeof(tool_detail), "Calling %s...", device_name);
-      webui_send_state_with_detail(session, "tool_call", tool_detail);
-
-      /* Publish command via MQTT */
-      int rc = mosquitto_publish(mosq, NULL, APPLICATION_NAME, strlen(cmd_with_id), cmd_with_id, 0,
-                                 false);
-      if (rc != MOSQ_ERR_SUCCESS) {
-         OLOG_ERROR("WebUI: MQTT publish failed: %d", rc);
-         command_router_cancel(req);
-         json_object_put(parsed_json);
-         free(cmd_json);
-         search_ptr = cmd_end + strlen("</command>");
-         continue;
-      }
-      OLOG_INFO("WebUI: Published command to %s", APPLICATION_NAME);
-
-      /* Wait for result */
-      char *callback_result = command_router_wait(req, COMMAND_RESULT_TIMEOUT_MS);
-
-      /* Format result for LLM */
-      tool_results[num_results] = malloc(TOOL_RESULT_MSG_SIZE);
-      if (tool_results[num_results]) {
-         if (callback_result && strlen(callback_result) > 0) {
-            OLOG_INFO("WebUI: Received callback result: %.50s%s", callback_result,
-                      strlen(callback_result) > 50 ? "..." : "");
-            snprintf(tool_results[num_results], TOOL_RESULT_MSG_SIZE,
-                     "[Tool Result: %s.%s returned: %s]", device_name, action_name,
-                     callback_result);
-         } else {
-            OLOG_WARNING("WebUI: No callback result (timeout or empty)");
-            snprintf(tool_results[num_results], TOOL_RESULT_MSG_SIZE,
-                     "[Tool Result: %s.%s completed successfully]", device_name, action_name);
-         }
-
-         /* Send tool result to WebUI for debug display */
-         webui_send_transcript(session, "assistant", tool_results[num_results]);
-
-         num_results++;
-      }
-
-      if (callback_result) {
-         free(callback_result);
-      }
-
-      json_object_put(parsed_json);
-      free(cmd_json);
-      search_ptr = cmd_end + strlen("</command>");
-   }
-
-   /* If no results collected, return NULL (no commands processed) */
-   if (num_results == 0) {
-      return NULL;
-   }
-
-   /* Build combined tool results message for LLM */
-   size_t total_len = 1; /* For null terminator */
-   for (int i = 0; i < num_results; i++) {
-      if (tool_results[i]) {
-         total_len += strlen(tool_results[i]) + 1; /* +1 for newline */
-      }
-   }
-
-   char *combined_results = malloc(total_len);
-   if (!combined_results) {
-      OLOG_ERROR("WebUI: Failed to allocate combined results");
-      for (int i = 0; i < num_results; i++) {
-         free(tool_results[i]);
-      }
-      return NULL;
-   }
-
-   char *ptr = combined_results;
-   for (int i = 0; i < num_results; i++) {
-      if (tool_results[i]) {
-         size_t len = strlen(tool_results[i]);
-         memcpy(ptr, tool_results[i], len);
-         ptr += len;
-         if (i < num_results - 1) {
-            *ptr++ = '\n';
-         }
-         free(tool_results[i]);
-      }
-   }
-   *ptr = '\0';
-
-   OLOG_INFO("WebUI: Sending tool results to LLM: %s", combined_results);
-
-   /* Make follow-up LLM call with tool results */
-   char *final_response = session_llm_call(session, combined_results);
-
-   free(combined_results);
-
-   if (!final_response) {
-      OLOG_ERROR("WebUI: Follow-up LLM call failed");
-      return NULL;
-   }
-
-   OLOG_INFO("WebUI: LLM final response: %.50s%s", final_response,
-             strlen(final_response) > 50 ? "..." : "");
-
-   return final_response;
-}
-
-/* strip_command_tags() is shared across webui modules — see webui_satellite.c */
 
 /* REQUEST_SUPERSEDED macro now defined in webui_internal.h */
 
@@ -343,7 +103,8 @@ static void webui_tool_persist_cb(void *userdata,
                                   const char *content,
                                   const char *tool_calls_json,
                                   const char *tool_call_id,
-                                  const char *reasoning_json) {
+                                  const char *reasoning_json,
+                                  bool is_error) {
    webui_tool_persist_ctx_t *ctx = (webui_tool_persist_ctx_t *)userdata;
    if (!ctx || !ctx->session || !role) {
       return;
@@ -357,9 +118,9 @@ static void webui_tool_persist_cb(void *userdata,
    if (conv_id <= 0) {
       return; /* turn not tagged with a conversation — skip rather than guess */
    }
-   if (conv_db_add_message_with_tools(conv_id, ctx->auth_user_id, role, content ? content : "",
-                                      tool_calls_json, tool_call_id, reasoning_json,
-                                      NULL) != AUTH_DB_SUCCESS) {
+   if (conv_db_add_message_with_tools_ex(conv_id, ctx->auth_user_id, role, content ? content : "",
+                                         tool_calls_json, tool_call_id, reasoning_json, is_error,
+                                         NULL) != AUTH_DB_SUCCESS) {
       OLOG_WARNING("WebUI: failed to persist tool-turn %s row to conv %lld (may orphan on reload)",
                    role, (long long)conv_id);
    }
@@ -387,12 +148,35 @@ void webui_tool_iteration_cb(session_t *session, void *userdata) {
  * focus injection and the LLM call.  Preserves the WebUI's "transcript
  * echoes immediately after the user types" UX while keeping the
  * add/persist/focus/LLM sequence inside the Layer 2 helper. */
-static void webui_text_dispatch_on_user_msg(void *ctx, const char *text, bool persisted_to_db) {
+static void webui_text_dispatch_on_user_msg(void *ctx,
+                                            const char *text,
+                                            const char *persist_text,
+                                            int64_t message_id) {
    session_t *session = (session_t *)ctx;
    if (!session || !text) {
       return;
    }
-   webui_send_transcript_ex(session, "user", text, persisted_to_db);
+   /* Echo to the origin with the CLEAN text — the origin already rendered its own image
+    * locally at upload time, so the echo mirrors what the user typed.  Carries the DB row
+    * id so the origin stamps data-message-id on its user bubble (and dedups its fan-out copy). */
+   webui_send_transcript_ex(session, "user", text, message_id > 0, message_id);
+   /* Fan the user message out to every OTHER viewer of this conversation so a
+    * second open client sees the question, not just the answer (§12c).  Use the PERSISTED
+    * form (persist_text) — for an image turn that carries the `[IMAGE:<id>]` markers, so a
+    * non-origin viewer rehydrates the image LIVE (its addNormalEntry parses the marker and
+    * fetches /api/images/<id>), not only on reload.  The origin's own copy dedups on
+    * message_id via the echo above.  User messages are never streamed → stream_id 0.
+    * INVARIANT (mirrored in webui_audio.c): guard on message_id > 0 so a user turn
+    * only ever emits TWO frames (echo + fan-out) when they carry the SAME positive
+    * id — a save failure (id 0) emits only the echo, never an undedup-able double. */
+   if (message_id > 0) {
+      ws_connection_t *conn = (ws_connection_t *)session->client_data;
+      int64_t conv_id = atomic_load(&session->stream_conversation_id);
+      if (conn && conn->auth_user_id > 0 && conv_id > 0) {
+         conv_event_notify_message_appended(conv_id, conn->auth_user_id, message_id, "user",
+                                            persist_text ? persist_text : text, NULL, 0);
+      }
+   }
 }
 
 /* Balanced exit for a worker that has passed its initial supersede check and
@@ -401,6 +185,11 @@ static void webui_text_dispatch_on_user_msg(void *ctx, const char *text, bool pe
  * concurrent session_destroy proceeds, turn_in_flight already reads 0. */
 static void text_worker_end(session_t *session) {
    if (session) {
+      /* Close the multi-target TTS bracket on non-origin listeners (§Phase-4) BEFORE releasing
+       * the turn ref — this teardown is the single funnel every text-worker exit passes through,
+       * so a fanned bystander always returns to idle regardless of which exit ran. No-op when the
+       * turn fanned to no one. */
+      webui_fanout_tts_idle(session);
       atomic_fetch_sub(&session->turn_in_flight, 1);
       session_release(session);
    }
@@ -422,7 +211,28 @@ static void text_worker_cleanup(text_work_t *work, session_t *session, char *tex
          }
       }
       work->vision_image_count = 0;
+      free(work->persist_content); /* separate alloc from `text` (work->text alias) */
       free(work);
+   }
+}
+
+/* 2b: the foreground server-authoritative final-answer persist.  Wraps the shared
+ * webui_persist_final_answer (which does the splice + row + retention + id-stamp + fan-out
+ * with a bounded DB retry) and adds the foreground-only "tell the user it failed" frame on
+ * a hard failure — the reply is on screen, but the row didn't save.  turn_conv/turn_user_id
+ * are the pre-dispatch, disconnect-safe captures — NEVER conn. */
+static void text_worker_persist_final(session_t *session,
+                                      int64_t turn_conv,
+                                      int turn_user_id,
+                                      const char *body) {
+   if (turn_conv <= 0 || turn_user_id <= 0 || body == NULL || body[0] == '\0') {
+      return;
+   }
+   if (webui_persist_final_answer(session, turn_conv, turn_user_id, body, NULL) !=
+       AUTH_DB_SUCCESS) {
+      OLOG_ERROR("WebUI: failed to persist final answer to conv %lld after retries",
+                 (long long)turn_conv);
+      webui_send_error(session, "PERSIST_ERROR", "Your reply was shown but could not be saved.");
    }
 }
 
@@ -506,11 +316,20 @@ static void *text_worker_thread(void *arg) {
    if (turn_conv <= 0 && conn && conn->active_conversation_id > 0) {
       turn_conv = conn->active_conversation_id;
    }
+
+   /* Multi-target TTS (SERVER_AUTHORITATIVE_PERSISTENCE §Phase-4): arm synthesis when the origin
+    * has TTS on OR any OTHER speaker-capable viewer of this conversation exists, so a silent-origin
+    * turn still speaks on a remote listener's device.  Keeping origin.tts_enabled as an independent
+    * sufficient condition preserves origin-speaks even before turn_conv is bound (arch HIGH-2). The
+    * fanout callback synthesizes once and fans to every speaker viewer (the origin included). */
+   bool fanout_tts = tts_enabled ||
+                     webui_audio_has_other_speaker(turn_user_id, turn_conv, session->session_id);
    text_input_dispatch_opts_t dispatch_opts = {
       .conversation_id = turn_conv,
       .auth_user_id = conn ? conn->auth_user_id : 0,
-      .sentence_cb = tts_enabled ? webui_sentence_audio_callback : NULL,
-      .sentence_userdata = tts_enabled ? session : NULL,
+      .persist_content_override = work->persist_content, /* text + [IMAGE:<id>] for image turns */
+      .sentence_cb = fanout_tts ? webui_sentence_audio_fanout_callback : NULL,
+      .sentence_userdata = fanout_tts ? session : NULL,
       .on_user_msg_added = webui_text_dispatch_on_user_msg,
       .user_msg_added_ctx = session,
    };
@@ -530,13 +349,44 @@ static void *text_worker_thread(void *arg) {
       session_set_tool_iteration_hook(session, webui_tool_iteration_cb, NULL);
    }
 
+   /* Clear the per-turn error flag before the call; the provider layer sets it via
+    * webui_send_error_ex if it emits a specific error, which we then honor below to
+    * skip the redundant generic fallback. */
+   atomic_store(&session->turn_error_emitted, false);
+
+   /* Server-authoritative (SERVER_AUTHORITATIVE Phase 2b-i): the server is now the sole
+    * writer of this reply.  Arm the Model A promise so the FINAL stream_end tells the
+    * browser to stand down from its client-save; disarm right after dispatch (the promise
+    * is read only at the in-dispatch stream_end).  session_begin_turn_flags at dequeue
+    * (text_turn_thread_entry) reset it before this worker ran, so reset-then-arm holds. */
+   atomic_store(&session->will_persist_turn, true);
    char *response = core_text_input_dispatch(
        session, text, (const char **)work->vision_images, work->vision_image_sizes,
        (const char(*)[WEBUI_VISION_MIME_MAX])work->vision_mimes, work->vision_image_count,
        &dispatch_opts);
+   atomic_store(&session->will_persist_turn, false);
 
    session_set_tool_persist_hook(session, NULL, NULL); /* persist_ctx goes out of scope below */
    session_set_tool_iteration_hook(session, NULL, NULL);
+
+   /* Promote the persisted image turn's images to permanent retention — AFTER
+    * dispatch persisted the row, so images are pinned only for turns that reached
+    * here (queue-full/superseded-before-dequeue rejections never do).  Images have
+    * no orphan sweep and PERMANENT is LRU-exempt, so pinning a never-persisted turn
+    * would leak forever.  Re-collect ids from the persisted marker string with the
+    * same parser the reload path uses, so we pin exactly what the row references —
+    * keeping image_store in the WebUI layer, off core. */
+   if (work->persist_content && conn) {
+      char persisted_ids[WEBUI_MAX_VISION_IMAGES_CAP][IMAGE_ID_LEN];
+      int persisted_id_count = 0;
+      if (webui_collect_image_ids(work->persist_content, persisted_ids, WEBUI_MAX_VISION_IMAGES_CAP,
+                                  &persisted_id_count) == SUCCESS) {
+         for (int i = 0; i < persisted_id_count; i++) {
+            image_store_update_retention(persisted_ids[i], conn->auth_user_id,
+                                         IMAGE_RETAIN_PERMANENT);
+         }
+      }
+   }
 
    /* Free vision data after LLM call (it's been sent over HTTP, no longer needed) */
    for (int i = 0; i < work->vision_image_count; i++) {
@@ -549,93 +399,67 @@ static void *text_worker_thread(void *arg) {
 
    /* Check if request was superseded during LLM call */
    if (REQUEST_SUPERSEDED(session, expected_gen)) {
-      /* Request superseded - don't try to send response */
+      /* Request superseded - don't send the response live.  G4 (SERVER_AUTHORITATIVE §9):
+       * but if this turn made a will_persist promise and the reply COMPLETED, the browser
+       * already stood down, so persist it before discarding — the in-hand `response`, or the
+       * cancel-at-buzzer stash if dispatch already freed it (cancelled-THEN-superseded, the
+       * cross case).  current_stream_id is still THIS turn's (the superseding turn is queued,
+       * not yet streaming), so the helper's fan-out stamps correctly. */
       OLOG_INFO("WebUI: Session %u request superseded during LLM call", session->session_id);
+      char *superseded_reply = response;
+      if (superseded_reply == NULL) {
+         superseded_reply = session->cancelled_final_response;
+         session->cancelled_final_response = NULL;
+      }
+      if (superseded_reply != NULL && superseded_reply[0] != '\0') {
+         text_worker_persist_final(session, session->stream_conversation_id, turn_user_id,
+                                   superseded_reply);
+      }
       text_worker_end(session);
-      free(response);
+      free(superseded_reply); /* frees response OR the taken stash (mutually exclusive) */
       free(text);
+      free(work->persist_content);
       free(work);
       return NULL;
    }
 
    if (!response) {
-      /* LLM call failed */
-      webui_send_error(session, "LLM_ERROR", "Failed to get response from AI");
+      /* G4 cancel-at-buzzer (SERVER_AUTHORITATIVE §9): a cancel that landed AFTER the reply
+       * completed stashed the finalized text and returned NULL — and will_persist was already
+       * stamped on the final stream_end, so the browser stood down.  Recover + persist it here,
+       * BEFORE any error path, rather than showing a spurious "Failed to get response" for a
+       * reply the user just saw/heard. */
+      char *stashed = session->cancelled_final_response;
+      session->cancelled_final_response = NULL;
+      if (stashed != NULL && stashed[0] != '\0') {
+         text_worker_persist_final(session, session->stream_conversation_id, turn_user_id, stashed);
+         free(stashed);
+         webui_send_state(session, "idle");
+         text_worker_end(session);
+         free(text);
+         free(work->persist_content);
+         free(work);
+         return NULL;
+      }
+      free(stashed); /* NULL-safe; no completed reply to recover */
+
+      /* Genuine failure.  Emit the generic error ONLY if the provider layer did
+       * not already surface a specific one for this turn — otherwise the user
+       * sees the same failure twice (the precise message, then this fallback). */
+      if (!atomic_load(&session->turn_error_emitted)) {
+         webui_send_error(session, "LLM_ERROR", "Failed to get response from AI");
+      }
       webui_send_state(session, "idle");
       text_worker_end(session);
       free(text);
+      free(work->persist_content);
       free(work);
       return NULL;
    }
 
-   /* Check for command tags and process them */
+   /* Response is already canonical clean text (finalized centrally in
+    * llm_call_finalize).  Keep the `final_response` alias for the block below. */
    char *final_response = response;
-   if (strstr(response, "<command>")) {
-      OLOG_INFO("WebUI: Response contains commands, processing...");
-
-      /* Note: Don't send intermediate response here - streaming already delivered it */
-
-      /* Process commands and get follow-up response */
-      char *processed = webui_process_commands(response, session);
-      if (processed) {
-         /* Check if request was superseded after command processing */
-         if (REQUEST_SUPERSEDED(session, expected_gen)) {
-            OLOG_INFO("WebUI: Session %u request superseded during command processing",
-                      session->session_id);
-            text_worker_end(session);
-            free(response);
-            free(processed);
-            free(text);
-            free(work);
-            return NULL;
-         }
-
-         /* Recursively process if the follow-up also contains commands.
-          * Limit iterations to prevent infinite loops from confused LLMs. */
-         int follow_up_iterations = 0;
-         const int MAX_FOLLOW_UP_ITERATIONS = 5;
-
-         while (strstr(processed, "<command>") && !REQUEST_SUPERSEDED(session, expected_gen)) {
-            follow_up_iterations++;
-            if (follow_up_iterations > MAX_FOLLOW_UP_ITERATIONS) {
-               OLOG_WARNING("WebUI: Command loop limit reached (%d iterations), breaking",
-                            MAX_FOLLOW_UP_ITERATIONS);
-               break;
-            }
-
-            OLOG_INFO(
-                "WebUI: Follow-up response contains more commands, processing... (iter %d/%d)",
-                follow_up_iterations, MAX_FOLLOW_UP_ITERATIONS);
-            /* Note: Don't send transcript - streaming already delivered it */
-
-            char *next_processed = webui_process_commands(processed, session);
-            free(processed);
-            if (!next_processed) {
-               processed = NULL;
-               break;
-            }
-            processed = next_processed;
-         }
-
-         if (processed) {
-            free(response);
-            final_response = processed;
-
-            /* Generate TTS for the command result (follow-up response) */
-            if (tts_enabled && strlen(processed) > 0) {
-               OLOG_INFO("WebUI: Generating TTS for command result: %.60s%s", processed,
-                         strlen(processed) > 60 ? "..." : "");
-               webui_sentence_audio_callback(processed, session);
-            }
-         } else {
-            /* Command processing failed, use original response */
-            final_response = response;
-         }
-      }
-   }
-
-   /* Strip any remaining command tags from final response */
-   strip_command_tags(final_response);
 
    /* Send audio end marker if TTS was enabled (use_opus captured at worker
     * start — conn may be freed by now if the client disconnected mid-turn). */
@@ -647,34 +471,17 @@ static void *text_worker_thread(void *arg) {
     * The LLM call uses webui_send_stream_start/delta/end for real-time delivery.
     * Assistant response is already added to history inside the LLM call. */
 
-   /* Server-authoritative persistence of the final assistant answer when the
-    * client won't save it — two cases (background-jobs Phase 1):
-    *   (a) BACKGROUNDED: the turn finished while the client was viewing a
-    *       DIFFERENT conversation (the client saver only writes the on-screen
-    *       conversation), or
-    *   (b) CLIENT GONE: the client disconnected mid-turn — the turn survived and
-    *       completed, but there is no client left to save it (Arch-H1).
-    * A foreground, still-connected turn is saved by the client → skip to avoid a
-    * duplicate row.  Uses turn_user_id + the captured conversation — NEVER conn,
-    * which libwebsockets may have freed after a mid-turn disconnect.  Tool-turn
-    * rows were already persisted server-side by webui_tool_persist_cb. */
+   /* Server-authoritative persistence (SERVER_AUTHORITATIVE Phase 2b-i): the SERVER is now
+    * the single writer of every foreground reply — persist UNCONDITIONALLY (was gated on
+    * backgrounded/client-gone in Phase 1).  will_persist was stamped on the final stream_end,
+    * so the browser stood down; no duplicate row.  Uses turn_user_id + the captured
+    * conversation — NEVER conn, which libwebsockets may have freed after a mid-turn
+    * disconnect.  Tool-turn rows were already persisted server-side by webui_tool_persist_cb;
+    * the helper attaches the final-answer reasoning + accumulated visual, promotes reply-body
+    * images, stamps the history id, and fans out message_appended. */
    if (final_response && final_response[0] != '\0') {
       int64_t turn_conv = session->stream_conversation_id;
-      bool client_gone = atomic_load(&session->disconnected);
-      bool backgrounded = (turn_conv > 0 && turn_conv != webui_get_active_conversation_id(session));
-      if (turn_conv > 0 && turn_user_id > 0 && (backgrounded || client_gone)) {
-         int64_t appended_id = 0;
-         if (conv_db_add_message_with_tools(turn_conv, turn_user_id, "assistant", final_response,
-                                            NULL, NULL, NULL, &appended_id) != AUTH_DB_SUCCESS) {
-            OLOG_WARNING("WebUI: failed to persist final assistant answer to conv %lld",
-                         (long long)turn_conv);
-         } else {
-            OLOG_INFO("WebUI: persisted final assistant answer server-side to conv %lld (%s)",
-                      (long long)turn_conv, client_gone ? "client gone" : "backgrounded");
-            conv_event_notify_message_appended(turn_conv, turn_user_id, appended_id, "assistant",
-                                               final_response);
-         }
-      }
+      text_worker_persist_final(session, turn_conv, turn_user_id, final_response);
    }
 
    /* Free the final response (either original response or processed copy) */
@@ -702,6 +509,7 @@ static void *text_worker_thread(void *arg) {
    text_worker_end(session);
 
    free(text);
+   free(work->persist_content);
    free(work);
    return NULL;
 }
@@ -721,6 +529,7 @@ static void webui_text_turn_free(void *work) {
       session_release(w->session);
    }
    free(w->text);
+   free(w->persist_content);
    for (int i = 0; i < w->vision_image_count; i++) {
       free(w->vision_images[i]);
    }
@@ -787,6 +596,7 @@ int webui_process_text_input_with_vision(session_t *session,
                                          const size_t *vision_image_sizes,
                                          const char **vision_mimes,
                                          int vision_image_count,
+                                         const char *persist_content,
                                          bool input_was_voice) {
    if (!session || !text || strlen(text) == 0) {
       return 1;
@@ -809,6 +619,18 @@ int webui_process_text_input_with_vision(session_t *session,
     * is replaced by the queue; Stop still works via cancel_requested. */
    unsigned int new_gen = atomic_load(&session->request_generation);
 
+   /* Voice turns are server-dispatched, so the browser never ran its conversation
+    * pre-create.  Bind (lazily creating) a conversation here — titled from the
+    * transcript — or this turn's user row + reply evaporate on the next reload.
+    * No-op when a conversation is already selected; leaves the typed-text path
+    * (client pre-creates) untouched. */
+   if (input_was_voice && webui_voice_transcript_substantive(text)) {
+      ws_connection_t *vconn = session ? (ws_connection_t *)session->client_data : NULL;
+      if (vconn && vconn->active_conversation_id <= 0) {
+         webui_ensure_active_conversation(vconn, text);
+      }
+   }
+
    /* Conversation this turn was sent for — captured NOW (the viewed conversation)
     * and applied to session->stream_conversation_id at dequeue. */
    int64_t turn_conv_id = webui_get_active_conversation_id(session);
@@ -830,6 +652,15 @@ int webui_process_text_input_with_vision(session_t *session,
       free(work);
       return 1;
    }
+   if (persist_content) {
+      work->persist_content = strdup(persist_content);
+      if (!work->persist_content) {
+         OLOG_ERROR("WebUI: Failed to allocate persist_content copy");
+         free(work->text);
+         free(work);
+         return 1;
+      }
+   }
 
    /* Copy vision images if present */
    if (vision_images && vision_image_count > 0) {
@@ -846,6 +677,7 @@ int webui_process_text_input_with_vision(session_t *session,
                free(work->vision_images[j]);
             }
             free(work->text);
+            free(work->persist_content);
             free(work);
             return 1;
          }
@@ -882,5 +714,6 @@ int webui_process_text_input_with_vision(session_t *session,
 }
 
 int webui_process_text_input(session_t *session, const char *text, bool input_was_voice) {
-   return webui_process_text_input_with_vision(session, text, NULL, NULL, NULL, 0, input_was_voice);
+   return webui_process_text_input_with_vision(session, text, NULL, NULL, NULL, 0,
+                                               /*persist_content=*/NULL, input_was_voice);
 }

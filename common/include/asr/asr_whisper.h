@@ -108,6 +108,22 @@ void asr_whisper_set_timing_callback(whisper_asr_context_t *ctx,
                                      void *user_data);
 
 /**
+ * @brief Override the encoder audio-context size (E1 latency work)
+ *
+ * The encoder normally processes a fixed 30s window (audio_ctx = 1500) regardless
+ * of clip length, so a short command pays full freight. This sets a per-context
+ * override applied on each finalize():
+ *   - 0  = model default (1500) — no change (default)
+ *   - >0 = fixed audio_ctx (diagnostic only; must be >= the clip's token need)
+ *   - <0 = auto-scale to the utterance length; the floor is encoded as -value
+ *         (e.g. -384 => auto with a 384-token floor). Production mode.
+ *
+ * @param ctx Whisper context
+ * @param audio_ctx Override mode/value per above
+ */
+void asr_whisper_set_audio_ctx(whisper_asr_context_t *ctx, int audio_ctx);
+
+/**
  * @brief Process audio chunk
  *
  * Accumulates audio in internal buffer. Whisper is batch-only,

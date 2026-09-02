@@ -96,7 +96,6 @@
 
    // Per-conversation LLM settings state
    let conversationLlmState = {
-      tools_mode: 'native',
       thinking_mode: 'enabled',
       reasoning_effort: 'medium',
       locked: false,
@@ -108,12 +107,10 @@
    let globalDefaults = {
       type: 'cloud',
       provider: '',
-      use_openrouter: false,
       openai_model: '',
       claude_model: '',
       gemini_model: '',
       openrouter_model: '',
-      tools_mode: 'native',
       thinking_mode: 'disabled', // disabled/enabled
       reasoning_effort: 'medium', // low/medium/high - controls token budget
    };
@@ -193,10 +190,6 @@
             // Request local models when switching to local mode
             if (newType === 'local') {
                requestLocalModels();
-            } else if (globalDefaults.use_openrouter) {
-               // Gateway on: reflect a read-only OpenRouter provider + slug model list
-               // instead of a direct provider picker the gateway would override.
-               applyGatewayCloudUI(true);
             } else {
                // Switching to cloud (direct providers): restore provider dropdown and update model
                if (providerSelect) {
@@ -265,25 +258,16 @@
    function setConversationLlmLocked(locked) {
       conversationLlmState.locked = locked;
       const grid = document.getElementById('llm-controls-grid');
-      const indicator = document.getElementById('llm-lock-indicator');
       const reasoningSelect = document.getElementById('reasoning-mode-select');
-      const toolsSelect = document.getElementById('tools-mode-select');
 
       if (grid) {
          grid.classList.toggle('locked', locked);
       }
       // Reasoning mode + effort stay editable mid-conversation. Effort never
       // errors on any provider; a reasoning-mode change is made safe server-side
-      // (Claude clamps an incompatible thinking toggle instead of 400ing). Only
-      // tool mode is frozen after the first message (pending a per-provider test).
+      // (Claude clamps an incompatible thinking toggle instead of 400ing).
       if (reasoningSelect) {
          reasoningSelect.disabled = false;
-      }
-      if (toolsSelect) {
-         toolsSelect.disabled = locked;
-      }
-      if (indicator) {
-         indicator.classList.toggle('hidden', !locked);
       }
    }
 
@@ -293,7 +277,6 @@
    function initConversationLlmControls() {
       const reasoningSelect = document.getElementById('reasoning-mode-select');
       const depthSelect = document.getElementById('reasoning-effort-select');
-      const toolsSelect = document.getElementById('tools-mode-select');
 
       // Helper to update depth selector enabled state based on reasoning mode
       function updateDepthEnabled() {
@@ -328,60 +311,7 @@
          updateDepthEnabled();
       }
 
-      if (toolsSelect) {
-         toolsSelect.addEventListener('change', () => {
-            conversationLlmState.tools_mode = toolsSelect.value;
-            // Immediately update session config so tool_mode takes effect
-            if (!conversationLlmState.locked) {
-               setSessionLlm({ tool_mode: toolsSelect.value });
-            }
-         });
-      }
-
       // Initial session defaults are applied after config loads via applyGlobalDefaultsToControls()
-
-      // Tools help button popup
-      const toolsHelpBtn = document.getElementById('tools-help-btn');
-      const toolsHelpPopup = document.getElementById('tools-help-popup');
-
-      if (toolsHelpBtn && toolsHelpPopup) {
-         // Escape close goes through DawnEscStack (registered while shown) so it
-         // stacks correctly under any layer opened above the popup.
-         let escToken = null;
-         const closePopup = () => {
-            toolsHelpPopup.classList.add('hidden');
-            if (escToken !== null) {
-               DawnEscStack.unregister(escToken);
-               escToken = null;
-            }
-         };
-         const openPopup = () => {
-            toolsHelpPopup.classList.remove('hidden');
-            if (escToken === null) {
-               escToken = DawnEscStack.register(() => {
-                  closePopup();
-                  return true;
-               });
-            }
-         };
-
-         // Toggle popup on button click
-         toolsHelpBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            if (toolsHelpPopup.classList.contains('hidden')) openPopup();
-            else closePopup();
-         });
-
-         // Close popup when clicking outside.
-         // NOTE: This document-level listener is intentionally not removed — the
-         // popup is a session-lived singleton; closePopup is a safe no-op when
-         // already hidden.
-         document.addEventListener('click', (e) => {
-            if (!toolsHelpPopup.contains(e.target) && e.target !== toolsHelpBtn) {
-               closePopup();
-            }
-         });
-      }
 
       // Privacy toggle button
       initPrivacyToggle();
@@ -579,7 +509,6 @@
       const modelSelect = document.getElementById('llm-model-select');
       const reasoningSelect = document.getElementById('reasoning-mode-select');
       const depthSelect = document.getElementById('reasoning-effort-select');
-      const toolsSelect = document.getElementById('tools-mode-select');
 
       // Reset type (local/cloud)
       if (typeSelect) {
@@ -589,7 +518,6 @@
       // Build session reset payload
       const sessionReset = {
          type: globalDefaults.type,
-         tool_mode: globalDefaults.tools_mode,
          thinking_mode: globalDefaults.thinking_mode,
          reasoning_effort: globalDefaults.reasoning_effort,
       };
@@ -638,12 +566,6 @@
          );
       }
 
-      // Reset tools dropdown
-      if (toolsSelect) {
-         toolsSelect.value = globalDefaults.tools_mode;
-         conversationLlmState.tools_mode = globalDefaults.tools_mode;
-      }
-
       // Update runtime state
       llmRuntimeState.type = globalDefaults.type;
       llmRuntimeState.provider = globalDefaults.provider;
@@ -673,7 +595,6 @@
    function applyConversationLlmSettings(settings, isLocked) {
       const reasoningSelect = document.getElementById('reasoning-mode-select');
       const depthSelect = document.getElementById('reasoning-effort-select');
-      const toolsSelect = document.getElementById('tools-mode-select');
 
       if (settings) {
          if (settings.thinking_mode && reasoningSelect) {
@@ -698,11 +619,6 @@
             setControlHint('effort-hint', disabled ? 'Enable reasoning first' : null);
          }
 
-         if (settings.tools_mode && toolsSelect) {
-            toolsSelect.value = settings.tools_mode;
-            conversationLlmState.tools_mode = settings.tools_mode;
-         }
-
          // Push restored settings back to the server session. Without this, the
          // session keeps whichever defaults were sent by applyGlobalDefaultsToControls
          // at page load — the UI shows the conversation's value but the server
@@ -711,7 +627,6 @@
          if (settings.llm_type) sessionPayload.type = settings.llm_type;
          if (settings.cloud_provider) sessionPayload.provider = settings.cloud_provider;
          if (settings.model) sessionPayload.model = settings.model;
-         if (settings.tools_mode) sessionPayload.tool_mode = settings.tools_mode;
          if (settings.thinking_mode) sessionPayload.thinking_mode = settings.thinking_mode;
          if (settings.reasoning_effort) sessionPayload.reasoning_effort = settings.reasoning_effort;
 
@@ -753,7 +668,6 @@
          llm_type: llmRuntimeState.type,
          cloud_provider: llmRuntimeState.provider,
          model: llmRuntimeState.model,
-         tools_mode: conversationLlmState.tools_mode,
          thinking_mode: conversationLlmState.thinking_mode,
          reasoning_effort: conversationLlmState.reasoning_effort,
       };
@@ -926,7 +840,19 @@
       if (!modelSelect || !providerSelect) return;
 
       const provider = providerSelect.value?.toLowerCase() || '';
-      const models = cloudModelLists[provider] || [];
+      const baseModels = cloudModelLists[provider] || [];
+
+      // On a passive render (load/reconnect) the runtime provider+model are
+      // consistent, so a live model outside the curated list (common for OpenRouter
+      // vendor/model slugs) is shown honestly — prepended and selected — instead of
+      // snapping to the provider default. On an ACTIVE switch (sendToSession) the
+      // current model still belongs to the OLD provider, so it must NOT be prepended;
+      // fall through to the new provider's default and push that to the session.
+      const currentModel = llmRuntimeState?.model;
+      const models =
+         !sendToSession && currentModel && !baseModels.includes(currentModel)
+            ? [currentModel, ...baseModels]
+            : baseModels;
 
       modelSelect.innerHTML = '';
 
@@ -949,8 +875,7 @@
          modelSelect.appendChild(opt);
       });
 
-      // Select current model if in list, otherwise use provider's default
-      const currentModel = llmRuntimeState?.model;
+      // Select current model if present, otherwise use provider's default
       if (currentModel && models.includes(currentModel)) {
          modelSelect.value = currentModel;
       } else {
@@ -983,30 +908,6 @@
          llmRuntimeState.model = modelSelect.value;
          setSessionLlm({ model: modelSelect.value });
       }
-   }
-
-   /**
-    * Reflect OpenRouter gateway mode in the cloud provider/model controls: a single
-    * read-only "OpenRouter" provider plus the vendor/model slug list. Shared by the
-    * initial render and the Type->Cloud switch so both honor the gateway. Without this
-    * on the switch path, picking Cloud rebuilt a direct OpenAI/Claude/Gemini picker and
-    * let the user select a bare model that the gateway then silently replaced with a
-    * different vendor's default.
-    * @param {boolean} sendToSession - Whether to push the selected slug to the session
-    */
-   function applyGatewayCloudUI(sendToSession = false) {
-      const providerSelect = document.getElementById('llm-provider-select');
-      if (!providerSelect) return;
-      providerSelect.innerHTML = '';
-      const opt = document.createElement('option');
-      opt.value = 'openrouter';
-      opt.textContent = 'OpenRouter';
-      providerSelect.appendChild(opt);
-      providerSelect.value = 'openrouter';
-      providerSelect.disabled = true;
-      providerSelect.title = 'Gateway mode — all cloud models routed through OpenRouter';
-      setControlHint('provider-hint', 'Gateway: OpenRouter');
-      updateModelDropdownForCloud(sendToSession);
    }
 
    /**
@@ -1044,9 +945,6 @@
       if (config.llm?.cloud?.provider) {
          globalDefaults.provider = config.llm.cloud.provider;
       }
-      // OpenRouter gateway flag
-      globalDefaults.use_openrouter = !!config.llm?.cloud?.use_openrouter;
-
       // Default models (resolve idx to model name)
       if (config.llm?.cloud) {
          const cloud = config.llm.cloud;
@@ -1064,11 +962,6 @@
          globalDefaults.gemini_model = geminiModels[geminiIdx] || geminiModels[0] || '';
          globalDefaults.openrouter_model =
             openrouterModels[openrouterIdx] || openrouterModels[0] || '';
-      }
-
-      // Tools mode
-      if (config.llm?.tools?.mode) {
-         globalDefaults.tools_mode = config.llm.tools.mode;
       }
 
       // Thinking mode (Claude/local) — normalize legacy "auto" to "enabled"
@@ -1089,7 +982,6 @@
    function applyGlobalDefaultsToControls() {
       const reasoningSelect = document.getElementById('reasoning-mode-select');
       const depthSelect = document.getElementById('reasoning-effort-select');
-      const toolsSelect = document.getElementById('tools-mode-select');
 
       if (reasoningSelect) {
          reasoningSelect.value = globalDefaults.thinking_mode;
@@ -1106,16 +998,10 @@
          );
       }
 
-      if (toolsSelect) {
-         toolsSelect.value = globalDefaults.tools_mode;
-         conversationLlmState.tools_mode = globalDefaults.tools_mode;
-      }
-
       // Send initial defaults to session. from_restore: this fires at config-load
       // time, which on a page reload may happen WHILE a conversation is already
       // active server-side — defaults must not cascade onto that conv's row.
       setSessionLlm({
-         tool_mode: globalDefaults.tools_mode,
          thinking_mode: globalDefaults.thinking_mode,
          reasoning_effort: globalDefaults.reasoning_effort,
          from_restore: true,
@@ -1165,23 +1051,6 @@
          typeSelect.value = runtime.type || 'cloud';
       }
 
-      // OpenRouter gateway: the backend forces every cloud session through OpenRouter,
-      // so reflect that honestly as a read-only "OpenRouter" provider instead of leaving
-      // a stale direct-provider dropdown that contradicts the actual routing. The full
-      // interactive switcher under gateway is a Phase 2 item.
-      const gatewayOn = !!globalDefaults.use_openrouter;
-      if (providerSelect && gatewayOn && runtime.type !== 'local') {
-         applyGatewayCloudUI(false);
-         if (runtime.model) {
-            syncEffortDropdownToModel(runtime.model, true);
-         }
-         applyRuntimeReasoning(runtime);
-         if (typeof DAWN !== 'undefined' && DAWN.updateLlmMiniSummary) {
-            DAWN.updateLlmMiniSummary();
-         }
-         return;
-      }
-
       if (providerSelect) {
          // Update available options based on API key availability
          providerSelect.innerHTML = '';
@@ -1207,8 +1076,24 @@
             providerSelect.appendChild(opt);
          }
 
+         // OpenRouter is a first-class provider. Surface it whenever a key is present OR
+         // the session is actively on it, so a session resolved to OpenRouter shows/keeps
+         // the right provider instead of falling through to a stale value.
+         if (runtime.openrouter_available || runtime.provider?.toLowerCase() === 'openrouter') {
+            const opt = document.createElement('option');
+            opt.value = 'openrouter';
+            opt.textContent = 'OpenRouter';
+            providerSelect.appendChild(opt);
+         }
+
          // If no providers available, show disabled message
-         if (!runtime.openai_available && !runtime.claude_available && !runtime.gemini_available) {
+         if (
+            !runtime.openai_available &&
+            !runtime.claude_available &&
+            !runtime.gemini_available &&
+            !runtime.openrouter_available &&
+            runtime.provider?.toLowerCase() !== 'openrouter'
+         ) {
             const opt = document.createElement('option');
             opt.value = '';
             opt.textContent = 'No API keys configured';
@@ -1240,7 +1125,9 @@
          } else if (
             runtime.openai_available ||
             runtime.claude_available ||
-            runtime.gemini_available
+            runtime.gemini_available ||
+            runtime.openrouter_available ||
+            runtime.provider?.toLowerCase() === 'openrouter'
          ) {
             providerSelect.disabled = false;
             providerSelect.title = 'Switch cloud provider';

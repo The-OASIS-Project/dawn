@@ -1,0 +1,372 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "date",
+      "description": "Get the current date. Returns today's date formatted for the user.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "time",
+      "description": "Get the current time. Returns the current local time.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "weather",
+      "description": "Get weather forecasts for any location. Use 'today' for current conditions, 'tomorrow' for today and tomorrow, or 'week' for a 7-day forecast. Location is optional if a default is configured.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "The forecast type: 'today' (current conditions), 'tomorrow' (today and tomorrow), 'week' (7-day forecast)",
+            "enum": [
+              "today",
+              "tomorrow",
+              "week",
+              "get"
+            ]
+          },
+          "location": {
+            "type": "string",
+            "description": "Location for weather (e.g., 'New York City' or 'Paris, France'). Optional - uses default from config if not provided."
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "search",
+      "description": "Search the web for information. ALWAYS use this tool for current events, recent news, prices, scores, or any time-sensitive question — do NOT guess from training data.\nCategory quick-guide:\n  - Time-sensitive 'what happened / latest / launched' → 'news' + time_range\n  - 'best X' / 'X vs Y' / community opinion / recommendations → 'social'\n  - Benchmarks, model comparisons, product reviews → 'social' (community results) plus a second 'news' call for press coverage\n  - General lookup with no better fit → 'web'\n  - Finding a specific Docker image / package / API doc → 'it'\n  - Scientific research → 'science'; peer-reviewed papers → 'papers'\nAVOID 'it' for opinion/benchmark/release queries — it returns package registries, not articles. Use time_range='day' or 'week' for breaking/recent news.\nQUERY STYLE: use short keyword phrases (3-6 words), NOT full sentences. Social/Reddit search returns ZERO results on long natural-language queries.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "Search category. Pick the one that matches your INTENT:\n  'news'    — current events, headlines, product launches, releases. Best for anything time-sensitive ('latest X', 'who released Y', 'what happened with Z').\n  'social'  — opinions, comparisons, community sentiment, recommendations, discussions. Hits Reddit/Twitter. Use for 'best X for Y', 'X vs Y', 'what do people think about Z', or any subjective/qualitative query.\n  'web'     — general-purpose fallback when no specialty fits.\n  'science' — peer-reviewed scientific search.\n  'papers'  — academic papers (arxiv, scholar).\n  'it'      — package registries, container images, tech docs (DockerHub, MDN, GitHub). Use ONLY for finding a specific package/library/image, NOT for benchmarks, releases, or model comparisons (use 'news' or 'social' for those).\n  'dictionary' — word definitions.",
+            "enum": [
+              "web",
+              "news",
+              "science",
+              "it",
+              "social",
+              "dictionary",
+              "papers"
+            ]
+          },
+          "query": {
+            "type": "string",
+            "description": "Short keyword query (3-6 words). Do NOT write full sentences — search engines (especially social/Reddit) return zero results on long natural-language queries. Good: 'GPT-5.5 vs Claude coding'. Bad: 'what do developers think about GPT-5.5 compared to Claude for coding tasks'."
+          },
+          "time_range": {
+            "type": "string",
+            "description": "Optional time filter to restrict results to a recent period. 'day' = last 24h, 'week' = last 7 days, 'month' = last 30 days, 'year' = last 12 months. Most useful with category='news'. Omit for no time filter.",
+            "enum": [
+              "day",
+              "week",
+              "month",
+              "year"
+            ]
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "calculator",
+      "description": "Perform mathematical calculations. Actions: 'evaluate' for math expressions (supports +, -, *, /, ^, sqrt, sin, cos, factorial via postfix '!' like '52!' or fac(n), etc.; fast, uses scientific notation for huge results), 'exact' for digit-perfect arbitrary-precision integer results (every digit of 52!, 2^256, big sums/products — use when the user wants the full number, not an approximation), 'convert' for unit conversion (length, mass, volume, temperature, time), 'base' for number base conversion (hex, decimal, octal, binary), 'random' for random number generation.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "The calculator action: 'evaluate' (fast floating-point math, scientific notation for big results), 'exact' (digit-perfect arbitrary-precision integer math — full digits of e.g. 52! or 2^256), 'convert' (unit conversion), 'base' (number base conversion), 'random' (random number generation)",
+            "enum": [
+              "evaluate",
+              "exact",
+              "convert",
+              "base",
+              "random"
+            ]
+          },
+          "value": {
+            "type": "string",
+            "description": "The value to process. For 'evaluate': math expression (e.g., '2+2*3', '52!'). For 'convert': 'VALUE UNIT to UNIT' (e.g., '5 miles to km'). For 'base': 'VALUE to BASE' (e.g., '255 to hex'). For 'random': 'MIN to MAX' or just 'MAX' (e.g., '1 to 100')."
+          }
+        },
+        "required": [
+          "action",
+          "value"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "music",
+      "description": "Control music playback and build playlists from the local library. 'play' REPLACES the queue; 'enqueue' APPENDS (use it to add to an existing playlist). search/play match a query as a case-insensitive substring against ONE field (artist, title, album, or genre); spaces are wildcards WITHIN one field, so search by artist alone or title alone — never combine 'Artist Title' in one query. The library has NO decade/genre-mood/vibe index: 'search 80s' only matches text literally containing '80s'. To build a themed/decade/mood playlist: (1) think of concrete artist & song names (use the web 'search' tool — distinct from this tool's 'search' action — if unsure who fits); (2) browse 'library' artists/albums to see what exists; (3) batch-search (search items:[\"Prince\",\"Madonna\"]) with ONE artist/title per query to get paths; (4) enqueue items:[paths] to add them. All track numbers are 1-based.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "The action: 'play' (REPLACE the queue with search results or items, then play), 'enqueue' (APPEND to the queue without interrupting — use this to add to an existing playlist), 'stop', 'pause', 'resume', 'next', 'previous', 'list' (show queue + shuffle/repeat state), 'select' (jump to track N, 1-based), 'remove' (drop track N (1-based) or a title match from the queue), 'clear' (empty the queue), 'search' (find music without playing — returns paths), 'library' (browse artists/albums/stats), 'shuffle' ('on'/'off'; no arg reports current state), 'repeat' ('none'/'all'/'one'; no arg reports current state)",
+            "enum": [
+              "play",
+              "enqueue",
+              "stop",
+              "pause",
+              "resume",
+              "next",
+              "previous",
+              "list",
+              "select",
+              "remove",
+              "clear",
+              "search",
+              "library",
+              "shuffle",
+              "repeat"
+            ]
+          },
+          "query": {
+            "type": "string",
+            "description": "For 'play'/'search'/'enqueue': search terms — ONE artist OR title OR album per query (see the tool description for search rules). For 'select'/'remove': track number (1-based); 'remove' also accepts a title to match. For 'shuffle': 'on' or 'off'. For 'repeat': 'none', 'all', or 'one'. For 'library': 'artists', 'albums', or omit."
+          },
+          "limit": {
+            "type": "number",
+            "description": "For 'search': maximum results to return (0 = all, default 10)."
+          },
+          "page": {
+            "type": "number",
+            "description": "For 'library': page number for pagination (1-based, default 1). Each page returns up to 50 items. Use with 'artists' or 'albums'."
+          },
+          "items": {
+            "type": "array",
+            "description": "For 'play'/'enqueue': a list of track names or file paths to queue (names resolve to the best match; paths from a 'search' result are exact). For 'search': a list of queries to run in one batch. Build playlists by collecting names/paths and passing them here.",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "memory",
+      "description": "Store and retrieve persistent memories about the user. Use 'remember' to store facts (preferences, information shared by user). When the user shares something to remember, note, or 'keep in mind' — even casually or as an aside — you MUST call 'remember' in the SAME turn. Acknowledging it in your reply ('got it', 'noted', 'I'll remember that') does NOT store anything; only the tool call persists it. Never claim you saved or will remember something without actually calling 'remember'. Each fact is ONE concise statement, max 511 characters. To store several facts at once, pass a JSON array (one fact per element) — preferred over many separate calls for a multi-fact dump. Each element is either a plain string (a durable fact) or, for a TRANSIENT dated fact that loses value after a date — a movie/event on a day, a forecast, an appointment — an object {\"text\": \"...\", \"expires_at\": \"YYYY-MM-DD\"}; use the object form whenever a fact is tied to a passing date. For longer content (e.g. a journal entry) split it into several concise facts. Memory is for facts learned in passing. For verbatim, authored, or living reference text the user maintains and retrieves exactly — a bio, a pitch, an address, a saved answer — use document_manage (save_note / edit) instead, NOT remember. Call 'remember' directly; it cannot be used inside execute_plan. Use 'search' for a TARGETED lookup of stored memory facts (optionally filtered by time_range like '24h', '7d', '2w'). For a BROAD 'what do we know about X' / 'how do things stand' question, call the 'recall' tool FIRST instead — it spans memory, notes, documents, and the calendar in one pass; reach for memory 'search' when you specifically need memory facts and recall isn't warranted. Use 'forget' to remove memories by numeric ID (you MUST use 'search', 'recent', or 'find_duplicates' first to find the ID); pass a comma-separated list for several. 'forget' has TWO modes — pick deliberately: (1) DELETE (default, permanent) for facts that are wrong or unwanted; (2) MERGE (recoverable) for duplicates — when the user asks to merge/consolidate/dedupe while keeping one, OR you are cleaning duplicates, set 'replaced_by' to the keeper's ID so the rest are hidden-but-recoverable rather than permanently deleted. Prefer MERGE for duplicate cleanup so a wrong call is reversible. Use 'recent' to list recently stored memories. Use 'save_contact' to store contact info (email, phone) for a person (query: person name, field_type: email/phone, value: the address/number, label: work/personal, entity_id: optional, use to select a specific person when prompted for disambiguation). Use 'find_contact' to look up contact info by name (query: name, optional field_type). Use 'list_contacts' to list all stored contacts (query: optional field_type). Use 'delete_contact' to remove a contact record by ID. Use 'merge_entities' to soft-link two entities that refer to the same person/pet/place (query: source name, target_name: canonical entity to keep). The link is reversible — the source row is preserved and can be split later. Use 'dawn-admin memory entity consolidate' to make a soft link permanent. Use with_source=true on 'search'/'recent' to include verbatim conversation excerpts for each fact (v40+, 16 KB budget; older facts omit excerpts). Memories persist across sessions and are private to each user.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "Memory action: 'remember' (store a fact), 'search' (find memories), 'get' (retrieve specific memories EXACTLY by numeric ID — the deterministic counterpart to 'search'; use when you already know the ID(s) and want the exact stored text rather than a relevance-ranked match), 'forget' (remove memories by numeric ID — DELETE permanently, or MERGE duplicates while keeping one by also setting 'replaced_by'; use search/recent/find_duplicates first to find the IDs), 'recent' (list recent memories), 'find_duplicates' (list clusters of near-identical facts with their IDs so you can forget the redundant ones), 'save_contact' (store email/phone for a person), 'find_contact' (look up contact info), 'list_contacts' (list all contacts), 'delete_contact' (remove contact by ID), 'merge_entities' (soft-link two entities that refer to the same person/thing — creates a reversible alias; both entity rows remain)",
+            "enum": [
+              "remember",
+              "search",
+              "get",
+              "forget",
+              "recent",
+              "find_duplicates",
+              "save_contact",
+              "find_contact",
+              "list_contacts",
+              "delete_contact",
+              "merge_entities"
+            ]
+          },
+          "query": {
+            "type": "string",
+            "description": "POLYMORPHIC — the expected SHAPE of this value depends on the chosen action. Check the action you picked before filling this in:\n  remember:        STRING — one fact, e.g. 'User prefers dark mode'. To store SEVERAL facts at once in a single call, pass a JSON array instead (max 25). Each element is EITHER a plain string (a DURABLE fact) OR an object {\"text\": \"...\", \"expires_at\": \"YYYY-MM-DD\"} for a TRANSIENT dated fact that loses value after that date — a movie/event on a specific day, a weather forecast, an appointment. Set expires_at ONLY for such facts; use a plain string for anything durable (preferences, traits, relationships, lasting records). Mix freely, e.g. [\"User prefers dark mode\", {\"text\": \"Movie The Odyssey on 2026-07-22 7:00 PM\", \"expires_at\": \"2026-07-22\"}].\n  search:          STRING — keywords (3-8 words work best).\n  get:             NUMERIC ID(s) — one ID, or a comma-separated list, e.g. '7858' or '7858,7854'. Returns those exact memories verbatim (no ranking); non-numeric tokens are ignored.\n  forget:          NUMERIC ID(s) — one fact ID, or a comma-separated list to bulk-delete, e.g. '4711' or '4711,4712,4713' (max 50). IDs come from a prior search/recent/find_duplicates result; non-numeric tokens are ignored.\n  find_duplicates: OPTIONAL NUMERIC — cosine similarity threshold 0.50-1.00 (default 0.85). Omit to use the default; raise it for stricter (more-identical) matches. To clean up, pass the redundant IDs to 'forget' (max 50 per call — split larger sets across calls).\n  recent:          TIME WINDOW — how far back to look. Suffix-encoded: '24h', '7d', '2w', '90d', '1y', '10y' (default '7d', upper bound '10y'). Returns entries within [now − query, now]. Use 'sort' and 'before' params for ordering and upper-bound.\n  save_contact:    STRING — the person's name (e.g. 'Jane Doe').\n  find_contact:    STRING — name (or partial name) to search for.\n  list_contacts:   OPTIONAL STRING — field_type filter, one of 'email' or 'phone'. Omit to list all contacts.\n  delete_contact:  NUMERIC STRING — contact ID from a prior find_contact / list_contacts result.\n  merge_entities:  STRING — the SOURCE entity name (will become an alias of the entity named in 'target_name'). Both names must already exist as entities; run 'search' first to verify."
+          },
+          "time_range": {
+            "type": "string",
+            "description": "Optional time filter for 'search'. Limit results to memories from this period back to now. Examples: '24h', '7d', '2w', '30d'. Only used with 'search'."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Optional result count for 'recent' (max per category — facts and summaries each capped to this). Range 1-50; default 20 facts / 10 summaries. Not used by 'search' (which returns its hybrid top hits)."
+          },
+          "sort": {
+            "type": "string",
+            "description": "Optional sort order for 'recent'. 'newest' (default) returns the most recent entries first; 'oldest' returns the earliest entries first. Sort applies ONLY WITHIN the time window set by 'query' — it does not change how far back 'recent' reaches. To find the earliest entries in the entire store, widen 'query' (its upper bound is '10y'). Not used by 'search' (its hybrid scoring drives ordering).",
+            "enum": [
+              "newest",
+              "oldest"
+            ]
+          },
+          "before": {
+            "type": "string",
+            "description": "Optional time-period upper bound for 'recent' (e.g., '3d', '30d'). Restricts results to entries older than 'before' ago. Combine with 'query' (the lower bound) to query a slice in the past — query and before together bracket a window [now − query, now − before]. Not used by 'search'."
+          },
+          "target_name": {
+            "type": "string",
+            "description": "For 'merge_entities': the name of the entity to make canonical (keeps its name and identity; the source becomes a soft alias that resolves here)."
+          },
+          "category": {
+            "type": "string",
+            "description": "Optional topic tag. No longer narrows 'search' results — semantic ranking covers all categories, so you do NOT need to guess a category to find a fact. Accepted for back-compat but safe to omit.",
+            "enum": [
+              "personal",
+              "professional",
+              "relationships",
+              "health",
+              "interests",
+              "practical",
+              "preferences",
+              "general"
+            ]
+          },
+          "as_of": {
+            "type": "string",
+            "description": "Optional ISO date (YYYY-MM-DD or YYYY) for 'search'. Returns relations valid at that point in time (e.g., 'who did Alice work for in 2020'). Defaults to now() when omitted."
+          },
+          "include_historical": {
+            "type": "boolean",
+            "description": "Set to true to include closed relations (those with a past valid_to) in 'search' results. Default false returns only currently-valid relations."
+          },
+          "with_source": {
+            "type": "boolean",
+            "description": "Set to true to include verbatim source excerpts for each fact returned by 'search' or 'recent'.  Excerpts are omitted for legacy facts (stored before v40) and for facts from private conversations.  A shared 16 KB budget applies; excess sources are noted with a pointer to context_expand."
+          },
+          "confirm_private": {
+            "type": "boolean",
+            "description": "For 'remember' in a PRIVATE conversation ONLY.  Set this to true when THE USER asked for the save — if they said 'remember that', 'save this', 'note that down', or similar, they have already decided and you should just set it and save.  Do NOT ask them to confirm something they only just told you to do.  Leave it unset when saving is YOUR idea rather than theirs; the tool will then decline and you should ask first. The distinction is who decided, not how sensitive the content looks."
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "scheduler",
+      "description": "Manage timers, alarms, reminders, scheduled tasks, and briefings. Set timers with duration ('set a 10 minute timer'), alarms at specific times ('set an alarm for 7 AM'), reminders with messages ('remind me to call Mom at 3pm'), schedule tool execution ('turn off lights at midnight'), or briefings that summarize tool output via LLM ('weather briefing at 7am'). Query time remaining, list active events, cancel, snooze, or dismiss.\n\nTASK vs BRIEFING: use `briefing` whenever the user wants to RECEIVE the tool's output (weather, search, news, web fetches, calendar readouts) — briefings summarize and deliver the result.  Use `task` ONLY for action tools whose result is just a status the user doesn't need read back (lights, locks, media control, sending a message).  A `task` discards its tool output; if you schedule an informational/read-only tool as a `task` the scheduler auto-corrects it to a single-step briefing so the result isn't lost, but picking `briefing` yourself is clearer.\n\nCRITICAL: see the TOOL-CALL DISCIPLINE block in your system prompt — it applies doubly hard here.  A schedule that doesn't fire is the worst failure mode: the user trusts your confirmation and finds out hours later that nothing happened.  When the user asks you to schedule ANY event, the `scheduler` create call MUST be in the same turn as your acknowledgement.  Never say \"locked in\" / \"firing at\" / \"got it scheduled\" without actually emitting the tool call first.\n\nBriefings can be SINGLE-STEP (one tool, one summary) or MULTI-STEP (run several tools, summarize the combined output).  For multi-step, pass a `steps` array inside `details` and omit top-level tool_name; each step is {tool_name, tool_action, tool_value} — use those exact key names, NOT the short forms tool/action/value.  Each step's tool_value MUST be the literal arguments the tool receives (for `search`, that's the query string).  Empty tool_value for tools that require it (search, url_fetch) is rejected at create time.  Maximum 8 steps per briefing.\n\nAUDIO (briefings only): controlled by `say_aloud` in `details` — NOT `announce_all` (which is multi-user fan-out, unrelated to TTS).  Default behavior: briefings created via voice (local mic / satellite) speak their summary aloud when they fire; briefings created via text in the WebUI are SILENT.  Override with `say_aloud`: set to `true` when the user asks for audio explicitly ('read it to me out loud' from a WebUI-text user), set to `false` when the user asks for silence ('don't say this one aloud', 'keep it quiet', 'silent briefing' — even from a voice user).  When in doubt — if the user mentioned audio/quiet/silent/aloud at all — set `say_aloud` explicitly rather than relying on the default.  Omit the field only when the user didn't reference audio at all.\n\nDELIVERY (any event type): set `deliver_to` to a messaging channel display_name (e.g. \"telegram_main\", \"slack_D0B6SQGB31C\") to fan the announcement out to that chat surface IN ADDITION TO the local TTS / WebUI banner — additive, not exclusive.  Applies to timers, alarms, reminders, tasks, AND briefings (no exception).  Use `messaging.list_channels` to discover names the user has linked.\n  CURRENT-SURFACE DEFAULT: if the system prompt contains a `MessagingChannel=[NAME]` line (the user is asking through a chat app: Slack/Telegram/Discord/SMS), DEFAULT `deliver_to` to NAME for EVERY event type — including briefings — UNLESS the user explicitly says otherwise.  Reasoning: the user is paying attention to the chat surface (that's where they typed the request); a local-only event fires where they aren't listening.  This applies to both one-shot ('briefing on X in two minutes') and recurring ('morning briefing every weekday') events — recurring briefings set from Slack continue to land on Slack daily until the user says otherwise.  Override when the user says \"set it locally\", \"don't send to Slack\", \"just on the speaker\", \"silent\" (audio cue, not messaging — keep deliver_to), etc.\n  EXPLICIT TARGET: when the user names a different channel than the current one ('send it to my Discord', 'ping family group'), set `deliver_to` to THAT channel — don't second-guess.\n  NO MESSAGING IN PROMPT: when the system prompt has no `MessagingChannel=[...]` line (WebUI / local mic / satellite), only set `deliver_to` when the user explicitly asks for a chat-surface delivery.\n  RESPONSE COHERENCE: whatever delivery you set in `deliver_to`, REFLECT IT in your reply to the user.  If you set `deliver_to=slack_main`, say \"...delivered to Slack\" or similar.  If you omitted `deliver_to`, do NOT claim delivery to a chat surface.  Telling the user you'll send to Discord when you didn't set `deliver_to` is a hallucination — surface the actual tool-call shape in the reply.\n  The engine verifies the channel belongs to the current user at delivery time, so a guessed or stale name fails safely (logged, no leak).\n\nExample with explicit silent override (voice user said 'don't say this aloud'): {\"type\":\"briefing\",\"name\":\"Iran War News\",\"duration_minutes\":2,\"say_aloud\":false,\"steps\":[{\"tool_name\":\"search\",\"tool_action\":\"query\",\"tool_value\":\"Iran War news today\"}]}\nExample with default audio (recurring morning briefing, no explicit override): {\"type\":\"briefing\",\"name\":\"Morning Briefing\",\"fire_at\":\"2026-05-22T07:00:00\",\"recurrence\":\"weekdays\",\"steps\":[{\"tool_name\":\"weather\",\"tool_action\":\"get\",\"tool_value\":\"Atlanta\"},{\"tool_name\":\"search\",\"tool_action\":\"search\",\"tool_value\":\"top tech news today\"}]}\nExample with messaging fan-out (user said 'send the morning briefing to Slack'): {\"type\":\"briefing\",\"name\":\"Morning Briefing\",\"fire_at\":\"2026-05-22T07:00:00\",\"recurrence\":\"weekdays\",\"deliver_to\":\"slack_D0B6SQGB31C\",\"steps\":[{\"tool_name\":\"weather\",\"tool_action\":\"get\",\"tool_value\":\"Atlanta\"}]}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "The scheduler action: 'create' (new event), 'list' (show active events), 'cancel' (cancel by name/id), 'query' (check status/time remaining), 'snooze' (snooze ringing alarm), 'dismiss' (dismiss ringing alarm)",
+            "enum": [
+              "create",
+              "list",
+              "cancel",
+              "query",
+              "snooze",
+              "dismiss"
+            ]
+          },
+          "details": {
+            "type": "string",
+            "description": "JSON object with action-specific fields.\ncreate: {type (timer|alarm|reminder|task|briefing), name (optional), fire_at, duration_minutes (1-43200, MINUTES UNTIL FIRE — use ONLY for 'in X minutes' / 'X-minute timer' shapes; this is NOT briefing duration / task duration / how-long-the-thing-runs.  Use EITHER fire_at OR duration_minutes, never both — they conflict and duration_minutes wins, which causes a briefing fire_at=10min-from-now + duration_minutes=1 to fire in 1 minute instead of 10), message (reminders, ≤512 chars), recurrence (once|daily|weekdays|weekends|weekly|custom), recurrence_days (csv: mon,tue,...), announce_all (bool — multi-user fan-out, NOT audio control), say_aloud (briefing-only bool — TTS override; see AUDIO section), deliver_to (optional string — messaging channel display_name; see DELIVERY section)}.\n  fire_at: ISO 8601. No timezone suffix = the user's LOCAL timezone ('2026-03-19T07:00:00' = 7 AM local). 'Z' suffix = UTC. '+05:00' = explicit offset. For user-said times like 'set an alarm for 7am', use NO suffix.\ntask/briefing also require tool_name + tool_action + tool_value (or briefing-only `steps` array — see the tool's top-level description for multi-step shape).\n  tool_action: the action you would pass when calling that tool DIRECTLY — the value of the tool's own action selector (the enum `action` parameter in its schema), e.g. weather->today/tomorrow/week, search->web/news/social/..., music->play/stop, calendar->today/range/add, home_assistant->on/off. Use one of the tool's own action values; NEVER put the tool's name in tool_action.\n  tool_value: the literal arguments the tool receives. SHAPE depends on the target tool:\n    - For tools whose value is plain text (search, weather, url_fetch): pass the RAW string (e.g. tool_value: 'today's news').\n    - For tools whose value is a JSON object (calendar, email, scheduler, memory): pass a JSON STRING with escaped quotes (e.g. tool_value: '{\\\"action\\\":\\\"today\\\"}').\n  search/url_fetch reject empty tool_value at create time.\nlist: {type (optional filter)}.\ncancel/query: {name or event_id (event_id is the integer shown in 'list' output as '[id=N]')}.\nsnooze: {event_id (optional), snooze_minutes (1-120, optional)}.\ndismiss: {event_id (optional)}."
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "calendar",
+      "description": "Access and manage calendar events via CalDAV. List available calendars ('which calendars are available'), check today's schedule ('what's on my calendar today'), find upcoming events ('when is my next meeting'), search events ('do I have anything with dentist'), create events ('add a meeting tomorrow at 2pm'), update or delete events by UID.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "The calendar action: 'calendars' (list all calendar accounts and their calendars), 'today' (today's events), 'range' (events in date range), 'next' (next upcoming event), 'search' (find events by text), 'add' (create new event), 'update' (modify event), 'delete' (remove event)",
+            "enum": [
+              "calendars",
+              "today",
+              "range",
+              "next",
+              "search",
+              "add",
+              "update",
+              "delete"
+            ]
+          },
+          "details": {
+            "type": "string",
+            "description": "JSON object with action-specific fields (pass as JSON-encoded string).\nFor 'calendars': no fields needed.\nFor 'today': {calendar?}.\nFor 'range': {start (ISO 8601, required), end (ISO 8601, optional, default +24h), calendar?}.\nFor 'next': {calendar?}.\nFor 'search': {query (text to search in event titles/locations), calendar?}.\nFor 'add': {summary (required), start (ISO 8601, required), end (ISO 8601, optional), location (optional), description (optional), all_day (bool, optional), calendar?, rrule (RFC 5545 recurrence, optional — e.g. 'FREQ=WEEKLY;BYDAY=MO,WE,FR;COUNT=10')}.\nFor 'update': {uid (required, from previous query — emitted as '[UID: ...]' on each result row), summary, start, end, location, description — only specified fields are changed}.\nFor 'delete': {uid (required)}.\n  calendar?: the calendar DISPLAY NAME as returned by action='calendars' (e.g. 'Family', 'Work'). NOT an account name and NOT an arbitrary guess; if uncertain, run action='calendars' first to enumerate. Omit to search across all calendars on all accounts.\n  start/end ISO 8601 format: no timezone suffix = LOCAL time ('2026-05-27T14:00:00'); 'Z' = UTC; '+05:00' = explicit offset; bare date '2026-05-27' is accepted too."
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "email",
+      "description": "Read, send, trash, and archive emails. Use 'accounts' to see configured email accounts. Use 'folders' to list available folders/labels for an account. Use 'recent' to fetch recent emails sorted newest-first (set unread_only:true for unread only, folder to specify folder/label). Use 'read' to read a full email by message_id (from recent/search results). Use 'search' to find emails by from, subject, text, or date range (results sorted newest-first, set unread_only:true to filter unread). The 'folder' parameter (on recent/search) selects which folder/label: inbox, sent, trash, spam, drafts, starred, important, all, or a custom label name. Default is inbox. Use 'send' to compose a draft (reads back to user for confirmation). Use 'confirm_send' with the draft_id to actually send after user confirms. Use 'trash' to move an email to trash (two-step: creates pending action, then 'confirm_trash' executes after user confirms). Use 'archive' to remove an email from inbox (keeps in All Mail, no confirmation needed). Emails are sent from the first writable account. For 'send', the 'to' field can be a contact name (resolved via contacts) or a direct email address.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "Email action: 'accounts' (list configured accounts), 'recent' (fetch recent emails), 'read' (read full email by message_id), 'search' (search by from/subject/text/date), 'folders' (list available folders/labels), 'send' (compose draft for user confirmation), 'confirm_send' (send confirmed draft), 'trash' (move email to trash — requires confirmation), 'confirm_trash' (confirm trash action), 'archive' (remove from inbox, keep in All Mail)",
+            "enum": [
+              "recent",
+              "read",
+              "search",
+              "folders",
+              "send",
+              "confirm_send",
+              "accounts",
+              "trash",
+              "confirm_trash",
+              "archive"
+            ]
+          },
+          "details": {
+            "type": "string",
+            "description": "JSON (pass as JSON-encoded string): recent {count? (up to 50), folder?, unread_only?, account?, page_token?, sort?}, read {message_id, account?}, search {from?, subject?, text?, since?, before?, folder?, unread_only?, account?, page_token?, sort?} (dates: YYYY-MM-DD, UTC, since=inclusive, before=exclusive), folders {account?}, send {to, subject, body} (to: email or contact name), confirm_send {draft_id}, trash {message_id, account?} (creates pending — ask user to confirm), confirm_trash {pending_id}, archive {message_id, account?} (removes from inbox, no confirmation needed).\n  account?: the CONFIGURED account name OR username/email from the 'accounts' action — must already exist. Do NOT invent an email address; if uncertain, call action='accounts' first to enumerate. Omit to search/read across all enabled accounts.\n  folder?: defaults to inbox; valid values listed in the top-level tool description.\n  sort?: \"newest\" (default) or \"oldest\" — orders results by date.\n  page_token: opaque cursor from a previous response; pass back verbatim, do not parse or invent.\nResults include a page_token when more results are available — pass it in the next call to fetch the next page."
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  }
+]

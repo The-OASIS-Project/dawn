@@ -110,7 +110,11 @@ typedef struct {
                                                  * conn_get_session/conn_set_session for
                                                  * cross-thread access) */
    char session_token[WEBUI_SESSION_TOKEN_LEN]; /* Reconnection token */
-   uint8_t *audio_buffer;                       /* Opus audio accumulation */
+   bool session_was_reconnected; /* True iff this conn adopted its OWN existing session via a
+                                  * reconnect token (vs a fresh/throwaway auto-create); emitted
+                                  * as `reconnected` on the session frame so the client knows
+                                  * whether to load_conversation (fresh) or just re-anchor. */
+   uint8_t *audio_buffer;        /* Opus audio accumulation */
    size_t audio_buffer_len;
    size_t audio_buffer_capacity;
    bool in_binary_fragment; /* True if receiving fragmented binary frame */
@@ -118,7 +122,12 @@ typedef struct {
    _Atomic bool
        use_opus; /* True if client supports Opus codec (atomic: set by LWS, read by worker) */
    _Atomic bool tts_enabled; /* True if TTS output enabled (atomic: set by LWS, read by worker) */
-   bool is_satellite;        /* True if this is a DAP2 satellite connection */
+   _Atomic bool
+       tool_step_origin; /* True if this client renders its OWN turn's tool steps from the
+                          * tool_step frame (uniform-pill clients); server then includes it
+                          * in its own tool_step fan. Default off = #3 origin-excluded
+                          * behavior (stock www). Set by LWS at handshake, read by worker. */
+   bool is_satellite;    /* True if this is a DAP2 satellite connection */
 
    /* Text message fragmentation support (for large JSON payloads) */
    char *text_buffer;      /* Accumulation buffer for fragmented text messages */
@@ -135,6 +144,12 @@ typedef struct {
    /* Missed notification delivery: set once queued replay has been pushed to the
     * client so the delivery only happens on the first ready message per connection. */
    bool missed_notif_delivered;
+
+   /* Watches-panel live gauge stream: while set, the 1 Hz heartbeat pushes a
+    * compact watch_readings frame to this connection (opt-in via
+    * watch_readings_subscribe, browsers only).  Plain bool — needs no teardown;
+    * the connection's user data is zero-initialized and slot reuse re-clears it. */
+   bool watch_readings_subscribed;
 
    /* Client IP address (captured at connection establishment for reliable logging) */
    char client_ip[64];
@@ -235,6 +250,8 @@ typedef struct {
          char *text;
          bool server_saved;       /* Message already persisted to DB server-side */
          int64_t conversation_id; /* Live-turn conversation (0 = none); routes tool/visual frames */
+         int64_t message_id; /* DB row id (0 = none); lets the client stamp data-message-id so a
+                              * fanned-out message_appended dedups (server-authoritative §12c) */
       } transcript;
       struct {
          char *code;
@@ -258,6 +275,8 @@ typedef struct {
          uint32_t stream_id;
          int64_t conversation_id; /* Conversation this turn belongs to (0 = none) */
          char text[1024];         /* Buffer for delta/end text (increased for thinking) */
+         bool will_persist;       /* stream_end only: server promises to persist this turn
+                                     (Model A intent, SERVER_AUTHORITATIVE §6 step 2) */
       } stream;
       struct {
          char state[16];   /* idle, listening, thinking, speaking, error */
@@ -370,6 +389,27 @@ extern ws_connection_t *s_active_connections[MAX_ACTIVE_CONNECTIONS];
 extern pthread_mutex_t s_conn_registry_mutex;
 
 /**
+ * @brief Visitor invoked under s_conn_registry_mutex for each candidate connection.
+ *
+ * Return false to stop the walk early (existence checks); true to continue.  The
+ * visitor runs WITH s_conn_registry_mutex held: it may queue_response (the
+ * registry -> response-queue nesting is the established order) but MUST NOT
+ * re-acquire s_conn_registry_mutex or block on TTS synthesis.
+ */
+typedef bool (*conn_visitor_fn)(ws_connection_t *conn, void *ctx);
+
+/**
+ * @brief Walk every authenticated connection for @user_id, invoking @visit.
+ *
+ * Bakes in ONLY the auth + user + excluded-origin filters (user_id <= 0 = all
+ * users; exclude_session_id == 0 = exclude none).  All secondary predicates
+ * (wsi liveness, session type, active conversation, satellite tier) belong in
+ * the visitor.  Defined in webui_broadcasts.c; the §Phase-4 multi-target TTS
+ * fan in webui_audio.c is the second caller.
+ */
+void for_each_user_conn(int user_id, uint32_t exclude_session_id, conn_visitor_fn visit, void *ctx);
+
+/**
  * @brief Deliver queued missed scheduler notifications to a connection.
  *
  * Called after cookie-based auth completes at WebSocket open.  Reads up
@@ -412,7 +452,8 @@ void handle_text_message(ws_connection_t *conn,
                          const char **vision_images,
                          const size_t *vision_image_sizes,
                          const char **vision_mimes,
-                         int vision_image_count);
+                         int vision_image_count,
+                         const char *persist_content);
 
 /**
  * @brief Handle a `get_metrics` message — emit the current session-metrics
@@ -438,6 +479,24 @@ bool handle_smart_home_message(ws_connection_t *conn,
  * webui_message_dispatch.c on session_init / login.
  */
 void queue_init_messages(ws_connection_t *conn, const char *token);
+
+/* Private-range (RFC 6455 4000-4999) WS close code sent to a connection whose
+ * session a newer reconnect has taken over.  The client reads event.code === 4001
+ * in onclose and backs off (does NOT auto-reconnect) instead of re-stealing the
+ * session, which would ping-pong two tabs.  Kept in sync with www/js client. */
+#define WEBUI_CLOSE_SUPERSEDED 4001
+
+/**
+ * @brief Evict the connection currently owning @p existing so a newer reconnect
+ *        can take over, closing it with WS code 4001 "superseded".
+ *
+ * No-op when @p existing has no owner, the owner IS @p new_conn, or the owner has
+ * no live wsi.  The caller assigns `existing->client_data = new_conn` immediately
+ * after; the evicted connection's LWS_CALLBACK_CLOSED then sees it is no longer the
+ * owner (client_data != it) and leaves the session intact, only dropping its own
+ * ref.  Must run on the lws service thread (reconnect dispatch).
+ */
+void webui_evict_session_owner(session_t *existing, ws_connection_t *new_conn);
 
 /**
  * @brief Validate base64-encoded image data (security-hardened).
@@ -670,6 +729,18 @@ void send_json_response(ws_connection_t *conn, json_object *response);
 int webui_broadcast_json_to_user(int user_id, json_object *root, bool browsers_only);
 
 /**
+ * @brief Push a live watch_readings frame to every subscribed Watches panel.
+ *
+ * The 1 Hz heartbeat entry (driven from the dawn main loop beside attention_tick).
+ * No-op unless proactive attention is enabled AND a browser has opted in via
+ * watch_readings_subscribe — so an idle tick with the panel closed costs one
+ * registry scan and takes no metric snapshot.  For each subscribed browser it
+ * snapshots that user's watch readings and queues a compact
+ * {type:"watch_readings", payload:{readings:[{id,has_current,current?}]}} frame.
+ */
+void webui_watch_readings_tick(void);
+
+/**
  * @brief Broadcast a JSON frame to every admin user's browser sessions.
  *
  * Resolves the admin user_id set via auth_db BEFORE taking the connection
@@ -681,6 +752,16 @@ int webui_broadcast_json_to_user(int user_id, json_object *root, bool browsers_o
  * @return Number of connections the frame was queued to.
  */
 int broadcast_json_to_admins(json_object *root, bool browsers_only);
+
+/**
+ * @brief Broadcast a "config_changed" nudge to every admin browser.
+ *
+ * Empty-payload signal ("something changed, re-fetch") emitted after a successful
+ * set_config save so other admin sessions (a second WebUI tab, Aurora) refresh
+ * their config-derived panels instead of showing a stale view until reconnect.
+ * Config is daemon-global + admin-only, so it fans to all admins (browsers only).
+ */
+void webui_broadcast_config_changed(void);
 
 /**
  * @brief Effective model name for a resolved LLM config (session model if set,
@@ -701,6 +782,37 @@ const char *webui_effective_model_name(const llm_resolved_config_t *resolved);
  * @param user_id Owning user (for the auth_db lookup).
  */
 void webui_conv_stamp_llm_settings(session_t *session, int64_t conv_id, int user_id);
+
+/**
+ * @brief Ensure the connection has a bound conversation, lazily creating one.
+ *
+ * Server-side mirror of the browser's `beginConversationBeforeSend`. Voice turns
+ * (always-on wake-word and push-to-talk) are dispatched by the daemon, not by a
+ * client "send", so they never trigger the client-side conversation pre-create.
+ * A voice turn taken with nothing selected therefore ran against
+ * `active_conversation_id == 0`, and the persistence gates on both voice paths
+ * skipped the ASR user row AND the assistant reply — the exchange vanished on the
+ * next reload. This binds (creating if needed) a conversation so those rows
+ * persist. No-op returning the existing id when one is already bound, so it is
+ * safe to call unconditionally on the voice paths.
+ *
+ * @param conn        Connection (must be authenticated).
+ * @param title_hint  Text to auto-title from (the transcript); may be NULL.
+ * @return The bound conversation id (existing or new), or 0 on failure.
+ */
+int64_t webui_ensure_active_conversation(ws_connection_t *conn, const char *title_hint);
+
+/* Minimum word count for a voice transcript to auto-create a conversation.
+ * Skips 1-2 word ASR fragments (false-wake / ambient-speech guard) so stray
+ * wake-word turns don't mint durable, public, memory-extractable conversations. */
+#define WEBUI_VOICE_AUTO_CONV_MIN_WORDS 3
+
+/**
+ * @brief True if a voice transcript is substantive enough to auto-create a
+ *        conversation (>= WEBUI_VOICE_AUTO_CONV_MIN_WORDS whitespace-separated words).
+ * @param text Transcript (may be NULL → false).
+ */
+bool webui_voice_transcript_substantive(const char *text);
 
 /**
  * @brief Send an error message to a client (severity = error).
@@ -797,18 +909,6 @@ int dawn_build_prompt(int user_id,
                       const char *user_turn_text,
                       prompt_refresh_kind_t kind,
                       composed_prompt_t *out);
-
-/**
- * @brief Process command tags in LLM response
- *
- * Extracts <command> tags, publishes to MQTT, and collects results.
- *
- * @param llm_response The LLM response containing command tags
- * @param session The session for context
- * @return Allocated string with follow-up response, or NULL on error
- */
-char *webui_process_commands(const char *llm_response, session_t *session);
-
 
 /* =============================================================================
  * Connection Iterator (defined in webui_server.c, used by webui_music.c)

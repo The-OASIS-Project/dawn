@@ -141,7 +141,7 @@ struct json_object *memory_extraction_parse_json(const char *response);
  * caller's buffers are smaller than the required minimums (model_buf_sz <
  * LLM_MODEL_NAME_MAX or endpoint_buf_sz < MEMORY_EXTRACTION_ENDPOINT_BUF_MIN).
  *
- * Sets cfg->tool_mode = "disabled", cfg->thinking_mode = "disabled", and
+ * Sets cfg->suppress_tools = true, cfg->thinking_mode = "disabled", and
  * cfg->timeout_ms from g_config.memory.extraction_timeout_ms — extraction
  * paths universally want JSON output without tools or visible reasoning.
  *

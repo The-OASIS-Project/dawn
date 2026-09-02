@@ -110,42 +110,50 @@ The stable prefix is built first (`build_stable_segment`, `:435`), **then** sate
 
 ### Provider handling
 
-Assembly is provider-agnostic — the two-segment `composed_prompt_t` is serialized per provider downstream: Claude attaches `cache_control` to the first system message (plus a second breakpoint on the final tool schema, `src/llm/llm_claude_format.c`), the OpenAI Responses API concatenates the two segments, and Chat Completions tolerates two consecutive system messages. Commit `e4dc72f` also unified cache-token accounting across providers (Claude `cache_creation`/`cache_read` tokens, Responses API usage struct). Gemini caching is documented as unreliable upstream — see the Gemini native-API notes in `docs/TODO.md`.
+Assembly is provider-agnostic — the two-segment `composed_prompt_t` is serialized per provider downstream: Claude attaches `cache_control` to the first system message (plus a second breakpoint on the final tool schema, `src/llm/llm_claude_format.c`); the OpenAI **Responses** API — which has no cache-breakpoint mechanism and requires the changing content *last* for its automatic prefix cache — puts only the **stable** segment in `instructions` (byte-stable) and repositions the **volatile** segment as a user item immediately before the current question, so `[instructions][tools][history]` caches cross-turn (`src/llm/llm_openai_responses_input.c`, `docs/RESPONSES_CACHE_REORDER_PLAN.md`; live-verified 0 → ~93% cross-turn cached); Chat Completions collapses the two into one leading system block (`llm_openai_cache.c`) — it shares the Responses cross-turn gap, unfixed since Claude was the primary provider. Commit `e4dc72f` also unified cache-token accounting across providers (Claude `cache_creation`/`cache_read` tokens, Responses API usage struct). Gemini caching is documented as unreliable upstream — see the Gemini native-API notes in `docs/TODO.md`.
 
-## OpenRouter Gateway Mode
+## OpenRouter Provider
 
-OpenRouter (`https://openrouter.ai/api/v1`) is an OpenAI-wire-compatible gateway fronting
-many vendors' models. DAWN integrates it as a **gateway toggle**, not a fourth sibling
-provider: `[llm.cloud] use_openrouter = true` (key `openrouter_api_key` in `secrets.toml`,
-or `OPENROUTER_API_KEY` env) routes **all** cloud traffic — the main chat path AND the
-auxiliary memory-extraction / compaction / silent-observe / scheduler calls — through
-OpenRouter with one key, regardless of the `provider` setting. Because OpenRouter is
-OpenAI-compatible for every model it serves (including Anthropic ones), all calls reuse the
-existing `llm_openai_*` request/SSE path (`CLOUD_PROVIDER_OPENROUTER` falls into the
-OpenAI-compatible branch everywhere, never the native Claude path).
+OpenRouter (`https://openrouter.ai/api/v1`) is an OpenAI-wire-compatible endpoint fronting
+many vendors' models. DAWN treats it as a **first-class cloud provider**, not a mode: set
+`[llm.cloud] provider = "openrouter"` (key `openrouter_api_key` in `secrets.toml`, or
+`OPENROUTER_API_KEY` env) and the main chat routes through OpenRouter with one key. Its model
+list (`openrouter_models`) uses `vendor/model` IDs (e.g. `anthropic/claude-sonnet-4`).
+Because OpenRouter is OpenAI-compatible for every model it serves (including Anthropic ones),
+all calls reuse the existing `llm_openai_*` request/SSE path (`CLOUD_PROVIDER_OPENROUTER`
+falls into the OpenAI-compatible branch everywhere, never the native Claude path).
 
-**Single-authority rule (avoids inconsistent state):** exactly one place converts the
-`use_openrouter` bool → the `CLOUD_PROVIDER_OPENROUTER` enum — the gateway short-circuit at
-the top of `llm_init()` / `llm_refresh_providers()` (and `llm_get_default_config()` for
-session defaults). Every other site treats the enum as ground truth and never re-reads the
-bool to decide the provider. The string-keyed auxiliary resolvers (compaction in
-`llm_context.c`, extraction in `memory_extraction.c`, silent-observe, scheduler) call the
-shared helper `llm_apply_openrouter_gateway()`, which rewrites their resolved
-provider/endpoint/api_key to OpenRouter while preserving the configured model string — so
-`compact_model` / silent-observe model / `memory.extraction_model` must be OpenRouter
-`vendor/model` IDs when the gateway is on. The scheduler picks from per-provider model lists,
-so it selects the OpenRouter default model explicitly instead.
+**One authority — the provider enum.** `provider` (a `CLOUD_PROVIDER_*` enum resolved by the
+init/refresh ladder) is the single source of truth for the active provider; there is no
+separate mode flag. A stored bare model name is canonically remapped to its OpenRouter
+`vendor/model` slug at the single request choke point (`llm_resolve_config`), so a legacy
+conversation's bare id is never sent verbatim.
 
-Other gateway specifics: OpenRouter never routes to `/v1/responses`
+**Per-purpose independence.** Each background purpose (memory-extraction in
+`memory_extraction.c`, compaction in `llm_context.c`, silent-observe, scheduler) follows its
+OWN provider setting (`extraction_provider` / `compact_provider` /
+`[llm.silent_observe] provider`, or the scheduler's `provider`). Set one to `"openrouter"`
+and put a `vendor/model` slug in that purpose's normal model field (empty → the main
+OpenRouter default). **No global override** forces an aux call onto OpenRouter — a
+Claude-configured extraction runs on direct Claude even while the main chat is on OpenRouter.
+
+Other specifics: OpenRouter never routes to `/v1/responses`
 (`should_dispatch_to_responses_api` skips `openrouter.ai`); requests carry optional
-`HTTP-Referer` + `X-Title` attribution headers; gateway-on-but-no-key falls back to local
-rather than issuing a NULL-key request; and `get_context_size()` best-effort-strips the
-`vendor/` prefix to reuse the known context-window tables, else a conservative 128K default.
+`HTTP-Referer` + `X-Title` attribution headers; a `provider="openrouter"` config with no key
+falls back to auto-detect, and a keyed aux purpose with no key **errors honestly** rather
+than silently switching providers; and `get_context_size()` best-effort-strips the `vendor/`
+prefix to reuse the known context-window tables, else a conservative 128K default.
 
-> **Tech debt note:** OpenRouter adds a seventh per-provider→(URL, key) branch ladder across
-> the resolvers (`llm_resolve_config`, `llm_chat_completion_with_config`,
-> `build_compaction_config`, `memory_extraction_resolve_config`, silent-observe, scheduler).
-> Consolidating these into one resolver is a worthwhile future cleanup.
+> **History:** OpenRouter was originally a `[llm.cloud] use_openrouter` gateway *toggle* that
+> force-rerouted all cloud traffic. It was promoted to a first-class provider (Aug 2026); the
+> retired `use_openrouter` bool is auto-migrated to `provider = "openrouter"` at load (once,
+> then dropped). The three per-purpose `*_openrouter_model` shadow fields were retired with
+> it — each purpose's normal model field now carries the slug.
+
+> **Tech debt note:** each provider still has its own `(URL, key)` branch across the resolvers
+> (`llm_resolve_config`, `llm_chat_completion_with_config`, `build_compaction_config`,
+> `memory_extraction_resolve_config`, silent-observe, scheduler). Consolidating these into one
+> resolver is a worthwhile future cleanup.
 
 ## LLM Worker Thread
 

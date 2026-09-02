@@ -1,0 +1,104 @@
+# DAWN model context-window registry
+# =====================================
+# Maps a model-id PREFIX to its maximum input context window (in tokens).
+#
+# Longest-prefix-match wins: DAWN sorts every provider's entries by prefix length
+# (descending) at load, so file order does NOT matter — "gpt-5.6" always beats the
+# "gpt-5" catch-all regardless of where each line sits.
+#
+# This file is REFERENCE DATA, not user settings. DAWN reads it once at startup and
+# NEVER rewrites it, so it is exempt from the dawn.toml WebUI settings round-trip.
+# Edit + restart to update a number or add a model — no rebuild required.
+#
+# If this file is missing, or a model isn't listed, DAWN falls back to a
+# per-provider default (OpenAI/OpenRouter 128K, Claude/Gemini their own). That
+# default is conservative — i.e. safe against over-running the window — ONLY for
+# models whose real window is >= the default (every modern model). The legacy
+# sub-128K entries below (gpt-4 8K, gpt-3.5 16K, gpt-4-32k 32K) would be
+# OVER-estimated by the 128K default, so those models require this file present.
+# Only the DIRECT providers below live here — OpenRouter and local (llama.cpp/
+# Ollama) context windows are fetched LIVE from the provider (/api/v1/models,
+# /props) and are intentionally not listed.
+#
+# Keys must be quoted (model ids contain '.' and '-').
+# Sources: developers.openai.com model reference, platform.claude.com (Aug 2026).
+
+[openai]
+# GPT-5.6 family — 1,050,000 (gpt-5.6, gpt-5.6-luna, gpt-5.6-sol, ...)
+"gpt-5.6" = 1050000
+# GPT-5.5 — 1,050,000 API window (the Codex surface caps it at 400K, not the API)
+"gpt-5.5" = 1050000
+# GPT-5.4 — 256,000
+"gpt-5.4" = 256000
+# GPT-5.0-5.2 family — 400,000
+"gpt-5.2" = 400000
+"gpt-5.1" = 400000
+"gpt-5-mini" = 400000
+"gpt-5-nano" = 400000
+"gpt-5" = 400000
+# GPT-4.1 family — 1,047,576
+"gpt-4.1-mini" = 1047576
+"gpt-4.1-nano" = 1047576
+"gpt-4.1" = 1047576
+# O-series reasoning models
+"o4-mini" = 200000
+"o3-pro" = 200000
+"o3-mini" = 200000
+"o3" = 200000
+"o1-pro" = 200000
+"o1-mini" = 128000
+"o1-preview" = 128000
+"o1" = 200000
+# GPT-4o family
+"gpt-4o-mini" = 128000
+"gpt-4o" = 128000
+# GPT-4 Turbo
+"gpt-4-turbo" = 128000
+"gpt-4-0125" = 128000
+"gpt-4-1106" = 128000
+# Legacy GPT-4
+"gpt-4-32k" = 32768
+"gpt-4" = 8192
+# Legacy GPT-3.5
+"gpt-3.5-turbo-16k" = 16384
+"gpt-3.5-turbo" = 16384
+
+[anthropic]
+# 1M context is GA at standard pricing since March 2026 (no beta header). The
+# newest flagships carry it; Haiku and older models remain at 200K.
+"claude-opus-4-8" = 1000000
+"claude-opus-4-7" = 1000000
+"claude-opus-4-6" = 1000000
+"claude-sonnet-4-6" = 1000000
+"claude-sonnet-5" = 1000000
+"claude-fable-5" = 1000000
+"claude-mythos-5" = 1000000
+# 200K models
+"claude-haiku-4-5" = 200000
+"claude-opus-4-5" = 200000
+"claude-sonnet-4-5" = 200000
+"claude-opus-4.5" = 200000
+"claude-sonnet-4.5" = 200000
+"claude-opus-4.1" = 200000
+"claude-sonnet-4.1" = 200000
+"claude-opus-4" = 200000
+"claude-sonnet-4" = 200000
+"claude-3-5-sonnet" = 200000
+"claude-3-5-haiku" = 200000
+"claude-3.5" = 200000
+"claude-3-opus" = 200000
+"claude-3-sonnet" = 200000
+"claude-3-haiku" = 200000
+
+[gemini]
+# All current Gemini families use a 1,048,576 (1M) input window.
+"gemini-3.1-pro" = 1048576
+"gemini-3-flash" = 1048576
+"gemini-3-pro" = 1048576
+"gemini-2.5-pro" = 1048576
+"gemini-2.5-flash-lite" = 1048576
+"gemini-2.5-flash" = 1048576
+"gemini-2.0-flash-lite" = 1048576
+"gemini-2.0-flash" = 1048576
+"gemini-1.5-pro" = 1048576
+"gemini-1.5-flash" = 1048576

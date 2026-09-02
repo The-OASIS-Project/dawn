@@ -137,7 +137,8 @@ void send_stream_delta_impl(struct lws *wsi,
 void send_stream_end_impl(struct lws *wsi,
                           uint32_t stream_id,
                           int64_t conversation_id,
-                          const char *reason);
+                          const char *reason,
+                          bool will_persist);
 void send_thinking_start_impl(struct lws *wsi,
                               uint32_t stream_id,
                               int64_t conversation_id,
@@ -155,7 +156,8 @@ void send_transcript_impl_ex(struct lws *wsi,
                              const char *text,
                              bool replay,
                              bool server_saved,
-                             int64_t conversation_id);
+                             int64_t conversation_id,
+                             int64_t message_id);
 
 /* =============================================================================
  * Audio Send (used by webui_audio.c)
@@ -186,6 +188,37 @@ void webui_send_audio_end(session_t *session, bool is_opus);
  * @param userdata Session pointer (cast to session_t*)
  */
 void webui_sentence_audio_callback(const char *sentence, void *userdata);
+
+/**
+ * @brief Multi-target TTS sentence callback (SERVER_AUTHORITATIVE_PERSISTENCE §Phase-4).
+ *
+ * Like webui_sentence_audio_callback, but fans the synthesized audio to every
+ * TTS-enabled WEBUI browser viewing the origin's conversation (the origin included),
+ * not just the origin.  Synthesis runs once per sentence; the resample + Opus encode
+ * run once and are shared.  Used by the normal text + push-to-talk voice workers.
+ * v1 is browser-to-browser (cross-device fan to Tier-2 satellites is deferred — a
+ * satellite has no active-conversation membership signal yet).  @param userdata is the
+ * ORIGIN session (cast to session_t*).
+ */
+void webui_sentence_audio_fanout_callback(const char *sentence, void *userdata);
+
+/**
+ * @brief Arm-time check: does a NON-origin speaker-capable viewer of @conv_id exist?
+ *
+ * The text worker arms TTS synthesis when the origin's own TTS is on OR this returns
+ * true, so a silent-origin turn still speaks on a remote listener's device.  @param
+ * origin_session_id is excluded from the scan.
+ */
+bool webui_audio_has_other_speaker(int user_id, int64_t conv_id, uint32_t origin_session_id);
+
+/**
+ * @brief Close the multi-target TTS "speaking" bracket on non-origin recipients (§Phase-4).
+ *
+ * Fans a per-connection state:idle to every NON-origin viewer that received the fanned audio,
+ * mirroring the origin's own turn-end idle.  Called once from each worker's teardown funnel
+ * (text_worker_end / audio_worker_end); a no-op walk when no listener was fanned to.
+ */
+void webui_fanout_tts_idle(session_t *origin);
 
 #ifdef __cplusplus
 }

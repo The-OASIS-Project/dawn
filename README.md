@@ -9,6 +9,8 @@ Unlike cloud-dependent assistants and plugin-based AI agents, DAWN runs entirely
 DAWN runs on platforms from a Jetson Orin to a Raspberry Pi 5 and supports multiple interfaces: a local microphone, a browser-based Web UI with voice and text input, and DAP2 satellite devices (Raspberry Pi or ESP32).
 
 > **New to DAWN?** See **[GETTING_STARTED.md](GETTING_STARTED.md)** for a step-by-step setup guide.
+>
+> **Updating an existing install?** See **[UPGRADING.md](UPGRADING.md)** for version-to-version notes and anything that needs your attention.
 
 <!-- TODO: Hero screenshot of WebUI conversation view -->
 
@@ -46,7 +48,7 @@ Everything is GPLv3. Cloud LLMs are optional — DAWN runs fully local if you wa
 ### Voice Intelligence
 
 - **Speech Recognition** — Whisper ASR with GPU acceleration on Jetson (2.3x–5.5x faster than real-time). Intelligent voice activity detection knows when you're speaking and when you've stopped.
-- **Multi-Provider LLM** — Cloud: OpenAI GPT-5, Anthropic Claude 4.6, Google Gemini 2.5/3, or any model through the OpenRouter gateway. Local: llama.cpp or Ollama for fully offline operation. Runtime model switching via WebUI or voice.
+- **Multi-Provider LLM** — Cloud: OpenAI GPT-5, Anthropic Claude 4.6, Google Gemini 2.5/3, or any model via OpenRouter (one key, many vendors). Local: llama.cpp or Ollama for fully offline operation. Runtime model switching via WebUI or voice.
 - **Text-to-Speech** — Piper TTS with ONNX Runtime. Multiple voices included. Text preprocessing for natural phrasing.
 - **Speech-Shaped Replies** — On voice interfaces (satellites, local mic, WebUI voice) DAWN tells the model its reply will be read aloud, so answers stay concise and skip on-screen-only formatting; it also warns the model that speech-transcribed input may contain homophone mishearings to interpret from context. All three directives are editable in Settings (Text-to-Speech / Speech Recognition), and the WebUI voice variant keeps the screen free for visuals.
 - **Extended Thinking** — Deep reasoning mode for complex queries:
@@ -74,6 +76,7 @@ Everything is GPLv3. Cloud LLMs are optional — DAWN runs fully local if you wa
 - **Browser-Based** — Accessible on port 3000 from any device on your network.
 - **Voice & Text Input** — Three input modes via unified action button: Send Text, Hold to Talk (push-to-talk), and Continuous Listening (always-on wake word detection with server-side VAD). Smart typing override temporarily switches voice modes to Send when text is present.
 - **Real-Time Communication** — WebSocket-based with session persistence across page refreshes (30-minute timeout).
+- **Multi-Device Sync** — Open the same conversation on two browsers (say a phone and a laptop) and they stay in lockstep: messages, live tool-call activity, and **spoken replies** all fan out to every viewer in real time, with the server as the single source of truth. Trigger a reply on one device and it's read aloud on every device viewing that conversation that has text-to-speech on — synthesized once on the server, no matter how many are listening.
 - **Settings Panel** — Live configuration editing from the browser. API keys with secure handling. Restart indicators for settings that require it.
 - **User Management** — Cookie-based authentication with "Remember Me" (30-day sessions). Admin tools: create/delete users, reset passwords, unlock accounts. Per-user persona, location, timezone, units, and TTS speed preferences.
 - **Conversation History** — Browse, search, continue, delete, and export (JSON/HTML) past conversations. One-click message copy. Per-conversation LLM settings (reasoning mode, tools mode).

@@ -41,6 +41,7 @@
 #include "llm/llm_tools.h"
 #include "logging.h"
 #include "memory/memory_extraction.h"
+#include "utils/string_utils.h" /* sanitize_utf8_for_json */
 #include "version.h"
 #include "webui/webui_image_rehydrate.h"
 #include "webui/webui_internal.h"
@@ -229,7 +230,14 @@ static int list_conv_callback(const conversation_t *conv, void *context) {
    json_object *conv_obj = json_object_new_object();
 
    json_object_object_add(conv_obj, "id", json_object_new_int64(conv->id));
-   json_object_object_add(conv_obj, "title", json_object_new_string(conv->title));
+   /* Sanitize the title's UTF-8 at the WS emit sink: an invalid byte (e.g. a
+    * codepoint split by a byte-truncated title from any source) makes the browser's
+    * JSON.parse reject the ENTIRE conversation-list frame, not just this row. conv
+    * is const, so sanitize a local copy. */
+   char safe_title[CONV_TITLE_MAX];
+   snprintf(safe_title, sizeof(safe_title), "%s", conv->title);
+   sanitize_utf8_for_json(safe_title);
+   json_object_object_add(conv_obj, "title", json_object_new_string(safe_title));
    json_object_object_add(conv_obj, "created_at", json_object_new_int64(conv->created_at));
    json_object_object_add(conv_obj, "updated_at", json_object_new_int64(conv->updated_at));
    json_object_object_add(conv_obj, "message_count", json_object_new_int(conv->message_count));
@@ -363,6 +371,45 @@ static bool should_skip_memory_extraction(ws_connection_t *conn) {
 }
 
 /**
+ * @brief Shared create+bind seam for a new conversation on this connection.
+ *
+ * Creates the row, makes it the active conversation, marks it public (a fresh
+ * conversation is never private until the user toggles it), stamps the session's
+ * LLM settings, and audit-logs it. Both the client-driven handler
+ * (handle_new_conversation) and the server-driven voice auto-bind
+ * (webui_ensure_active_conversation) go through here so create semantics live in
+ * ONE place. Callers own their own framing (a solicited response vs. an
+ * unsolicited push) and their own turn-tagging.
+ *
+ * @return conv_db_create's rc (AUTH_DB_SUCCESS / AUTH_DB_LIMIT_EXCEEDED / failure).
+ *         Callers MUST pre-initialize *conv_id_out to 0 and consume it only on
+ *         AUTH_DB_SUCCESS — conv_db_create may touch the out-param before its rc is
+ *         known, so this function does not guarantee it untouched on failure.
+ */
+static int webui_conv_create_bind(ws_connection_t *conn,
+                                  const char *title,
+                                  const char *log_detail,
+                                  int64_t *conv_id_out) {
+   int rc = conv_db_create(conn->auth_user_id, title, conv_id_out);
+   if (rc != AUTH_DB_SUCCESS) {
+      return rc;
+   }
+
+   conn->active_conversation_id = *conv_id_out;
+   /* A fresh conversation is public; active_conversation_id + active_conversation_private
+    * move together as a pair (see the invariant note where should_skip_memory_extraction
+    * reads it) so the cache can't report a public row as private. */
+   conn->active_conversation_private = false;
+   /* Stamp the session's current LLM settings onto the fresh row so it records the
+    * model/reasoning it runs with instead of leaving NULL columns (which the client
+    * would render as stale defaults). Safe no-op once a message lands. */
+   webui_conv_stamp_llm_settings(conn->session, *conv_id_out, conn->auth_user_id);
+   auth_db_log_event("CONVERSATION_CREATED", conn->username, conn->client_ip,
+                     log_detail ? log_detail : "New conversation");
+   return rc;
+}
+
+/**
  * @brief Create a new conversation
  */
 void handle_new_conversation(ws_connection_t *conn, struct json_object *payload) {
@@ -406,8 +453,8 @@ void handle_new_conversation(ws_connection_t *conn, struct json_object *payload)
       }
    }
 
-   int64_t conv_id;
-   int result = conv_db_create(conn->auth_user_id, title, &conv_id);
+   int64_t conv_id = 0;
+   int result = webui_conv_create_bind(conn, title, "New conversation", &conv_id);
 
    if (result == AUTH_DB_SUCCESS) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
@@ -430,17 +477,6 @@ void handle_new_conversation(ws_connection_t *conn, struct json_object *payload)
        * - User starts a new chat via UI (which sends clear_history first)
        */
 
-      auth_db_log_event("CONVERSATION_CREATED", conn->username, conn->client_ip,
-                        "New conversation");
-
-      /* Update active conversation tracking */
-      conn->active_conversation_id = conv_id;
-
-      /* Stamp the session's current LLM settings onto the fresh row so it records
-       * the model/reasoning it runs with instead of leaving NULL columns (which the
-       * client would render as stale defaults). Safe no-op once a message lands. */
-      webui_conv_stamp_llm_settings(conn->session, conv_id, conn->auth_user_id);
-
       /* Back-fill the in-flight turn's conversation tag if it was dispatched
        * before this row existed (fresh-chat first message: the text is dispatched,
        * then this new_conversation creates the row).  Only overwrite the
@@ -462,6 +498,94 @@ void handle_new_conversation(ws_connection_t *conn, struct json_object *payload)
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);
+}
+
+bool webui_voice_transcript_substantive(const char *text) {
+   if (!text) {
+      return false;
+   }
+   int words = 0;
+   const char *p = text;
+   while (*p) {
+      while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') {
+         p++;
+      }
+      if (!*p) {
+         break;
+      }
+      words++;
+      if (words >= WEBUI_VOICE_AUTO_CONV_MIN_WORDS) {
+         return true; /* short-circuit once the floor is met */
+      }
+      while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') {
+         p++;
+      }
+   }
+   return false;
+}
+
+int64_t webui_ensure_active_conversation(ws_connection_t *conn, const char *title_hint) {
+   if (!conn || conn->auth_user_id <= 0) {
+      return 0;
+   }
+
+   int64_t existing = conn->active_conversation_id;
+   if (existing > 0) {
+      return existing; /* already bound — nothing to create */
+   }
+
+   /* Derive a human title from the transcript instead of a bare "New
+    * Conversation" (voice turns carry no user-typed title). */
+   char title[CONV_TITLE_MAX];
+   title[0] = '\0';
+   if (title_hint && title_hint[0] != '\0') {
+      conv_generate_title(title_hint, title, sizeof(title));
+      /* Sanitize once at the source: conv_generate_title's boundary trim keeps valid
+       * UTF-8 valid but does not repair a transcript's pre-existing bad bytes.  Doing
+       * it here keeps BOTH the stored row and the unsolicited push frame valid. */
+      sanitize_utf8_for_json(title);
+   }
+
+   int64_t conv_id = 0;
+   int rc = webui_conv_create_bind(conn, title[0] ? title : NULL, "Voice conversation (auto)",
+                                   &conv_id);
+   if (rc != AUTH_DB_SUCCESS || conv_id <= 0) {
+      OLOG_WARNING("WebUI: voice-turn conversation auto-create failed (rc=%d)", rc);
+      return 0;
+   }
+
+   /* NOTE: no stream_conversation_id back-fill here — the caller owns turn-tagging.
+    * The text/always-on path binds active_conversation_id BEFORE its turn captures
+    * work->conv_id (→ stream at dequeue, webui_text_processing.c), and the audio
+    * caller atomic_stores the returned id directly.  A back-fill here would be
+    * dead-on-arrival (immediately overwritten) and non-atomic against the worker. */
+
+   /* Push an unsolicited new_conversation_response so a live client rebinds its
+    * active conversation (handleNewConversationResponse -> setActiveConversationId),
+    * keeping a still-open tab from minting a second conversation on the next typed
+    * turn. A reload finds the row via the conversation list regardless. */
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("new_conversation_response"));
+   json_object *resp_payload = json_object_new_object();
+   json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+   json_object_object_add(resp_payload, "conversation_id", json_object_new_int64(conv_id));
+   /* Include the transcript-derived title so a client can reflect it immediately
+    * instead of blanking the title until a later refresh (voice turns clear the
+    * >=3-word floor, so `title` is populated here). */
+   if (title[0]) {
+      json_object_object_add(resp_payload, "title", json_object_new_string(title));
+   }
+   /* Marks this as a server-initiated (unsolicited) bind, NOT a reply to a client
+    * new_conversation request.  The client uses it to skip request-flow side
+    * effects (the "created" toast, re-applying a pending-privacy state) that would
+    * be wrong mid-voice-turn. */
+   json_object_object_add(resp_payload, "server_initiated", json_object_new_boolean(1));
+   json_object_object_add(response, "payload", resp_payload);
+   send_json_response(conn, response);
+   json_object_put(response);
+
+   OLOG_INFO("WebUI: bound voice turn to auto-created conversation %lld", (long long)conv_id);
+   return conv_id;
 }
 
 /**
@@ -641,6 +765,14 @@ static int load_msg_callback(const conversation_message_t *msg, void *context) {
    if (msg->tool_call_id && msg->tool_call_id[0]) {
       json_object_object_add(msg_obj, "tool_call_id", json_object_new_string(msg->tool_call_id));
    }
+   /* Red-on-failure pill parity: surface a persisted tool-result failure so a reloaded pill reds,
+    * matching the live tool_step `error`.  Emitted only when set (omit otherwise = neutral).
+    * NOTE the key name: this reload projection uses `is_error` (the DB column name), which is the
+    * deliberate twin of the LIVE tool_step frame's `error` key — same concept, two message types.
+    * A client reads `m.is_error` here and `obj.error` there; keep both in sync if either moves. */
+   if (msg->is_error) {
+      json_object_object_add(msg_obj, "is_error", json_object_new_boolean(1));
+   }
    /* Surface display-only reasoning JSON as a parsed `reasoning` field so the browser
     * reconstructs the "AI thought" panel at this row's position (E3).  Display-only —
     * delivered here but NOT in webui_session_restore_msg_cb (the LLM-context path). */
@@ -689,9 +821,7 @@ static json_object *build_conv_llm_settings_json(const conversation_t *conv) {
    json_object_object_add(llm, "model",
                           json_object_new_string(conv->model[0] ? conv->model
                                                                 : (def_model ? def_model : "")));
-   json_object_object_add(llm, "tools_mode",
-                          json_object_new_string(conv->tools_mode[0] ? conv->tools_mode
-                                                                     : def_r.tool_mode));
+   /* tools_mode is a retired dead column — no longer surfaced to the client. */
    json_object_object_add(llm, "thinking_mode",
                           json_object_new_string(conv->thinking_mode[0] ? conv->thinking_mode
                                                                         : def_r.thinking_mode));
@@ -730,9 +860,89 @@ void webui_conv_stamp_llm_settings(session_t *session, int64_t conv_id, int user
    snprintf(model, sizeof(model), "%s", webui_effective_model_name(&r));
 
    const char *type_str = r.type == LLM_LOCAL ? "local" : "cloud";
+   /* tools_mode column is retired (dead) — pass empty. */
    conv_db_fill_llm_settings_if_empty(conv_id, user_id, type_str,
-                                      cloud_provider_to_string(r.cloud_provider), model,
-                                      r.tool_mode, r.thinking_mode, r.reasoning_effort);
+                                      cloud_provider_to_string(r.cloud_provider), model, "",
+                                      r.thinking_mode, r.reasoning_effort);
+}
+
+/**
+ * @brief Re-anchor a connection's active conversation to @p req_conv, ownership-checked.
+ *
+ * Sets conn->active_conversation_id AND conn->active_conversation_private together
+ * from the same owned conversation row, or leaves @p conn untouched and returns
+ * false.  The two fields MUST move as a pair: active_conversation_private gates
+ * memory extraction (a private conversation must not be extracted), so a private
+ * flag left stale relative to the id is a privacy-leak-class bug.  Centralizing
+ * that invariant here is why both the `text`-tag heal path
+ * (webui_message_dispatch.c) and handle_set_active_conversation call this rather
+ * than open-coding the conv_db_get→set→free dance.  Does NOT replay history or
+ * touch stream_conversation_id (turns derive their stream conv from
+ * active_conversation_id at enqueue).
+ *
+ * @return true if re-anchored (conn owns @p req_conv); false otherwise.
+ */
+bool conn_reanchor_conversation(ws_connection_t *conn, int64_t req_conv) {
+   if (!conn || req_conv <= 0 || conn->auth_user_id <= 0) {
+      return false;
+   }
+   conversation_t conv = { 0 };
+   if (conv_db_get(req_conv, conn->auth_user_id, &conv) != AUTH_DB_SUCCESS) {
+      return false;
+   }
+   conn->active_conversation_id = req_conv;
+   conn->active_conversation_private = conv.is_private;
+   conv_free(&conv);
+   return true;
+}
+
+/**
+ * @brief Re-anchor the connection's active conversation without replaying history.
+ *
+ * Lightweight counterpart to handle_load_conversation: a text/voice turn derives
+ * its stream conversation from conn->active_conversation_id captured at enqueue,
+ * so a reconnecting client only needs to reset that field (via
+ * conn_reanchor_conversation) — NOT replay the full message history nor touch
+ * stream_conversation_id.  Owner-scoped and non-oracle on failure.  Tolerates a
+ * NULL/absent payload (replies with the missing-id error rather than dropping).
+ */
+void handle_set_active_conversation(ws_connection_t *conn, struct json_object *payload) {
+   if (!conn_require_auth(conn)) {
+      return;
+   }
+
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type",
+                          json_object_new_string("set_active_conversation_response"));
+   json_object *resp_payload = json_object_new_object();
+
+   json_object *id_obj;
+   int64_t req_conv = 0;
+   if (payload && json_object_object_get_ex(payload, "conversation_id", &id_obj)) {
+      req_conv = json_object_get_int64(id_obj);
+   }
+
+   if (req_conv <= 0) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Missing conversation id"));
+   } else if (conn_reanchor_conversation(conn, req_conv)) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+      json_object_object_add(resp_payload, "conversation_id", json_object_new_int64(req_conv));
+      json_object_object_add(resp_payload, "is_private",
+                             json_object_new_boolean(conn->active_conversation_private));
+   } else {
+      /* Owner-scoped, non-oracle: a foreign or absent conversation gets one
+       * indistinguishable answer (same shape as doc_library_get). */
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "conversation_id", json_object_new_int64(req_conv));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Conversation unavailable"));
+   }
+
+   json_object_object_add(response, "payload", resp_payload);
+   send_json_response(conn, response);
+   json_object_put(response);
 }
 
 /**
@@ -891,6 +1101,7 @@ void handle_load_conversation(ws_connection_t *conn, struct json_object *payload
          {
             json_object_object_add(resp_payload, "is_archived",
                                    json_object_new_boolean(conv.is_archived));
+            sanitize_utf8_for_json(conv.title); /* valid UTF-8 at the WS sink (see list emit) */
             json_object_object_add(resp_payload, "title", json_object_new_string(conv.title));
             json_object_object_add(resp_payload, "message_count",
                                    json_object_new_int(total_messages));
@@ -1455,9 +1666,18 @@ void handle_search_conversations(ws_connection_t *conn, struct json_object *payl
  * MESSAGE-ROW OWNERSHIP MAP (one tool-using turn writes several `messages` rows from
  * three different writers — keep these partitions disjoint to avoid double-writes/drops):
  *
- *   - User turn .......... CLIENT here (handle_save_message), EXCEPT a vision turn, which
- *                          text_input_dispatch.c persists server-side (it owns the image
- *                          markers); the client skips the save when vision_image_count > 0.
+ *   - User turn .......... DAEMON.  Every TYPED/text-dispatch user turn is persisted in
+ *                          text_input_dispatch.c (core_text_input_dispatch) — text and image
+ *                          alike; for an image turn the WebUI hands it
+ *                          `persist_content_override` = text + [IMAGE:<id>] markers (built
+ *                          from the client's image_ids).  The daemon echoes server_saved=true
+ *                          so the client never saves a user row (handle_save_message no longer
+ *                          writes them).  Durability is now load-bearing on conv_id > 0 at
+ *                          dispatch (a conv_id==0 dispatch persists nothing — same as the old
+ *                          client path when no conversation existed).  Voice/ASR user turns are
+ *                          a SEPARATE server-side writer (webui_audio.c persists the transcript
+ *                          directly, not via core_text_input_dispatch) — still one writer per
+ *                          row, just a different one for that path.
  *   - Tool iteration rows  DAEMON, via the persist hook (persist_appended_tool_turn →
  *     (assistant+tool) .... webui_tool_persist_cb), once per LLM tool-loop iteration; this
  *                          is also where per-iteration display-only `reasoning` is attached.
@@ -1513,6 +1733,20 @@ void handle_save_message(ws_connection_t *conn, struct json_object *payload) {
       return;
    }
 
+   /* User turns are DAEMON-persisted now (server-authoritative — see the OWNERSHIP
+    * MAP above; text_input_dispatch.c writes every user turn, image markers included).
+    * A client user-role save is therefore a no-op: the row already exists and the
+    * turn echoed server_saved=true.  Accept-and-drop (answer success so a stale client
+    * doesn't retry) rather than write a duplicate row.  Mirrors the job-conv drop below. */
+   if (strcmp(role, "user") == 0) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+      json_object_object_add(resp_payload, "conversation_id", json_object_new_int64(conv_id));
+      json_object_object_add(response, "payload", resp_payload);
+      send_json_response(conn, response);
+      json_object_put(response);
+      return;
+   }
+
    /* A job conversation is persisted ENTIRELY server-side: the dispatch saves the
     * goal, job_worker + the tool-persist hook save the assistant/tool rows.  When a
     * user WATCHES a job live (CP4b), the client's streaming backup-save (streaming.js)
@@ -1531,78 +1765,21 @@ void handle_save_message(ws_connection_t *conn, struct json_object *payload) {
       return;
    }
 
-   /* Optional display-only reasoning JSON for the final answer (E3).  Bounded by the same
-    * limit as message content; over-limit is dropped (the "AI thought" panel simply won't
-    * render for that message rather than storing an unbounded blob). */
-   const char *reasoning = NULL;
-   json_object *reasoning_obj;
-   if (json_object_object_get_ex(payload, "reasoning", &reasoning_obj) &&
-       json_object_is_type(reasoning_obj, json_type_string)) {
-      const char *r = json_object_get_string(reasoning_obj);
-      if (r && r[0] && strlen(r) <= CONV_MESSAGE_MAX) {
-         reasoning = r;
-      }
-   }
-
-   /* SECURITY: Validate any embedded image thumbnails (size limit, safe prefix) */
-   if (!validate_image_marker(content)) {
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-      json_object_object_add(resp_payload, "error",
-                             json_object_new_string("Invalid or oversized image data"));
-      json_object_object_add(response, "payload", resp_payload);
-      send_json_response(conn, response);
-      json_object_put(response);
-      return;
-   }
-
-   /* Clear pending_visual if present — the client-side streaming save
-    * already interleaves the visual content at the correct position
-    * (pre-visual text + <dawn-visual> tag + post-visual text). */
-   if (strcmp(role, "assistant") == 0 && conn->session) {
-      pthread_mutex_lock(&conn->session->tools_mutex);
-      free(conn->session->pending_visual);
-      conn->session->pending_visual = NULL;
-      pthread_mutex_unlock(&conn->session->tools_mutex);
-   }
-
-   int64_t msg_id = 0;
-   int result = conv_db_add_message_with_tools(conv_id, conn->auth_user_id, role, content, NULL,
-                                               NULL, reasoning, &msg_id);
-
-   if (result == AUTH_DB_SUCCESS) {
-      if (conn->session && msg_id > 0)
-         session_stamp_last_message_id(conn->session, role, msg_id);
-      /* §6.3 — the SUBTLE one.  A foreground WebUI turn is saved by the BROWSER,
-       * not the server, so this is the only place its body becomes durable.  An
-       * event-only consumer tailing a conversation that happens to have a tab
-       * open would otherwise never receive the answer.  Assistant rows only:
-       * user text is echoed to the sender already. */
-      if (role && strcmp(role, "assistant") == 0) {
-         conv_event_notify_message_appended(conv_id, conn->auth_user_id, msg_id, role, content);
-      }
-      /* Promote any referenced images to PERMANENT so they survive age/LRU eviction
-       * for the life of the conversation (conversation-lifecycle-owned).  Owner-checked
-       * via conn->auth_user_id; an injected foreign id no-ops.  Per-message scan: the
-       * collect cap equals the per-turn upload cap, so no referenced id is missed. */
-      char img_ids[WEBUI_MAX_VISION_IMAGES_CAP][IMAGE_ID_LEN];
-      int img_count = 0;
-      if (webui_collect_image_ids(content, img_ids, WEBUI_MAX_VISION_IMAGES_CAP, &img_count) ==
-          SUCCESS) {
-         for (int i = 0; i < img_count; i++) {
-            image_store_update_retention(img_ids[i], conn->auth_user_id, IMAGE_RETAIN_PERMANENT);
-         }
-      }
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
-   } else if (result == AUTH_DB_FORBIDDEN) {
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-      json_object_object_add(resp_payload, "error",
-                             json_object_new_string("Access denied to conversation"));
-   } else {
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-      json_object_object_add(resp_payload, "error",
-                             json_object_new_string("Failed to save message"));
-   }
-
+   /* Server-authoritative (SERVER_AUTHORITATIVE_PERSISTENCE_DESIGN Phase 2b-ii, §9/Q4): the
+    * assistant reply is now persisted ENTIRELY server-side — the foreground text/voice
+    * workers write the row via webui_persist_final_answer (which attaches reasoning +
+    * accumulated visual, promotes reply-body images, stamps the history id, and fans out
+    * message_appended).  This fall-through is assistant-only in practice (the role whitelist
+    * above rejects everything but user/assistant, and user drops earlier), so a client
+    * save_message here is a no-op.  ACCEPT-AND-DROP: answer success so a stale/lagging client
+    * (incl. one
+    * behind a deploy, or Aurora before it retires its client-save) neither retries nor errors.
+    * PURE drop — no row, and deliberately NO pending_visual clear (a race with the worker's
+    * take could free the visual out from under the append) and NO fan-out (no msg_id exists).
+    * Mirrors the user-role + job-conv drops above; the handler stays forever as the
+    * stale-client sink. */
+   json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+   json_object_object_add(resp_payload, "conversation_id", json_object_new_int64(conv_id));
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);
@@ -1677,7 +1854,6 @@ void handle_lock_conversation_llm(ws_connection_t *conn, struct json_object *pay
    const char *llm_type = NULL;
    const char *cloud_provider = NULL;
    const char *model = NULL;
-   const char *tools_mode = NULL;
    const char *thinking_mode = NULL;
    const char *reasoning_effort = NULL;
 
@@ -1691,9 +1867,6 @@ void handle_lock_conversation_llm(ws_connection_t *conn, struct json_object *pay
    if (json_object_object_get_ex(settings_obj, "model", &val)) {
       model = json_object_get_string(val);
    }
-   if (json_object_object_get_ex(settings_obj, "tools_mode", &val)) {
-      tools_mode = json_object_get_string(val);
-   }
    if (json_object_object_get_ex(settings_obj, "thinking_mode", &val)) {
       thinking_mode = json_object_get_string(val);
    }
@@ -1703,8 +1876,7 @@ void handle_lock_conversation_llm(ws_connection_t *conn, struct json_object *pay
 
    /* Validate input lengths against database field sizes */
    if ((llm_type && strlen(llm_type) > 15) || (cloud_provider && strlen(cloud_provider) > 15) ||
-       (model && strlen(model) > 63) || (tools_mode && strlen(tools_mode) > 15) ||
-       (thinking_mode && strlen(thinking_mode) > 15) ||
+       (model && strlen(model) > 63) || (thinking_mode && strlen(thinking_mode) > 15) ||
        (reasoning_effort && strlen(reasoning_effort) > 15)) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error", json_object_new_string("Field value too long"));
@@ -1714,9 +1886,10 @@ void handle_lock_conversation_llm(ws_connection_t *conn, struct json_object *pay
       return;
    }
 
-   /* Lock settings in database (only works if message_count == 0) */
+   /* Lock settings in database (only works if message_count == 0).
+    * tools_mode column is retired (dead) — pass empty. */
    int result = conv_db_lock_llm_settings(conv_id, conn->auth_user_id, llm_type, cloud_provider,
-                                          model, tools_mode, thinking_mode, reasoning_effort);
+                                          model, "", thinking_mode, reasoning_effort);
 
    if (result == AUTH_DB_SUCCESS) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
@@ -1947,6 +2120,7 @@ void handle_export_conversation(ws_connection_t *conn, struct json_object *paylo
    /* Conversation metadata */
    json_object *conv_obj = json_object_new_object();
    json_object_object_add(conv_obj, "id", json_object_new_int64(conv.id));
+   sanitize_utf8_for_json(conv.title); /* valid UTF-8 in the export JSON */
    json_object_object_add(conv_obj, "title", json_object_new_string(conv.title));
 
    char ts_buf[32];

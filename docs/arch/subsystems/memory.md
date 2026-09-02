@@ -82,6 +82,7 @@ Memory extraction happens at session end, not during conversation — zero laten
    - Hybrid `summary_adapter` merges keyword + semantic results by summary id and re-ranks by max-score (Step 3 of summary backfill)
    - Memory-tool double-dip mitigation: prompt nudge in `core/prompt_compose.c` framing tells the LLM the focus block already contains its top hits
    - Source-type tagging via `focus_source.h` taxonomy (INTERNAL / EXTERNAL / USER_CONTENT) routes the injection filter only at the trust boundary
+- **memory_citation.c** (Aug 2026, feature-gated on `[memory] citation_enabled`): the citation signal (from RMM, arXiv 2503.08026 — the readout only, not its RL reranker). When on, the focus block numbers each citeable candidate `[M# source]`; the model echoes the ones it used in a trailing `<cited>M1,M7</cited>` tag that `llm_response_finalize` strips (a live stream-strip seam, `text_filter_cited_tags`, keeps it out of the browser mid-stream). Each turn's injected-vs-cited item ids + their `final_score` land in the `memory_citation_audit` table (schema v78) → **injection precision** (are we injecting memory the model actually uses?) via `benchmarks/citation_audit_summary.py`. A `context_citations` WS frame gold-highlights the cited rows in the WebUI Context panel. Log-only today; Phase 2 (citation-only confidence reinforcement) is designed but not built. See `docs/MEMORY_CITATION_DESIGN.md`.
 
 - **memory_fact_search.c/h**: Hybrid-search public surface
    - Extracted from `memory_embeddings.c` (header-only split May 2026)

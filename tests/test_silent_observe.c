@@ -87,19 +87,8 @@ static void test_event_listener(const char *category,
 dawn_config_t g_config;
 secrets_config_t g_secrets;
 
-/* Stub for llm_apply_openrouter_gateway — silent-observe's resolver calls this;
- * the test doesn't exercise gateway mode, so it's a no-op (returns false). */
-bool llm_apply_openrouter_gateway(cloud_provider_t *provider,
-                                  const char **endpoint,
-                                  const char **api_key) {
-   (void)provider;
-   (void)endpoint;
-   (void)api_key;
-   return false;
-}
-
-/* Stub for llm_get_default_openrouter_model — referenced by the resolver's gateway
- * branch (never reached here since the gateway stub returns false), but must link. */
+/* Stub for llm_get_default_openrouter_model — the resolver's openrouter arm calls it
+ * to fill an empty model with the OpenRouter default; must link. */
 const char *llm_get_default_openrouter_model(void) {
    return "anthropic/claude-3.5-haiku";
 }
@@ -122,6 +111,12 @@ char *llm_chat_completion_with_config(struct json_object *conversation_history,
    if (!s_mock_response)
       return NULL;
    return strdup(s_mock_response);
+}
+
+/* Stubs for the thread-local tool-suppression guard bracketing the LLM call. */
+void llm_tools_suppress_push(void) {
+}
+void llm_tools_suppress_pop(void) {
 }
 
 /* Stub the memory filter — return programmed blocking decision.
@@ -385,6 +380,31 @@ static void test_config_unknown_provider(void) {
    TEST_ASSERT_EQUAL_INT(FAILURE, rc);
 }
 
+/* --- OpenRouter is a first-class provider (2b): with a key it reaches the LLM --- */
+static void test_config_openrouter_provider(void) {
+   strncpy(g_config.llm.silent_observe.provider, "openrouter",
+           sizeof(g_config.llm.silent_observe.provider) - 1);
+   strncpy(g_secrets.openrouter_api_key, "sk-or-test", sizeof(g_secrets.openrouter_api_key) - 1);
+   s_mock_response = "{ \"ack\": true, \"category\": \"calendar\", \"note\": \"x\" }";
+   silent_observe_response_t out = { 0 };
+   int rc = llm_silent_observe("input", "calendar", 1, &out);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT_MESSAGE(1, s_mock_response_called,
+                                 "openrouter provider with a key must reach the LLM call");
+}
+
+/* --- OpenRouter with no key rejects before the LLM call (P1) --- */
+static void test_config_openrouter_no_key(void) {
+   strncpy(g_config.llm.silent_observe.provider, "openrouter",
+           sizeof(g_config.llm.silent_observe.provider) - 1);
+   /* g_secrets.openrouter_api_key is empty by default */
+   silent_observe_response_t out = { 0 };
+   int rc = llm_silent_observe("input", "calendar", 1, &out);
+   TEST_ASSERT_EQUAL_INT(FAILURE, rc);
+   TEST_ASSERT_EQUAL_INT_MESSAGE(0, s_mock_response_called,
+                                 "openrouter with no key must reject before the LLM call");
+}
+
 /* --- Parameter validation: NULL inputs --- */
 static void test_params_null_input(void) {
    silent_observe_response_t out = { 0 };
@@ -447,6 +467,8 @@ int main(void) {
    RUN_TEST(test_config_missing_provider);
    RUN_TEST(test_config_cloud_provider_no_key);
    RUN_TEST(test_config_unknown_provider);
+   RUN_TEST(test_config_openrouter_provider);
+   RUN_TEST(test_config_openrouter_no_key);
    RUN_TEST(test_params_null_input);
    RUN_TEST(test_listener_registration);
    RUN_TEST(test_markdown_fence_stripped);

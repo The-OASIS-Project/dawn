@@ -94,7 +94,6 @@ static const tool_metadata_t url_metadata = {
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NETWORK | TOOL_CAP_SCHEDULABLE | TOOL_CAP_REQUIRES_VALUE |
                    TOOL_CAP_INFORMATIONAL,
-   .is_getter = true,
    .skip_followup = false,
    .default_remote = true,
 
@@ -121,7 +120,7 @@ static char *url_tool_callback(const char *action, char *value, int *should_resp
    /* Support both "get" action and NULL/empty action (for direct calls) */
    if (action != NULL && action[0] != '\0' && strcmp(action, "get") != 0) {
       OLOG_WARNING("url_tool: Unknown action '%s'", action);
-      return strdup("Unknown URL action. Use: get");
+      return strdup(TOOL_RESULT_ERROR_MARK "Unknown URL action. Use: get");
    }
 
    OLOG_INFO("url_tool: Fetching URL '%s'", value);
@@ -129,7 +128,7 @@ static char *url_tool_callback(const char *action, char *value, int *should_resp
    /* Validate URL */
    if (!url_is_valid(value)) {
       OLOG_WARNING("url_tool: Invalid URL '%s'", value);
-      return strdup("Invalid URL. Must start with http:// or https://");
+      return strdup(TOOL_RESULT_ERROR_MARK "Invalid URL. Must start with http:// or https://");
    }
 
    /* Fetch and extract content */
@@ -145,12 +144,12 @@ static char *url_tool_callback(const char *action, char *value, int *should_resp
       char *msg = malloc(512);
       if (msg) {
          if (n > 0)
-            snprintf(msg, 512, "Failed to fetch URL: %s", detail);
+            snprintf(msg, 512, TOOL_RESULT_ERROR_MARK "Failed to fetch URL: %s", detail);
          else
-            snprintf(msg, 512, "Failed to fetch URL: %s", err);
+            snprintf(msg, 512, TOOL_RESULT_ERROR_MARK "Failed to fetch URL: %s", err);
          return msg;
       }
-      return strdup("Failed to fetch URL.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Failed to fetch URL.");
    }
 
    OLOG_INFO("url_tool: Extracted %zu bytes of content", content_size);

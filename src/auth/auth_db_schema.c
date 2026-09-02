@@ -237,6 +237,7 @@ static const char *SCHEMA_SQL =
     "   tool_call_id TEXT," /* role='tool' rows: matching tool_call id (v56) */
     "   reasoning TEXT,"    /* assistant rows: display-only reasoning JSON (v57) */
     "   created_at INTEGER NOT NULL,"
+    "   is_error INTEGER NOT NULL DEFAULT 0," /* role='tool' rows: 1 = confirmed failure (v81) */
     "   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, id ASC);"
@@ -420,6 +421,14 @@ static const char *SCHEMA_SQL =
      * ON DELETE SET NULL: deleting the note drops the pointer (the gloss text is
      * cleaned up explicitly by the note-delete path). */
     "   note_doc_id            INTEGER DEFAULT NULL,"
+    /* v83: last_cited — cooldown timestamp for citation-driven confidence
+     * reinforcement (Memory Citation Phase 2).  NULL = never cited (the default
+     * for every existing row); the first citation always bumps.  Kept SEPARATE
+     * from last_accessed on purpose: the recall render path sets last_accessed =
+     * now on every surfaced fact (memory_callback.c) seconds before the model
+     * cites, so a citation cooldown sharing that column would never fire.  The
+     * reinforce UPDATE gates on (last_cited IS NULL OR now - last_cited > 3600). */
+    "   last_cited             INTEGER DEFAULT NULL,"
     "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
     "   FOREIGN KEY (superseded_by) REFERENCES memory_facts(id) ON DELETE SET NULL,"
     "   FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL,"
@@ -500,6 +509,30 @@ static const char *SCHEMA_SQL =
     ");"
     "CREATE INDEX IF NOT EXISTS idx_memory_summaries_user ON "
     "memory_summaries(user_id, created_at DESC);"
+
+    /* Memory citation audit (v77).  One row per assistant turn that surfaced
+     * numbered [M#] memories AND had the citation signal enabled: which item_ids
+     * were injected vs which the model cited, for measuring injection precision.
+     * Log-only telemetry — retention-prunable; no FK cascade needed. */
+    "CREATE TABLE IF NOT EXISTS memory_citation_audit ("
+    "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "   conversation_id INTEGER DEFAULT 0,"
+    "   message_id INTEGER DEFAULT 0,"
+    "   user_id INTEGER NOT NULL,"
+    "   ts INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
+    "   injected_ids TEXT,"      /* CSV of surfaced item_ids, e.g. "fact:12,entity:7" */
+    "   cited_ids TEXT,"         /* CSV of the validated cited subset */
+    "   injected_scores TEXT,"   /* CSV of per-item final_score, aligned 1:1 with injected_ids.
+                                    Analysis-only (read by citation_audit_summary.py, not the daemon).
+                                  */
+    "   tool_surfaced_ids TEXT," /* v79: CSV of facts shown via a memory tool this turn,
+                                    canonical "fact:x" — the tool-cite universe (Option B) */
+    "   dropped_count INTEGER DEFAULT 0,"     /* cited ordinals rejected (out-of-range/dup) */
+    "   dropped_tool_count INTEGER DEFAULT 0" /* v79: cited ID:x not in the surfaced set
+                                                 (mis-copied / hallucinated tool id) */
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_memory_citation_audit_user_ts ON "
+    "memory_citation_audit(user_id, ts);"
 
     /* Entity/relation tables (v19).  canonical_id + is_user_self added in v43
      * for the entity-merge / user-identity-dedup workstream:
@@ -806,6 +839,7 @@ static const char *SCHEMA_SQL =
     "  color TEXT DEFAULT '',"
     "  is_active INTEGER DEFAULT 1,"
     "  ctag TEXT DEFAULT '',"
+    "  sync_token TEXT DEFAULT '',"
     "  created_at INTEGER NOT NULL,"
     "  FOREIGN KEY(account_id) REFERENCES calendar_accounts(id) ON DELETE CASCADE"
     ");"
@@ -815,6 +849,7 @@ static const char *SCHEMA_SQL =
     "  calendar_id INTEGER NOT NULL,"
     "  uid TEXT NOT NULL,"
     "  etag TEXT DEFAULT '',"
+    "  href TEXT DEFAULT '',"
     "  summary TEXT DEFAULT '',"
     "  description TEXT DEFAULT '',"
     "  location TEXT DEFAULT '',"

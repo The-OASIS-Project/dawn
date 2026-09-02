@@ -575,6 +575,7 @@ dawn_add_unit_test(test_messaging_format
 dawn_add_unit_test(test_claude_format
    SOURCES test_claude_format.c
            ${SRC_ROOT}/src/llm/llm_claude_format.c
+           ${SRC_ROOT}/src/llm/llm_model_version.c
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -647,6 +648,14 @@ dawn_add_unit_test(test_recall_format
    SOURCES test_recall_format.c
            ${SRC_ROOT}/src/tools/recall_format.c
            ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity pthread
+   LABEL   ci)
+
+# Memory-citation <cited> tokenizer + two-set validation (Option B).  Links the
+# pure parse core only — no session/DB/config.
+dawn_add_unit_test(test_memory_citation_parse
+   SOURCES test_memory_citation_parse.c
+           ${SRC_ROOT}/src/memory/memory_citation_parse.c
    LIBS    dawn_common unity pthread
    LABEL   ci)
 
@@ -757,6 +766,25 @@ dawn_add_unit_test(test_text_filter
    SOURCES test_text_filter.c
            ${SRC_ROOT}/src/core/text_filter.c
    LIBS    unity
+   LABEL   ci)
+
+dawn_add_unit_test(test_llm_response_finalize
+   SOURCES test_llm_response_finalize.c
+           ${SRC_ROOT}/src/core/llm_response_finalize.c
+           ${SRC_ROOT}/src/core/text_filter.c
+   LIBS    unity
+   LABEL   ci)
+
+dawn_add_unit_test(test_llm_model_version
+   SOURCES test_llm_model_version.c
+           ${SRC_ROOT}/src/llm/llm_model_version.c
+   LIBS    unity
+   LABEL   ci)
+
+dawn_add_unit_test(test_responses_input
+   SOURCES test_responses_input.c
+           ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
+   LIBS    unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_iso8601
@@ -1141,21 +1169,10 @@ dawn_add_unit_test(test_email_db
 # Hardware-dependent tests (require ONNX, CUDA, or external APIs)
 # =============================================================================
 
-dawn_add_unit_test(test_streaming
-   SOURCES test_streaming.c
-           ${SRC_ROOT}/src/llm/llm_interface.c
-           ${SRC_ROOT}/src/llm/llm_openai.c
-           ${SRC_ROOT}/src/llm/llm_claude.c
-           ${SRC_ROOT}/src/llm/llm_streaming.c
-           ${SRC_ROOT}/src/llm/sse_parser.c
-           ${SRC_ROOT}/src/config/config_parser.c
-           ${SRC_ROOT}/src/config/config_defaults.c
-           ${SRC_ROOT}/src/config/config_env.c
-           ${SRC_ROOT}/src/tools/toml.c
-           ${SRC_ROOT}/src/ui/metrics.c
-   LIBS    dawn_common ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
-           OpenSSL::SSL OpenSSL::Crypto
-   LABEL   hardware)
+# NOTE: test_streaming (manual live-API streaming smoke, no assertions, LABEL
+# hardware) was dropped + removed 2026-08-25 — bit-rotted uncompilable, needs live
+# keys so never in CI, and its testable surface is covered by test_sse_parser (SSE
+# parse) + test_responses_input (Responses request shaping) + live usage.
 
 dawn_add_unit_test(asr_benchmark
    SOURCES asr_benchmark.c
@@ -1240,6 +1257,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_local_provider.c
            ${SRC_ROOT}/src/llm/llm_claude.c
            ${SRC_ROOT}/src/llm/llm_claude_format.c
+           ${SRC_ROOT}/src/llm/llm_model_version.c
            ${SRC_ROOT}/src/llm/llm_openai.c
            ${SRC_ROOT}/src/llm/llm_openai_cache.c
            ${SRC_ROOT}/src/llm/llm_openai_chat_completions.c
@@ -1248,6 +1266,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_tools.c
            ${SRC_ROOT}/src/llm/llm_rate_limit.c
            ${SRC_ROOT}/src/llm/llm_openai_responses.c
+           ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
            ${SRC_ROOT}/src/llm/llm_context.c
            ${SRC_ROOT}/src/llm/llm_command_parser.c
            ${SRC_ROOT}/src/llm/llm_tool_loop.c

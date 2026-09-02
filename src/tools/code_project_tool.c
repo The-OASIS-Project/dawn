@@ -38,7 +38,7 @@ static char *cp_list(int64_t uid) {
    code_project_t list[CODE_PROJECTS_MAX];
    int n = 0;
    if (code_project_db_list_visible(uid, list, CODE_PROJECTS_MAX, &n) != AUTH_DB_SUCCESS) {
-      return strdup("Could not list code projects.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Could not list code projects.");
    }
    if (n == 0) {
       return strdup("No code projects are available to you.");
@@ -60,10 +60,11 @@ static char *cp_no_such_project_msg(int64_t uid) {
    int n = 0;
    if (code_project_db_list_visible(uid, list, CODE_PROJECTS_MAX, &n) != AUTH_DB_SUCCESS ||
        n == 0) {
-      return strdup("No such project is available to you.");
+      return strdup(TOOL_RESULT_ERROR_MARK "No such project is available to you.");
    }
    char buf[2048];
    int off = snprintf(buf, sizeof(buf),
+                      TOOL_RESULT_ERROR_MARK
                       "No such project is available to you. Available projects: ");
    for (int i = 0; i < n && off < (int)sizeof(buf); i++) {
       off += snprintf(buf + off, sizeof(buf) - off, "%s%s", i > 0 ? ", " : "", list[i].name);
@@ -84,7 +85,7 @@ static char *cp_set_active(int64_t uid, const char *name) {
    }
    session_t *s = session_get_command_context();
    if (s == NULL) {
-      return strdup("No active session to set the project on.");
+      return strdup(TOOL_RESULT_ERROR_MARK "No active session to set the project on.");
    }
    pthread_mutex_lock(&s->llm_config_mutex);
    s->active_project_id = p.id;
@@ -136,7 +137,7 @@ static char *code_project_callback(const char *action, char *value, int *should_
    if (strcmp(action, "status") == 0) {
       return cp_status(uid, value);
    }
-   return strdup("Unknown action. Use 'list', 'set_active', or 'status'.");
+   return strdup(TOOL_RESULT_ERROR_MARK "Unknown action. Use 'list', 'set_active', or 'status'.");
 }
 
 static const treg_param_t s_params[] = {
@@ -166,7 +167,6 @@ static const tool_metadata_t s_meta = {
    .param_count = 2,
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NONE,
-   .is_getter = true,
    .default_local = true,
    .default_remote = true,
    .callback = code_project_callback,

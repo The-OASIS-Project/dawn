@@ -20,7 +20,6 @@
  */
 
 /* Std C */
-#include <json-c/json.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,31 +27,25 @@
 
 /* Local */
 #include "config/dawn_config.h"
-#include "core/command_executor.h"
 #include "core/session_manager.h"
 #include "dawn.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
-#include "mosquitto_comms.h"
-#include "text_to_command_nuevo.h"
 #include "tools/tool_registry.h"
-#include "ui/metrics.h"
 
 /* =============================================================================
  * System Prompt Strings
  * =============================================================================
- * These prompts define the AI's behavior rules. There are two modes:
+ * Tool use is native function calling: the LLM receives tool schemas via the
+ * provider API (OpenAI function calling / Claude tool_use / llama.cpp --jinja).
+ * NATIVE_TOOLS_RULES is the minimal behavior prompt used when tools are enabled;
+ * when tools are disabled only the prose OUTPUT_FORMATTING_RULES apply.
  *
- * 1. NATIVE TOOL CALLING (default): Uses NATIVE_TOOLS_RULES - a minimal prompt
- *    since the LLM receives tool schemas via API (OpenAI function calling /
- *    Claude tool_use).
- *
- * 2. LEGACY <command> TAG MODE: Uses LEGACY_RULES_* prompts that instruct the
- *    LLM to emit <command>{"device":"x","action":"y"}</command> JSON tags.
- *
- * See get_system_instructions() for the branching logic.
+ * The legacy <command>-tag transport (LLM emits JSON tags parsed from its output)
+ * was retired 2026-08 — native tool calling reaches every provider and hits the
+ * same command executor. See get_system_instructions() for the branching logic.
  * ============================================================================= */
 
 // clang-format off
@@ -104,42 +97,16 @@ static const char *PLAN_EXECUTOR_PROMPT =
    "- You need to reason about intermediate results\n";
 // clang-format on
 
-/* Core behavior rules for <command> tag mode (legacy) */
-static const char *LEGACY_RULES_CORE =
-    "Do not use thinking mode. Respond directly without internal reasoning.\n"
-    "Max 30 words plus <command> tags unless the user says \"explain in detail\".\n"
-    "\n"
-    "RULES\n"
-    "1. For Boolean / Analog / Music actions: one sentence, then the JSON tag(s). No prose after "
-    "the tag block.\n"
-    "2. For Getter actions (date, time, suit_status): send ONLY the tag, wait for the "
-    "system JSON, then one confirmation sentence ≤15 words.\n"
-    "3. Use only the devices and actions listed below; never invent new ones.\n"
-    "4. If a request is ambiguous (e.g., \"Mute it\"), ask one-line clarification.\n"
-    "5. If the user wants information that has no matching getter yet, answer verbally with no "
-    "tags.\n"
-    "6. Device \"info\" supports ENABLE / DISABLE only—never use \"get\" with it.\n"
-    "7. To mute playback after clarification, use "
-    "<command>{\"device\":\"volume\",\"action\":\"set\",\"value\":0}</command>.\n"
-    "8. Multiple commands can be sent in one response using multiple <command> tags.\n"
-    "9. Do NOT lead responses with comments about location, weather, or time of day.\n"
-    "   Vary your greetings. The user's context below is for tool use only.\n";
-
-/* Output-formatting rules that apply in every tool mode (native / command_tags /
- * disabled).  Kept separate from the tool instructions because they shape prose,
- * not tool use. */
+/* Output-formatting rules that apply whether tools are enabled or disabled.
+ * Kept separate from the tool instructions because they shape prose, not tool use. */
 static const char *OUTPUT_FORMATTING_RULES =
     "When writing a mathematical factorial, spell it out as \"N factorial\" (for example "
     "\"52 factorial\"), not the symbol \"52!\", so it is read correctly when spoken aloud.\n";
 
 // clang-format on
 
-/* Tool-specific rules (LEGACY_RULES_VISION, LEGACY_RULES_WEATHER, etc.) have been removed.
- * Tool instructions are now generated dynamically from the tool_registry via
- * generate_command_tag_instructions() and build_capabilities_list(). */
-
 /* =============================================================================
- * End Legacy Prompt Strings
+ * End Prompt Strings
  * ============================================================================= */
 
 // Static buffer for command prompt - make it static, make it large
@@ -218,21 +185,6 @@ int is_vision_enabled_for_current_llm(void) {
 
 
 /**
- * @brief Builds dynamic system instructions based on enabled features
- *
- * Assembles LEGACY_RULES_CORE plus feature-specific rules based on config.
- * This ensures the LLM only sees instructions for features that are available.
- *
- * Features checked:
- * - Vision: Requires vision_enabled for current LLM type (cloud or local)
- * - Weather: Always available (Open-Meteo free API)
- * - Search: Requires SearXNG endpoint configured
- * - Calculator: Always available (local computation)
- * - URL: Always available (basic HTTP fetch)
- *
- * @return Pointer to static buffer containing assembled instructions
- */
-/**
  * @brief Invalidates cached system instructions, forcing rebuild on next call
  *
  * Call this when capabilities change at runtime (e.g., a tool's auth
@@ -257,216 +209,6 @@ int get_system_instructions_version(void) {
    return v;
 }
 
-/* =============================================================================
- * Dynamic Command Tag Generation (from tool_registry)
- * ============================================================================= */
-
-/**
- * @brief Check if a tool is available at runtime
- *
- * Checks both the enabled status and the optional is_available() callback.
- *
- * @param tool The tool metadata
- * @return true if tool is available, false otherwise
- */
-static bool is_tool_available(const tool_metadata_t *tool) {
-   if (!tool)
-      return false;
-
-   /* Check if tool is enabled (handles DANGEROUS capability check) */
-   if (!tool_registry_is_enabled(tool->name))
-      return false;
-
-   /* Check runtime availability if function is provided */
-   if (tool->is_available && !tool->is_available())
-      return false;
-
-   return true;
-}
-
-/**
- * @brief Generate command tag instructions for a single tool
- *
- * Output format:
- *   TOOL_NAME: Description
- *     <command>{"device":"name","action":"ACTION","value":"VALUE"}</command>
- *     Actions: action1, action2, action3
- *
- * @param tool The tool metadata
- * @param buffer Output buffer
- * @param buffer_size Buffer size
- * @return Number of bytes written
- */
-static int generate_command_tag_instructions(const tool_metadata_t *tool,
-                                             char *buffer,
-                                             size_t buffer_size) {
-   if (!tool || !buffer || buffer_size == 0)
-      return 0;
-
-   int len = 0;
-   int remaining = (int)buffer_size;
-
-   /* Find action and value parameters */
-   const treg_param_t *action_param = NULL;
-   const treg_param_t *value_param = NULL;
-
-   for (int i = 0; i < tool->param_count; i++) {
-      if (tool->params[i].maps_to == TOOL_MAPS_TO_ACTION) {
-         action_param = &tool->params[i];
-      } else if (tool->params[i].maps_to == TOOL_MAPS_TO_VALUE) {
-         value_param = &tool->params[i];
-      }
-   }
-
-   /* Determine default action based on device_type when no action param exists */
-   const char *default_action = NULL;
-   if (!action_param) {
-      switch (tool->device_type) {
-         case TOOL_DEVICE_TYPE_BOOLEAN:
-            default_action = "enable/disable";
-            break;
-         case TOOL_DEVICE_TYPE_ANALOG:
-            default_action = "set";
-            break;
-         case TOOL_DEVICE_TYPE_GETTER:
-            default_action = "get";
-            break;
-         case TOOL_DEVICE_TYPE_MUSIC:
-            default_action = "play";
-            break;
-         case TOOL_DEVICE_TYPE_TRIGGER:
-            default_action = "trigger";
-            break;
-         default:
-            default_action = "get";
-            break;
-      }
-   }
-
-   /* Tool name in uppercase */
-   char upper_name[TOOL_NAME_MAX];
-   int i;
-   for (i = 0; tool->name[i] && i < TOOL_NAME_MAX - 1; i++) {
-      upper_name[i] = (tool->name[i] >= 'a' && tool->name[i] <= 'z') ? tool->name[i] - 32
-                                                                     : tool->name[i];
-   }
-   upper_name[i] = '\0';
-
-   /* Header: TOOL_NAME: Description */
-   len += snprintf(buffer + len, remaining - len, "%s: %s\n", upper_name, tool->description);
-
-   /* Example command tag - always include action field */
-   len += snprintf(buffer + len, remaining - len, "  <command>{\"device\":\"%s\"", tool->name);
-
-   if (action_param) {
-      len += snprintf(buffer + len, remaining - len, ",\"action\":\"ACTION\"");
-   } else if (default_action) {
-      /* Use default action for tools without action param */
-      len += snprintf(buffer + len, remaining - len, ",\"action\":\"%s\"", default_action);
-   }
-
-   if (value_param) {
-      /* Use param name as hint */
-      const char *value_hint = value_param->name ? value_param->name : "value";
-      len += snprintf(buffer + len, remaining - len, ",\"value\":\"%s\"", value_hint);
-   }
-   len += snprintf(buffer + len, remaining - len, "}</command>\n");
-
-   /* List available actions if enum type */
-   if (action_param && action_param->type == TOOL_PARAM_TYPE_ENUM && action_param->enum_count > 0) {
-      len += snprintf(buffer + len, remaining - len, "  Actions: ");
-      for (int j = 0; j < action_param->enum_count; j++) {
-         if (j > 0)
-            len += snprintf(buffer + len, remaining - len, ", ");
-         len += snprintf(buffer + len, remaining - len, "%s", action_param->enum_values[j]);
-      }
-      len += snprintf(buffer + len, remaining - len, "\n");
-   }
-
-   /* Add a blank line for readability */
-   len += snprintf(buffer + len, remaining - len, "\n");
-
-   return len;
-}
-
-/**
- * @brief Context for combined capabilities + command tag generation
- *
- * This allows building both outputs in a single iteration pass over tools.
- */
-typedef struct {
-   /* Capabilities list */
-   char *cap_buffer;
-   size_t cap_buffer_size;
-   int cap_offset;
-   int cap_count;
-
-   /* Command tags */
-   char *cmd_buffer;
-   size_t cmd_buffer_size;
-   int cmd_offset;
-} combined_build_ctx_t;
-
-/**
- * @brief Callback to build both capability entry and command tag in single pass
- */
-static void build_combined_entry(const tool_metadata_t *tool, void *user_data) {
-   combined_build_ctx_t *ctx = (combined_build_ctx_t *)user_data;
-
-   if (!is_tool_available(tool))
-      return;
-
-   /* Skip mqtt_only tools that are hardware-specific */
-   if (tool->mqtt_only && !tool->sync_wait)
-      return;
-
-   /* Build capability entry */
-   int cap_remaining = (int)ctx->cap_buffer_size - ctx->cap_offset;
-   if (cap_remaining > 0) {
-      /* Add comma separator after first item */
-      if (ctx->cap_count > 0) {
-         ctx->cap_offset += snprintf(ctx->cap_buffer + ctx->cap_offset, cap_remaining, ", ");
-         cap_remaining = (int)ctx->cap_buffer_size - ctx->cap_offset;
-      }
-
-      /* Generate capability description based on tool type */
-      if (tool->is_getter) {
-         ctx->cap_offset += snprintf(ctx->cap_buffer + ctx->cap_offset, cap_remaining,
-                                     "get %s info", tool->name);
-      } else if (tool->device_type == TOOL_DEVICE_TYPE_MUSIC) {
-         ctx->cap_offset += snprintf(ctx->cap_buffer + ctx->cap_offset, cap_remaining, "control %s",
-                                     tool->name);
-      } else {
-         ctx->cap_offset += snprintf(ctx->cap_buffer + ctx->cap_offset, cap_remaining, "use %s",
-                                     tool->name);
-      }
-      ctx->cap_count++;
-   }
-
-   /* Build command tag instruction */
-   int cmd_remaining = (int)ctx->cmd_buffer_size - ctx->cmd_offset;
-   if (cmd_remaining > 0) {
-      ctx->cmd_offset += generate_command_tag_instructions(tool, ctx->cmd_buffer + ctx->cmd_offset,
-                                                           cmd_remaining);
-   }
-}
-
-/* =============================================================================
- * End Dynamic Generation Functions
- * ============================================================================= */
-
-/**
- * @brief Build system instructions for a specific mode into a provided buffer
- *
- * This is the core logic for building system instructions. It can be used
- * for both cached (global) and non-cached (session-specific) builds.
- *
- * @param mode The tool mode: "native", "command_tags", or "disabled"
- * @param is_remote true for a remote-session prompt, false for local
- * @param buffer Output buffer to write instructions to
- * @param buffer_size Size of the output buffer
- * @return Number of bytes written (excluding null terminator)
- */
 /**
  * @brief Truncation-safe formatted append into a fixed buffer
  *
@@ -490,69 +232,41 @@ static void instr_appendf(char *buffer, int cap, int *len, const char *fmt, ...)
    *len += (n < cap - *len) ? n : (cap - *len - 1);
 }
 
-static int build_system_instructions_to_buffer(const char *mode,
+/**
+ * @brief Build system instructions into a provided buffer
+ *
+ * Core logic for both the cached (global) and non-cached (session) builds.
+ *
+ * @param tools_on true = native tool rules; false = prose format rules only
+ * @param is_remote true for a remote-session prompt, false for local
+ * @param buffer Output buffer to write instructions to
+ * @param buffer_size Size of the output buffer
+ * @return Number of bytes written (excluding null terminator)
+ */
+static int build_system_instructions_to_buffer(bool tools_on,
                                                bool is_remote,
                                                char *buffer,
                                                size_t buffer_size) {
    int len = 0;
    int cap = (int)buffer_size;
 
-   /* Prose output-format rules first — apply regardless of tool mode. */
+   /* Prose output-format rules first — apply whether or not tools are enabled. */
    instr_appendf(buffer, cap, &len, "%s", OUTPUT_FORMATTING_RULES);
 
-   bool use_native = (strcmp(mode, "native") == 0);
-
-   if (use_native) {
-      instr_appendf(buffer, cap, &len, "%s\n", NATIVE_TOOLS_RULES);
-      /* Add plan executor DSL when tool is registered and 3+ tools enabled */
-      if (tool_registry_is_enabled("execute_plan") && llm_tools_get_enabled_count() >= 3) {
-         instr_appendf(buffer, cap, &len, "%s", PLAN_EXECUTOR_PROMPT);
-      }
-      /* Append per-session hint about unavailable/disabled tools */
-      if (len < cap - 1) {
-         len += llm_tools_build_disabled_hint(is_remote, buffer + len, cap - len);
-      }
+   /* Tools off = prose rules only; tools on = native tool rules. */
+   if (!tools_on) {
       return len;
    }
 
-   if (strcmp(mode, "disabled") == 0) {
-      /* No tool instructions for disabled mode — keep the prose format rules above. */
-      return len;
+   instr_appendf(buffer, cap, &len, "%s\n", NATIVE_TOOLS_RULES);
+   /* Add plan executor DSL when tool is registered and 3+ tools enabled */
+   if (tool_registry_is_enabled("execute_plan") && llm_tools_get_enabled_count() >= 3) {
+      instr_appendf(buffer, cap, &len, "%s", PLAN_EXECUTOR_PROMPT);
    }
-
-   /* command_tags mode - dynamic generation from tool_registry */
-
-   /* Core behavior rules (static, minimal) */
-   instr_appendf(buffer, cap, &len, "%s\n", LEGACY_RULES_CORE);
-
-   /* Single-pass generation of both capabilities and command tags */
-   char cap_buffer[2048];
-   char cmd_buffer[16384];
-
-   combined_build_ctx_t ctx = {
-      .cap_buffer = cap_buffer,
-      .cap_buffer_size = sizeof(cap_buffer),
-      .cap_offset = 0,
-      .cap_count = 0,
-      .cmd_buffer = cmd_buffer,
-      .cmd_buffer_size = sizeof(cmd_buffer),
-      .cmd_offset = 0,
-   };
-
-   tool_registry_foreach_enabled(build_combined_entry, &ctx);
-
-   /* Assemble capabilities list with header and footer */
-   instr_appendf(buffer, cap, &len, "CAPABILITIES: You CAN %s.\n\n", cap_buffer);
-
-   /* Append command tag instructions (bounded copy; len is clamped to <= cap-1). */
-   int avail = cap - len - 1;
-   int cmd_copy = (ctx.cmd_offset < avail) ? ctx.cmd_offset : avail;
-   if (cmd_copy > 0) {
-      memcpy(buffer + len, cmd_buffer, cmd_copy);
-      len += cmd_copy;
-      buffer[len] = '\0';
+   /* Append per-session hint about unavailable/disabled tools */
+   if (len < cap - 1) {
+      len += llm_tools_build_disabled_hint(is_remote, buffer + len, cap - len);
    }
-
    return len;
 }
 
@@ -568,13 +282,10 @@ const char *get_system_instructions(bool is_remote) {
       return buffer;
    }
 
-   /* Determine mode from global config */
-   const char *mode = llm_tools_enabled(NULL) ? "native" : g_config.llm.tools.mode;
-   if (!mode || mode[0] == '\0') {
-      mode = "native";
-   }
+   /* Tools on/off from global config (native tool calling is the only tool path). */
+   bool tools_on = llm_tools_enabled(NULL);
 
-   int len = build_system_instructions_to_buffer(mode, is_remote, buffer,
+   int len = build_system_instructions_to_buffer(tools_on, is_remote, buffer,
                                                  SYSTEM_INSTRUCTIONS_BUFFER_SIZE);
 
    *initialized = 1;
@@ -582,11 +293,8 @@ const char *get_system_instructions(bool is_remote) {
    pthread_mutex_unlock(&system_instructions_mutex);
 
    const char *scope = is_remote ? "remote" : "local";
-   if (strcmp(mode, "native") == 0) {
-      OLOG_INFO("Built %s system instructions for native tool calling (%d bytes)", scope, len);
-   } else {
-      OLOG_INFO("Built %s dynamic system instructions (%d bytes)", scope, len);
-   }
+   OLOG_INFO("Built %s system instructions (%s, %d bytes)", scope,
+             tools_on ? "tools on" : "tools off", len);
 
    return buffer;
 }
@@ -696,9 +404,8 @@ static const char *get_persona_description(void) {
 /**
  * @brief Builds the system prompt for the local interface
  *
- * All commands are now defined via the modular tool_registry system.
- * Native tool calling is the primary mode; legacy <command> tag mode
- * falls back to a minimal prompt without JSON-defined commands.
+ * All tools are defined via the modular tool_registry and called natively.
+ * When tools are disabled the prompt carries only prose format rules.
  */
 static void initialize_command_prompt(void) {
    /* Gather inputs without holding the mutex — these call helpers that each
@@ -706,7 +413,6 @@ static void initialize_command_prompt(void) {
    const char *persona = get_persona_description();
    const char *sys_instr = get_system_instructions(false);
    const char *loc_ctx = get_localization_context();
-   const char *tools_mode = g_config.llm.tools.mode;
    /* Local mic is a voice surface: input is ASR-transcribed and output is spoken.
     * Append the spoken-output directive + ASR-disambiguation hint (config-or-
     * built-in-default) so the local prompt shapes replies for the ear and warns
@@ -733,13 +439,8 @@ static void initialize_command_prompt(void) {
    prompt_initialized = 1;
    pthread_mutex_unlock(&system_instructions_mutex);
 
-   if (strcmp(tools_mode, "native") == 0) {
-      OLOG_INFO("AI prompt initialized (native tools mode). Length: %d", prompt_len);
-   } else if (strcmp(tools_mode, "disabled") == 0) {
-      OLOG_INFO("AI prompt initialized (tools disabled). Length: %d", prompt_len);
-   } else {
-      OLOG_INFO("AI prompt initialized (command_tags mode). Length: %d", prompt_len);
-   }
+   OLOG_INFO("AI prompt initialized (tools %s). Length: %d",
+             g_config.llm.tools.enabled ? "on" : "off", prompt_len);
 }
 
 /**
@@ -759,14 +460,13 @@ const char *get_local_command_prompt(void) {
 /**
  * @brief Builds the remote command prompt (excludes local-only topics like hud, helmet)
  *
- * All commands are now defined via the modular tool_registry system.
- * Native tool calling filters remote-available tools automatically.
+ * All tools are defined via the modular tool_registry and called natively;
+ * remote-available tools are filtered automatically.
  */
 static void initialize_remote_command_prompt(void) {
    const char *persona = get_persona_description();
    const char *sys_instr = get_system_instructions(true);
    const char *loc_ctx = get_localization_context();
-   const char *tools_mode = g_config.llm.tools.mode;
 
    pthread_mutex_lock(&system_instructions_mutex);
    if (remote_prompt_initialized) {
@@ -779,13 +479,8 @@ static void initialize_remote_command_prompt(void) {
    remote_prompt_initialized = 1;
    pthread_mutex_unlock(&system_instructions_mutex);
 
-   if (strcmp(tools_mode, "native") == 0) {
-      OLOG_INFO("Remote AI prompt initialized (native tools mode). Length: %d", prompt_len);
-   } else if (strcmp(tools_mode, "disabled") == 0) {
-      OLOG_INFO("Remote AI prompt initialized (tools disabled). Length: %d", prompt_len);
-   } else {
-      OLOG_INFO("Remote AI prompt initialized (command_tags mode). Length: %d", prompt_len);
-   }
+   OLOG_INFO("Remote AI prompt initialized (tools %s). Length: %d",
+             g_config.llm.tools.enabled ? "on" : "off", prompt_len);
 }
 
 /**
@@ -803,36 +498,6 @@ const char *get_remote_command_prompt(void) {
    return remote_command_prompt;
 }
 
-char *build_remote_prompt_for_mode(const char *tool_mode) {
-   if (!tool_mode) {
-      tool_mode = "native";
-   }
-
-   /* Allocate output buffer */
-   char *prompt = malloc(PROMPT_BUFFER_SIZE);
-   if (!prompt) {
-      OLOG_ERROR("Failed to allocate prompt buffer");
-      return NULL;
-   }
-
-   int len = 0;
-   int remaining = PROMPT_BUFFER_SIZE;
-
-   /* Add persona */
-   len += snprintf(prompt + len, remaining - len, "%s\n\n", get_persona_description());
-
-   /* Generate system instructions using the shared builder (respects mode parameter).
-    * This helper is called only for remote sessions (WebUI / satellites). */
-   len += build_system_instructions_to_buffer(tool_mode, true, prompt + len, remaining - len);
-   len += snprintf(prompt + len, remaining - len, "\n");
-
-   /* Add localization context */
-   len += snprintf(prompt + len, remaining - len, "%s", get_localization_context());
-
-   OLOG_INFO("Built prompt for %s mode. Length: %d", tool_mode, len);
-   return prompt;
-}
-
 /* =============================================================================
  * Voice-session prompt directives — effective-value accessors
  *
@@ -841,7 +506,7 @@ char *build_remote_prompt_for_mode(const char *tool_mode) {
  *
  * Concurrency note: these return a pointer directly into g_config and are read
  * unlocked on the prompt-build path — consistent with every other g_config read
- * there (persona, llm.tools.mode, localization, ...).  A WebUI config save
+ * there (persona, llm.tools.enabled, localization, ...).  A WebUI config save
  * (handle_set_config, under s_config_rwlock wrlock) racing an in-flight turn
  * could yield a torn directive for that one turn.  The buffers are fixed-size
  * (CONFIG_DESCRIPTION_MAX) and strncpy-padded, so a torn read is still a bounded,
@@ -864,99 +529,4 @@ const char *voice_directive_webui_effective(void) {
 const char *asr_disambiguation_hint_effective(void) {
    return g_config.asr.disambiguation_hint[0] ? g_config.asr.disambiguation_hint
                                               : DEFAULT_ASR_DISAMBIGUATION_HINT;
-}
-
-/**
- * @brief Parses an LLM response for commands and executes them
- *
- * This function looks for JSON commands enclosed in <command> tags in the LLM response,
- * extracts them, validates the device against the allowlist, and sends them through
- * the MQTT messaging system.
- *
- * SECURITY: Commands are validated against commands_config_nuevo.json before execution.
- * Unknown devices are rejected and logged for audit.
- *
- * @param llm_response The text response from the LLM
- * @param mosq The MQTT client instance
- * @return The number of commands found and processed
- */
-int parse_llm_response_for_commands(const char *llm_response, struct mosquitto *mosq) {
-   if (!llm_response || !mosq) {
-      return 0;
-   }
-
-   int commands_found = 0;
-   const char *start_tag = "<command>";
-   const char *end_tag = "</command>";
-   size_t start_tag_len = strlen(start_tag);
-   size_t end_tag_len = strlen(end_tag);
-
-   const char *search_start = llm_response;
-   const char *cmd_start, *cmd_end;
-
-   while ((cmd_start = strstr(search_start, start_tag)) != NULL) {
-      cmd_start += start_tag_len;
-      cmd_end = strstr(cmd_start, end_tag);
-
-      if (cmd_end) {
-         // Extract the command
-         size_t cmd_len = cmd_end - cmd_start;
-         char *command = (char *)malloc(cmd_len + 1);
-         if (command) {
-            strncpy(command, cmd_start, cmd_len);
-            command[cmd_len] = '\0';
-
-            OLOG_INFO("LLM command extracted: %s", command);
-
-            // Parse JSON
-            struct json_object *cmd_json = json_tokener_parse(command);
-            if (cmd_json) {
-               struct json_object *device_obj;
-
-               if (json_object_object_get_ex(cmd_json, "device", &device_obj)) {
-                  const char *device = json_object_get_string(device_obj);
-
-                  /* Use unified command executor - handles callbacks AND MQTT */
-                  cmd_exec_result_t exec_result;
-                  int rc = command_execute_json(cmd_json, mosq, &exec_result);
-
-                  if (rc == 0 && exec_result.success) {
-                     OLOG_INFO("LLM COMMAND EXECUTED: device=%s via unified executor", device);
-                     metrics_log_activity("LLM CMD: %s", command);
-                     commands_found++;
-
-                     /* If command returned data, log it (could be used for response) */
-                     if (exec_result.result && exec_result.should_respond) {
-                        OLOG_INFO("  Command result: %.100s%s", exec_result.result,
-                                  strlen(exec_result.result) > 100 ? "..." : "");
-                     }
-                  } else {
-                     /* Command failed - could be unknown device or execution error */
-                     OLOG_WARNING("LLM COMMAND FAILED: device='%s' - %s", device,
-                                  exec_result.result ? exec_result.result : "unknown error");
-                     metrics_log_activity("LLM CMD FAILED: %s", device);
-                  }
-
-                  cmd_exec_result_free(&exec_result);
-               } else {
-                  OLOG_WARNING("LLM COMMAND REJECTED: No device field in command JSON");
-               }
-
-               json_object_put(cmd_json);
-            } else {
-               OLOG_ERROR("Failed to parse command JSON: %s", command);
-            }
-
-            free(command);
-         }
-
-         // Continue search after this command
-         search_start = cmd_end + end_tag_len;
-      } else {
-         // No closing tag found, stop searching
-         break;
-      }
-   }
-
-   return commands_found;
 }

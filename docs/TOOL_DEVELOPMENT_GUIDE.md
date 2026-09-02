@@ -187,7 +187,6 @@ typedef struct {
    /* Behavior Flags */
    tool_device_type_t device_type;                    /* boolean, analog, getter, etc. */
    tool_capability_t capabilities;                    /* Security/capability flags */
-   bool is_getter;                                    /* Read-only, no side effects */
    bool skip_followup;                                /* Don't send result back to LLM */
    bool mqtt_only;                                    /* Only available via MQTT */
    bool sync_wait;                                    /* Wait for MQTT response */
@@ -267,7 +266,6 @@ static const tool_device_map_t audio_device_map[] = {
 |-------|---------|-------------|
 | `device_type` | - | Classification affecting action word parsing (see Device Types) |
 | `capabilities` | `TOOL_CAP_NONE` | Security capabilities (see Capabilities) |
-| `is_getter` | `false` | `true` if tool only reads data (no side effects) |
 | `skip_followup` | `false` | `true` to skip LLM follow-up (see [skip_followup Behavior](#skip_followup-behavior) below) |
 | `mqtt_only` | `false` | `true` if tool only works via MQTT (not voice/WebUI) |
 | `sync_wait` | `false` | `true` to wait for MQTT response before continuing |
@@ -331,6 +329,53 @@ char *my_callback(const char *action, char *value, int *should_respond);
 - `value`: The primary value (from `MAPS_TO_VALUE` parameter)
 - `should_respond`: Set to 1 to return result to LLM, 0 to handle silently
 - **Returns**: Heap-allocated string (caller frees), or NULL
+
+#### Signaling a Failure (`TOOL_RESULT_ERROR_MARK`)
+
+**A tool result is opaque text — DAWN cannot tell your `"Entity not found"` from a
+success unless you say so.** The framework's own `success` flag is *structural* only (did the
+callback run at all): a callback that returns normally is `success=true` even when the string it
+returns describes a failure. So if your tool can fail *while still returning a string*, mark that
+string as a hard failure by prefixing it with `TOOL_RESULT_ERROR_MARK` (`"\x01"`, from
+`tool_registry.h`):
+
+```c
+#include "tools/tool_registry.h"
+
+if (!entity_found) {
+   return strdup(TOOL_RESULT_ERROR_MARK "Entity '" /* … */ "' not found");
+}
+```
+
+For a `snprintf`'d buffer, write the mark as the first byte:
+
+```c
+char *msg = malloc(256);
+snprintf(msg, 256, TOOL_RESULT_ERROR_MARK "Failed to fetch URL: %s", err);
+return msg;
+```
+
+**What the mark does** (and does not):
+- **Drives the red WebUI "tool pill"** — a marked result renders red; an unmarked one stays neutral.
+- **Keeps the scheduler's briefing step-accounting honest** — a marked step counts as failed.
+- **Is stripped before the LLM sees it** (`tool_result_strip_error_mark()` runs on every
+  callback-dispatch path), so the human-readable error text still reaches the model unchanged. Marking
+  is purely a side-channel; it never alters what the LLM reads or how the user hears the reply.
+
+**Mark ONLY genuine hard failures** — the operation could not complete: not found, failed to X,
+API/network/HTTP error, invalid arguments, capability offline / not configured, permission denied,
+timeout. **Do NOT mark:**
+- **Valid empty results** — a search/query that *ran* but found nothing is a success (`"No events
+  today"`, `"No results found"`, `"Nothing scheduled"` → **no mark**).
+- **Input guidance** — `"Please provide a value"` is a prompt, not a failure.
+- **Confirmations / normal getter output.**
+
+The rule of thumb mirrors the red-pill design: **neutral = success or empty; red = the tool tried and
+could not.** When unsure, leave it unmarked — a missed red is harmless; a false red misleads.
+
+Helpers (all in `tool_registry.h`): `tool_result_is_error(s)` tests the first byte;
+`tool_result_strip_error_mark(s)` removes it in place. You normally only need the `TOOL_RESULT_ERROR_MARK`
+prefix on your return — the framework calls the other two.
 
 ---
 
@@ -668,7 +713,6 @@ static const tool_metadata_t mytool_metadata = {
    /* Behavior Flags */
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NETWORK,  /* This tool makes network calls */
-   .is_getter = true,                 /* Primarily reads data */
    .skip_followup = false,            /* Return results to LLM */
    .mqtt_only = false,                /* Available via voice/WebUI */
    .sync_wait = false,                /* Don't wait for MQTT response */
@@ -881,7 +925,6 @@ const char *tool_registry_get_config_string(const char *path);
 ### Iteration
 ```c
 void tool_registry_foreach(tool_foreach_callback_t callback, void *user_data);
-void tool_registry_foreach_enabled(tool_foreach_callback_t callback, void *user_data);
 int tool_registry_count(void);
 int tool_registry_enabled_count(void);
 ```
@@ -992,7 +1035,6 @@ static const tool_metadata_t load_metadata = {
    .param_count = 1,
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_FILESYSTEM,
-   .is_getter = true,
    .callback = load_instructions_callback,
    /* ... */
 };

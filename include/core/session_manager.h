@@ -256,6 +256,66 @@ typedef struct {
                                        runaway suppression) */
 } injected_set_t;
 
+/* Maximum [M#] ordinals stashed per turn.  Sized to the focus-injection top_k
+ * validation ceiling (memory.focus_injection.top_k is clamped to [1,64] in
+ * config_validate.c), so every surfaced-and-numbered candidate can be stashed —
+ * a smaller cap would render [M#] beyond the stash and mis-score a real citation
+ * as a hallucination in the audit.  64 × 68B ≈ 4.25 KB/session. */
+#define MAX_CITATION_STASH 64
+
+/**
+ * @brief Per-turn map from a rendered [M#] ordinal to the surfaced item_id.
+ *
+ * Populated in build_focus_block() when memory citation is enabled (M1 =
+ * entries[0], …), read by the response finalizer to resolve a `<cited>M#</cited>`
+ * back to its memory item (e.g. "fact:123").  CLEARED at dispatch entry so a
+ * turn whose focus block is short-circuited can never inherit a stale map and
+ * false-validate a citation.  Guarded by session->history_mutex.
+ */
+typedef struct {
+   char item_id[64];  /* Opaque item key, e.g. "fact:123"; matches FOCUS_ITEM_ID_BUFLEN.
+                         Static literal — session_manager.h cannot include L2 headers. */
+   float final_score; /* Ranker composite (focus_score_breakdown_t.final_score) this item
+                         was injected at — audited to measure used-vs-unused score
+                         distributions for a data-driven injection floor. */
+} citation_stash_entry_t;
+
+typedef struct {
+   citation_stash_entry_t entries[MAX_CITATION_STASH]; /* indexed by ordinal-1 */
+   int count;                                          /* number of [M#] tags rendered this turn */
+} citation_stash_t;
+
+/* Kind of a tool-surfaced citeable item.  A seam: fact is the only value today
+ * (memory tool results are facts); summaries/entities are a future additive value
+ * so their id space (summary:x / entity:x) slots in without a struct change. */
+#define MEM_CITED_KIND_FACT 0
+
+/* Maximum tool-surfaced fact ids stashed per turn for citation.  A turn can call
+ * memory search several times (~10 results each) under the 8-iteration tool-loop
+ * cap; 96 covers the realistic multi-search case, drop-with-log past it.
+ * 96 × 16B ≈ 1.5 KB/session. */
+#define MAX_TOOL_CITED_FACTS 96
+
+/**
+ * @brief One fact the model was shown via a memory TOOL result this turn.
+ *
+ * Distinct from the focus stash (build-once, single-writer): this set is written
+ * by PARALLEL native-tool worker threads (session_get_command_context() is
+ * per-worker), so every record MUST go through history_mutex.  Populated by
+ * memory_citation_record_tool_fact() at each retrieval render path; the model may
+ * cite an entry as <cited>ID:123</cited>, validated against this set at capture.
+ * CLEARED at dispatch entry alongside the focus stash.
+ */
+typedef struct {
+   int64_t fact_id; /* the surfaced memory fact id (model cites the bare int) */
+   int kind;        /* MEM_CITED_KIND_FACT today; see the kind seam above */
+} tool_cited_entry_t;
+
+typedef struct {
+   tool_cited_entry_t entries[MAX_TOOL_CITED_FACTS];
+   int count;
+} tool_cited_set_t;
+
 typedef struct {
    _Atomic int state;
    pthread_t thread_id;
@@ -287,15 +347,18 @@ typedef struct {
  * form. @p tool_calls_json is the assistant's tool_calls JSON array (NULL for
  * non-assistant rows); @p tool_call_id is the matching id on role="tool" rows
  * (NULL otherwise); @p reasoning_json is display-only reasoning JSON on the assistant
- * tool_calls row (NULL otherwise, and never read into the LLM context). The
- * implementation persists to conv_db.
+ * tool_calls row (NULL otherwise, and never read into the LLM context); @p is_error is set
+ * only on role="tool" result rows (true = confirmed failure) so a reloaded conversation can
+ * red the failed tool pill, matching the live tool_step signal. The implementation persists to
+ * conv_db.
  */
 typedef void (*session_tool_persist_fn)(void *userdata,
                                         const char *role,
                                         const char *content,
                                         const char *tool_calls_json,
                                         const char *tool_call_id,
-                                        const char *reasoning_json);
+                                        const char *reasoning_json,
+                                        bool is_error);
 
 /**
  * @brief Tool-loop iteration-boundary callback.
@@ -375,6 +438,27 @@ typedef struct session {
     * Atomic for ARM64 visibility across worker threads. */
    atomic_bool input_was_voice;
 
+   /* WebUI: did a SPECIFIC error-severity frame already go out for the in-flight
+    * turn?  The provider layer emits a precise error (e.g. "model access denied")
+    * via webui_send_error_ex on a failed streaming turn, which then returns a NULL
+    * response to the text worker.  Without this flag the worker's NULL-response
+    * fallback would emit a second, generic "Failed to get response from AI",
+    * showing the user the same failure twice.  Reset by the WebUI text worker
+    * immediately before the LLM call and checked right after, so set/reset/check
+    * for a turn all run on that one worker thread around the synchronous dispatch.
+    * The setter in webui_send_error_ex is guarded three ways (severity==ERROR &&
+    * type==WEBUI && command-context==this session) so only a real error from the
+    * worker running THIS turn sets it — an INFO notice, a cross-thread
+    * TURN_QUEUE_FULL, or a DAP2 emit cannot spuriously suppress the fallback.
+    * Atomic for ARM64 visibility; only consumed on the SESSION_TYPE_WEBUI text path.
+    * Known accepted edge: the flag is set on ENQUEUE, not delivery, so if the
+    * specific error frame is dropped under queue backpressure AND the turn then
+    * NULLs, the generic fallback is also suppressed (silent turn).  Window is
+    * tiny (queue saturation exactly at error emission) and no worse than the
+    * pre-existing single-frame drop risk; not worth widening the void funnel's
+    * contract to a delivery-status return. */
+   atomic_bool turn_error_emitted;
+
    /* Idle-timeout-sweep exemption.
     *
     * Set by subsystems that retain a long-lived reference to this
@@ -406,6 +490,44 @@ typedef struct session {
    // parity with current_stream_id / TSan-cleanliness (a second turn's stream
    // start can write it while a superseded turn's tail still reads).
    _Atomic int64_t stream_conversation_id;
+
+   // Server-authoritative persistence, Model A intent flag (SERVER_AUTHORITATIVE_
+   // PERSISTENCE_DESIGN §5/§6 step 2).  Set true by the persist-owning caller
+   // (the reinvoke worker in Phase 1) BEFORE dispatch and cleared after; read at
+   // the final-stream_end emit (webui_send_stream_end) to stamp `will_persist:true`
+   // so the streamed viewer stands down from client-saving.  Default false → every
+   // non-opted surface's stream_end is unchanged.  Atomic for parity with the
+   // sibling stream flags (a superseded turn's tail could read while a new turn
+   // begins), though the turn queue serializes turns per session.
+   _Atomic bool will_persist_turn;
+
+   // Cancel-at-buzzer stash (SERVER_AUTHORITATIVE §9/G4).  When will_persist_turn
+   // is set and a cancel lands AFTER the reply completed (llm_call_finalize frees
+   // the completed response and returns NULL), the finalized text is stashed HERE
+   // instead of freed, so the persist-owning caller can still persist it post-
+   // dispatch (the browser already stood down on will_persist → a naive free would
+   // lose the reply from the DB).  Owned by the session; the consuming caller takes
+   // it (sets NULL) + frees.  Cleared at turn start (llm_call_prepare) and freed at
+   // session teardown.  Single-writer per turn on the dispatch thread, read by the
+   // same worker after dispatch returns (turn-queue serialized) — no lock needed.
+   char *cancelled_final_response;
+
+   // Final-answer reasoning stash (SERVER_AUTHORITATIVE_PERSISTENCE §6c-G1 / Phase 2).
+   // The tool loop persists per-tool-iteration reasoning via the persist hook, but the
+   // FINAL answer's reasoning (E3 "AI thought" panel) is dropped server-side — only the
+   // browser client-save carried it.  The tool loop stashes build_reasoning_json() of the
+   // final turn HERE (tool_loop_stash_final_reasoning) at every text-returning path; the
+   // post-dispatch persist (webui_persist_final_answer) takes it and writes it to the
+   // messages.reasoning column + the message_appended fan-out.  Owned by the session;
+   // the consuming caller takes it (sets NULL) + frees.
+   //
+   // LIFETIME (differs from will_persist_turn — do NOT "consistency-fix"): WRITTEN during
+   // dispatch (inside the tool loop) and READ post-dispatch, so cleared at turn start in
+   // llm_call_prepare (a prepare-clear cannot clobber an in-dispatch write).  will_persist_turn
+   // is armed BEFORE dispatch, so it must reset in session_begin_turn_flags instead.  This
+   // asymmetry is intentional.  No lock (single-writer-in-dispatch / read-post-dispatch,
+   // same discipline as stream_conversation_id).  Freed at session teardown.
+   char *final_reasoning_json;
 
    // Whether THIS turn's step events (tool_call/tool_result) should be persisted
    // to conversation_events and fanned out.  Set at dispatch from the same
@@ -476,6 +598,8 @@ typedef struct session {
    // Used when native tool calling is disabled (legacy command tag mode)
    cmd_tag_filter_state_t cmd_tag_filter;  // State for text_filter_command_tags()
    bool cmd_tag_filter_bypass;             // Cached: true if native tools enabled (skip filtering)
+   cited_tag_filter_state_t
+       cited_tag_filter;  // Live-stream <cited>…</cited> strip (all stream paths)
 
    // Active tool tracking (for parallel tool status display)
    char active_tools[8][32];     // Tool names currently executing (max 8 parallel)
@@ -513,6 +637,17 @@ typedef struct session {
    // dies with it) and the never-hold-two-L4-locks rule keeps us out of a
    // dedicated lock here.  See injected_set_t above for the full contract.
    injected_set_t injected_set;
+
+   // Memory citation signal (Phase 1): per-turn [M#] ordinal -> item_id map,
+   // populated in build_focus_block when citation is enabled and read by the
+   // response finalizer.  Shares history_mutex (same rationale as injected_set).
+   citation_stash_t citation_stash;
+
+   // Memory citation — tool-sourced facts (Option B): per-turn set of fact ids the
+   // model was shown via a memory search/recall tool result, eligible to be cited
+   // by <cited>ID:x</cited>.  Multi-writer (parallel tool workers) — every record
+   // via history_mutex.  Cleared at dispatch entry beside citation_stash.
+   tool_cited_set_t tool_cited_set;
 
    // Phase 1g-i: most-recently-stamped user-message DB id.  Set by
    // session_stamp_last_message_id when role == "user"; read as `turn_id`
@@ -584,6 +719,17 @@ static inline void session_teardown_flags(session_t *s) {
 
 /** Clear both flags at the start of a fresh turn (client present, not cancelled). */
 static inline void session_begin_turn_flags(session_t *s) {
+   /* Structural clean-slate for the Model A persist promise (SERVER_AUTHORITATIVE
+    * §6 step 2): a turn is not persist-promised unless its persist-owning caller
+    * arms will_persist_turn AFTER this point (the reinvoke worker, Phase 2's text
+    * worker).  Reset it here — the turn-start hook every WEBUI turn path runs before
+    * arming — so a leaked promise from a caller that forgot to disarm can never make
+    * the NEXT turn's browser stand down from a save the server won't take.  Done
+    * unconditionally (even mid-teardown): a stale promise must never survive a turn
+    * boundary.  NOT in llm_call_prepare, which runs INSIDE dispatch after the arm. */
+   if (s != NULL) {
+      atomic_store(&s->will_persist_turn, false);
+   }
    /* Never resurrect a session whose teardown has begun: if being_destroyed is
     * set, leave the teardown-set cancel/disconnected flags standing so an
     * in-flight worker still aborts at its next LLM gate.  This NARROWS the
@@ -857,6 +1003,15 @@ int session_injected_set_advance_turn_locked(session_t *session);
  * fresh and once-per-session log lines re-arm.
  */
 void session_injected_set_clear(session_t *session);
+
+/**
+ * @brief Clear the per-turn citation stash (memory citation signal).
+ *
+ * SELF-LOCKING — acquires `session->history_mutex` internally.  Called at
+ * dispatch entry so a turn whose focus block is short-circuited cannot inherit
+ * the previous turn's [M#]→item_id map and false-validate a stale `<cited>`.
+ */
+void session_citation_stash_clear(session_t *session);
 
 /**
  * @brief Set/get the thread-local session pointer used by the per-turn
@@ -2160,6 +2315,10 @@ static inline int session_injected_set_advance_turn_locked(session_t *session) {
 }
 
 static inline void session_injected_set_clear(session_t *session) {
+   (void)session;
+}
+
+static inline void session_citation_stash_clear(session_t *session) {
    (void)session;
 }
 

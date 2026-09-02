@@ -128,6 +128,25 @@ void handle_continue_conversation(ws_connection_t *conn, struct json_object *pay
 void handle_load_conversation(ws_connection_t *conn, struct json_object *payload);
 
 /**
+ * @brief Re-anchor the active conversation without replaying history.
+ *
+ * Lightweight reconnect re-anchor: sets conn->active_conversation_id (+ privacy
+ * flag) after an ownership check, replies set_active_conversation_response, and
+ * does NOT replay messages or touch stream_conversation_id.
+ */
+void handle_set_active_conversation(ws_connection_t *conn, struct json_object *payload);
+
+/**
+ * @brief Ownership-checked re-anchor of conn's active conversation (+ privacy flag).
+ *
+ * Shared by handle_set_active_conversation and the `text`-tag heal path so the
+ * "id and privacy flag move together, ownership-checked" invariant lives in one
+ * place. Returns true if @p conn owns @p req_conv (fields updated), else false
+ * (conn untouched).
+ */
+bool conn_reanchor_conversation(ws_connection_t *conn, int64_t req_conv);
+
+/**
  * @brief Replay a conversation's durable event log to @p conn (§6 attach step 2).
  *
  * Sends one `conversation_events` frame carrying events at seq > @p last_seq, or
@@ -652,12 +671,6 @@ void handle_set_channel_llm(ws_connection_t *conn, struct json_object *payload);
  * Satellite Handler Functions (defined in webui_satellite.c)
  * ============================================================================= */
 
-/**
- * @brief Strip <command>...</command> and <end_of_turn> tags from text in-place
- *
- * Shared utility used by satellite worker and audio sentence callback.
- */
-void strip_command_tags(char *text);
 
 /**
  * @brief Handle satellite_register message
@@ -673,6 +686,20 @@ void handle_satellite_query(ws_connection_t *conn, struct json_object *payload);
  * @brief Handle satellite_ping message
  */
 void handle_satellite_ping(ws_connection_t *conn);
+
+/**
+ * @brief Emit a uniform app-level pong to any WebSocket client.
+ *
+ * Shared by the browser `ping` handler and the DAP2 `satellite_ping` handler.
+ * Echoes the request's `seq` (if present), stamps `server_time_ms`, and touches
+ * the session.  The liveness gate is the CALLER's responsibility — see the
+ * definition in webui_satellite.c.
+ *
+ * @param conn        Connection to reply on
+ * @param pong_type   Response "type" string ("pong" or "satellite_pong")
+ * @param req_payload Inbound message "payload" object, or NULL
+ */
+void webui_send_pong(ws_connection_t *conn, const char *pong_type, struct json_object *req_payload);
 
 /**
  * @brief Handle volume_state message from satellite

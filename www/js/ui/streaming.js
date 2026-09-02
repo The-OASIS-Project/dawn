@@ -80,11 +80,13 @@
       }
       DawnState.streamingState.active = false;
       DawnState.streamingState.streamId = null;
+      DawnState.streamingState.conversationId = null;
       DawnState.streamingState.entryElement = null;
       DawnState.streamingState.textElement = null;
       DawnState.streamingState.content = '';
       DawnState.streamingState.preVisualContent = '';
       DawnState.streamingState.pendingRender = false;
+      DawnState.streamingState.willPersist = false;
       // Drop any stale thinking + reasoning state (it belonged to the conversation
       // we left — otherwise the next conversation's finalizeStream would prepend
       // this turn's pre-visual text / attach its reasoning to the wrong message).
@@ -119,6 +121,17 @@
          return;
       }
 
+      // Seal the previous tool-loop iteration's pill group before this iteration's text opens.
+      // Tools arrive AFTER their iteration's tool_iteration seal and BEFORE the next iteration's
+      // stream_start, so closing here splits groups per iteration — matching the reload
+      // per-message split (living tool pills). This mirrors the Aurora client's grouping.
+      // The former KNOWN LIMIT (a text-less/tool-only iteration emits no stream_start, so its
+      // tools merged into the prior group) is now covered by the daemon's per-iteration `iter`
+      // marker on tool_step: handleToolStep seals on iter change too, so this stream_start seal
+      // and the iter seal are complementary (both idempotent — closeGroup on a null group is a
+      // no-op). An older daemon that omits `iter` falls back to this seal alone (limit persists).
+      if (typeof DawnToolPills !== 'undefined') DawnToolPills.closeGroup();
+
       // Update status to show responding
       if (callbacks.onStateChange) {
          callbacks.onStateChange('speaking', 'Responding');
@@ -152,9 +165,16 @@
          // Update streaming state
          DawnState.streamingState.active = true;
          DawnState.streamingState.streamId = payload.stream_id;
+         // Phase-0 (server-authoritative persistence §6a): remember which conversation
+         // this stream belongs to so finalize can record (conv, streamId) → bubble for
+         // the message_appended adopt-map.
+         DawnState.streamingState.conversationId = payload.conversation_id;
          DawnState.streamingState.entryElement = entry;
          DawnState.streamingState.textElement = entry.querySelector('.text');
          DawnState.streamingState.content = '';
+         // Phase 1 (server-authoritative §6 step 2): default to client-saving; the
+         // final stream_end sets this true if the server promised to persist the turn.
+         DawnState.streamingState.willPersist = false;
 
          // Reset thinking tokens for new stream (will be populated by reasoning_summary if applicable)
          DawnState.metricsState.last_thinking_tokens = 0;
@@ -311,6 +331,12 @@
          return;
       }
 
+      // Phase 1 (server-authoritative §6 step 2): if the server promised to persist
+      // this turn, stand down from the client-save in finalizeStream — the server
+      // wrote the row and fans it back as message_appended, which the adopt-map
+      // reconciles onto this same bubble.
+      DawnState.streamingState.willPersist = !!payload.will_persist;
+
       finalizeStream();
    }
 
@@ -355,6 +381,10 @@
 
       DawnState.streamingState.active = true;
       DawnState.streamingState.streamId = payload.stream_id;
+      // Phase-0 adopt-map (§6a): a resumed viewer streamed this reply too, so it
+      // must record (conv, streamId) at finalize to adopt the fanned message_appended
+      // instead of double-rendering. Without this the resumed viewer re-renders.
+      DawnState.streamingState.conversationId = payload.conversation_id;
       DawnState.streamingState.entryElement = entry;
       DawnState.streamingState.textElement = entry.querySelector('.text');
       DawnState.streamingState.content = payload.partial;
@@ -421,6 +451,188 @@
       DawnState.thinkingState.finalizedProvider = null;
    }
 
+   /* Phase-0 cross-viewer adopt-map (server-authoritative persistence §6a): a small
+    * ring of recently-finalized assistant bubbles awaiting their DB message_id.  The
+    * ORIGIN viewer streamed the reply and rendered the bubble; the post-persist
+    * `message_appended` (carrying the same stream_id) lets it ADOPT the message_id
+    * onto that bubble instead of re-rendering.  Deliberately survives finalizeStream's
+    * state reset — the correlating frame arrives AFTER finalize. */
+   var finalizedRing = [];
+   var FINALIZED_RING_MAX = 12;
+
+   function recordFinalized(conv, streamId, el) {
+      if (conv == null || !streamId || !el) return;
+      finalizedRing.push({ conv: String(conv), streamId: streamId, el: el, messageId: null });
+      if (finalizedRing.length > FINALIZED_RING_MAX) finalizedRing.shift();
+   }
+
+   /**
+    * Handle a `message_appended` fan-out frame (server-authoritative persistence §6a).
+    *   ORIGIN: (conv, stream_id) matches a finalized bubble still awaiting an id →
+    *           adopt message_id onto it, do NOT re-render (already on screen).
+    *   NON-ORIGIN, active view → render the pushed reply inline (+ reasoning panel),
+    *           tagged with its message_id.  Dedup: a bubble already carrying that
+    *           message_id is never re-rendered (covers stream / appended / reload).
+    *   NON-ACTIVE → mark the conversation unread (existing behavior).
+    */
+   async function handleMessageAppended(payload) {
+      if (!payload) return;
+      var conv = payload.conversation_id;
+      var msgId = payload.message_id;
+      var streamId = payload.stream_id;
+
+      // 1. Origin adopt — my own already-streamed bubble.
+      if (streamId) {
+         for (var i = 0; i < finalizedRing.length; i++) {
+            var e = finalizedRing[i];
+            if (e.messageId == null && e.streamId === streamId && String(e.conv) === String(conv)) {
+               e.messageId = msgId;
+               if (e.el && msgId != null) {
+                  e.el.setAttribute('data-message-id', String(msgId));
+               }
+               return;
+            }
+         }
+      }
+
+      var activeConv =
+         typeof DawnHistory !== 'undefined' && DawnHistory.getActiveConversationId
+            ? DawnHistory.getActiveConversationId()
+            : null;
+      var isActive = activeConv != null && String(conv) === String(activeConv);
+
+      if (!isActive) {
+         if (typeof DawnHistory !== 'undefined' && DawnHistory.setConversationUnread) {
+            DawnHistory.setConversationUnread(conv, true);
+         }
+         return;
+      }
+
+      // 2. Dedup — never re-render a message_id already on screen.
+      var transcript = DawnElements.transcript;
+      if (
+         msgId != null &&
+         transcript &&
+         transcript.querySelector('[data-message-id="' + String(msgId) + '"]')
+      ) {
+         return;
+      }
+
+      // Tool activity renders as living tool pills (from the tool_step frame), NEVER as a
+      // message_appended debug entry. The server does not fan message_appended for role:'tool'
+      // rows, but guard anyway so a tool-content row can't double-render alongside its pill.
+      var maText = typeof payload.text === 'string' ? payload.text : '';
+      if (
+         payload.role === 'tool' ||
+         maText.startsWith('[Tool Call:') ||
+         maText.startsWith('[Tool Result:')
+      ) {
+         return;
+      }
+
+      // Bystander final-group seal: a viewer watching ANOTHER session's turn never receives that
+      // turn's stream_start/finalizeStream (3c: narration isn't fanned live), so the iter marker
+      // seals BETWEEN iterations but nothing seals the LAST tool group. The turn's final answer
+      // landing as message_appended is that seal — it renders below the (now-closed) group, and
+      // closeGroup is idempotent (no-op for the origin, which returned at the adopt path above, and
+      // when no group is open, e.g. a plain user turn).
+      if (typeof DawnToolPills !== 'undefined') DawnToolPills.closeGroup();
+
+      // 3. Non-origin inline render (+ reasoning panel), stamped with message_id.
+      if (typeof DawnTranscript === 'undefined' || !DawnTranscript.addEntry) return;
+      var reasoningObj = null;
+      if (payload.reasoning) {
+         try {
+            reasoningObj = JSON.parse(payload.reasoning);
+         } catch (err) {
+            reasoningObj = null;
+         }
+      }
+      await DawnTranscript.addEntry(
+         payload.role || 'assistant',
+         payload.text || '',
+         reasoningObj,
+         msgId
+      );
+   }
+
+   /**
+    * Handle a `tool_step` fan-out frame (server-authoritative persistence §Phase-3 +
+    * §living-tool-pills): a LIVE, EPHEMERAL tool_call / tool_result step.
+    *
+    * We advertise `tool_step_origin` (websocket.js), so the server includes THIS connection in
+    * its fan — this reaches us for our OWN turn AND for a turn another browser is driving. Either
+    * way we render it as a living tool pill (DawnToolPills). No double-render on our own turn: the
+    * origin's redundant role:'tool' transcript frame is NOT rendered (dawn.js keeps only its
+    * reasoning-discard side effect). We keep ONLY the active-conversation check here.
+    *
+    * Not persisted and not message-id-stamped: on reload the transcript rebuilds tool activity
+    * from the messages table (history.js -> DawnToolPills.renderReloadGroup, same tool_call_id
+    * pairing), so the live pills are simply replaced by the reloaded ones.
+    *
+    * @param {Object} payload - { conversation_id, stream_id, kind, payload:"<opaque JSON>" }
+    */
+   function handleToolStep(payload) {
+      if (!payload) return;
+      var conv = payload.conversation_id;
+      var kind = payload.kind;
+
+      // Active-conversation routing: only render into the conversation on screen. A step for
+      // a non-active conversation is dropped (the final message_appended marks it unread;
+      // switching to it reloads the tool rows from the messages table).
+      var activeConv =
+         typeof DawnHistory !== 'undefined' && DawnHistory.getActiveConversationId
+            ? DawnHistory.getActiveConversationId()
+            : null;
+      if (activeConv == null || String(conv) !== String(activeConv)) return;
+
+      if (typeof DawnToolPills === 'undefined') return;
+
+      // Belt-and-suspenders size bound on the opaque payload (the daemon already caps event
+      // payloads; this guards against a future cap regression handing JSON.parse a huge string).
+      if (typeof payload.payload === 'string' && payload.payload.length > 65536) return;
+
+      // Parse the opaque, untrusted payload defensively (§8.7); never trust-parse for logic,
+      // only to extract display fields. DawnToolPills renders via textContent (escaped).
+      var obj = null;
+      try {
+         obj = JSON.parse(payload.payload || '{}');
+      } catch (e) {
+         return;
+      }
+      if (!obj || typeof obj !== 'object') return;
+      var tool = typeof obj.tool === 'string' ? obj.tool : 'tool';
+      // tool_call_id lives INSIDE the opaque payload (same key load_conversation emits on
+      // tool_calls/role:tool rows) — the correlation that pairs a result to its call's pill.
+      var id = typeof obj.tool_call_id === 'string' ? obj.tool_call_id : '';
+      // Per-iteration grouping marker: seals the pill group at a tool-loop iteration boundary
+      // even when that iteration streamed no text (so no stream_start seal fired) — closing the
+      // known-limit merge documented at handleStreamStart. Absent (older daemon) -> undefined ->
+      // DawnToolPills falls back to the stream_start seal alone.
+      var iter = typeof obj.iter === 'number' ? obj.iter : undefined;
+
+      if (kind === 'tool_call') {
+         var argsStr = '';
+         if (obj.args && typeof obj.args === 'object') {
+            try {
+               argsStr = JSON.stringify(obj.args, null, 2);
+            } catch (e) {
+               argsStr = '';
+            }
+         } else if (typeof obj.args === 'string') {
+            argsStr = obj.args; // redacted marker
+         }
+         DawnToolPills.toolCall(id, tool, argsStr, iter);
+      } else if (kind === 'tool_result') {
+         var result = typeof obj.result === 'string' ? obj.result : '';
+         // Red-only failure signal: strict === true (a confirmed failure). Absent/false → neutral,
+         // so a red is never inferred from result content — only from the daemon's explicit flag.
+         var isError = obj.error === true;
+         DawnToolPills.toolResult(id, result, isError);
+      }
+      // Scroll-to-follow is handled inside DawnToolPills.
+   }
+
    /**
     * Finalize the current streaming entry
     */
@@ -428,6 +640,10 @@
       if (!DawnState.streamingState.active) {
          return;
       }
+
+      // Seal any still-open tool-pill group at turn end (usually already closed by the final
+      // answer's stream_start; this covers a turn that ends right after tools).
+      if (typeof DawnToolPills !== 'undefined') DawnToolPills.closeGroup();
 
       // Update status back to idle
       if (callbacks.onStateChange) {
@@ -490,47 +706,41 @@
          DawnState.streamingState.content;
       /* Strip self-inserted <thinking> tags from save content */
       fullContent = fullContent.replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, '');
-      if (fullContent && callbacks.onSaveMessage) {
-         // E3: reasoning is persisted server-side as a structured field (NOT inline
-         // <dawn:thinking>/<dawn:reasoning> markers in content). Build the reasoning object
-         // {provider, duration, content?, tokens?} from the finalized thinking state; the
-         // server writes it to the messages.reasoning column on this (final-answer) row.
-         const finContent = DawnState.thinkingState.finalizedContent;
-         const finProvider = DawnState.thinkingState.finalizedProvider || 'unknown';
-         const finDuration = DawnState.thinkingState.finalizedDuration || '0';
-         const hasThinkingContent = finContent && finContent.trim();
-         const hasReasoningTokens = DawnState.streamingState.reasoningTokens > 0;
-         let reasoning = null;
-         if (hasThinkingContent || hasReasoningTokens) {
-            reasoning = { provider: finProvider, duration: finDuration };
-            if (hasThinkingContent) reasoning.content = finContent;
-            if (hasReasoningTokens) reasoning.tokens = DawnState.streamingState.reasoningTokens;
-         }
+      // Server-authoritative (SERVER_AUTHORITATIVE Phase 2c): the client-save of the assistant
+      // reply is RETIRED — the server is the sole writer, and the fanned-out message_appended
+      // adopts its message_id onto this already-streamed bubble (recordFinalized below).
+      // `fullContent` is still assembled above: it drains getPendingVisuals() (so a visual
+      // can't leak into the next turn) and gates recordFinalized.  The finalized-thinking
+      // reset used to live inside the deleted save block — run it unconditionally now, else
+      // stale thinking state leaks into the next turn.
+      DawnState.thinkingState.finalizedContent = '';
+      DawnState.thinkingState.finalizedDuration = '0';
+      DawnState.thinkingState.finalizedProvider = null;
 
-         /* Note: visual content is NOT appended here for client-side save.
-          * The server appends pending_visual to the assistant message in
-          * session_add_message(), so the DB copy already includes it.
-          * The client save_message is a backup that may be skipped on
-          * server_saved replay. Visual rendering on replay is handled by
-          * extractVisuals() in addNormalEntry. */
-
-         callbacks.onSaveMessage('assistant', fullContent, reasoning);
-
-         // Clear finalized thinking content after saving
-         DawnState.thinkingState.finalizedContent = '';
-         DawnState.thinkingState.finalizedDuration = '0';
-         DawnState.thinkingState.finalizedProvider = null;
+      // Phase-0 adopt-map: record (conv, streamId) → bubble BEFORE the reset nulls
+      // them, so the post-persist message_appended can adopt onto this bubble.  Only
+      // when content was actually saved — an empty-reply turn produces no
+      // message_appended, so recording it would leave a stale null-id ring entry that
+      // a later same-numbered stream from another session could false-adopt.
+      if (fullContent) {
+         recordFinalized(
+            DawnState.streamingState.conversationId,
+            DawnState.streamingState.streamId,
+            DawnState.streamingState.entryElement
+         );
       }
 
       // Reset state
       DawnState.streamingState.active = false;
       DawnState.streamingState.streamId = null;
+      DawnState.streamingState.conversationId = null;
       DawnState.streamingState.entryElement = null;
       DawnState.streamingState.textElement = null;
       DawnState.streamingState.content = '';
       DawnState.streamingState.preVisualContent = '';
       DawnState.streamingState.pendingRender = false;
       DawnState.streamingState.reasoningTokens = 0;
+      DawnState.streamingState.willPersist = false;
    }
 
    /**
@@ -931,6 +1141,8 @@
       handleDelta: handleStreamDelta,
       handleEnd: handleStreamEnd,
       handleResume: handleStreamResume,
+      handleMessageAppended: handleMessageAppended,
+      handleToolStep: handleToolStep,
       resetSilently: resetStreamingStateSilently,
       finalize: finalizeStream,
       setCallbacks: setCallbacks,

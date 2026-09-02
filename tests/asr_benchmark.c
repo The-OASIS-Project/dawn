@@ -38,8 +38,17 @@
 #include <string.h>
 #include <sys/time.h>
 
-#include "../asr_interface.h"
-#include "../logging.h"
+#include "asr/asr_interface.h"
+#include "logging.h"
+
+/* The ASR engine records per-utterance timing into production telemetry
+ * (src/ui/metrics.c). This benchmark does its own timing and does not want
+ * metrics.c's transitive deps (cloud provider strings, etc.), so stub the hook. */
+void metrics_record_asr_timing(double time_ms, double rtf);
+void metrics_record_asr_timing(double time_ms, double rtf) {
+   (void)time_ms;
+   (void)rtf;
+}
 
 #define DEFAULT_VOSK_MODEL "model"
 #define DEFAULT_WHISPER_MODEL_TINY "whisper.cpp/models/ggml-tiny.bin"
@@ -111,7 +120,8 @@ static benchmark_result_t run_engine_benchmark(asr_engine_type_t engine,
                                                const char *model_path,
                                                const int16_t *audio,
                                                size_t samples,
-                                               int sample_rate) {
+                                               int sample_rate,
+                                               int audio_ctx) {
    benchmark_result_t result = { 0 };
    result.engine = engine;
    result.engine_name = asr_engine_name(engine);
@@ -132,6 +142,10 @@ static benchmark_result_t run_engine_benchmark(asr_engine_type_t engine,
 
    result.model_load_time_ms = (load_end.tv_sec - load_start.tv_sec) * 1000.0 +
                                (load_end.tv_usec - load_start.tv_usec) / 1000.0;
+
+   // E1: override the encoder audio context (0=model default, >0=fixed, <0=auto).
+   // Whisper-only; no-op for Vosk.
+   asr_set_audio_ctx(ctx, audio_ctx);
 
    // Time transcription (process + finalize)
    gettimeofday(&trans_start, NULL);
@@ -226,18 +240,19 @@ static void print_results_csv(benchmark_result_t *results,
                               int num_results,
                               const char *wav_file,
                               size_t samples,
-                              int sample_rate) {
+                              int sample_rate,
+                              int audio_ctx) {
    double audio_duration = (double)samples / sample_rate;
 
-   // CSV header
-   printf("wav_file,duration_sec,samples,sample_rate,engine,model,success,rtf,load_time_ms,"
-          "transcription_time_ms,confidence,transcription\n");
+   // CSV header (audio_ctx = the E1 override this run used: 0 default / >0 fixed / <0 auto)
+   printf("wav_file,duration_sec,samples,sample_rate,engine,model,audio_ctx,success,rtf,"
+          "load_time_ms,transcription_time_ms,confidence,transcription\n");
 
    for (int i = 0; i < num_results; i++) {
       benchmark_result_t *r = &results[i];
 
-      printf("%s,%.2f,%zu,%d,%s,%s,%d,%.3f,%.1f,%.1f,%.2f,\"%s\"\n", wav_file, audio_duration,
-             samples, sample_rate, r->engine_name, r->model_path, r->success, r->rtf,
+      printf("%s,%.2f,%zu,%d,%s,%s,%d,%d,%.3f,%.1f,%.1f,%.2f,\"%s\"\n", wav_file, audio_duration,
+             samples, sample_rate, r->engine_name, r->model_path, audio_ctx, r->success, r->rtf,
              r->model_load_time_ms, r->transcription_time_ms,
              (r->result && r->result->confidence >= 0) ? r->result->confidence : -1.0,
              (r->result && r->result->text) ? r->result->text : "");
@@ -259,6 +274,8 @@ static void print_usage(const char *prog_name) {
    printf("                         Default: %s\n", DEFAULT_VOSK_MODEL);
    printf("  --whisper-model <path> Path to Whisper .bin model file\n");
    printf("                         Default: %s\n", DEFAULT_WHISPER_MODEL_BASE);
+   printf("  --audio-ctx <n>        Whisper encoder audio_ctx (E1): 0=default(1500),\n");
+   printf("                         >0=fixed, <0=auto-scale to clip length. Default: 0\n");
    printf("  --csv                  Output results in CSV format\n");
    printf("  --help                 Show this help message\n");
    printf("\n");
@@ -277,17 +294,19 @@ int main(int argc, char **argv) {
    const char *vosk_model = DEFAULT_VOSK_MODEL;
    const char *whisper_model = DEFAULT_WHISPER_MODEL_BASE;
    int csv_output = 0;
+   int audio_ctx = 0;  // E1: 0=model default(1500), >0=fixed, <0=auto-scale by length
 
    // Parse command-line options
    static struct option long_options[] = { { "engines", required_argument, 0, 'e' },
                                            { "vosk-model", required_argument, 0, 'v' },
                                            { "whisper-model", required_argument, 0, 'w' },
+                                           { "audio-ctx", required_argument, 0, 'a' },
                                            { "csv", no_argument, 0, 'c' },
                                            { "help", no_argument, 0, 'h' },
                                            { 0, 0, 0, 0 } };
 
    int opt;
-   while ((opt = getopt_long(argc, argv, "e:v:w:ch", long_options, NULL)) != -1) {
+   while ((opt = getopt_long(argc, argv, "e:v:w:a:ch", long_options, NULL)) != -1) {
       switch (opt) {
          case 'e':
             engines_str = optarg;
@@ -297,6 +316,16 @@ int main(int argc, char **argv) {
             break;
          case 'w':
             whisper_model = optarg;
+            break;
+         case 'a':
+            audio_ctx = atoi(optarg);
+            /* Bound to the encoder's valid range so a fat-fingered CLI value
+             * can't pass an out-of-range (or INT_MIN-negation-UB) audio_ctx. */
+            if (audio_ctx < -1500) {
+               audio_ctx = -1500;
+            } else if (audio_ctx > 1500) {
+               audio_ctx = 1500;
+            }
             break;
          case 'c':
             csv_output = 1;
@@ -362,12 +391,13 @@ int main(int argc, char **argv) {
       if (!csv_output) {
          OLOG_INFO("Running %s benchmark...", asr_engine_name(engines[i]));
       }
-      results[i] = run_engine_benchmark(engines[i], model_paths[i], audio, samples, sample_rate);
+      results[i] = run_engine_benchmark(engines[i], model_paths[i], audio, samples, sample_rate,
+                                        audio_ctx);
    }
 
    // Output results
    if (csv_output) {
-      print_results_csv(results, num_engines, wav_file, samples, sample_rate);
+      print_results_csv(results, num_engines, wav_file, samples, sample_rate, audio_ctx);
    } else {
       print_results_table(results, num_engines, wav_file, samples, sample_rate);
    }

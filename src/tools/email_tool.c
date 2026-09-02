@@ -108,7 +108,7 @@ static char *handle_accounts(int user_id) {
 
    char *buf = malloc(RESULT_BUF_SIZE);
    if (!buf)
-      return strdup("Error: memory allocation failed");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
 
    int pos = 0;
    if (count <= 0) {
@@ -138,36 +138,47 @@ static char *handle_accounts(int user_id) {
  *
  * Caller frees.  Returns a heap-allocated string identical in lifecycle to
  * every other error return in this file (strdup'd or malloc'd, never NULL).
+ *
+ * Every caller of this helper is a genuine hard failure (unknown/absent
+ * account, invalid folder, revoked OAuth, network/upstream error), so each
+ * message carries TOOL_RESULT_ERROR_MARK to red the WebUI tool pill.  The mark
+ * is stripped before the LLM reads the text (see TOOL_DEVELOPMENT_GUIDE.md
+ * § Signaling a Failure).
  */
 static char *email_rc_to_error(int rc, const char *op, const char *account, const char *folder) {
    char *msg = malloc(384);
    if (!msg)
-      return strdup("Error: memory allocation failed");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
    switch (rc) {
       case EMAIL_RC_UNKNOWN_ACCOUNT:
          if (account && account[0])
             snprintf(msg, 384,
+                     TOOL_RESULT_ERROR_MARK
                      "Error: no email account matches '%s'. Call action='accounts' to see "
                      "configured account names; do not invent email addresses.",
                      account);
          else
             snprintf(msg, 384,
+                     TOOL_RESULT_ERROR_MARK
                      "Error: no email account matches the request. Call action='accounts' to "
                      "enumerate.");
          break;
       case EMAIL_RC_NO_ACCOUNTS:
          snprintf(msg, 384,
+                  TOOL_RESULT_ERROR_MARK
                   "Error: no email accounts configured (or all are disabled). Tell the user to "
                   "add or enable one via WebUI Settings -> Email.");
          break;
       case EMAIL_RC_INVALID_FOLDER:
          if (folder && folder[0])
             snprintf(msg, 384,
+                     TOOL_RESULT_ERROR_MARK
                      "Error: invalid folder name '%s'. Valid: inbox, sent, drafts, trash, "
                      "spam, starred, important, all.",
                      folder);
          else
             snprintf(msg, 384,
+                     TOOL_RESULT_ERROR_MARK
                      "Error: invalid folder name. Valid: inbox, sent, drafts, trash, spam, "
                      "starred, important, all.");
          break;
@@ -179,6 +190,7 @@ static char *email_rc_to_error(int rc, const char *op, const char *account, cons
          char revoked_account[128] = { 0 };
          if (oauth_was_last_refresh_revoked(revoked_account, sizeof(revoked_account))) {
             snprintf(msg, 384,
+                     TOOL_RESULT_ERROR_MARK
                      "Error: OAuth tokens for '%s' have been revoked at the provider. "
                      "Tell the user to re-link this email account in WebUI Settings -> "
                      "Email.  Do NOT retry — retrying with the same tokens will keep "
@@ -186,6 +198,7 @@ static char *email_rc_to_error(int rc, const char *op, const char *account, cons
                      revoked_account[0] ? revoked_account : "this account");
          } else {
             snprintf(msg, 384,
+                     TOOL_RESULT_ERROR_MARK
                      "Error: email %s failed (network or upstream error). Retry once; if "
                      "persistent, the email backend may be unreachable.",
                      op);
@@ -249,7 +262,7 @@ static char *handle_recent(struct json_object *details, int user_id) {
 
    char *buf = malloc(RESULT_BUF_SIZE);
    if (!buf)
-      return strdup("Error: memory allocation failed");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
 
    int pos = 0;
    if (out_count == 0) {
@@ -305,7 +318,7 @@ static char *handle_read(struct json_object *details, int user_id) {
    char *buf = malloc(buf_size);
    if (!buf) {
       email_message_free(&msg);
-      return strdup("Error: memory allocation failed");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
    }
 
    int pos = 0;
@@ -375,7 +388,7 @@ static char *handle_search(struct json_object *details, int user_id) {
 
    char *buf = malloc(RESULT_BUF_SIZE);
    if (!buf)
-      return strdup("Error: memory allocation failed");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
 
    int pos = 0;
    if (out_count == 0) {
@@ -447,7 +460,7 @@ static char *handle_send(struct json_object *details, int user_id) {
          /* Multiple matches — ask LLM to disambiguate */
          char *buf = malloc(1024);
          if (!buf)
-            return strdup("Error: memory allocation failed");
+            return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
          int pos = snprintf(buf, 1024, "Multiple email addresses found for '%s':\n", to);
          if (pos > 1024)
             pos = 1024;
@@ -474,13 +487,14 @@ static char *handle_send(struct json_object *details, int user_id) {
    int rc = email_service_create_draft(user_id, resolved_addr, resolved_name, subject, body,
                                        draft_id, sizeof(draft_id));
    if (rc == 2)
-      return strdup("Error: all email accounts are read-only. Cannot send emails.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: all email accounts are read-only. Cannot send emails.");
    if (rc != 0)
-      return strdup("Error: failed to create email draft");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: failed to create email draft");
 
    char *buf = malloc(RESULT_BUF_SIZE);
    if (!buf)
-      return strdup("Error: memory allocation failed");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
 
    snprintf(buf, RESULT_BUF_SIZE,
             "Draft email prepared:\n"
@@ -505,13 +519,16 @@ static char *handle_confirm_send(struct json_object *details, int user_id) {
       case 0:
          return strdup("Email sent successfully.");
       case 2:
-         return strdup("Error: draft not found or expired. The draft may have timed out "
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: draft not found or expired. The draft may have timed out "
                        "(5-minute limit). Please use 'send' to create a new draft.");
       case 3:
-         return strdup("Error: too many failed confirmation attempts. Please wait 60 seconds "
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: too many failed confirmation attempts. Please wait 60 seconds "
                        "before trying again.");
       default:
-         return strdup("Error: failed to send email (network or upstream error). Retry once; "
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: failed to send email (network or upstream error). Retry once; "
                        "if persistent, the SMTP server may be unreachable.");
    }
 }
@@ -529,7 +546,7 @@ static char *handle_folders(struct json_object *details, int user_id) {
 
    char *result = malloc(RESULT_BUF_SIZE);
    if (!result)
-      return strdup("Error: memory allocation failed");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
 
    if (account && account[0])
       snprintf(result, RESULT_BUF_SIZE, "Folders for '%s':\n%s", account, buf);
@@ -556,16 +573,18 @@ static char *handle_trash(struct json_object *details, int user_id) {
                                                sizeof(pending_id), subject, sizeof(subject), from,
                                                sizeof(from));
    if (rc == 2)
-      return strdup("Error: email account is read-only. Cannot trash emails. Tell the user "
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: email account is read-only. Cannot trash emails. Tell the user "
                     "to enable write access for this account in WebUI Settings -> Email.");
    if (rc != 0)
-      return strdup("Error: failed to prepare trash action. The message_id may be invalid "
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: failed to prepare trash action. The message_id may be invalid "
                     "(get fresh IDs from 'recent' or 'search') or the account may be "
                     "unreachable — retry once.");
 
    char *buf = malloc(RESULT_BUF_SIZE);
    if (!buf)
-      return strdup("Error: memory allocation failed");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
 
    snprintf(buf, RESULT_BUF_SIZE,
             "Pending trash:\n"
@@ -588,13 +607,16 @@ static char *handle_confirm_trash(struct json_object *details, int user_id) {
       case 0:
          return strdup("Email moved to Trash successfully.");
       case 2:
-         return strdup("Error: pending trash not found or expired. The request may have timed out "
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: pending trash not found or expired. The request may have timed out "
                        "(5-minute limit). Please use 'trash' to create a new request.");
       case 3:
-         return strdup("Error: too many failed confirmation attempts. Please wait 60 seconds "
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: too many failed confirmation attempts. Please wait 60 seconds "
                        "before trying again.");
       default:
-         return strdup("Error: failed to trash email (network or upstream error). Retry "
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: failed to trash email (network or upstream error). Retry "
                        "once; if persistent, the email backend may be unreachable.");
    }
 }
@@ -611,11 +633,13 @@ static char *handle_archive(struct json_object *details, int user_id) {
       case 0:
          return strdup("Email archived successfully (removed from Inbox, kept in All Mail).");
       case 2:
-         return strdup("Error: email account is read-only. Cannot archive emails. Tell the "
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: email account is read-only. Cannot archive emails. Tell the "
                        "user to enable write access for this account in WebUI Settings -> "
                        "Email.");
       default:
-         return strdup("Error: failed to archive email (network or upstream error). The "
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: failed to archive email (network or upstream error). The "
                        "message_id may be invalid (get fresh IDs from 'recent') or the "
                        "account may be unreachable — retry once.");
    }
@@ -635,7 +659,7 @@ static char *email_tool_callback(const char *action, char *value, int *should_re
    if (value && value[0]) {
       details = json_tokener_parse(value);
       if (!details)
-         return strdup("Error: invalid JSON in details parameter");
+         return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid JSON in details parameter");
    } else {
       details = json_object_new_object();
    }
@@ -667,6 +691,7 @@ static char *email_tool_callback(const char *action, char *value, int *should_re
    } else {
       char buf[256];
       snprintf(buf, sizeof(buf),
+               TOOL_RESULT_ERROR_MARK
                "Error: unknown action '%s'. Valid: accounts, recent, read, search, folders, "
                "send, confirm_send, trash, confirm_trash, archive",
                action);
@@ -795,7 +820,6 @@ static const tool_metadata_t email_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NETWORK | TOOL_CAP_DANGEROUS | TOOL_CAP_SCHEDULABLE,
-   .is_getter = false,
    .skip_followup = false,
    .default_local = true,
    .default_remote = true,

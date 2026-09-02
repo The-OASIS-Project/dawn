@@ -70,12 +70,14 @@ Send a text message to the AI (with optional vision images).
             "data": "<base64-encoded image>",
             "mime_type": "image/jpeg"
          }
-      ]
+      ],
+      "image_ids": ["img_a1b2c3d4e5f6"]
    }
 }
 ```
-- `images` is optional, max 5 images, max 4MB each
+- `images` is optional, max 5 images, max 4MB each — the base64 data sent to the LLM for this turn.
 - Supported MIME types: `image/jpeg`, `image/png`, `image/gif`, `image/webp`
+- `image_ids` — the ids for those images returned by the `POST /api/images` HTTP upload (see `docs/arch/subsystems/vision-documents.md`), **ordered to match `images[]`**. The daemon is authoritative for user-turn persistence: it builds `[IMAGE:<id>]` markers from these ids and persists the turn itself, then echoes `server_saved: true` on the transcript so the client does **not** save the user row. **Mandatory on any image turn** — an image turn sent without `image_ids` persists text-only and the images will not re-render on reload (there is no client-save fallback). Omit for text-only turns.
 - Requires authentication
 
 #### `cancel`
@@ -91,13 +93,26 @@ Reconnect to an existing session using a stored token.
    "type": "reconnect",
    "payload": {
       "token": "a1b2c3d4...",
-      "audio_codecs": ["opus", "pcm"]
+      "audio_codecs": ["opus", "pcm"],
+      "tts_enabled": true,
+      "tool_step_origin": true
    }
 }
 ```
 - If token is valid, session is restored with conversation history
 - If token is invalid/expired, a new session is created
 - `audio_codecs` is optional, used to detect Opus support
+- `tts_enabled` (optional, default false): server synthesizes and streams TTS audio to this connection
+- `tool_step_origin` (optional, default false): a **client capability** — set it if this client
+  renders its own turn's tool steps from the `tool_step` frame (uniform "tool pill" UI) rather than
+  from its live text stream. When set, the server includes this connection in its **own** turn's
+  `tool_step` fan (see `tool_step` under Server → Client). Default off preserves the origin-excluded
+  behavior for clients that render tool steps inline from the stream. **The same two fields are
+  accepted on the initial connect handshake**, not only on `reconnect`.
+- **Single-connection-per-session:** if the target session is already held by another
+  live connection, that connection is **evicted** — it receives a `session_superseded`
+  frame + a `4001` close (see below). Last deliberate reconnect wins; the reconnecting
+  client gets `reconnected:true` on its `session` frame.
 
 #### `capabilities_update`
 Update client capabilities after initial connection.
@@ -276,7 +291,6 @@ Configure LLM settings for this session only (does not affect other clients).
       "type": "cloud",
       "provider": "openai",
       "model": "gpt-5-mini",
-      "tool_mode": "native",
       "thinking_mode": "enabled",
       "reasoning_effort": "medium"
    }
@@ -284,7 +298,6 @@ Configure LLM settings for this session only (does not affect other clients).
 ```
 - All fields are optional, only provided fields are changed
 - `type`: `"local"`, `"cloud"`, or `"reset"` (revert to defaults)
-- `tool_mode`: `"native"`, `"command_tags"`, or `"disabled"`
 - `thinking_mode`: `"disabled"`, `"auto"`, or `"enabled"`
 - `reasoning_effort`: `"low"`, `"medium"`, or `"high"`
 - Response: `set_session_llm_response`
@@ -494,6 +507,25 @@ Load a saved conversation into the current session.
 ```
 Response: `load_conversation_response`
 
+#### `set_active_conversation`
+Re-anchor the connection's active conversation **without** replaying history — a
+lightweight alternative to `load_conversation` for the reconnect case, where the
+client only needs to reset which conversation its turns persist into (not reload
+the transcript).
+```json
+{
+   "type": "set_active_conversation",
+   "payload": {
+      "conversation_id": 42
+   }
+}
+```
+Response: `set_active_conversation_response` — `{success, conversation_id, is_private}`
+on success; `{success:false, conversation_id, error}` on failure. Ownership-checked
+(owner-scoped, non-oracle): a conversation the caller does not own returns
+`error: "Conversation unavailable"`, indistinguishable from an absent id. Does not
+touch `stream_conversation_id`.
+
 #### `delete_conversation`
 Delete a saved conversation.
 ```json
@@ -558,7 +590,8 @@ Search through conversation history.
 Response: `search_conversations_response`
 
 #### `save_message`
-Save a message to the current conversation in the database.
+Save a message to the current conversation in the database. Used by the client to
+persist the **assistant's final answer** (role `assistant`).
 ```json
 {
    "type": "save_message",
@@ -571,6 +604,12 @@ Save a message to the current conversation in the database.
    }
 }
 ```
+- **`role: "user"` is a no-op** (answers success, writes nothing). The daemon is the
+  sole writer of user rows — every typed/text-dispatch user turn is persisted server-side
+  in `text_input_dispatch.c`, image markers included, and the turn echoes `server_saved: true`.
+  A client should not send user-role saves; a stale one is accepted-and-dropped so it cannot
+  double-write. `system`/`tool` roles are rejected outright (daemon-owned).
+
 Response: `save_message_response`
 
 #### `update_context`
@@ -959,6 +998,22 @@ Application-level keepalive (every 10 seconds).
 ```
 Response: `satellite_pong`
 
+#### `ping`
+Application-level liveness probe for **browser (WebUI)** clients — the
+authenticated counterpart to `satellite_ping`. Sent on an idle-gated heartbeat
+(~10 s) so a client can detect a stale/timed-out session.
+```json
+{"type": "ping", "payload": {"seq": 42}}
+```
+- `seq` (optional): correlation token echoed verbatim in the `pong` so the
+  client can match replies and discard stale ones.
+
+Response: `pong` — but **only** for a valid, authenticated session
+(`conn_require_auth`). A revoked/expired/unauthenticated connection receives an
+`UNAUTHORIZED` `error` and no `pong`; that absence is the client's staleness
+signal. The reply carries `{seq?, server_time_ms}` (same payload shape as
+[`satellite_pong`](#satellite_pong)).
+
 #### OTA (over-the-air updates)
 Server→satellite firmware updates. Control plane is on this WebSocket; the image
 itself is pulled over HTTPS. The signing key never touches the daemon — devices
@@ -1159,10 +1214,38 @@ Session token and auth state (sent on connect/reconnect).
       "token": "a1b2c3d4...",
       "authenticated": true,
       "username": "alice",
-      "is_admin": false
+      "is_admin": false,
+      "reconnected": true,
+      "session_id": 42
    }
 }
 ```
+- `reconnected` — `true` when the connection adopted its **own** existing session via a
+  valid reconnect token; `false` when it landed on a **fresh** session (server restart,
+  idle-expiry, or a reconnect that was evicted onto a new session). Clients use it to
+  decide recovery: `reconnected:false` → issue `load_conversation` to rebuild LLM
+  context; `true` → the lightweight `set_active_conversation` re-anchor suffices.
+  Feature-detect it (older servers omit it → treat as "load").
+- `session_id` — the adopted session's numeric id (correlation). Emitted **only on the
+  authenticated frame** (omitted pre-auth).
+
+#### `session_superseded`
+Another connection (a second tab, or the same browser reconnecting) has taken over this
+session, so this connection is about to be closed. Emitted **immediately before** the
+server closes the socket with WS close code **`4001` "superseded"**.
+```json
+{
+   "type": "session_superseded",
+   "payload": { "reason": "superseded" }
+}
+```
+- Both signals are sent — the data frame **and** the 4001 close code — because a reverse
+  proxy (dev http-proxy, nginx) **strips a custom WS close code** (a proxied browser sees
+  a generic `1006`). The data frame proxies through intact, so it is the proxy-robust
+  signal; the 4001 code covers the same-origin/prod path.
+- Client contract: on this frame **or** `close.code === 4001`, do **not** auto-reconnect
+  (that would ping-pong the two tabs) — show a takeover state and reclaim only on an
+  explicit user gesture (which cleanly evicts the other connection). `reason` is optional.
 
 #### `config`
 WebUI configuration (sent after session).
@@ -1198,6 +1281,22 @@ State machine update.
 ```
 - `detail`: Optional status message during long operations
 - `tools`: Optional array of active tool calls (during parallel execution)
+
+> **Precedence trap — `state: "speaking"` vs `always_on_state: "recording"`.**
+> In the always-on bare-wake-word flow (user says only the wake word, then speaks a
+> command), DAWN plays a short greeting ("Hello.") *while the always-on state machine
+> is already in `recording`*. The greeting is normal TTS, so the client receives a
+> top-level `state: "speaking"` **concurrent with** the `always_on_state: "recording"`
+> frame. These read as contradictory. **Contract:
+> during always-on `recording`, `always_on_state: "recording"` wins** — the client
+> keeps its mic **open** and relies on client-side echo cancellation (AEC) to remove
+> the greeting from its capture; it must **not** mute on `state: "speaking"` until
+> recording clears (`recording` → `processing`, which precedes the *reply's*
+> `state: "speaking"`). A client that mutes on `state: "speaking"` will gag its own
+> command window. Corollary: the client's TTS playback must be **AEC-referenceable**
+> (route through a media element the browser's echo canceller sees, not a bare Web
+> Audio destination) or the greeting will bleed uncancelled into the live mic and
+> keep the server's VAD from ever reaching end-of-speech.
 
 #### `error`
 Error or informational notification.
@@ -1241,11 +1340,16 @@ Complete message (non-streaming, or replayed history).
    "payload": {
       "role": "user|assistant|satellite_response",
       "text": "Hello, how are you?",
-      "replay": true
+      "replay": true,
+      "server_saved": true
    }
 }
 ```
 - `replay`: true when sending conversation history on reconnect
+- `server_saved`: present and `true` on a user-turn echo when the daemon already persisted
+  the row (the normal case — the daemon owns user-turn persistence). The client uses it to
+  skip its own save. The echo `text` is the clean user text; any `[IMAGE:<id>]` markers were
+  persisted server-side, not sent here.
 
 #### `stream_start`
 Start of LLM token stream.
@@ -1334,6 +1438,52 @@ OpenAI o-series reasoning token summary (content not available).
 }
 ```
 
+#### `tool_step`
+Live cross-viewer tool step (server-authoritative fan-out; see
+[SERVER_AUTHORITATIVE_PERSISTENCE_DESIGN.md](https://github.com/The-OASIS-Project/atlas/blob/main/dawn/archive/SERVER_AUTHORITATIVE_PERSISTENCE_DESIGN.md) §12h).
+Fans one `tool_call` or `tool_result` to the user's OTHER browsers viewing the conversation **as
+the turn runs**, so a bystander sees tool activity live. **Ephemeral** — no durable event is
+written for this frame; the step is already persisted with the turn, so reload rebuilds it.
+```json
+{
+   "type": "tool_step",
+   "payload": {
+      "conversation_id": 1204,
+      "stream_id": 7,
+      "kind": "tool_call",
+      "payload": "{\"tool\":\"search\",\"tool_call_id\":\"toolu_015abc\",\"args\":{\"q\":\"...\"}}"
+   }
+}
+```
+- `kind`: `tool_call` or `tool_result`.
+- `payload`: an **opaque, pre-redacted, size-capped JSON string** — forwarded verbatim and rendered
+  as text, never re-parsed as trusted. Its inner object carries `tool` (name), an optional
+  `tool_call_id`, and (`args` | `result`).
+- `tool_call_id` (inside the inner `payload`): provider correlation id — the **same key**
+  `load_conversation` emits on the `tool_calls` / `role:tool` rows, so a client pairs a live result
+  to its call with one implementation across live and reload. Present on both `tool_call` and
+  `tool_result`; omitted when the provider supplied none.
+- `iter` (inside the inner `payload`): the 0-based tool-loop **iteration index** this step belongs
+  to. Present on both `tool_call` and `tool_result` when known; omitted otherwise. A client seals its
+  per-iteration group when `iter` changes — so grouping stays correct even for a tool-only iteration
+  that streams no text (which emits no stream boundary). Absent → group by stream boundaries only.
+- `error` (inside the inner `payload`, **`tool_result` only**): `true` iff the tool step was a
+  **confirmed failure** — set at execute time from the tool result (structural failure OR a
+  tool-self-reported hard failure), **never parsed from the result text**. **Omitted otherwise**, so
+  a consumer reds the pill solely on the explicit `true` (a red-only signal: neutral = success or
+  unknown; there is deliberately no "success" value). Back-compat: absent → neutral in both
+  directions; either side may land first.
+  - **Reload parity**: the failure is **persisted** on the `role:tool` message row
+    (`messages.is_error`, schema v81) and surfaced on reload as `is_error: true` in the
+    `load_conversation` message projection (omitted otherwise), so a reloaded conversation reds a
+    failed pill just like the live signal. (The durable job-observe path also persists the whole
+    `tool_step` payload to `conversation_events`, so a job conversation's attach/replay reds too.)
+- `stream_id` is best-effort / informational.
+- **Recipients**: the user's authenticated WEBUI browsers viewing the conversation, **excluding the
+  origin by default** (the origin renders its own steps from its live stream). A connection that
+  advertised the `tool_step_origin` capability (see `reconnect`) instead receives its **own** turn's
+  `tool_step` frames and renders every step uniformly from this frame — no stream-derived path.
+
 ---
 
 ### Context & Metrics
@@ -1387,6 +1537,27 @@ Notification that conversation context was reset (via tool).
 ```json
 {"type": "conversation_reset"}
 ```
+
+#### `context_citations`
+Memory-citation signal (feature-gated on `[memory] citation_enabled`). Emitted at turn
+end when the model cited ≥1 injected memory, so a "Context for this turn" panel can
+gold-highlight the rows the model actually used. Delivered only to the WEBUI session on
+the matching active conversation.
+```json
+{
+   "type": "context_citations",
+   "conversation_id": 1163,
+   "turn_id": 23474,
+   "cited_item_ids": ["fact:8502", "summary:2496"]
+}
+```
+- Fields are flat at the root (not under `payload`).
+- `turn_id` is the triggering user message id; it pairs this frame to the per-turn
+  focus block (the `context_injection` panel broadcast) by `(conversation_id, turn_id)`.
+  `turn_id` is globally unique, so a consumer can match on it alone.
+- `cited_item_ids` are the **validated** cited subset (hallucinated/out-of-range ordinals
+  are already dropped server-side); each maps to a focus-block row's `item_id`. Only memory
+  rows carry a citeable `item_id`.
 
 ---
 
@@ -1675,10 +1846,18 @@ Response to `satellite_ping`.
 {
    "type": "satellite_pong",
    "payload": {
-      "timestamp": 1708300000
+      "server_time_ms": 1708300000000
    }
 }
 ```
+- `server_time_ms`: server wall-clock at reply time (epoch milliseconds).
+
+Browser (WebUI) clients use the parallel `ping` → `pong` verb, which shares
+this exact payload shape and additionally echoes a client-supplied `seq` (see
+[`ping`](#ping) above). The two verbs differ only in the liveness gate: a
+satellite `satellite_ping` is accepted on `is_satellite`, a browser `ping` is
+authenticated via `conn_require_auth` (so a revoked/expired session gets an
+`error` frame and **no** `pong`).
 
 Satellites also receive the same streaming messages as WebUI clients:
 `state`, `error`, `transcript`, `stream_start`, `stream_delta`, `stream_end`.
@@ -1715,6 +1894,7 @@ Satellites also receive the same streaming messages as WebUI clients:
 | `list_conversations` | `list_conversations_response` |
 | `new_conversation` | `new_conversation_response` |
 | `load_conversation` | `load_conversation_response` |
+| `set_active_conversation` | `set_active_conversation_response` |
 | `delete_conversation` | `delete_conversation_response` |
 | `rename_conversation` | `rename_conversation_response` |
 | `set_private` | `set_private_response` |
@@ -1740,6 +1920,7 @@ Satellites also receive the same streaming messages as WebUI clients:
 | `calendar_upcoming_events` | `calendar_upcoming_events_response` |
 | `satellite_register` | `satellite_register_ack` |
 | `satellite_ping` | `satellite_pong` |
+| `ping` | `pong` |
 
 ---
 

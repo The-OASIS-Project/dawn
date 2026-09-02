@@ -367,13 +367,22 @@ static void parse_asr(toml_table_t *table, asr_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = { "model", "models_path", "dedup_window_sec",
-                                             "disambiguation_hint", NULL };
+   static const char *const known_keys[] = {
+      "model", "models_path", "dedup_window_sec", "audio_ctx_floor", "disambiguation_hint", NULL
+   };
    warn_unknown_keys(table, "asr", known_keys);
 
    PARSE_STRING(table, "model", config->model);
    PARSE_STRING(table, "models_path", config->models_path);
    PARSE_INT(table, "dedup_window_sec", config->dedup_window_sec);
+   PARSE_INT(table, "audio_ctx_floor", config->audio_ctx_floor);
+   /* 0 disables; otherwise clamp into [0, 1500] (1500 = full window = effectively off). */
+   if (config->audio_ctx_floor < 0) {
+      config->audio_ctx_floor = 0;
+   }
+   if (config->audio_ctx_floor > ASR_AUDIO_CTX_FLOOR_MAX) {
+      config->audio_ctx_floor = ASR_AUDIO_CTX_FLOOR_MAX;
+   }
    PARSE_STRING(table, "disambiguation_hint", config->disambiguation_hint);
 }
 
@@ -556,32 +565,33 @@ static void parse_llm_tools(toml_table_t *table, llm_tools_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = { "mode",
-                                             "native_enabled",
-                                             "local_enabled",
-                                             "remote_enabled",
-                                             "local_disabled",
-                                             "remote_disabled",
-                                             NULL };
+   static const char *const known_keys[] = {
+      "enabled",        "mode", /* legacy, accepted for back-compat */
+      "native_enabled",         /* legacy, accepted for back-compat */
+      "local_enabled",  "remote_enabled", "local_disabled", "remote_disabled", NULL
+   };
    warn_unknown_keys(table, "llm.tools", known_keys);
 
-   /* Parse mode (preferred) or fall back to native_enabled for backwards compatibility */
-   PARSE_STRING(table, "mode", config->mode);
-
-   /* Validate mode if set */
-   if (config->mode[0] != '\0') {
-      if (strcmp(config->mode, "native") != 0 && strcmp(config->mode, "command_tags") != 0 &&
-          strcmp(config->mode, "disabled") != 0) {
-         OLOG_WARNING("Invalid llm.tools.mode '%s', using 'native'", config->mode);
-         safe_strncpy(config->mode, "native", sizeof(config->mode));
-      }
+   /* Preferred: boolean master switch for native tool calling. */
+   toml_datum_t enabled = toml_bool_in(table, "enabled");
+   if (enabled.ok) {
+      config->enabled = enabled.u.b;
    } else {
-      /* Backwards compatibility: convert native_enabled bool to mode */
-      toml_datum_t native = toml_bool_in(table, "native_enabled");
-      if (native.ok) {
-         safe_strncpy(config->mode, native.u.b ? "native" : "command_tags", sizeof(config->mode));
+      /* Backwards compatibility with the retired <command> transport: the legacy
+       * string `mode` had values native/command_tags/disabled — only "disabled"
+       * turned tools off, so map anything else to on.  Older `native_enabled` bool
+       * still maps directly. */
+      toml_datum_t mode = toml_string_in(table, "mode");
+      if (mode.ok) {
+         config->enabled = (strcmp(mode.u.s, "disabled") != 0);
+         free(mode.u.s);
+      } else {
+         toml_datum_t native = toml_bool_in(table, "native_enabled");
+         if (native.ok) {
+            config->enabled = native.u.b;
+         }
+         /* If none set, default (true) from config_defaults.c stands. */
       }
-      /* If neither is set, default will be applied from config_defaults.c */
    }
 
    /* Parse local_enabled array */
@@ -730,7 +740,6 @@ static void parse_llm(toml_table_t *table, llm_config_t *config) {
                                              "compact_use_session",
                                              "compact_provider",
                                              "compact_model",
-                                             "compact_openrouter_model",
                                              "conversation_logging",
                                              "rate_limit_enabled",
                                              "rate_limit_rpm",
@@ -782,7 +791,6 @@ static void parse_llm(toml_table_t *table, llm_config_t *config) {
    PARSE_BOOL(table, "compact_use_session", config->compact_use_session);
    PARSE_STRING(table, "compact_provider", config->compact_provider);
    PARSE_STRING(table, "compact_model", config->compact_model);
-   PARSE_STRING(table, "compact_openrouter_model", config->compact_openrouter_model);
 
    PARSE_BOOL(table, "conversation_logging", config->conversation_logging);
    PARSE_BOOL(table, "rate_limit_enabled", config->rate_limit_enabled);
@@ -804,11 +812,10 @@ static void parse_llm(toml_table_t *table, llm_config_t *config) {
    /* [llm.silent_observe] — Phase 0 of Dynamic Context Injection */
    toml_table_t *silent = toml_table_in(table, "silent_observe");
    if (silent) {
-      static const char *const silent_keys[] = { "provider", "model", "openrouter_model", NULL };
+      static const char *const silent_keys[] = { "provider", "model", NULL };
       warn_unknown_keys(silent, "llm.silent_observe", silent_keys);
       PARSE_STRING(silent, "provider", config->silent_observe.provider);
       PARSE_STRING(silent, "model", config->silent_observe.model);
-      PARSE_STRING(silent, "openrouter_model", config->silent_observe.openrouter_model);
    }
 }
 
@@ -1186,7 +1193,6 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                              "source_budget_chars",
                                              "extraction_provider",
                                              "extraction_model",
-                                             "extraction_openrouter_model",
                                              "extraction_timeout_ms",
                                              "paraphrase_dedup_enabled",
                                              "paraphrase_dedup_threshold",
@@ -1215,7 +1221,6 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
    PARSE_INT(table, "source_budget_chars", config->source_budget_chars);
    PARSE_STRING(table, "extraction_provider", config->extraction_provider);
    PARSE_STRING(table, "extraction_model", config->extraction_model);
-   PARSE_STRING(table, "extraction_openrouter_model", config->extraction_openrouter_model);
    PARSE_INT(table, "extraction_timeout_ms", config->extraction_timeout_ms);
    PARSE_BOOL(table, "paraphrase_dedup_enabled", config->paraphrase_dedup_enabled);
    PARSE_DOUBLE(table, "paraphrase_dedup_threshold", config->paraphrase_dedup_threshold);
@@ -1326,6 +1331,8 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                                 "prune_threshold",
                                                 "summary_retention_days",
                                                 "access_reinforcement_boost",
+                                                "citation_enabled",
+                                                "citation_reinforcement_boost",
                                                 NULL };
       warn_unknown_keys(decay, "memory.decay", decay_keys);
 
@@ -1340,6 +1347,8 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       PARSE_DOUBLE(decay, "prune_threshold", config->decay_prune_threshold);
       PARSE_INT(decay, "summary_retention_days", config->summary_retention_days);
       PARSE_DOUBLE(decay, "access_reinforcement_boost", config->access_reinforcement_boost);
+      PARSE_BOOL(decay, "citation_enabled", config->citation_enabled);
+      PARSE_DOUBLE(decay, "citation_reinforcement_boost", config->citation_reinforcement_boost);
    }
 
    /* Clamp decay values to sane ranges */
@@ -1393,6 +1402,12 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       config->access_reinforcement_boost = 0.0f;
    if (config->access_reinforcement_boost > 0.5f)
       config->access_reinforcement_boost = 0.5f;
+
+   /* Citation reinforcement boost: 0.0-0.5 (0.0 = inert) */
+   if (config->citation_reinforcement_boost < 0.0f)
+      config->citation_reinforcement_boost = 0.0f;
+   if (config->citation_reinforcement_boost > 0.5f)
+      config->citation_reinforcement_boost = 0.5f;
 
    /* Parse [memory.embeddings] sub-table */
    toml_table_t *embeddings = toml_table_in(table, "embeddings");

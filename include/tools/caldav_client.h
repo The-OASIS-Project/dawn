@@ -35,15 +35,16 @@
 
 typedef enum {
    CALDAV_OK = 0,
-   CALDAV_ERR_NETWORK,      /**< curl or DNS failure */
-   CALDAV_ERR_AUTH,         /**< 401 Unauthorized */
-   CALDAV_ERR_FORBIDDEN,    /**< 403 Forbidden */
-   CALDAV_ERR_NOT_FOUND,    /**< 404 Not Found */
-   CALDAV_ERR_CONFLICT,     /**< 412 Precondition Failed (ETag mismatch) */
-   CALDAV_ERR_SERVER,       /**< 5xx server error */
-   CALDAV_ERR_PARSE,        /**< XML or iCalendar parse failure */
-   CALDAV_ERR_NO_CALENDARS, /**< Discovery found no calendar collections */
-   CALDAV_ERR_ALLOC,        /**< Memory allocation failure */
+   CALDAV_ERR_NETWORK,            /**< curl or DNS failure */
+   CALDAV_ERR_AUTH,               /**< 401 Unauthorized */
+   CALDAV_ERR_FORBIDDEN,          /**< 403 Forbidden */
+   CALDAV_ERR_NOT_FOUND,          /**< 404 Not Found */
+   CALDAV_ERR_CONFLICT,           /**< 412 Precondition Failed (ETag mismatch) */
+   CALDAV_ERR_SERVER,             /**< 5xx server error */
+   CALDAV_ERR_PARSE,              /**< XML or iCalendar parse failure */
+   CALDAV_ERR_NO_CALENDARS,       /**< Discovery found no calendar collections */
+   CALDAV_ERR_ALLOC,              /**< Memory allocation failure */
+   CALDAV_ERR_SYNC_TOKEN_INVALID, /**< RFC 6578 sync-token rejected (stale/expired) — re-baseline */
 } caldav_error_t;
 
 /* ============================================================================
@@ -96,6 +97,34 @@ typedef struct {
 } caldav_event_list_t;
 
 /* ============================================================================
+ * Sync-Collection Types (RFC 6578)
+ * ============================================================================ */
+
+/** One member reported by a sync-collection REPORT. */
+typedef struct {
+   char href[512]; /**< Resolved resource path (matches calendar_events.href on fetch). */
+   bool gone;      /**< True when the member reported a 404 status (removed upstream). */
+} caldav_sync_change_t;
+
+/**
+ * Result of a sync-collection REPORT (paged to completion internally).
+ *
+ * `gone` entries are the removal signal; non-gone entries are added/modified
+ * members (hrefs only — bodies are fetched separately by the time-range query).
+ * `sync_token` is the new baseline to persist for the next incremental run.
+ * `complete` is false when paging was capped or a page failed: the caller MUST
+ * NOT prune-by-set and MUST NOT persist the token when complete is false, but
+ * may still apply the `gone` deletions (a confirmed 404 is always safe to act on).
+ */
+typedef struct {
+   caldav_sync_change_t *changes;
+   int count;
+   char sync_token[1024]; /**< Opaque server token; sized with headroom to avoid truncation
+                           *   (a truncated token would be rejected → perpetual re-baseline). */
+   bool complete;
+} caldav_sync_result_t;
+
+/* ============================================================================
  * Authentication
  * ============================================================================ */
 
@@ -144,6 +173,29 @@ caldav_error_t caldav_fetch_events(const char *calendar_url,
 
 /** Free event list internals */
 void caldav_event_list_free(caldav_event_list_t *list);
+
+/**
+ * RFC 6578 sync-collection REPORT: enumerate changes since a sync-token.
+ *
+ * @param sync_token_in  Prior token for an incremental run, or "" / NULL to
+ *                       baseline (server enumerates the whole collection and
+ *                       mints a fresh token).
+ * @param result_out     Filled with changed/removed hrefs + the new token +
+ *                       a `complete` flag. Caller frees with
+ *                       caldav_sync_result_free().
+ *
+ * Returns CALDAV_ERR_SYNC_TOKEN_INVALID when a non-empty token was supplied and
+ * the server rejected it (stale/expired) — the caller should retry with "" to
+ * re-baseline. Returns other caldav_error_t values on auth/network/server
+ * failure or when the server does not support sync-collection.
+ */
+caldav_error_t caldav_sync_collection(const char *calendar_url,
+                                      const caldav_auth_t *auth,
+                                      const char *sync_token_in,
+                                      caldav_sync_result_t *result_out);
+
+/** Free sync-collection result internals. */
+void caldav_sync_result_free(caldav_sync_result_t *result);
 
 /**
  * Create a new event (PUT with If-None-Match: *).

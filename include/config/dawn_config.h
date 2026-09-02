@@ -190,10 +190,20 @@ typedef struct {
 #define ASR_DEDUP_WINDOW_SEC_DEFAULT 4
 #define ASR_DEDUP_WINDOW_SEC_MAX 60
 
+/* Whisper encoder audio-context floor (E1 latency work). The encoder normally
+ * processes a full 30s window (audio_ctx = 1500) regardless of clip length; when
+ * this is > 0, DAWN scales audio_ctx to the actual utterance length with this
+ * value as the floor, cutting inference time on short commands. 0 disables (full
+ * 1500). 768 is validated safe (<=+1pp WER) on both base.en and small.en; going
+ * lower risks hallucination on smaller models (base.en craters at 256). */
+#define ASR_AUDIO_CTX_FLOOR_DEFAULT 768
+#define ASR_AUDIO_CTX_FLOOR_MAX 1500
+
 typedef struct {
    char model[CONFIG_NAME_MAX];       /* Whisper: "tiny", "base", "small", "medium" */
    char models_path[CONFIG_PATH_MAX]; /* Path to model files */
    int dedup_window_sec;              /* Cross-device utterance dedup window (s); 0 disables */
+   int audio_ctx_floor; /* Whisper audio_ctx auto-scale floor; 0 disables (full 1500) */
    /* Prompt hint injected on voice-input surfaces warning the LLM that its
     * input was speech-transcribed and may contain homophone/mis-recognition
     * errors to interpret from context.  Empty = built-in default
@@ -225,27 +235,29 @@ typedef struct {
 /* =============================================================================
  * LLM (Large Language Model) Configuration
  * ============================================================================= */
-/* Maximum models per provider in the configurable model list */
-#define LLM_CLOUD_MAX_MODELS 8
+/* Maximum models per provider in the configurable model list. 32 leaves ample
+ * room for users curating a large OpenRouter shortlist to test many vendors.
+ * Longest slug in use (~29 chars, "google/gemini-3.1-pro-preview") fits well
+ * inside NAME_MAX below, so that cap does not need to grow alongside it. */
+#define LLM_CLOUD_MAX_MODELS 32
 #define LLM_CLOUD_MODEL_NAME_MAX 64
 
 /* Default fallback models when no models are configured
- * Updated: 2026-02 - Update these when new model generations are released */
-#define LLM_DEFAULT_OPENAI_MODEL "gpt-5.4"
-#define LLM_DEFAULT_CLAUDE_MODEL "claude-sonnet-4-6"
-#define LLM_DEFAULT_GEMINI_MODEL "gemini-2.5-flash"
-#define LLM_DEFAULT_OPENROUTER_MODEL "anthropic/claude-sonnet-4.6"
+ * Updated: 2026-08 - Update these when new model generations are released */
+#define LLM_DEFAULT_OPENAI_MODEL "gpt-5.6-luna"
+#define LLM_DEFAULT_CLAUDE_MODEL "claude-haiku-4-5"
+#define LLM_DEFAULT_GEMINI_MODEL "gemini-3.7-flash"
+#define LLM_DEFAULT_OPENROUTER_MODEL "openai/gpt-5.6-luna"
 
 typedef struct {
-   char provider[16];              /* "openai", "claude", or "gemini" */
+   char provider[16];              /* "openai", "claude", "gemini", or "openrouter" */
    char endpoint[CONFIG_PATH_MAX]; /* Empty = default, or custom endpoint */
    bool vision_enabled;            /* Model supports vision/image analysis */
 
-   /* OpenRouter gateway mode: when true, ALL cloud traffic (main chat AND the
-    * auxiliary extraction/compaction/silent-observe/scheduler calls) routes
-    * through OpenRouter using openrouter_api_key, regardless of the provider
-    * field above.  Direct-provider settings are hidden in the WebUI but
-    * preserved.  See docs/arch/subsystems/llm.md "OpenRouter gateway". */
+   /* RETIRED gateway bool — no longer a live setting. config_migrate() folds a legacy
+    * use_openrouter=true into provider="openrouter" at load and clears this; it is never
+    * written back or read for resolution. Retained only as the one-shot migration input
+    * (parser still reads it from an old file). OpenRouter is now a first-class provider. */
    bool use_openrouter;
 
    /* OpenAI endpoint selection: "auto" (route gpt-5.4* to /v1/responses),
@@ -266,9 +278,8 @@ typedef struct {
    int gemini_models_count;
    int gemini_default_model_idx; /* Index into gemini_models for default */
 
-   /* OpenRouter model list (used when use_openrouter is true).  These are the
-    * curated "favorites" shown in the header model switcher; the full live
-    * catalog (Phase 2) is browsed in Settings.  IDs are "vendor/model"
+   /* OpenRouter model list (used when provider = "openrouter").  These are the
+    * curated "favorites" shown in the header model switcher.  IDs are "vendor/model"
     * (e.g. "anthropic/claude-sonnet-4"). */
    char openrouter_models[LLM_CLOUD_MAX_MODELS][LLM_CLOUD_MODEL_NAME_MAX];
    int openrouter_models_count;
@@ -286,7 +297,7 @@ typedef struct {
 #define LLM_TOOL_NAME_MAX 64
 
 typedef struct llm_tools_config {
-   char mode[16]; /* "native", "command_tags", or "disabled" (default: native) */
+   bool enabled; /* Native tool/function calling on (default) or off */
 
    /* Per-tool enable lists — WHITELIST (legacy): only listed (non-dangerous) tools
     * are enabled. Also the opt-in mechanism for TOOL_CAP_DANGEROUS tools under
@@ -334,10 +345,8 @@ typedef struct {
  * Provider config is dedicated so background observations can run on a cheap
  * model without affecting user-facing chat.  See src/llm/llm_silent_observe.c. */
 typedef struct {
-   char provider[16]; /* "local" | "ollama" | "openai" | "claude" | "anthropic" | "gemini" */
-   char model[64];    /* Model name (provider-specific, direct-API naming) */
-   char openrouter_model[64]; /* Model when OpenRouter gateway is on ("vendor/model");
-                               * empty = use main OpenRouter default */
+   char provider[16]; /* "local"|"ollama"|"openai"|"claude"|"anthropic"|"gemini"|"openrouter" */
+   char model[64];    /* Model name; a "vendor/model" slug when provider = "openrouter" */
 } llm_silent_observe_config_t;
 
 typedef struct {
@@ -353,13 +362,12 @@ typedef struct {
    float compact_soft_threshold; /* Async compaction trigger (default: 0.60) */
    float compact_hard_threshold; /* Blocking compaction trigger (default: 0.85) */
    bool compact_use_session;     /* Use session's provider for compaction (default: true) */
-   char compact_provider[32];    /* Dedicated compaction provider: openai/claude/gemini/local */
-   char compact_model[128];      /* Dedicated compaction model name (direct-API naming) */
-   char compact_openrouter_model[128]; /* Compaction model when OpenRouter gateway is on
-                                        * ("vendor/model"); empty = use main OpenRouter default */
-   bool conversation_logging;          /* Save chat history to log files (default: false) */
-   bool rate_limit_enabled;            /* Throttle cloud API calls (default: true) */
-   int rate_limit_rpm;                 /* Max cloud API calls per minute (default: 40) */
+   char compact_provider[32];    /* Compaction provider: openai/claude/gemini/openrouter/local */
+   char compact_model[128]; /* Compaction model; a "vendor/model" slug when provider = "openrouter"
+                             */
+   bool conversation_logging; /* Save chat history to log files (default: false) */
+   bool rate_limit_enabled;   /* Throttle cloud API calls (default: true) */
+   int rate_limit_rpm;        /* Max cloud API calls per minute (default: 40) */
 } llm_config_t;
 
 /* =============================================================================
@@ -626,22 +634,21 @@ typedef struct {
 } recall_config_t;
 
 typedef struct {
-   bool enabled;                         /* Enable memory system */
-   int context_budget_tokens;            /* Max tokens for memory context (~800) */
-   int source_budget_chars;              /* Max chars of verbatim source excerpts per
-                                          * memory_callback "search"/"recent" call when
-                                          * with_source=true.  Default 3072 (~768 tokens).
-                                          * Bench validation (May 2026, LoCoMo Haiku):
-                                          * 0=baseline 0.368, 1024=+3.5pp, 3072=+7.7pp,
-                                          * 6144=+9.5pp, 12288=+TBD recall_generation.
-                                          * Tune up for higher answer quality, down for
-                                          * lower per-call token cost.  Hard-clamped at
-                                          * MEMORY_SOURCE_BUDGET_MAX (32 KiB). */
-   char extraction_provider[16];         /* LLM provider for extraction */
-   char extraction_model[64];            /* Model for extraction (direct-API naming) */
-   char extraction_openrouter_model[64]; /* Extraction model when OpenRouter gateway is on
-                                          * ("vendor/model"); empty = use main OpenRouter default */
-   int extraction_timeout_ms;            /* LLM timeout for fact extraction (default 120s) */
+   bool enabled;                 /* Enable memory system */
+   int context_budget_tokens;    /* Max tokens for memory context (~800) */
+   int source_budget_chars;      /* Max chars of verbatim source excerpts per
+                                  * memory_callback "search"/"recent" call when
+                                  * with_source=true.  Default 3072 (~768 tokens).
+                                  * Bench validation (May 2026, LoCoMo Haiku):
+                                  * 0=baseline 0.368, 1024=+3.5pp, 3072=+7.7pp,
+                                  * 6144=+9.5pp, 12288=+TBD recall_generation.
+                                  * Tune up for higher answer quality, down for
+                                  * lower per-call token cost.  Hard-clamped at
+                                  * MEMORY_SOURCE_BUDGET_MAX (32 KiB). */
+   char extraction_provider[16]; /* LLM provider for extraction (incl. "openrouter") */
+   char extraction_model[64];    /* Extraction model; a "vendor/model" slug when provider =
+                                    "openrouter" */
+   int extraction_timeout_ms;    /* LLM timeout for fact extraction (default 120s) */
 
    /* Pruning settings */
    bool pruning_enabled;             /* Enable automatic fact pruning */
@@ -674,6 +681,10 @@ typedef struct {
    float decay_prune_threshold;      /* Delete facts below this (0.25) */
    int summary_retention_days;       /* Delete summaries older than N days (30) */
    float access_reinforcement_boost; /* Confidence boost on access (0.05) */
+   bool citation_enabled;            /* Memory citation signal: inject [M#], capture <cited>, audit
+                                        (log-only in Phase 1; default off) */
+   float citation_reinforcement_boost; /* Phase 2: confidence boost when a fact is CITED (default
+                                          0.0 = inert; gate additionally on citation_enabled) */
 
    /* Embeddings (semantic search) */
    char embedding_provider[16];        /* "onnx", "ollama", "openai", "" (disabled) */

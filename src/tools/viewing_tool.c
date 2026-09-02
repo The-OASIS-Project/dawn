@@ -71,7 +71,6 @@ static const tool_metadata_t viewing_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_ARMOR_FEATURE,
-   .is_getter = true,
    .skip_followup = false,
    .mqtt_only = true, /* Commands sent via MQTT to external vision system */
    .sync_wait = true, /* Wait for MQTT response */
@@ -113,7 +112,8 @@ static char *viewing_tool_callback(const char *action, char *value, int *should_
 
    OLOG_WARNING("viewing_tool_callback called directly - should use MQTT execution");
    *should_respond = 1;
-   return strdup("Viewing command could not be delivered — the vision hardware doesn't appear "
+   return strdup(TOOL_RESULT_ERROR_MARK
+                 "Viewing command could not be delivered — the vision hardware doesn't appear "
                  "to be connected right now.  Let the user know the camera/vision system is "
                  "offline.");
 }

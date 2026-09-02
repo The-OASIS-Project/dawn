@@ -106,7 +106,6 @@ static const tool_metadata_t switch_llm_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_ANALOG,
    .capabilities = TOOL_CAP_NONE,
-   .is_getter = false,
    .skip_followup = false,
    .default_remote = true,
 
@@ -188,20 +187,12 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
       char *result = malloc(128);
       if (result) {
          snprintf(result, 128,
+                  TOOL_RESULT_ERROR_MARK
                   "Unknown LLM target '%.32s'. Use 'local', 'cloud', 'openai', 'claude', "
                   "or 'gemini'.",
                   target);
       }
       return result;
-   }
-
-   /* Under the OpenRouter gateway, switching to a specific DIRECT cloud provider is
-    * meaningless — all cloud traffic routes through OpenRouter.  Allow local / cloud /
-    * openrouter; refuse openai/claude/gemini with an explanation. */
-   if (llm_openrouter_gateway_enabled() && entry->type == LLM_CLOUD &&
-       entry->provider != CLOUD_PROVIDER_NONE && entry->provider != CLOUD_PROVIDER_OPENROUTER) {
-      return strdup("All cloud language models are routed through OpenRouter on this system. "
-                    "Say 'switch to local' or 'switch to OpenRouter' instead.");
    }
 
    /* Get session from command context, fall back to local session for external MQTT */
@@ -211,7 +202,7 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
    }
 
    if (!session) {
-      return strdup("No active session available for LLM switch.");
+      return strdup(TOOL_RESULT_ERROR_MARK "No active session available for LLM switch.");
    }
 
    session_llm_config_t config;
@@ -230,7 +221,7 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
    if (session_set_llm_config(session, &config) != SUCCESS) {
       char *result = malloc(128);
       if (result) {
-         snprintf(result, 128, "Failed to switch to %s.%s%s", entry->label,
+         snprintf(result, 128, TOOL_RESULT_ERROR_MARK "Failed to switch to %s.%s%s", entry->label,
                   entry->fail_hint ? " " : "", entry->fail_hint ? entry->fail_hint : "");
       }
       return result;
@@ -249,18 +240,13 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
       session_llm_config_t applied;
       session_get_llm_config(session, &applied);
       const char *type_str = (applied.type == LLM_LOCAL) ? "local" : "cloud";
-      /* Under the OpenRouter gateway the applied provider is OPENROUTER (the
-       * session was force-routed), so that is what gets persisted — correct
-       * while the gateway stays on.  If the operator later disables the gateway
-       * the row reads "openrouter" and session_set_llm_config falls back to the
-       * global default at that point; benign display/semantic drift, not data
-       * corruption. */
       const char *prov_str = (applied.type == LLM_CLOUD)
                                  ? cloud_provider_to_string(applied.cloud_provider)
                                  : "";
+      /* tools_mode column is retired (dead) — pass empty. */
       int prc = conv_db_update_llm_settings(session->messaging_identity.conversation_id,
                                             session->metrics.user_id, type_str, prov_str,
-                                            applied.model, applied.tool_mode, applied.thinking_mode,
+                                            applied.model, "", applied.thinking_mode,
                                             applied.reasoning_effort);
       if (prc != AUTH_DB_SUCCESS) {
          /* Best-effort: the live session changed but the row didn't, so the

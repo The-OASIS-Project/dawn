@@ -49,6 +49,7 @@
 #include "core/scheduler_db.h"
 #include "core/session_manager.h"
 #include "dawn.h"
+#include "image_store.h"
 #include "llm/llm_claude_format.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_context.h"
@@ -59,6 +60,7 @@
 #include "webui/webui_attention.h"
 #include "webui/webui_contacts.h"
 #include "webui/webui_doc_library.h"
+#include "webui/webui_image_rehydrate.h"
 #ifdef DAWN_ENABLE_CODE_PROJECTS
 #include "webui/webui_code_projects.h"
 #endif
@@ -68,8 +70,9 @@
 #include "webui/webui_ota.h"
 #include "webui/webui_server.h"
 
-/* handle_cancel_message is defined at the bottom of this TU. */
+/* handle_cancel_message and handle_ping are defined at the bottom of this TU. */
 static void handle_cancel_message(ws_connection_t *conn);
+static void handle_ping(ws_connection_t *conn, struct json_object *payload);
 
 /* handle_always_on_enable / handle_always_on_disable moved to
  * webui_always_on.c (next to always_on_create / always_on_destroy);
@@ -114,20 +117,13 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                 * client sends the conversation this message belongs to, so the
                 * server never has to infer it from the live view — robust across
                 * reconnect and multi-tab, where server-side active_conversation_id
-                * can be stale or 0.  Validate ownership first (a client must not
-                * tag/persist into another user's conversation), then heal both the
-                * active id and its privacy flag (which gates memory extraction). */
+                * can be stale or 0.  conn_reanchor_conversation validates ownership
+                * (a client must not tag/persist into another user's conversation)
+                * then heals both the active id and its privacy flag together; a
+                * bad/foreign id is a no-op heal (the turn keeps the prior anchor). */
                struct json_object *conv_id_obj;
                if (json_object_object_get_ex(payload, "conversation_id", &conv_id_obj)) {
-                  int64_t req_conv = json_object_get_int64(conv_id_obj);
-                  if (req_conv > 0 && conn->auth_user_id > 0) {
-                     conversation_t conv;
-                     if (conv_db_get(req_conv, conn->auth_user_id, &conv) == AUTH_DB_SUCCESS) {
-                        conn->active_conversation_id = req_conv;
-                        conn->active_conversation_private = conv.is_private;
-                        conv_free(&conv);
-                     }
-                  }
+                  conn_reanchor_conversation(conn, json_object_get_int64(conv_id_obj));
                }
 
                /* Extract optional images for vision (array format) */
@@ -194,8 +190,65 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                   }
                }
 
+               /* Parse image_ids[] — the /api/images persistence keys the client
+                * holds, ordered to match images[].  The daemon is authoritative for
+                * user-turn persistence, so it builds the [IMAGE:<id>] markers itself
+                * (no client save).  Retention promotion is NOT done here: it happens
+                * post-persist in the worker so images are pinned only for turns that
+                * actually persisted (a turn rejected before persist — queue-full,
+                * superseded — would otherwise permanently pin images that have no
+                * orphan sweep).  The images[]<->image_ids[] correspondence is a
+                * client convention (both mapped from one array, see dawn.js); the
+                * server does not cross-check them — a bad pairing only mis-persists
+                * the sender's own turn. */
+               char image_ids[WEBUI_MAX_VISION_IMAGES_CAP][IMAGE_ID_LEN];
+               int image_id_count = 0;
+               struct json_object *image_ids_obj;
+               if (json_object_object_get_ex(payload, "image_ids", &image_ids_obj) &&
+                   json_object_is_type(image_ids_obj, json_type_array)) {
+                  int id_len = json_object_array_length(image_ids_obj);
+                  /* Cap at the SAME effective limit as images[] (runtime, may be <
+                   * the array bound), then belt-and-suspenders at the array bound. */
+                  if (id_len > max_vision_images) {
+                     id_len = max_vision_images;
+                  }
+                  if (id_len > WEBUI_MAX_VISION_IMAGES_CAP) {
+                     id_len = WEBUI_MAX_VISION_IMAGES_CAP;
+                  }
+                  for (int i = 0; i < id_len; i++) {
+                     const char *img_id = json_object_get_string(
+                         json_object_array_get_idx(image_ids_obj, i));
+                     if (!img_id || !image_store_validate_id(img_id)) {
+                        OLOG_WARNING("WebUI: ignoring invalid image_id in turn frame");
+                        continue;
+                     }
+                     snprintf(image_ids[image_id_count], IMAGE_ID_LEN, "%s", img_id);
+                     image_id_count++;
+                  }
+               }
+
+               /* Server-authoritative persisted form for an image turn: clean text
+                * + [IMAGE:<id>] markers.  NULL for text-only turns (persist plain
+                * text).  Freed after the call — the worker strdup's what it needs. */
+               char *persist_content = NULL;
+               if (image_id_count > 0) {
+                  persist_content = webui_build_image_marker_content(text, image_ids,
+                                                                     image_id_count);
+                  if (!persist_content) {
+                     /* OOM building markers — persist plain text rather than fail the
+                      * turn.  Log loudly: the images won't re-render on reload (no
+                      * markers persisted) and won't be pinned (worker promotes only
+                      * what's in the marker string), so they LRU-evict normally — a
+                      * silent-on-reload degradation bounded to this OOM-gated turn. */
+                     OLOG_ERROR("WebUI: failed to build image markers (OOM); persisting text-only, "
+                                "%d image(s) will not re-render on reload",
+                                image_id_count);
+                  }
+               }
+
                handle_text_message(conn, text, strlen(text), vision_images, vision_image_sizes,
-                                   vision_mimes, vision_image_count);
+                                   vision_mimes, vision_image_count, persist_content);
+               free(persist_content);
             }
          }
       }
@@ -326,17 +379,17 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                   llm_set_type(LLM_LOCAL);
                   OLOG_INFO("WebUI: Switched to local LLM");
                } else if (strcmp(new_type, "cloud") == 0) {
-                  /* When switching to cloud, ensure we have a valid provider selected.
-                   * Under the OpenRouter gateway, the provider is always OpenRouter;
-                   * otherwise prefer OpenAI, then Claude, then Gemini. */
-                  if (llm_openrouter_gateway_enabled() && llm_has_openrouter_key()) {
-                     llm_set_cloud_provider(CLOUD_PROVIDER_OPENROUTER);
-                  } else if (llm_has_openai_key()) {
+                  /* When switching to cloud, ensure a provider with a key is selected.
+                   * OpenRouter is a normal provider now; it is picked last so it does
+                   * not preempt a configured direct provider (decision O1). */
+                  if (llm_has_openai_key()) {
                      llm_set_cloud_provider(CLOUD_PROVIDER_OPENAI);
                   } else if (llm_has_claude_key()) {
                      llm_set_cloud_provider(CLOUD_PROVIDER_CLAUDE);
                   } else if (llm_has_gemini_key()) {
                      llm_set_cloud_provider(CLOUD_PROVIDER_GEMINI);
+                  } else if (llm_has_openrouter_key()) {
+                     llm_set_cloud_provider(CLOUD_PROVIDER_OPENROUTER);
                   }
                   int rc = llm_set_type(LLM_CLOUD);
                   if (rc != 0) {
@@ -420,11 +473,6 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
          bool has_changes = false;
          bool thinking_clamped_on = false; /* set-time thinking-disable clamp fired */
 
-         /* Track old tool_mode for prompt rebuild */
-         char old_tool_mode[LLM_TOOL_MODE_MAX];
-         strncpy(old_tool_mode, config.tool_mode, sizeof(old_tool_mode) - 1);
-         old_tool_mode[sizeof(old_tool_mode) - 1] = '\0';
-
          /* Track old model + type for context cache invalidation */
          char old_model[LLM_MODEL_NAME_MAX];
          strncpy(old_model, config.model, sizeof(old_model) - 1);
@@ -432,14 +480,17 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
          int old_type = config.type;
 
          /* Parse type (local/cloud) */
+         bool type_explicitly_set = false;
          if (json_object_object_get_ex(payload, "type", &type_obj)) {
             const char *new_type = json_object_get_string(type_obj);
             if (new_type) {
                has_changes = true;
                if (strcmp(new_type, "local") == 0) {
                   config.type = LLM_LOCAL;
+                  type_explicitly_set = true;
                } else if (strcmp(new_type, "cloud") == 0) {
                   config.type = LLM_CLOUD;
+                  type_explicitly_set = true;
                   /* If no provider is set, pick the first one with an API key */
                   if (config.cloud_provider == CLOUD_PROVIDER_NONE) {
                      config.cloud_provider = llm_detect_available_provider();
@@ -500,9 +551,9 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                   /* Infer provider from model name if not explicitly set
                    * (handles old conversations and frontend bugs).
                    * Only infer if the inferred provider has an API key available.
-                   * Skipped under the OpenRouter gateway — IDs are "vendor/model"
-                   * and the gateway forces OPENROUTER below. */
-                  if (!provider_explicitly_set && !llm_openrouter_gateway_enabled()) {
+                   * OpenRouter IDs are "vendor/model" slugs and match none of the bare
+                   * prefixes below, so an OpenRouter session's model is left untouched. */
+                  if (!provider_explicitly_set) {
                      if ((strncmp(new_model, "gpt-", 4) == 0 || strncmp(new_model, "o1-", 3) == 0 ||
                           strncmp(new_model, "o3-", 3) == 0) &&
                          llm_has_openai_key()) {
@@ -522,32 +573,39 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
             }
          }
 
-         /* OpenRouter gateway is the single authority: force the provider enum so key
-          * validation uses the OpenRouter key.  A bare model ID is remapped to a
-          * vendor/model slug canonically in llm_resolve_config at request time (the
-          * gateway-aware UI already sends vendor/model slugs, so this path only ever
-          * carried a bare id for a stale/non-gateway-aware client). */
-         if (config.type == LLM_CLOUD && llm_openrouter_gateway_enabled()) {
-            config.cloud_provider = CLOUD_PROVIDER_OPENROUTER;
-         }
-
-         /* Parse tool_mode (native/command_tags/disabled) */
-         struct json_object *tool_mode_obj;
-         if (json_object_object_get_ex(payload, "tool_mode", &tool_mode_obj)) {
-            const char *new_tool_mode = json_object_get_string(tool_mode_obj);
-            if (new_tool_mode) {
-               /* Validate tool mode value */
-               if (strcmp(new_tool_mode, "native") == 0 ||
-                   strcmp(new_tool_mode, "command_tags") == 0 ||
-                   strcmp(new_tool_mode, "disabled") == 0) {
-                  has_changes = true;
-                  strncpy(config.tool_mode, new_tool_mode, sizeof(config.tool_mode) - 1);
-                  config.tool_mode[sizeof(config.tool_mode) - 1] = '\0';
-                  OLOG_INFO("WebUI: Session tool_mode set to '%s'", config.tool_mode);
-               } else {
-                  OLOG_WARNING("WebUI: Rejected invalid tool_mode '%s' from client", new_tool_mode);
-               }
-            }
+         /* Reconcile type with the selected cloud model/provider (frontend-bug guard).
+          * `type` and `model`/`provider` are independent fields; a client that switches to a
+          * cloud model/provider but OMITS type='cloud' leaves the session's prior LOCAL type
+          * standing, and `type` wins at dispatch — so the turn runs on the local endpoint
+          * despite the cloud model name (observed: an Aurora gpt-5.6-luna pick kept a stale
+          * local type, and the follow-up ran on llama.cpp).  The existing provider inference
+          * above only corrects the PROVIDER and is gated on !provider_explicitly_set, so it
+          * misses this.  Force type=cloud on either cloud signal:
+          *   (a) the effective model name matches a bare cloud prefix — local models are gguf
+          *       paths that match none, so this never misfires on a local pick; or
+          *   (b) the client explicitly set a cloud provider this request (covers OpenRouter,
+          *       whose "vendor/model" slug matches no prefix) — an active cloud selection.
+          * A missing key then fails loudly in session_set_llm_config below rather than
+          * silently substituting local.
+          *
+          * Gated on !type_explicitly_set: this only reconciles the case where the client
+          * OMITS type. A client that explicitly sends type='local' this request means it —
+          * the carried-over cloud model name is just stale (the client updates the model in
+          * a follow-up set_session_llm once the local list arrives). Firing here on an
+          * explicit local pick reverts it straight back to cloud, which the WebUI's async
+          * flow (send {type:local}, THEN fetch models) can never recover from. */
+         bool model_is_cloud = strncmp(config.model, "gpt-", 4) == 0 ||
+                               strncmp(config.model, "o1-", 3) == 0 ||
+                               strncmp(config.model, "o3-", 3) == 0 ||
+                               strncmp(config.model, "claude-", 7) == 0 ||
+                               strncmp(config.model, "gemini-", 7) == 0;
+         bool provider_is_cloud = provider_explicitly_set &&
+                                  config.cloud_provider != CLOUD_PROVIDER_NONE;
+         if (!type_explicitly_set && config.type != LLM_CLOUD &&
+             (model_is_cloud || provider_is_cloud)) {
+            config.type = LLM_CLOUD;
+            has_changes = true;
+            OLOG_INFO("WebUI: Corrected stale local type to cloud for model '%s'", config.model);
          }
 
          /* Parse thinking_mode (disabled/auto/enabled) */
@@ -644,18 +702,6 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                   llm_context_refresh_local();
                }
 
-               /* If tool_mode changed, rebuild and update the session's system prompt */
-               if (strcmp(old_tool_mode, config.tool_mode) != 0) {
-                  invalidate_system_instructions(); /* Clear cached prompt first */
-                  char *new_prompt = build_remote_prompt_for_mode(config.tool_mode);
-                  if (new_prompt) {
-                     session_update_system_prompt(conn->session, new_prompt);
-                     OLOG_INFO("WebUI: Updated session prompt for tool_mode change to '%s'",
-                               config.tool_mode);
-                     free(new_prompt);
-                  }
-               }
-
                /* Persist LLM settings to the active conversation DB so that
                 * session recreation (after timeout) restores the latest config.
                 *
@@ -672,10 +718,11 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                }
                if (!from_restore && conn->active_conversation_id > 0) {
                   const char *type_str = config.type == LLM_LOCAL ? "local" : "cloud";
+                  /* tools_mode column is retired (dead) — pass empty. */
                   conv_db_update_llm_settings(conn->active_conversation_id, conn->auth_user_id,
                                               type_str,
                                               cloud_provider_to_string(config.cloud_provider),
-                                              config.model, config.tool_mode, config.thinking_mode,
+                                              config.model, "", config.thinking_mode,
                                               config.reasoning_effort);
                }
             }
@@ -786,7 +833,12 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                      unregister_tokens_for_session(abandoned_id);
                      OLOG_INFO("WebUI: Destroyed abandoned session %u", abandoned_id);
                   }
+                  /* Evict any other connection still owning this session BEFORE
+                   * taking ownership, so the superseded tab backs off (WS 4001)
+                   * rather than fighting to re-steal it. */
+                  webui_evict_session_owner(existing, conn);
                   conn->session = existing;
+                  conn->session_was_reconnected = true;
                   existing->client_data = conn;
                   existing->disconnected = false;
                   strncpy(conn->session_token, token, WEBUI_SESSION_TOKEN_LEN - 1);
@@ -797,6 +849,12 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                   struct json_object *tts_obj;
                   if (json_object_object_get_ex(payload, "tts_enabled", &tts_obj)) {
                      conn->tts_enabled = json_object_get_boolean(tts_obj);
+                  }
+                  /* Living tool pills: client renders its OWN turn's tool steps from the
+                   * tool_step frame, so the server includes it in the fan (default off). */
+                  struct json_object *tso_obj;
+                  if (json_object_object_get_ex(payload, "tool_step_origin", &tso_obj)) {
+                     conn->tool_step_origin = json_object_get_boolean(tso_obj);
                   }
 
                   OLOG_INFO("WebUI: Reconnected to session %u with token %.4s... "
@@ -832,6 +890,10 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                                                    prompt ? prompt : get_remote_command_prompt());
                         free(prompt);
                         conn->session->client_data = conn;
+                        /* Fresh session (reconnect token stale) — not a true reconnect,
+                         * so the session frame must report reconnected:false.  Enforced
+                         * locally at all four fresh-create sites. */
+                        conn->session_was_reconnected = false;
                         if (generate_session_token(conn->session_token) != 0) {
                            OLOG_ERROR("WebUI: Failed to generate session token");
                            session_destroy(conn->session->session_id);
@@ -852,6 +914,10 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                      if (json_object_object_get_ex(payload, "tts_enabled", &tts_obj)) {
                         conn->tts_enabled = json_object_get_boolean(tts_obj);
                      }
+                     struct json_object *tso_obj;
+                     if (json_object_object_get_ex(payload, "tool_step_origin", &tso_obj)) {
+                        conn->tool_step_origin = json_object_get_boolean(tso_obj);
+                     }
                      OLOG_INFO("WebUI: Session %u capabilities synced (opus: %s, tts: %s)",
                                conn->session->session_id, conn->use_opus ? "yes" : "no",
                                conn->tts_enabled ? "yes" : "no");
@@ -868,6 +934,10 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
          struct json_object *tts_obj;
          if (json_object_object_get_ex(payload, "tts_enabled", &tts_obj)) {
             conn->tts_enabled = json_object_get_boolean(tts_obj);
+         }
+         struct json_object *tso_obj;
+         if (json_object_object_get_ex(payload, "tool_step_origin", &tso_obj)) {
+            conn->tool_step_origin = json_object_get_boolean(tso_obj);
          }
          OLOG_INFO("WebUI: Session %u init capabilities synced (opus: %s, tts: %s)",
                    conn->session ? conn->session->session_id : 0, conn->use_opus ? "yes" : "no",
@@ -1005,6 +1075,10 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       if (payload) {
          handle_load_conversation(conn, payload);
       }
+   } else if (strcmp(type, "set_active_conversation") == 0) {
+      /* Lightweight reconnect re-anchor: reset conn->active_conversation_id
+       * without the full history replay a load_conversation does. */
+      handle_set_active_conversation(conn, payload);
    } else if (strcmp(type, "attach_conversation") == 0) {
       /* Same handler as load_conversation — an attach IS a load that also asks
        * for the durable event log.  The distinction is the `last_seq` cursor in
@@ -1328,6 +1402,8 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       if (payload) {
          handle_watch_remove(conn, payload);
       }
+   } else if (strcmp(type, "watch_readings_subscribe") == 0) {
+      handle_watch_readings_subscribe(conn, payload);
    }
    /* TTS control (per-connection) */
    else if (strcmp(type, "set_tts_enabled") == 0) {
@@ -1531,6 +1607,11 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                                    ? always_on_state_name(always_on_get_state(conn->always_on))
                                    : "disabled";
       send_always_on_state(conn->wsi, state_name);
+   } else if (strcmp(type, "ping") == 0) {
+      /* App-level liveness probe from a browser client (client→server).  Gated
+       * on auth so only a valid, registered session gets a pong; the missing
+       * pong (or the UNAUTHORIZED error) is the client's staleness signal. */
+      handle_ping(conn, payload);
    }
    /* Satellite (DAP2 Tier 1) messages — only accept from existing satellites.
     * Initial registration is handled in the init block above (line ~2924).
@@ -1587,4 +1668,20 @@ static void handle_cancel_message(ws_connection_t *conn) {
       session_cancel_turn(conn->session);
       send_state_impl(conn->wsi, "idle", NULL);
    }
+}
+
+/*
+ * Browser (SESSION_TYPE_WEBUI) app-level liveness probe.  The counterpart to
+ * handle_satellite_ping, gated on user auth rather than device registration:
+ * conn_require_auth() re-validates the session token against the DB on every
+ * call, so a revoked or expired session receives an UNAUTHORIZED error and NO
+ * pong — precisely the "session no longer alive" signal the client keys off to
+ * fall back to re-authentication.  A valid session gets a pong (with any echoed
+ * seq + server_time_ms) and has its last_activity refreshed by webui_send_pong.
+ */
+static void handle_ping(ws_connection_t *conn, struct json_object *payload) {
+   if (!conn_require_auth(conn)) {
+      return;
+   }
+   webui_send_pong(conn, "pong", payload);
 }

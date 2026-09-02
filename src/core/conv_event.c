@@ -68,26 +68,86 @@ void conv_event_emit(int64_t conv_id, int user_id, const char *kind, char *paylo
    free(payload_owned);
 }
 
+/* Weak default: no WebUI linked (WEBUI-off builds, unit tests).  Strong
+ * override in src/webui/webui_broadcasts.c. */
+__attribute__((weak)) void webui_broadcast_tool_step(int user_id,
+                                                     int64_t conv_id,
+                                                     uint32_t origin_session_id,
+                                                     unsigned stream_id,
+                                                     const char *kind,
+                                                     const char *payload) {
+   (void)user_id;
+   (void)conv_id;
+   (void)origin_session_id;
+   (void)stream_id;
+   (void)kind;
+   (void)payload;
+}
+
+void conv_event_tool_step_fanout(int64_t conv_id,
+                                 int user_id,
+                                 uint32_t origin_session_id,
+                                 unsigned stream_id,
+                                 const char *kind,
+                                 char *payload_owned) {
+   /* Ephemeral: NO conv_db_event_append — the messages table already persists the step; this
+    * is live-only cross-viewer sugar (§Phase-3).  Fan then free, mirroring conv_event_emit's
+    * ownership contract (frees on every path, incl. the skip). */
+   if (conv_id > 0 && user_id > 0 && kind != NULL) {
+      webui_broadcast_tool_step(user_id, conv_id, origin_session_id, stream_id, kind,
+                                payload_owned);
+   }
+   free(payload_owned);
+}
+
 /* Weak default: no WebUI linked.  Strong override in webui_broadcasts.c. */
 __attribute__((weak)) void webui_broadcast_message_appended(int user_id,
                                                             int64_t conv_id,
                                                             int64_t msg_id,
                                                             const char *role,
-                                                            const char *text) {
+                                                            const char *text,
+                                                            const char *reasoning,
+                                                            unsigned stream_id) {
    (void)user_id;
    (void)conv_id;
    (void)msg_id;
    (void)role;
    (void)text;
+   (void)reasoning;
+   (void)stream_id;
+}
+
+/* Weak link-safety stub: never runs in a real build (every caller compiles under
+ * ENABLE_WEBUI, which links the strong def in webui_broadcasts.c).  Loud + fail-closed so
+ * a future headless-caller misconfiguration is caught rather than silently dropping the
+ * assistant reply. */
+__attribute__((weak)) int webui_persist_final_answer(struct session *session,
+                                                     int64_t conv_id,
+                                                     int64_t user_id,
+                                                     const char *body,
+                                                     int64_t *out_msg_id) {
+   (void)session;
+   (void)user_id;
+   (void)body;
+   if (out_msg_id != NULL) {
+      *out_msg_id = 0;
+   }
+   OLOG_ERROR("webui_persist_final_answer: no WebUI strong symbol linked — assistant reply to "
+              "conv %lld NOT persisted",
+              (long long)conv_id);
+   return 1; /* non-zero = failure (AUTH_DB_SUCCESS is 0) */
 }
 
 void conv_event_notify_message_appended(int64_t conv_id,
                                         int user_id,
                                         int64_t msg_id,
                                         const char *role,
-                                        const char *text) {
+                                        const char *text,
+                                        const char *reasoning,
+                                        unsigned stream_id) {
    if (conv_id <= 0 || user_id <= 0 || text == NULL || text[0] == '\0') {
       return;
    }
-   webui_broadcast_message_appended(user_id, conv_id, msg_id, role ? role : "assistant", text);
+   webui_broadcast_message_appended(user_id, conv_id, msg_id, role ? role : "assistant", text,
+                                    reasoning, stream_id);
 }

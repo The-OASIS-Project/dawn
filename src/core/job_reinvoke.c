@@ -449,6 +449,18 @@ static void *reinvoke_turn_entry(void *arg) {
    session_begin_turn_flags(live);
    atomic_fetch_add(&live->turn_in_flight, 1);
 
+   /* Clear a stale pending_visual left by a PRIOR turn on this viewer's session (e.g. a
+    * render_visual whose turn was interrupted before its final answer persisted).  The
+    * server-authoritative persist below now CONSUMES pending_visual (via
+    * webui_persist_final_answer), so without this a leftover chart would splice onto — and
+    * durably persist with — an unrelated re-engagement reply.  Mirrors the identical
+    * turn-start clear the text/voice workers carry (webui_text_processing.c / webui_audio.c);
+    * session_begin_turn_flags deliberately does NOT touch it (tools_mutex-guarded state). */
+   pthread_mutex_lock(&live->tools_mutex);
+   free(live->pending_visual);
+   live->pending_visual = NULL;
+   pthread_mutex_unlock(&live->tools_mutex);
+
    int64_t fired_ids[JOB_MONITOR_MAX_PER_TICK];
    int n_fired = 0;
    char *envelope = build_envelope(parent, user_id, fired_ids, &n_fired);
@@ -465,52 +477,61 @@ static void *reinvoke_turn_entry(void *arg) {
        * entries pile below it.  A live viewer is a WEBUI session, so this renders. */
       session_set_tool_iteration_hook(live, webui_tool_iteration_cb, NULL);
       text_input_dispatch_opts_t opts = reinvoke_dispatch_opts(user_id);
+      /* LIVE path only: if this viewer has TTS on, speak the re-engagement like a
+       * normal turn (state:speaking + streamed audio via the wired callback,
+       * closed by _finish → audio_end + state:idle).  No-op weak default off the
+       * WebUI build, and the shared opts builder keeps the detached path silent. */
+      bool tts_use_opus = false;
+      bool tts_wired = webui_reinvoke_tts_begin(live, &opts, &tts_use_opus);
+      /* Server-authoritative (SERVER_AUTHORITATIVE_PERSISTENCE_DESIGN §7, Phase 1):
+       * the server is now the SOLE writer of this reply.  Arm the Model A promise so
+       * the FINAL stream_end tells the streamed viewer to stand down from its
+       * client-save; the unconditional persist below honors it.  Disarm right after
+       * dispatch (the promise is read only at the in-dispatch stream_end). */
+      atomic_store(&live->will_persist_turn, true);
       char *response = core_text_input_dispatch(live, envelope, NULL, NULL, NULL, 0, &opts);
+      atomic_store(&live->will_persist_turn, false);
+      if (tts_wired) {
+         /* Codec captured at begin (pre-dispatch) so this close never derefs a
+          * client_data the lws thread may have freed during a long tool loop. */
+         webui_reinvoke_tts_finish(live, tts_use_opus);
+      }
       session_set_tool_iteration_hook(live, NULL, NULL);
       session_set_tool_persist_hook(live, NULL, NULL);
 
-      /* C3: mark fired ONLY if the reply is actually saved somewhere.  A
-       * foreground, connected viewer's client saves the streamed reply; if the
-       * viewer switched conversations or the client vanished mid-turn, persist
-       * server-side FIRST — never fire a re-engagement that exists nowhere. */
-      bool cancelled = atomic_load(&live->cancel_requested);
-      if (cancelled || response == NULL || response[0] == '\0') {
+      /* ALWAYS persist server-side — the single writer (Phase 1).  A cancel-at-buzzer
+       * (§9/G4) freed the completed reply inside dispatch and returned NULL, so recover
+       * it from the will_persist stash; `reply` takes ownership either way.  Mark the
+       * jobs fired ONLY on a durable insert (invariant C3): a persist failure leaves
+       * them for the monitor to retry rather than silently dropping the reply. */
+      char *reply = response;
+      if (reply == NULL) {
+         reply = live->cancelled_final_response;
+         live->cancelled_final_response = NULL;
+      }
+      if (reply == NULL || reply[0] == '\0') {
          OLOG_INFO("job_reinvoke: live re-engage of parent %lld empty/cancelled; will retry",
                    (long long)parent);
       } else {
-         bool client_gone = atomic_load(&live->disconnected);
-         bool backgrounded = (webui_session_active_conversation(live) != parent);
-         bool persisted_ok = true;
-         if (client_gone || backgrounded) {
-            int64_t appended_id = 0;
-            persisted_ok = (conv_db_add_message_with_tools(parent, user_id, "assistant", response,
-                                                           NULL, NULL, NULL,
-                                                           &appended_id) == AUTH_DB_SUCCESS);
-            if (persisted_ok) {
-               job_reinvoke_notify_conv_appended(user_id, parent);
-               conv_event_notify_message_appended(parent, user_id, appended_id, "assistant",
-                                                  response);
-            }
-         }
-         if (persisted_ok) {
-            /* LOAD-BEARING CONTRACT: in the "client-saved" case (foreground +
-             * connected, so we did NOT persist server-side above) we mark the jobs
-             * fired trusting the browser to save the foreground-streamed reply via
-             * its conversation-tagged background save path.  If a future client
-             * refactor breaks that save, a fired-but-unsaved re-engagement is lost
-             * and never retries.  Keep the client save tied to this decision. */
+         /* Single server-authoritative persist path (SERVER_AUTHORITATIVE §6c): the shared
+          * helper splices this session's final-answer reasoning + accumulated render_visual
+          * output into the row, promotes the reply body's image markers to permanent, stamps
+          * the id, and fans out ONE message_appended for viewers of the parent — the streamed
+          * viewer's current_stream_id lets it adopt (having stood down on will_persist).  Mark
+          * the jobs fired ONLY on a durable insert (invariant C3): a persist failure leaves
+          * them for the monitor to retry rather than silently dropping the reply. */
+         if (webui_persist_final_answer(live, parent, user_id, reply, NULL) == AUTH_DB_SUCCESS) {
             conv_db_job_mark_fired_many(fired_ids, n_fired);
-            OLOG_INFO(
-                "job_reinvoke: streamed re-engagement into live parent %lld (%d result(s), %s)",
-                (long long)parent, n_fired,
-                (client_gone || backgrounded) ? "persisted server-side" : "client-saved");
+            OLOG_INFO("job_reinvoke: streamed re-engagement into live parent %lld "
+                      "(%d result(s), persisted server-side)",
+                      (long long)parent, n_fired);
          } else {
             OLOG_WARNING(
                 "job_reinvoke: re-engage of parent %lld persisted nowhere; leaving unfired",
                 (long long)parent);
          }
       }
-      free(response);
+      free(reply);
    }
    free(envelope);
 
@@ -583,13 +604,21 @@ static void reinvoke_run_detached(reinvoke_work_t *w,
        * unfired lets the monitor retry on a later tick; retries stay bounded
        * because build_envelope() bumps each job's reinvoke count per attempt and
        * force-fires past max_reinvokes_per_tree. */
-      int64_t appended_id = 0;
-      if (conv_db_add_message_with_tools(w->parent_conv, w->user_id, "assistant", response, NULL,
-                                         NULL, NULL, &appended_id) == AUTH_DB_SUCCESS) {
+      /* Single server-authoritative persist path (SERVER_AUTHORITATIVE §6c): same shared
+       * helper as the live path, gaining final-answer reasoning + visual fidelity for the
+       * detached re-engagement too.  The helper fans out with THIS turn's own
+       * current_stream_id (a job session still bumps it on first streamed content, so it is
+       * generally non-zero — not the old hardcoded 0).  With no browser watching this job
+       * live there is no matching client adopt entry, so every viewer renders inline as
+       * before; if a browser IS watching the stream, the real id yields a correct adopt
+       * (strictly better than the old 0, which would have double-rendered).
+       * Mark fired ONLY on a durable insert (invariant C3): this path has no client to
+       * client-save the reply, so the insert is the only durable store — firing on a failed
+       * persist would permanently suppress the follow-up AND lose the output.  Leaving the
+       * rows unfired lets the monitor retry on a later tick (bounded by the reinvoke ceiling). */
+      if (webui_persist_final_answer(s, w->parent_conv, w->user_id, response, NULL) ==
+          AUTH_DB_SUCCESS) {
          conv_db_job_mark_fired_many(fired_ids, n_fired);
-         job_reinvoke_notify_conv_appended(w->user_id, w->parent_conv);
-         conv_event_notify_message_appended(w->parent_conv, w->user_id, appended_id, "assistant",
-                                            response);
          OLOG_INFO("job_reinvoke: re-engaged parent %lld (detached) with %d job result(s)",
                    (long long)w->parent_conv, n_fired);
       } else {
@@ -814,12 +843,6 @@ void job_reinvoke_init(void) {
    OLOG_INFO("job_reinvoke: reinvoke_parent processor registered");
 }
 
-/* Weak default: no-op unless the WebUI provides the strong override. */
-__attribute__((weak)) void job_reinvoke_notify_conv_appended(int user_id, int64_t conversation_id) {
-   (void)user_id;
-   (void)conversation_id;
-}
-
 /* Weak default: no live viewer without WebUI → always take the detached path. */
 __attribute__((weak)) session_t *webui_find_reinvoke_viewer(int64_t conv_id, int user_id) {
    (void)conv_id;
@@ -827,9 +850,20 @@ __attribute__((weak)) session_t *webui_find_reinvoke_viewer(int64_t conv_id, int
    return NULL;
 }
 
-/* Weak default: 0 (no client view) without WebUI — the reinvoke closure then
- * always persists server-side, which is the safe choice for a headless build. */
-__attribute__((weak)) int64_t webui_session_active_conversation(session_t *s) {
-   (void)s;
-   return 0;
+/* Weak default: no WebUI → no TTS wiring, so a reinvoke turn stays silent. */
+__attribute__((weak)) bool webui_reinvoke_tts_begin(session_t *live,
+                                                    text_input_dispatch_opts_t *opts,
+                                                    bool *use_opus_out) {
+   (void)live;
+   (void)opts;
+   if (use_opus_out != NULL) {
+      *use_opus_out = false;
+   }
+   return false;
+}
+
+/* Weak default: nothing to close without WebUI. */
+__attribute__((weak)) void webui_reinvoke_tts_finish(session_t *live, bool use_opus) {
+   (void)live;
+   (void)use_opus;
 }

@@ -108,7 +108,7 @@ Arduino-ecosystem libraries (WebSockets, ArduinoJson, Adafruit GFX/ST7789/NeoPix
 | OpenAI | Cloud LLM | `[llm.cloud] provider = "openai"` | Sign up at openai.com |
 | Anthropic Claude | Cloud LLM | `[llm.cloud] provider = "claude"` | Sign up at anthropic.com |
 | Google Gemini | Cloud LLM | `[llm.cloud] provider = "gemini"` | Sign up at ai.google.dev |
-| **OpenRouter** | Single OpenAI-compatible gateway fronting hundreds of models from many vendors | `[llm.cloud] use_openrouter = true` (gateway mode — routes ALL cloud traffic through OpenRouter) | Sign up at openrouter.ai. Key in `secrets.toml` under `openrouter_api_key` (or `OPENROUTER_API_KEY` env). No new build deps (reuses the existing OpenAI request/SSE path). |
+| **OpenRouter** | First-class cloud provider fronting hundreds of models from many vendors through one OpenAI-compatible key | `[llm.cloud] provider = "openrouter"` | Sign up at openrouter.ai. Key in `secrets.toml` under `openrouter_api_key` (or `OPENROUTER_API_KEY` env). No new build deps (reuses the existing OpenAI request/SSE path). |
 | **Tavily** | LLM-optimized web search + URL extract (opt-in alternative to local SearXNG + FlareSolverr) | `[search] engine = "tavily"` and/or `[url_fetcher] fallback = "tavily"` | Sign up at tavily.com — free tier 1000 calls/month. Key in `secrets.toml` under `tavily_api_key` (or `TAVILY_API_KEY` env). No new build deps (uses existing libcurl + json-c). |
 
 ### Security note on API keys via environment variables

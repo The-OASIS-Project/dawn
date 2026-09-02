@@ -84,6 +84,11 @@
       const cleanText = text
          // Strip command tags before rendering (they should go to debug panel only)
          .replace(/<command>[\s\S]*?<\/command>/g, '')
+         // Strip memory-citation tags (bookkeeping — the server audits + persists
+         // clean text; this keeps them out of the live stream too, incl. an
+         // orphan opener from a mid-stream break).
+         .replace(/<cited>[\s\S]*?<\/cited>/g, '')
+         .replace(/<cited>[\s\S]*$/g, '')
          // Compact spelled-out factorial back to the symbol for the printed view
          // ("52 factorial" → "52!"). The LLM is prompted to write "N factorial"
          // so TTS reads it correctly; this restores compact notation on screen.

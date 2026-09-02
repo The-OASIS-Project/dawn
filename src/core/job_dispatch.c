@@ -77,14 +77,15 @@ void job_dispatch_tool_persist_cb(void *userdata,
                                   const char *content,
                                   const char *tool_calls_json,
                                   const char *tool_call_id,
-                                  const char *reasoning_json) {
+                                  const char *reasoning_json,
+                                  bool is_error) {
    job_persist_ctx_t *ctx = (job_persist_ctx_t *)userdata;
    if (ctx == NULL || role == NULL) {
       return;
    }
-   if (conv_db_add_message_with_tools(ctx->conv_id, ctx->user_id, role, content ? content : "",
-                                      tool_calls_json, tool_call_id, reasoning_json,
-                                      NULL) != AUTH_DB_SUCCESS) {
+   if (conv_db_add_message_with_tools_ex(ctx->conv_id, ctx->user_id, role, content ? content : "",
+                                         tool_calls_json, tool_call_id, reasoning_json, is_error,
+                                         NULL) != AUTH_DB_SUCCESS) {
       OLOG_WARNING("job_dispatch: failed to persist tool-turn %s row to conv %lld", role,
                    (long long)ctx->conv_id);
    }

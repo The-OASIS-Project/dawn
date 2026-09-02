@@ -141,10 +141,10 @@ int config_validate(const dawn_config_t *config,
                 (double)config->llm.compact_hard_threshold);
    }
    if (config->llm.compact_provider[0]) {
-      const char *valid_providers[] = { "claude", "openai", "gemini", "local" };
-      if (!string_in_list(config->llm.compact_provider, valid_providers, 4)) {
+      const char *valid_providers[] = { "claude", "openai", "gemini", "openrouter", "local" };
+      if (!string_in_list(config->llm.compact_provider, valid_providers, 5)) {
          ADD_ERROR("llm.compact_provider",
-                   "must be one of: claude, openai, gemini, local (got '%s')",
+                   "must be one of: claude, openai, gemini, openrouter, local (got '%s')",
                    config->llm.compact_provider);
       }
    }
@@ -267,17 +267,19 @@ int config_validate(const dawn_config_t *config,
 
    /* ===== LLM Cloud Provider (enum) ===== */
    if (strcmp(config->llm.type, "cloud") == 0 && config->llm.cloud.provider[0] != '\0') {
-      const char *valid_providers[] = { "openai", "claude", "gemini" };
-      if (!string_in_list(config->llm.cloud.provider, valid_providers, 3)) {
-         ADD_ERROR("llm.cloud.provider", "must be 'openai', 'claude', or 'gemini' (got '%s')",
+      const char *valid_providers[] = { "openai", "claude", "gemini", "openrouter" };
+      if (!string_in_list(config->llm.cloud.provider, valid_providers, 4)) {
+         ADD_ERROR("llm.cloud.provider",
+                   "must be 'openai', 'claude', 'gemini', or 'openrouter' (got '%s')",
                    config->llm.cloud.provider);
       }
    }
 
-   /* NOTE: use_openrouter is a separate bool, NOT a provider-string value — it is
-    * deliberately not added to valid_providers above.  A gateway-on-but-no-key
-    * config is non-fatal (the runtime falls back to local — see llm_init), so it is
-    * intentionally not flagged here; config_validate reports hard errors only. */
+   /* NOTE: "openrouter" is now a first-class provider value (2a-0).  The legacy
+    * use_openrouter bool is a SEPARATE gateway toggle (folded into provider="openrouter"
+    * by config_migrate in 2a); a gateway-on-but-no-key config stays non-fatal (the
+    * runtime falls back to local — see llm_init), so it is intentionally not flagged
+    * here; config_validate reports hard errors only. */
 
    /* ===== OpenAI Responses API mode (enum) ===== */
    if (config->llm.cloud.openai_use_responses_api[0] != '\0') {

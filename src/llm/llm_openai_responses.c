@@ -30,6 +30,7 @@
 #include "llm/llm_openai_responses.h"
 
 #include <curl/curl.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,7 +42,9 @@
 #include "core/session_manager.h"
 #include "llm/llm_context.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_model_version.h"
 #include "llm/llm_openai_internal.h"
+#include "llm/llm_openai_responses_input.h"
 #include "llm/llm_streaming.h"
 #include "llm/llm_tools.h"
 #include "llm/sse_parser.h"
@@ -118,295 +121,6 @@ typedef struct {
 /* =============================================================================
  * History conversion: DAWN's chat-completions-shaped history → Responses input
  * ============================================================================= */
-
-/**
- * @brief Concatenate all role:"system" messages into a single instructions string.
- *
- * Returns a freshly-allocated string (caller frees), or NULL if no system
- * messages. Multiple system messages are joined with double newlines.
- */
-static char *extract_system_instructions(struct json_object *history) {
-   int len = json_object_array_length(history);
-   size_t total = 0;
-   for (int i = 0; i < len; i++) {
-      struct json_object *msg = json_object_array_get_idx(history, i);
-      struct json_object *role_obj, *content_obj;
-      if (!json_object_object_get_ex(msg, "role", &role_obj))
-         continue;
-      if (strcmp(json_object_get_string(role_obj), "system") != 0)
-         continue;
-      if (!json_object_object_get_ex(msg, "content", &content_obj))
-         continue;
-      const char *txt = json_object_get_string(content_obj);
-      if (txt) {
-         total += strlen(txt) + 2;
-      }
-   }
-   if (total == 0) {
-      return NULL;
-   }
-
-   char *out = malloc(total + 1);
-   if (!out) {
-      return NULL;
-   }
-   out[0] = '\0';
-   size_t off = 0;
-   bool first = true;
-   for (int i = 0; i < len; i++) {
-      struct json_object *msg = json_object_array_get_idx(history, i);
-      struct json_object *role_obj, *content_obj;
-      if (!json_object_object_get_ex(msg, "role", &role_obj))
-         continue;
-      if (strcmp(json_object_get_string(role_obj), "system") != 0)
-         continue;
-      if (!json_object_object_get_ex(msg, "content", &content_obj))
-         continue;
-      const char *txt = json_object_get_string(content_obj);
-      if (!txt || !*txt)
-         continue;
-      if (!first) {
-         off += snprintf(out + off, total + 1 - off, "\n\n");
-      }
-      off += snprintf(out + off, total + 1 - off, "%s", txt);
-      first = false;
-   }
-   return out;
-}
-
-/**
- * @brief Append vision images to a content_part array (Responses schema).
- */
-static void append_vision_parts(struct json_object *content_array,
-                                const char **vision_images,
-                                const size_t *vision_image_sizes,
-                                int vision_image_count) {
-   for (int i = 0; i < vision_image_count; i++) {
-      if (!vision_images[i])
-         continue;
-      if (vision_image_sizes && vision_image_sizes[i] == 0)
-         continue;
-
-      struct json_object *part = json_object_new_object();
-      json_object_object_add(part, "type", json_object_new_string("input_image"));
-      const char *prefix = "data:image/jpeg;base64,";
-      size_t uri_len = strlen(prefix) + strlen(vision_images[i]) + 1;
-      char *uri = malloc(uri_len);
-      if (uri) {
-         snprintf(uri, uri_len, "%s%s", prefix, vision_images[i]);
-         json_object_object_add(part, "image_url", json_object_new_string(uri));
-         free(uri);
-      }
-      json_object_array_add(content_array, part);
-   }
-}
-
-/**
- * @brief Build a Responses-format input array from DAWN's chat-completions history.
- *
- * Conversion rules:
- *   - role:"system" → handled separately as top-level instructions
- *   - role:"user"/"assistant" with string content → message item with input_text/output_text
- *   - role:"assistant" with tool_calls[] → one function_call item per call
- *   - role:"tool" → function_call_output item
- *   - assistant._provider_state.openai_responses.reasoning_items → echoed reasoning items
- *     (placed before the function_call items from the same assistant message, matching
- *     the order the server originally emitted them)
- *
- * @param history       Chat-completions-shaped JSON array.
- * @param input_text    User input to append as the final user message (empty/NULL skipped).
- * @param vision_images Optional images to attach to the final user message.
- * @return Newly-allocated JSON array (caller json_object_put). NULL on error.
- */
-static struct json_object *build_responses_input(struct json_object *history,
-                                                 const char *input_text,
-                                                 const char **vision_images,
-                                                 const size_t *vision_image_sizes,
-                                                 int vision_image_count) {
-   struct json_object *input = json_object_new_array();
-   if (!input)
-      return NULL;
-
-   int len = json_object_array_length(history);
-   for (int i = 0; i < len; i++) {
-      struct json_object *msg = json_object_array_get_idx(history, i);
-      struct json_object *role_obj;
-      if (!json_object_object_get_ex(msg, "role", &role_obj))
-         continue;
-      const char *role = json_object_get_string(role_obj);
-
-      /* System messages → top-level instructions; skip here */
-      if (strcmp(role, "system") == 0)
-         continue;
-
-      /* Tool result message (chat-completions role:"tool") */
-      if (strcmp(role, "tool") == 0) {
-         struct json_object *call_id_obj, *content_obj;
-         if (!json_object_object_get_ex(msg, "tool_call_id", &call_id_obj))
-            continue;
-         if (!json_object_object_get_ex(msg, "content", &content_obj))
-            continue;
-         struct json_object *item = json_object_new_object();
-         json_object_object_add(item, "type", json_object_new_string("function_call_output"));
-         json_object_object_add(item, "call_id",
-                                json_object_new_string(json_object_get_string(call_id_obj)));
-         json_object_object_add(item, "output",
-                                json_object_new_string(json_object_get_string(content_obj)));
-         json_object_array_add(input, item);
-         continue;
-      }
-
-      /* Assistant message: emit reasoning items first, then text, then function_call items */
-      if (strcmp(role, "assistant") == 0) {
-         /* Echoed reasoning items (Mode B round-trip) */
-         struct json_object *prov_state, *openai_resp, *r_items;
-         if (json_object_object_get_ex(msg, "_provider_state", &prov_state) &&
-             json_object_object_get_ex(prov_state, "openai_responses", &openai_resp) &&
-             json_object_object_get_ex(openai_resp, "reasoning_items", &r_items) &&
-             json_object_get_type(r_items) == json_type_array) {
-            int n = json_object_array_length(r_items);
-            for (int k = 0; k < n; k++) {
-               struct json_object *item = json_object_array_get_idx(r_items, k);
-               json_object_array_add(input, json_object_get(item));
-            }
-         }
-
-         /* Pre-tool assistant text (if any) */
-         struct json_object *content_obj;
-         if (json_object_object_get_ex(msg, "content", &content_obj)) {
-            const char *txt = json_object_get_string(content_obj);
-            if (txt && *txt) {
-               struct json_object *item = json_object_new_object();
-               json_object_object_add(item, "type", json_object_new_string("message"));
-               json_object_object_add(item, "role", json_object_new_string("assistant"));
-               struct json_object *content_array = json_object_new_array();
-               struct json_object *part = json_object_new_object();
-               json_object_object_add(part, "type", json_object_new_string("output_text"));
-               json_object_object_add(part, "text", json_object_new_string(txt));
-               json_object_array_add(content_array, part);
-               json_object_object_add(item, "content", content_array);
-               json_object_array_add(input, item);
-            }
-         }
-
-         /* Tool calls → function_call items */
-         struct json_object *tool_calls;
-         if (json_object_object_get_ex(msg, "tool_calls", &tool_calls) &&
-             json_object_get_type(tool_calls) == json_type_array) {
-            int n = json_object_array_length(tool_calls);
-            for (int k = 0; k < n; k++) {
-               struct json_object *tc = json_object_array_get_idx(tool_calls, k);
-               struct json_object *id_obj, *fn_obj;
-               if (!json_object_object_get_ex(tc, "id", &id_obj))
-                  continue;
-               if (!json_object_object_get_ex(tc, "function", &fn_obj))
-                  continue;
-               struct json_object *name_obj, *args_obj;
-               if (!json_object_object_get_ex(fn_obj, "name", &name_obj))
-                  continue;
-               if (!json_object_object_get_ex(fn_obj, "arguments", &args_obj))
-                  continue;
-               struct json_object *item = json_object_new_object();
-               json_object_object_add(item, "type", json_object_new_string("function_call"));
-               json_object_object_add(item, "call_id",
-                                      json_object_new_string(json_object_get_string(id_obj)));
-               json_object_object_add(item, "name",
-                                      json_object_new_string(json_object_get_string(name_obj)));
-               json_object_object_add(item, "arguments",
-                                      json_object_new_string(json_object_get_string(args_obj)));
-               json_object_array_add(input, item);
-            }
-         }
-         continue;
-      }
-
-      /* User message (string content; or array content for vision in legacy format) */
-      if (strcmp(role, "user") == 0) {
-         struct json_object *content_obj;
-         if (!json_object_object_get_ex(msg, "content", &content_obj))
-            continue;
-
-         struct json_object *item = json_object_new_object();
-         json_object_object_add(item, "type", json_object_new_string("message"));
-         json_object_object_add(item, "role", json_object_new_string("user"));
-         struct json_object *content_array = json_object_new_array();
-
-         /* Chat-completions string content → single input_text part */
-         if (json_object_get_type(content_obj) == json_type_string) {
-            struct json_object *part = json_object_new_object();
-            json_object_object_add(part, "type", json_object_new_string("input_text"));
-            json_object_object_add(part, "text",
-                                   json_object_new_string(json_object_get_string(content_obj)));
-            json_object_array_add(content_array, part);
-         } else if (json_object_get_type(content_obj) == json_type_array) {
-            /* Chat-completions multimodal array → translate text/image_url parts */
-            int n = json_object_array_length(content_obj);
-            for (int k = 0; k < n; k++) {
-               struct json_object *part_in = json_object_array_get_idx(content_obj, k);
-               struct json_object *type_obj;
-               if (!json_object_object_get_ex(part_in, "type", &type_obj))
-                  continue;
-               const char *t = json_object_get_string(type_obj);
-               if (strcmp(t, "text") == 0) {
-                  struct json_object *txt_obj;
-                  if (json_object_object_get_ex(part_in, "text", &txt_obj)) {
-                     struct json_object *part = json_object_new_object();
-                     json_object_object_add(part, "type", json_object_new_string("input_text"));
-                     json_object_object_add(
-                         part, "text", json_object_new_string(json_object_get_string(txt_obj)));
-                     json_object_array_add(content_array, part);
-                  }
-               } else if (strcmp(t, "image_url") == 0) {
-                  struct json_object *url_wrapper, *url_obj;
-                  if (json_object_object_get_ex(part_in, "image_url", &url_wrapper) &&
-                      json_object_object_get_ex(url_wrapper, "url", &url_obj)) {
-                     struct json_object *part = json_object_new_object();
-                     json_object_object_add(part, "type", json_object_new_string("input_image"));
-                     json_object_object_add(part, "image_url",
-                                            json_object_new_string(
-                                                json_object_get_string(url_obj)));
-                     json_object_array_add(content_array, part);
-                  }
-               }
-            }
-         }
-
-         json_object_object_add(item, "content", content_array);
-         json_object_array_add(input, item);
-      }
-   }
-
-   /* Append the new user input + vision (if not already part of history) */
-   if (input_text && *input_text) {
-      struct json_object *item = json_object_new_object();
-      json_object_object_add(item, "type", json_object_new_string("message"));
-      json_object_object_add(item, "role", json_object_new_string("user"));
-      struct json_object *content_array = json_object_new_array();
-      struct json_object *part = json_object_new_object();
-      json_object_object_add(part, "type", json_object_new_string("input_text"));
-      json_object_object_add(part, "text", json_object_new_string(input_text));
-      json_object_array_add(content_array, part);
-      append_vision_parts(content_array, vision_images, vision_image_sizes, vision_image_count);
-      json_object_object_add(item, "content", content_array);
-      json_object_array_add(input, item);
-   } else if (vision_image_count > 0) {
-      /* Vision attached to last user message in history is the chat-completions pattern;
-       * replicate by appending images to that message if we just emitted it. */
-      int n = json_object_array_length(input);
-      if (n > 0) {
-         struct json_object *last = json_object_array_get_idx(input, n - 1);
-         struct json_object *role_obj, *content_obj;
-         if (json_object_object_get_ex(last, "role", &role_obj) &&
-             strcmp(json_object_get_string(role_obj), "user") == 0 &&
-             json_object_object_get_ex(last, "content", &content_obj) &&
-             json_object_get_type(content_obj) == json_type_array) {
-            append_vision_parts(content_obj, vision_images, vision_image_sizes, vision_image_count);
-         }
-      }
-   }
-
-   return input;
-}
 
 /**
  * @brief Convert chat-completions tool definitions to the Responses flat schema.
@@ -534,6 +248,58 @@ static struct json_object *build_responses_request(struct json_object *history,
    /* Stateless: don't persist on the server. Mode B echoes reasoning items in input. */
    json_object_object_add(root, "store", json_object_new_boolean(0));
 
+   /* Explicit prompt caching (prompt_cache_options + prompt_cache_breakpoint) is a
+    * GPT-5.6+ feature; gpt-5.4/5.5 also route through this Responses path
+    * (llm_openai_model_prefers_responses_api: minor >= 4) and reject those fields as
+    * unknown params. Gate both on model >= 5.6. */
+   int cache_major = 0, cache_minor = 0;
+   llm_parse_model_version(model_name, &cache_major, &cache_minor);
+   const bool cache_explicit_supported = (cache_major > 5) ||
+                                         (cache_major == 5 && cache_minor >= 6);
+
+   /* Prompt-cache routing key. Pins same-conversation turns to the same OpenAI cache
+    * shard so the large `input` prefix (conversation history) stays warm cross-turn.
+    * Without it, live measurement shows only the static instructions+tools header
+    * caches; the dynamic conversation prefix never re-hits (see
+    * docs/RESPONSES_CACHE_REORDER_PLAN.md). Stable per conversation, falling back to
+    * per-session, then omitted when no session context is on this thread. Content-
+    * neutral hint scoped to our org — a key collision only costs a cache miss on a
+    * differing prefix, it never returns another request's content. */
+   {
+      session_t *cache_sess = session_get_command_context();
+      if (cache_sess != NULL) {
+         char cache_key[64];
+         int64_t conv = atomic_load(&cache_sess->stream_conversation_id);
+         if (conv > 0)
+            snprintf(cache_key, sizeof(cache_key), "dawn-conv-%lld", (long long)conv);
+         else
+            snprintf(cache_key, sizeof(cache_key), "dawn-sess-%u", cache_sess->session_id);
+         json_object_object_add(root, "prompt_cache_key", json_object_new_string(cache_key));
+      }
+   }
+
+   /* Prompt-cache mode (GPT-5.6+ only — see cache_explicit_supported). "implicit" keeps
+    * OpenAI's automatic end-of-messages breakpoint (preserves the within-turn tool-loop
+    * hit) AND honors the explicit prompt_cache_breakpoint that build_input stamps on the
+    * last stable input_text before the volatile block — that explicit breakpoint is what
+    * makes the conversation history cache CROSS-turn (the documented "a shared prefix is
+    * not always a cached prefix" fix). Raw-JSON path, so this works regardless of the
+    * Python SDK's type lag. TTL defaults to 30m on 5.6, so it is left unset.
+    *
+    * Deliberate cost tradeoff: implicit mode re-writes the ~2K changing volatile+question
+    * suffix each turn at the 1.25x cache-write rate. That is dwarfed by now reading the
+    * large stable history prefix at 0.1x instead of re-writing it, and — unlike an
+    * explicit-only mode — it preserves within-turn tool-loop caching (tool outputs are
+    * appended after the question, so the implicit end breakpoint caches the growing prefix
+    * iteration-to-iteration). Do not "optimize" to explicit-only without re-measuring. */
+   if (cache_explicit_supported) {
+      struct json_object *pco = json_object_new_object();
+      if (pco != NULL) {
+         json_object_object_add(pco, "mode", json_object_new_string("implicit"));
+         json_object_object_add(root, "prompt_cache_options", pco);
+      }
+   }
+
    /* Always request encrypted_content so we can round-trip reasoning items */
    struct json_object *include_arr = json_object_new_array();
    json_object_array_add(include_arr, json_object_new_string("reasoning.encrypted_content"));
@@ -548,18 +314,26 @@ static struct json_object *build_responses_request(struct json_object *history,
       json_object_object_add(root, "reasoning", reasoning);
    }
 
-   /* System → instructions */
-   char *instructions = extract_system_instructions(history);
+   /* System → instructions: ONLY the stable segment, kept byte-stable across turns so
+    * [instructions][tools][history] forms a cacheable prefix. The per-turn volatile
+    * block is repositioned into `input` (below). The stable persona is always present
+    * on the live path, so the field presence is itself stable. */
+   char *instructions = llm_responses_extract_stable_instructions(history);
    if (instructions) {
       json_object_object_add(root, "instructions", json_object_new_string(instructions));
       free(instructions);
    }
+   char *volatile_ctx = llm_responses_extract_volatile_context(history);
+   int leading_run = llm_responses_count_leading_system_run(history);
 
    /* Input items (or previous_response_id for Mode A) */
    if (prior_response_id && *prior_response_id) {
       json_object_object_add(root, "previous_response_id",
                              json_object_new_string(prior_response_id));
-      /* Only attach the new user message — server has the rest */
+      /* Only attach the new user message — server has the rest. NOTE: Mode A is
+       * currently unused (callers pass NULL). If it is ever revived, the volatile
+       * TURN CONTEXT block must be repositioned here too (prepend it before the new
+       * user message) or per-turn memory/time context vanishes from these turns. */
       struct json_object *input = json_object_new_array();
       if (input_text && *input_text) {
          struct json_object *item = json_object_new_object();
@@ -570,14 +344,19 @@ static struct json_object *build_responses_request(struct json_object *history,
          json_object_object_add(part, "type", json_object_new_string("input_text"));
          json_object_object_add(part, "text", json_object_new_string(input_text));
          json_object_array_add(content_array, part);
-         append_vision_parts(content_array, vision_images, vision_image_sizes, vision_image_count);
+         llm_responses_append_vision_parts(content_array, vision_images, vision_image_sizes,
+                                           vision_image_count);
          json_object_object_add(item, "content", content_array);
          json_object_array_add(input, item);
       }
       json_object_object_add(root, "input", input);
+      free(volatile_ctx);
    } else {
-      struct json_object *input = build_responses_input(history, input_text, vision_images,
-                                                        vision_image_sizes, vision_image_count);
+      struct json_object *input = llm_responses_build_input(history, input_text, vision_images,
+                                                            vision_image_sizes, vision_image_count,
+                                                            volatile_ctx, leading_run,
+                                                            cache_explicit_supported);
+      free(volatile_ctx);
       if (!input) {
          json_object_put(root);
          return NULL;
@@ -927,13 +706,19 @@ static void responses_handle_event(const char *event_type, const char *event_dat
             if (json_object_object_get_ex(usage_obj, "output_tokens", &tok_obj))
                output_tokens = json_object_get_int(tok_obj);
 
+            int cache_write_tokens = 0;
             struct json_object *in_details;
             if (json_object_object_get_ex(usage_obj, "input_tokens_details", &in_details)) {
-               if (json_object_object_get_ex(in_details, "cached_tokens", &tok_obj)) {
+               if (json_object_object_get_ex(in_details, "cached_tokens", &tok_obj))
                   cached_tokens = json_object_get_int(tok_obj);
-                  if (cached_tokens > 0)
-                     OLOG_INFO("OpenAI Responses cache hit: %d tokens cached", cached_tokens);
-               }
+               /* GPT-5.6+ also reports cache_write_tokens (prefix newly written to cache,
+                * billed 1.25x). Tracking it confirms the explicit breakpoint is creating a
+                * reusable write and shows the cross-turn read/write split. */
+               if (json_object_object_get_ex(in_details, "cache_write_tokens", &tok_obj))
+                  cache_write_tokens = json_object_get_int(tok_obj);
+               if (cached_tokens > 0 || cache_write_tokens > 0)
+                  OLOG_INFO("OpenAI Responses cache: %d read, %d write tokens", cached_tokens,
+                            cache_write_tokens);
             }
 
             struct json_object *out_details;
@@ -954,8 +739,8 @@ static void responses_handle_event(const char *event_type, const char *event_dat
                uint32_t session_id = 0;
 #endif
                llm_context_update_usage(session_id, input_tokens, output_tokens, cached_tokens);
-               OLOG_INFO("Responses usage: %d input, %d output, %d cached tokens", input_tokens,
-                         output_tokens, cached_tokens);
+               OLOG_INFO("Responses usage: %d input, %d output, %d cached, %d write tokens",
+                         input_tokens, output_tokens, cached_tokens, cache_write_tokens);
             }
          }
       }

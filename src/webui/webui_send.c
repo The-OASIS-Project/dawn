@@ -396,7 +396,8 @@ void send_transcript_impl_ex(struct lws *wsi,
                              const char *text,
                              bool replay,
                              bool server_saved,
-                             int64_t conversation_id) {
+                             int64_t conversation_id,
+                             int64_t message_id) {
    /* Escape JSON special characters in text */
    struct json_object *obj = json_object_new_object();
    struct json_object *payload = json_object_new_object();
@@ -405,6 +406,11 @@ void send_transcript_impl_ex(struct lws *wsi,
    json_object_object_add(payload, "text", json_object_new_string(text));
    if (conversation_id > 0) {
       json_object_object_add(payload, "conversation_id", json_object_new_int64(conversation_id));
+   }
+   /* DB row id so the client stamps data-message-id on the echoed bubble and the
+    * fanned-out message_appended for the same row dedups (server-authoritative §12c). */
+   if (message_id > 0) {
+      json_object_object_add(payload, "message_id", json_object_new_int64(message_id));
    }
    if (replay) {
       json_object_object_add(payload, "replay", json_object_new_boolean(true));
@@ -421,7 +427,7 @@ void send_transcript_impl_ex(struct lws *wsi,
 }
 
 static void send_transcript_impl(struct lws *wsi, const char *role, const char *text) {
-   send_transcript_impl_ex(wsi, role, text, false, false, 0);
+   send_transcript_impl_ex(wsi, role, text, false, false, 0, 0);
 }
 
 void send_error_impl(struct lws *wsi, const char *code, const char *message) {
@@ -462,6 +468,13 @@ void send_force_logout_impl(struct lws *wsi, const char *reason) {
 void send_session_token_impl(ws_connection_t *conn, const char *token) {
    char json[512];
 
+   /* reconnected: did this connection adopt its OWN existing session (true) or land
+    * on a fresh/throwaway one (false — restart, idle-expiry, or evicted-to-fresh)?
+    * The client uses it to decide load_conversation vs a lightweight re-anchor.
+    * session_id lets the client correlate. */
+   const char *reconnected = conn->session_was_reconnected ? "true" : "false";
+   uint32_t session_id = conn->session ? conn->session->session_id : 0;
+
    /* Include auth state in session response to avoid separate config fetch */
    if (conn->authenticated) {
       /* Fetch is_admin from DB (not cached to prevent stale state) */
@@ -472,9 +485,13 @@ void send_session_token_impl(ws_connection_t *conn, const char *token) {
       }
       snprintf(json, sizeof(json),
                "{\"type\":\"session\",\"payload\":{\"token\":\"%s\","
-               "\"authenticated\":true,\"username\":\"%s\",\"is_admin\":%s}}",
-               token, conn->username, is_admin ? "true" : "false");
+               "\"authenticated\":true,\"username\":\"%s\",\"is_admin\":%s,"
+               "\"reconnected\":%s,\"session_id\":%u}}",
+               token, conn->username, is_admin ? "true" : "false", reconnected, session_id);
    } else {
+      /* Unauthenticated clients don't drive reconnect/load_conversation logic (it's
+       * auth-gated), so omit reconnected/session_id here — no reason to hand the
+       * global session counter to a pre-auth observer. */
       snprintf(json, sizeof(json),
                "{\"type\":\"session\",\"payload\":{\"token\":\"%s\","
                "\"authenticated\":false}}",
@@ -650,13 +667,20 @@ void send_stream_delta_impl(struct lws *wsi,
 void send_stream_end_impl(struct lws *wsi,
                           uint32_t stream_id,
                           int64_t conversation_id,
-                          const char *reason) {
+                          const char *reason,
+                          bool will_persist) {
    struct json_object *obj = json_object_new_object();
    struct json_object *payload = json_object_new_object();
 
    json_object_object_add(payload, "stream_id", json_object_new_int((int32_t)stream_id));
    json_object_object_add(payload, "conversation_id", json_object_new_int64(conversation_id));
    json_object_object_add(payload, "reason", json_object_new_string(reason ? reason : "complete"));
+   /* Model A intent (SERVER_AUTHORITATIVE §6 step 2): when set, the server owns the
+    * save of this turn, so the streamed viewer must NOT client-save it.  Only the
+    * final stream_end carries it (never reason=tool_iteration — filtered upstream). */
+   if (will_persist) {
+      json_object_object_add(payload, "will_persist", json_object_new_boolean(true));
+   }
    json_object_object_add(obj, "type", json_object_new_string("stream_end"));
    json_object_object_add(obj, "payload", payload);
 
@@ -886,7 +910,8 @@ void process_one_response(void) {
          break;
       case WS_RESP_TRANSCRIPT:
          send_transcript_impl_ex(conn->wsi, resp.transcript.role, resp.transcript.text, false,
-                                 resp.transcript.server_saved, resp.transcript.conversation_id);
+                                 resp.transcript.server_saved, resp.transcript.conversation_id,
+                                 resp.transcript.message_id);
          free(resp.transcript.role);
          free(resp.transcript.text);
          break;
@@ -927,7 +952,7 @@ void process_one_response(void) {
          break;
       case WS_RESP_STREAM_END:
          send_stream_end_impl(conn->wsi, resp.stream.stream_id, resp.stream.conversation_id,
-                              resp.stream.text);
+                              resp.stream.text, resp.stream.will_persist);
          /* text[] is inline buffer - no free needed */
          break;
       case WS_RESP_METRICS_UPDATE:

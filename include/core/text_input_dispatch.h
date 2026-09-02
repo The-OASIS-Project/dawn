@@ -52,11 +52,21 @@ extern "C" {
  * pipeline as the existing WebUI behavior.
  *
  * @param ctx Caller-supplied context pointer (`opts->user_msg_added_ctx`).
- * @param text The user message text that was just added.
- * @param persisted_to_db True if the message was successfully written
- *                        to conv_db (only when `opts->conversation_id > 0`).
+ * @param text The CLEAN user message text that was just added (no persist markers) — for
+ *             the origin echo, which mirrors what the user typed.
+ * @param persist_text The PERSISTED form (== `persist_content_override` when set, else equal
+ *                   to `text`): `text` + `[IMAGE:<id>]` markers for an image turn.  Use this
+ *                   for the cross-viewer fan-out so a non-origin viewer can rehydrate the
+ *                   image live (the origin already has it locally, so its echo stays clean).
+ * @param message_id The persisted DB row id of the user message (0 = not persisted;
+ *                   `persisted == message_id > 0`).  Lets the WebUI hook stamp + fan
+ *                   out the user message by its real id (replaced the old
+ *                   `bool persisted_to_db`).
  */
-typedef void (*text_input_user_msg_added_fn)(void *ctx, const char *text, bool persisted_to_db);
+typedef void (*text_input_user_msg_added_fn)(void *ctx,
+                                             const char *text,
+                                             const char *persist_text,
+                                             int64_t message_id);
 
 /**
  * @brief Per-call options for `core_text_input_dispatch()`.
@@ -71,6 +81,15 @@ typedef struct {
     * write happens. */
    int64_t conversation_id;
    int auth_user_id;
+
+   /* Optional persisted-form override for the user message.  When non-NULL, this
+    * exact string is what gets written to conv_db (and stamped) instead of `text`;
+    * the in-memory history and the transcript echo still use the clean `text`.
+    * Used by the WebUI to persist an image turn as `text` + `[IMAGE:<id>]` markers
+    * (built caller-side) so it re-renders on reload — keeping BOTH the image store
+    * AND the marker format out of core: this module just persists the string it's
+    * handed.  NULL for text-only turns and all non-WebUI callers. */
+   const char *persist_content_override;
 
    /* TTS sentence streaming.  Pass NULL to skip TTS (text-only mode).
     * When non-NULL, the LLM call uses sentence buffering and invokes

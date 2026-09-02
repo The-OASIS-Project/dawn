@@ -37,6 +37,7 @@
  */
 
 #include <json-c/json.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -55,11 +56,15 @@
 #include "core/job_reinvoke.h"
 #include "core/missed_notifications_db.h"
 #include "core/scheduler.h"
+#include "dawn_error.h"
+#include "image_store.h"
 #include "logging.h"
 #include "memory/memory_db_aliases.h"
 #include "tools/calendar_service.h"
 #include "utils/string_utils.h"
+#include "webui/webui_image_rehydrate.h" /* webui_collect_image_ids (reply-body image retention) */
 #include "webui/webui_internal.h"
+#include "webui/webui_send.h" /* webui_sentence_audio_callback, webui_send_audio_end/_state */
 #include "webui/webui_server.h"
 
 /* =============================================================================
@@ -466,6 +471,80 @@ int webui_broadcast_json_to_user(int user_id, json_object *root, bool browsers_o
    return broadcast_json_to_user_ex(user_id, root, browsers_only);
 }
 
+/* Build a {type:"watch_readings", payload:{readings:[...]}} frame from a user's
+ * reading snapshot.  Only the moving numbers — the rule structure travels via
+ * watch_list.  Mirrors watch_to_json's has_current/current + isfinite guard so a
+ * live gauge and the initial list agree on when a value is absent. */
+static json_object *build_watch_readings_frame(const sage_reading_t *readings, int n) {
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("watch_readings"));
+   json_object *payload = json_object_new_object();
+   json_object *arr = json_object_new_array();
+   for (int i = 0; i < n; i++) {
+      json_object *o = json_object_new_object();
+      json_object_object_add(o, "id", json_object_new_int64(readings[i].id));
+      json_object_object_add(o, "has_current", json_object_new_boolean(readings[i].has_current));
+      if (readings[i].has_current && isfinite(readings[i].value)) {
+         json_object_object_add(o, "current", json_object_new_double(readings[i].value));
+      }
+      json_object_object_add(o, "breaching", json_object_new_boolean(readings[i].breaching));
+      json_object_array_add(arr, o);
+   }
+   json_object_object_add(payload, "readings", arr);
+   json_object_object_add(root, "payload", payload);
+   return root;
+}
+
+void webui_watch_readings_tick(void) {
+   /* Master switch off => the panel already shows "attention is off" and no watch
+    * can fire; skip the stream entirely (also the cheapest early-out). */
+   if (!attention_is_enabled()) {
+      return;
+   }
+
+   /* Collect the subscribed browser connections under the registry lock, then
+    * release it BEFORE sampling.  attention_readings_snapshot pulls in the
+    * attention + stat/suit/component service locks; running that under the
+    * heavily-contended registry lock would nest those cross-module locks beneath
+    * it once per subscriber per second.  conn pointers are lws-owned and stable
+    * for the process lifetime, so using them post-unlock is safe — this is the
+    * same capture-then-send_json_response pattern the detached job/reinvoke
+    * workers use.  When the panel is closed everywhere this is the only cost: one
+    * registry scan and no metric snapshot at all. */
+   ws_connection_t *subs[MAX_ACTIVE_CONNECTIONS];
+   int nsub = 0;
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      ws_connection_t *conn = s_active_connections[i];
+      if (conn && conn->authenticated && !conn->is_satellite && conn->session &&
+          conn->watch_readings_subscribed) {
+         subs[nsub++] = conn;
+      }
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+
+   for (int i = 0; i < nsub; i++) {
+      ws_connection_t *conn = subs[i];
+      /* Re-check liveness: a connection can detach between collection and send.
+       * (Per-connection ingest is intentional — one snapshot per subscribed conn;
+       * at 1-2 viewers the redundant sample is negligible and now outside the
+       * registry lock.  Dedup per user only if concurrent viewers ever grow.) */
+      if (!conn_get_session(conn)) {
+         continue;
+      }
+      sage_reading_t readings[SAGE_MAX_WATCHES_PER_USER];
+      int n = 0;
+      if (attention_readings_snapshot(conn->auth_user_id, readings, SAGE_MAX_WATCHES_PER_USER,
+                                      &n) != SUCCESS ||
+          n == 0) {
+         continue;
+      }
+      json_object *root = build_watch_readings_frame(readings, n);
+      send_json_response(conn, root);
+      json_object_put(root);
+   }
+}
+
 /* Collect admin user_ids via auth_db_list_users (callback ctx). */
 #define BROADCAST_MAX_ADMIN_IDS 64
 typedef struct {
@@ -641,7 +720,9 @@ void webui_broadcast_message_appended(int user_id,
                                       int64_t conv_id,
                                       int64_t msg_id,
                                       const char *role,
-                                      const char *text) {
+                                      const char *text,
+                                      const char *reasoning,
+                                      unsigned stream_id) {
    if (user_id <= 0 || conv_id <= 0 || text == NULL) {
       return;
    }
@@ -659,17 +740,117 @@ void webui_broadcast_message_appended(int user_id,
    json_object_object_add(p, "message_id", json_object_new_int64(msg_id));
    json_object_object_add(p, "role", json_object_new_string(role ? role : "assistant"));
    json_object_object_add(p, "text", json_object_new_string(text));
+   /* Phase-0 cross-viewer fan-out fields (SERVER_AUTHORITATIVE_PERSISTENCE_DESIGN §6a):
+    * reasoning lets a non-origin viewer render the E3 panel; stream_id lets the
+    * origin correlate + adopt instead of re-rendering. */
+   if (reasoning && reasoning[0]) {
+      json_object_object_add(p, "reasoning", json_object_new_string(reasoning));
+   }
+   json_object_object_add(p, "stream_id", json_object_new_int64((int64_t)stream_id));
    json_object_object_add(root, "payload", p);
 
-   /* broadcast_json_to_user TAKES OWNERSHIP — no json_object_put here. */
-   broadcast_json_to_user_ex(user_id, root, false);
+   /* browsers_only (SERVER_AUTHORITATIVE §8): message_appended is a transcript frame
+    * a satellite renders nothing for — keep it strictly WEBUI, matching the
+    * frame-delivery capability matrix.  broadcast_json_to_user TAKES OWNERSHIP. */
+   broadcast_json_to_user_ex(user_id, root, /*browsers_only=*/true);
 }
 
-/* Strong override of the job_reinvoke (Layer 2) weak seam: when a reinvoke_parent
- * re-engagement persists its reply to the parent conversation, refresh any open
- * tab viewing it by reusing the conversation_messages_appended broadcast. */
-void job_reinvoke_notify_conv_appended(int user_id, int64_t conversation_id) {
-   webui_broadcast_conversation_messages_appended(user_id, conversation_id);
+/* Strong override of the Layer-2 weak seam (conv_event.h): the ONE server-authoritative
+ * "persist a final assistant answer" path (SERVER_AUTHORITATIVE_PERSISTENCE §6c, Phase 2).
+ * See the header for the contract.  Callers own arming/retry/mark-fired; this owns the
+ * splice + row + retention + id-stamp + fan-out.  Adopted by the three foreground persist
+ * paths (text, voice, backgrounded/client-gone); reinvoke folds in as its own commit. */
+int webui_persist_final_answer(session_t *session,
+                               int64_t conv_id,
+                               int64_t user_id,
+                               const char *body,
+                               int64_t *out_msg_id) {
+   if (out_msg_id != NULL) {
+      *out_msg_id = 0;
+   }
+   if (session == NULL || conv_id <= 0 || user_id <= 0 || body == NULL || body[0] == '\0') {
+      return 1; /* nothing to persist */
+   }
+
+   /* Take the final-answer reasoning stash.  No lock: single-writer-in-dispatch, read
+    * post-dispatch on the same worker (turn-queue serialized) — same discipline as
+    * stream_conversation_id.  (Deliberately different from the visual take just below,
+    * which IS under tools_mutex because the render_visual tool callback writes it from a
+    * tool-worker thread — do NOT "consistency-fix" the two to match.) */
+   char *reasoning = session->final_reasoning_json;
+   session->final_reasoning_json = NULL;
+
+   /* Take the accumulated visual under tools_mutex, then RELEASE before the body build /
+    * DB write / fan-out — never hold a leaf lock across the persist (lock-ordering). */
+   pthread_mutex_lock(&session->tools_mutex);
+   char *visual = session->pending_visual;
+   session->pending_visual = NULL;
+   pthread_mutex_unlock(&session->tools_mutex);
+
+   /* Splice the visual at the END of the body (mid-body interleave is unrecoverable
+    * server-side — §6c-G2 accepted tradeoff; the '\n' wrapping matches the browser's
+    * visuals.join('\n') so replay's extractVisuals() sees a well-formed tag). */
+   const char *persist_body = body;
+   char *combined = NULL;
+   if (visual != NULL && visual[0] != '\0') {
+      size_t blen = strlen(body);
+      size_t vlen = strlen(visual);
+      combined = malloc(blen + 1 + vlen + 2); /* body '\n' visual '\n' '\0' */
+      if (combined != NULL) {
+         memcpy(combined, body, blen);
+         combined[blen] = '\n';
+         memcpy(combined + blen + 1, visual, vlen);
+         combined[blen + 1 + vlen] = '\n';
+         combined[blen + 1 + vlen + 1] = '\0';
+         persist_body = combined;
+      }
+      /* malloc failure: persist the bare body rather than lose the row. */
+   }
+
+   /* Bounded retry around the DB write ONLY (SERVER_AUTHORITATIVE §5/§9): reuses the same
+    * spliced body + reasoning every attempt, so a transient failure doesn't lose fidelity.
+    * The error FRAME stays in the foreground caller (reinvoke wants silent leave-unfired,
+    * not a user error). */
+   int64_t msg_id = 0;
+   int rc = 1;
+   for (int attempt = 0; attempt < 3; attempt++) {
+      rc = conv_db_add_message_with_tools(conv_id, (int)user_id, "assistant", persist_body, NULL,
+                                          NULL, reasoning, &msg_id);
+      if (rc == AUTH_DB_SUCCESS) {
+         break;
+      }
+      OLOG_WARNING("webui_persist_final_answer: DB write attempt %d failed for conv %lld",
+                   attempt + 1, (long long)conv_id);
+   }
+   if (rc == AUTH_DB_SUCCESS) {
+      if (out_msg_id != NULL) {
+         *out_msg_id = msg_id;
+      }
+      /* Stamp the in-memory history entry id (parity with the retired handle_save_message). */
+      session_stamp_last_message_id(session, "assistant", msg_id);
+
+      /* Promote the REPLY BODY's image markers to PERMANENT retention.  The retired
+       * client-save did this; the foreground workers' existing promotion covers only the
+       * user upload, not the reply — so a render_visual/generated-image reply's images
+       * would otherwise LRU-evict later (invisible to a reload-now fidelity test). */
+      char reply_ids[WEBUI_MAX_VISION_IMAGES_CAP][IMAGE_ID_LEN];
+      int reply_id_count = 0;
+      if (webui_collect_image_ids(persist_body, reply_ids, WEBUI_MAX_VISION_IMAGES_CAP,
+                                  &reply_id_count) == SUCCESS) {
+         for (int i = 0; i < reply_id_count; i++) {
+            image_store_update_retention(reply_ids[i], (int)user_id, IMAGE_RETAIN_PERMANENT);
+         }
+      }
+
+      /* One fan-out, stamped with this turn's stream_id so the origin adopts (browsers_only). */
+      conv_event_notify_message_appended(conv_id, (int)user_id, msg_id, "assistant", persist_body,
+                                         reasoning, atomic_load(&session->current_stream_id));
+   }
+
+   free(combined);
+   free(visual);
+   free(reasoning);
+   return rc;
 }
 
 void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id) {
@@ -688,6 +869,63 @@ void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id
       OLOG_INFO("WebUI: Broadcast conversation_messages_appended (conv=%lld) to %d client(s)",
                 (long long)conv_id, sent);
    }
+}
+
+/* =============================================================================
+ * Generalized connection walk (SERVER_AUTHORITATIVE_PERSISTENCE §Phase-4 reuse seam)
+ *
+ * The registry walks scattered across this file share one loop body: lock
+ * s_conn_registry_mutex, iterate s_active_connections, filter by auth + user +
+ * (optionally) an excluded origin session, then act.  This helper owns exactly
+ * those THREE baked-in filters and delegates everything else — wsi liveness,
+ * session type, active conversation, satellite gating — to the visitor, because
+ * the call sites genuinely diverge on those secondary predicates.  A future
+ * migrator must NOT add a wsi/type check here: broadcast_json_to_user_ex
+ * (deliberately un-migrated — different shape: serialize-once → strdup + queue
+ * under the lock) checks neither, and baking one in would silently change its
+ * reach.
+ *
+ * The visitor runs UNDER s_conn_registry_mutex; it may queue_response (the
+ * registry → response-queue nesting is the established order) but MUST NOT
+ * re-acquire the registry mutex or block on TTS synthesis.  Return false from
+ * the visitor to stop the walk early (existence checks); true to continue.
+ * conn_visitor_fn + this prototype are declared in webui_internal.h so the
+ * §Phase-4 multi-target TTS fan (webui_audio.c) can share the one walk.
+ * ============================================================================= */
+void for_each_user_conn(int user_id,
+                        uint32_t exclude_session_id,
+                        conn_visitor_fn visit,
+                        void *ctx) {
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      ws_connection_t *conn = s_active_connections[i];
+      if (!conn || !conn->session || !conn->authenticated)
+         continue;
+      if (user_id > 0 && conn->auth_user_id != user_id)
+         continue;
+      if (exclude_session_id != 0 && conn->session->session_id == exclude_session_id)
+         continue;
+      if (!visit(conn, ctx))
+         break;
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+}
+
+/* Existence-check visitor for any_session_matches:
+ * an authenticated WEBUI session, optionally on a specific active conversation. */
+typedef struct {
+   int64_t conv_id; /* > 0 = require this active conv; 0 = any */
+   bool found;
+} webui_match_ctx_t;
+
+static bool visit_webui_match(ws_connection_t *conn, void *vctx) {
+   webui_match_ctx_t *ctx = (webui_match_ctx_t *)vctx;
+   if (!conn->wsi || conn->session->type != SESSION_TYPE_WEBUI)
+      return true; /* keep looking */
+   if (ctx->conv_id > 0 && webui_get_active_conversation_id(conn->session) != ctx->conv_id)
+      return true;
+   ctx->found = true;
+   return false; /* stop */
 }
 
 /* =============================================================================
@@ -732,27 +970,119 @@ void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id
  * no correctness regression.
  * ============================================================================= */
 static bool any_session_matches(int user_id, int64_t conv_id_or_zero) {
+   /* user_id == 0 → broadcast-to-all; user_id > 0 → per-user (both handled by
+    * for_each_user_conn's baked-in user filter).  WEBUI-type + conv gating live in
+    * the visitor. */
+   webui_match_ctx_t ctx = { .conv_id = conv_id_or_zero, .found = false };
+   for_each_user_conn(user_id, 0, visit_webui_match, &ctx);
+   OLOG_DEBUG("any_session_matches: user=%d conv=%lld → %d", user_id, (long long)conv_id_or_zero,
+              ctx.found ? 1 : 0);
+   return ctx.found;
+}
+
+/* Cost-gate pre-flight for the ephemeral tool-step fan (SERVER_AUTHORITATIVE_PERSISTENCE
+ * §Phase-3, extended §living-tool-pills): is there ANY recipient?  A recipient is either a
+ * non-origin authenticated WEBUI browser (bystander — always a recipient), OR the origin's OWN
+ * connection when it advertised `tool_step_origin` (a uniform-pill client that renders its own
+ * steps from the frame, e.g. Aurora — often the lone dashboard, so this is the primary case).
+ * If none, the fan is pure waste and the caller skips serialization entirely.
+ *
+ * One walk over the whole user set (exclude_session_id=0) so the origin conn is visited and its
+ * flag consulted.  Deliberately user-scoped, NOT conv-scoped: conv-scoping would deref
+ * client_data via webui_get_active_conversation_id (the tracked TOCTOU / voice-auto-bind race,
+ * TODO (d)), and the client already drops frames for a non-active conversation.  session_id
+ * (monotonic), not the pointer, identifies the origin — matches job_manager_claim_reaped. */
+typedef struct {
+   uint32_t origin_session_id;
+   bool found;
+} tool_step_recipient_ctx_t;
+
+static bool visit_tool_step_recipient(ws_connection_t *conn, void *vctx) {
+   tool_step_recipient_ctx_t *ctx = (tool_step_recipient_ctx_t *)vctx;
+   if (!conn->wsi || conn->session->type != SESSION_TYPE_WEBUI)
+      return true;
+   bool is_origin = (conn->session->session_id == ctx->origin_session_id);
+   if (!is_origin || atomic_load(&conn->tool_step_origin)) {
+      ctx->found = true;
+      return false; /* a bystander always counts; the origin only if it opted in — stop */
+   }
+   return true;
+}
+
+static bool webui_tool_step_has_recipient(int user_id, uint32_t origin_session_id) {
+   if (user_id <= 0)
+      return false;
+   tool_step_recipient_ctx_t ctx = { .origin_session_id = origin_session_id, .found = false };
+   for_each_user_conn(user_id, 0, visit_tool_step_recipient, &ctx);
+   return ctx.found;
+}
+
+/* Strong override of the conv_event (Layer 2) weak seam: fan ONE ephemeral tool step to the
+ * user's OTHER browsers viewing this conversation (SERVER_AUTHORITATIVE_PERSISTENCE §Phase-3).
+ *
+ * Ephemeral: no DB write, no seq (the messages table already persists the step; this is
+ * live-view sugar).  The ORIGIN session is excluded from the recipient set BY DEFAULT — stock
+ * www renders its own steps from its live stream (`addDebug`), and needs no load-bearing
+ * origin-suppression (a client-side "am I streaming" check is deterministically false by the
+ * time this arrives: the tool-iteration stream_end clears the streaming flag before the step
+ * emits, master-plan §5).  EXCEPTION (§living-tool-pills): a client that advertised
+ * `tool_step_origin` has NO stream-derived tool path and renders every pill uniformly from this
+ * frame, so its OWN origin connection IS included.  WEBUI-only cell: a satellite renders no
+ * debug transcript.  stream_id is best-effort/informational. */
+void webui_broadcast_tool_step(int user_id,
+                               int64_t conv_id,
+                               uint32_t origin_session_id,
+                               unsigned stream_id,
+                               const char *kind,
+                               const char *payload) {
+   if (user_id <= 0 || conv_id <= 0 || kind == NULL)
+      return;
+   /* Cost-gate: serialize + walk ONLY when a recipient exists (a non-origin browser, OR the
+    * origin itself if it advertised tool_step_origin). */
+   if (!webui_tool_step_has_recipient(user_id, origin_session_id))
+      return;
+
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("tool_step"));
+   json_object *p = json_object_new_object();
+   json_object_object_add(p, "conversation_id", json_object_new_int64(conv_id));
+   json_object_object_add(p, "stream_id", json_object_new_int64((int64_t)stream_id));
+   json_object_object_add(p, "kind", json_object_new_string(kind));
+   /* payload is pre-redacted + pre-capped opaque JSON (event_payload.c).  Forwarded as a
+    * STRING, not re-parsed — the renderer treats it as untrusted text (§8.7). */
+   if (payload)
+      json_object_object_add(p, "payload", json_object_new_string(payload));
+   json_object_object_add(root, "payload", p);
+
+   const char *json_str = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+   char *json_cached = json_str ? strdup(json_str) : NULL;
+   json_object_put(root);
+   if (!json_cached)
+      return;
+
+   /* Send walk: every authenticated WEBUI browser for this user EXCEPT the origin.  Uses the
+    * WS-send funnel (queue_response), never direct lws_write (CI-enforced). */
    pthread_mutex_lock(&s_conn_registry_mutex);
-   bool found = false;
    for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
       ws_connection_t *conn = s_active_connections[i];
-      if (!conn || !conn->session || !conn->authenticated || !conn->wsi)
+      if (!conn || !conn->session || !conn->authenticated)
          continue;
       if (conn->session->type != SESSION_TYPE_WEBUI)
          continue;
-      /* user_id == 0: broadcast-to-all; any authenticated WebUI session
-       * matches.  user_id > 0: per-user. */
-      if (user_id > 0 && conn->auth_user_id != user_id)
+      if (conn->auth_user_id != user_id)
          continue;
-      if (conv_id_or_zero > 0 && webui_get_active_conversation_id(conn->session) != conv_id_or_zero)
+      if (conn->session->session_id == origin_session_id && !atomic_load(&conn->tool_step_origin))
+         continue; /* origin excluded UNLESS it advertised tool_step_origin (uniform-pill client) */
+      char *json_copy = strdup(json_cached);
+      if (!json_copy)
          continue;
-      found = true;
-      break;
+      ws_response_t resp = { .session = conn->session,
+                             .type = WS_RESP_JSON,
+                             .generic_json = { .json = json_copy } };
+      queue_response(&resp);
    }
    pthread_mutex_unlock(&s_conn_registry_mutex);
-   OLOG_DEBUG("any_session_matches: user=%d conv=%lld → %d", user_id, (long long)conv_id_or_zero,
-              found ? 1 : 0);
-   return found;
+   free(json_cached);
 }
 
 /* =============================================================================
@@ -946,6 +1276,11 @@ void webui_broadcast_context_injection(int user_id,
       json_object *item = json_object_new_object();
       json_object_object_add(item, "source_id",
                              json_object_new_string(c->source_id ? c->source_id : ""));
+      /* Per-row unique key ("fact:8502") — the SAME vocabulary the citation stash
+       * and the context_citations frame speak, so the browser can map a cited id
+       * back to its row.  Empty for non-citeable rows (calendar/document/etc.),
+       * which never carry an item_id and are never gold-highlighted. */
+      json_object_object_add(item, "item_id", json_object_new_string(c->item_id ? c->item_id : ""));
       json_object_object_add(item, "source_type",
                              json_object_new_string(focus_source_type_str(c->source_type)));
 
@@ -1055,6 +1390,85 @@ void webui_broadcast_context_injection(int user_id,
    }
 }
 
+/* Phase 1 (memory citation): after a turn's <cited> tag is parsed and validated,
+ * push the cited item_ids to the browser so the Context panel can gold-highlight
+ * the rows the model actually used.  Keyed to the context_injection frame by
+ * (conversation_id, turn_id) — turn_id is last_user_msg_id on both paths — and by
+ * per-row item_id.  Strong override of the weak no-op in memory_citation.c, so the
+ * Layer-2 capture stays WebUI-agnostic.  `cited_ids_csv` is the validated cited
+ * subset ("fact:8502,summary:2496"); item_ids are opaque ASCII keys. */
+void webui_broadcast_context_citations(int user_id,
+                                       int64_t conv_id,
+                                       int64_t turn_id,
+                                       const char *cited_ids_csv) {
+   if (user_id <= 0 || conv_id <= 0 || cited_ids_csv == NULL || cited_ids_csv[0] == '\0')
+      return;
+
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("context_citations"));
+   json_object_object_add(root, "conversation_id", json_object_new_int64(conv_id));
+   json_object_object_add(root, "turn_id", json_object_new_int64(turn_id));
+
+   json_object *ids = json_object_new_array();
+   int n = 0;
+   const char *p = cited_ids_csv;
+   while (*p) {
+      const char *comma = strchr(p, ',');
+      size_t len = comma ? (size_t)(comma - p) : strlen(p);
+      if (len > 0) {
+         char id[64];
+         if (len >= sizeof(id))
+            len = sizeof(id) - 1;
+         memcpy(id, p, len);
+         id[len] = '\0';
+         json_object_array_add(ids, json_object_new_string(id));
+         n++;
+      }
+      if (!comma)
+         break;
+      p = comma + 1;
+   }
+   json_object_object_add(root, "cited_item_ids", ids);
+
+   const char *json_canonical_ro = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+   char *json_canonical = json_canonical_ro ? strdup(json_canonical_ro) : NULL;
+   json_object_put(root);
+   if (json_canonical == NULL)
+      return;
+
+   int sent = 0;
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      ws_connection_t *conn = s_active_connections[i];
+      if (!conn || !conn->session || !conn->authenticated || !conn->wsi)
+         continue;
+      if (conn->session->type != SESSION_TYPE_WEBUI)
+         continue;
+      if (conn->auth_user_id != user_id)
+         continue;
+      if (webui_get_active_conversation_id(conn->session) != conv_id)
+         continue;
+
+      char *json_copy = strdup(json_canonical);
+      if (json_copy == NULL)
+         continue;
+      ws_response_t resp = { .session = conn->session,
+                             .type = WS_RESP_JSON,
+                             .generic_json = { .json = json_copy } };
+      queue_response(&resp);
+      sent++;
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+
+   free(json_canonical);
+
+   if (sent > 0) {
+      OLOG_DEBUG("WebUI: Broadcast context_citations (user=%d conv=%lld turn=%lld cited=%d) to %d "
+                 "client(s)",
+                 user_id, (long long)conv_id, (long long)turn_id, n, sent);
+   }
+}
+
 void webui_broadcast_memory_notice(int user_id, const char *level, const char *message) {
    if (user_id <= 0 || !level || !message)
       return;
@@ -1144,7 +1558,15 @@ session_t *webui_find_reinvoke_viewer(int64_t conv_id, int user_id) {
    if (conv_id <= 0 || user_id <= 0) {
       return NULL;
    }
-   session_t *found = NULL;
+   /* Prefer a TTS-enabled viewer (SERVER_AUTHORITATIVE §6d): the reinvoke is streamed
+    * text-only to ONE viewer, so pick the one that actually wants audio — the TTS user
+    * hears the re-engagement, a text viewer gets it via the fanned-out message_appended.
+    * Two-pass in one scan: `pick` is the first eligible viewer (fallback); upgrade to
+    * the first TTS-on viewer and stop.  Retain exactly ONCE, still under the registry
+    * lock (so the chosen session can't be freed before the retain), so there is no
+    * release-under-lock. */
+   session_t *pick = NULL;
+   bool pick_tts = false;
    pthread_mutex_lock(&s_conn_registry_mutex);
    for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
       ws_connection_t *conn = s_active_connections[i];
@@ -1171,18 +1593,69 @@ session_t *webui_find_reinvoke_viewer(int64_t conv_id, int user_id) {
       if (atomic_load(&s->disconnected) || atomic_load(&s->being_destroyed)) {
          continue;
       }
-      session_retain(s);
-      found = s;
-      break;
+      bool tts_on = atomic_load(&conn->tts_enabled);
+      if (pick == NULL) {
+         pick = s;
+         pick_tts = tts_on;
+         if (tts_on) {
+            break; /* best possible: first eligible AND wants audio */
+         }
+      } else if (tts_on && !pick_tts) {
+         pick = s; /* upgrade the non-TTS fallback to a TTS viewer */
+         pick_tts = true;
+         break;
+      }
+   }
+   if (pick != NULL) {
+      session_retain(pick);
    }
    pthread_mutex_unlock(&s_conn_registry_mutex);
-   return found;
+   return pick;
 }
 
-/* Strong override of the Layer-2 weak seam: the conversation the session's client
- * is currently viewing (used by the reinvoke closure's server-persist decision). */
-int64_t webui_session_active_conversation(session_t *s) {
-   return webui_get_active_conversation_id(s);
+
+/* Strong override: wire TTS onto a live reinvoke turn when the viewer has it on.
+ * live is a SESSION_TYPE_WEBUI viewer (webui_find_reinvoke_viewer guarantees the
+ * type), so client_data is its ws_connection_t.  Pointing sentence_cb at
+ * webui_sentence_audio_callback gives the re-engagement the same streamed-audio +
+ * state:speaking behavior as a normal turn. */
+bool webui_reinvoke_tts_begin(session_t *live,
+                              text_input_dispatch_opts_t *opts,
+                              bool *use_opus_out) {
+   if (use_opus_out != NULL) {
+      *use_opus_out = false;
+   }
+   if (!live || !opts) {
+      return false;
+   }
+   ws_connection_t *conn = (ws_connection_t *)live->client_data;
+   if (!conn || !atomic_load(&conn->tts_enabled)) {
+      return false;
+   }
+   opts->sentence_cb = webui_sentence_audio_callback;
+   opts->sentence_userdata = live;
+   /* Capture the codec now, while conn is known live, so _finish (post-dispatch)
+    * needs no client_data deref — the lws thread may free conn during a long
+    * re-engagement, and this mirrors the normal turn's early-capture. */
+   if (use_opus_out != NULL) {
+      *use_opus_out = atomic_load(&conn->use_opus);
+   }
+   return true;
+}
+
+/* Strong override: close the reinvoke's TTS audio stream + settle to idle.  Only
+ * called when _tts_begin returned true (TTS was on).  When the turn actually
+ * spoke, the sentence callback already emitted state:speaking and this brackets
+ * it with audio_end + state:idle (a normal turn's envelope, so echo-mute
+ * disengages and clients settle); on an empty/cancelled turn no speaking preceded
+ * and these two frames simply close an empty audio buffer + settle to idle, both
+ * harmless/idempotent.  Uses the codec captured at begin — no client_data deref. */
+void webui_reinvoke_tts_finish(session_t *live, bool use_opus) {
+   if (!live) {
+      return;
+   }
+   webui_send_audio_end(live, use_opus);
+   webui_send_state(live, "idle");
 }
 
 void webui_broadcast_memory_proposals_changed(int user_id) {
@@ -1247,6 +1720,26 @@ void calendar_broadcast_events_changed(int user_id) {
    if (sent > 0) {
       OLOG_INFO("WebUI: Broadcast calendar_events_changed (user=%d) to %d client(s)", user_id,
                 sent);
+   }
+}
+
+/*
+ * Nudge every admin browser to re-pull config after a successful set_config save.
+ * DAWN config is daemon-global and admin-only (single dawn.toml), so this fans to
+ * ALL admin browsers rather than scoping to a user like the calendar/scheduler
+ * broadcasts.  Empty payload — the "something changed, re-fetch" contract that
+ * calendar_events_changed uses; clients respond by re-sending get_config.  The
+ * editing tab already refreshes from its set_config_response, so its extra refetch
+ * here is redundant-but-harmless (idempotent), not worth excluding.  Browsers only:
+ * a satellite renders no settings panel. */
+void webui_broadcast_config_changed(void) {
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("config_changed"));
+   json_object_object_add(root, "payload", json_object_new_object());
+
+   int sent = broadcast_json_to_admins(root, /*browsers_only=*/true);
+   if (sent > 0) {
+      OLOG_INFO("WebUI: Broadcast config_changed to %d admin client(s)", sent);
    }
 }
 

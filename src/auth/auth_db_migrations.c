@@ -2825,6 +2825,194 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       errmsg = NULL;
    }
 
+   /* v77: memory_citation_audit table (memory citation signal).  A NEW table, so
+    * CREATE IF NOT EXISTS is idempotent — base SCHEMA_SQL adds it on fresh
+    * installs, this adds it on existing DBs.  Gated `< 77`; on failure v77_ok
+    * stays false so the version bump is deferred and the migration retries. */
+   bool v77_ok = (current_version >= 77);
+   if (current_version < 77) {
+      rc = sqlite3_exec(s_db.db,
+                        "CREATE TABLE IF NOT EXISTS memory_citation_audit ("
+                        "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                        "   conversation_id INTEGER DEFAULT 0,"
+                        "   message_id INTEGER DEFAULT 0,"
+                        "   user_id INTEGER NOT NULL,"
+                        "   ts INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
+                        "   injected_ids TEXT,"
+                        "   cited_ids TEXT,"
+                        "   dropped_count INTEGER DEFAULT 0"
+                        ");"
+                        "CREATE INDEX IF NOT EXISTS idx_memory_citation_audit_user_ts ON "
+                        "memory_citation_audit(user_id, ts);",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v77 migration (memory_citation_audit) failed: %s",
+                    errmsg ? errmsg : "unknown");
+         v77_ok = false;
+      } else {
+         v77_ok = true;
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* v78: injected_scores on memory_citation_audit — per-item retrieval final_score,
+    * CSV-aligned 1:1 with injected_ids, so the audit can measure the score distribution
+    * of used (cited) vs unused (uncited) injected memories and inform a data-driven
+    * focus-injection score floor.  Base SCHEMA_SQL already carries the column; this ALTER
+    * back-fills an existing v77 DB.  Gated `< 78` so it runs on fresh installs too, where
+    * base already added it and the duplicate-column error is expected + tolerated (mirrors
+    * the v76 resolution_reason pattern). */
+   bool v78_ok = (current_version >= 78);
+   if (current_version < 78) {
+      rc = sqlite3_exec(s_db.db,
+                        "ALTER TABLE memory_citation_audit ADD COLUMN injected_scores TEXT", NULL,
+                        NULL, &errmsg);
+      /* Tolerate ONLY the expected duplicate-column result (fresh installs already have the
+       * column from base SCHEMA_SQL); a real error must hold v78_ok false so the version
+       * bump is gated and the migration retries next boot. */
+      bool duplicate = (errmsg && strstr(errmsg, "duplicate column"));
+      if (rc != SQLITE_OK && !duplicate) {
+         OLOG_ERROR("auth_db: v78 migration (injected_scores) failed: %s",
+                    errmsg ? errmsg : "unknown");
+         v78_ok = false;
+      } else {
+         v78_ok = true;
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* v79: tool-sourced citation (Option B) — two columns on memory_citation_audit.
+    * tool_surfaced_ids = the facts shown via a memory tool this turn (canonical
+    * "fact:x"); dropped_tool_count = cited ID:x not in that set.  Base SCHEMA_SQL
+    * carries both; these ALTERs back-fill an existing v78 DB.  Gated `< 79`; each
+    * ALTER tolerates ONLY the expected duplicate-column result (fresh installs
+    * already have the columns), same pattern as v78. */
+   bool v79_ok = (current_version >= 79);
+   if (current_version < 79) {
+      v79_ok = true;
+      const char *const v79_sql[] = {
+         "ALTER TABLE memory_citation_audit ADD COLUMN tool_surfaced_ids TEXT",
+         "ALTER TABLE memory_citation_audit ADD COLUMN dropped_tool_count INTEGER DEFAULT 0",
+      };
+      for (size_t i = 0; i < sizeof(v79_sql) / sizeof(v79_sql[0]); i++) {
+         rc = sqlite3_exec(s_db.db, v79_sql[i], NULL, NULL, &errmsg);
+         bool duplicate = (errmsg && strstr(errmsg, "duplicate column"));
+         if (rc != SQLITE_OK && !duplicate) {
+            OLOG_ERROR("auth_db: v79 migration (%s) failed: %s", v79_sql[i],
+                       errmsg ? errmsg : "unknown");
+            v79_ok = false;
+         }
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      }
+   }
+
+   /* v80: named flag on attention_rules — distinguishes a user-chosen watch name
+    * (spoken in alerts, system won't regenerate it) from a system-owned auto-name.
+    * attention_rules is created by the v71 migration (now carrying the column for
+    * fresh installs); this ALTER back-fills an existing DB.  Gated `< 80`; tolerates
+    * ONLY the expected duplicate-column result (same pattern as v78/v79). */
+   bool v80_ok = (current_version >= 80);
+   if (current_version < 80) {
+      rc = sqlite3_exec(s_db.db,
+                        "ALTER TABLE attention_rules ADD COLUMN named INTEGER NOT NULL DEFAULT 0",
+                        NULL, NULL, &errmsg);
+      bool duplicate = (errmsg && strstr(errmsg, "duplicate column"));
+      if (rc != SQLITE_OK && !duplicate) {
+         OLOG_ERROR("auth_db: v80 migration (named) failed: %s", errmsg ? errmsg : "unknown");
+         v80_ok = false;
+      } else {
+         v80_ok = true;
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* v81: per-message failure flag (messages.is_error) so a reloaded conversation reds a
+    * failed tool pill, matching the live tool_step signal (red-on-failure pills). Only
+    * role='tool' rows ever set it; DEFAULT 0 = neutral for every existing + non-tool row. */
+   bool v81_ok = (current_version >= 81);
+   if (current_version < 81) {
+      rc = sqlite3_exec(s_db.db,
+                        "ALTER TABLE messages ADD COLUMN is_error INTEGER NOT NULL DEFAULT 0", NULL,
+                        NULL, &errmsg);
+      bool duplicate = (errmsg && strstr(errmsg, "duplicate column"));
+      if (rc != SQLITE_OK && !duplicate) {
+         OLOG_ERROR("auth_db: v81 migration (is_error) failed: %s", errmsg ? errmsg : "unknown");
+         v81_ok = false;
+      } else {
+         v81_ok = true;
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* v82: RFC 6578 sync-collection support — calendar_events.href (the removal key:
+    * a deleted resource reports its href with a 404 status but no UID) and
+    * calendar_calendars.sync_token (the WebDAV sync baseline).  Base SCHEMA_SQL
+    * already carries both columns; these ALTERs back-fill an existing DB.  Gated
+    * `< 82` so both run on fresh installs too (base added the columns, so the
+    * duplicate-column error is expected + tolerated — mirrors the v76 pattern).
+    * The href index goes ONLY here (never in SCHEMA_SQL, which runs before this
+    * ALTER on an existing DB → would fail "no such column: href"); the `< 82` gate
+    * makes it reachable by both fresh (column from base) and migrated (column from
+    * the ALTER above) paths. */
+   bool v82_ok = (current_version >= 82);
+   if (current_version < 82) {
+      v82_ok = true;
+      static const char *const v82_alters[] = {
+         "ALTER TABLE calendar_events ADD COLUMN href TEXT DEFAULT ''",
+         "ALTER TABLE calendar_calendars ADD COLUMN sync_token TEXT DEFAULT ''",
+      };
+      for (size_t i = 0; i < sizeof(v82_alters) / sizeof(v82_alters[0]); i++) {
+         rc = sqlite3_exec(s_db.db, v82_alters[i], NULL, NULL, &errmsg);
+         bool duplicate = (errmsg && strstr(errmsg, "duplicate column"));
+         if (rc != SQLITE_OK && !duplicate) {
+            OLOG_ERROR("auth_db: v82 migration (sync-collection) failed: %s",
+                       errmsg ? errmsg : "unknown");
+            v82_ok = false;
+         }
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      }
+      if (v82_ok) {
+         rc = sqlite3_exec(s_db.db,
+                           "CREATE INDEX IF NOT EXISTS idx_cal_events_href "
+                           "ON calendar_events(calendar_id, href)",
+                           NULL, NULL, &errmsg);
+         if (rc != SQLITE_OK) {
+            OLOG_ERROR("auth_db: v82 migration (href index) failed: %s",
+                       errmsg ? errmsg : "unknown");
+            v82_ok = false;
+         }
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      }
+   }
+
+   /* v83: memory_facts.last_cited — cooldown timestamp for citation-driven
+    * confidence reinforcement (Memory Citation Phase 2).  Base SCHEMA_SQL carries
+    * the column; this ALTER back-fills an existing DB.  Gated `< 83` so it also
+    * runs on fresh installs (base added it → duplicate-column expected + tolerated,
+    * mirroring the v81/v82 pattern).  NULL default = never cited; first cite bumps. */
+   bool v83_ok = (current_version >= 83);
+   if (current_version < 83) {
+      rc = sqlite3_exec(s_db.db,
+                        "ALTER TABLE memory_facts ADD COLUMN last_cited INTEGER DEFAULT NULL", NULL,
+                        NULL, &errmsg);
+      bool duplicate = (errmsg && strstr(errmsg, "duplicate column"));
+      if (rc != SQLITE_OK && !duplicate) {
+         OLOG_ERROR("auth_db: v83 migration (last_cited) failed: %s", errmsg ? errmsg : "unknown");
+         v83_ok = false;
+      } else {
+         v83_ok = true;
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
    /* Log migration if upgrading from an older version */
    if (current_version > 0 && current_version < AUTH_DB_SCHEMA_VERSION) {
       OLOG_INFO("auth_db: migrated schema from v%d to v%d", current_version,
@@ -2847,7 +3035,8 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
                               v55_ok && v56_ok && v57_ok && v58_ok && v59_ok && v60_ok && v61_ok &&
                               v62_ok && v63_ok && v64_ok && v65_ok && v66_ok && v67_ok && v68_ok &&
                               v69_ok && v70_ok && v71_ok && v72_ok && v73_ok && v74_ok && v75_ok &&
-                              v76_ok;
+                              v76_ok && v77_ok && v78_ok && v79_ok && v80_ok && v81_ok && v82_ok &&
+                              v83_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

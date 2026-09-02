@@ -644,12 +644,9 @@ static bool guard_redact_content_array(const memory_note_guard_t *g,
  * ============================================================================= */
 
 /* NOTE: the guard collects filed bodies only from STRUCTURED tool calls (OpenAI
- * `tool_calls` + Claude `tool_use` blocks) — the shape produced by native
- * tool-calling mode (`[llm.tools] mode = "native"`, the default).  In the legacy
- * `command_tags` mode the LLM emits document_manage as a `<command>` tag inside
- * plain assistant text, so the body is never collected and therefore never
- * redacted from extraction.  Acceptable because command_tags is a non-default
- * legacy path; if it is ever made primary, add a command-tag collector here. */
+ * `tool_calls` + Claude `tool_use` blocks) — the shape produced by native tool
+ * calling, which is the only tool transport (the legacy `<command>`-tag path was
+ * retired 2026-08). */
 memory_note_guard_t *memory_note_guard_create(struct json_object *conversation_history) {
    if (!conversation_history || !g_config.memory.note_extraction_guard) {
       return NULL;

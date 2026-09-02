@@ -116,9 +116,6 @@ typedef enum {
 /** CURL connect timeout in milliseconds (TCP + TLS handshake) */
 #define LLM_CONNECT_TIMEOUT_MS 10000L
 
-/** Maximum length for tool mode strings */
-#define LLM_TOOL_MODE_MAX 16
-
 /** Maximum length for thinking mode strings */
 #define LLM_THINKING_MODE_MAX 16
 
@@ -134,7 +131,7 @@ typedef struct {
    cloud_provider_t cloud_provider;              /**< Cloud provider (OpenAI, Claude, etc.) */
    char endpoint[128];                           /**< Endpoint URL (empty = use provider default) */
    char model[LLM_MODEL_NAME_MAX];               /**< Model name (empty = use provider default) */
-   char tool_mode[LLM_TOOL_MODE_MAX];            /**< Tool mode: native, command_tags, disabled */
+   bool suppress_tools;                          /**< Force tools off for this call (internal) */
    char thinking_mode[LLM_THINKING_MODE_MAX];    /**< Thinking: disabled, auto, enabled */
    char reasoning_effort[LLM_THINKING_MODE_MAX]; /**< Reasoning effort: low, medium, high */
 } session_llm_config_t;
@@ -159,7 +156,7 @@ typedef struct {
                                                     struct's lifetime) */
    char model_buf[LLM_MODEL_NAME_MAX];           /**< Backs `model` when remapped to an
                                                     OpenRouter slug (stable, in-struct) */
-   char tool_mode[LLM_TOOL_MODE_MAX];            /**< Tool mode: native, command_tags, disabled */
+   bool suppress_tools;                          /**< Force tools off for this call (internal) */
    char thinking_mode[LLM_THINKING_MODE_MAX];    /**< Thinking: disabled, auto, enabled */
    char reasoning_effort[LLM_THINKING_MODE_MAX]; /**< Reasoning effort: low, medium, high */
    int timeout_ms; /**< Per-request timeout (0 = use global default) */
@@ -589,42 +586,6 @@ bool llm_has_gemini_key(void);
 bool llm_has_openrouter_key(void);
 
 /**
- * @brief Whether OpenRouter gateway mode is active.
- *
- * Reads g_config.llm.cloud.use_openrouter.  When true, ALL cloud traffic
- * (main chat + auxiliary extraction/compaction/silent-observe/scheduler calls)
- * routes through OpenRouter.  This is the single source of truth for the
- * bool→CLOUD_PROVIDER_OPENROUTER conversion done in llm_init/llm_refresh_providers.
- *
- * @return true if the gateway is enabled in config
- */
-bool llm_openrouter_gateway_enabled(void);
-
-/**
- * @brief Rewrite an auxiliary resolver's cloud target to OpenRouter when the
- *        gateway is on.
- *
- * Used by the string-keyed auxiliary resolvers (compaction, extraction,
- * silent-observe, scheduler) that do not go through the session path.  When the
- * gateway is enabled and *provider indicates a cloud provider, this sets
- * *provider = CLOUD_PROVIDER_OPENROUTER, writes *endpoint = OPENROUTER base URL
- * UNCONDITIONALLY (callers must not rely on downstream endpoint fallback), and
- * sets *api_key to the OpenRouter key.  The model string is left untouched — the
- * caller's configured model (e.g. an "anthropic/..." OpenRouter ID) is preserved.
- *
- * Reads global config; not reentrant across a mid-flight config change (matches
- * every other resolver's convention).
- *
- * @param provider [in,out] provider enum to (possibly) rewrite
- * @param endpoint [out]    receives the OpenRouter base URL when applied; may be NULL (skipped)
- * @param api_key  [out]    receives the OpenRouter key when applied; may be NULL (skipped)
- * @return true if the override was applied, false otherwise (advisory — callers may ignore)
- */
-bool llm_apply_openrouter_gateway(cloud_provider_t *provider,
-                                  const char **endpoint,
-                                  const char **api_key);
-
-/**
  * @brief Auto-detect the first cloud provider with an available API key
  *
  * When the OpenRouter gateway is on, returns CLOUD_PROVIDER_OPENROUTER if its
@@ -773,7 +734,7 @@ void llm_set_timeout_override(int timeout_ms);
  *      are not part of any user-facing conversation history.
  *   4. Never invokes text_to_speech() directly or indirectly.
  *   5. Tool-call rejection lives at this entry point, not inside any provider
- *      implementation: tool_mode = "disabled" suppresses tools in the request,
+ *      implementation: suppress_tools = true suppresses tools in the request,
  *      and any leakage in the response is caught by schema validation.
  *
  * Hardening (mandatory, not optional):

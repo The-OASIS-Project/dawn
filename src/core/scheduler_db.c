@@ -857,6 +857,232 @@ int scheduler_db_briefing_steps_set(int64_t event_id,
    return rc;
 }
 
+/* Caller holds s_db.mutex.  Reads steps for event_id (seq order) into out[],
+ * up to SCHED_BRIEFING_STEPS_MAX.  Returns the count, or -1 on prepare error. */
+static int briefing_steps_read_unlocked(int64_t event_id, sched_briefing_step_t *out) {
+   const char *sql = "SELECT tool_name, COALESCE(tool_action,''), COALESCE(tool_value,'') "
+                     "FROM briefing_steps WHERE event_id = ? ORDER BY seq ASC LIMIT ?";
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK)
+      return -1;
+   sqlite3_bind_int64(stmt, 1, event_id);
+   sqlite3_bind_int(stmt, 2, SCHED_BRIEFING_STEPS_MAX);
+   int n = 0;
+   while (sqlite3_step(stmt) == SQLITE_ROW && n < SCHED_BRIEFING_STEPS_MAX) {
+      memset(&out[n], 0, sizeof(out[n]));
+      const unsigned char *tname = sqlite3_column_text(stmt, 0);
+      const unsigned char *tact = sqlite3_column_text(stmt, 1);
+      const unsigned char *tval = sqlite3_column_text(stmt, 2);
+      if (tname)
+         strncpy(out[n].tool_name, (const char *)tname, SCHED_TOOL_NAME_MAX - 1);
+      if (tact)
+         strncpy(out[n].tool_action, (const char *)tact, SCHED_TOOL_NAME_MAX - 1);
+      if (tval)
+         strncpy(out[n].tool_value, (const char *)tval, SCHED_TOOL_VALUE_MAX - 1);
+      n++;
+   }
+   sqlite3_finalize(stmt);
+   return n;
+}
+
+int scheduler_db_briefing_steps_update(int64_t event_id,
+                                       int user_id,
+                                       const sched_briefing_step_t *steps,
+                                       int step_count,
+                                       bool append) {
+   if (step_count < 0 || step_count > SCHED_BRIEFING_STEPS_MAX)
+      return SCHED_DB_FAILURE;
+   if (step_count > 0 && !steps)
+      return SCHED_DB_FAILURE;
+   AUTH_DB_LOCK_OR_RETURN(SCHED_DB_FAILURE);
+
+   sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+
+   /* 1. Read the guard columns + legacy single-tool fields under the txn. */
+   const char *sel_sql =
+       "SELECT user_id, status, event_type, "
+       "COALESCE(tool_name,''), COALESCE(tool_action,''), COALESCE(tool_value,'') "
+       "FROM scheduled_events WHERE id = ?";
+   sqlite3_stmt *sel = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sel_sql, -1, &sel, NULL) != SQLITE_OK) {
+      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+      AUTH_DB_UNLOCK();
+      return SCHED_DB_FAILURE;
+   }
+   sqlite3_bind_int64(sel, 1, event_id);
+
+   int guard_rc = SCHED_DB_NOT_EDITABLE;
+   sched_briefing_step_t legacy_step;
+   bool have_legacy = false;
+   memset(&legacy_step, 0, sizeof(legacy_step));
+
+   if (sqlite3_step(sel) == SQLITE_ROW) {
+      int row_user = sqlite3_column_int(sel, 0);
+      const char *status_str = (const char *)sqlite3_column_text(sel, 1);
+      const char *type_str = (const char *)sqlite3_column_text(sel, 2);
+      sched_status_t status = sched_status_from_str(status_str);
+      sched_event_type_t etype = sched_event_type_from_str(type_str);
+      bool editable = (status == SCHED_STATUS_PENDING || status == SCHED_STATUS_SNOOZED);
+      if (row_user == user_id && etype == SCHED_EVENT_BRIEFING && editable) {
+         guard_rc = SCHED_DB_SUCCESS;
+         /* Capture the legacy single-tool fields for append materialization. */
+         const unsigned char *ltn = sqlite3_column_text(sel, 3);
+         if (ltn && ltn[0]) {
+            strncpy(legacy_step.tool_name, (const char *)ltn, SCHED_TOOL_NAME_MAX - 1);
+            const unsigned char *lta = sqlite3_column_text(sel, 4);
+            const unsigned char *ltv = sqlite3_column_text(sel, 5);
+            if (lta)
+               strncpy(legacy_step.tool_action, (const char *)lta, SCHED_TOOL_NAME_MAX - 1);
+            if (ltv)
+               strncpy(legacy_step.tool_value, (const char *)ltv, SCHED_TOOL_VALUE_MAX - 1);
+            have_legacy = true;
+         }
+      }
+   }
+   sqlite3_finalize(sel);
+
+   if (guard_rc != SCHED_DB_SUCCESS) {
+      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+      AUTH_DB_UNLOCK();
+      return guard_rc;
+   }
+
+   /* 2. Build the final step list. */
+   sched_briefing_step_t final[SCHED_BRIEFING_STEPS_MAX];
+   int final_count = 0;
+
+   if (append) {
+      int existing = briefing_steps_read_unlocked(event_id, final);
+      if (existing < 0) {
+         sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+         AUTH_DB_UNLOCK();
+         return SCHED_DB_FAILURE;
+      }
+      final_count = existing;
+      /* Materialize a legacy single-tool briefing as step[0] so appending does
+       * not silently orphan the original tool (steps table wins at fire time). */
+      if (final_count == 0 && have_legacy) {
+         final[0] = legacy_step;
+         final_count = 1;
+      }
+      for (int i = 0; i < step_count; i++) {
+         /* Idempotent retry: skip an exact duplicate of an existing step. */
+         bool dup = false;
+         for (int j = 0; j < final_count; j++) {
+            if (strcmp(final[j].tool_name, steps[i].tool_name) == 0 &&
+                strcmp(final[j].tool_action, steps[i].tool_action) == 0 &&
+                strcmp(final[j].tool_value, steps[i].tool_value) == 0) {
+               dup = true;
+               break;
+            }
+         }
+         if (dup)
+            continue;
+         if (final_count >= SCHED_BRIEFING_STEPS_MAX) {
+            sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+            AUTH_DB_UNLOCK();
+            return SCHED_DB_FAILURE; /* would exceed the step cap */
+         }
+         final[final_count++] = steps[i];
+      }
+   } else {
+      final_count = step_count;
+      for (int i = 0; i < step_count; i++)
+         final[i] = steps[i];
+   }
+
+   /* 3. Replace the stored steps atomically (delete + insert in this txn). */
+   int rc = briefing_steps_delete_unlocked(event_id);
+   if (rc == SCHED_DB_SUCCESS && final_count > 0)
+      rc = briefing_steps_insert_unlocked(event_id, final, final_count);
+
+   if (rc == SCHED_DB_SUCCESS)
+      sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL);
+   else
+      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+
+   AUTH_DB_UNLOCK();
+   return rc;
+}
+
+int scheduler_db_update_fields(int64_t id,
+                               int user_id,
+                               const sched_event_t *fields,
+                               uint32_t field_mask) {
+   if (!fields || field_mask == 0)
+      return SCHED_DB_FAILURE;
+   AUTH_DB_LOCK_OR_RETURN(SCHED_DB_FAILURE);
+
+   /* Build the SET clause from the masked columns.  The bind loop below MUST
+    * visit the same columns in the same order. */
+   char sql[512];
+   int off = snprintf(sql, sizeof(sql), "UPDATE scheduled_events SET ");
+   bool first = true;
+#define SCHED_SET_COL(bit, col)                                                               \
+   do {                                                                                       \
+      if (field_mask & (bit)) {                                                               \
+         off += snprintf(sql + off, sizeof(sql) - off, "%s%s = ?", first ? "" : ", ", (col)); \
+         first = false;                                                                       \
+      }                                                                                       \
+   } while (0)
+   SCHED_SET_COL(SCHED_FIELD_NAME, "name");
+   SCHED_SET_COL(SCHED_FIELD_MESSAGE, "message");
+   SCHED_SET_COL(SCHED_FIELD_FIRE_AT, "fire_at");
+   SCHED_SET_COL(SCHED_FIELD_ORIGINAL_TIME, "original_time");
+   SCHED_SET_COL(SCHED_FIELD_RECURRENCE, "recurrence");
+   SCHED_SET_COL(SCHED_FIELD_RECURRENCE_DAYS, "recurrence_days");
+   SCHED_SET_COL(SCHED_FIELD_DELIVER_TO, "deliver_to");
+   SCHED_SET_COL(SCHED_FIELD_SAY_ALOUD, "say_aloud");
+#undef SCHED_SET_COL
+   off += snprintf(sql + off, sizeof(sql) - off,
+                   " WHERE id = ? AND user_id = ? AND status IN ('pending', 'snoozed')");
+   /* Guard the snprintf accumulator: unreachable at the current 8 columns
+    * (~215 bytes < 512), but keeps a future column addition from wrapping
+    * `sizeof(sql) - off` to a huge size_t on the next append. */
+   if (off < 0 || (size_t)off >= sizeof(sql)) {
+      AUTH_DB_UNLOCK();
+      return SCHED_DB_FAILURE;
+   }
+
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return SCHED_DB_FAILURE;
+   }
+
+   int idx = 1;
+   if (field_mask & SCHED_FIELD_NAME)
+      sqlite3_bind_text(stmt, idx++, fields->name, -1, SQLITE_TRANSIENT);
+   if (field_mask & SCHED_FIELD_MESSAGE)
+      sqlite3_bind_text(stmt, idx++, fields->message, -1, SQLITE_TRANSIENT);
+   if (field_mask & SCHED_FIELD_FIRE_AT)
+      sqlite3_bind_int64(stmt, idx++, (sqlite3_int64)fields->fire_at);
+   if (field_mask & SCHED_FIELD_ORIGINAL_TIME)
+      sqlite3_bind_text(stmt, idx++, fields->original_time, -1, SQLITE_TRANSIENT);
+   if (field_mask & SCHED_FIELD_RECURRENCE)
+      sqlite3_bind_text(stmt, idx++, sched_recurrence_to_str(fields->recurrence), -1,
+                        SQLITE_STATIC);
+   if (field_mask & SCHED_FIELD_RECURRENCE_DAYS)
+      sqlite3_bind_text(stmt, idx++, fields->recurrence_days, -1, SQLITE_TRANSIENT);
+   if (field_mask & SCHED_FIELD_DELIVER_TO)
+      sqlite3_bind_text(stmt, idx++, fields->deliver_to, -1, SQLITE_TRANSIENT);
+   if (field_mask & SCHED_FIELD_SAY_ALOUD)
+      sqlite3_bind_int(stmt, idx++, (int)fields->say_aloud);
+   sqlite3_bind_int64(stmt, idx++, id);
+   sqlite3_bind_int(stmt, idx++, user_id);
+
+   int sq = sqlite3_step(stmt);
+   int changes = sqlite3_changes(s_db.db);
+   sqlite3_finalize(stmt);
+
+   int rc = SCHED_DB_FAILURE;
+   if (sq == SQLITE_DONE)
+      rc = (changes > 0) ? SCHED_DB_SUCCESS : SCHED_DB_NOT_EDITABLE;
+
+   AUTH_DB_UNLOCK();
+   return rc;
+}
+
 int scheduler_db_briefing_steps_list(int64_t event_id,
                                      sched_briefing_step_t *out,
                                      int max_count,

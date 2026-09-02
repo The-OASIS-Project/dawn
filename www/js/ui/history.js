@@ -387,7 +387,7 @@
       });
    }
 
-   function requestSaveMessage(convId, role, content, reasoning) {
+   function requestSaveMessage(convId, role, content, reasoning, streamId) {
       if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
       if (!convId || !role || !content) return;
 
@@ -399,6 +399,12 @@
       // E3: display-only reasoning persisted server-side as a JSON string field.
       if (reasoning && typeof reasoning === 'object') {
          payload.reasoning = JSON.stringify(reasoning);
+      }
+      // Phase-0 (server-authoritative persistence §6a): the stream this reply was
+      // delivered on, so the server echoes it into message_appended and THIS client
+      // recognizes its own save-echo (adopt, don't re-render). Transitional field.
+      if (streamId) {
+         payload.stream_id = streamId;
       }
       DawnWS.send({ type: 'save_message', payload });
    }
@@ -569,6 +575,13 @@
 
       setActiveConversationId(payload.conversation_id);
 
+      // Server-initiated bind (unsolicited, e.g. an always-on voice turn auto-creating
+      // a conversation): skip the request-flow side effects below. Re-applying a
+      // pending-privacy state here would flip the server's public voice conversation
+      // to private behind the user's back, and the "created" toast is a surprise
+      // mid-voice-turn. The active-id bind above is all a server-initiated push needs.
+      const serverInitiated = !!payload.server_initiated;
+
       // Update privacy toggle with new conversation ID, preserving pending privacy state
       if (typeof DawnSettingsLlm !== 'undefined' && DawnSettingsLlm.setCurrentConversation) {
          // Get the pending privacy state (may have been set before conversation was created)
@@ -578,7 +591,7 @@
          DawnSettingsLlm.setCurrentConversation(payload.conversation_id);
 
          // If privacy was set before conversation was created, apply it now
-         if (pendingPrivacy && DawnSettingsLlm.setPrivacy) {
+         if (!serverInitiated && pendingPrivacy && DawnSettingsLlm.setPrivacy) {
             DawnSettingsLlm.setPrivacy(true);
          }
       }
@@ -588,10 +601,19 @@
          DawnSettings.lockConversationLlmSettings(payload.conversation_id);
       }
 
-      // Process any pending messages
-      if (historyState.pendingMessages.length > 0) {
+      // Process any pending messages. Skip for a server-initiated bind: those pending
+      // messages belong to a client-initiated create the user typed, NOT to this
+      // auto-created voice conversation — flushing them here would misfile the user's
+      // queued text into the voice conversation.
+      if (!serverInitiated && historyState.pendingMessages.length > 0) {
          historyState.pendingMessages.forEach((msg) => {
-            requestSaveMessage(payload.conversation_id, msg.role, msg.content, msg.reasoning);
+            requestSaveMessage(
+               payload.conversation_id,
+               msg.role,
+               msg.content,
+               msg.reasoning,
+               msg.streamId
+            );
          });
          historyState.pendingMessages = [];
       }
@@ -600,7 +622,11 @@
       // Note: We don't clear transcript here - startNewChat() already handles that,
       // and if this was an auto-created conversation from sending a message, we
       // definitely don't want to clear (the message is already displayed)
-      if (historyElements.panel && !historyElements.panel.classList.contains('hidden')) {
+      if (
+         !serverInitiated &&
+         historyElements.panel &&
+         !historyElements.panel.classList.contains('hidden')
+      ) {
          if (typeof DawnToast !== 'undefined') {
             DawnToast.show('New conversation created', 'success');
          }
@@ -666,6 +692,8 @@
       // Clear transcript
       if (transcript) {
          transcript.innerHTML = '';
+         // Drop any open live tool-pill group whose DOM just got cleared (living tool pills).
+         if (typeof DawnToolPills !== 'undefined') DawnToolPills.reset();
 
          // Add archived notice at top for archived conversations
          if (isArchived) {
@@ -716,16 +744,26 @@
          const toolResultsById = {};
          for (const m of messages) {
             if (m.role === 'tool' && m.tool_call_id) {
-               toolResultsById[m.tool_call_id] = m.content || '';
+               // Carry the persisted failure flag (v81) so a reloaded pill reds, matching live.
+               toolResultsById[m.tool_call_id] = {
+                  result: m.content || '',
+                  error: m.is_error === true,
+               };
             }
          }
          const consumedResultIds = new Set();
          // CP4b: stamp each rendered entry with its message's created_at so
          // DawnAgentEvents can slot a durable-event marker (e.g. a `resume` boundary)
          // at the right spot by timestamp.  Tags the entries this message just added.
-         const tagEntries = (fromLen, ts) => {
+         const tagEntries = (fromLen, ts, msgId) => {
             for (let k = fromLen; k < transcript.children.length; k++) {
                transcript.children[k].setAttribute('data-ts', String(ts || 0));
+               // Phase-0 (server-authoritative persistence §6a): stamp the DB message_id
+               // on every reloaded bubble so a message_appended arriving after a reload
+               // dedups instead of double-rendering.
+               if (msgId != null) {
+                  transcript.children[k].setAttribute('data-message-id', String(msgId));
+               }
             }
          };
          (async () => {
@@ -742,10 +780,24 @@
                   // tool turn at the 50-message boundary), there's no call in this page to
                   // pair with — render the result inline at its real position rather than
                   // dropping it or dumping it out of order at the end of the transcript.
-                  if (msg.tool_call_id && !consumedResultIds.has(msg.tool_call_id)) {
-                     DawnTranscript.addDebug('tool result', `[Tool Result: ${msg.content || ''}]`);
+                  if (
+                     msg.tool_call_id &&
+                     !consumedResultIds.has(msg.tool_call_id) &&
+                     typeof DawnToolPills !== 'undefined'
+                  ) {
+                     // Orphan result (its call is on an earlier, not-yet-loaded page): render a
+                     // lone result-only pill in place rather than dropping it.
+                     DawnToolPills.renderReloadGroup([
+                        {
+                           id: msg.tool_call_id,
+                           name: 'tool',
+                           args: '',
+                           result: msg.content || '',
+                           error: msg.is_error === true,
+                        },
+                     ]);
                   }
-                  tagEntries(entryStart, msg.created_at);
+                  tagEntries(entryStart, msg.created_at, msg.id);
                   continue;
                }
 
@@ -758,26 +810,38 @@
                   if ((msg.content && msg.content.trim()) || msg.reasoning) {
                      await DawnTranscript.addEntry(msg.role, msg.content || '', msg.reasoning);
                   }
+                  // Living tool pills: one group per tool_calls message (per-iteration split,
+                  // matching the live per-iteration groups). Pair each call to its result by
+                  // tool_call_id — the SAME key the live tool_step frame carries.
+                  const items = [];
                   for (const tc of msg.tool_calls) {
                      const fn = tc.function || {};
                      const name = fn.name || 'tool';
-                     const args = fn.arguments || ''; // already a compact JSON string
-                     const result = toolResultsById[tc.id];
-                     if (result !== undefined) consumedResultIds.add(tc.id);
-                     const combined =
-                        result !== undefined
-                           ? `[Tool Call: ${name}(${args}) -> ${result}]`
-                           : `[Tool Call: ${name}(${args})]`;
-                     // Label as a call (the entry IS the call, with its result inlined) so
-                     // the debug badge/colour matches the live 'tool call' rendering.
-                     DawnTranscript.addDebug('tool call', combined);
+                     let args = fn.arguments || ''; // compact JSON string; pretty-print if parseable
+                     try {
+                        args = JSON.stringify(JSON.parse(args), null, 2);
+                     } catch (e) {
+                        /* leave as-is (redacted marker or non-JSON) */
+                     }
+                     const tr = toolResultsById[tc.id];
+                     if (tr !== undefined) consumedResultIds.add(tc.id);
+                     items.push({
+                        id: tc.id,
+                        name: name,
+                        args: args,
+                        result: (tr && tr.result) || '',
+                        error: !!(tr && tr.error),
+                     });
                   }
-                  tagEntries(entryStart, msg.created_at);
+                  if (typeof DawnToolPills !== 'undefined') {
+                     DawnToolPills.renderReloadGroup(items);
+                  }
+                  tagEntries(entryStart, msg.created_at, msg.id);
                   continue;
                }
 
                await DawnTranscript.addEntry(msg.role, msg.content, msg.reasoning);
-               tagEntries(entryStart, msg.created_at);
+               tagEntries(entryStart, msg.created_at, msg.id);
             }
 
             // Add continuation link at bottom for archived conversations (after all messages)
@@ -1702,7 +1766,7 @@
    /**
     * Save a message to the current conversation (auto-creates conversation if needed)
     */
-   function saveMessageToHistory(role, content, reasoning) {
+   function saveMessageToHistory(role, content, reasoning, streamId) {
       if (role !== 'user' && role !== 'assistant' && role !== 'tool') return;
       if (!content || !content.trim()) return;
 
@@ -1714,7 +1778,7 @@
          if (role === 'user' && typeof DawnSettings !== 'undefined') {
             DawnSettings.lockConversationLlmSettings(historyState.activeConversationId);
          }
-         requestSaveMessage(historyState.activeConversationId, role, content, reasoning);
+         requestSaveMessage(historyState.activeConversationId, role, content, reasoning, streamId);
          return;
       }
 
@@ -1727,7 +1791,8 @@
             requestNewConversation(title);
          }
       } else {
-         historyState.pendingMessages.push({ role, content, reasoning });
+         // Carry streamId so the flush after conv-create still echoes it (Phase-0).
+         historyState.pendingMessages.push({ role, content, reasoning, streamId });
       }
    }
 
@@ -1765,6 +1830,7 @@
       const transcript = document.getElementById('transcript');
       if (transcript) {
          transcript.innerHTML = '';
+         if (typeof DawnToolPills !== 'undefined') DawnToolPills.reset();
       }
 
       // Reset per-conversation LLM settings

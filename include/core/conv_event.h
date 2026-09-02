@@ -29,8 +29,8 @@
  * frame races the replay batch during attach.
  *
  * Layering: this module sits above auth_db (Layer 2) and reaches the WebUI
- * (Layer 4) only through a weak symbol, matching the
- * job_reinvoke_notify_conv_appended idiom — no upward dependency.
+ * (Layer 4) only through a weak symbol (webui_broadcast_message_appended) —
+ * no upward dependency.
  */
 
 #ifndef CONV_EVENT_H
@@ -97,6 +97,48 @@ void webui_broadcast_conversation_event(int user_id,
                                         const char *payload);
 
 /**
+ * @brief Ephemeral cross-viewer tool step (SERVER_AUTHORITATIVE_PERSISTENCE §Phase-3).
+ *
+ * Fan a single tool_call / tool_result step LIVE to the user's OTHER browsers viewing
+ * this conversation, with NO conversation_events write — the messages table already
+ * persists the step (tool-persist hook), so reload rebuilds it; this frame is pure
+ * live-view sugar for a bystander who is watching the turn in real time.
+ *
+ * Unlike conv_event_emit this does NOT persist and assigns no seq.  The ORIGIN session
+ * is excluded from the recipient set (it renders its own steps inline), so the client
+ * needs no load-bearing origin-suppression.
+ *
+ * TAKES OWNERSHIP of @p payload_owned and frees it on every path (like conv_event_emit).
+ *
+ * @param conv_id            Conversation the step belongs to (captured at dispatch).
+ * @param user_id            Owner, for browser-scoped fan-out. <= 0 skips the fan.
+ * @param origin_session_id  The turn's own session id — excluded from recipients.
+ * @param stream_id          Best-effort correlation handle (may be 0/stale on a
+ *                           tool-only first iteration); informational only.
+ * @param kind               CONV_EVENT_TOOL_CALL or CONV_EVENT_TOOL_RESULT.
+ * @param payload_owned      malloc'd redacted JSON, or NULL. Freed here.
+ */
+void conv_event_tool_step_fanout(int64_t conv_id,
+                                 int user_id,
+                                 uint32_t origin_session_id,
+                                 unsigned stream_id,
+                                 const char *kind,
+                                 char *payload_owned);
+
+/**
+ * @brief Push one ephemeral tool step to a user's OTHER browsers (origin excluded).
+ *
+ * Weak default is a no-op (WEBUI-off builds / unit tests); webui_broadcasts.c provides
+ * the strong override.  browsers_only, WEBUI-only capability cell.
+ */
+void webui_broadcast_tool_step(int user_id,
+                               int64_t conv_id,
+                               uint32_t origin_session_id,
+                               unsigned stream_id,
+                               const char *kind,
+                               const char *payload);
+
+/**
  * @brief Announce that an assistant message was persisted, WITH its body (§6.3).
  *
  * NOT an entry in conversation_events — deliberately.  Final assistant text
@@ -115,18 +157,67 @@ void webui_broadcast_conversation_event(int user_id,
  *
  * @param text May be NULL/empty; the frame is then skipped.
  */
+/*
+ * @p reasoning  Optional E3 "AI thought" JSON for the final answer (NULL/empty ok).
+ *               Lets a NON-origin viewer render the panel for a fanned-out reply.
+ * @p stream_id  The stream this reply was delivered on, so an ORIGIN viewer can
+ *               correlate its already-streamed bubble and adopt @p msg_id instead
+ *               of re-rendering (server-authoritative persistence, Phase 0).  0 =
+ *               "no live stream" (never matches a rendered bubble). Per-session,
+ *               per-tool-iteration counter — the client keys on (conv, stream_id)
+ *               and only a freshly-finalized, id-less bubble may adopt.
+ */
 void conv_event_notify_message_appended(int64_t conv_id,
                                         int user_id,
                                         int64_t msg_id,
                                         const char *role,
-                                        const char *text);
+                                        const char *text,
+                                        const char *reasoning,
+                                        unsigned stream_id);
 
 /** Weak seam for the above; strong override in webui_broadcasts.c. */
 void webui_broadcast_message_appended(int user_id,
                                       int64_t conv_id,
                                       int64_t msg_id,
                                       const char *role,
-                                      const char *text);
+                                      const char *text,
+                                      const char *reasoning,
+                                      unsigned stream_id);
+
+struct session; /* forward decl — avoids pulling session_manager.h into this low header */
+
+/**
+ * @brief The single server-authoritative "persist one final assistant answer" seam
+ *        (SERVER_AUTHORITATIVE_PERSISTENCE_DESIGN, Phase 2, arch HIGH-1).
+ *
+ * Splices the session's accumulated `pending_visual` + `final_reasoning_json` — TAKING
+ * ownership of BOTH from @p session — into @p body, writes ONE assistant row to @p conv_id,
+ * promotes the reply body's image markers to PERMANENT retention, stamps the in-memory
+ * history id, and fans out `message_appended` stamped with the turn's `current_stream_id`
+ * (browsers_only).  ONE DB write + ONE fan-out + ONE place the addressing metadata is
+ * stamped.  The three foreground persist paths (text, voice, and the backgrounded/client-gone
+ * case) route through it today; the reinvoke path (job_reinvoke.c) still persists inline and
+ * folds in as its own follow-up commit (it already reaches this seam with no include change).
+ *
+ * Callers own everything OUTSIDE this middle: arming `will_persist_turn`, bounded retry +
+ * error frame, and post-persist side effects (a job's mark-fired).  Gate those on the return.
+ *
+ * Weak seam: the strong definition lives in the WebUI layer (webui_broadcasts.c) so a
+ * Layer-2 core caller (job_reinvoke.c) reaches it with no upward include — exactly like
+ * conv_event_notify_message_appended.  The weak default is a loud link-safety stub that
+ * never runs in a real build (every caller compiles under ENABLE_WEBUI, which links the
+ * strong def).
+ *
+ * @param body        The final assistant text (NOT owned; the helper builds its own copy
+ *                    when a visual is spliced).
+ * @param out_msg_id  Set to the persisted row id on success (may be NULL).
+ * @return AUTH_DB_SUCCESS (0) on a durable write; non-zero otherwise.
+ */
+int webui_persist_final_answer(struct session *session,
+                               int64_t conv_id,
+                               int64_t user_id,
+                               const char *body,
+                               int64_t *out_msg_id);
 
 #ifdef __cplusplus
 }

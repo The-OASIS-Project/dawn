@@ -39,10 +39,12 @@
 #include "core/iso8601.h"
 #include "core/session_manager.h"
 #include "core/strbuf.h"
+#include "core/text_filter.h" /* SURFACED_ID_FMT — one marker for both memory renderers */
 #include "core/time_query_parser.h"
 #include "logging.h"
 #include "memory/contacts_db.h"
 #include "memory/memory_callback_internal.h"
+#include "memory/memory_citation.h" /* memory_citation_record_tool_fact_current (Option B) */
 #include "memory/memory_db.h"
 #include "memory/memory_db_aliases.h"
 #include "memory/memory_db_provenance.h"
@@ -522,6 +524,49 @@ static void append_graph_context(int user_id,
  * Action: Search
  * ============================================================================= */
 
+/* Append the tool-result citation hint (Option B) when the signal is on — the
+ * adjacency salience lever: the cite reminder sits right under the [ID:x] facts
+ * the model just saw, not only in the far cached prefix.  Same wording as the
+ * recall tool's footer (recall_format.c).  Callers gate on having rendered >=1
+ * [ID:x] fact so it never trails an empty result. */
+static void append_tool_citation_hint(strbuf_t *sb) {
+   if (!memory_citation_enabled())
+      return;
+   strbuf_appendf(sb,
+                  "\nIf any " SURFACED_ID_HINT " fact above informed your reply, end your reply "
+                  "with a citation tag listing the ids you used, e.g. " CITED_TAG_ID_EXAMPLE
+                  " (comma-separated, no spaces).\n");
+}
+
+/* Every TOOL_MAPS_TO_CUSTOM field the `memory` tool declares (memory_tool.c),
+ * flattened into the callback value as "::field::value" (tool_registry.h).
+ * `remember` stores its input verbatim as fact_text, so ANY of these that the
+ * flattening appends must be trimmed first — a stray param tail poisons the
+ * fact_text, its embedding, and its dedup hash (observed: a remember call that
+ * carried spurious search/recent params). Keep in sync with memory_tool.c. */
+static const char *const kMemoryParamMarkers[] = {
+   "::time_range::",  "::limit::",           "::sort::",        "::before::",
+   "::target_name::", "::category::",        "::as_of::",       "::include_historical::",
+   "::with_source::", "::confirm_private::", "::replaced_by::",
+};
+
+/* Length of `value` up to the EARLIEST known custom-param marker (or the whole
+ * length if none). Matches on the known "::field::" names rather than a bare
+ * "::", so a fact that legitimately contains "::" (e.g. "the ratio is 3::1") is
+ * never truncated. */
+static size_t memory_value_base_len(const char *value) {
+   size_t base = strlen(value);
+   for (size_t i = 0; i < sizeof(kMemoryParamMarkers) / sizeof(kMemoryParamMarkers[0]); i++) {
+      const char *m = strstr(value, kMemoryParamMarkers[i]);
+      if (m != NULL) {
+         size_t len = (size_t)(m - value);
+         if (len < base)
+            base = len;
+      }
+   }
+   return base;
+}
+
 /* category (v34): when non-NULL/non-empty, pre-filters fact-ID set by exact category
  *   match before hybrid scoring.  Bypasses time_range path (categories layer above
  *   recency for now — combinable in a follow-up if useful).
@@ -679,7 +724,9 @@ char *memory_action_search(int user_id,
          if (minimal) {
             /* Stripped per-fact line: just `- text`.  Date stays in fact_text
              * when extraction included it (Phase 0 prompt v2). */
-            strbuf_appendf(&sb, "- [ID:%lld] %s\n", (long long)facts[i].id, facts[i].fact_text);
+            strbuf_appendf(&sb, "- " SURFACED_ID_FMT " %s\n", (long long)facts[i].id,
+                           facts[i].fact_text);
+            memory_citation_record_tool_fact_current(facts[i].id);
             /* Capture provenance for the deferred global Source evidence block. */
             if (with_source && fact_conv[i] > 0 && min_src_count < MINIMAL_SOURCE_TOP_FACTS) {
                min_src_conv[min_src_count] = fact_conv[i];
@@ -691,8 +738,10 @@ char *memory_action_search(int user_id,
          } else {
             char time_str[32];
             format_time_ago(facts[i].created_at, time_str, sizeof(time_str));
-            strbuf_appendf(&sb, "- [ID:%lld] %s (confidence: %.0f%%, %s)\n", (long long)facts[i].id,
-                           facts[i].fact_text, facts[i].confidence * 100, time_str);
+            strbuf_appendf(&sb, "- " SURFACED_ID_FMT " %s (confidence: %.0f%%, %s)\n",
+                           (long long)facts[i].id, facts[i].fact_text, facts[i].confidence * 100,
+                           time_str);
+            memory_citation_record_tool_fact_current(facts[i].id);
 
             if (with_source && source_budget > 0 && fact_conv[i] > 0) {
                append_source_excerpt_from_range(user_id, fact_conv[i], fact_start[i], fact_end[i],
@@ -859,6 +908,10 @@ char *memory_action_search(int user_id,
       }
    }
 
+   /* Cite hint next to the [ID:x] facts (adjacency), only when facts were rendered. */
+   if (fact_count > 0)
+      append_tool_citation_hint(&sb);
+
    /* Empty result: surface a friendly fallback (must not be NULL — callers
     * expect a heap-allocated string). */
    if (strbuf_len(&sb) == 0) {
@@ -868,7 +921,8 @@ char *memory_action_search(int user_id,
    /* OOM during build: return a sentinel; consumer (LLM) sees the failure. */
    if (strbuf_oom(&sb)) {
       strbuf_free(&sb);
-      return strdup("Memory search failed: response too large or out of memory.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Memory search failed: response too large or out of memory.");
    }
 
    char *out = strbuf_steal(&sb);
@@ -923,7 +977,8 @@ static char *memory_action_remember_single(int user_id,
 
    /* Check for injection patterns */
    if (memory_filter_check(fact_text)) {
-      return strdup("I cannot store that as a fact. It contains patterns that could affect my "
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "I cannot store that as a fact. It contains patterns that could affect my "
                     "behavior in unintended ways.");
    }
 
@@ -1009,7 +1064,7 @@ static char *memory_action_remember_single(int user_id,
                                          &fact_id);
 
    if (create_rc != MEMORY_DB_SUCCESS) {
-      return strdup("Failed to store the fact. Please try again.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Failed to store the fact. Please try again.");
    }
 
    /* AI-decided expiry (v58/C3): if the model attached a reference date and
@@ -1049,8 +1104,9 @@ static char *memory_action_remember_single(int user_id,
          memory_fact_t nf;
          if (memory_db_fact_get(neighbor_ids[i], user_id, &nf) != MEMORY_DB_SUCCESS)
             continue; /* vanished between scan and render — skip */
-         strbuf_appendf(&sb, "\n  - [ID:%lld] %.200s (sim %.2f)", (long long)neighbor_ids[i],
-                        nf.fact_text, neighbor_scores[i]);
+         strbuf_appendf(&sb, "\n  - " SURFACED_ID_FMT " %.200s (sim %.2f)",
+                        (long long)neighbor_ids[i], nf.fact_text, neighbor_scores[i]);
+         memory_citation_record_tool_fact_current(neighbor_ids[i]);
       }
    }
 
@@ -1219,7 +1275,8 @@ static char *memory_action_forget(int user_id, const char *fact_text, int64_t re
    if (merge) {
       memory_fact_t keep;
       if (memory_db_fact_get(replaced_by, user_id, &keep) != MEMORY_DB_SUCCESS) {
-         return strdup("The 'replaced_by' keeper ID wasn't found (or isn't yours). "
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "The 'replaced_by' keeper ID wasn't found (or isn't yours). "
                        "Nothing was changed.");
       }
       for (int i = 0; i < id_count; i++) {
@@ -1357,7 +1414,8 @@ static char *memory_action_get(int user_id, const char *value) {
       /* memory_db_fact_get is user-scoped at the SQL layer, so a foreign or
        * absent ID simply misses — no cross-user leak. */
       if (memory_db_fact_get(ids[i], user_id, &fact) == MEMORY_DB_SUCCESS) {
-         strbuf_appendf(&sb, "- [ID:%lld] %s\n", (long long)ids[i], fact.fact_text);
+         strbuf_appendf(&sb, "- " SURFACED_ID_FMT " %s\n", (long long)ids[i], fact.fact_text);
+         memory_citation_record_tool_fact_current(ids[i]);
          found++;
       } else if (nf_len < sizeof(nf_ids) - 1) {
          nf_len += (size_t)snprintf(nf_ids + nf_len, sizeof(nf_ids) - nf_len, "%s%lld",
@@ -1383,7 +1441,8 @@ static char *memory_action_get(int user_id, const char *value) {
 
    if (strbuf_oom(&sb)) {
       strbuf_free(&sb);
-      return strdup("Memory query failed: response too large or out of memory.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Memory query failed: response too large or out of memory.");
    }
    char *out = strbuf_steal(&sb);
    return out ? out : strdup("Memory query failed: out of memory.");
@@ -1411,7 +1470,8 @@ static char *memory_action_find_duplicates(int user_id, const char *value) {
    if (memory_embeddings_find_duplicate_clusters(user_id, threshold, clusters,
                                                  MEMORY_DUP_MAX_CLUSTERS,
                                                  &cluster_count) != MEMORY_DB_SUCCESS) {
-      return strdup("Couldn't scan memories for duplicates (embeddings may be unavailable).");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Couldn't scan memories for duplicates (embeddings may be unavailable).");
    }
 
    if (cluster_count == 0) {
@@ -1441,15 +1501,17 @@ static char *memory_action_find_duplicates(int user_id, const char *value) {
          memory_fact_t fact;
          /* Skip NOT_FOUND (a just-deleted fact / cache-vs-DB race). */
          if (memory_db_fact_get(clusters[c].ids[k], user_id, &fact) == MEMORY_DB_SUCCESS) {
-            strbuf_appendf(&sb, "  - [ID:%lld] %.160s%s\n", (long long)clusters[c].ids[k],
+            strbuf_appendf(&sb, "  - " SURFACED_ID_FMT " %.160s%s\n", (long long)clusters[c].ids[k],
                            fact.fact_text, strlen(fact.fact_text) > 160 ? "..." : "");
+            memory_citation_record_tool_fact_current(clusters[c].ids[k]);
          }
       }
    }
 
    if (strbuf_oom(&sb)) {
       strbuf_free(&sb);
-      return strdup("Duplicate scan succeeded but the result was too large to render.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Duplicate scan succeeded but the result was too large to render.");
    }
    char *out = strbuf_steal(&sb);
    return out ? out : strdup("Memory updated.");
@@ -1482,7 +1544,8 @@ char *memory_action_recent(int user_id,
    const char *period_resolved = (period && period[0]) ? period : "7d";
    time_t seconds = parse_time_period(period_resolved);
    if (seconds <= 0) {
-      return strdup("Invalid time period. Use format like '24h', '7d', '1w', or '30m'.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Invalid time period. Use format like '24h', '7d', '1w', or '30m'.");
    }
    time_t now_ts = time(NULL);
    time_t since = now_ts - seconds;
@@ -1495,7 +1558,8 @@ char *memory_action_recent(int user_id,
    if (before && before[0]) {
       time_t before_seconds = parse_time_period(before);
       if (before_seconds <= 0) {
-         return strdup("Invalid 'before' time period. Use format like '3d', '30d', '1w'.");
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Invalid 'before' time period. Use format like '3d', '30d', '1w'.");
       }
       until = now_ts - before_seconds;
       if (until < 0)
@@ -1573,7 +1637,9 @@ char *memory_action_recent(int user_id,
       int elided = 0;
       for (int i = 0; i < fact_count; i++) {
          if (minimal) {
-            strbuf_appendf(&sb, "- [ID:%lld] %s\n", (long long)facts[i].id, facts[i].fact_text);
+            strbuf_appendf(&sb, "- " SURFACED_ID_FMT " %s\n", (long long)facts[i].id,
+                           facts[i].fact_text);
+            memory_citation_record_tool_fact_current(facts[i].id);
             if (with_source && fact_conv[i] > 0 &&
                 min_src_count < MINIMAL_RECENT_SOURCE_TOP_FACTS) {
                min_src_conv[min_src_count] = fact_conv[i];
@@ -1585,8 +1651,9 @@ char *memory_action_recent(int user_id,
          } else {
             char time_str[32];
             format_time_ago(facts[i].created_at, time_str, sizeof(time_str));
-            strbuf_appendf(&sb, "- [ID:%lld] %s (%s, %s)\n", (long long)facts[i].id,
+            strbuf_appendf(&sb, "- " SURFACED_ID_FMT " %s (%s, %s)\n", (long long)facts[i].id,
                            facts[i].fact_text, facts[i].source, time_str);
+            memory_citation_record_tool_fact_current(facts[i].id);
             if (with_source && source_budget > 0 && fact_conv[i] > 0) {
                /* memory_action_recent is time-windowed, not query-driven — pass
                 * NULL for the query scoring slot and use the fact_text alone
@@ -1684,11 +1751,14 @@ char *memory_action_recent(int user_id,
       strbuf_appendf(&sb, "No memories found in the past %s.", period_resolved);
    } else {
       strbuf_appendf(&sb, "\nTotal: %d facts, %d conversations", fact_count, summary_count);
+      if (fact_count > 0)
+         append_tool_citation_hint(&sb); /* adjacency cite hint, only when [ID:x] facts shown */
    }
 
    if (strbuf_oom(&sb)) {
       strbuf_free(&sb);
-      return strdup("Memory query failed: response too large or out of memory.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Memory query failed: response too large or out of memory.");
    }
 
    char *out = strbuf_steal(&sb);
@@ -1702,7 +1772,8 @@ char *memory_action_recent(int user_id,
 static char *memory_action_save_contact(int user_id, const char *value) {
    /* value format: "entity_name::field_type::type::value::val::label::lbl" */
    if (!value || !value[0])
-      return strdup("Error: save_contact requires entity name, field_type, and value");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: save_contact requires entity name, field_type, and value");
 
    char entity_name[128] = "";
    tool_param_extract_base(value, entity_name, sizeof(entity_name));
@@ -1721,7 +1792,8 @@ static char *memory_action_save_contact(int user_id, const char *value) {
    tool_param_extract_custom(value, "entity_id", entity_id_str, sizeof(entity_id_str));
 
    if (!entity_name[0] || !field_type[0] || !contact_value[0])
-      return strdup("Error: save_contact requires entity name, field_type, and value");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: save_contact requires entity name, field_type, and value");
 
    int64_t entity_id;
 
@@ -1729,7 +1801,7 @@ static char *memory_action_save_contact(int user_id, const char *value) {
       /* Explicit entity_id provided — use it directly (disambiguation resolved) */
       entity_id = atoll(entity_id_str);
       if (entity_id <= 0)
-         return strdup("Error: invalid entity_id");
+         return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid entity_id");
    } else {
       /* Check for exact canonical match first */
       char canonical[64];
@@ -1760,7 +1832,7 @@ static char *memory_action_save_contact(int user_id, const char *value) {
             /* Similar people found — return disambiguation prompt */
             char *buf = malloc(2048);
             if (!buf)
-               return strdup("Error: memory allocation failed");
+               return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
             int pos = snprintf(buf, 2048,
                                "Similar people already exist. Which person should receive "
                                "this contact info?\n");
@@ -1780,7 +1852,7 @@ static char *memory_action_save_contact(int user_id, const char *value) {
          bool created = false;
          if (memory_db_entity_upsert(user_id, entity_name, "person", canonical, &created,
                                      &entity_id) != MEMORY_DB_SUCCESS)
-            return strdup("Error: failed to create entity");
+            return strdup(TOOL_RESULT_ERROR_MARK "Error: failed to create entity");
       }
    }
 
@@ -1791,11 +1863,11 @@ static char *memory_action_save_contact(int user_id, const char *value) {
       bool created = false;
       if (memory_db_entity_upsert(user_id, entity_name, "person", canonical, &created,
                                   &entity_id) != MEMORY_DB_SUCCESS)
-         return strdup("Error: failed to create entity");
+         return strdup(TOOL_RESULT_ERROR_MARK "Error: failed to create entity");
    }
 
    if (contacts_add(user_id, entity_id, field_type, contact_value, label) != 0)
-      return strdup("Error: failed to save contact information");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: failed to save contact information");
 
    char *result = malloc(512);
    if (result)
@@ -1810,7 +1882,7 @@ static char *memory_action_save_contact(int user_id, const char *value) {
 
 static char *memory_action_find_contact(int user_id, const char *value) {
    if (!value || !value[0])
-      return strdup("Error: find_contact requires a name to search for");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: find_contact requires a name to search for");
 
    char name[128] = "";
    tool_param_extract_base(value, name, sizeof(name));
@@ -1828,7 +1900,7 @@ static char *memory_action_find_contact(int user_id, const char *value) {
 
    char *buf = malloc(2048);
    if (!buf)
-      return strdup("Error: memory allocation failed");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
    int pos = snprintf(buf, 2048, "Contact results (%d):\n", count);
    for (int i = 0; i < count && pos < 1900; i++) {
       pos += snprintf(buf + pos, 2048 - pos, "- %s: %s = %s%s%s%s [id:%lld]\n",
@@ -1857,7 +1929,7 @@ static char *memory_action_list_contacts(int user_id, const char *value) {
 
    char *buf = malloc(4096);
    if (!buf)
-      return strdup("Error: memory allocation failed");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
    int pos = snprintf(buf, 4096, "All contacts (%d):\n", count);
    for (int i = 0; i < count && pos < 3900; i++) {
       pos += snprintf(buf + pos, 4096 - pos, "- %s: %s = %s%s%s%s\n", results[i].entity_name,
@@ -1873,7 +1945,8 @@ static char *memory_action_list_contacts(int user_id, const char *value) {
 
 static char *memory_action_merge_entities(int user_id, const char *value) {
    if (!value || !value[0])
-      return strdup("Error: merge_entities requires source_name (query) and target_name");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: merge_entities requires source_name (query) and target_name");
 
    char source_name[128] = "";
    tool_param_extract_base(value, source_name, sizeof(source_name));
@@ -1882,14 +1955,15 @@ static char *memory_action_merge_entities(int user_id, const char *value) {
    tool_param_extract_custom(value, "target_name", target_name, sizeof(target_name));
 
    if (!source_name[0] || !target_name[0])
-      return strdup("Error: merge_entities requires both source_name (query) and target_name");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: merge_entities requires both source_name (query) and target_name");
 
    /* Run prompt-injection filter on both names before any DB lookup —
     * mirrors what the resolver path will do at extraction time, and
     * prevents a poisoned name from sliding into a downstream
     * canonical_name field via a misdirected merge. */
    if (memory_filter_check(source_name) || memory_filter_check(target_name)) {
-      return strdup("Error: entity name failed prompt-injection filter");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: entity name failed prompt-injection filter");
    }
 
    /* Look up both entities by canonical name */
@@ -1899,9 +1973,9 @@ static char *memory_action_merge_entities(int user_id, const char *value) {
 
    memory_entity_t src_entity, tgt_entity;
    if (memory_db_entity_get_by_name(user_id, src_canonical, &src_entity) != MEMORY_DB_SUCCESS)
-      return strdup("Error: source entity not found");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: source entity not found");
    if (memory_db_entity_get_by_name(user_id, tgt_canonical, &tgt_entity) != MEMORY_DB_SUCCESS)
-      return strdup("Error: target entity not found");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: target entity not found");
 
    /* Soft-link by default (entity-merge Phase 1, design §14): set
     * canonical_id on the source row + audit-row insert.  The link is
@@ -1927,12 +2001,14 @@ static char *memory_action_merge_entities(int user_id, const char *value) {
       OLOG_WARNING("memory_callback: merge_entities race — entity vanished between lookup and "
                    "link (source='%s', target='%s')",
                    source_name, target_name);
-      return strdup("Error: one or both entities no longer exist (may have been deleted)");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: one or both entities no longer exist (may have been deleted)");
    } else {
       /* alias_link refuses self-link, source-with-existing-aliases (would
        * orphan the equivalence class), and DB failures.  Distinct return
        * codes aren't surfaced; report the operation refused. */
-      return strdup("Error: cannot link these entities "
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: cannot link these entities "
                     "(source may already be a canonical with its own aliases, or "
                     "source and target are the same)");
    }
@@ -1944,16 +2020,16 @@ static char *memory_action_merge_entities(int user_id, const char *value) {
 
 static char *memory_action_delete_contact(int user_id, const char *value) {
    if (!value || !value[0])
-      return strdup("Error: delete_contact requires a contact ID");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: delete_contact requires a contact ID");
 
    char id_str[32] = "";
    tool_param_extract_base(value, id_str, sizeof(id_str));
    int64_t contact_id = strtoll(id_str[0] ? id_str : value, NULL, 10);
    if (contact_id <= 0)
-      return strdup("Error: invalid contact ID");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid contact ID");
 
    if (contacts_delete(user_id, contact_id) != 0)
-      return strdup("Error: contact not found or already deleted");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: contact not found or already deleted");
 
    return strdup("Contact deleted.");
 }
@@ -2024,17 +2100,17 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
 
    /* Check if memory system is enabled */
    if (!g_config.memory.enabled) {
-      return strdup("Memory system is disabled.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Memory system is disabled.");
    }
 
    /* Get current user ID */
    int user_id = get_current_user_id();
    if (user_id <= 0) {
-      return strdup("Memory system requires authentication. Please log in.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Memory system requires authentication. Please log in.");
    }
 
    if (!actionName) {
-      return strdup("Invalid memory action.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Invalid memory action.");
    }
 
    OLOG_INFO("memory_callback: action='%s', value='%s', user_id=%d", actionName,
@@ -2124,29 +2200,39 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
          return gate; /* private conversation, not yet confirmed */
       }
       /* Strip the packed custom-param suffix before the text is stored.
-       * TOOL_MAPS_TO_CUSTOM params ride INSIDE `value` as
-       * "base::field::val" (tool_registry.h), and remember stores its input
-       * verbatim as fact_text.  `remember` had no custom param until
-       * confirm_private, so passing `value` straight through used to be safe;
-       * now the confirmed retry — the very thing the refusal string tells the
-       * model to do — would persist "…the 14th::confirm_private::true" as the
-       * fact, poisoning its embedding, its dedup hash and every later recall.
+       * TOOL_MAPS_TO_CUSTOM params ride INSIDE `value` as "base::field::val"
+       * (tool_registry.h), and remember stores its input verbatim as fact_text.
+       * ANY declared param the flattening appends (not just confirm_private —
+       * a remember call has been seen carrying spurious search/recent params)
+       * would otherwise persist "…the 14th::confirm_private::true" /
+       * "…::time_range::…" as the fact, poisoning its embedding, its dedup hash
+       * and every later recall.
        *
-       * Trimmed at OUR marker specifically rather than via
+       * Trimmed at the earliest KNOWN "::field::" marker rather than via
        * tool_param_extract_base(), which cuts at the FIRST "::" — fine for the
        * ID lists `forget` passes, but a fact is free-form user text and may
        * legitimately contain "::" ("the ratio is 3::1"), which base-extraction
        * would silently truncate. */
-      static const char kConfirmMarker[] = "::confirm_private::";
-      char *marker = strstr(value, kConfirmMarker);
-      char *trimmed = NULL;
-      if (marker != NULL) {
-         size_t base_len = (size_t)(marker - value);
-         trimmed = strndup(value, base_len);
+      size_t base_len = memory_value_base_len(value);
+      if (base_len < strlen(value)) {
+         /* A param tail was appended — trim it before storing.  Warn: a normal
+          * remember carries no flattened params, so a trim means the model
+          * over-populated the call (the observed poisoning path) or, very rarely,
+          * a fact legitimately contained a "::field::" token — either way worth a
+          * breadcrumb. */
+         OLOG_WARNING("memory remember: stripped %zu-byte custom-param tail before storing fact",
+                      strlen(value) - base_len);
+         char *trimmed = strndup(value, base_len);
+         if (trimmed == NULL) {
+            /* Fail SAFE: never fall back to the untrimmed value — that would
+             * persist the param tail this strip exists to remove. */
+            return strdup(TOOL_RESULT_ERROR_MARK "Memory remember failed: out of memory.");
+         }
+         char *res = memory_action_remember(user_id, trimmed);
+         free(trimmed);
+         return res;
       }
-      char *res = memory_action_remember(user_id, trimmed ? trimmed : value);
-      free(trimmed);
-      return res;
+      return memory_action_remember(user_id, value);
    } else if (strcmp(actionName, "forget") == 0) {
       /* IDs are the base value; optional replaced_by switches delete -> supersede (merge).
        * Base-extract so the ID parser doesn't choke on the ::replaced_by:: suffix. */
@@ -2230,9 +2316,9 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
    } else {
       char *msg = malloc(128);
       if (msg) {
-         snprintf(msg, 128, "Unknown memory action: '%s'", actionName);
+         snprintf(msg, 128, TOOL_RESULT_ERROR_MARK "Unknown memory action: '%s'", actionName);
          return msg;
       }
-      return strdup("Unknown memory action.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Unknown memory action.");
    }
 }

@@ -396,7 +396,6 @@ static const tool_metadata_t doc_index_metadata = {
    .param_count = 2,
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NETWORK,
-   .is_getter = false,
    .callback = doc_index_callback,
    .is_available = doc_index_is_available,
 };
@@ -445,20 +444,21 @@ static char *doc_index_callback(const char *action, char *value, int *should_res
    int user_id = tool_get_current_user_id();
    if (!rate_limit_check(user_id)) {
       snprintf(result_buf, sizeof(result_buf),
-               "Rate limit: max %d document indexing requests per minute.",
+               TOOL_RESULT_ERROR_MARK "Rate limit: max %d document indexing requests per minute.",
                DOC_INDEX_RATE_LIMIT_MAX);
       return strdup(result_buf);
    }
 
    /* Validate URL */
    if (!url_is_valid(url_start)) {
-      snprintf(result_buf, sizeof(result_buf), "Invalid URL: must start with http:// or https://");
+      snprintf(result_buf, sizeof(result_buf),
+               TOOL_RESULT_ERROR_MARK "Invalid URL: must start with http:// or https://");
       return strdup(result_buf);
    }
 
    if (url_is_blocked(url_start)) {
       snprintf(result_buf, sizeof(result_buf),
-               "URL blocked: cannot access private/internal addresses.");
+               TOOL_RESULT_ERROR_MARK "URL blocked: cannot access private/internal addresses.");
       return strdup(result_buf);
    }
 
@@ -468,7 +468,8 @@ static char *doc_index_callback(const char *action, char *value, int *should_res
 
    /* Check extension allowed (preliminary — Content-Type may override) */
    if (url_ext && !document_extension_allowed(url_ext)) {
-      snprintf(result_buf, sizeof(result_buf), "Unsupported file type: %s", url_ext);
+      snprintf(result_buf, sizeof(result_buf), TOOL_RESULT_ERROR_MARK "Unsupported file type: %s",
+               url_ext);
       return strdup(result_buf);
    }
 
@@ -510,7 +511,8 @@ static char *doc_index_callback(const char *action, char *value, int *should_res
          }
          free(fs_content);
       }
-      snprintf(result_buf, sizeof(result_buf), "Download failed: %s", dl_error);
+      snprintf(result_buf, sizeof(result_buf), TOOL_RESULT_ERROR_MARK "Download failed: %s",
+               dl_error);
       return strdup(result_buf);
    }
 
@@ -526,7 +528,8 @@ static char *doc_index_callback(const char *action, char *value, int *should_res
 
    /* Verify resolved extension is allowed */
    if (!document_extension_allowed(ext)) {
-      snprintf(result_buf, sizeof(result_buf), "Unsupported content type: %s",
+      snprintf(result_buf, sizeof(result_buf),
+               TOOL_RESULT_ERROR_MARK "Unsupported content type: %s",
                dl.content_type[0] ? dl.content_type : "(unknown)");
       curl_buffer_free(&dl.buffer);
       return strdup(result_buf);
@@ -563,7 +566,7 @@ static char *doc_index_callback(const char *action, char *value, int *should_res
          }
          free(fs_content);
       }
-      snprintf(result_buf, sizeof(result_buf), "Extraction failed: %s",
+      snprintf(result_buf, sizeof(result_buf), TOOL_RESULT_ERROR_MARK "Extraction failed: %s",
                document_extract_error_string(extract_rc));
       return strdup(result_buf);
    }
@@ -608,7 +611,7 @@ index_document:
    }
 
    if (idx_rc != DOC_INDEX_SUCCESS) {
-      snprintf(result_buf, sizeof(result_buf), "Indexing failed: %s",
+      snprintf(result_buf, sizeof(result_buf), TOOL_RESULT_ERROR_MARK "Indexing failed: %s",
                idx_result.error_msg[0] ? idx_result.error_msg
                                        : document_index_error_string(idx_rc));
       return strdup(result_buf);

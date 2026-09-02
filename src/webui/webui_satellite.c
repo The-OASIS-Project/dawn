@@ -28,6 +28,7 @@
 #include <sodium.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <string.h>
 #include <time.h>
 
@@ -221,31 +222,6 @@ typedef struct {
    unsigned int request_gen;
 } satellite_work_t;
 
-/**
- * @brief Strip command tags from text in-place (shared by satellite + audio workers)
- */
-void strip_command_tags(char *text) {
-   if (!text)
-      return;
-
-   char *cmd_start, *cmd_end;
-   while ((cmd_start = strstr(text, "<command>")) != NULL) {
-      cmd_end = strstr(cmd_start, "</command>");
-      if (cmd_end) {
-         cmd_end += strlen("</command>");
-         memmove(cmd_start, cmd_end, strlen(cmd_end) + 1);
-      } else {
-         break;
-      }
-   }
-
-   /* Also remove <end_of_turn> tags (local AI models) */
-   char *match = strstr(text, "<end_of_turn>");
-   if (match) {
-      *match = '\0';
-   }
-}
-
 static void *satellite_worker_thread(void *arg) {
    satellite_work_t *work = (satellite_work_t *)arg;
    session_t *session = work->session;
@@ -309,50 +285,11 @@ static void *satellite_worker_thread(void *arg) {
       goto cleanup;
    }
 
-   /* Check for command tags and process them using the existing infrastructure */
-   if (strstr(response, "<command>")) {
-      OLOG_INFO("Satellite: Response contains commands, processing...");
-
-      char *processed = webui_process_commands(response, session);
-      if (processed && !REQUEST_SUPERSEDED(session, expected_gen) && !session->disconnected) {
-         /* Recursively process if the follow-up also contains commands */
-         int iterations = 0;
-         const int MAX_ITERATIONS = 5;
-
-         while (strstr(processed, "<command>") && !REQUEST_SUPERSEDED(session, expected_gen) &&
-                !session->disconnected) {
-            if (++iterations > MAX_ITERATIONS) {
-               OLOG_WARNING("Satellite: Command loop limit reached (%d iterations)",
-                            MAX_ITERATIONS);
-               break;
-            }
-
-            OLOG_INFO("Satellite: Follow-up contains more commands, processing (iter %d/%d)",
-                      iterations, MAX_ITERATIONS);
-
-            char *next_processed = webui_process_commands(processed, session);
-            free(processed);
-            if (!next_processed) {
-               processed = NULL;
-               break;
-            }
-            processed = next_processed;
-         }
-
-         if (processed) {
-            free(response);
-            response = processed;
-         }
-      } else {
-         free(processed);
-      }
-   }
-
    if (REQUEST_SUPERSEDED(session, expected_gen))
       goto cleanup;
 
-   /* Strip any remaining command tags from final response */
-   strip_command_tags(response);
+   /* Response is already canonical clean text (finalized centrally in
+    * llm_call_finalize) — no per-seam strip needed. */
 
    /* Send stream end if streaming was active */
    if (atomic_load(&session->llm_streaming_active)) {
@@ -801,20 +738,75 @@ void handle_satellite_query(ws_connection_t *conn, struct json_object *payload) 
              strlen(text) > 50 ? "..." : "");
 }
 
-void handle_satellite_ping(ws_connection_t *conn) {
-   if (!conn) {
+/*
+ * Shared app-level pong emitter for every WebSocket client type (browser and
+ * DAP2 satellite).  Builds a uniform pong frame — {type, payload:{seq?,
+ * server_time_ms}} — echoing the request's `seq` when present so the client can
+ * correlate and discard stale replies, and stamping server_time_ms (epoch ms)
+ * for RTT / clock-skew display.
+ *
+ * The liveness GATE is deliberately NOT here: it differs by client type
+ * (conn->is_satellite for a device-registered satellite vs. conn_require_auth()
+ * for a user-authenticated browser) and belongs at the dispatch site.  Callers
+ * must only reach this after their own gate has passed.
+ *
+ * Side-effect-free beyond touching the session: no DB, no LLM, no broadcast —
+ * safe to run on the lws service thread at the client's ~10s heartbeat cadence.
+ *
+ * @param conn        Connection to reply on
+ * @param pong_type   Response "type" string ("pong" for browsers, "satellite_pong")
+ * @param req_payload The inbound message's "payload" object, or NULL
+ */
+void webui_send_pong(ws_connection_t *conn,
+                     const char *pong_type,
+                     struct json_object *req_payload) {
+   if (!conn || !pong_type) {
       return;
    }
 
    struct json_object *response = json_object_new_object();
-   json_object_object_add(response, "type", json_object_new_string("satellite_pong"));
-   send_json_response(conn, response);
+   json_object_object_add(response, "type", json_object_new_string(pong_type));
+
+   struct json_object *out = json_object_new_object();
+   struct json_object *seq;
+   if (req_payload && json_object_object_get_ex(req_payload, "seq", &seq)) {
+      /* Echo seq verbatim.  json_object_get bumps the refcount so the inbound
+       * message tree remains owned by the dispatch caller. */
+      json_object_object_add(out, "seq", json_object_get(seq));
+   }
+   struct timespec now;
+   clock_gettime(CLOCK_REALTIME, &now);
+   json_object_object_add(out, "server_time_ms",
+                          json_object_new_int64((int64_t)now.tv_sec * 1000 +
+                                                now.tv_nsec / 1000000));
+   json_object_object_add(response, "payload", out);
+
+   /* Deliver the pong DIRECTLY to this connection's socket — NOT via
+    * send_json_response(), which routes through session->client_data.  A pong must
+    * reach the exact connection that pinged: if this connection is not the current
+    * client_data owner (a superseded/detached tab), routing via client_data would
+    * send its pong to the OWNER's socket, so it would see silence and its watchdog
+    * would false-fire — the reconnect-storm D1.  Safe: this runs on the lws service
+    * thread (ping dispatch). */
+   const char *pong_json = json_object_to_json_string(response);
+   if (pong_json && conn->wsi) {
+      send_json_message(conn->wsi, pong_json);
+   }
    json_object_put(response);
 
-   /* Touch session if exists */
+   /* Touch the session so a live-but-idle client keeps its last_activity fresh
+    * (see session_cleanup_expired()): an open dashboard pinging every ~10s never
+    * idle-expires, while a vanished one stops pinging, goes stale, and is reaped
+    * on the normal idle path. */
    if (conn->session) {
       session_touch(conn->session);
    }
+}
+
+void handle_satellite_ping(ws_connection_t *conn) {
+   /* Gate already applied at dispatch (conn->is_satellite).  Satellites send no
+    * seq today; the uniform pong shape stays forward-compatible if they add one. */
+   webui_send_pong(conn, "satellite_pong", NULL);
 }
 
 /* =============================================================================

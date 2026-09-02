@@ -342,6 +342,16 @@
                step: 1,
                hint: 'Suppress duplicate responses when two devices hear one command within this window (0 disables; default: 4)',
             },
+            audio_ctx_floor: {
+               type: 'number',
+               label: 'Whisper Audio Context Floor',
+               // min/max mirror ASR_AUDIO_CTX_FLOOR_* in include/config/dawn_config.h
+               min: 0,
+               max: 1500,
+               step: 64,
+               advanced: true,
+               hint: 'Scale Whisper’s encoder context to the utterance length (faster transcription on short commands) with this token floor. 0 disables (full 1500 = default behavior). 768 is validated safe on base.en + small.en; lower risks accuracy on smaller models.',
+            },
             disambiguation_hint: {
                type: 'textarea',
                label: 'Voice-Input Disambiguation Hint',
@@ -420,24 +430,17 @@
                label: 'Cloud Settings',
                advanced: true,
                fields: {
-                  use_openrouter: {
-                     type: 'checkbox',
-                     label: 'Route all cloud LLMs through OpenRouter',
-                     hint: 'When on, all cloud traffic (chat plus memory/compaction/observe) routes through OpenRouter using openrouter_api_key in secrets.toml. The direct openai/claude/gemini settings below are hidden but preserved — turn this off to restore them.',
-                  },
                   provider: {
                      type: 'select',
                      label: 'Provider',
-                     options: ['openai', 'claude', 'gemini'],
-                     hint: 'Cloud LLM provider',
-                     showWhen: { key: 'llm.cloud.use_openrouter', value: false },
+                     options: ['openai', 'claude', 'gemini', 'openrouter'],
+                     hint: 'Cloud LLM provider. OpenRouter fronts many vendors via one key — its model list uses "vendor/model" IDs.',
                   },
                   endpoint: {
                      type: 'text',
                      label: 'Custom Endpoint',
                      placeholder: 'Leave empty for default',
                      hint: 'Override API endpoint (for proxies or compatible APIs)',
-                     showWhen: { key: 'llm.cloud.use_openrouter', value: false },
                   },
                   vision_enabled: {
                      type: 'checkbox',
@@ -450,24 +453,19 @@
                      rows: 8, // LLM_CLOUD_MAX_MODELS
                      placeholder: 'gpt-4o\ngpt-4-turbo\ngpt-4o-mini',
                      hint: 'Available models for quick controls (one per line)',
-                     showWhen: { key: 'llm.cloud.use_openrouter', value: false },
                   },
                   openai_default_model_idx: {
                      type: 'model_default_select',
                      label: 'Default OpenAI Model',
                      sourceKey: 'llm.cloud.openai_models',
                      hint: 'Default model for new conversations',
-                     showWhen: { key: 'llm.cloud.use_openrouter', value: false },
                   },
                   openai_use_responses_api: {
                      type: 'select',
                      label: 'OpenAI Responses API',
                      options: ['auto', 'always', 'never'],
                      hint: 'Route reasoning-capable OpenAI models to /v1/responses. "auto" is recommended.',
-                     showWhen: [
-                        { key: 'llm.cloud.provider', value: 'openai' },
-                        { key: 'llm.cloud.use_openrouter', value: false },
-                     ],
+                     showWhen: { key: 'llm.cloud.provider', value: 'openai' },
                   },
                   claude_models: {
                      type: 'model_list',
@@ -475,14 +473,12 @@
                      rows: 8, // LLM_CLOUD_MAX_MODELS
                      placeholder: 'claude-sonnet-4-20250514\nclaude-opus-4-20250514',
                      hint: 'Available models for quick controls (one per line)',
-                     showWhen: { key: 'llm.cloud.use_openrouter', value: false },
                   },
                   claude_default_model_idx: {
                      type: 'model_default_select',
                      label: 'Default Claude Model',
                      sourceKey: 'llm.cloud.claude_models',
                      hint: 'Default model for new conversations',
-                     showWhen: { key: 'llm.cloud.use_openrouter', value: false },
                   },
                   gemini_models: {
                      type: 'model_list',
@@ -490,14 +486,12 @@
                      rows: 8, // LLM_CLOUD_MAX_MODELS
                      placeholder: 'gemini-2.5-flash\ngemini-2.5-pro\ngemini-3-flash-preview',
                      hint: 'Available models for quick controls (one per line). 2.5+ and 3.x support reasoning.',
-                     showWhen: { key: 'llm.cloud.use_openrouter', value: false },
                   },
                   gemini_default_model_idx: {
                      type: 'model_default_select',
                      label: 'Default Gemini Model',
                      sourceKey: 'llm.cloud.gemini_models',
                      hint: 'Default model for new conversations',
-                     showWhen: { key: 'llm.cloud.use_openrouter', value: false },
                   },
                   openrouter_models: {
                      type: 'model_list',
@@ -506,14 +500,12 @@
                      placeholder:
                         'anthropic/claude-sonnet-4\nopenai/gpt-5.4\ngoogle/gemini-2.5-flash',
                      hint: 'Curated shortlist shown in the header model switcher. One OpenRouter model ID per line, "vendor/model" (e.g. anthropic/claude-sonnet-4).',
-                     showWhen: { key: 'llm.cloud.use_openrouter', value: true },
                   },
                   openrouter_default_model_idx: {
                      type: 'model_default_select',
                      label: 'Default OpenRouter Model',
                      sourceKey: 'llm.cloud.openrouter_models',
                      hint: 'Default model for new conversations',
-                     showWhen: { key: 'llm.cloud.use_openrouter', value: true },
                   },
                },
             },
@@ -613,39 +605,20 @@
             compact_provider: {
                type: 'select',
                label: 'Compaction Provider',
-               options: ['claude', 'openai', 'gemini', 'local'],
+               options: ['claude', 'openai', 'gemini', 'openrouter', 'local'],
                hint: 'Provider to use for context compaction summaries',
                advanced: true,
-               showWhen: [
-                  { key: 'llm.compact_use_session', value: false },
-                  { key: 'llm.cloud.use_openrouter', value: false },
-               ],
+               showWhen: [{ key: 'llm.compact_use_session', value: false }],
             },
             compact_model: {
                type: 'text',
                label: 'Compaction Model',
                hint:
-                  'Model name for compaction (e.g., claude-haiku-4-5 — the same ' +
-                  'tier validated for memory extraction). Leave empty for provider default.',
+                  'Model name for compaction (e.g., claude-haiku-4-5 — the same tier validated for ' +
+                  'memory extraction). A "vendor/model" slug when the provider is OpenRouter. Leave ' +
+                  'empty for provider default.',
                advanced: true,
-               showWhen: [
-                  { key: 'llm.compact_use_session', value: false },
-                  { key: 'llm.cloud.use_openrouter', value: false },
-               ],
-            },
-            compact_openrouter_model: {
-               type: 'model_source_select',
-               sourceKey: 'llm.cloud.openrouter_models',
-               label: 'Compaction Model (OpenRouter)',
-               hint:
-                  'OpenRouter model for compaction when the gateway is on. Chosen from your ' +
-                  'OpenRouter Models list (Language Model settings). "(Use default)" = the main ' +
-                  'OpenRouter default model.',
-               advanced: true,
-               showWhen: [
-                  { key: 'llm.compact_use_session', value: false },
-                  { key: 'llm.cloud.use_openrouter', value: true },
-               ],
+               showWhen: [{ key: 'llm.compact_use_session', value: false }],
             },
             conversation_logging: {
                type: 'checkbox',
@@ -690,16 +663,11 @@
          icon: '&#x1F527;',
          adminOnly: true,
          fields: {
-            mode: {
-               type: 'select',
-               label: 'Mode',
-               options: [
-                  { value: 'native', label: 'Native Tools' },
-                  { value: 'command_tags', label: 'Command Tags (Legacy)' },
-                  { value: 'disabled', label: 'Disabled' },
-               ],
-               hint: 'Native Tools: LLM function calling, Command Tags: XML-style <command> tags, Disabled: no tool use',
-               configPath: 'llm.tools.mode',
+            enabled: {
+               type: 'checkbox',
+               label: 'Enable Tool Calling',
+               hint: 'Native LLM function calling. Off = no tool use.',
+               configPath: 'llm.tools.enabled',
             },
          },
          customContent: 'tools_list', // Special marker for injecting tools list
@@ -887,11 +855,10 @@
             extraction_provider: {
                type: 'select',
                label: 'Extraction Provider',
-               options: ['local', 'openai', 'claude'],
+               options: ['local', 'openai', 'claude', 'openrouter'],
                hint: 'LLM provider for extracting facts from conversations',
                id: 'memory-extraction-provider',
                advanced: true,
-               showWhen: { key: 'llm.cloud.use_openrouter', value: false },
             },
             extraction_model: {
                type: 'dynamic_select',
@@ -899,22 +866,11 @@
                hint:
                   'Model for memory extraction (populated based on provider). ' +
                   'Haiku-tier validated as the sweet spot — larger Claude models do ' +
-                  'not produce better extraction (see benchmarks/README.md).',
+                  'not produce better extraction (see benchmarks/README.md). A "vendor/model" ' +
+                  'slug when the provider is OpenRouter; empty = OpenRouter default.',
                dynamicKey: 'memory_extraction_models',
                id: 'memory-extraction-model',
                advanced: true,
-               showWhen: { key: 'llm.cloud.use_openrouter', value: false },
-            },
-            extraction_openrouter_model: {
-               type: 'model_source_select',
-               sourceKey: 'llm.cloud.openrouter_models',
-               label: 'Extraction Model (OpenRouter)',
-               hint:
-                  'OpenRouter model for memory extraction when the gateway is on. Chosen from your ' +
-                  'OpenRouter Models list (Language Model settings). "(Use default)" = the main ' +
-                  'OpenRouter default model.',
-               advanced: true,
-               showWhen: { key: 'llm.cloud.use_openrouter', value: true },
             },
             extraction_timeout_ms: {
                type: 'number',
@@ -928,36 +884,30 @@
             silent_observe_provider: {
                type: 'select',
                label: 'Silent-Observe Provider',
-               options: ['local', 'ollama', 'openai', 'claude', 'anthropic', 'gemini'],
+               options: [
+                  'local',
+                  'ollama',
+                  'openai',
+                  'claude',
+                  'anthropic',
+                  'gemini',
+                  'openrouter',
+               ],
                hint:
                   'LLM provider for the Silent-Observe primitive (Phase 0 of ' +
                   'Dynamic Context Injection). Background observations are non-streaming, ' +
                   'no tools, no TTS. Defaults to local for cost.',
                configPath: 'llm.silent_observe.provider',
                advanced: true,
-               showWhen: { key: 'llm.cloud.use_openrouter', value: false },
             },
             silent_observe_model: {
                type: 'text',
                label: 'Silent-Observe Model',
                hint:
-                  'Model name for silent observations. Empty = let provider pick. ' +
-                  'A small/fast model is fine.',
+                  'Model name for silent observations. Empty = let provider pick. A small/fast ' +
+                  'model is fine. A "vendor/model" slug when the provider is OpenRouter.',
                configPath: 'llm.silent_observe.model',
                advanced: true,
-               showWhen: { key: 'llm.cloud.use_openrouter', value: false },
-            },
-            silent_observe_openrouter_model: {
-               type: 'model_source_select',
-               sourceKey: 'llm.cloud.openrouter_models',
-               label: 'Silent-Observe Model (OpenRouter)',
-               hint:
-                  'OpenRouter model for silent observations when the gateway is on. Chosen from ' +
-                  'your OpenRouter Models list (Language Model settings). "(Use default)" = the ' +
-                  'main OpenRouter default model.',
-               configPath: 'llm.silent_observe.openrouter_model',
-               advanced: true,
-               showWhen: { key: 'llm.cloud.use_openrouter', value: true },
             },
             note_extraction_guard: {
                type: 'checkbox',
@@ -1128,6 +1078,21 @@
                max: 0.5,
                step: 0.01,
                hint: 'Confidence boost when a fact is accessed (time-gated to once per hour)',
+               advanced: true,
+            },
+            citation_enabled: {
+               type: 'checkbox',
+               label: 'Memory Citation Signal',
+               hint: 'Tag surfaced memories [M#] and record which the assistant cites (audit-only)',
+               advanced: true,
+            },
+            citation_reinforcement_boost: {
+               type: 'number',
+               label: 'Citation Reinforcement Boost',
+               min: 0,
+               max: 0.5,
+               step: 0.01,
+               hint: 'Confidence boost when the assistant cites a fact (0 = off; time-gated to once per hour). Requires Memory Citation Signal enabled.',
                advanced: true,
             },
             embedding_settings: {
@@ -2113,7 +2078,7 @@
                label: 'Max Spoken Alerts / Hour',
                min: 0,
                max: 100,
-               hint: 'Global budget for spoken alerts; over-budget alerts degrade to a silent banner.',
+               hint: 'Global budget for spoken alerts; over-budget alerts degrade to a silent banner. Set to 0 for no limit (every alert is always spoken).',
             },
             inject_into_sessions: {
                type: 'checkbox',

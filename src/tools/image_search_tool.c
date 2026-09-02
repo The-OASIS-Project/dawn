@@ -147,7 +147,6 @@ static const tool_metadata_t image_search_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NETWORK,
-   .is_getter = true,
    .skip_followup = false,
    .default_remote = true,
 
@@ -190,7 +189,8 @@ static char *image_search_callback(const char *action, char *value, int *should_
    *should_respond = 1;
 
    if (!image_search_is_available()) {
-      return strdup("Image search is not available (SearXNG or image store not initialized).");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Image search is not available (SearXNG or image store not initialized).");
    }
 
    /* Extract query and count */
@@ -214,14 +214,14 @@ static char *image_search_callback(const char *action, char *value, int *should_
    if (!web_search_is_initialized()) {
       const char *endpoint = g_config.search.endpoint[0] != '\0' ? g_config.search.endpoint : NULL;
       if (web_search_init(endpoint) != 0) {
-         return strdup("Image search service is not available.");
+         return strdup(TOOL_RESULT_ERROR_MARK "Image search service is not available.");
       }
    }
 
    /* Query SearXNG for image results */
    struct json_object *root = web_search_query_images_raw(query, count * 2);
    if (!root) {
-      return strdup("Image search request failed.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Image search request failed.");
    }
 
    struct json_object *results_array = NULL;
@@ -242,7 +242,7 @@ static char *image_search_callback(const char *action, char *value, int *should_
    image_fetch_t *fetches = calloc((size_t)count, sizeof(image_fetch_t));
    if (!fetches) {
       json_object_put(root);
-      return strdup("Memory allocation failed.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Memory allocation failed.");
    }
 
    for (int i = 0; i < result_count && fetch_count < count; i++) {
@@ -324,7 +324,7 @@ static char *image_search_callback(const char *action, char *value, int *should_
       for (int i = 0; i < fetch_count; i++)
          curl_buffer_free(&fetches[i].buffer);
       free(fetches);
-      return strdup("Failed to initialize HTTP client.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Failed to initialize HTTP client.");
    }
 
    curl_multi_setopt(multi, CURLMOPT_MAX_TOTAL_CONNECTIONS, 4L);
@@ -335,7 +335,7 @@ static char *image_search_callback(const char *action, char *value, int *should_
       for (int i = 0; i < fetch_count; i++)
          curl_buffer_free(&fetches[i].buffer);
       free(fetches);
-      return strdup("Memory allocation failed.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Memory allocation failed.");
    }
 
    for (int i = 0; i < fetch_count; i++) {
