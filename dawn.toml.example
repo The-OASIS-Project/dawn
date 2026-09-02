@@ -600,16 +600,17 @@
 # summary_retention_days = 30     # Delete conversation summaries older than N days
 # access_reinforcement_boost = 0.05  # Confidence boost when a fact is accessed (+5%)
                                   # Time-gated: only boosts once per hour to prevent pinning
-# citation_enabled = false        # Memory citation signal: tag surfaced memories [M#], have the
-                                  # assistant emit <cited>, and record which were used in an audit
-                                  # table.  Audit-only in this phase (no confidence change).
-# citation_reinforcement_boost = 0.0  # Phase 2: confidence boost (0.0-0.5) when a fact is CITED,
-                                  # 1h-cooldown gated on a dedicated last_cited column.  Requires
-                                  # citation_enabled = true.  DEFAULT 0.0 (inert).  Parsed + round-
-                                  # tripped but intentionally NOT in the WebUI panel yet: enabling it
-                                  # while stale device-state facts are still in the DB would entrench
-                                  # them (confidence->rank loop).  Run the legacy-fact cleanup first,
-                                  # then set this > 0 (e.g. 0.05) to activate.
+# Memory citation signal: tag surfaced memories [M#], have the assistant emit
+# <cited>, and record which were used in an audit table.  ON for fresh installs
+# (this template).  Compile-time DEFAULT is false, so an EXISTING dawn.toml that
+# omits this key stays off on upgrade (opt-in).
+citation_enabled = true
+# Phase 2: confidence boost (0.0-0.5) when the assistant CITES a fact, 1h-cooldown
+# gated on the last_cited column, ceilinged at 1.0.  Requires citation_enabled = true.
+# ON at 0.05 for fresh installs (safe: the extraction guard means a new DB accrues
+# no transient device-state junk to entrench).  Compile-time DEFAULT is 0.0, so an
+# UPGRADING user is OFF until they opt in — see UPGRADING.md (2026-09-02).
+citation_reinforcement_boost = 0.05
 
 [memory.embeddings]
 # provider = "onnx"               # Embedding provider: "onnx" (local), "ollama", or "openai"

@@ -9,6 +9,8 @@ Unlike cloud-dependent assistants and plugin-based AI agents, DAWN runs entirely
 DAWN runs on platforms from a Jetson Orin to a Raspberry Pi 5 and supports multiple interfaces: a local microphone, a browser-based Web UI with voice and text input, and DAP2 satellite devices (Raspberry Pi or ESP32).
 
 > **New to DAWN?** See **[GETTING_STARTED.md](GETTING_STARTED.md)** for a step-by-step setup guide.
+>
+> **Updating an existing install?** See **[UPGRADING.md](UPGRADING.md)** for version-to-version notes and anything that needs your attention.
 
 <!-- TODO: Hero screenshot of WebUI conversation view -->
 
