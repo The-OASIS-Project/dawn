@@ -38,6 +38,7 @@
 #include <libical/ical.h>
 #endif
 
+#include <json-c/json.h>
 #include <sodium.h>
 #include <sys/stat.h>
 
@@ -616,15 +617,16 @@ static void expand_rrule(int64_t event_id,
 /**
  * RFC 6578 sync-collection reconcile for one calendar.
  *
- * Baselines the sync-token on first sight (empty stored token → server enumerates
- * the whole collection and mints one) and, on subsequent runs, applies the
- * server's explicit removals (members reported with a 404 status). The whole-
- * collection retroactive prune is deliberately deferred (the in-window sentinel in
- * calendar_service_sync_now covers events whose master dtstart is in-window); this
- * path is what carries deletion detection OUT of the cache window — and also covers
- * in-window recurring series whose master predates the window, which the sentinel's
- * dtstart bound misses. Best-effort: any failure leaves the token untouched so the
- * next pass retries, and the sentinel has already handled the master-in-window case.
+ * Three jobs. (1) On first sight (empty stored token) it BASELINES: the server
+ * enumerates the whole collection and mints a sync-token, and — since that member set
+ * is complete — a whole-collection retroactive prune (calendar_db_event_prune_not_in_hrefs)
+ * clears local rows whose href is not in the set, i.e. out-of-window upstream deletions
+ * the in-window sentinel cannot see. (2) On subsequent runs (real token) it applies the
+ * server's explicit incremental removals (members reported with a 404 status), which are
+ * window-independent. (3) It advances the token. So the in-window sentinel and this path
+ * divide the work: the sentinel owns the visible window on every server; this owns
+ * out-of-window (retroactively at baseline, incrementally after). Best-effort: any
+ * failure leaves the token untouched so the next pass retries.
  */
 /* Placeholder stored in sync_token after a reconcile that produced no real RFC 6578
  * token (server lacks sync-collection, or a baseline came back incomplete). Non-empty,
@@ -678,6 +680,40 @@ static void sync_collection_reconcile(const calendar_calendar_t *cal, const cald
       OLOG_INFO("calendar: sync-collection removed %d deleted event(s) from '%s'", removed,
                 cal->display_name);
 
+   /* Whole-collection retroactive prune (baseline only). On a COMPLETE baseline
+    * enumeration (empty token → server returns the full member set as non-gone
+    * entries), diff local non-empty-href rows against that set to clear out-of-window
+    * upstream deletions the in-window sentinel can't see. Guarded on:
+    *   - !have_real_token: this was a baseline, so sr.changes IS the full set (an
+    *     incremental returns only deltas — never set-diff against a delta);
+    *   - sr.complete: fully paged (plan-review requirement — never prune on partial);
+    *   - added > 0: a non-empty member set (never blind-delete on a bogus empty set).
+    * A legitimately-emptied upstream calendar (0 members) is therefore NOT reconciled by
+    * this path — indistinguishable from a spurious empty response, so we keep the rows;
+    * in-window remnants still clear via the sentinel. The DB helper adds a second guard
+    * (refuse if no local href matches the set — href-format drift protection). */
+   if (!have_real_token && sr.complete) {
+      json_object *arr = json_object_new_array();
+      if (arr) {
+         int added = 0;
+         for (int i = 0; i < sr.count; i++) {
+            if (!sr.changes[i].gone && sr.changes[i].href[0]) {
+               json_object_array_add(arr, json_object_new_string(sr.changes[i].href));
+               added++;
+            }
+         }
+         if (added > 0) {
+            int wc_pruned = 0;
+            calendar_db_event_prune_not_in_hrefs(cal->id, json_object_to_json_string(arr),
+                                                 &wc_pruned);
+            if (wc_pruned > 0)
+               OLOG_INFO("calendar: reconciled %d out-of-window deletion(s) from '%s'", wc_pruned,
+                         cal->display_name);
+         }
+         json_object_put(arr);
+      }
+   }
+
    if (sr.complete && sr.sync_token[0]) {
       /* Real token obtained — persist it (replaces empty or the placeholder). */
       if (strcmp(sr.sync_token, cal->sync_token) != 0)
@@ -716,6 +752,19 @@ int calendar_service_sync_now(int64_t account_id) {
    time_t now = time(NULL);
    time_t range_start = now - (s_cal.config.cache_past_days * 86400);
    time_t range_end = now + (s_cal.config.cache_future_days * 86400);
+
+   /* Date-string form of the window, for the sentinel's all-day occurrence overlap. */
+   char range_start_date[16] = { 0 };
+   char range_end_date[16] = { 0 };
+   {
+      struct tm rs_tm, re_tm;
+      gmtime_r(&range_start, &rs_tm);
+      gmtime_r(&range_end, &re_tm);
+      iso8601_format_date(rs_tm.tm_year + 1900, rs_tm.tm_mon + 1, rs_tm.tm_mday, range_start_date,
+                          sizeof(range_start_date));
+      iso8601_format_date(re_tm.tm_year + 1900, re_tm.tm_mon + 1, re_tm.tm_mday, range_end_date,
+                          sizeof(range_end_date));
+   }
 
    int synced = 0;
    for (int i = 0; i < cal_count; i++) {
@@ -793,22 +842,24 @@ int calendar_service_sync_now(int64_t account_id) {
 
       caldav_event_list_free(&events);
 
-      /* Deletion reconcile for events whose MASTER dtstart lands in [range_start,
-       * range_end). The fetch above re-stamped last_synced=now on every event the
-       * server still returns in that range; any such row NOT re-stamped is gone
-       * upstream. Runs only here — after a SUCCESSFUL, complete fetch (a truncated/
-       * failed fetch `continue`d above; caldav_fetch_events is all-or-error, never a
-       * silent partial) — so we never prune on partial data. Keyed on last_synced, so
-       * it also clears pre-v82 empty-href ghosts, and its dtstart bound never touches
-       * out-of-window or just-created rows.
+      /* In-window deletion reconcile, keyed on OCCURRENCE overlap. The fetch above
+       * re-stamped last_synced=now on every event the server still returns in-window;
+       * any event NOT re-stamped whose occurrences fall in [range_start, range_end) is
+       * gone upstream. Because it keys on occurrence overlap (not master dtstart), it
+       * covers a recurring series whose master predates the window but whose occurrences
+       * are visible in it — matching exactly what the user sees. Runs only here — after a
+       * SUCCESSFUL, complete fetch (a truncated/failed fetch `continue`d above;
+       * caldav_fetch_events is all-or-error, never a silent partial) — so we never prune
+       * on partial data. Keyed on last_synced, so it also clears pre-v82 empty-href
+       * ghosts and never touches out-of-window or just-created rows.
        *
-       * Coverage limit: a recurring series whose MASTER dtstart predates range_start
-       * but whose OCCURRENCES fall in-window is NOT caught here (its dtstart is out of
-       * bound). On a sync-collection server that gap is closed by the 404 path below;
-       * on a server without sync-collection it relies on the deferred whole-collection
-       * prune (Phase 4). An occurrence-keyed sentinel would close it directly. */
+       * Assumes a conformant time-range REPORT (returns a recurring event whenever any
+       * instance is in-window, so it gets re-stamped); true for Google/iCloud/Nextcloud/
+       * Radicale. An event with zero in-window occurrences is not visible and is left to
+       * the sync-collection paths below. */
       int pruned = 0;
-      calendar_db_event_prune_window_stale(cals[i].id, now, range_start, range_end, &pruned);
+      calendar_db_event_prune_window_stale(cals[i].id, now, range_start, range_end,
+                                           range_start_date, range_end_date, &pruned);
       if (pruned > 0)
          OLOG_INFO("calendar: pruned %d upstream-deleted event(s) from '%s'", pruned,
                    cals[i].display_name);

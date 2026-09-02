@@ -644,6 +644,8 @@ int calendar_db_event_prune_window_stale(int64_t calendar_id,
                                          time_t pass_start,
                                          time_t range_start,
                                          time_t range_end,
+                                         const char *range_start_date,
+                                         const char *range_end_date,
                                          int *deleted_out) {
    if (deleted_out)
       *deleted_out = 0;
@@ -656,6 +658,55 @@ int calendar_db_event_prune_window_stale(int64_t calendar_id,
    sqlite3_bind_int64(st, 2, (int64_t)pass_start);
    sqlite3_bind_int64(st, 3, (int64_t)range_start);
    sqlite3_bind_int64(st, 4, (int64_t)range_end);
+   sqlite3_bind_text(st, 5, range_start_date ? range_start_date : "", -1, SQLITE_STATIC);
+   sqlite3_bind_text(st, 6, range_end_date ? range_end_date : "", -1, SQLITE_STATIC);
+
+   int result = (sqlite3_step(st) == SQLITE_DONE) ? 0 : 1;
+   if (result == 0 && deleted_out)
+      *deleted_out = sqlite3_changes(s_db.db);
+   sqlite3_reset(st);
+
+   AUTH_DB_UNLOCK();
+   return result;
+}
+
+int calendar_db_event_prune_not_in_hrefs(int64_t calendar_id,
+                                         const char *json_hrefs,
+                                         int *deleted_out) {
+   if (deleted_out)
+      *deleted_out = 0;
+   if (!json_hrefs || !json_hrefs[0])
+      return 1; /* no set to diff against — never prune blindly */
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   /* Blast-radius guard: count local non-empty-href rows that MATCH the server set.
+    * The caller only invokes this with a non-empty server member set, so zero matches
+    * means the local vs server href forms diverged (a future normalization drift) or the
+    * calendar was fully replaced — either way the NOT IN prune would delete every href'd
+    * row. Refuse: keeping the (out-of-window) rows is the safe direction, and the
+    * sentinel + 404 paths still cover the visible window. A single match confirms the
+    * forms agree, so the prune is trustworthy. */
+   sqlite3_stmt *cs = s_db.stmt_cal_evt_count_href_in_set;
+   sqlite3_reset(cs);
+   sqlite3_bind_int64(cs, 1, calendar_id);
+   sqlite3_bind_text(cs, 2, json_hrefs, -1, SQLITE_STATIC);
+   int matched = (sqlite3_step(cs) == SQLITE_ROW) ? sqlite3_column_int(cs, 0) : -1;
+   sqlite3_reset(cs);
+
+   if (matched <= 0) {
+      if (matched == 0)
+         OLOG_WARNING("calendar: whole-collection prune for cal %lld skipped — no local href "
+                      "matched the server set (href-format drift or full replacement?)",
+                      (long long)calendar_id);
+      AUTH_DB_UNLOCK();
+      return 1; /* refused (matched==0) or count failed (matched<0) */
+   }
+
+   sqlite3_stmt *st = s_db.stmt_cal_evt_prune_not_in_hrefs;
+   sqlite3_reset(st);
+   sqlite3_bind_int64(st, 1, calendar_id);
+   sqlite3_bind_text(st, 2, json_hrefs, -1, SQLITE_STATIC);
 
    int result = (sqlite3_step(st) == SQLITE_DONE) ? 0 : 1;
    if (result == 0 && deleted_out)

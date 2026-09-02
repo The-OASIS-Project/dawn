@@ -406,6 +406,8 @@ typedef struct {
    sqlite3_stmt *stmt_cal_evt_delete_by_cal;
    sqlite3_stmt *stmt_cal_evt_delete_by_href;
    sqlite3_stmt *stmt_cal_evt_prune_window_stale;
+   sqlite3_stmt *stmt_cal_evt_prune_not_in_hrefs;
+   sqlite3_stmt *stmt_cal_evt_count_href_in_set;
    sqlite3_stmt *stmt_cal_occ_insert;
    sqlite3_stmt *stmt_cal_occ_delete_for_event;
    sqlite3_stmt *stmt_cal_occ_in_range;

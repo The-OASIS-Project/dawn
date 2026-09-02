@@ -182,14 +182,30 @@ int calendar_db_event_delete_by_calendar(int64_t calendar_id);
 int calendar_db_event_delete_by_href(int64_t calendar_id, const char *href, int *deleted_out);
 
 /**
- * In-window deletion reconcile: delete events in [range_start, range_end) whose
- * last_synced predates pass_start — i.e. still-cached but not re-stamped by the
- * just-completed time-range fetch, so gone upstream. @param deleted_out (may be NULL).
+ * In-window deletion reconcile: delete events with last_synced < pass_start (not
+ * re-stamped by the just-completed time-range fetch, so gone upstream) that have at
+ * least one OCCURRENCE overlapping the window — catching recurring series whose master
+ * predates the window but whose occurrences are visible in it. The all-day overlap is
+ * evaluated on the date-string range (range_start_date/range_end_date, "YYYY-MM-DD"),
+ * the timed overlap on the epoch range. @param deleted_out (may be NULL).
  */
 int calendar_db_event_prune_window_stale(int64_t calendar_id,
                                          time_t pass_start,
                                          time_t range_start,
                                          time_t range_end,
+                                         const char *range_start_date,
+                                         const char *range_end_date,
+                                         int *deleted_out);
+
+/**
+ * Whole-collection retroactive prune: delete events for this calendar whose (non-empty)
+ * href is not present in json_hrefs (a JSON array of the full current server href set
+ * from a COMPLETE sync-collection baseline) — i.e. deleted upstream while out of the
+ * fetch window. Empty-href rows are left untouched (the sentinel owns those).
+ * @param json_hrefs  JSON array text, e.g. ["/a.ics","/b.ics"]. @param deleted_out (may be NULL).
+ */
+int calendar_db_event_prune_not_in_hrefs(int64_t calendar_id,
+                                         const char *json_hrefs,
                                          int *deleted_out);
 
 /* ============================================================================

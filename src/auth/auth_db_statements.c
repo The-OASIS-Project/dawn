@@ -2177,15 +2177,50 @@ int auth_db_prepare_statements(void) {
    }
 
    /* In-window deletion reconcile: after a complete time-range fetch re-stamps every
-    * still-live in-window event's last_synced to the pass time, any in-window row NOT
-    * re-stamped is gone upstream. Keyed on last_synced (not href), so it prunes even
-    * pre-v82 empty-href ghosts, and never touches out-of-window or just-created rows. */
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "DELETE FROM calendar_events WHERE calendar_id = ? "
-                           "AND last_synced < ? AND dtstart >= ? AND dtstart < ?",
-                           -1, &s_db.stmt_cal_evt_prune_window_stale, NULL);
+    * still-live in-window event's last_synced to the pass time, any event NOT re-stamped
+    * whose OCCURRENCES fall in the window is gone upstream. Keyed on occurrence overlap
+    * (not master dtstart), so it also catches a recurring series whose master predates
+    * the window but whose occurrences are visible in it — matching exactly what the user
+    * sees. The timed/all-day overlap predicates mirror the display range queries
+    * (stmt_cal_occ_in_range / _allday_in_range). Keyed on last_synced, so it also prunes
+    * pre-v82 empty-href ghosts and never touches out-of-window or just-created rows. */
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "DELETE FROM calendar_events WHERE calendar_id = ?1 AND last_synced < ?2 "
+       "AND EXISTS (SELECT 1 FROM calendar_occurrences o "
+       "            WHERE o.event_id = calendar_events.id "
+       "              AND ((o.all_day = 0 AND o.dtstart < ?4 AND o.dtend > ?3) "
+       "                OR (o.all_day = 1 AND o.dtstart_date < ?6 AND o.dtend_date > ?5)))",
+       -1, &s_db.stmt_cal_evt_prune_window_stale, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare cal_evt_prune_window_stale failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   /* Whole-collection retroactive prune: after a COMPLETE sync-collection baseline
+    * enumeration yields the full current server href set, delete local rows for this
+    * calendar whose (non-empty) href is not in that set — i.e. deleted upstream while
+    * out of the fetch window, which the in-window sentinel above cannot see. Empty-href
+    * rows (un-round-tripped / pre-v82) are left to the sentinel. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "DELETE FROM calendar_events WHERE calendar_id = ?1 AND href <> '' "
+                           "AND href NOT IN (SELECT value FROM json_each(?2))",
+                           -1, &s_db.stmt_cal_evt_prune_not_in_hrefs, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare cal_evt_prune_not_in_hrefs failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   /* Blast-radius pre-check for the whole-collection prune: how many local non-empty-href
+    * rows actually MATCH the server set. Zero overlap against a non-empty server set means
+    * the local vs sync-collection href forms diverged (a future normalization drift) — the
+    * NOT IN prune would then wipe the whole calendar, so the caller refuses instead. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT count(*) FROM calendar_events WHERE calendar_id = ?1 "
+                           "AND href <> '' AND href IN (SELECT value FROM json_each(?2))",
+                           -1, &s_db.stmt_cal_evt_count_href_in_set, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare cal_evt_count_href_in_set failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
@@ -2865,6 +2900,10 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_cal_evt_delete_by_href);
    if (s_db.stmt_cal_evt_prune_window_stale)
       sqlite3_finalize(s_db.stmt_cal_evt_prune_window_stale);
+   if (s_db.stmt_cal_evt_prune_not_in_hrefs)
+      sqlite3_finalize(s_db.stmt_cal_evt_prune_not_in_hrefs);
+   if (s_db.stmt_cal_evt_count_href_in_set)
+      sqlite3_finalize(s_db.stmt_cal_evt_count_href_in_set);
    if (s_db.stmt_cal_occ_insert)
       sqlite3_finalize(s_db.stmt_cal_occ_insert);
    if (s_db.stmt_cal_occ_delete_for_event)
