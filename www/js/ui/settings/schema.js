@@ -1086,6 +1086,15 @@
                hint: 'Tag surfaced memories [M#] and record which the assistant cites (audit-only)',
                advanced: true,
             },
+            citation_reinforcement_boost: {
+               type: 'number',
+               label: 'Citation Reinforcement Boost',
+               min: 0,
+               max: 0.5,
+               step: 0.01,
+               hint: 'Confidence boost when the assistant cites a fact (0 = off; time-gated to once per hour). Requires Memory Citation Signal enabled.',
+               advanced: true,
+            },
             embedding_settings: {
                type: 'group',
                label: 'Semantic Search',
