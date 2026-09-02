@@ -131,6 +131,16 @@ char *core_text_input_dispatch(session_t *session,
     * tools): the deep-research controller drives a bare session whose research
     * system prompt it set once, and skipping here is what structurally keeps
     * private memory out of the fetch loop (DEEP_RESEARCH_DESIGN.md §4a). */
+   /* The per-turn citation stash MUST be clear before this turn's finalizer runs
+    * memory_citation_capture — otherwise a stale [M#]->item_id map from a prior turn
+    * false-validates this turn's <cited> tags and (with reinforcement on) credits the
+    * bump to the wrong facts.  session_dispatch_user_turn clears it, but skip_prompt_rebuild
+    * bypasses that call, so clear here UNCONDITIONALLY.  No live trigger today (the only
+    * skip_prompt_rebuild caller is deep research, on a bare memory-free session), but this
+    * disarms the trap for any future memory-surfacing skip_prompt_rebuild caller.  The clear
+    * is idempotent, so the double-clear when the rebuild does run is harmless. */
+   session_citation_stash_clear(session);
+
    if (!(opts && opts->skip_prompt_rebuild)) {
       session_dispatch_user_turn(session, text);
    }

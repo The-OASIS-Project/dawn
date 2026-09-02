@@ -11,7 +11,7 @@ procedures, and recorded test results — lives in
 [SECURITY_HARDENING_GUIDE.md](SECURITY_HARDENING_GUIDE.md). Read this to understand what DAWN
 trusts; read that to deploy it safely.
 
-**Last updated**: August 2026.
+**Last updated**: September 2026.
 
 ## Table of Contents
 
@@ -299,6 +299,19 @@ Open, acknowledged, and contributor help is welcome. Each maps to a tracked TODO
 8. **Plaintext at rest.** `auth.db` is 0600 but unencrypted; filesystem-level encryption (LUKS)
    is the intended mitigation. Satellite secrets in NVS/flash require physical access to extract
    (accepted risk).
+
+9. **Citation reinforcement is influenceable by prompt injection.** When
+   `citation_reinforcement_boost > 0` (on by default for new installs, opt-in on upgrade), a fact
+   the LLM wraps in `<cited>` gets a confidence bump — and confidence is the retrieval `ORDER BY`
+   key. Untrusted content in the model's context (a fetched page, tool result, or email body)
+   could therefore instruct the model to cite a specific fact and bias that user's future
+   retrieval ranking. The vector is **bounded**: a cited id resolves *only* against the facts
+   surfaced to *this user* on *this turn* (an arbitrary or foreign id is dropped, never
+   reinforced — so no cross-user reach and no fact creation), and each bump is rate-limited to
+   once per fact per hour, clamped (≤0.5), and ceilinged at 1.0. The durable fix is to withhold
+   reinforcement on turns that ran an outward-reading tool, which composes with gap #1's
+   capability mask. *(TODO: "Tool audit: autonomously-dangerous classification pass" /
+   `CAPABILITY_MASK_DESIGN.md`.)*
 
 ---
 

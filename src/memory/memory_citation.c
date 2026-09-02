@@ -137,9 +137,10 @@ void memory_citation_capture(session_t *session, const char *response_text) {
    /* Snapshot BOTH per-turn citation structures under ONE history_mutex critical
     * section (they share the lock) so validation sees a consistent pair.  The tool
     * set is written by parallel tool workers, so this copy-out MUST be under lock.
-    * INVARIANT: every finalizer call site is preceded, on the SAME session, by
-    * session_dispatch_user_turn()'s clear of both — else a stale set attributes to
-    * the wrong turn. */
+    * INVARIANT: every finalizer call site is preceded, on the SAME session, by a
+    * per-turn clear of both — core_text_input_dispatch clears unconditionally (even on
+    * the skip_prompt_rebuild path that bypasses session_dispatch_user_turn), else a stale
+    * set attributes to the wrong turn. */
    citation_stash_t stash;
    tool_cited_set_t tool_set;
    pthread_mutex_lock(&session->history_mutex);
