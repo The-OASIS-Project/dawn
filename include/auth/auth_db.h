@@ -352,7 +352,7 @@ int auth_db_unlock_user(const char *username);
 /**
  * @brief Maximum persona description length
  */
-#define AUTH_PERSONA_DESC_MAX 512
+#define AUTH_PERSONA_DESC_MAX 2048
 
 /**
  * @brief Maximum location length

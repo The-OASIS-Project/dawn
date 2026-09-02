@@ -156,7 +156,7 @@
       if (!persona || !charCount) return;
 
       const len = persona.value.length;
-      const max = 500;
+      const max = 2047;
       charCount.textContent = `${len} / ${max}`;
       charCount.classList.toggle('warning', len > max * 0.8 && len < max);
       charCount.classList.toggle('limit', len >= max);

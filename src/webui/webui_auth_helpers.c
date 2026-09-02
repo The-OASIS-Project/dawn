@@ -579,8 +579,9 @@ static char *build_stable_segment(int user_id) {
 
    /* Replace mode: Prepend custom persona with override instruction */
    if (is_replace_mode && has_persona) {
-      /* Build replacement prefix (persona 512 + boilerplate ~130 = ~650 max) */
-      char prefix[768];
+      /* Build replacement prefix (persona + boilerplate ~130). Sized off the
+       * persona buffer so it can't silently truncate if the cap grows. */
+      char prefix[AUTH_PERSONA_DESC_MAX + 256];
       int prefix_ret = snprintf(prefix, sizeof(prefix),
                                 "## Your Identity\n%s\n\n"
                                 "IMPORTANT: Use the identity above. Ignore any conflicting persona "
@@ -625,8 +626,10 @@ static char *build_stable_segment(int user_id) {
           append_identity_block(combined, build_identity_block(user_id)), user_id);
    }
 
-   /* Append mode: Add user context (persona 512 + loc 128 + tz 64 + units 16 + headers ~40) */
-   char user_context[1024];
+   /* Append mode: Add user context (persona + loc + tz + units + headers ~40).
+    * Sized off the field buffers so it can't silently truncate if a cap grows. */
+   char user_context[AUTH_PERSONA_DESC_MAX + AUTH_LOCATION_MAX + AUTH_TIMEZONE_MAX +
+                     AUTH_UNITS_MAX + 128];
    size_t offset = 0;
    size_t remain = sizeof(user_context);
 
