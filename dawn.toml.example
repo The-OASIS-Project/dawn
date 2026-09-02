@@ -603,6 +603,13 @@
 # citation_enabled = false        # Memory citation signal: tag surfaced memories [M#], have the
                                   # assistant emit <cited>, and record which were used in an audit
                                   # table.  Audit-only in this phase (no confidence change).
+# citation_reinforcement_boost = 0.0  # Phase 2: confidence boost (0.0-0.5) when a fact is CITED,
+                                  # 1h-cooldown gated on a dedicated last_cited column.  Requires
+                                  # citation_enabled = true.  DEFAULT 0.0 (inert).  Parsed + round-
+                                  # tripped but intentionally NOT in the WebUI panel yet: enabling it
+                                  # while stale device-state facts are still in the DB would entrench
+                                  # them (confidence->rank loop).  Run the legacy-fact cleanup first,
+                                  # then set this > 0 (e.g. 0.05) to activate.
 
 [memory.embeddings]
 # provider = "onnx"               # Embedding provider: "onnx" (local), "ollama", or "openai"

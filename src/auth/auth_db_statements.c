@@ -968,6 +968,29 @@ int auth_db_prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   /* Citation-driven confidence reinforcement (Memory Citation Phase 2).
+    * Bumps confidence (ceilinged at 1.0) when the model actually CITED this fact,
+    * gated by a 1 h cooldown on last_cited — a SEPARATE column from last_accessed,
+    * because the recall render path stamps last_accessed = now on every surfaced
+    * fact seconds before the citation, so a shared cooldown would never fire.
+    * The cooldown lives in the WHERE (not a CASE) so the row is touched ONLY when
+    * eligible: the hour is measured from the last BUMP, not the last attempt, and a
+    * NULL last_cited (never cited) always bumps on the first citation.  Binds:
+    * 1=boost, 2=id, 3=user_id.  (id, user_id) filter = CWE-639 defense-in-depth. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "UPDATE memory_facts SET"
+                           "  confidence = MIN(1.0, confidence + ?),"
+                           "  last_cited = CAST(strftime('%s','now') AS INTEGER) "
+                           "WHERE id = ? AND user_id = ?"
+                           "  AND (last_cited IS NULL"
+                           "   OR (CAST(strftime('%s','now') AS REAL) - last_cited) > 3600)",
+                           -1, &s_db.stmt_memory_fact_reinforce_citation, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare memory_fact_reinforce_citation failed: %s",
+                 sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
    /* CWE-639 defense-in-depth: SQL filters on (id, user_id) so a foreign
     * rowid cannot bump confidence on another user's fact. */
    rc = sqlite3_prepare_v2(s_db.db,
@@ -2672,6 +2695,8 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_memory_facts_fts_delete);
    if (s_db.stmt_memory_fact_update_access)
       sqlite3_finalize(s_db.stmt_memory_fact_update_access);
+   if (s_db.stmt_memory_fact_reinforce_citation)
+      sqlite3_finalize(s_db.stmt_memory_fact_reinforce_citation);
    if (s_db.stmt_memory_fact_update_confidence)
       sqlite3_finalize(s_db.stmt_memory_fact_update_confidence);
    if (s_db.stmt_memory_fact_supersede)

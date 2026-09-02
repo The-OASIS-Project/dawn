@@ -837,6 +837,8 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_DOUBLE(section, "access_reinforcement_boost",
                             config->memory.access_reinforcement_boost);
       JSON_TO_CONFIG_BOOL(section, "citation_enabled", config->memory.citation_enabled);
+      JSON_TO_CONFIG_DOUBLE(section, "citation_reinforcement_boost",
+                            config->memory.citation_reinforcement_boost);
       /* Clamp decay values to sane ranges */
       if (config->memory.decay_hour < 0)
          config->memory.decay_hour = 0;
@@ -882,6 +884,11 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
          config->memory.access_reinforcement_boost = 0.0f;
       if (config->memory.access_reinforcement_boost > 0.5f)
          config->memory.access_reinforcement_boost = 0.5f;
+      /* Citation reinforcement boost: 0.0-0.5 (0.0 = inert) */
+      if (config->memory.citation_reinforcement_boost < 0.0f)
+         config->memory.citation_reinforcement_boost = 0.0f;
+      if (config->memory.citation_reinforcement_boost > 0.5f)
+         config->memory.citation_reinforcement_boost = 0.5f;
 
       /* Embedding settings */
       JSON_TO_CONFIG_STR(section, "embedding_provider", config->memory.embedding_provider);

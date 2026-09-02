@@ -221,3 +221,41 @@ void memory_citation_resolve_cited(const char *text,
       *out_dropped_tool = dropped_tool;
    }
 }
+
+int memory_citation_extract_fact_ids(const char *cited_all, int64_t *out_ids, int max) {
+   if (cited_all == NULL || out_ids == NULL || max <= 0) {
+      return 0;
+   }
+   int n = 0;
+   const char *p = cited_all;
+   /* Tokens are comma-separated "kind:<digits>"; emit ids for the "fact:" kind only.
+    * The resolver already de-duplicated, so no cross-token dedup is needed here. */
+   while (*p != '\0' && n < max) {
+      /* Skip leading separators / whitespace. */
+      while (*p == ',' || *p == ' ' || *p == '\t' || *p == '\n') {
+         p++;
+      }
+      if (*p == '\0') {
+         break;
+      }
+      const char *tok = p;
+      while (*p != '\0' && *p != ',') {
+         p++;
+      }
+      /* [tok, p) is one token. */
+      if ((size_t)(p - tok) > 5 && strncmp(tok, "fact:", 5) == 0) {
+         const char *q = tok + 5;
+         int64_t id = 0;
+         int digits = 0;
+         while (q < p && *q >= '0' && *q <= '9' && digits < 18) {
+            id = id * 10 + (*q - '0');
+            q++;
+            digits++;
+         }
+         if (digits > 0) {
+            out_ids[n++] = id;
+         }
+      }
+   }
+   return n;
+}

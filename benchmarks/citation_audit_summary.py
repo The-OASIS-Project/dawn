@@ -268,6 +268,66 @@ def main():
                 print(f"   {f:>7.3f} {pct(kept, len(used_recall)):>11} {pct(cut, len(unused_recall)):>12}")
             print("   (pick the floor that keeps ~95% cited while cutting the most uncited)")
 
+    # ---- Saturation telemetry (Phase 2 safety instrument, design §8/G9) ----
+    # confidence IS the focus importance term AND the `ORDER BY confidence DESC`
+    # retrieval key, so a +boost on citation moves both survival and rank.  Watch:
+    # what fraction of facts have pinned at 1.0, and whether the pinned set is the
+    # genuinely-cited set (acceptable) rather than the whole store (over-reinforced).
+    # Reads memory_facts.last_cited (v83) directly — the audit table has no
+    # confidence column.  All-NULL last_cited = reinforcement still inert.
+    ucl = " WHERE user_id = ?" if args.user is not None else ""
+    uargs = (args.user,) if args.user is not None else ()
+    uand = " AND user_id = ?" if args.user is not None else ""
+    print()
+    print(" SATURATION (Phase 2 safety instrument)")
+    try:
+        n_facts, n_pinned, n_evercited = db.execute(
+            "SELECT COUNT(*), COALESCE(SUM(confidence >= 1.0), 0), "
+            "COALESCE(SUM(last_cited IS NOT NULL), 0) FROM memory_facts" + ucl, uargs
+        ).fetchone()
+        print(f"   total facts                   : {n_facts}")
+        print(f"   pinned at confidence 1.0      : {n_pinned}  ({pct(n_pinned, n_facts)} of all facts)")
+        print("     (note: explicit facts DEFAULT to 1.0 — the drift signal is the cited-vs-")
+        print("      never-cited separation below, not this raw fraction)")
+        print(f"   ever cited (last_cited set)   : {n_evercited}")
+        if n_evercited:
+            pinned_cited = db.execute(
+                "SELECT COALESCE(SUM(confidence >= 1.0), 0) FROM memory_facts "
+                "WHERE last_cited IS NOT NULL" + uand, uargs
+            ).fetchone()[0]
+            print(f"   pinned AMONG ever-cited       : {pinned_cited}  ({pct(pinned_cited, n_evercited)})"
+                  "  <- want the pinned set to BE the cited set")
+            if args.days is not None:
+                cutoff = int(time.time() - args.days * 86400)
+                win = db.execute(
+                    "SELECT COUNT(*) FROM memory_facts WHERE last_cited >= ?" + uand,
+                    (cutoff,) + uargs
+                ).fetchone()[0]
+                print(f"   cited within window           : {win}")
+            # Confidence separation = the drift signal: reinforcement should lift the
+            # cited population's confidence above the never-cited baseline over time.
+            cited_conf = [r[0] for r in db.execute(
+                "SELECT confidence FROM memory_facts WHERE last_cited IS NOT NULL" + uand, uargs)]
+            never_conf = [r[0] for r in db.execute(
+                "SELECT confidence FROM memory_facts WHERE last_cited IS NULL" + uand, uargs)]
+            print(stat_line("  cited-fact confidence", cited_conf))
+            print(stat_line("  never-cited confidence", never_conf))
+            # Hot-fact rank drift: are the most-cited facts the ones pinning?
+            hot = [(it, c) for it, c in cite_freq.most_common(8) if kind(it) == "fact"]
+            if hot:
+                print("   hot-fact drift (most-cited fact -> current confidence):")
+                for it, c in hot:
+                    r = db.execute("SELECT confidence FROM memory_facts WHERE id = ?",
+                                   (int(it.split(":")[1]),)).fetchone()
+                    conf = f"{r[0]:.3f}" if r else "gone"
+                    pin = " PINNED" if (r and r[0] >= 1.0) else ""
+                    print(f"     {it:>14} cited x{c:<3} conf={conf}{pin}")
+        else:
+            print("   (0 facts cited yet — reinforcement inert: "
+                  "citation_reinforcement_boost = 0.0, or not enabled)")
+    except sqlite3.Error as e:
+        print(f"   (saturation stats unavailable — needs schema >= v83: {e})")
+
     print()
     print(f" --- {min(args.recent, turns)} most recent turns ---")
     print(f" {'when':<19} {'conv':>6} {'msg':>7} {'inj':>4} {'cit':>4} {'drop':>4} {'top':>6} {'used_lo':>7}")

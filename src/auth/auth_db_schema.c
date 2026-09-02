@@ -421,6 +421,14 @@ static const char *SCHEMA_SQL =
      * ON DELETE SET NULL: deleting the note drops the pointer (the gloss text is
      * cleaned up explicitly by the note-delete path). */
     "   note_doc_id            INTEGER DEFAULT NULL,"
+    /* v83: last_cited — cooldown timestamp for citation-driven confidence
+     * reinforcement (Memory Citation Phase 2).  NULL = never cited (the default
+     * for every existing row); the first citation always bumps.  Kept SEPARATE
+     * from last_accessed on purpose: the recall render path sets last_accessed =
+     * now on every surfaced fact (memory_callback.c) seconds before the model
+     * cites, so a citation cooldown sharing that column would never fire.  The
+     * reinforce UPDATE gates on (last_cited IS NULL OR now - last_cited > 3600). */
+    "   last_cited             INTEGER DEFAULT NULL,"
     "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
     "   FOREIGN KEY (superseded_by) REFERENCES memory_facts(id) ON DELETE SET NULL,"
     "   FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL,"

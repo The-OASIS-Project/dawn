@@ -33,6 +33,7 @@
 #include "core/session_manager.h"  /* session_t, citation_stash_t, tool_cited_set_t */
 #include "logging.h"
 #include "memory/memory_citation_internal.h" /* memory_citation_csv_append + resolve_cited */
+#include "memory/memory_db.h"                /* memory_db_fact_reinforce_citation (Phase 2) */
 
 /* CSV buffer for the injected / tool-surfaced / cited id lists.  Sized for the
  * realistic worst case: the tool universe can hold MAX_TOOL_CITED_FACTS (96)
@@ -211,6 +212,28 @@ void memory_citation_capture(session_t *session, const char *response_text) {
 
    audit_insert(conv_id, msg_id, user_id, injected, cited_all, inj_scores, tool_surfaced, dropped,
                 dropped_tool);
+
+   /* Phase 2 — citation-driven confidence reinforcement.  Bump every FACT the model
+    * actually cited (facts only in v1; cited summaries/relations are audited above but
+    * NOT reinforced — a Phase-3 decision).  Reinforce from BOTH surfaces: cited_all
+    * already unions focus + tool ids, so a fact cited via either path is covered.
+    * Gated on a non-zero boost so the whole block is inert at the default (0.0) until
+    * deliberately enabled AFTER the legacy device-state cleanup — enabling it while
+    * stale facts are live would entrench them via the confidence->rank loop.  The DB
+    * primitive self-limits via a 1 h cooldown on last_cited and ceilings at 1.0. */
+   if (g_config.memory.citation_reinforcement_boost > 0.0f) {
+      int64_t fact_ids[MAX_CITATION_STASH + MAX_TOOL_CITED_FACTS];
+      int nf = memory_citation_extract_fact_ids(cited_all, fact_ids,
+                                                (int)(sizeof(fact_ids) / sizeof(fact_ids[0])));
+      for (int i = 0; i < nf; i++) {
+         memory_db_fact_reinforce_citation(fact_ids[i], user_id);
+      }
+      if (nf > 0) {
+         OLOG_INFO("memory_citation: citation reinforcement applied to %d cited fact(s) "
+                   "(user=%d boost=%.3f, per-fact 1h cooldown)",
+                   nf, user_id, (double)g_config.memory.citation_reinforcement_boost);
+      }
+   }
 
    /* Feed the Context panel: gold-highlight ONLY the focus-injected rows the model
     * cited (a tool fact has no panel row).  Focus subset only — keeps the reviewed

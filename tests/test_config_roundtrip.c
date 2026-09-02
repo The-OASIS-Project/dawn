@@ -237,10 +237,15 @@ static void test_memory_citation_roundtrip(void) {
     * the key (a dropped key would revert to the false default and be lost on the
     * next WebUI settings save). */
    g_written.memory.citation_enabled = true;
+   /* Phase 2: a non-default boost must survive the round-trip.  Default is 0.0
+    * (inert); a dropped key would silently revert to 0.0 and disable reinforcement
+    * on the next WebUI settings save.  0.05 survives the writer's %.2f precision. */
+   g_written.memory.citation_reinforcement_boost = 0.05f;
 
    round_trip();
 
    TEST_ASSERT_TRUE(g_read.memory.citation_enabled);
+   TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.05f, g_read.memory.citation_reinforcement_boost);
 }
 
 /* --- section coverage ------------------------------------------------------

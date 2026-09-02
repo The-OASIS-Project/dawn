@@ -2992,6 +2992,27 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       }
    }
 
+   /* v83: memory_facts.last_cited — cooldown timestamp for citation-driven
+    * confidence reinforcement (Memory Citation Phase 2).  Base SCHEMA_SQL carries
+    * the column; this ALTER back-fills an existing DB.  Gated `< 83` so it also
+    * runs on fresh installs (base added it → duplicate-column expected + tolerated,
+    * mirroring the v81/v82 pattern).  NULL default = never cited; first cite bumps. */
+   bool v83_ok = (current_version >= 83);
+   if (current_version < 83) {
+      rc = sqlite3_exec(s_db.db,
+                        "ALTER TABLE memory_facts ADD COLUMN last_cited INTEGER DEFAULT NULL", NULL,
+                        NULL, &errmsg);
+      bool duplicate = (errmsg && strstr(errmsg, "duplicate column"));
+      if (rc != SQLITE_OK && !duplicate) {
+         OLOG_ERROR("auth_db: v83 migration (last_cited) failed: %s", errmsg ? errmsg : "unknown");
+         v83_ok = false;
+      } else {
+         v83_ok = true;
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
    /* Log migration if upgrading from an older version */
    if (current_version > 0 && current_version < AUTH_DB_SCHEMA_VERSION) {
       OLOG_INFO("auth_db: migrated schema from v%d to v%d", current_version,
@@ -3014,7 +3035,8 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
                               v55_ok && v56_ok && v57_ok && v58_ok && v59_ok && v60_ok && v61_ok &&
                               v62_ok && v63_ok && v64_ok && v65_ok && v66_ok && v67_ok && v68_ok &&
                               v69_ok && v70_ok && v71_ok && v72_ok && v73_ok && v74_ok && v75_ok &&
-                              v76_ok && v77_ok && v78_ok && v79_ok && v80_ok && v81_ok && v82_ok;
+                              v76_ok && v77_ok && v78_ok && v79_ok && v80_ok && v81_ok && v82_ok &&
+                              v83_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

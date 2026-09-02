@@ -1332,6 +1332,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                                 "summary_retention_days",
                                                 "access_reinforcement_boost",
                                                 "citation_enabled",
+                                                "citation_reinforcement_boost",
                                                 NULL };
       warn_unknown_keys(decay, "memory.decay", decay_keys);
 
@@ -1347,6 +1348,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       PARSE_INT(decay, "summary_retention_days", config->summary_retention_days);
       PARSE_DOUBLE(decay, "access_reinforcement_boost", config->access_reinforcement_boost);
       PARSE_BOOL(decay, "citation_enabled", config->citation_enabled);
+      PARSE_DOUBLE(decay, "citation_reinforcement_boost", config->citation_reinforcement_boost);
    }
 
    /* Clamp decay values to sane ranges */
@@ -1400,6 +1402,12 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       config->access_reinforcement_boost = 0.0f;
    if (config->access_reinforcement_boost > 0.5f)
       config->access_reinforcement_boost = 0.5f;
+
+   /* Citation reinforcement boost: 0.0-0.5 (0.0 = inert) */
+   if (config->citation_reinforcement_boost < 0.0f)
+      config->citation_reinforcement_boost = 0.0f;
+   if (config->citation_reinforcement_boost > 0.5f)
+      config->citation_reinforcement_boost = 0.5f;
 
    /* Parse [memory.embeddings] sub-table */
    toml_table_t *embeddings = toml_table_in(table, "embeddings");

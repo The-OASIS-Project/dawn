@@ -303,6 +303,48 @@ static void test_focus_summary_and_tool_fact(void) {
    TEST_ASSERT_EQUAL_INT(1, g_tc);
 }
 
+/* --- memory_citation_extract_fact_ids (Phase 2 reinforcement input) --------- */
+
+static void test_extract_facts_only(void) {
+   /* Only "fact:" tokens are emitted; summary/relation are skipped. */
+   int64_t ids[8];
+   int n = memory_citation_extract_fact_ids("fact:5889,summary:2566,fact:10716,relation:41", ids,
+                                            8);
+   TEST_ASSERT_EQUAL_INT(2, n);
+   TEST_ASSERT_EQUAL_INT64(5889, ids[0]);
+   TEST_ASSERT_EQUAL_INT64(10716, ids[1]);
+}
+
+static void test_extract_empty_and_null(void) {
+   int64_t ids[4];
+   TEST_ASSERT_EQUAL_INT(0, memory_citation_extract_fact_ids("", ids, 4));
+   TEST_ASSERT_EQUAL_INT(0, memory_citation_extract_fact_ids(NULL, ids, 4));
+   TEST_ASSERT_EQUAL_INT(0, memory_citation_extract_fact_ids("summary:1,relation:2", ids, 4));
+}
+
+static void test_extract_respects_max(void) {
+   int64_t ids[2];
+   int n = memory_citation_extract_fact_ids("fact:1,fact:2,fact:3,fact:4", ids, 2);
+   TEST_ASSERT_EQUAL_INT(2, n);
+   TEST_ASSERT_EQUAL_INT64(1, ids[0]);
+   TEST_ASSERT_EQUAL_INT64(2, ids[1]);
+}
+
+static void test_extract_single_fact(void) {
+   int64_t ids[4];
+   int n = memory_citation_extract_fact_ids("fact:10266", ids, 4);
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT64(10266, ids[0]);
+}
+
+static void test_extract_ignores_malformed(void) {
+   /* "fact:" with no digits, and a bare "fact" token, both yield nothing. */
+   int64_t ids[4];
+   int n = memory_citation_extract_fact_ids("fact:,factoid:9,fact:77", ids, 4);
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT64(77, ids[0]);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_focus_ordinals);
@@ -326,5 +368,10 @@ int main(void) {
    RUN_TEST(test_overlong_id_tail_drops_and_preserves_next);
    RUN_TEST(test_overlong_ordinal_drops);
    RUN_TEST(test_focus_summary_and_tool_fact);
+   RUN_TEST(test_extract_facts_only);
+   RUN_TEST(test_extract_empty_and_null);
+   RUN_TEST(test_extract_respects_max);
+   RUN_TEST(test_extract_single_fact);
+   RUN_TEST(test_extract_ignores_malformed);
    return UNITY_END();
 }

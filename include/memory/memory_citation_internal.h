@@ -24,6 +24,7 @@
 #define MEMORY_CITATION_INTERNAL_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include "core/session_manager.h" /* citation_stash_t, tool_cited_set_t */
 
@@ -58,6 +59,18 @@ void memory_citation_resolve_cited(const char *text,
                                    int *out_tool_count,
                                    int *out_dropped,
                                    int *out_dropped_tool);
+
+/**
+ * @brief Extract the distinct FACT ids from a resolved cited_all CSV.
+ *
+ * Pure (no I/O), unit-testable.  @p cited_all is the canonical-id CSV produced by
+ * memory_citation_resolve_cited ("fact:5889,summary:2566,relation:41,...").  Only
+ * "fact:<n>" tokens are emitted (Phase 2 reinforcement applies to
+ * memory_facts.confidence only); summary/relation tokens are ignored.  Writes up
+ * to @p max ids into @p out_ids and returns the count written.  The input is
+ * already de-duplicated by the resolver, so no extra dedup is performed here.
+ */
+int memory_citation_extract_fact_ids(const char *cited_all, int64_t *out_ids, int max);
 
 #ifdef __cplusplus
 }

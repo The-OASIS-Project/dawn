@@ -683,6 +683,8 @@ typedef struct {
    float access_reinforcement_boost; /* Confidence boost on access (0.05) */
    bool citation_enabled;            /* Memory citation signal: inject [M#], capture <cited>, audit
                                         (log-only in Phase 1; default off) */
+   float citation_reinforcement_boost; /* Phase 2: confidence boost when a fact is CITED (default
+                                          0.0 = inert; gate additionally on citation_enabled) */
 
    /* Embeddings (semantic search) */
    char embedding_provider[16];        /* "onnx", "ollama", "openai", "" (disabled) */

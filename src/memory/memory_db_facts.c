@@ -559,6 +559,28 @@ int memory_db_fact_update_access(int64_t fact_id, int user_id) {
    return (rc == SQLITE_DONE) ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
+int memory_db_fact_reinforce_citation(int64_t fact_id, int user_id) {
+   if (user_id <= 0 || fact_id <= 0)
+      return MEMORY_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+
+   /* Binds: 1=boost, 2=id, 3=user_id.  The 1 h cooldown + first-cite-bumps logic
+    * lives in the statement's WHERE (see auth_db_statements.c) — a cooldown-blocked
+    * or foreign-user call is a legitimate no-op (0 rows changed), not a failure. */
+   sqlite3_stmt *stmt = s_db.stmt_memory_fact_reinforce_citation;
+   sqlite3_reset(stmt);
+   sqlite3_bind_double(stmt, 1, (double)g_config.memory.citation_reinforcement_boost);
+   sqlite3_bind_int64(stmt, 2, fact_id);
+   sqlite3_bind_int(stmt, 3, user_id);
+
+   int rc = sqlite3_step(stmt);
+   sqlite3_reset(stmt);
+
+   AUTH_DB_UNLOCK();
+   return (rc == SQLITE_DONE) ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
+}
+
 int memory_db_fact_update_confidence(int64_t fact_id, int user_id, float confidence) {
    if (user_id <= 0)
       return MEMORY_DB_FAILURE;
