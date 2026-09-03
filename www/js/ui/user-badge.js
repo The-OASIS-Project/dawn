@@ -75,6 +75,17 @@
          if (!item) return;
 
          var action = item.dataset.action;
+
+         // Alarm-sounds is an in-place toggle, not a navigation action — flip it
+         // and leave the menu open so the state change is visible.
+         if (action === 'alarm-sounds') {
+            if (window.DawnScheduler) {
+               DawnScheduler.setAlarmSounds(!DawnScheduler.isAlarmSoundsEnabled());
+               syncAlarmSoundsItem();
+            }
+            return;
+         }
+
          close();
 
          switch (action) {
@@ -101,6 +112,17 @@
       });
    }
 
+   // Reflect the persisted "Alarm sounds" state on its menu item (aria-checked
+   // for AT + the visible check glyph). No-op if the item or DawnScheduler is
+   // absent, so the header still works if scheduler.js failed to load.
+   function syncAlarmSoundsItem() {
+      var item = document.getElementById('alarm-sounds-item');
+      if (!item || !window.DawnScheduler) return;
+      // aria-checked is the single source of truth — the .dropdown-item-check
+      // glyph follows it via CSS, so we never touch the span directly.
+      item.setAttribute('aria-checked', DawnScheduler.isAlarmSoundsEnabled() ? 'true' : 'false');
+   }
+
    function open() {
       var badge = document.getElementById('user-badge');
       var dropdown = document.getElementById('user-badge-dropdown');
@@ -108,6 +130,7 @@
 
       badge.setAttribute('aria-expanded', 'true');
       dropdown.classList.add('open');
+      syncAlarmSoundsItem();
       if (badgeEscToken === null) {
          badgeEscToken = DawnEscStack.register(function () {
             close();

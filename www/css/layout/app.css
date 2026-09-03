@@ -245,6 +245,17 @@
    flex-shrink: 0;
 }
 
+/* Right-aligned checkmark for a menuitemcheckbox row (e.g. "Alarm sounds").
+   aria-checked is the single source of truth — the glyph follows it, so JS
+   only ever writes the attribute, never the visibility. */
+.dropdown-item-check {
+   margin-left: auto;
+}
+
+.dropdown-item[aria-checked='false'] .dropdown-item-check {
+   visibility: hidden;
+}
+
 .dropdown-divider {
    height: 1px;
    margin: 0.25rem 0;

@@ -44,6 +44,7 @@
       SETTINGS_SHOW_ADVANCED: 'dawn-settings-show-advanced',
       CALENDAR_VIEW: 'dawn_calendar_view',
       CALENDAR_UPCOMING_ONLY: 'dawn_calendar_upcoming_only',
+      ALARM_SOUNDS: 'dawn_alarm_sounds',
    });
 
    /**

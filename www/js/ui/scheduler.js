@@ -15,6 +15,14 @@
     * affecting other ringing alarms. */
    const activeAlarmLoops = new Map();
 
+   /* Client-side "Alarm sounds" toggle — gates the chime + ringing-alarm loop
+    * ONLY. The spoken alarm announcement is separate: it rides the general TTS
+    * mute (set_tts_enabled), not this flag. Defaults ON so existing users keep
+    * today's always-chiming behavior. Persisted per-browser via DawnStore. */
+   let alarmSoundsEnabled = window.DawnStore
+      ? DawnStore.getBool(DawnStore.KEYS.ALARM_SOUNDS, true)
+      : true;
+
    /**
     * Ask the browser for Notification API permission. Must be triggered from a
     * user gesture (button click) — not page load — or browsers block the prompt.
@@ -109,6 +117,7 @@
     * Play a browser alarm chime using Web Audio API
     */
    function playChime(eventType) {
+      if (!alarmSoundsEnabled) return;
       try {
          if (!chimeCtx) {
             chimeCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -143,6 +152,7 @@
     * same event_id — only the first call starts a loop.
     */
    function startAlarmLoop(eventId) {
+      if (!alarmSoundsEnabled) return;
       if (activeAlarmLoops.has(eventId)) return;
 
       try {
@@ -193,6 +203,32 @@
       if (!entry) return;
       clearInterval(entry.timer);
       activeAlarmLoops.delete(eventId);
+   }
+
+   /**
+    * Read the client-side "Alarm sounds" state (chime + ringing loop).
+    * @returns {boolean}
+    */
+   function isAlarmSoundsEnabled() {
+      return alarmSoundsEnabled;
+   }
+
+   /**
+    * Set the client-side "Alarm sounds" state and persist it. Turning it OFF
+    * silences any alarm currently looping — the user muting mid-ring expects
+    * immediate quiet, not "next time." Does NOT touch the spoken announcement
+    * (that follows the general TTS mute).
+    * @param {boolean} on
+    */
+   function setAlarmSounds(on) {
+      alarmSoundsEnabled = !!on;
+      if (window.DawnStore) {
+         DawnStore.setBool(DawnStore.KEYS.ALARM_SOUNDS, alarmSoundsEnabled);
+      }
+      if (!alarmSoundsEnabled) {
+         /* Snapshot keys first — stopAlarmLoop mutates the map. */
+         Array.from(activeAlarmLoops.keys()).forEach(stopAlarmLoop);
+      }
    }
 
    /**
@@ -475,5 +511,7 @@
       handleNotification,
       getUnreadBriefings,
       removeUnreadBriefing,
+      isAlarmSoundsEnabled,
+      setAlarmSounds,
    };
 })();
