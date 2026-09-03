@@ -1,5 +1,22 @@
 # DAWN Local LLM Model Test Analysis - FINAL RESULTS
 
+> **⚠️ HISTORICAL RECORD — SUPERSEDED.** This document analyses the original
+> 31-configuration campaign run on a Jetson Orin **16GB** against a **105-point**
+> FRIDAY suite. Its numbers are preserved as written and are *not* comparable
+> with current figures, which use a **116-point** suite on an AGX Orin **64GB**:
+> a percentage difference between the two eras can be the suite changing rather
+> than the model.
+>
+> **For current numbers see
+> [`services/llama-server/README.md`](../../services/llama-server/README.md).**
+> As of the 2026-09-03 full-fleet sweep the production model is Qwen3.6 35B-A3B
+> (MoE, Preset J) at 94.0% and ~37.1 tok/s on llama.cpp b10626 — not the
+> Qwen3-4B below. Highest local score is Gemma 4 31B at 97.4%.
+>
+> What *does* still hold from this campaign: **batch size 768 is the critical
+> quality parameter**, and sampling parameters (temperature, top-k, top-p,
+> repeat penalty) have negligible effect. Both remain the basis of every preset.
+
 ## Executive Summary
 
 After extensive testing (31+ configurations across 5 models), we achieved **81.9% quality (B grade)** with local LLM inference on Jetson Orin. The breakthrough came from discovering that **batch size is THE critical parameter** for quality.

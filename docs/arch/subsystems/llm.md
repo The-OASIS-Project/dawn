@@ -204,7 +204,19 @@ User Query → LLM Provider (OpenAI/Claude/Local)
 | OpenAI GPT-5            | 100%    | ~300ms    | ~3.1s   | ~$0.01/query  |
 | Claude 4.6 Sonnet       | 92.4%   | ~400ms    | ~3.5s   | ~$0.015/query |
 | Gemini 2.5 Flash        | ~90%    | ~250ms    | ~2.5s   | ~$0.002/query |
-| llama.cpp (Qwen3-4B Q4) | 81.9%   | 116-138ms | ~1.5s   | FREE          |
-| Ollama (Qwen3-4B Q4)    | 81.9%   | ~150ms    | ~1.6s   | FREE          |
+| llama.cpp (Qwen3.6 35B-A3B MoE) | 94.0% | 264-332ms\* | ~1.6s | FREE |
+| llama.cpp (Qwen3-4B Q4) | 94.8%   | 45-59ms\* | ~1.5s  | FREE          |
+| llama.cpp (Gemma 4 31B) | 97.4%   | 659-730ms\* | slow | FREE          |
+| Ollama (Qwen3-4B Q4)    | *not measured* | ~150ms | ~1.6s | FREE      |
 
 **TTFT = Time To First Token** (lower = faster perceived response).
+
+\* TTFT on the benchmark harness's ~66-token prompts. DAWN's real system prompt
+is ~1000 tokens and yields substantially higher TTFT; that has not been measured
+on b10626. Quality and TTFT are from one sweep of all presets on 2026-09-03,
+AGX Orin 64GB MAXN, llama.cpp b10626, 116-point FRIDAY suite. The Ollama row was
+never benchmarked and its numbers are inherited estimates.
+
+Qwen3.6 35B-A3B is the production default (llama-server Preset J);
+it is the only local option that is voice-viable *with* vision. See
+[services/llama-server/README.md](../../../services/llama-server/README.md).

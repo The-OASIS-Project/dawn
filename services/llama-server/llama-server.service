@@ -16,7 +16,14 @@ Environment="CUDA_VISIBLE_DEVICES=0"
 EnvironmentFile=/usr/local/etc/llama-cpp/llama-server.conf
 
 # Execution command (with optimal DAWN settings)
-# Shell wrapper enables conditional args: TEMPLATE (omit for built-in) and MMPROJ (vision models)
+# Shell wrapper enables conditional args: TEMPLATE (omit for built-in), MMPROJ
+# (vision models), PRESENCE_PENALTY (Qwen 3.8+ recommends 1.5 in non-thinking
+# mode), and REASONING_MODE (--reasoning on|off|auto). Presets that omit a key
+# keep llama.cpp's default for it. The ${VAR:+...} guard is what makes an
+# absent key safe — do not convert these to unconditional "${VAR}" args.
+#
+# REASONING_MODE replaced the LLAMA_CHAT_TEMPLATE_KWARGS env var, which
+# llama.cpp b10626 deprecated and renamed; requires b10419+.
 ExecStart=/bin/sh -c 'exec /usr/local/bin/llama-server \
   -m "${MODEL}" \
   --gpu-layers "${GPU_LAYERS}" \
@@ -32,6 +39,8 @@ ExecStart=/bin/sh -c 'exec /usr/local/bin/llama-server \
   --top-k "${TOP_K}" \
   --repeat-penalty "${REPEAT_PENALTY}" \
   --min-p "${MIN_P}" \
+  ${PRESENCE_PENALTY:+--presence-penalty "${PRESENCE_PENALTY}"} \
+  ${REASONING_MODE:+--reasoning "${REASONING_MODE}"} \
   --reasoning-format "${REASONING_FORMAT}" \
   --jinja \
   ${TEMPLATE:+--chat-template-file "${TEMPLATE}"} \

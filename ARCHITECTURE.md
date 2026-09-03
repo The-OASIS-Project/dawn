@@ -707,14 +707,30 @@ parsed-but-not-yet-enforced — see the guide).
 
 **Total** = ASR time + TTFT + TTS time.
 
-| Component          | Latency (Whisper base GPU) | Notes                     |
-| ------------------ | -------------------------- | ------------------------- |
-| ASR (Whisper base) | ~110 ms                    | GPU accelerated           |
-| TTFT (Qwen3-4B)    | ~138 ms                    | Local LLM first token     |
-| TTS (Piper)        | ~200 ms                    | First sentence            |
-| **Total**          | **~448 ms**                | User hears first response |
+AGX Orin 64GB MAXN. **TTFT depends heavily on prompt size**, so the basis is
+stated per row rather than quoting one number — DAWN's real system prompt is
+~1000 tokens, far larger than the benchmark harness's ~66.
 
-**Streaming advantage**: with streaming LLM + TTS, the user hears a response in <500ms instead of waiting for the complete LLM response (~3s).
+| Component                          | Latency (Whisper base GPU) | Notes                            |
+| ---------------------------------- | -------------------------- | -------------------------------- |
+| ASR (Whisper base)                 | ~110 ms                    | GPU accelerated                   |
+| TTFT, short prompt (~66 tok)       | 264-332 ms                 | Preset J, b10626, 2026-09-03      |
+| TTFT, full DAWN prompt (~1000 tok) | ~1.3 s warm                | Preset J, b8667 — **stale**       |
+| TTS (Piper)                        | ~200 ms                    | First sentence                    |
+| **Total, short prompt**            | **~0.6 s**                 | Best case                         |
+| **Total, full DAWN prompt**        | **~1.6 s**                 | What a real voice turn looks like |
+
+Preset A (Qwen3 4B, no vision) is markedly better on this axis — 45-59 ms TTFT,
+the best of any preset — at the cost of vision support.
+
+The full-prompt TTFT has not been re-measured since the b10626 upgrade; treat
+the ~1.6 s figure as the last known value, not a current one. Every other
+number here is from the 2026-09-03 full-fleet sweep.
+
+**Streaming advantage**: with streaming LLM + TTS the user hears the *first
+sentence* as soon as it is synthesized, rather than waiting for the whole
+response (~3 s+). It is first-sentence time that gates perceived latency, not
+total generation time — which is why TTFT, not tok/s, is the number to watch.
 
 ### Platform Override
 

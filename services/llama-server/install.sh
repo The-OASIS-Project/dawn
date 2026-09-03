@@ -48,15 +48,33 @@ error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 # Each preset defines: label, model filename, model HF repo, model HF file,
 # mmproj filename (empty=none), mmproj HF repo, mmproj HF file,
-# template filename (empty=built-in), reasoning_format, context_size,
-# batch_size, temperature, top_p, top_k, min_p, repeat_penalty,
-# min_memory_gb, speed, quality, vision (0/1), notes
+# template filename (empty=built-in), reasoning_format, reasoning_mode
+# (empty=llama.cpp 'auto'), context_size, batch_size, temperature, top_p,
+# top_k, min_p, repeat_penalty, presence_penalty (empty=llama.cpp default
+# 0.0), min_memory_gb, speed, quality, vision (0/1), notes
 
 define_presets() {
-    # Default: no chat-template kwargs (presets that need it set this explicitly)
-    # Used for Qwen 3.6 family where built-in template defaults thinking ON,
-    # which siphons all generation into reasoning_content (empty content field)
-    # under short max_tokens. Disable with {"enable_thinking":false}.
+    # Default: no reasoning override (llama.cpp 'auto' = detect from template).
+    # Models whose built-in template defaults thinking ON siphon all generation
+    # into reasoning_content, leaving `content` EMPTY -- which scores ~20% on
+    # the FRIDAY suite and gives DAWN blank replies. Those presets set
+    # REASONING_MODE="off".
+    #
+    # Migrated 2026-08-27 from --chat-template-kwargs {"enable_thinking":false}.
+    # llama.cpp b10626 deprecated that spelling ("Setting 'enable_thinking' via
+    # --chat-template-kwargs is deprecated. Use --reasoning on / --reasoning off
+    # instead.") AND renamed its env var LLAMA_CHAT_TEMPLATE_KWARGS ->
+    # LLAMA_ARG_CHAT_TEMPLATE_KWARGS, so the old generated line was silently
+    # ignored -- thinking back ON in production with nothing failing.
+    # REASONING_MODE requires llama.cpp b10419+ (see README).
+
+    # SPEED / QUALITY for every preset below were measured in one sweep on
+    # 2026-09-03: llama.cpp b10626, AGX Orin 64GB @ MAXN, 116-point FRIDAY
+    # suite, via llm_testing/scripts/test_single_model.sh. One build, one
+    # machine, one suite -- so they are comparable with each other. Quality
+    # carries ~+/-3 points of run-to-run variance at temp 0.7.
+    # Preset B is deliberately "TBD": a thinking model cannot be scored by a
+    # suite that caps generation at 150 tokens (see model_configs.conf).
 
     # Preset A: Qwen3 4B Instruct (no vision)
     PRESET_A_LABEL="Qwen3 4B Instruct"
@@ -76,7 +94,7 @@ define_presets() {
     PRESET_A_MIN_P=0
     PRESET_A_REPEAT="1.1"
     PRESET_A_MIN_MEM=6
-    PRESET_A_SPEED="35.1"
+    PRESET_A_SPEED="36.71"
     PRESET_A_QUALITY="94.8% (A)"
     PRESET_A_VISION=0
     PRESET_A_SIZE="2.5 GB"
@@ -92,6 +110,7 @@ define_presets() {
     PRESET_A2_MMPROJ_FILE="mmproj-Qwen_Qwen3.5-4B-f16.gguf"
     PRESET_A2_TEMPLATE=""
     PRESET_A2_REASONING="deepseek"
+    PRESET_A2_REASONING_MODE="off"
     PRESET_A2_CTX=16384
     PRESET_A2_BATCH=768
     PRESET_A2_TEMP="0.7"
@@ -100,8 +119,8 @@ define_presets() {
     PRESET_A2_MIN_P=0
     PRESET_A2_REPEAT="1.1"
     PRESET_A2_MIN_MEM=6
-    PRESET_A2_SPEED="28.4"
-    PRESET_A2_QUALITY="90.5% (A)"
+    PRESET_A2_SPEED="31.19"
+    PRESET_A2_QUALITY="89.7% (B)"
     PRESET_A2_VISION=1
     PRESET_A2_SIZE="2.9 GB"
     PRESET_A2_NOTES="Vision, small hardware"
@@ -124,7 +143,7 @@ define_presets() {
     PRESET_A3_MIN_P=0
     PRESET_A3_REPEAT="1.0"
     PRESET_A3_MIN_MEM=6
-    PRESET_A3_SPEED="36.3"
+    PRESET_A3_SPEED="37.93"
     PRESET_A3_QUALITY="89.7% (B)"
     PRESET_A3_VISION=1
     PRESET_A3_SIZE="2.5 GB"
@@ -173,7 +192,7 @@ define_presets() {
     PRESET_C_MIN_P=0
     PRESET_C_REPEAT="1.0"
     PRESET_C_MIN_MEM=16
-    PRESET_C_SPEED="16.1"
+    PRESET_C_SPEED="16.51"
     PRESET_C_QUALITY="89.7% (B)"
     PRESET_C_VISION=1
     PRESET_C_SIZE="7.3 GB"
@@ -189,6 +208,7 @@ define_presets() {
     PRESET_D_MMPROJ_FILE="mmproj-google_gemma-4-31B-it-f16.gguf"
     PRESET_D_TEMPLATE=""
     PRESET_D_REASONING="deepseek"
+    PRESET_D_REASONING_MODE="off"
 
     PRESET_D_CTX=32768
     PRESET_D_BATCH=768
@@ -198,11 +218,11 @@ define_presets() {
     PRESET_D_MIN_P=0
     PRESET_D_REPEAT="1.0"
     PRESET_D_MIN_MEM=48
-    PRESET_D_SPEED="6.8"
-    PRESET_D_QUALITY="100% (A)"
+    PRESET_D_SPEED="6.75"
+    PRESET_D_QUALITY="97.4% (A)"
     PRESET_D_VISION=1
     PRESET_D_SIZE="18.2 GB"
-    PRESET_D_NOTES="WebUI only, thinking leaks"
+    PRESET_D_NOTES="Highest quality, too slow for voice"
 
     # Preset E: Qwen 3.5 27B dense
     PRESET_E_LABEL="Qwen3.5 27B Vision (dense)"
@@ -214,6 +234,7 @@ define_presets() {
     PRESET_E_MMPROJ_FILE="mmproj-Qwen_Qwen3.5-27B-f16.gguf"
     PRESET_E_TEMPLATE=""
     PRESET_E_REASONING="deepseek"
+    PRESET_E_REASONING_MODE="off"
 
     PRESET_E_CTX=32768
     PRESET_E_BATCH=768
@@ -223,8 +244,8 @@ define_presets() {
     PRESET_E_MIN_P=0
     PRESET_E_REPEAT="1.1"
     PRESET_E_MIN_MEM=48
-    PRESET_E_SPEED="7.2"
-    PRESET_E_QUALITY="91.4% (A)"
+    PRESET_E_SPEED="7.55"
+    PRESET_E_QUALITY="93.1% (A)"
     PRESET_E_VISION=1
     PRESET_E_SIZE="15.9 GB"
     PRESET_E_NOTES="WebUI only"
@@ -239,6 +260,7 @@ define_presets() {
     PRESET_F_MMPROJ_FILE="mmproj-Qwen_Qwen3.5-35B-A3B-f16.gguf"
     PRESET_F_TEMPLATE=""
     PRESET_F_REASONING="deepseek"
+    PRESET_F_REASONING_MODE="off"
 
     PRESET_F_CTX=131072
     PRESET_F_BATCH=768
@@ -248,8 +270,8 @@ define_presets() {
     PRESET_F_MIN_P=0
     PRESET_F_REPEAT="1.1"
     PRESET_F_MIN_MEM=48
-    PRESET_F_SPEED="29.6"
-    PRESET_F_QUALITY="94.8% (A)"
+    PRESET_F_SPEED="34.97"
+    PRESET_F_QUALITY="91.4% (A)"
     PRESET_F_VISION=1
     PRESET_F_SIZE="19.9 GB"
     PRESET_F_NOTES="Stable alt for 64GB"
@@ -264,6 +286,7 @@ define_presets() {
     PRESET_G_MMPROJ_FILE="mmproj-google_gemma-4-26B-A4B-it-f16.gguf"
     PRESET_G_TEMPLATE=""
     PRESET_G_REASONING="deepseek"
+    PRESET_G_REASONING_MODE="off"
 
     PRESET_G_CTX=32768
     PRESET_G_BATCH=768
@@ -273,11 +296,11 @@ define_presets() {
     PRESET_G_MIN_P=0
     PRESET_G_REPEAT="1.0"
     PRESET_G_MIN_MEM=48
-    PRESET_G_SPEED="32.2"
-    PRESET_G_QUALITY="94.8% (A)"
+    PRESET_G_SPEED="31.48"
+    PRESET_G_QUALITY="93.1% (A)"
     PRESET_G_VISION=1
     PRESET_G_SIZE="15.9 GB"
-    PRESET_G_NOTES="PENDING: thinking leak"
+    PRESET_G_NOTES="Voice-viable; vision/tools unverified"
 
     # Preset H: Qwen3-Coder-Next 80B-A3B MoE (coding)
     PRESET_H_LABEL="Qwen3-Coder-Next 80B (MoE)"
@@ -297,8 +320,8 @@ define_presets() {
     PRESET_H_MIN_P=0
     PRESET_H_REPEAT="1.0"
     PRESET_H_MIN_MEM=48
-    PRESET_H_SPEED="28.2"
-    PRESET_H_QUALITY="92.2% (A)"
+    PRESET_H_SPEED="34.37"
+    PRESET_H_QUALITY="94.0% (A)"
     PRESET_H_VISION=0
     PRESET_H_SIZE="42.2 GB"
     PRESET_H_NOTES="Coding model, no vision"
@@ -313,6 +336,7 @@ define_presets() {
     PRESET_I_MMPROJ_FILE="mmproj-Qwen_Qwen3.6-27B-f16.gguf"
     PRESET_I_TEMPLATE=""
     PRESET_I_REASONING="deepseek"
+    PRESET_I_REASONING_MODE="off"
     PRESET_I_CTX=32768
     PRESET_I_BATCH=768
     PRESET_I_TEMP="0.7"
@@ -321,7 +345,7 @@ define_presets() {
     PRESET_I_MIN_P=0
     PRESET_I_REPEAT="1.0"
     PRESET_I_MIN_MEM=24
-    PRESET_I_SPEED="7.0"
+    PRESET_I_SPEED="7.47"
     PRESET_I_QUALITY="92.2% (A)"
     PRESET_I_VISION=1
     PRESET_I_SIZE="17.5 GB"
@@ -337,7 +361,7 @@ define_presets() {
     PRESET_J_MMPROJ_FILE="mmproj-Qwen_Qwen3.6-35B-A3B-f16.gguf"
     PRESET_J_TEMPLATE=""
     PRESET_J_REASONING="deepseek"
-    PRESET_J_CHAT_TEMPLATE_KWARGS='{"enable_thinking":false}'
+    PRESET_J_REASONING_MODE="off"
     PRESET_J_CTX=131072
     PRESET_J_BATCH=768
     PRESET_J_TEMP="0.7"
@@ -346,13 +370,47 @@ define_presets() {
     PRESET_J_MIN_P=0
     PRESET_J_REPEAT="1.0"
     PRESET_J_MIN_MEM=48
-    PRESET_J_SPEED="32.07"
-    PRESET_J_QUALITY="94.8% (A)"
+    PRESET_J_SPEED="37.11"
+    PRESET_J_QUALITY="94.0% (A)"
     PRESET_J_VISION=1
     PRESET_J_SIZE="20.1 GB"
     PRESET_J_NOTES="RECOMMENDED for 64GB"
 
-    ALL_PRESETS="A A2 A3 B C D E F G H I J"
+    # Preset K: Qwen 3.8 27B Vision, dense (AGX Orin 64GB)
+    # Successor to Preset I (Qwen 3.6 27B). Requires llama.cpp b10419+.
+    # Uses the unsloth Dynamic (UD) quant -- that is the one benchmarked on
+    # 2026-08-27. bartowski/Qwen3.8-27B-GGUF (Qwen3.8-27B-Q4_K_M.gguf +
+    # mmproj-Qwen3.8-27B-f16.gguf) is the untested alternative.
+    # NOTE MMPROJ != MMPROJ_FILE: unsloth ships a generically-named
+    # "mmproj-F16.gguf", which would collide with other models in the shared
+    # models dir, so it is renamed on install (see check_model_files).
+    # presence_penalty 1.5 is Qwen's documented non-thinking recommendation.
+    PRESET_K_LABEL="Qwen 3.8 27B Vision"
+    PRESET_K_MODEL="Qwen3.8-27B-UD-Q4_K_M.gguf"
+    PRESET_K_HF_REPO="unsloth/Qwen3.8-27B-GGUF"
+    PRESET_K_HF_FILE="Qwen3.8-27B-UD-Q4_K_M.gguf"
+    PRESET_K_MMPROJ="mmproj-Qwen3.8-27B-f16.gguf"
+    PRESET_K_MMPROJ_REPO="unsloth/Qwen3.8-27B-GGUF"
+    PRESET_K_MMPROJ_FILE="mmproj-F16.gguf"
+    PRESET_K_TEMPLATE=""
+    PRESET_K_REASONING="deepseek"
+    PRESET_K_REASONING_MODE="off"
+    PRESET_K_CTX=32768
+    PRESET_K_BATCH=768
+    PRESET_K_TEMP="0.7"
+    PRESET_K_TOP_P="0.8"
+    PRESET_K_TOP_K=20
+    PRESET_K_MIN_P=0
+    PRESET_K_REPEAT="1.0"
+    PRESET_K_PRESENCE="1.5"
+    PRESET_K_MIN_MEM=24
+    PRESET_K_SPEED="8.28"
+    PRESET_K_QUALITY="94.0% (A)"
+    PRESET_K_VISION=1
+    PRESET_K_SIZE="16.5 GB"
+    PRESET_K_NOTES="Ties J on quality, 4.5x slower"
+
+    ALL_PRESETS="A A2 A3 B C D E F G H I J K"
 }
 
 # Get a preset variable by name: get_preset_var F LABEL -> value
@@ -457,7 +515,7 @@ show_preset_menu() {
     # Read selection
     local default="$RECOMMENDED_PRESET"
     while true; do
-        read -r -p "  Select preset [A-J] (Enter for $default): " choice
+        read -r -p "  Select preset [A-K] (Enter for $default): " choice
         choice="${choice:-$default}"
         choice="${choice^^}"  # uppercase
 
@@ -475,7 +533,7 @@ show_preset_menu() {
             SELECTED_PRESET="$choice"
             break
         else
-            echo -e "  ${RED}Invalid selection. Choose A-J.${NC}"
+            echo -e "  ${RED}Invalid selection. Choose A-K.${NC}"
         fi
     done
 
@@ -498,7 +556,7 @@ apply_preset() {
     SEL_MMPROJ_FILE=$(get_preset_var "$p" MMPROJ_FILE)
     SEL_TEMPLATE=$(get_preset_var "$p" TEMPLATE)
     SEL_REASONING=$(get_preset_var "$p" REASONING)
-    SEL_CHAT_TEMPLATE_KWARGS=$(get_preset_var "$p" CHAT_TEMPLATE_KWARGS)
+    SEL_REASONING_MODE=$(get_preset_var "$p" REASONING_MODE)
 
     SEL_CTX=$(get_preset_var "$p" CTX)
     SEL_BATCH=$(get_preset_var "$p" BATCH)
@@ -507,6 +565,7 @@ apply_preset() {
     SEL_TOP_K=$(get_preset_var "$p" TOP_K)
     SEL_MIN_P=$(get_preset_var "$p" MIN_P)
     SEL_REPEAT=$(get_preset_var "$p" REPEAT)
+    SEL_PRESENCE=$(get_preset_var "$p" PRESENCE)
 }
 
 # =============================================================================
@@ -567,6 +626,13 @@ check_model_files() {
                 $hf_cmd download "$SEL_HF_REPO" "$SEL_HF_FILE" \
                     --local-dir "$DATA_DIR/models/" || \
                     error "Model download failed. Check network and try again."
+                # hf saves under the REPO filename; rename when the preset uses
+                # a different local name (see MMPROJ note below).
+                if [ "$SEL_HF_FILE" != "$SEL_MODEL" ]; then
+                    mv "$DATA_DIR/models/$SEL_HF_FILE" "$DATA_DIR/models/$SEL_MODEL" || \
+                        error "Could not rename $SEL_HF_FILE -> $SEL_MODEL"
+                    log "Renamed to $SEL_MODEL"
+                fi
             fi
 
             # Download mmproj if missing
@@ -575,6 +641,15 @@ check_model_files() {
                 $hf_cmd download "$SEL_MMPROJ_REPO" "$SEL_MMPROJ_FILE" \
                     --local-dir "$DATA_DIR/models/" || \
                     error "Vision projector download failed."
+                # Some repos (unsloth) ship a generically-named "mmproj-F16.gguf"
+                # that would collide with other models in the shared models dir,
+                # so presets may set MMPROJ != MMPROJ_FILE. Rename to match, or
+                # the file check above never finds what it just downloaded.
+                if [ "$SEL_MMPROJ_FILE" != "$SEL_MMPROJ" ]; then
+                    mv "$DATA_DIR/models/$SEL_MMPROJ_FILE" "$DATA_DIR/models/$SEL_MMPROJ" || \
+                        error "Could not rename $SEL_MMPROJ_FILE -> $SEL_MMPROJ"
+                    log "Renamed to $SEL_MMPROJ"
+                fi
             fi
 
             log "Downloads complete"
@@ -594,6 +669,10 @@ check_model_files() {
     if [ -n "$SEL_MMPROJ" ] && [ ! -f "$DATA_DIR/models/$SEL_MMPROJ" ]; then
         echo "    hf download $SEL_MMPROJ_REPO $SEL_MMPROJ_FILE \\"
         echo "      --local-dir $DATA_DIR/models/"
+        if [ "$SEL_MMPROJ_FILE" != "$SEL_MMPROJ" ]; then
+            echo "    mv $DATA_DIR/models/$SEL_MMPROJ_FILE \\"
+            echo "       $DATA_DIR/models/$SEL_MMPROJ"
+        fi
         echo ""
     fi
     if [ -z "$hf_cmd" ]; then
@@ -679,19 +758,26 @@ generate_config() {
         mmproj_line="MMPROJ=\"$DATA_DIR/models/$SEL_MMPROJ\""
     fi
 
-    # Build LLAMA_CHAT_TEMPLATE_KWARGS line (env var llama-server reads directly).
-    # systemd's EnvironmentFile parses C-style escapes inside double-quoted
-    # values, so escape inner " as \" to keep the JSON intact through systemd.
-    # Sourcing argv from sh -c via ${VAR:+...} mangles the inner quotes; the
-    # env-var path bypasses sh entirely (verified against llama.cpp help text:
-    # "--chat-template-kwargs ... (env: LLAMA_CHAT_TEMPLATE_KWARGS)").
-    #
-    # Omit the line entirely when unset — llama-server attempts to parse an
-    # exported empty string as JSON and exits with parse_error.101.
-    local kwargs_line=""
-    if [ -n "$SEL_CHAT_TEMPLATE_KWARGS" ]; then
-        local escaped="${SEL_CHAT_TEMPLATE_KWARGS//\"/\\\"}"
-        kwargs_line="LLAMA_CHAT_TEMPLATE_KWARGS=\"$escaped\""
+    # Build REASONING_MODE line -> --reasoning on|off|auto.
+    # Replaces the old LLAMA_CHAT_TEMPLATE_KWARGS env-var line, which b10626
+    # both deprecated and renamed (-> LLAMA_ARG_CHAT_TEMPLATE_KWARGS), so the
+    # generated line was read by nobody and thinking silently came back ON.
+    # A plain token, so the ${VAR:+...} argv path in the unit is safe -- none
+    # of the quote-mangling that forced the JSON value onto the env-var path.
+    # Omitted when unset so llama.cpp keeps its 'auto' default.
+    local reasoning_line=""
+    if [ -n "$SEL_REASONING_MODE" ]; then
+        reasoning_line="REASONING_MODE=$SEL_REASONING_MODE"
+    fi
+
+    # Build PRESENCE_PENALTY line. Omitted for presets that do not set it, so
+    # configs generated for Presets A-J stay byte-identical to before this key
+    # existed; the service unit's ${PRESENCE_PENALTY:+...} guard then falls
+    # through to llama.cpp's 0.0 default. Qwen 3.8 (Preset K) is the first
+    # preset to need it (1.5, non-thinking mode).
+    local presence_line=""
+    if [ -n "$SEL_PRESENCE" ]; then
+        presence_line="PRESENCE_PENALTY=$SEL_PRESENCE"
     fi
 
     cat > "$conf_file" << CONF
@@ -709,7 +795,7 @@ generate_config() {
 MODEL="$model_val"
 $template_line
 REASONING_FORMAT=$SEL_REASONING
-$kwargs_line
+$reasoning_line
 $mmproj_line
 
 # Environment variables (Jetson-specific CUDA settings)
@@ -735,6 +821,7 @@ TOP_P=$SEL_TOP_P
 TOP_K=$SEL_TOP_K
 MIN_P=$SEL_MIN_P
 REPEAT_PENALTY=$SEL_REPEAT
+$presence_line
 CONF
 
     chmod 644 "$conf_file"
@@ -777,7 +864,7 @@ parse_args() {
                 echo "Usage: $0 [options]"
                 echo ""
                 echo "Preset selection (recommended):"
-                echo "  -P, --preset LETTER    Install a specific preset (A-J) non-interactively"
+                echo "  -P, --preset LETTER    Install a specific preset (A-K) non-interactively"
                 echo "                         Without this flag, an interactive menu is shown"
                 echo ""
                 echo "Legacy mode (manual file paths):"
@@ -796,13 +883,14 @@ parse_args() {
                 echo "  A3  Gemma 3 4B Vision        2.5 GB    Fastest 4B + vision"
                 echo "  B   Qwen3 4B Thinking        2.5 GB    Reasoning mode"
                 echo "  C   Gemma 3 12B Vision       7.3 GB    High quality + vision"
-                echo "  D   Gemma 4 31B Vision       18.2 GB   WebUI only (64GB)"
+                echo "  D   Gemma 4 31B Vision       18.2 GB   Best quality (97.4%), 6.8 tok/s"
                 echo "  E   Qwen3.5 27B Vision       15.9 GB   WebUI only (64GB)"
                 echo "  F   Qwen3.5 35B-A3B MoE      19.9 GB   Stable alt for 64GB"
-                echo "  G   Gemma 4 26B-A4B MoE      15.9 GB   Pending thinking fix"
+                echo "  G   Gemma 4 26B-A4B MoE      15.9 GB   93.1%, 31.5 tok/s; vision unverified"
                 echo "  H   Qwen3-Coder-Next 80B     42.2 GB   Coding model, no vision"
                 echo "  I   Qwen 3.6 27B Vision      17.5 GB   Coding + vision, WebUI tier"
                 echo "  J   Qwen 3.6 35B-A3B MoE     20.1 GB   RECOMMENDED for 64GB"
+                echo "  K   Qwen 3.8 27B Vision      16.5 GB   94.0% but only 8.3 tok/s"
                 echo ""
                 echo "Examples:"
                 echo "  $0                     # Interactive preset selection"
@@ -865,7 +953,7 @@ legacy_install() {
 
     # Defaults for legacy mode
     SEL_REASONING="none"
-    SEL_CHAT_TEMPLATE_KWARGS=""
+    SEL_REASONING_MODE=""
     SEL_CTX=8192
     SEL_BATCH=768
     SEL_TEMP="0.7"
@@ -873,6 +961,7 @@ legacy_install() {
     SEL_TOP_K=20
     SEL_MIN_P=0
     SEL_REPEAT="1.1"
+    SEL_PRESENCE=""
     SELECTED_PRESET="custom"
 }
 
@@ -915,7 +1004,7 @@ if [ -n "$CLI_MODEL_PATH" ]; then
 elif [ -n "$CLI_PRESET" ]; then
     # Non-interactive preset mode
     if [[ ! " $ALL_PRESETS " == *" $CLI_PRESET "* ]]; then
-        error "Invalid preset: $CLI_PRESET (valid: A A2 A3 B C D E F G H I J)"
+        error "Invalid preset: $CLI_PRESET (valid: A A2 A3 B C D E F G H I J K)"
     fi
     SELECTED_PRESET="$CLI_PRESET"
     log "Preset $SELECTED_PRESET: $(get_preset_var "$SELECTED_PRESET" LABEL)"

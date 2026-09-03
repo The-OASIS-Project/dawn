@@ -121,10 +121,63 @@ if [ "$USE_SPEC_DECODING" = true ]; then
 fi
 echo ""
 
-# Stop any running server
+# Stop any running server.
+# NOTE: killall only reaches processes owned by the invoking user. The systemd
+# llama-server runs as user "llama", so this silently fails against it (see the
+# port guard below, which is what actually catches that case).
 echo "Stopping any running llama-server..."
 killall llama-server 2>/dev/null
 sleep 2
+
+# Port guard. If something still holds 8080 we cannot bind it, our llama-server
+# exits immediately, and every check below would be answered by the OTHER
+# server -- silently benchmarking the wrong model with the wrong settings.
+# This burned a full run on 2026-08-27: the systemd service (Qwen 3.6 27B,
+# thinking on) answered for a Qwen 3.6 35B-A3B run and produced 7.48 tok/s /
+# 19.8%, which looked like a real result and a real regression.
+#
+# Waits rather than checking once: a llama-server holding a 20 GB model can
+# take several seconds to exit and release the socket after the killall above,
+# so a single check right after `sleep 2` false-positives on a server that is
+# already on its way out.
+port_owner() {
+    if command -v ss >/dev/null; then
+        ss -ltnp 2>/dev/null | grep -E ':8080\b'
+    elif command -v lsof >/dev/null; then
+        lsof -iTCP:8080 -sTCP:LISTEN 2>/dev/null | tail -n +2
+    fi
+}
+
+PORT_WAIT=0
+while [ -n "$(port_owner)" ] && [ $PORT_WAIT -lt 10 ]; do
+    [ $PORT_WAIT -eq 0 ] && echo -n "Waiting for port 8080 to be released"
+    echo -n "."
+    sleep 1
+    PORT_WAIT=$((PORT_WAIT + 1))
+done
+[ $PORT_WAIT -gt 0 ] && echo ""
+
+OWNER="$(port_owner)"
+if [ -n "$OWNER" ]; then
+    echo ""
+    echo "❌ Port 8080 is still in use after ${PORT_WAIT}s -- refusing to run."
+    echo "   Benchmarking anyway would measure whatever owns the port."
+    echo ""
+    echo "   Holder:"
+    echo "$OWNER" | sed 's/^/     /'
+    echo ""
+    if echo "$OWNER" | grep -q "llama-server"; then
+        echo "   That is a llama-server. If it is the systemd service (runs as"
+        echo "   user 'llama', so the killall above cannot reach it):"
+        echo ""
+        echo "     sudo systemctl stop llama-server"
+    else
+        echo "   That is NOT a llama-server -- some other process is on 8080."
+        echo "   Stop it, or free the port, then re-run."
+    fi
+    echo ""
+    exit 1
+fi
 
 # Build speculative decoding flags if enabled
 SPEC_FLAGS=""
@@ -167,6 +220,16 @@ echo "(This can take 30-90 seconds for model loading...)"
 MAX_WAIT=120
 WAITED=0
 while [ $WAITED -lt $MAX_WAIT ]; do
+    # Our own server must still be alive. If it died (e.g. failed to bind the
+    # port) then anything answering below belongs to someone else.
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        echo ""
+        echo "❌ llama-server exited during startup (PID $SERVER_PID is gone)."
+        echo "   Scroll up for its error output -- a failed port bind or a"
+        echo "   cudaMalloc OOM are the usual causes."
+        exit 1
+    fi
+
     # Check if health returns 200 (not 503)
     HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/health 2>/dev/null)
     if [ "$HTTP_CODE" = "200" ]; then
@@ -176,8 +239,30 @@ while [ $WAITED -lt $MAX_WAIT ]; do
             -d '{"messages":[{"role":"user","content":"test"}],"max_tokens":5}' 2>/dev/null)
 
         if echo "$TEST_RESPONSE" | grep -q "choices"; then
+            # Identity check: confirm the server answering is serving the model
+            # we asked for. Belt-and-braces against ever benchmarking a
+            # pre-existing server that happens to hold the port.
+            LOADED=$(curl -s http://127.0.0.1:8080/v1/models 2>/dev/null |
+                     python3 -c "import sys,json
+try:
+    d=json.load(sys.stdin)
+    print(d.get('data',[{}])[0].get('id',''))
+except Exception:
+    print('')" 2>/dev/null)
+            if [ -n "$LOADED" ] && [ "$(basename "$LOADED")" != "$MODEL_FILE" ]; then
+                echo ""
+                echo "❌ Wrong model on port 8080 -- refusing to benchmark."
+                echo "   requested: $MODEL_FILE"
+                echo "   serving:   $(basename "$LOADED")"
+                echo ""
+                echo "   Another llama-server owns the port. Stop it and re-run:"
+                echo "     sudo systemctl stop llama-server"
+                echo ""
+                kill $SERVER_PID 2>/dev/null
+                exit 1
+            fi
             echo ""
-            echo "✅ Server ready and model loaded!"
+            echo "✅ Server ready and model loaded: ${LOADED:-$MODEL_FILE}"
             echo ""
             break
         fi

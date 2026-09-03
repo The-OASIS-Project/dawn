@@ -4,12 +4,35 @@
 
 DAWN supports **four cloud providers** (OpenAI, Claude, Gemini, and OpenRouter — one key, hundreds of models from many vendors) and **local LLM** (llama.cpp or Ollama) for voice command processing. All configuration is done at runtime via `dawn.toml` — no recompilation needed to switch providers or models.
 
-After testing 31+ configurations across 5 local models, we achieved **81.9% quality (B grade)** with local inference — production-ready for voice assistants.
+Local inference is production-ready for voice. Every figure below comes from a
+single sweep of all advertised presets on 2026-09-03 — llama.cpp b10626, Jetson
+AGX Orin 64GB (MAXN), 116-point FRIDAY suite — so the models are comparable
+with each other:
 
-**Local LLM Winner:** Qwen3-4B-Instruct-2507-Q4_K_M @ batch 768
-- **Quality:** 81.9% (86/105 points, B grade)
-- **TTFT:** 116-138ms (excellent for streaming)
-- **Streaming Latency:** ~1.3s perceived (ASR + TTFT + TTS start)
+**Local LLM Winner:** Qwen3.6-35B-A3B-Q4_K_M (MoE, ~3B active) — llama-server Preset J
+- **Quality:** 94.0% (A grade; 91.4–94.0% over four runs, three landing on 94.0)
+- **Speed:** 37.0–37.2 tok/s — the fastest model scoring ≥94%, *with* vision
+- **TTFT:** 264–332 ms on the harness's ~66-token prompts. DAWN's real ~1000-token
+  system prompt gives substantially higher TTFT and has not been re-measured on
+  b10626
+- Within a few points of Claude Haiku/Sonnet (96.5%) at zero cost, fully offline
+
+On constrained hardware, **Qwen3-4B-Instruct-2507-Q4_K_M** (Preset A) gives
+94.8% at 36.71 tok/s with no vision — and the best TTFT of any preset at
+45–59 ms. **Gemma 3 4B IT** (Preset A3) is the pick for a 16GB Orin at 89.7%
+and 13.9 tok/s @ 28W.
+
+If quality matters more than latency, **Gemma 4 31B** (Preset D) scored
+**97.4%** — the highest local result, above Claude Haiku/Sonnet on this suite —
+but at 6.75 tok/s it is WebUI-only, and its vision/tool-calling support is not
+yet verified on b10626.
+
+> **Note on older figures in this document.** Sections below dated to the
+> original 31-configuration campaign quote a **105-point** suite on an Orin
+> **16GB**; current numbers use a **116-point** suite on an AGX Orin **64GB**.
+> The two are not directly comparable — a percentage move between eras can be
+> the suite changing rather than the model. `services/llama-server/README.md`
+> is the authoritative, current table.
 
 ---
 
@@ -69,10 +92,10 @@ provider = "auto"    # Auto-detects llama.cpp vs Ollama
 
 3. Run DAWN — it connects to the local server.
 
-**Performance:**
-- Quality: 81.9% (B grade)
-- TTFT: 116-138ms
-- Streaming Latency: ~1.3s perceived
+**Performance** (Preset J, AGX Orin 64GB MAXN, llama.cpp b10626):
+- Quality: 94.0% (A grade; 91.4–94.0% over four runs)
+- Speed: 37.0–37.2 tok/s
+- TTFT: 264–332 ms on a ~66-token prompt (higher with DAWN's full prompt)
 - Cost: Free
 
 ---
@@ -322,30 +345,52 @@ After testing **31+ configurations**, these settings achieve optimal quality:
 
 **Key Finding:** After testing 19 parameters, **only batch size and context size matter**. All sampling parameters (temperature, top-k, top-p, repeat penalty) have **zero effect** on quality.
 
-### Model Comparison (All @ Batch 768)
+### Model Comparison — current (AGX Orin 64GB MAXN, llama.cpp b10626, 116-point suite)
+
+| Model | Preset | Quality | Speed | Vision | Recommendation |
+|-------|--------|---------|-------|--------|----------------|
+| Gemma 4 31B | D | **97.4%** | 6.75 tok/s | Yes | Highest quality; WebUI only |
+| Qwen3 4B Instruct | A | 94.8% | 36.71 tok/s | No | Voice-only, any hardware |
+| **Qwen3.6 35B-A3B (MoE)** | J | **94.0%** | **37.11 tok/s** | Yes | **Production** (64GB) |
+| Qwen3.8 27B (dense) | K | 94.0% | 8.28 tok/s | Yes | Ties J on quality, 4.5x slower |
+| Qwen3-Coder-Next | H | 94.0% | 34.37 tok/s | No | Coding, 256K ctx |
+| Gemma 4 26B-A4B (MoE) | G | 93.1% | 31.48 tok/s | Yes | Vision/tools unverified |
+| Qwen3.5 27B (dense) | E | 93.1% | 7.55 tok/s | Yes | WebUI tier |
+| Qwen3.6 27B (dense) | I | 92.2% | 7.47 tok/s | Yes | WebUI tier |
+| Qwen3.5 35B-A3B (MoE) | F | 91.4% | 34.97 tok/s | Yes | Stable alt |
+| Gemma 3 4B IT | A3 | 89.7% | 37.93 tok/s | Yes | 16GB Orin (helmet) |
+| Qwen3.5 4B | A2 | 89.7% | 31.19 tok/s | Yes | Small hardware + vision |
+| Gemma 3 12B IT | C | 89.7% | 16.51 tok/s | Yes | WebUI quality tier |
+
+Anything under ~25 tok/s is WebUI-only — too slow to keep up with streaming TTS
+for voice. See `services/llama-server/README.md` for the full table, TTFT
+figures, and context-scaling data.
+
+> Scores carry roughly ±3 points of run-to-run variance at temp 0.7 on this
+> suite; do not read a 1–2 point move as a regression.
+
+### Model Comparison — historical (Orin 16GB, 105-point suite)
+
+Kept for provenance. Different hardware *and* a different suite, so these do
+not line up with the table above.
 
 | Model | Quality | TTFT | Speed | Recommendation |
 |-------|---------|------|-------|----------------|
-| **Qwen3-4B Q4** | **81.9%** | 116-138ms | 13.5 tok/s | **Production** (balanced) |
+| **Qwen3-4B Q4** | **81.9%** | 116-138ms | 13.5 tok/s | Production *(at the time)* |
 | Qwen2.5-7B Q4 | **85.7%** | 181-218ms | 9.8 tok/s | Quality-focused option |
 | Llama-3.2-3B | **71.4%** | 92-108ms | 18.0 tok/s | Speed-focused option |
 | Phi-3-mini | 41.9% | ? | ? | Poor instruction following |
 | Qwen3-4B Q6 | 36.2% | ? | ? | Template issues (`<think>` loops) |
 
-**Three Viable Options:**
-1. **Qwen3-4B Q4 (Recommended):** Best balance of quality + TTFT
-2. **Qwen2.5-7B Q4:** Best quality (85.7%), only +80ms TTFT vs Qwen3-4B
-3. **Llama-3.2-3B:** Fastest TTFT (92ms), acceptable quality (71.4%)
-
 ---
 
 ## Performance Comparison
 
-| Metric | Cloud | Local (Qwen3-4B) |
-|--------|-------|-------------------|
-| **Quality** | 92-100% | 81.9% |
-| **Speed** | ~1.2s LLM | ~3.4s LLM |
-| **Total Latency** | ~3.1s | ~5.2s |
+| Metric | Cloud | Local (Qwen3.6 35B-A3B, Preset J) |
+|--------|-------|-----------------------------------|
+| **Quality** | 96.5-99.1% (Claude) | 94.0% (97.4% with Gemma 4 31B) |
+| **Speed** | ~1.2s LLM | ~37.1 tok/s |
+| **Total Latency** | ~3.1s | ~1.6s to first sentence (full DAWN prompt) |
 | **Offline?** | No | Yes |
 | **Privacy** | Data sent to API | Fully local |
 | **Cost** | ~$0.01-0.02 each | Free |

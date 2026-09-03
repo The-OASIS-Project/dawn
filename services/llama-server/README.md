@@ -12,46 +12,59 @@ At 30W mode, speeds are ~3x slower.
 
 | Use Case | Model | Preset | Speed | Quality | Vision |
 |----------|-------|--------|-------|---------|--------|
-| **Home (64GB Orin)** | Qwen3.6 35B-A3B MoE | J | 32.07 tok/s | 94.8% (A) | Yes |
+| **Home (64GB Orin)** | Qwen3.6 35B-A3B MoE | J | 37.01-37.22 tok/s | 94.0% (A) | Yes |
 | **Helmet (16GB Orin)** | Gemma 3 4B IT | A3 | 13.9 tok/s (28W) | 89.7% (B) | Yes |
-| **Voice only (any)** | Qwen3 4B Instruct | A | 35.1 tok/s | 94.8% (A) | No |
+| **Voice only (any)** | Qwen3 4B Instruct | A | 36.71 tok/s | 94.8% (A) | No |
 
 ### Full Benchmark Results (AGX Orin 64GB MAXN)
 
-TTFT = time to first token with DAWN's full system prompt (~1000 tokens).
-Cold = first request after server start. Warm = subsequent requests (prompt cached).
+**All figures below were measured in a single sweep on 2026-09-03, llama.cpp
+b10626, AGX Orin 64GB @ MAXN, 116-point FRIDAY suite** — one build, one machine,
+one suite, so the rows are directly comparable to each other for the first time.
+
+TTFT is the range across the harness's three probes, which use **~66-token
+prompts**. DAWN's real system prompt is ~1000 tokens and produces substantially
+higher TTFT; that figure has not been re-measured on b10626 and is *not* what
+this column shows. Speed is the mean of the same three probes.
+
+Quality carries real run-to-run variance at temp 0.7 — where a model was run
+more than once the spread is given. Treat a 1-3 point gap between models as
+noise, not a ranking.
 
 **4B class (voice-viable on all hardware):**
 
-| Model | Type | Size | Quality | Speed | Cold TTFT | Warm TTFT | Vision | Notes |
-|-------|------|------|---------|-------|-----------|-----------|--------|-------|
-| **Gemma 3 4B IT** | Dense | 2.5 GB | 89.7% (B) | 36.3 tok/s | 669 ms | 676 ms | Yes | Fastest 4B + vision (64GB) |
-| **Gemma 3 4B IT** | Dense | 2.5 GB | 89.7% (B) | 13.9 tok/s | 1820 ms | 158 ms | Yes | 16GB Orin @ 28W |
-| **Qwen3 4B Instruct** | Dense | 2.5 GB | 94.8% (A) | 35.1 tok/s | 659 ms | 95 ms | No | Best prompt caching |
-| Qwen3.5 4B | SSM hybrid | 2.9 GB | 90.5% (A) | 28.4 tok/s | 950 ms | 760 ms | Yes | Vision, slower (SSM overhead) |
+| Model | Type | Size | Quality | Speed | TTFT (66-tok) | Vision | Notes |
+|-------|------|------|---------|-------|---------------|--------|-------|
+| **Gemma 3 4B IT** | Dense | 2.5 GB | 89.7% (B) | 37.93 tok/s | 84-124 ms | Yes | Fastest 4B + vision |
+| **Qwen3 4B Instruct** | Dense | 2.5 GB | **94.8% (A)** | 36.71 tok/s | **45-59 ms** | No | Best TTFT of any preset |
+| Qwen3.5 4B | SSM hybrid | 2.9 GB | 89.7% (B) | 31.19 tok/s | 163-224 ms | Yes | Vision, SSM overhead |
+
+*(Gemma 3 4B on a 16GB Orin @ 28W measured 13.9 tok/s — different hardware, not
+re-run in this sweep.)*
 
 **12B+ class (mixed voice/WebUI):**
 
-| Model | Type | Size | Quality | Speed | Cold TTFT | Warm TTFT | Vision | Notes |
-|-------|------|------|---------|-------|-----------|-----------|--------|-------|
-| Gemma 3 12B IT | Dense | 7.3 GB | 89.7% (B) | 16.1 tok/s | 1904 ms | 1956 ms | Yes | WebUI quality tier |
+| Model | Type | Size | Quality | Speed | TTFT (66-tok) | Vision | Notes |
+|-------|------|------|---------|-------|---------------|--------|-------|
+| Gemma 3 12B IT | Dense | 7.3 GB | 89.7% (B) | 16.51 tok/s | 201-297 ms | Yes | WebUI quality tier |
 
 **MoE class (voice-viable on 64GB):**
 
-| Model | Active/Total | Size | Quality | Speed | Cold TTFT | Warm TTFT | Vision | Notes |
-|-------|-------------|------|---------|-------|-----------|-----------|--------|-------|
-| **Qwen3.6 35B-A3B** | ~3B/35B | 20.1 GB | 94.8% (A) | 32.07 tok/s | 1863 ms | 1256 ms | Yes | **Home recommended** (Preset J), 128K ctx |
-| Qwen3.5 35B-A3B | 3B/35B | 19.9 GB | 94.8% (A) | 29.6 tok/s | 1894 ms | 1302 ms | Yes | Stable alt (Preset F), 128K ctx |
-| Gemma 4 26B-A4B | 4B/25B | 15.9 GB | 94.8% (A) | 32.2 tok/s | 1467 ms | 1396 ms | Yes | Pending thinking fix |
+| Model | Active/Total | Size | Quality | Speed | TTFT (66-tok) | Vision | Notes |
+|-------|-------------|------|---------|-------|---------------|--------|-------|
+| **Qwen3.6 35B-A3B** | ~3B/35B | 20.1 GB | **94.0% (A)** *(91.4-94.0, 4 runs)* | **37.01-37.22 tok/s** | 264-332 ms | Yes | **Home recommended** (Preset J), 128K ctx |
+| Qwen3.5 35B-A3B | 3B/35B | 19.9 GB | 91.4% (A) | 34.97 tok/s | 255-391 ms | Yes | Stable alt (Preset F), 128K ctx |
+| Gemma 4 26B-A4B | 4B/25B | 15.9 GB | 93.1% (A) | 31.48 tok/s | 235-277 ms | Yes | Text now works with `--reasoning off`; vision/tools unverified |
 
 **Dense large (WebUI only on 64GB):**
 
-| Model | Params | Size | Quality | Speed | Vision | Notes |
-|-------|--------|------|---------|-------|--------|-------|
-| Qwen3.5 27B | 26.9B | 15.9 GB | 91.4% (A) | 7.2 tok/s | Yes | Too slow for voice |
-| Qwen3.6 27B | 27B | 17.5 GB | 92.2% (A) | 7.0 tok/s | Yes | Qwen's flagship 27B coder |
-| Qwen3-Coder-Next | 80B/3B MoE | 42.2 GB | 92.2% (A) | 28.2 tok/s | No | Coding specialist, 256K ctx |
-| Gemma 4 31B | 30.7B | 18.2 GB | 100% (A) | 6.8 tok/s | Yes | Highest quality, thinking leaks |
+| Model | Params | Size | Quality | Speed | TTFT (66-tok) | Vision | Notes |
+|-------|--------|------|---------|-------|---------------|--------|-------|
+| **Gemma 4 31B** | 30.7B | 18.2 GB | **97.4% (A)** | 6.75 tok/s | 659-730 ms | Yes | **Highest local quality measured** |
+| Qwen3.8 27B | 27B | 16.5 GB | 94.0% (A) *(93.1-95.7, 3 runs)* | 8.28 tok/s | 625-772 ms | Yes | Preset K (unsloth UD quant) |
+| Qwen3-Coder-Next | 80B/3B MoE | 42.2 GB | 94.0% (A) | 34.37 tok/s | 342-390 ms | No | Coding specialist, 256K ctx |
+| Qwen3.5 27B | 26.9B | 15.9 GB | 93.1% (A) | 7.55 tok/s | 656-948 ms | Yes | Too slow for voice |
+| Qwen3.6 27B | 27B | 17.5 GB | 92.2% (A) *(89.7-92.2, 2 runs)* | 7.47 tok/s | 658-803 ms | Yes | Qwen's flagship 27B coder |
 
 ### Cloud Baseline Comparison (Claude API)
 
@@ -63,14 +76,22 @@ For reference — how local Jetson models compare to cloud flagships on the same
 | Claude Opus 4.7 | 99.1% | Cloud flagship |
 | Claude Haiku 4.5 | 96.5% | Cloud |
 | Claude Sonnet 4.6 | 96.5% | Cloud |
-| **Qwen3.6 35B-A3B (local)** | **94.8%** | **Jetson AGX Orin 64GB (Preset J)** |
-| Qwen3.5 35B-A3B (local) | 94.8% | Jetson — stable alt (Preset F) |
-| Gemma 4 26B-A4B (local) | 94.8% | Jetson (pending fix) |
+| **Gemma 4 31B (local)** | **97.4%** | Jetson — highest local, but 6.75 tok/s |
+| Qwen3.8 27B (local) | 94.0% | Jetson (Preset K) — 8.28 tok/s |
+| **Qwen3.6 35B-A3B (local)** | **94.0%** | **Jetson AGX Orin 64GB (Preset J)** |
 | Qwen3 4B (local) | 94.8% | Jetson — any hardware |
+| Qwen3-Coder-Next (local) | 94.0% | Jetson — coding, no vision |
+| Gemma 4 26B-A4B (local) | 93.1% | Jetson (Preset G) |
+| Qwen3.5 35B-A3B (local) | 91.4% | Jetson — stable alt (Preset F) |
 
-The best local model runs within 1.7% of Claude Haiku/Sonnet and 4.3% of Opus,
-at zero cost, fully offline. Gap between best local and best cloud is smaller
-than the gap between Opus and Sonnet (2.6%).
+Gemma 4 31B at 97.4% now sits **above** Claude Haiku/Sonnet (96.5%) on this
+suite and within 1.7 points of Opus — at zero cost, fully offline. It is also
+6.75 tok/s, so it buys that quality at roughly 5x the latency of Preset J.
+The production pick trades ~3.4 points of quality for 5.5x the speed.
+
+Caveat: this is a 13-test, 116-point instruction-following suite with ±3 points
+of run-to-run variance. It measures DAWN's command/tool-formatting behaviour,
+not general capability — do not read it as a general model ranking.
 
 ### Context Scaling: Qwen3.5/3.6 35B-A3B on AGX Orin 64GB MAXN
 
@@ -91,6 +112,117 @@ scaling — 128K context confirmed working in production.
 128K is the recommended context for Presets F and J on AGX Orin 64GB. Zero
 performance penalty vs 32K, with 4x the usable context for heavy tool workflows.
 
+### Qwen 3.8 Status (August 2026) — Preset K, benchmarked
+
+The Qwen3.8 open-weight release has exactly two models: **Qwen3.8-27B** (dense,
+vision, Apache 2.0, 262144 native context) and **Qwen3.8-2.4T-A95B** (2.4T total
+/ 95B active — does not fit on this hardware, and not an open licence).
+
+**There is no Qwen 3.8 model in the 35B-A3B MoE class.** Qwen 3.8 therefore does
+*not* offer a successor to Preset J, which remains the production recommendation.
+Preset K competes with Preset I (Qwen 3.6 27B) only, and since it is the same
+weight class with the same hybrid linear/full-attention layout, expect roughly
+the same ~7 tok/s — a WebUI-tier quality comparison, not a speed upgrade.
+
+**Benchmarked 2026-08-27** on llama.cpp b10626, using the **unsloth Dynamic
+(UD) Q4_K_M** quant — `unsloth/Qwen3.8-27B-GGUF`, 16.5 GB:
+
+| | Qwen 3.6 27B (Preset I) | Qwen 3.8 27B (Preset K) | Qwen 3.6 35B-A3B (Preset J) |
+|---|---|---|---|
+| Quality | 92.2% (b8667) | **93.1%** (108/116, 1 run) | 91.4–94.0% (2 runs) |
+| Speed | 7.47 tok/s | **8.28 tok/s** | 37.11 tok/s |
+| Tier | WebUI | WebUI | **voice + WebUI** |
+
+**Verdict: no production impact.** Qwen 3.8 27B edges out its predecessor
+Qwen 3.6 27B on both axes (+0.9 points, +19% speed), but the quality delta is
+inside this suite's ±3-point run-to-run variance, so only the speed gain is
+solid. Against Preset J it is 4.5x slower; on quality the two overlap inside the
+suite's ±3-point variance (K 93.1% from one run vs J 91.4-94.0% from two), so
+no quality claim either way is supportable without more runs. With no
+Qwen 3.8 model in the 35B-A3B MoE class, the 3.8 generation offers DAWN
+nothing for the voice path — **Preset J remains the recommendation**.
+
+Caveat on the I-vs-K comparison: Preset I's 92.2% was measured on b8667 and is
+not reproducible on b10626 without `REASONING_MODE=off`, so that column is
+cross-build. Re-run Preset I on b10626 for a clean generational comparison.
+
+The harness prints "❌ NOT RECOMMENDED" for Preset K — that is purely its
+25 tok/s voice-viability gate, not a failure. Preset I trips the same gate.
+
+`general.architecture` is **`qwen35`** — Qwen 3.8 reuses the Qwen 3.5
+implementation, which is why a llama.cpp tree containing no "qwen38" string
+loads it fine. Vision verified working with `mmproj-F16.gguf`. The GGUF also
+carries MTP/NextN tensors that llama.cpp ignores on this arch (`unused tensor
+blk.64.nextn.*` warnings, ~260 MB of dead weight — harmless).
+
+Configuration notes captured from the official model card and template source:
+
+- **Non-thinking (what DAWN uses):** temp 0.7, top_p 0.80, top_k 20, min_p 0.0,
+  repetition_penalty 1.0, **presence_penalty 1.5**.
+- **Thinking:** temp 1.0, top_p 0.95, top_k 20, presence_penalty 0.0.
+- `presence_penalty` is a **new knob for this repo** — Preset K is the first
+  preset to set it. See `PRESENCE_PENALTY` in the config reference below.
+- **Thinking is ON by default**, the same trap that scored Qwen 3.6 35B-A3B at
+  18%. The template reads `enable_thinking is undefined or enable_thinking is
+  true`; on b10419+ the way to turn it off is `REASONING_MODE=off` →
+  `--reasoning off`. Qwen 3.8 additionally supports `reasoning_effort`
+  (`xhigh` default / `medium` / `low`) if a graded dial is wanted.
+- **KV cache is cheap**: only 16 of 64 layers carry one — 64 KB/token at f16,
+  ~34 KB/token at the `q8_0` cache type this service uses. At Q4_K_M the
+  resident set is ~19.8 GB at 32K, ~23 GB at 128K, ~27.5 GB at 262K.
+- **Filename change**: bartowski dropped the `Qwen_` prefix this generation.
+
+Preset K ships at `CONTEXT_SIZE=32768`, which is what was benchmarked. Native
+context is 262144; raise it only after a context-scaling pass.
+
+Preset K sets `MMPROJ` (`mmproj-Qwen3.8-27B-f16.gguf`) different from
+`MMPROJ_FILE` (`mmproj-F16.gguf`): unsloth ships a generic projector name that
+would collide with other models in the shared models directory, so the
+installer renames it after download.
+
+### llama.cpp b10626 upgrade (2026-08-25)
+
+Rebuilt from b8667 → **b10626**. Preset J regression gate re-run on 2026-08-27:
+
+| | b8667 | b10626 |
+|---|---|---|
+| Speed | 32.07 tok/s | **37.0-37.2 tok/s** (+16%) |
+| Quality | 94.8% (110/116) | 94.0% (109/116), 91.4% (106/116) |
+| TTFT *(66-token prompt)* | 201 / 241 / 301 ms | 252 / 287 / 308 ms |
+
+Speed is the only clear win. Quality is flat within noise — the suite shows ±3
+points run-to-run at temp 0.7 (94.8 / 94.0 / 91.4 across three runs), so do not
+read a 1–2 point move as a regression in either direction.
+
+**TTFT did not improve.** `test_llama_performance.sh` sends ~66-token prompts,
+so its TTFT is not comparable with the 1863/1256 ms figures in the table above,
+which the column header defines as DAWN's full ~1000-token system prompt. On the
+like-for-like 66-token basis, b10626 is flat to marginally *worse* than b8667.
+Re-measuring TTFT under a full DAWN prompt on b10626 is still outstanding — the
+2026-09-03 sweep measured TTFT for every preset, but all on the 66-token basis.
+
+**Three behaviour changes this upgrade introduced:**
+
+1. `--chat-template-kwargs {"enable_thinking":false}` is **deprecated** in
+   favour of `--reasoning on|off|auto`. It still works but warns.
+2. Its env var was **renamed** `LLAMA_CHAT_TEMPLATE_KWARGS` →
+   `LLAMA_ARG_CHAT_TEMPLATE_KWARGS`. The generated config used the old name, so
+   the line was read by nobody and thinking came back ON silently. This is why
+   presets now emit `REASONING_MODE` instead.
+3. `--reasoning-format` now defaults to `auto` (extracts thoughts) and `--jinja`
+   defaults to enabled. **Preset I is affected**: it needed no thinking-disable
+   on b8667 and does on b10626, otherwise `content` returns empty. Its recorded
+   92.2% is not reproducible on b10626 without `REASONING_MODE=off`.
+
+**Benchmark pitfall found the same day.** `test_single_model.sh` calls
+`killall llama-server`, which cannot touch the systemd service (that runs as
+user `llama`). The bench's own server then failed to bind port 8080, exited,
+and every probe was answered by the *service* — silently benchmarking Qwen 3.6
+**27B** with thinking on and reporting it as the 35B-A3B MoE (7.48 tok/s,
+19.8%). The harness now refuses to run if the port is held, if its own server
+dies during startup, or if `/v1/models` reports a model other than the one
+requested. **Always `sudo systemctl stop llama-server` before benchmarking.**
+
 ### Gemma 4 Status (April 2026)
 
 **Thinking leak: mostly fixed** on CUDA in llama.cpp b8738+ (PRs #21326, #21327,
@@ -98,18 +230,30 @@ performance penalty vs 32K, with 4x the usable context for heavy tool workflows.
 `--chat-template-kwargs '{"enable_thinking":false}'` with a quantized GGUF
 (Q4/Q5/Q8 — F16 may still loop).
 
-**Still blocking for DAWN:**
+**Text quality is now measurable and good** (2026-09-03 sweep, b10626, with
+`REASONING_MODE=off`): Gemma 4 31B scored **97.4%** — the highest local result
+on this suite — and Gemma 4 26B-A4B scored **93.1% at 31.48 tok/s**, which is
+voice-viable. The thinking problem is solved by `--reasoning off`; what remains
+is everything else.
+
+**Still blocking for DAWN** (not re-verified on b10626 — status below is from
+April and needs re-checking before either preset is promoted):
 - **Vision (mmproj) on CUDA crashes** — issue #21402 still open. DAWN uses
   vision on the home Orin, so this alone blocks production use.
 - **Tool calling loops** — issue #21375 (peg-gemma4 parser) still open.
   DAWN relies heavily on tool calling.
 
-Once #21402 and #21375 close, Gemma 4 26B-A4B is in the same speed/quality
-class as Qwen 3.6 35B-A3B (94.8% quality, 32.2 vs 32.07 tok/s).
+Both were re-run on b10626 in the 2026-09-03 sweep: Gemma 4 26B-A4B is
+**93.1% at 31.48 tok/s** vs Qwen 3.6 35B-A3B's **94.0% at 37.1 tok/s** — so on
+the current build Qwen 3.6 is ahead on both axes, and the "ties on quality,
+runs faster" claim from April no longer holds. Gemma 4 26B-A4B is a credible
+fallback rather than an upgrade, and only if #21402 and #21375 are confirmed
+closed.
 
 **Current recommendation:** Use **Qwen 3.6 35B-A3B** (Preset J) for production
-on AGX Orin 64GB. Qwen 3.5 35B-A3B (Preset F) is the stable alt. Gemma **3**
-models do not have any of the Gemma 4 issues.
+on AGX Orin 64GB — fastest of anything scoring ≥94%. Qwen 3.5 35B-A3B (Preset F)
+is the stable alt, though the sweep put it at 91.4%, below its previously
+recorded 94.8%. Gemma **3** models do not have any of the Gemma 4 issues.
 
 ### Hardware: Jetson AGX Orin 64GB Developer Kit
 
@@ -134,10 +278,10 @@ sudo ./install.sh
 Or install a specific preset non-interactively:
 
 ```bash
-# AGX Orin 64GB: Qwen 3.6 35B-A3B MoE (recommended — 94.8% quality, 32.07 tok/s, vision)
+# AGX Orin 64GB: Qwen 3.6 35B-A3B MoE (recommended — 94.0%, ~37 tok/s, vision)
 sudo ./install.sh -P J
 
-# Small hardware: Qwen3 4B Instruct (94.8% quality, 35.1 tok/s, no vision)
+# Small hardware: Qwen3 4B Instruct (94.8% quality, 36.71 tok/s, no vision)
 sudo ./install.sh -P A
 ```
 
@@ -167,6 +311,16 @@ hf download bartowski/Qwen_Qwen3.5-35B-A3B-GGUF \
 # Preset A: Qwen3 4B Instruct
 hf download unsloth/Qwen3-4B-Instruct-2507-GGUF \
   Qwen3-4B-Instruct-2507-Q4_K_M.gguf \
+  --local-dir /var/lib/llama-cpp/models/
+
+# Preset K: Qwen 3.8 27B (unbenchmarked — requires llama.cpp b10419+)
+# Note: no "Qwen_" filename prefix this generation.
+hf download bartowski/Qwen3.8-27B-GGUF \
+  Qwen3.8-27B-Q4_K_M.gguf \
+  --local-dir /var/lib/llama-cpp/models/
+
+hf download bartowski/Qwen3.8-27B-GGUF \
+  mmproj-Qwen3.8-27B-f16.gguf \
   --local-dir /var/lib/llama-cpp/models/
 ```
 
@@ -233,22 +387,22 @@ MMPROJ=
 MODEL="/var/lib/llama-cpp/models/Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf"
 TEMPLATE=
 REASONING_FORMAT=deepseek
-LLAMA_CHAT_TEMPLATE_KWARGS="{\"enable_thinking\":false}"
+REASONING_MODE=off
 MMPROJ="/var/lib/llama-cpp/models/mmproj-Qwen_Qwen3.6-35B-A3B-f16.gguf"
 CONTEXT_SIZE=131072
 ```
 
-Qwen 3.6 ships with thinking ON by default; the `LLAMA_CHAT_TEMPLATE_KWARGS`
-line is required to disable it. Inner double quotes must be escaped as `\"`
-because systemd's `EnvironmentFile` parses C-style escapes inside double-quoted
-values. Do not use single quotes around this value — sh-argv passing via
-`${VAR:+...}` strips the inner quotes and the JSON parse fails.
+Qwen 3.6 ships with thinking ON by default; `REASONING_MODE=off` (which becomes
+`--reasoning off`) is required to disable it. Without it, generation is siphoned
+into `reasoning_content`, `content` comes back **empty**, and the FRIDAY suite
+scores ~20% at completely normal speed.
 
 ### For Qwen 3.5 35B-A3B Vision MoE (AGX Orin 64GB, stable alt):
 ```bash
 MODEL="/var/lib/llama-cpp/models/Qwen_Qwen3.5-35B-A3B-Q4_K_M.gguf"
 TEMPLATE=
 REASONING_FORMAT=deepseek
+REASONING_MODE=off
 MMPROJ="/var/lib/llama-cpp/models/mmproj-Qwen_Qwen3.5-35B-A3B-f16.gguf"
 CONTEXT_SIZE=131072
 ```
@@ -265,6 +419,21 @@ TOP_P=0.95
 TOP_K=64
 REPEAT_PENALTY=1.0
 ```
+
+### For Qwen 3.8 27B Vision dense (AGX Orin 64GB, needs llama.cpp b10419+):
+```bash
+MODEL="/var/lib/llama-cpp/models/Qwen3.8-27B-Q4_K_M.gguf"
+TEMPLATE=
+REASONING_FORMAT=deepseek
+REASONING_MODE=off
+MMPROJ="/var/lib/llama-cpp/models/mmproj-Qwen3.8-27B-f16.gguf"
+CONTEXT_SIZE=32768
+REPEAT_PENALTY=1.0
+PRESENCE_PENALTY=1.5
+```
+
+`PRESENCE_PENALTY=1.5` is Qwen's documented non-thinking recommendation; leave
+the key out entirely for any model that does not ask for it.
 
 ### For Qwen 3.5 27B Vision dense (AGX Orin 64GB):
 ```bash
@@ -320,6 +489,8 @@ budget_tokens = 5000
 | `GPU_LAYERS` | 99 | Layers to offload to GPU |
 | `PORT` | 8080 | Server listen port |
 | `HOST` | 127.0.0.1 | Server bind address |
+| `REASONING_MODE` | *(unset)* | Optional. `on`/`off`/`auto` → `--reasoning`. Set `off` for any model whose template defaults thinking ON, or `content` comes back empty. Requires llama.cpp b10419+ |
+| `PRESENCE_PENALTY` | *(unset)* | Optional. Passed only when set, so omitting it keeps llama.cpp's 0.0 default. Qwen 3.8 wants `1.5` in non-thinking mode |
 
 ### Critical Parameters (affect quality)
 
@@ -535,8 +706,8 @@ sudo journalctl -u llama-server -n 100
 
 | Metric | Claude Opus 4.7 | Claude Sonnet 4.6 | Qwen3.6 35B-A3B (local) | Qwen3 4B (local) | Gemma 3 4B (local) |
 |--------|-----------------|-------------------|-------------------------|------------------|---------------------|
-| Quality | 99.1% | 96.5% | 94.8% (A) | 94.8% (A) | 89.7% (B) |
-| Speed | cloud | cloud | 32.07 tok/s | 35.1 tok/s | 36.3 tok/s |
+| Quality | 99.1% | 96.5% | 94.0% (A) | 94.8% (A) | 89.7% (B) |
+| Speed | cloud | cloud | ~37.1 tok/s | 36.71 tok/s | 37.93 tok/s |
 | Vision | Yes | Yes | Yes | No | Yes |
 | Offline | No | No | Yes | Yes | Yes |
 | Privacy | Data sent | Data sent | Fully local | Fully local | Fully local |
