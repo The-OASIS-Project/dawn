@@ -66,7 +66,9 @@ define_presets() {
     # instead.") AND renamed its env var LLAMA_CHAT_TEMPLATE_KWARGS ->
     # LLAMA_ARG_CHAT_TEMPLATE_KWARGS, so the old generated line was silently
     # ignored -- thinking back ON in production with nothing failing.
-    # REASONING_MODE requires llama.cpp b10419+ (see README).
+    # REASONING_MODE needs llama.cpp b8287+ (where --reasoning was added).
+    # The env-var rename that killed the old line landed in b9360. b10419 is a
+    # separate, Preset-K-only requirement for loading the Qwen 3.8 GGUF.
 
     # SPEED / QUALITY for every preset below were measured in one sweep on
     # 2026-09-03: llama.cpp b10626, AGX Orin 64GB @ MAXN, 116-point FRIDAY
@@ -377,7 +379,8 @@ define_presets() {
     PRESET_J_NOTES="RECOMMENDED for 64GB"
 
     # Preset K: Qwen 3.8 27B Vision, dense (AGX Orin 64GB)
-    # Successor to Preset I (Qwen 3.6 27B). Requires llama.cpp b10419+.
+    # Successor to Preset I (Qwen 3.6 27B). Needs llama.cpp b10419+ to load
+    # this GGUF (a model requirement, unrelated to REASONING_MODE).
     # Uses the unsloth Dynamic (UD) quant -- that is the one benchmarked on
     # 2026-08-27. bartowski/Qwen3.8-27B-GGUF (Qwen3.8-27B-Q4_K_M.gguf +
     # mmproj-Qwen3.8-27B-f16.gguf) is the untested alternative.

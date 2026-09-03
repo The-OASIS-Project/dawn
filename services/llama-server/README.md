@@ -164,7 +164,7 @@ Configuration notes captured from the official model card and template source:
   preset to set it. See `PRESENCE_PENALTY` in the config reference below.
 - **Thinking is ON by default**, the same trap that scored Qwen 3.6 35B-A3B at
   18%. The template reads `enable_thinking is undefined or enable_thinking is
-  true`; on b10419+ the way to turn it off is `REASONING_MODE=off` →
+  true`; the way to turn it off is `REASONING_MODE=off` →
   `--reasoning off`. Qwen 3.8 additionally supports `reasoning_effort`
   (`xhigh` default / `medium` / `low`) if a graded dial is wanted.
 - **KV cache is cheap**: only 16 of 64 layers carry one — 64 KB/token at f16,
@@ -313,7 +313,7 @@ hf download unsloth/Qwen3-4B-Instruct-2507-GGUF \
   Qwen3-4B-Instruct-2507-Q4_K_M.gguf \
   --local-dir /var/lib/llama-cpp/models/
 
-# Preset K: Qwen 3.8 27B (unbenchmarked — requires llama.cpp b10419+)
+# Preset K: Qwen 3.8 27B (requires llama.cpp b10419+ to load this GGUF)
 # Note: no "Qwen_" filename prefix this generation.
 hf download bartowski/Qwen3.8-27B-GGUF \
   Qwen3.8-27B-Q4_K_M.gguf \
@@ -420,7 +420,7 @@ TOP_K=64
 REPEAT_PENALTY=1.0
 ```
 
-### For Qwen 3.8 27B Vision dense (AGX Orin 64GB, needs llama.cpp b10419+):
+### For Qwen 3.8 27B Vision dense (AGX Orin 64GB; this GGUF needs llama.cpp b10419+):
 ```bash
 MODEL="/var/lib/llama-cpp/models/Qwen3.8-27B-Q4_K_M.gguf"
 TEMPLATE=
@@ -489,7 +489,7 @@ budget_tokens = 5000
 | `GPU_LAYERS` | 99 | Layers to offload to GPU |
 | `PORT` | 8080 | Server listen port |
 | `HOST` | 127.0.0.1 | Server bind address |
-| `REASONING_MODE` | *(unset)* | Optional. `on`/`off`/`auto` → `--reasoning`. Set `off` for any model whose template defaults thinking ON, or `content` comes back empty. Requires llama.cpp b10419+ |
+| `REASONING_MODE` | *(unset)* | Optional. `on`/`off`/`auto` → `--reasoning`. Set `off` for any model whose template defaults thinking ON, or `content` comes back empty. Needs llama.cpp **b8287+** (where `--reasoning` was added) |
 | `PRESENCE_PENALTY` | *(unset)* | Optional. Passed only when set, so omitting it keeps llama.cpp's 0.0 default. Qwen 3.8 wants `1.5` in non-thinking mode |
 
 ### Critical Parameters (affect quality)

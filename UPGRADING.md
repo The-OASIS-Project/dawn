@@ -12,6 +12,66 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-09-03 — llama-server: thinking control moved to `--reasoning`
+
+**Local LLM users only.** If DAWN uses a cloud provider, nothing here applies.
+
+**What changed.** llama.cpp renamed how "don't think, just answer" is requested.
+DAWN's llama-server config now writes `REASONING_MODE=off` instead of the old
+`LLAMA_CHAT_TEMPLATE_KWARGS='{"enable_thinking":false}'` line. Also adds Preset K
+(Qwen 3.8 27B) and refreshes every preset's advertised speed/quality from a
+single re-benchmark of the whole fleet.
+
+**Does this affect me?**
+
+- **🔴 If you are on llama.cpp b9360 (2026-05-27) or newer and have NOT re-run
+  the installer — you are probably already broken, and it is silent.** In b9360
+  llama.cpp renamed the environment variable that old line used
+  (`LLAMA_CHAT_TEMPLATE_KWARGS` → `LLAMA_ARG_CHAT_TEMPLATE_KWARGS`). Your
+  existing `/usr/local/etc/llama-cpp/llama-server.conf` still sets the old name,
+  which nothing reads any more, so thinking is **on** — the model's whole reply
+  goes into `reasoning_content` and DAWN receives an **empty message**. Nothing
+  errors; replies just come back blank or truncated.
+
+  Check it in one command (with llama-server running):
+  ```bash
+  curl -s -X POST http://127.0.0.1:8080/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{"messages":[{"role":"user","content":"Hello"}],"max_tokens":30}' \
+    | head -c 400
+  ```
+  If `"content"` is empty and `"reasoning_content"` is full of text, you have it.
+
+  **Fix — re-run the installer for your preset**, which regenerates the config
+  with the new key and installs the updated service unit:
+  ```bash
+  sudo ./services/llama-server/install.sh -P J    # or your preset letter
+  ```
+
+- **Which llama.cpp do I need?** `REASONING_MODE` needs **b8287** (2026-03-11) or
+  newer — that is when `--reasoning on|off|auto` was added. Practically any build
+  from the last six months qualifies. Preset K (Qwen 3.8) additionally needs
+  **b10419+** to load its GGUF, but that is a Preset-K-only requirement.
+
+  Check yours with `llama-server --version`. On a build older than b8287,
+  **do not re-run the installer** — the generated config would pass a flag your
+  binary does not understand and llama-server would fail to start. Upgrade
+  llama.cpp first.
+
+- **Preset numbers changed.** Every preset was re-benchmarked on one build /
+  one machine / one suite, so the advertised speed and quality figures moved —
+  previously they had been collected across several llama.cpp versions and two
+  hardware generations and were not comparable to each other. Notably Gemma 4
+  31B now measures 97.4% (highest local score) and Gemma 4 26B-A4B's "blocked on
+  thinking leak" note is resolved by `--reasoning off`. This is informational —
+  no action needed.
+
+- **Nothing else to do.** No database migration, no `dawn.toml` change. If you
+  are on an older llama.cpp and do not re-run the installer, your setup keeps
+  working exactly as before.
+
+---
+
 ## 2026-09-02 — Memory citation reinforcement + transient-state extraction guard
 
 **What changed.** DAWN can now reinforce a memory fact's confidence when the

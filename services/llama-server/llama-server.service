@@ -23,7 +23,7 @@ EnvironmentFile=/usr/local/etc/llama-cpp/llama-server.conf
 # absent key safe — do not convert these to unconditional "${VAR}" args.
 #
 # REASONING_MODE replaced the LLAMA_CHAT_TEMPLATE_KWARGS env var, which
-# llama.cpp b10626 deprecated and renamed; requires b10419+.
+# llama.cpp deprecated (b8287) then renamed (b9360); --reasoning needs b8287+.
 ExecStart=/bin/sh -c 'exec /usr/local/bin/llama-server \
   -m "${MODEL}" \
   --gpu-layers "${GPU_LAYERS}" \
