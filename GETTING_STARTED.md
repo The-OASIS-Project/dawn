@@ -274,20 +274,52 @@ The two background roles run constantly, so keeping them on a small fast model k
 
 ## 6. Create Admin Account
 
-The Web UI requires authentication. On first run, DAWN displays a setup token in the console:
+The Web UI requires authentication. There is no default account and no default password — on first run (when no admin user exists yet), DAWN prints a one-time setup token to the console. It's written to **stderr only**, never to a log file, in a banner like this:
+
+```
+╔═══════════════════════════════════════════════════════════╗
+║              DAWN FIRST-RUN SETUP TOKEN                   ║
+╠═══════════════════════════════════════════════════════════╣
+║                                                           ║
+║   Token: DAWN-XXXXXXXXXXXX                                ║
+║                                                           ║
+║   Valid for 5 minutes. Use with:                          ║
+║   dawn-admin user create <username> --admin               ║
+║                                                           ║
+╚═══════════════════════════════════════════════════════════╝
+```
 
 ```bash
 # Run from project root (where dawn.toml is located)
 ./build/dawn
-# Look for: "Setup token: XXXX-XXXX-XXXX"
+# Copy the DAWN-... token from the banner above
 ```
+
+> **The token expires 5 minutes after it's printed** and is single-use. If it lapses, just restart `dawn` — a fresh token is generated on every startup as long as no admin account exists yet. Once you've created your first admin, the token is no longer printed.
+
+> **Running with the ncurses TUI enabled** (`[tui] enabled = true` or the `--tui` flag)? The TUI takes over the terminal *before* the token is printed, so the banner is painted over and you'll never see it — this is independent of `--server`. Capture it by redirecting stderr to a file, which works even while the TUI owns the screen:
+>
+> ```bash
+> ./build/dawn 2> /tmp/dawn-firstrun.log
+> # in another terminal:
+> grep "Token:" /tmp/dawn-firstrun.log
+> ```
+>
+> Or simply do first-run admin creation with the TUI off (omit `--tui` / set `[tui] enabled = false`), then re-enable it afterward.
 
 Use the `dawn-admin` utility to create your admin account:
 
 ```bash
 ./build/dawn-admin user create <username> --admin
-# Enter the setup token when prompted
-# Set your password
+# Enter the setup token when prompted (paste the DAWN-... value)
+# Set your password (you'll be asked to confirm it)
+```
+
+**Non-interactive / scripted setup** — supply the token and password via environment variables instead of the prompts (useful for automated server provisioning):
+
+```bash
+DAWN_SETUP_TOKEN=DAWN-XXXXXXXXXXXX DAWN_PASSWORD='your-password' \
+  ./build/dawn-admin user create <username> --admin
 ```
 
 ## 7. SSL Setup (Recommended)

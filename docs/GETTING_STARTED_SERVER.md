@@ -388,7 +388,33 @@ LD_LIBRARY_PATH=/usr/local/lib ./build-debug/dawn
 
 Access WebUI at `https://your-server:3000`.
 
-On first access, you'll be prompted to create an admin account.
+### First admin account
+
+There is no default account or password. On the first run (when no admin user exists), DAWN prints a one-time **setup token** to **stderr** — a `DAWN-...` value in a "DAWN FIRST-RUN SETUP TOKEN" banner. The token is valid for **5 minutes** and is single-use; restart `dawn` to regenerate one as long as no admin exists yet.
+
+> **Running DAWN as the systemd service?** The banner won't appear on your terminal — the `dawn-server` unit redirects the daemon's stderr to `/var/log/dawn/server.log` (`StandardError=append:/var/log/dawn/server.log`). Pull the token from there instead:
+>
+> ```bash
+> sudo grep "Token:" /var/log/dawn/server.log | tail -1
+> ```
+>
+> If it has already expired (5-minute TTL), `sudo systemctl restart dawn-server` and grab the freshly printed one. Alternatively, run the daemon once in the foreground (`./build-debug/dawn --server`) to read the banner directly, create the admin, then start the service.
+
+Create the first admin with the `dawn-admin` CLI, pasting the token when prompted:
+
+```bash
+./build-debug/dawn-admin user create <username> --admin
+# Enter the setup token when prompted, then set a password
+```
+
+For automated provisioning, pass the token and password non-interactively via environment variables:
+
+```bash
+DAWN_SETUP_TOKEN=DAWN-XXXXXXXXXXXX DAWN_PASSWORD='your-password' \
+  ./build-debug/dawn-admin user create <username> --admin
+```
+
+Then log in at the WebUI with that account. See [GETTING_STARTED.md § Create Admin Account](../GETTING_STARTED.md#6-create-admin-account) for the full walkthrough.
 
 ### What server mode skips
 
