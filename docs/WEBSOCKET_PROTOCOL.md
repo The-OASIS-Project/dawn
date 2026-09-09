@@ -711,6 +711,42 @@ Search through stored memories.
 ```
 Response: `search_memory_response`
 
+#### `get_memory_fact_source`
+Return the verbatim source conversation messages a fact was extracted from (memory provenance).
+```json
+{
+   "type": "get_memory_fact_source",
+   "payload": {
+      "fact_id": 5
+   }
+}
+```
+Response: `get_memory_fact_source_response`
+
+On success the payload carries the source range and up to 500 user/assistant
+messages (system/tool messages are omitted):
+```json
+{
+   "type": "get_memory_fact_source_response",
+   "payload": {
+      "fact_id": 5,
+      "success": true,
+      "conversation_id": 1222,
+      "msg_id_start": 1,
+      "msg_id_end": 24682,
+      "messages": [
+         { "id": 24663, "role": "user", "content": "…", "created_at": 1757370000 }
+      ]
+   }
+}
+```
+An empty `messages` array with `success: true` means the range held no
+user/assistant messages (only system/tool). On failure, `success` is `false`
+and `reason` is one of: `not_available` (no provenance recorded, fact not
+found, source conversation deleted, or private), `forbidden` (the source
+conversation is not owned by the caller), `invalid_range` (the stored
+provenance range is invalid), or `error` (server/DB failure).
+
 #### `delete_memory_fact`
 Delete a specific memory fact.
 ```json
@@ -1908,6 +1944,7 @@ Satellites also receive the same streaming messages as WebUI clients:
 | `get_memory_stats` | `get_memory_stats_response` |
 | `list_memory_facts` | `list_memory_facts_response` |
 | `search_memory` | `search_memory_response` |
+| `get_memory_fact_source` | `get_memory_fact_source_response` |
 | `delete_memory_fact` | `delete_memory_fact_response` |
 | `delete_all_memories` | `delete_all_memories_response` |
 | `music_subscribe` | `music_state` |

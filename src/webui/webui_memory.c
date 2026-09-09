@@ -242,17 +242,43 @@ void handle_get_memory_fact_source(ws_connection_t *conn, struct json_object *pa
       return;
    }
 
+   /* Fetch up to 500 source messages.  The cap is a row LIMIT, never an
+    * ID-span bound — messages.id is a global sparse autoincrement, so the old
+    * `start_id + 500` window silently missed a conversation's high-ID message
+    * block and returned nothing for every wide-range (first-extraction) fact. */
+   json_object *messages_arr = json_object_new_array();
+   int rc_msgs = conv_db_get_messages_by_range(conv_id, conn->auth_user_id, start_id, end_id,
+                                               /*max_rows=*/500, /*include_private=*/false,
+                                               source_msg_to_json, messages_arr);
+
+   /* Report a real failure as such instead of masking it behind success:true
+    * with an empty array (which the client renders identically to a legitimately
+    * empty range).  That masking is exactly how the ID-span cap bug stayed
+    * invisible: FORBIDDEN / INVALID / DB error all looked like "no messages". */
+   if (rc_msgs != AUTH_DB_SUCCESS) {
+      const char *reason = (rc_msgs == AUTH_DB_FORBIDDEN) ? "forbidden"
+                           : (rc_msgs == AUTH_DB_INVALID) ? "invalid_range"
+                                                          : "error";
+      OLOG_WARNING("get_memory_fact_source: fact %lld conv %lld range [%lld,%lld] rc=%d (%s)",
+                   (long long)fact_id, (long long)conv_id, (long long)start_id, (long long)end_id,
+                   rc_msgs, reason);
+      json_object_put(messages_arr);
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "reason", json_object_new_string(reason));
+      json_object_object_add(response, "payload", resp_payload);
+      send_json_response(conn, response);
+      json_object_put(response);
+      return;
+   }
+
+   OLOG_INFO("get_memory_fact_source: fact %lld conv %lld range [%lld,%lld] returned %zu msg(s)",
+             (long long)fact_id, (long long)conv_id, (long long)start_id, (long long)end_id,
+             json_object_array_length(messages_arr));
+
    json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
    json_object_object_add(resp_payload, "conversation_id", json_object_new_int64(conv_id));
    json_object_object_add(resp_payload, "msg_id_start", json_object_new_int64(start_id));
    json_object_object_add(resp_payload, "msg_id_end", json_object_new_int64(end_id));
-
-   /* Cap range at 500 messages (matches tool-path budget) */
-   int64_t capped_end = (end_id - start_id > 500) ? start_id + 500 : end_id;
-   json_object *messages_arr = json_object_new_array();
-   conv_db_get_messages_by_range(conv_id, conn->auth_user_id, start_id, capped_end,
-                                 /*include_private=*/false, source_msg_to_json, messages_arr);
-
    json_object_object_add(resp_payload, "messages", messages_arr);
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);

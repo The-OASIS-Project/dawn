@@ -1960,10 +1960,11 @@ int conv_db_get_messages_by_range(int64_t conv_id,
                                   int user_id,
                                   int64_t start_id,
                                   int64_t end_id,
+                                  int max_rows,
                                   bool include_private,
                                   message_callback_t callback,
                                   void *ctx) {
-   if (conv_id <= 0 || !callback || start_id <= 0 || end_id <= 0)
+   if (conv_id <= 0 || !callback || start_id <= 0 || end_id <= 0 || end_id < start_id)
       return AUTH_DB_INVALID;
 
    AUTH_DB_LOCK_OR_FAIL();
@@ -1981,18 +1982,27 @@ int conv_db_get_messages_by_range(int64_t conv_id,
 
    /* Defense-in-depth: when `include_private = false` (the memory/provenance
     * default), suppress rows from private conversations in SQL itself.  Even
-    * if an upstream caller fails to filter, private content cannot leak. */
-   const char *sql = include_private
-                         ? "SELECT m.id, m.conversation_id, m.role, m.content, m.created_at "
-                           "FROM messages m "
-                           "INNER JOIN conversations c ON m.conversation_id = c.id "
-                           "WHERE m.conversation_id = ? AND c.user_id = ? "
-                           "AND m.id BETWEEN ? AND ? ORDER BY m.id ASC"
-                         : "SELECT m.id, m.conversation_id, m.role, m.content, m.created_at "
-                           "FROM messages m "
-                           "INNER JOIN conversations c ON m.conversation_id = c.id "
-                           "WHERE m.conversation_id = ? AND c.user_id = ? AND c.is_private = 0 "
-                           "AND m.id BETWEEN ? AND ? ORDER BY m.id ASC";
+    * if an upstream caller fails to filter, private content cannot leak.
+    *
+    * The row cap is a SQL `LIMIT` (row count), NOT a `start_id + N` bound on
+    * the ID span: `messages.id` is a global sparse autoincrement, so a
+    * conversation's messages occupy a high, narrow ID block far above a
+    * provenance range that starts at 1 — an arithmetic ID cap would window
+    * past every real row and return nothing. */
+   const char *base = include_private
+                          ? "SELECT m.id, m.conversation_id, m.role, m.content, m.created_at "
+                            "FROM messages m "
+                            "INNER JOIN conversations c ON m.conversation_id = c.id "
+                            "WHERE m.conversation_id = ? AND c.user_id = ? "
+                            "AND m.id BETWEEN ? AND ? ORDER BY m.id ASC"
+                          : "SELECT m.id, m.conversation_id, m.role, m.content, m.created_at "
+                            "FROM messages m "
+                            "INNER JOIN conversations c ON m.conversation_id = c.id "
+                            "WHERE m.conversation_id = ? AND c.user_id = ? AND c.is_private = 0 "
+                            "AND m.id BETWEEN ? AND ? ORDER BY m.id ASC";
+
+   char sql[512];
+   snprintf(sql, sizeof(sql), "%s%s", base, max_rows > 0 ? " LIMIT ?" : "");
 
    sqlite3_stmt *stmt = NULL;
    rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
@@ -2006,6 +2016,8 @@ int conv_db_get_messages_by_range(int64_t conv_id,
    sqlite3_bind_int(stmt, 2, user_id);
    sqlite3_bind_int64(stmt, 3, start_id);
    sqlite3_bind_int64(stmt, 4, end_id);
+   if (max_rows > 0)
+      sqlite3_bind_int(stmt, 5, max_rows);
 
    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
       conversation_message_t msg = { 0 };
@@ -2026,9 +2038,18 @@ int conv_db_get_messages_by_range(int64_t conv_id,
    }
 
    sqlite3_finalize(stmt);
-   AUTH_DB_UNLOCK();
 
-   return AUTH_DB_SUCCESS;
+   /* SQLITE_DONE = ran to completion; SQLITE_ROW = a callback asked to stop
+    * early (intentional, e.g. a caller-side cap) — both are success.  Any
+    * other code is a mid-iteration DB error (BUSY/ERROR/CORRUPT): report it
+    * rather than let a partial/empty result masquerade as a clean read.
+    * errmsg is read under the lock (before unlock) so it stays accurate. */
+   int result = (rc == SQLITE_DONE || rc == SQLITE_ROW) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+   if (result != AUTH_DB_SUCCESS)
+      OLOG_ERROR("conv_db_get_messages_by_range: step failed: %s", sqlite3_errmsg(s_db.db));
+
+   AUTH_DB_UNLOCK();
+   return result;
 }
 
 int conv_db_get_max_msg_id(int64_t conv_id, int user_id, int64_t *max_id_out) {

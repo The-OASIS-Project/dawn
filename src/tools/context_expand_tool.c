@@ -290,7 +290,7 @@ static char *context_expand_callback(const char *action, char *value, int *shoul
    /* include_private = true: user is expanding a [COMPACTED ...] block from
     * their own active session, which may itself be a private conversation.
     * Privacy is intra-conversation; ownership check still applies. */
-   int rc = conv_db_get_messages_by_range(conv_id, user_id, start_id, end_id,
+   int rc = conv_db_get_messages_by_range(conv_id, user_id, start_id, end_id, /*max_rows=*/0,
                                           /*include_private=*/true, expand_message_cb, &ec);
 
    if (rc == AUTH_DB_FORBIDDEN) {

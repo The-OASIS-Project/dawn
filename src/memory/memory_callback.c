@@ -255,11 +255,11 @@ static int append_source_excerpt_from_range(int user_id,
                                      (int)(sizeof(coll.tokens) / sizeof(coll.tokens[0])));
    }
 
-   /* Collect candidates — cap range at 500 messages per dedup spec; the
-    * top-K collector reduces the emit set further to MEMORY_SOURCE_TOP_MESSAGES. */
-   int64_t capped_end = (end_id - start_id > 500) ? start_id + 500 : end_id;
-   conv_db_get_messages_by_range(conv_id, user_id, start_id, capped_end, /*include_private=*/false,
-                                 collect_top_k_callback, &coll);
+   /* Collect candidates — cap at 500 messages (a row LIMIT, not an ID-span
+    * bound; see conv_db_get_messages_by_range) per dedup spec; the top-K
+    * collector reduces the emit set further to MEMORY_SOURCE_TOP_MESSAGES. */
+   conv_db_get_messages_by_range(conv_id, user_id, start_id, end_id, /*max_rows=*/500,
+                                 /*include_private=*/false, collect_top_k_callback, &coll);
 
    if (coll.filled == 0) {
       /* No emittable user/assistant messages in this range (e.g., the

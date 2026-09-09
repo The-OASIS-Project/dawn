@@ -501,7 +501,7 @@ static void test_get_messages_by_range_filters_private_by_default(void) {
 
    /* Public first — confirm the harness can read messages. */
    struct mbr_count_ctx pub_ctx = { 0, 0 };
-   int rc = conv_db_get_messages_by_range(conv_id, user_id, 1, 1000000,
+   int rc = conv_db_get_messages_by_range(conv_id, user_id, 1, 1000000, /*max_rows=*/0,
                                           /*include_private=*/false, mbr_count_cb, &pub_ctx);
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, rc);
    TEST_ASSERT_EQUAL_INT(2, pub_ctx.count);
@@ -511,8 +511,8 @@ static void test_get_messages_by_range_filters_private_by_default(void) {
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, rc);
 
    struct mbr_count_ctx priv_ctx = { 0, 0 };
-   rc = conv_db_get_messages_by_range(conv_id, user_id, 1, 1000000, /*include_private=*/false,
-                                      mbr_count_cb, &priv_ctx);
+   rc = conv_db_get_messages_by_range(conv_id, user_id, 1, 1000000, /*max_rows=*/0,
+                                      /*include_private=*/false, mbr_count_cb, &priv_ctx);
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, rc);
    TEST_ASSERT_EQUAL_INT(0, priv_ctx.count);
 }
@@ -528,10 +528,44 @@ static void test_get_messages_by_range_returns_private_when_opted_in(void) {
    /* include_private=true is the context_expand path — user expanding their
     * own current-session COMPACTED block.  Ownership still enforced. */
    struct mbr_count_ctx ctx = { 0, 0 };
-   rc = conv_db_get_messages_by_range(conv_id, user_id, 1, 1000000, /*include_private=*/true,
-                                      mbr_count_cb, &ctx);
+   rc = conv_db_get_messages_by_range(conv_id, user_id, 1, 1000000, /*max_rows=*/0,
+                                      /*include_private=*/true, mbr_count_cb, &ctx);
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, rc);
    TEST_ASSERT_EQUAL_INT(1, ctx.count);
+}
+
+/* Regression: the row cap is a LIMIT on returned rows, and a range far wider
+ * than the message-ID span still returns every in-range message.  Guards the
+ * bug where the window was capped as `start_id + 500` on the global sparse
+ * messages.id, silently returning nothing for wide (first-extraction) ranges. */
+static void test_get_messages_by_range_row_cap(void) {
+   int user_id = create_and_get_id("range_cap_user", "hash", false);
+   int64_t conv_id = 0;
+   conv_db_create(user_id, "cap session", &conv_id);
+   conv_db_add_message(conv_id, user_id, "user", "one");
+   conv_db_add_message(conv_id, user_id, "assistant", "two");
+   conv_db_add_message(conv_id, user_id, "user", "three");
+
+   /* Wide range (starts at 1, well below the real message IDs) must still
+    * return all three — the old start_id+N cap regressed to zero here. */
+   struct mbr_count_ctx all_ctx = { 0, 0 };
+   int rc = conv_db_get_messages_by_range(conv_id, user_id, 1, 1000000, /*max_rows=*/0,
+                                          /*include_private=*/false, mbr_count_cb, &all_ctx);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(3, all_ctx.count);
+
+   /* max_rows caps the returned row count. */
+   struct mbr_count_ctx cap_ctx = { 0, 0 };
+   rc = conv_db_get_messages_by_range(conv_id, user_id, 1, 1000000, /*max_rows=*/2,
+                                      /*include_private=*/false, mbr_count_cb, &cap_ctx);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(2, cap_ctx.count);
+
+   /* An inverted range (start > end) is rejected, not silently empty. */
+   struct mbr_count_ctx inv_ctx = { 0, 0 };
+   rc = conv_db_get_messages_by_range(conv_id, user_id, 1000, 999, /*max_rows=*/0,
+                                      /*include_private=*/false, mbr_count_cb, &inv_ctx);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_INVALID, rc);
 }
 
 /* ============================================================================
@@ -975,6 +1009,7 @@ int main(void) {
    RUN_TEST(test_message_is_error_round_trip);
    RUN_TEST(test_get_messages_by_range_filters_private_by_default);
    RUN_TEST(test_get_messages_by_range_returns_private_when_opted_in);
+   RUN_TEST(test_get_messages_by_range_row_cap);
    RUN_TEST(test_compaction_watermark_monotonic);
    RUN_TEST(test_get_messages_after_bounds);
 

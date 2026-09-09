@@ -623,7 +623,13 @@
       if (!modal || !body) return;
 
       if (!payload.success) {
-         body.innerHTML = '<p class="memory-source-unavailable">Source no longer available.</p>';
+         const reasonText = {
+            forbidden: "You don't have access to this source conversation.",
+            invalid_range: 'Source range is invalid for this fact.',
+            error: "Couldn't load the source (server error). Please try again.",
+         };
+         const msg = reasonText[payload.reason] || 'Source no longer available.';
+         body.innerHTML = `<p class="memory-source-unavailable">${escapeHtml(msg)}</p>`;
       } else {
          const msgs = payload.messages || [];
          if (msgs.length === 0) {

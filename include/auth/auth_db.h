@@ -2317,17 +2317,24 @@ int conv_db_get_message_ids(int64_t conv_id, int user_id, int64_t **ids_out, int
  * @param user_id User ID (for ownership check)
  * @param start_id First message ID (inclusive)
  * @param end_id Last message ID (inclusive)
+ * @param max_rows Cap on rows returned (the lowest `max_rows` by ascending
+ *                 message ID).  `<= 0` means no cap.  NOTE: this is a row
+ *                 count, NOT an ID span — `messages.id` is a global sparse
+ *                 autoincrement, so a caller must never bound the window by
+ *                 `start_id + N` arithmetic (that silently misses a
+ *                 conversation's high-ID message block).
  * @param include_private If false (default for memory/provenance callers),
  *                        rows whose conversation has `is_private = 1` are
  *                        suppressed in SQL.  If true, ownership-only.
  * @param callback Function called for each message
  * @param ctx User context passed to callback
- * @return AUTH_DB_SUCCESS, AUTH_DB_FORBIDDEN, or AUTH_DB_FAILURE
+ * @return AUTH_DB_SUCCESS, AUTH_DB_INVALID, AUTH_DB_FORBIDDEN, or AUTH_DB_FAILURE
  */
 int conv_db_get_messages_by_range(int64_t conv_id,
                                   int user_id,
                                   int64_t start_id,
                                   int64_t end_id,
+                                  int max_rows,
                                   bool include_private,
                                   message_callback_t callback,
                                   void *ctx);
