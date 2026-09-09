@@ -679,10 +679,15 @@ List stored memory facts for the current user.
    "type": "list_memory_facts",
    "payload": {
       "limit": 50,
-      "offset": 0
+      "offset": 0,
+      "sort": "confidence"
    }
 }
 ```
+`sort` (optional): `"confidence"` (default — highest confidence first), `"created_desc"`
+(newest first), or `"created_asc"` (oldest first). An absent or unrecognized value uses
+the default.
+
 Response: `list_memory_facts_response`
 
 #### `list_memory_preferences`
@@ -690,14 +695,24 @@ List stored user preferences.
 ```json
 {"type": "list_memory_preferences"}
 ```
-Response: (uses `list_memory_facts_response` type with preference data)
+Response: `list_memory_preferences_response`
 
 #### `list_memory_summaries`
 List conversation summaries.
 ```json
-{"type": "list_memory_summaries"}
+{
+   "type": "list_memory_summaries",
+   "payload": {
+      "limit": 50,
+      "offset": 0,
+      "sort": "created_desc"
+   }
+}
 ```
-Response: (uses `list_memory_facts_response` type with summary data)
+`sort` (optional): `"created_desc"` (default — newest first) or `"created_asc"` (oldest
+first). Absent or unrecognized uses the default.
+
+Response: `list_memory_summaries_response`
 
 #### `search_memory`
 Search through stored memories.

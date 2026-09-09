@@ -256,6 +256,8 @@ typedef struct {
    sqlite3_stmt *stmt_memory_fact_create;
    sqlite3_stmt *stmt_memory_fact_get;
    sqlite3_stmt *stmt_memory_fact_list;
+   sqlite3_stmt *stmt_memory_fact_list_created_desc; /* WebUI sort: newest first */
+   sqlite3_stmt *stmt_memory_fact_list_created_asc;  /* WebUI sort: oldest first */
    sqlite3_stmt *stmt_memory_fact_search;
    sqlite3_stmt *stmt_memory_fact_update_access;
    sqlite3_stmt *stmt_memory_fact_reinforce_citation;
@@ -288,6 +290,7 @@ typedef struct {
 
    sqlite3_stmt *stmt_memory_summary_create;
    sqlite3_stmt *stmt_memory_summary_list;
+   sqlite3_stmt *stmt_memory_summary_list_created_asc; /* WebUI sort: oldest first */
    sqlite3_stmt *stmt_memory_summary_mark_consolidated;
    sqlite3_stmt *stmt_memory_summary_search;
 

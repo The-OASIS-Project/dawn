@@ -242,6 +242,30 @@ static int prepare_statements(void) {
    if (rc != SQLITE_OK)
       return FAILURE;
 
+   /* WebUI sort variants — mirror auth_db_statements.c so memory_db_fact_list_sorted
+    * exercises its real statement selection + bind logic here. */
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
+       "access_count, superseded_by, category FROM memory_facts "
+       "WHERE user_id = ?1 AND superseded_by IS NULL "
+       "  AND (expires_at IS NULL OR expires_at >= ?4) "
+       "ORDER BY created_at DESC, id DESC LIMIT ?2 OFFSET ?3",
+       -1, &s_db.stmt_memory_fact_list_created_desc, NULL);
+   if (rc != SQLITE_OK)
+      return FAILURE;
+
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
+       "access_count, superseded_by, category FROM memory_facts "
+       "WHERE user_id = ?1 AND superseded_by IS NULL "
+       "  AND (expires_at IS NULL OR expires_at >= ?4) "
+       "ORDER BY created_at ASC, id ASC LIMIT ?2 OFFSET ?3",
+       -1, &s_db.stmt_memory_fact_list_created_asc, NULL);
+   if (rc != SQLITE_OK)
+      return FAILURE;
+
    rc = sqlite3_prepare_v2(s_db.db,
                            "DELETE FROM memory_facts WHERE user_id = ? "
                            "AND expires_at IS NOT NULL AND expires_at < ?",
@@ -285,6 +309,10 @@ static void close_db(void) {
       sqlite3_finalize(s_db.stmt_conv_set_last_extracted);
    if (s_db.stmt_memory_fact_list)
       sqlite3_finalize(s_db.stmt_memory_fact_list);
+   if (s_db.stmt_memory_fact_list_created_desc)
+      sqlite3_finalize(s_db.stmt_memory_fact_list_created_desc);
+   if (s_db.stmt_memory_fact_list_created_asc)
+      sqlite3_finalize(s_db.stmt_memory_fact_list_created_asc);
    if (s_db.stmt_memory_fact_prune_expired)
       sqlite3_finalize(s_db.stmt_memory_fact_prune_expired);
    s_db.stmt_memory_fact_create = NULL;
@@ -293,6 +321,8 @@ static void close_db(void) {
    s_db.stmt_memory_summary_create = NULL;
    s_db.stmt_conv_set_last_extracted = NULL;
    s_db.stmt_memory_fact_list = NULL;
+   s_db.stmt_memory_fact_list_created_desc = NULL;
+   s_db.stmt_memory_fact_list_created_asc = NULL;
    s_db.stmt_memory_fact_prune_expired = NULL;
    sqlite3_close(s_db.db);
    s_db.db = NULL;
@@ -935,6 +965,56 @@ void test_expiry_guard_hides_and_restores(void) {
    TEST_ASSERT_EQUAL(2, n);
 }
 
+/* memory_db_fact_list_sorted honors the sort order: DEFAULT keeps confidence DESC,
+ * CREATED_DESC/ASC order by created_at.  Guards the WebUI sort statements + the
+ * enum->statement selection. */
+void test_fact_list_sort_orders(void) {
+   g_config.memory.expire_enabled = false;
+
+   int64_t now = (int64_t)time(NULL);
+   int64_t id_old = 0, id_mid = 0, id_new = 0;
+   /* confidence order (0.9 > 0.7 > 0.5) is deliberately different from age order
+    * so DEFAULT (confidence) and CREATED_* produce distinct sequences. */
+   memory_db_fact_create_at(1, "oldest fact", 0.5f, "explicit", "general", NULL, now - 300,
+                            &id_old);
+   memory_db_fact_create_at(1, "middle fact", 0.9f, "explicit", "general", NULL, now - 200,
+                            &id_mid);
+   memory_db_fact_create_at(1, "newest fact", 0.7f, "explicit", "general", NULL, now - 100,
+                            &id_new);
+   TEST_ASSERT_TRUE(id_old > 0 && id_mid > 0 && id_new > 0);
+
+   memory_fact_t facts[8];
+   int n = 0;
+
+   /* DEFAULT == confidence DESC: mid(0.9), new(0.7), old(0.5). */
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS,
+                     memory_db_fact_list_sorted(1, MEMORY_SORT_DEFAULT, facts, 8, 0, &n));
+   TEST_ASSERT_EQUAL(3, n);
+   TEST_ASSERT_EQUAL_INT64(id_mid, facts[0].id);
+   TEST_ASSERT_EQUAL_INT64(id_new, facts[1].id);
+   TEST_ASSERT_EQUAL_INT64(id_old, facts[2].id);
+
+   /* CREATED_DESC == newest first: new, mid, old. */
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS,
+                     memory_db_fact_list_sorted(1, MEMORY_SORT_CREATED_DESC, facts, 8, 0, &n));
+   TEST_ASSERT_EQUAL(3, n);
+   TEST_ASSERT_EQUAL_INT64(id_new, facts[0].id);
+   TEST_ASSERT_EQUAL_INT64(id_mid, facts[1].id);
+   TEST_ASSERT_EQUAL_INT64(id_old, facts[2].id);
+
+   /* CREATED_ASC == oldest first: old, mid, new. */
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS,
+                     memory_db_fact_list_sorted(1, MEMORY_SORT_CREATED_ASC, facts, 8, 0, &n));
+   TEST_ASSERT_EQUAL(3, n);
+   TEST_ASSERT_EQUAL_INT64(id_old, facts[0].id);
+   TEST_ASSERT_EQUAL_INT64(id_mid, facts[1].id);
+   TEST_ASSERT_EQUAL_INT64(id_new, facts[2].id);
+
+   /* The plain list stays the DEFAULT (confidence) order. */
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_list(1, facts, 8, 0, &n));
+   TEST_ASSERT_EQUAL_INT64(id_mid, facts[0].id);
+}
+
 /* prune_expired hard-deletes facts past their reference date (retention 0) and
  * leaves durable + future-expiry facts intact. */
 void test_prune_expired_removes_past_only(void) {
@@ -1005,6 +1085,7 @@ int main(void) {
 
    /* v58 fact-expiry guard + prune — 2 cases. */
    RUN_TEST(test_expiry_guard_hides_and_restores);
+   RUN_TEST(test_fact_list_sort_orders);
    RUN_TEST(test_prune_expired_removes_past_only);
 
    return UNITY_END();

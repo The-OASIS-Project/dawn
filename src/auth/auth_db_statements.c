@@ -819,6 +819,37 @@ int auth_db_prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   /* WebUI sort variants: identical projection + ?1..?4 numbering as
+    * stmt_memory_fact_list so memory_db_fact_list_sorted's one bind block serves
+    * all three.  The id tiebreak keeps OFFSET paging stable across same-second rows. */
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
+       "access_count, superseded_by, category FROM memory_facts "
+       "WHERE user_id = ?1 AND superseded_by IS NULL "
+       "  AND (expires_at IS NULL OR expires_at >= ?4) "
+       "ORDER BY created_at DESC, id DESC LIMIT ?2 OFFSET ?3",
+       -1, &s_db.stmt_memory_fact_list_created_desc, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare memory_fact_list_created_desc failed: %s",
+                 sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
+       "access_count, superseded_by, category FROM memory_facts "
+       "WHERE user_id = ?1 AND superseded_by IS NULL "
+       "  AND (expires_at IS NULL OR expires_at >= ?4) "
+       "ORDER BY created_at ASC, id ASC LIMIT ?2 OFFSET ?3",
+       -1, &s_db.stmt_memory_fact_list_created_asc, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare memory_fact_list_created_asc failed: %s",
+                 sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
    rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
@@ -1162,6 +1193,20 @@ int auth_db_prepare_statements(void) {
        -1, &s_db.stmt_memory_summary_list, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare memory_summary_list failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   /* WebUI sort variant (oldest first): same projection + positional params as
+    * stmt_memory_summary_list.  DEFAULT/newest keeps using stmt_memory_summary_list. */
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT id, user_id, session_id, summary, topics, sentiment, created_at, "
+       "message_count, duration_seconds, consolidated FROM memory_summaries "
+       "WHERE user_id = ? AND consolidated = 0 ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?",
+       -1, &s_db.stmt_memory_summary_list_created_asc, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare memory_summary_list_created_asc failed: %s",
+                 sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
@@ -2683,6 +2728,10 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_memory_fact_get);
    if (s_db.stmt_memory_fact_list)
       sqlite3_finalize(s_db.stmt_memory_fact_list);
+   if (s_db.stmt_memory_fact_list_created_desc)
+      sqlite3_finalize(s_db.stmt_memory_fact_list_created_desc);
+   if (s_db.stmt_memory_fact_list_created_asc)
+      sqlite3_finalize(s_db.stmt_memory_fact_list_created_asc);
    if (s_db.stmt_memory_fact_search)
       sqlite3_finalize(s_db.stmt_memory_fact_search);
    if (s_db.stmt_memory_fact_search_bm25)
@@ -2719,6 +2768,8 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_memory_summary_create);
    if (s_db.stmt_memory_summary_list)
       sqlite3_finalize(s_db.stmt_memory_summary_list);
+   if (s_db.stmt_memory_summary_list_created_asc)
+      sqlite3_finalize(s_db.stmt_memory_summary_list_created_asc);
    if (s_db.stmt_memory_summary_mark_consolidated)
       sqlite3_finalize(s_db.stmt_memory_summary_mark_consolidated);
    if (s_db.stmt_memory_summary_search)

@@ -323,6 +323,16 @@ int memory_db_fact_list(int user_id,
                         int max_facts,
                         int offset,
                         int *count_out) {
+   return memory_db_fact_list_sorted(user_id, MEMORY_SORT_DEFAULT, out_facts, max_facts, offset,
+                                     count_out);
+}
+
+int memory_db_fact_list_sorted(int user_id,
+                               memory_list_sort_t sort,
+                               memory_fact_t *out_facts,
+                               int max_facts,
+                               int offset,
+                               int *count_out) {
    if (count_out)
       *count_out = 0;
    if (!out_facts || max_facts <= 0) {
@@ -331,7 +341,26 @@ int memory_db_fact_list(int user_id,
 
    AUTH_DB_LOCK_OR_FAIL();
 
-   sqlite3_stmt *stmt = s_db.stmt_memory_fact_list;
+   /* All three statements share the ?1 user / ?2 limit / ?3 offset / ?4 expiry
+    * numbering (see auth_db_statements.c), so one bind block serves any of them. */
+   sqlite3_stmt *stmt;
+   switch (sort) {
+      case MEMORY_SORT_CREATED_DESC:
+         stmt = s_db.stmt_memory_fact_list_created_desc;
+         break;
+      case MEMORY_SORT_CREATED_ASC:
+         stmt = s_db.stmt_memory_fact_list_created_asc;
+         break;
+      default:
+         stmt = s_db.stmt_memory_fact_list;
+         break;
+   }
+   if (!stmt) {
+      AUTH_DB_UNLOCK();
+      OLOG_ERROR("memory_db_fact_list_sorted: statement not prepared (sort=%d)", (int)sort);
+      return MEMORY_DB_FAILURE;
+   }
+
    sqlite3_reset(stmt);
    sqlite3_bind_int(stmt, 1, user_id);
    sqlite3_bind_int(stmt, 2, max_facts);

@@ -11,6 +11,22 @@
 
    const PAGE_SIZE = 20;
 
+   /* Per-tab sort options for the Facts/Summaries sort control. `value` is sent
+    * to the server as the `sort` field (see webui_memory.c parse_memory_sort).
+    * Only these two tabs are sortable. */
+   const SORT_OPTIONS = {
+      facts: [
+         { value: 'confidence', label: 'Most confident' },
+         { value: 'created_desc', label: 'Newest first' },
+         { value: 'created_asc', label: 'Oldest first' },
+      ],
+      summaries: [
+         { value: 'created_desc', label: 'Newest first' },
+         { value: 'created_asc', label: 'Oldest first' },
+      ],
+   };
+   const SORT_DEFAULTS = { facts: 'confidence', summaries: 'created_desc' };
+
    /* =============================================================================
     * State
     * ============================================================================= */
@@ -24,6 +40,7 @@
       entities: [],
       allEntities: [], // Keep unfiltered copy for client-side search
       activeTab: 'facts',
+      sortByTab: { facts: 'confidence', summaries: 'created_desc' },
       searchQuery: '',
       searchTimeout: null,
       tabOffset: { facts: 0, preferences: 0, summaries: 0, entities: 0, contacts: 0 },
@@ -63,6 +80,7 @@
       popover: null,
       closeBtn: null,
       searchInput: null,
+      sortSelect: null,
       list: null,
       forgetAllBtn: null,
       exportBtn: null,
@@ -95,7 +113,7 @@
       memoryState.loading = true;
       DawnWS.send({
          type: 'list_memory_facts',
-         payload: { limit: PAGE_SIZE, offset: offset || 0 },
+         payload: { limit: PAGE_SIZE, offset: offset || 0, sort: memoryState.sortByTab.facts },
       });
    }
 
@@ -113,7 +131,7 @@
       memoryState.loading = true;
       DawnWS.send({
          type: 'list_memory_summaries',
-         payload: { limit: PAGE_SIZE, offset: offset || 0 },
+         payload: { limit: PAGE_SIZE, offset: offset || 0, sort: memoryState.sortByTab.summaries },
       });
    }
 
@@ -413,8 +431,10 @@
       // hits regardless of how much the user has paginated through.  The
       // older client-side filter on `allPreferences` / `allEntities` only
       // saw the loaded-page subset and silently missed past-page matches.
-      memoryState.facts = payload.facts || [];
-      memoryState.summaries = payload.summaries || [];
+      // Server search uses a fixed order per record type; re-apply the user's
+      // chosen Facts/Summaries sort so results honor the active sort control.
+      memoryState.facts = sortMemoryArray(payload.facts || [], 'facts');
+      memoryState.summaries = sortMemoryArray(payload.summaries || [], 'summaries');
       memoryState.preferences = payload.preferences || [];
       memoryState.entities = payload.entities || [];
 
@@ -617,75 +637,11 @@
       `;
    }
 
-   function handleFactSourceResponse(payload) {
-      const modal = document.getElementById('memory-source-modal');
-      const body = document.getElementById('memory-source-body');
-      if (!modal || !body) return;
-
-      if (!payload.success) {
-         const reasonText = {
-            forbidden: "You don't have access to this source conversation.",
-            invalid_range: 'Source range is invalid for this fact.',
-            error: "Couldn't load the source (server error). Please try again.",
-         };
-         const msg = reasonText[payload.reason] || 'Source no longer available.';
-         body.innerHTML = `<p class="memory-source-unavailable">${escapeHtml(msg)}</p>`;
-      } else {
-         const msgs = payload.messages || [];
-         if (msgs.length === 0) {
-            body.innerHTML =
-               '<p class="memory-source-unavailable">No messages in source range.</p>';
-         } else {
-            body.innerHTML = msgs
-               .map(
-                  (m) => `
-               <div class="memory-source-message memory-source-${escapeHtml(m.role)}">
-                  <span class="memory-source-role">${escapeHtml(m.role)}</span>
-                  <span class="memory-source-content">${escapeHtml(m.content || '')}</span>
-               </div>
-            `
-               )
-               .join('');
-         }
-      }
-      modal.classList.remove('hidden');
-   }
-
-   let sourceModalTrigger = null;
-   let sourceEscToken = null; // DawnEscStack registration while the source modal is open
-
-   function openSourceModal(factId) {
-      const modal = document.getElementById('memory-source-modal');
-      const body = document.getElementById('memory-source-body');
-      if (!modal || !body) return;
-      sourceModalTrigger = document.activeElement;
-      body.innerHTML = '<p class="memory-source-loading">Loading…</p>';
-      modal.classList.remove('hidden');
-      if (sourceEscToken === null) {
-         sourceEscToken = DawnEscStack.register(() => {
-            closeSourceModal();
-            return true;
-         });
-      }
-      const closeBtn = document.getElementById('memory-source-close');
-      if (closeBtn) closeBtn.focus();
-      if (typeof DawnWS !== 'undefined' && DawnWS.isConnected()) {
-         DawnWS.send({ type: 'get_memory_fact_source', payload: { fact_id: factId } });
-      }
-   }
-
-   function closeSourceModal() {
-      const modal = document.getElementById('memory-source-modal');
-      if (modal) modal.classList.add('hidden');
-      if (sourceEscToken !== null) {
-         DawnEscStack.unregister(sourceEscToken);
-         sourceEscToken = null;
-      }
-      if (sourceModalTrigger && typeof sourceModalTrigger.focus === 'function') {
-         sourceModalTrigger.focus();
-         sourceModalTrigger = null;
-      }
-   }
+   /* The fact-source "mini chat" viewer (handleFactSourceResponse / openSourceModal /
+    * closeSourceModal) now lives in www/js/ui/memory_source.js as DawnMemorySource.
+    * DawnMemory.handleFactSourceResponse below forwards to it so the dawn.js WS
+    * dispatch is unchanged, and the source-button click handler calls
+    * DawnMemorySource.openSourceModal directly. */
 
    function renderPreferencesList() {
       if (!memoryElements.list) return;
@@ -1102,7 +1058,7 @@
       const sourceBtn = e.target.closest('.memory-item-source-btn');
       if (sourceBtn) {
          e.stopPropagation();
-         openSourceModal(parseInt(sourceBtn.dataset.factId, 10));
+         DawnMemorySource.openSourceModal(parseInt(sourceBtn.dataset.factId, 10));
          return;
       }
 
@@ -1215,7 +1171,9 @@
          }, 0);
       }
 
-      // Request fresh data
+      // Request fresh data (sync the sort control first — switchTab early-returns
+      // on the same tab, so opening on the default tab wouldn't otherwise sync it).
+      syncSortControl();
       requestStats();
       loadActiveTabData();
 
@@ -1288,6 +1246,15 @@
       )
          return;
 
+      // Same for the source-conversation modal (a sibling overlay, not a child of
+      // the panel): a click on it — the ×, the backdrop, or its content — must not
+      // close the panel underneath. `contains()` (no not-hidden check) still matches
+      // a close-button click, which hides the modal before this document-level
+      // handler runs; a truly-closed modal is display:none so its nodes aren't
+      // clickable. No stopPropagation, so the image lightbox still receives clicks.
+      const sourceModal = document.getElementById('memory-source-modal');
+      if (sourceModal && sourceModal.contains(e.target)) return;
+
       if (
          memoryElements.popover &&
          !memoryElements.popover.contains(e.target) &&
@@ -1318,6 +1285,7 @@
       memoryState.activeTab = tabName;
 
       if (tablist) tablist.sync();
+      syncSortControl();
 
       // Update tabpanel aria-labelledby to point to active tab
       if (memoryElements.list) {
@@ -1365,6 +1333,92 @@
             if (typeof DawnContacts !== 'undefined') DawnContacts.loadContacts();
             break;
       }
+   }
+
+   /* =============================================================================
+    * Sort Control (Facts / Summaries only)
+    * ============================================================================= */
+
+   /* Client-side comparator matching the server sort — used ONLY to re-order an
+    * active search result set (search uses its own fixed SQL order), so a search
+    * run under "Oldest" still reads oldest-first. */
+   function sortMemoryArray(arr, tab) {
+      if (!Array.isArray(arr)) return arr;
+      const cmp = {
+         confidence: (a, b) => (b.confidence || 0) - (a.confidence || 0),
+         created_desc: (a, b) => (b.created_at || 0) - (a.created_at || 0),
+         created_asc: (a, b) => (a.created_at || 0) - (b.created_at || 0),
+      }[memoryState.sortByTab[tab]];
+      return cmp ? arr.slice().sort(cmp) : arr;
+   }
+
+   /* Show + populate the sort <select> for the active tab (Facts/Summaries only),
+    * reflecting the persisted choice. Called from switchTab and open(). */
+   function syncSortControl() {
+      const sel = memoryElements.sortSelect;
+      if (!sel) return;
+      const options = SORT_OPTIONS[memoryState.activeTab];
+      if (!options) {
+         sel.hidden = true;
+         return;
+      }
+      const current = memoryState.sortByTab[memoryState.activeTab];
+      sel.innerHTML = options
+         .map(
+            (o) =>
+               `<option value="${o.value}"${o.value === current ? ' selected' : ''}>${escapeHtml(
+                  o.label
+               )}</option>`
+         )
+         .join('');
+      sel.hidden = false;
+   }
+
+   function handleSortChange() {
+      const sel = memoryElements.sortSelect;
+      if (!sel) return;
+      const tab = memoryState.activeTab;
+      const options = SORT_OPTIONS[tab];
+      if (!options || !options.some((o) => o.value === sel.value)) return;
+      memoryState.sortByTab[tab] = sel.value;
+      persistSort();
+
+      if (memoryState.searchQuery) {
+         // Search results carry their own fixed SQL order; re-order the loaded
+         // set client-side and re-render (no server round-trip).
+         if (tab === 'facts') {
+            memoryState.facts = sortMemoryArray(memoryState.facts, 'facts');
+            renderFactsList();
+         } else if (tab === 'summaries') {
+            memoryState.summaries = sortMemoryArray(memoryState.summaries, 'summaries');
+            renderSummariesList();
+         }
+         return;
+      }
+
+      // Non-search path: re-request page 0 in the new order.
+      memoryState.tabOffset[tab] = 0;
+      showLoading();
+      if (tab === 'facts') requestFacts(0);
+      else if (tab === 'summaries') requestSummaries(0);
+   }
+
+   /* Load persisted sort choices, validated against each tab's allowed set. */
+   function loadPersistedSort() {
+      if (typeof DawnStore === 'undefined') return;
+      const stored = DawnStore.getJSON(DawnStore.KEYS.MEMORY_SORT, null);
+      if (!stored || typeof stored !== 'object') return;
+      Object.keys(SORT_OPTIONS).forEach((tab) => {
+         const v = stored[tab];
+         if (v && SORT_OPTIONS[tab].some((o) => o.value === v)) {
+            memoryState.sortByTab[tab] = v;
+         }
+      });
+   }
+
+   function persistSort() {
+      if (typeof DawnStore === 'undefined') return;
+      DawnStore.setJSON(DawnStore.KEYS.MEMORY_SORT, memoryState.sortByTab);
    }
 
    /* =============================================================================
@@ -1519,6 +1573,7 @@
       memoryElements.popover = document.getElementById('memory-popover');
       memoryElements.closeBtn = document.getElementById('memory-close');
       memoryElements.searchInput = document.getElementById('memory-search-input');
+      memoryElements.sortSelect = document.getElementById('memory-sort');
       memoryElements.list = document.getElementById('memory-list');
       memoryElements.forgetAllBtn = document.getElementById('memory-forget-all');
       memoryElements.exportBtn = document.getElementById('memory-export');
@@ -1597,24 +1652,21 @@
          memoryElements.searchInput.addEventListener('input', handleSearchInput);
       }
 
+      // Sort control (Facts/Summaries)
+      loadPersistedSort();
+      if (memoryElements.sortSelect) {
+         memoryElements.sortSelect.addEventListener('change', handleSortChange);
+      }
+      syncSortControl();
+
       // Forget all handler
       if (memoryElements.forgetAllBtn) {
          memoryElements.forgetAllBtn.addEventListener('click', handleForgetAll);
       }
 
       // Export/Import buttons + modals are wired by DawnMemoryImport.init() above.
-
-      // Source modal close button, overlay click, and ESC key
-      const srcClose = document.getElementById('memory-source-close');
-      if (srcClose) srcClose.addEventListener('click', closeSourceModal);
-      const srcModal = document.getElementById('memory-source-modal');
-      if (srcModal) {
-         srcModal.addEventListener('click', (e) => {
-            if (e.target === srcModal) closeSourceModal();
-         });
-         // Escape close is handled via DawnEscStack (register-on-open in
-         // openSourceModal / unregister in closeSourceModal).
-      }
+      // The source modal (close button, overlay click, ESC) is wired by
+      // DawnMemorySource.init() in memory_source.js.
 
       // Initialize contacts module
       if (typeof DawnContacts !== 'undefined') DawnContacts.init();
@@ -1658,6 +1710,8 @@
       handleDeleteAllResponse,
       handleExportResponse,
       handleImportResponse,
-      handleFactSourceResponse,
+      // Forwards to the extracted source viewer (memory_source.js) so the
+      // dawn.js WS dispatch (DawnMemory.handleFactSourceResponse) is unchanged.
+      handleFactSourceResponse: (payload) => DawnMemorySource.handleFactSourceResponse(payload),
    };
 })();

@@ -146,6 +146,16 @@ int memory_db_summary_list(int user_id,
                            int max_summaries,
                            int offset,
                            int *count_out) {
+   return memory_db_summary_list_sorted(user_id, MEMORY_SORT_DEFAULT, out_summaries, max_summaries,
+                                        offset, count_out);
+}
+
+int memory_db_summary_list_sorted(int user_id,
+                                  memory_list_sort_t sort,
+                                  memory_summary_t *out_summaries,
+                                  int max_summaries,
+                                  int offset,
+                                  int *count_out) {
    if (count_out)
       *count_out = 0;
    if (!out_summaries || max_summaries <= 0) {
@@ -154,7 +164,17 @@ int memory_db_summary_list(int user_id,
 
    AUTH_DB_LOCK_OR_FAIL();
 
-   sqlite3_stmt *stmt = s_db.stmt_memory_summary_list;
+   /* Only CREATED_ASC differs; DEFAULT and CREATED_DESC are both newest-first.
+    * Both statements share the positional user / limit / offset binding. */
+   sqlite3_stmt *stmt = (sort == MEMORY_SORT_CREATED_ASC)
+                            ? s_db.stmt_memory_summary_list_created_asc
+                            : s_db.stmt_memory_summary_list;
+   if (!stmt) {
+      AUTH_DB_UNLOCK();
+      OLOG_ERROR("memory_db_summary_list_sorted: statement not prepared (sort=%d)", (int)sort);
+      return MEMORY_DB_FAILURE;
+   }
+
    sqlite3_reset(stmt);
    sqlite3_bind_int(stmt, 1, user_id);
    sqlite3_bind_int(stmt, 2, max_summaries);

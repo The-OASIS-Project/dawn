@@ -499,6 +499,11 @@
       const transcript = DawnElements.transcript;
       if (!transcript) return;
 
+      /* NOTE: the marker pre-render ORDER below (documents -> images -> strip
+       * <thinking> -> extract <dawn-visual> -> markdown) is mirrored by the
+       * static source viewer in memory_source.js (renderSourceMessage).  If you
+       * add or reorder a marker family here, update that mirror too. */
+
       // Parse document markers (strip from display, extract for chips)
       // If caller already extracted docs (addTranscriptEntry), use those directly
       let docData;
@@ -902,5 +907,8 @@
       containsCommandTags: containsCommandTags,
       isOnlyDebugContent: isOnlyDebugContent,
       extractUserFacingText: extractUserFacingText,
+      // Reused by the memory source viewer (mini-chat render)
+      createImageElement: createImageElement,
+      createDocumentChips: createDocumentChips,
    };
 })(window);

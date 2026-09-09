@@ -562,6 +562,14 @@
                   placeholder="Search memories..."
                   autocomplete="off"
                />
+               <!-- Sort control: shown only for Facts/Summaries; options are
+                    populated per-tab by DawnMemory.syncSortControl(). -->
+               <select
+                  id="memory-sort"
+                  class="memory-sort"
+                  aria-label="Sort memories"
+                  hidden
+               ></select>
             </div>
 
             <div
@@ -3653,6 +3661,7 @@ token = "eyJ..."</pre
       <script defer src="/js/ui/history.js"></script>
       <script defer src="/js/ui/memory_aliases.js"></script>
       <script defer src="/js/ui/memory_import.js"></script>
+      <script defer src="/js/ui/memory_source.js"></script>
       <script defer src="/js/ui/memory.js"></script>
       <script defer src="/js/ui/silent-observe.js"></script>
       <script defer src="/js/ui/context-injection.js"></script>

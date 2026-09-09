@@ -91,6 +91,27 @@ void handle_get_memory_stats(ws_connection_t *conn) {
  * Memory Facts Handlers
  * ============================================================================= */
 
+/* Map an optional "sort" payload field to a memory_list_sort_t.  Facts accept
+ * "confidence" (default) / "created_desc" / "created_asc"; summaries accept
+ * "created_desc" (default) / "created_asc".  Absent or unrecognized ->
+ * MEMORY_SORT_DEFAULT (each list's natural order).  Shared by the facts and
+ * summaries list handlers. */
+static memory_list_sort_t parse_memory_sort(struct json_object *payload) {
+   if (!payload)
+      return MEMORY_SORT_DEFAULT;
+   json_object *sort_obj;
+   if (!json_object_object_get_ex(payload, "sort", &sort_obj))
+      return MEMORY_SORT_DEFAULT;
+   const char *s = json_object_get_string(sort_obj);
+   if (!s)
+      return MEMORY_SORT_DEFAULT;
+   if (strcmp(s, "created_desc") == 0)
+      return MEMORY_SORT_CREATED_DESC;
+   if (strcmp(s, "created_asc") == 0)
+      return MEMORY_SORT_CREATED_ASC;
+   return MEMORY_SORT_DEFAULT; /* "confidence" and any unknown value */
+}
+
 /**
  * @brief List memory facts for the current user (paginated)
  */
@@ -123,10 +144,11 @@ void handle_list_memory_facts(ws_connection_t *conn, struct json_object *payload
    }
 
    /* Query database */
+   memory_list_sort_t sort = parse_memory_sort(payload);
    memory_fact_t facts[MAX_MEMORY_LIMIT];
    memset(facts, 0, sizeof(facts));
    int count = 0;
-   int list_rc = memory_db_fact_list(conn->auth_user_id, facts, limit, offset, &count);
+   int list_rc = memory_db_fact_list_sorted(conn->auth_user_id, sort, facts, limit, offset, &count);
 
    if (list_rc == MEMORY_DB_SUCCESS) {
       /* Batch-fetch provenance for all facts in one lock cycle. */
@@ -721,10 +743,12 @@ void handle_list_memory_summaries(ws_connection_t *conn, struct json_object *pay
    }
 
    /* Query database */
+   memory_list_sort_t sort = parse_memory_sort(payload);
    memory_summary_t summaries[MAX_MEMORY_LIMIT];
    memset(summaries, 0, sizeof(summaries));
    int count = 0;
-   int rc = memory_db_summary_list(conn->auth_user_id, summaries, limit, offset, &count);
+   int rc = memory_db_summary_list_sorted(conn->auth_user_id, sort, summaries, limit, offset,
+                                          &count);
 
    if (rc == MEMORY_DB_SUCCESS) {
       json_object *summaries_array = json_object_new_array();

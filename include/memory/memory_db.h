@@ -165,6 +165,19 @@ int memory_db_fact_get(int64_t fact_id, int user_id, memory_fact_t *out_fact);
 bool memory_db_fact_expiry_hidden(int64_t expires_at);
 
 /**
+ * @brief Sort order for the paginated fact/summary list readers.
+ *
+ * DEFAULT preserves each list's historical order (facts: confidence DESC;
+ * summaries: created_at DESC). The CREATED_* orders sort by created_at.
+ * An unrecognized value is treated as DEFAULT (never an error).
+ */
+typedef enum {
+   MEMORY_SORT_DEFAULT = 0,  /**< list's natural order (facts: confidence; summaries: newest) */
+   MEMORY_SORT_CREATED_DESC, /**< newest first (by created_at) */
+   MEMORY_SORT_CREATED_ASC,  /**< oldest first (by created_at) */
+} memory_list_sort_t;
+
+/**
  * @brief List facts for a user (non-superseded only)
  *
  * @param user_id User ID
@@ -179,6 +192,21 @@ int memory_db_fact_list(int user_id,
                         int max_facts,
                         int offset,
                         int *count_out);
+
+/**
+ * @brief List facts for a user with an explicit sort order.
+ *
+ * memory_db_fact_list() is the DEFAULT-order (confidence DESC) delegator of this.
+ *
+ * @param sort MEMORY_SORT_DEFAULT (confidence DESC), CREATED_DESC, or CREATED_ASC
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_fact_list_sorted(int user_id,
+                               memory_list_sort_t sort,
+                               memory_fact_t *out_facts,
+                               int max_facts,
+                               int offset,
+                               int *count_out);
 
 /**
  * @brief Search facts by keyword
@@ -768,6 +796,23 @@ int memory_db_summary_list(int user_id,
                            int max_summaries,
                            int offset,
                            int *count_out);
+
+/**
+ * @brief List recent (non-consolidated) summaries with an explicit sort order.
+ *
+ * memory_db_summary_list() is the DEFAULT-order (created_at DESC) delegator of this.
+ * Facts-only orders (there is no confidence) collapse to DEFAULT; only CREATED_ASC
+ * changes the order (oldest first).
+ *
+ * @param sort MEMORY_SORT_DEFAULT / CREATED_DESC (both newest first) or CREATED_ASC
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_summary_list_sorted(int user_id,
+                                  memory_list_sort_t sort,
+                                  memory_summary_t *out_summaries,
+                                  int max_summaries,
+                                  int offset,
+                                  int *count_out);
 
 /**
  * @brief Mark a summary as consolidated
