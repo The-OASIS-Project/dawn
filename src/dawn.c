@@ -1322,6 +1322,33 @@ void *llm_worker_thread(void *arg) {
    return NULL;
 }
 
+/**
+ * @brief Expand a leading '~' in a config path into a runtime-resolved field.
+ *
+ * Called once at startup for each filesystem path in [paths]. Centralizes the
+ * expansion that consumers previously each had to remember (the music queue DB
+ * forgot it once — see UPGRADING/the tilde bug). The raw source is left intact
+ * for serialization; only the resolved copy is normalized. Lives here in the
+ * application layer rather than the config layer because path_expand_tilde()
+ * is a Layer-1 helper and config is Layer 0 (no upward dependency allowed).
+ *
+ * On expansion failure (e.g. HOME unset, or the result exceeds resolved_len)
+ * it falls back to copying the raw value so downstream never receives an empty
+ * path; leaf DB openers still expand defensively as a second line.
+ */
+static void resolve_config_path(const char *raw, char *resolved, size_t resolved_len) {
+   if (raw == NULL || raw[0] == '\0') {
+      if (resolved_len > 0) {
+         resolved[0] = '\0';
+      }
+      return;
+   }
+   if (!path_expand_tilde(raw, resolved, resolved_len)) {
+      OLOG_WARNING("Could not expand path '%s'; using as-is", raw);
+      snprintf(resolved, resolved_len, "%s", raw);
+   }
+}
+
 int main(int argc, char *argv[]) {
    char *input_text = NULL;
    char *command_text = NULL;
@@ -1710,6 +1737,16 @@ int main(int argc, char *argv[]) {
    // overrides can set a legacy value, and before config_validate below).
    config_migrate(&g_config);
 
+   // Step 4b: Resolve '~' in filesystem paths ONCE, into the runtime-only
+   // *_resolved fields, so every consumer reads an already-expanded path
+   // instead of each remembering to call path_expand_tilde. Runs after env +
+   // migrations (which can still change the raw paths) and before any consumer
+   // uses them. Raw fields stay untouched so config_write_toml round-trips '~'.
+   resolve_config_path(g_config.paths.data_dir, g_config.paths.data_dir_resolved,
+                       sizeof(g_config.paths.data_dir_resolved));
+   resolve_config_path(g_config.paths.music_dir, g_config.paths.music_dir_resolved,
+                       sizeof(g_config.paths.music_dir_resolved));
+
    // Step 4b: Apply config-based settings (CLI overrides take precedence)
    if (!(cli_overrides & CLI_OVERRIDE_COMMAND_MODE) &&
        g_config.commands.processing_mode[0] != '\0') {
@@ -2077,17 +2114,17 @@ int main(int argc, char *argv[]) {
       }
 
       // Initialize music metadata database for search by artist/title/album
-      // Construct path: {data_dir}/music.db
+      // Construct path: {data_dir}/music.db (data_dir_resolved = ~ pre-expanded)
       char music_db_path[CONFIG_PATH_MAX + 16];
-      snprintf(music_db_path, sizeof(music_db_path), "%s/music.db", g_config.paths.data_dir);
+      snprintf(music_db_path, sizeof(music_db_path), "%s/music.db",
+               g_config.paths.data_dir_resolved);
       if (music_db_init(music_db_path) == 0) {
          // Register available music source providers before starting scanner
          music_scanner_register_source(plex_db_get_provider());
 
-         // Start background scanner to index music library
-         // Uses paths.music_dir with tilde expansion handled by scanner
-         if (music_scanner_start(g_config.paths.music_dir, g_config.music.scan_interval_minutes,
-                                 music_db_path) != 0) {
+         // Start background scanner to index music library (pre-expanded dir)
+         if (music_scanner_start(g_config.paths.music_dir_resolved,
+                                 g_config.music.scan_interval_minutes, music_db_path) != 0) {
             OLOG_WARNING("Music scanner failed to start");
          }
       } else {
@@ -2411,12 +2448,10 @@ mqtt_disabled:
    }
 #endif
 
-   /* Initialize database (needed for memory system in all modes) */
-   char expanded_data_dir[CONFIG_PATH_MAX];
+   /* Initialize database (needed for memory system in all modes).
+    * data_dir_resolved was tilde-expanded once at startup (Step 4b). */
+   const char *expanded_data_dir = g_config.paths.data_dir_resolved;
    char auth_db_path[CONFIG_PATH_MAX + 16];
-   if (!path_expand_tilde(g_config.paths.data_dir, expanded_data_dir, sizeof(expanded_data_dir))) {
-      OLOG_ERROR("Failed to expand data_dir path: %s", g_config.paths.data_dir);
-   }
    snprintf(auth_db_path, sizeof(auth_db_path), "%s/auth.db", expanded_data_dir);
    bool auth_db_ready = (auth_db_init(auth_db_path) == AUTH_DB_SUCCESS);
    if (!auth_db_ready) {

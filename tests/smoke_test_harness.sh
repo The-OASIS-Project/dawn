@@ -43,8 +43,8 @@ skip_or_fail() {
 if [ -z "$DAWN_ADMIN" ]; then
    if command -v dawn-admin >/dev/null 2>&1; then
       DAWN_ADMIN="dawn-admin"
-   elif [ -x "$REPO_ROOT/build-debug/dawn-admin/dawn-admin" ]; then
-      DAWN_ADMIN="$REPO_ROOT/build-debug/dawn-admin/dawn-admin"
+   elif [ -x "$REPO_ROOT/build-debug/dawn-admin" ]; then
+      DAWN_ADMIN="$REPO_ROOT/build-debug/dawn-admin"
    else
       skip_or_fail "dawn-admin not found"
    fi

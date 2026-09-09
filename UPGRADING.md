@@ -12,6 +12,37 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-09-09 — `dawn-admin` binary now builds beside `dawn`
+
+**Anyone rebuilding in an existing build directory.** Fresh checkouts and clean
+builds are unaffected.
+
+**What changed.** The `dawn-admin` CLI now builds to `<build>/dawn-admin`
+(next to the `dawn` binary) instead of the nested `<build>/dawn-admin/dawn-admin`.
+This matches the layout the getting-started docs already show. The install/test
+scripts that hardcoded the old nested path were updated to the flat path in the
+same change.
+
+**Does this affect me?** Only if you have an **existing** build directory from
+before this change. It still contains a `dawn-admin/` *directory*, which now
+collides with the new same-named output *file* — your next build fails with:
+
+```
+/usr/bin/ld: cannot open output file dawn-admin: Is a directory
+```
+
+**Fix (one time).** Remove the stale directory, then rebuild:
+
+```bash
+rm -rf build-debug/dawn-admin        # or your build dir (build/, build-release/, …)
+make -C build-debug -j8
+```
+
+A full clean rebuild (fresh build directory) also resolves it. After this,
+invoke the CLI as `./build-debug/dawn-admin …` (no second `dawn-admin/`).
+
+---
+
 ## 2026-09-03 — llama-server: thinking control moved to `--reasoning`
 
 **Local LLM users only.** If DAWN uses a cloud provider, nothing here applies.

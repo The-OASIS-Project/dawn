@@ -26,7 +26,7 @@ SKIPPED=0
 # Path to dawn-admin binary
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-DAWN_ADMIN="${PROJECT_ROOT}/build-debug/dawn-admin/dawn-admin"
+DAWN_ADMIN="${PROJECT_ROOT}/build-debug/dawn-admin"
 
 # Test user credentials
 TEST_USER="testuser_$$"

@@ -1145,7 +1145,24 @@ add_subdirectory(tests EXCLUDE_FROM_ALL)
 # Admin CLI Tool (dawn-admin)
 # =============================================================================
 # Only built when authentication is enabled (WebUI)
+#
+# Defined here at the top level (rather than via add_subdirectory(dawn-admin))
+# so the binary lands at ${CMAKE_BINARY_DIR}/dawn-admin, beside the `dawn`
+# binary — the standard layout the docs and scripts expect. add_subdirectory
+# would create a build-tree directory of the same name and nest the output at
+# ${CMAKE_BINARY_DIR}/dawn-admin/dawn-admin (and a same-named output file would
+# collide with that directory). Mirrors how `ota-keytool` is defined above.
 if(ENABLE_AUTH)
-    add_subdirectory(dawn-admin)
+    add_executable(dawn-admin
+        dawn-admin/main.c
+        dawn-admin/socket_client.c
+        dawn-admin/password_prompt.c)
+    target_include_directories(dawn-admin PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    # SODIUM_LIBRARIES is set above when ENABLE_AUTH is ON.
+    target_link_libraries(dawn-admin pthread ${SODIUM_LIBRARIES})
+    set_target_properties(dawn-admin PROPERTIES
+        C_STANDARD 11
+        C_STANDARD_REQUIRED ON)
+    install(TARGETS dawn-admin RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 

@@ -397,7 +397,7 @@ run_admin() {
       return 0
    fi
 
-   if [ ! -f "$BUILD_DIR/dawn-admin/dawn-admin" ]; then
+   if [ ! -f "$BUILD_DIR/dawn-admin" ]; then
       warn "Admin: dawn-admin binary not found, skipping"
       return 0
    fi
@@ -465,7 +465,7 @@ run_admin() {
    # Wait for admin socket to be ready (daemon may still be initializing)
    local ready=false ping_timeout=10 ping_elapsed=0
    while [ $ping_elapsed -lt $ping_timeout ]; do
-      if run_dawn "$BUILD_DIR/dawn-admin/dawn-admin" ping >/dev/null 2>&1; then
+      if run_dawn "$BUILD_DIR/dawn-admin" ping >/dev/null 2>&1; then
          ready=true
          break
       fi
@@ -485,19 +485,20 @@ run_admin() {
 
    log "Creating admin account..."
 
+   # Generate a 16-char alphanumeric password. Read /dev/urandom as an UNBOUNDED
+   # stream so the alnum filter always reaches 16 chars: only ~24% of random
+   # bytes are [A-Za-z0-9], so a fixed 64-byte block averages ~15.5 survivors
+   # and falls short of 16 about half the time (and under the 8-char minimum
+   # occasionally, which dawn-admin then rejects). `head -c 16` closing the pipe
+   # sends SIGPIPE to `tr`; `|| true` keeps that from tripping `set -o pipefail`.
    local admin_pass
-   admin_pass=$(dd if=/dev/urandom bs=64 count=1 status=none | tr -dc 'A-Za-z0-9' | head -c 16)
+   admin_pass=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16) || true
 
    if DAWN_SETUP_TOKEN="$token" DAWN_PASSWORD="$admin_pass" \
-      run_dawn "$BUILD_DIR/dawn-admin/dawn-admin" user create admin --admin; then
-      # Store password globally so deploy step can reprint it
+      run_dawn "$BUILD_DIR/dawn-admin" user create admin --admin; then
+      # Store password globally so the final summary can reprint it
       INSTALL_ADMIN_PASS="$admin_pass"
-      echo ""
-      log "Admin account created:"
-      log "  Username: admin"
-      log "  Password: $admin_pass"
-      echo ""
-      warn "Save this password now — it will not be shown again."
+      show_admin_credentials "admin" "$admin_pass"
    else
       warn "Failed to create admin account"
       # Show DB init errors (often early in startup, missed by tail)
@@ -1100,15 +1101,6 @@ main() {
       elif [ "$INTERACTIVE" = true ]; then
          if ask_yes_no "Deploy DAWN as a systemd service?"; then
             run_deploy "server"
-            # Reprint admin credentials so user doesn't have to scroll up
-            if [ -n "${INSTALL_ADMIN_PASS:-}" ]; then
-               echo ""
-               log "Admin credentials (same as Phase 8):"
-               log "  Username: admin"
-               log "  Password: $INSTALL_ADMIN_PASS"
-               echo ""
-               warn "Save this password now — it will not be shown again."
-            fi
          else
             echo ""
             log "To deploy as a service later:"
@@ -1123,6 +1115,13 @@ main() {
 
    echo ""
    log "Installation complete!"
+
+   # Reprint admin credentials LAST, on every path (interactive/unattended,
+   # server/satellite, deploy-or-not), so the one-time password is the final
+   # thing on screen instead of scrolled off above the verify/deploy output.
+   if [ -n "${INSTALL_ADMIN_PASS:-}" ]; then
+      show_admin_credentials "admin" "$INSTALL_ADMIN_PASS"
+   fi
 }
 
 main "$@"

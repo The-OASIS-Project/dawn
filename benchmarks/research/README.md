@@ -81,7 +81,7 @@ confirm — the operator is the authorization (§16.4). Runs are **web-only**.
    # from the repo root:
    benchmarks/research/run_benchmark.py \
        --tasks benchmarks/research/smoke_queries.json --user <eval_id> \
-       --admin ./build-debug/dawn-admin/dawn-admin \
+       --admin ./build-debug/dawn-admin \
        --out benchmarks/research/results --timeout 3600
    ```
 
@@ -136,7 +136,7 @@ cd benchmarks/research
 
 # 2. run them through DAWN (dedicated eval user; long timeout for cloud too).
 ./run_benchmark.py --tasks dr_tasks.json --user <eval_id> \
-    --admin ../../build-debug/dawn-admin/dawn-admin \
+    --admin ../../build-debug/dawn-admin \
     --out results/dr --timeout 3600 --prompt-tag sonnet5-baseline
 
 # 3. our artifacts -> their raw_data line file, + the deterministic stats table.

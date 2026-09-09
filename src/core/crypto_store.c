@@ -49,13 +49,24 @@ static int s_crypto_error = 0;
  * Key File Path
  * ============================================================================= */
 
+/* Resolve the data directory used for key storage. Prefer the startup-resolved
+ * value (dawn.c Step 4b); fall back to expanding the raw config value here for
+ * consumers that run OUTSIDE daemon startup and so never populate
+ * data_dir_resolved (e.g. the standalone crypto_store unit test, which sets
+ * paths.data_dir directly); finally /var/lib/dawn when nothing is configured. */
+static void crypto_data_dir(char *out, size_t out_len) {
+   if (g_config.paths.data_dir_resolved[0]) {
+      snprintf(out, out_len, "%s", g_config.paths.data_dir_resolved);
+   } else if (g_config.paths.data_dir[0]) {
+      path_expand_tilde(g_config.paths.data_dir, out, out_len);
+   } else {
+      snprintf(out, out_len, "/var/lib/dawn");
+   }
+}
+
 static void get_key_path(char *out, size_t out_len) {
    char expanded[512];
-   if (g_config.paths.data_dir[0]) {
-      path_expand_tilde(g_config.paths.data_dir, expanded, sizeof(expanded));
-   } else {
-      snprintf(expanded, sizeof(expanded), "/var/lib/dawn");
-   }
+   crypto_data_dir(expanded, sizeof(expanded));
    snprintf(out, out_len, "%.*s/dawn.key", (int)(out_len > 10 ? out_len - 10 : 0), expanded);
 }
 
@@ -65,11 +76,7 @@ static void get_key_path(char *out, size_t out_len) {
 
 static void migrate_key_file(const char *new_path) {
    char expanded[512];
-   if (g_config.paths.data_dir[0]) {
-      path_expand_tilde(g_config.paths.data_dir, expanded, sizeof(expanded));
-   } else {
-      snprintf(expanded, sizeof(expanded), "/var/lib/dawn");
-   }
+   crypto_data_dir(expanded, sizeof(expanded));
 
    char old_path[PATH_MAX];
    snprintf(old_path, sizeof(old_path), "%s/caldav.key", expanded);

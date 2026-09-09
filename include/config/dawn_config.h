@@ -905,6 +905,16 @@ typedef struct {
 typedef struct {
    char data_dir[CONFIG_PATH_MAX]; /* Data directory for databases (default: ~/.local/share/dawn) */
    char music_dir[CONFIG_PATH_MAX]; /* Music library location */
+
+   /* Runtime-only, tilde-EXPANDED forms of the two paths above. Populated once
+    * at startup (see resolve_config_path() in dawn.c); NOT parsed, NOT written
+    * back to dawn.toml, NOT part of the config round-trip. Filesystem consumers
+    * must read these, never the raw fields above — the raw ones may still begin
+    * with '~'. Empty until resolution runs (e.g. in standalone tools that load
+    * config without the daemon startup path; those rely on leaf openers that
+    * expand defensively). */
+   char data_dir_resolved[CONFIG_PATH_MAX];
+   char music_dir_resolved[CONFIG_PATH_MAX];
 } paths_config_t;
 
 /* =============================================================================

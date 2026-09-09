@@ -174,7 +174,7 @@ sign_args=(sign --sk "$KEY" --image "$DIR/image" --version "$VERSION" \
 "$KEYTOOL" "${sign_args[@]}"
 echo "==> staged: $DIR/{image,manifest,manifest.sig}  (min_version=${MIN_VERSION:-none} abi=$ABI)"
 
-admin="$REPO_ROOT/build-debug/dawn-admin/dawn-admin"
+admin="$REPO_ROOT/build-debug/dawn-admin"
 [ -x "$admin" ] || admin="dawn-admin"
 
 # Tell a running daemon to re-scan so this release is pushable without a restart.

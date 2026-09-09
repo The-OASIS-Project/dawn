@@ -221,8 +221,8 @@ Reference: `GETTING_STARTED.md` section 3.
 **Verify**:
 - Binary exists: `ls -la build/dawn` (path depends on preset)
 - Binary runs: `LD_LIBRARY_PATH=/usr/local/lib ./build/dawn --help` or `--dump-config` (should print config and exit).
-  **Note**: `LD_LIBRARY_PATH=/usr/local/lib` is needed when core libraries (ONNX Runtime, espeak-ng, piper-phonemize) are installed to `/usr/local/lib/`. Use it for all `./build/dawn` and `./build/dawn-admin/dawn-admin` invocations.
-- `dawn-admin` exists: `ls -la build/dawn-admin/dawn-admin`
+  **Note**: `LD_LIBRARY_PATH=/usr/local/lib` is needed when core libraries (ONNX Runtime, espeak-ng, piper-phonemize) are installed to `/usr/local/lib/`. Use it for all `./build/dawn` and `./build/dawn-admin` invocations.
+- `dawn-admin` exists: `ls -la build/dawn-admin`
 
 ## Phase 4: Download Models
 
@@ -331,7 +331,7 @@ variables for fully non-interactive creation:
    ```bash
    ADMIN_PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)
    DAWN_SETUP_TOKEN="$TOKEN" DAWN_PASSWORD="$ADMIN_PASS" \
-     LD_LIBRARY_PATH=/usr/local/lib ./build/dawn-admin/dawn-admin user create admin --admin
+     LD_LIBRARY_PATH=/usr/local/lib ./build/dawn-admin user create admin --admin
    ```
 3. Stop the background daemon: `kill $DAWN_PID`
 4. Display the generated password prominently and warn the user to save it (it will not be shown again)

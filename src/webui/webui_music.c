@@ -42,7 +42,6 @@
 #include "audio/plex_client.h"
 #include "audio/resampler.h"
 #include "config/dawn_config.h"
-#include "core/path_utils.h"
 #include "logging.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_music_internal.h"
@@ -381,9 +380,11 @@ bool webui_music_is_path_valid(const char *path) {
    char resolved_path[PATH_MAX];
    char resolved_music_dir[PATH_MAX];
 
-   /* Resolve the music library base path */
-   if (realpath(g_config.paths.music_dir, resolved_music_dir) == NULL) {
-      OLOG_ERROR("WebUI music: Cannot resolve music directory: %s", g_config.paths.music_dir);
+   /* Resolve the music library base path. music_dir_resolved has '~' expanded
+    * once at startup; realpath() does not expand a leading tilde itself. */
+   if (realpath(g_config.paths.music_dir_resolved, resolved_music_dir) == NULL) {
+      OLOG_ERROR("WebUI music: Cannot resolve music directory: %s",
+                 g_config.paths.music_dir_resolved);
       return false;
    }
 
@@ -1290,7 +1291,8 @@ int webui_music_init(void) {
    /* Initialize queue persistence DB */
    {
       char queue_db_path[512];
-      snprintf(queue_db_path, sizeof(queue_db_path), "%s/music.db", g_config.paths.data_dir);
+      snprintf(queue_db_path, sizeof(queue_db_path), "%s/music.db",
+               g_config.paths.data_dir_resolved);
       if (music_queue_db_init(queue_db_path) != 0) {
          OLOG_WARNING("WebUI music: Queue DB init failed — queue persistence unavailable");
       }

@@ -390,6 +390,14 @@ Access WebUI at `https://your-server:3000`.
 
 ### First admin account
 
+> **Installed with `./scripts/install.sh`? It already created your admin.** The
+> installer provisions the `admin` account during the build phase and prints
+> the username + password **once** in a boxed "DAWN ADMIN ACCOUNT" banner,
+> repeated in the final summary — save it and skip to login. Because the
+> account now exists, the setup token below **is no longer printed**; if you
+> lost the password, reset it with `dawn-admin user passwd admin`. The manual
+> token flow below applies to a hand build or a manually-started daemon.
+
 There is no default account or password. On the first run (when no admin user exists), DAWN prints a one-time **setup token** to **stderr** — a `DAWN-...` value in a "DAWN FIRST-RUN SETUP TOKEN" banner. The token is valid for **5 minutes** and is single-use; restart `dawn` to regenerate one as long as no admin exists yet.
 
 > **Running DAWN as the systemd service?** The banner won't appear on your terminal — the `dawn-server` unit redirects the daemon's stderr to `/var/log/dawn/server.log` (`StandardError=append:/var/log/dawn/server.log`). Pull the token from there instead:

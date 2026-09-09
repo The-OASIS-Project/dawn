@@ -44,8 +44,8 @@ check_binary_runs() {
 }
 
 check_dawn_admin() {
-   if [ -n "${BUILD_DIR:-}" ] && [ -f "$BUILD_DIR/dawn-admin/dawn-admin" ]; then
-      echo "PASS|$BUILD_DIR/dawn-admin/dawn-admin"
+   if [ -n "${BUILD_DIR:-}" ] && [ -f "$BUILD_DIR/dawn-admin" ]; then
+      echo "PASS|$BUILD_DIR/dawn-admin"
    else
       echo "FAIL|Not found"
    fi
@@ -198,9 +198,16 @@ check_audio_playback() {
 }
 
 check_admin_account() {
-   local db_path="$HOME/.local/share/dawn/auth.db"
-   if [ -f "$db_path" ]; then
-      echo "PASS|auth.db exists"
+   # Dev/foreground installs keep the DB under the user's XDG data dir; the
+   # systemd service sets data_dir = /var/lib/dawn/db (see
+   # services/dawn-server/install.sh). Check both so verify matches the
+   # Phase 8 existence guard in install.sh.
+   local dev_db="$HOME/.local/share/dawn/auth.db"
+   local service_db="/var/lib/dawn/db/auth.db"
+   if [ -f "$dev_db" ]; then
+      echo "PASS|auth.db exists ($dev_db)"
+   elif [ -f "$service_db" ]; then
+      echo "PASS|auth.db exists ($service_db)"
    else
       echo "SKIP|No auth database (admin not created yet)"
    fi

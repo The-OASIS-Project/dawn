@@ -26,6 +26,7 @@
 #include <sqlite3.h>
 #include <string.h>
 
+#include "core/path_utils.h"
 #include "logging.h"
 #include "webui/webui_music_internal.h"
 
@@ -60,9 +61,18 @@ int music_queue_db_init(const char *db_path) {
       return 0; /* Already initialized */
    }
 
-   int rc = sqlite3_open(db_path, &s_db);
+   /* Expand tilde (e.g. ~/.local/share/dawn/music.db) — the caller passes the
+    * raw configured data_dir, which may start with '~'. sqlite3_open() does not
+    * expand it, so do it here, matching music_db.c (same MUSIC_DB_PATH_MAX). */
+   char expanded[MUSIC_DB_PATH_MAX];
+   if (!path_expand_tilde(db_path, expanded, sizeof(expanded))) {
+      OLOG_ERROR("Music queue DB: Failed to expand path: %s", db_path);
+      return 1;
+   }
+
+   int rc = sqlite3_open(expanded, &s_db);
    if (rc != SQLITE_OK) {
-      OLOG_ERROR("Music queue DB: Failed to open %s: %s", db_path, sqlite3_errmsg(s_db));
+      OLOG_ERROR("Music queue DB: Failed to open %s: %s", expanded, sqlite3_errmsg(s_db));
       sqlite3_close(s_db);
       s_db = NULL;
       return 1;
@@ -84,7 +94,7 @@ int music_queue_db_init(const char *db_path) {
       return 1;
    }
 
-   OLOG_INFO("Music queue DB: Initialized at %s", db_path);
+   OLOG_INFO("Music queue DB: Initialized at %s", expanded);
    return 0;
 }
 

@@ -274,6 +274,15 @@ The two background roles run constantly, so keeping them on a small fast model k
 
 ## 6. Create Admin Account
 
+> **Already ran `./scripts/install.sh`? Your admin account is done.** The
+> installer creates it for you (username `admin`) and prints the credentials
+> **once** in a boxed "DAWN ADMIN ACCOUNT" banner near the end of the run —
+> save that password and skip straight to login (step 7). If you scrolled past
+> it, the account already exists, so the setup token below **won't print any
+> more** (it's only shown while no admin exists) — reset the password with
+> `./build/dawn-admin user passwd admin` instead. The manual steps below are
+> for a hand build (no installer), or for creating **additional** admins.
+
 The Web UI requires authentication. There is no default account and no default password — on first run (when no admin user exists yet), DAWN prints a one-time setup token to the console. It's written to **stderr only**, never to a log file, in a banner like this:
 
 ```

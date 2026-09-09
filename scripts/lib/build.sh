@@ -94,6 +94,20 @@ build_dawn() {
       *) error "Unknown build preset: $preset" ;;
    esac
 
+   # One-time migration (added 2026-09): dawn-admin now builds to
+   # $BUILD_DIR/dawn-admin (a file). Build dirs from before that change contain
+   # a stale $BUILD_DIR/dawn-admin/ *directory* (the old add_subdirectory
+   # layout) that collides with the new output file ("ld: cannot open output
+   # file dawn-admin: Is a directory"). Remove the stale directory so an
+   # in-place upgrade rebuilds cleanly. Guarded on -d so it only ever touches
+   # the old directory, never the new binary.
+   # Safe to delete this block once existing build dirs have all been rebuilt
+   # (roughly one release cycle out).
+   if [ -d "$BUILD_DIR/dawn-admin" ]; then
+      log "Removing stale dawn-admin build directory (moved to $BUILD_DIR/dawn-admin)"
+      rm -rf "$BUILD_DIR/dawn-admin"
+   fi
+
    # Configure
    cmake --preset "$preset" || error "CMake configure failed for preset '$preset'"
 
@@ -110,8 +124,8 @@ build_dawn() {
    log "Binary built: $BUILD_DIR/dawn ($binary_size)"
 
    # Check dawn-admin
-   if [ -f "$BUILD_DIR/dawn-admin/dawn-admin" ]; then
-      log "dawn-admin built: $BUILD_DIR/dawn-admin/dawn-admin"
+   if [ -f "$BUILD_DIR/dawn-admin" ]; then
+      log "dawn-admin built: $BUILD_DIR/dawn-admin"
    else
       warn "dawn-admin not found in build output"
    fi

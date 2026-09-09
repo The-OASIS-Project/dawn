@@ -21,7 +21,13 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Install clang-format-14
-        run: sudo apt-get update && sudo apt-get install -y clang-format-14
+        run: |
+          # Drop the runner's pre-installed Google Chrome apt repo before
+          # updating: it periodically serves a Packages index that mismatches
+          # its InRelease hash, which fails `apt-get update` (exit 100) and
+          # takes the whole job with it. DAWN's build needs nothing from it.
+          sudo rm -f /etc/apt/sources.list.d/*google-chrome*
+          sudo apt-get update && sudo apt-get install -y clang-format-14
 
       - name: Install Prettier
         run: npm install
@@ -62,6 +68,8 @@ jobs:
 
       - name: Install dependencies
         run: |
+          # See format-check job: drop the flaky Google Chrome apt repo first.
+          sudo rm -f /etc/apt/sources.list.d/*google-chrome*
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             cmake build-essential pkg-config \
@@ -126,6 +134,8 @@ jobs:
 
       - name: Install dependencies
         run: |
+          # See format-check job: drop the flaky Google Chrome apt repo first.
+          sudo rm -f /etc/apt/sources.list.d/*google-chrome*
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             cmake build-essential pkg-config \
