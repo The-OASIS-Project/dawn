@@ -655,14 +655,12 @@ static char *email_tool_callback(const char *action, char *value, int *should_re
    if (!action || !action[0])
       return strdup("Error: action is required");
 
-   struct json_object *details = NULL;
-   if (value && value[0]) {
-      details = json_tokener_parse(value);
-      if (!details)
-         return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid JSON in details parameter");
-   } else {
-      details = json_object_new_object();
-   }
+   /* 'accounts' takes no arguments, so tolerate a prose `arguments` value (a
+    * model may still narrate despite the schema); every other action reads
+    * fields, where a non-JSON value stays a hard error. */
+   struct json_object *details = tool_parse_details(value, strcmp(action, "accounts") == 0);
+   if (!details)
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid JSON in details parameter");
 
    int user_id = tool_get_current_user_id();
 
@@ -757,9 +755,11 @@ static const treg_param_t email_params[] = {
        .enum_count = 10,
    },
    {
-       .name = "details",
+       .name = "arguments",
        .description =
-           "JSON (pass as JSON-encoded string): "
+           "JSON object of the action's arguments, passed as a JSON-encoded string.  "
+           "Omit for an action that takes no arguments; never fill it with a description "
+           "or rationale.  Shapes: "
            "recent {count? (up to 50), folder?, unread_only?, account?, page_token?, sort?}, "
            "read {message_id, account?}, "
            "search {from?, subject?, text?, since?, before?, folder?, unread_only?, "

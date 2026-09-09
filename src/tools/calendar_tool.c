@@ -506,15 +506,13 @@ static char *calendar_tool_callback(const char *action, char *value, int *should
    if (!action || !action[0])
       return strdup("Error: action is required");
 
-   /* Parse details JSON */
-   struct json_object *details = NULL;
-   if (value && value[0]) {
-      details = json_tokener_parse(value);
-      if (!details)
-         return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid JSON in details parameter");
-   } else {
-      details = json_object_new_object();
-   }
+   /* 'calendars' takes no arguments, so tolerate a prose `arguments` value (a
+    * model may still narrate despite the schema); every other action reads
+    * fields, where a non-JSON value stays a hard error rather than silently
+    * dropping the caller's request. */
+   struct json_object *details = tool_parse_details(value, strcmp(action, "calendars") == 0);
+   if (!details)
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid JSON in details parameter");
 
    int user_id = tool_get_current_user_id();
 
@@ -585,9 +583,11 @@ static const treg_param_t calendar_params[] = {
        .enum_count = 8,
    },
    {
-       .name = "details",
+       .name = "arguments",
        .description =
-           "JSON object with action-specific fields (pass as JSON-encoded string).\n"
+           "JSON object of the action's arguments, passed as a JSON-encoded string.  "
+           "Omit entirely for an action that takes no arguments; never fill it with a "
+           "description or rationale.\n"
            "For 'calendars': no fields needed.\n"
            "For 'today': {calendar?}.\n"
            "For 'range': {start (ISO 8601, required), end (ISO 8601, optional, default "

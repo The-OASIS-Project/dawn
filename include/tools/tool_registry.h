@@ -281,6 +281,42 @@ static inline void tool_result_strip_error_mark(char *result) {
    }
 }
 
+struct json_object; /* forward decl — avoids forcing <json-c/json.h> on consumers */
+
+/**
+ * @brief Parse a tool's `details` argument (the VALUE param) into a JSON object.
+ *
+ * DAWN tools carry their per-action arguments as a single JSON-encoded string
+ * (the `details`/VALUE param).  A reasoning model frequently fills that param
+ * with a prose *rationale* ("List configured email accounts so the briefing can
+ * inspect all inboxes.") instead of a JSON object — harmless for an action that
+ * reads no fields, but a hard failure everywhere it is parsed as JSON-or-die.
+ * This helper is the single seam for that contract.
+ *
+ * CALLER OBLIGATION: pass @p no_required_fields = true ONLY for an action that
+ * takes no arguments at all, so an empty object loses nothing (e.g. email
+ * 'accounts', calendar 'calendars', job 'list').  Passing true for an action
+ * that reads ANY field — even an optional filter, e.g. scheduler 'list' with its
+ * optional `type` — would let malformed prose silently degrade to an empty
+ * object and run the action with that field missing (a wrong result the user
+ * never sees), instead of surfacing the error.  The tolerated set is decided
+ * per-call (a `strcmp` on the action) so this pairing lives at each call site;
+ * keep them in sync.
+ *
+ * @param value             The raw VALUE string.  NULL or empty always yields a
+ *                          fresh empty object, regardless of @p no_required_fields.
+ * @param no_required_fields true if the action reads no required field from
+ *                          `details`: a non-JSON value degrades to an empty
+ *                          object so the call still succeeds.  false otherwise:
+ *                          a non-JSON value returns NULL so the caller can raise
+ *                          "invalid JSON in details parameter" rather than
+ *                          silently dropping the caller's request.
+ * @return An owned json_object the caller must json_object_put(), or NULL only
+ *         when @p value is non-empty, unparseable, AND @p no_required_fields is
+ *         false.  Never returns NULL when @p no_required_fields is true.
+ */
+struct json_object *tool_parse_details(const char *value, bool no_required_fields);
+
 /* =============================================================================
  * Tool Metadata (Complete Definition)
  * ============================================================================= */

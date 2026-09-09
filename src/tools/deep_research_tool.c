@@ -658,14 +658,12 @@ static char *deep_research_callback(const char *action, char *value, int *should
                     "(or set [research] enabled = true in dawn.toml).");
    }
 
-   struct json_object *details = NULL;
-   if (value != NULL && value[0] != '\0') {
-      details = json_tokener_parse(value);
-      if (details == NULL) {
-         return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid JSON in details parameter.");
-      }
-   } else {
-      details = json_object_new_object();
+   /* Every deep_research action ('start' needs a query, 'status'/'cancel' need a
+    * run_id) reads required fields, so a non-JSON `arguments` value is always an
+    * error — no action tolerates a prose value. */
+   struct json_object *details = tool_parse_details(value, false);
+   if (details == NULL) {
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid JSON in details parameter.");
    }
 
    /* Caller context: user_id is the requester's (non-overridable); parent conv is
@@ -749,9 +747,11 @@ static const treg_param_t deep_research_params[] = {
        .enum_count = 3,
    },
    {
-       .name = "details",
+       .name = "arguments",
        .description =
-           "JSON object with action-specific fields.\n"
+           "JSON object of the action's arguments, passed as a JSON-encoded string.  "
+           "Omit entirely for an action that takes no arguments; never fill it with a "
+           "description or rationale.\n"
            "start: {brief (required for the proposal — the question/topic to research), mode "
            "('web' (default), 'private', or 'both'; private/both are not available yet and run "
            "web-only), deliver_to (optional messaging channel display_name for the completion "

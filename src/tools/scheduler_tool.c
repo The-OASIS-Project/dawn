@@ -1165,26 +1165,14 @@ static char *scheduler_tool_callback(const char *action, char *value, int *shoul
    if (!action || !action[0])
       return strdup(TOOL_RESULT_ERROR_MARK "Error: action is required");
 
-   /* Parse details JSON */
-   struct json_object *details = NULL;
-   if (value && value[0]) {
-      details = json_tokener_parse(value);
-      if (!details) {
-         /* `list` takes only an optional `type` filter, so a caller that passes
-          * a non-JSON details (e.g. a model emitting a prose description instead
-          * of an object) should still list everything rather than fail.  Every
-          * other action needs structured fields, so malformed JSON stays an
-          * error there — silently proceeding on a create/update/cancel with an
-          * empty details would drop the caller's real request. */
-         if (strcmp(action, "list") == 0) {
-            details = json_object_new_object();
-         } else {
-            return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid JSON in details parameter");
-         }
-      }
-   } else {
-      details = json_object_new_object();
-   }
+   /* No scheduler action tolerates a non-JSON `arguments` value.  Even `list`
+    * reads an optional `type` filter, so degrading prose to an empty object
+    * would silently list everything instead of the requested subset; better to
+    * error and let the model re-emit proper JSON (the schema now tells it to
+    * omit `arguments` for a no-arg action rather than narrate). */
+   struct json_object *details = tool_parse_details(value, false);
+   if (!details)
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid JSON in details parameter");
 
    /* Get user context */
    int user_id = 1; /* Default */
@@ -1281,9 +1269,11 @@ static const treg_param_t scheduler_params[] = {
        .enum_count = 7,
    },
    {
-       .name = "details",
+       .name = "arguments",
        .description =
-           "JSON object with action-specific fields.\n"
+           "JSON object of the action's arguments, passed as a JSON-encoded string.  "
+           "Omit entirely for an action that takes no arguments; never fill it with a "
+           "description or rationale.\n"
            "create: {type (timer|alarm|reminder|task|briefing), name (optional), "
            "fire_at, duration_minutes (1-43200, MINUTES UNTIL FIRE — use ONLY for "
            "'in X minutes' / 'X-minute timer' shapes; this is NOT briefing duration / "

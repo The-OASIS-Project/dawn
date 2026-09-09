@@ -1465,10 +1465,10 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
       }
    }
 
-   /* Fallback: if value_buf is empty and the LLM sent a flat JSON (no "details" key),
+   /* Fallback: if value_buf is empty and the LLM sent a flat JSON (no "arguments" key),
     * collect all non-extracted fields into a JSON object as the value.
     * This handles LLMs that flatten {"action":"create","type":"timer",...}
-    * instead of nesting {"action":"create","details":"{\"type\":\"timer\",...}"}. */
+    * instead of nesting {"action":"create","arguments":"{\"type\":\"timer\",...}"}. */
    if (value_buf[0] == '\0' && args && value_param_name) {
       struct json_object *remaining = json_object_new_object();
       json_object_object_foreach(args, key, val) {

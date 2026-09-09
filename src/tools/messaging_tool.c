@@ -489,9 +489,11 @@ static const treg_param_t messaging_params[] = {
        .enum_count = 7,
    },
    {
-       .name = "details",
+       .name = "arguments",
        .description =
-           "JSON object with action-specific fields (pass as JSON-encoded string).\n"
+           "JSON object of the action's arguments, passed as a JSON-encoded string.  "
+           "Omit entirely for an action that takes no arguments; never fill it with a "
+           "description or rationale.\n"
            "For 'send': {channel: 'telegram_main', text: 'message body'}.\n"
            "For 'read_channel': {channel: 'general', since: 'last week', until: 'yesterday', "
            "limit: 100, server: 'My Server'}. 'channel' is the Discord channel name (with or "

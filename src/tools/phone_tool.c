@@ -1207,9 +1207,11 @@ static const treg_param_t phone_params[] = {
        .enum_count = 14,
    },
    {
-       .name = "details",
+       .name = "arguments",
        .description =
-           "JSON object with action-specific fields (pass as JSON-encoded string).\n"
+           "JSON object of the action's arguments, passed as a JSON-encoded string.  "
+           "Omit entirely for an action that takes no arguments; never fill it with a "
+           "description or rationale.\n"
            "call {target}, confirm_call {}, answer {}, hang_up {},\n"
            "send_sms {target, body}, confirm_sms {}, read_sms {},\n"
            "call_log {count?} (default 10; rows show [id=N] for delete_call),\n"
