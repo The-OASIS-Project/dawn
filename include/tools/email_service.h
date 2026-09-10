@@ -121,6 +121,19 @@ int email_service_remove_account(int64_t account_id);
 int email_service_test_connection(int64_t account_id, bool *imap_ok, bool *smtp_ok);
 int email_service_list_accounts(int user_id, email_account_t *out, int max);
 
+/* Best-effort fill of each row's `replied` tri-state (email_summary_t.replied):
+ * for each Gmail account represented in @p rows, one `in:sent` search — bounded
+ * to the oldest enrichable row's date for that account (a reply is always later
+ * than the message it answers) — builds the set of threads the user sent into,
+ * and a row is marked EMAIL_REPLIED_YES iff its thread has a SENT message dated
+ * later than the row (the correspondent-answered-my-thread false positive is
+ * thus excluded).  Rows with no thread_id (IMAP), self-sent rows (from_me),
+ * unparseable-date rows, rows whose account's sent-search fails, and — when the
+ * sent set truncates at the fetch cap — still-unmatched rows are left
+ * EMAIL_REPLIED_UNKNOWN (never a false "not replied").  Network I/O: one search
+ * per Gmail account with enrichable rows; call on the shown/capped rows only. */
+void email_service_fill_reply_states(int user_id, email_summary_t *rows, int nrows);
+
 /* True if this account is served by the Gmail REST backend (OAuth + gmail.com).
  * Currently also the set of accounts whose fetch populates email_summary_t.unread
  * (IMAP \Seen parsing is deferred), so callers can tell whether an unread count

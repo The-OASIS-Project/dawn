@@ -818,6 +818,103 @@ int email_service_search(int user_id,
    return any_error ? EMAIL_RC_FAILURE : EMAIL_RC_OK;
 }
 
+void email_service_fill_reply_states(int user_id, email_summary_t *rows, int nrows) {
+   if (!rows || nrows <= 0)
+      return;
+
+   email_account_t accts[EMAIL_MAX_ACCOUNTS];
+   int nacct = 0;
+   email_db_account_list(user_id, accts, EMAIL_MAX_ACCOUNTS, &nacct);
+   if (nacct <= 0)
+      return;
+
+   email_summary_t *sent = calloc(EMAIL_MAX_FETCH_RESULTS, sizeof(email_summary_t));
+   if (!sent)
+      return; /* leave all rows UNKNOWN */
+
+   for (int a = 0; a < nacct; a++) {
+      if (!accts[a].enabled || !is_gmail_api_account(&accts[a]))
+         continue;
+
+      /* Find this account's enrichable rows and the oldest one's date — the
+       * sent-search only needs to reach back that far (a reply is always later
+       * than the message it answers). */
+      int enrichable = 0;
+      time_t oldest = 0;
+      for (int r = 0; r < nrows; r++) {
+         if (rows[r].thread_id[0] && !rows[r].from_me && rows[r].date > 0 &&
+             strcmp(rows[r].account_name, accts[a].name) == 0) {
+            enrichable++;
+            if (oldest == 0 || rows[r].date < oldest)
+               oldest = rows[r].date;
+         }
+      }
+      if (enrichable == 0)
+         continue;
+
+      /* Lower bound padded one day (Gmail after: is date-granular). */
+      struct tm tmv;
+      char since[16] = { 0 };
+      time_t start = oldest - 86400;
+      if (localtime_r(&start, &tmv))
+         strftime(since, sizeof(since), "%Y-%m-%d", &tmv);
+
+      email_search_params_t params = { 0 };
+      snprintf(params.folder, sizeof(params.folder), "sent");
+      snprintf(params.since, sizeof(params.since), "%s", since);
+      int sent_count = 0;
+      /* A non-empty next-page token means the sent set was truncated at the fetch
+       * cap — there is sent mail we did NOT see, so a "no match" here cannot be
+       * trusted as "not replied" (contract: over-budget → UNKNOWN, never NO). */
+      char npt[256] = { 0 };
+      int rc = email_service_search(user_id, accts[a].name, &params, sent, EMAIL_MAX_FETCH_RESULTS,
+                                    &sent_count, npt, sizeof(npt));
+      if (rc != EMAIL_RC_OK) {
+         OLOG_INFO("email_reply: acct='%s' enrichable=%d sent-search FAILED (rc=%d) — rows UNKNOWN",
+                   accts[a].name, enrichable, rc);
+         continue; /* rows for this account stay UNKNOWN */
+      }
+      bool sent_truncated = (npt[0] != '\0');
+
+      int yes = 0, no = 0, unknown = 0;
+      for (int r = 0; r < nrows; r++) {
+         /* date <= 0 mirrors the oldest-date loop's `date > 0` filter, so an
+          * unparseable/negative timestamp is treated identically in both
+          * passes (matters only if fill is ever extended past Gmail). */
+         if (!rows[r].thread_id[0] || rows[r].from_me || rows[r].date <= 0)
+            continue;
+         if (strcmp(rows[r].account_name, accts[a].name) != 0)
+            continue;
+         email_reply_state_t state = EMAIL_REPLIED_NO;
+         for (int s = 0; s < sent_count; s++) {
+            if (sent[s].date > rows[r].date && strcmp(sent[s].thread_id, rows[r].thread_id) == 0) {
+               state = EMAIL_REPLIED_YES;
+               break;
+            }
+         }
+         /* No match found, but the sent set was capped — we may have missed the
+          * reply, so report UNKNOWN instead of asserting NO. */
+         if (state == EMAIL_REPLIED_NO && sent_truncated)
+            state = EMAIL_REPLIED_UNKNOWN;
+         rows[r].replied = state;
+         if (state == EMAIL_REPLIED_YES)
+            yes++;
+         else if (state == EMAIL_REPLIED_NO)
+            no++;
+         else
+            unknown++;
+      }
+      OLOG_INFO("email_reply: acct='%s' since=%s enrichable=%d sent_found=%d truncated=%d -> "
+                "yes=%d no=%d unknown=%d",
+                accts[a].name, since, enrichable, sent_count, sent_truncated, yes, no, unknown);
+   }
+
+   /* Zero the scratch: it transiently held the owner's sent-mail metadata
+    * (subjects/senders/previews), matching the token/conn wipe discipline. */
+   sodium_memzero(sent, (size_t)EMAIL_MAX_FETCH_RESULTS * sizeof(*sent));
+   free(sent);
+}
+
 /* =============================================================================
  * Draft Management
  * ============================================================================= */

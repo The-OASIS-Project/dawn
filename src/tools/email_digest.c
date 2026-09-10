@@ -241,6 +241,13 @@ char *email_digest_build(int user_id, const email_digest_opts_t *opts) {
    int shown = merged_n < cap ? merged_n : cap;
    int omitted = merged_n - shown;
 
+   /* Best-effort reply enrichment (Phase 2b): fill each shown row's `replied`
+    * tri-state via one in:sent search per Gmail account.  Only the shown/capped
+    * rows are enriched to bound the network cost; emit_row renders [replied]
+    * for EMAIL_REPLIED_YES and stays silent for NO/UNKNOWN (never asserts
+    * "not replied" on a skipped/failed lookup). */
+   email_service_fill_reply_states(user_id, merged, shown);
+
    char wlabel[16];
    format_window(window_sec, wlabel, sizeof(wlabel));
    strbuf_t sb;

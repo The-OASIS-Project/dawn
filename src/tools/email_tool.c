@@ -290,13 +290,14 @@ static char *handle_recent(struct json_object *details, int user_id) {
             snprintf(acctlabel, sizeof(acctlabel), "%s (%s)", an, aa);
          else
             snprintf(acctlabel, sizeof(acctlabel), "%s", aa[0] ? aa : (an[0] ? an : "?"));
-         pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos,
-                         "\n%d. From: %s%s%s\n   Subject: %s%s\n   Account: %s | Date: %s\n   [ID: "
-                         "%s]\n",
-                         i + 1, emails[i].from_name, emails[i].from_name[0] ? " " : "",
-                         emails[i].from_addr, emails[i].subject,
-                         emails[i].unread ? " [UNREAD]" : "", acctlabel, emails[i].date_str,
-                         emails[i].message_id);
+         pos += snprintf(
+             buf + pos, RESULT_BUF_SIZE - pos,
+             "\n%d. From: %s%s%s\n   Subject: %s%s%s\n   Account: %s | Date: %s\n   [ID: "
+             "%s]\n",
+             i + 1, emails[i].from_name, emails[i].from_name[0] ? " " : "", emails[i].from_addr,
+             emails[i].subject, emails[i].unread ? " [UNREAD]" : "",
+             emails[i].replied == EMAIL_REPLIED_YES ? " [replied]" : "", acctlabel,
+             emails[i].date_str, emails[i].message_id);
       }
    }
 
@@ -408,6 +409,10 @@ static char *handle_search(struct json_object *details, int user_id) {
 
    sort_summaries_by_date(emails, out_count, sort);
 
+   /* Enrich reply status so a "did I reply to Fred?" search shows [replied].
+    * One in:sent lookup per Gmail account represented in the results. */
+   email_service_fill_reply_states(user_id, emails, out_count);
+
    char *buf = malloc(RESULT_BUF_SIZE);
    if (!buf)
       return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
@@ -427,13 +432,14 @@ static char *handle_search(struct json_object *details, int user_id) {
             snprintf(acctlabel, sizeof(acctlabel), "%s (%s)", an, aa);
          else
             snprintf(acctlabel, sizeof(acctlabel), "%s", aa[0] ? aa : (an[0] ? an : "?"));
-         pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos,
-                         "\n%d. From: %s%s%s\n   Subject: %s%s\n   Account: %s | Date: %s\n   [ID: "
-                         "%s]\n",
-                         i + 1, emails[i].from_name, emails[i].from_name[0] ? " " : "",
-                         emails[i].from_addr, emails[i].subject,
-                         emails[i].unread ? " [UNREAD]" : "", acctlabel, emails[i].date_str,
-                         emails[i].message_id);
+         pos += snprintf(
+             buf + pos, RESULT_BUF_SIZE - pos,
+             "\n%d. From: %s%s%s\n   Subject: %s%s%s\n   Account: %s | Date: %s\n   [ID: "
+             "%s]\n",
+             i + 1, emails[i].from_name, emails[i].from_name[0] ? " " : "", emails[i].from_addr,
+             emails[i].subject, emails[i].unread ? " [UNREAD]" : "",
+             emails[i].replied == EMAIL_REPLIED_YES ? " [replied]" : "", acctlabel,
+             emails[i].date_str, emails[i].message_id);
       }
    }
 

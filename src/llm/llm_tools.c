@@ -210,6 +210,12 @@ static const char *SEQUENTIAL_TOOLS[] = {
    "shutdown",           /* Critical system operation */
    "execute_plan",       /* Plan executor modifies state via sub-tool calls */
    "phone",              /* Shared pending confirmation state + delete rate bucket */
+   "email",              /* Shared pending draft/trash state; and concurrent Gmail
+                          * operations (e.g. two digests + a search in one turn)
+                          * produced inconsistent reply-enrichment results — the
+                          * per-op sent-searches interfere. A single email op is
+                          * already internally serial, so this only serializes the
+                          * multi-call case, at no cost to normal use. */
    NULL                  /* Sentinel */
 };
 
