@@ -37,6 +37,7 @@
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/contacts_db.h"
+#include "tools/email_digest.h"
 #include "tools/email_service.h"
 #include "tools/oauth_client.h"
 #include "tools/toml.h"
@@ -183,6 +184,14 @@ static char *email_rc_to_error(int rc, const char *op, const char *account, cons
                      TOOL_RESULT_ERROR_MARK
                      "Error: invalid folder name. Valid: inbox, sent, drafts, trash, spam, "
                      "starred, important, all.");
+         break;
+      case EMAIL_RC_NOT_FOUND:
+         snprintf(msg, 384,
+                  TOOL_RESULT_ERROR_MARK
+                  "Error: no message with that id exists in %s. The id may be stale, mistyped, "
+                  "or the message was moved/deleted. Do NOT retry the same id — get a fresh id "
+                  "from 'recent', 'search', or 'digest' (copy it exactly).",
+                  (account && account[0]) ? account : "any of your accounts");
          break;
       default: {
          /* If the underlying oauth_refresh detected invalid_grant, the
@@ -673,6 +682,44 @@ static char *handle_archive(struct json_object *details, int user_id) {
  * Tool Callback
  * ============================================================================= */
 
+/* All-inbox briefing digest.  Parses window/max/unread_only, delegates the
+ * aggregation to email_digest.c.  Read-only, schedulable. */
+static char *handle_digest(struct json_object *details, int user_id) {
+   email_digest_opts_t opts = { 0 };
+   opts.window_seconds = EMAIL_DIGEST_DEFAULT_WINDOW_SEC;
+   opts.max = EMAIL_DIGEST_DEFAULT_MAX;
+   opts.unread_only = json_get_bool(details, "unread_only", false);
+
+   /* window: "<n>h" (hours, default) or "<n>d" (days), e.g. "24h", "2d".  Clamp n
+    * to the max window (in the chosen unit) BEFORE multiplying, so a huge/garbage
+    * value can't overflow the int math; email_digest_build re-clamps in seconds. */
+   const char *w = json_get_str(details, "window");
+   if (w && w[0]) {
+      char *end = NULL;
+      long n = strtol(w, &end, 10);
+      char unit = (end && *end) ? *end : 'h';
+      if (n > 0) {
+         if (unit == 'd' || unit == 'D') {
+            long max_days = EMAIL_DIGEST_MAX_WINDOW_SEC / (24 * 3600);
+            if (n > max_days)
+               n = max_days;
+            opts.window_seconds = (int)(n * 24 * 3600);
+         } else {
+            long max_hours = EMAIL_DIGEST_MAX_WINDOW_SEC / 3600;
+            if (n > max_hours)
+               n = max_hours;
+            opts.window_seconds = (int)(n * 3600);
+         }
+      }
+   }
+
+   /* max is passed through unclamped; email_digest_build owns the row ceiling so
+    * every caller of the module inherits the same bound. */
+   opts.max = json_get_int(details, "max", 0);
+
+   return email_digest_build(user_id, &opts);
+}
+
 /* Single source of truth for which email actions may run unattended (from a
  * scheduled task or briefing).  Only read-only actions qualify; anything that
  * sends, trashes, or archives requires a live conversation (a human in the
@@ -680,16 +727,16 @@ static char *handle_archive(struct json_object *details, int user_id) {
  * reached via tool_registry) and the fire-time gate in email_tool_callback.
  * Unknown/new actions are NOT schedulable by default (fail closed). */
 static bool email_action_is_schedulable(const char *action) {
-   /* Phase 2a adds "digest" here alongside its handler — keep this list in sync
-    * with the actions the callback actually dispatches so a scheduled step never
-    * passes the gate only to fail with "unknown action" at fire time. */
+   /* Keep this list in sync with the read-only actions the callback dispatches so
+    * a scheduled step never passes the gate only to fail "unknown action" at fire
+    * time.  'digest' is the daily-briefing aggregator (email_digest.c). */
    return action && (strcmp(action, "accounts") == 0 || strcmp(action, "recent") == 0 ||
                      strcmp(action, "search") == 0 || strcmp(action, "folders") == 0 ||
-                     strcmp(action, "read") == 0);
+                     strcmp(action, "read") == 0 || strcmp(action, "digest") == 0);
 }
 
-#define EMAIL_SCHEDULABLE_ERR                                                    \
-   "only read-only email actions (accounts / recent / search / folders / read) " \
+#define EMAIL_SCHEDULABLE_ERR                                                             \
+   "only read-only email actions (accounts / recent / search / folders / read / digest) " \
    "may run from a schedule; send, trash, and archive require a live conversation."
 
 /* Per-action schedulability gate registered in email_metadata.  The email tool
@@ -754,12 +801,14 @@ static char *email_tool_callback(const char *action, char *value, int *should_re
       result = handle_confirm_trash(details, user_id);
    } else if (strcmp(action, "archive") == 0) {
       result = handle_archive(details, user_id);
+   } else if (strcmp(action, "digest") == 0) {
+      result = handle_digest(details, user_id);
    } else {
       char buf[256];
       snprintf(buf, sizeof(buf),
                TOOL_RESULT_ERROR_MARK
                "Error: unknown action '%s'. Valid: accounts, recent, read, search, folders, "
-               "send, confirm_send, trash, confirm_trash, archive",
+               "digest, send, confirm_send, trash, confirm_trash, archive",
                action);
       result = strdup(buf);
    }
@@ -818,9 +867,9 @@ static const treg_param_t email_params[] = {
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
-       .enum_values = { "recent", "read", "search", "folders", "send", "confirm_send", "accounts",
-                        "trash", "confirm_trash", "archive" },
-       .enum_count = 10,
+       .enum_values = { "recent", "read", "search", "folders", "digest", "send", "confirm_send",
+                        "accounts", "trash", "confirm_trash", "archive" },
+       .enum_count = 11,
    },
    {
        .name = "arguments",
@@ -834,6 +883,9 @@ static const treg_param_t email_params[] = {
            "account?, page_token?, sort?} (dates: YYYY-MM-DD, UTC, since=inclusive, "
            "before=exclusive), "
            "folders {account?}, "
+           "digest {window? ('24h' default, or '2d'/'7d'), unread_only?, max? (default 50)} "
+           "(a briefing-style summary of recent inbox mail across ALL accounts, grouped by "
+           "importance/category with an [E-NN] label per message; act on one via its [ID]), "
            "send {to, subject, body} (to: email or contact name), "
            "confirm_send {draft_id}, "
            "trash {message_id, account?} (creates pending — ask user to confirm), "

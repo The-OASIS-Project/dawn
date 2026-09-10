@@ -255,6 +255,10 @@ static bool is_gmail_api_account(const email_account_t *acct) {
           strcasestr(acct->imap_server, "gmail.com") != NULL;
 }
 
+bool email_service_is_gmail_account(const email_account_t *acct) {
+   return acct && is_gmail_api_account(acct);
+}
+
 /** IMAP server is Gmail (regardless of auth type) */
 static bool is_gmail_imap_server(const email_account_t *acct) {
    return strcasestr(acct->imap_server, "gmail.com") != NULL;
@@ -618,16 +622,22 @@ int email_service_read(int user_id,
    if (acct_count <= 0)
       return EMAIL_RC_NO_ACCOUNTS;
    int enabled_seen = 0;
+   int all_not_found = 1; /* every failure so far was a clean 404, not a network error */
    for (int i = 0; i < acct_count; i++) {
       if (!accounts[i].enabled)
          continue;
       enabled_seen = 1;
-      if (read_single_account(&accounts[i], message_id, out) == 0)
+      int rc = read_single_account(&accounts[i], message_id, out);
+      if (rc == EMAIL_RC_OK)
          return EMAIL_RC_OK;
+      if (rc != EMAIL_RC_NOT_FOUND)
+         all_not_found = 0;
    }
-   /* Distinguish "you have accounts but they're all disabled" from generic
-    * fetch failure — the LLM should tell the user to enable one. */
-   return enabled_seen ? EMAIL_RC_FAILURE : EMAIL_RC_NO_ACCOUNTS;
+   /* Distinguish "you have accounts but they're all disabled" (enable one) from
+    * "the id isn't in any mailbox" (stale/wrong id) from a generic fetch failure. */
+   if (!enabled_seen)
+      return EMAIL_RC_NO_ACCOUNTS;
+   return all_not_found ? EMAIL_RC_NOT_FOUND : EMAIL_RC_FAILURE;
 }
 
 static int read_single_account(email_account_t *acct,
@@ -643,7 +653,9 @@ static int read_single_account(email_account_t *acct,
       int max_chars = acct->max_body_chars > 0 ? acct->max_body_chars : EMAIL_MAX_READ_BODY_LEN;
       int rc = gmail_read_message(token, message_id, max_chars, out);
       sodium_memzero(token, sizeof(token));
-      return rc;
+      if (rc == GMAIL_RC_NOT_FOUND)
+         return EMAIL_RC_NOT_FOUND;
+      return rc ? EMAIL_RC_FAILURE : EMAIL_RC_OK;
    }
 
    /* IMAP path — parse composite "folder:uid" using strrchr (last colon).

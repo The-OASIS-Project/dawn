@@ -55,13 +55,19 @@ int gmail_fetch_recent(const char *token,
                        char *next_page_token,
                        size_t npt_len);
 
+/* gmail_read_message return value for an HTTP 404 — the message id is not in
+ * this mailbox (stale, deleted, or from a different account), as distinct from a
+ * transport/network failure (1).  Lets the service layer report an accurate
+ * "not found" rather than "backend unreachable". */
+#define GMAIL_RC_NOT_FOUND 404
+
 /**
  * @brief Read a full message by Gmail message ID.
  * @param token          Bearer access token
  * @param message_id     Gmail hex message ID
  * @param max_body_chars Maximum body characters to return
  * @param out            Output message (caller frees via email_message_free())
- * @return 0 on success, 1 on failure
+ * @return 0 on success, GMAIL_RC_NOT_FOUND on HTTP 404, 1 on any other failure
  */
 int gmail_read_message(const char *token,
                        const char *message_id,

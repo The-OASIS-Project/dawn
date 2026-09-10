@@ -108,7 +108,16 @@ static CURL *gmail_create_curl(void) {
    return curl;
 }
 
-static int gmail_api_get(CURL *curl, const char *token, const char *url, curl_buffer_t *resp) {
+/* GET a Gmail API URL.  When @p http_code_out is non-NULL it receives the HTTP
+ * status (0 if the transfer never completed), so callers can distinguish a 404
+ * (message/resource not found) from a transport/network failure. */
+static int gmail_api_get(CURL *curl,
+                         const char *token,
+                         const char *url,
+                         curl_buffer_t *resp,
+                         long *http_code_out) {
+   if (http_code_out)
+      *http_code_out = 0;
    curl_buffer_init_with_max(resp, GMAIL_MAX_RESPONSE_SIZE);
 
    char auth_header[2112];
@@ -141,6 +150,8 @@ static int gmail_api_get(CURL *curl, const char *token, const char *url, curl_bu
 
    long http_code = 0;
    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+   if (http_code_out)
+      *http_code_out = http_code;
    if (http_code < 200 || http_code >= 300) {
       OLOG_ERROR("gmail: API request returned HTTP %ld", http_code);
       curl_buffer_free(resp);
@@ -778,7 +789,7 @@ static int fetch_message_ids(CURL *curl,
    }
 
    curl_buffer_t resp;
-   if (gmail_api_get(curl, token, url, &resp) != 0)
+   if (gmail_api_get(curl, token, url, &resp, NULL) != 0)
       return 1;
 
    struct json_object *root = json_tokener_parse(resp.data);
@@ -1137,9 +1148,10 @@ int gmail_read_message(const char *token,
    snprintf(url, sizeof(url), GMAIL_API_BASE "/messages/%s?format=full", message_id);
 
    curl_buffer_t resp;
-   if (gmail_api_get(curl, token, url, &resp) != 0) {
+   long http_code = 0;
+   if (gmail_api_get(curl, token, url, &resp, &http_code) != 0) {
       curl_easy_cleanup(curl);
-      return 1;
+      return http_code == 404 ? GMAIL_RC_NOT_FOUND : 1;
    }
 
    curl_easy_cleanup(curl);
@@ -1371,7 +1383,7 @@ int gmail_test_connection(const char *token, char *email_out, size_t email_len) 
       return 1;
 
    curl_buffer_t resp;
-   int rc = gmail_api_get(curl, token, GMAIL_API_BASE "/profile", &resp);
+   int rc = gmail_api_get(curl, token, GMAIL_API_BASE "/profile", &resp, NULL);
    curl_easy_cleanup(curl);
 
    if (rc != 0)
@@ -1440,7 +1452,7 @@ int gmail_list_labels(const char *token, char *out, size_t out_len) {
       return 1;
 
    curl_buffer_t resp;
-   int rc = gmail_api_get(curl, token, GMAIL_API_BASE "/labels", &resp);
+   int rc = gmail_api_get(curl, token, GMAIL_API_BASE "/labels", &resp, NULL);
    curl_easy_cleanup(curl);
 
    if (rc != 0)

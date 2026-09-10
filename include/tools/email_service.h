@@ -77,6 +77,7 @@ typedef struct {
 #define EMAIL_RC_UNKNOWN_ACCOUNT 10 /* account_name didn't match any configured account */
 #define EMAIL_RC_NO_ACCOUNTS 11     /* user has no enabled email accounts */
 #define EMAIL_RC_INVALID_FOLDER 12  /* folder name failed validation */
+#define EMAIL_RC_NOT_FOUND 13       /* message id not found in the mailbox (stale/wrong/deleted) */
 
 /* =============================================================================
  * Lifecycle
@@ -119,6 +120,12 @@ int email_service_add_account(int user_id,
 int email_service_remove_account(int64_t account_id);
 int email_service_test_connection(int64_t account_id, bool *imap_ok, bool *smtp_ok);
 int email_service_list_accounts(int user_id, email_account_t *out, int max);
+
+/* True if this account is served by the Gmail REST backend (OAuth + gmail.com).
+ * Currently also the set of accounts whose fetch populates email_summary_t.unread
+ * (IMAP \Seen parsing is deferred), so callers can tell whether an unread count
+ * is reliable for a given account. */
+bool email_service_is_gmail_account(const email_account_t *acct);
 
 /* =============================================================================
  * Operations (used by email_tool.c)

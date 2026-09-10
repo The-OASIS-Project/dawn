@@ -18,8 +18,8 @@ This is not a full changelog (see git history for that) — it is the short list
 *archive* step.** Nothing to do for anyone else.
 
 **What changed.** A scheduled or briefing step that invokes the `email` tool is now
-restricted to read-only actions (`accounts`, `recent`, `search`, `folders`, `read`).
-A step that tries to `send`, `trash`, or `archive` mail is
+restricted to read-only actions (`accounts`, `recent`, `search`, `folders`, `read`,
+`digest`). A step that tries to `send`, `trash`, or `archive` mail is
 refused at both creation and fire time — those actions require a live conversation
 (a human in the loop). This closes a gap where a scheduled email step could send or
 delete mail unattended. If you had such a step, recreate it as an interactive flow;
