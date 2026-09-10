@@ -356,10 +356,22 @@ typedef struct {
    tool_device_type_t device_type; /**< boolean, analog, getter, etc. */
    tool_capability_t capabilities; /**< Capability flags */
    bool skip_followup;             /**< Skip LLM follow-up response (see guide for details) */
-   bool mqtt_only;                 /**< Only available via MQTT */
-   bool sync_wait;                 /**< Wait for MQTT response */
-   bool default_local;             /**< Available to local sessions */
-   bool default_remote;            /**< Available to remote sessions */
+   /**< When true, a scheduled-briefing step running this tool has its result
+    * persisted into the briefing conversation as a synthetic tool-call/result
+    * pair (rendered as a tool entry, reloaded into LLM context) alongside the
+    * summary, so later turns can act on it — e.g. resolve an email digest's
+    * [E-NN]/[ID] rows. Most tools leave this false: weather/search output is
+    * noise once summarized.
+    * CONTRACT for adopters: the result must be COMPACT, actionable reference
+    * data (it is stored verbatim and rejoins context on every follow-up turn),
+    * and the synthetic call's arguments are serialized as {action, arguments} —
+    * a good fit for command-callback tools; a native-structured-params tool
+    * would show the model args that don't match its own schema. */
+   bool persist_scheduled_output;
+   bool mqtt_only;      /**< Only available via MQTT */
+   bool sync_wait;      /**< Wait for MQTT response */
+   bool default_local;  /**< Available to local sessions */
+   bool default_remote; /**< Available to remote sessions */
 
    /** Optional runtime availability check (NULL = always available) */
    bool (*is_available)(void);

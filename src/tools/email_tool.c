@@ -940,6 +940,10 @@ static const tool_metadata_t email_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NETWORK | TOOL_CAP_DANGEROUS | TOOL_CAP_SCHEDULABLE,
+   /* Scheduled read steps (digest/recent/search) carry [E-NN]/[ID] rows the user
+    * may follow up on ("open E-03") — persist the raw result into the briefing
+    * conversation so those references resolve on a later turn. */
+   .persist_scheduled_output = true,
    .skip_followup = false,
    .default_local = true,
    .default_remote = true,
