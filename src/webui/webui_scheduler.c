@@ -94,6 +94,7 @@ static json_object *serialize_event(const sched_event_t *e,
    json_object_object_add(obj, "snooze_count", json_object_new_int(e->snooze_count));
    json_object_object_add(obj, "say_aloud", json_object_new_int((int)e->say_aloud));
    json_object_object_add(obj, "deliver_to", json_object_new_string(e->deliver_to));
+   json_object_object_add(obj, "instructions", json_object_new_string(e->instructions));
    json_object_object_add(obj, "recurrence",
                           json_object_new_string(sched_recurrence_to_str(e->recurrence)));
    json_object_object_add(obj, "recurrence_days", json_object_new_string(e->recurrence_days));
@@ -157,13 +158,15 @@ void handle_scheduler_list_events(ws_connection_t *conn) {
    json_object *events_array = json_object_new_array();
 
    if (conn->auth_user_id > 0) {
-      /* Stack arithmetic: sched_event_t is ~3 KB (tool_value[2048] dominates).
-       * Two SCHED_MAX_RESULTS=50 arrays = ~294 KB on this stack frame.  Safe
-       * on the libwebsockets service thread (8 MB glibc pthread stack), and
-       * deliberately inside the `auth_user_id > 0` gate so unassigned
-       * satellites don't pay the cost.  If SCHED_MAX_RESULTS grows past ~400
-       * or the libws thread later hosts deeper call chains, switch these to
-       * calloc/free. */
+      /* Stack arithmetic: sched_event_t is ~4 KB (tool_value[2048] +
+       * instructions[1024] dominate).  Two SCHED_MAX_RESULTS=50 arrays =
+       * ~400 KB on this stack frame.  Safe on the libwebsockets service thread
+       * (8 MB glibc pthread stack), and deliberately inside the
+       * `auth_user_id > 0` gate so unassigned satellites don't pay the cost.
+       * (The scheduler_tool `handle_list` path runs on the 512 KB parallel-tool
+       * thread and therefore heap-allocates its equivalent array.)  If
+       * SCHED_MAX_RESULTS grows past ~400 or the libws thread later hosts deeper
+       * call chains, switch these to calloc/free. */
       sched_event_t active[SCHED_MAX_RESULTS];
       sched_event_t missed[SCHED_MAX_RESULTS];
       int active_count = scheduler_db_list_user_events(conn->auth_user_id, -1, active,

@@ -178,6 +178,9 @@ static void extract_event_row(sqlite3_stmt *stmt, sched_event_t *event) {
    /* v54: deliver_to is the 23rd column.  Same migration-guarantee
     * argument as say_aloud. */
    read_text_col(stmt, 23, event->deliver_to, SCHED_DELIVER_TO_MAX);
+   /* v84: briefing_instructions is the 24th column.  NULL (legacy row) reads as
+    * empty → default summarization prompt. */
+   read_text_col(stmt, 24, event->instructions, SCHED_INSTRUCTIONS_MAX);
 }
 
 /* Bind every column of the INSERT statement.  Both insert call sites
@@ -216,6 +219,8 @@ static void bind_event_columns(sqlite3_stmt *stmt, const sched_event_t *event) {
    sqlite3_bind_int(stmt, 22, (int)event->say_aloud);
    sqlite3_bind_text(stmt, 23, event->deliver_to[0] ? event->deliver_to : NULL, -1,
                      SQLITE_TRANSIENT);
+   sqlite3_bind_text(stmt, 24, event->instructions[0] ? event->instructions : NULL, -1,
+                     SQLITE_TRANSIENT);
 }
 
 /* Select all columns in consistent order */
@@ -224,7 +229,7 @@ static void bind_event_columns(sqlite3_stmt *stmt, const sched_event_t *event) {
    "duration_sec, snoozed_until, recurrence, recurrence_days, original_time, " \
    "source_uuid, source_location, source_client_type, announce_all, "          \
    "tool_name, tool_action, tool_value, fired_at, snooze_count, say_aloud, "   \
-   "deliver_to"
+   "deliver_to, briefing_instructions"
 
 /* =============================================================================
  * CRUD Operations
@@ -242,8 +247,9 @@ static int insert_event_unlocked(sched_event_t *event, int64_t *id_out) {
                      "duration_sec, snoozed_until, recurrence, recurrence_days, original_time, "
                      "source_uuid, source_location, source_client_type, announce_all, "
                      "tool_name, tool_action, tool_value, fired_at, snooze_count, say_aloud, "
-                     "deliver_to) "
-                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                     "deliver_to, briefing_instructions) "
+                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                     "?)";
 
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
@@ -326,8 +332,9 @@ int scheduler_db_insert_checked(sched_event_t *event,
                      "duration_sec, snoozed_until, recurrence, recurrence_days, original_time, "
                      "source_uuid, source_location, source_client_type, announce_all, "
                      "tool_name, tool_action, tool_value, fired_at, snooze_count, say_aloud, "
-                     "deliver_to) "
-                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                     "deliver_to, briefing_instructions) "
+                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                     "?)";
 
    sqlite3_stmt *stmt = NULL;
    rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
@@ -1033,11 +1040,12 @@ int scheduler_db_update_fields(int64_t id,
    SCHED_SET_COL(SCHED_FIELD_RECURRENCE_DAYS, "recurrence_days");
    SCHED_SET_COL(SCHED_FIELD_DELIVER_TO, "deliver_to");
    SCHED_SET_COL(SCHED_FIELD_SAY_ALOUD, "say_aloud");
+   SCHED_SET_COL(SCHED_FIELD_INSTRUCTIONS, "briefing_instructions");
 #undef SCHED_SET_COL
    off += snprintf(sql + off, sizeof(sql) - off,
                    " WHERE id = ? AND user_id = ? AND status IN ('pending', 'snoozed')");
-   /* Guard the snprintf accumulator: unreachable at the current 8 columns
-    * (~215 bytes < 512), but keeps a future column addition from wrapping
+   /* Guard the snprintf accumulator: unreachable at the current 9 columns
+    * (~245 bytes < 512), but keeps a future column addition from wrapping
     * `sizeof(sql) - off` to a huge size_t on the next append. */
    if (off < 0 || (size_t)off >= sizeof(sql)) {
       AUTH_DB_UNLOCK();
@@ -1068,6 +1076,10 @@ int scheduler_db_update_fields(int64_t id,
       sqlite3_bind_text(stmt, idx++, fields->deliver_to, -1, SQLITE_TRANSIENT);
    if (field_mask & SCHED_FIELD_SAY_ALOUD)
       sqlite3_bind_int(stmt, idx++, (int)fields->say_aloud);
+   if (field_mask & SCHED_FIELD_INSTRUCTIONS)
+      /* Bind NULL when cleared so the column stays canonical (NULL = unset). */
+      sqlite3_bind_text(stmt, idx++, fields->instructions[0] ? fields->instructions : NULL, -1,
+                        SQLITE_TRANSIENT);
    sqlite3_bind_int64(stmt, idx++, id);
    sqlite3_bind_int(stmt, idx++, user_id);
 

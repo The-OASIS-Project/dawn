@@ -12,6 +12,33 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-09-10 — Briefings can carry summarization instructions
+
+**Optional, opt-in — nothing to do unless you want it.** Existing briefings are
+unchanged and keep summarizing exactly as before.
+
+**What changed.** A briefing can now carry a free-text **instructions** field that
+steers *how* its collected data is summarized — what to emphasize, how to structure
+it, length, and tone. For example: "Lead with anything time-sensitive, keep it under
+five bullets, skip the pleasantries." A briefing with no instructions uses the same
+default format it always has.
+
+**How to use it.** Just ask your assistant — "make my morning briefing punchier and
+lead with unread email," or "drop the closing line from the market briefing." The
+field is editable in place, so you can tweak an existing briefing without recreating
+it. (A WebUI editor is planned; for now it's conversational.) Note the instructions
+**replace** the previous ones wholesale on each edit rather than appending — ask your
+assistant to read them back first if you mean to amend.
+
+**Schema.** The auth database migrates to v84 automatically on first launch (adds one
+nullable column to `scheduled_events`). No manual step; the upgrade is transparent.
+
+**Safety note.** Briefing instructions can shape the *format* but cannot override the
+rule that the data a briefing collects is data, never instructions — a summarization
+prompt can't be steered into treating an email's contents as commands.
+
+---
+
 ## 2026-09-09 — Scheduled email steps are now read-only
 
 **Only if you have a scheduled task/briefing that runs an email *send*, *trash*, or
