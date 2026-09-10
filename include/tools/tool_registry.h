@@ -807,6 +807,7 @@ int tool_registry_count_tool_variations(const char *name);
 #include <stdio.h>
 #include <string.h>
 
+#include "core/scheduled_context.h"
 #include "core/session_manager.h"
 
 /**
@@ -910,6 +911,14 @@ static inline int tool_get_current_user_id(void) {
    session_t *session = session_get_command_context();
    if (session && session->metrics.user_id > 0)
       return session->metrics.user_id;
+   /* No live session: a scheduled briefing step runs on the scheduler thread
+    * with no command context, so consult the scheduled-origin user the briefing
+    * executor set (scheduled_context_set) before defaulting to user 1 —
+    * otherwise every scheduled tool would bill/audit/act as user 1 rather than
+    * the briefing's owner.  See include/core/scheduled_context.h. */
+   int sched_user = 0;
+   if (scheduled_context_get(&sched_user) && sched_user > 0)
+      return sched_user;
    return 1;
 }
 

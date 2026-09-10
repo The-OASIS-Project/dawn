@@ -12,6 +12,21 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-09-09 — Scheduled email steps are now read-only
+
+**Only if you have a scheduled task/briefing that runs an email *send*, *trash*, or
+*archive* step.** Nothing to do for anyone else.
+
+**What changed.** A scheduled or briefing step that invokes the `email` tool is now
+restricted to read-only actions (`accounts`, `recent`, `search`, `folders`, `read`).
+A step that tries to `send`, `trash`, or `archive` mail is
+refused at both creation and fire time — those actions require a live conversation
+(a human in the loop). This closes a gap where a scheduled email step could send or
+delete mail unattended. If you had such a step, recreate it as an interactive flow;
+read-only email briefings are unaffected.
+
+---
+
 ## 2026-09-09 — `dawn-admin` binary now builds beside `dawn`
 
 **Anyone rebuilding in an existing build directory.** Fresh checkouts and clean

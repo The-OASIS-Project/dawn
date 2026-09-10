@@ -404,15 +404,12 @@ static char *messaging_callback(const char *action, char *value, int *should_res
     * with no session, so fall back to the scheduled-origin context the
     * briefing executor sets — otherwise this would silently bill/audit reads
     * to user 1.  See include/core/scheduled_context.h. */
-   int user_id = 1;
-   int sched_user = 0;
-   bool is_scheduled = scheduled_context_get(&sched_user);
-   session_t *ctx = session_get_command_context();
-   if (ctx && ctx->metrics.user_id > 0) {
-      user_id = ctx->metrics.user_id;
-   } else if (is_scheduled && sched_user > 0) {
-      user_id = sched_user;
-   }
+   /* Identity resolution is centralized in tool_get_current_user_id() (session,
+    * else scheduled-origin owner, else 1).  We still read the scheduled context
+    * separately for the fire-time gate below — "is this scheduled?" is a distinct
+    * question from "who owns it?". */
+   int user_id = tool_get_current_user_id();
+   bool is_scheduled = scheduled_context_get(NULL);
 
    /* Fire-time action-level schedulability gate: the tool carries
     * TOOL_CAP_SCHEDULABLE (so the read-digest use case works), but only

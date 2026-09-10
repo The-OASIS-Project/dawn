@@ -697,6 +697,44 @@ static int parse_message_json(struct json_object *root, email_summary_t *out) {
          out->date = (time_t)(strtoll(ms_str, NULL, 10) / 1000);
    }
 
+   /* Thread id — used by the digest for reply detection + dedup grouping. */
+   struct json_object *thread_obj = NULL;
+   if (json_object_object_get_ex(root, "threadId", &thread_obj)) {
+      const char *tid = json_object_get_string(thread_obj);
+      if (tid)
+         snprintf(out->thread_id, sizeof(out->thread_id), "%s", tid);
+   }
+
+   /* labelIds → read/importance/category flags.  Present in format=metadata and
+    * format=minimal responses; absent when a caller uses format=full without
+    * asking for labels, in which case the flags stay at their zero defaults. */
+   struct json_object *labels = NULL;
+   if (json_object_object_get_ex(root, "labelIds", &labels) &&
+       json_object_is_type(labels, json_type_array)) {
+      size_t n = json_object_array_length(labels);
+      for (size_t i = 0; i < n; i++) {
+         const char *lbl = json_object_get_string(json_object_array_get_idx(labels, i));
+         if (!lbl)
+            continue;
+         if (strcmp(lbl, "UNREAD") == 0)
+            out->unread = true;
+         else if (strcmp(lbl, "IMPORTANT") == 0)
+            out->important = true;
+         else if (strcmp(lbl, "STARRED") == 0)
+            out->starred = true;
+         else if (strcmp(lbl, "SENT") == 0)
+            out->from_me = true;
+         else if (strcmp(lbl, "CATEGORY_SOCIAL") == 0)
+            out->category = EMAIL_CAT_SOCIAL;
+         else if (strcmp(lbl, "CATEGORY_PROMOTIONS") == 0)
+            out->category = EMAIL_CAT_PROMOTIONS;
+         else if (strcmp(lbl, "CATEGORY_UPDATES") == 0)
+            out->category = EMAIL_CAT_UPDATES;
+         else if (strcmp(lbl, "CATEGORY_FORUMS") == 0)
+            out->category = EMAIL_CAT_FORUMS;
+      }
+   }
+
    return 0;
 }
 

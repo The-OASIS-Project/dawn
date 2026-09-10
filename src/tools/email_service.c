@@ -518,6 +518,18 @@ int email_service_list_accounts(int user_id, email_account_t *out, int max) {
  * Operations (Tool Layer)
  * ============================================================================= */
 
+/* Stamp the owning account's display name + address onto each returned row.
+ * The lower-level fetch primitives don't know the account, so the service layer
+ * is the single point that labels every row (contract in email_service.h).  The
+ * address (username) is the unambiguous inbox identifier — the display name may
+ * be a generic label like "Gmail" that doesn't say which account it is. */
+static void stamp_account(email_summary_t *out, int n, const email_account_t *acct) {
+   for (int i = 0; i < n; i++) {
+      snprintf(out[i].account_name, sizeof(out[i].account_name), "%s", acct->name);
+      snprintf(out[i].account_addr, sizeof(out[i].account_addr), "%s", acct->username);
+   }
+}
+
 int email_service_recent(int user_id,
                          const char *account_name,
                          const char *folder,
@@ -557,6 +569,7 @@ int email_service_recent(int user_id,
       int rc = gmail_fetch_recent(token, norm.gmail_query, count, unread_only, page_token, out, max,
                                   out_count, next_page_token, npt_len);
       sodium_memzero(token, sizeof(token));
+      stamp_account(out, *out_count, &acct);
       return rc;
    }
 
@@ -571,9 +584,10 @@ int email_service_recent(int user_id,
    rc = email_fetch_recent(&conn, norm.imap_folder, count, unread_only, out, max, out_count);
    sodium_memzero(&conn, sizeof(conn));
 
-   /* Populate message_id as folder:uid for IMAP results */
+   /* Populate message_id (folder:uid) for IMAP results, then stamp the account. */
    for (int i = 0; i < *out_count; i++)
       snprintf(out[i].message_id, sizeof(out[i].message_id), "%s:%u", norm.imap_folder, out[i].uid);
+   stamp_account(out, *out_count, &acct);
 
    return rc;
 }
@@ -704,6 +718,7 @@ static int search_single_account(email_account_t *acct,
       int rc = gmail_search(token, &gmail_params, max, out, max, out_count, next_page_token,
                             npt_len);
       sodium_memzero(token, sizeof(token));
+      stamp_account(out, *out_count, acct);
       return rc;
    }
 
@@ -720,6 +735,7 @@ static int search_single_account(email_account_t *acct,
 
    for (int i = 0; i < *out_count; i++)
       snprintf(out[i].message_id, sizeof(out[i].message_id), "%s:%u", norm.imap_folder, out[i].uid);
+   stamp_account(out, *out_count, acct);
 
    return rc;
 }

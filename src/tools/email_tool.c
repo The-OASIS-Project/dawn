@@ -32,7 +32,9 @@
 #include <strings.h>
 #include <time.h>
 
+#include "core/scheduled_context.h"
 #include "core/session_manager.h"
+#include "dawn_error.h"
 #include "logging.h"
 #include "memory/contacts_db.h"
 #include "tools/email_service.h"
@@ -270,10 +272,21 @@ static char *handle_recent(struct json_object *details, int user_id) {
    } else {
       pos += snprintf(buf, RESULT_BUF_SIZE, "Recent emails (%d):\n", out_count);
       for (int i = 0; i < out_count && pos < RESULT_BUF_SIZE - 512; i++) {
+         /* Prefer "name (address)" so a generic display name like "Gmail" still
+          * identifies which inbox; collapse to one when name == address. */
+         char acctlabel[300];
+         const char *an = emails[i].account_name;
+         const char *aa = emails[i].account_addr;
+         if (aa[0] && an[0] && strcmp(an, aa) != 0)
+            snprintf(acctlabel, sizeof(acctlabel), "%s (%s)", an, aa);
+         else
+            snprintf(acctlabel, sizeof(acctlabel), "%s", aa[0] ? aa : (an[0] ? an : "?"));
          pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos,
-                         "\n%d. From: %s%s%s\n   Subject: %s\n   Date: %s\n   [ID: %s]\n", i + 1,
-                         emails[i].from_name, emails[i].from_name[0] ? " " : "",
-                         emails[i].from_addr, emails[i].subject, emails[i].date_str,
+                         "\n%d. From: %s%s%s\n   Subject: %s%s\n   Account: %s | Date: %s\n   [ID: "
+                         "%s]\n",
+                         i + 1, emails[i].from_name, emails[i].from_name[0] ? " " : "",
+                         emails[i].from_addr, emails[i].subject,
+                         emails[i].unread ? " [UNREAD]" : "", acctlabel, emails[i].date_str,
                          emails[i].message_id);
       }
    }
@@ -396,10 +409,21 @@ static char *handle_search(struct json_object *details, int user_id) {
    } else {
       pos += snprintf(buf, RESULT_BUF_SIZE, "Search results (%d):\n", out_count);
       for (int i = 0; i < out_count && pos < RESULT_BUF_SIZE - 512; i++) {
+         /* Prefer "name (address)" so a generic display name like "Gmail" still
+          * identifies which inbox; collapse to one when name == address. */
+         char acctlabel[300];
+         const char *an = emails[i].account_name;
+         const char *aa = emails[i].account_addr;
+         if (aa[0] && an[0] && strcmp(an, aa) != 0)
+            snprintf(acctlabel, sizeof(acctlabel), "%s (%s)", an, aa);
+         else
+            snprintf(acctlabel, sizeof(acctlabel), "%s", aa[0] ? aa : (an[0] ? an : "?"));
          pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos,
-                         "\n%d. From: %s%s%s\n   Subject: %s\n   Date: %s\n   [ID: %s]\n", i + 1,
-                         emails[i].from_name, emails[i].from_name[0] ? " " : "",
-                         emails[i].from_addr, emails[i].subject, emails[i].date_str,
+                         "\n%d. From: %s%s%s\n   Subject: %s%s\n   Account: %s | Date: %s\n   [ID: "
+                         "%s]\n",
+                         i + 1, emails[i].from_name, emails[i].from_name[0] ? " " : "",
+                         emails[i].from_addr, emails[i].subject,
+                         emails[i].unread ? " [UNREAD]" : "", acctlabel, emails[i].date_str,
                          emails[i].message_id);
       }
    }
@@ -649,11 +673,55 @@ static char *handle_archive(struct json_object *details, int user_id) {
  * Tool Callback
  * ============================================================================= */
 
+/* Single source of truth for which email actions may run unattended (from a
+ * scheduled task or briefing).  Only read-only actions qualify; anything that
+ * sends, trashes, or archives requires a live conversation (a human in the
+ * loop).  Used by BOTH the create-time gate (email_validate_schedulable_action,
+ * reached via tool_registry) and the fire-time gate in email_tool_callback.
+ * Unknown/new actions are NOT schedulable by default (fail closed). */
+static bool email_action_is_schedulable(const char *action) {
+   /* Phase 2a adds "digest" here alongside its handler — keep this list in sync
+    * with the actions the callback actually dispatches so a scheduled step never
+    * passes the gate only to fail with "unknown action" at fire time. */
+   return action && (strcmp(action, "accounts") == 0 || strcmp(action, "recent") == 0 ||
+                     strcmp(action, "search") == 0 || strcmp(action, "folders") == 0 ||
+                     strcmp(action, "read") == 0);
+}
+
+#define EMAIL_SCHEDULABLE_ERR                                                    \
+   "only read-only email actions (accounts / recent / search / folders / read) " \
+   "may run from a schedule; send, trash, and archive require a live conversation."
+
+/* Per-action schedulability gate registered in email_metadata.  The email tool
+ * is TOOL_CAP_DANGEROUS (send/trash/archive) yet TOOL_CAP_SCHEDULABLE (so the
+ * read-only digest can run in a daily briefing); tool_registry_validate_schedulable
+ * does NOT reject DANGEROUS tools, so without this gate a scheduled step could
+ * send or trash mail.  Rejects non-read actions at scheduler CREATE time so the
+ * LLM is told up front.  Mirrors the fire-time gate in the callback. */
+static int email_validate_schedulable_action(const char *action,
+                                             char *err_buf,
+                                             size_t err_buf_size) {
+   if (email_action_is_schedulable(action))
+      return SUCCESS;
+   if (err_buf && err_buf_size)
+      snprintf(err_buf, err_buf_size, EMAIL_SCHEDULABLE_ERR);
+   return FAILURE;
+}
+
 static char *email_tool_callback(const char *action, char *value, int *should_respond) {
    *should_respond = 1;
 
    if (!action || !action[0])
       return strdup("Error: action is required");
+
+   /* Fire-time schedulability gate.  Keyed on the scheduled-origin context, NOT
+    * "no session" — the identity fallback in tool_get_current_user_id resolves a
+    * scheduled owner, so "no session" alone no longer distinguishes scheduled
+    * from interactive.  Defense in depth with the create-time gate above; this
+    * also catches legacy briefing rows that predate the gate (the single-tool
+    * briefing path skips tool_registry_validate_schedulable). */
+   if (scheduled_context_get(NULL) && !email_action_is_schedulable(action))
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: " EMAIL_SCHEDULABLE_ERR);
 
    /* 'accounts' takes no arguments, so tolerate a prose `arguments` value (a
     * model may still narrate despite the schema); every other action reads
@@ -830,6 +898,7 @@ static const tool_metadata_t email_metadata = {
    .config_section = "email",
 
    .is_available = email_tool_available,
+   .validate_schedulable_action = email_validate_schedulable_action,
    .init = email_tool_init,
    .cleanup = email_tool_cleanup,
    .callback = email_tool_callback,

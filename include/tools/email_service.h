@@ -123,6 +123,13 @@ int email_service_list_accounts(int user_id, email_account_t *out, int max);
 /* =============================================================================
  * Operations (used by email_tool.c)
  * account_name: string match against account.name, NULL = first enabled
+ *
+ * CONTRACT: these service-layer entry points stamp email_summary_t.account_name
+ * on every returned row (both backends).  The lower-level fetch primitives
+ * (gmail_fetch_recent / email_fetch_recent / gmail_search / email_search) do NOT
+ * — they don't know the account name.  So any new caller (e.g. email_digest.c's
+ * multi-account loop) MUST go through these service functions to inherit the
+ * account label, or stamp account_name itself.
  * ============================================================================= */
 
 int email_service_recent(int user_id,

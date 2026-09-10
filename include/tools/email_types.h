@@ -29,7 +29,13 @@
 #include <time.h>
 
 /* Maximum emails to fetch in a single request (bounds stack usage).
- * 50 entries * ~1.3KB = ~65KB stack — well within Jetson limits. */
+ * handle_recent/handle_search hold an email_summary_t[50] (~1.66KB each ≈ 83KB)
+ * on the stack.  The binding limit is NOT the 8MB default stack but the 512KB
+ * parallel tool-execution thread (llm_tools.c) the email tool runs on when the
+ * LLM batches tool calls — 83KB is ~16% of it, comfortable but the number to
+ * measure against if this struct grows.  If it grows materially, move those
+ * arrays to a calloc'd scratch (as email_digest.c does across accounts) rather
+ * than raising this cap. */
 #define EMAIL_MAX_FETCH_RESULTS 50
 
 /* Inbound (read) body cap — default fallback for both backends when an account
@@ -47,15 +53,45 @@
 /* Lower bound the WebUI accepts for a per-account max_body_chars override. */
 #define EMAIL_MIN_READ_BODY_LEN 500
 
+/* Whether the user has replied to a message.  Tri-state so a skipped, failed, or
+ * over-budget thread lookup is reported as UNKNOWN, never as "not replied". */
+typedef enum {
+   EMAIL_REPLIED_UNKNOWN = 0, /* not determined (default; lookup skipped/failed) */
+   EMAIL_REPLIED_NO,          /* no later reply found in the thread */
+   EMAIL_REPLIED_YES,         /* a SENT message exists later in the thread */
+} email_reply_state_t;
+
+/* Gmail inbox category (from CATEGORY_* labels).  PRIMARY is the default when no
+ * category label is present (or on IMAP, which has no categories). */
+typedef enum {
+   EMAIL_CAT_PRIMARY = 0,
+   EMAIL_CAT_SOCIAL,
+   EMAIL_CAT_PROMOTIONS,
+   EMAIL_CAT_UPDATES,
+   EMAIL_CAT_FORUMS,
+} email_category_t;
+
 typedef struct {
    uint32_t uid;
-   char message_id[192]; /* Gmail hex ID or IMAP folder:uid composite */
+   char message_id[192];   /* Gmail hex ID or IMAP folder:uid composite */
+   char thread_id[192];    /* Gmail threadId (for reply/dedup grouping); empty on IMAP */
+   char account_name[128]; /* configured account display name (email_account_t.name) — may be a
+                            * friendly label like "Gmail" that does not identify the inbox */
+   char account_addr[128]; /* the account's address (email_account_t.username) — the unambiguous
+                            * inbox identifier; use this to disambiguate across accounts */
    char from_name[64];
    char from_addr[256];
    char subject[256];
    char date_str[32];
    time_t date;
    char preview[512];
+   bool unread;                 /* Gmail UNREAD label. Gmail-only for now: IMAP does not
+                                 * parse \Seen yet (Phase 4), so it stays false on IMAP. */
+   bool important;              /* Gmail IMPORTANT label */
+   bool starred;                /* Gmail STARRED label */
+   bool from_me;                /* Gmail SENT label — the user's own message */
+   email_category_t category;   /* Gmail inbox category; PRIMARY otherwise */
+   email_reply_state_t replied; /* filled by the digest reply-enrichment pass */
 } email_summary_t;
 
 typedef struct {
