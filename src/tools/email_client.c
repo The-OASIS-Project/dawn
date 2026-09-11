@@ -393,13 +393,6 @@ static void parse_from_value(const char *decoded,
    }
 }
 
-/** Parse Date header into time_t */
-/* RFC 2822 Date-header parsing (timezone-aware) lives in email_parse.c so the
- * date math is unit-testable; this thin alias preserves the local call sites. */
-static time_t parse_email_date(const char *date_str) {
-   return email_parse_rfc822_date(date_str);
-}
-
 /* =============================================================================
  * Extract plain text body from email content
  * ============================================================================= */
@@ -488,19 +481,24 @@ static char *extract_plain_body(const char *raw, int max_chars, bool *out_trunca
  * ============================================================================= */
 
 /**
- * Parse the last N UIDs from an IMAP SEARCH response.
+ * Parse the last N UIDs from an IMAP UID SEARCH response.
  *
- * SEARCH returns UIDs in ascending order. For "recent" email, we want the
- * highest UIDs (newest messages). This uses a circular buffer to capture
- * only the last `wanted` UIDs from arbitrarily large inboxes without
- * excessive memory.
+ * UID SEARCH returns UIDs in ascending order (a plain SEARCH would return
+ * sequence numbers — callers MUST issue UID SEARCH so these ids match the
+ * subsequent UID FETCH). For "recent" email, we want the highest UIDs (newest
+ * messages). This uses a circular buffer to capture only the last `wanted` UIDs
+ * from arbitrarily large inboxes without excessive memory.
  *
- * @param response  Raw IMAP SEARCH response
+ * @param response  Raw IMAP UID SEARCH response
  * @param uids      Output array (must hold at least `wanted` elements)
  * @param wanted    Max UIDs to return (from the tail of the list)
  * @return Number of UIDs written to uids[], in ascending order
  */
 static int parse_tail_uids(const char *response, uint32_t *uids, int wanted) {
+   /* Guard against a server that returns no body (curl leaves buf.data NULL) and
+    * against a zero `wanted` (the `total % wanted` below would divide by zero). */
+   if (!response || wanted <= 0)
+      return 0;
    const char *p = strstr(response, "* SEARCH");
    if (!p)
       return 0;
@@ -543,70 +541,46 @@ static int parse_tail_uids(const char *response, uint32_t *uids, int wanted) {
  * Parse email headers from FETCH response
  * ============================================================================= */
 
-static void parse_summary_from_fetch(const char *data, email_summary_t *out) {
-   memset(out, 0, sizeof(*out));
-
-   /* From: unfold + decode, then parse name/addr */
-   char from_decoded[256];
-   const char *from_val = find_header(data, "From");
-   copy_header_value(from_val, from_decoded, sizeof(from_decoded));
-   parse_from_value(from_decoded, out->from_name, sizeof(out->from_name), out->from_addr,
-                    sizeof(out->from_addr));
-
-   /* Subject: unfold + decode */
-   const char *subj_val = find_header(data, "Subject");
-   copy_header_value(subj_val, out->subject, sizeof(out->subject));
-
-   /* Date: unfold (no RFC 2047 in dates, but unfolding is safe) */
-   const char *date_val = find_header(data, "Date");
-   copy_header_value(date_val, out->date_str, sizeof(out->date_str));
-   out->date = parse_email_date(out->date_str);
-
-   /* Preview from body */
-   const char *body = strstr(data, "\r\n\r\n");
-   if (!body)
-      body = strstr(data, "\n\n");
-   if (body) {
-      body += (body[0] == '\r') ? 4 : 2;
-      snprintf(out->preview, sizeof(out->preview), "%.*s", (int)(sizeof(out->preview) - 1), body);
-   }
-}
-
 /* =============================================================================
- * Batch FETCH headers for multiple UIDs
+ * Batch FETCH summaries for multiple UIDs
  *
- * Sends a single UID FETCH command for all UIDs instead of N individual round
- * trips.  Falls back to per-UID fetch if the batch command fails.
- *
- * The batch response is a sequence of IMAP untagged FETCH responses:
- *   * seqnum FETCH (UID uid BODY[HEADER] {octets}\r\n<header data>\r\n)\r\n
- *
- * We parse these by scanning for "UID <num>" and "BODY[HEADER] {<octets>}"
- * within each "* ... FETCH" block.
+ * One UID FETCH (FLAGS INTERNALDATE ENVELOPE) for the whole set.  All three
+ * items are delivered INLINE (no IMAP literal), which matters twice over:
+ *   1. libcurl's custom-command path (used for CUSTOMREQUEST) writes untagged
+ *      response lines to us but DISCARDS literal octet blocks — so BODY[HEADER],
+ *      which is a literal, can never be read this way.
+ *   2. The only libcurl path that DOES stream a body literal is the URL form,
+ *      but it issues plain BODY[...] (not BODY.PEEK), which marks messages
+ *      \Seen — unacceptable for a digest that just lists mail.
+ * ENVELOPE sidesteps both: it carries From/Subject/Date as an inline structure
+ * and never touches the body, so nothing is marked read.  See email_parse.c
+ * for the ENVELOPE + paren-matching parsers (unit-tested).
  * ============================================================================= */
 
-/* Apply the per-message IMAP FETCH metadata that precedes the BODY[HEADER]
- * literal — FLAGS and INTERNALDATE — onto a summary already populated from the
- * header block.  `seg` is the response text from the "* N FETCH (" opener up to
- * (not including) the literal's '{'.  FLAGS drives unread (\Seen absent) and the
- * tri-state replied (\Answered present -> YES, else NO); INTERNALDATE, when
- * present, is the reliable server receive time and overrides the free-form Date
- * header.  Fields are left at their parse_summary_from_fetch defaults when a
- * token is absent (unread stays false, replied stays UNKNOWN).
+/* Apply the per-message IMAP FETCH metadata — FLAGS and INTERNALDATE — onto a
+ * summary.  `seg` is one message's full item-list text ("* N FETCH (UID .. FLAGS
+ * (..) INTERNALDATE ".." ENVELOPE (..))").  FLAGS drives unread (\Seen absent)
+ * and the tri-state replied (\Answered present -> YES, else NO); INTERNALDATE is
+ * the reliable server receive time.  Absent tokens leave the caller's memset
+ * defaults (unread false, replied UNKNOWN, date 0).
  *
- * Scans only the pre-literal prefix DELIBERATELY: the header body that follows
- * the literal is attacker-influenced email content, so scanning it for FLAGS/
- * INTERNALDATE would let a crafted header forge read/reply state.  This assumes
- * the server returns FLAGS/INTERNALDATE before BODY[HEADER] — which every
- * mainstream server (Gmail, Dovecot, Cyrus, Exchange) does, though RFC 3501
- * §7.4.2 does not strictly require request-order.  Returns true iff a FLAGS
- * group was found, so the caller can flag a (rare) reordering server rather
- * than silently trust the unread=false default. */
+ * SECURITY: the FLAGS/INTERNALDATE search is confined to the region BEFORE
+ * "ENVELOPE".  Everything inside ENVELOPE (subject, sender name) is
+ * sender-controlled, so without this bound a crafted subject like
+ * `FLAGS (\Answered)` or `INTERNALDATE "01-Jan-1990..."` could forge the
+ * read/reply state or receive date.  We request `(FLAGS INTERNALDATE ENVELOPE)`
+ * in that order, so the genuine items always fall in this trusted prefix; a
+ * match at or beyond ENVELOPE is ignored (fail-safe to the default).  Returns
+ * true iff a FLAGS group was found in the prefix. */
 static bool apply_fetch_metadata(const char *seg, email_summary_t *out) {
+   /* Trusted prefix ends at the (sender-controlled) ENVELOPE. */
+   const char *env = strcasestr(seg, "ENVELOPE");
+   size_t prefix = env ? (size_t)(env - seg) : strlen(seg);
+
    bool flags_found = false;
-   /* FLAGS (...) group. */
+   /* FLAGS (...) group — only if it lies in the trusted prefix. */
    const char *flags_kw = strcasestr(seg, "FLAGS");
-   if (flags_kw) {
+   if (flags_kw && (size_t)(flags_kw - seg) < prefix) {
       const char *lp = strchr(flags_kw, '(');
       const char *rp = lp ? strchr(lp, ')') : NULL;
       if (lp && rp && rp > lp) {
@@ -623,9 +597,10 @@ static bool apply_fetch_metadata(const char *seg, email_summary_t *out) {
       }
    }
 
-   /* INTERNALDATE "dd-Mon-yyyy HH:MM:SS +ZZZZ" — reliable server receive time. */
+   /* INTERNALDATE "dd-Mon-yyyy HH:MM:SS +ZZZZ" — reliable server receive time,
+    * likewise only trusted from the pre-ENVELOPE prefix. */
    const char *idate_kw = strcasestr(seg, "INTERNALDATE");
-   if (idate_kw) {
+   if (idate_kw && (size_t)(idate_kw - seg) < prefix) {
       const char *q1 = strchr(idate_kw, '"');
       const char *q2 = q1 ? strchr(q1 + 1, '"') : NULL;
       if (q1 && q2 && q2 > q1 + 1) {
@@ -664,18 +639,12 @@ static int batch_fetch_headers(CURL *curl,
       BUF_PRINTF(uid_list, upos, urem, "%u", uids[i]);
    }
 
-   /* Send single UID FETCH command */
    char url[1024];
    snprintf(url, sizeof(url), "%s/%s", conn->imap_url, encoded_folder);
    curl_easy_setopt(curl, CURLOPT_URL, url);
 
    char fetch_cmd[1200];
-   /* FLAGS + INTERNALDATE alongside the header block: FLAGS gives per-message
-    * unread (\Seen) and replied (\Answered) state natively (no sent-folder
-    * search needed the way the Gmail backend requires), and INTERNALDATE is the
-    * reliable server receive time for the digest's rolling-window filter. */
-   snprintf(fetch_cmd, sizeof(fetch_cmd), "UID FETCH %s (FLAGS INTERNALDATE BODY.PEEK[HEADER])",
-            uid_list);
+   snprintf(fetch_cmd, sizeof(fetch_cmd), "UID FETCH %s (FLAGS INTERNALDATE ENVELOPE)", uid_list);
    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, fetch_cmd);
 
    curl_buffer_t buf;
@@ -696,97 +665,60 @@ static int batch_fetch_headers(CURL *curl,
       return 1;
    }
 
-   /* Parse multi-message response.  Each message appears as:
-    *   * <seq> FETCH (UID <uid> BODY[HEADER] {<octets>}\r\n<data>\r\n)
-    * We scan for each "* " line, extract UID and literal size, then grab
-    * exactly <octets> bytes of header data. */
+   /* Parse the response, one "* <seq> FETCH (UID <uid> FLAGS (..) INTERNALDATE
+    * ".." ENVELOPE (..))" untagged line per message.  email_imap_next_fetch
+    * isolates each message (bounding it at its quote-aware matching ')', and
+    * resyncing past a literal-truncated envelope so one bad message can't drop
+    * the rest of the batch — see its contract). */
    const char *p = buf.data;
-   int flags_missing = 0; /* messages whose prefix carried no FLAGS group */
-   while (p && *p && *out_count < max_out) {
-      /* Find next untagged FETCH response */
-      const char *fetch = strstr(p, "* ");
-      if (!fetch)
+   const char *seg_start = NULL;
+   size_t seg_len = 0;
+   uint32_t uid = 0;
+   while (*out_count < max_out &&
+          (p = email_imap_next_fetch(p, &seg_start, &seg_len, &uid)) != NULL) {
+      char *seg = malloc(seg_len + 1);
+      if (!seg)
          break;
+      memcpy(seg, seg_start, seg_len);
+      seg[seg_len] = '\0';
 
-      const char *fetch_kw = strcasestr(fetch, "FETCH");
-      if (!fetch_kw) {
-         p = fetch + 2;
-         continue;
+      email_summary_t *s = &out[*out_count];
+      memset(s, 0, sizeof(*s));
+      s->uid = uid;
+
+      /* FLAGS -> unread/replied, INTERNALDATE -> date (server receive time). */
+      apply_fetch_metadata(seg, s);
+
+      /* date_str is the human-readable date the recent/search formatter prints
+       * (the digest sorts/filters on the epoch instead).  Derive it from the
+       * reliable INTERNALDATE epoch rather than the sender's Date header. */
+      if (s->date > 0) {
+         struct tm tmv;
+         if (localtime_r(&s->date, &tmv))
+            strftime(s->date_str, sizeof(s->date_str), "%a, %d %b %Y %H:%M", &tmv);
       }
 
-      /* Extract UID */
-      const char *uid_str = strstr(fetch, "UID ");
-      if (!uid_str || uid_str > fetch_kw + 256) {
-         p = fetch_kw + 5;
-         continue;
-      }
-      uint32_t uid = (uint32_t)strtoul(uid_str + 4, NULL, 10);
-
-      /* Find literal size: {octets} */
-      const char *lbrace = strchr(uid_str, '{');
-      if (!lbrace) {
-         p = uid_str + 4;
-         continue;
-      }
-      int octets = (int)strtol(lbrace + 1, NULL, 10);
-      if (octets <= 0 || octets > 128 * 1024) {
-         p = lbrace + 1;
-         continue;
+      /* ENVELOPE -> subject + first From (RAW envelope strings are RFC 2047-
+       * encoded; decode them with the same word decoder the header path uses).
+       * A message whose ENVELOPE contains an IMAP literal ({N}) in a string
+       * field — a raw non-RFC2047 subject/name — loses that field (and the rest
+       * of its envelope): libcurl's custom-command path discards literal octets.
+       * Such a message keeps its date/flags/id and stays readable via `read`,
+       * but its subject/sender degrade cleanly to blank — never a wrong value. */
+      char subj_raw[256] = { 0 };
+      char fname_raw[256] = { 0 };
+      char faddr[256] = { 0 };
+      if (email_parse_envelope(seg, subj_raw, sizeof(subj_raw), fname_raw, sizeof(fname_raw), faddr,
+                               sizeof(faddr))) {
+         decode_rfc2047(subj_raw, s->subject, sizeof(s->subject));
+         if (fname_raw[0])
+            decode_rfc2047(fname_raw, s->from_name, sizeof(s->from_name));
+         snprintf(s->from_addr, sizeof(s->from_addr), "%s", faddr);
       }
 
-      /* Header data starts after {octets}\r\n */
-      const char *hdr_start = strchr(lbrace, '\n');
-      if (!hdr_start) {
-         p = lbrace + 1;
-         break;
-      }
-      hdr_start++; /* skip \n */
-
-      /* Bounds check */
-      if (hdr_start + octets > buf.data + buf.size)
-         break;
-
-      /* Copy header data into a temporary null-terminated buffer */
-      char *hdr_copy = malloc(octets + 1);
-      if (!hdr_copy)
-         break;
-      memcpy(hdr_copy, hdr_start, octets);
-      hdr_copy[octets] = '\0';
-
-      parse_summary_from_fetch(hdr_copy, &out[*out_count]);
-      out[*out_count].uid = uid;
-
-      /* Apply FLAGS + INTERNALDATE from the response prefix (everything from the
-       * "* N FETCH (" opener up to the BODY[HEADER] literal's '{').  1 KB is
-       * ample for UID + a FLAGS keyword list + INTERNALDATE ahead of the
-       * literal; a longer prefix truncates gracefully (same fall-through as a
-       * missing token). */
-      {
-         char meta[1024];
-         size_t mlen = (size_t)(lbrace - fetch);
-         if (mlen >= sizeof(meta))
-            mlen = sizeof(meta) - 1;
-         memcpy(meta, fetch, mlen);
-         meta[mlen] = '\0';
-         if (!apply_fetch_metadata(meta, &out[*out_count]))
-            flags_missing++;
-      }
       (*out_count)++;
-
-      free(hdr_copy);
-      p = hdr_start + octets;
+      free(seg);
    }
-
-   /* We requested FLAGS on every message; if none of the parsed messages
-    * carried a FLAGS group in its prefix, the server likely returned data
-    * items out of request order (RFC 3501 allows it) — in which case unread/
-    * replied fell back to defaults and the unread count is understated.  Log it
-    * once so the (rare) offending server is diagnosable instead of silently
-    * reporting "0 unread". */
-   if (*out_count > 0 && flags_missing == *out_count)
-      OLOG_WARNING("email: IMAP FETCH returned no FLAGS in any of %d message prefixes — "
-                   "server may reorder data items; unread/replied state may be incomplete",
-                   *out_count);
 
    curl_buffer_free(&buf);
    return 0;
@@ -847,8 +779,13 @@ int email_fetch_recent(const email_conn_t *conn,
    snprintf(url, sizeof(url), "%s/%s", conn->imap_url, encoded_folder);
    curl_easy_setopt(curl, CURLOPT_URL, url);
 
+   /* UID SEARCH (not plain SEARCH): the results are fed to UID FETCH below, so
+    * both must speak UIDs.  Plain SEARCH returns message SEQUENCE numbers, which
+    * only coincide with UIDs in a mailbox that has never had a message expunged
+    * — on any established mailbox the two diverge and UID-FETCHing sequence
+    * numbers returns nothing ("No recent emails found"). */
    char search_cmd[128];
-   snprintf(search_cmd, sizeof(search_cmd), "SEARCH %s", unread_only ? "UNSEEN" : "ALL");
+   snprintf(search_cmd, sizeof(search_cmd), "UID SEARCH %s", unread_only ? "UNSEEN" : "ALL");
    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, search_cmd);
 
    curl_buffer_t buf;
@@ -992,11 +929,13 @@ int email_search(const email_conn_t *conn,
    if (!curl)
       return 1;
 
-   /* Build IMAP SEARCH command with literal syntax for user-provided values */
+   /* Build IMAP UID SEARCH command with literal syntax for user-provided values.
+    * UID SEARCH (not plain SEARCH) so the returned ids are UIDs, matching the
+    * UID FETCH that consumes them — see the note in email_fetch_recent. */
    char search_cmd[2048];
    size_t spos = 0;
    size_t srem = sizeof(search_cmd);
-   BUF_PRINTF(search_cmd, spos, srem, "SEARCH");
+   BUF_PRINTF(search_cmd, spos, srem, "UID SEARCH");
 
    if (params->unread_only) {
       BUF_PRINTF(search_cmd, spos, srem, " UNSEEN");
