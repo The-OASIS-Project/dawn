@@ -92,12 +92,9 @@ typedef struct {
  * session->client_data, NULLed on disconnect) because a brand-new chat's conversation is
  * created a moment AFTER the turn starts (the browser's new_conversation message), still
  * well before the LLM emits tool calls; a setup-time snapshot would be 0.  auth_user_id is
- * stable for the connection, so it is snapshotted at setup. */
-typedef struct {
-   session_t *session;
-   int auth_user_id;
-} webui_tool_persist_ctx_t;
-
+ * stable for the connection, so it is snapshotted at setup.  (webui_tool_persist_ctx_t
+ * is declared in webui_internal.h so the shared arm/disarm helper + the voice path can
+ * reference it.) */
 static void webui_tool_persist_cb(void *userdata,
                                   const char *role,
                                   const char *content,
@@ -141,6 +138,49 @@ void webui_tool_iteration_cb(session_t *session, void *userdata) {
    if (session && atomic_load(&session->llm_streaming_active)) {
       webui_send_stream_end(session, "tool_iteration");
    }
+}
+
+/* Arm the WebUI per-turn persistence contract as ONE unit: the tool-persist hook
+ * (writes assistant tool_calls + role:tool rows), the tool-iteration hook (seals the
+ * streaming bubble per iteration), and will_persist_turn (the final-reply stand-down
+ * promise).  BOTH WebUI foreground surfaces — typed (this file) and voice
+ * (webui_audio.c) — route through this so neither can wire half the contract (the gap
+ * that silently dropped voice tool-turns).  `scope` owns the stack-lifetime persist_ctx
+ * the hook references and MUST outlive the synchronous LLM dispatch; the hook reads the
+ * conversation id LIVE from session->stream_conversation_id, so bind the conversation
+ * BEFORE arming.  Captures only session + auth_user_id — never `conn` (freed on a
+ * mid-turn disconnect).  Arms nothing when auth_user_id <= 0, so will_persist_turn never
+ * promises a persistence the server then can't deliver (rows are user-owned).
+ *
+ * NOT used by jobs (job_worker/job_reinvoke install their own persist cb with a snapshot
+ * conv_id and deliberately do NOT arm will_persist_turn — a job reply persists via its
+ * tail + durable conv_event log), nor by messaging/research (they persist inline / to
+ * their own ledgers).  Do not "consistency-fix" those onto this helper. */
+void webui_turn_persist_arm(session_t *session,
+                            int auth_user_id,
+                            webui_turn_persist_scope_t *scope) {
+   if (!session || !scope) {
+      return;
+   }
+   scope->persist_ctx.session = session;
+   scope->persist_ctx.auth_user_id = auth_user_id;
+   if (auth_user_id <= 0) {
+      return; /* no user → nothing persistable; arm nothing (incl. will_persist_turn) */
+   }
+   session_set_tool_persist_hook(session, webui_tool_persist_cb, &scope->persist_ctx);
+   session_set_tool_iteration_hook(session, webui_tool_iteration_cb, NULL);
+   atomic_store(&session->will_persist_turn, true);
+}
+
+/* Symmetric teardown; safe/idempotent even if arm installed nothing. */
+void webui_turn_persist_disarm(session_t *session, webui_turn_persist_scope_t *scope) {
+   (void)scope; /* persist_ctx is cleared implicitly when it goes out of scope in the caller */
+   if (!session) {
+      return;
+   }
+   atomic_store(&session->will_persist_turn, false);
+   session_set_tool_persist_hook(session, NULL, NULL);
+   session_set_tool_iteration_hook(session, NULL, NULL);
 }
 
 /* Callback fired by core_text_input_dispatch after the user message is
@@ -334,40 +374,24 @@ static void *text_worker_thread(void *arg) {
       .user_msg_added_ctx = session,
    };
 
-   /* Install the tool-turn persist hook for the duration of the (synchronous) LLM
-    * call so the tool loop can durably persist structured assistant tool_calls +
-    * role:tool rows.  persist_ctx is stack-scoped and the hook fires on THIS thread
-    * during core_text_input_dispatch, so it's valid throughout; cleared right after.
-    * Installed whenever we have a connection — the callback reads the conversation id
-    * live (it may still be 0 here for a brand-new chat, but is set before tools fire). */
-   webui_tool_persist_ctx_t persist_ctx = { .session = session,
-                                            .auth_user_id = conn ? conn->auth_user_id : 0 };
-   if (conn) {
-      session_set_tool_persist_hook(session, webui_tool_persist_cb, &persist_ctx);
-      /* Live-transcript reorder: segment the streaming bubble per tool-loop iteration.
-       * Stateless (acts on the session), so no userdata needed. */
-      session_set_tool_iteration_hook(session, webui_tool_iteration_cb, NULL);
-   }
-
    /* Clear the per-turn error flag before the call; the provider layer sets it via
     * webui_send_error_ex if it emits a specific error, which we then honor below to
     * skip the redundant generic fallback. */
    atomic_store(&session->turn_error_emitted, false);
 
-   /* Server-authoritative (SERVER_AUTHORITATIVE Phase 2b-i): the server is now the sole
-    * writer of this reply.  Arm the Model A promise so the FINAL stream_end tells the
-    * browser to stand down from its client-save; disarm right after dispatch (the promise
-    * is read only at the in-dispatch stream_end).  session_begin_turn_flags at dequeue
-    * (text_turn_thread_entry) reset it before this worker ran, so reset-then-arm holds. */
-   atomic_store(&session->will_persist_turn, true);
+   /* Arm the WebUI per-turn persistence contract (tool-persist hook + tool-iteration
+    * hook + will_persist_turn) as one unit — same helper the voice worker uses, so a
+    * path can't wire half of it.  `persist_scope` must outlive the synchronous dispatch;
+    * the hook reads the conversation id live (may still be 0 here for a brand-new chat,
+    * but is set before tools fire).  session_begin_turn_flags at dequeue reset
+    * will_persist_turn before this worker ran, so reset-then-arm holds. */
+   webui_turn_persist_scope_t persist_scope;
+   webui_turn_persist_arm(session, conn ? conn->auth_user_id : 0, &persist_scope);
    char *response = core_text_input_dispatch(
        session, text, (const char **)work->vision_images, work->vision_image_sizes,
        (const char(*)[WEBUI_VISION_MIME_MAX])work->vision_mimes, work->vision_image_count,
        &dispatch_opts);
-   atomic_store(&session->will_persist_turn, false);
-
-   session_set_tool_persist_hook(session, NULL, NULL); /* persist_ctx goes out of scope below */
-   session_set_tool_iteration_hook(session, NULL, NULL);
+   webui_turn_persist_disarm(session, &persist_scope);
 
    /* Promote the persisted image turn's images to permanent retention — AFTER
     * dispatch persisted the row, so images are pinned only for turns that reached

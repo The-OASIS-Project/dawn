@@ -499,6 +499,30 @@ void queue_init_messages(ws_connection_t *conn, const char *token);
  */
 void webui_evict_session_owner(session_t *existing, ws_connection_t *new_conn);
 
+/* ---- Per-turn persistence contract (webui_text_processing.c) ---------------
+ * The tool-persist hook context + a scope that arms/disarms the WHOLE WebUI
+ * turn-persistence contract as one unit, so a foreground turn path (typed or
+ * voice) can't wire half of it. */
+typedef struct {
+   session_t *session; /* retained for the turn; NEVER a raw conn (UAF on disconnect) */
+   int auth_user_id;   /* stable per connection; snapshotted at arm time */
+} webui_tool_persist_ctx_t;
+
+typedef struct {
+   webui_tool_persist_ctx_t persist_ctx; /* stack-lifetime; referenced by the hook */
+} webui_turn_persist_scope_t;
+
+/* Arm {tool-persist hook, tool-iteration hook, will_persist_turn} together for the
+ * synchronous LLM dispatch.  `scope` MUST outlive the dispatch; the hook reads the
+ * conversation id live from session->stream_conversation_id, so bind the conversation
+ * FIRST.  Captures only session + auth_user_id (never conn).  Arms nothing when
+ * auth_user_id <= 0 (no user → nothing persistable).  Deliberately NOT for jobs
+ * (own cb + snapshot conv, no will_persist) / messaging / research. */
+void webui_turn_persist_arm(session_t *session,
+                            int auth_user_id,
+                            webui_turn_persist_scope_t *scope);
+void webui_turn_persist_disarm(session_t *session, webui_turn_persist_scope_t *scope);
+
 /**
  * @brief Validate base64-encoded image data (security-hardened).
  *

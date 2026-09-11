@@ -1565,9 +1565,14 @@ static void *audio_worker_thread(void *arg) {
    /* Call LLM with TTS streaming - audio is generated and sent per-sentence
     * No vision images for voice input (pass NULL for vision params).
     * Arm the Model A promise so the final stream_end stands the browser down from its
-    * client-save; the server persists the reply in the tail (the path the voice worker
-    * previously lacked entirely). */
-   atomic_store(&session->will_persist_turn, true);
+    * client-save; the server persists the reply in the tail.  Arm the FULL WebUI
+    * persistence contract via the shared helper (tool-persist hook + tool-iteration hook +
+    * will_persist_turn) — the voice worker previously armed ONLY will_persist_turn and never
+    * installed the tool-persist hook, so voice tool-turns dropped their tool_calls/role:tool
+    * rows on reload.  turn_user_id is the disconnect-safe captured user; the conversation is
+    * bound above (stream_conversation_id), which the hook reads live. */
+   webui_turn_persist_scope_t voice_persist_scope;
+   webui_turn_persist_arm(session, turn_user_id, &voice_persist_scope);
    /* Multi-target TTS (§Phase-4): fan the voice reply to every speaker-capable viewer of this
     * conversation, the origin voice device included.  Self-gates when no listener exists (scan
     * finds none → no synth), so the unconditional wiring keeps today's no-audio-when-TTS-off case.
@@ -1575,7 +1580,7 @@ static void *audio_worker_thread(void *arg) {
    char *response = session_llm_call_with_tts_vision_no_add(session, transcript, NULL, NULL, NULL,
                                                             0, webui_sentence_audio_fanout_callback,
                                                             session);
-   atomic_store(&session->will_persist_turn, false);
+   webui_turn_persist_disarm(session, &voice_persist_scope);
    free(transcript);
 
    bool superseded = REQUEST_SUPERSEDED(session, expected_gen);

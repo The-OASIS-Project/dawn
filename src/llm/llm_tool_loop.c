@@ -201,6 +201,21 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
    const bool fan_ephemeral = ev_conv > 0 && !ev_observe;
    const bool ev_live = ev_observe || fan_ephemeral; /* either surface consumes tool events */
 
+   /* Invariant guard (SERVER_AUTHORITATIVE): a foreground turn that promised full-turn
+    * server persistence (will_persist_turn) and relies on the messages table for its tool
+    * rows (fan_ephemeral — NOT the durable observe log) MUST have a tool-persist writer
+    * installed.  cb==NULL here means an entry path armed will_persist_turn but never
+    * installed the persist hook — the exact gap that silently dropped voice tool-turns.
+    * Log-only (the rows are already lost either way); will_persist_turn scopes it off the
+    * jobs/messaging/research paths, which don't arm it.  May repeat per tool iteration on a
+    * genuinely broken turn — acceptable for a should-never-fire diagnostic. */
+   if (fan_ephemeral && cb == NULL && atomic_load(&s->will_persist_turn)) {
+      OLOG_WARNING("tool-persist gap: turn on conv %lld armed will_persist_turn but no persist "
+                   "hook is installed — tool rows will NOT be saved (entry path missing "
+                   "webui_turn_persist_arm?)",
+                   (long long)ev_conv);
+   }
+
    /* The canonical role:tool result row carries no tool name — only its
     * tool_call_id — but the redactor needs the name to apply the
     * TOOL_CAP_SECRETS backstop.  The assistant tool_calls row (with both id and
