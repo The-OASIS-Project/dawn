@@ -422,6 +422,42 @@
       return '<ul class="sched-row-delivery">' + lines.join('') + '</ul>';
    }
 
+   /* Expanded instructions panel (briefings only) — shows the per-briefing
+    * summarization instructions (or a muted "none" state) plus an Edit button
+    * that opens the editor modal.  Always present for an expanded briefing so
+    * instructions can be ADDED even when none are set yet.  Presence is keyed on
+    * state.expandedRowIds (see the cursor-safe-replaceWith note above); the
+    * body text is keyed on event.instructions (event data), so a server-side
+    * change re-renders the row cleanly. */
+   function buildInstructionsPanel(event) {
+      if (event.event_type !== 'briefing') return '';
+      if (!state.expandedRowIds.has(event.id)) return '';
+      const instr = (event.instructions || '').trim();
+      const body = instr
+         ? '<div class="sched-row-instr-text">' + escape(instr) + '</div>'
+         : '<div class="sched-row-instr-empty">No custom instructions — uses the default ' +
+           'briefing format.</div>';
+      const btnLabel = instr ? 'Edit' : 'Add';
+      return (
+         '<div class="sched-row-instr">' +
+         '<div class="sched-row-instr-head">' +
+         '<span class="sched-row-delivery-label">Summarization instructions</span>' +
+         '<button type="button" class="sched-row-instr-edit" data-edit-instructions="1"' +
+         ' aria-label="' +
+         escapeAttr(
+            (instr ? 'Edit' : 'Add') +
+               ' summarization instructions for ' +
+               (event.name || 'briefing')
+         ) +
+         '">' +
+         btnLabel +
+         '</button>' +
+         '</div>' +
+         body +
+         '</div>'
+      );
+   }
+
    /* Expanded steps panel — rendered inside the row body when the row is in
     * state.expandedRowIds.  One <ol> with one <li> per step. */
    function buildStepsPanel(event) {
@@ -461,8 +497,8 @@
     * Currently state-coupled fields:
     *   - state.armedRowId      →  `is-armed` class on the matching row
     *   - state.expandedRowIds  →  chevron glyph in buildToolLine, plus the
-    *                              presence of buildStepsPanel and
-    *                              buildDeliveryPanel output (briefings only)
+    *                              presence of buildStepsPanel, buildDeliveryPanel,
+    *                              and buildInstructionsPanel output (briefings only)
     *
     * If the list grows, also update the block comment in render() at
     * the cursor-fix site to keep both surfaces honest. */
@@ -532,6 +568,7 @@
          '</div>' +
          buildToolLine(event) +
          buildDeliveryPanel(event) +
+         buildInstructionsPanel(event) +
          buildStepsPanel(event) +
          '</div>' +
          '<time class="sched-row-time">' +
@@ -902,6 +939,17 @@
       });
    }
 
+   /* Set/clear a briefing's summarization instructions.  Empty string clears
+    * (server contract).  The server broadcasts scheduler_events_changed on
+    * success → refresh() re-renders, so no optimistic update is needed. */
+   function sendUpdateInstructions(eventId, instructions) {
+      if (typeof DawnWS === 'undefined' || !DawnWS.send) return;
+      DawnWS.send({
+         type: 'scheduler_action',
+         payload: { action: 'update', event_id: eventId, instructions: instructions },
+      });
+   }
+
    function handleListResponse(payload) {
       if (!payload) return;
       state.events = Array.isArray(payload.events) ? payload.events : [];
@@ -1022,6 +1070,19 @@
     * ============================================================================= */
 
    function onListClick(e) {
+      /* Edit-instructions button (inside an expanded briefing) opens the editor
+       * modal — checked first so it isn't read as an expand/disarm click. */
+      const instrEditBtn = e.target.closest('[data-edit-instructions]');
+      if (instrEditBtn) {
+         const row = instrEditBtn.closest('.sched-row');
+         if (row) {
+            const eventId = parseInt(row.getAttribute('data-event-id'), 10);
+            e.stopPropagation();
+            openInstructionsEditor(eventId);
+            return;
+         }
+      }
+
       /* Expand-toggle has priority over the disarm-on-empty-click default —
        * clicking the chevron should expand/collapse, not just disarm. */
       const expandTrigger = e.target.closest('[data-expand-trigger]');
@@ -1398,6 +1459,137 @@
    function toggle() {
       if (state.isOpen) close();
       else open();
+   }
+
+   /* =============================================================================
+    * Instructions editor modal (briefings)
+    *
+    * Rendered at BODY level (outside the popover list) so it sidesteps the
+    * row-HTML diff-reconcile entirely, and onDocClick already skips clicks
+    * inside `.modal:not(.hidden)`.  Mirrors the Watches modal pattern:
+    * DawnEscStack for Escape, an element-scoped focus trap, backdrop-click
+    * dismiss, and trigger-focus restore.
+    * ============================================================================= */
+
+   let instrModalEl = null;
+   let instrModalPrevFocus = null;
+   let instrModalEscToken = null;
+   let instrModalEventId = 0;
+
+   function instrModalKeydown(e) {
+      if (e.key !== 'Tab' || !instrModalEl) return;
+      const focusable = Array.from(
+         instrModalEl.querySelectorAll(
+            'button, input, select, textarea, [tabindex]:not([tabindex="-1"])'
+         )
+      ).filter((el) => el.offsetParent !== null);
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+         e.preventDefault();
+         last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+         e.preventDefault();
+         first.focus();
+      }
+   }
+
+   function createInstructionsModal() {
+      if (instrModalEl) return instrModalEl;
+      instrModalEl = document.createElement('div');
+      instrModalEl.className = 'modal hidden';
+      instrModalEl.setAttribute('role', 'dialog');
+      instrModalEl.setAttribute('aria-modal', 'true');
+      instrModalEl.setAttribute('aria-labelledby', 'sched-instr-modal-title');
+      instrModalEl.innerHTML =
+         '<div class="modal-content">' +
+         '<h3 id="sched-instr-modal-title">Briefing instructions</h3>' +
+         '<div class="dawn-form">' +
+         '<div class="form-group">' +
+         '<label for="sched-instr-textarea">How should this briefing be summarized?</label>' +
+         '<textarea id="sched-instr-textarea" rows="7" maxlength="1024" ' +
+         'placeholder="e.g. Lead with anything time-sensitive, keep it under five bullets, ' +
+         'skip the pleasantries."></textarea>' +
+         '<div class="form-hint">Steers tone, structure, length, and emphasis (max 1024 ' +
+         'characters). Saving replaces the current instructions; leave empty to clear and use ' +
+         'the default briefing format.</div>' +
+         '</div>' +
+         '<div class="form-actions">' +
+         '<button type="button" class="btn btn-secondary" data-instr-cancel>Cancel</button>' +
+         '<button type="button" class="btn btn-primary" data-instr-save>Save</button>' +
+         '</div>' +
+         '</div>' +
+         '</div>';
+      instrModalEl.addEventListener('click', (e) => {
+         if (e.target === instrModalEl) hideInstructionsModal();
+      });
+      instrModalEl.addEventListener('keydown', instrModalKeydown);
+      instrModalEl
+         .querySelector('[data-instr-cancel]')
+         .addEventListener('click', hideInstructionsModal);
+      instrModalEl.querySelector('[data-instr-save]').addEventListener('click', saveInstructions);
+      document.body.appendChild(instrModalEl);
+      return instrModalEl;
+   }
+
+   function openInstructionsEditor(eventId) {
+      const event = state.events.find((ev) => ev.id === eventId);
+      if (!event || event.event_type !== 'briefing') return;
+      createInstructionsModal();
+      instrModalEventId = eventId;
+      /* Capture the trigger for focus-restore only on a genuine fresh open
+       * (token not yet registered) — re-entering while already open must not
+       * overwrite the saved trigger with an in-modal element. */
+      if (instrModalEscToken === null) instrModalPrevFocus = document.activeElement;
+      /* Name the briefing in the title so multi-briefing setups don't lose the
+       * edit target (also what the screen reader announces via aria-labelledby). */
+      const titleEl = instrModalEl.querySelector('#sched-instr-modal-title');
+      if (titleEl) {
+         titleEl.textContent = event.name
+            ? 'Instructions — ' + event.name
+            : 'Briefing instructions';
+      }
+      const ta = instrModalEl.querySelector('#sched-instr-textarea');
+      const existing = event.instructions || '';
+      if (ta) ta.value = existing;
+      instrModalEl.classList.remove('hidden');
+      if (instrModalEscToken === null) {
+         instrModalEscToken = DawnEscStack.register(() => {
+            hideInstructionsModal();
+            return true;
+         });
+      }
+      if (ta) {
+         ta.focus();
+         /* Select-all only when adding fresh; for an edit, place the caret at the
+          * end so the first keystroke doesn't wipe existing instructions. */
+         if (existing) ta.setSelectionRange(existing.length, existing.length);
+         else ta.select();
+      }
+   }
+
+   function hideInstructionsModal() {
+      if (instrModalEl) instrModalEl.classList.add('hidden');
+      if (instrModalEscToken !== null) {
+         DawnEscStack.unregister(instrModalEscToken);
+         instrModalEscToken = null;
+      }
+      instrModalEventId = 0;
+      if (instrModalPrevFocus) {
+         instrModalPrevFocus.focus();
+         instrModalPrevFocus = null;
+      }
+   }
+
+   function saveInstructions() {
+      if (!instrModalEl || instrModalEventId <= 0) {
+         hideInstructionsModal();
+         return;
+      }
+      const ta = instrModalEl.querySelector('#sched-instr-textarea');
+      sendUpdateInstructions(instrModalEventId, ta ? ta.value : '');
+      hideInstructionsModal();
    }
 
    /* =============================================================================

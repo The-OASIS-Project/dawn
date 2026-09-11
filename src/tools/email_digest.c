@@ -194,7 +194,6 @@ char *email_digest_build(int user_id, const email_digest_opts_t *opts) {
    int enabled_accounts = 0;
    int ok_accounts = 0;
    int total_unread = 0;
-   bool unread_reliable = true; /* false once a non-Gmail account is included */
 
    for (int a = 0; a < n_acct; a++) {
       if (!accounts[a].enabled)
@@ -214,10 +213,8 @@ char *email_digest_build(int user_id, const email_digest_opts_t *opts) {
          continue;
       }
       ok_accounts++;
-      /* unread is Gmail-only until IMAP \Seen parsing lands (Phase 4); track so
-       * the header can caveat the count rather than assert a wrong "0 unread". */
-      if (!email_service_is_gmail_account(&accounts[a]))
-         unread_reliable = false;
+      /* unread is reliable on both backends now: Gmail via the UNREAD label,
+       * IMAP via the \Seen flag parsed at fetch time. */
 
       int kept = 0;
       for (int i = 0; i < out_count && merged_n < n_acct * DIGEST_FETCH_PER_ACCT; i++) {
@@ -241,11 +238,12 @@ char *email_digest_build(int user_id, const email_digest_opts_t *opts) {
    int shown = merged_n < cap ? merged_n : cap;
    int omitted = merged_n - shown;
 
-   /* Best-effort reply enrichment (Phase 2b): fill each shown row's `replied`
-    * tri-state via one in:sent search per Gmail account.  Only the shown/capped
-    * rows are enriched to bound the network cost; emit_row renders [replied]
-    * for EMAIL_REPLIED_YES and stays silent for NO/UNKNOWN (never asserts
-    * "not replied" on a skipped/failed lookup). */
+   /* Best-effort reply enrichment: Gmail rows are filled here via one in:sent
+    * search per account (bounded to the shown/capped rows to limit network
+    * cost); IMAP rows already carry their replied state from the \Answered flag
+    * parsed at fetch time, and fill_reply_states leaves them untouched.  emit_row
+    * renders [replied] for EMAIL_REPLIED_YES and stays silent for NO/UNKNOWN
+    * (never asserts "not replied" on a skipped/failed lookup). */
    email_service_fill_reply_states(user_id, merged, shown);
 
    char wlabel[16];
@@ -253,10 +251,9 @@ char *email_digest_build(int user_id, const email_digest_opts_t *opts) {
    strbuf_t sb;
    strbuf_init(&sb, 4096);
    strbuf_appendf(&sb,
-                  "Email digest — %d message%s across %d of %d inbox%s, %d unread%s, window=%s.\n",
+                  "Email digest — %d message%s across %d of %d inbox%s, %d unread, window=%s.\n",
                   merged_n, merged_n == 1 ? "" : "s", ok_accounts, enabled_accounts,
-                  enabled_accounts == 1 ? "" : "es", total_unread,
-                  unread_reliable ? "" : " (Gmail accounts only)", wlabel);
+                  enabled_accounts == 1 ? "" : "es", total_unread, wlabel);
    if (status.len > 0)
       strbuf_appendf(&sb, "Per-account:\n%s", status.buf);
    if (merged_n == 0)

@@ -366,6 +366,12 @@ dawn_add_unit_test(test_briefing_prompt
    LIBS    dawn_common unity
    LABEL   ci)
 
+dawn_add_unit_test(test_email_parse
+   SOURCES test_email_parse.c
+           ${SRC_ROOT}/src/tools/email_parse.c
+   LIBS    unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_music_db
    SOURCES test_music_db.c
            ${SRC_ROOT}/src/audio/music_db.c

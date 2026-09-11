@@ -12,6 +12,21 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-09-10 — IMAP accounts now show unread & replied state in digests
+
+**Only affects non-Gmail (IMAP) email accounts.** Gmail accounts were already
+covered; nothing to do either way.
+
+**What changed.** Email digests and briefings now read the `\Seen` and `\Answered`
+flags directly from IMAP servers, so IMAP messages get accurate **unread** markers and
+**replied** indicators — previously these were populated for Gmail accounts only and an
+IMAP inbox would report "0 unread." Message receive times also now come from the
+server's INTERNALDATE (with correct timezone handling), so the digest's 24-hour window
+is accurate for IMAP mail regardless of the sender's timezone. No configuration change;
+the improvement is automatic the next time a digest runs.
+
+---
+
 ## 2026-09-10 — Briefings can carry summarization instructions
 
 **Optional, opt-in — nothing to do unless you want it.** Existing briefings are
@@ -23,12 +38,12 @@ it, length, and tone. For example: "Lead with anything time-sensitive, keep it u
 five bullets, skip the pleasantries." A briefing with no instructions uses the same
 default format it always has.
 
-**How to use it.** Just ask your assistant — "make my morning briefing punchier and
-lead with unread email," or "drop the closing line from the market briefing." The
-field is editable in place, so you can tweak an existing briefing without recreating
-it. (A WebUI editor is planned; for now it's conversational.) Note the instructions
-**replace** the previous ones wholesale on each edit rather than appending — ask your
-assistant to read them back first if you mean to amend.
+**How to use it.** Two ways: ask your assistant — "make my morning briefing punchier
+and lead with unread email," or "drop the closing line from the market briefing" — or
+edit it in the WebUI: open the **Scheduler** panel, expand a briefing, and use the
+**Edit** button in its "Summarization instructions" section. Either way the
+instructions **replace** the previous ones wholesale rather than appending (an empty
+save clears them back to the default), so read them back first if you mean to amend.
 
 **Schema.** The auth database migrates to v84 automatically on first launch (adds one
 nullable column to `scheduled_events`). No manual step; the upgrade is transparent.

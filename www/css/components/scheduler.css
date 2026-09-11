@@ -850,6 +850,60 @@
    font-weight: 500;
 }
 
+/* Expanded briefing instructions block — same tinted, accent-striped card as
+ * the delivery/steps panels so the expanded briefing reads as one unit. */
+.sched-row-instr {
+   margin: 4px 0 2px 0;
+   padding: 6px 8px;
+   background: rgba(0, 0, 0, 0.18);
+   border-left: 2px solid var(--accent-border);
+   border-radius: 3px;
+   font-size: 0.72rem;
+   color: var(--text-secondary);
+}
+
+.sched-row-instr-head {
+   display: flex;
+   align-items: center;
+   justify-content: space-between;
+   gap: 0.5rem;
+}
+
+.sched-row-instr-edit {
+   flex: 0 0 auto;
+   padding: 1px 8px;
+   font-size: 0.68rem;
+   line-height: 1.5;
+   color: var(--accent, var(--text-primary));
+   background: transparent;
+   border: 1px solid var(--accent-border);
+   border-radius: 3px;
+   cursor: pointer;
+}
+
+.sched-row-instr-edit:hover {
+   background: rgba(255, 255, 255, 0.06);
+}
+
+.sched-row-instr-edit:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 1px;
+}
+
+.sched-row-instr-text {
+   margin-top: 4px;
+   color: var(--text-primary);
+   white-space: pre-wrap;
+   word-break: break-word;
+   line-height: 1.4;
+}
+
+.sched-row-instr-empty {
+   margin-top: 4px;
+   color: var(--text-tertiary);
+   font-style: italic;
+}
+
 .sched-row-time {
    font-family: 'IBM Plex Mono', monospace;
    font-variant-numeric: tabular-nums;

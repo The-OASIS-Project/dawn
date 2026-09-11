@@ -42,6 +42,7 @@
 #include "core/buf_printf.h"
 #include "core/curl_buffer.h"
 #include "logging.h"
+#include "tools/email_parse.h"
 #include "tools/html_parser.h"
 
 /* =============================================================================
@@ -393,23 +394,10 @@ static void parse_from_value(const char *decoded,
 }
 
 /** Parse Date header into time_t */
+/* RFC 2822 Date-header parsing (timezone-aware) lives in email_parse.c so the
+ * date math is unit-testable; this thin alias preserves the local call sites. */
 static time_t parse_email_date(const char *date_str) {
-   if (!date_str)
-      return 0;
-
-   struct tm tm_info;
-   memset(&tm_info, 0, sizeof(tm_info));
-
-   /* Try RFC 2822 format: "Thu, 13 Mar 2026 10:30:00 +0000" */
-   char *result = strptime(date_str, "%a, %d %b %Y %H:%M:%S", &tm_info);
-   if (!result) {
-      /* Try without day of week */
-      result = strptime(date_str, "%d %b %Y %H:%M:%S", &tm_info);
-   }
-   if (!result)
-      return 0;
-
-   return mktime(&tm_info);
+   return email_parse_rfc822_date(date_str);
 }
 
 /* =============================================================================
@@ -597,6 +585,64 @@ static void parse_summary_from_fetch(const char *data, email_summary_t *out) {
  * within each "* ... FETCH" block.
  * ============================================================================= */
 
+/* Apply the per-message IMAP FETCH metadata that precedes the BODY[HEADER]
+ * literal — FLAGS and INTERNALDATE — onto a summary already populated from the
+ * header block.  `seg` is the response text from the "* N FETCH (" opener up to
+ * (not including) the literal's '{'.  FLAGS drives unread (\Seen absent) and the
+ * tri-state replied (\Answered present -> YES, else NO); INTERNALDATE, when
+ * present, is the reliable server receive time and overrides the free-form Date
+ * header.  Fields are left at their parse_summary_from_fetch defaults when a
+ * token is absent (unread stays false, replied stays UNKNOWN).
+ *
+ * Scans only the pre-literal prefix DELIBERATELY: the header body that follows
+ * the literal is attacker-influenced email content, so scanning it for FLAGS/
+ * INTERNALDATE would let a crafted header forge read/reply state.  This assumes
+ * the server returns FLAGS/INTERNALDATE before BODY[HEADER] — which every
+ * mainstream server (Gmail, Dovecot, Cyrus, Exchange) does, though RFC 3501
+ * §7.4.2 does not strictly require request-order.  Returns true iff a FLAGS
+ * group was found, so the caller can flag a (rare) reordering server rather
+ * than silently trust the unread=false default. */
+static bool apply_fetch_metadata(const char *seg, email_summary_t *out) {
+   bool flags_found = false;
+   /* FLAGS (...) group. */
+   const char *flags_kw = strcasestr(seg, "FLAGS");
+   if (flags_kw) {
+      const char *lp = strchr(flags_kw, '(');
+      const char *rp = lp ? strchr(lp, ')') : NULL;
+      if (lp && rp && rp > lp) {
+         char group[256];
+         size_t glen = (size_t)(rp - lp + 1);
+         if (glen >= sizeof(group))
+            glen = sizeof(group) - 1;
+         memcpy(group, lp, glen);
+         group[glen] = '\0';
+         out->unread = !email_imap_flags_contains(group, "\\Seen");
+         out->replied = email_imap_flags_contains(group, "\\Answered") ? EMAIL_REPLIED_YES
+                                                                       : EMAIL_REPLIED_NO;
+         flags_found = true;
+      }
+   }
+
+   /* INTERNALDATE "dd-Mon-yyyy HH:MM:SS +ZZZZ" — reliable server receive time. */
+   const char *idate_kw = strcasestr(seg, "INTERNALDATE");
+   if (idate_kw) {
+      const char *q1 = strchr(idate_kw, '"');
+      const char *q2 = q1 ? strchr(q1 + 1, '"') : NULL;
+      if (q1 && q2 && q2 > q1 + 1) {
+         char idate[64];
+         size_t ilen = (size_t)(q2 - (q1 + 1));
+         if (ilen >= sizeof(idate))
+            ilen = sizeof(idate) - 1;
+         memcpy(idate, q1 + 1, ilen);
+         idate[ilen] = '\0';
+         time_t t = email_parse_imap_internaldate(idate);
+         if (t > 0)
+            out->date = t;
+      }
+   }
+   return flags_found;
+}
+
 static int batch_fetch_headers(CURL *curl,
                                const email_conn_t *conn,
                                const char *encoded_folder,
@@ -624,7 +670,12 @@ static int batch_fetch_headers(CURL *curl,
    curl_easy_setopt(curl, CURLOPT_URL, url);
 
    char fetch_cmd[1200];
-   snprintf(fetch_cmd, sizeof(fetch_cmd), "UID FETCH %s BODY.PEEK[HEADER]", uid_list);
+   /* FLAGS + INTERNALDATE alongside the header block: FLAGS gives per-message
+    * unread (\Seen) and replied (\Answered) state natively (no sent-folder
+    * search needed the way the Gmail backend requires), and INTERNALDATE is the
+    * reliable server receive time for the digest's rolling-window filter. */
+   snprintf(fetch_cmd, sizeof(fetch_cmd), "UID FETCH %s (FLAGS INTERNALDATE BODY.PEEK[HEADER])",
+            uid_list);
    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, fetch_cmd);
 
    curl_buffer_t buf;
@@ -650,6 +701,7 @@ static int batch_fetch_headers(CURL *curl,
     * We scan for each "* " line, extract UID and literal size, then grab
     * exactly <octets> bytes of header data. */
    const char *p = buf.data;
+   int flags_missing = 0; /* messages whose prefix carried no FLAGS group */
    while (p && *p && *out_count < max_out) {
       /* Find next untagged FETCH response */
       const char *fetch = strstr(p, "* ");
@@ -703,11 +755,38 @@ static int batch_fetch_headers(CURL *curl,
 
       parse_summary_from_fetch(hdr_copy, &out[*out_count]);
       out[*out_count].uid = uid;
+
+      /* Apply FLAGS + INTERNALDATE from the response prefix (everything from the
+       * "* N FETCH (" opener up to the BODY[HEADER] literal's '{').  1 KB is
+       * ample for UID + a FLAGS keyword list + INTERNALDATE ahead of the
+       * literal; a longer prefix truncates gracefully (same fall-through as a
+       * missing token). */
+      {
+         char meta[1024];
+         size_t mlen = (size_t)(lbrace - fetch);
+         if (mlen >= sizeof(meta))
+            mlen = sizeof(meta) - 1;
+         memcpy(meta, fetch, mlen);
+         meta[mlen] = '\0';
+         if (!apply_fetch_metadata(meta, &out[*out_count]))
+            flags_missing++;
+      }
       (*out_count)++;
 
       free(hdr_copy);
       p = hdr_start + octets;
    }
+
+   /* We requested FLAGS on every message; if none of the parsed messages
+    * carried a FLAGS group in its prefix, the server likely returned data
+    * items out of request order (RFC 3501 allows it) — in which case unread/
+    * replied fell back to defaults and the unread count is understated.  Log it
+    * once so the (rare) offending server is diagnosable instead of silently
+    * reporting "0 unread". */
+   if (*out_count > 0 && flags_missing == *out_count)
+      OLOG_WARNING("email: IMAP FETCH returned no FLAGS in any of %d message prefixes — "
+                   "server may reorder data items; unread/replied state may be incomplete",
+                   *out_count);
 
    curl_buffer_free(&buf);
    return 0;

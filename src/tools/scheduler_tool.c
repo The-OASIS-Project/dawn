@@ -1041,7 +1041,10 @@ static char *handle_update(struct json_object *details, int user_id) {
     * REPLACES it wholesale (this is not an append — the model is told to query
     * first if it means to amend).  Briefing-only: unlike create (which silently
     * ignores it off-type), update REFUSES on a non-briefing so a mistargeted
-    * edit surfaces rather than no-ops.  Truncated on a UTF-8 boundary. */
+    * edit surfaces rather than no-ops.  Truncated on a UTF-8 boundary.  The
+    * browser sibling (webui_scheduler.c handle_scheduler_update_instructions)
+    * shares this contract — keep the briefing-only/empty-clears/cap rules in
+    * sync across both writers. */
    struct json_object *jinstr = NULL;
    if (json_object_object_get_ex(details, "instructions", &jinstr) &&
        json_object_is_type(jinstr, json_type_string)) {

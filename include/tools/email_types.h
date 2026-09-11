@@ -85,13 +85,14 @@ typedef struct {
    char date_str[32];
    time_t date;
    char preview[512];
-   bool unread;                 /* Gmail UNREAD label. Gmail-only for now: IMAP does not
-                                 * parse \Seen yet (Phase 4), so it stays false on IMAP. */
+   bool unread;                 /* Gmail UNREAD label / IMAP \Seen-absent — populated on both
+                                 * backends (IMAP parses FLAGS at fetch time). */
    bool important;              /* Gmail IMPORTANT label */
    bool starred;                /* Gmail STARRED label */
    bool from_me;                /* Gmail SENT label — the user's own message */
    email_category_t category;   /* Gmail inbox category; PRIMARY otherwise */
-   email_reply_state_t replied; /* filled by the digest reply-enrichment pass */
+   email_reply_state_t replied; /* Gmail: filled by the digest reply-enrichment pass (in:sent
+                                 * search). IMAP: filled at fetch time from the \Answered flag. */
 } email_summary_t;
 
 typedef struct {

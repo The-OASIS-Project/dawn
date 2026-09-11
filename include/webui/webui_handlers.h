@@ -408,6 +408,18 @@ void handle_scheduler_cancel_occurrence(ws_connection_t *conn, int64_t event_id)
  */
 void handle_scheduler_clear_missed(ws_connection_t *conn, int64_t event_id);
 
+/**
+ * @brief Set/clear a briefing's per-briefing summarization instructions.
+ *
+ * The browser edit path for the `instructions` field (the LLM tool `update`
+ * action is the other writer).  Ownership-gated and briefing-only; an empty
+ * string clears the steering back to the default prompt.  @p instructions must
+ * be non-NULL (a missing string is an INVALID_PARAM error, not a silent clear).
+ */
+void handle_scheduler_update_instructions(ws_connection_t *conn,
+                                          int64_t event_id,
+                                          const char *instructions);
+
 /* =============================================================================
  * Calendar Handler Functions (defined in webui_calendar.c)
  * ============================================================================= */
