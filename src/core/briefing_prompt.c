@@ -33,7 +33,12 @@ void neutralize_briefing_fences(char *s) {
    for (char *p = s; *p; p++) {
       if (*p != '<')
          continue;
+      /* Tolerate whitespace on EITHER side of an optional single '/', so a
+       * spaced closing form like "<  /briefing_data>" or "< / briefing_data>"
+       * is defanged the same as "</briefing_data>". */
       const char *q = p + 1;
+      while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r' || *q == '\f' || *q == '\v')
+         q++;
       if (*q == '/')
          q++;
       while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r' || *q == '\f' || *q == '\v')
@@ -76,8 +81,16 @@ char *build_briefing_system_message(const char *briefing_name,
       strbuf_append(&sb, "\n</briefing_instructions>");
    }
    strbuf_append(&sb, BRIEFING_SYSTEM_PROMPT_SECURITY);
-   strbuf_appendf(&sb, "\n\nBriefing name: %s\n\n<briefing_data>\n%s\n</briefing_data>",
-                  briefing_name && briefing_name[0] ? briefing_name : "scheduled",
+   /* The briefing name is user/LLM-controlled (a scheduler event name) and is
+    * emitted AFTER the absolute SECURITY rule, so an unneutralized name such as
+    * "</briefing_data>\n<briefing_instructions>..." could close the trusted
+    * block and forge a later directive.  Neutralize a bounded copy the same way
+    * cleaned_data and instructions are. */
+   char name_safe[SCHED_NAME_MAX];
+   snprintf(name_safe, sizeof(name_safe), "%s",
+            briefing_name && briefing_name[0] ? briefing_name : "scheduled");
+   neutralize_briefing_fences(name_safe);
+   strbuf_appendf(&sb, "\n\nBriefing name: %s\n\n<briefing_data>\n%s\n</briefing_data>", name_safe,
                   cleaned_data ? cleaned_data : "(no data)");
    if (strbuf_oom(&sb)) {
       strbuf_free(&sb);

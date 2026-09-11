@@ -53,13 +53,19 @@ struct json_object *tool_parse_details(const char *value, bool no_required_field
    }
    struct json_object *parsed = json_tokener_parse(value);
    if (parsed != NULL) {
-      return parsed;
+      if (json_object_is_type(parsed, json_type_object))
+         return parsed;
+      /* Valid JSON but not an object (array/string/number/bool/null): callers
+       * read named fields via json_object_object_get, so a value like `[]`
+       * would be treated as an empty object and silently drop a requested
+       * filter.  Release it and fall through to the same handling as non-JSON. */
+      json_object_put(parsed);
    }
-   /* Not JSON.  A reasoning model often fills `details` with a prose rationale
-    * instead of an args object; for an action that reads no required field that
-    * is harmless, so degrade to an empty object.  For an action with real fields
-    * a prose value would silently drop the caller's request, so return NULL and
-    * let the caller raise "invalid JSON in details parameter". */
+   /* Not a JSON object.  A reasoning model often fills `details` with a prose
+    * rationale instead of an args object; for an action that reads no required
+    * field that is harmless, so degrade to an empty object.  For an action with
+    * real fields a non-object value would silently drop the caller's request, so
+    * return NULL and let the caller raise "invalid JSON in details parameter". */
    return no_required_fields ? json_object_new_object() : NULL;
 }
 

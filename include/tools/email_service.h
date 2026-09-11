@@ -135,9 +135,9 @@ int email_service_list_accounts(int user_id, email_account_t *out, int max);
 void email_service_fill_reply_states(int user_id, email_summary_t *rows, int nrows);
 
 /* True if this account is served by the Gmail REST backend (OAuth + gmail.com).
- * Currently also the set of accounts whose fetch populates email_summary_t.unread
- * (IMAP \Seen parsing is deferred), so callers can tell whether an unread count
- * is reliable for a given account. */
+ * email_summary_t.unread is populated on BOTH backends (Gmail via the UNREAD
+ * label, IMAP via the \Seen flag parsed at fetch time), so this predicate is
+ * purely a backend selector, not an unread-reliability signal. */
 bool email_service_is_gmail_account(const email_account_t *acct);
 
 /* =============================================================================

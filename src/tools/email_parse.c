@@ -428,6 +428,27 @@ bool email_parse_envelope(const char *seg,
    return true;
 }
 
+/* Scan from `from` for the next untagged response that begins a real FETCH
+ * ("* <seq> FETCH ... UID ...").  Used to resynchronize after the transport
+ * discards an IMAP literal ({N}) and truncates a FETCH line: it anchors on an
+ * actual FETCH boundary — validated with the same FETCH-within-64 / UID-within
+ * checks the main loop trusts — rather than any bare "* " (which can appear
+ * inside a quoted subject/name) or any "{" (a quoted brace is not a literal
+ * marker).  Returns NULL if no further FETCH boundary exists. */
+static const char *next_fetch_boundary(const char *from) {
+   const char *q = from;
+   while ((q = strstr(q, "* ")) != NULL) {
+      const char *kw = strcasestr(q, "FETCH");
+      if (kw && kw <= q + 64) {
+         const char *uid = strstr(q, "UID ");
+         if (uid && uid <= kw + 256)
+            return q;
+      }
+      q += 2;
+   }
+   return NULL;
+}
+
 const char *email_imap_next_fetch(const char *p,
                                   const char **out_seg,
                                   size_t *out_seg_len,
@@ -475,11 +496,11 @@ const char *email_imap_next_fetch(const char *p,
       } else {
          /* Unclosed item list: the ENVELOPE carried an IMAP literal ({N}) the
           * transport discarded, dropping the rest of the line and jumping to the
-          * next "* <seq> FETCH".  Resync there — searching AFTER the literal
-          * marker so a "* " inside an earlier quoted field can't false-match — so
-          * this message doesn't swallow the rest of the batch. */
-         const char *lit = strchr(open, '{');
-         const char *nxt = lit ? strstr(lit, "* ") : NULL;
+          * next "* <seq> FETCH".  Resync to the next VALIDATED FETCH boundary
+          * (scanned after this message's own FETCH keyword) so a quoted "* " or
+          * a quoted "{" in the truncated envelope can't misdirect the resync and
+          * make this message swallow the rest of the batch. */
+         const char *nxt = next_fetch_boundary(fetch_kw + 5);
          if (nxt) {
             seg_end = nxt;
             resume = nxt;

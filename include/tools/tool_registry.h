@@ -293,27 +293,35 @@ struct json_object; /* forward decl — avoids forcing <json-c/json.h> on consum
  * reads no fields, but a hard failure everywhere it is parsed as JSON-or-die.
  * This helper is the single seam for that contract.
  *
- * CALLER OBLIGATION: pass @p no_required_fields = true ONLY for an action that
- * takes no arguments at all, so an empty object loses nothing (e.g. email
- * 'accounts', calendar 'calendars', job 'list').  Passing true for an action
- * that reads ANY field — even an optional filter, e.g. scheduler 'list' with its
- * optional `type` — would let malformed prose silently degrade to an empty
- * object and run the action with that field missing (a wrong result the user
- * never sees), instead of surfacing the error.  The tolerated set is decided
- * per-call (a `strcmp` on the action) so this pairing lives at each call site;
- * keep them in sync.
+ * CALLER OBLIGATION: pass @p no_required_fields = true only when running the
+ * action with every `details` field absent is an acceptable outcome.  Two
+ * sanctioned tiers qualify, and the choice is a per-call PRODUCT decision (a
+ * `strcmp` on the action, living at the call site — keep it in sync):
+ *   1. Actions that take NO arguments at all, so an empty object loses nothing
+ *      (e.g. email 'accounts', calendar 'calendars', job 'list').
+ *   2. Actions whose fields are ALL OPTIONAL and whose defaults are a sensible
+ *      "no filter" result, so a prose value degrading to defaults is desired,
+ *      not a dropped request (e.g. email 'recent'/'search'/'folders'/'digest',
+ *      which default to recent mail across the appropriate accounts).
+ * Do NOT pass true for an action that reads a REQUIRED field (e.g. email 'read'
+ * needs message_id) or where dropping an optional filter would be a silent wrong
+ * result the user never sees (e.g. scheduler 'list' with its `type` filter treats
+ * that as a bug to surface, so it passes false) — there, a non-object value must
+ * hard-error rather than run with the field missing.
  *
  * @param value             The raw VALUE string.  NULL or empty always yields a
  *                          fresh empty object, regardless of @p no_required_fields.
  * @param no_required_fields true if the action reads no required field from
- *                          `details`: a non-JSON value degrades to an empty
- *                          object so the call still succeeds.  false otherwise:
- *                          a non-JSON value returns NULL so the caller can raise
- *                          "invalid JSON in details parameter" rather than
- *                          silently dropping the caller's request.
+ *                          `details`: a value that is not a JSON OBJECT degrades
+ *                          to an empty object so the call still succeeds.  false
+ *                          otherwise: a non-object value returns NULL so the
+ *                          caller can raise "invalid JSON in details parameter"
+ *                          rather than silently dropping the caller's request.
  * @return An owned json_object the caller must json_object_put(), or NULL only
- *         when @p value is non-empty, unparseable, AND @p no_required_fields is
- *         false.  Never returns NULL when @p no_required_fields is true.
+ *         when @p value is non-empty, is NOT a valid JSON object (unparseable, OR
+ *         parseable but an array/string/number/bool/null), AND @p
+ *         no_required_fields is false.  Never returns NULL when @p
+ *         no_required_fields is true.
  */
 struct json_object *tool_parse_details(const char *value, bool no_required_fields);
 

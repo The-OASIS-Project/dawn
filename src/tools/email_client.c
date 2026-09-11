@@ -721,10 +721,14 @@ int email_fetch_recent(const email_conn_t *conn,
    for (int i = total - 1; i >= 0 && rev_count < max_out; i--)
       rev_uids[rev_count++] = tail_uids[i];
 
-   batch_fetch_headers(curl, conn, encoded_folder, rev_uids, rev_count, out, max_out, out_count);
+   int fetch_rc = batch_fetch_headers(curl, conn, encoded_folder, rev_uids, rev_count, out, max_out,
+                                      out_count);
 
    curl_easy_cleanup(curl);
-   return 0;
+   /* Propagate the FETCH result: a failed/over-cap header fetch must surface as
+    * an error, not a successful-looking empty mailbox (the digest would then
+    * treat a broken account as healthy). */
+   return fetch_rc;
 }
 
 /* =============================================================================
@@ -940,10 +944,14 @@ int email_search(const email_conn_t *conn,
    for (int i = total - 1; i >= 0 && rev_count < max_out; i--)
       rev_uids[rev_count++] = tail_uids[i];
 
-   batch_fetch_headers(curl, conn, encoded_folder, rev_uids, rev_count, out, max_out, out_count);
+   int fetch_rc = batch_fetch_headers(curl, conn, encoded_folder, rev_uids, rev_count, out, max_out,
+                                      out_count);
 
    curl_easy_cleanup(curl);
-   return 0;
+   /* Propagate the FETCH result: a failed/over-cap header fetch must surface as
+    * an error, not a successful-looking empty mailbox (the digest would then
+    * treat a broken account as healthy). */
+   return fetch_rc;
 }
 
 /* =============================================================================

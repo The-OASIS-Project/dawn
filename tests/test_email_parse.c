@@ -346,6 +346,44 @@ static void test_next_fetch_literal_truncation(void) {
    TEST_ASSERT_NULL(p);
 }
 
+/* REGRESSION (Copilot #28): message 1's envelope carries a quoted "* " AND a
+ * quoted "{" BEFORE the truncated literal.  A resync that hunts for the literal
+ * "{" or the next bare "* " could latch onto the quoted text and mis-bound or
+ * lose the batch; anchoring on a VALIDATED "* <seq> FETCH ... UID" boundary must
+ * still recover message 2 intact. */
+static void test_next_fetch_literal_truncation_quoted_star(void) {
+   const char *resp =
+       "* 1 FETCH (UID 100 FLAGS (\\Seen) INTERNALDATE \"06-Apr-2026 00:03:06 -0500\" "
+       "ENVELOPE (\"trap {x} and * bait\" {121}"
+       "* 2 FETCH (UID 200 FLAGS (\\Seen) INTERNALDATE \"08-Apr-2026 04:30:55 -0500\" "
+       "ENVELOPE (\"d\" \"Recovered\" ((\"Z\" NIL \"z\" \"tdr.ro\")) NIL NIL NIL NIL NIL NIL "
+       "\"<x>\"))\r\n";
+   const char *seg = NULL;
+   size_t len = 0;
+   uint32_t uid = 0;
+   const char *p = resp;
+   char tmp[600];
+   char subj[256], fname[256], faddr[256];
+
+   /* Message 1: returned, correct UID, subject blank (literal, unrecoverable). */
+   p = email_imap_next_fetch(p, &seg, &len, &uid);
+   TEST_ASSERT_NOT_NULL(p);
+   TEST_ASSERT_EQUAL_UINT32(100, uid);
+
+   /* Message 2: RECOVERED — not lost to a quoted-"* " false resync. */
+   p = email_imap_next_fetch(p, &seg, &len, &uid);
+   TEST_ASSERT_NOT_NULL(p);
+   TEST_ASSERT_EQUAL_UINT32(200, uid);
+   TEST_ASSERT_TRUE(len < sizeof(tmp));
+   memcpy(tmp, seg, len);
+   tmp[len] = '\0';
+   email_parse_envelope(tmp, subj, sizeof subj, fname, sizeof fname, faddr, sizeof faddr);
+   TEST_ASSERT_EQUAL_STRING("Recovered", subj);
+
+   p = email_imap_next_fetch(p, &seg, &len, &uid);
+   TEST_ASSERT_NULL(p);
+}
+
 static void test_next_fetch_null_and_empty(void) {
    const char *seg = NULL;
    size_t len = 0;
@@ -485,6 +523,7 @@ int main(void) {
    RUN_TEST(test_envelope_no_envelope);
    RUN_TEST(test_next_fetch_two_clean);
    RUN_TEST(test_next_fetch_literal_truncation);
+   RUN_TEST(test_next_fetch_literal_truncation_quoted_star);
    RUN_TEST(test_next_fetch_null_and_empty);
    RUN_TEST(test_rfc2047_base64);
    RUN_TEST(test_rfc2047_qp);

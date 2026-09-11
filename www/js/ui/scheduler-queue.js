@@ -19,6 +19,13 @@
 (function () {
    'use strict';
 
+   /* The server stores briefing instructions in a char[SCHED_INSTRUCTIONS_MAX]
+    * (1024) and caps at SCHED_INSTRUCTIONS_MAX-1 = 1023 UTF-8 BYTES on a
+    * codepoint boundary.  The textarea maxlength counts UTF-16 code units, so a
+    * non-ASCII value under 1024 units can still exceed 1023 bytes — we validate
+    * the true byte length on save (below) rather than rely on maxlength. */
+   const INSTR_MAX_BYTES = 1023;
+
    /* =============================================================================
     * State
     * ============================================================================= */
@@ -1508,12 +1515,12 @@
          '<div class="dawn-form">' +
          '<div class="form-group">' +
          '<label for="sched-instr-textarea">How should this briefing be summarized?</label>' +
-         '<textarea id="sched-instr-textarea" rows="7" maxlength="1024" ' +
+         '<textarea id="sched-instr-textarea" rows="7" maxlength="1023" ' +
          'placeholder="e.g. Lead with anything time-sensitive, keep it under five bullets, ' +
          'skip the pleasantries."></textarea>' +
-         '<div class="form-hint">Steers tone, structure, length, and emphasis (max 1024 ' +
-         'characters). Saving replaces the current instructions; leave empty to clear and use ' +
-         'the default briefing format.</div>' +
+         '<div class="form-hint">Steers tone, structure, length, and emphasis (up to about ' +
+         '1000 characters). Saving replaces the current instructions; leave empty to clear and ' +
+         'use the default briefing format.</div>' +
          '</div>' +
          '<div class="form-actions">' +
          '<button type="button" class="btn btn-secondary" data-instr-cancel>Cancel</button>' +
@@ -1588,7 +1595,26 @@
          return;
       }
       const ta = instrModalEl.querySelector('#sched-instr-textarea');
-      sendUpdateInstructions(instrModalEventId, ta ? ta.value : '');
+      const value = ta ? ta.value : '';
+      /* Enforce the server's true limit (UTF-8 bytes), not the textarea's UTF-16
+       * maxlength, so a non-ASCII value isn't silently truncated on the server. */
+      const bytes =
+         typeof TextEncoder !== 'undefined' ? new TextEncoder().encode(value).length : value.length;
+      if (bytes > INSTR_MAX_BYTES) {
+         /* Blocking error on the primary action: announce assertively (not the
+          * default polite warning) so assistive tech surfaces it, and keep the
+          * modal open so the user can trim in place. */
+         if (typeof DawnToast !== 'undefined') {
+            DawnToast.show(
+               'Instructions are a bit too long — please shorten them and try again.',
+               'warning',
+               4000,
+               { assertive: true }
+            );
+         }
+         return; /* keep the modal open so the user can trim */
+      }
+      sendUpdateInstructions(instrModalEventId, value);
       hideInstructionsModal();
    }
 

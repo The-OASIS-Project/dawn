@@ -843,7 +843,7 @@ void email_service_fill_reply_states(int user_id, email_summary_t *rows, int nro
       time_t oldest = 0;
       for (int r = 0; r < nrows; r++) {
          if (rows[r].thread_id[0] && !rows[r].from_me && rows[r].date > 0 &&
-             strcmp(rows[r].account_name, accts[a].name) == 0) {
+             strcmp(rows[r].account_addr, accts[a].username) == 0) {
             enrichable++;
             if (oldest == 0 || rows[r].date < oldest)
                oldest = rows[r].date;
@@ -867,8 +867,11 @@ void email_service_fill_reply_states(int user_id, email_summary_t *rows, int nro
        * cap — there is sent mail we did NOT see, so a "no match" here cannot be
        * trusted as "not replied" (contract: over-budget → UNKNOWN, never NO). */
       char npt[256] = { 0 };
-      int rc = email_service_search(user_id, accts[a].name, &params, sent, EMAIL_MAX_FETCH_RESULTS,
-                                    &sent_count, npt, sizeof(npt));
+      /* Resolve by username: display names are not unique, so two "Gmail"
+       * accounts must not share one sent-search or cross-tag each other's rows.
+       * account_addr is stamped from acct->username, so it is the stable key. */
+      int rc = email_service_search(user_id, accts[a].username, &params, sent,
+                                    EMAIL_MAX_FETCH_RESULTS, &sent_count, npt, sizeof(npt));
       if (rc != EMAIL_RC_OK) {
          OLOG_INFO("email_reply: acct='%s' enrichable=%d sent-search FAILED (rc=%d) — rows UNKNOWN",
                    accts[a].name, enrichable, rc);
@@ -883,7 +886,7 @@ void email_service_fill_reply_states(int user_id, email_summary_t *rows, int nro
           * passes (matters only if fill is ever extended past Gmail). */
          if (!rows[r].thread_id[0] || rows[r].from_me || rows[r].date <= 0)
             continue;
-         if (strcmp(rows[r].account_name, accts[a].name) != 0)
+         if (strcmp(rows[r].account_addr, accts[a].username) != 0)
             continue;
          email_reply_state_t state = EMAIL_REPLIED_NO;
          for (int s = 0; s < sent_count; s++) {

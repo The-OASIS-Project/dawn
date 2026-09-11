@@ -172,6 +172,17 @@ char *email_digest_build(int user_id, const email_digest_opts_t *opts) {
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: no email accounts configured. Add one in WebUI Settings -> Email.");
 
+   /* n_acct includes disabled accounts.  If every configured account is disabled
+    * the fetch loop below would skip them all and emit a misleading "0 of 0
+    * inboxes" success — surface the enable-account guidance instead. */
+   int enabled_pre = 0;
+   for (int a = 0; a < n_acct; a++)
+      if (accounts[a].enabled)
+         enabled_pre++;
+   if (enabled_pre == 0)
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: no email accounts enabled. Enable one in WebUI Settings -> Email.");
+
    /* Heap scratch: one reusable per-account batch, and a merged buffer sized to
     * the worst case (every account returns a full batch).  Kept off the stack —
     * email_summary_t is ~1.8KB and this runs on the 512KB parallel tool thread. */
@@ -204,7 +215,15 @@ char *email_digest_build(int user_id, const email_digest_opts_t *opts) {
        * the Gmail INBOX label / IMAP "INBOX" per backend (normalize_folder). */
       int out_count = 0;
       char npt[256] = { 0 };
-      int rc = email_service_recent(user_id, accounts[a].name, "inbox", DIGEST_FETCH_PER_ACCT,
+      /* Resolve by username (the account's login/address), not the display name:
+       * find_account matches name OR username first-wins, and display names are
+       * not unique (two accounts may both be "Gmail").  Selecting by name would
+       * fetch the first such account twice and omit the other's mail.  (Residual
+       * edge: find_account checks name before username, so this still mis-resolves
+       * if one account's display NAME equals another's username string — a
+       * degenerate operator config; the clean fix is threading the DB id through
+       * email_summary_t, deferred as disproportionate for these fixes.) */
+      int rc = email_service_recent(user_id, accounts[a].username, "inbox", DIGEST_FETCH_PER_ACCT,
                                     opts->unread_only, NULL, batch, DIGEST_FETCH_PER_ACCT,
                                     &out_count, npt, sizeof(npt));
       if (rc != 0) {

@@ -745,6 +745,18 @@ static bool email_action_is_schedulable(const char *action) {
    "only read-only email actions (accounts / recent / search / folders / read / digest) " \
    "may run from a schedule; send, trash, and archive require a live conversation."
 
+/* Actions whose `arguments` fields are ALL optional.  A reasoning model may
+ * narrate prose instead of an args object while still meaning "use the
+ * defaults", so tool_parse_details degrades a non-JSON value to an empty object
+ * for these.  NOTE: this is a superset of the no-argument case ('accounts') —
+ * 'read' is excluded because it requires message_id, and the mutations
+ * (send/confirm_send/trash/confirm_trash/archive) stay strict. */
+static bool email_action_no_required_fields(const char *action) {
+   return action && (strcmp(action, "accounts") == 0 || strcmp(action, "recent") == 0 ||
+                     strcmp(action, "search") == 0 || strcmp(action, "folders") == 0 ||
+                     strcmp(action, "digest") == 0);
+}
+
 /* Per-action schedulability gate registered in email_metadata.  The email tool
  * is TOOL_CAP_DANGEROUS (send/trash/archive) yet TOOL_CAP_SCHEDULABLE (so the
  * read-only digest can run in a daily briefing); tool_registry_validate_schedulable
@@ -776,10 +788,10 @@ static char *email_tool_callback(const char *action, char *value, int *should_re
    if (scheduled_context_get(NULL) && !email_action_is_schedulable(action))
       return strdup(TOOL_RESULT_ERROR_MARK "Error: " EMAIL_SCHEDULABLE_ERR);
 
-   /* 'accounts' takes no arguments, so tolerate a prose `arguments` value (a
-    * model may still narrate despite the schema); every other action reads
+   /* Actions with only-optional fields tolerate a prose `arguments` value (a
+    * model may still narrate despite the schema); read + the mutations require
     * fields, where a non-JSON value stays a hard error. */
-   struct json_object *details = tool_parse_details(value, strcmp(action, "accounts") == 0);
+   struct json_object *details = tool_parse_details(value, email_action_no_required_fields(action));
    if (!details)
       return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid JSON in details parameter");
 
@@ -865,6 +877,8 @@ static const treg_param_t email_params[] = {
                       "'recent' (fetch recent emails), 'read' (read full email by message_id), "
                       "'search' (search by from/subject/text/date), "
                       "'folders' (list available folders/labels), "
+                      "'digest' (read-only briefing summary of recent inbox mail across ALL "
+                      "accounts, grouped by importance/category), "
                       "'send' (compose draft for user confirmation), "
                       "'confirm_send' (send confirmed draft), "
                       "'trash' (move email to trash — requires confirmation), "
@@ -899,8 +913,11 @@ static const treg_param_t email_params[] = {
            "archive {message_id, account?} (removes from inbox, no confirmation needed).\n"
            "  account?: the CONFIGURED account name OR username/email from the 'accounts' "
            "action — must already exist. Do NOT invent an email address; if uncertain, "
-           "call action='accounts' first to enumerate. Omit to search/read across all "
-           "enabled accounts.\n"
+           "call action='accounts' first to enumerate. When omitted: 'search' merges ALL "
+           "enabled accounts and 'digest' always spans every account; 'read' searches every "
+           "enabled account for the message id; but 'recent'/'folders' use only the FIRST "
+           "enabled account — name the account explicitly, or use 'digest', to cover every "
+           "inbox with those two.\n"
            "  folder?: defaults to inbox; valid values listed in the top-level tool "
            "description.\n"
            "  sort?: \"newest\" (default) or \"oldest\" — orders results by date.\n"
