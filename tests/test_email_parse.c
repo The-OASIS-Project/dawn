@@ -16,10 +16,11 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Unit tests for the IMAP email parsing helpers (tools/email_parse.c):
+ * Unit tests for the shared email header-field helpers (tools/email_parse.c):
  * RFC 2822 dates (timezone-aware), IMAP INTERNALDATE, FLAGS membership,
- * quote-aware paren matching, ENVELOPE parsing, and the FETCH-response message
- * iterator (including the literal-truncation resync).
+ * quote-aware paren matching, ENVELOPE parsing, the FETCH-response message
+ * iterator (including the literal-truncation resync), RFC 2047 encoded-word
+ * decoding (with control-byte stripping), and CR/LF header sanitization.
  */
 
 #include <string.h>
@@ -353,6 +354,103 @@ static void test_next_fetch_null_and_empty(void) {
    TEST_ASSERT_NULL(email_imap_next_fetch("no fetch here", &seg, &len, &uid));
 }
 
+/* ============================================================================
+ * email_decode_rfc2047 — encoded-word decoder (shared by both backends)
+ * ============================================================================ */
+
+static void test_rfc2047_base64(void) {
+   char out[64];
+   email_decode_rfc2047("=?UTF-8?B?SGVsbG8=?=", out, sizeof out); /* "Hello" */
+   TEST_ASSERT_EQUAL_STRING("Hello", out);
+}
+
+static void test_rfc2047_qp(void) {
+   char out[64];
+   email_decode_rfc2047("=?UTF-8?Q?Hello=20World?=", out, sizeof out);
+   TEST_ASSERT_EQUAL_STRING("Hello World", out);
+   email_decode_rfc2047("=?UTF-8?Q?Hello_World?=", out, sizeof out); /* '_' -> space */
+   TEST_ASSERT_EQUAL_STRING("Hello World", out);
+}
+
+/* Non-encoded text passes through; an encoded word mid-string is decoded. */
+static void test_rfc2047_mixed_and_plain(void) {
+   char out[64];
+   email_decode_rfc2047("Plain subject", out, sizeof out);
+   TEST_ASSERT_EQUAL_STRING("Plain subject", out);
+   email_decode_rfc2047("Re: =?UTF-8?B?SGVsbG8=?=", out, sizeof out);
+   TEST_ASSERT_EQUAL_STRING("Re: Hello", out);
+}
+
+/* RFC 2047 §6.2: whitespace between adjacent encoded words is dropped. */
+static void test_rfc2047_adjacent_words(void) {
+   char out[64];
+   email_decode_rfc2047("=?UTF-8?B?SGVsbG8=?= =?UTF-8?B?V29ybGQ=?=", out, sizeof out);
+   TEST_ASSERT_EQUAL_STRING("HelloWorld", out);
+}
+
+static void test_rfc2047_unknown_encoding_passthrough(void) {
+   char out[64];
+   email_decode_rfc2047("=?UTF-8?X?whatever?=", out, sizeof out);
+   TEST_ASSERT_EQUAL_STRING("=?UTF-8?X?whatever?=", out);
+}
+
+static void test_rfc2047_null_and_empty(void) {
+   char out[8] = "xx";
+   email_decode_rfc2047(NULL, out, sizeof out);
+   TEST_ASSERT_EQUAL_STRING("", out);
+   char out2[8] = "xx";
+   email_decode_rfc2047("abc", out2, 0); /* zero dst_len: no write, no crash */
+   TEST_ASSERT_EQUAL_STRING("xx", out2); /* untouched */
+}
+
+/* Whitespace between an encoded word and a following PLAIN word is preserved
+ * (only whitespace between two ENCODED words is folded, §6.2). */
+static void test_rfc2047_space_before_plain(void) {
+   char out[64];
+   email_decode_rfc2047("=?UTF-8?B?SGVsbG8=?= there", out, sizeof out);
+   TEST_ASSERT_EQUAL_STRING("Hello there", out);
+}
+
+/* Decoded C0 control bytes (incl. an embedded NUL that would truncate the field)
+ * are stripped so they can't corrupt the displayed value or bleed into context. */
+static void test_rfc2047_strips_control_bytes(void) {
+   char out[64];
+   email_decode_rfc2047("=?UTF-8?B?AA==?=", out, sizeof out);      /* base64 "AA==" -> 0x00 */
+   TEST_ASSERT_EQUAL_STRING("", out);                              /* NUL dropped, not truncation */
+   email_decode_rfc2047("=?UTF-8?Q?a=00b=09c?=", out, sizeof out); /* NUL dropped, tab kept */
+   TEST_ASSERT_EQUAL_STRING("ab\tc", out);
+}
+
+/* Multi-byte UTF-8 (emoji, accented letters) is DECODED and PRESERVED — not
+ * reduced to ASCII, normalized, or stripped.  This is the whole point of the
+ * Gmail fix: "=?UTF-8?B?..?=" -> the real glyph.  (The control-byte strip only
+ * removes C0 bytes, all < 0x20; UTF-8 continuation bytes are >= 0x80.) */
+static void test_rfc2047_preserves_utf8(void) {
+   char out[64];
+   email_decode_rfc2047("=?UTF-8?B?8J+lgw==?=", out, sizeof out); /* base64 of 🥃 (F0 9F A5 83) */
+   TEST_ASSERT_EQUAL_STRING("🥃", out);
+   email_decode_rfc2047("=?UTF-8?B?Y2Fmw6k=?=", out, sizeof out); /* base64 of "café" */
+   TEST_ASSERT_EQUAL_STRING("café", out);
+   email_decode_rfc2047("=?UTF-8?Q?caf=C3=A9?=", out, sizeof out); /* Q-encoded "café" */
+   TEST_ASSERT_EQUAL_STRING("café", out);
+}
+
+/* Decoding into an undersized buffer truncates cleanly and stays NUL-terminated. */
+static void test_rfc2047_bounded_dst(void) {
+   char out[4];
+   email_decode_rfc2047("=?UTF-8?B?SGVsbG8=?=", out, sizeof out); /* "Hello" into 4 */
+   TEST_ASSERT_EQUAL_STRING("Hel", out);
+   TEST_ASSERT_EQUAL_CHAR('\0', out[3]);
+}
+
+static void test_sanitize_header_value(void) {
+   char out[32];
+   email_sanitize_header_value("subject\r\ninjected: x", out, sizeof out);
+   TEST_ASSERT_EQUAL_STRING("subjectinjected: x", out);
+   email_sanitize_header_value(NULL, out, sizeof out);
+   TEST_ASSERT_EQUAL_STRING("", out);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_rfc822_utc);
@@ -388,5 +486,16 @@ int main(void) {
    RUN_TEST(test_next_fetch_two_clean);
    RUN_TEST(test_next_fetch_literal_truncation);
    RUN_TEST(test_next_fetch_null_and_empty);
+   RUN_TEST(test_rfc2047_base64);
+   RUN_TEST(test_rfc2047_qp);
+   RUN_TEST(test_rfc2047_mixed_and_plain);
+   RUN_TEST(test_rfc2047_adjacent_words);
+   RUN_TEST(test_rfc2047_unknown_encoding_passthrough);
+   RUN_TEST(test_rfc2047_null_and_empty);
+   RUN_TEST(test_rfc2047_space_before_plain);
+   RUN_TEST(test_rfc2047_strips_control_bytes);
+   RUN_TEST(test_rfc2047_preserves_utf8);
+   RUN_TEST(test_rfc2047_bounded_dst);
+   RUN_TEST(test_sanitize_header_value);
    return UNITY_END();
 }

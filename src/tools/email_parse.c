@@ -23,7 +23,9 @@
 
 #include "tools/email_parse.h"
 
+#include <ctype.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,6 +41,157 @@ static time_t tm_with_offset_to_utc(struct tm *tm) {
       return 0;
    utc -= off;
    return utc > 0 ? utc : 0;
+}
+
+/* =============================================================================
+ * RFC 2047 encoded-word decoder (=?charset?Q?..?= / =?charset?B?..?=)
+ *
+ * Shared by both email backends for header display names / subjects.  NOTE: the
+ * decoded bytes are emitted as-is — correct for UTF-8 (the modern norm), lossy
+ * for legacy ISO-8859-x charsets (no transcoding).  Pre-existing behavior.
+ * ============================================================================= */
+
+/* Keep a decoded byte only if it is not a C0 control (tab excepted): an attacker
+ * fully controls the decoded bytes via base64/QP, and an embedded NUL would
+ * truncate the field while other control/CR-LF bytes would bleed into the
+ * LLM/user context.  UTF-8 continuation bytes (>= 0x80) are preserved. */
+static inline bool decoded_byte_ok(char c) {
+   unsigned char u = (unsigned char)c;
+   return u >= 0x20 || u == '\t';
+}
+
+/** Decode a single RFC 2047 quoted-printable encoded word.  Precondition:
+ * dst_len >= 1 (guarded here defensively). */
+static size_t decode_qp_word(const char *src, size_t src_len, char *dst, size_t dst_len) {
+   if (dst_len == 0)
+      return 0;
+   size_t j = 0;
+   for (size_t i = 0; i < src_len && j < dst_len - 1; i++) {
+      char c;
+      if (src[i] == '_') {
+         c = ' ';
+      } else if (src[i] == '=' && i + 2 < src_len && isxdigit((unsigned char)src[i + 1]) &&
+                 isxdigit((unsigned char)src[i + 2])) {
+         char hex[3] = { src[i + 1], src[i + 2], '\0' };
+         c = (char)strtol(hex, NULL, 16);
+         i += 2;
+      } else {
+         c = src[i];
+      }
+      if (decoded_byte_ok(c))
+         dst[j++] = c;
+   }
+   dst[j] = '\0';
+   return j;
+}
+
+/** Simple base64 decode (RFC 2045 alphabet).  Precondition: dst_len >= 1
+ * (guarded here defensively). */
+static size_t decode_b64_word(const char *src, size_t src_len, char *dst, size_t dst_len) {
+   if (dst_len == 0)
+      return 0;
+   static const int8_t b64_table[256] = {
+      [0 ... 255] = -1, ['A'] = 0,  ['B'] = 1,  ['C'] = 2,  ['D'] = 3,  ['E'] = 4,  ['F'] = 5,
+      ['G'] = 6,        ['H'] = 7,  ['I'] = 8,  ['J'] = 9,  ['K'] = 10, ['L'] = 11, ['M'] = 12,
+      ['N'] = 13,       ['O'] = 14, ['P'] = 15, ['Q'] = 16, ['R'] = 17, ['S'] = 18, ['T'] = 19,
+      ['U'] = 20,       ['V'] = 21, ['W'] = 22, ['X'] = 23, ['Y'] = 24, ['Z'] = 25, ['a'] = 26,
+      ['b'] = 27,       ['c'] = 28, ['d'] = 29, ['e'] = 30, ['f'] = 31, ['g'] = 32, ['h'] = 33,
+      ['i'] = 34,       ['j'] = 35, ['k'] = 36, ['l'] = 37, ['m'] = 38, ['n'] = 39, ['o'] = 40,
+      ['p'] = 41,       ['q'] = 42, ['r'] = 43, ['s'] = 44, ['t'] = 45, ['u'] = 46, ['v'] = 47,
+      ['w'] = 48,       ['x'] = 49, ['y'] = 50, ['z'] = 51, ['0'] = 52, ['1'] = 53, ['2'] = 54,
+      ['3'] = 55,       ['4'] = 56, ['5'] = 57, ['6'] = 58, ['7'] = 59, ['8'] = 60, ['9'] = 61,
+      ['+'] = 62,       ['/'] = 63,
+   };
+
+   size_t j = 0;
+   uint32_t accum = 0;
+   int bits = 0;
+
+   for (size_t i = 0; i < src_len && j < dst_len - 1; i++) {
+      int8_t val = b64_table[(unsigned char)src[i]];
+      if (val < 0)
+         continue; /* skip padding and whitespace */
+      accum = (accum << 6) | val;
+      bits += 6;
+      if (bits >= 8) {
+         bits -= 8;
+         char c = (char)((accum >> bits) & 0xFF);
+         if (decoded_byte_ok(c))
+            dst[j++] = c;
+      }
+   }
+   dst[j] = '\0';
+   return j;
+}
+
+void email_decode_rfc2047(const char *src, char *dst, size_t dst_len) {
+   if (!dst || dst_len == 0)
+      return;
+   dst[0] = '\0';
+   if (!src)
+      return;
+
+   size_t out = 0;
+   const char *p = src;
+   while (*p && out < dst_len - 1) {
+      if (strncmp(p, "=?", 2) != 0) {
+         dst[out++] = *p++;
+         continue;
+      }
+
+      /* Parse =?charset?encoding?text?= */
+      const char *charset_start = p + 2;
+      const char *q1 = strchr(charset_start, '?');
+      if (!q1 || !q1[1] || q1[2] != '?') {
+         dst[out++] = *p++;
+         continue;
+      }
+
+      char encoding = q1[1];
+      const char *text_start = q1 + 3;
+      const char *end = strstr(text_start, "?=");
+      if (!end) {
+         dst[out++] = *p++;
+         continue;
+      }
+
+      size_t text_len = (size_t)(end - text_start);
+
+      if (encoding == 'Q' || encoding == 'q') {
+         out += decode_qp_word(text_start, text_len, dst + out, dst_len - out);
+      } else if (encoding == 'B' || encoding == 'b') {
+         out += decode_b64_word(text_start, text_len, dst + out, dst_len - out);
+      } else {
+         /* Unknown encoding, copy literally. */
+         dst[out++] = *p++;
+         continue;
+      }
+
+      p = end + 2;
+
+      /* RFC 2047 §6.2: whitespace between adjacent encoded words is ignored. */
+      const char *ws = p;
+      while (*ws == ' ' || *ws == '\t')
+         ws++;
+      if (strncmp(ws, "=?", 2) == 0)
+         p = ws;
+   }
+   dst[out] = '\0';
+}
+
+/** Strip CR/LF from a header value to prevent SMTP header injection.  Shared by
+ * both backends' send paths. */
+void email_sanitize_header_value(const char *src, char *dst, size_t dst_len) {
+   if (!dst || dst_len == 0)
+      return;
+   size_t j = 0;
+   if (src) {
+      for (size_t i = 0; src[i] && j < dst_len - 1; i++) {
+         if (src[i] != '\r' && src[i] != '\n')
+            dst[j++] = src[i];
+      }
+   }
+   dst[j] = '\0';
 }
 
 time_t email_parse_rfc822_date(const char *date_str) {

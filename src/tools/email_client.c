@@ -56,6 +56,15 @@
 
 #define EMAIL_MAX_RESPONSE_SIZE (1024 * 1024) /* 1 MB cap on IMAP/SMTP responses */
 
+/* Byte ceiling for a single-message read fetch (IMAP BODY[]<0.N>).  We only need
+ * headers + the first ~50 KB of decoded text body — reading a message must not
+ * pull the entire raw MIME (base64 attachments can be many MB and would blow the
+ * 1 MB response cap, failing the read outright).  512 KB covers headers plus a
+ * large text/HTML part for essentially all real mail; a bigger message degrades
+ * to a truncated body (out->truncated), never a failed read.  Attachments are a
+ * separate feature (see EMAIL_ATTACHMENT_DOWNLOAD_DESIGN.md). */
+#define EMAIL_MAX_READ_FETCH_BYTES (512 * 1024)
+
 /* =============================================================================
  * SMTP Upload Buffer for email_send
  * ============================================================================= */
@@ -182,116 +191,9 @@ static void append_imap_literal(char *buf, size_t *off, size_t *rem, const char 
    BUF_PRINTF(buf, *off, *rem, "{%zu}\r\n%s", val_len, value);
 }
 
-/* =============================================================================
- * RFC 2047 Encoded Word Decoder
- *
- * Decodes =?charset?Q?text?= (quoted-printable) and =?charset?B?text?= (base64)
- * encoded words commonly found in email From/Subject headers.
- * ============================================================================= */
-
-/** Decode a single RFC 2047 quoted-printable encoded word */
-static size_t decode_qp_word(const char *src, size_t src_len, char *dst, size_t dst_len) {
-   size_t j = 0;
-   for (size_t i = 0; i < src_len && j < dst_len - 1; i++) {
-      if (src[i] == '_') {
-         dst[j++] = ' ';
-      } else if (src[i] == '=' && i + 2 < src_len && isxdigit((unsigned char)src[i + 1]) &&
-                 isxdigit((unsigned char)src[i + 2])) {
-         char hex[3] = { src[i + 1], src[i + 2], '\0' };
-         dst[j++] = (char)strtol(hex, NULL, 16);
-         i += 2;
-      } else {
-         dst[j++] = src[i];
-      }
-   }
-   dst[j] = '\0';
-   return j;
-}
-
-/** Simple base64 decode (RFC 2045 alphabet) */
-static size_t decode_b64_word(const char *src, size_t src_len, char *dst, size_t dst_len) {
-   static const int8_t b64_table[256] = {
-      [0 ... 255] = -1, ['A'] = 0,  ['B'] = 1,  ['C'] = 2,  ['D'] = 3,  ['E'] = 4,  ['F'] = 5,
-      ['G'] = 6,        ['H'] = 7,  ['I'] = 8,  ['J'] = 9,  ['K'] = 10, ['L'] = 11, ['M'] = 12,
-      ['N'] = 13,       ['O'] = 14, ['P'] = 15, ['Q'] = 16, ['R'] = 17, ['S'] = 18, ['T'] = 19,
-      ['U'] = 20,       ['V'] = 21, ['W'] = 22, ['X'] = 23, ['Y'] = 24, ['Z'] = 25, ['a'] = 26,
-      ['b'] = 27,       ['c'] = 28, ['d'] = 29, ['e'] = 30, ['f'] = 31, ['g'] = 32, ['h'] = 33,
-      ['i'] = 34,       ['j'] = 35, ['k'] = 36, ['l'] = 37, ['m'] = 38, ['n'] = 39, ['o'] = 40,
-      ['p'] = 41,       ['q'] = 42, ['r'] = 43, ['s'] = 44, ['t'] = 45, ['u'] = 46, ['v'] = 47,
-      ['w'] = 48,       ['x'] = 49, ['y'] = 50, ['z'] = 51, ['0'] = 52, ['1'] = 53, ['2'] = 54,
-      ['3'] = 55,       ['4'] = 56, ['5'] = 57, ['6'] = 58, ['7'] = 59, ['8'] = 60, ['9'] = 61,
-      ['+'] = 62,       ['/'] = 63,
-   };
-
-   size_t j = 0;
-   uint32_t accum = 0;
-   int bits = 0;
-
-   for (size_t i = 0; i < src_len && j < dst_len - 1; i++) {
-      int8_t val = b64_table[(unsigned char)src[i]];
-      if (val < 0)
-         continue; /* skip padding and whitespace */
-      accum = (accum << 6) | val;
-      bits += 6;
-      if (bits >= 8) {
-         bits -= 8;
-         dst[j++] = (char)((accum >> bits) & 0xFF);
-      }
-   }
-   dst[j] = '\0';
-   return j;
-}
-
-/** Decode all RFC 2047 encoded words in a string, writing result to dst */
-static void decode_rfc2047(const char *src, char *dst, size_t dst_len) {
-   size_t out = 0;
-   const char *p = src;
-
-   while (*p && out < dst_len - 1) {
-      if (strncmp(p, "=?", 2) != 0) {
-         dst[out++] = *p++;
-         continue;
-      }
-
-      /* Parse =?charset?encoding?text?= */
-      const char *charset_start = p + 2;
-      const char *q1 = strchr(charset_start, '?');
-      if (!q1 || !q1[1] || q1[2] != '?') {
-         dst[out++] = *p++;
-         continue;
-      }
-
-      char encoding = q1[1];
-      const char *text_start = q1 + 3;
-      const char *end = strstr(text_start, "?=");
-      if (!end) {
-         dst[out++] = *p++;
-         continue;
-      }
-
-      size_t text_len = end - text_start;
-
-      if (encoding == 'Q' || encoding == 'q') {
-         out += decode_qp_word(text_start, text_len, dst + out, dst_len - out);
-      } else if (encoding == 'B' || encoding == 'b') {
-         out += decode_b64_word(text_start, text_len, dst + out, dst_len - out);
-      } else {
-         /* Unknown encoding, copy literally */
-         dst[out++] = *p++;
-         continue;
-      }
-
-      p = end + 2;
-
-      /* RFC 2047 §6.2: whitespace between adjacent encoded words is ignored */
-      const char *ws = p;
-      while (*ws == ' ' || *ws == '\t')
-         ws++;
-      if (strncmp(ws, "=?", 2) == 0)
-         p = ws;
-   }
-   dst[out] = '\0';
-}
+/* RFC 2047 encoded-word decoding (email_decode_rfc2047) lives in email_parse.c
+ * so both the IMAP and Gmail backends share one implementation — see the note
+ * there.  copy_header_value below wraps it after unfolding. */
 
 /* =============================================================================
  * Header Parsing Helpers
@@ -349,7 +251,7 @@ static void copy_header_value(const char *start, char *out, size_t out_len) {
    raw[j] = '\0';
 
    /* Step 2: Decode RFC 2047 encoded words */
-   decode_rfc2047(raw, out, out_len);
+   email_decode_rfc2047(raw, out, out_len);
 }
 
 /** Parse "Display Name <email@example.com>" from a decoded From header value */
@@ -710,9 +612,9 @@ static int batch_fetch_headers(CURL *curl,
       char faddr[256] = { 0 };
       if (email_parse_envelope(seg, subj_raw, sizeof(subj_raw), fname_raw, sizeof(fname_raw), faddr,
                                sizeof(faddr))) {
-         decode_rfc2047(subj_raw, s->subject, sizeof(s->subject));
+         email_decode_rfc2047(subj_raw, s->subject, sizeof(s->subject));
          if (fname_raw[0])
-            decode_rfc2047(fname_raw, s->from_name, sizeof(s->from_name));
+            email_decode_rfc2047(fname_raw, s->from_name, sizeof(s->from_name));
          snprintf(s->from_addr, sizeof(s->from_addr), "%s", faddr);
       }
 
@@ -845,25 +747,46 @@ int email_read_message(const email_conn_t *conn,
    if (!curl)
       return 1;
 
-   /* Fetch full message by UID */
+   /* Fetch the message by UID.  First try a bounded partial fetch (IMAP
+    * BODY[]<0.N>, curl ";PARTIAL=") so a huge message (big attachments) can't
+    * blow the response cap and fail the read outright.  PARTIAL is core RFC 3501,
+    * but if a non-conforming server rejects it, fall back once to a full fetch
+    * (still capped at EMAIL_MAX_RESPONSE_SIZE) so reads keep working. */
    char url[1024];
-   snprintf(url, sizeof(url), "%s/%s/;UID=%u", conn->imap_url, encoded_folder, uid);
-   curl_easy_setopt(curl, CURLOPT_URL, url);
-
    curl_buffer_t buf;
-   curl_buffer_init_with_max(&buf, EMAIL_MAX_RESPONSE_SIZE);
-   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
-   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
+   CURLcode res = CURLE_OK;
+   bool used_partial = true;
 
-   CURLcode res = curl_easy_perform(curl);
-   curl_easy_cleanup(curl);
+   for (int attempt = 0; attempt < 2; attempt++) {
+      if (used_partial)
+         snprintf(url, sizeof(url), "%s/%s/;UID=%u;PARTIAL=0.%d", conn->imap_url, encoded_folder,
+                  uid, EMAIL_MAX_READ_FETCH_BYTES);
+      else
+         snprintf(url, sizeof(url), "%s/%s/;UID=%u", conn->imap_url, encoded_folder, uid);
+      curl_easy_setopt(curl, CURLOPT_URL, url);
 
-   if (res != CURLE_OK || !buf.data || buf.truncated) {
-      OLOG_ERROR("email: IMAP FETCH uid=%u failed: %s%s", uid, curl_easy_strerror(res),
-                 buf.truncated ? " (response exceeded cap)" : "");
+      curl_buffer_init_with_max(&buf, EMAIL_MAX_RESPONSE_SIZE);
+      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
+      curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
+
+      res = curl_easy_perform(curl);
+      if (res == CURLE_OK && buf.data && !buf.truncated)
+         break; /* success */
+
+      bool was_truncated = buf.truncated;
       curl_buffer_free(&buf);
+      if (used_partial) {
+         OLOG_WARNING("email: IMAP partial fetch uid=%u failed (%s); retrying full fetch", uid,
+                      curl_easy_strerror(res));
+         used_partial = false;
+         continue; /* retry without PARTIAL */
+      }
+      OLOG_ERROR("email: IMAP FETCH uid=%u failed: %s%s", uid, curl_easy_strerror(res),
+                 was_truncated ? " (response exceeded cap)" : "");
+      curl_easy_cleanup(curl);
       return 1;
    }
+   curl_easy_cleanup(curl);
 
    out->uid = uid;
 
@@ -883,6 +806,15 @@ int email_read_message(const email_conn_t *conn,
    const char *date_val = find_header(buf.data, "Date");
    copy_header_value(date_val, out->date_str, sizeof(out->date_str));
 
+   /* The partial fetch caps the RAW MIME at EMAIL_MAX_READ_FETCH_BYTES; when it
+    * returns exactly the cap the message was cut, so the body may be incomplete
+    * even if the text extractor didn't hit its own max_chars limit (e.g. a large
+    * leading HTML/image part pushed the text/plain past the cut).  Fold that into
+    * the truncation flag so a clipped body is never reported as complete.  Only
+    * applies to the partial fetch — a full-fetch fallback got the whole message
+    * (a real overflow there would have set buf.truncated and failed above). */
+   bool raw_truncated = used_partial && (buf.size >= (size_t)EMAIL_MAX_READ_FETCH_BYTES);
+
    /* Extract plain text body (defensive fallback; service layer always supplies
     * a positive cap via build_conn_for_account) */
    int max_chars = conn->max_body_chars > 0 ? conn->max_body_chars : EMAIL_MAX_READ_BODY_LEN;
@@ -890,7 +822,7 @@ int email_read_message(const email_conn_t *conn,
    out->body = extract_plain_body(buf.data, max_chars, &body_truncated);
    if (out->body) {
       out->body_len = strlen(out->body);
-      out->truncated = body_truncated;
+      out->truncated = body_truncated || raw_truncated;
    }
 
    /* Count attachments (rough heuristic — count Content-Disposition: attachment) */
@@ -1015,21 +947,6 @@ int email_search(const email_conn_t *conn,
 }
 
 /* =============================================================================
- * SMTP Header Injection Prevention
- *
- * Strip CR/LF from values used in email headers to prevent header injection.
- * ============================================================================= */
-
-static void sanitize_header_value(const char *src, char *dst, size_t dst_len) {
-   size_t j = 0;
-   for (size_t i = 0; src[i] && j < dst_len - 1; i++) {
-      if (src[i] != '\r' && src[i] != '\n')
-         dst[j++] = src[i];
-   }
-   dst[j] = '\0';
-}
-
-/* =============================================================================
  * Public API: Send Email
  * ============================================================================= */
 
@@ -1041,12 +958,12 @@ int email_send(const email_conn_t *conn,
    if (!to_addr || !to_addr[0] || !subject || !body)
       return 1;
 
-   /* Sanitize all header-injectable fields */
+   /* Sanitize all header-injectable fields (CR/LF strip — shared helper). */
    char safe_subject[256], safe_to_name[64], safe_display_name[64], safe_to_addr[256];
-   sanitize_header_value(subject, safe_subject, sizeof(safe_subject));
-   sanitize_header_value(to_name ? to_name : "", safe_to_name, sizeof(safe_to_name));
-   sanitize_header_value(conn->display_name, safe_display_name, sizeof(safe_display_name));
-   sanitize_header_value(to_addr, safe_to_addr, sizeof(safe_to_addr));
+   email_sanitize_header_value(subject, safe_subject, sizeof(safe_subject));
+   email_sanitize_header_value(to_name ? to_name : "", safe_to_name, sizeof(safe_to_name));
+   email_sanitize_header_value(conn->display_name, safe_display_name, sizeof(safe_display_name));
+   email_sanitize_header_value(to_addr, safe_to_addr, sizeof(safe_to_addr));
 
    CURL *curl = create_smtp_handle(conn);
    if (!curl)

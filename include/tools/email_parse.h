@@ -16,10 +16,11 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Pure parsing helpers for the IMAP email backend: RFC 2822 Date headers,
- * IMAP INTERNALDATE, FLAGS membership, quote-aware paren matching, ENVELOPE
- * parsing, and the FETCH-response message iterator.  Extracted from
- * email_client.c so the parsing logic is independently unit-testable.
+ * Pure header-field utilities shared by both email backends (IMAP + Gmail):
+ * RFC 2822 Date / IMAP INTERNALDATE parsing, IMAP FLAGS membership, quote-aware
+ * paren matching, ENVELOPE parsing, the FETCH-response message iterator, RFC 2047
+ * encoded-word decoding, and CR/LF header sanitization.  A libc-only leaf, so
+ * the logic is independently unit-testable.
  */
 
 #ifndef EMAIL_PARSE_H
@@ -63,6 +64,25 @@ time_t email_parse_imap_internaldate(const char *idate);
  * parens, so "\\Seen" does not match "\\SeenLater".  NULL-safe (returns false).
  */
 bool email_imap_flags_contains(const char *flags_group, const char *flag);
+
+/**
+ * Decode all RFC 2047 encoded words ("=?charset?Q?..?=" / "=?charset?B?..?=") in
+ * @p src into @p dst (NUL-terminated, bounded by @p dst_len).  Non-encoded text
+ * is copied through; whitespace between adjacent encoded words is folded away
+ * (RFC 2047 §6.2); an unknown encoding is copied literally.  Shared by both email
+ * backends for header display names / subjects.  NULL-safe.
+ *
+ * NOTE: decoded bytes are emitted as-is — correct for UTF-8, lossy for legacy
+ * ISO-8859-x charsets (no transcoding).
+ */
+void email_decode_rfc2047(const char *src, char *dst, size_t dst_len);
+
+/**
+ * Copy @p src to @p dst (NUL-terminated, bounded by @p dst_len) with CR and LF
+ * removed, to prevent SMTP header injection via a user-supplied header value.
+ * Shared by both backends' send paths.  NULL-safe.
+ */
+void email_sanitize_header_value(const char *src, char *dst, size_t dst_len);
 
 /**
  * Find the ')' matching the '(' at @p open, honoring IMAP quoted strings (so a

@@ -25,7 +25,7 @@
  * - Authorization header wiped with sodium_memzero() after each curl call
  * - HTTPS-only with certificate verification enforced
  * - Response size capped at GMAIL_MAX_RESPONSE_SIZE (4 MB)
- * - Header injection prevention via sanitize_header_value() on all user fields
+ * - Header injection prevention via email_sanitize_header_value() on all user fields
  * - Base64url decode: text/plain capped at max_body_chars, text/html capped at 2 MB
  * - Gmail search params quoted to prevent query injection
  * - Batch API used for metadata fetches (2 HTTP calls instead of N+1)
@@ -47,6 +47,7 @@
 
 #include "core/curl_buffer.h"
 #include "logging.h"
+#include "tools/email_parse.h"
 #include "tools/html_parser.h"
 
 /* =============================================================================
@@ -325,18 +326,8 @@ static size_t base64url_encode(const unsigned char *data, size_t len, char *out,
    return pos;
 }
 
-/* =============================================================================
- * Header Injection Prevention
- * ============================================================================= */
-
-static void sanitize_header_value(const char *src, char *dst, size_t dst_len) {
-   size_t j = 0;
-   for (size_t i = 0; src[i] && j < dst_len - 1; i++) {
-      if (src[i] != '\r' && src[i] != '\n')
-         dst[j++] = src[i];
-   }
-   dst[j] = '\0';
-}
+/* Header-injection prevention (CR/LF strip) and RFC 2047 decoding both live in
+ * email_parse.c so the IMAP and Gmail backends share one implementation. */
 
 /* =============================================================================
  * URL Encoding (for query parameters)
@@ -680,13 +671,18 @@ static int parse_message_json(struct json_object *root, email_summary_t *out) {
    if (json_object_object_get_ex(root, "payload", &payload))
       json_object_object_get_ex(payload, "headers", &headers);
 
+   /* Gmail's API does NOT MIME-decode header values (only the snippet), so
+    * RFC 2047-decode From/Subject here — otherwise a non-ASCII sender/subject
+    * ("=?UTF-8?B?..?=") reaches the user as raw gibberish.  The encoded word
+    * lives in the From display-name, so decode before splitting name/addr. */
    const char *from = find_gmail_header(headers, "From");
-   parse_from_field(from, out->from_name, sizeof(out->from_name), out->from_addr,
+   char from_decoded[512];
+   email_decode_rfc2047(from, from_decoded, sizeof(from_decoded));
+   parse_from_field(from_decoded, out->from_name, sizeof(out->from_name), out->from_addr,
                     sizeof(out->from_addr));
 
    const char *subject = find_gmail_header(headers, "Subject");
-   if (subject)
-      snprintf(out->subject, sizeof(out->subject), "%s", subject);
+   email_decode_rfc2047(subject, out->subject, sizeof(out->subject));
 
    const char *date = find_gmail_header(headers, "Date");
    if (date)
@@ -1167,17 +1163,19 @@ int gmail_read_message(const char *token,
    if (json_object_object_get_ex(root, "payload", &payload))
       json_object_object_get_ex(payload, "headers", &headers);
 
+   /* RFC 2047-decode header values (Gmail's API leaves them encoded) — parity
+    * with the IMAP read path's copy_header_value. */
    const char *from = find_gmail_header(headers, "From");
-   parse_from_field(from, out->from_name, sizeof(out->from_name), out->from_addr,
+   char from_decoded[512];
+   email_decode_rfc2047(from, from_decoded, sizeof(from_decoded));
+   parse_from_field(from_decoded, out->from_name, sizeof(out->from_name), out->from_addr,
                     sizeof(out->from_addr));
 
    const char *to = find_gmail_header(headers, "To");
-   if (to)
-      snprintf(out->to, sizeof(out->to), "%s", to);
+   email_decode_rfc2047(to, out->to, sizeof(out->to));
 
    const char *subject = find_gmail_header(headers, "Subject");
-   if (subject)
-      snprintf(out->subject, sizeof(out->subject), "%s", subject);
+   email_decode_rfc2047(subject, out->subject, sizeof(out->subject));
 
    const char *date = find_gmail_header(headers, "Date");
    if (date)
@@ -1281,12 +1279,12 @@ int gmail_send(const char *token,
    /* Sanitize all header-injectable fields (including from_addr for consistency) */
    char safe_from_addr[256];
    char safe_subject[256], safe_to_name[64], safe_display_name[64], safe_to_addr[256];
-   sanitize_header_value(from_addr, safe_from_addr, sizeof(safe_from_addr));
-   sanitize_header_value(subject, safe_subject, sizeof(safe_subject));
-   sanitize_header_value(to_name ? to_name : "", safe_to_name, sizeof(safe_to_name));
-   sanitize_header_value(display_name ? display_name : "", safe_display_name,
-                         sizeof(safe_display_name));
-   sanitize_header_value(to_addr, safe_to_addr, sizeof(safe_to_addr));
+   email_sanitize_header_value(from_addr, safe_from_addr, sizeof(safe_from_addr));
+   email_sanitize_header_value(subject, safe_subject, sizeof(safe_subject));
+   email_sanitize_header_value(to_name ? to_name : "", safe_to_name, sizeof(safe_to_name));
+   email_sanitize_header_value(display_name ? display_name : "", safe_display_name,
+                               sizeof(safe_display_name));
+   email_sanitize_header_value(to_addr, safe_to_addr, sizeof(safe_to_addr));
 
    /* Build From header */
    char from_header[512];
