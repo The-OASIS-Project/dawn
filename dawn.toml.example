@@ -443,6 +443,10 @@
                                   # Env: DAWN_WEBUI_WORKERS
 # www_path = "www"                # Path to static web files
                                   # Env: DAWN_WEBUI_WWW_PATH
+# aurora_path = ""                # Absolute path to the Aurora SPA build (its Vite `dist/`).
+                                  # When set, DAWN serves that bundle same-origin at /aurora/
+                                  # (shared login, cookie, /api, /ws). Empty = disabled (WebUI
+                                  # only). Point at dist/, NOT the repo root. Restart to apply.
 
 # SSL/HTTPS (required for microphone access from non-localhost)
 # https = false                   # Enable HTTPS

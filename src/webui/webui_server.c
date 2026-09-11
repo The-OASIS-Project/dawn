@@ -117,6 +117,7 @@ _Atomic int s_running = 0;  // atomic: written on shutdown, read in server-threa
 volatile int s_client_count = 0;
 int s_port = 0;
 char s_www_path[256] = { 0 };
+char s_aurora_path[256] = { 0 }; /* Aurora dist root served at /aurora (empty = disabled) */
 pthread_mutex_t s_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* Config modification mutex - protects against concurrent config reads during writes */
@@ -1801,6 +1802,41 @@ int webui_server_init(int port, const char *www_path) {
       strncpy(s_www_path, WEBUI_DEFAULT_WWW_PATH, sizeof(s_www_path) - 1);
    }
    s_www_path[sizeof(s_www_path) - 1] = '\0';
+
+   /* Aurora SPA subpath (optional). Validate once at startup: a path that
+    * doesn't resolve or lacks an index.html disables the feature rather than
+    * serving the wrong tree to authenticated users. We store the RAW configured
+    * path (like s_www_path) so per-request is_path_within_www() realpaths it and
+    * a dist symlink swap stays live; realpath here is only for validation. */
+   s_aurora_path[0] = '\0';
+   if (g_config.webui.aurora_path[0] != '\0') {
+      const char *ap = g_config.webui.aurora_path;
+      char resolved[PATH_MAX];
+      char probe[PATH_MAX + 32];
+      char probe_resolved[PATH_MAX];
+      if (realpath(ap, resolved) == NULL) {
+         OLOG_WARNING("WebUI: aurora_path '%s' does not resolve — Aurora subpath disabled", ap);
+      } else {
+         snprintf(probe, sizeof(probe), "%s/index.html", resolved);
+         if (realpath(probe, probe_resolved) == NULL) {
+            OLOG_WARNING("WebUI: aurora_path '%s' has no index.html — Aurora subpath disabled "
+                         "(point it at the built dist/, not the repo root)",
+                         resolved);
+         } else {
+            snprintf(probe, sizeof(probe), "%s/.git", resolved);
+            bool has_git = (realpath(probe, probe_resolved) != NULL);
+            snprintf(probe, sizeof(probe), "%s/package.json", resolved);
+            bool has_pkg = (realpath(probe, probe_resolved) != NULL);
+            if (has_git || has_pkg)
+               OLOG_WARNING("WebUI: aurora_path '%s' looks like a source tree (%s present); "
+                            "serve the built dist/ to avoid exposing sources",
+                            resolved, has_git ? ".git" : "package.json");
+            strncpy(s_aurora_path, ap, sizeof(s_aurora_path) - 1);
+            s_aurora_path[sizeof(s_aurora_path) - 1] = '\0';
+            OLOG_INFO("WebUI: serving Aurora at /aurora/ from %s", resolved);
+         }
+      }
+   }
 
    /* Configure libwebsockets context */
    memset(&info, 0, sizeof(info));

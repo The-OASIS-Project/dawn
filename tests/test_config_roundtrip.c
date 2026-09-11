@@ -412,9 +412,13 @@ static void test_written_file_reparses(void) {
    /* Guard the [webui] allowed_origins round-trip (silent-deletion hazard). */
    snprintf(g_written.webui.allowed_origins, sizeof(g_written.webui.allowed_origins), "%s",
             "https://localhost:5273,https://hud.example.com");
+   /* Guard the [webui] aurora_path round-trip (conditional-emit silent-deletion hazard). */
+   snprintf(g_written.webui.aurora_path, sizeof(g_written.webui.aurora_path), "%s",
+            "/opt/aurora/dist");
    round_trip();
    TEST_ASSERT_EQUAL_STRING(g_written.general.ai_name, g_read.general.ai_name);
    TEST_ASSERT_EQUAL_STRING(g_written.webui.allowed_origins, g_read.webui.allowed_origins);
+   TEST_ASSERT_EQUAL_STRING(g_written.webui.aurora_path, g_read.webui.aurora_path);
 }
 
 /* String values must be ESCAPED, never fprintf'd raw.  A raw "%s" write lets a

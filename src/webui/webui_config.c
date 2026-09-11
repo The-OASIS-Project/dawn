@@ -761,6 +761,7 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_INT(section, "max_clients", config->webui.max_clients);
       JSON_TO_CONFIG_INT(section, "audio_chunk_ms", config->webui.audio_chunk_ms);
       JSON_TO_CONFIG_STR(section, "www_path", config->webui.www_path);
+      JSON_TO_CONFIG_STR(section, "aurora_path", config->webui.aurora_path);
       JSON_TO_CONFIG_STR(section, "bind_address", config->webui.bind_address);
       JSON_TO_CONFIG_BOOL(section, "https", config->webui.https);
       JSON_TO_CONFIG_STR(section, "ssl_cert_path", config->webui.ssl_cert_path);

@@ -12,6 +12,30 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-09-11 — Optional: serve the Aurora UI from DAWN at /aurora
+
+**New opt-in; nothing changes unless you turn it on.** If you don't run Aurora,
+skip this — the default is off and your install is unaffected.
+
+**What changed.** DAWN's WebUI server can now serve the Aurora front-end from its
+own origin under `/aurora/`, sharing one login, cookie, and API/WebSocket with the
+main WebUI — no separate port, host, or CORS setup. It is gated by a new `[webui]`
+setting, `aurora_path`, which is empty (disabled) by default.
+
+**What to do (only if you want Aurora).** Build Aurora (`npm run build`), then in
+`dawn.toml`:
+
+    [webui]
+    aurora_path = "/absolute/path/to/aurora/dist"
+
+Point it at the built `dist/` directory (not the repo root), using an absolute
+path, and restart DAWN. When enabled, an Aurora link appears in the WebUI header
+and `/aurora/` serves the app behind the same login. Leaving `aurora_path` empty
+keeps the WebUI-only behavior. DAWN validates the path at startup and disables the
+feature (with a log warning) if it does not exist or has no `index.html`.
+
+---
+
 ## 2026-09-10 — IMAP accounts now show unread & replied state in digests
 
 **Only affects non-Gmail (IMAP) email accounts.** Gmail accounts were already

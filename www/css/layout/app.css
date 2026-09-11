@@ -364,6 +364,34 @@ body.user-is-admin .settings-paths.admin-only {
 }
 
 /* =============================================================================
+ * Aurora Button (nav link to the co-located Aurora SPA at /aurora/)
+ * ============================================================================= */
+#aurora-btn {
+   background: none;
+   border: none;
+   color: var(--text-secondary);
+   cursor: pointer;
+   padding: 0.25rem;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   text-decoration: none;
+   transition: color var(--transition-fast);
+   position: relative;
+}
+
+/* ID+class override so `.hidden` wins over `display: flex` — DAWN has no global
+ * `.hidden` utility (mirrors #coding-btn.hidden). Revealed only when the server
+ * advertises aurora_enabled in the config frame. */
+#aurora-btn.hidden {
+   display: none;
+}
+
+#aurora-btn:hover {
+   color: var(--text-primary);
+}
+
+/* =============================================================================
  * Footer
  * ============================================================================= */
 #footer {

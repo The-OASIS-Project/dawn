@@ -1451,6 +1451,7 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object_object_add(webui, "audio_chunk_ms",
                           json_object_new_int(config->webui.audio_chunk_ms));
    json_object_object_add(webui, "www_path", json_object_new_string(config->webui.www_path));
+   json_object_object_add(webui, "aurora_path", json_object_new_string(config->webui.aurora_path));
    json_object_object_add(webui, "bind_address",
                           json_object_new_string(config->webui.bind_address));
    json_object_object_add(webui, "https", json_object_new_boolean(config->webui.https));
@@ -2421,6 +2422,8 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "max_clients = %d\n", config->webui.max_clients);
    fprintf(fp, "audio_chunk_ms = %d\n", config->webui.audio_chunk_ms);
    write_toml_string(fp, "www_path", config->webui.www_path);
+   if (config->webui.aurora_path[0])
+      write_toml_string(fp, "aurora_path", config->webui.aurora_path);
    write_toml_string(fp, "bind_address", config->webui.bind_address);
    fprintf(fp, "https = %s\n", config->webui.https ? "true" : "false");
    if (config->webui.ssl_cert_path[0])

@@ -507,11 +507,12 @@ void send_session_token_impl(ws_connection_t *conn, const char *token) {
 static void build_config_json(char *json, size_t len) {
    bool music_enabled = webui_music_server_is_running();
    int music_port = webui_music_server_get_port();
+   bool aurora_enabled = (s_aurora_path[0] != '\0');
    snprintf(json, len,
             "{\"type\":\"config\",\"payload\":{\"audio_chunk_ms\":%d,"
-            "\"music_enabled\":%s,\"music_port\":%d,\"version\":\"%s\"}}",
+            "\"music_enabled\":%s,\"music_port\":%d,\"aurora_enabled\":%s,\"version\":\"%s\"}}",
             g_config.webui.audio_chunk_ms, music_enabled ? "true" : "false", music_port,
-            VERSION_NUMBER);
+            aurora_enabled ? "true" : "false", VERSION_NUMBER);
 }
 
 /* Compile-time constant: feature flags sent to all clients on connect */

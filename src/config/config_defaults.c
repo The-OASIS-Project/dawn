@@ -268,6 +268,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->webui.max_clients = 4;
    config->webui.audio_chunk_ms = 100; /* 100ms chunks for lower VAD latency */
    SAFE_COPY(config->webui.www_path, "www");
+   config->webui.aurora_path[0] = '\0'; /* Aurora subpath serving disabled by default */
    SAFE_COPY(config->webui.bind_address, "0.0.0.0");
    config->webui.https = false;
    config->webui.ssl_cert_path[0] = '\0';

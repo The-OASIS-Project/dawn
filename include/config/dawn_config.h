@@ -475,7 +475,10 @@ typedef struct {
    int max_clients;                     /* Max concurrent WebSocket clients */
    int audio_chunk_ms;                  /* Audio chunk size in ms (100-500, default: 200) */
    char www_path[CONFIG_PATH_MAX];      /* Path to static files */
-   char bind_address[CONFIG_NAME_MAX];  /* Bind address (default: 127.0.0.1) */
+   char aurora_path[CONFIG_PATH_MAX];   /* Aurora SPA build (dist/) served same-origin at
+                                           /aurora; empty = disabled (WebUI only) */
+   char bind_address[CONFIG_NAME_MAX];  /* Bind address (default: 0.0.0.0 — all interfaces;
+                                           LAN-reachable) */
    bool https;                          /* Enable HTTPS (required for mic on LAN) */
    char ssl_cert_path[CONFIG_PATH_MAX]; /* Path to SSL certificate (.pem) */
    char ssl_key_path[CONFIG_PATH_MAX];  /* Path to SSL private key (.pem) */

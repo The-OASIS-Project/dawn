@@ -1003,6 +1003,7 @@ static void parse_webui(toml_table_t *table, webui_config_t *config) {
                                              "max_clients",
                                              "audio_chunk_ms",
                                              "www_path",
+                                             "aurora_path",
                                              "bind_address",
                                              "https",
                                              "ssl_cert_path",
@@ -1018,6 +1019,7 @@ static void parse_webui(toml_table_t *table, webui_config_t *config) {
    PARSE_INT(table, "max_clients", config->max_clients);
    PARSE_INT(table, "audio_chunk_ms", config->audio_chunk_ms);
    PARSE_STRING(table, "www_path", config->www_path);
+   PARSE_STRING(table, "aurora_path", config->aurora_path);
    PARSE_STRING(table, "bind_address", config->bind_address);
    PARSE_BOOL(table, "https", config->https);
    PARSE_STRING(table, "ssl_cert_path", config->ssl_cert_path);

@@ -432,6 +432,12 @@
                      msg.payload.music_enabled
                   );
                }
+               // Aurora subpath: reveal the nav link only when the server is
+               // serving the Aurora SPA at /aurora/.
+               if (msg.payload.aurora_enabled) {
+                  const auroraBtn = document.getElementById('aurora-btn');
+                  if (auroraBtn) auroraBtn.classList.remove('hidden');
+               }
                break;
             case 'server_features':
                if (msg.payload.home_assistant) {

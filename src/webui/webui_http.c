@@ -281,6 +281,37 @@ static bool path_is_immutable_asset(const char *path) {
  *   - Everything else        → no-cache + ETag (revalidate every request).
  * Returns bytes written, or 0 on overflow (caller falls back to
  * security-headers-only so CSP/X-Frame-Options are never dropped). */
+/* How a request path maps onto the optional /aurora subpath mount. */
+typedef enum {
+   AURORA_NOT_AURORA, /* not under /aurora — caller serves from www as usual */
+   AURORA_REDIRECT,   /* bare /aurora — caller 302s to /aurora/ */
+   AURORA_SERVE,      /* serve out_sub from the Aurora root */
+   AURORA_FORBIDDEN   /* dotfile / hidden component / overflow — refuse */
+} aurora_route_t;
+
+/* Map a request path onto the Aurora mount. Only call when the feature is
+ * enabled (s_aurora_path validated + set at init). The exact "/aurora" boundary
+ * keeps /auroraXXX out of the subtree, and the leading-slash remainder means a
+ * later realpath containment on the Aurora root is the authoritative escape
+ * guard (this only pre-rejects the obvious dotfile cases). On AURORA_SERVE,
+ * out_sub receives the file subpath under the Aurora root (always begins '/'). */
+static aurora_route_t aurora_route(const char *path, char *out_sub, size_t out_sub_len) {
+   if (strcmp(path, "/aurora") == 0)
+      return AURORA_REDIRECT;
+   if (strncmp(path, "/aurora/", 8) != 0)
+      return AURORA_NOT_AURORA;
+   /* "/aurora" is 7 chars, so path+7 keeps the leading '/'; a bare "/aurora/"
+    * maps to the SPA shell. */
+   const char *sub = (strcmp(path, "/aurora/") == 0) ? "/index.html" : path + 7;
+   /* Reject dotfiles / hidden components (contains_path_traversal only catches
+    * ".."); blocks /aurora/.git/config, /aurora/.env, and "/.." underflow. */
+   if (strstr(sub, "/."))
+      return AURORA_FORBIDDEN;
+   if ((size_t)snprintf(out_sub, out_sub_len, "%s", sub) >= out_sub_len)
+      return AURORA_FORBIDDEN;
+   return AURORA_SERVE;
+}
+
 static int build_static_cache_headers(char *buf,
                                       size_t buf_size,
                                       const char *path,
@@ -1578,6 +1609,45 @@ int callback_http(struct lws *wsi,
             return LWS_CLOSE_CONNECTION; /* Close connection after response */
          }
 
+         /* Aurora SPA subpath (optional, config-gated): serve its own dist root
+          * at /aurora/ with the prefix stripped, reusing the traversal +
+          * realpath-containment guards anchored on the Aurora root (never
+          * s_www_path). Inactive unless [webui] aurora_path validated at init. */
+         const char *serve_root = s_www_path;
+         const char *serve_path = path;
+         char aurora_sub[512];
+         if (s_aurora_path[0] != '\0') {
+            aurora_route_t ar = aurora_route(path, aurora_sub, sizeof(aurora_sub));
+            if (ar == AURORA_FORBIDDEN) {
+               OLOG_WARNING("WebUI: Aurora path blocked: %s", path);
+               lws_return_http_status(wsi, HTTP_STATUS_FORBIDDEN, NULL);
+               return LWS_CLOSE_CONNECTION;
+            }
+            if (ar == AURORA_REDIRECT) {
+               /* Normalize bare /aurora → /aurora/ so relative assets resolve.
+                * 768 matches the login redirect below: the security-header set
+                * (~429B) + status + Location overruns a 256B buffer, which would
+                * silently abort the write. */
+               unsigned char rbuf[LWS_PRE + 768];
+               unsigned char *rstart = &rbuf[LWS_PRE];
+               unsigned char *rp = rstart;
+               unsigned char *rend = &rbuf[sizeof(rbuf) - 1];
+               if (lws_add_http_header_status(wsi, HTTP_STATUS_FOUND, &rp, rend) ||
+                   lws_add_http_header_by_name(wsi, (unsigned char *)"Location:",
+                                               (unsigned char *)"/aurora/", 8, &rp, rend) ||
+                   lws_add_http_header_content_length(wsi, 0, &rp, rend) ||
+                   webui_add_security_headers(wsi, &rp, rend) ||
+                   lws_finalize_http_header(wsi, &rp, rend))
+                  return LWS_CLOSE_CONNECTION;
+               lws_write(wsi, rstart, (size_t)(rp - rstart), LWS_WRITE_HTTP_HEADERS);
+               return LWS_CLOSE_CONNECTION;
+            }
+            if (ar == AURORA_SERVE) {
+               serve_root = s_aurora_path;
+               serve_path = aurora_sub;
+            }
+         }
+
          /* Default to index.html for root */
          if (strcmp(path, "/") == 0) {
             strncpy(path, "/index.html", sizeof(path) - 1);
@@ -1590,11 +1660,18 @@ int callback_http(struct lws *wsi,
             return LWS_CLOSE_CONNECTION;
          }
 
-         /* Build full filesystem path */
-         snprintf(filepath, sizeof(filepath), "%s%s", s_www_path, path);
+         /* Build full filesystem path (Aurora requests use their own root). */
+         int fp_len = snprintf(filepath, sizeof(filepath), "%s%s", serve_root, serve_path);
+         if (fp_len < 0 || (size_t)fp_len >= sizeof(filepath)) {
+            OLOG_WARNING("WebUI: served path too long, refused: %s%s", serve_root, serve_path);
+            lws_return_http_status(wsi, HTTP_STATUS_REQ_URI_TOO_LONG, NULL);
+            return LWS_CLOSE_CONNECTION;
+         }
 
-         /* Second layer: verify resolved path is within www directory */
-         if (!is_path_within_www(filepath, s_www_path)) {
+         /* Second layer: verify the resolved path is within the served root
+          * (realpath containment anchored on serve_root — s_www_path or the
+          * validated Aurora dist root, never a mix). */
+         if (!is_path_within_www(filepath, serve_root)) {
             OLOG_WARNING("WebUI: Path escape attempt blocked: %s", filepath);
             lws_return_http_status(wsi, HTTP_STATUS_FORBIDDEN, NULL);
             return LWS_CLOSE_CONNECTION;
