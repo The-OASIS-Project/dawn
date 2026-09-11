@@ -32,9 +32,12 @@
 #include <strings.h>
 #include <time.h>
 
+#include "core/scheduled_context.h"
 #include "core/session_manager.h"
+#include "dawn_error.h"
 #include "logging.h"
 #include "memory/contacts_db.h"
+#include "tools/email_digest.h"
 #include "tools/email_service.h"
 #include "tools/oauth_client.h"
 #include "tools/toml.h"
@@ -182,6 +185,14 @@ static char *email_rc_to_error(int rc, const char *op, const char *account, cons
                      "Error: invalid folder name. Valid: inbox, sent, drafts, trash, spam, "
                      "starred, important, all.");
          break;
+      case EMAIL_RC_NOT_FOUND:
+         snprintf(msg, 384,
+                  TOOL_RESULT_ERROR_MARK
+                  "Error: no message with that id exists in %s. The id may be stale, mistyped, "
+                  "or the message was moved/deleted. Do NOT retry the same id — get a fresh id "
+                  "from 'recent', 'search', or 'digest' (copy it exactly).",
+                  (account && account[0]) ? account : "any of your accounts");
+         break;
       default: {
          /* If the underlying oauth_refresh detected invalid_grant, the
           * tokens were revoked at the provider — a generic "network
@@ -270,11 +281,23 @@ static char *handle_recent(struct json_object *details, int user_id) {
    } else {
       pos += snprintf(buf, RESULT_BUF_SIZE, "Recent emails (%d):\n", out_count);
       for (int i = 0; i < out_count && pos < RESULT_BUF_SIZE - 512; i++) {
-         pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos,
-                         "\n%d. From: %s%s%s\n   Subject: %s\n   Date: %s\n   [ID: %s]\n", i + 1,
-                         emails[i].from_name, emails[i].from_name[0] ? " " : "",
-                         emails[i].from_addr, emails[i].subject, emails[i].date_str,
-                         emails[i].message_id);
+         /* Prefer "name (address)" so a generic display name like "Gmail" still
+          * identifies which inbox; collapse to one when name == address. */
+         char acctlabel[300];
+         const char *an = emails[i].account_name;
+         const char *aa = emails[i].account_addr;
+         if (aa[0] && an[0] && strcmp(an, aa) != 0)
+            snprintf(acctlabel, sizeof(acctlabel), "%s (%s)", an, aa);
+         else
+            snprintf(acctlabel, sizeof(acctlabel), "%s", aa[0] ? aa : (an[0] ? an : "?"));
+         pos += snprintf(
+             buf + pos, RESULT_BUF_SIZE - pos,
+             "\n%d. From: %s%s%s\n   Subject: %s%s%s\n   Account: %s | Date: %s\n   [ID: "
+             "%s]\n",
+             i + 1, emails[i].from_name, emails[i].from_name[0] ? " " : "", emails[i].from_addr,
+             emails[i].subject, emails[i].unread ? " [UNREAD]" : "",
+             emails[i].replied == EMAIL_REPLIED_YES ? " [replied]" : "", acctlabel,
+             emails[i].date_str, emails[i].message_id);
       }
    }
 
@@ -386,6 +409,10 @@ static char *handle_search(struct json_object *details, int user_id) {
 
    sort_summaries_by_date(emails, out_count, sort);
 
+   /* Enrich reply status so a "did I reply to Fred?" search shows [replied].
+    * One in:sent lookup per Gmail account represented in the results. */
+   email_service_fill_reply_states(user_id, emails, out_count);
+
    char *buf = malloc(RESULT_BUF_SIZE);
    if (!buf)
       return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
@@ -396,11 +423,23 @@ static char *handle_search(struct json_object *details, int user_id) {
    } else {
       pos += snprintf(buf, RESULT_BUF_SIZE, "Search results (%d):\n", out_count);
       for (int i = 0; i < out_count && pos < RESULT_BUF_SIZE - 512; i++) {
-         pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos,
-                         "\n%d. From: %s%s%s\n   Subject: %s\n   Date: %s\n   [ID: %s]\n", i + 1,
-                         emails[i].from_name, emails[i].from_name[0] ? " " : "",
-                         emails[i].from_addr, emails[i].subject, emails[i].date_str,
-                         emails[i].message_id);
+         /* Prefer "name (address)" so a generic display name like "Gmail" still
+          * identifies which inbox; collapse to one when name == address. */
+         char acctlabel[300];
+         const char *an = emails[i].account_name;
+         const char *aa = emails[i].account_addr;
+         if (aa[0] && an[0] && strcmp(an, aa) != 0)
+            snprintf(acctlabel, sizeof(acctlabel), "%s (%s)", an, aa);
+         else
+            snprintf(acctlabel, sizeof(acctlabel), "%s", aa[0] ? aa : (an[0] ? an : "?"));
+         pos += snprintf(
+             buf + pos, RESULT_BUF_SIZE - pos,
+             "\n%d. From: %s%s%s\n   Subject: %s%s%s\n   Account: %s | Date: %s\n   [ID: "
+             "%s]\n",
+             i + 1, emails[i].from_name, emails[i].from_name[0] ? " " : "", emails[i].from_addr,
+             emails[i].subject, emails[i].unread ? " [UNREAD]" : "",
+             emails[i].replied == EMAIL_REPLIED_YES ? " [replied]" : "", acctlabel,
+             emails[i].date_str, emails[i].message_id);
       }
    }
 
@@ -649,20 +688,112 @@ static char *handle_archive(struct json_object *details, int user_id) {
  * Tool Callback
  * ============================================================================= */
 
+/* All-inbox briefing digest.  Parses window/max/unread_only, delegates the
+ * aggregation to email_digest.c.  Read-only, schedulable. */
+static char *handle_digest(struct json_object *details, int user_id) {
+   email_digest_opts_t opts = { 0 };
+   opts.window_seconds = EMAIL_DIGEST_DEFAULT_WINDOW_SEC;
+   opts.max = EMAIL_DIGEST_DEFAULT_MAX;
+   opts.unread_only = json_get_bool(details, "unread_only", false);
+
+   /* window: "<n>h" (hours, default) or "<n>d" (days), e.g. "24h", "2d".  Clamp n
+    * to the max window (in the chosen unit) BEFORE multiplying, so a huge/garbage
+    * value can't overflow the int math; email_digest_build re-clamps in seconds. */
+   const char *w = json_get_str(details, "window");
+   if (w && w[0]) {
+      char *end = NULL;
+      long n = strtol(w, &end, 10);
+      char unit = (end && *end) ? *end : 'h';
+      if (n > 0) {
+         if (unit == 'd' || unit == 'D') {
+            long max_days = EMAIL_DIGEST_MAX_WINDOW_SEC / (24 * 3600);
+            if (n > max_days)
+               n = max_days;
+            opts.window_seconds = (int)(n * 24 * 3600);
+         } else {
+            long max_hours = EMAIL_DIGEST_MAX_WINDOW_SEC / 3600;
+            if (n > max_hours)
+               n = max_hours;
+            opts.window_seconds = (int)(n * 3600);
+         }
+      }
+   }
+
+   /* max is passed through unclamped; email_digest_build owns the row ceiling so
+    * every caller of the module inherits the same bound. */
+   opts.max = json_get_int(details, "max", 0);
+
+   return email_digest_build(user_id, &opts);
+}
+
+/* Single source of truth for which email actions may run unattended (from a
+ * scheduled task or briefing).  Only read-only actions qualify; anything that
+ * sends, trashes, or archives requires a live conversation (a human in the
+ * loop).  Used by BOTH the create-time gate (email_validate_schedulable_action,
+ * reached via tool_registry) and the fire-time gate in email_tool_callback.
+ * Unknown/new actions are NOT schedulable by default (fail closed). */
+static bool email_action_is_schedulable(const char *action) {
+   /* Keep this list in sync with the read-only actions the callback dispatches so
+    * a scheduled step never passes the gate only to fail "unknown action" at fire
+    * time.  'digest' is the daily-briefing aggregator (email_digest.c). */
+   return action && (strcmp(action, "accounts") == 0 || strcmp(action, "recent") == 0 ||
+                     strcmp(action, "search") == 0 || strcmp(action, "folders") == 0 ||
+                     strcmp(action, "read") == 0 || strcmp(action, "digest") == 0);
+}
+
+#define EMAIL_SCHEDULABLE_ERR                                                             \
+   "only read-only email actions (accounts / recent / search / folders / read / digest) " \
+   "may run from a schedule; send, trash, and archive require a live conversation."
+
+/* Actions whose `arguments` fields are ALL optional.  A reasoning model may
+ * narrate prose instead of an args object while still meaning "use the
+ * defaults", so tool_parse_details degrades a non-JSON value to an empty object
+ * for these.  NOTE: this is a superset of the no-argument case ('accounts') —
+ * 'read' is excluded because it requires message_id, and the mutations
+ * (send/confirm_send/trash/confirm_trash/archive) stay strict. */
+static bool email_action_no_required_fields(const char *action) {
+   return action && (strcmp(action, "accounts") == 0 || strcmp(action, "recent") == 0 ||
+                     strcmp(action, "search") == 0 || strcmp(action, "folders") == 0 ||
+                     strcmp(action, "digest") == 0);
+}
+
+/* Per-action schedulability gate registered in email_metadata.  The email tool
+ * is TOOL_CAP_DANGEROUS (send/trash/archive) yet TOOL_CAP_SCHEDULABLE (so the
+ * read-only digest can run in a daily briefing); tool_registry_validate_schedulable
+ * does NOT reject DANGEROUS tools, so without this gate a scheduled step could
+ * send or trash mail.  Rejects non-read actions at scheduler CREATE time so the
+ * LLM is told up front.  Mirrors the fire-time gate in the callback. */
+static int email_validate_schedulable_action(const char *action,
+                                             char *err_buf,
+                                             size_t err_buf_size) {
+   if (email_action_is_schedulable(action))
+      return SUCCESS;
+   if (err_buf && err_buf_size)
+      snprintf(err_buf, err_buf_size, EMAIL_SCHEDULABLE_ERR);
+   return FAILURE;
+}
+
 static char *email_tool_callback(const char *action, char *value, int *should_respond) {
    *should_respond = 1;
 
    if (!action || !action[0])
       return strdup("Error: action is required");
 
-   struct json_object *details = NULL;
-   if (value && value[0]) {
-      details = json_tokener_parse(value);
-      if (!details)
-         return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid JSON in details parameter");
-   } else {
-      details = json_object_new_object();
-   }
+   /* Fire-time schedulability gate.  Keyed on the scheduled-origin context, NOT
+    * "no session" — the identity fallback in tool_get_current_user_id resolves a
+    * scheduled owner, so "no session" alone no longer distinguishes scheduled
+    * from interactive.  Defense in depth with the create-time gate above; this
+    * also catches legacy briefing rows that predate the gate (the single-tool
+    * briefing path skips tool_registry_validate_schedulable). */
+   if (scheduled_context_get(NULL) && !email_action_is_schedulable(action))
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: " EMAIL_SCHEDULABLE_ERR);
+
+   /* Actions with only-optional fields tolerate a prose `arguments` value (a
+    * model may still narrate despite the schema); read + the mutations require
+    * fields, where a non-JSON value stays a hard error. */
+   struct json_object *details = tool_parse_details(value, email_action_no_required_fields(action));
+   if (!details)
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid JSON in details parameter");
 
    int user_id = tool_get_current_user_id();
 
@@ -688,12 +819,14 @@ static char *email_tool_callback(const char *action, char *value, int *should_re
       result = handle_confirm_trash(details, user_id);
    } else if (strcmp(action, "archive") == 0) {
       result = handle_archive(details, user_id);
+   } else if (strcmp(action, "digest") == 0) {
+      result = handle_digest(details, user_id);
    } else {
       char buf[256];
       snprintf(buf, sizeof(buf),
                TOOL_RESULT_ERROR_MARK
                "Error: unknown action '%s'. Valid: accounts, recent, read, search, folders, "
-               "send, confirm_send, trash, confirm_trash, archive",
+               "digest, send, confirm_send, trash, confirm_trash, archive",
                action);
       result = strdup(buf);
    }
@@ -744,6 +877,8 @@ static const treg_param_t email_params[] = {
                       "'recent' (fetch recent emails), 'read' (read full email by message_id), "
                       "'search' (search by from/subject/text/date), "
                       "'folders' (list available folders/labels), "
+                      "'digest' (read-only briefing summary of recent inbox mail across ALL "
+                      "accounts, grouped by importance/category), "
                       "'send' (compose draft for user confirmation), "
                       "'confirm_send' (send confirmed draft), "
                       "'trash' (move email to trash — requires confirmation), "
@@ -752,20 +887,25 @@ static const treg_param_t email_params[] = {
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
-       .enum_values = { "recent", "read", "search", "folders", "send", "confirm_send", "accounts",
-                        "trash", "confirm_trash", "archive" },
-       .enum_count = 10,
+       .enum_values = { "recent", "read", "search", "folders", "digest", "send", "confirm_send",
+                        "accounts", "trash", "confirm_trash", "archive" },
+       .enum_count = 11,
    },
    {
-       .name = "details",
+       .name = "arguments",
        .description =
-           "JSON (pass as JSON-encoded string): "
+           "JSON object of the action's arguments, passed as a JSON-encoded string.  "
+           "Omit for an action that takes no arguments; never fill it with a description "
+           "or rationale.  Shapes: "
            "recent {count? (up to 50), folder?, unread_only?, account?, page_token?, sort?}, "
            "read {message_id, account?}, "
            "search {from?, subject?, text?, since?, before?, folder?, unread_only?, "
            "account?, page_token?, sort?} (dates: YYYY-MM-DD, UTC, since=inclusive, "
            "before=exclusive), "
            "folders {account?}, "
+           "digest {window? ('24h' default, or '2d'/'7d'), unread_only?, max? (default 50)} "
+           "(a briefing-style summary of recent inbox mail across ALL accounts, grouped by "
+           "importance/category with an [E-NN] label per message; act on one via its [ID]), "
            "send {to, subject, body} (to: email or contact name), "
            "confirm_send {draft_id}, "
            "trash {message_id, account?} (creates pending — ask user to confirm), "
@@ -773,8 +913,11 @@ static const treg_param_t email_params[] = {
            "archive {message_id, account?} (removes from inbox, no confirmation needed).\n"
            "  account?: the CONFIGURED account name OR username/email from the 'accounts' "
            "action — must already exist. Do NOT invent an email address; if uncertain, "
-           "call action='accounts' first to enumerate. Omit to search/read across all "
-           "enabled accounts.\n"
+           "call action='accounts' first to enumerate. When omitted: 'search' merges ALL "
+           "enabled accounts and 'digest' always spans every account; 'read' searches every "
+           "enabled account for the message id; but 'recent'/'folders' use only the FIRST "
+           "enabled account — name the account explicitly, or use 'digest', to cover every "
+           "inbox with those two.\n"
            "  folder?: defaults to inbox; valid values listed in the top-level tool "
            "description.\n"
            "  sort?: \"newest\" (default) or \"oldest\" — orders results by date.\n"
@@ -820,6 +963,10 @@ static const tool_metadata_t email_metadata = {
 
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_NETWORK | TOOL_CAP_DANGEROUS | TOOL_CAP_SCHEDULABLE,
+   /* Scheduled read steps (digest/recent/search) carry [E-NN]/[ID] rows the user
+    * may follow up on ("open E-03") — persist the raw result into the briefing
+    * conversation so those references resolve on a later turn. */
+   .persist_scheduled_output = true,
    .skip_followup = false,
    .default_local = true,
    .default_remote = true,
@@ -830,6 +977,7 @@ static const tool_metadata_t email_metadata = {
    .config_section = "email",
 
    .is_available = email_tool_available,
+   .validate_schedulable_action = email_validate_schedulable_action,
    .init = email_tool_init,
    .cleanup = email_tool_cleanup,
    .callback = email_tool_callback,

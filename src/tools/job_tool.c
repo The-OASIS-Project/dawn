@@ -387,14 +387,12 @@ static char *job_tool_callback(const char *action, char *value, int *should_resp
                     "Error: action is required (spawn, list, status, cancel).");
    }
 
-   struct json_object *details = NULL;
-   if (value != NULL && value[0] != '\0') {
-      details = json_tokener_parse(value);
-      if (details == NULL) {
-         return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid JSON in details parameter.");
-      }
-   } else {
-      details = json_object_new_object();
+   /* 'list' takes no arguments, so tolerate a prose `arguments` value (a model
+    * may still narrate despite the schema); every other action reads fields,
+    * where a non-JSON value stays a hard error. */
+   struct json_object *details = tool_parse_details(value, strcmp(action, "list") == 0);
+   if (details == NULL) {
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid JSON in details parameter.");
    }
 
    /* Caller context: user_id is the spawner's (non-overridable); parent conv is
@@ -487,9 +485,11 @@ static const treg_param_t job_params[] = {
        .enum_count = 5,
    },
    {
-       .name = "details",
+       .name = "arguments",
        .description =
-           "JSON object with action-specific fields.\n"
+           "JSON object of the action's arguments, passed as a JSON-encoded string.  "
+           "Omit entirely for an action that takes no arguments; never fill it with a "
+           "description or rationale.\n"
            "spawn: {goal (required — the task to run in the background, e.g. 'research the latest "
            "on X and summarize'), on_complete ('reinvoke_parent' (default — bring the result back "
            "into this conversation and react to it when done), 'notify' (just a heads-up; retrieve "

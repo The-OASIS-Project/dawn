@@ -67,6 +67,12 @@ extern "C" {
  * margin.  Empty = no fan-out (legacy default). */
 #define SCHED_DELIVER_TO_MAX 64
 
+/* Cap on per-briefing summarization instructions (schema v84).  Owner-authored
+ * free text that steers the briefing summary's content/format; empty = the
+ * default prompt (legacy).  A real steering paragraph is 300-600 chars; 1024 is
+ * comfortable margin without bloating the summarization prompt. */
+#define SCHED_INSTRUCTIONS_MAX 1024
+
 /* Hard cap on briefing step count.  Not a config knob — at 9+ steps the LLM
  * summarization context approaches diminishing returns and the briefing
  * duration becomes user-hostile. */
@@ -74,8 +80,10 @@ extern "C" {
 
 /* Tripwire: list / batched-lister call sites stack-allocate an
  * `int64_t ids[SCHED_MAX_RESULTS]` array (400 bytes at 50) and
- * `sched_event_t active[SCHED_MAX_RESULTS]` / `missed[]` (~3 KB each at 50,
- * so ~294 KB total for both arrays at the WebUI panel path).  If
+ * `sched_event_t active[SCHED_MAX_RESULTS]` / `missed[]` (~4 KB each at 50 since
+ * the v84 instructions field, so ~400 KB total for both arrays at the WebUI
+ * panel path; the scheduler_tool handle_list path now heap-allocs its events
+ * array to stay off the 512 KB parallel-tool thread).  If
  * SCHED_MAX_RESULTS bumps past this ceiling, those call sites need to move
  * to heap allocation alongside the step table they already do.  Pinning
  * here so the ceiling can't drift without a build-break review.  See
@@ -183,6 +191,9 @@ typedef struct {
     * auto-dismiss + timeout terminal-state notifications do NOT
     * re-fan-out (the initial ring already did). */
    char deliver_to[SCHED_DELIVER_TO_MAX];
+   /* Optional per-briefing summarization steering (schema v84).  Empty = default
+    * prompt.  Briefing events only (tasks don't summarize). */
+   char instructions[SCHED_INSTRUCTIONS_MAX];
 } sched_event_t;
 
 /* Single step within a multi-step briefing.  Schema v50+. */
@@ -472,6 +483,7 @@ int scheduler_db_briefing_steps_update(int64_t event_id,
 #define SCHED_FIELD_RECURRENCE_DAYS (1u << 5)
 #define SCHED_FIELD_DELIVER_TO (1u << 6)
 #define SCHED_FIELD_SAY_ALOUD (1u << 7)
+#define SCHED_FIELD_INSTRUCTIONS (1u << 8)
 
 /**
  * @brief Ownership- and status-guarded scalar-field edit of a scheduled event

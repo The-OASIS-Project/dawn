@@ -210,6 +210,12 @@ static const char *SEQUENTIAL_TOOLS[] = {
    "shutdown",           /* Critical system operation */
    "execute_plan",       /* Plan executor modifies state via sub-tool calls */
    "phone",              /* Shared pending confirmation state + delete rate bucket */
+   "email",              /* Shared pending draft/trash state; and concurrent Gmail
+                          * operations (e.g. two digests + a search in one turn)
+                          * produced inconsistent reply-enrichment results — the
+                          * per-op sent-searches interfere. A single email op is
+                          * already internally serial, so this only serializes the
+                          * multi-call case, at no cost to normal use. */
    NULL                  /* Sentinel */
 };
 
@@ -1465,10 +1471,10 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
       }
    }
 
-   /* Fallback: if value_buf is empty and the LLM sent a flat JSON (no "details" key),
+   /* Fallback: if value_buf is empty and the LLM sent a flat JSON (no "arguments" key),
     * collect all non-extracted fields into a JSON object as the value.
     * This handles LLMs that flatten {"action":"create","type":"timer",...}
-    * instead of nesting {"action":"create","details":"{\"type\":\"timer\",...}"}. */
+    * instead of nesting {"action":"create","arguments":"{\"type\":\"timer\",...}"}. */
    if (value_buf[0] == '\0' && args && value_param_name) {
       struct json_object *remaining = json_object_new_object();
       json_object_object_foreach(args, key, val) {

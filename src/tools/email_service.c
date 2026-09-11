@@ -255,6 +255,10 @@ static bool is_gmail_api_account(const email_account_t *acct) {
           strcasestr(acct->imap_server, "gmail.com") != NULL;
 }
 
+bool email_service_is_gmail_account(const email_account_t *acct) {
+   return acct && is_gmail_api_account(acct);
+}
+
 /** IMAP server is Gmail (regardless of auth type) */
 static bool is_gmail_imap_server(const email_account_t *acct) {
    return strcasestr(acct->imap_server, "gmail.com") != NULL;
@@ -518,6 +522,18 @@ int email_service_list_accounts(int user_id, email_account_t *out, int max) {
  * Operations (Tool Layer)
  * ============================================================================= */
 
+/* Stamp the owning account's display name + address onto each returned row.
+ * The lower-level fetch primitives don't know the account, so the service layer
+ * is the single point that labels every row (contract in email_service.h).  The
+ * address (username) is the unambiguous inbox identifier — the display name may
+ * be a generic label like "Gmail" that doesn't say which account it is. */
+static void stamp_account(email_summary_t *out, int n, const email_account_t *acct) {
+   for (int i = 0; i < n; i++) {
+      snprintf(out[i].account_name, sizeof(out[i].account_name), "%s", acct->name);
+      snprintf(out[i].account_addr, sizeof(out[i].account_addr), "%s", acct->username);
+   }
+}
+
 int email_service_recent(int user_id,
                          const char *account_name,
                          const char *folder,
@@ -557,6 +573,7 @@ int email_service_recent(int user_id,
       int rc = gmail_fetch_recent(token, norm.gmail_query, count, unread_only, page_token, out, max,
                                   out_count, next_page_token, npt_len);
       sodium_memzero(token, sizeof(token));
+      stamp_account(out, *out_count, &acct);
       return rc;
    }
 
@@ -571,9 +588,10 @@ int email_service_recent(int user_id,
    rc = email_fetch_recent(&conn, norm.imap_folder, count, unread_only, out, max, out_count);
    sodium_memzero(&conn, sizeof(conn));
 
-   /* Populate message_id as folder:uid for IMAP results */
+   /* Populate message_id (folder:uid) for IMAP results, then stamp the account. */
    for (int i = 0; i < *out_count; i++)
       snprintf(out[i].message_id, sizeof(out[i].message_id), "%s:%u", norm.imap_folder, out[i].uid);
+   stamp_account(out, *out_count, &acct);
 
    return rc;
 }
@@ -604,16 +622,22 @@ int email_service_read(int user_id,
    if (acct_count <= 0)
       return EMAIL_RC_NO_ACCOUNTS;
    int enabled_seen = 0;
+   int all_not_found = 1; /* every failure so far was a clean 404, not a network error */
    for (int i = 0; i < acct_count; i++) {
       if (!accounts[i].enabled)
          continue;
       enabled_seen = 1;
-      if (read_single_account(&accounts[i], message_id, out) == 0)
+      int rc = read_single_account(&accounts[i], message_id, out);
+      if (rc == EMAIL_RC_OK)
          return EMAIL_RC_OK;
+      if (rc != EMAIL_RC_NOT_FOUND)
+         all_not_found = 0;
    }
-   /* Distinguish "you have accounts but they're all disabled" from generic
-    * fetch failure — the LLM should tell the user to enable one. */
-   return enabled_seen ? EMAIL_RC_FAILURE : EMAIL_RC_NO_ACCOUNTS;
+   /* Distinguish "you have accounts but they're all disabled" (enable one) from
+    * "the id isn't in any mailbox" (stale/wrong id) from a generic fetch failure. */
+   if (!enabled_seen)
+      return EMAIL_RC_NO_ACCOUNTS;
+   return all_not_found ? EMAIL_RC_NOT_FOUND : EMAIL_RC_FAILURE;
 }
 
 static int read_single_account(email_account_t *acct,
@@ -629,7 +653,9 @@ static int read_single_account(email_account_t *acct,
       int max_chars = acct->max_body_chars > 0 ? acct->max_body_chars : EMAIL_MAX_READ_BODY_LEN;
       int rc = gmail_read_message(token, message_id, max_chars, out);
       sodium_memzero(token, sizeof(token));
-      return rc;
+      if (rc == GMAIL_RC_NOT_FOUND)
+         return EMAIL_RC_NOT_FOUND;
+      return rc ? EMAIL_RC_FAILURE : EMAIL_RC_OK;
    }
 
    /* IMAP path — parse composite "folder:uid" using strrchr (last colon).
@@ -704,6 +730,7 @@ static int search_single_account(email_account_t *acct,
       int rc = gmail_search(token, &gmail_params, max, out, max, out_count, next_page_token,
                             npt_len);
       sodium_memzero(token, sizeof(token));
+      stamp_account(out, *out_count, acct);
       return rc;
    }
 
@@ -720,6 +747,7 @@ static int search_single_account(email_account_t *acct,
 
    for (int i = 0; i < *out_count; i++)
       snprintf(out[i].message_id, sizeof(out[i].message_id), "%s:%u", norm.imap_folder, out[i].uid);
+   stamp_account(out, *out_count, acct);
 
    return rc;
 }
@@ -788,6 +816,106 @@ int email_service_search(int user_id,
     * least one account errored).  Reporting no-match as FAILURE makes the LLM
     * believe email is down and abandon the search instead of broadening it. */
    return any_error ? EMAIL_RC_FAILURE : EMAIL_RC_OK;
+}
+
+void email_service_fill_reply_states(int user_id, email_summary_t *rows, int nrows) {
+   if (!rows || nrows <= 0)
+      return;
+
+   email_account_t accts[EMAIL_MAX_ACCOUNTS];
+   int nacct = 0;
+   email_db_account_list(user_id, accts, EMAIL_MAX_ACCOUNTS, &nacct);
+   if (nacct <= 0)
+      return;
+
+   email_summary_t *sent = calloc(EMAIL_MAX_FETCH_RESULTS, sizeof(email_summary_t));
+   if (!sent)
+      return; /* leave all rows UNKNOWN */
+
+   for (int a = 0; a < nacct; a++) {
+      if (!accts[a].enabled || !is_gmail_api_account(&accts[a]))
+         continue;
+
+      /* Find this account's enrichable rows and the oldest one's date — the
+       * sent-search only needs to reach back that far (a reply is always later
+       * than the message it answers). */
+      int enrichable = 0;
+      time_t oldest = 0;
+      for (int r = 0; r < nrows; r++) {
+         if (rows[r].thread_id[0] && !rows[r].from_me && rows[r].date > 0 &&
+             strcmp(rows[r].account_addr, accts[a].username) == 0) {
+            enrichable++;
+            if (oldest == 0 || rows[r].date < oldest)
+               oldest = rows[r].date;
+         }
+      }
+      if (enrichable == 0)
+         continue;
+
+      /* Lower bound padded one day (Gmail after: is date-granular). */
+      struct tm tmv;
+      char since[16] = { 0 };
+      time_t start = oldest - 86400;
+      if (localtime_r(&start, &tmv))
+         strftime(since, sizeof(since), "%Y-%m-%d", &tmv);
+
+      email_search_params_t params = { 0 };
+      snprintf(params.folder, sizeof(params.folder), "sent");
+      snprintf(params.since, sizeof(params.since), "%s", since);
+      int sent_count = 0;
+      /* A non-empty next-page token means the sent set was truncated at the fetch
+       * cap — there is sent mail we did NOT see, so a "no match" here cannot be
+       * trusted as "not replied" (contract: over-budget → UNKNOWN, never NO). */
+      char npt[256] = { 0 };
+      /* Resolve by username: display names are not unique, so two "Gmail"
+       * accounts must not share one sent-search or cross-tag each other's rows.
+       * account_addr is stamped from acct->username, so it is the stable key. */
+      int rc = email_service_search(user_id, accts[a].username, &params, sent,
+                                    EMAIL_MAX_FETCH_RESULTS, &sent_count, npt, sizeof(npt));
+      if (rc != EMAIL_RC_OK) {
+         OLOG_INFO("email_reply: acct='%s' enrichable=%d sent-search FAILED (rc=%d) — rows UNKNOWN",
+                   accts[a].name, enrichable, rc);
+         continue; /* rows for this account stay UNKNOWN */
+      }
+      bool sent_truncated = (npt[0] != '\0');
+
+      int yes = 0, no = 0, unknown = 0;
+      for (int r = 0; r < nrows; r++) {
+         /* date <= 0 mirrors the oldest-date loop's `date > 0` filter, so an
+          * unparseable/negative timestamp is treated identically in both
+          * passes (matters only if fill is ever extended past Gmail). */
+         if (!rows[r].thread_id[0] || rows[r].from_me || rows[r].date <= 0)
+            continue;
+         if (strcmp(rows[r].account_addr, accts[a].username) != 0)
+            continue;
+         email_reply_state_t state = EMAIL_REPLIED_NO;
+         for (int s = 0; s < sent_count; s++) {
+            if (sent[s].date > rows[r].date && strcmp(sent[s].thread_id, rows[r].thread_id) == 0) {
+               state = EMAIL_REPLIED_YES;
+               break;
+            }
+         }
+         /* No match found, but the sent set was capped — we may have missed the
+          * reply, so report UNKNOWN instead of asserting NO. */
+         if (state == EMAIL_REPLIED_NO && sent_truncated)
+            state = EMAIL_REPLIED_UNKNOWN;
+         rows[r].replied = state;
+         if (state == EMAIL_REPLIED_YES)
+            yes++;
+         else if (state == EMAIL_REPLIED_NO)
+            no++;
+         else
+            unknown++;
+      }
+      OLOG_INFO("email_reply: acct='%s' since=%s enrichable=%d sent_found=%d truncated=%d -> "
+                "yes=%d no=%d unknown=%d",
+                accts[a].name, since, enrichable, sent_count, sent_truncated, yes, no, unknown);
+   }
+
+   /* Zero the scratch: it transiently held the owner's sent-mail metadata
+    * (subjects/senders/previews), matching the token/conn wipe discipline. */
+   sodium_memzero(sent, (size_t)EMAIL_MAX_FETCH_RESULTS * sizeof(*sent));
+   free(sent);
 }
 
 /* =============================================================================

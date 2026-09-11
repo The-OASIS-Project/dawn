@@ -359,6 +359,19 @@ dawn_add_unit_test(test_scheduler
    LIBS    dawn_common unity sqlite3 pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
+dawn_add_unit_test(test_briefing_prompt
+   SOURCES test_briefing_prompt.c
+           ${SRC_ROOT}/src/core/briefing_prompt.c
+           ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity
+   LABEL   ci)
+
+dawn_add_unit_test(test_email_parse
+   SOURCES test_email_parse.c
+           ${SRC_ROOT}/src/tools/email_parse.c
+   LIBS    unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_music_db
    SOURCES test_music_db.c
            ${SRC_ROOT}/src/audio/music_db.c

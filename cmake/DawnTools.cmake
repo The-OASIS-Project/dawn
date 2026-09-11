@@ -335,8 +335,10 @@ if(DAWN_ENABLE_EMAIL_TOOL)
     list(APPEND TOOL_SOURCES
         src/tools/email_tool.c
         src/tools/email_service.c
+        src/tools/email_digest.c
         src/tools/email_db.c
         src/tools/email_client.c
+        src/tools/email_parse.c
         src/tools/gmail_client.c
         src/webui/webui_email.c)
     # oauth_client.c may already be included by calendar tool

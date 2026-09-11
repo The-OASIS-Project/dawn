@@ -34,6 +34,7 @@
 
 #include <string.h>
 
+#include "core/focus/focus_candidate_helpers.h"
 #include "core/scheduler.h"
 #include "core/scheduler_db.h"
 #include "logging.h"
@@ -94,6 +95,7 @@ static json_object *serialize_event(const sched_event_t *e,
    json_object_object_add(obj, "snooze_count", json_object_new_int(e->snooze_count));
    json_object_object_add(obj, "say_aloud", json_object_new_int((int)e->say_aloud));
    json_object_object_add(obj, "deliver_to", json_object_new_string(e->deliver_to));
+   json_object_object_add(obj, "instructions", json_object_new_string(e->instructions));
    json_object_object_add(obj, "recurrence",
                           json_object_new_string(sched_recurrence_to_str(e->recurrence)));
    json_object_object_add(obj, "recurrence_days", json_object_new_string(e->recurrence_days));
@@ -157,13 +159,15 @@ void handle_scheduler_list_events(ws_connection_t *conn) {
    json_object *events_array = json_object_new_array();
 
    if (conn->auth_user_id > 0) {
-      /* Stack arithmetic: sched_event_t is ~3 KB (tool_value[2048] dominates).
-       * Two SCHED_MAX_RESULTS=50 arrays = ~294 KB on this stack frame.  Safe
-       * on the libwebsockets service thread (8 MB glibc pthread stack), and
-       * deliberately inside the `auth_user_id > 0` gate so unassigned
-       * satellites don't pay the cost.  If SCHED_MAX_RESULTS grows past ~400
-       * or the libws thread later hosts deeper call chains, switch these to
-       * calloc/free. */
+      /* Stack arithmetic: sched_event_t is ~4 KB (tool_value[2048] +
+       * instructions[1024] dominate).  Two SCHED_MAX_RESULTS=50 arrays =
+       * ~400 KB on this stack frame.  Safe on the libwebsockets service thread
+       * (8 MB glibc pthread stack), and deliberately inside the
+       * `auth_user_id > 0` gate so unassigned satellites don't pay the cost.
+       * (The scheduler_tool `handle_list` path runs on the 512 KB parallel-tool
+       * thread and therefore heap-allocates its equivalent array.)  If
+       * SCHED_MAX_RESULTS grows past ~400 or the libws thread later hosts deeper
+       * call chains, switch these to calloc/free. */
       sched_event_t active[SCHED_MAX_RESULTS];
       sched_event_t missed[SCHED_MAX_RESULTS];
       int active_count = scheduler_db_list_user_events(conn->auth_user_id, -1, active,
@@ -315,5 +319,54 @@ void handle_scheduler_clear_missed(ws_connection_t *conn, int64_t event_id) {
       scheduler_broadcast_events_changed(ev.user_id);
    } else {
       send_error_impl(conn->wsi, "ALREADY_RESOLVED", "Event was not in 'missed' state");
+   }
+}
+
+void handle_scheduler_update_instructions(ws_connection_t *conn,
+                                          int64_t event_id,
+                                          const char *instructions) {
+   /* Browser-only edit (no satellite carve-out): editing summarization
+    * instructions is not a live-alarm operation. */
+   if (!conn_require_auth(conn))
+      return;
+   if (!instructions) {
+      /* A present-but-empty string clears; a missing/non-string field is a
+       * client bug, not an intent to clear — reject rather than wipe silently. */
+      send_error_impl(conn->wsi, "INVALID_PARAM", "Missing instructions string");
+      return;
+   }
+
+   sched_event_t ev;
+   if (authorize_event_for_user(conn, event_id, &ev) != SUCCESS)
+      return;
+
+   /* Instructions steer briefing summarization — briefing-only.  This is the
+    * browser sibling of the LLM tool's `update` path (scheduler_tool.c
+    * handle_update); both share the contract "briefing-only, empty string
+    * clears, UTF-8-boundary-capped" and converge on scheduler_db_update_fields.
+    * Keep the off-type refusal and cap in sync if either side changes. */
+   if (ev.event_type != SCHED_EVENT_BRIEFING) {
+      char msg[96];
+      snprintf(msg, sizeof(msg), "Instructions can only be set on a briefing (this is a %s)",
+               sched_event_type_to_str(ev.event_type));
+      send_error_impl(conn->wsi, "INVALID_PARAM", msg);
+      return;
+   }
+
+   sched_event_t fields;
+   memset(&fields, 0, sizeof(fields));
+   /* UTF-8-boundary-safe truncation (same as the tool path); `fields` is zeroed,
+    * so an empty string leaves instructions[0]=='\0' and the field clears. */
+   size_t cap = focus_utf8_safe_cap(instructions, SCHED_INSTRUCTIONS_MAX - 1);
+   memcpy(fields.instructions, instructions, cap);
+
+   int rc = scheduler_db_update_fields(event_id, ev.user_id, &fields, SCHED_FIELD_INSTRUCTIONS);
+   if (rc == SCHED_DB_SUCCESS) {
+      scheduler_broadcast_events_changed(ev.user_id);
+   } else if (rc == SCHED_DB_NOT_EDITABLE) {
+      send_error_impl(conn->wsi, "ALREADY_RESOLVED",
+                      "Briefing can no longer be edited (it already fired or was cancelled)");
+   } else {
+      send_error_impl(conn->wsi, "INTERNAL_ERROR", "Could not update briefing instructions");
    }
 }

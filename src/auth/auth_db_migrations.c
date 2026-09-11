@@ -3013,6 +3013,28 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       errmsg = NULL;
    }
 
+   /* v84: scheduled_events.briefing_instructions — optional per-briefing text that
+    * steers the summarization prompt.  Base SCHEMA_SQL carries the column; this
+    * ALTER back-fills an existing DB.  Gated `< 84` so it also runs on fresh
+    * installs (base added it → duplicate-column expected + tolerated, mirroring the
+    * v83 pattern).  NULL = no instructions → legacy summarization prompt. */
+   bool v84_ok = (current_version >= 84);
+   if (current_version < 84) {
+      rc = sqlite3_exec(s_db.db,
+                        "ALTER TABLE scheduled_events ADD COLUMN briefing_instructions TEXT", NULL,
+                        NULL, &errmsg);
+      bool duplicate = (errmsg && strstr(errmsg, "duplicate column"));
+      if (rc != SQLITE_OK && !duplicate) {
+         OLOG_ERROR("auth_db: v84 migration (briefing_instructions) failed: %s",
+                    errmsg ? errmsg : "unknown");
+         v84_ok = false;
+      } else {
+         v84_ok = true;
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
    /* Log migration if upgrading from an older version */
    if (current_version > 0 && current_version < AUTH_DB_SCHEMA_VERSION) {
       OLOG_INFO("auth_db: migrated schema from v%d to v%d", current_version,
@@ -3036,7 +3058,7 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
                               v62_ok && v63_ok && v64_ok && v65_ok && v66_ok && v67_ok && v68_ok &&
                               v69_ok && v70_ok && v71_ok && v72_ok && v73_ok && v74_ok && v75_ok &&
                               v76_ok && v77_ok && v78_ok && v79_ok && v80_ok && v81_ok && v82_ok &&
-                              v83_ok;
+                              v83_ok && v84_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

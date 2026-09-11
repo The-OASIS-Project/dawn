@@ -12,6 +12,63 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-09-10 — IMAP accounts now show unread & replied state in digests
+
+**Only affects non-Gmail (IMAP) email accounts.** Gmail accounts were already
+covered; nothing to do either way.
+
+**What changed.** Email digests and briefings now read the `\Seen` and `\Answered`
+flags directly from IMAP servers, so IMAP messages get accurate **unread** markers and
+**replied** indicators — previously these were populated for Gmail accounts only and an
+IMAP inbox would report "0 unread." Message receive times also now come from the
+server's INTERNALDATE (with correct timezone handling), so the digest's 24-hour window
+is accurate for IMAP mail regardless of the sender's timezone. No configuration change;
+the improvement is automatic the next time a digest runs.
+
+---
+
+## 2026-09-10 — Briefings can carry summarization instructions
+
+**Optional, opt-in — nothing to do unless you want it.** Existing briefings are
+unchanged and keep summarizing exactly as before.
+
+**What changed.** A briefing can now carry a free-text **instructions** field that
+steers *how* its collected data is summarized — what to emphasize, how to structure
+it, length, and tone. For example: "Lead with anything time-sensitive, keep it under
+five bullets, skip the pleasantries." A briefing with no instructions uses the same
+default format it always has.
+
+**How to use it.** Two ways: ask your assistant — "make my morning briefing punchier
+and lead with unread email," or "drop the closing line from the market briefing" — or
+edit it in the WebUI: open the **Scheduler** panel, expand a briefing, and use the
+**Edit** button in its "Summarization instructions" section. Either way the
+instructions **replace** the previous ones wholesale rather than appending (an empty
+save clears them back to the default), so read them back first if you mean to amend.
+
+**Schema.** The auth database migrates to v84 automatically on first launch (adds one
+nullable column to `scheduled_events`). No manual step; the upgrade is transparent.
+
+**Safety note.** Briefing instructions can shape the *format* but cannot override the
+rule that the data a briefing collects is data, never instructions — a summarization
+prompt can't be steered into treating an email's contents as commands.
+
+---
+
+## 2026-09-09 — Scheduled email steps are now read-only
+
+**Only if you have a scheduled task/briefing that runs an email *send*, *trash*, or
+*archive* step.** Nothing to do for anyone else.
+
+**What changed.** A scheduled or briefing step that invokes the `email` tool is now
+restricted to read-only actions (`accounts`, `recent`, `search`, `folders`, `read`,
+`digest`). A step that tries to `send`, `trash`, or `archive` mail is
+refused at both creation and fire time — those actions require a live conversation
+(a human in the loop). This closes a gap where a scheduled email step could send or
+delete mail unattended. If you had such a step, recreate it as an interactive flow;
+read-only email briefings are unaffected.
+
+---
+
 ## 2026-09-09 — `dawn-admin` binary now builds beside `dawn`
 
 **Anyone rebuilding in an existing build directory.** Fresh checkouts and clean

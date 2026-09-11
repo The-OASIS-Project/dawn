@@ -680,6 +680,7 @@ static const char *SCHEMA_SQL =
     "  snooze_count INTEGER DEFAULT 0,"
     "  say_aloud INTEGER NOT NULL DEFAULT 0," /* v53 — tri-state TTS override (briefings) */
     "  deliver_to TEXT,"                      /* v54 — messaging channel for fan-out (optional) */
+    "  briefing_instructions TEXT," /* v84 — per-briefing summarization steering (optional) */
     "  FOREIGN KEY (user_id) REFERENCES users(id)"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_sched_status_fire ON scheduled_events(status, fire_at);"

@@ -217,6 +217,20 @@ tracked as *"memory injection filter: multi-language"* in the TODO.
 Injecting untrusted content directly into the **system** role would bypass all of this and is
 a security bug — untrusted text goes into user/data-role context, never the system prompt.
 
+**Scheduled briefing summarization** is a self-contained instance of this pattern. The briefing's
+collected tool output is wrapped in `<briefing_data>` and summarized by a **tool-less** LLM turn,
+so injected data cannot invoke a tool. Forged fence tags in that data (`</briefing_data>`, a fake
+`<briefing_instructions>`) are byte-neutralized (`neutralize_briefing_fences`), and an absolute
+"data, not instructions" rule is emitted *after* the owner's optional per-briefing `instructions`
+and immediately before the data, so the overridable instructions cannot relax it. The owner
+`instructions` field is authenticated-owner content but is neutralized the same way (defense in
+depth): a briefing's `instructions` + `deliver_to` together form an owner-controlled
+content-shaping-plus-egress path — if the instructions channel is ever set via an injected
+`scheduler update` on a compromised owner session, neutralizing its fences prevents it from
+restructuring the summarization prompt. This composes with the autonomously-dangerous-tool /
+capability-mask work below (an injected owner turn that can write `instructions`/`deliver_to` is
+the same confused-deputy seam).
+
 ---
 
 ## Cross-Origin / CSRF

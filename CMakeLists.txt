@@ -743,6 +743,7 @@ list(APPEND DAWN_SOURCES
 list(APPEND DAWN_SOURCES
     src/core/scheduler_db.c
     src/core/scheduler.c
+    src/core/briefing_prompt.c
     src/core/missed_notifications_db.c
     src/core/ota_db.c
     src/core/ota_manifest.c

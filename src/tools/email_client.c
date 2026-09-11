@@ -42,6 +42,7 @@
 #include "core/buf_printf.h"
 #include "core/curl_buffer.h"
 #include "logging.h"
+#include "tools/email_parse.h"
 #include "tools/html_parser.h"
 
 /* =============================================================================
@@ -54,6 +55,15 @@
  * ============================================================================= */
 
 #define EMAIL_MAX_RESPONSE_SIZE (1024 * 1024) /* 1 MB cap on IMAP/SMTP responses */
+
+/* Byte ceiling for a single-message read fetch (IMAP BODY[]<0.N>).  We only need
+ * headers + the first ~50 KB of decoded text body — reading a message must not
+ * pull the entire raw MIME (base64 attachments can be many MB and would blow the
+ * 1 MB response cap, failing the read outright).  512 KB covers headers plus a
+ * large text/HTML part for essentially all real mail; a bigger message degrades
+ * to a truncated body (out->truncated), never a failed read.  Attachments are a
+ * separate feature (see EMAIL_ATTACHMENT_DOWNLOAD_DESIGN.md). */
+#define EMAIL_MAX_READ_FETCH_BYTES (512 * 1024)
 
 /* =============================================================================
  * SMTP Upload Buffer for email_send
@@ -181,116 +191,9 @@ static void append_imap_literal(char *buf, size_t *off, size_t *rem, const char 
    BUF_PRINTF(buf, *off, *rem, "{%zu}\r\n%s", val_len, value);
 }
 
-/* =============================================================================
- * RFC 2047 Encoded Word Decoder
- *
- * Decodes =?charset?Q?text?= (quoted-printable) and =?charset?B?text?= (base64)
- * encoded words commonly found in email From/Subject headers.
- * ============================================================================= */
-
-/** Decode a single RFC 2047 quoted-printable encoded word */
-static size_t decode_qp_word(const char *src, size_t src_len, char *dst, size_t dst_len) {
-   size_t j = 0;
-   for (size_t i = 0; i < src_len && j < dst_len - 1; i++) {
-      if (src[i] == '_') {
-         dst[j++] = ' ';
-      } else if (src[i] == '=' && i + 2 < src_len && isxdigit((unsigned char)src[i + 1]) &&
-                 isxdigit((unsigned char)src[i + 2])) {
-         char hex[3] = { src[i + 1], src[i + 2], '\0' };
-         dst[j++] = (char)strtol(hex, NULL, 16);
-         i += 2;
-      } else {
-         dst[j++] = src[i];
-      }
-   }
-   dst[j] = '\0';
-   return j;
-}
-
-/** Simple base64 decode (RFC 2045 alphabet) */
-static size_t decode_b64_word(const char *src, size_t src_len, char *dst, size_t dst_len) {
-   static const int8_t b64_table[256] = {
-      [0 ... 255] = -1, ['A'] = 0,  ['B'] = 1,  ['C'] = 2,  ['D'] = 3,  ['E'] = 4,  ['F'] = 5,
-      ['G'] = 6,        ['H'] = 7,  ['I'] = 8,  ['J'] = 9,  ['K'] = 10, ['L'] = 11, ['M'] = 12,
-      ['N'] = 13,       ['O'] = 14, ['P'] = 15, ['Q'] = 16, ['R'] = 17, ['S'] = 18, ['T'] = 19,
-      ['U'] = 20,       ['V'] = 21, ['W'] = 22, ['X'] = 23, ['Y'] = 24, ['Z'] = 25, ['a'] = 26,
-      ['b'] = 27,       ['c'] = 28, ['d'] = 29, ['e'] = 30, ['f'] = 31, ['g'] = 32, ['h'] = 33,
-      ['i'] = 34,       ['j'] = 35, ['k'] = 36, ['l'] = 37, ['m'] = 38, ['n'] = 39, ['o'] = 40,
-      ['p'] = 41,       ['q'] = 42, ['r'] = 43, ['s'] = 44, ['t'] = 45, ['u'] = 46, ['v'] = 47,
-      ['w'] = 48,       ['x'] = 49, ['y'] = 50, ['z'] = 51, ['0'] = 52, ['1'] = 53, ['2'] = 54,
-      ['3'] = 55,       ['4'] = 56, ['5'] = 57, ['6'] = 58, ['7'] = 59, ['8'] = 60, ['9'] = 61,
-      ['+'] = 62,       ['/'] = 63,
-   };
-
-   size_t j = 0;
-   uint32_t accum = 0;
-   int bits = 0;
-
-   for (size_t i = 0; i < src_len && j < dst_len - 1; i++) {
-      int8_t val = b64_table[(unsigned char)src[i]];
-      if (val < 0)
-         continue; /* skip padding and whitespace */
-      accum = (accum << 6) | val;
-      bits += 6;
-      if (bits >= 8) {
-         bits -= 8;
-         dst[j++] = (char)((accum >> bits) & 0xFF);
-      }
-   }
-   dst[j] = '\0';
-   return j;
-}
-
-/** Decode all RFC 2047 encoded words in a string, writing result to dst */
-static void decode_rfc2047(const char *src, char *dst, size_t dst_len) {
-   size_t out = 0;
-   const char *p = src;
-
-   while (*p && out < dst_len - 1) {
-      if (strncmp(p, "=?", 2) != 0) {
-         dst[out++] = *p++;
-         continue;
-      }
-
-      /* Parse =?charset?encoding?text?= */
-      const char *charset_start = p + 2;
-      const char *q1 = strchr(charset_start, '?');
-      if (!q1 || !q1[1] || q1[2] != '?') {
-         dst[out++] = *p++;
-         continue;
-      }
-
-      char encoding = q1[1];
-      const char *text_start = q1 + 3;
-      const char *end = strstr(text_start, "?=");
-      if (!end) {
-         dst[out++] = *p++;
-         continue;
-      }
-
-      size_t text_len = end - text_start;
-
-      if (encoding == 'Q' || encoding == 'q') {
-         out += decode_qp_word(text_start, text_len, dst + out, dst_len - out);
-      } else if (encoding == 'B' || encoding == 'b') {
-         out += decode_b64_word(text_start, text_len, dst + out, dst_len - out);
-      } else {
-         /* Unknown encoding, copy literally */
-         dst[out++] = *p++;
-         continue;
-      }
-
-      p = end + 2;
-
-      /* RFC 2047 §6.2: whitespace between adjacent encoded words is ignored */
-      const char *ws = p;
-      while (*ws == ' ' || *ws == '\t')
-         ws++;
-      if (strncmp(ws, "=?", 2) == 0)
-         p = ws;
-   }
-   dst[out] = '\0';
-}
+/* RFC 2047 encoded-word decoding (email_decode_rfc2047) lives in email_parse.c
+ * so both the IMAP and Gmail backends share one implementation — see the note
+ * there.  copy_header_value below wraps it after unfolding. */
 
 /* =============================================================================
  * Header Parsing Helpers
@@ -348,7 +251,7 @@ static void copy_header_value(const char *start, char *out, size_t out_len) {
    raw[j] = '\0';
 
    /* Step 2: Decode RFC 2047 encoded words */
-   decode_rfc2047(raw, out, out_len);
+   email_decode_rfc2047(raw, out, out_len);
 }
 
 /** Parse "Display Name <email@example.com>" from a decoded From header value */
@@ -390,26 +293,6 @@ static void parse_from_value(const char *decoded,
       name[0] = '\0';
       snprintf(addr, addr_len, "%s", decoded);
    }
-}
-
-/** Parse Date header into time_t */
-static time_t parse_email_date(const char *date_str) {
-   if (!date_str)
-      return 0;
-
-   struct tm tm_info;
-   memset(&tm_info, 0, sizeof(tm_info));
-
-   /* Try RFC 2822 format: "Thu, 13 Mar 2026 10:30:00 +0000" */
-   char *result = strptime(date_str, "%a, %d %b %Y %H:%M:%S", &tm_info);
-   if (!result) {
-      /* Try without day of week */
-      result = strptime(date_str, "%d %b %Y %H:%M:%S", &tm_info);
-   }
-   if (!result)
-      return 0;
-
-   return mktime(&tm_info);
 }
 
 /* =============================================================================
@@ -500,19 +383,24 @@ static char *extract_plain_body(const char *raw, int max_chars, bool *out_trunca
  * ============================================================================= */
 
 /**
- * Parse the last N UIDs from an IMAP SEARCH response.
+ * Parse the last N UIDs from an IMAP UID SEARCH response.
  *
- * SEARCH returns UIDs in ascending order. For "recent" email, we want the
- * highest UIDs (newest messages). This uses a circular buffer to capture
- * only the last `wanted` UIDs from arbitrarily large inboxes without
- * excessive memory.
+ * UID SEARCH returns UIDs in ascending order (a plain SEARCH would return
+ * sequence numbers — callers MUST issue UID SEARCH so these ids match the
+ * subsequent UID FETCH). For "recent" email, we want the highest UIDs (newest
+ * messages). This uses a circular buffer to capture only the last `wanted` UIDs
+ * from arbitrarily large inboxes without excessive memory.
  *
- * @param response  Raw IMAP SEARCH response
+ * @param response  Raw IMAP UID SEARCH response
  * @param uids      Output array (must hold at least `wanted` elements)
  * @param wanted    Max UIDs to return (from the tail of the list)
  * @return Number of UIDs written to uids[], in ascending order
  */
 static int parse_tail_uids(const char *response, uint32_t *uids, int wanted) {
+   /* Guard against a server that returns no body (curl leaves buf.data NULL) and
+    * against a zero `wanted` (the `total % wanted` below would divide by zero). */
+   if (!response || wanted <= 0)
+      return 0;
    const char *p = strstr(response, "* SEARCH");
    if (!p)
       return 0;
@@ -555,47 +443,82 @@ static int parse_tail_uids(const char *response, uint32_t *uids, int wanted) {
  * Parse email headers from FETCH response
  * ============================================================================= */
 
-static void parse_summary_from_fetch(const char *data, email_summary_t *out) {
-   memset(out, 0, sizeof(*out));
-
-   /* From: unfold + decode, then parse name/addr */
-   char from_decoded[256];
-   const char *from_val = find_header(data, "From");
-   copy_header_value(from_val, from_decoded, sizeof(from_decoded));
-   parse_from_value(from_decoded, out->from_name, sizeof(out->from_name), out->from_addr,
-                    sizeof(out->from_addr));
-
-   /* Subject: unfold + decode */
-   const char *subj_val = find_header(data, "Subject");
-   copy_header_value(subj_val, out->subject, sizeof(out->subject));
-
-   /* Date: unfold (no RFC 2047 in dates, but unfolding is safe) */
-   const char *date_val = find_header(data, "Date");
-   copy_header_value(date_val, out->date_str, sizeof(out->date_str));
-   out->date = parse_email_date(out->date_str);
-
-   /* Preview from body */
-   const char *body = strstr(data, "\r\n\r\n");
-   if (!body)
-      body = strstr(data, "\n\n");
-   if (body) {
-      body += (body[0] == '\r') ? 4 : 2;
-      snprintf(out->preview, sizeof(out->preview), "%.*s", (int)(sizeof(out->preview) - 1), body);
-   }
-}
-
 /* =============================================================================
- * Batch FETCH headers for multiple UIDs
+ * Batch FETCH summaries for multiple UIDs
  *
- * Sends a single UID FETCH command for all UIDs instead of N individual round
- * trips.  Falls back to per-UID fetch if the batch command fails.
- *
- * The batch response is a sequence of IMAP untagged FETCH responses:
- *   * seqnum FETCH (UID uid BODY[HEADER] {octets}\r\n<header data>\r\n)\r\n
- *
- * We parse these by scanning for "UID <num>" and "BODY[HEADER] {<octets>}"
- * within each "* ... FETCH" block.
+ * One UID FETCH (FLAGS INTERNALDATE ENVELOPE) for the whole set.  All three
+ * items are delivered INLINE (no IMAP literal), which matters twice over:
+ *   1. libcurl's custom-command path (used for CUSTOMREQUEST) writes untagged
+ *      response lines to us but DISCARDS literal octet blocks — so BODY[HEADER],
+ *      which is a literal, can never be read this way.
+ *   2. The only libcurl path that DOES stream a body literal is the URL form,
+ *      but it issues plain BODY[...] (not BODY.PEEK), which marks messages
+ *      \Seen — unacceptable for a digest that just lists mail.
+ * ENVELOPE sidesteps both: it carries From/Subject/Date as an inline structure
+ * and never touches the body, so nothing is marked read.  See email_parse.c
+ * for the ENVELOPE + paren-matching parsers (unit-tested).
  * ============================================================================= */
+
+/* Apply the per-message IMAP FETCH metadata — FLAGS and INTERNALDATE — onto a
+ * summary.  `seg` is one message's full item-list text ("* N FETCH (UID .. FLAGS
+ * (..) INTERNALDATE ".." ENVELOPE (..))").  FLAGS drives unread (\Seen absent)
+ * and the tri-state replied (\Answered present -> YES, else NO); INTERNALDATE is
+ * the reliable server receive time.  Absent tokens leave the caller's memset
+ * defaults (unread false, replied UNKNOWN, date 0).
+ *
+ * SECURITY: the FLAGS/INTERNALDATE search is confined to the region BEFORE
+ * "ENVELOPE".  Everything inside ENVELOPE (subject, sender name) is
+ * sender-controlled, so without this bound a crafted subject like
+ * `FLAGS (\Answered)` or `INTERNALDATE "01-Jan-1990..."` could forge the
+ * read/reply state or receive date.  We request `(FLAGS INTERNALDATE ENVELOPE)`
+ * in that order, so the genuine items always fall in this trusted prefix; a
+ * match at or beyond ENVELOPE is ignored (fail-safe to the default).  Returns
+ * true iff a FLAGS group was found in the prefix. */
+static bool apply_fetch_metadata(const char *seg, email_summary_t *out) {
+   /* Trusted prefix ends at the (sender-controlled) ENVELOPE. */
+   const char *env = strcasestr(seg, "ENVELOPE");
+   size_t prefix = env ? (size_t)(env - seg) : strlen(seg);
+
+   bool flags_found = false;
+   /* FLAGS (...) group — only if it lies in the trusted prefix. */
+   const char *flags_kw = strcasestr(seg, "FLAGS");
+   if (flags_kw && (size_t)(flags_kw - seg) < prefix) {
+      const char *lp = strchr(flags_kw, '(');
+      const char *rp = lp ? strchr(lp, ')') : NULL;
+      if (lp && rp && rp > lp) {
+         char group[256];
+         size_t glen = (size_t)(rp - lp + 1);
+         if (glen >= sizeof(group))
+            glen = sizeof(group) - 1;
+         memcpy(group, lp, glen);
+         group[glen] = '\0';
+         out->unread = !email_imap_flags_contains(group, "\\Seen");
+         out->replied = email_imap_flags_contains(group, "\\Answered") ? EMAIL_REPLIED_YES
+                                                                       : EMAIL_REPLIED_NO;
+         flags_found = true;
+      }
+   }
+
+   /* INTERNALDATE "dd-Mon-yyyy HH:MM:SS +ZZZZ" — reliable server receive time,
+    * likewise only trusted from the pre-ENVELOPE prefix. */
+   const char *idate_kw = strcasestr(seg, "INTERNALDATE");
+   if (idate_kw && (size_t)(idate_kw - seg) < prefix) {
+      const char *q1 = strchr(idate_kw, '"');
+      const char *q2 = q1 ? strchr(q1 + 1, '"') : NULL;
+      if (q1 && q2 && q2 > q1 + 1) {
+         char idate[64];
+         size_t ilen = (size_t)(q2 - (q1 + 1));
+         if (ilen >= sizeof(idate))
+            ilen = sizeof(idate) - 1;
+         memcpy(idate, q1 + 1, ilen);
+         idate[ilen] = '\0';
+         time_t t = email_parse_imap_internaldate(idate);
+         if (t > 0)
+            out->date = t;
+      }
+   }
+   return flags_found;
+}
 
 static int batch_fetch_headers(CURL *curl,
                                const email_conn_t *conn,
@@ -618,13 +541,12 @@ static int batch_fetch_headers(CURL *curl,
       BUF_PRINTF(uid_list, upos, urem, "%u", uids[i]);
    }
 
-   /* Send single UID FETCH command */
    char url[1024];
    snprintf(url, sizeof(url), "%s/%s", conn->imap_url, encoded_folder);
    curl_easy_setopt(curl, CURLOPT_URL, url);
 
    char fetch_cmd[1200];
-   snprintf(fetch_cmd, sizeof(fetch_cmd), "UID FETCH %s BODY.PEEK[HEADER]", uid_list);
+   snprintf(fetch_cmd, sizeof(fetch_cmd), "UID FETCH %s (FLAGS INTERNALDATE ENVELOPE)", uid_list);
    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, fetch_cmd);
 
    curl_buffer_t buf;
@@ -645,68 +567,59 @@ static int batch_fetch_headers(CURL *curl,
       return 1;
    }
 
-   /* Parse multi-message response.  Each message appears as:
-    *   * <seq> FETCH (UID <uid> BODY[HEADER] {<octets>}\r\n<data>\r\n)
-    * We scan for each "* " line, extract UID and literal size, then grab
-    * exactly <octets> bytes of header data. */
+   /* Parse the response, one "* <seq> FETCH (UID <uid> FLAGS (..) INTERNALDATE
+    * ".." ENVELOPE (..))" untagged line per message.  email_imap_next_fetch
+    * isolates each message (bounding it at its quote-aware matching ')', and
+    * resyncing past a literal-truncated envelope so one bad message can't drop
+    * the rest of the batch — see its contract). */
    const char *p = buf.data;
-   while (p && *p && *out_count < max_out) {
-      /* Find next untagged FETCH response */
-      const char *fetch = strstr(p, "* ");
-      if (!fetch)
+   const char *seg_start = NULL;
+   size_t seg_len = 0;
+   uint32_t uid = 0;
+   while (*out_count < max_out &&
+          (p = email_imap_next_fetch(p, &seg_start, &seg_len, &uid)) != NULL) {
+      char *seg = malloc(seg_len + 1);
+      if (!seg)
          break;
+      memcpy(seg, seg_start, seg_len);
+      seg[seg_len] = '\0';
 
-      const char *fetch_kw = strcasestr(fetch, "FETCH");
-      if (!fetch_kw) {
-         p = fetch + 2;
-         continue;
+      email_summary_t *s = &out[*out_count];
+      memset(s, 0, sizeof(*s));
+      s->uid = uid;
+
+      /* FLAGS -> unread/replied, INTERNALDATE -> date (server receive time). */
+      apply_fetch_metadata(seg, s);
+
+      /* date_str is the human-readable date the recent/search formatter prints
+       * (the digest sorts/filters on the epoch instead).  Derive it from the
+       * reliable INTERNALDATE epoch rather than the sender's Date header. */
+      if (s->date > 0) {
+         struct tm tmv;
+         if (localtime_r(&s->date, &tmv))
+            strftime(s->date_str, sizeof(s->date_str), "%a, %d %b %Y %H:%M", &tmv);
       }
 
-      /* Extract UID */
-      const char *uid_str = strstr(fetch, "UID ");
-      if (!uid_str || uid_str > fetch_kw + 256) {
-         p = fetch_kw + 5;
-         continue;
-      }
-      uint32_t uid = (uint32_t)strtoul(uid_str + 4, NULL, 10);
-
-      /* Find literal size: {octets} */
-      const char *lbrace = strchr(uid_str, '{');
-      if (!lbrace) {
-         p = uid_str + 4;
-         continue;
-      }
-      int octets = (int)strtol(lbrace + 1, NULL, 10);
-      if (octets <= 0 || octets > 128 * 1024) {
-         p = lbrace + 1;
-         continue;
+      /* ENVELOPE -> subject + first From (RAW envelope strings are RFC 2047-
+       * encoded; decode them with the same word decoder the header path uses).
+       * A message whose ENVELOPE contains an IMAP literal ({N}) in a string
+       * field — a raw non-RFC2047 subject/name — loses that field (and the rest
+       * of its envelope): libcurl's custom-command path discards literal octets.
+       * Such a message keeps its date/flags/id and stays readable via `read`,
+       * but its subject/sender degrade cleanly to blank — never a wrong value. */
+      char subj_raw[256] = { 0 };
+      char fname_raw[256] = { 0 };
+      char faddr[256] = { 0 };
+      if (email_parse_envelope(seg, subj_raw, sizeof(subj_raw), fname_raw, sizeof(fname_raw), faddr,
+                               sizeof(faddr))) {
+         email_decode_rfc2047(subj_raw, s->subject, sizeof(s->subject));
+         if (fname_raw[0])
+            email_decode_rfc2047(fname_raw, s->from_name, sizeof(s->from_name));
+         snprintf(s->from_addr, sizeof(s->from_addr), "%s", faddr);
       }
 
-      /* Header data starts after {octets}\r\n */
-      const char *hdr_start = strchr(lbrace, '\n');
-      if (!hdr_start) {
-         p = lbrace + 1;
-         break;
-      }
-      hdr_start++; /* skip \n */
-
-      /* Bounds check */
-      if (hdr_start + octets > buf.data + buf.size)
-         break;
-
-      /* Copy header data into a temporary null-terminated buffer */
-      char *hdr_copy = malloc(octets + 1);
-      if (!hdr_copy)
-         break;
-      memcpy(hdr_copy, hdr_start, octets);
-      hdr_copy[octets] = '\0';
-
-      parse_summary_from_fetch(hdr_copy, &out[*out_count]);
-      out[*out_count].uid = uid;
       (*out_count)++;
-
-      free(hdr_copy);
-      p = hdr_start + octets;
+      free(seg);
    }
 
    curl_buffer_free(&buf);
@@ -768,8 +681,13 @@ int email_fetch_recent(const email_conn_t *conn,
    snprintf(url, sizeof(url), "%s/%s", conn->imap_url, encoded_folder);
    curl_easy_setopt(curl, CURLOPT_URL, url);
 
+   /* UID SEARCH (not plain SEARCH): the results are fed to UID FETCH below, so
+    * both must speak UIDs.  Plain SEARCH returns message SEQUENCE numbers, which
+    * only coincide with UIDs in a mailbox that has never had a message expunged
+    * — on any established mailbox the two diverge and UID-FETCHing sequence
+    * numbers returns nothing ("No recent emails found"). */
    char search_cmd[128];
-   snprintf(search_cmd, sizeof(search_cmd), "SEARCH %s", unread_only ? "UNSEEN" : "ALL");
+   snprintf(search_cmd, sizeof(search_cmd), "UID SEARCH %s", unread_only ? "UNSEEN" : "ALL");
    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, search_cmd);
 
    curl_buffer_t buf;
@@ -803,10 +721,14 @@ int email_fetch_recent(const email_conn_t *conn,
    for (int i = total - 1; i >= 0 && rev_count < max_out; i--)
       rev_uids[rev_count++] = tail_uids[i];
 
-   batch_fetch_headers(curl, conn, encoded_folder, rev_uids, rev_count, out, max_out, out_count);
+   int fetch_rc = batch_fetch_headers(curl, conn, encoded_folder, rev_uids, rev_count, out, max_out,
+                                      out_count);
 
    curl_easy_cleanup(curl);
-   return 0;
+   /* Propagate the FETCH result: a failed/over-cap header fetch must surface as
+    * an error, not a successful-looking empty mailbox (the digest would then
+    * treat a broken account as healthy). */
+   return fetch_rc;
 }
 
 /* =============================================================================
@@ -829,25 +751,46 @@ int email_read_message(const email_conn_t *conn,
    if (!curl)
       return 1;
 
-   /* Fetch full message by UID */
+   /* Fetch the message by UID.  First try a bounded partial fetch (IMAP
+    * BODY[]<0.N>, curl ";PARTIAL=") so a huge message (big attachments) can't
+    * blow the response cap and fail the read outright.  PARTIAL is core RFC 3501,
+    * but if a non-conforming server rejects it, fall back once to a full fetch
+    * (still capped at EMAIL_MAX_RESPONSE_SIZE) so reads keep working. */
    char url[1024];
-   snprintf(url, sizeof(url), "%s/%s/;UID=%u", conn->imap_url, encoded_folder, uid);
-   curl_easy_setopt(curl, CURLOPT_URL, url);
-
    curl_buffer_t buf;
-   curl_buffer_init_with_max(&buf, EMAIL_MAX_RESPONSE_SIZE);
-   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
-   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
+   CURLcode res = CURLE_OK;
+   bool used_partial = true;
 
-   CURLcode res = curl_easy_perform(curl);
-   curl_easy_cleanup(curl);
+   for (int attempt = 0; attempt < 2; attempt++) {
+      if (used_partial)
+         snprintf(url, sizeof(url), "%s/%s/;UID=%u;PARTIAL=0.%d", conn->imap_url, encoded_folder,
+                  uid, EMAIL_MAX_READ_FETCH_BYTES);
+      else
+         snprintf(url, sizeof(url), "%s/%s/;UID=%u", conn->imap_url, encoded_folder, uid);
+      curl_easy_setopt(curl, CURLOPT_URL, url);
 
-   if (res != CURLE_OK || !buf.data || buf.truncated) {
-      OLOG_ERROR("email: IMAP FETCH uid=%u failed: %s%s", uid, curl_easy_strerror(res),
-                 buf.truncated ? " (response exceeded cap)" : "");
+      curl_buffer_init_with_max(&buf, EMAIL_MAX_RESPONSE_SIZE);
+      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
+      curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
+
+      res = curl_easy_perform(curl);
+      if (res == CURLE_OK && buf.data && !buf.truncated)
+         break; /* success */
+
+      bool was_truncated = buf.truncated;
       curl_buffer_free(&buf);
+      if (used_partial) {
+         OLOG_WARNING("email: IMAP partial fetch uid=%u failed (%s); retrying full fetch", uid,
+                      curl_easy_strerror(res));
+         used_partial = false;
+         continue; /* retry without PARTIAL */
+      }
+      OLOG_ERROR("email: IMAP FETCH uid=%u failed: %s%s", uid, curl_easy_strerror(res),
+                 was_truncated ? " (response exceeded cap)" : "");
+      curl_easy_cleanup(curl);
       return 1;
    }
+   curl_easy_cleanup(curl);
 
    out->uid = uid;
 
@@ -867,6 +810,15 @@ int email_read_message(const email_conn_t *conn,
    const char *date_val = find_header(buf.data, "Date");
    copy_header_value(date_val, out->date_str, sizeof(out->date_str));
 
+   /* The partial fetch caps the RAW MIME at EMAIL_MAX_READ_FETCH_BYTES; when it
+    * returns exactly the cap the message was cut, so the body may be incomplete
+    * even if the text extractor didn't hit its own max_chars limit (e.g. a large
+    * leading HTML/image part pushed the text/plain past the cut).  Fold that into
+    * the truncation flag so a clipped body is never reported as complete.  Only
+    * applies to the partial fetch — a full-fetch fallback got the whole message
+    * (a real overflow there would have set buf.truncated and failed above). */
+   bool raw_truncated = used_partial && (buf.size >= (size_t)EMAIL_MAX_READ_FETCH_BYTES);
+
    /* Extract plain text body (defensive fallback; service layer always supplies
     * a positive cap via build_conn_for_account) */
    int max_chars = conn->max_body_chars > 0 ? conn->max_body_chars : EMAIL_MAX_READ_BODY_LEN;
@@ -874,7 +826,7 @@ int email_read_message(const email_conn_t *conn,
    out->body = extract_plain_body(buf.data, max_chars, &body_truncated);
    if (out->body) {
       out->body_len = strlen(out->body);
-      out->truncated = body_truncated;
+      out->truncated = body_truncated || raw_truncated;
    }
 
    /* Count attachments (rough heuristic — count Content-Disposition: attachment) */
@@ -913,11 +865,13 @@ int email_search(const email_conn_t *conn,
    if (!curl)
       return 1;
 
-   /* Build IMAP SEARCH command with literal syntax for user-provided values */
+   /* Build IMAP UID SEARCH command with literal syntax for user-provided values.
+    * UID SEARCH (not plain SEARCH) so the returned ids are UIDs, matching the
+    * UID FETCH that consumes them — see the note in email_fetch_recent. */
    char search_cmd[2048];
    size_t spos = 0;
    size_t srem = sizeof(search_cmd);
-   BUF_PRINTF(search_cmd, spos, srem, "SEARCH");
+   BUF_PRINTF(search_cmd, spos, srem, "UID SEARCH");
 
    if (params->unread_only) {
       BUF_PRINTF(search_cmd, spos, srem, " UNSEEN");
@@ -990,25 +944,14 @@ int email_search(const email_conn_t *conn,
    for (int i = total - 1; i >= 0 && rev_count < max_out; i--)
       rev_uids[rev_count++] = tail_uids[i];
 
-   batch_fetch_headers(curl, conn, encoded_folder, rev_uids, rev_count, out, max_out, out_count);
+   int fetch_rc = batch_fetch_headers(curl, conn, encoded_folder, rev_uids, rev_count, out, max_out,
+                                      out_count);
 
    curl_easy_cleanup(curl);
-   return 0;
-}
-
-/* =============================================================================
- * SMTP Header Injection Prevention
- *
- * Strip CR/LF from values used in email headers to prevent header injection.
- * ============================================================================= */
-
-static void sanitize_header_value(const char *src, char *dst, size_t dst_len) {
-   size_t j = 0;
-   for (size_t i = 0; src[i] && j < dst_len - 1; i++) {
-      if (src[i] != '\r' && src[i] != '\n')
-         dst[j++] = src[i];
-   }
-   dst[j] = '\0';
+   /* Propagate the FETCH result: a failed/over-cap header fetch must surface as
+    * an error, not a successful-looking empty mailbox (the digest would then
+    * treat a broken account as healthy). */
+   return fetch_rc;
 }
 
 /* =============================================================================
@@ -1023,12 +966,12 @@ int email_send(const email_conn_t *conn,
    if (!to_addr || !to_addr[0] || !subject || !body)
       return 1;
 
-   /* Sanitize all header-injectable fields */
+   /* Sanitize all header-injectable fields (CR/LF strip — shared helper). */
    char safe_subject[256], safe_to_name[64], safe_display_name[64], safe_to_addr[256];
-   sanitize_header_value(subject, safe_subject, sizeof(safe_subject));
-   sanitize_header_value(to_name ? to_name : "", safe_to_name, sizeof(safe_to_name));
-   sanitize_header_value(conn->display_name, safe_display_name, sizeof(safe_display_name));
-   sanitize_header_value(to_addr, safe_to_addr, sizeof(safe_to_addr));
+   email_sanitize_header_value(subject, safe_subject, sizeof(safe_subject));
+   email_sanitize_header_value(to_name ? to_name : "", safe_to_name, sizeof(safe_to_name));
+   email_sanitize_header_value(conn->display_name, safe_display_name, sizeof(safe_display_name));
+   email_sanitize_header_value(to_addr, safe_to_addr, sizeof(safe_to_addr));
 
    CURL *curl = create_smtp_handle(conn);
    if (!curl)

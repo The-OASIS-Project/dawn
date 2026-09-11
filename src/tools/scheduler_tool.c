@@ -380,6 +380,26 @@ static char *handle_create(struct json_object *details,
       }
    }
 
+   /* Per-briefing summarization instructions (schema v84).  Optional free text
+    * that steers HOW the briefing LLM summarizes the collected tool output
+    * (content emphasis, structure, length, tone).  Briefing-only: silently
+    * ignored for non-briefing types so the LLM can pass it speculatively
+    * without rejection (same tolerance as say_aloud).  Explicit string
+    * type-check matches the deliver_to/say_aloud pattern.  Truncated on a
+    * UTF-8 boundary so a multi-byte char is never split mid-sequence. */
+   if (type == SCHED_EVENT_BRIEFING) {
+      struct json_object *instr_obj = NULL;
+      if (json_object_object_get_ex(details, "instructions", &instr_obj) && instr_obj &&
+          json_object_is_type(instr_obj, json_type_string)) {
+         const char *instr_str = json_object_get_string(instr_obj);
+         if (instr_str && instr_str[0]) {
+            size_t cap = focus_utf8_safe_cap(instr_str, SCHED_INSTRUCTIONS_MAX - 1);
+            memcpy(event.instructions, instr_str, cap);
+            event.instructions[cap] = '\0';
+         }
+      }
+   }
+
    /* Tool scheduling — supports both legacy single-tool (top-level
     * tool_name/tool_action/tool_value) AND multi-step briefings (a `steps`
     * JSON array).  If `steps` is present, it wins; top-level tool_* is
@@ -559,10 +579,16 @@ static char *handle_list(struct json_object *details, int user_id) {
    const char *type_str = json_get_string(details, "type");
    int type_filter = type_str ? (int)sched_event_type_from_str(type_str) : -1;
 
-   sched_event_t events[SCHED_MAX_RESULTS];
+   /* Heap-allocate the event array: sched_event_t grew to ~4 KB with the v84
+    * instructions field, so an on-stack SCHED_MAX_RESULTS array would burn
+    * ~200 KB of the LLM-worker stack.  calloc'd once, freed on every exit. */
+   sched_event_t *events = calloc(SCHED_MAX_RESULTS, sizeof(sched_event_t));
+   if (!events)
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: out of memory.");
    int count = scheduler_db_list_user_events(user_id, type_filter, events, SCHED_MAX_RESULTS);
 
    if (count == 0) {
+      free(events);
       if (type_str)
          return strdup("No active events of that type.");
       return strdup("No active timers, alarms, or reminders.");
@@ -675,6 +701,7 @@ static char *handle_list(struct json_object *details, int user_id) {
 
    free(step_table);
    free(step_counts);
+   free(events);
 
    if (strbuf_oom(&sb)) {
       strbuf_free(&sb);
@@ -809,6 +836,11 @@ static char *handle_query(struct json_object *details, int user_id) {
                         (int)((sizeof(result) - off) > 3 ? (sizeof(result) - off) - 3 : 0),
                         event.tool_value);
          }
+         /* Surface any per-briefing summarization steering so the model can
+          * relay it verbatim when the user asks how a briefing is configured. */
+         if (off < sizeof(result) && event.instructions[0])
+            snprintf(result + off, sizeof(result) - off, " Summarization instructions: \"%s\"",
+                     event.instructions);
       } else if (written > 0 && (size_t)written < sizeof(result) &&
                  event.event_type == SCHED_EVENT_TASK && event.tool_name[0]) {
          size_t off = (size_t)written;
@@ -1004,6 +1036,31 @@ static char *handle_update(struct json_object *details, int user_id) {
       mask |= SCHED_FIELD_SAY_ALOUD;
    }
 
+   /* Per-briefing summarization instructions (schema v84).  An empty string
+    * CLEARS the field (reverts to the legacy fixed prompt); a non-empty string
+    * REPLACES it wholesale (this is not an append — the model is told to query
+    * first if it means to amend).  Briefing-only: unlike create (which silently
+    * ignores it off-type), update REFUSES on a non-briefing so a mistargeted
+    * edit surfaces rather than no-ops.  Truncated on a UTF-8 boundary.  The
+    * browser sibling (webui_scheduler.c handle_scheduler_update_instructions)
+    * shares this contract — keep the briefing-only/empty-clears/cap rules in
+    * sync across both writers. */
+   struct json_object *jinstr = NULL;
+   if (json_object_object_get_ex(details, "instructions", &jinstr) &&
+       json_object_is_type(jinstr, json_type_string)) {
+      if (event.event_type != SCHED_EVENT_BRIEFING) {
+         snprintf(result, sizeof(result),
+                  TOOL_RESULT_ERROR_MARK
+                  "Error: instructions can only be set on a briefing (this is a %s)",
+                  sched_event_type_to_str(event.event_type));
+         return strdup(result);
+      }
+      const char *instr = json_object_get_string(jinstr);
+      size_t cap = focus_utf8_safe_cap(instr, SCHED_INSTRUCTIONS_MAX - 1);
+      memcpy(fields.instructions, instr, cap);
+      mask |= SCHED_FIELD_INSTRUCTIONS; /* empty string clears the steering */
+   }
+
    /* --- Parse step edits (briefings only). --- */
    struct json_object *replace_arr = NULL, *append_arr = NULL;
    json_object_object_get_ex(details, "steps", &replace_arr);
@@ -1028,7 +1085,7 @@ static char *handle_update(struct json_object *details, int user_id) {
    if (mask == 0 && !has_steps) {
       snprintf(result, sizeof(result),
                "Error: nothing to update — pass add_steps/steps (briefings) or a field such as "
-               "new_name, fire_at, recurrence, deliver_to, or say_aloud");
+               "new_name, fire_at, recurrence, deliver_to, say_aloud, or instructions");
       return strdup(result);
    }
 
@@ -1116,6 +1173,15 @@ static char *handle_update(struct json_object *details, int user_id) {
    if (updated.recurrence != SCHED_RECUR_ONCE)
       strbuf_appendf(&sb, ", %s", sched_recurrence_to_str(updated.recurrence));
    strbuf_append(&sb, ").");
+   if (mask & SCHED_FIELD_INSTRUCTIONS) {
+      /* Echo from `fields` (what we just wrote), not `updated` — the write
+       * already succeeded above, and `updated` falls back to the PRE-edit copy
+       * if the confirmation read-back happens to fail. */
+      if (fields.instructions[0])
+         strbuf_appendf(&sb, " Summarization instructions set to: \"%s\"", fields.instructions);
+      else
+         strbuf_append(&sb, " Summarization instructions cleared (back to the default format).");
+   }
    if (updated.event_type == SCHED_EVENT_BRIEFING)
       append_run_summary(&sb, &updated);
    if (strbuf_oom(&sb)) {
@@ -1165,26 +1231,14 @@ static char *scheduler_tool_callback(const char *action, char *value, int *shoul
    if (!action || !action[0])
       return strdup(TOOL_RESULT_ERROR_MARK "Error: action is required");
 
-   /* Parse details JSON */
-   struct json_object *details = NULL;
-   if (value && value[0]) {
-      details = json_tokener_parse(value);
-      if (!details) {
-         /* `list` takes only an optional `type` filter, so a caller that passes
-          * a non-JSON details (e.g. a model emitting a prose description instead
-          * of an object) should still list everything rather than fail.  Every
-          * other action needs structured fields, so malformed JSON stays an
-          * error there — silently proceeding on a create/update/cancel with an
-          * empty details would drop the caller's real request. */
-         if (strcmp(action, "list") == 0) {
-            details = json_object_new_object();
-         } else {
-            return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid JSON in details parameter");
-         }
-      }
-   } else {
-      details = json_object_new_object();
-   }
+   /* No scheduler action tolerates a non-JSON `arguments` value.  Even `list`
+    * reads an optional `type` filter, so degrading prose to an empty object
+    * would silently list everything instead of the requested subset; better to
+    * error and let the model re-emit proper JSON (the schema now tells it to
+    * omit `arguments` for a no-arg action rather than narrate). */
+   struct json_object *details = tool_parse_details(value, false);
+   if (!details)
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid JSON in details parameter");
 
    /* Get user context */
    int user_id = 1; /* Default */
@@ -1281,9 +1335,11 @@ static const treg_param_t scheduler_params[] = {
        .enum_count = 7,
    },
    {
-       .name = "details",
+       .name = "arguments",
        .description =
-           "JSON object with action-specific fields.\n"
+           "JSON object of the action's arguments, passed as a JSON-encoded string.  "
+           "Omit entirely for an action that takes no arguments; never fill it with a "
+           "description or rationale.\n"
            "create: {type (timer|alarm|reminder|task|briefing), name (optional), "
            "fire_at, duration_minutes (1-43200, MINUTES UNTIL FIRE — use ONLY for "
            "'in X minutes' / 'X-minute timer' shapes; this is NOT briefing duration / "
@@ -1295,7 +1351,10 @@ static const treg_param_t scheduler_params[] = {
            "(csv: mon,tue,...), announce_all (bool — multi-user fan-out, NOT "
            "audio control), say_aloud (briefing-only bool — TTS override; see "
            "AUDIO section), deliver_to (optional string — messaging channel "
-           "display_name; see DELIVERY section)}.\n"
+           "display_name; see DELIVERY section), instructions (briefing-only "
+           "optional string, ≤1024 chars — free-text steering for HOW the "
+           "briefing is summarized: content emphasis, structure, length, tone; "
+           "omit to use the default briefing format)}.\n"
            "  fire_at: ISO 8601. No timezone suffix = the user's LOCAL timezone "
            "('2026-03-19T07:00:00' = 7 AM local). 'Z' suffix = UTC. '+05:00' = explicit "
            "offset. For user-said times like 'set an alarm for 7am', use NO suffix.\n"
@@ -1320,7 +1379,10 @@ static const treg_param_t scheduler_params[] = {
            "output as '[id=N]')}.\n"
            "update: {name or event_id to identify the event, plus any of: new_name (rename), "
            "fire_at (reschedule, ISO 8601), recurrence, recurrence_days, message (reminders), "
-           "deliver_to (channel; empty string clears fan-out), say_aloud (briefings).  For "
+           "deliver_to (channel; empty string clears fan-out), say_aloud (briefings), "
+           "instructions (briefing-only summarization steering — REPLACES the current "
+           "instructions wholesale, so 'query' the briefing first if you mean to amend "
+           "rather than overwrite; empty string clears it back to the default format).  For "
            "BRIEFINGS also: add_steps (append one or more steps — use this to ADD to a "
            "briefing, e.g. add stock news to a morning briefing; send only the NEW steps) OR "
            "steps (replace the WHOLE step list — you must resend every step you want kept). "

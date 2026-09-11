@@ -70,6 +70,7 @@ static const char *DDL =
     "  snooze_count INTEGER DEFAULT 0,"
     "  say_aloud INTEGER NOT NULL DEFAULT 0," /* v53 tri-state TTS override */
     "  deliver_to TEXT,"                      /* v54 messaging channel fan-out */
+    "  briefing_instructions TEXT,"           /* v84 per-briefing summarization steering */
     "  FOREIGN KEY (user_id) REFERENCES users(id)"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_sched_status_fire "
@@ -1127,6 +1128,37 @@ static void test_deliver_to_persistence(void) {
 }
 
 /* ============================================================================
+ * Test: instructions column round-trips through insert + read (schema v84)
+ * ============================================================================ */
+
+static void test_instructions_persistence(void) {
+   /* Non-empty instructions round-trip */
+   sched_event_t ev = make_event();
+   ev.event_type = SCHED_EVENT_BRIEFING;
+   strncpy(ev.instructions, "Lead with unread email; keep it under five bullets.",
+           SCHED_INSTRUCTIONS_MAX - 1);
+   int64_t id = 0;
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS, scheduler_db_insert(&ev, &id));
+
+   sched_event_t got;
+   memset(&got, 0, sizeof(got));
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_get(id, &got));
+   TEST_ASSERT_EQUAL_STRING("Lead with unread email; keep it under five bullets.",
+                            got.instructions);
+
+   /* Empty instructions stay empty (legacy default — fixed prompt) */
+   sched_event_t ev2 = make_event();
+   ev2.event_type = SCHED_EVENT_BRIEFING;
+   /* instructions[0] == '\0' from make_event's memset */
+   id = 0;
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS, scheduler_db_insert(&ev2, &id));
+
+   memset(&got, 0xAA, sizeof(got)); /* prove the read actually clears */
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_get(id, &got));
+   TEST_ASSERT_EQUAL_INT(0, got.instructions[0]);
+}
+
+/* ============================================================================
  * Test: deliver_to carries through recurrence (struct copy invariant)
  *
  * prepare_next_occurrence_row in scheduler.c does *next_out = *src and only
@@ -1147,6 +1179,8 @@ static void test_deliver_to_recurrence_carry(void) {
    src.recurrence = SCHED_RECUR_DAILY;
    strncpy(src.deliver_to, "slack_morning", SCHED_DELIVER_TO_MAX - 1);
    src.say_aloud = SCHED_SAY_ALOUD_ALWAYS;
+   strncpy(src.instructions, "Punchy, lead with anything time-sensitive.",
+           SCHED_INSTRUCTIONS_MAX - 1);
 
    /* Mirror prepare_next_occurrence_row's exact body. */
    sched_event_t next = src;
@@ -1160,6 +1194,7 @@ static void test_deliver_to_recurrence_carry(void) {
    TEST_ASSERT_EQUAL_STRING("slack_morning", next.deliver_to);
    TEST_ASSERT_EQUAL_INT(SCHED_SAY_ALOUD_ALWAYS, next.say_aloud);
    TEST_ASSERT_EQUAL_INT(SCHED_EVENT_BRIEFING, next.event_type);
+   TEST_ASSERT_EQUAL_STRING("Punchy, lead with anything time-sensitive.", next.instructions);
 
    /* Round-trip the next-occurrence row through the DB too so a struct
     * shape that survives the in-memory copy but fails on DB persist
@@ -1170,6 +1205,7 @@ static void test_deliver_to_recurrence_carry(void) {
    memset(&got, 0, sizeof(got));
    TEST_ASSERT_EQUAL_INT(0, scheduler_db_get(id, &got));
    TEST_ASSERT_EQUAL_STRING("slack_morning", got.deliver_to);
+   TEST_ASSERT_EQUAL_STRING("Punchy, lead with anything time-sensitive.", got.instructions);
 }
 
 /* ============================================================================
@@ -1418,6 +1454,32 @@ static void test_update_fields_deliver_to_clear(void) {
    TEST_ASSERT_EQUAL_INT(0, got.deliver_to[0]);
 }
 
+static void test_update_fields_instructions_set_and_clear(void) {
+   sched_event_t ev = make_event();
+   ev.event_type = SCHED_EVENT_BRIEFING;
+   int64_t id = 0;
+   scheduler_db_insert(&ev, &id);
+
+   /* Set instructions on a briefing that had none. */
+   sched_event_t fields;
+   memset(&fields, 0, sizeof(fields));
+   strncpy(fields.instructions, "Terse, no closing line.", SCHED_INSTRUCTIONS_MAX - 1);
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS,
+                         scheduler_db_update_fields(id, 1, &fields, SCHED_FIELD_INSTRUCTIONS));
+   sched_event_t got;
+   scheduler_db_get(id, &got);
+   TEST_ASSERT_EQUAL_STRING("Terse, no closing line.", got.instructions);
+
+   /* Empty instructions clear the steering (back to the default prompt). */
+   memset(&fields, 0, sizeof(fields));
+   fields.instructions[0] = '\0';
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS,
+                         scheduler_db_update_fields(id, 1, &fields, SCHED_FIELD_INSTRUCTIONS));
+   memset(&got, 0xAA, sizeof(got));
+   scheduler_db_get(id, &got);
+   TEST_ASSERT_EQUAL_INT(0, got.instructions[0]);
+}
+
 static void test_update_fields_ownership(void) {
    sched_event_t ev = make_event(); /* user 1 */
    int64_t id = 0;
@@ -1506,6 +1568,7 @@ int main(void) {
    RUN_TEST(test_briefing_steps_list_many_rejects_bad_args);
    RUN_TEST(test_say_aloud_persistence);
    RUN_TEST(test_deliver_to_persistence);
+   RUN_TEST(test_instructions_persistence);
    RUN_TEST(test_deliver_to_recurrence_carry);
    RUN_TEST(test_briefing_steps_update_append);
    RUN_TEST(test_briefing_steps_update_replace);
@@ -1520,6 +1583,7 @@ int main(void) {
    RUN_TEST(test_update_fields_name_and_recurrence);
    RUN_TEST(test_update_fields_fire_at_and_original_time);
    RUN_TEST(test_update_fields_deliver_to_clear);
+   RUN_TEST(test_update_fields_instructions_set_and_clear);
    RUN_TEST(test_update_fields_ownership);
    RUN_TEST(test_update_fields_not_editable_status);
    RUN_TEST(test_update_fields_empty_mask_rejected);

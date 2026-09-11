@@ -1,6 +1,6 @@
 # Scheduler Subsystem
 
-Source: `src/core/scheduler.c`, `src/core/scheduler_db.c`, `src/tools/scheduler_tool.c`
+Source: `src/core/scheduler.c`, `src/core/scheduler_db.c`, `src/core/briefing_prompt.c`, `src/tools/scheduler_tool.c`
 
 Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main doc for layer rules, threading model, and lock ordering.
 
@@ -35,7 +35,8 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 
 ## Key Design Points
 
-- **Event types**: timer (countdown), alarm (absolute time), reminder (absolute + label), task (absolute + tool invocation).
+- **Event types**: timer (countdown), alarm (absolute time), reminder (absolute + label), task (absolute + tool invocation), briefing (multi-step tool run + one LLM summarization at fire time).
+- **Briefings**: a briefing runs its `briefing_steps` on a detached thread, concatenates the output, and makes one LLM summarization call under a `<briefing_data>` block. An optional per-briefing `instructions` field (schema v84, `sched_event_t.instructions`) steers *how* that summary is written (emphasis, structure, length, tone); it is emitted as a fenced `<briefing_instructions>` block that precedes an absolute security rule, so instructions can shape format but can never reclassify the data as commands. The field is LLM-editable in place via the scheduler `update` action (replace-wholesale semantics). Legacy briefings with no instructions use the fixed default prompt.
 - **Chime audio**: built-in chime WAV played via audio subsystem at configurable volume.
 - **WebUI notifications**: `scheduler_fire` WebSocket message triggers banner with snooze/dismiss buttons.
 - **Recurrence**: events auto-reschedule after firing based on recurrence pattern.

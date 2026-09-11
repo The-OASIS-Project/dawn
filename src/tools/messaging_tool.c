@@ -404,15 +404,12 @@ static char *messaging_callback(const char *action, char *value, int *should_res
     * with no session, so fall back to the scheduled-origin context the
     * briefing executor sets — otherwise this would silently bill/audit reads
     * to user 1.  See include/core/scheduled_context.h. */
-   int user_id = 1;
-   int sched_user = 0;
-   bool is_scheduled = scheduled_context_get(&sched_user);
-   session_t *ctx = session_get_command_context();
-   if (ctx && ctx->metrics.user_id > 0) {
-      user_id = ctx->metrics.user_id;
-   } else if (is_scheduled && sched_user > 0) {
-      user_id = sched_user;
-   }
+   /* Identity resolution is centralized in tool_get_current_user_id() (session,
+    * else scheduled-origin owner, else 1).  We still read the scheduled context
+    * separately for the fire-time gate below — "is this scheduled?" is a distinct
+    * question from "who owns it?". */
+   int user_id = tool_get_current_user_id();
+   bool is_scheduled = scheduled_context_get(NULL);
 
    /* Fire-time action-level schedulability gate: the tool carries
     * TOOL_CAP_SCHEDULABLE (so the read-digest use case works), but only
@@ -489,9 +486,11 @@ static const treg_param_t messaging_params[] = {
        .enum_count = 7,
    },
    {
-       .name = "details",
+       .name = "arguments",
        .description =
-           "JSON object with action-specific fields (pass as JSON-encoded string).\n"
+           "JSON object of the action's arguments, passed as a JSON-encoded string.  "
+           "Omit entirely for an action that takes no arguments; never fill it with a "
+           "description or rationale.\n"
            "For 'send': {channel: 'telegram_main', text: 'message body'}.\n"
            "For 'read_channel': {channel: 'general', since: 'last week', until: 'yesterday', "
            "limit: 100, server: 'My Server'}. 'channel' is the Discord channel name (with or "

@@ -1530,6 +1530,16 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
          handle_scheduler_cancel_occurrence(conn, event_id);
       } else if (strcmp(action, "clear_missed") == 0) {
          handle_scheduler_clear_missed(conn, event_id);
+      } else if (strcmp(action, "update") == 0) {
+         /* Edit a briefing's summarization instructions from the panel.  Only a
+          * string-typed field is honored (empty string clears); a missing or
+          * non-string field is rejected by the handler rather than clearing. */
+         json_object *instr_obj = NULL;
+         json_object_object_get_ex(payload, "instructions", &instr_obj);
+         const char *instructions = (instr_obj && json_object_is_type(instr_obj, json_type_string))
+                                        ? json_object_get_string(instr_obj)
+                                        : NULL;
+         handle_scheduler_update_instructions(conn, event_id, instructions);
       } else if (strcmp(action, "dismiss_missed") == 0) {
          /* Delete a queued missed notification. Uses missed_notif_id rather than
           * event_id, so this branch runs before the event_id validation.
