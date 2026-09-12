@@ -40,6 +40,7 @@
 #include <unistd.h>
 
 #include "auth/auth_db.h"
+#include "core/job_dispatch.h"
 #include "core/memory_filter.h"
 #include "core/rate_limiter.h"
 #include "core/session_manager.h"
@@ -530,7 +531,19 @@ static void process_inbound(inbound_item_t *item) {
       }
    }
 
+   /* Persist the tool-turn's assistant tool_calls + role:tool rows to the channel
+    * conversation for the whole (synchronous) dispatch — the SAME mechanism jobs use
+    * (job_dispatch_tool_persist_cb, snapshot conv_id).  A messaging turn is otherwise on
+    * the tool loop's fan_ephemeral path with no persist hook, so without this a WebUI
+    * viewer reloading the channel conversation loses the tool interaction (the chat
+    * platform only ever receives the final answer, which persists inline below).  pctx is
+    * stack-scoped and the hook fires on THIS thread during dispatch; cleared right after. */
+   job_persist_ctx_t pctx = { conv_id, item->user_id };
+   if (conv_id > 0) {
+      session_set_tool_persist_hook(session, job_dispatch_tool_persist_cb, &pctx);
+   }
    char *response = core_text_input_dispatch(session, item->body, NULL, NULL, NULL, 0, &opts);
+   session_set_tool_persist_hook(session, NULL, NULL);
 
    /* Stop the typing keepalive before doing anything else with the
     * response — including the empty-response early return below, so
