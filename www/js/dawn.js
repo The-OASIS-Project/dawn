@@ -1224,6 +1224,12 @@
             case 'conversation_messages_appended':
                DawnHistory.handleConversationMessagesAppended(msg.payload);
                break;
+            case 'conversation_list_changed':
+               // A conversation was created/bumped from another interface (second
+               // tab, messaging, voice, a background job). Surface it behind the
+               // sidebar's consent pill instead of silently re-ordering the list.
+               DawnHistory.handleConversationListChanged(msg.payload);
+               break;
             case 'lock_conversation_llm_response':
                // Background ack for per-conversation LLM settings lock. Silent on
                // success; surface only genuine failures (success === false).

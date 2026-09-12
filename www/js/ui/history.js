@@ -43,6 +43,11 @@
    let historyEscToken = null; // DawnEscStack registration while the history panel is open
    let reassignEscToken = null; // DawnEscStack registration while the reassign modal is open
 
+   // Conversation ids changed from another interface (second tab, messaging, voice,
+   // a background job) since the last list load, surfaced behind the consent pill.
+   // A Set of String ids, so a turn's several bumped frames coalesce to one entry.
+   let pendingListChangeIds = new Set();
+
    // Track pending delete to clear UI if deleting active conversation
    let pendingDeleteId = null;
 
@@ -151,6 +156,7 @@
       searchInput: null,
       searchContentCheckbox: null,
       list: null,
+      refreshPill: null, // consent pill for remote-driven list changes
       // Sidebar rail elements
       sidebarRail: null,
       sidebarToggle: null,
@@ -546,6 +552,9 @@
          historyState.conversations = incoming;
          historyState.conversationsTotal = payload.total != null ? payload.total : incoming.length;
          renderConversationList();
+         // A fresh page-0 load reflects current ordering + membership, so any
+         // queued remote changes are now applied — drop the consent pill.
+         clearPendingListChange();
       }
    }
 
@@ -1055,6 +1064,85 @@
       // TODO: switch to an incremental-append path when forever-conversations get
       // long enough that the full re-render's scroll-jump becomes annoying.
       requestLoadConversation(id);
+   }
+
+   /* =============================================================================
+    * Remote list-change pill (auto-update WITHOUT silent re-order)
+    *
+    * The server pushes `conversation_list_changed` when a conversation is created
+    * or its last-activity is bumped from ANY interface (a second tab, messaging,
+    * voice, a background job, a scheduler briefing). Rather than silently
+    * re-ordering the sidebar under the user — jarring, and the "things blindly
+    * happening" we deliberately avoid — we accumulate the affected conversation
+    * ids and surface a single consent pill. Clicking it applies the pending page-0
+    * refresh, so the disruptive full re-render only ever happens on an explicit
+    * tap (or on the next natural list load: opening the panel re-fetches and
+    * clears the pending set). The Set is the coalescer — a turn's several bumped
+    * frames for one conversation collapse to one pill entry, so no debounce timer
+    * is needed on top of the server's role="tool" row suppression.
+    * ============================================================================= */
+
+   function updateRefreshPill() {
+      const pill = historyElements.refreshPill;
+      if (!pill) return;
+      const n = pendingListChangeIds.size;
+      if (n <= 0) {
+         pill.classList.add('hidden');
+         pill.textContent = '';
+         return;
+      }
+      // Unhide BEFORE writing the text: the button is its own aria-live="polite"
+      // region, and a mutation while the element is display:none (out of the a11y
+      // tree) may not be announced — so enter the tree first, then change content.
+      // The leading glyph is decorative; the text carries the meaning for AT.
+      pill.classList.remove('hidden');
+      pill.textContent = n === 1 ? '↻ 1 update — Refresh' : `↻ ${n} updates — Refresh`;
+   }
+
+   // Drop any queued remote changes and hide the pill (idempotent).
+   function clearPendingListChange() {
+      pendingListChangeIds.clear();
+      updateRefreshPill();
+   }
+
+   // Apply the queued changes on the user's explicit request: reuse the exact
+   // page-0 refetch every local mutation already uses. Its full re-render is now
+   // consent-driven, so the flash / scroll reset is expected — the user asked.
+   // Do NOT clear the pending set here: requestListConversations no-ops when a
+   // load is already in flight (e.g. an infinite-scroll append) or the socket is
+   // down, and pre-clearing would silently drop the queued changes on a click
+   // that never actually refetched. The replace-load response clears the set once
+   // the fresh page-0 has really landed, so the pill persists until then.
+   function applyPendingListChange() {
+      requestListConversations(false);
+   }
+
+   /*
+    * Server pushed `conversation_list_changed` — a conversation was created or
+    * bumped from another interface. Queue it behind the consent pill.
+    */
+   function handleConversationListChanged(payload) {
+      if (!payload || !payload.conversation_id) return;
+      const id = Number(payload.conversation_id);
+      if (!Number.isInteger(id) || id <= 0) return;
+      const reason = payload.reason === 'created' ? 'created' : 'bumped';
+
+      const known = historyState.conversations.some((c) => Number(c.id) === id);
+
+      // Self-echo / no-op filters:
+      // - A `created` we already have is this tab's own new-conversation round-trip
+      //   (we refetched on new_conversation_response before the echo landed) or a
+      //   duplicate — nothing new to surface.
+      // - A `bumped` of the conversation you're actively viewing is your own turn
+      //   (or one you're watching); nagging you to refresh your own open chat is
+      //   exactly the noise to avoid, and its sidebar position is low-value here.
+      if (reason === 'created' && known) return;
+      if (reason === 'bumped' && id === historyState.activeConversationId) return;
+
+      // String key — matches generatingConvIds/unreadConvIds; conversation ids can
+      // in principle exceed 2^53, so keying by string keeps two large ids distinct.
+      pendingListChangeIds.add(String(id));
+      updateRefreshPill();
    }
 
    function handleSearchConversationsResponse(payload) {
@@ -1873,6 +1961,7 @@
       historyElements.searchClear = document.getElementById('history-search-clear');
       historyElements.searchContentCheckbox = document.getElementById('history-search-content');
       historyElements.list = document.getElementById('history-list');
+      historyElements.refreshPill = document.getElementById('history-refresh-pill');
       // The scrollable container is .history-content (overflow-y:auto), NOT
       // #history-list (display:flex) — infinite-scroll must listen on this.
       historyElements.content = historyElements.panel
@@ -1974,6 +2063,11 @@
                requestSearchConversations(query, searchContent);
             }
          });
+      }
+
+      // Consent pill: apply queued remote list changes on an explicit click.
+      if (historyElements.refreshPill) {
+         historyElements.refreshPill.addEventListener('click', applyPendingListChange);
       }
    }
 
@@ -2401,6 +2495,8 @@
       handleConversationRenamed: handleConversationRenamed,
       // External-writer append broadcast handler (SMS/Telegram/future Discord)
       handleConversationMessagesAppended: handleConversationMessagesAppended,
+      // Remote list create/bump broadcast handler (any interface) → consent pill
+      handleConversationListChanged: handleConversationListChanged,
       // Briefing support
       loadConversation: requestLoadConversation,
       refreshList: requestListConversations,

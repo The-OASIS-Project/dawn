@@ -1724,6 +1724,39 @@ void calendar_broadcast_events_changed(int user_id) {
 }
 
 /*
+ * Strong symbol that overrides the weak stub in auth_db_conv.c.
+ * Emits a per-user `conversation_list_changed` frame so every browser this user has
+ * open updates its sidebar when a conversation is created or bumped from any
+ * interface. Payload carries {conversation_id, reason} so an in-place client can do
+ * a targeted update; DAWN's own client re-fetches page 0 (debounced) behind a pill.
+ * Browsers only: a satellite/DAP client renders no conversation sidebar. Fired from
+ * the conv-DB write paths, which may run on any thread, so it uses the thread-safe
+ * response queue inside broadcast_json_to_user_ex.
+ */
+void conversation_list_changed_notify(int user_id, int64_t conv_id, conv_list_change_t reason) {
+   /* A conversation always belongs to a real authenticated user; unlike the
+    * scheduler (which fans user_id<=0 "system events" to everyone), a list change
+    * has no all-users meaning, so refuse the degenerate broadcast-to-all. */
+   if (user_id <= 0)
+      return;
+
+   const char *reason_str = (reason == CONV_LIST_CHANGE_CREATED) ? "created" : "bumped";
+
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("conversation_list_changed"));
+   json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "conversation_id", json_object_new_int64(conv_id));
+   json_object_object_add(payload, "reason", json_object_new_string(reason_str));
+   json_object_object_add(root, "payload", payload);
+
+   int sent = broadcast_json_to_user_ex(user_id, root, /*browsers_only=*/true);
+   if (sent > 0) {
+      OLOG_INFO("WebUI: Broadcast conversation_list_changed (user=%d conv=%lld %s) to %d client(s)",
+                user_id, (long long)conv_id, reason_str, sent);
+   }
+}
+
+/*
  * Nudge every admin browser to re-pull config after a successful set_config save.
  * DAWN config is daemon-global and admin-only (single dawn.toml), so this fans to
  * ALL admin browsers rather than scoping to a user like the calendar/scheduler

@@ -1127,6 +1127,36 @@ typedef int (*conversation_all_callback_t)(const conversation_t *conv,
                                            void *ctx);
 
 /**
+ * @brief Why a user's conversation list changed (payload of the notify below)
+ */
+typedef enum {
+   CONV_LIST_CHANGE_CREATED = 0, /**< A new conversation appeared */
+   CONV_LIST_CHANGE_BUMPED = 1   /**< An existing conversation's last-activity moved */
+} conv_list_change_t;
+
+/**
+ * @brief Announce that a user's conversation list changed (create / bump).
+ *
+ * Store-level domain event: the conversation DB tells any interested surface that
+ * this user's sidebar list needs to update, so a change made from ANY entry path
+ * (WebUI, voice, messaging, jobs, research, scheduler) reaches every one of the
+ * user's connected browsers without a page refresh.
+ *
+ * The weak no-op default lives in auth_db_conv.c (compiled only when WebUI is OFF);
+ * the strong override in src/webui/webui_broadcasts.c emits a per-user
+ * `conversation_list_changed` WS frame carrying {conversation_id, reason}. Callers
+ * fire it AFTER releasing the auth_db lock (leaf-lock rule).
+ *
+ * Phase-7 consolidation candidate — see docs/TODO.md (the six→seven weak-symbol
+ * scheduler_broadcasts_t merge); mirrors calendar_broadcast_events_changed.
+ *
+ * @param user_id Owner of the conversation
+ * @param conv_id Conversation that changed
+ * @param reason  CONV_LIST_CHANGE_CREATED or CONV_LIST_CHANGE_BUMPED
+ */
+void conversation_list_changed_notify(int user_id, int64_t conv_id, conv_list_change_t reason);
+
+/**
  * @brief Create a new conversation
  *
  * @param user_id User ID who owns the conversation

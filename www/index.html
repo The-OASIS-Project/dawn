@@ -2358,6 +2358,17 @@ Format rules:
             </div>
 
             <div class="history-content">
+               <!-- Consent pill: shown when a conversation is created/updated from
+                    another interface (a second tab, messaging, voice, a background
+                    job). Clicking it applies the pending list refresh — so the
+                    disruptive full re-render only happens on an explicit tap, never
+                    silently under the user. aria-live announces the count politely. -->
+               <button
+                  id="history-refresh-pill"
+                  class="history-refresh-pill hidden"
+                  type="button"
+                  aria-live="polite"
+               ></button>
                <div id="history-list" class="history-list">
                   <!-- Conversations grouped by date will be populated dynamically -->
                   <div class="history-list-empty">No conversations yet</div>

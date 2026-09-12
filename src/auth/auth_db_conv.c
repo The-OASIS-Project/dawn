@@ -37,6 +37,26 @@
 #include "auth/auth_db_internal.h"
 #include "logging.h"
 
+/* Weak no-op fallback for the WebUI "conversation list changed, update" broadcast.
+ * When WebUI is on, the strong override in src/webui/webui_broadcasts.c wins the
+ * link and emits the WS frame; this weak def is the fallback everywhere else. Unlike
+ * calendar_broadcast_events_changed (whose weak stub is #ifndef ENABLE_WEBUI), this
+ * one is defined UNCONDITIONALLY and weakly, because the CALLER lives in
+ * auth_db_conv.c — which several standalone test binaries in tests/ bare-link WITH
+ * ENABLE_WEBUI defined but WITHOUT webui_broadcasts.c (test_blob_migration,
+ * test_v69/v70_migration, test_image_store, test_ota, test_document_original_store).
+ * An #ifndef guard would compile the fallback out of those builds and leave the
+ * symbol undefined at link (a green `make dawn` but a red `tests-ci`). weak+strong
+ * resolves to the strong daemon def with no double-definition. Phase-7 weak-symbol
+ * consolidation candidate. */
+void conversation_list_changed_notify(int user_id, int64_t conv_id, conv_list_change_t reason)
+    __attribute__((weak));
+void conversation_list_changed_notify(int user_id, int64_t conv_id, conv_list_change_t reason) {
+   (void)user_id;
+   (void)conv_id;
+   (void)reason;
+}
+
 /* =============================================================================
  * Helper Functions
  * ============================================================================= */
@@ -149,6 +169,7 @@ int conv_db_create(int user_id, const char *title, int64_t *conv_id_out) {
    AUTH_DB_UNLOCK();
 
    OLOG_INFO("Created conversation %lld for user %d", (long long)*conv_id_out, user_id);
+   conversation_list_changed_notify(user_id, *conv_id_out, CONV_LIST_CHANGE_CREATED);
    return AUTH_DB_SUCCESS;
 }
 
@@ -215,6 +236,7 @@ int conv_db_create_with_origin(int user_id,
 
    OLOG_INFO("Created %s conversation %lld for user %d", safe_origin, (long long)*conv_id_out,
              user_id);
+   conversation_list_changed_notify(user_id, *conv_id_out, CONV_LIST_CHANGE_CREATED);
    return AUTH_DB_SUCCESS;
 }
 
@@ -531,6 +553,7 @@ int conv_db_create_continuation(int user_id,
 
    OLOG_INFO("Created continuation conversation %lld from parent %lld for user %d",
              (long long)*conv_id_out, (long long)parent_id, user_id);
+   conversation_list_changed_notify(user_id, *conv_id_out, CONV_LIST_CHANGE_CREATED);
    return AUTH_DB_SUCCESS;
 }
 
@@ -1599,7 +1622,17 @@ int conv_db_add_message_with_tools_ex(int64_t conv_id,
 
    AUTH_DB_UNLOCK();
 
-   return (rc == SQLITE_DONE) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+   if (rc != SQLITE_DONE)
+      return AUTH_DB_FAILURE;
+
+   /* The updated_at bump re-orders this user's sidebar — tell any connected
+    * browser (leaf-lock rule: after the unlock). Skip role="tool" rows: the
+    * assistant row of the same turn already emitted a "bumped", so a multi-row
+    * tool turn fires one signal, not N. */
+   if (strcmp(role, "tool") != 0)
+      conversation_list_changed_notify(user_id, conv_id, CONV_LIST_CHANGE_BUMPED);
+
+   return AUTH_DB_SUCCESS;
 }
 
 /* Back-compat wrapper: assistant/user/system rows never carry a failure flag, so they persist

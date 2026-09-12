@@ -1870,6 +1870,29 @@ carries no event content, so no PII on the wire.
 { "type": "calendar_events_changed" }
 ```
 
+#### `conversation_list_changed`
+The user's conversation list changed — a conversation was **created** or its
+last-activity was **bumped** — from any interface (a second browser tab, a messaging
+channel, a voice/satellite turn, a background job, a scheduler briefing). Lets a browser
+keep its conversation sidebar current without a page refresh. Fanned per-user to the
+owning user's **browser** sessions only (a satellite/DAP client renders no sidebar).
+Fired from the conversation-DB write paths (create + the per-message `updated_at` bump);
+`role:"tool"` rows are suppressed server-side, so a multi-row tool turn emits one
+`bumped`, not one per row. Carries a small payload so a client that maintains its list
+in place can do a targeted update; the reference WebUI instead surfaces a consent pill
+and re-fetches page-0 on click (it never re-orders the list silently). Unknown to older
+clients — safely ignored.
+```json
+{
+  "type": "conversation_list_changed",
+  "payload": { "conversation_id": 1234, "reason": "created" }
+}
+```
+`reason` is `"created"` (a new conversation appeared) or `"bumped"` (an existing
+conversation's last-activity moved). Title/preview/timestamp are **not** included —
+the client reads them from its normal `list_conversations` refetch, so nothing beyond
+an id and a coarse reason is on the wire.
+
 ---
 
 ### Satellite Responses
