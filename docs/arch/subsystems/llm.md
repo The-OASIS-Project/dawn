@@ -211,9 +211,11 @@ User Query → LLM Provider (OpenAI/Claude/Local)
 
 **TTFT = Time To First Token** (lower = faster perceived response).
 
-\* TTFT on the benchmark harness's ~66-token prompts. DAWN's real system prompt
-is ~1000 tokens and yields substantially higher TTFT; that has not been measured
-on b10626. Quality and TTFT are from one sweep of all presets on 2026-09-03,
+\* TTFT on the benchmark harness's ~66-token prompts — useful for ranking models,
+useless as a latency estimate. Real DAWN traffic has a **median 2,360-token**
+prompt, where Preset J's measured TTFT is **~3.8 s** (p90 12.7 s). Prompt
+processing runs ~482 tok/s for Preset J and only ~219 tok/s for the dense
+Qwen3.6 27B — a 2.2x spread the tok/s column completely hides. Quality and TTFT are from one sweep of all presets on 2026-09-03,
 AGX Orin 64GB MAXN, llama.cpp b10626, 116-point FRIDAY suite. The Ollama row was
 never benchmarked and its numbers are inherited estimates.
 

@@ -707,25 +707,42 @@ parsed-but-not-yet-enforced — see the guide).
 
 **Total** = ASR time + TTFT + TTS time.
 
-AGX Orin 64GB MAXN. **TTFT depends heavily on prompt size**, so the basis is
-stated per row rather than quoting one number — DAWN's real system prompt is
-~1000 tokens, far larger than the benchmark harness's ~66.
+AGX Orin 64GB MAXN. **TTFT is dominated by prompt size**, so a single latency
+figure is meaningless without stating which prompt it used. DAWN has three
+different ones in play:
 
-| Component                          | Latency (Whisper base GPU) | Notes                            |
-| ---------------------------------- | -------------------------- | -------------------------------- |
-| ASR (Whisper base)                 | ~110 ms                    | GPU accelerated                   |
-| TTFT, short prompt (~66 tok)       | 264-332 ms                 | Preset J, b10626, 2026-09-03      |
-| TTFT, full DAWN prompt (~1000 tok) | ~1.3 s warm                | Preset J, b8667 — **stale**       |
-| TTS (Piper)                        | ~200 ms                    | First sentence                    |
-| **Total, short prompt**            | **~0.6 s**                 | Best case                         |
-| **Total, full DAWN prompt**        | **~1.6 s**                 | What a real voice turn looks like |
+| Context | Prompt size |
+|---|---|
+| `test_llama_performance.sh` (speed harness) | ~66 tokens |
+| `test_llm_quality.py` (FRIDAY suite) | 1,145 tokens |
+| **Real DAWN traffic** | **median 2,360**, p90 ~6k |
 
-Preset A (Qwen3 4B, no vision) is markedly better on this axis — 45-59 ms TTFT,
-the best of any preset — at the cost of vision support.
+Prompt processing is near-linear, so the durable constant is a rate:
+**Preset J processes ~482 tok/s**, giving `TTFT ≈ prompt_tokens ÷ 482`.
 
-The full-prompt TTFT has not been re-measured since the b10626 upgrade; treat
-the ~1.6 s figure as the last known value, not a current one. Every other
-number here is from the 2026-09-03 full-fleet sweep.
+| Component                                | Latency    | Notes                              |
+| ---------------------------------------- | ---------- | ---------------------------------- |
+| ASR (Whisper base)                       | ~110 ms    | GPU accelerated                     |
+| TTFT @ ~66-tok prompt                    | 264-332 ms | Preset J, benchmark only            |
+| TTFT @ 1,145-tok suite prompt, **cached**| ~0 s       | prefix shared across tests → free   |
+| **TTFT @ 2,360-tok production median**   | **~3.8 s** | Preset J, measured over 2,318 turns |
+| TTS (Piper)                              | ~200 ms    | First sentence                      |
+| **Total, a typical live voice turn**     | **~4.1 s** | ASR + production TTFT + TTS         |
+
+Earlier revisions of this table claimed ~1.3 s total. That came from the
+benchmark's small prompt, not production traffic; p90 in production is 12.7 s
+and p99 is 26.4 s. Preset A (Qwen3 4B, no vision) is far better on this axis.
+
+**Prompt caching is as significant as the model.** The FRIDAY suite reuses one
+system prompt across all 13 tests, so after the first call the prefix is cached
+and prompt processing costs ~nothing — its 0.75 s median total is essentially
+generation time alone. Production is not so lucky: the same logs show 1,749
+full re-process events from cache misses, and that is why the production median
+is 3.8 s while a benchmark at a *larger* prompt finishes in under a second.
+DAWN's two-segment prompt design (`prompt_compose.c`, stable prefix + volatile
+tail) exists precisely to keep that prefix cacheable. Full detail, per-model rates and the
+measured size→TTFT curve live in
+[services/llama-server/README.md](services/llama-server/README.md#latency-what-actually-governs-perceived-speed).
 
 **Streaming advantage**: with streaming LLM + TTS the user hears the *first
 sentence* as soon as it is synthesized, rather than waiting for the whole

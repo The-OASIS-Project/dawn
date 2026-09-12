@@ -12,9 +12,9 @@ with each other:
 **Local LLM Winner:** Qwen3.6-35B-A3B-Q4_K_M (MoE, ~3B active) — llama-server Preset J
 - **Quality:** 94.0% (A grade; 91.4–94.0% over four runs, three landing on 94.0)
 - **Speed:** 37.0–37.2 tok/s — the fastest model scoring ≥94%, *with* vision
-- **TTFT:** 264–332 ms on the harness's ~66-token prompts. DAWN's real ~1000-token
-  system prompt gives substantially higher TTFT and has not been re-measured on
-  b10626
+- **TTFT:** 264–332 ms on the harness's ~66-token prompts — a model-comparison
+  figure, not a latency estimate. Prompt processing runs ~482 tok/s, so real
+  traffic (median 2,360 tokens) gives **~3.8 s median TTFT**, p90 12.7 s
 - Within a few points of Claude Haiku/Sonnet (96.5%) at zero cost, fully offline
 
 On constrained hardware, **Qwen3-4B-Instruct-2507-Q4_K_M** (Preset A) gives
@@ -94,8 +94,9 @@ provider = "auto"    # Auto-detects llama.cpp vs Ollama
 
 **Performance** (Preset J, AGX Orin 64GB MAXN, llama.cpp b10626):
 - Quality: 94.0% (A grade; 91.4–94.0% over four runs)
-- Speed: 37.0–37.2 tok/s
-- TTFT: 264–332 ms on a ~66-token prompt (higher with DAWN's full prompt)
+- Speed: 37.0–37.2 tok/s generation; ~482 tok/s prompt processing
+- TTFT: ~3.8 s median on real traffic (2,360-tok median prompt); 264–332 ms on
+  the 66-token benchmark prompt — quote the first, not the second
 - Cost: Free
 
 ---
@@ -345,6 +346,25 @@ After testing **31+ configurations**, these settings achieve optimal quality:
 
 **Key Finding:** After testing 19 parameters, **only batch size and context size matter**. All sampling parameters (temperature, top-k, top-p, repeat penalty) have **zero effect** on quality.
 
+### Local vs cloud — measured end-to-end, same 13-test suite
+
+`max_tokens=150`, ~1,145-token prompt, cloud includes network RTT:
+
+| Model | Quality | Median response |
+|---|---|---|
+| Claude Opus 4.7 | 99.1% | 1.55 s |
+| Claude Haiku 4.5 | 96.6% | 1.06 s |
+| Claude Sonnet 4.6 | 96.6% | 1.64 s |
+| **Qwen3.6 35B-A3B (Preset J)** | 94.0% | **0.75 s** |
+| Qwen3 4B Instruct (Preset A) | 94.8% | 1.06 s |
+| Gemma 4 31B (Preset D) | 97.4% | 5.68 s |
+
+Preset J is faster end-to-end than every Claude model tested, for 2.6 quality
+points, at zero cost and offline. **But** at 1,145 tokens that sits at the
+favourable end of the curve — at production's 2,360-token median, Preset J's
+TTFT alone is ~3.8 s. Cloud is far less sensitive to prompt growth, so the
+local advantage narrows and eventually inverts as prompts get longer.
+
 ### Model Comparison — current (AGX Orin 64GB MAXN, llama.cpp b10626, 116-point suite)
 
 | Model | Preset | Quality | Speed | Vision | Recommendation |
@@ -388,9 +408,9 @@ not line up with the table above.
 
 | Metric | Cloud | Local (Qwen3.6 35B-A3B, Preset J) |
 |--------|-------|-----------------------------------|
-| **Quality** | 96.5-99.1% (Claude) | 94.0% (97.4% with Gemma 4 31B) |
-| **Speed** | ~1.2s LLM | ~37.1 tok/s |
-| **Total Latency** | ~3.1s | ~1.6s to first sentence (full DAWN prompt) |
+| **Quality** | 96.6-99.1% (Claude) | 94.0% (97.4% with Gemma 4 31B) |
+| **Speed** | ~1.2s LLM | ~37.1 tok/s generation, ~482 tok/s prompt |
+| **Total Latency** | ~3.1s | ~4.1s on a typical live turn (2,360-tok prompt) |
 | **Offline?** | No | Yes |
 | **Privacy** | Data sent to API | Fully local |
 | **Cost** | ~$0.01-0.02 each | Free |

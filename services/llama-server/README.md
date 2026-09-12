@@ -23,9 +23,10 @@ b10626, AGX Orin 64GB @ MAXN, 116-point FRIDAY suite** — one build, one machin
 one suite, so the rows are directly comparable to each other for the first time.
 
 TTFT is the range across the harness's three probes, which use **~66-token
-prompts**. DAWN's real system prompt is ~1000 tokens and produces substantially
-higher TTFT; that figure has not been re-measured on b10626 and is *not* what
-this column shows. Speed is the mean of the same three probes.
+prompts** — far smaller than anything DAWN actually sends, so this column is
+useful for comparing models *to each other* and useless as a latency estimate.
+See [Latency: what actually governs perceived speed](#latency-what-actually-governs-perceived-speed)
+for real numbers. Speed is the mean of the same three probes.
 
 Quality carries real run-to-run variance at temp 0.7 — where a model was run
 more than once the spread is given. Treat a 1-3 point gap between models as
@@ -92,6 +93,105 @@ The production pick trades ~3.4 points of quality for 5.5x the speed.
 Caveat: this is a 13-test, 116-point instruction-following suite with ±3 points
 of run-to-run variance. It measures DAWN's command/tool-formatting behaviour,
 not general capability — do not read it as a general model ranking.
+
+### Latency: what actually governs perceived speed
+
+**tok/s is not the number that matters.** Generation speed decides how fast a
+reply *continues*; **prompt processing** decides how long the user waits before
+hearing anything. On long prompts the second dominates, and the two rank models
+differently — Qwen 3.6 27B and Qwen 3.5 35B-A3B are one tok/s tier apart but
+**2.5x** apart on prompt processing.
+
+#### Three different prompt sizes — don't mix them up
+
+Earlier revisions of this document quoted "DAWN's ~1000-token system prompt".
+That figure is the **quality suite's** prompt, not production's. Measured:
+
+| Context | Prompt size | What it is |
+|---|---|---|
+| `test_llama_performance.sh` | **~66 tokens** | the TTFT column in the tables above |
+| `test_llm_quality.py` | **1,145 tokens** (1,139–1,607) | the FRIDAY suite |
+| **Real DAWN traffic** | **median 2,360**, p90 ~6k, max 52k | what users actually pay for |
+
+Production numbers come from 2,318 prompt-eval events in
+`/var/log/llama-cpp/error.log`, attributed to Preset J by tracking which model
+was loaded at the time.
+
+#### Prompt-processing rate (the durable figure)
+
+Processing is near-linear in prompt size, so the useful published constant is a
+**rate**, not a single TTFT — it predicts any prompt size and does not go stale
+as the prompt grows:
+
+| Model | Prompt processing | Median TTFT in production | p90 |
+|---|---|---|---|
+| Qwen3.6 35B-A3B (Preset J) | **~482 tok/s** | 3,834 ms | 12,699 ms |
+| Qwen3.5 35B-A3B (Preset F) | ~562 tok/s | 1,270 ms\* | 9,915 ms |
+| Qwen3.6 27B (Preset I) | **~219 tok/s** | 7,689 ms | 35,796 ms |
+
+\* *Preset F's median reflects smaller prompts in its sample (p50 708 tok), not
+a faster model — compare the rate column, not the median.*
+
+    TTFT ≈ prompt_tokens ÷ prompt_rate
+
+#### Preset J measured curve (n=2,318)
+
+| Prompt tokens | n | Median TTFT | p90 |
+|---|---|---|---|
+| 0–500 | 424 | 476 ms | 680 ms |
+| 500–1k | 116 | 1,349 ms | 1,378 ms |
+| 1k–2k | 517 | 1,993 ms | 3,120 ms |
+| 2k–4k | 396 | 6,663 ms | 9,701 ms |
+| 4k–8k | 845 | 10,355 ms | 15,047 ms |
+| 8k–16k | 10 | 17,423 ms | 23,641 ms |
+
+**Overall median 3.8 s, p90 12.7 s, p99 26.4 s.** Earlier revisions claimed
+"~1.3 s"; that was never measured against a production prompt.
+
+Prompt caching matters as much as the model: the same log holds **1,749
+"re-processing due to lack of cache data"** events, each paying full price. Any
+single TTFT number is meaningless without saying whether the prefix was cached.
+
+**Known gap:** these logs cannot separate voice turns from RAG/document
+workloads — the 52k-token prompts are certainly not voice. Closing that needs
+DAWN's own `ttft_ms` (already computed in `session_manager_llm.c`, currently
+sent to the WebUI and discarded) logged with the session type.
+
+### Local vs cloud: measured, same suite
+
+Identical 13-test FRIDAY suite, `max_tokens=150`, ~1,145-token prompt. This is
+**end-to-end response time**, not TTFT. Cloud figures include network RTT from
+this location.
+
+| Model | Quality | Median | Mean | Max |
+|---|---|---|---|---|
+| Claude Opus 4.7 | 99.1% | 1.55 s | 1.79 s | 2.88 s |
+| Claude Sonnet 4.6 | 96.6% | 1.64 s | 1.84 s | 4.38 s |
+| Claude Haiku 4.5 | 96.6% | 1.06 s | 1.27 s | 2.19 s |
+| **Qwen3.6 35B-A3B (Preset J)** | 94.0% | **0.75 s** | 0.99 s | 2.85 s |
+| Qwen3-Coder-Next (H) | 94.0% | 0.65 s | 1.11 s | 3.69 s |
+| Qwen3 4B Instruct (A) | 94.8% | 1.06 s | 1.13 s | 1.65 s |
+| Gemma 4 26B-A4B (G) | 93.1% | 1.41 s | 1.50 s | 2.64 s |
+| Gemma 3 12B (C) | 89.7% | 2.36 s | 2.57 s | 4.00 s |
+| Qwen3.8 27B (K) | 95.7% | 3.99 s | 4.43 s | 10.05 s |
+| Gemma 4 31B (D) | 97.4% | 5.68 s | 5.85 s | 11.27 s |
+
+**Preset J is faster end-to-end than every Claude model tested** — 0.75 s vs
+Haiku's 1.06 s — for 2.6 quality points, at zero cost and fully offline.
+
+⚠ **These are warm-cache numbers.** The suite reuses one system prompt across
+all 13 tests, so after the first call llama.cpp has the 1,145-token prefix
+cached and prompt processing costs ~nothing — Preset J's 0.75 s median is
+essentially generation time alone (~32 completion tokens at 37 tok/s ≈ 0.86 s).
+It is *not* what a cold turn costs.
+
+That is why a benchmark at 1,145 tokens finishes in under a second while
+production, at a 2,360-token median, shows 3.8 s: production hits the cache far
+less often (1,749 recorded misses). Read the table as "local is competitive with
+cloud **when the prefix is cached**" — which is what DAWN's two-segment prompt
+design is built to achieve, and worth verifying rather than assuming. Cloud
+providers are much less sensitive to prompt growth and to cache state, so the
+local advantage narrows, and can invert, as prompts grow or caching misses.
 
 ### Context Scaling: Qwen3.5/3.6 35B-A3B on AGX Orin 64GB MAXN
 
@@ -194,12 +294,10 @@ Speed is the only clear win. Quality is flat within noise — the suite shows ±
 points run-to-run at temp 0.7 (94.8 / 94.0 / 91.4 across three runs), so do not
 read a 1–2 point move as a regression in either direction.
 
-**TTFT did not improve.** `test_llama_performance.sh` sends ~66-token prompts,
-so its TTFT is not comparable with the 1863/1256 ms figures in the table above,
-which the column header defines as DAWN's full ~1000-token system prompt. On the
-like-for-like 66-token basis, b10626 is flat to marginally *worse* than b8667.
-Re-measuring TTFT under a full DAWN prompt on b10626 is still outstanding — the
-2026-09-03 sweep measured TTFT for every preset, but all on the 66-token basis.
+**TTFT did not improve.** `test_llama_performance.sh` sends ~66-token prompts;
+on that like-for-like basis b10626 is flat to marginally *worse* than b8667
+(201/241/301 → 252/287/308 ms). Real-world TTFT is a different and much larger
+number — see the next section.
 
 **Three behaviour changes this upgrade introduced:**
 

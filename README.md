@@ -57,7 +57,7 @@ Everything is GPLv3. Cloud LLMs are optional — DAWN runs fully local if you wa
    - Gemini: thinking mode for Gemini 2.5 Flash/Pro
    - Local: Qwen3 thinking mode with native template support
 - **Cloud Rate Limiting** — Built-in throttling prevents you from getting rate-limited by cloud providers.
-- **Streaming Responses** — DAWN starts speaking while still thinking, just like a real conversation. Perceived latency drops to ~1.3 seconds.
+- **Streaming Responses** — DAWN starts speaking while still thinking, just like a real conversation, so you hear the first sentence instead of waiting for the whole reply. With a cloud provider that's typically ~1-2s; with a local LLM it depends heavily on how long the prompt is (see [llama-server latency notes](services/llama-server/README.md#latency-what-actually-governs-perceived-speed)).
 
 ### Multi-Room Voice (DAP2 Satellites)
 
