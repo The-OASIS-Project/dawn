@@ -402,12 +402,12 @@ static char *handle_add(struct json_object *details, int user_id) {
    char uid[256] = { 0 };
    int rc = calendar_service_add(user_id, summary, start, end, location, description, all_day,
                                  calendar_name, rrule, tz, uid, sizeof(uid));
-   if (rc == 2)
+   if (rc == CALENDAR_RC_READONLY)
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: the target calendar belongs to a read-only account. "
                     "The user has restricted this account from AI modifications. "
                     "Try specifying a different writable calendar.");
-   if (rc != 0) {
+   if (rc != CALENDAR_RC_OK) {
       char *revoked = check_oauth_revoked();
       if (revoked)
          return revoked;
@@ -456,11 +456,11 @@ static char *handle_update(struct json_object *details, int user_id) {
    time_t end = end_str ? iso8601_parse(end_str) : 0;
 
    int rc = calendar_service_update(user_id, uid, summary, start, end, location, description);
-   if (rc == 2)
+   if (rc == CALENDAR_RC_READONLY)
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: the event belongs to a read-only account. "
                     "The user has restricted this account from AI modifications.");
-   if (rc != 0) {
+   if (rc != CALENDAR_RC_OK) {
       char *revoked = check_oauth_revoked();
       if (revoked)
          return revoked;
@@ -479,11 +479,11 @@ static char *handle_delete(struct json_object *details, int user_id) {
       return strdup("Error: 'uid' of the event to delete is required");
 
    int rc = calendar_service_delete(user_id, uid);
-   if (rc == 2)
+   if (rc == CALENDAR_RC_READONLY)
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: the event belongs to a read-only account. "
                     "The user has restricted this account from AI modifications.");
-   if (rc != 0) {
+   if (rc != CALENDAR_RC_OK) {
       char *revoked = check_oauth_revoked();
       if (revoked)
          return revoked;

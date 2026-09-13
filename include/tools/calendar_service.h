@@ -31,6 +31,17 @@
 #include "tools/calendar_db.h"
 
 /* ============================================================================
+ * Return codes (0 = success).  Mutating operations (add_account / add / update /
+ * delete) return one of these; each outcome has a DISJOINT value so no literal
+ * ever means two different things across functions.  See each function's
+ * @return for which codes it can produce.
+ * ============================================================================ */
+#define CALENDAR_RC_OK 0        /* success */
+#define CALENDAR_RC_FAILURE 1   /* generic — network, CalDAV, or unmapped */
+#define CALENDAR_RC_DUPLICATE 2 /* add_account: an account with this identity already exists */
+#define CALENDAR_RC_READONLY 3  /* target calendar/account is read-only (add / update / delete) */
+
+/* ============================================================================
  * Lifecycle
  * ============================================================================ */
 
@@ -50,6 +61,11 @@ bool calendar_service_available(void);
  * Account Management (WebUI admin)
  * ============================================================================ */
 
+/**
+ * @brief Add (provision) a CalDAV account for a user.
+ * @return CALENDAR_RC_OK on success, CALENDAR_RC_FAILURE on failure,
+ *         CALENDAR_RC_DUPLICATE if an account with this identity already exists
+ */
 int calendar_service_add_account(int user_id,
                                  const char *name,
                                  const char *caldav_url,
@@ -145,6 +161,8 @@ int calendar_service_search(int user_id,
  * @param rrule         Recurrence rule (NULL = non-recurring)
  * @param tz_name       User timezone for iCalendar DTSTART TZID
  * @param uid_out       Buffer for created UID (at least 256 bytes)
+ * @return CALENDAR_RC_OK on success, CALENDAR_RC_FAILURE on failure,
+ *         CALENDAR_RC_READONLY if the target calendar/account is read-only
  */
 int calendar_service_add(int user_id,
                          const char *summary,
@@ -161,6 +179,8 @@ int calendar_service_add(int user_id,
 
 /**
  * Update an existing event by UID. Write-through to server.
+ * @return CALENDAR_RC_OK on success, CALENDAR_RC_FAILURE on failure,
+ *         CALENDAR_RC_READONLY if the event's account is read-only
  */
 int calendar_service_update(int user_id,
                             const char *uid,
@@ -170,7 +190,9 @@ int calendar_service_update(int user_id,
                             const char *location,
                             const char *description);
 
-/** Delete an event by UID. Write-through to server. */
+/** Delete an event by UID. Write-through to server.
+ *  @return CALENDAR_RC_OK on success, CALENDAR_RC_FAILURE on failure,
+ *          CALENDAR_RC_READONLY if the event's account is read-only */
 int calendar_service_delete(int user_id, const char *uid);
 
 /* ============================================================================

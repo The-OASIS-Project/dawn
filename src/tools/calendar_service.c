@@ -257,7 +257,7 @@ int calendar_service_add_account(int user_id,
 
    if (!is_oauth && (!password || !password[0])) {
       OLOG_ERROR("calendar: password is required for basic auth account creation");
-      return 1;
+      return CALENDAR_RC_FAILURE;
    }
 
    /* Duplicate check: same user + (OAuth key or username+URL) */
@@ -269,12 +269,12 @@ int calendar_service_add_account(int user_id,
           strcmp(existing[i].oauth_account_key, oauth_account_key) == 0) {
          OLOG_INFO("calendar: account with OAuth key '%s' already exists, skipping",
                    oauth_account_key);
-         return 2; /* Duplicate */
+         return CALENDAR_RC_DUPLICATE;
       }
       if (!is_oauth && username && caldav_url && strcmp(existing[i].username, username) == 0 &&
           strcmp(existing[i].caldav_url, caldav_url) == 0) {
          OLOG_INFO("calendar: account '%s@%s' already exists, skipping", username, caldav_url);
-         return 2; /* Duplicate */
+         return CALENDAR_RC_DUPLICATE;
       }
    }
 
@@ -295,14 +295,14 @@ int calendar_service_add_account(int user_id,
       snprintf(acct.auth_type, sizeof(acct.auth_type), "basic");
       if (calendar_encrypt_password(password, &acct) != 0) {
          OLOG_ERROR("calendar: failed to encrypt password for account '%s'", name);
-         return 1;
+         return CALENDAR_RC_FAILURE;
       }
    }
 
    int64_t id = 0;
    if (calendar_db_account_create(&acct, &id) != 0) {
       OLOG_ERROR("calendar: failed to create account '%s'", name);
-      return 1;
+      return CALENDAR_RC_FAILURE;
    }
 
    OLOG_INFO("calendar: added %s account '%s' (id=%lld)", is_oauth ? "OAuth" : "basic", name,
@@ -317,7 +317,7 @@ int calendar_service_add_account(int user_id,
                    name);
    }
 
-   return 0;
+   return CALENDAR_RC_OK;
 }
 
 int calendar_service_remove_account(int64_t account_id) {
@@ -1162,7 +1162,7 @@ int calendar_service_add(int user_id,
    calendar_db_active_calendars_for_user(user_id, cals, 32, &cal_count);
    if (cal_count <= 0) {
       OLOG_ERROR("calendar: no active calendars for user %d", user_id);
-      return 1;
+      return CALENDAR_RC_FAILURE;
    }
 
    /* Select target: match by name or use first writable */
@@ -1171,7 +1171,7 @@ int calendar_service_add(int user_id,
       for (int i = 0; i < cal_count; i++) {
          if (strcasecmp(cals[i].display_name, calendar_name) == 0) {
             if (cals[i].account_read_only)
-               return 2; /* User explicitly named a read-only calendar */
+               return CALENDAR_RC_READONLY; /* user explicitly named a read-only calendar */
             target = i;
             break;
          }
@@ -1187,18 +1187,18 @@ int calendar_service_add(int user_id,
       }
    }
    if (target < 0)
-      return 2; /* All calendars read-only */
+      return CALENDAR_RC_READONLY; /* all calendars read-only */
 
    /* Get account for auth */
    calendar_account_t acct;
    if (calendar_db_account_get(cals[target].account_id, &acct) != 0)
-      return 1;
+      return CALENDAR_RC_FAILURE;
 
    char password[384];
    char token[OAUTH_TOKEN_BUF_SIZE];
    caldav_auth_t auth;
    if (build_auth_for_account(&acct, &auth, password, sizeof(password), token, sizeof(token)) != 0)
-      return 1;
+      return CALENDAR_RC_FAILURE;
 
    /* Generate UID with random component for unpredictability */
    char uid[256];
@@ -1278,7 +1278,7 @@ int calendar_service_add(int user_id,
    sodium_memzero(token, sizeof(token));
    if (err != CALDAV_OK) {
       OLOG_ERROR("calendar: create event failed: %s", caldav_strerror(err));
-      return 1;
+      return CALENDAR_RC_FAILURE;
    }
 
    /* Cache locally */
@@ -1344,7 +1344,7 @@ int calendar_service_add(int user_id,
       snprintf(uid_out, uid_out_len, "%s", uid);
 
    OLOG_INFO("calendar: created event '%s' (uid=%s)", summary, uid);
-   return 0;
+   return CALENDAR_RC_OK;
 }
 
 int calendar_service_update(int user_id,
@@ -1359,27 +1359,27 @@ int calendar_service_update(int user_id,
    evt.calendar_id = user_id; /* overloaded for get_by_uid */
    if (calendar_db_event_get_by_uid(uid, &evt) != 0) {
       OLOG_ERROR("calendar: event '%s' not found for user %d", uid, user_id);
-      return 1;
+      return CALENDAR_RC_FAILURE;
    }
 
    /* Get calendar and account for auth */
    calendar_calendar_t cal = { 0 };
    if (calendar_db_calendar_get(evt.calendar_id, &cal) != 0) {
       free(evt.raw_ical);
-      return 1;
+      return CALENDAR_RC_FAILURE;
    }
 
    calendar_account_t acct = { 0 };
    if (calendar_db_account_get(cal.account_id, &acct) != 0) {
       free(evt.raw_ical);
-      return 1;
+      return CALENDAR_RC_FAILURE;
    }
 
    if (acct.read_only) {
       OLOG_WARNING("calendar: account '%s' is read-only, cannot modify event", acct.name);
       if (evt.raw_ical)
          free(evt.raw_ical);
-      return 2;
+      return CALENDAR_RC_READONLY;
    }
 
    char password[384];
@@ -1388,7 +1388,7 @@ int calendar_service_update(int user_id,
    if (build_auth_for_account(&acct, &auth, password, sizeof(password), token_buf,
                               sizeof(token_buf)) != 0) {
       free(evt.raw_ical);
-      return 1;
+      return CALENDAR_RC_FAILURE;
    }
 
    /* Update fields and sanitize against CRLF injection */
@@ -1477,7 +1477,7 @@ int calendar_service_update(int user_id,
       OLOG_ERROR("calendar: update event failed: %s", caldav_strerror(err));
       if (evt.raw_ical)
          free(evt.raw_ical);
-      return 1;
+      return CALENDAR_RC_FAILURE;
    }
 
    /* Update cache */
@@ -1505,7 +1505,7 @@ int calendar_service_update(int user_id,
    }
 
    OLOG_INFO("calendar: updated event '%s'", evt.summary);
-   return 0;
+   return CALENDAR_RC_OK;
 }
 
 int calendar_service_delete(int user_id, const char *uid) {
@@ -1513,25 +1513,25 @@ int calendar_service_delete(int user_id, const char *uid) {
    evt.calendar_id = user_id; /* overloaded */
    if (calendar_db_event_get_by_uid(uid, &evt) != 0) {
       OLOG_ERROR("calendar: event '%s' not found", uid);
-      return 1;
+      return CALENDAR_RC_FAILURE;
    }
 
    calendar_calendar_t cal;
    if (calendar_db_calendar_get(evt.calendar_id, &cal) != 0) {
       free(evt.raw_ical);
-      return 1;
+      return CALENDAR_RC_FAILURE;
    }
 
    calendar_account_t acct;
    if (calendar_db_account_get(cal.account_id, &acct) != 0) {
       free(evt.raw_ical);
-      return 1;
+      return CALENDAR_RC_FAILURE;
    }
 
    if (acct.read_only) {
       OLOG_WARNING("calendar: account '%s' is read-only, cannot delete event", acct.name);
       free(evt.raw_ical);
-      return 2;
+      return CALENDAR_RC_READONLY;
    }
 
    char password[384];
@@ -1540,7 +1540,7 @@ int calendar_service_delete(int user_id, const char *uid) {
    if (build_auth_for_account(&acct, &auth, password, sizeof(password), token_buf,
                               sizeof(token_buf)) != 0) {
       free(evt.raw_ical);
-      return 1;
+      return CALENDAR_RC_FAILURE;
    }
 
    char href[1024];
@@ -1552,7 +1552,7 @@ int calendar_service_delete(int user_id, const char *uid) {
    if (err != CALDAV_OK && err != CALDAV_ERR_NOT_FOUND) {
       OLOG_ERROR("calendar: delete event failed: %s", caldav_strerror(err));
       free(evt.raw_ical);
-      return 1;
+      return CALENDAR_RC_FAILURE;
    }
 
    /* Remove from cache */
@@ -1561,7 +1561,7 @@ int calendar_service_delete(int user_id, const char *uid) {
 
    free(evt.raw_ical);
    OLOG_INFO("calendar: deleted event '%s'", uid);
-   return 0;
+   return CALENDAR_RC_OK;
 }
 
 /* =============================================================================
