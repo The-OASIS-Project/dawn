@@ -248,6 +248,20 @@ time_t email_parse_imap_internaldate(const char *idate) {
    return 0;
 }
 
+bool email_parse_valid_iso_date(const char *iso) {
+   if (!iso || !iso[0])
+      return false;
+   struct tm tm_info;
+   memset(&tm_info, 0, sizeof(tm_info));
+   /* Exactly a YYYY-MM-DD calendar date (the search since/before format).
+    * strptime tolerates trailing text, so require it to consume the WHOLE string
+    * — otherwise "2025-01-01garbage" would validate.  Shared authority: both the
+    * IMAP (validate_imap_date) and Gmail (build_search_query) backends gate their
+    * date emission on this, so an invalid date is dropped identically. */
+   const char *end = strptime(iso, "%Y-%m-%d", &tm_info);
+   return end != NULL && *end == '\0';
+}
+
 /* =============================================================================
  * IMAP SEARCH quoted-string builders (pure; unit-tested in test_email_parse.c)
  *

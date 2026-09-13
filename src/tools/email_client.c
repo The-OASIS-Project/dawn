@@ -182,7 +182,11 @@ static bool validate_imap_date(const char *iso_date, char *imap_out, size_t out_
    struct tm tm_info;
    memset(&tm_info, 0, sizeof(tm_info));
 
-   if (!strptime(iso_date, "%Y-%m-%d", &tm_info))
+   /* Require the whole string to be a YYYY-MM-DD date (strptime tolerates
+    * trailing text otherwise).  Matches the shared email_parse_valid_iso_date so
+    * the IMAP and Gmail backends accept/reject the same dates. */
+   const char *end = strptime(iso_date, "%Y-%m-%d", &tm_info);
+   if (!end || *end != '\0')
       return false;
 
    /* Reconstruct in IMAP format: DD-Mon-YYYY */
@@ -193,11 +197,10 @@ static bool validate_imap_date(const char *iso_date, char *imap_out, size_t out_
 }
 
 bool email_search_date_valid(const char *iso) {
-   /* Public wrapper: does `iso` parse as a date the SEARCH builder will actually
-    * emit?  Uses the same validator, so the tool layer's notion of "was this
-    * search date-bounded" can never diverge from what went on the wire. */
-   char imap_date[32];
-   return validate_imap_date(iso, imap_date, sizeof(imap_date));
+   /* email_client-layer accessor for the shared pure validator, so email_tool
+    * (which doesn't include email_parse.h) can tell whether a search was
+    * date-bounded without diverging from what the SEARCH builders emit. */
+   return email_parse_valid_iso_date(iso);
 }
 
 /* The IMAP SEARCH quoted-string builders (email_imap_append_quoted /

@@ -589,6 +589,33 @@ static void test_search_key_null_skips(void) {
    TEST_ASSERT_EQUAL_STRING("", out);
 }
 
+/* ============================================================================
+ * email_parse_valid_iso_date — shared YYYY-MM-DD validator (IMAP + Gmail).
+ * ============================================================================ */
+
+static void test_iso_date_valid(void) {
+   TEST_ASSERT_TRUE(email_parse_valid_iso_date("2026-03-13"));
+   TEST_ASSERT_TRUE(email_parse_valid_iso_date("2024-02-29")); /* leap day */
+}
+
+static void test_iso_date_trailing_junk_rejected(void) {
+   /* The strict fix: strptime alone would accept the leading date and leave the
+    * junk, so we require the whole string to be consumed. */
+   TEST_ASSERT_FALSE(email_parse_valid_iso_date("2026-03-13xyz"));
+   TEST_ASSERT_FALSE(email_parse_valid_iso_date("2026-03-13 10:00"));
+}
+
+static void test_iso_date_wrong_format_rejected(void) {
+   TEST_ASSERT_FALSE(email_parse_valid_iso_date("03/13/2026"));
+   TEST_ASSERT_FALSE(email_parse_valid_iso_date("2026-03")); /* no day */
+   TEST_ASSERT_FALSE(email_parse_valid_iso_date("last week"));
+}
+
+static void test_iso_date_empty_and_null(void) {
+   TEST_ASSERT_FALSE(email_parse_valid_iso_date(""));
+   TEST_ASSERT_FALSE(email_parse_valid_iso_date(NULL));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_rfc822_utc);
@@ -648,5 +675,9 @@ int main(void) {
    RUN_TEST(test_search_key_skips_empty);
    RUN_TEST(test_search_key_skips_all_control);
    RUN_TEST(test_search_key_null_skips);
+   RUN_TEST(test_iso_date_valid);
+   RUN_TEST(test_iso_date_trailing_junk_rejected);
+   RUN_TEST(test_iso_date_wrong_format_rejected);
+   RUN_TEST(test_iso_date_empty_and_null);
    return UNITY_END();
 }

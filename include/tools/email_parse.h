@@ -57,6 +57,14 @@ time_t email_parse_rfc822_date(const char *date_str);
 time_t email_parse_imap_internaldate(const char *idate);
 
 /**
+ * True iff @p iso is exactly a valid YYYY-MM-DD calendar date (the format the
+ * email search `since`/`before` params use).  Requires the whole string to be
+ * consumed, so trailing junk is rejected.  NULL/empty -> false.  Shared by both
+ * the IMAP and Gmail search backends so an invalid date is dropped identically.
+ */
+bool email_parse_valid_iso_date(const char *iso);
+
+/**
  * Append @p value to @p buf as an IMAP quoted string ("...") for safe
  * interpolation into a SEARCH command, tracking the running offset/remaining in
  * @p off / @p rem (BUF_PRINTF convention).  Control chars are dropped, `"` and

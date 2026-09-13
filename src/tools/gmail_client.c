@@ -619,7 +619,9 @@ static void build_search_query(const email_search_params_t *params,
       pos += snprintf(query + pos, query_len - pos, "\"%s\"", safe);
    }
 
-   if (params->since[0]) {
+   /* Gate on the shared validator (same as the IMAP backend), so a malformed
+    * date is dropped rather than passed raw into the Gmail query. */
+   if (email_parse_valid_iso_date(params->since)) {
       /* Convert YYYY-MM-DD to YYYY/MM/DD for Gmail */
       char date_buf[16];
       snprintf(date_buf, sizeof(date_buf), "%s", params->since);
@@ -632,7 +634,7 @@ static void build_search_query(const email_search_params_t *params,
       pos += snprintf(query + pos, query_len - pos, "after:%s", date_buf);
    }
 
-   if (params->before[0]) {
+   if (email_parse_valid_iso_date(params->before)) {
       char date_buf[16];
       snprintf(date_buf, sizeof(date_buf), "%s", params->before);
       for (char *p = date_buf; *p; p++) {
