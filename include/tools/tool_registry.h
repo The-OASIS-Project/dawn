@@ -743,6 +743,15 @@ void tool_registry_foreach_with_capability(tool_capability_t cap,
  * Dynamic Parameter Updates
  * ============================================================================= */
 
+/* tool_registry_update_param_enum() return codes (0 = success; disjoint values,
+ * so each error condition — including the two former uses of "4" — is distinct). */
+#define TREG_ENUM_RC_OK 0
+#define TREG_ENUM_RC_FAILURE 1         /* bad args, registry uninitialized, or tool not found */
+#define TREG_ENUM_RC_PARAM_NOT_FOUND 2 /* param name not present on the tool */
+#define TREG_ENUM_RC_NOT_ENUM 3        /* param exists but is not enum-typed */
+#define TREG_ENUM_RC_TOO_MANY 4        /* count exceeds TOOL_PARAM_ENUM_MAX */
+#define TREG_ENUM_RC_SLOTS_EXHAUSTED 5 /* no free enum-override slot */
+
 /**
  * @brief Update enum values for a tool parameter dynamically
  *
@@ -759,11 +768,12 @@ void tool_registry_foreach_with_capability(tool_capability_t cap,
  * @param param_name Name of the parameter with enum type
  * @param values Array of enum value strings (will be copied)
  * @param count Number of values in array
- * @return 0 on success, non-zero on error:
- *         1 = tool not found
- *         2 = parameter not found
- *         3 = parameter is not enum type
- *         4 = count exceeds TOOL_PARAM_ENUM_MAX
+ * @return TREG_ENUM_RC_OK on success, or one of the TREG_ENUM_RC_* error codes:
+ *         TREG_ENUM_RC_FAILURE        = bad args, registry uninitialized, or tool not found
+ *         TREG_ENUM_RC_PARAM_NOT_FOUND = parameter not found on the tool
+ *         TREG_ENUM_RC_NOT_ENUM       = parameter exists but is not enum-typed
+ *         TREG_ENUM_RC_TOO_MANY       = count exceeds TOOL_PARAM_ENUM_MAX
+ *         TREG_ENUM_RC_SLOTS_EXHAUSTED = no free enum-override slot
  */
 int tool_registry_update_param_enum(const char *tool_name,
                                     const char *param_name,

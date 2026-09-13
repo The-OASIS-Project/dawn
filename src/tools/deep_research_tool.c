@@ -205,9 +205,15 @@ static void dr_confirm_record_failure_locked(int user_id, time_t now) {
    }
 }
 
+/* dr_pending_claim() return codes (0 = success; 1 reserved as the generic
+ * failure slot per the codebase SUCCESS/FAILURE convention, unused here). */
+#define DR_CLAIM_RC_OK 0
+#define DR_CLAIM_RC_NOT_FOUND 2 /* no matching pending proposal: missing / expired / wrong user */
+#define DR_CLAIM_RC_THROTTLED 3 /* too many failed confirmations */
+
 /* Claim a pending proposal by token: validate (exists, user-owned, unused, unexpired,
  * not throttled), copy the STORED brief/deliver_to/parent_conv out, mark single-use.
- * Returns 0 = ok, 2 = not found / expired / wrong user, 3 = throttled. */
+ * Returns DR_CLAIM_RC_OK / DR_CLAIM_RC_NOT_FOUND / DR_CLAIM_RC_THROTTLED. */
 static int dr_pending_claim(int user_id,
                             const char *token,
                             char *brief_out,
@@ -219,7 +225,7 @@ static int dr_pending_claim(int user_id,
    time_t now = time(NULL);
    if (dr_confirm_throttled_locked(user_id, now)) {
       pthread_mutex_unlock(&s_dr_confirm.mutex);
-      return 3;
+      return DR_CLAIM_RC_THROTTLED;
    }
    dr_pending_expire_locked(now);
    dr_pending_t *found = NULL;
@@ -236,7 +242,7 @@ static int dr_pending_claim(int user_id,
    if (!found) {
       dr_confirm_record_failure_locked(user_id, now);
       pthread_mutex_unlock(&s_dr_confirm.mutex);
-      return 2;
+      return DR_CLAIM_RC_NOT_FOUND;
    }
    found->used = true;
    snprintf(brief_out, brief_len, "%s", found->brief);
@@ -244,7 +250,7 @@ static int dr_pending_claim(int user_id,
    *parent_out = found->parent_conv;
    sodium_memzero(found, sizeof(*found));
    pthread_mutex_unlock(&s_dr_confirm.mutex);
-   return 0;
+   return DR_CLAIM_RC_OK;
 }
 
 /* Build the pre-spawn proposal + cost envelope (§7a step 2).  Addressed to the
@@ -437,11 +443,11 @@ static char *handle_start(struct json_object *details, int user_id, int64_t pare
       int64_t stored_parent = 0;
       int crc = dr_pending_claim(user_id, token, brief_buf, sizeof(brief_buf), deliver_buf,
                                  sizeof(deliver_buf), &stored_parent);
-      if (crc == 3) {
+      if (crc == DR_CLAIM_RC_THROTTLED) {
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: too many failed confirmations — wait a minute and try again.");
       }
-      if (crc != 0) {
+      if (crc != DR_CLAIM_RC_OK) {
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: no matching research proposal to confirm (it may have expired, "
                        "already started, or was never proposed). Call deep_research start with "

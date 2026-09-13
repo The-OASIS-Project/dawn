@@ -984,19 +984,19 @@ int tool_registry_update_param_enum(const char *tool_name,
                                     const char **values,
                                     int count) {
    if (!tool_name || !param_name || !values || count <= 0) {
-      return 1;
+      return TREG_ENUM_RC_FAILURE;
    }
 
    if (count > TOOL_PARAM_ENUM_MAX) {
       OLOG_ERROR("tool_registry: Enum count %d exceeds max %d", count, TOOL_PARAM_ENUM_MAX);
-      return 4;
+      return TREG_ENUM_RC_TOO_MANY;
    }
 
    pthread_mutex_lock(&s_registry_mutex);
 
    if (!s_initialized) {
       pthread_mutex_unlock(&s_registry_mutex);
-      return 1;
+      return TREG_ENUM_RC_FAILURE;
    }
 
    /* Find the tool by name */
@@ -1004,7 +1004,7 @@ int tool_registry_update_param_enum(const char *tool_name,
    if (tool_idx < 0 || !s_tools[tool_idx].registered) {
       OLOG_ERROR("tool_registry: Tool '%s' not found for enum update", tool_name);
       pthread_mutex_unlock(&s_registry_mutex);
-      return 1;
+      return TREG_ENUM_RC_FAILURE;
    }
 
    tool_entry_t *entry = &s_tools[tool_idx];
@@ -1022,7 +1022,7 @@ int tool_registry_update_param_enum(const char *tool_name,
    if (param_idx < 0) {
       OLOG_ERROR("tool_registry: Parameter '%s' not found in tool '%s'", param_name, tool_name);
       pthread_mutex_unlock(&s_registry_mutex);
-      return 2;
+      return TREG_ENUM_RC_PARAM_NOT_FOUND;
    }
 
    const treg_param_t *orig_param = &meta->params[param_idx];
@@ -1030,7 +1030,7 @@ int tool_registry_update_param_enum(const char *tool_name,
       OLOG_ERROR("tool_registry: Parameter '%s' in tool '%s' is not enum type", param_name,
                  tool_name);
       pthread_mutex_unlock(&s_registry_mutex);
-      return 3;
+      return TREG_ENUM_RC_NOT_ENUM;
    }
 
    /* Find or allocate override slot */
@@ -1040,7 +1040,7 @@ int tool_registry_update_param_enum(const char *tool_name,
       if (override_idx < 0) {
          OLOG_ERROR("tool_registry: Enum override slots exhausted");
          pthread_mutex_unlock(&s_registry_mutex);
-         return 4;
+         return TREG_ENUM_RC_SLOTS_EXHAUSTED;
       }
    }
 
@@ -1085,7 +1085,7 @@ int tool_registry_update_param_enum(const char *tool_name,
              param_name, valid_count, count - valid_count);
 
    pthread_mutex_unlock(&s_registry_mutex);
-   return SUCCESS;
+   return TREG_ENUM_RC_OK;
 }
 
 void tool_registry_invalidate_cache(void) {

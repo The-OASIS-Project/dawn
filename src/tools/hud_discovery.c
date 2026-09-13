@@ -139,7 +139,7 @@ static bool update_hud_control_elements(void) {
 
    int rc = tool_registry_update_param_enum("hud_control", "element", s_element_ptrs,
                                             s_element_count);
-   if (rc == 0) {
+   if (rc == TREG_ENUM_RC_OK) {
       OLOG_INFO("HUD discovery: Updated hud_control with %d elements", s_element_count);
       return true;
    }
@@ -158,7 +158,7 @@ static bool update_hud_mode_modes(void) {
    }
 
    int rc = tool_registry_update_param_enum("hud_mode", "mode", s_mode_ptrs, s_mode_count);
-   if (rc == 0) {
+   if (rc == TREG_ENUM_RC_OK) {
       OLOG_INFO("HUD discovery: Updated hud_mode with %d modes", s_mode_count);
       return true;
    }
