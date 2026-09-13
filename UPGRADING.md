@@ -12,6 +12,23 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-09-13 — Email: sending now requires you to choose the account
+
+**What changed.** The assistant's `email` `send` action now **requires** an explicit
+`account` naming which of your configured accounts the message goes out *from*.
+Previously, sends silently used the first writable account, so a reply could leave
+from the wrong mailbox. The chosen account is now bound to the draft when it is
+prepared and used unchanged when you confirm the send, and the confirmation readback
+tells you which account it will send from.
+
+**What you need to do.** Nothing for normal use — the assistant now names the sending
+account and reads it back before sending, and is instructed to reply from the account
+the original message was addressed to. **If you created a scheduled/automated task
+that sends email**, make sure it specifies an `account`; a `send` with no account now
+returns an error instead of guessing.
+
+---
+
 ## 2026-09-11 — Optional: serve the Aurora UI from DAWN at /aurora
 
 **New opt-in; nothing changes unless you turn it on.** If you don't run Aurora,

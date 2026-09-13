@@ -186,11 +186,11 @@ void handle_email_add_account(ws_connection_t *conn, json_object *payload) {
           has_user ? json_object_get_string(user_obj) : "", display_name,
           has_pass ? json_object_get_string(pass_obj) : "", read_only, auth_type, oauth_key);
 
-      if (rc == 2) {
+      if (rc == EMAIL_ADD_RC_DUPLICATE) {
          json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
          json_object_object_add(resp_payload, "error",
                                 json_object_new_string("Account already exists"));
-      } else if (rc != 0) {
+      } else if (rc != EMAIL_RC_OK) {
          json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
          json_object_object_add(resp_payload, "error",
                                 json_object_new_string("Failed to add account"));

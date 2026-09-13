@@ -46,6 +46,7 @@
 typedef struct {
    char draft_id[16]; /* hex-encoded randombytes_buf() */
    int user_id;
+   char from_account[128]; /* canonical sending-account name, resolved at draft time */
    char to_address[256];
    char to_name[64];
    char subject[256];
@@ -70,7 +71,8 @@ typedef struct {
  * read paths (recent / read / search / list_folders) so the email_tool
  * wrapper can surface actionable messages instead of a generic
  * "search failed".  Other functions document their own per-function codes
- * (draft creation = 2, confirm = 2/3, etc.) which are reserved at 2-3.
+ * (draft creation = 1/2/3/4, confirm = 1/2/3/4, etc.) reserved in the low
+ * single digits — see each function's doc comment for its exact contract.
  * ============================================================================= */
 #define EMAIL_RC_OK 0
 #define EMAIL_RC_FAILURE 1          /* generic — network, upstream, or unmapped */
@@ -78,6 +80,29 @@ typedef struct {
 #define EMAIL_RC_NO_ACCOUNTS 11     /* user has no enabled email accounts */
 #define EMAIL_RC_INVALID_FOLDER 12  /* folder name failed validation */
 #define EMAIL_RC_NOT_FOUND 13       /* message id not found in the mailbox (stale/wrong/deleted) */
+
+/* Two-step action codes (compose/send + trash prep/confirm; archive shares the
+ * account-resolution set).  0/1 reuse EMAIL_RC_OK / EMAIL_RC_FAILURE above, and
+ * account-not-found / no-accounts are forwarded verbatim as the shared
+ * EMAIL_RC_UNKNOWN_ACCOUNT (10) / EMAIL_RC_NO_ACCOUNTS (11) — so the only codes
+ * defined here are the genuinely per-function outcomes, and each has a DISJOINT
+ * value (2-7): no literal ever means two different things. */
+/* account read-only (create_draft / create_pending_trash / archive) */
+#define EMAIL_ACCT_RC_READONLY 2
+
+#define EMAIL_CONFIRM_RC_NOT_FOUND 3    /* draft/pending not found or expired */
+#define EMAIL_CONFIRM_RC_THROTTLED 4    /* too many failed confirmations */
+#define EMAIL_CONFIRM_RC_ACCOUNT_GONE 5 /* account gone/read-only at confirm time */
+
+/* add_account: an account with this identity already exists */
+#define EMAIL_ADD_RC_DUPLICATE 6
+
+/* Access-summary status predicate (get_access_summary): this one is NOT an
+ * OK/FAILURE result — 0 and 1 are a boolean, EMAIL_ACCESS_RC_ERROR is the
+ * error sentinel. */
+#define EMAIL_ACCESS_ALL_WRITABLE 0 /* no read-only accounts */
+#define EMAIL_ACCESS_HAS_READONLY 1 /* at least one read-only account */
+#define EMAIL_ACCESS_RC_ERROR 7     /* no accounts configured / lookup failed */
 
 /* =============================================================================
  * Lifecycle
@@ -102,6 +127,11 @@ bool email_service_validate_folder_name(const char *folder);
  * Account Management (WebUI)
  * ============================================================================= */
 
+/**
+ * @brief Add (provision) an email account for a user.
+ * @return EMAIL_RC_OK on success, EMAIL_RC_FAILURE on failure,
+ *         EMAIL_ADD_RC_DUPLICATE if an account with this identity already exists
+ */
 int email_service_add_account(int user_id,
                               const char *name,
                               const char *imap_server,
@@ -180,26 +210,48 @@ int email_service_search(int user_id,
 
 /**
  * @brief Create a draft email for two-step send.
+ * @param account_name  Required: which configured account to send FROM (canonical
+ *                      name or username). There is no implicit default — the caller
+ *                      must name the sender so a reply can never go out from the
+ *                      wrong mailbox. The resolved account is bound to the draft and
+ *                      used verbatim at confirm time.
  * @param draft_id_out  Output: hex draft ID string
- * @return 0 on success, 1 on failure, 2 if all accounts read-only
+ * @param from_account_out  Optional output (may be NULL): the resolved CANONICAL
+ *                      account name bound to the draft — differs from @p account_name
+ *                      when the caller passed a username/email alias. Print this,
+ *                      not the raw input, so the confirmation readback names the
+ *                      account the send is actually bound to.
+ * @return EMAIL_RC_OK on success, EMAIL_RC_FAILURE on generic failure (bad input
+ *         / empty account), EMAIL_ACCT_RC_READONLY if the named account is
+ *         read-only, or a forwarded EMAIL_RC_UNKNOWN_ACCOUNT / EMAIL_RC_NO_ACCOUNTS
+ *         from account resolution (no name match / no configured accounts)
  */
 int email_service_create_draft(int user_id,
+                               const char *account_name,
                                const char *to_addr,
                                const char *to_name,
                                const char *subject,
                                const char *body,
                                char *draft_id_out,
-                               size_t draft_id_len);
+                               size_t draft_id_len,
+                               char *from_account_out,
+                               size_t from_account_len);
 
 /**
  * @brief Confirm and send a draft.
- * @return 0 on success, 1 on failure, 2 if draft not found/expired, 3 if throttled
+ * @return EMAIL_RC_OK on success, EMAIL_RC_FAILURE on send failure
+ *         (network/upstream), EMAIL_CONFIRM_RC_NOT_FOUND if the draft is not
+ *         found/expired, EMAIL_CONFIRM_RC_THROTTLED if throttled,
+ *         EMAIL_CONFIRM_RC_ACCOUNT_GONE if the draft's bound sending account is
+ *         no longer available or writable (deleted/disabled/read-only since the
+ *         draft was prepared — prepare a new draft)
  */
 int email_service_confirm_send(int user_id, const char *draft_id);
 
 /**
  * @brief Get access summary for read-only indication.
- * @return 1 if any read-only accounts exist, 0 if all writable, 2 on error
+ * @return EMAIL_ACCESS_HAS_READONLY if any read-only accounts exist,
+ *         EMAIL_ACCESS_ALL_WRITABLE if all writable, EMAIL_ACCESS_RC_ERROR on error
  */
 int email_service_get_access_summary(int user_id,
                                      char *writable,
@@ -220,7 +272,8 @@ int email_service_list_folders(int user_id, const char *account_name, char *out,
  * @brief Create a pending trash action for two-step delete.
  * Fetches message metadata for confirmation display.
  * @param pending_id_out  Output: hex pending ID string
- * @return 0 on success, 1 on failure, 2 if account is read-only
+ * @return EMAIL_RC_OK on success, EMAIL_RC_FAILURE on failure,
+ *         EMAIL_ACCT_RC_READONLY if the account is read-only
  */
 int email_service_create_pending_trash(int user_id,
                                        const char *account_name,
@@ -234,14 +287,19 @@ int email_service_create_pending_trash(int user_id,
 
 /**
  * @brief Confirm and execute a pending trash action.
- * @return 0 on success, 1 on failure, 2 if not found/expired, 3 if throttled
+ * @return EMAIL_RC_OK on success, EMAIL_RC_FAILURE on failure,
+ *         EMAIL_CONFIRM_RC_NOT_FOUND if not found/expired,
+ *         EMAIL_CONFIRM_RC_THROTTLED if throttled,
+ *         EMAIL_CONFIRM_RC_ACCOUNT_GONE if the account is no longer available or
+ *         writable since the pending action was prepared
  */
 int email_service_confirm_trash(int user_id, const char *pending_id);
 
 /**
  * @brief Archive a message (remove from inbox, keep in All Mail/Archive).
  * Single-step operation — no confirmation needed.
- * @return 0 on success, 1 on failure, 2 if account is read-only
+ * @return EMAIL_RC_OK on success, EMAIL_RC_FAILURE on failure,
+ *         EMAIL_ACCT_RC_READONLY if the account is read-only
  */
 int email_service_archive(int user_id, const char *account_name, const char *message_id);
 

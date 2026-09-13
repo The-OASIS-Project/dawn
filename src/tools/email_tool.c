@@ -93,7 +93,8 @@ static int json_get_int(struct json_object *obj, const char *key, int def) {
 
 static int append_access_summary(char *buf, int pos, size_t buf_len, int user_id) {
    char writable[512] = { 0 }, ro[512] = { 0 };
-   if (email_service_get_access_summary(user_id, writable, sizeof(writable), ro, sizeof(ro)) > 0) {
+   if (email_service_get_access_summary(user_id, writable, sizeof(writable), ro, sizeof(ro)) !=
+       EMAIL_ACCESS_ALL_WRITABLE) {
       pos += snprintf(buf + pos, buf_len - pos,
                       "\n\nWritable accounts: %s\nRead-only accounts (no sending): %s",
                       writable[0] ? writable : "(none)", ro);
@@ -452,10 +453,16 @@ static char *handle_search(struct json_object *details, int user_id) {
 }
 
 static char *handle_send(struct json_object *details, int user_id) {
+   const char *account = json_get_str(details, "account");
    const char *to = json_get_str(details, "to");
    const char *subject = json_get_str(details, "subject");
    const char *body = json_get_str(details, "body");
 
+   if (!account || !account[0])
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: 'account' is required — specify which configured account to send "
+                    "FROM (the sender). Call action='accounts' to list them, and never invent "
+                    "one. When replying, use the account the original message arrived on.");
    if (!to || !to[0])
       return strdup("Error: 'to' is required (email address or contact name)");
    if (!subject || !subject[0])
@@ -523,13 +530,19 @@ static char *handle_send(struct json_object *details, int user_id) {
 
    /* Create draft (two-step send) */
    char draft_id[16];
-   int rc = email_service_create_draft(user_id, resolved_addr, resolved_name, subject, body,
-                                       draft_id, sizeof(draft_id));
-   if (rc == 2)
+   char from_account[128] = "";
+   int rc = email_service_create_draft(user_id, account, resolved_addr, resolved_name, subject,
+                                       body, draft_id, sizeof(draft_id), from_account,
+                                       sizeof(from_account));
+   if (rc == EMAIL_ACCT_RC_READONLY)
       return strdup(TOOL_RESULT_ERROR_MARK
-                    "Error: all email accounts are read-only. Cannot send emails.");
-   if (rc != 0)
-      return strdup(TOOL_RESULT_ERROR_MARK "Error: failed to create email draft");
+                    "Error: that account is read-only and cannot send. Choose a writable "
+                    "account (call action='accounts'), or enable write access in WebUI "
+                    "Settings -> Email.");
+   /* Unknown-account / no-accounts are forwarded from find_account — reuse the
+    * shared account-error messages instead of restating them here. */
+   if (rc != EMAIL_RC_OK)
+      return email_rc_to_error(rc, "send draft", account, NULL);
 
    char *buf = malloc(RESULT_BUF_SIZE);
    if (!buf)
@@ -537,13 +550,14 @@ static char *handle_send(struct json_object *details, int user_id) {
 
    snprintf(buf, RESULT_BUF_SIZE,
             "Draft email prepared:\n"
+            "  From account: %s\n"
             "  To: %s%s%s%s\n"
             "  Subject: %s\n"
             "  Body: %s\n\n"
-            "Read this back to the user and ask for confirmation. "
-            "If confirmed, call confirm_send with draft_id '%s'.",
-            resolved_name[0] ? resolved_name : "", resolved_name[0] ? " <" : "", resolved_addr,
-            resolved_name[0] ? ">" : "", subject, body, draft_id);
+            "Read this back to the user (including which account it will send FROM) and ask for "
+            "confirmation. If confirmed, call confirm_send with draft_id '%s'.",
+            from_account, resolved_name[0] ? resolved_name : "", resolved_name[0] ? " <" : "",
+            resolved_addr, resolved_name[0] ? ">" : "", subject, body, draft_id);
 
    return buf;
 }
@@ -555,16 +569,21 @@ static char *handle_confirm_send(struct json_object *details, int user_id) {
 
    int rc = email_service_confirm_send(user_id, draft_id);
    switch (rc) {
-      case 0:
+      case EMAIL_RC_OK:
          return strdup("Email sent successfully.");
-      case 2:
+      case EMAIL_CONFIRM_RC_NOT_FOUND:
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: draft not found or expired. The draft may have timed out "
                        "(5-minute limit). Please use 'send' to create a new draft.");
-      case 3:
+      case EMAIL_CONFIRM_RC_THROTTLED:
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: too many failed confirmation attempts. Please wait 60 seconds "
                        "before trying again.");
+      case EMAIL_CONFIRM_RC_ACCOUNT_GONE:
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: the account this draft was prepared to send from is no longer "
+                       "available or has become read-only. Call action='accounts', then use "
+                       "'send' to prepare a new draft from a writable account.");
       default:
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: failed to send email (network or upstream error). Retry once; "
@@ -611,11 +630,11 @@ static char *handle_trash(struct json_object *details, int user_id) {
    int rc = email_service_create_pending_trash(user_id, account, mid, pending_id,
                                                sizeof(pending_id), subject, sizeof(subject), from,
                                                sizeof(from));
-   if (rc == 2)
+   if (rc == EMAIL_ACCT_RC_READONLY)
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: email account is read-only. Cannot trash emails. Tell the user "
                     "to enable write access for this account in WebUI Settings -> Email.");
-   if (rc != 0)
+   if (rc != EMAIL_RC_OK)
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: failed to prepare trash action. The message_id may be invalid "
                     "(get fresh IDs from 'recent' or 'search') or the account may be "
@@ -643,16 +662,21 @@ static char *handle_confirm_trash(struct json_object *details, int user_id) {
 
    int rc = email_service_confirm_trash(user_id, pending_id);
    switch (rc) {
-      case 0:
+      case EMAIL_RC_OK:
          return strdup("Email moved to Trash successfully.");
-      case 2:
+      case EMAIL_CONFIRM_RC_NOT_FOUND:
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: pending trash not found or expired. The request may have timed out "
                        "(5-minute limit). Please use 'trash' to create a new request.");
-      case 3:
+      case EMAIL_CONFIRM_RC_THROTTLED:
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: too many failed confirmation attempts. Please wait 60 seconds "
                        "before trying again.");
+      case EMAIL_CONFIRM_RC_ACCOUNT_GONE:
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "Error: the account this message belongs to is no longer available or "
+                       "has become read-only. Nothing was deleted. Call action='accounts' to "
+                       "check, then retry from a writable account.");
       default:
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: failed to trash email (network or upstream error). Retry "
@@ -669,9 +693,9 @@ static char *handle_archive(struct json_object *details, int user_id) {
 
    int rc = email_service_archive(user_id, account, mid);
    switch (rc) {
-      case 0:
+      case EMAIL_RC_OK:
          return strdup("Email archived successfully (removed from Inbox, kept in All Mail).");
-      case 2:
+      case EMAIL_ACCT_RC_READONLY:
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: email account is read-only. Cannot archive emails. Tell the "
                        "user to enable write access for this account in WebUI Settings -> "
@@ -906,14 +930,17 @@ static const treg_param_t email_params[] = {
            "digest {window? ('24h' default, or '2d'/'7d'), unread_only?, max? (default 50)} "
            "(a briefing-style summary of recent inbox mail across ALL accounts, grouped by "
            "importance/category with an [E-NN] label per message; act on one via its [ID]), "
-           "send {to, subject, body} (to: email or contact name), "
+           "send {account, to, subject, body} (account: REQUIRED — the configured "
+           "account to send FROM; to: email or contact name), "
            "confirm_send {draft_id}, "
            "trash {message_id, account?} (creates pending — ask user to confirm), "
            "confirm_trash {pending_id}, "
            "archive {message_id, account?} (removes from inbox, no confirmation needed).\n"
            "  account?: the CONFIGURED account name OR username/email from the 'accounts' "
            "action — must already exist. Do NOT invent an email address; if uncertain, "
-           "call action='accounts' first to enumerate. When omitted: 'search' merges ALL "
+           "call action='accounts' first to enumerate. 'send' REQUIRES account (the sender — "
+           "there is no default; when replying, use the account the original arrived on). "
+           "When omitted: 'search' merges ALL "
            "enabled accounts and 'digest' always spans every account; 'read' searches every "
            "enabled account for the message id; but 'recent'/'folders' use only the FIRST "
            "enabled account — name the account explicitly, or use 'digest', to cover every "
@@ -950,12 +977,14 @@ static const tool_metadata_t email_metadata = {
                   "inbox, sent, trash, spam, drafts, starred, important, all, "
                   "or a custom label name. Default is inbox. "
                   "Use 'send' to compose a draft (reads back to user for confirmation). "
+                  "'send' REQUIRES an 'account' argument naming which configured account to "
+                  "send FROM (call 'accounts' to list them; when replying, use the account the "
+                  "original message arrived on). "
                   "Use 'confirm_send' with the draft_id to actually send after user confirms. "
                   "Use 'trash' to move an email to trash (two-step: creates pending action, "
                   "then 'confirm_trash' executes after user confirms). "
                   "Use 'archive' to remove an email from inbox (keeps in All Mail, no "
                   "confirmation needed). "
-                  "Emails are sent from the first writable account. "
                   "For 'send', the 'to' field can be a contact name (resolved via contacts) "
                   "or a direct email address.",
    .params = email_params,

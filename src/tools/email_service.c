@@ -227,23 +227,6 @@ static int find_account(int user_id, const char *account_name, email_account_t *
    return result;
 }
 
-static int find_writable_account(int user_id, email_account_t *out) {
-   email_account_t accounts[EMAIL_MAX_ACCOUNTS];
-   int count = 0;
-   email_db_account_list(user_id, accounts, EMAIL_MAX_ACCOUNTS, &count);
-
-   int result = 1;
-   for (int i = 0; i < count; i++) {
-      if (accounts[i].enabled && !accounts[i].read_only) {
-         *out = accounts[i];
-         result = 0;
-         break;
-      }
-   }
-   sodium_memzero(accounts, sizeof(accounts));
-   return result;
-}
-
 /* =============================================================================
  * Gmail API Detection
  *
@@ -401,12 +384,12 @@ int email_service_add_account(int user_id,
           strcmp(existing[i].oauth_account_key, oauth_account_key) == 0) {
          OLOG_INFO("email: account with OAuth key '%s' already exists, skipping",
                    oauth_account_key);
-         return 2; /* Duplicate */
+         return EMAIL_ADD_RC_DUPLICATE;
       }
       if (!is_oauth && username && imap_server && strcmp(existing[i].username, username) == 0 &&
           strcmp(existing[i].imap_server, imap_server) == 0) {
          OLOG_INFO("email: account '%s@%s' already exists, skipping", username, imap_server);
-         return 2; /* Duplicate */
+         return EMAIL_ADD_RC_DUPLICATE;
       }
    }
 
@@ -947,12 +930,18 @@ static void expire_drafts_locked(void) {
 }
 
 int email_service_create_draft(int user_id,
+                               const char *account_name,
                                const char *to_addr,
                                const char *to_name,
                                const char *subject,
                                const char *body,
                                char *draft_id_out,
-                               size_t draft_id_len) {
+                               size_t draft_id_len,
+                               char *from_account_out,
+                               size_t from_account_len) {
+   if (from_account_out && from_account_len > 0)
+      from_account_out[0] = '\0';
+
    /* Validate field lengths */
    if (!body || strlen(body) > EMAIL_MAX_SEND_BODY_LEN) {
       OLOG_WARNING("email: draft body too long (%zu > %d)", body ? strlen(body) : 0,
@@ -962,10 +951,24 @@ int email_service_create_draft(int user_id,
    if (!subject || strlen(subject) > EMAIL_MAX_SUBJECT_LEN)
       return 1;
 
-   /* Check for writable accounts */
+   /* Resolve the sending account — required, no implicit default.  Binding the
+    * account here (and again verbatim at confirm time) is what prevents a reply
+    * from silently going out from the wrong mailbox.  Not-found / no-accounts are
+    * forwarded verbatim (as list_folders does) so the tool layer reuses the shared
+    * account-error messages; only read-only is a draft-specific outcome. */
+   if (!account_name || !account_name[0])
+      return EMAIL_RC_FAILURE;
+
    email_account_t acct;
-   if (find_writable_account(user_id, &acct) != 0)
-      return 2; /* All accounts read-only */
+   int find_rc = find_account(user_id, account_name, &acct);
+   if (find_rc != EMAIL_RC_OK) {
+      sodium_memzero(&acct, sizeof(acct));
+      return find_rc;
+   }
+   if (acct.read_only) {
+      sodium_memzero(&acct, sizeof(acct));
+      return EMAIL_ACCT_RC_READONLY;
+   }
 
    pthread_mutex_lock(&s_email.draft_mutex);
    expire_drafts_locked();
@@ -997,14 +1000,18 @@ int email_service_create_draft(int user_id,
    d->used = false;
    generate_draft_id(d->draft_id, sizeof(d->draft_id));
 
+   snprintf(d->from_account, sizeof(d->from_account), "%s", acct.name);
    snprintf(d->to_address, sizeof(d->to_address), "%s", to_addr ? to_addr : "");
    snprintf(d->to_name, sizeof(d->to_name), "%s", to_name ? to_name : "");
    snprintf(d->subject, sizeof(d->subject), "%s", subject);
    snprintf(d->body, sizeof(d->body), "%s", body);
 
    snprintf(draft_id_out, draft_id_len, "%s", d->draft_id);
+   if (from_account_out && from_account_len > 0)
+      snprintf(from_account_out, from_account_len, "%s", d->from_account);
 
    pthread_mutex_unlock(&s_email.draft_mutex);
+   sodium_memzero(&acct, sizeof(acct));
    return 0;
 }
 
@@ -1058,12 +1065,12 @@ static void record_confirm_failure(int user_id) {
 
 int email_service_confirm_send(int user_id, const char *draft_id) {
    if (!draft_id || !draft_id[0])
-      return 2;
+      return EMAIL_CONFIRM_RC_NOT_FOUND;
 
    /* Check throttle */
    if (is_throttled(user_id)) {
       OLOG_WARNING("email: confirm_send throttled for user %d", user_id);
-      return 3;
+      return EMAIL_CONFIRM_RC_THROTTLED;
    }
 
    pthread_mutex_lock(&s_email.draft_mutex);
@@ -1082,7 +1089,7 @@ int email_service_confirm_send(int user_id, const char *draft_id) {
    if (!found) {
       pthread_mutex_unlock(&s_email.draft_mutex);
       record_confirm_failure(user_id);
-      return 2; /* Not found / expired */
+      return EMAIL_CONFIRM_RC_NOT_FOUND;
    }
 
    /* Validate user_id match */
@@ -1091,14 +1098,15 @@ int email_service_confirm_send(int user_id, const char *draft_id) {
       record_confirm_failure(user_id);
       OLOG_WARNING("email: confirm_send user mismatch (draft=%d, caller=%d)", found->user_id,
                    user_id);
-      return 2;
+      return EMAIL_CONFIRM_RC_NOT_FOUND;
    }
 
    /* Mark as used before releasing mutex */
    found->used = true;
 
    /* Copy draft data to local before releasing mutex */
-   char to_addr[256], to_name[64], subject[256], body[4096];
+   char from_account[128], to_addr[256], to_name[64], subject[256], body[4096];
+   snprintf(from_account, sizeof(from_account), "%s", found->from_account);
    snprintf(to_addr, sizeof(to_addr), "%s", found->to_address);
    snprintf(to_name, sizeof(to_name), "%s", found->to_name);
    snprintf(subject, sizeof(subject), "%s", found->subject);
@@ -1108,10 +1116,16 @@ int email_service_confirm_send(int user_id, const char *draft_id) {
    sodium_memzero(found, sizeof(*found));
    pthread_mutex_unlock(&s_email.draft_mutex);
 
-   /* Find writable account and send */
+   /* Send from the account bound to the draft — re-resolved (not re-chosen) so a
+    * send always leaves from the account the draft was prepared for.  If it was
+    * disabled, deleted, or flipped read-only between draft and confirm, fail
+    * rather than fall back to a different mailbox. */
    email_account_t acct;
-   if (find_writable_account(user_id, &acct) != 0)
-      return 1;
+   if (find_account(user_id, from_account, &acct) != EMAIL_RC_OK || acct.read_only) {
+      OLOG_WARNING("email: confirm_send account '%s' no longer available/writable", from_account);
+      sodium_memzero(&acct, sizeof(acct));
+      return EMAIL_CONFIRM_RC_ACCOUNT_GONE;
+   }
 
    /* Gmail API path */
    if (is_gmail_api_account(&acct)) {
@@ -1214,7 +1228,7 @@ int email_service_create_pending_trash(int user_id,
          return 1;
    }
    if (acct.read_only)
-      return 2;
+      return EMAIL_ACCT_RC_READONLY;
 
    /* Fetch message metadata for confirmation display */
    email_message_t msg = { 0 };
@@ -1324,11 +1338,11 @@ static int execute_trash(email_account_t *acct, const char *message_id) {
 
 int email_service_confirm_trash(int user_id, const char *pending_id) {
    if (!pending_id || !pending_id[0])
-      return 2;
+      return EMAIL_CONFIRM_RC_NOT_FOUND;
 
    if (is_throttled(user_id)) {
       OLOG_WARNING("email: confirm_trash throttled for user %d", user_id);
-      return 3;
+      return EMAIL_CONFIRM_RC_THROTTLED;
    }
 
    pthread_mutex_lock(&s_email.pending_trash_mutex);
@@ -1347,7 +1361,7 @@ int email_service_confirm_trash(int user_id, const char *pending_id) {
    if (!found) {
       pthread_mutex_unlock(&s_email.pending_trash_mutex);
       record_confirm_failure(user_id);
-      return 2;
+      return EMAIL_CONFIRM_RC_NOT_FOUND;
    }
 
    if (found->user_id != user_id) {
@@ -1355,7 +1369,7 @@ int email_service_confirm_trash(int user_id, const char *pending_id) {
       record_confirm_failure(user_id);
       OLOG_WARNING("email: confirm_trash user mismatch (pending=%d, caller=%d)", found->user_id,
                    user_id);
-      return 2;
+      return EMAIL_CONFIRM_RC_NOT_FOUND;
    }
 
    found->used = true;
@@ -1368,10 +1382,15 @@ int email_service_confirm_trash(int user_id, const char *pending_id) {
    sodium_memzero(found, sizeof(*found));
    pthread_mutex_unlock(&s_email.pending_trash_mutex);
 
-   /* Resolve account and execute trash */
+   /* Re-resolve the account (not re-choose) and re-check writability — an account
+    * flipped read-only, disabled, or deleted between 'trash' and 'confirm_trash'
+    * must not still execute the delete (mirrors confirm_send). */
    email_account_t acct;
-   if (find_account(user_id, account_name, &acct) != 0)
-      return 1;
+   if (find_account(user_id, account_name, &acct) != EMAIL_RC_OK || acct.read_only) {
+      OLOG_WARNING("email: confirm_trash account '%s' no longer available/writable", account_name);
+      sodium_memzero(&acct, sizeof(acct));
+      return EMAIL_CONFIRM_RC_ACCOUNT_GONE;
+   }
 
    return execute_trash(&acct, message_id);
 }
@@ -1395,7 +1414,7 @@ int email_service_archive(int user_id, const char *account_name, const char *mes
    }
 
    if (acct.read_only)
-      return 2;
+      return EMAIL_ACCT_RC_READONLY;
 
    /* Gmail API path */
    if (is_gmail_api_account(&acct)) {
@@ -1456,7 +1475,7 @@ int email_service_get_access_summary(int user_id,
    int count = 0;
    email_db_account_list(user_id, accounts, EMAIL_MAX_ACCOUNTS, &count);
    if (count <= 0)
-      return 2;
+      return EMAIL_ACCESS_RC_ERROR;
 
    writable[0] = '\0';
    read_only_out[0] = '\0';
