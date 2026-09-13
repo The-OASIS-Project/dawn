@@ -67,6 +67,9 @@ int email_read_message(const email_conn_t *conn,
 /**
  * @brief Search emails by criteria in an IMAP folder.
  * @param folder  IMAP folder name (e.g. "INBOX", "[Gmail]/Sent Mail")
+ * @param auth_denied  Optional out (may be NULL): set true when the failure was
+ *                     an IMAP login/credential rejection (CURLE_LOGIN_DENIED),
+ *                     so the caller can surface an actionable "login failed".
  * @return 0 on success, 1 on failure
  */
 int email_search(const email_conn_t *conn,
@@ -74,7 +77,8 @@ int email_search(const email_conn_t *conn,
                  const email_search_params_t *params,
                  email_summary_t *out,
                  int max_out,
-                 int *out_count);
+                 int *out_count,
+                 bool *auth_denied);
 
 /**
  * @brief List available IMAP folders.

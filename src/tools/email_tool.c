@@ -402,11 +402,28 @@ static char *handle_search(struct json_object *details, int user_id) {
    email_summary_t emails[MAX_EMAIL_RESULTS];
    int out_count = 0;
    char next_page_token[256] = { 0 };
+   char warn[256] = { 0 }; /* accounts that couldn't be searched (multi-account merge) */
    int rc = email_service_search(user_id, account, &params, emails, MAX_EMAIL_RESULTS, &out_count,
-                                 next_page_token, sizeof(next_page_token));
+                                 next_page_token, sizeof(next_page_token), warn, sizeof(warn));
 
-   if (rc != EMAIL_RC_OK)
+   if (rc != EMAIL_RC_OK) {
+      /* Every enabled account failed.  Name them (with 'login failed' where known)
+       * instead of the generic backend-error message, so the user gets an
+       * actionable report rather than a silent/opaque failure. */
+      if (warn[0]) {
+         char *msg = malloc(512);
+         if (!msg)
+            return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
+         snprintf(msg, 512,
+                  TOOL_RESULT_ERROR_MARK
+                  "Error: could not search %s. Tell the user; an account marked 'login failed' "
+                  "has bad or expired credentials and should be re-checked in WebUI Settings -> "
+                  "Email.",
+                  warn);
+         return msg;
+      }
       return email_rc_to_error(rc, "search", account, folder);
+   }
 
    sort_summaries_by_date(emails, out_count, sort);
 
@@ -448,6 +465,18 @@ static char *handle_search(struct json_object *details, int user_id) {
       pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos,
                       "\n[More results available. Use page_token: \"%s\" to fetch next page]",
                       next_page_token);
+
+   /* Partial result: some accounts succeeded, others couldn't be reached.  Surface
+    * it so the LLM tells the user rather than silently presenting incomplete results
+    * (or a bare "No emails" that's actually a down account, not a true no-match). */
+   /* Size the guard to the actual note length (fixed text + warn) so the advisory
+    * never truncates mid-sentence when several accounts failed. */
+   if (warn[0] && pos + (int)strlen(warn) + 256 < RESULT_BUF_SIZE)
+      snprintf(buf + pos, RESULT_BUF_SIZE - pos,
+               "\n\nNote: could not search %s — those results are NOT included. Tell the user; "
+               "an account marked 'login failed' has bad or expired credentials and should be "
+               "re-checked in WebUI Settings -> Email.",
+               warn);
 
    return buf;
 }

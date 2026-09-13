@@ -199,6 +199,15 @@ int email_service_read(int user_id,
                        const char *message_id,
                        email_message_t *out);
 
+/**
+ * @brief Search email across one or (when account_name is NULL) all enabled accounts.
+ * @param warn_out  Optional out (may be NULL): on a multi-account search where some
+ *                  accounts failed but others succeeded, this is filled with a
+ *                  human-readable note naming the unreachable accounts (auth failures
+ *                  flagged distinctly) so the caller can tell the user results are
+ *                  partial instead of the failure being silent. Empty when all
+ *                  searched accounts were reached.
+ */
 int email_service_search(int user_id,
                          const char *account_name,
                          const email_search_params_t *params,
@@ -206,7 +215,9 @@ int email_service_search(int user_id,
                          int max,
                          int *out_count,
                          char *next_page_token,
-                         size_t npt_len);
+                         size_t npt_len,
+                         char *warn_out,
+                         size_t warn_len);
 
 /**
  * @brief Create a draft email for two-step send.

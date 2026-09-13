@@ -849,8 +849,11 @@ int email_search(const email_conn_t *conn,
                  const email_search_params_t *params,
                  email_summary_t *out,
                  int max_out,
-                 int *out_count) {
+                 int *out_count,
+                 bool *auth_denied) {
    *out_count = 0;
+   if (auth_denied)
+      *auth_denied = false;
 
    if (max_out > EMAIL_MAX_FETCH_RESULTS)
       max_out = EMAIL_MAX_FETCH_RESULTS;
@@ -922,6 +925,8 @@ int email_search(const email_conn_t *conn,
    CURLcode res = curl_easy_perform(curl);
    if (res != CURLE_OK) {
       OLOG_ERROR("email: IMAP SEARCH failed: %s", curl_easy_strerror(res));
+      if (auth_denied && res == CURLE_LOGIN_DENIED)
+         *auth_denied = true;
       curl_buffer_free(&buf);
       curl_easy_cleanup(curl);
       return 1;

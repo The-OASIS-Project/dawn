@@ -134,17 +134,25 @@ static bool is_loopback(const char *host) {
  * TLS enforcement: refuse plaintext to non-loopback servers.
  * ============================================================================= */
 
+/* build_conn_for_account() outcomes.  Callers that only need pass/fail keep
+ * checking `!= CONN_RC_OK`; the search path distinguishes CONN_RC_AUTH_FAILURE
+ * (a real credential problem worth telling the user about) from a config/TLS
+ * refusal, so it doesn't mislabel a TLS misconfig as "login failed". */
+#define CONN_RC_OK 0           /* success */
+#define CONN_RC_FAILURE 1      /* config/TLS refusal or internal — not a credential problem */
+#define CONN_RC_AUTH_FAILURE 2 /* OAuth token fetch or password decrypt failed (credentials) */
+
 static int build_conn_for_account(const email_account_t *acct, email_conn_t *conn) {
    memset(conn, 0, sizeof(*conn));
 
    /* Enforce TLS for non-loopback servers */
    if (!acct->imap_ssl && !is_loopback(acct->imap_server)) {
       OLOG_ERROR("email: refusing plaintext IMAP to non-loopback server %s", acct->imap_server);
-      return 1;
+      return CONN_RC_FAILURE;
    }
    if (!acct->smtp_ssl && !is_loopback(acct->smtp_server)) {
       OLOG_ERROR("email: refusing plaintext SMTP to non-loopback server %s", acct->smtp_server);
-      return 1;
+      return CONN_RC_FAILURE;
    }
 
    /* Build IMAP URL */
@@ -166,22 +174,22 @@ static int build_conn_for_account(const email_account_t *acct, email_conn_t *con
       oauth_provider_config_t google;
       if (oauth_build_google_provider(GOOGLE_EMAIL_SCOPE, &google) != 0) {
          OLOG_ERROR("email: failed to build Google OAuth provider");
-         return 1;
+         return CONN_RC_FAILURE;
       }
       if (oauth_get_access_token(&google, acct->user_id, acct->oauth_account_key,
                                  conn->bearer_token, sizeof(conn->bearer_token)) != 0) {
          OLOG_ERROR("email: failed to get OAuth access token for %s", acct->name);
-         return 1;
+         return CONN_RC_AUTH_FAILURE;
       }
    } else {
       /* App password — decrypt */
       if (email_decrypt_password(acct, conn->password, sizeof(conn->password)) != 0) {
          OLOG_ERROR("email: failed to decrypt password for %s", acct->name);
-         return 1;
+         return CONN_RC_AUTH_FAILURE;
       }
    }
 
-   return 0;
+   return CONN_RC_OK;
 }
 
 /* =============================================================================
@@ -580,7 +588,10 @@ int email_service_recent(int user_id,
 }
 
 /** Read from a single account */
-static int read_single_account(email_account_t *acct, const char *message_id, email_message_t *out);
+static int read_single_account(email_account_t *acct,
+                               const char *message_id,
+                               email_message_t *out,
+                               bool fanout);
 
 int email_service_read(int user_id,
                        const char *account_name,
@@ -595,7 +606,7 @@ int email_service_read(int user_id,
       int find_rc = find_account(user_id, account_name, &acct);
       if (find_rc != EMAIL_RC_OK)
          return find_rc;
-      return read_single_account(&acct, message_id, out);
+      return read_single_account(&acct, message_id, out, false);
    }
 
    /* No account specified — try all enabled accounts until one succeeds */
@@ -610,7 +621,7 @@ int email_service_read(int user_id,
       if (!accounts[i].enabled)
          continue;
       enabled_seen = 1;
-      int rc = read_single_account(&accounts[i], message_id, out);
+      int rc = read_single_account(&accounts[i], message_id, out, true);
       if (rc == EMAIL_RC_OK)
          return EMAIL_RC_OK;
       if (rc != EMAIL_RC_NOT_FOUND)
@@ -625,7 +636,8 @@ int email_service_read(int user_id,
 
 static int read_single_account(email_account_t *acct,
                                const char *message_id,
-                               email_message_t *out) {
+                               email_message_t *out,
+                               bool fanout) {
    /* Gmail API path — hex IDs contain no colons */
    if (is_gmail_api_account(acct)) {
       char token[OAUTH_TOKEN_BUF_SIZE];
@@ -664,7 +676,13 @@ static int read_single_account(email_account_t *acct,
    char *endptr = NULL;
    unsigned long uid_val = strtoul(uid_str, &endptr, 10);
    if (!endptr || *endptr != '\0' || uid_val == 0 || uid_val > UINT32_MAX) {
-      OLOG_ERROR("email: invalid IMAP UID '%s'", uid_str);
+      /* During a no-account read fan-out this is just a Gmail hex id landing on an
+       * IMAP account (backend mismatch) — expected, not an error.  When the caller
+       * named a specific IMAP account, a bad UID is a real error. */
+      if (fanout)
+         OLOG_DEBUG("email: message id '%s' is not an IMAP UID (skipping IMAP account)", uid_str);
+      else
+         OLOG_ERROR("email: invalid IMAP UID '%s'", uid_str);
       return 1;
    }
 
@@ -693,10 +711,13 @@ static int search_single_account(email_account_t *acct,
                                  int max,
                                  int *out_count,
                                  char *next_page_token,
-                                 size_t npt_len) {
+                                 size_t npt_len,
+                                 bool *auth_error) {
    *out_count = 0;
    if (next_page_token && npt_len > 0)
       next_page_token[0] = '\0';
+   if (auth_error)
+      *auth_error = false;
 
    folder_norm_t norm;
    normalize_folder(params->folder, acct, &norm);
@@ -707,6 +728,9 @@ static int search_single_account(email_account_t *acct,
 
       char token[OAUTH_TOKEN_BUF_SIZE];
       if (get_gmail_token(acct, token, sizeof(token)) != 0) {
+         /* Token fetch failed = the account can't authenticate (revoked/expired). */
+         if (auth_error)
+            *auth_error = true;
          sodium_memzero(token, sizeof(token));
          return 1;
       }
@@ -720,12 +744,19 @@ static int search_single_account(email_account_t *acct,
    /* IMAP path (no pagination support) */
    email_conn_t conn;
    int rc = build_conn_for_account(acct, &conn);
-   if (rc != 0) {
+   if (rc != CONN_RC_OK) {
+      /* Only a credential failure (bad token / undecryptable password) is a "login"
+       * problem; a TLS/config refusal must NOT be mislabeled as bad credentials. */
+      if (auth_error)
+         *auth_error = (rc == CONN_RC_AUTH_FAILURE);
       sodium_memzero(&conn, sizeof(conn));
       return 1;
    }
 
-   rc = email_search(&conn, norm.imap_folder, params, out, max, out_count);
+   bool imap_auth_denied = false;
+   rc = email_search(&conn, norm.imap_folder, params, out, max, out_count, &imap_auth_denied);
+   if (rc != 0 && auth_error)
+      *auth_error = imap_auth_denied;
    sodium_memzero(&conn, sizeof(conn));
 
    for (int i = 0; i < *out_count; i++)
@@ -742,10 +773,14 @@ int email_service_search(int user_id,
                          int max,
                          int *out_count,
                          char *next_page_token,
-                         size_t npt_len) {
+                         size_t npt_len,
+                         char *warn_out,
+                         size_t warn_len) {
    *out_count = 0;
    if (next_page_token && npt_len > 0)
       next_page_token[0] = '\0';
+   if (warn_out && warn_len > 0)
+      warn_out[0] = '\0';
 
    if (!validate_folder_name(params->folder))
       return EMAIL_RC_INVALID_FOLDER;
@@ -756,7 +791,8 @@ int email_service_search(int user_id,
       int find_rc = find_account(user_id, account_name, &acct);
       if (find_rc != EMAIL_RC_OK)
          return find_rc;
-      return search_single_account(&acct, params, out, max, out_count, next_page_token, npt_len);
+      return search_single_account(&acct, params, out, max, out_count, next_page_token, npt_len,
+                                   NULL);
    }
 
    /* No account specified — search ALL enabled accounts and merge results.
@@ -776,16 +812,25 @@ int email_service_search(int user_id,
 
       int this_count = 0;
       int remaining = max - total;
+      bool acct_auth = false;
       int rc = search_single_account(&accounts[i], params, out + total, remaining, &this_count,
-                                     NULL, 0);
+                                     NULL, 0, &acct_auth);
       if (rc == 0) {
          total += this_count;
       } else {
          /* Per-account transport/upstream failure.  Logged (not silent) so a
           * genuine backend problem is diagnosable from the log; the search still
-          * continues across the remaining accounts. */
+          * continues across the remaining accounts.  Also surfaced to warn_out so
+          * the LLM can tell the user results are partial — an auth failure would
+          * otherwise be completely invisible when other accounts return matches. */
          any_error = 1;
-         OLOG_WARNING("email: search failed for account '%s' (rc=%d)", accounts[i].name, rc);
+         OLOG_WARNING("email: search failed for account '%s' (rc=%d%s)", accounts[i].name, rc,
+                      acct_auth ? ", login denied" : "");
+         if (warn_out && warn_len > 0) {
+            size_t used = strlen(warn_out);
+            snprintf(warn_out + used, warn_len - used, "%s%s (%s)", used > 0 ? ", " : "",
+                     accounts[i].name, acct_auth ? "login failed" : "unreachable");
+         }
       }
    }
 
@@ -854,7 +899,8 @@ void email_service_fill_reply_states(int user_id, email_summary_t *rows, int nro
        * accounts must not share one sent-search or cross-tag each other's rows.
        * account_addr is stamped from acct->username, so it is the stable key. */
       int rc = email_service_search(user_id, accts[a].username, &params, sent,
-                                    EMAIL_MAX_FETCH_RESULTS, &sent_count, npt, sizeof(npt));
+                                    EMAIL_MAX_FETCH_RESULTS, &sent_count, npt, sizeof(npt), NULL,
+                                    0);
       if (rc != EMAIL_RC_OK) {
          OLOG_INFO("email_reply: acct='%s' enrichable=%d sent-search FAILED (rc=%d) — rows UNKNOWN",
                    accts[a].name, enrichable, rc);
@@ -1232,7 +1278,7 @@ int email_service_create_pending_trash(int user_id,
 
    /* Fetch message metadata for confirmation display */
    email_message_t msg = { 0 };
-   int read_rc = read_single_account(&acct, message_id, &msg);
+   int read_rc = read_single_account(&acct, message_id, &msg, false);
    char fetched_subject[256] = "(unknown)";
    char fetched_from[128] = "(unknown)";
    if (read_rc == 0) {

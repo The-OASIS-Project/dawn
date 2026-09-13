@@ -154,7 +154,14 @@ static int gmail_api_get(CURL *curl,
    if (http_code_out)
       *http_code_out = http_code;
    if (http_code < 200 || http_code >= 300) {
-      OLOG_ERROR("gmail: API request returned HTTP %ld", http_code);
+      /* 404 is an expected "not in this mailbox" outcome — the multi-account read
+       * fan-out probes every account, so logging each miss at ERROR is noise.  The
+       * caller maps it to GMAIL_RC_NOT_FOUND and surfaces it properly.  Real errors
+       * (auth 401/403, 5xx) stay at ERROR. */
+      if (http_code == 404)
+         OLOG_DEBUG("gmail: API request returned HTTP 404 (not found)");
+      else
+         OLOG_ERROR("gmail: API request returned HTTP %ld", http_code);
       curl_buffer_free(resp);
       return 1;
    }
