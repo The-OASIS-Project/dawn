@@ -377,6 +377,33 @@ Helpers (all in `tool_registry.h`): `tool_result_is_error(s)` tests the first by
 `tool_result_strip_error_mark(s)` removes it in place. You normally only need the `TOOL_RESULT_ERROR_MARK`
 prefix on your return — the framework calls the other two.
 
+#### Return codes for service/helper functions (name them — never bare `return 2`)
+
+The `TOOL_RESULT_ERROR_MARK` above is about the *callback's string* result. Separately, the
+`int`-returning **service-layer** functions behind a tool (`*_service_*`, draft/confirm helpers,
+DB wrappers) often need to distinguish *why* they failed. When a function has more than two outcomes,
+**give each outcome a named constant — do not `return 2;` with the meaning in a comment.**
+
+Rules, in order of how much they bite:
+
+1. **Values must be DISJOINT across the module.** The hazard is one literal meaning two things:
+   `return 2` = "read-only" in one function and "duplicate" in another. It reads fine, compiles, and
+   silently misleads the day someone refactors or copies a call site. This has shipped and been
+   cleaned up in `email`, `calendar`, and `tool_registry` — don't reintroduce it. One literal, one
+   meaning, module-wide.
+2. **`0`/`1` stay `SUCCESS`/`FAILURE`** (`include/dawn_error.h`) — reuse them as `<TOOL>_RC_OK` /
+   `_FAILURE`. **Never negative returns** (`-1`/`-errno`); specific codes are `> 1`.
+3. **Document the full contract in the header** `@return` block, by constant name, listing every
+   code the body can produce — the doc and the `return` sites must not drift.
+4. **Move producer and every caller together.** A code's value is private to the module; renumbering
+   is safe *only* if every `return` and every `rc == N` comparison change in the same commit.
+
+Template families to copy: `EMAIL_RC_*` / `EMAIL_ACCT_RC_*` (`include/tools/email_service.h`) and
+`CALENDAR_RC_*` (`include/tools/calendar_service.h`). Scope the prefix to the function family
+(`<TOOL>_<GROUP>_RC_<CONDITION>`) when a tool has several unrelated code sets. A generic `FAILURE`
+that folds several non-actionable failure modes into `1` is fine and idiomatic — the smell is a
+*specific* coded outcome (`≥ 2`) left unnamed or value-colliding.
+
 ---
 
 ### Device Types (`tool_device_type_t`)
