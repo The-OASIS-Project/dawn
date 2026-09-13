@@ -194,6 +194,16 @@ static char *email_rc_to_error(int rc, const char *op, const char *account, cons
                   "from 'recent', 'search', or 'digest' (copy it exactly).",
                   (account && account[0]) ? account : "any of your accounts");
          break;
+      case EMAIL_RC_TIMEOUT:
+         /* Generic fallback.  The 'search' path builds a date-aware message in
+          * handle_search (it knows whether a date bound was already supplied),
+          * so this branch only serves other ops. */
+         snprintf(msg, 384,
+                  TOOL_RESULT_ERROR_MARK
+                  "Error: email %s timed out (the server was slow to respond). Retry once; if "
+                  "persistent, the mailbox may be very large or the backend is slow.",
+                  op);
+         break;
       default: {
          /* If the underlying oauth_refresh detected invalid_grant, the
           * tokens were revoked at the provider — a generic "network
@@ -420,6 +430,33 @@ static char *handle_search(struct json_object *details, int user_id) {
                   "has bad or expired credentials and should be re-checked in WebUI Settings -> "
                   "Email.",
                   warn);
+         return msg;
+      }
+      if (rc == EMAIL_RC_TIMEOUT) {
+         /* Date-aware hint: if the search was already date-bounded, telling the
+          * LLM to "add a since date" is wrong — the range is just still too big,
+          * so advise narrowing.  Otherwise advise bounding with a date.  Keyed on
+          * date VALIDITY (what the SEARCH actually emitted), not raw presence: a
+          * malformed date is silently dropped, so treating it as "bounded" would
+          * tell the LLM to tighten a bound that was never applied. */
+         bool bounded = email_search_date_valid(params.since) ||
+                        email_search_date_valid(params.before);
+         char *msg = malloc(384);
+         if (!msg)
+            return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
+         if (bounded)
+            snprintf(msg, 384,
+                     TOOL_RESULT_ERROR_MARK
+                     "Error: email search timed out even with a date range — the range is still "
+                     "too large for this mailbox (the server has no fast full-text index). Narrow "
+                     "it: use a tighter 'since', add a 'before', or a specific 'from'/'subject'.");
+         else
+            snprintf(msg, 384,
+                     TOOL_RESULT_ERROR_MARK
+                     "Error: email search timed out — the mailbox is large and the server has no "
+                     "fast full-text index, so an unbounded search is slow. Retry with a 'since' "
+                     "date (e.g. the last 12 months) to bound it; add 'before' or a specific "
+                     "'from'/'subject' to narrow further.");
          return msg;
       }
       return email_rc_to_error(rc, "search", account, folder);

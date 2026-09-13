@@ -57,6 +57,28 @@ time_t email_parse_rfc822_date(const char *date_str);
 time_t email_parse_imap_internaldate(const char *idate);
 
 /**
+ * Append @p value to @p buf as an IMAP quoted string ("...") for safe
+ * interpolation into a SEARCH command, tracking the running offset/remaining in
+ * @p off / @p rem (BUF_PRINTF convention).  Control chars are dropped, `"` and
+ * `\` are backslash-escaped, and — because libcurl URL-DECODES the built
+ * CUSTOMREQUEST before sending — every literal `%` is escaped as `%25`.  This is
+ * the sole injection defense for LLM-supplied search terms; see the CRITICAL note
+ * at the definition.  NULL @p value is treated as empty.
+ */
+void email_imap_append_quoted(char *buf, size_t *off, size_t *rem, const char *value);
+
+/**
+ * Append ` KEY "value"` (KEY quoted via email_imap_append_quoted) to an IMAP
+ * SEARCH command, or nothing when @p value is NULL/empty or reduces to empty
+ * after control-char stripping (avoids KEY "" = match-all).
+ */
+void email_imap_append_search_key(char *buf,
+                                  size_t *off,
+                                  size_t *rem,
+                                  const char *key,
+                                  const char *value);
+
+/**
  * Case-insensitive, whole-token test for an IMAP system flag within a FLAGS
  * group.  `flags_group` is the text of a "FLAGS (...)" list (with or without
  * the surrounding parens); `flag` is the flag name to find (e.g. "\\Seen",

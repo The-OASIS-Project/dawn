@@ -80,6 +80,7 @@ typedef struct {
 #define EMAIL_RC_NO_ACCOUNTS 11     /* user has no enabled email accounts */
 #define EMAIL_RC_INVALID_FOLDER 12  /* folder name failed validation */
 #define EMAIL_RC_NOT_FOUND 13       /* message id not found in the mailbox (stale/wrong/deleted) */
+#define EMAIL_RC_TIMEOUT 14 /* op timed out (large mailbox / slow server); hint to bound it */
 
 /* Two-step action codes (compose/send + trash prep/confirm; archive shares the
  * account-resolution set).  0/1 reuse EMAIL_RC_OK / EMAIL_RC_FAILURE above, and

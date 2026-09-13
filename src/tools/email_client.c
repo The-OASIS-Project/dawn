@@ -21,7 +21,8 @@
  * Email client — IMAP/SMTP operations via libcurl.
  *
  * Security notes:
- * - IMAP SEARCH commands use literal syntax {N}\r\n<data> to prevent injection
+ * - IMAP SEARCH terms use quoted-string syntax with control-char stripping and
+ *   "/\ escaping (append_imap_quoted) to prevent command injection
  * - Date parameters are parsed via strptime() and reconstructed via strftime()
  * - TLS is enforced for non-loopback servers
  * - Credentials are wiped via sodium_memzero() on all code paths
@@ -42,6 +43,7 @@
 #include "core/buf_printf.h"
 #include "core/curl_buffer.h"
 #include "logging.h"
+#include "tools/email_instrument.h"
 #include "tools/email_parse.h"
 #include "tools/html_parser.h"
 
@@ -64,6 +66,17 @@
  * to a truncated body (out->truncated), never a failed read.  Attachments are a
  * separate feature (see EMAIL_ATTACHMENT_DOWNLOAD_DESIGN.md). */
 #define EMAIL_MAX_READ_FETCH_BYTES (512 * 1024)
+
+/* IMAP per-op timeout budget (TOTAL transfer time: connect + TLS + LOGIN + the
+ * command).  The default covers the cheap ops (SEARCH ALL/UNSEEN, ENVELOPE
+ * FETCH, LIST, a bounded single-message read).  Content SEARCH (TEXT/BODY) is
+ * the outlier: on a server with no FTS index it brute-force-scans every message
+ * body, and slow shared-hosting auth (measured ~2-5 s just for LOGIN) eats into
+ * the budget too — so an explicit keyword search gets a much larger allowance.
+ * A hung/pooled connection is bounded by CONNECT + these. */
+#define EMAIL_IMAP_CONNECT_TIMEOUT_SEC 15L
+#define EMAIL_IMAP_TIMEOUT_SEC 30L
+#define EMAIL_IMAP_SEARCH_TIMEOUT_SEC 60L
 
 /* =============================================================================
  * SMTP Upload Buffer for email_send
@@ -108,8 +121,8 @@ static CURL *create_imap_handle(const email_conn_t *conn) {
    if (!curl)
       return NULL;
 
-   curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
-   curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+   curl_easy_setopt(curl, CURLOPT_TIMEOUT, EMAIL_IMAP_TIMEOUT_SEC);
+   curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, EMAIL_IMAP_CONNECT_TIMEOUT_SEC);
    curl_easy_setopt(curl, CURLOPT_VERBOSE, 0L);
    setup_auth(curl, conn);
 
@@ -179,17 +192,18 @@ static bool validate_imap_date(const char *iso_date, char *imap_out, size_t out_
    return true;
 }
 
-/* =============================================================================
- * IMAP Literal Builder
- *
- * Builds IMAP literal syntax {N}\r\n<data> for safe string interpolation.
- * Literals are length-prefixed and cannot be escaped out of.
- * ============================================================================= */
-
-static void append_imap_literal(char *buf, size_t *off, size_t *rem, const char *value) {
-   size_t val_len = strlen(value);
-   BUF_PRINTF(buf, *off, *rem, "{%zu}\r\n%s", val_len, value);
+bool email_search_date_valid(const char *iso) {
+   /* Public wrapper: does `iso` parse as a date the SEARCH builder will actually
+    * emit?  Uses the same validator, so the tool layer's notion of "was this
+    * search date-bounded" can never diverge from what went on the wire. */
+   char imap_date[32];
+   return validate_imap_date(iso, imap_date, sizeof(imap_date));
 }
+
+/* The IMAP SEARCH quoted-string builders (email_imap_append_quoted /
+ * email_imap_append_search_key) are pure string helpers and live in the
+ * unit-tested email_parse.c — see the CRITICAL note there on curl's
+ * CUSTOMREQUEST URL-decode (why '%' must be escaped). */
 
 /* RFC 2047 encoded-word decoding (email_decode_rfc2047) lives in email_parse.c
  * so both the IMAP and Gmail backends share one implementation — see the note
@@ -676,6 +690,9 @@ int email_fetch_recent(const email_conn_t *conn,
    if (!curl)
       return 1;
 
+   email_instrument_ctx_t dctx;
+   email_instrument_attach(curl, &dctx);
+
    /* Step 1: SEARCH for UIDs, optionally unread only */
    char url[1024];
    snprintf(url, sizeof(url), "%s/%s", conn->imap_url, encoded_folder);
@@ -695,9 +712,10 @@ int email_fetch_recent(const email_conn_t *conn,
    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
 
-   CURLcode res = curl_easy_perform(curl);
+   CURLcode res = email_instrument_perform(curl, &dctx, conn->username, "recent");
    if (res != CURLE_OK) {
       OLOG_ERROR("email: IMAP SEARCH failed: %s", curl_easy_strerror(res));
+      email_instrument_op_done(conn->username, "recent", curl, &dctx);
       curl_buffer_free(&buf);
       curl_easy_cleanup(curl);
       return 1;
@@ -705,6 +723,7 @@ int email_fetch_recent(const email_conn_t *conn,
    if (buf.truncated) {
       OLOG_ERROR("email: IMAP SEARCH response exceeded %d byte cap; rejecting",
                  EMAIL_MAX_RESPONSE_SIZE);
+      email_instrument_op_done(conn->username, "recent", curl, &dctx);
       curl_buffer_free(&buf);
       curl_easy_cleanup(curl);
       return 1;
@@ -724,6 +743,7 @@ int email_fetch_recent(const email_conn_t *conn,
    int fetch_rc = batch_fetch_headers(curl, conn, encoded_folder, rev_uids, rev_count, out, max_out,
                                       out_count);
 
+   email_instrument_op_done(conn->username, "recent", curl, &dctx);
    curl_easy_cleanup(curl);
    /* Propagate the FETCH result: a failed/over-cap header fetch must surface as
     * an error, not a successful-looking empty mailbox (the digest would then
@@ -751,6 +771,9 @@ int email_read_message(const email_conn_t *conn,
    if (!curl)
       return 1;
 
+   email_instrument_ctx_t dctx;
+   email_instrument_attach(curl, &dctx);
+
    /* Fetch the message by UID.  First try a bounded partial fetch (IMAP
     * BODY[]<0.N>, curl ";PARTIAL=") so a huge message (big attachments) can't
     * blow the response cap and fail the read outright.  PARTIAL is core RFC 3501,
@@ -773,12 +796,20 @@ int email_read_message(const email_conn_t *conn,
       curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
       curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
 
-      res = curl_easy_perform(curl);
+      res = email_instrument_perform(curl, &dctx, conn->username, "read");
       if (res == CURLE_OK && buf.data && !buf.truncated)
          break; /* success */
 
       bool was_truncated = buf.truncated;
       curl_buffer_free(&buf);
+      /* A login denial is not a PARTIAL-unsupported server — do NOT fall through
+       * to a full fetch (that immediately re-logs-in, exactly the burst we're
+       * avoiding).  The instrumented perform already logged + guarded-retried. */
+      if (res == CURLE_LOGIN_DENIED) {
+         email_instrument_op_done(conn->username, "read", curl, &dctx);
+         curl_easy_cleanup(curl);
+         return 1;
+      }
       if (used_partial) {
          OLOG_WARNING("email: IMAP partial fetch uid=%u failed (%s); retrying full fetch", uid,
                       curl_easy_strerror(res));
@@ -787,9 +818,11 @@ int email_read_message(const email_conn_t *conn,
       }
       OLOG_ERROR("email: IMAP FETCH uid=%u failed: %s%s", uid, curl_easy_strerror(res),
                  was_truncated ? " (response exceeded cap)" : "");
+      email_instrument_op_done(conn->username, "read", curl, &dctx);
       curl_easy_cleanup(curl);
       return 1;
    }
+   email_instrument_op_done(conn->username, "read", curl, &dctx);
    curl_easy_cleanup(curl);
 
    out->uid = uid;
@@ -850,10 +883,13 @@ int email_search(const email_conn_t *conn,
                  email_summary_t *out,
                  int max_out,
                  int *out_count,
-                 bool *auth_denied) {
+                 bool *auth_denied,
+                 bool *timed_out) {
    *out_count = 0;
    if (auth_denied)
       *auth_denied = false;
+   if (timed_out)
+      *timed_out = false;
 
    if (max_out > EMAIL_MAX_FETCH_RESULTS)
       max_out = EMAIL_MAX_FETCH_RESULTS;
@@ -868,29 +904,30 @@ int email_search(const email_conn_t *conn,
    if (!curl)
       return 1;
 
-   /* Build IMAP UID SEARCH command with literal syntax for user-provided values.
-    * UID SEARCH (not plain SEARCH) so the returned ids are UIDs, matching the
-    * UID FETCH that consumes them — see the note in email_fetch_recent. */
+   email_instrument_ctx_t dctx;
+   email_instrument_attach(curl, &dctx);
+
+   /* Content SEARCH (TEXT/BODY) can brute-force-scan the whole mailbox on a
+    * server without an FTS index — give it a larger total budget than the cheap
+    * ops' default (see EMAIL_IMAP_SEARCH_TIMEOUT_SEC). */
+   curl_easy_setopt(curl, CURLOPT_TIMEOUT, EMAIL_IMAP_SEARCH_TIMEOUT_SEC);
+
+   /* Build IMAP UID SEARCH command; user-provided values go through
+    * append_imap_search_key (quoted + sanitized).  UID SEARCH (not plain SEARCH)
+    * so the returned ids are UIDs, matching the UID FETCH that consumes them —
+    * see the note in email_fetch_recent. */
    char search_cmd[2048];
    size_t spos = 0;
    size_t srem = sizeof(search_cmd);
    BUF_PRINTF(search_cmd, spos, srem, "UID SEARCH");
+   size_t base_len = spos; /* length with no criteria yet — used for the ALL fallback */
 
    if (params->unread_only) {
       BUF_PRINTF(search_cmd, spos, srem, " UNSEEN");
    }
-   if (params->from[0]) {
-      BUF_PRINTF(search_cmd, spos, srem, " FROM ");
-      append_imap_literal(search_cmd, &spos, &srem, params->from);
-   }
-   if (params->subject[0]) {
-      BUF_PRINTF(search_cmd, spos, srem, " SUBJECT ");
-      append_imap_literal(search_cmd, &spos, &srem, params->subject);
-   }
-   if (params->text[0]) {
-      BUF_PRINTF(search_cmd, spos, srem, " TEXT ");
-      append_imap_literal(search_cmd, &spos, &srem, params->text);
-   }
+   email_imap_append_search_key(search_cmd, &spos, &srem, "FROM", params->from);
+   email_imap_append_search_key(search_cmd, &spos, &srem, "SUBJECT", params->subject);
+   email_imap_append_search_key(search_cmd, &spos, &srem, "TEXT", params->text);
 
    /* Date parameters — validate via strptime/strftime (never raw) */
    if (params->since[0]) {
@@ -906,9 +943,11 @@ int email_search(const email_conn_t *conn,
       }
    }
 
-   /* Need at least one search key */
-   if (!params->unread_only && !params->from[0] && !params->subject[0] && !params->text[0] &&
-       !params->since[0] && !params->before[0]) {
+   /* Need at least one search key.  Keyed on whether any criterion was actually
+    * emitted (not on raw param presence), so a term that reduced to empty after
+    * sanitization or a date that failed validation still falls back to ALL
+    * rather than sending a bare, invalid "UID SEARCH". */
+   if (spos == base_len) {
       BUF_PRINTF(search_cmd, spos, srem, " ALL");
    }
 
@@ -922,11 +961,14 @@ int email_search(const email_conn_t *conn,
    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
 
-   CURLcode res = curl_easy_perform(curl);
+   CURLcode res = email_instrument_perform(curl, &dctx, conn->username, "search");
    if (res != CURLE_OK) {
       OLOG_ERROR("email: IMAP SEARCH failed: %s", curl_easy_strerror(res));
       if (auth_denied && res == CURLE_LOGIN_DENIED)
          *auth_denied = true;
+      if (timed_out && res == CURLE_OPERATION_TIMEDOUT)
+         *timed_out = true;
+      email_instrument_op_done(conn->username, "search", curl, &dctx);
       curl_buffer_free(&buf);
       curl_easy_cleanup(curl);
       return 1;
@@ -934,6 +976,7 @@ int email_search(const email_conn_t *conn,
    if (buf.truncated) {
       OLOG_ERROR("email: IMAP SEARCH response exceeded %d byte cap; rejecting",
                  EMAIL_MAX_RESPONSE_SIZE);
+      email_instrument_op_done(conn->username, "search", curl, &dctx);
       curl_buffer_free(&buf);
       curl_easy_cleanup(curl);
       return 1;
@@ -952,6 +995,7 @@ int email_search(const email_conn_t *conn,
    int fetch_rc = batch_fetch_headers(curl, conn, encoded_folder, rev_uids, rev_count, out, max_out,
                                       out_count);
 
+   email_instrument_op_done(conn->username, "search", curl, &dctx);
    curl_easy_cleanup(curl);
    /* Propagate the FETCH result: a failed/over-cap header fetch must surface as
     * an error, not a successful-looking empty mailbox (the digest would then
@@ -1063,6 +1107,13 @@ int email_test_connection(const email_conn_t *conn, bool *imap_ok, bool *smtp_ok
    /* Test IMAP: connect to INBOX */
    CURL *curl = create_imap_handle(conn);
    if (curl) {
+      /* Instrument for the same on-wire-login count + rejection capture as the
+       * real ops, so a passing test contrasts directly with a failing search in
+       * the log — but the test BYPASSES the breaker (no retry): a diagnostic
+       * button must return its verdict immediately. */
+      email_instrument_ctx_t dctx;
+      email_instrument_attach(curl, &dctx);
+
       char url[768];
       snprintf(url, sizeof(url), "%s/INBOX", conn->imap_url);
       curl_easy_setopt(curl, CURLOPT_URL, url);
@@ -1076,8 +1127,12 @@ int email_test_connection(const email_conn_t *conn, bool *imap_ok, bool *smtp_ok
       CURLcode res = curl_easy_perform(curl);
       *imap_ok = (res == CURLE_OK);
       if (!*imap_ok) {
-         OLOG_WARNING("email: IMAP test failed: %s", curl_easy_strerror(res));
+         if (res == CURLE_LOGIN_DENIED)
+            email_instrument_note_denied(conn->username, &dctx, "test-connection");
+         else
+            OLOG_WARNING("email: IMAP test failed: %s", curl_easy_strerror(res));
       }
+      email_instrument_op_done(conn->username, "test-connection", curl, &dctx);
       curl_buffer_free(&buf);
       curl_easy_cleanup(curl);
    }
@@ -1200,6 +1255,9 @@ int email_list_folders(const email_conn_t *conn, char *out, size_t out_len) {
    if (!curl)
       return 1;
 
+   email_instrument_ctx_t dctx;
+   email_instrument_attach(curl, &dctx);
+
    char url[768];
    snprintf(url, sizeof(url), "%s", conn->imap_url);
    curl_easy_setopt(curl, CURLOPT_URL, url);
@@ -1210,7 +1268,8 @@ int email_list_folders(const email_conn_t *conn, char *out, size_t out_len) {
    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
 
-   CURLcode res = curl_easy_perform(curl);
+   CURLcode res = email_instrument_perform(curl, &dctx, conn->username, "list");
+   email_instrument_op_done(conn->username, "list", curl, &dctx);
    curl_easy_cleanup(curl);
 
    if (res != CURLE_OK || !buf.data || buf.truncated) {

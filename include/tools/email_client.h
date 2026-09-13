@@ -70,6 +70,10 @@ int email_read_message(const email_conn_t *conn,
  * @param auth_denied  Optional out (may be NULL): set true when the failure was
  *                     an IMAP login/credential rejection (CURLE_LOGIN_DENIED),
  *                     so the caller can surface an actionable "login failed".
+ * @param timed_out    Optional out (may be NULL): set true when the failure was
+ *                     a transfer timeout (CURLE_OPERATION_TIMEDOUT) — typically a
+ *                     large mailbox with no server-side full-text index, so the
+ *                     caller can hint the LLM to bound the search with a date.
  * @return 0 on success, 1 on failure
  */
 int email_search(const email_conn_t *conn,
@@ -78,7 +82,17 @@ int email_search(const email_conn_t *conn,
                  email_summary_t *out,
                  int max_out,
                  int *out_count,
-                 bool *auth_denied);
+                 bool *auth_denied,
+                 bool *timed_out);
+
+/**
+ * @brief Does @p iso parse as a valid IMAP search date (YYYY-MM-DD)?
+ *
+ * Shares the exact validation the SEARCH builder uses, so a caller can tell
+ * whether a search will actually be date-bounded (e.g. to phrase a timeout hint
+ * correctly) rather than guessing from raw param presence.
+ */
+bool email_search_date_valid(const char *iso);
 
 /**
  * @brief List available IMAP folders.

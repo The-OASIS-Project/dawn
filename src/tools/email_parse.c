@@ -30,6 +30,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "core/buf_printf.h"
+
 /* Convert a strptime-filled tm that carries a zone offset (%z -> tm_gmtoff)
  * into a UTC epoch.  timegm() reads the broken-down time AS UTC, so subtract
  * the parsed offset to recover the true instant.  Returns 0 on overflow/failure
@@ -244,6 +246,68 @@ time_t email_parse_imap_internaldate(const char *idate) {
    if (strptime(idate, "%d-%b-%Y %H:%M:%S %z", &tm_info))
       return tm_with_offset_to_utc(&tm_info);
    return 0;
+}
+
+/* =============================================================================
+ * IMAP SEARCH quoted-string builders (pure; unit-tested in test_email_parse.c)
+ *
+ * Appends `value` as an IMAP quoted string ("...") for safe interpolation into a
+ * SEARCH command: control characters (CR/LF/NUL/DEL, everything < 0x20 and 0x7f)
+ * are dropped, the two quoted-string metacharacters (" and \) are backslash-
+ * escaped, and '%' is emitted as '%25'.
+ *
+ * CRITICAL — the built command is URL-DECODED AGAIN by libcurl: the SEARCH is
+ * carried via CURLOPT_CUSTOMREQUEST, and libcurl's IMAP layer runs
+ * Curl_urldecode() (with control-char rejection) over it before it hits the wire.
+ * So sanitizing the pre-decode form is not enough — a percent-encoded
+ * metacharacter (%22 -> ", %5C -> \) would survive this function and
+ * re-materialize on the wire, breaking out of the quotes.  Escaping every literal
+ * '%' as '%25' makes the user's bytes round-trip to themselves after curl's
+ * decode (and lets a genuine term like "50% off" through, which would otherwise
+ * fail as CURLE_URL_MALFORMAT).  curl's REJECT_CTRL still blocks a decoded
+ * CR/LF/NUL, so no command chaining.  This is why the earlier IMAP *literal* form
+ * ({N}\r\n<data>) could not work — its embedded CR/LF hit REJECT_CTRL.  (High-bit
+ * UTF-8 octets pass through unchanged, matching the prior no-CHARSET behavior.)
+ * ============================================================================= */
+void email_imap_append_quoted(char *buf, size_t *off, size_t *rem, const char *value) {
+   BUF_PRINTF(buf, *off, *rem, "\"");
+   for (const char *p = value ? value : ""; *p; p++) {
+      unsigned char c = (unsigned char)*p;
+      if (c < 0x20 || c == 0x7f)
+         continue; /* control chars are not permitted in an IMAP quoted string */
+      if (c == '%') {
+         /* Escape for curl's CUSTOMREQUEST URL-decode (see the note above). */
+         BUF_PRINTF(buf, *off, *rem, "%%25");
+         continue;
+      }
+      /* Emit the escaping backslash (for " and \) and the char in ONE append so a
+       * buffer-boundary truncation can never leave a lone trailing backslash that
+       * would escape the closing quote. */
+      BUF_PRINTF(buf, *off, *rem, (c == '"' || c == '\\') ? "\\%c" : "%c", (char)c);
+   }
+   BUF_PRINTF(buf, *off, *rem, "\"");
+}
+
+void email_imap_append_search_key(char *buf,
+                                  size_t *off,
+                                  size_t *rem,
+                                  const char *key,
+                                  const char *value) {
+   /* Skip the key entirely when `value` is NULL/empty or reduces to empty after
+    * control-char stripping — emitting KEY "" matches the empty substring (every
+    * message), silently turning a narrowing filter into match-all. */
+   bool has_content = false;
+   for (const char *p = value ? value : ""; *p; p++) {
+      unsigned char c = (unsigned char)*p;
+      if (!(c < 0x20 || c == 0x7f)) {
+         has_content = true;
+         break;
+      }
+   }
+   if (!has_content)
+      return;
+   BUF_PRINTF(buf, *off, *rem, " %s ", key);
+   email_imap_append_quoted(buf, off, rem, value);
 }
 
 bool email_imap_flags_contains(const char *flags_group, const char *flag) {

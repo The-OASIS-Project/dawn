@@ -754,7 +754,9 @@ static int search_single_account(email_account_t *acct,
    }
 
    bool imap_auth_denied = false;
-   rc = email_search(&conn, norm.imap_folder, params, out, max, out_count, &imap_auth_denied);
+   bool imap_timed_out = false;
+   rc = email_search(&conn, norm.imap_folder, params, out, max, out_count, &imap_auth_denied,
+                     &imap_timed_out);
    if (rc != 0 && auth_error)
       *auth_error = imap_auth_denied;
    sodium_memzero(&conn, sizeof(conn));
@@ -763,6 +765,10 @@ static int search_single_account(email_account_t *acct,
       snprintf(out[i].message_id, sizeof(out[i].message_id), "%s:%u", norm.imap_folder, out[i].uid);
    stamp_account(out, *out_count, acct);
 
+   /* Surface a timeout as a distinct code so the tool layer can hint the LLM to
+    * bound the search with a date (large mailbox / no server FTS index). */
+   if (rc != 0 && imap_timed_out)
+      return EMAIL_RC_TIMEOUT;
    return rc;
 }
 
@@ -804,6 +810,7 @@ int email_service_search(int user_id,
       return EMAIL_RC_NO_ACCOUNTS;
    int enabled_seen = 0;
    int any_error = 0;
+   int any_timeout = 0;
    int total = 0;
    for (int i = 0; i < acct_count && total < max; i++) {
       if (!accounts[i].enabled)
@@ -824,12 +831,18 @@ int email_service_search(int user_id,
           * the LLM can tell the user results are partial — an auth failure would
           * otherwise be completely invisible when other accounts return matches. */
          any_error = 1;
-         OLOG_WARNING("email: search failed for account '%s' (rc=%d%s)", accounts[i].name, rc,
-                      acct_auth ? ", login denied" : "");
+         bool acct_timeout = (rc == EMAIL_RC_TIMEOUT);
+         if (acct_timeout)
+            any_timeout = 1;
+         const char *reason = acct_auth      ? "login failed"
+                              : acct_timeout ? "timed out — narrow with a date range"
+                                             : "unreachable";
+         OLOG_WARNING("email: search failed for account '%s' (rc=%d, %s)", accounts[i].name, rc,
+                      reason);
          if (warn_out && warn_len > 0) {
             size_t used = strlen(warn_out);
             snprintf(warn_out + used, warn_len - used, "%s%s (%s)", used > 0 ? ", " : "",
-                     accounts[i].name, acct_auth ? "login failed" : "unreachable");
+                     accounts[i].name, reason);
          }
       }
    }
@@ -843,7 +856,9 @@ int email_service_search(int user_id,
     * (every account searched OK, just nothing matched) from a real failure (at
     * least one account errored).  Reporting no-match as FAILURE makes the LLM
     * believe email is down and abandon the search instead of broadening it. */
-   return any_error ? EMAIL_RC_FAILURE : EMAIL_RC_OK;
+   if (!any_error)
+      return EMAIL_RC_OK;
+   return any_timeout ? EMAIL_RC_TIMEOUT : EMAIL_RC_FAILURE;
 }
 
 void email_service_fill_reply_states(int user_id, email_summary_t *rows, int nrows) {

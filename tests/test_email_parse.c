@@ -489,6 +489,106 @@ static void test_sanitize_header_value(void) {
    TEST_ASSERT_EQUAL_STRING("", out);
 }
 
+/* ============================================================================
+ * email_imap_append_quoted / _search_key — IMAP SEARCH term quoting.
+ *
+ * The built command is URL-decoded again by libcurl (CUSTOMREQUEST), so a
+ * literal '%' MUST be escaped as '%25' or a percent-encoded metacharacter (%22
+ * -> ", %5C -> \) breaks out of the quotes on the wire.  These pin that contract
+ * plus quote/backslash escaping, control stripping, and the match-all guard.
+ * ============================================================================ */
+
+static void quote_into(char *dst, size_t dstlen, const char *value) {
+   size_t off = 0, rem = dstlen;
+   dst[0] = '\0';
+   email_imap_append_quoted(dst, &off, &rem, value);
+}
+
+static void test_quote_plain(void) {
+   char out[64];
+   quote_into(out, sizeof out, "sketch cards");
+   TEST_ASSERT_EQUAL_STRING("\"sketch cards\"", out);
+}
+
+static void test_quote_escapes_quote_and_backslash(void) {
+   char out[64];
+   quote_into(out, sizeof out, "a\"b\\c"); /* a"b\c */
+   TEST_ASSERT_EQUAL_STRING("\"a\\\"b\\\\c\"", out);
+}
+
+static void test_quote_trailing_backslash(void) {
+   char out[64];
+   quote_into(out, sizeof out, "foo\\"); /* foo\  ->  "foo\\" (escaped, quote intact) */
+   TEST_ASSERT_EQUAL_STRING("\"foo\\\\\"", out);
+}
+
+static void test_quote_percent_escaped(void) {
+   /* '%' -> '%25' so curl's CUSTOMREQUEST URL-decode round-trips it to one '%'
+    * (and a genuine "50% off" search no longer fails as CURLE_URL_MALFORMAT). */
+   char out[64];
+   quote_into(out, sizeof out, "50% off");
+   TEST_ASSERT_EQUAL_STRING("\"50%25 off\"", out);
+}
+
+static void test_quote_percent_encoded_injection_neutralized(void) {
+   /* A percent-encoded quote must not survive curl's decode as a bare " — the
+    * '%' is escaped, so it decodes back to the literal text "%22", not '"'. */
+   char out[64];
+   quote_into(out, sizeof out, "x%22 OR HEADER x");
+   TEST_ASSERT_EQUAL_STRING("\"x%2522 OR HEADER x\"", out);
+}
+
+static void test_quote_strips_control_bytes(void) {
+   char out[64];
+   quote_into(out, sizeof out, "a\r\n\tb"); /* CR/LF/TAB dropped */
+   TEST_ASSERT_EQUAL_STRING("\"ab\"", out);
+}
+
+static void test_quote_null_is_empty(void) {
+   char out[8];
+   quote_into(out, sizeof out, NULL);
+   TEST_ASSERT_EQUAL_STRING("\"\"", out);
+}
+
+static void test_quote_preserves_utf8(void) {
+   char out[32];
+   quote_into(out, sizeof out, "caf\xC3\xA9"); /* café — high-bit octets pass through */
+   TEST_ASSERT_EQUAL_STRING("\"caf\xC3\xA9\"", out);
+}
+
+static void test_search_key_emits_key(void) {
+   char out[64];
+   out[0] = '\0';
+   size_t off = 0, rem = sizeof out;
+   email_imap_append_search_key(out, &off, &rem, "FROM", "bob@example.com");
+   TEST_ASSERT_EQUAL_STRING(" FROM \"bob@example.com\"", out);
+}
+
+static void test_search_key_skips_empty(void) {
+   char out[64];
+   out[0] = '\0';
+   size_t off = 0, rem = sizeof out;
+   email_imap_append_search_key(out, &off, &rem, "SUBJECT", "");
+   TEST_ASSERT_EQUAL_STRING("", out);
+}
+
+static void test_search_key_skips_all_control(void) {
+   /* All-control value sanitizes to "" -> KEY "" would match every message. */
+   char out[64];
+   out[0] = '\0';
+   size_t off = 0, rem = sizeof out;
+   email_imap_append_search_key(out, &off, &rem, "TEXT", "\r\n\x01");
+   TEST_ASSERT_EQUAL_STRING("", out);
+}
+
+static void test_search_key_null_skips(void) {
+   char out[64];
+   out[0] = '\0';
+   size_t off = 0, rem = sizeof out;
+   email_imap_append_search_key(out, &off, &rem, "FROM", NULL);
+   TEST_ASSERT_EQUAL_STRING("", out);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_rfc822_utc);
@@ -536,5 +636,17 @@ int main(void) {
    RUN_TEST(test_rfc2047_preserves_utf8);
    RUN_TEST(test_rfc2047_bounded_dst);
    RUN_TEST(test_sanitize_header_value);
+   RUN_TEST(test_quote_plain);
+   RUN_TEST(test_quote_escapes_quote_and_backslash);
+   RUN_TEST(test_quote_trailing_backslash);
+   RUN_TEST(test_quote_percent_escaped);
+   RUN_TEST(test_quote_percent_encoded_injection_neutralized);
+   RUN_TEST(test_quote_strips_control_bytes);
+   RUN_TEST(test_quote_null_is_empty);
+   RUN_TEST(test_quote_preserves_utf8);
+   RUN_TEST(test_search_key_emits_key);
+   RUN_TEST(test_search_key_skips_empty);
+   RUN_TEST(test_search_key_skips_all_control);
+   RUN_TEST(test_search_key_null_skips);
    return UNITY_END();
 }
