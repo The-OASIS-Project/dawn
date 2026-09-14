@@ -491,9 +491,11 @@ buffer = NULL;
 
 ### String Safety
 ```c
-/* Use bounded string functions */
-strncpy(dest, src, sizeof(dest) - 1);
-dest[sizeof(dest) - 1] = '\0';
+/* Use the canonical bounded copies (common/include/utils/string_utils.h).
+ * Raw strncpy is forbidden in swept directories — check_no_raw_strncpy.sh
+ * enforces it on every build. */
+safe_strscpy(dest, src);          /* dest is a fixed-size array (compile-checked) */
+safe_strncpy(ptr, src, ptr_size); /* dest is a pointer with a known capacity */
 
 snprintf(buffer, sizeof(buffer), "Value: %d", value);
 ```

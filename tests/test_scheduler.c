@@ -33,6 +33,7 @@
 #include "auth/auth_db_internal.h"
 #include "core/scheduler_db.h"
 #include "unity.h"
+#include "utils/string_utils.h"
 
 /* Must match auth_db_core.c v18 migration */
 static const char *DDL =
@@ -1425,7 +1426,7 @@ static void test_update_fields_fire_at_and_original_time(void) {
    sched_event_t fields;
    memset(&fields, 0, sizeof(fields));
    fields.fire_at = new_fire;
-   strncpy(fields.original_time, "09:30", SCHED_ORIGINAL_TIME_MAX - 1);
+   safe_strscpy(fields.original_time, "09:30");
    TEST_ASSERT_EQUAL_INT(
        SCHED_DB_SUCCESS,
        scheduler_db_update_fields(id, 1, &fields, SCHED_FIELD_FIRE_AT | SCHED_FIELD_ORIGINAL_TIME));

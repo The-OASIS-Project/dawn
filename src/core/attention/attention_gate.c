@@ -146,12 +146,16 @@ static void build_summary(const sage_watch_t *w,
    /* Named watch: speak the user's name so the alert is specific.  Threshold
     * watches get the "over/under the '<name>' threshold" flavour; other kinds use a
     * neutral "'<name>':" prefix. */
+   /* Deliberate: a long watch name/reading truncates the spoken alert, never overflows. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
    if (w->rule_type == SAGE_RULE_THRESHOLD) {
       snprintf(out, out_sz, "you're %s the '%s' threshold — %s",
                (w->direction == SAGE_DIR_BELOW) ? "under" : "over", w->name, reading);
    } else {
       snprintf(out, out_sz, "'%s' — %s", w->name, reading);
    }
+#pragma GCC diagnostic pop
 }
 
 /* Update the backoff window after a fire. */

@@ -5,20 +5,14 @@ project(dawn LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# -Wswitch: an enum switch with no `default:` must handle every enumerator.
-#
-# Not part of -Wall's default here because the project does not build with
-# -Wall (see below), and this one warning class pays for itself: the codebase
-# uses result enums as the seam between a shared operation and the surfaces that
-# word its outcome, so a NEW enumerator silently falling through to a generic
-# "unknown" branch is a user-visible wrong answer that compiles clean.  That
-# exact bug shipped once — JOB_RESUME_NOTHING_TO_RUN reached the WebUI handler
-# but not the `job` tool, so resuming a job reported "No such background job."
-#
-# Measured cost when enabled: ONE pre-existing site, since fixed.  Enabling the
-# rest of -Wall is a separate, larger decision; a first slice is enabled below,
-# AFTER add_subdirectory(whisper.cpp), so it scopes to DAWN's own code and not the
-# vendored ggml/whisper sources.
+# -Wswitch here (before the whisper subdirectory) so it also covers the vendored
+# ggml/whisper tree; full -Wall for DAWN's own code is enabled further below, AFTER
+# add_subdirectory(whisper.cpp), so -Wall's noisier members don't flood the vendored
+# sources.  -Wswitch pays for itself: the codebase uses result enums as the seam between
+# a shared operation and the surfaces that word its outcome, so a NEW enumerator silently
+# falling through to a generic "unknown" branch is a user-visible wrong answer that
+# compiles clean.  That exact bug shipped once — JOB_RESUME_NOTHING_TO_RUN reached the
+# WebUI handler but not the `job` tool, so resuming a job reported "No such background job."
 add_compile_options(-Wswitch)
 
 # Standard install paths (/usr/local/bin, /usr/local/lib, etc.)
@@ -507,27 +501,26 @@ else()
     message(STATUS "Skipping Whisper build (Vosk enabled)")
 endif()
 
-# Incremental -Wall adoption.  Rather than flipping -Wall wholesale, enable only the
-# sub-flags whose warnings have already been driven to zero.  Placed HERE — after
-# add_subdirectory(whisper.cpp) — so they apply to DAWN's own sources (common, dawn,
-# tests, dawn-admin, all added below) but NOT to the vendored ggml/whisper tree, whose
-# static-inline header helpers would otherwise flood -Wunused-function.
+# Full -Wall.  Placed HERE — after add_subdirectory(whisper.cpp) — so it applies to
+# DAWN's own sources (common, dawn, tests, dawn-admin, all added below) but NOT to the
+# vendored ggml/whisper tree, whose static-inline header helpers would otherwise flood
+# -Wunused-function.  (-Wall is language-aware, so C-only members like -Wpointer-sign are
+# not applied to .cpp TUs — no genex needed.)
 #
-# Not yet enabled, and why:
-#   -Wstringop-truncation  many deliberate fixed-buffer strncpy sites; each needs review
-#   -Warray-bounds         only fires inside vendored tinyexpr.c
-#   -Wmaybe-uninitialized  fires only under optimization (standard builds are -O0), and the
-#                          sole current site is a known GCC false positive that a zero
-#                          initializer does not silence
-add_compile_options(
-    -Wcomment
-    # -Wpointer-sign is a C-only diagnostic; guard it so cc1plus does not warn on every .cpp.
-    $<$<COMPILE_LANGUAGE:C>:-Wpointer-sign>
-    -Wunused-variable
-    -Wunused-but-set-variable
-    -Wunused-value
-    -Wunused-label
-    -Wunused-function)
+# Every -Wall member is ON for first-party code.  The handful of deliberate
+# snprintf-into-fixed-display-buffer truncations (SAGE watch alerts, a job-restart
+# message — non-overflowing by construction) carry a narrow per-site
+# `#pragma GCC diagnostic ignored "-Wformat-truncation"`, so the class still catches a
+# future careless truncation anywhere else.  -Warray-bounds is on globally but suppressed
+# for the one vendored file that trips it (tinyexpr.c) via set_source_files_properties
+# below.  -Wstringop-truncation and -Wmaybe-uninitialized are clean.
+add_compile_options(-Wall)
+
+# tinyexpr.c is vendored (public-domain expression evaluator).  Its tagged-union
+# pointer arithmetic trips -Warray-bounds under -O2 (4 warnings, all known-benign
+# upstream).  Suppress the class for that one file rather than patching vendored code
+# or disabling -Warray-bounds globally.
+set_source_files_properties(src/tools/tinyexpr.c PROPERTIES COMPILE_OPTIONS "-Wno-array-bounds")
 
 # Common library added here (after whisper.cpp) so dawn_common_asr can link whisper
 add_subdirectory(common)

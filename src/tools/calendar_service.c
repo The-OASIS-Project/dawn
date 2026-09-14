@@ -34,6 +34,8 @@
 #include <strings.h>
 #include <time.h>
 
+#include "utils/string_utils.h"
+
 #ifdef HAVE_LIBICAL
 #include <libical/ical.h>
 #endif
@@ -1293,9 +1295,14 @@ int calendar_service_add(int user_id,
    {
       size_t cl = strlen(cals[target].caldav_path);
       const char *sep = (cl > 0 && cals[target].caldav_path[cl - 1] == '/') ? "" : "/";
+      /* Deliberate: a pathological path/uid truncates this provisional href (the next
+       * full sync overwrites it with the server's canonical href), never overflows. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
       snprintf(evt.href, sizeof(evt.href), "%s%s%s.ics", cals[target].caldav_path, sep, uid);
+#pragma GCC diagnostic pop
    }
-   snprintf(evt.summary, sizeof(evt.summary), "%s", summary);
+   safe_strscpy(evt.summary, summary);
    if (description)
       snprintf(evt.description, sizeof(evt.description), "%s", description);
    if (location)
@@ -1393,7 +1400,7 @@ int calendar_service_update(int user_id,
 
    /* Update fields and sanitize against CRLF injection */
    if (summary)
-      snprintf(evt.summary, sizeof(evt.summary), "%s", summary);
+      safe_strscpy(evt.summary, summary);
    if (start > 0)
       evt.dtstart = start;
    if (end > 0)

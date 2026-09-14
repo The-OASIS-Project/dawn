@@ -293,8 +293,7 @@ static void parse_url_components(const char *url,
    if (scheme_end) {
       size_t slen = scheme_end - url;
       if (slen < scheme_size) {
-         strncpy(scheme, url,
-                 slen); /* strncpy-ok: substring copy, slen < scheme_size guaranteed above */
+         memcpy(scheme, url, slen); /* slen < scheme_size guaranteed above */
          scheme[slen] = '\0';
       }
       url = scheme_end + 3;
@@ -304,8 +303,7 @@ static void parse_url_components(const char *url,
    const char *path_start = strchr(url, '/');
    size_t host_len = path_start ? (size_t)(path_start - url) : strlen(url);
    if (host_len < host_size) {
-      strncpy(host, url,
-              host_len); /* strncpy-ok: substring copy, host_len < host_size guaranteed above */
+      memcpy(host, url, host_len); /* host_len < host_size guaranteed above */
       host[host_len] = '\0';
    }
 
@@ -316,8 +314,7 @@ static void parse_url_components(const char *url,
       if (last_slash && last_slash != path_start) {
          size_t plen = last_slash - path_start + 1;
          if (plen < path_size) {
-            strncpy(path, path_start,
-                    plen); /* strncpy-ok: substring copy, plen < path_size guaranteed above */
+            memcpy(path, path_start, plen); /* plen < path_size guaranteed above */
             path[plen] = '\0';
          }
       } else {

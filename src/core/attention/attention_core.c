@@ -706,8 +706,12 @@ static void auto_name_base(const sage_watch_t *w, char *buf, size_t sz) {
    } else if (w->rule_type == SAGE_RULE_ABSENCE) {
       snprintf(buf, sz, "%s silent", label);
    } else {
+      /* Deliberate: a long label/unit truncates the display label, never overflows. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
       snprintf(buf, sz, "%s %s %g%s", label, (w->direction == SAGE_DIR_BELOW) ? "below" : "above",
                w->threshold, (unit && unit[0]) ? unit : "");
+#pragma GCC diagnostic pop
    }
 }
 

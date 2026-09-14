@@ -2343,6 +2343,11 @@ void handle_list_llm_models(ws_connection_t *conn) {
 
    /* Determine current model - provider-specific logic */
    const char *current_model = NULL;
+   /* Function scope on purpose: current_model may be pointed at session_config.model
+    * below and is read after the session block (and by json_object_new_string at the
+    * end), so session_config must outlive that block — a block-scoped declaration was a
+    * use-after-scope dangling read (caught by -Wmaybe-uninitialized at -O2). */
+   session_llm_config_t session_config = { 0 };
 
    /* For llama.cpp: always use actual loaded model (server can only run one model)
     * Config/session settings are not meaningful since llama.cpp can't switch models */
@@ -2354,7 +2359,6 @@ void handle_list_llm_models(ws_connection_t *conn) {
    else {
       /* Check session config first */
       if (conn->session) {
-         session_llm_config_t session_config = { 0 };
          session_get_llm_config(conn->session, &session_config);
          if (session_config.model[0] != '\0') {
             current_model = session_config.model;

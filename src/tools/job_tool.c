@@ -304,11 +304,16 @@ static char *handle_resume(struct json_object *details, int user_id) {
           * job (restartable, just not by me) and a done/running one (not
           * restartable at all).  The result code doesn't distinguish them, so
           * the wording must not claim to either. */
+         /* Deliberate: fixed user-facing message; a huge conv_id would truncate the tail,
+          * never overflows (buf is sized for the message). */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
          snprintf(buf, sizeof(buf),
                   "I can only restart a job that was interrupted or failed, and #%lld isn't in "
                   "that state. If you cancelled it and want it back, you can resume it yourself "
                   "from the background-jobs panel.",
                   (long long)conv_id);
+#pragma GCC diagnostic pop
          return strdup(buf);
       case JOB_RESUME_CAPACITY:
          return strdup(TOOL_RESULT_ERROR_MARK

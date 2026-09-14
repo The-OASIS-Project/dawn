@@ -838,7 +838,7 @@ static void *briefing_thread_func(void *arg) {
              !memory_filter_check_injection_commands(step_result)) {
             briefing_persist_step_t *ps = &persist_steps[persist_count];
             snprintf(ps->call_id, sizeof(ps->call_id), "sched_%lld_%d", (long long)event->id, i);
-            snprintf(ps->name, sizeof(ps->name), "%s", steps[i].tool_name);
+            safe_strscpy(ps->name, steps[i].tool_name);
             ps->args = briefing_build_step_args(steps[i].tool_action, steps[i].tool_value);
             ps->result = strdup(step_result);
             if (ps->args && ps->result) {
