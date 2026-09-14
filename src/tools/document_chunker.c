@@ -534,7 +534,6 @@ int document_chunk_text(const char *text, const chunk_config_t *config, chunk_re
    }
 
    /* Convert token limits to approximate char limits */
-   int target_chars = cfg.target_tokens * 4;
    int max_chars = cfg.max_tokens * 4;
    int overlap_chars = cfg.overlap_tokens * 4;
 

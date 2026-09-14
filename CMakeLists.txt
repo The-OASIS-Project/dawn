@@ -16,8 +16,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # but not the `job` tool, so resuming a job reported "No such background job."
 #
 # Measured cost when enabled: ONE pre-existing site, since fixed.  Enabling the
-# rest of -Wall is a separate, larger decision (213 warnings, mostly -Wcomment
-# and -Wstringop-truncation) — see docs/TODO.md.
+# rest of -Wall is a separate, larger decision; a first slice is enabled below,
+# AFTER add_subdirectory(whisper.cpp), so it scopes to DAWN's own code and not the
+# vendored ggml/whisper sources.
 add_compile_options(-Wswitch)
 
 # Standard install paths (/usr/local/bin, /usr/local/lib, etc.)
@@ -505,6 +506,28 @@ if(NOT ENABLE_VOSK)
 else()
     message(STATUS "Skipping Whisper build (Vosk enabled)")
 endif()
+
+# Incremental -Wall adoption.  Rather than flipping -Wall wholesale, enable only the
+# sub-flags whose warnings have already been driven to zero.  Placed HERE — after
+# add_subdirectory(whisper.cpp) — so they apply to DAWN's own sources (common, dawn,
+# tests, dawn-admin, all added below) but NOT to the vendored ggml/whisper tree, whose
+# static-inline header helpers would otherwise flood -Wunused-function.
+#
+# Not yet enabled, and why:
+#   -Wstringop-truncation  many deliberate fixed-buffer strncpy sites; each needs review
+#   -Warray-bounds         only fires inside vendored tinyexpr.c
+#   -Wmaybe-uninitialized  fires only under optimization (standard builds are -O0), and the
+#                          sole current site is a known GCC false positive that a zero
+#                          initializer does not silence
+add_compile_options(
+    -Wcomment
+    # -Wpointer-sign is a C-only diagnostic; guard it so cc1plus does not warn on every .cpp.
+    $<$<COMPILE_LANGUAGE:C>:-Wpointer-sign>
+    -Wunused-variable
+    -Wunused-but-set-variable
+    -Wunused-value
+    -Wunused-label
+    -Wunused-function)
 
 # Common library added here (after whisper.cpp) so dawn_common_asr can link whisper
 add_subdirectory(common)

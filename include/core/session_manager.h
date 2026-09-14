@@ -857,8 +857,8 @@ typedef enum {
  * Composed prompt — three named blocks the builder fills in.  The
  * session manager owns the heap allocations on a successful builder
  * return and releases them via `composed_prompt_free()`.  Struct
- * intentionally contains only `char *` so no webui/, tools/, or
- * memory/* type leaks through Layer 1.
+ * intentionally contains only `char *` so no webui, tools, or
+ * memory subsystem types leak through Layer 1.
  *
  * `focus_block` may be NULL on every refresh kind: when feature is
  * disabled, when focus_compose returns zero candidates, when the focus

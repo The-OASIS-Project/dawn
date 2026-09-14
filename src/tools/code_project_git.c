@@ -318,7 +318,7 @@ int code_project_git_fetch_checkout(const code_git_fetch_opts_t *opts) {
    if (opts->clone_depth > 0) {
       fo.depth = opts->clone_depth;
    }
-   /* NULL refspec → origin's configured refspec (+refs/heads/*:refs/remotes/origin/*),
+   /* NULL refspec → origin's configured refspec (+refs/heads/<*>:refs/remotes/origin/<*>),
     * so refs/remotes/origin/<branch> resolves even for a branch we didn't clone. */
    if (git_remote_fetch(remote, NULL, &fo, NULL) != 0) {
       log_git_error("fetch (origin)", opts->local_path);

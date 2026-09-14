@@ -66,13 +66,6 @@ static const char *json_get_str(struct json_object *obj, const char *key) {
    return json_object_get_string(val);
 }
 
-static int json_get_int(struct json_object *obj, const char *key, int def) {
-   struct json_object *val = NULL;
-   if (!json_object_object_get_ex(obj, key, &val))
-      return def;
-   return json_object_get_int(val);
-}
-
 static bool json_get_bool(struct json_object *obj, const char *key, bool def) {
    struct json_object *val = NULL;
    if (!json_object_object_get_ex(obj, key, &val))

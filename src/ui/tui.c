@@ -773,7 +773,6 @@ static void draw_footer(int y, int width) {
  * @brief Draw the text input panel overlay
  */
 static void draw_input_panel(void) {
-   int panel_height = 3;
    int panel_width = g_term_cols - 4;
    int start_y = g_term_rows - 5; /* Just above footer */
    int start_x = 2;

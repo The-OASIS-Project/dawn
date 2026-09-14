@@ -162,12 +162,12 @@ static int parse_validate_steps(struct json_object *steps_arr,
          return FAILURE;
       }
       struct json_object *jname = NULL, *jaction = NULL, *jvalue = NULL;
-      json_object_object_get_ex(step, "tool_name", &jname) ||
-          json_object_object_get_ex(step, "tool", &jname);
-      json_object_object_get_ex(step, "tool_action", &jaction) ||
-          json_object_object_get_ex(step, "action", &jaction);
-      json_object_object_get_ex(step, "tool_value", &jvalue) ||
-          json_object_object_get_ex(step, "value", &jvalue);
+      (void)(json_object_object_get_ex(step, "tool_name", &jname) ||
+             json_object_object_get_ex(step, "tool", &jname));
+      (void)(json_object_object_get_ex(step, "tool_action", &jaction) ||
+             json_object_object_get_ex(step, "action", &jaction));
+      (void)(json_object_object_get_ex(step, "tool_value", &jvalue) ||
+             json_object_object_get_ex(step, "value", &jvalue));
       if (jname && !json_object_is_type(jname, json_type_string)) {
          snprintf(err, errlen, "Error: steps[%d].tool_name must be a string", i);
          return FAILURE;

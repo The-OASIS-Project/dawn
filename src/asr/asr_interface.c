@@ -60,8 +60,9 @@
 
 // Static buffer for normalized audio (avoids allocation in hot path)
 // Size: 30 seconds at 16kHz = 480000 samples (enough for any utterance)
+// Gated by NORM_ENABLED (default 0); marked unused so the disabled build stays clean.
 #define NORM_BUFFER_SIZE 480000
-static int16_t g_norm_buffer[NORM_BUFFER_SIZE];
+static int16_t g_norm_buffer[NORM_BUFFER_SIZE] __attribute__((unused));
 
 // Normalization coefficients (computed once, shared across all contexts)
 static float g_norm_attack_coeff = 0.0f;
@@ -307,10 +308,10 @@ static void init_norm_coefficients(void) {
  * @param num_samples Number of samples
  * @return Average gain applied
  */
-static float normalize_audio_for_asr(norm_state_t *state,
-                                     const int16_t *audio_in,
-                                     int16_t *audio_out,
-                                     size_t num_samples) {
+static float __attribute__((unused)) normalize_audio_for_asr(norm_state_t *state,
+                                                             const int16_t *audio_in,
+                                                             int16_t *audio_out,
+                                                             size_t num_samples) {
    // Ensure coefficients are initialized
    init_norm_coefficients();
 

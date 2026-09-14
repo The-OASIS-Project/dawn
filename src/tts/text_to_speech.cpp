@@ -418,7 +418,6 @@ void *tts_thread_function(void *arg) {
       SynthesisResult result;
       std::vector<int16_t> audioBuffer;
       int rc = 0;
-      int error = 0;
 
       // Reset the interruption flag
       tts_stop_processing.store(false);

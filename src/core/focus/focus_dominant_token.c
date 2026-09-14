@@ -342,6 +342,7 @@ void focus_apply_dominant_token_penalty(bool enabled,
       }
       n_penalized++;
 
+      (void)before; /* read only by the OLOG_DEBUG below (a no-op unless built -DDEBUG) */
       OLOG_DEBUG("focus_dominant_token: penalty %.3f applied to '%s' (semantic %.3f → %.3f, "
                  "shared %d, dominant %d)",
                  penalty, pool[i].item_id ? pool[i].item_id : "(no id)", before,

@@ -673,8 +673,6 @@ void llm_tools_refresh(void) {
       return;
    }
 
-   const secrets_config_t *secrets = config_get_secrets();
-
    /* Check if HUD/helmet hardware is available via status keepalive */
    bool hud_available = component_status_is_hud_online();
 

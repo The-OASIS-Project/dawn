@@ -184,10 +184,17 @@ static bool validate_single_image_marker(const char *marker_start, const char **
  * SECURITY: Validates every marker, not just the first, to prevent bypass
  * attacks where a valid first image masks a malicious second image.
  *
+ * NOTE (2026-09): currently uncalled.  Its sole caller was handle_save_message,
+ * which became an accept-and-drop no-op under server-authoritative persistence
+ * (commit 6360b87) — clients no longer persist message content, so there is no
+ * client-supplied content left to validate on this path (image markers are now
+ * written server-side by the daemon, a trusted origin).  Retained rather than
+ * deleted pending a decision to remove or re-wire.
+ *
  * @param content Message content to validate
  * @return true if all markers are safe, false if any malicious/invalid marker found
  */
-static bool validate_image_marker(const char *content) {
+static bool __attribute__((unused)) validate_image_marker(const char *content) {
    if (!content)
       return true;
 
@@ -1716,7 +1723,6 @@ void handle_save_message(ws_connection_t *conn, struct json_object *payload) {
 
    int64_t conv_id = json_object_get_int64(conv_id_obj);
    const char *role = json_object_get_string(role_obj);
-   const char *content = json_object_get_string(content_obj);
 
    /* SECURITY: whitelist the role a client may persist.  Clients only ever save their
     * own 'user' turns and the assistant's visible answer; 'system'/'tool' rows are

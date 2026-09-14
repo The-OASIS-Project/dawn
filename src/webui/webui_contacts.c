@@ -211,7 +211,6 @@ void handle_contacts_list(ws_connection_t *conn, json_object *payload) {
       json_object_object_add(resp_payload, "has_more", json_object_new_boolean(has_more));
    }
 
-done:
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);

@@ -115,19 +115,6 @@ static void res_unpack_question(sqlite3_stmt *st, research_question_t *q) {
    res_copy_text(st, 7, q->resolution_reason, sizeof(q->resolution_reason));
 }
 
-static void res_unpack_claim(sqlite3_stmt *st, research_claim_t *c) {
-   memset(c, 0, sizeof(*c));
-   c->id = sqlite3_column_int64(st, 0);
-   c->run_id = sqlite3_column_int64(st, 1);
-   c->question_id = res_col_int64_or_zero(st, 2);
-   res_copy_text(st, 3, c->claim, sizeof(c->claim));
-   res_copy_text(st, 4, c->source_url, sizeof(c->source_url));
-   res_copy_text(st, 5, c->source_kind, sizeof(c->source_kind));
-   res_copy_text(st, 6, c->quote, sizeof(c->quote));
-   c->round = sqlite3_column_int(st, 7);
-   c->created_at = (time_t)sqlite3_column_int64(st, 8);
-}
-
 /* Unpack the RESEARCH_CLAIM_LIGHT_COLS projection — question_id/claim/source_url
  * only.  memset zeroes the fields the projection omits (quote/source_kind/round/…)
  * so a stack-allocated research_claim_t (the digest gloss) has no uninitialized

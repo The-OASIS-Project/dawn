@@ -389,6 +389,7 @@ int memory_db_relation_supersede(int user_id,
          rc = sqlite3_step(create_stmt);
       } while (rc == SQLITE_ROW);
    }
+   (void)upsert_id; /* read only by the OLOG_DEBUG below (a no-op unless built -DDEBUG) */
    sqlite3_reset(create_stmt);
    if (rc != SQLITE_DONE) {
       int xrc = sqlite3_extended_errcode(s_db.db);

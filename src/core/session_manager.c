@@ -1802,7 +1802,6 @@ void session_update_system_prompt(session_t *session, const char *system_prompt)
    /* Find existing system message */
    int len = json_object_array_length(session->conversation_history);
    struct json_object *system_msg = NULL;
-   int system_idx = -1;
 
    for (int i = 0; i < len; i++) {
       struct json_object *msg = json_object_array_get_idx(session->conversation_history, i);
@@ -1811,7 +1810,6 @@ void session_update_system_prompt(session_t *session, const char *system_prompt)
          const char *role = json_object_get_string(role_obj);
          if (role && strcmp(role, "system") == 0) {
             system_msg = msg;
-            system_idx = i;
             break;
          }
       }

@@ -95,8 +95,6 @@ static const char *SQL_INSERT_OR_REPLACE =
     "INSERT OR REPLACE INTO music_metadata (path, mtime, title, artist, album, duration_sec) "
     "VALUES (?, ?, ?, ?, ?, ?)";
 
-static const char *SQL_DELETE_BY_PATH = "DELETE FROM music_metadata WHERE path = ?";
-
 static const char *SQL_SELECT_BY_PATH = "SELECT path, title, artist, album, duration_sec "
                                         "FROM music_metadata WHERE path = ?";
 
@@ -109,8 +107,6 @@ static const char *SQL_STATS = "SELECT COUNT(*), "
                                "COUNT(DISTINCT CASE WHEN album != '' THEN album END) "
                                "FROM music_metadata " DEDUP_WHERE;
 
-static const char *SQL_DELETE_NOT_IN_LIST = "DELETE FROM music_metadata WHERE path NOT IN (%s)";
-
 /* Search query: match pattern against title, artist, album, genre, or filename.
  * Dedup: exclude rows where a higher-priority source has the same track. */
 static const char *SQL_SEARCH = "SELECT path, title, artist, album, genre, duration_sec, source "
@@ -122,12 +118,6 @@ static const char *SQL_SEARCH = "SELECT path, title, artist, album, genre, durat
                                 "title COLLATE NOCASE "
                                 "LIMIT ?";
 
-/* List query: return all tracks ordered by artist/album/title (deduped) */
-static const char *SQL_LIST = "SELECT path, title, artist, album, genre, duration_sec, source "
-                              "FROM music_metadata " DEDUP_WHERE
-                              "ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, "
-                              "title COLLATE NOCASE "
-                              "LIMIT ?";
 
 static const char *SQL_LIST_PAGED =
     "SELECT path, title, artist, album, genre, duration_sec, source "

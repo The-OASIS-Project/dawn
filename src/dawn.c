@@ -954,7 +954,7 @@ const char *wakeWordAcknowledgment() {
 int capture_buffer(audioControl *myAudioControls,
                    char *max_buff,
                    uint32_t max_buff_size,
-                   int *ret_buff_size) {
+                   uint32_t *ret_buff_size) {
    (void)myAudioControls;  // Unused parameter (kept for API compatibility)
 
    *ret_buff_size = 0;
@@ -1352,7 +1352,6 @@ static void resolve_config_path(const char *raw, char *resolved, size_t resolved
 int main(int argc, char *argv[]) {
    char *input_text = NULL;
    char *command_text = NULL;
-   char *response_text = NULL;
    asr_result_t *asr_result = NULL;
    size_t prev_text_length = 0;
    int text_nochange = 0;
@@ -1386,7 +1385,6 @@ int main(int argc, char *argv[]) {
 
    // VAD state tracking
    float vad_speech_prob = 0.0f;
-   int silence_count = 0;
    float silence_duration = 0.0f;
    float speech_duration = 0.0f;     // For pause detection / chunking
    float recording_duration = 0.0f;  // Total recording time (prevents buffer overflow)
@@ -3041,7 +3039,6 @@ mqtt_disabled:
                if (vad_ctx) {
                   vad_silero_reset(vad_ctx);
                }
-               silence_count = 0;
                silence_duration = 0.0f;
                speech_duration = 0.0f;
                recording_duration = 0.0f;

@@ -300,15 +300,6 @@ static int job_update_exec(const char *sql,
    return AUTH_DB_SUCCESS;
 }
 
-struct running_bind {
-   int64_t conv_id;
-   time_t started_at;
-};
-static void bind_running(sqlite3_stmt *st, void *ctx) {
-   struct running_bind *b = ctx;
-   sqlite3_bind_int64(st, 1, (int64_t)b->started_at);
-   sqlite3_bind_int64(st, 2, b->conv_id);
-}
 int conv_db_job_set_running(int64_t conv_id, time_t started_at) {
    if (conv_id <= 0) {
       return AUTH_DB_INVALID;

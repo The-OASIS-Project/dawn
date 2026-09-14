@@ -426,10 +426,6 @@ void send_transcript_impl_ex(struct lws *wsi,
    json_object_put(obj);
 }
 
-static void send_transcript_impl(struct lws *wsi, const char *role, const char *text) {
-   send_transcript_impl_ex(wsi, role, text, false, false, 0, 0);
-}
-
 void send_error_impl(struct lws *wsi, const char *code, const char *message) {
    send_error_impl_ex(wsi, code, message, WS_SEVERITY_ERROR);
 }
@@ -524,10 +520,6 @@ static const char s_server_features_json[] = "{\"type\":\"server_features\",\"pa
                                              "false"
 #endif
                                              "}}";
-
-static void send_server_features(struct lws *wsi) {
-   send_json_message(wsi, s_server_features_json);
-}
 
 /**
  * Queue the 4 init messages through the response queue instead of calling

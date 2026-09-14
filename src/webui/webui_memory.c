@@ -1546,7 +1546,7 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
          int len = json_object_array_length(facts_arr);
          for (int i = 0; i < len && i < IMPORT_MAX_LINES; i++) {
             json_object *f = json_object_array_get_idx(facts_arr, i);
-            json_object *text_obj, *conf_obj, *src_obj;
+            json_object *text_obj, *conf_obj;
 
             if (!json_object_object_get_ex(f, "fact_text", &text_obj))
                continue;

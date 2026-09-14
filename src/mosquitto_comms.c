@@ -96,8 +96,6 @@ static void executeJsonCommand(struct json_object *parsedJson, struct mosquitto 
    char *callback_result = NULL;
    int should_respond = 0;
 
-   int i = 0;
-
    // Get the "device" object from the JSON
    if (json_object_object_get_ex(parsedJson, "device", &deviceObject)) {
       // Extract the text value as a C string

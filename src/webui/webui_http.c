@@ -22,7 +22,7 @@
  *
  * This module handles:
  * - Static file serving from www/ directory
- * - Authentication API endpoints (/api/auth/*)
+ * - Authentication API endpoints (/api/auth/...)
  * - Health check endpoint
  */
 

@@ -840,7 +840,6 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
       if (strcmp(role, "assistant") == 0 && json_object_is_type(content_obj, json_type_array)) {
          int content_len = json_object_array_length(content_obj);
          json_object *filtered_content = json_object_new_array();
-         int has_tool_use = 0;
 
          for (int j = 0; j < content_len; j++) {
             json_object *block = json_object_array_get_idx(content_obj, j);
@@ -863,7 +862,6 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
                   if (!tool_result_ids ||
                       has_matching_tool_result(tool_id, tool_result_ids, tool_result_count)) {
                      json_object_array_add(filtered_content, json_object_get(block));
-                     has_tool_use = 1;
                   } else {
                      OLOG_WARNING("Claude: Skipping orphaned tool_use %s", tool_id);
                   }

@@ -442,7 +442,6 @@ DelayLineBuffer *g_ref_buffer = nullptr;  // Simple delay line buffer
 // Pre-allocated frame buffers at 48kHz (10ms = 480 samples)
 int16_t g_ref_frame[AEC_FRAME_SAMPLES];
 int16_t g_mic_frame[AEC_FRAME_SAMPLES];  // Mic input frame (native 48kHz)
-int16_t g_out_frame[AEC_FRAME_SAMPLES];  // AEC output at 48kHz
 
 // Note: TTS module already resamples 22050Hz → 48kHz before calling aec_add_reference()
 // No resampler needed here - reference audio arrives at native 48kHz

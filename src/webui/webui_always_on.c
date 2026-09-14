@@ -121,44 +121,6 @@ static void buffer_write(always_on_ctx_t *ctx, const uint8_t *data, size_t len) 
    ctx->valid_len += len;
 }
 
-/**
- * Read PCM samples from the circular buffer for VAD processing.
- * Returns pointer to contiguous samples (may use provided scratch buffer for wrap-around).
- */
-static const int16_t *buffer_read_samples(always_on_ctx_t *ctx,
-                                          size_t num_samples,
-                                          int16_t *scratch,
-                                          size_t *available_out) {
-   size_t available_samples = ctx->valid_len / sizeof(int16_t);
-   if (available_samples < num_samples) {
-      *available_out = available_samples;
-      return NULL;
-   }
-   *available_out = num_samples;
-
-   size_t byte_count = num_samples * sizeof(int16_t);
-   size_t first_chunk = ALWAYS_ON_BUFFER_SIZE - ctx->read_pos;
-
-   if (byte_count <= first_chunk) {
-      /* No wrap — return pointer directly into buffer */
-      return (const int16_t *)(ctx->audio_buffer + ctx->read_pos);
-   }
-
-   /* Wrap-around — copy into scratch buffer */
-   memcpy(scratch, ctx->audio_buffer + ctx->read_pos, first_chunk);
-   memcpy((uint8_t *)scratch + first_chunk, ctx->audio_buffer, byte_count - first_chunk);
-   return scratch;
-}
-
-/**
- * Advance read position after consuming samples
- */
-static void buffer_consume(always_on_ctx_t *ctx, size_t num_samples) {
-   size_t byte_count = num_samples * sizeof(int16_t);
-   ctx->read_pos = (ctx->read_pos + byte_count) % ALWAYS_ON_BUFFER_SIZE;
-   ctx->valid_len -= byte_count;
-}
-
 /* Forward declarations */
 static void always_on_release(always_on_ctx_t *ctx);
 

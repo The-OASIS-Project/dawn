@@ -2402,7 +2402,7 @@ void handle_list_llm_models(ws_connection_t *conn) {
    else {
       /* Check session config first */
       if (conn->session) {
-         session_llm_config_t session_config;
+         session_llm_config_t session_config = { 0 };
          session_get_llm_config(conn->session, &session_config);
          if (session_config.model[0] != '\0') {
             current_model = session_config.model;
