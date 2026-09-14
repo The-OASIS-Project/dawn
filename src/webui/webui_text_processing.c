@@ -48,6 +48,7 @@
 #include "image_store.h"
 #include "llm/llm_context.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 #include "webui/webui_image_rehydrate.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_server.h"
@@ -707,9 +708,7 @@ int webui_process_text_input_with_vision(session_t *session,
          }
          work->vision_image_sizes[work->vision_image_count] = vision_image_sizes[i];
          if (vision_mimes && vision_mimes[i]) {
-            strncpy(work->vision_mimes[work->vision_image_count], vision_mimes[i],
-                    WEBUI_VISION_MIME_MAX - 1);
-            work->vision_mimes[work->vision_image_count][WEBUI_VISION_MIME_MAX - 1] = '\0';
+            safe_strscpy(work->vision_mimes[work->vision_image_count], vision_mimes[i]);
          }
          work->vision_image_count++;
       }

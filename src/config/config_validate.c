@@ -28,20 +28,20 @@
 #include <string.h>
 
 #include "llm/llm_interface.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Helper Macros
  * ============================================================================= */
 
-#define ADD_ERROR(field_name, msg_fmt, ...)                                                     \
-   do {                                                                                         \
-      if (error_count < (int)max_errors) {                                                      \
-         strncpy(errors[error_count].field, field_name, sizeof(errors[error_count].field) - 1); \
-         errors[error_count].field[sizeof(errors[error_count].field) - 1] = '\0';               \
-         snprintf(errors[error_count].message, sizeof(errors[error_count].message), msg_fmt,    \
-                  ##__VA_ARGS__);                                                               \
-         error_count++;                                                                         \
-      }                                                                                         \
+#define ADD_ERROR(field_name, msg_fmt, ...)                                                  \
+   do {                                                                                      \
+      if (error_count < (int)max_errors) {                                                   \
+         safe_strscpy(errors[error_count].field, field_name);                                \
+         snprintf(errors[error_count].message, sizeof(errors[error_count].message), msg_fmt, \
+                  ##__VA_ARGS__);                                                            \
+         error_count++;                                                                      \
+      }                                                                                      \
    } while (0)
 
 /* NaN-safe range check: the negated-range form catches NaN/+inf/-inf

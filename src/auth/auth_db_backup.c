@@ -29,6 +29,7 @@
 
 #define AUTH_DB_INTERNAL_ALLOWED
 #include "auth/auth_db_internal.h"
+#include "utils/string_utils.h"
 #undef AUTH_DB_INTERNAL_ALLOWED
 
 #include <dirent.h>
@@ -77,7 +78,7 @@ static void prune_old_backups(const char *backup_dir, const char *prefix) {
       if (stat(full, &st) != 0 || !S_ISREG(st.st_mode)) {
          continue;
       }
-      strncpy(entries[n].name, e->d_name, sizeof(entries[n].name) - 1);
+      safe_strscpy(entries[n].name, e->d_name);
       entries[n].name[sizeof(entries[n].name) - 1] = '\0';
       entries[n].mtime = st.st_mtime;
       n++;

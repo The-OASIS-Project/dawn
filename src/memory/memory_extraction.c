@@ -50,6 +50,7 @@
 #include "memory/memory_note_guard.h"
 #include "memory/memory_predicate_dedup.h"
 #include "memory/memory_types.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Extraction Prompt Template
@@ -974,8 +975,7 @@ static void process_extraction_response(int user_id,
 
          /* Add to local map */
          if (entity_map_count < ENTITY_MAP_MAX) {
-            strncpy(entity_map[entity_map_count].canonical, canonical, MEMORY_ENTITY_NAME_MAX - 1);
-            entity_map[entity_map_count].canonical[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+            safe_strscpy(entity_map[entity_map_count].canonical, canonical);
             entity_map[entity_map_count].id = eid;
             entity_map_count++;
          } else {
@@ -1168,9 +1168,7 @@ static void process_extraction_response(int user_id,
                                               &subject_entity_id) == MEMORY_DB_SUCCESS &&
                    subject_entity_id > 0) {
                   if (entity_map_count < ENTITY_MAP_MAX) {
-                     strncpy(entity_map[entity_map_count].canonical, subj_canonical,
-                             MEMORY_ENTITY_NAME_MAX - 1);
-                     entity_map[entity_map_count].canonical[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+                     safe_strscpy(entity_map[entity_map_count].canonical, subj_canonical);
                      entity_map[entity_map_count].id = subject_entity_id;
                      entity_map_count++;
                   }
@@ -1249,9 +1247,7 @@ static void process_extraction_response(int user_id,
                                                  &r_subj_id) != MEMORY_DB_SUCCESS)
                      continue;
                   if (entity_map_count < ENTITY_MAP_MAX) {
-                     strncpy(entity_map[entity_map_count].canonical, r_subj_canon,
-                             MEMORY_ENTITY_NAME_MAX - 1);
-                     entity_map[entity_map_count].canonical[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+                     safe_strscpy(entity_map[entity_map_count].canonical, r_subj_canon);
                      entity_map[entity_map_count].id = r_subj_id;
                      entity_map_count++;
                   }
@@ -1515,8 +1511,7 @@ static void process_extraction_response(int user_id,
       const char *title = json_object_get_string(title_obj);
       if (title && title[0] != '\0' && conversation_id > 0) {
          char safe_title[48];
-         strncpy(safe_title, title, sizeof(safe_title) - 1);
-         safe_title[sizeof(safe_title) - 1] = '\0';
+         safe_strscpy(safe_title, title);
          utf8_truncate(safe_title, 40);
 
          int rc = conv_db_auto_title(conversation_id, user_id, safe_title);
@@ -1545,8 +1540,8 @@ void memory_extraction_build_fallback(session_t *session, memory_extraction_fall
    session_get_llm_config(session, &cfg);
    fb->type = cfg.type;
    fb->cloud_provider = cfg.cloud_provider;
-   strncpy(fb->endpoint, cfg.endpoint, sizeof(fb->endpoint) - 1);
-   strncpy(fb->model, cfg.model, sizeof(fb->model) - 1);
+   safe_strscpy(fb->endpoint, cfg.endpoint);
+   safe_strscpy(fb->model, cfg.model);
 }
 
 /* =============================================================================
@@ -1687,8 +1682,7 @@ static void *extraction_thread(void *arg) {
          fallback_config.endpoint = ctx->fallback.endpoint;
          fallback_config.model = ctx->fallback.model;
          fallback_config.suppress_tools = true;
-         strncpy(fallback_config.thinking_mode, "disabled",
-                 sizeof(fallback_config.thinking_mode) - 1);
+         safe_strscpy(fallback_config.thinking_mode, "disabled");
 
          fallback_config.timeout_ms = g_config.memory.extraction_timeout_ms;
 
@@ -2077,7 +2071,7 @@ int memory_trigger_extraction(int user_id,
    ctx->user_id = user_id;
    ctx->conversation_id = conversation_id;
    if (session_id_str) {
-      strncpy(ctx->session_id, session_id_str, MEMORY_SESSION_ID_MAX - 1);
+      safe_strscpy(ctx->session_id, session_id_str);
    } else {
       snprintf(ctx->session_id, MEMORY_SESSION_ID_MAX, "session_%ld", (long)time(NULL));
    }
@@ -2228,16 +2222,14 @@ int memory_extraction_resolve_config(llm_resolved_config_t *cfg,
    }
 
    if (model && model[0] != '\0') {
-      strncpy(model_buf, model, model_buf_sz - 1);
-      model_buf[model_buf_sz - 1] = '\0';
+      safe_strncpy(model_buf, model, model_buf_sz);
       cfg->model = model_buf;
    }
 
    if (strcmp(provider, "local") == 0 || strcmp(provider, "ollama") == 0) {
       cfg->type = LLM_LOCAL;
       cfg->cloud_provider = CLOUD_PROVIDER_NONE;
-      strncpy(endpoint_buf, g_config.llm.local.endpoint, endpoint_buf_sz - 1);
-      endpoint_buf[endpoint_buf_sz - 1] = '\0';
+      safe_strncpy(endpoint_buf, g_config.llm.local.endpoint, endpoint_buf_sz);
       cfg->endpoint = endpoint_buf;
    } else if (strcmp(provider, "openai") == 0) {
       cfg->type = LLM_CLOUD;
@@ -2257,8 +2249,7 @@ int memory_extraction_resolve_config(llm_resolved_config_t *cfg,
       /* extraction_model is a "vendor/model" slug here; fall back to the main OpenRouter
        * default when unset. */
       if (!cfg->model || cfg->model[0] == '\0') {
-         strncpy(model_buf, llm_get_default_openrouter_model(), model_buf_sz - 1);
-         model_buf[model_buf_sz - 1] = '\0';
+         safe_strncpy(model_buf, llm_get_default_openrouter_model(), model_buf_sz);
          cfg->model = model_buf;
       }
    } else {
@@ -2267,8 +2258,7 @@ int memory_extraction_resolve_config(llm_resolved_config_t *cfg,
                    prefix, provider);
       cfg->type = LLM_LOCAL;
       cfg->cloud_provider = CLOUD_PROVIDER_NONE;
-      strncpy(endpoint_buf, g_config.llm.local.endpoint, endpoint_buf_sz - 1);
-      endpoint_buf[endpoint_buf_sz - 1] = '\0';
+      safe_strncpy(endpoint_buf, g_config.llm.local.endpoint, endpoint_buf_sz);
       cfg->endpoint = endpoint_buf;
    }
 
@@ -2281,7 +2271,7 @@ int memory_extraction_resolve_config(llm_resolved_config_t *cfg,
    }
 
    cfg->suppress_tools = true;
-   strncpy(cfg->thinking_mode, "disabled", sizeof(cfg->thinking_mode) - 1);
+   safe_strscpy(cfg->thinking_mode, "disabled");
    cfg->timeout_ms = g_config.memory.extraction_timeout_ms;
 
    return SUCCESS;

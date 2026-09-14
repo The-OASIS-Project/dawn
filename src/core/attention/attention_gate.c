@@ -28,14 +28,14 @@
 #include <string.h>
 
 #include "core/attention/attention_internal.h"
+#include "utils/string_utils.h"
 
 /* Bounded copy — kept local so the gate stays dependency-free for unit tests. */
 static void gate_strcpy(char *dst, const char *src, size_t n) {
    if (n == 0) {
       return;
    }
-   strncpy(dst, src, n - 1);
-   dst[n - 1] = '\0';
+   safe_strncpy(dst, src, n);
 }
 
 /* True if the watch's raw condition is met right now (pre-hysteresis/backoff). */

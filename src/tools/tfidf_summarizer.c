@@ -243,7 +243,7 @@ static void hash_table_increment(hash_entry_t **table, const char *word) {
    if (!new_entry) {
       return;
    }
-   strncpy(new_entry->word, word, MAX_WORD_LEN - 1);
+   safe_strscpy(new_entry->word, word);
    new_entry->doc_freq = 1;
    new_entry->next = table[idx];
    table[idx] = new_entry;
@@ -796,7 +796,7 @@ static void hash_table_set(hash_entry_t **table, const char *word, int value) {
    if (!new_entry) {
       return;
    }
-   strncpy(new_entry->word, word, MAX_WORD_LEN - 1);
+   safe_strscpy(new_entry->word, word);
    new_entry->doc_freq = value;
    new_entry->next = table[idx];
    table[idx] = new_entry;

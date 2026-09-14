@@ -37,6 +37,7 @@
 #include "memory/memory_db_aliases.h"
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_similarity.h"
+#include "utils/string_utils.h"
 #include "webui/webui_internal.h"
 
 /* Default pagination limits */
@@ -1562,8 +1563,7 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
 
             /* Truncate to max fact length (same as text path) */
             char truncated[MEMORY_FACT_TEXT_MAX];
-            strncpy(truncated, text, sizeof(truncated) - 1);
-            truncated[sizeof(truncated) - 1] = '\0';
+            safe_strscpy(truncated, text);
 
             if (memory_filter_check(truncated)) {
                skipped_blocked++;
@@ -1612,11 +1612,9 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
 
             /* Truncate to field limits */
             char category[MEMORY_CATEGORY_MAX];
-            strncpy(category, category_raw, sizeof(category) - 1);
-            category[sizeof(category) - 1] = '\0';
+            safe_strscpy(category, category_raw);
             char value[MEMORY_PREF_VALUE_MAX];
-            strncpy(value, value_raw, sizeof(value) - 1);
-            value[sizeof(value) - 1] = '\0';
+            safe_strscpy(value, value_raw);
 
             float confidence = 0.8f;
             if (json_object_object_get_ex(p, "confidence", &conf_obj))
@@ -1720,8 +1718,7 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
 
          /* Truncate to max fact length */
          char truncated[MEMORY_FACT_TEXT_MAX];
-         strncpy(truncated, fact_text, sizeof(truncated) - 1);
-         truncated[sizeof(truncated) - 1] = '\0';
+         safe_strscpy(truncated, fact_text);
 
          if (memory_filter_check(truncated)) {
             skipped_blocked++;
@@ -1910,8 +1907,7 @@ void handle_entity_link_request(ws_connection_t *conn, struct json_object *paylo
    if (json_object_object_get_ex(payload, "reason", &reason_obj)) {
       const char *r = json_object_get_string(reason_obj);
       if (r && *r) {
-         strncpy(reason_buf, r, sizeof(reason_buf) - 1);
-         reason_buf[sizeof(reason_buf) - 1] = '\0';
+         safe_strscpy(reason_buf, r);
          if (memory_filter_check(reason_buf)) {
             send_alias_error(conn, "entity_link_response", "Reason failed prompt-injection filter");
             return;
@@ -1955,8 +1951,7 @@ void handle_entity_unlink_request(ws_connection_t *conn, struct json_object *pay
    if (json_object_object_get_ex(payload, "reason", &reason_obj)) {
       const char *r = json_object_get_string(reason_obj);
       if (r && *r) {
-         strncpy(reason_buf, r, sizeof(reason_buf) - 1);
-         reason_buf[sizeof(reason_buf) - 1] = '\0';
+         safe_strscpy(reason_buf, r);
          if (memory_filter_check(reason_buf)) {
             send_alias_error(conn, "entity_unlink_response",
                              "Reason failed prompt-injection filter");

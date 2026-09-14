@@ -44,6 +44,7 @@
 #include "memory/memory_history_loader.h"
 #include "messaging/messaging_engine.h"
 #include "messaging/messaging_engine_internal.h"
+#include "utils/string_utils.h"
 
 /* messaging_conv_get_max_msg_id and history_array_max_msg_id are file-local
  * helpers (used only by the staleness reload + history restore below). */
@@ -518,17 +519,13 @@ session_t *get_or_create_messaging_session(const char *provider,
             }
          }
          if (conv.model[0]) {
-            strncpy(mcfg.model, conv.model, sizeof(mcfg.model) - 1);
-            mcfg.model[sizeof(mcfg.model) - 1] = '\0';
+            safe_strscpy(mcfg.model, conv.model);
          }
          if (conv.thinking_mode[0]) {
-            strncpy(mcfg.thinking_mode, conv.thinking_mode, sizeof(mcfg.thinking_mode) - 1);
-            mcfg.thinking_mode[sizeof(mcfg.thinking_mode) - 1] = '\0';
+            safe_strscpy(mcfg.thinking_mode, conv.thinking_mode);
          }
          if (conv.reasoning_effort[0]) {
-            strncpy(mcfg.reasoning_effort, conv.reasoning_effort,
-                    sizeof(mcfg.reasoning_effort) - 1);
-            mcfg.reasoning_effort[sizeof(mcfg.reasoning_effort) - 1] = '\0';
+            safe_strscpy(mcfg.reasoning_effort, conv.reasoning_effort);
          }
 
          if (session_set_llm_config(s, &mcfg) != SUCCESS) {

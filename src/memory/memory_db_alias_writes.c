@@ -46,6 +46,7 @@
 #include "memory/memory_db_entities.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_types.h"
+#include "utils/string_utils.h"
 
 /* Insert a memory_entity_merge_proposals row.  Used by consider_auto_merge
  * for review-band candidates AND by the link-user-self orchestrator's
@@ -762,16 +763,14 @@ static void populate_relation_outgoing_row(sqlite3_stmt *stmt, memory_relation_t
    out->subject_entity_id = sqlite3_column_int64(stmt, 1);
    const char *rel = (const char *)sqlite3_column_text(stmt, 2);
    if (rel) {
-      strncpy(out->relation, rel, MEMORY_RELATION_MAX - 1);
-      out->relation[MEMORY_RELATION_MAX - 1] = '\0';
+      safe_strscpy(out->relation, rel);
    }
    out->object_entity_id = (sqlite3_column_type(stmt, 3) == SQLITE_NULL)
                                ? 0
                                : sqlite3_column_int64(stmt, 3);
    const char *obj_name = (const char *)sqlite3_column_text(stmt, 4);
    if (obj_name) {
-      strncpy(out->object_name, obj_name, MEMORY_ENTITY_NAME_MAX - 1);
-      out->object_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+      safe_strscpy(out->object_name, obj_name);
    }
    out->confidence = (float)sqlite3_column_double(stmt, 5);
    out->valid_from = (sqlite3_column_type(stmt, 6) == SQLITE_NULL) ? 0
@@ -977,13 +976,11 @@ int memory_db_entity_alias_list(int user_id,
       row->source_entity_id = sqlite3_column_int64(stmt, 1);
       const char *src = (const char *)sqlite3_column_text(stmt, 2);
       if (src) {
-         strncpy(row->source_canonical_name, src, MEMORY_ENTITY_NAME_MAX - 1);
-         row->source_canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+         safe_strscpy(row->source_canonical_name, src);
       }
       const char *kind = (const char *)sqlite3_column_text(stmt, 3);
       if (kind) {
-         strncpy(row->link_kind, kind, sizeof(row->link_kind) - 1);
-         row->link_kind[sizeof(row->link_kind) - 1] = '\0';
+         safe_strscpy(row->link_kind, kind);
       }
       row->composite_score = (float)sqlite3_column_double(stmt, 4);
       row->linked_at = sqlite3_column_int64(stmt, 5);
@@ -1031,30 +1028,25 @@ int memory_db_entity_alias_history(int user_id,
       row->link_id = sqlite3_column_int64(stmt, 0);
       const char *src = (const char *)sqlite3_column_text(stmt, 1);
       if (src) {
-         strncpy(row->source_canonical_name, src, MEMORY_ENTITY_NAME_MAX - 1);
-         row->source_canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+         safe_strscpy(row->source_canonical_name, src);
       }
       const char *tgt = (const char *)sqlite3_column_text(stmt, 2);
       if (tgt) {
-         strncpy(row->target_canonical_name, tgt, MEMORY_ENTITY_NAME_MAX - 1);
-         row->target_canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+         safe_strscpy(row->target_canonical_name, tgt);
       }
       const char *kind = (const char *)sqlite3_column_text(stmt, 3);
       if (kind) {
-         strncpy(row->link_kind, kind, sizeof(row->link_kind) - 1);
-         row->link_kind[sizeof(row->link_kind) - 1] = '\0';
+         safe_strscpy(row->link_kind, kind);
       }
       const char *reason = (const char *)sqlite3_column_text(stmt, 4);
       if (reason) {
-         strncpy(row->reason, reason, sizeof(row->reason) - 1);
-         row->reason[sizeof(row->reason) - 1] = '\0';
+         safe_strscpy(row->reason, reason);
       }
       row->linked_at = sqlite3_column_int64(stmt, 5);
       row->unlinked_at = sqlite3_column_int64(stmt, 6);
       const char *unlink_r = (const char *)sqlite3_column_text(stmt, 7);
       if (unlink_r) {
-         strncpy(row->unlink_reason, unlink_r, sizeof(row->unlink_reason) - 1);
-         row->unlink_reason[sizeof(row->unlink_reason) - 1] = '\0';
+         safe_strscpy(row->unlink_reason, unlink_r);
       }
       n++;
    }
@@ -1113,13 +1105,11 @@ int memory_db_entity_list_for_admin(int user_id,
       row->entity_id = sqlite3_column_int64(stmt, 0);
       const char *name = (const char *)sqlite3_column_text(stmt, 1);
       if (name) {
-         strncpy(row->name, name, MEMORY_ENTITY_NAME_MAX - 1);
-         row->name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+         safe_strscpy(row->name, name);
       }
       const char *etype = (const char *)sqlite3_column_text(stmt, 2);
       if (etype) {
-         strncpy(row->entity_type, etype, MEMORY_ENTITY_TYPE_MAX - 1);
-         row->entity_type[MEMORY_ENTITY_TYPE_MAX - 1] = '\0';
+         safe_strscpy(row->entity_type, etype);
       }
       row->mention_count = sqlite3_column_int(stmt, 3);
       row->is_user_self = sqlite3_column_int(stmt, 4) != 0;
@@ -1156,13 +1146,11 @@ int memory_db_entity_list_for_admin(int user_id,
          row->entity_id = sqlite3_column_int64(stmt, 0);
          const char *name = (const char *)sqlite3_column_text(stmt, 1);
          if (name) {
-            strncpy(row->name, name, MEMORY_ENTITY_NAME_MAX - 1);
-            row->name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+            safe_strscpy(row->name, name);
          }
          const char *etype = (const char *)sqlite3_column_text(stmt, 2);
          if (etype) {
-            strncpy(row->entity_type, etype, MEMORY_ENTITY_TYPE_MAX - 1);
-            row->entity_type[MEMORY_ENTITY_TYPE_MAX - 1] = '\0';
+            safe_strscpy(row->entity_type, etype);
          }
          row->mention_count = sqlite3_column_int(stmt, 3);
          row->is_user_self = sqlite3_column_int(stmt, 4) != 0;
@@ -1622,13 +1610,11 @@ int memory_db_proposal_list_pending(int user_id,
       row->target_entity_id = sqlite3_column_int64(stmt, 2);
       const char *src = (const char *)sqlite3_column_text(stmt, 3);
       if (src) {
-         strncpy(row->source_canonical_name, src, MEMORY_ENTITY_NAME_MAX - 1);
-         row->source_canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+         safe_strscpy(row->source_canonical_name, src);
       }
       const char *tgt = (const char *)sqlite3_column_text(stmt, 4);
       if (tgt) {
-         strncpy(row->target_canonical_name, tgt, MEMORY_ENTITY_NAME_MAX - 1);
-         row->target_canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+         safe_strscpy(row->target_canonical_name, tgt);
       }
       row->composite_score = (float)sqlite3_column_double(stmt, 5);
       row->proposed_at = sqlite3_column_int64(stmt, 6);
@@ -1963,10 +1949,8 @@ static void build_synthetic_self_entity(int user_id,
                        * 0 for id=0, which is the correct behavior for a
                        * not-yet-materialized entity. */
    out_synth->user_id = user_id;
-   strncpy(out_synth->name, identity->real_name, MEMORY_ENTITY_NAME_MAX - 1);
-   out_synth->name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
-   strncpy(out_synth->entity_type, "person", MEMORY_ENTITY_TYPE_MAX - 1);
-   out_synth->entity_type[MEMORY_ENTITY_TYPE_MAX - 1] = '\0';
+   safe_strscpy(out_synth->name, identity->real_name);
+   safe_strscpy(out_synth->entity_type, "person");
 
    /* Start canonical_name with real_name canonicalized; this is the
     * primary token surface. */
@@ -1976,8 +1960,7 @@ static void build_synthetic_self_entity(int user_id,
    /* Union with alias-line tokens.  Up to 16 aliases tracked for dedupe. */
    if (identity->identity_aliases[0] != '\0') {
       char buf[AUTH_IDENTITY_ALIASES_MAX];
-      strncpy(buf, identity->identity_aliases, sizeof(buf) - 1);
-      buf[sizeof(buf) - 1] = '\0';
+      safe_strscpy(buf, identity->identity_aliases);
 
       char *seen[16];
       int seen_count = 0;
@@ -2029,8 +2012,7 @@ static void build_synthetic_self_entity(int user_id,
                       dropped_overflow, user_id);
       }
    }
-   strncpy(out_synth->canonical_name, canon, MEMORY_ENTITY_NAME_MAX - 1);
-   out_synth->canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+   safe_strscpy(out_synth->canonical_name, canon);
 
    out_synth->mention_count = 0;
    out_synth->first_seen = time(NULL);
@@ -2082,8 +2064,7 @@ int memory_alias_link_user_self_run(int user_id,
       }
       result->self_entity_id = self_id;
       result->self_was_seeded = false;
-      strncpy(result->self_canonical_name, self_ent.canonical_name, MEMORY_ENTITY_NAME_MAX - 1);
-      result->self_canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+      safe_strscpy(result->self_canonical_name, self_ent.canonical_name);
    } else {
       /* No is_user_self=1 row exists — per design §8 Path B step 1, first
        * try to find an existing entity that matches the synthetic strongly
@@ -2092,8 +2073,7 @@ int memory_alias_link_user_self_run(int user_id,
        * a fresh entity.  Phase 1.5 Ckpt D added an explicit real_name gate
        * above this point; an empty real_name has already returned an error. */
       char display_name[MEMORY_ENTITY_NAME_MAX];
-      strncpy(display_name, identity.real_name, sizeof(display_name) - 1);
-      display_name[sizeof(display_name) - 1] = '\0';
+      safe_strscpy(display_name, identity.real_name);
 
       char canonical_name[MEMORY_ENTITY_NAME_MAX];
       memory_make_canonical_name(display_name, canonical_name, sizeof(canonical_name));
@@ -2140,12 +2120,9 @@ int memory_alias_link_user_self_run(int user_id,
          memory_entity_t self_ent;
          if (memory_alias_internal_load_entity_full(user_id, self_id, &self_ent, NULL, NULL) ==
              MEMORY_DB_SUCCESS) {
-            strncpy(result->self_canonical_name, self_ent.canonical_name,
-                    MEMORY_ENTITY_NAME_MAX - 1);
-            result->self_canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+            safe_strscpy(result->self_canonical_name, self_ent.canonical_name);
          } else {
-            strncpy(result->self_canonical_name, canonical_name, MEMORY_ENTITY_NAME_MAX - 1);
-            result->self_canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+            safe_strscpy(result->self_canonical_name, canonical_name);
          }
          result->self_entity_id = self_id;
       }
@@ -2171,8 +2148,7 @@ int memory_alias_link_user_self_run(int user_id,
             result->self_was_promoted = false;
          }
          result->self_entity_id = self_id;
-         strncpy(result->self_canonical_name, canonical_name, MEMORY_ENTITY_NAME_MAX - 1);
-         result->self_canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+         safe_strscpy(result->self_canonical_name, canonical_name);
       }
    }
 
@@ -2222,10 +2198,8 @@ int memory_alias_link_user_self_run(int user_id,
       if (result->row_count < MEMORY_ALIAS_LINK_USER_SELF_MAX_ROWS) {
          row = &result->rows[result->row_count++];
          row->entity_id = eid;
-         strncpy(row->canonical_name, cand.canonical_name, MEMORY_ENTITY_NAME_MAX - 1);
-         row->canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
-         strncpy(row->entity_type, cand.entity_type, MEMORY_ENTITY_TYPE_MAX - 1);
-         row->entity_type[MEMORY_ENTITY_TYPE_MAX - 1] = '\0';
+         safe_strscpy(row->canonical_name, cand.canonical_name);
+         safe_strscpy(row->entity_type, cand.entity_type);
       }
 
       if (dry_run) {

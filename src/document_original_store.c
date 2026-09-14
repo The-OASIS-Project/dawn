@@ -33,6 +33,7 @@
 
 #include "document_original_store.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* kind tag for document originals in the shared blobs table. */
 #define DOC_ORIGINAL_KIND 0
@@ -159,8 +160,7 @@ int document_original_get_filename(const char *blob_id, int user_id, char *out, 
    if (!doc_can_read(user_id, md.user_id, md.source)) {
       return BLOB_STORE_FORBIDDEN;
    }
-   strncpy(out, md.filename_original, out_size - 1);
-   out[out_size - 1] = '\0';
+   safe_strncpy(out, md.filename_original, out_size);
    return BLOB_STORE_SUCCESS;
 }
 

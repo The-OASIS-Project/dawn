@@ -40,6 +40,7 @@
 #include "memory/memory_db_entities.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_types.h"
+#include "utils/string_utils.h"
 
 /* Tripwire: the cascade's insertion sort on the scored array (see
  * cascade_internal) is justified by N being tiny.  If MEMORY_ALIAS_STAGE5_
@@ -211,10 +212,8 @@ static int stage2_candidates(int user_id,
 
       alias_candidate_t *c = &out[*out_count];
       c->entity_id = e.id;
-      strncpy(c->canonical_name, e.canonical_name, MEMORY_ENTITY_NAME_MAX - 1);
-      c->canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
-      strncpy(c->entity_type, e.entity_type, MEMORY_ENTITY_TYPE_MAX - 1);
-      c->entity_type[MEMORY_ENTITY_TYPE_MAX - 1] = '\0';
+      safe_strscpy(c->canonical_name, e.canonical_name);
+      safe_strscpy(c->entity_type, e.entity_type);
       c->mention_count = e.mention_count;
       c->first_seen = e.first_seen;
       c->is_user_self = is_self;
@@ -327,10 +326,8 @@ static int stage2_reverse_substring_candidates(int user_id,
 
       alias_candidate_t *c = &out[*out_count];
       c->entity_id = e.id;
-      strncpy(c->canonical_name, e.canonical_name, MEMORY_ENTITY_NAME_MAX - 1);
-      c->canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
-      strncpy(c->entity_type, e.entity_type, MEMORY_ENTITY_TYPE_MAX - 1);
-      c->entity_type[MEMORY_ENTITY_TYPE_MAX - 1] = '\0';
+      safe_strscpy(c->canonical_name, e.canonical_name);
+      safe_strscpy(c->entity_type, e.entity_type);
       c->mention_count = e.mention_count;
       c->first_seen = e.first_seen;
       c->is_user_self = is_self;
@@ -495,10 +492,8 @@ static void synth_self_allow_list_user(int user_id,
    alias_candidate_t *c = &out[*count];
    memset(c, 0, sizeof(*c));
    c->entity_id = e.id;
-   strncpy(c->canonical_name, e.canonical_name, MEMORY_ENTITY_NAME_MAX - 1);
-   c->canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
-   strncpy(c->entity_type, e.entity_type, MEMORY_ENTITY_TYPE_MAX - 1);
-   c->entity_type[MEMORY_ENTITY_TYPE_MAX - 1] = '\0';
+   safe_strscpy(c->canonical_name, e.canonical_name);
+   safe_strscpy(c->entity_type, e.entity_type);
    c->mention_count = e.mention_count;
    c->first_seen = e.first_seen;
    c->is_user_self = is_self;
@@ -632,11 +627,11 @@ int memory_alias_internal_cascade(int user_id,
          memset(&cur, 0, sizeof(cur));
          memset(&cand, 0, sizeof(cand));
          cur.id = cands[best_idx].entity_id;
-         strncpy(cur.entity_type, cands[best_idx].entity_type, MEMORY_ENTITY_TYPE_MAX - 1);
+         safe_strscpy(cur.entity_type, cands[best_idx].entity_type);
          cur.mention_count = cands[best_idx].mention_count;
          cur.first_seen = cands[best_idx].first_seen;
          cand.id = cands[i].entity_id;
-         strncpy(cand.entity_type, cands[i].entity_type, MEMORY_ENTITY_TYPE_MAX - 1);
+         safe_strscpy(cand.entity_type, cands[i].entity_type);
          cand.mention_count = cands[i].mention_count;
          cand.first_seen = cands[i].first_seen;
          /* Returns > 0 when @p b (the new candidate) should be canonical. */

@@ -44,6 +44,7 @@
 #include "tools/tool_registry.h"
 #include "tools/url_fetcher.h"
 #include "tools/web_search.h"
+#include "utils/string_utils.h"
 
 /* ========== Constants ========== */
 
@@ -275,7 +276,7 @@ static char *image_search_callback(const char *action, char *value, int *should_
 
       image_fetch_t *f = &fetches[fetch_count];
       curl_buffer_init_with_max(&f->buffer, IMAGE_SEARCH_MAX_FETCH_SIZE);
-      strncpy(f->img_src, img_src, sizeof(f->img_src) - 1);
+      safe_strscpy(f->img_src, img_src);
       f->valid = true;
 
       /* Build DNS pinning resolve list to prevent TOCTOU rebinding */
@@ -291,10 +292,10 @@ static char *image_search_callback(const char *action, char *value, int *should_
 
       /* Optional fields */
       if (json_object_object_get_ex(item, "title", &val) && json_object_get_string(val)) {
-         strncpy(f->title, json_object_get_string(val), sizeof(f->title) - 1);
+         safe_strscpy(f->title, json_object_get_string(val));
       }
       if (json_object_object_get_ex(item, "source", &val) && json_object_get_string(val)) {
-         strncpy(f->source, json_object_get_string(val), sizeof(f->source) - 1);
+         safe_strscpy(f->source, json_object_get_string(val));
       }
       if (json_object_object_get_ex(item, "resolution", &val) && json_object_get_string(val)) {
          /* Resolution is "WxH" string */
@@ -432,8 +433,7 @@ static char *image_search_callback(const char *action, char *value, int *should_
                }
                if (idx >= 0) {
                   redirects[redirect_count].fetch_idx = idx;
-                  strncpy(redirects[redirect_count].url, redir_url, sizeof(redirects[0].url) - 1);
-                  redirects[redirect_count].url[sizeof(redirects[0].url) - 1] = '\0';
+                  safe_strscpy(redirects[redirect_count].url, redir_url);
                   redirect_count++;
                   f->valid = false; /* Mark as needing retry */
                   OLOG_INFO("image_search: %ld redirect for %s -> %s", http_code, f->img_src,

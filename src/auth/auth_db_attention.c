@@ -34,6 +34,7 @@
 #include "auth/auth_db_internal.h"
 #include "core/path_utils.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 static int64_t now_ms(void) {
    struct timespec ts;

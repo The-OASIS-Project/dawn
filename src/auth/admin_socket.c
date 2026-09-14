@@ -318,7 +318,8 @@ static int create_listening_socket(void) {
    /* Use abstract socket namespace (Linux-specific) */
    /* First byte is null, followed by the name */
    addr.sun_path[0] = '\0';
-   strncpy(addr.sun_path + 1, ADMIN_SOCKET_ABSTRACT_NAME, sizeof(addr.sun_path) - 2);
+   strncpy(addr.sun_path + 1, ADMIN_SOCKET_ABSTRACT_NAME,
+           sizeof(addr.sun_path) - 2); /* strncpy-ok: abstract socket path, leading NUL + bounded */
 
    /* Calculate address length for abstract socket */
    socklen_t addr_len = offsetof(struct sockaddr_un, sun_path) + 1 +

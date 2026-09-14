@@ -29,6 +29,7 @@
 
 #include "logging.h"
 #include "tools/tool_registry.h"
+#include "utils/string_utils.h"
 
 /* TOML parsing */
 #include "tools/toml.h"
@@ -115,8 +116,7 @@ static void shutdown_tool_parse_config(toml_table_t *table, void *config) {
    /* Parse passphrase (string) */
    toml_datum_t passphrase = toml_string_in(table, "passphrase");
    if (passphrase.ok) {
-      strncpy(cfg->passphrase, passphrase.u.s, sizeof(cfg->passphrase) - 1);
-      cfg->passphrase[sizeof(cfg->passphrase) - 1] = '\0';
+      safe_strscpy(cfg->passphrase, passphrase.u.s);
       free(passphrase.u.s); /* TOML library allocates string */
    }
 }

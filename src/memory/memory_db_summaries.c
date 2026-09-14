@@ -32,6 +32,7 @@
 #include "memory/memory_db.h"
 #include "memory/memory_db_internal.h"
 #include "memory/memory_embeddings.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Helper: Populate summary from statement row
@@ -43,26 +44,22 @@ static void populate_summary_from_row(sqlite3_stmt *stmt, memory_summary_t *summ
 
    const char *sid = (const char *)sqlite3_column_text(stmt, 2);
    if (sid) {
-      strncpy(summary->session_id, sid, MEMORY_SESSION_ID_MAX - 1);
-      summary->session_id[MEMORY_SESSION_ID_MAX - 1] = '\0';
+      safe_strscpy(summary->session_id, sid);
    }
 
    const char *sum = (const char *)sqlite3_column_text(stmt, 3);
    if (sum) {
-      strncpy(summary->summary, sum, MEMORY_SUMMARY_MAX - 1);
-      summary->summary[MEMORY_SUMMARY_MAX - 1] = '\0';
+      safe_strscpy(summary->summary, sum);
    }
 
    const char *topics = (const char *)sqlite3_column_text(stmt, 4);
    if (topics) {
-      strncpy(summary->topics, topics, MEMORY_TOPICS_MAX - 1);
-      summary->topics[MEMORY_TOPICS_MAX - 1] = '\0';
+      safe_strscpy(summary->topics, topics);
    }
 
    const char *sentiment = (const char *)sqlite3_column_text(stmt, 5);
    if (sentiment) {
-      strncpy(summary->sentiment, sentiment, MEMORY_SENTIMENT_MAX - 1);
-      summary->sentiment[MEMORY_SENTIMENT_MAX - 1] = '\0';
+      safe_strscpy(summary->sentiment, sentiment);
    }
 
    summary->created_at = (time_t)sqlite3_column_int64(stmt, 6);
@@ -549,16 +546,16 @@ int memory_db_summary_search_semantic(int user_id,
       s->user_id = sqlite3_column_int(fetch, 1);
       const unsigned char *sid = sqlite3_column_text(fetch, 2);
       if (sid)
-         strncpy(s->session_id, (const char *)sid, sizeof(s->session_id) - 1);
+         safe_strscpy(s->session_id, (const char *)sid);
       const unsigned char *txt = sqlite3_column_text(fetch, 3);
       if (txt)
-         strncpy(s->summary, (const char *)txt, sizeof(s->summary) - 1);
+         safe_strscpy(s->summary, (const char *)txt);
       const unsigned char *topics = sqlite3_column_text(fetch, 4);
       if (topics)
-         strncpy(s->topics, (const char *)topics, sizeof(s->topics) - 1);
+         safe_strscpy(s->topics, (const char *)topics);
       const unsigned char *sent = sqlite3_column_text(fetch, 5);
       if (sent)
-         strncpy(s->sentiment, (const char *)sent, sizeof(s->sentiment) - 1);
+         safe_strscpy(s->sentiment, (const char *)sent);
       s->created_at = (time_t)sqlite3_column_int64(fetch, 6);
       s->message_count = sqlite3_column_int(fetch, 7);
       s->duration_seconds = sqlite3_column_int(fetch, 8);
@@ -601,8 +598,7 @@ int memory_db_summary_list_without_embedding(int user_id,
       const unsigned char *txt = sqlite3_column_text(
           s_db.stmt_memory_summary_list_without_embedding, 1);
       if (txt) {
-         strncpy(out_texts[n], (const char *)txt, MEMORY_SUMMARY_MAX - 1);
-         out_texts[n][MEMORY_SUMMARY_MAX - 1] = '\0';
+         safe_strscpy(out_texts[n], (const char *)txt);
       } else {
          out_texts[n][0] = '\0';
       }

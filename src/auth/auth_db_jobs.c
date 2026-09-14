@@ -43,6 +43,7 @@
 
 #include "auth/auth_db_internal.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Helpers
@@ -52,8 +53,7 @@
 static void job_copy_text(sqlite3_stmt *st, int col, char *dst, size_t n) {
    const char *s = (const char *)sqlite3_column_text(st, col);
    if (s && n > 0) {
-      strncpy(dst, s, n - 1);
-      dst[n - 1] = '\0';
+      safe_strncpy(dst, s, n);
    } else if (n > 0) {
       dst[0] = '\0';
    }
@@ -149,8 +149,7 @@ int conv_db_create_job_ex(int user_id,
 
    char safe_title[CONV_TITLE_MAX];
    if (title && title[0] != '\0') {
-      strncpy(safe_title, title, CONV_TITLE_MAX - 1);
-      safe_title[CONV_TITLE_MAX - 1] = '\0';
+      safe_strscpy(safe_title, title);
    } else {
       strcpy(safe_title, "Background Job");
    }
@@ -608,8 +607,7 @@ int conv_db_job_get_status(int64_t conv_id, int user_id, char *status_out, size_
    }
    const char *status = (const char *)sqlite3_column_text(st, 1);
    if (status) {
-      strncpy(status_out, status, n - 1);
-      status_out[n - 1] = '\0';
+      safe_strncpy(status_out, status, n);
    }
    sqlite3_finalize(st);
    AUTH_DB_UNLOCK();

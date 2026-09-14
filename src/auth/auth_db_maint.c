@@ -40,6 +40,7 @@
 
 #include "auth/auth_db_internal.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* Vacuum rate limit: once per 24 hours */
 #define VACUUM_COOLDOWN_SEC (24 * 60 * 60)
@@ -242,8 +243,7 @@ static int validate_backup_path(const char *path) {
 
    /* Get parent directory of the target path */
    char parent[PATH_MAX];
-   strncpy(parent, path, sizeof(parent) - 1);
-   parent[sizeof(parent) - 1] = '\0';
+   safe_strscpy(parent, path);
 
    char *last_slash = strrchr(parent, '/');
    if (!last_slash || last_slash == parent) {

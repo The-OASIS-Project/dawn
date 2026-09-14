@@ -40,6 +40,7 @@
 #include "core/curl_buffer.h"
 #include "core/str_fuzzy.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Constants
@@ -263,10 +264,8 @@ static ha_error_t do_api_request(const char *method,
       pthread_rwlock_unlock(&s_ha.rwlock);
       return HA_ERR_NOT_CONFIGURED;
    }
-   strncpy(local_base_url, s_ha.base_url, sizeof(local_base_url) - 1);
-   local_base_url[sizeof(local_base_url) - 1] = '\0';
-   strncpy(local_token, s_ha.token, sizeof(local_token) - 1);
-   local_token[sizeof(local_token) - 1] = '\0';
+   safe_strscpy(local_base_url, s_ha.base_url);
+   safe_strscpy(local_token, s_ha.token);
    pthread_rwlock_unlock(&s_ha.rwlock);
 
    CURL *curl = curl_easy_init();
@@ -457,8 +456,7 @@ ha_error_t homeassistant_init(const char *url, const char *token) {
 
    pthread_rwlock_wrlock(&s_ha.rwlock);
 
-   strncpy(s_ha.base_url, url, sizeof(s_ha.base_url) - 1);
-   s_ha.base_url[sizeof(s_ha.base_url) - 1] = '\0';
+   safe_strscpy(s_ha.base_url, url);
 
    /* Strip trailing slash */
    size_t url_len = strlen(s_ha.base_url);
@@ -466,8 +464,7 @@ ha_error_t homeassistant_init(const char *url, const char *token) {
       s_ha.base_url[url_len - 1] = '\0';
    }
 
-   strncpy(s_ha.token, token, sizeof(s_ha.token) - 1);
-   s_ha.token[sizeof(s_ha.token) - 1] = '\0';
+   safe_strscpy(s_ha.token, token);
 
    s_ha.initialized = true;
    s_ha.connected = false;
@@ -524,10 +521,8 @@ ha_error_t homeassistant_copy_credentials(char *url_out,
       token_out[0] = '\0';
       return HA_ERR_NOT_CONFIGURED;
    }
-   strncpy(url_out, s_ha.base_url, url_len - 1);
-   url_out[url_len - 1] = '\0';
-   strncpy(token_out, s_ha.token, token_len - 1);
-   token_out[token_len - 1] = '\0';
+   safe_strncpy(url_out, s_ha.base_url, url_len);
+   safe_strncpy(token_out, s_ha.token, token_len);
    pthread_rwlock_unlock(&s_ha.rwlock);
    return HA_OK;
 }
@@ -557,8 +552,7 @@ ha_error_t homeassistant_test_connection(void) {
          if (json_object_object_get_ex(root, "version", &ver_obj)) {
             const char *ver = json_object_get_string(ver_obj);
             if (ver) {
-               strncpy(s_ha.version, ver, sizeof(s_ha.version) - 1);
-               s_ha.version[sizeof(s_ha.version) - 1] = '\0';
+               safe_strscpy(s_ha.version, ver);
             }
          }
          json_object_put(root);
@@ -577,10 +571,8 @@ ha_error_t homeassistant_get_status(ha_status_t *status) {
    status->configured = s_ha.initialized;
    status->connected = __atomic_load_n(&s_ha.connected, __ATOMIC_ACQUIRE);
    status->entity_count = s_ha.entity_cache.count;
-   strncpy(status->version, s_ha.version, sizeof(status->version) - 1);
-   status->version[sizeof(status->version) - 1] = '\0';
-   strncpy(status->url, s_ha.base_url, sizeof(status->url) - 1);
-   status->url[sizeof(status->url) - 1] = '\0';
+   safe_strscpy(status->version, s_ha.version);
+   safe_strscpy(status->url, s_ha.base_url);
 
    return HA_OK;
 }
@@ -679,10 +671,8 @@ static bool fetch_area_data(ha_area_cache_t *out) {
          continue;
 
       ha_area_entry_t *entry = &out->entries[out->count];
-      strncpy(entry->entity_id, eid, sizeof(entry->entity_id) - 1);
-      entry->entity_id[sizeof(entry->entity_id) - 1] = '\0';
-      strncpy(entry->area_name, area, sizeof(entry->area_name) - 1);
-      entry->area_name[sizeof(entry->area_name) - 1] = '\0';
+      safe_strscpy(entry->entity_id, eid);
+      safe_strscpy(entry->area_name, area);
       out->count++;
    }
 
@@ -716,8 +706,7 @@ int homeassistant_list_areas(char areas[][64], int max_areas) {
          }
       }
       if (!dup) {
-         strncpy(areas[count], name, 63);
-         areas[count][63] = '\0';
+         safe_strscpy(areas[count], name);
          count++;
       }
    }
@@ -732,8 +721,7 @@ static const char *find_area_for_entity(const char *entity_id) {
       return NULL;
 
    ha_area_entry_t key;
-   strncpy(key.entity_id, entity_id, sizeof(key.entity_id) - 1);
-   key.entity_id[sizeof(key.entity_id) - 1] = '\0';
+   safe_strscpy(key.entity_id, entity_id);
 
    ha_area_entry_t *found = bsearch(&key, s_ha.area_cache.entries, s_ha.area_cache.count,
                                     sizeof(ha_area_entry_t), area_entry_compare);
@@ -770,7 +758,7 @@ static void parse_entity_attributes(json_object *attrs, ha_entity_t *ent) {
    if (json_object_object_get_ex(attrs, "color_mode", &val)) {
       const char *cm = json_object_get_string(val);
       if (cm)
-         strncpy(ent->color_mode, cm, sizeof(ent->color_mode) - 1);
+         safe_strscpy(ent->color_mode, cm);
    }
    if (json_object_object_get_ex(attrs, "current_temperature", &val))
       ent->temperature = json_object_get_double(val);
@@ -779,7 +767,7 @@ static void parse_entity_attributes(json_object *attrs, ha_entity_t *ent) {
    if (json_object_object_get_ex(attrs, "hvac_mode", &val)) {
       const char *hvac = json_object_get_string(val);
       if (hvac)
-         strncpy(ent->hvac_mode, hvac, sizeof(ent->hvac_mode) - 1);
+         safe_strscpy(ent->hvac_mode, hvac);
    }
    if (json_object_object_get_ex(attrs, "current_position", &val))
       ent->cover_position = json_object_get_int(val);
@@ -792,7 +780,7 @@ static void parse_entity_attributes(json_object *attrs, ha_entity_t *ent) {
       for (int i = 0; i < n && ent->hvac_modes_count < HA_MAX_HVAC_MODES; i++) {
          const char *m = json_object_get_string(json_object_array_get_idx(val, i));
          if (m && m[0]) {
-            strncpy(ent->hvac_modes[ent->hvac_modes_count], m, sizeof(ent->hvac_modes[0]) - 1);
+            safe_strscpy(ent->hvac_modes[ent->hvac_modes_count], m);
             ent->hvac_modes_count++;
          }
       }
@@ -800,12 +788,12 @@ static void parse_entity_attributes(json_object *attrs, ha_entity_t *ent) {
    if (json_object_object_get_ex(attrs, "unit_of_measurement", &val)) {
       const char *u = json_object_get_string(val);
       if (u)
-         strncpy(ent->unit_of_measurement, u, sizeof(ent->unit_of_measurement) - 1);
+         safe_strscpy(ent->unit_of_measurement, u);
    }
    if (json_object_object_get_ex(attrs, "device_class", &val)) {
       const char *dc = json_object_get_string(val);
       if (dc)
-         strncpy(ent->device_class, dc, sizeof(ent->device_class) - 1);
+         safe_strscpy(ent->device_class, dc);
    }
 }
 
@@ -849,8 +837,8 @@ static bool parse_one_state(json_object *entity_obj, ha_entity_t *out) {
    }
 
    memset(out, 0, sizeof(*out));
-   strncpy(out->entity_id, eid, sizeof(out->entity_id) - 1);
-   strncpy(out->domain_str, domain_str, sizeof(out->domain_str) - 1);
+   safe_strscpy(out->entity_id, eid);
+   safe_strscpy(out->domain_str, domain_str);
    out->domain = homeassistant_parse_domain(eid);
 
    /* State */
@@ -858,7 +846,7 @@ static bool parse_one_state(json_object *entity_obj, ha_entity_t *out) {
    if (json_object_object_get_ex(entity_obj, "state", &state_obj)) {
       const char *state = json_object_get_string(state_obj);
       if (state)
-         strncpy(out->state, state, sizeof(out->state) - 1);
+         safe_strscpy(out->state, state);
    }
 
    /* Attributes */
@@ -868,13 +856,13 @@ static bool parse_one_state(json_object *entity_obj, ha_entity_t *out) {
       if (json_object_object_get_ex(attrs, "friendly_name", &fname_obj)) {
          const char *fname = json_object_get_string(fname_obj);
          if (fname) {
-            strncpy(out->friendly_name, fname, sizeof(out->friendly_name) - 1);
+            safe_strscpy(out->friendly_name, fname);
             str_fuzzy_tolower(out->friendly_name_lower, fname, sizeof(out->friendly_name_lower));
          }
       }
       if (!out->friendly_name[0]) {
          /* Use entity_id after dot as fallback */
-         strncpy(out->friendly_name, dot + 1, sizeof(out->friendly_name) - 1);
+         safe_strscpy(out->friendly_name, dot + 1);
          str_fuzzy_tolower(out->friendly_name_lower, dot + 1, sizeof(out->friendly_name_lower));
       }
       parse_entity_attributes(attrs, out);
@@ -883,7 +871,7 @@ static bool parse_one_state(json_object *entity_obj, ha_entity_t *out) {
    /* Area enrichment */
    const char *area = find_area_for_entity(eid);
    if (area) {
-      strncpy(out->area_name, area, sizeof(out->area_name) - 1);
+      safe_strscpy(out->area_name, area);
    }
 
    return true;
@@ -1065,10 +1053,8 @@ ha_error_t homeassistant_cache_replace_areas(struct json_object *area_reg_v,
          continue;
 
       ha_area_entry_t *entry = &tmp->entries[tmp->count];
-      strncpy(entry->entity_id, eid, sizeof(entry->entity_id) - 1);
-      entry->entity_id[sizeof(entry->entity_id) - 1] = '\0';
-      strncpy(entry->area_name, name, sizeof(entry->area_name) - 1);
-      entry->area_name[sizeof(entry->area_name) - 1] = '\0';
+      safe_strscpy(entry->entity_id, eid);
+      safe_strscpy(entry->area_name, name);
       tmp->count++;
    }
    if (tmp->count > 1) {
@@ -1333,14 +1319,14 @@ ha_error_t homeassistant_get_entity_state(const char *entity_id, ha_entity_t *ou
    }
 
    memset(out, 0, sizeof(*out));
-   strncpy(out->entity_id, entity_id, sizeof(out->entity_id) - 1);
+   safe_strscpy(out->entity_id, entity_id);
    out->domain = homeassistant_parse_domain(entity_id);
 
    json_object *state_obj;
    if (json_object_object_get_ex(root, "state", &state_obj)) {
       const char *state = json_object_get_string(state_obj);
       if (state)
-         strncpy(out->state, state, sizeof(out->state) - 1);
+         safe_strscpy(out->state, state);
    }
 
    json_object *attrs;
@@ -1349,7 +1335,7 @@ ha_error_t homeassistant_get_entity_state(const char *entity_id, ha_entity_t *ou
       if (json_object_object_get_ex(attrs, "friendly_name", &val)) {
          const char *fname = json_object_get_string(val);
          if (fname)
-            strncpy(out->friendly_name, fname, sizeof(out->friendly_name) - 1);
+            safe_strscpy(out->friendly_name, fname);
       }
       parse_entity_attributes(attrs, out);
    }

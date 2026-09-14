@@ -34,6 +34,7 @@
 #include "config/dawn_config.h"
 #include "image_store.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 #include "webui/webui_internal.h"
 
 /* =============================================================================
@@ -244,8 +245,7 @@ static bool parse_multipart(http_image_session_t *session,
       }
    } else {
       /* Default to octet-stream if no Content-Type */
-      strncpy(mime_type, "application/octet-stream", mime_size - 1);
-      mime_type[mime_size - 1] = '\0';
+      safe_strncpy(mime_type, "application/octet-stream", mime_size);
    }
 
    /* Data starts after headers */
@@ -333,7 +333,7 @@ int webui_images_handle_upload_start(struct lws *wsi,
    session->is_multipart = is_multipart;
    session->content_length = content_length;
    session->max_image_size = max_image_size;
-   strncpy(session->mime_type, content_type, sizeof(session->mime_type) - 1);
+   safe_strscpy(session->mime_type, content_type);
 
    /* Extract boundary for multipart */
    if (is_multipart) {
@@ -416,7 +416,7 @@ int webui_images_handle_upload_complete(struct lws *wsi, http_image_session_t *s
       /* Direct binary upload */
       image_data = session->data;
       image_len = session->data_len;
-      strncpy(mime_type, session->mime_type, sizeof(mime_type) - 1);
+      safe_strscpy(mime_type, session->mime_type);
    }
 
    /* Validate MIME type */

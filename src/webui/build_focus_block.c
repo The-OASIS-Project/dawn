@@ -40,6 +40,7 @@
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_embeddings.h"
+#include "utils/string_utils.h"
 #include "webui/webui_server.h"
 
 /* Per-call rendering buffer initial size — sized to comfortably hold
@@ -437,10 +438,7 @@ int build_focus_block(int user_id,
             if (rc_append >= 0) {
                /* Commit the ordinal only after the text is in the block. */
                m_ordinal = next_ordinal;
-               strncpy(local_stash.entries[m_ordinal - 1].item_id, c->item_id,
-                       sizeof(local_stash.entries[0].item_id) - 1);
-               local_stash.entries[m_ordinal - 1]
-                   .item_id[sizeof(local_stash.entries[0].item_id) - 1] = '\0';
+               safe_strscpy(local_stash.entries[m_ordinal - 1].item_id, c->item_id);
                /* Capture the ranker composite this item was injected at (parallel
                 * score_breakdowns[i]); FOCUS_SCORE_NA if the breakdown is absent so
                 * the audit can tell "no score recorded" from a real 0. */

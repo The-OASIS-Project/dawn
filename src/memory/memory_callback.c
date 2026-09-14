@@ -50,6 +50,7 @@
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_fact_search.h"
+#include "utils/string_utils.h"
 /* SOURCE_DEDUP_CAP / source_dedup_set_t / source_dedup_{seen,add} live in
  * memory_callback_internal.h so the unit tests can exercise them directly. */
 #include "core/memory_filter.h"
@@ -432,11 +433,8 @@ static void append_graph_context(int user_id,
             if (seen_count < 5)
                seen_ids[seen_count++] = kw_entities[i].id;
             entity_ids[entity_count] = kw_entities[i].id;
-            strncpy(entity_names[entity_count], kw_entities[i].name, MEMORY_ENTITY_NAME_MAX - 1);
-            entity_names[entity_count][MEMORY_ENTITY_NAME_MAX - 1] = '\0';
-            strncpy(entity_types[entity_count], kw_entities[i].entity_type,
-                    MEMORY_ENTITY_TYPE_MAX - 1);
-            entity_types[entity_count][MEMORY_ENTITY_TYPE_MAX - 1] = '\0';
+            safe_strscpy(entity_names[entity_count], kw_entities[i].name);
+            safe_strscpy(entity_types[entity_count], kw_entities[i].entity_type);
             entity_count++;
          }
       }
@@ -2144,8 +2142,7 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
          if (tool_param_extract_custom(value, "category", raw_cat, sizeof(raw_cat)) && raw_cat[0]) {
             for (int i = 0; i < MEMORY_FACT_CATEGORY_COUNT; i++) {
                if (strcmp(raw_cat, MEMORY_FACT_CATEGORIES[i]) == 0) {
-                  strncpy(category, raw_cat, sizeof(category) - 1);
-                  category[sizeof(category) - 1] = '\0';
+                  safe_strscpy(category, raw_cat);
                   break;
                }
             }

@@ -33,6 +33,7 @@
 #include "dawn.h"
 #include "logging.h"
 #include "memory/memory_db_aliases.h"
+#include "utils/string_utils.h"
 #include "webui/webui_internal.h"
 
 /**
@@ -126,36 +127,30 @@ void handle_set_my_settings(ws_connection_t *conn, struct json_object *payload) 
    json_object *field_obj;
 
    if (json_object_object_get_ex(payload, "persona_description", &field_obj)) {
-      strncpy(settings.persona_description, json_object_get_string(field_obj),
-              AUTH_PERSONA_DESC_MAX - 1);
-      settings.persona_description[AUTH_PERSONA_DESC_MAX - 1] = '\0';
+      safe_strscpy(settings.persona_description, json_object_get_string(field_obj));
    }
 
    if (json_object_object_get_ex(payload, "persona_mode", &field_obj)) {
       const char *mode = json_object_get_string(field_obj);
       /* Validate mode value */
       if (strcmp(mode, "append") == 0 || strcmp(mode, "replace") == 0) {
-         strncpy(settings.persona_mode, mode, AUTH_PERSONA_MODE_MAX - 1);
-         settings.persona_mode[AUTH_PERSONA_MODE_MAX - 1] = '\0';
+         safe_strscpy(settings.persona_mode, mode);
       }
    }
 
    if (json_object_object_get_ex(payload, "location", &field_obj)) {
-      strncpy(settings.location, json_object_get_string(field_obj), AUTH_LOCATION_MAX - 1);
-      settings.location[AUTH_LOCATION_MAX - 1] = '\0';
+      safe_strscpy(settings.location, json_object_get_string(field_obj));
    }
 
    if (json_object_object_get_ex(payload, "timezone", &field_obj)) {
-      strncpy(settings.timezone, json_object_get_string(field_obj), AUTH_TIMEZONE_MAX - 1);
-      settings.timezone[AUTH_TIMEZONE_MAX - 1] = '\0';
+      safe_strscpy(settings.timezone, json_object_get_string(field_obj));
    }
 
    if (json_object_object_get_ex(payload, "units", &field_obj)) {
       const char *units = json_object_get_string(field_obj);
       /* Validate units value */
       if (strcmp(units, "metric") == 0 || strcmp(units, "imperial") == 0) {
-         strncpy(settings.units, units, AUTH_UNITS_MAX - 1);
-         settings.units[AUTH_UNITS_MAX - 1] = '\0';
+         safe_strscpy(settings.units, units);
       }
    }
 
@@ -166,8 +161,7 @@ void handle_set_my_settings(ws_connection_t *conn, struct json_object *payload) 
                     strcmp(theme, "green") == 0 || strcmp(theme, "orange") == 0 ||
                     strcmp(theme, "red") == 0 || strcmp(theme, "blue") == 0 ||
                     strcmp(theme, "terminal") == 0)) {
-         strncpy(settings.theme, theme, AUTH_THEME_MAX - 1);
-         settings.theme[AUTH_THEME_MAX - 1] = '\0';
+         safe_strscpy(settings.theme, theme);
       }
    }
 
@@ -180,22 +174,19 @@ void handle_set_my_settings(ws_connection_t *conn, struct json_object *payload) 
    if (json_object_object_get_ex(payload, "real_name", &field_obj)) {
       const char *v = json_object_get_string(field_obj);
       if (v) {
-         strncpy(identity.real_name, v, AUTH_REAL_NAME_MAX - 1);
-         identity.real_name[AUTH_REAL_NAME_MAX - 1] = '\0';
+         safe_strscpy(identity.real_name, v);
       }
    }
    if (json_object_object_get_ex(payload, "preferred_address", &field_obj)) {
       const char *v = json_object_get_string(field_obj);
       if (v) {
-         strncpy(identity.preferred_address, v, AUTH_PREFERRED_ADDRESS_MAX - 1);
-         identity.preferred_address[AUTH_PREFERRED_ADDRESS_MAX - 1] = '\0';
+         safe_strscpy(identity.preferred_address, v);
       }
    }
    if (json_object_object_get_ex(payload, "identity_aliases", &field_obj)) {
       const char *v = json_object_get_string(field_obj);
       if (v) {
-         strncpy(identity.identity_aliases, v, AUTH_IDENTITY_ALIASES_MAX - 1);
-         identity.identity_aliases[AUTH_IDENTITY_ALIASES_MAX - 1] = '\0';
+         safe_strscpy(identity.identity_aliases, v);
       }
    }
    auth_db_set_user_identity(conn->auth_user_id, &identity);

@@ -40,6 +40,7 @@
 #include "core/path_utils.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Module State
@@ -225,8 +226,7 @@ int music_scanner_start(const char *music_dir, int scan_interval_min, const char
 
    /* Store expanded path (empty string if no local dir) */
    if (have_local) {
-      strncpy(g_music_dir, canonical_dir, sizeof(g_music_dir) - 1);
-      g_music_dir[sizeof(g_music_dir) - 1] = '\0';
+      safe_strscpy(g_music_dir, canonical_dir);
    } else {
       g_music_dir[0] = '\0';
    }

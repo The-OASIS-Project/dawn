@@ -185,9 +185,9 @@ int tui_has_text_input(void);
  * @brief Get pending text input
  *
  * Thread-safe retrieval of text input. Clears the pending flag.
- * Buffer must be at least TUI_INPUT_MAX_LEN bytes.
+ * Buffer must be at least TUI_INPUT_MAX_LEN + 1 bytes.
  *
- * @param buffer Output buffer for the text (must be TUI_INPUT_MAX_LEN bytes)
+ * @param buffer Output buffer for the text (must be TUI_INPUT_MAX_LEN + 1 bytes)
  * @return 1 if text was retrieved, 0 if no text available
  */
 int tui_get_text_input(char *buffer);

@@ -44,6 +44,7 @@
 #include "llm/llm_command_parser.h"
 #include "logging.h"
 #include "memory/memory_context.h"
+#include "utils/string_utils.h"
 #include "webui/build_focus_block.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_server.h"
@@ -153,8 +154,7 @@ static char *build_identity_block(int user_id) {
    joined_aliases[0] = '\0';
    if (identity.identity_aliases[0] != '\0') {
       char buf[AUTH_IDENTITY_ALIASES_MAX];
-      strncpy(buf, identity.identity_aliases, sizeof(buf) - 1);
-      buf[sizeof(buf) - 1] = '\0';
+      safe_strscpy(buf, identity.identity_aliases);
 
       char *seen[16];
       int seen_count = 0;
@@ -859,8 +859,7 @@ static char *append_satellite_context_to_stable(char *base, session_t *dispatch)
       /* Sanitize ha_area same as session_append_satellite_context:
        * allowlist [A-Za-z0-9 _-] only; everything else becomes '_'. */
       char safe_area[64];
-      strncpy(safe_area, ha_area, sizeof(safe_area) - 1);
-      safe_area[sizeof(safe_area) - 1] = '\0';
+      safe_strscpy(safe_area, ha_area);
       for (char *p = safe_area; *p; p++) {
          if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') ||
                *p == ' ' || *p == '-' || *p == '_'))

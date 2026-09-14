@@ -38,6 +38,7 @@
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* --- module state --- */
 static pthread_mutex_t s_mutex = PTHREAD_MUTEX_INITIALIZER; /* leaf: cache + queue + metrics */

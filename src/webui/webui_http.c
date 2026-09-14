@@ -38,6 +38,7 @@
 #include "core/rate_limiter.h"
 #include "logging.h"
 #include "ui/metrics.h"
+#include "utils/string_utils.h"
 #include "version.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_server.h"
@@ -818,7 +819,7 @@ static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
    char user_agent[AUTH_USER_AGENT_MAX] = "Unknown";
    int ua_len = lws_hdr_copy(wsi, user_agent, sizeof(user_agent), WSI_TOKEN_HTTP_USER_AGENT);
    if (ua_len <= 0) {
-      strncpy(user_agent, "Unknown", sizeof(user_agent));
+      safe_strscpy(user_agent, "Unknown");
    }
 
    /* Create session in database */
@@ -1291,13 +1292,11 @@ int callback_http(struct lws *wsi,
          }
 
          /* Get requested path */
-         strncpy(path, (const char *)in, sizeof(path) - 1);
-         path[sizeof(path) - 1] = '\0';
+         safe_strscpy(path, (const char *)in);
 
          /* Initialize session data */
          if (pss) {
-            strncpy(pss->path, path, sizeof(pss->path) - 1);
-            pss->path[sizeof(pss->path) - 1] = '\0';
+            safe_strscpy(pss->path, path);
             pss->post_body_len = 0;
             pss->post_body[0] = '\0';
             pss->is_post = (lws_hdr_total_length(wsi, WSI_TOKEN_POST_URI) > 0);
@@ -1650,7 +1649,7 @@ int callback_http(struct lws *wsi,
 
          /* Default to index.html for root */
          if (strcmp(path, "/") == 0) {
-            strncpy(path, "/index.html", sizeof(path) - 1);
+            safe_strscpy(path, "/index.html");
          }
 
          /* Prevent directory traversal - check for patterns including URL-encoded */

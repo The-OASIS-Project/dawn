@@ -28,6 +28,7 @@
 
 #define AUTH_DB_INTERNAL_ALLOWED
 #include "auth/auth_db_internal.h"
+#include "utils/string_utils.h"
 #undef AUTH_DB_INTERNAL_ALLOWED
 
 #include <stdbool.h>
@@ -203,8 +204,7 @@ int image_store_get_path(const char *id, int user_id, char *path_out, char *mime
    char mime_buf[BLOB_MIME_MAX];
    int rc = blob_store_get_path(s_image_handle, id, user_id, path_out, mime_out ? mime_buf : NULL);
    if (rc == BLOB_STORE_SUCCESS && mime_out) {
-      strncpy(mime_out, mime_buf, IMAGE_MIME_MAX - 1);
-      mime_out[IMAGE_MIME_MAX - 1] = '\0';
+      safe_strncpy(mime_out, mime_buf, IMAGE_MIME_MAX);
    }
    return rc;
 }
@@ -218,14 +218,11 @@ int image_store_get_metadata(const char *id, image_metadata_t *metadata_out) {
    if (rc != BLOB_STORE_SUCCESS) {
       return rc;
    }
-   strncpy(metadata_out->id, m.id, IMAGE_ID_LEN - 1);
-   metadata_out->id[IMAGE_ID_LEN - 1] = '\0';
+   safe_strscpy(metadata_out->id, m.id);
    metadata_out->user_id = m.user_id;
-   strncpy(metadata_out->mime_type, m.mime_type, IMAGE_MIME_MAX - 1);
-   metadata_out->mime_type[IMAGE_MIME_MAX - 1] = '\0';
+   safe_strscpy(metadata_out->mime_type, m.mime_type);
    metadata_out->size = m.size;
-   strncpy(metadata_out->filename, m.filename, IMAGE_FILENAME_MAX - 1);
-   metadata_out->filename[IMAGE_FILENAME_MAX - 1] = '\0';
+   safe_strscpy(metadata_out->filename, m.filename);
    metadata_out->source = (image_source_t)m.source;
    metadata_out->retention_policy = (image_retention_t)m.retention_policy;
    metadata_out->created_at = m.created_at;

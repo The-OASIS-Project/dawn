@@ -43,6 +43,7 @@
 #include "core/curl_buffer.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Static State
@@ -672,8 +673,7 @@ int plex_client_test_connection(char *server_name_out, size_t name_size) {
    if (json_object_object_get_ex(root, "MediaContainer", &container)) {
       if (server_name_out && name_size > 0) {
          const char *name = json_get_string(container, "friendlyName");
-         strncpy(server_name_out, name, name_size - 1);
-         server_name_out[name_size - 1] = '\0';
+         safe_strncpy(server_name_out, name, name_size);
       }
       OLOG_INFO("Plex: connected to server '%s'", json_get_string(container, "friendlyName"));
    }

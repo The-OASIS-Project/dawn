@@ -41,6 +41,7 @@
 #include "core/utterance_dedup.h"
 #include "logging.h"
 #include "tools/volume_tool.h"
+#include "utils/string_utils.h"
 #include "webui/webui_internal.h"
 
 /* Maximum concurrent satellite worker threads (LLM calls).
@@ -158,8 +159,7 @@ void satellite_send_stream_end(session_t *session, const char *reason) {
                           } };
 
    const char *r = reason ? reason : "complete";
-   strncpy(resp.stream.text, r, sizeof(resp.stream.text) - 1);
-   resp.stream.text[sizeof(resp.stream.text) - 1] = '\0';
+   safe_strscpy(resp.stream.text, r);
 
    queue_response(&resp);
    OLOG_INFO("Satellite: Stream end id=%u reason=%s for session %u", session->current_stream_id, r,
@@ -470,9 +470,9 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
    /* Build identity */
    dap2_identity_t identity;
    memset(&identity, 0, sizeof(identity));
-   strncpy(identity.uuid, uuid, sizeof(identity.uuid) - 1);
-   strncpy(identity.name, name, sizeof(identity.name) - 1);
-   strncpy(identity.location, location, sizeof(identity.location) - 1);
+   safe_strscpy(identity.uuid, uuid);
+   safe_strscpy(identity.name, name);
+   safe_strscpy(identity.location, location);
 
    /* Sanitize name/location to [a-zA-Z0-9 _.\-].  These fields surface in
     * the WebUI scheduler panel and other client-rendered surfaces; anything
@@ -496,7 +496,7 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
 
    /* Include reconnect_secret if client provided one (for session reclamation) */
    if (reconnect_secret && reconnect_secret[0]) {
-      strncpy(identity.reconnect_secret, reconnect_secret, sizeof(identity.reconnect_secret) - 1);
+      safe_strscpy(identity.reconnect_secret, reconnect_secret);
    }
 
    /* Create or reconnect session */
@@ -564,8 +564,8 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
          if (strcmp(mapping.name, identity.name) != 0 ||
              strcmp(mapping.location, identity.location) != 0) {
             satellite_mapping_t updated = mapping;
-            strncpy(updated.name, identity.name, sizeof(updated.name) - 1);
-            strncpy(updated.location, identity.location, sizeof(updated.location) - 1);
+            safe_strscpy(updated.name, identity.name);
+            safe_strscpy(updated.location, identity.location);
             updated.last_seen = time(NULL);
             satellite_db_upsert(&updated);
          } else {
@@ -575,9 +575,9 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
          /* First-time registration — create mapping with user_id=0 */
          satellite_mapping_t new_mapping;
          memset(&new_mapping, 0, sizeof(new_mapping));
-         strncpy(new_mapping.uuid, uuid, sizeof(new_mapping.uuid) - 1);
-         strncpy(new_mapping.name, identity.name, sizeof(new_mapping.name) - 1);
-         strncpy(new_mapping.location, identity.location, sizeof(new_mapping.location) - 1);
+         safe_strscpy(new_mapping.uuid, uuid);
+         safe_strscpy(new_mapping.name, identity.name);
+         safe_strscpy(new_mapping.location, identity.location);
          new_mapping.tier = tier;
          new_mapping.enabled = true;
          new_mapping.created_at = time(NULL);
@@ -632,8 +632,7 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
    char music_token[WEBUI_SESSION_TOKEN_LEN];
    if (generate_session_token(music_token) == 0) {
       register_token(music_token, session->session_id);
-      strncpy(conn->session_token, music_token, WEBUI_SESSION_TOKEN_LEN - 1);
-      conn->session_token[WEBUI_SESSION_TOKEN_LEN - 1] = '\0';
+      safe_strscpy(conn->session_token, music_token);
       json_object_object_add(resp_payload, "session_token", json_object_new_string(music_token));
    }
 

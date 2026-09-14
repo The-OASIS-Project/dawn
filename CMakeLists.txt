@@ -968,6 +968,17 @@ add_custom_target(no_ws_direct_write_check
     COMMENT "Checking WebUI invariant: no direct WS-frame lws_write()")
 add_dependencies(dawn no_ws_direct_write_check)
 
+# safe_strscpy migration guard: forbid raw strncpy()/strncat() in directories
+# already swept onto safe_strscpy()/safe_strncpy() (ratcheting COVERED_DIRS list
+# in the script).  Runs at -O0 on every build, so it catches regressions that
+# -Wstringop-truncation (optimizer-gated, dark in Debug) cannot.  See
+# docs/SAFE_STRNCPY_STANDARDIZATION_DESIGN.md.
+add_custom_target(no_raw_strncpy_check
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/check_no_raw_strncpy.sh
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Checking safe_strscpy migration invariant: no raw strncpy in swept dirs")
+add_dependencies(dawn no_raw_strncpy_check)
+
 # Blob-marker CI invariant: the chat-attachment "blob:<id>]" marker is encoded
 # in three places (JS producer, JS parser, orphan-sweep SQL) that must agree, or
 # the maintenance sweep silently reclaims still-attached original files (data

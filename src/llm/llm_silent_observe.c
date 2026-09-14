@@ -57,6 +57,7 @@
 #include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* -----------------------------------------------------------------------------
  * Allowlisted source categories
@@ -218,16 +219,14 @@ static int resolve_silent_observe_config(llm_resolved_config_t *cfg,
    memset(cfg, 0, sizeof(*cfg));
 
    if (model && model[0] != '\0') {
-      strncpy(model_buf, model, model_buf_size - 1);
-      model_buf[model_buf_size - 1] = '\0';
+      safe_strncpy(model_buf, model, model_buf_size);
       cfg->model = model_buf;
    }
 
    if (strcmp(provider, "local") == 0 || strcmp(provider, "ollama") == 0) {
       cfg->type = LLM_LOCAL;
       cfg->cloud_provider = CLOUD_PROVIDER_NONE;
-      strncpy(endpoint_buf, g_config.llm.local.endpoint, endpoint_buf_size - 1);
-      endpoint_buf[endpoint_buf_size - 1] = '\0';
+      safe_strncpy(endpoint_buf, g_config.llm.local.endpoint, endpoint_buf_size);
       cfg->endpoint = endpoint_buf;
    } else if (strcmp(provider, "openai") == 0) {
       cfg->type = LLM_CLOUD;
@@ -252,8 +251,7 @@ static int resolve_silent_observe_config(llm_resolved_config_t *cfg,
       /* silent_observe.model is a "vendor/model" slug here; fall back to the main
        * OpenRouter default when unset. */
       if (!cfg->model || cfg->model[0] == '\0') {
-         strncpy(model_buf, llm_get_default_openrouter_model(), model_buf_size - 1);
-         model_buf[model_buf_size - 1] = '\0';
+         safe_strncpy(model_buf, llm_get_default_openrouter_model(), model_buf_size);
          cfg->model = model_buf;
       }
    } else {
@@ -265,8 +263,7 @@ static int resolve_silent_observe_config(llm_resolved_config_t *cfg,
 
    /* Tools off, thinking off — invariants 2 and 4. */
    cfg->suppress_tools = true;
-   strncpy(cfg->thinking_mode, "disabled", sizeof(cfg->thinking_mode) - 1);
-   cfg->thinking_mode[sizeof(cfg->thinking_mode) - 1] = '\0';
+   safe_strscpy(cfg->thinking_mode, "disabled");
 
    /* Cloud calls require a key; reject early so the audit log captures it. */
    if (cfg->type == LLM_CLOUD && (!cfg->api_key || cfg->api_key[0] == '\0')) {
@@ -488,10 +485,8 @@ static int validate_response_schema(const char *raw,
    }
 
    out->ack = true;
-   strncpy(out->category, cat_str, sizeof(out->category) - 1);
-   out->category[sizeof(out->category) - 1] = '\0';
-   strncpy(out->note, note_str, sizeof(out->note) - 1);
-   out->note[sizeof(out->note) - 1] = '\0';
+   safe_strscpy(out->category, cat_str);
+   safe_strscpy(out->note, note_str);
 
    json_object_put(root);
    return SUCCESS;

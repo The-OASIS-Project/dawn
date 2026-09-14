@@ -35,6 +35,7 @@
 #include "dawn_error.h"
 #include "logging.h"
 #include "tools/volume_tool.h"
+#include "utils/string_utils.h"
 #include "webui/webui_music_internal.h"
 #include "webui/webui_music_queue_db.h"
 #include "webui/webui_server.h"

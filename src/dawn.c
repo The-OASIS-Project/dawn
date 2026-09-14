@@ -49,6 +49,7 @@
 /* Speech to Text */
 #include "asr/asr_interface.h"
 #include "utils/asr_transcript.h"
+#include "utils/string_utils.h"
 
 /* Local */
 #include "asr/vad_silero.h"
@@ -670,8 +671,7 @@ char *setPcmPlaybackDevice(const char *actionName, char *value, int *should_resp
 
       if (match) {
          OLOG_INFO("Setting audio playback device to \"%s\"", d->device);
-         strncpy(pcm_playback_device, d->device, MAX_WORD_LENGTH);
-         pcm_playback_device[MAX_WORD_LENGTH] = '\0';
+         safe_strscpy(pcm_playback_device, d->device);
 
          if (command_processing_mode == CMD_MODE_DIRECT_ONLY) {
             snprintf(speech, MAX_COMMAND_LENGTH, "Switching playback device to %s.", d->name);
@@ -741,8 +741,7 @@ char *setPcmCaptureDevice(const char *actionName, char *value, int *should_respo
 
       if (match) {
          OLOG_INFO("Setting audio capture device to \"%s\"", d->device);
-         strncpy(pcm_capture_device, d->device, MAX_WORD_LENGTH);
-         pcm_capture_device[MAX_WORD_LENGTH] = '\0';
+         safe_strscpy(pcm_capture_device, d->device);
 
          if (command_processing_mode == CMD_MODE_DIRECT_ONLY) {
             snprintf(speech, MAX_COMMAND_LENGTH, "Switching capture device to %s.", d->name);
@@ -1512,12 +1511,10 @@ int main(int argc, char *argv[]) {
 #endif
       switch (opt) {
          case 'c':
-            strncpy(pcm_capture_device, optarg, sizeof(pcm_capture_device));
-            pcm_capture_device[sizeof(pcm_capture_device) - 1] = '\0';
+            safe_strscpy(pcm_capture_device, optarg);
             break;
          case 'd':
-            strncpy(pcm_playback_device, optarg, sizeof(pcm_playback_device));
-            pcm_playback_device[sizeof(pcm_playback_device) - 1] = '\0';
+            safe_strscpy(pcm_playback_device, optarg);
             break;
          case 'h':
             display_help(argc, argv);
@@ -1684,7 +1681,7 @@ int main(int argc, char *argv[]) {
             break;
          case 262:  // --server
             server_mode = 1;
-            strncpy(g_config.general.mode, "server", sizeof(g_config.general.mode) - 1);
+            safe_strscpy(g_config.general.mode, "server");
             OLOG_INFO("Server mode: ENABLED (no local audio capture/playback)");
             break;
          case '?':
@@ -1852,12 +1849,10 @@ int main(int argc, char *argv[]) {
 
    // Apply CLI LLM type override to g_config (needed for validation)
    if (llm_type_override == LLM_LOCAL) {
-      strncpy(g_config.llm.type, "local", sizeof(g_config.llm.type) - 1);
-      g_config.llm.type[sizeof(g_config.llm.type) - 1] = '\0';
+      safe_strscpy(g_config.llm.type, "local");
       OLOG_INFO("LLM type set to 'local' (CLI override)");
    } else if (llm_type_override == LLM_CLOUD) {
-      strncpy(g_config.llm.type, "cloud", sizeof(g_config.llm.type) - 1);
-      g_config.llm.type[sizeof(g_config.llm.type) - 1] = '\0';
+      safe_strscpy(g_config.llm.type, "cloud");
       OLOG_INFO("LLM type set to 'cloud' (CLI override)");
    }
 
@@ -1900,8 +1895,7 @@ int main(int argc, char *argv[]) {
          OLOG_WARNING("Cloud LLM provider '%s' requires API key in secrets.toml - falling back to "
                       "local LLM",
                       provider);
-         strncpy(g_config.llm.type, "local", sizeof(g_config.llm.type) - 1);
-         g_config.llm.type[sizeof(g_config.llm.type) - 1] = '\0';
+         safe_strscpy(g_config.llm.type, "local");
          // Also update the runtime override so llm_init uses local
          llm_type_override = LLM_LOCAL;
       }
@@ -1962,13 +1956,11 @@ int main(int argc, char *argv[]) {
 #endif
 
    if (strcmp(pcm_capture_device, "") == 0) {
-      strncpy(pcm_capture_device, g_config.audio.capture_device, sizeof(pcm_capture_device));
-      pcm_capture_device[sizeof(pcm_capture_device) - 1] = '\0';
+      safe_strscpy(pcm_capture_device, g_config.audio.capture_device);
    }
 
    if (strcmp(pcm_playback_device, "") == 0) {
-      strncpy(pcm_playback_device, g_config.audio.playback_device, sizeof(pcm_playback_device));
-      pcm_playback_device[sizeof(pcm_playback_device) - 1] = '\0';
+      safe_strscpy(pcm_playback_device, g_config.audio.playback_device);
    }
 
    // Initialize tool registry (modular tool system)
@@ -3920,9 +3912,7 @@ mqtt_disabled:
                          "Voice trigger detected - enabling extended thinking for this request");
                      session_llm_config_t trigger_config;
                      session_get_llm_config(local_session, &trigger_config);
-                     strncpy(trigger_config.thinking_mode, "enabled",
-                             sizeof(trigger_config.thinking_mode) - 1);
-                     trigger_config.thinking_mode[sizeof(trigger_config.thinking_mode) - 1] = '\0';
+                     safe_strscpy(trigger_config.thinking_mode, "enabled");
                      session_set_llm_config(local_session, &trigger_config);
                   }
 

@@ -34,6 +34,7 @@
 
 #include "auth/auth_db_internal.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Session Metrics Operations
@@ -262,7 +263,7 @@ int auth_db_list_session_metrics(const session_metrics_filter_t *filter,
 
       const char *type = (const char *)sqlite3_column_text(stmt, 3);
       if (type) {
-         strncpy(m.session_type, type, sizeof(m.session_type) - 1);
+         safe_strscpy(m.session_type, type);
       }
 
       m.started_at = (time_t)sqlite3_column_int64(stmt, 4);

@@ -470,8 +470,7 @@ static void parse_results_array(struct json_object *results_array,
       if (host_idx == -1) {
          // New host
          if (unique_hosts < total_count) {
-            strncpy(host_counts[unique_hosts].host, host, sizeof(host_counts[0].host) - 1);
-            host_counts[unique_hosts].host[sizeof(host_counts[0].host) - 1] = '\0';
+            safe_strscpy(host_counts[unique_hosts].host, host);
             host_counts[unique_hosts].count = 1;
             unique_hosts++;
          }

@@ -43,6 +43,7 @@
 #include "llm/llm_interface.h"
 #include "logging.h"
 #include "ui/metrics.h"
+#include "utils/string_utils.h"
 #include "version.h"
 
 /* ============================================================================
@@ -526,9 +527,14 @@ static void draw_performance_panel(int y, int x, int width, dawn_metrics_t *metr
    if (strlen(metrics->last_user_command) > 0) {
       /* Truncate if too long */
       int max_cmd_len = width - 14;
-      if ((int)strlen(metrics->last_user_command) > max_cmd_len) {
+      /* max_cmd_len > 3 guards the (max_cmd_len - 3) copy length below against a
+       * size_t underflow on an absurdly narrow (<17-column) terminal. */
+      if (max_cmd_len > 3 && (int)strlen(metrics->last_user_command) > max_cmd_len) {
          char truncated[256];
-         strncpy(truncated, metrics->last_user_command, max_cmd_len - 3);
+         /* Fixed-length substring for the ellipsis; length is 0 < max_cmd_len-3 < 256
+          * (guarded above, and last_user_command is capped at METRICS_MAX_LOG_LENGTH). */
+         strncpy(truncated, metrics->last_user_command,
+                 max_cmd_len - 3); /* strncpy-ok: bounded, see above */
          truncated[max_cmd_len - 3] = '\0';
          printw("\"%s...\"", truncated);
       } else {
@@ -1302,8 +1308,7 @@ int tui_get_text_input(char *buffer) {
 
    /* Delegate to unified input queue */
    if (input_queue_pop(&input)) {
-      strncpy(buffer, input.text, TUI_INPUT_MAX_LEN);
-      buffer[TUI_INPUT_MAX_LEN] = '\0';
+      safe_strncpy(buffer, input.text, TUI_INPUT_MAX_LEN + 1);
       return 1;
    }
 

@@ -34,6 +34,7 @@
 
 #include "dawn_error.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 #define VOCAB_HASH_SIZE 65536 /* ~30K entries, 0.46 load factor */
 #define VOCAB_MAX_WORD_LEN 128
@@ -116,8 +117,7 @@ static int vocab_load_locked(const char *path) {
          fclose(fp);
          return FAILURE;
       }
-      strncpy(entry->word, line, VOCAB_MAX_WORD_LEN - 1);
-      entry->word[VOCAB_MAX_WORD_LEN - 1] = '\0';
+      safe_strscpy(entry->word, line);
       entry->token_id = id;
       entry->next = s_vocab_table[idx];
       s_vocab_table[idx] = entry;
@@ -202,8 +202,7 @@ int memory_embed_tokenizer_acquire(const char *path) {
       return FAILURE;
    }
 
-   strncpy(s_loaded_path, path, sizeof(s_loaded_path) - 1);
-   s_loaded_path[sizeof(s_loaded_path) - 1] = '\0';
+   safe_strscpy(s_loaded_path, path);
    s_refcount = 1;
    pthread_mutex_unlock(&s_lock);
    return SUCCESS;

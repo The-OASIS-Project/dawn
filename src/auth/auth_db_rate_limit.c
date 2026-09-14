@@ -33,6 +33,7 @@
 
 #include "auth/auth_db_internal.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Rate Limiting
@@ -166,7 +167,7 @@ int auth_db_list_blocked_ips(time_t since, auth_ip_status_callback_t callback, v
 
       const char *ip = (const char *)sqlite3_column_text(stmt, 0);
       if (ip) {
-         strncpy(status.ip_address, ip, sizeof(status.ip_address) - 1);
+         safe_strscpy(status.ip_address, ip);
       }
       status.failed_attempts = sqlite3_column_int(stmt, 1);
       status.last_attempt = (time_t)sqlite3_column_int64(stmt, 2);

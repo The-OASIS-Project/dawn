@@ -37,6 +37,7 @@
 #include "memory/memory_embeddings.h"
 #include "memory/memory_similarity.h"
 #include "memory/memory_stem.h"
+#include "utils/string_utils.h"
 
 /* Canonical fact category labels (v34).  Single source of truth referenced by
  * extraction allowlist (memory_extraction.c), tool enum_values (memory_tool.c),
@@ -59,16 +60,14 @@ static void populate_fact_from_row(sqlite3_stmt *stmt, memory_fact_t *fact) {
 
    const char *text = (const char *)sqlite3_column_text(stmt, 2);
    if (text) {
-      strncpy(fact->fact_text, text, MEMORY_FACT_TEXT_MAX - 1);
-      fact->fact_text[MEMORY_FACT_TEXT_MAX - 1] = '\0';
+      safe_strscpy(fact->fact_text, text);
    }
 
    fact->confidence = (float)sqlite3_column_double(stmt, 3);
 
    const char *source = (const char *)sqlite3_column_text(stmt, 4);
    if (source) {
-      strncpy(fact->source, source, MEMORY_SOURCE_MAX - 1);
-      fact->source[MEMORY_SOURCE_MAX - 1] = '\0';
+      safe_strscpy(fact->source, source);
    }
 
    fact->created_at = (time_t)sqlite3_column_int64(stmt, 5);
@@ -78,11 +77,9 @@ static void populate_fact_from_row(sqlite3_stmt *stmt, memory_fact_t *fact) {
 
    const char *category = (const char *)sqlite3_column_text(stmt, 9);
    if (category) {
-      strncpy(fact->category, category, MEMORY_CATEGORY_MAX - 1);
-      fact->category[MEMORY_CATEGORY_MAX - 1] = '\0';
+      safe_strscpy(fact->category, category);
    } else {
-      strncpy(fact->category, "general", MEMORY_CATEGORY_MAX - 1);
-      fact->category[MEMORY_CATEGORY_MAX - 1] = '\0';
+      safe_strscpy(fact->category, "general");
    }
 
    /* expires_at (v58) is NOT in the shared 10-column projection — the
@@ -905,8 +902,7 @@ int memory_db_fact_find_similar(int user_id,
       out_facts[count].id = sqlite3_column_int64(stmt, 0);
       const char *text = (const char *)sqlite3_column_text(stmt, 1);
       if (text) {
-         strncpy(out_facts[count].fact_text, text, MEMORY_FACT_TEXT_MAX - 1);
-         out_facts[count].fact_text[MEMORY_FACT_TEXT_MAX - 1] = '\0';
+         safe_strscpy(out_facts[count].fact_text, text);
       }
       out_facts[count].confidence = (float)sqlite3_column_double(stmt, 2);
       count++;
@@ -942,8 +938,7 @@ int memory_db_fact_find_by_hash(int user_id,
       out_facts[count].id = sqlite3_column_int64(stmt, 0);
       const char *text = (const char *)sqlite3_column_text(stmt, 1);
       if (text) {
-         strncpy(out_facts[count].fact_text, text, MEMORY_FACT_TEXT_MAX - 1);
-         out_facts[count].fact_text[MEMORY_FACT_TEXT_MAX - 1] = '\0';
+         safe_strscpy(out_facts[count].fact_text, text);
       }
       out_facts[count].confidence = (float)sqlite3_column_double(stmt, 2);
       count++;
@@ -1444,8 +1439,7 @@ int memory_db_fact_list_without_embedding(int user_id,
       const char *text = (const char *)sqlite3_column_text(
           s_db.stmt_memory_fact_list_without_embedding, 1);
       if (text) {
-         strncpy(out_texts[count], text, 511);
-         out_texts[count][511] = '\0';
+         safe_strscpy(out_texts[count], text);
       } else {
          out_texts[count][0] = '\0';
       }

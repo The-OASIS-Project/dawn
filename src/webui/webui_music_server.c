@@ -37,6 +37,7 @@
 
 #include "config/dawn_config.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_music.h"
 #include "webui/webui_server.h"
@@ -126,8 +127,7 @@ static int callback_music_websocket(struct lws *wsi,
                   if (session) {
                      conn->authenticated = true;
                      conn->session = session;
-                     strncpy(conn->session_token, token, WEBUI_SESSION_TOKEN_LEN - 1);
-                     conn->session_token[WEBUI_SESSION_TOKEN_LEN - 1] = '\0';
+                     safe_strscpy(conn->session_token, token);
 
                      /* Register this wsi with the session's music state */
                      webui_music_set_stream_wsi(session, wsi);

@@ -49,6 +49,7 @@
 #include "llm/llm_interface.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
+#include "utils/string_utils.h"
 
 #ifdef ENABLE_MULTI_CLIENT
 #include "webui/webui_satellite.h"
@@ -614,13 +615,11 @@ static void briefing_build_llm_config(llm_resolved_config_t *cfg,
    if (strcmp(g_config.llm.type, "local") == 0) {
       cfg->type = LLM_LOCAL;
       cfg->cloud_provider = CLOUD_PROVIDER_NONE;
-      strncpy(endpoint_buf, g_config.llm.local.endpoint, endpoint_buf_size - 1);
-      endpoint_buf[endpoint_buf_size - 1] = '\0';
+      safe_strncpy(endpoint_buf, g_config.llm.local.endpoint, endpoint_buf_size);
       cfg->endpoint = endpoint_buf;
       /* Use default local model */
       if (g_config.llm.local.model[0]) {
-         strncpy(model_buf, g_config.llm.local.model, model_buf_size - 1);
-         model_buf[model_buf_size - 1] = '\0';
+         safe_strncpy(model_buf, g_config.llm.local.model, model_buf_size);
          cfg->model = model_buf;
       }
    } else if (strcmp(provider, "openrouter") == 0) {
@@ -634,8 +633,7 @@ static void briefing_build_llm_config(llm_resolved_config_t *cfg,
       cfg->cloud_provider = CLOUD_PROVIDER_OPENROUTER;
       cfg->api_key = g_secrets.openrouter_api_key;
       cfg->endpoint = OPENROUTER_URL;
-      strncpy(model_buf, llm_get_default_openrouter_model(), model_buf_size - 1);
-      model_buf[model_buf_size - 1] = '\0';
+      safe_strncpy(model_buf, llm_get_default_openrouter_model(), model_buf_size);
       cfg->model = model_buf;
    } else if (strcmp(provider, "claude") == 0 && g_secrets.claude_api_key[0]) {
       cfg->type = LLM_CLOUD;
@@ -643,8 +641,7 @@ static void briefing_build_llm_config(llm_resolved_config_t *cfg,
       cfg->api_key = g_secrets.claude_api_key;
       if (g_config.llm.cloud.claude_models_count > 0) {
          int idx = g_config.llm.cloud.claude_default_model_idx;
-         strncpy(model_buf, g_config.llm.cloud.claude_models[idx], model_buf_size - 1);
-         model_buf[model_buf_size - 1] = '\0';
+         safe_strncpy(model_buf, g_config.llm.cloud.claude_models[idx], model_buf_size);
          cfg->model = model_buf;
       }
    } else if (strcmp(provider, "gemini") == 0 && g_secrets.gemini_api_key[0]) {
@@ -653,8 +650,7 @@ static void briefing_build_llm_config(llm_resolved_config_t *cfg,
       cfg->api_key = g_secrets.gemini_api_key;
       if (g_config.llm.cloud.gemini_models_count > 0) {
          int idx = g_config.llm.cloud.gemini_default_model_idx;
-         strncpy(model_buf, g_config.llm.cloud.gemini_models[idx], model_buf_size - 1);
-         model_buf[model_buf_size - 1] = '\0';
+         safe_strncpy(model_buf, g_config.llm.cloud.gemini_models[idx], model_buf_size);
          cfg->model = model_buf;
       }
    } else if (g_secrets.openai_api_key[0]) {
@@ -663,21 +659,19 @@ static void briefing_build_llm_config(llm_resolved_config_t *cfg,
       cfg->api_key = g_secrets.openai_api_key;
       if (g_config.llm.cloud.openai_models_count > 0) {
          int idx = g_config.llm.cloud.openai_default_model_idx;
-         strncpy(model_buf, g_config.llm.cloud.openai_models[idx], model_buf_size - 1);
-         model_buf[model_buf_size - 1] = '\0';
+         safe_strncpy(model_buf, g_config.llm.cloud.openai_models[idx], model_buf_size);
          cfg->model = model_buf;
       }
    } else {
       /* Fallback to local */
       cfg->type = LLM_LOCAL;
       cfg->cloud_provider = CLOUD_PROVIDER_NONE;
-      strncpy(endpoint_buf, g_config.llm.local.endpoint, endpoint_buf_size - 1);
-      endpoint_buf[endpoint_buf_size - 1] = '\0';
+      safe_strncpy(endpoint_buf, g_config.llm.local.endpoint, endpoint_buf_size);
       cfg->endpoint = endpoint_buf;
    }
 
    cfg->suppress_tools = true;
-   strncpy(cfg->thinking_mode, "disabled", sizeof(cfg->thinking_mode) - 1);
+   safe_strscpy(cfg->thinking_mode, "disabled");
    cfg->timeout_ms = 30000;
 }
 

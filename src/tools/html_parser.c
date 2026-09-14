@@ -293,7 +293,8 @@ static void parse_url_components(const char *url,
    if (scheme_end) {
       size_t slen = scheme_end - url;
       if (slen < scheme_size) {
-         strncpy(scheme, url, slen);
+         strncpy(scheme, url,
+                 slen); /* strncpy-ok: substring copy, slen < scheme_size guaranteed above */
          scheme[slen] = '\0';
       }
       url = scheme_end + 3;
@@ -303,7 +304,8 @@ static void parse_url_components(const char *url,
    const char *path_start = strchr(url, '/');
    size_t host_len = path_start ? (size_t)(path_start - url) : strlen(url);
    if (host_len < host_size) {
-      strncpy(host, url, host_len);
+      strncpy(host, url,
+              host_len); /* strncpy-ok: substring copy, host_len < host_size guaranteed above */
       host[host_len] = '\0';
    }
 
@@ -314,16 +316,15 @@ static void parse_url_components(const char *url,
       if (last_slash && last_slash != path_start) {
          size_t plen = last_slash - path_start + 1;
          if (plen < path_size) {
-            strncpy(path, path_start, plen);
+            strncpy(path, path_start,
+                    plen); /* strncpy-ok: substring copy, plen < path_size guaranteed above */
             path[plen] = '\0';
          }
       } else {
-         strncpy(path, "/", path_size - 1);
-         path[path_size - 1] = '\0';
+         safe_strncpy(path, "/", path_size);
       }
    } else {
-      strncpy(path, "/", path_size - 1);
-      path[path_size - 1] = '\0';
+      safe_strncpy(path, "/", path_size);
    }
 }
 
@@ -344,8 +345,7 @@ static void resolve_url(const char *href,
 
    // Already absolute URL
    if (strncmp(href, "http://", 7) == 0 || strncmp(href, "https://", 8) == 0) {
-      strncpy(resolved, href, resolved_size - 1);
-      resolved[resolved_size - 1] = '\0';
+      safe_strncpy(resolved, href, resolved_size);
       return;
    }
 
@@ -1070,8 +1070,7 @@ static void handle_tag_close(html_parser_state_t *state, const char *tag_name) {
                resolve_url(state->link_href, state->base_scheme, state->base_host, state->base_path,
                            resolved_href, sizeof(resolved_href));
             } else {
-               strncpy(resolved_href, state->link_href, sizeof(resolved_href) - 1);
-               resolved_href[sizeof(resolved_href) - 1] = '\0';
+               safe_strscpy(resolved_href, state->link_href);
             }
 
             emit_char(state, '[');
@@ -1330,7 +1329,7 @@ static int html_extract_internal(const char *html,
 
    // Parse base URL for link resolution
    if (base_url) {
-      strncpy(state.base_url, base_url, sizeof(state.base_url) - 1);
+      safe_strscpy(state.base_url, base_url);
       state.base_url[sizeof(state.base_url) - 1] = '\0';  // Ensure null termination
       parse_url_components(base_url, state.base_scheme, sizeof(state.base_scheme), state.base_host,
                            sizeof(state.base_host), state.base_path, sizeof(state.base_path));

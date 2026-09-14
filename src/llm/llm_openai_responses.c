@@ -50,6 +50,7 @@
 #include "llm/sse_parser.h"
 #include "logging.h"
 #include "ui/metrics.h"
+#include "utils/string_utils.h"
 #ifdef ENABLE_WEBUI
 #include "webui/webui_server.h"
 #endif
@@ -546,12 +547,10 @@ static void responses_handle_event(const char *event_type, const char *event_dat
                   rctx->active_fc_index = idx;
                   tool_call_t *call = &rctx->stream_ctx->tool_calls.calls[idx];
                   if (json_object_object_get_ex(item, "call_id", &call_id_obj)) {
-                     strncpy(call->id, json_object_get_string(call_id_obj), sizeof(call->id) - 1);
-                     call->id[sizeof(call->id) - 1] = '\0';
+                     safe_strscpy(call->id, json_object_get_string(call_id_obj));
                   }
                   if (json_object_object_get_ex(item, "name", &name_obj)) {
-                     strncpy(call->name, json_object_get_string(name_obj), sizeof(call->name) - 1);
-                     call->name[sizeof(call->name) - 1] = '\0';
+                     safe_strscpy(call->name, json_object_get_string(name_obj));
                   }
                   call->arguments[0] = '\0';
                   rctx->fc_args_len[idx] = 0;
@@ -595,8 +594,7 @@ static void responses_handle_event(const char *event_type, const char *event_dat
          tool_call_t *call = &rctx->stream_ctx->tool_calls.calls[idx];
          const char *args = json_object_get_string(args_obj);
          if (args) {
-            strncpy(call->arguments, args, sizeof(call->arguments) - 1);
-            call->arguments[sizeof(call->arguments) - 1] = '\0';
+            safe_strscpy(call->arguments, args);
             rctx->fc_args_len[idx] = strlen(call->arguments);
          }
       }
@@ -678,8 +676,7 @@ static void responses_handle_event(const char *event_type, const char *event_dat
                   OLOG_WARNING("Responses: response.id length %zu exceeds buffer %zu, truncating",
                                id_len, sizeof(rctx->response_id) - 1);
                }
-               strncpy(rctx->response_id, id, sizeof(rctx->response_id) - 1);
-               rctx->response_id[sizeof(rctx->response_id) - 1] = '\0';
+               safe_strscpy(rctx->response_id, id);
             }
          }
          if (json_object_object_get_ex(resp, "usage", &usage_obj)) {
@@ -746,11 +743,9 @@ static void responses_handle_event(const char *event_type, const char *event_dat
       }
       /* Set finish_reason consistent with chat-completions semantics */
       if (rctx->stream_ctx->has_tool_calls) {
-         strncpy(rctx->stream_ctx->finish_reason, "tool_calls",
-                 sizeof(rctx->stream_ctx->finish_reason) - 1);
+         safe_strscpy(rctx->stream_ctx->finish_reason, "tool_calls");
       } else {
-         strncpy(rctx->stream_ctx->finish_reason, "stop",
-                 sizeof(rctx->stream_ctx->finish_reason) - 1);
+         safe_strscpy(rctx->stream_ctx->finish_reason, "stop");
       }
       rctx->stream_ctx->stream_complete = 1;
    } else if (strcmp(event_type, "response.failed") == 0 || strcmp(event_type, "error") == 0) {
@@ -770,8 +765,7 @@ static void responses_handle_event(const char *event_type, const char *event_dat
          }
       }
       OLOG_ERROR("Responses stream %s: %s", event_type, msg ? msg : "(no message)");
-      strncpy(rctx->stream_ctx->finish_reason, "error",
-              sizeof(rctx->stream_ctx->finish_reason) - 1);
+      safe_strscpy(rctx->stream_ctx->finish_reason, "error");
       rctx->stream_ctx->stream_complete = 1;
    }
 
@@ -1000,8 +994,7 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
    result->thinking_content = llm_stream_get_thinking(rctx.stream_ctx);
    result->reasoning_tokens = rctx.reasoning_tokens;
    if (rctx.stream_ctx->finish_reason[0] != '\0') {
-      strncpy(result->finish_reason, rctx.stream_ctx->finish_reason,
-              sizeof(result->finish_reason) - 1);
+      safe_strscpy(result->finish_reason, rctx.stream_ctx->finish_reason);
    }
 
    /* Round-trip metadata */

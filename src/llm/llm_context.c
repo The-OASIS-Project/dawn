@@ -1275,7 +1275,7 @@ static bool build_compaction_config(llm_resolved_config_t *cfg) {
    if (cfg->cloud_provider == CLOUD_PROVIDER_OPENROUTER && !cfg->model)
       cfg->model = llm_get_default_openrouter_model();
    cfg->suppress_tools = true;
-   strncpy(cfg->thinking_mode, "disabled", sizeof(cfg->thinking_mode) - 1);
+   safe_strscpy(cfg->thinking_mode, "disabled");
    cfg->timeout_ms = g_config.network.summarization_timeout_ms;
 
    if (cfg->type == LLM_CLOUD && (!cfg->api_key || !cfg->api_key[0])) {

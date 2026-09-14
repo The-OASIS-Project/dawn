@@ -38,6 +38,7 @@
 #include "dawn_error.h"
 #include "llm/llm_context.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Configuration Access
@@ -210,8 +211,7 @@ static bool probe_endpoint(const char *base_url, const char *path, int timeout_m
  * @brief Get clean base URL (remove any path suffixes like /v1/chat/completions)
  */
 static void get_base_url(const char *endpoint, char *base_url, size_t base_url_len) {
-   strncpy(base_url, endpoint, base_url_len - 1);
-   base_url[base_url_len - 1] = '\0';
+   safe_strncpy(base_url, endpoint, base_url_len);
 
    /* Remove common path suffixes */
    char *v1_pos = strstr(base_url, "/v1/");
@@ -738,8 +738,7 @@ static int parse_ollama_models(const char *json_str,
       if (json_object_object_get_ex(model_obj, "name", &name_obj)) {
          const char *name = json_object_get_string(name_obj);
          if (name && llm_local_is_valid_model_name(name)) {
-            strncpy(models[count].name, name, LLM_LOCAL_MODEL_NAME_MAX - 1);
-            models[count].name[LLM_LOCAL_MODEL_NAME_MAX - 1] = '\0';
+            safe_strscpy(models[count].name, name);
             models[count].loaded = false; /* Ollama doesn't indicate this in /api/tags */
             count++;
          }
@@ -784,8 +783,7 @@ static int parse_openai_models(const char *json_str,
       if (json_object_object_get_ex(model_obj, "id", &id_obj)) {
          const char *id = json_object_get_string(id_obj);
          if (id && llm_local_is_valid_model_name(id)) {
-            strncpy(models[count].name, id, LLM_LOCAL_MODEL_NAME_MAX - 1);
-            models[count].name[LLM_LOCAL_MODEL_NAME_MAX - 1] = '\0';
+            safe_strscpy(models[count].name, id);
             models[count].loaded = true; /* llama.cpp only shows loaded model */
             count++;
          }

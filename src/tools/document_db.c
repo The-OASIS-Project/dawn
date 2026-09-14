@@ -37,6 +37,7 @@
 #include "logging.h"
 #include "memory/memory_bm25.h"
 #include "memory/memory_stem.h"
+#include "utils/string_utils.h"
 
 extern dawn_config_t g_config;
 
@@ -746,8 +747,7 @@ int document_db_delete_indexed(int64_t doc_id) {
          if (!filename[0]) {
             const unsigned char *fn = sqlite3_column_text(sel, 2);
             if (fn) {
-               strncpy(filename, (const char *)fn, sizeof(filename) - 1);
-               filename[sizeof(filename) - 1] = '\0';
+               safe_strscpy(filename, (const char *)fn);
             }
             owner_user_id = sqlite3_column_int(sel, 3);
          }
@@ -1664,8 +1664,7 @@ int document_db_note_update(int user_id,
       document_t doc;
       row_to_document(g, &doc);
       if (doc.user_id == user_id && doc.num_chunks == 1 && strcmp(doc.filetype, "note") == 0) {
-         strncpy(old_filename, doc.filename, sizeof(old_filename) - 1);
-         old_filename[sizeof(old_filename) - 1] = '\0';
+         safe_strscpy(old_filename, doc.filename);
          gate = SUCCESS;
       }
    }

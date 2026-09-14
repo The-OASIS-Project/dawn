@@ -40,6 +40,7 @@
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 #ifdef ENABLE_MULTI_CLIENT
 
@@ -163,10 +164,8 @@ int session_injected_set_record_locked(session_t *session,
     * effectively the truncated form (cannot collide with anything else
     * because adapters use stable static source_ids and bounded item_id
     * formats). */
-   strncpy(e->source_id, source_id, sizeof(e->source_id) - 1);
-   e->source_id[sizeof(e->source_id) - 1] = '\0';
-   strncpy(e->item_id, item_id, sizeof(e->item_id) - 1);
-   e->item_id[sizeof(e->item_id) - 1] = '\0';
+   safe_strscpy(e->source_id, source_id);
+   safe_strscpy(e->item_id, item_id);
    e->first_injected_turn = current_turn;
    e->last_injected_turn = current_turn;
    e->last_score = score;

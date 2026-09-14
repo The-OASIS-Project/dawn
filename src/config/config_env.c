@@ -123,8 +123,7 @@ void config_migrate(dawn_config_t *config) {
    if (config->llm.cloud.use_openrouter && strcmp(config->llm.cloud.provider, "openrouter") != 0) {
       OLOG_INFO(
           "config: migrated retired use_openrouter=true -> llm.cloud.provider=\"openrouter\"");
-      strncpy(config->llm.cloud.provider, "openrouter", sizeof(config->llm.cloud.provider) - 1);
-      config->llm.cloud.provider[sizeof(config->llm.cloud.provider) - 1] = '\0';
+      safe_strscpy(config->llm.cloud.provider, "openrouter");
    }
    config->llm.cloud.use_openrouter = false;
 }

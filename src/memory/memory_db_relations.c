@@ -58,6 +58,7 @@
 #include "logging.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_internal.h"
+#include "utils/string_utils.h"
 
 /* `const char *const` (not just `const char *`) so the pointer array itself
  * lands in .rodata.  Without the inner const, only the C-strings are
@@ -482,16 +483,14 @@ static void populate_relation_from_row(sqlite3_stmt *stmt, memory_relation_t *re
 
    const char *r = (const char *)sqlite3_column_text(stmt, 2);
    if (r) {
-      strncpy(rel->relation, r, MEMORY_RELATION_MAX - 1);
-      rel->relation[MEMORY_RELATION_MAX - 1] = '\0';
+      safe_strscpy(rel->relation, r);
    }
 
    rel->object_entity_id = sqlite3_column_int64(stmt, 3);
 
    const char *obj_name = (const char *)sqlite3_column_text(stmt, 4);
    if (obj_name) {
-      strncpy(rel->object_name, obj_name, MEMORY_ENTITY_NAME_MAX - 1);
-      rel->object_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+      safe_strscpy(rel->object_name, obj_name);
    }
 
    rel->confidence = (float)sqlite3_column_double(stmt, 5);
@@ -638,8 +637,7 @@ int memory_db_relation_distinct_predicates(int user_id,
       const char *rel = (const char *)sqlite3_column_text(stmt, 0);
       if (!rel || !*rel)
          continue;
-      strncpy(out[count], rel, MEMORY_RELATION_MAX - 1);
-      out[count][MEMORY_RELATION_MAX - 1] = '\0';
+      safe_strscpy(out[count], rel);
       count++;
    }
    sqlite3_finalize(stmt);

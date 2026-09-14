@@ -35,6 +35,7 @@
 #include "audio_decoder_internal.h"
 #include "core/path_utils.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Constants

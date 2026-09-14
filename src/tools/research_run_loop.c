@@ -571,10 +571,10 @@ static int commentary_collect_cb(const conversation_message_t *msg, void *ctx) {
       return 0; /* skip system/tool rows — keep the human thread only */
    }
    int slot = c->count % RESEARCH_COMMENTARY_CTX_TURNS;
-   strncpy(c->role[slot], msg->role, sizeof(c->role[slot]) - 1);
+   safe_strscpy(c->role[slot], msg->role);
    c->role[slot][sizeof(c->role[slot]) - 1] = '\0';
    const char *content = msg->content ? msg->content : "";
-   strncpy(c->text[slot], content, sizeof(c->text[slot]) - 1);
+   safe_strscpy(c->text[slot], content);
    c->text[slot][sizeof(c->text[slot]) - 1] = '\0';
    c->count++;
    return 0; /* keep iterating; the ring retains the last TURNS */

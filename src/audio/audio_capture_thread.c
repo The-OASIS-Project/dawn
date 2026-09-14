@@ -42,6 +42,7 @@
 #include "dawn.h"
 #include "logging.h"
 #include "ui/metrics.h"
+#include "utils/string_utils.h"
 
 #ifdef ENABLE_AEC
 #include "audio/aec_processor.h"
@@ -483,8 +484,7 @@ void audio_capture_clear(audio_capture_context_t *ctx) {
 void mic_set_recording_dir(const char *dir) {
    pthread_mutex_lock(&g_mic_recording_mutex);
    if (dir) {
-      strncpy(g_mic_recording_dir, dir, sizeof(g_mic_recording_dir) - 1);
-      g_mic_recording_dir[sizeof(g_mic_recording_dir) - 1] = '\0';
+      safe_strscpy(g_mic_recording_dir, dir);
    }
    OLOG_INFO("Mic recording directory set to: %s", g_mic_recording_dir);
    pthread_mutex_unlock(&g_mic_recording_mutex);

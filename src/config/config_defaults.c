@@ -648,10 +648,8 @@ void config_set_defaults(dawn_config_t *config) {
 
    /* Music - streaming settings */
    config->music.streaming_enabled = true;
-   strncpy(config->music.streaming_quality, "standard",
-           sizeof(config->music.streaming_quality) - 1);
-   strncpy(config->music.streaming_bitrate_mode, "vbr",
-           sizeof(config->music.streaming_bitrate_mode) - 1);
+   safe_strscpy(config->music.streaming_quality, "standard");
+   safe_strscpy(config->music.streaming_bitrate_mode, "vbr");
 }
 
 void config_set_secrets_defaults(secrets_config_t *secrets) {

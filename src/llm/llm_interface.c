@@ -816,8 +816,7 @@ const char *llm_get_model_name(void) {
 
       /* If session has a custom model, copy to static buffer and return */
       if (config.model[0] != '\0') {
-         strncpy(session_model_buf, config.model, sizeof(session_model_buf) - 1);
-         session_model_buf[sizeof(session_model_buf) - 1] = '\0';
+         safe_strscpy(session_model_buf, config.model);
          return session_model_buf;
       }
    }
@@ -1432,19 +1431,16 @@ void llm_get_default_config(session_llm_config_t *config) {
 
    // Copy thinking mode from global config
    if (g_config.llm.thinking.mode[0] != '\0') {
-      strncpy(config->thinking_mode, g_config.llm.thinking.mode, sizeof(config->thinking_mode) - 1);
-      config->thinking_mode[sizeof(config->thinking_mode) - 1] = '\0';
+      safe_strscpy(config->thinking_mode, g_config.llm.thinking.mode);
    } else {
-      strncpy(config->thinking_mode, "disabled", sizeof(config->thinking_mode) - 1);
+      safe_strscpy(config->thinking_mode, "disabled");
    }
 
    // Copy reasoning effort from global config
    if (g_config.llm.thinking.reasoning_effort[0] != '\0') {
-      strncpy(config->reasoning_effort, g_config.llm.thinking.reasoning_effort,
-              sizeof(config->reasoning_effort) - 1);
-      config->reasoning_effort[sizeof(config->reasoning_effort) - 1] = '\0';
+      safe_strscpy(config->reasoning_effort, g_config.llm.thinking.reasoning_effort);
    } else {
-      strncpy(config->reasoning_effort, "medium", sizeof(config->reasoning_effort) - 1);
+      safe_strscpy(config->reasoning_effort, "medium");
    }
 
    OLOG_INFO("Default LLM config: type=%s, provider=%s",
@@ -1551,28 +1547,20 @@ int llm_resolve_config(const session_llm_config_t *session_config,
 
    // Resolve thinking_mode - use session config if set, otherwise global config
    if (session_config->thinking_mode[0] != '\0') {
-      strncpy(resolved->thinking_mode, session_config->thinking_mode,
-              sizeof(resolved->thinking_mode) - 1);
-      resolved->thinking_mode[sizeof(resolved->thinking_mode) - 1] = '\0';
+      safe_strscpy(resolved->thinking_mode, session_config->thinking_mode);
    } else if (g_config.llm.thinking.mode[0] != '\0') {
-      strncpy(resolved->thinking_mode, g_config.llm.thinking.mode,
-              sizeof(resolved->thinking_mode) - 1);
-      resolved->thinking_mode[sizeof(resolved->thinking_mode) - 1] = '\0';
+      safe_strscpy(resolved->thinking_mode, g_config.llm.thinking.mode);
    } else {
-      strncpy(resolved->thinking_mode, "auto", sizeof(resolved->thinking_mode) - 1);
+      safe_strscpy(resolved->thinking_mode, "auto");
    }
 
    // Resolve reasoning_effort - use session config if set, otherwise global config
    if (session_config->reasoning_effort[0] != '\0') {
-      strncpy(resolved->reasoning_effort, session_config->reasoning_effort,
-              sizeof(resolved->reasoning_effort) - 1);
-      resolved->reasoning_effort[sizeof(resolved->reasoning_effort) - 1] = '\0';
+      safe_strscpy(resolved->reasoning_effort, session_config->reasoning_effort);
    } else if (g_config.llm.thinking.reasoning_effort[0] != '\0') {
-      strncpy(resolved->reasoning_effort, g_config.llm.thinking.reasoning_effort,
-              sizeof(resolved->reasoning_effort) - 1);
-      resolved->reasoning_effort[sizeof(resolved->reasoning_effort) - 1] = '\0';
+      safe_strscpy(resolved->reasoning_effort, g_config.llm.thinking.reasoning_effort);
    } else {
-      strncpy(resolved->reasoning_effort, "medium", sizeof(resolved->reasoning_effort) - 1);
+      safe_strscpy(resolved->reasoning_effort, "medium");
    }
 
    /* Stabilize `model` into the config's own inline model_buf.  Until here it may
@@ -1589,8 +1577,7 @@ int llm_resolve_config(const session_llm_config_t *session_config,
     * `model` can alias a per-call local — a custom-endpoint sibling gap remains,
     * but no struct buffer backs endpoint today.) */
    if (resolved->model != NULL && resolved->model != resolved->model_buf) {
-      strncpy(resolved->model_buf, resolved->model, sizeof(resolved->model_buf) - 1);
-      resolved->model_buf[sizeof(resolved->model_buf) - 1] = '\0';
+      safe_strscpy(resolved->model_buf, resolved->model);
       resolved->model = resolved->model_buf;
    }
 

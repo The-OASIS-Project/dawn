@@ -30,6 +30,7 @@
 
 #include "auth/auth_db_internal.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Helper: Read satellite_mapping_t from prepared statement result row
@@ -40,22 +41,22 @@ static void read_mapping_row(sqlite3_stmt *stmt, satellite_mapping_t *out) {
 
    const char *uuid = (const char *)sqlite3_column_text(stmt, 0);
    if (uuid) {
-      strncpy(out->uuid, uuid, sizeof(out->uuid) - 1);
+      safe_strscpy(out->uuid, uuid);
    }
 
    const char *name = (const char *)sqlite3_column_text(stmt, 1);
    if (name) {
-      strncpy(out->name, name, sizeof(out->name) - 1);
+      safe_strscpy(out->name, name);
    }
 
    const char *location = (const char *)sqlite3_column_text(stmt, 2);
    if (location) {
-      strncpy(out->location, location, sizeof(out->location) - 1);
+      safe_strscpy(out->location, location);
    }
 
    const char *ha_area = (const char *)sqlite3_column_text(stmt, 3);
    if (ha_area) {
-      strncpy(out->ha_area, ha_area, sizeof(out->ha_area) - 1);
+      safe_strscpy(out->ha_area, ha_area);
    }
 
    out->user_id = sqlite3_column_int(stmt, 4);
@@ -294,8 +295,8 @@ int satellite_db_ensure_local_pseudo(void) {
 
    satellite_mapping_t m;
    memset(&m, 0, sizeof(m));
-   strncpy(m.uuid, LOCAL_PSEUDO_SATELLITE_UUID, sizeof(m.uuid) - 1);
-   strncpy(m.name, "Local Device", sizeof(m.name) - 1);
+   safe_strscpy(m.uuid, LOCAL_PSEUDO_SATELLITE_UUID);
+   safe_strscpy(m.name, "Local Device");
    m.location[0] = '\0';
    m.ha_area[0] = '\0';
    m.user_id = 0; /* unassigned → backward-compat default (plays for all) */

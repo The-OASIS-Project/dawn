@@ -33,6 +33,7 @@
 
 #include "auth/auth_db_internal.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * User Settings Operations
@@ -45,10 +46,10 @@ int auth_db_get_user_settings(int user_id, auth_user_settings_t *settings_out) {
 
    /* Initialize with defaults */
    memset(settings_out, 0, sizeof(*settings_out));
-   strncpy(settings_out->persona_mode, "append", AUTH_PERSONA_MODE_MAX - 1);
-   strncpy(settings_out->timezone, "UTC", AUTH_TIMEZONE_MAX - 1);
-   strncpy(settings_out->units, "metric", AUTH_UNITS_MAX - 1);
-   strncpy(settings_out->theme, "cyan", AUTH_THEME_MAX - 1);
+   safe_strscpy(settings_out->persona_mode, "append");
+   safe_strscpy(settings_out->timezone, "UTC");
+   safe_strscpy(settings_out->units, "metric");
+   safe_strscpy(settings_out->theme, "cyan");
 
    AUTH_DB_LOCK_OR_FAIL();
 
@@ -66,24 +67,24 @@ int auth_db_get_user_settings(int user_id, auth_user_settings_t *settings_out) {
       const char *units = (const char *)sqlite3_column_text(s_db.stmt_get_user_settings, 4);
 
       if (persona) {
-         strncpy(settings_out->persona_description, persona, AUTH_PERSONA_DESC_MAX - 1);
+         safe_strscpy(settings_out->persona_description, persona);
       }
       if (persona_mode) {
-         strncpy(settings_out->persona_mode, persona_mode, AUTH_PERSONA_MODE_MAX - 1);
+         safe_strscpy(settings_out->persona_mode, persona_mode);
       }
       if (location) {
-         strncpy(settings_out->location, location, AUTH_LOCATION_MAX - 1);
+         safe_strscpy(settings_out->location, location);
       }
       if (timezone) {
-         strncpy(settings_out->timezone, timezone, AUTH_TIMEZONE_MAX - 1);
+         safe_strscpy(settings_out->timezone, timezone);
       }
       if (units) {
-         strncpy(settings_out->units, units, AUTH_UNITS_MAX - 1);
+         safe_strscpy(settings_out->units, units);
       }
 
       const char *theme = (const char *)sqlite3_column_text(s_db.stmt_get_user_settings, 5);
       if (theme) {
-         strncpy(settings_out->theme, theme, AUTH_THEME_MAX - 1);
+         safe_strscpy(settings_out->theme, theme);
       }
    } else if (rc != SQLITE_DONE) {
       /* Unexpected error */
@@ -133,8 +134,8 @@ int auth_db_set_user_settings(int user_id, const auth_user_settings_t *settings)
 int auth_db_init_user_settings(int user_id) {
    auth_user_settings_t defaults;
    memset(&defaults, 0, sizeof(defaults));
-   strncpy(defaults.timezone, "UTC", AUTH_TIMEZONE_MAX - 1);
-   strncpy(defaults.units, "metric", AUTH_UNITS_MAX - 1);
+   safe_strscpy(defaults.timezone, "UTC");
+   safe_strscpy(defaults.units, "metric");
    return auth_db_set_user_settings(user_id, &defaults);
 }
 
@@ -179,16 +180,13 @@ int auth_db_get_user_identity(int user_id, auth_user_identity_t *out) {
    const char *pa = (const char *)sqlite3_column_text(stmt, 1);
    const char *ia = (const char *)sqlite3_column_text(stmt, 2);
    if (rn) {
-      strncpy(out->real_name, rn, AUTH_REAL_NAME_MAX - 1);
-      out->real_name[AUTH_REAL_NAME_MAX - 1] = '\0';
+      safe_strscpy(out->real_name, rn);
    }
    if (pa) {
-      strncpy(out->preferred_address, pa, AUTH_PREFERRED_ADDRESS_MAX - 1);
-      out->preferred_address[AUTH_PREFERRED_ADDRESS_MAX - 1] = '\0';
+      safe_strscpy(out->preferred_address, pa);
    }
    if (ia) {
-      strncpy(out->identity_aliases, ia, AUTH_IDENTITY_ALIASES_MAX - 1);
-      out->identity_aliases[AUTH_IDENTITY_ALIASES_MAX - 1] = '\0';
+      safe_strscpy(out->identity_aliases, ia);
    }
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();

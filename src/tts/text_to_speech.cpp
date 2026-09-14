@@ -18,6 +18,7 @@
 #include "dawn_error.h"
 #include "logging.h"
 #include "ui/metrics.h"
+#include "utils/string_utils.h"
 
 #ifdef ENABLE_AEC
 #include "audio/aec_calibration.h"
@@ -714,8 +715,7 @@ void initialize_text_to_speech(char *pcm_device) {
    OLOG_INFO("Initializing Text-to-Speech system...");
 
    // Store device name (with bounds checking)
-   strncpy(tts_handle.pcm_playback_device, pcm_device, MAX_WORD_LENGTH);
-   tts_handle.pcm_playback_device[MAX_WORD_LENGTH] = '\0';
+   safe_strscpy(tts_handle.pcm_playback_device, pcm_device);
 
    // Load the voice model from configured models directory
    // Construct paths from config: {models_path}/{voice_model}.onnx and .json

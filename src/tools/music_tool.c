@@ -46,6 +46,7 @@
 #include "dawn_error.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
+#include "utils/string_utils.h"
 
 /* WebUI music integration - route commands to browser when originating from WebUI */
 #ifdef ENABLE_WEBUI
@@ -330,12 +331,9 @@ static int search_music_database(const char *query, Playlist *playlist) {
 
    playlist->count = 0;
    for (int i = 0; i < count && playlist->count < MAX_PLAYLIST_LENGTH; i++) {
-      strncpy(playlist->filenames[playlist->count], results[i].path, MAX_FILENAME_LENGTH - 1);
-      playlist->filenames[playlist->count][MAX_FILENAME_LENGTH - 1] = '\0';
+      safe_strscpy(playlist->filenames[playlist->count], results[i].path);
 
-      strncpy(playlist->display_names[playlist->count], results[i].display_name,
-              MAX_FILENAME_LENGTH - 1);
-      playlist->display_names[playlist->count][MAX_FILENAME_LENGTH - 1] = '\0';
+      safe_strscpy(playlist->display_names[playlist->count], results[i].display_name);
 
       playlist->count++;
    }

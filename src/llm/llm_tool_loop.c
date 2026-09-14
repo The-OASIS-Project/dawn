@@ -45,6 +45,7 @@
 #include "llm/llm_rate_limit.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 #include "webui/webui_server.h"
 
 /* Transient-network retry policy.  Triggered when the provider returns rc != 0
@@ -583,8 +584,7 @@ static bool resolve_provider_switch(llm_tool_loop_params_t *params) {
 
    /* Copy model to params-owned buffer (resolved ptr may dangle after return) */
    if (current_config.model && current_config.model[0] != '\0') {
-      strncpy(params->model_storage, current_config.model, LLM_MODEL_NAME_MAX - 1);
-      params->model_storage[LLM_MODEL_NAME_MAX - 1] = '\0';
+      safe_strscpy(params->model_storage, current_config.model);
       params->model = params->model_storage;
    }
 

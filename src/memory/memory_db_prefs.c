@@ -33,6 +33,7 @@
 #include "logging.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_internal.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Helper: Populate preference from statement row
@@ -44,22 +45,19 @@ static void populate_pref_from_row(sqlite3_stmt *stmt, memory_preference_t *pref
 
    const char *cat = (const char *)sqlite3_column_text(stmt, 2);
    if (cat) {
-      strncpy(pref->category, cat, MEMORY_CATEGORY_MAX - 1);
-      pref->category[MEMORY_CATEGORY_MAX - 1] = '\0';
+      safe_strscpy(pref->category, cat);
    }
 
    const char *val = (const char *)sqlite3_column_text(stmt, 3);
    if (val) {
-      strncpy(pref->value, val, MEMORY_PREF_VALUE_MAX - 1);
-      pref->value[MEMORY_PREF_VALUE_MAX - 1] = '\0';
+      safe_strscpy(pref->value, val);
    }
 
    pref->confidence = (float)sqlite3_column_double(stmt, 4);
 
    const char *source = (const char *)sqlite3_column_text(stmt, 5);
    if (source) {
-      strncpy(pref->source, source, MEMORY_SOURCE_MAX - 1);
-      pref->source[MEMORY_SOURCE_MAX - 1] = '\0';
+      safe_strscpy(pref->source, source);
    }
 
    pref->created_at = (time_t)sqlite3_column_int64(stmt, 6);

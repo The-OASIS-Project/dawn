@@ -39,6 +39,7 @@
 #include "tools/homeassistant_ws.h"
 #include "tools/toml.h"
 #include "tools/tool_registry.h"
+#include "utils/string_utils.h"
 
 /* ========== Forward Declarations ========== */
 
@@ -82,8 +83,7 @@ static void ha_parse_config(toml_table_t *table, void *config) {
 
    toml_datum_t url = toml_string_in(table, "url");
    if (url.ok) {
-      strncpy(cfg->url, url.u.s, sizeof(cfg->url) - 1);
-      cfg->url[sizeof(cfg->url) - 1] = '\0';
+      safe_strscpy(cfg->url, url.u.s);
       free(url.u.s);
    }
 
@@ -242,8 +242,7 @@ int homeassistant_tool_update_config(const char *url, int enabled, int led_hue_c
                     url);
          return 1;
       }
-      strncpy(s_config.url, url, sizeof(s_config.url) - 1);
-      s_config.url[sizeof(s_config.url) - 1] = '\0';
+      safe_strscpy(s_config.url, url);
    }
    if (enabled >= 0) {
       s_config.enabled = (bool)enabled;
@@ -307,14 +306,14 @@ static const int color_count = sizeof(color_names) / sizeof(color_names[0]);
 /* Copy entity fields to local buffers to avoid stale cache pointers.
  * The entity pointer from homeassistant_find_entity() points into the shared
  * cache which can be refreshed by another thread at any time. */
-#define ENTITY_LOCAL_COPY(entity)                                                         \
-   char entity_id_buf[HA_MAX_ENTITY_ID];                                                  \
-   char friendly_name_buf[HA_MAX_FRIENDLY_NAME];                                          \
-   do {                                                                                   \
-      strncpy(entity_id_buf, (entity)->entity_id, sizeof(entity_id_buf) - 1);             \
-      entity_id_buf[sizeof(entity_id_buf) - 1] = '\0';                                    \
-      strncpy(friendly_name_buf, (entity)->friendly_name, sizeof(friendly_name_buf) - 1); \
-      friendly_name_buf[sizeof(friendly_name_buf) - 1] = '\0';                            \
+#define ENTITY_LOCAL_COPY(entity)                               \
+   char entity_id_buf[HA_MAX_ENTITY_ID];                        \
+   char friendly_name_buf[HA_MAX_FRIENDLY_NAME];                \
+   do {                                                         \
+      safe_strscpy(entity_id_buf, (entity)->entity_id);         \
+      entity_id_buf[sizeof(entity_id_buf) - 1] = '\0';          \
+      safe_strscpy(friendly_name_buf, (entity)->friendly_name); \
+      friendly_name_buf[sizeof(friendly_name_buf) - 1] = '\0';  \
    } while (0)
 
 /* Every make_error_msg() caller is a genuine failure (entity/lock not found, "Failed to <op>",

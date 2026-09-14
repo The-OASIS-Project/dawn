@@ -37,6 +37,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "utils/string_utils.h"
+
 #define AUTH_DB_INTERNAL_ALLOWED /* needed for direct sqlite access in category backfill */
 
 #include "auth/auth_db_internal.h"
@@ -1204,12 +1206,10 @@ int memory_embeddings_entity_search(int user_id,
       int idx = scored[i].idx;
       out_ids[i] = s_entity_cache.ids[idx];
       if (out_names) {
-         strncpy(out_names[i], s_entity_cache.names[idx], MEMORY_ENTITY_NAME_MAX - 1);
-         out_names[i][MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+         safe_strscpy(out_names[i], s_entity_cache.names[idx]);
       }
       if (out_types) {
-         strncpy(out_types[i], s_entity_cache.types[idx], MEMORY_ENTITY_TYPE_MAX - 1);
-         out_types[i][MEMORY_ENTITY_TYPE_MAX - 1] = '\0';
+         safe_strscpy(out_types[i], s_entity_cache.types[idx]);
       }
       if (out_scores)
          out_scores[i] = scored[i].score;

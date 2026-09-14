@@ -34,6 +34,7 @@
 
 #include "logging.h"
 #include "memory/memory_types.h"
+#include "utils/string_utils.h"
 
 /* Compile-time tripwire: the stems output buffer must comfortably exceed
  * the maximum fact_text length, since Porter2 only shortens (never grows)
@@ -100,8 +101,7 @@ int memory_stem_tokenize_padded(const char *keywords,
     * with no log (rare for real queries — UI input boxes cap well below
     * this).  Caller's `tokens[][64]` storage shape sets the row cap. */
    char buf[MEMORY_FACT_STEMS_MAX];
-   strncpy(buf, keywords, sizeof(buf) - 1);
-   buf[sizeof(buf) - 1] = '\0';
+   safe_strscpy(buf, keywords);
 
    /* Use a stack pointer-array sized to max_tokens (caller passes a small
     * cap, usually 8).  Hard cap at 64 to bound the VLA. */

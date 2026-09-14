@@ -41,6 +41,7 @@
 #include "llm/llm_tools.h"
 #include "logging.h"
 #include "memory/memory_extraction.h"
+#include "utils/string_utils.h"
 #ifdef ENABLE_WEBUI
 #include "webui/webui_server.h"
 #endif
@@ -542,8 +543,7 @@ void session_append_satellite_context(session_t *session, const char *room, cons
    if (ha_area && ha_area[0] && len < (int)sizeof(ctx) - 1) {
       /* Sanitize ha_area: allowlist alphanumeric, spaces, hyphens, underscores */
       char safe_area[64];
-      strncpy(safe_area, ha_area, sizeof(safe_area) - 1);
-      safe_area[sizeof(safe_area) - 1] = '\0';
+      safe_strscpy(safe_area, ha_area);
       for (char *p = safe_area; *p; p++) {
          if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') ||
                *p == ' ' || *p == '-' || *p == '_'))
@@ -781,8 +781,7 @@ session_t *session_get_or_create_dap(int client_fd, const char *client_ip) {
    session->ref_count = 1;
 
    // Store client IP for session persistence
-   strncpy(session->client_ip, client_ip, INET_ADDRSTRLEN - 1);
-   session->client_ip[INET_ADDRSTRLEN - 1] = '\0';
+   safe_strscpy(session->client_ip, client_ip);
 
    sessions[slot] = session;
 
@@ -1044,8 +1043,7 @@ void session_destroy(uint32_t session_id) {
       db_metrics.id = m->db_id;
       db_metrics.session_id = session->session_id;
       db_metrics.user_id = m->user_id;
-      strncpy(db_metrics.session_type, session_type_name(session->type),
-              sizeof(db_metrics.session_type) - 1);
+      safe_strscpy(db_metrics.session_type, session_type_name(session->type));
       db_metrics.started_at = session->created_at;
       db_metrics.ended_at = time(NULL);
       db_metrics.queries_total = m->queries_total;
@@ -1650,9 +1648,12 @@ int session_save_voice_conversation(session_t *session, int64_t *conv_id_out) {
                /* Truncate to title length, add ellipsis if needed */
                size_t max_len = sizeof(title) - 4; /* Room for "..." */
                if (strlen(content) <= max_len) {
-                  strncpy(title, content, sizeof(title) - 1);
+                  safe_strscpy(title, content);
                } else {
-                  strncpy(title, content, max_len);
+                  strncpy(
+                      title, content,
+                      max_len); /* strncpy-ok: computed truncation length (title[128], max_len=124),
+                                   NUL-terminated below then room reserved for "..." */
                   title[max_len] = '\0';
                   strcat(title, "...");
                }
@@ -2703,8 +2704,7 @@ static session_provider_tokens_t *find_or_create_provider(session_t *session,
    // Create new entry if space available
    if (m->provider_count < SESSION_MAX_PROVIDERS) {
       session_provider_tokens_t *p = &m->providers[m->provider_count++];
-      strncpy(p->provider, provider, SESSION_PROVIDER_MAX - 1);
-      p->provider[SESSION_PROVIDER_MAX - 1] = '\0';
+      safe_strscpy(p->provider, provider);
       return p;
    }
 
@@ -2734,8 +2734,7 @@ static void persist_session_metrics(session_t *session) {
    db_metrics.id = m->db_id;  // -1 for INSERT, >0 for UPDATE
    db_metrics.session_id = session->session_id;
    db_metrics.user_id = m->user_id;
-   strncpy(db_metrics.session_type, session_type_name(session->type),
-           sizeof(db_metrics.session_type) - 1);
+   safe_strscpy(db_metrics.session_type, session_type_name(session->type));
    db_metrics.started_at = session->created_at;
    db_metrics.ended_at = time(NULL);
 
@@ -2768,8 +2767,7 @@ static void persist_session_metrics(session_t *session) {
          session_provider_metrics_t providers[SESSION_MAX_PROVIDERS];
          for (int i = 0; i < m->provider_count; i++) {
             providers[i].session_metrics_id = m->db_id;
-            strncpy(providers[i].provider, m->providers[i].provider, CLOUD_PROVIDER_MAX - 1);
-            providers[i].provider[CLOUD_PROVIDER_MAX - 1] = '\0';
+            safe_strscpy(providers[i].provider, m->providers[i].provider);
             providers[i].tokens_input = m->providers[i].tokens_input;
             providers[i].tokens_output = m->providers[i].tokens_output;
             providers[i].tokens_cached = m->providers[i].tokens_cached;

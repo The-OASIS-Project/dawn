@@ -332,8 +332,7 @@ int research_critic_parse_verdict(const char *response, research_critic_verdict_
             continue; /* skip empty questions */
          }
          char *slot = out->gaps[out->n_gaps];
-         strncpy(slot, q, RESEARCH_QUESTION_MAX - 1);
-         slot[RESEARCH_QUESTION_MAX - 1] = '\0';
+         safe_strncpy(slot, q, RESEARCH_QUESTION_MAX);
          sanitize_utf8_for_json(slot); /* model-authored → keep it WS-frame-safe */
          out->n_gaps++;
       }

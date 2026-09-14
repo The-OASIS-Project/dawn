@@ -37,6 +37,7 @@
 #include <unistd.h>
 
 #include "logging.h"
+#include "utils/string_utils.h"
 
 #ifdef ENABLE_WEBUI
 #include "core/session_manager.h"
@@ -208,8 +209,7 @@ void plan_vars_set(plan_context_t *ctx, const char *name, const char *value) {
    if (ctx->var_count >= PLAN_MAX_VARS)
       return;
 
-   strncpy(ctx->vars[ctx->var_count].name, name, PLAN_VAR_NAME_MAX);
-   ctx->vars[ctx->var_count].name[PLAN_VAR_NAME_MAX] = '\0';
+   safe_strscpy(ctx->vars[ctx->var_count].name, name);
    ctx->vars[ctx->var_count].value = value ? strdup(value) : NULL;
    ctx->vars[ctx->var_count].success = false;
    ctx->var_count++;
@@ -388,8 +388,7 @@ static void plan_append_resolved_var(const plan_context_t *ctx,
          if (json_object_object_get_ex(jobj, field_key, &field_val)) {
             const char *fv_str = json_object_get_string(field_val);
             if (fv_str) {
-               strncpy(field_buf, fv_str, sizeof(field_buf) - 1);
-               field_buf[sizeof(field_buf) - 1] = '\0';
+               safe_strscpy(field_buf, fv_str);
                resolved = field_buf;
             } else {
                resolved = ""; /* field exists but not stringifiable */
@@ -563,8 +562,7 @@ int plan_build_args_json(plan_context_t *ctx,
       return 1;
    }
 
-   strncpy(out_json, json_str, out_size - 1);
-   out_json[out_size - 1] = '\0';
+   safe_strncpy(out_json, json_str, out_size);
    json_object_put(result);
    return 0;
 }
@@ -1009,7 +1007,7 @@ static int plan_step_call(plan_context_t *ctx, struct json_object *step) {
    /* Build tool call with interpolated arguments */
    tool_call_t call = { 0 };
    snprintf(call.id, sizeof(call.id), "plan_%d", ctx->total_steps_executed);
-   strncpy(call.name, tool_name, sizeof(call.name) - 1);
+   safe_strscpy(call.name, tool_name);
    plan_build_args_json(ctx, args_obj, call.arguments, sizeof(call.arguments));
 
    /* Execute through the standard dispatch path */

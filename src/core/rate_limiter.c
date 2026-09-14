@@ -27,6 +27,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "utils/string_utils.h"
+
 void rate_limiter_init(rate_limiter_t *limiter,
                        rate_limit_entry_t *entries,
                        const rate_limiter_config_t *config) {
@@ -103,8 +105,7 @@ bool rate_limiter_check(rate_limiter_t *limiter, const char *ip) {
          /* All slots full and active - use random eviction to prevent targeting */
          entry = &limiter->entries[rand() % limiter->config.slot_count];
       }
-      strncpy(entry->ip, ip, sizeof(entry->ip) - 1);
-      entry->ip[sizeof(entry->ip) - 1] = '\0';
+      safe_strscpy(entry->ip, ip);
       entry->count = 1;
       entry->window_start = now;
       entry->last_access = now;
@@ -173,7 +174,6 @@ void rate_limiter_normalize_ip(const char *ip, char *out, size_t out_len) {
       inet_ntop(AF_INET6, &addr6, out, out_len);
    } else {
       /* IPv4 or other - use as-is */
-      strncpy(out, ip, out_len - 1);
-      out[out_len - 1] = '\0';
+      safe_strncpy(out, ip, out_len);
    }
 }

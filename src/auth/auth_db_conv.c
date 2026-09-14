@@ -36,6 +36,7 @@
 
 #include "auth/auth_db_internal.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* Weak no-op fallback for the WebUI "conversation list changed, update" broadcast.
  * When WebUI is on, the strong override in src/webui/webui_broadcasts.c wins the
@@ -203,8 +204,7 @@ int conv_db_create_with_origin(int user_id,
    /* Use default title if none provided, truncate if too long */
    char safe_title[CONV_TITLE_MAX];
    if (title && title[0] != '\0') {
-      strncpy(safe_title, title, CONV_TITLE_MAX - 1);
-      safe_title[CONV_TITLE_MAX - 1] = '\0';
+      safe_strscpy(safe_title, title);
    } else {
       strcpy(safe_title, "Voice Conversation");
    }
@@ -320,8 +320,7 @@ int conv_db_get(int64_t conv_id, int user_id, conversation_t *conv_out) {
 
    const char *title = (const char *)sqlite3_column_text(s_db.stmt_conv_get, 2);
    if (title) {
-      strncpy(conv_out->title, title, CONV_TITLE_MAX - 1);
-      conv_out->title[CONV_TITLE_MAX - 1] = '\0';
+      safe_strscpy(conv_out->title, title);
    }
 
    conv_out->created_at = (time_t)sqlite3_column_int64(s_db.stmt_conv_get, 3);
@@ -339,28 +338,23 @@ int conv_db_get(int64_t conv_id, int user_id, conversation_t *conv_out) {
    /* Per-conversation LLM settings (schema v11+) */
    const char *llm_type = (const char *)sqlite3_column_text(s_db.stmt_conv_get, 11);
    if (llm_type) {
-      strncpy(conv_out->llm_type, llm_type, sizeof(conv_out->llm_type) - 1);
-      conv_out->llm_type[sizeof(conv_out->llm_type) - 1] = '\0';
+      safe_strscpy(conv_out->llm_type, llm_type);
    }
    const char *cloud_provider = (const char *)sqlite3_column_text(s_db.stmt_conv_get, 12);
    if (cloud_provider) {
-      strncpy(conv_out->cloud_provider, cloud_provider, sizeof(conv_out->cloud_provider) - 1);
-      conv_out->cloud_provider[sizeof(conv_out->cloud_provider) - 1] = '\0';
+      safe_strscpy(conv_out->cloud_provider, cloud_provider);
    }
    const char *model = (const char *)sqlite3_column_text(s_db.stmt_conv_get, 13);
    if (model) {
-      strncpy(conv_out->model, model, sizeof(conv_out->model) - 1);
-      conv_out->model[sizeof(conv_out->model) - 1] = '\0';
+      safe_strscpy(conv_out->model, model);
    }
    const char *tools_mode = (const char *)sqlite3_column_text(s_db.stmt_conv_get, 14);
    if (tools_mode) {
-      strncpy(conv_out->tools_mode, tools_mode, sizeof(conv_out->tools_mode) - 1);
-      conv_out->tools_mode[sizeof(conv_out->tools_mode) - 1] = '\0';
+      safe_strscpy(conv_out->tools_mode, tools_mode);
    }
    const char *thinking_mode = (const char *)sqlite3_column_text(s_db.stmt_conv_get, 15);
    if (thinking_mode) {
-      strncpy(conv_out->thinking_mode, thinking_mode, sizeof(conv_out->thinking_mode) - 1);
-      conv_out->thinking_mode[sizeof(conv_out->thinking_mode) - 1] = '\0';
+      safe_strscpy(conv_out->thinking_mode, thinking_mode);
    }
 
    /* Privacy flag (schema v16+) */
@@ -369,8 +363,7 @@ int conv_db_get(int64_t conv_id, int user_id, conversation_t *conv_out) {
    /* Origin field (schema v17+) */
    const char *origin = (const char *)sqlite3_column_text(s_db.stmt_conv_get, 17);
    if (origin) {
-      strncpy(conv_out->origin, origin, sizeof(conv_out->origin) - 1);
-      conv_out->origin[sizeof(conv_out->origin) - 1] = '\0';
+      safe_strscpy(conv_out->origin, origin);
    } else {
       strcpy(conv_out->origin, "webui"); /* Default for old conversations */
    }
@@ -378,8 +371,7 @@ int conv_db_get(int64_t conv_id, int user_id, conversation_t *conv_out) {
    /* Reasoning effort (schema v36+) */
    const char *reasoning_effort = (const char *)sqlite3_column_text(s_db.stmt_conv_get, 18);
    if (reasoning_effort) {
-      strncpy(conv_out->reasoning_effort, reasoning_effort, sizeof(conv_out->reasoning_effort) - 1);
-      conv_out->reasoning_effort[sizeof(conv_out->reasoning_effort) - 1] = '\0';
+      safe_strscpy(conv_out->reasoning_effort, reasoning_effort);
    }
 
    /* Compaction watermark (schema v67+) */
@@ -474,28 +466,22 @@ int conv_db_create_continuation(int user_id,
       /* Copy parent LLM settings (explicit null termination for safety) */
       const char *val;
       if ((val = (const char *)sqlite3_column_text(stmt, 1)) != NULL) {
-         strncpy(parent_llm_type, val, sizeof(parent_llm_type) - 1);
-         parent_llm_type[sizeof(parent_llm_type) - 1] = '\0';
+         safe_strscpy(parent_llm_type, val);
       }
       if ((val = (const char *)sqlite3_column_text(stmt, 2)) != NULL) {
-         strncpy(parent_cloud_provider, val, sizeof(parent_cloud_provider) - 1);
-         parent_cloud_provider[sizeof(parent_cloud_provider) - 1] = '\0';
+         safe_strscpy(parent_cloud_provider, val);
       }
       if ((val = (const char *)sqlite3_column_text(stmt, 3)) != NULL) {
-         strncpy(parent_model, val, sizeof(parent_model) - 1);
-         parent_model[sizeof(parent_model) - 1] = '\0';
+         safe_strscpy(parent_model, val);
       }
       if ((val = (const char *)sqlite3_column_text(stmt, 4)) != NULL) {
-         strncpy(parent_tools_mode, val, sizeof(parent_tools_mode) - 1);
-         parent_tools_mode[sizeof(parent_tools_mode) - 1] = '\0';
+         safe_strscpy(parent_tools_mode, val);
       }
       if ((val = (const char *)sqlite3_column_text(stmt, 5)) != NULL) {
-         strncpy(parent_thinking_mode, val, sizeof(parent_thinking_mode) - 1);
-         parent_thinking_mode[sizeof(parent_thinking_mode) - 1] = '\0';
+         safe_strscpy(parent_thinking_mode, val);
       }
       if ((val = (const char *)sqlite3_column_text(stmt, 6)) != NULL) {
-         strncpy(parent_reasoning_effort, val, sizeof(parent_reasoning_effort) - 1);
-         parent_reasoning_effort[sizeof(parent_reasoning_effort) - 1] = '\0';
+         safe_strscpy(parent_reasoning_effort, val);
       }
    }
    sqlite3_finalize(stmt);
@@ -596,8 +582,7 @@ int conv_db_list(int user_id,
 
       const char *title = (const char *)sqlite3_column_text(s_db.stmt_conv_list, 2);
       if (title) {
-         strncpy(conv.title, title, CONV_TITLE_MAX - 1);
-         conv.title[CONV_TITLE_MAX - 1] = '\0';
+         safe_strscpy(conv.title, title);
       }
 
       conv.created_at = (time_t)sqlite3_column_int64(s_db.stmt_conv_list, 3);
@@ -617,8 +602,7 @@ int conv_db_list(int user_id,
       /* Origin field (schema v17+) */
       const char *origin = (const char *)sqlite3_column_text(s_db.stmt_conv_list, 12);
       if (origin) {
-         strncpy(conv.origin, origin, sizeof(conv.origin) - 1);
-         conv.origin[sizeof(conv.origin) - 1] = '\0';
+         safe_strscpy(conv.origin, origin);
       } else {
          strcpy(conv.origin, "webui");
       }
@@ -671,8 +655,7 @@ int conv_db_list_all(bool include_archived,
 
       const char *title = (const char *)sqlite3_column_text(s_db.stmt_conv_list_all, 2);
       if (title) {
-         strncpy(conv.title, title, CONV_TITLE_MAX - 1);
-         conv.title[CONV_TITLE_MAX - 1] = '\0';
+         safe_strscpy(conv.title, title);
       }
 
       conv.created_at = (time_t)sqlite3_column_int64(s_db.stmt_conv_list_all, 3);
@@ -690,16 +673,14 @@ int conv_db_list_all(bool include_archived,
       /* Origin field (schema v17+) */
       const char *origin = (const char *)sqlite3_column_text(s_db.stmt_conv_list_all, 12);
       if (origin) {
-         strncpy(conv.origin, origin, sizeof(conv.origin) - 1);
-         conv.origin[sizeof(conv.origin) - 1] = '\0';
+         safe_strscpy(conv.origin, origin);
       } else {
          strcpy(conv.origin, "webui");
       }
 
       const char *uname = (const char *)sqlite3_column_text(s_db.stmt_conv_list_all, 13);
       if (uname) {
-         strncpy(username, uname, AUTH_USERNAME_MAX - 1);
-         username[AUTH_USERNAME_MAX - 1] = '\0';
+         safe_strscpy(username, uname);
       }
 
       /* Pinned flag (schema v69+) */
@@ -1137,8 +1118,7 @@ int conv_db_search(int user_id,
 
       const char *title = (const char *)sqlite3_column_text(s_db.stmt_conv_search, 2);
       if (title) {
-         strncpy(conv.title, title, CONV_TITLE_MAX - 1);
-         conv.title[CONV_TITLE_MAX - 1] = '\0';
+         safe_strscpy(conv.title, title);
       }
 
       conv.created_at = (time_t)sqlite3_column_int64(s_db.stmt_conv_search, 3);
@@ -1158,8 +1138,7 @@ int conv_db_search(int user_id,
       /* Origin field (schema v17+) */
       const char *origin = (const char *)sqlite3_column_text(s_db.stmt_conv_search, 12);
       if (origin) {
-         strncpy(conv.origin, origin, sizeof(conv.origin) - 1);
-         conv.origin[sizeof(conv.origin) - 1] = '\0';
+         safe_strscpy(conv.origin, origin);
       } else {
          strcpy(conv.origin, "webui");
       }
@@ -1215,8 +1194,7 @@ int conv_db_search_content(int user_id,
 
       const char *title = (const char *)sqlite3_column_text(s_db.stmt_conv_search_content, 2);
       if (title) {
-         strncpy(conv.title, title, CONV_TITLE_MAX - 1);
-         conv.title[CONV_TITLE_MAX - 1] = '\0';
+         safe_strscpy(conv.title, title);
       }
 
       conv.created_at = (time_t)sqlite3_column_int64(s_db.stmt_conv_search_content, 3);
@@ -1236,8 +1214,7 @@ int conv_db_search_content(int user_id,
       /* Origin field (schema v17+) */
       const char *origin = (const char *)sqlite3_column_text(s_db.stmt_conv_search_content, 12);
       if (origin) {
-         strncpy(conv.origin, origin, sizeof(conv.origin) - 1);
-         conv.origin[sizeof(conv.origin) - 1] = '\0';
+         safe_strscpy(conv.origin, origin);
       } else {
          strcpy(conv.origin, "webui");
       }
@@ -1695,8 +1672,7 @@ int conv_db_get_messages(int64_t conv_id, int user_id, message_callback_t callba
 
       const char *role = (const char *)sqlite3_column_text(s_db.stmt_msg_get, 2);
       if (role) {
-         strncpy(msg.role, role, CONV_ROLE_MAX - 1);
-         msg.role[CONV_ROLE_MAX - 1] = '\0';
+         safe_strscpy(msg.role, role);
       }
 
       /* Column pointers are only valid during the callback */
@@ -1739,8 +1715,7 @@ int conv_db_get_messages_after(int64_t conv_id,
 
       const char *role = (const char *)sqlite3_column_text(s_db.stmt_msg_get_after, 2);
       if (role) {
-         strncpy(msg.role, role, CONV_ROLE_MAX - 1);
-         msg.role[CONV_ROLE_MAX - 1] = '\0';
+         safe_strscpy(msg.role, role);
       }
 
       /* Column pointers are only valid during the callback */
@@ -1776,8 +1751,7 @@ int conv_db_get_messages_admin(int64_t conv_id, message_callback_t callback, voi
 
       const char *role = (const char *)sqlite3_column_text(s_db.stmt_msg_get_admin, 2);
       if (role) {
-         strncpy(msg.role, role, CONV_ROLE_MAX - 1);
-         msg.role[CONV_ROLE_MAX - 1] = '\0';
+         safe_strscpy(msg.role, role);
       }
 
       msg_read_columns(&msg, s_db.stmt_msg_get_admin);
@@ -1880,8 +1854,7 @@ void conv_generate_title(const char *content, char *title_out, size_t max_len) {
    size_t content_len = strlen(content);
    if (content_len <= target_len) {
       /* Content fits entirely */
-      strncpy(title_out, content, max_len - 1);
-      title_out[max_len - 1] = '\0';
+      safe_strncpy(title_out, content, max_len);
 
       /* Remove trailing newlines */
       size_t len = strlen(title_out);
@@ -1912,7 +1885,8 @@ void conv_generate_title(const char *content, char *title_out, size_t max_len) {
    }
 
    /* Copy and add ellipsis */
-   strncpy(title_out, content, cut_pos);
+   strncpy(title_out, content,
+           cut_pos); /* strncpy-ok: bounded substring, cut_pos <= target_len < max_len */
    title_out[cut_pos] = '\0';
 
    /* Trim trailing whitespace before ellipsis */
@@ -2059,8 +2033,7 @@ int conv_db_get_messages_by_range(int64_t conv_id,
 
       const char *role = (const char *)sqlite3_column_text(stmt, 2);
       if (role) {
-         strncpy(msg.role, role, CONV_ROLE_MAX - 1);
-         msg.role[CONV_ROLE_MAX - 1] = '\0';
+         safe_strscpy(msg.role, role);
       }
 
       msg.content = (char *)sqlite3_column_text(stmt, 3);

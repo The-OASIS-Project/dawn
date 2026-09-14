@@ -53,6 +53,7 @@
 #include "auth/auth_db_internal.h"
 #include "logging.h"
 #include "memory/memory_stem.h"
+#include "utils/string_utils.h"
 
 /* Apply the per-version migration ladder on top of SCHEMA_SQL.  Bumps
  * schema_version to AUTH_DB_SCHEMA_VERSION only when every gating step
@@ -844,8 +845,7 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       /* Derive images directory from db_path parent */
       char images_dir[PATH_MAX];
       char db_path_copy[PATH_MAX];
-      strncpy(db_path_copy, db_path, sizeof(db_path_copy) - 1);
-      db_path_copy[sizeof(db_path_copy) - 1] = '\0';
+      safe_strscpy(db_path_copy, db_path);
       char *parent = dirname(db_path_copy);
       snprintf(images_dir, sizeof(images_dir), "%s/images", parent);
 

@@ -126,8 +126,7 @@ static int collect_tool_result_ids(struct json_object *conversation,
          if (json_object_object_get_ex(msg, "tool_call_id", &tool_call_id_obj)) {
             const char *id = json_object_get_string(tool_call_id_obj);
             if (id && count < max_results) {
-               strncpy(tool_result_ids[count], id, LLM_TOOLS_ID_LEN - 1);
-               tool_result_ids[count][LLM_TOOLS_ID_LEN - 1] = '\0';
+               safe_strscpy(tool_result_ids[count], id);
                count++;
             }
          }
@@ -148,8 +147,7 @@ static int collect_tool_result_ids(struct json_object *conversation,
                   if (json_object_object_get_ex(block, "tool_use_id", &tool_use_id_obj)) {
                      const char *id = json_object_get_string(tool_use_id_obj);
                      if (id && count < max_results) {
-                        strncpy(tool_result_ids[count], id, LLM_TOOLS_ID_LEN - 1);
-                        tool_result_ids[count][LLM_TOOLS_ID_LEN - 1] = '\0';
+                        safe_strscpy(tool_result_ids[count], id);
                         count++;
                      }
                   }
@@ -434,7 +432,9 @@ static json_object *convert_content_block_to_claude(json_object *block) {
    if (media_type_len >= sizeof(media_type)) {
       media_type_len = sizeof(media_type) - 1;
    }
-   strncpy(media_type, after_data, media_type_len);
+   strncpy(media_type, after_data, media_type_len); /* strncpy-ok: copies only the media-type
+                                                       substring (data:<type>;), length clamped to
+                                                       sizeof-1 above; explicit NUL follows */
    media_type[media_type_len] = '\0';
 
    // The base64 data is after the comma

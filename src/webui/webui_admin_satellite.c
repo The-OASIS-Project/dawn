@@ -33,6 +33,7 @@
 #include "core/ota_db.h"
 #include "core/rate_limiter.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 #include "webui/webui_internal.h"
 
 #ifdef DAWN_ENABLE_HOMEASSISTANT_TOOL
@@ -207,15 +208,14 @@ void handle_update_satellite(ws_connection_t *conn, struct json_object *payload)
       if (ha_area) {
          /* Sanitize: allowlist alphanumeric, spaces, hyphens, underscores */
          char safe[SATELLITE_LOCATION_MAX];
-         strncpy(safe, ha_area, sizeof(safe) - 1);
-         safe[sizeof(safe) - 1] = '\0';
+         safe_strscpy(safe, ha_area);
          for (char *p = safe; *p; p++) {
             if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
                   (*p >= '0' && *p <= '9') || *p == ' ' || *p == '-' || *p == '_'))
                *p = '_';
          }
          satellite_db_update_location(uuid, mapping.location, safe);
-         strncpy(mapping.ha_area, safe, sizeof(mapping.ha_area) - 1);
+         safe_strscpy(mapping.ha_area, safe);
       }
    }
 

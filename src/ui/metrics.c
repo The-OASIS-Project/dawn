@@ -32,6 +32,7 @@
 #include <string.h>
 
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* Global metrics instance */
 static dawn_metrics_t g_metrics;
@@ -372,8 +373,7 @@ void metrics_set_last_asr_text(const char *text, double processing_time_ms) {
    }
 
    pthread_mutex_lock(&g_metrics.mutex);
-   strncpy(g_metrics.last_asr_text, text, METRICS_MAX_LOG_LENGTH - 1);
-   g_metrics.last_asr_text[METRICS_MAX_LOG_LENGTH - 1] = '\0';
+   safe_strscpy(g_metrics.last_asr_text, text);
    g_metrics.last_asr_text_time_ms = processing_time_ms;
    /* Sanitize for clean display */
    sanitize_for_display(g_metrics.last_asr_text);
@@ -585,8 +585,7 @@ void metrics_set_last_user_command(const char *command) {
    }
 
    pthread_mutex_lock(&g_metrics.mutex);
-   strncpy(g_metrics.last_user_command, command, METRICS_MAX_LOG_LENGTH - 1);
-   g_metrics.last_user_command[METRICS_MAX_LOG_LENGTH - 1] = '\0';
+   safe_strscpy(g_metrics.last_user_command, command);
    pthread_mutex_unlock(&g_metrics.mutex);
 
    /* Also log to activity feed */
@@ -599,8 +598,7 @@ void metrics_set_last_ai_response(const char *response) {
    }
 
    pthread_mutex_lock(&g_metrics.mutex);
-   strncpy(g_metrics.last_ai_response, response, METRICS_MAX_LOG_LENGTH - 1);
-   g_metrics.last_ai_response[METRICS_MAX_LOG_LENGTH - 1] = '\0';
+   safe_strscpy(g_metrics.last_ai_response, response);
    /* Sanitize for clean display */
    sanitize_for_display(g_metrics.last_ai_response);
    pthread_mutex_unlock(&g_metrics.mutex);

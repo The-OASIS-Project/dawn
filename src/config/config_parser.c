@@ -50,8 +50,7 @@ static char s_loaded_secrets_path[CONFIG_PATH_MAX] = { 0 };
    do {                                            \
       toml_datum_t d = toml_string_in(table, key); \
       if (d.ok) {                                  \
-         strncpy(dest, d.u.s, sizeof(dest) - 1);   \
-         dest[sizeof(dest) - 1] = '\0';            \
+         safe_strscpy(dest, d.u.s);                \
          free(d.u.s);                              \
       }                                            \
    } while (0)
@@ -688,8 +687,7 @@ static void parse_llm_thinking(toml_table_t *table, llm_thinking_config_t *confi
    if (config->mode[0] != '\0' && strcmp(config->mode, "disabled") != 0 &&
        strcmp(config->mode, "auto") != 0 && strcmp(config->mode, "enabled") != 0) {
       OLOG_WARNING("llm.thinking.mode invalid '%s', defaulting to 'disabled'", config->mode);
-      strncpy(config->mode, "disabled", sizeof(config->mode) - 1);
-      config->mode[sizeof(config->mode) - 1] = '\0';
+      safe_strscpy(config->mode, "disabled");
    }
 
    /* Validate reasoning_effort. Full set: none/low/medium/high/xhigh.
@@ -703,8 +701,7 @@ static void parse_llm_thinking(toml_table_t *table, llm_thinking_config_t *confi
        strcmp(config->reasoning_effort, "xhigh") != 0) {
       OLOG_WARNING("llm.thinking.reasoning_effort invalid '%s', defaulting to 'medium'",
                    config->reasoning_effort);
-      strncpy(config->reasoning_effort, "medium", sizeof(config->reasoning_effort) - 1);
-      config->reasoning_effort[sizeof(config->reasoning_effort) - 1] = '\0';
+      safe_strscpy(config->reasoning_effort, "medium");
    }
 
    /* Validate budget values (minimum 1024 tokens for Claude compatibility) */
@@ -869,9 +866,7 @@ static void parse_search(toml_table_t *table, search_config_t *config) {
       for (int i = 0; i < count; i++) {
          toml_datum_t d = toml_string_at(filters_arr, i);
          if (d.ok && d.u.s) {
-            strncpy(config->title_filters[config->title_filters_count], d.u.s,
-                    SEARCH_TITLE_FILTER_MAX - 1);
-            config->title_filters[config->title_filters_count][SEARCH_TITLE_FILTER_MAX - 1] = '\0';
+            safe_strscpy(config->title_filters[config->title_filters_count], d.u.s);
             config->title_filters_count++;
             free(d.u.s);
          }
@@ -933,8 +928,7 @@ static void parse_url_fetcher(toml_table_t *table, url_fetcher_config_t *config)
       for (int i = 0; i < count; i++) {
          toml_datum_t d = toml_string_at(whitelist_arr, i);
          if (d.ok) {
-            strncpy(config->whitelist[i], d.u.s, URL_FETCHER_ENTRY_MAX - 1);
-            config->whitelist[i][URL_FETCHER_ENTRY_MAX - 1] = '\0';
+            safe_strscpy(config->whitelist[i], d.u.s);
             config->whitelist_count++;
             free(d.u.s); /* Free tomlc99 allocated string */
          }
@@ -2105,10 +2099,7 @@ static void parse_code_projects(toml_table_t *table, code_projects_config_t *con
       for (int i = 0; i < count; i++) {
          toml_datum_t d = toml_string_at(roots_arr, i);
          if (d.ok && d.u.s) {
-            strncpy(config->allowed_local_roots[config->allowed_local_roots_count], d.u.s,
-                    CONFIG_PATH_MAX - 1);
-            config->allowed_local_roots[config->allowed_local_roots_count][CONFIG_PATH_MAX - 1] =
-                '\0';
+            safe_strscpy(config->allowed_local_roots[config->allowed_local_roots_count], d.u.s);
             config->allowed_local_roots_count++;
             free(d.u.s);
          }
@@ -2326,8 +2317,7 @@ int config_load_from_search(const char *explicit_path, dawn_config_t *config) {
       if (config_file_readable(explicit_path)) {
          result = config_parse_file(explicit_path, config);
          if (result == SUCCESS) {
-            strncpy(s_loaded_config_path, explicit_path, sizeof(s_loaded_config_path) - 1);
-            s_loaded_config_path[sizeof(s_loaded_config_path) - 1] = '\0';
+            safe_strscpy(s_loaded_config_path, explicit_path);
             OLOG_INFO("Config loaded: %s", s_loaded_config_path);
          }
          return result;
@@ -2341,7 +2331,7 @@ int config_load_from_search(const char *explicit_path, dawn_config_t *config) {
    if (config_file_readable("./dawn.toml")) {
       result = config_parse_file("./dawn.toml", config);
       if (result == SUCCESS) {
-         strncpy(s_loaded_config_path, "./dawn.toml", sizeof(s_loaded_config_path) - 1);
+         safe_strscpy(s_loaded_config_path, "./dawn.toml");
          OLOG_INFO("Config loaded: %s", s_loaded_config_path);
       }
       return result;
@@ -2355,8 +2345,7 @@ int config_load_from_search(const char *explicit_path, dawn_config_t *config) {
       if (config_file_readable(path)) {
          result = config_parse_file(path, config);
          if (result == SUCCESS) {
-            strncpy(s_loaded_config_path, path, sizeof(s_loaded_config_path) - 1);
-            s_loaded_config_path[sizeof(s_loaded_config_path) - 1] = '\0';
+            safe_strscpy(s_loaded_config_path, path);
             OLOG_INFO("Config loaded: %s", s_loaded_config_path);
          }
          return result;
@@ -2367,7 +2356,7 @@ int config_load_from_search(const char *explicit_path, dawn_config_t *config) {
    if (config_file_readable("/etc/dawn/config.toml")) {
       result = config_parse_file("/etc/dawn/config.toml", config);
       if (result == SUCCESS) {
-         strncpy(s_loaded_config_path, "/etc/dawn/config.toml", sizeof(s_loaded_config_path) - 1);
+         safe_strscpy(s_loaded_config_path, "/etc/dawn/config.toml");
          OLOG_INFO("Config loaded: %s", s_loaded_config_path);
       }
       return result;
@@ -2388,7 +2377,7 @@ int config_load_secrets_from_search(secrets_config_t *secrets) {
    if (config_file_readable("./secrets.toml")) {
       result = config_parse_secrets("./secrets.toml", secrets);
       if (result == SUCCESS) {
-         strncpy(s_loaded_secrets_path, "./secrets.toml", sizeof(s_loaded_secrets_path) - 1);
+         safe_strscpy(s_loaded_secrets_path, "./secrets.toml");
          OLOG_INFO("Secrets loaded: %s", s_loaded_secrets_path);
       }
       return result;
@@ -2402,8 +2391,7 @@ int config_load_secrets_from_search(secrets_config_t *secrets) {
       if (config_file_readable(path)) {
          result = config_parse_secrets(path, secrets);
          if (result == SUCCESS) {
-            strncpy(s_loaded_secrets_path, path, sizeof(s_loaded_secrets_path) - 1);
-            s_loaded_secrets_path[sizeof(s_loaded_secrets_path) - 1] = '\0';
+            safe_strscpy(s_loaded_secrets_path, path);
             OLOG_INFO("Secrets loaded: %s", s_loaded_secrets_path);
          }
          return result;
@@ -2414,8 +2402,7 @@ int config_load_secrets_from_search(secrets_config_t *secrets) {
    if (config_file_readable("/etc/dawn/secrets.toml")) {
       result = config_parse_secrets("/etc/dawn/secrets.toml", secrets);
       if (result == SUCCESS) {
-         strncpy(s_loaded_secrets_path, "/etc/dawn/secrets.toml",
-                 sizeof(s_loaded_secrets_path) - 1);
+         safe_strscpy(s_loaded_secrets_path, "/etc/dawn/secrets.toml");
          OLOG_INFO("Secrets loaded: %s", s_loaded_secrets_path);
       }
       return result;

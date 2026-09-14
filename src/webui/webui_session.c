@@ -29,6 +29,7 @@
 
 #include "auth/auth_db.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 #include "webui/webui_internal.h"
 
 /* Callback for session enumeration */
@@ -72,7 +73,7 @@ void handle_list_my_sessions(ws_connection_t *conn) {
 
       /* Include current session's token prefix so UI can highlight it */
       char current_prefix[17] = { 0 };
-      strncpy(current_prefix, conn->auth_session_token, 16);
+      safe_strscpy(current_prefix, conn->auth_session_token);
       json_object_object_add(resp_payload, "current_session",
                              json_object_new_string(current_prefix));
    } else {

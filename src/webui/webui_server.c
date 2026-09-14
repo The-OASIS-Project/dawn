@@ -232,8 +232,7 @@ void register_token(const char *token, uint32_t session_id) {
    }
 
    if (empty_slot >= 0) {
-      strncpy(s_token_map[empty_slot].token, token, WEBUI_SESSION_TOKEN_LEN - 1);
-      s_token_map[empty_slot].token[WEBUI_SESSION_TOKEN_LEN - 1] = '\0';
+      safe_strscpy(s_token_map[empty_slot].token, token);
       s_token_map[empty_slot].session_id = session_id;
       s_token_map[empty_slot].created = time(NULL);
       s_token_map[empty_slot].in_use = true;
@@ -260,8 +259,7 @@ void register_token(const char *token, uint32_t session_id) {
          }
       }
       explicit_bzero(s_token_map[evict].token, sizeof(s_token_map[evict].token));
-      strncpy(s_token_map[evict].token, token, WEBUI_SESSION_TOKEN_LEN - 1);
-      s_token_map[evict].token[WEBUI_SESSION_TOKEN_LEN - 1] = '\0';
+      safe_strscpy(s_token_map[evict].token, token);
       s_token_map[evict].session_id = session_id;
       s_token_map[evict].created = time(NULL);
       s_token_map[evict].in_use = true;
@@ -798,7 +796,7 @@ static int callback_websocket(struct lws *wsi,
          /* Capture client IP at connection time for reliable logging later */
          lws_get_peer_simple(wsi, conn->client_ip, sizeof(conn->client_ip));
          if (conn->client_ip[0] == '\0') {
-            strncpy(conn->client_ip, "(unknown)", sizeof(conn->client_ip) - 1);
+            safe_strscpy(conn->client_ip, "(unknown)");
          }
 
          /* Populate auth state from HTTP cookie (if present) */
@@ -806,11 +804,8 @@ static int callback_websocket(struct lws *wsi,
          if (is_request_authenticated(wsi, &auth_session)) {
             conn->authenticated = true;
             conn->auth_user_id = auth_session.user_id;
-            strncpy(conn->auth_session_token, auth_session.token,
-                    sizeof(conn->auth_session_token) - 1);
-            conn->auth_session_token[sizeof(conn->auth_session_token) - 1] = '\0';
-            strncpy(conn->username, auth_session.username, sizeof(conn->username) - 1);
-            conn->username[sizeof(conn->username) - 1] = '\0';
+            safe_strscpy(conn->auth_session_token, auth_session.token);
+            safe_strscpy(conn->username, auth_session.username);
             OLOG_INFO("WebUI: WebSocket authenticated as user '%s' (id=%d)", conn->username,
                       conn->auth_user_id);
          } else {
@@ -998,8 +993,7 @@ static int callback_websocket(struct lws *wsi,
                            conn->session_was_reconnected = true;
                            existing_session->client_data = conn;
                            existing_session->disconnected = false;
-                           strncpy(conn->session_token, token, WEBUI_SESSION_TOKEN_LEN - 1);
-                           conn->session_token[WEBUI_SESSION_TOKEN_LEN - 1] = '\0';
+                           safe_strscpy(conn->session_token, token);
 
                            /* Check for Opus codec support */
                            conn->use_opus = check_opus_capability(payload);
@@ -1524,8 +1518,7 @@ static bool session_add_active_tool(session_t *session, const char *tool_name) {
 
    /* Add if space available */
    if (session->active_tool_count < 8) {
-      strncpy(session->active_tools[session->active_tool_count], tool_name, 31);
-      session->active_tools[session->active_tool_count][31] = '\0';
+      safe_strscpy(session->active_tools[session->active_tool_count], tool_name);
       session->active_tool_count++;
       pthread_mutex_unlock(&session->tools_mutex);
       return true;
@@ -1610,8 +1603,7 @@ static void build_tool_display_name(const char *tool_name,
    }
 
    /* Default to just the tool name */
-   strncpy(out, tool_name, out_size - 1);
-   out[out_size - 1] = '\0';
+   safe_strncpy(out, tool_name, out_size);
 
    if (!tool_args || tool_args[0] == '\0') {
       return;
@@ -1656,8 +1648,7 @@ static void build_tool_display_name(const char *tool_name,
    if (qualifier && qualifier[0] != '\0') {
       /* Truncate qualifier if too long */
       char short_qual[16];
-      strncpy(short_qual, qualifier, sizeof(short_qual) - 1);
-      short_qual[sizeof(short_qual) - 1] = '\0';
+      safe_strscpy(short_qual, qualifier);
       snprintf(out, out_size, "%s:%s", tool_name, short_qual);
    }
 
@@ -1795,11 +1786,11 @@ int webui_server_init(int port, const char *www_path) {
 
    /* Determine www path */
    if (www_path && www_path[0] != '\0') {
-      strncpy(s_www_path, www_path, sizeof(s_www_path) - 1);
+      safe_strscpy(s_www_path, www_path);
    } else if (g_config.webui.www_path[0] != '\0') {
-      strncpy(s_www_path, g_config.webui.www_path, sizeof(s_www_path) - 1);
+      safe_strscpy(s_www_path, g_config.webui.www_path);
    } else {
-      strncpy(s_www_path, WEBUI_DEFAULT_WWW_PATH, sizeof(s_www_path) - 1);
+      safe_strscpy(s_www_path, WEBUI_DEFAULT_WWW_PATH);
    }
    s_www_path[sizeof(s_www_path) - 1] = '\0';
 
@@ -1831,8 +1822,7 @@ int webui_server_init(int port, const char *www_path) {
                OLOG_WARNING("WebUI: aurora_path '%s' looks like a source tree (%s present); "
                             "serve the built dist/ to avoid exposing sources",
                             resolved, has_git ? ".git" : "package.json");
-            strncpy(s_aurora_path, ap, sizeof(s_aurora_path) - 1);
-            s_aurora_path[sizeof(s_aurora_path) - 1] = '\0';
+            safe_strscpy(s_aurora_path, ap);
             OLOG_INFO("WebUI: serving Aurora at /aurora/ from %s", resolved);
          }
       }
@@ -2688,8 +2678,7 @@ void webui_send_stream_end(session_t *session, const char *reason) {
                               .will_persist = will_persist,
                           } };
 
-   strncpy(resp.stream.text, r, sizeof(resp.stream.text) - 1);
-   resp.stream.text[sizeof(resp.stream.text) - 1] = '\0';
+   safe_strscpy(resp.stream.text, r);
 
    queue_response(&resp);
    OLOG_INFO("WebUI: Stream end id=%u reason=%s for session %u", session->current_stream_id, r,
@@ -2714,8 +2703,7 @@ void webui_send_thinking_start(session_t *session, const char *provider) {
 
    /* Store provider name in text buffer */
    const char *p = provider ? provider : "unknown";
-   strncpy(resp.stream.text, p, sizeof(resp.stream.text) - 1);
-   resp.stream.text[sizeof(resp.stream.text) - 1] = '\0';
+   safe_strscpy(resp.stream.text, p);
 
    queue_response(&resp);
    OLOG_INFO("WebUI: Thinking start id=%u provider=%s for session %u", session->current_stream_id,
@@ -2738,8 +2726,7 @@ void webui_send_thinking_delta(session_t *session, const char *text) {
                               .conversation_id = session->stream_conversation_id,
                           } };
 
-   strncpy(resp.stream.text, text, sizeof(resp.stream.text) - 1);
-   resp.stream.text[sizeof(resp.stream.text) - 1] = '\0';
+   safe_strscpy(resp.stream.text, text);
 
    queue_response(&resp);
 }
@@ -2980,8 +2967,7 @@ void webui_send_metrics_update(session_t *session,
 
    /* Copy state into fixed buffer */
    const char *s = state ? state : "idle";
-   strncpy(resp.metrics.state, s, sizeof(resp.metrics.state) - 1);
-   resp.metrics.state[sizeof(resp.metrics.state) - 1] = '\0';
+   safe_strscpy(resp.metrics.state, s);
 
    resp.metrics.ttft_ms = ttft_ms;
    resp.metrics.token_rate = token_rate;
@@ -3417,8 +3403,7 @@ int webui_restore_conversation_context(ws_connection_t *conn,
             cfg.cloud_provider = CLOUD_PROVIDER_OPENROUTER;
       }
       if (conv->model[0] != '\0') {
-         strncpy(cfg.model, conv->model, sizeof(cfg.model) - 1);
-         cfg.model[sizeof(cfg.model) - 1] = '\0';
+         safe_strscpy(cfg.model, conv->model);
 
          /* Infer provider from model name if not explicitly stored. OpenRouter IDs are
           * "vendor/model" slugs and match none of the bare prefixes below, so an
@@ -3437,8 +3422,7 @@ int webui_restore_conversation_context(ws_connection_t *conn,
 
       /* Fix #6: Restore thinking_mode from conversation DB */
       if (conv->thinking_mode[0] != '\0') {
-         strncpy(cfg.thinking_mode, conv->thinking_mode, sizeof(cfg.thinking_mode) - 1);
-         cfg.thinking_mode[sizeof(cfg.thinking_mode) - 1] = '\0';
+         safe_strscpy(cfg.thinking_mode, conv->thinking_mode);
       }
       session_set_llm_config(conn->session, &cfg);
    }

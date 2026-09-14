@@ -67,6 +67,7 @@
 #include "memory/memory_embeddings.h"
 #include "memory/memory_fact_search.h"
 #include "memory/memory_types.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Constants
@@ -669,9 +670,7 @@ static int relation_adapter_query(int user_id,
                                                                q_norm, scratch->norms[i]);
       if (subject_count < RELATION_TOP_SUBJECTS) {
          subjects[subject_count].entity_id = scratch->ids[i];
-         strncpy(subjects[subject_count].entity.name, scratch->names[i],
-                 MEMORY_ENTITY_NAME_MAX - 1);
-         subjects[subject_count].entity.name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+         safe_strscpy(subjects[subject_count].entity.name, scratch->names[i]);
          subjects[subject_count].cosine = cosine;
          subject_count++;
       } else {
@@ -682,8 +681,7 @@ static int relation_adapter_query(int user_id,
                worst = k;
          if (cosine > subjects[worst].cosine) {
             subjects[worst].entity_id = scratch->ids[i];
-            strncpy(subjects[worst].entity.name, scratch->names[i], MEMORY_ENTITY_NAME_MAX - 1);
-            subjects[worst].entity.name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+            safe_strscpy(subjects[worst].entity.name, scratch->names[i]);
             subjects[worst].cosine = cosine;
          }
       }

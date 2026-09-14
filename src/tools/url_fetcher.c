@@ -267,7 +267,8 @@ static int parse_cidr(const char *cidr, unsigned int *network, unsigned int *net
    size_t ip_len = slash - cidr;
    if (ip_len >= sizeof(ip_part))
       return 0;
-   strncpy(ip_part, cidr, ip_len);
+   strncpy(ip_part, cidr,
+           ip_len); /* strncpy-ok: substring copy, ip_len < sizeof(ip_part) guaranteed above */
    ip_part[ip_len] = '\0';
 
    // Parse prefix length
@@ -1303,8 +1304,7 @@ int url_is_blocked_with_resolve(const char *url,
 
    // Copy host out if requested
    if (host_out && host_out_size > 0) {
-      strncpy(host_out, host, host_out_size - 1);
-      host_out[host_out_size - 1] = '\0';
+      safe_strncpy(host_out, host, host_out_size);
    }
    if (port_out)
       *port_out = port;
@@ -1358,8 +1358,7 @@ int url_is_blocked_with_resolve(const char *url,
 
             // Save first IPv4 for CURLOPT_RESOLVE
             if (first_ipv4[0] == '\0') {
-               strncpy(first_ipv4, ip_str, sizeof(first_ipv4) - 1);
-               first_ipv4[sizeof(first_ipv4) - 1] = '\0';
+               safe_strscpy(first_ipv4, ip_str);
             }
 
             // Check if this IP is private/blocked
@@ -1385,8 +1384,7 @@ int url_is_blocked_with_resolve(const char *url,
    if (is_whitelisted(url, host, first_ipv4[0] ? first_ipv4 : NULL)) {
       // Whitelisted - return the resolved IP for curl to use
       if (resolved_ip && first_ipv4[0]) {
-         strncpy(resolved_ip, first_ipv4, INET_ADDRSTRLEN - 1);
-         resolved_ip[INET_ADDRSTRLEN - 1] = '\0';
+         safe_strncpy(resolved_ip, first_ipv4, INET_ADDRSTRLEN);
       }
       return 0;  // Not blocked
    }
@@ -1397,8 +1395,7 @@ int url_is_blocked_with_resolve(const char *url,
 
    // Not blocked - return resolved IP for CURLOPT_RESOLVE
    if (resolved_ip && first_ipv4[0]) {
-      strncpy(resolved_ip, first_ipv4, INET_ADDRSTRLEN - 1);
-      resolved_ip[INET_ADDRSTRLEN - 1] = '\0';
+      safe_strncpy(resolved_ip, first_ipv4, INET_ADDRSTRLEN);
    }
 
    return 0;  // Not blocked

@@ -42,6 +42,7 @@
 #include "logging.h"
 #include "memory/memory_db.h"
 #include "memory/memory_embeddings.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Constants
@@ -82,7 +83,7 @@ static int meta_get(const char *key, char *out, size_t out_size) {
    if (sqlite3_step(stmt) == SQLITE_ROW) {
       const char *val = (const char *)sqlite3_column_text(stmt, 0);
       if (val)
-         strncpy(out, val, out_size - 1);
+         safe_strncpy(out, val, out_size);
    }
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
@@ -250,7 +251,7 @@ static int recompute_facts_for_user(int user_id) {
             batch_max_id = row_id;
          rows[batch_count].id = row_id;
          if (text)
-            strncpy(rows[batch_count].text, text, RECOMPUTE_TEXT_MAX - 1);
+            safe_strscpy(rows[batch_count].text, text);
          else
             rows[batch_count].text[0] = '\0';
          batch_count++;
@@ -343,7 +344,7 @@ static int recompute_entities_for_user(int user_id) {
             batch_max_id = row_id;
          rows[batch_count].id = row_id;
          if (name)
-            strncpy(rows[batch_count].name, name, sizeof(rows[batch_count].name) - 1);
+            safe_strscpy(rows[batch_count].name, name);
          else
             rows[batch_count].name[0] = '\0';
          batch_count++;
@@ -438,7 +439,7 @@ static int recompute_summaries_for_user(int user_id) {
             batch_max_id = row_id;
          rows[batch_count].id = row_id;
          if (text)
-            strncpy(rows[batch_count].text, text, RECOMPUTE_TEXT_MAX - 1);
+            safe_strscpy(rows[batch_count].text, text);
          else
             rows[batch_count].text[0] = '\0';
          batch_count++;
@@ -527,7 +528,7 @@ static int recompute_document_chunks(void) {
             batch_max_id = row_id;
          rows[batch_count].id = row_id;
          if (text)
-            strncpy(rows[batch_count].text, text, RECOMPUTE_TEXT_MAX - 1);
+            safe_strscpy(rows[batch_count].text, text);
          else
             rows[batch_count].text[0] = '\0';
          batch_count++;

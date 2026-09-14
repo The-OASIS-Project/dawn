@@ -28,6 +28,7 @@
 
 #include "core/text_filter.h" /* CITED_TAG_OPEN/CLOSE(_LEN) — single-sourced grammar */
 #include "memory/memory_citation_internal.h"
+#include "utils/string_utils.h" /* safe_strscpy */
 
 void memory_citation_csv_append(char *buf, size_t bufsz, size_t *len, const char *s) {
    if (buf == NULL || bufsz == 0 || *len >= bufsz - 1) {
@@ -50,8 +51,7 @@ static bool cited_all_add(char seen_ids[][64], int *n_seen, int cap, const char 
       }
    }
    if (*n_seen < cap) {
-      strncpy(seen_ids[*n_seen], id, 63);
-      seen_ids[*n_seen][63] = '\0';
+      safe_strscpy(seen_ids[*n_seen], id);
       (*n_seen)++;
    }
    return true;

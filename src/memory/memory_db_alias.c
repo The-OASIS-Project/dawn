@@ -43,6 +43,7 @@
 #include "memory/memory_db_entities.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_types.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Tokenizer (pure-function helpers shared by Stage 2 and the Jaccard signal)
@@ -415,16 +416,13 @@ int memory_alias_internal_load_entity_full(int user_id,
    const char *etype = (const char *)sqlite3_column_text(stmt, 3);
    const char *canon = (const char *)sqlite3_column_text(stmt, 4);
    if (name) {
-      strncpy(out_entity->name, name, MEMORY_ENTITY_NAME_MAX - 1);
-      out_entity->name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+      safe_strscpy(out_entity->name, name);
    }
    if (etype) {
-      strncpy(out_entity->entity_type, etype, MEMORY_ENTITY_TYPE_MAX - 1);
-      out_entity->entity_type[MEMORY_ENTITY_TYPE_MAX - 1] = '\0';
+      safe_strscpy(out_entity->entity_type, etype);
    }
    if (canon) {
-      strncpy(out_entity->canonical_name, canon, MEMORY_ENTITY_NAME_MAX - 1);
-      out_entity->canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+      safe_strscpy(out_entity->canonical_name, canon);
    }
    out_entity->mention_count = sqlite3_column_int(stmt, 5);
    out_entity->first_seen = (time_t)sqlite3_column_int64(stmt, 6);
@@ -572,13 +570,11 @@ float memory_alias_internal_compute_exclusive_relation_overlap(int user_id,
       const char *rel = (const char *)sqlite3_column_text(stmt, 1);
       if (!rel)
          continue;
-      strncpy(dest[*dest_count].relation, rel, MEMORY_RELATION_MAX - 1);
-      dest[*dest_count].relation[MEMORY_RELATION_MAX - 1] = '\0';
+      safe_strscpy(dest[*dest_count].relation, rel);
       dest[*dest_count].object_entity_id = sqlite3_column_int64(stmt, 2);
       const char *ov = (const char *)sqlite3_column_text(stmt, 3);
       if (ov) {
-         strncpy(dest[*dest_count].object_value, ov, MEMORY_ENTITY_NAME_MAX - 1);
-         dest[*dest_count].object_value[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+         safe_strscpy(dest[*dest_count].object_value, ov);
       } else {
          dest[*dest_count].object_value[0] = '\0';
       }
@@ -691,8 +687,7 @@ static void parse_canonical_alias_list(char *raw,
       if (dup)
          continue;
 
-      strncpy(out[*out_count], canon, MEMORY_ENTITY_NAME_MAX - 1);
-      out[*out_count][MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+      safe_strscpy(out[*out_count], canon);
       (*out_count)++;
    }
 }

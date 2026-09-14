@@ -32,6 +32,7 @@
 
 #include "auth/auth_db_internal.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Audit Logging
@@ -155,22 +156,22 @@ int auth_db_query_audit_log(const auth_log_filter_t *filter,
 
       const char *ev = (const char *)sqlite3_column_text(stmt, 1);
       if (ev) {
-         strncpy(entry.event, ev, sizeof(entry.event) - 1);
+         safe_strscpy(entry.event, ev);
       }
 
       const char *user = (const char *)sqlite3_column_text(stmt, 2);
       if (user) {
-         strncpy(entry.username, user, sizeof(entry.username) - 1);
+         safe_strscpy(entry.username, user);
       }
 
       const char *ip = (const char *)sqlite3_column_text(stmt, 3);
       if (ip) {
-         strncpy(entry.ip_address, ip, sizeof(entry.ip_address) - 1);
+         safe_strscpy(entry.ip_address, ip);
       }
 
       const char *details = (const char *)sqlite3_column_text(stmt, 4);
       if (details) {
-         strncpy(entry.details, details, sizeof(entry.details) - 1);
+         safe_strscpy(entry.details, details);
       }
 
       if (callback(&entry, ctx) != 0) {

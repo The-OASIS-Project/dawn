@@ -49,6 +49,7 @@
 #include "dawn_error.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
+#include "utils/string_utils.h"
 
 #define ATTN_RESULT_MAX 1536
 

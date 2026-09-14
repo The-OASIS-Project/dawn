@@ -28,6 +28,7 @@
 
 #define AUTH_DB_INTERNAL_ALLOWED
 #include "auth/auth_db_internal.h"
+#include "utils/string_utils.h"
 #undef AUTH_DB_INTERNAL_ALLOWED
 
 #include <errno.h>
@@ -292,8 +293,7 @@ int blob_store_find_by_hash(blob_store_handle_t handle,
    if (rc == SQLITE_ROW) {
       const char *id = (const char *)sqlite3_column_text(t->stmts->find_by_hash, 0);
       if (id) {
-         strncpy(id_out, id, BLOB_ID_LEN - 1);
-         id_out[BLOB_ID_LEN - 1] = '\0';
+         safe_strncpy(id_out, id, BLOB_ID_LEN);
          result = BLOB_STORE_SUCCESS;
       }
    }
@@ -339,8 +339,7 @@ int blob_store_save(blob_store_handle_t handle,
    if (content_hash && t->has_content_hash && t->stmts->find_by_hash) {
       char existing[BLOB_ID_LEN];
       if (blob_store_find_by_hash(handle, user_id, content_hash, existing) == BLOB_STORE_SUCCESS) {
-         strncpy(id_out, existing, BLOB_ID_LEN - 1);
-         id_out[BLOB_ID_LEN - 1] = '\0';
+         safe_strncpy(id_out, existing, BLOB_ID_LEN);
          return BLOB_STORE_SUCCESS;
       }
    }
@@ -427,8 +426,7 @@ int blob_store_save(blob_store_handle_t handle,
    if (rc == SQLITE_CONSTRAINT && content_hash && t->has_content_hash) {
       char existing[BLOB_ID_LEN];
       if (blob_store_find_by_hash(handle, user_id, content_hash, existing) == BLOB_STORE_SUCCESS) {
-         strncpy(id_out, existing, BLOB_ID_LEN - 1);
-         id_out[BLOB_ID_LEN - 1] = '\0';
+         safe_strncpy(id_out, existing, BLOB_ID_LEN);
          return BLOB_STORE_SUCCESS;
       }
    }
@@ -478,8 +476,7 @@ int blob_store_get_path(blob_store_handle_t handle,
 
    char filename_buf[BLOB_FILENAME_MAX];
    if (filename && blob_validate_db_filename(filename)) {
-      strncpy(filename_buf, filename, sizeof(filename_buf) - 1);
-      filename_buf[sizeof(filename_buf) - 1] = '\0';
+      safe_strscpy(filename_buf, filename);
    } else {
       sqlite3_reset(t->stmts->get_file);
       AUTH_DB_UNLOCK();
@@ -487,8 +484,7 @@ int blob_store_get_path(blob_store_handle_t handle,
    }
 
    if (mime_out && mime) {
-      strncpy(mime_out, mime, BLOB_MIME_MAX - 1);
-      mime_out[BLOB_MIME_MAX - 1] = '\0';
+      safe_strncpy(mime_out, mime, BLOB_MIME_MAX);
    }
    sqlite3_reset(t->stmts->get_file);
 
@@ -528,16 +524,13 @@ int blob_store_get_metadata(blob_store_handle_t handle, const char *id, blob_met
 
    /* Columns: id,user_id,mime,size,filename,source,retention,created_at,last_accessed. */
    const char *cid = (const char *)sqlite3_column_text(t->stmts->get, 0);
-   strncpy(out->id, cid ? cid : "", BLOB_ID_LEN - 1);
-   out->id[BLOB_ID_LEN - 1] = '\0';
+   safe_strscpy(out->id, cid ? cid : "");
    out->user_id = sqlite3_column_int(t->stmts->get, 1);
    const char *mime = (const char *)sqlite3_column_text(t->stmts->get, 2);
-   strncpy(out->mime_type, mime ? mime : "", BLOB_MIME_MAX - 1);
-   out->mime_type[BLOB_MIME_MAX - 1] = '\0';
+   safe_strscpy(out->mime_type, mime ? mime : "");
    out->size = (size_t)sqlite3_column_int64(t->stmts->get, 3);
    const char *fn = (const char *)sqlite3_column_text(t->stmts->get, 4);
-   strncpy(out->filename, fn ? fn : "", BLOB_FILENAME_MAX - 1);
-   out->filename[BLOB_FILENAME_MAX - 1] = '\0';
+   safe_strscpy(out->filename, fn ? fn : "");
    out->source = sqlite3_column_int(t->stmts->get, 5);
    out->retention_policy = (blob_retention_t)sqlite3_column_int(t->stmts->get, 6);
    out->created_at = (time_t)sqlite3_column_int64(t->stmts->get, 7);
@@ -547,8 +540,7 @@ int blob_store_get_metadata(blob_store_handle_t handle, const char *id, blob_met
    if (t->has_filename_original) {
       const char *fo = (const char *)sqlite3_column_text(t->stmts->get, 9);
       if (fo) {
-         strncpy(out->filename_original, fo, BLOB_FILENAME_ORIGINAL_MAX - 1);
-         out->filename_original[BLOB_FILENAME_ORIGINAL_MAX - 1] = '\0';
+         safe_strscpy(out->filename_original, fo);
       }
    }
 
@@ -613,7 +605,7 @@ int blob_store_delete(blob_store_handle_t handle, const char *id, int user_id) {
 
    char filename_buf[BLOB_FILENAME_MAX] = { 0 };
    if (filename && blob_validate_db_filename(filename)) {
-      strncpy(filename_buf, filename, sizeof(filename_buf) - 1);
+      safe_strscpy(filename_buf, filename);
    }
    sqlite3_reset(t->stmts->get_file);
 
@@ -687,8 +679,7 @@ int blob_store_delete_user(blob_store_handle_t handle, int user_id) {
          filenames = grown;
          cap = new_cap;
       }
-      strncpy(filenames[n], fn, BLOB_FILENAME_MAX - 1);
-      filenames[n][BLOB_FILENAME_MAX - 1] = '\0';
+      safe_strscpy(filenames[n], fn);
       n++;
    }
    sqlite3_finalize(sel);
@@ -749,8 +740,7 @@ int blob_store_cleanup(blob_store_handle_t handle, int *deleted_out) {
              batch < BLOB_CLEANUP_BATCH_SIZE) {
          const char *fn = (const char *)sqlite3_column_text(t->stmts->get_expired_ids, 1);
          if (fn && blob_validate_db_filename(fn)) {
-            strncpy(filenames[batch], fn, BLOB_FILENAME_MAX - 1);
-            filenames[batch][BLOB_FILENAME_MAX - 1] = '\0';
+            safe_strscpy(filenames[batch], fn);
             batch++;
          }
       }
@@ -796,10 +786,8 @@ int blob_store_cleanup(blob_store_handle_t handle, int *deleted_out) {
             const char *fn = (const char *)sqlite3_column_text(t->stmts->get_cache_lru_ids, 1);
             int64_t row_size = sqlite3_column_int64(t->stmts->get_cache_lru_ids, 2);
             if (cid && fn) {
-               strncpy(cache_ids[evict], cid, BLOB_ID_LEN - 1);
-               cache_ids[evict][BLOB_ID_LEN - 1] = '\0';
-               strncpy(cache_filenames[evict], fn, BLOB_FILENAME_MAX - 1);
-               cache_filenames[evict][BLOB_FILENAME_MAX - 1] = '\0';
+               safe_strscpy(cache_ids[evict], cid);
+               safe_strscpy(cache_filenames[evict], fn);
                evict++;
                cache_bytes -= row_size;
             }
@@ -866,10 +854,8 @@ int blob_store_cleanup_orphans(blob_store_handle_t handle, int grace_sec, int *d
          const char *cid = (const char *)sqlite3_column_text(t->stmts->get_orphan_ids, 0);
          const char *fn = (const char *)sqlite3_column_text(t->stmts->get_orphan_ids, 1);
          if (cid && fn && blob_validate_db_filename(fn)) {
-            strncpy(ids[batch], cid, BLOB_ID_LEN - 1);
-            ids[batch][BLOB_ID_LEN - 1] = '\0';
-            strncpy(filenames[batch], fn, BLOB_FILENAME_MAX - 1);
-            filenames[batch][BLOB_FILENAME_MAX - 1] = '\0';
+            safe_strscpy(ids[batch], cid);
+            safe_strscpy(filenames[batch], fn);
             batch++;
          }
       }

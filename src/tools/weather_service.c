@@ -35,6 +35,7 @@
 #include "core/curl_buffer.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 // Module state (thread-safe with mutex protection)
 static int module_initialized = 0;
@@ -323,7 +324,7 @@ static int geocode_location(const char *location,
       const char *state_start = comma + 1;
       while (*state_start == ' ')
          state_start++;
-      strncpy(state_filter, state_start, sizeof(state_filter) - 1);
+      safe_strscpy(state_filter, state_start);
       // Trim trailing whitespace from state
       char *end = state_filter + strlen(state_filter) - 1;
       while (end > state_filter && *end == ' ')
@@ -333,8 +334,7 @@ static int geocode_location(const char *location,
       const char *expanded = expand_state_abbrev(state_filter);
       if (expanded) {
          OLOG_INFO("Geocoding: Expanded state '%s' to '%s'", state_filter, expanded);
-         strncpy(state_filter, expanded, sizeof(state_filter) - 1);
-         state_filter[sizeof(state_filter) - 1] = '\0';
+         safe_strscpy(state_filter, expanded);
       }
    }
 

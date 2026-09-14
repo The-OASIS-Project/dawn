@@ -26,6 +26,8 @@
 #include <ctype.h>
 #include <string.h>
 
+#include "utils/string_utils.h"
+
 void str_fuzzy_tolower(char *dst, const char *src, size_t max_len) {
    if (!dst || max_len == 0) {
       return;
@@ -59,8 +61,7 @@ int str_fuzzy_score(const char *haystack_lower, const char *needle_lower) {
    /* Word-by-word match */
    int score = 0;
    char needle_copy[256];
-   strncpy(needle_copy, needle_lower, sizeof(needle_copy) - 1);
-   needle_copy[sizeof(needle_copy) - 1] = '\0';
+   safe_strscpy(needle_copy, needle_lower);
 
    char *saveptr;
    char *token = strtok_r(needle_copy, " ", &saveptr);

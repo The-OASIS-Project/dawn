@@ -33,6 +33,7 @@
 
 #include "auth/auth_db_internal.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Internal Helpers
@@ -53,16 +54,14 @@ static void extract_session_summary(sqlite3_stmt *stmt, auth_session_summary_t *
    /* Only copy token prefix for security */
    const char *tok = (const char *)sqlite3_column_text(stmt, 0);
    if (tok) {
-      strncpy(session->token_prefix, tok, AUTH_TOKEN_PREFIX_LEN);
-      session->token_prefix[AUTH_TOKEN_PREFIX_LEN] = '\0';
+      safe_strscpy(session->token_prefix, tok);
    }
 
    session->user_id = sqlite3_column_int(stmt, 1);
 
    const char *uname = (const char *)sqlite3_column_text(stmt, 2);
    if (uname) {
-      strncpy(session->username, uname, AUTH_USERNAME_MAX - 1);
-      session->username[AUTH_USERNAME_MAX - 1] = '\0';
+      safe_strscpy(session->username, uname);
    }
 
    session->created_at = (time_t)sqlite3_column_int64(stmt, 3);
@@ -70,14 +69,12 @@ static void extract_session_summary(sqlite3_stmt *stmt, auth_session_summary_t *
 
    const char *ip = (const char *)sqlite3_column_text(stmt, 5);
    if (ip) {
-      strncpy(session->ip_address, ip, AUTH_IP_MAX - 1);
-      session->ip_address[AUTH_IP_MAX - 1] = '\0';
+      safe_strscpy(session->ip_address, ip);
    }
 
    const char *ua = (const char *)sqlite3_column_text(stmt, 6);
    if (ua) {
-      strncpy(session->user_agent, ua, AUTH_USER_AGENT_MAX - 1);
-      session->user_agent[AUTH_USER_AGENT_MAX - 1] = '\0';
+      safe_strscpy(session->user_agent, ua);
    }
 }
 
@@ -151,16 +148,14 @@ int auth_db_get_session(const char *token, auth_session_t *session_out) {
    if (rc == SQLITE_ROW) {
       const char *tok = (const char *)sqlite3_column_text(s_db.stmt_get_session, 0);
       if (tok) {
-         strncpy(session_out->token, tok, AUTH_TOKEN_LEN - 1);
-         session_out->token[AUTH_TOKEN_LEN - 1] = '\0';
+         safe_strscpy(session_out->token, tok);
       }
 
       session_out->user_id = sqlite3_column_int(s_db.stmt_get_session, 1);
 
       const char *uname = (const char *)sqlite3_column_text(s_db.stmt_get_session, 2);
       if (uname) {
-         strncpy(session_out->username, uname, AUTH_USERNAME_MAX - 1);
-         session_out->username[AUTH_USERNAME_MAX - 1] = '\0';
+         safe_strscpy(session_out->username, uname);
       }
 
       session_out->is_admin = sqlite3_column_int(s_db.stmt_get_session, 3) != 0;
@@ -170,16 +165,14 @@ int auth_db_get_session(const char *token, auth_session_t *session_out) {
 
       const char *ip = (const char *)sqlite3_column_text(s_db.stmt_get_session, 7);
       if (ip) {
-         strncpy(session_out->ip_address, ip, AUTH_IP_MAX - 1);
-         session_out->ip_address[AUTH_IP_MAX - 1] = '\0';
+         safe_strscpy(session_out->ip_address, ip);
       } else {
          session_out->ip_address[0] = '\0';
       }
 
       const char *ua = (const char *)sqlite3_column_text(s_db.stmt_get_session, 8);
       if (ua) {
-         strncpy(session_out->user_agent, ua, AUTH_USER_AGENT_MAX - 1);
-         session_out->user_agent[AUTH_USER_AGENT_MAX - 1] = '\0';
+         safe_strscpy(session_out->user_agent, ua);
       } else {
          session_out->user_agent[0] = '\0';
       }
@@ -263,7 +256,7 @@ int auth_db_delete_session_by_prefix(const char *prefix) {
 
    /* Bind only the first AUTH_TOKEN_PREFIX_LEN characters */
    char prefix_buf[AUTH_TOKEN_PREFIX_LEN + 1] = { 0 };
-   strncpy(prefix_buf, prefix, AUTH_TOKEN_PREFIX_LEN);
+   safe_strscpy(prefix_buf, prefix);
    sqlite3_bind_text(stmt, 1, prefix_buf, AUTH_TOKEN_PREFIX_LEN, SQLITE_STATIC);
 
    rc = sqlite3_step(stmt);
@@ -312,7 +305,7 @@ bool auth_db_session_belongs_to_user(const char *prefix, int user_id) {
    }
 
    char prefix_buf[AUTH_TOKEN_PREFIX_LEN + 1] = { 0 };
-   strncpy(prefix_buf, prefix, AUTH_TOKEN_PREFIX_LEN);
+   safe_strscpy(prefix_buf, prefix);
    sqlite3_bind_text(stmt, 1, prefix_buf, AUTH_TOKEN_PREFIX_LEN, SQLITE_STATIC);
    sqlite3_bind_int(stmt, 2, user_id);
 

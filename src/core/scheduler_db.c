@@ -32,6 +32,7 @@
 #include "auth/auth_db_internal.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * String Conversion Tables
@@ -125,8 +126,7 @@ static void read_text_col(sqlite3_stmt *stmt, int idx, char *dst, size_t dst_siz
    if (!src || !src[0] || dst_size == 0) {
       return;
    }
-   strncpy(dst, src, dst_size - 1);
-   dst[dst_size - 1] = '\0';
+   safe_strncpy(dst, src, dst_size);
 }
 
 static void extract_event_row(sqlite3_stmt *stmt, sched_event_t *event) {
@@ -881,11 +881,11 @@ static int briefing_steps_read_unlocked(int64_t event_id, sched_briefing_step_t 
       const unsigned char *tact = sqlite3_column_text(stmt, 1);
       const unsigned char *tval = sqlite3_column_text(stmt, 2);
       if (tname)
-         strncpy(out[n].tool_name, (const char *)tname, SCHED_TOOL_NAME_MAX - 1);
+         safe_strscpy(out[n].tool_name, (const char *)tname);
       if (tact)
-         strncpy(out[n].tool_action, (const char *)tact, SCHED_TOOL_NAME_MAX - 1);
+         safe_strscpy(out[n].tool_action, (const char *)tact);
       if (tval)
-         strncpy(out[n].tool_value, (const char *)tval, SCHED_TOOL_VALUE_MAX - 1);
+         safe_strscpy(out[n].tool_value, (const char *)tval);
       n++;
    }
    sqlite3_finalize(stmt);
@@ -935,13 +935,13 @@ int scheduler_db_briefing_steps_update(int64_t event_id,
          /* Capture the legacy single-tool fields for append materialization. */
          const unsigned char *ltn = sqlite3_column_text(sel, 3);
          if (ltn && ltn[0]) {
-            strncpy(legacy_step.tool_name, (const char *)ltn, SCHED_TOOL_NAME_MAX - 1);
+            safe_strscpy(legacy_step.tool_name, (const char *)ltn);
             const unsigned char *lta = sqlite3_column_text(sel, 4);
             const unsigned char *ltv = sqlite3_column_text(sel, 5);
             if (lta)
-               strncpy(legacy_step.tool_action, (const char *)lta, SCHED_TOOL_NAME_MAX - 1);
+               safe_strscpy(legacy_step.tool_action, (const char *)lta);
             if (ltv)
-               strncpy(legacy_step.tool_value, (const char *)ltv, SCHED_TOOL_VALUE_MAX - 1);
+               safe_strscpy(legacy_step.tool_value, (const char *)ltv);
             have_legacy = true;
          }
       }
@@ -1122,11 +1122,11 @@ int scheduler_db_briefing_steps_list(int64_t event_id,
       const unsigned char *tact = sqlite3_column_text(stmt, 1);
       const unsigned char *tval = sqlite3_column_text(stmt, 2);
       if (tname)
-         strncpy(out[n].tool_name, (const char *)tname, SCHED_TOOL_NAME_MAX - 1);
+         safe_strscpy(out[n].tool_name, (const char *)tname);
       if (tact)
-         strncpy(out[n].tool_action, (const char *)tact, SCHED_TOOL_NAME_MAX - 1);
+         safe_strscpy(out[n].tool_action, (const char *)tact);
       if (tval)
-         strncpy(out[n].tool_value, (const char *)tval, SCHED_TOOL_VALUE_MAX - 1);
+         safe_strscpy(out[n].tool_value, (const char *)tval);
       n++;
    }
    sqlite3_finalize(stmt);
@@ -1158,11 +1158,11 @@ int scheduler_db_insert_with_step_clone(sched_event_t *next,
          const unsigned char *tact = sqlite3_column_text(sel, 1);
          const unsigned char *tval = sqlite3_column_text(sel, 2);
          if (tname)
-            strncpy(steps[step_count].tool_name, (const char *)tname, SCHED_TOOL_NAME_MAX - 1);
+            safe_strscpy(steps[step_count].tool_name, (const char *)tname);
          if (tact)
-            strncpy(steps[step_count].tool_action, (const char *)tact, SCHED_TOOL_NAME_MAX - 1);
+            safe_strscpy(steps[step_count].tool_action, (const char *)tact);
          if (tval)
-            strncpy(steps[step_count].tool_value, (const char *)tval, SCHED_TOOL_VALUE_MAX - 1);
+            safe_strscpy(steps[step_count].tool_value, (const char *)tval);
          step_count++;
       }
    }
@@ -1222,11 +1222,11 @@ int scheduler_db_cancel_and_insert_next(int64_t cancel_id,
             const unsigned char *tact = sqlite3_column_text(sel, 1);
             const unsigned char *tval = sqlite3_column_text(sel, 2);
             if (tname)
-               strncpy(steps[step_count].tool_name, (const char *)tname, SCHED_TOOL_NAME_MAX - 1);
+               safe_strscpy(steps[step_count].tool_name, (const char *)tname);
             if (tact)
-               strncpy(steps[step_count].tool_action, (const char *)tact, SCHED_TOOL_NAME_MAX - 1);
+               safe_strscpy(steps[step_count].tool_action, (const char *)tact);
             if (tval)
-               strncpy(steps[step_count].tool_value, (const char *)tval, SCHED_TOOL_VALUE_MAX - 1);
+               safe_strscpy(steps[step_count].tool_value, (const char *)tval);
             step_count++;
          }
       }
@@ -1300,11 +1300,11 @@ int scheduler_db_briefing_steps_list_many(const int64_t *event_ids,
          const unsigned char *tact = sqlite3_column_text(stmt, 1);
          const unsigned char *tval = sqlite3_column_text(stmt, 2);
          if (tname)
-            strncpy(base[n].tool_name, (const char *)tname, SCHED_TOOL_NAME_MAX - 1);
+            safe_strscpy(base[n].tool_name, (const char *)tname);
          if (tact)
-            strncpy(base[n].tool_action, (const char *)tact, SCHED_TOOL_NAME_MAX - 1);
+            safe_strscpy(base[n].tool_action, (const char *)tact);
          if (tval)
-            strncpy(base[n].tool_value, (const char *)tval, SCHED_TOOL_VALUE_MAX - 1);
+            safe_strscpy(base[n].tool_value, (const char *)tval);
          n++;
       }
       out_counts[i] = n;

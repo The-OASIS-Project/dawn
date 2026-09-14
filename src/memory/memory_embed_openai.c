@@ -33,6 +33,7 @@
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_embeddings.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * State
@@ -53,21 +54,20 @@ static int openai_init(const char *endpoint, const char *model, const char *api_
    }
 
    if (endpoint && endpoint[0]) {
-      strncpy(s_endpoint, endpoint, sizeof(s_endpoint) - 1);
+      safe_strscpy(s_endpoint, endpoint);
    } else {
-      strncpy(s_endpoint, "https://api.openai.com", sizeof(s_endpoint) - 1);
+      safe_strscpy(s_endpoint, "https://api.openai.com");
    }
    s_endpoint[sizeof(s_endpoint) - 1] = '\0';
 
    if (model && model[0]) {
-      strncpy(s_model, model, sizeof(s_model) - 1);
+      safe_strscpy(s_model, model);
    } else {
-      strncpy(s_model, "text-embedding-3-small", sizeof(s_model) - 1);
+      safe_strscpy(s_model, "text-embedding-3-small");
    }
    s_model[sizeof(s_model) - 1] = '\0';
 
-   strncpy(s_api_key, api_key, sizeof(s_api_key) - 1);
-   s_api_key[sizeof(s_api_key) - 1] = '\0';
+   safe_strscpy(s_api_key, api_key);
 
    OLOG_INFO("memory_embed_openai: initialized (endpoint: %s, model: %s)", s_endpoint, s_model);
    return 0;

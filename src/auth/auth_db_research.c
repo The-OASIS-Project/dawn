@@ -47,6 +47,7 @@
 
 #include "auth/auth_db_internal.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* Column projections, kept adjacent to the unpackers that read them. */
 #define RESEARCH_RUN_COLS                                                           \
@@ -71,8 +72,7 @@
 static void res_copy_text(sqlite3_stmt *st, int col, char *dst, size_t n) {
    const char *s = (const char *)sqlite3_column_text(st, col);
    if (s && n > 0) {
-      strncpy(dst, s, n - 1);
-      dst[n - 1] = '\0';
+      safe_strncpy(dst, s, n);
    } else if (n > 0) {
       dst[0] = '\0';
    }
@@ -659,15 +659,15 @@ int research_db_claim_add(int64_t run_id,
    research_claim_t c;
    memset(&c, 0, sizeof(c));
    c.question_id = question_id;
-   strncpy(c.claim, claim, sizeof(c.claim) - 1);
+   safe_strscpy(c.claim, claim);
    if (source_url) {
-      strncpy(c.source_url, source_url, sizeof(c.source_url) - 1);
+      safe_strscpy(c.source_url, source_url);
    }
    if (source_kind) {
-      strncpy(c.source_kind, source_kind, sizeof(c.source_kind) - 1);
+      safe_strscpy(c.source_kind, source_kind);
    }
    if (quote) {
-      strncpy(c.quote, quote, sizeof(c.quote) - 1);
+      safe_strscpy(c.quote, quote);
    }
    c.round = round;
    return research_db_claims_add(run_id, &c, 1);

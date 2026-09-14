@@ -140,7 +140,7 @@ int url_is_blocked(const char *url);
  * TOCTOU/DNS rebinding attacks).
  *
  * @param url URL to check
- * @param resolved_ip Buffer for resolved IP (at least INET6_ADDRSTRLEN bytes, can be NULL)
+ * @param resolved_ip Buffer for resolved IP (at least INET_ADDRSTRLEN bytes, can be NULL)
  * @param host_out Buffer for extracted hostname (can be NULL)
  * @param host_out_size Size of host_out buffer
  * @param port_out Receives extracted port number (can be NULL)

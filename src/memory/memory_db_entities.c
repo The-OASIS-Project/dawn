@@ -36,6 +36,7 @@
 #include "memory/memory_db.h"
 #include "memory/memory_db_internal.h"
 #include "memory/memory_embeddings.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Canonical-name normalisation
@@ -74,20 +75,17 @@ static void populate_entity_from_row(sqlite3_stmt *stmt, memory_entity_t *entity
 
    const char *name = (const char *)sqlite3_column_text(stmt, 2);
    if (name) {
-      strncpy(entity->name, name, MEMORY_ENTITY_NAME_MAX - 1);
-      entity->name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+      safe_strscpy(entity->name, name);
    }
 
    const char *type = (const char *)sqlite3_column_text(stmt, 3);
    if (type) {
-      strncpy(entity->entity_type, type, MEMORY_ENTITY_TYPE_MAX - 1);
-      entity->entity_type[MEMORY_ENTITY_TYPE_MAX - 1] = '\0';
+      safe_strscpy(entity->entity_type, type);
    }
 
    const char *cname = (const char *)sqlite3_column_text(stmt, 4);
    if (cname) {
-      strncpy(entity->canonical_name, cname, MEMORY_ENTITY_NAME_MAX - 1);
-      entity->canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+      safe_strscpy(entity->canonical_name, cname);
    }
 
    entity->mention_count = sqlite3_column_int(stmt, 5);
@@ -590,8 +588,7 @@ int memory_db_entity_get_embeddings(int user_id,
       const char *cname = (const char *)sqlite3_column_text(s_db.stmt_memory_entity_get_embeddings,
                                                             1);
       if (cname) {
-         strncpy(out_names[count], cname, MEMORY_ENTITY_NAME_MAX - 1);
-         out_names[count][MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+         safe_strscpy(out_names[count], cname);
       } else {
          out_names[count][0] = '\0';
       }
@@ -599,8 +596,7 @@ int memory_db_entity_get_embeddings(int user_id,
       const char *etype = (const char *)sqlite3_column_text(s_db.stmt_memory_entity_get_embeddings,
                                                             2);
       if (etype) {
-         strncpy(out_types[count], etype, MEMORY_ENTITY_TYPE_MAX - 1);
-         out_types[count][MEMORY_ENTITY_TYPE_MAX - 1] = '\0';
+         safe_strscpy(out_types[count], etype);
       } else {
          out_types[count][0] = '\0';
       }

@@ -39,6 +39,7 @@
 #include "llm/sse_parser.h"
 #include "logging.h"
 #include "ui/metrics.h"
+#include "utils/string_utils.h"
 #ifdef ENABLE_WEBUI
 #include "webui/webui_server.h"
 #endif
@@ -777,8 +778,7 @@ static char *llm_claude_streaming_internal(struct json_object *conversation_hist
 
          // Copy model to local buffer immediately (current_config.model may be dangling pointer)
          if (config_valid && current_config.model && current_config.model[0] != '\0') {
-            strncpy(model_buf_followup, current_config.model, sizeof(model_buf_followup) - 1);
-            model_buf_followup[sizeof(model_buf_followup) - 1] = '\0';
+            safe_strscpy(model_buf_followup, current_config.model);
          }
 
          // Create single-item array for tool result vision
@@ -1070,7 +1070,7 @@ int llm_claude_streaming_single_shot(struct json_object *conversation_history,
    result->text = llm_stream_get_response(stream_ctx);
 
    if (stream_ctx->finish_reason[0] != '\0') {
-      strncpy(result->finish_reason, stream_ctx->finish_reason, sizeof(result->finish_reason) - 1);
+      safe_strscpy(result->finish_reason, stream_ctx->finish_reason);
    }
 
    /* Extract thinking content and signature for follow-up history */

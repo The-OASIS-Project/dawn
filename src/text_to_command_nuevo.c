@@ -33,6 +33,7 @@
 #include "core/device_types.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
+#include "utils/string_utils.h"
 
 void normalize_for_matching(const char *input, char *output, size_t size) {
    if (input == NULL || output == NULL || size == 0) {
@@ -135,13 +136,11 @@ int try_tool_registry_match(const char *input,
          }
 
          const char *json_str = json_object_to_json_string(cmd_json);
-         strncpy(out_command, json_str, command_size - 1);
-         out_command[command_size - 1] = '\0';
+         safe_strncpy(out_command, json_str, command_size);
          json_object_put(cmd_json);
 
          if (out_topic && topic_size > 0) {
-            strncpy(out_topic, tool->topic, topic_size - 1);
-            out_topic[topic_size - 1] = '\0';
+            safe_strncpy(out_topic, tool->topic, topic_size);
          }
 
          OLOG_INFO("TREG MATCH: \"%s\" → tool=%s, action=%s, value=%s", input, tool->name, action,

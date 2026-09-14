@@ -28,6 +28,7 @@
 #include <string.h>
 
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* Circular buffer for queued items */
 static queued_input_t g_queue[INPUT_QUEUE_MAX_ITEMS];
@@ -122,8 +123,7 @@ int input_queue_push(input_source_t source, const char *text) {
 
    /* Add new item at tail */
    g_queue[g_tail].source = source;
-   strncpy(g_queue[g_tail].text, text, INPUT_QUEUE_MAX_TEXT);
-   g_queue[g_tail].text[INPUT_QUEUE_MAX_TEXT] = '\0';
+   safe_strscpy(g_queue[g_tail].text, text);
 
    /* Advance tail pointer */
    g_tail = (g_tail + 1) % INPUT_QUEUE_MAX_ITEMS;

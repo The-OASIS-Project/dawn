@@ -56,6 +56,7 @@
 #include "llm/llm_local_provider.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 #include "webui/webui_always_on.h"
 #include "webui/webui_attention.h"
 #include "webui/webui_contacts.h"
@@ -475,8 +476,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
 
          /* Track old model + type for context cache invalidation */
          char old_model[LLM_MODEL_NAME_MAX];
-         strncpy(old_model, config.model, sizeof(old_model) - 1);
-         old_model[sizeof(old_model) - 1] = '\0';
+         safe_strscpy(old_model, config.model);
          int old_type = config.type;
 
          /* Parse type (local/cloud) */
@@ -539,8 +539,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                /* Validate model name to prevent injection attacks */
                if (llm_local_is_valid_model_name(new_model)) {
                   has_changes = true;
-                  strncpy(config.model, new_model, sizeof(config.model) - 1);
-                  config.model[sizeof(config.model) - 1] = '\0';
+                  safe_strscpy(config.model, new_model);
                   /* "requested", not "set": under the OpenRouter gateway a bare
                    * (non vendor/model) id is dropped below and the resolver
                    * substitutes the gateway default — so this value is not
@@ -642,9 +641,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                      }
                   }
                   has_changes = true;
-                  strncpy(config.thinking_mode, new_thinking_mode,
-                          sizeof(config.thinking_mode) - 1);
-                  config.thinking_mode[sizeof(config.thinking_mode) - 1] = '\0';
+                  safe_strscpy(config.thinking_mode, new_thinking_mode);
                   OLOG_INFO("WebUI: Session thinking_mode set to '%s'", config.thinking_mode);
                } else {
                   OLOG_WARNING("WebUI: Rejected invalid thinking_mode '%s' from client",
@@ -664,8 +661,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                    strcmp(new_effort, "medium") == 0 || strcmp(new_effort, "high") == 0 ||
                    strcmp(new_effort, "xhigh") == 0) {
                   has_changes = true;
-                  strncpy(config.reasoning_effort, new_effort, sizeof(config.reasoning_effort) - 1);
-                  config.reasoning_effort[sizeof(config.reasoning_effort) - 1] = '\0';
+                  safe_strscpy(config.reasoning_effort, new_effort);
                   OLOG_INFO("WebUI: Session reasoning_effort set to '%s'", config.reasoning_effort);
                } else {
                   OLOG_WARNING("WebUI: Rejected invalid reasoning_effort '%s' from client",
@@ -841,8 +837,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                   conn->session_was_reconnected = true;
                   existing->client_data = conn;
                   existing->disconnected = false;
-                  strncpy(conn->session_token, token, WEBUI_SESSION_TOKEN_LEN - 1);
-                  conn->session_token[WEBUI_SESSION_TOKEN_LEN - 1] = '\0';
+                  safe_strscpy(conn->session_token, token);
 
                   /* Restore connection capabilities from init payload */
                   conn->use_opus = check_opus_capability(payload);

@@ -44,6 +44,7 @@
 #include "llm/sse_parser.h"
 #include "logging.h"
 #include "ui/metrics.h"
+#include "utils/string_utils.h"
 #ifdef ENABLE_WEBUI
 #include "webui/webui_server.h"
 #endif
@@ -846,7 +847,7 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
             char model_buf[LLM_MODEL_NAME_MAX] = "";
             bool config_ok = (llm_get_current_resolved_config(&config) == 0);
             if (config_ok && config.model && config.model[0] != '\0') {
-               strncpy(model_buf, config.model, sizeof(model_buf) - 1);
+               safe_strscpy(model_buf, config.model);
             }
 
             const char *fresh_url = config_ok ? config.endpoint : base_url;
@@ -990,8 +991,7 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
          bool config_valid = (llm_get_current_resolved_config(&current_config) == 0);
 
          if (config_valid && current_config.model && current_config.model[0] != '\0') {
-            strncpy(model_buf_followup, current_config.model, sizeof(model_buf_followup) - 1);
-            model_buf_followup[sizeof(model_buf_followup) - 1] = '\0';
+            safe_strscpy(model_buf_followup, current_config.model);
          }
 
          if (config_valid && current_config.type != LLM_LOCAL &&
@@ -1350,7 +1350,7 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
    result->reasoning_tokens = stream_ctx->reasoning_tokens;
 
    if (stream_ctx->finish_reason[0] != '\0') {
-      strncpy(result->finish_reason, stream_ctx->finish_reason, sizeof(result->finish_reason) - 1);
+      safe_strscpy(result->finish_reason, stream_ctx->finish_reason);
    }
 
 #ifdef ENABLE_WEBUI

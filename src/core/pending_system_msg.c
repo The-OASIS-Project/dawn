@@ -26,6 +26,7 @@
 #include <string.h>
 
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* Fixed ring buffer of deferred messages. */
 static char g_queue[PENDING_SYSMSG_MAX_ITEMS][PENDING_SYSMSG_MAX_TEXT + 1];
@@ -57,8 +58,7 @@ int pending_sysmsg_push(const char *text) {
       dropped = 1;
    }
 
-   strncpy(g_queue[g_tail], text, PENDING_SYSMSG_MAX_TEXT);
-   g_queue[g_tail][PENDING_SYSMSG_MAX_TEXT] = '\0';
+   safe_strscpy(g_queue[g_tail], text);
    g_tail = (g_tail + 1) % PENDING_SYSMSG_MAX_ITEMS;
    g_count++;
 
@@ -86,8 +86,7 @@ int pending_sysmsg_pop(char *out, size_t out_size) {
    pthread_mutex_lock(&g_mutex);
 
    if (g_count > 0) {
-      strncpy(out, g_queue[g_head], out_size - 1);
-      out[out_size - 1] = '\0';
+      safe_strncpy(out, g_queue[g_head], out_size);
       g_head = (g_head + 1) % PENDING_SYSMSG_MAX_ITEMS;
       g_count--;
       result = 1;

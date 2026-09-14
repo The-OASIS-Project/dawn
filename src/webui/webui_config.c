@@ -56,6 +56,7 @@
 #include "logging.h"
 #include "tools/messaging_tool.h"
 #include "tools/tool_registry.h"
+#include "utils/string_utils.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_music.h"
 #include "webui/webui_phone_config.h"
@@ -293,7 +294,7 @@ void handle_get_config(ws_connection_t *conn) {
       if (json_object_object_get_ex(obj, key, &_val)) {   \
          const char *_str = json_object_get_string(_val); \
          if (_str) {                                      \
-            strncpy(dest, _str, sizeof(dest) - 1);        \
+            safe_strscpy(dest, _str);                     \
             dest[sizeof(dest) - 1] = '\0';                \
          }                                                \
       }                                                   \
@@ -452,7 +453,7 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
              strcmp(config->llm.cloud.provider, "openrouter") != 0) {
             OLOG_WARNING("WebUI: Invalid cloud.provider '%s', using 'openai'",
                          config->llm.cloud.provider);
-            strncpy(config->llm.cloud.provider, "openai", sizeof(config->llm.cloud.provider) - 1);
+            safe_strscpy(config->llm.cloud.provider, "openai");
          }
          JSON_TO_CONFIG_STR(cloud, "endpoint", config->llm.cloud.endpoint);
          JSON_TO_CONFIG_BOOL(cloud, "vision_enabled", config->llm.cloud.vision_enabled);
@@ -467,8 +468,7 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
              strcmp(config->llm.cloud.openai_use_responses_api, "never") != 0) {
             OLOG_WARNING("WebUI: Invalid openai_use_responses_api '%s', using 'auto'",
                          config->llm.cloud.openai_use_responses_api);
-            strncpy(config->llm.cloud.openai_use_responses_api, "auto",
-                    sizeof(config->llm.cloud.openai_use_responses_api) - 1);
+            safe_strscpy(config->llm.cloud.openai_use_responses_api, "auto");
          }
 
          /* Parse model lists from settings UI */
@@ -481,10 +481,9 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
                struct json_object *model_obj = json_object_array_get_idx(openai_models_arr, i);
                const char *model = json_object_get_string(model_obj);
                if (model && model[0] != '\0') {
-                  strncpy(config->llm.cloud.openai_models[config->llm.cloud.openai_models_count],
-                          model, LLM_CLOUD_MODEL_NAME_MAX - 1);
-                  config->llm.cloud.openai_models[config->llm.cloud.openai_models_count]
-                                                 [LLM_CLOUD_MODEL_NAME_MAX - 1] = '\0';
+                  safe_strscpy(
+                      config->llm.cloud.openai_models[config->llm.cloud.openai_models_count],
+                      model);
                   config->llm.cloud.openai_models_count++;
                }
             }
@@ -511,10 +510,9 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
                struct json_object *model_obj = json_object_array_get_idx(claude_models_arr, i);
                const char *model = json_object_get_string(model_obj);
                if (model && model[0] != '\0') {
-                  strncpy(config->llm.cloud.claude_models[config->llm.cloud.claude_models_count],
-                          model, LLM_CLOUD_MODEL_NAME_MAX - 1);
-                  config->llm.cloud.claude_models[config->llm.cloud.claude_models_count]
-                                                 [LLM_CLOUD_MODEL_NAME_MAX - 1] = '\0';
+                  safe_strscpy(
+                      config->llm.cloud.claude_models[config->llm.cloud.claude_models_count],
+                      model);
                   config->llm.cloud.claude_models_count++;
                }
             }
@@ -541,10 +539,9 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
                struct json_object *model_obj = json_object_array_get_idx(gemini_models_arr, i);
                const char *model = json_object_get_string(model_obj);
                if (model && model[0] != '\0') {
-                  strncpy(config->llm.cloud.gemini_models[config->llm.cloud.gemini_models_count],
-                          model, LLM_CLOUD_MODEL_NAME_MAX - 1);
-                  config->llm.cloud.gemini_models[config->llm.cloud.gemini_models_count]
-                                                 [LLM_CLOUD_MODEL_NAME_MAX - 1] = '\0';
+                  safe_strscpy(
+                      config->llm.cloud.gemini_models[config->llm.cloud.gemini_models_count],
+                      model);
                   config->llm.cloud.gemini_models_count++;
                }
             }
@@ -571,9 +568,9 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
                struct json_object *model_obj = json_object_array_get_idx(openrouter_models_arr, i);
                const char *model = json_object_get_string(model_obj);
                if (model && model[0] != '\0') {
-                  strncpy(config->llm.cloud
-                              .openrouter_models[config->llm.cloud.openrouter_models_count],
-                          model, LLM_CLOUD_MODEL_NAME_MAX - 1);
+                  safe_strscpy(config->llm.cloud
+                                   .openrouter_models[config->llm.cloud.openrouter_models_count],
+                               model);
                   config->llm.cloud.openrouter_models[config->llm.cloud.openrouter_models_count]
                                                      [LLM_CLOUD_MODEL_NAME_MAX - 1] = '\0';
                   config->llm.cloud.openrouter_models_count++;
@@ -626,10 +623,7 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
              !llm_silent_observe_provider_is_valid(config->llm.silent_observe.provider)) {
             OLOG_WARNING("WebUI: Invalid silent_observe.provider '%s', resetting to 'local'",
                          config->llm.silent_observe.provider);
-            strncpy(config->llm.silent_observe.provider, "local",
-                    sizeof(config->llm.silent_observe.provider) - 1);
-            config->llm.silent_observe.provider[sizeof(config->llm.silent_observe.provider) - 1] =
-                '\0';
+            safe_strscpy(config->llm.silent_observe.provider, "local");
          }
       }
 
@@ -670,10 +664,8 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
             struct json_object *filter_obj = json_object_array_get_idx(title_filters_arr, i);
             const char *filter = json_object_get_string(filter_obj);
             if (filter && filter[0] != '\0') {
-               strncpy(config->search.title_filters[config->search.title_filters_count], filter,
-                       SEARCH_TITLE_FILTER_MAX - 1);
-               config->search.title_filters[config->search.title_filters_count]
-                                           [SEARCH_TITLE_FILTER_MAX - 1] = '\0';
+               safe_strscpy(config->search.title_filters[config->search.title_filters_count],
+                            filter);
                config->search.title_filters_count++;
             }
          }
@@ -719,10 +711,8 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
             struct json_object *entry_obj = json_object_array_get_idx(whitelist_arr, i);
             const char *entry = json_object_get_string(entry_obj);
             if (entry && entry[0] != '\0') {
-               strncpy(config->url_fetcher.whitelist[config->url_fetcher.whitelist_count], entry,
-                       URL_FETCHER_ENTRY_MAX - 1);
-               config->url_fetcher.whitelist[config->url_fetcher.whitelist_count]
-                                            [URL_FETCHER_ENTRY_MAX - 1] = '\0';
+               safe_strscpy(config->url_fetcher.whitelist[config->url_fetcher.whitelist_count],
+                            entry);
                config->url_fetcher.whitelist_count++;
             }
          }
@@ -1269,8 +1259,7 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
          for (int i = 0; i < n && kept < CODE_PROJECTS_MAX_LOCAL_ROOTS; i++) {
             const char *p = json_object_get_string(json_object_array_get_idx(roots_arr, i));
             if (p && p[0] != '\0') {
-               strncpy(config->code_projects.allowed_local_roots[kept], p, CONFIG_PATH_MAX - 1);
-               config->code_projects.allowed_local_roots[kept][CONFIG_PATH_MAX - 1] = '\0';
+               safe_strscpy(config->code_projects.allowed_local_roots[kept], p);
                kept++;
             }
          }
@@ -1370,16 +1359,12 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
     * is NOT tracked here — it only rides the per-turn WebUI volatile block. */
    char old_voice_directive[CONFIG_DESCRIPTION_MAX];
    char old_disambiguation_hint[CONFIG_DESCRIPTION_MAX];
-   strncpy(old_voice_directive, g_config.tts.voice_directive, sizeof(old_voice_directive) - 1);
-   old_voice_directive[sizeof(old_voice_directive) - 1] = '\0';
-   strncpy(old_disambiguation_hint, g_config.asr.disambiguation_hint,
-           sizeof(old_disambiguation_hint) - 1);
-   old_disambiguation_hint[sizeof(old_disambiguation_hint) - 1] = '\0';
+   safe_strscpy(old_voice_directive, g_config.tts.voice_directive);
+   safe_strscpy(old_disambiguation_hint, g_config.asr.disambiguation_hint);
 
    /* Track local endpoint changes for provider cache invalidation */
    char old_local_endpoint[128];
-   strncpy(old_local_endpoint, g_config.llm.local.endpoint, sizeof(old_local_endpoint) - 1);
-   old_local_endpoint[sizeof(old_local_endpoint) - 1] = '\0';
+   safe_strscpy(old_local_endpoint, g_config.llm.local.endpoint);
 
    /* Apply changes to global config with mutex protection.
     * The write lock ensures no other threads are reading config during modification.
@@ -1591,137 +1576,105 @@ void handle_set_secrets(ws_connection_t *conn, struct json_object *payload) {
    if (json_object_object_get_ex(payload, "openai_api_key", &val)) {
       const char *str = json_object_get_string(val);
       if (str) {
-         strncpy(mutable_secrets->openai_api_key, str, sizeof(mutable_secrets->openai_api_key) - 1);
-         mutable_secrets->openai_api_key[sizeof(mutable_secrets->openai_api_key) - 1] = '\0';
+         safe_strscpy(mutable_secrets->openai_api_key, str);
       }
    }
    if (json_object_object_get_ex(payload, "claude_api_key", &val)) {
       const char *str = json_object_get_string(val);
       if (str) {
-         strncpy(mutable_secrets->claude_api_key, str, sizeof(mutable_secrets->claude_api_key) - 1);
-         mutable_secrets->claude_api_key[sizeof(mutable_secrets->claude_api_key) - 1] = '\0';
+         safe_strscpy(mutable_secrets->claude_api_key, str);
       }
    }
    if (json_object_object_get_ex(payload, "gemini_api_key", &val)) {
       const char *str = json_object_get_string(val);
       if (str) {
-         strncpy(mutable_secrets->gemini_api_key, str, sizeof(mutable_secrets->gemini_api_key) - 1);
-         mutable_secrets->gemini_api_key[sizeof(mutable_secrets->gemini_api_key) - 1] = '\0';
+         safe_strscpy(mutable_secrets->gemini_api_key, str);
       }
    }
    if (json_object_object_get_ex(payload, "openrouter_api_key", &val)) {
       const char *str = json_object_get_string(val);
       if (str) {
-         strncpy(mutable_secrets->openrouter_api_key, str,
-                 sizeof(mutable_secrets->openrouter_api_key) - 1);
-         mutable_secrets->openrouter_api_key[sizeof(mutable_secrets->openrouter_api_key) - 1] =
-             '\0';
+         safe_strscpy(mutable_secrets->openrouter_api_key, str);
       }
    }
    if (json_object_object_get_ex(payload, "tavily_api_key", &val)) {
       const char *str = json_object_get_string(val);
       if (str) {
-         strncpy(mutable_secrets->tavily_api_key, str, sizeof(mutable_secrets->tavily_api_key) - 1);
-         mutable_secrets->tavily_api_key[sizeof(mutable_secrets->tavily_api_key) - 1] = '\0';
+         safe_strscpy(mutable_secrets->tavily_api_key, str);
       }
    }
    if (json_object_object_get_ex(payload, "mqtt_username", &val)) {
       const char *str = json_object_get_string(val);
       if (str) {
-         strncpy(mutable_secrets->mqtt_username, str, sizeof(mutable_secrets->mqtt_username) - 1);
-         mutable_secrets->mqtt_username[sizeof(mutable_secrets->mqtt_username) - 1] = '\0';
+         safe_strscpy(mutable_secrets->mqtt_username, str);
       }
    }
    if (json_object_object_get_ex(payload, "mqtt_password", &val)) {
       const char *str = json_object_get_string(val);
       if (str) {
-         strncpy(mutable_secrets->mqtt_password, str, sizeof(mutable_secrets->mqtt_password) - 1);
-         mutable_secrets->mqtt_password[sizeof(mutable_secrets->mqtt_password) - 1] = '\0';
+         safe_strscpy(mutable_secrets->mqtt_password, str);
       }
    }
    if (json_object_object_get_ex(payload, "plex_token", &val)) {
       const char *str = json_object_get_string(val);
       if (str) {
-         strncpy(mutable_secrets->plex_token, str, sizeof(mutable_secrets->plex_token) - 1);
-         mutable_secrets->plex_token[sizeof(mutable_secrets->plex_token) - 1] = '\0';
+         safe_strscpy(mutable_secrets->plex_token, str);
       }
    }
    if (json_object_object_get_ex(payload, "embedding_api_key", &val)) {
       const char *str = json_object_get_string(val);
       if (str) {
-         strncpy(mutable_secrets->embedding_api_key, str,
-                 sizeof(mutable_secrets->embedding_api_key) - 1);
-         mutable_secrets->embedding_api_key[sizeof(mutable_secrets->embedding_api_key) - 1] = '\0';
+         safe_strscpy(mutable_secrets->embedding_api_key, str);
       }
    }
    if (json_object_object_get_ex(payload, "telegram_bot_token", &val)) {
       const char *str = json_object_get_string(val);
       if (str) {
-         strncpy(mutable_secrets->telegram_bot_token, str,
-                 sizeof(mutable_secrets->telegram_bot_token) - 1);
-         mutable_secrets->telegram_bot_token[sizeof(mutable_secrets->telegram_bot_token) - 1] =
-             '\0';
+         safe_strscpy(mutable_secrets->telegram_bot_token, str);
       }
    }
    if (json_object_object_get_ex(payload, "discord_bot_token", &val)) {
       const char *str = json_object_get_string(val);
       if (str) {
-         strncpy(mutable_secrets->discord_bot_token, str,
-                 sizeof(mutable_secrets->discord_bot_token) - 1);
-         mutable_secrets->discord_bot_token[sizeof(mutable_secrets->discord_bot_token) - 1] = '\0';
+         safe_strscpy(mutable_secrets->discord_bot_token, str);
       }
    }
    if (json_object_object_get_ex(payload, "slack_app_token", &val)) {
       const char *str = json_object_get_string(val);
       if (str) {
-         strncpy(mutable_secrets->slack_app_token, str,
-                 sizeof(mutable_secrets->slack_app_token) - 1);
-         mutable_secrets->slack_app_token[sizeof(mutable_secrets->slack_app_token) - 1] = '\0';
+         safe_strscpy(mutable_secrets->slack_app_token, str);
       }
    }
    if (json_object_object_get_ex(payload, "slack_bot_token", &val)) {
       const char *str = json_object_get_string(val);
       if (str) {
-         strncpy(mutable_secrets->slack_bot_token, str,
-                 sizeof(mutable_secrets->slack_bot_token) - 1);
-         mutable_secrets->slack_bot_token[sizeof(mutable_secrets->slack_bot_token) - 1] = '\0';
+         safe_strscpy(mutable_secrets->slack_bot_token, str);
       }
    }
 #ifdef DAWN_ENABLE_HOMEASSISTANT_TOOL
    if (json_object_object_get_ex(payload, "home_assistant_token", &val)) {
       const char *str = json_object_get_string(val);
       if (str) {
-         strncpy(mutable_secrets->home_assistant_token, str,
-                 sizeof(mutable_secrets->home_assistant_token) - 1);
-         mutable_secrets->home_assistant_token[sizeof(mutable_secrets->home_assistant_token) - 1] =
-             '\0';
+         safe_strscpy(mutable_secrets->home_assistant_token, str);
       }
    }
 #endif
    if (json_object_object_get_ex(payload, "google_client_id", &val)) {
       const char *str = json_object_get_string(val);
       if (str) {
-         strncpy(mutable_secrets->google_client_id, str,
-                 sizeof(mutable_secrets->google_client_id) - 1);
-         mutable_secrets->google_client_id[sizeof(mutable_secrets->google_client_id) - 1] = '\0';
+         safe_strscpy(mutable_secrets->google_client_id, str);
       }
    }
    if (json_object_object_get_ex(payload, "google_client_secret", &val)) {
       const char *str = json_object_get_string(val);
       if (str) {
-         strncpy(mutable_secrets->google_client_secret, str,
-                 sizeof(mutable_secrets->google_client_secret) - 1);
-         mutable_secrets->google_client_secret[sizeof(mutable_secrets->google_client_secret) - 1] =
-             '\0';
+         safe_strscpy(mutable_secrets->google_client_secret, str);
       }
    }
    if (json_object_object_get_ex(payload, "google_redirect_url", &val)) {
       const char *str = json_object_get_string(val);
       if (str) {
-         strncpy(mutable_secrets->google_redirect_url, str,
-                 sizeof(mutable_secrets->google_redirect_url) - 1);
-         mutable_secrets->google_redirect_url[sizeof(mutable_secrets->google_redirect_url) - 1] =
-             '\0';
+         safe_strscpy(mutable_secrets->google_redirect_url, str);
       }
    }
 
@@ -1853,7 +1806,7 @@ static void parse_alsa_devices(const char *output, json_object *arr) {
 
          if (len > 0 && len < 256) {
             char device[256];
-            strncpy(device, line, len);
+            strncpy(device, line, len); /* strncpy-ok: len guarded < 256 == sizeof(device) */
             device[len] = '\0';
 
             /* Skip null device and some internal devices */
@@ -1896,7 +1849,7 @@ static void parse_pulse_devices(const char *output, json_object *arr, bool filte
             size_t len = (size_t)(tab2 - tab1);
             if (len > 0 && len < 256) {
                char device[256];
-               strncpy(device, tab1, len);
+               strncpy(device, tab1, len); /* strncpy-ok: len guarded < 256 == sizeof(device) */
                device[len] = '\0';
 
                /* Filter out monitor sources if requested (they capture sink output, not mic input)
@@ -2074,13 +2027,11 @@ static json_object *scan_models_directory(void) {
 
    if (resolved) {
       asr_valid = is_path_allowed(resolved);
-      strncpy(asr_path, resolved, sizeof(asr_path) - 1);
-      asr_path[sizeof(asr_path) - 1] = '\0';
+      safe_strscpy(asr_path, resolved);
       free(resolved);
    } else {
       /* realpath failed - use original path with validation */
-      strncpy(asr_path, config->asr.models_path, sizeof(asr_path) - 1);
-      asr_path[sizeof(asr_path) - 1] = '\0';
+      safe_strscpy(asr_path, config->asr.models_path);
       asr_valid = (asr_path[0] == '.' || is_path_allowed(asr_path));
    }
 
@@ -2104,7 +2055,8 @@ static json_object *scan_models_directory(void) {
                      size_t model_len = ext - (name + 5);
                      if (model_len > 0 && model_len < 64) {
                         char model_name[64];
-                        strncpy(model_name, name + 5, model_len);
+                        strncpy(model_name, name + 5, model_len); /* strncpy-ok: model_len guarded <
+                                                                     64 == sizeof(model_name) */
                         model_name[model_len] = '\0';
                         json_object_array_add(asr_models, json_object_new_string(model_name));
                      }
@@ -2125,13 +2077,11 @@ static json_object *scan_models_directory(void) {
 
    if (resolved) {
       tts_valid = is_path_allowed(resolved);
-      strncpy(tts_path, resolved, sizeof(tts_path) - 1);
-      tts_path[sizeof(tts_path) - 1] = '\0';
+      safe_strscpy(tts_path, resolved);
       free(resolved);
    } else {
       /* realpath failed - use original path with validation */
-      strncpy(tts_path, config->tts.models_path, sizeof(tts_path) - 1);
-      tts_path[sizeof(tts_path) - 1] = '\0';
+      safe_strscpy(tts_path, config->tts.models_path);
       tts_valid = (tts_path[0] == '.' || is_path_allowed(tts_path));
    }
 
@@ -2155,7 +2105,9 @@ static json_object *scan_models_directory(void) {
                   size_t voice_len = ext - name;
                   if (voice_len > 0 && voice_len < 128) {
                      char voice_name[128];
-                     strncpy(voice_name, name, voice_len);
+                     strncpy(
+                         voice_name, name,
+                         voice_len); /* strncpy-ok: voice_len guarded < 128 == sizeof(voice_name) */
                      voice_name[voice_len] = '\0';
                      json_object_array_add(tts_voices, json_object_new_string(voice_name));
                   }
@@ -2247,9 +2199,9 @@ static json_object *scan_network_interfaces(void) {
 
    /* Always include common options first */
    json_object_array_add(addresses, json_object_new_string("0.0.0.0"));
-   strncpy(seen_ips[seen_count++], "0.0.0.0", INET_ADDRSTRLEN);
+   safe_strscpy(seen_ips[seen_count++], "0.0.0.0");
    json_object_array_add(addresses, json_object_new_string("127.0.0.1"));
-   strncpy(seen_ips[seen_count++], "127.0.0.1", INET_ADDRSTRLEN);
+   safe_strscpy(seen_ips[seen_count++], "127.0.0.1");
 
    /* Get actual interface addresses */
    struct ifaddrs *ifaddr, *ifa;
@@ -2276,7 +2228,7 @@ static json_object *scan_network_interfaces(void) {
                   }
                }
                if (!duplicate && seen_count < 16) {
-                  strncpy(seen_ips[seen_count++], ip_str, INET_ADDRSTRLEN);
+                  safe_strscpy(seen_ips[seen_count++], ip_str);
                   json_object_array_add(addresses, json_object_new_string(ip_str));
                }
             }

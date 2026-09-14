@@ -30,6 +30,7 @@
 
 #include "auth/auth_db_internal.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * User Operations
@@ -86,14 +87,12 @@ int auth_db_get_user(const char *username, auth_user_t *user_out) {
 
          const char *uname = (const char *)sqlite3_column_text(s_db.stmt_get_user, 1);
          if (uname) {
-            strncpy(user_out->username, uname, AUTH_USERNAME_MAX - 1);
-            user_out->username[AUTH_USERNAME_MAX - 1] = '\0';
+            safe_strscpy(user_out->username, uname);
          }
 
          const char *hash = (const char *)sqlite3_column_text(s_db.stmt_get_user, 2);
          if (hash) {
-            strncpy(user_out->password_hash, hash, AUTH_HASH_LEN - 1);
-            user_out->password_hash[AUTH_HASH_LEN - 1] = '\0';
+            safe_strscpy(user_out->password_hash, hash);
          }
 
          user_out->is_admin = sqlite3_column_int(s_db.stmt_get_user, 3) != 0;
@@ -266,8 +265,7 @@ int auth_db_list_users(auth_user_summary_callback_t callback, void *ctx) {
 
       const char *uname = (const char *)sqlite3_column_text(stmt, 1);
       if (uname) {
-         strncpy(user.username, uname, AUTH_USERNAME_MAX - 1);
-         user.username[AUTH_USERNAME_MAX - 1] = '\0';
+         safe_strscpy(user.username, uname);
       }
 
       user.is_admin = sqlite3_column_int(stmt, 2) != 0;

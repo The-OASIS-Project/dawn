@@ -44,6 +44,7 @@
 #include "logging.h"
 #include "tools/time_utils.h"
 #include "utils/sentence_buffer.h"
+#include "utils/string_utils.h"
 #ifdef ENABLE_WEBUI
 #include "webui/webui_server.h"
 #endif
@@ -197,13 +198,11 @@ static int llm_call_prepare(session_t *session,
 
    /* Copy model/endpoint to ctx buffers (resolved pointers may point to stack) */
    if (ctx->resolved_config.model && ctx->resolved_config.model[0] != '\0') {
-      strncpy(ctx->model_buf, ctx->resolved_config.model, sizeof(ctx->model_buf) - 1);
-      ctx->model_buf[sizeof(ctx->model_buf) - 1] = '\0';
+      safe_strscpy(ctx->model_buf, ctx->resolved_config.model);
       ctx->resolved_config.model = ctx->model_buf;
    }
    if (ctx->resolved_config.endpoint && ctx->resolved_config.endpoint[0] != '\0') {
-      strncpy(ctx->endpoint_buf, ctx->resolved_config.endpoint, sizeof(ctx->endpoint_buf) - 1);
-      ctx->endpoint_buf[sizeof(ctx->endpoint_buf) - 1] = '\0';
+      safe_strscpy(ctx->endpoint_buf, ctx->resolved_config.endpoint);
       ctx->resolved_config.endpoint = ctx->endpoint_buf;
    }
 

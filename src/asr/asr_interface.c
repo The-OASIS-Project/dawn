@@ -30,6 +30,8 @@
 #include <string.h>
 #include <time.h>
 
+#include "utils/string_utils.h"
+
 #ifdef ENABLE_VOSK
 #include "asr/asr_vosk.h"
 #else
@@ -147,8 +149,7 @@ static void asr_finalize_wav_header(FILE *f, size_t num_samples, uint16_t channe
 
 void asr_set_recording_dir(const char *dir) {
    if (dir) {
-      strncpy(g_asr_recording_dir, dir, sizeof(g_asr_recording_dir) - 1);
-      g_asr_recording_dir[sizeof(g_asr_recording_dir) - 1] = '\0';
+      safe_strscpy(g_asr_recording_dir, dir);
    }
 }
 

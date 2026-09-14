@@ -41,6 +41,7 @@
 #include "core/path_utils.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Constants

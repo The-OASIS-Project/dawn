@@ -192,7 +192,9 @@ int send_json_message(struct lws *wsi, const char *json) {
             type_start++; /* skip opening quote */
          const char *type_end = strchr(type_start, '"');
          if (type_end && (size_t)(type_end - type_start) < sizeof(type_buf) - 1) {
-            strncpy(type_buf, type_start, (size_t)(type_end - type_start));
+            strncpy(type_buf, type_start,
+                    (size_t)(type_end - type_start)); /* strncpy-ok: copy length guarded <
+                                                         sizeof(type_buf)-1 above */
             type_buf[type_end - type_start] = '\0';
          }
       }

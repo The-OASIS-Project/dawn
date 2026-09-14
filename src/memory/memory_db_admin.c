@@ -46,6 +46,7 @@
 #include "memory/memory_embeddings.h"
 #include "memory/memory_extraction.h"
 #include "memory/memory_recovery.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Worker state — CAS-guarded busy flag, mirrors memory_recategorize.c.
@@ -322,12 +323,10 @@ int memory_db_admin_estimate_reextract_cost(int user_id, memory_db_admin_cost_es
    const char *provider = g_config.memory.extraction_provider;
    const char *model = g_config.memory.extraction_model;
    if (provider) {
-      strncpy(out->provider, provider, sizeof(out->provider) - 1);
-      out->provider[sizeof(out->provider) - 1] = '\0';
+      safe_strscpy(out->provider, provider);
    }
    if (model) {
-      strncpy(out->model, model, sizeof(out->model) - 1);
-      out->model[sizeof(out->model) - 1] = '\0';
+      safe_strscpy(out->model, model);
    }
 
    AUTH_DB_LOCK_OR_RETURN(FAILURE);

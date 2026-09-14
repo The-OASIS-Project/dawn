@@ -34,6 +34,7 @@
 #include "logging.h"
 #include "tools/tool_registry.h"
 #include "tts/text_to_speech.h"
+#include "utils/string_utils.h"
 
 /* ========== Forward Declarations ========== */
 
@@ -112,14 +113,12 @@ static char *llm_status_tool_callback(const char *action, char *value, int *shou
              * For Ollama: use config model or first available */
             local_provider_t provider = llm_local_detect_provider(endpoint);
             if (provider == LOCAL_PROVIDER_LLAMA_CPP) {
-               strncpy(local_model_buf, models[0].name, sizeof(local_model_buf) - 1);
-               local_model_buf[sizeof(local_model_buf) - 1] = '\0';
+               safe_strscpy(local_model_buf, models[0].name);
                model = local_model_buf;
             } else if (g_config.llm.local.model[0] != '\0') {
                model = g_config.llm.local.model;
             } else {
-               strncpy(local_model_buf, models[0].name, sizeof(local_model_buf) - 1);
-               local_model_buf[sizeof(local_model_buf) - 1] = '\0';
+               safe_strscpy(local_model_buf, models[0].name);
                model = local_model_buf;
             }
          } else {

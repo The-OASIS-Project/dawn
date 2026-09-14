@@ -32,6 +32,7 @@
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_embeddings.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * State
@@ -48,16 +49,16 @@ static int ollama_init(const char *endpoint, const char *model, const char *api_
    (void)api_key; /* Ollama doesn't use API keys */
 
    if (endpoint && endpoint[0]) {
-      strncpy(s_endpoint, endpoint, sizeof(s_endpoint) - 1);
+      safe_strscpy(s_endpoint, endpoint);
    } else {
-      strncpy(s_endpoint, "http://localhost:11434", sizeof(s_endpoint) - 1);
+      safe_strscpy(s_endpoint, "http://localhost:11434");
    }
    s_endpoint[sizeof(s_endpoint) - 1] = '\0';
 
    if (model && model[0]) {
-      strncpy(s_model, model, sizeof(s_model) - 1);
+      safe_strscpy(s_model, model);
    } else {
-      strncpy(s_model, "all-minilm", sizeof(s_model) - 1);
+      safe_strscpy(s_model, "all-minilm");
    }
    s_model[sizeof(s_model) - 1] = '\0';
 

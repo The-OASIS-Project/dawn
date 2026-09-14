@@ -31,6 +31,7 @@
 #include "llm/llm_tools.h"
 #include "logging.h"
 #include "ui/metrics.h"
+#include "utils/string_utils.h"
 #include "webui/webui_server.h"
 
 #define DEFAULT_ACCUMULATED_CAPACITY 8192
@@ -547,7 +548,7 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
                if (json_object_object_get_ex(tc, "id", &id_obj)) {
                   const char *id = json_object_get_string(id_obj);
                   if (id) {
-                     strncpy(ctx->tool_calls.calls[tc_index].id, id, LLM_TOOLS_ID_LEN - 1);
+                     safe_strscpy(ctx->tool_calls.calls[tc_index].id, id);
                      if (tc_index >= ctx->tool_calls.count) {
                         ctx->tool_calls.count = tc_index + 1;
                      }
@@ -560,7 +561,7 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
                   if (json_object_object_get_ex(function_obj, "name", &name_obj)) {
                      const char *name = json_object_get_string(name_obj);
                      if (name) {
-                        strncpy(ctx->tool_calls.calls[tc_index].name, name, LLM_TOOLS_NAME_LEN - 1);
+                        safe_strscpy(ctx->tool_calls.calls[tc_index].name, name);
                      }
                   }
 
@@ -610,9 +611,7 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
                      const char *sig = json_object_get_string(sig_obj);
                      if (sig && sig[0] != '\0') {
                         size_t sig_len = strlen(sig);
-                        strncpy(ctx->tool_calls.thought_signature, sig,
-                                LLM_TOOLS_THOUGHT_SIG_LEN - 1);
-                        ctx->tool_calls.thought_signature[LLM_TOOLS_THOUGHT_SIG_LEN - 1] = '\0';
+                        safe_strscpy(ctx->tool_calls.thought_signature, sig);
                         if (sig_len >= LLM_TOOLS_THOUGHT_SIG_LEN) {
                            OLOG_WARNING("Gemini thought_signature truncated: %zu -> %d bytes",
                                         sig_len, LLM_TOOLS_THOUGHT_SIG_LEN - 1);
@@ -626,9 +625,7 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
                      const char *sig = json_object_get_string(sig_obj);
                      if (sig && sig[0] != '\0') {
                         size_t sig_len = strlen(sig);
-                        strncpy(ctx->tool_calls.thought_signature, sig,
-                                LLM_TOOLS_THOUGHT_SIG_LEN - 1);
-                        ctx->tool_calls.thought_signature[LLM_TOOLS_THOUGHT_SIG_LEN - 1] = '\0';
+                        safe_strscpy(ctx->tool_calls.thought_signature, sig);
                         if (sig_len >= LLM_TOOLS_THOUGHT_SIG_LEN) {
                            OLOG_WARNING("Gemini thought_signature truncated: %zu -> %d bytes",
                                         sig_len, LLM_TOOLS_THOUGHT_SIG_LEN - 1);
@@ -648,7 +645,7 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
          if (!json_object_is_type(finish_reason, json_type_null)) {
             const char *reason = json_object_get_string(finish_reason);
             if (reason) {
-               strncpy(ctx->finish_reason, reason, sizeof(ctx->finish_reason) - 1);
+               safe_strscpy(ctx->finish_reason, reason);
                OLOG_INFO("Stream finish_reason: %s", reason);
             }
             ctx->stream_complete = 1;
@@ -668,9 +665,8 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
             // Finalize tool call arguments
             if (ctx->has_tool_calls) {
                for (int i = 0; i < ctx->tool_calls.count; i++) {
-                  strncpy(ctx->tool_calls.calls[i].arguments,
-                          ctx->provider.openai.tool_args_buffer[i], LLM_TOOLS_ARGS_LEN - 1);
-                  ctx->tool_calls.calls[i].arguments[LLM_TOOLS_ARGS_LEN - 1] = '\0';
+                  safe_strscpy(ctx->tool_calls.calls[i].arguments,
+                               ctx->provider.openai.tool_args_buffer[i]);
                   ctx->tool_calls.calls[i].args_truncated =
                       ctx->provider.openai.tool_args_overflow[i];
                }
@@ -769,7 +765,7 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
                char model_prefix[8] = { 0 };
                if (ws_session != NULL) {
                   pthread_mutex_lock(&ws_session->llm_config_mutex);
-                  strncpy(model_prefix, ws_session->llm_config.model, sizeof(model_prefix) - 1);
+                  safe_strscpy(model_prefix, ws_session->llm_config.model);
                   pthread_mutex_unlock(&ws_session->llm_config_mutex);
                }
                const char *provider_label = (strncmp(model_prefix, "gemini-", 7) == 0) ? "Gemini"
@@ -920,15 +916,11 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
                }
 
                if (json_object_object_get_ex(content_block, "id", &id_obj)) {
-                  strncpy(ctx->provider.claude.tool_id, json_object_get_string(id_obj),
-                          LLM_TOOLS_ID_LEN - 1);
-                  ctx->provider.claude.tool_id[LLM_TOOLS_ID_LEN - 1] = '\0';
+                  safe_strscpy(ctx->provider.claude.tool_id, json_object_get_string(id_obj));
                }
 
                if (json_object_object_get_ex(content_block, "name", &name_obj)) {
-                  strncpy(ctx->provider.claude.tool_name, json_object_get_string(name_obj),
-                          LLM_TOOLS_NAME_LEN - 1);
-                  ctx->provider.claude.tool_name[LLM_TOOLS_NAME_LEN - 1] = '\0';
+                  safe_strscpy(ctx->provider.claude.tool_name, json_object_get_string(name_obj));
                }
 
                OLOG_INFO("Claude: Starting tool_use block: %s (id=%s)",
@@ -1091,13 +1083,9 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
          // Add to tool_calls list
          if (ctx->tool_calls.count < LLM_TOOLS_MAX_PARALLEL_CALLS) {
             int idx = ctx->tool_calls.count;
-            strncpy(ctx->tool_calls.calls[idx].id, ctx->provider.claude.tool_id,
-                    LLM_TOOLS_ID_LEN - 1);
-            strncpy(ctx->tool_calls.calls[idx].name, ctx->provider.claude.tool_name,
-                    LLM_TOOLS_NAME_LEN - 1);
-            strncpy(ctx->tool_calls.calls[idx].arguments, ctx->provider.claude.tool_args,
-                    LLM_TOOLS_ARGS_LEN - 1);
-            ctx->tool_calls.calls[idx].arguments[LLM_TOOLS_ARGS_LEN - 1] = '\0';
+            safe_strscpy(ctx->tool_calls.calls[idx].id, ctx->provider.claude.tool_id);
+            safe_strscpy(ctx->tool_calls.calls[idx].name, ctx->provider.claude.tool_name);
+            safe_strscpy(ctx->tool_calls.calls[idx].arguments, ctx->provider.claude.tool_args);
             ctx->tool_calls.calls[idx].args_truncated = ctx->provider.claude.tool_args_overflow;
             ctx->tool_calls.count++;
             ctx->has_tool_calls = 1;
@@ -1122,8 +1110,7 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
          if (json_object_object_get_ex(delta_obj, "stop_reason", &stop_reason_obj)) {
             const char *stop_reason = json_object_get_string(stop_reason_obj);
             if (stop_reason) {
-               strncpy(ctx->finish_reason, stop_reason, sizeof(ctx->finish_reason) - 1);
-               ctx->finish_reason[sizeof(ctx->finish_reason) - 1] = '\0';
+               safe_strscpy(ctx->finish_reason, stop_reason);
                OLOG_INFO("Claude stream stop_reason: %s", stop_reason);
             }
          }

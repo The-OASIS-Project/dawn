@@ -42,6 +42,7 @@
 #include "core/strbuf.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Constants
@@ -95,8 +96,7 @@ static bool valid_recurrence_days_csv(const char *csv) {
       return false;
    static const char *valid_days[] = { "sun", "mon", "tue", "wed", "thu", "fri", "sat" };
    char buf[SCHED_RECURRENCE_DAYS_MAX];
-   strncpy(buf, csv, sizeof(buf) - 1);
-   buf[sizeof(buf) - 1] = '\0';
+   safe_strscpy(buf, csv);
 
    bool valid = true;
    char *saveptr = NULL;
@@ -194,11 +194,11 @@ static int parse_validate_steps(struct json_object *steps_arr,
                   strlen(s_value), SCHED_TOOL_VALUE_MAX - 1);
          return FAILURE;
       }
-      strncpy(out[i].tool_name, s_name, SCHED_TOOL_NAME_MAX - 1);
+      safe_strscpy(out[i].tool_name, s_name);
       if (s_action)
-         strncpy(out[i].tool_action, s_action, SCHED_TOOL_NAME_MAX - 1);
+         safe_strscpy(out[i].tool_action, s_action);
       if (s_value)
-         strncpy(out[i].tool_value, s_value, SCHED_TOOL_VALUE_MAX - 1);
+         safe_strscpy(out[i].tool_value, s_value);
    }
    *count_out = n;
    return SUCCESS;
@@ -248,7 +248,7 @@ static char *handle_create(struct json_object *details,
    /* Message (for reminders) */
    const char *message = json_get_string(details, "message");
    if (message)
-      strncpy(event.message, message, SCHED_MESSAGE_MAX - 1);
+      safe_strscpy(event.message, message);
 
    /* Fire time */
    int duration_min = json_get_int(details, "duration_minutes", 0);
@@ -295,9 +295,9 @@ static char *handle_create(struct json_object *details,
       const char *time_only = strchr(fire_at_str, 'T');
       if (time_only) {
          time_only++; /* Skip 'T' */
-         strncpy(event.original_time, time_only, SCHED_ORIGINAL_TIME_MAX - 1);
+         safe_strscpy(event.original_time, time_only);
       } else if (strlen(fire_at_str) <= 5) {
-         strncpy(event.original_time, fire_at_str, SCHED_ORIGINAL_TIME_MAX - 1);
+         safe_strscpy(event.original_time, fire_at_str);
       }
    } else {
       /* Neither provided */
@@ -327,14 +327,14 @@ static char *handle_create(struct json_object *details,
                   recur_days);
          return strdup(result);
       }
-      strncpy(event.recurrence_days, recur_days, SCHED_RECURRENCE_DAYS_MAX - 1);
+      safe_strscpy(event.recurrence_days, recur_days);
    }
 
    /* Source info */
    if (source_uuid)
-      strncpy(event.source_uuid, source_uuid, SCHED_UUID_MAX - 1);
+      safe_strscpy(event.source_uuid, source_uuid);
    if (source_location)
-      strncpy(event.source_location, source_location, SCHED_LOCATION_MAX - 1);
+      safe_strscpy(event.source_location, source_location);
    event.source_client_type = source_client_type;
 
    /* Announce all */
@@ -375,8 +375,7 @@ static char *handle_create(struct json_object *details,
        json_object_is_type(dt_obj, json_type_string)) {
       const char *deliver_to_str = json_object_get_string(dt_obj);
       if (deliver_to_str && deliver_to_str[0]) {
-         strncpy(event.deliver_to, deliver_to_str, SCHED_DELIVER_TO_MAX - 1);
-         event.deliver_to[SCHED_DELIVER_TO_MAX - 1] = '\0';
+         safe_strscpy(event.deliver_to, deliver_to_str);
       }
    }
 
@@ -446,10 +445,10 @@ static char *handle_create(struct json_object *details,
             snprintf(result, sizeof(result), TOOL_RESULT_ERROR_MARK "Error: %s", err);
             return strdup(result);
          }
-         strncpy(event.tool_name, tool_name, SCHED_TOOL_NAME_MAX - 1);
+         safe_strscpy(event.tool_name, tool_name);
       }
       if (tool_action)
-         strncpy(event.tool_action, tool_action, SCHED_TOOL_NAME_MAX - 1);
+         safe_strscpy(event.tool_action, tool_action);
       if (tool_value) {
          if (strlen(tool_value) >= SCHED_TOOL_VALUE_MAX) {
             snprintf(result, sizeof(result),
@@ -458,7 +457,7 @@ static char *handle_create(struct json_object *details,
                      strlen(tool_value), SCHED_TOOL_VALUE_MAX - 1);
             return strdup(result);
          }
-         strncpy(event.tool_value, tool_value, SCHED_TOOL_VALUE_MAX - 1);
+         safe_strscpy(event.tool_value, tool_value);
       }
    }
 
@@ -480,9 +479,9 @@ static char *handle_create(struct json_object *details,
       const tool_metadata_t *promote_meta = tool_registry_find(event.tool_name);
       if (promote_meta && (promote_meta->capabilities & TOOL_CAP_INFORMATIONAL)) {
          memset(parsed_steps, 0, sizeof(parsed_steps));
-         strncpy(parsed_steps[0].tool_name, event.tool_name, SCHED_TOOL_NAME_MAX - 1);
-         strncpy(parsed_steps[0].tool_action, event.tool_action, SCHED_TOOL_NAME_MAX - 1);
-         strncpy(parsed_steps[0].tool_value, event.tool_value, SCHED_TOOL_VALUE_MAX - 1);
+         safe_strscpy(parsed_steps[0].tool_name, event.tool_name);
+         safe_strscpy(parsed_steps[0].tool_action, event.tool_action);
+         safe_strscpy(parsed_steps[0].tool_value, event.tool_value);
          parsed_step_count = 1;
          event.tool_name[0] = '\0';
          event.tool_action[0] = '\0';
@@ -1017,14 +1016,14 @@ static char *handle_update(struct json_object *details, int user_id) {
                   recur_days);
          return strdup(result);
       }
-      strncpy(fields.recurrence_days, recur_days, SCHED_RECURRENCE_DAYS_MAX - 1);
+      safe_strscpy(fields.recurrence_days, recur_days);
       mask |= SCHED_FIELD_RECURRENCE_DAYS;
    }
 
    struct json_object *jdt = NULL;
    if (json_object_object_get_ex(details, "deliver_to", &jdt) &&
        json_object_is_type(jdt, json_type_string)) {
-      strncpy(fields.deliver_to, json_object_get_string(jdt), SCHED_DELIVER_TO_MAX - 1);
+      safe_strscpy(fields.deliver_to, json_object_get_string(jdt));
       mask |= SCHED_FIELD_DELIVER_TO; /* empty string clears fan-out */
    }
 

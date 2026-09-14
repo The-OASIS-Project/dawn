@@ -43,6 +43,7 @@
 #include "audio/resampler.h"
 #include "config/dawn_config.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_music_internal.h"
 #include "webui/webui_music_queue_db.h"
@@ -1175,11 +1176,9 @@ int webui_music_start_playback(session_music_state_t *state, const char *path) {
          return 1;
       }
       /* Remember temp file for cleanup */
-      strncpy(state->temp_file, local_path, sizeof(state->temp_file) - 1);
-      state->temp_file[sizeof(state->temp_file) - 1] = '\0';
+      safe_strscpy(state->temp_file, local_path);
    } else {
-      strncpy(local_path, path, sizeof(local_path) - 1);
-      local_path[sizeof(local_path) - 1] = '\0';
+      safe_strscpy(local_path, path);
    }
 
    /* Open the file (always a local path at this point) */
