@@ -62,9 +62,10 @@ int parseNumericalWord(const char *token) {
 }
 
 double wordToNumber(char *originalWord) {
-   char word[1024];                                // Temporary buffer for tokenization.
-   strncpy(word, originalWord, sizeof(word) - 1);  // Ensure null-termination.
-   word[sizeof(word) - 1] = '\0';
+   char word[1024];  // Temporary buffer for tokenization.
+   size_t owlen = strnlen(originalWord, sizeof(word) - 1);
+   memcpy(word, originalWord, owlen);
+   word[owlen] = '\0';  // Bounded copy with guaranteed null-termination.
 
    /* Short-scale magnitudes, mirroring common/src/tts/number_to_words.c so the
     * two directions cover the same vocabulary (forward: number -> words).
@@ -134,8 +135,11 @@ double wordToNumber(char *originalWord) {
    }
    result += tempValue;  // Add any remaining value to the result.
 
-   // Process fractional part if "point" was found.
-   strncpy(word, originalWord, sizeof(word));
+   // Process fractional part if "point" was found.  Re-copy the original (word was
+   // tokenized in place above); bounded with guaranteed null-termination.
+   owlen = strnlen(originalWord, sizeof(word) - 1);
+   memcpy(word, originalWord, owlen);
+   word[owlen] = '\0';
    char *decimalPart = strstr(word, "point");
    if (decimalPart) {
       char *dec_saveptr = NULL;
