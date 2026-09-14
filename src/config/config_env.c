@@ -37,21 +37,16 @@
 #include "config/config_parser.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Helper Macros
  * ============================================================================= */
-#define SAFE_COPY(dst, src)                   \
-   do {                                       \
-      strncpy((dst), (src), sizeof(dst) - 1); \
-      (dst)[sizeof(dst) - 1] = '\0';          \
-   } while (0)
-
 #define ENV_STRING(env_name, dest)                           \
    do {                                                      \
       const char *val = getenv(env_name);                    \
       if (val) {                                             \
-         SAFE_COPY(dest, val);                               \
+         safe_strscpy(dest, val);                            \
          OLOG_INFO("Config override: %s=%s", env_name, val); \
       }                                                      \
    } while (0)
@@ -61,7 +56,7 @@
    do {                                                         \
       const char *val = getenv(env_name);                       \
       if (val) {                                                \
-         SAFE_COPY(dest, val);                                  \
+         safe_strscpy(dest, val);                               \
          OLOG_INFO("Config override: %s=[REDACTED]", env_name); \
       }                                                         \
    } while (0)

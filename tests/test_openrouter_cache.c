@@ -199,7 +199,7 @@ static void test_already_array_content_skipped(void) {
    json_object_put(history);
 }
 
-/* ── The gate: only openrouter + anthropic/* ────────────────────────────── */
+/* ── The gate: only openrouter + anthropic models ───────────────────────── */
 
 static void expect_noop(const char *model, const char *url) {
    json_object *history = make_history();

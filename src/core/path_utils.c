@@ -34,20 +34,8 @@
 
 #include "logging.h"
 
-/* =============================================================================
- * String Utilities
- * ============================================================================= */
-
-void safe_strncpy(char *dst, const char *src, size_t dst_size) {
-   if (!dst || dst_size == 0)
-      return;
-   if (!src) {
-      dst[0] = '\0';
-      return;
-   }
-   strncpy(dst, src, dst_size - 1);
-   dst[dst_size - 1] = '\0';
-}
+/* safe_strncpy() moved to the shared string utilities (utils/string_utils.h),
+ * reachable here via core/path_utils.h. */
 
 /* =============================================================================
  * Path Expansion

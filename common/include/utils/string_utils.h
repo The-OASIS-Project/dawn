@@ -36,29 +36,72 @@ extern "C" {
 #endif
 
 /**
- * @brief Safe string copy with guaranteed null-termination
+ * @brief Safe bounded string copy with guaranteed null-termination.
  *
- * Unlike strncpy, this always null-terminates the destination buffer
- * and doesn't waste cycles padding with zeros. This is a portable
- * replacement for strlcpy which isn't available on all platforms.
+ * Unlike strncpy, this always null-terminates the destination and does not
+ * pad the tail with zeros. Portable replacement for strlcpy; the canonical
+ * explicit-size bounded copy for the project. Prefer safe_strscpy() (below)
+ * when the destination is a fixed-size array — it derives the size and rejects
+ * a pointer destination at compile time.
  *
- * Thread Safety: This function is thread-safe (modifies only dest buffer).
+ * NULL-safe: a NULL dest (or size 0) is a no-op; a NULL src yields an empty
+ * dest. Thread-safe (modifies only the dest buffer).
  *
- * @param dest Destination buffer
- * @param src Source string (must be null-terminated)
- * @param size Size of destination buffer
+ * @param dest Destination buffer (may be NULL).
+ * @param src Source string, null-terminated (may be NULL).
+ * @param size Capacity of the destination buffer (copies at most size-1).
+ * @return The length of @p src (strlcpy semantics): a return value >= @p size
+ *         means the copy was TRUNCATED. Returns 0 for a NULL/empty src or a
+ *         no-op call. Callers that don't care may ignore it.
  */
-static inline void safe_strncpy(char *dest, const char *src, size_t size) {
-   if (size == 0) {
-      return;
+static inline size_t safe_strncpy(char *dest, const char *src, size_t size) {
+   if (dest == NULL || size == 0) {
+      return 0;
    }
-   size_t len = strlen(src);
-   if (len >= size) {
-      len = size - 1;
+   if (src == NULL) {
+      dest[0] = '\0';
+      return 0;
    }
-   memcpy(dest, src, len);
-   dest[len] = '\0';
+   size_t srclen = strlen(src);
+   size_t copylen = srclen < size ? srclen : size - 1;
+   memcpy(dest, src, copylen);
+   dest[copylen] = '\0';
+   return srclen;
 }
+
+/*
+ * safe_strscpy(dst, src) — the preferred bounded copy for a fixed-size array.
+ *
+ * Derives the capacity from sizeof(dst) so the size can't be mis-passed, and
+ * rejects a POINTER destination at compile time (a pointer would otherwise copy
+ * only sizeof(pointer)-1 bytes). Returns strlcpy semantics like safe_strncpy:
+ * a return >= sizeof(dst) means truncation.
+ *
+ * Use safe_strncpy() directly when the destination is a pointer with a known
+ * capacity (a size parameter), where sizeof(dst) would be wrong.
+ *
+ * Two implementations give the same guarantee:
+ *  - C: a macro using the GCC/Clang array-detection idiom (typeof +
+ *    __builtin_types_compatible_p). DAWN_MUST_BE_ARRAY expands to 0 for an array
+ *    and to an ill-formed (negative-width bitfield) type otherwise, failing the
+ *    build. DAWN_-prefixed (not reserved __names) to stay collision-safe in this
+ *    widely-included header.
+ *  - C++: an array-reference template (char (&)[N]) — a pointer won't bind, so it
+ *    yields the same compile-time rejection without the GNU builtins, which the
+ *    C++ front end does not accept.
+ */
+#ifdef __cplusplus
+} /* extern "C" — a function template cannot have C language linkage */
+template<size_t N> static inline size_t safe_strscpy(char (&dst)[N], const char *src) {
+   return safe_strncpy(dst, src, N);
+}
+extern "C" {
+#else
+#define DAWN_SAME_TYPE(a, b) __builtin_types_compatible_p(__typeof__(a), __typeof__(b))
+#define DAWN_MUST_BE_ARRAY(a) \
+   (sizeof(struct { int _dummy[1 - 2 * !!(DAWN_SAME_TYPE((a), &(a)[0]))]; }) * 0)
+#define safe_strscpy(dst, src) safe_strncpy((dst), (src), sizeof(dst) + DAWN_MUST_BE_ARRAY(dst))
+#endif
 
 /**
  * @brief Sanitize string for safe use in JSON and LLM APIs

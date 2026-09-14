@@ -142,11 +142,96 @@ static void test_surrogate_replaced(void) {
    TEST_ASSERT_TRUE(is_valid_utf8(buf));
 }
 
+/* ── safe_strncpy (canonical bounded copy) ──────────────────────────────── */
+
+static void test_safe_strncpy_basic_fit(void) {
+   char dst[8] = "xxxxxxx";
+   safe_strncpy(dst, "hello", sizeof(dst));
+   TEST_ASSERT_EQUAL_STRING("hello", dst);
+}
+
+static void test_safe_strncpy_exact_fit(void) {
+   /* "world" is 5 chars, buffer is 6 — fits exactly with room for the NUL. */
+   char dst[6];
+   safe_strncpy(dst, "world", sizeof(dst));
+   TEST_ASSERT_EQUAL_STRING("world", dst);
+}
+
+static void test_safe_strncpy_truncates_and_terminates(void) {
+   char dst[4];
+   safe_strncpy(dst, "abcdef", sizeof(dst));
+   TEST_ASSERT_EQUAL_STRING("abc", dst); /* size-1 = 3 chars copied */
+   TEST_ASSERT_EQUAL_CHAR('\0', dst[3]);
+}
+
+static void test_safe_strncpy_null_src_yields_empty(void) {
+   char dst[8] = "keep";
+   safe_strncpy(dst, NULL, sizeof(dst));
+   TEST_ASSERT_EQUAL_STRING("", dst);
+}
+
+static void test_safe_strncpy_null_dst_is_noop(void) {
+   safe_strncpy(NULL, "x", 8); /* must not crash */
+   TEST_PASS();
+}
+
+static void test_safe_strncpy_zero_size_is_noop(void) {
+   char dst[4] = "abc";
+   safe_strncpy(dst, "zzzz", 0); /* size 0: dst left untouched */
+   TEST_ASSERT_EQUAL_STRING("abc", dst);
+}
+
+/* Return value: strlcpy semantics — source length; >= size means truncated. */
+static void test_safe_strncpy_return_fit(void) {
+   char dst[8];
+   TEST_ASSERT_EQUAL_UINT(5, safe_strncpy(dst, "hello", sizeof(dst)));
+}
+
+static void test_safe_strncpy_return_signals_truncation(void) {
+   char dst[4];
+   size_t r = safe_strncpy(dst, "abcdef", sizeof(dst)); /* src len 6 >= size 4 */
+   TEST_ASSERT_EQUAL_UINT(6, r);
+   TEST_ASSERT_TRUE(r >= sizeof(dst)); /* the truncation test callers use */
+}
+
+static void test_safe_strncpy_return_zero_on_null(void) {
+   char dst[8] = "keep";
+   TEST_ASSERT_EQUAL_UINT(0, safe_strncpy(dst, NULL, sizeof(dst)));
+   TEST_ASSERT_EQUAL_UINT(0, safe_strncpy(NULL, "x", 8));
+}
+
+/* safe_strscpy: auto-size from the array, same strlcpy return. */
+static void test_safe_strscpy_basic(void) {
+   char dst[8] = "xxxxxxx";
+   size_t r = safe_strscpy(dst, "hi");
+   TEST_ASSERT_EQUAL_STRING("hi", dst);
+   TEST_ASSERT_EQUAL_UINT(2, r);
+}
+
+static void test_safe_strscpy_truncates(void) {
+   char dst[4];
+   size_t r = safe_strscpy(dst, "abcdef");
+   TEST_ASSERT_EQUAL_STRING("abc", dst);
+   TEST_ASSERT_TRUE(r >= sizeof(dst)); /* truncation detectable via sizeof(dst) */
+}
+
 int main(void) {
    UNITY_BEGIN();
 
    RUN_TEST(test_null_is_safe);
    RUN_TEST(test_empty_stays_empty);
+
+   RUN_TEST(test_safe_strncpy_basic_fit);
+   RUN_TEST(test_safe_strncpy_exact_fit);
+   RUN_TEST(test_safe_strncpy_truncates_and_terminates);
+   RUN_TEST(test_safe_strncpy_null_src_yields_empty);
+   RUN_TEST(test_safe_strncpy_null_dst_is_noop);
+   RUN_TEST(test_safe_strncpy_zero_size_is_noop);
+   RUN_TEST(test_safe_strncpy_return_fit);
+   RUN_TEST(test_safe_strncpy_return_signals_truncation);
+   RUN_TEST(test_safe_strncpy_return_zero_on_null);
+   RUN_TEST(test_safe_strscpy_basic);
+   RUN_TEST(test_safe_strscpy_truncates);
 
    RUN_TEST(test_ascii_unchanged);
    RUN_TEST(test_allowed_whitespace_kept);

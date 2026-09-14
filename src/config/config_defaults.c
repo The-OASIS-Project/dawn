@@ -29,21 +29,13 @@
 #include "config/dawn_config.h"
 #include "config/research_defaults.h" /* RESEARCH_DEFAULT_* — single source for [research] defaults */
 #include "memory/memory_db.h"
+#include "utils/string_utils.h"
 
 /* =============================================================================
  * Global Configuration Instances
  * ============================================================================= */
 dawn_config_t g_config;
 secrets_config_t g_secrets;
-
-/* =============================================================================
- * Helper Macros
- * ============================================================================= */
-#define SAFE_COPY(dst, src)                   \
-   do {                                       \
-      strncpy((dst), (src), sizeof(dst) - 1); \
-      (dst)[sizeof(dst) - 1] = '\0';          \
-   } while (0)
 
 /* =============================================================================
  * Default Values - matching dawn.h and dawn.c
@@ -55,7 +47,7 @@ void config_set_defaults(dawn_config_t *config) {
    memset(config, 0, sizeof(*config));
 
    /* General */
-   SAFE_COPY(config->general.ai_name, "friday");
+   safe_strscpy(config->general.ai_name, "friday");
    config->general.log_file[0] = '\0'; /* Empty = stdout */
 
    /* Persona - empty means use compile-time default from dawn.h */
@@ -64,12 +56,12 @@ void config_set_defaults(dawn_config_t *config) {
    /* Localization */
    config->localization.location[0] = '\0'; /* No default location */
    config->localization.timezone[0] = '\0'; /* System default */
-   SAFE_COPY(config->localization.units, "imperial");
+   safe_strscpy(config->localization.units, "imperial");
 
    /* Audio */
-   SAFE_COPY(config->audio.backend, "auto");
-   SAFE_COPY(config->audio.capture_device, "default");
-   SAFE_COPY(config->audio.playback_device, "default");
+   safe_strscpy(config->audio.backend, "auto");
+   safe_strscpy(config->audio.capture_device, "default");
+   safe_strscpy(config->audio.playback_device, "default");
    config->audio.output_rate = 44100; /* CD quality, native for most music */
    config->audio.output_channels = 2; /* Stereo required for dmix compatibility */
 
@@ -96,25 +88,25 @@ void config_set_defaults(dawn_config_t *config) {
    config->vad.chunking.max_duration = 10.0f;  /* VAD_MAX_CHUNK_DURATION */
 
    /* ASR */
-   SAFE_COPY(config->asr.model, "base.en");
-   SAFE_COPY(config->asr.models_path, "models/whisper.cpp");
+   safe_strscpy(config->asr.model, "base.en");
+   safe_strscpy(config->asr.models_path, "models/whisper.cpp");
    config->asr.dedup_window_sec = ASR_DEDUP_WINDOW_SEC_DEFAULT;
    config->asr.audio_ctx_floor = ASR_AUDIO_CTX_FLOOR_DEFAULT;
    /* disambiguation_hint left empty by the memset above → built-in default
     * (DEFAULT_ASR_DISAMBIGUATION_HINT) is used at prompt-build time. */
 
    /* TTS */
-   SAFE_COPY(config->tts.models_path, "models");
-   SAFE_COPY(config->tts.voice_model, "en_GB-alba-medium");
+   safe_strscpy(config->tts.models_path, "models");
+   safe_strscpy(config->tts.voice_model, "en_GB-alba-medium");
    config->tts.length_scale = 0.85f;
    /* voice_directive / voice_directive_webui left empty by the memset above →
     * built-in defaults (DEFAULT_VOICE_OUTPUT_DIRECTIVE[_WEBUI]) are used. */
 
    /* Commands */
-   SAFE_COPY(config->commands.processing_mode, "direct_first");
+   safe_strscpy(config->commands.processing_mode, "direct_first");
 
    /* LLM */
-   SAFE_COPY(config->llm.type, "cloud");
+   safe_strscpy(config->llm.type, "cloud");
    config->llm.max_tokens = 16384; /* Generous, universally-safe ceiling (= GPT-4o max output,
                                       well within Claude 4.x 64K); a ceiling, not a target */
 
@@ -124,31 +116,33 @@ void config_set_defaults(dawn_config_t *config) {
    config->llm.cloud.vision_enabled = true;
    config->llm.cloud.use_openrouter = false; /* Direct providers by default */
    /* OpenAI endpoint selection: auto routes gpt-5.4* to /v1/responses */
-   SAFE_COPY(config->llm.cloud.openai_use_responses_api, "auto");
+   safe_strscpy(config->llm.cloud.openai_use_responses_api, "auto");
 
    /* Default OpenAI model list (first entry is default).
     * gpt-5.x families route through /v1/responses; older entries use chat completions. */
    config->llm.cloud.openai_models_count = 6;
-   SAFE_COPY(config->llm.cloud.openai_models[0], LLM_DEFAULT_OPENAI_MODEL); /* gpt-5.6-luna */
-   SAFE_COPY(config->llm.cloud.openai_models[1], "gpt-5.6-terra");
-   SAFE_COPY(config->llm.cloud.openai_models[2], "gpt-5.6-sol");
-   SAFE_COPY(config->llm.cloud.openai_models[3], "gpt-5.5");
-   SAFE_COPY(config->llm.cloud.openai_models[4], "gpt-5.4-mini");
-   SAFE_COPY(config->llm.cloud.openai_models[5], "gpt-5.4-nano");
+   safe_strscpy(config->llm.cloud.openai_models[0], LLM_DEFAULT_OPENAI_MODEL); /* gpt-5.6-luna */
+   safe_strscpy(config->llm.cloud.openai_models[1], "gpt-5.6-terra");
+   safe_strscpy(config->llm.cloud.openai_models[2], "gpt-5.6-sol");
+   safe_strscpy(config->llm.cloud.openai_models[3], "gpt-5.5");
+   safe_strscpy(config->llm.cloud.openai_models[4], "gpt-5.4-mini");
+   safe_strscpy(config->llm.cloud.openai_models[5], "gpt-5.4-nano");
    config->llm.cloud.openai_default_model_idx = 0;
 
    /* Default Claude model list (first entry is default) */
    config->llm.cloud.claude_models_count = 4;
-   SAFE_COPY(config->llm.cloud.claude_models[0], LLM_DEFAULT_CLAUDE_MODEL); /* claude-haiku-4-5 */
-   SAFE_COPY(config->llm.cloud.claude_models[1], "claude-sonnet-5");
-   SAFE_COPY(config->llm.cloud.claude_models[2], "claude-opus-4-8");
-   SAFE_COPY(config->llm.cloud.claude_models[3], "claude-opus-5");
+   safe_strscpy(config->llm.cloud.claude_models[0],
+                LLM_DEFAULT_CLAUDE_MODEL); /* claude-haiku-4-5 */
+   safe_strscpy(config->llm.cloud.claude_models[1], "claude-sonnet-5");
+   safe_strscpy(config->llm.cloud.claude_models[2], "claude-opus-4-8");
+   safe_strscpy(config->llm.cloud.claude_models[3], "claude-opus-5");
    config->llm.cloud.claude_default_model_idx = 0;
 
    /* Default Gemini model list (first entry is default) */
    config->llm.cloud.gemini_models_count = 2;
-   SAFE_COPY(config->llm.cloud.gemini_models[0], LLM_DEFAULT_GEMINI_MODEL); /* gemini-3.7-flash */
-   SAFE_COPY(config->llm.cloud.gemini_models[1], "gemini-3.1-pro-preview");
+   safe_strscpy(config->llm.cloud.gemini_models[0],
+                LLM_DEFAULT_GEMINI_MODEL); /* gemini-3.7-flash */
+   safe_strscpy(config->llm.cloud.gemini_models[1], "gemini-3.1-pro-preview");
    config->llm.cloud.gemini_default_model_idx = 0;
 
    /* Default OpenRouter model list (curated favorites shown in the header switcher;
@@ -156,25 +150,25 @@ void config_set_defaults(dawn_config_t *config) {
     * verify against https://openrouter.ai/models as the catalog shifts.  Mirrors the
     * per-provider lists above (default gpt-5.6-luna to match the OpenAI default). */
    config->llm.cloud.openrouter_models_count = 12;
-   SAFE_COPY(config->llm.cloud.openrouter_models[0], "openai/gpt-5.6-luna");
-   SAFE_COPY(config->llm.cloud.openrouter_models[1], "openai/gpt-5.6-terra");
-   SAFE_COPY(config->llm.cloud.openrouter_models[2], "openai/gpt-5.6-sol");
-   SAFE_COPY(config->llm.cloud.openrouter_models[3], "openai/gpt-5.5");
-   SAFE_COPY(config->llm.cloud.openrouter_models[4], "openai/gpt-5.4-mini");
-   SAFE_COPY(config->llm.cloud.openrouter_models[5], "openai/gpt-5.4-nano");
-   SAFE_COPY(config->llm.cloud.openrouter_models[6], "anthropic/claude-haiku-4.5");
-   SAFE_COPY(config->llm.cloud.openrouter_models[7], "anthropic/claude-sonnet-5");
-   SAFE_COPY(config->llm.cloud.openrouter_models[8], "anthropic/claude-opus-4.8");
-   SAFE_COPY(config->llm.cloud.openrouter_models[9], "anthropic/claude-opus-5");
-   SAFE_COPY(config->llm.cloud.openrouter_models[10], "google/gemini-3.7-flash");
-   SAFE_COPY(config->llm.cloud.openrouter_models[11], "google/gemini-3.1-pro-preview");
+   safe_strscpy(config->llm.cloud.openrouter_models[0], "openai/gpt-5.6-luna");
+   safe_strscpy(config->llm.cloud.openrouter_models[1], "openai/gpt-5.6-terra");
+   safe_strscpy(config->llm.cloud.openrouter_models[2], "openai/gpt-5.6-sol");
+   safe_strscpy(config->llm.cloud.openrouter_models[3], "openai/gpt-5.5");
+   safe_strscpy(config->llm.cloud.openrouter_models[4], "openai/gpt-5.4-mini");
+   safe_strscpy(config->llm.cloud.openrouter_models[5], "openai/gpt-5.4-nano");
+   safe_strscpy(config->llm.cloud.openrouter_models[6], "anthropic/claude-haiku-4.5");
+   safe_strscpy(config->llm.cloud.openrouter_models[7], "anthropic/claude-sonnet-5");
+   safe_strscpy(config->llm.cloud.openrouter_models[8], "anthropic/claude-opus-4.8");
+   safe_strscpy(config->llm.cloud.openrouter_models[9], "anthropic/claude-opus-5");
+   safe_strscpy(config->llm.cloud.openrouter_models[10], "google/gemini-3.7-flash");
+   safe_strscpy(config->llm.cloud.openrouter_models[11], "google/gemini-3.1-pro-preview");
    config->llm.cloud.openrouter_default_model_idx = 0; /* openai/gpt-5.6-luna */
 
    /* LLM Local */
-   SAFE_COPY(config->llm.local.endpoint, "http://127.0.0.1:8080");
-   config->llm.local.model[0] = '\0';             /* Server decides */
-   config->llm.local.vision_enabled = false;      /* Most local models don't support vision */
-   SAFE_COPY(config->llm.local.provider, "auto"); /* Auto-detect Ollama vs llama.cpp */
+   safe_strscpy(config->llm.local.endpoint, "http://127.0.0.1:8080");
+   config->llm.local.model[0] = '\0';                /* Server decides */
+   config->llm.local.vision_enabled = false;         /* Most local models don't support vision */
+   safe_strscpy(config->llm.local.provider, "auto"); /* Auto-detect Ollama vs llama.cpp */
 
    /* LLM Tools */
    config->llm.tools.enabled = true; /* Native tool calling on by default */
@@ -182,12 +176,12 @@ void config_set_defaults(dawn_config_t *config) {
    /* LLM Silent-Observe (Phase 0 of Dynamic Context Injection)
     * Default to local provider so background observations don't accrue cloud
     * spend.  Operator can flip to a cloud provider with a configured key. */
-   SAFE_COPY(config->llm.silent_observe.provider, "local");
+   safe_strscpy(config->llm.silent_observe.provider, "local");
    config->llm.silent_observe.model[0] = '\0'; /* Empty = let provider pick */
 
    /* LLM Thinking/Reasoning */
-   SAFE_COPY(config->llm.thinking.mode, "disabled");           /* "disabled", "enabled", "auto" */
-   SAFE_COPY(config->llm.thinking.reasoning_effort, "medium"); /* Controls budget via dropdown */
+   safe_strscpy(config->llm.thinking.mode, "disabled"); /* "disabled", "enabled", "auto" */
+   safe_strscpy(config->llm.thinking.reasoning_effort, "medium"); /* Controls budget via dropdown */
    config->llm.thinking.budget_low = LLM_THINKING_BUDGET_LOW_DEFAULT;
    config->llm.thinking.budget_medium = LLM_THINKING_BUDGET_MEDIUM_DEFAULT;
    config->llm.thinking.budget_high = LLM_THINKING_BUDGET_HIGH_DEFAULT;
@@ -205,22 +199,23 @@ void config_set_defaults(dawn_config_t *config) {
    config->llm.rate_limit_rpm = 40;            /* 20% headroom under typical 50 RPM limit */
 
    /* Search */
-   SAFE_COPY(config->search.engine, "searxng");
-   SAFE_COPY(config->search.endpoint, "http://127.0.0.1:8384");
+   safe_strscpy(config->search.engine, "searxng");
+   safe_strscpy(config->search.endpoint, "http://127.0.0.1:8384");
 
    /* Search Summarizer */
-   SAFE_COPY(config->search.summarizer.backend, "tfidf"); /* Fast local extractive summarization */
+   safe_strscpy(config->search.summarizer.backend,
+                "tfidf"); /* Fast local extractive summarization */
    config->search.summarizer.threshold_bytes = 4096;
    config->search.summarizer.target_words = 600;
    config->search.summarizer.target_ratio = 0.2f; /* Keep 20% of sentences for TF-IDF */
 
    /* Search Title Filters - exclude low-quality SEO spam from news results */
-   SAFE_COPY(config->search.title_filters[0], "wordle");
-   SAFE_COPY(config->search.title_filters[1], "connections hints");
-   SAFE_COPY(config->search.title_filters[2], "connections answers");
-   SAFE_COPY(config->search.title_filters[3], "nyt connections");
-   SAFE_COPY(config->search.title_filters[4], "puzzle hints");
-   SAFE_COPY(config->search.title_filters[5], "puzzle answers");
+   safe_strscpy(config->search.title_filters[0], "wordle");
+   safe_strscpy(config->search.title_filters[1], "connections hints");
+   safe_strscpy(config->search.title_filters[2], "connections answers");
+   safe_strscpy(config->search.title_filters[3], "nyt connections");
+   safe_strscpy(config->search.title_filters[4], "puzzle hints");
+   safe_strscpy(config->search.title_filters[5], "puzzle answers");
    config->search.title_filters_count = 6;
 
    /* URL Fetcher - whitelist is zeroed by memset */
@@ -228,26 +223,26 @@ void config_set_defaults(dawn_config_t *config) {
 
    /* Fallback engine selection — preserves existing FlareSolverr default;
     * users opt into Tavily by changing this string. */
-   SAFE_COPY(config->url_fetcher.fallback, "flaresolverr");
+   safe_strscpy(config->url_fetcher.fallback, "flaresolverr");
 
    /* FlareSolverr */
    config->url_fetcher.flaresolverr.enabled = false;
-   SAFE_COPY(config->url_fetcher.flaresolverr.endpoint, "http://127.0.0.1:8191/v1");
+   safe_strscpy(config->url_fetcher.flaresolverr.endpoint, "http://127.0.0.1:8191/v1");
    config->url_fetcher.flaresolverr.timeout_sec = 10;
    config->url_fetcher.flaresolverr.max_response_bytes = 4 * 1024 * 1024; /* 4MB */
 
    /* Tavily /extract (no enabled flag — selection is via url_fetcher.fallback) */
    config->url_fetcher.tavily.timeout_sec = 30;
    config->url_fetcher.tavily.max_response_bytes = 1 * 1024 * 1024; /* 1MB */
-   SAFE_COPY(config->url_fetcher.tavily.extract_depth, "advanced");
+   safe_strscpy(config->url_fetcher.tavily.extract_depth, "advanced");
    config->url_fetcher.tavily.rate_limit_per_minute = 10;
    config->url_fetcher.tavily.rate_limit_per_hour = 100;
    config->url_fetcher.tavily.rate_limit_per_day = 500;
 
    /* MQTT - matching dawn.h */
    config->mqtt.enabled = true;
-   SAFE_COPY(config->mqtt.broker, "127.0.0.1"); /* MQTT_IP */
-   config->mqtt.port = 1883;                    /* MQTT_PORT */
+   safe_strscpy(config->mqtt.broker, "127.0.0.1"); /* MQTT_IP */
+   config->mqtt.port = 1883;                       /* MQTT_PORT */
    config->mqtt.tls = false;
    config->mqtt.tls_ca_cert[0] = '\0';
    config->mqtt.tls_cert_path[0] = '\0';
@@ -267,14 +262,14 @@ void config_set_defaults(dawn_config_t *config) {
    config->webui.port = 3000; /* "I love you 3000" */
    config->webui.max_clients = 4;
    config->webui.audio_chunk_ms = 100; /* 100ms chunks for lower VAD latency */
-   SAFE_COPY(config->webui.www_path, "www");
+   safe_strscpy(config->webui.www_path, "www");
    config->webui.aurora_path[0] = '\0'; /* Aurora subpath serving disabled by default */
-   SAFE_COPY(config->webui.bind_address, "0.0.0.0");
+   safe_strscpy(config->webui.bind_address, "0.0.0.0");
    config->webui.https = false;
    config->webui.ssl_cert_path[0] = '\0';
    config->webui.ssl_key_path[0] = '\0';
    config->webui.export_max_messages = 5000;
-   SAFE_COPY(config->webui.export_format, "json");
+   safe_strscpy(config->webui.export_format, "json");
    config->webui.allowed_origins[0] = '\0'; /* same-origin only by default */
 
    /* Images - storage settings for vision uploads */
@@ -321,8 +316,8 @@ void config_set_defaults(dawn_config_t *config) {
    /* Default = 3072 (~768 tokens of verbatim source per memory tool call).
     * See dawn_config.h source_budget_chars for the bench-validated lift table. */
    config->memory.source_budget_chars = 3072;
-   SAFE_COPY(config->memory.extraction_provider, "local");
-   SAFE_COPY(config->memory.extraction_model, "qwen2.5:7b");
+   safe_strscpy(config->memory.extraction_provider, "local");
+   safe_strscpy(config->memory.extraction_model, "qwen2.5:7b");
    config->memory.extraction_timeout_ms = 120000; /* 2 minutes for fact extraction */
    config->memory.pruning_enabled = true;
    config->memory.prune_superseded_days = 30; /* Delete old superseded facts after 30 days */
@@ -352,12 +347,12 @@ void config_set_defaults(dawn_config_t *config) {
        0.0f; /* Phase 2: inert until deliberately enabled */
 
    /* Memory embeddings (semantic search) */
-   SAFE_COPY(config->memory.embedding_provider, "onnx");
+   safe_strscpy(config->memory.embedding_provider, "onnx");
    /* embedding_model, embedding_endpoint: empty (memset zero) — ONNX needs neither */
    config->memory.embedding_keyword_weight = 0.3f;
    config->memory.embedding_vector_weight = 0.7f;
    config->memory.embedding_backfill_on_startup = true;
-   SAFE_COPY(config->memory.model_id, "bge-small-en-v1.5-int8");
+   safe_strscpy(config->memory.model_id, "bge-small-en-v1.5-int8");
    config->memory.recompute_on_model_change = true;
    config->memory.recompute_batch_size = 50;
    config->memory.recompute_batch_sleep_ms = 100;
@@ -549,12 +544,12 @@ void config_set_defaults(dawn_config_t *config) {
    config->debug.mic_record = false;
    config->debug.asr_record = false;
    config->debug.aec_record = false;
-   SAFE_COPY(config->debug.record_path, "/tmp");
+   safe_strscpy(config->debug.record_path, "/tmp");
    config->debug.silent_observe_test_endpoint = false; /* Off by default — dev only */
 
    /* Paths */
-   SAFE_COPY(config->paths.data_dir, "~/.local/share/dawn"); /* Database storage directory */
-   SAFE_COPY(config->paths.music_dir, "~/Music");
+   safe_strscpy(config->paths.data_dir, "~/.local/share/dawn"); /* Database storage directory */
+   safe_strscpy(config->paths.music_dir, "~/Music");
 
    /* Music - metadata indexing */
    config->music.scan_interval_minutes = 60; /* Rescan every hour */
@@ -574,7 +569,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->scheduler.max_events_per_user = 50;
    config->scheduler.max_events_total = 200;
    config->scheduler.missed_event_recovery = true;
-   SAFE_COPY(config->scheduler.missed_task_policy, "skip");
+   safe_strscpy(config->scheduler.missed_task_policy, "skip");
    config->scheduler.missed_task_max_age_sec = 300;
    config->scheduler.alarm_timeout_sec = 60;
    config->scheduler.alarm_volume = 80;
@@ -636,20 +631,20 @@ void config_set_defaults(dawn_config_t *config) {
 
    /* OTA (over-the-air satellite updates) — opt-in; serve disabled by default */
    config->ota.enabled = false;
-   SAFE_COPY(config->ota.release_dir, "/var/lib/dawn/ota");
+   safe_strscpy(config->ota.release_dir, "/var/lib/dawn/ota");
    config->ota.download_token_ttl_sec = 120; /* 2 min: enough to start the pull */
    config->ota.require_tls = true;           /* never serve OTA over plaintext */
 
    /* Code projects (coding harness) — disabled by default; secure-by-default caps. */
-   SAFE_COPY(config->code_projects.source_root, "/var/lib/dawn/source");
-   SAFE_COPY(config->code_projects.default_index_mode, "full");
-   SAFE_COPY(config->code_projects.import_user_required, "admin");
+   safe_strscpy(config->code_projects.source_root, "/var/lib/dawn/source");
+   safe_strscpy(config->code_projects.default_index_mode, "full");
+   safe_strscpy(config->code_projects.import_user_required, "admin");
    config->code_projects.max_repo_size_mb = 2048;
    config->code_projects.max_file_count = 200000;
    config->code_projects.max_path_depth = 20;
    config->code_projects.clone_depth = 0;
-   SAFE_COPY(config->code_projects.allowed_host_pattern,
-             "^([a-z0-9-]+\\.)?(github\\.com|gitlab\\.com|codeberg\\.org|bitbucket\\.org)$");
+   safe_strscpy(config->code_projects.allowed_host_pattern,
+                "^([a-z0-9-]+\\.)?(github\\.com|gitlab\\.com|codeberg\\.org|bitbucket\\.org)$");
 
    /* Music - streaming settings */
    config->music.streaming_enabled = true;

@@ -48,6 +48,7 @@
 #include "tts/text_to_speech.h"
 #include "ui/metrics.h"
 #include "utils/sentence_buffer.h"
+#include "utils/string_utils.h"
 
 // Provider implementations - include if compile-time keys exist OR if we might have runtime keys
 // Note: The actual provider files (llm_openai.c, llm_claude.c) are always compiled
@@ -220,6 +221,18 @@ int llm_get_current_resolved_config(llm_resolved_config_t *config_out) {
 // Note: curl_buffer_t uses 'data' field, MemoryStruct used 'memory' field.
 // Both are handled by the common curl_buffer_write_callback().
 
+/* Copy up to src_len bytes of src (a substring, not necessarily null-terminated) into dst,
+ * always null-terminating within dst_size. A NULL/zero-size dst is a no-op; src must be
+ * non-NULL (all call sites pass a validated pointer or a string literal). */
+static void copy_bounded(char *dst, size_t dst_size, const char *src, size_t src_len) {
+   if (dst == NULL || dst_size == 0) {
+      return;
+   }
+   size_t n = src_len < dst_size - 1 ? src_len : dst_size - 1;
+   memcpy(dst, src, n);
+   dst[n] = '\0';
+}
+
 /**
  * @brief Extracts the host and port from a URL, removing protocol and paths.
  *
@@ -227,15 +240,20 @@ int llm_get_current_resolved_config(llm_resolved_config_t *config_out) {
  * URLs. If no port is provided, it defaults to port 80 for http and 443 for https.
  *
  * @param url The input URL string.
- * @param host Output buffer to store the extracted host (must be pre-allocated).
- * @param port Output buffer to store the extracted port (must be large enough for the port
- * number).
+ * @param host Output buffer to store the extracted host.
+ * @param host_size Size of the host buffer.
+ * @param port Output buffer to store the extracted port number.
+ * @param port_size Size of the port buffer.
  * @return int Returns 0 on success, 1 on failure.
  */
-static int extract_host_and_port(const char *url, char *host, char *port) {
+static int extract_host_and_port(const char *url,
+                                 char *host,
+                                 size_t host_size,
+                                 char *port,
+                                 size_t port_size) {
    // Validate the input arguments
-   if (url == NULL || host == NULL || port == NULL) {
-      OLOG_ERROR("Error: NULL argument passed to extract_host_and_port.");
+   if (url == NULL || host == NULL || port == NULL || host_size == 0 || port_size == 0) {
+      OLOG_ERROR("Error: invalid argument passed to extract_host_and_port.");
       return 1;
    }
 
@@ -246,32 +264,28 @@ static int extract_host_and_port(const char *url, char *host, char *port) {
 
    const char *start = url;
 
-   // Determine protocol and set default port
+   // Determine protocol and set default port (defaults are short; bounded copy for safety).
+   const char *default_port = "80";
    if (strncmp(url, "http://", 7) == 0) {
-      start = url + 7;     // Skip "http://"
-      strcpy(port, "80");  // Default port for http
+      start = url + 7;  // Skip "http://"
    } else if (strncmp(url, "https://", 8) == 0) {
-      start = url + 8;      // Skip "https://"
-      strcpy(port, "443");  // Default port for https
-   } else {
-      // If no recognizable protocol, assume http and continue
-      strcpy(port, "80");
+      start = url + 8;  // Skip "https://"
+      default_port = "443";
    }
+   // No recognizable protocol falls through with start = url and the http default.
+   copy_bounded(port, port_size, default_port, strlen(default_port));
 
-   // Find the end of the host part (either ':' for port or '/' for path)
+   // Host runs from start up to the first ':' (port) or '/' (path), whichever comes first.
    const char *end = strpbrk(start, ":/");
-   if (end == NULL) {
-      // No port or path, the host is the entire remaining string
-      strcpy(host, start);
-   } else if (*end == ':') {
-      // Extract the host and port
-      strncpy(host, start, end - start);
-      host[end - start] = '\0';  // Null-terminate the host
-      strcpy(port, end + 1);     // Port starts after ':'
-   } else {
-      // Extract the host only (no port, but has a path)
-      strncpy(host, start, end - start);
-      host[end - start] = '\0';  // Null-terminate the host
+   size_t host_len = end ? (size_t)(end - start) : strlen(start);
+   copy_bounded(host, host_size, start, host_len);
+
+   // A ':' means an explicit port follows, up to the next '/' (path) or end of string.
+   if (end != NULL && *end == ':') {
+      const char *port_start = end + 1;
+      const char *path = strchr(port_start, '/');
+      size_t port_len = path ? (size_t)(path - port_start) : strlen(port_start);
+      copy_bounded(port, port_size, port_start, port_len);
    }
 
    return 0;
@@ -282,7 +296,7 @@ int llm_check_connection(const char *url, int timeout_seconds) {
    char port[6];
 
    // Extract host from the URL (ignores path and protocol)
-   if (extract_host_and_port(url, host, port) != 0) {
+   if (extract_host_and_port(url, host, sizeof(host), port, sizeof(port)) != 0) {
       OLOG_ERROR("Error: Invalid URL format");
       return 0;
    }
@@ -1039,7 +1053,7 @@ char *llm_chat_completion(struct json_object *conversation_history,
          url = resolved.endpoint ? resolved.endpoint : llm_url;
          api_key = resolved.api_key;
          /* Copy model to local buffer (resolved.model may be dangling pointer) */
-         LLM_COPY_MODEL_SAFE(model_buf, resolved.model);
+         safe_strscpy(model_buf, resolved.model);
          if (model_buf[0] != '\0') {
             model = model_buf;
          }
@@ -1157,7 +1171,7 @@ char *llm_chat_completion_streaming(struct json_object *conversation_history,
          url = resolved.endpoint ? resolved.endpoint : llm_url;
          api_key = resolved.api_key;
          /* Copy model to local buffer (resolved.model may be dangling pointer) */
-         LLM_COPY_MODEL_SAFE(model_buf, resolved.model);
+         safe_strscpy(model_buf, resolved.model);
          if (model_buf[0] != '\0') {
             model = model_buf;
          }

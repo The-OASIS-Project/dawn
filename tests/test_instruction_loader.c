@@ -48,7 +48,7 @@ static void write_file(const char *path, const char *content) {
    }
 }
 
-static void setup_test_files(void) {
+static void __attribute__((unused)) setup_test_files(void) {
    mkdir(TEST_DIR, 0755);
    mkdir(TEST_DIR "/" TOOL_NAME, 0755);
 
@@ -58,7 +58,7 @@ static void setup_test_files(void) {
    write_file(TEST_DIR "/" TOOL_NAME "/empty.md", "");
 }
 
-static void cleanup_test_files(void) {
+static void __attribute__((unused)) cleanup_test_files(void) {
    unlink(TEST_DIR "/" TOOL_NAME "/_core.md");
    unlink(TEST_DIR "/" TOOL_NAME "/formal.md");
    unlink(TEST_DIR "/" TOOL_NAME "/casual.md");

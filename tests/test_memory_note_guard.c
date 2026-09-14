@@ -154,7 +154,7 @@ static char *edit_args_json(const char *label, const char *find, const char *rep
    return s;
 }
 
-static char *append_args_json(const char *label, const char *text) {
+static __attribute__((unused)) char *append_args_json(const char *label, const char *text) {
    struct json_object *o = json_object_new_object();
    json_object_object_add(o, "action", json_object_new_string("append"));
    json_object_object_add(o, "label", json_object_new_string(label));

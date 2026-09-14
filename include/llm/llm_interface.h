@@ -143,7 +143,7 @@ typedef struct {
  *
  * WARNING: Pointers reference internal/stack memory that may become invalid
  * after llm_resolve_config() returns. Callers MUST copy string fields to local
- * buffers immediately using LLM_COPY_MODEL_SAFE() before any function calls.
+ * buffers immediately using safe_strscpy() before any function calls.
  */
 typedef struct {
    llm_type_t type;                              /**< Resolved LLM type */
@@ -161,31 +161,6 @@ typedef struct {
    char reasoning_effort[LLM_THINKING_MODE_MAX]; /**< Reasoning effort: low, medium, high */
    int timeout_ms; /**< Per-request timeout (0 = use global default) */
 } llm_resolved_config_t;
-
-/**
- * @brief Safely copy a model name to a local buffer
- *
- * Use this macro immediately after llm_resolve_config() to copy string fields
- * that may become dangling pointers. The macro handles NULL and empty strings.
- *
- * @param dst    Destination buffer (char array)
- * @param src    Source string (may be NULL)
- *
- * Example:
- *   llm_resolved_config_t resolved;
- *   char model_buf[LLM_MODEL_NAME_MAX];
- *   llm_resolve_config(&session_config, &resolved);
- *   LLM_COPY_MODEL_SAFE(model_buf, resolved.model);
- */
-#define LLM_COPY_MODEL_SAFE(dst, src)            \
-   do {                                          \
-      if ((src) && (src)[0] != '\0') {           \
-         strncpy((dst), (src), sizeof(dst) - 1); \
-         (dst)[sizeof(dst) - 1] = '\0';          \
-      } else {                                   \
-         (dst)[0] = '\0';                        \
-      }                                          \
-   } while (0)
 
 /**
  * @brief Initialize the LLM system

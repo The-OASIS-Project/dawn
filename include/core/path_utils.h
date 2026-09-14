@@ -28,6 +28,11 @@
 #include <stddef.h>
 #include <sys/types.h>
 
+/* safe_strncpy() is the project's canonical bounded string copy; it lives in the
+ * shared string utilities.  Included here so existing path_utils.h consumers that
+ * call safe_strncpy() keep compiling after the definition was de-duplicated. */
+#include "utils/string_utils.h"
+
 /**
  * @brief Expand tilde in path to home directory
  *
@@ -71,20 +76,6 @@ bool path_canonicalize(const char *path, char *canonical, size_t canonical_size)
  * @note Both paths must exist for this check to succeed.
  */
 bool path_is_within_root(const char *path, const char *root_dir);
-
-/**
- * @brief Copy string safely with guaranteed null termination
- *
- * Unlike strncpy(), this always null-terminates the destination.
- * Silently truncates if source is longer than destination.
- *
- * @param dst Destination buffer
- * @param src Source string (may be NULL)
- * @param dst_size Size of destination buffer
- *
- * @note If src is NULL, dst is set to empty string.
- */
-void safe_strncpy(char *dst, const char *src, size_t dst_size);
 
 /**
  * @brief Ensure parent directory exists for a file path

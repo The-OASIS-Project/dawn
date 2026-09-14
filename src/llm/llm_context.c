@@ -37,6 +37,7 @@
 #include "config/config_parser.h"
 #include "config/dawn_config.h"
 #include "core/curl_buffer.h"
+#include "core/path_utils.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "llm/llm_interface.h"
@@ -49,10 +50,6 @@
 #ifdef ENABLE_WEBUI
 #include "webui/webui_server.h"
 #endif
-
-/* Forward declaration — avoid including path_utils.h which conflicts with
- * string_utils.h's static inline safe_strncpy */
-bool path_ensure_parent_dir(const char *file_path);
 
 static int estimate_tokens_range(struct json_object *history, int start_idx, int end_idx);
 
