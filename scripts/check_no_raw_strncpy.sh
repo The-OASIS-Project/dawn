@@ -34,6 +34,7 @@ cd "$REPO_ROOT"
 # commit. When every source directory is listed, the migration is complete.
 COVERED_DIRS=(
    src
+   dawn-admin
 )
 
 # Raw strncpy the migration replaces. safe_strncpy/safe_strscpy are the

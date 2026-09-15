@@ -44,6 +44,7 @@ int admin_client_connect(void) {
 
    /* Use abstract socket namespace (Linux-specific) */
    addr.sun_path[0] = '\0';
+   /* strncpy-ok: abstract socket path, leading NUL + bounded non-terminated field */
    strncpy(addr.sun_path + 1, ADMIN_SOCKET_ABSTRACT_NAME, sizeof(addr.sun_path) - 2);
 
    socklen_t addr_len = offsetof(struct sockaddr_un, sun_path) + 1 +

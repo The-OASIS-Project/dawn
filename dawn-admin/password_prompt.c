@@ -32,6 +32,8 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include "utils/string_utils.h"
+
 /* Saved terminal settings for signal handler restoration */
 static struct termios s_saved_term;
 static volatile sig_atomic_t s_term_modified = 0;
@@ -250,8 +252,7 @@ int prompt_input(const char *prompt, char *buf, size_t buflen) {
    if (env_var != NULL) {
       const char *env_value = getenv(env_var);
       if (env_value != NULL) {
-         strncpy(buf, env_value, buflen - 1);
-         buf[buflen - 1] = '\0';
+         safe_strncpy(buf, env_value, buflen);
          fprintf(stderr, "Note: Using value from %s environment variable\n", env_var);
          return 0;
       }

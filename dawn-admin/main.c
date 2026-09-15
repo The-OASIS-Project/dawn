@@ -32,6 +32,7 @@
 
 #include "password_prompt.h"
 #include "socket_client.h"
+#include "utils/string_utils.h"
 
 #define VERSION "2.0.0"
 
@@ -1002,7 +1003,7 @@ static int print_conv_callback(const admin_conversation_entry_t *conv, void *ctx
 
    /* Truncate title for display */
    char title[41] = { 0 };
-   strncpy(title, conv->title, 40);
+   safe_strscpy(title, conv->title);
    if (strlen(conv->title) > 40) {
       strcpy(title + 37, "...");
    }
