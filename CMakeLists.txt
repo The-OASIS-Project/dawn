@@ -62,18 +62,27 @@ message(STATUS "Building for platform: ${PLATFORM}")
 # define it here (a -D would redefine the header's value and warn).  Only GIT_SHA,
 # computed at configure time, is passed through as a -D below.
 
-# Try to get the current Git SHA
-execute_process(
-    COMMAND git rev-parse --short HEAD
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    OUTPUT_VARIABLE GIT_SHA
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-    RESULT_VARIABLE GIT_SHA_RESULT
-)
+# GIT_SHA may be supplied externally with -DGIT_SHA=... — the Docker build does
+# this, since its build context excludes .git (so the git command below can't
+# resolve it and would otherwise stamp the image "unknown").  Only fall back to
+# deriving it from git when it was not passed in.
+if(NOT DEFINED GIT_SHA)
+    execute_process(
+        COMMAND git rev-parse --short HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE GIT_SHA
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE GIT_SHA_RESULT
+    )
+    # Check if the command was successful
+    if(NOT GIT_SHA_RESULT EQUAL 0)
+        set(GIT_SHA "unknown")
+    endif()
+endif()
 
-# Check if the command was successful
-if(NOT GIT_SHA_RESULT EQUAL 0)
+# An empty override (e.g. --build-arg GIT_SHA= with no value) stamps "unknown".
+if(GIT_SHA STREQUAL "")
     set(GIT_SHA "unknown")
 endif()
 

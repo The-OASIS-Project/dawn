@@ -120,7 +120,12 @@ WORKDIR /src
 # When building via CI, use: git checkout --recurse-submodules
 # When building locally: git submodule update --init whisper.cpp
 
-RUN cmake --preset server \
+# Git SHA stamped into the binary's version string. The build context excludes
+# .git (see .dockerignore), so CMake can't derive it here — pass it in with
+# --build-arg GIT_SHA=$(git rev-parse --short HEAD). Defaults to "unknown".
+ARG GIT_SHA=unknown
+
+RUN cmake --preset server -DGIT_SHA="${GIT_SHA}" \
     && make -C build-server -j"$(nproc)"
 
 RUN cmake --install build-server --prefix /opt/dawn

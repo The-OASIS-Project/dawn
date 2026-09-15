@@ -116,7 +116,9 @@ jobs:
           submodules: recursive
 
       - name: Build Docker image
-        run: docker build -t dawn .
+        # Pass the short commit SHA so the image's version string identifies its
+        # build (the build context excludes .git, so CMake can't derive it).
+        run: docker build --build-arg GIT_SHA="${GITHUB_SHA::7}" -t dawn .
 
       - name: Smoke test (daemon links + starts)
         run: docker run --rm dawn --help
