@@ -212,7 +212,7 @@ int url_fetcher_init(void) {
 
    // Load whitelist entries from config
    for (int i = 0; i < g_config.url_fetcher.whitelist_count; i++) {
-      if (g_config.url_fetcher.whitelist[i] && g_config.url_fetcher.whitelist[i][0] != '\0') {
+      if (g_config.url_fetcher.whitelist[i][0] != '\0') {
          if (url_whitelist_add(g_config.url_fetcher.whitelist[i]) == 0) {
             OLOG_INFO("url_fetcher: Loaded whitelist entry from config: %s",
                       g_config.url_fetcher.whitelist[i]);

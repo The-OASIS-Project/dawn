@@ -111,6 +111,12 @@ static bool validate_contact_value(const char *field_type,
          }
       }
 
+      /* Each branch bounds j (the stripped digit count) to a small exact value,
+       * so the E.164 form always fits in out (MAX_CONTACT_VALUE_LEN-sized); the
+       * compiler can't carry the branch constraint into strlen(stripped), so it
+       * flags a truncation that can't occur. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
       if (stripped[0] == '+') {
          if (j < 8 || j > 16) {
             *err_msg = "Phone number must be 7-15 digits after +";
@@ -125,6 +131,7 @@ static bool validate_contact_value(const char *field_type,
          *err_msg = "Invalid phone number. Enter 10-digit US number or +country code with number.";
          return false;
       }
+#pragma GCC diagnostic pop
       return true;
    }
 

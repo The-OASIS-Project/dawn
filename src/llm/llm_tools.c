@@ -1459,7 +1459,14 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
                      json_object_put(args);
                      return 1;
                   }
+                  /* The `need >= remaining` guard above proves this snprintf cannot
+                   * truncate (need = field_name + val_str + 4 delimiters < remaining),
+                   * but the compiler can't correlate the strlen-based guard with the
+                   * buffer size, so it flags a truncation that can't occur. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
                   snprintf(value_buf + cur_len, remaining, "::%s::%s", param->field_name, val_str);
+#pragma GCC diagnostic pop
                } else if (value_buf[0] == '\0') {
                   /* Fallback: store directly if value is empty */
                   safe_strncpy(value_buf, val_str, sizeof(value_buf));

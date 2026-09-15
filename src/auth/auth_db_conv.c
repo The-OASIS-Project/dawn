@@ -1884,9 +1884,12 @@ void conv_generate_title(const char *content, char *title_out, size_t max_len) {
       cut_pos--;
    }
 
-   /* Copy and add ellipsis */
-   strncpy(title_out, content,
-           cut_pos); /* strncpy-ok: bounded substring, cut_pos <= target_len < max_len */
+   /* Copy the bounded substring and NUL-terminate. cut_pos <= target_len < max_len,
+    * and content has > target_len bytes here (the fits-entirely case returned above),
+    * so all cut_pos bytes are valid and the terminator lands in range. memcpy, not
+    * strncpy: the 3rd arg is an exact copy length, not a buffer capacity, and we add
+    * the NUL ourselves — strncpy's truncation/padding semantics don't apply. */
+   memcpy(title_out, content, cut_pos);
    title_out[cut_pos] = '\0';
 
    /* Trim trailing whitespace before ellipsis */

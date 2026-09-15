@@ -128,6 +128,10 @@ void *playFlacAudio(void *arg) {
    size_t output_buffer_frames = 0;
 
    int song_finished_naturally = 0;
+   /* Default to a natural finish: an early `goto cleanup` (open/alloc failure)
+    * reaches the cleanup block before this is computed below, and the drop-vs-drain
+    * choice there reads it — so it must be initialized on every path. */
+   int stopped_by_user = 0;
 
    /* Check that audio backend is initialized */
    if (audio_backend_get_type() == AUDIO_BACKEND_NONE) {
@@ -277,7 +281,7 @@ void *playFlacAudio(void *arg) {
       }
    }
 
-   int stopped_by_user = (getMusicPlay() == 0);
+   stopped_by_user = (getMusicPlay() == 0);
 
    if (stopped_by_user) {
       OLOG_INFO("Playback stopped by user");

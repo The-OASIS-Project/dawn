@@ -450,7 +450,9 @@ int messaging_deliver(const messaging_driver_t *drv,
     * prefix is plain ASCII (digits/slash/parens/space) — safe to prepend even
     * to Telegram HTML without escaping or unbalancing tags. */
    for (size_t i = 0; i < nparts; i++) {
-      char prefix[16] = { 0 };
+      /* "(%zu/%zu) ": two size_t are up to 20 digits each + 4 literal chars + NUL
+       * = 45 worst case; size for that so the prefix can never be truncated. */
+      char prefix[48] = { 0 };
       if (nparts > 1) {
          snprintf(prefix, sizeof(prefix), "(%zu/%zu) ", i + 1, nparts);
       }
