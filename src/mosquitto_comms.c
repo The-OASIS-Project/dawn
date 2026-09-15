@@ -157,6 +157,7 @@ static void executeJsonCommand(struct json_object *parsedJson, struct mosquitto 
             free(pending_command_result);
             pending_command_result = NULL;
             free(callback_result);
+            callback_result = NULL;
          } else {
             pending_command_result = temp;
 
