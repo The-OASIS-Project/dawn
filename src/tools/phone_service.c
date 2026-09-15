@@ -892,8 +892,7 @@ void phone_service_handle_event(const char *payload, int payload_len) {
          char preview[128] = "";
          if (body_len > 90) {
             memcpy(preview, body, 90);
-            preview[90] = '\0';
-            strncat(preview, "...", sizeof(preview) - strlen(preview) - 1);
+            memcpy(preview + 90, "...", sizeof("...")); /* 3 chars + NUL, fits in [128] */
          } else {
             memcpy(preview, body, body_len + 1);
          }

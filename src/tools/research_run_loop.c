@@ -298,7 +298,12 @@ static void research_report_label(int64_t run_id,
     * bytes (the label is emitted into a JSON WS frame — tool_desc_utf8_truncation). */
    sanitize_utf8_for_json(clean);
    if (truncated) {
-      strncat(clean, "…", sizeof(clean) - strlen(clean) - 1);
+      size_t clen = strlen(clean);
+      /* "…" is 3 UTF-8 bytes + NUL. Append only with room (memcpy, not strncat:
+       * exact length, no truncation-warning surface). */
+      if (clen + sizeof("…") <= sizeof(clean)) {
+         memcpy(clean + clen, "…", sizeof("…"));
+      }
    }
    snprintf(out, out_size, "Research #%lld: %s", (long long)run_id, clean);
 }

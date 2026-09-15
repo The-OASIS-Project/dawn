@@ -555,12 +555,11 @@ static char *handle_delete_sms(struct json_object *details, int user_id) {
       }
 
       /* Truncate body preview */
-      char preview[128];
+      char preview[128] = "";
       size_t blen = strlen(match.body);
       if (blen > 100) {
          memcpy(preview, match.body, 100);
-         preview[100] = '\0';
-         strncat(preview, "...", sizeof(preview) - strlen(preview) - 1);
+         memcpy(preview + 100, "...", sizeof("...")); /* 3 chars + NUL, fits in [128] */
       } else {
          memcpy(preview, match.body, blen + 1);
       }
@@ -965,12 +964,11 @@ static char *handle_sms_log(struct json_object *details, int user_id) {
          }
 
          /* Truncate body for log display */
-         char preview[200];
+         char preview[200] = "";
          size_t blen = strlen(entries[i].body);
          if (blen > 150) {
             memcpy(preview, entries[i].body, 150);
-            preview[150] = '\0';
-            strncat(preview, "...", sizeof(preview) - strlen(preview) - 1);
+            memcpy(preview + 150, "...", sizeof("...")); /* 3 chars + NUL, fits in [200] */
          } else {
             memcpy(preview, entries[i].body, blen + 1);
          }

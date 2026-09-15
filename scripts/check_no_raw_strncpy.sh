@@ -16,13 +16,13 @@
 # to it in the same commit that finishes converting that directory. Anything not
 # yet listed is not checked (still mid-migration).
 #
-# ESCAPE HATCH: a genuine, reviewed raw strncpy (e.g. a deliberate
+# ESCAPE HATCH: a genuine, reviewed raw strncpy/strncat (e.g. a deliberate
 # fixed-length substring copy where the 3rd arg is a copy length, not a buffer
 # capacity) is allowed with a  /* strncpy-ok: <reason> */  marker on the same
 # line OR the line immediately above (like NOLINTNEXTLINE).
 #
 # Usage:   ./scripts/check_no_raw_strncpy.sh
-# Exit:    0 = clean, 1 = a raw strncpy found in a covered directory
+# Exit:    0 = clean, 1 = a raw strncpy/strncat found in a covered directory
 ###############################################################################
 
 set -euo pipefail
@@ -37,11 +37,14 @@ COVERED_DIRS=(
    dawn-admin
 )
 
-# Raw strncpy the migration replaces. safe_strncpy/safe_strscpy are the
+# Raw strncpy/strncat the migration replaces. safe_strncpy/safe_strscpy are the
 # replacements, so the word boundary + trailing '(' avoids matching them.
-# (strncat is out of scope: the few remaining uses are the correctly-bounded
-# `sizeof(dst)-strlen(dst)-1` append idiom, which has no safe_ wrapper.)
-FORBIDDEN='(^|[^_[:alnum:]])strncpy[[:space:]]*\('
+# strncat is included: its bounded `sizeof(dst)-strlen(dst)-1` idiom trips GCC's
+# -Wstringop-truncation under -O2 on x86-64 (an arch the Jetson can't reproduce
+# locally, so it only surfaces in the docker CI gate). First-party code uses a
+# bounded memcpy with an explicit length instead; a genuinely-needed raw call can
+# still opt out with the marker below.
+FORBIDDEN='(^|[^_[:alnum:]])strn(cpy|cat)[[:space:]]*\('
 
 # Strip // line and /* */ block comments (preserving line numbers) so a prose
 # mention can't false-positive; then drop any line carrying the strncpy-ok
@@ -92,13 +95,13 @@ while IFS= read -r f; do
          # one on the next line.
          end=$(awk -v s="$ln" 'NR >= s && /;/ { print NR; exit }' "$f")
          [ -z "$end" ] && end=$((ln + 4))
-         if sed -n "${ln},${end}p" "$f" | grep -q 'strncpy-ok'; then
+         if sed -n "${ln},${end}p" "$f" | grep -qE 'strn(cpy|cat)-ok'; then
             continue
          fi
          if [ "$ln" -gt 1 ]; then
             above="$(sed -n "$((ln - 1))p" "$f")"
-            if printf '%s' "$above" | grep -q 'strncpy-ok' &&
-               ! printf '%s' "$above" | grep -qE '(^|[^_[:alnum:]])strncpy[[:space:]]*\('; then
+            if printf '%s' "$above" | grep -qE 'strn(cpy|cat)-ok' &&
+               ! printf '%s' "$above" | grep -qE '(^|[^_[:alnum:]])strn(cpy|cat)[[:space:]]*\('; then
                continue
             fi
          fi
@@ -112,11 +115,12 @@ done)
 
 if [ "$violations" -gt 0 ]; then
    echo ""
-   echo "check_no_raw_strncpy: FAILED -- $violations raw strncpy call(s) in a"
+   echo "check_no_raw_strncpy: FAILED -- $violations raw strncpy/strncat call(s) in a"
    echo "swept directory. Use safe_strscpy(dst, src) for a fixed-size array, or"
-   echo "safe_strncpy(dst, src, size) for a pointer with a known capacity. A genuine"
-   echo "fixed-length substring copy may be kept with a  /* strncpy-ok: <reason> */"
-   echo "marker on the same line."
+   echo "safe_strncpy(dst, src, size) for a pointer with a known capacity. For a bounded"
+   echo "append, use a length-checked memcpy (strncat's sizeof-strlen-1 idiom trips"
+   echo "-Wstringop-truncation at -O2). A genuine fixed-length copy may be kept with a"
+   echo "/* strncpy-ok: <reason> */ (or strncat-ok) marker on the same line."
    exit 1
 fi
 

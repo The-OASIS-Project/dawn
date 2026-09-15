@@ -1997,14 +1997,18 @@ static void build_synthetic_self_entity(int user_id,
          if (!canon_alias[0])
             continue;
          size_t cur = strlen(canon);
-         size_t need = (cur > 0 ? 1 : 0) + strlen(canon_alias);
+         size_t alias_len = strlen(canon_alias);
+         size_t need = (cur > 0 ? 1 : 0) + alias_len;
          if (cur + need + 1 >= sizeof(canon))
             break;
          if (cur > 0) {
             canon[cur++] = ' ';
-            canon[cur] = '\0';
          }
-         strncat(canon, canon_alias, sizeof(canon) - cur - 1);
+         /* The guard above proved cur + alias_len + 1 <= sizeof(canon), so the
+          * alias plus its NUL fits exactly. memcpy, not strncat: the length is
+          * exact, so strncat's truncation semantics (which the -O2 optimizer flags
+          * as a possible cut it can't rule out) don't apply. */
+         memcpy(canon + cur, canon_alias, alias_len + 1);
       }
       if (dropped_overflow > 0) {
          OLOG_WARNING("identity_aliases truncated: %d alias line(s) past the 16-entry "
