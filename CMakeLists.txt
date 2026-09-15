@@ -501,11 +501,18 @@ else()
     message(STATUS "Skipping Whisper build (Vosk enabled)")
 endif()
 
-# Full -Wall.  Placed HERE — after add_subdirectory(whisper.cpp) — so it applies to
+# Full -Wall -Werror.  Placed HERE — after add_subdirectory(whisper.cpp) — so it applies to
 # DAWN's own sources (common, dawn, tests, dawn-admin, all added below) but NOT to the
 # vendored ggml/whisper tree, whose static-inline header helpers would otherwise flood
-# -Wunused-function.  (-Wall is language-aware, so C-only members like -Wpointer-sign are
-# not applied to .cpp TUs — no genex needed.)
+# -Wunused-function and (with -Werror) fail the build.  (-Wall is language-aware, so C-only
+# members like -Wpointer-sign are not applied to .cpp TUs — no genex needed.)
+#
+# -Werror keeps it honest: a warning is a build failure.  This makes the docker-build CI
+# job (which compiles the server preset — Release + WEBUI, -O2 — see .github/workflows/
+# ci.yml) the enforcement gate for the -O2-gated classes (-Wmaybe-uninitialized,
+# -Wstringop-truncation, -Warray-bounds, -Wformat-truncation) that the Debug -O0 CI/
+# pre-commit builds cannot see.  A -O2-only regression (e.g. the webui_config
+# use-after-scope this caught) now fails CI instead of shipping.
 #
 # Every -Wall member is ON for first-party code.  The handful of deliberate
 # snprintf-into-fixed-display-buffer truncations (SAGE watch alerts, a job-restart
@@ -514,7 +521,7 @@ endif()
 # future careless truncation anywhere else.  -Warray-bounds is on globally but suppressed
 # for the one vendored file that trips it (tinyexpr.c) via set_source_files_properties
 # below.  -Wstringop-truncation and -Wmaybe-uninitialized are clean.
-add_compile_options(-Wall)
+add_compile_options(-Wall -Werror)
 
 # tinyexpr.c is vendored (public-domain expression evaluator).  Its tagged-union
 # pointer arithmetic trips -Warray-bounds under -O2 (4 warnings, all known-benign

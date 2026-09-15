@@ -94,6 +94,11 @@ jobs:
   # -------------------------------------------------------------------------
   # Job 3: Docker Build (~10 min)
   # Builds full image (deps + server compile + runtime) and smoke tests it.
+  # ALSO the -Wall -Werror enforcement gate: the server preset compiles Release
+  # (-O2) + WEBUI, so this job (unlike the Debug -O0 ci-preset unit-tests job) is
+  # where the optimizer-gated warnings (-Wmaybe-uninitialized / -Wstringop-truncation
+  # / -Warray-bounds / -Wformat-truncation) fire — and -Werror turns any of them into
+  # a build failure here. A -O2-only regression fails CI instead of shipping.
   # This is the CI home of the daemon link+start smoke (the `dawn --help` run):
   # the daemon unconditionally links ONNX Runtime + Piper, which aren't apt
   # packages, so this image is the only place on stock runners the full binary
