@@ -123,11 +123,13 @@ int http_download_to_temp(CURL *curl,
       return 1;
    }
 
-   /* Log large downloads */
-   double dl_size = 0;
-   curl_easy_getinfo(curl, CURLINFO_SIZE_DOWNLOAD, &dl_size);
+   /* Log large downloads. CURLINFO_SIZE_DOWNLOAD_T (curl_off_t) supersedes the
+    * deprecated double CURLINFO_SIZE_DOWNLOAD (since libcurl 7.55). */
+   curl_off_t dl_size = 0;
+   curl_easy_getinfo(curl, CURLINFO_SIZE_DOWNLOAD_T, &dl_size);
    if (dl_size > 100 * 1024 * 1024) {
-      OLOG_WARNING("http_download: large file downloaded (%.1f MB)", dl_size / (1024 * 1024));
+      OLOG_WARNING("http_download: large file downloaded (%.1f MB)",
+                   (double)dl_size / (1024 * 1024));
    }
 
    return 0;
