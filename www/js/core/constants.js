@@ -25,7 +25,11 @@
    const PING_IDLE_MS = 8000; // only ping after this much inbound silence (traffic already proves life)
    const PING_INTERVAL_MS = 10000; // heartbeat tick cadence
    const PONG_TIMEOUT_MS = 6000; // a ping unanswered this long counts as one miss
-   const MAX_MISSED_PONGS = 2; // consecutive misses => link dead, force reconnect
+   // Hysteresis: an isolated missed pong (a single late one on a marginal link)
+   // must NOT flash the "unstable" pill. Only surface it after this many
+   // CONSECUTIVE misses; a recovery (pong or any inbound frame) resets the count.
+   const PONG_STALE_MISSES = 2; // consecutive misses => show "unstable" (not yet dead)
+   const MAX_MISSED_PONGS = 3; // consecutive misses => link dead, force reconnect
    const MAX_UNSUPPORTED_PROBES = 3; // no pong EVER => assume an older server, stop probing (no false dead)
 
    // Audio configuration
@@ -57,6 +61,7 @@
       PING_IDLE_MS: PING_IDLE_MS,
       PING_INTERVAL_MS: PING_INTERVAL_MS,
       PONG_TIMEOUT_MS: PONG_TIMEOUT_MS,
+      PONG_STALE_MISSES: PONG_STALE_MISSES,
       MAX_MISSED_PONGS: MAX_MISSED_PONGS,
       MAX_UNSUPPORTED_PROBES: MAX_UNSUPPORTED_PROBES,
 

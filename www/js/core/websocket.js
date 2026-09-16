@@ -219,8 +219,11 @@
          // ping. Only cancel the ping once the server is known to answer pings, so
          // an as-yet-unconfirmed arming probe still runs to establish pongSupported.
          if (missedPongs > 0) {
+            const wasStale = missedPongs >= DawnConfig.PONG_STALE_MISSES;
             missedPongs = 0;
-            if (callbacks.onStatus) callbacks.onStatus('connected');
+            // Re-assert 'connected' only if we'd actually shown 'stale' — a
+            // sub-threshold miss changed nothing visible, so don't re-announce.
+            if (wasStale && callbacks.onStatus) callbacks.onStatus('connected');
          }
          if (pendingPingSeq !== 0 && pongSupported) {
             pendingPingSeq = 0;
@@ -400,7 +403,7 @@
     */
    function handlePong(seq) {
       if (seq !== pendingPingSeq) return; // stale/duplicate
-      const wasSuspect = missedPongs > 0; // recovered from a "stale" state
+      const wasSuspect = missedPongs >= DawnConfig.PONG_STALE_MISSES; // had shown "stale"
       pongSupported = true; // feature gate: the server answers pings
       unsupportedProbes = 0;
       missedPongs = 0;
@@ -439,9 +442,9 @@
       missedPongs++;
       if (missedPongs >= DawnConfig.MAX_MISSED_PONGS) {
          deadLink();
-      } else if (callbacks.onStatus) {
-         // First miss: unstable but not yet dead — tell the UI now instead of
-         // waiting the full timeout for the watchdog to reconnect.
+      } else if (missedPongs >= DawnConfig.PONG_STALE_MISSES && callbacks.onStatus) {
+         // Suspect but not yet dead. Surfaced only at the hysteresis threshold so a
+         // single transient miss on a marginal link never flashes the pill.
          callbacks.onStatus('stale', 'Connection unstable…');
       }
    }
@@ -465,7 +468,7 @@
     */
    function isLive() {
       if (!ws || ws.readyState !== WebSocket.OPEN || !capabilitiesSynced) return false;
-      if (pongSupported && missedPongs >= 1) return false; // a ping went unanswered: suspect
+      if (pongSupported && missedPongs >= DawnConfig.PONG_STALE_MISSES) return false; // suspect
       return true;
    }
 
