@@ -19,6 +19,41 @@
    // Settings closes.  null until the panel has loaded once (nothing to revert to).
    let savedTheme = null;
 
+   // Tracks unsaved edits in the My Settings form (persona, location, timezone,
+   // units, identity fields, theme).  Two jobs:
+   //  1. Guards handleGetMySettingsResponse() so a refetch (panel open, section
+   //     re-expand, reconnect) can't overwrite in-progress edits with the
+   //     last-saved server value — which the next Save would then persist,
+   //     silently losing what the user typed.
+   //  2. Lets the unified panel Save (config.js) know whether My Settings needs
+   //     sending.
+   // Set true on any edit; cleared on a successful save or an explicit
+   // discard-and-reload, when the form matches the server again.
+   let formDirty = false;
+
+   // Completion callback registered by the unified panel Save (config.js) so a
+   // My-Settings save reports done into the shared multi-save counter.  Mirrors
+   // the DawnTools.onSaveComplete pattern; one-shot — fired and cleared by
+   // handleSetMySettingsResponse.
+   let saveCompleteCb = null;
+
+   // Whether a get_my_settings response has ever populated the form.  The
+   // refetch guard only protects edits AFTER the first load — the first
+   // response must always populate, or a user who edits within the sub-RTT
+   // window before it arrives would leave untouched fields at HTML defaults and
+   // savedTheme null (a later Save would then persist those defaults).
+   let loadedOnce = false;
+
+   // Single writer for the dirty state so the "unsaved" dot on the My Settings
+   // section header stays in lockstep with the flag (mirrors how the config
+   // sections show a has-unsaved dot).
+   function setFormDirty(dirty) {
+      formDirty = dirty;
+      const section = document.getElementById('my-settings-section');
+      const header = section && section.querySelector('.section-header');
+      if (header) header.classList.toggle('has-unsaved', dirty);
+   }
+
    /* =============================================================================
     * API Requests
     * ============================================================================= */
@@ -36,6 +71,55 @@
             payload: settings,
          });
       }
+   }
+
+   // Collect the current form values and send them.  Invoked by the unified
+   // panel Save (config.js) AFTER it has registered onSaveComplete and counted
+   // this save in its multi-save total, so it always sends when called.
+   function saveMySettings() {
+      const settings = {
+         persona_description: document.getElementById('my-persona')?.value || '',
+         persona_mode:
+            document.querySelector('input[name="persona_mode"]:checked')?.value || 'append',
+         location: document.getElementById('my-location')?.value || '',
+         timezone: document.getElementById('my-timezone')?.value || 'UTC',
+         units: document.querySelector('input[name="units"]:checked')?.value || 'metric',
+         theme: document.querySelector('.theme-btn.active')?.dataset.theme || 'cyan',
+         // v44 identity fields
+         real_name: document.getElementById('my-real-name')?.value.trim() || '',
+         identity_aliases: document.getElementById('my-identity-aliases')?.value.trim() || '',
+         preferred_address: document.getElementById('my-preferred-address')?.value.trim() || '',
+      };
+      // The previewed theme is now being committed — make it the revert baseline.
+      savedTheme = settings.theme;
+      requestSetMySettings(settings);
+   }
+
+   function hasUnsavedChanges() {
+      return formDirty;
+   }
+
+   function onSaveComplete(cb) {
+      saveCompleteCb = cb;
+   }
+
+   // Discard unsaved edits and reload the values currently saved on the server
+   // (used by the panel's "Reset to Saved Settings").  Clears the dirty flag
+   // FIRST so the get response is allowed to repopulate — the refetch guard in
+   // handleGetMySettingsResponse would otherwise preserve the very edits we want
+   // to discard — and reverts any unsaved theme preview.
+   function discardAndReload() {
+      setFormDirty(false);
+      revertUnsavedTheme();
+      requestGetMySettings();
+   }
+
+   // Drop the unsaved-edit state without a refetch — used by the panel-close
+   // "Discard" path, where the panel is closing so reloading would be wasted
+   // (and reverts any unsaved theme preview, matching discardAndReload).
+   function clearDirty() {
+      setFormDirty(false);
+      revertUnsavedTheme();
    }
 
    /* =============================================================================
@@ -69,6 +153,20 @@
       const realName = document.getElementById('my-real-name');
       const aliases = document.getElementById('my-identity-aliases');
       const preferredAddr = document.getElementById('my-preferred-address');
+      // Guard against clobbering unsaved edits on a refetch (section re-expand,
+      // reconnect) — but ONLY once we've loaded at least once.  The first
+      // response must always populate: there are no real saved edits to protect
+      // yet, and untouched fields + savedTheme need their initial values even if
+      // the user typed within the sub-RTT window before this arrived.
+      if (loadedOnce && formDirty) {
+         // Keep the derived UI (char count / clear button / preview) in sync
+         // with whatever the user has typed, but touch no field values.
+         updatePersonaCharCount();
+         updateClearButtonVisibility();
+         updatePersonaPreview();
+         return;
+      }
+
       if (persona) {
          persona.value = payload.persona_description || '';
          updatePersonaCharCount();
@@ -106,6 +204,11 @@
          typeof DawnTheme !== 'undefined' && DawnTheme.current
             ? DawnTheme.current()
             : payload.theme || 'cyan';
+
+      // The form now reflects the server; future refetches may guard against
+      // clobbering, and this load cleared any pre-load edit state.
+      loadedOnce = true;
+      setFormDirty(false);
    }
 
    // Revert an unsaved theme PREVIEW back to the last saved value.  Called when My
@@ -120,17 +223,32 @@
    }
 
    function handleSetMySettingsResponse(payload) {
+      // One-shot: take and clear the orchestration callback up front.
+      const cb = saveCompleteCb;
+      saveCompleteCb = null;
+
       if (payload.success) {
-         if (typeof DawnToast !== 'undefined') {
-            DawnToast.show('Settings saved successfully', 'success');
-         }
-      } else {
-         if (typeof DawnToast !== 'undefined') {
-            DawnToast.show(
-               'Failed to save settings: ' + (payload.error || 'Unknown error'),
-               'error'
-            );
-         }
+         // Saved state now matches the form; future refetches may repopulate.
+         setFormDirty(false);
+      }
+
+      if (cb) {
+         // Orchestrated by the unified panel Save: report into its shared
+         // counter and stay silent so it can show a single toast (mirrors the
+         // deliberately-silent DawnTools completion path).
+         cb(!!payload.success);
+         return;
+      }
+
+      // Standalone save (defensive — the panel now routes through the unified
+      // Save, so this path is not normally reached).
+      if (typeof DawnToast !== 'undefined') {
+         DawnToast.show(
+            payload.success
+               ? 'Settings saved successfully'
+               : 'Failed to save settings: ' + (payload.error || 'Unknown error'),
+            payload.success ? 'success' : 'error'
+         );
       }
    }
 
@@ -216,7 +334,6 @@
 
    function init() {
       const form = document.getElementById('my-settings-form');
-      const resetBtn = document.getElementById('reset-my-settings-btn');
       const section = document.getElementById('my-settings-section');
       const persona = document.getElementById('my-persona');
       const toggleBasePersona = document.getElementById('toggle-base-persona');
@@ -243,6 +360,7 @@
       // Persona textarea input handlers
       if (persona) {
          persona.addEventListener('input', () => {
+            setFormDirty(true);
             updatePersonaCharCount();
             updateClearButtonVisibility();
             updatePersonaPreview();
@@ -253,66 +371,43 @@
       if (clearPersonaBtn && persona) {
          clearPersonaBtn.addEventListener('click', () => {
             persona.value = '';
+            setFormDirty(true);
             updatePersonaCharCount();
             updateClearButtonVisibility();
             updatePersonaPreview();
          });
       }
 
-      // Form submission
+      // Mark the form dirty on any edit so (a) a refetch won't clobber it and
+      // (b) the unified Save knows to send it.  A form-level input/change
+      // listener covers text inputs, selects and radios; theme is chosen via
+      // <button> clicks (wired in theme.js), which fire neither input nor
+      // change, so those are hooked explicitly below.
+      if (form) {
+         form.addEventListener('input', () => {
+            setFormDirty(true);
+         });
+         form.addEventListener('change', () => {
+            setFormDirty(true);
+         });
+      }
+      document.querySelectorAll('.theme-btn').forEach((btn) => {
+         btn.addEventListener('click', () => {
+            setFormDirty(true);
+         });
+      });
+
+      // Enter in a single-line field submits the form.  Route it through the
+      // unified panel Save (config.js) so Enter saves everything on the panel,
+      // and keep preventDefault so the SPA never navigates/reloads.  (There is
+      // no separate "Save My Settings" button anymore — the footer "Save
+      // Settings" is the one Save.)
       if (form) {
          form.addEventListener('submit', (e) => {
             e.preventDefault();
-
-            const settings = {
-               persona_description: document.getElementById('my-persona')?.value || '',
-               persona_mode:
-                  document.querySelector('input[name="persona_mode"]:checked')?.value || 'append',
-               location: document.getElementById('my-location')?.value || '',
-               timezone: document.getElementById('my-timezone')?.value || 'UTC',
-               units: document.querySelector('input[name="units"]:checked')?.value || 'metric',
-               theme: document.querySelector('.theme-btn.active')?.dataset.theme || 'cyan',
-               // v44 identity fields
-               real_name: document.getElementById('my-real-name')?.value.trim() || '',
-               identity_aliases: document.getElementById('my-identity-aliases')?.value.trim() || '',
-               preferred_address:
-                  document.getElementById('my-preferred-address')?.value.trim() || '',
-            };
-            requestSetMySettings(settings);
-            // The previewed theme is now committed — make it the revert baseline.
-            savedTheme = settings.theme;
-         });
-      }
-
-      // Reset to defaults
-      if (resetBtn) {
-         resetBtn.addEventListener('click', async () => {
-            if (
-               !(await DawnDialog.confirm('Reset all personal settings to defaults?', {
-                  title: 'Reset Settings',
-                  okText: 'Reset',
-               }))
-            ) {
-               return;
+            if (typeof DawnSettingsConfig !== 'undefined' && DawnSettingsConfig.saveConfig) {
+               DawnSettingsConfig.saveConfig();
             }
-            requestSetMySettings({
-               persona_description: '',
-               persona_mode: 'append',
-               location: '',
-               timezone: 'UTC',
-               units: 'metric',
-               theme: 'cyan',
-               // v44 identity fields cleared on reset (NULLIF in SQL)
-               real_name: '',
-               identity_aliases: '',
-               preferred_address: '',
-            });
-            // Apply theme immediately
-            if (callbacks.setTheme) {
-               callbacks.setTheme('cyan');
-            }
-            // Refresh form after a moment
-            setTimeout(requestGetMySettings, 500);
          });
       }
 
@@ -355,5 +450,11 @@
       handleGetResponse: handleGetMySettingsResponse,
       handleSetResponse: handleSetMySettingsResponse,
       revertUnsavedTheme: revertUnsavedTheme,
+      // Unified-panel-save integration (mirrors DawnTools):
+      hasUnsavedChanges: hasUnsavedChanges,
+      onSaveComplete: onSaveComplete,
+      save: saveMySettings,
+      discardAndReload: discardAndReload,
+      clearDirty: clearDirty,
    };
 })();

@@ -2520,7 +2520,11 @@ Format rules:
                      <span class="section-toggle">&#9660;</span>
                   </h3>
                   <div class="section-content">
-                     <form id="my-settings-form">
+                     <form id="my-settings-form" aria-describedby="my-settings-save-hint">
+                        <p class="section-description" id="my-settings-save-hint">
+                           Changes here are saved with the &ldquo;Save Settings&rdquo; button at the
+                           bottom of this panel.
+                        </p>
                         <!-- AI Persona Configuration -->
                         <div class="persona-config">
                            <h4 class="persona-heading">AI Persona</h4>
@@ -2785,17 +2789,6 @@ Format rules:
                               </button>
                            </div>
                         </div>
-
-                        <div class="settings-actions">
-                           <button type="submit" class="btn btn-primary">Save My Settings</button>
-                           <button
-                              type="button"
-                              id="reset-my-settings-btn"
-                              class="btn btn-secondary"
-                           >
-                              Reset to Defaults
-                           </button>
-                        </div>
                      </form>
                   </div>
                </div>
@@ -3020,8 +3013,14 @@ token = "eyJ..."</pre
 
             <div class="settings-footer">
                <div class="settings-actions">
-                  <button id="save-config-btn" class="save-btn primary">Save Configuration</button>
-                  <button id="reset-config-btn" class="reset-btn">Reset to Defaults</button>
+                  <button
+                     id="save-config-btn"
+                     class="save-btn primary"
+                     aria-label="Save all settings"
+                  >
+                     Save Settings
+                  </button>
+                  <button id="reset-config-btn" class="reset-btn">Reset to Saved Settings</button>
                </div>
                <div class="restart-notice hidden" id="restart-notice">
                   <svg

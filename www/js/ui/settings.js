@@ -115,13 +115,20 @@
    async function close() {
       if (!settingsElements.panel) return;
 
-      // Check for unsaved changes
+      // Check for unsaved changes across every section the unified Save commits:
+      // global config, tools, AND the per-user My Settings form.  My Settings
+      // must be included — with its own Save button gone, closing the panel is
+      // otherwise a silent-data-loss path for persona/identity edits.
       const configCount = Config.getChangedFields().size;
       const toolsUnsaved =
          typeof DawnTools !== 'undefined' && DawnTools.hasUnsavedChanges
             ? DawnTools.hasUnsavedChanges()
             : false;
-      const totalUnsaved = configCount + (toolsUnsaved ? 1 : 0);
+      const myUnsaved =
+         typeof DawnMySettings !== 'undefined' &&
+         DawnMySettings.hasUnsavedChanges &&
+         DawnMySettings.hasUnsavedChanges();
+      const totalUnsaved = configCount + (toolsUnsaved ? 1 : 0) + (myUnsaved ? 1 : 0);
 
       if (totalUnsaved > 0) {
          if (
@@ -134,6 +141,9 @@
             Config.clearChangedFields();
             if (typeof DawnTools !== 'undefined' && DawnTools.clearUnsavedChanges) {
                DawnTools.clearUnsavedChanges();
+            }
+            if (typeof DawnMySettings !== 'undefined' && DawnMySettings.clearDirty) {
+               DawnMySettings.clearDirty();
             }
             clearUnsavedIndicators();
             doClose();
@@ -509,13 +519,38 @@
       // Reset button
       if (settingsElements.resetBtn) {
          settingsElements.resetBtn.addEventListener('click', async () => {
+            // "Reset to Saved Settings" — non-destructive: discard unsaved edits
+            // across the whole panel (config + tools + My Settings) and reload
+            // the values currently SAVED on the server.  NOT a factory-defaults
+            // reset.  Covers the same three sections the unified Save commits.
+            const toolsDirty =
+               typeof DawnTools !== 'undefined' &&
+               DawnTools.hasUnsavedChanges &&
+               DawnTools.hasUnsavedChanges();
+            const dirty =
+               Config.getChangedFields().size > 0 ||
+               toolsDirty ||
+               (typeof DawnMySettings !== 'undefined' &&
+                  DawnMySettings.hasUnsavedChanges &&
+                  DawnMySettings.hasUnsavedChanges());
+            // Only confirm when there's actually something to discard.
             if (
-               await DawnDialog.confirm(
-                  'Reset all settings to defaults?\n\nThis will reload the current configuration.',
-                  { title: 'Reset Configuration', okText: 'Reset' }
-               )
+               dirty &&
+               !(await DawnDialog.confirm(
+                  'Discard unsaved changes and reload your saved settings?',
+                  { title: 'Reset to Saved Settings', okText: 'Discard' }
+               ))
             ) {
-               Config.requestConfig();
+               return;
+            }
+            Config.requestConfig();
+            clearUnsavedIndicators();
+            if (typeof DawnTools !== 'undefined') {
+               if (DawnTools.clearUnsavedChanges) DawnTools.clearUnsavedChanges();
+               if (DawnTools.requestConfig) DawnTools.requestConfig();
+            }
+            if (typeof DawnMySettings !== 'undefined' && DawnMySettings.discardAndReload) {
+               DawnMySettings.discardAndReload();
             }
          });
       }

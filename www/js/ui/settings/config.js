@@ -629,7 +629,32 @@
          return;
       }
 
-      const config = collectConfigValues();
+      // Unified panel Save: commit every pending change on the Settings panel —
+      // global config, tools, and the per-user My Settings form — under ONE
+      // multi-save counter and one toast.  Each part is sent (and counted) only
+      // when actually dirty, so an unchanged section is never rewritten.
+      //
+      // changedFields is populated solely from edits in the admin-only config
+      // sections, so a non-admin's set is always empty — this inherently skips
+      // (and does not count) set_config for non-admins, which is required: the
+      // server answers a non-admin set_config with a generic error, not a
+      // set_config_response, so counting it would hang the button forever.
+      const configNeedSave = changedFields.size > 0;
+      const toolsNeedSave =
+         typeof DawnTools !== 'undefined' &&
+         DawnTools.hasUnsavedChanges &&
+         DawnTools.hasUnsavedChanges();
+      const myNeedSave =
+         typeof DawnMySettings !== 'undefined' &&
+         DawnMySettings.hasUnsavedChanges &&
+         DawnMySettings.hasUnsavedChanges();
+
+      if (!configNeedSave && !toolsNeedSave && !myNeedSave) {
+         if (typeof DawnToast !== 'undefined') {
+            DawnToast.show('No changes to save', 'info');
+         }
+         return;
+      }
 
       // Show loading state
       const btn = settingsElements.saveConfigBtn;
@@ -639,22 +664,18 @@
          btn.textContent = 'Saving...';
       }
 
-      // Determine if tools also need saving
-      const toolsNeedSave =
-         typeof DawnTools !== 'undefined' &&
-         DawnTools.hasUnsavedChanges &&
-         DawnTools.hasUnsavedChanges();
-
-      pendingSaves = 1 + (toolsNeedSave ? 1 : 0);
+      pendingSaves = (configNeedSave ? 1 : 0) + (toolsNeedSave ? 1 : 0) + (myNeedSave ? 1 : 0);
       saveHadError = false;
 
-      // Send main config save
-      DawnWS.send({
-         type: 'set_config',
-         payload: config,
-      });
+      // Global config (decremented in handleSetConfigResponse)
+      if (configNeedSave) {
+         DawnWS.send({
+            type: 'set_config',
+            payload: collectConfigValues(),
+         });
+      }
 
-      // Also save tools config if dirty
+      // Tools config
       if (toolsNeedSave) {
          DawnTools.onSaveComplete(function (success) {
             if (!success) saveHadError = true;
@@ -662,6 +683,16 @@
             checkAllSavesComplete();
          });
          DawnTools.saveToolsConfig();
+      }
+
+      // Per-user My Settings
+      if (myNeedSave) {
+         DawnMySettings.onSaveComplete(function (success) {
+            if (!success) saveHadError = true;
+            pendingSaves--;
+            checkAllSavesComplete();
+         });
+         DawnMySettings.save();
       }
    }
 
@@ -798,7 +829,7 @@
       const btn = settingsElements.saveConfigBtn;
       if (btn) {
          btn.disabled = false;
-         btn.textContent = btn.dataset.originalText || 'Save Configuration';
+         btn.textContent = btn.dataset.originalText || 'Save Settings';
       }
 
       if (!saveHadError) {
@@ -807,7 +838,7 @@
             callbacks.showRestartConfirmation(configSaveRestartFields);
          } else {
             if (typeof DawnToast !== 'undefined') {
-               DawnToast.show('Configuration saved successfully!', 'success');
+               DawnToast.show('Settings saved successfully!', 'success');
             }
          }
 
@@ -827,6 +858,12 @@
 
          // Refresh config to update globalDefaults and other cached values
          requestConfig();
+      } else if (typeof DawnToast !== 'undefined') {
+         // At least one part failed.  Each part stays silent under orchestration
+         // so the success case shows a single toast — without this, a failed
+         // My-Settings- or tools-only save (and a partial failure) would show
+         // nothing at all, recreating the "looked saved, wasn't" trap.
+         DawnToast.show('Some settings could not be saved. Please try again.', 'error');
       }
 
       configSaveRestartFields = [];
