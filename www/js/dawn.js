@@ -77,6 +77,10 @@
          console.log('Received:', msg);
 
          switch (msg.type) {
+            case 'pong':
+               // Liveness heartbeat reply — route to the watchdog (seq-matched).
+               if (DawnWS.handlePong) DawnWS.handlePong(msg.payload && msg.payload.seq);
+               break;
             case 'state':
                // A background turn's state (thinking/speaking/idle for a conversation
                // not on screen) must not drive the pill. Untagged states (no
@@ -317,6 +321,30 @@
                   DawnState.authState.username = msg.payload.username || '';
                   DawnSettings.updateAuthVisibility();
                }
+               // Start the liveness heartbeat now that the session is authed (a
+               // ping before auth would draw UNAUTHORIZED). Re-armed on every
+               // (re)connect; startHeartbeat() resets any prior state.
+               if (msg.payload.authenticated && DawnWS.startHeartbeat) {
+                  DawnWS.startHeartbeat();
+               }
+               // Claim session ownership for sibling tabs (steal-back guard): this
+               // tab holds the token now, so a background sibling must not reconnect
+               // and evict it.
+               if (DawnWS.postSessionClaim) {
+                  DawnWS.postSessionClaim();
+               }
+               // Re-assert session keepalive if this browser opted in. A FRESH
+               // session (new token after restart/idle-expiry) starts with the DB
+               // keepalive flag cleared, so re-send the gated enable to persist it
+               // on the current session. Idempotent on a same-token reconnect (the
+               // DB flag is already set). Mirrors the voice-always-on resume above.
+               if (
+                  msg.payload.authenticated &&
+                  typeof DawnStore !== 'undefined' &&
+                  DawnStore.getBool(DawnStore.KEYS.SESSION_KEEPALIVE, false)
+               ) {
+                  DawnWS.send({ type: 'session_keepalive_enable' });
+               }
                /* Phase 2 entity-merge: prime the memory-icon dot with the
                 * current pending-proposal count once the session is auth'd.
                 * Without this the dot stays dark on page-refresh until the
@@ -345,6 +373,13 @@
                // socket (in-flight actions, a half-loaded history page).
                if (typeof DawnJobs !== 'undefined') {
                   DawnJobs.handleReconnect();
+               }
+               // Recover conversation-list changes missed while the socket was
+               // down (the list-changed frame is never replayed). Diffs into the
+               // consent pill rather than reordering under the user; on first
+               // connect it's the normal initial list load.
+               if (typeof DawnHistory !== 'undefined' && DawnHistory.resyncListOnReconnect) {
+                  DawnHistory.resyncListOnReconnect();
                }
                // Re-enable always-on if it was active before the connection
                // dropped. Deferred to here (not raw 'connected') for the same
@@ -1460,7 +1495,10 @@
    function updateConnectionStatus(status, reason) {
       // A new (re)connect: allow the next 'session' message to restore the active
       // conversation once (the duplicate-restore guard in the session handler).
-      if (status !== 'connected') {
+      // 'stale' is a transient heartbeat-suspect state on a still-OPEN socket, not
+      // a disconnect — it must NOT reset the reconnect/restore guard or drop live
+      // generating dots.
+      if (status !== 'connected' && status !== 'stale') {
          restoredConvIdThisConnection = null;
          // Background turns are aborted server-side on disconnect — drop stale dots.
          if (typeof DawnHistory !== 'undefined' && DawnHistory.clearGenerating) {
@@ -1491,6 +1529,16 @@
          // reconnect then destroys (the reply would be lost).
       } else if (status === 'connecting') {
          DawnElements.connectionStatus.textContent = 'Connecting...';
+      } else if (status === 'stale') {
+         // One heartbeat ping went unanswered — the link is suspect but the socket
+         // is still OPEN and may still be delivering data, so DON'T say
+         // "Reconnecting" (nothing is). Signal instability, keep the amber
+         // 'connecting' style, and don't tear down phone/composer. A recovered
+         // pong (or any inbound frame) re-emits 'connected'; a second miss forces
+         // a real reconnect (→ 'disconnected').
+         DawnElements.connectionStatus.className = 'connecting';
+         DawnElements.connectionStatus.textContent = 'Unstable…';
+         DawnElements.connectionStatus.title = reason || 'Connection unstable — checking…';
       } else {
          if (status === 'superseded') {
             // Another tab/device took over this session. Reuse the 'disconnected'
@@ -1507,11 +1555,22 @@
             DawnElements.connectionStatus.textContent = reason
                ? 'Disconnected: ' + (reason.length > 30 ? reason.substring(0, 30) + '...' : reason)
                : 'Disconnected';
+            // Reconnect is automatic + indefinite now; make both the auto-retry and
+            // the click-to-retry-now affordance discoverable (cursor:pointer alone
+            // isn't).
+            DawnElements.connectionStatus.title =
+               'Disconnected — retrying automatically. Click to retry now.';
          }
          // Tear down stale phone call UI — a persistent "On call" pill must not
          // outlive the connection that authenticates its state.
          if (typeof DawnPhone !== 'undefined') {
             DawnPhone.handleDisconnect();
+         }
+         // Reset the conversation-list in-flight latch: a drop mid-request would
+         // otherwise wedge it true forever (the clearing response never arrives),
+         // no-opping the refresh pill, infinite scroll, and reconnect re-sync.
+         if (typeof DawnHistory !== 'undefined' && DawnHistory.handleDisconnect) {
+            DawnHistory.handleDisconnect();
          }
          // Clear the composer working-indicator for the same reason: a socket drop
          // mid-tool-loop would otherwise leave a lit "Using Tools" reactor pinned to
@@ -2540,20 +2599,32 @@
 
       // Allow manual reconnect by clicking connection status
       DawnElements.connectionStatus.addEventListener('click', () => {
-         if (!DawnWS.isConnected()) {
+         // Fire on a dead OR half-open/suspect link. A half-open socket still
+         // reports isConnected()=true, so gating on that would leave the click
+         // inert exactly when the user needs to force a reconnect; isLive() is
+         // false for a half-open or superseded link.
+         if (!DawnWS.isLive()) {
             DawnWS.forceReconnect();
          }
       });
       DawnElements.connectionStatus.style.cursor = 'pointer';
 
-      // Reconnect on visibility change — but NOT if the server superseded us
-      // (another tab took over). Otherwise focusing the superseded tab would
-      // silently re-steal the session and restart the tab war. Reclaim is only via
-      // an explicit click on the connection status (forceReconnect).
+      // On regaining foreground / connectivity, probe immediately: a hidden tab's
+      // heartbeat timers are throttled, so a half-open link may be minutes-stale
+      // and a hidden-deferred reconnect may be pending. probeNow() reconnects a
+      // down socket (respecting the sibling-claim + superseded guards, so it won't
+      // re-steal a session another tab took over) or fast-pings an open-but-stale
+      // one. Deliberate reclaim after a takeover is still an explicit status click.
       document.addEventListener('visibilitychange', function () {
-         if (!document.hidden && !DawnWS.isConnected() && !DawnWS.isSuperseded()) {
-            DawnWS.forceReconnect();
+         if (!document.hidden) {
+            DawnWS.probeNow();
          }
+      });
+      window.addEventListener('online', function () {
+         DawnWS.probeNow();
+      });
+      window.addEventListener('pageshow', function () {
+         DawnWS.probeNow();
       });
 
       // Fetch and display version info in footer

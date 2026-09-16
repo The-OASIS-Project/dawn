@@ -14,6 +14,7 @@
       conversationsTotal: 0, // total available on the server (for list pagination)
       conversationsLoading: false, // a list_conversations request is in flight
       pendingListAppend: false, // the in-flight request is a "load more" (append, not replace)
+      resyncInFlight: false, // the in-flight request is a reconnect re-sync (diff-to-pill, not replace)
       activeConversationId: null,
       searchQuery: '',
       searchTimeout: null,
@@ -516,8 +517,10 @@
 
    function handleListConversationsResponse(payload) {
       const wasAppend = historyState.pendingListAppend;
+      const wasResync = historyState.resyncInFlight;
       historyState.conversationsLoading = false;
       historyState.pendingListAppend = false;
+      historyState.resyncInFlight = false;
 
       if (!payload.success) {
          console.error('Failed to list conversations:', payload.error);
@@ -528,6 +531,38 @@
       }
 
       const incoming = payload.conversations || [];
+
+      if (wasResync) {
+         // Reconnect re-sync: recover list changes missed during the drop WITHOUT
+         // silently reordering under the user. If the list was never populated,
+         // just apply (this is effectively the first load); otherwise diff page 0
+         // against what's shown and route changed ids into the consent pill.
+         if (historyState.conversations.length === 0) {
+            historyState.conversations = incoming;
+            historyState.conversationsTotal =
+               payload.total != null ? payload.total : incoming.length;
+            renderConversationList();
+            clearPendingListChange();
+            return;
+         }
+         const currentById = new Map();
+         historyState.conversations.forEach((c) => currentById.set(Number(c.id), c));
+         incoming.forEach((c) => {
+            const id = Number(c.id);
+            const cur = currentById.get(id);
+            const changed =
+               !cur ||
+               Number(cur.updated_at || 0) !== Number(c.updated_at || 0) ||
+               (cur.title || '') !== (c.title || '');
+            // Same self-echo filter as a live list-changed frame: don't nag about
+            // the conversation the user is actively viewing.
+            if (changed && id !== historyState.activeConversationId) {
+               pendingListChangeIds.add(String(id));
+            }
+         });
+         updateRefreshPill();
+         return;
+      }
       if (wasAppend) {
          // An empty page means we've reached the end (e.g. rows were deleted
          // between pages and `total` is stale) — pin total to what we have so
@@ -1143,6 +1178,37 @@
       // in principle exceed 2^53, so keying by string keeps two large ids distinct.
       pendingListChangeIds.add(String(id));
       updateRefreshPill();
+   }
+
+   // A socket drop while a list_conversations request is in flight would leave
+   // the in-flight latch stuck true forever — the response that clears it never
+   // arrives — wedging the refresh pill (its click no-ops), infinite scroll, and
+   // the reconnect list re-sync. Reset the latch on disconnect. The pending-change
+   // set is deliberately kept so the consent pill survives the drop and its queued
+   // ids are recovered by the refetch on reconnect.
+   function handleDisconnect() {
+      historyState.conversationsLoading = false;
+      historyState.pendingListAppend = false;
+      historyState.resyncInFlight = false;
+   }
+
+   // On (re)connect, recover conversation-list changes missed while the socket was
+   // down — the `conversation_list_changed` frame is fire-and-forget and never
+   // replayed server-side, so a client refetch is the only recovery. Refetches
+   // page 0; the response handler diffs it into the consent pill rather than
+   // silently reordering the sidebar (see handleListConversationsResponse). On the
+   // very first connect (empty list) it acts as the normal initial load.
+   function resyncListOnReconnect() {
+      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
+      if (historyState.conversationsLoading) return; // a load is already in flight
+      if (historyState.searchQuery) return; // search has its own result set
+      historyState.resyncInFlight = true;
+      historyState.pendingListAppend = false;
+      historyState.conversationsLoading = true;
+      DawnWS.send({
+         type: 'list_conversations',
+         payload: { limit: CONVERSATION_PAGE_SIZE, offset: 0 },
+      });
    }
 
    function handleSearchConversationsResponse(payload) {
@@ -2497,6 +2563,8 @@
       handleConversationMessagesAppended: handleConversationMessagesAppended,
       // Remote list create/bump broadcast handler (any interface) → consent pill
       handleConversationListChanged: handleConversationListChanged,
+      handleDisconnect: handleDisconnect,
+      resyncListOnReconnect: resyncListOnReconnect,
       // Briefing support
       loadConversation: requestLoadConversation,
       refreshList: requestListConversations,

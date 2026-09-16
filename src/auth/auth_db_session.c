@@ -177,6 +177,8 @@ int auth_db_get_session(const char *token, auth_session_t *session_out) {
          session_out->user_agent[0] = '\0';
       }
 
+      session_out->keepalive_enabled = sqlite3_column_int(s_db.stmt_get_session, 9) != 0;
+
       sqlite3_reset(s_db.stmt_get_session);
 
       /* Check if session has expired */
@@ -198,6 +200,49 @@ int auth_db_get_session(const char *token, auth_session_t *session_out) {
 
    OLOG_ERROR("auth_db_get_session: failed: %s", sqlite3_errmsg(s_db.db));
    return AUTH_DB_FAILURE;
+}
+
+int auth_db_renew_session(const char *token, time_t new_expires_at) {
+   if (!token) {
+      return AUTH_DB_INVALID;
+   }
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   sqlite3_reset(s_db.stmt_renew_session);
+   sqlite3_bind_int64(s_db.stmt_renew_session, 1, (int64_t)new_expires_at);
+   /* Absolute-cap clamp lives in the SQL (MIN(?, created_at + ?cap)) so the
+    * primitive itself can never write an unbounded expiry. */
+   sqlite3_bind_int64(s_db.stmt_renew_session, 2, (int64_t)AUTH_SESSION_ABSOLUTE_CAP_SEC);
+   sqlite3_bind_text(s_db.stmt_renew_session, 3, token, -1, SQLITE_STATIC);
+   /* Guard: never renew an already-expired/revoked-by-time row. */
+   sqlite3_bind_int64(s_db.stmt_renew_session, 4, (int64_t)time(NULL));
+
+   int rc = sqlite3_step(s_db.stmt_renew_session);
+   sqlite3_reset(s_db.stmt_renew_session);
+
+   AUTH_DB_UNLOCK();
+
+   return (rc == SQLITE_DONE) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+}
+
+int auth_db_set_session_keepalive(const char *token, bool enabled) {
+   if (!token) {
+      return AUTH_DB_INVALID;
+   }
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   sqlite3_reset(s_db.stmt_set_session_keepalive);
+   sqlite3_bind_int(s_db.stmt_set_session_keepalive, 1, enabled ? 1 : 0);
+   sqlite3_bind_text(s_db.stmt_set_session_keepalive, 2, token, -1, SQLITE_STATIC);
+
+   int rc = sqlite3_step(s_db.stmt_set_session_keepalive);
+   sqlite3_reset(s_db.stmt_set_session_keepalive);
+
+   AUTH_DB_UNLOCK();
+
+   return (rc == SQLITE_DONE) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
 }
 
 int auth_db_update_session_activity(const char *token) {

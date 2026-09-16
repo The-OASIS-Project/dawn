@@ -12,6 +12,32 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-09-16 — WebUI reconnect hardening + optional "Always on" per-browser mode
+
+**What changed.**
+- The WebUI now runs an app-level heartbeat and detects a *half-open* socket (one
+  that looks "Connected" but the server has stopped answering) instead of sitting
+  silently dead — a real cause of "it says connected but nothing saves." It
+  reconnects indefinitely (no more giving up after a few tries), recovers on tab
+  focus/network-online, and re-syncs the conversation list on reconnect. A briefly
+  shaky link shows an amber "Unstable…" state.
+- New per-browser opt-in **"Always on (this browser)"** in the user menu (beside
+  "Alarm sounds"). When you enable it (after accepting a security prompt), that
+  browser stays signed in for as long as it's open — its login session is renewed
+  while it actively heartbeats, up to a **30-day** absolute cap — instead of
+  expiring at 24h. **Enable it only on a device you personally trust:** anyone with
+  access to that browser stays logged in as you until you turn it off or sign out.
+- The auth database migrates automatically to **schema v85** (adds one column). No
+  action needed; the daemon logs `migrated schema from v84 to v85` on first start.
+
+**What you need to do.** Nothing required. Restart the daemon to pick up the schema
+migration and the keepalive support; hard-refresh open WebUI tabs to load the new
+client. "Always on" is off by default. If you don't enable it, login-expiry behavior
+is unchanged (you'll simply see a non-navigating "signed out" state instead of an
+abrupt redirect that could lose an in-progress message).
+
+---
+
 ## 2026-09-13 — Email: sending now requires you to choose the account
 
 **What changed.** The assistant's `email` `send` action now **requires** an explicit

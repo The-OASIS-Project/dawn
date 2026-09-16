@@ -64,7 +64,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 84
+#define AUTH_DB_SCHEMA_VERSION 85
 
 /* Retention periods */
 #define LOGIN_ATTEMPT_RETENTION_SEC (7 * 24 * 60 * 60) /* 7 days */
@@ -185,6 +185,8 @@ typedef struct {
    /* === Session module statements (auth_db_session.c) === */
    sqlite3_stmt *stmt_create_session;
    sqlite3_stmt *stmt_get_session;
+   sqlite3_stmt *stmt_renew_session;
+   sqlite3_stmt *stmt_set_session_keepalive;
    sqlite3_stmt *stmt_update_session_activity;
    sqlite3_stmt *stmt_delete_session;
    sqlite3_stmt *stmt_delete_user_sessions;

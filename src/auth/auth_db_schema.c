@@ -97,6 +97,9 @@ static const char *SCHEMA_SQL =
     "   expires_at INTEGER,"
     "   ip_address TEXT,"
     "   user_agent TEXT,"
+    /* Session-keepalive (always-on): 1 = slide expires_at forward on heartbeat.
+     * Added via migration; present here for fresh DBs (see migration ladder). */
+    "   keepalive_enabled INTEGER NOT NULL DEFAULT 0,"
     "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);"

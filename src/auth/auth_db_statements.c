@@ -110,11 +110,35 @@ int auth_db_prepare_statements(void) {
 
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT s.token, s.user_id, u.username, u.is_admin, s.created_at, "
-                           "s.last_activity, s.expires_at, s.ip_address, s.user_agent "
+                           "s.last_activity, s.expires_at, s.ip_address, s.user_agent, "
+                           "s.keepalive_enabled "
                            "FROM sessions s JOIN users u ON s.user_id = u.id WHERE s.token = ?",
                            -1, &s_db.stmt_get_session, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare get_session failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   /* Slide expires_at forward for a session-keepalive (always-on) session.
+    * `MIN(?new_expires, created_at + ?cap)` clamps to the 30-day absolute lifetime
+    * cap INSIDE the primitive (defense-in-depth: a future second caller can't write
+    * an unbounded expiry even if it forgets to clamp). The WHERE guard
+    * (expires_at IS NOT NULL AND expires_at >= ?now) prevents renewing an
+    * already-expired or revoked-by-time row. Binds: 1=new_expires, 2=cap_seconds,
+    * 3=token, 4=now. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "UPDATE sessions SET expires_at = MIN(?, created_at + ?) "
+                           "WHERE token = ? AND expires_at IS NOT NULL AND expires_at >= ?",
+                           -1, &s_db.stmt_renew_session, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare renew_session failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db, "UPDATE sessions SET keepalive_enabled = ? WHERE token = ?", -1,
+                           &s_db.stmt_set_session_keepalive, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare set_session_keepalive failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
@@ -2579,6 +2603,10 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_create_session);
    if (s_db.stmt_get_session)
       sqlite3_finalize(s_db.stmt_get_session);
+   if (s_db.stmt_renew_session)
+      sqlite3_finalize(s_db.stmt_renew_session);
+   if (s_db.stmt_set_session_keepalive)
+      sqlite3_finalize(s_db.stmt_set_session_keepalive);
    if (s_db.stmt_update_session_activity)
       sqlite3_finalize(s_db.stmt_update_session_activity);
    if (s_db.stmt_delete_session)

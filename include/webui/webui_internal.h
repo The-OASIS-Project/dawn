@@ -139,6 +139,12 @@ typedef struct {
    int auth_user_id;
    char auth_session_token[AUTH_TOKEN_LEN]; /* For DB re-validation */
    char username[AUTH_USERNAME_MAX];
+   /* Session-keepalive (always-on): connection-time intent hint only, stored for
+    * diagnostics. It is deliberately NOT READ by any renewal/authorization logic
+    * (renewal reads the DB keepalive_enabled flag, set by the authenticated
+    * session_keepalive_enable handler) — do not wire behavior off this field, and
+    * a client that never sends the hint still gets keepalive via the enable msg. */
+   bool session_keepalive;
    /* Note: is_admin NOT cached - re-validated from DB on each admin operation */
 
    /* Missed notification delivery: set once queued replay has been pushed to the
@@ -703,6 +709,18 @@ static inline bool conn_is_satellite_session(ws_connection_t *conn) {
  * @return true if authenticated, false otherwise (error sent)
  */
 bool conn_require_auth(ws_connection_t *conn);
+
+/**
+ * @brief Like conn_require_auth, but hands back the re-validated session.
+ *
+ * Lets a caller reuse the single DB read (e.g. handle_ping renewing keepalive)
+ * instead of issuing a second get_session. @p session_out may be NULL.
+ *
+ * @param conn WebSocket connection
+ * @param session_out Optional buffer to receive the validated session
+ * @return true if authenticated with valid session, false otherwise (error sent)
+ */
+bool conn_require_auth_ex(ws_connection_t *conn, auth_session_t *session_out);
 
 /**
  * @brief Check if WebSocket connection has admin privileges

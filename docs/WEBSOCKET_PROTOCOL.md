@@ -95,7 +95,8 @@ Reconnect to an existing session using a stored token.
       "token": "a1b2c3d4...",
       "audio_codecs": ["opus", "pcm"],
       "tts_enabled": true,
-      "tool_step_origin": true
+      "tool_step_origin": true,
+      "session_keepalive": false
    }
 }
 ```
@@ -107,8 +108,14 @@ Reconnect to an existing session using a stored token.
   renders its own turn's tool steps from the `tool_step` frame (uniform "tool pill" UI) rather than
   from its live text stream. When set, the server includes this connection in its **own** turn's
   `tool_step` fan (see `tool_step` under Server → Client). Default off preserves the origin-excluded
-  behavior for clients that render tool steps inline from the stream. **The same two fields are
+  behavior for clients that render tool steps inline from the stream. **The same fields are
   accepted on the initial connect handshake**, not only on `reconnect`.
+- `session_keepalive` (optional, default false): a per-browser **"always on"** hint that this
+  client has session-keepalive enabled. **Hint only** — it is NOT the authorization to extend the
+  session (an attacker holding a token could otherwise set it). The authoritative state is the
+  server-persisted `keepalive_enabled` flag, set only by the authenticated `session_keepalive_enable`
+  message (see Session Management). When that flag is set, the server slides this session's expiry
+  forward on each authenticated heartbeat `ping` (up to a 30-day absolute cap from session creation).
 - **Single-connection-per-session:** if the target session is already held by another
   live connection, that connection is **evicted** — it receives a `session_superseded`
   frame + a `4001` close (see below). Last deliberate reconnect wins; the reconnecting
@@ -465,6 +472,28 @@ Revoke (terminate) a specific session.
 }
 ```
 Response: `revoke_session_response`
+
+#### `session_keepalive_enable`
+Opt this browser's session into **keepalive** ("always on"). While the session actively heartbeats
+(`ping`), the server slides its `expires_at` forward on renewal (within ~12h of expiry) instead of
+letting it expire at the normal 24h — up to a **30-day absolute cap** measured from session creation.
+The decision is persisted as the `keepalive_enabled` flag on the session row (survives reconnects on
+the **same** token; a **fresh** session starts with it off, so the client re-sends this on landing a
+fresh session). This is the authorization gate — the `session_keepalive` connect-payload hint above
+is advisory only.
+```json
+{"type": "session_keepalive_enable"}
+```
+Requires an authenticated session. No response frame; takes effect on the next heartbeat renewal.
+The enable/disable events are audit-logged (`SESSION_KEEPALIVE_ENABLE`/`_DISABLE`).
+
+#### `session_keepalive_disable`
+Turn keepalive back off for this session; its expiry reverts to the normal fixed lifetime and is no
+longer slid forward.
+```json
+{"type": "session_keepalive_disable"}
+```
+Requires an authenticated session. No response frame.
 
 ---
 
@@ -1836,7 +1865,9 @@ Broadcast to all authenticated WebUI clients when a scheduled event fires, is di
       "event_type": "alarm|timer|reminder|task",
       "status": "ringing|dismissed|snoozed|cancelled|fired",
       "name": "Morning Alarm",
-      "message": "Morning Alarm"
+      "message": "Morning Alarm",
+      "fire_at": 1708300000,
+      "conversation_id": 1234
    }
 }
 ```
@@ -1848,7 +1879,13 @@ Broadcast to all authenticated WebUI clients when a scheduled event fires, is di
   - `cancelled`: Event was cancelled
   - `fired`: Timer/reminder completed (auto-dismissed)
 - `name`: Event name/label
-- `message`: Display message (may include custom reminder text)
+- `message`: Display message (may include custom reminder text; briefings send a preview ~80 chars)
+- `fire_at`: epoch **seconds** when the event fired. Present on every notification (including the
+  missed-notification replay delivered on reconnect).
+- `conversation_id` (optional): the conversation this notification is associated with, when it has
+  one — e.g. a **briefing** that posted its output to a conversation. Clients use it for
+  **click-to-open** (jump to that conversation). Absent (or `0`) for events with no conversation,
+  such as a plain alarm or timer.
 - Alarms pulse and support snooze; timers/reminders auto-dismiss after firing
 - Not sent to satellite connections (satellites don't have WebUI notification UI)
 

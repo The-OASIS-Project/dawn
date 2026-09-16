@@ -13,10 +13,20 @@
    // WebSocket configuration
    const WS_SUBPROTOCOL = 'dawn-1.0';
 
-   // Reconnection settings
+   // Reconnection settings. No attempt cap: a browser left open reconnects
+   // indefinitely with full-jitter backoff (see websocket.js scheduleReconnect).
    const RECONNECT_BASE_DELAY = 1000;
    const RECONNECT_MAX_DELAY = 30000;
-   const RECONNECT_MAX_ATTEMPTS = 5;
+
+   // Liveness heartbeat (app-level ping/pong). The server answers an authed
+   // `ping` with a seq-echoing `pong`; these detect a half-open socket that
+   // readyState still reports as OPEN. Values match Aurora's proven watchdog and
+   // sit well under the server's ~1800s idle expiry and typical proxy timeouts.
+   const PING_IDLE_MS = 8000; // only ping after this much inbound silence (traffic already proves life)
+   const PING_INTERVAL_MS = 10000; // heartbeat tick cadence
+   const PONG_TIMEOUT_MS = 6000; // a ping unanswered this long counts as one miss
+   const MAX_MISSED_PONGS = 2; // consecutive misses => link dead, force reconnect
+   const MAX_UNSUPPORTED_PROBES = 3; // no pong EVER => assume an older server, stop probing (no false dead)
 
    // Audio configuration
    // 48kHz is Opus native rate - server resamples to 16kHz for ASR
@@ -42,7 +52,13 @@
       // Reconnection
       RECONNECT_BASE_DELAY: RECONNECT_BASE_DELAY,
       RECONNECT_MAX_DELAY: RECONNECT_MAX_DELAY,
-      RECONNECT_MAX_ATTEMPTS: RECONNECT_MAX_ATTEMPTS,
+
+      // Liveness heartbeat
+      PING_IDLE_MS: PING_IDLE_MS,
+      PING_INTERVAL_MS: PING_INTERVAL_MS,
+      PONG_TIMEOUT_MS: PONG_TIMEOUT_MS,
+      MAX_MISSED_PONGS: MAX_MISSED_PONGS,
+      MAX_UNSUPPORTED_PROBES: MAX_UNSUPPORTED_PROBES,
 
       // Audio
       AUDIO_SAMPLE_RATE: AUDIO_SAMPLE_RATE,

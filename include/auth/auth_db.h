@@ -74,6 +74,16 @@
 #define AUTH_REMEMBER_ME_TIMEOUT_SEC (30 * 24 * 60 * 60)
 
 /**
+ * @brief Absolute maximum session lifetime in seconds (30 days)
+ *
+ * Hard cap on total session age measured from created_at, enforced when a
+ * "session keepalive" (always-on) session slides its expires_at forward. Bounds
+ * the worst-case blast radius of a stolen token: even an actively-heartbeating
+ * keepalive session cannot outlive this, after which the user must re-authenticate.
+ */
+#define AUTH_SESSION_ABSOLUTE_CAP_SEC (30 * 24 * 60 * 60)
+
+/**
  * @brief Cleanup interval in seconds (5 minutes)
  *
  * Lazy cleanup runs during auth_db_get_session() if this much time has passed.
@@ -138,6 +148,7 @@ typedef struct {
    time_t expires_at; /**< When session expires (0 = use legacy last_activity check) */
    char ip_address[AUTH_IP_MAX];
    char user_agent[AUTH_USER_AGENT_MAX];
+   bool keepalive_enabled; /**< Session-keepalive (always-on): slide expires_at on heartbeat */
 } auth_session_t;
 
 /**
@@ -500,6 +511,37 @@ int auth_db_create_session(int user_id,
  * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, or AUTH_DB_FAILURE
  */
 int auth_db_get_session(const char *token, auth_session_t *session_out);
+
+/**
+ * @brief Slide a session's expiry forward (session-keepalive / always-on)
+ *
+ * Sets expires_at on the row keyed by @p token. The UPDATE is guarded
+ * (expires_at IS NOT NULL AND expires_at >= now) so it cannot resurrect an
+ * already-expired or revoked-by-time session, and it CLAMPS the new expiry to
+ * created_at + AUTH_SESSION_ABSOLUTE_CAP_SEC in SQL — so even a caller that
+ * passes an unbounded @p new_expires_at cannot exceed the 30-day absolute cap.
+ * (The caller should still compute a bounded value; this is defense-in-depth.)
+ * Pass the AUTH-DB token (auth_session_token), not the WebUI reconnect token.
+ *
+ * @param token Auth session token
+ * @param new_expires_at New expiry (absolute unix time)
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
+ */
+int auth_db_renew_session(const char *token, time_t new_expires_at);
+
+/**
+ * @brief Enable/disable session-keepalive (always-on) on a session row
+ *
+ * Persists the keepalive_enabled flag; only a session with this set will have
+ * its expiry slid forward on heartbeat. Set from the authenticated
+ * session_keepalive_enable/disable handler (informed consent recorded server-side,
+ * not trusted from a connect-time payload hint). Pass the AUTH-DB token.
+ *
+ * @param token Auth session token
+ * @param enabled true to enable keepalive, false to disable
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
+ */
+int auth_db_set_session_keepalive(const char *token, bool enabled);
 
 /**
  * @brief Update session last activity timestamp

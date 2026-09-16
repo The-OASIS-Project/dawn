@@ -70,7 +70,7 @@
  * @param conn WebSocket connection
  * @return true if authenticated with valid session, false otherwise (error sent)
  */
-bool conn_require_auth(ws_connection_t *conn) {
+bool conn_require_auth_ex(ws_connection_t *conn, auth_session_t *session_out) {
    if (!conn->authenticated) {
       send_error_impl(conn->wsi, "UNAUTHORIZED", "Authentication required");
       return false;
@@ -84,7 +84,16 @@ bool conn_require_auth(ws_connection_t *conn) {
       return false;
    }
 
+   /* Hand the freshly-fetched session to the caller so it needn't re-SELECT
+    * (e.g. handle_ping renewing keepalive from the same read). */
+   if (session_out) {
+      *session_out = session;
+   }
    return true;
+}
+
+bool conn_require_auth(ws_connection_t *conn) {
+   return conn_require_auth_ex(conn, NULL);
 }
 
 /**

@@ -46,6 +46,11 @@
       CALENDAR_UPCOMING_ONLY: 'dawn_calendar_upcoming_only',
       ALARM_SOUNDS: 'dawn_alarm_sounds',
       MEMORY_SORT: 'dawn_memory_sort',
+      // Per-browser "Always on": keep this browser a persistent live surface
+      // (reconnect even while hidden; opt in to server-side session keepalive).
+      // Named session_keepalive to match the wire/DB, and to stay grep-distinct
+      // from the always-on VOICE feature's own key.
+      SESSION_KEEPALIVE: 'dawn_session_keepalive',
    });
 
    /**

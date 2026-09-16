@@ -125,6 +125,10 @@
    let currentSecrets = null;
    let restartRequiredFields = [];
    let changedFields = new Set();
+   // True once a get_config response has rendered the panel.  Gates the
+   // preserve-unsaved-edits guard in handleGetConfigResponse: a reconnect/re-open
+   // refetch must not clobber in-progress edits (mirrors the My Settings guard).
+   let configLoadedOnce = false;
    let dynamicOptions = {
       asr_models: [],
       tts_voices: [],
@@ -448,11 +452,17 @@
    let defaultPersona = '';
 
    function handleGetConfigResponse(payload) {
+      // Preserve unsaved edits across a refetch (reconnect / panel re-open): if
+      // the user has pending config changes and the panel has already rendered,
+      // don't clobber their in-place values or clear the change tracking. First
+      // load (nothing rendered yet) always populates.
+      const preserveEdits = configLoadedOnce && changedFields.size > 0;
+
       currentConfig = payload.config;
       currentSecrets = payload.secrets;
       restartRequiredFields = payload.requires_restart || [];
       defaultPersona = payload.default_persona || '';
-      changedFields.clear();
+      if (!preserveEdits) changedFields.clear();
 
       // Update path displays
       if (settingsElements.configPath) {
@@ -468,9 +478,13 @@
          logoEl.textContent = currentConfig.general.ai_name.toUpperCase();
       }
 
-      // Render settings sections (full rebuild) or update values in-place
+      // Render settings sections (full rebuild) or update values in-place.
+      // Skipped entirely when preserving unsaved edits, so a refetch can't
+      // overwrite what the user is currently typing.
       const Schema = window.DawnSettingsSchema;
-      if (Schema && !Schema.needsRebuild()) {
+      if (preserveEdits) {
+         // Keep the current DOM (the user's in-progress edits) — no repopulation.
+      } else if (Schema && !Schema.needsRebuild()) {
          // DOM already rendered — update values in-place (fast path)
          Schema.updateSettingsValues(currentConfig);
       } else {
@@ -483,6 +497,7 @@
             callbacks.buildSearchIndex();
          }
       }
+      configLoadedOnce = true;
 
       // Update memory extraction model dropdown based on provider
       updateMemoryExtractionModels();

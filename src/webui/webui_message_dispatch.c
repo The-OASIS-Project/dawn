@@ -851,6 +851,13 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                   if (json_object_object_get_ex(payload, "tool_step_origin", &tso_obj)) {
                      conn->tool_step_origin = json_object_get_boolean(tso_obj);
                   }
+                  /* Session-keepalive intent hint (display only). The authoritative
+                   * renewal gate is the persisted keepalive_enabled DB flag, which
+                   * survives reconnects — so no re-enable is needed here. */
+                  struct json_object *ka_obj;
+                  if (json_object_object_get_ex(payload, "session_keepalive", &ka_obj)) {
+                     conn->session_keepalive = json_object_get_boolean(ka_obj);
+                  }
 
                   OLOG_INFO("WebUI: Reconnected to session %u with token %.4s... "
                             "(opus: %s, tts: %s)",
@@ -912,6 +919,10 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                      struct json_object *tso_obj;
                      if (json_object_object_get_ex(payload, "tool_step_origin", &tso_obj)) {
                         conn->tool_step_origin = json_object_get_boolean(tso_obj);
+                     }
+                     struct json_object *ka_obj;
+                     if (json_object_object_get_ex(payload, "session_keepalive", &ka_obj)) {
+                        conn->session_keepalive = json_object_get_boolean(ka_obj);
                      }
                      OLOG_INFO("WebUI: Session %u capabilities synced (opus: %s, tts: %s)",
                                conn->session->session_id, conn->use_opus ? "yes" : "no",
@@ -1612,6 +1623,27 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                                    ? always_on_state_name(always_on_get_state(conn->always_on))
                                    : "disabled";
       send_always_on_state(conn->wsi, state_name);
+   } else if (strcmp(type, "session_keepalive_enable") == 0) {
+      if (!conn_require_auth(conn)) {
+         return;
+      }
+      /* Informed consent recorded server-side (the client showed a security
+       * warning the user accepted). Persist on the session row so renewal in
+       * handle_ping is authorized by DB state, not the connect-time payload hint. */
+      conn->session_keepalive = true;
+      if (auth_db_set_session_keepalive(conn->auth_session_token, true) == AUTH_DB_SUCCESS) {
+         auth_db_log_event("SESSION_KEEPALIVE_ENABLE", conn->username, conn->client_ip,
+                           "always-on session keepalive enabled");
+      }
+   } else if (strcmp(type, "session_keepalive_disable") == 0) {
+      if (!conn_require_auth(conn)) {
+         return;
+      }
+      conn->session_keepalive = false;
+      if (auth_db_set_session_keepalive(conn->auth_session_token, false) == AUTH_DB_SUCCESS) {
+         auth_db_log_event("SESSION_KEEPALIVE_DISABLE", conn->username, conn->client_ip,
+                           "always-on session keepalive disabled");
+      }
    } else if (strcmp(type, "ping") == 0) {
       /* App-level liveness probe from a browser client (client→server).  Gated
        * on auth so only a valid, registered session gets a pong; the missing
@@ -1685,8 +1717,31 @@ static void handle_cancel_message(ws_connection_t *conn) {
  * seq + server_time_ms) and has its last_activity refreshed by webui_send_pong.
  */
 static void handle_ping(ws_connection_t *conn, struct json_object *payload) {
-   if (!conn_require_auth(conn)) {
+   auth_session_t session;
+   if (!conn_require_auth_ex(conn, &session)) {
       return;
    }
+
+   /* Session-keepalive (always-on): slide the auth token's expiry forward while
+    * this browser actively heartbeats — but only if the user enabled keepalive
+    * (persisted DB flag, not the connect-time hint), and only when within half a
+    * window of expiry so we write at most ~once per 12h rather than every ping.
+    * The absolute cap bounds a stolen token's worst-case lifetime.
+    * TODO(security): downgrade renewal (fall back to fixed window) on an IP/UA
+    * mismatch vs the stored session, and keep step-up re-auth on sensitive ops. */
+   if (session.keepalive_enabled) {
+      time_t now = time(NULL);
+      if (session.expires_at - now < AUTH_SESSION_TIMEOUT_SEC / 2) {
+         time_t slid = session.expires_at > now + AUTH_SESSION_TIMEOUT_SEC
+                           ? session.expires_at
+                           : now + AUTH_SESSION_TIMEOUT_SEC;
+         time_t capped = session.created_at + AUTH_SESSION_ABSOLUTE_CAP_SEC;
+         time_t new_expires = slid < capped ? slid : capped;
+         if (new_expires > session.expires_at) {
+            auth_db_renew_session(conn->auth_session_token, new_expires);
+         }
+      }
+   }
+
    webui_send_pong(conn, "pong", payload);
 }

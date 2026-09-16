@@ -86,6 +86,14 @@
             return;
          }
 
+         // "Always on" is an in-place toggle too — flip it and leave the menu
+         // open. Enabling opts into server-side session keepalive, so it's gated
+         // behind an explicit confirmation (handled in toggleAlwaysOn).
+         if (action === 'always-on') {
+            toggleAlwaysOn();
+            return;
+         }
+
          close();
 
          switch (action) {
@@ -123,6 +131,71 @@
       item.setAttribute('aria-checked', DawnScheduler.isAlarmSoundsEnabled() ? 'true' : 'false');
    }
 
+   function isAlwaysOnEnabled() {
+      try {
+         return DawnStore.getBool(DawnStore.KEYS.SESSION_KEEPALIVE, false);
+      } catch (e) {
+         return false;
+      }
+   }
+
+   function syncAlwaysOnItem() {
+      var item = document.getElementById('always-on-item');
+      if (!item) return;
+      item.setAttribute('aria-checked', isAlwaysOnEnabled() ? 'true' : 'false');
+   }
+
+   // "Always on": keep THIS browser connected and signed in while it's open.
+   // Enabling opts into server-side session keepalive (the browser won't
+   // re-prompt for login as long as it stays open, up to a 30-day cap), so it is
+   // gated behind an explicit security confirmation. Persisted per-browser in
+   // DawnStore; the server is told via session_keepalive_enable/disable, and the
+   // flag is echoed in the WS init/reconnect payload as a hint.
+   async function toggleAlwaysOn() {
+      if (!isAlwaysOnEnabled()) {
+         // Turning ON — require explicit consent (this weakens login expiry).
+         // Fail CLOSED: the security warning must never be silently skipped, so
+         // `ok` starts false and is only set by an actual confirmation.
+         var ok = false;
+         if (window.DawnDialog && DawnDialog.confirm) {
+            ok = await DawnDialog.confirm(
+               'Keep this browser signed in for as long as it stays open? It will not ' +
+                  'ask for your password again (up to 30 days) and it stays connected in ' +
+                  'the background. Only turn this on for a device you personally trust and ' +
+                  'control — anyone with access to it stays logged in as you.',
+               { title: 'Turn on “Always on”', okText: 'Turn on', cancelText: 'Cancel' }
+            );
+         } else if (typeof window.confirm === 'function') {
+            // Rich dialog unavailable (load race) — fall back to a blocking native
+            // confirm rather than enabling without any warning.
+            ok = window.confirm(
+               'Keep this browser signed in for as long as it stays open (up to 30 days)? ' +
+                  'Only turn this on for a device you personally trust and control.'
+            );
+         }
+         if (!ok) return;
+         try {
+            DawnStore.setBool(DawnStore.KEYS.SESSION_KEEPALIVE, true);
+         } catch (e) {
+            /* storage unavailable — the toggle just won't persist */
+         }
+         if (window.DawnWS && DawnWS.isConnected()) {
+            DawnWS.send({ type: 'session_keepalive_enable' });
+         }
+      } else {
+         // Turning OFF — no confirmation needed.
+         try {
+            DawnStore.setBool(DawnStore.KEYS.SESSION_KEEPALIVE, false);
+         } catch (e) {
+            /* ignore */
+         }
+         if (window.DawnWS && DawnWS.isConnected()) {
+            DawnWS.send({ type: 'session_keepalive_disable' });
+         }
+      }
+      syncAlwaysOnItem();
+   }
+
    function open() {
       var badge = document.getElementById('user-badge');
       var dropdown = document.getElementById('user-badge-dropdown');
@@ -131,6 +204,7 @@
       badge.setAttribute('aria-expanded', 'true');
       dropdown.classList.add('open');
       syncAlarmSoundsItem();
+      syncAlwaysOnItem();
       if (badgeEscToken === null) {
          badgeEscToken = DawnEscStack.register(function () {
             close();
