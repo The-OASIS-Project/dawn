@@ -124,6 +124,20 @@ authority is the *session's* authority (see below), not a separate admin token.
 - **Sessions**: 256-bit tokens from `getrandom()`, 24 h expiry (30 days with "Remember Me").
   Every request re-validates the token against the live user record — a deleted user's cookie
   stops authenticating on its next request.
+- **Session keepalive ("Always on")**: an opt-in, **per-browser** mode (behind an explicit
+  consent prompt) that slides a session's expiry forward while the browser actively heartbeats,
+  instead of the fixed 24 h. **The tradeoff is deliberately bounded.** Sliding-forever would
+  remove the bounded blast radius of a *stolen* token (normally ≤24 h / ≤30 days), so renewal is
+  clamped to an absolute **30-day cap from session creation** (`AUTH_SESSION_ABSOLUTE_CAP_SEC`),
+  enforced **in the DB primitive itself** (`MIN(?, created_at + cap)`) — a stolen keepalive token
+  still dies in ≤30 days, and the per-request re-validation above means revocation (logout / admin
+  revoke / password change) still lands within one heartbeat. Authorization is a **persisted**
+  `keepalive_enabled` flag set only by an *authenticated* `session_keepalive_enable` message; the
+  connect-time payload hint is advisory, so a token holder cannot self-extend over the wire.
+  Renewal targets the auth-DB token, never the WebUI reconnect token. **Accepted residual**: an
+  unlocked/kiosk browser with keepalive on stays logged in until closed — the consent prompt
+  states this; step-up re-auth on the most sensitive actions is the intended mitigation (not yet
+  implemented).
 - **Rate limiting / lockout**: 20 attempts / 15 min per IP (IPv6 normalized to /64), 5 failed
   attempts → 15-minute account lock (`rate_limiter.c`, `webui_http.c`).
 - **CSRF**: HMAC-signed single-use tokens, 10-minute validity, nonce replay detection on
