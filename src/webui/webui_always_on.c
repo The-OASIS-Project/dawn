@@ -583,19 +583,33 @@ void always_on_destroy(always_on_ctx_t *ctx) {
  * handle_json_message() in webui_message_dispatch.c when the client sends
  * `always_on_enable` / `always_on_disable`.  Kept here next to the
  * context lifecycle (always_on_create / always_on_destroy) so policy
- * (per-user uniqueness, push-to-talk conflict, sample-rate validation)
- * stays adjacent to the state machine it gates.
+ * (per-login uniqueness by auth session token, push-to-talk conflict,
+ * sample-rate validation) stays adjacent to the state machine it gates.
  * ============================================================================= */
 
 /**
- * Check if another connection for the same user already has always-on active.
- * Must NOT hold s_conn_registry_mutex when calling conn_require_auth.
+ * Check if another connection sharing this browser login already has always-on
+ * active.  Keyed on the auth session token (the login cookie), NOT the user id:
+ * one account logged in on several machines has a distinct token per login, so
+ * matching on user id wrongly blocked a second machine from listening.
+ * Same-browser tabs share the cookie (and are already reduced to one live
+ * connection by session eviction); an independent machine has its own token and
+ * gets its own always-on session.  An empty token matches nothing (fail open).
+ *
+ * No self-exclusion is needed: handle_always_on_enable() early-returns when
+ * conn->always_on is already set, so the calling connection cannot self-match.
+ * The caller is auth-gated upstream (conn_require_auth at dispatch), so the
+ * token is already DB-validated and non-empty here; the empty-token guard is
+ * only defensive.
  */
-static bool user_has_always_on(int auth_user_id) {
+static bool session_has_always_on(const char *auth_session_token) {
+   if (!auth_session_token || auth_session_token[0] == '\0') {
+      return false;
+   }
    pthread_mutex_lock(&s_conn_registry_mutex);
    for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
       ws_connection_t *c = s_active_connections[i];
-      if (c && c->auth_user_id == auth_user_id && c->always_on) {
+      if (c && c->always_on && strcmp(c->auth_session_token, auth_session_token) == 0) {
          pthread_mutex_unlock(&s_conn_registry_mutex);
          return true;
       }
@@ -619,10 +633,11 @@ void handle_always_on_enable(void *conn_ptr, struct json_object *payload) {
       return;
    }
 
-   /* Enforce per-user limit (max 1 always-on session) */
-   if (user_has_always_on(conn->auth_user_id)) {
-      send_error_impl(conn->wsi, "ALREADY_ACTIVE",
-                      "Always-on is active in another tab for this user");
+   /* Enforce one always-on per browser login (keyed on the auth session token),
+    * so each machine gets its own; a second tab of the same browser shares the
+    * token — and is already reduced to one live connection by session eviction. */
+   if (session_has_always_on(conn->auth_session_token)) {
+      send_error_impl(conn->wsi, "ALREADY_ACTIVE", "Always-on is already active in this browser");
       return;
    }
 
