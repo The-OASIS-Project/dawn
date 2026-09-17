@@ -45,14 +45,18 @@ char *schwab_service_portfolio(int user_id, bool accounts_only);
  * Build an LLM-facing price-history answer for ONE symbol. @p range is one of
  * 1mo/3mo/6mo/1y/5y/ytd (default 1y); @p interval is daily/weekly/monthly
  * (default per range; an illegal range+interval is coerced); @p data is
- * summary/series/raw (default summary). Empty strings take the defaults.
+ * summary/series/raw (default summary). @p start / @p end are optional
+ * YYYY-MM-DD dates: when @p start is non-empty they override @p range with an
+ * explicit window (@p end defaults to today). Empty strings take the defaults.
  * Returns an owned string; failures prefixed with TOOL_RESULT_ERROR_MARK.
  */
 char *schwab_service_history(int user_id,
                              const char *symbol,
                              const char *range,
                              const char *interval,
-                             const char *data);
+                             const char *data,
+                             const char *start,
+                             const char *end);
 
 /**
  * Build an LLM-facing fundamentals (valuation) snapshot for one or more

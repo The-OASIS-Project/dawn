@@ -32,6 +32,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "core/iso8601.h" /* iso8601_parse_date_utc */
 #include "core/strbuf.h"
 #include "logging.h"
 #include "tools/oauth_client.h"
@@ -236,7 +237,8 @@ static schwab_rc_t schwab_get_with_retry(oauth_provider_config_t *prov,
  * transport error. */
 static char *schwab_req_err(schwab_rc_t rc, long http) {
    if (rc == SCHWAB_RC_HTTP && (http == 400 || http == 404)) {
-      return result_err("Schwab rejected that request — check the symbol (and range/interval).");
+      return result_err(
+          "Schwab rejected that request — check the symbol, and any dates or range/interval.");
    }
    return rc_to_err(rc);
 }
@@ -507,11 +509,39 @@ static const hist_range_t HIST_RANGES[] = {
    { "ytd", "ytd", 1, 1u | 2u, SCHWAB_FREQ_DAILY },
 };
 
+/* Strict YYYY-MM-DD check. Stricter than strptime (which tolerates trailing junk
+ * and single-digit fields) AND rejects semantically-invalid dates like
+ * 2025-02-30 / 2025-13-45 that timegm would silently normalize — by requiring an
+ * exact parse→reformat round-trip. Local so the stocks tool does not depend on
+ * the email tool being compiled in. */
+static bool schwab_valid_date(const char *s) {
+   if (!s || strlen(s) != 10 || s[4] != '-' || s[7] != '-') {
+      return false;
+   }
+   for (int i = 0; i < 10; i++) {
+      if (i == 4 || i == 7) {
+         continue;
+      }
+      if (s[i] < '0' || s[i] > '9') {
+         return false;
+      }
+   }
+   time_t t = (time_t)iso8601_parse_date_utc(s);
+   struct tm tmv;
+   char rt[16];
+   if (!gmtime_r(&t, &tmv) || strftime(rt, sizeof(rt), "%Y-%m-%d", &tmv) == 0) {
+      return false;
+   }
+   return strcmp(rt, s) == 0;
+}
+
 char *schwab_service_history(int user_id,
                              const char *symbol,
                              const char *range,
                              const char *interval,
-                             const char *data) {
+                             const char *data,
+                             const char *start,
+                             const char *end) {
    /* symbol: history is single — take the first valid token. */
    char clean[32];
    if (clean_symbols(symbol ? symbol : "", clean, sizeof(clean), NULL) == 0) {
@@ -520,40 +550,6 @@ char *schwab_service_history(int user_id,
    char *comma = strchr(clean, ',');
    if (comma) {
       *comma = '\0';
-   }
-
-   /* range */
-   const char *rq = (range && range[0]) ? range : "1y";
-   const hist_range_t *rr = NULL;
-   for (size_t i = 0; i < sizeof(HIST_RANGES) / sizeof(HIST_RANGES[0]); i++) {
-      if (strcmp(rq, HIST_RANGES[i].range) == 0) {
-         rr = &HIST_RANGES[i];
-         break;
-      }
-   }
-   if (!rr) {
-      return result_err("Unknown range. Use 1mo, 3mo, 6mo, 1y, 5y, or ytd.");
-   }
-
-   /* interval (+ coercion to a legal one for this range) */
-   schwab_freq_t freq;
-   if (!interval || !interval[0]) {
-      freq = rr->def_interval;
-   } else if (strcmp(interval, "daily") == 0) {
-      freq = SCHWAB_FREQ_DAILY;
-   } else if (strcmp(interval, "weekly") == 0) {
-      freq = SCHWAB_FREQ_WEEKLY;
-   } else if (strcmp(interval, "monthly") == 0) {
-      freq = SCHWAB_FREQ_MONTHLY;
-   } else {
-      return result_err("Unknown interval. Use daily, weekly, or monthly.");
-   }
-   char coerce_note[96] = "";
-   if (!(rr->legal & freq_bit(freq))) {
-      schwab_freq_t nf = (rr->legal & 2u) ? SCHWAB_FREQ_WEEKLY : SCHWAB_FREQ_DAILY;
-      snprintf(coerce_note, sizeof(coerce_note), " (%s bars aren't available for %s — using %s)",
-               freq_name(freq), rr->range, freq_name(nf));
-      freq = nf;
    }
 
    /* data mode: 0 summary, 1 series, 2 raw (all include the summary) */
@@ -568,6 +564,99 @@ char *schwab_service_history(int user_id,
       }
    }
 
+   /* Build the pricehistory URL via either an explicit start/end date range or
+    * a preset range. `label`, `freq`, and (date mode) the client-side trim
+    * bounds are set by whichever branch runs, so nothing below dereferences a
+    * range-table row that doesn't exist in date mode. */
+   char url[512];
+   char coerce_note[96] = "";
+   char label[48];
+   schwab_freq_t freq = SCHWAB_FREQ_DAILY;
+   bool date_mode = (start && start[0]);
+   int64_t start_ms = 0, end_excl = 0;
+   if (!date_mode && end && end[0]) {
+      return result_err("An end date needs a start date too (or use range).");
+   }
+
+   if (date_mode) {
+      if (!schwab_valid_date(start)) {
+         return result_err("Dates must be YYYY-MM-DD (e.g. 2025-03-01).");
+      }
+      int64_t s_sec = iso8601_parse_date_utc(start);
+      /* +1 day of slack so "today" in a UTC+N timezone isn't rejected (start is
+       * UTC-midnight); a genuinely future date just yields an empty window. */
+      if (s_sec > (int64_t)time(NULL) + 86400) {
+         return result_err("Start date is in the future.");
+      }
+      int64_t e_sec;
+      if (end && end[0]) {
+         if (!schwab_valid_date(end)) {
+            return result_err("Dates must be YYYY-MM-DD (e.g. 2025-03-01).");
+         }
+         e_sec = iso8601_parse_date_utc(end);
+         if (e_sec < s_sec) {
+            return result_err("End date is before the start date.");
+         }
+      } else {
+         e_sec = (int64_t)time(NULL);
+      }
+      /* interval: no coercion — periodType=year legally allows all three. */
+      if (interval && interval[0]) {
+         if (strcmp(interval, "daily") == 0) {
+            freq = SCHWAB_FREQ_DAILY;
+         } else if (strcmp(interval, "weekly") == 0) {
+            freq = SCHWAB_FREQ_WEEKLY;
+         } else if (strcmp(interval, "monthly") == 0) {
+            freq = SCHWAB_FREQ_MONTHLY;
+         } else {
+            return result_err("Unknown interval. Use daily, weekly, or monthly.");
+         }
+      }
+      start_ms = s_sec * 1000;
+      end_excl = (e_sec + 86400) * 1000; /* 00:00Z of the day after `end` */
+      int64_t end_ms = end_excl - 1;     /* end-of-day so Schwab includes the end day */
+      snprintf(url, sizeof(url),
+               "%s/pricehistory?symbol=%s&periodType=year&frequencyType=%s&frequency=1"
+               "&startDate=%lld&endDate=%lld&needExtendedHoursData=false",
+               SCHWAB_MARKETDATA_BASE, clean, freq_name(freq), (long long)start_ms,
+               (long long)end_ms);
+      snprintf(label, sizeof(label), "%s to %s", start, (end && end[0]) ? end : "today");
+   } else {
+      const char *rq = (range && range[0]) ? range : "1y";
+      const hist_range_t *rr = NULL;
+      for (size_t i = 0; i < sizeof(HIST_RANGES) / sizeof(HIST_RANGES[0]); i++) {
+         if (strcmp(rq, HIST_RANGES[i].range) == 0) {
+            rr = &HIST_RANGES[i];
+            break;
+         }
+      }
+      if (!rr) {
+         return result_err("Unknown range. Use 1mo, 3mo, 6mo, 1y, 5y, or ytd.");
+      }
+      if (!interval || !interval[0]) {
+         freq = rr->def_interval;
+      } else if (strcmp(interval, "daily") == 0) {
+         freq = SCHWAB_FREQ_DAILY;
+      } else if (strcmp(interval, "weekly") == 0) {
+         freq = SCHWAB_FREQ_WEEKLY;
+      } else if (strcmp(interval, "monthly") == 0) {
+         freq = SCHWAB_FREQ_MONTHLY;
+      } else {
+         return result_err("Unknown interval. Use daily, weekly, or monthly.");
+      }
+      if (!(rr->legal & freq_bit(freq))) {
+         schwab_freq_t nf = (rr->legal & 2u) ? SCHWAB_FREQ_WEEKLY : SCHWAB_FREQ_DAILY;
+         snprintf(coerce_note, sizeof(coerce_note), " (%s bars aren't available for %s — using %s)",
+                  freq_name(freq), rr->range, freq_name(nf));
+         freq = nf;
+      }
+      snprintf(url, sizeof(url),
+               "%s/pricehistory?symbol=%s&periodType=%s&period=%d&frequencyType=%s&frequency=1"
+               "&needExtendedHoursData=false",
+               SCHWAB_MARKETDATA_BASE, clean, rr->period_type, rr->period, freq_name(freq));
+      snprintf(label, sizeof(label), "%s", rr->range);
+   }
+
    oauth_provider_config_t prov;
    char bearer[OAUTH_TOKEN_BUF_SIZE];
    char *err = NULL;
@@ -575,12 +664,6 @@ char *schwab_service_history(int user_id,
       sodium_memzero(&prov, sizeof(prov));
       return err;
    }
-
-   char url[512];
-   snprintf(url, sizeof(url),
-            "%s/pricehistory?symbol=%s&periodType=%s&period=%d&frequencyType=%s&frequency=1"
-            "&needExtendedHoursData=false",
-            SCHWAB_MARKETDATA_BASE, clean, rr->period_type, rr->period, freq_name(freq));
 
    struct json_object *root = NULL;
    long http = 0;
@@ -631,6 +714,43 @@ char *schwab_service_history(int user_id,
    }
    json_object_put(root);
 
+   /* Date mode: trim to the requested window client-side (candles are oldest-
+    * first). This makes both boundary days inclusive regardless of how Schwab
+    * interprets startDate/endDate — a daily candle stamped ~05:00Z on the day
+    * falls inside [start 00:00Z, day-after-end 00:00Z). Base pointers are kept
+    * for free(); the window is shifted to the front. */
+   if (date_mode) {
+      int s0 = 0;
+      while (s0 < n && dt[s0] < start_ms) {
+         s0++;
+      }
+      int e = s0;
+      while (e < n && dt[e] < end_excl) {
+         e++;
+      }
+      int win = e - s0;
+      if (win <= 0) {
+         free(op);
+         free(hi);
+         free(lo);
+         free(cl);
+         free(vo);
+         free(dt);
+         char m[96];
+         snprintf(m, sizeof(m), "No price history for %s in that date range.", clean);
+         return result_err(m);
+      }
+      if (s0 > 0) {
+         memmove(op, op + s0, sizeof(double) * win);
+         memmove(hi, hi + s0, sizeof(double) * win);
+         memmove(lo, lo + s0, sizeof(double) * win);
+         memmove(cl, cl + s0, sizeof(double) * win);
+         memmove(vo, vo + s0, sizeof(double) * win);
+         memmove(dt, dt + s0, sizeof(int64_t) * win);
+      }
+      n = win;
+   }
+
    /* Base the period return on the first candle's close (an unambiguous
     * "change across the returned window"). Schwab's previousClose is not
     * reliably the pre-window close, so using it would risk mislabeling a
@@ -643,7 +763,7 @@ char *schwab_service_history(int user_id,
    char d0[24], d1[24];
    fmt_date(dt[0], d0, sizeof(d0));
    fmt_date(dt[n - 1], d1, sizeof(d1));
-   strbuf_appendf(&sb, "%s — %s price history, %s bars%s\n", clean, rr->range, freq_name(freq),
+   strbuf_appendf(&sb, "%s — %s price history, %s bars%s\n", clean, label, freq_name(freq),
                   coerce_note);
    strbuf_appendf(&sb, "%s to %s (%d bars). Last close $%.2f (as of %s).\n", d0, d1, n,
                   st.last_close, d1);
@@ -704,13 +824,13 @@ char *schwab_service_history(int user_id,
       strbuf_append(&sb, "]\n");
    } else if (mode == 2) {
       int cap = 300;
-      int start = (n > cap) ? (n - cap) : 0;
+      int raw_start = (n > cap) ? (n - cap) : 0;
       if (n > cap) {
          strbuf_appendf(&sb, "\nRaw candles (last %d of %d):\n", cap, n);
       } else {
          strbuf_appendf(&sb, "\nRaw candles (%d):\n", n);
       }
-      for (int i = start; i < n; i++) {
+      for (int i = raw_start; i < n; i++) {
          char d[24], vb[24];
          fmt_date(dt[i], d, sizeof(d));
          fmt_volume(vo[i], vb, sizeof(vb));

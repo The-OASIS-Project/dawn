@@ -60,7 +60,7 @@ static const treg_param_t schwab_params[] = {
    {
        .name = "range",
        .description = "history only: how far back — '1mo','3mo','6mo','1y','5y','ytd' "
-                      "(default '1y').",
+                      "(default '1y'). Ignored when 'start' is given.",
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
@@ -92,6 +92,24 @@ static const treg_param_t schwab_params[] = {
        .enum_values = { "summary", "series", "raw" },
        .enum_count = 3,
    },
+   {
+       .name = "start",
+       .description = "history only: custom start date YYYY-MM-DD (e.g. '2025-03-01'). When set, "
+                      "it overrides 'range' with an explicit window.",
+       .type = TOOL_PARAM_TYPE_STRING,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "start",
+   },
+   {
+       .name = "end",
+       .description = "history only: custom end date YYYY-MM-DD (default: today). Only used "
+                      "together with 'start'.",
+       .type = TOOL_PARAM_TYPE_STRING,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "end",
+   },
 };
 
 /* ========== Metadata ========== */
@@ -110,7 +128,7 @@ static const tool_metadata_t schwab_metadata = {
                   "render_visual to chart it), 'fundamentals' (P/E, market cap, dividend yield, "
                   "52-week range, beta). Read-only.",
    .params = schwab_params,
-   .param_count = 5,
+   .param_count = 7,
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NETWORK | TOOL_CAP_SECRETS | TOOL_CAP_INFORMATIONAL |
@@ -165,13 +183,15 @@ static char *schwab_tool_callback(const char *action, char *value, int *should_r
       return r ? r : oom();
    }
    if (strcmp(action, "history") == 0) {
-      char range[16] = "", interval[16] = "", data[16] = "";
+      char range[16] = "", interval[16] = "", data[16] = "", start[16] = "", end[16] = "";
       if (value) {
          tool_param_extract_custom(value, "range", range, sizeof(range));
          tool_param_extract_custom(value, "interval", interval, sizeof(interval));
          tool_param_extract_custom(value, "data", data, sizeof(data));
+         tool_param_extract_custom(value, "start", start, sizeof(start));
+         tool_param_extract_custom(value, "end", end, sizeof(end));
       }
-      char *r = schwab_service_history(user_id, syms, range, interval, data);
+      char *r = schwab_service_history(user_id, syms, range, interval, data, start, end);
       return r ? r : oom();
    }
    if (strcmp(action, "fundamentals") == 0) {
