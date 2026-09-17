@@ -928,6 +928,23 @@ admin_resp_code_t admin_client_research_cancel(int fd,
                                                size_t resp_len);
 
 /**
+ * @brief Charles Schwab OAuth enrollment (CLI manual-paste bootstrap).
+ *        `auth_url` returns the authorize URL; the operator approves in a browser
+ *        and pastes the resulting redirect URL to `auth_complete`. @p user_id is
+ *        required and validated daemon-side.
+ */
+admin_resp_code_t admin_client_schwab_auth_url(int fd,
+                                               int user_id,
+                                               char *response,
+                                               size_t resp_len);
+admin_resp_code_t admin_client_schwab_auth_complete(int fd,
+                                                    int user_id,
+                                                    const char *redirect_url,
+                                                    char *response,
+                                                    size_t resp_len);
+admin_resp_code_t admin_client_schwab_status(int fd, int user_id, char *response, size_t resp_len);
+
+/**
  * @brief Push an update offer to one satellite by uuid.
  *
  * The daemon resolves the device's tier→platform, mints a one-time download

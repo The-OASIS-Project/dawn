@@ -34,14 +34,22 @@
  * ============================================================================ */
 
 typedef struct {
-   char provider[32];         /**< "google" */
+   char provider[32];         /**< "google", "schwab" */
    char client_id[128];       /**< OAuth client ID */
    char client_secret[256];   /**< OAuth client secret */
    char auth_endpoint[256];   /**< Authorization endpoint URL */
    char token_endpoint[256];  /**< Token exchange endpoint URL */
-   char revoke_endpoint[256]; /**< Token revocation endpoint URL */
+   char revoke_endpoint[256]; /**< Token revocation endpoint URL (blank = provider has none) */
    char redirect_uri[256];    /**< Redirect URI registered with provider */
-   char scopes[512];          /**< Space-separated scopes */
+   char scopes[512];          /**< Space-separated scopes (blank = provider grants a default) */
+   /* Provider-behavior flags. Google sets {false, true, false} (the historical
+    * defaults, so a zero-initialized struct that then calls oauth_google_provider
+    * reproduces the original request bytes). Schwab sets {true, false, true}. */
+   bool token_auth_basic;    /**< Send client creds as HTTP Basic on the token endpoint
+                                  (Authorization header) instead of in the POST body. */
+   bool use_pkce;            /**< Emit a PKCE S256 challenge/verifier. */
+   bool minimal_auth_params; /**< Omit the Google-only access_type/prompt/
+                                  include_granted_scopes params from the auth URL. */
 } oauth_provider_config_t;
 
 /* ============================================================================
@@ -51,7 +59,11 @@ typedef struct {
 typedef struct {
    char access_token[2048]; /**< Bearer access token */
    char refresh_token[512]; /**< Refresh token for obtaining new access tokens */
-   int64_t expires_at;      /**< Expiry time (epoch seconds) */
+   int64_t expires_at;      /**< Access-token expiry time (epoch seconds) */
+   int64_t linked_at;       /**< Original authorization time (epoch seconds); set at code
+                                 exchange and preserved across refreshes. 0 if unknown.
+                                 Used to warn before a fixed-lifetime refresh token (e.g.
+                                 Schwab's 7-day) lapses. */
    char scopes[512];        /**< Granted scopes */
    char email[256];         /**< User email from token response (if available) */
 } oauth_token_set_t;
@@ -94,6 +106,23 @@ int oauth_google_provider(const char *client_id,
  */
 int oauth_build_google_provider(const char *scopes, oauth_provider_config_t *out);
 
+/**
+ * Fill provider config with Charles Schwab OAuth 2.0 endpoints.
+ * Schwab uses HTTP Basic auth on the token endpoint, no PKCE, no scope param,
+ * and has no revocation endpoint.
+ * @return 0 on success, 1 on failure (missing client_id/secret)
+ */
+int oauth_schwab_provider(const char *client_id,
+                          const char *client_secret,
+                          const char *redirect_uri,
+                          oauth_provider_config_t *out);
+
+/**
+ * Build Schwab provider from global config (secrets.toml [secrets.schwab]).
+ * @return 0 on success, 1 if not configured
+ */
+int oauth_build_schwab_provider(oauth_provider_config_t *out);
+
 /* ============================================================================
  * OAuth Flow
  * ============================================================================ */
@@ -132,6 +161,24 @@ int oauth_exchange_code(const oauth_provider_config_t *provider,
                         const char *state,
                         int user_id,
                         oauth_token_set_t *out_tokens);
+
+/**
+ * Complete an OAuth flow from a pasted full redirect URL: validate the URL's
+ * origin/path against the provider's registered redirect_uri, extract + URL-decode
+ * `code` and `state`, exchange, and store the tokens under (user_id, provider,
+ * account_key). Shared by the CLI enrollment and any future WebUI paste field.
+ * Never logs the URL/code; zeroes all sensitive intermediates.
+ *
+ * @param err      Optional buffer for a human-readable failure reason (credential-
+ *                 neutral). May be NULL.
+ * @return 0 on success, 1 on failure.
+ */
+int oauth_complete_from_redirect(const oauth_provider_config_t *provider,
+                                 int user_id,
+                                 const char *redirect_url,
+                                 const char *account_key,
+                                 char *err,
+                                 size_t err_len);
 
 /**
  * Refresh an expired access token using the refresh token.

@@ -33,6 +33,9 @@
 #include "config/dawn_config.h"
 
 dawn_config_t g_config;
+/* llm_tools.c's per-tool advertisement gates read g_secrets (e.g. the stocks
+ * tool checks schwab_client_id); zero-init leaves those tools "not configured". */
+secrets_config_t g_secrets;
 
 /* --- on the dup-check path: real returns --- */
 const char *tool_registry_get_action_param_name(const char *tool_name) {

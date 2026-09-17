@@ -268,7 +268,18 @@ typedef enum {
    ADMIN_MSG_RESEARCH_START = 0xE0,  /**< spawn a research run headlessly */
    ADMIN_MSG_RESEARCH_STATUS = 0xE1, /**< machine-readable run status line */
    ADMIN_MSG_RESEARCH_CANCEL = 0xE2, /**< cancel a run at its next round boundary */
-   /* Next free research opcode: 0xE3.  (Range ends 0xEF.) */
+
+   /* Charles Schwab OAuth enrollment operator surface (docs/SCHWAB_SETUP.md).
+    * Same SO_PEERCRED operator trust as research above (no admin-auth prefix).
+    * Wire formats (little-endian):
+    *   SCHWAB_AUTH_URL:      [user_id i32]                     → returns the authorize URL
+    *   SCHWAB_AUTH_COMPLETE: [user_id i32][redirect-URL bytes] → exchanges + stores tokens
+    *   SCHWAB_STATUS:        [user_id i32]                     → link state + days to expiry
+    * user_id is REQUIRED and validated against a real account. */
+   ADMIN_MSG_SCHWAB_AUTH_URL = 0xE3,      /**< generate the Schwab authorize URL */
+   ADMIN_MSG_SCHWAB_AUTH_COMPLETE = 0xE4, /**< complete enrollment from the pasted redirect URL */
+   ADMIN_MSG_SCHWAB_STATUS = 0xE5,        /**< linked-account status + refresh-expiry countdown */
+   /* Next free operator opcode: 0xE6.  (Range ends 0xEF.) */
 } admin_msg_type_t;
 
 /**

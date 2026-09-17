@@ -1677,6 +1677,24 @@ void handle_set_secrets(ws_connection_t *conn, struct json_object *payload) {
          safe_strscpy(mutable_secrets->google_redirect_url, str);
       }
    }
+   if (json_object_object_get_ex(payload, "schwab_client_id", &val)) {
+      const char *str = json_object_get_string(val);
+      if (str) {
+         safe_strscpy(mutable_secrets->schwab_client_id, str);
+      }
+   }
+   if (json_object_object_get_ex(payload, "schwab_client_secret", &val)) {
+      const char *str = json_object_get_string(val);
+      if (str) {
+         safe_strscpy(mutable_secrets->schwab_client_secret, str);
+      }
+   }
+   if (json_object_object_get_ex(payload, "schwab_redirect_url", &val)) {
+      const char *str = json_object_get_string(val);
+      if (str) {
+         safe_strscpy(mutable_secrets->schwab_redirect_url, str);
+      }
+   }
 
    /* Write to file */
    int result = secrets_write_toml(mutable_secrets, secrets_path);

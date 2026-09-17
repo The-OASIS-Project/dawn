@@ -1877,6 +1877,55 @@ admin_resp_code_t admin_client_research_cancel(int fd,
    return recv_text_response(fd, response, resp_len);
 }
 
+/* =============================================================================
+ * Charles Schwab OAuth enrollment (dawn-admin schwab *)
+ * ============================================================================= */
+
+admin_resp_code_t admin_client_schwab_auth_url(int fd,
+                                               int user_id,
+                                               char *response,
+                                               size_t resp_len) {
+   uint8_t buf[4];
+   wr_i32le(buf, (int32_t)user_id);
+   if (send_message(fd, ADMIN_MSG_SCHWAB_AUTH_URL, (const char *)buf, 4) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
+admin_resp_code_t admin_client_schwab_auth_complete(int fd,
+                                                    int user_id,
+                                                    const char *redirect_url,
+                                                    char *response,
+                                                    size_t resp_len) {
+   if (!redirect_url || !redirect_url[0]) {
+      return ADMIN_RESP_FAILURE;
+   }
+   size_t ulen = strlen(redirect_url);
+   if (ulen + 4 >= ADMIN_MSG_MAX_PAYLOAD) {
+      return ADMIN_RESP_FAILURE;
+   }
+   uint8_t buf[ADMIN_MSG_MAX_PAYLOAD];
+   wr_i32le(buf, (int32_t)user_id);
+   memcpy(buf + 4, redirect_url, ulen);
+   uint16_t total = (uint16_t)(4 + ulen);
+   int sent = send_message(fd, ADMIN_MSG_SCHWAB_AUTH_COMPLETE, (const char *)buf, total);
+   explicit_bzero(buf, sizeof(buf)); /* single-use authorization code */
+   if (sent != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
+admin_resp_code_t admin_client_schwab_status(int fd, int user_id, char *response, size_t resp_len) {
+   uint8_t buf[4];
+   wr_i32le(buf, (int32_t)user_id);
+   if (send_message(fd, ADMIN_MSG_SCHWAB_STATUS, (const char *)buf, 4) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
 admin_resp_code_t admin_client_ota_list(int fd, char *response, size_t resp_len) {
    if (send_message(fd, ADMIN_MSG_OTA_LIST, NULL, 0) != 0) {
       return ADMIN_RESP_SERVICE_ERROR;

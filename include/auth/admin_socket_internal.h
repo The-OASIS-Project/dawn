@@ -110,6 +110,14 @@ int handle_research_status_cmd(int client_fd, const char *payload, uint16_t payl
 int handle_research_cancel_cmd(int client_fd, const char *payload, uint16_t payload_len);
 #endif
 
+#ifdef DAWN_ENABLE_SCHWAB_TOOL
+/* Charles Schwab OAuth enrollment operator commands (admin_socket_schwab.c) —
+ * the CLI manual-paste bootstrap (docs/SCHWAB_SETUP.md). */
+int handle_schwab_auth_url_cmd(int client_fd, const char *payload, uint16_t payload_len);
+int handle_schwab_auth_complete_cmd(int client_fd, const char *payload, uint16_t payload_len);
+int handle_schwab_status_cmd(int client_fd, const char *payload, uint16_t payload_len);
+#endif
+
 /* Music-DB handlers (admin_socket_music.c).  Dispatched from handle_client()
  * in admin_socket.c against ADMIN_MSG_MUSIC_* opcodes. */
 int admin_handle_music_stats(int client_fd);

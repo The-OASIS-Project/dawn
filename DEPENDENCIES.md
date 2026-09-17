@@ -110,6 +110,7 @@ Arduino-ecosystem libraries (WebSockets, ArduinoJson, Adafruit GFX/ST7789/NeoPix
 | Google Gemini | Cloud LLM | `[llm.cloud] provider = "gemini"` | Sign up at ai.google.dev |
 | **OpenRouter** | First-class cloud provider fronting hundreds of models from many vendors through one OpenAI-compatible key | `[llm.cloud] provider = "openrouter"` | Sign up at openrouter.ai. Key in `secrets.toml` under `openrouter_api_key` (or `OPENROUTER_API_KEY` env). No new build deps (reuses the existing OpenAI request/SSE path). |
 | **Tavily** | LLM-optimized web search + URL extract (opt-in alternative to local SearXNG + FlareSolverr) | `[search] engine = "tavily"` and/or `[url_fetcher] fallback = "tavily"` | Sign up at tavily.com — free tier 1000 calls/month. Key in `secrets.toml` under `tavily_api_key` (or `TAVILY_API_KEY` env). No new build deps (uses existing libcurl + json-c). |
+| **Charles Schwab** | Live stock quotes + read-only portfolio (the `stocks` tool) | Set `[secrets.schwab]` `client_id`/`client_secret`, then `dawn-admin schwab auth` | Requires a Schwab developer app (developer.schwab.com) with the Market Data + Accounts/Trading products and a registered HTTPS loopback callback. OAuth 2.0; tokens stored encrypted. Refresh token expires every 7 days (re-run `dawn-admin schwab auth`). No new build deps (reuses `oauth_client` + libcurl + json-c). See [SCHWAB_SETUP.md](docs/SCHWAB_SETUP.md). |
 
 ### Security note on API keys via environment variables
 

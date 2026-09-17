@@ -2253,6 +2253,14 @@ int config_parse_secrets(const char *path, secrets_config_t *secrets) {
          PARSE_STRING(google, "redirect_url", secrets->google_redirect_url);
       }
 
+      /* Parse [secrets.schwab] sub-section for Charles Schwab OAuth 2.0 (stocks tool) */
+      toml_table_t *schwab = toml_table_in(secrets_section, "schwab");
+      if (schwab) {
+         PARSE_STRING(schwab, "client_id", secrets->schwab_client_id);
+         PARSE_STRING(schwab, "client_secret", secrets->schwab_client_secret);
+         PARSE_STRING(schwab, "redirect_url", secrets->schwab_redirect_url);
+      }
+
       PARSE_STRING(secrets_section, "service_token", secrets->service_token);
       if (secrets->service_token[0] && strlen(secrets->service_token) < 32) {
          OLOG_WARNING("config: service_token is too short (min 32 chars) — ignoring");

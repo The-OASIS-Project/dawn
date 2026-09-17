@@ -40,6 +40,7 @@ option(DAWN_ENABLE_TTS_TOOL "Enable text-to-speech command tool" ON)
 option(DAWN_ENABLE_DOCUMENT_SEARCH_TOOL "Enable RAG document search tool" ON)
 option(DAWN_ENABLE_CALENDAR_TOOL "Enable CalDAV calendar integration" ON)
 option(DAWN_ENABLE_EMAIL_TOOL "Enable IMAP/SMTP email integration" ON)
+option(DAWN_ENABLE_SCHWAB_TOOL "Enable Charles Schwab stocks tool (quotes + portfolio)" ON)
 option(DAWN_ENABLE_SFX_TOOL "Enable sound effect playback tool" ON)
 option(DAWN_ENABLE_RENDER_VISUAL_TOOL "Enable visual rendering tool (SVG/HTML diagrams)" ON)
 option(DAWN_ENABLE_PHONE_TOOL "Enable phone call and SMS tool (requires ECHO daemon)" ON)
@@ -349,6 +350,23 @@ if(DAWN_ENABLE_EMAIL_TOOL)
     message(STATUS "DAWN: Email tool ENABLED")
 else()
     message(STATUS "DAWN: Email tool DISABLED")
+endif()
+
+# Schwab Stocks Tool (Charles Schwab API) — quotes + portfolio (read-only).
+# Reuses oauth_client.c for OAuth; only json-c + libcurl otherwise (already linked).
+if(DAWN_ENABLE_SCHWAB_TOOL)
+    add_definitions(-DDAWN_ENABLE_SCHWAB_TOOL)
+    list(APPEND TOOL_SOURCES
+        src/tools/schwab_tool.c
+        src/tools/schwab_service.c
+        src/tools/schwab_client.c)
+    # oauth_client.c may already be included by calendar or email
+    if(NOT DAWN_ENABLE_CALENDAR_TOOL AND NOT DAWN_ENABLE_EMAIL_TOOL)
+        list(APPEND TOOL_SOURCES src/tools/oauth_client.c)
+    endif()
+    message(STATUS "DAWN: Schwab stocks tool ENABLED")
+else()
+    message(STATUS "DAWN: Schwab stocks tool DISABLED")
 endif()
 
 # Shared OAuth WebUI handler (needed by calendar or email for Google OAuth).

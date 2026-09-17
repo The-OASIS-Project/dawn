@@ -285,6 +285,11 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
    ENV_SECRET("DAWN_GOOGLE_CLIENT_SECRET", secrets->google_client_secret);
    ENV_SECRET("DAWN_GOOGLE_REDIRECT_URL", secrets->google_redirect_url);
 
+   /* Charles Schwab OAuth 2.0 */
+   ENV_SECRET("DAWN_SCHWAB_CLIENT_ID", secrets->schwab_client_id);
+   ENV_SECRET("DAWN_SCHWAB_CLIENT_SECRET", secrets->schwab_client_secret);
+   ENV_SECRET("DAWN_SCHWAB_REDIRECT_URL", secrets->schwab_redirect_url);
+
    /* Satellite registration key */
    ENV_SECRET("DAWN_SATELLITE_KEY", secrets->satellite_registration_key);
 
@@ -937,6 +942,10 @@ void config_dump_settings(const dawn_config_t *config,
           (secrets && secrets->google_client_id[0]) ? "[set]" : "[not set]");
    printf("  DAWN_GOOGLE_CLIENT_SECRET                %s\n",
           (secrets && secrets->google_client_secret[0]) ? "[set]" : "[not set]");
+   printf("  DAWN_SCHWAB_CLIENT_ID                    %s\n",
+          (secrets && secrets->schwab_client_id[0]) ? "[set]" : "[not set]");
+   printf("  DAWN_SCHWAB_CLIENT_SECRET                %s\n",
+          (secrets && secrets->schwab_client_secret[0]) ? "[set]" : "[not set]");
    printf("  DAWN_SATELLITE_KEY                       %s\n\n",
           (secrets && secrets->satellite_registration_key[0]) ? "[set]" : "[not set]");
 }
@@ -1930,6 +1939,12 @@ json_object *secrets_to_json_status(const secrets_config_t *secrets) {
                           json_object_new_boolean(secrets && secrets->google_client_secret[0]));
    json_object_object_add(obj, "google_redirect_url",
                           json_object_new_boolean(secrets && secrets->google_redirect_url[0]));
+   json_object_object_add(obj, "schwab_client_id",
+                          json_object_new_boolean(secrets && secrets->schwab_client_id[0]));
+   json_object_object_add(obj, "schwab_client_secret",
+                          json_object_new_boolean(secrets && secrets->schwab_client_secret[0]));
+   json_object_object_add(obj, "schwab_redirect_url",
+                          json_object_new_boolean(secrets && secrets->schwab_redirect_url[0]));
    json_object_object_add(obj, "tavily_api_key",
                           json_object_new_boolean(secrets && secrets->tavily_api_key[0]));
    json_object_object_add(obj, "telegram_bot_token",
@@ -2866,6 +2881,15 @@ int secrets_write_toml(const secrets_config_t *secrets, const char *path) {
       WRITE_SECRET("client_id", secrets->google_client_id);
       WRITE_SECRET("client_secret", secrets->google_client_secret);
       WRITE_SECRET("redirect_url", secrets->google_redirect_url);
+   }
+
+   /* Charles Schwab OAuth 2.0 (stocks tool) */
+   if (secrets->schwab_client_id[0] || secrets->schwab_client_secret[0] ||
+       secrets->schwab_redirect_url[0]) {
+      fprintf(fp, "\n[secrets.schwab]\n");
+      WRITE_SECRET("client_id", secrets->schwab_client_id);
+      WRITE_SECRET("client_secret", secrets->schwab_client_secret);
+      WRITE_SECRET("redirect_url", secrets->schwab_redirect_url);
    }
 
 #undef WRITE_SECRET

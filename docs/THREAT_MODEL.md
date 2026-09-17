@@ -341,6 +341,20 @@ Open, acknowledged, and contributor help is welcome. Each maps to a tracked TODO
    capability mask. *(TODO: "Tool audit: autonomously-dangerous classification pass" /
    `CAPABILITY_MASK_DESIGN.md`.)*
 
+10. **Schwab enrollment is operator-trust (SO_PEERCRED), not admin-password-gated.** The
+   `dawn-admin schwab auth`/`status` opcodes (`0xE3-0xE5`) sit in the same peer-cred operator
+   range as the research spawn commands — any member of the daemon's group can mint a Schwab
+   authorize URL, complete an enrollment that binds a token to an arbitrary valid `--user`, or
+   read a user's link status, *without* the admin username/password the mutating account ops
+   require. Completing an enrollment still requires possession of a Schwab-issued code (a real
+   browser approval with the user's Schwab credentials), so a group member cannot silently bind a
+   stranger's brokerage; `status` discloses only linked-yes/no + days-to-expiry. Consistent with
+   the local-operator trust model (firewalled host, trusted operator), and the stored token is
+   **read-only** (quotes + portfolio; no trading in round one). Also note the `stocks` tool
+   returns portfolio balances to whatever principal `tool_get_current_user_id()` resolves to, so
+   on a shared/always-on voice surface a bystander could hear the owner's balances — the general
+   per-surface auth model (as with email/calendar), flagged because the data class is higher-value.
+
 ---
 
 ## References

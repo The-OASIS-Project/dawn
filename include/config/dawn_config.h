@@ -1111,6 +1111,11 @@ typedef struct {
    char google_client_secret[CONFIG_API_KEY_MAX];
    char google_redirect_url[CONFIG_PATH_MAX]; /* e.g. https://myhost:3000/oauth/callback */
 
+   /* Charles Schwab OAuth 2.0 (stocks tool) */
+   char schwab_client_id[CONFIG_API_KEY_MAX];
+   char schwab_client_secret[CONFIG_API_KEY_MAX];
+   char schwab_redirect_url[CONFIG_PATH_MAX]; /* default https://127.0.0.1:8000/callback */
+
    /* Service token for machine-to-machine image API access (MIRAGE, etc.) */
    char service_token[CONFIG_API_KEY_MAX];
 

@@ -210,6 +210,10 @@ int oauth_google_provider(const char *client_id,
    snprintf(out->redirect_uri, sizeof(out->redirect_uri), "%s", redirect_uri ? redirect_uri : "");
    snprintf(out->scopes, sizeof(out->scopes), "%s",
             scopes ? scopes : "https://www.googleapis.com/auth/calendar");
+   /* Google behavior: creds in the POST body, PKCE S256, full auth-URL params. */
+   out->token_auth_basic = false;
+   out->use_pkce = true;
+   out->minimal_auth_params = false;
    return 0;
 }
 
@@ -232,6 +236,49 @@ int oauth_build_google_provider(const char *scopes, oauth_provider_config_t *out
 
    return oauth_google_provider(g_secrets.google_client_id, g_secrets.google_client_secret,
                                 redirect_uri, scopes, out);
+}
+
+int oauth_schwab_provider(const char *client_id,
+                          const char *client_secret,
+                          const char *redirect_uri,
+                          oauth_provider_config_t *out) {
+   if (!client_id || !client_id[0] || !client_secret || !client_secret[0] || !out)
+      return 1;
+
+   memset(out, 0, sizeof(*out));
+   snprintf(out->provider, sizeof(out->provider), "schwab");
+   snprintf(out->client_id, sizeof(out->client_id), "%s", client_id);
+   snprintf(out->client_secret, sizeof(out->client_secret), "%s", client_secret);
+   snprintf(out->auth_endpoint, sizeof(out->auth_endpoint),
+            "https://api.schwabapi.com/v1/oauth/authorize");
+   snprintf(out->token_endpoint, sizeof(out->token_endpoint),
+            "https://api.schwabapi.com/v1/oauth/token");
+   out->revoke_endpoint[0] = '\0'; /* Schwab has no revocation endpoint */
+   snprintf(out->redirect_uri, sizeof(out->redirect_uri), "%s", redirect_uri ? redirect_uri : "");
+   out->scopes[0] = '\0'; /* Schwab grants its default scope; no scope param sent */
+   /* Schwab behavior: client creds as HTTP Basic on the token endpoint, no PKCE,
+    * minimal auth-URL params (no access_type/prompt/include_granted_scopes). */
+   out->token_auth_basic = true;
+   out->use_pkce = false;
+   out->minimal_auth_params = true;
+   return 0;
+}
+
+int oauth_build_schwab_provider(oauth_provider_config_t *out) {
+   extern secrets_config_t g_secrets;
+
+   if (g_secrets.schwab_client_id[0] == '\0' || g_secrets.schwab_client_secret[0] == '\0') {
+      OLOG_ERROR("Schwab OAuth not configured — set schwab client_id/secret in "
+                 "secrets.toml [secrets.schwab]");
+      return 1;
+   }
+
+   const char *redirect_uri = g_secrets.schwab_redirect_url[0] != '\0'
+                                  ? g_secrets.schwab_redirect_url
+                                  : "https://127.0.0.1:8000/callback";
+
+   return oauth_schwab_provider(g_secrets.schwab_client_id, g_secrets.schwab_client_secret,
+                                redirect_uri, out);
 }
 
 /* =============================================================================
@@ -296,17 +343,20 @@ int oauth_get_auth_url(const oauth_provider_config_t *provider,
       return 1;
    }
 
-   /* Generate PKCE code_verifier (32 random bytes → base64url) */
+   /* Generate PKCE code_verifier + challenge (only when the provider uses PKCE;
+    * Schwab does not, and rejecting the extra params keeps its auth URL clean). */
    unsigned char verifier_raw[OAUTH_VERIFIER_LEN];
-   randombytes_buf(verifier_raw, sizeof(verifier_raw));
-   char code_verifier[64];
-   base64url_encode(verifier_raw, sizeof(verifier_raw), code_verifier, sizeof(code_verifier));
+   char code_verifier[64] = { 0 };
+   char code_challenge[64] = { 0 };
+   if (provider->use_pkce) {
+      randombytes_buf(verifier_raw, sizeof(verifier_raw));
+      base64url_encode(verifier_raw, sizeof(verifier_raw), code_verifier, sizeof(code_verifier));
 
-   /* SHA-256 hash → base64url = code_challenge */
-   unsigned char hash[crypto_hash_sha256_BYTES];
-   crypto_hash_sha256(hash, (const unsigned char *)code_verifier, strlen(code_verifier));
-   char code_challenge[64];
-   base64url_encode(hash, sizeof(hash), code_challenge, sizeof(code_challenge));
+      unsigned char hash[crypto_hash_sha256_BYTES];
+      crypto_hash_sha256(hash, (const unsigned char *)code_verifier, strlen(code_verifier));
+      base64url_encode(hash, sizeof(hash), code_challenge, sizeof(code_challenge));
+      sodium_memzero(verifier_raw, sizeof(verifier_raw));
+   }
 
    /* Generate state token (32 random bytes → base64url) */
    unsigned char state_raw[OAUTH_STATE_LEN];
@@ -314,7 +364,7 @@ int oauth_get_auth_url(const oauth_provider_config_t *provider,
    char state[64];
    base64url_encode(state_raw, sizeof(state_raw), state, sizeof(state));
 
-   /* Store pending state */
+   /* Store pending state (code_verifier is empty for non-PKCE providers) */
    s_pending[slot].active = true;
    s_pending[slot].user_id = user_id;
    snprintf(s_pending[slot].state, sizeof(s_pending[slot].state), "%s", state);
@@ -326,30 +376,58 @@ int oauth_get_auth_url(const oauth_provider_config_t *provider,
 
    pthread_mutex_unlock(&s_pending_mutex);
 
-   /* URL-encode components */
-   char enc_client_id[256], enc_redirect[512], enc_scopes[1024], enc_challenge[128];
+   /* Build authorization URL incrementally: required base, then optional
+    * scope / Google-only / PKCE segments. */
+   char enc_client_id[256], enc_redirect[512];
    url_encode(provider->client_id, enc_client_id, sizeof(enc_client_id));
    url_encode(provider->redirect_uri, enc_redirect, sizeof(enc_redirect));
-   url_encode(provider->scopes, enc_scopes, sizeof(enc_scopes));
-   url_encode(code_challenge, enc_challenge, sizeof(enc_challenge));
 
-   /* Build authorization URL (include_granted_scopes for incremental auth) */
-   int written = snprintf(url_buf, url_len,
-                          "%s?client_id=%s&redirect_uri=%s&response_type=code"
-                          "&scope=%s&state=%s&access_type=offline&prompt=consent"
-                          "&code_challenge=%s&code_challenge_method=S256"
-                          "&include_granted_scopes=true",
-                          provider->auth_endpoint, enc_client_id, enc_redirect, enc_scopes, state,
-                          enc_challenge);
-   if (written < 0 || (size_t)written >= url_len) {
+   int off = snprintf(url_buf, url_len,
+                      "%s?client_id=%s&redirect_uri=%s&response_type=code&state=%s",
+                      provider->auth_endpoint, enc_client_id, enc_redirect, state);
+   if (off < 0 || (size_t)off >= url_len) {
       OLOG_ERROR("oauth: auth URL truncated");
       return 1;
    }
 
+   /* scope — omitted entirely when the provider defines no scopes (Schwab) */
+   if (provider->scopes[0]) {
+      char enc_scopes[1024];
+      url_encode(provider->scopes, enc_scopes, sizeof(enc_scopes));
+      int n = snprintf(url_buf + off, url_len - (size_t)off, "&scope=%s", enc_scopes);
+      if (n < 0 || (size_t)n >= url_len - (size_t)off) {
+         OLOG_ERROR("oauth: auth URL truncated");
+         return 1;
+      }
+      off += n;
+   }
+
+   /* Google-only incremental-auth params */
+   if (!provider->minimal_auth_params) {
+      int n = snprintf(url_buf + off, url_len - (size_t)off,
+                       "&access_type=offline&prompt=consent&include_granted_scopes=true");
+      if (n < 0 || (size_t)n >= url_len - (size_t)off) {
+         OLOG_ERROR("oauth: auth URL truncated");
+         return 1;
+      }
+      off += n;
+   }
+
+   /* PKCE challenge */
+   if (provider->use_pkce) {
+      char enc_challenge[128];
+      url_encode(code_challenge, enc_challenge, sizeof(enc_challenge));
+      int n = snprintf(url_buf + off, url_len - (size_t)off,
+                       "&code_challenge=%s&code_challenge_method=S256", enc_challenge);
+      if (n < 0 || (size_t)n >= url_len - (size_t)off) {
+         OLOG_ERROR("oauth: auth URL truncated");
+         return 1;
+      }
+      off += n;
+   }
+
    snprintf(state_buf, state_len, "%s", state);
 
-   /* Zero sensitive buffers */
-   sodium_memzero(verifier_raw, sizeof(verifier_raw));
    sodium_memzero(code_verifier, sizeof(code_verifier)); /* Only copy is in s_pending */
 
    return 0;
@@ -457,24 +535,59 @@ int oauth_exchange_code(const oauth_provider_config_t *provider,
    sodium_memzero(&s_pending[found], sizeof(s_pending[found]));
    pthread_mutex_unlock(&s_pending_mutex);
 
-   /* Build POST body (all values URL-encoded) */
+   /* Build POST body incrementally.  Credentials go in the body only when the
+    * provider does NOT use HTTP Basic on the token endpoint (Basic providers set
+    * them via CURLOPT_USERNAME/PASSWORD below); the PKCE verifier only when the
+    * provider uses PKCE. */
    char post_body[2048];
-   char enc_code[512], enc_redirect[512], enc_verifier[128];
-   char enc_client_id[256], enc_client_secret[512];
+   /* enc_code sized to match oauth_complete_from_redirect's raw_code[1024] so a
+    * long (but in-range) code can't silently truncate here. */
+   char enc_code[1024], enc_redirect[512];
    url_encode(code, enc_code, sizeof(enc_code));
    url_encode(provider->redirect_uri, enc_redirect, sizeof(enc_redirect));
-   url_encode(code_verifier, enc_verifier, sizeof(enc_verifier));
-   url_encode(provider->client_id, enc_client_id, sizeof(enc_client_id));
-   url_encode(provider->client_secret, enc_client_secret, sizeof(enc_client_secret));
 
-   int written = snprintf(post_body, sizeof(post_body),
-                          "grant_type=authorization_code&code=%s&redirect_uri=%s"
-                          "&client_id=%s&client_secret=%s&code_verifier=%s",
-                          enc_code, enc_redirect, enc_client_id, enc_client_secret, enc_verifier);
-   if (written < 0 || (size_t)written >= sizeof(post_body)) {
+   int off = snprintf(post_body, sizeof(post_body),
+                      "grant_type=authorization_code&code=%s&redirect_uri=%s", enc_code,
+                      enc_redirect);
+   if (off < 0 || (size_t)off >= sizeof(post_body)) {
       OLOG_ERROR("oauth: POST body truncated");
       sodium_memzero(code_verifier, sizeof(code_verifier));
+      sodium_memzero(post_body, sizeof(post_body));
+      sodium_memzero(enc_code, sizeof(enc_code));
       return 1;
+   }
+
+   if (!provider->token_auth_basic) {
+      char enc_client_id[256], enc_client_secret[512];
+      url_encode(provider->client_id, enc_client_id, sizeof(enc_client_id));
+      url_encode(provider->client_secret, enc_client_secret, sizeof(enc_client_secret));
+      int n = snprintf(post_body + off, sizeof(post_body) - (size_t)off,
+                       "&client_id=%s&client_secret=%s", enc_client_id, enc_client_secret);
+      sodium_memzero(enc_client_secret, sizeof(enc_client_secret));
+      if (n < 0 || (size_t)n >= sizeof(post_body) - (size_t)off) {
+         OLOG_ERROR("oauth: POST body truncated");
+         sodium_memzero(code_verifier, sizeof(code_verifier));
+         sodium_memzero(post_body, sizeof(post_body));
+         sodium_memzero(enc_code, sizeof(enc_code));
+         return 1;
+      }
+      off += n;
+   }
+
+   if (provider->use_pkce) {
+      char enc_verifier[128];
+      url_encode(code_verifier, enc_verifier, sizeof(enc_verifier));
+      int n = snprintf(post_body + off, sizeof(post_body) - (size_t)off, "&code_verifier=%s",
+                       enc_verifier);
+      sodium_memzero(enc_verifier, sizeof(enc_verifier));
+      if (n < 0 || (size_t)n >= sizeof(post_body) - (size_t)off) {
+         OLOG_ERROR("oauth: POST body truncated");
+         sodium_memzero(code_verifier, sizeof(code_verifier));
+         sodium_memzero(post_body, sizeof(post_body));
+         sodium_memzero(enc_code, sizeof(enc_code));
+         return 1;
+      }
+      off += n;
    }
 
    sodium_memzero(code_verifier, sizeof(code_verifier));
@@ -490,6 +603,13 @@ int oauth_exchange_code(const oauth_provider_config_t *provider,
    curl_buffer_init_with_max(&resp, OAUTH_MAX_RESPONSE_SIZE);
    curl_easy_setopt(curl, CURLOPT_URL, provider->token_endpoint);
    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_body);
+   /* Basic providers (Schwab) authenticate the client with HTTP Basic; libcurl
+    * emits a correctly padded Authorization header. */
+   if (provider->token_auth_basic) {
+      curl_easy_setopt(curl, CURLOPT_HTTPAUTH, (long)CURLAUTH_BASIC);
+      curl_easy_setopt(curl, CURLOPT_USERNAME, provider->client_id);
+      curl_easy_setopt(curl, CURLOPT_PASSWORD, provider->client_secret);
+   }
    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
    curl_easy_setopt(curl, CURLOPT_TIMEOUT, (long)OAUTH_CURL_TIMEOUT);
@@ -503,9 +623,7 @@ int oauth_exchange_code(const oauth_provider_config_t *provider,
    curl_easy_cleanup(curl);
 
    sodium_memzero(post_body, sizeof(post_body));
-   sodium_memzero(enc_client_secret, sizeof(enc_client_secret));
    sodium_memzero(enc_code, sizeof(enc_code));
-   sodium_memzero(enc_verifier, sizeof(enc_verifier));
 
    if (cres != CURLE_OK || http_code != 200 || resp.truncated) {
       if (resp.truncated) {
@@ -545,6 +663,11 @@ int oauth_exchange_code(const oauth_provider_config_t *provider,
 
    json_object_put(root);
 
+   /* The code exchange IS the original authorization — stamp the link time so
+    * downstream can warn before a fixed-lifetime refresh token (e.g. Schwab's
+    * 7-day) lapses. */
+   out_tokens->linked_at = time(NULL);
+
    if (!out_tokens->access_token[0]) {
       OLOG_ERROR("oauth: no access_token in response");
       return 1;
@@ -563,6 +686,117 @@ int oauth_exchange_code(const oauth_provider_config_t *provider,
 }
 
 /* =============================================================================
+ * Complete a flow from a pasted redirect URL (CLI + future WebUI paste field)
+ * ============================================================================= */
+
+int oauth_complete_from_redirect(const oauth_provider_config_t *provider,
+                                 int user_id,
+                                 const char *redirect_url,
+                                 const char *account_key,
+                                 char *err,
+                                 size_t err_len) {
+   if (err && err_len)
+      err[0] = '\0';
+   if (!provider || !redirect_url || !account_key) {
+      if (err)
+         snprintf(err, err_len, "internal error");
+      return 1;
+   }
+
+   /* The pasted URL's base (everything before '?') must EXACTLY match the
+    * provider's registered redirect URI — reject a paste from any other origin. */
+   const char *q = strchr(redirect_url, '?');
+   if (!q) {
+      if (err)
+         snprintf(err, err_len, "That does not look like a redirect URL (no '?' query).");
+      return 1;
+   }
+   size_t base_len = (size_t)(q - redirect_url);
+   if (base_len != strlen(provider->redirect_uri) ||
+       strncmp(redirect_url, provider->redirect_uri, base_len) != 0) {
+      if (err)
+         snprintf(err, err_len, "URL origin/path does not match the configured redirect (%s).",
+                  provider->redirect_uri);
+      return 1;
+   }
+
+   /* Extract raw code= and state= from the query string (ignore other params,
+    * e.g. Schwab's extra 'session'). */
+   char raw_code[1024] = { 0 }, raw_state[256] = { 0 };
+   const char *p = q + 1;
+   while (*p) {
+      const char *amp = strchr(p, '&');
+      size_t seg = amp ? (size_t)(amp - p) : strlen(p);
+      if (seg > 5 && strncmp(p, "code=", 5) == 0) {
+         size_t vlen = seg - 5;
+         if (vlen < sizeof(raw_code)) {
+            memcpy(raw_code, p + 5, vlen);
+            raw_code[vlen] = '\0';
+         }
+      } else if (seg > 6 && strncmp(p, "state=", 6) == 0) {
+         size_t vlen = seg - 6;
+         if (vlen < sizeof(raw_state)) {
+            memcpy(raw_state, p + 6, vlen);
+            raw_state[vlen] = '\0';
+         }
+      }
+      if (!amp)
+         break;
+      p = amp + 1;
+   }
+   if (!raw_code[0] || !raw_state[0]) {
+      if (err)
+         snprintf(err, err_len, "URL is missing the code or state parameter.");
+      sodium_memzero(raw_code, sizeof(raw_code));
+      return 1;
+   }
+
+   /* URL-decode: the code is percent-encoded (Schwab's ends in %40 → '@'), and
+    * oauth_exchange_code re-encodes, so it must arrive decoded. */
+   CURL *curl = curl_easy_init();
+   if (!curl) {
+      if (err)
+         snprintf(err, err_len, "internal error");
+      sodium_memzero(raw_code, sizeof(raw_code));
+      return 1;
+   }
+   char *dec_code = curl_easy_unescape(curl, raw_code, 0, NULL);
+   char *dec_state = curl_easy_unescape(curl, raw_state, 0, NULL);
+   sodium_memzero(raw_code, sizeof(raw_code));
+   sodium_memzero(raw_state, sizeof(raw_state));
+
+   int rc = 1;
+   if (dec_code && dec_state) {
+      oauth_token_set_t tokens;
+      if (oauth_exchange_code(provider, dec_code, dec_state, user_id, &tokens) != 0) {
+         if (err)
+            snprintf(err, err_len,
+                     "Token exchange failed — the paste may have expired (5 min), or the app "
+                     "key/secret/redirect may not match. See the daemon log.");
+      } else if (oauth_store_tokens(user_id, provider->provider, account_key, &tokens) != 0) {
+         if (err)
+            snprintf(err, err_len, "Token exchange succeeded but storing the tokens failed.");
+      } else {
+         rc = 0;
+      }
+      sodium_memzero(&tokens, sizeof(tokens));
+   } else if (err) {
+      snprintf(err, err_len, "internal error");
+   }
+
+   if (dec_code) {
+      sodium_memzero(dec_code, strlen(dec_code));
+      curl_free(dec_code);
+   }
+   if (dec_state) {
+      sodium_memzero(dec_state, strlen(dec_state));
+      curl_free(dec_state);
+   }
+   curl_easy_cleanup(curl);
+   return rc;
+}
+
+/* =============================================================================
  * Token Refresh
  * ============================================================================= */
 
@@ -576,16 +810,32 @@ int oauth_refresh(const oauth_provider_config_t *provider, oauth_token_set_t *to
       return 1;
 
    char post_body[1024];
-   char enc_refresh[768], enc_client_id[256], enc_client_secret[512];
+   char enc_refresh[768];
    url_encode(tokens->refresh_token, enc_refresh, sizeof(enc_refresh));
-   url_encode(provider->client_id, enc_client_id, sizeof(enc_client_id));
-   url_encode(provider->client_secret, enc_client_secret, sizeof(enc_client_secret));
-   int written = snprintf(post_body, sizeof(post_body),
-                          "grant_type=refresh_token&refresh_token=%s"
-                          "&client_id=%s&client_secret=%s",
-                          enc_refresh, enc_client_id, enc_client_secret);
-   if (written < 0 || (size_t)written >= sizeof(post_body))
+
+   int off = snprintf(post_body, sizeof(post_body), "grant_type=refresh_token&refresh_token=%s",
+                      enc_refresh);
+   if (off < 0 || (size_t)off >= sizeof(post_body)) {
+      sodium_memzero(enc_refresh, sizeof(enc_refresh));
       return 1;
+   }
+
+   /* Body creds only for non-Basic providers; Basic providers (Schwab) set them
+    * via CURLOPT_USERNAME/PASSWORD below. */
+   if (!provider->token_auth_basic) {
+      char enc_client_id[256], enc_client_secret[512];
+      url_encode(provider->client_id, enc_client_id, sizeof(enc_client_id));
+      url_encode(provider->client_secret, enc_client_secret, sizeof(enc_client_secret));
+      int n = snprintf(post_body + off, sizeof(post_body) - (size_t)off,
+                       "&client_id=%s&client_secret=%s", enc_client_id, enc_client_secret);
+      sodium_memzero(enc_client_secret, sizeof(enc_client_secret));
+      if (n < 0 || (size_t)n >= sizeof(post_body) - (size_t)off) {
+         sodium_memzero(post_body, sizeof(post_body));
+         sodium_memzero(enc_refresh, sizeof(enc_refresh));
+         return 1;
+      }
+      off += n;
+   }
 
    CURL *curl = curl_easy_init();
    if (!curl)
@@ -595,6 +845,11 @@ int oauth_refresh(const oauth_provider_config_t *provider, oauth_token_set_t *to
    curl_buffer_init_with_max(&resp, OAUTH_MAX_RESPONSE_SIZE);
    curl_easy_setopt(curl, CURLOPT_URL, provider->token_endpoint);
    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_body);
+   if (provider->token_auth_basic) {
+      curl_easy_setopt(curl, CURLOPT_HTTPAUTH, (long)CURLAUTH_BASIC);
+      curl_easy_setopt(curl, CURLOPT_USERNAME, provider->client_id);
+      curl_easy_setopt(curl, CURLOPT_PASSWORD, provider->client_secret);
+   }
    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
    curl_easy_setopt(curl, CURLOPT_TIMEOUT, (long)OAUTH_CURL_TIMEOUT);
@@ -608,7 +863,6 @@ int oauth_refresh(const oauth_provider_config_t *provider, oauth_token_set_t *to
    curl_easy_cleanup(curl);
 
    sodium_memzero(post_body, sizeof(post_body));
-   sodium_memzero(enc_client_secret, sizeof(enc_client_secret));
    sodium_memzero(enc_refresh, sizeof(enc_refresh));
 
    if (cres != CURLE_OK || http_code != 200 || resp.truncated) {
@@ -625,18 +879,17 @@ int oauth_refresh(const oauth_provider_config_t *provider, oauth_token_set_t *to
             OLOG_ERROR("oauth: server response: %.*s", (int)(resp.size < 512 ? resp.size : 512),
                        resp.data);
          }
-         /* Detect "invalid_grant" — Google's response when the refresh
-          * token has been revoked at the provider (user removed access at
-          * myaccount.google.com or admin policy revoked it).  Set the
-          * thread-local flag so downstream tool wrappers can surface a
-          * "re-link this account" message to the LLM instead of a generic
-          * "network error".  Substring match is acceptable here because
-          * the token endpoint response is server-controlled JSON that
-          * we've already capped at 1 MB. */
+         /* Detect a dead refresh token so downstream tool wrappers can surface a
+          * "re-link this account" message instead of a generic "network error".
+          * Google returns "invalid_grant" when the token is revoked; Schwab
+          * returns "invalid_client" when its fixed-lifetime (7-day) refresh
+          * token lapses.  Substring match is acceptable here because the token
+          * endpoint response is server-controlled JSON already capped at 1 MB. */
          if (!resp.truncated && http_code == 400 && resp.size > 0 &&
-             strstr(resp.data, "\"invalid_grant\"") != NULL) {
-            OLOG_ERROR("oauth: refresh token revoked by provider (invalid_grant). User must "
-                       "re-link account.");
+             (strstr(resp.data, "\"invalid_grant\"") != NULL ||
+              strstr(resp.data, "\"invalid_client\"") != NULL)) {
+            OLOG_ERROR("oauth: refresh token rejected by provider "
+                       "(invalid_grant/invalid_client). User must re-link account.");
             oauth_set_last_revoked(1, NULL);
          }
          sodium_memzero(resp.data, resp.size);
@@ -677,6 +930,7 @@ static int tokens_to_json(const oauth_token_set_t *tokens, char *buf, size_t buf
    json_object_object_add(obj, "access_token", json_object_new_string(tokens->access_token));
    json_object_object_add(obj, "refresh_token", json_object_new_string(tokens->refresh_token));
    json_object_object_add(obj, "expires_at", json_object_new_int64(tokens->expires_at));
+   json_object_object_add(obj, "linked_at", json_object_new_int64(tokens->linked_at));
    json_object_object_add(obj, "scopes", json_object_new_string(tokens->scopes));
    json_object_object_add(obj, "email", json_object_new_string(tokens->email));
 
@@ -705,6 +959,8 @@ static int json_to_tokens(const char *json_str, size_t len, oauth_token_set_t *t
                json_object_get_string(j));
    if (json_object_object_get_ex(root, "expires_at", &j))
       tokens->expires_at = json_object_get_int64(j);
+   if (json_object_object_get_ex(root, "linked_at", &j))
+      tokens->linked_at = json_object_get_int64(j);
    if (json_object_object_get_ex(root, "scopes", &j))
       snprintf(tokens->scopes, sizeof(tokens->scopes), "%s", json_object_get_string(j));
    if (json_object_object_get_ex(root, "email", &j))
@@ -921,9 +1177,11 @@ int oauth_revoke_and_delete(const oauth_provider_config_t *provider,
    if (!provider || !account_key)
       return 1;
 
-   /* Load tokens for revocation */
+   /* Load tokens for revocation. Skip the HTTP revoke entirely for providers
+    * with no revocation endpoint (e.g. Schwab) — local deletion below still runs. */
    oauth_token_set_t tokens;
-   if (oauth_load_tokens(user_id, provider->provider, account_key, &tokens) == 0 &&
+   if (provider->revoke_endpoint[0] &&
+       oauth_load_tokens(user_id, provider->provider, account_key, &tokens) == 0 &&
        (tokens.refresh_token[0] || tokens.access_token[0])) {
       /* Revoke refresh token (invalidates both); fall back to access token */
       char post_body[2560];

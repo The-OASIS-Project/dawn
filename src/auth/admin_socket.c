@@ -2331,6 +2331,16 @@ static int handle_client(int client_fd) {
          return handle_research_cancel_cmd(client_fd, payload, header.payload_len);
 #endif
 
+#ifdef DAWN_ENABLE_SCHWAB_TOOL
+      /* Charles Schwab OAuth enrollment (CLI manual-paste bootstrap). */
+      case ADMIN_MSG_SCHWAB_AUTH_URL:
+         return handle_schwab_auth_url_cmd(client_fd, payload, header.payload_len);
+      case ADMIN_MSG_SCHWAB_AUTH_COMPLETE:
+         return handle_schwab_auth_complete_cmd(client_fd, payload, header.payload_len);
+      case ADMIN_MSG_SCHWAB_STATUS:
+         return handle_schwab_status_cmd(client_fd, payload, header.payload_len);
+#endif
+
 #ifdef DAWN_ENABLE_MCP_BRIDGE_TOOL
       case ADMIN_MSG_MCP_LIST:
          return handle_mcp_list(client_fd, payload, header.payload_len);

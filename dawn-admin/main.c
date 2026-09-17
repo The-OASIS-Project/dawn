@@ -150,6 +150,10 @@ static void print_usage(const char *prog) {
            "                                       Spawn a headless research run (web-only).\n"
            "  research status --user <id> <run_id> Machine-readable run status line.\n"
            "  research cancel --user <id> <run_id> Cancel a run at its next round boundary.\n");
+   fprintf(stderr, "\nStocks (Charles Schwab):\n");
+   fprintf(stderr,
+           "  schwab auth [--user <id>]            Link a Schwab account (paste-the-redirect).\n"
+           "  schwab status [--user <id>]          Show link state + days to refresh expiry.\n");
    fprintf(stderr, "\nMCP Bridge (coding harness):\n");
    fprintf(stderr,
            "  mcp list                             List connected MCP servers + tool counts\n"
@@ -2381,6 +2385,105 @@ int main(int argc, char *argv[]) {
       }
 
       fprintf(stderr, "Error: Unknown research subcommand: %s\n", subcmd);
+      return 1;
+   }
+
+   if (strcmp(cmd, "schwab") == 0) {
+      if (argc < 3) {
+         fprintf(stderr, "Error: Missing schwab subcommand\n");
+         fprintf(stderr, "Usage: %s schwab auth [--user <id>]\n", argv[0]);
+         fprintf(stderr, "       %s schwab status [--user <id>]\n", argv[0]);
+         return 1;
+      }
+      const char *subcmd = argv[2];
+      int user_id = 1; /* default to the primary user */
+      for (int i = 3; i < argc; i++) {
+         if (strcmp(argv[i], "--user") == 0 && i + 1 < argc) {
+            user_id = atoi(argv[++i]);
+         } else {
+            fprintf(stderr, "Error: Unknown option for schwab %s: %s\n", subcmd, argv[i]);
+            return 1;
+         }
+      }
+      if (user_id <= 0) {
+         fprintf(stderr, "Error: --user must be a positive id\n");
+         return 1;
+      }
+
+      if (strcmp(subcmd, "status") == 0) {
+         int fd = admin_client_connect();
+         if (fd < 0) {
+            return 1;
+         }
+         char response[512];
+         admin_resp_code_t resp = admin_client_schwab_status(fd, user_id, response,
+                                                             sizeof(response));
+         admin_client_disconnect(fd);
+         if (resp == ADMIN_RESP_SUCCESS) {
+            printf("%s\n", response);
+            return 0;
+         }
+         fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
+         return 1;
+      }
+
+      if (strcmp(subcmd, "auth") == 0) {
+         /* Step 1: mint the authorize URL. */
+         int fd = admin_client_connect();
+         if (fd < 0) {
+            return 1;
+         }
+         char url[2048];
+         admin_resp_code_t resp = admin_client_schwab_auth_url(fd, user_id, url, sizeof(url));
+         admin_client_disconnect(fd);
+         if (resp != ADMIN_RESP_SUCCESS) {
+            fprintf(stderr, "Error: %s\n", url[0] ? url : admin_resp_strerror(resp));
+            return 1;
+         }
+
+         printf("\n1. Open this URL in a browser and approve access:\n\n%s\n\n", url);
+         printf("2. Schwab will redirect to your callback (the page may show a connection\n"
+                "   error — that is expected). Copy the FULL URL from the address bar.\n\n");
+         printf("You have about 5 minutes. Paste the redirect URL here:\n> ");
+         fflush(stdout);
+
+         /* Step 2: read the pasted redirect URL and complete enrollment. */
+         char pasted[2048];
+         if (!fgets(pasted, sizeof(pasted), stdin)) {
+            fprintf(stderr, "Error: no input read\n");
+            return 1;
+         }
+         size_t plen = strlen(pasted);
+         while (plen > 0 && (pasted[plen - 1] == '\n' || pasted[plen - 1] == '\r' ||
+                             pasted[plen - 1] == ' ' || pasted[plen - 1] == '\t')) {
+            pasted[--plen] = '\0';
+         }
+         char *purl = pasted;
+         while (*purl == ' ' || *purl == '\t') {
+            purl++;
+         }
+         if (!*purl) {
+            fprintf(stderr, "Error: empty URL\n");
+            return 1;
+         }
+
+         fd = admin_client_connect();
+         if (fd < 0) {
+            return 1;
+         }
+         char response[512];
+         resp = admin_client_schwab_auth_complete(fd, user_id, purl, response, sizeof(response));
+         admin_client_disconnect(fd);
+         explicit_bzero(pasted, sizeof(pasted)); /* single-use authorization code */
+         if (resp == ADMIN_RESP_SUCCESS) {
+            printf("\n%s\n", response);
+            return 0;
+         }
+         fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
+         return 1;
+      }
+
+      fprintf(stderr, "Error: Unknown schwab subcommand: %s\n", subcmd);
       return 1;
    }
 

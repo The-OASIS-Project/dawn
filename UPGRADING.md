@@ -12,6 +12,23 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-09-17 — New optional "stocks" tool (Charles Schwab)
+
+**What changed.** DAWN gains an opt-in **stocks** tool for live quotes and
+read-only Schwab portfolio access. It's off unless you configure it, so this is
+purely additive — nothing changes for existing installs that don't want it.
+
+**What (if anything) to do.** Only if you want it:
+1. Add `[secrets.schwab]` `client_id` / `client_secret` (and optionally
+   `redirect_url`) to `secrets.toml`.
+2. Run `dawn-admin schwab auth` on the host to link your account.
+
+Note the Schwab refresh token expires every **7 days**, so you re-run
+`dawn-admin schwab auth` about weekly. Full instructions:
+[docs/SCHWAB_SETUP.md](docs/SCHWAB_SETUP.md). Trading is not included (read-only).
+
+---
+
 ## 2026-09-16 — WebUI reconnect hardening + optional "Always on" per-browser mode
 
 **What changed.**

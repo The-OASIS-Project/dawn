@@ -91,6 +91,28 @@
          inputType: 'text',
       },
       {
+         id: 'secret-schwab-client-id',
+         key: 'schwab_client_id',
+         label: 'Schwab OAuth Client ID (App Key)',
+         placeholder: 'Enter Schwab app key...',
+         maxlength: 256,
+      },
+      {
+         id: 'secret-schwab-client-secret',
+         key: 'schwab_client_secret',
+         label: 'Schwab OAuth Client Secret (App Secret)',
+         placeholder: 'Enter Schwab app secret...',
+         maxlength: 256,
+      },
+      {
+         id: 'secret-schwab-redirect-url',
+         key: 'schwab_redirect_url',
+         label: 'Schwab OAuth Redirect URL',
+         placeholder: 'https://127.0.0.1:8000/callback',
+         maxlength: 256,
+         inputType: 'text',
+      },
+      {
          id: 'secret-telegram-token',
          key: 'telegram_bot_token',
          label: 'Telegram Bot Token',

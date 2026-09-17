@@ -719,6 +719,14 @@ void llm_tools_refresh(void) {
       if (strcmp(t->name, "deep_research") == 0) {
          t->enabled = g_config.research.enabled;
       }
+
+      /* Stocks (Schwab) requires the OAuth client to be configured — gate the
+       * native schema by name (is_available is consulted only for armor tools,
+       * per the deep_research note above).  The callback refuses per-user with a
+       * "run dawn-admin schwab auth" message when the account isn't linked. */
+      if (strcmp(t->name, "stocks") == 0) {
+         t->enabled = (g_secrets.schwab_client_id[0] != '\0');
+      }
    }
 
    /* Update cached enabled count (total capability-enabled) */
