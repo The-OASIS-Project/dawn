@@ -87,12 +87,16 @@ Ask the assistant naturally, for example:
 - "How did NVDA do between March and June?" (history over an explicit date range)
 - "Chart NVDA's last 3 months." (history → an inline chart)
 - "What's AAPL's P/E and dividend yield?" (fundamentals)
+- "Show my recent transactions." / "What dividends did I get this month?" (transactions)
+- "List my deposits and withdrawals since July." (transactions over a date range)
 
 Notes:
 
 - **Quotes may be delayed** if your Schwab app's market-data entitlement is for
   delayed data — such quotes are labeled `[delayed]`.
 - **Account numbers are masked** to the last four digits everywhere they appear.
+- **Transactions cover a recent window only** — Schwab serves roughly the last year of
+  activity, so this is recent trades/dividends/transfers, not lifetime history.
 - The tool is read-only. Trading is a separate, future capability.
 
 ## Troubleshooting

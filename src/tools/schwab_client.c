@@ -92,9 +92,14 @@ schwab_rc_t schwab_client_get_json(const char *bearer,
       rc = SCHWAB_RC_AUTH;
    } else if (http_code == 429) {
       rc = SCHWAB_RC_RATE_LIMITED;
-   } else if (http_code != 200 || resp.truncated) {
-      OLOG_ERROR("schwab: unexpected HTTP %ld%s", http_code,
-                 resp.truncated ? " (response too large)" : "");
+   } else if (http_code == 200 && resp.truncated) {
+      /* Succeeded but the body blew past SCHWAB_MAX_RESPONSE — distinct from a
+       * transport error so callers can tell the user to narrow the window rather
+       * than reporting a network failure. */
+      OLOG_ERROR("schwab: response exceeded %d bytes (truncated)", SCHWAB_MAX_RESPONSE);
+      rc = SCHWAB_RC_TOO_LARGE;
+   } else if (http_code != 200) {
+      OLOG_ERROR("schwab: unexpected HTTP %ld", http_code);
       rc = SCHWAB_RC_HTTP;
    } else if (!resp.data) {
       /* Empty 200 body — curl_buffer_t.data stays NULL when the write callback

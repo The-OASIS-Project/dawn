@@ -65,4 +65,23 @@ char *schwab_service_history(int user_id,
  */
 char *schwab_service_fundamentals(int user_id, const char *symbols_csv);
 
+/**
+ * Build an LLM-facing list of recent account activity (trades, dividends/
+ * interest, deposits/withdrawals, fees) across the user's Schwab accounts, with
+ * per-category aggregates. Schwab serves only a recent (~1-year) window and no
+ * historical valuations, so this is activity, not lifetime performance.
+ *
+ * @p symbol optionally filters to one ticker (won't reliably match dividend
+ * rows, which carry no symbol field). @p start / @p end are optional YYYY-MM-DD
+ * bounds; empty @p start defaults to the last ~60 days, @p end defaults to
+ * today. @p type is a user-language category: trades / dividends / deposits /
+ * withdrawals / fees / all (default). Returns an owned string; failures prefixed
+ * with TOOL_RESULT_ERROR_MARK.
+ */
+char *schwab_service_transactions(int user_id,
+                                  const char *symbol,
+                                  const char *start,
+                                  const char *end,
+                                  const char *type);
+
 #endif /* SCHWAB_SERVICE_H */

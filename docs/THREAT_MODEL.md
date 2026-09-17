@@ -350,10 +350,20 @@ Open, acknowledged, and contributor help is welcome. Each maps to a tracked TODO
    browser approval with the user's Schwab credentials), so a group member cannot silently bind a
    stranger's brokerage; `status` discloses only linked-yes/no + days-to-expiry. Consistent with
    the local-operator trust model (firewalled host, trusted operator), and the stored token is
-   **read-only** (quotes + portfolio; no trading in round one). Also note the `stocks` tool
-   returns portfolio balances to whatever principal `tool_get_current_user_id()` resolves to, so
-   on a shared/always-on voice surface a bystander could hear the owner's balances — the general
+   **read-only** (quotes + portfolio + recent transactions; no trading). Also note the `stocks`
+   tool returns portfolio balances to whatever principal `tool_get_current_user_id()` resolves to
+   (which falls back to user 1 when there is no session and no scheduled context), so on a
+   shared/always-on voice surface a bystander could hear the owner's financial data — the general
    per-surface auth model (as with email/calendar), flagged because the data class is higher-value.
+   The `transactions` action raises that data class further: it exposes deposits, withdrawals,
+   dividends and realized trade activity — more sensitive than a balance snapshot — and each
+   Schwab transaction row also carries a `user{}` block (name/login) and the plaintext account
+   number. The service masks account numbers to the last four and never renders or logs the
+   `user{}` block or the raw number (the same discipline as portfolio, and the client scrubs the
+   response body from freed heap). **Tighter per-surface gating for transaction/cost-basis data on
+   shared or always-on voice surfaces is a deliberately-accepted, deferred risk** — the current
+   mitigation is the general per-surface auth model, and hardening it (a sensitivity tier that
+   withholds this class from a bystander-reachable surface) is future work, not addressed now.
 
 ---
 

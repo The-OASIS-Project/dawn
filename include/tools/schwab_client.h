@@ -39,6 +39,7 @@ typedef enum {
    SCHWAB_RC_AUTH = 3,         /**< token refresh failed / HTTP 401 */
    SCHWAB_RC_HTTP = 4,         /**< network/transport or non-200 status */
    SCHWAB_RC_RATE_LIMITED = 5, /**< HTTP 429 */
+   SCHWAB_RC_TOO_LARGE = 6,    /**< HTTP 200 but the body exceeded SCHWAB_MAX_RESPONSE */
 } schwab_rc_t;
 
 /**

@@ -154,6 +154,14 @@ dawn_add_unit_test(test_schwab_stats
    LIBS    unity m
    LABEL   ci)
 
+# Schwab transaction classifier — pure (json-c parse only, no network/DB),
+# exercised against a scrubbed fixture pinned from a live capture.
+dawn_add_unit_test(test_schwab_txn
+   SOURCES test_schwab_txn.c
+           ${SRC_ROOT}/src/tools/schwab_txn.c
+   LIBS    unity ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # MCP HTTP+SSE transport — exercised against an in-test loopback HTTP+SSE
 # server (no external network), so it is CI-safe.
 dawn_add_unit_test(test_mcp_transport

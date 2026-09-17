@@ -37,12 +37,31 @@
 #include "logging.h"
 #include "tools/oauth_client.h"
 #include "tools/schwab_client.h"
+#include "tools/schwab_txn.h"    /* transaction classifier + aggregates */
 #include "tools/tool_registry.h" /* TOOL_RESULT_ERROR_MARK */
 
 #define SCHWAB_MAX_SYMBOLS 25
 /* Upper bound on candles we allocate for, guarding against a pathological
  * response — legitimate price history is well under this (5y daily ~1,300). */
 #define SCHWAB_MAX_CANDLES 20000
+
+/* Transactions: Schwab serves only a recent window. schwab-py's 60-day figure is
+ * TD-Ameritrade heritage; schwabr + a live-account PR report ~365 days — SPIKE
+ * pins the exact edge (365/366/400d probe). Default to a short recent window. */
+#define SCHWAB_TXN_DEFAULT_DAYS 60
+#define SCHWAB_TXN_MAX_LOOKBACK_DAYS 365
+#define SCHWAB_TXN_MAX_ACCOUNTS 16
+/* Aggregate over every returned row, but bound the parse allocation and the
+ * per-account listing (a voice user wants recent activity, not a wall of rows). */
+#define SCHWAB_TXN_MAX_ROWS 4000
+#define SCHWAB_TXN_LIST_CAP 50
+/* The full transaction-type set, comma-joined for the `types=` query. schwab-py
+ * always sends all types joined and it works; `startDate`/`endDate`/`types` are
+ * effectively required, so never rely on "omit → all". */
+#define SCHWAB_TXN_ALL_TYPES                                                                   \
+   "TRADE,RECEIVE_AND_DELIVER,DIVIDEND_OR_INTEREST,ACH_RECEIPT,ACH_DISBURSEMENT,CASH_RECEIPT," \
+   "CASH_DISBURSEMENT,ELECTRONIC_FUND,WIRE_OUT,WIRE_IN,JOURNAL,MEMORANDUM,MARGIN_CALL,"        \
+   "MONEY_MARKET,SMA_ADJUSTMENT"
 
 /* ===== small helpers ===== */
 
@@ -64,6 +83,9 @@ static char *rc_to_err(schwab_rc_t rc) {
              "Schwab authorization failed. Re-link by running 'dawn-admin schwab auth'.");
       case SCHWAB_RC_HTTP:
          return result_err("Couldn't reach Schwab (network or service error).");
+      case SCHWAB_RC_TOO_LARGE:
+         return result_err("That request returned too much data to handle — narrow the date range "
+                           "and try again.");
       case SCHWAB_RC_NOT_LINKED:
       case SCHWAB_RC_ERROR:
       case SCHWAB_RC_OK:
@@ -406,6 +428,7 @@ char *schwab_service_portfolio(int user_id, bool accounts_only) {
    strbuf_init(&sb, 1024);
    size_t nacc = json_object_array_length(root);
    double total_liq = 0.0;
+   double total_pl = 0.0;
    int shown = 0;
 
    for (size_t i = 0; i < nacc; i++) {
@@ -439,9 +462,23 @@ char *schwab_service_portfolio(int user_id, bool accounts_only) {
              json_object_is_type(positions, json_type_array) &&
              json_object_array_length(positions) > 0) {
             size_t np = json_object_array_length(positions);
+            double acct_mv = 0.0, acct_pl = 0.0;
             for (size_t j = 0; j < np; j++) {
-               fmt_position(&sb, json_object_array_get_idx(positions, j));
+               struct json_object *pos = json_object_array_get_idx(positions, j);
+               fmt_position(&sb, pos);
+               acct_mv += jget_d(pos, "marketValue");
+               acct_pl += jget_d(pos, "longOpenProfitLoss");
             }
+            /* Account-level unrealized P/L; % is against cost basis (market value
+             * minus the open gain), which the position rows already carry. */
+            double cost = acct_mv - acct_pl;
+            if (cost > 0.0) {
+               strbuf_appendf(&sb, "  Unrealized P/L (long positions) %+.2f (%+.2f%%)\n", acct_pl,
+                              acct_pl / cost * 100.0);
+            } else {
+               strbuf_appendf(&sb, "  Unrealized P/L (long positions) %+.2f\n", acct_pl);
+            }
+            total_pl += acct_pl;
          } else {
             strbuf_append(&sb, "  (no open positions)\n");
          }
@@ -457,6 +494,9 @@ char *schwab_service_portfolio(int user_id, bool accounts_only) {
    }
    strbuf_appendf(&sb, "Total value: $%.2f across %d account%s.\n", total_liq, shown,
                   shown == 1 ? "" : "s");
+   if (!accounts_only) {
+      strbuf_appendf(&sb, "Total unrealized P/L (long positions): %+.2f.\n", total_pl);
+   }
 
    char *out = (!strbuf_oom(&sb) && sb.buf) ? strdup(sb.buf) : NULL;
    strbuf_free(&sb);
@@ -977,4 +1017,354 @@ char *schwab_service_fundamentals(int user_id, const char *symbols_csv) {
    char *outstr = (!strbuf_oom(&sb) && sb.buf) ? strdup(sb.buf) : NULL;
    strbuf_free(&sb);
    return outstr ? outstr : result_err("Schwab fundamentals formatting failed.");
+}
+
+/* ===== transactions (recent account activity) ===== */
+
+/* Format an epoch-seconds instant as Schwab's ISO-8601 datetime. The date is
+ * drawn from the (UTC-midnight) instant; the time is fixed to the start or end of
+ * that day. SPIKE: confirm whether the `.000Z` millisecond suffix is required or
+ * a bare `Z` is accepted (schwab-py's real formatter omits the .000). */
+static void fmt_iso8601_z(int64_t epoch_sec, bool is_end, char *out, size_t n) {
+   time_t s = (time_t)epoch_sec;
+   struct tm tmv;
+   const char *fmt = is_end ? "%Y-%m-%dT23:59:59.000Z" : "%Y-%m-%dT00:00:00.000Z";
+   if (!gmtime_r(&s, &tmv) || strftime(out, n, fmt, &tmv) == 0) {
+      snprintf(out, n, "?");
+   }
+}
+
+/* A Schwab account hashValue is interpolated as a URL *path segment*, so validate
+ * its charset and length before building the request — a stray '/' or '?' would
+ * change the endpoint. Defense in depth even over TLS. */
+static bool schwab_valid_hash(const char *h) {
+   if (!h || !h[0]) {
+      return false;
+   }
+   size_t len = strlen(h);
+   if (len > 128) {
+      return false;
+   }
+   for (size_t i = 0; i < len; i++) {
+      char c = h[i];
+      if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))) {
+         return false;
+      }
+   }
+   return true;
+}
+
+/* Map a user-language category to the Schwab `types=` query value. Fees are legs
+ * inside TRADE rows (not a transaction type), so `fees` requests all types and
+ * the fee legs are summed client-side (post-spike, in schwab_txn.c). Returns NULL
+ * for an unknown category. */
+static const char *txn_types_for(const char *cat) {
+   static const struct {
+      const char *cat;
+      const char *raw;
+   } M[] = {
+      { "all", SCHWAB_TXN_ALL_TYPES },
+      { "trades", "TRADE" },
+      { "dividends", "DIVIDEND_OR_INTEREST" },
+      { "deposits", "ACH_RECEIPT,CASH_RECEIPT,WIRE_IN,ELECTRONIC_FUND,JOURNAL" },
+      { "withdrawals", "ACH_DISBURSEMENT,CASH_DISBURSEMENT,WIRE_OUT" },
+      { "fees", SCHWAB_TXN_ALL_TYPES },
+   };
+   for (size_t i = 0; i < sizeof(M) / sizeof(M[0]); i++) {
+      if (strcmp(cat, M[i].cat) == 0) {
+         return M[i].raw;
+      }
+   }
+   return NULL;
+}
+
+/* qsort: newest-first by the ISO `time` string (all rows share one format). */
+static int txn_cmp_desc(const void *a, const void *b) {
+   const schwab_txn_t *x = a, *y = b;
+   return strcmp(y->time_key, x->time_key);
+}
+
+/* Render one account's transactions: aggregate over ALL rows, then a
+ * newest-first listing (internal sweeps hidden from the "all" view). @p rows is
+ * the parsed JSON array; @p cat is the requested category ("all" or a filter). */
+static void fmt_txn_account(strbuf_t *sb,
+                            const char *masked,
+                            struct json_object *rows,
+                            const char *cat) {
+   size_t n = json_object_array_length(rows);
+   if (n == 0) {
+      strbuf_appendf(sb, "Account %s: no transactions in this window.\n", masked);
+      return;
+   }
+   size_t cap = n > SCHWAB_TXN_MAX_ROWS ? SCHWAB_TXN_MAX_ROWS : n;
+   schwab_txn_t *tx = malloc(sizeof(schwab_txn_t) * cap);
+   if (!tx) {
+      strbuf_appendf(sb, "Account %s: out of memory formatting transactions.\n", masked);
+      return;
+   }
+
+   /* Aggregate over EVERY row; retain up to `cap` for the listing. (Totals stay
+    * complete even if a pathological account exceeds the listing bound.) */
+   schwab_txn_agg_t agg;
+   schwab_txn_agg_init(&agg);
+   size_t parsed = 0;
+   for (size_t i = 0; i < n; i++) {
+      schwab_txn_t t;
+      schwab_txn_classify(json_object_array_get_idx(rows, i), &t);
+      schwab_txn_agg_add(&agg, &t);
+      if (parsed < cap) {
+         tx[parsed++] = t;
+      }
+   }
+   qsort(tx, parsed, sizeof(schwab_txn_t), txn_cmp_desc);
+
+   strbuf_appendf(sb, "Account %s — %d transaction%s:\n", masked, agg.count,
+                  agg.count == 1 ? "" : "s");
+   if (agg.n_trade) {
+      strbuf_appendf(sb, "  Trades: %d (net cash %+.2f)\n", agg.n_trade, agg.net_trade);
+   }
+   if (agg.n_dividend) {
+      strbuf_appendf(sb, "  Dividends/interest: %d (%+.2f)\n", agg.n_dividend, agg.income);
+   }
+   if (agg.n_deposit) {
+      strbuf_appendf(sb, "  Deposits: %d (%+.2f)\n", agg.n_deposit, agg.deposits);
+   }
+   if (agg.n_withdrawal) {
+      strbuf_appendf(sb, "  Withdrawals: %d (%+.2f)\n", agg.n_withdrawal, agg.withdrawals);
+   }
+   if (agg.n_internal) {
+      /* Listed as its own line so the per-category counts always sum to the
+       * header total, including in a filtered view (e.g. a `deposits` filter
+       * that also returns JOURNAL rows). */
+      strbuf_appendf(sb, "  Internal moves: %d (net %+.2f)\n", agg.n_internal, agg.net_internal);
+   }
+   if (agg.fees > 0.0) {
+      strbuf_appendf(sb, "  Fees paid: %.2f\n", agg.fees);
+   }
+   if (agg.n_other) {
+      strbuf_appendf(sb, "  Other: %d\n", agg.n_other);
+   }
+
+   bool hide_internal = (strcmp(cat, "all") == 0);
+   int listed = 0, hidden_internal = 0;
+   strbuf_append(sb, "  Activity (newest first):\n");
+   for (size_t i = 0; i < parsed; i++) {
+      const schwab_txn_t *t = &tx[i];
+      if (hide_internal && schwab_txn_is_internal(t)) {
+         hidden_internal++;
+         continue;
+      }
+      if (listed >= SCHWAB_TXN_LIST_CAP) {
+         continue;
+      }
+      strbuf_appendf(sb, "    %s  %s", t->date[0] ? t->date : "?", schwab_txn_cat_name(t->cat));
+      if (t->symbol[0]) {
+         strbuf_appendf(sb, " %s", t->symbol);
+         if (t->cat == SCHWAB_TXN_TRADE && t->qty != 0.0) {
+            strbuf_appendf(sb, " %s %.4g sh", t->qty > 0.0 ? "buy" : "sell",
+                           t->qty > 0.0 ? t->qty : -t->qty);
+         }
+      } else if (t->memo[0]) {
+         char safe[96]; /* memo is <= 80; masking only shrinks it */
+         schwab_txn_mask_numbers(t->memo, safe, sizeof(safe));
+         strbuf_appendf(sb, " %s", safe);
+      }
+      strbuf_appendf(sb, "  %+.2f\n", t->net_amount);
+      listed++;
+   }
+
+   int shown_total = 0;
+   for (size_t i = 0; i < parsed; i++) {
+      if (!(hide_internal && schwab_txn_is_internal(&tx[i]))) {
+         shown_total++;
+      }
+   }
+   if (listed < shown_total) {
+      strbuf_appendf(sb, "    (showing %d of %d; ask for a narrower window or a type filter.)\n",
+                     listed, shown_total);
+   }
+   if (hidden_internal > 0) {
+      strbuf_appendf(sb,
+                     "    (%d internal cash sweep%s not listed; counted in the totals above.)\n",
+                     hidden_internal, hidden_internal == 1 ? "" : "s");
+   }
+   if (n > cap) {
+      /* Totals above cover all rows; only the listing array is bounded. */
+      strbuf_appendf(sb, "    (%zu transactions total; the activity list covers %zu of them.)\n", n,
+                     cap);
+   }
+   free(tx);
+}
+
+char *schwab_service_transactions(int user_id,
+                                  const char *symbol,
+                                  const char *start,
+                                  const char *end,
+                                  const char *type) {
+   /* Optional single-symbol filter (URL-safe token). Empty = no filter; a
+    * provided-but-invalid symbol is an error. */
+   char sym_clean[32] = "";
+   if (symbol && symbol[0]) {
+      if (clean_symbols(symbol, sym_clean, sizeof(sym_clean), NULL) == 0) {
+         return result_err("That doesn't look like a valid stock symbol (e.g. NVDA).");
+      }
+      char *comma = strchr(sym_clean, ',');
+      if (comma) {
+         *comma = '\0'; /* single symbol only */
+      }
+   }
+
+   /* Category → Schwab types= list (default all). ENUM params are not validated
+    * at dispatch, so whitelist here. */
+   const char *cat = (type && type[0]) ? type : "all";
+   const char *types = txn_types_for(cat);
+   if (!types) {
+      return result_err("Unknown transaction type. Use trades, dividends, deposits, "
+                        "withdrawals, fees, or all.");
+   }
+
+   /* Date window: reuse the history guards, then add the ~1-year lookback ceiling.
+    * Default (no start) = the last SCHWAB_TXN_DEFAULT_DAYS. */
+   int64_t now = (int64_t)time(NULL);
+   int64_t midnight_today = now - (now % 86400);
+   int64_t s_sec, e_sec;
+   bool date_mode = (start && start[0]);
+   if (!date_mode && end && end[0]) {
+      return result_err("An end date needs a start date too.");
+   }
+   if (date_mode) {
+      if (!schwab_valid_date(start)) {
+         return result_err("Dates must be YYYY-MM-DD (e.g. 2025-03-01).");
+      }
+      s_sec = iso8601_parse_date_utc(start);
+      if (s_sec > now + 86400) { /* +1 day of slack for UTC+N "today" */
+         return result_err("Start date is in the future.");
+      }
+      /* Compare against UTC-midnight (matching s_sec) so a start exactly ~1 year
+       * old isn't rejected by a mid-day `now`. */
+      if (s_sec < midnight_today - (int64_t)SCHWAB_TXN_MAX_LOOKBACK_DAYS * 86400) {
+         return result_err("Schwab only provides about a year of transaction history — "
+                           "try a more recent start date.");
+      }
+      if (end && end[0]) {
+         if (!schwab_valid_date(end)) {
+            return result_err("Dates must be YYYY-MM-DD (e.g. 2025-03-01).");
+         }
+         e_sec = iso8601_parse_date_utc(end);
+         if (e_sec < s_sec) {
+            return result_err("End date is before the start date.");
+         }
+         if (e_sec > midnight_today) {
+            e_sec = midnight_today; /* clamp a future end to today */
+         }
+      } else {
+         e_sec = midnight_today;
+      }
+   } else {
+      e_sec = midnight_today;
+      s_sec = midnight_today - (int64_t)SCHWAB_TXN_DEFAULT_DAYS * 86400;
+   }
+   char start_iso[32], end_iso[32];
+   fmt_iso8601_z(s_sec, false, start_iso, sizeof(start_iso));
+   fmt_iso8601_z(e_sec, true, end_iso, sizeof(end_iso));
+
+   oauth_provider_config_t prov;
+   char bearer[OAUTH_TOKEN_BUF_SIZE];
+   char *err = NULL;
+   if (schwab_bearer(user_id, &prov, bearer, sizeof(bearer), &err) != SCHWAB_RC_OK) {
+      sodium_memzero(&prov, sizeof(prov));
+      return err;
+   }
+
+   /* Call 1: resolve account hashes. The response carries plaintext account
+    * numbers — copy out the masked number + validated hash, then drop it. */
+   char acct_url[128];
+   snprintf(acct_url, sizeof(acct_url), "%s/accounts/accountNumbers", SCHWAB_TRADER_BASE);
+   struct json_object *aroot = NULL;
+   long http = 0;
+   schwab_rc_t rc = schwab_get_with_retry(&prov, user_id, acct_url, bearer, sizeof(bearer), &aroot,
+                                          &http);
+   if (rc != SCHWAB_RC_OK) {
+      sodium_memzero(bearer, sizeof(bearer));
+      sodium_memzero(&prov, sizeof(prov));
+      return schwab_req_err(rc, http);
+   }
+   if (!json_object_is_type(aroot, json_type_array)) {
+      json_object_put(aroot);
+      sodium_memzero(bearer, sizeof(bearer));
+      sodium_memzero(&prov, sizeof(prov));
+      return result_err("Unexpected account response from Schwab.");
+   }
+
+   char hashes[SCHWAB_TXN_MAX_ACCOUNTS][129];
+   char masked[SCHWAB_TXN_MAX_ACCOUNTS][24];
+   int naccts = 0;
+   size_t na = json_object_array_length(aroot);
+   for (size_t i = 0; i < na && naccts < SCHWAB_TXN_MAX_ACCOUNTS; i++) {
+      struct json_object *el = json_object_array_get_idx(aroot, i);
+      const char *hv = jget_s(el, "hashValue");
+      if (!schwab_valid_hash(hv)) {
+         continue;
+      }
+      snprintf(hashes[naccts], sizeof(hashes[naccts]), "%s", hv);
+      mask_account(jget_s(el, "accountNumber"), masked[naccts], sizeof(masked[naccts]));
+      naccts++;
+   }
+   json_object_put(aroot);
+
+   if (naccts == 0) {
+      sodium_memzero(bearer, sizeof(bearer));
+      sodium_memzero(&prov, sizeof(prov));
+      return result_err("No Schwab accounts were found on your link.");
+   }
+
+   /* Call 2 (per account): fetch the window. Per-account failure is isolated so
+    * one bad account doesn't sink the others. */
+   strbuf_t sb;
+   strbuf_init(&sb, 1024);
+   strbuf_appendf(&sb, "Schwab transactions (%.10s to %.10s%s%s):\n", start_iso, end_iso,
+                  strcmp(cat, "all") == 0 ? "" : ", ", strcmp(cat, "all") == 0 ? "" : cat);
+
+   for (int a = 0; a < naccts; a++) {
+      char url[1024];
+      int un = snprintf(url, sizeof(url),
+                        "%s/accounts/%s/transactions?startDate=%s&endDate=%s&types=%s",
+                        SCHWAB_TRADER_BASE, hashes[a], start_iso, end_iso, types);
+      if (un <= 0 || (size_t)un >= sizeof(url)) {
+         /* All components are validated/bounded, so this shouldn't happen; refuse
+          * rather than issue a truncated request. */
+         strbuf_appendf(&sb, "Account %s: internal error building the request.\n", masked[a]);
+         continue;
+      }
+      if (sym_clean[0]) {
+         size_t off = (size_t)un;
+         snprintf(url + off, sizeof(url) - off, "&symbol=%s", sym_clean);
+      }
+
+      struct json_object *troot = NULL;
+      long thttp = 0;
+      schwab_rc_t trc = schwab_get_with_retry(&prov, user_id, url, bearer, sizeof(bearer), &troot,
+                                              &thttp);
+      if (trc != SCHWAB_RC_OK) {
+         char *e = schwab_req_err(trc, thttp);
+         strbuf_appendf(&sb, "Account %s: %s\n", masked[a],
+                        e ? e + 1 /* skip TOOL_RESULT_ERROR_MARK */ : "request failed");
+         free(e);
+         continue;
+      }
+      if (!json_object_is_type(troot, json_type_array)) {
+         strbuf_appendf(&sb, "Account %s: unexpected transactions response.\n", masked[a]);
+         json_object_put(troot);
+         continue;
+      }
+      fmt_txn_account(&sb, masked[a], troot, cat);
+      json_object_put(troot);
+   }
+
+   sodium_memzero(bearer, sizeof(bearer));
+   sodium_memzero(&prov, sizeof(prov));
+
+   char *outstr = (!strbuf_oom(&sb) && sb.buf) ? strdup(sb.buf) : NULL;
+   strbuf_free(&sb);
+   return outstr ? outstr : result_err("Schwab transactions formatting failed.");
 }

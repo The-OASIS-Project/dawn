@@ -38,21 +38,26 @@ static const treg_param_t schwab_params[] = {
    {
        .name = "action",
        .description =
-           "'quote' (live prices — needs symbols), 'portfolio' (holdings + balances across "
-           "all the user's Schwab accounts), 'accounts' (balances only), 'history' (price "
-           "history + analytics for ONE symbol over a range), or 'fundamentals' (valuation: "
-           "P/E, EPS, market cap, dividend yield, 52-week range, beta — one or more symbols).",
+           "'quote' (live prices — needs symbols), 'portfolio' (holdings + balances + "
+           "unrealized P/L across all the user's Schwab accounts), 'accounts' (balances only), "
+           "'history' (price history + analytics for ONE symbol over a range), 'fundamentals' "
+           "(valuation: P/E, EPS, market cap, dividend yield, 52-week range, beta — one or more "
+           "symbols), or 'transactions' (recent account activity: trades, dividends, deposits/"
+           "withdrawals, fees — over a date window).",
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
-       .enum_values = { "quote", "portfolio", "accounts", "history", "fundamentals" },
-       .enum_count = 5,
+       .enum_values = { "quote", "portfolio", "accounts", "history", "fundamentals",
+                        "transactions" },
+       .enum_count = 6,
    },
    {
        .name = "symbols",
        .description = "Ticker symbol(s). For 'quote'/'fundamentals': one or more, "
                       "comma-separated (e.g. 'NVDA' or 'NVDA, AMD, AAPL'). For 'history': a "
-                      "single symbol. Ignored for portfolio/accounts.",
+                      "single symbol. For 'transactions': an optional single-symbol filter "
+                      "(note: won't reliably match dividend rows). Ignored for "
+                      "portfolio/accounts.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_VALUE,
@@ -94,8 +99,10 @@ static const treg_param_t schwab_params[] = {
    },
    {
        .name = "start",
-       .description = "history only: custom start date YYYY-MM-DD (e.g. '2025-03-01'). When set, "
-                      "it overrides 'range' with an explicit window.",
+       .description = "history/transactions: custom start date YYYY-MM-DD (e.g. '2025-03-01'). "
+                      "For history, overrides 'range' with an explicit window. For "
+                      "transactions, defaults to the last ~60 days if omitted (Schwab serves "
+                      "at most ~1 year back).",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
@@ -103,12 +110,23 @@ static const treg_param_t schwab_params[] = {
    },
    {
        .name = "end",
-       .description = "history only: custom end date YYYY-MM-DD (default: today). Only used "
-                      "together with 'start'.",
+       .description = "history/transactions: custom end date YYYY-MM-DD (default: today). Only "
+                      "used together with 'start'.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
        .field_name = "end",
+   },
+   {
+       .name = "type",
+       .description = "transactions only: filter by category — 'trades', 'dividends' (incl. "
+                      "interest), 'deposits', 'withdrawals', 'fees', or 'all' (default).",
+       .type = TOOL_PARAM_TYPE_ENUM,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "type",
+       .enum_values = { "trades", "dividends", "deposits", "withdrawals", "fees", "all" },
+       .enum_count = 6,
    },
 };
 
@@ -122,13 +140,15 @@ static const tool_metadata_t schwab_metadata = {
    .alias_count = 1,
 
    .description = "Live stock quotes, the user's Charles Schwab portfolio, price history with "
-                  "analytics, and company fundamentals. Actions: 'quote' (prices), 'portfolio' "
-                  "/ 'accounts' (holdings + balances), 'history' (price trend + return/"
-                  "volatility/drawdown/moving-averages for one symbol; use data='series' then "
-                  "render_visual to chart it), 'fundamentals' (P/E, market cap, dividend yield, "
-                  "52-week range, beta). Read-only.",
+                  "analytics, company fundamentals, and recent account transactions. Actions: "
+                  "'quote' (prices), 'portfolio' / 'accounts' (holdings + balances + unrealized "
+                  "P/L), 'history' (price trend + return/volatility/drawdown/moving-averages for "
+                  "one symbol; use data='series' then render_visual to chart it), 'fundamentals' "
+                  "(P/E, market cap, dividend yield, 52-week range, beta), 'transactions' "
+                  "(recent trades/dividends/deposits/withdrawals/fees over a date window). "
+                  "Read-only.",
    .params = schwab_params,
-   .param_count = 7,
+   .param_count = 8,
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NETWORK | TOOL_CAP_SECRETS | TOOL_CAP_INFORMATIONAL |
@@ -198,9 +218,20 @@ static char *schwab_tool_callback(const char *action, char *value, int *should_r
       char *r = schwab_service_fundamentals(user_id, syms);
       return r ? r : oom();
    }
+   if (strcmp(action, "transactions") == 0) {
+      char start[16] = "", end[16] = "", type[16] = "";
+      if (value) {
+         tool_param_extract_custom(value, "start", start, sizeof(start));
+         tool_param_extract_custom(value, "end", end, sizeof(end));
+         tool_param_extract_custom(value, "type", type, sizeof(type));
+      }
+      /* syms is the optional single-symbol filter (base-extracted above). */
+      char *r = schwab_service_transactions(user_id, syms, start, end, type);
+      return r ? r : oom();
+   }
 
-   return strdup("Unknown stocks action. Use 'quote', 'portfolio', 'accounts', 'history', or "
-                 "'fundamentals'.");
+   return strdup("Unknown stocks action. Use 'quote', 'portfolio', 'accounts', 'history', "
+                 "'fundamentals', or 'transactions'.");
 }
 
 /* ========== Public API ========== */
