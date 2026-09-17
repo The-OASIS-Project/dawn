@@ -58,10 +58,10 @@ Use color ramp 600 stops for dataset colors:
 - Multi-variable comparison → radar
 
 ## Worked example: time-series line with a min–max band
-Some tools (e.g. `system_status action="trend"`) hand you a ready-made series as
-`"labels":[…]`, `"avg":[…]`, and — for temperature/battery — `"min":[…]` and
-`"max":[…]`. **Copy those arrays verbatim** into the chart; do not recompute or
-re-round them. Use a category x-axis (the labels), plot `avg` as the line, and
+Some tools (e.g. `system_status action="trend"`, or `stocks action="history"
+data="series"` which gives `labels`/`close`/`low`/`high`) hand you a ready-made
+series. **Copy those arrays verbatim** into the chart; do not recompute or
+re-round them. (For stock price history, plot `close` as the line.) Use a category x-axis (the labels), plot `avg` as the line, and
 shade `min`→`max` as a band. Missing points arrive as `null`; keep
 `spanGaps: true` so a data gap is bridged rather than dropping to zero.
 

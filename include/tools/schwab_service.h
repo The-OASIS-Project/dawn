@@ -24,6 +24,8 @@
 
 #include <stdbool.h>
 
+#include "tools/schwab_stats.h" /* schwab_history_stats + types */
+
 /**
  * Build an LLM-facing quote summary for one or more comma/space-separated
  * symbols. Returns an owned string (caller frees); failure paths are prefixed
@@ -38,5 +40,25 @@ char *schwab_service_quote(int user_id, const char *symbols_csv);
  * failures prefixed with TOOL_RESULT_ERROR_MARK.
  */
 char *schwab_service_portfolio(int user_id, bool accounts_only);
+
+/**
+ * Build an LLM-facing price-history answer for ONE symbol. @p range is one of
+ * 1mo/3mo/6mo/1y/5y/ytd (default 1y); @p interval is daily/weekly/monthly
+ * (default per range; an illegal range+interval is coerced); @p data is
+ * summary/series/raw (default summary). Empty strings take the defaults.
+ * Returns an owned string; failures prefixed with TOOL_RESULT_ERROR_MARK.
+ */
+char *schwab_service_history(int user_id,
+                             const char *symbol,
+                             const char *range,
+                             const char *interval,
+                             const char *data);
+
+/**
+ * Build an LLM-facing fundamentals (valuation) snapshot for one or more
+ * comma-separated symbols. Returns an owned string; failures prefixed with
+ * TOOL_RESULT_ERROR_MARK.
+ */
+char *schwab_service_fundamentals(int user_id, const char *symbols_csv);
 
 #endif /* SCHWAB_SERVICE_H */

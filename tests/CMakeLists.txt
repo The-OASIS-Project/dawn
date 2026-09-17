@@ -147,6 +147,13 @@ dawn_add_unit_test(test_sse_parser
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# Schwab price-history analytics — pure math, no network/DB.
+dawn_add_unit_test(test_schwab_stats
+   SOURCES test_schwab_stats.c
+           ${SRC_ROOT}/src/tools/schwab_stats.c
+   LIBS    unity m
+   LABEL   ci)
+
 # MCP HTTP+SSE transport — exercised against an in-test loopback HTTP+SSE
 # server (no external network), so it is CI-safe.
 dawn_add_unit_test(test_mcp_transport

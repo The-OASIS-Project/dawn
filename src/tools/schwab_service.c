@@ -26,9 +26,11 @@
 
 #include <json-c/json.h>
 #include <sodium.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "core/strbuf.h"
 #include "logging.h"
@@ -37,6 +39,9 @@
 #include "tools/tool_registry.h" /* TOOL_RESULT_ERROR_MARK */
 
 #define SCHWAB_MAX_SYMBOLS 25
+/* Upper bound on candles we allocate for, guarding against a pathological
+ * response — legitimate price history is well under this (5y daily ~1,300). */
+#define SCHWAB_MAX_CANDLES 20000
 
 /* ===== small helpers ===== */
 
@@ -203,13 +208,16 @@ static schwab_rc_t schwab_force_refresh(oauth_provider_config_t *prov,
    return SCHWAB_RC_OK;
 }
 
-/* GET with one forced-refresh retry on a mid-window 401. */
+/* GET with one forced-refresh retry on a mid-window 401. @p http_out (optional)
+ * receives the final HTTP status so callers can distinguish 400/404 from a
+ * transport error. */
 static schwab_rc_t schwab_get_with_retry(oauth_provider_config_t *prov,
                                          int user_id,
                                          const char *url,
                                          char *bearer,
                                          size_t blen,
-                                         struct json_object **root) {
+                                         struct json_object **root,
+                                         long *http_out) {
    long http = 0;
    schwab_rc_t rc = schwab_client_get_json(bearer, url, root, &http);
    if (rc == SCHWAB_RC_AUTH) {
@@ -217,7 +225,20 @@ static schwab_rc_t schwab_get_with_retry(oauth_provider_config_t *prov,
          rc = schwab_client_get_json(bearer, url, root, &http);
       }
    }
+   if (http_out) {
+      *http_out = http;
+   }
    return rc;
+}
+
+/* Map a failed request to an error-marked message, using the HTTP status to
+ * turn a 400/404 (bad symbol/params) into something more useful than a generic
+ * transport error. */
+static char *schwab_req_err(schwab_rc_t rc, long http) {
+   if (rc == SCHWAB_RC_HTTP && (http == 400 || http == 404)) {
+      return result_err("Schwab rejected that request — check the symbol (and range/interval).");
+   }
+   return rc_to_err(rc);
 }
 
 /* ===== quotes ===== */
@@ -273,7 +294,7 @@ char *schwab_service_quote(int user_id, const char *symbols_csv) {
             SCHWAB_MARKETDATA_BASE, clean);
 
    struct json_object *root = NULL;
-   schwab_rc_t rc = schwab_get_with_retry(&prov, user_id, url, bearer, sizeof(bearer), &root);
+   schwab_rc_t rc = schwab_get_with_retry(&prov, user_id, url, bearer, sizeof(bearer), &root, NULL);
    sodium_memzero(bearer, sizeof(bearer));
    sodium_memzero(&prov, sizeof(prov));
    if (rc != SCHWAB_RC_OK) {
@@ -367,7 +388,7 @@ char *schwab_service_portfolio(int user_id, bool accounts_only) {
    snprintf(url, sizeof(url), "%s/accounts?fields=positions", SCHWAB_TRADER_BASE);
 
    struct json_object *root = NULL;
-   schwab_rc_t rc = schwab_get_with_retry(&prov, user_id, url, bearer, sizeof(bearer), &root);
+   schwab_rc_t rc = schwab_get_with_retry(&prov, user_id, url, bearer, sizeof(bearer), &root, NULL);
    sodium_memzero(bearer, sizeof(bearer));
    sodium_memzero(&prov, sizeof(prov));
    if (rc != SCHWAB_RC_OK) {
@@ -438,4 +459,402 @@ char *schwab_service_portfolio(int user_id, bool accounts_only) {
    char *out = (!strbuf_oom(&sb) && sb.buf) ? strdup(sb.buf) : NULL;
    strbuf_free(&sb);
    return out ? out : result_err("Schwab portfolio formatting failed.");
+}
+
+/* ===== price history + analytics ===== */
+
+static int64_t jget_i64(struct json_object *o, const char *k) {
+   struct json_object *v = NULL;
+   return (o && json_object_object_get_ex(o, k, &v)) ? json_object_get_int64(v) : 0;
+}
+
+/* Schwab candle datetime is epoch ms; daily candles are stamped US-midnight, so
+ * the UTC calendar date equals the trading date — gmtime_r is correct and
+ * thread-safe (localtime_r/TZ would be wrong on non-Eastern hosts). */
+static void fmt_date(int64_t epoch_ms, char *out, size_t n) {
+   time_t s = (time_t)(epoch_ms / 1000);
+   struct tm tmv;
+   /* gmtime_r can return NULL for an out-of-range time_t, and strftime returns 0
+    * (buffer contents unspecified) if the result doesn't fit — guard both so a
+    * pathological server datetime can't leave `out` unterminated. */
+   if (!gmtime_r(&s, &tmv) || strftime(out, n, "%Y-%m-%d", &tmv) == 0) {
+      snprintf(out, n, "?");
+   }
+}
+
+static const char *freq_name(schwab_freq_t f) {
+   return f == SCHWAB_FREQ_WEEKLY ? "weekly" : f == SCHWAB_FREQ_MONTHLY ? "monthly" : "daily";
+}
+static unsigned freq_bit(schwab_freq_t f) {
+   return 1u << (unsigned)f; /* daily=1, weekly=2, monthly=4 */
+}
+
+/* Range → Schwab pricehistory params + the set of legal intervals. */
+typedef struct {
+   const char *range;
+   const char *period_type;
+   int period;
+   unsigned legal;             /* OR of freq_bit() */
+   schwab_freq_t def_interval; /* default when none requested */
+} hist_range_t;
+
+static const hist_range_t HIST_RANGES[] = {
+   { "1mo", "month", 1, 1u | 2u, SCHWAB_FREQ_DAILY },
+   { "3mo", "month", 3, 1u | 2u, SCHWAB_FREQ_DAILY },
+   { "6mo", "month", 6, 1u | 2u, SCHWAB_FREQ_DAILY },
+   { "1y", "year", 1, 1u | 2u | 4u, SCHWAB_FREQ_DAILY },
+   { "5y", "year", 5, 1u | 2u | 4u, SCHWAB_FREQ_WEEKLY },
+   { "ytd", "ytd", 1, 1u | 2u, SCHWAB_FREQ_DAILY },
+};
+
+char *schwab_service_history(int user_id,
+                             const char *symbol,
+                             const char *range,
+                             const char *interval,
+                             const char *data) {
+   /* symbol: history is single — take the first valid token. */
+   char clean[32];
+   if (clean_symbols(symbol ? symbol : "", clean, sizeof(clean), NULL) == 0) {
+      return result_err("No valid stock symbol was given (e.g. NVDA).");
+   }
+   char *comma = strchr(clean, ',');
+   if (comma) {
+      *comma = '\0';
+   }
+
+   /* range */
+   const char *rq = (range && range[0]) ? range : "1y";
+   const hist_range_t *rr = NULL;
+   for (size_t i = 0; i < sizeof(HIST_RANGES) / sizeof(HIST_RANGES[0]); i++) {
+      if (strcmp(rq, HIST_RANGES[i].range) == 0) {
+         rr = &HIST_RANGES[i];
+         break;
+      }
+   }
+   if (!rr) {
+      return result_err("Unknown range. Use 1mo, 3mo, 6mo, 1y, 5y, or ytd.");
+   }
+
+   /* interval (+ coercion to a legal one for this range) */
+   schwab_freq_t freq;
+   if (!interval || !interval[0]) {
+      freq = rr->def_interval;
+   } else if (strcmp(interval, "daily") == 0) {
+      freq = SCHWAB_FREQ_DAILY;
+   } else if (strcmp(interval, "weekly") == 0) {
+      freq = SCHWAB_FREQ_WEEKLY;
+   } else if (strcmp(interval, "monthly") == 0) {
+      freq = SCHWAB_FREQ_MONTHLY;
+   } else {
+      return result_err("Unknown interval. Use daily, weekly, or monthly.");
+   }
+   char coerce_note[96] = "";
+   if (!(rr->legal & freq_bit(freq))) {
+      schwab_freq_t nf = (rr->legal & 2u) ? SCHWAB_FREQ_WEEKLY : SCHWAB_FREQ_DAILY;
+      snprintf(coerce_note, sizeof(coerce_note), " (%s bars aren't available for %s — using %s)",
+               freq_name(freq), rr->range, freq_name(nf));
+      freq = nf;
+   }
+
+   /* data mode: 0 summary, 1 series, 2 raw (all include the summary) */
+   int mode = 0;
+   if (data && data[0]) {
+      if (strcmp(data, "series") == 0) {
+         mode = 1;
+      } else if (strcmp(data, "raw") == 0) {
+         mode = 2;
+      } else if (strcmp(data, "summary") != 0) {
+         return result_err("Unknown data mode. Use summary, series, or raw.");
+      }
+   }
+
+   oauth_provider_config_t prov;
+   char bearer[OAUTH_TOKEN_BUF_SIZE];
+   char *err = NULL;
+   if (schwab_bearer(user_id, &prov, bearer, sizeof(bearer), &err) != SCHWAB_RC_OK) {
+      sodium_memzero(&prov, sizeof(prov));
+      return err;
+   }
+
+   char url[512];
+   snprintf(url, sizeof(url),
+            "%s/pricehistory?symbol=%s&periodType=%s&period=%d&frequencyType=%s&frequency=1"
+            "&needExtendedHoursData=false",
+            SCHWAB_MARKETDATA_BASE, clean, rr->period_type, rr->period, freq_name(freq));
+
+   struct json_object *root = NULL;
+   long http = 0;
+   schwab_rc_t rc = schwab_get_with_retry(&prov, user_id, url, bearer, sizeof(bearer), &root,
+                                          &http);
+   sodium_memzero(bearer, sizeof(bearer));
+   sodium_memzero(&prov, sizeof(prov));
+   if (rc != SCHWAB_RC_OK) {
+      return schwab_req_err(rc, http);
+   }
+
+   struct json_object *candles = NULL;
+   if (!json_object_is_type(root, json_type_object) || jget_b(root, "empty", false) ||
+       !json_object_object_get_ex(root, "candles", &candles) ||
+       !json_object_is_type(candles, json_type_array) || json_object_array_length(candles) == 0) {
+      json_object_put(root);
+      char m[96];
+      snprintf(m, sizeof(m), "No price history returned for %s.", clean);
+      return result_err(m);
+   }
+
+   int n = (int)json_object_array_length(candles);
+   if (n > SCHWAB_MAX_CANDLES) {
+      n = SCHWAB_MAX_CANDLES;
+   }
+   double *op = malloc(sizeof(double) * n), *hi = malloc(sizeof(double) * n);
+   double *lo = malloc(sizeof(double) * n), *cl = malloc(sizeof(double) * n);
+   double *vo = malloc(sizeof(double) * n);
+   int64_t *dt = malloc(sizeof(int64_t) * n);
+   if (!op || !hi || !lo || !cl || !vo || !dt) {
+      free(op);
+      free(hi);
+      free(lo);
+      free(cl);
+      free(vo);
+      free(dt);
+      json_object_put(root);
+      return result_err("Stocks: out of memory.");
+   }
+   for (int i = 0; i < n; i++) {
+      struct json_object *c = json_object_array_get_idx(candles, i);
+      op[i] = jget_d(c, "open");
+      hi[i] = jget_d(c, "high");
+      lo[i] = jget_d(c, "low");
+      cl[i] = jget_d(c, "close");
+      vo[i] = jget_d(c, "volume");
+      dt[i] = jget_i64(c, "datetime");
+   }
+   json_object_put(root);
+
+   /* Base the period return on the first candle's close (an unambiguous
+    * "change across the returned window"). Schwab's previousClose is not
+    * reliably the pre-window close, so using it would risk mislabeling a
+    * one-bar move as the whole-period change. */
+   schwab_hist_stats_t st;
+   schwab_history_stats(cl, hi, lo, n, 0.0 /* base=0 → use close[0] */, freq, &st);
+
+   strbuf_t sb;
+   strbuf_init(&sb, 512);
+   char d0[24], d1[24];
+   fmt_date(dt[0], d0, sizeof(d0));
+   fmt_date(dt[n - 1], d1, sizeof(d1));
+   strbuf_appendf(&sb, "%s — %s price history, %s bars%s\n", clean, rr->range, freq_name(freq),
+                  coerce_note);
+   strbuf_appendf(&sb, "%s to %s (%d bars). Last close $%.2f (as of %s).\n", d0, d1, n,
+                  st.last_close, d1);
+   strbuf_appendf(&sb, "Change %+.2f%% over the period; range $%.2f-$%.2f; max drawdown %.2f%%.\n",
+                  st.pct_change, st.period_low, st.period_high, st.max_drawdown * 100.0);
+   if (st.volatility >= 0.0) {
+      strbuf_appendf(&sb, "Annualized volatility %.1f%% (%d %s log returns).\n",
+                     st.volatility * 100.0, st.vol_n, freq_name(freq));
+   } else {
+      strbuf_append(&sb, "Annualized volatility: n/a (not enough data).\n");
+   }
+   if (st.sma20 >= 0.0) {
+      strbuf_appendf(&sb, "20-bar SMA $%.2f (%s)", st.sma20,
+                     st.last_close >= st.sma20 ? "above" : "below");
+      if (st.sma50 >= 0.0) {
+         strbuf_appendf(&sb, "; 50-bar SMA $%.2f (%s)", st.sma50,
+                        st.last_close >= st.sma50 ? "above" : "below");
+      } else {
+         strbuf_append(&sb, "; 50-bar SMA needs \u226550 bars");
+      }
+      strbuf_append(&sb, ".\n");
+   }
+
+   if (mode == 1) {
+      /* Compact series for charting — mirror the system_status trend contract. */
+      int stride = (n + 58) / 59; /* ≤59 strided points + the forced last = ≤60 */
+      if (stride < 1) {
+         stride = 1;
+      }
+      int idx[64];
+      int np = 0;
+      for (int i = 0; i < n && np < 63; i += stride) {
+         idx[np++] = i;
+      }
+      if (np == 0 || idx[np - 1] != n - 1) {
+         idx[np++] = n - 1;
+      }
+      strbuf_append(&sb, "\nSeries (copy these arrays verbatim into a render_visual Chart.js line "
+                         "chart — do not recompute):\n");
+      strbuf_append(&sb, "labels=[");
+      for (int j = 0; j < np; j++) {
+         char d[24];
+         fmt_date(dt[idx[j]], d, sizeof(d));
+         strbuf_appendf(&sb, "%s\"%s\"", j ? "," : "", d);
+      }
+      strbuf_append(&sb, "]\nclose=[");
+      for (int j = 0; j < np; j++) {
+         strbuf_appendf(&sb, "%s%.2f", j ? "," : "", cl[idx[j]]);
+      }
+      strbuf_append(&sb, "]\nlow=[");
+      for (int j = 0; j < np; j++) {
+         strbuf_appendf(&sb, "%s%.2f", j ? "," : "", lo[idx[j]]);
+      }
+      strbuf_append(&sb, "]\nhigh=[");
+      for (int j = 0; j < np; j++) {
+         strbuf_appendf(&sb, "%s%.2f", j ? "," : "", hi[idx[j]]);
+      }
+      strbuf_append(&sb, "]\n");
+   } else if (mode == 2) {
+      int cap = 300;
+      int start = (n > cap) ? (n - cap) : 0;
+      if (n > cap) {
+         strbuf_appendf(&sb, "\nRaw candles (last %d of %d):\n", cap, n);
+      } else {
+         strbuf_appendf(&sb, "\nRaw candles (%d):\n", n);
+      }
+      for (int i = start; i < n; i++) {
+         char d[24], vb[24];
+         fmt_date(dt[i], d, sizeof(d));
+         fmt_volume(vo[i], vb, sizeof(vb));
+         strbuf_appendf(&sb, "%s  O%.2f H%.2f L%.2f C%.2f  vol %s\n", d, op[i], hi[i], lo[i], cl[i],
+                        vb);
+      }
+   }
+
+   free(op);
+   free(hi);
+   free(lo);
+   free(cl);
+   free(vo);
+   free(dt);
+
+   char *outstr = (!strbuf_oom(&sb) && sb.buf) ? strdup(sb.buf) : NULL;
+   strbuf_free(&sb);
+   return outstr ? outstr : result_err("Schwab history formatting failed.");
+}
+
+/* ===== fundamentals ===== */
+
+/* Format one instrument's fundamental block into sb. `io` is the instrument
+ * object; `fund` is its fundamental sub-object (may equal io on a flat shape). */
+static void fmt_fundamental(strbuf_t *sb,
+                            const char *sym,
+                            struct json_object *io,
+                            struct json_object *fund) {
+   const char *desc = jget_s(io, "description");
+   strbuf_appendf(sb, "%s%s%s%s:\n", sym, (desc && desc[0]) ? " (" : "", desc ? desc : "",
+                  (desc && desc[0]) ? ")" : "");
+   double pe = jget_d(fund, "peRatio");
+   double eps = jget_d(fund, "eps");
+   if (eps == 0.0) {
+      eps = jget_d(fund, "epsTTM");
+   }
+   double mcap = jget_d(fund, "marketCap");
+   double beta = jget_d(fund, "beta");
+   double dy = jget_d(fund, "dividendYield");
+   double da = jget_d(fund, "dividendAmount");
+   double h52 = jget_d(fund, "high52");
+   double l52 = jget_d(fund, "low52");
+   if (pe != 0.0) {
+      strbuf_appendf(sb, "  P/E %.2f", pe);
+   }
+   if (eps != 0.0) {
+      strbuf_appendf(sb, "  EPS $%.2f", eps);
+   }
+   if (mcap != 0.0) {
+      char mb[24];
+      fmt_volume(mcap, mb, sizeof(mb));
+      strbuf_appendf(sb, "  Market cap $%s", mb);
+   }
+   if (beta != 0.0) {
+      strbuf_appendf(sb, "  Beta %.2f", beta);
+   }
+   strbuf_append(sb, "\n");
+   if (dy != 0.0 || da != 0.0) {
+      strbuf_appendf(sb, "  Dividend yield %.2f%%", dy);
+      if (da != 0.0) {
+         strbuf_appendf(sb, " ($%.2f/yr)", da);
+      }
+      strbuf_append(sb, "\n");
+   }
+   if (h52 != 0.0 || l52 != 0.0) {
+      strbuf_appendf(sb, "  52-week range $%.2f-$%.2f\n", l52, h52);
+   }
+}
+
+char *schwab_service_fundamentals(int user_id, const char *symbols_csv) {
+   char clean[512];
+   if (clean_symbols(symbols_csv ? symbols_csv : "", clean, sizeof(clean), NULL) == 0) {
+      return result_err("No valid stock symbols were given (e.g. NVDA).");
+   }
+
+   oauth_provider_config_t prov;
+   char bearer[OAUTH_TOKEN_BUF_SIZE];
+   char *err = NULL;
+   if (schwab_bearer(user_id, &prov, bearer, sizeof(bearer), &err) != SCHWAB_RC_OK) {
+      sodium_memzero(&prov, sizeof(prov));
+      return err;
+   }
+
+   char url[1024];
+   snprintf(url, sizeof(url), "%s/instruments?symbol=%s&projection=fundamental",
+            SCHWAB_MARKETDATA_BASE, clean);
+
+   struct json_object *root = NULL;
+   long http = 0;
+   schwab_rc_t rc = schwab_get_with_retry(&prov, user_id, url, bearer, sizeof(bearer), &root,
+                                          &http);
+   sodium_memzero(bearer, sizeof(bearer));
+   sodium_memzero(&prov, sizeof(prov));
+   if (rc != SCHWAB_RC_OK) {
+      return schwab_req_err(rc, http);
+   }
+   if (!json_object_is_type(root, json_type_object)) {
+      json_object_put(root);
+      return result_err("Unexpected fundamentals response from Schwab.");
+   }
+
+   strbuf_t sb;
+   strbuf_init(&sb, 512);
+   int shown = 0;
+
+   /* Documented shape is {"instruments":[{symbol,description,exchange,fundamental{…}}]}.
+    * Fall back to a symbol-keyed object if that's what comes back. */
+   struct json_object *instruments = NULL;
+   if (json_object_object_get_ex(root, "instruments", &instruments) &&
+       json_object_is_type(instruments, json_type_array)) {
+      int ni = (int)json_object_array_length(instruments);
+      for (int i = 0; i < ni; i++) {
+         struct json_object *io = json_object_array_get_idx(instruments, i);
+         if (!json_object_is_type(io, json_type_object)) {
+            continue;
+         }
+         struct json_object *fund = NULL;
+         if (!json_object_object_get_ex(io, "fundamental", &fund)) {
+            fund = io; /* flat shape */
+         }
+         fmt_fundamental(&sb, jget_s(io, "symbol"), io, fund);
+         shown++;
+      }
+   } else {
+      json_object_object_foreach(root, key, io) {
+         if (!json_object_is_type(io, json_type_object)) {
+            continue;
+         }
+         struct json_object *fund = NULL;
+         if (!json_object_object_get_ex(io, "fundamental", &fund)) {
+            fund = io;
+         }
+         fmt_fundamental(&sb, key, io, fund);
+         shown++;
+      }
+   }
+
+   json_object_put(root);
+   if (shown == 0) {
+      strbuf_free(&sb);
+      return result_err("No fundamentals returned (check the symbol).");
+   }
+
+   char *outstr = (!strbuf_oom(&sb) && sb.buf) ? strdup(sb.buf) : NULL;
+   strbuf_free(&sb);
+   return outstr ? outstr : result_err("Schwab fundamentals formatting failed.");
 }

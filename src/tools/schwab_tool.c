@@ -37,22 +37,60 @@ static char *schwab_tool_callback(const char *action, char *value, int *should_r
 static const treg_param_t schwab_params[] = {
    {
        .name = "action",
-       .description = "'quote' (live prices — requires symbols), 'portfolio' (the user's "
-                      "holdings and balances across all their Schwab accounts), or "
-                      "'accounts' (balances only, no positions).",
+       .description =
+           "'quote' (live prices — needs symbols), 'portfolio' (holdings + balances across "
+           "all the user's Schwab accounts), 'accounts' (balances only), 'history' (price "
+           "history + analytics for ONE symbol over a range), or 'fundamentals' (valuation: "
+           "P/E, EPS, market cap, dividend yield, 52-week range, beta — one or more symbols).",
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
-       .enum_values = { "quote", "portfolio", "accounts" },
-       .enum_count = 3,
+       .enum_values = { "quote", "portfolio", "accounts", "history", "fundamentals" },
+       .enum_count = 5,
    },
    {
        .name = "symbols",
-       .description = "For 'quote' only: one or more ticker symbols, comma-separated "
-                      "(e.g. 'NVDA' or 'NVDA, AMD, AAPL'). Ignored for portfolio/accounts.",
+       .description = "Ticker symbol(s). For 'quote'/'fundamentals': one or more, "
+                      "comma-separated (e.g. 'NVDA' or 'NVDA, AMD, AAPL'). For 'history': a "
+                      "single symbol. Ignored for portfolio/accounts.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_VALUE,
+   },
+   {
+       .name = "range",
+       .description = "history only: how far back — '1mo','3mo','6mo','1y','5y','ytd' "
+                      "(default '1y').",
+       .type = TOOL_PARAM_TYPE_ENUM,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "range",
+       .enum_values = { "1mo", "3mo", "6mo", "1y", "5y", "ytd" },
+       .enum_count = 6,
+   },
+   {
+       .name = "interval",
+       .description = "history only: candle interval — 'daily','weekly','monthly' (default "
+                      "depends on range; an illegal range+interval is auto-corrected).",
+       .type = TOOL_PARAM_TYPE_ENUM,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "interval",
+       .enum_values = { "daily", "weekly", "monthly" },
+       .enum_count = 3,
+   },
+   {
+       .name = "data",
+       .description = "history only: what to return — 'summary' (computed metrics: % change, "
+                      "high/low, volatility, max drawdown, moving averages; default), 'series' "
+                      "(compact date+price arrays to chart with render_visual), or 'raw' "
+                      "(recent OHLCV candles).",
+       .type = TOOL_PARAM_TYPE_ENUM,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "data",
+       .enum_values = { "summary", "series", "raw" },
+       .enum_count = 3,
    },
 };
 
@@ -65,12 +103,14 @@ static const tool_metadata_t schwab_metadata = {
    .aliases = { "stock" },
    .alias_count = 1,
 
-   .description = "Look up live stock quotes and the user's Charles Schwab portfolio. Use "
-                  "'quote' with one or more ticker symbols for prices; 'portfolio' for the "
-                  "user's holdings and balances across all their Schwab accounts; 'accounts' "
-                  "for balances only. Read-only.",
+   .description = "Live stock quotes, the user's Charles Schwab portfolio, price history with "
+                  "analytics, and company fundamentals. Actions: 'quote' (prices), 'portfolio' "
+                  "/ 'accounts' (holdings + balances), 'history' (price trend + return/"
+                  "volatility/drawdown/moving-averages for one symbol; use data='series' then "
+                  "render_visual to chart it), 'fundamentals' (P/E, market cap, dividend yield, "
+                  "52-week range, beta). Read-only.",
    .params = schwab_params,
-   .param_count = 2,
+   .param_count = 5,
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_NETWORK | TOOL_CAP_SECRETS | TOOL_CAP_INFORMATIONAL |
@@ -103,9 +143,17 @@ static char *schwab_tool_callback(const char *action, char *value, int *should_r
       action = "quote";
    }
 
+   /* The framework appends declared CUSTOM params to the VALUE string as
+    * "::field::value"; strip that back to the base symbol string so a `quote`
+    * that also carries a stray range= doesn't reach clean_symbols as
+    * "NVDA::range::1y". Applies to every symbol-taking action. */
+   char syms[256] = "";
+   if (value) {
+      tool_param_extract_base(value, syms, sizeof(syms));
+   }
+
    if (strcmp(action, "quote") == 0 || strcmp(action, "get") == 0) {
-      /* `symbols` maps to VALUE, so `value` is the raw symbols string. */
-      char *r = schwab_service_quote(user_id, value);
+      char *r = schwab_service_quote(user_id, syms);
       return r ? r : oom();
    }
    if (strcmp(action, "portfolio") == 0 || strcmp(action, "positions") == 0) {
@@ -116,8 +164,23 @@ static char *schwab_tool_callback(const char *action, char *value, int *should_r
       char *r = schwab_service_portfolio(user_id, true /* balances only */);
       return r ? r : oom();
    }
+   if (strcmp(action, "history") == 0) {
+      char range[16] = "", interval[16] = "", data[16] = "";
+      if (value) {
+         tool_param_extract_custom(value, "range", range, sizeof(range));
+         tool_param_extract_custom(value, "interval", interval, sizeof(interval));
+         tool_param_extract_custom(value, "data", data, sizeof(data));
+      }
+      char *r = schwab_service_history(user_id, syms, range, interval, data);
+      return r ? r : oom();
+   }
+   if (strcmp(action, "fundamentals") == 0) {
+      char *r = schwab_service_fundamentals(user_id, syms);
+      return r ? r : oom();
+   }
 
-   return strdup("Unknown stocks action. Use 'quote' (with symbols), 'portfolio', or 'accounts'.");
+   return strdup("Unknown stocks action. Use 'quote', 'portfolio', 'accounts', 'history', or "
+                 "'fundamentals'.");
 }
 
 /* ========== Public API ========== */

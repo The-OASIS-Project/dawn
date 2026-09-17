@@ -83,6 +83,9 @@ Ask the assistant naturally, for example:
 
 - "What's NVDA trading at?" / "Quote AAPL, AMD, and ARM."
 - "Show me my portfolio." / "What are my Schwab balances?"
+- "How has TSM done over the past year?" (price history + return/volatility/drawdown)
+- "Chart NVDA's last 3 months." (history → an inline chart)
+- "What's AAPL's P/E and dividend yield?" (fundamentals)
 
 Notes:
 
