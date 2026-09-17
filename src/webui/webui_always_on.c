@@ -687,6 +687,11 @@ void always_on_consume_wake_result(always_on_ctx_t *ctx, void *conn_ptr) {
    }
 
    ws_connection_t *conn = (ws_connection_t *)conn_ptr;
+   /* Read conn->session ONCE (atomic): the maintenance thread can NULL it
+    * concurrently, so re-reading the field between the guard and the deref could
+    * tear to a NULL. The lws-thread caller (the always-on sweep) has retained
+    * this session, so a non-NULL value stays alive for the dispatch below. */
+   session_t *session = conn_get_session(conn);
    atomic_store(&ctx->wake_result_ready, 0);
 
    pthread_mutex_lock(&ctx->mutex);
@@ -709,18 +714,18 @@ void always_on_consume_wake_result(always_on_ctx_t *ctx, void *conn_ptr) {
 
          send_always_on_state(ctx->wsi, "processing");
 
-         if (conn->session && cmd[0] != '\0') {
+         if (session && cmd[0] != '\0') {
             /* Cross-device dedup: another device already handled this spoken
              * command within the window.  Suppress and return to listening —
              * always_on_processing_complete resets the state machine (a plain
              * "idle" send would leave it wedged in PROCESSING). */
-            if (utterance_dedup_check(conn->session->session_id)) {
+            if (utterance_dedup_check(session->session_id)) {
                OLOG_INFO("Always-on: Dedup suppressed duplicate utterance: \"%s\"", cmd);
                always_on_processing_complete(ctx);
             } else {
                /* Always-on voice: this turn's input is ASR-transcribed.  Passed
                 * as input_was_voice=true; the worker stamps it before dispatch. */
-               webui_process_text_input(conn->session, cmd, /*input_was_voice=*/true);
+               webui_process_text_input(session, cmd, /*input_was_voice=*/true);
             }
          }
          free(cmd);
@@ -779,6 +784,8 @@ static void always_on_consume_cmd_result(always_on_ctx_t *ctx, void *conn_ptr) {
    }
 
    ws_connection_t *conn = (ws_connection_t *)conn_ptr;
+   /* Read conn->session ONCE (atomic) — see always_on_consume_wake_result. */
+   session_t *session = conn_get_session(conn);
    atomic_store(&ctx->cmd_result_ready, 0);
 
    pthread_mutex_lock(&ctx->mutex);
@@ -786,17 +793,17 @@ static void always_on_consume_cmd_result(always_on_ctx_t *ctx, void *conn_ptr) {
    ctx->cmd_transcript = NULL;
    pthread_mutex_unlock(&ctx->mutex);
 
-   if (transcript && conn->session) {
+   if (transcript && session) {
       /* Cross-device dedup: drop a duplicate of a command another device
        * already handled; reset the state machine like the ASR-fail path. */
-      if (utterance_dedup_check(conn->session->session_id)) {
+      if (utterance_dedup_check(session->session_id)) {
          OLOG_INFO("Always-on: Dedup suppressed duplicate utterance: \"%s\"", transcript);
          free(transcript);
          always_on_processing_complete(ctx);
       } else {
          /* Always-on voice: this turn's input is ASR-transcribed.  Passed as
           * input_was_voice=true; the worker stamps it before dispatch. */
-         webui_process_text_input(conn->session, transcript, /*input_was_voice=*/true);
+         webui_process_text_input(session, transcript, /*input_was_voice=*/true);
          free(transcript);
       }
    } else {

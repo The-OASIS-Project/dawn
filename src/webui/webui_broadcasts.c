@@ -415,6 +415,12 @@ int scheduler_route_tts_to_user(int user_id,
  * cannot render a browser toast — so counting one would fire the row and show
  * the user nothing.  Callers that only log the count pass false and keep the
  * historical fan-out.
+ *
+ * LOCKING CONTRACT: acquires the non-recursive s_conn_registry_mutex, so it MUST
+ * NOT be called with that mutex already held — doing so self-deadlocks the whole
+ * daemon (this was a live bug via the always-on sweep, fixed by snapshot-then-
+ * unlock). All conv_db_* callers reach this only after AUTH_DB_UNLOCK and hold no
+ * registry lock.
  * ============================================================================= */
 static int broadcast_json_to_user_ex(int user_id, json_object *root, bool browsers_only) {
    if (!root)

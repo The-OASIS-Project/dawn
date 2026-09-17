@@ -736,6 +736,12 @@ int webui_process_text_input_with_vision(session_t *session,
    return 0;
 }
 
+/* INVARIANT: the synchronous portion (conv-create + broadcast, before the turn is
+ * enqueued to a worker) MUST NOT pump lws (no lws_service / connection-close
+ * callbacks). The always-on sweep (webui_thread_func) calls this while iterating a
+ * snapshot of raw connection pointers taken without the registry lock; if this
+ * path synchronously flushed lws, a CLOSED callback could free a snapshotted
+ * connection mid-sweep. */
 int webui_process_text_input(session_t *session, const char *text, bool input_was_voice) {
    return webui_process_text_input_with_vision(session, text, NULL, NULL, NULL, 0,
                                                /*persist_content=*/NULL, input_was_voice);

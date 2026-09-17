@@ -161,6 +161,11 @@ pthread_mutex_t s_token_mutex = PTHREAD_MUTEX_INITIALIZER;
  * declared in webui_internal.h so sibling modules (broadcasts.c, etc.)
  * can iterate the registry without duplicating storage. */
 ws_connection_t *s_active_connections[MAX_ACTIVE_CONNECTIONS];
+/* Non-recursive. MUST NOT be held across any callout that can reach a
+ * per-user broadcast (broadcast_json_to_user_ex / conversation_list_changed_notify)
+ * — the broadcast re-acquires this mutex and would self-deadlock the whole
+ * daemon. Snapshot what you need, unlock, then act (see the always-on sweep in
+ * webui_thread_func). */
 pthread_mutex_t s_conn_registry_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* deliver_missed_notifications + webui_broadcast_silent_observation moved
@@ -1379,19 +1384,64 @@ static void *webui_thread_func(void *arg) {
          int64_t now_ms = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
          if (now_ms - last_timeout_check_ms >= 250) {
             last_timeout_check_ms = now_ms;
+            /* Snapshot the always-on connections under the registry lock, then run
+             * the checks UNLOCKED. always_on_check_timeouts can execute a full
+             * synchronous turn (consume a wake result → webui_process_text_input →
+             * conv create → conversation_list_changed_notify →
+             * broadcast_json_to_user_ex), and that broadcast re-acquires
+             * s_conn_registry_mutex — holding it across the sweep self-deadlocks
+             * the whole daemon (the mutex is non-recursive).
+             *
+             * Snapshot safety: ws_connection_t is lws per-session-data, and every
+             * registry-slot mutation and connection free happens on THIS lws
+             * service thread (register/unregister in the ESTABLISHED/CLOSED
+             * callbacks, driven by lws_service earlier in this same loop). No other
+             * thread frees or re-slots a connection, and no lws callback runs
+             * between the snapshot and its use in this sweep, so the pointers stay
+             * valid. conn->always_on is likewise mutated only on this thread, and
+             * ctx teardown is refcount-guarded (always_on_destroy drops the lws
+             * thread's ref; the free happens via always_on_release at refcount 0),
+             * so the auto-disable cleanup is safe outside the registry lock. Keep
+             * it on the lws thread.
+             *
+             * Session pinning: always_on_check_timeouts can consume a wake result
+             * and dispatch a turn on conn->session. The maintenance thread's
+             * webui_detach_session() NULLs conn->session and releases the
+             * connection's session ref UNDER s_conn_registry_mutex — so with the
+             * lock dropped it could free the session_t mid-check. Retain each
+             * connection's session here, where detach is excluded, and release it
+             * after the unlocked pass, so the session stays alive across the turn
+             * dispatch. */
+            ws_connection_t *ao_conn[MAX_ACTIVE_CONNECTIONS];
+            session_t *ao_session[MAX_ACTIVE_CONNECTIONS];
+            int ao_count = 0;
             pthread_mutex_lock(&s_conn_registry_mutex);
             for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
                ws_connection_t *c = s_active_connections[i];
                if (c && c->always_on) {
-                  if (always_on_check_timeouts(c->always_on, c)) {
-                     /* Auto-disabled — clean up */
-                     send_always_on_state(c->wsi, "disabled");
-                     always_on_destroy(c->always_on);
-                     c->always_on = NULL;
+                  ao_conn[ao_count] = c;
+                  session_t *s = conn_get_session(c);
+                  if (s) {
+                     session_retain(s);
                   }
+                  ao_session[ao_count] = s;
+                  ao_count++;
                }
             }
             pthread_mutex_unlock(&s_conn_registry_mutex);
+
+            for (int j = 0; j < ao_count; j++) {
+               ws_connection_t *c = ao_conn[j];
+               if (always_on_check_timeouts(c->always_on, c)) {
+                  /* Auto-disabled — clean up (lws thread; single-threaded field). */
+                  send_always_on_state(c->wsi, "disabled");
+                  always_on_destroy(c->always_on);
+                  c->always_on = NULL;
+               }
+               if (ao_session[j]) {
+                  session_release(ao_session[j]);
+               }
+            }
          }
       }
    }
