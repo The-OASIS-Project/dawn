@@ -98,6 +98,13 @@ static const treg_param_t plan_params[] = {
          "later steps reference it as `{{foo}}` inside any string field. Variable names "
          "must match [a-z_][a-z0-9_]* (lowercase letters, digits, underscores).\n"
          "\n"
+         "IMPORTANT — how results come back: a `call`'s result is saved into its `store` "
+         "variable but is NOT returned to you on its own. The ONLY output this tool returns "
+         "is the text emitted by `log` steps. So any plan meant to PRODUCE an answer must end "
+         "with a `log` step that prints the stored variables you care about (e.g. "
+         "`{\"type\":\"log\",\"message\":\"NVDA {{nvda}} | AMD {{amd}}\"}`) — otherwise it runs "
+         "and returns nothing.\n"
+         "\n"
          "When to use this tool: reach for it ONLY when you need conditional branching, "
          "looping over results, or chaining where step N consumes step M's stored output. "
          "If you just need 2-3 unrelated tool calls, call them directly — don't wrap them "
@@ -139,6 +146,46 @@ static const tool_metadata_t plan_executor_metadata = {
 /* =============================================================================
  * Callback Implementation
  * ============================================================================= */
+
+/* When a plan emits no `log` output but stored results in variables, surface
+ * those variables instead of returning nothing — a fetch-and-store plan that
+ * omitted a `log` step (a common LLM mistake) would otherwise run every call
+ * and silently return empty.  Only reached on the all-succeeded path, so stored
+ * values are results; a leading tool error-mark is stripped so it isn't emitted
+ * mid-stream. */
+static char *plan_build_stored_vars_result(const plan_context_t *ctx) {
+   char *buf = malloc(LLM_TOOLS_RESULT_LEN);
+   if (!buf) {
+      return NULL;
+   }
+   int off = snprintf(buf, LLM_TOOLS_RESULT_LEN,
+                      "Plan executed. No log step produced output; returning the stored "
+                      "results:\n");
+   if (off < 0 || off >= LLM_TOOLS_RESULT_LEN) {
+      free(buf);
+      return NULL;
+   }
+   for (int i = 0; i < ctx->var_count && off < LLM_TOOLS_RESULT_LEN - 1; i++) {
+      const char *v = ctx->vars[i].value;
+      if (!v) {
+         continue;
+      }
+      if (v[0] == TOOL_RESULT_ERROR_MARK[0]) {
+         v++;
+      }
+      int w = snprintf(buf + off, (size_t)(LLM_TOOLS_RESULT_LEN - off), "\n[%s]\n%s\n",
+                       ctx->vars[i].name, v);
+      if (w < 0) {
+         break;
+      }
+      if (w >= LLM_TOOLS_RESULT_LEN - off) {
+         off = LLM_TOOLS_RESULT_LEN - 1; /* truncated — stop appending */
+         break;
+      }
+      off += w;
+   }
+   return buf;
+}
 
 /**
  * @brief Plan executor tool callback
@@ -256,6 +303,13 @@ static char *plan_executor_callback(const char *action, char *value, int *should
    } else {
       if (ctx.output[0]) {
          result = strdup(ctx.output);
+      } else if (ctx.var_count > 0) {
+         /* No log output, but the plan stored results — surface them rather than
+          * silently returning nothing (see plan_build_stored_vars_result). */
+         result = plan_build_stored_vars_result(&ctx);
+         if (!result) {
+            result = strdup("Plan executed successfully (no output).");
+         }
       } else {
          result = strdup("Plan executed successfully (no output).");
       }
