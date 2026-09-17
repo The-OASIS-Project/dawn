@@ -1353,8 +1353,11 @@ void scheduler_send_tts_to_session(session_t *session, const char *text) {
 static void audio_worker_end(session_t *session) {
    if (session) {
       /* Close the multi-target TTS bracket on non-origin listeners (§Phase-4) BEFORE releasing
-       * the turn ref — single funnel for every voice-worker exit; no-op when nothing was fanned. */
-      webui_fanout_tts_idle(session);
+       * the turn ref — single funnel for every voice-worker exit. Only WEBUI origins fan out
+       * (satellites self-target via the single-target callback), so skip the scan otherwise. */
+      if (session->type == SESSION_TYPE_WEBUI) {
+         webui_fanout_tts_idle(session);
+      }
       atomic_fetch_sub(&session->turn_in_flight, 1);
       session_release(session);
    }
@@ -1573,13 +1576,18 @@ static void *audio_worker_thread(void *arg) {
     * bound above (stream_conversation_id), which the hook reads live. */
    webui_turn_persist_scope_t voice_persist_scope;
    webui_turn_persist_arm(session, turn_user_id, &voice_persist_scope);
-   /* Multi-target TTS (§Phase-4): fan the voice reply to every speaker-capable viewer of this
-    * conversation, the origin voice device included.  Self-gates when no listener exists (scan
-    * finds none → no synth), so the unconditional wiring keeps today's no-audio-when-TTS-off case.
-    */
+   /* Voice reply routing. A satellite ORIGIN must self-target via the single-target callback:
+    * the §Phase-4 fan-out's conn_is_audio_target rejects non-WEBUI sessions AND emits 48kHz
+    * browser-rate PCM, so routing a satellite through it drops the reply entirely (no eligible
+    * browser → no synth). The single-target callback sends native-rate (Tier-2: 22050Hz) PCM to
+    * the originating device. A WEBUI origin keeps the multi-target fan-out (every speaker-capable
+    * viewer of this conversation, origin included; self-gates when no listener exists). */
+   session_sentence_callback sentence_cb = (session->type == SESSION_TYPE_DAP2 &&
+                                            session->tier == DAP2_TIER_2)
+                                               ? webui_sentence_audio_callback
+                                               : webui_sentence_audio_fanout_callback;
    char *response = session_llm_call_with_tts_vision_no_add(session, transcript, NULL, NULL, NULL,
-                                                            0, webui_sentence_audio_fanout_callback,
-                                                            session);
+                                                            0, sentence_cb, session);
    webui_turn_persist_disarm(session, &voice_persist_scope);
    free(transcript);
 
