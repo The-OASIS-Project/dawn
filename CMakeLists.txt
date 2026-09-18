@@ -791,6 +791,12 @@ list(APPEND DAWN_SOURCES
     src/core/stat_net_interpret.c
 )
 
+# Pure voice end-of-speech decision (no I/O), extracted from the dawn.c state
+# machine so the endpoint logic is unit-testable via trace replay.
+list(APPEND DAWN_SOURCES
+    src/core/endpointer.c
+)
+
 # SAGE proactive-attention subsystem (Layer 1 core, always compiled; master
 # switch is [attention] enabled, default OFF). Ingest polls the STAT/suit
 # service caches, so it degrades gracefully when those tools are compiled out.

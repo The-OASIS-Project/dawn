@@ -66,6 +66,7 @@
 #include "core/component_status.h"
 #include "core/conv_stream.h"
 #include "core/embedding_engine.h"
+#include "core/endpointer.h"
 #ifdef ENABLE_WEBUI
 #include "core/job_manager.h" /* job subsystem compiles only under ENABLE_WEBUI */
 #include "core/job_reinvoke.h"
@@ -205,6 +206,12 @@ static audio_capture_context_t *audio_capture_ctx = NULL;
 
 // Silero VAD context for voice activity detection
 static silero_vad_context_t *vad_ctx = NULL;
+
+// End-of-speech decision for the local WAKEWORD_LISTEN path. Owned by the single
+// main-loop thread. In P0 it runs with adaptive=false, so it reproduces the
+// legacy `silence_duration >= end_of_speech_duration` timing exactly while
+// shadow-recording the tentative->resume gaps (adaptive-dwell instrumentation).
+static endpointer_t s_ww_endpointer;
 
 // Wake word prefixes that get combined with ai_name at runtime
 static const char *wakeWordPrefixes[] = { "hello ",    "okay ",         "alright ",
@@ -1086,6 +1093,9 @@ static void reset_for_new_utterance(silero_vad_context_t *vad_ctx,
    *silence_duration = 0.0f;
    *speech_duration = 0.0f;
    *recording_duration = 0.0f;
+
+   // Keep the WAKEWORD_LISTEN endpointer in lockstep with the durations above.
+   endpointer_reset(&s_ww_endpointer);
 
    // Reset pre-roll buffer
    *preroll_write_pos = 0;
@@ -3154,6 +3164,19 @@ mqtt_disabled:
                is_silence = 1;  // Assume silence if VAD unavailable
             }
 
+            // Adaptive-dwell endpointer, fed one frame per tick in lockstep with the
+            // durations below. P0: adaptive=false, so ww_ev's COMMIT fires on the exact
+            // frame the legacy `silence_duration >= end_of_speech_duration` check would;
+            // TENTATIVE/CANCEL are shadow-only signals (they change no timing) that record
+            // the tentative->resume pause distribution. Config re-synced each tick so live
+            // [vad] setting changes apply exactly as before. t_hush = the chunker's pause
+            // (a natural tentative point); 0 disables tentative if chunking pause is 0.
+            endpointer_configure(&s_ww_endpointer, g_config.vad.chunking.pause_duration,
+                                 g_config.vad.end_of_speech_duration,
+                                 g_config.vad.max_recording_duration, false);
+            endpoint_event_t ww_ev = endpointer_feed(&s_ww_endpointer, !is_silence,
+                                                     DEFAULT_CAPTURE_SECONDS);
+
             // Track silence and speech duration for speech end detection and chunking
             if (is_silence) {
                silence_duration += DEFAULT_CAPTURE_SECONDS;
@@ -3210,14 +3233,18 @@ mqtt_disabled:
             // Flag to trigger wake word processing after finalization
             int should_check_wake_word = 0;
 
-            // Check for maximum recording duration (safety limit for buffer)
-            if (recording_duration >= g_config.vad.max_recording_duration) {
+            // Check for maximum recording duration (safety limit for buffer).
+            // Routed through the endpointer (adaptive=false => identical to the
+            // legacy `recording_duration >= max_recording_duration`, which wins
+            // over end-of-speech).
+            if (ww_ev == ENDPOINT_COMMIT && endpointer_commit_forced(&s_ww_endpointer)) {
                OLOG_WARNING("WAKEWORD_LISTEN: Max recording duration reached (%.1fs), forcing "
                             "finalization to prevent buffer overflow.\n",
                             recording_duration);
                recording_duration = 0.0f;
                silence_duration = 0.0f;
                speech_duration = 0.0f;
+               endpointer_reset(&s_ww_endpointer);
                // Reset pre-roll buffer
                preroll_write_pos = 0;
                preroll_valid_bytes = 0;
@@ -3263,11 +3290,21 @@ mqtt_disabled:
                       1;  // Set flag even with NULL input to trigger state transition
                }
             }
-            // Check if speech has ended (silence threshold)
-            else if (silence_duration >= g_config.vad.end_of_speech_duration) {
+            // Check if speech has ended (silence threshold). Routed through the
+            // endpointer (adaptive=false => identical to the legacy
+            // `silence_duration >= end_of_speech_duration`).
+            else if (ww_ev == ENDPOINT_COMMIT) {
+               // Adaptive-dwell shadow instrumentation: the pause distribution a
+               // future adaptive endpoint would have to respect. voiced = total
+               // speech this utterance; max_pause = longest mid-utterance gap that
+               // still resumed (never cut off).
+               OLOG_INFO("EOS shadow: voiced=%.2fs tentatives=%d resumes=%d max_pause=%.2fs",
+                         (double)s_ww_endpointer.speech_s, s_ww_endpointer.tentative_count,
+                         s_ww_endpointer.resume_count, (double)s_ww_endpointer.max_pause_s);
                silence_duration = 0.0f;
                speech_duration = 0.0f;
                recording_duration = 0.0f;
+               endpointer_reset(&s_ww_endpointer);
                // Reset pre-roll buffer
                preroll_write_pos = 0;
                preroll_valid_bytes = 0;
