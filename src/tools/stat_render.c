@@ -24,37 +24,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Primary uplink = the default route with the LOWEST metric. NetworkManager
- * penalizes a failed-over path with +20000, so the metric (not the interface
- * name — usb0 isn't stable across USB re-enumeration) identifies the active
- * path. Returns the route index, or -1 if there is no default route. */
-static int net_primary_route(const stat_snapshot_t *s) {
-   int best = -1;
-   for (int i = 0; i < s->net_route_count; i++) {
-      if (best < 0 || s->net_routes[i].metric < s->net_routes[best].metric) {
-         best = i;
-      }
-   }
-   return best;
-}
-
-static const stat_net_iface_t *net_iface_by_name(const stat_snapshot_t *s, const char *name) {
-   for (int i = 0; i < s->net_iface_count; i++) {
-      if (strcmp(s->net_ifaces[i].name, name) == 0) {
-         return &s->net_ifaces[i];
-      }
-   }
-   return NULL;
-}
-
-static const stat_net_reach_t *net_reach_for_iface(const stat_snapshot_t *s, const char *iface) {
-   for (int i = 0; i < s->net_reach_count; i++) {
-      if (strcmp(s->net_reach[i].iface, iface) == 0) {
-         return &s->net_reach[i];
-      }
-   }
-   return NULL;
-}
+#include "core/stat_net_interpret.h"
 
 /* Append the honest reachability phrase for one interface's gateway probe. A
  * single reachable:false is a dropped packet, not an outage — only fail_streak
@@ -85,11 +55,10 @@ void stat_render_network(const stat_snapshot_t *s, char *buf, size_t sz) {
       return;
    }
 
-   int pr = net_primary_route(s);
+   const stat_net_route_t *r = stat_net_primary_route(s, NULL);
    size_t off = strlen(buf);
-   if (pr >= 0) {
-      const stat_net_route_t *r = &s->net_routes[pr];
-      const stat_net_iface_t *pf = net_iface_by_name(s, r->iface);
+   if (r) {
+      const stat_net_iface_t *pf = stat_net_iface_by_name(s, r->iface);
       const char *kind = (pf && pf->kind[0]) ? pf->kind : "";
       snprintf(buf + off, sz - off, "Network: primary path %s%s%s%s via %s. ", r->iface,
                kind[0] ? " (" : "", kind, kind[0] ? ")" : "", r->gateway);
@@ -100,7 +69,7 @@ void stat_render_network(const stat_snapshot_t *s, char *buf, size_t sz) {
    for (int i = 0; i < s->net_iface_count; i++) {
       const stat_net_iface_t *f = &s->net_ifaces[i];
       bool linkup = f->up && f->carrier; /* trust up/carrier, not the operstate string */
-      const stat_net_reach_t *re = net_reach_for_iface(s, f->name);
+      const stat_net_reach_t *re = stat_net_reach_for_iface(s, f->name);
       off = strlen(buf);
       snprintf(buf + off, sz - off, "%s (%s): %s%s%s", f->name, f->kind[0] ? f->kind : "?",
                linkup ? "up" : "down", f->ipv4[0] ? ", " : "", f->ipv4[0] ? f->ipv4 : "");

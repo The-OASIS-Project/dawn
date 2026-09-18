@@ -262,11 +262,45 @@ static bool read_enviro_age(const attention_sample_ctx_t *ctx, double *value) {
    return true;
 }
 
+static bool read_stat_age(const attention_sample_ctx_t *ctx, double *value) {
+   if (!ctx->stat_valid || !ctx->stat.ever_seen) {
+      return false;
+   }
+   *value = (double)ctx->stat.age_sec;
+   return true;
+}
+
+/* Network transition readers. ctx->net_present already folds in STAT freshness
+ * (absent / stale / no network telemetry => not present), and the durations are
+ * the dwell counters maintained idempotently in attention_ingest.c. A zero
+ * duration is a healthy/on-wired reading (the value IS known), so present stays
+ * true — only a missing/stale STAT feed reports "not present".
+ *
+ * Honesty caveat (see stat_net_interpret.h): when the primary path is itself
+ * cellular, uplink-down can only detect USB-link loss to the modem, not a dead
+ * bearer, because the gateway probe answers from the modem's own IP stack. */
+static bool read_net_uplink_down_sec(const attention_sample_ctx_t *ctx, double *value) {
+   if (!ctx->net_present) {
+      return false;
+   }
+   *value = (double)ctx->net_uplink_down_sec;
+   return true;
+}
+
+static bool read_net_cellular_sec(const attention_sample_ctx_t *ctx, double *value) {
+   if (!ctx->net_present) {
+      return false;
+   }
+   *value = (double)ctx->net_cellular_sec;
+   return true;
+}
+
 /* --- the catalog --- */
 /* Fields: key, source, label, unit, default_rule_type, default_direction,
  * default_threshold, default_hysteresis, default_absence_after_sec,
- * default_notify, reader.  Keep the key set in sync with the `attention` tool's
- * `metric` enum (src/tools/attention_tool.c). */
+ * default_notify, reader.  This array IS the metric vocabulary: the `attention`
+ * tool and the WebUI panel generate their choices from it, so there is no second
+ * list to keep in sync — add a row here and the surfaces pick it up. */
 #define DEG_C \
    "\xC2\xB0" \
    "C"
@@ -319,6 +353,20 @@ static const attention_catalog_entry_t s_catalog[] = {
      0.0, 60, SAGE_NOTIFY_AMBIENT, read_hud_age },
    { "suit.enviro", "suit", "suit telemetry", "s", SAGE_RULE_ABSENCE, SAGE_DIR_ABOVE, 0.0, 0.0, 120,
      SAGE_NOTIFY_AMBIENT, read_enviro_age },
+   { "stat.telemetry", "stat", "STAT telemetry", "s", SAGE_RULE_ABSENCE, SAGE_DIR_ABOVE, 0.0, 0.0,
+     120, SAGE_NOTIFY_AMBIENT, read_stat_age },
+   /* Network transitions (duration-in-state metrics, seconds). Source is "stat"
+    * (honest provenance — the data rides the STAT feed) while the "network." key
+    * groups them for the user; that key/source split is deliberate. uplink
+    * downtime fires when the IPv4 primary path is unhealthy at all (threshold
+    * above 0 = one tick past onset); cellular-backup carries a 15 s dwell so a
+    * brief route re-evaluation blip doesn't announce a failover. The dwell is
+    * wall-clock-since-onset (a STAT blackout is counted, not subtracted). Both
+    * re-arm silently on recovery; an explicit "restored" alert is not built here. */
+   { "network.uplink_down_sec", "stat", "uplink downtime", "s", SAGE_RULE_THRESHOLD, SAGE_DIR_ABOVE,
+     0.0, 0.0, 0, SAGE_NOTIFY_ALERT, read_net_uplink_down_sec },
+   { "network.cellular_sec", "stat", "time on cellular backup", "s", SAGE_RULE_THRESHOLD,
+     SAGE_DIR_ABOVE, 15.0, 0.0, 0, SAGE_NOTIFY_ALERT, read_net_cellular_sec },
 };
 
 static const int s_catalog_count = (int)(sizeof(s_catalog) / sizeof(s_catalog[0]));

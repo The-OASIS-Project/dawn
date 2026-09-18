@@ -61,6 +61,13 @@ typedef struct attention_sample_ctx {
    bool hud_ever;   /* HUD/MIRAGE was ever seen online */
    bool hud_online; /* currently online */
    int hud_age_sec; /* seconds since last hud/status */
+   /* Derived network state (from ctx->stat via stat_net_interpret). net_present
+    * is false when STAT is absent/stale/lacks network telemetry, so the network
+    * readers report "not present" rather than a frozen reading. The durations are
+    * dwell counters maintained idempotently in attention_ingest.c. */
+   bool net_present;
+   int net_uplink_down_sec; /* seconds the IPv4 primary path has been unhealthy */
+   int net_cellular_sec;    /* seconds the IPv4 primary path has been cellular */
    int64_t now_ms;
 } attention_sample_ctx_t;
 
@@ -98,8 +105,12 @@ const attention_catalog_entry_t *attention_catalog_lookup(const char *key);
 const attention_catalog_entry_t *attention_catalog_at(int i);
 
 /* --- ingest (attention_ingest.c) --- */
-/* Fill @ctx from all available sources for this tick. */
-void attention_ingest_sample(attention_sample_ctx_t *ctx, int64_t now_ms);
+/* Fill @ctx from all available sources for this tick. @advance_dwell must be true
+ * ONLY for the single heartbeat-tick caller: it commits the persistent network
+ * dwell timers. Off-tick query paths (metric_current / readings_snapshot, which
+ * run on other threads) pass false — they read the committed dwell without
+ * mutating it, so a poll can't reset a dwell window the tick depends on. */
+void attention_ingest_sample(attention_sample_ctx_t *ctx, int64_t now_ms, bool advance_dwell);
 
 /* --- gate (attention_gate.c) --- pure, explicit-state, unit-testable --- */
 /*

@@ -783,6 +783,14 @@ list(APPEND DAWN_SOURCES
     src/core/ota_rollout.c
 )
 
+# Pure STAT network-telemetry interpretation (Layer 2, always compiled). Shared
+# by the STAT tool renderer and the SAGE attention catalog, so both apply the
+# same primary-path/fail-streak/cellular honesty rules. Depends only on the
+# snapshot structs, so it links even when the STAT tool is compiled out.
+list(APPEND DAWN_SOURCES
+    src/core/stat_net_interpret.c
+)
+
 # SAGE proactive-attention subsystem (Layer 1 core, always compiled; master
 # switch is [attention] enabled, default OFF). Ingest polls the STAT/suit
 # service caches, so it degrades gracefully when those tools are compiled out.

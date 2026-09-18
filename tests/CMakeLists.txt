@@ -399,6 +399,7 @@ dawn_add_unit_test(test_stat_service
    SOURCES test_stat_service.c
            ${SRC_ROOT}/src/core/stat_service.c
            ${SRC_ROOT}/src/core/stat_db.c
+           ${SRC_ROOT}/src/core/stat_net_interpret.c
            ${SRC_ROOT}/src/core/path_utils.c
            ${SRC_ROOT}/src/tools/stat_render.c
    LIBS    dawn_common unity sqlite3 pthread ${JSONC_LIBRARIES}

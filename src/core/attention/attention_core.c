@@ -200,7 +200,7 @@ void attention_tick(time_t now) {
    int64_t now_ms = (int64_t)now * 1000;
 
    attention_sample_ctx_t ctx;
-   attention_ingest_sample(&ctx, now_ms);
+   attention_ingest_sample(&ctx, now_ms, true); /* the tick is the sole dwell-timer writer */
 
    /* Evaluate every enabled watch under the lock, enqueue fired events. */
    pthread_mutex_lock(&s_mutex);
@@ -770,7 +770,7 @@ bool attention_metric_current(const char *key, double *value) {
    }
    int64_t now_ms = (int64_t)time(NULL) * 1000;
    attention_sample_ctx_t ctx;
-   attention_ingest_sample(&ctx, now_ms);
+   attention_ingest_sample(&ctx, now_ms, false); /* read-only: don't advance dwell timers */
    bool present = false;
    resolve_and_read(&ctx, key, value, &present);
    return present;
@@ -799,7 +799,7 @@ int attention_readings_snapshot(int user_id, sage_reading_t *out, int max, int *
     * shared context — so a user's N watches cost one ingest, not N. */
    int64_t now_ms = (int64_t)time(NULL) * 1000;
    attention_sample_ctx_t ctx;
-   attention_ingest_sample(&ctx, now_ms);
+   attention_ingest_sample(&ctx, now_ms, false); /* read-only: don't advance dwell timers */
 
    int count = 0;
    pthread_mutex_lock(&s_mutex);

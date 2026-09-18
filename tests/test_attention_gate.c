@@ -318,6 +318,78 @@ static void test_catalog_reader(void) {
    TEST_ASSERT_EQUAL_STRING("CO2", attention_catalog_label("suit.co2_ppm"));
 }
 
+/* Network catalog entries: default rule shape + reader present/value semantics. */
+static void test_network_catalog_readers(void) {
+   const attention_catalog_entry_t *down = attention_catalog_lookup("network.uplink_down_sec");
+   const attention_catalog_entry_t *cell = attention_catalog_lookup("network.cellular_sec");
+   const attention_catalog_entry_t *stat = attention_catalog_lookup("stat.telemetry");
+   TEST_ASSERT_NOT_NULL(down);
+   TEST_ASSERT_NOT_NULL(cell);
+   TEST_ASSERT_NOT_NULL(stat);
+
+   /* Defaults: onset-fires uplink (threshold 0), dwelled cellular (threshold 15). */
+   TEST_ASSERT_EQUAL_INT(SAGE_RULE_THRESHOLD, down->default_rule_type);
+   TEST_ASSERT_EQUAL_INT(SAGE_DIR_ABOVE, down->default_direction);
+   TEST_ASSERT_EQUAL_DOUBLE(0.0, down->default_threshold);
+   TEST_ASSERT_EQUAL_INT(SAGE_NOTIFY_ALERT, down->default_notify);
+   TEST_ASSERT_EQUAL_DOUBLE(15.0, cell->default_threshold);
+   TEST_ASSERT_EQUAL_INT(SAGE_RULE_ABSENCE, stat->default_rule_type);
+
+   double v = -1.0;
+   attention_sample_ctx_t ctx;
+   memset(&ctx, 0, sizeof(ctx));
+   /* No fresh STAT network view => both network readers report not present. */
+   TEST_ASSERT_FALSE(down->read(&ctx, &v));
+   TEST_ASSERT_FALSE(cell->read(&ctx, &v));
+
+   ctx.net_present = true;
+   ctx.net_uplink_down_sec = 12;
+   ctx.net_cellular_sec = 0;
+   TEST_ASSERT_TRUE(down->read(&ctx, &v));
+   TEST_ASSERT_EQUAL_DOUBLE(12.0, v);
+   TEST_ASSERT_TRUE(cell->read(&ctx, &v)); /* 0 is a known reading, not "absent" */
+   TEST_ASSERT_EQUAL_DOUBLE(0.0, v);
+
+   /* stat.telemetry absence reader: present only with a seen STAT feed, value = age. */
+   memset(&ctx, 0, sizeof(ctx));
+   TEST_ASSERT_FALSE(stat->read(&ctx, &v));
+   ctx.stat_valid = true;
+   ctx.stat.ever_seen = true;
+   ctx.stat.age_sec = 300;
+   TEST_ASSERT_TRUE(stat->read(&ctx, &v));
+   TEST_ASSERT_EQUAL_DOUBLE(300.0, v);
+}
+
+/* End-to-end: the cellular dwell watch (catalog default threshold 15, ABOVE)
+ * stays quiet inside the dwell and fires once past it. */
+static void test_network_cellular_dwell_fires(void) {
+   const attention_catalog_entry_t *cell = attention_catalog_lookup("network.cellular_sec");
+   TEST_ASSERT_NOT_NULL(cell);
+
+   sage_watch_t w;
+   memset(&w, 0, sizeof(w));
+   w.id = 7;
+   w.user_id = 1;
+   w.rule_type = SAGE_RULE_THRESHOLD;
+   w.direction = SAGE_DIR_ABOVE;
+   w.threshold = cell->default_threshold; /* 15 s */
+   w.hysteresis = 0.0;
+   w.notify = cell->default_notify;
+   w.enabled = true;
+   w.ttl_min = 30;
+   strncpy(w.metric, "network.cellular_sec", sizeof(w.metric) - 1);
+
+   sage_rule_state_t st;
+   memset(&st, 0, sizeof(st));
+   sage_event_t ev;
+   /* On cellular 10 s: below dwell, no alert. */
+   TEST_ASSERT_FALSE(attention_gate_eval(&w, &st, 10.0, true, T0, cell, &ev));
+   /* Past 15 s dwell: fires. */
+   TEST_ASSERT_TRUE(attention_gate_eval(&w, &st, 16.0, true, T0 + 1000, cell, &ev));
+   /* Back on wired (0 s): silent re-arm; no restore alert is fired here. */
+   TEST_ASSERT_FALSE(attention_gate_eval(&w, &st, 0.0, true, T0 + 2000, cell, &ev));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_threshold_hysteresis_and_backoff);
@@ -330,5 +402,7 @@ int main(void) {
    RUN_TEST(test_gate_zero_threshold_rearms);
    RUN_TEST(test_policy_notify_and_budget);
    RUN_TEST(test_catalog_reader);
+   RUN_TEST(test_network_catalog_readers);
+   RUN_TEST(test_network_cellular_dwell_fires);
    return UNITY_END();
 }

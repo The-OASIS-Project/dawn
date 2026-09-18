@@ -27,6 +27,7 @@
 #include <unistd.h>
 
 #include "core/stat_db.h"
+#include "core/stat_net_interpret.h"
 #include "core/stat_service.h"
 #include "tools/stat_render.h"
 #include "unity.h"
@@ -650,6 +651,123 @@ void test_render_no_network(void) {
    TEST_ASSERT_NOT_NULL(strstr(buf, "No network telemetry"));
 }
 
+/* ---- stat_net_interpret: the shared honesty rules SAGE readers rely on ---- */
+
+static void mk_route(stat_net_route_t *r, const char *iface, int metric, const char *family) {
+   memset(r, 0, sizeof(*r));
+   snprintf(r->iface, sizeof(r->iface), "%s", iface);
+   r->metric = metric;
+   snprintf(r->family, sizeof(r->family), "%s", family);
+}
+
+/* Primary = min metric, filtered to the requested family; a lower-metric route in
+ * the OTHER family must not win when a family is specified. */
+void test_interpret_primary_min_metric_family(void) {
+   stat_snapshot_t s;
+   memset(&s, 0, sizeof(s));
+   s.net_route_count = 3;
+   mk_route(&s.net_routes[0], "usb0", 20100, "ipv4");   /* penalized wired-fallback slot */
+   mk_route(&s.net_routes[1], "enP8p1s0", 100, "ipv4"); /* the real min */
+   mk_route(&s.net_routes[2], "enP8p1s0", 50, "ipv6");  /* lower, but wrong family */
+
+   const stat_net_route_t *pr = stat_net_primary_route(&s, "ipv4");
+   TEST_ASSERT_NOT_NULL(pr);
+   TEST_ASSERT_EQUAL_INT(100, pr->metric);
+   TEST_ASSERT_EQUAL_STRING("enP8p1s0", pr->iface);
+   /* family NULL = any: the v6 route at metric 50 now wins. */
+   pr = stat_net_primary_route(&s, NULL);
+   TEST_ASSERT_EQUAL_INT(50, pr->metric);
+}
+
+/* Healthy needs a route + up/carrier iface + gateway not down (fail_streak < 2). */
+void test_interpret_primary_healthy_and_failstreak(void) {
+   stat_snapshot_t s;
+   memset(&s, 0, sizeof(s));
+   s.net_iface_count = 1;
+   mk_iface(&s.net_ifaces[0], "eth0", "ethernet", true, true, "10.0.0.9", NULL);
+   s.net_route_count = 1;
+   mk_route(&s.net_routes[0], "eth0", 100, "ipv4");
+   s.net_reach_count = 1;
+   snprintf(s.net_reach[0].iface, sizeof(s.net_reach[0].iface), "eth0");
+
+   s.net_reach[0].fail_streak = 1; /* a single miss is transient */
+   TEST_ASSERT_TRUE(stat_net_primary_healthy(&s, "ipv4"));
+   s.net_reach[0].fail_streak = 2; /* >= 2 = down */
+   TEST_ASSERT_FALSE(stat_net_primary_healthy(&s, "ipv4"));
+}
+
+/* No default route, and a link-down primary iface, both read as unhealthy. */
+void test_interpret_no_route_and_link_down(void) {
+   stat_snapshot_t s;
+   memset(&s, 0, sizeof(s));
+   TEST_ASSERT_FALSE(stat_net_primary_healthy(&s, "ipv4")); /* no route at all */
+
+   s.net_iface_count = 1;
+   mk_iface(&s.net_ifaces[0], "eth0", "ethernet", false, false, NULL, NULL); /* link down */
+   s.net_route_count = 1;
+   mk_route(&s.net_routes[0], "eth0", 100, "ipv4");
+   TEST_ASSERT_FALSE(stat_net_primary_healthy(&s, "ipv4"));
+   /* No reach row = link-state-only: a healthy link with no probe is still healthy. */
+   mk_iface(&s.net_ifaces[0], "eth0", "ethernet", true, true, "10.0.0.9", NULL);
+   TEST_ASSERT_TRUE(stat_net_primary_healthy(&s, "ipv4"));
+}
+
+/* A cellular primary route reads as on-cellular; a wired one does not. */
+void test_interpret_cellular_primary(void) {
+   stat_snapshot_t s;
+   memset(&s, 0, sizeof(s));
+   s.net_iface_count = 2;
+   mk_iface(&s.net_ifaces[0], "enP8p1s0", "ethernet", true, true, "192.168.1.9", NULL);
+   mk_iface(&s.net_ifaces[1], "usb0", "cellular", true, true, "192.168.225.9", NULL);
+   s.net_route_count = 1;
+   mk_route(&s.net_routes[0], "enP8p1s0", 100, "ipv4");
+   TEST_ASSERT_FALSE(stat_net_primary_is_cellular(&s, "ipv4"));
+   mk_route(&s.net_routes[0], "usb0", 100, "ipv4");
+   TEST_ASSERT_TRUE(stat_net_primary_is_cellular(&s, "ipv4"));
+}
+
+/* O1: when wired and cellular TIE at the penalized level, the effective uplink is
+ * cellular even though the wired route is listed first (first-wins picks wired).
+ * Below the penalty level a tie is NOT treated as a failover. */
+void test_interpret_cellular_penalized_tie(void) {
+   stat_snapshot_t s;
+   memset(&s, 0, sizeof(s));
+   s.net_iface_count = 2;
+   mk_iface(&s.net_ifaces[0], "enP8p1s0", "ethernet", true, true, "192.168.1.9", NULL);
+   mk_iface(&s.net_ifaces[1], "usb0", "cellular", true, true, "192.168.225.9", NULL);
+   s.net_route_count = 2;
+   mk_route(&s.net_routes[0], "enP8p1s0", 20100, "ipv4"); /* penalized wired, listed first */
+   mk_route(&s.net_routes[1], "usb0", 20100, "ipv4");     /* cellular, same metric */
+   TEST_ASSERT_TRUE(stat_net_primary_is_cellular(&s, "ipv4"));
+
+   s.net_routes[0].metric = 100; /* below penalty: a plain tie, wired wins, not failover */
+   s.net_routes[1].metric = 100;
+   TEST_ASSERT_FALSE(stat_net_primary_is_cellular(&s, "ipv4"));
+}
+
+/* Dwell bookkeeping: idempotent per now_ms, counts while in-state, clears on exit. */
+void test_interpret_since_update_dwell(void) {
+   int64_t since = 0;
+   /* Not in state: stays 0. */
+   TEST_ASSERT_EQUAL_INT(0, stat_net_since_update(&since, false, 1000));
+   TEST_ASSERT_EQUAL_INT64(0, since);
+   /* Onset stamps; same tick reads 0 elapsed; idempotent on repeat. */
+   TEST_ASSERT_EQUAL_INT(0, stat_net_since_update(&since, true, 1000));
+   TEST_ASSERT_EQUAL_INT64(1000, since);
+   TEST_ASSERT_EQUAL_INT(0, stat_net_since_update(&since, true, 1000)); /* off-tick re-sample */
+   TEST_ASSERT_EQUAL_INT64(1000, since);                                /* stamp unmoved */
+   /* Held: elapsed grows, stamp fixed. */
+   TEST_ASSERT_EQUAL_INT(16, stat_net_since_update(&since, true, 17000));
+   TEST_ASSERT_EQUAL_INT64(1000, since);
+   /* Freeze semantics: NOT calling it preserves the stamp; a later call resumes. */
+   TEST_ASSERT_EQUAL_INT(20, stat_net_since_update(&since, true, 21000));
+   /* Exit clears; re-entry re-stamps fresh. */
+   TEST_ASSERT_EQUAL_INT(0, stat_net_since_update(&since, false, 22000));
+   TEST_ASSERT_EQUAL_INT64(0, since);
+   TEST_ASSERT_EQUAL_INT(0, stat_net_since_update(&since, true, 30000));
+   TEST_ASSERT_EQUAL_INT64(30000, since);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_topic_gating);
@@ -659,6 +777,12 @@ int main(void) {
    RUN_TEST(test_render_cellular_honesty);
    RUN_TEST(test_render_route_without_iface);
    RUN_TEST(test_render_no_network);
+   RUN_TEST(test_interpret_primary_min_metric_family);
+   RUN_TEST(test_interpret_primary_healthy_and_failstreak);
+   RUN_TEST(test_interpret_no_route_and_link_down);
+   RUN_TEST(test_interpret_cellular_primary);
+   RUN_TEST(test_interpret_cellular_penalized_tie);
+   RUN_TEST(test_interpret_since_update_dwell);
    RUN_TEST(test_network_parse_synthetic);
    RUN_TEST(test_network_malformed_not_truncated);
    RUN_TEST(test_network_contract_fixture);
