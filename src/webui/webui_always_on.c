@@ -84,6 +84,28 @@ static inline bool always_on_eos_reached(const always_on_ctx_t *ctx, int64_t now
    return ctx->last_speech_ms > 0 && (now - ctx->last_speech_ms) >= eos_ms;
 }
 
+/* Adaptive-dwell shadow instrumentation (read-only; does NOT affect endpointing).
+ * Call on a speech frame BEFORE updating last_speech_ms: if speech resumed after a
+ * pause long enough to be a tentative endpoint (>= the chunker pause) but shorter
+ * than the commit dwell, log it. These are exactly the mid-utterance pauses a
+ * future adaptive/fast-commit endpoint on this path would have to NOT cut off, so
+ * the distribution of their lengths is the dataset that decides whether it's safe.
+ * Mirrors the local WAKEWORD_LISTEN "EOS shadow" log. */
+static void always_on_shadow_note_resume(const always_on_ctx_t *ctx,
+                                         int64_t now,
+                                         const char *where) {
+   if (ctx->last_speech_ms <= 0) {
+      return;
+   }
+   const int64_t gap = now - ctx->last_speech_ms;
+   const int64_t hush_ms = (int64_t)(g_config.vad.chunking.pause_duration * 1000.0f);
+   const int64_t eos_ms = (int64_t)(g_config.vad.end_of_speech_duration * 1000.0f);
+   if (hush_ms > 0 && gap >= hush_ms && gap < eos_ms) {
+      OLOG_INFO("AO shadow: %s speech resumed after %lldms pause (dwell=%lldms)", where,
+                (long long)gap, (long long)eos_ms);
+   }
+}
+
 static void set_state(always_on_ctx_t *ctx, always_on_state_t new_state) {
    always_on_state_t old = atomic_load(&ctx->state);
    atomic_store(&ctx->state, new_state);
@@ -951,6 +973,7 @@ int always_on_process_audio(always_on_ctx_t *ctx,
 
          case ALWAYS_ON_WAKE_CHECK: {
             if (speech_prob >= speech_threshold) {
+               always_on_shadow_note_resume(ctx, now, "wake_check");
                ctx->last_speech_ms = now;
             }
 
@@ -964,6 +987,7 @@ int always_on_process_audio(always_on_ctx_t *ctx,
 
          case ALWAYS_ON_RECORDING:
             if (speech_prob >= speech_threshold) {
+               always_on_shadow_note_resume(ctx, now, "recording");
                ctx->last_speech_ms = now;
             }
             /* End-of-speech: dispatch ASR to worker thread (non-blocking) */
