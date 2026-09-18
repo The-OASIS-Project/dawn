@@ -12,6 +12,23 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-09-17 — `system_status` gains a `network` view (requires a STAT upgrade)
+
+**What changed.** The `system_status` tool can now report network status — your
+interfaces, primary uplink (lowest-metric default route), gateway reachability,
+and the cellular link — via a new `network` action (also folded into `all`). Ask
+things like "what's my network status?".
+
+**What (if anything) to do.** This depends on new telemetry from the **STAT**
+sensor service: DAWN only shows network data if STAT is publishing its `Network`
+message type. **Upgrade STAT to a build that emits `Network` telemetry** (dated
+2026-09-17 or later). Until you do, the `network` action simply reports "No
+network telemetry from STAT" and the rest of `system_status` is unaffected —
+nothing breaks, the new view is just empty. No DAWN config change is required
+(same `[stat]` topic).
+
+---
+
 ## 2026-09-17 — New optional "stocks" tool (Charles Schwab)
 
 **What changed.** DAWN gains an opt-in **stocks** tool for live quotes and

@@ -47,6 +47,45 @@ typedef struct {
    int history_retention_days; /* prune buckets older than this */
 } stat_service_cfg_t;
 
+/* Network telemetry (the STAT "Network" envelope). Bounded so the snapshot stays
+ * a fixed copy-out; extra rows are dropped and the *_truncated flags note it. */
+#define STAT_NET_MAX_IFACES 8
+#define STAT_NET_MAX_ROUTES 8
+#define STAT_NET_MAX_REACH 8
+
+typedef struct {
+   char name[24];   /* interface name (e.g. enP8p1s0, usb0) */
+   char kind[16];   /* ethernet / cellular / wifi / loopback / ... */
+   char driver[24]; /* kernel driver (r8168, rndis_host, ...) */
+   char state[16];  /* operstate; may be "unknown" even when up */
+   bool up;         /* administratively/operationally up */
+   bool carrier;    /* physical/link carrier present */
+   int mtu;
+   int speed_mbps;       /* -1 = unknown (cellular) */
+   char ipv4[24];        /* first IPv4, "" if none */
+   char ipv6_global[46]; /* first global-scope IPv6 (2000::/3), "" if none */
+   bool has_ipv6;        /* any IPv6 (incl. link-local) present */
+   bool addr_truncated;  /* STAT dropped some addresses for this iface */
+} stat_net_iface_t;
+
+typedef struct {
+   char iface[24];
+   char gateway[46];
+   int metric;     /* lower = preferred; NM adds +20000 on a penalized path */
+   char family[8]; /* "ipv4" / "ipv6" */
+} stat_net_route_t;
+
+typedef struct {
+   char gateway[46];
+   char iface[24];
+   char target_kind[16]; /* "gateway" (only kind today) */
+   bool reachable;       /* UNAUTHENTICATED ICMP result — never gate security on it */
+   bool has_rtt;         /* rtt_ms is omitted on the wire when unreachable */
+   double rtt_ms;
+   int fail_streak; /* consecutive failures; treat >= 2 as "down", not 1 */
+   bool bound;      /* probe was bound to the specific iface */
+} stat_net_reach_t;
+
 /** A consistent copy-out of the live cache (see stat_service_get_snapshot). */
 typedef struct {
    bool stat_online; /* last stat/status said "online" */
@@ -67,6 +106,18 @@ typedef struct {
    char battery_status[24]; /* OK / WARNING / CRITICAL */
    char status_reason[96];
    int crit_faults, warn_faults, info_faults;
+
+   bool have_network;
+   bool net_probe_available;  /* false = ICMP probe disabled / socket unavailable */
+   bool net_ifaces_truncated; /* STAT dropped some interfaces */
+   bool net_routes_truncated; /* STAT dropped some default routes */
+   bool net_reach_truncated;  /* our cap dropped some reachability rows */
+   int net_iface_count;       /* entries populated in net_ifaces[] */
+   int net_route_count;
+   int net_reach_count;
+   stat_net_iface_t net_ifaces[STAT_NET_MAX_IFACES];
+   stat_net_route_t net_routes[STAT_NET_MAX_ROUTES];
+   stat_net_reach_t net_reach[STAT_NET_MAX_REACH];
 } stat_snapshot_t;
 
 /**

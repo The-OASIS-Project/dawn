@@ -420,6 +420,7 @@ if(DAWN_ENABLE_STAT_TOOL)
     add_definitions(-DDAWN_ENABLE_STAT_TOOL)
     list(APPEND TOOL_SOURCES
         src/tools/stat_tool.c
+        src/tools/stat_render.c
         src/core/stat_service.c
         src/core/stat_db.c)
     message(STATUS "DAWN: STAT telemetry tool ENABLED")

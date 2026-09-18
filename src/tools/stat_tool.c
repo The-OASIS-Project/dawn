@@ -34,6 +34,7 @@
 #include "core/stat_service.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "tools/stat_render.h"
 #include "tools/toml.h"
 #include "tools/tool_registry.h"
 
@@ -42,6 +43,11 @@
  * ready arrays are never truncated (a truncation would hand malformed JSON to
  * the LLM). */
 #define STAT_SERIES_TEXT_MAX 8192
+
+/* Live-status buffer. Sized for 'all' incl. the per-interface network detail
+ * (chattier than the scalar metrics); snprintf-bounded, so it truncates the tail
+ * rather than overflowing on a many-interface host. */
+#define STAT_LIVE_BUF_LEN 2048
 
 #define STAT_SECS_PER_DAY (24 * 3600)
 
@@ -142,14 +148,15 @@ static const treg_param_t stat_params[] = {
        .description =
            "What to report: 'all' (full live status), 'temps', 'battery' "
            "(charge/power/health/time remaining), 'performance' (CPU and memory load), "
-           "'history' (min/max/average and peak of a metric over a period, as prose), or "
-           "'trend' (a per-interval time series of one metric — labels plus avg, and min/max "
-           "for temperature and battery — suitable for charting).",
+           "'network' (interfaces, primary uplink, and gateway reachability — incl. the "
+           "cellular link), 'history' (min/max/average and peak of a metric over a period, as "
+           "prose), or 'trend' (a per-interval time series of one metric — labels plus avg, and "
+           "min/max for temperature and battery — suitable for charting).",
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
-       .enum_values = { "all", "temps", "battery", "performance", "history", "trend" },
-       .enum_count = 6,
+       .enum_values = { "all", "temps", "battery", "performance", "network", "history", "trend" },
+       .enum_count = 7,
    },
    {
        .name = "period",
@@ -314,6 +321,11 @@ static int format_live(const char *action, char *buf, size_t sz) {
       if (s.have_fan) {
          append_fan(&s, buf, sz);
       }
+      if (s.have_network) {
+         stat_render_network(&s, buf, sz);
+      }
+   } else if (strcasecmp(action, "network") == 0) {
+      stat_render_network(&s, buf, sz);
    } else if (strcasecmp(action, "temps") == 0) {
       if (s.have_system) {
          append_temp(&s, buf, sz);
@@ -657,7 +669,7 @@ static char *stat_tool_callback(const char *action, char *value, int *should_res
       return strdup(TOOL_RESULT_ERROR_MARK "system_status: missing action.");
    }
 
-   char *out = malloc(1024);
+   char *out = malloc(STAT_LIVE_BUF_LEN);
    if (!out) {
       return strdup(TOOL_RESULT_ERROR_MARK "system_status: out of memory.");
    }
@@ -683,7 +695,7 @@ static char *stat_tool_callback(const char *action, char *value, int *should_res
          free(out);
          return strdup(TOOL_RESULT_ERROR_MARK "Failed to query telemetry history.");
       }
-      format_history(metric, label, &agg, out, 1024);
+      format_history(metric, label, &agg, out, STAT_LIVE_BUF_LEN);
       return out;
    }
 
@@ -726,11 +738,11 @@ static char *stat_tool_callback(const char *action, char *value, int *should_res
    }
 
    /* Live actions. */
-   if (format_live(action, out, 1024) != SUCCESS) {
+   if (format_live(action, out, STAT_LIVE_BUF_LEN) != SUCCESS) {
       /* Prefix the error mark IN PLACE so the failure is surfaced (not spoken as
        * data) — avoids a second allocation whose OOM would drop the mark. */
       size_t len = strlen(out);
-      if (len + 2 <= 1024) {
+      if (len + 2 <= STAT_LIVE_BUF_LEN) {
          memmove(out + 1, out, len + 1); /* shift including the NUL terminator */
          out[0] = TOOL_RESULT_ERROR_MARK[0];
       }

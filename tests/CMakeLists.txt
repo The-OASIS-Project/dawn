@@ -400,8 +400,16 @@ dawn_add_unit_test(test_stat_service
            ${SRC_ROOT}/src/core/stat_service.c
            ${SRC_ROOT}/src/core/stat_db.c
            ${SRC_ROOT}/src/core/path_utils.c
+           ${SRC_ROOT}/src/tools/stat_render.c
    LIBS    dawn_common unity sqlite3 pthread ${JSONC_LIBRARIES}
    LABEL   ci)
+# Pin the DAWN-side Network parser to STAT's canonical wire fixture (sibling repo),
+# so a wire-contract change on either side fails a test. The test skips gracefully
+# when the STAT checkout isn't present (e.g. DAWN-only CI).
+if(TARGET test_stat_service)
+   target_compile_definitions(test_stat_service PRIVATE
+      STAT_NET_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/../../stat/tests/fixtures/network_v1.json")
+endif()
 
 dawn_add_unit_test(test_suit_service
    SOURCES test_suit_service.c

@@ -69,6 +69,18 @@ static struct {
    char battery_status[24];
    char status_reason[96];
    int crit_faults, warn_faults, info_faults;
+
+   bool have_network;
+   bool net_probe_available;
+   bool net_ifaces_truncated;
+   bool net_routes_truncated;
+   bool net_reach_truncated;
+   int net_iface_count;
+   int net_route_count;
+   int net_reach_count;
+   stat_net_iface_t net_ifaces[STAT_NET_MAX_IFACES];
+   stat_net_route_t net_routes[STAT_NET_MAX_ROUTES];
+   stat_net_reach_t net_reach[STAT_NET_MAX_REACH];
 } s_cache;
 
 /* Rollup accumulators for the current bucket (per family). */
@@ -107,6 +119,11 @@ static void mark_seen_locked(time_t now) {
 static bool json_get_double(struct json_object *root, const char *key, double *out) {
    struct json_object *v;
    if (json_object_object_get_ex(root, key, &v)) {
+      /* Require an actual JSON number — a hostile "rtt_ms":"x" would otherwise
+       * coerce to 0.0 and read as "0 ms" instead of absent. */
+      if (!json_object_is_type(v, json_type_double) && !json_object_is_type(v, json_type_int)) {
+         return false;
+      }
       double d = json_object_get_double(v);
       if (!isfinite(d)) {
          return false;
@@ -126,9 +143,47 @@ static bool json_get_int(struct json_object *root, const char *key, int *out) {
    return false;
 }
 
+/* Bool field; absent key leaves *out untouched (truncation flags are emitted
+ * only-when-true, so a missing flag correctly reads as false). */
+static bool json_get_bool(struct json_object *root, const char *key, bool *out) {
+   struct json_object *v;
+   if (json_object_object_get_ex(root, key, &v)) {
+      *out = json_object_get_boolean(v);
+      return true;
+   }
+   return false;
+}
+
+/* Drop a trailing incomplete UTF-8 sequence left by a byte-boundary truncation,
+ * so an untrusted field truncated into a fixed buffer never emits invalid UTF-8
+ * (a cloud provider rejects the whole request on it). */
+static void utf8_trim_incomplete(char *s) {
+   size_t len = strlen(s);
+   size_t i = len;
+   while (i > 0 && ((unsigned char)s[i - 1] & 0xC0) == 0x80) {
+      i--; /* walk back over continuation bytes (10xxxxxx) */
+   }
+   if (i == 0) {
+      return;
+   }
+   unsigned char lead = (unsigned char)s[i - 1];
+   size_t seq_len = 1;
+   if ((lead & 0xE0) == 0xC0) {
+      seq_len = 2;
+   } else if ((lead & 0xF0) == 0xE0) {
+      seq_len = 3;
+   } else if ((lead & 0xF8) == 0xF0) {
+      seq_len = 4;
+   }
+   if (seq_len > (len - (i - 1))) {
+      s[i - 1] = '\0'; /* incomplete trailing sequence — truncate at the lead byte */
+   }
+}
+
 /* Copy a string field, replacing control characters with spaces.  These fields
  * come from untrusted MQTT and are surfaced into the LLM tool result, so strip
- * newlines/control bytes that could break formatting or inject structure. */
+ * newlines/control bytes that could break formatting or inject structure, and
+ * trim any partial UTF-8 codepoint left by the fixed-buffer truncation. */
 static void json_get_str(struct json_object *root, const char *key, char *out, size_t out_sz) {
    struct json_object *v;
    if (!json_object_object_get_ex(root, key, &v)) {
@@ -142,6 +197,7 @@ static void json_get_str(struct json_object *root, const char *key, char *out, s
          *p = ' ';
       }
    }
+   utf8_trim_incomplete(out);
 }
 
 /* --- SystemMetrics: cpu_usage, memory_usage, system_temp --- */
@@ -255,6 +311,159 @@ static void ingest_battery(struct json_object *root) {
    pthread_mutex_unlock(&s_mutex);
 }
 
+/* --- Network: interfaces, default routes, reachability --- */
+
+/* Strip control bytes from an untrusted string surfaced to the LLM tool. */
+static void strip_ctrl(char *s) {
+   for (; *s; s++) {
+      unsigned char c = (unsigned char)*s;
+      if (c < 0x20 || c == 0x7F) {
+         *s = ' ';
+      }
+   }
+}
+
+/* First element of a string array, into out (control-stripped). */
+static void pick_first_str(struct json_object *arr, char *out, size_t out_sz) {
+   out[0] = '\0';
+   if (!arr || !json_object_is_type(arr, json_type_array) || json_object_array_length(arr) == 0) {
+      return;
+   }
+   const char *a = json_object_get_string(json_object_array_get_idx(arr, 0));
+   snprintf(out, out_sz, "%s", a ? a : "");
+   strip_ctrl(out);
+   utf8_trim_incomplete(out);
+}
+
+/* First global-scope IPv6 (2000::/3 — the bearer-presence proxy) from an address
+ * array. Sets *has_any when the array is non-empty (any scope). */
+static void pick_ipv6_global(struct json_object *arr, char *out, size_t out_sz, bool *has_any) {
+   out[0] = '\0';
+   if (!arr || !json_object_is_type(arr, json_type_array)) {
+      return;
+   }
+   size_t n = json_object_array_length(arr);
+   if (n > 0) {
+      *has_any = true;
+   }
+   for (size_t i = 0; i < n; i++) {
+      const char *a = json_object_get_string(json_object_array_get_idx(arr, i));
+      if (a && (a[0] == '2' || a[0] == '3')) { /* global unicast, 2000::/3 */
+         snprintf(out, out_sz, "%s", a);
+         strip_ctrl(out);
+         utf8_trim_incomplete(out);
+         return;
+      }
+   }
+}
+
+static void ingest_network(struct json_object *root) {
+   /* Parse into locals, commit under the lock (short critical section). */
+   stat_net_iface_t ifaces[STAT_NET_MAX_IFACES];
+   stat_net_route_t routes[STAT_NET_MAX_ROUTES];
+   stat_net_reach_t reach[STAT_NET_MAX_REACH];
+   memset(ifaces, 0, sizeof(ifaces));
+   memset(routes, 0, sizeof(routes));
+   memset(reach, 0, sizeof(reach));
+   int nif = 0, nrt = 0, nre = 0;
+   bool if_trunc = false, rt_trunc = false, re_trunc = false, probe = false;
+   json_get_bool(root, "interfaces_truncated", &if_trunc);
+   json_get_bool(root, "routes_truncated", &rt_trunc);
+   json_get_bool(root, "probe_available", &probe);
+
+   struct json_object *arr;
+   if (json_object_object_get_ex(root, "interfaces", &arr) &&
+       json_object_is_type(arr, json_type_array)) {
+      size_t n = json_object_array_length(arr);
+      for (size_t i = 0; i < n && nif < STAT_NET_MAX_IFACES; i++) {
+         struct json_object *o = json_object_array_get_idx(arr, i);
+         if (!json_object_is_type(o, json_type_object)) {
+            continue;
+         }
+         stat_net_iface_t *f = &ifaces[nif];
+         json_get_str(o, "name", f->name, sizeof(f->name));
+         json_get_str(o, "kind", f->kind, sizeof(f->kind));
+         json_get_str(o, "driver", f->driver, sizeof(f->driver));
+         json_get_str(o, "state", f->state, sizeof(f->state));
+         json_get_bool(o, "up", &f->up);
+         json_get_bool(o, "carrier", &f->carrier);
+         json_get_int(o, "mtu", &f->mtu);
+         if (!json_get_int(o, "speed_mbps", &f->speed_mbps)) {
+            f->speed_mbps = -1;
+         }
+         json_get_bool(o, "addr_truncated", &f->addr_truncated);
+         struct json_object *a4 = NULL, *a6 = NULL;
+         json_object_object_get_ex(o, "ipv4", &a4);
+         json_object_object_get_ex(o, "ipv6", &a6);
+         pick_first_str(a4, f->ipv4, sizeof(f->ipv4));
+         pick_ipv6_global(a6, f->ipv6_global, sizeof(f->ipv6_global), &f->has_ipv6);
+         nif++;
+      }
+      if (nif == STAT_NET_MAX_IFACES && n > (size_t)nif) {
+         if_trunc = true; /* our cap truncated (distinct from skipped malformed) */
+      }
+   }
+
+   if (json_object_object_get_ex(root, "default_routes", &arr) &&
+       json_object_is_type(arr, json_type_array)) {
+      size_t n = json_object_array_length(arr);
+      for (size_t i = 0; i < n && nrt < STAT_NET_MAX_ROUTES; i++) {
+         struct json_object *o = json_object_array_get_idx(arr, i);
+         if (!json_object_is_type(o, json_type_object)) {
+            continue;
+         }
+         stat_net_route_t *r = &routes[nrt];
+         json_get_str(o, "iface", r->iface, sizeof(r->iface));
+         json_get_str(o, "gateway", r->gateway, sizeof(r->gateway));
+         json_get_int(o, "metric", &r->metric);
+         json_get_str(o, "family", r->family, sizeof(r->family));
+         nrt++;
+      }
+      if (nrt == STAT_NET_MAX_ROUTES && n > (size_t)nrt) {
+         rt_trunc = true;
+      }
+   }
+
+   if (json_object_object_get_ex(root, "reachability", &arr) &&
+       json_object_is_type(arr, json_type_array)) {
+      size_t n = json_object_array_length(arr);
+      for (size_t i = 0; i < n && nre < STAT_NET_MAX_REACH; i++) {
+         struct json_object *o = json_object_array_get_idx(arr, i);
+         if (!json_object_is_type(o, json_type_object)) {
+            continue;
+         }
+         stat_net_reach_t *e = &reach[nre];
+         json_get_str(o, "gateway", e->gateway, sizeof(e->gateway));
+         json_get_str(o, "iface", e->iface, sizeof(e->iface));
+         json_get_str(o, "target_kind", e->target_kind, sizeof(e->target_kind));
+         json_get_bool(o, "reachable", &e->reachable);
+         e->has_rtt = json_get_double(o, "rtt_ms", &e->rtt_ms); /* omitted when unreachable */
+         json_get_int(o, "fail_streak", &e->fail_streak);
+         json_get_bool(o, "bound", &e->bound);
+         nre++;
+      }
+      if (nre == STAT_NET_MAX_REACH && n > (size_t)nre) {
+         re_trunc = true; /* reachability has no wire truncation flag; ours only */
+      }
+   }
+
+   time_t now = time(NULL);
+   pthread_mutex_lock(&s_mutex);
+   s_cache.have_network = true;
+   s_cache.net_probe_available = probe;
+   s_cache.net_ifaces_truncated = if_trunc;
+   s_cache.net_routes_truncated = rt_trunc;
+   s_cache.net_reach_truncated = re_trunc;
+   s_cache.net_iface_count = nif;
+   s_cache.net_route_count = nrt;
+   s_cache.net_reach_count = nre;
+   memcpy(s_cache.net_ifaces, ifaces, sizeof(s_cache.net_ifaces));
+   memcpy(s_cache.net_routes, routes, sizeof(s_cache.net_routes));
+   memcpy(s_cache.net_reach, reach, sizeof(s_cache.net_reach));
+   mark_seen_locked(now);
+   pthread_mutex_unlock(&s_mutex);
+}
+
 static void ingest_telemetry(struct json_object *root) {
    struct json_object *j_type;
    if (!json_object_object_get_ex(root, "type", &j_type)) {
@@ -273,6 +482,8 @@ static void ingest_telemetry(struct json_object *root) {
       ingest_fan(root);
    } else if (strcmp(type, "BatteryStatus") == 0) {
       ingest_battery(root);
+   } else if (strcmp(type, "Network") == 0) {
+      ingest_network(root);
    }
    /* else Battery(raw)/SystemPower/BatteryHealth — not in the headline set */
 }
@@ -356,6 +567,18 @@ void stat_service_get_snapshot(stat_snapshot_t *out) {
    snprintf(out->charging_state, sizeof(out->charging_state), "%s", s_cache.charging_state);
    snprintf(out->battery_status, sizeof(out->battery_status), "%s", s_cache.battery_status);
    snprintf(out->status_reason, sizeof(out->status_reason), "%s", s_cache.status_reason);
+
+   out->have_network = s_cache.have_network;
+   out->net_probe_available = s_cache.net_probe_available;
+   out->net_ifaces_truncated = s_cache.net_ifaces_truncated;
+   out->net_routes_truncated = s_cache.net_routes_truncated;
+   out->net_reach_truncated = s_cache.net_reach_truncated;
+   out->net_iface_count = s_cache.net_iface_count;
+   out->net_route_count = s_cache.net_route_count;
+   out->net_reach_count = s_cache.net_reach_count;
+   memcpy(out->net_ifaces, s_cache.net_ifaces, sizeof(out->net_ifaces));
+   memcpy(out->net_routes, s_cache.net_routes, sizeof(out->net_routes));
+   memcpy(out->net_reach, s_cache.net_reach, sizeof(out->net_reach));
    pthread_mutex_unlock(&s_mutex);
 
    time_t now = time(NULL);

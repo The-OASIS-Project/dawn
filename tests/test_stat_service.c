@@ -21,12 +21,14 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "core/stat_db.h"
 #include "core/stat_service.h"
+#include "tools/stat_render.h"
 #include "unity.h"
 
 #define TEST_DB "/tmp/dawn_stat_test.db"
@@ -345,9 +347,321 @@ void test_series_empty_window(void) {
    TEST_ASSERT_EQUAL_INT(0, s.count);
 }
 
+/* ===== Network telemetry ===== */
+
+/* Synthetic payload exercising the parser independent of the STAT checkout:
+ * link-local-only IPv6 (no global), speed_mbps -1, an unreachable gateway with
+ * fail_streak and no rtt_ms, and interfaces_truncated. Always runs in CI. */
+void test_network_parse_synthetic(void) {
+   const char *msg =
+       "{\"device\":\"stat\",\"msg_type\":\"telemetry\",\"type\":\"Network\","
+       "\"probe_available\":true,\"interfaces_truncated\":true,"
+       "\"interfaces\":[{\"name\":\"usb0\",\"kind\":\"cellular\",\"driver\":\"rndis_host\","
+       "\"state\":\"unknown\",\"up\":true,\"carrier\":true,\"mtu\":1420,\"speed_mbps\":-1,"
+       "\"ipv4\":[\"192.168.225.40\"],\"ipv6\":[\"fe80::1\"]}],"
+       "\"default_routes\":[{\"iface\":\"usb0\",\"gateway\":\"192.168.225.1\",\"metric\":20100,"
+       "\"family\":\"ipv4\"}],"
+       "\"reachability\":[{\"gateway\":\"192.168.225.1\",\"iface\":\"usb0\",\"target_kind\":"
+       "\"gateway\",\"reachable\":false,\"fail_streak\":3,\"bound\":true}]}";
+   int consumed = stat_service_handle_mqtt("stat/telemetry", msg, (int)strlen(msg));
+   TEST_ASSERT_EQUAL_INT(1, consumed);
+
+   stat_snapshot_t s;
+   stat_service_get_snapshot(&s);
+   TEST_ASSERT_TRUE(s.have_network);
+   TEST_ASSERT_TRUE(s.net_ifaces_truncated);
+   TEST_ASSERT_EQUAL_INT(1, s.net_iface_count);
+   TEST_ASSERT_EQUAL_STRING("cellular", s.net_ifaces[0].kind);
+   TEST_ASSERT_EQUAL_INT(-1, s.net_ifaces[0].speed_mbps);
+   TEST_ASSERT_TRUE(s.net_ifaces[0].up); /* up despite state "unknown" */
+   TEST_ASSERT_TRUE(s.net_ifaces[0].has_ipv6);
+   TEST_ASSERT_EQUAL_STRING("", s.net_ifaces[0].ipv6_global); /* fe80:: is not global */
+   TEST_ASSERT_EQUAL_INT(1, s.net_reach_count);
+   TEST_ASSERT_FALSE(s.net_reach[0].reachable);
+   TEST_ASSERT_FALSE(s.net_reach[0].has_rtt); /* rtt_ms omitted when unreachable */
+   TEST_ASSERT_EQUAL_INT(3, s.net_reach[0].fail_streak);
+}
+
+/* A non-object array element is skipped, but must NOT read as a capacity
+ * truncation (the *_truncated flag reflects a real cap hit, not a bad element). */
+void test_network_malformed_not_truncated(void) {
+   const char *msg =
+       "{\"device\":\"stat\",\"msg_type\":\"telemetry\",\"type\":\"Network\",\"probe_available\":"
+       "true,\"interfaces\":[{\"name\":\"eth0\",\"kind\":\"ethernet\",\"up\":true,\"carrier\":true,"
+       "\"ipv4\":[\"10.0.0.2\"]},null]}";
+   int consumed = stat_service_handle_mqtt("stat/telemetry", msg, (int)strlen(msg));
+   TEST_ASSERT_EQUAL_INT(1, consumed);
+   stat_snapshot_t s;
+   stat_service_get_snapshot(&s);
+   TEST_ASSERT_EQUAL_INT(1, s.net_iface_count); /* the null element was skipped */
+   TEST_ASSERT_FALSE(s.net_ifaces_truncated);   /* a skip is not a capacity truncation */
+}
+
+#ifdef STAT_NET_FIXTURE
+static char *read_file(const char *path, int *len_out) {
+   FILE *f = fopen(path, "rb");
+   if (!f) {
+      return NULL;
+   }
+   fseek(f, 0, SEEK_END);
+   long n = ftell(f);
+   fseek(f, 0, SEEK_SET);
+   if (n <= 0) {
+      fclose(f);
+      return NULL;
+   }
+   char *buf = malloc((size_t)n + 1);
+   if (!buf) {
+      fclose(f);
+      return NULL;
+   }
+   size_t rd = fread(buf, 1, (size_t)n, f);
+   fclose(f);
+   buf[rd] = '\0';
+   if (len_out) {
+      *len_out = (int)rd;
+   }
+   return buf;
+}
+#endif
+
+/* Cross-repo contract pin: feed STAT's canonical network_v1.json and assert the
+ * exact parsed values. A field-name/shape change on the STAT side breaks this. */
+void test_network_contract_fixture(void) {
+#ifndef STAT_NET_FIXTURE
+   TEST_IGNORE_MESSAGE("STAT_NET_FIXTURE not defined");
+#else
+   int len = 0;
+   char *payload = read_file(STAT_NET_FIXTURE, &len);
+   if (!payload) {
+      TEST_IGNORE_MESSAGE(
+          "STAT fixture not present (sibling checkout absent) — cross-repo pin skipped");
+      return;
+   }
+   int consumed = stat_service_handle_mqtt("stat/telemetry", payload, len);
+   free(payload);
+   TEST_ASSERT_EQUAL_INT(1, consumed);
+
+   stat_snapshot_t s;
+   stat_service_get_snapshot(&s);
+   TEST_ASSERT_TRUE(s.have_network);
+   TEST_ASSERT_TRUE(s.net_probe_available);
+   TEST_ASSERT_FALSE(s.net_ifaces_truncated);
+   TEST_ASSERT_FALSE(s.net_routes_truncated);
+   TEST_ASSERT_EQUAL_INT(2, s.net_iface_count);
+   TEST_ASSERT_EQUAL_INT(4, s.net_route_count);
+   TEST_ASSERT_EQUAL_INT(2, s.net_reach_count);
+
+   const stat_net_iface_t *eth = NULL, *cell = NULL;
+   for (int i = 0; i < s.net_iface_count; i++) {
+      if (strcmp(s.net_ifaces[i].kind, "ethernet") == 0) {
+         eth = &s.net_ifaces[i];
+      } else if (strcmp(s.net_ifaces[i].kind, "cellular") == 0) {
+         cell = &s.net_ifaces[i];
+      }
+   }
+   TEST_ASSERT_NOT_NULL(eth);
+   TEST_ASSERT_NOT_NULL(cell);
+   TEST_ASSERT_EQUAL_STRING("enP8p1s0", eth->name);
+   TEST_ASSERT_TRUE(eth->up);
+   TEST_ASSERT_TRUE(eth->carrier);
+   TEST_ASSERT_EQUAL_STRING("192.168.1.159", eth->ipv4);
+   TEST_ASSERT_TRUE(eth->has_ipv6);
+   TEST_ASSERT_EQUAL_STRING("usb0", cell->name);
+   TEST_ASSERT_EQUAL_STRING("unknown", cell->state);
+   TEST_ASSERT_TRUE(cell->up); /* up true despite state "unknown" */
+   TEST_ASSERT_EQUAL_INT(-1, cell->speed_mbps);
+   TEST_ASSERT_EQUAL_STRING("192.168.225.40", cell->ipv4);
+   TEST_ASSERT_EQUAL_STRING("2607:fb90:7c1c:ccc7:6627:9487:834b:af2b", cell->ipv6_global);
+
+   /* min-metric route is the ethernet path (metric 100 < 20100). */
+   int best = -1;
+   for (int i = 0; i < s.net_route_count; i++) {
+      if (best < 0 || s.net_routes[i].metric < s.net_routes[best].metric) {
+         best = i;
+      }
+   }
+   TEST_ASSERT_TRUE(best >= 0);
+   TEST_ASSERT_EQUAL_STRING("enP8p1s0", s.net_routes[best].iface);
+   TEST_ASSERT_EQUAL_INT(100, s.net_routes[best].metric);
+
+   const stat_net_reach_t *ru = NULL;
+   for (int i = 0; i < s.net_reach_count; i++) {
+      if (strcmp(s.net_reach[i].iface, "usb0") == 0) {
+         ru = &s.net_reach[i];
+      }
+   }
+   TEST_ASSERT_NOT_NULL(ru);
+   TEST_ASSERT_TRUE(ru->reachable);
+   TEST_ASSERT_TRUE(ru->has_rtt);
+   TEST_ASSERT_EQUAL_INT(0, ru->fail_streak);
+   TEST_ASSERT_TRUE(ru->bound);
+#endif
+}
+
+/* ===== Renderer interpretation rules (stat_render_network, hand-built snapshots
+ * so the author-specified rules can't silently regress) ===== */
+
+static void mk_iface(stat_net_iface_t *f,
+                     const char *name,
+                     const char *kind,
+                     bool up,
+                     bool carrier,
+                     const char *ipv4,
+                     const char *ipv6_global) {
+   memset(f, 0, sizeof(*f));
+   snprintf(f->name, sizeof(f->name), "%s", name);
+   snprintf(f->kind, sizeof(f->kind), "%s", kind);
+   snprintf(f->state, sizeof(f->state), "unknown"); /* deliberately not "up" */
+   f->up = up;
+   f->carrier = carrier;
+   if (ipv4) {
+      snprintf(f->ipv4, sizeof(f->ipv4), "%s", ipv4);
+   }
+   if (ipv6_global) {
+      snprintf(f->ipv6_global, sizeof(f->ipv6_global), "%s", ipv6_global);
+   }
+}
+
+/* Primary path = the MIN-metric route, even when it isn't first in the array. */
+void test_render_primary_min_metric(void) {
+   stat_snapshot_t s;
+   memset(&s, 0, sizeof(s));
+   s.have_network = true;
+   s.net_probe_available = true;
+   s.net_iface_count = 2;
+   mk_iface(&s.net_ifaces[0], "enP8p1s0", "ethernet", true, true, "192.168.1.9", NULL);
+   mk_iface(&s.net_ifaces[1], "usb0", "cellular", true, true, "192.168.225.9", NULL);
+   /* Higher-metric (penalized) route FIRST so "first" != "min". */
+   s.net_route_count = 2;
+   snprintf(s.net_routes[0].iface, sizeof(s.net_routes[0].iface), "usb0");
+   s.net_routes[0].metric = 20100;
+   snprintf(s.net_routes[1].iface, sizeof(s.net_routes[1].iface), "enP8p1s0");
+   s.net_routes[1].metric = 100;
+
+   char buf[512] = "";
+   stat_render_network(&s, buf, sizeof(buf));
+   TEST_ASSERT_NOT_NULL(strstr(buf, "primary path enP8p1s0")); /* min metric, not first */
+   TEST_ASSERT_NULL(strstr(buf, "primary path usb0"));
+}
+
+/* Link state is up&&carrier, NOT the operstate string (which is "unknown"). */
+void test_render_up_carrier_not_state(void) {
+   stat_snapshot_t s;
+   memset(&s, 0, sizeof(s));
+   s.have_network = true;
+   s.net_probe_available = true;
+   s.net_iface_count = 2;
+   mk_iface(&s.net_ifaces[0], "usb0", "cellular", true, true, "10.0.0.9", NULL); /* up */
+   mk_iface(&s.net_ifaces[1], "eth1", "ethernet", false, false, NULL, NULL);     /* down */
+
+   char buf[512] = "";
+   stat_render_network(&s, buf, sizeof(buf));
+   TEST_ASSERT_NOT_NULL(strstr(buf, "usb0 (cellular): up"));
+   TEST_ASSERT_NOT_NULL(strstr(buf, "eth1 (ethernet): down"));
+}
+
+/* fail_streak >= 2 = unreachable; a single reachable:false = transient; else reachable. */
+void test_render_fail_streak_down(void) {
+   stat_snapshot_t s;
+   memset(&s, 0, sizeof(s));
+   s.have_network = true;
+   s.net_probe_available = true;
+   s.net_iface_count = 1;
+   mk_iface(&s.net_ifaces[0], "eth0", "ethernet", true, true, "10.0.0.9", NULL);
+   s.net_reach_count = 1;
+   snprintf(s.net_reach[0].iface, sizeof(s.net_reach[0].iface), "eth0");
+
+   /* fail_streak 3 → down */
+   s.net_reach[0].reachable = false;
+   s.net_reach[0].fail_streak = 3;
+   char buf[512] = "";
+   stat_render_network(&s, buf, sizeof(buf));
+   TEST_ASSERT_NOT_NULL(strstr(buf, "gateway unreachable (3 consecutive failures)"));
+
+   /* single miss (fail_streak 1) → transient, NOT down */
+   s.net_reach[0].fail_streak = 1;
+   buf[0] = '\0';
+   stat_render_network(&s, buf, sizeof(buf));
+   TEST_ASSERT_NOT_NULL(strstr(buf, "missed once (transient)"));
+   TEST_ASSERT_NULL(strstr(buf, "unreachable"));
+
+   /* reachable with rtt */
+   s.net_reach[0].reachable = true;
+   s.net_reach[0].fail_streak = 0;
+   s.net_reach[0].has_rtt = true;
+   s.net_reach[0].rtt_ms = 1.5;
+   buf[0] = '\0';
+   stat_render_network(&s, buf, sizeof(buf));
+   TEST_ASSERT_NOT_NULL(strstr(buf, "gateway reachable (1.5 ms)"));
+}
+
+/* Cellular honesty: caveat present and leading; bearer claim keyed on global IPv6. */
+void test_render_cellular_honesty(void) {
+   stat_snapshot_t s;
+   memset(&s, 0, sizeof(s));
+   s.have_network = true;
+   s.net_probe_available = true;
+   s.net_iface_count = 1;
+
+   /* With a global IPv6 → "likely active", but caveat still present + leads. */
+   mk_iface(&s.net_ifaces[0], "usb0", "cellular", true, true, "192.168.225.9",
+            "2607:fb90:1:2:3:4:5:6");
+   char buf[512] = "";
+   stat_render_network(&s, buf, sizeof(buf));
+   TEST_ASSERT_NOT_NULL(strstr(buf, "not the cellular bearer"));
+   TEST_ASSERT_NOT_NULL(strstr(buf, "bearer is likely active"));
+   /* the caveat leads the hedge (survives truncation) */
+   char *caveat = strstr(buf, "USB link to the modem");
+   char *hedge = strstr(buf, "likely active");
+   TEST_ASSERT_NOT_NULL(caveat);
+   TEST_ASSERT_TRUE(caveat < hedge);
+
+   /* No global IPv6 → "bearer may be down". */
+   mk_iface(&s.net_ifaces[0], "usb0", "cellular", true, true, "192.168.225.9", NULL);
+   buf[0] = '\0';
+   stat_render_network(&s, buf, sizeof(buf));
+   TEST_ASSERT_NOT_NULL(strstr(buf, "bearer may be down"));
+}
+
+/* A route whose iface has no interface record must not crash the primary line. */
+void test_render_route_without_iface(void) {
+   stat_snapshot_t s;
+   memset(&s, 0, sizeof(s));
+   s.have_network = true;
+   s.net_probe_available = true;
+   s.net_route_count = 1;
+   snprintf(s.net_routes[0].iface, sizeof(s.net_routes[0].iface), "ghost0");
+   snprintf(s.net_routes[0].gateway, sizeof(s.net_routes[0].gateway), "10.0.0.1");
+   s.net_routes[0].metric = 100;
+   /* net_iface_count = 0 — no matching interface record */
+
+   char buf[512] = "";
+   stat_render_network(&s, buf, sizeof(buf));
+   TEST_ASSERT_NOT_NULL(strstr(buf, "primary path ghost0")); /* no kind, no crash */
+}
+
+void test_render_no_network(void) {
+   stat_snapshot_t s;
+   memset(&s, 0, sizeof(s));
+   s.have_network = false;
+   char buf[512] = "";
+   stat_render_network(&s, buf, sizeof(buf));
+   TEST_ASSERT_NOT_NULL(strstr(buf, "No network telemetry"));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_topic_gating);
+   RUN_TEST(test_render_primary_min_metric);
+   RUN_TEST(test_render_up_carrier_not_state);
+   RUN_TEST(test_render_fail_streak_down);
+   RUN_TEST(test_render_cellular_honesty);
+   RUN_TEST(test_render_route_without_iface);
+   RUN_TEST(test_render_no_network);
+   RUN_TEST(test_network_parse_synthetic);
+   RUN_TEST(test_network_malformed_not_truncated);
+   RUN_TEST(test_network_contract_fixture);
    RUN_TEST(test_snapshot_never_seen);
    RUN_TEST(test_live_cache_latest);
    RUN_TEST(test_history_aggregation);
