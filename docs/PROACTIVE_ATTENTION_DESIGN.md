@@ -905,3 +905,50 @@ tiers + budgets), where it belongs.
 **Code map:** `attention_core.c` (naming, uniqueness, finders, shared validators), `attention_tool.c`
 (grammar), `attention_gate.c` (name-aware summary), `webui_attention.c` (wire), `auth_db_attention.c`
 + v71/v80 migrations (`named` column), `attention_catalog.c` (catalog wire accessors).
+
+## 17. Network-transition watches — SHIPPED 2026-09-18 (`d064b40`, post-P0 evolution)
+
+First proactive watches over STAT **network** telemetry, added as pure **catalog rows + readers** —
+the P0-native extension path that touches **no paused P1 surface** (no event queue, `SAGE_RULE_MATCH`,
+`attention_gate_admit`, or policy/judge seam). Plan reviewed by master-plan-reviewer; implementation
+reviewed by correctness / architecture / standards+efficiency (1 data race found + fixed, see below).
+stat.telemetry-silence live-verified on the suit; the two link transitions accepted on review (not
+reproducible on the LAN).
+
+- **The three metrics** (`attention_catalog.c`), all read from `stat_service_get_snapshot()`:
+  - `network.uplink_down_sec` — THRESHOLD `above 0`, ALERT. Seconds the **IPv4 primary path** has been
+    unhealthy = no default route, or its iface not `up && carrier`, or its gateway at `fail_streak >= 2`.
+  - `network.cellular_sec` — THRESHOLD `above 15` (dwell), ALERT. Seconds the primary path has been the
+    **cellular backup**. The 15 s dwell defeats a route-re-evaluation blip announcing a false failover.
+  - `stat.telemetry` — ABSENCE `above 120`, AMBIENT. STAT feed silence (companion liveness, so a dead
+    STAT feed doesn't leave the two network watches silently frozen at their last reading).
+- **Duration-in-state metrics, not booleans** — a duration reads/speaks naturally through the single
+  `build_summary` format ("time on cellular backup is 16 s") and gives failover the field-standard
+  `for:`-style dwell. Onset half of each transition delivers; **restore is a silent re-arm** (the P0
+  gate is silent-on-recovery by design). An explicit "restored" alert (a general per-watch
+  notify-on-recovery) is the deliberate next slice, gated the same way P1 is — accrue field signal first.
+- **Interpretation single-sourced.** The honesty rules (min-metric primary route — NM penalizes a
+  failed path +20000, so metric not iface name identifies the live path; `up && carrier` link state;
+  `fail_streak >= 2` = down; cellular detection) were promoted out of the Layer-3 `src/tools/stat_render.c`
+  into a new pure, always-compiled Layer-2 `src/core/stat_net_interpret.{c,h}`, so the STAT tool renderer
+  and the SAGE catalog reader interpret the wire identically. Includes a penalized-tie robustness check
+  (both wired-and-cellular at the +20000 level ⇒ effective uplink is cellular).
+- **Dwell state is single-writer.** The two "in-state since" timestamps persist across ticks as file-
+  static atomics; **only the heartbeat tick commits** them, while the off-tick `attention_metric_current`
+  / `attention_readings_snapshot` query paths (lws + LLM threads) read the committed value without
+  storing — so a poll can't reset a dwell window the tick depends on. `attention_ingest_sample` gained an
+  `advance_dwell` arg to enforce this. STAT stale/absent ⇒ readers report not-present and the timers
+  freeze (a blackout can't fabricate an outage).
+- **Accepted limitation:** when the primary path is *itself* cellular, the gateway probe answers from the
+  modem's own IP stack, so `uplink_down` there detects only USB-link loss, not a dead bearer. Bearer
+  liveness needs an upstream signal (ECHO `+CGACT`/`+CGPADDR`, or STAT publishing NM per-device
+  connectivity) — filed as a follow-up, not built here.
+- **Deployment note:** on a box where the cellular backup route metric ties with a penalized-wired path
+  (e.g. `usb0` at 20100), the tie-break above keeps detection correct; setting the backup metric strictly
+  between the primary's and +20000 (NM's wwan default 700) makes it unambiguous. Config, not code.
+
+**Code map:** `stat_net_interpret.{c,h}` (new pure interpreter + dwell helper), `stat_render.c`
+(delegates to it, behavior-preserving), `attention_catalog.c` (3 rows + readers), `attention_ingest.c`
+(+`attention_internal.h` ctx fields, atomic dwell timers, `advance_dwell`), `attention_core.c` (3 call
+sites). Tests: `test_stat_service` (interpretation rules + dwell idempotency), `test_attention_gate`
+(readers + dwell gate).
