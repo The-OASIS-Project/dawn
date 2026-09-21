@@ -585,7 +585,8 @@ static void test_ipv4_in_url_guarded(void) {
    TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("http://192.168.1.1:3000/api", out,
                                                       sizeof(out), &written));
    TEST_ASSERT_NULL(strstr(out, "api")); /* path dropped by the URL pass -> guard held */
-   TEST_ASSERT_NOT_NULL(strstr(out, "192 dot 168 dot 1 dot 1")); /* URL pass spoke the host */
+   TEST_ASSERT_NOT_NULL(
+       strstr(out, "1 9 2 dot 1 6 8 dot 1 dot 1")); /* URL pass spells the IP host too */
 }
 
 /* A bare IP with a trailing port/CIDR verbalizes the IP; the suffix stays. */

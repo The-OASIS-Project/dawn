@@ -549,8 +549,11 @@ static void on_sentence_complete(const char *sentence, void *userdata) {
    }
 
 #ifdef HAVE_TTS_PIPER
-   /* Preprocess the sentence for TTS */
-   char preprocessed[4096];
+   /* Preprocess the sentence for TTS. Sized generously (>=4x a sentence) because
+    * the preprocessor EXPANDS text: an IP verbalizes digit-by-digit (~3x), and
+    * acronym/ZIP/number expansions grow it further. The C ABI truncates safely if
+    * a pathological sentence still overflows. */
+   char preprocessed[8192];
    int preproc_len = 0;
    preprocess_text_for_tts_c(sentence, preprocessed, sizeof(preprocessed), &preproc_len);
    if (preproc_len <= 0) {

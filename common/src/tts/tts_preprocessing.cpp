@@ -726,6 +726,68 @@ static inline size_t find_url_end(const char *src, size_t start, size_t len) {
  * @param domain_end Output: end of domain (before path)
  * @return Spoken form size (with dots expanded to " dot ")
  */
+/* If [start,end) begins with an IPv4 literal (4 dot-separated octets 0-255,
+ * optionally followed by ':' + port), returns the index just past the dotted-quad
+ * so the octets can be spelled; otherwise returns start (not an IP host). */
+static inline size_t domain_ipv4_end(const char *src, size_t start, size_t end) {
+   size_t i = start;
+   for (int octet = 0; octet < 4; octet++) {
+      if (octet > 0) {
+         if (i >= end || src[i] != '.')
+            return start;
+         i++;
+      }
+      int val = 0, nd = 0;
+      while (i < end && nd < 3 && std::isdigit((unsigned char)src[i])) {
+         val = val * 10 + (src[i] - '0');
+         i++;
+         nd++;
+      }
+      if (nd == 0 || val > 255)
+         return start;
+   }
+   if (i != end && src[i] != ':') /* clean host: nothing, or a ':port' follows */
+      return start;
+   return i;
+}
+
+/* Render a URL domain to spoken form. When @out is non-null it writes and returns
+ * the byte count; when null it only computes the size — so extract_domain_info
+ * (size) and write_spoken_domain (write) share ONE implementation and cannot
+ * diverge under the two-pass invariant. Dots become " dot "; an IPv4 host's
+ * octets are spelled digit-by-digit ("1 9 2 dot 1 6 8 dot 1 dot 1"), matching how
+ * a bare IP is read; any ':port' tail and normal-domain letters are copied. */
+static inline size_t render_spoken_domain(const char *src, size_t start, size_t end, char *out) {
+   const size_t ip_end = domain_ipv4_end(src, start, end); /* == start if not an IP */
+   size_t pos = 0;
+   bool first_digit = true;
+   for (size_t i = start; i < end; i++) {
+      char c = src[i];
+      if (c == '.') {
+         if (out)
+            std::memcpy(out + pos, " dot ", 5);
+         pos += 5;
+         first_digit = true;
+      } else if (i < ip_end && std::isdigit((unsigned char)c)) {
+         if (!first_digit) {
+            if (out)
+               out[pos] = ' ';
+            pos++;
+         }
+         if (out)
+            out[pos] = c;
+         pos++;
+         first_digit = false;
+      } else {
+         if (out)
+            out[pos] = c;
+         pos++;
+         first_digit = false;
+      }
+   }
+   return pos;
+}
+
 static inline size_t extract_domain_info(const char *src,
                                          size_t url_start,
                                          size_t url_end,
@@ -746,35 +808,17 @@ static inline size_t extract_domain_info(const char *src,
    *domain_start = start;
    *domain_end = end;
 
-   // Calculate spoken size: each '.' becomes " dot " (5 chars instead of 1)
-   size_t spoken_size = 0;
-   for (size_t i = start; i < end; i++) {
-      if (src[i] == '.') {
-         spoken_size += 5;  // " dot "
-      } else {
-         spoken_size += 1;
-      }
-   }
-   return spoken_size;
+   return render_spoken_domain(src, start, end, nullptr); /* size only */
 }
 
 /**
- * @brief Write domain in spoken form (dots -> " dot ")
+ * @brief Write domain in spoken form (dots -> " dot "; IPv4 host spelled).
  */
 static inline size_t write_spoken_domain(const char *src,
                                          size_t domain_start,
                                          size_t domain_end,
                                          char *out) {
-   size_t out_pos = 0;
-   for (size_t i = domain_start; i < domain_end; i++) {
-      if (src[i] == '.') {
-         std::memcpy(out + out_pos, " dot ", 5);
-         out_pos += 5;
-      } else {
-         out[out_pos++] = src[i];
-      }
-   }
-   return out_pos;
+   return render_spoken_domain(src, domain_start, domain_end, out);
 }
 
 // ============================================================================
