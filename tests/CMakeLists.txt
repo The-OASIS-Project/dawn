@@ -170,6 +170,14 @@ dawn_add_unit_test(test_schwab_portfolio
    LIBS    unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# Schwab /quotes reference-name parser — synthetic /quotes fixture (reference
+# blocks, a missing-reference symbol, the errors object).
+dawn_add_unit_test(test_schwab_quotes
+   SOURCES test_schwab_quotes.c
+           ${SRC_ROOT}/src/tools/schwab_quotes.c
+   LIBS    unity ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # MCP HTTP+SSE transport — exercised against an in-test loopback HTTP+SSE
 # server (no external network), so it is CI-safe.
 dawn_add_unit_test(test_mcp_transport

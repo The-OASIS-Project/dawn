@@ -31,6 +31,7 @@
 struct json_object;
 
 #define SCHWAB_SYMBOL_MAX 24     /* OCC option symbols run ~21 chars */
+#define SCHWAB_DESC_MAX 96       /* instrument.description ("Apple Inc."); long fund names fit */
 #define SCHWAB_ACCT_LABEL_MAX 16 /* masked "…1234" */
 #define SCHWAB_ACCT_TYPE_MAX 16  /* "CASH" / "MARGIN" */
 
@@ -46,6 +47,7 @@ typedef enum {
 
 typedef struct {
    char symbol[SCHWAB_SYMBOL_MAX];
+   char description[SCHWAB_DESC_MAX]; /* instrument.description; "" if absent */
    schwab_asset_type_t asset_type;
    double qty;   /* net long − short */
    double price; /* last: marketValue / qty (0 when qty == 0) */

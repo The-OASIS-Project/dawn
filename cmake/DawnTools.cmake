@@ -362,6 +362,7 @@ if(DAWN_ENABLE_SCHWAB_TOOL)
         src/tools/schwab_stats.c
         src/tools/schwab_txn.c
         src/tools/schwab_portfolio.c
+        src/tools/schwab_quotes.c
         src/tools/schwab_client.c)
     # oauth_client.c may already be included by calendar or email
     if(NOT DAWN_ENABLE_CALENDAR_TOOL AND NOT DAWN_ENABLE_EMAIL_TOOL)

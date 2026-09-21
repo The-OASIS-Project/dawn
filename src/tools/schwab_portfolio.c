@@ -107,6 +107,8 @@ static void parse_position(struct json_object *pos, schwab_position_t *out) {
 
    const char *sym = jget_s(inst, "symbol");
    snprintf(out->symbol, sizeof(out->symbol), "%s", (sym && sym[0]) ? sym : "?");
+   const char *desc = jget_s(inst, "description");
+   snprintf(out->description, sizeof(out->description), "%s", desc ? desc : "");
    out->asset_type = schwab_asset_type_from_str(jget_s(inst, "assetType"));
 
    double lq = jget_d(pos, "longQuantity");
@@ -198,6 +200,10 @@ int schwab_portfolio_parse(struct json_object *root, schwab_portfolio_t *out) {
 static struct json_object *position_json(const schwab_position_t *p) {
    struct json_object *o = json_object_new_object();
    json_object_object_add(o, "symbol", json_object_new_string(p->symbol));
+   if (p->description[0]) {
+      /* Omit when empty so a consumer's presence-check means "has a name". */
+      json_object_object_add(o, "description", json_object_new_string(p->description));
+   }
    json_object_object_add(o, "asset_type",
                           json_object_new_string(schwab_asset_type_str(p->asset_type)));
    json_object_object_add(o, "qty", json_object_new_double(p->qty));

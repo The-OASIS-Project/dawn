@@ -38,7 +38,8 @@ static const char *FIXTURE =
     "[{\"securitiesAccount\":{\"type\":\"MARGIN\",\"accountNumber\":\"12345678\","
     "\"currentBalances\":{\"liquidationValue\":100000.0,\"cashBalance\":20000.0},"
     "\"positions\":["
-    "{\"instrument\":{\"symbol\":\"AAPL\",\"assetType\":\"EQUITY\"},\"longQuantity\":100,"
+    "{\"instrument\":{\"symbol\":\"AAPL\",\"assetType\":\"EQUITY\",\"description\":\"Apple Inc.\"},"
+    "\"longQuantity\":100,"
     "\"shortQuantity\":0,\"averagePrice\":150.0,\"marketValue\":19000.0,"
     "\"currentDayProfitLoss\":-100.0,\"longOpenProfitLoss\":4000.0},"
     "{\"instrument\":{\"symbol\":\"SPY\",\"assetType\":\"COLLECTIVE_INVESTMENT\"},\"longQuantity\":"
@@ -112,6 +113,8 @@ static void test_parse_fixture(void) {
 
    schwab_position_t *aapl = &a0->positions[0];
    TEST_ASSERT_EQUAL_STRING("AAPL", aapl->symbol);
+   TEST_ASSERT_EQUAL_STRING("Apple Inc.", aapl->description);
+   TEST_ASSERT_EQUAL_STRING("", a0->positions[1].description); /* SPY has none → empty */
    TEST_ASSERT_EQUAL_INT(SCHWAB_ASSET_EQUITY, aapl->asset_type);
    TEST_ASSERT_DOUBLE_WITHIN(1e-6, 100.0, aapl->qty);
    TEST_ASSERT_DOUBLE_WITHIN(1e-6, 190.0, aapl->price); /* 19000/100 */
