@@ -219,13 +219,19 @@ static struct json_object *position_json(const schwab_position_t *p) {
 struct json_object *schwab_portfolio_payload_jobj(const schwab_portfolio_t *p,
                                                   const char *status,
                                                   const char *market,
-                                                  bool ext_hours) {
+                                                  bool ext_hours,
+                                                  int64_t link_expires_at) {
    struct json_object *payload = json_object_new_object();
    json_object_object_add(payload, "status", json_object_new_string(status ? status : "error"));
    json_object_object_add(payload, "market", json_object_new_string(market ? market : "closed"));
    json_object_object_add(payload, "ext_hours",
                           json_object_new_boolean(p ? p->ext_hours : ext_hours));
    json_object_object_add(payload, "as_of", json_object_new_int64(p ? p->as_of : 0));
+   /* Emitted even on a state-only (e.g. token_expired) frame — that's exactly when a
+    * panel wants to say "reconnect Schwab". Omitted when the link time is unknown. */
+   if (link_expires_at > 0) {
+      json_object_object_add(payload, "link_expires_at", json_object_new_int64(link_expires_at));
+   }
 
    if (p) {
       json_object_object_add(payload, "total_value", json_object_new_double(p->total_value));
@@ -265,8 +271,10 @@ struct json_object *schwab_portfolio_payload_jobj(const schwab_portfolio_t *p,
 char *schwab_portfolio_to_json(const schwab_portfolio_t *p,
                                const char *status,
                                const char *market,
-                               bool ext_hours) {
-   struct json_object *payload = schwab_portfolio_payload_jobj(p, status, market, ext_hours);
+                               bool ext_hours,
+                               int64_t link_expires_at) {
+   struct json_object *payload = schwab_portfolio_payload_jobj(p, status, market, ext_hours,
+                                                               link_expires_at);
    const char *s = json_object_to_json_string_ext(payload, JSON_C_TO_STRING_PLAIN);
    char *out = s ? strdup(s) : NULL;
    json_object_put(payload);

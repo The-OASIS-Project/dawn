@@ -53,6 +53,13 @@ char *schwab_service_portfolio(int user_id, bool accounts_only);
 schwab_rc_t schwab_service_portfolio_snapshot(int user_id, bool ext_hours, schwab_portfolio_t *out);
 
 /**
+ * Epoch seconds at which @p user_id's Schwab refresh token lapses (link time +
+ * SCHWAB_REFRESH_LIFETIME_DAYS), so the panel can warn before it expires. Returns 0
+ * when not linked or the link time is unknown (caller omits the hint).
+ */
+int64_t schwab_service_link_expires_at(int user_id);
+
+/**
  * Build an LLM-facing price-history answer for ONE symbol. @p range is one of
  * 1mo/3mo/6mo/1y/5y/ytd (default 1y); @p interval is daily/weekly/monthly
  * (default per range; an illegal range+interval is coerced); @p data is

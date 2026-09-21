@@ -107,13 +107,15 @@ int schwab_portfolio_parse(struct json_object *accounts_root, schwab_portfolio_t
 struct json_object *schwab_portfolio_payload_jobj(const schwab_portfolio_t *p,
                                                   const char *status,
                                                   const char *market,
-                                                  bool ext_hours);
+                                                  bool ext_hours,
+                                                  int64_t link_expires_at);
 
 /** As above, serialized to an owned JSON string (caller frees). */
 char *schwab_portfolio_to_json(const schwab_portfolio_t *p,
                                const char *status,
                                const char *market,
-                               bool ext_hours);
+                               bool ext_hours,
+                               int64_t link_expires_at);
 
 /** Free allocated arrays and zero the struct. Safe on a zeroed/NULL struct. */
 void schwab_portfolio_free(schwab_portfolio_t *p);

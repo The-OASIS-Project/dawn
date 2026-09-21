@@ -754,6 +754,18 @@ schwab_rc_t schwab_service_portfolio_snapshot(int user_id,
    return SCHWAB_RC_OK;
 }
 
+int64_t schwab_service_link_expires_at(int user_id) {
+   oauth_token_set_t t;
+   if (oauth_load_tokens(user_id, "schwab", SCHWAB_ACCOUNT_KEY, &t) != 0) {
+      sodium_memzero(&t, sizeof(t)); /* self-contained hygiene, not reliant on callee zeroing */
+      return 0;                      /* not linked / not configured — caller omits the hint */
+   }
+   int64_t exp = (t.linked_at > 0) ? t.linked_at + (int64_t)SCHWAB_REFRESH_LIFETIME_DAYS * 86400
+                                   : 0;
+   sodium_memzero(&t, sizeof(t));
+   return exp;
+}
+
 /* ===== price history + analytics ===== */
 
 static int64_t jget_i64(struct json_object *o, const char *k) {

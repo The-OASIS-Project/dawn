@@ -28,6 +28,11 @@
  * accounts are resolved from the API, not from multiple OAuth links). */
 #define SCHWAB_ACCOUNT_KEY "default"
 
+/* Schwab's refresh token has a fixed lifetime from the original authorization,
+ * after which the user must re-link (dawn-admin schwab auth). One canonical home so
+ * the admin CLI and the WebUI relink-warning agree. */
+#define SCHWAB_REFRESH_LIFETIME_DAYS 7
+
 /* Schwab splits market-data and trader/accounts under one host. */
 #define SCHWAB_MARKETDATA_BASE "https://api.schwabapi.com/marketdata/v1"
 #define SCHWAB_TRADER_BASE "https://api.schwabapi.com/trader/v1"

@@ -148,7 +148,7 @@ static void test_to_json_roundtrip(void) {
    p.as_of = 1750000000;
    p.ext_hours = false;
 
-   char *js = schwab_portfolio_to_json(&p, "ok", "regular", false);
+   char *js = schwab_portfolio_to_json(&p, "ok", "regular", false, 1750604800);
    TEST_ASSERT_NOT_NULL(js);
    struct json_object *back = json_tokener_parse(js);
    TEST_ASSERT_NOT_NULL(back);
@@ -170,6 +170,8 @@ static void test_to_json_roundtrip(void) {
    struct json_object *p0 = json_object_array_get_idx(pos, 0);
    json_object_object_get_ex(p0, "asset_type", &v);
    TEST_ASSERT_EQUAL_STRING("equity", json_object_get_string(v));
+   TEST_ASSERT_TRUE(json_object_object_get_ex(back, "link_expires_at", &v));
+   TEST_ASSERT_EQUAL_INT64(1750604800, json_object_get_int64(v));
 
    json_object_put(back);
    free(js);
@@ -177,8 +179,9 @@ static void test_to_json_roundtrip(void) {
 }
 
 static void test_to_json_state_only(void) {
-   /* NULL snapshot → state-only frame: status present, no numeric/accounts. */
-   char *js = schwab_portfolio_to_json(NULL, "token_expired", "closed", false);
+   /* NULL snapshot → state-only frame: status present, no numeric/accounts, but the
+    * relink hint (link_expires_at) IS carried — that's the frame that needs it. */
+   char *js = schwab_portfolio_to_json(NULL, "token_expired", "closed", false, 1750604800);
    TEST_ASSERT_NOT_NULL(js);
    struct json_object *o = json_tokener_parse(js);
    struct json_object *v = NULL;
@@ -186,6 +189,8 @@ static void test_to_json_state_only(void) {
    TEST_ASSERT_EQUAL_STRING("token_expired", json_object_get_string(v));
    TEST_ASSERT_FALSE(json_object_object_get_ex(o, "accounts", &v));
    TEST_ASSERT_FALSE(json_object_object_get_ex(o, "total_value", &v));
+   TEST_ASSERT_TRUE(json_object_object_get_ex(o, "link_expires_at", &v));
+   TEST_ASSERT_EQUAL_INT64(1750604800, json_object_get_int64(v));
    json_object_put(o);
    free(js);
 }

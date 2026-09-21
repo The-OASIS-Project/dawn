@@ -46,8 +46,7 @@
 #include "tools/oauth_client.h"
 #include "tools/schwab_client.h" /* SCHWAB_ACCOUNT_KEY (one canonical definition) */
 
-/* Schwab's refresh token has a fixed 7-day lifetime from the original auth. */
-#define SCHWAB_REFRESH_LIFETIME_DAYS 7
+/* SCHWAB_REFRESH_LIFETIME_DAYS lives in schwab_client.h (included above). */
 
 /* Little-endian reader — the wire is fixed LE regardless of host byte order. */
 static int32_t rd_i32le(const unsigned char *p) {

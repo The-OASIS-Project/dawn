@@ -50,10 +50,12 @@ typedef struct {
    bool have_snap; /* a successful fetch has populated snap at least once */
    char status[16];
    bool ext_hours_last;
-   int64_t last_ok;       /* time() of the last OK fetch */
-   int64_t last_attempt;  /* time() of the last fetch attempt (success OR failure) */
-   int64_t backoff_until; /* don't fetch before this (429 / auth / error retry) */
-   int backoff_sec;       /* current 429 backoff step */
+   int64_t last_ok;         /* time() of the last OK fetch */
+   int64_t last_attempt;    /* time() of the last fetch attempt (success OR failure) */
+   int64_t backoff_until;   /* don't fetch before this (429 / auth / error retry) */
+   int backoff_sec;         /* current 429 backoff step */
+   int64_t link_expires_at; /* Schwab refresh-token expiry (0 = unknown); set off-lock
+                               by the refresher so the lws thread never decrypts */
 } stocks_cache_t;
 
 static stocks_cache_t s_cache[STOCKS_MAX_USERS];
@@ -165,7 +167,8 @@ static struct json_object *frame_payload_locked(const stocks_cache_t *e, const c
       state_only = !(e && e->have_snap);
    }
    const schwab_portfolio_t *snap = state_only ? NULL : &e->snap;
-   return schwab_portfolio_payload_jobj(snap, status, market, e ? e->ext_hours_last : false);
+   return schwab_portfolio_payload_jobj(snap, status, market, e ? e->ext_hours_last : false,
+                                        e ? e->link_expires_at : 0);
 }
 
 /* Wrap a payload object in the {type, payload} frame envelope (takes ownership of
@@ -316,9 +319,11 @@ static void refresh_user(int user_id, bool ext, const char *market) {
       return;
    }
 
-   /* Blocking Schwab fetch — OUTSIDE every lock. */
+   /* Blocking Schwab fetch + token-expiry read — OUTSIDE every lock (the expiry read
+    * decrypts, so it must not run on the lws thread; the refresher owns it). */
    schwab_portfolio_t fresh;
    schwab_rc_t rc = schwab_service_portfolio_snapshot(user_id, ext, &fresh);
+   int64_t link_exp = schwab_service_link_expires_at(user_id);
 
    pthread_mutex_lock(&s_stocks_mutex);
    e = cache_get(user_id);
@@ -328,6 +333,7 @@ static void refresh_user(int user_id, bool ext, const char *market) {
       return;
    }
    apply_fetch(e, rc, &fresh, ext);
+   e->link_expires_at = link_exp;
    struct json_object *payload = frame_payload_locked(e, market);
    pthread_mutex_unlock(&s_stocks_mutex);
 
