@@ -34,8 +34,9 @@ LD_LIBRARY_PATH=/usr/local/lib ./build-debug/dawn
 
 # Format
 ./format_code.sh --changed       # fast: only uncommitted/staged files (use during dev)
+./format_code.sh --check --changed  # verify only changed files (local pre-commit; run AFTER build)
 ./format_code.sh                 # fix all files
-./format_code.sh --check         # CI mode (final pre-commit verification)
+./format_code.sh --check         # full-tree scan (what CI runs; walks the whole repo, slow)
 
 # Unit test (standalone binaries in tests/)
 make -C build-debug test_<name>
@@ -146,7 +147,7 @@ still in `dawn.toml`.
 4. **Test** — developer tests manually and reports. Fix issues found; adjacent bugs may warrant their own mini cycle.
 5. **Document** — update or create the atlas design doc (`~/code/The-OASIS-Project/atlas/dawn/`) for significant features. Memory-subsystem docs land under `atlas/dawn/memory/`; everything else flat under `atlas/dawn/archive/`. Have architecture-reviewer verify the doc against code.
 6. **Update planning docs** — cut the item's row from `docs/TODO.md` and paste it into `docs/DONE.md` under the matching section, with the `~~strikethrough~~` SHIPPED tag including the commit hash; remove any `§N` detail section from TODO.md.
-7. **Commit** — run `./format_code.sh --check` once more. Provide a single `git add` command and a commit message. **Developer runs `git add`/`commit`/`push`.** Wait for confirmation.
+7. **Commit** — always **format before building**, so the bytes you compiled and tested are the bytes you commit (formatting rewrites code; compiling first verifies a draft you then discard). The verify order is `./format_code.sh --changed` → build → test → `./format_code.sh --check --changed` (changed-scope verify — never bare `--check`, which walks the whole tree). Then provide a single `git add` command and a commit message. **Developer runs `git add`/`commit`/`push`.** Wait for confirmation.
 
 ## Code Review Workflow
 
