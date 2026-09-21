@@ -364,6 +364,72 @@ static void test_preprocess_state_abbrev(void) {
    TEST_ASSERT_NOT_NULL(strstr(out, "California"));
 }
 
+/* Ambiguous state codes (ID, OK, OR, ...) expand ONLY with positive context. */
+static void test_state_collider_city_comma_expands(void) {
+   char out[128];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("Boise, ID", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "Idaho"));
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("Portland, OR", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "Oregon"));
+   /* multi-word city: the last word before the comma is the capitalized token */
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("New York, NY", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "New York")); /* NY -> New York */
+}
+
+/* Bare ambiguous codes are left for espeak (spelled/word), not expanded. */
+static void test_state_collider_bare_not_expanded(void) {
+   char out[128];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0,
+                         preprocess_text_for_tts_c("Show me your ID", out, sizeof(out), &written));
+   TEST_ASSERT_NULL(strstr(out, "Idaho"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "ID"));
+   /* the live bug: sentence-initial "OK," must not become "Oklahoma," */
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("OK, here's the plan", out, sizeof(out),
+                                                      &written));
+   TEST_ASSERT_NULL(strstr(out, "Oklahoma"));
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("in the OR now", out, sizeof(out), &written));
+   TEST_ASSERT_NULL(strstr(out, "Oregon"));
+   /* interjection stoplist: capitalized word before the comma is not a city */
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("Yes, OK, I'll do it", out, sizeof(out),
+                                                      &written));
+   TEST_ASSERT_NULL(strstr(out, "Oklahoma"));
+}
+
+/* Comma-gated ZIP is a state signal; an ID + number without a comma is not. */
+static void test_state_collider_comma_zip(void) {
+   char out[128];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0,
+                         preprocess_text_for_tts_c("Apt 4, ID 83702", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "Idaho 8 3 7 0 2")); /* ZIP spelled digit-by-digit */
+   TEST_ASSERT_EQUAL_INT(0,
+                         preprocess_text_for_tts_c("order ID 83702", out, sizeof(out), &written));
+   TEST_ASSERT_NULL(strstr(out, "Idaho")); /* no comma -> not a state */
+   /* 5 digits run into a letter -> not a ZIP */
+   TEST_ASSERT_EQUAL_INT(0,
+                         preprocess_text_for_tts_c("Apt 4, ID 12345x", out, sizeof(out), &written));
+   TEST_ASSERT_NULL(strstr(out, "Idaho"));
+   /* ZIP+4: the '-' is a valid boundary after 5 digits (non-city, so only the
+    * comma-ZIP signal can fire here). */
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("Apt 4, ID 83702-1234", out, sizeof(out),
+                                                      &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "Idaho"));
+}
+
+/* Non-collider codes keep expanding unconditionally (no context needed). */
+static void test_state_noncollider_always_expands(void) {
+   char out[128];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0,
+                         preprocess_text_for_tts_c("Visit CA today", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "California")); /* CA is not a collider */
+   TEST_ASSERT_EQUAL_INT(0,
+                         preprocess_text_for_tts_c("Washington, DC", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "D.C."));
+}
+
 static void test_preprocess_day_abbrev(void) {
    char out[128];
    int written = 0;
@@ -480,13 +546,94 @@ static void test_phone_leading_nonone_11_untouched(void) {
    TEST_ASSERT_NOT_NULL(strstr(out, "2-678-643-2695"));
 }
 
-static void test_phone_ip_untouched(void) {
+/* An IPv4 literal is now verbalized (was passed through). The phone pass still
+ * must not treat it as a phone number ({3,3,1,3} is not a phone shape). */
+static void test_ipv4_verbalized(void) {
    char out[128];
    int written = 0;
-   /* Finding #3: an IP address ({3,3,1,3}) is not a phone shape. */
    TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("host 192.168.1.100 up", out, sizeof(out),
                                                       &written));
-   TEST_ASSERT_NOT_NULL(strstr(out, "192.168.1.100"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "1 9 2 dot 1 6 8 dot 1 dot 1 0 0")); /* digit-by-digit */
+   TEST_ASSERT_NULL(strstr(out, "192.168")); /* no raw dotted run left */
+}
+
+/* Non-IP dotted/numeric shapes must pass through unchanged. */
+static void test_ipv4_negatives(void) {
+   char out[128];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("version 1.2.3 now", out, sizeof(out),
+                                                      &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "1.2.3")); /* semver: 3 groups, not an IP */
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("pi is 3.14", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "3.14")); /* decimal */
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("999.1.1.1 bad", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "999.1.1.1")); /* octet > 255 */
+   TEST_ASSERT_EQUAL_INT(0,
+                         preprocess_text_for_tts_c("1.2.3.4.5 nope", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "1.2.3.4.5")); /* 5 groups */
+   TEST_ASSERT_EQUAL_INT(0,
+                         preprocess_text_for_tts_c("build v1.2.3.4", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "v1.2.3.4")); /* alnum prefix -> not an IP */
+}
+
+/* An IP inside a URL is left to the URL pass (which speaks the host and drops the
+ * path). If the IP pass fired first it would break the URL parse and leak the
+ * path — so the guard is verified by the path NOT appearing in the output. */
+static void test_ipv4_in_url_guarded(void) {
+   char out[256];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("http://192.168.1.1:3000/api", out,
+                                                      sizeof(out), &written));
+   TEST_ASSERT_NULL(strstr(out, "api")); /* path dropped by the URL pass -> guard held */
+   TEST_ASSERT_NOT_NULL(strstr(out, "192 dot 168 dot 1 dot 1")); /* URL pass spoke the host */
+}
+
+/* A bare IP with a trailing port/CIDR verbalizes the IP; the suffix stays. */
+static void test_ipv4_bare_with_suffix(void) {
+   char out[128];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("10.0.0.1/24", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "1 0 dot 0 dot 0 dot 1"));
+   TEST_ASSERT_EQUAL_INT(0,
+                         preprocess_text_for_tts_c("192.168.1.1:8080", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "1 9 2 dot 1 6 8 dot 1 dot 1"));
+}
+
+/* Override map: only the specific espeak-misread tokens are rewritten. */
+static void test_override_terms(void) {
+   char out[128];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("use IPv4 here", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "I.P.v. four"));
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("IPv4/IPv6", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "I.P.v. four"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "I.P.v. six"));
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("(IPv4)", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "I.P.v. four")); /* punctuation boundaries */
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("on AWS now", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "A.W.S."));
+   TEST_ASSERT_EQUAL_INT(0,
+                         preprocess_text_for_tts_c("the MAC address", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "mac address"));
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("400 kHz clock", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "kilohertz"));
+}
+
+/* Override map must NOT fire inside a longer word or on the wrong case. */
+static void test_override_boundaries(void) {
+   char out[128];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0,
+                         preprocess_text_for_tts_c("the CIRCUS act", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "CIRCUS")); /* "CI" must not fire mid-word */
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("lowercase ipv4 text", out, sizeof(out),
+                                                      &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "ipv4")); /* exact-case: lowercase untouched */
+   TEST_ASSERT_NULL(strstr(out, "version"));
+   /* espeak already spells these correctly, so we leave them untouched. */
+   TEST_ASSERT_EQUAL_INT(0,
+                         preprocess_text_for_tts_c("the FBI report", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "FBI"));
 }
 
 static void test_phone_iso_datetime_untouched(void) {
@@ -585,6 +732,10 @@ int main(void) {
    RUN_TEST(test_number_negative_to_words);
    RUN_TEST(test_number_factorial_result);
    RUN_TEST(test_preprocess_state_abbrev);
+   RUN_TEST(test_state_collider_city_comma_expands);
+   RUN_TEST(test_state_collider_bare_not_expanded);
+   RUN_TEST(test_state_collider_comma_zip);
+   RUN_TEST(test_state_noncollider_always_expands);
    RUN_TEST(test_preprocess_day_abbrev);
    RUN_TEST(test_preprocess_month_abbrev);
 
@@ -599,7 +750,12 @@ int main(void) {
    RUN_TEST(test_phone_trailing_number_not_merged);
    RUN_TEST(test_phone_two_in_one_sentence);
    RUN_TEST(test_phone_leading_nonone_11_untouched);
-   RUN_TEST(test_phone_ip_untouched);
+   RUN_TEST(test_ipv4_verbalized);
+   RUN_TEST(test_ipv4_negatives);
+   RUN_TEST(test_ipv4_in_url_guarded);
+   RUN_TEST(test_ipv4_bare_with_suffix);
+   RUN_TEST(test_override_terms);
+   RUN_TEST(test_override_boundaries);
    RUN_TEST(test_phone_iso_datetime_untouched);
    RUN_TEST(test_phone_adversarial_bounded);
 
