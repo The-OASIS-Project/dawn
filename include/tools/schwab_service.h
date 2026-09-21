@@ -24,7 +24,9 @@
 
 #include <stdbool.h>
 
-#include "tools/schwab_stats.h" /* schwab_history_stats + types */
+#include "tools/schwab_client.h"    /* schwab_rc_t */
+#include "tools/schwab_portfolio.h" /* schwab_portfolio_t */
+#include "tools/schwab_stats.h"     /* schwab_history_stats + types */
 
 /**
  * Build an LLM-facing quote summary for one or more comma/space-separated
@@ -40,6 +42,15 @@ char *schwab_service_quote(int user_id, const char *symbols_csv);
  * failures prefixed with TOOL_RESULT_ERROR_MARK.
  */
 char *schwab_service_portfolio(int user_id, bool accounts_only);
+
+/**
+ * Structured portfolio snapshot for the WebUI stocks panel (one /accounts call,
+ * parsed into @p out instead of prose). Returns the schwab_rc_t so the caller can
+ * map it to a wire status; on non-OK, @p out is zeroed. Free @p out with
+ * schwab_portfolio_free(). The ext_hours /quotes overlay is not yet applied
+ * (recorded only). @p user_id owns the Schwab OAuth link.
+ */
+schwab_rc_t schwab_service_portfolio_snapshot(int user_id, bool ext_hours, schwab_portfolio_t *out);
 
 /**
  * Build an LLM-facing price-history answer for ONE symbol. @p range is one of

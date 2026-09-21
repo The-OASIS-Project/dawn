@@ -65,6 +65,9 @@
 #ifdef DAWN_ENABLE_CODE_PROJECTS
 #include "webui/webui_code_projects.h"
 #endif
+#ifdef DAWN_ENABLE_SCHWAB_TOOL
+#include "webui/webui_stocks.h"
+#endif
 #include "webui/webui_email.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_oauth.h"
@@ -1297,6 +1300,16 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       handle_code_projects_set_branch(conn, payload);
    } else if (strcmp(type, "code_projects_delete") == 0) {
       handle_code_projects_delete(conn, payload);
+   }
+#endif
+#ifdef DAWN_ENABLE_SCHWAB_TOOL
+   /* Stocks panel (owner's Schwab portfolio) */
+   else if (strcmp(type, "stocks_portfolio_subscribe") == 0) {
+      handle_stocks_portfolio_subscribe(conn, payload);
+   } else if (strcmp(type, "stocks_portfolio_unsubscribe") == 0) {
+      handle_stocks_portfolio_unsubscribe(conn, payload);
+   } else if (strcmp(type, "stocks_portfolio_get") == 0) {
+      handle_stocks_portfolio_get(conn, payload);
    }
 #endif
    /* OAuth flow (shared by calendar and email) */

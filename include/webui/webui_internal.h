@@ -157,6 +157,13 @@ typedef struct {
     * the connection's user data is zero-initialized and slot reuse re-clears it. */
    bool watch_readings_subscribed;
 
+   /* Stocks panel push: while subscribed, the stocks refresher thread fans the
+    * owner's portfolio snapshot to this connection on the active cadence.
+    * stocks_ext_hours mirrors the panel's "Extended Hours" switch. Plain bools —
+    * zero-initialized user data, re-cleared on slot reuse; no teardown needed. */
+   bool stocks_subscribed;
+   bool stocks_ext_hours;
+
    /* Client IP address (captured at connection establishment for reliable logging) */
    char client_ip[64];
 

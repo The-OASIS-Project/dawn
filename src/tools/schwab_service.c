@@ -34,11 +34,13 @@
 
 #include "core/iso8601.h" /* iso8601_parse_date_utc */
 #include "core/strbuf.h"
+#include "dawn_error.h"
 #include "logging.h"
 #include "tools/oauth_client.h"
 #include "tools/schwab_client.h"
-#include "tools/schwab_txn.h"    /* transaction classifier + aggregates */
-#include "tools/tool_registry.h" /* TOOL_RESULT_ERROR_MARK */
+#include "tools/schwab_portfolio.h" /* structured snapshot for the WebUI panel */
+#include "tools/schwab_txn.h"       /* transaction classifier + aggregates */
+#include "tools/tool_registry.h"    /* TOOL_RESULT_ERROR_MARK */
 
 #define SCHWAB_MAX_SYMBOLS 25
 /* Upper bound on candles we allocate for, guarding against a pathological
@@ -501,6 +503,51 @@ char *schwab_service_portfolio(int user_id, bool accounts_only) {
    char *out = (!strbuf_oom(&sb) && sb.buf) ? strdup(sb.buf) : NULL;
    strbuf_free(&sb);
    return out ? out : result_err("Schwab portfolio formatting failed.");
+}
+
+/* Structured portfolio snapshot for the WebUI stocks panel — same one-call fetch
+ * as schwab_service_portfolio(), parsed into a struct instead of prose. Returns
+ * the schwab_rc_t so the caller maps it to a wire status (OK / NOT_LINKED /
+ * AUTH→token_expired / RATE_LIMITED / else error). On non-OK, @p out is left
+ * zeroed. The ext_hours /quotes overlay is P2; here the flag is recorded only. */
+schwab_rc_t schwab_service_portfolio_snapshot(int user_id,
+                                              bool ext_hours,
+                                              schwab_portfolio_t *out) {
+   if (out) {
+      memset(out, 0, sizeof(*out));
+   }
+   oauth_provider_config_t prov;
+   char bearer[OAUTH_TOKEN_BUF_SIZE];
+   char *err = NULL;
+   schwab_rc_t rc = schwab_bearer(user_id, &prov, bearer, sizeof(bearer), &err);
+   if (rc != SCHWAB_RC_OK) {
+      free(err); /* the structured caller wants the code, not the prose message */
+      sodium_memzero(&prov, sizeof(prov));
+      return rc;
+   }
+
+   char url[512];
+   snprintf(url, sizeof(url), "%s/accounts?fields=positions", SCHWAB_TRADER_BASE);
+
+   struct json_object *root = NULL;
+   rc = schwab_get_with_retry(&prov, user_id, url, bearer, sizeof(bearer), &root, NULL);
+   sodium_memzero(bearer, sizeof(bearer));
+   sodium_memzero(&prov, sizeof(prov));
+   if (rc != SCHWAB_RC_OK) {
+      return rc;
+   }
+
+   if (!out || schwab_portfolio_parse(root, out) != SUCCESS) {
+      json_object_put(root);
+      if (out) {
+         schwab_portfolio_free(out); /* self-enforce the "zeroed on non-OK" contract */
+      }
+      return SCHWAB_RC_ERROR;
+   }
+   out->as_of = (int64_t)time(NULL);
+   out->ext_hours = ext_hours;
+   json_object_put(root);
+   return SCHWAB_RC_OK;
 }
 
 /* ===== price history + analytics ===== */

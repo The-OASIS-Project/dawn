@@ -81,6 +81,9 @@
 #include "version.h"
 #include "webui/webui_always_on.h"
 #include "webui/webui_music.h"
+#ifdef DAWN_ENABLE_SCHWAB_TOOL
+#include "webui/webui_stocks.h"
+#endif
 
 #ifdef ENABLE_AUTH
 #include "auth/auth_crypto.h"
@@ -1970,6 +1973,11 @@ int webui_server_init(int port, const char *www_path) {
       OLOG_WARNING("WebUI: Music streaming subsystem not available");
    }
 
+#ifdef DAWN_ENABLE_SCHWAB_TOOL
+   /* Stocks panel refresher thread (owner's Schwab portfolio push). */
+   webui_stocks_start();
+#endif
+
    /* Register tool execution callback for debug display */
    llm_tools_set_execution_callback(webui_tool_execution_callback);
 
@@ -1984,6 +1992,9 @@ int webui_server_init(int port, const char *www_path) {
    if (pthread_create(&s_webui_thread, NULL, webui_thread_func, NULL) != 0) {
       OLOG_ERROR("WebUI: Failed to create server thread");
       llm_silent_observe_set_event_listener(NULL);
+#ifdef DAWN_ENABLE_SCHWAB_TOOL
+      webui_stocks_stop();
+#endif
       webui_music_cleanup();
 #ifdef ENABLE_WEBUI_AUDIO
       webui_audio_cleanup();
@@ -2063,6 +2074,11 @@ void webui_server_shutdown(void) {
    } else {
       OLOG_INFO("WebUI: Server thread exited cleanly");
    }
+
+#ifdef DAWN_ENABLE_SCHWAB_TOOL
+   /* Join the stocks refresher before tearing down (it fans via queue_response). */
+   webui_stocks_stop();
+#endif
 
    /* Destroy context */
    if (s_lws_context) {

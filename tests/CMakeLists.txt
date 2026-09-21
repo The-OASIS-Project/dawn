@@ -162,6 +162,14 @@ dawn_add_unit_test(test_schwab_txn
    LIBS    unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# Schwab portfolio snapshot parser + JSON serializer — pure (json-c only),
+# exercised against a synthetic /accounts fixture (multi-account, options, short).
+dawn_add_unit_test(test_schwab_portfolio
+   SOURCES test_schwab_portfolio.c
+           ${SRC_ROOT}/src/tools/schwab_portfolio.c
+   LIBS    unity ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # MCP HTTP+SSE transport — exercised against an in-test loopback HTTP+SSE
 # server (no external network), so it is CI-safe.
 dawn_add_unit_test(test_mcp_transport
