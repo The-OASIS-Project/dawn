@@ -229,11 +229,26 @@ static void *satellite_worker_thread(void *arg) {
    unsigned int expected_gen = work->request_gen;
    char *response = NULL;
 
+   /* The Tier-1/Tier-2 client keys its response_complete flag ONLY on a
+    * stream_end (or a satellite_response transcript) — never on state=idle or
+    * error (see dawn_satellite ws_client.c).  So every exit that OWNS this turn's
+    * outcome must emit exactly one terminal stream_end, or the satellite spins in
+    * VOICE_STATE_WAITING until its 50s response timeout.  A superseded exit is the
+    * one exception: its successor worker owns the terminal, so it stays silent
+    * (and if that successor fails to spawn, handle_satellite_query's
+    * satellite_reject_query still releases the client — so the hand-off is safe).
+    * This flag records "the client contract is satisfied" for both cases and lets
+    * the cleanup safety net release any future path that forgets. */
+   bool terminal_sent = false;
+
    /* Worker count already incremented in handle_satellite_query before pthread_create */
 
-   /* Check if session is still valid or if this request was superseded */
+   /* Check if session is still valid or if this request was superseded.  Either
+    * way this worker owes no terminal frame: a disconnected session has no client
+    * to release, and a superseding query's successor worker will send it. */
    if (!session || REQUEST_SUPERSEDED(session, expected_gen)) {
       OLOG_INFO("Satellite: Session disconnected or request superseded, aborting");
+      terminal_sent = true;
       goto cleanup;
    }
 
@@ -248,6 +263,7 @@ static void *satellite_worker_thread(void *arg) {
        * timer, so it would spin until the 50s response timeout.  Send stream_end
        * (empty response = nothing spoken) to release it immediately. */
       satellite_send_stream_end(session, "complete");
+      terminal_sent = true;
       satellite_send_state(session, "idle");
       goto cleanup;
    }
@@ -273,28 +289,38 @@ static void *satellite_worker_thread(void *arg) {
        session, text, NULL, NULL, NULL, 0, needs_server_tts ? webui_sentence_audio_callback : NULL,
        needs_server_tts ? session : NULL);
 
-   /* Check if request was superseded during LLM call */
+   /* Check if request was superseded during LLM call.  A superseding query has
+    * already spawned a successor worker that will emit the terminal frame, so
+    * this worker stays SILENT — sending stream_end here would release the client
+    * before the successor's real reply.  Mark the contract satisfied so the
+    * cleanup safety net does not fire. */
    if (REQUEST_SUPERSEDED(session, expected_gen)) {
       OLOG_INFO("Satellite: Request superseded during LLM call");
+      terminal_sent = true;
       goto cleanup;
    }
 
    if (!response) {
       satellite_send_error(session, "LLM_ERROR", "Failed to get response from AI");
+      satellite_send_stream_end(session, "error");
+      terminal_sent = true;
       satellite_send_state(session, "idle");
       goto cleanup;
    }
 
-   if (REQUEST_SUPERSEDED(session, expected_gen))
+   if (REQUEST_SUPERSEDED(session, expected_gen)) {
+      terminal_sent = true; /* successor owns the terminal frame (see above) */
       goto cleanup;
+   }
 
    /* Response is already canonical clean text (finalized centrally in
     * llm_call_finalize) — no per-seam strip needed. */
 
-   /* Send stream end if streaming was active */
-   if (atomic_load(&session->llm_streaming_active)) {
-      satellite_send_stream_end(session, "complete");
-   }
+   /* Terminate the turn.  Unconditional (not gated on llm_streaming_active): a
+    * non-streaming reply produces no stream to close, but the client still needs
+    * a stream_end to release its response_complete flag. */
+   satellite_send_stream_end(session, "complete");
+   terminal_sent = true;
 
    /* Return to idle state */
    satellite_send_state(session, "idle");
@@ -303,6 +329,11 @@ static void *satellite_worker_thread(void *arg) {
    session_update_interaction_complete(session);
 
 cleanup:
+   /* Safety net: any exit that did not already send a terminal frame (e.g. the
+    * early superseded/disconnected check above) must still release the client. */
+   if (session && !terminal_sent) {
+      satellite_send_stream_end(session, "error");
+   }
    if (session)
       session_release(session);
    free(response);
@@ -644,6 +675,22 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
    json_object_put(response);
 }
 
+/* Reject a satellite query AND release the waiting client.  The client keys its
+ * response_complete flag only on stream_end/transcript, never on an error frame,
+ * so a bare error here hangs it until the 50s response timeout.  Worse: if this
+ * query already bumped request_generation, the superseded predecessor worker
+ * stays silent (it expects THIS successor to send the terminal) — but a failed
+ * spawn means no successor runs.  Every post-registration failure therefore emits
+ * a terminal stream_end so the querying client is always released and the
+ * "successor owns the terminal" contract in satellite_worker_thread holds.
+ * Use only after the DAP2 registration guard (conn->session is a valid DAP2
+ * session); the NOT_REGISTERED rejection stays a plain error (no satellite to
+ * release). */
+static void satellite_reject_query(ws_connection_t *conn, const char *code, const char *message) {
+   send_error_impl(conn->wsi, code, message);
+   satellite_send_stream_end(conn->session, "error");
+}
+
 void handle_satellite_query(ws_connection_t *conn, struct json_object *payload) {
    if (!conn || !payload) {
       OLOG_WARNING("Satellite: Invalid query request");
@@ -661,19 +708,19 @@ void handle_satellite_query(ws_connection_t *conn, struct json_object *payload) 
    /* Extract query text */
    struct json_object *text_obj;
    if (!json_object_object_get_ex(payload, "text", &text_obj)) {
-      send_error_impl(conn->wsi, "INVALID_MESSAGE", "Missing 'text' in satellite_query");
+      satellite_reject_query(conn, "INVALID_MESSAGE", "Missing 'text' in satellite_query");
       return;
    }
 
    const char *text = json_object_get_string(text_obj);
    if (!text || strlen(text) == 0) {
-      send_error_impl(conn->wsi, "INVALID_MESSAGE", "Empty query text");
+      satellite_reject_query(conn, "INVALID_MESSAGE", "Empty query text");
       return;
    }
 
    /* Cap query length to prevent resource exhaustion (memory + LLM API cost) */
    if (strlen(text) > 8192) {
-      send_error_impl(conn->wsi, "INVALID_MESSAGE", "Query text too long (max 8192 chars)");
+      satellite_reject_query(conn, "INVALID_MESSAGE", "Query text too long (max 8192 chars)");
       return;
    }
 
@@ -683,7 +730,7 @@ void handle_satellite_query(ws_connection_t *conn, struct json_object *payload) 
    /* Create work item */
    satellite_work_t *work = calloc(1, sizeof(satellite_work_t));
    if (!work) {
-      send_error_impl(conn->wsi, "INTERNAL_ERROR", "Memory allocation failed");
+      satellite_reject_query(conn, "INTERNAL_ERROR", "Memory allocation failed");
       return;
    }
 
@@ -695,7 +742,7 @@ void handle_satellite_query(ws_connection_t *conn, struct json_object *payload) 
    if (!work->text) {
       session_release(session);
       free(work);
-      send_error_impl(conn->wsi, "INTERNAL_ERROR", "Memory allocation failed");
+      satellite_reject_query(conn, "INTERNAL_ERROR", "Memory allocation failed");
       return;
    }
 
@@ -705,7 +752,7 @@ void handle_satellite_query(ws_connection_t *conn, struct json_object *payload) 
       atomic_fetch_sub(&g_active_satellite_workers, 1);
       OLOG_WARNING("Satellite: Worker limit reached (%d), rejecting query from %s",
                    MAX_SATELLITE_WORKERS, session->identity.name);
-      send_error_impl(conn->wsi, "BUSY", "Server busy processing other requests");
+      satellite_reject_query(conn, "BUSY", "Server busy processing other requests");
       session_release(session);
       free(work->text);
       free(work);
@@ -729,7 +776,7 @@ void handle_satellite_query(ws_connection_t *conn, struct json_object *payload) 
       session_release(session);
       free(work->text);
       free(work);
-      send_error_impl(conn->wsi, "INTERNAL_ERROR", "Failed to start processing");
+      satellite_reject_query(conn, "INTERNAL_ERROR", "Failed to start processing");
       return;
    }
 
