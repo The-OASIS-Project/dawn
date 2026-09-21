@@ -42,6 +42,7 @@
 #include "dawn_error.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_local_provider.h"
+#include "llm/llm_pricing.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
 #include "tools/toml.h"
@@ -144,6 +145,9 @@ typedef struct {
    int last_completion_tokens;
    int total_prompt_tokens;
    int total_completion_tokens;
+   int last_cached_tokens;      /* Cache-read prompt tokens from the last sub-call */
+   int last_cache_write_tokens; /* Cache-write prompt tokens from the last sub-call (GPT-5.6+) */
+   int last_saved_input_tokens; /* Provider-discounted net input tokens saved (may be negative) */
 } session_token_tracking_t;
 
 #define MAX_TRACKED_SESSIONS 16
@@ -763,10 +767,19 @@ static session_token_tracking_t *get_session_tracking(uint32_t session_id, bool 
    return entry;
 }
 
-void llm_context_update_usage(uint32_t session_id,
-                              int prompt_tokens,
-                              int completion_tokens,
-                              int cached_tokens) {
+void llm_context_update_usage(uint32_t session_id, const llm_usage_report_t *usage) {
+   if (!usage) {
+      return;
+   }
+   const int prompt_tokens = usage->prompt_tokens;
+   const int completion_tokens = usage->completion_tokens;
+   const int cached_tokens = usage->cached_tokens;
+   const int cache_write_tokens = usage->cache_write_tokens;
+   /* Derive the provider-discounted savings here (pure, no shared state) so it is
+    * computed once at the token-producing site where the provider is unambiguous. */
+   const int saved_input_tokens = llm_cache_saved_input_tokens(usage->type, usage->provider,
+                                                               cached_tokens, cache_write_tokens);
+
    pthread_mutex_lock(&s_state.mutex);
 
    session_token_tracking_t *tracking = get_session_tracking(session_id, true);
@@ -775,6 +788,9 @@ void llm_context_update_usage(uint32_t session_id,
       tracking->last_completion_tokens = completion_tokens;
       tracking->total_prompt_tokens += prompt_tokens;
       tracking->total_completion_tokens += completion_tokens;
+      tracking->last_cached_tokens = cached_tokens;
+      tracking->last_cache_write_tokens = cache_write_tokens;
+      tracking->last_saved_input_tokens = saved_input_tokens;
    }
 
    /* Check if we need to re-query Ollama context. Set authoritative=true under
@@ -888,6 +904,36 @@ void llm_context_get_last_usage(int *current_tokens, int *max_tokens, float *thr
    if (threshold) {
       *threshold = g_config.llm.compact_hard_threshold;
    }
+}
+
+void llm_context_get_last_cache(uint32_t session_id, llm_cache_snapshot_t *out) {
+   if (!out) {
+      return;
+   }
+   llm_cache_snapshot_t snap = { 0 };
+   pthread_mutex_lock(&s_state.mutex);
+   session_token_tracking_t *tracking = get_session_tracking(session_id, false);
+   if (tracking) {
+      snap.prompt_tokens = tracking->last_prompt_tokens;
+      snap.cached_tokens = tracking->last_cached_tokens;
+      snap.cache_write_tokens = tracking->last_cache_write_tokens;
+      snap.saved_input_tokens = tracking->last_saved_input_tokens;
+   }
+   pthread_mutex_unlock(&s_state.mutex);
+   *out = snap;
+}
+
+void llm_context_reset_turn_cache(uint32_t session_id) {
+   pthread_mutex_lock(&s_state.mutex);
+   /* create=false: a session with no tracking slot yet has nothing to carry over
+    * (a fresh slot is created zeroed by the next update_usage). */
+   session_token_tracking_t *tracking = get_session_tracking(session_id, false);
+   if (tracking) {
+      tracking->last_cached_tokens = 0;
+      tracking->last_cache_write_tokens = 0;
+      tracking->last_saved_input_tokens = 0;
+   }
+   pthread_mutex_unlock(&s_state.mutex);
 }
 
 int llm_context_estimate_tokens(struct json_object *history) {

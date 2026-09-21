@@ -122,6 +122,10 @@ void send_metrics_impl(struct lws *wsi,
                        int ttft_ms,
                        float token_rate,
                        int context_tokens,
+                       int input_tokens,
+                       int cached_tokens,
+                       int cache_write_tokens,
+                       int cache_saved_tokens,
                        int64_t conversation_id);
 void send_music_position_impl(struct lws *wsi, double position_sec, uint32_t duration_sec);
 void send_reasoning_summary_impl(struct lws *wsi,

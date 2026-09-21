@@ -485,7 +485,24 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
 
       session_t *session = session_get_command_context();
       uint32_t session_id = session ? session->session_id : 0;
-      llm_context_update_usage(session_id, input_tokens, output_tokens, cached_tokens);
+      /* This OpenAI-compat path also fronts Gemini and OpenRouter — derive the
+       * real provider from the endpoint so cache-savings uses the right discount
+       * (Gemini and OpenAI differ). Local turns bill nothing regardless of this.
+       * Chat Completions reports no cache-write count → 0. */
+      cloud_provider_t token_provider = CLOUD_PROVIDER_OPENAI;
+      if (base_url) {
+         if (strstr(base_url, "generativelanguage.googleapis.com"))
+            token_provider = CLOUD_PROVIDER_GEMINI;
+         else if (strstr(base_url, "openrouter.ai"))
+            token_provider = CLOUD_PROVIDER_OPENROUTER;
+      }
+      llm_usage_report_t usage = { .prompt_tokens = input_tokens,
+                                   .completion_tokens = output_tokens,
+                                   .cached_tokens = cached_tokens,
+                                   .cache_write_tokens = 0,
+                                   .type = token_type,
+                                   .provider = token_provider };
+      llm_context_update_usage(session_id, &usage);
    }
 
    const char *content_str = json_object_get_string(content);

@@ -3022,6 +3022,17 @@ void webui_send_metrics_update(session_t *session,
    resp.metrics.ttft_ms = ttft_ms;
    resp.metrics.token_rate = token_rate;
    resp.metrics.context_pct = context_percent;
+   /* Per-session cache figures from the last completed LLM sub-call. Meaningful on
+    * the terminal "idle" frame (emitted after usage is parsed); the mid-stream
+    * "thinking" frames carry the prior turn's value — the client gates on state.
+    * input_tokens is the denominator for the cache-hit rate; cache_saved_tokens is
+    * the provider-discounted net input-token saving. */
+   llm_cache_snapshot_t cache = { 0 };
+   llm_context_get_last_cache(session->session_id, &cache);
+   resp.metrics.input_tokens = cache.prompt_tokens;
+   resp.metrics.cached_tokens = cache.cached_tokens;
+   resp.metrics.cache_write_tokens = cache.cache_write_tokens;
+   resp.metrics.cache_saved_tokens = cache.saved_input_tokens;
    resp.metrics.conversation_id = atomic_load(&session->stream_conversation_id);
 
    queue_response(&resp);

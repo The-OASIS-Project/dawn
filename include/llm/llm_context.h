@@ -161,20 +161,68 @@ void llm_context_refresh_local(void);
  * ============================================================================= */
 
 /**
- * @brief Update token count from LLM response
+ * @brief A turn's token usage, reported to the context tracker
  *
- * Call this after each LLM response with the usage information.
- * Tracks per-session token usage.
+ * Passed as a struct (rather than positional args) so the four provider call
+ * sites can't transpose the several int fields, and so the provider/type that
+ * produced the tokens travels with them for cache-savings accounting.
+ */
+typedef struct {
+   int prompt_tokens;         /**< Full prompt (input) token count */
+   int completion_tokens;     /**< Output token count */
+   int cached_tokens;         /**< Prompt tokens read from cache (0 if none) */
+   int cache_write_tokens;    /**< Prompt tokens newly written to cache (GPT-5.6+/Claude; else 0) */
+   llm_type_t type;           /**< LLM_LOCAL or LLM_CLOUD (selects cache economics) */
+   cloud_provider_t provider; /**< Cloud provider that produced the tokens */
+} llm_usage_report_t;
+
+/**
+ * @brief Update token/cache counts from an LLM response (per session)
+ *
+ * Call once per completed LLM sub-call with its usage. Tracks per-session token
+ * usage and derives the provider-discounted cache saving for later display.
  *
  * @param session_id Session to update
- * @param prompt_tokens Tokens used for prompt (from response)
- * @param completion_tokens Tokens used for completion
- * @param cached_tokens Cached tokens (if applicable)
+ * @param usage This sub-call's usage report (must be non-NULL)
  */
-void llm_context_update_usage(uint32_t session_id,
-                              int prompt_tokens,
-                              int completion_tokens,
-                              int cached_tokens);
+void llm_context_update_usage(uint32_t session_id, const llm_usage_report_t *usage);
+
+/**
+ * @brief The last turn's cache-facing token snapshot for a session
+ *
+ * All fields mirror last_prompt_tokens semantics: for a multi-iteration tool
+ * turn they reflect the LAST LLM sub-call, not a sum across iterations.
+ * saved_input_tokens is the provider-discounted net input-token saving and can
+ * be negative on a cache-write-heavy turn.
+ */
+typedef struct {
+   int prompt_tokens;      /**< Full prompt (input) tokens — the cache-rate denominator */
+   int cached_tokens;      /**< Cache-read prompt tokens */
+   int cache_write_tokens; /**< Cache-write prompt tokens */
+   int saved_input_tokens; /**< Net effective input tokens saved (may be negative) */
+} llm_cache_snapshot_t;
+
+/**
+ * @brief Get the last turn's cache snapshot for a session (WebUI display)
+ *
+ * Zero-fills @p out for an unknown session. @p out must be non-NULL.
+ *
+ * @param session_id Session to query
+ * @param[out] out Snapshot (zeroed if the session has no tracking slot yet)
+ */
+void llm_context_get_last_cache(uint32_t session_id, llm_cache_snapshot_t *out);
+
+/**
+ * @brief Clear a session's cache-token trackers at the start of a turn
+ *
+ * Call once per turn before the LLM streams so an interrupted or usage-less turn
+ * (Stop / barge-in / a provider that omits the usage chunk) reports 0 cache
+ * tokens on its idle metrics frame instead of carrying over the prior turn's
+ * figures. A normal turn overwrites these when its usage chunk is parsed.
+ *
+ * @param session_id Session to reset
+ */
+void llm_context_reset_turn_cache(uint32_t session_id);
 
 /**
  * @brief Get current context usage for a session

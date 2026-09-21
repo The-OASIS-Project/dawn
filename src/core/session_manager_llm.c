@@ -40,6 +40,7 @@
 #include "core/llm_response_finalize.h"
 #include "core/session_manager.h"
 #include "core/text_filter.h"
+#include "llm/llm_context.h"
 #include "llm/llm_interface.h"
 #include "logging.h"
 #include "tools/time_utils.h"
@@ -161,6 +162,13 @@ static int llm_call_prepare(session_t *session,
       free(session->final_reasoning_json);
       session->final_reasoning_json = NULL;
    }
+
+   /* Turn-start reset of the per-turn cache-token trackers so an interrupted or
+    * usage-less turn (Stop / wake-word barge-in / a provider that omits the usage
+    * chunk) reports 0 cache tokens on its idle metrics frame rather than carrying
+    * over the prior turn's figures.  A normal turn overwrites these when its usage
+    * chunk is parsed, before the idle frame fires in llm_call_finalize. */
+   llm_context_reset_turn_cache(session->session_id);
 
    // Add user message to history (unless caller already did)
    if (!skip_add_message) {

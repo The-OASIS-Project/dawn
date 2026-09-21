@@ -735,7 +735,13 @@ static void responses_handle_event(const char *event_type, const char *event_dat
 #else
                uint32_t session_id = 0;
 #endif
-               llm_context_update_usage(session_id, input_tokens, output_tokens, cached_tokens);
+               llm_usage_report_t usage = { .prompt_tokens = input_tokens,
+                                            .completion_tokens = output_tokens,
+                                            .cached_tokens = cached_tokens,
+                                            .cache_write_tokens = cache_write_tokens,
+                                            .type = LLM_CLOUD,
+                                            .provider = CLOUD_PROVIDER_OPENAI };
+               llm_context_update_usage(session_id, &usage);
                OLOG_INFO("Responses usage: %d input, %d output, %d cached, %d write tokens",
                          input_tokens, output_tokens, cached_tokens, cache_write_tokens);
             }

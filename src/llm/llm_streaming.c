@@ -795,7 +795,14 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
 
          // Update context usage tracking with actual session ID
          uint32_t session_id = ws_session ? ws_session->session_id : 0;
-         llm_context_update_usage(session_id, input_tokens, output_tokens, cached_tokens);
+         /* This streaming path (local / OpenAI-compat) has no cache-write count → 0. */
+         llm_usage_report_t usage = { .prompt_tokens = input_tokens,
+                                      .completion_tokens = output_tokens,
+                                      .cached_tokens = cached_tokens,
+                                      .cache_write_tokens = 0,
+                                      .type = type,
+                                      .provider = ctx->cloud_provider };
+         llm_context_update_usage(session_id, &usage);
 
          // Calculate accurate token rate from actual output tokens and streaming duration
          // This is more accurate than counting chunks for providers like Gemini
@@ -1128,10 +1135,24 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
             metrics_record_llm_tokens(LLM_CLOUD, CLOUD_PROVIDER_CLAUDE,
                                       ctx->provider.claude.input_tokens, output_tokens, cached);
 
-            // Update context usage tracking with actual session ID
+            // Update context usage tracking with actual session ID.
+            // Anthropic reports input_tokens (UNCACHED), cache_read, and
+            // cache_creation as three separate additive counts, so the full
+            // prompt = their sum. Use that as prompt_tokens so cached <= prompt
+            // (the cache-hit-rate denominator) and context occupancy are correct.
             uint32_t session_id = ws_session ? ws_session->session_id : 0;
-            llm_context_update_usage(session_id, ctx->provider.claude.input_tokens, output_tokens,
-                                     cached);
+            int claude_prompt_tokens = ctx->provider.claude.input_tokens +
+                                       ctx->provider.claude.cache_read_input_tokens +
+                                       ctx->provider.claude.cache_creation_input_tokens;
+            llm_usage_report_t usage = {
+               .prompt_tokens = claude_prompt_tokens,
+               .completion_tokens = output_tokens,
+               .cached_tokens = cached,
+               .cache_write_tokens = ctx->provider.claude.cache_creation_input_tokens,
+               .type = LLM_CLOUD,
+               .provider = CLOUD_PROVIDER_CLAUDE
+            };
+            llm_context_update_usage(session_id, &usage);
 
             // Calculate accurate token rate from actual output tokens
             if (output_tokens > 0 && has_ws_session) {

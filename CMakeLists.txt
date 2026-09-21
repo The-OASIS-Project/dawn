@@ -590,6 +590,7 @@ set(DAWN_SOURCES
     src/llm/llm_tools.c
     src/llm/llm_tool_loop.c
     src/llm/llm_context.c
+    src/llm/llm_pricing.c
     src/llm/llm_local_provider.c
     src/llm/sse_parser.c
     src/llm/llm_rate_limit.c

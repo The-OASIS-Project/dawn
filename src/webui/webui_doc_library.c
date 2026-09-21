@@ -592,6 +592,77 @@ void handle_doc_library_note_update(ws_connection_t *conn, json_object *payload)
    json_object_put(response);
 }
 
+/* v63: replace a MULTI-chunk document's full text in place (re-chunk + re-embed),
+ * owner-scoped.  Single-chunk notes are edited via doc_library_note_update; this
+ * verb refuses a note so it can't silently convert one into a document.
+ * document_doc_update archives the prior content first, so the edit is undoable
+ * via doc_library_version_restore.  Payload: { id: <document_id>, text: <full new
+ * text> }.  Pre-v63 uploads without stored full text are rejected by the update
+ * ("re-save to enable editing"), surfaced in the error field. */
+void handle_doc_library_doc_update(ws_connection_t *conn, json_object *payload) {
+   if (!conn_require_auth(conn))
+      return;
+
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type",
+                          json_object_new_string("doc_library_doc_update_response"));
+   json_object *resp_payload = json_object_new_object();
+
+   json_object *id_obj = NULL, *text_obj = NULL;
+   int64_t doc_id = 0;
+   if (!payload || !json_object_object_get_ex(payload, "id", &id_obj) ||
+       (doc_id = json_object_get_int64(id_obj)) <= 0 ||
+       !json_object_object_get_ex(payload, "text", &text_obj)) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("a valid id and text are required"));
+      goto send;
+   }
+
+   /* Owner gate + note guard up front so we return a precise error rather than
+    * letting a note get re-chunked as a generic document. */
+   document_t doc;
+   if (document_db_get(doc_id, &doc) != SUCCESS || doc.user_id != conn->auth_user_id) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Document not found (or not yours)"));
+      goto send;
+   }
+   /* Refuse notes on filetype alone (fail-closed): a note is always single-chunk,
+    * so this can't convert one into a document even if num_chunks ever drifts. */
+   if (strcmp(doc.filetype, "note") == 0) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string(
+                                 "That item is a note — edit it via doc_library_note_update"));
+      goto send;
+   }
+
+   {
+      const char *text = json_object_get_string(text_obj);
+      doc_index_result_t result;
+      int rc = document_doc_update(conn->auth_user_id, doc_id, text, text ? strlen(text) : 0,
+                                   &result);
+      if (rc != DOC_INDEX_SUCCESS) {
+         json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+         json_object_object_add(resp_payload, "error",
+                                json_object_new_string(result.error_msg[0]
+                                                           ? result.error_msg
+                                                           : document_index_error_string(rc)));
+      } else {
+         json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+         json_object_object_add(resp_payload, "id", json_object_new_int64(doc_id));
+         OLOG_INFO("doc_library: user %d updated document %lld (%d chunks)", conn->auth_user_id,
+                   (long long)doc_id, result.num_chunks);
+      }
+   }
+
+send:
+   json_object_object_add(response, "payload", resp_payload);
+   send_json_response(conn, response);
+   json_object_put(response);
+}
+
 /* v62: list a document/note's archived versions (newest first), owner-scoped.
  * Payload: { id: <document_id> }. */
 void handle_doc_library_version_list(ws_connection_t *conn, json_object *payload) {

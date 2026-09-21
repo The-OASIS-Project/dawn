@@ -289,6 +289,10 @@ typedef struct {
          int ttft_ms;      /* Time to first token (ms) */
          float token_rate; /* Tokens per second */
          int context_pct;  /* Context utilization 0-100 */
+         int input_tokens; /* This turn's prompt tokens (last sub-call) — cache-rate denominator */
+         int cached_tokens; /* Cache-read prompt tokens for this turn (last sub-call; 0 = miss) */
+         int cache_write_tokens; /* Cache-write prompt tokens for this turn (0 when unreported) */
+         int cache_saved_tokens; /* Provider-discounted net input tokens saved (may be negative) */
          int64_t
              conversation_id; /* turn's conversation — client gates the footer to the active view */
       } metrics;

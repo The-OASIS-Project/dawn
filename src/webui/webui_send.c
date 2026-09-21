@@ -589,14 +589,32 @@ void send_metrics_impl(struct lws *wsi,
                        int ttft_ms,
                        float token_rate,
                        int context_pct,
+                       int input_tokens,
+                       int cached_tokens,
+                       int cache_write_tokens,
+                       int cache_saved_tokens,
                        int64_t conversation_id) {
-   char json[256];
+   char json[384];
+   /* input_tokens (this turn's prompt) is the cache-rate denominator: hit% =
+    * cached_tokens / input_tokens. cached_tokens is always present (0 = miss);
+    * cache_write_tokens only when non-zero (GPT-5.6+ / Claude) so clients feature-
+    * detect it. cache_saved_tokens is the provider-discounted net input-token
+    * saving (may be negative on a cache-write turn). All cache figures are
+    * meaningful only on the final "idle" frame — the mid-stream "thinking" frames
+    * carry the prior turn's value; the client gates on state. */
+   char cache_write_field[48] = "";
+   if (cache_write_tokens > 0) {
+      snprintf(cache_write_field, sizeof(cache_write_field), ",\"cache_write_tokens\":%d",
+               cache_write_tokens);
+   }
    /* conversation_id lets the client gate the footer to the active view — a
     * background turn's tok/s/TTFT must not update the footer of an idle view. */
    snprintf(json, sizeof(json),
             "{\"type\":\"metrics_update\",\"payload\":{\"state\":\"%s\",\"ttft_ms\":%d,"
-            "\"token_rate\":%.1f,\"context_percent\":%d,\"conversation_id\":%lld}}",
-            state, ttft_ms, token_rate, context_pct, (long long)conversation_id);
+            "\"token_rate\":%.1f,\"context_percent\":%d,\"input_tokens\":%d,\"cached_tokens\":%d%s,"
+            "\"cache_saved_tokens\":%d,\"conversation_id\":%lld}}",
+            state, ttft_ms, token_rate, context_pct, input_tokens, cached_tokens, cache_write_field,
+            cache_saved_tokens, (long long)conversation_id);
    send_json_message(wsi, json);
 }
 
@@ -953,6 +971,8 @@ void process_one_response(void) {
       case WS_RESP_METRICS_UPDATE:
          send_metrics_impl(conn->wsi, resp.metrics.state, resp.metrics.ttft_ms,
                            resp.metrics.token_rate, resp.metrics.context_pct,
+                           resp.metrics.input_tokens, resp.metrics.cached_tokens,
+                           resp.metrics.cache_write_tokens, resp.metrics.cache_saved_tokens,
                            resp.metrics.conversation_id);
          break;
       case WS_RESP_COMPACTION_COMPLETE:

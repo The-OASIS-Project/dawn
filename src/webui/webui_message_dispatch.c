@@ -1266,6 +1266,10 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       if (payload) {
          handle_doc_library_note_update(conn, payload);
       }
+   } else if (strcmp(type, "doc_library_doc_update") == 0) {
+      if (payload) {
+         handle_doc_library_doc_update(conn, payload);
+      }
    } else if (strcmp(type, "doc_library_version_list") == 0) {
       if (payload) {
          handle_doc_library_version_list(conn, payload);
