@@ -1047,7 +1047,19 @@ static const char *SCHEMA_SQL =
                                   ");"
                                   "CREATE INDEX IF NOT EXISTS idx_messaging_link_attempts_recent "
                                   "  ON messaging_link_attempts(provider, sender_address, "
-                                  "created_at);";
+                                  "created_at);"
+                                  /* Per-user stocks watchlist (arbitrary not-held tickers the
+                                   * WebUI stocks panel tracks). One row per symbol; the
+                                   * (user_id, symbol) PK also serves the per-user lookup.
+                                   * `position` is reserved for future user-defined ordering —
+                                   * rows are currently returned ordered by added_at. */
+                                  "CREATE TABLE IF NOT EXISTS stocks_watchlist ("
+                                  "  user_id INTEGER NOT NULL,"
+                                  "  symbol TEXT NOT NULL,"
+                                  "  position INTEGER NOT NULL DEFAULT 0,"
+                                  "  added_at INTEGER NOT NULL,"
+                                  "  PRIMARY KEY(user_id, symbol)"
+                                  ");";
 
 /* =============================================================================
  * Schema Version and Migration

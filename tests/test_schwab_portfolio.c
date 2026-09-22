@@ -195,6 +195,64 @@ static void test_to_json_state_only(void) {
    free(js);
 }
 
+/* The ext-hours overlay: /accounts carries no pre/post price, so the snapshot merges
+ * it onto positions. Here we set it directly on one position and confirm the row
+ * serializes an ext:{price,change,change_pct} object, while a position without it
+ * omits ext entirely (feature-detectable by the client). */
+static void test_to_json_ext(void) {
+   struct json_object *root = json_tokener_parse(FIXTURE);
+   schwab_portfolio_t p;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, schwab_portfolio_parse(root, &p));
+   json_object_put(root);
+
+   schwab_position_t *aapl = &p.accounts[0].positions[0];
+   aapl->has_ext = true;
+   aapl->ext_last = 191.25;
+   aapl->ext_change = 1.25;
+   aapl->ext_change_pct = 0.6579;
+   /* SPY (positions[1]) is left without ext → its row must omit the object. */
+
+   char *js = schwab_portfolio_to_json(&p, "ok", "post", true, 0);
+   TEST_ASSERT_NOT_NULL(js);
+   struct json_object *back = json_tokener_parse(js);
+   struct json_object *accts = NULL, *v = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(back, "accounts", &accts));
+   struct json_object *a0 = json_object_array_get_idx(accts, 0);
+   struct json_object *pos = NULL;
+   json_object_object_get_ex(a0, "positions", &pos);
+
+   struct json_object *p0 = json_object_array_get_idx(pos, 0); /* AAPL — has ext */
+   struct json_object *ext = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(p0, "ext", &ext));
+   json_object_object_get_ex(ext, "price", &v);
+   TEST_ASSERT_DOUBLE_WITHIN(1e-6, 191.25, json_object_get_double(v));
+   json_object_object_get_ex(ext, "change", &v);
+   TEST_ASSERT_DOUBLE_WITHIN(1e-6, 1.25, json_object_get_double(v));
+   json_object_object_get_ex(ext, "change_pct", &v);
+   TEST_ASSERT_DOUBLE_WITHIN(1e-4, 0.6579, json_object_get_double(v));
+
+   struct json_object *p1 = json_object_array_get_idx(pos, 1); /* SPY — no ext */
+   TEST_ASSERT_FALSE(json_object_object_get_ex(p1, "ext", &v));
+
+   json_object_put(back);
+   free(js);
+
+   /* Same snapshot (AAPL still has_ext), but market "closed" → ext suppressed at
+    * build time even from a cached has_ext position (stale-ext-after-close guard). */
+   char *jsc = schwab_portfolio_to_json(&p, "ok", "closed", true, 0);
+   struct json_object *backc = json_tokener_parse(jsc);
+   struct json_object *acctsc = NULL;
+   json_object_object_get_ex(backc, "accounts", &acctsc);
+   struct json_object *posc = NULL;
+   json_object_object_get_ex(json_object_array_get_idx(acctsc, 0), "positions", &posc);
+   struct json_object *pc0 = json_object_array_get_idx(posc, 0); /* AAPL */
+   TEST_ASSERT_FALSE(json_object_object_get_ex(pc0, "ext", &v));
+   json_object_put(backc);
+   free(jsc);
+
+   schwab_portfolio_free(&p);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_asset_type_mapping);
@@ -202,5 +260,6 @@ int main(void) {
    RUN_TEST(test_parse_fixture);
    RUN_TEST(test_to_json_roundtrip);
    RUN_TEST(test_to_json_state_only);
+   RUN_TEST(test_to_json_ext);
    return UNITY_END();
 }

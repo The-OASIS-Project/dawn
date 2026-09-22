@@ -164,6 +164,14 @@ typedef struct {
    bool stocks_subscribed;
    bool stocks_ext_hours;
 
+   /* Watchlist panel push (independent of the portfolio subscription above): while
+    * subscribed, the refresher fans stocks_watch_update (quotes for the user's
+    * watched, not-held tickers) to this connection. stocks_watch_ext_hours opts this
+    * connection into the extended-hours price overlay (aggregated per user; the
+    * overlay is emitted only during an active pre/post window). */
+   bool stocks_watch_subscribed;
+   bool stocks_watch_ext_hours;
+
    /* Client IP address (captured at connection establishment for reliable logging) */
    char client_ip[64];
 

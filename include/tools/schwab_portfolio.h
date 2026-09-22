@@ -56,6 +56,13 @@ typedef struct {
    double unrealized_pl_pct; /* vs cost basis (value − unrealized_pl); 0 if undefined */
    double day_change;        /* currentDayProfitLoss */
    double day_change_pct;    /* vs prior close (value − day_change); 0 if undefined */
+   /* Extended-hours overlay — /accounts omits it; the snapshot enriches these from a
+    * /quotes?fields=quote,regular,extended lookup only during an active pre/post
+    * window. Change is per-share, measured against the regular-session close. */
+   bool has_ext;          /* true = an extended last price was merged in */
+   double ext_last;       /* extended.lastPrice (per-share pre/post-market last) */
+   double ext_change;     /* ext_last − regular-session close (per share) */
+   double ext_change_pct; /* ext_change as a signed % of the regular close */
 } schwab_position_t;
 
 typedef struct {

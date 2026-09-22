@@ -26,6 +26,7 @@
 
 #include "tools/schwab_client.h"    /* schwab_rc_t */
 #include "tools/schwab_portfolio.h" /* schwab_portfolio_t */
+#include "tools/schwab_quotes.h"    /* schwab_quote_t */
 #include "tools/schwab_stats.h"     /* schwab_history_stats + types */
 
 /**
@@ -58,6 +59,34 @@ schwab_rc_t schwab_service_portfolio_snapshot(int user_id, bool ext_hours, schwa
  * when not linked or the link time is unknown (caller omits the hint).
  */
 int64_t schwab_service_link_expires_at(int user_id);
+
+/**
+ * Batch-quote up to SCHWAB_MAX_SYMBOLS @p syms into @p out (up to @p max; @p n_out
+ * set). URL-safety is enforced internally. Requests quote+reference; when @p ext_hours
+ * is set (an active pre/post window) it also requests regular+extended so the parser
+ * fills each quote's ext overlay. Used by the watchlist.
+ */
+schwab_rc_t schwab_service_quotes(int user_id,
+                                  const char *const *syms,
+                                  int n_syms,
+                                  bool ext_hours,
+                                  schwab_quote_t *out,
+                                  int max,
+                                  int *n_out);
+
+/**
+ * Validate @p syms against Schwab: fills @p invalid (up to @p inv_max) with the
+ * symbols Schwab explicitly flagged (errors.invalidSymbols) and sets @p n_invalid.
+ * A symbol NOT flagged is treated as valid (returned quote, or ambiguous-but-not-
+ * rejected). Returns the schwab_rc_t; on non-OK, @p n_invalid is 0 (validation
+ * couldn't run — the caller decides its fallback).
+ */
+schwab_rc_t schwab_service_validate_symbols(int user_id,
+                                            const char *const *syms,
+                                            int n_syms,
+                                            char (*invalid)[SCHWAB_SYMBOL_MAX],
+                                            int inv_max,
+                                            int *n_invalid);
 
 /**
  * Build an LLM-facing price-history answer for ONE symbol. @p range is one of

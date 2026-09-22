@@ -30,6 +30,12 @@ void handle_stocks_portfolio_subscribe(ws_connection_t *conn, struct json_object
 void handle_stocks_portfolio_unsubscribe(ws_connection_t *conn, struct json_object *payload);
 void handle_stocks_portfolio_get(ws_connection_t *conn, struct json_object *payload);
 
+/* Watchlist WS handlers — a separate panel/subscription from the portfolio above. */
+void handle_stocks_watch_subscribe(ws_connection_t *conn, struct json_object *payload);
+void handle_stocks_watch_unsubscribe(ws_connection_t *conn, struct json_object *payload);
+void handle_stocks_watch_get(ws_connection_t *conn, struct json_object *payload);
+void handle_stocks_watch_set(ws_connection_t *conn, struct json_object *payload);
+
 /* Lifecycle: start/stop the dedicated refresher thread (idempotent). */
 void webui_stocks_start(void);
 void webui_stocks_stop(void);

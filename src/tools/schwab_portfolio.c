@@ -29,6 +29,7 @@
 #include <string.h>
 
 #include "dawn_error.h"
+#include "tools/schwab_quotes.h" /* schwab_quotes_add_ext_obj — shared ext-row emitter */
 
 /* ----- small json-c accessors (null-safe), mirroring schwab_service.c ----- */
 
@@ -197,7 +198,11 @@ int schwab_portfolio_parse(struct json_object *root, schwab_portfolio_t *out) {
    return SUCCESS;
 }
 
-static struct json_object *position_json(const schwab_position_t *p) {
+/* @p ext_session gates the ext overlay: the cache can hold has_ext positions fetched
+ * in the last pre/post window and re-serve them after close (no fetch when closed), so
+ * emit the ext object only while the session is actually pre/post — matching the wire
+ * contract regardless of cache age. */
+static struct json_object *position_json(const schwab_position_t *p, bool ext_session) {
    struct json_object *o = json_object_new_object();
    json_object_object_add(o, "symbol", json_object_new_string(p->symbol));
    if (p->description[0]) {
@@ -213,6 +218,9 @@ static struct json_object *position_json(const schwab_position_t *p) {
    json_object_object_add(o, "unrealized_pl_pct", json_object_new_double(p->unrealized_pl_pct));
    json_object_object_add(o, "day_change", json_object_new_double(p->day_change));
    json_object_object_add(o, "day_change_pct", json_object_new_double(p->day_change_pct));
+   if (p->has_ext && ext_session) {
+      schwab_quotes_add_ext_obj(o, p->ext_last, p->ext_change, p->ext_change_pct);
+   }
    return o;
 }
 
@@ -232,6 +240,10 @@ struct json_object *schwab_portfolio_payload_jobj(const schwab_portfolio_t *p,
    if (link_expires_at > 0) {
       json_object_object_add(payload, "link_expires_at", json_object_new_int64(link_expires_at));
    }
+
+   /* Emit the ext overlay only while the session is actually pre/post (see
+    * position_json) — the cache can outlive the window. */
+   bool ext_session = market && (strcmp(market, "pre") == 0 || strcmp(market, "post") == 0);
 
    if (p) {
       json_object_object_add(payload, "total_value", json_object_new_double(p->total_value));
@@ -258,7 +270,7 @@ struct json_object *schwab_portfolio_payload_jobj(const schwab_portfolio_t *p,
                                 json_object_new_double(a->unrealized_pl_pct));
          struct json_object *pos = json_object_new_array();
          for (int j = 0; j < a->position_count; j++) {
-            json_object_array_add(pos, position_json(&a->positions[j]));
+            json_object_array_add(pos, position_json(&a->positions[j], ext_session));
          }
          json_object_object_add(ao, "positions", pos);
          json_object_array_add(accts, ao);

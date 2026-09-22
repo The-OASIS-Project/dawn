@@ -3057,6 +3057,31 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       errmsg = NULL;
    }
 
+   /* v86: stocks_watchlist — per-user WebUI stocks watchlist (arbitrary not-held
+    * tickers). Base SCHEMA_SQL carries the table; this CREATE back-fills an existing
+    * DB. CREATE TABLE IF NOT EXISTS is idempotent, so (unlike the ALTER steps above)
+    * it also runs harmlessly on a fresh install. Gated `< 86`. */
+   bool v86_ok = (current_version >= 86);
+   if (current_version < 86) {
+      rc = sqlite3_exec(s_db.db,
+                        "CREATE TABLE IF NOT EXISTS stocks_watchlist ("
+                        "  user_id INTEGER NOT NULL,"
+                        "  symbol TEXT NOT NULL,"
+                        "  position INTEGER NOT NULL DEFAULT 0,"
+                        "  added_at INTEGER NOT NULL,"
+                        "  PRIMARY KEY(user_id, symbol))",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v86 migration (stocks_watchlist) failed: %s",
+                    errmsg ? errmsg : "unknown");
+         v86_ok = false;
+      } else {
+         v86_ok = true;
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
    /* Log migration if upgrading from an older version */
    if (current_version > 0 && current_version < AUTH_DB_SCHEMA_VERSION) {
       OLOG_INFO("auth_db: migrated schema from v%d to v%d", current_version,
@@ -3080,7 +3105,7 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
                               v62_ok && v63_ok && v64_ok && v65_ok && v66_ok && v67_ok && v68_ok &&
                               v69_ok && v70_ok && v71_ok && v72_ok && v73_ok && v74_ok && v75_ok &&
                               v76_ok && v77_ok && v78_ok && v79_ok && v80_ok && v81_ok && v82_ok &&
-                              v83_ok && v84_ok && v85_ok;
+                              v83_ok && v84_ok && v85_ok && v86_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

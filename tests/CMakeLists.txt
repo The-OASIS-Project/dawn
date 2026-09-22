@@ -167,6 +167,7 @@ dawn_add_unit_test(test_schwab_txn
 dawn_add_unit_test(test_schwab_portfolio
    SOURCES test_schwab_portfolio.c
            ${SRC_ROOT}/src/tools/schwab_portfolio.c
+           ${SRC_ROOT}/src/tools/schwab_quotes.c
    LIBS    unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -175,6 +176,7 @@ dawn_add_unit_test(test_schwab_portfolio
 dawn_add_unit_test(test_schwab_quotes
    SOURCES test_schwab_quotes.c
            ${SRC_ROOT}/src/tools/schwab_quotes.c
+           ${SRC_ROOT}/src/tools/schwab_portfolio.c
    LIBS    unity ${JSONC_LIBRARIES}
    LABEL   ci)
 

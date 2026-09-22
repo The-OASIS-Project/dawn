@@ -1310,6 +1310,14 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       handle_stocks_portfolio_unsubscribe(conn, payload);
    } else if (strcmp(type, "stocks_portfolio_get") == 0) {
       handle_stocks_portfolio_get(conn, payload);
+   } else if (strcmp(type, "stocks_watch_subscribe") == 0) {
+      handle_stocks_watch_subscribe(conn, payload);
+   } else if (strcmp(type, "stocks_watch_unsubscribe") == 0) {
+      handle_stocks_watch_unsubscribe(conn, payload);
+   } else if (strcmp(type, "stocks_watch_get") == 0) {
+      handle_stocks_watch_get(conn, payload);
+   } else if (strcmp(type, "stocks_watch_set") == 0) {
+      handle_stocks_watch_set(conn, payload);
    }
 #endif
    /* OAuth flow (shared by calendar and email) */
