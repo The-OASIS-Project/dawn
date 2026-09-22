@@ -453,6 +453,13 @@ dawn_add_unit_test(test_time_query_parser
    LIBS    unity m
    LABEL   ci)
 
+# US-equity market-session calendar — NYSE holidays, observed shifts, half-days.
+dawn_add_unit_test(test_market_hours
+   SOURCES test_market_hours.c
+           ${SRC_ROOT}/src/core/market_hours.c
+   LIBS    unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_attention_gate
    SOURCES test_attention_gate.c
            ${SRC_ROOT}/src/core/attention/attention_gate.c

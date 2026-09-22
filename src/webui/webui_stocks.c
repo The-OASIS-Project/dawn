@@ -29,6 +29,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "core/market_hours.h" /* US-equity session (holiday/half-day aware) */
 #include "dawn_error.h"
 #include "logging.h"
 #include "tools/schwab_client.h"    /* schwab_rc_t */
@@ -67,59 +68,11 @@ static bool s_stocks_shutdown = false;
 
 /* ---------------------------------------------------------------- market hours */
 
-/* nth (1-based) occurrence of weekday (0=Sun) in month0 (0-based) of year → mday. */
-static int nth_weekday(int year, int month0, int weekday, int nth) {
-   struct tm t = { 0 };
-   t.tm_year = year - 1900;
-   t.tm_mon = month0;
-   t.tm_mday = 1;
-   time_t first = timegm(&t);
-   struct tm g;
-   gmtime_r(&first, &g);
-   return 1 + ((weekday - g.tm_wday + 7) % 7) + (nth - 1) * 7;
-}
-
-/* US Eastern DST: 2nd Sunday of March 07:00 UTC (02:00 EST) → 1st Sunday of
- * November 06:00 UTC (02:00 EDT). */
-static bool us_eastern_is_dst(time_t utc) {
-   struct tm g;
-   gmtime_r(&utc, &g);
-   int year = g.tm_year + 1900;
-   struct tm st = { 0 };
-   st.tm_year = year - 1900;
-   st.tm_mon = 2;
-   st.tm_mday = nth_weekday(year, 2, 0, 2);
-   st.tm_hour = 7;
-   struct tm en = { 0 };
-   en.tm_year = year - 1900;
-   en.tm_mon = 10;
-   en.tm_mday = nth_weekday(year, 10, 0, 1);
-   en.tm_hour = 6;
-   return utc >= timegm(&st) && utc < timegm(&en);
-}
-
-/* "regular" | "pre" | "post" | "closed". Holidays are NOT handled here (P2 via the
- * Schwab /markets endpoint); a market holiday reads as an open weekday, which at
- * worst does a few no-op fetches on a closed market. */
+/* "regular" | "pre" | "post" | "closed" — the US-equity session now (DST-aware ET
+ * clock + NYSE holidays/half-days live in the reusable, unit-tested market_hours
+ * module). Wraps it so the call sites below stay unchanged. */
 static const char *stocks_market_state(void) {
-   time_t now = time(NULL);
-   time_t et = now - (us_eastern_is_dst(now) ? 4 * 3600 : 5 * 3600);
-   struct tm e;
-   gmtime_r(&et, &e);
-   if (e.tm_wday == 0 || e.tm_wday == 6) {
-      return "closed";
-   }
-   int mins = e.tm_hour * 60 + e.tm_min;
-   if (mins >= 9 * 60 + 30 && mins < 16 * 60) {
-      return "regular";
-   }
-   if (mins >= 7 * 60 && mins < 9 * 60 + 30) {
-      return "pre";
-   }
-   if (mins >= 16 * 60 && mins < 20 * 60) {
-      return "post";
-   }
-   return "closed";
+   return market_session_str(market_hours_us_equity(time(NULL)));
 }
 
 /* ---------------------------------------------------------------- cache (locked) */

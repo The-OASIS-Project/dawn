@@ -647,6 +647,7 @@ set(DAWN_SOURCES
     src/tools/url_snippet_cache.c
     src/tools/html_parser.c
     src/core/time_query_parser.c
+    src/core/market_hours.c
     src/core/iso8601.c
     src/core/str_fuzzy.c
     src/core/scheduled_context.c
