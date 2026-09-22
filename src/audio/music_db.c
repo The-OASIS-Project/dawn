@@ -37,6 +37,7 @@
 #include <unistd.h>
 
 #include "audio/audio_decoder.h"
+#include "audio/music_rank.h"
 #include "audio/music_source.h"
 #include "core/path_utils.h"
 #include "dawn_error.h"
@@ -63,6 +64,14 @@
  *  it in one macro is what stops a future column from drifting one query out of
  *  contract. */
 #define MUSIC_ROW_COLS "path, title, artist, album, genre, duration_sec, source, year"
+
+/** Rows pulled from the DB before relevance ranking trims to the caller's limit.
+ *  Wide enough that the right track isn't excluded before scoring; bounded so the
+ *  LIKE scan and in-memory sort stay cheap. NOTE: candidates are gathered by a
+ *  substring LIKE + alpha ORDER BY then LIMIT, so a match sorting past this window
+ *  is truncated before it can be ranked — the known ceiling that Phase 2b (FTS5
+ *  relevance in SQL) is meant to remove. */
+#define MUSIC_QUERY_CANDIDATE_WINDOW 300
 
 /** Priority-based dedup clause: exclude rows where a higher-priority source
  *  (lower enum value) has the same artist+album+title. Uses idx_music_dedup.
@@ -787,6 +796,65 @@ int music_db_get_stats(music_db_stats_t *stats) {
    return SUCCESS;
 }
 
+/**
+ * @brief Build a bounded SQL LIKE pattern from a user query
+ *
+ * Wraps the query in %…% wildcards, turns internal spaces/'*' into wildcards,
+ * escapes literal % _ \ (ESCAPE '\\'), and caps total wildcards to keep the LIKE
+ * scan cheap. @p out_cap must be >= 5 (leading '%', trailing '%', NUL, plus the
+ * loop's own guard headroom); smaller yields an empty pattern.
+ */
+static void build_like_pattern(const char *pattern, char *out, size_t out_cap) {
+   if (!out || out_cap < 5) {
+      if (out && out_cap > 0) {
+         out[0] = '\0';
+      }
+      return;
+   }
+   size_t len = strlen(pattern);
+   size_t j = 0;
+   int wildcard_count = 0;
+   bool last_was_wildcard = false;
+   const int max_wildcards = 10;
+
+   out[j++] = '%';
+   wildcard_count++;
+   last_was_wildcard = true;
+
+   for (size_t i = 0; i < len && j < out_cap - 4; i++) {
+      if (pattern[i] == ' ' || pattern[i] == '*') {
+         if (!last_was_wildcard && wildcard_count < max_wildcards) {
+            out[j++] = '%';
+            wildcard_count++;
+            last_was_wildcard = true;
+         }
+      } else {
+         if (pattern[i] == '%' || pattern[i] == '_' || pattern[i] == '\\') {
+            out[j++] = '\\';
+         }
+         out[j++] = pattern[i];
+         last_was_wildcard = false;
+      }
+   }
+
+   if (!last_was_wildcard && wildcard_count < max_wildcards) {
+      out[j++] = '%';
+   }
+   out[j] = '\0';
+}
+
+/* Count of meaningful (non-wildcard) characters in a query — a search needs at
+ * least a couple so it isn't effectively "match everything". */
+static size_t content_char_count(const char *s) {
+   size_t n = 0;
+   for (const char *p = s; *p; p++) {
+      if (*p != ' ' && *p != '*') {
+         n++;
+      }
+   }
+   return n;
+}
+
 int music_db_search(const char *pattern,
                     music_search_result_t *results,
                     int max_results,
@@ -803,14 +871,7 @@ int music_db_search(const char *pattern,
       return FAILURE;
    }
 
-   /* Count non-wildcard characters to ensure meaningful search */
-   size_t content_chars = 0;
-   for (size_t i = 0; i < len; i++) {
-      if (pattern[i] != ' ' && pattern[i] != '*') {
-         content_chars++;
-      }
-   }
-   if (content_chars < 2) {
+   if (content_char_count(pattern) < 2) {
       OLOG_WARNING("music_db_search: Pattern too broad (need at least 2 characters)");
       return SUCCESS; /* Return empty results rather than error */
    }
@@ -822,42 +883,8 @@ int music_db_search(const char *pattern,
       return FAILURE;
    }
 
-   /* Convert search pattern to SQL LIKE pattern (add % wildcards).
-    * Escape literal % and _ to prevent LIKE wildcard injection.
-    * Limit wildcards to prevent excessive pattern complexity. */
    char sql_pattern[AUDIO_METADATA_STRING_MAX * 2];
-   size_t j = 0;
-   int wildcard_count = 0;
-   bool last_was_wildcard = false; /* Track actual wildcards, not escaped literals */
-   const int max_wildcards = 10;   /* Limit total wildcards to prevent query slowdown */
-
-   sql_pattern[j++] = '%';
-   wildcard_count++;
-   last_was_wildcard = true;
-
-   for (size_t i = 0; i < len && j < sizeof(sql_pattern) - 4; i++) {
-      if (pattern[i] == ' ' || pattern[i] == '*') {
-         /* Skip consecutive wildcards and respect limit */
-         if (!last_was_wildcard && wildcard_count < max_wildcards) {
-            sql_pattern[j++] = '%';
-            wildcard_count++;
-            last_was_wildcard = true;
-         }
-      } else {
-         /* Escape literal LIKE wildcards */
-         if (pattern[i] == '%' || pattern[i] == '_' || pattern[i] == '\\') {
-            sql_pattern[j++] = '\\';
-         }
-         sql_pattern[j++] = pattern[i];
-         last_was_wildcard = false;
-      }
-   }
-
-   /* Add trailing wildcard if not already present */
-   if (!last_was_wildcard && wildcard_count < max_wildcards) {
-      sql_pattern[j++] = '%';
-   }
-   sql_pattern[j] = '\0';
+   build_like_pattern(pattern, sql_pattern, sizeof(sql_pattern));
 
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(g_db, SQL_SEARCH, -1, &stmt, NULL);
@@ -885,6 +912,208 @@ int music_db_search(const char *pattern,
    pthread_mutex_unlock(&g_db_mutex);
 
    *count_out = count;
+   return SUCCESS;
+}
+
+int music_db_query(const music_query_t *q,
+                   music_search_result_t *results,
+                   int max_results,
+                   int *count_out) {
+   if (!q || !results || max_results <= 0 || !count_out) {
+      return FAILURE;
+   }
+   *count_out = 0;
+
+   const bool has_text = q->text && q->text[0] && content_char_count(q->text) >= 2;
+   const bool has_artist = q->artist && q->artist[0];
+   const bool has_title = q->title && q->title[0];
+   const bool has_album = q->album && q->album[0];
+   const bool has_genre = q->genre && q->genre[0];
+   const bool has_ymin = q->year_min > 0;
+   const bool has_ymax = q->year_max > 0;
+
+   if (!has_text && !has_artist && !has_title && !has_album && !has_genre && !has_ymin &&
+       !has_ymax) {
+      return SUCCESS; /* No constraints → return nothing rather than the whole library */
+   }
+
+   /* Per-field LIKE patterns (must outlive sqlite3_step under SQLITE_STATIC). */
+   char p_text[AUDIO_METADATA_STRING_MAX * 2];
+   char p_artist[AUDIO_METADATA_STRING_MAX * 2];
+   char p_title[AUDIO_METADATA_STRING_MAX * 2];
+   char p_album[AUDIO_METADATA_STRING_MAX * 2];
+   char p_genre[AUDIO_METADATA_STRING_MAX * 2];
+   if (has_text) {
+      build_like_pattern(q->text, p_text, sizeof(p_text));
+   }
+   if (has_artist) {
+      build_like_pattern(q->artist, p_artist, sizeof(p_artist));
+   }
+   if (has_title) {
+      build_like_pattern(q->title, p_title, sizeof(p_title));
+   }
+   if (has_album) {
+      build_like_pattern(q->album, p_album, sizeof(p_album));
+   }
+   if (has_genre) {
+      build_like_pattern(q->genre, p_genre, sizeof(p_genre));
+   }
+
+   /* Build the candidate SQL. Anonymous '?' params are bound in append order.
+    * The file path is deliberately NOT matched (folder names must not leak in).
+    * QUERY_APPEND fails closed on truncation of ANY fragment, so the buffer can't
+    * silently produce malformed SQL if clauses are added later. */
+   char sql[1024];
+   int off = 0;
+#define QUERY_APPEND(...)                                                   \
+   do {                                                                     \
+      int _w = snprintf(sql + off, sizeof(sql) - (size_t)off, __VA_ARGS__); \
+      if (_w < 0 || _w >= (int)(sizeof(sql) - (size_t)off)) {               \
+         OLOG_ERROR("music_db_query: SQL buffer overflow");                 \
+         return FAILURE;                                                    \
+      }                                                                     \
+      off += _w;                                                            \
+   } while (0)
+
+   QUERY_APPEND("SELECT " MUSIC_ROW_COLS " FROM music_metadata WHERE 1=1");
+   if (has_text) {
+      QUERY_APPEND(" AND (title LIKE ? ESCAPE '\\' OR artist LIKE ? ESCAPE '\\'"
+                   " OR album LIKE ? ESCAPE '\\' OR genre LIKE ? ESCAPE '\\')");
+   }
+   if (has_artist) {
+      QUERY_APPEND(" AND artist LIKE ? ESCAPE '\\'");
+   }
+   if (has_title) {
+      QUERY_APPEND(" AND title LIKE ? ESCAPE '\\'");
+   }
+   if (has_album) {
+      QUERY_APPEND(" AND album LIKE ? ESCAPE '\\'");
+   }
+   if (has_genre) {
+      QUERY_APPEND(" AND genre LIKE ? ESCAPE '\\'");
+   }
+   if (has_ymin) {
+      QUERY_APPEND(" AND year >= ?");
+   }
+   if (has_ymax) {
+      QUERY_APPEND(" AND year <= ?");
+   }
+   QUERY_APPEND(" " DEDUP_CLAUSE
+                "ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, title COLLATE NOCASE "
+                "LIMIT ?");
+#undef QUERY_APPEND
+
+   /* Candidate window (~750 KB); allocated off the DB lock since its size is fixed
+    * and independent of the query result. */
+   music_search_result_t *cand = malloc(MUSIC_QUERY_CANDIDATE_WINDOW *
+                                        sizeof(music_search_result_t));
+   if (!cand) {
+      return FAILURE;
+   }
+
+   pthread_mutex_lock(&g_db_mutex);
+   if (!g_initialized) {
+      pthread_mutex_unlock(&g_db_mutex);
+      free(cand);
+      return FAILURE;
+   }
+
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+      OLOG_ERROR("music_db_query: prepare failed: %s", sqlite3_errmsg(g_db));
+      pthread_mutex_unlock(&g_db_mutex);
+      free(cand);
+      return FAILURE;
+   }
+
+   int bind = 1;
+   if (has_text) {
+      for (int k = 0; k < 4; k++) { /* title, artist, album, genre */
+         sqlite3_bind_text(stmt, bind++, p_text, -1, SQLITE_STATIC);
+      }
+   }
+   if (has_artist) {
+      sqlite3_bind_text(stmt, bind++, p_artist, -1, SQLITE_STATIC);
+   }
+   if (has_title) {
+      sqlite3_bind_text(stmt, bind++, p_title, -1, SQLITE_STATIC);
+   }
+   if (has_album) {
+      sqlite3_bind_text(stmt, bind++, p_album, -1, SQLITE_STATIC);
+   }
+   if (has_genre) {
+      sqlite3_bind_text(stmt, bind++, p_genre, -1, SQLITE_STATIC);
+   }
+   if (has_ymin) {
+      sqlite3_bind_int(stmt, bind++, q->year_min);
+   }
+   if (has_ymax) {
+      sqlite3_bind_int(stmt, bind++, q->year_max);
+   }
+   sqlite3_bind_int(stmt, bind++, MUSIC_QUERY_CANDIDATE_WINDOW);
+
+   /* Fetch the candidate window, then rank + threshold + cap off the DB lock. */
+   int ncand = 0;
+   while (sqlite3_step(stmt) == SQLITE_ROW && ncand < MUSIC_QUERY_CANDIDATE_WINDOW) {
+      populate_result_from_row(stmt, &cand[ncand]);
+      ncand++;
+   }
+   sqlite3_finalize(stmt);
+   pthread_mutex_unlock(&g_db_mutex);
+
+   /* Fielded artist/title/album filters are the precision lever: the SQL uses a
+    * substring LIKE to gather candidates, but here we require a word-boundary-or-
+    * better match on the field, so `artist:"Prince"` excludes "…Princeton
+    * Nassoons" (a mid-word collision) entirely rather than merely ranking it low.
+    * Free-text search keeps its breadth; genre stays a broad substring filter. */
+   if (has_artist || has_title || has_album) {
+      int kept = 0;
+      for (int i = 0; i < ncand; i++) {
+         bool ok = true;
+         if (has_artist && music_rank_field_quality(cand[i].artist, q->artist) < MUSIC_RANK_WORD) {
+            ok = false;
+         }
+         if (ok && has_title &&
+             music_rank_field_quality(cand[i].title, q->title) < MUSIC_RANK_WORD) {
+            ok = false;
+         }
+         if (ok && has_album &&
+             music_rank_field_quality(cand[i].album, q->album) < MUSIC_RANK_WORD) {
+            ok = false;
+         }
+         if (ok) {
+            if (kept != i) {
+               cand[kept] = cand[i];
+            }
+            kept++;
+         }
+      }
+      ncand = kept;
+   }
+
+   int *order = malloc((size_t)ncand * sizeof(int));
+   if (ncand > 0 && !order) {
+      free(cand);
+      return FAILURE;
+   }
+
+   /* Rank by the most specific search term: free text if given, else the fielded
+    * artist/title/album value (so `artist:"Prince"` ranks real Prince above a
+    * substring hit like "…Princeton Nassoons" rather than falling to SQL alpha
+    * order). Genre/year are pure filters and never drive ranking. */
+   const char *rank_text = has_text     ? q->text
+                           : has_artist ? q->artist
+                           : has_title  ? q->title
+                           : has_album  ? q->album
+                                        : NULL;
+   int kept = music_rank_select(cand, ncand, rank_text, max_results, order);
+   for (int i = 0; i < kept; i++) {
+      results[i] = cand[order[i]];
+   }
+
+   free(order);
+   free(cand);
+   *count_out = kept;
    return SUCCESS;
 }
 
@@ -922,20 +1151,17 @@ int music_db_pick_best_match(const music_search_result_t *results,
       const char *t = results[i].title;
       long score = 0;
 
-      /* Title closeness: exact > prefix > substring. */
+      /* Title closeness via the shared tiers (exact > prefix > whole-word >
+       * substring), so "play Prince" ranks like "search Prince" — a leading
+       * longer word ("Princess") is a weak substring, not a prefix. Max 1000,
+       * kept below the artist bonus so a matching artist still dominates. */
       if (qlen > 0) {
-         if (strcasecmp(t, title_query) == 0) {
-            score += 300;
-         } else if (strncasecmp(t, title_query, qlen) == 0) {
-            score += 200;
-         } else if (music_ci_contains(t, title_query)) {
-            score += 100;
-         }
+         score += music_rank_field_quality(t, title_query);
       }
 
       /* A matching artist dominates (disambiguates "Artist - Title"). */
       if (artist && artist[0] && music_ci_contains(results[i].artist, artist)) {
-         score += 1000;
+         score += 2000;
       }
 
       size_t len = strlen(t);

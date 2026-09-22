@@ -604,6 +604,7 @@ set(DAWN_SOURCES
     src/audio/audio_capture_thread.c
     src/audio/audio_decoder.c
     src/audio/audio_metadata_util.c
+    src/audio/music_rank.c
     src/audio/flac_decoder.c
     src/audio/flac_playback.c
     src/audio/mic_passthrough.c

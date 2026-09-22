@@ -186,6 +186,46 @@ int music_db_search(const char *pattern,
                     int *count_out);
 
 /**
+ * @brief Structured music query: fielded filters + relevance-ranked free text
+ *
+ * Fields left NULL / 0 are ignored. When @ref text is set, matching candidates
+ * are ranked by relevance (see music_rank.c) and trimmed by a score threshold;
+ * fielded filters (artist/title/album/genre, year range) narrow the candidate
+ * set via SQL. Unlike music_db_search(), the file path is NOT matched, so folder
+ * names never leak into results.
+ */
+typedef struct {
+   const char *text;   /**< Free text, ranked across artist/title/album/genre (NULL = none) */
+   const char *artist; /**< Exact-ish artist filter (NULL = none) */
+   const char *title;  /**< Title filter (NULL = none) */
+   const char *album;  /**< Album filter (NULL = none) */
+   const char *genre;  /**< Genre filter (NULL = none) */
+   int year_min;       /**< Inclusive lower year bound (0 = unbounded) */
+   int year_max;       /**< Inclusive upper year bound (0 = unbounded) */
+} music_query_t;
+
+/** Upper sanity bound for a parsed release year (exclusive); rejects garbage. */
+#define MUSIC_QUERY_YEAR_MAX 3000
+
+/**
+ * @brief Run a structured, relevance-ranked query
+ *
+ * Fetches a wide candidate window matching the query's filters, ranks it against
+ * @ref music_query_t::text (when present), applies a max + relative-score
+ * threshold, and returns the trimmed, best-first results.
+ *
+ * @param query      The structured query
+ * @param results    Output array (caller-owned, holds at least @p max_results)
+ * @param max_results Capacity of @p results
+ * @param count_out  Output: number of results written
+ * @return SUCCESS or FAILURE
+ */
+int music_db_query(const music_query_t *query,
+                   music_search_result_t *results,
+                   int max_results,
+                   int *count_out);
+
+/**
  * @brief Pick the most relevant result from a candidate set (pure, no DB/locks)
  *
  * music_db_search() orders alphabetically, so its first row is rarely the best

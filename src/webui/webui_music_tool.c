@@ -42,6 +42,7 @@
 #include "core/strbuf.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "tools/music_tool.h"
 #include "tools/tool_registry.h"
 #include "tools/volume_tool.h"
 #include "utils/string_utils.h"
@@ -157,9 +158,8 @@ static int resolve_item_to_path(const char *item,
       return FAILURE;
    }
 
-   /* Split an optional "Artist - Title"; search the title (or whole item) and
-    * rank the candidates by relevance (music_db_search orders alphabetically, so
-    * its first row is rarely the right track — e.g. "Africa" → Bo Burnham). */
+   /* Split an optional "Artist - Title"; the title (or whole item) drives a
+    * ranked query and the picker then prefers the matching artist. */
    const char *dash = strstr(item, " - ");
    char artist[sizeof(r[0].artist)] = { 0 };
    const char *title_query = item;
@@ -173,8 +173,9 @@ static int resolve_item_to_path(const char *item,
       title_query = dash + 3;
    }
 
-   if (music_db_search(title_query, r, WEBUI_MUSIC_RESOLVE_CANDIDATES, &count) == SUCCESS &&
-       count > 0) {
+   /* Path-clean, relevance-ranked candidates, then artist preference + tiebreak. */
+   music_query_t mq = { .text = title_query };
+   if (music_db_query(&mq, r, WEBUI_MUSIC_RESOLVE_CANDIDATES, &count) == SUCCESS && count > 0) {
       int pick = music_db_pick_best_match(r, count, title_query, dash ? artist : NULL);
       safe_strncpy(path_out, r[pick].path, path_len);
       if (display_out) {
@@ -440,8 +441,8 @@ int webui_music_execute_tool(ws_connection_t *conn,
          return FAILURE;
       }
       int count = 0;
-      if (music_db_search(base_query, results, WEBUI_MUSIC_MAX_QUEUE, &count) != SUCCESS ||
-          count <= 0) {
+      music_query_t mq = { .text = base_query };
+      if (music_db_query(&mq, results, WEBUI_MUSIC_MAX_QUEUE, &count) != SUCCESS || count <= 0) {
          free(results);
          if (result_out) {
             char buf[WEBUI_MUSIC_PATH_MAX + 64];
@@ -890,16 +891,29 @@ int webui_music_execute_tool(ws_connection_t *conn,
        * can enqueue exact tracks. Single-query search/library fall through to the
        * local handler (they don't affect streaming state). */
       struct json_object *items = (strcmp(action, "search") == 0) ? decode_items(query) : NULL;
+      /* An empty items[] is not a batch — free it and fall through to the single/
+       * filter handler so a genre- or year-only search still runs. */
+      if (items && json_object_array_length(items) == 0) {
+         json_object_put(items);
+         items = NULL;
+      }
       if (items) {
          int n = (int)json_object_array_length(items);
          if (n > WEBUI_MUSIC_MAX_QUEUE) {
             n = WEBUI_MUSIC_MAX_QUEUE; /* bound per-call DB work (one LIKE scan each) */
          }
+         /* Optional fielded/genre/year filters applied to every query in the batch. */
+         music_search_filters_t filters;
+         music_query_parse_filters(query, &filters);
+
          strbuf_t sb;
          strbuf_init(&sb, 1024);
          /* Heap-allocate the per-query result window (~2.5 KB/row) vs. a big stack array. */
          music_search_result_t *r = malloc(WEBUI_MUSIC_BATCH_SEARCH_LIMIT *
                                            sizeof(music_search_result_t));
+         if (!r) {
+            strbuf_appendf(&sb, "%s", TOOL_RESULT_ERROR_MARK "Failed to allocate search buffer");
+         }
          for (int i = 0; r && i < n; i++) {
             struct json_object *e = json_object_array_get_idx(items, i);
             const char *q = e ? json_object_get_string(e) : NULL;
@@ -908,7 +922,9 @@ int webui_music_execute_tool(ws_connection_t *conn,
             }
             strbuf_appendf(&sb, "%s:\n", q);
             int count = 0;
-            if (music_db_search(q, r, WEBUI_MUSIC_BATCH_SEARCH_LIMIT, &count) == SUCCESS &&
+            music_query_t mq;
+            music_query_from_filters(&mq, q, &filters);
+            if (music_db_query(&mq, r, WEBUI_MUSIC_BATCH_SEARCH_LIMIT, &count) == SUCCESS &&
                 count > 0) {
                for (int j = 0; j < count; j++) {
                   strbuf_appendf(&sb, "  %s - %s  [%s]\n", r[j].artist, r[j].title, r[j].path);
