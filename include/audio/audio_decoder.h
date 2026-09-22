@@ -129,6 +129,9 @@ typedef struct {
 /** Maximum length for metadata string fields (artist, title, album) */
 #define AUDIO_METADATA_STRING_MAX 256
 
+/** Maximum length for genre string (genres are short: "Rock", "Electronic", etc.) */
+#define AUDIO_GENRE_STRING_MAX 128
+
 /**
  * @brief Audio file tag metadata (ID3, Vorbis comments, etc.)
  *
@@ -139,6 +142,8 @@ typedef struct {
    char title[AUDIO_METADATA_STRING_MAX];  /**< Track title (e.g., "Time") */
    char artist[AUDIO_METADATA_STRING_MAX]; /**< Artist name (e.g., "Pink Floyd") */
    char album[AUDIO_METADATA_STRING_MAX];  /**< Album name (e.g., "Dark Side of the Moon") */
+   char genre[AUDIO_GENRE_STRING_MAX];     /**< Genre (e.g., "Rock"); comma-joined if multiple */
+   uint32_t year;                          /**< Release year (0 if unknown) */
    uint32_t duration_sec;                  /**< Duration in seconds (0 if unknown) */
    bool has_metadata;                      /**< True if any tag metadata was found */
 } audio_metadata_t;
@@ -242,6 +247,29 @@ int audio_decoder_seek(audio_decoder_t *dec, uint64_t sample_pos);
  * @return AUDIO_DECODER_SUCCESS on success, or error code
  */
 int audio_decoder_get_metadata(const char *path, audio_metadata_t *metadata);
+
+/**
+ * @brief Parse a 4-digit release year from a tag date string
+ *
+ * Handles the common tag forms ("1985", "1985-06-01", "1985/06", "06/1985") by
+ * returning the first standalone run of four digits within a plausible range.
+ *
+ * @param s Date/year tag value (may be NULL)
+ * @return Year in [1000, 2999], or 0 if none found
+ */
+uint32_t audio_metadata_parse_year(const char *s);
+
+/**
+ * @brief Append a genre value to a metadata struct, comma-joining if non-empty
+ *
+ * Formats stored as multiple genre entries (repeated Vorbis GENRE=) are
+ * flattened into one comma-separated string for parity with the Plex path.
+ * Bounded to AUDIO_GENRE_STRING_MAX.
+ *
+ * @param metadata Target metadata (genre field appended in place)
+ * @param genre    Genre value to add (ignored if NULL/empty)
+ */
+void audio_metadata_append_genre(audio_metadata_t *metadata, const char *genre);
 
 /* =============================================================================
  * Utility Functions

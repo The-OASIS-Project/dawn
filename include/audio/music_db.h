@@ -73,6 +73,7 @@ typedef struct {
    char genre[AUDIO_METADATA_STRING_MAX];            /**< Genre (comma-separated if multiple) */
    char display_name[AUDIO_METADATA_STRING_MAX * 2]; /**< "Artist - Title" or filename */
    uint32_t duration_sec;                            /**< Duration in seconds */
+   uint32_t year;                                    /**< Release year (0 if unknown) */
    music_source_t source;                            /**< Which source this track came from */
 } music_search_result_t;
 

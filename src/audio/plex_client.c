@@ -300,6 +300,16 @@ static json_object *build_track_json(json_object *item) {
    int duration_ms = json_get_int(item, "duration");
    json_object_object_add(track, "duration_sec", json_object_new_int(duration_ms / 1000));
 
+   /* Year: Plex track items expose the album year as `parentYear` (the plain
+    * `year`/`originallyAvailableAt` fields are not present on track items). */
+   int year = json_get_int(item, "parentYear");
+   if (year <= 0) {
+      year = json_get_int(item, "year"); /* fallback if a server ever provides it */
+   }
+   if (year > 0) {
+      json_object_object_add(track, "year", json_object_new_int(year));
+   }
+
    /* Path: plex:{Part.key} — no token! */
    const char *part_key = get_part_key(item);
    if (part_key && part_key[0]) {

@@ -446,11 +446,22 @@ int flac_get_metadata(const char *path, audio_metadata_t *metadata) {
                   safe_strncpy(metadata->artist, entry + 7, AUDIO_METADATA_STRING_MAX);
                } else if (strncasecmp(entry, "ALBUM=", 6) == 0 && length > 6) {
                   safe_strncpy(metadata->album, entry + 6, AUDIO_METADATA_STRING_MAX);
+               } else if (strncasecmp(entry, "GENRE=", 6) == 0 && length > 6) {
+                  /* Vorbis comments may repeat GENRE=; comma-join for parity with Plex. */
+                  audio_metadata_append_genre(metadata, entry + 6);
+               } else if (strncasecmp(entry, "DATE=", 5) == 0 && length > 5) {
+                  if (metadata->year == 0) {
+                     metadata->year = audio_metadata_parse_year(entry + 5);
+                  }
+               } else if (strncasecmp(entry, "YEAR=", 5) == 0 && length > 5) {
+                  if (metadata->year == 0) {
+                     metadata->year = audio_metadata_parse_year(entry + 5);
+                  }
                }
             }
 
             metadata->has_metadata = (metadata->title[0] || metadata->artist[0] ||
-                                      metadata->album[0]);
+                                      metadata->album[0] || metadata->genre[0]);
             FLAC__metadata_object_delete(block);
          }
       }

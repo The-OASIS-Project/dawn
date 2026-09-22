@@ -36,6 +36,7 @@
 
 #include "audio_decoder_internal.h"
 #include "logging.h"
+#include "utils/string_utils.h"
 
 /* Vtable and base structure defined in audio_decoder_internal.h */
 

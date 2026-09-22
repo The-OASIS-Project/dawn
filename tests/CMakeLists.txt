@@ -413,6 +413,13 @@ dawn_add_unit_test(test_music_db
    LIBS    dawn_common unity sqlite3 pthread
    LABEL   ci)
 
+dawn_add_unit_test(test_audio_metadata
+   SOURCES test_audio_metadata.c
+           ${SRC_ROOT}/src/audio/audio_metadata_util.c
+   LIBS    unity
+   INCLUDES ${SRC_ROOT}/common/include
+   LABEL   ci)
+
 dawn_add_unit_test(test_stat_service
    SOURCES test_stat_service.c
            ${SRC_ROOT}/src/core/stat_service.c

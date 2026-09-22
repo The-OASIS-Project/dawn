@@ -334,8 +334,20 @@ int ogg_get_metadata(const char *path, audio_metadata_t *metadata) {
       if ((val = vorbis_comment_query(vc, "ALBUM", 0)) != NULL) {
          safe_strncpy(metadata->album, val, AUDIO_METADATA_STRING_MAX);
       }
+      /* GENRE may repeat; comma-join every entry for parity with the Plex path. */
+      for (int gi = 0; (val = vorbis_comment_query(vc, "GENRE", gi)) != NULL; gi++) {
+         audio_metadata_append_genre(metadata, val);
+      }
+      /* Prefer DATE (may be a full date), fall back to YEAR. */
+      if ((val = vorbis_comment_query(vc, "DATE", 0)) != NULL) {
+         metadata->year = audio_metadata_parse_year(val);
+      }
+      if (metadata->year == 0 && (val = vorbis_comment_query(vc, "YEAR", 0)) != NULL) {
+         metadata->year = audio_metadata_parse_year(val);
+      }
 
-      metadata->has_metadata = (metadata->title[0] || metadata->artist[0] || metadata->album[0]);
+      metadata->has_metadata = (metadata->title[0] || metadata->artist[0] || metadata->album[0] ||
+                                metadata->genre[0]);
    }
 
    ov_clear(&vf);

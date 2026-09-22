@@ -55,6 +55,11 @@
 /* Candidate window pulled from the DB for relevance ranking in the resolver. */
 #define WEBUI_MUSIC_RESOLVE_CANDIDATES 8
 
+/* Rows surfaced to the LLM per query in an items[] batch search. Generous so the
+ * real match isn't crowded out of the window while results are still alpha-ordered
+ * (mirrors MUSIC_BATCH_SEARCH_LIMIT in the voice tool). */
+#define WEBUI_MUSIC_BATCH_SEARCH_LIMIT 25
+
 /* =============================================================================
  * LLM-facing helpers: state footer, item resolution, batch apply + report
  * ============================================================================= */
@@ -892,16 +897,19 @@ int webui_music_execute_tool(ws_connection_t *conn,
          }
          strbuf_t sb;
          strbuf_init(&sb, 1024);
-         for (int i = 0; i < n; i++) {
+         /* Heap-allocate the per-query result window (~2.5 KB/row) vs. a big stack array. */
+         music_search_result_t *r = malloc(WEBUI_MUSIC_BATCH_SEARCH_LIMIT *
+                                           sizeof(music_search_result_t));
+         for (int i = 0; r && i < n; i++) {
             struct json_object *e = json_object_array_get_idx(items, i);
             const char *q = e ? json_object_get_string(e) : NULL;
             if (!q || !q[0]) {
                continue;
             }
             strbuf_appendf(&sb, "%s:\n", q);
-            music_search_result_t r[5];
             int count = 0;
-            if (music_db_search(q, r, 5, &count) == SUCCESS && count > 0) {
+            if (music_db_search(q, r, WEBUI_MUSIC_BATCH_SEARCH_LIMIT, &count) == SUCCESS &&
+                count > 0) {
                for (int j = 0; j < count; j++) {
                   strbuf_appendf(&sb, "  %s - %s  [%s]\n", r[j].artist, r[j].title, r[j].path);
                }
@@ -909,6 +917,7 @@ int webui_music_execute_tool(ws_connection_t *conn,
                strbuf_appendf(&sb, "  No match: %s\n", q);
             }
          }
+         free(r);
          json_object_put(items);
          if (result_out) {
             char *out = strbuf_oom(&sb) ? NULL : strbuf_steal(&sb);

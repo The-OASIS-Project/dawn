@@ -63,6 +63,13 @@
 /* Candidate window pulled from the DB for relevance ranking in the resolver. */
 #define MUSIC_RESOLVE_CANDIDATES 8
 
+/* How many rows the 'search' action surfaces to the LLM. Kept generous so the
+ * real match isn't crowded out of the window by substring false-positives while
+ * results are still alpha-ordered (proper relevance ranking is a later phase).
+ * DEFAULT applies to a single query; BATCH applies per-query in an items[] batch. */
+#define MUSIC_SEARCH_DEFAULT_LIMIT 25
+#define MUSIC_BATCH_SEARCH_LIMIT 25
+
 /* ========== Types ========== */
 
 /**
@@ -132,7 +139,8 @@ static const treg_param_t music_params[] = {
    },
    {
        .name = "limit",
-       .description = "For 'search': maximum results to return (0 = all, default 10).",
+       .description = "For 'search': maximum results to return (0 = all, default 25). Note a "
+                      "batch search (items:[...]) returns up to 25 per query regardless.",
        .type = TOOL_PARAM_TYPE_NUMBER,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
@@ -833,6 +841,19 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
                if (n > MAX_PLAYLIST_LENGTH) {
                   n = MAX_PLAYLIST_LENGTH; /* bound per-call DB work */
                }
+               /* Heap-allocate the per-query result window (~2.5 KB/row) rather
+                * than a large stack array. */
+               music_search_result_t *r = malloc(MUSIC_BATCH_SEARCH_LIMIT *
+                                                 sizeof(music_search_result_t));
+               if (!r) {
+                  json_object_put(arr);
+                  strbuf_free(&sb);
+                  if (direct_mode) {
+                     *should_respond = 0;
+                     return NULL;
+                  }
+                  return strdup(TOOL_RESULT_ERROR_MARK "Failed to allocate search buffer");
+               }
                for (int i = 0; i < n; i++) {
                   struct json_object *e = json_object_array_get_idx(arr, i);
                   const char *q = e ? json_object_get_string(e) : NULL;
@@ -840,9 +861,9 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
                      continue;
                   }
                   strbuf_appendf(&sb, "%s:\n", q);
-                  music_search_result_t r[5];
                   int count = 0;
-                  if (music_db_search(q, r, 5, &count) == SUCCESS && count > 0) {
+                  if (music_db_search(q, r, MUSIC_BATCH_SEARCH_LIMIT, &count) == SUCCESS &&
+                      count > 0) {
                      for (int j = 0; j < count; j++) {
                         strbuf_appendf(&sb, "  %s  [%s]\n", r[j].display_name, r[j].path);
                      }
@@ -850,6 +871,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
                      strbuf_appendf(&sb, "  No match: %s\n", q);
                   }
                }
+               free(r);
                json_object_put(arr);
                if (direct_mode) {
                   *should_respond = 0;
@@ -884,7 +906,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
       tool_param_extract_base(value, query, sizeof(query));
 
       char limit_str[16] = "";
-      int limit = 10; /* Default: show 10 results */
+      int limit = MUSIC_SEARCH_DEFAULT_LIMIT; /* Default result window */
       if (tool_param_extract_custom(value, "limit", limit_str, sizeof(limit_str))) {
          char *endptr;
          long parsed = strtol(limit_str, &endptr, 10);
@@ -898,7 +920,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
                limit = (int)parsed;
             }
          }
-         /* If parsing failed, keep default limit of 10 */
+         /* If parsing failed, keep the default limit */
       }
 
       /* Validate search term length */

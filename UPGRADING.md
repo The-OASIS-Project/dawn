@@ -12,6 +12,23 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-09-22 — Music library re-scans once to add genre + year (and fixes genre loss)
+
+**What changed.** The music scanner now extracts **genre** and **release year** from
+your local files' tags (FLAC/MP3/Ogg) and from Plex, and stores them in the music
+database. This also **fixes a bug** where a local track's genre could be silently
+cleared whenever its file changed, because the previous scanner never wrote genre back.
+Searching for a genre ("play some jazz") now works against local files, not just Plex.
+
+**What (if anything) to do.** Nothing — it's automatic, but be aware of a **one-time
+slow scan**: on first startup after this upgrade, DAWN re-reads every local music file
+once to backfill genre/year (existing entries are otherwise skipped by the
+unchanged-file check). Expect that first scan to take about as long as your original
+initial scan; subsequent startups are back to normal. No config change, and your Plex
+tracks refresh on the normal sync.
+
+---
+
 ## 2026-09-17 — `system_status` gains a `network` view (requires a STAT upgrade)
 
 **What changed.** The `system_status` tool can now report network status — your

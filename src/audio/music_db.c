@@ -53,6 +53,17 @@
 /** Yield mutex every N files to allow searches during scan */
 #define SCAN_YIELD_INTERVAL 50
 
+/** Local-metadata extractor version. Bump when the local tag extraction changes
+ *  what it stores so a one-time forced re-parse backfills existing rows. Stored
+ *  in PRAGMA user_version. v1 = genre + year extraction (2026-09). */
+#define MUSIC_META_VERSION 1
+
+/** The single result-row projection shared by every row-returning query. Column
+ *  order MUST match populate_result_from_row()'s reads (0 path … 7 year); keeping
+ *  it in one macro is what stops a future column from drifting one query out of
+ *  contract. */
+#define MUSIC_ROW_COLS "path, title, artist, album, genre, duration_sec, source, year"
+
 /** Priority-based dedup clause: exclude rows where a higher-priority source
  *  (lower enum value) has the same artist+album+title. Uses idx_music_dedup.
  *  COLLATE NOCASE handles metadata case differences between sources.
@@ -93,11 +104,12 @@ static const char *SQL_CREATE_INDEX_TITLE =
     "CREATE INDEX IF NOT EXISTS idx_music_title ON music_metadata(title)";
 
 static const char *SQL_INSERT_OR_REPLACE =
-    "INSERT OR REPLACE INTO music_metadata (path, mtime, title, artist, album, duration_sec) "
-    "VALUES (?, ?, ?, ?, ?, ?)";
+    "INSERT OR REPLACE INTO music_metadata "
+    "(path, mtime, title, artist, album, duration_sec, genre, year) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
 
-static const char *SQL_SELECT_BY_PATH = "SELECT path, title, artist, album, duration_sec "
-                                        "FROM music_metadata WHERE path = ?";
+static const char *SQL_SELECT_BY_PATH = "SELECT " MUSIC_ROW_COLS
+                                        " FROM music_metadata WHERE path = ?";
 
 static const char *SQL_SELECT_MTIME = "SELECT mtime FROM music_metadata WHERE path = ?";
 
@@ -110,8 +122,7 @@ static const char *SQL_STATS = "SELECT COUNT(*), "
 
 /* Search query: match pattern against title, artist, album, genre, or filename.
  * Dedup: exclude rows where a higher-priority source has the same track. */
-static const char *SQL_SEARCH = "SELECT path, title, artist, album, genre, duration_sec, source "
-                                "FROM music_metadata "
+static const char *SQL_SEARCH = "SELECT " MUSIC_ROW_COLS " FROM music_metadata "
                                 "WHERE (title LIKE ? ESCAPE '\\' OR artist LIKE ? ESCAPE '\\' "
                                 "   OR album LIKE ? ESCAPE '\\' OR genre LIKE ? ESCAPE '\\' "
                                 "   OR path LIKE ? ESCAPE '\\') " DEDUP_CLAUSE
@@ -121,8 +132,7 @@ static const char *SQL_SEARCH = "SELECT path, title, artist, album, genre, durat
 
 
 static const char *SQL_LIST_PAGED =
-    "SELECT path, title, artist, album, genre, duration_sec, source "
-    "FROM music_metadata " DEDUP_WHERE
+    "SELECT " MUSIC_ROW_COLS " FROM music_metadata " DEDUP_WHERE
     "ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, title COLLATE NOCASE "
     "LIMIT ? OFFSET ?";
 
@@ -158,18 +168,15 @@ static const char *SQL_LIST_ALBUMS_WITH_STATS = "SELECT album, "
                                                 "LIMIT ? OFFSET ?";
 
 /* Get tracks by artist (deduped) */
-static const char *SQL_GET_BY_ARTIST =
-    "SELECT path, title, artist, album, genre, duration_sec, source "
-    "FROM music_metadata "
-    "WHERE artist = ? " DEDUP_CLAUSE "ORDER BY album COLLATE NOCASE, title COLLATE NOCASE "
-    "LIMIT ?";
+static const char *SQL_GET_BY_ARTIST = "SELECT " MUSIC_ROW_COLS " FROM music_metadata "
+                                       "WHERE artist = ? " DEDUP_CLAUSE
+                                       "ORDER BY album COLLATE NOCASE, title COLLATE NOCASE "
+                                       "LIMIT ?";
 
 /* Get tracks by album (deduped) */
-static const char *SQL_GET_BY_ALBUM =
-    "SELECT path, title, artist, album, genre, duration_sec, source "
-    "FROM music_metadata "
-    "WHERE album = ? " DEDUP_CLAUSE "ORDER BY path "
-    "LIMIT ?";
+static const char *SQL_GET_BY_ALBUM = "SELECT " MUSIC_ROW_COLS " FROM music_metadata "
+                                      "WHERE album = ? " DEDUP_CLAUSE "ORDER BY path "
+                                      "LIMIT ?";
 
 /* =============================================================================
  * Module State
@@ -202,6 +209,39 @@ static void build_display_name(music_search_result_t *result) {
       safe_strncpy(result->display_name, fname ? fname + 1 : result->path,
                    sizeof(result->display_name));
    }
+}
+
+/**
+ * @brief Populate a result row from a prepared statement
+ *
+ * Assumes the standard 8-column projection shared by all row-returning queries:
+ * 0 path, 1 title, 2 artist, 3 album, 4 genre, 5 duration_sec, 6 source, 7 year.
+ * Keeps every read site on one column contract so a schema change touches one place.
+ */
+static void populate_result_from_row(sqlite3_stmt *stmt, music_search_result_t *r) {
+   memset(r, 0, sizeof(*r));
+
+   const char *path = (const char *)sqlite3_column_text(stmt, 0);
+   const char *title = (const char *)sqlite3_column_text(stmt, 1);
+   const char *artist = (const char *)sqlite3_column_text(stmt, 2);
+   const char *album = (const char *)sqlite3_column_text(stmt, 3);
+   const char *genre = (const char *)sqlite3_column_text(stmt, 4);
+
+   if (path)
+      safe_strncpy(r->path, path, sizeof(r->path));
+   if (title)
+      safe_strncpy(r->title, title, sizeof(r->title));
+   if (artist)
+      safe_strncpy(r->artist, artist, sizeof(r->artist));
+   if (album)
+      safe_strncpy(r->album, album, sizeof(r->album));
+   if (genre)
+      safe_strncpy(r->genre, genre, sizeof(r->genre));
+   r->duration_sec = (uint32_t)sqlite3_column_int(stmt, 5);
+   r->source = (music_source_t)sqlite3_column_int(stmt, 6);
+   r->year = (uint32_t)sqlite3_column_int(stmt, 7);
+
+   build_display_name(r);
 }
 
 /**
@@ -287,6 +327,13 @@ static int insert_track(const char *path, time_t mtime, const audio_metadata_t *
    sqlite3_bind_text(stmt, 4, meta->artist[0] ? meta->artist : NULL, -1, SQLITE_STATIC);
    sqlite3_bind_text(stmt, 5, meta->album[0] ? meta->album : NULL, -1, SQLITE_STATIC);
    sqlite3_bind_int(stmt, 6, (int)meta->duration_sec);
+   sqlite3_bind_text(stmt, 7, meta->genre[0] ? meta->genre : NULL, -1, SQLITE_STATIC);
+   /* Store NULL (not 0) for unknown year so `year BETWEEN ?` filters exclude it. */
+   if (meta->year) {
+      sqlite3_bind_int(stmt, 8, (int)meta->year);
+   } else {
+      sqlite3_bind_null(stmt, 8);
+   }
 
    rc = sqlite3_step(stmt);
    sqlite3_finalize(stmt);
@@ -482,6 +529,7 @@ int music_db_init(const char *db_path) {
          "ALTER TABLE music_metadata ADD COLUMN genre TEXT",
          "ALTER TABLE music_metadata ADD COLUMN rating_key TEXT",
          "ALTER TABLE music_metadata ADD COLUMN sync_gen INTEGER DEFAULT 0",
+         "ALTER TABLE music_metadata ADD COLUMN year INTEGER",
       };
       for (int i = 0; i < (int)(sizeof(migrations) / sizeof(migrations[0])); i++) {
          char *err = NULL;
@@ -498,6 +546,7 @@ int music_db_init(const char *db_path) {
    exec_sql("CREATE INDEX IF NOT EXISTS idx_music_source ON music_metadata(source)");
    exec_sql("CREATE INDEX IF NOT EXISTS idx_music_genre ON music_metadata(genre)");
    exec_sql("CREATE INDEX IF NOT EXISTS idx_music_rating_key ON music_metadata(rating_key)");
+   exec_sql("CREATE INDEX IF NOT EXISTS idx_music_year ON music_metadata(year)");
 
    /* Composite index for dedup subquery — single B-tree seek for NOT EXISTS check.
     * COLLATE NOCASE must match the dedup clause collation for index to be used. */
@@ -515,6 +564,39 @@ int music_db_init(const char *db_path) {
 
    /* Set busy timeout to prevent query blocking during scans (5 seconds) */
    sqlite3_busy_timeout(g_db, 5000);
+
+   /* Metadata-version backfill. PRAGMA user_version here tracks the *content
+    * extractor* version — distinct from this file's ALTER-TABLE schema migrations
+    * and from auth_db's schema_version ladder. When the local tag extractor changes
+    * what it stores, we force existing local rows to be re-parsed on the next scan
+    * by zeroing their mtime (get_db_mtime() treats 0 as "new file"). Plex rows need
+    * nothing — every restart re-fetches and INSERT OR REPLACEs them. */
+   {
+      int db_version = 0;
+      sqlite3_stmt *vstmt = NULL;
+      if (sqlite3_prepare_v2(g_db, "PRAGMA user_version", -1, &vstmt, NULL) == SQLITE_OK) {
+         if (sqlite3_step(vstmt) == SQLITE_ROW) {
+            db_version = sqlite3_column_int(vstmt, 0);
+         }
+         sqlite3_finalize(vstmt);
+      }
+      if (db_version < MUSIC_META_VERSION) {
+         OLOG_INFO("Music metadata version %d < %d — forcing local re-scan to backfill "
+                   "genre/year (first scan will be slow)",
+                   db_version, MUSIC_META_VERSION);
+         char update_sql[96];
+         snprintf(update_sql, sizeof(update_sql),
+                  "UPDATE music_metadata SET mtime = 0 WHERE source = %d", MUSIC_SOURCE_LOCAL);
+         char pragma[64];
+         snprintf(pragma, sizeof(pragma), "PRAGMA user_version = %d", MUSIC_META_VERSION);
+         /* Atomic: the mtime reset and the version bump must land together so a crash
+          * between them can't leave the version bumped with rows un-reset. */
+         exec_sql("BEGIN");
+         exec_sql(update_sql);
+         exec_sql(pragma);
+         exec_sql("COMMIT");
+      }
+   }
 
    g_initialized = true;
    OLOG_INFO("Music database initialized: %s", expanded_path);
@@ -795,31 +877,7 @@ int music_db_search(const char *pattern,
 
    int count = 0;
    while (sqlite3_step(stmt) == SQLITE_ROW && count < max_results) {
-      music_search_result_t *r = &results[count];
-      memset(r, 0, sizeof(*r));
-
-      const char *path = (const char *)sqlite3_column_text(stmt, 0);
-      const char *title = (const char *)sqlite3_column_text(stmt, 1);
-      const char *artist = (const char *)sqlite3_column_text(stmt, 2);
-      const char *album = (const char *)sqlite3_column_text(stmt, 3);
-      const char *genre = (const char *)sqlite3_column_text(stmt, 4);
-      int duration = sqlite3_column_int(stmt, 5);
-      int source = sqlite3_column_int(stmt, 6);
-
-      if (path)
-         safe_strncpy(r->path, path, sizeof(r->path));
-      if (title)
-         safe_strncpy(r->title, title, sizeof(r->title));
-      if (artist)
-         safe_strncpy(r->artist, artist, sizeof(r->artist));
-      if (album)
-         safe_strncpy(r->album, album, sizeof(r->album));
-      if (genre)
-         safe_strncpy(r->genre, genre, sizeof(r->genre));
-      r->duration_sec = (uint32_t)duration;
-      r->source = (music_source_t)source;
-
-      build_display_name(r);
+      populate_result_from_row(stmt, &results[count]);
       count++;
    }
 
@@ -917,25 +975,7 @@ int music_db_get_by_path(const char *path, music_search_result_t *result, bool *
    sqlite3_bind_text(stmt, 1, path, -1, SQLITE_STATIC);
 
    if (sqlite3_step(stmt) == SQLITE_ROW) {
-      memset(result, 0, sizeof(*result));
-
-      const char *p = (const char *)sqlite3_column_text(stmt, 0);
-      const char *title = (const char *)sqlite3_column_text(stmt, 1);
-      const char *artist = (const char *)sqlite3_column_text(stmt, 2);
-      const char *album = (const char *)sqlite3_column_text(stmt, 3);
-      int duration = sqlite3_column_int(stmt, 4);
-
-      if (p)
-         safe_strncpy(result->path, p, sizeof(result->path));
-      if (title)
-         safe_strncpy(result->title, title, sizeof(result->title));
-      if (artist)
-         safe_strncpy(result->artist, artist, sizeof(result->artist));
-      if (album)
-         safe_strncpy(result->album, album, sizeof(result->album));
-      result->duration_sec = (uint32_t)duration;
-
-      build_display_name(result);
+      populate_result_from_row(stmt, result);
       *found_out = true;
    }
 
@@ -977,31 +1017,7 @@ int music_db_list_paged(music_search_result_t *results,
 
    int count = 0;
    while (sqlite3_step(stmt) == SQLITE_ROW && count < max_results) {
-      music_search_result_t *r = &results[count];
-      memset(r, 0, sizeof(*r));
-
-      const char *path = (const char *)sqlite3_column_text(stmt, 0);
-      const char *title = (const char *)sqlite3_column_text(stmt, 1);
-      const char *artist = (const char *)sqlite3_column_text(stmt, 2);
-      const char *album = (const char *)sqlite3_column_text(stmt, 3);
-      const char *genre = (const char *)sqlite3_column_text(stmt, 4);
-      int duration = sqlite3_column_int(stmt, 5);
-      int source = sqlite3_column_int(stmt, 6);
-
-      if (path)
-         safe_strncpy(r->path, path, sizeof(r->path));
-      if (title)
-         safe_strncpy(r->title, title, sizeof(r->title));
-      if (artist)
-         safe_strncpy(r->artist, artist, sizeof(r->artist));
-      if (album)
-         safe_strncpy(r->album, album, sizeof(r->album));
-      if (genre)
-         safe_strncpy(r->genre, genre, sizeof(r->genre));
-      r->duration_sec = (uint32_t)duration;
-      r->source = (music_source_t)source;
-
-      build_display_name(r);
+      populate_result_from_row(stmt, &results[count]);
       count++;
    }
 
@@ -1230,31 +1246,7 @@ int music_db_get_by_artist(const char *artist,
 
    int count = 0;
    while (sqlite3_step(stmt) == SQLITE_ROW && count < max_results) {
-      music_search_result_t *r = &results[count];
-      memset(r, 0, sizeof(*r));
-
-      const char *path = (const char *)sqlite3_column_text(stmt, 0);
-      const char *title = (const char *)sqlite3_column_text(stmt, 1);
-      const char *art = (const char *)sqlite3_column_text(stmt, 2);
-      const char *album = (const char *)sqlite3_column_text(stmt, 3);
-      const char *genre = (const char *)sqlite3_column_text(stmt, 4);
-      int duration = sqlite3_column_int(stmt, 5);
-      int source = sqlite3_column_int(stmt, 6);
-
-      if (path)
-         safe_strncpy(r->path, path, sizeof(r->path));
-      if (title)
-         safe_strncpy(r->title, title, sizeof(r->title));
-      if (art)
-         safe_strncpy(r->artist, art, sizeof(r->artist));
-      if (album)
-         safe_strncpy(r->album, album, sizeof(r->album));
-      if (genre)
-         safe_strncpy(r->genre, genre, sizeof(r->genre));
-      r->duration_sec = (uint32_t)duration;
-      r->source = (music_source_t)source;
-
-      build_display_name(r);
+      populate_result_from_row(stmt, &results[count]);
       count++;
    }
 
@@ -1294,31 +1286,7 @@ int music_db_get_by_album(const char *album,
 
    int count = 0;
    while (sqlite3_step(stmt) == SQLITE_ROW && count < max_results) {
-      music_search_result_t *r = &results[count];
-      memset(r, 0, sizeof(*r));
-
-      const char *path = (const char *)sqlite3_column_text(stmt, 0);
-      const char *title = (const char *)sqlite3_column_text(stmt, 1);
-      const char *artist = (const char *)sqlite3_column_text(stmt, 2);
-      const char *alb = (const char *)sqlite3_column_text(stmt, 3);
-      const char *genre = (const char *)sqlite3_column_text(stmt, 4);
-      int duration = sqlite3_column_int(stmt, 5);
-      int source = sqlite3_column_int(stmt, 6);
-
-      if (path)
-         safe_strncpy(r->path, path, sizeof(r->path));
-      if (title)
-         safe_strncpy(r->title, title, sizeof(r->title));
-      if (artist)
-         safe_strncpy(r->artist, artist, sizeof(r->artist));
-      if (alb)
-         safe_strncpy(r->album, alb, sizeof(r->album));
-      if (genre)
-         safe_strncpy(r->genre, genre, sizeof(r->genre));
-      r->duration_sec = (uint32_t)duration;
-      r->source = (music_source_t)source;
-
-      build_display_name(r);
+      populate_result_from_row(stmt, &results[count]);
       count++;
    }
 
