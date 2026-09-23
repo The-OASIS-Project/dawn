@@ -110,10 +110,13 @@ void spec_slot_mark_launched(spec_slot_t *s, int64_t now_ms);
  * @param now_ms            wall-clock now.
  * @param state_is_recording owner still in RECORDING (belt-and-braces vs teardown).
  * @return true  → the result is current and now held in the slot.
- *         false → stale/superseded and DROPPED.
+ *         false → stale/superseded, or `text` was NULL (a blank/failed decode),
+ *                 and DROPPED.
  * The slot takes ownership of `text` either way — it is stored on true and freed
- * on false — so the caller must NEVER free `text` after this call. Clears
- * `inflight` on BOTH outcomes (the decode is done regardless).
+ * on false — so the caller must NEVER free `text` after this call. Passing NULL
+ * `text` is valid: it clears `inflight` and returns false without marking ready
+ * (the way a worker reports "decode finished, nothing usable"). Clears `inflight`
+ * on EVERY outcome (the decode is done regardless).
  */
 bool spec_slot_store(spec_slot_t *s,
                      uint64_t gen,

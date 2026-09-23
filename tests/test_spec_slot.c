@@ -140,6 +140,20 @@ static void test_store_rejected_when_not_recording(void) {
    TEST_ASSERT_FALSE(s.inflight);
 }
 
+/* ---- a NULL (blank/failed) decode clears inflight without marking ready ---- */
+
+static void test_store_null_clears_inflight(void) {
+   spec_slot_t s;
+   spec_slot_init(&s);
+   uint64_t gen = spec_slot_gen(&s);
+   spec_slot_mark_launched(&s, 100);
+
+   TEST_ASSERT_FALSE(spec_slot_store(&s, gen, NULL, 700, true)); /* blank decode */
+   TEST_ASSERT_FALSE(s.ready);
+   TEST_ASSERT_FALSE(s.inflight); /* decode is done */
+   TEST_ASSERT_NULL(spec_slot_take_if_current(&s));
+}
+
 /* ---- in-flight cap: cannot arm a second decode while one is running ---- */
 
 static void test_cannot_arm_while_inflight(void) {
@@ -238,6 +252,7 @@ int main(void) {
    RUN_TEST(test_cancel_drops_late_store);
    RUN_TEST(test_take_rejects_bumped_after_store);
    RUN_TEST(test_store_rejected_when_not_recording);
+   RUN_TEST(test_store_null_clears_inflight);
    RUN_TEST(test_cannot_arm_while_inflight);
    RUN_TEST(test_fire_cap_persists_then_resets);
    RUN_TEST(test_invalidate_frees_stored_text);

@@ -62,6 +62,11 @@ const uint32_t ALWAYS_ON_VALID_SAMPLE_RATES[] = { 8000, 16000, 22050, 44100, 480
  * below) so remote always-on tracks the same knobs as the local mic path. */
 #define VAD_SAMPLE_SIZE 512 /* 32ms at 16kHz */
 
+/* Adaptive-dwell speculative decode: cap the speculative runs per utterance so a
+ * long stutter can't spawn unbounded decodes (paired with the <=1-in-flight cap in
+ * spec_slot). See docs/ADAPTIVE_DWELL_DESIGN.md. */
+#define SPEC_MAX_FIRES 3
+
 /* =============================================================================
  * Helpers
  * ============================================================================= */
@@ -112,9 +117,15 @@ static void set_state(always_on_ctx_t *ctx, always_on_state_t new_state) {
    ctx->state_entry_ms = now_ms();
    /* Every state transition invalidates any speculative decode: a stale in-flight
     * decode's store is dropped (generation bump) and any stored result is freed.
-    * Entering RECORDING is a new utterance, so it also resets the per-utterance
-    * fire cap. Single-writer on the LWS thread; see the spec_slot locking contract. */
-   spec_slot_invalidate(&ctx->spec, new_state == ALWAYS_ON_RECORDING);
+    * Entering an armable state (WAKE_CHECK = a fresh utterance, or RECORDING = the
+    * command segment of a two-part one) also resets the per-segment fire cap and
+    * the shadow miss reason. Single-writer on the LWS thread; see the spec_slot
+    * locking contract. */
+   bool armable_entry = (new_state == ALWAYS_ON_WAKE_CHECK || new_state == ALWAYS_ON_RECORDING);
+   spec_slot_invalidate(&ctx->spec, armable_entry);
+   if (armable_entry) {
+      ctx->spec_pool_missed = false;
+   }
    OLOG_INFO("Always-on state: %s -> %s", always_on_state_name(old),
              always_on_state_name(new_state));
 }
@@ -150,6 +161,7 @@ static void buffer_write(always_on_ctx_t *ctx, const uint8_t *data, size_t len) 
 
 /* Forward declarations */
 static void always_on_release(always_on_ctx_t *ctx);
+static inline bool always_on_adaptive_enabled(void); /* defined in the spec section */
 
 void send_always_on_state(struct lws *wsi, const char *state_name) {
    if (!wsi)
@@ -205,6 +217,10 @@ typedef struct {
    int16_t *pcm_data;    /**< 48kHz mono PCM (owned, must free) */
    size_t pcm_samples;   /**< Number of samples */
    always_on_ctx_t *ctx; /**< Back-pointer to always-on context (retained) */
+   /* Adaptive-dwell shadow: speculative transcript ready at commit (owned, may be
+    * NULL) for spec-vs-committed agreement logging. Shadow-only; never dispatched. */
+   char *spec_text;
+   const char *spec_where;
 } wake_check_work_t;
 
 typedef struct {
@@ -212,6 +228,11 @@ typedef struct {
    size_t pcm_samples;   /**< Number of samples */
    always_on_ctx_t *ctx; /**< Back-pointer to always-on context (retained) */
    session_t *session;   /**< Session for LLM dispatch (retained) */
+   /* Adaptive-dwell shadow: the speculative transcript that was ready at commit
+    * (owned, may be NULL), so the worker can log spec-vs-committed agreement off
+    * the LWS thread. Shadow-only; never dispatched. */
+   char *spec_text;
+   const char *spec_where; /**< which state armed it ("recording"); static string */
 } cmd_transcribe_work_t;
 
 /**
@@ -292,6 +313,7 @@ static void *wake_check_worker(void *arg) {
    if (always_on_get_state(ctx) == ALWAYS_ON_DISABLED) {
       OLOG_INFO("Always-on: wake check worker aborted (context disabled)");
       free(work->pcm_data);
+      free(work->spec_text);
       free(work);
       always_on_release(ctx);
       return NULL;
@@ -306,6 +328,16 @@ static void *wake_check_worker(void *arg) {
 
    const char *transcript = (asr_ret == 0 && transcript_str) ? transcript_str : "";
    OLOG_INFO("Always-on: wake check transcript: \"%s\"", transcript);
+
+   /* Adaptive-dwell shadow: compare the speculative transcript (if one was ready at
+    * commit) against this authoritative wake-check transcript. Measurement only. */
+   if (work->spec_text) {
+      bool agree = strcmp(work->spec_text, transcript) == 0;
+      OLOG_INFO("AO spec agreement: where=%s agree=%d spec=\"%s\" committed=\"%s\"",
+                work->spec_where ? work->spec_where : "?", agree, work->spec_text, transcript);
+      free(work->spec_text);
+      work->spec_text = NULL;
+   }
 
    /* Check for wake word */
    wake_word_result_t ww = wake_word_check(transcript);
@@ -336,11 +368,28 @@ static void *wake_check_worker(void *arg) {
  * Must be called with ctx->mutex held; releases before thread dispatch.
  */
 static void dispatch_wake_check(always_on_ctx_t *ctx, ws_connection_t *conn) {
+   /* Adaptive-dwell shadow: snapshot the speculative slot BEFORE set_state wipes
+    * it. Never consumed in P1.1 — it rides to the worker only for agreement logging;
+    * the synchronous wake-check decode below is always authoritative. */
+   char *spec_text = spec_slot_take_if_current(&ctx->spec);
+   if (always_on_adaptive_enabled()) {
+      const int64_t commit_now = now_ms();
+      const char *miss = spec_text               ? "hit"
+                         : ctx->spec.inflight    ? "inflight"
+                         : ctx->spec_pool_missed ? "pool"
+                         : ctx->spec.fires > 0   ? "cancelled"
+                                                 : "none";
+      OLOG_INFO("AO spec commit: where=wake_check hit=%d miss=%s fires=%d wait_at_commit_ms=%lld",
+                spec_text != NULL, miss, ctx->spec.fires,
+                spec_text ? (long long)(commit_now - ctx->spec.ready_ms) : 0LL);
+   }
+
    size_t pcm_samples = 0;
    int16_t *pcm_data = extract_buffered_audio(ctx, &pcm_samples);
 
    if (!pcm_data || pcm_samples == 0) {
       OLOG_WARNING("Always-on: no audio to check for wake word");
+      free(spec_text);
       vad_silero_reset(ctx->vad_ctx);
       set_state(ctx, ALWAYS_ON_LISTENING);
       return;
@@ -349,6 +398,7 @@ static void dispatch_wake_check(always_on_ctx_t *ctx, ws_connection_t *conn) {
    wake_check_work_t *work = malloc(sizeof(wake_check_work_t));
    if (!work) {
       OLOG_ERROR("Always-on: failed to allocate wake check work");
+      free(spec_text);
       free(pcm_data);
       vad_silero_reset(ctx->vad_ctx);
       set_state(ctx, ALWAYS_ON_LISTENING);
@@ -358,6 +408,8 @@ static void dispatch_wake_check(always_on_ctx_t *ctx, ws_connection_t *conn) {
    work->pcm_data = pcm_data;
    work->pcm_samples = pcm_samples;
    work->ctx = ctx;
+   work->spec_text = spec_text;
+   work->spec_where = "wake_check";
    (void)conn; /* Result consumed by LWS thread via always_on_consume_wake_result */
 
    set_state(ctx, ALWAYS_ON_WAKE_PENDING);
@@ -378,6 +430,7 @@ static void dispatch_wake_check(always_on_ctx_t *ctx, ws_connection_t *conn) {
    if (ret != 0) {
       OLOG_ERROR("Always-on: failed to create wake check thread: %d", ret);
       atomic_fetch_sub(&ctx->refcount, 1); /* Undo retain */
+      free(work->spec_text);
       free(pcm_data);
       free(work);
       vad_silero_reset(ctx->vad_ctx);
@@ -396,6 +449,7 @@ static void *cmd_transcribe_worker(void *arg) {
    if (always_on_get_state(ctx) == ALWAYS_ON_DISABLED) {
       OLOG_INFO("Always-on: cmd transcribe worker aborted (context disabled)");
       free(work->pcm_data);
+      free(work->spec_text);
       session_release(work->session);
       free(work);
       always_on_release(ctx);
@@ -407,6 +461,18 @@ static void *cmd_transcribe_worker(void *arg) {
 
    if (asr_ret == 0 && transcript) {
       OLOG_INFO("Always-on: command transcript: \"%s\"", transcript);
+   }
+
+   /* Adaptive-dwell shadow: compare the speculative transcript (if one was ready at
+    * commit) against this authoritative one. Pure measurement — the committed
+    * transcript below is always the one that gets used. */
+   if (work->spec_text) {
+      const char *committed = (asr_ret == 0 && transcript) ? transcript : "";
+      bool agree = strcmp(work->spec_text, committed) == 0;
+      OLOG_INFO("AO spec agreement: where=%s agree=%d spec=\"%s\" committed=\"%s\"",
+                work->spec_where ? work->spec_where : "?", agree, work->spec_text, committed);
+      free(work->spec_text);
+      work->spec_text = NULL;
    }
 
    /* Store result under mutex for thread safety.  Drop blank/silence transcripts
@@ -428,16 +494,180 @@ static void *cmd_transcribe_worker(void *arg) {
    return NULL;
 }
 
+/* =============================================================================
+ * Adaptive-dwell speculative decode (P1.1 shadow: arms + decodes, never consumes)
+ * ============================================================================= */
+
+/* True when speculative decode should run: [vad] adaptive_endpoint is not "off"
+ * AND the ASR engine is Whisper (speculation is meaningless for streaming Vosk). */
+static inline bool always_on_adaptive_enabled(void) {
+   if (strcmp(g_config.vad.adaptive_endpoint, "off") == 0) {
+      return false;
+   }
+   return worker_pool_engine_type() == ASR_ENGINE_WHISPER;
+}
+
+typedef struct {
+   int16_t *pcm_data;      /**< 48kHz snapshot (owned) */
+   size_t pcm_samples;     /**< Number of samples */
+   always_on_ctx_t *ctx;   /**< Retained (refcount) */
+   asr_context_t *asr_ctx; /**< Borrowed; worker returns it */
+   uint64_t gen;           /**< Generation captured at launch (staleness tag) */
+   const char *where;      /**< armed-in state ("wake_check"/"recording"); static */
+} spec_transcribe_work_t;
+
+/* A speculative decode is worth keeping only while the connection is still in a
+ * state that will consume it — i.e. still accumulating this utterance. */
+static inline bool always_on_state_speculatable(always_on_state_t s) {
+   return s == ALWAYS_ON_WAKE_CHECK || s == ALWAYS_ON_RECORDING;
+}
+
+/**
+ * Speculative decode worker. Decodes a hush-time audio snapshot on a try-borrowed
+ * ASR context and stores the result in the spec slot IFF still current. Never
+ * dispatches, never touches the session or wsi, never sets state. Detached.
+ */
+static void *spec_transcribe_worker(void *arg) {
+   spec_transcribe_work_t *work = (spec_transcribe_work_t *)arg;
+   always_on_ctx_t *ctx = work->ctx;
+
+   char *transcript = NULL;
+   int rc = webui_audio_pcm48k_to_text_on_ctx(work->asr_ctx, work->pcm_data, work->pcm_samples,
+                                              &transcript);
+   worker_pool_return_asr(work->asr_ctx); /* return the borrowed context ASAP */
+
+   /* Blank/failed decode → no usable result (spec_slot_store(NULL) just clears
+    * inflight). Otherwise hand ownership to the slot, which keeps it only if the
+    * generation still matches and we're still recording. */
+   if (rc != 0 || asr_transcript_is_blank(transcript)) {
+      free(transcript);
+      transcript = NULL;
+   }
+
+   const int64_t now = now_ms();
+   pthread_mutex_lock(&ctx->mutex);
+   bool active = always_on_state_speculatable(atomic_load(&ctx->state));
+   bool kept = spec_slot_store(&ctx->spec, work->gen, transcript, now, active);
+   pthread_mutex_unlock(&ctx->mutex);
+   if (kept) {
+      OLOG_INFO("AO spec: decode ready where=%s (gen=%llu)", work->where,
+                (unsigned long long)work->gen);
+   }
+
+   free(work->pcm_data);
+   free(work);
+   always_on_release(ctx);
+   return NULL;
+}
+
+/**
+ * Arm a speculative decode if we're in a hush and conditions allow. Call under
+ * ctx->mutex, on a silence frame, AFTER the end-of-speech (commit) check. @p where
+ * is a static string for shadow logging. Never blocks; if no ASR context can be
+ * spared it records a pool miss and returns.
+ */
+static void always_on_spec_maybe_arm(always_on_ctx_t *ctx,
+                                     int64_t now,
+                                     always_on_state_t expected,
+                                     const char *where) {
+   if (!always_on_adaptive_enabled() || atomic_load(&ctx->state) != expected) {
+      return;
+   }
+   /* With the default network.workers=2 pool and keep_idle=1 this arms only when a
+    * spare context remains; a 1-worker pool can never spare one, so log once and
+    * stay inert rather than silently never arming. */
+   if (worker_pool_size() < 2) {
+      static _Atomic bool logged = false;
+      if (!atomic_exchange(&logged, true)) {
+         OLOG_WARNING("Adaptive endpoint inert: worker pool too small (%d < 2)",
+                      worker_pool_size());
+      }
+      return;
+   }
+
+   const int64_t hush_ms = (int64_t)(g_config.vad.chunking.pause_duration * 1000.0f);
+   const int64_t eos_ms = (int64_t)(g_config.vad.end_of_speech_duration * 1000.0f);
+   if (!spec_in_hush_window(ctx->last_speech_ms, now, hush_ms, eos_ms) ||
+       !spec_slot_can_arm(&ctx->spec, SPEC_MAX_FIRES)) {
+      return;
+   }
+
+   asr_context_t *asr_ctx = worker_pool_try_borrow_asr(1);
+   if (!asr_ctx) {
+      ctx->spec_pool_missed = true;
+      return;
+   }
+
+   size_t n = 0;
+   int16_t *pcm = peek_buffered_audio(ctx, &n); /* non-destructive: capture continues */
+   if (!pcm || n == 0) {
+      worker_pool_return_asr(asr_ctx);
+      free(pcm);
+      return;
+   }
+
+   spec_transcribe_work_t *work = malloc(sizeof(spec_transcribe_work_t));
+   if (!work) {
+      worker_pool_return_asr(asr_ctx);
+      free(pcm);
+      return;
+   }
+   work->pcm_data = pcm;
+   work->pcm_samples = n;
+   work->ctx = ctx;
+   work->asr_ctx = asr_ctx;
+   work->gen = spec_slot_gen(&ctx->spec);
+   work->where = where;
+
+   atomic_fetch_add(&ctx->refcount, 1); /* worker holds a reference */
+
+   pthread_t thread;
+   pthread_attr_t attr;
+   pthread_attr_init(&attr);
+   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+   int ret = pthread_create(&thread, &attr, spec_transcribe_worker, work);
+   pthread_attr_destroy(&attr);
+
+   if (ret != 0) {
+      OLOG_ERROR("Always-on: failed to create speculative decode thread: %d", ret);
+      atomic_fetch_sub(&ctx->refcount, 1);
+      worker_pool_return_asr(asr_ctx);
+      free(pcm);
+      free(work);
+      return; /* slot NOT marked launched → a later frame may retry */
+   }
+
+   spec_slot_mark_launched(&ctx->spec, now);
+}
+
 /**
  * Dispatch command transcription to a worker thread.
  * Must be called with ctx->mutex held.
  */
 static void dispatch_cmd_transcribe(always_on_ctx_t *ctx, ws_connection_t *conn) {
+   /* Adaptive-dwell shadow: snapshot the speculative slot BEFORE set_state wipes
+    * it. take_if_current detaches a ready + current speculative transcript (else
+    * NULL). P1.1 NEVER consumes it — it rides along to the worker only so agreement
+    * can be logged; the real synchronous decode below is always authoritative. */
+   char *spec_text = spec_slot_take_if_current(&ctx->spec);
+   if (always_on_adaptive_enabled()) {
+      const int64_t commit_now = now_ms();
+      const char *miss = spec_text               ? "hit"
+                         : ctx->spec.inflight    ? "inflight"
+                         : ctx->spec_pool_missed ? "pool"
+                         : ctx->spec.fires > 0   ? "cancelled"
+                                                 : "none";
+      OLOG_INFO("AO spec commit: hit=%d miss=%s fires=%d wait_at_commit_ms=%lld", spec_text != NULL,
+                miss, ctx->spec.fires,
+                spec_text ? (long long)(commit_now - ctx->spec.ready_ms) : 0LL);
+   }
+
    size_t pcm_samples = 0;
    int16_t *pcm_data = extract_buffered_audio(ctx, &pcm_samples);
 
    if (!pcm_data || pcm_samples == 0 || !conn->session) {
       OLOG_WARNING("Always-on: no audio or session for command transcribe");
+      free(spec_text);
       vad_silero_reset(ctx->vad_ctx);
       always_on_processing_complete(ctx);
       return;
@@ -446,6 +676,7 @@ static void dispatch_cmd_transcribe(always_on_ctx_t *ctx, ws_connection_t *conn)
    cmd_transcribe_work_t *work = malloc(sizeof(cmd_transcribe_work_t));
    if (!work) {
       OLOG_ERROR("Always-on: failed to allocate cmd transcribe work");
+      free(spec_text);
       free(pcm_data);
       vad_silero_reset(ctx->vad_ctx);
       always_on_processing_complete(ctx);
@@ -456,6 +687,8 @@ static void dispatch_cmd_transcribe(always_on_ctx_t *ctx, ws_connection_t *conn)
    work->pcm_samples = pcm_samples;
    work->ctx = ctx;
    work->session = conn->session;
+   work->spec_text = spec_text;
+   work->spec_where = "recording";
    session_retain(work->session);
 
    set_state(ctx, ALWAYS_ON_PROCESSING);
@@ -475,6 +708,7 @@ static void dispatch_cmd_transcribe(always_on_ctx_t *ctx, ws_connection_t *conn)
       OLOG_ERROR("Always-on: failed to create cmd transcribe thread: %d", ret);
       atomic_fetch_sub(&ctx->refcount, 1);
       session_release(work->session);
+      free(work->spec_text);
       free(pcm_data);
       free(work);
       vad_silero_reset(ctx->vad_ctx);
@@ -997,13 +1231,15 @@ int always_on_process_audio(always_on_ctx_t *ctx,
          case ALWAYS_ON_WAKE_CHECK: {
             if (speech_prob >= speech_threshold) {
                always_on_shadow_note_resume(ctx, now, "wake_check");
+               /* Resumed speech cancels any armed/in-flight speculative decode. */
+               spec_slot_invalidate(&ctx->spec, false);
                ctx->last_speech_ms = now;
-            }
-
-            /* Check if speech ended (silence exceeds pause threshold) */
-            if (speech_prob < speech_threshold && always_on_eos_reached(ctx, now)) {
+            } else if (always_on_eos_reached(ctx, now)) {
                /* Speech ended — dispatch ASR to worker thread */
                dispatch_wake_check(ctx, (ws_connection_t *)conn_ptr);
+            } else {
+               /* Silence, not yet end-of-speech: at the hush, speculate (shadow). */
+               always_on_spec_maybe_arm(ctx, now, ALWAYS_ON_WAKE_CHECK, "wake_check");
             }
             break;
          }
@@ -1011,12 +1247,17 @@ int always_on_process_audio(always_on_ctx_t *ctx,
          case ALWAYS_ON_RECORDING:
             if (speech_prob >= speech_threshold) {
                always_on_shadow_note_resume(ctx, now, "recording");
+               /* Resumed speech cancels any armed/in-flight speculative decode
+                * (its later store is dropped by the generation bump). */
+               spec_slot_invalidate(&ctx->spec, false);
                ctx->last_speech_ms = now;
-            }
-            /* End-of-speech: dispatch ASR to worker thread (non-blocking) */
-            if (speech_prob < speech_threshold && always_on_eos_reached(ctx, now)) {
+            } else if (always_on_eos_reached(ctx, now)) {
+               /* End-of-speech: dispatch ASR to worker thread (non-blocking) */
                send_always_on_state(ctx->wsi, "processing");
                dispatch_cmd_transcribe(ctx, (ws_connection_t *)conn_ptr);
+            } else {
+               /* Silence, not yet end-of-speech: at the hush, speculate (shadow). */
+               always_on_spec_maybe_arm(ctx, now, ALWAYS_ON_RECORDING, "recording");
             }
             break;
 
@@ -1077,6 +1318,9 @@ bool always_on_check_timeouts(always_on_ctx_t *ctx, void *conn) {
             OLOG_INFO("Always-on: WAKE_CHECK timeout (%lld ms), dispatching ASR",
                       (long long)elapsed);
             dispatch_wake_check(ctx, (ws_connection_t *)conn);
+         } else {
+            /* DTX client mid-pause: at the hush, speculate (shadow). Self-gates. */
+            always_on_spec_maybe_arm(ctx, now, ALWAYS_ON_WAKE_CHECK, "wake_check");
          }
          break;
 
@@ -1114,6 +1358,10 @@ bool always_on_check_timeouts(always_on_ctx_t *ctx, void *conn) {
                          (long long)elapsed);
             send_always_on_state(ctx->wsi, "processing");
             dispatch_cmd_transcribe(ctx, (ws_connection_t *)conn);
+         } else {
+            /* DTX client mid-pause: at the hush, speculate (shadow). Self-gates on
+             * the hush window, so it's a no-op until the pause is long enough. */
+            always_on_spec_maybe_arm(ctx, now, ALWAYS_ON_RECORDING, "recording");
          }
          break;
       }

@@ -157,6 +157,9 @@ typedef struct always_on_ctx {
     * lock-free generation read; see spec_slot.h). Invalidated on every set_state
     * and on a resumed-speech cancel. Inert unless [vad] adaptive_endpoint != off. */
    spec_slot_t spec;
+   bool spec_pool_missed; /**< a speculative arm this utterance failed to borrow a
+                             context (for shadow miss-reason logging); reset on
+                             RECORDING entry. Under `mutex`. */
 
    /* Connection back-pointer (non-owning, for sending responses) */
    struct lws *wsi;

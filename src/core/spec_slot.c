@@ -102,8 +102,9 @@ bool spec_slot_store(spec_slot_t *s,
    /* The decode is finished regardless of whether we keep it. */
    s->inflight = false;
 
-   if (gen != atomic_load(&s->gen) || !state_is_recording) {
-      /* Superseded by a cancel/new-utterance, or the connection left RECORDING. */
+   if (!text || gen != atomic_load(&s->gen) || !state_is_recording) {
+      /* No usable transcript (blank/failed decode), or superseded by a
+       * cancel/new-utterance, or the connection left the speculation state. */
       free(text);
       return false;
    }
