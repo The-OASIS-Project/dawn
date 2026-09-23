@@ -620,6 +620,8 @@ set(DAWN_SOURCES
     src/audio/phone_apm.cpp
     src/audio/audio_converter.c
     src/audio/music_db.c
+    src/audio/music_db_query.c
+    src/tools/music_search.c
     src/audio/music_scanner.c
     src/audio/music_source.c
     src/audio/plex_client.c

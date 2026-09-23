@@ -408,6 +408,7 @@ dawn_add_unit_test(test_email_parse
 dawn_add_unit_test(test_music_db
    SOURCES test_music_db.c
            ${SRC_ROOT}/src/audio/music_db.c
+           ${SRC_ROOT}/src/audio/music_db_query.c
            ${SRC_ROOT}/src/audio/music_rank.c
            ${SRC_ROOT}/src/audio/music_source.c
            ${SRC_ROOT}/src/core/path_utils.c
@@ -419,6 +420,18 @@ dawn_add_unit_test(test_audio_metadata
            ${SRC_ROOT}/src/audio/audio_metadata_util.c
    LIBS    unity
    INCLUDES ${SRC_ROOT}/common/include
+   LABEL   ci)
+
+dawn_add_unit_test(test_music_search
+   SOURCES test_music_search.c
+           ${SRC_ROOT}/src/tools/music_search.c
+           ${SRC_ROOT}/src/audio/music_db.c
+           ${SRC_ROOT}/src/audio/music_db_query.c
+           ${SRC_ROOT}/src/audio/music_rank.c
+           ${SRC_ROOT}/src/audio/music_source.c
+           ${SRC_ROOT}/src/core/path_utils.c
+           ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity sqlite3 pthread
    LABEL   ci)
 
 dawn_add_unit_test(test_music_rank

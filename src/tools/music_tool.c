@@ -39,12 +39,14 @@
 #include "audio/audio_decoder.h"
 #include "audio/flac_playback.h"
 #include "audio/music_db.h"
+#include "audio/music_rank.h"
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
 #include "core/strbuf.h"
 #include "dawn.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "tools/music_search.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
 
@@ -63,12 +65,8 @@
 /* Candidate window pulled from the DB for relevance ranking in the resolver. */
 #define MUSIC_RESOLVE_CANDIDATES 8
 
-/* How many rows the 'search' action surfaces to the LLM. Results are relevance-
- * ranked best-first, so this is the breadth of options the LLM sees to choose
- * from. DEFAULT applies to a single query; BATCH applies per-query in an items[]
- * batch. */
-#define MUSIC_SEARCH_DEFAULT_LIMIT 25
-#define MUSIC_BATCH_SEARCH_LIMIT 25
+/* Albums/artists per 'library' page. (Search page sizes live in music_search.h.) */
+#define MUSIC_LIBRARY_PER_PAGE 50
 
 /* ========== Types ========== */
 
@@ -129,18 +127,19 @@ static const treg_param_t music_params[] = {
    {
        .name = "query",
        .description =
-           "For 'play'/'search'/'enqueue': search terms — ONE artist OR title OR album per query "
-           "(see the tool description for search rules). For 'select'/'remove': track number "
-           "(1-based); 'remove' also accepts a title to match. For 'shuffle': 'on' or 'off'. "
-           "For 'repeat': 'none', 'all', or 'one'. For 'library': 'artists', 'albums', or omit.",
+           "For 'play'/'search'/'enqueue': search terms — best as one artist, title, or album per "
+           "query (see the tool description for search rules). For 'select'/'remove': track "
+           "number (1-based); 'remove' also accepts a title to match. For 'shuffle': 'on' or "
+           "'off'. For 'repeat': 'none', 'all', or 'one'. For 'library': 'artists', 'albums' "
+           "(add artist:'X' for that artist's albums), or omit for stats.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_VALUE,
    },
    {
        .name = "limit",
-       .description = "For 'search': maximum results to return (0 = all, default 25). Note a "
-                      "batch search (items:[...]) returns up to 25 per query regardless.",
+       .description = "For 'search': results per page (default 25, max 100; 0 = max). A batch "
+                      "search (items:[...]) returns up to 25 per query regardless.",
        .type = TOOL_PARAM_TYPE_NUMBER,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
@@ -148,8 +147,10 @@ static const treg_param_t music_params[] = {
    },
    {
        .name = "page",
-       .description = "For 'library': page number for pagination (1-based, default 1). "
-                      "Each page returns up to 50 items. Use with 'artists' or 'albums'.",
+       .description = "For 'search' and 'library': page number (1-based, default 1). Every "
+                      "result states how many were found and how many pages there are — request "
+                      "the next page when you need more. 'search' pages hold 'limit' tracks; "
+                      "'library' pages hold 50 items.",
        .type = TOOL_PARAM_TYPE_NUMBER,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
@@ -168,7 +169,8 @@ static const treg_param_t music_params[] = {
        .name = "artist",
        .description = "For 'search': restrict matching to the ARTIST field (e.g. artist:'Queen' "
                       "returns the band, not songs with 'Queen' in the title). Narrows a broad "
-                      "free-text query.",
+                      "free-text query. For 'library' with query 'albums': list this artist's "
+                      "albums.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
@@ -181,6 +183,16 @@ static const treg_param_t music_params[] = {
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
        .field_name = "title",
+   },
+   {
+       .name = "album",
+       .description = "For 'search': restrict matching to the ALBUM field (e.g. album:'Whatever "
+                      "and Ever Amen' lists that album's tracks). Combine with artist: to "
+                      "disambiguate.",
+       .type = TOOL_PARAM_TYPE_STRING,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "album",
    },
    {
        .name = "year_min",
@@ -227,19 +239,23 @@ static const tool_metadata_t music_metadata = {
    .description =
        "Control music playback and build playlists from the local library. 'play' REPLACES the "
        "queue; 'enqueue' APPENDS (use it to add to an existing playlist). 'search' matches a query "
-       "against artist/title/album/genre and returns matches RANKED best-first (exact hits top, "
-       "looser matches below — so you see options and choose), with paths you can enqueue "
-       "directly; "
-       "one query per artist or title (don't combine 'Artist Title'). To narrow, restrict to a "
-       "field: artist:'Queen' returns the band (not songs titled '…Queen…'), title:'…'. 'search' "
-       "also filters by genre:'jazz' and/or a year range (year_min/year_max, e.g. 1980..1989 for "
-       "the 80s), with or without a text query. There is NO mood/vibe index — for a themed "
-       "playlist, name concrete "
-       "artists/songs (use the web 'search' tool if unsure who fits), optionally narrow with "
-       "genre/year, then batch-search (search items:[\"Prince\",\"Queen\"]) and enqueue the paths. "
-       "All track numbers are 1-based.",
+       "against artist/title/album/genre (punctuation and word order don't matter) and returns "
+       "matches RANKED best-first (exact hits top, looser matches below — so you see options and "
+       "choose), with album, year, and a path you can enqueue directly. Every search states how "
+       "many tracks matched and how many pages there are; use page:N to see more. To narrow, "
+       "restrict to a field: artist:'Queen' returns the band (not songs titled '…Queen…'), "
+       "title:'…', album:'…'. 'search' also filters by genre:'jazz' and/or a year range "
+       "(year_min/year_max, e.g. 1980..1989 for the 80s), with or without a text query. To see "
+       "which albums an artist has, use library query:'albums' artist:'X' (one line per album, "
+       "editions merged, with years and track counts) instead of paging through tracks. The "
+       "library only reflects what's owned — for anything about music beyond it (discographies, "
+       "releases, who fits a theme), use the web 'search' tool rather than memory. There is "
+       "NO mood/vibe index — for a themed playlist, name concrete artists/songs, optionally "
+       "narrow with genre/year, then batch-search "
+       "(search items:[\"Prince\",\"Queen\"]) and enqueue the paths. All track numbers are "
+       "1-based.",
    .params = music_params,
-   .param_count = 10,
+   .param_count = 11,
 
    .device_type = TOOL_DEVICE_TYPE_MUSIC,
    .capabilities = TOOL_CAP_FILESYSTEM | TOOL_CAP_SCHEDULABLE,
@@ -257,50 +273,6 @@ static const tool_metadata_t music_metadata = {
 };
 
 /* ========== Helper Functions ========== */
-
-/* Parse one sanity-bounded year param from the tool value, 0 if absent/invalid. */
-static int parse_year_param(const char *value, const char *field) {
-   char ybuf[16] = "";
-   if (tool_param_extract_custom(value ? value : "", field, ybuf, sizeof(ybuf))) {
-      long y = strtol(ybuf, NULL, 10);
-      if (y > 0 && y < MUSIC_QUERY_YEAR_MAX) {
-         return (int)y;
-      }
-   }
-   return 0;
-}
-
-void music_query_parse_filters(const char *value, music_search_filters_t *out) {
-   if (!out) {
-      return;
-   }
-   memset(out, 0, sizeof(*out));
-   const char *v = value ? value : "";
-   tool_param_extract_custom(v, "genre", out->genre, sizeof(out->genre));
-   tool_param_extract_custom(v, "artist", out->artist, sizeof(out->artist));
-   tool_param_extract_custom(v, "title", out->title, sizeof(out->title));
-   out->year_min = parse_year_param(v, "year_min");
-   out->year_max = parse_year_param(v, "year_max");
-}
-
-void music_query_from_filters(music_query_t *out,
-                              const char *text,
-                              const music_search_filters_t *f) {
-   if (!out) {
-      return;
-   }
-   memset(out, 0, sizeof(*out));
-   if (text && text[0]) {
-      out->text = text;
-   }
-   if (f) {
-      out->genre = f->genre[0] ? f->genre : NULL;
-      out->artist = f->artist[0] ? f->artist : NULL;
-      out->title = f->title[0] ? f->title : NULL;
-      out->year_min = f->year_min;
-      out->year_max = f->year_max;
-   }
-}
 
 /**
  * @brief Extract just the filename from a full path
@@ -485,12 +457,12 @@ static int local_resolve_item(const char *item, music_search_result_t *out) {
       title_query = dash + 3;
    }
 
-   /* Fetch path-clean, relevance-ranked candidates (music_db_query drops the file
-    * path from matching and excludes weak substrings), then apply the artist
+   /* Fetch path-clean, relevance-ranked candidates (strict matching — never the
+    * approximate fallback, since this plays what it finds), then apply the artist
     * preference + shorter-title tiebreak. */
    music_query_t mq = { .text = title_query };
    if (music_db_query(&mq, r, MUSIC_RESOLVE_CANDIDATES, &count) == SUCCESS && count > 0) {
-      int pick = music_db_pick_best_match(r, count, title_query, dash ? artist : NULL);
+      int pick = music_rank_pick_best(r, count, title_query, dash ? artist : NULL);
       *out = r[pick];
       return 1;
    }
@@ -923,7 +895,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
       /* Search without playing - return matching tracks */
       /* Optional filters shared by the batch and single-query paths. */
       music_search_filters_t filters;
-      music_query_parse_filters(value, &filters);
+      music_search_parse_filters(value, &filters);
 
       /* Batch search: items[] of queries → grouped results with paths. */
       if (value && value[0]) {
@@ -940,8 +912,8 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
                strbuf_t sb;
                strbuf_init(&sb, 1024);
                int n = (int)json_object_array_length(arr);
-               if (n > MAX_PLAYLIST_LENGTH) {
-                  n = MAX_PLAYLIST_LENGTH; /* bound per-call DB work */
+               if (n > MUSIC_BATCH_MAX_QUERIES) {
+                  n = MUSIC_BATCH_MAX_QUERIES; /* each query is a full-library scan */
                }
                /* Heap-allocate the per-query result window (~2.5 KB/row) rather
                 * than a large stack array. */
@@ -959,20 +931,8 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
                for (int i = 0; i < n; i++) {
                   struct json_object *e = json_object_array_get_idx(arr, i);
                   const char *q = e ? json_object_get_string(e) : NULL;
-                  if (!q || !q[0]) {
-                     continue;
-                  }
-                  strbuf_appendf(&sb, "%s:\n", q);
-                  int count = 0;
-                  music_query_t mq;
-                  music_query_from_filters(&mq, q, &filters);
-                  if (music_db_query(&mq, r, MUSIC_BATCH_SEARCH_LIMIT, &count) == SUCCESS &&
-                      count > 0) {
-                     for (int j = 0; j < count; j++) {
-                        strbuf_appendf(&sb, "  %s  [%s]\n", r[j].display_name, r[j].path);
-                     }
-                  } else {
-                     strbuf_appendf(&sb, "  No match: %s\n", q);
+                  if (q && q[0]) {
+                     music_search_append_batch_entry(&sb, q, &filters, r);
                   }
                }
                free(r);
@@ -1000,31 +960,17 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
       /* Single-query (or filter-only) search via the ranked query core. */
       char query[MAX_FILENAME_LENGTH];
       tool_param_extract_base(value ? value : "", query, sizeof(query));
+      /* limit:0 means the largest page; an absent/garbled limit keeps the default. */
+      int limit = music_search_parse_int(value, "limit", MUSIC_SEARCH_DEFAULT_LIMIT);
+      int page_no = music_search_parse_int(value, "page", 1);
 
-      char limit_str[16] = "";
-      int limit = MUSIC_SEARCH_DEFAULT_LIMIT; /* Default result window */
-      if (tool_param_extract_custom(value ? value : "", "limit", limit_str, sizeof(limit_str))) {
-         char *endptr;
-         long parsed = strtol(limit_str, &endptr, 10);
-         if (endptr != limit_str && *endptr == '\0') {
-            if (parsed == 0 || parsed > MAX_PLAYLIST_LENGTH) {
-               limit = MAX_PLAYLIST_LENGTH; /* 0 = show all (bounded) */
-            } else if (parsed > 0) {
-               limit = (int)parsed;
-            }
-         }
-         /* If parsing failed, keep the default limit */
-      }
-
-      bool have_filter = filters.genre[0] || filters.artist[0] || filters.title[0] ||
-                         filters.year_min > 0 || filters.year_max > 0;
-      if (!query[0] && !have_filter) {
+      if (!query[0] && !music_search_filters_any(&filters)) {
          if (direct_mode) {
             *should_respond = 0;
             return NULL;
          }
-         return strdup(TOOL_RESULT_ERROR_MARK "Search requires a query, artist, title, genre, or "
-                                              "year range");
+         return strdup(TOOL_RESULT_ERROR_MARK "Search requires a query, artist, title, album, "
+                                              "genre, or year range");
       }
       if ((strlen(query) + 8) > MAX_FILENAME_LENGTH) {
          if (direct_mode) {
@@ -1033,53 +979,12 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
          }
          return strdup(TOOL_RESULT_ERROR_MARK "Search term too long");
       }
-
-      music_search_result_t *res = malloc((size_t)limit * sizeof(music_search_result_t));
-      if (!res) {
-         if (direct_mode) {
-            *should_respond = 0;
-            return NULL;
-         }
-         return strdup(TOOL_RESULT_ERROR_MARK "Failed to allocate search buffer");
-      }
-
-      int count = 0;
-      music_query_t mq;
-      music_query_from_filters(&mq, query, &filters);
-      music_db_query(&mq, res, limit, &count);
-
-      if (count == 0) {
-         free(res);
-         if (direct_mode) {
-            *should_respond = 0;
-            return NULL;
-         }
-         return strdup("No music found matching that search.");
-      }
-
-      strbuf_t sb;
-      strbuf_init(&sb, 512);
-      strbuf_appendf(&sb, "Found %d track%s:\n", count, count == 1 ? "" : "s");
-      for (int i = 0; i < count; i++) {
-         if (res[i].year > 0) {
-            strbuf_appendf(&sb, "  %s (%u)  [%s]\n", res[i].display_name, res[i].year, res[i].path);
-         } else {
-            strbuf_appendf(&sb, "  %s  [%s]\n", res[i].display_name, res[i].path);
-         }
-      }
-      free(res);
-
       if (direct_mode) {
          *should_respond = 0;
-         strbuf_free(&sb);
          return NULL;
       }
-      char *out = strbuf_oom(&sb) ? NULL : strbuf_steal(&sb);
-      if (!out) {
-         strbuf_free(&sb);
-         return strdup(TOOL_RESULT_ERROR_MARK "Failed to build search results");
-      }
-      return out;
+      char *out = music_search_page_text(query, &filters, page_no, limit);
+      return out ? out : strdup(TOOL_RESULT_ERROR_MARK "Music search failed");
 
    } else if (strcmp(action, "library") == 0) {
       /* Browse music library - show stats, artists, or albums */
@@ -1091,24 +996,32 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
          return strdup(TOOL_RESULT_ERROR_MARK "Music database not available");
       }
 
-      /* Extract page parameter (1-based, default 1) */
-      int page = 1;
-      char page_str[16] = "";
-      if (tool_param_extract_custom(value, "page", page_str, sizeof(page_str))) {
-         char *endptr;
-         long parsed = strtol(page_str, &endptr, 10);
-         if (endptr != page_str && *endptr == '\0' && parsed >= 1) {
-            page = (int)parsed;
-         }
+      /* Page parameter (1-based, default 1; clamped before any int math) */
+      int page = music_search_parse_int(value, "page", 1);
+      if (page < 1) {
+         page = 1;
       }
-
-      int per_page = 50;
+      int per_page = MUSIC_LIBRARY_PER_PAGE;
       int db_offset = (page - 1) * per_page;
 
       /* Extract base query (strip ::page::N suffix) */
       char lib_query[64] = "";
       if (value && *value) {
          tool_param_extract_base(value, lib_query, sizeof(lib_query));
+      }
+
+      /* One artist's albums (discography view) — the right answer to "which of
+       * X's albums do I have", instead of paging through duplicate-heavy tracks. */
+      music_search_filters_t lib_filters;
+      music_search_parse_filters(value, &lib_filters);
+      if (strcasecmp(lib_query, "albums") == 0 && lib_filters.artist[0]) {
+         result = music_library_albums_text(lib_filters.artist, page, per_page);
+         if (direct_mode) {
+            *should_respond = 0;
+            free(result);
+            return NULL;
+         }
+         return result ? result : strdup(TOOL_RESULT_ERROR_MARK "Failed to list albums");
       }
 
       /* Default: show stats and first page of artists */

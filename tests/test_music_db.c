@@ -31,7 +31,9 @@
 
 #include "audio/audio_decoder.h"
 #include "audio/music_db.h"
+#include "audio/music_rank.h"
 #include "audio/music_source.h"
+#include "dawn_error.h"
 
 /* =============================================================================
  * Stubs for symbols referenced by music_db.c but not exercised in tests
@@ -124,6 +126,13 @@ static void clear_tracks(void) {
    sqlite3_exec(g_test_db, "DELETE FROM music_metadata", NULL, NULL, NULL);
 }
 
+/** Free-text search through the ranked query core (strict). */
+static void search_text(const char *text, music_search_result_t *results, int max, int *count) {
+   music_query_t q = { .text = text };
+   *count = 0;
+   music_db_query(&q, results, max, count);
+}
+
 /* =============================================================================
  * Group 1: music_source abstraction (no DB needed)
  * ============================================================================= */
@@ -208,7 +217,7 @@ static void test_search_basic(void) {
 
    music_search_result_t results[10];
    int count = 0;
-   music_db_search("Artist One", results, 10, &count);
+   search_text("Artist One", results, 10, &count);
 
    TEST_ASSERT_TRUE_MESSAGE(count == 2, "Search by artist returns 2 matches");
    if (count >= 1) {
@@ -226,7 +235,7 @@ static void test_search_by_title(void) {
 
    music_search_result_t results[10];
    int count = 0;
-   music_db_search("Bohemian", results, 10, &count);
+   search_text("Bohemian", results, 10, &count);
 
    TEST_ASSERT_TRUE_MESSAGE(count == 1, "Search by title finds 1 match");
    if (count >= 1) {
@@ -243,7 +252,7 @@ static void test_search_by_album(void) {
 
    music_search_result_t results[10];
    int count = 0;
-   music_db_search("Dark Side", results, 10, &count);
+   search_text("Dark Side", results, 10, &count);
 
    TEST_ASSERT_TRUE_MESSAGE(count == 1, "Search by album finds 1 match");
    if (count >= 1) {
@@ -260,7 +269,7 @@ static void test_search_by_genre(void) {
 
    music_search_result_t results[10];
    int count = 0;
-   music_db_search("Jazz", results, 10, &count);
+   search_text("Jazz", results, 10, &count);
 
    /* Should match both the genre "Jazz" AND the title "Jazz Song" — but both belong to same track
     */
@@ -281,7 +290,7 @@ static void test_search_dedup_local_wins(void) {
 
    music_search_result_t results[10];
    int count = 0;
-   music_db_search("Dedup Song", results, 10, &count);
+   search_text("Dedup Song", results, 10, &count);
 
    TEST_ASSERT_TRUE_MESSAGE(count == 1, "Dedup returns 1 result (not 2)");
    if (count >= 1) {
@@ -300,7 +309,7 @@ static void test_search_dedup_plex_only(void) {
 
    music_search_result_t results[10];
    int count = 0;
-   music_db_search("Plex Only", results, 10, &count);
+   search_text("Plex Only", results, 10, &count);
 
    TEST_ASSERT_TRUE_MESSAGE(count == 1, "Plex-only track returned");
    if (count >= 1) {
@@ -320,7 +329,7 @@ static void test_search_dedup_case_insensitive(void) {
 
    music_search_result_t results[10];
    int count = 0;
-   music_db_search("Song", results, 10, &count);
+   search_text("Song", results, 10, &count);
    TEST_ASSERT_TRUE_MESSAGE(count == 1, "Case-diff artist deduplicates to 1");
    if (count >= 1) {
       TEST_ASSERT_TRUE_MESSAGE(results[0].source == MUSIC_SOURCE_LOCAL,
@@ -332,7 +341,7 @@ static void test_search_dedup_case_insensitive(void) {
    insert_track("/music/b1.flac", "Comfortably Numb", "Artist", "Album", "Rock", 0, 300);
    insert_track("plex:/lib/b1.mp3", "comfortably numb", "Artist", "Album", "Rock", 1, 300);
 
-   music_db_search("Artist", results, 10, &count);
+   search_text("Artist", results, 10, &count);
    TEST_ASSERT_TRUE_MESSAGE(count == 1, "Case-diff title deduplicates to 1");
 
    /* Album case difference */
@@ -340,7 +349,7 @@ static void test_search_dedup_case_insensitive(void) {
    insert_track("/music/c1.flac", "Track", "Art", "The Wall", "Rock", 0, 250);
    insert_track("plex:/lib/c1.mp3", "Track", "Art", "THE WALL", "Rock", 1, 250);
 
-   music_db_search("Track", results, 10, &count);
+   search_text("Track", results, 10, &count);
    TEST_ASSERT_TRUE_MESSAGE(count == 1, "Case-diff album deduplicates to 1");
 
    /* All three differ in case simultaneously */
@@ -348,7 +357,7 @@ static void test_search_dedup_case_insensitive(void) {
    insert_track("/music/d1.flac", "Time", "Pink Floyd", "Dark Side", "Rock", 0, 400);
    insert_track("plex:/lib/d1.mp3", "TIME", "pink floyd", "DARK SIDE", "Rock", 1, 400);
 
-   music_db_search("Pink Floyd", results, 10, &count);
+   search_text("Pink Floyd", results, 10, &count);
    TEST_ASSERT_TRUE_MESSAGE(count == 1, "Triple case-diff deduplicates to 1");
    if (count >= 1) {
       TEST_ASSERT_TRUE_MESSAGE(results[0].source == MUSIC_SOURCE_LOCAL,
@@ -372,7 +381,7 @@ static void test_search_dedup_different_titles(void) {
 
    music_search_result_t results[10];
    int count = 0;
-   music_db_search("Shared Artist", results, 10, &count);
+   search_text("Shared Artist", results, 10, &count);
 
    TEST_ASSERT_TRUE_MESSAGE(count == 2, "Different titles both returned (no false dedup)");
 }
@@ -387,7 +396,7 @@ static void test_search_like_escaping(void) {
 
    music_search_result_t results[10];
    int count = 0;
-   music_db_search("100% Pure", results, 10, &count);
+   search_text("100% Pure", results, 10, &count);
 
    /* Should match "100% Pure" but NOT "100 reasons" (% is escaped, not wildcard) */
    TEST_ASSERT_TRUE_MESSAGE(count == 1, "Escaped %% prevents wildcard match");
@@ -401,7 +410,7 @@ static void test_search_like_escaping(void) {
    insert_track("/music/under.flac", "test_x", "Test", "Album", "Rock", 0, 200);
    insert_track("/music/nope.flac", "testYx", "Test", "Album", "Rock", 0, 180);
 
-   music_db_search("test_x", results, 10, &count);
+   search_text("test_x", results, 10, &count);
    TEST_ASSERT_TRUE_MESSAGE(count == 1, "Escaped _ prevents single-char wildcard");
    if (count >= 1) {
       TEST_ASSERT_TRUE_MESSAGE(strcmp(results[0].title, "test_x") == 0,
@@ -594,7 +603,7 @@ void tearDown(void) {
 }
 
 /* ============================================================================
- * music_db_pick_best_match — pure relevance ranking (no DB)
+ * music_rank_pick_best — pure relevance ranking (no DB)
  * ============================================================================ */
 
 static music_search_result_t mk_result(const char *artist, const char *title) {
@@ -613,7 +622,7 @@ static void test_pick_best_bare_title_prefers_close_match(void) {
       mk_result("Bo Burnham", "A Prayer/How Do We Fix Africa? [Explicit]"),
       mk_result("Toto", "Africa (Single Version)"),
    };
-   int pick = music_db_pick_best_match(r, 3, "Africa", NULL);
+   int pick = music_rank_pick_best(r, 3, "Africa", NULL);
    TEST_ASSERT_EQUAL_INT_MESSAGE(2, pick,
                                  "bare 'Africa' picks Toto (title prefix beats substring)");
 }
@@ -624,7 +633,7 @@ static void test_pick_best_artist_dominates(void) {
       mk_result("Bo Burnham", "Africa"),            /* exact title, wrong artist */
       mk_result("Toto", "Africa (Single Version)"), /* prefix title, right artist */
    };
-   int pick = music_db_pick_best_match(r, 2, "Africa", "Toto");
+   int pick = music_rank_pick_best(r, 2, "Africa", "Toto");
    TEST_ASSERT_EQUAL_INT_MESSAGE(1, pick, "artist match outweighs a closer title");
 }
 
@@ -634,7 +643,7 @@ static void test_pick_best_exact_title(void) {
       mk_result("Spandau Ballet", "Gold (Remastered)"),
       mk_result("Spandau Ballet", "Gold"),
    };
-   int pick = music_db_pick_best_match(r, 2, "Gold", NULL);
+   int pick = music_rank_pick_best(r, 2, "Gold", NULL);
    TEST_ASSERT_EQUAL_INT_MESSAGE(1, pick, "exact title outranks prefix");
 }
 
@@ -644,13 +653,345 @@ static void test_pick_best_no_match_falls_back(void) {
       mk_result("Artist A", "Totally Unrelated"),
       mk_result("Artist B", "Also Unrelated"),
    };
-   int pick = music_db_pick_best_match(r, 2, "Nonexistent", NULL);
+   int pick = music_rank_pick_best(r, 2, "Nonexistent", NULL);
    TEST_ASSERT_EQUAL_INT_MESSAGE(0, pick, "no match falls back to first candidate");
 }
 
 /* Defensive: empty candidate set returns 0. */
 static void test_pick_best_empty(void) {
-   TEST_ASSERT_EQUAL_INT(0, music_db_pick_best_match(NULL, 0, "x", NULL));
+   TEST_ASSERT_EQUAL_INT(0, music_rank_pick_best(NULL, 0, "x", NULL));
+}
+
+/* =============================================================================
+ * Group: ranked, paged structured query (music_db_query_page)
+ * ============================================================================= */
+
+/** Insert a track with a release year (and explicit duration). */
+static void insert_track_y(const char *path,
+                           const char *title,
+                           const char *artist,
+                           const char *album,
+                           int source,
+                           int duration,
+                           int year) {
+   insert_track(path, title, artist, album, "", source, duration);
+   sqlite3_stmt *stmt = NULL;
+   sqlite3_prepare_v2(g_test_db, "UPDATE music_metadata SET year = ? WHERE path = ?", -1, &stmt,
+                      NULL);
+   sqlite3_bind_int(stmt, 1, year);
+   sqlite3_bind_text(stmt, 2, path, -1, SQLITE_STATIC);
+   sqlite3_step(stmt);
+   sqlite3_finalize(stmt);
+}
+
+static music_query_page_t run_page(music_query_t q,
+                                   int offset,
+                                   music_search_result_t *res,
+                                   int max) {
+   music_query_page_t pg;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_db_query_page(&q, offset, res, max, &pg));
+   return pg;
+}
+
+/* The live failure: the stored title has punctuation the query lacks. */
+static void test_query_punctuation_mismatch(void) {
+   clear_tracks();
+   insert_track("/m/rts.flac", "Rockin' the Suburbs", "Ben Folds", "Rockin' the Suburbs", "", 0,
+                300);
+   insert_track("/m/dsb.flac", "Don\xE2\x80\x99t Stop Believin'", "Journey", "Escape", "", 0, 250);
+   insert_track("/m/acdc.flac", "Back in Black", "AC/DC", "Back in Black", "", 0, 255);
+   music_search_result_t res[10];
+
+   music_query_page_t pg = run_page((music_query_t){ .text = "Rockin the Suburbs" }, 0, res, 10);
+   TEST_ASSERT_EQUAL_INT(1, pg.total);
+   TEST_ASSERT_EQUAL_STRING("/m/rts.flac", res[0].path);
+
+   pg = run_page((music_query_t){ .text = "dont stop believin" }, 0, res, 10);
+   TEST_ASSERT_EQUAL_INT(1, pg.total);
+
+   pg = run_page((music_query_t){ .artist = "AC DC" }, 0, res, 10);
+   TEST_ASSERT_EQUAL_INT(1, pg.total);
+   TEST_ASSERT_FALSE(pg.approximate);
+}
+
+/* Pages tile the ranked list exactly: no repeats, no gaps, exact total. */
+static void test_query_pagination(void) {
+   clear_tracks();
+   char path[64];
+   char title[64];
+   for (int i = 0; i < 30; i++) {
+      snprintf(path, sizeof(path), "/m/pager_%02d.flac", i);
+      snprintf(title, sizeof(title), "Song %02d", i);
+      insert_track(path, title, "Pager", "Paging Album", "", 0, 100 + i);
+   }
+   music_search_result_t res[10];
+   char seen[30][MUSIC_DB_PATH_MAX];
+   int nseen = 0;
+   for (int page = 0; page < 3; page++) {
+      music_query_page_t pg = run_page((music_query_t){ .artist = "Pager" }, page * 10, res, 10);
+      TEST_ASSERT_EQUAL_INT(30, pg.total);
+      TEST_ASSERT_EQUAL_INT(10, pg.count);
+      for (int i = 0; i < pg.count; i++) {
+         for (int k = 0; k < nseen; k++) {
+            TEST_ASSERT_TRUE_MESSAGE(strcmp(seen[k], res[i].path) != 0, "row repeated");
+         }
+         snprintf(seen[nseen++], sizeof(seen[0]), "%s", res[i].path);
+      }
+   }
+   TEST_ASSERT_EQUAL_INT(30, nseen);
+
+   /* Past the end: no rows, but the total is still reported. */
+   music_query_page_t pg = run_page((music_query_t){ .artist = "Pager" }, 40, res, 10);
+   TEST_ASSERT_EQUAL_INT(0, pg.count);
+   TEST_ASSERT_EQUAL_INT(30, pg.total);
+}
+
+/* The total counts only rows that pass the fielded word-boundary filter. */
+static void test_query_total_after_fielded_filter(void) {
+   clear_tracks();
+   insert_track("/m/p1.flac", "1999", "Prince", "1999", "", 0, 100);
+   insert_track("/m/p2.flac", "Kiss", "Prince", "Parade", "", 0, 101);
+   insert_track("/m/p3.flac", "Purple Rain", "Prince and the Revolution", "Purple Rain", "", 0,
+                102);
+   insert_track("/m/n1.flac", "Time", "Ben Folds Presents: The Princeton Nassoons", "UAC", "", 0,
+                103);
+   insert_track("/m/n2.flac", "Princess", "Someone", "Princess", "", 0, 104);
+   music_search_result_t res[10];
+   music_query_page_t pg = run_page((music_query_t){ .artist = "Prince" }, 0, res, 10);
+   TEST_ASSERT_EQUAL_INT(3, pg.total);
+   TEST_ASSERT_EQUAL_STRING("Prince", res[0].artist); /* exact before prefix */
+
+   /* Free text keeps breadth: the mid-word hits count too, ranked below. */
+   pg = run_page((music_query_t){ .text = "Prince" }, 0, res, 10);
+   TEST_ASSERT_EQUAL_INT(5, pg.total);
+   TEST_ASSERT_EQUAL_STRING("Prince", res[0].artist);
+}
+
+static void test_query_album_filter(void) {
+   clear_tracks();
+   insert_track("/m/w1.flac", "Brick", "Ben Folds Five", "Whatever And Ever Amen (Remastered)", "",
+                0, 280);
+   insert_track("/m/w2.flac", "Kate", "Ben Folds Five", "Whatever and Ever Amen", "", 0, 190);
+   insert_track("/m/r1.flac", "Brick", "Ben Folds", "Ben Folds Live", "", 0, 290);
+   music_search_result_t res[10];
+   music_query_page_t pg = run_page((music_query_t){ .album = "Whatever and Ever Amen" }, 0, res,
+                                    10);
+   TEST_ASSERT_EQUAL_INT(2, pg.total);
+   pg = run_page((music_query_t){ .album = "Whatever and Ever Amen", .title = "Brick" }, 0, res,
+                 10);
+   TEST_ASSERT_EQUAL_INT(1, pg.total);
+   TEST_ASSERT_EQUAL_STRING("/m/w1.flac", res[0].path);
+}
+
+/* Ranking covers every match, not an alphabetical window: the one exact hit that
+ * sorts last alphabetically still ranks first. */
+static void test_query_ranks_whole_match_set(void) {
+   clear_tracks();
+   char path[64];
+   char title[64];
+   for (int i = 0; i < 400; i++) {
+      snprintf(path, sizeof(path), "/m/aa_%03d.flac", i);
+      snprintf(title, sizeof(title), "Love %03d", i);
+      insert_track(path, title, "Aardvark", "Alpha", "", 0, i + 1);
+   }
+   insert_track("/m/zed.flac", "Love", "Zed", "Zulu", "", 0, 999);
+   music_search_result_t res[5];
+   music_query_page_t pg = run_page((music_query_t){ .text = "Love" }, 0, res, 5);
+   TEST_ASSERT_EQUAL_INT(401, pg.total);
+   TEST_ASSERT_EQUAL_STRING("Zed", res[0].artist);
+}
+
+/* A library indexed twice within one source collapses; distinct same-title
+ * tracks (different durations) survive. */
+static void test_query_same_source_dedup(void) {
+   clear_tracks();
+   insert_track("plex:/library/parts/1/a.mp3", "Army", "Ben Folds", "Live", "", 1, 200);
+   insert_track("plex:/library/parts/2/a.mp3", "Army", "Ben Folds", "Live", "", 1, 201);
+   insert_track("/m/i1.flac", "Interlude", "Band", "Double", "", 0, 60);
+   insert_track("/m/i2.flac", "Interlude", "Band", "Double", "", 0, 95);
+   music_search_result_t res[10];
+   music_query_page_t pg = run_page((music_query_t){ .text = "Army" }, 0, res, 10);
+   TEST_ASSERT_EQUAL_INT(1, pg.total);
+   TEST_ASSERT_EQUAL_STRING("plex:/library/parts/1/a.mp3", res[0].path); /* earliest copy */
+   pg = run_page((music_query_t){ .text = "Interlude" }, 0, res, 10);
+   TEST_ASSERT_EQUAL_INT(2, pg.total);
+}
+
+static void test_query_cross_field_and_fallback(void) {
+   clear_tracks();
+   insert_track("/m/c1.flac", "Zak and Sara", "Ben Folds", "Rockin' the Suburbs", "", 0, 200);
+   insert_track("/m/c2.flac", "Brick", "Ben Folds Five", "Whatever and Ever Amen", "", 0, 201);
+   music_search_result_t res[10];
+
+   /* "Artist Title" free text works across fields, exactly. */
+   music_query_page_t pg = run_page((music_query_t){ .text = "Ben Folds Zak" }, 0, res, 10);
+   TEST_ASSERT_EQUAL_INT(1, pg.total);
+   TEST_ASSERT_FALSE(pg.approximate);
+
+   /* A typo'd long query: no strict match, so the one-word-off rows come back
+    * flagged approximate rather than "nothing found". */
+   pg = run_page((music_query_t){ .text = "Ben Folds Zak Sarah", .allow_partial = true }, 0, res,
+                 10);
+   TEST_ASSERT_TRUE(pg.approximate);
+   TEST_ASSERT_TRUE(pg.total >= 1);
+   TEST_ASSERT_EQUAL_STRING("/m/c1.flac", res[0].path);
+
+   /* Without opting in (play/enqueue/resolve paths), a near-miss is no match. */
+   pg = run_page((music_query_t){ .text = "Ben Folds Zak Sarah" }, 0, res, 10);
+   TEST_ASSERT_EQUAL_INT(0, pg.total);
+   TEST_ASSERT_FALSE(pg.approximate);
+
+   /* When strict matches exist, partials don't pad the result. */
+   pg = run_page((music_query_t){ .text = "Ben Folds Brick", .allow_partial = true }, 0, res, 10);
+   TEST_ASSERT_EQUAL_INT(1, pg.total);
+   TEST_ASSERT_FALSE(pg.approximate);
+}
+
+static void test_query_filters_only_and_empty(void) {
+   clear_tracks();
+   insert_track_y("/m/y1.flac", "A", "X", "Old", 0, 100, 1985);
+   insert_track_y("/m/y2.flac", "B", "X", "New", 0, 100, 2005);
+   music_search_result_t res[10];
+   music_query_page_t pg = run_page((music_query_t){ .year_min = 1980, .year_max = 1989 }, 0, res,
+                                    10);
+   TEST_ASSERT_EQUAL_INT(1, pg.total);
+   TEST_ASSERT_EQUAL_STRING("/m/y1.flac", res[0].path);
+   pg = run_page((music_query_t){ 0 }, 0, res, 10);
+   TEST_ASSERT_EQUAL_INT(0, pg.total);
+   TEST_ASSERT_EQUAL_INT(0, pg.count);
+   /* The legacy wrapper still returns the first page. */
+   int count = -1;
+   music_query_t q = { .text = "Old" };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_db_query(&q, res, 10, &count));
+   TEST_ASSERT_EQUAL_INT(1, count);
+}
+
+/* =============================================================================
+ * Group: album inventory for an artist
+ * ============================================================================= */
+
+static void test_albums_by_artist(void) {
+   clear_tracks();
+   /* Two editions of one album across sources; one extra bonus track. */
+   insert_track_y("/m/rts1.flac", "Zak and Sara", "Ben Folds", "Rockin' the Suburbs", 0, 200, 2001);
+   insert_track_y("/m/rts2.flac", "Fired", "Ben Folds", "Rockin' the Suburbs", 0, 210, 2001);
+   insert_track_y("plex:/p/1.mp3", "Zak And Sara", "Ben Folds",
+                  "Rockin' the Suburbs (Expanded Edition)", 1, 200, 2001);
+   insert_track_y("plex:/p/2.mp3", "Bonus Demo", "Ben Folds",
+                  "Rockin' the Suburbs (Expanded Edition)", 1, 180, 2001);
+   /* Plex indexed twice — must not double the track count. */
+   insert_track_y("plex:/p/3.mp3", "Bonus Demo", "Ben Folds",
+                  "Rockin' the Suburbs (Expanded Edition)", 1, 180, 2001);
+   /* Related act matches as whole words. */
+   insert_track_y("/m/w.flac", "Brick", "Ben Folds Five", "Whatever and Ever Amen", 0, 280, 1997);
+   /* Compilation credited to many "Ben Folds Presents: X" artists → listed once. */
+   insert_track_y("/m/u1.flac", "Time", "Ben Folds Presents: The Princeton Nassoons",
+                  "Ben Folds Presents: University A Cappella!", 0, 200, 2009);
+   insert_track_y("/m/u2.flac", "Magic", "Ben Folds Presents: The Spartan Dischords",
+                  "Ben Folds Presents: University A Cappella!", 0, 201, 2009);
+   /* Unrelated artist excluded. */
+   insert_track_y("/m/x.flac", "Folds", "Benny Goodman", "Sing Sing Sing", 0, 300, 1938);
+
+   music_album_info_t al[10];
+   int count = 0;
+   int total = 0;
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         music_db_list_albums_by_artist("Ben Folds", al, 10, 0, &count, &total));
+   TEST_ASSERT_EQUAL_INT(3, total);
+   TEST_ASSERT_EQUAL_INT(3, count);
+
+   /* Oldest first. */
+   TEST_ASSERT_EQUAL_STRING("Whatever and Ever Amen", al[0].name);
+   TEST_ASSERT_EQUAL_INT(1997, al[0].year);
+
+   TEST_ASSERT_EQUAL_STRING("Rockin' the Suburbs", al[1].name); /* shortest edition name */
+   TEST_ASSERT_EQUAL_INT(3, al[1].track_count);                 /* Zak and Sara, Fired, Bonus */
+   TEST_ASSERT_EQUAL_INT(2, al[1].editions);
+   TEST_ASSERT_EQUAL_INT(1, al[1].artist_count);
+
+   TEST_ASSERT_EQUAL_STRING("Ben Folds Presents: University A Cappella!", al[2].name);
+   TEST_ASSERT_EQUAL_INT(2, al[2].artist_count);
+   TEST_ASSERT_EQUAL_INT(2, al[2].track_count);
+
+   /* Paging: one per page, past-end still reports the total. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         music_db_list_albums_by_artist("Ben Folds", al, 1, 1, &count, &total));
+   TEST_ASSERT_EQUAL_INT(1, count);
+   TEST_ASSERT_EQUAL_INT(3, total);
+   TEST_ASSERT_EQUAL_STRING("Rockin' the Suburbs", al[0].name);
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         music_db_list_albums_by_artist("Ben Folds", al, 1, 9, &count, &total));
+   TEST_ASSERT_EQUAL_INT(0, count);
+   TEST_ASSERT_EQUAL_INT(3, total);
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         music_db_list_albums_by_artist("Nobody Here", al, 10, 0, &count, &total));
+   TEST_ASSERT_EQUAL_INT(0, total);
+   TEST_ASSERT_EQUAL_INT(FAILURE, music_db_list_albums_by_artist("", al, 10, 0, &count, &total));
+}
+
+/* Review regressions: a same-source copy is never hidden by one a genre/year
+ * filter would reject; unknown durations never collapse; fielded filters
+ * require every word (filler included). */
+static void test_query_review_regressions(void) {
+   clear_tracks();
+   /* Two same-source copies: only the second is tagged. */
+   insert_track("/m/untagged.mp3", "Song", "B", "BA", "", 0, 200);
+   insert_track_y("/m/tagged.flac", "Song", "B", "BA", 0, 200, 1999);
+   sqlite3_exec(g_test_db, "UPDATE music_metadata SET genre = 'Rock' WHERE path = '/m/tagged.flac'",
+                NULL, NULL, NULL);
+   music_search_result_t res[10];
+   music_query_page_t pg = run_page((music_query_t){ .genre = "rock" }, 0, res, 10);
+   TEST_ASSERT_EQUAL_INT(1, pg.total);
+   TEST_ASSERT_EQUAL_STRING("/m/tagged.flac", res[0].path);
+   pg = run_page((music_query_t){ .year_min = 1990 }, 0, res, 10);
+   TEST_ASSERT_EQUAL_INT(1, pg.total);
+
+   /* Cross-source: an untagged local copy must not hide the tagged Plex copy. */
+   clear_tracks();
+   insert_track("/m/local.flac", "Song", "B", "BA", "", 0, 200);
+   insert_track_y("plex:/p/9.flac", "Song", "B", "BA", 1, 200, 1997);
+   sqlite3_exec(g_test_db, "UPDATE music_metadata SET genre = 'Rock' WHERE path = 'plex:/p/9.flac'",
+                NULL, NULL, NULL);
+   pg = run_page((music_query_t){ .genre = "rock" }, 0, res, 10);
+   TEST_ASSERT_EQUAL_INT(1, pg.total);
+   TEST_ASSERT_EQUAL_STRING("plex:/p/9.flac", res[0].path);
+   pg = run_page((music_query_t){ .year_min = 1990 }, 0, res, 10);
+   TEST_ASSERT_EQUAL_INT(1, pg.total);
+   /* Unfiltered, the local copy still wins as before. */
+   pg = run_page((music_query_t){ .text = "Song" }, 0, res, 10);
+   TEST_ASSERT_EQUAL_INT(1, pg.total);
+   TEST_ASSERT_EQUAL_STRING("/m/local.flac", res[0].path);
+
+   /* Unknown (0) durations: two same-titled tracks both survive. */
+   clear_tracks();
+   insert_track("/m/i1.flac", "Interlude", "Band", "Double", "", 0, 0);
+   insert_track("/m/i2.flac", "Interlude", "Band", "Double", "", 0, 0);
+   pg = run_page((music_query_t){ .text = "Interlude" }, 0, res, 10);
+   TEST_ASSERT_EQUAL_INT(2, pg.total);
+
+   /* Fielded filters: filler words are required. */
+   clear_tracks();
+   insert_track("/m/dmb.flac", "Crash", "Dave Matthews Band", "Crash", "", 0, 100);
+   insert_track("/m/band.flac", "The Weight", "The Band", "Music from Big Pink", "", 0, 101);
+   insert_track("/m/part2.flac", "Part 2", "X", "Y", "", 0, 102);
+   pg = run_page((music_query_t){ .artist = "The Band" }, 0, res, 10);
+   TEST_ASSERT_EQUAL_INT(1, pg.total);
+   TEST_ASSERT_EQUAL_STRING("The Band", res[0].artist);
+   pg = run_page((music_query_t){ .title = "Song 2" }, 0, res, 10);
+   TEST_ASSERT_EQUAL_INT(0, pg.total);
+
+   /* A wildcard-only genre is not a constraint (no whole-library dump). */
+   pg = run_page((music_query_t){ .genre = " * " }, 0, res, 10);
+   TEST_ASSERT_EQUAL_INT(0, pg.total);
+}
+
+static void test_pick_best_artist_punctuation(void) {
+   music_search_result_t r[2] = {
+      mk_result("Someone Else", "Back in Black"),
+      mk_result("AC/DC", "Back in Black (Live)"),
+   };
+   TEST_ASSERT_EQUAL_INT(1, music_rank_pick_best(r, 2, "Back in Black", "AC DC"));
 }
 
 int main(void) {
@@ -682,5 +1023,16 @@ int main(void) {
    RUN_TEST(test_pick_best_exact_title);
    RUN_TEST(test_pick_best_no_match_falls_back);
    RUN_TEST(test_pick_best_empty);
+   RUN_TEST(test_query_punctuation_mismatch);
+   RUN_TEST(test_query_pagination);
+   RUN_TEST(test_query_total_after_fielded_filter);
+   RUN_TEST(test_query_album_filter);
+   RUN_TEST(test_query_ranks_whole_match_set);
+   RUN_TEST(test_query_same_source_dedup);
+   RUN_TEST(test_query_cross_field_and_fallback);
+   RUN_TEST(test_query_filters_only_and_empty);
+   RUN_TEST(test_albums_by_artist);
+   RUN_TEST(test_query_review_regressions);
+   RUN_TEST(test_pick_best_artist_punctuation);
    return UNITY_END();
 }

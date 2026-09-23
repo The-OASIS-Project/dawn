@@ -37,11 +37,13 @@
 #include <strings.h>
 
 #include "audio/music_db.h"
+#include "audio/music_rank.h"
 #include "audio/music_source.h"
 #include "core/path_utils.h"
 #include "core/strbuf.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "tools/music_search.h"
 #include "tools/music_tool.h"
 #include "tools/tool_registry.h"
 #include "tools/volume_tool.h"
@@ -55,11 +57,6 @@
 
 /* Candidate window pulled from the DB for relevance ranking in the resolver. */
 #define WEBUI_MUSIC_RESOLVE_CANDIDATES 8
-
-/* Rows surfaced to the LLM per query in an items[] batch search. Generous so the
- * real match isn't crowded out of the window while results are still alpha-ordered
- * (mirrors MUSIC_BATCH_SEARCH_LIMIT in the voice tool). */
-#define WEBUI_MUSIC_BATCH_SEARCH_LIMIT 25
 
 /* =============================================================================
  * LLM-facing helpers: state footer, item resolution, batch apply + report
@@ -176,7 +173,7 @@ static int resolve_item_to_path(const char *item,
    /* Path-clean, relevance-ranked candidates, then artist preference + tiebreak. */
    music_query_t mq = { .text = title_query };
    if (music_db_query(&mq, r, WEBUI_MUSIC_RESOLVE_CANDIDATES, &count) == SUCCESS && count > 0) {
-      int pick = music_db_pick_best_match(r, count, title_query, dash ? artist : NULL);
+      int pick = music_rank_pick_best(r, count, title_query, dash ? artist : NULL);
       safe_strncpy(path_out, r[pick].path, path_len);
       if (display_out) {
          char label[2 * AUDIO_METADATA_STRING_MAX + 4];
@@ -899,17 +896,17 @@ int webui_music_execute_tool(ws_connection_t *conn,
       }
       if (items) {
          int n = (int)json_object_array_length(items);
-         if (n > WEBUI_MUSIC_MAX_QUEUE) {
-            n = WEBUI_MUSIC_MAX_QUEUE; /* bound per-call DB work (one LIKE scan each) */
+         if (n > MUSIC_BATCH_MAX_QUERIES) {
+            n = MUSIC_BATCH_MAX_QUERIES; /* each query is a full-library scan */
          }
          /* Optional fielded/genre/year filters applied to every query in the batch. */
          music_search_filters_t filters;
-         music_query_parse_filters(query, &filters);
+         music_search_parse_filters(query, &filters);
 
          strbuf_t sb;
          strbuf_init(&sb, 1024);
          /* Heap-allocate the per-query result window (~2.5 KB/row) vs. a big stack array. */
-         music_search_result_t *r = malloc(WEBUI_MUSIC_BATCH_SEARCH_LIMIT *
+         music_search_result_t *r = malloc(MUSIC_BATCH_SEARCH_LIMIT *
                                            sizeof(music_search_result_t));
          if (!r) {
             strbuf_appendf(&sb, "%s", TOOL_RESULT_ERROR_MARK "Failed to allocate search buffer");
@@ -917,20 +914,8 @@ int webui_music_execute_tool(ws_connection_t *conn,
          for (int i = 0; r && i < n; i++) {
             struct json_object *e = json_object_array_get_idx(items, i);
             const char *q = e ? json_object_get_string(e) : NULL;
-            if (!q || !q[0]) {
-               continue;
-            }
-            strbuf_appendf(&sb, "%s:\n", q);
-            int count = 0;
-            music_query_t mq;
-            music_query_from_filters(&mq, q, &filters);
-            if (music_db_query(&mq, r, WEBUI_MUSIC_BATCH_SEARCH_LIMIT, &count) == SUCCESS &&
-                count > 0) {
-               for (int j = 0; j < count; j++) {
-                  strbuf_appendf(&sb, "  %s - %s  [%s]\n", r[j].artist, r[j].title, r[j].path);
-               }
-            } else {
-               strbuf_appendf(&sb, "  No match: %s\n", q);
+            if (q && q[0]) {
+               music_search_append_batch_entry(&sb, q, &filters, r);
             }
          }
          free(r);
