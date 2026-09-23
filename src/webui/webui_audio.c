@@ -420,20 +420,12 @@ int webui_opus_encode_stream(const int16_t *pcm_data,
  * ASR Integration Functions
  * ============================================================================= */
 
-int webui_audio_transcribe(const int16_t *pcm_data, size_t pcm_samples, char **text_out) {
-   if (!pcm_data || pcm_samples == 0 || !text_out) {
+int webui_audio_transcribe_on_ctx(asr_context_t *asr_ctx,
+                                  const int16_t *pcm_data,
+                                  size_t pcm_samples,
+                                  char **text_out) {
+   if (!asr_ctx || !pcm_data || pcm_samples == 0 || !text_out) {
       return WEBUI_AUDIO_ERROR;
-   }
-
-   if (!atomic_load(&s_initialized)) {
-      return WEBUI_AUDIO_ERROR_NOT_INITIALIZED;
-   }
-
-   /* Borrow an ASR context from the worker pool */
-   asr_context_t *asr_ctx = worker_pool_borrow_asr();
-   if (!asr_ctx) {
-      OLOG_WARNING("WebUI audio: All workers busy, cannot transcribe");
-      return WEBUI_AUDIO_ERROR_ASR;
    }
 
    /* Reset ASR for new utterance */
@@ -448,9 +440,6 @@ int webui_audio_transcribe(const int16_t *pcm_data, size_t pcm_samples, char **t
 
    /* Get final transcription */
    asr_result_t *result = asr_finalize(asr_ctx);
-
-   /* Return ASR context to pool immediately */
-   worker_pool_return_asr(asr_ctx);
 
    if (!result || !result->text || strlen(result->text) == 0) {
       if (result) {
@@ -469,6 +458,27 @@ int webui_audio_transcribe(const int16_t *pcm_data, size_t pcm_samples, char **t
    }
 
    return WEBUI_AUDIO_SUCCESS;
+}
+
+int webui_audio_transcribe(const int16_t *pcm_data, size_t pcm_samples, char **text_out) {
+   if (!pcm_data || pcm_samples == 0 || !text_out) {
+      return WEBUI_AUDIO_ERROR;
+   }
+
+   if (!atomic_load(&s_initialized)) {
+      return WEBUI_AUDIO_ERROR_NOT_INITIALIZED;
+   }
+
+   /* Borrow an ASR context from the worker pool (blocks up to ~5s if all busy) */
+   asr_context_t *asr_ctx = worker_pool_borrow_asr();
+   if (!asr_ctx) {
+      OLOG_WARNING("WebUI audio: All workers busy, cannot transcribe");
+      return WEBUI_AUDIO_ERROR_ASR;
+   }
+
+   int ret = webui_audio_transcribe_on_ctx(asr_ctx, pcm_data, pcm_samples, text_out);
+   worker_pool_return_asr(asr_ctx);
+   return ret;
 }
 
 /**
@@ -576,6 +586,30 @@ int webui_audio_pcm48k_to_text(const int16_t *pcm_data, size_t pcm_samples, char
 
    /* Transcribe resampled PCM (16kHz) */
    int ret = webui_audio_transcribe(resampled, total_resampled, text_out);
+   free(resampled);
+
+   return ret;
+}
+
+int webui_audio_pcm48k_to_text_on_ctx(asr_context_t *asr_ctx,
+                                      const int16_t *pcm_data,
+                                      size_t pcm_samples,
+                                      char **text_out) {
+   if (!asr_ctx || !pcm_data || pcm_samples == 0 || !text_out) {
+      return WEBUI_AUDIO_ERROR;
+   }
+
+   /* Resample 48kHz → 16kHz for ASR */
+   int16_t *resampled = NULL;
+   size_t total_resampled = 0;
+   int resample_ret = resample_48k_to_16k(pcm_data, pcm_samples, &resampled, &total_resampled);
+   if (resample_ret != WEBUI_AUDIO_SUCCESS) {
+      return resample_ret;
+   }
+
+   /* Transcribe on the caller-owned context (no borrow/return — the caller, e.g. a
+    * speculative decode that try-borrowed a context, owns its lifecycle). */
+   int ret = webui_audio_transcribe_on_ctx(asr_ctx, resampled, total_resampled, text_out);
    free(resampled);
 
    return ret;

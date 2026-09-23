@@ -126,6 +126,18 @@ static void test_asr_roundtrip(void) {
    TEST_ASSERT_EQUAL_INT(7, g_read.asr.dedup_window_sec);
 }
 
+/* --- [vad] ----------------------------------------------------------------- */
+
+static void test_vad_roundtrip(void) {
+   /* adaptive_endpoint is a string enum; a non-default valid value must survive
+    * the write/re-parse (the silent-deletion guard for this field). */
+   strncpy(g_written.vad.adaptive_endpoint, "shadow", sizeof(g_written.vad.adaptive_endpoint) - 1);
+
+   round_trip();
+
+   TEST_ASSERT_EQUAL_STRING("shadow", g_read.vad.adaptive_endpoint);
+}
+
 /* --- [research] ------------------------------------------------------------ */
 
 static void test_research_roundtrip(void) {
@@ -455,6 +467,7 @@ int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_jobs_roundtrip);
    RUN_TEST(test_asr_roundtrip);
+   RUN_TEST(test_vad_roundtrip);
    RUN_TEST(test_research_roundtrip);
    RUN_TEST(test_event_chunk_cap_has_a_floor);
    RUN_TEST(test_scheduler_roundtrip);

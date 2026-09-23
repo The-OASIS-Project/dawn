@@ -80,6 +80,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->vad.end_of_speech_duration = 1.0f;  /* VAD_END_OF_SPEECH_DURATION */
    config->vad.max_recording_duration = 30.0f; /* VAD_MAX_RECORDING_DURATION */
    config->vad.preroll_ms = 500;
+   safe_strscpy(config->vad.adaptive_endpoint, "off");
 
    /* VAD Chunking - matching defines in dawn.c */
    config->vad.chunking.enabled = true;

@@ -396,6 +396,8 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_DOUBLE(section, "end_of_speech_duration", config->vad.end_of_speech_duration);
       JSON_TO_CONFIG_DOUBLE(section, "max_recording_duration", config->vad.max_recording_duration);
       JSON_TO_CONFIG_INT(section, "preroll_ms", config->vad.preroll_ms);
+      JSON_TO_CONFIG_STR(section, "adaptive_endpoint", config->vad.adaptive_endpoint);
+      config_clamp_vad(&config->vad); /* same bounds as the file path */
 
       struct json_object *chunking;
       if (json_object_object_get_ex(section, "chunking", &chunking)) {

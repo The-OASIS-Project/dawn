@@ -178,6 +178,11 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
    ENV_FLOAT("DAWN_VAD_END_OF_SPEECH_DURATION", config->vad.end_of_speech_duration);
    ENV_FLOAT("DAWN_VAD_MAX_RECORDING_DURATION", config->vad.max_recording_duration);
    ENV_INT("DAWN_VAD_PREROLL_MS", config->vad.preroll_ms);
+   ENV_STRING("DAWN_VAD_ADAPTIVE_ENDPOINT", config->vad.adaptive_endpoint);
+   /* Re-clamp: env overlay runs after the parser's clamp, so coerce a bad env
+    * value to "off" here too — same bounds as the file and WebUI POST paths
+    * (otherwise a garbage env value would fail validation and refuse to boot). */
+   config_clamp_vad(&config->vad);
 
    /* [vad.chunking] */
    ENV_BOOL("DAWN_VAD_CHUNKING_ENABLED", config->vad.chunking.enabled);
@@ -355,6 +360,7 @@ void config_dump(const dawn_config_t *config) {
    printf("  end_of_speech_duration = %.1f\n", config->vad.end_of_speech_duration);
    printf("  max_recording_duration = %.1f\n", config->vad.max_recording_duration);
    printf("  preroll_ms = %d\n", config->vad.preroll_ms);
+   printf("  adaptive_endpoint = \"%s\"\n", config->vad.adaptive_endpoint);
 
    printf("\n[vad.chunking]\n");
    printf("  enabled = %s\n", config->vad.chunking.enabled ? "true" : "false");
@@ -671,6 +677,11 @@ void config_dump_settings(const dawn_config_t *config,
    PRINT_SETTING_INT("preroll_ms", config->vad.preroll_ms, "DAWN_VAD_PREROLL_MS",
                      detect_source_int(config->vad.preroll_ms, defaults.vad.preroll_ms,
                                        "DAWN_VAD_PREROLL_MS"));
+   PRINT_SETTING_STR("adaptive_endpoint", config->vad.adaptive_endpoint,
+                     "DAWN_VAD_ADAPTIVE_ENDPOINT",
+                     detect_source_str(config->vad.adaptive_endpoint,
+                                       defaults.vad.adaptive_endpoint,
+                                       "DAWN_VAD_ADAPTIVE_ENDPOINT"));
 
    /* [vad.chunking] */
    printf("[vad.chunking]\n");
@@ -986,6 +997,7 @@ void config_dump_toml(const dawn_config_t *config) {
    printf("end_of_speech_duration = %.1f\n", config->vad.end_of_speech_duration);
    printf("max_recording_duration = %.1f\n", config->vad.max_recording_duration);
    printf("preroll_ms = %d\n", config->vad.preroll_ms);
+   printf("adaptive_endpoint = \"%s\"\n", config->vad.adaptive_endpoint);
 
    printf("\n[vad.chunking]\n");
    printf("enabled = %s\n", config->vad.chunking.enabled ? "true" : "false");
@@ -1132,6 +1144,8 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object_object_add(vad, "max_recording_duration",
                           json_object_new_double(config->vad.max_recording_duration));
    json_object_object_add(vad, "preroll_ms", json_object_new_int(config->vad.preroll_ms));
+   json_object_object_add(vad, "adaptive_endpoint",
+                          json_object_new_string(config->vad.adaptive_endpoint));
 
    /* [vad.chunking] */
    json_object *chunking = json_object_new_object();
@@ -2165,6 +2179,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "end_of_speech_duration = %.1f\n", config->vad.end_of_speech_duration);
    fprintf(fp, "max_recording_duration = %.1f\n", config->vad.max_recording_duration);
    fprintf(fp, "preroll_ms = %d\n", config->vad.preroll_ms);
+   write_toml_string(fp, "adaptive_endpoint", config->vad.adaptive_endpoint);
 
    fprintf(fp, "\n[vad.chunking]\n");
    fprintf(fp, "enabled = %s\n", config->vad.chunking.enabled ? "true" : "false");

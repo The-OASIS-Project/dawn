@@ -491,6 +491,17 @@ dawn_add_unit_test(test_endpointer
    LIBS    unity
    LABEL   ci)
 
+dawn_add_unit_test(test_spec_slot
+   SOURCES test_spec_slot.c
+           ${SRC_ROOT}/src/core/spec_slot.c
+   LIBS    unity
+   LABEL   ci)
+
+dawn_add_unit_test(test_worker_pool_select
+   SOURCES test_worker_pool_select.c
+   LIBS    unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_v49_migration
    SOURCES test_v49_migration.c
    LIBS    unity sqlite3

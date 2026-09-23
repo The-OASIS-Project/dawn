@@ -804,6 +804,12 @@ list(APPEND DAWN_SOURCES
     src/core/endpointer.c
 )
 
+# Speculative-decode result slot (pure state machine, no I/O) for the adaptive
+# end-of-speech dwell's always-on speculative overlap. Unit-tested standalone.
+list(APPEND DAWN_SOURCES
+    src/core/spec_slot.c
+)
+
 # SAGE proactive-attention subsystem (Layer 1 core, always compiled; master
 # switch is [attention] enabled, default OFF). Ingest polls the STAT/suit
 # service caches, so it degrades gracefully when those tools are compiled out.

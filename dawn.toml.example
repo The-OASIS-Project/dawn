@@ -83,6 +83,9 @@
                                   # Env: DAWN_VAD_MAX_RECORDING_DURATION
 # preroll_ms = 500                # Audio to keep before speech detected
                                   # Env: DAWN_VAD_PREROLL_MS
+# adaptive_endpoint = "off"       # "off" | "shadow" (measure only) | "on" (speculative
+                                  # decode overlap). Experimental; Whisper-only.
+                                  # Env: DAWN_VAD_ADAPTIVE_ENDPOINT
 
 [vad.chunking]
 # enabled = true                  # Enable chunked transcription for long utterances

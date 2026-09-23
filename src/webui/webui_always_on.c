@@ -110,6 +110,11 @@ static void set_state(always_on_ctx_t *ctx, always_on_state_t new_state) {
    always_on_state_t old = atomic_load(&ctx->state);
    atomic_store(&ctx->state, new_state);
    ctx->state_entry_ms = now_ms();
+   /* Every state transition invalidates any speculative decode: a stale in-flight
+    * decode's store is dropped (generation bump) and any stored result is freed.
+    * Entering RECORDING is a new utterance, so it also resets the per-utterance
+    * fire cap. Single-writer on the LWS thread; see the spec_slot locking contract. */
+   spec_slot_invalidate(&ctx->spec, new_state == ALWAYS_ON_RECORDING);
    OLOG_INFO("Always-on state: %s -> %s", always_on_state_name(old),
              always_on_state_name(new_state));
 }
@@ -210,13 +215,16 @@ typedef struct {
 } cmd_transcribe_work_t;
 
 /**
- * Extract audio from wake_start_pos to write_pos as a contiguous 16kHz PCM buffer.
- * This captures all audio from when speech was first detected (WAKE_CHECK entry)
- * through to the current write position, regardless of VAD consumption.
- * Returns allocated buffer (caller must free), sets *out_samples.
- * Resets the circular buffer afterward.
+ * Copy audio from wake_start_pos to write_pos as a contiguous raw 48kHz PCM buffer
+ * WITHOUT disturbing the ring. This captures all audio from when speech was first
+ * detected (WAKE_CHECK entry) through to the current write position, regardless of
+ * VAD consumption. Returns allocated buffer (caller must free), sets *out_samples.
+ *
+ * Non-destructive: read_pos/valid_len are untouched, so capture keeps running. Used
+ * by the speculative-decode snapshot (which must not stop capture) and by
+ * extract_buffered_audio (which adds the ring reset). Caller holds ctx->mutex.
  */
-static int16_t *extract_buffered_audio(always_on_ctx_t *ctx, size_t *out_samples) {
+static int16_t *peek_buffered_audio(always_on_ctx_t *ctx, size_t *out_samples) {
    /* Calculate bytes from wake_start_pos to write_pos */
    size_t byte_count;
    if (ctx->write_pos >= ctx->wake_start_pos) {
@@ -250,11 +258,24 @@ static int16_t *extract_buffered_audio(always_on_ctx_t *ctx, size_t *out_samples
       memcpy((uint8_t *)pcm + first_chunk, ctx->audio_buffer, byte_count - first_chunk);
    }
 
-   /* Reset buffer */
-   ctx->read_pos = ctx->write_pos;
-   ctx->valid_len = 0;
-
    *out_samples = available;
+   return pcm;
+}
+
+/**
+ * Like peek_buffered_audio(), but also resets the ring afterward (the committed
+ * command window is consumed, not re-decoded). Caller holds ctx->mutex.
+ */
+static int16_t *extract_buffered_audio(always_on_ctx_t *ctx, size_t *out_samples) {
+   int16_t *pcm = peek_buffered_audio(ctx, out_samples);
+
+   /* Reset the ring only when audio was actually taken (matches the pre-split
+    * behavior, which returned before resetting on an empty/failed peek). */
+   if (pcm) {
+      ctx->read_pos = ctx->write_pos;
+      ctx->valid_len = 0;
+   }
+
    return pcm;
 }
 
@@ -505,6 +526,7 @@ always_on_ctx_t *always_on_create(uint32_t client_sample_rate, struct lws *wsi) 
    atomic_store(&ctx->refcount, 1); /* LWS thread holds initial reference */
    ctx->wsi = wsi;
    ctx->client_sample_rate = client_sample_rate;
+   spec_slot_init(&ctx->spec); /* redundant on calloc, explicit for clarity */
 
    /* Allocate circular buffer */
    ctx->audio_buffer = calloc(1, ALWAYS_ON_BUFFER_SIZE);
@@ -564,6 +586,7 @@ static void always_on_free(always_on_ctx_t *ctx) {
    }
    free(ctx->wake_command);
    free(ctx->cmd_transcript);
+   spec_slot_free(&ctx->spec);
    free(ctx->audio_buffer);
    pthread_mutex_destroy(&ctx->mutex);
    free(ctx);

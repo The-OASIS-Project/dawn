@@ -277,6 +277,14 @@
                min: 0,
                hint: 'Audio captured before VAD trigger (catches word beginnings)',
             },
+            adaptive_endpoint: {
+               type: 'select',
+               label: 'Adaptive Endpoint',
+               options: ['off', 'shadow', 'on'],
+               default: 'off',
+               advanced: true,
+               hint: 'Speculative-decode overlap for lower voice latency (shadow = measure only). Experimental.',
+            },
             chunking: {
                type: 'group',
                label: 'Audio Chunking',

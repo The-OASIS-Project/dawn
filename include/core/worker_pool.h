@@ -154,6 +154,34 @@ int worker_pool_assign_client(int client_fd, session_t *session);
 asr_context_t *worker_pool_borrow_asr(void);
 
 /**
+ * @brief Non-blocking borrow that always leaves a reserve of idle contexts.
+ *
+ * Unlike worker_pool_borrow_asr() (which blocks up to WORKER_BORROW_TIMEOUT_MS),
+ * this returns immediately: it lends an idle ASR context ONLY when strictly more
+ * than @p keep_idle workers are idle, otherwise it returns NULL without waiting.
+ *
+ * Intended for opportunistic/speculative work (adaptive-dwell speculative decode)
+ * that must never wait for, or starve, a real client decode. Call with
+ * keep_idle = 1 to always reserve one context for a genuine client turn.
+ *
+ * @param keep_idle Minimum number of contexts to leave idle (>= 0).
+ * @return Borrowed ASR context, or NULL if the reserve would be breached.
+ * @note Caller MUST call worker_pool_return_asr() on a non-NULL result.
+ * @note Thread-safe (uses pool mutex); never blocks.
+ */
+asr_context_t *worker_pool_try_borrow_asr(int keep_idle);
+
+/**
+ * @brief ASR engine the pool was initialized with (VOSK or WHISPER).
+ *
+ * Lets callers gate engine-specific behavior (e.g. speculative decode is
+ * Whisper-only) without threading the engine type through every layer.
+ *
+ * @return The engine type passed to worker_pool_init().
+ */
+asr_engine_type_t worker_pool_engine_type(void);
+
+/**
  * @brief Return a borrowed ASR context to the worker pool
  *
  * Marks the owning worker as IDLE, allowing it to accept new clients.
@@ -246,6 +274,15 @@ static inline int worker_pool_assign_client(int client_fd, session_t *session) {
 
 static inline asr_context_t *worker_pool_borrow_asr(void) {
    return NULL;
+}
+
+static inline asr_context_t *worker_pool_try_borrow_asr(int keep_idle) {
+   (void)keep_idle;
+   return NULL;
+}
+
+static inline asr_engine_type_t worker_pool_engine_type(void) {
+   return ASR_ENGINE_WHISPER;
 }
 
 static inline void worker_pool_return_asr(asr_context_t *ctx) {

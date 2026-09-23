@@ -113,6 +113,7 @@ static void set_valid_defaults(void) {
    s_config.network.summarization_timeout_ms = 60000;
    strncpy(s_config.commands.processing_mode, "direct_first",
            sizeof(s_config.commands.processing_mode) - 1);
+   strncpy(s_config.vad.adaptive_endpoint, "off", sizeof(s_config.vad.adaptive_endpoint) - 1);
    strncpy(s_config.llm.type, "cloud", sizeof(s_config.llm.type) - 1);
    strncpy(s_config.llm.cloud.provider, "openai", sizeof(s_config.llm.cloud.provider) - 1);
    strncpy(s_config.search.summarizer.backend, "tfidf",

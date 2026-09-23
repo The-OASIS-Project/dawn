@@ -177,6 +177,8 @@ typedef struct {
    float end_of_speech_duration; /* Seconds of silence to end recording */
    float max_recording_duration; /* Maximum recording length (seconds) */
    int preroll_ms;               /* Audio buffer before VAD trigger */
+   char adaptive_endpoint[16];   /* adaptive end-of-speech: "off"|"shadow"|"on" (default off).
+                                    Speculative-decode overlap. */
    vad_chunking_config_t chunking;
 } vad_config_t;
 
@@ -1303,6 +1305,17 @@ void config_set_secrets_defaults(secrets_config_t *secrets);
  * @param config Jobs config to clamp in place (NULL-safe).
  */
 void config_clamp_jobs(jobs_config_t *config);
+
+/**
+ * @brief Clamp [vad] enum settings to their valid values.
+ *
+ * Shared by the TOML parse path and the WebUI settings POST handler so the two
+ * entry points cannot drift — adaptive_endpoint is coerced to "off" unless it is
+ * exactly "off", "shadow", or "on".
+ *
+ * @param config VAD config to clamp in place (NULL-safe).
+ */
+void config_clamp_vad(vad_config_t *config);
 
 /**
  * @brief Clamp [research] budgets to their safe bounds.

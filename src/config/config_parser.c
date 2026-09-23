@@ -346,6 +346,7 @@ static void parse_vad(toml_table_t *table, vad_config_t *config) {
                                              "end_of_speech_duration",
                                              "max_recording_duration",
                                              "preroll_ms",
+                                             "adaptive_endpoint",
                                              "chunking",
                                              NULL };
    warn_unknown_keys(table, "vad", known_keys);
@@ -356,6 +357,9 @@ static void parse_vad(toml_table_t *table, vad_config_t *config) {
    PARSE_DOUBLE(table, "end_of_speech_duration", config->end_of_speech_duration);
    PARSE_DOUBLE(table, "max_recording_duration", config->max_recording_duration);
    PARSE_INT(table, "preroll_ms", config->preroll_ms);
+   PARSE_STRING(table, "adaptive_endpoint", config->adaptive_endpoint);
+
+   config_clamp_vad(config);
 
    /* Parse [vad.chunking] sub-table */
    toml_table_t *chunking = toml_table_in(table, "chunking");
@@ -1751,6 +1755,20 @@ static void parse_scheduler(toml_table_t *table, scheduler_config_t *config) {
  * arriving over the wire can't bypass bounds the file path enforces.  The
  * job-session pool array is sized to max_active_jobs, so a nonsense value must
  * not blow the allocation. */
+void config_clamp_vad(vad_config_t *config) {
+   if (!config) {
+      return;
+   }
+   /* adaptive_endpoint is a tri-state enum ("off"|"shadow"|"on"); anything else
+    * falls back to "off" so the file path and the WebUI POST path share bounds. */
+   if (strcmp(config->adaptive_endpoint, "off") != 0 &&
+       strcmp(config->adaptive_endpoint, "shadow") != 0 &&
+       strcmp(config->adaptive_endpoint, "on") != 0) {
+      OLOG_WARNING("Invalid [vad] adaptive_endpoint '%s'; using 'off'", config->adaptive_endpoint);
+      safe_strscpy(config->adaptive_endpoint, "off");
+   }
+}
+
 void config_clamp_jobs(jobs_config_t *config) {
    if (!config) {
       return;
