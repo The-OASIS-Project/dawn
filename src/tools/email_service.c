@@ -41,6 +41,7 @@
 #include "tools/calendar_db.h"
 #include "tools/email_client.h"
 #include "tools/email_db.h"
+#include "tools/email_parse.h"
 #include "tools/gmail_client.h"
 #include "tools/oauth_client.h"
 
@@ -513,6 +514,34 @@ int email_service_list_accounts(int user_id, email_account_t *out, int max) {
  * Operations (Tool Layer)
  * ============================================================================= */
 
+/* IMAP page_token <-> cursor.  An empty token is the first page; anything that
+ * isn't a well-formed IMAP cursor (e.g. a Gmail token) is rejected rather than
+ * silently restarting from page one. */
+static int imap_page_from_token(const char *page_token, email_imap_page_t *page) {
+   memset(page, 0, sizeof(*page));
+   if (!page_token || !page_token[0])
+      return EMAIL_RC_OK;
+   if (!email_imap_page_token_parse(page_token, &page->before_uid, &page->uidvalidity))
+      return EMAIL_RC_INVALID_PAGE_TOKEN;
+   return EMAIL_RC_OK;
+}
+
+static void imap_page_to_token(const email_imap_page_t *page, char *npt, size_t npt_len) {
+   if (!npt || npt_len == 0 || page->next_before_uid == 0)
+      return;
+   /* Pin the epoch this page was read under; fall back to the one the incoming
+    * cursor carried if the server's SELECT line wasn't observed. */
+   uint32_t v = page->next_uidvalidity ? page->next_uidvalidity : page->uidvalidity;
+   email_imap_page_token_format(page->next_before_uid, v, npt, npt_len);
+}
+
+/* A Gmail account handed an IMAP cursor: reject it the same way instead of
+ * letting the Gmail API 400 into a generic "network error". */
+static bool is_imap_page_token(const char *page_token) {
+   uint32_t uid = 0, v = 0;
+   return page_token && page_token[0] && email_imap_page_token_parse(page_token, &uid, &v);
+}
+
 /* Stamp the owning account's display name + address onto each returned row.
  * The lower-level fetch primitives don't know the account, so the service layer
  * is the single point that labels every row (contract in email_service.h).  The
@@ -536,6 +565,12 @@ int email_service_recent(int user_id,
                          int *out_count,
                          char *next_page_token,
                          size_t npt_len) {
+   /* Copy the incoming cursor before clearing the outgoing one, so a caller may
+    * pass the same buffer for both (page N's token in, page N+1's out). */
+   char tok_in[EMAIL_PAGE_TOKEN_LEN];
+   snprintf(tok_in, sizeof(tok_in), "%s", page_token ? page_token : "");
+   page_token = tok_in;
+
    *out_count = 0;
    if (next_page_token && npt_len > 0)
       next_page_token[0] = '\0';
@@ -549,13 +584,15 @@ int email_service_recent(int user_id,
       return find_rc;
 
    if (count <= 0)
-      count = acct.max_recent > 0 ? acct.max_recent : 10;
+      count = acct.max_recent > 0 ? acct.max_recent : EMAIL_MAX_RECENT_DEFAULT;
 
    folder_norm_t norm;
    normalize_folder(folder, &acct, &norm);
 
    /* Gmail API path */
    if (is_gmail_api_account(&acct)) {
+      if (is_imap_page_token(page_token))
+         return EMAIL_RC_INVALID_PAGE_TOKEN;
       char token[OAUTH_TOKEN_BUF_SIZE];
       if (get_gmail_token(&acct, token, sizeof(token)) != 0) {
          sodium_memzero(token, sizeof(token));
@@ -568,7 +605,11 @@ int email_service_recent(int user_id,
       return rc;
    }
 
-   /* IMAP path (no pagination support) */
+   /* IMAP path: UID cursor paging */
+   email_imap_page_t page;
+   if (imap_page_from_token(page_token, &page) != EMAIL_RC_OK)
+      return EMAIL_RC_INVALID_PAGE_TOKEN;
+
    email_conn_t conn;
    int rc = build_conn_for_account(&acct, &conn);
    if (rc != 0) {
@@ -576,8 +617,12 @@ int email_service_recent(int user_id,
       return 1;
    }
 
-   rc = email_fetch_recent(&conn, norm.imap_folder, count, unread_only, out, max, out_count);
+   rc = email_fetch_recent(&conn, norm.imap_folder, count, unread_only, &page, out, max, out_count);
    sodium_memzero(&conn, sizeof(conn));
+   if (rc != 0 && page.stale)
+      return EMAIL_RC_INVALID_PAGE_TOKEN;
+   if (rc == 0)
+      imap_page_to_token(&page, next_page_token, npt_len);
 
    /* Populate message_id (folder:uid) for IMAP results, then stamp the account. */
    for (int i = 0; i < *out_count; i++)
@@ -713,6 +758,11 @@ static int search_single_account(email_account_t *acct,
                                  char *next_page_token,
                                  size_t npt_len,
                                  bool *auth_error) {
+   /* Work on a copy so the caller may hand back the previous page's token buffer
+    * as next_page_token (see email_service_recent). */
+   email_search_params_t local_params = *params;
+   params = &local_params;
+
    *out_count = 0;
    if (next_page_token && npt_len > 0)
       next_page_token[0] = '\0';
@@ -723,6 +773,8 @@ static int search_single_account(email_account_t *acct,
    normalize_folder(params->folder, acct, &norm);
 
    if (is_gmail_api_account(acct)) {
+      if (is_imap_page_token(params->page_token))
+         return EMAIL_RC_INVALID_PAGE_TOKEN;
       email_search_params_t gmail_params = *params;
       snprintf(gmail_params.folder, sizeof(gmail_params.folder), "%s", norm.gmail_query);
 
@@ -741,7 +793,11 @@ static int search_single_account(email_account_t *acct,
       return rc;
    }
 
-   /* IMAP path (no pagination support) */
+   /* IMAP path: UID cursor paging */
+   email_imap_page_t page;
+   if (imap_page_from_token(params->page_token, &page) != EMAIL_RC_OK)
+      return EMAIL_RC_INVALID_PAGE_TOKEN;
+
    email_conn_t conn;
    int rc = build_conn_for_account(acct, &conn);
    if (rc != CONN_RC_OK) {
@@ -755,11 +811,15 @@ static int search_single_account(email_account_t *acct,
 
    bool imap_auth_denied = false;
    bool imap_timed_out = false;
-   rc = email_search(&conn, norm.imap_folder, params, out, max, out_count, &imap_auth_denied,
+   rc = email_search(&conn, norm.imap_folder, params, &page, out, max, out_count, &imap_auth_denied,
                      &imap_timed_out);
    if (rc != 0 && auth_error)
       *auth_error = imap_auth_denied;
    sodium_memzero(&conn, sizeof(conn));
+   if (rc != 0 && page.stale)
+      return EMAIL_RC_INVALID_PAGE_TOKEN;
+   if (rc == 0)
+      imap_page_to_token(&page, next_page_token, npt_len);
 
    for (int i = 0; i < *out_count; i++)
       snprintf(out[i].message_id, sizeof(out[i].message_id), "%s:%u", norm.imap_folder, out[i].uid);
@@ -802,7 +862,12 @@ int email_service_search(int user_id,
    }
 
    /* No account specified — search ALL enabled accounts and merge results.
-    * Pagination only applies to single-account searches. */
+    * Pagination only applies to single-account searches, so drop any page_token:
+    * a cursor belongs to one account and would 400 the others (Gmail) or be
+    * rejected as foreign (IMAP), turning a fresh search into spurious errors. */
+   email_search_params_t first_page = *params;
+   first_page.page_token[0] = '\0';
+   params = &first_page;
    email_account_t accounts[16];
    int acct_count = 0;
    email_db_account_list(user_id, accounts, 16, &acct_count);

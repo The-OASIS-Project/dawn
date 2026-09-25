@@ -942,7 +942,7 @@ static const char *SCHEMA_SQL =
     "  max_recent INTEGER DEFAULT 10,"
     "  max_body_chars INTEGER DEFAULT " STRINGIFY(
         EMAIL_DEFAULT_BODY_CHARS) ","
-                                  "  created_at INTEGER NOT NULL,"
+                                  "  created_at INTEGER NOT NULL," EMAIL_DIGEST_DEPTH_COLUMN_SQL
                                   "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE"
                                   ");"
                                   "CREATE INDEX IF NOT EXISTS idx_email_acct_user ON "

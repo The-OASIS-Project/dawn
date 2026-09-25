@@ -64,7 +64,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 86
+#define AUTH_DB_SCHEMA_VERSION 87
 
 /* Retention periods */
 #define LOGIN_ATTEMPT_RETENTION_SEC (7 * 24 * 60 * 60) /* 7 days */
@@ -158,6 +158,16 @@
  * so this MIRRORS EMAIL_MAX_READ_BODY_LEN in include/tools/email_types.h (the
  * runtime read-body fallback) — keep the two values in sync. */
 #define EMAIL_DEFAULT_BODY_CHARS 50000
+
+/* Default per-account digest depth baked into the email_accounts schema column
+ * and applied by the v87 migration.  MIRRORS EMAIL_DIGEST_DEPTH_DEFAULT in
+ * include/tools/email_types.h — keep the two values in sync. */
+#define EMAIL_DEFAULT_DIGEST_DEPTH 50
+/* digest_depth's base-schema column definition (the v87 ALTER spells the same
+ * type + default itself).  A single token keeps the base schema's long string
+ * concatenation formatter-stable. */
+#define EMAIL_DIGEST_DEPTH_COLUMN_SQL \
+   "  digest_depth INTEGER NOT NULL DEFAULT " STRINGIFY(EMAIL_DEFAULT_DIGEST_DEPTH) ","
 
 /* =============================================================================
  * Database State Structure (~408 bytes in BSS)

@@ -38,6 +38,28 @@
  * than raising this cap. */
 #define EMAIL_MAX_FETCH_RESULTS 50
 
+/* Buffer size for an opaque paging cursor (Gmail nextPageToken or IMAP "u<uid>.<v>");
+ * matches email_search_params_t.page_token. */
+#define EMAIL_PAGE_TOKEN_LEN 256
+
+/* Rows `recent` returns when the caller gives no count and the account has no
+ * max_recent override.  The email_accounts base schema spells this default as a
+ * literal (max_recent INTEGER DEFAULT 10); every insert binds an explicit value,
+ * so the schema literal only matters for hand-inserted rows. */
+#define EMAIL_MAX_RECENT_DEFAULT 10
+
+/* Per-account digest depth: how many of an inbox's newest messages the daily
+ * digest may scan, reached by paging EMAIL_MAX_FETCH_RESULTS at a time.  The
+ * default equals the old single-fetch depth, so existing digests are unchanged.
+ * NOTE: the auth layer cannot include tools headers, so the email_accounts
+ * schema default + v87 migration mirror the default as EMAIL_DEFAULT_DIGEST_DEPTH
+ * in include/auth/auth_db_internal.h — keep the two in sync. */
+#define EMAIL_DIGEST_DEPTH_DEFAULT 50
+#define EMAIL_DIGEST_DEPTH_MAX 200
+/* Page ceiling per account per digest: bounds the loop even if a backend keeps
+ * returning short pages with a continuation token. */
+#define EMAIL_DIGEST_MAX_PAGES (EMAIL_DIGEST_DEPTH_MAX / EMAIL_MAX_FETCH_RESULTS)
+
 /* Inbound (read) body cap — default fallback for both backends when an account
  * sets no max_body_chars override, and the upper bound the WebUI accepts for the
  * per-account override.  Read bodies are heap-allocated, so this can be large;
@@ -115,9 +137,9 @@ typedef struct {
    char text[128];
    char since[16]; /* YYYY-MM-DD, validated via strptime/strftime */
    char before[16];
-   bool unread_only;     /* Only match UNSEEN messages */
-   char folder[256];     /* Folder/label or normalized Gmail query fragment */
-   char page_token[256]; /* Gmail pagination token (empty = first page) */
+   bool unread_only;                      /* Only match UNSEEN messages */
+   char folder[256];                      /* Folder/label or normalized Gmail query fragment */
+   char page_token[EMAIL_PAGE_TOKEN_LEN]; /* Paging cursor, Gmail or IMAP (empty = first page) */
 } email_search_params_t;
 
 /**

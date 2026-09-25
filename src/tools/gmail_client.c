@@ -1019,8 +1019,8 @@ static int parse_batch_response(const char *resp_data,
 }
 
 /**
- * Fetch metadata for multiple messages using Gmail batch API.
- * Falls back to individual fetches if batch fails.
+ * Fetch metadata for multiple messages using Gmail batch API (one POST).
+ * A failed batch fails the whole call; there is no per-message fallback.
  *
  * Stack budget: ~1.6KB for ids array + curl locals. Called from Jetson daemon only.
  */
@@ -1091,9 +1091,13 @@ int gmail_fetch_recent(const char *token,
       return 1;
 
    if (count <= 0)
-      count = 10;
+      count = EMAIL_MAX_RECENT_DEFAULT;
    if (count > max_out)
       count = max_out;
+   /* ids[] below is sized EMAIL_MAX_FETCH_RESULTS: clamp to the array itself,
+    * not just to the caller's output capacity. */
+   if (count > EMAIL_MAX_FETCH_RESULTS)
+      count = EMAIL_MAX_FETCH_RESULTS;
 
    CURL *curl = gmail_create_curl();
    if (!curl)
@@ -1108,7 +1112,9 @@ int gmail_fetch_recent(const char *token,
       snprintf(query, sizeof(query), "%s", lq);
 
    /* Fetch message IDs */
-   gmail_msg_id_t ids[EMAIL_MAX_FETCH_RESULTS];
+   /* Zeroed: a list entry without an "id" leaves its slot untouched, and
+    * is_valid_gmail_id() must then see an empty string, not stack garbage. */
+   gmail_msg_id_t ids[EMAIL_MAX_FETCH_RESULTS] = { 0 };
    int id_count = 0;
    int rc = fetch_message_ids(curl, token, query, count, page_token, ids, count, &id_count,
                               next_page_token, npt_len);
@@ -1233,9 +1239,12 @@ int gmail_search(const char *token,
       return 1;
 
    if (max_results <= 0)
-      max_results = 10;
+      max_results = EMAIL_MAX_RECENT_DEFAULT;
    if (max_results > max_out)
       max_results = max_out;
+   /* ids[] below is sized EMAIL_MAX_FETCH_RESULTS: clamp to the array itself. */
+   if (max_results > EMAIL_MAX_FETCH_RESULTS)
+      max_results = EMAIL_MAX_FETCH_RESULTS;
 
    CURL *curl = gmail_create_curl();
    if (!curl) {
@@ -1254,7 +1263,9 @@ int gmail_search(const char *token,
    }
 
    /* Fetch message IDs */
-   gmail_msg_id_t ids[EMAIL_MAX_FETCH_RESULTS];
+   /* Zeroed: a list entry without an "id" leaves its slot untouched, and
+    * is_valid_gmail_id() must then see an empty string, not stack garbage. */
+   gmail_msg_id_t ids[EMAIL_MAX_FETCH_RESULTS] = { 0 };
    int id_count = 0;
    const char *pt = params->page_token[0] ? params->page_token : NULL;
    int rc = fetch_message_ids(curl, token, query, max_results, pt, ids, max_results, &id_count,

@@ -39,6 +39,7 @@
 
 #include <curl/curl.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 /**
  * Per-operation debug-capture context. Stack-allocate one per email op and wire
@@ -50,6 +51,20 @@ typedef struct {
    char last_reject[256]; /* most recent tagged "NO"/"BAD"/"BYE" server line, sanitized + trimmed */
    int login_seen;        /* on-wire LOGIN/AUTHENTICATE commands sent (ground-truth login count) */
    int retries;           /* guarded retries taken this op (each adds one extra on-wire login) */
+   /* Mailbox epoch from the SELECT/EXAMINE response's "* OK [UIDVALIDITY n]" (0 =
+    * not seen).  LOAD-BEARING for IMAP paging, not just diagnostics: the paging
+    * cursor pins this epoch (email_client.c), so the capture must stay attached
+    * to every IMAP op that pages. */
+   uint32_t uidvalidity;
+   /* Message count from the same SELECT response's "* <n> EXISTS" (also required by
+    * RFC 3501).  Load-bearing too: IMAP searches run in sequence-number windows
+    * counted down from it, so no single SEARCH reply outgrows libcurl's line limit. */
+   uint32_t exists;
+   bool exists_seen; /* 0 is a valid count (empty mailbox), so presence is tracked apart */
+   /* The last command sent was SELECT/EXAMINE (the capture window).  Assumes each op
+    * opens a fresh connection, so its first perform always issues SELECT; a shared or
+    * persistent connection (CURLSH) could skip it — revisit this if one is added. */
+   bool in_select;
 } email_instrument_ctx_t;
 
 /**

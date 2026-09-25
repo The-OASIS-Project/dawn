@@ -48,7 +48,15 @@
  * ============================================================================= */
 
 #define RESULT_BUF_SIZE 16384
-#define MAX_EMAIL_RESULTS 50
+#define MAX_EMAIL_RESULTS EMAIL_MAX_FETCH_RESULTS
+
+/* An empty page that still carries a page_token: a large mailbox's search stopped
+ * (time or window budget) before reaching older mail.  Say so, or the model reads
+ * the empty page as "there is no such mail". */
+#define EMAIL_PARTIAL_SCAN_NOTE                                                             \
+   "No matches in the most recent part of this mailbox, but older mail has not been "       \
+   "searched yet. This is NOT a confirmed \"no results\" — pass the page_token below to " \
+   "continue searching older mail."
 
 /* =============================================================================
  * Config (TOOL_CAP_DANGEROUS requires enabled = true as first field)
@@ -194,6 +202,15 @@ static char *email_rc_to_error(int rc, const char *op, const char *account, cons
                   "from 'recent', 'search', or 'digest' (copy it exactly).",
                   (account && account[0]) ? account : "any of your accounts");
          break;
+      case EMAIL_RC_INVALID_PAGE_TOKEN:
+         snprintf(msg, 384,
+                  TOOL_RESULT_ERROR_MARK
+                  "Error: page_token is not valid here (it belongs to a different kind of "
+                  "account, is malformed, or the mailbox changed since it was issued). Do NOT "
+                  "retry it — call '%s' without page_token to get a fresh first page and token. "
+                  "Always reuse a page_token with the same account it came from.",
+                  op);
+         break;
       case EMAIL_RC_TIMEOUT:
          /* Generic fallback.  The 'search' path builds a date-aware message in
           * handle_search (it knows whether a date bound was already supplied),
@@ -263,7 +280,8 @@ static void sort_summaries_by_date(email_summary_t *arr, int n, const char *sort
 }
 
 static char *handle_recent(struct json_object *details, int user_id) {
-   int count = json_get_int(details, "count", 10);
+   /* 0 = not given: the service layer substitutes the account's max_recent. */
+   int count = json_get_int(details, "count", 0);
    const char *account = json_get_str(details, "account");
    const char *folder = json_get_str(details, "folder");
    bool unread_only = json_get_bool(details, "unread_only", false);
@@ -287,7 +305,9 @@ static char *handle_recent(struct json_object *details, int user_id) {
       return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
 
    int pos = 0;
-   if (out_count == 0) {
+   if (out_count == 0 && next_page_token[0]) {
+      pos += snprintf(buf, RESULT_BUF_SIZE, "%s", EMAIL_PARTIAL_SCAN_NOTE);
+   } else if (out_count == 0) {
       pos += snprintf(buf, RESULT_BUF_SIZE, "No recent emails found.");
    } else {
       pos += snprintf(buf, RESULT_BUF_SIZE, "Recent emails (%d):\n", out_count);
@@ -473,7 +493,9 @@ static char *handle_search(struct json_object *details, int user_id) {
       return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
 
    int pos = 0;
-   if (out_count == 0) {
+   if (out_count == 0 && next_page_token[0]) {
+      pos += snprintf(buf, RESULT_BUF_SIZE, "%s", EMAIL_PARTIAL_SCAN_NOTE);
+   } else if (out_count == 0) {
       pos += snprintf(buf, RESULT_BUF_SIZE, "No emails matching your search criteria.");
    } else {
       pos += snprintf(buf, RESULT_BUF_SIZE, "Search results (%d):\n", out_count);
@@ -987,7 +1009,8 @@ static const treg_param_t email_params[] = {
            "JSON object of the action's arguments, passed as a JSON-encoded string.  "
            "Omit for an action that takes no arguments; never fill it with a description "
            "or rationale.  Shapes: "
-           "recent {count? (up to 50), folder?, unread_only?, account?, page_token?, sort?}, "
+           "recent {count? (default: the account's setting; up to 50), folder?, unread_only?, "
+           "account?, page_token?, sort?}, "
            "read {message_id, account?}, "
            "search {from?, subject?, text?, since?, before?, folder?, unread_only?, "
            "account?, page_token?, sort?} (dates: YYYY-MM-DD, UTC, since=inclusive, "

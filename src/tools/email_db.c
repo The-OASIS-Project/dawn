@@ -72,6 +72,23 @@ int email_decrypt_password(const email_account_t *acct, char *out, size_t out_le
  * Row Helper
  * ============================================================================= */
 
+/* The auth layer can't include tools headers, so it mirrors these defaults for the
+ * email_accounts schema; fail the build rather than let the two drift. */
+_Static_assert(EMAIL_DEFAULT_DIGEST_DEPTH == EMAIL_DIGEST_DEPTH_DEFAULT,
+               "auth-layer digest_depth default must mirror email_types.h");
+_Static_assert(EMAIL_DEFAULT_BODY_CHARS == EMAIL_MAX_READ_BODY_LEN,
+               "auth-layer max_body_chars default must mirror email_types.h");
+
+/* Unset (<= 0) means "use the default"; anything above the ceiling is capped so a
+ * hand-edited row can't drive an unbounded digest paging loop. */
+static int clamp_digest_depth(int depth) {
+   if (depth <= 0)
+      return EMAIL_DIGEST_DEPTH_DEFAULT;
+   if (depth > EMAIL_DIGEST_DEPTH_MAX)
+      return EMAIL_DIGEST_DEPTH_MAX;
+   return depth;
+}
+
 static void row_to_account(sqlite3_stmt *st, email_account_t *out) {
    memset(out, 0, sizeof(*out));
    out->id = sqlite3_column_int64(st, 0);
@@ -120,8 +137,11 @@ static void row_to_account(sqlite3_stmt *st, email_account_t *out) {
    out->enabled = sqlite3_column_int(st, 15) != 0;
    out->read_only = sqlite3_column_int(st, 16) != 0;
    out->max_recent = sqlite3_column_int(st, 17);
+   if (out->max_recent <= 0 || out->max_recent > EMAIL_MAX_FETCH_RESULTS)
+      out->max_recent = EMAIL_MAX_RECENT_DEFAULT;
    out->max_body_chars = sqlite3_column_int(st, 18);
    out->created_at = (time_t)sqlite3_column_int64(st, 19);
+   out->digest_depth = clamp_digest_depth(sqlite3_column_int(st, 20));
 }
 
 /* =============================================================================
@@ -150,10 +170,11 @@ int email_db_account_create(const email_account_t *acct, int64_t *id_out) {
    sqlite3_bind_text(st, 14, acct->oauth_account_key, -1, SQLITE_TRANSIENT);
    sqlite3_bind_int(st, 15, acct->enabled ? 1 : 0);
    sqlite3_bind_int(st, 16, acct->read_only ? 1 : 0);
-   sqlite3_bind_int(st, 17, acct->max_recent > 0 ? acct->max_recent : 10);
+   sqlite3_bind_int(st, 17, acct->max_recent > 0 ? acct->max_recent : EMAIL_MAX_RECENT_DEFAULT);
    sqlite3_bind_int(st, 18,
                     acct->max_body_chars > 0 ? acct->max_body_chars : EMAIL_MAX_READ_BODY_LEN);
    sqlite3_bind_int64(st, 19, (int64_t)time(NULL));
+   sqlite3_bind_int(st, 20, clamp_digest_depth(acct->digest_depth));
 
    int result = FAILURE;
    if (sqlite3_step(st) == SQLITE_DONE) {
@@ -229,7 +250,8 @@ int email_db_account_update(const email_account_t *acct) {
    sqlite3_bind_text(st, 13, acct->oauth_account_key, -1, SQLITE_TRANSIENT);
    sqlite3_bind_int(st, 14, acct->max_recent);
    sqlite3_bind_int(st, 15, acct->max_body_chars);
-   sqlite3_bind_int64(st, 16, acct->id);
+   sqlite3_bind_int(st, 16, clamp_digest_depth(acct->digest_depth));
+   sqlite3_bind_int64(st, 17, acct->id);
 
    int rc = sqlite3_step(st);
    sqlite3_reset(st);

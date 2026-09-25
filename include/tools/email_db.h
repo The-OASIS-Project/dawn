@@ -50,9 +50,10 @@ typedef struct {
    char oauth_account_key[128];
    bool enabled;
    bool read_only;     /* Blocks send/confirm_send actions */
-   int max_recent;     /* Default 10 */
+   int max_recent;     /* Default EMAIL_MAX_RECENT_DEFAULT */
    int max_body_chars; /* Default EMAIL_MAX_READ_BODY_LEN (50000) */
    time_t created_at;
+   int digest_depth; /* Digest scan depth, 1..EMAIL_DIGEST_DEPTH_MAX (default 50) */
 } email_account_t;
 
 /**

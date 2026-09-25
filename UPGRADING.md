@@ -12,6 +12,30 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-09-24 — Email: per-account digest depth, and older mail on IMAP accounts
+
+**What changed.**
+- Each email account has a new **Digest depth** setting (Settings → Email → edit
+  account → Advanced Settings). It's the most messages the daily digest will look
+  through in that inbox. The digest now pages back through an inbox until it covers
+  the whole digest window, so a busy day is no longer cut off at 50 messages. Depth
+  defaults to 50, the same as before, so nothing changes until you raise it (up to 200).
+  Lower it for a busy inbox you don't need fully covered.
+- The **Max recent emails** setting now actually takes effect. When you ask for recent
+  mail without saying how many, that account returns this many (default 10, as
+  before). Asking for a specific number works as it always did.
+- **IMAP accounts** (non-Gmail) can now page back to older mail, the way Gmail
+  accounts already could.
+- **Fix for large IMAP mailboxes:** listing or searching a big IMAP inbox could
+  quietly drop messages (commonly showing one fewer than asked for) because of a
+  limit in the curl library. DAWN now searches in small batches, so results are
+  complete.
+
+**What (if anything) to do.** Nothing. The database upgrades itself on first start.
+If a digest line says "digest depth N reached", raise that account's Digest depth.
+
+---
+
 ## 2026-09-22 — Music library re-scans once to add genre + year (and fixes genre loss)
 
 **What changed.** The music scanner now extracts **genre** and **release year** from

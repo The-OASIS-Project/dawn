@@ -2513,8 +2513,8 @@ int auth_db_prepare_statements(void) {
        "INSERT INTO email_accounts (user_id, name, imap_server, imap_port, imap_ssl, "
        "smtp_server, smtp_port, smtp_ssl, username, display_name, "
        "encrypted_password, encrypted_password_len, auth_type, oauth_account_key, "
-       "enabled, read_only, max_recent, max_body_chars, created_at) "
-       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+       "enabled, read_only, max_recent, max_body_chars, created_at, digest_depth) "
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
        -1, &s_db.stmt_email_acct_create, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare email_acct_create failed: %s", sqlite3_errmsg(s_db.db));
@@ -2526,7 +2526,7 @@ int auth_db_prepare_statements(void) {
        "SELECT id, user_id, name, imap_server, imap_port, imap_ssl, "
        "smtp_server, smtp_port, smtp_ssl, username, display_name, "
        "encrypted_password, encrypted_password_len, auth_type, oauth_account_key, "
-       "enabled, read_only, max_recent, max_body_chars, created_at "
+       "enabled, read_only, max_recent, max_body_chars, created_at, digest_depth "
        "FROM email_accounts WHERE id = ?",
        -1, &s_db.stmt_email_acct_get, NULL);
    if (rc != SQLITE_OK) {
@@ -2539,7 +2539,7 @@ int auth_db_prepare_statements(void) {
        "SELECT id, user_id, name, imap_server, imap_port, imap_ssl, "
        "smtp_server, smtp_port, smtp_ssl, username, display_name, "
        "encrypted_password, encrypted_password_len, auth_type, oauth_account_key, "
-       "enabled, read_only, max_recent, max_body_chars, created_at "
+       "enabled, read_only, max_recent, max_body_chars, created_at, digest_depth "
        "FROM email_accounts WHERE user_id = ? ORDER BY name",
        -1, &s_db.stmt_email_acct_list, NULL);
    if (rc != SQLITE_OK) {
@@ -2552,7 +2552,7 @@ int auth_db_prepare_statements(void) {
        "UPDATE email_accounts SET name=?, imap_server=?, imap_port=?, imap_ssl=?, "
        "smtp_server=?, smtp_port=?, smtp_ssl=?, username=?, display_name=?, "
        "encrypted_password=?, encrypted_password_len=?, auth_type=?, oauth_account_key=?, "
-       "max_recent=?, max_body_chars=? WHERE id=?",
+       "max_recent=?, max_body_chars=?, digest_depth=? WHERE id=?",
        -1, &s_db.stmt_email_acct_update, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare email_acct_update failed: %s", sqlite3_errmsg(s_db.db));

@@ -19,8 +19,9 @@
  * Email daily-briefing digest — aggregates recent inbox mail across every
  * enabled account into one categorized, briefing-ready summary.
  *
- * Flow: enumerate enabled accounts -> fetch recent inbox per account through the
- * email_service layer (which stamps account name + address on each row) -> keep
+ * Flow: enumerate enabled accounts -> page each inbox newest-first through the
+ * email_service layer (which stamps account name + address on each row) until the
+ * window start, the end of the mailbox, or the account's digest depth -> keep
  * rows inside the rolling window (in-memory filter on the parsed epoch) -> merge
  * + date-sort across accounts -> cap -> render Important/Primary/Other sections
  * with display-only E-NN labels and the real [ID] for follow-up actions.
@@ -40,14 +41,10 @@
 #include "core/strbuf.h"
 #include "logging.h"
 #include "tools/email_db.h"
+#include "tools/email_digest_internal.h"
 #include "tools/email_service.h"
 #include "tools/email_types.h"
 #include "tools/tool_registry.h"
-
-/* Per-account fetch depth.  recent() has no time filter, so we pull this many
- * newest inbox messages and window-filter in memory.  A busier-than-this day in
- * one inbox trips the cap note (oldest-in-window may be omitted). */
-#define DIGEST_FETCH_PER_ACCT EMAIL_MAX_FETCH_RESULTS
 
 static int cmp_summary_date_desc(const void *a, const void *b) {
    time_t da = ((const email_summary_t *)a)->date;
@@ -152,6 +149,125 @@ static void emit_section(strbuf_t *sb,
    }
 }
 
+/* Growable array of in-window rows merged across accounts.  Worst case it holds
+ * every scanned row: accounts x EMAIL_DIGEST_DEPTH_MAX x ~1.8KB (16 x 200 -> ~5.7MB,
+ * briefly ~8.6MB while the last doubling copies).  Raising the depth ceiling
+ * raises this bound. */
+typedef struct {
+   email_summary_t *v;
+   int n;
+   int cap;
+} digest_rows_t;
+
+static bool digest_rows_push(digest_rows_t *r, const email_summary_t *m) {
+   if (r->n == r->cap) {
+      int ncap = r->cap > 0 ? r->cap * 2 : EMAIL_MAX_FETCH_RESULTS;
+      email_summary_t *nv = realloc(r->v, (size_t)ncap * sizeof(*nv));
+      if (!nv)
+         return false;
+      r->v = nv;
+      r->cap = ncap;
+   }
+   r->v[r->n++] = *m;
+   return true;
+}
+
+/* Page one account's inbox newest-first until the window start, the end of the
+ * mailbox, or the account's digest depth (see email_digest_next_step), keeping
+ * in-window rows and appending one per-account status line.
+ * @return true if the account was reachable (its first page fetched). */
+static bool digest_fetch_account(int user_id,
+                                 const email_account_t *acct,
+                                 bool unread_only,
+                                 time_t cutoff,
+                                 email_summary_t *batch,
+                                 digest_rows_t *rows,
+                                 strbuf_t *status,
+                                 int *unread_total) {
+   /* The token sent and the token returned are kept apart so a cursor that
+    * fails to advance (same token back) can be detected. */
+   char tok_in[EMAIL_PAGE_TOKEN_LEN] = { 0 };
+   char tok_out[EMAIL_PAGE_TOKEN_LEN] = { 0 };
+   email_digest_page_state_t st = { 0 };
+   st.depth = acct->digest_depth; /* clamped to [1, EMAIL_DIGEST_DEPTH_MAX] on DB load */
+   email_digest_step_t step = EMAIL_DIGEST_MORE;
+   int kept = 0;
+   bool fetch_error = false;
+   bool oom = false;
+
+   while (step == EMAIL_DIGEST_MORE) {
+      int want = st.depth - st.fetched;
+      if (want > EMAIL_MAX_FETCH_RESULTS)
+         want = EMAIL_MAX_FETCH_RESULTS;
+      int out_count = 0;
+      /* Resolve by username (the account's login/address), not the display name:
+       * find_account matches name OR username first-wins, and display names are
+       * not unique (two accounts may both be "Gmail").  Selecting by name would
+       * fetch the first such account twice and omit the other's mail.  (Residual
+       * edge: find_account checks name before username, so this still mis-resolves
+       * if one account's display NAME equals another's username string — a
+       * degenerate operator config.)  "inbox" is a portable folder token the
+       * service layer normalizes per backend. */
+      int rc = email_service_recent(user_id, acct->username, "inbox", want, unread_only,
+                                    tok_in[0] ? tok_in : NULL, batch, EMAIL_MAX_FETCH_RESULTS,
+                                    &out_count, tok_out, sizeof(tok_out));
+      if (rc != EMAIL_RC_OK) {
+         if (st.pages == 0) {
+            strbuf_appendf(status, "  %s <%s>: unavailable (fetch error — check account/OAuth)\n",
+                           acct->name, acct->username);
+            return false;
+         }
+         fetch_error = true; /* keep what earlier pages found */
+         break;
+      }
+
+      for (int i = 0; i < out_count; i++) {
+         /* date == 0 means the backend could not parse a timestamp; keep it
+          * rather than silently dropping (tri-state "unknown", not "old"). */
+         if (batch[i].date > 0 && batch[i].date < cutoff)
+            continue;
+         if (!digest_rows_push(rows, &batch[i])) {
+            OLOG_ERROR("email_digest: out of memory merging rows for %s", acct->username);
+            oom = true;
+            break;
+         }
+         kept++;
+         if (batch[i].unread)
+            (*unread_total)++;
+      }
+      if (oom)
+         break;
+
+      st.pages++;
+      st.fetched += out_count;
+      st.last_returned = out_count;
+      st.reached_cutoff = email_digest_page_reached_cutoff(batch, out_count, cutoff);
+      st.has_token = tok_out[0] != '\0';
+      st.token_repeated = st.has_token && strcmp(tok_out, tok_in) == 0;
+      step = email_digest_next_step(&st);
+      if (step == EMAIL_DIGEST_MORE)
+         memcpy(tok_in, tok_out, sizeof(tok_in));
+   }
+
+   strbuf_appendf(status, "  %s <%s>: %d in window", acct->name, acct->username, kept);
+   if (oom)
+      strbuf_appendf(status, " (out of memory; older in-window mail omitted)");
+   else if (fetch_error)
+      strbuf_appendf(status,
+                     " (fetch error after %d messages; older in-window mail may be omitted)",
+                     st.fetched);
+   else if (step == EMAIL_DIGEST_STOP_DEPTH)
+      strbuf_appendf(status,
+                     " (digest depth %d reached; older in-window mail may be omitted — raise "
+                     "\"Digest depth\" for this account in Settings -> Email)",
+                     st.depth);
+   else if (step == EMAIL_DIGEST_STOP_PAGE_LIMIT)
+      strbuf_appendf(status, " (stopped after %d pages; older in-window mail may be omitted)",
+                     st.pages);
+   strbuf_appendf(status, "\n");
+   return true;
+}
+
 char *email_digest_build(int user_id, const email_digest_opts_t *opts) {
    if (!opts)
       return strdup(TOOL_RESULT_ERROR_MARK "Error: internal error (no digest options)");
@@ -183,17 +299,13 @@ char *email_digest_build(int user_id, const email_digest_opts_t *opts) {
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: no email accounts enabled. Enable one in WebUI Settings -> Email.");
 
-   /* Heap scratch: one reusable per-account batch, and a merged buffer sized to
-    * the worst case (every account returns a full batch).  Kept off the stack —
-    * email_summary_t is ~1.8KB and this runs on the 512KB parallel tool thread. */
-   email_summary_t *batch = calloc(DIGEST_FETCH_PER_ACCT, sizeof(email_summary_t));
-   email_summary_t *merged = calloc((size_t)n_acct * DIGEST_FETCH_PER_ACCT,
-                                    sizeof(email_summary_t));
-   if (!batch || !merged) {
-      free(batch);
-      free(merged);
+   /* Heap scratch: one reusable one-page batch, and a growable merged buffer of
+    * in-window rows.  Kept off the stack — email_summary_t is ~1.8KB and this
+    * runs on the 512KB parallel tool thread. */
+   email_summary_t *batch = calloc(EMAIL_MAX_FETCH_RESULTS, sizeof(email_summary_t));
+   if (!batch)
       return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed");
-   }
+   digest_rows_t rows = { 0 }; /* grown on demand by digest_rows_push */
 
    time_t now = time(NULL);
    time_t cutoff = now - window_sec;
@@ -201,7 +313,6 @@ char *email_digest_build(int user_id, const email_digest_opts_t *opts) {
    strbuf_t status;
    strbuf_init(&status, 256);
 
-   int merged_n = 0;
    int enabled_accounts = 0;
    int ok_accounts = 0;
    int total_unread = 0;
@@ -210,49 +321,16 @@ char *email_digest_build(int user_id, const email_digest_opts_t *opts) {
       if (!accounts[a].enabled)
          continue;
       enabled_accounts++;
-
-      /* "inbox" is a portable folder token: the service layer normalizes it to
-       * the Gmail INBOX label / IMAP "INBOX" per backend (normalize_folder). */
-      int out_count = 0;
-      char npt[256] = { 0 };
-      /* Resolve by username (the account's login/address), not the display name:
-       * find_account matches name OR username first-wins, and display names are
-       * not unique (two accounts may both be "Gmail").  Selecting by name would
-       * fetch the first such account twice and omit the other's mail.  (Residual
-       * edge: find_account checks name before username, so this still mis-resolves
-       * if one account's display NAME equals another's username string — a
-       * degenerate operator config; the clean fix is threading the DB id through
-       * email_summary_t, deferred as disproportionate for these fixes.) */
-      int rc = email_service_recent(user_id, accounts[a].username, "inbox", DIGEST_FETCH_PER_ACCT,
-                                    opts->unread_only, NULL, batch, DIGEST_FETCH_PER_ACCT,
-                                    &out_count, npt, sizeof(npt));
-      if (rc != 0) {
-         strbuf_appendf(&status, "  %s <%s>: unavailable (fetch error — check account/OAuth)\n",
-                        accounts[a].name, accounts[a].username);
-         continue;
-      }
-      ok_accounts++;
-      /* unread is reliable on both backends now: Gmail via the UNREAD label,
-       * IMAP via the \Seen flag parsed at fetch time. */
-
-      int kept = 0;
-      for (int i = 0; i < out_count && merged_n < n_acct * DIGEST_FETCH_PER_ACCT; i++) {
-         /* date == 0 means the backend could not parse a timestamp; keep it
-          * rather than silently dropping (tri-state "unknown", not "old"). */
-         if (batch[i].date > 0 && batch[i].date < cutoff)
-            continue;
-         merged[merged_n++] = batch[i];
-         kept++;
-         if (batch[i].unread)
-            total_unread++;
-      }
-      bool cap_hit = (out_count >= DIGEST_FETCH_PER_ACCT);
-      strbuf_appendf(&status, "  %s <%s>: %d in window%s\n", accounts[a].name, accounts[a].username,
-                     kept,
-                     cap_hit ? " (fetch cap reached; older in-window mail may be omitted)" : "");
+      if (digest_fetch_account(user_id, &accounts[a], opts->unread_only, cutoff, batch, &rows,
+                               &status, &total_unread))
+         ok_accounts++;
    }
 
-   qsort(merged, merged_n, sizeof(email_summary_t), cmp_summary_date_desc);
+   email_summary_t *merged = rows.v;
+   int merged_n = rows.n;
+
+   if (merged_n > 1)
+      qsort(merged, merged_n, sizeof(email_summary_t), cmp_summary_date_desc);
 
    int shown = merged_n < cap ? merged_n : cap;
    int omitted = merged_n - shown;

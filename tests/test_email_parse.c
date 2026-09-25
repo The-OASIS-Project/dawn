@@ -616,6 +616,202 @@ static void test_iso_date_empty_and_null(void) {
    TEST_ASSERT_FALSE(email_parse_valid_iso_date(NULL));
 }
 
+
+/* =============================================================================
+ * email_imap_select_newest_uids
+ * ============================================================================= */
+
+static void test_select_uids_ascending(void) {
+   uint32_t out[3];
+   int total = -1;
+   int n = email_imap_select_newest_uids("* SEARCH 1 2 3 4 5\r\nA1 OK done\r\n", out, 3, &total);
+   TEST_ASSERT_EQUAL_INT(3, n);
+   TEST_ASSERT_EQUAL_INT(5, total);
+   TEST_ASSERT_EQUAL_UINT32(3, out[0]);
+   TEST_ASSERT_EQUAL_UINT32(4, out[1]);
+   TEST_ASSERT_EQUAL_UINT32(5, out[2]);
+}
+
+static void test_select_uids_descending_and_shuffled(void) {
+   uint32_t out[3];
+   int total = 0;
+   int n = email_imap_select_newest_uids("* SEARCH 50 40 30 20 10\r\n", out, 3, &total);
+   TEST_ASSERT_EQUAL_INT(3, n);
+   TEST_ASSERT_EQUAL_UINT32(30, out[0]);
+   TEST_ASSERT_EQUAL_UINT32(50, out[2]);
+
+   n = email_imap_select_newest_uids("* SEARCH 7 99 3 42 8 100 1\r\n", out, 3, &total);
+   TEST_ASSERT_EQUAL_INT(7, total);
+   TEST_ASSERT_EQUAL_UINT32(42, out[0]);
+   TEST_ASSERT_EQUAL_UINT32(99, out[1]);
+   TEST_ASSERT_EQUAL_UINT32(100, out[2]);
+   (void)n;
+}
+
+static void test_select_uids_split_lines_and_case(void) {
+   uint32_t out[4];
+   int total = 0;
+   int n = email_imap_select_newest_uids("* SEARCH 5 6\r\n* search 9 1\r\nA1 OK\r\n", out, 4,
+                                         &total);
+   TEST_ASSERT_EQUAL_INT(4, n);
+   TEST_ASSERT_EQUAL_INT(4, total);
+   TEST_ASSERT_EQUAL_UINT32(1, out[0]);
+   TEST_ASSERT_EQUAL_UINT32(9, out[3]);
+}
+
+static void test_select_uids_fewer_than_wanted_and_empty(void) {
+   uint32_t out[10];
+   int total = -1;
+   TEST_ASSERT_EQUAL_INT(2, email_imap_select_newest_uids("* SEARCH 8 3\r\n", out, 10, &total));
+   TEST_ASSERT_EQUAL_INT(2, total);
+   TEST_ASSERT_EQUAL_UINT32(3, out[0]);
+
+   TEST_ASSERT_EQUAL_INT(0,
+                         email_imap_select_newest_uids("* SEARCH\r\nA1 OK\r\n", out, 10, &total));
+   TEST_ASSERT_EQUAL_INT(0, total);
+   TEST_ASSERT_EQUAL_INT(0, email_imap_select_newest_uids(NULL, out, 10, &total));
+   TEST_ASSERT_EQUAL_INT(0, email_imap_select_newest_uids("A1 OK\r\n", out, 10, &total));
+}
+
+static void test_select_uids_skips_invalid_values(void) {
+   uint32_t out[5];
+   int total = 0;
+   int n = email_imap_select_newest_uids("* SEARCH 0 4294967296 7 4294967295\r\n", out, 5, &total);
+   TEST_ASSERT_EQUAL_INT(2, n);
+   TEST_ASSERT_EQUAL_INT(2, total);
+   TEST_ASSERT_EQUAL_UINT32(7, out[0]);
+   TEST_ASSERT_EQUAL_UINT32(4294967295u, out[1]);
+}
+
+static void test_select_uids_wanted_zero_still_counts(void) {
+   uint32_t out[1];
+   int total = 0;
+   TEST_ASSERT_EQUAL_INT(0, email_imap_select_newest_uids("* SEARCH 1 2 3\r\n", out, 0, &total));
+   TEST_ASSERT_EQUAL_INT(3, total);
+}
+
+/* =============================================================================
+ * IMAP page token format/parse
+ * ============================================================================= */
+
+static void test_page_token_round_trip(void) {
+   char tok[32];
+   uint32_t uid = 0, v = 99;
+   TEST_ASSERT_TRUE(email_imap_page_token_format(566060, 0, tok, sizeof(tok)));
+   TEST_ASSERT_EQUAL_STRING("u566060", tok);
+   TEST_ASSERT_TRUE(email_imap_page_token_parse(tok, &uid, &v));
+   TEST_ASSERT_EQUAL_UINT32(566060, uid);
+   TEST_ASSERT_EQUAL_UINT32(0, v);
+
+   TEST_ASSERT_TRUE(email_imap_page_token_format(4294967295u, 1199169964, tok, sizeof(tok)));
+   TEST_ASSERT_EQUAL_STRING("u4294967295.1199169964", tok);
+   TEST_ASSERT_TRUE(email_imap_page_token_parse(tok, &uid, &v));
+   TEST_ASSERT_EQUAL_UINT32(4294967295u, uid);
+   TEST_ASSERT_EQUAL_UINT32(1199169964, v);
+}
+
+static void test_page_token_format_rejects(void) {
+   char tok[8];
+   TEST_ASSERT_FALSE(email_imap_page_token_format(1, 0, tok, sizeof(tok)));
+   TEST_ASSERT_FALSE(email_imap_page_token_format(0, 0, tok, sizeof(tok)));
+   TEST_ASSERT_FALSE(email_imap_page_token_format(566060, 1199169964, tok, sizeof(tok)));
+   TEST_ASSERT_EQUAL_STRING("", tok);
+}
+
+static void test_page_token_parse_rejects(void) {
+   static const char *const bad[] = {
+      "",
+      "u",
+      "u0",
+      "u1",
+      "u01",
+      "u12x",
+      "12",
+      "u+5",
+      "u 5",
+      "u5.",
+      "u5.x",
+      "u5.0",
+      "u5.01",
+      "u99999999999",
+      "U5",
+      "u5 ",
+      "u4294967296",
+      "u5.1.2",
+      "u5.4294967296",
+      "CiAKGhIYc3BhbS10b2tlbg", /* Gmail-shaped */
+   };
+   uint32_t uid = 0, v = 0;
+   for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+      TEST_ASSERT_FALSE_MESSAGE(email_imap_page_token_parse(bad[i], &uid, &v), bad[i]);
+   }
+   TEST_ASSERT_FALSE(email_imap_page_token_parse(NULL, &uid, &v));
+}
+
+
+static void test_uidvalidity_line(void) {
+   uint32_t v = 0;
+   const char *ok = "* OK [UIDVALIDITY 1199169964] UIDs valid\r\n";
+   TEST_ASSERT_TRUE(email_imap_parse_uidvalidity(ok, strlen(ok), &v));
+   TEST_ASSERT_EQUAL_UINT32(1199169964u, v);
+   const char *lower = "* ok [uidvalidity 7]";
+   TEST_ASSERT_TRUE(email_imap_parse_uidvalidity(lower, strlen(lower), &v));
+   TEST_ASSERT_EQUAL_UINT32(7, v);
+
+   static const char *const bad[] = {
+      "* OK [UIDVALIDITY 0]",  "* OK [UIDVALIDITY ]",
+      "* OK [UIDVALIDITY 12",  "* OK [UIDVALIDITY 4294967296]",
+      "* OK [UIDNEXT 5]",      "* 3 FETCH (ENVELOPE (\"* OK [UIDVALIDITY 1]\"))",
+      " * OK [UIDVALIDITY 5]", "* OK [UIDVALIDITY 12345678901]",
+   };
+   for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+      v = 99;
+      TEST_ASSERT_FALSE_MESSAGE(email_imap_parse_uidvalidity(bad[i], strlen(bad[i]), &v), bad[i]);
+      TEST_ASSERT_EQUAL_UINT32(99, v);
+   }
+   /* length-bounded: the digits run off the end of the buffer */
+   TEST_ASSERT_FALSE(email_imap_parse_uidvalidity(ok, 20, &v));
+}
+
+
+static void test_select_uids_collapses_duplicates(void) {
+   uint32_t out[5];
+   int total = 0;
+   int n = email_imap_select_newest_uids("* SEARCH 4 9 9 4 7\r\n", out, 5, &total);
+   TEST_ASSERT_EQUAL_INT(3, n);
+   TEST_ASSERT_EQUAL_INT(3, total);
+   TEST_ASSERT_EQUAL_UINT32(4, out[0]);
+   TEST_ASSERT_EQUAL_UINT32(7, out[1]);
+   TEST_ASSERT_EQUAL_UINT32(9, out[2]);
+}
+
+
+static void test_exists_line(void) {
+   uint32_t v = 99;
+   const char *ok = "* 35820 EXISTS\r\n";
+   TEST_ASSERT_TRUE(email_imap_parse_exists(ok, strlen(ok), &v));
+   TEST_ASSERT_EQUAL_UINT32(35820, v);
+   TEST_ASSERT_TRUE(email_imap_parse_exists("* 0 exists", 10, &v));
+   TEST_ASSERT_EQUAL_UINT32(0, v);
+   static const char *const bad[] = {
+      "* EXISTS",
+      "* 12 EXIST",
+      "* 12 EXISTSX",
+      "* 12 RECENT",
+      " * 12 EXISTS",
+      "* 4294967296 EXISTS",
+      "* 3 FETCH (ENVELOPE (\"* 9 EXISTS\"))",
+      "*12 EXISTS",
+   };
+   for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+      v = 99;
+      TEST_ASSERT_FALSE_MESSAGE(email_imap_parse_exists(bad[i], strlen(bad[i]), &v), bad[i]);
+      TEST_ASSERT_EQUAL_UINT32(99, v);
+   }
+   /* length-bounded: the suffix runs off the end of the buffer */
+   TEST_ASSERT_FALSE(email_imap_parse_exists(ok, 10, &v));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_rfc822_utc);
@@ -679,5 +875,17 @@ int main(void) {
    RUN_TEST(test_iso_date_trailing_junk_rejected);
    RUN_TEST(test_iso_date_wrong_format_rejected);
    RUN_TEST(test_iso_date_empty_and_null);
+   RUN_TEST(test_select_uids_ascending);
+   RUN_TEST(test_select_uids_descending_and_shuffled);
+   RUN_TEST(test_select_uids_split_lines_and_case);
+   RUN_TEST(test_select_uids_fewer_than_wanted_and_empty);
+   RUN_TEST(test_select_uids_skips_invalid_values);
+   RUN_TEST(test_select_uids_wanted_zero_still_counts);
+   RUN_TEST(test_page_token_round_trip);
+   RUN_TEST(test_page_token_format_rejects);
+   RUN_TEST(test_page_token_parse_rejects);
+   RUN_TEST(test_uidvalidity_line);
+   RUN_TEST(test_select_uids_collapses_duplicates);
+   RUN_TEST(test_exists_line);
    return UNITY_END();
 }

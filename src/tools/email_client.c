@@ -116,6 +116,11 @@ static void setup_auth(CURL *curl, const email_conn_t *conn) {
    }
 }
 
+/* IMAP receive buffer: bounds the longest server line libcurl reads intact.
+ * ~2.8x a worst-case IMAP_SEARCH_WINDOW reply (every message matching, 10-digit
+ * UIDs: ~45 KB). */
+#define IMAP_RECV_BUFFER_SIZE (128 * 1024)
+
 static CURL *create_imap_handle(const email_conn_t *conn) {
    CURL *curl = curl_easy_init();
    if (!curl)
@@ -124,6 +129,12 @@ static CURL *create_imap_handle(const email_conn_t *conn) {
    curl_easy_setopt(curl, CURLOPT_TIMEOUT, EMAIL_IMAP_TIMEOUT_SEC);
    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, EMAIL_IMAP_CONNECT_TIMEOUT_SEC);
    curl_easy_setopt(curl, CURLOPT_VERBOSE, 0L);
+   /* libcurl's IMAP reader truncates any server response line longer than its
+    * receive buffer (see "Windowed UID SEARCH" below).  The 16 KB default is
+    * smaller than one full SEARCH window's reply can be, so size it well past it. */
+   if (curl_easy_setopt(curl, CURLOPT_BUFFERSIZE, (long)IMAP_RECV_BUFFER_SIZE) != CURLE_OK)
+      OLOG_ERROR("email: libcurl refused the IMAP receive buffer size; long SEARCH replies "
+                 "may be truncated");
    setup_auth(curl, conn);
 
    /* TLS certificate verification */
@@ -396,64 +407,88 @@ static char *extract_plain_body(const char *raw, int max_chars, bool *out_trunca
 }
 
 /* =============================================================================
- * Parse UID list from IMAP SEARCH response
+ * UID page selection (shared by recent + search)
  * ============================================================================= */
 
 /**
- * Parse the last N UIDs from an IMAP UID SEARCH response.
+ * Pick one page of UIDs from a UID SEARCH response: the @p wanted newest, listed
+ * newest-first in @p rev_uids for the FETCH command, and fill the paging cursor
+ * from the SEARCH selection itself — never from fetched rows, since a FETCH can
+ * drop a UID (expunged in between, unparseable envelope) and a row-derived cursor
+ * would then skip or repeat mail.
  *
- * UID SEARCH returns UIDs in ascending order (a plain SEARCH would return
- * sequence numbers — callers MUST issue UID SEARCH so these ids match the
- * subsequent UID FETCH). For "recent" email, we want the highest UIDs (newest
- * messages). This uses a circular buffer to capture only the last `wanted` UIDs
- * from arbitrarily large inboxes without excessive memory.
+ * NOTE: the FETCH *response* comes back in whatever order the server chooses
+ * (typically ascending), so the rows in out[] are NOT newest-first.  Callers that
+ * care about order sort by date or UID themselves.
  *
- * @param response  Raw IMAP UID SEARCH response
- * @param uids      Output array (must hold at least `wanted` elements)
- * @param wanted    Max UIDs to return (from the tail of the list)
- * @return Number of UIDs written to uids[], in ascending order
+ * @return number of UIDs written to @p rev_uids.
  */
-static int parse_tail_uids(const char *response, uint32_t *uids, int wanted) {
-   /* Guard against a server that returns no body (curl leaves buf.data NULL) and
-    * against a zero `wanted` (the `total % wanted` below would divide by zero). */
-   if (!response || wanted <= 0)
-      return 0;
-   const char *p = strstr(response, "* SEARCH");
-   if (!p)
-      return 0;
-   p += 8;
-
+static int select_uid_page(const char *response,
+                           int wanted,
+                           email_imap_page_t *page,
+                           uint32_t *rev_uids) {
+   uint32_t asc[EMAIL_MAX_FETCH_RESULTS];
+   if (wanted > EMAIL_MAX_FETCH_RESULTS)
+      wanted = EMAIL_MAX_FETCH_RESULTS;
    int total = 0;
-   while (*p) {
-      while (*p == ' ')
-         p++;
-      if (*p == '\r' || *p == '\n' || *p == '\0')
-         break;
-
-      char *end;
-      unsigned long uid = strtoul(p, &end, 10);
-      if (end == p)
-         break;
-
-      /* Circular buffer: overwrite oldest when full */
-      uids[total % wanted] = (uint32_t)uid;
-      total++;
-      p = end;
+   int n = email_imap_select_newest_uids(response, asc, wanted, &total);
+   for (int i = 0; i < n; i++)
+      rev_uids[i] = asc[n - 1 - i];
+   if (page) {
+      /* More (older) matches remain below the oldest UID on this page.  A cursor
+       * of 1 would mean "below UID 1" = nothing, so it is never issued. */
+      page->next_before_uid = (total > n && n > 0 && asc[0] > 1) ? asc[0] : 0;
    }
+   return n;
+}
 
-   if (total <= wanted) {
-      /* All fit — already in ascending order */
-      return total;
-   }
+/* Append " UID 1:<before-1>" so a continuation page only matches older mail.
+ * The UID search key is core RFC 3501; the sequence window (see
+ * imap_windowed_search) is what bounds the reply size. */
+static void append_uid_range(char *cmd, size_t *pos, size_t *rem, const email_imap_page_t *page) {
+   if (page && page->before_uid > 1)
+      BUF_PRINTF(cmd, *pos, *rem, " UID 1:%u", page->before_uid - 1);
+}
 
-   /* Rearrange circular buffer to sequential ascending order */
-   uint32_t tmp[EMAIL_MAX_FETCH_RESULTS];
-   int start = total % wanted;
-   for (int i = 0; i < wanted; i++) {
-      tmp[i] = uids[(start + i) % wanted];
-   }
-   memcpy(uids, tmp, wanted * sizeof(uint32_t));
-   return wanted;
+static void page_reset_outputs(email_imap_page_t *page) {
+   if (!page)
+      return;
+   page->next_before_uid = 0;
+   page->next_uidvalidity = 0;
+   page->stale = false;
+}
+
+/* A pinned continuation page failed: decide whether it's because the mailbox's
+ * UIDVALIDITY epoch changed (the cursor is stale) rather than some other SELECT
+ * failure such as a missing folder, which reports the same curl code.  Stale only
+ * when the server's SELECT reported an epoch AND it differs from the pinned one.
+ * @return true (and logs) when the cursor is stale. */
+static bool page_mark_stale(email_imap_page_t *page,
+                            CURLcode res,
+                            const email_instrument_ctx_t *dctx) {
+   if (!page || page->uidvalidity == 0 || page->before_uid <= 1 ||
+       res != CURLE_REMOTE_FILE_NOT_FOUND || dctx->uidvalidity == 0 ||
+       dctx->uidvalidity == page->uidvalidity)
+      return false;
+   OLOG_WARNING("email: IMAP paging cursor is stale (mailbox UIDVALIDITY %u, cursor %u)",
+                dctx->uidvalidity, page->uidvalidity);
+   page->stale = true;
+   return true;
+}
+
+/* Mailbox URL; a continuation page pins the UIDVALIDITY epoch its cursor came
+ * from, so libcurl fails the SELECT (CURLE_REMOTE_FILE_NOT_FOUND) instead of
+ * paging a rebuilt mailbox with stale UIDs. */
+static void build_mailbox_url(const email_conn_t *conn,
+                              const char *encoded_folder,
+                              const email_imap_page_t *page,
+                              char *url,
+                              size_t url_len) {
+   if (page && page->before_uid > 1 && page->uidvalidity > 0)
+      snprintf(url, url_len, "%s/%s;UIDVALIDITY=%u", conn->imap_url, encoded_folder,
+               page->uidvalidity);
+   else
+      snprintf(url, url_len, "%s/%s", conn->imap_url, encoded_folder);
 }
 
 /* =============================================================================
@@ -664,6 +699,320 @@ static void url_encode_folder(const char *folder, char *out, size_t out_len) {
 }
 
 /* =============================================================================
+ * Windowed UID SEARCH
+ *
+ * libcurl truncates any IMAP server response line longer than its internal
+ * buffer (curl known bug "IMAP SEARCH ALL truncated response", still open): it
+ * keeps the first 40 bytes and splices on the tail, silently dropping UIDs and
+ * gluing two partial numbers into a bogus one.  The limit is the handle's
+ * receive buffer (CURLOPT_BUFFERSIZE, 16 KB by default — ~2k UIDs), so a big
+ * mailbox breaks a single `UID SEARCH ALL` long before any response-size cap.
+ * create_imap_handle raises the buffer; windowing keeps every reply far below it.
+ *
+ * So a search never asks for more than IMAP_SEARCH_WINDOW messages at once: it
+ * walks down from the newest message in message-SEQUENCE-number windows
+ * ("UID SEARCH <criteria> <lo>:<hi>").  Sequence numbers are dense (1..EXISTS)
+ * and ascend in UID order, so a window of N returns at most N UIDs whatever the
+ * UID gaps, and the walk is bounded by the mailbox size.  The paging cursor
+ * stays a UID (" UID 1:<X-1>" AND'd onto every window), so it survives expunges.
+ * ============================================================================= */
+
+/* Messages per SEARCH window.  A reply grows with the number of MATCHES, so the
+ * worst case is every message matching at 10-digit UIDs: ~45 KB, still ~2.8x
+ * under IMAP_RECV_BUFFER_SIZE. */
+#define IMAP_SEARCH_WINDOW 4096u
+/* Windows per call before handing back a resume cursor (262k messages). */
+#define IMAP_SEARCH_MAX_WINDOWS 64
+/* Floor on a window's time slice, so a nearly spent budget still lets the first
+ * window run rather than failing instantly. */
+#define IMAP_MIN_WINDOW_MS 2000L
+
+/* One custom command on the already-configured handle, reply into @p buf
+ * (caller frees).  Uses the breaker-aware perform only for the op's first,
+ * auth-bearing command. */
+static CURLcode imap_run_command(CURL *curl,
+                                 email_instrument_ctx_t *dctx,
+                                 const email_conn_t *conn,
+                                 const char *op,
+                                 const char *cmd,
+                                 bool first,
+                                 curl_buffer_t *buf) {
+   curl_buffer_init_with_max(buf, EMAIL_MAX_RESPONSE_SIZE);
+   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
+   curl_easy_setopt(curl, CURLOPT_WRITEDATA, buf);
+   curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, cmd);
+   CURLcode res = first ? email_instrument_perform(curl, dctx, conn->username, op)
+                        : curl_easy_perform(curl);
+   if (res == CURLE_OK && buf->truncated) {
+      OLOG_ERROR("email: IMAP %s response exceeded %d byte cap; rejecting", op,
+                 EMAIL_MAX_RESPONSE_SIZE);
+      res = CURLE_FILESIZE_EXCEEDED;
+   }
+   return res;
+}
+
+/* Legacy single-shot search, used only when the server's SELECT reported no
+ * EXISTS count (RFC 3501 requires one) so windows can't be computed. */
+static int imap_search_unwindowed(CURL *curl,
+                                  email_instrument_ctx_t *dctx,
+                                  const email_conn_t *conn,
+                                  const char *op,
+                                  const char *criteria,
+                                  email_imap_page_t *page,
+                                  int wanted,
+                                  uint32_t *rev_uids,
+                                  int *rev_count,
+                                  CURLcode *res_out) {
+   char cmd[2176];
+   size_t pos = 0;
+   size_t rem = sizeof(cmd);
+   BUF_PRINTF(cmd, pos, rem, "UID SEARCH%s", criteria);
+   append_uid_range(cmd, &pos, &rem, page);
+   if (!criteria[0] && !(page && page->before_uid > 1))
+      BUF_PRINTF(cmd, pos, rem, " ALL");
+   if (rem <= 1) {
+      OLOG_ERROR("email: IMAP SEARCH command too long; refusing to send it truncated");
+      *res_out = CURLE_URL_MALFORMAT;
+      return 1;
+   }
+
+   curl_buffer_t buf;
+   CURLcode res = imap_run_command(curl, dctx, conn, op, cmd, false, &buf);
+   if (res != CURLE_OK) {
+      *res_out = res;
+      OLOG_ERROR("email: IMAP SEARCH failed: %s", curl_easy_strerror(res));
+      curl_buffer_free(&buf);
+      return 1;
+   }
+   /* Unwindowed, one reply can outgrow libcurl's line buffer and be silently
+    * spliced (see "Windowed UID SEARCH"); at least say when it's getting close. */
+   if (buf.size > IMAP_RECV_BUFFER_SIZE * 3 / 4)
+      OLOG_WARNING("email: unwindowed IMAP SEARCH reply is %zu bytes, near the %d-byte line "
+                   "limit; results may be incomplete",
+                   buf.size, IMAP_RECV_BUFFER_SIZE);
+   *rev_count = select_uid_page(buf.data, wanted, page, rev_uids);
+   curl_buffer_free(&buf);
+   return 0;
+}
+
+static long long monotonic_ms(void) {
+   struct timespec ts;
+   clock_gettime(CLOCK_MONOTONIC, &ts);
+   return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* Run a tiny lookup whose "* SEARCH" reply is at most one number (a UID or a
+ * sequence number).  @return true and sets @p out when one came back. */
+static bool imap_lookup_one(CURL *curl,
+                            email_instrument_ctx_t *dctx,
+                            const email_conn_t *conn,
+                            const char *op,
+                            const char *cmd,
+                            uint32_t *out) {
+   curl_buffer_t buf;
+   CURLcode res = imap_run_command(curl, dctx, conn, op, cmd, false, &buf);
+   uint32_t v[1];
+   int total = 0;
+   int n = (res == CURLE_OK) ? email_imap_select_newest_uids(buf.data, v, 1, &total) : 0;
+   curl_buffer_free(&buf);
+   if (n != 1 || total != 1)
+      return false;
+   *out = v[0];
+   return true;
+}
+
+/**
+ * Select the mailbox and find the @p wanted newest matching UIDs (newest first
+ * in @p rev_uids), filling the paging cursor in @p page.
+ *
+ * A continuation page starts its walk just below the cursor's own message
+ * (looked up by UID), not at the top of the mailbox.  The window walk shares one
+ * deadline of @p budget_sec (the SELECT before it and the header FETCH after it
+ * have their own timeouts).  If the deadline or the window cap would be exceeded
+ * with older messages still unscanned, the walk stops and the cursor resumes just
+ * below the lowest message actually scanned, so a partial page never looks like
+ * the end of the results.
+ *
+ * @param criteria  Search keys with a leading space each (" UNSEEN FROM \"x\""),
+ *                  or "" for all messages.
+ * @param res_out   Set to the failing CURLcode on error (for auth/timeout mapping).
+ * @return 0 on success, 1 on failure (page->stale set if the cursor's epoch changed).
+ */
+static int imap_windowed_search(CURL *curl,
+                                email_instrument_ctx_t *dctx,
+                                const email_conn_t *conn,
+                                const char *op,
+                                const char *criteria,
+                                email_imap_page_t *page,
+                                int wanted,
+                                long budget_sec,
+                                uint32_t *rev_uids,
+                                int *rev_count,
+                                CURLcode *res_out) {
+   *rev_count = 0;
+   *res_out = CURLE_OK;
+   if (wanted > EMAIL_MAX_FETCH_RESULTS)
+      wanted = EMAIL_MAX_FETCH_RESULTS;
+   const long long deadline_ms = monotonic_ms() + budget_sec * 1000;
+
+   /* NOOP makes libcurl log in and SELECT the mailbox; the SELECT response
+    * carries EXISTS + UIDVALIDITY, captured by the instrument's debug callback.
+    * A pinned cursor whose epoch changed fails right here. */
+   curl_buffer_t buf;
+   CURLcode res = imap_run_command(curl, dctx, conn, op, "NOOP", true, &buf);
+   curl_buffer_free(&buf);
+   if (res != CURLE_OK) {
+      *res_out = res;
+      if (!page_mark_stale(page, res, dctx))
+         OLOG_ERROR("email: IMAP SELECT failed: %s", curl_easy_strerror(res));
+      return 1;
+   }
+   if (page)
+      page->next_uidvalidity = dctx->uidvalidity;
+
+   if (!dctx->exists_seen) {
+      OLOG_WARNING("email: IMAP server sent no EXISTS count; searching unwindowed");
+      return imap_search_unwindowed(curl, dctx, conn, op, criteria, page, wanted, rev_uids,
+                                    rev_count, res_out);
+   }
+
+   char cmd[2176];
+   _Static_assert(sizeof(cmd) >= 2048 + 64, "window command must fit the criteria + bounds");
+   size_t pos;
+   size_t rem;
+
+   uint32_t seq_hi = dctx->exists;
+   if (page && page->before_uid > 1 && seq_hi > 0) {
+      /* Plain (non-UID) SEARCH answers with the sequence number.  Everything
+       * below the cursor's message has a lower UID, so start right under it.
+       * If it was expunged meanwhile, fall back to walking from the top. */
+      uint32_t seq = 0;
+      snprintf(cmd, sizeof(cmd), "SEARCH UID %u", page->before_uid);
+      if (imap_lookup_one(curl, dctx, conn, op, cmd, &seq) && seq >= 1 && seq <= seq_hi)
+         seq_hi = seq - 1;
+   }
+
+   /* 64-bit so a legitimate UID of UINT32_MAX still passes the ceiling check. */
+   uint64_t upper = (page && page->before_uid > 1) ? page->before_uid : (uint64_t)UINT32_MAX + 1;
+   bool more_below = false; /* a scanned window had more matches than we took */
+   bool stopped_early = false;
+   int windows = 0;
+   long long slowest_ms = 0;
+   uint32_t tmp[EMAIL_MAX_FETCH_RESULTS];
+
+   while (seq_hi >= 1 && *rev_count < wanted) {
+      long long left_ms = deadline_ms - monotonic_ms();
+      /* Stop BEFORE a window that likely won't finish in time (judged by the
+       * slowest one so far, plus a quarter), rather than letting curl kill it and
+       * lose the pages already scanned. */
+      if (windows > 0 && (windows == IMAP_SEARCH_MAX_WINDOWS || left_ms <= 0 ||
+                          left_ms < slowest_ms + slowest_ms / 4)) {
+         stopped_early = true;
+         break;
+      }
+      curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS,
+                       (long)(left_ms > IMAP_MIN_WINDOW_MS ? left_ms : IMAP_MIN_WINDOW_MS));
+      uint32_t seq_lo = seq_hi > IMAP_SEARCH_WINDOW ? seq_hi - IMAP_SEARCH_WINDOW + 1 : 1;
+
+      pos = 0;
+      rem = sizeof(cmd);
+      BUF_PRINTF(cmd, pos, rem, "UID SEARCH%s %u:%u", criteria, seq_lo, seq_hi);
+      append_uid_range(cmd, &pos, &rem, page);
+      if (rem <= 1) {
+         OLOG_ERROR("email: IMAP SEARCH command too long; refusing to send it truncated");
+         *res_out = CURLE_URL_MALFORMAT;
+         return 1;
+      }
+
+      long long window_start_ms = monotonic_ms();
+      res = imap_run_command(curl, dctx, conn, op, cmd, false, &buf);
+      if (res == CURLE_OPERATION_TIMEDOUT && windows > 0) {
+         /* Out of time mid-walk: keep what earlier windows found and hand back a
+          * resume cursor (this window counts as unscanned; seq_hi is unchanged). */
+         curl_buffer_free(&buf);
+         stopped_early = true;
+         break;
+      }
+      if (res != CURLE_OK) {
+         *res_out = res;
+         OLOG_ERROR("email: IMAP SEARCH failed: %s", curl_easy_strerror(res));
+         curl_buffer_free(&buf);
+         return 1;
+      }
+      long long took_ms = monotonic_ms() - window_start_ms;
+      if (took_ms > slowest_ms)
+         slowest_ms = took_ms;
+      int need = wanted - *rev_count;
+      int total = 0;
+      int n = email_imap_select_newest_uids(buf.data, tmp, need, &total);
+      curl_buffer_free(&buf);
+      windows++;
+
+      /* A window can't match more messages than it spans: anything else is a
+       * mangled reply, so fail rather than show the wrong mail. */
+      if ((uint32_t)total > seq_hi - seq_lo + 1) {
+         OLOG_ERROR("email: IMAP SEARCH window %u:%u returned more matches than it spans", seq_lo,
+                    seq_hi);
+         *res_out = CURLE_RECV_ERROR;
+         return 1;
+      }
+      /* Every UID must sit below the cursor and below what's already taken
+       * (sequence order is UID order).  A concurrent expunge by another client
+       * can renumber a message into this window a second time: drop it. */
+      uint64_t ceiling = *rev_count > 0 ? rev_uids[*rev_count - 1] : upper;
+      int keep = n;
+      while (keep > 0 && tmp[keep - 1] >= ceiling)
+         keep--;
+      if (keep < n)
+         OLOG_INFO("email: IMAP SEARCH window %u:%u: dropped %d already-seen UID(s)", seq_lo,
+                   seq_hi, n - keep);
+      for (int i = keep - 1; i >= 0; i--)
+         rev_uids[(*rev_count)++] = tmp[i];
+
+      if (total > n) {
+         more_below = true; /* this window alone had more than we needed */
+         break;
+      }
+      seq_hi = seq_lo - 1;
+   }
+   /* Leave the handle's own timeout for the header FETCH that follows. */
+   curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 0L);
+   curl_easy_setopt(curl, CURLOPT_TIMEOUT, budget_sec);
+
+   if (!page)
+      return 0;
+   uint32_t oldest = *rev_count > 0 ? rev_uids[*rev_count - 1] : 0;
+   uint32_t next = 0;
+   if (more_below) {
+      next = oldest;
+   } else if (stopped_early && seq_hi >= 1) {
+      /* Resume just below the lowest message scanned (sequence seq_hi + 1). */
+      uint32_t uid_at = 0;
+      snprintf(cmd, sizeof(cmd), "UID SEARCH %u", seq_hi + 1);
+      if (imap_lookup_one(curl, dctx, conn, op, cmd, &uid_at)) {
+         next = uid_at;
+      } else if (*rev_count > 0) {
+         next = oldest; /* safe: at worst rescans a little */
+      } else {
+         /* No rows and no way to resume: an empty page without a cursor would
+          * read as "no such mail", so report the search as failed instead. */
+         OLOG_ERROR("email: IMAP search stopped early and could not resume");
+         *res_out = CURLE_OPERATION_TIMEDOUT;
+         return 1;
+      }
+      if (page->before_uid > 1 && next >= page->before_uid)
+         OLOG_WARNING("email: IMAP resume cursor %u is not below the previous cursor %u; some "
+                      "mail may be shown again",
+                      next, page->before_uid);
+      OLOG_INFO("email: IMAP search stopped after %d window(s); older mail remains", windows);
+   } else if (*rev_count >= wanted && seq_hi >= 1) {
+      next = oldest; /* filled up; unscanned older messages remain (may not match) */
+   }
+   page->next_before_uid = next > 1 ? next : 0;
+   return 0;
+}
+
+/* =============================================================================
  * Public API: Fetch Recent
  * ============================================================================= */
 
@@ -671,17 +1020,19 @@ int email_fetch_recent(const email_conn_t *conn,
                        const char *folder,
                        int count,
                        bool unread_only,
+                       email_imap_page_t *page,
                        email_summary_t *out,
                        int max_out,
                        int *out_count) {
    *out_count = 0;
+   page_reset_outputs(page);
 
    if (count > max_out)
       count = max_out;
    if (count > EMAIL_MAX_FETCH_RESULTS)
       count = EMAIL_MAX_FETCH_RESULTS;
    if (count <= 0)
-      count = 10;
+      count = EMAIL_MAX_RECENT_DEFAULT;
 
    if (!folder || !folder[0])
       folder = "INBOX";
@@ -696,53 +1047,25 @@ int email_fetch_recent(const email_conn_t *conn,
    email_instrument_ctx_t dctx;
    email_instrument_attach(curl, &dctx);
 
-   /* Step 1: SEARCH for UIDs, optionally unread only */
    char url[1024];
-   snprintf(url, sizeof(url), "%s/%s", conn->imap_url, encoded_folder);
+   build_mailbox_url(conn, encoded_folder, page, url, sizeof(url));
    curl_easy_setopt(curl, CURLOPT_URL, url);
 
-   /* UID SEARCH (not plain SEARCH): the results are fed to UID FETCH below, so
-    * both must speak UIDs.  Plain SEARCH returns message SEQUENCE numbers, which
-    * only coincide with UIDs in a mailbox that has never had a message expunged
-    * — on any established mailbox the two diverge and UID-FETCHing sequence
-    * numbers returns nothing ("No recent emails found"). */
-   char search_cmd[128];
-   snprintf(search_cmd, sizeof(search_cmd), "UID SEARCH %s", unread_only ? "UNSEEN" : "ALL");
-   curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, search_cmd);
-
-   curl_buffer_t buf;
-   curl_buffer_init_with_max(&buf, EMAIL_MAX_RESPONSE_SIZE);
-   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
-   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
-
-   CURLcode res = email_instrument_perform(curl, &dctx, conn->username, "recent");
-   if (res != CURLE_OK) {
-      OLOG_ERROR("email: IMAP SEARCH failed: %s", curl_easy_strerror(res));
-      email_instrument_op_done(conn->username, "recent", curl, &dctx);
-      curl_buffer_free(&buf);
-      curl_easy_cleanup(curl);
-      return 1;
-   }
-   if (buf.truncated) {
-      OLOG_ERROR("email: IMAP SEARCH response exceeded %d byte cap; rejecting",
-                 EMAIL_MAX_RESPONSE_SIZE);
-      email_instrument_op_done(conn->username, "recent", curl, &dctx);
-      curl_buffer_free(&buf);
-      curl_easy_cleanup(curl);
-      return 1;
-   }
-
-   /* Parse last N UIDs (highest = newest) from SEARCH response */
-   uint32_t tail_uids[EMAIL_MAX_FETCH_RESULTS];
-   int total = parse_tail_uids(buf.data, tail_uids, count);
-   curl_buffer_free(&buf);
-
-   /* Step 2: Batch-fetch headers (single round trip) in reverse order (newest first) */
+   /* Step 1: the newest `count` matching UIDs, via windowed UID SEARCH.  UID
+    * SEARCH (not plain SEARCH) so the ids feed the UID FETCH below: plain SEARCH
+    * returns sequence numbers, which diverge from UIDs once anything has been
+    * expunged. */
    uint32_t rev_uids[EMAIL_MAX_FETCH_RESULTS];
    int rev_count = 0;
-   for (int i = total - 1; i >= 0 && rev_count < max_out; i--)
-      rev_uids[rev_count++] = tail_uids[i];
+   CURLcode res = CURLE_OK;
+   if (imap_windowed_search(curl, &dctx, conn, "recent", unread_only ? " UNSEEN" : "", page, count,
+                            EMAIL_IMAP_TIMEOUT_SEC, rev_uids, &rev_count, &res) != 0) {
+      email_instrument_op_done(conn->username, "recent", curl, &dctx);
+      curl_easy_cleanup(curl);
+      return 1;
+   }
 
+   /* Step 2: batch-fetch headers (single round trip) */
    int fetch_rc = batch_fetch_headers(curl, conn, encoded_folder, rev_uids, rev_count, out, max_out,
                                       out_count);
 
@@ -883,6 +1206,7 @@ int email_read_message(const email_conn_t *conn,
 int email_search(const email_conn_t *conn,
                  const char *folder,
                  const email_search_params_t *params,
+                 email_imap_page_t *page,
                  email_summary_t *out,
                  int max_out,
                  int *out_count,
@@ -893,6 +1217,7 @@ int email_search(const email_conn_t *conn,
       *auth_denied = false;
    if (timed_out)
       *timed_out = false;
+   page_reset_outputs(page);
 
    if (max_out > EMAIL_MAX_FETCH_RESULTS)
       max_out = EMAIL_MAX_FETCH_RESULTS;
@@ -911,19 +1236,17 @@ int email_search(const email_conn_t *conn,
    email_instrument_attach(curl, &dctx);
 
    /* Content SEARCH (TEXT/BODY) can brute-force-scan the whole mailbox on a
-    * server without an FTS index — give it a larger total budget than the cheap
-    * ops' default (see EMAIL_IMAP_SEARCH_TIMEOUT_SEC). */
+    * server without an FTS index — give it a larger budget than the cheap ops'
+    * default (see EMAIL_IMAP_SEARCH_TIMEOUT_SEC).  imap_windowed_search spreads
+    * this one budget across all of its windows. */
    curl_easy_setopt(curl, CURLOPT_TIMEOUT, EMAIL_IMAP_SEARCH_TIMEOUT_SEC);
 
-   /* Build IMAP UID SEARCH command; user-provided values go through
-    * append_imap_search_key (quoted + sanitized).  UID SEARCH (not plain SEARCH)
-    * so the returned ids are UIDs, matching the UID FETCH that consumes them —
-    * see the note in email_fetch_recent. */
-   char search_cmd[2048];
+   /* Search keys; user-provided values go through email_imap_append_search_key
+    * (quoted + sanitized).  The windowed search adds the "UID SEARCH" prefix,
+    * the sequence window and the paging bound. */
+   char search_cmd[2048] = "";
    size_t spos = 0;
    size_t srem = sizeof(search_cmd);
-   BUF_PRINTF(search_cmd, spos, srem, "UID SEARCH");
-   size_t base_len = spos; /* length with no criteria yet — used for the ALL fallback */
 
    if (params->unread_only) {
       BUF_PRINTF(search_cmd, spos, srem, " UNSEEN");
@@ -946,54 +1269,30 @@ int email_search(const email_conn_t *conn,
       }
    }
 
-   /* Need at least one search key.  Keyed on whether any criterion was actually
-    * emitted (not on raw param presence), so a term that reduced to empty after
-    * sanitization or a date that failed validation still falls back to ALL
-    * rather than sending a bare, invalid "UID SEARCH". */
-   if (spos == base_len) {
-      BUF_PRINTF(search_cmd, spos, srem, " ALL");
-   }
-
    char url[1024];
-   snprintf(url, sizeof(url), "%s/%s", conn->imap_url, encoded_folder);
+   build_mailbox_url(conn, encoded_folder, page, url, sizeof(url));
    curl_easy_setopt(curl, CURLOPT_URL, url);
-   curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, search_cmd);
 
-   curl_buffer_t buf;
-   curl_buffer_init_with_max(&buf, EMAIL_MAX_RESPONSE_SIZE);
-   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
-   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
-
-   CURLcode res = email_instrument_perform(curl, &dctx, conn->username, "search");
-   if (res != CURLE_OK) {
-      OLOG_ERROR("email: IMAP SEARCH failed: %s", curl_easy_strerror(res));
+   /* The newest max_out matches, newest first, plus the cursor */
+   uint32_t rev_uids[EMAIL_MAX_FETCH_RESULTS];
+   int rev_count = 0;
+   CURLcode res = CURLE_OK;
+   if (spos >= sizeof(search_cmd) - 1) {
+      OLOG_ERROR("email: IMAP search criteria too long; refusing to send them truncated");
+      email_instrument_op_done(conn->username, "search", curl, &dctx);
+      curl_easy_cleanup(curl);
+      return 1;
+   }
+   if (imap_windowed_search(curl, &dctx, conn, "search", search_cmd, page, max_out,
+                            EMAIL_IMAP_SEARCH_TIMEOUT_SEC, rev_uids, &rev_count, &res) != 0) {
       if (auth_denied && res == CURLE_LOGIN_DENIED)
          *auth_denied = true;
       if (timed_out && res == CURLE_OPERATION_TIMEDOUT)
          *timed_out = true;
       email_instrument_op_done(conn->username, "search", curl, &dctx);
-      curl_buffer_free(&buf);
       curl_easy_cleanup(curl);
       return 1;
    }
-   if (buf.truncated) {
-      OLOG_ERROR("email: IMAP SEARCH response exceeded %d byte cap; rejecting",
-                 EMAIL_MAX_RESPONSE_SIZE);
-      email_instrument_op_done(conn->username, "search", curl, &dctx);
-      curl_buffer_free(&buf);
-      curl_easy_cleanup(curl);
-      return 1;
-   }
-
-   uint32_t tail_uids[EMAIL_MAX_FETCH_RESULTS];
-   int total = parse_tail_uids(buf.data, tail_uids, max_out);
-   curl_buffer_free(&buf);
-
-   /* Batch-fetch headers (single round trip) in reverse order (newest first) */
-   uint32_t rev_uids[EMAIL_MAX_FETCH_RESULTS];
-   int rev_count = 0;
-   for (int i = total - 1; i >= 0 && rev_count < max_out; i--)
-      rev_uids[rev_count++] = tail_uids[i];
 
    int fetch_rc = batch_fetch_headers(curl, conn, encoded_folder, rev_uids, rev_count, out, max_out,
                                       out_count);

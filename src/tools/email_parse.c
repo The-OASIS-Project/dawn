@@ -294,9 +294,11 @@ void email_imap_append_quoted(char *buf, size_t *off, size_t *rem, const char *v
          BUF_PRINTF(buf, *off, *rem, "%%25");
          continue;
       }
-      /* Emit the escaping backslash (for " and \) and the char in ONE append so a
-       * buffer-boundary truncation can never leave a lone trailing backslash that
-       * would escape the closing quote. */
+      /* Emit the escaping backslash (for " and \) and the char in one append.  NOTE:
+       * this does not make truncation safe — BUF_PRINTF keeps snprintf's partial
+       * output, so a nearly full buffer can still end in a lone backslash (or a cut
+       * "%25").  Callers size the buffer for the worst case and refuse to send a
+       * command that filled it (see email_search / imap_windowed_search). */
       BUF_PRINTF(buf, *off, *rem, (c == '"' || c == '\\') ? "\\%c" : "%c", (char)c);
    }
    BUF_PRINTF(buf, *off, *rem, "\"");
@@ -597,4 +599,227 @@ const char *email_imap_next_fetch(const char *p,
       return resume;
    }
    return NULL;
+}
+
+/* =============================================================================
+ * IMAP UID selection + paging cursor (pure; unit-tested in test_email_parse.c)
+ * ============================================================================= */
+
+/* Restore the min-heap property below index i (heap[0] is the smallest kept UID). */
+static void uid_heap_sift_down(uint32_t *heap, int n, int i) {
+   for (;;) {
+      int smallest = i;
+      int l = 2 * i + 1;
+      int r = l + 1;
+      if (l < n && heap[l] < heap[smallest])
+         smallest = l;
+      if (r < n && heap[r] < heap[smallest])
+         smallest = r;
+      if (smallest == i)
+         return;
+      uint32_t t = heap[i];
+      heap[i] = heap[smallest];
+      heap[smallest] = t;
+      i = smallest;
+   }
+}
+
+static void uid_heap_sift_up(uint32_t *heap, int i) {
+   while (i > 0) {
+      int parent = (i - 1) / 2;
+      if (heap[parent] <= heap[i])
+         return;
+      uint32_t t = heap[i];
+      heap[i] = heap[parent];
+      heap[parent] = t;
+      i = parent;
+   }
+}
+
+static int cmp_uid_asc(const void *a, const void *b) {
+   uint32_t x = *(const uint32_t *)a;
+   uint32_t y = *(const uint32_t *)b;
+   return (x > y) - (x < y);
+}
+
+/* Case-insensitive "* SEARCH" at the start of a line. */
+static bool line_is_search(const char *line) {
+   static const char kSearch[] = "* SEARCH";
+   for (size_t i = 0; i < sizeof(kSearch) - 1; i++) {
+      if (toupper((unsigned char)line[i]) != kSearch[i])
+         return false;
+   }
+   return true;
+}
+
+int email_imap_select_newest_uids(const char *response, uint32_t *out, int wanted, int *total_out) {
+   int total = 0;
+   int n = 0;
+   if (total_out)
+      *total_out = 0;
+   if (!response || !out)
+      return 0;
+
+   const char *line = response;
+   while (*line) {
+      const char *eol = line;
+      while (*eol && *eol != '\r' && *eol != '\n')
+         eol++;
+
+      if (line_is_search(line)) {
+         const char *p = line + 8;
+         while (p < eol) {
+            while (p < eol && *p == ' ')
+               p++;
+            if (p >= eol || !isdigit((unsigned char)*p))
+               break; /* end of the number list (or a trailing non-numeric token) */
+            uint64_t v = 0;
+            bool overflow = false;
+            while (p < eol && isdigit((unsigned char)*p)) {
+               v = v * 10 + (uint64_t)(*p - '0');
+               if (v > UINT32_MAX)
+                  overflow = true;
+               p++;
+            }
+            if (overflow || v == 0)
+               continue; /* not a valid UID; skip, don't count */
+            total++;
+            if (wanted <= 0)
+               continue;
+            if (n < wanted) {
+               out[n] = (uint32_t)v;
+               uid_heap_sift_up(out, n);
+               n++;
+            } else if ((uint32_t)v > out[0]) {
+               out[0] = (uint32_t)v;
+               uid_heap_sift_down(out, n, 0);
+            }
+         }
+      }
+
+      line = eol;
+      while (*line == '\r' || *line == '\n')
+         line++;
+   }
+
+   if (n > 1)
+      qsort(out, (size_t)n, sizeof(*out), cmp_uid_asc);
+   /* A buggy or hostile server may repeat UIDs; FETCHing one twice would show the
+    * message twice, so collapse duplicates (the list is sorted). */
+   int w = 0;
+   for (int i = 0; i < n; i++) {
+      if (w == 0 || out[i] != out[w - 1])
+         out[w++] = out[i];
+   }
+   total -= n - w; /* repeats aren't more mail; don't let them imply another page */
+   n = w;
+   if (total_out)
+      *total_out = total;
+   return n;
+}
+
+bool email_imap_page_token_format(uint32_t before_uid,
+                                  uint32_t uidvalidity,
+                                  char *out,
+                                  size_t out_len) {
+   if (!out || out_len == 0 || before_uid < 2)
+      return false;
+   int w = uidvalidity ? snprintf(out, out_len, "u%u.%u", before_uid, uidvalidity)
+                       : snprintf(out, out_len, "u%u", before_uid);
+   if (w < 0 || (size_t)w >= out_len) {
+      out[0] = '\0';
+      return false;
+   }
+   return true;
+}
+
+/* Parse 1-10 digits with no leading zero into a uint32; advances *pp. */
+static bool parse_u32_strict(const char **pp, uint32_t *out) {
+   const char *p = *pp;
+   if (!isdigit((unsigned char)*p) || *p == '0')
+      return false;
+   uint64_t v = 0;
+   int digits = 0;
+   while (isdigit((unsigned char)*p)) {
+      if (++digits > 10)
+         return false;
+      v = v * 10 + (uint64_t)(*p - '0');
+      p++;
+   }
+   if (v > UINT32_MAX)
+      return false;
+   *out = (uint32_t)v;
+   *pp = p;
+   return true;
+}
+
+bool email_imap_page_token_parse(const char *tok, uint32_t *before_uid, uint32_t *uidvalidity) {
+   if (!tok || tok[0] != 'u' || !before_uid || !uidvalidity)
+      return false;
+   const char *p = tok + 1;
+   uint32_t uid = 0;
+   uint32_t v = 0;
+   if (!parse_u32_strict(&p, &uid) || uid < 2)
+      return false;
+   if (*p == '.') {
+      p++;
+      if (!parse_u32_strict(&p, &v))
+         return false;
+   }
+   if (*p != '\0')
+      return false;
+   *before_uid = uid;
+   *uidvalidity = v;
+   return true;
+}
+
+bool email_imap_parse_uidvalidity(const char *line, size_t len, uint32_t *out) {
+   static const char kPrefix[] = "* OK [UIDVALIDITY ";
+   const size_t plen = sizeof(kPrefix) - 1;
+   if (!line || !out || len <= plen)
+      return false;
+   for (size_t i = 0; i < plen; i++) {
+      if (toupper((unsigned char)line[i]) != kPrefix[i])
+         return false;
+   }
+   size_t i = plen;
+   uint64_t v = 0;
+   int digits = 0;
+   while (i < len && isdigit((unsigned char)line[i])) {
+      if (++digits > 10)
+         return false;
+      v = v * 10 + (uint64_t)(line[i] - '0');
+      i++;
+   }
+   if (digits == 0 || v == 0 || v > UINT32_MAX || i >= len || line[i] != ']')
+      return false;
+   *out = (uint32_t)v;
+   return true;
+}
+
+bool email_imap_parse_exists(const char *line, size_t len, uint32_t *out) {
+   static const char kSuffix[] = " EXISTS";
+   const size_t slen = sizeof(kSuffix) - 1;
+   if (!line || !out || len < 3 || line[0] != '*' || line[1] != ' ')
+      return false;
+   size_t i = 2;
+   uint64_t v = 0;
+   int digits = 0;
+   while (i < len && isdigit((unsigned char)line[i])) {
+      if (++digits > 10)
+         return false;
+      v = v * 10 + (uint64_t)(line[i] - '0');
+      i++;
+   }
+   if (digits == 0 || v > UINT32_MAX || len - i < slen)
+      return false;
+   for (size_t k = 0; k < slen; k++) {
+      if (toupper((unsigned char)line[i + k]) != kSuffix[k])
+         return false;
+   }
+   i += slen;
+   if (i < len && line[i] != '\r' && line[i] != '\n')
+      return false;
+   *out = (uint32_t)v;
+   return true;
 }

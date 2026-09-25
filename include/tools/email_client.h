@@ -40,15 +40,30 @@ typedef struct {
 } email_conn_t;
 
 /**
+ * IMAP paging cursor.  UIDs only grow within one UIDVALIDITY epoch, so "the next
+ * page" is "matches with a UID below the oldest one already returned".
+ */
+typedef struct {
+   uint32_t before_uid;       /* in:  only match UIDs below this (0 = first page) */
+   uint32_t uidvalidity;      /* in:  epoch the cursor was issued under (0 = don't assert) */
+   uint32_t next_before_uid;  /* out: cursor for the next page (0 = no more matches) */
+   uint32_t next_uidvalidity; /* out: epoch observed on this call (0 = not reported);
+                               * captured by email_instrument's debug callback */
+   bool stale;                /* out: the pinned epoch no longer matches the mailbox */
+} email_imap_page_t;
+
+/**
  * @brief Fetch recent emails from an IMAP folder, sorted newest-first.
  * @param folder       IMAP folder name (e.g. "INBOX", "[Gmail]/Sent Mail")
  * @param unread_only  If true, only fetch unread (UNSEEN) emails
- * @return 0 on success, 1 on failure
+ * @param page         Optional paging cursor (NULL = first page, no cursor out)
+ * @return 0 on success, 1 on failure (page->stale set when the cursor's epoch changed)
  */
 int email_fetch_recent(const email_conn_t *conn,
                        const char *folder,
                        int count,
                        bool unread_only,
+                       email_imap_page_t *page,
                        email_summary_t *out,
                        int max_out,
                        int *out_count);
@@ -79,6 +94,7 @@ int email_read_message(const email_conn_t *conn,
 int email_search(const email_conn_t *conn,
                  const char *folder,
                  const email_search_params_t *params,
+                 email_imap_page_t *page,
                  email_summary_t *out,
                  int max_out,
                  int *out_count,

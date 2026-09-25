@@ -81,6 +81,7 @@ typedef struct {
 #define EMAIL_RC_INVALID_FOLDER 12  /* folder name failed validation */
 #define EMAIL_RC_NOT_FOUND 13       /* message id not found in the mailbox (stale/wrong/deleted) */
 #define EMAIL_RC_TIMEOUT 14 /* op timed out (large mailbox / slow server); hint to bound it */
+#define EMAIL_RC_INVALID_PAGE_TOKEN 15 /* page_token malformed, from another account, or stale */
 
 /* Two-step action codes (compose/send + trash prep/confirm; archive shares the
  * account-resolution set).  0/1 reuse EMAIL_RC_OK / EMAIL_RC_FAILURE above, and
@@ -183,6 +184,17 @@ bool email_service_is_gmail_account(const email_account_t *acct);
  * account label, or stamp account_name itself.
  * ============================================================================= */
 
+/**
+ * @brief Newest-first messages from one account's folder.
+ * @param count            Rows wanted; <= 0 uses the account's max_recent setting.
+ * @param page_token       Continuation cursor from a previous call's @p next_page_token
+ *                         (NULL/empty = first page).  Opaque and backend-specific: a Gmail
+ *                         token on an IMAP account (or a stale IMAP cursor) returns
+ *                         EMAIL_RC_INVALID_PAGE_TOKEN.
+ * @param next_page_token  Filled when more (older) messages remain; empty otherwise.
+ * @note @p page_token and @p next_page_token may be the same buffer (the input is
+ *       copied before the output is cleared).
+ */
 int email_service_recent(int user_id,
                          const char *account_name,
                          const char *folder,
@@ -208,6 +220,8 @@ int email_service_read(int user_id,
  *                  flagged distinctly) so the caller can tell the user results are
  *                  partial instead of the failure being silent. Empty when all
  *                  searched accounts were reached.
+ * @note Paging (params->page_token / next_page_token) applies to a single-account
+ *       search only; a multi-account search always returns the first page.
  */
 int email_service_search(int user_id,
                          const char *account_name,
