@@ -30,6 +30,10 @@ include_directories(${SRC_ROOT}/include)
 # Aggregate targets — populated by dawn_add_unit_test() below.
 add_custom_target(tests-ci  COMMENT "Building CI-safe unit tests")
 add_custom_target(tests-all COMMENT "Building all tests")
+# Benchmark drivers (NO_TEST).  Not part of tests-ci because GitHub CI lacks
+# onnxruntime; the pre-commit hook builds this on the dev box so the benches
+# cannot silently stop compiling or linking.
+add_custom_target(benches COMMENT "Building benchmark drivers")
 # Backwards-compatibility alias for `make tests`.
 add_custom_target(tests DEPENDS tests-all)
 
@@ -57,7 +61,7 @@ add_custom_target(tests DEPENDS tests-all)
 # - Tests with no label are added to `tests-all` (and registered with ctest
 #   without a label).
 # - NO_TEST skips ctest registration entirely (e.g., bench_retrieval, which is
-#   driven by an external Python harness).
+#   driven by an external Python harness) and joins the `benches` aggregate.
 function(dawn_add_unit_test NAME)
    cmake_parse_arguments(T "NO_TEST" "LABEL" "SOURCES;LIBS;INCLUDES;DEFINES" ${ARGN})
 
@@ -80,6 +84,8 @@ function(dawn_add_unit_test NAME)
       elseif(T_LABEL STREQUAL "hardware")
          set_tests_properties(${NAME} PROPERTIES LABELS "hardware")
       endif()
+   else()
+      add_dependencies(benches ${NAME})
    endif()
    add_dependencies(tests-all ${NAME})
 endfunction()
@@ -469,9 +475,36 @@ dawn_add_unit_test(test_suit_service
    LIBS    dawn_common unity pthread m ${JSONC_LIBRARIES}
    LABEL   ci)
 
+dawn_add_unit_test(test_session_history
+   SOURCES test_session_history.c
+           ${SRC_ROOT}/src/core/session_history.c
+   DEFINES ENABLE_MULTI_CLIENT
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+dawn_add_unit_test(test_satellite_remap
+   SOURCES test_satellite_remap.c
+           ${SRC_ROOT}/src/webui/satellite_remap.c
+           ${SRC_ROOT}/src/core/turn_queue.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+dawn_add_unit_test(test_turn_queue
+   SOURCES test_turn_queue.c
+           ${SRC_ROOT}/src/core/turn_queue.c
+   LIBS    dawn_common unity pthread
+   LABEL   ci)
+
+dawn_add_unit_test(test_llm_context_merge
+   SOURCES test_llm_context_merge.c
+           ${SRC_ROOT}/src/llm/llm_context_merge.c
+   LIBS    unity ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 dawn_add_unit_test(test_memory_embeddings
    SOURCES test_memory_embeddings.c test_memory_embeddings_stub.c
            ${SRC_ROOT}/src/memory/memory_embeddings.c
+           ${SRC_ROOT}/src/memory/memory_embed_backfill.c
            ${SRC_ROOT}/src/core/time_query_parser.c
            ${SRC_ROOT}/src/core/embedding_engine.c
    LIBS    dawn_common unity sqlite3 pthread m
@@ -625,6 +658,7 @@ dawn_add_unit_test(test_document_chunker
 dawn_add_unit_test(test_document_db
    SOURCES test_document_db.c test_document_db_stub.c
            ${SRC_ROOT}/src/tools/document_db.c
+           ${SRC_ROOT}/src/tools/document_db_embeddings.c
            # v61: document_db.c now stems label/body for the FTS sync helpers and
            # runs the BM25 lexical search (build_match_expr + normalize).
            ${SRC_ROOT}/src/memory/memory_stem.c
@@ -638,6 +672,7 @@ dawn_add_unit_test(test_document_db
 dawn_add_unit_test(test_document_search_bm25
    SOURCES test_document_search_bm25.c
            ${SRC_ROOT}/src/tools/document_db.c
+           ${SRC_ROOT}/src/tools/document_db_embeddings.c
            ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer
    LABEL   ci)
@@ -850,6 +885,7 @@ dawn_add_unit_test(test_focus_probe
 dawn_add_unit_test(test_external_focus_adapters
    SOURCES test_external_focus_adapters.c test_external_focus_adapters_stub.c
            ${SRC_ROOT}/src/tools/document_focus_adapter.c
+           ${SRC_ROOT}/src/tools/document_embed_cache.c
            ${SRC_ROOT}/src/tools/calendar_focus_adapter.c
            ${SRC_ROOT}/src/tools/external_focus_adapters_init.c
            ${SRC_ROOT}/src/core/focus/focus_source.c
@@ -933,6 +969,7 @@ dawn_add_unit_test(test_strbuf
 dawn_add_unit_test(test_memory_provenance
    SOURCES test_memory_provenance.c test_memory_provenance_stub.c
            ${SRC_ROOT}/src/memory/memory_db.c
+           ${SRC_ROOT}/src/memory/memory_db_forget.c
            ${SRC_ROOT}/src/memory/memory_db_facts.c
            ${SRC_ROOT}/src/memory/memory_db_summaries.c
            ${SRC_ROOT}/src/memory/memory_db_prefs.c
@@ -1043,6 +1080,7 @@ dawn_add_unit_test(test_embed_recompute
 dawn_add_unit_test(test_embed_tokenizer
    SOURCES test_embed_tokenizer.c
            ${SRC_ROOT}/src/memory/memory_embed_tokenizer.c
+           ${SRC_ROOT}/src/memory/memory_embed_unicode.c
    LIBS    dawn_common unity pthread
    LABEL   ci)
 
@@ -1086,12 +1124,6 @@ dawn_add_unit_test(test_crypto_store
 dawn_add_unit_test(test_input_queue
    SOURCES test_input_queue.c
            ${SRC_ROOT}/src/input_queue.c
-   LIBS    dawn_common unity pthread
-   LABEL   ci)
-
-dawn_add_unit_test(test_pending_system_msg
-   SOURCES test_pending_system_msg.c
-           ${SRC_ROOT}/src/core/pending_system_msg.c
    LIBS    dawn_common unity pthread
    LABEL   ci)
 
@@ -1336,10 +1368,12 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/benchmarks/bench_retrieval_stub.c
            ${SRC_ROOT}/benchmarks/bench_memory_pipeline.c
            ${SRC_ROOT}/src/tools/document_db.c
+           ${SRC_ROOT}/src/tools/document_db_embeddings.c
            ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/core/time_query_parser.c
            ${SRC_ROOT}/src/core/embedding_engine.c
            ${SRC_ROOT}/src/memory/memory_embed_tokenizer.c
+           ${SRC_ROOT}/src/memory/memory_embed_unicode.c
            ${SRC_ROOT}/src/memory/memory_embed_onnx.c
            ${SRC_ROOT}/src/memory/memory_embed_ollama.c
            ${SRC_ROOT}/src/memory/memory_embed_openai.c
@@ -1360,7 +1394,9 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/memory/memory_graph_retrieval.c
            ${SRC_ROOT}/src/memory/memory_predicate_dedup.c
            ${SRC_ROOT}/src/memory/memory_embeddings.c
+           ${SRC_ROOT}/src/memory/memory_embed_backfill.c
            ${SRC_ROOT}/src/memory/memory_extraction.c
+           ${SRC_ROOT}/src/memory/memory_extraction_input.c
            ${SRC_ROOT}/src/memory/memory_note_guard.c
            ${SRC_ROOT}/src/memory/memory_fact_search.c
            ${SRC_ROOT}/src/core/memory_filter.c
@@ -1380,6 +1416,8 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_openai_responses.c
            ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
            ${SRC_ROOT}/src/llm/llm_context.c
+           ${SRC_ROOT}/src/llm/llm_context_merge.c
+           ${SRC_ROOT}/src/llm/llm_pricing.c
            ${SRC_ROOT}/src/llm/llm_command_parser.c
            ${SRC_ROOT}/src/llm/llm_tool_loop.c
            ${SRC_ROOT}/src/llm/sse_parser.c
@@ -1395,12 +1433,86 @@ dawn_add_unit_test(bench_retrieval
    LIBS    dawn_common sqlite3 pthread m onnxruntime ssl crypto stemmer
            ${CURL_LIBRARIES} ${JSONC_LIBRARIES})
 
+# The remember tool end to end (memory_callback.c on a real schema), linked like
+# the retrieval bench: where a remembered fact's source comes from, and the
+# refusal when a turn has more facts waiting than it can track.
+dawn_add_unit_test(test_memory_remember
+   SOURCES test_memory_remember.c
+           ${SRC_ROOT}/benchmarks/bench_retrieval_stub.c
+           ${SRC_ROOT}/src/tools/document_db.c
+           ${SRC_ROOT}/src/tools/document_db_embeddings.c
+           ${SRC_ROOT}/src/core/strbuf.c
+           ${SRC_ROOT}/src/core/time_query_parser.c
+           ${SRC_ROOT}/src/core/embedding_engine.c
+           ${SRC_ROOT}/src/memory/memory_embed_tokenizer.c
+           ${SRC_ROOT}/src/memory/memory_embed_unicode.c
+           ${SRC_ROOT}/src/memory/memory_embed_onnx.c
+           ${SRC_ROOT}/src/memory/memory_embed_ollama.c
+           ${SRC_ROOT}/src/memory/memory_embed_openai.c
+           # Memory-pipeline mode TUs (dormant unless --memory-pipeline is passed)
+           ${AUTH_DB_SOURCES}
+           ${SRC_ROOT}/src/memory/memory_callback.c
+           ${SRC_ROOT}/src/memory/contacts_db.c
+           ${SRC_ROOT}/src/memory/memory_db.c
+           ${SRC_ROOT}/src/memory/memory_db_facts.c
+           ${SRC_ROOT}/src/memory/memory_db_summaries.c
+           ${SRC_ROOT}/src/memory/memory_db_prefs.c
+           ${SRC_ROOT}/src/memory/memory_db_entities.c
+           ${SRC_ROOT}/src/memory/memory_db_relations.c
+           ${SRC_ROOT}/src/memory/memory_db_provenance.c
+           # memory_bm25.c + memory_stem.c arrive via AUTH_DB_SOURCES below.
+           ${SRC_ROOT}/src/memory/memory_source_dedup.c
+           ${SRC_ROOT}/src/memory/memory_score_floor.c
+           ${SRC_ROOT}/src/memory/memory_graph_retrieval.c
+           ${SRC_ROOT}/src/memory/memory_predicate_dedup.c
+           ${SRC_ROOT}/src/memory/memory_embeddings.c
+           ${SRC_ROOT}/src/memory/memory_embed_backfill.c
+           ${SRC_ROOT}/src/memory/memory_extraction.c
+           ${SRC_ROOT}/src/memory/memory_extraction_input.c
+           ${SRC_ROOT}/src/memory/memory_note_guard.c
+           ${SRC_ROOT}/src/memory/memory_fact_search.c
+           ${SRC_ROOT}/src/core/memory_filter.c
+           ${SRC_ROOT}/src/memory/memory_similarity.c
+           ${SRC_ROOT}/src/llm/llm_interface.c
+           ${SRC_ROOT}/src/llm/llm_local_provider.c
+           ${SRC_ROOT}/src/llm/llm_claude.c
+           ${SRC_ROOT}/src/llm/llm_claude_format.c
+           ${SRC_ROOT}/src/llm/llm_model_version.c
+           ${SRC_ROOT}/src/llm/llm_openai.c
+           ${SRC_ROOT}/src/llm/llm_openai_cache.c
+           ${SRC_ROOT}/src/llm/llm_openai_chat_completions.c
+           ${SRC_ROOT}/src/llm/llm_openai_history.c
+           ${SRC_ROOT}/src/llm/llm_streaming.c
+           ${SRC_ROOT}/src/llm/llm_tools.c
+           ${SRC_ROOT}/src/llm/llm_rate_limit.c
+           ${SRC_ROOT}/src/llm/llm_openai_responses.c
+           ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
+           ${SRC_ROOT}/src/llm/llm_context.c
+           ${SRC_ROOT}/src/llm/llm_context_merge.c
+           ${SRC_ROOT}/src/llm/llm_pricing.c
+           ${SRC_ROOT}/src/llm/llm_command_parser.c
+           ${SRC_ROOT}/src/llm/llm_tool_loop.c
+           ${SRC_ROOT}/src/llm/sse_parser.c
+           ${SRC_ROOT}/src/core/iso8601.c
+           ${SRC_ROOT}/src/core/ocp_helpers.c
+           ${SRC_ROOT}/src/tools/tool_registry.c
+           ${SRC_ROOT}/src/config/config_parser.c
+           ${SRC_ROOT}/src/config/config_defaults.c
+           ${SRC_ROOT}/src/config/config_validate.c
+           ${SRC_ROOT}/src/config/config_env.c
+           ${SRC_ROOT}/src/tools/toml.c
+   INCLUDES /usr/local/include/onnxruntime
+   LIBS    dawn_common sqlite3 pthread m onnxruntime ssl crypto stemmer
+           unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 dawn_add_unit_test(bench_contradiction
    NO_TEST
    SOURCES ${SRC_ROOT}/benchmarks/bench_contradiction.c
            ${SRC_ROOT}/benchmarks/bench_contradiction_stub.c
            ${SRC_ROOT}/src/core/embedding_engine.c
            ${SRC_ROOT}/src/memory/memory_embed_tokenizer.c
+           ${SRC_ROOT}/src/memory/memory_embed_unicode.c
            ${SRC_ROOT}/src/memory/memory_embed_onnx.c
            ${SRC_ROOT}/src/memory/memory_embed_ollama.c
            ${SRC_ROOT}/src/memory/memory_embed_openai.c

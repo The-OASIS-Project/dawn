@@ -330,6 +330,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->memory.conversation_idle_timeout_min =
        15;                                   /* Auto-save voice conversations after 15 min */
    config->memory.default_voice_user_id = 1; /* Assign to first user (admin) by default */
+   config->memory.fact_cache_mb = MEMORY_FACT_CACHE_MB_DEFAULT;
 
    /* Memory decay (Phase 5) */
    config->memory.decay_enabled = true;
@@ -442,10 +443,8 @@ void config_set_defaults(dawn_config_t *config) {
    config->memory.recovery_max_attempts = 2;
    config->memory.recovery_recurring_interval_seconds = 86400; /* daily */
 
-   /* Per-turn focus injection (Phase 1 of Dynamic Context Injection) —
-    * disabled by default until adapters land in 1c/1d and the
-    * prompt-builder integration ships in 1e.  Defaults match the design
-    * doc §"Phase 1 — Per-Turn Focus" TOML block. */
+   /* Per-turn focus injection: automatically adds relevant memory, document,
+    * calendar and email content to each turn.  Opt-in. */
    config->memory.focus_injection.enabled = false;
    /* Per-turn focus-block budget in BYTES (same unit as FOCUS_TEXT_MAX_BYTES).
     * 10240 ≈ two full document chunks plus several small fact/summary
@@ -459,6 +458,16 @@ void config_set_defaults(dawn_config_t *config) {
     * 1j fixtures get summary-relevant probes. */
    config->memory.focus_injection.top_k = 12;
    config->memory.focus_injection.min_score = 0.4f;
+   /* Calibrated 2026-09 on 1,330 real document chunks with 15 document questions and
+    * 15 everyday turns, on bge-small and MiniLM-L6: 0.48 injected no unrelated chunk
+    * on either model while keeping 9-11 of 15 relevant ones (the rest stay reachable
+    * through document_search).  A raw cosine floor does not transfer between models. */
+   config->memory.focus_injection.document_min_relevance = 0.48f;
+   /* Calibrated 2026-09 on 5,109 real facts: 0.34 kept all 15 targeted facts
+    * (lowest 0.35) while dropping the clearly unrelated ones everyday turns
+    * pulled in (arithmetic, jokes).  Personal facts legitimately relate to many
+    * requests, so this is a gentle trim, not a hard filter. */
+   config->memory.focus_injection.fact_min_relevance = 0.34f;
    config->memory.focus_injection.classifier_enabled = false;
    config->memory.focus_injection.summary_max_scan = MEMORY_SUMMARY_SEMANTIC_SCAN_CAP_DEFAULT;
    /* Phase 1j tuning (May 2026): w_imp 0.2 → 1.0, w_rec 0.3 → 0.15.

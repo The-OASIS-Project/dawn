@@ -39,6 +39,10 @@ dawn_config_t g_config;
 
 /* Stub: memory_db_delete_user_memories calls this after dropping rows.  Tests
  * never exercise that path but the symbol must resolve at link time. */
+void memory_embeddings_invalidate_cache_for_user(int user_id) {
+   (void)user_id;
+}
+
 void memory_embeddings_invalidate_all(void) {
 }
 

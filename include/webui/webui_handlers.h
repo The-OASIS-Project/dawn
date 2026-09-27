@@ -91,12 +91,14 @@ void handle_unlock_user(ws_connection_t *conn, struct json_object *payload);
  * @param preloaded_msgs Optional pre-fetched message array (json_object array
  *        with "role" and "content" fields per element). If NULL, messages are
  *        fetched from the DB. Caller retains ownership; not freed by this function.
- * @return Number of messages restored, or LWS_CLOSE_CONNECTION on error
+ * @param count_out [out] Messages restored (may be NULL)
+ * @return SUCCESS, or FAILURE (DB read failed; history untouched)
  */
 int webui_restore_conversation_context(ws_connection_t *conn,
                                        const conversation_t *conv,
                                        int64_t conv_id,
-                                       json_object *preloaded_msgs);
+                                       json_object *preloaded_msgs,
+                                       int *count_out);
 
 /* =============================================================================
  * History Handler Functions (defined in webui_history.c)
@@ -218,11 +220,30 @@ void handle_delete_conversation(ws_connection_t *conn, struct json_object *paylo
 void handle_rename_conversation(ws_connection_t *conn, struct json_object *payload);
 
 /**
- * @brief Set private mode for a conversation
+ * @brief Set private mode for a conversation (webui_conv_memory.c)
  *
- * Private conversations are excluded from memory extraction.
+ * Private conversations (and their continuations) are excluded from memory
+ * extraction.  Going private also sends a `conversation_learned` frame, once any
+ * in-flight extraction has finished, with what was already learned.
  */
 void handle_set_private(ws_connection_t *conn, struct json_object *payload);
+
+/**
+ * @brief Count again what was learned from a private conversation
+ *        (webui_conv_memory.c)
+ *
+ * For a client told the count was busy (conversation_learned with busy set).
+ * Answers with conversation_learned.
+ */
+void handle_conversation_learned_request(ws_connection_t *conn, struct json_object *payload);
+
+/**
+ * @brief Forget every memory learned from a conversation and its continuations
+ *        (webui_conv_memory.c; offered after it is marked private)
+ *
+ * Runs on a worker; answers with forget_conversation_memories_response.
+ */
+void handle_forget_conversation_memories(ws_connection_t *conn, struct json_object *payload);
 
 /**
  * @brief Pin or unpin a conversation

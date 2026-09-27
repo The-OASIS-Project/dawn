@@ -36,9 +36,22 @@
 // For local microphone interface - includes all commands (HUD, helmet, general)
 const char *get_local_command_prompt(void);
 
+/**
+ * @brief A private copy of the local command prompt (caller frees)
+ *
+ * For a caller that uses the prompt later, not right away: the shared buffer
+ * get_local_command_prompt() returns is rewritten when the prompt is rebuilt.
+ * NULL on allocation failure.
+ */
+char *get_local_command_prompt_dup(void);
+
 // Function to build remote command prompt (excludes local-only topics: hud, helmet)
 // For network satellite clients (DAP/DAP2) - includes general commands like date, time
 const char *get_remote_command_prompt(void);
+
+/** A private copy of the remote command prompt (caller frees; NULL on OOM); see
+ * get_local_command_prompt_dup(). */
+char *get_remote_command_prompt_dup(void);
 
 /**
  * @brief Builds dynamic system instructions based on enabled features

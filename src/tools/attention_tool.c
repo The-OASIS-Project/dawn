@@ -634,8 +634,8 @@ static char *attention_tool_callback(const char *action, char *value, int *shoul
    }
 
    /* Fail closed for MUTATIONS from a caller with no session context — an
-    * unauthenticated MQTT publish would otherwise mutate as user 1
-    * (tool_get_current_user_id() defaults to 1 with no session).  Reads (list) are
+    * unauthenticated MQTT publish would otherwise mutate as the default voice
+    * user (tool_get_current_user_id() with no session).  Reads (list) are
     * user-scoped + harmless, so they stay open.  Mirrors job_tool.c. */
    if (strcasecmp(action, "list") != 0 && session_get_command_context() == NULL) {
       OLOG_WARNING("attention: refused '%s' from a caller with no session context", action);
@@ -643,6 +643,8 @@ static char *attention_tool_callback(const char *action, char *value, int *shoul
    }
 
    int user_id = tool_get_current_user_id();
+   if (user_id <= 0)
+      return strdup(TOOL_GUEST_REFUSAL);
 
    char metric[SAGE_METRIC_LEN] = { 0 };
    char name[SAGE_WATCH_NAME_LEN] = { 0 };

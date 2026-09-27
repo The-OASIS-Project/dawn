@@ -117,6 +117,46 @@ int auth_db_get_user(const char *username, auth_user_t *user_out) {
    return AUTH_DB_FAILURE;
 }
 
+int auth_db_user_get_categories_backfilled_at(int user_id, int64_t *ts_out) {
+   if (!ts_out || user_id <= 0) {
+      return AUTH_DB_INVALID;
+   }
+   *ts_out = 0;
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *stmt = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db, "SELECT categories_backfilled_at FROM users WHERE id = ?",
+                               -1, &stmt, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int(stmt, 1, user_id);
+      rc = sqlite3_step(stmt);
+      if (rc == SQLITE_ROW) {
+         *ts_out = sqlite3_column_int64(stmt, 0);
+      }
+   }
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   return (rc == SQLITE_ROW || rc == SQLITE_DONE) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+}
+
+int auth_db_user_set_categories_backfilled_at(int user_id, int64_t ts) {
+   if (user_id <= 0) {
+      return AUTH_DB_INVALID;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *stmt = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "UPDATE users SET categories_backfilled_at = ? WHERE id = ?", -1,
+                               &stmt, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int64(stmt, 1, ts);
+      sqlite3_bind_int(stmt, 2, user_id);
+      rc = sqlite3_step(stmt);
+   }
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   return rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+}
+
 int auth_db_user_count(int *count_out) {
    if (!count_out) {
       return AUTH_DB_FAILURE;

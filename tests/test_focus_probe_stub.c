@@ -98,13 +98,12 @@ void webui_broadcast_context_injection(int user_id,
 }
 
 /* =============================================================================
- * webui_get_active_conversation_id stub — build_focus_block.c re-reads the
- * active conversation_id from the dispatch session right before broadcast
- * (first-turn race fix, May 2026).  Tests don't exercise the WebSocket
- * server's session registry, so returning 0 is the safe no-op (caller
- * falls back to the captured value).
+ * session_turn_conversation stub — build_focus_block.c re-reads the dispatching
+ * turn's conversation right before broadcast (first-turn race fix).  Tests don't
+ * run turns, so returning 0 is the safe no-op (caller falls back to the captured
+ * value).
  * ============================================================================= */
-int64_t webui_get_active_conversation_id(struct session *session) {
+int64_t session_turn_conversation(struct session *session) {
    (void)session;
    return 0;
 }

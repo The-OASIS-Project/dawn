@@ -260,6 +260,30 @@ static void test_memory_citation_roundtrip(void) {
    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.05f, g_read.memory.citation_reinforcement_boost);
 }
 
+static void test_focus_document_min_relevance_roundtrip(void) {
+   /* A non-default value must survive: a dropped key would silently revert to the
+    * default on the next WebUI settings save. */
+   g_written.memory.focus_injection.document_min_relevance = 0.62f;
+   g_written.memory.focus_injection.fact_min_relevance = 0.26f;
+
+   round_trip();
+
+   TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.62f, g_read.memory.focus_injection.document_min_relevance);
+   TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.26f, g_read.memory.focus_injection.fact_min_relevance);
+}
+
+static void test_memory_fact_cache_mb_roundtrip(void) {
+   g_written.memory.fact_cache_mb = 123;
+   round_trip();
+   TEST_ASSERT_EQUAL_INT(123, g_read.memory.fact_cache_mb);
+}
+
+static void test_memory_fact_cache_mb_is_clamped(void) {
+   g_written.memory.fact_cache_mb = 1; /* below the floor */
+   round_trip();
+   TEST_ASSERT_EQUAL_INT(MEMORY_FACT_CACHE_MB_MIN, g_read.memory.fact_cache_mb);
+}
+
 /* --- section coverage ------------------------------------------------------
  * The generic half: every section config_write_toml is responsible for must
  * appear in its output.  A new section wired into the parser but not the writer
@@ -473,6 +497,9 @@ int main(void) {
    RUN_TEST(test_scheduler_roundtrip);
    RUN_TEST(test_llm_tools_roundtrip);
    RUN_TEST(test_memory_citation_roundtrip);
+   RUN_TEST(test_focus_document_min_relevance_roundtrip);
+   RUN_TEST(test_memory_fact_cache_mb_roundtrip);
+   RUN_TEST(test_memory_fact_cache_mb_is_clamped);
    RUN_TEST(test_use_openrouter_migrates_to_provider);
    RUN_TEST(test_use_openrouter_not_written);
    RUN_TEST(test_all_writer_owned_sections_present);

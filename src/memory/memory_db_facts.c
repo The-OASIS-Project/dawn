@@ -28,13 +28,17 @@
 #include <string.h>
 #include <time.h>
 
+#include "auth/auth_db.h"
 #include "auth/auth_db_internal.h"
 #include "config/dawn_config.h"
+#include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_bm25.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_internal.h"
+#include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
+#include "memory/memory_embeddings_internal.h"
 #include "memory/memory_similarity.h"
 #include "memory/memory_stem.h"
 #include "utils/string_utils.h"
@@ -109,11 +113,10 @@ bool memory_db_fact_expiry_hidden(int64_t expires_at) {
    return expires_at < (int64_t)time(NULL);
 }
 
-/* v48 FTS5 maintenance helpers — caller must hold AUTH_DB_LOCK.  Forward
- * declared so memory_db_fact_create / memory_db_fact_delete / the bulk
- * delete path can call them. */
+/* v48 FTS5 maintenance helper — caller must hold AUTH_DB_LOCK.  Forward
+ * declared so memory_db_fact_create can call it (the delete counterpart is
+ * memory_db_internal_fts5_delete_fact_locked, shared with memory_db_forget.c). */
 static int fts5_insert_fact_stems_locked(int64_t fact_id, const char *fact_stems);
-static int fts5_delete_fact_stems_locked(int64_t fact_id, const char *fact_stems);
 
 /* =============================================================================
  * Fact Operations
@@ -158,6 +161,10 @@ int memory_db_fact_create_at(int user_id,
 
    AUTH_DB_LOCK_OR_FAIL();
 
+   /* The fact, its keyword-index entry and its source commit together (a
+    * savepoint nests inside a caller's transaction). */
+   const bool sp = sqlite3_exec(s_db.db, "SAVEPOINT fact_create", NULL, NULL, NULL) == SQLITE_OK;
+
    sqlite3_stmt *stmt = s_db.stmt_memory_fact_create;
    sqlite3_reset(stmt);
    sqlite3_bind_int(stmt, 1, user_id);
@@ -174,6 +181,10 @@ int memory_db_fact_create_at(int user_id,
 
    if (rc != SQLITE_DONE) {
       OLOG_ERROR("memory_db: fact_create failed: %s", sqlite3_errmsg(s_db.db));
+      if (sp) {
+         sqlite3_exec(s_db.db, "ROLLBACK TO fact_create", NULL, NULL, NULL);
+         sqlite3_exec(s_db.db, "RELEASE fact_create", NULL, NULL, NULL);
+      }
       AUTH_DB_UNLOCK();
       return MEMORY_DB_FAILURE;
    }
@@ -187,6 +198,12 @@ int memory_db_fact_create_at(int user_id,
     * recompute.  Stems were computed pre-lock; pass them through to keep
     * the stemmer mutex out of the auth_db critical section. */
    (void)fts5_insert_fact_stems_locked(id, fact_stems);
+   if (prov) {
+      memory_db_internal_source_add_locked(MEMORY_SOURCE_FACT, id, prov->conv_id);
+   }
+   if (sp) {
+      sqlite3_exec(s_db.db, "RELEASE fact_create", NULL, NULL, NULL);
+   }
 
    AUTH_DB_UNLOCK();
 
@@ -229,6 +246,107 @@ int memory_db_fact_update_category(int64_t fact_id, int user_id, const char *cat
    AUTH_DB_UNLOCK();
 
    return (rc == SQLITE_DONE) ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
+}
+
+int memory_db_fact_list_general_embedded(int user_id,
+                                         int64_t after_id,
+                                         int dims,
+                                         int max,
+                                         int64_t *ids_out,
+                                         float *embs_out,
+                                         int *count_out,
+                                         int64_t *last_id_out) {
+   if (count_out)
+      *count_out = 0;
+   if (last_id_out)
+      *last_id_out = after_id;
+   if (user_id <= 0 || dims <= 0 || max <= 0 || !ids_out || !embs_out || !count_out)
+      return MEMORY_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT id, embedding FROM memory_facts "
+                          "WHERE user_id = ? AND superseded_by IS NULL "
+                          "  AND embedding IS NOT NULL AND id > ? "
+                          "  AND category = 'general' "
+                          "ORDER BY id ASC LIMIT ?",
+                          -1, &stmt, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_int64(stmt, 2, after_id);
+   sqlite3_bind_int(stmt, 3, max);
+
+   const int want = dims * (int)sizeof(float);
+   int n = 0;
+   int64_t last = after_id;
+   int rc;
+   while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+      const int64_t id = sqlite3_column_int64(stmt, 0);
+      if (id > last)
+         last = id;
+      const void *blob = sqlite3_column_blob(stmt, 1);
+      if (blob && sqlite3_column_bytes(stmt, 1) == want && n < max) {
+         ids_out[n] = id;
+         memcpy(embs_out + (size_t)n * (size_t)dims, blob, (size_t)want);
+         n++;
+      }
+   }
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   if (rc != SQLITE_DONE)
+      return MEMORY_DB_FAILURE;
+   *count_out = n;
+   if (last_id_out)
+      *last_id_out = last;
+   return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_fact_set_categories(int user_id,
+                                  const int64_t *ids,
+                                  const char *const *categories,
+                                  int n,
+                                  int *written_out) {
+   if (written_out)
+      *written_out = 0;
+   if (user_id <= 0 || !ids || !categories || n < 0)
+      return MEMORY_DB_FAILURE;
+   if (n == 0)
+      return MEMORY_DB_SUCCESS;
+
+   AUTH_DB_LOCK_OR_FAIL();
+   if (sqlite3_exec(s_db.db, "BEGIN", NULL, NULL, NULL) != SQLITE_OK) {
+      OLOG_ERROR("memory_db: set_categories BEGIN failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   int written = 0;
+   bool ok = true;
+   sqlite3_stmt *stmt = s_db.stmt_memory_fact_update_category;
+   for (int i = 0; i < n && ok; i++) {
+      if (!categories[i] || !*categories[i])
+         continue;
+      sqlite3_reset(stmt);
+      sqlite3_bind_text(stmt, 1, categories[i], -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64(stmt, 2, ids[i]);
+      sqlite3_bind_int(stmt, 3, user_id);
+      ok = sqlite3_step(stmt) == SQLITE_DONE;
+      /* An UPDATE that matches nothing still returns SQLITE_DONE; count real writes. */
+      written += ok ? sqlite3_changes(s_db.db) : 0;
+   }
+   sqlite3_reset(stmt);
+   if (!ok || sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
+      OLOG_ERROR("memory_db: set_categories failed: %s", sqlite3_errmsg(s_db.db));
+      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   AUTH_DB_UNLOCK();
+   if (written_out)
+      *written_out = written;
+   return MEMORY_DB_SUCCESS;
 }
 
 int memory_db_fact_list_general(int user_id,
@@ -413,7 +531,7 @@ static int fts5_insert_fact_stems_locked(int64_t fact_id, const char *fact_stems
  * already hold AUTH_DB_LOCK.  Caller must provide pre-stemmed content
  * (typically obtained by calling memory_stem_string on the live fact_text
  * BEFORE taking the lock — same stems the original insert used). */
-static int fts5_delete_fact_stems_locked(int64_t fact_id, const char *fact_stems) {
+int memory_db_internal_fts5_delete_fact_locked(int64_t fact_id, const char *fact_stems) {
    if (fact_id <= 0 || !fact_stems)
       return 1;
    sqlite3_stmt *del = s_db.stmt_memory_facts_fts_delete;
@@ -605,6 +723,26 @@ int memory_db_fact_reinforce_citation(int64_t fact_id, int user_id) {
 
    AUTH_DB_UNLOCK();
    return (rc == SQLITE_DONE) ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
+}
+
+int memory_db_fact_mark_unsourced(int64_t fact_id, int user_id) {
+   if (fact_id <= 0 || user_id <= 0) {
+      return MEMORY_DB_FAILURE;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *stmt = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "UPDATE memory_facts SET origin_unsourced = 1 WHERE id = ? AND "
+                               "user_id = ? AND origin_unsourced = 0",
+                               -1, &stmt, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int64(stmt, 1, fact_id);
+      sqlite3_bind_int(stmt, 2, user_id);
+      rc = sqlite3_step(stmt);
+   }
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   return rc == SQLITE_DONE ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
 int memory_db_fact_update_confidence(int64_t fact_id, int user_id, float confidence) {
@@ -812,20 +950,15 @@ int memory_db_fact_delete(int64_t fact_id, int user_id) {
    sqlite3_bind_int64(get, 1, fact_id);
    sqlite3_bind_int(get, 2, user_id);
    int owner = 0;
-   char text_buf[MEMORY_FACT_TEXT_MAX];
-   text_buf[0] = '\0';
+   /* The whole text: the insert stemmed all of it, and a contentless FTS5
+    * delete must name exactly the tokens it indexed. */
+   char *text_buf = NULL;
    bool found = false;
    if (sqlite3_step(get) == SQLITE_ROW) {
       owner = sqlite3_column_int(get, 1);
       const unsigned char *t = sqlite3_column_text(get, 2);
-      if (t) {
-         size_t n = strlen((const char *)t);
-         if (n >= sizeof(text_buf))
-            n = sizeof(text_buf) - 1;
-         memcpy(text_buf, t, n);
-         text_buf[n] = '\0';
-      }
-      found = true;
+      text_buf = strdup(t ? (const char *)t : "");
+      found = text_buf != NULL;
    }
    sqlite3_reset(get);
    AUTH_DB_UNLOCK();
@@ -835,6 +968,7 @@ int memory_db_fact_delete(int64_t fact_id, int user_id) {
     * Don't distinguish "wrong user" from "doesn't exist" — same response
     * a legitimate not-found request would get. */
    if (!found || owner != user_id) {
+      free(text_buf);
       return MEMORY_DB_NOT_FOUND;
    }
 
@@ -843,12 +977,13 @@ int memory_db_fact_delete(int64_t fact_id, int user_id) {
     * is immutable post-create. */
    char fact_stems[MEMORY_FACT_STEMS_MAX];
    (void)memory_stem_string(text_buf, fact_stems, sizeof(fact_stems));
+   free(text_buf);
 
    /* Step 3: re-take the lock and run the FTS5 delete + facts DELETE
     * atomically (within the same critical section). */
    AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
 
-   (void)fts5_delete_fact_stems_locked(fact_id, fact_stems);
+   (void)memory_db_internal_fts5_delete_fact_locked(fact_id, fact_stems);
 
    sqlite3_stmt *stmt = s_db.stmt_memory_fact_delete;
    sqlite3_reset(stmt);
@@ -1193,7 +1328,7 @@ int memory_db_facts_delete_by_patterns(int user_id,
       const unsigned char *text = sqlite3_column_text(victim_stmt, 1);
       char stems_buf[MEMORY_FACT_STEMS_MAX];
       (void)memory_stem_string(text ? (const char *)text : "", stems_buf, sizeof(stems_buf));
-      (void)fts5_delete_fact_stems_locked(fid, stems_buf);
+      (void)memory_db_internal_fts5_delete_fact_locked(fid, stems_buf);
    }
    sqlite3_finalize(victim_stmt);
 
@@ -1358,63 +1493,113 @@ int memory_db_fact_update_embedding(int user_id,
    return MEMORY_DB_SUCCESS;
 }
 
-int memory_db_fact_get_embeddings(int user_id,
-                                  int expected_dims,
-                                  int64_t *out_ids,
-                                  float *out_embeddings,
-                                  float *out_norms,
-                                  int64_t *out_created_ats,
-                                  int64_t *out_note_doc_ids,
-                                  int max_count,
-                                  int *count_out) {
-   if (count_out)
-      *count_out = 0;
-   if (!out_ids || !out_embeddings || !out_norms || max_count <= 0 || expected_dims <= 0)
+/* The facts the in-memory cache may load: current (not superseded, not expired)
+ * with an embedding of the expected size.  ?1 user, ?2 expiry guard
+ * (fact_expiry_guard_now), ?3 embedding bytes. */
+#define FACT_CACHE_WHERE                                                   \
+   "user_id = ?1 AND superseded_by IS NULL AND embedding IS NOT NULL AND " \
+   "length(embedding) = ?3 AND (expires_at IS NULL OR expires_at >= ?2)"
+#define FACT_CACHE_COLUMNS "id, embedding, embedding_norm, created_at, note_doc_id"
+
+/* Caller holds the auth_db lock.  Prepare @p sql and bind the shared WHERE's
+ * parameters; NULL on failure. */
+static sqlite3_stmt *fact_cache_prepare(const char *sql, int user_id, int expected_dims) {
+   sqlite3_stmt *st = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL) != SQLITE_OK) {
+      OLOG_ERROR("memory_db: preparing a fact cache query failed: %s", sqlite3_errmsg(s_db.db));
+      sqlite3_finalize(st);
+      return NULL;
+   }
+   sqlite3_bind_int(st, 1, user_id);
+   sqlite3_bind_int64(st, 2, fact_expiry_guard_now());
+   sqlite3_bind_int(st, 3, expected_dims * (int)sizeof(float));
+   return st;
+}
+
+int memory_db_fact_foreach_embedding(int user_id,
+                                     int expected_dims,
+                                     int limit,
+                                     memory_fact_embedding_fn fn,
+                                     void *ctx) {
+   if (!fn || limit <= 0 || expected_dims <= 0)
       return MEMORY_DB_FAILURE;
 
    AUTH_DB_LOCK_OR_FAIL();
 
-   sqlite3_reset(s_db.stmt_memory_fact_get_embeddings);
-   sqlite3_bind_int(s_db.stmt_memory_fact_get_embeddings, 1, user_id);
-   sqlite3_bind_int(s_db.stmt_memory_fact_get_embeddings, 2, max_count);
-
-   int count = 0;
-   int expected_bytes = expected_dims * (int)sizeof(float);
-
-   while (count < max_count && sqlite3_step(s_db.stmt_memory_fact_get_embeddings) == SQLITE_ROW) {
-      int blob_bytes = sqlite3_column_bytes(s_db.stmt_memory_fact_get_embeddings, 1);
-
-      /* Skip dimension mismatches (model changed) */
-      if (blob_bytes != expected_bytes)
-         continue;
-
-      out_ids[count] = sqlite3_column_int64(s_db.stmt_memory_fact_get_embeddings, 0);
-      const void *blob = sqlite3_column_blob(s_db.stmt_memory_fact_get_embeddings, 1);
-      if (blob) {
-         memcpy(out_embeddings + count * expected_dims, blob, (size_t)expected_bytes);
-      }
-      out_norms[count] = (float)sqlite3_column_double(s_db.stmt_memory_fact_get_embeddings, 2);
-      /* created_at appended col 3 (v35).  out_created_ats may be NULL when caller
-       * doesn't need temporal scoring — keeps the function backward-tolerant. */
-      if (out_created_ats) {
-         out_created_ats[count] = sqlite3_column_int64(s_db.stmt_memory_fact_get_embeddings, 3);
-      }
-      /* note_doc_id (col 4, v61) — NULL reads back as 0.  Caller may pass NULL
-       * when gloss-awareness isn't needed. */
-      if (out_note_doc_ids) {
-         out_note_doc_ids[count] = sqlite3_column_int64(s_db.stmt_memory_fact_get_embeddings, 4);
-      }
-      count++;
+   /* How many there are decides the query.  Usually they all fit and order
+    * doesn't matter, so a plain scan.  Over the limit, rank ids without their
+    * embeddings (sorting the blobs is what's expensive), then fetch the kept
+    * ones by id. */
+   int total = 0;
+   sqlite3_stmt *st = fact_cache_prepare(
+       "SELECT COUNT(*) FROM memory_facts WHERE " FACT_CACHE_WHERE, user_id, expected_dims);
+   int step = st ? sqlite3_step(st) : SQLITE_ERROR;
+   if (step == SQLITE_ROW) {
+      total = sqlite3_column_int(st, 0);
+   }
+   sqlite3_finalize(st);
+   st = NULL;
+   if (step != SQLITE_ROW) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
    }
 
-   sqlite3_reset(s_db.stmt_memory_fact_get_embeddings);
+   if (total <= limit) {
+      st = fact_cache_prepare("SELECT " FACT_CACHE_COLUMNS
+                              " FROM memory_facts WHERE " FACT_CACHE_WHERE,
+                              user_id, expected_dims);
+   } else {
+      /* ?4 recently-used cutoff, ?5 now, ?6 recency scale, ?7 limit (see
+       * MEMORY_CACHE_RECENT_USE_SEC for the order). */
+      st = fact_cache_prepare(
+          "SELECT " FACT_CACHE_COLUMNS " FROM memory_facts WHERE id IN ("
+          "SELECT id FROM memory_facts WHERE " FACT_CACHE_WHERE " "
+          "ORDER BY (MAX(COALESCE(last_accessed, 0), COALESCE(last_cited, 0)) >= ?4 "
+          "OR COALESCE(note_doc_id, 0) > 0) DESC, "
+          "COALESCE(confidence, 0) / (1.0 + MAX(0, ?5 - MAX(created_at, COALESCE(last_accessed, "
+          "0), "
+          "COALESCE(last_cited, 0))) / ?6) DESC, "
+          "id DESC LIMIT ?7)",
+          user_id, expected_dims);
+      if (st) {
+         const int64_t now = (int64_t)time(NULL);
+         sqlite3_bind_int64(st, 4, now - MEMORY_CACHE_RECENT_USE_SEC);
+         sqlite3_bind_int64(st, 5, now);
+         sqlite3_bind_double(st, 6, (double)MEMORY_CACHE_RECENCY_SCALE_SEC);
+         sqlite3_bind_int(st, 7, limit);
+      }
+   }
+   if (!st) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+
+   int rc = MEMORY_DB_SUCCESS;
+   while ((step = sqlite3_step(st)) == SQLITE_ROW) {
+      const memory_fact_embedding_row_t row = {
+         .id = sqlite3_column_int64(st, 0),
+         .embedding = sqlite3_column_blob(st, 1),
+         .norm = (float)sqlite3_column_double(st, 2),
+         .created_at = sqlite3_column_int64(st, 3),
+         .note_doc_id = sqlite3_column_int64(st, 4), /* NULL reads back as 0 */
+      };
+      if (!row.embedding || fn(&row, total, ctx) != SUCCESS) {
+         rc = MEMORY_DB_FAILURE;
+         break;
+      }
+   }
+   if (rc == MEMORY_DB_SUCCESS && step != SQLITE_DONE) {
+      OLOG_ERROR("memory_db: loading fact embeddings for user %d failed: %s", user_id,
+                 sqlite3_errmsg(s_db.db));
+      rc = MEMORY_DB_FAILURE;
+   }
+   sqlite3_finalize(st);
    AUTH_DB_UNLOCK();
-   if (count_out)
-      *count_out = count;
-   return MEMORY_DB_SUCCESS;
+   return rc;
 }
 
 int memory_db_fact_list_without_embedding(int user_id,
+                                          int64_t after_id,
                                           int expected_dims,
                                           int64_t *out_ids,
                                           char out_texts[][512],
@@ -1429,8 +1614,9 @@ int memory_db_fact_list_without_embedding(int user_id,
 
    sqlite3_reset(s_db.stmt_memory_fact_list_without_embedding);
    sqlite3_bind_int(s_db.stmt_memory_fact_list_without_embedding, 1, user_id);
-   sqlite3_bind_int(s_db.stmt_memory_fact_list_without_embedding, 2, expected_dims);
-   sqlite3_bind_int(s_db.stmt_memory_fact_list_without_embedding, 3, max_count);
+   sqlite3_bind_int64(s_db.stmt_memory_fact_list_without_embedding, 2, after_id);
+   sqlite3_bind_int(s_db.stmt_memory_fact_list_without_embedding, 3, expected_dims);
+   sqlite3_bind_int(s_db.stmt_memory_fact_list_without_embedding, 4, max_count);
 
    int count = 0;
    while (count < max_count &&
@@ -1447,6 +1633,56 @@ int memory_db_fact_list_without_embedding(int user_id,
    }
 
    sqlite3_reset(s_db.stmt_memory_fact_list_without_embedding);
+   AUTH_DB_UNLOCK();
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_fact_users_needing_backfill(int expected_dims,
+                                          int after_user_id,
+                                          int *out_user_ids,
+                                          int max_count,
+                                          int *count_out) {
+   if (count_out)
+      *count_out = 0;
+   if (!out_user_ids || max_count <= 0 || expected_dims <= 0)
+      return MEMORY_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   /* Sweep-only (at boot, after a re-index, or to continue an overflowed sweep),
+    * so an ad-hoc prepare is cheaper than a statement held for the process
+    * lifetime.  Second arm: users whose one-shot category pass hasn't run yet
+    * (reset by an admin re-extract, or pre-v34 data) but whose facts are all
+    * embedded — the pass runs at the end of a backfill, so they need queuing too. */
+   sqlite3_stmt *stmt = NULL;
+   int rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT user_id FROM memory_facts "
+       "WHERE superseded_by IS NULL AND fact_text != '' AND user_id > ?1 "
+       "AND (embedding IS NULL OR length(embedding)/4 != ?2) "
+       "UNION "
+       "SELECT u.id FROM users u WHERE u.id > ?1 AND u.categories_backfilled_at = 0 "
+       "AND EXISTS (SELECT 1 FROM memory_facts f WHERE f.user_id = u.id "
+       "AND f.superseded_by IS NULL) "
+       "ORDER BY 1 LIMIT ?3",
+       -1, &stmt, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("memory_db: prepare fact_users_needing_backfill failed: %s",
+                   sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   sqlite3_bind_int(stmt, 1, after_user_id);
+   sqlite3_bind_int(stmt, 2, expected_dims);
+   sqlite3_bind_int(stmt, 3, max_count);
+
+   int count = 0;
+   while (count < max_count && sqlite3_step(stmt) == SQLITE_ROW) {
+      out_user_ids[count++] = sqlite3_column_int(stmt, 0);
+   }
+   sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
    if (count_out)
       *count_out = count;

@@ -1002,6 +1002,8 @@ static char *phone_tool_callback(const char *action, char *value, int *should_re
    *should_respond = 1;
 
    int user_id = tool_get_current_user_id();
+   if (user_id <= 0)
+      return strdup(TOOL_GUEST_REFUSAL);
    struct json_object *details = NULL;
    if (value && value[0]) {
       details = json_tokener_parse(value);

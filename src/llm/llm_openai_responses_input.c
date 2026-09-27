@@ -36,12 +36,13 @@
  * static rules, byte-identical across turns), index 1 = volatile block (per-turn
  * memory/docs/calendar + [system_time], the "--- TURN CONTEXT ---" DATA block).
  * A later `role:"system"` message is NOT part of that pair — it is a mid-history
- * broadcast (session_broadcast_system_message(), e.g. an incoming-call notice).
+ * system message (device events now render into the volatile block instead, but a
+ * history saved by an older build may still hold one).
  *
  * For OpenAI Responses the STABLE segment goes in `instructions` (kept byte-stable so
  * [instructions][tools][history] forms a reusable prefix); the VOLATILE segment is
  * repositioned to a user-role input item just before the current question
- * (llm_responses_build_input), and mid-history broadcasts are emitted inline at their
+ * (llm_responses_build_input), and mid-history system messages are emitted inline at their
  * position. Because the volatile changes every turn and sits before the question,
  * implicit-only caching cannot reuse the stable prefix cross-turn (OpenAI's "a shared
  * prefix is not always a cached prefix" gotcha). GPT-5.6+ resolves this with an EXPLICIT
@@ -208,10 +209,9 @@ struct json_object *llm_responses_build_input(struct json_object *history,
       const char *role = json_object_get_string(role_obj);
 
       /* Leading system run (stable + volatile) → instructions + repositioned
-       * volatile below; skip here. A LATER system message is a mid-history
-       * broadcast (session_broadcast_system_message, e.g. an incoming-call notice)
-       * — emit it inline at its position so it is not lost and stays frozen in the
-       * cacheable prefix. */
+       * volatile below; skip here. A LATER system message (from a history an
+       * older build saved) is emitted inline at its position so it is not lost
+       * and stays frozen in the cacheable prefix. */
       if (strcmp(role, "system") == 0) {
          if (i < leading_system_run)
             continue;

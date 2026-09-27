@@ -81,6 +81,27 @@ int memory_db_pref_upsert(int user_id,
 
    AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
 
+   /* Which preference row this is and whether its value changes: a new value
+    * comes only from the conversation setting it, so its recorded sources reset;
+    * the same value reinforced gains a source. */
+   int64_t pref_id = 0;
+   bool value_changed = false;
+   /* The row and its sources change together (a savepoint nests inside a
+    * caller's transaction). */
+   const bool sp = sqlite3_exec(s_db.db, "SAVEPOINT pref_upsert", NULL, NULL, NULL) == SQLITE_OK;
+   {
+      sqlite3_stmt *cur = s_db.stmt_memory_pref_current;
+      sqlite3_reset(cur);
+      sqlite3_bind_int(cur, 1, user_id);
+      sqlite3_bind_text(cur, 2, category, -1, SQLITE_STATIC);
+      if (sqlite3_step(cur) == SQLITE_ROW) {
+         pref_id = sqlite3_column_int64(cur, 0);
+         const char *old = (const char *)sqlite3_column_text(cur, 1);
+         value_changed = !old || strcmp(old, value) != 0;
+      }
+      sqlite3_reset(cur);
+   }
+
    time_t now = time(NULL);
    sqlite3_stmt *stmt = s_db.stmt_memory_pref_upsert;
    sqlite3_reset(stmt);
@@ -95,6 +116,27 @@ int memory_db_pref_upsert(int user_id,
 
    int rc = sqlite3_step(stmt);
    sqlite3_reset(stmt);
+
+   if (rc == SQLITE_DONE) {
+      if (pref_id == 0) {
+         pref_id = sqlite3_last_insert_rowid(s_db.db); /* inserted */
+      } else if (value_changed && s_db.stmt_memory_pref_sources_clear) {
+         sqlite3_stmt *clr = s_db.stmt_memory_pref_sources_clear;
+         sqlite3_reset(clr);
+         sqlite3_bind_int64(clr, 1, pref_id);
+         (void)sqlite3_step(clr);
+         sqlite3_reset(clr);
+      }
+      if (prov) {
+         memory_db_internal_source_add_locked(MEMORY_SOURCE_PREFERENCE, pref_id, prov->conv_id);
+      }
+   }
+   if (sp) {
+      if (rc != SQLITE_DONE) {
+         sqlite3_exec(s_db.db, "ROLLBACK TO pref_upsert", NULL, NULL, NULL);
+      }
+      sqlite3_exec(s_db.db, "RELEASE pref_upsert", NULL, NULL, NULL);
+   }
 
    AUTH_DB_UNLOCK();
 

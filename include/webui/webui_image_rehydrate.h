@@ -66,27 +66,25 @@ int webui_collect_image_ids(const char *content,
                             int *count_out);
 
 /**
- * @brief Append a stored message to the session, rehydrating image markers.
+ * @brief Build a stored message for the LLM context, rehydrating image markers.
  *
- * If @p content has no [IMAGE:...] markers, appends it as a plain text message.
+ * If @p content has no [IMAGE:...] markers, returns a plain text message.
  * Otherwise builds an OpenAI multi-part message: one text part (prose, markers
  * removed) followed by image_url parts. Each [IMAGE:img_id] is OWNER-CHECKED
  * (image_store_get_metadata → require md.user_id == @p user_id, independent of
  * image source) then fetched and base64-encoded with its real mime. A missing /
  * non-owned / unreadable image, or one past WEBUI_MAX_REHYDRATE_BYTES, degrades to
- * an inline "[image no longer available]" / "[earlier image omitted]" note — the
- * call NEVER fails the restore. Legacy [IMAGE:data:...] markers pass through inline.
+ * an inline "[image no longer available]" / "[earlier image omitted]" note — a
+ * missing image never fails the message. Legacy [IMAGE:data:...] markers pass
+ * through inline.  Touches no session, so a restore can build a whole history
+ * off-session and install it in one step.
  *
- * @param session Target session.
  * @param user_id Authenticated user id (ownership boundary; never 0).
  * @param role    Message role.
  * @param content Stored message content.
- * @return SUCCESS (best-effort; always materializes a message), or FAILURE on NULL args.
+ * @return New {role, content} message (caller owns), or NULL on NULL args / OOM.
  */
-int webui_rehydrate_message_into_session(session_t *session,
-                                         int user_id,
-                                         const char *role,
-                                         const char *content);
+struct json_object *webui_rehydrate_message(int user_id, const char *role, const char *content);
 
 /**
  * @brief Build the persisted form of an image turn: @p text + one `\n[IMAGE:<id>]`

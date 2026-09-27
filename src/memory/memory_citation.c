@@ -207,9 +207,8 @@ void memory_citation_capture(session_t *session, const char *response_text) {
 
    int64_t conv_id = atomic_load(&session->stream_conversation_id);
    int64_t msg_id = session_get_last_user_msg_id(session); /* the user turn this reply answers */
-   pthread_mutex_lock(&session->metrics_mutex);
-   int user_id = session->metrics.user_id;
-   pthread_mutex_unlock(&session->metrics_mutex);
+   /* Whose memory the reply cited: the local mic's is the default voice user's. */
+   const int user_id = session_effective_user_id(session);
 
    audit_insert(conv_id, msg_id, user_id, injected, cited_all, inj_scores, tool_surfaced, dropped,
                 dropped_tool);

@@ -205,12 +205,7 @@ void reload_session_history_if_stale(session_t *session,
    }
    size_t restored_count = (size_t)json_object_array_length(loaded);
 
-   pthread_mutex_lock(&session->history_mutex);
-   if (session->conversation_history) {
-      json_object_put(session->conversation_history);
-   }
-   session->conversation_history = loaded;
-   pthread_mutex_unlock(&session->history_mutex);
+   session_replace_history(session, loaded, conv_id);
 
    int64_t new_high = history_array_max_msg_id(loaded);
    slot_bump_last_known_msg_id(session, new_high);
@@ -463,12 +458,7 @@ session_t *get_or_create_messaging_session(const char *provider,
              * last_known_msg_id so the cross-channel staleness check
              * in process_inbound knows what we've seen. */
             restored_max_msg_id = history_array_max_msg_id(loaded);
-            pthread_mutex_lock(&s->history_mutex);
-            if (s->conversation_history) {
-               json_object_put(s->conversation_history);
-            }
-            s->conversation_history = loaded;
-            pthread_mutex_unlock(&s->history_mutex);
+            session_replace_history(s, loaded, conversation_id);
             OLOG_INFO("messaging: restored %zu messages (%zu chars) into session %u from conv %lld",
                       restored_count, restored_chars, s->session_id, (long long)conversation_id);
          } else {
@@ -499,6 +489,7 @@ session_t *get_or_create_messaging_session(const char *provider,
     * without engine locks: session_t is thread-private here, and
     * session_set_llm_config takes only the leaf llm_config_mutex. */
    s->messaging_identity.conversation_id = conversation_id;
+   session_bind_history_conversation(s, conversation_id);
    if (conversation_id > 0 && user_id > 0) {
       conversation_t conv;
       if (conv_db_get(conversation_id, user_id, &conv) == AUTH_DB_SUCCESS) {

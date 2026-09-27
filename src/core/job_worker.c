@@ -137,12 +137,7 @@ static void job_worker_run(job_work_t *work) {
       struct json_object *hist = memory_history_load_from_db(work->conv_id, work->user_id,
                                                              &restored);
       if (hist != NULL && restored > 0) {
-         pthread_mutex_lock(&s->history_mutex);
-         if (s->conversation_history) {
-            json_object_put(s->conversation_history);
-         }
-         s->conversation_history = hist;
-         pthread_mutex_unlock(&s->history_mutex);
+         session_replace_history(s, hist, work->conv_id);
          continued = true;
          OLOG_INFO("job_worker: resuming conv %lld with %zu bytes of history — continuing",
                    (long long)work->conv_id, restored);
@@ -219,7 +214,11 @@ static void job_worker_run(job_work_t *work) {
    }
    s->last_finish_reason[0] =
        '\0'; /* clear before dispatch — pooled session may hold a stale reason */
+   /* The turn belongs to the job conversation (compaction watermark, context
+    * expansion and focus read it from the turn, like every other surface). */
+   session_turn_begin(s, work->conv_id, work->user_id);
    char *response = core_text_input_dispatch(s, dispatch_text, NULL, NULL, NULL, 0, &opts);
+   session_turn_end(s);
    free(framed_goal);
    session_set_tool_persist_hook(s, NULL, NULL);
    session_set_tool_iteration_hook(s, NULL, NULL);

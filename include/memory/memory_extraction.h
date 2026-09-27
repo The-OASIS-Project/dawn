@@ -98,6 +98,37 @@ int memory_trigger_extraction(int user_id,
 bool memory_extraction_in_progress(int user_id);
 
 /**
+ * @brief Wait (up to @p timeout_sec) until no extraction is running for a user
+ *
+ * Claims nothing: an extraction may start again right after.
+ *
+ * @return true if idle, false on timeout
+ */
+bool memory_extraction_wait_idle(int user_id, int timeout_sec);
+
+/** Users whose extraction can be held at once (memory_extraction_hold_user). */
+#define MEMORY_EXTRACTION_MAX_HOLDS 32
+
+/**
+ * @brief Wait for a user's in-flight extraction to finish, then block new ones
+ *
+ * Marks the user held, so an extraction triggered meanwhile for this user is
+ * skipped as "already in progress" (memory_recovery picks it up later).  Holds
+ * have their own table (MEMORY_EXTRACTION_MAX_HOLDS), apart from the running
+ * extractions' slots, so they never take another user's capacity.  For
+ * operations that must see every row an extraction writes (e.g. forgetting a
+ * conversation).  Pair with memory_extraction_release_user().
+ *
+ * @param user_id     User
+ * @param timeout_sec Longest to wait for an in-flight extraction
+ * @return true if held; false on timeout (nothing held)
+ */
+bool memory_extraction_hold_user(int user_id, int timeout_sec);
+
+/** Release a hold taken by memory_extraction_hold_user(). */
+void memory_extraction_release_user(int user_id);
+
+/**
  * @brief Read and consume the last-extraction-was-transient flag for a user.
  *
  * Returns true exactly once after an extraction completed with a transient

@@ -908,6 +908,10 @@ static char *email_tool_callback(const char *action, char *value, int *should_re
       return strdup(TOOL_RESULT_ERROR_MARK "Error: invalid JSON in details parameter");
 
    int user_id = tool_get_current_user_id();
+   if (user_id <= 0) {
+      json_object_put(details);
+      return strdup(TOOL_GUEST_REFUSAL);
+   }
 
    char *result = NULL;
 

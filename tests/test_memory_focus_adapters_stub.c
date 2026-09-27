@@ -554,6 +554,24 @@ int memory_embeddings_rescore_against_query(int user_id,
    return SUCCESS;
 }
 
+/* No fact-embedding cache in this harness: the injection relevance gate is
+ * skipped (it only applies with a real baseline). */
+int memory_embeddings_fact_relevance(int user_id,
+                                     const float *query_emb,
+                                     const int64_t *ids,
+                                     int n,
+                                     float *out_rel,
+                                     int *pool_out) {
+   (void)user_id;
+   (void)query_emb;
+   (void)ids;
+   (void)n;
+   (void)out_rel;
+   if (pool_out)
+      *pool_out = 0;
+   return FAILURE;
+}
+
 int memory_search_apply_score_floor(memory_fact_t *facts,
                                     float *scores,
                                     int count,

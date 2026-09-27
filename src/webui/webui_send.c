@@ -619,6 +619,7 @@ void send_metrics_impl(struct lws *wsi,
 }
 
 void send_compaction_impl(struct lws *wsi,
+                          int64_t conversation_id,
                           int tokens_before,
                           int tokens_after,
                           int messages_summarized,
@@ -631,6 +632,9 @@ void send_compaction_impl(struct lws *wsi,
    json_object_object_add(payload, "tokens_after", json_object_new_int(tokens_after));
    json_object_object_add(payload, "messages_summarized", json_object_new_int(messages_summarized));
    json_object_object_add(payload, "level", json_object_new_int(level));
+   if (conversation_id > 0) {
+      json_object_object_add(payload, "conversation_id", json_object_new_int64(conversation_id));
+   }
    if (summary) {
       json_object_object_add(payload, "summary", json_object_new_string(summary));
    }
@@ -976,9 +980,10 @@ void process_one_response(void) {
                            resp.metrics.conversation_id);
          break;
       case WS_RESP_COMPACTION_COMPLETE:
-         send_compaction_impl(conn->wsi, resp.compaction.tokens_before,
-                              resp.compaction.tokens_after, resp.compaction.messages_summarized,
-                              resp.compaction.summary, resp.compaction.level);
+         send_compaction_impl(conn->wsi, resp.compaction.conversation_id,
+                              resp.compaction.tokens_before, resp.compaction.tokens_after,
+                              resp.compaction.messages_summarized, resp.compaction.summary,
+                              resp.compaction.level);
          free(resp.compaction.summary);
          break;
       case WS_RESP_THINKING_START:

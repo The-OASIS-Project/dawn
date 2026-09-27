@@ -1521,6 +1521,8 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_int(config->memory.conversation_idle_timeout_min));
    json_object_object_add(memory, "default_voice_user_id",
                           json_object_new_int(config->memory.default_voice_user_id));
+   json_object_object_add(memory, "fact_cache_mb",
+                          json_object_new_int(config->memory.fact_cache_mb));
    json_object_object_add(memory, "decay_enabled",
                           json_object_new_boolean(config->memory.decay_enabled));
    json_object_object_add(memory, "decay_hour", json_object_new_int(config->memory.decay_hour));
@@ -1615,6 +1617,10 @@ json_object *config_to_json(const dawn_config_t *config) {
       json_object_object_add(focus, "top_k", json_object_new_int(fi->top_k));
       json_object_object_add(focus, "summary_max_scan", json_object_new_int(fi->summary_max_scan));
       json_object_object_add(focus, "min_score", json_object_new_double(fi->min_score));
+      json_object_object_add(focus, "document_min_relevance",
+                             json_object_new_double(fi->document_min_relevance));
+      json_object_object_add(focus, "fact_min_relevance",
+                             json_object_new_double(fi->fact_min_relevance));
       json_object_object_add(focus, "classifier_enabled",
                              json_object_new_boolean(fi->classifier_enabled));
       json_object_object_add(focus, "weight_semantic", json_object_new_double(fi->weight_semantic));
@@ -2482,6 +2488,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "conversation_idle_timeout_min = %d\n",
            config->memory.conversation_idle_timeout_min);
    fprintf(fp, "default_voice_user_id = %d\n", config->memory.default_voice_user_id);
+   fprintf(fp, "fact_cache_mb = %d\n", config->memory.fact_cache_mb);
 
    fprintf(fp, "\n[memory.decay]\n");
    fprintf(fp, "enabled = %s\n", config->memory.decay_enabled ? "true" : "false");
@@ -2566,6 +2573,8 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
       fprintf(fp, "top_k = %d\n", fi->top_k);
       fprintf(fp, "summary_max_scan = %d\n", fi->summary_max_scan);
       fprintf(fp, "min_score = %.2f\n", fi->min_score);
+      fprintf(fp, "document_min_relevance = %.2f\n", fi->document_min_relevance);
+      fprintf(fp, "fact_min_relevance = %.2f\n", fi->fact_min_relevance);
       fprintf(fp, "classifier_enabled = %s\n", fi->classifier_enabled ? "true" : "false");
       fprintf(fp, "weight_semantic = %.2f\n", fi->weight_semantic);
       fprintf(fp, "weight_recency = %.2f\n", fi->weight_recency);

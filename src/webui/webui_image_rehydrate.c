@@ -162,18 +162,25 @@ int webui_collect_image_ids(const char *content,
    return SUCCESS;
 }
 
-int webui_rehydrate_message_into_session(session_t *session,
-                                         int user_id,
-                                         const char *role,
-                                         const char *content) {
-   if (!session || !role || !content) {
-      return FAILURE;
+/* {role, content} text message; NULL on OOM. */
+static struct json_object *text_message(const char *role, const char *content) {
+   struct json_object *m = json_object_new_object();
+   if (!m) {
+      return NULL;
+   }
+   json_object_object_add(m, "role", json_object_new_string(role));
+   json_object_object_add(m, "content", json_object_new_string(content));
+   return m;
+}
+
+struct json_object *webui_rehydrate_message(int user_id, const char *role, const char *content) {
+   if (!role || !content) {
+      return NULL;
    }
 
    /* Fast path: no markers → plain text message, unchanged. */
    if (!strstr(content, IMAGE_MARKER_PREFIX)) {
-      session_add_message(session, role, content);
-      return SUCCESS;
+      return text_message(role, content);
    }
 
    /* Collect image parts into a temporary array while building the prose text
@@ -183,8 +190,7 @@ int webui_rehydrate_message_into_session(session_t *session,
    strbuf_init(&prose, strlen(content) + 32);
    if (!image_parts) {
       strbuf_free(&prose);
-      session_add_message(session, role, content);
-      return SUCCESS;
+      return text_message(role, content);
    }
 
    size_t total_bytes = 0;
@@ -297,13 +303,13 @@ int webui_rehydrate_message_into_session(session_t *session,
    if (n_images == 0) {
       /* Nothing materialized — emit the prose as a plain text message. */
       const char *text = strbuf_str(&prose);
-      session_add_message(session, role, text ? text : content);
+      struct json_object *m = text_message(role, text ? text : content);
       strbuf_free(&prose);
       json_object_put(image_parts);
-      return SUCCESS;
+      return m;
    }
 
-   /* Assemble {role, content:[text, image_url...]} and hand ownership to the session. */
+   /* Assemble {role, content:[text, image_url...]}. */
    struct json_object *message = json_object_new_object();
    struct json_object *content_arr = json_object_new_array();
    if (!message || !content_arr) {
@@ -314,10 +320,10 @@ int webui_rehydrate_message_into_session(session_t *session,
          json_object_put(content_arr);
       }
       const char *text = strbuf_str(&prose);
-      session_add_message(session, role, text ? text : content);
+      struct json_object *m = text_message(role, text ? text : content);
       strbuf_free(&prose);
       json_object_put(image_parts);
-      return SUCCESS;
+      return m;
    }
 
    json_object_object_add(message, "role", json_object_new_string(role));
@@ -335,8 +341,7 @@ int webui_rehydrate_message_into_session(session_t *session,
    json_object_put(image_parts);
 
    json_object_object_add(message, "content", content_arr);
-   session_add_message_multipart(session, message); /* takes ownership */
 
    OLOG_INFO("WebUI: rehydrated %d image(s) into restored message", n_images);
-   return SUCCESS;
+   return message;
 }

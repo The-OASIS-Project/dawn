@@ -549,17 +549,6 @@ static void respond_error(const char *message) {
    fflush(stdout);
 }
 
-/* dia_id → msg_id lookup over the in-process map. */
-static int64_t dia_map_lookup(const char *dia_id) {
-   if (!dia_id)
-      return 0;
-   for (int i = 0; i < s_dia_map_count; i++) {
-      if (strcmp(s_dia_map[i].dia_id, dia_id) == 0)
-         return s_dia_map[i].msg_id;
-   }
-   return 0;
-}
-
 /* Reverse: msg_id → dia_id (used by query_memory to compute covered_dia_ids
  * for retrieved facts whose provenance range covers stored msg_ids). */
 static const char *dia_map_reverse(int64_t msg_id) {

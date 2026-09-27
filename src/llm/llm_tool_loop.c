@@ -447,7 +447,7 @@ static void append_openai_tool_history(struct json_object *history,
       }
    }
 
-   json_object_array_add(history, assistant_msg);
+   session_history_append(history, assistant_msg);
 
    /* Add tool results */
    llm_tools_add_results_openai(history, results);
@@ -511,7 +511,7 @@ static void append_claude_tool_history(struct json_object *history,
    }
 
    json_object_object_add(assistant_msg, "content", content_array);
-   json_object_array_add(history, assistant_msg);
+   session_history_append(history, assistant_msg);
 
    /* Add tool results in Claude format */
    llm_tools_add_results_claude(history, results);
@@ -544,7 +544,7 @@ static void append_closing_message(struct json_object *history,
       json_object_object_add(closing_msg, "content", json_object_new_string(text));
    }
 
-   json_object_array_add(history, closing_msg);
+   session_history_append(history, closing_msg);
    OLOG_INFO("Tool loop: Added closing assistant message to complete history");
 }
 
@@ -780,6 +780,9 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
             OLOG_ERROR("Tool loop: transient network error at iteration %d after %d retries, "
                        "giving up",
                        iteration, LLM_TRANSIENT_RETRY_MAX);
+         } else if (llm_interrupt_ctx_triggered(&ictx)) {
+            /* The user interrupted (wake word, Stop): not a failure. */
+            OLOG_INFO("Tool loop: provider call interrupted at iteration %d", iteration);
          } else {
             OLOG_ERROR("Tool loop: Provider call failed at iteration %d", iteration);
          }
@@ -860,7 +863,7 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
              json_object_new_string(
                  "You already called that tool with identical arguments and have its result. "
                  "Answer using the information you already have — do not call it again."));
-         json_object_array_add(params->conversation_history, hint_msg);
+         session_history_append(params->conversation_history, hint_msg);
 
          llm_tool_response_free(&result);
 
@@ -965,7 +968,7 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
              json_object_new_string(
                  "[System: Maximum tool iterations reached. Respond to the user now with "
                  "the information you have gathered so far. Do not call any more tools.]"));
-         json_object_array_add(params->conversation_history, hint_msg);
+         session_history_append(params->conversation_history, hint_msg);
 
          free_tool_result_resources(results);
          free(results);

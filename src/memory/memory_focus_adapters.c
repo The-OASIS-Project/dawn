@@ -46,6 +46,7 @@
 
 #include "memory/memory_focus_adapters.h"
 
+#include <math.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -56,6 +57,7 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/embedding_engine.h"
 #include "core/focus/focus_candidate_helpers.h"
 #include "core/focus/focus_recency.h"
 #include "core/focus/focus_source.h"
@@ -193,6 +195,7 @@ static void release_entity_scratch(void) {
  * user_id; the conversation-private boundary is enforced at conv_db_*
  * level only, not at memory_facts.  Wired in 1f.
  * ============================================================================= */
+
 static int fact_adapter_query(int user_id,
                               bool include_private,
                               const char *query_text,
@@ -245,6 +248,36 @@ static int fact_adapter_query(int user_id,
    kept = memory_search_apply_score_floor(facts, scores, kept, g_config.memory.search_score_floor);
    if (kept <= 0)
       return SUCCESS;
+
+   /* Relevance gate for injection only (the memory tool's search is unaffected).
+    * The search floor above sits near the embedding model's unrelated-text
+    * baseline, so it lets through facts that don't relate to the turn (an
+    * arithmetic question pulling in an anniversary).  Keep facts that stand out
+    * from the user's typical fact for this query; facts with no embedding yet
+    * matched on keywords and are kept.  Needs enough facts for a baseline. */
+   const float min_rel = g_config.memory.focus_injection.fact_min_relevance;
+   if (min_rel > 0.0f && query_embedding != NULL && embed_dim > 0) {
+      int64_t ids[10];
+      float rel[10];
+      int pool = 0;
+      for (int i = 0; i < kept; i++)
+         ids[i] = facts[i].id;
+      if (memory_embeddings_fact_relevance(user_id, query_embedding, ids, kept, rel, &pool) ==
+              SUCCESS &&
+          pool >= EMBEDDING_RELEVANCE_MIN_POOL) {
+         int k2 = 0;
+         for (int i = 0; i < kept; i++) {
+            if (isnan(rel[i]) || rel[i] >= min_rel) {
+               facts[k2] = facts[i];
+               scores[k2] = scores[i];
+               k2++;
+            }
+         }
+         kept = k2;
+         if (kept <= 0)
+            return SUCCESS;
+      }
+   }
 
    /* Batch provenance lookup. */
    int64_t fact_ids[10];

@@ -109,6 +109,46 @@ int memory_db_fact_create_at(int user_id,
 int memory_db_fact_update_category(int64_t fact_id, int user_id, const char *category);
 
 /**
+ * @brief Page of a user's current, embedded facts still in category 'general'
+ *
+ * For the embedding-centroid category pass.  Facts with id > @p after_id, in id
+ * order; those whose embedding isn't @p dims wide are skipped (but still advance
+ * @p last_id_out, so paging always progresses).
+ *
+ * @param user_id     Owner
+ * @param after_id    Cursor: only ids greater than this
+ * @param dims        Expected embedding dimension
+ * @param max         Page size
+ * @param ids_out     [out] Up to @p max fact ids
+ * @param embs_out    [out] Their embeddings, @p max * @p dims floats
+ * @param count_out   [out] Facts written
+ * @param last_id_out [out] Highest id seen (next cursor; may be NULL)
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_fact_list_general_embedded(int user_id,
+                                         int64_t after_id,
+                                         int dims,
+                                         int max,
+                                         int64_t *ids_out,
+                                         float *embs_out,
+                                         int *count_out,
+                                         int64_t *last_id_out);
+
+/**
+ * @brief Set many facts' categories in one transaction
+ *
+ * NULL or empty entries in @p categories are skipped.
+ *
+ * @param written_out [out] Facts actually updated (may be NULL)
+ * @return MEMORY_DB_SUCCESS, or MEMORY_DB_FAILURE (nothing written)
+ */
+int memory_db_fact_set_categories(int user_id,
+                                  const int64_t *ids,
+                                  const char *const *categories,
+                                  int n,
+                                  int *written_out);
+
+/**
  * @brief List facts with category='general' for a user, paginated by id.
  *
  * Used by LLM recategorization to fetch batches of uncategorized facts.
@@ -316,6 +356,16 @@ int memory_db_fact_reinforce_citation(int64_t fact_id, int user_id);
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_fact_update_confidence(int64_t fact_id, int user_id, float confidence);
+
+/**
+ * @brief Record that a fact was also learned outside any conversation
+ *
+ * The user stated it directly ("remember", an import): forgetting what a
+ * conversation taught then keeps it (memory_facts.origin_unsourced).
+ *
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_fact_mark_unsourced(int64_t fact_id, int user_id);
 
 /**
  * @brief Set the subject_entity_id FK on an existing fact (v47).

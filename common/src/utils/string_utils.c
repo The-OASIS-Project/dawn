@@ -27,6 +27,38 @@
 #include <string.h>
 #include <strings.h>
 
+void utf8_trim_incomplete(char *s) {
+   if (!s)
+      return;
+   size_t len = strlen(s);
+   size_t i = len;
+   while (i > 0 && ((unsigned char)s[i - 1] & 0xC0) == 0x80) {
+      i--; /* walk back over continuation bytes (10xxxxxx) */
+   }
+   if (i == 0) {
+      return;
+   }
+   unsigned char lead = (unsigned char)s[i - 1];
+   size_t seq_len = 1;
+   if ((lead & 0xE0) == 0xC0) {
+      seq_len = 2;
+   } else if ((lead & 0xF0) == 0xE0) {
+      seq_len = 3;
+   } else if ((lead & 0xF8) == 0xF0) {
+      seq_len = 4;
+   }
+   if (seq_len > (len - (i - 1))) {
+      s[i - 1] = '\0'; /* incomplete trailing sequence — truncate at the lead byte */
+   }
+}
+
+void utf8_truncate(char *str, size_t max_bytes) {
+   if (!str || strlen(str) <= max_bytes)
+      return;
+   str[max_bytes] = '\0';
+   utf8_trim_incomplete(str);
+}
+
 void sanitize_utf8_for_json(char *str) {
    if (!str)
       return;

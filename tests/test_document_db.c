@@ -150,16 +150,6 @@ static int prepare_statements(void) {
       return -1;
 
    rc = sqlite3_prepare_v2(s_db.db,
-                           "SELECT c.id, c.chunk_index, c.text, c.embedding, c.embedding_norm, "
-                           "d.id, d.filename, d.filetype, c.created_at "
-                           "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
-                           "WHERE d.user_id = ? OR d.is_global = 1 "
-                           "LIMIT ?",
-                           -1, &s_db.stmt_doc_chunk_search, NULL);
-   if (rc != SQLITE_OK)
-      return -1;
-
-   rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, user_id, filename, filepath, filetype, file_hash, "
                            "num_chunks, is_global, created_at "
                            "FROM documents "
@@ -259,8 +249,6 @@ static void teardown_db(void) {
       sqlite3_finalize(s_db.stmt_doc_count_user);
    if (s_db.stmt_doc_chunk_create)
       sqlite3_finalize(s_db.stmt_doc_chunk_create);
-   if (s_db.stmt_doc_chunk_search)
-      sqlite3_finalize(s_db.stmt_doc_chunk_search);
    if (s_db.stmt_doc_find_by_name)
       sqlite3_finalize(s_db.stmt_doc_find_by_name);
    if (s_db.stmt_doc_chunk_read)

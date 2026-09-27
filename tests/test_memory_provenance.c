@@ -34,8 +34,10 @@
 
 #include "auth/auth_db_internal.h"
 #include "config/dawn_config.h"
+#include "core/session_manager.h"
 #include "dawn_error.h"
 #include "memory/memory_db.h"
+#include "memory/memory_db_internal.h"
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_types.h"
 #include "unity.h"
@@ -111,8 +113,64 @@ static const char *DDL =
    "  source_msg_id_end      INTEGER DEFAULT NULL,"
    "  expires_at             INTEGER DEFAULT NULL,"  /* v58 */
    "  note_doc_id            INTEGER DEFAULT NULL,"  /* v61 (memory→note bridge) */
+   "  subject_entity_id      INTEGER DEFAULT NULL,"
+   "  origin_unsourced       INTEGER NOT NULL DEFAULT 0,"
    "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
+   "  FOREIGN KEY (superseded_by) REFERENCES memory_facts(id) ON DELETE SET NULL,"
    "  FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL"
+   ");"
+
+   /* The indexes production has, so the planner faces the same choices. */
+   "CREATE INDEX IF NOT EXISTS idx_memory_facts_user ON memory_facts(user_id);"
+   "CREATE INDEX IF NOT EXISTS idx_memory_facts_source_conv ON "
+   "memory_facts(user_id, source_conversation_id);"
+   "CREATE INDEX IF NOT EXISTS idx_memory_facts_superseded_by ON "
+   "memory_facts(superseded_by) WHERE superseded_by IS NOT NULL;"
+
+   /* v89: every conversation a fact was learned from */
+   "CREATE TABLE IF NOT EXISTS memory_fact_sources ("
+   "  fact_id INTEGER NOT NULL,"
+   "  conversation_id INTEGER NOT NULL,"
+   "  PRIMARY KEY (fact_id, conversation_id),"
+   "  FOREIGN KEY (fact_id) REFERENCES memory_facts(id) ON DELETE CASCADE,"
+   "  FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
+   ") WITHOUT ROWID;"
+
+   "CREATE TABLE IF NOT EXISTS memory_relation_sources ("
+   "  relation_id INTEGER NOT NULL,"
+   "  conversation_id INTEGER NOT NULL,"
+   "  PRIMARY KEY (relation_id, conversation_id),"
+   "  FOREIGN KEY (relation_id) REFERENCES memory_relations(id) ON DELETE CASCADE,"
+   "  FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
+   ") WITHOUT ROWID;"
+   "CREATE TABLE IF NOT EXISTS memory_preference_sources ("
+   "  preference_id INTEGER NOT NULL,"
+   "  conversation_id INTEGER NOT NULL,"
+   "  PRIMARY KEY (preference_id, conversation_id),"
+   "  FOREIGN KEY (preference_id) REFERENCES memory_preferences(id) ON DELETE CASCADE,"
+   "  FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
+   ") WITHOUT ROWID;"
+
+   "CREATE TABLE IF NOT EXISTS memory_entities ("
+   "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+   "  user_id INTEGER NOT NULL,"
+   "  name TEXT NOT NULL,"
+   "  canonical_id INTEGER DEFAULT NULL,"
+   "  is_user_self INTEGER NOT NULL DEFAULT 0"
+   ");"
+   "CREATE TABLE IF NOT EXISTS memory_entity_aliases ("
+   "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+   "  user_id INTEGER NOT NULL,"
+   "  source_entity_id INTEGER,"
+   "  target_entity_id INTEGER NOT NULL,"
+   "  FOREIGN KEY (source_entity_id) REFERENCES memory_entities(id) ON DELETE SET NULL,"
+   "  FOREIGN KEY (target_entity_id) REFERENCES memory_entities(id) ON DELETE SET NULL"
+   ");"
+   "CREATE TABLE IF NOT EXISTS contacts ("
+   "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+   "  user_id INTEGER NOT NULL,"
+   "  entity_id INTEGER NOT NULL,"
+   "  value TEXT NOT NULL"
    ");"
 
    "CREATE TABLE IF NOT EXISTS memory_preferences ("
@@ -128,6 +186,7 @@ static const char *DDL =
    "  source_conversation_id INTEGER DEFAULT NULL,"
    "  source_msg_id_start    INTEGER DEFAULT NULL,"
    "  source_msg_id_end      INTEGER DEFAULT NULL,"
+   "  origin_unsourced       INTEGER NOT NULL DEFAULT 0,"
    "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
    "  FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL,"
    "  UNIQUE(user_id, category)"
@@ -160,16 +219,23 @@ static const char *DDL =
    "  object_entity_id INTEGER DEFAULT 0,"
    "  object_name TEXT,"
    "  confidence REAL DEFAULT 1.0,"
-   "  fact_id INTEGER DEFAULT 0,"
+   "  fact_id INTEGER DEFAULT NULL,"
    "  valid_from INTEGER DEFAULT NULL,"
    "  valid_to INTEGER DEFAULT NULL,"
    "  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
    "  source_conversation_id INTEGER DEFAULT NULL,"
    "  source_msg_id_start    INTEGER DEFAULT NULL,"
    "  source_msg_id_end      INTEGER DEFAULT NULL,"
+   "  origin_unsourced       INTEGER NOT NULL DEFAULT 0,"
    "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
+   "  FOREIGN KEY (fact_id) REFERENCES memory_facts(id) ON DELETE SET NULL,"
    "  FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL"
-   ");";
+   ");"
+   "CREATE INDEX IF NOT EXISTS idx_memory_relations_user ON memory_relations(user_id);"
+   "CREATE INDEX IF NOT EXISTS idx_memory_relations_source_conv ON "
+   "memory_relations(user_id, source_conversation_id);"
+   "CREATE INDEX IF NOT EXISTS idx_memory_relations_fact ON "
+   "memory_relations(fact_id) WHERE fact_id IS NOT NULL;";
 /* clang-format on */
 
 static int prepare_statements(void) {
@@ -178,8 +244,9 @@ static int prepare_statements(void) {
    rc = sqlite3_prepare_v2(s_db.db,
                            "INSERT INTO memory_facts (user_id, fact_text, confidence, source, "
                            "category, created_at, normalized_hash, "
-                           "source_conversation_id, source_msg_id_start, source_msg_id_end) "
-                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                           "source_conversation_id, source_msg_id_start, source_msg_id_end, "
+                           "origin_unsourced) "
+                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?8 IS NULL)",
                            -1, &s_db.stmt_memory_fact_create, NULL);
    if (rc != SQLITE_OK)
       return FAILURE;
@@ -200,9 +267,12 @@ static int prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "INSERT INTO memory_preferences (user_id, category, value, confidence, source, created_at, "
-       "updated_at, source_conversation_id, source_msg_id_start, source_msg_id_end) "
-       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+       "updated_at, source_conversation_id, source_msg_id_start, source_msg_id_end, "
+       "origin_unsourced) "
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?8 IS NULL) "
        "ON CONFLICT(user_id, category) DO UPDATE SET "
+       "origin_unsourced = CASE WHEN excluded.value != value THEN excluded.origin_unsourced "
+       "ELSE MAX(origin_unsourced, excluded.origin_unsourced) END, "
        "value=excluded.value, confidence=excluded.confidence, updated_at=excluded.updated_at, "
        "source_conversation_id=excluded.source_conversation_id, "
        "source_msg_id_start=excluded.source_msg_id_start, "
@@ -273,6 +343,36 @@ static int prepare_statements(void) {
    if (rc != SQLITE_OK)
       return FAILURE;
 
+   /* Forget: keep in sync with auth_db_statements.c. */
+   rc = sqlite3_prepare_v2(s_db.db, "DELETE FROM memory_facts WHERE id = ? AND user_id = ?", -1,
+                           &s_db.stmt_memory_fact_delete, NULL);
+   if (rc != SQLITE_OK)
+      return FAILURE;
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "INSERT OR IGNORE INTO memory_fact_sources (fact_id, conversation_id) "
+                           "SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM conversations WHERE "
+                           "id = ?2)",
+                           -1, &s_db.stmt_memory_fact_source_add, NULL);
+   if (rc != SQLITE_OK)
+      return FAILURE;
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT id, value FROM memory_preferences WHERE user_id = ? AND "
+                           "category = ?",
+                           -1, &s_db.stmt_memory_pref_current, NULL);
+   if (rc != SQLITE_OK)
+      return FAILURE;
+   rc = sqlite3_prepare_v2(s_db.db, "DELETE FROM memory_preference_sources WHERE preference_id = ?",
+                           -1, &s_db.stmt_memory_pref_sources_clear, NULL);
+   if (rc != SQLITE_OK)
+      return FAILURE;
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "INSERT OR IGNORE INTO memory_preference_sources (preference_id, "
+                           "conversation_id) SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM "
+                           "conversations WHERE id = ?2)",
+                           -1, &s_db.stmt_memory_pref_source_add, NULL);
+   if (rc != SQLITE_OK)
+      return FAILURE;
+
    return SUCCESS;
 }
 
@@ -315,6 +415,21 @@ static void close_db(void) {
       sqlite3_finalize(s_db.stmt_memory_fact_list_created_asc);
    if (s_db.stmt_memory_fact_prune_expired)
       sqlite3_finalize(s_db.stmt_memory_fact_prune_expired);
+   if (s_db.stmt_memory_fact_delete)
+      sqlite3_finalize(s_db.stmt_memory_fact_delete);
+   if (s_db.stmt_memory_fact_source_add)
+      sqlite3_finalize(s_db.stmt_memory_fact_source_add);
+   if (s_db.stmt_memory_pref_source_add)
+      sqlite3_finalize(s_db.stmt_memory_pref_source_add);
+   if (s_db.stmt_memory_pref_current)
+      sqlite3_finalize(s_db.stmt_memory_pref_current);
+   if (s_db.stmt_memory_pref_sources_clear)
+      sqlite3_finalize(s_db.stmt_memory_pref_sources_clear);
+   s_db.stmt_memory_pref_current = NULL;
+   s_db.stmt_memory_pref_sources_clear = NULL;
+   s_db.stmt_memory_fact_delete = NULL;
+   s_db.stmt_memory_fact_source_add = NULL;
+   s_db.stmt_memory_pref_source_add = NULL;
    s_db.stmt_memory_fact_create = NULL;
    s_db.stmt_memory_fact_get = NULL;
    s_db.stmt_memory_pref_upsert = NULL;
@@ -1038,8 +1153,395 @@ void test_prune_expired_removes_past_only(void) {
    TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(future_id, 1, &got));
 }
 
+/* Run a single-value query and return the integer (or -1 if no row). */
+static int64_t q_int(const char *sql) {
+   sqlite3_stmt *st = NULL;
+   int64_t v = -1;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL) == SQLITE_OK &&
+       sqlite3_step(st) == SQLITE_ROW) {
+      v = sqlite3_column_type(st, 0) == SQLITE_NULL ? 0 : sqlite3_column_int64(st, 0);
+   }
+   sqlite3_finalize(st);
+   return v;
+}
+
+static void q_exec(const char *sql) {
+   char *err = NULL;
+   TEST_ASSERT_EQUAL_INT_MESSAGE(SQLITE_OK, sqlite3_exec(s_db.db, sql, NULL, NULL, &err),
+                                 err ? err : sql);
+}
+
+/* Forgetting conversation 25 removes what only it taught, keeps (and re-points)
+ * what another conversation also taught, and cleans up orphaned entities. */
+void test_forget_keeps_facts_taught_elsewhere(void) {
+   memory_provenance_t p10 = { .conv_id = 10, .msg_id_start = 100, .msg_id_end = 101 };
+   memory_provenance_t p25 = { .conv_id = 25, .msg_id_start = 0, .msg_id_end = 0 };
+   int64_t shared = 0, only25 = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_fact_create(1, "User lives in Atlanta", 0.9f, "explicit",
+                                               "personal", &p10, &shared));
+   /* Re-mentioned in 25: the fact's own source now points at 25. */
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_provenance_extend(shared, 1, 25, 0, 0));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_fact_create(1, "User has a doctor visit Friday", 0.8f,
+                                               "explicit", "health", &p25, &only25));
+
+   char sql[512];
+   q_exec("INSERT INTO memory_entities (id, user_id, name) VALUES (500, 1, 'Dr Orphan');"
+          "INSERT INTO memory_entities (id, user_id, name) VALUES (501, 1, 'Pat Contact');"
+          "INSERT INTO memory_entities (id, user_id, name, is_user_self) VALUES (502, 1, 'Me', 1);"
+          "INSERT INTO contacts (user_id, entity_id, value) VALUES (1, 501, 'pat@example.com');");
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, "
+            "object_entity_id, fact_id, source_conversation_id) VALUES "
+            "(900, 1, 502, 'sees', 500, %lld, 25), "      /* tied to only25: goes */
+            "(901, 1, 500, 'knows', 501, NULL, 25), "     /* no fact, only 25: goes */
+            "(902, 1, 502, 'lives_in', NULL, %lld, 25), " /* only 25 said it: goes */
+            "(903, 1, 502, 'drives', NULL, NULL, 25);",   /* 10 said it too: stays */
+            (long long)only25, (long long)shared);
+   q_exec(sql);
+   q_exec("INSERT INTO memory_relation_sources VALUES (903, 10), (903, 25);");
+   q_exec("INSERT INTO memory_summaries (user_id, session_id, summary, source_conversation_id) "
+          "VALUES (1, 's', 'talked about a visit', 25);"
+          "INSERT INTO memory_preferences (id, user_id, category, value, source_conversation_id) "
+          "VALUES (700, 1, 'tone', 'brief', 25), (701, 1, 'units', 'metric', 25);"
+          "INSERT INTO memory_preference_sources VALUES (701, 10), (701, 25);");
+
+   const int64_t set[] = { 25 };
+   memory_conv_learned_t n;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_learned_count(1, set, 1, &n));
+   TEST_ASSERT_EQUAL_INT(1, n.facts);
+   TEST_ASSERT_EQUAL_INT(1, n.summaries);
+   TEST_ASSERT_EQUAL_INT(3, n.relations);
+   TEST_ASSERT_EQUAL_INT(1, n.preferences);
+
+   memory_conv_learned_t d;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_forget(1, set, 1, &d));
+   /* The count shown before a forget is exactly what it removes. */
+   TEST_ASSERT_EQUAL_INT(n.facts, d.facts);
+   TEST_ASSERT_EQUAL_INT(n.summaries, d.summaries);
+   TEST_ASSERT_EQUAL_INT(n.relations, d.relations);
+   TEST_ASSERT_EQUAL_INT(n.preferences, d.preferences);
+   TEST_ASSERT_EQUAL_INT(1, d.entities);
+
+   snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM memory_facts WHERE id = %lld",
+            (long long)only25);
+   TEST_ASSERT_EQUAL_INT64(0, q_int(sql));
+   snprintf(sql, sizeof(sql), "SELECT source_conversation_id FROM memory_facts WHERE id = %lld",
+            (long long)shared);
+   TEST_ASSERT_EQUAL_INT64(10, q_int(sql));
+   snprintf(sql, sizeof(sql),
+            "SELECT COUNT(*) FROM memory_fact_sources WHERE fact_id = %lld AND "
+            "conversation_id = 25",
+            (long long)shared);
+   TEST_ASSERT_EQUAL_INT64(0, q_int(sql));
+   TEST_ASSERT_EQUAL_INT64(10, q_int("SELECT source_conversation_id FROM memory_relations "
+                                     "WHERE id = 903"));
+   TEST_ASSERT_EQUAL_INT64(
+       0, q_int("SELECT COUNT(*) FROM memory_relations WHERE id IN (900, 901, 902)"));
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT COUNT(*) FROM memory_summaries"));
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT COUNT(*) FROM memory_preferences WHERE id = 700"));
+   TEST_ASSERT_EQUAL_INT64(10, q_int("SELECT source_conversation_id FROM memory_preferences "
+                                     "WHERE id = 701"));
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT COUNT(*) FROM memory_entities WHERE id = 500"));
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT COUNT(*) FROM memory_entities WHERE id = 501"));
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT COUNT(*) FROM memory_entities WHERE id = 502"));
+
+   /* Nothing left to forget. */
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_learned_count(1, set, 1, &n));
+   TEST_ASSERT_EQUAL_INT(0, n.facts + n.summaries + n.relations + n.preferences);
+}
+
+/* A preference reinforced with the same value gains a source; a new value
+ * comes only from the conversation that set it. */
+void test_preference_sources_follow_the_value(void) {
+   memory_provenance_t p10 = { .conv_id = 10 }, p25 = { .conv_id = 25 }, p30 = { .conv_id = 30 };
+   memory_db_pref_upsert(1, "tone", "brief", 0.8f, "inferred", &p10);
+   memory_db_pref_upsert(1, "tone", "brief", 0.8f, "inferred", &p25);
+   TEST_ASSERT_EQUAL_INT64(2, q_int("SELECT COUNT(*) FROM memory_preference_sources"));
+   memory_db_pref_upsert(1, "tone", "verbose", 0.8f, "inferred", &p30);
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT COUNT(*) FROM memory_preference_sources"));
+   TEST_ASSERT_EQUAL_INT64(30, q_int("SELECT conversation_id FROM memory_preference_sources"));
+}
+
+/* Another user's rows sourced from the same conversation id are untouched. */
+void test_forget_is_user_scoped(void) {
+   memory_provenance_t p25 = { .conv_id = 25 };
+   int64_t mine = 0, theirs = 0;
+   memory_db_fact_create(1, "mine", 0.9f, "explicit", "general", &p25, &mine);
+   memory_db_fact_create(2, "theirs", 0.9f, "explicit", "general", &p25, &theirs);
+   const int64_t set[] = { 25 };
+   memory_conv_learned_t d;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_forget(1, set, 1, &d));
+   TEST_ASSERT_EQUAL_INT(1, d.facts);
+   char sql[128];
+   snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM memory_facts WHERE id = %lld",
+            (long long)theirs);
+   TEST_ASSERT_EQUAL_INT64(1, q_int(sql));
+}
+
+/* A relation tied to a forgotten fact but also taught by another conversation
+ * stays; it only loses its link to the fact. */
+void test_forget_keeps_relation_taught_elsewhere(void) {
+   memory_provenance_t p25 = { .conv_id = 25 };
+   int64_t f = 0;
+   memory_db_fact_create(1, "User works at Acme", 0.9f, "explicit", "work", &p25, &f);
+   char sql[256];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_relations (id, user_id, subject_entity_id, relation, fact_id, "
+            "source_conversation_id) VALUES (910, 1, 502, 'works_at', %lld, 25);"
+            "INSERT INTO memory_relation_sources VALUES (910, 10), (910, 25);",
+            (long long)f);
+   q_exec(
+       "INSERT INTO memory_entities (id, user_id, name, is_user_self) VALUES (502, 1, 'Me', 1);");
+   q_exec(sql);
+   const int64_t set[] = { 25 };
+   memory_conv_learned_t n, d;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_learned_count(1, set, 1, &n));
+   TEST_ASSERT_EQUAL_INT(0, n.relations);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_forget(1, set, 1, &d));
+   TEST_ASSERT_EQUAL_INT(1, d.facts);
+   TEST_ASSERT_EQUAL_INT(0, d.relations);
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT COUNT(*) FROM memory_relations WHERE id = 910 AND "
+                                    "fact_id IS NULL AND source_conversation_id = 10"));
+}
+
+/* Forgetting a correction takes the facts it replaced with it, down the chain,
+ * rather than reviving them as current. */
+void test_forget_takes_superseded_chain(void) {
+   memory_provenance_t p10 = { .conv_id = 10 }, p25 = { .conv_id = 25 };
+   int64_t boston = 0, austin = 0, denver = 0;
+   memory_db_fact_create(1, "User lives in Boston", 0.9f, "explicit", "personal", &p10, &boston);
+   memory_db_fact_create(1, "User lives in Austin", 0.9f, "explicit", "personal", &p10, &austin);
+   memory_db_fact_create(1, "User lives in Denver", 0.9f, "explicit", "personal", &p25, &denver);
+   char sql[256];
+   snprintf(sql, sizeof(sql),
+            "UPDATE memory_facts SET superseded_by = %lld WHERE id = %lld;"
+            "UPDATE memory_facts SET superseded_by = %lld WHERE id = %lld;",
+            (long long)austin, (long long)boston, (long long)denver, (long long)austin);
+   q_exec(sql);
+   const int64_t set[] = { 25 };
+   memory_conv_learned_t n, d;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_learned_count(1, set, 1, &n));
+   TEST_ASSERT_EQUAL_INT(1, n.facts);
+   TEST_ASSERT_EQUAL_INT(2, n.outdated);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_forget(1, set, 1, &d));
+   TEST_ASSERT_EQUAL_INT(n.facts, d.facts);
+   TEST_ASSERT_EQUAL_INT(n.outdated, d.outdated);
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT COUNT(*) FROM memory_facts"));
+}
+
+/* An entity an alias still targets is kept (its target column can't be nulled),
+ * and doesn't fail the forget. */
+void test_forget_keeps_alias_target_entity(void) {
+   memory_provenance_t p25 = { .conv_id = 25 };
+   int64_t f = 0;
+   memory_db_fact_create(1, "Sam likes chess", 0.9f, "explicit", "general", &p25, &f);
+   char sql[256];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_entities (id, user_id, name) VALUES (600, 1, 'Sam');"
+            "INSERT INTO memory_entity_aliases (user_id, source_entity_id, target_entity_id) "
+            "VALUES (1, NULL, 600);"
+            "UPDATE memory_facts SET subject_entity_id = 600 WHERE id = %lld;",
+            (long long)f);
+   q_exec(sql);
+   const int64_t set[] = { 25 };
+   memory_conv_learned_t d;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_forget(1, set, 1, &d));
+   TEST_ASSERT_EQUAL_INT(1, d.facts);
+   TEST_ASSERT_EQUAL_INT(0, d.entities);
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT COUNT(*) FROM memory_entities WHERE id = 600"));
+}
+
+/* Deleting a conversation drops its source rows, so it is never counted as
+ * another conversation that taught a fact. */
+void test_conversation_delete_drops_sources(void) {
+   memory_provenance_t p10 = { .conv_id = 10 }, p30 = { .conv_id = 30 };
+   int64_t f = 0;
+   memory_db_fact_create(1, "User owns a kayak", 0.9f, "explicit", "general", &p30, &f);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_provenance_extend(f, 1, 10, 0, 0));
+   (void)p10;
+   q_exec("DELETE FROM conversations WHERE id = 30;");
+   TEST_ASSERT_EQUAL_INT64(0, q_int("SELECT COUNT(*) FROM memory_fact_sources WHERE "
+                                    "conversation_id = 30"));
+   const int64_t set[] = { 10 };
+   memory_conv_learned_t d;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_forget(1, set, 1, &d));
+   TEST_ASSERT_EQUAL_INT(1, d.facts);
+}
+
+/* True when EXPLAIN QUERY PLAN of @p sql names @p index anywhere. */
+static bool plan_uses(const char *sql, const char *index) {
+   char eqp[8192];
+   snprintf(eqp, sizeof(eqp), "EXPLAIN QUERY PLAN %s", sql);
+   sqlite3_stmt *st = NULL;
+   bool found = false;
+   if (sqlite3_prepare_v2(s_db.db, eqp, -1, &st, NULL) == SQLITE_OK) {
+      sqlite3_bind_int(st, 1, 1);
+      sqlite3_bind_text(st, 2, "[25]", -1, SQLITE_STATIC);
+      while (sqlite3_step(st) == SQLITE_ROW) {
+         const char *detail = (const char *)sqlite3_column_text(st, 3);
+         if (detail && strstr(detail, index)) {
+            found = true;
+         }
+      }
+   }
+   sqlite3_finalize(st);
+   return found;
+}
+
+/* The supersede recursion and the relation fact arm seek their own indexes.
+ * On user_id instead, each step scans all of the user's rows: seconds under the
+ * global database lock on a real memory.  The planner's choice is silent, so
+ * pin it here. */
+void test_forget_queries_use_their_indexes(void) {
+   TEST_ASSERT_TRUE(plan_uses("SELECT id FROM memory_facts WHERE user_id = ?1 AND id IN "
+                              "(" MEMORY_FORGET_FACT_IDS ")",
+                              "idx_memory_facts_superseded_by"));
+   TEST_ASSERT_TRUE(plan_uses(MEMORY_FORGET_RELATION_IDS, "idx_memory_relations_fact"));
+}
+
+/* A fact stated directly (remember, import) and later repeated in a conversation
+ * stays when that conversation is forgotten; so does a preference imported with
+ * the value a conversation gave it. */
+void test_forget_keeps_what_was_stated_directly(void) {
+   memory_provenance_t p25 = { .conv_id = 25 };
+   int64_t f = 0;
+   memory_db_fact_create(1, "User is allergic to peanuts", 0.9f, "explicit", "health", NULL, &f);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_provenance_extend(f, 1, 25, 0, 0));
+   memory_db_pref_upsert(1, "tone", "brief", 0.8f, "inferred", &p25);
+   memory_db_pref_upsert(1, "tone", "brief", 0.8f, "import", NULL);
+   const int64_t set[] = { 25 };
+   memory_conv_learned_t n, d;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_learned_count(1, set, 1, &n));
+   TEST_ASSERT_EQUAL_INT(0, n.facts);
+   TEST_ASSERT_EQUAL_INT(0, n.preferences);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_forget(1, set, 1, &d));
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT COUNT(*) FROM memory_facts"));
+   TEST_ASSERT_EQUAL_INT64(1, q_int("SELECT COUNT(*) FROM memory_preferences"));
+}
+
+/* A forgotten correction takes the facts it replaced, except an imported one:
+ * that stays, current again. */
+void test_forget_chain_stops_at_imported_fact(void) {
+   memory_provenance_t p25 = { .conv_id = 25 };
+   int64_t imported = 0, denver = 0;
+   memory_db_fact_create(1, "User lives in Boston", 0.9f, "import", "personal", NULL, &imported);
+   memory_db_fact_create(1, "User lives in Denver", 0.9f, "explicit", "personal", &p25, &denver);
+   char sql[160];
+   snprintf(sql, sizeof(sql), "UPDATE memory_facts SET superseded_by = %lld WHERE id = %lld;",
+            (long long)denver, (long long)imported);
+   q_exec(sql);
+   const int64_t set[] = { 25 };
+   memory_conv_learned_t n, d;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_learned_count(1, set, 1, &n));
+   TEST_ASSERT_EQUAL_INT(1, n.facts);
+   TEST_ASSERT_EQUAL_INT(0, n.outdated);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_forget(1, set, 1, &d));
+   snprintf(sql, sizeof(sql),
+            "SELECT COUNT(*) FROM memory_facts WHERE id = %lld AND "
+            "superseded_by IS NULL",
+            (long long)imported);
+   TEST_ASSERT_EQUAL_INT64(1, q_int(sql));
+}
+
+static void fact_origin(int64_t id, int64_t *conv_out, int *unsourced_out) {
+   sqlite3_stmt *st = NULL;
+   sqlite3_prepare_v2(s_db.db,
+                      "SELECT source_conversation_id, origin_unsourced FROM memory_facts "
+                      "WHERE id = ?",
+                      -1, &st, NULL);
+   sqlite3_bind_int64(st, 1, id);
+   TEST_ASSERT_EQUAL(SQLITE_ROW, sqlite3_step(st));
+   *conv_out = sqlite3_column_type(st, 0) == SQLITE_NULL ? 0 : sqlite3_column_int64(st, 0);
+   *unsourced_out = sqlite3_column_int(st, 1);
+   sqlite3_finalize(st);
+}
+
+/* A remember made before its conversation existed: recorded as learned in it. */
+void test_attach_source_records_where_a_remember_was_made(void) {
+   int64_t id = 0;
+   memory_db_fact_create(1, "Garage code hint", 1.0f, "explicit", "general", NULL, &id);
+   int64_t conv = 0;
+   int unsourced = 0;
+   fact_origin(id, &conv, &unsourced);
+   TEST_ASSERT_EQUAL(1, unsourced);
+   memory_db_fact_attach_source(id, 1, true, 10);
+   fact_origin(id, &conv, &unsourced);
+   TEST_ASSERT_EQUAL(10, conv);
+   TEST_ASSERT_EQUAL(0, unsourced);
+}
+
+/* Already pointing at a newer conversation: still recorded as learned in one. */
+void test_attach_source_marks_learned_when_columns_keep_a_newer_one(void) {
+   int64_t id = 0;
+   memory_db_fact_create(1, "Prefers tea", 1.0f, "explicit", "general", NULL, &id);
+   memory_db_fact_provenance_extend(id, 1, 30, 0, 0); /* restated in 30 meanwhile */
+   memory_db_fact_attach_source(id, 1, true, 25);
+   int64_t conv = 0;
+   int unsourced = 1;
+   fact_origin(id, &conv, &unsourced);
+   TEST_ASSERT_EQUAL(30, conv);
+   TEST_ASSERT_EQUAL(0, unsourced);
+}
+
+/* A conversation deleted (or someone else's) is never recorded as a source. */
+void test_attach_source_refuses_a_missing_conversation(void) {
+   int64_t id = 0;
+   memory_db_fact_create(1, "Deleted-conversation fact", 1.0f, "explicit", "general", NULL, &id);
+   memory_db_fact_attach_source(id, 1, true, 999);
+   int64_t conv = 0;
+   int unsourced = 0;
+   fact_origin(id, &conv, &unsourced);
+   TEST_ASSERT_EQUAL(0, conv);
+   TEST_ASSERT_EQUAL(1, unsourced);
+}
+
+/* A batch in one commit: each fact gets the conversation when it is its user's
+ * and exists; the others are left alone. */
+void test_attach_sources_batch_checks_each_fact(void) {
+   int64_t mine = 0, again = 0, bobs = 0;
+   memory_db_fact_create(1, "Batch fact one", 1.0f, "explicit", "general", NULL, &mine);
+   memory_db_fact_create(1, "Batch fact two", 1.0f, "explicit", "general", NULL, &again);
+   memory_db_fact_create(2, "Bob's fact", 1.0f, "explicit", "general", NULL, &bobs);
+   const session_fact_source_t batch[] = {
+      { .fact_id = mine, .user_id = 1, .created = true },
+      { .fact_id = bobs, .user_id = 2, .created = true }, /* conversation 10 is user 1's */
+      { .fact_id = again, .user_id = 1, .created = false },
+   };
+   memory_db_fact_attach_sources(batch, 3, 10);
+   int64_t conv = 0;
+   int unsourced = 0;
+   fact_origin(mine, &conv, &unsourced);
+   TEST_ASSERT_EQUAL(10, conv);
+   TEST_ASSERT_EQUAL(0, unsourced);
+   fact_origin(bobs, &conv, &unsourced);
+   TEST_ASSERT_EQUAL(0, conv);
+   TEST_ASSERT_EQUAL(1, unsourced);
+   fact_origin(again, &conv, &unsourced); /* restated: sourced, not "learned here" */
+   TEST_ASSERT_EQUAL(10, conv);
+   TEST_ASSERT_EQUAL(1, unsourced);
+}
+
+/* A restated fact never points at a conversation that is gone. */
+void test_attach_source_restated_refuses_a_missing_conversation(void) {
+   int64_t id = 0;
+   memory_provenance_t prov = { .conv_id = 25 };
+   memory_db_fact_create(1, "Restated fact", 1.0f, "explicit", "general", &prov, &id);
+   memory_db_fact_attach_source(id, 1, false, 999);
+   int64_t conv = 0;
+   int unsourced = 0;
+   fact_origin(id, &conv, &unsourced);
+   TEST_ASSERT_EQUAL(25, conv);
+}
+
 int main(void) {
    UNITY_BEGIN();
+   RUN_TEST(test_attach_source_records_where_a_remember_was_made);
+   RUN_TEST(test_attach_source_marks_learned_when_columns_keep_a_newer_one);
+   RUN_TEST(test_attach_source_refuses_a_missing_conversation);
+   RUN_TEST(test_attach_sources_batch_checks_each_fact);
+   RUN_TEST(test_attach_source_restated_refuses_a_missing_conversation);
    RUN_TEST(test_fact_create_with_source_roundtrip);
    RUN_TEST(test_fact_create_null_provenance_returns_not_found);
    RUN_TEST(test_null_bind_produces_sql_null_not_zero);
@@ -1087,6 +1589,16 @@ int main(void) {
    RUN_TEST(test_expiry_guard_hides_and_restores);
    RUN_TEST(test_fact_list_sort_orders);
    RUN_TEST(test_prune_expired_removes_past_only);
+   RUN_TEST(test_forget_keeps_facts_taught_elsewhere);
+   RUN_TEST(test_forget_is_user_scoped);
+   RUN_TEST(test_preference_sources_follow_the_value);
+   RUN_TEST(test_forget_keeps_relation_taught_elsewhere);
+   RUN_TEST(test_forget_takes_superseded_chain);
+   RUN_TEST(test_forget_keeps_alias_target_entity);
+   RUN_TEST(test_conversation_delete_drops_sources);
+   RUN_TEST(test_forget_queries_use_their_indexes);
+   RUN_TEST(test_forget_keeps_what_was_stated_directly);
+   RUN_TEST(test_forget_chain_stops_at_imported_fact);
 
    return UNITY_END();
 }

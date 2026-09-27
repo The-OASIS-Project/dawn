@@ -806,8 +806,9 @@ int auth_db_prepare_statements(void) {
    rc = sqlite3_prepare_v2(s_db.db,
                            "INSERT INTO memory_facts (user_id, fact_text, confidence, source, "
                            "category, created_at, normalized_hash, "
-                           "source_conversation_id, source_msg_id_start, source_msg_id_end) "
-                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                           "source_conversation_id, source_msg_id_start, source_msg_id_end, "
+                           "origin_unsourced) "
+                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?8 IS NULL)",
                            -1, &s_db.stmt_memory_fact_create, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare memory_fact_create failed: %s", sqlite3_errmsg(s_db.db));
@@ -958,6 +959,60 @@ int auth_db_prepare_statements(void) {
                    "FTS5 sync inactive until v48 migration completes",
                    sqlite3_errmsg(s_db.db));
       s_db.stmt_memory_facts_fts_insert = NULL;
+   }
+   /* v89: record a conversation a fact was learned from.  Soft: until the
+    * migration has run the table is missing and sources simply aren't recorded. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "INSERT OR IGNORE INTO memory_fact_sources (fact_id, conversation_id) "
+                           "SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM conversations WHERE "
+                           "id = ?2)",
+                           -1, &s_db.stmt_memory_fact_source_add, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: prepare memory_fact_source_add failed: %s", sqlite3_errmsg(s_db.db));
+      s_db.stmt_memory_fact_source_add = NULL;
+   }
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "INSERT OR IGNORE INTO memory_relation_sources (relation_id, "
+                           "conversation_id) SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM "
+                           "conversations WHERE id = ?2)",
+                           -1, &s_db.stmt_memory_relation_source_add, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: prepare memory_relation_source_add failed: %s",
+                   sqlite3_errmsg(s_db.db));
+      s_db.stmt_memory_relation_source_add = NULL;
+   }
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "INSERT OR IGNORE INTO memory_preference_sources (preference_id, "
+                           "conversation_id) SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM "
+                           "conversations WHERE id = ?2)",
+                           -1, &s_db.stmt_memory_pref_source_add, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: prepare memory_pref_source_add failed: %s", sqlite3_errmsg(s_db.db));
+      s_db.stmt_memory_pref_source_add = NULL;
+   }
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT id, value FROM memory_preferences WHERE user_id = ? AND "
+                           "category = ?",
+                           -1, &s_db.stmt_memory_pref_current, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare memory_pref_current failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+   rc = sqlite3_prepare_v2(s_db.db, "DELETE FROM memory_preference_sources WHERE preference_id = ?",
+                           -1, &s_db.stmt_memory_pref_sources_clear, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: prepare memory_pref_sources_clear failed: %s",
+                   sqlite3_errmsg(s_db.db));
+      s_db.stmt_memory_pref_sources_clear = NULL;
+   }
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT COALESCE((SELECT gen FROM doc_chunk_generation WHERE owner = "
+                           "?1), 0), COALESCE((SELECT gen FROM doc_chunk_generation WHERE "
+                           "owner = 0), 0)",
+                           -1, &s_db.stmt_doc_chunk_generation, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: prepare doc_chunk_generation failed: %s", sqlite3_errmsg(s_db.db));
+      s_db.stmt_doc_chunk_generation = NULL;
    }
    /* Contentless FTS5 requires the 'delete' command rather than DELETE FROM
     * (which would leave the index out of sync because there's no content
@@ -1141,9 +1196,14 @@ int auth_db_prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "INSERT INTO memory_preferences (user_id, category, value, confidence, source, created_at, "
-       "updated_at, source_conversation_id, source_msg_id_start, source_msg_id_end) "
-       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+       "updated_at, source_conversation_id, source_msg_id_start, source_msg_id_end, "
+       "origin_unsourced) "
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?8 IS NULL) "
        "ON CONFLICT(user_id, category) DO UPDATE SET "
+       /* A new value comes only from where it was set; the same value keeps
+        * every origin it had. */
+       "origin_unsourced = CASE WHEN excluded.value != value THEN excluded.origin_unsourced "
+       "ELSE MAX(origin_unsourced, excluded.origin_unsourced) END, "
        "value=excluded.value, confidence=excluded.confidence, updated_at=excluded.updated_at, "
        "source_conversation_id=excluded.source_conversation_id, "
        "source_msg_id_start=excluded.source_msg_id_start, "
@@ -1415,27 +1475,13 @@ int auth_db_prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
-   /* fact_get_embeddings: created_at appended last (col 3) for temporal-query
-    * scoring (#3).  Cache loader reads it and stores per-fact for boost computation.
-    * note_doc_id (col 4, v61) flags memory→note bridge glosses: they stay in the
-    * cache so semantic retrieval can still surface them, but the paraphrase-dedup
-    * consumer (nearest_fact) skips them so a gloss never merges with a real fact. */
-   rc = sqlite3_prepare_v2(
-       s_db.db,
-       "SELECT id, embedding, embedding_norm, created_at, note_doc_id FROM memory_facts "
-       "WHERE user_id = ? AND superseded_by IS NULL AND embedding IS NOT NULL "
-       "ORDER BY confidence DESC LIMIT ?",
-       -1, &s_db.stmt_memory_fact_get_embeddings, NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("auth_db: prepare fact_get_embeddings failed: %s", sqlite3_errmsg(s_db.db));
-      return AUTH_DB_FAILURE;
-   }
 
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, fact_text FROM memory_facts "
-                           "WHERE user_id = ? AND superseded_by IS NULL "
+                           "WHERE user_id = ? AND superseded_by IS NULL AND id > ? "
+                           "AND fact_text != '' "
                            "AND (embedding IS NULL OR length(embedding)/4 != ?) "
-                           "ORDER BY created_at ASC LIMIT ?",
+                           "ORDER BY id ASC LIMIT ?",
                            -1, &s_db.stmt_memory_fact_list_without_embedding, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare fact_list_without_embedding failed: %s",
@@ -1589,12 +1635,15 @@ int auth_db_prepare_statements(void) {
                            "INSERT INTO memory_relations (user_id, subject_entity_id, relation, "
                            "object_entity_id, object_value, fact_id, confidence, created_at, "
                            "valid_from, valid_to, "
-                           "source_conversation_id, source_msg_id_start, source_msg_id_end) "
-                           "VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'), ?, ?, ?, ?, ?) "
+                           "source_conversation_id, source_msg_id_start, source_msg_id_end, "
+                           "origin_unsourced) "
+                           "VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'), ?, ?, ?, ?, ?, "
+                           "?10 IS NULL) "
                            "ON CONFLICT(user_id, subject_entity_id, relation, "
                            "            COALESCE(object_entity_id, 0), COALESCE(object_value, '')) "
                            "WHERE valid_to IS NULL DO UPDATE SET "
                            "  mention_count = mention_count + 1, "
+                           "  origin_unsourced = MAX(origin_unsourced, excluded.origin_unsourced), "
                            "  confidence = MAX(confidence, excluded.confidence), "
                            "  source_conversation_id = excluded.source_conversation_id, "
                            "  source_msg_id_start = excluded.source_msg_id_start, "
@@ -1910,20 +1959,6 @@ int auth_db_prepare_statements(void) {
        -1, &s_db.stmt_doc_chunk_create, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare doc_chunk_create failed: %s", sqlite3_errmsg(s_db.db));
-      return AUTH_DB_FAILURE;
-   }
-
-   /* doc_chunk_search: created_at appended last so existing column indices in
-    * downstream populators are preserved. */
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "SELECT c.id, c.chunk_index, c.text, c.embedding, c.embedding_norm, "
-                           "d.id, d.filename, d.filetype, c.created_at "
-                           "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
-                           "WHERE d.user_id = ? OR d.is_global = 1 "
-                           "LIMIT ?",
-                           -1, &s_db.stmt_doc_chunk_search, NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("auth_db: prepare doc_chunk_search failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
@@ -2768,6 +2803,18 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_memory_fact_search_bm25_since);
    if (s_db.stmt_memory_facts_fts_insert)
       sqlite3_finalize(s_db.stmt_memory_facts_fts_insert);
+   if (s_db.stmt_memory_fact_source_add)
+      sqlite3_finalize(s_db.stmt_memory_fact_source_add);
+   if (s_db.stmt_memory_relation_source_add)
+      sqlite3_finalize(s_db.stmt_memory_relation_source_add);
+   if (s_db.stmt_memory_pref_source_add)
+      sqlite3_finalize(s_db.stmt_memory_pref_source_add);
+   if (s_db.stmt_memory_pref_current)
+      sqlite3_finalize(s_db.stmt_memory_pref_current);
+   if (s_db.stmt_memory_pref_sources_clear)
+      sqlite3_finalize(s_db.stmt_memory_pref_sources_clear);
+   if (s_db.stmt_doc_chunk_generation)
+      sqlite3_finalize(s_db.stmt_doc_chunk_generation);
    if (s_db.stmt_memory_facts_fts_delete)
       sqlite3_finalize(s_db.stmt_memory_facts_fts_delete);
    if (s_db.stmt_memory_fact_update_access)
@@ -2858,8 +2905,6 @@ void auth_db_finalize_statements(void) {
    /* Embedding statements */
    if (s_db.stmt_memory_fact_update_embedding)
       sqlite3_finalize(s_db.stmt_memory_fact_update_embedding);
-   if (s_db.stmt_memory_fact_get_embeddings)
-      sqlite3_finalize(s_db.stmt_memory_fact_get_embeddings);
    if (s_db.stmt_memory_fact_list_without_embedding)
       sqlite3_finalize(s_db.stmt_memory_fact_list_without_embedding);
    if (s_db.stmt_memory_summary_update_embedding)
@@ -2932,8 +2977,6 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_doc_count_user);
    if (s_db.stmt_doc_chunk_create)
       sqlite3_finalize(s_db.stmt_doc_chunk_create);
-   if (s_db.stmt_doc_chunk_search)
-      sqlite3_finalize(s_db.stmt_doc_chunk_search);
    if (s_db.stmt_doc_find_by_name)
       sqlite3_finalize(s_db.stmt_doc_find_by_name);
    if (s_db.stmt_doc_chunk_read)

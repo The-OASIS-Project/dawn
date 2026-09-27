@@ -90,6 +90,12 @@ extern "C" {
  * of its near-duplicate band (and as the fallback when the config is invalid). */
 #define MEMORY_PARAPHRASE_DEDUP_DEFAULT 0.92f
 
+/* [memory] fact_cache_mb: default and bounds.  A fact takes dims * 4 + 28 bytes,
+ * so the default holds about 50,000 at 384 dims and 13,000 at 1536. */
+#define MEMORY_FACT_CACHE_MB_DEFAULT 80
+#define MEMORY_FACT_CACHE_MB_MIN 8
+#define MEMORY_FACT_CACHE_MB_MAX 1024
+
 /* =============================================================================
  * General Configuration
  * ============================================================================= */
@@ -591,14 +597,21 @@ typedef struct {
 } focus_dedup_config_t;
 
 typedef struct {
-   bool enabled;            /* Master enable; default false until 1c/1d ship */
-   int focus_budget_bytes;  /* Byte cap on the assembled focus block (per turn) */
-   int top_k;               /* Maximum candidates retained after ranking */
-   float min_score;         /* Floor — anything below is dropped */
-   bool classifier_enabled; /* RAGRoute-style source classifier;
-                               default false (off, opt-in after probe) */
-   float weight_semantic;   /* Cross-source ranker weights — Generative
-                               Agents / CrewAI three-factor formula */
+   bool enabled;                 /* Master enable (default off) */
+   int focus_budget_bytes;       /* Byte cap on the assembled focus block (per turn) */
+   int top_k;                    /* Maximum candidates retained after ranking */
+   float min_score;              /* Floor — anything below is dropped */
+   float fact_min_relevance;     /* Facts: same corpus-relative measure against the user's
+                                    other facts; injection only (not the memory tool).
+                                    0 disables. */
+   float document_min_relevance; /* Document chunks: minimum similarity measured from the
+                                    corpus-typical level toward identical,
+                                    (cos - pool_mean) / (1 - pool_mean).  Model-independent;
+                                    0 disables. */
+   bool classifier_enabled;      /* RAGRoute-style source classifier;
+                                    default false (off, opt-in after probe) */
+   float weight_semantic;        /* Cross-source ranker weights — Generative
+                                    Agents / CrewAI three-factor formula */
    float weight_recency;
    float weight_importance;
    float weight_source;  /* Multiplier on per-source weights below */
@@ -672,7 +685,15 @@ typedef struct {
 
    /* Voice conversation idle timeout */
    int conversation_idle_timeout_min; /* Minutes before auto-save (default: 15, 0=disabled) */
-   int default_voice_user_id;         /* User ID for local/DAP conversations (default: 1) */
+   int default_voice_user_id;         /* User the local mic speaks for while the Local Device
+                                       * is unassigned (default: 1); an unmapped satellite is
+                                       * a guest, not this user */
+
+   /* RAM (MB) for the facts held for semantic search (one user's at a time).
+    * When a user's facts need more, the load keeps recently used facts and note
+    * links first, then the best by confidence and recency; the rest are still
+    * found by keyword search. */
+   int fact_cache_mb;
 
    /* Decay settings (Phase 5) */
    bool decay_enabled;               /* Enable nightly confidence decay */

@@ -81,6 +81,57 @@ typedef struct {
 
 /* REQUEST_SUPERSEDED macro now defined in webui_internal.h */
 
+/* A new chat's first message is dispatched before its conversation exists, so
+ * it has no row yet.  Once the conversation is created for it
+ * (session_bind_created_conversation), write it here, on the turn's own thread,
+ * before anything else of the turn, so the user row precedes the reply. */
+/* Write an earlier turn's exchange this turn adopted (it ended before the
+ * conversation existed), ahead of this turn's own rows. */
+static void write_prior_exchange(session_t *session,
+                                 int user_id,
+                                 int64_t conv_id,
+                                 const char *user,
+                                 const char *reply) {
+   int64_t user_row = 0;
+   int64_t reply_row = 0;
+   if (user_id > 0 && user) {
+      (void)conv_db_add_message_ex(conv_id, user_id, "user", user, &user_row);
+   }
+   if (user_id > 0 && reply) {
+      (void)conv_db_add_message_ex(conv_id, user_id, "assistant", reply, &reply_row);
+   }
+   session_stamp_claimed(session, user_row, reply_row);
+}
+
+/* A new chat's first message is dispatched before its conversation exists, so
+ * it has no row yet.  Once the conversation is created for it
+ * (session_bind_created_conversation), write it here, on the turn's own thread,
+ * before anything else of the turn, so the user row precedes the reply: after
+ * any earlier exchange the turn adopted with the conversation. */
+static void persist_pending_user_row(session_t *session, int user_id) {
+   int64_t conv_id = 0;
+   char *prior_user = NULL;
+   char *prior_reply = NULL;
+   if (session_turn_take_prior(session, &conv_id, &prior_user, &prior_reply)) {
+      write_prior_exchange(session, user_id, conv_id, prior_user, prior_reply);
+   }
+   free(prior_user);
+   free(prior_reply);
+   char *pending = session_turn_take_pending(session, "user", &conv_id);
+   if (!pending) {
+      return;
+   }
+   int64_t msg_id = 0;
+   if (user_id > 0 &&
+       conv_db_add_message_ex(conv_id, user_id, "user", pending, &msg_id) == AUTH_DB_SUCCESS) {
+      session_stamp_last_message_id(session, "user", msg_id);
+   } else {
+      OLOG_WARNING("WebUI: could not save the first message of conversation %lld",
+                   (long long)conv_id);
+   }
+   free(pending);
+}
+
 /* Context + callback for the LLM tool loop's structured tool-turn persistence (E2).
  * The daemon owns the structured tool data (the browser only saves the final visible
  * assistant text); this writes the assistant tool_calls + role:tool rows to conv_db.
@@ -116,6 +167,7 @@ static void webui_tool_persist_cb(void *userdata,
    if (conv_id <= 0) {
       return; /* turn not tagged with a conversation — skip rather than guess */
    }
+   persist_pending_user_row(ctx->session, ctx->auth_user_id);
    if (conv_db_add_message_with_tools_ex(conv_id, ctx->auth_user_id, role, content ? content : "",
                                          tool_calls_json, tool_call_id, reasoning_json, is_error,
                                          NULL) != AUTH_DB_SUCCESS) {
@@ -224,6 +276,42 @@ static void webui_text_dispatch_on_user_msg(void *ctx,
  * incremented turn_in_flight: clear the in-flight guard, then release the ref.
  * Decrement BEFORE release so that if this release drops ref_count to 0 and a
  * concurrent session_destroy proceeds, turn_in_flight already reads 0. */
+static void text_worker_persist_final(session_t *session,
+                                      int64_t turn_conv,
+                                      int turn_user_id,
+                                      const char *body);
+
+/* End the turn, first writing what it couldn't save yet while it is still open
+ * (so the rows' ids land on its own history): an earlier exchange it adopted,
+ * its question, its reply.  Deciding and ending happen together: a conversation
+ * created for it at the last moment is either seen here or handed to
+ * session_bind_created_conversation, never lost between the two.  Every exit of
+ * a begun text turn goes through here. */
+static void finish_turn(session_t *session) {
+   const int user_id = (int)session->metrics.user_id;
+   session_turn_unsaved_t unsaved;
+   while (session_turn_finish(session, &unsaved) == SESSION_TURN_WRITE_UNSAVED) {
+      if (unsaved.prior_user || unsaved.prior_reply) {
+         write_prior_exchange(session, user_id, unsaved.conv, unsaved.prior_user,
+                              unsaved.prior_reply);
+      }
+      if (user_id > 0) {
+         int64_t msg_id = 0;
+         if (unsaved.user && conv_db_add_message_ex(unsaved.conv, user_id, "user", unsaved.user,
+                                                    &msg_id) == AUTH_DB_SUCCESS) {
+            session_stamp_last_message_id(session, "user", msg_id);
+         }
+         if (unsaved.reply) {
+            text_worker_persist_final(session, unsaved.conv, user_id, unsaved.reply);
+         }
+      }
+      free(unsaved.prior_user);
+      free(unsaved.prior_reply);
+      free(unsaved.user);
+      free(unsaved.reply);
+   }
+}
+
 static void text_worker_end(session_t *session) {
    if (session) {
       /* Close the multi-target TTS bracket on non-origin listeners (§Phase-4) BEFORE releasing
@@ -231,6 +319,7 @@ static void text_worker_end(session_t *session) {
        * so a fanned bystander always returns to idle regardless of which exit ran. No-op when the
        * turn fanned to no one. */
       webui_fanout_tts_idle(session);
+      finish_turn(session);
       atomic_fetch_sub(&session->turn_in_flight, 1);
       session_release(session);
    }
@@ -266,7 +355,17 @@ static void text_worker_persist_final(session_t *session,
                                       int64_t turn_conv,
                                       int turn_user_id,
                                       const char *body) {
-   if (turn_conv <= 0 || turn_user_id <= 0 || body == NULL || body[0] == '\0') {
+   persist_pending_user_row(session, turn_user_id);
+   if (body == NULL || body[0] == '\0') {
+      return;
+   }
+   if (turn_conv <= 0) {
+      /* The conversation isn't created yet: kept until it is (the turn's end
+       * or the handler creating it writes it). */
+      session_turn_set_pending(session, "assistant", body);
+      return;
+   }
+   if (turn_user_id <= 0) {
       return;
    }
    if (webui_persist_final_answer(session, turn_conv, turn_user_id, body, NULL) !=
@@ -286,6 +385,9 @@ static void *text_worker_thread(void *arg) {
    /* Check if session is still valid or if this request was superseded */
    if (!session || REQUEST_SUPERSEDED(session, expected_gen)) {
       OLOG_INFO("WebUI: Session disconnected or request superseded, aborting text processing");
+      if (session) {
+         finish_turn(session); /* begun at dequeue; never ran */
+      }
       text_worker_cleanup(work, session, text);
       return NULL;
    }
@@ -353,10 +455,10 @@ static void *text_worker_thread(void *arg) {
     * creation) rather than a live re-read of conn->active_conversation_id, which
     * this worker could observe AFTER a mid-turn view switch — that would persist
     * the user message / inject focus for the wrong conversation. */
+   /* A new chat's first message may have none yet: the conversation the client
+    * creates for it is adopted (session_bind_created_conversation) and its
+    * messages are written then, never guessed from whatever is on screen. */
    int64_t turn_conv = session->stream_conversation_id;
-   if (turn_conv <= 0 && conn && conn->active_conversation_id > 0) {
-      turn_conv = conn->active_conversation_id;
-   }
 
    /* Multi-target TTS (SERVER_AUTHORITATIVE_PERSISTENCE §Phase-4): arm synthesis when the origin
     * has TTS on OR any OTHER speaker-capable viewer of this conversation exists, so a silent-origin
@@ -369,6 +471,7 @@ static void *text_worker_thread(void *arg) {
       .conversation_id = turn_conv,
       .auth_user_id = conn ? conn->auth_user_id : 0,
       .persist_content_override = work->persist_content, /* text + [IMAGE:<id>] for image turns */
+      .await_conversation = turn_conv <= 0,
       .sentence_cb = fanout_tts ? webui_sentence_audio_fanout_callback : NULL,
       .sentence_userdata = fanout_tts ? session : NULL,
       .on_user_msg_added = webui_text_dispatch_on_user_msg,
@@ -578,7 +681,11 @@ static void *text_turn_thread_entry(void *arg) {
          turn_queue_turn_done(sid);
          return NULL;
       }
-      atomic_store(&work->session->stream_conversation_id, work->conv_id);
+      session_turn_begin(work->session, work->conv_id, (int)work->session->metrics.user_id);
+      if (work->conv_id <= 0) {
+         /* A new chat's first message: its conversation is created after it. */
+         session_turn_await_conversation(work->session);
+      }
       session_begin_turn_flags(work->session); /* fresh flags for THIS turn (G2) */
    }
    text_worker_thread(work);  /* existing turn body — frees work, releases session */

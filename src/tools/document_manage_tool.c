@@ -888,6 +888,8 @@ static char *doc_manage_callback(const char *action, char *value, int *should_re
    (void)action;
    *should_respond = 1;
    int user_id = tool_get_current_user_id();
+   if (user_id <= 0)
+      return strdup(TOOL_GUEST_REFUSAL);
 
    char act[32] = "";
    if (action)

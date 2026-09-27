@@ -1061,8 +1061,8 @@ static bool webui_origin_fan_target(session_t *origin,
       return false; /* unauthenticated — never fan across all users (for_each_user_conn's <=0=all)
                      */
    int64_t conv = origin->stream_conversation_id;
-   if (conv <= 0 && ocon && ocon->active_conversation_id > 0)
-      conv = ocon->active_conversation_id;
+   if (conv <= 0)
+      conv = webui_get_active_conversation_id(origin); /* the session's copy, not ocon's */
    if (ocon_out)
       *ocon_out = ocon;
    *user_id_out = user_id;
@@ -1112,7 +1112,10 @@ static bool visit_tts_send(ws_connection_t *conn, void *vctx) {
    /* Light state frame only (webui_send_state additionally does session_get_llm_config +
     * llm_context_get_usage per call — per-session + module locks we must NOT nest under the
     * registry lock).  The context% is turn-static, so per-sentence metrics added nothing. */
-   webui_send_state_with_detail(s, "speaking", NULL);
+   /* Tagged with the conversation being spoken, not the recipient's own last
+    * turn: a bystander viewing it would otherwise drop it as another
+    * conversation's state. */
+   webui_send_state_for_conversation(s, "speaking", NULL, ctx->conv_id);
    if (conn_target_fmt(conn) == TTS_FMT_OPUS) {
       if (ctx->opus && ctx->opus_len > 0) {
          webui_send_audio(s, ctx->opus, ctx->opus_len);
@@ -1151,7 +1154,7 @@ typedef struct {
 static bool visit_tts_idle(ws_connection_t *conn, void *vctx) {
    tts_idle_ctx_t *ctx = (tts_idle_ctx_t *)vctx;
    if (conn_is_audio_target(conn, ctx->conv_id, ctx->origin_session_id))
-      webui_send_state_with_detail(conn->session, "idle", NULL);
+      webui_send_state_for_conversation(conn->session, "idle", NULL, ctx->conv_id);
    return true;
 }
 
@@ -1392,6 +1395,7 @@ static void audio_worker_end(session_t *session) {
       if (session->type == SESSION_TYPE_WEBUI) {
          webui_fanout_tts_idle(session);
       }
+      session_turn_end(session);
       atomic_fetch_sub(&session->turn_in_flight, 1);
       session_release(session);
    }
@@ -1407,7 +1411,8 @@ static void *audio_worker_thread(void *arg) {
    if (!session || REQUEST_SUPERSEDED(session, expected_gen)) {
       OLOG_INFO("WebUI: Audio session disconnected or request superseded, aborting");
       if (session) {
-         session_release(session); /* pre-increment exit: bare release, no turn_in_flight */
+         session_turn_end(session); /* begun at dequeue; never ran */
+         session_release(session);  /* pre-increment exit: bare release, no turn_in_flight */
       }
       free(audio_data);
       free(work);
@@ -1511,29 +1516,38 @@ static void *audio_worker_thread(void *arg) {
       return NULL;
    }
 
-   /* Add user message to session history immediately (before LLM call can be cancelled) */
-   session_add_message(session, "user", transcript);
-
-   /* Persist to conversation DB immediately (prevents race with client reload) */
    ws_connection_t *conn = (ws_connection_t *)session->client_data;
-   /* Voice turn: server-dispatched, so the browser never ran its conversation
-    * pre-create.  Bind (lazily creating) a conversation so this transcript AND the
-    * reply persist instead of evaporating on reload.  The assistant/tool rows
-    * persist off session->stream_conversation_id (set from the enqueue-captured,
-    * possibly 0, conv at dequeue with no active-conversation fallback), so point it
-    * at the freshly-bound conversation too. */
-   if (conn && conn->active_conversation_id <= 0 &&
-       webui_voice_transcript_substantive(transcript)) {
-      int64_t bound = webui_ensure_active_conversation(conn, transcript);
-      if (bound > 0) {
-         atomic_store(&session->stream_conversation_id, bound);
+   /* The turn's conversation is the one captured when the audio was queued
+    * (stream_conversation_id), never a live re-read of the view: the user may have
+    * opened another conversation while this turn waited, and the utterance must
+    * not be written there (it could be private -> public).  The reply persists off
+    * the same field.  Only a turn queued with no conversation adopts one: the
+    * conversation now open, or (none open) a lazily created one — a voice turn is
+    * server-dispatched, so the browser never ran its conversation pre-create.
+    * Resolved before the transcript is appended, so the turn runs on that
+    * conversation's own context (session_turn_set_conversation). */
+   int64_t turn_conv = atomic_load(&session->stream_conversation_id);
+   if (turn_conv <= 0 && conn) {
+      const int64_t viewed = webui_get_active_conversation_id(session);
+      if (viewed > 0) {
+         turn_conv = viewed;
+      } else if (webui_voice_transcript_substantive(transcript)) {
+         turn_conv = webui_ensure_active_conversation(conn, transcript);
       }
    }
+   if (turn_conv > 0) {
+      session_turn_set_conversation(session, turn_conv, true); /* also tags the stream */
+   }
+
+   /* Add user message to session history immediately (before LLM call can be cancelled) */
+   session_add_turn_message(session, "user", transcript);
+
+   /* Persist to conversation DB immediately (prevents race with client reload) */
    bool saved_to_db = false;
    int64_t user_msg_id = 0;
-   if (conn && conn->active_conversation_id > 0) {
-      if (conv_db_add_message_ex(conn->active_conversation_id, conn->auth_user_id, "user",
-                                 transcript, &user_msg_id) == AUTH_DB_SUCCESS) {
+   if (conn && turn_conv > 0) {
+      if (conv_db_add_message_ex(turn_conv, conn->auth_user_id, "user", transcript, &user_msg_id) ==
+          AUTH_DB_SUCCESS) {
          saved_to_db = true;
          session_stamp_last_message_id(session, "user", user_msg_id);
       } else {
@@ -1549,9 +1563,9 @@ static void *audio_worker_thread(void *arg) {
     * INVARIANT (mirrors webui_text_processing.c): guard on user_msg_id > 0 so a save
     * failure (id 0) emits ONLY the echo, never a second frame the client can't dedup —
     * a spoken turn has no optimistic bubble, so an id-0 fan-out would double it. */
-   if (user_msg_id > 0 && conn && conn->auth_user_id > 0 && conn->active_conversation_id > 0) {
-      conv_event_notify_message_appended(conn->active_conversation_id, conn->auth_user_id,
-                                         user_msg_id, "user", transcript, NULL, 0);
+   if (user_msg_id > 0 && conn && conn->auth_user_id > 0) {
+      conv_event_notify_message_appended(turn_conv, conn->auth_user_id, user_msg_id, "user",
+                                         transcript, NULL, 0);
    }
 
    /* This turn's input is ASR-transcribed (voice) — flag it before dispatch so
@@ -1584,7 +1598,7 @@ static void *audio_worker_thread(void *arg) {
     * libwebsockets frees `conn`.  The post-dispatch persist + audio_end MUST NOT deref
     * conn — capture everything now, use only the locals in the tail.  turn_conv reads
     * stream_conversation_id AFTER the lazy bind above. */
-   int64_t turn_conv = atomic_load(&session->stream_conversation_id);
+   turn_conv = atomic_load(&session->stream_conversation_id);
    int turn_user_id = conn ? conn->auth_user_id : (int)session->metrics.user_id;
    bool use_opus = conn ? atomic_load(&conn->use_opus) : false;
 
@@ -1721,7 +1735,7 @@ static void *audio_turn_thread_entry(void *arg) {
          turn_queue_turn_done(sid);
          return NULL;
       }
-      atomic_store(&work->session->stream_conversation_id, work->conv_id);
+      session_turn_begin(work->session, work->conv_id, (int)work->session->metrics.user_id);
       session_begin_turn_flags(work->session); /* fresh flags for THIS turn (G2) */
    }
    audio_worker_thread(work); /* existing turn body — frees work, releases session */

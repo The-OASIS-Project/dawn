@@ -197,6 +197,10 @@ int config_validate(const dawn_config_t *config,
    VALIDATE_RANGE_FLOAT("memory.recall.min_score", config->memory.recall.min_score, 0.0f, 1.0f);
    VALIDATE_RANGE_FLOAT("memory.focus_injection.min_score",
                         config->memory.focus_injection.min_score, 0.0f, 1.0f);
+   VALIDATE_RANGE_FLOAT("memory.focus_injection.document_min_relevance",
+                        config->memory.focus_injection.document_min_relevance, 0.0f, 1.0f);
+   VALIDATE_RANGE_FLOAT("memory.focus_injection.fact_min_relevance",
+                        config->memory.focus_injection.fact_min_relevance, 0.0f, 1.0f);
    VALIDATE_RANGE_FLOAT("memory.focus_injection.weight_semantic",
                         config->memory.focus_injection.weight_semantic, 0.0f, 5.0f);
    VALIDATE_RANGE_FLOAT("memory.focus_injection.weight_recency",

@@ -64,7 +64,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 87
+#define AUTH_DB_SCHEMA_VERSION 89
 
 /* Retention periods */
 #define LOGIN_ATTEMPT_RETENTION_SEC (7 * 24 * 60 * 60) /* 7 days */
@@ -292,6 +292,12 @@ typedef struct {
    sqlite3_stmt *stmt_memory_fact_search_bm25;
    sqlite3_stmt *stmt_memory_fact_search_bm25_since;
    sqlite3_stmt *stmt_memory_facts_fts_insert;
+   sqlite3_stmt *stmt_memory_fact_source_add;     /* v89; NULL until migrated */
+   sqlite3_stmt *stmt_memory_relation_source_add; /* v89; NULL until migrated */
+   sqlite3_stmt *stmt_memory_pref_source_add;     /* v89; NULL until migrated */
+   sqlite3_stmt *stmt_memory_pref_current;        /* the row's id and value, before an upsert */
+   sqlite3_stmt *stmt_memory_pref_sources_clear;  /* v89; NULL until migrated */
+   sqlite3_stmt *stmt_doc_chunk_generation;       /* v89; NULL until migrated */
    sqlite3_stmt *stmt_memory_facts_fts_delete;
 
    sqlite3_stmt *stmt_memory_pref_upsert;
@@ -340,7 +346,6 @@ typedef struct {
 
    /* === Embedding module statements (memory_db.c) === */
    sqlite3_stmt *stmt_memory_fact_update_embedding;
-   sqlite3_stmt *stmt_memory_fact_get_embeddings;
    sqlite3_stmt *stmt_memory_fact_list_without_embedding;
 
    /* Summary-embedding statements (v45) — used by the semantic summary
@@ -386,7 +391,6 @@ typedef struct {
    sqlite3_stmt *stmt_doc_delete;
    sqlite3_stmt *stmt_doc_count_user;
    sqlite3_stmt *stmt_doc_chunk_create;
-   sqlite3_stmt *stmt_doc_chunk_search;
    sqlite3_stmt *stmt_doc_find_by_name;
    sqlite3_stmt *stmt_doc_chunk_read;
    sqlite3_stmt *stmt_doc_chunk_read_range; /* window by chunk_index (gap-safe, no OFFSET) */

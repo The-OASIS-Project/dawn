@@ -183,6 +183,8 @@ static char *doc_read_callback(const char *action, char *value, int *should_resp
       return strdup("Error: provide a document name/label or a numeric id.");
 
    int user_id = tool_get_current_user_id();
+   if (user_id <= 0)
+      return strdup(TOOL_GUEST_REFUSAL);
 
    /* Resolve the document.  An explicit numeric id targets one EXACT document
     * (disambiguates same-named copies); otherwise resolve by name/label.  An

@@ -41,6 +41,8 @@
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_db.h"
+#include "memory/memory_embed_backfill.h"
+#include "memory/memory_embed_tokenizer.h"
 #include "memory/memory_embeddings.h"
 #include "utils/string_utils.h"
 
@@ -49,6 +51,7 @@
  * ============================================================================= */
 
 #define RECOMPUTE_TEXT_MAX 512 /* max chars per fact/entity text */
+#define INDEX_KEY_MAX 96       /* model id + tokenizer revision suffix */
 #define RECOMPUTE_BATCH 50     /* rows per batch (overridden by config) */
 
 /* =============================================================================
@@ -117,6 +120,18 @@ static int meta_set(const char *key, const char *value) {
  * Per-user embeddings_model_id helpers
  * ============================================================================= */
 
+/* Identity of the stored embeddings: the configured model plus, for the local
+ * ONNX provider (whose tokenization DAWN performs), the tokenizer revision — a
+ * tokenizer change alters the vectors as much as a model change does.  Remote
+ * providers tokenize server-side, so their key is just the model id. */
+static void index_key(char *out, size_t n) {
+   if (strcmp(g_config.memory.embedding_provider, "onnx") == 0) {
+      snprintf(out, n, "%s+tok%d", g_config.memory.model_id, MEMORY_EMBED_TOKENIZER_REVISION);
+   } else {
+      snprintf(out, n, "%s", g_config.memory.model_id);
+   }
+}
+
 static int user_needs_recompute(int user_id, bool *needs_out) {
    if (!needs_out)
       return FAILURE;
@@ -132,9 +147,11 @@ static int user_needs_recompute(int user_id, bool *needs_out) {
       return FAILURE;
    }
    sqlite3_bind_int(stmt, 1, user_id);
+   char key[INDEX_KEY_MAX];
+   index_key(key, sizeof(key));
    if (sqlite3_step(stmt) == SQLITE_ROW) {
       const char *stored = (const char *)sqlite3_column_text(stmt, 0);
-      if (!stored || strcmp(stored, g_config.memory.model_id) != 0)
+      if (!stored || strcmp(stored, key) != 0)
          *needs_out = true;
    } else {
       /* User not found — treat as needing recompute to be safe */
@@ -155,7 +172,9 @@ static int user_set_model_id(int user_id) {
       AUTH_DB_UNLOCK();
       return FAILURE;
    }
-   sqlite3_bind_text(stmt, 1, g_config.memory.model_id, -1, SQLITE_STATIC);
+   char key[INDEX_KEY_MAX];
+   index_key(key, sizeof(key));
+   sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT);
    sqlite3_bind_int(stmt, 2, user_id);
    sqlite3_step(stmt);
    sqlite3_finalize(stmt);
@@ -181,7 +200,9 @@ static int collect_stale_users(int *out_ids, int cap, int *count_out) {
       AUTH_DB_UNLOCK();
       return FAILURE;
    }
-   sqlite3_bind_text(stmt, 1, g_config.memory.model_id, -1, SQLITE_STATIC);
+   char key[INDEX_KEY_MAX];
+   index_key(key, sizeof(key));
+   sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT);
 
    int n = 0;
    while (n < cap && sqlite3_step(stmt) == SQLITE_ROW) {
@@ -618,6 +639,7 @@ static void *recompute_thread_fn(void *arg) {
    int user_count = 0;
    if (collect_stale_users(user_ids, 256, &user_count) != SUCCESS || user_count == 0) {
       OLOG_INFO("memory_embed_recompute: all users up-to-date, nothing to do");
+      memory_embeddings_reindex_end(true);
       atomic_store(&s_running, false);
       return NULL;
    }
@@ -677,6 +699,7 @@ static void *recompute_thread_fn(void *arg) {
 
    if (atomic_load(&s_shutdown)) {
       OLOG_INFO("memory_embed_recompute: worker interrupted during user pass");
+      memory_embeddings_reindex_end(false);
       atomic_store(&s_running, false);
       return NULL;
    }
@@ -684,13 +707,25 @@ static void *recompute_thread_fn(void *arg) {
    /* Deferred lower-priority document_chunks pass.
     * system_metadata.embedding_model_id is updated only AFTER chunks complete so
     * that an interrupted chunk pass triggers a full re-run on next start. */
-   recompute_document_chunks();
+   if (recompute_document_chunks() != SUCCESS || atomic_load(&s_shutdown)) {
+      OLOG_INFO("memory_embed_recompute: document_chunks pass did not finish; re-index "
+                "resumes on next start");
+      memory_embeddings_reindex_end(false);
+      atomic_store(&s_running, false);
+      return NULL;
+   }
 
-   meta_set("embedding_model_id", g_config.memory.model_id);
-   OLOG_INFO("memory_embed_recompute: system model_id updated to '%s'", g_config.memory.model_id);
+   char key[INDEX_KEY_MAX];
+   index_key(key, sizeof(key));
+   meta_set("embedding_model_id", key);
+   OLOG_INFO("memory_embed_recompute: system index key updated to '%s'", key);
 
    OLOG_INFO("memory_embed_recompute: worker complete (done=%lld)",
              (long long)atomic_load(&s_done));
+   /* End the re-index BEFORE clearing s_running: reindex_end may run a backfill
+    * sweep (DB work), and memory_embed_recompute_stop() only joins this thread
+    * while s_running is set. */
+   memory_embeddings_reindex_end(true);
    atomic_store(&s_running, false);
    return NULL;
 }
@@ -717,23 +752,24 @@ int memory_embed_recompute_start(void) {
    }
 
    /* Check system_metadata for model change */
-   char stored_model_id[64] = { 0 };
+   char stored_model_id[INDEX_KEY_MAX] = { 0 };
    meta_get("embedding_model_id", stored_model_id, sizeof(stored_model_id));
+   char key[INDEX_KEY_MAX];
+   index_key(key, sizeof(key));
 
-   if (strcmp(stored_model_id, g_config.memory.model_id) == 0) {
+   if (strcmp(stored_model_id, key) == 0) {
       /* Model unchanged — still check if any user has a stale or missing model_id */
       int user_ids[256];
       int user_count = 0;
       collect_stale_users(user_ids, 256, &user_count);
       if (user_count == 0) {
-         OLOG_INFO("memory_embed_recompute: model_id '%s' unchanged, skipping",
-                   g_config.memory.model_id);
+         OLOG_INFO("memory_embed_recompute: index key '%s' unchanged, skipping", key);
          return SUCCESS;
       }
       OLOG_INFO("memory_embed_recompute: %d user(s) have stale embeddings", user_count);
    } else {
       OLOG_INFO("memory_embed_recompute: model changed ('%s' → '%s'), re-indexing",
-                stored_model_id[0] ? stored_model_id : "(none)", g_config.memory.model_id);
+                stored_model_id[0] ? stored_model_id : "(none)", key);
    }
 
    atomic_store(&s_shutdown, false);
@@ -741,9 +777,13 @@ int memory_embed_recompute_start(void) {
    atomic_store(&s_done, 0);
    atomic_store(&s_total, 0);
 
+   /* Park fact backfill until the re-index finishes; every exit of the worker
+    * ends it (a completed re-index then runs any sweep requested meanwhile). */
+   memory_embeddings_reindex_begin();
    if (pthread_create(&s_thread, NULL, recompute_thread_fn, NULL) != 0) {
       OLOG_ERROR("memory_embed_recompute: failed to create worker thread");
       atomic_store(&s_running, false);
+      memory_embeddings_reindex_end(false);
       return FAILURE;
    }
 

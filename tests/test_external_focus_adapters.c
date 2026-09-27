@@ -41,6 +41,7 @@
 #include "core/focus/focus_source_internal.h"
 #include "dawn_error.h"
 #include "test_external_focus_adapters_mocks.h"
+#include "tools/document_embed_cache.h"
 #include "tools/external_focus_adapters.h"
 #include "unity.h"
 
@@ -241,7 +242,7 @@ static void test_document_skipped_when_no_query_embedding(void) {
    /* requires_embedding=true → framework skips the adapter. */
    TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "anything", /*qembed*/ NULL, 0,
                                                 1700000000, 5, &result));
-   /* No chunk_search_load call should have fired. */
+   /* No chunk ranking should have run. */
    TEST_ASSERT_EQUAL_INT(0, s_ext_mock.call_count_chunk_search_load);
    for (int i = 0; i < result.candidate_count; i++)
       TEST_ASSERT_NOT_EQUAL(0, strcmp(result.candidates[i].source_id, "document_chunk"));
@@ -269,6 +270,52 @@ static void test_document_cap_honoring(void) {
       if (strcmp(result.candidates[i].source_id, "document_chunk") == 0)
          doc_count++;
    TEST_ASSERT_EQUAL_INT(3, doc_count);
+   focus_result_free(&result);
+}
+
+/* Relevance gate: with a corpus large enough for a baseline, only chunks that
+ * stand clearly above the corpus-typical similarity are injected. */
+static const float embed_baseline[EXT_MOCK_DIMS] = { 0.5f, 0.8660254f, 0.0f, 0.0f }; /* cos 0.5 */
+
+static void test_document_relevance_gate(void) {
+   seed_chunk(0, 500, 1, "the relevant passage", "answer.txt", embed_q, 1700000000);
+   for (int i = 1; i < EXT_MOCK_MAX_CHUNKS; i++) {
+      char text[32];
+      snprintf(text, sizeof(text), "typical chunk %d", i);
+      seed_chunk(i, 500 + i, 1, text, "other.txt", embed_baseline, 1700000000);
+   }
+   s_ext_mock.chunk_count = EXT_MOCK_MAX_CHUNKS;
+   s_ext_mock.chunk_dim = EXT_MOCK_DIMS;
+   s_ext_mock.embeddings_available = true;
+   g_config.memory.focus_injection.document_min_relevance = 0.48f;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "x", embed_q, EXT_MOCK_DIMS, 1700000000,
+                                                /*per_source_max=*/5, &result));
+   int doc_count = 0;
+   const focus_candidate_t *only = NULL;
+   for (int i = 0; i < result.candidate_count; i++) {
+      if (strcmp(result.candidates[i].source_id, "document_chunk") == 0) {
+         doc_count++;
+         only = &result.candidates[i];
+      }
+   }
+   /* 31 chunks at the corpus-typical similarity are gated out; the one that
+    * stands out is kept. */
+   TEST_ASSERT_EQUAL_INT(1, doc_count);
+   TEST_ASSERT_TRUE(strstr(only->text, "the relevant passage") != NULL);
+   focus_result_free(&result);
+
+   /* With the gate off, the typical chunks come back. */
+   g_config.memory.focus_injection.document_min_relevance = 0.0f;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "x", embed_q, EXT_MOCK_DIMS, 1700000000,
+                                                /*per_source_max=*/5, &result));
+   doc_count = 0;
+   for (int i = 0; i < result.candidate_count; i++)
+      if (strcmp(result.candidates[i].source_id, "document_chunk") == 0)
+         doc_count++;
+   TEST_ASSERT_TRUE(doc_count > 1);
    focus_result_free(&result);
 }
 
@@ -459,6 +506,36 @@ static void test_no_network_calls_during_compose(void) {
    /* search path also fires because query_text was non-empty. */
    TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_occurrences_search);
    focus_result_free(&result);
+}
+
+/* The chunk-embedding cache reads the database once per generation: a second
+ * turn reuses it, and a change (new generation) or another user rebuilds it. */
+static void test_document_embedding_cache_reuse(void) {
+   const time_t now = 1700000000;
+   seed_chunk(0, 1, 1, "doc", "f.txt", embed_v1, now);
+   s_ext_mock.chunk_count = 1;
+   s_ext_mock.chunk_dim = EXT_MOCK_DIMS;
+   s_ext_mock.embeddings_available = true;
+   s_ext_mock.pin_generation = true;
+   s_ext_mock.generation = 1000;
+   document_embed_cache_shutdown(); /* no copy from an earlier test */
+
+   document_chunk_score_t top[4];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_embed_rank(1, embed_q, EXT_MOCK_DIMS, 4, top, &n, NULL));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_embed_rank(1, embed_q, EXT_MOCK_DIMS, 4, top, &n, NULL));
+   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_chunk_search_load);
+
+   s_ext_mock.generation++;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_embed_rank(1, embed_q, EXT_MOCK_DIMS, 4, top, &n, NULL));
+   TEST_ASSERT_EQUAL_INT(2, s_ext_mock.call_count_chunk_search_load);
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_embed_rank(2, embed_q, EXT_MOCK_DIMS, 4, top, &n, NULL));
+   TEST_ASSERT_EQUAL_INT(3, s_ext_mock.call_count_chunk_search_load);
+   TEST_ASSERT_EQUAL_INT(0, n); /* the chunk is user 1's */
+
+   document_embed_cache_shutdown();
 }
 
 /* =====================================================================
@@ -828,6 +905,7 @@ int main(void) {
    RUN_TEST(test_document_adapter_shape);
    RUN_TEST(test_document_skipped_when_no_query_embedding);
    RUN_TEST(test_document_cap_honoring);
+   RUN_TEST(test_document_relevance_gate);
 
    /* Calendar adapter happy paths */
    RUN_TEST(test_calendar_range_only_path);
@@ -843,6 +921,7 @@ int main(void) {
 
    /* Network-call invariant */
    RUN_TEST(test_no_network_calls_during_compose);
+   RUN_TEST(test_document_embedding_cache_reuse);
 
    /* Failure / partial-failure cleanup */
    RUN_TEST(test_document_failure_zeros_outparams);

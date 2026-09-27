@@ -1014,7 +1014,7 @@ int dawn_build_prompt(int user_id,
    int64_t turn_id = 0;
    session_t *dispatch = session_get_dispatch_session();
    if (dispatch != NULL) {
-      conv_id = webui_get_active_conversation_id(dispatch);
+      conv_id = session_turn_conversation(dispatch); /* the turn's, not the view */
       turn_id = session_get_last_user_msg_id(dispatch);
    }
    if (build_focus_block(user_id, conv_id, turn_id, user_turn_text, &focus_body) != SUCCESS)

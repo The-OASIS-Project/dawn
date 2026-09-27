@@ -592,7 +592,15 @@
 # prune_expired_days = 30         # Recoverable buffer before hard-delete (0 = delete on expiry)
 # conversation_idle_timeout_min = 15  # Auto-save voice conversations after N minutes idle
                                   # (0 = disabled, minimum 10 if enabled)
-# default_voice_user_id = 1       # User account for local microphone and DAP conversations
+# default_voice_user_id = 1       # User the local microphone speaks for while the Local Device
+                                  # isn't assigned on the admin satellite page (assigned, its mic
+                                  # and speaker are that user's).  Satellites not assigned to a
+                                  # user are guests: no personal memory, data, alerts or persona.
+# fact_cache_mb = 80              # RAM for one user's facts held for semantic search.  A fact
+                                  # takes about 1.6 KB with the default 384-dim model (about
+                                  # 50,000 facts); larger models hold fewer.  Past it, recently
+                                  # used facts and note links are kept first, then the most
+                                  # confident and recent; the rest are found by keyword search.
 
 [memory.decay]
 # enabled = true                  # Enable nightly confidence decay
@@ -774,6 +782,16 @@ citation_reinforcement_boost = 0.05
                                       # threshold and you observe drops.
 # min_score = 0.4                     # Floor — anything below is dropped.
                                       # Range: 0.0 - 1.0
+# document_min_relevance = 0.48       # Documents only: how far a passage's
+                                      # similarity must sit above your
+                                      # corpus-typical level (0 = typical,
+                                      # 1 = identical) to be injected.
+                                      # Works across embedding models.
+                                      # 0 disables.  Range: 0.0 - 1.0
+# fact_min_relevance = 0.34           # Same measure for remembered facts,
+                                      # against your other facts.  Injection
+                                      # only; memory search is unaffected.
+                                      # 0 disables.  Range: 0.0 - 1.0
 # classifier_enabled = false          # RAGRoute-style source classifier
                                       # (default off — opt-in only after probe).
 # weight_semantic = 1.0               # Generative-Agents three-factor ranker
@@ -1000,8 +1018,9 @@ citation_reinforcement_boost = 0.05
 # max_alerts_per_hour = 4         # Global spoken-alert budget; over-budget
                                   #   alerts degrade to a silent banner. 0-100;
                                   #   0 = no limit (every alert is always spoken).
-# inject_into_sessions = false    # Also make an active conversation aware of a
-                                  #   fired alert (so Friday can reference it).
+# inject_into_sessions = false    # Also make the watch owner's conversations aware
+                                  #   of a fired alert for 10 minutes (so Friday can
+                                  #   reference it). Only that user's surfaces see it.
 # judge_enabled = false           # P2 LLM salience judge (not yet active).
 # judge_threshold = 3.5           # P2 score floor (1.0-5.0).
 # quiet_hours = ""                # P1 quiet-hours window, e.g. "23:00-07:00".

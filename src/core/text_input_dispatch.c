@@ -76,11 +76,19 @@ char *core_text_input_dispatch(session_t *session,
    /* Step 1: add user message to session history.  When images are
     * attached, store in the multi-part shape so they persist across
     * turns. */
+   /* The turn's conversation may only be resolved here (fallback to the active
+    * one) rather than at dequeue; record it before the append attributes it. */
+   if (opts && opts->is_background_turn) {
+      session_turn_mark_background(session);
+   }
+   if (opts && opts->conversation_id > 0) {
+      session_turn_set_conversation(session, opts->conversation_id, true);
+   }
    if (vision_image_count > 0 && vision_images) {
-      session_add_message_with_images(session, "user", text, (const char *const *)vision_images,
-                                      vision_image_count);
+      session_add_turn_message_with_images(session, "user", text,
+                                           (const char *const *)vision_images, vision_image_count);
    } else {
-      session_add_message(session, "user", text);
+      session_add_turn_message(session, "user", text);
    }
 
    /* Step 2: persist to conv_db if requested.  The conv_db row ID is
@@ -97,6 +105,12 @@ char *core_text_input_dispatch(session_t *session,
     * double-save.  Non-WebUI callers (messaging) leave the override NULL and
     * persist plain text. */
    int64_t user_msg_id = 0;
+   if (opts && opts->conversation_id <= 0 && opts->await_conversation) {
+      /* A new chat's first message, its conversation created after it: the
+       * turn's worker writes it once one is (session_turn_take_pending). */
+      session_turn_set_pending(
+          session, "user", opts->persist_content_override ? opts->persist_content_override : text);
+   }
    if (opts && opts->conversation_id > 0) {
       const char *persist_text = opts->persist_content_override ? opts->persist_content_override
                                                                 : text;

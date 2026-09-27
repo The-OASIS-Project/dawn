@@ -196,11 +196,11 @@ static char *mcp_bridge_dispatch(mcp_slot_t *slot,
    }
 
    /* Fail closed: bridged MCP tools require an authenticated user session. The
-    * registry's tool_get_current_user_id() invents uid 1 (admin) when no session
-    * context is set, which would let any non-session caller bypass both gates
+    * registry's tool_get_current_user_id() falls back to the default voice user
+    * when no session context is set, which would let any non-session caller bypass both gates
     * below (sec-S1). */
    session_t *cmd_sess = session_get_command_context();
-   if (cmd_sess == NULL || cmd_sess->metrics.user_id <= 0) {
+   if (cmd_sess == NULL || session_effective_user_id(cmd_sess) <= 0) {
       return dispatch_error(should_respond, "MCP tools require an authenticated user session.");
    }
    int64_t uid = cmd_sess->metrics.user_id;

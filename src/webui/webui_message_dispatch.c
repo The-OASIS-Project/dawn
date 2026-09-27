@@ -815,6 +815,13 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
             const char *token = json_object_get_string(token_obj);
             if (token && strlen(token) > 0) {
                session_t *existing = lookup_session_by_token(token);
+               if (existing && !webui_session_owned_by(existing, conn->auth_user_id)) {
+                  /* Another user's session: never attach to it. */
+                  OLOG_WARNING("WebUI: reconnect token belongs to another user's session; "
+                               "not attaching");
+                  session_release(existing); /* the lookup's reference */
+                  existing = NULL;
+               }
                if (existing) {
                   /* Found existing session - switch to it */
                   if (conn->session && conn->session != existing) {
@@ -839,6 +846,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                   conn->session = existing;
                   conn->session_was_reconnected = true;
                   existing->client_data = conn;
+                  webui_conn_publish_view(conn); /* the session shows what this connection does */
                   existing->disconnected = false;
                   safe_strscpy(conn->session_token, token);
 
@@ -895,6 +903,8 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                                                    prompt ? prompt : get_remote_command_prompt());
                         free(prompt);
                         conn->session->client_data = conn;
+                        webui_conn_publish_view(
+                            conn); /* the session shows what this connection does */
                         /* Fresh session (reconnect token stale) — not a true reconnect,
                          * so the session frame must report reconnected:false.  Enforced
                          * locally at all four fresh-create sites. */
@@ -1109,6 +1119,10 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       if (payload) {
          handle_set_private(conn, payload);
       }
+   } else if (strcmp(type, "forget_conversation_memories") == 0) {
+      handle_forget_conversation_memories(conn, payload);
+   } else if (strcmp(type, "conversation_learned_request") == 0) {
+      handle_conversation_learned_request(conn, payload);
    } else if (strcmp(type, "set_pinned") == 0) {
       if (payload) {
          handle_set_pinned(conn, payload);

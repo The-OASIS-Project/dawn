@@ -54,6 +54,7 @@
 #include "llm/llm_local_provider.h"
 #include "llm/llm_rate_limit.h"
 #include "logging.h"
+#include "memory/memory_embeddings.h"
 #include "tools/messaging_tool.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
@@ -814,6 +815,13 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       if (config->memory.default_voice_user_id < 1) {
          config->memory.default_voice_user_id = 1;
       }
+      const int prev_fact_cache_mb = config->memory.fact_cache_mb;
+      JSON_TO_CONFIG_INT(section, "fact_cache_mb", config->memory.fact_cache_mb);
+      CONFIG_CLAMP(config->memory.fact_cache_mb, MEMORY_FACT_CACHE_MB_MIN,
+                   MEMORY_FACT_CACHE_MB_MAX);
+      if (config->memory.fact_cache_mb != prev_fact_cache_mb) {
+         memory_embeddings_invalidate_cache(); /* the next search reloads at the new size */
+      }
       /* Decay settings */
       JSON_TO_CONFIG_BOOL(section, "decay_enabled", config->memory.decay_enabled);
       JSON_TO_CONFIG_INT(section, "decay_hour", config->memory.decay_hour);
@@ -963,6 +971,8 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
          JSON_TO_CONFIG_INT(focus_obj, "focus_budget_bytes", fi->focus_budget_bytes);
          JSON_TO_CONFIG_INT(focus_obj, "top_k", fi->top_k);
          JSON_TO_CONFIG_DOUBLE(focus_obj, "min_score", fi->min_score);
+         JSON_TO_CONFIG_DOUBLE(focus_obj, "document_min_relevance", fi->document_min_relevance);
+         JSON_TO_CONFIG_DOUBLE(focus_obj, "fact_min_relevance", fi->fact_min_relevance);
          JSON_TO_CONFIG_BOOL(focus_obj, "classifier_enabled", fi->classifier_enabled);
          JSON_TO_CONFIG_DOUBLE(focus_obj, "weight_semantic", fi->weight_semantic);
          JSON_TO_CONFIG_DOUBLE(focus_obj, "weight_recency", fi->weight_recency);
@@ -998,6 +1008,8 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
          CONFIG_CLAMP(fi->focus_budget_bytes, 1024, 65536);
          CONFIG_CLAMP(fi->top_k, 1, 64);
          CONFIG_CLAMP(fi->min_score, 0.0f, 1.0f);
+         CONFIG_CLAMP(fi->document_min_relevance, 0.0f, 1.0f);
+         CONFIG_CLAMP(fi->fact_min_relevance, 0.0f, 1.0f);
          CONFIG_CLAMP(fi->weight_semantic, 0.0f, 5.0f);
          CONFIG_CLAMP(fi->weight_recency, 0.0f, 5.0f);
          CONFIG_CLAMP(fi->weight_importance, 0.0f, 5.0f);

@@ -129,6 +129,11 @@ typedef struct {
    bool is_background_turn;
    bool is_job_conversation;
 
+   /* A new chat's first message: conversation_id is 0 because the client creates
+    * the conversation after sending it.  The user message is kept for the turn's
+    * worker to write once the conversation exists (session_turn_set_pending). */
+   bool await_conversation;
+
    /* Skip the entire per-turn prompt rebuild (step 4,
     * session_dispatch_user_turn) for this dispatch.  When true, the session's
     * CURRENT system prompt stands unchanged — nothing is recomposed: no

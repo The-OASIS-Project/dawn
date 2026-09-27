@@ -40,7 +40,6 @@
 #include "audio/flac_playback.h"
 #include "core/command_router.h"
 #include "core/ocp_helpers.h"
-#include "core/pending_system_msg.h"
 #include "core/session_manager.h"
 #include "core/worker_pool.h"
 #include "dawn_error.h"
@@ -306,20 +305,17 @@ static void play_ringtone(void) {
 }
 
 /**
- * @brief Inject a phone event into the local session's conversation history.
+ * @brief Tell the local session's next turns about a phone event.
  *
- * Uses "system" role to give the LLM context for follow-up voice commands
- * (e.g., "answer the phone", "who texted me"). The LLM sees this on its
- * next request. TTS announcements are handled separately for immediate feedback.
+ * Gives the LLM context for follow-up voice commands (e.g., "answer the
+ * phone", "who texted me"): it sees the event on its next request. TTS
+ * announcements are handled separately for immediate feedback.
  */
 static void inject_local_context(const char *message) {
    /* Session context injection is a WebUI/multi-client feature; in a WebUI-less
     * build there is no session to inject into. */
 #ifdef ENABLE_WEBUI
-   /* Runs on the MQTT/echo callback thread — do NOT write sessions[0] directly.
-    * The local session's history is appended-to by the main thread without
-    * history_mutex, so defer this to the main-loop drain (single-owner). */
-   pending_sysmsg_push(message);
+   session_post_notice(session_get_local(), message);
 #else
    (void)message;
 #endif
@@ -337,12 +333,7 @@ static void inject_local_context(const char *message) {
  */
 static void broadcast_call_context(const char *message) {
 #ifdef ENABLE_WEBUI
-   /* Runs on the MQTT/echo callback thread.  Fan out to the WebUI/DAP/DAP2
-    * surfaces immediately (those are fully serialized by their own
-    * history_mutex), but defer the LOCAL-session write to the main-loop drain —
-    * sessions[0] has an unlocked main-path writer this thread must not race. */
-   pending_sysmsg_push(message);
-   session_broadcast_system_message_nonlocal(message);
+   session_broadcast_notice(message);
 #else
    (void)message;
 #endif

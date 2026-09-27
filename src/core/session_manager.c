@@ -92,6 +92,12 @@ __attribute__((weak)) void webui_send_purge_session(const session_t *s) {
  */
 static __thread session_t *tl_command_context = NULL;
 
+/* The running turn this thread works for (see session_turn_token()), and LLM
+ * settings pinned for work that outlives its turn. */
+static __thread uint64_t tl_turn_token = 0;
+static __thread const session_t *tl_llm_override_session = NULL;
+static __thread const session_llm_config_t *tl_llm_override = NULL;
+
 // =============================================================================
 // Internal Helper Functions
 // =============================================================================
@@ -262,7 +268,46 @@ static void session_free(session_t *session) {
       return;
    }
 
-   // Free conversation history
+   // Free conversation history (and any turn state a torn-down turn left behind)
+   if (session->turn_history) {
+      json_object_put(session->turn_history);
+      session->turn_history = NULL;
+   }
+   if (session->turn_reply) {
+      json_object_put(session->turn_reply);
+      session->turn_reply = NULL;
+   }
+   if (session->turn_reply_mirror) {
+      json_object_put(session->turn_reply_mirror);
+      session->turn_reply_mirror = NULL;
+   }
+   free(session->turn_pending_user);
+   session->turn_pending_user = NULL;
+   free(session->turn_pending_reply);
+   session->turn_pending_reply = NULL;
+   free(session->unclaimed_user);
+   session->unclaimed_user = NULL;
+   free(session->unclaimed_reply);
+   session->unclaimed_reply = NULL;
+   free(session->turn_prior_user);
+   session->turn_prior_user = NULL;
+   free(session->turn_prior_reply);
+   session->turn_prior_reply = NULL;
+   for (int i = 0; i < session->parked_msg_count; i++) {
+      json_object_put(session->parked_msgs[i]);
+   }
+   session->parked_msg_count = 0;
+   struct json_object **held[] = { &session->turn_user_msg, &session->unclaimed_user_msg,
+                                   &session->unclaimed_reply_msg, &session->claimed_user_msg,
+                                   &session->claimed_reply_msg };
+   for (size_t i = 0; i < sizeof(held) / sizeof(held[0]); i++) {
+      if (*held[i]) {
+         json_object_put(*held[i]);
+         *held[i] = NULL;
+      }
+   }
+   free(session->deferred_system_prompt);
+   session->deferred_system_prompt = NULL;
    if (session->conversation_history) {
       json_object_put(session->conversation_history);
       session->conversation_history = NULL;
@@ -281,6 +326,10 @@ static void session_free(session_t *session) {
    session->final_reasoning_json = NULL;
 
    // Free async compaction resources
+   if (session->async_compact.snapshot_last) {
+      json_object_put(session->async_compact.snapshot_last);
+      session->async_compact.snapshot_last = NULL;
+   }
    if (session->async_compact.pending_history) {
       json_object_put(session->async_compact.pending_history);
       session->async_compact.pending_history = NULL;
@@ -994,11 +1043,11 @@ void session_destroy(uint32_t session_id) {
     * Phase 1's session_teardown_flags() just set, so any in-flight transfer
     * aborts and the join returns promptly. Must happen before Phase 2 to
     * release the thread's ref. */
-   if (atomic_load(&session->async_compact.state) != ASYNC_COMPACT_IDLE &&
-       session->async_compact.thread_active) {
+   /* Joined whenever a thread was started: one that aborted is idle but still
+    * joinable, and would otherwise leak its stack. */
+   if (atomic_exchange(&session->async_compact.thread_active, false)) {
       OLOG_INFO("Session %u: joining async compaction thread", session_id);
       pthread_join(session->async_compact.thread_id, NULL);
-      session->async_compact.thread_active = false;
       OLOG_INFO("Session %u: async compaction thread joined", session_id);
    }
 
@@ -1074,35 +1123,43 @@ void session_destroy(uint32_t session_id) {
         session->type == SESSION_TYPE_MESSAGING) &&
        session->metrics.user_id > 0 && session->metrics.queries_total > 0 &&
        g_config.memory.enabled) {
-      /* Copy conversation history reference while we still have it */
-      pthread_mutex_lock(&session->history_mutex);
-      struct json_object *history = session->conversation_history;
-      int message_count = history ? (int)json_object_array_length(history) : 0;
+      /* Copy the history and what it holds in one critical section, then work
+       * outside the lock (extraction does DB lookups). */
+      int64_t conv_id = 0;
+      int message_count = 0;
+      struct json_object *clean = session_snapshot_history(session, &conv_id, &message_count);
       int duration_seconds = (int)(time(NULL) - session->created_at);
 
-      if (message_count > 2 && history) {
+      /* Extract the conversation this history belongs to, by id, so
+       * memory_trigger_extraction applies its privacy and background-job checks
+       * and advances the incremental cursor.  A history spanning several
+       * conversations can't be attributed to any one of them, so it is left to
+       * memory_recovery, which extracts each (non-private) conversation from the
+       * DB.  0 = no DB conversation: a satellite's history is never persisted, so
+       * it can't be private; a WebUI or messaging history always belongs to a DB
+       * conversation, so 0 there means it could not be attributed — skip it
+       * (anything persisted is extracted by recovery). */
+      const bool persisted_type = session->type == SESSION_TYPE_WEBUI ||
+                                  session->type == SESSION_TYPE_MESSAGING;
+      if (conv_id == SESSION_HISTORY_CONV_MIXED || (conv_id <= 0 && persisted_type)) {
+         OLOG_INFO("Session %u: history not attributable to one conversation; leaving "
+                   "memory extraction to recovery",
+                   session->session_id);
+      } else if (message_count > 2 && clean) {
          /* Create session ID string for the summary */
          char session_id_str[32];
          snprintf(session_id_str, sizeof(session_id_str), "ws_%u", session->session_id);
 
-         /* Strip _provider_state (OpenAI Responses encrypted reasoning blobs) before
-          * forwarding to the extraction LLM, which may be a different provider.
-          * See llm_history_strip_provider_state docs. */
-         struct json_object *clean = llm_history_strip_provider_state(history);
-         if (clean) {
-            /* Trigger extraction (copies history internally)
-             * Pass 0 for conversation_id - session doesn't track which DB conversation
-             * it's associated with. Incremental extraction works when triggered from
-             * WebUI with known conversation_id. */
-            memory_extraction_fallback_t fb;
-            memory_extraction_build_fallback(session, &fb);
-
-            memory_trigger_extraction(session->metrics.user_id, 0, session_id_str, clean,
-                                      message_count, duration_seconds, &fb);
-            json_object_put(clean);
-         }
+         /* The snapshot has provider state stripped (see
+          * llm_history_strip_provider_state); extraction copies it again. */
+         memory_extraction_fallback_t fb;
+         memory_extraction_build_fallback(session, &fb);
+         memory_trigger_extraction(session->metrics.user_id, conv_id, session_id_str, clean,
+                                   message_count, duration_seconds, &fb);
       }
-      pthread_mutex_unlock(&session->history_mutex);
+      if (clean) {
+         json_object_put(clean);
+      }
    }
 
    OLOG_INFO("Destroying session %u (type=%s)", session_id, session_type_name(session->type));
@@ -1237,55 +1294,46 @@ void session_check_idle_conversations(void) {
 }
 
 // =============================================================================
-// Conversation History
+// System-message broadcast and per-turn tool hooks
+// (conversation-history functions live in session_history.c)
 // =============================================================================
 
-void session_add_message(session_t *session, const char *role, const char *content) {
-   if (!session || !role || !content) {
-      return;
+int session_effective_user_id(session_t *session) {
+   if (!session) {
+      return 0;
    }
-
-   pthread_mutex_lock(&session->history_mutex);
-
-   /* Guard against corrupted or NULL history — recover by creating a fresh array */
-   if (!session->conversation_history ||
-       !json_object_is_type(session->conversation_history, json_type_array)) {
-      OLOG_ERROR("Session %u: conversation_history is %s (expected array), recreating",
-                 session->session_id,
-                 session->conversation_history
-                     ? json_type_to_name(json_object_get_type(session->conversation_history))
-                     : "NULL");
-      if (session->conversation_history) {
-         json_object_put(session->conversation_history);
-      }
-      session->conversation_history = json_object_new_array();
-      if (!session->conversation_history) {
-         pthread_mutex_unlock(&session->history_mutex);
-         OLOG_ERROR("Session %u: Failed to recreate conversation history", session->session_id);
-         return;
-      }
+   pthread_mutex_lock(&session->metrics_mutex);
+   const int user_id = session->metrics.user_id;
+   pthread_mutex_unlock(&session->metrics_mutex);
+   if (user_id > 0) {
+      return user_id;
    }
-
-   struct json_object *message = json_object_new_object();
-   if (!message) {
-      pthread_mutex_unlock(&session->history_mutex);
-      OLOG_ERROR("Failed to create message object");
-      return;
-   }
-
-   json_object_object_add(message, "role", json_object_new_string(role));
-   json_object_object_add(message, "content", json_object_new_string(content));
-
-   json_object_array_add(session->conversation_history, message);
-
-   int count = json_object_array_length(session->conversation_history);
-   OLOG_INFO("Session %u: Added %s message to history (now %d messages)", session->session_id, role,
-             count);
-
-   pthread_mutex_unlock(&session->history_mutex);
+   return session->type == SESSION_TYPE_LOCAL ? session_default_voice_user_id() : 0;
 }
 
-static int broadcast_system_message_impl(const char *content, bool include_local) {
+int session_default_voice_user_id(void) {
+   return g_config.memory.default_voice_user_id > 0 ? g_config.memory.default_voice_user_id : 1;
+}
+
+/* The local device's requested owner, applied by the main loop between turns. */
+static atomic_int s_local_owner_request = 0;
+static atomic_bool s_local_owner_pending = false;
+
+void session_request_local_owner(int user_id) {
+   atomic_store(&s_local_owner_request, user_id > 0 ? user_id : 0);
+   atomic_store(&s_local_owner_pending, true); /* after the value: a taker sees it */
+}
+
+bool session_take_local_owner(int *user_id_out) {
+   if (!user_id_out || !atomic_exchange(&s_local_owner_pending, false)) {
+      return false;
+   }
+   *user_id_out = atomic_load(&s_local_owner_request);
+   return true;
+}
+
+/* session_broadcast_notice() / _for_user(): @p user_id 0 = every user. */
+static int broadcast_notice(int user_id, const char *content) {
    if (!initialized || !content || content[0] == '\0') {
       return 0;
    }
@@ -1314,15 +1362,11 @@ static int broadcast_system_message_impl(const char *content, bool include_local
       }
 
       /* Interactive surfaces only.  Messaging-channel forever-conversations are
-       * excluded so a device event doesn't leak into an unrelated chat.  The
-       * LOCAL session is skipped when include_local is false so an off-main-thread
-       * caller doesn't race the unlocked main-path append (see the _nonlocal
-       * variant's header doc). */
-      bool is_local = (s->type == SESSION_TYPE_LOCAL);
-      bool interactive = is_local || s->type == SESSION_TYPE_DAP || s->type == SESSION_TYPE_DAP2 ||
-                         s->type == SESSION_TYPE_WEBUI;
-      if (interactive && (include_local || !is_local)) {
-         session_add_message(s, "system", content);
+       * excluded so a device event doesn't leak into an unrelated chat. */
+      bool interactive = s->type == SESSION_TYPE_LOCAL || s->type == SESSION_TYPE_DAP ||
+                         s->type == SESSION_TYPE_DAP2 || s->type == SESSION_TYPE_WEBUI;
+      if (interactive && (user_id <= 0 || session_effective_user_id(s) == user_id)) {
+         session_post_notice_for(s, content, user_id);
          delivered++;
       }
 
@@ -1332,186 +1376,14 @@ static int broadcast_system_message_impl(const char *content, bool include_local
    return delivered;
 }
 
-int session_broadcast_system_message(const char *content) {
-   return broadcast_system_message_impl(content, true);
+int session_broadcast_notice(const char *content) {
+   return broadcast_notice(0, content);
 }
 
-int session_broadcast_system_message_nonlocal(const char *content) {
-   return broadcast_system_message_impl(content, false);
+int session_broadcast_notice_for_user(int user_id, const char *content) {
+   return user_id > 0 ? broadcast_notice(user_id, content) : 0;
 }
 
-void session_stamp_last_message_id(session_t *session, const char *role, int64_t msg_id) {
-   if (!session || !role || msg_id <= 0)
-      return;
-
-   pthread_mutex_lock(&session->history_mutex);
-
-   if (!session->conversation_history)
-      goto unlock;
-
-   int len = (int)json_object_array_length(session->conversation_history);
-   for (int i = len - 1; i >= 0; i--) {
-      struct json_object *entry = json_object_array_get_idx(session->conversation_history, i);
-      if (!entry)
-         continue;
-      struct json_object *role_obj;
-      if (!json_object_object_get_ex(entry, "role", &role_obj))
-         continue;
-      if (strcmp(json_object_get_string(role_obj), role) != 0)
-         continue;
-      /* Skip entries that already have an ID stamped */
-      if (json_object_object_get_ex(entry, "id", NULL))
-         continue;
-      json_object_object_add(entry, "id", json_object_new_int64(msg_id));
-      break;
-   }
-
-   /* Phase 1g-i: mirror the user-msg id into a session field so the
-    * WebUI prompt builder can read it without parsing JSON history.
-    * Other roles (assistant / tool / system) don't drive turn_id —
-    * focus injection rebuilds on USER turns only. */
-   if (strcmp(role, "user") == 0)
-      session->last_user_msg_id = msg_id;
-
-unlock:
-   pthread_mutex_unlock(&session->history_mutex);
-}
-
-int64_t session_get_last_user_msg_id(session_t *session) {
-   if (!session)
-      return 0;
-   pthread_mutex_lock(&session->history_mutex);
-   int64_t id = session->last_user_msg_id;
-   pthread_mutex_unlock(&session->history_mutex);
-   return id;
-}
-
-void session_add_message_with_images(session_t *session,
-                                     const char *role,
-                                     const char *text,
-                                     const char *const *vision_images,
-                                     int vision_image_count) {
-   if (!session || !role || !text) {
-      return;
-   }
-
-   /* No images? Fall back to simple text message */
-   if (!vision_images || vision_image_count <= 0) {
-      session_add_message(session, role, text);
-      return;
-   }
-
-   pthread_mutex_lock(&session->history_mutex);
-
-   /* Guard against corrupted or NULL history */
-   if (!session->conversation_history ||
-       !json_object_is_type(session->conversation_history, json_type_array)) {
-      OLOG_ERROR("Session %u: conversation_history corrupt in add_message_with_images, recreating",
-                 session->session_id);
-      if (session->conversation_history) {
-         json_object_put(session->conversation_history);
-      }
-      session->conversation_history = json_object_new_array();
-      if (!session->conversation_history) {
-         pthread_mutex_unlock(&session->history_mutex);
-         return;
-      }
-   }
-
-   struct json_object *message = json_object_new_object();
-   if (!message) {
-      pthread_mutex_unlock(&session->history_mutex);
-      OLOG_ERROR("Failed to create message object");
-      return;
-   }
-
-   json_object_object_add(message, "role", json_object_new_string(role));
-
-   /* Build multi-part content array in OpenAI format */
-   struct json_object *content = json_object_new_array();
-   if (!content) {
-      json_object_put(message);
-      pthread_mutex_unlock(&session->history_mutex);
-      OLOG_ERROR("Failed to create content array");
-      return;
-   }
-
-   /* Add text part first.  INVARIANT: this text part must always precede any
-    * image part, so a user-attached image message never collapses to a
-    * lone-image content array — llm_tools.c's is_capture_image_message()
-    * relies on that shape (single-element array, image-only) to distinguish
-    * ambient tool captures (eviction-eligible) from images the user
-    * deliberately attached (never evicted). Keep this ordering if this
-    * function is ever changed to allow an empty/absent text argument. */
-   struct json_object *text_part = json_object_new_object();
-   json_object_object_add(text_part, "type", json_object_new_string("text"));
-   json_object_object_add(text_part, "text", json_object_new_string(text));
-   json_object_array_add(content, text_part);
-
-   /* Add image parts */
-   for (int i = 0; i < vision_image_count; i++) {
-      if (!vision_images[i] || vision_images[i][0] == '\0') {
-         continue;
-      }
-
-      struct json_object *image_part = json_object_new_object();
-      json_object_object_add(image_part, "type", json_object_new_string("image_url"));
-
-      struct json_object *image_url = json_object_new_object();
-
-      /* Build data URI: data:image/jpeg;base64,<data> */
-      size_t data_len = strlen(vision_images[i]);
-      size_t uri_len = 23 + data_len + 1; /* "data:image/jpeg;base64," + data + null */
-      char *data_uri = malloc(uri_len);
-      if (data_uri) {
-         snprintf(data_uri, uri_len, "data:image/jpeg;base64,%s", vision_images[i]);
-         json_object_object_add(image_url, "url", json_object_new_string(data_uri));
-         free(data_uri);
-      }
-
-      json_object_object_add(image_part, "image_url", image_url);
-      json_object_array_add(content, image_part);
-   }
-
-   json_object_object_add(message, "content", content);
-   json_object_array_add(session->conversation_history, message);
-
-   OLOG_INFO("Session %u: Added message with %d images to history", session->session_id,
-             vision_image_count);
-
-   pthread_mutex_unlock(&session->history_mutex);
-}
-
-void session_add_message_multipart(session_t *session, struct json_object *message) {
-   if (!session || !message) {
-      if (message) {
-         json_object_put(message);
-      }
-      return;
-   }
-
-   pthread_mutex_lock(&session->history_mutex);
-
-   /* Guard against corrupted or NULL history (mirrors add_message_with_images). */
-   if (!session->conversation_history ||
-       !json_object_is_type(session->conversation_history, json_type_array)) {
-      OLOG_ERROR("Session %u: conversation_history corrupt in add_message_multipart, recreating",
-                 session->session_id);
-      if (session->conversation_history) {
-         json_object_put(session->conversation_history);
-      }
-      session->conversation_history = json_object_new_array();
-      if (!session->conversation_history) {
-         pthread_mutex_unlock(&session->history_mutex);
-         json_object_put(message);
-         return;
-      }
-   }
-
-   json_object_array_add(session->conversation_history, message); /* takes ownership */
-
-   pthread_mutex_unlock(&session->history_mutex);
-}
 
 void session_set_tool_persist_hook(session_t *session, session_tool_persist_fn cb, void *userdata) {
    if (!session) {
@@ -1534,66 +1406,26 @@ void session_set_tool_iteration_hook(session_t *session,
    session->tool_iteration_userdata = userdata;
 }
 
-struct json_object *session_get_history(session_t *session) {
-   if (!session) {
-      return NULL;
-   }
-
-   pthread_mutex_lock(&session->history_mutex);
-   struct json_object *history = session->conversation_history;
-
-   // Increment reference count so caller can use it
-   json_object_get(history);
-
-   pthread_mutex_unlock(&session->history_mutex);
-
-   return history;
-}
-
-void session_clear_history(session_t *session) {
-   if (!session) {
-      return;
-   }
-
-   pthread_mutex_lock(&session->history_mutex);
-
-   // Release old history
-   if (session->conversation_history) {
-      json_object_put(session->conversation_history);
-   }
-
-   // Create new empty array
-   session->conversation_history = json_object_new_array();
-   if (!session->conversation_history) {
-      OLOG_ERROR("Failed to create new conversation history array");
-   }
-
-   // Clear visual guideline cache — LLM no longer has them in context
-   session->visual_modules_loaded[0] = '\0';
-
-   pthread_mutex_unlock(&session->history_mutex);
-}
-
-bool session_has_messages(session_t *session) {
-   if (!session) {
-      return false;
-   }
-
-   pthread_mutex_lock(&session->history_mutex);
-   int count = session->conversation_history
-                   ? (int)json_object_array_length(session->conversation_history)
-                   : 0;
-   pthread_mutex_unlock(&session->history_mutex);
-
-   /* Require at least 2 messages (system prompt + user message) */
-   return count >= 2;
-}
-
 void session_update_interaction_complete(session_t *session) {
    if (!session) {
       return;
    }
    session->last_interaction_complete = time(NULL);
+}
+
+/* Seconds before an idle voice save that couldn't run (a turn in progress, a
+ * database error) is tried again, rather than on every idle check. */
+#define VOICE_SAVE_RETRY_SEC 60
+
+/* A voice save that couldn't run is tried again later; one with nothing to
+ * save waits for the next interaction. */
+static void voice_save_later(session_t *session, bool nothing_to_save) {
+   const time_t timeout = (time_t)g_config.memory.conversation_idle_timeout_min * 60;
+   if (nothing_to_save || timeout <= 0) {
+      session->last_interaction_complete = 0;
+   } else if (session->last_interaction_complete > 0) {
+      session->last_interaction_complete = time(NULL) - timeout + VOICE_SAVE_RETRY_SEC;
+   }
 }
 
 int session_save_voice_conversation(session_t *session, int64_t *conv_id_out) {
@@ -1604,28 +1436,62 @@ int session_save_voice_conversation(session_t *session, int64_t *conv_id_out) {
       return 1;
    }
 
+   /* The prompt the next context starts with: the local mic's, or the remote
+    * one a satellite starts with (each turn then personalizes it).  Copied
+    * before taking the history lock. */
+   char *next_prompt = session->type == SESSION_TYPE_LOCAL ? get_local_command_prompt_dup()
+                                                           : get_remote_command_prompt_dup();
+
    pthread_mutex_lock(&session->history_mutex);
+
+   /* Not while a turn is running: it reads this history without the lock, and
+    * its exchange isn't finished (the next idle check saves it). */
+   if (session->turn_active) {
+      pthread_mutex_unlock(&session->history_mutex);
+      OLOG_INFO("Session %u: turn in progress; voice conversation not saved yet",
+                session->session_id);
+      voice_save_later(session, false);
+      free(next_prompt);
+      return 1;
+   }
 
    /* Check if there are messages to save */
    if (!session->conversation_history) {
       pthread_mutex_unlock(&session->history_mutex);
+      free(next_prompt);
       return 1;
    }
 
    int msg_count = (int)json_object_array_length(session->conversation_history);
-   if (msg_count < 2) {
-      /* No user messages, just system prompt */
+   int exchange_count = 0; /* messages other than the system prompt */
+   for (int i = 0; i < msg_count; i++) {
+      struct json_object *role = NULL;
+      if (json_object_object_get_ex(json_object_array_get_idx(session->conversation_history, i),
+                                    "role", &role) &&
+          strcmp(json_object_get_string(role), "system") != 0) {
+         exchange_count++;
+      }
+   }
+   if (exchange_count == 0) {
+      /* Just the system prompt */
       pthread_mutex_unlock(&session->history_mutex);
+      voice_save_later(session, true);
+      free(next_prompt);
       return 1;
    }
 
-   /* Get user ID: prefer session's mapped user, fall back to config default */
-   int user_id = session->metrics.user_id;
+   /* A guest's conversation (an unmapped satellite) belongs to no one: it is
+    * not saved, and the next context starts fresh. */
+   const int user_id = session_effective_user_id(session);
    if (user_id <= 0) {
-      user_id = g_config.memory.default_voice_user_id;
-   }
-   if (user_id <= 0) {
-      user_id = 1; /* Fallback to admin */
+      session_fact_source_t dropped[SESSION_PENDING_FACT_SOURCES_MAX];
+      (void)session_take_fact_sources_locked(session, dropped);
+      session_new_context_locked(session, next_prompt);
+      session->last_interaction_complete = 0;
+      pthread_mutex_unlock(&session->history_mutex);
+      free(next_prompt);
+      OLOG_INFO("Session %u: guest conversation not saved (no user)", session->session_id);
+      return 1;
    }
 
    /* Generate title from first user message */
@@ -1670,6 +1536,8 @@ int session_save_voice_conversation(session_t *session, int64_t *conv_id_out) {
    if (rc != AUTH_DB_SUCCESS) {
       OLOG_ERROR("Session %u: Failed to create voice conversation: %d", session->session_id, rc);
       pthread_mutex_unlock(&session->history_mutex);
+      voice_save_later(session, false);
+      free(next_prompt);
       return 1;
    }
 
@@ -1688,7 +1556,9 @@ int session_save_voice_conversation(session_t *session, int64_t *conv_id_out) {
       const char *role = json_object_get_string(role_obj);
       const char *content = json_object_get_string(content_obj);
 
-      if (role && content) {
+      /* The prompt isn't part of the conversation (and its volatile block
+       * carries this turn's context and device events). */
+      if (role && content && strcmp(role, "system") != 0) {
          int64_t msg_id = 0;
          if (conv_db_add_message_ex(conv_id, user_id, role, content, &msg_id) == AUTH_DB_SUCCESS &&
              msg_id > 0) {
@@ -1703,45 +1573,44 @@ int session_save_voice_conversation(session_t *session, int64_t *conv_id_out) {
     * (session_manager_alloc_bare) and torn down by job_manager_end() via
     * session_manager_free_bare() -> session_free(), so neither this function nor
     * session_destroy() runs for them.  A SESSION_TYPE_JOB guard on this line
-    * would be dead code — the job-extraction exemption belongs where a job
-    * conversation can actually be reached, which is should_skip_memory_extraction()
-    * in webui_history.c (the jobs panel can load one into a WebUI session) and
-    * memory_recovery.c's scan. */
-   if (g_config.memory.enabled) {
+    * would be dead code: memory_trigger_extraction() itself refuses background-job
+    * and private conversations, for every caller. */
+   /* Deep-copy history with provider-private fields stripped. The OpenAI
+    * Responses path stashes encrypted reasoning blobs under _provider_state
+    * which are session-bound to OpenAI and must not be forwarded to the
+    * memory-extraction LLM (which may be Claude/Gemini/local).  Extraction
+    * starts after the lock is released: building its fallback reads the LLM
+    * settings under llm_config_mutex, never held together with this one. */
+   struct json_object *history_copy = g_config.memory.enabled ? llm_history_strip_provider_state(
+                                                                    session->conversation_history)
+                                                              : NULL;
+
+   /* Start the next context in the same critical section, so no turn can begin
+    * on the history just saved (its exchange would be saved twice, or lost),
+    * taking the facts the voice turns saved to memory: they were learned in
+    * this conversation. */
+   session_fact_source_t facts[SESSION_PENDING_FACT_SOURCES_MAX];
+   const int fact_count = session_take_fact_sources_locked(session, facts);
+   session_new_context_locked(session, next_prompt);
+   session->last_interaction_complete = 0;
+
+   pthread_mutex_unlock(&session->history_mutex);
+   free(next_prompt);
+
+   session_record_fact_sources(facts, fact_count, conv_id, user_id);
+
+   if (history_copy) {
       int duration_seconds = (int)(time(NULL) - session->created_at);
       char session_id_str[32];
       snprintf(session_id_str, sizeof(session_id_str), "voice_%u", session->session_id);
-
-      /* Deep-copy history with provider-private fields stripped. The OpenAI
-       * Responses path stashes encrypted reasoning blobs under _provider_state
-       * which are session-bound to OpenAI and must not be forwarded to the
-       * memory-extraction LLM (which may be Claude/Gemini/local). */
-      struct json_object *history_copy = llm_history_strip_provider_state(
-          session->conversation_history);
-
-      if (history_copy) {
-         memory_extraction_fallback_t fb;
-         memory_extraction_build_fallback(session, &fb);
-
-         memory_trigger_extraction(user_id, conv_id, session_id_str, history_copy, msg_count,
-                                   duration_seconds, &fb);
-      }
-   }
-
-   pthread_mutex_unlock(&session->history_mutex);
-
-   /* Clear session history and reset timestamp */
-   session_clear_history(session);
-   session->last_interaction_complete = 0;
-
-   /* Re-initialize with system prompt (use local command prompt for voice sessions) */
-   const char *system_prompt = get_local_command_prompt();
-   if (system_prompt) {
-      session_init_system_prompt(session, system_prompt);
+      memory_extraction_fallback_t fb;
+      memory_extraction_build_fallback(session, &fb);
+      memory_trigger_extraction(user_id, conv_id, session_id_str, history_copy, msg_count,
+                                duration_seconds, &fb);
    }
 
    OLOG_INFO("Session %u: Saved voice conversation %lld (%d messages, user %d)",
-             session->session_id, (long long)conv_id, msg_count, user_id);
+             session->session_id, (long long)conv_id, exchange_count, user_id);
 
    *conv_id_out = conv_id;
    return 0;
@@ -1751,37 +1620,10 @@ void session_init_system_prompt(session_t *session, const char *system_prompt) {
    if (!session || !system_prompt) {
       return;
    }
-
    pthread_mutex_lock(&session->history_mutex);
-
-   // Release old history
-   if (session->conversation_history) {
-      json_object_put(session->conversation_history);
-   }
-
-   // Create new array with system message
-   session->conversation_history = json_object_new_array();
-   if (!session->conversation_history) {
-      OLOG_ERROR("Failed to create conversation history array");
-      pthread_mutex_unlock(&session->history_mutex);
-      return;
-   }
-
-   // Add system message
-   struct json_object *system_message = json_object_new_object();
-   if (system_message) {
-      json_object_object_add(system_message, "role", json_object_new_string("system"));
-      json_object_object_add(system_message, "content", json_object_new_string(system_prompt));
-      json_object_array_add(session->conversation_history, system_message);
-   }
-
-   /* Phase 1f: a fresh system prompt on this session is by definition a
-    * SESSION_START boundary — clear dedup state under the same lock so
-    * the next PER_TURN admits all candidates fresh.  Inline memset (not
-    * session_injected_set_clear) because we already hold history_mutex
-    * here and the helper is self-locking. */
-   memset(&session->injected_set, 0, sizeof(session->injected_set));
-
+   /* A fresh system prompt is a SESSION_START boundary: a new context (the
+    * focus dedup set clears with it, so the next turn admits all candidates). */
+   session_new_context_locked(session, system_prompt);
    pthread_mutex_unlock(&session->history_mutex);
 
    OLOG_INFO("Session %u: Initialized with system prompt (%zu chars)", session->session_id,
@@ -1794,9 +1636,23 @@ void session_update_system_prompt(session_t *session, const char *system_prompt)
    }
 
    pthread_mutex_lock(&session->history_mutex);
-
-   if (!session->conversation_history) {
+   if (session_turn_defers_writes_locked(session)) {
+      /* Another thread, while a turn serializes the live history: the turn
+       * applies it when it ends (the latest refresh wins). */
+      char *copy = strdup(system_prompt);
+      if (copy) {
+         free(session->deferred_system_prompt);
+         session->deferred_system_prompt = copy;
+      }
       pthread_mutex_unlock(&session->history_mutex);
+      return;
+   }
+   session_update_system_prompt_locked(session, system_prompt);
+   pthread_mutex_unlock(&session->history_mutex);
+}
+
+void session_update_system_prompt_locked(session_t *session, const char *system_prompt) {
+   if (!session->conversation_history) {
       return;
    }
 
@@ -1855,7 +1711,6 @@ void session_update_system_prompt(session_t *session, const char *system_prompt)
             if (!rebuilt) {
                json_object_put(new_msg);
                OLOG_ERROR("Session %u: failed to allocate rebuilt history", session->session_id);
-               pthread_mutex_unlock(&session->history_mutex);
                return;
             }
             json_object_array_add(rebuilt, new_msg);
@@ -1875,8 +1730,6 @@ void session_update_system_prompt(session_t *session, const char *system_prompt)
                    strlen(system_prompt));
       }
    }
-
-   pthread_mutex_unlock(&session->history_mutex);
 }
 
 /* Helper: scan the conversation history under @p session->history_mutex
@@ -1888,10 +1741,10 @@ void session_update_system_prompt(session_t *session, const char *system_prompt)
  *
  * Returns SUCCESS / FAILURE; on FAILURE the existing history is left
  * intact (no partial mutation). */
-static int rebuild_history_with_two_system_messages_locked(session_t *session,
+static int rebuild_history_with_two_system_messages_locked(struct json_object **slot,
                                                            const char *stable_prefix,
                                                            const char *volatile_block) {
-   if (session == NULL || session->conversation_history == NULL)
+   if (slot == NULL || *slot == NULL)
       return FAILURE;
 
    const bool have_stable = stable_prefix != NULL && stable_prefix[0] != '\0';
@@ -1925,9 +1778,9 @@ static int rebuild_history_with_two_system_messages_locked(session_t *session,
    }
 
    /* Preserve every non-system message in original order. */
-   const int len = json_object_array_length(session->conversation_history);
+   const int len = json_object_array_length(*slot);
    for (int i = 0; i < len; i++) {
-      struct json_object *old = json_object_array_get_idx(session->conversation_history, i);
+      struct json_object *old = json_object_array_get_idx(*slot, i);
       struct json_object *role_obj = NULL;
       const char *role = NULL;
       if (json_object_object_get_ex(old, "role", &role_obj))
@@ -1935,14 +1788,111 @@ static int rebuild_history_with_two_system_messages_locked(session_t *session,
       if (role != NULL && strcmp(role, "system") == 0)
          continue;
       /* Refcount bump: json_object_array_add takes ownership but old
-       * is still referenced by conversation_history until we put it. */
+       * is still referenced by the old array until we put it. */
       json_object_get(old);
       json_object_array_add(rebuilt, old);
    }
 
-   json_object_put(session->conversation_history);
-   session->conversation_history = rebuilt;
+   json_object_put(*slot);
+   *slot = rebuilt;
    return SUCCESS;
+}
+
+/* Caller holds history_mutex.  The @p index'th message of @p hist when it is a
+ * system message: its content; NULL otherwise. */
+static const char *system_content_at(struct json_object *hist, int index) {
+   if (!hist || (int)json_object_array_length(hist) <= index) {
+      return NULL;
+   }
+   struct json_object *msg = json_object_array_get_idx(hist, index);
+   struct json_object *role = NULL;
+   struct json_object *content = NULL;
+   if (json_object_object_get_ex(msg, "role", &role) &&
+       strcmp(json_object_get_string(role), "system") == 0 &&
+       json_object_object_get_ex(msg, "content", &content)) {
+      return json_object_get_string(content);
+   }
+   return NULL;
+}
+
+/* The device events rendered into a volatile block start at their header. */
+static const char *find_notices(const char *vol) {
+   return vol ? strstr(vol, session_notices_header()) : NULL;
+}
+
+/* Caller holds history_mutex.  Rebuild the running turn's history (or the live
+ * one) so it leads with @p stable_prefix and the volatile block: @p
+ * volatile_block plus the session's recent device events.  NULL for either
+ * keeps what that history has (the volatile block without the device events it
+ * was last rendered with).  @p viewer_user_id: whose device events to show
+ * (session_effective_user_id(), read before taking history_mutex). */
+static void apply_system_messages_locked(session_t *session,
+                                         const char *stable_prefix,
+                                         const char *volatile_block,
+                                         int viewer_user_id) {
+   if (session->conversation_history == NULL) {
+      session->conversation_history = json_object_new_array();
+      if (session->conversation_history == NULL) {
+         return;
+      }
+   }
+
+   /* The system messages belong to the running turn's context: rebuild the
+    * turn's own history when the user has since opened another conversation,
+    * else the live one (moving the turn's pin with it when they are the same). */
+   const bool pinned_elsewhere = session->turn_history != NULL &&
+                                 session->turn_history != session->conversation_history;
+   const bool pinned_live = session->turn_history != NULL && !pinned_elsewhere;
+   struct json_object **slot = pinned_elsewhere ? &session->turn_history
+                                                : &session->conversation_history;
+
+   char *kept_stable = NULL;
+   if (stable_prefix == NULL) {
+      const char *first = system_content_at(*slot, 0);
+      kept_stable = first ? strdup(first) : NULL;
+      stable_prefix = kept_stable;
+   }
+   char *kept_volatile = NULL;
+   if (volatile_block == NULL) {
+      /* This history's own volatile block (a two-message shape), without the
+       * events rendered into it last time. */
+      const char *second = system_content_at(*slot, 1);
+      if (second) {
+         const char *cut = find_notices(second);
+         size_t len = cut ? (size_t)(cut - second) : strlen(second);
+         while (len > 0 && second[len - 1] == '\n') {
+            len--;
+         }
+         kept_volatile = strndup(second, len);
+      }
+      volatile_block = kept_volatile ? kept_volatile : "";
+   }
+
+   char *notices = session_render_notices_locked(session, viewer_user_id);
+   char *combined = NULL;
+   if (notices && notices[0] != '\0') {
+      const size_t n = strlen(volatile_block) + strlen(notices) + 3;
+      combined = malloc(n);
+      if (combined) {
+         snprintf(combined, n, "%s%s%s", volatile_block, volatile_block[0] ? "\n\n" : "", notices);
+      }
+   }
+   const char *vol = combined ? combined : volatile_block;
+
+   if (rebuild_history_with_two_system_messages_locked(slot, stable_prefix, vol) != SUCCESS) {
+      /* Nothing to lead with, or out of memory: the history is left as it was. */
+      if ((stable_prefix && stable_prefix[0]) || vol[0]) {
+         OLOG_ERROR("Session %u: failed to rebuild history with two-system-messages shape",
+                    session->session_id);
+      }
+   } else if (pinned_live) {
+      json_object_put(session->turn_history);
+      session->turn_history = json_object_get(session->conversation_history);
+   }
+   free(combined);
+   free(notices);
+   free(kept_volatile);
+   free(kept_stable);
 }
 
 void session_update_system_messages(session_t *session,
@@ -1955,22 +1905,10 @@ void session_update_system_messages(session_t *session,
    if (!have_stable && !have_volatile)
       return; /* nothing to push — leave system messages as-is */
 
+   const int viewer = session_effective_user_id(session);
    pthread_mutex_lock(&session->history_mutex);
-   if (session->conversation_history == NULL) {
-      session->conversation_history = json_object_new_array();
-      if (session->conversation_history == NULL) {
-         pthread_mutex_unlock(&session->history_mutex);
-         return;
-      }
-   }
-
-   if (rebuild_history_with_two_system_messages_locked(session, stable_prefix, volatile_block) !=
-       SUCCESS) {
-      OLOG_ERROR("Session %u: failed to rebuild history with two-system-messages shape",
-                 session->session_id);
-      pthread_mutex_unlock(&session->history_mutex);
-      return;
-   }
+   apply_system_messages_locked(session, have_stable ? stable_prefix : "",
+                                have_volatile ? volatile_block : "", viewer);
 
    /* Drift detection.  Hash the stable prefix and compare to the
     * session's last-known value.  First call post-init (prior hash 0)
@@ -1995,13 +1933,32 @@ void session_update_system_messages(session_t *session,
              have_volatile ? strlen(volatile_block) : 0);
 }
 
+/* For a turn that keeps its last prompt (no prompt builder, no user, or the
+ * builder failed): re-render the device events into the volatile block of the
+ * history the turn runs on, keeping the rest of its system messages. */
+static void session_refresh_notices(session_t *session) {
+   const int viewer = session_effective_user_id(session);
+   pthread_mutex_lock(&session->history_mutex);
+   struct json_object *hist = session->turn_history ? session->turn_history
+                                                    : session->conversation_history;
+   /* Skip when there's nothing to add and nothing rendered last time to take out. */
+   if (session->notice_count > 0 || find_notices(system_content_at(hist, 1)) != NULL) {
+      apply_system_messages_locked(session, NULL, NULL, viewer);
+   }
+   pthread_mutex_unlock(&session->history_mutex);
+}
+
 void session_append_to_volatile_segment(session_t *session, const char *text) {
    if (session == NULL || text == NULL || text[0] == '\0')
       return;
 
    pthread_mutex_lock(&session->history_mutex);
 
-   if (session->conversation_history == NULL) {
+   /* The running turn's history (the pin), which may be its own copy of
+    * another conversation; the live history otherwise. */
+   struct json_object *hist = session->turn_history ? session->turn_history
+                                                    : session->conversation_history;
+   if (hist == NULL) {
       pthread_mutex_unlock(&session->history_mutex);
       return;
    }
@@ -2011,10 +1968,10 @@ void session_append_to_volatile_segment(session_t *session, const char *text) {
     * message sessions it's the lone system message.  Either way the
     * cacheable stable prefix at messages[0] is untouched whenever the
     * two-message shape applies. */
-   const int len = json_object_array_length(session->conversation_history);
+   const int len = json_object_array_length(hist);
    struct json_object *target = NULL;
    for (int i = len - 1; i >= 0; i--) {
-      struct json_object *msg = json_object_array_get_idx(session->conversation_history, i);
+      struct json_object *msg = json_object_array_get_idx(hist, i);
       struct json_object *role_obj = NULL;
       if (!json_object_object_get_ex(msg, "role", &role_obj))
          continue;
@@ -2350,27 +2307,19 @@ int session_dispatch_user_turn(session_t *session, const char *user_turn_text) {
    text_filter_cited_reset(&session->cited_tag_filter);
 
    session_prompt_builder_t builder = atomic_load_explicit(&s_prompt_builder, memory_order_acquire);
-   if (builder == NULL)
-      return SUCCESS; /* No builder registered — leave system prompt as-is. */
+   if (builder == NULL) {
+      session_refresh_notices(session); /* the prompt stays; its device events don't */
+      return SUCCESS;
+   }
 
    /* Re-read user_id under metrics_mutex so satellite rebinds that
     * occurred since last turn are picked up.  Session manager design
     * pattern (matches refresh_all_prompts at line 1700-1702). */
-   pthread_mutex_lock(&session->metrics_mutex);
-   int user_id = session->metrics.user_id;
-   pthread_mutex_unlock(&session->metrics_mutex);
-   /* The LOCAL mic session carries no authenticated user_id (metrics.user_id
-    * stays 0); its memory is bound to the configured default voice user —
-    * resolved the same way as the extraction / voice-conversation-save path
-    * (session_save_voice_conversation, get_current_user_id).  This is what
-    * gives the local mic the same per-turn memory + focus injection every
-    * other surface already gets. */
-   if (user_id <= 0 && session->type == SESSION_TYPE_LOCAL) {
-      user_id = g_config.memory.default_voice_user_id > 0 ? g_config.memory.default_voice_user_id
-                                                          : 1;
+   const int user_id = session_effective_user_id(session);
+   if (user_id <= 0) {
+      session_refresh_notices(session); /* unauthenticated: base prompt + device events */
+      return SUCCESS;
    }
-   if (user_id <= 0)
-      return SUCCESS; /* Unauthenticated — base prompt only; nothing to refresh. */
 
    /* Phase 1f: publish the dispatch session into TLS so build_focus_block
     * can find the dedup set without needing session plumbed through the
@@ -2394,6 +2343,7 @@ int session_dispatch_user_turn(session_t *session, const char *user_turn_text) {
                    user_id);
       composed_prompt_free(&cp);
       session_set_dispatch_session(NULL);
+      session_refresh_notices(session);
       return SUCCESS; /* LLM dispatch never blocked by focus errors. */
    }
 
@@ -2531,47 +2481,68 @@ void session_manager_refresh_all_prompts(void) {
 // Per-Session LLM Configuration
 // =============================================================================
 
+/* @p config, or a copy in @p fallback with a cloud provider that has an API key
+ * when @p config's doesn't; NULL when no cloud provider has one. */
+static const session_llm_config_t *usable_llm_config(const session_t *session,
+                                                     const session_llm_config_t *config,
+                                                     session_llm_config_t *fallback) {
+   if (config->type != LLM_CLOUD) {
+      return config;
+   }
+   bool has_key = false;
+   if (config->cloud_provider == CLOUD_PROVIDER_OPENAI)
+      has_key = llm_has_openai_key();
+   else if (config->cloud_provider == CLOUD_PROVIDER_CLAUDE)
+      has_key = llm_has_claude_key();
+   else if (config->cloud_provider == CLOUD_PROVIDER_GEMINI)
+      has_key = llm_has_gemini_key();
+   else if (config->cloud_provider == CLOUD_PROVIDER_OPENROUTER)
+      has_key = llm_has_openrouter_key();
+   if (has_key) {
+      return config;
+   }
+
+   cloud_provider_t alt = llm_detect_available_provider();
+   if (alt == CLOUD_PROVIDER_NONE) {
+      OLOG_WARNING("Session %u: No cloud provider has an API key configured", session->session_id);
+      return NULL;
+   }
+   OLOG_INFO("Session %u: %s provider unavailable, falling back to %s", session->session_id,
+             cloud_provider_to_string(config->cloud_provider), cloud_provider_to_string(alt));
+   memcpy(fallback, config, sizeof(session_llm_config_t));
+   fallback->cloud_provider = alt;
+   fallback->model[0] = '\0'; /* Clear model — let resolver pick default for new provider */
+   return fallback;
+}
+
+/* Caller holds llm_config_mutex.  True for the running turn's own code: its
+ * thread and the tool threads carrying its token. */
+static bool is_turn_caller_locked(const session_t *session) {
+   return session->turn_llm_config_set && tl_turn_token != 0 && tl_turn_token == session->turn_gen;
+}
+
 int session_set_llm_config(session_t *session, const session_llm_config_t *config) {
    if (!session || !config) {
       return 1;
    }
-
-   // Validate that requested provider has API key; fall back to available provider
    session_llm_config_t fallback_config;
-   if (config->type == LLM_CLOUD) {
-      bool has_key = false;
-      if (config->cloud_provider == CLOUD_PROVIDER_OPENAI)
-         has_key = llm_has_openai_key();
-      else if (config->cloud_provider == CLOUD_PROVIDER_CLAUDE)
-         has_key = llm_has_claude_key();
-      else if (config->cloud_provider == CLOUD_PROVIDER_GEMINI)
-         has_key = llm_has_gemini_key();
-      else if (config->cloud_provider == CLOUD_PROVIDER_OPENROUTER)
-         has_key = llm_has_openrouter_key();
-
-      if (!has_key) {
-         // Try to fall back to an available provider
-         cloud_provider_t fallback = llm_detect_available_provider();
-
-         if (fallback == CLOUD_PROVIDER_NONE) {
-            OLOG_WARNING("Session %u: No cloud provider has an API key configured",
-                         session->session_id);
-            return 1;
-         }
-
-         OLOG_INFO("Session %u: %s provider unavailable, falling back to %s", session->session_id,
-                   cloud_provider_to_string(config->cloud_provider),
-                   cloud_provider_to_string(fallback));
-         memcpy(&fallback_config, config, sizeof(session_llm_config_t));
-         fallback_config.cloud_provider = fallback;
-         fallback_config.model[0] =
-             '\0'; /* Clear model — let resolver pick default for new provider */
-         config = &fallback_config;
-      }
+   config = usable_llm_config(session, config, &fallback_config);
+   if (!config) {
+      return 1;
    }
 
+   /* A turn changing its own settings (switch_llm): the turn's settings change;
+    * the session's only when the turn runs on the session's live history, i.e.
+    * on the conversation being viewed. */
+   const bool on_own_copy = session_turn_on_own_history(session);
    pthread_mutex_lock(&session->llm_config_mutex);
-   memcpy(&session->llm_config, config, sizeof(session_llm_config_t));
+   const bool turn_caller = is_turn_caller_locked(session);
+   if (turn_caller) {
+      memcpy(&session->turn_llm_config, config, sizeof(session_llm_config_t));
+   }
+   if (!turn_caller || !on_own_copy) {
+      memcpy(&session->llm_config, config, sizeof(session_llm_config_t));
+   }
    pthread_mutex_unlock(&session->llm_config_mutex);
 
    OLOG_INFO("Session %u: LLM config updated (type=%d, provider=%d)", session->session_id,
@@ -2580,13 +2551,47 @@ int session_set_llm_config(session_t *session, const session_llm_config_t *confi
    return 0;
 }
 
+int session_set_turn_llm_config(session_t *session, const session_llm_config_t *config) {
+   if (!session || !config) {
+      return 1;
+   }
+   session_llm_config_t fallback_config;
+   config = usable_llm_config(session, config, &fallback_config);
+   if (!config) {
+      return 1;
+   }
+   pthread_mutex_lock(&session->llm_config_mutex);
+   const bool turn_caller = is_turn_caller_locked(session);
+   if (turn_caller) {
+      memcpy(&session->turn_llm_config, config, sizeof(session_llm_config_t));
+   }
+   pthread_mutex_unlock(&session->llm_config_mutex);
+   if (!turn_caller) {
+      OLOG_WARNING("Session %u: turn-only LLM change outside the running turn; ignored",
+                   session->session_id);
+      return 1;
+   }
+   OLOG_INFO("Session %u: LLM config updated for this turn only (type=%d, provider=%d)",
+             session->session_id, config->type, config->cloud_provider);
+   return 0;
+}
+
 void session_get_llm_config(session_t *session, session_llm_config_t *config) {
    if (!session || !config) {
       return;
    }
 
+   if (tl_llm_override && tl_llm_override_session == session) {
+      memcpy(config, tl_llm_override, sizeof(session_llm_config_t));
+      return;
+   }
    pthread_mutex_lock(&session->llm_config_mutex);
-   memcpy(config, &session->llm_config, sizeof(session_llm_config_t));
+   if (session->turn_llm_config_set && tl_turn_token != 0 && tl_turn_token == session->turn_gen) {
+      /* Part of the running turn: its own settings (see session_t.turn_llm_config). */
+      memcpy(config, &session->turn_llm_config, sizeof(session_llm_config_t));
+   } else {
+      memcpy(config, &session->llm_config, sizeof(session_llm_config_t));
+   }
    pthread_mutex_unlock(&session->llm_config_mutex);
 }
 
@@ -2675,6 +2680,19 @@ void session_set_command_context(session_t *session) {
 
 session_t *session_get_command_context(void) {
    return tl_command_context;
+}
+
+uint64_t session_turn_token(void) {
+   return tl_turn_token;
+}
+
+void session_set_turn_token(uint64_t token) {
+   tl_turn_token = token;
+}
+
+void session_set_llm_config_override(const session_t *session, const session_llm_config_t *config) {
+   tl_llm_override_session = config ? session : NULL;
+   tl_llm_override = session ? config : NULL;
 }
 
 // =============================================================================

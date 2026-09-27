@@ -33,6 +33,7 @@
 #ifndef MEMORY_DB_PROVENANCE_H
 #define MEMORY_DB_PROVENANCE_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "memory/memory_types.h"
@@ -115,6 +116,29 @@ int memory_db_fact_provenance_extend(int64_t fact_id,
                                      int64_t new_msg_end);
 
 /**
+ * @brief Record a conversation that didn't exist yet when a fact was saved
+ *
+ * A "remember" during a turn whose conversation was created afterwards (a new
+ * chat's first message, a voice turn saved when the session ends) is recorded
+ * as learned from @p conv_id once it exists: added to the fact's sources, and
+ * for a fact that turn created (@p created), no longer stated outside any
+ * conversation.  Failures are logged.
+ */
+void memory_db_fact_attach_source(int64_t fact_id, int user_id, bool created, int64_t conv_id);
+
+struct session_fact_source;
+
+/**
+ * @brief memory_db_fact_attach_source() for a batch, in one commit
+ *
+ * Each fact's conversation is checked to exist and be the fact's user's (a
+ * turn's conversation can be deleted while it runs); failures are logged.
+ */
+void memory_db_fact_attach_sources(const struct session_fact_source *facts,
+                                   int count,
+                                   int64_t conv_id);
+
+/**
  * @brief Batch-fetch provenance for up to `n` facts in a single lock cycle (v40).
  *
  * Replaces N sequential calls to `memory_db_fact_get_source()` in list paths.
@@ -178,6 +202,54 @@ int memory_db_prefs_get_sources(int user_id,
                                 int64_t *out_conv_ids,
                                 int64_t *out_starts,
                                 int64_t *out_ends);
+
+/* =============================================================================
+ * Per-conversation lookups (forget what was learned from a conversation)
+ * ============================================================================= */
+
+/** Memory rows learned from a set of conversations: exactly what a forget of
+ *  that set removes (including superseded facts and closed relations). */
+typedef struct {
+   int facts;       /**< current facts learned only from these conversations */
+   int outdated;    /**< superseded facts going with them (older versions the Memory
+                         panel doesn't list, and every fact a going one replaced) */
+   int summaries;   /**< conversation summaries */
+   int relations;   /**< entity relations (graph links, not shown as memories) going
+                         with those facts or sourced from these conversations */
+   int preferences; /**< preferences whose latest source is one of the conversations */
+   int entities;    /**< forget only: named entities left with no remaining reference */
+} memory_conv_learned_t;
+
+/**
+ * @brief Count the memory rows learned from any of @p conv_ids
+ *
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_conversations_learned_count(int user_id,
+                                          const int64_t *conv_ids,
+                                          int n_conv,
+                                          memory_conv_learned_t *out);
+
+/**
+ * @brief Delete every memory row learned from any of @p conv_ids
+ *
+ * In one transaction (all or nothing):
+ *  - facts learned only from these conversations (memory_fact_sources); a fact
+ *    another conversation also taught stays, pointed at that conversation;
+ *  - their relations, and relations not tied to a fact whose source is here;
+ *  - summaries of these conversations and preferences they last set;
+ *  - any named entity those rows referenced that nothing references afterwards
+ *    (not the user, no contact details, no other fact or relation, no alias).
+ * Deleting a fact that superseded an older one makes the older one current
+ * again (the superseded_by link is cleared by the schema).
+ *
+ * @param deleted_out Rows deleted per table (may be NULL)
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE (nothing deleted)
+ */
+int memory_db_conversations_forget(int user_id,
+                                   const int64_t *conv_ids,
+                                   int n_conv,
+                                   memory_conv_learned_t *deleted_out);
 
 #ifdef __cplusplus
 }

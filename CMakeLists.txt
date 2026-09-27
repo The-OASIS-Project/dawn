@@ -550,7 +550,6 @@ set(DAWN_SOURCES
     src/core/conv_stream.c
     src/core/event_payload.c
     src/core/conv_event.c
-    src/core/pending_system_msg.c
     src/input_queue.c
     src/mosquitto_comms.c
     src/text_to_command_nuevo.c
@@ -590,6 +589,7 @@ set(DAWN_SOURCES
     src/llm/llm_tools.c
     src/llm/llm_tool_loop.c
     src/llm/llm_context.c
+    src/llm/llm_context_merge.c
     src/llm/llm_pricing.c
     src/llm/llm_local_provider.c
     src/llm/sse_parser.c
@@ -690,6 +690,8 @@ if(ENABLE_WEBUI)
         src/webui/webui_messaging.c
         src/webui/webui_phone.c
         src/webui/webui_history.c
+        src/webui/webui_conv_memory.c
+        src/webui/webui_restore.c
         src/webui/webui_memory.c
         src/webui/webui_config.c
         src/webui/webui_session.c
@@ -700,6 +702,7 @@ if(ENABLE_WEBUI)
         src/webui/webui_documents.c
         src/webui/webui_doc_library.c
         src/webui/webui_satellite.c
+        src/webui/satellite_remap.c
         src/webui/webui_admin_satellite.c
         src/webui/webui_ota.c
         src/webui/webui_contacts.c
@@ -734,6 +737,7 @@ endif()
 if(ENABLE_WEBUI)
     list(APPEND DAWN_SOURCES
         src/core/session_manager.c
+        src/core/session_history.c
         src/core/turn_queue.c
         src/core/session_manager_llm.c
         src/core/job_manager.c
@@ -828,6 +832,7 @@ list(APPEND DAWN_SOURCES
 # Document DB, chunker, extraction, and indexing pipeline (RAG document search)
 list(APPEND DAWN_SOURCES
     src/tools/document_db.c
+    src/tools/document_db_embeddings.c
     src/tools/document_chunker.c
     src/tools/document_extract.c
     src/tools/document_index_pipeline.c
@@ -843,6 +848,7 @@ list(APPEND DAWN_SOURCES
 # directly.
 list(APPEND DAWN_SOURCES
     src/tools/document_focus_adapter.c
+    src/tools/document_embed_cache.c
     src/tools/calendar_focus_adapter.c
     src/tools/external_focus_adapters_init.c
 )
@@ -903,6 +909,7 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_db_alias_cascade.c
     src/memory/memory_db_alias_writes.c
     src/memory/memory_db_provenance.c
+    src/memory/memory_db_forget.c
     src/core/focus/focus_source.c
     src/core/focus/focus_recency.c
     src/core/focus/focus_candidate_helpers.c
@@ -920,15 +927,20 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_context.c
     src/memory/memory_callback.c
     src/memory/memory_extraction.c
+    src/memory/memory_extraction_input.c
     src/memory/memory_similarity.c
+    src/memory/memory_import.c
+    src/memory/memory_forget.c
     src/core/memory_filter.c
     src/memory/memory_maintenance.c
     src/memory/memory_recovery.c
     src/memory/memory_history_loader.c
     src/memory/memory_summarize_missing.c
     src/memory/memory_embeddings.c
+    src/memory/memory_embed_backfill.c
     src/memory/memory_recategorize.c
     src/memory/memory_embed_tokenizer.c
+    src/memory/memory_embed_unicode.c
     src/memory/memory_embed_onnx.c
     src/memory/memory_embed_ollama.c
     src/memory/memory_embed_openai.c

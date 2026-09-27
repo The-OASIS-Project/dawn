@@ -120,6 +120,25 @@ float embedding_engine_cosine_with_norms(const float *a,
  */
 float embedding_engine_cosine(const float *a, const float *b, int dims);
 
+/** Fewest scored items for a corpus mean to serve as a relevance baseline. */
+#define EMBEDDING_RELEVANCE_MIN_POOL 32
+
+/**
+ * @brief How far a cosine stands above its corpus: (cos - mean) / (1 - mean)
+ *
+ * Embedding models put unrelated text at a model-specific baseline similarity
+ * (bge-small about 0.43, MiniLM about 0.1), so a raw cosine threshold doesn't
+ * transfer between models.  Measured from the corpus mean it does: 0 is
+ * corpus-typical, 1 is identical.  Only meaningful for a pool of at least
+ * EMBEDDING_RELEVANCE_MIN_POOL.
+ *
+ * @param cosine     Item's cosine to the query
+ * @param cosine_sum Sum of the pool's cosines to the query
+ * @param pool       Pool size
+ * @return Relevance (can be negative), or 0 for an empty/degenerate pool
+ */
+float embedding_corpus_relevance(float cosine, double cosine_sum, int pool);
+
 #ifdef __cplusplus
 }
 #endif

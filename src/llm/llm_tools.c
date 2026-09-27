@@ -189,7 +189,8 @@ static void notify_tool_execution(const char *tool_name,
 typedef struct {
    const tool_call_t *call;
    tool_result_t *result;
-   session_t *session; /* Session context to propagate to spawned thread */
+   session_t *session;  /* Session context to propagate to spawned thread */
+   uint64_t turn_token; /* ...and the turn it works for (its LLM settings) */
    int return_code;
 } tool_exec_task_t;
 
@@ -273,10 +274,12 @@ static void *tool_exec_thread(void *arg) {
 
    /* Propagate session context to this thread */
    session_set_command_context(task->session);
+   session_set_turn_token(task->turn_token);
 
    task->return_code = llm_tools_execute(task->call, task->result);
 
    /* Clear context before thread exit */
+   session_set_turn_token(0);
    session_set_command_context(NULL);
 
    return NULL;
@@ -1814,6 +1817,7 @@ int llm_tools_execute_all(const tool_call_list_t *calls, tool_result_list_t *res
          tasks[i].call = &calls->calls[idx];
          tasks[i].result = &results->results[idx];
          tasks[i].session = current_session;
+         tasks[i].turn_token = session_turn_token();
          tasks[i].return_code = 0;
 
          int rc = pthread_create(&threads[i], &thread_attr, tool_exec_thread, &tasks[i]);
@@ -2073,7 +2077,7 @@ static void persist_capture_image_if_present(struct json_object *history,
       if (r->vision_image && r->vision_image_size > 0) {
          struct json_object *msg = build_message(r->vision_image);
          if (msg) {
-            json_object_array_add(history, msg);
+            session_history_append(history, msg);
             evict_old_capture_images(history, g_config.vision.capture_history_count);
          }
          return;
@@ -2102,7 +2106,7 @@ int llm_tools_add_results_openai(struct json_object *history, const tool_result_
       json_object_object_add(msg, "tool_call_id", json_object_new_string(r->tool_call_id));
       json_object_object_add(msg, "content", json_object_new_string(tool_result_content(r)));
 
-      json_object_array_add(history, msg);
+      session_history_append(history, msg);
    }
 
    /* A tool that returned a captured image (e.g. `viewing`) only shows the
@@ -2148,7 +2152,7 @@ int llm_tools_add_results_claude(struct json_object *history, const tool_result_
    json_object_object_add(msg, "role", json_object_new_string("user"));
    json_object_object_add(msg, "content", content_array);
 
-   json_object_array_add(history, msg);
+   session_history_append(history, msg);
 
    persist_capture_image_if_present(history, results, build_claude_capture_image_message);
 

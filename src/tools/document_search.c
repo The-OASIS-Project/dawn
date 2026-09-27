@@ -39,6 +39,7 @@
 #include "dawn_error.h"
 #include "logging.h"
 #include "tools/document_db.h"
+#include "tools/document_embed_cache.h"
 #include "tools/tool_registry.h"
 
 /* =============================================================================
@@ -47,7 +48,9 @@
 
 #define DOC_SEARCH_MAX_RESULTS 5
 #define DOC_SEARCH_MAX_CONTEXT_TOKENS 2000
-#define DOC_SEARCH_MAX_CHUNKS 10000
+/* Semantic candidates: the top chunks by cosine over the whole accessible
+ * corpus.  A chunk below this with no lexical hit can't reach the results. */
+#define DOC_SEARCH_SEMANTIC_TOPN 200
 /* v61 hybrid search: lexical BM25 candidate cap, and the count of top-cosine
  * candidates the (more expensive) phrase bonus is computed over.  Phrase bonus
  * runs on union(semantic top-N, ALL lexical hits) so an exact-label note with
@@ -265,6 +268,8 @@ static char *doc_search_callback(const char *action, char *value, int *should_re
       return strdup("Error: no search query provided.");
 
    int user_id = tool_get_current_user_id();
+   if (user_id <= 0)
+      return strdup(TOOL_GUEST_REFUSAL);
    int dims = embedding_engine_dims();
 
    if (dims <= 0)
@@ -280,27 +285,29 @@ static char *doc_search_callback(const char *action, char *value, int *should_re
       free(query_vec);
       return strdup(TOOL_RESULT_ERROR_MARK "Error: failed to generate query embedding.");
    }
-   float query_norm = embedding_engine_l2_norm(query_vec, dims);
-
-   /* Load all accessible chunks */
-   int max_chunks = DOC_SEARCH_MAX_CHUNKS;
-   document_chunk_t *chunks = calloc((size_t)max_chunks, sizeof(document_chunk_t));
-   float *emb_buf = malloc((size_t)max_chunks * (size_t)dims * sizeof(float));
-   if (!chunks || !emb_buf) {
-      free(query_vec);
-      free(chunks);
-      free(emb_buf);
-      return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed.");
-   }
-
-   int chunk_count = 0;
-   if (document_db_chunk_search_load(user_id, chunks, emb_buf, dims, max_chunks, &chunk_count) !=
+   /* ---- Channel 1: semantic.  Rank every accessible chunk by cosine, then load
+    * text only for the top ones. */
+   document_chunk_score_t top[DOC_SEARCH_SEMANTIC_TOPN];
+   int n_top = 0;
+   if (document_embed_rank(user_id, query_vec, dims, DOC_SEARCH_SEMANTIC_TOPN, top, &n_top, NULL) !=
            SUCCESS ||
-       chunk_count <= 0) {
+       n_top <= 0) {
       free(query_vec);
-      free(chunks);
-      free(emb_buf);
       return strdup("No documents indexed. Upload documents via the WebUI first.");
+   }
+   free(query_vec);
+   query_vec = NULL;
+
+   document_chunk_t *chunks = calloc((size_t)n_top, sizeof(document_chunk_t));
+   int64_t top_ids[DOC_SEARCH_SEMANTIC_TOPN];
+   for (int i = 0; i < n_top; i++) {
+      top_ids[i] = top[i].chunk_id;
+   }
+   int chunk_count = 0;
+   if (!chunks ||
+       document_db_chunks_get_by_ids(user_id, top_ids, n_top, chunks, &chunk_count) != SUCCESS) {
+      free(chunks);
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: could not load document text.");
    }
 
    /* Parse the query once for temporal expressions.  Skip the work when the
@@ -321,14 +328,11 @@ static char *doc_search_callback(const char *action, char *value, int *should_re
                                     DOC_SEARCH_BM25_CAND_LIMIT, &lex_count);
    }
 
-   /* ---- Fuse.  Candidate pool = every loaded semantic chunk (+ any lexical-only
-    * hit not present in the loaded set, possible only when the semantic load was
-    * capped on a very large corpus). */
+   /* ---- Fuse.  Candidate pool = the semantic top chunks + any lexical hit not
+    * among them. */
    cand_t *cand = calloc((size_t)chunk_count + (size_t)lex_count, sizeof(cand_t));
    if (!cand) {
-      free(query_vec);
       free(chunks);
-      free(emb_buf);
       free(lex);
       free(lex_scores);
       return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed.");
@@ -340,8 +344,13 @@ static char *doc_search_callback(const char *action, char *value, int *should_re
 
    int ncand = 0;
    for (int i = 0; i < chunk_count; i++) {
-      float cosine = embedding_engine_cosine_with_norms(query_vec, chunks[i].embedding, dims,
-                                                        query_norm, chunks[i].embedding_norm);
+      float cosine = 0.0f; /* the rank this chunk was loaded for */
+      for (int t = 0; t < n_top; t++) {
+         if (top[t].chunk_id == chunks[i].id) {
+            cosine = top[t].cosine;
+            break;
+         }
+      }
       cand[ncand].chunk_id = chunks[i].id;
       cand[ncand].text = chunks[i].text;
       cand[ncand].filename = chunks[i].doc_filename;
@@ -351,7 +360,6 @@ static char *doc_search_callback(const char *action, char *value, int *should_re
       cand[ncand].bm25 = 0.0f;
       ncand++;
    }
-   free(query_vec);
 
    /* Merge lexical hits by chunk id: set bm25 on the existing cand, or append a
     * lexical-only cand (cosine 0). */
@@ -420,7 +428,6 @@ static char *doc_search_callback(const char *action, char *value, int *should_re
    char *result = malloc((size_t)result_buf_size);
    if (!result) {
       free(chunks);
-      free(emb_buf);
       free(lex);
       free(lex_scores);
       free(cand);
@@ -429,7 +436,6 @@ static char *doc_search_callback(const char *action, char *value, int *should_re
 
    if (total_matches == 0) {
       free(chunks);
-      free(emb_buf);
       free(lex);
       free(lex_scores);
       free(cand);
@@ -471,7 +477,6 @@ static char *doc_search_callback(const char *action, char *value, int *should_re
    }
 
    free(chunks);
-   free(emb_buf);
    free(lex);
    free(lex_scores);
    free(cand);

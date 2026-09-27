@@ -107,6 +107,8 @@ static char *recall_callback(const char *action, char *value, int *should_respon
       return strdup("Error: recall needs a query (a topic, person, project, or status).");
 
    const int user_id = tool_get_current_user_id();
+   if (user_id <= 0)
+      return strdup(TOOL_GUEST_REFUSAL);
    const int dims = embedding_engine_dims();
    if (dims <= 0)
       return strdup(TOOL_RESULT_ERROR_MARK "Error: embedding engine not initialized.");

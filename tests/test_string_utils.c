@@ -215,6 +215,29 @@ static void test_safe_strscpy_truncates(void) {
    TEST_ASSERT_TRUE(r >= sizeof(dst)); /* truncation detectable via sizeof(dst) */
 }
 
+/* utf8_trim_incomplete / utf8_truncate: never leave a split character. */
+static void test_utf8_trim_incomplete(void) {
+   char a[] = "caf\xC3"; /* é cut after its lead byte */
+   utf8_trim_incomplete(a);
+   TEST_ASSERT_EQUAL_STRING("caf", a);
+   char b[] = "x\xE2\x82"; /* € cut after two of three bytes */
+   utf8_trim_incomplete(b);
+   TEST_ASSERT_EQUAL_STRING("x", b);
+   char c[] = "caf\xC3\xA9"; /* complete: unchanged */
+   utf8_trim_incomplete(c);
+   TEST_ASSERT_EQUAL_STRING("caf\xC3\xA9", c);
+   utf8_trim_incomplete(NULL);
+}
+
+static void test_utf8_truncate(void) {
+   char a[] = "ab\xE2\x82\xAC"; /* "ab€" (5 bytes) */
+   utf8_truncate(a, 4);         /* would split the € */
+   TEST_ASSERT_EQUAL_STRING("ab", a);
+   char b[] = "abc";
+   utf8_truncate(b, 10);
+   TEST_ASSERT_EQUAL_STRING("abc", b);
+}
+
 int main(void) {
    UNITY_BEGIN();
 
@@ -242,6 +265,8 @@ int main(void) {
    RUN_TEST(test_truncated_two_byte);
    RUN_TEST(test_truncated_three_byte);
    RUN_TEST(test_surrogate_replaced);
+   RUN_TEST(test_utf8_trim_incomplete);
+   RUN_TEST(test_utf8_truncate);
 
    return UNITY_END();
 }

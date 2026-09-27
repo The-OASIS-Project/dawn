@@ -44,7 +44,8 @@
  *     "config": {
  *       "top_k": 8,                       -- focus_injection.top_k
  *       "min_score": 0.40,                -- focus_injection.min_score
- *       "focus_budget_tokens": 1024,
+ *       "focus_budget_bytes": 10240,      -- focus_injection.focus_budget_bytes
+ *                                            ("focus_budget_tokens" accepted, x4)
  *       "weight_semantic": 1.0,
  *       "weight_recency":  0.30,
  *       "weight_importance": 0.20,
@@ -491,16 +492,14 @@ static void captured_release(void) {
    memset(&s_captured, 0, sizeof(s_captured));
 }
 
-/* Latent stub: build_focus_block.c calls webui_get_active_conversation_id()
- * to refresh the broadcast conv_id from a live dispatch pointer.  In the
- * bench, session_get_dispatch_session() returns NULL (no dispatch
- * published), so this stub never actually fires — but the symbol must
- * resolve at link time.  Signature mirrors the canonical declaration
- * in include/webui/webui_server.h:566 so a future LTO/static-analysis
- * pass can't trip on the prior ABI-mismatched stub.  Mirrors the
- * same shape used in tests/test_prompt_builder_stub.c. */
+/* Latent stub: build_focus_block.c calls session_turn_conversation() to
+ * refresh the broadcast conv_id from a live dispatch pointer.  In the bench,
+ * session_get_dispatch_session() returns NULL (no dispatch published), so this
+ * stub never actually fires — but the symbol must resolve at link time.
+ * Signature mirrors the declaration in include/core/session_manager.h.  Same
+ * shape as tests/test_prompt_builder_stub.c. */
 struct session;
-int64_t webui_get_active_conversation_id(struct session *session) {
+int64_t session_turn_conversation(struct session *session) {
    (void)session;
    return 0;
 }
@@ -746,8 +745,9 @@ static const char *json_get_string(struct json_object *obj, const char *key) {
  * a real result). */
 #define BENCH_TOP_K_MIN 1
 #define BENCH_TOP_K_MAX 64
-#define BENCH_BUDGET_TOKENS_MIN 0
-#define BENCH_BUDGET_TOKENS_MAX 65536
+/* Same range config_validate.c enforces on the production knob. */
+#define BENCH_BUDGET_BYTES_MIN 1024
+#define BENCH_BUDGET_BYTES_MAX 65536
 #define BENCH_WEIGHT_MIN 0.0f
 #define BENCH_WEIGHT_MAX 10.0f
 #define BENCH_DEDUP_WINDOW_MIN 0
@@ -778,7 +778,13 @@ static int parse_config(struct json_object *cfg) {
    fi->enabled = true;
    fi->top_k = json_get_int(cfg, "top_k", 8);
    fi->min_score = (float)json_get_double(cfg, "min_score", 0.4);
-   fi->focus_budget_tokens = json_get_int(cfg, "focus_budget_tokens", 1024);
+   /* The budget is bytes; "focus_budget_tokens" is the deprecated estimated-token
+    * name, converted x4 exactly as config_parser.c does for dawn.toml. */
+   fi->focus_budget_bytes = json_get_int(cfg, "focus_budget_bytes", 10240);
+   struct json_object *legacy_budget = NULL;
+   if (!json_object_object_get_ex(cfg, "focus_budget_bytes", NULL) &&
+       json_object_object_get_ex(cfg, "focus_budget_tokens", &legacy_budget))
+      fi->focus_budget_bytes = json_object_get_int(legacy_budget) * 4;
    fi->weight_semantic = (float)json_get_double(cfg, "weight_semantic", 1.0);
    fi->weight_recency = (float)json_get_double(cfg, "weight_recency", 0.3);
    fi->weight_importance = (float)json_get_double(cfg, "weight_importance", 0.2);
@@ -788,8 +794,8 @@ static int parse_config(struct json_object *cfg) {
    /* M4: clamp untrusted fields. */
    if (validate_int_range("top_k", fi->top_k, BENCH_TOP_K_MIN, BENCH_TOP_K_MAX) != SUCCESS)
       return FAILURE;
-   if (validate_int_range("focus_budget_tokens", fi->focus_budget_tokens, BENCH_BUDGET_TOKENS_MIN,
-                          BENCH_BUDGET_TOKENS_MAX) != SUCCESS)
+   if (validate_int_range("focus_budget_bytes", fi->focus_budget_bytes, BENCH_BUDGET_BYTES_MIN,
+                          BENCH_BUDGET_BYTES_MAX) != SUCCESS)
       return FAILURE;
    if (validate_float_range("min_score", fi->min_score, 0.0f, 1.0f) != SUCCESS)
       return FAILURE;

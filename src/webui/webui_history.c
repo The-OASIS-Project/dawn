@@ -317,17 +317,20 @@ void handle_list_conversations(ws_connection_t *conn, struct json_object *payloa
  * ============================================================================ */
 
 /**
- * @brief Check if memory extraction should be skipped for the active conversation
+ * @brief Check if memory extraction should be skipped for a conversation
  *
  * Centralizes the privacy check logic and handles race conditions by re-verifying
  * from the database when needed. Also updates the cached state if stale.
+ * memory_trigger_extraction repeats the privacy and job checks centrally (fail
+ * closed); these early-outs save building the extraction payload.
  *
  * @param conn WebSocket connection with conversation context
+ * @param conv_id Conversation whose messages would be extracted
  * @return true if memory extraction should be skipped, false otherwise
  */
-static bool should_skip_memory_extraction(ws_connection_t *conn) {
-   /* No conversation to extract from */
-   if (conn->active_conversation_id <= 0) {
+static bool should_skip_memory_extraction(ws_connection_t *conn, int64_t conv_id) {
+   /* No (single) conversation to extract from */
+   if (conv_id <= 0) {
       return true;
    }
 
@@ -336,45 +339,70 @@ static bool should_skip_memory_extraction(ws_connection_t *conn) {
       return true;
    }
 
-   /* Check cached privacy flag first */
-   if (conn->active_conversation_private) {
+   /* Cached privacy flag (only describes the active conversation) */
+   if (conv_id == conn->active_conversation_id && conn->active_conversation_private) {
       return true;
    }
 
    /* Never extract a BACKGROUND JOB conversation.  A job transcript is research
     * the model produced while working, not anything the user said — memory is
     * meant to come from the parent conversation, which is extracted on its own.
-    *
-    * This is the real enforcement point, and it was missing.  The exemption was
-    * implemented in memory_recovery.c's catch-up scan (`AND job_status IS NULL`)
-    * and nowhere else, which was survivable only while job conversations were
-    * unreachable in the UI — they are hidden from the sidebar.  The jobs panel's
-    * "View" button is the first surface that loads one into a WebUI session, so
-    * from that point on, viewing a job and then switching away extracted it.
-    *
-    * Privacy inheritance covers a job spawned from a private parent; this covers
-    * the rest, and the two are deliberately independent. */
+    * The jobs panel's "View" button loads one into a WebUI session, so switching
+    * away from a viewed job must not extract it. */
    job_record_t job_rec;
-   if (conv_db_job_get(conn->active_conversation_id, conn->auth_user_id, &job_rec) ==
-       AUTH_DB_SUCCESS) {
+   if (conv_db_job_get(conv_id, conn->auth_user_id, &job_rec) == AUTH_DB_SUCCESS) {
       OLOG_INFO("WebUI: skipping memory extraction, conversation %lld is a background job",
-                (long long)conn->active_conversation_id);
+                (long long)conv_id);
       return true;
    }
 
    /* Re-verify from database to handle race conditions (e.g., set_private in flight) */
    bool db_private = false;
-   int priv_rc = conv_db_is_private(conn->active_conversation_id, conn->auth_user_id, &db_private);
-   if (priv_rc == AUTH_DB_SUCCESS && db_private) {
-      /* Update cached state to match database */
-      conn->active_conversation_private = true;
-      OLOG_INFO("WebUI: privacy check found stale cache, conversation %lld is private",
-                (long long)conn->active_conversation_id);
+   int priv_rc = conv_db_is_private(conv_id, conn->auth_user_id, &db_private);
+   if (priv_rc != AUTH_DB_SUCCESS || db_private) {
+      if (priv_rc == AUTH_DB_SUCCESS && conv_id == conn->active_conversation_id) {
+         conn->active_conversation_private = true; /* cache was stale */
+      }
+      OLOG_INFO("WebUI: skipping memory extraction, conversation %lld is %s", (long long)conv_id,
+                priv_rc == AUTH_DB_SUCCESS ? "private" : "unreadable");
       return true;
    }
 
-   /* Not private, error, or not found - proceed with extraction */
    return false;
+}
+
+/**
+ * @brief Extract the session's current history into memory before it is replaced
+ *
+ * Attributes the history to the conversation it actually holds
+ * (history_conversation_id), not to the active view: the two differ when a
+ * conversation was opened without restoring its context (archived) or a turn
+ * for another conversation landed in this history.  A history spanning several
+ * conversations is left to memory_recovery, which extracts each from the DB.
+ *
+ * @param conn WebSocket connection
+ * @param why  Short reason for the log line ("switch", "new", "clear")
+ */
+static void extract_history_before_replace(ws_connection_t *conn, const char *why) {
+   if (!conn->session) {
+      return;
+   }
+   /* The copy and its attribution come from one critical section: a running turn
+    * may be appending to this history. */
+   int64_t conv_id = 0;
+   int msg_count = 0;
+   struct json_object *clean = session_snapshot_history(conn->session, &conv_id, &msg_count);
+   if (!clean) {
+      return;
+   }
+   if (msg_count >= 2 && !should_skip_memory_extraction(conn, conv_id)) {
+      memory_extraction_fallback_t fb;
+      memory_extraction_build_fallback(conn->session, &fb);
+      OLOG_INFO("WebUI: Triggering memory extraction for conversation %lld before %s",
+                (long long)conv_id, why);
+      memory_trigger_extraction(conn->auth_user_id, conv_id, NULL, clean, msg_count, 0, &fb);
+   }
+   json_object_put(clean);
 }
 
 /**
@@ -402,7 +430,7 @@ static int webui_conv_create_bind(ws_connection_t *conn,
       return rc;
    }
 
-   conn->active_conversation_id = *conv_id_out;
+   webui_conn_set_active_conversation(conn, *conv_id_out);
    /* A fresh conversation is public; active_conversation_id + active_conversation_private
     * move together as a pair (see the invariant note where should_skip_memory_extraction
     * reads it) so the cache can't report a public row as private. */
@@ -424,28 +452,9 @@ void handle_new_conversation(ws_connection_t *conn, struct json_object *payload)
       return;
    }
 
-   /* Trigger memory extraction for old conversation before creating new one (async, non-blocking).
-    * This captures the conversation state before switching to a fresh context.
-    * Strip _provider_state first — see llm_history_strip_provider_state docs. */
-   if (conn->session && !should_skip_memory_extraction(conn)) {
-      struct json_object *old_history = session_get_history(conn->session);
-      if (old_history) {
-         int msg_count = json_object_array_length(old_history);
-         if (msg_count >= 2) {
-            struct json_object *clean = llm_history_strip_provider_state(old_history);
-            if (clean) {
-               memory_extraction_fallback_t fb;
-               memory_extraction_build_fallback(conn->session, &fb);
-               OLOG_INFO("WebUI: Triggering memory extraction for conversation %lld before new",
-                         (long long)conn->active_conversation_id);
-               memory_trigger_extraction(conn->auth_user_id, conn->active_conversation_id, NULL,
-                                         clean, msg_count, 0, &fb);
-               json_object_put(clean);
-            }
-         }
-         json_object_put(old_history);
-      }
-   }
+   /* Trigger memory extraction for the current history before starting a fresh
+    * context (async, non-blocking). */
+   extract_history_before_replace(conn, "new");
 
    json_object *response = json_object_new_object();
    json_object_object_add(response, "type", json_object_new_string("new_conversation_response"));
@@ -484,13 +493,42 @@ void handle_new_conversation(ws_connection_t *conn, struct json_object *payload)
        * - User starts a new chat via UI (which sends clear_history first)
        */
 
-      /* Back-fill the in-flight turn's conversation tag if it was dispatched
-       * before this row existed (fresh-chat first message: the text is dispatched,
-       * then this new_conversation creates the row).  Only overwrite the
-       * uninitialized (0) value so an established turn's tag is never clobbered.
-       * This is the server-side safety net for the client's pre-create ordering. */
-      if (conn->session && conn->session->stream_conversation_id == 0) {
-         conn->session->stream_conversation_id = conv_id;
+      /* Give the in-flight turn this conversation if it was dispatched before the
+       * row existed (fresh-chat first message: the text is dispatched, then this
+       * new_conversation creates the row).  Only a typed turn waiting for one is
+       * bound, so an established turn's conversation is never clobbered.  The
+       * turn's own worker writes its pending user message (never this thread, so
+       * the user row can't land after the reply).  Server-side safety net for the
+       * client's pre-create ordering. */
+      if (conn->session) {
+         /* A turn that already ended (it failed or was cancelled fast) left its
+          * exchange unsaved: it belongs here, ahead of any turn still running. */
+         char *user_text = NULL;
+         char *reply_text = NULL;
+         bool adopted = false;
+         if (session_bind_created_conversation(conn->session, conv_id, &user_text, &reply_text,
+                                               &adopted)) {
+            /* Stamped with their row ids, as every saved message in the live
+             * history is (extraction and compaction key on them). */
+            int64_t user_row = 0;
+            int64_t reply_row = 0;
+            if (user_text) {
+               (void)conv_db_add_message_ex(conv_id, conn->auth_user_id, "user", user_text,
+                                            &user_row);
+            }
+            if (reply_text) {
+               (void)conv_db_add_message_ex(conv_id, conn->auth_user_id, "assistant", reply_text,
+                                            &reply_row);
+            }
+            session_stamp_claimed(conn->session, user_row, reply_row);
+            OLOG_INFO("WebUI: saved an ended turn's first exchange to new conversation %lld",
+                      (long long)conv_id);
+         }
+         free(user_text);
+         free(reply_text);
+         if (adopted) {
+            OLOG_INFO("WebUI: in-flight turn adopted new conversation %lld", (long long)conv_id);
+         }
       }
    } else if (result == AUTH_DB_LIMIT_EXCEEDED) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
@@ -618,31 +656,12 @@ void handle_clear_session(ws_connection_t *conn) {
       return;
    }
 
-   /* Trigger memory extraction before clearing (captures conversation state).
-    * Strip _provider_state first — see llm_history_strip_provider_state docs. */
-   if (!should_skip_memory_extraction(conn)) {
-      struct json_object *old_history = session_get_history(conn->session);
-      if (old_history) {
-         int msg_count = json_object_array_length(old_history);
-         if (msg_count >= 2) {
-            struct json_object *clean = llm_history_strip_provider_state(old_history);
-            if (clean) {
-               memory_extraction_fallback_t fb;
-               memory_extraction_build_fallback(conn->session, &fb);
-               OLOG_INFO("WebUI: Triggering memory extraction for conversation %lld before clear",
-                         (long long)conn->active_conversation_id);
-               memory_trigger_extraction(conn->auth_user_id, conn->active_conversation_id, NULL,
-                                         clean, msg_count, 0, &fb);
-               json_object_put(clean);
-            }
-         }
-         json_object_put(old_history);
-      }
-   }
+   /* Trigger memory extraction before clearing (captures conversation state). */
+   extract_history_before_replace(conn, "clear");
 
    /* Reset conversation tracking — prevents handle_new_conversation from
     * re-triggering extraction on the same (now-cleared) conversation */
-   conn->active_conversation_id = 0;
+   webui_conn_set_active_conversation(conn, 0);
    conn->active_conversation_private = false;
 
    session_clear_history(conn->session);
@@ -897,7 +916,7 @@ bool conn_reanchor_conversation(ws_connection_t *conn, int64_t req_conv) {
    if (conv_db_get(req_conv, conn->auth_user_id, &conv) != AUTH_DB_SUCCESS) {
       return false;
    }
-   conn->active_conversation_id = req_conv;
+   webui_conn_set_active_conversation(conn, req_conv);
    conn->active_conversation_private = conv.is_private;
    conv_free(&conv);
    return true;
@@ -990,29 +1009,11 @@ void handle_load_conversation(ws_connection_t *conn, struct json_object *payload
 
    bool needs_session_context = (conn->session != NULL);
 
-   /* Trigger memory extraction for old conversation before switching (async, non-blocking).
-    * Only triggers on an actual conversation switch, not on reloading the same conversation. */
-   if (conn->active_conversation_id != conv_id && conn->session &&
-       !should_skip_memory_extraction(conn)) {
-      struct json_object *old_history = session_get_history(conn->session);
-      if (old_history) {
-         int msg_count = json_object_array_length(old_history);
-         if (msg_count >= 2) {
-            /* Strip _provider_state before forwarding to extraction (cross-provider
-             * leak guard — see llm_history_strip_provider_state docs). */
-            struct json_object *clean = llm_history_strip_provider_state(old_history);
-            if (clean) {
-               memory_extraction_fallback_t fb;
-               memory_extraction_build_fallback(conn->session, &fb);
-               OLOG_INFO("WebUI: Triggering memory extraction for conversation %lld before switch",
-                         (long long)conn->active_conversation_id);
-               memory_trigger_extraction(conn->auth_user_id, conn->active_conversation_id, NULL,
-                                         clean, msg_count, 0, &fb);
-               json_object_put(clean);
-            }
-         }
-         json_object_put(old_history);
-      }
+   /* Trigger memory extraction for the history being replaced (async, non-blocking).
+    * Only on an actual switch: reloading the conversation the history already
+    * holds must not re-extract it. */
+   if (conn->session && atomic_load(&conn->session->history_conversation_id) != conv_id) {
+      extract_history_before_replace(conn, "switch");
    }
 
    /* Get conversation metadata */
@@ -1055,30 +1056,30 @@ void handle_load_conversation(ws_connection_t *conn, struct json_object *payload
          if (needs_session_context && !conv.is_archived && conn->session) {
             struct json_object *existing = session_get_history(conn->session);
             int existing_count = existing ? json_object_array_length(existing) : 0;
-            if (existing)
-               json_object_put(existing);
+            session_put_history(conn->session, existing);
 
             /* Restore (replacing the session's in-memory history) on a fresh
-             * session OR a switch to a DIFFERENT conversation.  Only skip when
-             * re-loading the SAME conversation the session already holds — the
-             * auto-create-already-restored case, where re-restoring would wipe
-             * messages added since.  `active_conversation_id` still holds the
-             * OLD conv here (it's updated to conv_id further below), so
-             * `!= conv_id` reliably means "the user switched conversations".
+             * session OR whenever the history doesn't hold this conversation.
+             * Only skip when it already does — the auto-create-already-restored
+             * case, where re-restoring would wipe messages added since.  Keyed on
+             * what the history holds, not on the view: they differ when a history
+             * couldn't be attributed (unbound turns, mixed), and re-opening the
+             * conversation must repair that.
              *
              * The previous guard skipped on message-count alone (existing_count
              * > 1), which wrongly skipped genuine switches: the session kept the
              * previous conversation's history for the LLM while the UI displayed
              * the newly-loaded one — messages then went to the wrong thread. */
-            if (existing_count <= 1 || conn->active_conversation_id != conv_id) {
+            if (existing_count <= 1 ||
+                atomic_load(&conn->session->history_conversation_id) != conv_id) {
                /* v67: when a compaction watermark is set, the display array (all_msgs)
                 * is the FULL transcript, but the LLM context must be bounded to
                 * post-watermark messages.  Pass NULL so restore does its own bounded
                 * fetch (conv_db_get_messages_after); display stays full. */
                json_object *restore_msgs = (conv.context_watermark_msg_id > 0) ? NULL : all_msgs;
-               int restored = webui_restore_conversation_context(conn, &conv, conv_id,
-                                                                 restore_msgs);
-               if (restored >= 0) {
+               int restored = 0;
+               if (webui_restore_conversation_context(conn, &conv, conv_id, restore_msgs,
+                                                      &restored) == SUCCESS) {
                   OLOG_INFO("WebUI: Restored %d messages to session %u context (conv %lld)",
                             restored, conn->session->session_id, (long long)conv_id);
                }
@@ -1152,7 +1153,7 @@ void handle_load_conversation(ws_connection_t *conn, struct json_object *payload
          }
 
          /* Update active conversation tracking */
-         conn->active_conversation_id = conv_id;
+         webui_conn_set_active_conversation(conn, conv_id);
          conn->active_conversation_private = conv.is_private;
 
          json_object_object_add(response, "payload", resp_payload);
@@ -1405,7 +1406,7 @@ void handle_delete_conversation(ws_connection_t *conn, struct json_object *paylo
        * handle_clear_session). */
       if (conn->session && conn->active_conversation_id == conv_id) {
          session_clear_history(conn->session);
-         conn->active_conversation_id = 0;
+         webui_conn_set_active_conversation(conn, 0);
          conn->active_conversation_private = false;
       }
 
@@ -1480,65 +1481,6 @@ void handle_rename_conversation(ws_connection_t *conn, struct json_object *paylo
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error",
                              json_object_new_string("Failed to rename conversation"));
-   }
-
-   json_object_object_add(response, "payload", resp_payload);
-   send_json_response(conn, response);
-   json_object_put(response);
-}
-
-/**
- * @brief Set private mode for a conversation
- *
- * Private conversations are excluded from memory extraction.
- */
-void handle_set_private(ws_connection_t *conn, struct json_object *payload) {
-   if (!conn_require_auth(conn)) {
-      return;
-   }
-
-   json_object *response = json_object_new_object();
-   json_object_object_add(response, "type", json_object_new_string("set_private_response"));
-   json_object *resp_payload = json_object_new_object();
-
-   /* Get conversation ID and private flag */
-   json_object *id_obj, *private_obj;
-   if (!json_object_object_get_ex(payload, "conversation_id", &id_obj) ||
-       !json_object_object_get_ex(payload, "is_private", &private_obj)) {
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-      json_object_object_add(resp_payload, "error",
-                             json_object_new_string("Missing conversation_id or is_private"));
-      json_object_object_add(response, "payload", resp_payload);
-      send_json_response(conn, response);
-      json_object_put(response);
-      return;
-   }
-
-   int64_t conv_id = json_object_get_int64(id_obj);
-   bool is_private = json_object_get_boolean(private_obj);
-
-   int result = conv_db_set_private(conv_id, conn->auth_user_id, is_private);
-
-   if (result == AUTH_DB_SUCCESS) {
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
-      json_object_object_add(resp_payload, "conversation_id", json_object_new_int64(conv_id));
-      json_object_object_add(resp_payload, "is_private", json_object_new_boolean(is_private));
-      json_object_object_add(resp_payload, "message",
-                             json_object_new_string(is_private ? "Conversation marked private"
-                                                               : "Conversation marked public"));
-
-      /* Update active conversation tracking if this is the current conversation */
-      if (conn->active_conversation_id == conv_id) {
-         conn->active_conversation_private = is_private;
-      }
-   } else if (result == AUTH_DB_NOT_FOUND) {
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-      json_object_object_add(resp_payload, "error",
-                             json_object_new_string("Conversation not found"));
-   } else {
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-      json_object_object_add(resp_payload, "error",
-                             json_object_new_string("Failed to update privacy"));
    }
 
    json_object_object_add(response, "payload", resp_payload);

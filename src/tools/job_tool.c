@@ -402,18 +402,19 @@ static char *job_tool_callback(const char *action, char *value, int *should_resp
 
    /* Caller context: user_id is the spawner's (non-overridable); parent conv is
     * the conversation this request came from. */
-   int user_id = 1;
+   const int user_id = tool_get_current_user_id(); /* 0 = a guest */
    int64_t parent_conv = 0;
    bool parent_is_messaging = false;
    bool caller_is_job = false;
    session_t *ctx = session_get_command_context();
    if (ctx != NULL) {
-      if (ctx->metrics.user_id > 0) {
-         user_id = ctx->metrics.user_id;
-      }
       parent_conv = atomic_load(&ctx->stream_conversation_id);
       parent_is_messaging = (ctx->type == SESSION_TYPE_MESSAGING);
       caller_is_job = (ctx->type == SESSION_TYPE_JOB);
+   }
+   if (user_id <= 0) {
+      json_object_put(details);
+      return strdup(TOOL_GUEST_REFUSAL);
    }
 
    /* Actions that START WORK: they take a pool slot, a provider counter and an

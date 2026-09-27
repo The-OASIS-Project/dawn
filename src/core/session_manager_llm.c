@@ -124,6 +124,7 @@ static void session_text_chunk_callback(const char *chunk, void *userdata) {
  * @brief Context for LLM call preparation (reduces duplication)
  */
 typedef struct {
+   session_t *session; /* owner of history (its reference is dropped under its lock) */
    struct json_object *history;
    const char *llm_input;
    llm_resolved_config_t resolved_config;
@@ -172,14 +173,17 @@ static int llm_call_prepare(session_t *session,
 
    // Add user message to history (unless caller already did)
    if (!skip_add_message) {
-      session_add_message(session, "user", user_text);
+      session_add_turn_message(session, "user", user_text);
    }
 
    // Update activity timestamp
    session_touch(session);
 
    // Get conversation history
-   ctx->history = session_get_history(session);
+   /* The running turn's own history (see session_turn_begin), not whatever the
+    * user has since opened. */
+   ctx->session = session;
+   ctx->history = session_get_turn_history(session);
    if (!ctx->history) {
       OLOG_ERROR("Session %u: Failed to get conversation history", session->session_id);
       return 1;
@@ -235,7 +239,8 @@ static int llm_call_prepare(session_t *session,
 static void llm_call_cleanup(llm_call_ctx_t *ctx) {
    session_set_command_context(NULL);
    if (ctx->history) {
-      json_object_put(ctx->history);
+      session_put_history(ctx->session, ctx->history);
+      ctx->history = NULL;
    }
 }
 
@@ -376,7 +381,7 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
 
    // Add assistant response to history (only if non-empty to avoid Claude API errors)
    if (*response) {
-      session_add_message(session, "assistant", response);
+      session_add_turn_message(session, "assistant", response);
    } else {
       OLOG_WARNING("Session %u: LLM returned empty response, not adding to history",
                    session->session_id);
@@ -398,7 +403,7 @@ char *session_llm_call(session_t *session, const char *user_text) {
       return NULL;
    }
 
-   llm_call_ctx_t ctx;
+   llm_call_ctx_t ctx = { 0 };
    if (llm_call_prepare(session, user_text, &ctx, false) != 0) {
       llm_call_cleanup(&ctx);
       return NULL;
@@ -547,7 +552,7 @@ char *session_llm_call_with_tts(session_t *session,
       return NULL;
    }
 
-   llm_call_ctx_t ctx;
+   llm_call_ctx_t ctx = { 0 };
    if (llm_call_prepare(session, user_text, &ctx, false) != 0) {
       llm_call_cleanup(&ctx);
       return NULL;
@@ -613,7 +618,7 @@ char *session_llm_call_with_tts_vision_no_add(session_t *session,
       return NULL;
    }
 
-   llm_call_ctx_t ctx;
+   llm_call_ctx_t ctx = { 0 };
    if (llm_call_prepare(session, user_text, &ctx, true) != 0) {
       llm_call_cleanup(&ctx);
       return NULL;

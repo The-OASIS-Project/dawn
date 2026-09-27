@@ -33,6 +33,7 @@
 #include "auth/auth_db.h"
 #include "auth/auth_db_internal.h"
 #include "unity.h"
+#include "utils/string_utils.h"
 
 /* ============================================================================
  * setUp / tearDown — fresh DB per test
@@ -309,6 +310,70 @@ static void test_delete_conversation(void) {
    conv_free(&conv);
 }
 
+static int64_t insert_fact(int user_id, int64_t source_conv) {
+   sqlite3_stmt *st = NULL;
+   sqlite3_prepare_v2(s_db.db,
+                      "INSERT INTO memory_facts (user_id, fact_text, source_conversation_id, "
+                      "origin_unsourced) VALUES (?, 'f', ?, 0)",
+                      -1, &st, NULL);
+   sqlite3_bind_int(st, 1, user_id);
+   sqlite3_bind_int64(st, 2, source_conv);
+   TEST_ASSERT_EQUAL_INT(SQLITE_DONE, sqlite3_step(st));
+   sqlite3_finalize(st);
+   return sqlite3_last_insert_rowid(s_db.db);
+}
+
+static void add_fact_source(int64_t fact_id, int64_t conv_id) {
+   sqlite3_stmt *st = NULL;
+   sqlite3_prepare_v2(s_db.db,
+                      "INSERT INTO memory_fact_sources (fact_id, conversation_id) VALUES (?, ?)",
+                      -1, &st, NULL);
+   sqlite3_bind_int64(st, 1, fact_id);
+   sqlite3_bind_int64(st, 2, conv_id);
+   TEST_ASSERT_EQUAL_INT(SQLITE_DONE, sqlite3_step(st));
+   sqlite3_finalize(st);
+}
+
+static void fact_source(int64_t fact_id, int64_t *conv_out, int *unsourced_out) {
+   sqlite3_stmt *st = NULL;
+   sqlite3_prepare_v2(s_db.db,
+                      "SELECT source_conversation_id, origin_unsourced FROM memory_facts "
+                      "WHERE id = ?",
+                      -1, &st, NULL);
+   sqlite3_bind_int64(st, 1, fact_id);
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+   *conv_out = sqlite3_column_type(st, 0) == SQLITE_NULL ? 0 : sqlite3_column_int64(st, 0);
+   *unsourced_out = sqlite3_column_int(st, 1);
+   sqlite3_finalize(st);
+}
+
+/* On the fresh-install schema (source_conversation_id references conversations
+ * ON DELETE SET NULL), a delete still keeps the memories it taught: one also
+ * taught elsewhere points there, one taught only here is marked as learned
+ * outside any conversation. */
+static void test_delete_conversation_keeps_its_memories(void) {
+   int user_id = create_and_get_id("conv_mem", "hash", false);
+   int64_t a = 0, b = 0;
+   conv_db_create(user_id, "A", &a);
+   conv_db_create(user_id, "B", &b);
+   const int64_t shared = insert_fact(user_id, a);
+   add_fact_source(shared, a);
+   add_fact_source(shared, b);
+   const int64_t only_a = insert_fact(user_id, a);
+   add_fact_source(only_a, a);
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_delete(a, user_id));
+
+   int64_t conv = 0;
+   int unsourced = -1;
+   fact_source(shared, &conv, &unsourced);
+   TEST_ASSERT_EQUAL_INT64(b, conv);
+   TEST_ASSERT_EQUAL_INT(0, unsourced);
+   fact_source(only_a, &conv, &unsourced);
+   TEST_ASSERT_EQUAL_INT64(0, conv);
+   TEST_ASSERT_EQUAL_INT(1, unsourced);
+}
+
 static void test_conversation_user_isolation(void) {
    int user1 = create_and_get_id("iso_user1", "hash1", false);
    int user2 = create_and_get_id("iso_user2", "hash2", false);
@@ -333,6 +398,116 @@ static void test_conversation_user_isolation(void) {
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, rc);
    TEST_ASSERT_EQUAL_STRING("User1 Private", conv.title);
    conv_free(&conv);
+}
+
+/* Memory extraction verifies, from the message rows themselves, which
+ * conversation(s) it is about to extract; this is the resolver it relies on. */
+static void test_messages_ownership(void) {
+   int user_id = create_and_get_id("own_user", "hash", false);
+   int other_id = create_and_get_id("own_other", "hash", false);
+
+   int64_t pub = 0, priv = 0, foreign = 0;
+   conv_db_create(user_id, "Public", &pub);
+   conv_db_create(user_id, "Private", &priv);
+   conv_db_create(other_id, "Someone else's", &foreign);
+   conv_db_set_private(priv, user_id, true);
+
+   int64_t p1 = 0, p2 = 0, x1 = 0, f1 = 0;
+   conv_db_add_message_ex(pub, user_id, "user", "hello", &p1);
+   conv_db_add_message_ex(pub, user_id, "assistant", "hi", &p2);
+   conv_db_add_message_ex(priv, user_id, "user", "secret", &x1);
+   conv_db_add_message_ex(foreign, other_id, "user", "theirs", &f1);
+
+   char ids[128];
+   conv_msg_ownership_t own;
+
+   /* Rows from one public conversation resolve to it */
+   snprintf(ids, sizeof(ids), "[%lld,%lld]", (long long)p1, (long long)p2);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_messages_ownership(user_id, ids, &own));
+   TEST_ASSERT_EQUAL_INT(2, own.matched);
+   TEST_ASSERT_EQUAL_INT(1, own.distinct_convs);
+   TEST_ASSERT_EQUAL_INT64(pub, own.conv_id);
+   TEST_ASSERT_FALSE(own.any_private);
+   TEST_ASSERT_FALSE(own.any_job);
+
+   /* Mixing in a private row is visible as both private and multi-conversation */
+   snprintf(ids, sizeof(ids), "[%lld,%lld]", (long long)p1, (long long)x1);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_messages_ownership(user_id, ids, &own));
+   TEST_ASSERT_EQUAL_INT(2, own.distinct_convs);
+   TEST_ASSERT_EQUAL_INT64(0, own.conv_id);
+   TEST_ASSERT_TRUE(own.any_private);
+
+   /* Another user's row and a nonexistent id are not counted as matched */
+   snprintf(ids, sizeof(ids), "[%lld,%lld,999999]", (long long)p1, (long long)f1);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_messages_ownership(user_id, ids, &own));
+   TEST_ASSERT_EQUAL_INT(1, own.matched);
+}
+
+/* A continuation carries its parent's compaction summary, so a private
+ * parent must yield a private continuation. */
+static void test_continuation_inherits_private(void) {
+   int user_id = create_and_get_id("cont_user", "hash", false);
+
+   int64_t parent = 0, child = 0, pub_parent = 0, pub_child = 0;
+   conv_db_create(user_id, "Private parent", &parent);
+   conv_db_set_private(parent, user_id, true);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_create_continuation(user_id, parent, "summary", &child));
+   bool is_private = false;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_is_private(child, user_id, &is_private));
+   TEST_ASSERT_TRUE(is_private);
+
+   conv_db_create(user_id, "Public parent", &pub_parent);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_create_continuation(user_id, pub_parent, "summary", &pub_child));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_is_private(pub_child, user_id, &is_private));
+   TEST_ASSERT_FALSE(is_private);
+}
+
+/* Going private later reaches every continuation (their context opens with a
+ * summary of the parent); going public changes only the one conversation. */
+static void test_set_private_cascades_to_continuations(void) {
+   int user_id = create_and_get_id("cascade_user", "hash", false);
+   int other = create_and_get_id("cascade_other", "hash", false);
+
+   int64_t root = 0, child = 0, grandchild = 0, unrelated = 0;
+   conv_db_create(user_id, "Root", &root);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_create_continuation(user_id, root, "summary", &child));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_create_continuation(user_id, child, "summary", &grandchild));
+   conv_db_create(user_id, "Unrelated", &unrelated);
+
+   int64_t chain[CONV_CHAIN_MAX];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_continuation_chain(root, user_id, chain, CONV_CHAIN_MAX, &n));
+   TEST_ASSERT_EQUAL_INT(3, n);
+   TEST_ASSERT_EQUAL_INT64(root, chain[0]);
+   /* Another user sees none of it. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_continuation_chain(root, other, chain, CONV_CHAIN_MAX, &n));
+   TEST_ASSERT_EQUAL_INT(0, n);
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(root, user_id, true));
+   bool p = false;
+   conv_db_is_private(child, user_id, &p);
+   TEST_ASSERT_TRUE(p);
+   conv_db_is_private(grandchild, user_id, &p);
+   TEST_ASSERT_TRUE(p);
+   conv_db_is_private(unrelated, user_id, &p);
+   TEST_ASSERT_FALSE(p);
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(root, user_id, false));
+   conv_db_is_private(root, user_id, &p);
+   TEST_ASSERT_FALSE(p);
+   conv_db_is_private(child, user_id, &p);
+   TEST_ASSERT_TRUE(p);
+
+   /* Not the owner: nothing changes. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_set_private(unrelated, other, true));
+   conv_db_is_private(unrelated, user_id, &p);
+   TEST_ASSERT_FALSE(p);
 }
 
 static void test_conversation_add_message(void) {
@@ -621,19 +796,15 @@ static void test_get_messages_after_bounds(void) {
    int user_id = create_and_get_id("wm_after", "hash", false);
    int64_t conv_id = 0;
    conv_db_create(user_id, "Watermark after", &conv_id);
-   conv_db_add_message(conv_id, user_id, "user", "m1");
-   conv_db_add_message(conv_id, user_id, "assistant", "m2");
-   conv_db_add_message(conv_id, user_id, "user", "m3");
+   int64_t ids[3] = { 0 };
+   conv_db_add_message_ex(conv_id, user_id, "user", "m1", &ids[0]);
+   conv_db_add_message_ex(conv_id, user_id, "assistant", "m2", &ids[1]);
+   conv_db_add_message_ex(conv_id, user_id, "user", "m3", &ids[2]);
 
    int n = 0;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
                          conv_db_get_messages_after(conv_id, user_id, 0, wm_count_cb, &n));
    TEST_ASSERT_EQUAL_INT(3, n);
-
-   int64_t *ids = NULL;
-   int idc = 0;
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_get_message_ids(conv_id, user_id, &ids, &idc));
-   TEST_ASSERT_EQUAL_INT(3, idc);
 
    n = 0;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
@@ -644,8 +815,6 @@ static void test_get_messages_after_bounds(void) {
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
                          conv_db_get_messages_after(conv_id, user_id, ids[2], wm_count_cb, &n));
    TEST_ASSERT_EQUAL_INT(0, n); /* nothing after the last message */
-
-   free(ids);
 }
 
 /* ============================================================================
@@ -972,11 +1141,38 @@ static void test_v43_migration_from_v42(void) {
  * main
  * ============================================================================ */
 
+/* The local pseudo-satellite renamed by a remote registration under its id
+ * (possible before registration refused the reserved id) is restored at
+ * startup, keeping its owner and room. */
+void test_local_pseudo_satellite_restored_keeping_owner(void) {
+   const int uid = create_and_get_id("owner", "hash", true);
+   satellite_mapping_t m;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, satellite_db_get(LOCAL_PSEUDO_SATELLITE_UUID, &m));
+   safe_strscpy(m.name, "recall-eval");
+   safe_strscpy(m.location, "eval");
+   m.tier = 1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, satellite_db_upsert(&m));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         satellite_db_update_user(LOCAL_PSEUDO_SATELLITE_UUID, uid));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, satellite_db_update_location(LOCAL_PSEUDO_SATELLITE_UUID,
+                                                                       "eval", "Office"));
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, satellite_db_ensure_local_pseudo());
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, satellite_db_get(LOCAL_PSEUDO_SATELLITE_UUID, &m));
+   TEST_ASSERT_EQUAL_STRING(LOCAL_PSEUDO_SATELLITE_NAME, m.name);
+   TEST_ASSERT_EQUAL_STRING("", m.location);
+   TEST_ASSERT_EQUAL_INT(LOCAL_PSEUDO_SATELLITE_TIER, m.tier);
+   TEST_ASSERT_EQUAL_INT(uid, m.user_id);
+   TEST_ASSERT_EQUAL_STRING("Office", m.ha_area);
+}
+
 int main(void) {
    UNITY_BEGIN();
 
    /* Lifecycle */
    RUN_TEST(test_init_returns_success);
+   RUN_TEST(test_local_pseudo_satellite_restored_keeping_owner);
    RUN_TEST(test_shutdown_and_reinit);
 
    /* Users */
@@ -1002,7 +1198,11 @@ int main(void) {
    RUN_TEST(test_create_conversation);
    RUN_TEST(test_get_conversation);
    RUN_TEST(test_delete_conversation);
+   RUN_TEST(test_delete_conversation_keeps_its_memories);
    RUN_TEST(test_conversation_user_isolation);
+   RUN_TEST(test_messages_ownership);
+   RUN_TEST(test_continuation_inherits_private);
+   RUN_TEST(test_set_private_cascades_to_continuations);
    RUN_TEST(test_conversation_add_message);
    RUN_TEST(test_message_reasoning_round_trip);
    RUN_TEST(test_message_reasoning_null);

@@ -66,41 +66,96 @@ void ext_mock_reset(void) {
  * document_db stubs
  * ============================================================================= */
 
-int document_db_chunk_search_load(int user_id,
-                                  document_chunk_t *chunks,
-                                  float *embedding_buf,
-                                  int dims,
-                                  int max_count,
-                                  int *count_out) {
-   s_ext_mock.call_count_chunk_search_load++;
-   if (s_ext_mock.fail_chunk_search) {
-      if (count_out)
-         *count_out = 0;
+/* A new generation every call unless a test pins it: tests reconfigure the mock
+ * chunk set between cases, so the real document_embed_cache must not reuse a
+ * copy across them. */
+int document_db_chunk_generation(int user_id, document_chunk_gen_t *gen_out) {
+   static int64_t gen;
+   (void)user_id;
+   if (!gen_out)
       return FAILURE;
-   }
-   if (chunks == NULL || embedding_buf == NULL || count_out == NULL || dims <= 0)
+   gen_out->own = s_ext_mock.pin_generation ? s_ext_mock.generation : ++gen;
+   gen_out->shared = 0;
+   return SUCCESS;
+}
+
+int document_db_chunk_count(int user_id, int *count_out) {
+   if (!count_out)
       return FAILURE;
-
-   /* Honor expected_dims contract — production returns SUCCESS with
-    * count=0 on dim mismatch. */
-   if (s_ext_mock.chunk_dim != 0 && s_ext_mock.chunk_dim != dims) {
-      *count_out = 0;
-      return SUCCESS;
-   }
-
    int n = 0;
-   for (int i = 0; i < s_ext_mock.chunk_count && n < max_count; i++) {
-      if (s_ext_mock.chunk_user_id[i] != user_id)
-         continue;
-      if (s_ext_mock.chunk_embeddings[i] == NULL)
-         continue;
-      chunks[n] = s_ext_mock.chunks[i];
-      memcpy(&embedding_buf[n * dims], s_ext_mock.chunk_embeddings[i],
-             (size_t)dims * sizeof(float));
-      chunks[n].embedding = &embedding_buf[n * dims];
-      n++;
+   for (int i = 0; i < s_ext_mock.chunk_count; i++) {
+      if (s_ext_mock.chunk_user_id[i] == user_id)
+         n++;
    }
    *count_out = n;
+   return SUCCESS;
+}
+
+/* Counts scans (a page starting from the beginning), not pages.  The mock is
+ * one document: the cursor's chunk id is the position. */
+int document_db_chunk_embeddings_page(int user_id,
+                                      int dims,
+                                      document_chunk_cursor_t *cursor,
+                                      int max,
+                                      int64_t *ids_out,
+                                      float *norms_out,
+                                      float *embs_out,
+                                      int *count_out) {
+   if (count_out)
+      *count_out = 0;
+   if (!cursor || !ids_out || !norms_out || !embs_out || !count_out || dims <= 0)
+      return FAILURE;
+   if (cursor->done)
+      return SUCCESS;
+   if (cursor->chunk_id == 0)
+      s_ext_mock.call_count_chunk_search_load++;
+   if (s_ext_mock.fail_chunk_search)
+      return FAILURE;
+   /* Production skips chunks whose stored embedding size differs. */
+   const bool dims_ok = s_ext_mock.chunk_dim == 0 || s_ext_mock.chunk_dim == dims;
+   int n = 0;
+   int read = 0;
+   for (int i = 0; i < s_ext_mock.chunk_count && read < max; i++) {
+      const int64_t id = s_ext_mock.chunks[i].id;
+      if (s_ext_mock.chunk_user_id[i] != user_id || id <= cursor->chunk_id)
+         continue;
+      read++;
+      cursor->chunk_id = id;
+      if (!dims_ok || s_ext_mock.chunk_embeddings[i] == NULL)
+         continue;
+      ids_out[n] = id;
+      norms_out[n] = s_ext_mock.chunks[i].embedding_norm;
+      memcpy(embs_out + (size_t)n * (size_t)dims, s_ext_mock.chunk_embeddings[i],
+             (size_t)dims * sizeof(float));
+      n++;
+   }
+   if (read < max)
+      cursor->done = true;
+   *count_out = n;
+   return SUCCESS;
+}
+
+int document_db_chunks_get_by_ids(int user_id,
+                                  const int64_t *ids,
+                                  int n,
+                                  document_chunk_t *out,
+                                  int *count_out) {
+   if (ids == NULL || out == NULL || count_out == NULL || n <= 0)
+      return FAILURE;
+   int count = 0;
+   for (int i = 0; i < s_ext_mock.chunk_count && count < n; i++) {
+      if (s_ext_mock.chunk_user_id[i] != user_id)
+         continue;
+      for (int k = 0; k < n; k++) {
+         if (ids[k] == s_ext_mock.chunks[i].id) {
+            out[count] = s_ext_mock.chunks[i];
+            out[count].embedding = NULL;
+            count++;
+            break;
+         }
+      }
+   }
+   *count_out = count;
    return SUCCESS;
 }
 
@@ -485,6 +540,28 @@ float memory_embeddings_cosine_with_norms(const float *a,
    if (cosine > 1.0)
       return 1.0f;
    return (float)cosine;
+}
+
+/* embedding_engine_* (the real document_embed_cache links against these). */
+float embedding_engine_l2_norm(const float *vec, int dims) {
+   return memory_embeddings_l2_norm(vec, dims);
+}
+
+float embedding_engine_cosine_with_norms(const float *a,
+                                         const float *b,
+                                         int dims,
+                                         float norm_a,
+                                         float norm_b) {
+   return memory_embeddings_cosine_with_norms(a, b, dims, norm_a, norm_b);
+}
+
+float embedding_corpus_relevance(float cosine, double cosine_sum, int pool) {
+   if (pool <= 0)
+      return 0.0f;
+   const double mean = cosine_sum / (double)pool;
+   if (mean >= 1.0)
+      return 0.0f;
+   return (float)(((double)cosine - mean) / (1.0 - mean));
 }
 
 /* memory_filter — production blocklist NOT linked.  Tests never inject

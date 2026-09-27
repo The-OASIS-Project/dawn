@@ -443,6 +443,16 @@ static void initialize_command_prompt(void) {
              g_config.llm.tools.enabled ? "on" : "off", prompt_len);
 }
 
+char *get_local_command_prompt_dup(void) {
+   initialize_command_prompt();
+   /* Copied under the mutex a rebuild writes the buffer under, so a config edit
+    * mid-copy can't hand the caller half of each. */
+   pthread_mutex_lock(&system_instructions_mutex);
+   char *copy = strdup(command_prompt);
+   pthread_mutex_unlock(&system_instructions_mutex);
+   return copy;
+}
+
 /**
  * @brief Gets the local command prompt string (all commands including HUD/helmet)
  *
@@ -496,6 +506,16 @@ const char *get_remote_command_prompt(void) {
     * and early-returns if already initialized. See get_local_command_prompt(). */
    initialize_remote_command_prompt();
    return remote_command_prompt;
+}
+
+char *get_remote_command_prompt_dup(void) {
+   initialize_remote_command_prompt();
+   /* Copied under the mutex a rebuild writes the buffer under (see
+    * get_local_command_prompt_dup()). */
+   pthread_mutex_lock(&system_instructions_mutex);
+   char *copy = strdup(remote_command_prompt);
+   pthread_mutex_unlock(&system_instructions_mutex);
+   return copy;
 }
 
 /* =============================================================================

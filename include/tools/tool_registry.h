@@ -937,20 +937,34 @@ static inline void tool_param_extract_base(const char *value, char *out_base, si
    out_base[base_len] = '\0';
 }
 
+/**
+ * @brief The user a tool call acts for; 0 for a guest
+ *
+ * The calling session's user (session_effective_user_id(): the local mic is
+ * the default voice user's, an unmapped satellite is a guest's).  With no
+ * session user, a scheduled briefing step acts for the briefing's owner
+ * (scheduled_context_set; the scheduler thread has no command context).  A
+ * caller with no session at all (MQTT, the device itself) acts for the default
+ * voice user.  A tool reading or changing personal data refuses a guest (0)
+ * with TOOL_GUEST_REFUSAL.
+ */
 static inline int tool_get_current_user_id(void) {
    session_t *session = session_get_command_context();
-   if (session && session->metrics.user_id > 0)
-      return session->metrics.user_id;
-   /* No live session: a scheduled briefing step runs on the scheduler thread
-    * with no command context, so consult the scheduled-origin user the briefing
-    * executor set (scheduled_context_set) before defaulting to user 1 —
-    * otherwise every scheduled tool would bill/audit/act as user 1 rather than
-    * the briefing's owner.  See include/core/scheduled_context.h. */
+   const int user_id = session ? session_effective_user_id(session) : 0;
+   if (user_id > 0)
+      return user_id;
    int sched_user = 0;
    if (scheduled_context_get(&sched_user) && sched_user > 0)
       return sched_user;
-   return 1;
+   return session ? 0 : session_default_voice_user_id();
 }
+
+/** The result for a guest (tool_get_current_user_id() == 0) asking for personal data. */
+#define TOOL_GUEST_REFUSAL                                                                   \
+   TOOL_RESULT_ERROR_MARK "This device isn't assigned to a user, so personal data (memory, " \
+                          "calendar, email, documents, reminders) isn't available here. An " \
+                          "admin can assign it to a user on the satellite management page."
+
 
 #ifdef __cplusplus
 }

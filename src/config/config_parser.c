@@ -1206,6 +1206,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                              "prune_expired_days",
                                              "conversation_idle_timeout_min",
                                              "default_voice_user_id",
+                                             "fact_cache_mb",
                                              "pruning",
                                              "decay",
                                              "embeddings",
@@ -1253,6 +1254,8 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
    /* Parse voice conversation idle timeout settings */
    PARSE_INT(table, "conversation_idle_timeout_min", config->conversation_idle_timeout_min);
    PARSE_INT(table, "default_voice_user_id", config->default_voice_user_id);
+   PARSE_INT(table, "fact_cache_mb", config->fact_cache_mb);
+   CONFIG_CLAMP(config->fact_cache_mb, MEMORY_FACT_CACHE_MB_MIN, MEMORY_FACT_CACHE_MB_MAX);
 
    /* Clamp context_budget_tokens to valid range */
    if (config->context_budget_tokens < 100) {
@@ -1501,6 +1504,8 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                                 "top_k",
                                                 "summary_max_scan",
                                                 "min_score",
+                                                "document_min_relevance",
+                                                "fact_min_relevance",
                                                 "classifier_enabled",
                                                 "weight_semantic",
                                                 "weight_recency",
@@ -1530,6 +1535,8 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       PARSE_INT(focus, "top_k", fi->top_k);
       PARSE_INT(focus, "summary_max_scan", fi->summary_max_scan);
       PARSE_DOUBLE(focus, "min_score", fi->min_score);
+      PARSE_DOUBLE(focus, "document_min_relevance", fi->document_min_relevance);
+      PARSE_DOUBLE(focus, "fact_min_relevance", fi->fact_min_relevance);
       PARSE_BOOL(focus, "classifier_enabled", fi->classifier_enabled);
       PARSE_DOUBLE(focus, "weight_semantic", fi->weight_semantic);
       PARSE_DOUBLE(focus, "weight_recency", fi->weight_recency);

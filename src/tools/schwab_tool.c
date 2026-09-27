@@ -179,6 +179,8 @@ static char *oom(void) {
 static char *schwab_tool_callback(const char *action, char *value, int *should_respond) {
    *should_respond = 1;
    int user_id = tool_get_current_user_id();
+   if (user_id <= 0)
+      return strdup(TOOL_GUEST_REFUSAL);
 
    if (!action) {
       action = "quote";

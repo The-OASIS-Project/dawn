@@ -41,6 +41,25 @@
 #define EXPAND_TOKEN_BUDGET 4000
 #define EXPAND_CHAR_BUDGET (EXPAND_TOKEN_BUDGET * 4)
 
+/* Whether @p target is @p turn_conv or one it continues (following
+ * continued_from up, as far as a continuation chain can go). */
+static bool in_turn_lineage(int64_t target, int64_t turn_conv, int user_id) {
+   int64_t c = turn_conv;
+   for (int i = 0; c > 0 && i < CONV_CHAIN_MAX; i++) {
+      if (c == target) {
+         return true;
+      }
+      conversation_t conv = { 0 };
+      if (conv_db_get(c, user_id, &conv) != AUTH_DB_SUCCESS) {
+         conv_free(&conv);
+         return false;
+      }
+      c = conv.continued_from;
+      conv_free(&conv);
+   }
+   return false;
+}
+
 static char *context_expand_callback(const char *action, char *value, int *should_respond);
 
 static const treg_param_t context_expand_params[] = {
@@ -248,12 +267,21 @@ static char *context_expand_callback(const char *action, char *value, int *shoul
    if (user_id <= 0)
       return strdup(TOOL_RESULT_ERROR_MARK "Error: no authenticated user.");
 
+   /* The conversation this turn belongs to, and whether the model named one. */
+   int64_t turn_conv = 0;
+#ifdef ENABLE_WEBUI
+   {
+      session_t *ts = session_get_command_context();
+      turn_conv = ts ? session_turn_conversation(ts) : 0;
+   }
+#endif
+
    /* If conversation_id not provided, use current or its parent */
    if (conv_id <= 0) {
 #ifdef ENABLE_WEBUI
       session_t *session = session_get_command_context();
       if (session) {
-         conv_id = webui_get_active_conversation_id(session);
+         conv_id = session_turn_conversation(session); /* this turn's, not the view */
          if (conv_id > 0) {
             conversation_t conv = { 0 };
             if (conv_db_get(conv_id, user_id, &conv) == AUTH_DB_SUCCESS) {
@@ -287,11 +315,23 @@ static char *context_expand_callback(const char *action, char *value, int *shoul
       header_len = ec.capacity - 1;
    ec.offset = header_len;
 
-   /* include_private = true: user is expanding a [COMPACTED ...] block from
-    * their own active session, which may itself be a private conversation.
-    * Privacy is intra-conversation; ownership check still applies. */
+   /* A private conversation's messages come back only into the conversation
+    * itself or its continuations (expanding a [COMPACTED ...] block there);
+    * named from anywhere else, they would carry private text into a
+    * conversation that is not private (and on into memory).  Ownership is
+    * checked either way. */
+   bool include_private = in_turn_lineage(conv_id, turn_conv, user_id);
+   if (include_private && conv_id != turn_conv) {
+      /* A continuation made public on its own must not pull its private
+       * parent's text into itself. */
+      bool target_private = false;
+      bool turn_private = false;
+      include_private = conv_db_is_private(conv_id, user_id, &target_private) == AUTH_DB_SUCCESS &&
+                        conv_db_is_private(turn_conv, user_id, &turn_private) == AUTH_DB_SUCCESS &&
+                        (!target_private || turn_private);
+   }
    int rc = conv_db_get_messages_by_range(conv_id, user_id, start_id, end_id, /*max_rows=*/0,
-                                          /*include_private=*/true, expand_message_cb, &ec);
+                                          include_private, expand_message_cb, &ec);
 
    if (rc == AUTH_DB_FORBIDDEN) {
       free(ec.buf);

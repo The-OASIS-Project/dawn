@@ -56,11 +56,36 @@
  * leaves the symbols undefined.  Define them as no-ops with sane returns. */
 #include "core/session_manager.h"
 
+/* Test hooks (tests/test_memory_remember.c sets them); the bench leaves them at
+ * their defaults: no command context, and no turn to record a source for. */
+session_t *g_stub_command_context = NULL;
+int g_stub_defer_result = 1; /* FAILURE */
+int64_t g_stub_defer_conv = 0;
+
 session_t *session_get_command_context(void) {
-   return NULL;
+   return g_stub_command_context;
 }
 void session_set_command_context(session_t *session) {
    (void)session;
+}
+/* The session layer's user rule (session_effective_user_id): its user, the
+ * default voice user for the local mic, else a guest (0). */
+int session_default_voice_user_id(void) {
+   return g_config.memory.default_voice_user_id > 0 ? g_config.memory.default_voice_user_id : 1;
+}
+int session_effective_user_id(session_t *session) {
+   if (!session) {
+      return 0;
+   }
+   if (session->metrics.user_id > 0) {
+      return session->metrics.user_id;
+   }
+   return session->type == SESSION_TYPE_LOCAL ? session_default_voice_user_id() : 0;
+}
+/* No scheduled briefing runs in the bench. */
+bool scheduled_context_get(int *user_id_out) {
+   (void)user_id_out;
+   return false;
 }
 void session_get_llm_config(session_t *session, session_llm_config_t *config) {
    (void)session;
@@ -278,8 +303,67 @@ int64_t webui_get_active_conversation_id(session_t *s) {
    (void)s;
    return 0;
 }
-void webui_send_compaction_complete(session_t *s) {
+void webui_send_compaction_complete(session_t *s,
+                                    int64_t conversation_id,
+                                    int tokens_before,
+                                    int tokens_after,
+                                    int messages_summarized,
+                                    const char *summary,
+                                    int level) {
    (void)s;
+   (void)conversation_id;
+   (void)tokens_before;
+   (void)tokens_after;
+   (void)messages_summarized;
+   (void)summary;
+   (void)level;
+}
+/* Headless bench: no session history to attribute. */
+int64_t session_history_conversation_of(session_t *s, struct json_object *history) {
+   (void)s;
+   (void)history;
+   return 0;
+}
+uint64_t session_turn_token(void) {
+   return 0;
+}
+int64_t session_turn_conversation(session_t *session) {
+   (void)session;
+   return 0;
+}
+bool session_turn_is_caller(session_t *session) {
+   (void)session;
+   return false;
+}
+int session_defer_fact_source(session_t *session,
+                              int64_t fact_id,
+                              int user_id,
+                              bool created,
+                              int64_t *conv_out) {
+   (void)session;
+   (void)fact_id;
+   (void)user_id;
+   (void)created;
+   *conv_out = g_stub_defer_conv;
+   return g_stub_defer_result;
+}
+void session_set_turn_token(uint64_t token) {
+   (void)token;
+}
+void session_set_llm_config_override(const session_t *session, const session_llm_config_t *config) {
+   (void)session;
+   (void)config;
+}
+void session_history_append(struct json_object *history, struct json_object *msg) {
+   json_object_array_add(history, msg);
+}
+void session_history_replace_contents(struct json_object *history, struct json_object *from) {
+   for (int i = (int)json_object_array_length(history) - 1; i >= 0; i--) {
+      json_object_array_del_idx(history, i, 1);
+   }
+   for (size_t i = 0; i < json_object_array_length(from); i++) {
+      json_object_array_add(history, json_object_get(json_object_array_get_idx(from, i)));
+   }
 }
 void webui_send_metrics_update(session_t *s) {
    (void)s;

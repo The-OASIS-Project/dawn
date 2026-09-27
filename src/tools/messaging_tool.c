@@ -409,6 +409,8 @@ static char *messaging_callback(const char *action, char *value, int *should_res
     * separately for the fire-time gate below — "is this scheduled?" is a distinct
     * question from "who owns it?". */
    int user_id = tool_get_current_user_id();
+   if (user_id <= 0)
+      return strdup(TOOL_GUEST_REFUSAL);
    bool is_scheduled = scheduled_context_get(NULL);
 
    /* Fire-time action-level schedulability gate: the tool carries

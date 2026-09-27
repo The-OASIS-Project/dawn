@@ -217,6 +217,26 @@ typedef struct {
  * single-threaded LWS callback context, direct conn->session access is fine
  * after an initial atomic load confirms non-NULL.
  */
+/**
+ * @brief Set the conversation the connection shows
+ *
+ * The one writer of conn->active_conversation_id: also keeps the session's copy
+ * (session_t.viewed_conversation_id) that turn threads read.  Handler thread.
+ */
+void webui_conn_set_active_conversation(ws_connection_t *conn, int64_t conv_id);
+
+/**
+ * @brief Publish the connection's view to the session it just attached to
+ *
+ * Call wherever a connection takes a session (create, reconnect, re-anchor):
+ * a new connection shows nothing yet, so a reconnected session must not keep the
+ * evicted tab's conversation; one created for an open conversation shows it.
+ */
+void webui_conn_publish_view(ws_connection_t *conn);
+
+/** Whether @p user_id may resume @p session (its owner, or no owner yet). */
+bool webui_session_owned_by(const session_t *session, int user_id);
+
 static inline session_t *conn_get_session(ws_connection_t *conn) {
    return __atomic_load_n(&conn->session, __ATOMIC_ACQUIRE);
 }
@@ -317,6 +337,7 @@ typedef struct {
          int messages_summarized;
          int level;
          char *summary;
+         int64_t conversation_id; /* the compacted conversation; client gates on it */
       } compaction;
       struct {
          double position_sec;
@@ -761,6 +782,21 @@ bool conn_require_admin(ws_connection_t *conn);
  * @return true if same-origin (or no Origin/Referer), false if cross-origin.
  */
 bool webui_is_same_origin_request(struct lws *wsi);
+
+/**
+ * @brief Build a conversation's LLM context for a turn, detached from any session
+ *
+ * session_turn_begin()'s loader (registered by webui_server_init).  Leaves every
+ * session untouched; reports the conversation's stored LLM settings (over
+ * @p base) in @p cfg_out / @p has_cfg_out.
+ *
+ * @return New history array (caller owns), or NULL
+ */
+json_object *webui_turn_history_loader(int user_id,
+                                       int64_t conv_id,
+                                       const session_llm_config_t *base,
+                                       session_llm_config_t *cfg_out,
+                                       bool *has_cfg_out);
 
 /**
  * @brief Send JSON response to WebSocket client via the response queue

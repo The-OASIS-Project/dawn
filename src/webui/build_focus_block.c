@@ -333,8 +333,11 @@ int build_focus_block(int user_id,
    bool warn_all_suppressed = false;
    if (dedup_session != NULL && result.candidate_count > 0) {
       pthread_mutex_lock(&dedup_session->history_mutex);
-      apply_dedup_locked(dedup_session, &result, top_k, fi.dedup.recent_window_turns, fi.min_score,
-                         fi.dedup.score_uplift_factor, &dedup_suppressed);
+      /* The dedup set describes what the live context has already seen; a turn
+       * running on its own conversation's history has seen none of it. */
+      if (!session_turn_on_own_history_locked(dedup_session))
+         apply_dedup_locked(dedup_session, &result, top_k, fi.dedup.recent_window_turns,
+                            fi.min_score, fi.dedup.score_uplift_factor, &dedup_suppressed);
       /* Empty-block observability: if dedup ate everything this turn
        * AND we had candidates going in, the user might be tuning the
        * window/uplift too aggressively.  Log OLOG_WARNING ONCE per
@@ -537,7 +540,7 @@ int build_focus_block(int user_id,
    int64_t broadcast_conv_id = conv_id;
    session_t *dispatch = session_get_dispatch_session();
    if (dispatch != NULL) {
-      int64_t live_conv = webui_get_active_conversation_id(dispatch);
+      int64_t live_conv = session_turn_conversation(dispatch);
       if (live_conv > 0)
          broadcast_conv_id = live_conv;
    }

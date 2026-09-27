@@ -272,6 +272,19 @@ void webui_send_state(struct session *session, const char *state);
 void webui_send_state_with_detail(struct session *session, const char *state, const char *detail);
 
 /**
+ * @brief webui_send_state_with_detail() tagged with @p conversation_id
+ *
+ * For a state about a turn that isn't the recipient's own: a reply fanned out to
+ * every tab viewing its conversation is tagged with that conversation, not with
+ * the recipient's last turn, so a client ignoring other conversations' states
+ * still sees it.
+ */
+void webui_send_state_for_conversation(struct session *session,
+                                       const char *state,
+                                       const char *detail,
+                                       int64_t conversation_id);
+
+/**
  * @brief Send context/token usage update to WebSocket client
  *
  * @param session Session to send to (must be SESSION_TYPE_WEBUI), or NULL for all
@@ -338,10 +351,12 @@ void webui_send_error_ex(struct session *session,
  * @param messages_summarized Number of messages that were summarized
  * @param summary The generated summary text (for continuation)
  * @param level Compaction escalation level used (0=normal, 1=aggressive, 2=deterministic)
+ * @param conversation_id Conversation that was compacted (0 = unknown)
  *
  * @note Thread-safe - can be called from any thread
  */
 void webui_send_compaction_complete(struct session *session,
+                                    int64_t conversation_id,
                                     int tokens_before,
                                     int tokens_after,
                                     int messages_summarized,
@@ -609,8 +624,9 @@ void webui_broadcast_plan_progress(struct session *session, const char *json_str
 /**
  * @brief Get the active conversation ID for a WebUI session
  *
- * Returns the conversation ID from the session's WebSocket connection.
- * Returns 0 for non-WebUI sessions or if no conversation is active.
+ * The conversation the session's client is showing, kept on the session
+ * (webui_conn_set_active_conversation), so any thread may read it without
+ * touching the connection.  Returns 0 for non-WebUI sessions or if none.
  *
  * @param session Session to query
  * @return Active conversation ID, or 0 if unavailable

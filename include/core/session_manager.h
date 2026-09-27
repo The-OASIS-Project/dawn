@@ -316,10 +316,38 @@ typedef struct {
    int count;
 } tool_cited_set_t;
 
+/** Facts a session holds for a conversation not created yet (see session_defer_fact_source). */
+#define SESSION_PENDING_FACT_SOURCES_MAX 64
+
+typedef struct session_fact_source {
+   int64_t fact_id;
+   int user_id;
+   bool created;         // the turn created the fact (vs. restated an existing one)
+   uint64_t turn_token;  // the turn that saved it, recorded when that turn learns its
+                         // conversation; 0 once it ended without one, then recorded
+                         // when the live history it wrote becomes a conversation
+} session_fact_source_t;
+
+/** Message refs a session holds for its running turn to release. */
+#define SESSION_PARKED_MSGS_MAX 8
+
+/** Device events a session keeps for its next turns (see session_post_notice). */
+#define SESSION_NOTICES_MAX 8
+/** How long a device event stays in the turns' context, in seconds. */
+#define SESSION_NOTICE_TTL_SEC 600
+/** Longest device event kept, in bytes including the terminator. */
+#define SESSION_NOTICE_TEXT_MAX 512
+
+typedef struct {
+   char text[SESSION_NOTICE_TEXT_MAX];
+   time_t at;
+   int user_id; /* whose it is: rendered only for that user's surface (0 = household) */
+} session_notice_t;
+
 typedef struct {
    _Atomic int state;
    pthread_t thread_id;
-   bool thread_active;
+   _Atomic bool thread_active;  // started and not yet joined: exactly one joiner takes it
 
    struct json_object *pending_history;
    int result_tokens_before;
@@ -328,11 +356,15 @@ typedef struct {
    int result_level;
    char *result_summary;
 
-   struct json_object *snapshot_history;
-   int snapshot_msg_count;
+   /* The last message of the history the summary was computed from (owned ref).
+    * The merge finds it in the history the next turn runs on: every turn rebuilds
+    * its history array, but keeps the message objects themselves. */
+   struct json_object *snapshot_last;
 
    llm_type_t trigger_llm_type;
    cloud_provider_t trigger_cloud_provider;
+   session_llm_config_t trigger_config;  // the triggering turn's settings (the
+                                         // compaction thread outlives the turn)
    char trigger_model[64];
    uint32_t trigger_session_id;
    int64_t trigger_conv_id;
@@ -490,6 +522,94 @@ typedef struct session {
    // parity with current_stream_id / TSan-cleanliness (a second turn's stream
    // start can write it while a superseded turn's tail still reads).
    _Atomic int64_t stream_conversation_id;
+
+   // DB conversation whose messages conversation_history holds.  Unlike
+   // stream_conversation_id (a per-TURN tag) this follows the history itself:
+   // set in the same critical section that installs a conversation's history
+   // (session_replace_history), reset by session_clear_history, adopted by the
+   // first turn of a fresh chat, and set to SESSION_HISTORY_CONV_MIXED if a turn
+   // ever writes into another conversation's history.  Consumers that act on the
+   // history as a whole (teardown memory extraction) must key on this, never on
+   // the turn tag.  0 = no DB conversation (unpersisted, e.g. a satellite
+   // session, or a fresh chat before its first turn).
+   _Atomic int64_t history_conversation_id;
+
+   // The running turn's own history (owned ref, guarded by history_mutex) and the
+   // conversation it belongs to.  Set by session_turn_begin(): the turn pins the
+   // live history when it holds the turn's conversation, and otherwise that
+   // conversation loaded on its own (detached from the session), so a queued turn
+   // never runs on the conversation the user is viewing, nor writes into it.
+   // Every turn-time history access (LLM call, tool loop, appends, id stamping,
+   // system-message rebuild) goes through the pin.  NULL = no turn pinned
+   // (untracked callers such as satellites use conversation_history directly).
+   struct json_object *turn_history;
+   int64_t turn_history_conv;      // the turn's conversation (0 = not resolved yet)
+   int64_t turn_pin_conv;          // conversation turn_history holds (0 none, MIXED)
+   int turn_user_id;               // owner, for loading the turn's conversation
+   int turn_appends;               // messages this turn appended to turn_history
+   bool turn_active;               // between session_turn_begin() and _end()
+   bool turn_awaits_conversation;  // typed first message; conversation created after
+   bool turn_background;           // a reinvoke / background turn, not the user's
+   bool turn_context_reset;        // the live history it wrote was reset under it (a clear)
+   char *turn_pending_user;        // persisted form of a user message not yet written
+   char *turn_pending_reply;       // the reply, likewise
+   char *unclaimed_user;           // an ended turn's unsaved exchange (see
+   char *unclaimed_reply;          // session_bind_created_conversation), and when it ended
+   time_t unclaimed_at;
+   struct json_object *turn_reply;         // the turn's assistant reply (owned ref): its row id
+                                           // is stamped on this object, wherever it now sits
+   struct json_object *turn_reply_mirror;  // its copy in a reloaded live history, if any
+   struct json_object *turn_user_msg;      // the turn's latest user message (owned ref)
+   // An ended turn's unsaved exchange as history messages (owned refs), stamped
+   // with their row ids once session_bind_created_conversation() hands them out.
+   struct json_object *unclaimed_user_msg;
+   struct json_object *unclaimed_reply_msg;
+   struct json_object *claimed_user_msg;  // the same, claimed and awaiting their ids
+   struct json_object *claimed_reply_msg;
+   int64_t claimed_user_row;   // their ids, when a running turn must stamp them
+   int64_t claimed_reply_row;  // (it reads those messages without the lock)
+   char *turn_prior_user;      // a claimed exchange the adopting turn writes first
+   char *turn_prior_reply;
+   // Message refs another thread let go of while a turn was running: released
+   // by that turn (json-c reference counts aren't atomic, and the turn reads
+   // its history's messages without the lock).
+   struct json_object *parked_msgs[SESSION_PARKED_MSGS_MAX];
+   int parked_msg_count;
+   // The conversation this session's client is showing (0 = none), written by
+   // the client's handler thread when it opens, starts or clears one.  Read by
+   // turn threads that must not touch the client's connection (it can be freed
+   // by a disconnect mid-turn).
+   _Atomic int64_t viewed_conversation_id;
+   uint64_t turn_owner_token;
+   uint64_t turn_outer_token;  // the begin thread's token before this turn  // the running turn's
+                               // token (session_turn_token()), readable under history_mutex
+   // A prompt refresh from another thread while a turn runs on the live history
+   // waits here and is applied when the turn ends: the turn is the only writer
+   // of the history it is serializing.
+   char *deferred_system_prompt;
+
+   // Recent device events (phone ringing, a call answered elsewhere, a proactive
+   // alert), oldest first.  Posted by any thread; never written into a history.
+   // Each turn renders the unexpired ones into its volatile system block.
+   // Guarded by history_mutex.
+   session_notice_t notices[SESSION_NOTICES_MAX];
+   int notice_count;
+   // Facts "remember"ed during a turn whose conversation wasn't known yet; their
+   // source is recorded once it is (see session_fact_source_t).  Guarded by
+   // history_mutex.
+   session_fact_source_t pending_fact_sources[SESSION_PENDING_FACT_SOURCES_MAX];
+   int pending_fact_source_count;
+
+   // The running turn's LLM settings, fixed at session_turn_begin(): the
+   // conversation's stored model/provider/thinking when the turn runs on its own
+   // copy of it, else the session's.  Returned by session_get_llm_config() only
+   // to code carrying the turn's token (session_turn_token(): the turn's thread
+   // and the tool threads it spawns), so a sidebar load mid-turn never changes
+   // the turn's provider, and the settings the user is looking at stay the
+   // viewed conversation's.  Guarded by llm_config_mutex.
+   session_llm_config_t turn_llm_config;
+   bool turn_llm_config_set;
+   uint64_t turn_gen;  // the running turn's token (0 = none)
 
    // Server-authoritative persistence, Model A intent flag (SERVER_AUTHORITATIVE_
    // PERSISTENCE_DESIGN §5/§6 step 2).  Set true by the persist-owning caller
@@ -1299,47 +1419,96 @@ void session_check_idle_conversations(void);
 void session_add_message(session_t *session, const char *role, const char *content);
 
 /**
- * @brief Inject a "system" message into every live interactive session.
+ * @brief Tell a session's next turns about a device event.
+ *
+ * Kept on the session, never written into a conversation history: each turn
+ * renders the events of the last SESSION_NOTICE_TTL_SEC seconds into its
+ * volatile system block (see session_update_system_messages), so the model sees
+ * "the phone is ringing" on the user's next request whatever thread posted it,
+ * without another thread ever touching a history a turn may be serializing.
+ * Keeps the newest SESSION_NOTICES_MAX; longer text is truncated.
+ *
+ * @param session Session to notify (NULL is a no-op).
+ * @param text    Event text (NULL/empty is a no-op).
+ *
+ * @locks session->history_mutex
+ */
+void session_post_notice(session_t *session, const char *text);
+
+/**
+ * @brief session_post_notice() for an event that is @p user_id's
+ *
+ * Rendered only while the session's surface is that user's
+ * (session_effective_user_id()), checked when each turn's prompt is built, so a
+ * surface that changes hands (a satellite remapped) stops showing it.  0 is a
+ * household event, rendered for anyone.
+ */
+void session_post_notice_for(session_t *session, const char *text, int user_id);
+
+/**
+ * @brief session_post_notice() on every live interactive session.
  *
  * Interactive = local mic (SESSION_TYPE_LOCAL), satellites (DAP/DAP2), and
  * WebUI — the surfaces from which a user can issue a real-time command.
  * Messaging-channel sessions (SESSION_TYPE_MESSAGING) are intentionally
- * excluded: injecting a transient device event into an unrelated ongoing chat
- * thread is noise.
+ * excluded: a transient device event is noise in an unrelated chat thread.
  *
- * Used to fan out device-wide events that any interactive surface should be
- * able to act on (e.g. an incoming phone call ringing, or a call that was just
- * answered/ended elsewhere) instead of only the local session seeing them.
+ * Used for household-wide events any interactive surface should be able to act
+ * on (an incoming call ringing, or a call answered/ended elsewhere).
  *
- * Follows the standard snapshot-then-retain iteration: session IDs are
- * snapshotted under the module read lock, then each session is retained via
- * session_get() and written under its own history_mutex, so no per-session
- * lock is ever held while the module lock is held.
+ * Session IDs are snapshotted under the module read lock, then each session is
+ * retained via session_get() and posted to under its own history_mutex, so no
+ * per-session lock is held while the module lock is.
  *
- * @param content Message content (NULL/empty is a no-op).
- * @return Number of sessions the message was written into.
+ * @param content Event text (NULL/empty is a no-op).
+ * @return Number of sessions notified.
  *
  * @locks session_manager_rwlock (read) for snapshot, then per-session
  *        ref_mutex + history_mutex during apply.
  */
-int session_broadcast_system_message(const char *content);
+int session_broadcast_notice(const char *content);
 
 /**
- * @brief Like session_broadcast_system_message() but skips the LOCAL session.
+ * @brief session_post_notice() on one user's interactive sessions
  *
- * The local session (sessions[0], voice pipeline) is appended-to by the main
- * thread WITHOUT history_mutex, so a foreign thread must never write it directly
- * (history_mutex won't serialize against the unlocked main-path append). Callers
- * running off the main thread (e.g. the phone broadcaster on the MQTT/echo
- * thread) use this to fan an event out to the WebUI/DAP/DAP2 surfaces — which
- * ARE fully serialized by their own history_mutex — and defer the local write to
- * the main loop via pending_sysmsg_push(). On-main-thread callers should keep
- * using session_broadcast_system_message(), which includes the local session.
+ * For an event that is one user's (a watch they set): only the surfaces that
+ * are theirs (session_effective_user_id()), so it never reaches another
+ * household member's conversation.  A household-wide event (the phone) uses
+ * session_broadcast_notice().
  *
- * @param content Message content (NULL/empty is a no-op).
- * @return Number of (non-local) sessions the message was written into.
+ * @return Number of sessions notified (0 for @p user_id <= 0).
  */
-int session_broadcast_system_message_nonlocal(const char *content);
+int session_broadcast_notice_for_user(int user_id, const char *content);
+
+/**
+ * @brief The user a session's surface belongs to
+ *
+ * Its logged-in or mapped user (for the local microphone, the Local Device's
+ * assignment, see session_request_local_owner).  The local mic without one is
+ * the default voice user's.  Any other surface without one, such
+ * as an unmapped satellite, is a guest: 0, meaning no personal memory, data,
+ * alerts or persona.  The one rule for memory, tools, voice saves, prompts and
+ * notices.
+ *
+ * @locks session->metrics_mutex
+ */
+int session_effective_user_id(session_t *session);
+
+/** The device's own user: [memory] default_voice_user_id, else 1 (admin). */
+int session_default_voice_user_id(void);
+
+/**
+ * @brief Record who the local device (its microphone and speaker) belongs to
+ *
+ * The Local Device's assignment on the satellite page; 0 = unassigned, when the
+ * local mic speaks for the default voice user.  The main loop applies it between
+ * turns (session_take_local_owner): the previous owner's voice conversation is
+ * saved first.  Latest request wins.
+ */
+void session_request_local_owner(int user_id);
+
+/** Take the owner requested since the last call; false when none was. */
+bool session_take_local_owner(int *user_id_out);
 
 /**
  * @brief Stamp a DB row ID onto the most recent unstamped history entry for role.
@@ -1394,23 +1563,6 @@ void session_add_message_with_images(session_t *session,
                                      int vision_image_count);
 
 /**
- * @brief Append a pre-built message object to conversation history.
- *
- * Takes ownership of @p message (a complete `{role, content, ...}` json_object,
- * e.g. a multi-part vision message or a reconstructed tool message) and appends
- * it under history_mutex.  On any error (NULL args, OOM) @p message is freed.
- * Used by conversation-reload rehydration where the caller builds the exact
- * LLM-faithful shape (real per-image mime, tool_calls fields) itself.
- *
- * @param session Target session
- * @param message Owned json_object to append (consumed in all paths)
- *
- * @locks session->history_mutex
- * @lock_order 3
- */
-void session_add_message_multipart(session_t *session, struct json_object *message);
-
-/**
  * @brief Set (or clear) the tool-turn persist hook for a session.
  *
  * The WebUI sets this around a turn so the LLM tool loop can persist structured
@@ -1447,11 +1599,33 @@ struct json_object *session_get_history(session_t *session);
 /**
  * @brief Clear conversation history
  *
+ * Also resets the history's conversation binding to 0.
+ *
  * @param session Session to clear
  *
  * @locks session->history_mutex
  */
 void session_clear_history(session_t *session);
+
+
+/**
+ * @brief Append a message that belongs to the running turn
+ *
+ * Appends to the turn's pinned history (conversation_history when no turn is
+ * pinned).  If the session has since reloaded the SAME conversation (a
+ * reconnect restore mid-turn), an assistant message is also added to the live
+ * history so the reply isn't lost from context.
+ *
+ * @return true if appended
+ */
+bool session_add_turn_message(session_t *session, const char *role, const char *content);
+
+/** Image variant of session_add_turn_message(); see session_add_message_with_images(). */
+bool session_add_turn_message_with_images(session_t *session,
+                                          const char *role,
+                                          const char *text,
+                                          const char *const *vision_images,
+                                          int vision_image_count);
 
 /**
  * @brief Check if session has user messages (beyond system prompt)
@@ -1542,6 +1716,10 @@ void session_append_satellite_context(session_t *session, const char *room, cons
  * @locks session->history_mutex
  */
 void session_update_system_prompt(session_t *session, const char *system_prompt);
+
+/** session_update_system_prompt() on the live history; caller holds history_mutex. */
+void session_update_system_prompt_locked(session_t *session, const char *system_prompt);
+
 
 /**
  * @brief Update the session's system messages as two segments.
@@ -1782,6 +1960,7 @@ int session_dispatch_user_turn(session_t *session, const char *user_turn_text);
  *        history_mutex via session_update_system_prompt
  */
 void session_manager_refresh_all_prompts(void);
+
 #endif /* ENABLE_MULTI_CLIENT */
 
 // =============================================================================
@@ -1885,6 +2064,21 @@ char *session_llm_call_with_tts_vision_no_add(session_t *session,
  * @locks session->llm_config_mutex
  */
 int session_set_llm_config(session_t *session, const session_llm_config_t *config);
+
+/**
+ * @brief Change the running turn's LLM settings only
+ *
+ * For a change the turn makes that must not outlive it (switch_llm on a
+ * background turn, or a switch the conversation doesn't keep): the session's
+ * settings, and so later turns, are untouched.  Same provider validation and
+ * fallback as session_set_llm_config().
+ *
+ * @return 0 on success; 1 if no provider is usable or the caller isn't the
+ *         running turn (its thread or a tool thread carrying its token)
+ *
+ * @locks session->llm_config_mutex
+ */
+int session_set_turn_llm_config(session_t *session, const session_llm_config_t *config);
 
 /**
  * @brief Get session's current LLM configuration
@@ -2053,6 +2247,28 @@ void session_set_command_context(session_t *session);
  * @return Current command context session, or NULL if not set
  */
 session_t *session_get_command_context(void);
+
+/**
+ * @brief This thread's turn token (0 = not part of a turn)
+ *
+ * session_turn_begin() gives each turn a token, unique across sessions, and sets
+ * it on the calling thread; session_get_llm_config() returns the turn's settings
+ * only to a thread carrying it.  A thread a turn spawns (parallel tool calls)
+ * captures the token before spawning and sets it with session_set_turn_token().
+ */
+uint64_t session_turn_token(void);
+
+/** @brief Set this thread's turn token (0 clears).  See session_turn_token(). */
+void session_set_turn_token(uint64_t token);
+
+/**
+ * @brief Pin the LLM settings session_get_llm_config() returns on this thread
+ *
+ * For work that outlives the turn it serves (async compaction): the turn's
+ * settings, captured while it ran, keep applying after it ends.  @p config must
+ * stay valid until cleared.  Pass NULL to clear.
+ */
+void session_set_llm_config_override(const session_t *session, const session_llm_config_t *config);
 #endif /* ENABLE_MULTI_CLIENT */
 
 /* =============================================================================
@@ -2121,6 +2337,20 @@ static inline void session_set_command_context(session_t *session) {
    (void)session;
 }
 
+static inline uint64_t session_turn_token(void) {
+   return 0;
+}
+
+static inline void session_set_turn_token(uint64_t token) {
+   (void)token;
+}
+
+static inline void session_set_llm_config_override(const session_t *session,
+                                                   const session_llm_config_t *config) {
+   (void)session;
+   (void)config;
+}
+
 static inline session_t *session_get(uint32_t session_id) {
    (void)session_id;
    return NULL;
@@ -2184,6 +2414,13 @@ static inline int session_set_llm_config(session_t *session, const session_llm_c
    return 1; /* Not supported in local-only mode */
 }
 
+static inline int session_set_turn_llm_config(session_t *session,
+                                              const session_llm_config_t *config) {
+   (void)session;
+   (void)config;
+   return 1; /* Not supported in local-only mode */
+}
+
 static inline void session_get_llm_config(session_t *session, session_llm_config_t *config) {
    (void)session;
    /* In local-only mode, use global defaults */
@@ -2233,6 +2470,7 @@ static inline void session_manager_set_local_prompt_builder(session_local_prompt
 
 static inline void session_manager_refresh_all_prompts(void) {
 }
+
 
 static inline void composed_prompt_free(composed_prompt_t *p) {
    /* Inlined free — non-MULTI_CLIENT builds still release any heap
@@ -2340,5 +2578,8 @@ static inline int64_t session_get_last_user_msg_id(session_t *session) {
 #ifdef __cplusplus
 }
 #endif
+
+/* The conversation history and the turn that runs on it (needs session_t). */
+#include "core/session_history.h"
 
 #endif  // SESSION_MANAGER_H

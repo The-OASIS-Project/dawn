@@ -201,6 +201,11 @@ void handle_update_satellite(ws_connection_t *conn, struct json_object *payload)
       int new_user_id = json_object_get_int(user_id_obj);
       satellite_db_update_user(uuid, new_user_id);
       mapping.user_id = new_user_id;
+      /* The Local Device is the daemon's own mic and speaker: its mic follows
+       * the same assignment (applied between local turns). */
+      if (satellite_is_local_pseudo(uuid)) {
+         session_request_local_owner(new_user_id);
+      }
    }
 
    if (json_object_object_get_ex(payload, "ha_area", &ha_area_obj)) {

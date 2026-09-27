@@ -26,6 +26,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "config/dawn_config.h"
+#include "core/embedding_engine.h"
 #include "memory/memory_embeddings.h"
 #include "unity.h"
 
@@ -434,6 +436,64 @@ static void test_band_neighbors_scan(void) {
  * Main
  * ============================================================================ */
 
+/* ---- fact cache sizing ---- */
+
+extern int g_stub_fact_total;
+extern int g_stub_load_limit;
+float stub_fact_angle(int64_t id);
+
+/* Whether the cache holds fact @p id: the nearest fact to its exact vector. */
+static bool cache_holds(int64_t id) {
+   const float angle = stub_fact_angle(id);
+   const float q[2] = { cosf(angle), sinf(angle) };
+   int64_t match = 0;
+   float score = 0.0f;
+   memory_embeddings_nearest_fact(1, q, 2, 0.99999f, &match, &score);
+   return match == id;
+}
+
+static void start_embedding_engine(void) {
+   snprintf(g_config.memory.embedding_provider, sizeof(g_config.memory.embedding_provider), "onnx");
+   TEST_ASSERT_EQUAL_INT(0, embedding_engine_init());
+}
+
+static void test_cache_holds_every_fact_past_the_old_cap(void) {
+   start_embedding_engine();
+   g_stub_fact_total = 9000; /* more than the 8,192 the cache used to stop at */
+   memory_embeddings_invalidate_cache();
+   TEST_ASSERT_TRUE(cache_holds(1));
+   TEST_ASSERT_TRUE(cache_holds(9000));
+}
+
+static void test_cache_grows_as_facts_are_added(void) {
+   start_embedding_engine();
+   g_stub_fact_total = 10;
+   memory_embeddings_invalidate_cache();
+   TEST_ASSERT_TRUE(cache_holds(10));
+   /* Appended past the room the load left (10 + 64). */
+   for (int64_t id = 11; id <= 400; id++) {
+      const float angle = stub_fact_angle(id);
+      const float v[2] = { cosf(angle), sinf(angle) };
+      TEST_ASSERT_EQUAL_INT(0, memory_embeddings_store_precomputed(1, id, v, 2));
+   }
+   /* Still the load's 10 in the stub store: only a cache that grew holds 400. */
+   TEST_ASSERT_TRUE(cache_holds(400));
+   TEST_ASSERT_TRUE(cache_holds(10));
+}
+
+static void test_cache_load_stops_at_the_ceiling(void) {
+   /* [memory] fact_cache_mb bounds how many facts a load keeps, at the
+    * embedding's size: 1 MB / 36 bytes (2 dims + 28) = 29,127. */
+   start_embedding_engine();
+   g_config.memory.fact_cache_mb = 1;
+   g_stub_fact_total = 30000;
+   memory_embeddings_invalidate_cache();
+   TEST_ASSERT_TRUE(cache_holds(1));
+   TEST_ASSERT_FALSE(cache_holds(30000)); /* past the ceiling */
+   TEST_ASSERT_EQUAL_INT(29127, g_stub_load_limit);
+   g_config.memory.fact_cache_mb = 0;
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_l2_norm);
@@ -451,5 +511,8 @@ int main(void) {
    RUN_TEST(test_rescore_sentinel_value_invariant);
    RUN_TEST(test_cluster_by_cosine);
    RUN_TEST(test_band_neighbors_scan);
+   RUN_TEST(test_cache_holds_every_fact_past_the_old_cap);
+   RUN_TEST(test_cache_grows_as_facts_are_added);
+   RUN_TEST(test_cache_load_stops_at_the_ceiling);
    return UNITY_END();
 }

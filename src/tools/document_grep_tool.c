@@ -252,6 +252,8 @@ static char *doc_grep_callback(const char *action, char *value, int *should_resp
       return strdup("Error: empty grep query.");
 
    int user_id = tool_get_current_user_id();
+   if (user_id <= 0)
+      return strdup(TOOL_GUEST_REFUSAL);
 
    doc_grep_hit_t hits[DOC_GREP_PAGE];
    int nhits = 0;

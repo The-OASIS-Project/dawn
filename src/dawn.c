@@ -76,7 +76,6 @@
 #include "core/ota.h"
 #include "core/ota_rollout.h"
 #include "core/path_utils.h"
-#include "core/pending_system_msg.h"
 #include "core/session_manager.h"
 #include "core/text_filter.h"
 #include "core/utterance_dedup.h"
@@ -95,6 +94,7 @@
 #include "mosquitto_comms.h"
 #include "state_machine.h"
 #include "text_to_command_nuevo.h"
+#include "tools/document_embed_cache.h"
 #ifdef DAWN_ENABLE_MUSIC_TOOL
 #include "tools/music_tool.h"
 #endif
@@ -124,6 +124,8 @@
 #endif
 #include "auth/auth_db.h"
 #include "memory/memory_db_admin.h"
+#include "memory/memory_db_provenance.h"
+#include "memory/memory_embed_backfill.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_focus_adapters.h"
 #include "memory/memory_recategorize.h"
@@ -242,6 +244,9 @@ static char *goodbyeWords[] = { "good bye", "goodbye", "good night", "bye", "qui
 // Array of predefined responses the AI can use upon recognizing a wake word/phrase.
 const char *wakeResponses[] = { "Hello Sir.", "At your service Sir.", "Yes Sir?",
                                 "How may I assist you Sir?", "Listening Sir." };
+
+// Spoken when a cancel phrase stops a reply, so the user knows it was heard.
+static const char *cancelResponses[] = { "Stopped, Sir.", "Standing by, Sir.", "Okay, Sir." };
 
 // Array of words/phrases that the AI should explicitly ignore during interaction.
 // This includes common filler words or phrases signaling to disregard the prior input.
@@ -372,10 +377,6 @@ static tui_theme_t tui_theme = TUI_THEME_GREEN;  // Default: Apple ][ green
 // Global variable for command processing mode
 command_processing_mode_t command_processing_mode = CMD_MODE_DIRECT_ONLY;
 
-// Pointer to local session's conversation history
-// NOTE: This is a convenience pointer to session_get_local()->conversation_history
-// For multi-client support, each session has its own history (see session_manager.c)
-struct json_object *conversation_history = NULL;
 
 // =============================================================================
 // Direct-only mode system prompt (persona + system instructions)
@@ -444,6 +445,141 @@ static int g_bargein_user_disabled = 0;  // Set by --no-bargein CLI option
 static char *llm_request_text = NULL;        // Input: command text for LLM
 static char *llm_response_text = NULL;       // Output: LLM response
 static _Atomic int llm_response_silent = 0;  // Flag: tool handled output, no text expected
+
+/* The local session's turn (session_turn_begin when its user message is
+ * added): its token, and whether one is open.  Main-thread state. */
+static uint64_t s_local_turn_token = 0;
+static bool s_local_turn_open = false;
+/* An LLM worker was spawned and not yet joined (main-thread state).  Completion
+ * is "spawned and no longer processing", not a 1 -> 0 edge of llm_processing,
+ * which a worker faster than one main-loop pass would never show. */
+static bool s_llm_thread_joinable = false;
+
+/* Whether the local pipeline is busy: a worker running, or finished and not yet
+ * handled, or a turn still open. */
+static bool local_llm_busy(void) {
+   return llm_processing || s_llm_thread_joinable || s_local_turn_open;
+}
+
+/* A spoken request that interrupted a reply still winding down (main-thread
+ * state): the newest such request, answered once the pipeline is free.  Only
+ * the newest, since each wake word supersedes what came before it. */
+static char *s_pending_voice_command = NULL;
+/* The command PROCESS_COMMAND is handling came from the hold: it already
+ * passed the cross-device dedup check when it was spoken. */
+static bool s_voice_command_from_hold = false;
+
+/* The running reply was stopped by a cancel phrase (main-thread state): its
+ * question is kept in the history with a stopped note, rather than rolled back
+ * as for an interrupt that brings a new request. */
+static bool s_reply_stopped_by_user = false;
+
+/* Recorded in place of the reply a cancel phrase stopped. */
+#define STOPPED_REPLY_NOTE "(Stopped at the user's request before finishing.)"
+
+/* Whether @p command is only a cancel phrase ("stop", "never mind"). */
+static bool is_cancel_command(const char *command) {
+   char normalized[MAX_COMMAND_LENGTH];
+   normalize_for_matching(command, normalized, sizeof(normalized));
+   for (size_t i = 0; i < sizeof(cancelWords) / sizeof(cancelWords[0]); i++) {
+      if (strcmp(normalized, cancelWords[i]) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
+/* A cancel phrase: stop the reply (its speech, and its generation if still
+ * running) and confirm out loud, since silence can't be told apart from not
+ * having been heard.  A fixed line on the local speaker: no LLM turn, nothing
+ * added to the conversation. */
+static void acknowledge_cancel(void) {
+   if (llm_processing) {
+      s_reply_stopped_by_user = true; /* keep its question (see the completion) */
+      llm_request_interrupt();
+   }
+   if (s_pending_voice_command) { /* stop means stop: a held request too */
+      free(s_pending_voice_command);
+      s_pending_voice_command = NULL;
+   }
+   pthread_mutex_lock(&tts_mutex);
+   if (tts_playback_state == TTS_PLAYBACK_PAUSE) {
+      tts_playback_state = TTS_PLAYBACK_DISCARD;
+      pthread_cond_signal(&tts_cond);
+   }
+   pthread_mutex_unlock(&tts_mutex);
+   const size_t n = sizeof(cancelResponses) / sizeof(cancelResponses[0]);
+   OLOG_INFO("Cancel phrase: reply stopped, confirming");
+   text_to_speech(cancelResponses[(size_t)rand() % n]);
+}
+
+/* Keep @p command (ownership taken) to answer once the pipeline is free,
+ * replacing any older one.  (A cancel phrase never gets here: PROCESS_COMMAND
+ * confirms it first.) */
+static void hold_voice_command(char *command) {
+   if (!command || !command[0]) {
+      free(command);
+      return;
+   }
+   if (s_pending_voice_command) {
+      OLOG_INFO("Newer request replaces the one waiting for the interrupted reply to end");
+      free(s_pending_voice_command);
+   }
+   s_pending_voice_command = command;
+   OLOG_INFO("Request held until the interrupted reply ends");
+}
+
+/* Hand the held request to PROCESS_COMMAND once the pipeline is free. */
+static bool take_voice_command(char **command_text_out,
+                               dawn_state_t *rec_state,
+                               dawn_state_t *silence_next_state) {
+   if (!s_pending_voice_command || local_llm_busy()) {
+      return false;
+   }
+   *command_text_out = s_pending_voice_command;
+   s_pending_voice_command = NULL;
+   s_voice_command_from_hold = true;
+   *silence_next_state = DAWN_STATE_WAKEWORD_LISTEN;
+   *rec_state = DAWN_STATE_PROCESS_COMMAND;
+   return true;
+}
+
+#ifdef ENABLE_MULTI_CLIENT
+/* Apply a change of the local device's owner (session_request_local_owner), only
+ * between turns: the previous owner's voice conversation is saved first (or, with
+ * nothing saved, a new context starts), so one history never holds two users'
+ * speech, as a satellite remap does. */
+static void apply_local_owner_change(session_t *local) {
+   int owner = 0;
+   if (local_llm_busy() || s_local_turn_open || !session_take_local_owner(&owner)) {
+      return;
+   }
+   const int before = session_effective_user_id(local);
+   const int after = owner > 0 ? owner : session_default_voice_user_id();
+   if (after != before) {
+      int64_t saved = 0;
+      /* Couldn't be saved: drop it rather than hand it to the next owner. */
+      if (session_save_voice_conversation(local, &saved) != 0 && session_has_messages(local)) {
+         session_init_system_prompt(local, get_local_command_prompt());
+      }
+      OLOG_INFO("Local device now belongs to user %d%s", after,
+                saved > 0 ? " (previous user's conversation saved)" : "");
+   }
+   session_set_metrics_user(local, owner);
+}
+#endif
+
+/* End the local turn (main thread): once its worker is joined, or when no
+ * worker is spawned for it (a direct command handled it, the spawn failed). */
+static void end_local_turn(void) {
+   if (!s_local_turn_open) {
+      return;
+   }
+   session_set_turn_token(s_local_turn_token); /* the turn's own thread ends it */
+   session_turn_end(session_get_local());
+   s_local_turn_open = false;
+   s_local_turn_token = 0;
+}
 // Note: Vision is handled by native tool calling - viewing tool captures image
 // and streaming code passes it to recursive LLM calls automatically
 
@@ -455,6 +591,11 @@ static _Atomic int llm_response_silent = 0;  // Flag: tool handled output, no te
  */
 static void dawn_tts_sentence_callback(const char *sentence, void *userdata) {
    if (!sentence || strlen(sentence) == 0) {
+      return;
+   }
+   /* The reply was interrupted: a sentence finished before the request stops
+    * isn't spoken (it would follow the cancel confirmation or the next reply). */
+   if (llm_is_interrupt_requested()) {
       return;
    }
 
@@ -500,28 +641,6 @@ sig_atomic_t get_quit(void) {
 int is_llm_processing(void) {
    return llm_processing;
 }
-
-#ifdef ENABLE_MULTI_CLIENT
-/* Apply deferred device/system-context messages (e.g. phone call state) into the
- * local session's history.  Foreign threads (the MQTT/echo callback) enqueue via
- * pending_sysmsg_push(); only the main thread appends, and callers gate on
- * !llm_processing so history is never mutated mid-turn — preserving single-owner
- * ownership of sessions[0], whose main-path appends are unlocked.  See
- * include/core/pending_system_msg.h. */
-static void drain_pending_system_messages(void) {
-   session_t *local = session_get_local();
-   if (!local) {
-      return;
-   }
-
-   /* +1 to match the queue's storage width so a full-length message round-trips
-    * without losing its last byte. */
-   char msg[PENDING_SYSMSG_MAX_TEXT + 1];
-   while (pending_sysmsg_pop(msg, sizeof(msg))) {
-      session_add_message(local, "system", msg);
-   }
-}
-#endif
 
 #if 0
 // Define the function to draw the waveform using SDL
@@ -1040,8 +1159,6 @@ void reset_conversation(void) {
    }
    session_init_system_prompt(local_session, system_prompt);
 
-   /* Update global pointer to the new history */
-   conversation_history = local_session->conversation_history;
 
    /* Reset metrics */
    metrics_reset();
@@ -1279,6 +1396,11 @@ void *llm_worker_thread(void *arg) {
    // Clear interrupt flag before calling LLM
    llm_clear_interrupt();
 
+   /* This thread runs the local turn begun on the main thread: its token gives it
+    * the turn's settings and makes it the turn's writer (session_turn_begin).
+    * Set before reading the settings, so it reads the turn's. */
+   session_set_turn_token(s_local_turn_token);
+
    // Get local session's LLM config (for per-session LLM settings)
    session_t *local_session = session_get_local();
    session_llm_config_t session_config;
@@ -1293,13 +1415,16 @@ void *llm_worker_thread(void *arg) {
    SESSION_SCOPED_COMMAND_CONTEXT(local_session);
 
    // Call LLM with resolved config (this can take 10+ seconds)
-   // Note: conversation_history is a global, but only main thread modifies it during setup
-   // and we only read it here, so no mutex needed for conversation_history itself
+   // The turn's own history, referenced for the call (other threads' writes to
+   // it wait for the turn to end).
    // Vision is handled by native tool calling - viewing tool captures image internally
-   char *response = llm_chat_completion_streaming_tts_with_config(conversation_history,
-                                                                  request_text, NULL, NULL, 0,
-                                                                  dawn_tts_sentence_callback, NULL,
-                                                                  &resolved_config);
+   struct json_object *history = session_get_turn_history(local_session);
+   char *response = history ? llm_chat_completion_streaming_tts_with_config(
+                                  history, request_text, NULL, NULL, 0, dawn_tts_sentence_callback,
+                                  NULL, &resolved_config)
+                            : NULL;
+   session_put_history(local_session, history);
+   session_set_turn_token(0);
    // Command context auto-cleared by scope guard
 
    // A NULL response that wasn't interrupted may be a silent tool (skip_followup)
@@ -2051,6 +2176,8 @@ int main(int argc, char *argv[]) {
     * Declaration via webui_internal.h (pulled in for ENABLE_WEBUI builds —
     * no extra dep cost since this block already lives under that gate). */
    session_manager_set_prompt_builder(dawn_build_prompt);
+   /* A "remember" made before its conversation existed gets it as its source. */
+   session_set_fact_source_hook(memory_db_fact_attach_sources);
 #endif
 
    // Initialize command router for worker thread request/response
@@ -2080,9 +2207,6 @@ int main(int argc, char *argv[]) {
 
    session_init_system_prompt(local_session, system_prompt);
 
-   // Point global conversation_history to local session's history for compatibility
-   // NOTE: This allows existing code to continue using the global pointer
-   conversation_history = local_session->conversation_history;
 
    // Initialize audio backend (runtime selection between ALSA and PulseAudio)
    // In server mode, use AUDIO_BACKEND_NONE — no local audio hardware needed
@@ -2492,6 +2616,17 @@ mqtt_disabled:
 #endif
 #endif
 
+#ifdef ENABLE_MULTI_CLIENT
+   /* The local mic belongs to whoever the Local Device (the speaker) is assigned
+    * to on the satellite page; unassigned, to the default voice user. */
+   if (auth_db_ready) {
+      satellite_mapping_t local_map;
+      if (satellite_db_get(LOCAL_PSEUDO_SATELLITE_UUID, &local_map) == AUTH_DB_SUCCESS) {
+         session_request_local_owner(local_map.user_id);
+      }
+   }
+#endif
+
    /* SAGE proactive attention: load per-user watches + seed the safety set on
     * first run (needs auth_db open).  Master switch [attention] enabled gates
     * whether the heartbeat tick actually evaluates + delivers. */
@@ -2537,9 +2672,10 @@ mqtt_disabled:
          if (memory_embed_recompute_start() != 0) {
             OLOG_WARNING("Embedding recompute worker failed to start");
          }
-         if (!memory_embed_recompute_in_progress() &&
-             g_config.memory.embedding_backfill_on_startup) {
-            memory_embeddings_start_backfill(g_config.memory.default_voice_user_id);
+         /* Every user's un-embedded facts, not just the voice user's.  If the
+          * re-index above is running, the sweep is parked until it completes. */
+         if (g_config.memory.embedding_backfill_on_startup) {
+            memory_embeddings_request_backfill_all();
          }
       }
    }
@@ -2603,15 +2739,12 @@ mqtt_disabled:
          time_t now_srv = time(NULL);
          attention_tick(now_srv);
          conv_stream_evict_stale(now_srv);
+         memory_embeddings_tick(now_srv);
 #ifdef ENABLE_WEBUI
          jobs_monitor_tick(now_srv);
          webui_watch_readings_tick();
 #endif
 #ifdef ENABLE_MULTI_CLIENT
-         /* Apply deferred device/system-context messages.  Server mode drives no
-          * local voice turn, so the local session has no other writer and the
-          * drain is always safe here. */
-         drain_pending_system_messages();
 #endif
       }
       goto server_shutdown;
@@ -2631,6 +2764,8 @@ mqtt_disabled:
             attention_tick(now_rollout);
             /* Evict finalized/abandoned live-partial replay-ring entries. */
             conv_stream_evict_stale(now_rollout);
+            /* Delayed embedding retry after an embed failure (one atomic load when idle). */
+            memory_embeddings_tick(now_rollout);
 #ifdef ENABLE_WEBUI
             /* Background-job completion monitor (dirty-gated). */
             jobs_monitor_tick(now_rollout);
@@ -2653,8 +2788,7 @@ mqtt_disabled:
 #endif
 
       // Check if LLM thread has completed (non-blocking check)
-      static int prev_llm_processing = 0;  // Track previous state
-      if (prev_llm_processing == 1 && llm_processing == 0) {
+      if (s_llm_thread_joinable && !llm_processing) {
          // LLM just completed - process the response
          OLOG_INFO("LLM thread completed - processing response");
 
@@ -2673,16 +2807,25 @@ mqtt_disabled:
 
          // Join the thread to clean up resources
          pthread_join(llm_thread, NULL);
+         s_llm_thread_joinable = false;
+         const bool stopped_by_user = s_reply_stopped_by_user;
+         s_reply_stopped_by_user = false;
+         /* The worker is done: this thread finishes the turn (its reply, or a
+          * rollback) and ends it. */
+         session_set_turn_token(s_local_turn_token);
 
          // Check if response was interrupted
          if (response_text == NULL && llm_is_interrupt_requested()) {
             OLOG_INFO("LLM was interrupted - discarding partial response");
             llm_clear_interrupt();
 
-            // Remove the user message from conversation history (last item)
-            int history_len = json_object_array_length(conversation_history);
-            if (history_len > 0) {
-               json_object_array_del_idx(conversation_history, history_len - 1, 1);
+            /* Stopped by the user: keep the question with a stopped note, so
+             * "do that again" still has it.  Interrupted by a new request: take
+             * the whole exchange back out.  Either way the tool calls and
+             * results the turn got to go (a lone tool call without its result
+             * is rejected by the provider next turn). */
+            if (!stopped_by_user || !session_stop_turn(local_session, STOPPED_REPLY_NOTE)) {
+               (void)session_rollback_turn(local_session);
             }
          } else if (response_text != NULL) {
             // Process successful response
@@ -2710,10 +2853,7 @@ mqtt_disabled:
             // to "") — an empty assistant message makes Claude reject the next turn.
             // Mirrors the guard in llm_call_finalize.
             if (history_text[0] != '\0') {
-               struct json_object *ai_message = json_object_new_object();
-               json_object_object_add(ai_message, "role", json_object_new_string("assistant"));
-               json_object_object_add(ai_message, "content", json_object_new_string(history_text));
-               json_object_array_add(conversation_history, ai_message);
+               session_add_turn_message(local_session, "assistant", history_text);
             }
 
             response_final_free(&fin);  // safe: fin.text is NULL on the finalize-failure path
@@ -2744,8 +2884,8 @@ mqtt_disabled:
             OLOG_ERROR("LLM error - no response");
             text_to_speech("I'm sorry but I'm currently unavailable.");
          }
+         end_local_turn();
       }
-      prev_llm_processing = llm_processing;  // Update previous state
 
       publish_ai_state(recState);
       switch (recState) {
@@ -2757,27 +2897,23 @@ mqtt_disabled:
             }
             pthread_mutex_unlock(&tts_mutex);
 
-            /* Apply any deferred device/system-context messages (phone call state,
-             * etc.) before dispatching a new turn, so the LLM sees them.  Gated on
-             * !llm_processing so the local history is never mutated mid-turn. */
-#ifdef ENABLE_MULTI_CLIENT
-            if (!llm_processing) {
-               drain_pending_system_messages();
-            }
-#endif
 
             /* Check for text input from any source (TUI, MQTT device relay, future REST).
              * Gated on !llm_processing so a queued item is never popped into a turn while
-             * the worker is running — it waits until the pipeline is free, so the
-             * main pipeline never mutates conversation_history mid-turn. */
-            if (!llm_processing &&
-                check_and_process_input_queue(&command_text, &recState, &silenceNextState)) {
+             * the worker is running — it waits until the pipeline is free, so a
+             * turn never starts while another is running. */
+#ifdef ENABLE_MULTI_CLIENT
+            apply_local_owner_change(local_session);
+#endif
+            if (take_voice_command(&command_text, &recState, &silenceNextState) ||
+                (!local_llm_busy() &&
+                 check_and_process_input_queue(&command_text, &recState, &silenceNextState))) {
                break;
             }
 
 #ifdef ENABLE_MULTI_CLIENT
             /* Check voice conversation idle timeout (only when not processing LLM) */
-            if (!llm_processing && g_config.memory.enabled &&
+            if (!local_llm_busy() && g_config.memory.enabled &&
                 g_config.memory.conversation_idle_timeout_min > 0) {
                time_t last_interaction = local_session->last_interaction_complete;
                if (last_interaction > 0 && session_has_messages(local_session)) {
@@ -2791,8 +2927,6 @@ mqtt_disabled:
                      if (session_save_voice_conversation(local_session, &conv_id) == 0 &&
                          conv_id > 0) {
                         OLOG_INFO("Session 0: Saved as conversation %lld", (long long)conv_id);
-                        /* Update global pointer to the new history */
-                        conversation_history = local_session->conversation_history;
                      }
                   }
                }
@@ -3100,10 +3234,11 @@ mqtt_disabled:
 
             /* Check for text input from any source (TUI, MQTT device relay, future REST).
              * Gated on !llm_processing so a queued item is never popped into a turn while
-             * the worker is running — it waits until the pipeline is free, so the
-             * main pipeline never mutates conversation_history mid-turn. */
-            if (!llm_processing &&
-                check_and_process_input_queue(&command_text, &recState, &silenceNextState)) {
+             * the worker is running — it waits until the pipeline is free, so a
+             * turn never starts while another is running. */
+            if (take_voice_command(&command_text, &recState, &silenceNextState) ||
+                (!local_llm_busy() &&
+                 check_and_process_input_queue(&command_text, &recState, &silenceNextState))) {
                break;
             }
 
@@ -3379,25 +3514,25 @@ mqtt_disabled:
                      }
                   }
 
+                  /* A bare cancel phrase said over her speech (no wake word
+                   * needed): stop and confirm. */
                   pthread_mutex_lock(&tts_mutex);
-                  if (tts_playback_state == TTS_PLAYBACK_PAUSE) {
-                     for (i = 0; i < numCancelWords; i++) {
-                        if (normalized_text && strcmp(normalized_text, cancelWords[i]) == 0) {
-                           OLOG_WARNING("Cancel word detected.\n");
-
-                           tts_playback_state = TTS_PLAYBACK_DISCARD;
-                           pthread_cond_signal(&tts_cond);
-
-                           silenceNextState = DAWN_STATE_WAKEWORD_LISTEN;
-                           recState = DAWN_STATE_SILENCE;
-                           // Reset all subsystems for new utterance
-                           reset_for_new_utterance(vad_ctx, asr_ctx, chunk_mgr, &silence_duration,
-                                                   &speech_duration, &recording_duration,
-                                                   &preroll_write_pos, &preroll_valid_bytes);
-                        }
-                     }
-                  }
+                  const bool speaking = tts_playback_state == TTS_PLAYBACK_PAUSE;
                   pthread_mutex_unlock(&tts_mutex);
+                  bool cancelled = false;
+                  for (i = 0; speaking && !cancelled && i < numCancelWords; i++) {
+                     cancelled = normalized_text && strcmp(normalized_text, cancelWords[i]) == 0;
+                  }
+                  if (cancelled) {
+                     OLOG_WARNING("Cancel word detected.\n");
+                     acknowledge_cancel();
+                     silenceNextState = DAWN_STATE_WAKEWORD_LISTEN;
+                     recState = DAWN_STATE_SILENCE;
+                     // Reset all subsystems for new utterance
+                     reset_for_new_utterance(vad_ctx, asr_ctx, chunk_mgr, &silence_duration,
+                                             &speech_duration, &recording_duration,
+                                             &preroll_write_pos, &preroll_valid_bytes);
+                  }
 
                   // Search for wake word in normalized text
                   for (i = 0; i < numWakeWords; i++) {
@@ -3748,6 +3883,7 @@ mqtt_disabled:
             // Skip processing if command is empty, whitespace, or a silence marker
             if (asr_transcript_is_blank(command_text)) {
                OLOG_INFO("Ignoring empty or invalid command\n");
+               s_voice_command_from_hold = false;
                if (command_text) {
                   free(command_text);
                   command_text = NULL;
@@ -3761,12 +3897,29 @@ mqtt_disabled:
                break;
             }
 
+            /* "Okay Friday, stop": the wake word already interrupted the reply;
+             * confirm instead of sending the phrase to the model. */
+            if (is_cancel_command(command_text)) {
+               s_voice_command_from_hold = false;
+               acknowledge_cancel();
+               free(command_text);
+               command_text = NULL;
+               silenceNextState = DAWN_STATE_WAKEWORD_LISTEN;
+               recState = DAWN_STATE_SILENCE;
+               reset_for_new_utterance(vad_ctx, asr_ctx, chunk_mgr, &silence_duration,
+                                       &speech_duration, &recording_duration, &preroll_write_pos,
+                                       &preroll_valid_bytes);
+               break;
+            }
+
             /* Cross-device dedup: if a nearby satellite (or another session)
              * already produced a command event within the window, this local
              * mic heard the same spoken command — drop it and return to
              * listening so the user gets exactly one response.  Covers all
              * processing modes since it runs before the mode branch below. */
-            if (utterance_dedup_check(local_session->session_id)) {
+            const bool from_hold = s_voice_command_from_hold;
+            s_voice_command_from_hold = false;
+            if (!from_hold && utterance_dedup_check(local_session->session_id)) {
                OLOG_INFO("Dedup suppressed duplicate local utterance: \"%s\"", command_text);
                free(command_text);
                command_text = NULL;
@@ -3780,25 +3933,33 @@ mqtt_disabled:
 
             int direct_command_found = 0;
 
-            /* Snapshot llm_processing once for this turn. To keep the main voice
-             * path from racing its own LLM worker on conversation_history, never
-             * mutate the array while the worker is running. We gate the
-             * user-message append below AND the LLM-busy
-             * bail further down on this same snapshot so they stay consistent
-             * (the worker can clear llm_processing between the two points). When
-             * busy the turn is dropped either way (see the bail), so skipping the
-             * append is behavior-preserving — it just removes the concurrent
-             * append that raced the worker. */
-            int llm_busy = llm_processing;
+            /* Snapshot busy once for this utterance.  While a turn is running
+             * (or its result isn't handled yet), this utterance is held until it
+             * ends (see the bail below), so its user message isn't added yet;
+             * both decisions use this one snapshot (the worker can clear
+             * llm_processing between the two points). */
+            const bool llm_busy = local_llm_busy();
+            /* Answered now, this newer request supersedes one still held (the
+             * interrupted reply ended while it was being spoken). */
+            if (!llm_busy && s_pending_voice_command) {
+               OLOG_INFO("Newer request answered now; dropping the one held for the "
+                         "interrupted reply");
+               free(s_pending_voice_command);
+               s_pending_voice_command = NULL;
+            }
 
-            // Add user message to conversation history first (needed for vision context).
-            // Skipped while the LLM worker is running (turn is dropped at the busy bail).
-            if (command_processing_mode != CMD_MODE_DIRECT_ONLY && !llm_busy) {
-               struct json_object *user_message_early = json_object_new_object();
-               json_object_object_add(user_message_early, "role", json_object_new_string("user"));
-               json_object_object_add(user_message_early, "content",
-                                      json_object_new_string(command_text));
-               json_object_array_add(conversation_history, user_message_early);
+            // Add user message to conversation history first (needed for vision context),
+            // as the first message of the turn it starts: the turn owns it from here
+            // (rollback on interrupt, the history pin).  Skipped while busy (the
+            // utterance is dropped at the busy bail).
+            /* Whether this utterance began a turn: only then is it this
+             * utterance's to end.  While busy, the open turn is the worker's. */
+            const bool began_turn = command_processing_mode != CMD_MODE_DIRECT_ONLY && !llm_busy;
+            if (began_turn) {
+               session_turn_begin(local_session, 0, session_effective_user_id(local_session));
+               s_local_turn_token = session_turn_token();
+               s_local_turn_open = true;
+               session_add_turn_message(local_session, "user", command_text);
             }
 
             /* Process Commands before AI if LLM command processing is disabled */
@@ -3856,6 +4017,10 @@ mqtt_disabled:
 
             // Handle direct command found - transition back to listening state
             if (direct_command_found) {
+               if (began_turn) {
+                  end_local_turn(); /* no LLM turn follows */
+               }
+
                // Free command text since we're done processing
                if (command_text) {
                   free(command_text);
@@ -3919,17 +4084,15 @@ mqtt_disabled:
                   // Check if an LLM thread is already running (from a previous request or
                   // interrupt). Uses the llm_busy snapshot taken at the top of this turn so
                   // it agrees with the user-message append gate above — when busy the append
-                  // was skipped, so there is nothing to remove here.
+                  // was skipped, so there is nothing to remove here; the queued request
+                  // adds its own when it runs.
                   if (llm_busy) {
-                     OLOG_WARNING(
-                         "LLM thread already running - ignoring new request (say command again "
-                         "after response completes)");
-
-                     // Free command text
-                     if (command_text) {
-                        free(command_text);
-                        command_text = NULL;
-                     }
+                     /* The wake word interrupted the reply in progress (or it is
+                      * finishing): answer this request once that turn has ended
+                      * and rolled back, rather than dropping it after having
+                      * cancelled the reply. */
+                     hold_voice_command(command_text);
+                     command_text = NULL;
 
                      // Return to listening state
                      silenceNextState = DAWN_STATE_WAKEWORD_LISTEN;
@@ -3942,6 +4105,14 @@ mqtt_disabled:
                      break;  // Exit DAWN_STATE_PROCESS_COMMAND case
                   }
 
+                  /* The turn this LLM request runs in: begun with the user message
+                   * above.  Defensive: a turn must be open by now. */
+                  if (!s_local_turn_open) {
+                     session_turn_begin(local_session, 0, session_effective_user_id(local_session));
+                     s_local_turn_token = session_turn_token();
+                     s_local_turn_open = true;
+                  }
+
                   // Check for thinking trigger phrases and enable extended thinking for this
                   // request
                   if (llm_check_thinking_trigger(command_text)) {
@@ -3950,26 +4121,20 @@ mqtt_disabled:
                      session_llm_config_t trigger_config;
                      session_get_llm_config(local_session, &trigger_config);
                      safe_strscpy(trigger_config.thinking_mode, "enabled");
-                     session_set_llm_config(local_session, &trigger_config);
+                     /* This turn only (this thread holds the turn begun with
+                      * the user message): later turns keep their setting. */
+                     session_set_turn_llm_config(local_session, &trigger_config);
                   }
 
                   /* Parity with WebUI/satellite: rebuild the local session's system
-                   * prompt with this turn's memory + focus context before dispatch.
-                   * session_dispatch_user_turn() swaps conversation_history (rebuilding
-                   * [0]=stable / [1]=volatile system messages, freeing the old array),
-                   * so re-sync the global alias afterward — the worker reads it at
-                   * spawn (pthread_create publishes the new pointer). No swap lock:
-                   * this runs on the main thread past the llm_processing busy-check
-                   * with no worker live, and the MQTT device relay no longer mutates
-                   * the array (it routes through input_queue). CAVEAT: not yet fully
-                   * single-owner — session_broadcast_system_message / session_add_message
-                   * (phone call-state, from the echo/MQTT thread) still append to this
-                   * array under history_mutex while the main path appends unlocked. That
-                   * pre-existing narrow race is closed by the tracked "session owns its
-                   * history under history_mutex (incl. LLM providers)" refactor. A no-op
-                   * when no structured builder is registered (non-WebUI) → static prompt. */
+                   * prompt with this turn's memory + focus context before dispatch (a
+                   * no-op when no structured builder is registered: static prompt). */
+                  /* The turn is carried by the worker thread (its token) and ended
+                   * here once the worker is joined. */
                   session_dispatch_user_turn(local_session, command_text);
-                  conversation_history = local_session->conversation_history;
+                  /* The worker writes from here on; this thread takes the token
+                   * back only to end the turn. */
+                  session_set_turn_token(0);
 
                   // Spawn LLM thread to process request (non-blocking)
                   pthread_mutex_lock(&llm_mutex);
@@ -3995,8 +4160,14 @@ mqtt_disabled:
 
                   // Spawn worker thread
                   int thread_result = pthread_create(&llm_thread, NULL, llm_worker_thread, NULL);
+                  s_llm_thread_joinable = (thread_result == 0);
                   if (thread_result != 0) {
                      OLOG_ERROR("Failed to create LLM thread: %d", thread_result);
+                     /* Unanswered: take the question back out, or the next
+                      * turn sends two user messages in a row. */
+                     session_set_turn_token(s_local_turn_token);
+                     (void)session_rollback_turn(local_session);
+                     end_local_turn();
                      pthread_mutex_lock(&llm_mutex);
                      llm_processing = 0;
                      if (llm_request_text) {
@@ -4039,7 +4210,7 @@ server_shutdown:
 
    // Ensure LLM thread is stopped before cleanup
    // This prevents resource leaks if restart was requested during LLM processing
-   if (llm_processing) {
+   if (s_llm_thread_joinable) {
       OLOG_INFO("Shutdown: waiting for LLM thread...");
       llm_request_interrupt();
 
@@ -4059,7 +4230,11 @@ server_shutdown:
          OLOG_ERROR("Shutdown: error joining LLM thread: %d", join_result);
       }
       llm_processing = 0;
+      s_llm_thread_joinable = false;
    }
+   end_local_turn();
+   free(s_pending_voice_command); /* a request never answered */
+   s_pending_voice_command = NULL;
 
 #ifdef ENABLE_MULTI_CLIENT
    /* Save any non-empty voice conversation before shutdown */
@@ -4116,6 +4291,7 @@ server_shutdown:
 #endif
    OLOG_INFO("Shutdown: memory_embeddings_cleanup");
    memory_embeddings_cleanup();
+   document_embed_cache_shutdown();
    OLOG_INFO("Shutdown: embedding_engine_cleanup");
    embedding_engine_cleanup();
    OLOG_INFO("Shutdown: auth_db_shutdown");
@@ -4140,9 +4316,6 @@ server_shutdown:
    // LOCAL/DAP session histories are not persisted (in-memory only).
    // File-based chat_history_*.json export has been removed.
 
-   // Don't json_object_put here - session_manager owns the history
-   // Clear the global pointer before session cleanup to prevent use-after-free
-   conversation_history = NULL;
 
    // NOTE: session_manager_cleanup() moved to after webui_server_shutdown()
    // WebSocket sessions hold references that are only released when WebUI shuts down

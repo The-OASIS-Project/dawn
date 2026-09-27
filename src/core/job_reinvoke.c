@@ -46,6 +46,7 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/automated_event.h"
 #include "core/conv_event.h"
 #include "core/job_dispatch.h"
 #include "core/job_manager.h"
@@ -280,8 +281,8 @@ static char *build_envelope(int64_t parent_conv, int user_id, int64_t *fired_ids
 
    char *buf = NULL;
    size_t len = 0, bcap = 0;
-   const char *head =
-       "[automated background-job update]\n"
+   const char *head = AUTOMATED_EVENT_JOB_UPDATE
+       "\n"
        "The background task(s) you started earlier have finished. Their full results are below. "
        "Tell me about them now, and take any obvious next step I'd want.\n";
    if (!sb_append(&buf, &len, &bcap, head, strlen(head))) {
@@ -445,7 +446,7 @@ static void *reinvoke_turn_entry(void *arg) {
       return NULL;
    }
 
-   atomic_store(&live->stream_conversation_id, parent);
+   session_turn_begin(live, parent, m->user_id); /* also tags the stream */
    session_begin_turn_flags(live);
    atomic_fetch_add(&live->turn_in_flight, 1);
 
@@ -536,6 +537,7 @@ static void *reinvoke_turn_entry(void *arg) {
    free(envelope);
 
    /* Exactly-once tail (run path). */
+   session_turn_end(live);
    atomic_fetch_sub(&live->turn_in_flight, 1);
    session_release(live);
    inflight_release(parent);
@@ -575,12 +577,7 @@ static void reinvoke_run_detached(reinvoke_work_t *w,
    size_t restored = 0;
    struct json_object *hist = memory_history_load_from_db(w->parent_conv, w->user_id, &restored);
    if (hist != NULL) {
-      pthread_mutex_lock(&s->history_mutex);
-      if (s->conversation_history) {
-         json_object_put(s->conversation_history);
-      }
-      s->conversation_history = hist;
-      pthread_mutex_unlock(&s->history_mutex);
+      session_replace_history(s, hist, w->parent_conv);
    }
 
    job_persist_ctx_t pctx = { w->parent_conv, w->user_id };
@@ -590,7 +587,10 @@ static void reinvoke_run_detached(reinvoke_work_t *w,
     * job_worker. */
    session_set_tool_iteration_hook(s, webui_tool_iteration_cb, NULL);
    text_input_dispatch_opts_t opts = reinvoke_dispatch_opts(w->user_id);
+   /* The turn belongs to the parent conversation (see session_turn_begin). */
+   session_turn_begin(s, w->parent_conv, w->user_id);
    char *response = core_text_input_dispatch(s, envelope, NULL, NULL, NULL, 0, &opts);
+   session_turn_end(s);
    session_set_tool_iteration_hook(s, NULL, NULL);
    session_set_tool_persist_hook(s, NULL, NULL);
 

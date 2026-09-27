@@ -127,6 +127,8 @@ static char *code_project_callback(const char *action, char *value, int *should_
       *should_respond = 1;
    }
    int64_t uid = tool_get_current_user_id();
+   if (uid <= 0)
+      return strdup(TOOL_GUEST_REFUSAL);
 
    if (action == NULL || action[0] == '\0' || strcmp(action, "list") == 0) {
       return cp_list(uid);

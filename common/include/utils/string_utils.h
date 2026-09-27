@@ -122,6 +122,22 @@ extern "C" {
 void sanitize_utf8_for_json(char *str);
 
 /**
+ * @brief Drop a multi-byte UTF-8 character cut short at the end of @p s
+ *
+ * For text truncated into a fixed buffer at a byte boundary: the result is
+ * valid UTF-8 up to its end (a cloud provider rejects a whole request over one
+ * invalid byte).  Modifies @p s in place; NULL-safe.
+ */
+void utf8_trim_incomplete(char *s);
+
+/**
+ * @brief Truncate @p str to at most @p max_bytes without splitting a character
+ *
+ * No-op when it already fits.  Modifies @p str in place; NULL-safe.
+ */
+void utf8_truncate(char *str, size_t max_bytes);
+
+/**
  * @brief Case-insensitive substring search (portable implementation)
  *
  * Finds the first occurrence of needle in haystack, ignoring case.

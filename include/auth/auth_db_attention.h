@@ -48,10 +48,13 @@ int auth_db_attention_rule_set_enabled(int user_id, int64_t id, bool enabled);
 int auth_db_attention_rule_delete(int user_id, int64_t id);
 
 /**
- * Load watches into @out (up to @max).  @user_id == 0 loads all users' watches
- * (for the cache); >0 loads one user's.  @out_count receives the number loaded.
+ * Load one user's watches into @out (up to @max); @out_count receives the number
+ * loaded.  @user_id must be > 0 (AUTH_DB_INVALID otherwise).
  */
 int auth_db_attention_rule_list(int user_id, sage_watch_t *out, int max, int *out_count);
+
+/** Load every user's watches (the in-process cache load only). */
+int auth_db_attention_rule_list_all(sage_watch_t *out, int max, int *out_count);
 
 /** Count watches for @user_id (for the per-user cap). */
 int auth_db_attention_rule_count(int user_id, int *out_count);

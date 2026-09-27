@@ -62,6 +62,17 @@ void session_set_command_context(session_t *session) {
 session_t *session_get_command_context(void) {
    return s_test_cmd_ctx;
 }
+/* The session layer's user rule: its user, the local mic's default voice user,
+ * else a guest (0). */
+int session_effective_user_id(session_t *session) {
+   if (!session) {
+      return 0;
+   }
+   if (session->metrics.user_id > 0) {
+      return session->metrics.user_id;
+   }
+   return session->type == SESSION_TYPE_LOCAL ? 1 : 0;
+}
 
 /* llm_tools.c is not linked here; the test drives the callback directly with
  * JSON in `value`, so the raw-args hook reports "no executor context". */

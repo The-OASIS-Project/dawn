@@ -576,54 +576,71 @@ int document_db_chunk_create(int64_t document_id,
    return result;
 }
 
-int document_db_chunk_search_load(int user_id,
-                                  document_chunk_t *chunks,
-                                  float *embedding_buf,
-                                  int dims,
-                                  int max_count,
+/* Bytes for n int64 ids as a JSON array: "[", up to 20 digits and a comma
+ * each, "]", NUL. */
+#define DOC_IDS_JSON_SIZE(n) ((size_t)(n)*21 + 3)
+
+int document_db_chunks_get_by_ids(int user_id,
+                                  const int64_t *ids,
+                                  int n,
+                                  document_chunk_t *out,
                                   int *count_out) {
-   if (!chunks || !embedding_buf || dims <= 0 || max_count <= 0 || !count_out)
+   if (!ids || !out || !count_out || n <= 0) {
       return FAILURE;
-
+   }
    *count_out = 0;
-   AUTH_DB_LOCK_OR_FAIL();
 
-   sqlite3_stmt *stmt = s_db.stmt_doc_chunk_search;
-   sqlite3_reset(stmt);
+   /* ids as a JSON array for json_each. */
+   const size_t list_size = DOC_IDS_JSON_SIZE(n);
+   char *list = malloc(list_size);
+   if (!list) {
+      return FAILURE;
+   }
+   size_t off = 0;
+   list[off++] = '[';
+   for (int i = 0; i < n; i++) {
+      int w = snprintf(list + off, list_size - off, "%s%lld", i ? "," : "", (long long)ids[i]);
+      if (w < 0 || (size_t)w >= list_size - off - 1) {
+         free(list);
+         return FAILURE;
+      }
+      off += (size_t)w;
+   }
+   list[off++] = ']';
+   list[off] = '\0';
+
+   AUTH_DB_LOCK_OR_RETURN((free(list), FAILURE));
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT c.id, c.chunk_index, c.text, c.document_id, d.filename, "
+                          "d.filetype, c.created_at "
+                          "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
+                          "WHERE (d.user_id = ? OR d.is_global = 1) "
+                          "AND c.id IN (SELECT value FROM json_each(?))",
+                          -1, &stmt, NULL) != SQLITE_OK) {
+      OLOG_ERROR("document_db: prepare chunks_get_by_ids failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      free(list);
+      return FAILURE;
+   }
    sqlite3_bind_int(stmt, 1, user_id);
-   sqlite3_bind_int(stmt, 2, max_count);
-
+   sqlite3_bind_text(stmt, 2, list, -1, SQLITE_STATIC);
    int count = 0;
-   int expected_blob_size = dims * (int)sizeof(float);
-
-   while (count < max_count && sqlite3_step(stmt) == SQLITE_ROW) {
-      /* Verify embedding dimensions match */
-      int blob_size = sqlite3_column_bytes(stmt, 3);
-      if (blob_size != expected_blob_size)
-         continue;
-
-      document_chunk_t *c = &chunks[count];
+   while (count < n && sqlite3_step(stmt) == SQLITE_ROW) {
+      document_chunk_t *c = &out[count];
+      memset(c, 0, sizeof(*c));
       c->id = sqlite3_column_int64(stmt, 0);
       c->chunk_index = sqlite3_column_int(stmt, 1);
       col_text_copy(c->text, sizeof(c->text), stmt, 2);
-
-      /* Copy embedding into the flat buffer */
-      const void *blob = sqlite3_column_blob(stmt, 3);
-      float *emb_dest = embedding_buf + (count * dims);
-      memcpy(emb_dest, blob, (size_t)blob_size);
-      c->embedding = emb_dest;
-      c->embedding_norm = (float)sqlite3_column_double(stmt, 4);
-
-      c->document_id = sqlite3_column_int64(stmt, 5);
-      col_text_copy(c->doc_filename, sizeof(c->doc_filename), stmt, 6);
-      col_text_copy(c->doc_filetype, sizeof(c->doc_filetype), stmt, 7);
-      c->created_at = sqlite3_column_int64(stmt, 8); /* v35 — 0 if column was NULL/0 */
-
+      c->document_id = sqlite3_column_int64(stmt, 3);
+      col_text_copy(c->doc_filename, sizeof(c->doc_filename), stmt, 4);
+      col_text_copy(c->doc_filetype, sizeof(c->doc_filetype), stmt, 5);
+      c->created_at = sqlite3_column_int64(stmt, 6);
       count++;
    }
-
-   sqlite3_reset(stmt);
+   sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
+   free(list);
    *count_out = count;
    return SUCCESS;
 }

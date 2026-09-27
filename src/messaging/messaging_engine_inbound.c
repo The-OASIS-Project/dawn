@@ -542,7 +542,10 @@ static void process_inbound(inbound_item_t *item) {
    if (conv_id > 0) {
       session_set_tool_persist_hook(session, job_dispatch_tool_persist_cb, &pctx);
    }
+   /* The turn belongs to the channel's conversation (see session_turn_begin). */
+   session_turn_begin(session, conv_id, item->user_id);
    char *response = core_text_input_dispatch(session, item->body, NULL, NULL, NULL, 0, &opts);
+   session_turn_end(session);
    session_set_tool_persist_hook(session, NULL, NULL);
 
    /* Stop the typing keepalive before doing anything else with the

@@ -40,6 +40,7 @@
 #include "core/path_utils.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
+#include "llm/llm_context_merge.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_local_provider.h"
 #include "llm/llm_pricing.h"
@@ -1535,18 +1536,19 @@ int llm_context_compact(uint32_t session_id,
    llm_context_save_conversation(session_id, history, "precompact", result->log_filename,
                                  sizeof(result->log_filename));
 
-   /* Extract system prompt (usually first message) */
-   struct json_object *system_msg = NULL;
-   int start_idx = 0;
-
-   struct json_object *first_msg = json_object_array_get_idx(history, 0);
-   struct json_object *role_obj = NULL;
-   if (json_object_object_get_ex(first_msg, "role", &role_obj)) {
-      if (strcmp(json_object_get_string(role_obj), "system") == 0) {
-         system_msg = json_object_get(first_msg); /* Increment ref */
-         start_idx = 1;
+   /* The leading system messages (the stable prefix and the volatile focus
+    * block) are kept as they are, never summarized. */
+   int n_sys = 0;
+   while (n_sys < history_len) {
+      struct json_object *role_obj = NULL;
+      if (!json_object_object_get_ex(json_object_array_get_idx(history, n_sys), "role",
+                                     &role_obj) ||
+          strcmp(json_object_get_string(role_obj), "system") != 0) {
+         break;
       }
+      n_sys++;
    }
+   int start_idx = n_sys;
 
    /* Keep last N exchanges (user + assistant pairs) */
    int keep_messages = LLM_CONTEXT_KEEP_EXCHANGES * 2;
@@ -1622,10 +1624,6 @@ int llm_context_compact(uint32_t session_id,
       result->messages_summarized = stripped;
       result->performed = (stripped > 0);
 
-      if (system_msg) {
-         json_object_put(system_msg);
-      }
-
       if (stripped > 0) {
          OLOG_INFO("llm_context: Stripped %d tool result(s), saved %d tokens (%d -> %d)", stripped,
                    saved, result->tokens_before, result->tokens_after);
@@ -1651,8 +1649,8 @@ int llm_context_compact(uint32_t session_id,
 
    /* Estimate fixed overhead: system prompt + kept messages (constant across levels) */
    int kept_tokens = 0;
-   if (system_msg)
-      kept_tokens += estimate_tokens_range(history, 0, 1);
+   if (n_sys > 0)
+      kept_tokens += estimate_tokens_range(history, 0, n_sys);
    kept_tokens += estimate_tokens_range(history, end_idx, history_len);
 
    /* Estimate input size for the size-gate check */
@@ -1694,8 +1692,6 @@ int llm_context_compact(uint32_t session_id,
          if (session)
             session_release(session);
 #endif
-         if (system_msg)
-            json_object_put(system_msg);
          return 1;
       }
 
@@ -1738,28 +1734,24 @@ int llm_context_compact(uint32_t session_id,
    /* Rebuild history: system + summary + last N messages */
    struct json_object *new_history = json_object_new_array();
 
-   if (system_msg)
-      json_object_array_add(new_history, system_msg); /* Transfers ownership */
+   for (int i = 0; i < n_sys; i++) {
+      json_object_array_add(new_history, json_object_get(json_object_array_get_idx(history, i)));
+   }
 
-   /* Resolve message IDs for the summarized range (LCM Phase 3) */
+   /* Resolve message IDs for the summarized range (LCM Phase 3): the database
+    * row ids restored and stamped on the messages themselves. */
    int64_t first_msg_id = 0, last_msg_id = 0;
    if (conv_id > 0) {
-      int64_t *msg_ids = NULL;
-      int msg_id_count = 0;
-      int user_id = 0;
-      session_t *ctx_session = session_get_command_context();
-      if (ctx_session)
-         user_id = ctx_session->metrics.user_id;
-      if (user_id > 0 &&
-          conv_db_get_message_ids(conv_id, user_id, &msg_ids, &msg_id_count) == AUTH_DB_SUCCESS) {
-         /* DB messages don't include the system prompt, so adjust indices */
-         int db_start = start_idx - (system_msg ? 1 : 0);
-         int db_end = end_idx - (system_msg ? 1 : 0);
-         if (msg_ids && db_start >= 0 && msg_id_count > db_start)
-            first_msg_id = msg_ids[db_start];
-         if (msg_ids && db_end > 0 && msg_id_count >= db_end)
-            last_msg_id = msg_ids[db_end - 1];
-         free(msg_ids);
+      for (int i = start_idx; i < end_idx; i++) {
+         struct json_object *id_obj = NULL;
+         if (json_object_object_get_ex(json_object_array_get_idx(history, i), "id", &id_obj) &&
+             json_object_get_int64(id_obj) > 0) {
+            const int64_t id = json_object_get_int64(id_obj);
+            if (first_msg_id == 0) {
+               first_msg_id = id;
+            }
+            last_msg_id = id;
+         }
       }
    }
 
@@ -1864,17 +1856,8 @@ int llm_context_compact(uint32_t session_id,
       json_object_array_add(new_history, json_object_get(msg));
    }
 
-   /* Replace history contents — delete from end for O(n) instead of O(n^2) */
-   int old_len = json_object_array_length(history);
-   for (int i = old_len - 1; i >= 0; i--) {
-      json_object_array_del_idx(history, i, 1);
-   }
-
-   int new_len = json_object_array_length(new_history);
-   for (int i = 0; i < new_len; i++) {
-      struct json_object *msg = json_object_array_get_idx(new_history, i);
-      json_object_array_add(history, json_object_get(msg));
-   }
+   /* Replace the history's contents in place (under its lock). */
+   session_history_replace_contents(history, new_history);
    json_object_put(new_history);
 
    result->tokens_after = llm_context_estimate_tokens(history);
@@ -1915,7 +1898,7 @@ int llm_context_compact_for_switch(uint32_t session_id,
 #ifdef ENABLE_WEBUI
    session_t *switch_session = session_get(session_id);
    if (switch_session) {
-      switch_conv_id = webui_get_active_conversation_id(switch_session);
+      switch_conv_id = session_history_conversation_of(switch_session, history);
       session_release(switch_session);
    }
 #endif
@@ -1944,6 +1927,9 @@ static void *async_compact_thread(void *arg) {
 
    llm_set_cancel_flag(&session->cancel_requested);
    session_set_command_context(session);
+   /* The triggering turn's provider, not whatever the session is viewing now:
+    * the summary is of that turn's conversation. */
+   session_set_llm_config_override(session, &session->async_compact.trigger_config);
 
    if (atomic_load(&session->cancel_requested)) {
       OLOG_INFO("llm_context: Async compaction: session %u cancelled, aborting", sid);
@@ -1986,6 +1972,7 @@ static void *async_compact_thread(void *arg) {
              session->async_compact.result_tokens_after, session->async_compact.result_level + 1);
 
    llm_set_cancel_flag(NULL);
+   session_set_llm_config_override(NULL, NULL);
    session_set_command_context(NULL);
    session_release(session);
    free(ctx);
@@ -1996,6 +1983,7 @@ cleanup_abort:
    if (copy)
       json_object_put(copy);
    llm_set_cancel_flag(NULL);
+   session_set_llm_config_override(NULL, NULL);
    session_set_command_context(NULL);
    session_release(session);
    free(ctx);
@@ -2030,8 +2018,14 @@ int llm_context_async_trigger(session_t *session,
    struct json_object *copy = NULL;
    pthread_mutex_lock(&session->history_mutex);
    int rc = json_object_deep_copy(history, &copy, NULL);
-   session->async_compact.snapshot_history = history;
-   session->async_compact.snapshot_msg_count = json_object_array_length(history);
+   /* Where the summarized history ends: its last message (referenced, so it
+    * stays itself), found again in the next turn's history at merge. */
+   if (session->async_compact.snapshot_last) {
+      json_object_put(session->async_compact.snapshot_last);
+   }
+   const int snap_len = (int)json_object_array_length(history);
+   session->async_compact.snapshot_last =
+       snap_len > 0 ? json_object_get(json_object_array_get_idx(history, snap_len - 1)) : NULL;
    pthread_mutex_unlock(&session->history_mutex);
 
    if (rc != 0 || !copy) {
@@ -2042,6 +2036,7 @@ int llm_context_async_trigger(session_t *session,
 
    session->async_compact.trigger_llm_type = type;
    session->async_compact.trigger_cloud_provider = provider;
+   session_get_llm_config(session, &session->async_compact.trigger_config);
    if (model)
       snprintf(session->async_compact.trigger_model, sizeof(session->async_compact.trigger_model),
                "%s", model);
@@ -2049,7 +2044,9 @@ int llm_context_async_trigger(session_t *session,
       session->async_compact.trigger_model[0] = '\0';
    session->async_compact.trigger_session_id = session->session_id;
 #ifdef ENABLE_WEBUI
-   session->async_compact.trigger_conv_id = webui_get_active_conversation_id(session);
+   /* The conversation this history holds (a turn may run on another
+    * conversation than the one being viewed). */
+   session->async_compact.trigger_conv_id = session_history_conversation_of(session, history);
 #else
    session->async_compact.trigger_conv_id = 0;
 #endif
@@ -2063,8 +2060,13 @@ int llm_context_async_trigger(session_t *session,
    ctx->session = session;
    ctx->history = copy;
 
+   /* A previous run that ended without a merge (aborted, or nothing to
+    * compact) is finished but not yet joined. */
+   if (atomic_exchange(&session->async_compact.thread_active, false)) {
+      pthread_join(session->async_compact.thread_id, NULL);
+   }
    atomic_store(&session->async_compact.state, ASYNC_COMPACT_RUNNING);
-   session->async_compact.thread_active = true;
+   atomic_store(&session->async_compact.thread_active, true);
 
    pthread_attr_t attr;
    pthread_attr_init(&attr);
@@ -2072,7 +2074,7 @@ int llm_context_async_trigger(session_t *session,
 
    if (pthread_create(&session->async_compact.thread_id, &attr, async_compact_thread, ctx) != 0) {
       OLOG_ERROR("llm_context: Failed to create async compaction thread");
-      session->async_compact.thread_active = false;
+      atomic_store(&session->async_compact.thread_active, false);
       atomic_store(&session->async_compact.state, ASYNC_COMPACT_IDLE);
       json_object_put(copy);
       session_release(session);
@@ -2095,45 +2097,28 @@ int llm_context_async_merge(session_t *session, struct json_object *history) {
 
    bool valid = false;
 
+   bool same_conversation = true;
+#ifdef ENABLE_WEBUI
+   /* The result belongs to the conversation it was computed on.  Read before
+    * history_mutex (the accessor takes it). */
+   same_conversation = session->async_compact.trigger_conv_id ==
+                       session_history_conversation_of(session, history);
+#endif
+
    pthread_mutex_lock(&session->history_mutex);
 
-   if (session->async_compact.snapshot_history == history &&
-       json_object_array_length(history) >= session->async_compact.snapshot_msg_count) {
-      int current_len = json_object_array_length(history);
-      int snapshot_len = session->async_compact.snapshot_msg_count;
-      int new_count = current_len - snapshot_len;
-
-      /* Save references to post-snapshot messages */
-      struct json_object **new_msgs = NULL;
-      if (new_count > 0) {
-         new_msgs = malloc(new_count * sizeof(*new_msgs));
-         if (!new_msgs) {
-            OLOG_ERROR("llm_context: Failed to allocate merge buffer (%d msgs)", new_count);
-            pthread_mutex_unlock(&session->history_mutex);
-            goto merge_cleanup;
-         }
-         for (int i = 0; i < new_count; i++)
-            new_msgs[i] = json_object_get(json_object_array_get_idx(history, snapshot_len + i));
-      }
-
-      /* Clear history (delete from end for O(n)) */
-      for (int i = current_len - 1; i >= 0; i--)
-         json_object_array_del_idx(history, i, 1);
-
-      /* Copy compacted history */
-      int compact_len = json_object_array_length(session->async_compact.pending_history);
-      for (int i = 0; i < compact_len; i++) {
-         struct json_object *msg = json_object_array_get_idx(session->async_compact.pending_history,
-                                                             i);
-         json_object_array_add(history, json_object_get(msg));
-      }
-
-      /* Re-append post-snapshot messages */
-      for (int i = 0; i < new_count; i++)
-         json_object_array_add(history, new_msgs[i]);
-      free(new_msgs);
-
-      valid = true;
+   valid = same_conversation &&
+           llm_context_merge_compacted(history, session->async_compact.pending_history,
+                                       session->async_compact.snapshot_last);
+   /* Released under the lock: the merged history now holds these messages too,
+    * and json-c reference counts aren't atomic. */
+   if (session->async_compact.snapshot_last) {
+      json_object_put(session->async_compact.snapshot_last);
+      session->async_compact.snapshot_last = NULL;
+   }
+   if (session->async_compact.pending_history) {
+      json_object_put(session->async_compact.pending_history);
+      session->async_compact.pending_history = NULL;
    }
 
    pthread_mutex_unlock(&session->history_mutex);
@@ -2146,7 +2131,8 @@ int llm_context_async_merge(session_t *session, struct json_object *history) {
 
 #ifdef ENABLE_WEBUI
       if (session->type == SESSION_TYPE_WEBUI) {
-         webui_send_compaction_complete(session, session->async_compact.result_tokens_before,
+         webui_send_compaction_complete(session, session->async_compact.trigger_conv_id,
+                                        session->async_compact.result_tokens_before,
                                         session->async_compact.result_tokens_after,
                                         session->async_compact.result_messages_summarized,
                                         session->async_compact.result_summary,
@@ -2157,10 +2143,16 @@ int llm_context_async_merge(session_t *session, struct json_object *history) {
    } else {
       OLOG_INFO("llm_context: Async compaction result discarded for session %u (stale)",
                 session->session_id);
+      /* The cooldown applies either way: without it a history that keeps
+       * missing would pay a summarization call every turn. */
+      session->async_compact.last_compacted_at = time(NULL);
    }
 
-merge_cleanup:
    /* Cleanup regardless of valid/stale */
+   if (session->async_compact.snapshot_last) {
+      json_object_put(session->async_compact.snapshot_last);
+      session->async_compact.snapshot_last = NULL;
+   }
    if (session->async_compact.pending_history) {
       json_object_put(session->async_compact.pending_history);
       session->async_compact.pending_history = NULL;
@@ -2170,9 +2162,8 @@ merge_cleanup:
    atomic_store(&session->async_compact.state, ASYNC_COMPACT_IDLE);
 
    /* Join the completed thread */
-   if (session->async_compact.thread_active) {
+   if (atomic_exchange(&session->async_compact.thread_active, false)) {
       pthread_join(session->async_compact.thread_id, NULL);
-      session->async_compact.thread_active = false;
    }
 
    return valid ? 1 : 0;
@@ -2258,7 +2249,7 @@ int llm_context_auto_compact_with_config(struct json_object *history,
    {
       session_t *conv_session = session_get(session_id);
       if (conv_session) {
-         auto_conv_id = webui_get_active_conversation_id(conv_session);
+         auto_conv_id = session_history_conversation_of(conv_session, history);
          session_release(conv_session);
       }
    }
@@ -2277,9 +2268,9 @@ int llm_context_auto_compact_with_config(struct json_object *history,
       if (session_id != 0) {
          session_t *session = session_get(session_id);
          if (session && session->type == SESSION_TYPE_WEBUI) {
-            webui_send_compaction_complete(session, result.tokens_before, result.tokens_after,
-                                           result.messages_summarized, result.summary,
-                                           result.level);
+            webui_send_compaction_complete(session, auto_conv_id, result.tokens_before,
+                                           result.tokens_after, result.messages_summarized,
+                                           result.summary, result.level);
          }
          if (session)
             session_release(session);

@@ -41,6 +41,7 @@
 #include "core/strbuf.h"
 #include "core/text_filter.h" /* SURFACED_ID_FMT — one marker for both memory renderers */
 #include "core/time_query_parser.h"
+#include "dawn_error.h"
 #include "logging.h"
 #include "memory/contacts_db.h"
 #include "memory/memory_callback_internal.h"
@@ -306,30 +307,6 @@ static int append_source_excerpt_from_range(int user_id,
  * call `append_source_excerpt_from_range` directly.  The single-record
  * `memory_db_fact_get_source` is still used by the WebUI memory panel
  * endpoint in webui_memory.c, which doesn't render the excerpt itself.) */
-
-/* =============================================================================
- * Helper: Get user ID from current session
- * ============================================================================= */
-
-static int get_current_user_id(void) {
-#ifdef ENABLE_MULTI_CLIENT
-   session_t *session = session_get_command_context();
-   if (session) {
-      /* For authenticated WebSocket sessions, use their user_id */
-      if (session->metrics.user_id > 0) {
-         return session->metrics.user_id;
-      }
-      /* For local voice sessions, use configured default user */
-      if (session->type == SESSION_TYPE_LOCAL) {
-         int user_id = g_config.memory.default_voice_user_id;
-         return (user_id > 0) ? user_id : 1; /* Fallback to admin */
-      }
-   }
-#endif
-   /* Fallback for non-multi-client builds: use default voice user */
-   int user_id = g_config.memory.default_voice_user_id;
-   return (user_id > 0) ? user_id : 1;
-}
 
 /* =============================================================================
  * Helper: Format time difference
@@ -954,6 +931,29 @@ char *memory_action_search(int user_id,
  * fact, or 0 for durable.  When set and [memory] expire_enabled is on, a fresh
  * fact gets expires_at = expires_ref + grace (v58/C3).  The AI is the judge — we
  * never derive this; it only fires when the model attaches a date. */
+/* Record where a fact a "remember" created (@p created) or restated was learned:
+ * the running turn's conversation, so forgetting that conversation forgets what
+ * was saved in it too.  A turn whose conversation doesn't exist yet (a voice
+ * turn, a new chat's first message) records it once it does.  Outside a turn
+ * (the scheduler, MQTT) the fact is stated outside any conversation. */
+static int remember_record_source(int64_t fact_id, int user_id, bool created) {
+   int64_t conv = 0;
+   int where = FAILURE;
+#ifdef ENABLE_MULTI_CLIENT
+   session_t *session = session_get_command_context();
+   if (session) {
+      where = session_defer_fact_source(session, fact_id, user_id, created, &conv);
+   }
+#endif
+   if (where == SUCCESS) {
+      memory_db_fact_attach_source(fact_id, user_id, created, conv);
+   } else if (where == FAILURE && !created) {
+      /* Stated outside any conversation (a create already is). */
+      memory_db_fact_mark_unsourced(fact_id, user_id);
+   }
+   return where;
+}
+
 static char *memory_action_remember_single(int user_id,
                                            const char *fact_text,
                                            int64_t expires_ref) {
@@ -998,6 +998,7 @@ static char *memory_action_remember_single(int user_id,
                if (new_conf > 1.0f)
                   new_conf = 1.0f;
                memory_db_fact_update_confidence(hash_matches[i].id, user_id, new_conf);
+               (void)remember_record_source(hash_matches[i].id, user_id, false);
                OLOG_INFO("memory_callback: duplicate detected (hash match), reinforced fact %ld",
                          (long)hash_matches[i].id);
                return strdup("I already know that. Increased my confidence in this fact.");
@@ -1021,6 +1022,7 @@ static char *memory_action_remember_single(int user_id,
             if (new_conf > 1.0f)
                new_conf = 1.0f;
             memory_db_fact_update_confidence(similar[i].id, user_id, new_conf);
+            (void)remember_record_source(similar[i].id, user_id, false);
             OLOG_INFO("memory_callback: duplicate detected (Jaccard=%.2f), reinforced fact %ld",
                       similarity, (long)similar[i].id);
             return strdup(
@@ -1056,13 +1058,23 @@ static char *memory_action_remember_single(int user_id,
                                              &neighbor_count);
    }
 
-   /* No duplicates found - store the new fact (no provenance: user-initiated) */
+   /* No duplicates found - store the new fact, then record the conversation it
+    * was learned in (checked to still exist and be this user's, atomically with
+    * the write), or keep it waiting for one. */
    int64_t fact_id = 0;
    int create_rc = memory_db_fact_create(user_id, fact_text, 1.0f, "explicit", NULL, NULL,
                                          &fact_id);
 
    if (create_rc != MEMORY_DB_SUCCESS) {
       return strdup(TOOL_RESULT_ERROR_MARK "Failed to store the fact. Please try again.");
+   }
+   if (remember_record_source(fact_id, user_id, true) == SESSION_FACT_SOURCE_DROPPED) {
+      /* Too many facts wait for this turn's conversation: stored, it could never
+       * be tied to it, and forgetting that conversation would keep it. */
+      memory_db_fact_delete(fact_id, user_id);
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Too many facts saved in this reply to keep track of; save this one in the "
+                    "next reply.");
    }
 
    /* AI-decided expiry (v58/C3): if the model attached a reference date and
@@ -2102,9 +2114,10 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
    }
 
    /* Get current user ID */
-   int user_id = get_current_user_id();
+   /* Whose memory: see tool_get_current_user_id() (0 = a guest). */
+   int user_id = tool_get_current_user_id();
    if (user_id <= 0) {
-      return strdup(TOOL_RESULT_ERROR_MARK "Memory system requires authentication. Please log in.");
+      return strdup(TOOL_GUEST_REFUSAL);
    }
 
    if (!actionName) {

@@ -149,8 +149,13 @@ static char *load_guidelines_callback(const char *action, char *value, int *shou
       return strdup("Error: provide module names (e.g., 'diagram', 'chart', 'interactive').");
    }
 
-   /* Check session cache — return short message if modules already in context */
+   /* Check session cache — return short message if modules already in context.
+    * A turn running on its own copy of another conversation has none of the
+    * session context's guidelines, so it neither reads nor records the cache. */
    session_t *session = session_get_command_context();
+   if (session && session_turn_on_own_history(session)) {
+      session = NULL;
+   }
    if (session && modules_already_loaded(session->visual_modules_loaded, value)) {
       OLOG_INFO("render_visual: guidelines already loaded for '%s', returning cache hint", value);
       return strdup("Guidelines already loaded in this conversation. "

@@ -442,6 +442,8 @@ static char *doc_index_callback(const char *action, char *value, int *should_res
 
    /* Rate limit check */
    int user_id = tool_get_current_user_id();
+   if (user_id <= 0)
+      return strdup(TOOL_GUEST_REFUSAL);
    if (!rate_limit_check(user_id)) {
       snprintf(result_buf, sizeof(result_buf),
                TOOL_RESULT_ERROR_MARK "Rate limit: max %d document indexing requests per minute.",

@@ -96,6 +96,15 @@ void *session_get_command_context(void) {
 void session_set_command_context(void *session) {
    (void)session;
 }
+uint64_t session_turn_token(void) {
+   return 0;
+}
+void session_set_turn_token(uint64_t token) {
+   (void)token;
+}
+void session_history_append(struct json_object *history, struct json_object *msg) {
+   json_object_array_add(history, msg);
+}
 /* strcasestr_portable is NOT stubbed here: llm_tools.c now references
  * sanitize_utf8_for_json (tool-description hardening), which pulls the real
  * string_utils.c from dawn_common into the link — so its strcasestr_portable is

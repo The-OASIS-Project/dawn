@@ -254,6 +254,20 @@ int auth_db_create_user(const char *username, const char *password_hash, bool is
 int auth_db_get_user(const char *username, auth_user_t *user_out);
 
 /**
+ * @brief When the user's one-shot fact-category pass ran (0 = not yet)
+ *
+ * @return AUTH_DB_SUCCESS (ts 0 also for an unknown user) or AUTH_DB_FAILURE
+ */
+int auth_db_user_get_categories_backfilled_at(int user_id, int64_t *ts_out);
+
+/**
+ * @brief Record when the user's one-shot fact-category pass ran
+ *
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
+ */
+int auth_db_user_set_categories_backfilled_at(int user_id, int64_t ts);
+
+/**
  * @brief Get total user count
  *
  * Useful for checking if any users exist (first-run detection).
@@ -830,6 +844,7 @@ int auth_db_checkpoint_passive(void);
  */
 #define LOCAL_PSEUDO_SATELLITE_UUID "00000000-0000-0000-0000-000000000000"
 #define LOCAL_PSEUDO_SATELLITE_TIER 0
+#define LOCAL_PSEUDO_SATELLITE_NAME "Local Device"
 
 /**
  * @brief True if the given UUID is the reserved local pseudo-satellite.
@@ -1949,7 +1964,11 @@ int conv_db_rename(int64_t conv_id, int user_id, const char *new_title);
 /**
  * @brief Set private mode for a conversation
  *
- * Private conversations are excluded from memory extraction.
+ * Private conversations are excluded from memory extraction.  Making one private
+ * also makes every conversation that continues it private (continued_from,
+ * transitively): a continuation's context opens with a summary of the parent, so
+ * a public continuation would leak the parent's content into memory.  Making one
+ * public changes only that conversation.
  *
  * @param conv_id Conversation ID
  * @param user_id User ID (for authorization check)
@@ -1957,6 +1976,29 @@ int conv_db_rename(int64_t conv_id, int user_id, const char *new_title);
  * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, AUTH_DB_FORBIDDEN, or AUTH_DB_FAILURE
  */
 int conv_db_set_private(int64_t conv_id, int user_id, bool is_private);
+
+/** Upper bound on conv_db_continuation_chain() results. */
+#define CONV_CHAIN_MAX 256
+
+/**
+ * @brief A conversation and every conversation that continues it
+ *
+ * @p conv_id first, then its continuations (continued_from, transitively), all
+ * owned by @p user_id.
+ *
+ * @param conv_id   Root conversation
+ * @param user_id   Owner
+ * @param ids_out   Receives the ids
+ * @param max       Capacity of @p ids_out
+ * @param count_out Receives the count (0 when @p conv_id isn't the user's)
+ * @return AUTH_DB_SUCCESS; AUTH_DB_LIMIT_EXCEEDED if the chain has more than
+ *         @p max conversations (nothing returned); or AUTH_DB_FAILURE
+ */
+int conv_db_continuation_chain(int64_t conv_id,
+                               int user_id,
+                               int64_t *ids_out,
+                               int max,
+                               int *count_out);
 
 /**
  * @brief Pin or unpin a conversation
@@ -1984,6 +2026,30 @@ int conv_db_set_pinned(int64_t conv_id, int user_id, bool is_pinned);
  * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, or AUTH_DB_FAILURE
  */
 int conv_db_is_private(int64_t conv_id, int user_id, bool *is_private_out);
+
+/** Which conversations a set of message rows belongs to (conv_db_messages_ownership). */
+typedef struct {
+   int matched;        /**< rows found among the given ids, owned by the user */
+   int distinct_convs; /**< number of distinct conversations those rows are in */
+   int64_t conv_id;    /**< the conversation, when distinct_convs == 1 */
+   bool any_private;   /**< any of those conversations is private */
+   bool any_job;       /**< any of those conversations is a background job */
+} conv_msg_ownership_t;
+
+/**
+ * @brief Resolve which conversations a set of message ids belongs to
+ *
+ * Used by memory extraction to verify, from the rows themselves, that the
+ * messages it is about to extract belong to the conversation it was told they
+ * do, and that none of them sits in a private or background-job conversation.
+ * Rows not owned by @p user_id are not counted as matched.
+ *
+ * @param user_id  Owner the rows must belong to
+ * @param ids_json JSON array of message ids, e.g. "[12,13,15]"
+ * @param out      Result
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
+ */
+int conv_db_messages_ownership(int user_id, const char *ids_json, conv_msg_ownership_t *out);
 
 /**
  * Sentinel value for "no anchor recorded" on conversations.anchor_date.
@@ -2356,20 +2422,6 @@ int conv_db_get_messages_after(int64_t conv_id,
  * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, or AUTH_DB_FAILURE
  */
 int conv_db_get_messages_admin(int64_t conv_id, message_callback_t callback, void *ctx);
-
-/**
- * @brief Get message IDs for a conversation (ordered by creation)
- *
- * Returns an array of message database IDs. Used by LCM Phase 3 to map
- * in-memory array indices to DB IDs at compaction time.
- *
- * @param conv_id Conversation ID
- * @param user_id User ID (for ownership check)
- * @param ids_out Output: heap-allocated array of message IDs (caller frees)
- * @param count_out Output: number of IDs in the array
- * @return AUTH_DB_SUCCESS, AUTH_DB_FORBIDDEN, or AUTH_DB_FAILURE
- */
-int conv_db_get_message_ids(int64_t conv_id, int user_id, int64_t **ids_out, int *count_out);
 
 /**
  * @brief Get messages by ID range (for context expansion).

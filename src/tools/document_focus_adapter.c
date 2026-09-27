@@ -16,37 +16,30 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Document chunk focus adapter — Phase 1d of Dynamic Context Injection.
+ * Document chunk focus adapter (per-turn context injection).
  *
  * source_id          = "document_chunk"
  * source_type        = FOCUS_SOURCE_EXTERNAL
  * requires_embedding = true
  *
  * Pipeline:
- *   1. Load up to (max_candidates * OVERFETCH_FACTOR) chunks accessible
- *      to user_id (own + global) via document_db_chunk_search_load,
- *      which JOINs to populate `doc_filename`/`doc_filetype` so the
- *      filename comes for free without a per-chunk N+1 fetch.
- *   2. Cosine-rank against query_embedding using
- *      memory_embeddings_cosine_with_norms (chunk norms are
- *      pre-computed in the DB).
- *   3. Trim to max_candidates by score (selection sort — N small).
+ *   1. Rank every chunk accessible to user_id (own + shared) by cosine to
+ *      query_embedding (document_embed_rank, from the in-memory embedding copy),
+ *      keeping the top max_candidates plus the pool's cosine mean.
+ *   2. Drop chunks not clearly above the corpus-typical similarity
+ *      (document_min_relevance).
+ *   3. Fetch text + filename for the rest via document_db_chunks_get_by_ids
+ *      (one JOIN, no per-chunk N+1).
  *   4. Render "[<filename>] <chunk_text>" through focus_candidate_init
  *      which truncates to FOCUS_TEXT_MAX_BYTES.
  *
- * Memory shape: stack-allocated `document_chunk_t` array (128
- * × ~5 KB ≈ 640 KB worst case at max_candidates=32 and OVERFETCH=4)
- * is too large; we heap-allocate the chunk + flat-embedding buffers
- * sized to the actual fetch and free both before returning.
+ * Memory shape: the ranker returns only (id, cosine) pairs; the chunk structs
+ * (~5 KB each) are heap-allocated for the top hits only.
  *
  * Provenance: {0,0,0} sentinel — documents have no conv-based source
  * linkage; the WebUI surfaces filename via the rendered text.
  *
- * Network-call audit (verified cache-only on 2026-05-08 by reading
- * src/tools/document_db.c:426-476 — pure SQLite via
- * AUTH_DB_LOCK_OR_FAIL → s_db.stmt_doc_chunk_search; no curl, socket,
- * connect, lws, or SSL calls in the call chain):
- *   - document_db_chunk_search_load — cache-only
+ * No network calls: ranking and fetch are in-memory + SQLite only.
  *
  * Filter-on-retrieval is FRAMEWORK-OWNED + trust-tier-gated.  This
  * adapter does NOT call `memory_filter_check()` — `focus_compose()`
@@ -63,6 +56,8 @@
 #include <string.h>
 #include <time.h>
 
+#include "config/dawn_config.h"
+#include "core/embedding_engine.h"
 #include "core/focus/focus_candidate_helpers.h"
 #include "core/focus/focus_recency.h"
 #include "core/focus/focus_source.h"
@@ -70,6 +65,7 @@
 #include "logging.h"
 #include "memory/memory_embeddings.h"
 #include "tools/document_db.h"
+#include "tools/document_embed_cache.h"
 
 /* Constants — file-static, all TODO(1j) for bench-driven tuning. */
 
@@ -79,34 +75,8 @@
  * future low-importance sources.  TODO(1j). */
 #define DOCUMENT_DEFAULT_IMPORTANCE 0.5f
 
-/* Over-fetch factor: load 4x max_candidates so cosine ranking has a
- * meaningful pool to re-sort instead of just returning whatever
- * SQLite happened to scan first.  Capped at DOCUMENT_FETCH_HARD_CAP
- * to bound stack/heap.  TODO(1j) — bench against R@k after Phase 1
- * lands. */
-#define DOCUMENT_OVERFETCH_FACTOR 4
-#define DOCUMENT_FETCH_HARD_CAP 128
-
-typedef struct {
-   int chunk_index; /* index in original chunks[] / norms — used to
-                       look up text + filename + timestamp + id. */
-   float cosine;
-} doc_rank_entry_t;
-
-/* Selection sort by cosine desc.  N is small (<= 128); a full qsort
- * would be overkill and would mask the deterministic ordering tests
- * rely on for tie-breaking. */
-static void rank_chunks_desc(doc_rank_entry_t *rows, int n) {
-   for (int i = 1; i < n; i++) {
-      doc_rank_entry_t tmp = rows[i];
-      int j = i - 1;
-      while (j >= 0 && rows[j].cosine < tmp.cosine) {
-         rows[j + 1] = rows[j];
-         j--;
-      }
-      rows[j + 1] = tmp;
-   }
-}
+/* Most candidates this adapter returns (callers pass top_k, normally <= 32). */
+#define DOCUMENT_TOP_CAP 64
 
 static int document_adapter_query(int user_id,
                                   bool include_private,
@@ -117,9 +87,8 @@ static int document_adapter_query(int user_id,
                                   int max_candidates,
                                   focus_candidate_t **out_candidates,
                                   int *out_count) {
-   (void)include_private; /* document_db_chunk_search_load surfaces own
-                             docs + global; private-conv linkage is
-                             1f scope (doesn't apply to documents). */
+   (void)include_private; /* ranking covers own docs + shared ones; documents
+                             have no link to a private conversation. */
    (void)query_text;      /* Vector-only adapter; query_text consumed
                              upstream to compute query_embedding. */
    *out_candidates = NULL;
@@ -132,80 +101,90 @@ static int document_adapter_query(int user_id,
    if (dims <= 0)
       return SUCCESS;
 
-   /* Compute over-fetch size, clamped so a misconfigured top_k can't
-    * drag the heap allocation arbitrarily high. */
-   int fetch_n = max_candidates * DOCUMENT_OVERFETCH_FACTOR;
-   if (fetch_n > DOCUMENT_FETCH_HARD_CAP)
-      fetch_n = DOCUMENT_FETCH_HARD_CAP;
-   if (fetch_n < max_candidates)
-      fetch_n = max_candidates;
+   /* Rank EVERY accessible chunk by cosine and keep the top `keep`; the same
+    * pass gives the pool's cosine mean.  (Loading a fixed number of chunks in
+    * scan order and ranking only those left most of a larger corpus
+    * unconsidered.) */
+   const int keep = (max_candidates > DOCUMENT_TOP_CAP) ? DOCUMENT_TOP_CAP : max_candidates;
+   document_chunk_score_t top[DOCUMENT_TOP_CAP];
+   int n_top = 0;
+   document_rank_stats_t stats;
 
-   /* Workspace allocations and `out` are released at the single
-    * `cleanup:` epilogue at the end of the function.  Adding a new
-    * buffer means adding one calloc + one free at the epilogue —
-    * not chasing every error branch.  `goto cleanup` is used by
-    * the framework's `focus_compose` for the same reason. */
    document_chunk_t *chunks = NULL;
-   float *embed_buf = NULL;
-   doc_rank_entry_t *rows = NULL;
    focus_candidate_t *out = NULL;
    int rc = SUCCESS;
    int produced = 0;
 
-   chunks = calloc((size_t)fetch_n, sizeof(*chunks));
+   if (document_embed_rank(user_id, query_embedding, dims, keep, top, &n_top, &stats) != SUCCESS) {
+      OLOG_ERROR("document_adapter: chunk ranking failed (user_id=%d)", user_id);
+      return FAILURE;
+   }
+   if (n_top == 0) {
+      return SUCCESS; /* zero candidates */
+   }
+
+   /* Relevance gate.  Embedding models put unrelated text at a model-specific
+    * baseline similarity (bge-small ~0.43, MiniLM ~0.1), so a raw cosine floor
+    * doesn't transfer between models and the ranker's final score (which adds
+    * constant source/importance priors) never gated at all: unrelated chunks were
+    * injected on every turn.  Measure each chunk from the corpus-typical level
+    * instead, relevance = (cos - pool_mean) / (1 - pool_mean), and keep only
+    * those clearly above it.  A small corpus gives no meaningful baseline, so the
+    * gate needs EMBEDDING_RELEVANCE_MIN_POOL chunks. */
+   const float min_rel = g_config.memory.focus_injection.document_min_relevance;
+   if (min_rel > 0.0f && stats.pool >= EMBEDDING_RELEVANCE_MIN_POOL) {
+      int kept_n = 0;
+      for (int i = 0; i < n_top; i++) {
+         if (embedding_corpus_relevance(top[i].cosine, stats.cosine_sum, stats.pool) >= min_rel) {
+            top[kept_n++] = top[i];
+         }
+      }
+      OLOG_DEBUG("document_adapter: pool=%d mean=%.3f top=%.3f kept %d/%d above relevance %.2f",
+                 stats.pool, stats.cosine_sum / stats.pool, top[0].cosine, kept_n, n_top, min_rel);
+      n_top = kept_n;
+      if (n_top == 0) {
+         return SUCCESS; /* nothing relevant enough */
+      }
+   }
+
+   int64_t ids[DOCUMENT_TOP_CAP];
+   for (int i = 0; i < n_top; i++) {
+      ids[i] = top[i].chunk_id;
+   }
+   chunks = calloc((size_t)n_top, sizeof(*chunks));
    if (chunks == NULL) {
-      OLOG_ERROR("document_adapter: OOM allocating chunks buffer (n=%d)", fetch_n);
-      rc = FAILURE;
-      goto cleanup;
+      OLOG_ERROR("document_adapter: OOM allocating chunks buffer (n=%d)", n_top);
+      return FAILURE;
    }
-   embed_buf = calloc((size_t)fetch_n * (size_t)dims, sizeof(float));
-   if (embed_buf == NULL) {
-      OLOG_ERROR("document_adapter: OOM allocating embedding buffer (n=%d, dims=%d)", fetch_n,
-                 dims);
-      rc = FAILURE;
-      goto cleanup;
-   }
-
    int loaded = 0;
-   if (document_db_chunk_search_load(user_id, chunks, embed_buf, dims, fetch_n, &loaded) !=
-       SUCCESS) {
-      OLOG_ERROR("document_adapter: document_db_chunk_search_load failed (user_id=%d)", user_id);
+   if (document_db_chunks_get_by_ids(user_id, ids, n_top, chunks, &loaded) != SUCCESS) {
+      OLOG_ERROR("document_adapter: chunk fetch failed (user_id=%d)", user_id);
       rc = FAILURE;
       goto cleanup;
    }
-   if (loaded <= 0)
-      goto cleanup; /* SUCCESS, zero candidates */
 
-   /* Cosine-rank.  Allocate the rank workspace separately so we don't
-    * have to keep the full chunk struct around for the trim/merge step. */
-   rows = calloc((size_t)loaded, sizeof(*rows));
-   if (rows == NULL) {
-      OLOG_ERROR("document_adapter: OOM allocating rank workspace (n=%d)", loaded);
-      rc = FAILURE;
-      goto cleanup;
-   }
-   const float q_norm = memory_embeddings_l2_norm(query_embedding, dims);
-   for (int i = 0; i < loaded; i++) {
-      rows[i].chunk_index = i;
-      rows[i].cosine = memory_embeddings_cosine_with_norms(query_embedding, &embed_buf[i * dims],
-                                                           dims, q_norm, chunks[i].embedding_norm);
-   }
-   rank_chunks_desc(rows, loaded);
-
-   const int kept = (loaded > max_candidates) ? max_candidates : loaded;
-   out = calloc((size_t)kept, sizeof(*out));
+   out = calloc((size_t)n_top, sizeof(*out));
    if (out == NULL) {
-      OLOG_ERROR("document_adapter: OOM allocating candidate array (n=%d)", kept);
+      OLOG_ERROR("document_adapter: OOM allocating candidate array (n=%d)", n_top);
       rc = FAILURE;
       goto cleanup;
    }
 
    bool truncated_warned = false;
-   for (int i = 0; i < kept; i++) {
-      const document_chunk_t *c = &chunks[rows[i].chunk_index];
+   for (int i = 0; i < n_top; i++) {
+      const document_chunk_t *c = NULL;
+      for (int j = 0; j < loaded; j++) {
+         if (chunks[j].id == top[i].chunk_id) {
+            c = &chunks[j];
+            break;
+         }
+      }
+      if (c == NULL) {
+         continue; /* deleted between ranking and fetch */
+      }
 
       /* Render "[<filename>] <chunk_text>".  filename comes from the
-       * JOIN inside document_db_chunk_search_load — no per-chunk N+1.
+       * JOIN inside document_db_chunks_get_by_ids — no per-chunk N+1.
        *
        * Sizing: filename ≤ DOC_FILENAME_MAX (256), `[` + `] ` = 3,
        * chunk text ≤ DOC_CHUNK_TEXT_MAX (4096), terminator = 1.
@@ -235,7 +214,7 @@ static int document_adapter_query(int user_id,
 
       const float recency = focus_recency_decay_uniform(c->created_at, now);
       if (focus_candidate_init(&out[produced], "document_chunk", FOCUS_SOURCE_EXTERNAL, rendered,
-                               item_id, c->created_at, rows[i].cosine, recency,
+                               item_id, c->created_at, top[i].cosine, recency,
                                DOCUMENT_DEFAULT_IMPORTANCE, &truncated_warned) != SUCCESS) {
          OLOG_ERROR("document_adapter: focus_candidate_init failed (chunk_id=%lld)",
                     (long long)c->id);
@@ -251,8 +230,6 @@ static int document_adapter_query(int user_id,
 
 cleanup:
    free(chunks);
-   free(embed_buf);
-   free(rows);
    if (rc == SUCCESS && out != NULL) {
       *out_candidates = out;
       *out_count = produced;

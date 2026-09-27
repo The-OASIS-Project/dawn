@@ -109,6 +109,7 @@ void send_audio_impl(struct lws *wsi, const uint8_t *data, size_t len);
 void send_audio_end_impl(struct lws *wsi, bool is_opus);
 
 void send_compaction_impl(struct lws *wsi,
+                          int64_t conversation_id,
                           int tokens_before,
                           int tokens_after,
                           int messages_summarized,
