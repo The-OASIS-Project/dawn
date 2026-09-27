@@ -12,6 +12,160 @@ This is not a full changelog (see git history for that) — it is the short list
 
 ---
 
+## 2026-09-27 — Memory: private-conversation fix, forget what a conversation taught, imported memories now searchable; unassigned satellites are guests
+
+**What changed.**
+- **A satellite not assigned to a user is now a guest.** Before, anyone speaking to
+  an unassigned satellite was treated as the *Default Voice User* (Settings → Memory,
+  usually the admin): they could ask about that user's memories, calendar, email,
+  documents, reminders, stock portfolio, text messages and background jobs, and the
+  conversation was saved to that user's history and learned from. Now an unassigned
+  satellite gets no personal data, persona or alerts: DAWN answers general questions
+  and controls the house, and says the device isn't assigned when asked for something
+  personal. Its conversations aren't saved or learned from. A ringing alarm can still
+  be snoozed or dismissed from it. The microphone connected to the DAWN machine now belongs to
+  whoever its speaker does: the *Local Device* on the satellite management page. While
+  that is unassigned it speaks for the *Default Voice User*. Tools called without any session
+  (for example over MQTT) also act for the Default Voice User; before, some of them
+  used the first account instead.
+- **Privacy fix: private conversations no longer reach memory when a session ends.**
+  When a WebUI, satellite or messaging session ended (idle timeout, a messaging
+  channel's `/new` reset, or daemon shutdown), DAWN summarized the conversation it
+  had open into long-term memory without checking whether that conversation was
+  marked private. Opening a private chat just to read it was enough. Switching
+  conversations or starting a new one already respected the private flag; the
+  session-end path didn't. It does now, and it also no longer summarizes a
+  background job's transcript or a conversation you deleted. The same session-end
+  path used to summarize a conversation a second time later on; that's fixed too.
+- **Switching conversations mid-reply no longer mixes them.** If you opened
+  another conversation while DAWN was still answering (or while a message was
+  queued), the reply could land in the conversation you switched to and become
+  part of its context for later answers. Each reply now stays in its own
+  conversation, and a message is always answered with its own conversation's
+  context. The same applies to voice: a spoken message is saved to the
+  conversation it was said in. Continuing a private conversation (after it was
+  compacted) now keeps it private, and a finished background job's report is no
+  longer remembered as something you said.
+- **Imported memories are now searchable by meaning.** Memories added with
+  Memory → Import were stored without embeddings, so DAWN could only find them by
+  exact keywords and never brought them up on its own. New imports are embedded in
+  the background within seconds and sorted into categories. On first start after
+  upgrading, DAWN also embeds any existing facts that are missing embeddings, for
+  every user, and if the embedding service is briefly unreachable it now retries a
+  few minutes later instead of waiting for the next restart.
+- **Fact categories are re-run.** The background pass that sorts imported and older
+  facts out of "general" into categories (personal, professional, interests, ...) had
+  been saving nothing. The upgrade (database schema v88) runs it again for every
+  user. It only touches facts still marked "general". Facts learned from
+  conversations already get their category when they're extracted.
+
+- **Marking a conversation private can now also forget what was learned from it.**
+  When you switch an existing conversation to private and DAWN has already learned
+  something from it, you're asked whether to forget those memories too. Only what
+  that conversation taught is forgotten, including anything saved there with
+  "remember that ...". A fact you also mentioned in another conversation stays, and
+  so do memories you imported (Memory → Import). If a forgotten fact had replaced an
+  older one (say, a new address), the older one is forgotten with it rather than
+  coming back as current, unless it was imported; the prompt counts those
+  separately as older versions. Making a conversation private now
+  also makes every conversation that continues it private, since each continuation
+  starts with a summary of the one before.
+- **Switching the model in a conversation now sticks to it.** When you ask DAWN to
+  change its model, the change is saved to that conversation (like the model
+  setting in the conversation's menu), so it still applies when you come back to it.
+  Before, a spoken switch in the WebUI lasted only until you opened another
+  conversation. A switch that comes from something DAWN read rather than from you
+  (a background job's result, a web page) lasts only for that one reply. Such a
+  switch can never move a conversation from the local model to a cloud one. Nor is a
+  switch you ask for saved when it would move a private conversation to the cloud.
+  In both cases DAWN says so.
+- **Deleting a conversation still keeps what DAWN learned from it; forgetting is the
+  new way to remove it.** That's how delete always worked. What changes is how it
+  works alongside forget: a memory another conversation also taught now points at that
+  conversation, and one no other conversation taught counts as learned outside any
+  conversation. Forgetting a different conversation that repeats it therefore leaves
+  it alone. To remove what a conversation taught, forget it (mark it private) before
+  deleting it.
+- **DAWN now knows about phone calls when you speak to it.** Notices like "the phone
+  is ringing" or "the call was answered elsewhere" were meant to reach the model but
+  were dropped every time a reply was prepared. Now they're included with your
+  requests for 10 minutes after the event, on every surface, and they're no longer
+  stored in conversations. Proactive alerts (Watches) do the same when *Make
+  Conversations Aware* is on (Settings → Proactive Attention; off by default), but
+  only on the watch owner's own devices.
+- **Voice fixes.**
+  - Interrupting DAWN with the wake word while it is answering now answers what you
+    said next. It used to cancel the reply and then ignore your new request, since
+    the reply hadn't finished stopping. An interruption during a tool call also no
+    longer leaves a half-finished tool call behind that made the next request fail.
+  - Saying a stop phrase ("Okay Friday, stop", "never mind", or just "stop" over her
+    speech) now stops the reply and she confirms right away ("Stopped, Sir."). Before,
+    "Okay Friday, stop" was sent to the model for a reply, and a bare "stop" stopped
+    her silently. A stopped request stays in the conversation, marked as stopped,
+    so "do that again" still knows what you meant.
+  - "Think hard" by voice now applies to that one request instead of staying on.
+  - A satellite sends one query at a time: speaking again stops the query still
+    running instead of both being answered at once.
+  - A satellite can no longer register with the all-zero id
+    `00000000-0000-0000-0000-000000000000`: it is reserved for the DAWN machine's own
+    mic and speaker (the *Local Device*). A client using it could take over the Local
+    Device's owner and room. If a client used it, give it its own id. The Local
+    Device's name is restored at startup if it was changed this way.
+  - Remapping a satellite to a different user in the WebUI saves the previous
+    user's voice conversation first, so one user's speech never ends up in another
+    user's conversation or memory.
+- **Better memory recall on large histories.** Memory search compared your question
+  against only the first 2,000 memories it held, and it held at most 8,192 per user,
+  so beyond either limit the rest were never searched by meaning. It now searches
+  every memory it holds, and holds as many as fit in 80 MB per user (new setting
+  *Semantic Search Memory*, `[memory] fact_cache_mb`): about 50,000 with the default
+  embedding model at about 1.6 KB each (13 MB for 8,000 memories), fewer with a larger
+  model. A user with more keeps
+  the memories used in the last 90 days and links to notes first, then the most
+  confident and recent; the log says how many were left to keyword search. Expired
+  memories are no longer held.
+- **Fewer unrelated documents in DAWN's context.** DAWN used to add passages from
+  your documents to nearly every answer, whether they were related or not, and only
+  ever looked at the first ~128 passages it found. It now considers all of your
+  documents and adds a passage only when it clearly relates to what you asked. The
+  new *Document relevance floor* setting (Settings → Memory → Per-Turn Context Injection,
+  `document_min_relevance`, default 0.48) controls how strict that is. Documents it
+  doesn't add are still available when you ask DAWN to search them. The same idea
+  applies, more gently, to your memories (*Memory relevance floor*,
+  `fact_min_relevance`, default 0.34): a fact is added automatically only when it
+  relates to what you said, so an arithmetic question no longer drags in your
+  anniversary. Asking DAWN to search its memory is unaffected.
+- **Memory search now understands accented and non-English text.** The built-in
+  (ONNX) embedding model only understood plain ASCII: accented words ("café",
+  "résumé"), other languages and even curly apostrophes were largely lost when
+  memories and documents were indexed. It now reads text the way the model was
+  trained to. Because this changes how text is indexed, **the first start after
+  upgrading re-indexes your memories and documents once** in the background. It takes
+  about 0.15 s per memory and document passage: a few minutes for a small memory,
+  around half an hour for tens of thousands of entries. DAWN stays usable meanwhile.
+  This only applies with the default built-in embedding provider; OpenAI or Ollama
+  embeddings are unchanged.
+- **Database schema v89** adds a record of which conversations each memory
+  (fact, relationship, preference) was learned from, seeded from existing
+  memories; indexes that make forgetting fast; and bookkeeping that lets DAWN keep
+  document search in memory. It runs automatically on first start. Memories saved
+  before this update only know the most recent conversation they came from, so
+  forgetting an older conversation can't find them; check the Memory panel for
+  those.
+
+**What you need to do.**
+- **If people use a satellite as themselves, assign it to them** on the satellite
+  management page (admin). Until then it's a guest and can't reach their memories or
+  data.
+- **If you use private conversations (including private messaging channels),** look
+  through Memory for anything that came from a private chat, and delete it. There's
+  no reliable way to tell those entries apart automatically. Summaries are the most
+  likely place to find them.
+- Nothing else. The embedding, re-indexing and category work runs in the background
+  after the first start (see the re-index note above for how long it takes).
+
+---
+
 ## 2026-09-24 — Email: per-account digest depth, and older mail on IMAP accounts
 
 **What changed.**
