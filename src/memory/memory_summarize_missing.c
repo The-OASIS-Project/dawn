@@ -44,6 +44,7 @@
 #include "core/buf_printf.h"
 #include "core/memory_filter.h"
 #include "dawn_error.h"
+#include "llm/llm_cache_monitor.h"
 #include "llm/llm_interface.h"
 #include "logging.h"
 #include "memory/memory_db.h"
@@ -386,7 +387,9 @@ static int process_one_conv(int user_id,
    json_object_object_add(user_msg, "content", json_object_new_string(prompt));
    json_object_array_add(llm_history, user_msg);
 
+   const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_EXTRACTION);
    char *response = llm_chat_completion_with_config(llm_history, prompt, NULL, NULL, 0, cfg);
+   llm_cache_monitor_pop_kind(kind_prev);
 
    json_object_put(llm_history);
    free(prompt);

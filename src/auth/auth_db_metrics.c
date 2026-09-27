@@ -413,3 +413,69 @@ int auth_db_cleanup_session_metrics(int retention_days, int *deleted_out) {
    }
    return AUTH_DB_SUCCESS;
 }
+
+int auth_db_llm_usage_insert(const llm_usage_row_t *rows, int count) {
+   if (!rows || count <= 0) {
+      return AUTH_DB_SUCCESS;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(
+       s_db.db,
+       "INSERT INTO llm_usage_log (created_at, user_id, conversation_id, provider, model, kind, "
+       "iteration, prompt_tokens, cache_read_tokens, cache_write_tokens, uncached_tokens, "
+       "output_tokens, expected_read, cache_state, gap_ms, tools_hash, system_hash, thinking, "
+       "images, cache_miss_reason, cache_missed_tokens) "
+       /* Privacy at the write: rows queued before a conversation went private or
+        * was deleted, or made after, keep no link to it; a deleted user's rows
+        * aren't written.  (conv_db_set_private / conv_db_delete / user delete
+        * handle the rows already stored.) */
+       "SELECT ?1, ?2, CASE WHEN EXISTS (SELECT 1 FROM conversations WHERE id = ?3 AND "
+       "is_private = 0) THEN ?3 ELSE 0 END, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, "
+       "?16, ?17, ?18, ?19, ?20, ?21 WHERE ?2 = 0 OR EXISTS (SELECT 1 FROM users WHERE id = ?2)",
+       -1, &st, NULL);
+   const bool began = rc == SQLITE_OK &&
+                      sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK;
+   bool ok = began;
+   for (int i = 0; ok && i < count; i++) {
+      const llm_usage_row_t *r = &rows[i];
+      sqlite3_reset(st);
+      sqlite3_bind_int64(st, 1, r->created_at);
+      sqlite3_bind_int(st, 2, r->user_id);
+      sqlite3_bind_int64(st, 3, r->conversation_id);
+      sqlite3_bind_text(st, 4, r->provider, -1, SQLITE_STATIC);
+      sqlite3_bind_text(st, 5, r->model, -1, SQLITE_STATIC);
+      sqlite3_bind_text(st, 6, r->kind, -1, SQLITE_STATIC);
+      sqlite3_bind_int(st, 7, r->iteration);
+      sqlite3_bind_int(st, 8, r->prompt_tokens);
+      sqlite3_bind_int(st, 9, r->cache_read_tokens);
+      sqlite3_bind_int(st, 10, r->cache_write_tokens);
+      sqlite3_bind_int(st, 11, r->uncached_tokens);
+      sqlite3_bind_int(st, 12, r->output_tokens);
+      if (r->expected_read >= 0) {
+         sqlite3_bind_int(st, 13, r->expected_read);
+         sqlite3_bind_text(st, 14, r->cache_state, -1, SQLITE_STATIC);
+      } else {
+         sqlite3_bind_null(st, 13);
+         sqlite3_bind_null(st, 14);
+      }
+      sqlite3_bind_int64(st, 15, r->gap_ms);
+      sqlite3_bind_int64(st, 16, (int64_t)r->tools_hash);
+      sqlite3_bind_int64(st, 17, (int64_t)r->system_hash);
+      sqlite3_bind_text(st, 18, r->thinking, -1, SQLITE_STATIC);
+      sqlite3_bind_int(st, 19, r->images ? 1 : 0);
+      sqlite3_bind_text(st, 20, r->cache_miss_reason, -1, SQLITE_STATIC);
+      sqlite3_bind_int(st, 21, r->cache_missed_tokens);
+      ok = sqlite3_step(st) == SQLITE_DONE;
+   }
+   if (!ok) {
+      OLOG_ERROR("auth_db: llm_usage_log insert failed: %s", sqlite3_errmsg(s_db.db));
+   }
+   if (began && (!ok || sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK)) {
+      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+      ok = false;
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   return ok ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+}

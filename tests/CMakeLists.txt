@@ -904,6 +904,23 @@ dawn_add_unit_test(test_silent_observe
    LIBS    dawn_common unity ${JSONC_LIBRARIES} pthread
    LABEL   ci)
 
+# Per-call prompt-cache telemetry: prefix hash of a noted request, expected-read
+# bookkeeping per cache key.  Session lookup and provider names are stubbed.
+dawn_add_unit_test(test_llm_cache_monitor
+   SOURCES test_llm_cache_monitor.c
+           ${SRC_ROOT}/src/llm/llm_cache_monitor.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES} pthread
+   LABEL   ci)
+
+# Per-model prompt-cache pricing, against the shipped models.toml.
+dawn_add_unit_test(test_llm_pricing
+   SOURCES test_llm_pricing.c
+           ${SRC_ROOT}/src/llm/llm_pricing.c
+           ${SRC_ROOT}/src/tools/toml.c
+   LIBS    dawn_common unity m
+   DEFINES MODELS_TOML_PATH="${SRC_ROOT}/models.toml"
+   LABEL   ci)
+
 dawn_add_unit_test(test_word_to_number
    SOURCES test_word_to_number.c
            ${SRC_ROOT}/src/word_to_number.c
@@ -1416,6 +1433,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_openai_responses.c
            ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
            ${SRC_ROOT}/src/llm/llm_context.c
+           ${SRC_ROOT}/src/llm/llm_cache_monitor.c
            ${SRC_ROOT}/src/llm/llm_context_merge.c
            ${SRC_ROOT}/src/llm/llm_pricing.c
            ${SRC_ROOT}/src/llm/llm_command_parser.c
@@ -1488,6 +1506,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_openai_responses.c
            ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
            ${SRC_ROOT}/src/llm/llm_context.c
+           ${SRC_ROOT}/src/llm/llm_cache_monitor.c
            ${SRC_ROOT}/src/llm/llm_context_merge.c
            ${SRC_ROOT}/src/llm/llm_pricing.c
            ${SRC_ROOT}/src/llm/llm_command_parser.c

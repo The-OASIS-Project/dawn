@@ -2581,6 +2581,44 @@ void conv_generate_title(const char *content, char *title_out, size_t max_len);
  */
 #define SESSION_METRICS_RETENTION_DAYS 90
 
+/* ============================================================================
+ * LLM usage log (schema v90): one row per LLM call
+ * ============================================================================ */
+
+/** Days a per-call usage row is kept. */
+#define LLM_USAGE_RETENTION_DAYS 90
+
+/** One LLM call's usage, as recorded by the cache monitor. */
+typedef struct {
+   int64_t created_at; /**< Unix seconds */
+   int user_id;        /**< 0 = none */
+   int64_t conversation_id;
+   char provider[16]; /**< "local", "claude", "openai", ... */
+   char model[64];
+   char kind[16]; /**< "turn", "tool_iter", "extraction", ... */
+   int iteration;
+   int prompt_tokens;
+   int cache_read_tokens;
+   int cache_write_tokens;
+   int uncached_tokens;
+   int output_tokens;
+   int expected_read; /**< -1 = not computed (stored as NULL) */
+   char cache_state[12];
+   int64_t gap_ms;
+   uint32_t tools_hash;
+   uint32_t system_hash;
+   char thinking[32];
+   bool images;
+   char cache_miss_reason[32]; /**< Anthropic cache diagnostics ("" = none) */
+   int cache_missed_tokens;
+} llm_usage_row_t;
+
+/**
+ * @brief Insert @p count usage rows in one transaction
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE (none inserted)
+ */
+int auth_db_llm_usage_insert(const llm_usage_row_t *rows, int count);
+
 /**
  * @brief Maximum session type string length
  */

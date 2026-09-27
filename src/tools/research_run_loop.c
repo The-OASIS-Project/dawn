@@ -45,6 +45,7 @@
 #include "core/memory_filter.h" /* memory_filter_check_injection_commands (critic gap gate) */
 #include "core/session_manager.h"
 #include "core/text_input_dispatch.h"
+#include "llm/llm_cache_monitor.h"
 #include "logging.h"
 #include "memory/memory_note_bridge.h"
 #include "tools/document_index_pipeline.h"
@@ -385,7 +386,11 @@ static char *research_synthesize(struct session *s,
       .auth_user_id = run0->user_id,
       .skip_prompt_rebuild = true, /* keep the synthesis prompt (no memory/persona rebuild) */
    };
+   /* A side call on the run's session: recorded, but it doesn't touch the
+    * rounds' cache key or context numbers. */
+   const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_SYNTHESIS);
    char *prose = core_text_input_dispatch(s, directive, NULL, NULL, NULL, 0, &opts);
+   llm_cache_monitor_pop_kind(kind_prev);
    session_set_tools_suppressed(s, false);
    free(directive);
    return prose;
@@ -430,7 +435,11 @@ static int research_run_critic(struct session *s,
       .auth_user_id = run0->user_id,
       .skip_prompt_rebuild = true,
    };
+   /* A side call on the run's session: recorded, but it doesn't touch the
+    * rounds' cache key or context numbers. */
+   const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_SYNTHESIS);
    char *resp = core_text_input_dispatch(s, digest, NULL, NULL, NULL, 0, &opts);
+   llm_cache_monitor_pop_kind(kind_prev);
    session_set_input_token_ceiling(s, b->max_input_tokens);
    session_set_tools_suppressed(s, false);
    free(digest);
@@ -670,7 +679,11 @@ static char *research_commentary(struct session *s, const research_run_t *run0, 
       .auth_user_id = run0->user_id,
       .skip_prompt_rebuild = true,
    };
+   /* A side call on the run's session: recorded, but it doesn't touch the
+    * rounds' cache key or context numbers. */
+   const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_SYNTHESIS);
    char *take = core_text_input_dispatch(s, directive, NULL, NULL, NULL, 0, &opts);
+   llm_cache_monitor_pop_kind(kind_prev);
    session_set_tools_suppressed(s, false);
    free(directive);
    free(sysprompt);

@@ -97,8 +97,11 @@ typedef struct {
    int cache_creation_input_tokens; /**< Tokens written to the prompt cache this turn (non-zero
                                          when cache_control: ephemeral is honored and a fresh
                                          entry was created).  Populated from message_start.usage. */
-   int cache_read_input_tokens;     /**< Tokens served from cache (90% discount on these).
-                                         Populated from message_start.usage. */
+   int cache_read_input_tokens;     /**< Tokens served from cache (billed at the model's cache-read
+                                         price).  Populated from message_start.usage. */
+   char message_id[64];             /**< message_start message.id (cache diagnostics' next key) */
+   char cache_miss_reason[32]; /**< message_start diagnostics.cache_miss_reason.type ("" = none) */
+   int cache_missed_tokens;    /**< ...cache_miss_reason.cache_missed_input_tokens */
 
    /* Tool use block tracking */
    int tool_block_active;              /**< Currently in a tool_use block */

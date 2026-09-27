@@ -32,6 +32,7 @@
 #include "core/curl_buffer.h"
 #include "core/session_manager.h"
 #include "dawn.h"
+#include "llm/llm_cache_monitor.h"
 #include "llm/llm_claude.h"
 #include "llm/llm_context.h"
 #include "llm/llm_interface.h"
@@ -64,6 +65,18 @@ extern int llm_curl_progress_callback(void *clientp,
  * it from the server's error body so the tool loop's transient-5xx retry path
  * fails fast instead of burning ~7s on three hopeless exponential-backoff
  * attempts.  Genuine transient 5xx (no template signature) stay retryable. */
+/* The cloud provider behind an OpenAI-compatible endpoint.  From the endpoint,
+ * never the session config or the model name: the endpoint is what answered. */
+static cloud_provider_t provider_for_endpoint(const char *base_url) {
+   if (base_url && strstr(base_url, "generativelanguage.googleapis.com")) {
+      return CLOUD_PROVIDER_GEMINI;
+   }
+   if (base_url && strstr(base_url, "openrouter.ai")) {
+      return CLOUD_PROVIDER_OPENROUTER;
+   }
+   return CLOUD_PROVIDER_OPENAI;
+}
+
 static bool llm_openai_is_deterministic_template_error(const char *body) {
    if (body == NULL) {
       return false;
@@ -307,6 +320,7 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
     * strict local chat templates (Qwen 3.5/3.6 Jinja) don't reject the second. */
    llm_openai_apply_system_prompt_caching(root, model_name, base_url);
 
+   llm_cache_monitor_note_request(root); /* for this call's "LLM cache:" line */
    payload = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN |
                                                       JSON_C_TO_STRING_NOSLASHESCAPE);
 
@@ -440,6 +454,7 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
    int input_tokens = 0;
    int output_tokens = 0;
    int cached_tokens = 0;
+   int cache_write_tokens = 0;
    if (json_object_object_get_ex(parsed_json, "usage", &usage_obj)) {
       if (json_object_object_get_ex(usage_obj, "total_tokens", &total_tokens_obj)) {
          total_tokens = json_object_get_int(total_tokens_obj);
@@ -460,46 +475,34 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
          json_object *cached_tokens_obj = NULL;
          if (json_object_object_get_ex(prompt_tokens_details, "cached_tokens",
                                        &cached_tokens_obj)) {
+            /* OpenAI and Gemini 2.5+ both report implicit caching here; the
+             * "LLM cache:" line labels it with the endpoint's provider. */
             cached_tokens = json_object_get_int(cached_tokens_obj);
-            if (cached_tokens > 0) {
-               /* Both OpenAI and Gemini-2.5+ surface implicit prompt caching
-                * via the same prompt_tokens_details.cached_tokens field
-                * (Gemini routes through our OpenAI-compat shim).  Detect
-                * which upstream we hit so the log line labels the provider
-                * correctly.  Dropped the explicit savings percentage —
-                * OpenAI's discount and Gemini's discount differ AND drift
-                * with provider pricing changes; the "X tokens cached" count
-                * is the unambiguous operator signal. */
-               const char *provider_label = (base_url &&
-                                             strstr(base_url, "generativelanguage.googleapis.com"))
-                                                ? "Gemini"
-                                                : "OpenAI";
-               OLOG_INFO("%s cache hit: %d tokens cached", provider_label, cached_tokens);
-            }
+         }
+         /* Cache writes, where an upstream reports them (OpenRouter fronting
+          * Anthropic, under either name). */
+         json_object *write_obj = NULL;
+         if (json_object_object_get_ex(prompt_tokens_details, "cache_write_tokens", &write_obj) ||
+             json_object_object_get_ex(prompt_tokens_details, "cache_creation_input_tokens",
+                                       &write_obj)) {
+            cache_write_tokens = json_object_get_int(write_obj);
          }
       }
 
       llm_type_t token_type = (api_key != NULL) ? LLM_CLOUD : LLM_LOCAL;
-      metrics_record_llm_tokens(token_type, CLOUD_PROVIDER_OPENAI, input_tokens, output_tokens,
+      /* This OpenAI-compat path also fronts Gemini and OpenRouter: the endpoint
+       * says which, so their tokens aren't booked as OpenAI's (cache-savings uses
+       * each provider's own discount).  Local turns bill nothing regardless. */
+      const cloud_provider_t token_provider = provider_for_endpoint(base_url);
+      metrics_record_llm_tokens(token_type, token_provider, input_tokens, output_tokens,
                                 cached_tokens);
 
       session_t *session = session_get_command_context();
       uint32_t session_id = session ? session->session_id : 0;
-      /* This OpenAI-compat path also fronts Gemini and OpenRouter — derive the
-       * real provider from the endpoint so cache-savings uses the right discount
-       * (Gemini and OpenAI differ). Local turns bill nothing regardless of this.
-       * Chat Completions reports no cache-write count → 0. */
-      cloud_provider_t token_provider = CLOUD_PROVIDER_OPENAI;
-      if (base_url) {
-         if (strstr(base_url, "generativelanguage.googleapis.com"))
-            token_provider = CLOUD_PROVIDER_GEMINI;
-         else if (strstr(base_url, "openrouter.ai"))
-            token_provider = CLOUD_PROVIDER_OPENROUTER;
-      }
       llm_usage_report_t usage = { .prompt_tokens = input_tokens,
                                    .completion_tokens = output_tokens,
                                    .cached_tokens = cached_tokens,
-                                   .cache_write_tokens = 0,
+                                   .cache_write_tokens = cache_write_tokens,
                                    .type = token_type,
                                    .provider = token_provider };
       llm_context_update_usage(session_id, &usage);
@@ -638,6 +641,7 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
     * strict local chat templates (Qwen 3.5/3.6 Jinja) don't reject the second. */
    llm_openai_apply_system_prompt_caching(root, model_name, base_url);
 
+   llm_cache_monitor_note_request(root); /* for this call's "LLM cache:" line */
    payload = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN |
                                                       JSON_C_TO_STRING_NOSLASHESCAPE);
 
@@ -683,17 +687,7 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
 
    llm_type_t stream_llm_type = (api_key != NULL) ? LLM_CLOUD : LLM_LOCAL;
 
-   cloud_provider_t stream_provider = CLOUD_PROVIDER_OPENAI;
-   session_t *ctx_session = session_get_command_context();
-   if (ctx_session && stream_llm_type == LLM_CLOUD) {
-      session_llm_config_t session_config;
-      session_get_llm_config(ctx_session, &session_config);
-      stream_provider = session_config.cloud_provider;
-   } else if (base_url && strstr(base_url, "generativelanguage.googleapis.com")) {
-      stream_provider = CLOUD_PROVIDER_GEMINI;
-   } else if (base_url && strstr(base_url, "openrouter.ai")) {
-      stream_provider = CLOUD_PROVIDER_OPENROUTER;
-   }
+   const cloud_provider_t stream_provider = provider_for_endpoint(base_url);
    stream_ctx = llm_stream_create(stream_llm_type, stream_provider, chunk_callback,
                                   callback_userdata);
    if (!stream_ctx) {
@@ -1178,6 +1172,7 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
     * strict local chat templates (Qwen 3.5/3.6 Jinja) don't reject the second. */
    llm_openai_apply_system_prompt_caching(root, model_name, base_url);
 
+   llm_cache_monitor_note_request(root); /* for this call's "LLM cache:" line */
    payload = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN |
                                                       JSON_C_TO_STRING_NOSLASHESCAPE);
 
@@ -1192,17 +1187,7 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
    }
 
    llm_type_t stream_llm_type = (api_key != NULL) ? LLM_CLOUD : LLM_LOCAL;
-   cloud_provider_t stream_provider = CLOUD_PROVIDER_OPENAI;
-   session_t *ctx_session = session_get_command_context();
-   if (ctx_session && stream_llm_type == LLM_CLOUD) {
-      session_llm_config_t session_config;
-      session_get_llm_config(ctx_session, &session_config);
-      stream_provider = session_config.cloud_provider;
-   } else if (base_url && strstr(base_url, "generativelanguage.googleapis.com")) {
-      stream_provider = CLOUD_PROVIDER_GEMINI;
-   } else if (base_url && strstr(base_url, "openrouter.ai")) {
-      stream_provider = CLOUD_PROVIDER_OPENROUTER;
-   }
+   const cloud_provider_t stream_provider = provider_for_endpoint(base_url);
    stream_ctx = llm_stream_create(stream_llm_type, stream_provider, chunk_callback,
                                   callback_userdata);
    if (!stream_ctx) {

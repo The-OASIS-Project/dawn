@@ -2703,7 +2703,7 @@ void session_set_llm_config_override(const session_t *session, const session_llm
  * @brief Find or create provider entry in session metrics
  *
  * @param session Session to search
- * @param provider Provider name ("openai", "claude", "local")
+ * @param provider Provider name ("local", or a cloud_provider_to_string() name)
  * @return Pointer to provider entry, or NULL if full
  *
  * @note Caller must hold session->metrics_mutex

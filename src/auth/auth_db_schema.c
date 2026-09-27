@@ -1059,7 +1059,14 @@ static const char *SCHEMA_SQL =
                                   "  position INTEGER NOT NULL DEFAULT 0,"
                                   "  added_at INTEGER NOT NULL,"
                                   "  PRIMARY KEY(user_id, symbol)"
-                                  ");";
+                                  ");"
+
+    /* v90: one row per LLM call (the "LLM cache:" record),
+     * for cache coverage and cost by provider, model and
+     * kind over time.  No foreign keys: a row outlives
+     * the conversation or user it names, until the
+     * 90-day retention sweep. */
+    LLM_USAGE_LOG_SCHEMA_SQL;
 
 /* =============================================================================
  * Schema Version and Migration

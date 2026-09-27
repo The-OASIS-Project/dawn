@@ -83,6 +83,7 @@
 #include "core/worker_pool.h"
 #include "dawn.h"
 #include "input_queue.h"
+#include "llm/llm_cache_monitor.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_context.h"
 #include "llm/llm_interface.h"
@@ -1399,6 +1400,7 @@ void *llm_worker_thread(void *arg) {
    /* This thread runs the local turn begun on the main thread: its token gives it
     * the turn's settings and makes it the turn's writer (session_turn_begin).
     * Set before reading the settings, so it reads the turn's. */
+   llm_cache_monitor_set_local_mic(true); /* this thread's calls are the local mic's turn */
    session_set_turn_token(s_local_turn_token);
 
    // Get local session's LLM config (for per-session LLM settings)
@@ -1424,6 +1426,7 @@ void *llm_worker_thread(void *arg) {
                                   NULL, &resolved_config)
                             : NULL;
    session_put_history(local_session, history);
+   llm_cache_monitor_set_local_mic(false);
    session_set_turn_token(0);
    // Command context auto-cleared by scope guard
 
@@ -2740,6 +2743,7 @@ mqtt_disabled:
          attention_tick(now_srv);
          conv_stream_evict_stale(now_srv);
          memory_embeddings_tick(now_srv);
+         llm_cache_monitor_flush(); /* per-call usage rows to the database */
 #ifdef ENABLE_WEBUI
          jobs_monitor_tick(now_srv);
          webui_watch_readings_tick();
@@ -2766,6 +2770,8 @@ mqtt_disabled:
             conv_stream_evict_stale(now_rollout);
             /* Delayed embedding retry after an embed failure (one atomic load when idle). */
             memory_embeddings_tick(now_rollout);
+            /* Per-call usage rows to the database (queued off the provider paths). */
+            llm_cache_monitor_flush();
 #ifdef ENABLE_WEBUI
             /* Background-job completion monitor (dirty-gated). */
             jobs_monitor_tick(now_rollout);
@@ -4294,6 +4300,7 @@ server_shutdown:
    document_embed_cache_shutdown();
    OLOG_INFO("Shutdown: embedding_engine_cleanup");
    embedding_engine_cleanup();
+   llm_cache_monitor_flush(); /* the last calls' usage rows */
    OLOG_INFO("Shutdown: auth_db_shutdown");
    auth_db_shutdown();
 

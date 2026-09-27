@@ -424,6 +424,20 @@ int auth_db_delete_user(const char *username) {
    sqlite3_step(stmt_del_sessions);
    sqlite3_finalize(stmt_del_sessions);
 
+   /* The user's per-call usage rows (llm_usage_log has no foreign keys). */
+   sqlite3_stmt *stmt_del_usage = NULL;
+   if (sqlite3_prepare_v2(s_db.db, "DELETE FROM llm_usage_log WHERE user_id = ?", -1,
+                          &stmt_del_usage, NULL) == SQLITE_OK) {
+      sqlite3_bind_int(stmt_del_usage, 1, user_id);
+      rc = sqlite3_step(stmt_del_usage);
+   }
+   sqlite3_finalize(stmt_del_usage);
+   if (rc != SQLITE_DONE) {
+      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+
    /* Delete the user */
    const char *sql_del = "DELETE FROM users WHERE username = ?";
    sqlite3_stmt *stmt_del = NULL;

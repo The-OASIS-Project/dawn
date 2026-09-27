@@ -38,6 +38,7 @@
 #include "auth/auth_db_internal.h"
 #include "config/dawn_config.h"
 #include "dawn_error.h"
+#include "llm/llm_cache_monitor.h"
 #include "memory/memory_db.h"
 #include "memory/memory_extraction.h"
 #include "memory/memory_history_loader.h"
@@ -161,6 +162,15 @@ int memory_embeddings_embed_and_store_summary(int user_id,
 int memory_filter_check(const char *text) {
    (void)text;
    return 0;
+}
+
+/* Call-kind tags for the cache telemetry: not under test here. */
+int llm_cache_monitor_push_kind(llm_call_kind_t kind) {
+   (void)kind;
+   return -1;
+}
+void llm_cache_monitor_pop_kind(int previous) {
+   (void)previous;
 }
 
 /* llm_chat_completion_with_config — abort guard.  Signature must match the

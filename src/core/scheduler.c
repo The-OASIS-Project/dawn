@@ -46,6 +46,7 @@
 #include "core/scheduler_db.h"
 #include "core/session_manager.h"
 #include "core/strbuf.h"
+#include "llm/llm_cache_monitor.h"
 #include "llm/llm_interface.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
@@ -1000,7 +1001,9 @@ static void *briefing_thread_func(void *arg) {
       /* Retry a bounded number of times on an empty response — the history
        * object is owned here and safe to reuse across attempts. */
       for (int attempt = 1; attempt <= BRIEFING_LLM_MAX_ATTEMPTS; attempt++) {
+         const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_BRIEFING);
          llm_response = llm_chat_completion_with_config(history, NULL, NULL, NULL, 0, &cfg);
+         llm_cache_monitor_pop_kind(kind_prev);
          if (llm_response && llm_response[0])
             break;
          OLOG_WARNING("scheduler: briefing %lld summarization returned empty (attempt %d/%d)",

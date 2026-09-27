@@ -85,6 +85,16 @@ int auth_db_run_cleanup(void) {
    sqlite3_step(s_db.stmt_metrics_delete_old);
    sqlite3_reset(s_db.stmt_metrics_delete_old);
 
+   /* Per-call LLM usage log (schema v90). */
+   time_t usage_cutoff = now - ((time_t)LLM_USAGE_RETENTION_DAYS * 24 * 60 * 60);
+   sqlite3_stmt *stmt_usage = NULL;
+   if (sqlite3_prepare_v2(s_db.db, "DELETE FROM llm_usage_log WHERE created_at < ?", -1,
+                          &stmt_usage, NULL) == SQLITE_OK) {
+      sqlite3_bind_int64(stmt_usage, 1, (int64_t)usage_cutoff);
+      sqlite3_step(stmt_usage);
+      sqlite3_finalize(stmt_usage);
+   }
+
    /* Messaging /link audit log (7-day retention).  Inline DELETE
     * rather than a cached prepared statement — the table sees low
     * write traffic (only on /link attempts, rate-limited to 5/sender/

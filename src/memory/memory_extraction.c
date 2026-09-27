@@ -42,6 +42,7 @@
 #include "core/memory_filter.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
+#include "llm/llm_cache_monitor.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
@@ -1662,6 +1663,7 @@ static void *extraction_thread(void *arg) {
     * conversation content, so bracket the call with the config-independent
     * tools-off guard (belt-and-suspenders alongside suppress_tools). */
    llm_tools_suppress_push();
+   const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_EXTRACTION);
    response = llm_chat_completion_with_config(extraction_history, prompt, NULL, NULL, 0,
                                               &extraction_config);
    llm_tools_suppress_pop();
@@ -1725,6 +1727,7 @@ static void *extraction_thread(void *arg) {
       }
    }
 
+   llm_cache_monitor_pop_kind(kind_prev); /* primary and fallback both tagged */
    json_object_put(extraction_history);
 
    /* Recovery-triggered extractions process old, idle conversations the user

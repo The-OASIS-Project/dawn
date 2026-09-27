@@ -32,6 +32,7 @@
 #include "config/dawn_config.h"
 #include "core/memory_filter.h"
 #include "dawn_error.h"
+#include "llm/llm_cache_monitor.h"
 #include "llm/llm_interface.h"
 #include "unity.h"
 
@@ -91,6 +92,15 @@ secrets_config_t g_secrets;
  * to fill an empty model with the OpenRouter default; must link. */
 const char *llm_get_default_openrouter_model(void) {
    return "anthropic/claude-3.5-haiku";
+}
+
+/* Call-kind tags for the cache telemetry: not under test here. */
+int llm_cache_monitor_push_kind(llm_call_kind_t kind) {
+   (void)kind;
+   return -1;
+}
+void llm_cache_monitor_pop_kind(int previous) {
+   (void)previous;
 }
 
 /* Stub for llm_chat_completion_with_config — silent-observe calls this

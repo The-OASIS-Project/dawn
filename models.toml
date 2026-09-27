@@ -66,6 +66,7 @@
 [anthropic]
 # 1M context is GA at standard pricing since March 2026 (no beta header). The
 # newest flagships carry it; Haiku and older models remain at 200K.
+"claude-opus-5" = 1000000
 "claude-opus-4-8" = 1000000
 "claude-opus-4-7" = 1000000
 "claude-opus-4-6" = 1000000
@@ -102,3 +103,35 @@
 "gemini-2.0-flash" = 1048576
 "gemini-1.5-pro" = 1048576
 "gemini-1.5-flash" = 1048576
+
+# -----------------------------------------------------------------------------
+# Prompt-cache pricing, as multiples of each model's base input price:
+#   read      a token read from the provider's prompt cache
+#   write_5m  a token written to it with the default 5-minute lifetime
+#   write_1h  a token written with the 1-hour lifetime
+# 1.0 means no premium (OpenAI before GPT-5.6 and Gemini don't charge for
+# writes).  Same longest-prefix matching as the context windows; a model not
+# listed gets its provider's default (Anthropic 0.10/1.25/2.00, OpenAI and
+# Gemini 0.10/1.00).  OpenRouter models ("anthropic/...") use their vendor's
+# table.  Used for DAWN's "saved by caching" estimates and cost telemetry only.
+# Sources (list prices, Sep 2026): platform.claude.com, developers.openai.com
+# /api/docs/pricing, ai.google.dev/gemini-api/docs/pricing.
+
+[cache_pricing.anthropic]
+"claude-opus-5-5" = { read = 0.05, write_5m = 1.25, write_1h = 2.0 }   # $0.20 on $4
+"claude-fable-5-1" = { read = 0.025, write_5m = 1.25, write_1h = 2.0 } # $0.25 on $10
+# Mythos 5.1 shares Fable 5.1's price, but whether its cache reads do was open
+# at launch: the default (0.10) until confirmed.
+"claude" = { read = 0.10, write_5m = 1.25, write_1h = 2.0 }
+
+[cache_pricing.openai]
+"gpt-5.6" = { read = 0.10, write_5m = 1.25, write_1h = 1.25 } # sol, terra, luna
+"gpt-5" = { read = 0.10, write_5m = 1.0, write_1h = 1.0 }     # 5.0-5.5, mini, nano
+"gpt-4.1" = { read = 0.25, write_5m = 1.0, write_1h = 1.0 }
+"o3" = { read = 0.25, write_5m = 1.0, write_1h = 1.0 }
+"o4-mini" = { read = 0.25, write_5m = 1.0, write_1h = 1.0 }
+"gpt-4o" = { read = 0.50, write_5m = 1.0, write_1h = 1.0 }
+
+[cache_pricing.gemini]
+"gemini" = { read = 0.10, write_5m = 1.0, write_1h = 1.0 } # 2.5 and 3.x families
+

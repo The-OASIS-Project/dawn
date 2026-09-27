@@ -1167,12 +1167,108 @@ void test_local_pseudo_satellite_restored_keeping_owner(void) {
    TEST_ASSERT_EQUAL_STRING("Office", m.ha_area);
 }
 
+static int count_rows(const char *sql) {
+   sqlite3_stmt *st = NULL;
+   int n = -1;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL) == SQLITE_OK &&
+       sqlite3_step(st) == SQLITE_ROW) {
+      n = sqlite3_column_int(st, 0);
+   }
+   sqlite3_finalize(st);
+   return n;
+}
+
+/* Per-call usage rows (schema v90): written in one batch, an expected read of
+ * -1 stored as NULL, and swept after the retention period. */
+void test_llm_usage_log_insert_and_retention(void) {
+   const int64_t now = (int64_t)time(NULL);
+   const int uid = create_and_get_id("usage_user", "hash", false); /* rows need their user */
+   llm_usage_row_t rows[2] = {
+      { .created_at = now,
+        .user_id = uid,
+        .conversation_id = 9,
+        .provider = "claude",
+        .model = "claude-sonnet-5",
+        .kind = "turn",
+        .iteration = 0,
+        .prompt_tokens = 100,
+        .cache_read_tokens = 80,
+        .cache_write_tokens = 10,
+        .uncached_tokens = 10,
+        .expected_read = 75,
+        .cache_state = "warm",
+        .tools_hash = 0xfffffffeu },
+      { .created_at = now - ((int64_t)LLM_USAGE_RETENTION_DAYS + 1) * 86400,
+        .provider = "local",
+        .kind = "extraction",
+        .iteration = -1,
+        .expected_read = -1 },
+   };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_llm_usage_insert(rows, 2));
+   TEST_ASSERT_EQUAL_INT(2, count_rows("SELECT COUNT(*) FROM llm_usage_log"));
+   TEST_ASSERT_EQUAL_INT(1, count_rows("SELECT COUNT(*) FROM llm_usage_log WHERE "
+                                       "expected_read IS NULL AND cache_state IS NULL"));
+   TEST_ASSERT_EQUAL_INT(1, count_rows("SELECT COUNT(*) FROM llm_usage_log WHERE "
+                                       "tools_hash = 4294967294 AND expected_read = 75"));
+   auth_db_run_cleanup();
+   TEST_ASSERT_EQUAL_INT(1, count_rows("SELECT COUNT(*) FROM llm_usage_log"));
+   TEST_ASSERT_EQUAL_INT(1, count_rows("SELECT COUNT(*) FROM llm_usage_log WHERE kind = 'turn'"));
+}
+
+/* Usage rows follow the privacy of what they describe: going private or
+ * deleting a conversation unlinks its rows (the cost stays), deleting the user
+ * deletes theirs. */
+void test_llm_usage_rows_follow_privacy_and_deletes(void) {
+   const int uid = create_and_get_id("usage_owner", "hash", false);
+   int64_t kept = 0;
+   int64_t priv = 0;
+   int64_t gone = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(uid, "kept", &kept));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(uid, "private", &priv));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(uid, "deleted", &gone));
+   const int64_t convs[3] = { kept, priv, gone };
+   llm_usage_row_t rows[3];
+   memset(rows, 0, sizeof(rows));
+   for (int i = 0; i < 3; i++) {
+      rows[i].created_at = (int64_t)time(NULL);
+      rows[i].user_id = uid;
+      rows[i].conversation_id = convs[i];
+      strcpy(rows[i].provider, "claude");
+      strcpy(rows[i].kind, "turn");
+      rows[i].expected_read = -1;
+   }
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_llm_usage_insert(rows, 3));
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(priv, uid, true));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_delete(gone, uid));
+   char sql[128];
+   snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM llm_usage_log WHERE conversation_id = %lld",
+            (long long)kept);
+   TEST_ASSERT_EQUAL_INT(1, count_rows(sql));
+   TEST_ASSERT_EQUAL_INT(2, count_rows("SELECT COUNT(*) FROM llm_usage_log WHERE "
+                                       "conversation_id = 0"));
+
+   /* Rows written after the fact (queued, or a later call) follow the same
+    * rule: no link to a private or deleted conversation. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_llm_usage_insert(rows, 3));
+   TEST_ASSERT_EQUAL_INT(4, count_rows("SELECT COUNT(*) FROM llm_usage_log WHERE "
+                                       "conversation_id = 0"));
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_delete_user("usage_owner"));
+   TEST_ASSERT_EQUAL_INT(0, count_rows("SELECT COUNT(*) FROM llm_usage_log"));
+   /* A deleted user's rows still queued aren't written. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_llm_usage_insert(rows, 3));
+   TEST_ASSERT_EQUAL_INT(0, count_rows("SELECT COUNT(*) FROM llm_usage_log"));
+}
+
 int main(void) {
    UNITY_BEGIN();
 
    /* Lifecycle */
    RUN_TEST(test_init_returns_success);
    RUN_TEST(test_local_pseudo_satellite_restored_keeping_owner);
+   RUN_TEST(test_llm_usage_log_insert_and_retention);
+   RUN_TEST(test_llm_usage_rows_follow_privacy_and_deletes);
    RUN_TEST(test_shutdown_and_reinit);
 
    /* Users */

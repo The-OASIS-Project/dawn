@@ -148,8 +148,10 @@ void llm_openai_add_anthropic_cache(json_object *root,
  * segment up front and reposition the volatile block as a user message just before
  * the current question (see extract_stable_instructions / build_responses_input in
  * llm_openai_responses.c and docs/RESPONSES_CACHE_REORDER_PLAN.md). Anthropic (the
- * add_anthropic_cache path above) needs no such move — its cache_control breakpoints
- * make placement irrelevant. */
+ * add_anthropic_cache path above) has the same problem: a cache_control breakpoint
+ * caches only the prefix up to and including the marked block, in tools -> system ->
+ * messages order, so a per-turn block ahead of the history leaves the history
+ * uncached. */
 void llm_openai_merge_leading_system_messages(json_object *root) {
    if (!root) {
       return;

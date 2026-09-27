@@ -37,6 +37,7 @@
 #include "core/conv_event.h"
 #include "core/event_payload.h"
 #include "core/session_manager.h"
+#include "llm/llm_cache_monitor.h"
 #include "llm/llm_claude.h"
 #include "llm/llm_context.h"
 #include "llm/llm_interface.h"
@@ -632,7 +633,7 @@ static bool resolve_provider_switch(llm_tool_loop_params_t *params) {
  * Central Tool Iteration Loop
  * ============================================================================= */
 
-char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
+static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
    if (!params || !params->provider_fn || !params->conversation_history) {
       OLOG_ERROR("Tool loop: Invalid parameters");
       return NULL;
@@ -650,6 +651,7 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
                                       .honor_global = !params->is_background };
 
    for (int iteration = 0; iteration <= LLM_TOOLS_MAX_ITERATIONS; iteration++) {
+      llm_cache_monitor_set_iteration(iteration); /* tags this iteration's provider call */
       /* Step 0: Merge any completed async compaction (invisible to user).
        * for_reconnect so a turn surviving a client disconnect still merges its
        * compaction across iterations (session_get would skip a disconnected
@@ -1032,4 +1034,13 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
    /* Should not reach here (loop exits via returns) */
    OLOG_ERROR("Tool loop: Fell through iteration loop unexpectedly");
    return NULL;
+}
+
+char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
+   /* A side call's own loop (a compaction or summarizer run from inside a turn's
+    * iteration) hands the iteration back to the loop it interrupted. */
+   const int outer_iteration = llm_cache_monitor_get_iteration();
+   char *response = tool_iteration_loop_body(params);
+   llm_cache_monitor_set_iteration(outer_iteration);
+   return response;
 }

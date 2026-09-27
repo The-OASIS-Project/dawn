@@ -40,6 +40,7 @@
 #include "config/dawn_config.h"
 #include "core/curl_buffer.h"
 #include "core/session_manager.h"
+#include "llm/llm_cache_monitor.h"
 #include "llm/llm_context.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_model_version.h"
@@ -714,8 +715,8 @@ static void responses_handle_event(const char *event_type, const char *event_dat
                if (json_object_object_get_ex(in_details, "cache_write_tokens", &tok_obj))
                   cache_write_tokens = json_object_get_int(tok_obj);
                if (cached_tokens > 0 || cache_write_tokens > 0)
-                  OLOG_INFO("OpenAI Responses cache: %d read, %d write tokens", cached_tokens,
-                            cache_write_tokens);
+                  OLOG_DEBUG("OpenAI Responses cache: %d read, %d write tokens", cached_tokens,
+                             cache_write_tokens);
             }
 
             struct json_object *out_details;
@@ -742,8 +743,8 @@ static void responses_handle_event(const char *event_type, const char *event_dat
                                             .type = LLM_CLOUD,
                                             .provider = CLOUD_PROVIDER_OPENAI };
                llm_context_update_usage(session_id, &usage);
-               OLOG_INFO("Responses usage: %d input, %d output, %d cached, %d write tokens",
-                         input_tokens, output_tokens, cached_tokens, cache_write_tokens);
+               OLOG_DEBUG("Responses usage: %d input, %d output, %d cached, %d write tokens",
+                          input_tokens, output_tokens, cached_tokens, cache_write_tokens);
             }
          }
       }
@@ -841,6 +842,7 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
       return 1;
    }
 
+   llm_cache_monitor_note_request(root); /* for this call's "LLM cache:" line */
    const char *payload = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN |
                                                                   JSON_C_TO_STRING_NOSLASHESCAPE);
 

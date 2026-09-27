@@ -38,7 +38,7 @@
 #include "llm/llm_interface.h"  // For session_llm_config_t
 
 #define SESSION_PROVIDER_MAX 16
-#define SESSION_MAX_PROVIDERS 4
+#define SESSION_MAX_PROVIDERS 5 /* local + each cloud provider */
 
 /**
  * @brief Per-provider token tracking for a session

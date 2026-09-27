@@ -3279,6 +3279,21 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       errmsg = NULL;
    }
 
+   /* v90: llm_usage_log, one row per LLM call.  The base schema creates it on
+    * every start; repeated here (idempotent) so the bump is gated on it. */
+   bool v90_ok = (current_version >= 90);
+   if (current_version < 90) {
+      rc = sqlite3_exec(s_db.db, LLM_USAGE_LOG_SCHEMA_SQL, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v90 migration (llm_usage_log) failed: %s",
+                    errmsg ? errmsg : "unknown");
+      } else {
+         v90_ok = true;
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
    /* Log migration if upgrading from an older version */
    if (current_version > 0 && current_version < AUTH_DB_SCHEMA_VERSION) {
       OLOG_INFO("auth_db: migrated schema from v%d to v%d", current_version,
@@ -3302,7 +3317,8 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
                               v62_ok && v63_ok && v64_ok && v65_ok && v66_ok && v67_ok && v68_ok &&
                               v69_ok && v70_ok && v71_ok && v72_ok && v73_ok && v74_ok && v75_ok &&
                               v76_ok && v77_ok && v78_ok && v79_ok && v80_ok && v81_ok && v82_ok &&
-                              v83_ok && v84_ok && v85_ok && v86_ok && v87_ok && v88_ok && v89_ok;
+                              v83_ok && v84_ok && v85_ok && v86_ok && v87_ok && v88_ok && v89_ok &&
+                              v90_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

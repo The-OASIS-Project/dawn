@@ -40,6 +40,7 @@
 #include "core/path_utils.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
+#include "llm/llm_cache_monitor.h"
 #include "llm/llm_context_merge.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_local_provider.h"
@@ -297,6 +298,7 @@ static void load_model_registry(void) {
    s_openai_models = load_provider_table(root, "openai");
    s_claude_models = load_provider_table(root, "anthropic");
    s_gemini_models = load_provider_table(root, "gemini");
+   llm_pricing_load_registry(root); /* [cache_pricing.*], same file */
    toml_free(root);
    OLOG_INFO("llm_context: loaded model context registry from %s", path);
 }
@@ -340,6 +342,7 @@ void llm_context_cleanup(void) {
    free_model_table(&s_openai_models);
    free_model_table(&s_claude_models);
    free_model_table(&s_gemini_models);
+   llm_pricing_free_registry();
 
    pthread_mutex_destroy(&s_state.mutex);
    s_state.initialized = false;
@@ -776,22 +779,34 @@ void llm_context_update_usage(uint32_t session_id, const llm_usage_report_t *usa
    const int completion_tokens = usage->completion_tokens;
    const int cached_tokens = usage->cached_tokens;
    const int cache_write_tokens = usage->cache_write_tokens;
+   /* Every call gets its "LLM cache:" record.  A tagged side call (extraction,
+    * compaction, a tool's helper call) under a session counts toward the
+    * session's totals and query stats, but isn't its context size: it must not
+    * replace the session's last-call numbers, the WebUI gauge or the "Context:"
+    * line, which belong to the conversation's own calls. */
+   llm_cache_record_t rec;
+   llm_cache_monitor_record(session_id, usage, &rec);
+   const bool sets_context = llm_call_kind_sets_context(rec.kind);
    /* Derive the provider-discounted savings here (pure, no shared state) so it is
     * computed once at the token-producing site where the provider is unambiguous. */
    const int saved_input_tokens = llm_cache_saved_input_tokens(usage->type, usage->provider,
+                                                               rec.model[0] ? rec.model
+                                                                            : llm_get_model_name(),
                                                                cached_tokens, cache_write_tokens);
 
    pthread_mutex_lock(&s_state.mutex);
 
    session_token_tracking_t *tracking = get_session_tracking(session_id, true);
    if (tracking) {
-      tracking->last_prompt_tokens = prompt_tokens;
-      tracking->last_completion_tokens = completion_tokens;
       tracking->total_prompt_tokens += prompt_tokens;
       tracking->total_completion_tokens += completion_tokens;
-      tracking->last_cached_tokens = cached_tokens;
-      tracking->last_cache_write_tokens = cache_write_tokens;
-      tracking->last_saved_input_tokens = saved_input_tokens;
+      if (sets_context) {
+         tracking->last_prompt_tokens = prompt_tokens;
+         tracking->last_completion_tokens = completion_tokens;
+         tracking->last_cached_tokens = cached_tokens;
+         tracking->last_cache_write_tokens = cache_write_tokens;
+         tracking->last_saved_input_tokens = saved_input_tokens;
+      }
    }
 
    /* Check if we need to re-query Ollama context. Set authoritative=true under
@@ -839,26 +854,34 @@ void llm_context_update_usage(uint32_t session_id, const llm_usage_report_t *usa
       }
    }
 
-   /* Log context usage with threshold check */
-   llm_type_t type = llm_get_type();
-   cloud_provider_t provider = llm_get_cloud_provider();
-   int context_size = llm_context_get_size(type, provider, llm_get_model_name());
-   float usage_pct = (context_size > 0) ? (float)prompt_tokens / (float)context_size * 100.0f : 0;
-   float threshold = g_config.llm.compact_hard_threshold;
-   float threshold_pct = threshold * 100.0f;
+   /* The context window: only for the conversation's own calls (a side call's
+    * prompt isn't the conversation's size). */
+   if (sets_context) {
+      /* Log context usage with threshold check: against the window of the model
+       * that made this call (not the daemon's default, which a session or turn may
+       * have switched away from). */
+      llm_type_t type = usage->type;
+      cloud_provider_t provider = usage->provider;
+      int context_size = llm_context_get_size(type, provider,
+                                              rec.model[0] ? rec.model : llm_get_model_name());
+      float usage_pct = (context_size > 0) ? (float)prompt_tokens / (float)context_size * 100.0f
+                                           : 0;
+      float threshold = g_config.llm.compact_hard_threshold;
+      float threshold_pct = threshold * 100.0f;
 
-   /* Store last values for WebUI retrieval (under mutex for M2 consistency) */
-   pthread_mutex_lock(&s_state.mutex);
-   s_state.last_prompt_tokens = prompt_tokens;
-   s_state.last_context_size = context_size;
-   pthread_mutex_unlock(&s_state.mutex);
+      /* Store last values for WebUI retrieval (under mutex for M2 consistency) */
+      pthread_mutex_lock(&s_state.mutex);
+      s_state.last_prompt_tokens = prompt_tokens;
+      s_state.last_context_size = context_size;
+      pthread_mutex_unlock(&s_state.mutex);
 
-   OLOG_INFO("Context: %d/%d tokens (%.1f%%), threshold: %.0f%%", prompt_tokens, context_size,
-             usage_pct, threshold_pct);
+      OLOG_INFO("Context: %d/%d tokens (%.1f%%), threshold: %.0f%%", prompt_tokens, context_size,
+                usage_pct, threshold_pct);
 
-   if (usage_pct >= threshold_pct) {
-      OLOG_WARNING("Context usage (%.1f%%) exceeds threshold (%.0f%%) - compaction recommended",
-                   usage_pct, threshold_pct);
+      if (usage_pct >= threshold_pct) {
+         OLOG_WARNING("Context usage (%.1f%%) exceeds threshold (%.0f%%) - compaction recommended",
+                      usage_pct, threshold_pct);
+      }
    }
 
 #ifdef ENABLE_MULTI_CLIENT
@@ -866,14 +889,9 @@ void llm_context_update_usage(uint32_t session_id, const llm_usage_report_t *usa
    session_t *session = session_get_command_context();
    if (session) {
       /* Build provider name string */
-      const char *provider_name;
-      if (type == LLM_LOCAL) {
-         provider_name = "local";
-      } else if (provider == CLOUD_PROVIDER_CLAUDE) {
-         provider_name = "claude";
-      } else {
-         provider_name = "openai";
-      }
+      const char *provider_name = usage->type == LLM_LOCAL
+                                      ? "local"
+                                      : cloud_provider_to_string(usage->provider);
 
       /* Get timing from session streaming metrics */
       double ttft_ms = 0.0;
@@ -1392,6 +1410,7 @@ static char *compact_with_llm(struct json_object *to_summarize,
 
    llm_resolved_config_t compact_cfg;
    char *summary = NULL;
+   const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_COMPACTION);
    if (build_compaction_config(&compact_cfg)) {
       OLOG_INFO("llm_context: Using dedicated compaction provider: %s %s",
                 g_config.llm.compact_provider,
@@ -1402,6 +1421,7 @@ static char *compact_with_llm(struct json_object *to_summarize,
       summary = llm_chat_completion(request, NULL, NULL, NULL, 0, true);
       llm_set_timeout_override(0);
    }
+   llm_cache_monitor_pop_kind(kind_prev);
 
    llm_tools_suppress_pop();
    json_object_put(request);

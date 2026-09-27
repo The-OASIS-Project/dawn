@@ -57,6 +57,13 @@ JUDGE_SYSTEM = (
     "be correct; equivalent phrasings and reasonable rounding are fine. "
     'Reply with JSON only: {"pass": true|false, "reason": "<one sentence>"}')
 
+# One line per call (current daemons); the three older lines below are for runs
+# recorded before it existed.
+RE_LLM_CACHE = re.compile(r"LLM cache: provider=claude .*?kind=(\w+) .*? read=(\d+) write=(\d+) "
+                          r"uncached=(\d+) .*? output=(\d+)")
+# The conversation's own calls; side calls (extraction, compaction, ...) are
+# left out so runs compare with the older lines, which never counted them.
+CONVERSATION_KINDS = {"turn", "tool_iter", "job", "research", "other"}
 RE_CACHE_WRITE = re.compile(r"Claude cache created: (\d+)")
 RE_CACHE_READ = re.compile(r"Claude cache hit: (\d+)")
 RE_CLAUDE_USAGE = re.compile(r"Claude usage: (\d+) input, (\d+) output")
@@ -85,9 +92,19 @@ def load_run(run_dir):
 
 
 def parse_claude_calls(lines):
-    """Group daemon-log lines into per-call records (cache lines precede the usage line)."""
+    """Per-call records from daemon-log lines: the one-line "LLM cache:" record, or
+    (older runs) the cache lines that precede each usage line."""
     calls, read, write = [], 0, 0
-    for ln in lines or []:
+    lines = lines or []
+    if any(RE_LLM_CACHE.search(ln) for ln in lines):
+        for ln in lines:
+            m = RE_LLM_CACHE.search(ln)
+            if m and m.group(1) in CONVERSATION_KINDS:
+                r, w, u = int(m.group(2)), int(m.group(3)), int(m.group(4))
+                calls.append({"read": r, "write": w, "uncached": u, "prompt": r + w + u,
+                              "output": int(m.group(5))})
+        return calls
+    for ln in lines:
         m = RE_CACHE_WRITE.search(ln)
         if m:
             write += int(m.group(1))

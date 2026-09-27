@@ -779,6 +779,22 @@ int conv_db_set_title_locked(int64_t conv_id, int user_id, int locked) {
    return (changes > 0) ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
 }
 
+/* Caller holds the auth_db lock.  Detach the per-call usage rows (llm_usage_log)
+ * matching @p where from their conversation: the cost is kept, the link to what
+ * was talked about isn't.  Returns SQLITE_DONE or an error. */
+static int unlink_usage_rows_locked(const char *where, int64_t arg) {
+   char sql[192];
+   snprintf(sql, sizeof(sql), "UPDATE llm_usage_log SET conversation_id = 0 WHERE %s", where);
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int64(st, 1, arg);
+      rc = sqlite3_step(st);
+   }
+   sqlite3_finalize(st);
+   return rc;
+}
+
 int conv_db_set_private(int64_t conv_id, int user_id, bool is_private) {
    if (conv_id <= 0 || user_id <= 0) {
       return AUTH_DB_INVALID;
@@ -825,6 +841,13 @@ int conv_db_set_private(int64_t conv_id, int user_id, bool is_private) {
       } else {
          rc = SQLITE_ERROR;
       }
+   }
+   if (rc == SQLITE_DONE && changes > 0 && is_private) {
+      /* The per-call usage rows of the user's private conversations (this one and
+       * the continuations just made private) lose their conversation link. */
+      rc = unlink_usage_rows_locked("conversation_id IN (SELECT id FROM conversations WHERE "
+                                    "user_id = ?1 AND is_private = 1)",
+                                    (int64_t)user_id);
    }
    if (rc != SQLITE_DONE) {
       OLOG_ERROR("conv_db_set_private: update failed: %s", sqlite3_errmsg(s_db.db));
@@ -1196,6 +1219,9 @@ static int delete_conversation_locked(sqlite3_stmt *del,
       changes = sqlite3_changes(s_db.db);
    }
    sqlite3_reset(del);
+   if (rc == SQLITE_DONE && changes > 0) {
+      rc = unlink_usage_rows_locked("conversation_id = ?1", conv_id);
+   }
    if (rc == SQLITE_DONE &&
        sqlite3_exec(s_db.db, "RELEASE conv_delete", NULL, NULL, NULL) == SQLITE_OK) {
       *changes_out = changes;

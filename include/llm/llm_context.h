@@ -174,6 +174,9 @@ typedef struct {
    int cache_write_tokens;    /**< Prompt tokens newly written to cache (GPT-5.6+/Claude; else 0) */
    llm_type_t type;           /**< LLM_LOCAL or LLM_CLOUD (selects cache economics) */
    cloud_provider_t provider; /**< Cloud provider that produced the tokens */
+   const char *message_id;    /**< Anthropic: the response's id (NULL otherwise) */
+   const char *cache_miss_reason; /**< Anthropic cache diagnostics: why the cache missed */
+   int cache_missed_tokens;       /**< ...and how many input tokens it missed */
 } llm_usage_report_t;
 
 /**
