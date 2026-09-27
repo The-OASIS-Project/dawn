@@ -425,7 +425,14 @@
          // Update history list if visible
          if (typeof DawnHistory !== 'undefined' && DawnHistory.updateConversationPrivacy) {
             DawnHistory.updateConversationPrivacy(payload.conversation_id, payload.is_private);
+            // Conversations continuing this one went private with it.
+            (payload.also_private || []).forEach((id) =>
+               DawnHistory.updateConversationPrivacy(id, true)
+            );
          }
+
+         // Private stops future learning; the server follows up with
+         // conversation_learned so the user can forget what was already learned.
       } else {
          // Revert UI on failure
          updatePrivacyToggleUI(conversationLlmState.is_private);

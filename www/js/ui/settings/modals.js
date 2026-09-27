@@ -161,9 +161,13 @@
       pendingConfirmOnClose = typeof options.onClose === 'function' ? options.onClose : null;
       modalTriggerElement = document.activeElement;
 
-      // Show modal
+      // Show modal.  A destructive confirm starts on the safe choice, so a stray
+      // Enter/Space (the dialog may open unprompted, e.g. after a server reply)
+      // can't take the irreversible action.
       modal.classList.remove('hidden');
-      confirmModalCleanup = trapFocus(modal);
+      const safeFirst = !!options.danger && cancelBtn && !options.okOnly;
+      confirmModalCleanup = trapFocus(modal, { skipInitialFocus: safeFirst });
+      if (safeFirst) cancelBtn.focus();
       // Unregister any stale token first (defensive — a direct show while one is
       // pending would otherwise orphan the prior registration on the stack).
       if (confirmEscToken !== null) DawnEscStack.unregister(confirmEscToken);

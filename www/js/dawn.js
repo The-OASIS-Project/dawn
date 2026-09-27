@@ -591,6 +591,8 @@
                break;
             }
             case 'context_compacted':
+               // A turn can run on a conversation other than the one on screen.
+               if (isForeignConvFrame(msg.payload)) break;
                DawnHistory.handleContextCompacted(msg.payload);
                break;
             case 'silent_observation':
@@ -816,6 +818,12 @@
                break;
             case 'set_private_response':
                DawnSettings.handleSetPrivateResponse(msg.payload);
+               break;
+            case 'forget_conversation_memories_response':
+               DawnSettings.handleForgetConversationMemoriesResponse(msg.payload);
+               break;
+            case 'conversation_learned':
+               DawnSettings.handleConversationLearned(msg.payload);
                break;
             case 'set_pinned_response':
                DawnHistory.handleSetPinnedResponse(msg.payload);

@@ -991,7 +991,16 @@
                type: 'dynamic_select',
                label: 'Default Voice User',
                dynamicKey: 'users',
-               hint: 'User account for local microphone and DAP voice conversations',
+               hint: "User the local microphone speaks for while the Local Device is not assigned to a user on the satellite page (assigned, the mic and speaker are that user's). Satellites not assigned to a user are guests (no personal memory or data).",
+               advanced: true,
+            },
+            fact_cache_mb: {
+               type: 'number',
+               label: 'Semantic Search Memory (MB)',
+               min: 8,
+               max: 1024,
+               default: 80,
+               hint: "RAM for one user's facts held for semantic search. With the default embedding model a fact takes about 1.6 KB, so 80 MB holds about 50,000; larger models hold fewer. Past it, recently used facts and note links are kept first, then the most confident and recent; the rest are still found by keyword search.",
                advanced: true,
             },
             decay_enabled: {
@@ -1311,12 +1320,12 @@
                type: 'group',
                label: 'Per-Turn Context Injection',
                description:
-                  'Pulls memory, document, calendar, and email content above a relevance threshold and injects it into each user turn. Disabled by default until source adapters ship in 1c/1d.',
+                  'Pulls memory, document, calendar, and email content above a relevance threshold and injects it into each user turn. Off by default.',
                fields: {
                   focus_enabled: {
                      type: 'checkbox',
                      label: 'Enable per-turn context injection',
-                     hint: 'Master switch for the focus-injection framework. No effect until adapters register.',
+                     hint: 'Master switch: automatically add relevant memories, documents, calendar, and email to each turn.',
                      configPath: 'memory.focus_injection.enabled',
                   },
                   focus_budget_bytes: {
@@ -1344,6 +1353,28 @@
                      step: 0.05,
                      hint: 'Drop candidates below this final score. Default 0.40.',
                      configPath: 'memory.focus_injection.min_score',
+                     displayValue: (v) => v.toFixed(2),
+                  },
+                  focus_document_min_relevance: {
+                     type: 'range',
+                     label: 'Document relevance floor',
+                     min: 0,
+                     max: 1,
+                     step: 0.02,
+                     hint: 'How clearly a document passage must stand out from your other documents to be added to context automatically. Checked before the minimum relevance score, and only once you have at least 32 document passages. Higher = fewer, more relevant passages. 0 turns it off. Default 0.48.',
+                     advanced: true,
+                     configPath: 'memory.focus_injection.document_min_relevance',
+                     displayValue: (v) => v.toFixed(2),
+                  },
+                  focus_fact_min_relevance: {
+                     type: 'range',
+                     label: 'Memory relevance floor',
+                     min: 0,
+                     max: 1,
+                     step: 0.02,
+                     hint: 'How clearly a remembered fact must relate to what you said, compared with your other memories, to be added to context automatically. Checked before the minimum relevance score, and only once you have at least 32 memories. Does not affect asking the assistant to search its memory. 0 turns it off. Default 0.34.',
+                     advanced: true,
+                     configPath: 'memory.focus_injection.fact_min_relevance',
                      displayValue: (v) => v.toFixed(2),
                   },
                   focus_weight_semantic: {
@@ -2091,7 +2122,7 @@
             inject_into_sessions: {
                type: 'checkbox',
                label: 'Make Conversations Aware',
-               hint: 'Also seed an active conversation with a fired alert so DAWN can reference it in chat.',
+               hint: "Also tell the watch owner's conversations about a fired alert (for the next 10 minutes) so DAWN can reference it in chat. Only that user's surfaces see it.",
                advanced: true,
             },
             judge_enabled: {
