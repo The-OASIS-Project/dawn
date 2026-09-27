@@ -1,0 +1,19 @@
+{
+  "_comment": "Fixed memory set for the dawn_ab eval account. Seeded (after a wipe) by run_ab.py --reseed-memory so every run starts from identical memory. Fictional person; no real user data.",
+  "facts": [
+    {"fact_text": "The user's dog is named Biscuit; Biscuit is a beagle.", "confidence": 0.95},
+    {"fact_text": "The user's sister Priya lives in Denver, Colorado, and works as a veterinarian.", "confidence": 0.95},
+    {"fact_text": "The user is allergic to shellfish.", "confidence": 0.95},
+    {"fact_text": "The user's wedding anniversary is June 14.", "confidence": 0.9},
+    {"fact_text": "The user prefers aisle seats on flights.", "confidence": 0.9},
+    {"fact_text": "The user drives a blue 2019 Subaru Outback.", "confidence": 0.9},
+    {"fact_text": "The user is training for a half marathon in the spring.", "confidence": 0.85},
+    {"fact_text": "The user's favorite cuisine is Thai food.", "confidence": 0.85},
+    {"fact_text": "The user works as a structural engineer.", "confidence": 0.85},
+    {"fact_text": "The user dislikes cold, windy weather.", "confidence": 0.85}
+  ],
+  "preferences": [
+    {"category": "units", "value": "Prefers Fahrenheit and miles", "confidence": 0.9},
+    {"category": "communication", "value": "Likes short, direct answers", "confidence": 0.85}
+  ]
+}

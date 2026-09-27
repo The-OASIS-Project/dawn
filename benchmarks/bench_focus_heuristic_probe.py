@@ -79,7 +79,7 @@ DEFAULT_DAWN_TOML = DAWN_ROOT / "dawn.toml"
 DEFAULT_FOCUS_CONFIG = {
     "top_k": 8,
     "min_score": 0.40,
-    "focus_budget_tokens": 1024,
+    "focus_budget_bytes": 10240,
     "weight_semantic": 1.0,
     "weight_recency": 0.30,
     "weight_importance": 1.00,
