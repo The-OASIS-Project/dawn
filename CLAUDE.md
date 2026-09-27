@@ -8,6 +8,24 @@ D.A.W.N. (part of The OASIS Project) is a voice-controlled AI assistant daemon w
 
 See @ARCHITECTURE.md for subsystem breakdowns, data flow, and module dependencies.
 
+## ⚠️ THE PRIME DIRECTIVE: WE ALWAYS DO IT RIGHT. WE DON'T DO STOP-GAPS. ⚠️
+
+**This rule outranks convenience, speed, and scope. It governs every other rule in this file.**
+
+- **Do it right. Don't be lazy.** Every fix is the real fix, designed properly and phased properly.
+  There is no "quick fix now, real fix later." Never propose a stop-gap, a band-aid, a workaround
+  dressed up as a fix, or a degrade-instead-of-fix path as the plan. If the proper fix is large,
+  **phase the proper fix**: every phase must be a piece of the final design, not something to rip
+  out later.
+- **DAWN is a public project.** Judge correctness against **every user's** accounts, configs,
+  platforms, and hardware — never only the developer's. "It works on my setup" or "my account isn't
+  affected" is not an argument. Other people run this.
+- **Verify, don't assume.** Check claims against the code and against authoritative vendor
+  documentation or live behavior, and reproduce a bug before calling it fixed. If you haven't
+  verified something, say so plainly.
+- **When a real tradeoff exists,** lay the options out honestly, say what each one actually fixes,
+  and recommend the proper one even when it's more work. Never quietly pick the easy option.
+
 ## Critical Rules — Always Follow
 
 - **NEVER delete files.** Tell the developer which files to delete. Files may hold secrets or unrecoverable data.
