@@ -468,6 +468,11 @@ void config_set_defaults(dawn_config_t *config) {
     * pulled in (arithmetic, jokes).  Personal facts legitimately relate to many
     * requests, so this is a gentle trim, not a hard filter. */
    config->memory.focus_injection.fact_min_relevance = 0.34f;
+   /* Calibrated 2026-09 on a real pool of ~700 entities: the entities a short
+    * query names scored 0.42-1.0, while look-alikes sharing a common word stayed
+    * under 0.37.  Names mentioned in a long message are caught by the name
+    * check instead, since the message's embedding dilutes them. */
+   config->memory.focus_injection.entity_min_relevance = 0.40f;
    config->memory.focus_injection.classifier_enabled = false;
    config->memory.focus_injection.summary_max_scan = MEMORY_SUMMARY_SEMANTIC_SCAN_CAP_DEFAULT;
    /* Phase 1j tuning (May 2026): w_imp 0.2 → 1.0, w_rec 0.3 → 0.15.

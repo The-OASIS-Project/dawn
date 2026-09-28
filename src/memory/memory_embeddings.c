@@ -77,28 +77,6 @@ static struct {
    .mutex = PTHREAD_MUTEX_INITIALIZER,
 };
 
-/* Entity embedding cache (separate from fact cache) */
-#define ENTITY_CACHE_CAP 500
-
-static struct {
-   pthread_mutex_t mutex;
-   int user_id;
-   int64_t *ids;
-   char (*names)[MEMORY_ENTITY_NAME_MAX];
-   char (*types)[MEMORY_ENTITY_TYPE_MAX];
-   float *embeddings; /* flat: count * dims */
-   float *norms;
-   int count;
-   int dims;
-   bool valid;
-   atomic_bool dirty;
-} s_entity_cache = {
-   .mutex = PTHREAD_MUTEX_INITIALIZER,
-};
-
-/* Forward declaration */
-static void entity_cache_free(void);
-
 /* =============================================================================
  * Math Utilities — delegate to shared embedding engine
  * ============================================================================= */
@@ -335,9 +313,7 @@ void memory_embeddings_cleanup(void) {
    cache_free_data();
    pthread_mutex_unlock(&s_cache.mutex);
 
-   pthread_mutex_lock(&s_entity_cache.mutex);
-   entity_cache_free();
-   pthread_mutex_unlock(&s_entity_cache.mutex);
+   memory_embeddings_entity_cleanup();
 
    /* Provider cleanup handled by embedding_engine_cleanup() in dawn.c shutdown */
 }
@@ -856,94 +832,9 @@ int memory_embeddings_find_duplicate_clusters(int user_id,
 }
 
 /* =============================================================================
- * Entity Embedding Support
+ * Summary embeddings and bulk invalidation (entity embeddings: see
+ * memory_embeddings_entity.c)
  * ============================================================================= */
-
-static void entity_cache_free(void) {
-   free(s_entity_cache.ids);
-   free(s_entity_cache.names);
-   free(s_entity_cache.types);
-   free(s_entity_cache.embeddings);
-   free(s_entity_cache.norms);
-   s_entity_cache.ids = NULL;
-   s_entity_cache.names = NULL;
-   s_entity_cache.types = NULL;
-   s_entity_cache.embeddings = NULL;
-   s_entity_cache.norms = NULL;
-   s_entity_cache.count = 0;
-   s_entity_cache.valid = false;
-}
-
-static int entity_cache_load(int user_id) {
-   if (s_entity_cache.valid && s_entity_cache.user_id == user_id &&
-       !atomic_load(&s_entity_cache.dirty))
-      return 0;
-
-   entity_cache_free();
-
-   int dims = embedding_engine_dims();
-   if (dims <= 0)
-      return FAILURE;
-
-   s_entity_cache.ids = malloc(ENTITY_CACHE_CAP * sizeof(int64_t));
-   s_entity_cache.names = malloc(ENTITY_CACHE_CAP * sizeof(*s_entity_cache.names));
-   s_entity_cache.types = malloc(ENTITY_CACHE_CAP * sizeof(*s_entity_cache.types));
-   s_entity_cache.embeddings = malloc((size_t)ENTITY_CACHE_CAP * (size_t)dims * sizeof(float));
-   s_entity_cache.norms = malloc(ENTITY_CACHE_CAP * sizeof(float));
-
-   if (!s_entity_cache.ids || !s_entity_cache.names || !s_entity_cache.types ||
-       !s_entity_cache.embeddings || !s_entity_cache.norms) {
-      entity_cache_free();
-      return FAILURE;
-   }
-
-   int loaded = 0;
-   /* Production cache is canonical-only — aliases (canonical_id IS NOT NULL)
-    * are filtered out so the cosine pool doesn't surface duplicate
-    * surface-form variants. */
-   if (memory_db_entity_get_embeddings(user_id, /* include_aliases */ false, dims,
-                                       s_entity_cache.ids, s_entity_cache.names,
-                                       s_entity_cache.types, s_entity_cache.embeddings,
-                                       s_entity_cache.norms, ENTITY_CACHE_CAP,
-                                       &loaded) != MEMORY_DB_SUCCESS) {
-      entity_cache_free();
-      return FAILURE;
-   }
-
-   s_entity_cache.count = loaded;
-   s_entity_cache.dims = dims;
-   s_entity_cache.user_id = user_id;
-   s_entity_cache.valid = true;
-   atomic_store(&s_entity_cache.dirty, false);
-
-   OLOG_INFO("memory_embeddings: loaded %d entity embeddings into cache for user %d", loaded,
-             user_id);
-   return 0;
-}
-
-int memory_embeddings_embed_and_store_entity(int64_t entity_id, int user_id, const char *text) {
-   if (!embedding_engine_available() || !text)
-      return FAILURE;
-
-   float embedding[MAX_EMBEDDING_DIMS];
-   int dims = 0;
-
-   int rc = embedding_engine_embed(text, embedding, MAX_EMBEDDING_DIMS, &dims);
-   if (rc != 0 || dims <= 0)
-      return rc;
-
-   float norm = memory_embeddings_l2_norm(embedding, dims);
-
-   rc = memory_db_entity_update_embedding(entity_id, user_id, embedding, dims, norm);
-   if (rc == MEMORY_DB_SUCCESS) {
-      memory_embeddings_invalidate_entity_cache();
-   }
-   return rc;
-}
-
-void memory_embeddings_invalidate_entity_cache(void) {
-   atomic_store(&s_entity_cache.dirty, true);
-}
 
 int memory_embeddings_embed_and_store_summary(int user_id, int64_t summary_id, const char *text) {
    if (!embedding_engine_available() || !text || !text[0])
@@ -965,136 +856,6 @@ int memory_embeddings_embed_and_store_summary(int user_id, int64_t summary_id, c
 void memory_embeddings_invalidate_all(void) {
    memory_embeddings_invalidate_cache();
    memory_embeddings_invalidate_entity_cache();
-}
-
-int memory_embeddings_entity_search(int user_id,
-                                    const char *query,
-                                    const char *type_filter,
-                                    int64_t *out_ids,
-                                    char out_names[][MEMORY_ENTITY_NAME_MAX],
-                                    char out_types[][MEMORY_ENTITY_TYPE_MAX],
-                                    float *out_scores,
-                                    int max_results) {
-   if (!memory_embeddings_available() || !query || !out_ids || max_results <= 0)
-      return 0;
-
-   /* Embed the query */
-   float query_emb[MAX_EMBEDDING_DIMS];
-   int dims = 0;
-   if (memory_embeddings_embed(query, query_emb, &dims) != 0 || dims != embedding_engine_dims())
-      return 0;
-
-   float query_norm = memory_embeddings_l2_norm(query_emb, dims);
-
-   pthread_mutex_lock(&s_entity_cache.mutex);
-   if (entity_cache_load(user_id) != 0) {
-      pthread_mutex_unlock(&s_entity_cache.mutex);
-      return 0;
-   }
-
-   /* Score all cached entities by cosine similarity */
-   typedef struct {
-      int idx;
-      float score;
-   } scored_t;
-   scored_t scored[ENTITY_CACHE_CAP];
-   int scored_count = 0;
-
-   for (int i = 0; i < s_entity_cache.count; i++) {
-      /* Apply type filter if specified */
-      if (type_filter && type_filter[0] != '\0' &&
-          strcmp(s_entity_cache.types[i], type_filter) != 0) {
-         continue;
-      }
-
-      float cosine = memory_embeddings_cosine_with_norms(
-          query_emb, s_entity_cache.embeddings + (size_t)i * (size_t)dims, dims, query_norm,
-          s_entity_cache.norms[i]);
-
-      if (cosine > 0.4f) {
-         scored[scored_count].idx = i;
-         scored[scored_count].score = cosine;
-         scored_count++;
-      }
-   }
-
-   /* Sort by score descending (insertion sort — small N) */
-   for (int i = 1; i < scored_count; i++) {
-      scored_t tmp = scored[i];
-      int j = i - 1;
-      while (j >= 0 && scored[j].score < tmp.score) {
-         scored[j + 1] = scored[j];
-         j--;
-      }
-      scored[j + 1] = tmp;
-   }
-
-   /* Copy top results */
-   int result_count = scored_count > max_results ? max_results : scored_count;
-   for (int i = 0; i < result_count; i++) {
-      int idx = scored[i].idx;
-      out_ids[i] = s_entity_cache.ids[idx];
-      if (out_names) {
-         safe_strscpy(out_names[i], s_entity_cache.names[idx]);
-      }
-      if (out_types) {
-         safe_strscpy(out_types[i], s_entity_cache.types[idx]);
-      }
-      if (out_scores)
-         out_scores[i] = scored[i].score;
-   }
-
-   pthread_mutex_unlock(&s_entity_cache.mutex);
-   return result_count;
-}
-
-int memory_embeddings_entity_cosine(int user_id,
-                                    int64_t entity_id,
-                                    const float *query_embedding,
-                                    int query_dims,
-                                    float query_norm,
-                                    float *out_cosine) {
-   if (!query_embedding || query_dims <= 0 || !out_cosine || entity_id <= 0) {
-      return FAILURE;
-   }
-   if (!memory_embeddings_available()) {
-      return FAILURE;
-   }
-
-   pthread_mutex_lock(&s_entity_cache.mutex);
-   if (entity_cache_load(user_id) != 0) {
-      pthread_mutex_unlock(&s_entity_cache.mutex);
-      return FAILURE;
-   }
-
-   /* Dimension mismatch — caller's embedding came from a different model;
-    * cosine would be meaningless. */
-   if (s_entity_cache.dims != query_dims) {
-      pthread_mutex_unlock(&s_entity_cache.mutex);
-      return FAILURE;
-   }
-
-   /* Linear scan over the cache.  ENTITY_CACHE_CAP is 500; the alias
-    * resolver runs at extraction time (off the conversational hot path)
-    * and visits at most 8 candidates per call (Stage 4 cap), so the
-    * outer-loop count of 500 is amortized across few invocations. */
-   int found = -1;
-   for (int i = 0; i < s_entity_cache.count; i++) {
-      if (s_entity_cache.ids[i] == entity_id) {
-         found = i;
-         break;
-      }
-   }
-   if (found < 0) {
-      pthread_mutex_unlock(&s_entity_cache.mutex);
-      return FAILURE;
-   }
-
-   *out_cosine = memory_embeddings_cosine_with_norms(
-       query_embedding, s_entity_cache.embeddings + (size_t)found * query_dims, query_dims,
-       query_norm, s_entity_cache.norms[found]);
-   pthread_mutex_unlock(&s_entity_cache.mutex);
-   return SUCCESS;
 }
 
 /* =============================================================================

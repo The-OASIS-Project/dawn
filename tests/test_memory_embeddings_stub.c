@@ -221,6 +221,14 @@ int memory_db_entity_get_embeddings(int user_id,
    return 0;
 }
 
+int memory_db_entity_embedding_count(int user_id, int expected_dims, int *count_out) {
+   (void)user_id;
+   (void)expected_dims;
+   if (count_out)
+      *count_out = 0;
+   return 0;
+}
+
 int memory_db_entity_update_embedding(int64_t entity_id,
                                       int user_id,
                                       const float *embedding,

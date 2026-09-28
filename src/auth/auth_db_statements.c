@@ -1588,13 +1588,17 @@ int auth_db_prepare_statements(void) {
     * excluded from the entity-embedding cache so the resolver / focus
     * adapter pools do not double-count surface-form variants of the same
     * real-world entity.  Bind position 2 = include_aliases (0 = filter
-    * aliases out, 1 = include).  See docs/ENTITY_MERGE_DESIGN.md §15. */
+    * aliases out, 1 = include).  See docs/ENTITY_MERGE_DESIGN.md §15.
+    * Position 4 = the embedding's size in bytes: only the current model's
+    * embeddings count toward the LIMIT (after a model swap, rows not yet
+    * recomputed would otherwise fill it). */
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, name, entity_type, embedding, embedding_norm "
                            "FROM memory_entities "
-                           "WHERE user_id = ? AND embedding IS NOT NULL "
-                           "  AND (? = 1 OR canonical_id IS NULL) "
-                           "ORDER BY mention_count DESC LIMIT ?",
+                           "WHERE user_id = ?1 AND embedding IS NOT NULL "
+                           "  AND length(embedding) = ?4 "
+                           "  AND (?2 = 1 OR canonical_id IS NULL) "
+                           "ORDER BY mention_count DESC LIMIT ?3",
                            -1, &s_db.stmt_memory_entity_get_embeddings, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare entity_get_embeddings failed: %s", sqlite3_errmsg(s_db.db));

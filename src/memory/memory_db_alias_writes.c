@@ -606,7 +606,7 @@ int memory_db_entity_alias_link(int user_id,
    /* Post-commit: invalidate the entity-embedding cache so subsequent
     * reads see the new alias state.  Safe outside the lock — the
     * invalidator is just an atomic dirty-bit flip (memory_embeddings.c). */
-   memory_embeddings_invalidate_entity_cache();
+   memory_embeddings_invalidate_entity_cache_for_user(user_id);
 
    if (out_link_id)
       *out_link_id = link_id;
@@ -724,7 +724,7 @@ int memory_db_entity_alias_unlink(int user_id, int64_t link_id, const char *unli
    AUTH_DB_UNLOCK();
 
    /* Post-commit cache invalidation; same contract as alias_link. */
-   memory_embeddings_invalidate_entity_cache();
+   memory_embeddings_invalidate_entity_cache_for_user(user_id);
 
    OLOG_INFO("memory_db_alias: split link %lld (source=%lld, reason=%s)", (long long)link_id,
              (long long)source_id, reason);

@@ -370,7 +370,7 @@ int memory_db_conversations_forget(int user_id,
       return MEMORY_DB_FAILURE;
    }
    if (d.entities > 0) {
-      memory_embeddings_invalidate_entity_cache();
+      memory_embeddings_invalidate_entity_cache_for_user(user_id);
    }
    if (d.facts + d.outdated > 0) {
       memory_embeddings_invalidate_cache_for_user(user_id); /* another user's copy stays */

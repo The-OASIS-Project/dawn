@@ -104,7 +104,7 @@ Memory extraction happens at session end, not during conversation — zero laten
 - **memory_embeddings.c/h**: Semantic embedding system
    - Calls shared `embedding_engine` (see [rag.md](rag.md)) for embed/cosine operations
    - Multi-provider support: Ollama, OpenAI, ONNX (configurable in `[memory.embeddings]`)
-   - In-memory cache with mutex protection (facts: 1000 cap, entities: 500 cap)
+   - In-memory cache with mutex protection (facts: 1000 cap).  Entities: every canonical entity with a current-model embedding, per user (up to 4 users' copies, 16 MB each), with name stems for "is this entity named in the query" (`memory_embeddings_entity.c`, `memory_embeddings_entity_matches()`)
    - Lazy cache loading on first search, invalidated after extraction
    - Cosine similarity search against cached embeddings
    - Hybrid search combining keyword and semantic results with configurable weights

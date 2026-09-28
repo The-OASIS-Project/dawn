@@ -57,6 +57,9 @@ int memory_embeddings_embed_and_store_ex(int user_id,
  */
 void memory_embeddings_invalidate_cache_for_user(int user_id);
 
+/** Free the entity embedding cache (daemon shutdown). */
+void memory_embeddings_entity_cleanup(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1377,6 +1377,17 @@
                      configPath: 'memory.focus_injection.fact_min_relevance',
                      displayValue: (v) => v.toFixed(2),
                   },
+                  focus_entity_min_relevance: {
+                     type: 'range',
+                     label: 'People & things relevance floor',
+                     min: 0,
+                     max: 1,
+                     step: 0.02,
+                     hint: 'How clearly a remembered person, place or thing must relate to what you said, compared with the others, to be added to context or found by recall. Anything you mention by name is always included. Only applies once there are at least 32. 0 turns it off. Default 0.40.',
+                     advanced: true,
+                     configPath: 'memory.focus_injection.entity_min_relevance',
+                     displayValue: (v) => v.toFixed(2),
+                  },
                   focus_weight_semantic: {
                      type: 'range',
                      label: 'Weight: semantic similarity',

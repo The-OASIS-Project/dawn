@@ -53,6 +53,9 @@ void memory_embeddings_invalidate_cache(void) {
 }
 void memory_embeddings_invalidate_entity_cache(void) {
 }
+void memory_embeddings_invalidate_entity_cache_for_user(int user_id) {
+   (void)user_id;
+}
 
 /* memory_db.c calls these when reading/writing entity embeddings; the
  * provenance tests touch fact rows, not embeddings, so a noop stub is

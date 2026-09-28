@@ -880,6 +880,7 @@ list(APPEND DAWN_SOURCES
 list(APPEND DAWN_SOURCES
     src/core/embedding_engine.c
     src/auth/auth_db_core.c
+    src/auth/auth_db_ids.c
     src/auth/auth_db_schema.c
     src/auth/auth_db_backup.c
     src/auth/auth_db_migrations.c
@@ -942,6 +943,7 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_predicate_dedup.c
     src/memory/memory_bm25.c
     src/memory/memory_stem.c
+    src/memory/memory_terms.c
     src/memory/memory_note_guard.c
     src/memory/memory_note_bridge.c
     src/memory/memory_context.c
@@ -957,6 +959,7 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_history_loader.c
     src/memory/memory_summarize_missing.c
     src/memory/memory_embeddings.c
+    src/memory/memory_embeddings_entity.c
     src/memory/memory_embed_backfill.c
     src/memory/memory_recategorize.c
     src/memory/memory_embed_tokenizer.c

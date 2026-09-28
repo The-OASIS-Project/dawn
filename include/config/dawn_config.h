@@ -608,6 +608,10 @@ typedef struct {
    float fact_min_relevance;     /* Facts: same corpus-relative measure against the user's
                                     other facts; injection only (not the memory tool).
                                     0 disables. */
+   float entity_min_relevance;   /* Entities: same measure against the user's other entities,
+                                    for those the query doesn't name (a named entity always
+                                    counts).  Injection, recall and the memory tool.
+                                    0 disables. */
    float document_min_relevance; /* Document chunks: minimum similarity measured from the
                                     corpus-typical level toward identical,
                                     (cos - pool_mean) / (1 - pool_mean).  Model-independent;

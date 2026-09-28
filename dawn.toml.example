@@ -792,6 +792,11 @@ citation_reinforcement_boost = 0.05
                                       # against your other facts.  Injection
                                       # only; memory search is unaffected.
                                       # 0 disables.  Range: 0.0 - 1.0
+# entity_min_relevance = 0.40         # Same measure for people, places and
+                                      # things.  An entity the message names
+                                      # always counts.  Injection, recall and
+                                      # memory search.  0 disables.
+                                      # Range: 0.0 - 1.0
 # classifier_enabled = false          # RAGRoute-style source classifier
                                       # (default off — opt-in only after probe).
 # weight_semantic = 1.0               # Generative-Agents three-factor ranker

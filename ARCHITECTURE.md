@@ -392,6 +392,7 @@ Per-module locks (scoped to a single subsystem):
   job_reinvoke::s_inflight_mutex (src/core/job_reinvoke.c) — per-parent reinvoke in-flight set (leaf)
   memory_embed_backfill::s_backfill_mutex (src/memory/memory_embed_backfill.c) — embedding-backfill request queue (LEAF; never held across an embed or DB call; joins an already-exited worker while held — safe only because the worker takes no lock after clearing s_backfill_running)
   document_embed_cache::s_cache.mutex (src/tools/document_embed_cache.c) — in-memory document-chunk embeddings (taken BEFORE the auth_db lock while a rebuild streams rows; never after it; scoring holds only this)
+  memory_embeddings_entity::s_ent.mutex (src/memory/memory_embeddings_entity.c) — per-user entity-embedding copies (LEAF: held only to look up, score and install; a copy is read from the DB and name-stemmed with no cache lock held; invalidation is lock-free atomics, safe under the auth_db lock)
   memory_extraction::s_extraction_mutex + s_extraction_cond (src/memory/memory_extraction.c) — per-user extraction slots (leaf); the cond var lets a forget wait out a user's in-flight extraction (memory_extraction_hold_user)
   ...and similar per-tool mutexes in src/tools/*.c
 ```

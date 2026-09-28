@@ -137,7 +137,16 @@ float embedding_engine_cosine(const float *a, const float *b, int dims);
  * @param pool       Pool size
  * @return Relevance (can be negative), or 0 for an empty/degenerate pool
  */
-float embedding_corpus_relevance(float cosine, double cosine_sum, int pool);
+static inline float embedding_corpus_relevance(float cosine, double cosine_sum, int pool) {
+   if (pool <= 0) {
+      return 0.0f;
+   }
+   const double mean = cosine_sum / (double)pool;
+   if (mean >= 1.0) {
+      return 0.0f;
+   }
+   return (float)(((double)cosine - mean) / (1.0 - mean));
+}
 
 #ifdef __cplusplus
 }

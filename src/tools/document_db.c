@@ -576,32 +576,6 @@ int document_db_chunk_create(int64_t document_id,
    return result;
 }
 
-/* Bytes for n int64 ids as a JSON array: "[", up to 20 digits and a comma
- * each, "]", NUL. */
-#define DOC_IDS_JSON_SIZE(n) ((size_t)(n)*21 + 3)
-
-/* ids as a JSON array for json_each; caller frees.  NULL on failure. */
-static char *ids_json(const int64_t *ids, int n) {
-   const size_t list_size = DOC_IDS_JSON_SIZE(n);
-   char *list = malloc(list_size);
-   if (!list) {
-      return NULL;
-   }
-   size_t off = 0;
-   list[off++] = '[';
-   for (int i = 0; i < n; i++) {
-      int w = snprintf(list + off, list_size - off, "%s%lld", i ? "," : "", (long long)ids[i]);
-      if (w < 0 || (size_t)w >= list_size - off - 1) {
-         free(list);
-         return NULL;
-      }
-      off += (size_t)w;
-   }
-   list[off++] = ']';
-   list[off] = '\0';
-   return list;
-}
-
 int document_db_chunks_meta_by_ids(int user_id,
                                    const int64_t *ids,
                                    int n,
@@ -611,7 +585,7 @@ int document_db_chunks_meta_by_ids(int user_id,
       return FAILURE;
    }
    *count_out = 0;
-   char *list = ids_json(ids, n);
+   char *list = auth_db_internal_ids_json(ids, n);
    if (!list) {
       return FAILURE;
    }
@@ -660,7 +634,7 @@ int document_db_chunks_get_by_ids(int user_id,
       return FAILURE;
    }
    *count_out = 0;
-   char *list = ids_json(ids, n);
+   char *list = auth_db_internal_ids_json(ids, n);
    if (!list) {
       return FAILURE;
    }

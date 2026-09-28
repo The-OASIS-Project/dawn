@@ -435,11 +435,36 @@ int memory_db_entity_get_photo(int user_id,
 int memory_db_entity_merge(int user_id, int64_t source_id, int64_t target_id);
 
 /**
+ * @brief Load entities by id (same fields as memory_db_entity_get_by_name)
+ *
+ * One statement for any number of ids.  Only the user's entities are
+ * returned; order follows the database, not @p ids.
+ *
+ * @param count_out Output: entities written to @p out
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_entities_get_by_ids(int user_id,
+                                  const int64_t *ids,
+                                  int n,
+                                  memory_entity_t *out,
+                                  int *count_out);
+
+/**
+ * @brief How many canonical entities have an embedding of @p expected_dims
+ *
+ * What memory_db_entity_get_embeddings() would load with no limit, so a
+ * caller can size its buffers once.
+ *
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_entity_embedding_count(int user_id, int expected_dims, int *count_out);
+
+/**
  * @brief Load all entity embeddings for a user (for cache).
  *
  * Defaults to canonical-only: rows with `canonical_id IS NOT NULL` (soft
  * aliases of another entity, v43) are excluded so the entity-embedding
- * cache and focus-adapter scratch buffer don't double-count surface-form
+ * cache doesn't double-count surface-form
  * variants of the same real-world entity.  Pass @p include_aliases = true
  * for the future Graph-tab "show all rows" view; production retrieval
  * paths always pass false.
@@ -450,7 +475,7 @@ int memory_db_entity_merge(int user_id, int64_t source_id, int64_t target_id);
  *                        every embedded entity for the user.
  * @param expected_dims Expected embedding dimensions
  * @param out_ids Output: entity IDs
- * @param out_names Output: canonical names
+ * @param out_names Output: display names (the `name` column, not canonical_name)
  * @param out_types Output: entity types
  * @param out_embeddings Output: flat float array
  * @param out_norms Output: norms

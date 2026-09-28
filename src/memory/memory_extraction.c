@@ -1472,7 +1472,7 @@ static void process_extraction_response(int user_id,
 
    /* Invalidate entity embedding cache once after all extractions */
    if (entity_map_count > 0) {
-      memory_embeddings_invalidate_entity_cache();
+      memory_embeddings_invalidate_entity_cache_for_user(user_id);
    }
 
    /* Process summary */

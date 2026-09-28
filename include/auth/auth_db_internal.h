@@ -629,6 +629,16 @@ int auth_db_internal_verify_permissions(const char *path);
  */
 int auth_db_internal_create_parent_dir(const char *path);
 
+/**
+ * @brief @p n row ids as a JSON array, for `IN (SELECT value FROM json_each(?))`
+ *
+ * One bound parameter for any number of ids, so a batch lookup is one
+ * statement.  Caller frees.
+ *
+ * @return The array, or NULL on allocation failure
+ */
+char *auth_db_internal_ids_json(const int64_t *ids, int n);
+
 /* =============================================================================
  * Schema + Statement Lifecycle (defined in sibling modules)
  *

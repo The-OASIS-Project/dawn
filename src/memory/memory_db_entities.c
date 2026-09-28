@@ -28,6 +28,7 @@
 #define AUTH_DB_INTERNAL_ALLOWED
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -195,6 +196,81 @@ int memory_db_entity_get_by_name(int user_id,
    sqlite3_reset(s_db.stmt_memory_entity_get_by_name);
    AUTH_DB_UNLOCK();
    return result;
+}
+
+int memory_db_entities_get_by_ids(int user_id,
+                                  const int64_t *ids,
+                                  int n,
+                                  memory_entity_t *out,
+                                  int *count_out) {
+   if (count_out)
+      *count_out = 0;
+   if (!ids || !out || !count_out || n <= 0)
+      return MEMORY_DB_FAILURE;
+   char *list = auth_db_internal_ids_json(ids, n);
+   if (!list)
+      return MEMORY_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_RETURN((free(list), MEMORY_DB_FAILURE));
+   sqlite3_stmt *stmt = NULL;
+   /* Same columns as the other entity reads (populate_entity_from_row):
+    * mention count and first/last seen roll up over the entity's aliases. */
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT e.id, e.user_id, e.name, e.entity_type, e.canonical_name, "
+                          "  (SELECT COALESCE(SUM(mention_count), 0) FROM memory_entities "
+                          "     WHERE user_id = e.user_id AND (id = e.id OR canonical_id = e.id)), "
+                          "  (SELECT COALESCE(MIN(first_seen), 0) FROM memory_entities "
+                          "     WHERE user_id = e.user_id AND (id = e.id OR canonical_id = e.id)), "
+                          "  (SELECT COALESCE(MAX(last_seen), 0) FROM memory_entities "
+                          "     WHERE user_id = e.user_id AND (id = e.id OR canonical_id = e.id)) "
+                          "FROM memory_entities e "
+                          "WHERE e.user_id = ? AND e.id IN (SELECT value FROM json_each(?))",
+                          -1, &stmt, NULL) != SQLITE_OK) {
+      OLOG_ERROR("memory_db: prepare entities_get_by_ids failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      free(list);
+      return MEMORY_DB_FAILURE;
+   }
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_text(stmt, 2, list, -1, SQLITE_STATIC);
+   int count = 0;
+   while (count < n && sqlite3_step(stmt) == SQLITE_ROW) {
+      memset(&out[count], 0, sizeof(out[count]));
+      populate_entity_from_row(stmt, &out[count]);
+      count++;
+   }
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   free(list);
+   *count_out = count;
+   return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_entity_embedding_count(int user_id, int expected_dims, int *count_out) {
+   if (!count_out || expected_dims <= 0)
+      return MEMORY_DB_FAILURE;
+   *count_out = 0;
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT COUNT(*) FROM memory_entities WHERE user_id = ? "
+                          "AND embedding IS NOT NULL AND length(embedding) = ? "
+                          "AND canonical_id IS NULL",
+                          -1, &stmt, NULL) != SQLITE_OK) {
+      OLOG_ERROR("memory_db: prepare entity_embedding_count failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_int(stmt, 2, expected_dims * (int)sizeof(float));
+   int rc = MEMORY_DB_FAILURE;
+   if (sqlite3_step(stmt) == SQLITE_ROW) {
+      *count_out = sqlite3_column_int(stmt, 0);
+      rc = MEMORY_DB_SUCCESS;
+   }
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   return rc;
 }
 
 int memory_db_entity_update_embedding(int64_t entity_id,
@@ -377,6 +453,10 @@ int memory_db_entity_delete(int64_t entity_id, int user_id) {
    if (rc != SQLITE_DONE) {
       return MEMORY_DB_FAILURE;
    }
+   if (changes > 0) {
+      /* A deleted entity mustn't stay findable from the embedding cache. */
+      memory_embeddings_invalidate_entity_cache_for_user(user_id);
+   }
    return (changes > 0) ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
 }
 
@@ -536,7 +616,7 @@ int memory_db_entity_merge(int user_id, int64_t source_id, int64_t target_id) {
     * docs/ENTITY_MERGE_DESIGN.md §12.  Rollback path skips invalidation
     * because ROLLBACK reverses the in-progress UPDATEs and the cache state
     * is consistent with the pre-merge DB. */
-   memory_embeddings_invalidate_entity_cache();
+   memory_embeddings_invalidate_entity_cache_for_user(user_id);
 
    OLOG_INFO("memory_db: merged entity %lld into %lld for user %d", (long long)source_id,
              (long long)target_id, user_id);
@@ -574,9 +654,10 @@ int memory_db_entity_get_embeddings(int user_id,
    sqlite3_bind_int(s_db.stmt_memory_entity_get_embeddings, 1, user_id);
    sqlite3_bind_int(s_db.stmt_memory_entity_get_embeddings, 2, include_aliases ? 1 : 0);
    sqlite3_bind_int(s_db.stmt_memory_entity_get_embeddings, 3, max);
+   int expected_bytes = expected_dims * (int)sizeof(float);
+   sqlite3_bind_int(s_db.stmt_memory_entity_get_embeddings, 4, expected_bytes);
 
    int count = 0;
-   int expected_bytes = expected_dims * (int)sizeof(float);
 
    while (count < max && sqlite3_step(s_db.stmt_memory_entity_get_embeddings) == SQLITE_ROW) {
       int blob_bytes = sqlite3_column_bytes(s_db.stmt_memory_entity_get_embeddings, 3);

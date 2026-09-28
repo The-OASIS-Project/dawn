@@ -32,7 +32,7 @@
 #include "memory/memory_types.h"
 
 #define MOCK_MAX_FACTS 32
-#define MOCK_MAX_ENTITIES 16
+#define MOCK_MAX_ENTITIES 600 /* past the entity cache's first read (512) */
 #define MOCK_MAX_RELATIONS 32
 #define MOCK_MAX_SUMMARIES 16
 #define MOCK_MAX_HYBRID 16
@@ -57,6 +57,7 @@ typedef struct {
    float entity_norms[MOCK_MAX_ENTITIES];
    const char *entity_photo_ids[MOCK_MAX_ENTITIES]; /* NULL = no photo */
    int entity_count;
+   int call_count_entity_embeddings; /* loads of the entity cache */
    int entity_dim;
 
    /* Relations */

@@ -615,14 +615,6 @@ float embedding_engine_cosine_with_norms(const float *a,
    return memory_embeddings_cosine_with_norms(a, b, dims, norm_a, norm_b);
 }
 
-float embedding_corpus_relevance(float cosine, double cosine_sum, int pool) {
-   if (pool <= 0)
-      return 0.0f;
-   const double mean = cosine_sum / (double)pool;
-   if (mean >= 1.0)
-      return 0.0f;
-   return (float)(((double)cosine - mean) / (1.0 - mean));
-}
 
 /* memory_filter — production blocklist NOT linked.  Tests never inject
  * blocklist payloads through the adapter path; framework filter-on-

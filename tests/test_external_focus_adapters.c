@@ -504,6 +504,19 @@ static void test_document_label_rule(void) {
    TEST_ASSERT_EQUAL_INT(2, document_label_terms(&terms, "r\xc3\xa9sum\xc3\xa9 (draft)"));
    TEST_ASSERT_EQUAL_INT(0, document_label_terms(&terms, "Sum of costs"));
 
+   /* A long message of repeated words still reaches a name at its end. */
+   {
+      char msg[8192];
+      size_t off = 0;
+      for (int i = 0; i < 1200; i++) {
+         off += (size_t)snprintf(msg + off, sizeof(msg) - off, "spam ");
+      }
+      snprintf(msg + off, sizeof(msg) - off, "harbor relocation");
+      document_query_terms(msg, &terms);
+      TEST_ASSERT_EQUAL_INT(3, terms.count);
+      TEST_ASSERT_EQUAL_INT(2, document_label_terms(&terms, "Harbor Lane Relocation"));
+   }
+
    /* Curly quotes and dashes separate words; accented capitals fold. */
    document_query_terms("show me \xe2\x80\x9cmarigold project plan\xe2\x80\x9d", &terms);
    TEST_ASSERT_EQUAL_INT(3,

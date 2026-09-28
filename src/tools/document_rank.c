@@ -25,7 +25,6 @@
 
 #include "tools/document_rank.h"
 
-#include <ctype.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,7 +34,7 @@
 #include "core/time_query_parser.h"
 #include "dawn_error.h"
 #include "logging.h"
-#include "memory/memory_stem.h"
+#include "memory/memory_terms.h"
 
 _Static_assert(DOCUMENT_RANK_LEXICAL_MAX <= DOCUMENT_RANK_WANT_MAX,
                "every keyword hit's cosine is requested from the semantic pass");
@@ -44,8 +43,6 @@ _Static_assert(DOCUMENT_RANK_LEXICAL_MAX <= DOCUMENT_RANK_WANT_MAX,
 #define DOC_RANK_PHRASE_MAX_TOKENS 256
 /* Query words the phrase bonus looks for. */
 #define DOC_RANK_PHRASE_MAX_WORDS 32
-/* Room for a query's content words, joined for one stemming pass. */
-#define DOC_RANK_QUERY_WORDS_MAX (DOCUMENT_QUERY_TERMS_MAX * DOCUMENT_QUERY_TERM_LEN)
 
 /* What a ranking's items point into. */
 struct document_ranking_store {
@@ -56,186 +53,24 @@ struct document_ranking_store {
 };
 
 /* =============================================================================
- * Words
- *
- * One definition of a word for query terms, label terms and the phrase bonus:
- * a run of letters and digits, ASCII or not (so "résumé" is one word and
- * "Tax_Return_2024" three).  Punctuation and spaces outside ASCII — curly
- * quotes, dashes, the ellipsis, a no-break space — separate words like their
- * ASCII counterparts, so a phone keyboard's “marigold project plan” is three words.  The
- * query and the label must split the same way or their words can't match.
+ * Query words vs document labels
  * ============================================================================= */
 
-/* Byte length of the separator at @p p: ASCII other than a letter or digit,
- * or a UTF-8 punctuation/space character; 0 when @p p starts a word character. */
-static size_t separator_len(const unsigned char *p) {
-   if (p[0] < 0x80) {
-      return isalnum(p[0]) ? 0 : 1;
-   }
-   if (p[0] >= 0xC2 && p[0] <= 0xDF && p[1] >= 0x80 && p[1] <= 0xBF) {
-      const unsigned cp = ((p[0] & 0x1Fu) << 6) | (p[1] & 0x3Fu);
-      /* Latin-1 punctuation and symbols (no-break space, «», ¿, ...), × and ÷,
-       * but not the letters and digits in that block (ª µ º ¹ ² ³ ¼ ½ ¾). */
-      const bool letter = cp == 0xAA || cp == 0xB2 || cp == 0xB3 || cp == 0xB5 || cp == 0xB9 ||
-                          cp == 0xBA || (cp >= 0xBC && cp <= 0xBE);
-      return ((cp <= 0xBF && !letter) || cp == 0xD7 || cp == 0xF7) ? 2 : 0;
-   }
-   if (p[0] >= 0xE0 && p[0] <= 0xEF && p[1] >= 0x80 && p[1] <= 0xBF && p[2] >= 0x80 &&
-       p[2] <= 0xBF) {
-      const unsigned cp = ((p[0] & 0x0Fu) << 12) | ((p[1] & 0x3Fu) << 6) | (p[2] & 0x3Fu);
-      /* General punctuation (spaces, dashes, quotes, ellipsis), supplemental
-       * punctuation, CJK punctuation (not its letters and numerals, U+3005-3007
-       * and U+3021-303C), and the byte-order mark. */
-      const bool cjk_punct = (cp >= 0x3000 && cp <= 0x3004) || (cp >= 0x3008 && cp <= 0x3020) ||
-                             (cp >= 0x303D && cp <= 0x303F);
-      const bool punct = (cp >= 0x2000 && cp <= 0x206F) || (cp >= 0x2E00 && cp <= 0x2E7F) ||
-                         cjk_punct || cp == 0xFEFF;
-      return punct ? 3 : 0;
-   }
-   return 0; /* other letters, and malformed bytes, stay in the word */
-}
-
-/* The next word at or after @p p, or NULL at the end of the text. */
-static const char *next_word(const char *p, const char **start, size_t *len) {
-   size_t sep = 0;
-   while (*p && (sep = separator_len((const unsigned char *)p)) > 0) {
-      p += sep;
-   }
-   if (!*p) {
-      return NULL;
-   }
-   *start = p;
-   while (*p && separator_len((const unsigned char *)p) == 0) {
-      p++;
-   }
-   *len = (size_t)(p - *start);
-   return p;
-}
-
-/* Byte @p i of word @p w, case-folded: ASCII, and the Latin-1 capitals À–Þ
- * (UTF-8 C3 80–9E, other than ×), which fold to à–þ by adding 0x20. */
-static unsigned char fold_at(const char *w, size_t i) {
-   const unsigned char c = (unsigned char)w[i];
-   if (c < 0x80) {
-      return (unsigned char)tolower(c);
-   }
-   if (i > 0 && (unsigned char)w[i - 1] == 0xC3 && c >= 0x80 && c <= 0x9E && c != 0x97) {
-      return (unsigned char)(c + 0x20);
-   }
-   return c;
-}
-
-/* Function words that say nothing about which document is meant.  Kept short
- * on purpose: a word missing here costs little (a label must still contain two
- * query words), a content word added here would be ignored.  The codebase's
- * other lists serve other purposes (the dominant-token list drops words under
- * four letters, which would lose label words like "tax" and "vet"). */
-static const char *const QUERY_STOPWORDS[] = {
-   "a",    "about", "all",   "am",    "an",    "and",    "any",   "are",    "as",    "at",   "be",
-   "been", "but",   "by",    "can",   "could", "did",    "do",    "does",   "for",   "from", "get",
-   "had",  "has",   "have",  "he",    "her",   "him",    "his",   "how",    "i",     "if",   "in",
-   "into", "is",    "it",    "its",   "just",  "know",   "let",   "me",     "my",    "no",   "not",
-   "of",   "on",    "or",    "our",   "out",   "please", "she",   "should", "so",    "some", "tell",
-   "than", "that",  "the",   "their", "them",  "then",   "there", "these",  "they",  "this", "to",
-   "up",   "us",    "was",   "we",    "were",  "what",   "when",  "where",  "which", "who",  "why",
-   "will", "with",  "would", "you",   "your",
-};
-
-static bool is_query_stopword(const char *word) {
-   for (size_t i = 0; i < sizeof(QUERY_STOPWORDS) / sizeof(QUERY_STOPWORDS[0]); i++) {
-      if (strcmp(QUERY_STOPWORDS[i], word) == 0) {
-         return true;
-      }
-   }
-   return false;
-}
-
-/* Append @p text's words (lowercased, content words only when @p content) to
- * @p buf, space-separated, stopping at @p max_words.  Returns words added. */
-static int join_words(const char *text, bool content, int max_words, char *buf, size_t size) {
-   size_t off = 0;
-   int n = 0;
-   const char *start = NULL;
-   size_t len = 0;
-   buf[0] = '\0';
-   for (const char *p = text; n < max_words && (p = next_word(p, &start, &len)) != NULL;) {
-      if (len < 2 || len >= DOCUMENT_QUERY_TERM_LEN || off + len + 2 > size) {
-         continue; /* single letters, runs too long to be a word, or no room */
-      }
-      char word[DOCUMENT_QUERY_TERM_LEN];
-      for (size_t i = 0; i < len; i++) {
-         word[i] = (char)fold_at(start, i);
-      }
-      word[len] = '\0';
-      if (content && is_query_stopword(word)) {
-         continue;
-      }
-      if (off > 0) {
-         buf[off++] = ' ';
-      }
-      memcpy(buf + off, word, len + 1);
-      off += len;
-      n++;
-   }
-   return n;
-}
-
 void document_query_terms(const char *query, document_query_terms_t *out) {
-   out->count = 0;
-   if (!query) {
-      return;
-   }
-   char words[DOC_RANK_QUERY_WORDS_MAX];
-   char stems[DOC_RANK_QUERY_WORDS_MAX];
-   /* Stem them in one pass: one hold of the stemmer's lock, not one per word. */
-   if (join_words(query, true, DOCUMENT_QUERY_TERMS_MAX, words, sizeof(words)) == 0 ||
-       memory_stem_string(words, stems, sizeof(stems)) <= 0) {
-      return;
-   }
-   char *save = NULL;
-   for (char *tok = strtok_r(stems, " ", &save); tok && out->count < DOCUMENT_QUERY_TERMS_MAX;
-        tok = strtok_r(NULL, " ", &save)) {
-      bool seen = strlen(tok) >= DOCUMENT_QUERY_TERM_LEN;
-      for (int i = 0; i < out->count && !seen; i++) {
-         seen = strcmp(out->term[i], tok) == 0;
-      }
-      if (!seen) {
-         memcpy(out->term[out->count], tok, strlen(tok) + 1);
-         out->count++;
-      }
-   }
+   memory_terms_from_text(query, true, out);
 }
 
 int document_label_terms(const document_query_terms_t *terms, const char *label) {
    if (!terms || terms->count == 0 || !label || !label[0]) {
       return 0;
    }
-   char words[DOC_FILENAME_MAX];
-   char stems[DOC_FILENAME_MAX];
-   if (join_words(label, false, DOC_FILENAME_MAX, words, sizeof(words)) == 0 ||
-       memory_stem_string(words, stems, sizeof(stems)) <= 0) {
-      return 0;
-   }
-   bool found[DOCUMENT_QUERY_TERMS_MAX] = { false };
-   int count = 0;
-   char *save = NULL;
-   for (char *tok = strtok_r(stems, " ", &save); tok; tok = strtok_r(NULL, " ", &save)) {
-      for (int i = 0; i < terms->count; i++) {
-         if (!found[i] && strcmp(terms->term[i], tok) == 0) {
-            found[i] = true;
-            count++;
-         }
-      }
-   }
-   return count;
+   char line[DOC_FILENAME_MAX];
+   memory_terms_stem_line(label, false, line, sizeof(line));
+   return memory_terms_count_in(terms, line);
 }
 
 bool document_label_matches(int label_terms, int query_terms) {
-   if (query_terms <= 0) {
-      return false;
-   }
-   const int needed = query_terms < 2 ? query_terms : 2;
-   return label_terms >= needed;
+   return memory_terms_enough(label_terms, query_terms);
 }
 
 /* =============================================================================
@@ -257,8 +92,8 @@ static void phrase_words(const char *query, phrase_words_t *qw) {
    qw->count = 0;
    const char *start = NULL;
    size_t len = 0;
-   for (const char *p = query;
-        qw->count < DOC_RANK_PHRASE_MAX_WORDS && (p = next_word(p, &start, &len)) != NULL;) {
+   for (const char *p = query; qw->count < DOC_RANK_PHRASE_MAX_WORDS &&
+                               (p = memory_terms_next_word(p, &start, &len)) != NULL;) {
       if (len >= 3) { /* skip very short words */
          qw->words[qw->count] = start;
          qw->lengths[qw->count] = (int)len;
@@ -272,7 +107,7 @@ static bool tok_eq_ci(const char *a, int al, const char *b, int bl) {
       return false;
    }
    for (int i = 0; i < al; i++) {
-      if (fold_at(a, (size_t)i) != fold_at(b, (size_t)i)) {
+      if (memory_terms_fold_at(a, (size_t)i) != memory_terms_fold_at(b, (size_t)i)) {
          return false;
       }
    }
@@ -289,7 +124,7 @@ static float phrase_bonus(const char *text, const phrase_words_t *qw) {
    const char *start = NULL;
    size_t len = 0;
    for (const char *p = text;
-        nt < DOC_RANK_PHRASE_MAX_TOKENS && (p = next_word(p, &start, &len)) != NULL;) {
+        nt < DOC_RANK_PHRASE_MAX_TOKENS && (p = memory_terms_next_word(p, &start, &len)) != NULL;) {
       tstart[nt] = start;
       tlen[nt] = (int)len;
       nt++;

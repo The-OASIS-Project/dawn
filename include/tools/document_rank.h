@@ -27,6 +27,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "memory/memory_terms.h"
 #include "tools/document_db.h"
 #include "tools/document_embed_cache.h"
 
@@ -37,9 +38,6 @@ extern "C" {
 /** Most keyword (BM25) hits one ranking considers. */
 #define DOCUMENT_RANK_LEXICAL_MAX 64
 
-/** Most distinct content words taken from a query. */
-#define DOCUMENT_QUERY_TERMS_MAX 32
-#define DOCUMENT_QUERY_TERM_LEN 48
 
 /** How much of the corpus a ranking looks at. */
 typedef struct {
@@ -79,10 +77,7 @@ typedef struct {
 } document_ranking_t;
 
 /** A query's distinct content words, stemmed. */
-typedef struct {
-   char term[DOCUMENT_QUERY_TERMS_MAX][DOCUMENT_QUERY_TERM_LEN];
-   int count;
-} document_query_terms_t;
+typedef memory_terms_t document_query_terms_t;
 
 /**
  * @brief Rank the chunks @p user_id can access against a query
@@ -129,9 +124,8 @@ void document_ranking_free(document_ranking_t *ranking);
  * @brief A query's distinct content words, stemmed
  *
  * Common function words ("the", "what", "about", …) are left out: they
- * carry nothing about which document is meant.  Words are runs of letters,
- * digits and non-ASCII characters, so "Tax_Return" is two words and
- * "résumé" one, on both sides of document_label_terms().
+ * carry nothing about which document is meant.  Words split as
+ * memory_terms_next_word() describes, on both sides of document_label_terms().
  */
 void document_query_terms(const char *query, document_query_terms_t *out);
 
@@ -142,10 +136,8 @@ int document_label_terms(const document_query_terms_t *terms, const char *label)
  * @brief Whether a document's label names what the query asks for
  *
  * At least two of the query's content words, or its only one, appear in the
- * label.  This is a count of words, so it means the same thing in every
- * user's corpus (a keyword score's scale depends on the corpus).  Words found
- * only in a chunk's body don't count: an ordinary sentence shares some word
- * with most documents.
+ * label (memory_terms_enough).  Words found only in a chunk's body don't
+ * count: an ordinary sentence shares some word with most documents.
  */
 bool document_label_matches(int label_terms, int query_terms);
 

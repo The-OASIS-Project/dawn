@@ -97,6 +97,7 @@ endfunction()
 # prepared-statement layer rather than stubbing it.
 set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_core.c
+    ${SRC_ROOT}/src/auth/auth_db_ids.c
     ${SRC_ROOT}/src/auth/auth_db_schema.c
     ${SRC_ROOT}/src/auth/auth_db_backup.c
     ${SRC_ROOT}/src/auth/auth_db_migrations.c
@@ -504,10 +505,13 @@ dawn_add_unit_test(test_llm_context_merge
 dawn_add_unit_test(test_memory_embeddings
    SOURCES test_memory_embeddings.c test_memory_embeddings_stub.c
            ${SRC_ROOT}/src/memory/memory_embeddings.c
+           ${SRC_ROOT}/src/memory/memory_embeddings_entity.c
+           ${SRC_ROOT}/src/memory/memory_terms.c
+           ${SRC_ROOT}/src/memory/memory_stem.c
            ${SRC_ROOT}/src/memory/memory_embed_backfill.c
            ${SRC_ROOT}/src/core/time_query_parser.c
            ${SRC_ROOT}/src/core/embedding_engine.c
-   LIBS    dawn_common unity sqlite3 pthread m
+   LIBS    dawn_common unity sqlite3 pthread m stemmer
    LABEL   ci)
 
 dawn_add_unit_test(test_context_compaction
@@ -570,6 +574,7 @@ dawn_add_unit_test(test_temporal_relations
            ${SRC_ROOT}/src/memory/memory_db_summaries.c
            ${SRC_ROOT}/src/memory/memory_db_prefs.c
            ${SRC_ROOT}/src/memory/memory_db_entities.c
+           ${SRC_ROOT}/src/auth/auth_db_ids.c
            ${SRC_ROOT}/src/memory/memory_db_relations.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
            # v48: memory_db_facts.c calls memory_bm25_* + memory_stem_* helpers
@@ -586,6 +591,7 @@ dawn_add_unit_test(test_relation_supersede
            ${SRC_ROOT}/src/memory/memory_db_summaries.c
            ${SRC_ROOT}/src/memory/memory_db_prefs.c
            ${SRC_ROOT}/src/memory/memory_db_entities.c
+           ${SRC_ROOT}/src/auth/auth_db_ids.c
            ${SRC_ROOT}/src/memory/memory_db_relations.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
            ${SRC_ROOT}/src/memory/memory_bm25.c
@@ -658,6 +664,7 @@ dawn_add_unit_test(test_document_chunker
 dawn_add_unit_test(test_document_db
    SOURCES test_document_db.c test_document_db_stub.c
            ${SRC_ROOT}/src/tools/document_db.c
+           ${SRC_ROOT}/src/auth/auth_db_ids.c
            ${SRC_ROOT}/src/tools/document_db_embeddings.c
            # v61: document_db.c now stems label/body for the FTS sync helpers and
            # runs the BM25 lexical search (build_match_expr + normalize).
@@ -829,6 +836,8 @@ dawn_add_unit_test(test_memory_focus_adapters
    SOURCES test_memory_focus_adapters.c test_memory_focus_adapters_stub.c
            ${SRC_ROOT}/src/memory/memory_focus_adapters.c
            ${SRC_ROOT}/src/memory/memory_fact_search.c
+           ${SRC_ROOT}/src/memory/memory_embeddings_entity.c
+           ${SRC_ROOT}/src/memory/memory_terms.c
            ${SRC_ROOT}/src/core/focus/focus_source.c
            ${SRC_ROOT}/src/core/focus/focus_recency.c
            ${SRC_ROOT}/src/core/focus/focus_candidate_helpers.c
@@ -900,6 +909,7 @@ dawn_add_unit_test(test_external_focus_adapters
            ${SRC_ROOT}/src/core/focus/focus_dominant_token.c
            ${SRC_ROOT}/src/core/time_query_parser.c
            ${SRC_ROOT}/src/memory/memory_stem.c
+           ${SRC_ROOT}/src/memory/memory_terms.c
    LIBS    dawn_common unity pthread m stemmer
    LABEL   ci)
 
@@ -1049,6 +1059,7 @@ dawn_add_unit_test(test_memory_provenance
            ${SRC_ROOT}/src/memory/memory_db_summaries.c
            ${SRC_ROOT}/src/memory/memory_db_prefs.c
            ${SRC_ROOT}/src/memory/memory_db_entities.c
+           ${SRC_ROOT}/src/auth/auth_db_ids.c
            ${SRC_ROOT}/src/memory/memory_db_relations.c
            ${SRC_ROOT}/src/memory/memory_db_provenance.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
@@ -1443,6 +1454,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/benchmarks/bench_retrieval_stub.c
            ${SRC_ROOT}/benchmarks/bench_memory_pipeline.c
            ${SRC_ROOT}/src/tools/document_db.c
+           ${SRC_ROOT}/src/auth/auth_db_ids.c
            ${SRC_ROOT}/src/tools/document_db_embeddings.c
            ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/core/time_query_parser.c
@@ -1469,6 +1481,8 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/memory/memory_graph_retrieval.c
            ${SRC_ROOT}/src/memory/memory_predicate_dedup.c
            ${SRC_ROOT}/src/memory/memory_embeddings.c
+           ${SRC_ROOT}/src/memory/memory_embeddings_entity.c
+           ${SRC_ROOT}/src/memory/memory_terms.c
            ${SRC_ROOT}/src/memory/memory_embed_backfill.c
            ${SRC_ROOT}/src/memory/memory_extraction.c
            ${SRC_ROOT}/src/memory/memory_extraction_input.c
@@ -1523,6 +1537,7 @@ dawn_add_unit_test(test_memory_remember
    SOURCES test_memory_remember.c
            ${SRC_ROOT}/benchmarks/bench_retrieval_stub.c
            ${SRC_ROOT}/src/tools/document_db.c
+           ${SRC_ROOT}/src/auth/auth_db_ids.c
            ${SRC_ROOT}/src/tools/document_db_embeddings.c
            ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/core/time_query_parser.c
@@ -1549,6 +1564,8 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/memory/memory_graph_retrieval.c
            ${SRC_ROOT}/src/memory/memory_predicate_dedup.c
            ${SRC_ROOT}/src/memory/memory_embeddings.c
+           ${SRC_ROOT}/src/memory/memory_embeddings_entity.c
+           ${SRC_ROOT}/src/memory/memory_terms.c
            ${SRC_ROOT}/src/memory/memory_embed_backfill.c
            ${SRC_ROOT}/src/memory/memory_extraction.c
            ${SRC_ROOT}/src/memory/memory_extraction_input.c
