@@ -923,7 +923,7 @@ dawn_add_unit_test(test_llm_capabilities
            ${SRC_ROOT}/src/llm/llm_capabilities.c
            ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/src/tools/toml.c
-   LIBS    dawn_common unity
+   LIBS    dawn_common unity ${JSONC_LIBRARIES}
    DEFINES MODELS_TOML_PATH="${SRC_ROOT}/models.toml"
    LABEL   ci)
 

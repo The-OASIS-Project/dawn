@@ -1968,10 +1968,11 @@ Format rules:
                >
                <select
                   id="reasoning-mode-select"
-                  title="Enable extended thinking for complex queries"
+                  title="Reasoning mode: only the modes the current model accepts are offered"
+                  aria-describedby="effort-hint"
                >
-                  <option value="disabled" selected>Disabled</option>
-                  <option value="enabled">Enabled</option>
+                  <option value="disabled" selected>Off</option>
+                  <option value="enabled">On</option>
                </select>
 
                <label for="reasoning-effort-select" class="llm-label" id="effort-label"
@@ -1979,7 +1980,8 @@ Format rules:
                >
                <select
                   id="reasoning-effort-select"
-                  title="Reasoning depth: None (off, gpt-5.4 only), Low, Medium, High, XHigh (gpt-5.4 only)"
+                  title="Reasoning effort: only the levels the current model offers"
+                  aria-describedby="effort-hint"
                   disabled
                >
                   <option value="none">None</option>
@@ -1988,7 +1990,7 @@ Format rules:
                   <option value="high">High</option>
                   <option value="xhigh">XHigh</option>
                </select>
-               <span class="control-hint hidden" id="effort-hint"></span>
+               <span class="control-hint hidden" id="effort-hint" aria-live="polite"></span>
 
                <label for="privacy-toggle" class="llm-label" id="privacy-label">Privacy:</label>
                <div id="tools-group">
@@ -3749,6 +3751,7 @@ token = "eyJ..."</pre
       <script defer src="/js/ui/settings/audio.js"></script>
       <script defer src="/js/ui/settings/config.js"></script>
       <script defer src="/js/ui/settings/search.js"></script>
+      <script defer src="/js/ui/settings/reasoning.js"></script>
       <script defer src="/js/ui/settings/llm.js"></script>
       <script defer src="/js/ui/settings/forget-learned.js"></script>
       <script defer src="/js/ui/settings/schema.js"></script>

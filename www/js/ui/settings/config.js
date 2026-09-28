@@ -547,6 +547,11 @@
          callbacks.updateAudioBackendState(backendSelect.value);
       }
 
+      // Every configured model's reasoning capabilities (the Reasoning/Effort selects)
+      if (typeof DawnReasoning !== 'undefined') {
+         DawnReasoning.setCloudCapabilities(payload.reasoning_capabilities);
+      }
+
       // Extract cloud model lists from config for quick controls dropdown
       if (callbacks.updateCloudModelLists) {
          callbacks.updateCloudModelLists(currentConfig);

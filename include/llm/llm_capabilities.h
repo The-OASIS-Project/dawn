@@ -34,6 +34,7 @@ extern "C" {
 #endif
 
 struct toml_table_t;
+struct json_object;
 
 /** A reasoning mode. */
 typedef enum {
@@ -75,6 +76,8 @@ typedef struct {
    char effort[LLM_EFFORT_NAME_MAX]; /**< "" when the mode takes none */
    bool budget;                      /**< effort names a budget size (Claude/local enabled) */
    bool clamped;                     /**< The request asked for something the model can't do */
+   bool mode_clamped;                /**< ...its mode (mode_clamped || effort_clamped == clamped) */
+   bool effort_clamped;              /**< ...its effort level */
 } llm_thinking_resolved_t;
 
 /**
@@ -131,7 +134,8 @@ void llm_thinking_resolve(const llm_thinking_caps_t *caps,
  * The session's thinking mode and effort (llm_get_current_thinking_mode /
  * llm_get_current_reasoning_effort) against the model's capabilities, as a
  * utility call when tools are suppressed for it.  What every request builder
- * sends.
+ * sends.  For a local model, detects the local provider first if nothing has
+ * (a request can't send budget levels it may not have).
  */
 void llm_thinking_resolve_current(llm_type_t type,
                                   cloud_provider_t provider,
@@ -145,6 +149,24 @@ void llm_thinking_resolve_current(llm_type_t type,
  * levels of a Claude or llama.cpp "enabled" mode).  Anything else is medium.
  */
 int llm_thinking_budget_size(const char *level);
+
+/**
+ * @brief A model's capabilities as the clients receive them
+ *
+ *   { "source": "row" | "provider_default" | "local",
+ *     "modes": [ { "mode": "disabled" | "adaptive" | "enabled",
+ *                  "efforts": [ lowest first; [] = no effort choice ],
+ *                  "budget": true when the efforts pick a thinking budget,
+ *                  "budget_tokens": { level: tokens } (budget modes only) } ],
+ *     "default": { "mode": ..., "effort": ... } }
+ *
+ * "modes": [] means the model has no reasoning control.  "default" is what a
+ * new conversation gets: the configured [llm.thinking] mode and effort,
+ * resolved for this model.
+ *
+ * @return A new object (caller owns it), or NULL on allocation failure
+ */
+struct json_object *llm_thinking_caps_to_json(const llm_thinking_caps_t *caps);
 
 /** The wire name of a mode ("disabled", "adaptive", "enabled"). */
 const char *llm_think_mode_name(llm_think_mode_t mode);

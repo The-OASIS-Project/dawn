@@ -61,6 +61,7 @@
 #include "webui/webui_internal.h"
 #include "webui/webui_music.h"
 #include "webui/webui_phone_config.h"
+#include "webui/webui_reasoning.h"
 #include "webui/webui_server.h" /* For WEBUI_MAX_THUMBNAIL_SIZE */
 #ifdef DAWN_ENABLE_HOMEASSISTANT_TOOL
 #include "tools/homeassistant_service.h"
@@ -246,16 +247,16 @@ void handle_get_config(ws_connection_t *conn) {
    if (ctx_max > 0) {
       json_object_object_add(llm_runtime, "context_max", json_object_new_int(ctx_max));
    }
-   /* Session's actual reasoning settings, so a client shows the real per-session
-    * value instead of the config default. Sourced from `resolved` to match every
-    * sibling field in this object (type/provider/model/context_max). llm_state_update
-    * only fires on a switch_llm tool call, so this is the only place a fresh
-    * connection learns them. */
-   json_object_object_add(llm_runtime, "thinking_mode",
-                          json_object_new_string(resolved.thinking_mode));
-   json_object_object_add(llm_runtime, "reasoning_effort",
-                          json_object_new_string(resolved.reasoning_effort));
+   /* The session's reasoning as its model is actually sent, with that model's
+    * capabilities, so a client shows the real value and only the options the
+    * model takes.  llm_state_update only fires on a switch_llm tool call, so
+    * this is the only place a fresh connection learns them. */
+   webui_reasoning_stamp(llm_runtime, &session_config);
    json_object_object_add(payload, "llm_runtime", llm_runtime);
+
+   /* Every configured cloud model's reasoning capabilities (local models come
+    * with list_llm_models_response). */
+   json_object_object_add(payload, "reasoning_capabilities", webui_reasoning_cloud_capabilities());
 
    /* Add auth state for frontend UI visibility control */
    json_object_object_add(payload, "authenticated", json_object_new_boolean(conn->authenticated));
@@ -2364,6 +2365,7 @@ void handle_list_llm_models(ws_connection_t *conn) {
          json_object *model_obj = json_object_new_object();
          json_object_object_add(model_obj, "name", json_object_new_string(models[i].name));
          json_object_object_add(model_obj, "loaded", json_object_new_boolean(models[i].loaded));
+         webui_reasoning_add_local(model_obj, models[i].name);
          json_object_array_add(models_arr, model_obj);
       }
    }

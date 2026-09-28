@@ -182,7 +182,7 @@
 
          // Show row if: reasoning mode enabled OR we have tokens to show
          const reasoningSelect = document.getElementById('reasoning-mode-select');
-         const reasoningEnabled = reasoningSelect && reasoningSelect.value === 'enabled';
+         const reasoningEnabled = reasoningSelect && reasoningSelect.value !== 'disabled';
          const shouldShow = reasoningEnabled || displayTokens > 0;
 
          if (shouldShow) {

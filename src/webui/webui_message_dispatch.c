@@ -72,6 +72,7 @@
 #include "webui/webui_internal.h"
 #include "webui/webui_oauth.h"
 #include "webui/webui_ota.h"
+#include "webui/webui_reasoning.h"
 #include "webui/webui_server.h"
 
 /* handle_cancel_message and handle_ping are defined at the bottom of this TU. */
@@ -463,6 +464,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       struct json_object *resp_payload = json_object_new_object();
 
       int success = 1;
+      bool reasoning_adjusted = false; /* the user's own reasoning change was adjusted */
       const char *error_msg = NULL;
 
       if (!conn->session) {
@@ -612,6 +614,8 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
          /* Parse thinking_mode.  Stored as picked; each request resolves it
           * against what the model accepts (llm_thinking_resolve_current). */
          struct json_object *thinking_mode_obj;
+         bool sent_mode = false;   /* an accepted thinking_mode came in */
+         bool sent_effort = false; /* an accepted reasoning_effort came in */
          if (json_object_object_get_ex(payload, "thinking_mode", &thinking_mode_obj)) {
             const char *new_thinking_mode = json_object_get_string(thinking_mode_obj);
             if (new_thinking_mode) {
@@ -621,6 +625,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                    strcmp(new_thinking_mode, "enabled") == 0 ||
                    strcmp(new_thinking_mode, "auto") == 0) {
                   has_changes = true;
+                  sent_mode = true;
                   safe_strscpy(config.thinking_mode, new_thinking_mode);
                   OLOG_INFO("WebUI: Session thinking_mode set to '%s'", config.thinking_mode);
                } else {
@@ -641,6 +646,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                    strcmp(new_effort, "high") == 0 || strcmp(new_effort, "xhigh") == 0 ||
                    strcmp(new_effort, "max") == 0) {
                   has_changes = true;
+                  sent_effort = true;
                   safe_strscpy(config.reasoning_effort, new_effort);
                   OLOG_INFO("WebUI: Session reasoning_effort set to '%s'", config.reasoning_effort);
                } else {
@@ -650,9 +656,21 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
             }
          }
 
-         /* Apply config if changes were made */
+         /* A restore push carries a loaded conversation's own settings. */
+         bool from_restore = false;
+         struct json_object *restore_obj;
+         if (json_object_object_get_ex(payload, "from_restore", &restore_obj)) {
+            from_restore = json_object_get_boolean(restore_obj);
+         }
+
+         /* Apply config if changes were made.  The reasoning pick is stored as
+          * picked (each request resolves it for its model); the reply says
+          * whether the user's own change was adjusted, never for a restore. */
          if (has_changes) {
             int rc = session_set_llm_config(conn->session, &config);
+            if (rc == 0 && !from_restore) {
+               reasoning_adjusted = webui_reasoning_adjusted(&config, sent_mode, sent_effort);
+            }
             if (rc != 0) {
                success = 0;
                error_msg = "API key not configured for requested provider";
@@ -675,11 +693,6 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                 * NEXT conversation by the time we process this message — the
                 * cascade would then silently overwrite that conv with the
                 * previous conv's values. */
-               bool from_restore = false;
-               struct json_object *restore_obj;
-               if (json_object_object_get_ex(payload, "from_restore", &restore_obj)) {
-                  from_restore = json_object_get_boolean(restore_obj);
-               }
                if (!from_restore && conn->active_conversation_id > 0) {
                   const char *type_str = config.type == LLM_LOCAL ? "local" : "cloud";
                   /* tools_mode column is retired (dead) — pass empty. */
@@ -732,12 +745,11 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
          json_object_object_add(resp_payload, "model",
                                 json_object_new_string(model_name ? model_name : ""));
 
-         /* Effective reasoning settings — so the client control reflects the real
-          * value (e.g. after a server-side thinking clamp), not the picked one. */
-         json_object_object_add(resp_payload, "thinking_mode",
-                                json_object_new_string(current.thinking_mode));
-         json_object_object_add(resp_payload, "reasoning_effort",
-                                json_object_new_string(current.reasoning_effort));
+         /* Effective reasoning, with the model's capabilities, so the client
+          * control shows what runs and only what the model takes. */
+         webui_reasoning_stamp(resp_payload, &current);
+         json_object_object_add(resp_payload, "reasoning_adjusted",
+                                json_object_new_boolean(reasoning_adjusted));
       }
 
       /* Include API key availability */

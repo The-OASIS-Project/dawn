@@ -16,82 +16,43 @@
    };
 
    /**
-    * Normalize a thinking_mode value from any source (server config, restored
-    * conversation, legacy storage) to the two values the dropdown supports.
-    * Legacy "auto" was identical to "enabled" in behavior — fold it in so old
-    * conversations still load cleanly without an "auto" option in the markup.
+    * Normalize a stored thinking_mode.  Legacy "auto" meant "reasoning on"; the
+    * server settles everything else against the model (disabled / adaptive /
+    * enabled), so those pass through.
     */
    function normalizeThinkingMode(mode) {
-      if (mode === 'disabled') return 'disabled';
-      if (mode === 'auto') return 'enabled';
-      if (mode === 'enabled') return 'enabled';
-      return 'enabled';
+      return mode === 'auto' ? 'enabled' : mode || 'disabled';
+   }
+
+   /* The capabilities the controls were last drawn from: a server-stamped set
+    * covers a model the client maps don't (a local model before its list
+    * arrives, a restored model no longer configured). */
+   let shownReasoningCaps = null;
+
+   /** The current model's reasoning capabilities, if the server has sent them. */
+   function currentReasoningCaps() {
+      return (
+         DawnReasoning.capsFor(
+            llmRuntimeState.type,
+            llmRuntimeState.provider,
+            llmRuntimeState.model
+         ) || shownReasoningCaps
+      );
    }
 
    /**
-    * Return the set of reasoning_effort values the given model accepts.
-    * Mirrors the C-side llm_openai_clamp_effort_for_model() rules.
-    *
-    *   gpt-5 base/-mini/-nano:  low | medium | high                 (no none, no xhigh)
-    *   gpt-5.1:                 none | low | medium | high          (no xhigh)
-    *   gpt-5.2 / gpt-5.4*:      none | low | medium | high | xhigh  (full set)
-    *   o1 / o3 series:          low | medium | high
-    *   Gemini 2.5+/3.x:         low | medium | high
-    *   Claude (any) / local:    low | medium | high  (mapped to budgets server-side)
-    *
-    * Server-side clamping handles wrong values gracefully, but trimming the
-    * dropdown prevents the user from picking something that gets silently
-    * downgraded.
+    * Render the Reasoning + Effort selects for @p caps (only the modes and
+    * levels that model takes) showing @p mode / @p effort.  Display only: the
+    * user's pick lives in conversationLlmState, which only user input (and a
+    * server-reported pick) changes, so no model switch or reload rewrites it.
     */
-   function validEffortsForModel(modelName) {
-      if (!modelName) return ['low', 'medium', 'high']; // safe baseline
-      // gpt-5 family detection — match C llm_openai_is_gpt5_base_family
-      if (modelName.startsWith('gpt-5')) {
-         const next = modelName.charAt(5);
-         if (next === '' || next === '-') {
-            // gpt-5 / gpt-5-mini / gpt-5-nano / gpt-5-2025-08-07
-            return ['low', 'medium', 'high'];
-         }
-         if (next === '.') {
-            const minor = modelName.charAt(6);
-            // gpt-5.1: none added; gpt-5.2+ adds xhigh too
-            if (minor === '1') {
-               return ['none', 'low', 'medium', 'high'];
-            }
-            if (minor >= '2' && minor <= '9') {
-               return ['none', 'low', 'medium', 'high', 'xhigh'];
-            }
-         }
+   function renderReasoning(caps, mode, effort) {
+      shownReasoningCaps = caps;
+      const shown = DawnReasoning.render(caps, normalizeThinkingMode(mode), effort);
+      if (typeof DAWN !== 'undefined' && DAWN.updateLlmMiniSummary) {
+         DAWN.updateLlmMiniSummary();
       }
-      // Everything else: o-series, Claude, Gemini, local — base set
-      return ['low', 'medium', 'high'];
-   }
-
-   /**
-    * Sync the per-conversation Effort dropdown to whatever the current model accepts.
-    * Hides invalid options and snaps the selected value to the closest valid one
-    * (xhigh→high, none→low) when the user switches to a less-capable model.
-    */
-   function syncEffortDropdownToModel(modelName, skipPersist) {
-      const depthSelect = document.getElementById('reasoning-effort-select');
-      if (!depthSelect) return;
-      const valid = new Set(validEffortsForModel(modelName));
-
-      let selected = depthSelect.value;
-      Array.from(depthSelect.options).forEach((opt) => {
-         opt.hidden = !valid.has(opt.value);
-         opt.disabled = !valid.has(opt.value);
-      });
-
-      // Snap to a valid value if the current pick is no longer allowed.
-      if (!valid.has(selected)) {
-         const fallback = selected === 'xhigh' ? 'high' : selected === 'none' ? 'low' : 'medium';
-         depthSelect.value = fallback;
-         conversationLlmState.reasoning_effort = fallback;
-         if (!skipPersist) {
-            setSessionLlm({ reasoning_effort: fallback });
-         }
-      }
+      return shown;
    }
 
    // Per-conversation LLM settings state
@@ -245,7 +206,17 @@
          modelSelect.addEventListener('change', () => {
             if (modelSelect.value) {
                setSessionLlm({ model: modelSelect.value });
-               syncEffortDropdownToModel(modelSelect.value);
+               /* Show the new model's options now; the server's reply carries
+                * the settled values. */
+               renderReasoning(
+                  DawnReasoning.capsFor(
+                     llmRuntimeState.type,
+                     llmRuntimeState.provider,
+                     modelSelect.value
+                  ),
+                  conversationLlmState.thinking_mode,
+                  conversationLlmState.reasoning_effort
+               );
             }
          });
       }
@@ -277,33 +248,48 @@
       const reasoningSelect = document.getElementById('reasoning-mode-select');
       const depthSelect = document.getElementById('reasoning-effort-select');
 
-      // Helper to update depth selector enabled state based on reasoning mode
-      function updateDepthEnabled() {
-         if (depthSelect) {
-            const disabled = reasoningSelect && reasoningSelect.value === 'disabled';
-            depthSelect.disabled = disabled;
-            setControlHint('effort-hint', disabled ? 'Enable reasoning first' : null);
-         }
-      }
-
       if (reasoningSelect) {
          reasoningSelect.addEventListener('change', () => {
+            /* The new mode's levels, keeping the pick where the mode has it;
+             * takes effect on the next request, mid-conversation included. */
+            const caps = currentReasoningCaps();
             conversationLlmState.thinking_mode = reasoningSelect.value;
-            // Update depth selector enabled state
-            updateDepthEnabled();
-            // Takes effect on the next request, mid-conversation included
-            setSessionLlm({ thinking_mode: reasoningSelect.value });
+            conversationLlmState.reasoning_effort = DawnReasoning.effortForMode(
+               caps,
+               reasoningSelect.value,
+               conversationLlmState.reasoning_effort
+            );
+            renderReasoning(
+               caps,
+               conversationLlmState.thinking_mode,
+               conversationLlmState.reasoning_effort
+            );
+            setSessionLlm({
+               thinking_mode: conversationLlmState.thinking_mode,
+               reasoning_effort: conversationLlmState.reasoning_effort,
+            });
          });
       }
 
       if (depthSelect) {
          depthSelect.addEventListener('change', () => {
+            /* Sent with the mode the control shows, so a stored mode the model
+             * can't honor (an Off default on a model that can't turn it off) is
+             * replaced by what the user sees; takes effect on the next request. */
+            conversationLlmState.thinking_mode = reasoningSelect
+               ? reasoningSelect.value
+               : conversationLlmState.thinking_mode;
             conversationLlmState.reasoning_effort = depthSelect.value;
-            // Takes effect on the next request, mid-conversation included
-            setSessionLlm({ reasoning_effort: depthSelect.value });
+            renderReasoning(
+               currentReasoningCaps(),
+               conversationLlmState.thinking_mode,
+               conversationLlmState.reasoning_effort
+            );
+            setSessionLlm({
+               thinking_mode: conversationLlmState.thinking_mode,
+               reasoning_effort: conversationLlmState.reasoning_effort,
+            });
          });
-         // Initialize enabled state
-         updateDepthEnabled();
       }
 
       // Initial session defaults are applied after config loads via applyGlobalDefaultsToControls()
@@ -509,8 +495,6 @@
       const typeSelect = document.getElementById('llm-type-select');
       const providerSelect = document.getElementById('llm-provider-select');
       const modelSelect = document.getElementById('llm-model-select');
-      const reasoningSelect = document.getElementById('reasoning-mode-select');
-      const depthSelect = document.getElementById('reasoning-effort-select');
 
       // Reset type (local/cloud)
       if (typeSelect) {
@@ -524,8 +508,12 @@
          reasoning_effort: globalDefaults.reasoning_effort,
       };
 
-      // Reset provider and model based on type
-      if (globalDefaults.type === 'cloud') {
+      // Reset provider and model based on type: only to a provider this
+      // server has a key for (the server rejects the whole reset otherwise,
+      // and the session keeps its current provider and model)
+      const defaultProviderAvailable =
+         !!globalDefaults.provider && !!llmRuntimeState[`${globalDefaults.provider}_available`];
+      if (globalDefaults.type === 'cloud' && defaultProviderAvailable) {
          if (providerSelect) {
             providerSelect.value = globalDefaults.provider;
          }
@@ -536,6 +524,8 @@
             defaultModel = globalDefaults.claude_model;
          } else if (globalDefaults.provider === 'gemini') {
             defaultModel = globalDefaults.gemini_model;
+         } else if (globalDefaults.provider === 'openrouter') {
+            defaultModel = globalDefaults.openrouter_model;
          } else {
             defaultModel = globalDefaults.openai_model;
          }
@@ -546,39 +536,27 @@
             modelSelect.value = defaultModel;
          }
 
-         sessionReset.cloud_provider = globalDefaults.provider;
+         sessionReset.provider = globalDefaults.provider;
          sessionReset.model = defaultModel;
       }
 
-      // Reset reasoning dropdown to global default
-      if (reasoningSelect) {
-         reasoningSelect.value = globalDefaults.thinking_mode;
-         conversationLlmState.thinking_mode = globalDefaults.thinking_mode;
-         sessionReset.thinking_mode = globalDefaults.thinking_mode;
-      }
+      // Reasoning: the configured default is the new pick, shown as the default
+      // model takes it
+      conversationLlmState.thinking_mode = globalDefaults.thinking_mode;
+      conversationLlmState.reasoning_effort = globalDefaults.reasoning_effort;
+      renderReasoning(
+         DawnReasoning.capsFor(globalDefaults.type, globalDefaults.provider, sessionReset.model),
+         globalDefaults.thinking_mode,
+         globalDefaults.reasoning_effort
+      );
 
-      // Reset depth dropdown and enabled state
-      if (depthSelect) {
-         depthSelect.value = globalDefaults.reasoning_effort;
-         conversationLlmState.reasoning_effort = globalDefaults.reasoning_effort;
-         depthSelect.disabled = globalDefaults.thinking_mode === 'disabled';
-         setControlHint(
-            'effort-hint',
-            globalDefaults.thinking_mode === 'disabled' ? 'Enable reasoning first' : null
-         );
-      }
-
-      // Update runtime state
+      // Update runtime state (the server's reply confirms it)
       llmRuntimeState.type = globalDefaults.type;
-      llmRuntimeState.provider = globalDefaults.provider;
+      if (sessionReset.provider) {
+         llmRuntimeState.provider = sessionReset.provider;
+      }
       if (sessionReset.model) {
          llmRuntimeState.model = sessionReset.model;
-      }
-
-      // Trim Effort dropdown to the new model's accepted set.
-      // skipPersist: reset path sends its own from_restore-tagged payload.
-      if (sessionReset.model) {
-         syncEffortDropdownToModel(sessionReset.model, true);
       }
 
       // Send reset to session. Mark as from_restore so the server's
@@ -595,31 +573,20 @@
     * @param {boolean} isLocked - Whether the conversation is locked
     */
    function applyConversationLlmSettings(settings, isLocked) {
-      const reasoningSelect = document.getElementById('reasoning-mode-select');
-      const depthSelect = document.getElementById('reasoning-effort-select');
-
       if (settings) {
-         if (settings.thinking_mode && reasoningSelect) {
-            const tm = normalizeThinkingMode(settings.thinking_mode);
-            reasoningSelect.value = tm;
-            conversationLlmState.thinking_mode = tm;
-         }
-
-         if (settings.reasoning_effort && depthSelect) {
-            depthSelect.value = settings.reasoning_effort;
-            conversationLlmState.reasoning_effort = settings.reasoning_effort;
-         }
-         // Trim Effort dropdown to what this model accepts (and snap if needed).
-         // skipPersist: restore path sends its own from_restore-tagged payload.
-         if (settings.model) {
-            syncEffortDropdownToModel(settings.model, true);
-         }
-         // Update depth enabled state based on thinking mode
-         if (depthSelect && reasoningSelect) {
-            const disabled = reasoningSelect.value === 'disabled';
-            depthSelect.disabled = disabled;
-            setControlHint('effort-hint', disabled ? 'Enable reasoning first' : null);
-         }
+         /* The conversation's pick (what's stored), and its reasoning as the
+          * model is sent it, from the model's capabilities (both stamped on the
+          * settings by the server). */
+         conversationLlmState.thinking_mode =
+            settings.thinking_mode_pick || settings.thinking_mode || 'disabled';
+         conversationLlmState.reasoning_effort =
+            settings.reasoning_effort_pick || settings.reasoning_effort || 'medium';
+         renderReasoning(
+            settings.reasoning_capabilities ||
+               DawnReasoning.capsFor(settings.llm_type, settings.cloud_provider, settings.model),
+            settings.thinking_mode,
+            settings.reasoning_effort
+         );
 
          // Push restored settings back to the server session. Without this, the
          // session keeps whichever defaults were sent by applyGlobalDefaultsToControls
@@ -629,8 +596,9 @@
          if (settings.llm_type) sessionPayload.type = settings.llm_type;
          if (settings.cloud_provider) sessionPayload.provider = settings.cloud_provider;
          if (settings.model) sessionPayload.model = settings.model;
-         if (settings.thinking_mode) sessionPayload.thinking_mode = settings.thinking_mode;
-         if (settings.reasoning_effort) sessionPayload.reasoning_effort = settings.reasoning_effort;
+         /* The pick, not the effective value: the session stores what was picked. */
+         sessionPayload.thinking_mode = conversationLlmState.thinking_mode;
+         sessionPayload.reasoning_effort = conversationLlmState.reasoning_effort;
 
          if (Object.keys(sessionPayload).length > 0) {
             // Show loading state while syncing if provider/model is changing
@@ -744,6 +712,7 @@
       }
 
       localModelList = payload.models || [];
+      DawnReasoning.setLocalCapabilities(localModelList);
       localProviderType = payload.provider || 'Unknown';
 
       // Update provider dropdown to show detected local provider
@@ -982,32 +951,17 @@
     * Called after config loads to set initial UI state
     */
    function applyGlobalDefaultsToControls() {
-      const reasoningSelect = document.getElementById('reasoning-mode-select');
-      const depthSelect = document.getElementById('reasoning-effort-select');
+      conversationLlmState.thinking_mode = globalDefaults.thinking_mode;
+      conversationLlmState.reasoning_effort = globalDefaults.reasoning_effort;
+      renderReasoning(
+         currentReasoningCaps(),
+         globalDefaults.thinking_mode,
+         globalDefaults.reasoning_effort
+      );
 
-      if (reasoningSelect) {
-         reasoningSelect.value = globalDefaults.thinking_mode;
-         conversationLlmState.thinking_mode = globalDefaults.thinking_mode;
-      }
-
-      if (depthSelect) {
-         depthSelect.value = globalDefaults.reasoning_effort;
-         conversationLlmState.reasoning_effort = globalDefaults.reasoning_effort;
-         depthSelect.disabled = globalDefaults.thinking_mode === 'disabled';
-         setControlHint(
-            'effort-hint',
-            globalDefaults.thinking_mode === 'disabled' ? 'Enable reasoning first' : null
-         );
-      }
-
-      // Send initial defaults to session. from_restore: this fires at config-load
-      // time, which on a page reload may happen WHILE a conversation is already
-      // active server-side — defaults must not cascade onto that conv's row.
-      setSessionLlm({
-         thinking_mode: globalDefaults.thinking_mode,
-         reasoning_effort: globalDefaults.reasoning_effort,
-         from_restore: true,
-      });
+      /* Display only.  A new server session already starts on these defaults,
+       * and a new conversation's reset sends them; pushing them here would
+       * overwrite a live session's reasoning on every page reload. */
    }
 
    /**
@@ -1015,32 +969,24 @@
     * @param {Object} runtime - Runtime state object
     */
    /**
-    * Apply the session's actual reasoning settings from an llm_runtime payload to
-    * the thinking-mode + effort controls. Before llm_runtime carried thinking_mode
-    * and reasoning_effort, these controls could only show the config default until
-    * the user touched them; now a fresh connection reflects the live session value.
+    * Apply the session's reasoning from an llm_runtime / set_session_llm_response
+    * payload: the values its model is actually sent, rendered from that model's
+    * capabilities (both stamped by the server).
     */
    function applyRuntimeReasoning(runtime) {
-      const reasoningSelect = document.getElementById('reasoning-mode-select');
-      const depthSelect = document.getElementById('reasoning-effort-select');
-      if (reasoningSelect && runtime.thinking_mode) {
-         reasoningSelect.value = normalizeThinkingMode(runtime.thinking_mode);
-         conversationLlmState.thinking_mode = reasoningSelect.value;
+      if (!runtime.thinking_mode && !runtime.reasoning_capabilities) return;
+      /* The session's stored pick, when the server reports it. */
+      if (runtime.thinking_mode_pick) {
+         conversationLlmState.thinking_mode = runtime.thinking_mode_pick;
       }
-      if (depthSelect && runtime.reasoning_effort) {
-         depthSelect.value = runtime.reasoning_effort;
-         // Clamp the selection to what the model accepts (also hides invalid opts).
-         if (runtime.model) {
-            syncEffortDropdownToModel(runtime.model, true);
-         }
-         conversationLlmState.reasoning_effort = depthSelect.value;
+      if (runtime.reasoning_effort_pick) {
+         conversationLlmState.reasoning_effort = runtime.reasoning_effort_pick;
       }
-      // Effort is inert when thinking is disabled — mirror the reset-path UX.
-      if (reasoningSelect && depthSelect) {
-         const off = reasoningSelect.value === 'disabled';
-         depthSelect.disabled = off;
-         setControlHint('effort-hint', off ? 'Enable reasoning first' : null);
-      }
+      renderReasoning(
+         runtime.reasoning_capabilities || currentReasoningCaps(),
+         runtime.thinking_mode || conversationLlmState.thinking_mode,
+         runtime.reasoning_effort || conversationLlmState.reasoning_effort
+      );
    }
 
    function updateLlmControls(runtime) {
@@ -1146,15 +1092,7 @@
          updateModelDropdownForCloud();
       }
 
-      // Effort dropdown's valid set depends on the model. Re-sync whenever the
-      // server confirms a new runtime model so user can't pick xhigh on a model
-      // that doesn't accept it.  skipPersist: config-load path, not user action.
-      if (runtime.model) {
-         syncEffortDropdownToModel(runtime.model, true);
-      }
-
-      // Apply the session's actual thinking_mode / reasoning_effort (llm_runtime
-      // now carries them) so the controls reflect the live session, not the default.
+      // The session's actual reasoning, rendered for its model.
       applyRuntimeReasoning(runtime);
 
       // Update collapsed mini bar summary if available
@@ -1192,6 +1130,15 @@
 
       if (payload.success) {
          updateLlmControls(payload);
+         /* The user's change was adjusted to what the model takes: say so, in
+          * the controls' own words. */
+         if (payload.reasoning_adjusted && typeof DawnToast !== 'undefined') {
+            DawnToast.show(
+               `${payload.model || 'This model'} doesn't offer that reasoning setting; ` +
+                  `using ${DawnReasoning.summary()}.`,
+               'info'
+            );
+         }
       } else {
          console.error('Failed to update session LLM:', payload.error);
          if (typeof DawnToast !== 'undefined') {

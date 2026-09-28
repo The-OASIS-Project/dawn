@@ -70,6 +70,10 @@ int llm_budget_tokens_for_effort(const char *effort) {
 local_provider_t llm_local_get_provider(void) {
    return LOCAL_PROVIDER_LLAMA_CPP;
 }
+local_provider_t llm_local_detect_provider(const char *endpoint) {
+   (void)endpoint;
+   return llm_local_get_provider();
+}
 struct json_object *llm_tools_get_claude_format_filtered(bool r) {
    (void)r;
    return NULL;

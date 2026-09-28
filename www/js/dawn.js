@@ -2067,9 +2067,10 @@
       modeEl.textContent = typeSelect
          ? typeSelect.options[typeSelect.selectedIndex]?.text || 'Local'
          : 'Local';
-      modelEl.textContent = modelSelect
-         ? modelSelect.options[modelSelect.selectedIndex]?.text || ''
-         : '';
+      const model = modelSelect ? modelSelect.options[modelSelect.selectedIndex]?.text || '' : '';
+      /* The reasoning setting too: a server adjustment stays visible collapsed. */
+      const reasoning = typeof DawnReasoning !== 'undefined' ? DawnReasoning.summary() : '';
+      modelEl.textContent = reasoning ? `${model} \u00b7 ${reasoning}` : model;
    }
 
    function toggleLlmControlsCollapse() {

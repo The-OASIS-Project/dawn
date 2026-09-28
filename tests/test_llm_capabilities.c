@@ -20,6 +20,7 @@
  * against the shipped models.toml parsed by DAWN's own TOML reader.
  */
 
+#include <json-c/json.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -34,6 +35,10 @@ dawn_config_t g_config;
 static local_provider_t s_local = LOCAL_PROVIDER_LLAMA_CPP;
 local_provider_t llm_local_get_provider(void) {
    return s_local;
+}
+local_provider_t llm_local_detect_provider(const char *endpoint) {
+   (void)endpoint;
+   return llm_local_get_provider();
 }
 const char *llm_get_current_thinking_mode(void) {
    return "disabled";
@@ -240,6 +245,63 @@ static void test_utility_calls_are_cheapest_and_never_clamped(void) {
    assert_resolved(r, LLM_THINK_DISABLED, "", false);
 }
 
+static json_object *caps_json(cloud_provider_t provider, const char *model) {
+   llm_thinking_caps_t caps;
+   llm_thinking_caps(LLM_CLOUD, provider, model, &caps);
+   json_object *j = llm_thinking_caps_to_json(&caps);
+   TEST_ASSERT_NOT_NULL(j);
+   return j;
+}
+
+static const char *str_at(json_object *obj, const char *key) {
+   json_object *v = NULL;
+   return json_object_object_get_ex(obj, key, &v) ? json_object_get_string(v) : NULL;
+}
+
+/* The shape the WebUI and Aurora render. */
+static void test_wire_shape(void) {
+   json_object *j = caps_json(CLOUD_PROVIDER_CLAUDE, "claude-opus-5-5");
+   TEST_ASSERT_EQUAL_STRING("row", str_at(j, "source"));
+   json_object *modes = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(j, "modes", &modes));
+   TEST_ASSERT_EQUAL_INT(1, json_object_array_length(modes));
+   json_object *m0 = json_object_array_get_idx(modes, 0);
+   TEST_ASSERT_EQUAL_STRING("adaptive", str_at(m0, "mode"));
+   json_object *efforts = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(m0, "efforts", &efforts));
+   TEST_ASSERT_EQUAL_INT(5, json_object_array_length(efforts));
+   TEST_ASSERT_FALSE(json_object_object_get_ex(m0, "budget_tokens", NULL));
+   /* The configured default ("disabled") resolved for a model that can't: */
+   json_object *def = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(j, "default", &def));
+   TEST_ASSERT_EQUAL_STRING("adaptive", str_at(def, "mode"));
+   TEST_ASSERT_EQUAL_STRING("low", str_at(def, "effort"));
+   json_object_put(j);
+
+   /* A budget mode names its token sizes. */
+   g_config.llm.thinking.budget_low = 1024;
+   g_config.llm.thinking.budget_high = 16384;
+   j = caps_json(CLOUD_PROVIDER_CLAUDE, "claude-haiku-4-5");
+   TEST_ASSERT_TRUE(json_object_object_get_ex(j, "modes", &modes));
+   json_object *m1 = json_object_array_get_idx(modes, 1);
+   TEST_ASSERT_EQUAL_STRING("enabled", str_at(m1, "mode"));
+   TEST_ASSERT_TRUE(json_object_get_boolean(json_object_object_get(m1, "budget")));
+   json_object *tokens = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(m1, "budget_tokens", &tokens));
+   TEST_ASSERT_EQUAL_INT(1024, json_object_get_int(json_object_object_get(tokens, "low")));
+   TEST_ASSERT_EQUAL_INT(16384, json_object_get_int(json_object_object_get(tokens, "high")));
+   TEST_ASSERT_TRUE(json_object_object_get_ex(j, "default", &def));
+   TEST_ASSERT_EQUAL_STRING("disabled", str_at(def, "mode"));
+   json_object_put(j);
+
+   /* No reasoning control: an explicit empty list, not a missing entry. */
+   j = caps_json(CLOUD_PROVIDER_OPENAI, "gpt-3.5-turbo");
+   TEST_ASSERT_EQUAL_STRING("provider_default", str_at(j, "source"));
+   TEST_ASSERT_TRUE(json_object_object_get_ex(j, "modes", &modes));
+   TEST_ASSERT_EQUAL_INT(0, json_object_array_length(modes));
+   json_object_put(j);
+}
+
 int main(void) {
    char err[256];
    FILE *f = fopen(MODELS_TOML_PATH, "r");
@@ -265,6 +327,7 @@ int main(void) {
    RUN_TEST(test_a_named_mode_the_model_lacks_is_a_clamp);
    RUN_TEST(test_local_providers);
    RUN_TEST(test_utility_calls_are_cheapest_and_never_clamped);
+   RUN_TEST(test_wire_shape);
    const int rc = UNITY_END();
    llm_capabilities_free_registry();
    toml_free(s_root);

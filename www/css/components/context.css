@@ -640,10 +640,12 @@
 
    /* Override ID-specificity desktop placements — place under select column */
    #provider-hint,
-   #model-hint {
+   #model-hint,
+   #effort-hint {
       grid-row: auto;
       grid-column: 2;
       text-align: left;
+      white-space: normal;
    }
 
    /* Reset desktop grid placements so row-4 items stack vertically on mobile */

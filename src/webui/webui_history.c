@@ -45,6 +45,7 @@
 #include "version.h"
 #include "webui/webui_image_rehydrate.h"
 #include "webui/webui_internal.h"
+#include "webui/webui_reasoning.h"
 #include "webui/webui_server.h" /* For WEBUI_MAX_THUMBNAIL_BASE64 */
 
 /* =============================================================================
@@ -822,10 +823,11 @@ static int load_msg_callback(const conversation_message_t *msg, void *context) {
  * the previously-viewed conversation's values. Shared by load + export so both stay
  * consistent (and both carry reasoning_effort).
  *
- * Note: export therefore reports the *effective* value for a legacy empty column,
- * not the raw stored blank — a deliberate choice (the effective config is what the
- * conversation actually ran with, and it's strictly better than the prior export,
- * which omitted reasoning_effort entirely).
+ * thinking_mode / reasoning_effort then report what the conversation's model is
+ * actually sent (the stored pick resolved against the model), and
+ * thinking_mode_pick / reasoning_effort_pick the stored pick itself, with the
+ * model's "reasoning_capabilities" and "reasoning_adjusted" (the pick differs).
+ * The WebUI restores and locks with the pick.
  */
 static json_object *build_conv_llm_settings_json(const conversation_t *conv) {
    session_llm_config_t def_sc;
@@ -855,6 +857,31 @@ static json_object *build_conv_llm_settings_json(const conversation_t *conv) {
                           json_object_new_string(conv->reasoning_effort[0]
                                                      ? conv->reasoning_effort
                                                      : def_r.reasoning_effort));
+
+   /* Then what this conversation's model is actually sent, with its
+    * capabilities (overwrites thinking_mode / reasoning_effort). */
+   session_llm_config_t cfg = def_sc;
+   if (conv->llm_type[0]) {
+      cfg.type = strcmp(conv->llm_type, "local") == 0 ? LLM_LOCAL : LLM_CLOUD;
+   }
+   llm_type_t parsed_type;
+   cloud_provider_t parsed_provider;
+   if (conv->cloud_provider[0] &&
+       cloud_provider_from_string(conv->cloud_provider, &parsed_type, &parsed_provider) ==
+           SUCCESS &&
+       parsed_type == LLM_CLOUD) {
+      cfg.cloud_provider = parsed_provider;
+   }
+   if (conv->model[0]) {
+      safe_strscpy(cfg.model, conv->model);
+   }
+   if (conv->thinking_mode[0]) {
+      safe_strscpy(cfg.thinking_mode, conv->thinking_mode);
+   }
+   if (conv->reasoning_effort[0]) {
+      safe_strscpy(cfg.reasoning_effort, conv->reasoning_effort);
+   }
+   webui_reasoning_stamp(llm, &cfg);
    return llm;
 }
 

@@ -22,6 +22,7 @@
 
 #include "llm/llm_capabilities.h"
 
+#include <json-c/json.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -270,13 +271,17 @@ void llm_thinking_caps(llm_type_t type,
    const llm_model_family_t family = llm_model_route(type, provider, model, id, sizeof(id));
    const caps_row_t *row = NULL;
    switch (family) {
-      case LLM_FAMILY_LOCAL:
-         /* llama.cpp: off, or a fixed budget; Ollama: think on or off. */
+      case LLM_FAMILY_LOCAL: {
+         /* llama.cpp (and generic servers): off, or a fixed budget; Ollama:
+          * think on or off.  Before the provider is detected, on or off only:
+          * no budget levels offered that may not apply. */
+         const local_provider_t local = llm_local_get_provider();
          out->source = LLM_CAPS_LOCAL;
          add_mode(out, LLM_THINK_DISABLED, NULL, 0, false);
          add_mode(out, LLM_THINK_ENABLED, NULL, 0,
-                  llm_local_get_provider() != LOCAL_PROVIDER_OLLAMA);
+                  local != LOCAL_PROVIDER_OLLAMA && local != LOCAL_PROVIDER_UNKNOWN);
          return;
+      }
       case LLM_FAMILY_ANTHROPIC:
          row = lookup(s_anthropic_rows, id);
          break;
@@ -338,11 +343,11 @@ static const char *nearest_effort(const llm_think_mode_caps_t *m, const char *wa
    return m->efforts[best];
 }
 
-void llm_thinking_resolve(const llm_thinking_caps_t *caps,
-                          const char *mode,
-                          const char *effort,
-                          bool utility,
-                          llm_thinking_resolved_t *out) {
+static void resolve(const llm_thinking_caps_t *caps,
+                    const char *mode,
+                    const char *effort,
+                    bool utility,
+                    llm_thinking_resolved_t *out) {
    memset(out, 0, sizeof(*out));
    out->mode = LLM_THINK_DISABLED;
    if (!caps || caps->mode_count == 0) {
@@ -359,7 +364,7 @@ void llm_thinking_resolve(const llm_thinking_caps_t *caps,
          /* Can't be turned off: the gentlest reasoning it has. */
          chosen = first_reasoning_mode(caps);
          lowest = true;
-         out->clamped = !utility;
+         out->mode_clamped = !utility;
       }
    } else {
       llm_think_mode_t wanted = LLM_THINK_ENABLED;
@@ -370,11 +375,11 @@ void llm_thinking_resolve(const llm_thinking_caps_t *caps,
          /* A named mode the model lacks is a change the user should hear
           * about, except "enabled", which the older clients send to mean
           * "reasoning on" (on an adaptive-only model, that's adaptive). */
-         out->clamped = named && wanted != LLM_THINK_ENABLED;
+         out->mode_clamped = named && wanted != LLM_THINK_ENABLED;
       }
       if (!chosen) {
          chosen = find_mode(caps, LLM_THINK_DISABLED); /* a model that can't reason */
-         out->clamped = true;
+         out->mode_clamped = true;
       }
    }
    if (!chosen) {
@@ -389,14 +394,29 @@ void llm_thinking_resolve(const llm_thinking_caps_t *caps,
    const char *pick = lowest ? chosen->efforts[0] : nearest_effort(chosen, effort);
    snprintf(out->effort, sizeof(out->effort), "%s", pick);
    if (!lowest && effort && *effort && strcmp(effort, pick) != 0) {
-      out->clamped = true;
+      out->effort_clamped = true;
    }
+}
+
+void llm_thinking_resolve(const llm_thinking_caps_t *caps,
+                          const char *mode,
+                          const char *effort,
+                          bool utility,
+                          llm_thinking_resolved_t *out) {
+   resolve(caps, mode, effort, utility, out);
+   out->clamped = out->mode_clamped || out->effort_clamped;
 }
 
 void llm_thinking_resolve_current(llm_type_t type,
                                   cloud_provider_t provider,
                                   const char *model,
                                   llm_thinking_resolved_t *out) {
+   /* A request needs the local provider's real rules (a budget or on/off):
+    * detect it if nothing has yet (cached after the first probe). */
+   if (type == LLM_LOCAL && llm_local_get_provider() == LOCAL_PROVIDER_UNKNOWN) {
+      llm_local_detect_provider(g_config.llm.local.endpoint[0] ? g_config.llm.local.endpoint
+                                                               : "http://127.0.0.1:8080");
+   }
    llm_thinking_caps_t caps;
    llm_thinking_caps(type, provider, model, &caps);
    llm_thinking_resolve(&caps, llm_get_current_thinking_mode(), llm_get_current_reasoning_effort(),
@@ -414,4 +434,58 @@ int llm_thinking_budget_size(const char *level) {
       return g_config.llm.thinking.budget_xhigh;
    }
    return g_config.llm.thinking.budget_medium;
+}
+
+static const char *source_name(llm_caps_source_t source) {
+   switch (source) {
+      case LLM_CAPS_ROW:
+         return "row";
+      case LLM_CAPS_LOCAL:
+         return "local";
+      case LLM_CAPS_PROVIDER_DEFAULT:
+      default:
+         return "provider_default";
+   }
+}
+
+struct json_object *llm_thinking_caps_to_json(const llm_thinking_caps_t *caps) {
+   json_object *obj = json_object_new_object();
+   json_object *modes = json_object_new_array();
+   if (!obj || !modes) {
+      json_object_put(obj);
+      json_object_put(modes);
+      return NULL;
+   }
+   json_object_object_add(obj, "source", json_object_new_string(source_name(caps->source)));
+   for (int i = 0; i < caps->mode_count; i++) {
+      const llm_think_mode_caps_t *m = &caps->modes[i];
+      json_object *mode = json_object_new_object();
+      json_object *efforts = json_object_new_array();
+      json_object_object_add(mode, "mode", json_object_new_string(llm_think_mode_name(m->mode)));
+      for (int e = 0; e < m->effort_count; e++) {
+         json_object_array_add(efforts, json_object_new_string(m->efforts[e]));
+      }
+      json_object_object_add(mode, "efforts", efforts);
+      json_object_object_add(mode, "budget", json_object_new_boolean(m->budget));
+      if (m->budget) {
+         json_object *tokens = json_object_new_object();
+         for (int e = 0; e < m->effort_count; e++) {
+            json_object_object_add(tokens, m->efforts[e],
+                                   json_object_new_int(llm_thinking_budget_size(m->efforts[e])));
+         }
+         json_object_object_add(mode, "budget_tokens", tokens);
+      }
+      json_object_array_add(modes, mode);
+   }
+   json_object_object_add(obj, "modes", modes);
+
+   /* What a new conversation gets: the configured default, resolved here. */
+   llm_thinking_resolved_t def;
+   llm_thinking_resolve(caps, g_config.llm.thinking.mode, g_config.llm.thinking.reasoning_effort,
+                        false, &def);
+   json_object *dflt = json_object_new_object();
+   json_object_object_add(dflt, "mode", json_object_new_string(llm_think_mode_name(def.mode)));
+   json_object_object_add(dflt, "effort", json_object_new_string(def.effort));
+   json_object_object_add(obj, "default", dflt);
+   return obj;
 }
