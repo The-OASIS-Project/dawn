@@ -451,7 +451,7 @@ Added to `resolve_text_source()`:
 #### Phone Notification Layouts
 
 ```
-Incoming:  [PHOTO 128x128] INCOMING CALL / John Doe / +1 (678) 643-2695 / ● RINGING
+Incoming:  [PHOTO 128x128] INCOMING CALL / John Doe / +1 (404) 555-0142 / ● RINGING
 Active:    [PHOTO 128x128] CALL ACTIVE / John Doe / 00:03:45 (collapses after 5s)
 Ended:     3s flash with duration, auto-dismiss
 SMS:       [PHOTO 128x128] SMS RECEIVED / John Doe / Preview text (2 lines max, 15s TTL)

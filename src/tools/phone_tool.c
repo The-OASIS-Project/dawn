@@ -1258,7 +1258,7 @@ static const tool_metadata_t phone_metadata = {
        "Call confirm_delete_sms/confirm_delete_call on the next turn if the user agrees. "
        "Pending state expires after 120 seconds. "
        "To delete multiple messages from one sender, use delete_sms with 'number' "
-       "(e.g. {number: '+16786432695'}) — it's one call that deletes them all. "
+       "(e.g. {number: '+14045550142'}) — it's one call that deletes them all. "
        "Do NOT loop over individual ids; do NOT wrap deletes in execute_plan — "
        "the phone tool is blocked inside plans on purpose. "
        "Use 'status' to check phone and modem status. "

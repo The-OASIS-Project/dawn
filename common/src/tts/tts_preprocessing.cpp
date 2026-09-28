@@ -1322,7 +1322,7 @@ static inline size_t generate_output(const char *src, size_t len, char *out) {
 // Phone-number expansion (pre-pass)
 // ============================================================================
 
-/* Phone numbers must be read digit-by-digit ("+16786432695" -> "1 6 7 8 ...")
+/* Phone numbers must be read digit-by-digit ("+14045550142" -> "1 6 7 8 ...")
  * rather than as one cardinal ("sixteen billion ...").  A dedicated pre-pass
  * (rather than a branch in the two-pass core) keeps that delicate size-calc /
  * generate symmetry untouched: it rewrites the input string first, and the
@@ -1331,7 +1331,7 @@ static inline size_t generate_output(const char *src, size_t len, char *out) {
  * Detection policy (deliberately conservative — a bare undelimited digit run is
  * NOT a phone number, so IDs/order numbers are never mis-spoken):
  *   - a '+'-prefixed run of PHONE_E164_MIN_DIGITS..PHONE_E164_MAX_DIGITS digits
- *     (E.164, e.g. "+16786432695", "+1 (678) 643-2695"), OR
+ *     (E.164, e.g. "+14045550142", "+1 (404) 555-0142"), OR
  *   - a punctuated US number whose digit groups match exactly {3,3,4} (10-digit)
  *     or {1,3,3,4} with a leading "1" (11-digit), separated by "-.() " or a
  *     mid-number space.  The exact-shape rule (not just "every group <= 4")
@@ -1361,8 +1361,8 @@ struct phone_scan_t {
 
 /* Scan a candidate phone token at s[start].  @p allow_space controls whether a
  * mid-number space counts as a group separator: the caller tries space=true
- * first (catches "678 643 2695" and "+1 (678) ...") and retries space=false on
- * reject (so "678-643-2695 2 times" doesn't merge the trailing " 2"). */
+ * first (catches "404 555 0142" and "+1 (404) ...") and retries space=false on
+ * reject (so "404-555-0142 2 times" doesn't merge the trailing " 2"). */
 static void scan_phone_token(const std::string &s,
                              size_t start,
                              bool allow_space,
@@ -1455,7 +1455,7 @@ static bool expand_phone_numbers_for_tts(const std::string &input, std::string &
       /* Attempt a match only at a token boundary: start-of-string, or after a
        * char that is neither alphanumeric nor a phone separator/currency sign.
        * Excluding a preceding '-'/'.'/'$' stops us from re-matching the tail of
-       * a rejected number ("2-678-643-2695") or a currency-prefixed run. */
+       * a rejected number ("2-404-555-0142") or a currency-prefixed run. */
       char prev = (i == 0) ? '\0' : input[i - 1];
       bool boundary = (i == 0) || (!std::isalnum((unsigned char)prev) && prev != '-' &&
                                    prev != '.' && prev != '$');

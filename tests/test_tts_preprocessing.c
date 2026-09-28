@@ -449,46 +449,46 @@ static void test_preprocess_month_abbrev(void) {
 static void test_phone_e164_spelled(void) {
    char out[256];
    int written = 0;
-   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("Call +16786432695 now", out, sizeof(out),
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("Call +14045550142 now", out, sizeof(out),
                                                       &written));
-   TEST_ASSERT_NOT_NULL(strstr(out, "1 6 7 8 6 4 3 2 6 9 5")); /* spelled digit-by-digit */
-   TEST_ASSERT_NULL(strstr(out, "16786432695"));               /* no unspaced run */
+   TEST_ASSERT_NOT_NULL(strstr(out, "1 4 0 4 5 5 5 0 1 4 2")); /* spelled digit-by-digit */
+   TEST_ASSERT_NULL(strstr(out, "14045550142"));               /* no unspaced run */
 }
 
 static void test_phone_e164_with_formatting(void) {
    char out[256];
    int written = 0;
-   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("at +1 (678) 643-2695.", out, sizeof(out),
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("at +1 (404) 555-0142.", out, sizeof(out),
                                                       &written));
-   TEST_ASSERT_NOT_NULL(strstr(out, "1 6 7 8 6 4 3 2 6 9 5"));
-   TEST_ASSERT_NULL(strstr(out, "(678)")); /* punctuation consumed */
+   TEST_ASSERT_NOT_NULL(strstr(out, "1 4 0 4 5 5 5 0 1 4 2"));
+   TEST_ASSERT_NULL(strstr(out, "(404)")); /* punctuation consumed */
    TEST_ASSERT_NULL(strstr(out, "+"));     /* the '+' is dropped, not leaked */
 }
 
 static void test_phone_us_parens(void) {
    char out[256];
    int written = 0;
-   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("Reach me at (678) 643-2695.", out,
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("Reach me at (404) 555-0142.", out,
                                                       sizeof(out), &written));
-   TEST_ASSERT_NOT_NULL(strstr(out, "6 7 8 6 4 3 2 6 9 5"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "4 0 4 5 5 5 0 1 4 2"));
    TEST_ASSERT_NOT_NULL(strstr(out, ".")); /* sentence period preserved */
 }
 
 static void test_phone_us_dashes_with_country_code(void) {
    char out[256];
    int written = 0;
-   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("dial 1-678-643-2695 please", out,
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("dial 1-404-555-0142 please", out,
                                                       sizeof(out), &written));
-   TEST_ASSERT_NOT_NULL(strstr(out, "1 6 7 8 6 4 3 2 6 9 5"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "1 4 0 4 5 5 5 0 1 4 2"));
 }
 
 static void test_phone_bare_run_untouched(void) {
    char out[256];
    int written = 0;
    /* No '+' and no separators — treated as an ordinary number, left for espeak. */
-   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("order 6786432695 shipped", out, sizeof(out),
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("order 4045550142 shipped", out, sizeof(out),
                                                       &written));
-   TEST_ASSERT_NOT_NULL(strstr(out, "6786432695"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "4045550142"));
 }
 
 static void test_phone_oversized_groups_rejected(void) {
@@ -521,18 +521,18 @@ static void test_phone_trailing_number_not_merged(void) {
    int written = 0;
    /* Finding #1: a phone followed by " <digit>" must still expand (retry with
     * space-separator disabled), and the trailing number stays intact. */
-   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("dial 678-643-2695 2 times", out, sizeof(out),
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("dial 404-555-0142 2 times", out, sizeof(out),
                                                       &written));
-   TEST_ASSERT_NOT_NULL(strstr(out, "6 7 8 6 4 3 2 6 9 5"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "4 0 4 5 5 5 0 1 4 2"));
    TEST_ASSERT_NOT_NULL(strstr(out, "2 times"));
 }
 
 static void test_phone_two_in_one_sentence(void) {
    char out[256];
    int written = 0;
-   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("call 678-643-2695 or 555.123.4567", out,
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("call 404-555-0142 or 555.123.4567", out,
                                                       sizeof(out), &written));
-   TEST_ASSERT_NOT_NULL(strstr(out, "6 7 8 6 4 3 2 6 9 5"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "4 0 4 5 5 5 0 1 4 2"));
    TEST_ASSERT_NOT_NULL(strstr(out, "5 5 5 1 2 3 4 5 6 7"));
 }
 
@@ -541,9 +541,9 @@ static void test_phone_leading_nonone_11_untouched(void) {
    int written = 0;
    /* Finding #4: an 11-digit dashed number NOT starting with 1 is not a US
     * phone, and must not have its 10-digit tail mangled. */
-   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("id 2-678-643-2695 ok", out, sizeof(out),
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("id 2-404-555-0142 ok", out, sizeof(out),
                                                       &written));
-   TEST_ASSERT_NOT_NULL(strstr(out, "2-678-643-2695"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "2-404-555-0142"));
 }
 
 /* An IPv4 literal is now verbalized (was passed through). The phone pass still
