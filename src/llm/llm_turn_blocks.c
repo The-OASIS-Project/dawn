@@ -648,8 +648,32 @@ struct json_object *llm_history_wire_copy(struct json_object *history) {
    return copy_history(history, false);
 }
 
+/* Remove, in place, the content parts of @p history's messages that carry a
+ * vendor's own reasoning: a Claude turn's content array holds its thinking
+ * (text and signature) and redacted thinking beside the text. */
+static void drop_reasoning_parts(struct json_object *history) {
+   const size_t n = json_object_array_length(history);
+   for (size_t i = 0; i < n; i++) {
+      struct json_object *content = NULL;
+      if (!json_object_object_get_ex(json_object_array_get_idx(history, i), "content", &content) ||
+          !json_object_is_type(content, json_type_array)) {
+         continue;
+      }
+      for (size_t j = json_object_array_length(content); j-- > 0;) {
+         const char *type = str_of(json_object_array_get_idx(content, j), "type");
+         if (is(type, "thinking") || is(type, "redacted_thinking")) {
+            json_object_array_del_idx(content, j, 1);
+         }
+      }
+   }
+}
+
 struct json_object *llm_history_strip_internal(struct json_object *history) {
-   return copy_history(history, true);
+   struct json_object *copy = copy_history(history, true);
+   if (copy) {
+      drop_reasoning_parts(copy); /* a deep copy: the history is untouched */
+   }
+   return copy;
 }
 
 /* The host of @p url ("https://api.openai.com/v1" → "api.openai.com"). */

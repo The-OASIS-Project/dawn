@@ -596,6 +596,31 @@ static void test_carrier(void) {
    TEST_ASSERT_NOT_EQUAL(0, strcmp(b, c));
 }
 
+/* The copy for extraction, summaries and logs has no reasoning: a Claude
+ * turn's thinking and redacted thinking go, its text and tool call stay, and
+ * the history itself is untouched. */
+static void test_strip_internal_drops_thinking_parts(void) {
+   struct json_object *history = json_object_new_array();
+   struct json_object *turn = json_tokener_parse(
+       "{\"role\":\"assistant\",\"content\":["
+       "{\"type\":\"thinking\",\"thinking\":\"private plan\",\"signature\":\"SIG\"},"
+       "{\"type\":\"redacted_thinking\",\"data\":\"ENC\"},"
+       "{\"type\":\"text\",\"text\":\"Checking.\"},"
+       "{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"weather\",\"input\":{}}]}");
+   json_object_array_add(history, turn);
+   struct json_object *copy = llm_history_strip_internal(history);
+   TEST_ASSERT_NOT_NULL(copy);
+   const char *text = json_object_to_json_string(copy);
+   TEST_ASSERT_NULL(strstr(text, "private plan"));
+   TEST_ASSERT_NULL(strstr(text, "SIG"));
+   TEST_ASSERT_NULL(strstr(text, "ENC"));
+   TEST_ASSERT_NOT_NULL(strstr(text, "Checking."));
+   TEST_ASSERT_NOT_NULL(strstr(text, "t1"));
+   TEST_ASSERT_NOT_NULL(strstr(json_object_to_json_string(history), "private plan"));
+   json_object_put(copy);
+   json_object_put(history);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_capture_keeps_every_block_in_order);
@@ -606,6 +631,7 @@ int main(void) {
    RUN_TEST(test_unknown_blocks_are_kept_for_their_vendor);
    RUN_TEST(test_a_large_block_is_kept_whole);
    RUN_TEST(test_strip_internal_removes_every_internal_key);
+   RUN_TEST(test_strip_internal_drops_thinking_parts);
    RUN_TEST(test_set_text_keeps_blocks_in_step);
    RUN_TEST(test_reasoning_counts_toward_context);
    RUN_TEST(test_copies_drop_every_internal_key);

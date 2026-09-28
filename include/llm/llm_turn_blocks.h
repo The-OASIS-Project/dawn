@@ -279,7 +279,9 @@ struct json_object *llm_history_wire_copy(struct json_object *history);
  * For anything that isn't a replay to the same vendor: memory extraction, a
  * summarizer, a log on disk.  None of those may see reasoning a vendor issued
  * for itself (it would be extracted as facts, sent to another model, or
- * written out).  Caller owns it; NULL on failure.
+ * written out): DAWN's own keys go, and so do the thinking and redacted
+ * thinking parts a Claude turn's content array holds.  Everything else keeps
+ * its shape.  Caller owns it; NULL on failure.
  */
 struct json_object *llm_history_strip_internal(struct json_object *history);
 
