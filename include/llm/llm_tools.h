@@ -157,15 +157,6 @@ typedef struct {
 } tool_call_t;
 
 /**
- * Maximum length for Gemini thought signature.
- * Gemini 3+ models return a thought_signature with tool calls that must be
- * echoed back in tool results. Based on observed API behavior, signatures
- * are typically < 1KB but can grow with complex reasoning. 4KB provides
- * headroom. Truncation is logged as a warning if exceeded.
- */
-#define LLM_TOOLS_THOUGHT_SIG_LEN 4096
-
-/**
  * @brief List of tool calls (for parallel invocation)
  *
  * LLMs can request multiple tool calls in a single response. This structure
@@ -174,8 +165,6 @@ typedef struct {
 typedef struct {
    tool_call_t calls[LLM_TOOLS_MAX_PARALLEL_CALLS];
    int count;
-   char thought_signature[LLM_TOOLS_THOUGHT_SIG_LEN]; /**< Gemini 3+ thought signature (first call)
-                                                       */
 } tool_call_list_t;
 
 /**

@@ -29,6 +29,7 @@
 #include "core/session_manager.h"
 #include "llm/llm_context.h"
 #include "llm/llm_tools.h"
+#include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "ui/metrics.h"
 #include "utils/string_utils.h"
@@ -390,6 +391,27 @@ process_remaining:
    }
 }
 
+
+/* Keep the thought signature a streamed tool call @p tc (index @p i) carries. */
+static void stream_keep_call_signature(llm_stream_context_t *ctx, json_object *tc, int i) {
+   if (i < 0 || i >= LLM_TOOLS_MAX_PARALLEL_CALLS) {
+      return;
+   }
+   json_object *extra = NULL, *google = NULL, *sig = NULL;
+   if (!(json_object_object_get_ex(tc, "extra_content", &extra) &&
+         json_object_object_get_ex(extra, "google", &google) &&
+         json_object_object_get_ex(google, "thought_signature", &sig)) &&
+       !json_object_object_get_ex(tc, "thought_signature", &sig)) {
+      return;
+   }
+   const char *value = json_object_get_string(sig);
+   if (!value || !*value ||
+       (size_t)json_object_get_string_len(sig) > LLM_REASONING_DETAILS_BYTES_MAX) {
+      return;
+   }
+   free(ctx->call_signatures[i]);
+   ctx->call_signatures[i] = strdup(value);
+}
 /**
  * @brief Emit a chunk of reasoning/thinking text to all sinks.
  *
@@ -447,6 +469,14 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
    // Extract choices[0].delta.content or tool_calls
    json_object *choices, *first_choice, *delta, *content;
 
+   /* The model that served this response: a router may pick another than the
+    * one asked for, and reasoning goes back only to the model that made it. */
+   json_object *served = NULL;
+   if (!ctx->served_model[0] && json_object_object_get_ex(chunk, "model", &served) &&
+       json_object_get_string(served)) {
+      safe_strscpy(ctx->served_model, json_object_get_string(served));
+   }
+
    if (json_object_object_get_ex(chunk, "choices", &choices) &&
        json_object_get_type(choices) == json_type_array && json_object_array_length(choices) > 0) {
       first_choice = json_object_array_get_idx(choices, 0);
@@ -491,6 +521,7 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
                   think = json_object_get_string(val_obj);
                }
                stream_emit_thinking(ctx, think, has_ws_session, ws_session, "openrouter");
+               llm_reasoning_details_add(&ctx->reasoning_details, entry);
             }
          } else {
             json_object *reasoning_str;
@@ -540,7 +571,8 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
                   tc_index = json_object_get_int(index_obj);
                }
 
-               if (tc_index >= LLM_TOOLS_MAX_PARALLEL_CALLS) {
+               /* Upstream data: an index outside the table would write outside it. */
+               if (tc_index < 0 || tc_index >= LLM_TOOLS_MAX_PARALLEL_CALLS) {
                   continue;
                }
 
@@ -599,42 +631,10 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
                   }
                }
 
-               // Gemini 3+ models: Capture thought_signature from first tool call
-               // Required for follow-up requests when reasoning mode is enabled
-               if (ctx->cloud_provider == CLOUD_PROVIDER_GEMINI &&
-                   ctx->tool_calls.thought_signature[0] == '\0') {
-                  json_object *extra_content, *google_obj, *sig_obj;
-                  // Try extra_content.google.thought_signature (OpenAI-compatible format)
-                  if (json_object_object_get_ex(tc, "extra_content", &extra_content) &&
-                      json_object_object_get_ex(extra_content, "google", &google_obj) &&
-                      json_object_object_get_ex(google_obj, "thought_signature", &sig_obj)) {
-                     const char *sig = json_object_get_string(sig_obj);
-                     if (sig && sig[0] != '\0') {
-                        size_t sig_len = strlen(sig);
-                        safe_strscpy(ctx->tool_calls.thought_signature, sig);
-                        if (sig_len >= LLM_TOOLS_THOUGHT_SIG_LEN) {
-                           OLOG_WARNING("Gemini thought_signature truncated: %zu -> %d bytes",
-                                        sig_len, LLM_TOOLS_THOUGHT_SIG_LEN - 1);
-                        } else {
-                           OLOG_INFO("Captured Gemini thought_signature (%zu bytes)", sig_len);
-                        }
-                     }
-                  }
-                  // Also try direct thought_signature field as fallback
-                  else if (json_object_object_get_ex(tc, "thought_signature", &sig_obj)) {
-                     const char *sig = json_object_get_string(sig_obj);
-                     if (sig && sig[0] != '\0') {
-                        size_t sig_len = strlen(sig);
-                        safe_strscpy(ctx->tool_calls.thought_signature, sig);
-                        if (sig_len >= LLM_TOOLS_THOUGHT_SIG_LEN) {
-                           OLOG_WARNING("Gemini thought_signature truncated: %zu -> %d bytes",
-                                        sig_len, LLM_TOOLS_THOUGHT_SIG_LEN - 1);
-                        } else {
-                           OLOG_INFO("Captured Gemini thought_signature (%zu bytes)", sig_len);
-                        }
-                     }
-                  }
-               }
+               /* Gemini signs its reasoning per call
+                * (extra_content.google.thought_signature, or a bare
+                * thought_signature): kept with that call, to go back with it. */
+               stream_keep_call_signature(ctx, tc, tc_index);
             }
          }
       }
@@ -1201,6 +1201,7 @@ llm_stream_context_t *llm_stream_create(llm_type_t llm_type,
       OLOG_ERROR("Failed to allocate LLM stream context");
       return NULL;
    }
+   llm_reasoning_details_init(&ctx->reasoning_details);
 
    ctx->accumulated_response = malloc(DEFAULT_ACCUMULATED_CAPACITY);
    if (!ctx->accumulated_response) {
@@ -1235,6 +1236,10 @@ void llm_stream_free(llm_stream_context_t *ctx) {
 
    free(ctx->accumulated_response);
    free(ctx->accumulated_thinking);
+   for (int i = 0; i < LLM_TOOLS_MAX_PARALLEL_CALLS; i++) {
+      free(ctx->call_signatures[i]);
+   }
+   llm_reasoning_details_free(&ctx->reasoning_details);
    /* The block capture holds heap pointers that live ONLY in the Claude arm of
     * the `provider` union; only the Claude SSE parser fills them.  For
     * OpenAI/OpenRouter/Gemini/local streams the active union member is
@@ -1313,6 +1318,40 @@ const tool_call_list_t *llm_stream_get_tool_calls(llm_stream_context_t *ctx) {
    }
 
    return &ctx->tool_calls;
+}
+
+struct json_object *llm_stream_chat_blocks(llm_stream_context_t *ctx,
+                                           const char *carrier,
+                                           const char *model) {
+   if (!ctx) {
+      return NULL;
+   }
+   struct json_object *blocks = llm_turn_blocks_new();
+   if (!blocks) {
+      return NULL;
+   }
+   json_object *details = llm_reasoning_details_finish(&ctx->reasoning_details);
+   if (details && !llm_served_as_asked(ctx->served_model, model)) {
+      OLOG_INFO("LLM: reasoning from %s (asked %s) not kept for replay", ctx->served_model,
+                model ? model : "?");
+      json_object_put(details);
+      details = NULL;
+   }
+   const size_t n = details ? json_object_array_length(details) : 0;
+   for (size_t i = 0; i < n; i++) {
+      llm_turn_blocks_add_reasoning(blocks, carrier, LLM_FORMAT_OPENROUTER, model,
+                                    json_object_get(json_object_array_get_idx(details, i)));
+   }
+   json_object_put(details);
+   if (ctx->accumulated_response && ctx->accumulated_size > 0) {
+      llm_turn_blocks_add_text(blocks, ctx->accumulated_response);
+   }
+   for (int i = 0; ctx->has_tool_calls && i < ctx->tool_calls.count; i++) {
+      const tool_call_t *call = &ctx->tool_calls.calls[i];
+      llm_turn_blocks_add_signed_tool_call(blocks, call->id, call->name, call->arguments, carrier,
+                                           model, ctx->call_signatures[i]);
+   }
+   return blocks;
 }
 
 llm_stream_context_t *llm_stream_create_extended(llm_type_t llm_type,

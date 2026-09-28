@@ -43,6 +43,7 @@
 #include "llm/llm_openai_internal.h"
 #include "llm/llm_streaming.h"
 #include "llm/llm_tools.h"
+#include "llm/llm_turn_blocks.h"
 #include "llm/sse_parser.h"
 #include "logging.h"
 #include "ui/metrics.h"
@@ -68,6 +69,15 @@ extern int llm_curl_progress_callback(void *clientp,
  * attempts.  Genuine transient 5xx (no template signature) stay retryable. */
 /* The cloud provider behind an OpenAI-compatible endpoint.  From the endpoint,
  * never the session config or the model name: the endpoint is what answered. */
+/* The model a request uses: the one given, else the configured default (the
+ * local model when there's no API key). */
+static const char *resolve_model(const char *model, const char *api_key) {
+   if (model && model[0] != '\0') {
+      return model;
+   }
+   return (api_key == NULL) ? g_config.llm.local.model : llm_get_default_openai_model();
+}
+
 static cloud_provider_t provider_for_endpoint(const char *base_url) {
    if (base_url && strstr(base_url, "generativelanguage.googleapis.com")) {
       return CLOUD_PROVIDER_GEMINI;
@@ -250,7 +260,14 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
    json_object *usage_obj = NULL;
    json_object *total_tokens_obj = NULL;
 
-   json_object *converted_history = llm_openai_prepare_chat_history(conversation_history);
+   /* The model, and whose reasoning this request may send back: its
+    * endpoint and key (llm_turn_blocks_carrier). */
+   const char *model_name = resolve_model(model, api_key);
+   char carrier[LLM_CARRIER_MAX];
+   llm_turn_blocks_carrier(base_url, api_key, carrier, sizeof(carrier));
+
+   json_object *converted_history = llm_openai_prepare_chat_history(conversation_history, carrier,
+                                                                    model_name);
    if (!converted_history) {
       OLOG_ERROR("OpenAI: could not prepare the conversation history");
       return NULL;
@@ -258,10 +275,7 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
 
    root = json_object_new_object();
 
-   const char *model_name = model;
-   if (!model_name || model_name[0] == '\0') {
-      model_name = (api_key == NULL) ? g_config.llm.local.model : llm_get_default_openai_model();
-   }
+
    if (model_name && model_name[0] != '\0') {
       json_object_object_add(root, "model", json_object_new_string(model_name));
    }
@@ -558,7 +572,14 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
    }
    memset(result, 0, sizeof(*result));
 
-   json_object *converted_history = llm_openai_prepare_chat_history(conversation_history);
+   /* The model, and whose reasoning this request may send back: its
+    * endpoint and key (llm_turn_blocks_carrier). */
+   const char *model_name = resolve_model(model, api_key);
+   char carrier[LLM_CARRIER_MAX];
+   llm_turn_blocks_carrier(base_url, api_key, carrier, sizeof(carrier));
+
+   json_object *converted_history = llm_openai_prepare_chat_history(conversation_history, carrier,
+                                                                    model_name);
    if (!converted_history) {
       OLOG_ERROR("OpenAI: could not prepare the conversation history");
       return 1;
@@ -566,10 +587,7 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
 
    root = json_object_new_object();
 
-   const char *model_name = model;
-   if (!model_name || model_name[0] == '\0') {
-      model_name = (api_key == NULL) ? g_config.llm.local.model : llm_get_default_openai_model();
-   }
+
    if (model_name && model_name[0] != '\0') {
       json_object_object_add(root, "model", json_object_new_string(model_name));
    }
@@ -799,6 +817,8 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
    result->text = llm_stream_get_response(stream_ctx);
    result->thinking_content = llm_stream_get_thinking(stream_ctx);
    result->reasoning_tokens = stream_ctx->reasoning_tokens;
+   /* The turn's blocks: what the next request sends back to this endpoint. */
+   result->blocks = llm_stream_chat_blocks(stream_ctx, carrier, model_name);
 
    if (stream_ctx->finish_reason[0] != '\0') {
       safe_strscpy(result->finish_reason, stream_ctx->finish_reason);

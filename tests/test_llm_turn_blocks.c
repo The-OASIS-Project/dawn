@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include "llm/llm_claude_blocks.h"
+#include "llm/llm_reasoning_details.h"
 #include "llm/llm_turn_blocks.h"
 #include "unity.h"
 
@@ -131,7 +132,6 @@ static void test_blocks_replay_to_claude_verbatim(void) {
    json_object *content = capture_rich_response();
    json_object *blocks = llm_turn_blocks_from_claude(content, "claude-opus-5-5");
    TEST_ASSERT_NOT_NULL(blocks);
-   TEST_ASSERT_TRUE(llm_turn_blocks_has_reasoning(blocks, LLM_CARRIER_ANTHROPIC));
    json_object *rendered = llm_turn_blocks_render_claude(blocks);
    /* The replay is the response as received, block for block. */
    TEST_ASSERT_EQUAL_STRING(json_object_to_json_string_ext(content, JSON_C_TO_STRING_PLAIN),
@@ -433,6 +433,169 @@ static void test_message_blocks(void) {
    json_object_put(m);
 }
 
+/* The pieces OpenRouter streamed for a Gemini turn (probed live): text in
+ * parts at index 0, then the signature as a separate encrypted entry at the
+ * same index.  Same index and type merge; a new type starts an entry. */
+static void test_reasoning_details_merge(void) {
+   llm_reasoning_details_t acc;
+   llm_reasoning_details_init(&acc);
+   const char *pieces[] = {
+      "{\"type\":\"reasoning.text\",\"text\":\"ab\",\"format\":\"google-gemini-v1\",\"index\":0}",
+      "{\"type\":\"reasoning.text\",\"text\":\"cd\",\"format\":\"google-gemini-v1\",\"index\":0}",
+      "{\"type\":\"reasoning.encrypted\",\"data\":\"SIG\",\"id\":\"call_1\","
+      "\"format\":\"google-gemini-v1\",\"index\":0}",
+      "{\"type\":\"reasoning.text\",\"text\":\"ef\",\"index\":1,\"signature\":null}",
+      "{\"type\":\"reasoning.text\",\"text\":\"\",\"index\":1,\"signature\":\"S2\"}",
+      /* Pieces with no index continue an entry of the same type too. */
+      "{\"type\":\"reasoning.summary\",\"summary\":\"s1\"}",
+      "{\"type\":\"reasoning.summary\",\"summary\":\"s2\"}",
+   };
+   for (size_t i = 0; i < sizeof(pieces) / sizeof(pieces[0]); i++) {
+      struct json_object *p = json_tokener_parse(pieces[i]);
+      llm_reasoning_details_add(&acc, p);
+      json_object_put(p);
+   }
+   struct json_object *details = llm_reasoning_details_finish(&acc);
+   TEST_ASSERT_NOT_NULL(details);
+   TEST_ASSERT_EQUAL_INT(4, json_object_array_length(details));
+   struct json_object *v;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(json_object_array_get_idx(details, 0), "text", &v));
+   TEST_ASSERT_EQUAL_STRING("abcd", json_object_get_string(v));
+   TEST_ASSERT_TRUE(json_object_object_get_ex(json_object_array_get_idx(details, 1), "data", &v));
+   TEST_ASSERT_EQUAL_STRING("SIG", json_object_get_string(v));
+   TEST_ASSERT_TRUE(
+       json_object_object_get_ex(json_object_array_get_idx(details, 2), "signature", &v));
+   TEST_ASSERT_EQUAL_STRING("S2", json_object_get_string(v));
+   TEST_ASSERT_TRUE(
+       json_object_object_get_ex(json_object_array_get_idx(details, 3), "summary", &v));
+   TEST_ASSERT_EQUAL_STRING("s1s2", json_object_get_string(v));
+   json_object_put(details);
+   llm_reasoning_details_free(&acc);
+
+   /* Past the size cap, none are kept: a partial sequence isn't the sequence. */
+   llm_reasoning_details_init(&acc);
+   char *big = malloc(LLM_REASONING_DETAILS_BYTES_MAX / 2 + 1);
+   memset(big, 'x', LLM_REASONING_DETAILS_BYTES_MAX / 2);
+   big[LLM_REASONING_DETAILS_BYTES_MAX / 2] = '\0';
+   for (int i = 0; i < 3; i++) {
+      struct json_object *p = json_object_new_object();
+      json_object_object_add(p, "type", json_object_new_string("reasoning.text"));
+      json_object_object_add(p, "text", json_object_new_string(big));
+      json_object_object_add(p, "index", json_object_new_int(0));
+      llm_reasoning_details_add(&acc, p);
+      json_object_put(p);
+   }
+   free(big);
+   TEST_ASSERT_NULL(llm_reasoning_details_finish(&acc));
+   llm_reasoning_details_free(&acc);
+}
+
+/* A long reasoning streamed a token at a time stays under the cap: the fields
+ * every piece repeats are counted once, not per piece. */
+static void test_reasoning_details_small_deltas(void) {
+   llm_reasoning_details_t acc;
+   llm_reasoning_details_init(&acc);
+   for (int i = 0; i < 20000; i++) {
+      struct json_object *p = json_tokener_parse(
+          "{\"type\":\"reasoning.text\",\"text\":\"abc\",\"format\":\"anthropic-claude-v1\","
+          "\"index\":0}");
+      llm_reasoning_details_add(&acc, p);
+      json_object_put(p);
+   }
+   struct json_object *details = llm_reasoning_details_finish(&acc);
+   TEST_ASSERT_NOT_NULL(details);
+   TEST_ASSERT_EQUAL_INT(1, json_object_array_length(details));
+   struct json_object *v;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(json_object_array_get_idx(details, 0), "text", &v));
+   TEST_ASSERT_EQUAL_INT(60000, json_object_get_string_len(v));
+   json_object_put(details);
+   llm_reasoning_details_free(&acc);
+}
+
+/* Reasoning goes back only to the model that made it: its name, or a dated
+ * version of it; not another model sharing a prefix, not a router's pick. */
+static void test_served_as_asked(void) {
+   TEST_ASSERT_TRUE(
+       llm_served_as_asked("anthropic/claude-sonnet-5.5", "anthropic/claude-sonnet-5.5"));
+   TEST_ASSERT_TRUE(llm_served_as_asked("gpt-5.5-2026-09-01", "gpt-5.5"));
+   TEST_ASSERT_TRUE(llm_served_as_asked("", "anthropic/claude-sonnet-5.5"));
+   TEST_ASSERT_TRUE(
+       llm_served_as_asked("google/gemini-3.1-pro-preview", "google/gemini-3.1-pro-preview:free"));
+   TEST_ASSERT_FALSE(llm_served_as_asked("deepseek/deepseek-v4-flash-0731", "openrouter/auto"));
+   TEST_ASSERT_FALSE(llm_served_as_asked("openai/gpt-5", "openai/gpt-5.5"));
+   TEST_ASSERT_FALSE(
+       llm_served_as_asked("anthropic/claude-sonnet-5.5", "anthropic/claude-sonnet-5"));
+}
+
+/* An OpenRouter entry goes back whole, so its text and signature both count. */
+static void test_openrouter_entry_counts_whole(void) {
+   struct json_object *blocks = llm_turn_blocks_new();
+   llm_turn_blocks_add_reasoning(blocks, "openrouter.ai#1", LLM_FORMAT_OPENROUTER, "m",
+                                 json_tokener_parse("{\"type\":\"reasoning.text\","
+                                                    "\"text\":\"0123456789\","
+                                                    "\"signature\":\"SIG\"}"));
+   llm_turn_blocks_add_signed_tool_call(blocks, "c1", "w", "{}", "g#1", "m", "GEMSIG");
+   struct json_object *m = json_object_new_object();
+   json_object_object_add(m, LLM_TURN_BLOCKS_KEY, blocks);
+   TEST_ASSERT_EQUAL_INT(10 + 3 + 6, (int)llm_turn_message_reasoning_chars(m));
+   json_object_put(m);
+}
+
+/* A chat-completions turn renders its text and calls for anyone; its
+ * reasoning and a call's signature only for the endpoint and model that
+ * issued them. */
+static void test_render_chat(void) {
+   const char *C = "openrouter.ai#11111111";
+   struct json_object *blocks = llm_turn_blocks_new();
+   llm_turn_blocks_add_reasoning(blocks, C, LLM_FORMAT_OPENROUTER, "m",
+                                 json_tokener_parse("{\"type\":\"reasoning.encrypted\","
+                                                    "\"data\":\"OR\"}"));
+   struct json_object *t = json_object_new_object();
+   json_object_object_add(t, "type", json_object_new_string("thinking"));
+   json_object_object_add(t, "thinking", json_object_new_string("hidden"));
+   llm_turn_blocks_add_reasoning(blocks, LLM_CARRIER_ANTHROPIC, LLM_FORMAT_ANTHROPIC, "c", t);
+   llm_turn_blocks_add_text(blocks, "one");
+   llm_turn_blocks_add_text(blocks, "two");
+   llm_turn_blocks_add_signed_tool_call(blocks, "c1", "weather", "{}", C, "m", "GEMSIG");
+   llm_turn_blocks_add_signed_tool_call(blocks, "c2", "weather", "{}", "other#2", "m", "X");
+
+   struct json_object *msg = llm_turn_blocks_render_chat(blocks, C, "m"), *v, *calls;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(msg, "content", &v));
+   TEST_ASSERT_EQUAL_STRING("one\n\ntwo", json_object_get_string(v));
+   TEST_ASSERT_TRUE(json_object_object_get_ex(msg, "reasoning_details", &v));
+   TEST_ASSERT_EQUAL_INT(1, json_object_array_length(v));
+   TEST_ASSERT_TRUE(json_object_object_get_ex(msg, "tool_calls", &calls));
+   TEST_ASSERT_EQUAL_INT(2, json_object_array_length(calls));
+   TEST_ASSERT_TRUE(
+       json_object_object_get_ex(json_object_array_get_idx(calls, 0), "extra_content", &v));
+   TEST_ASSERT_NOT_NULL(strstr(json_object_to_json_string(v), "GEMSIG"));
+   TEST_ASSERT_FALSE(
+       json_object_object_get_ex(json_object_array_get_idx(calls, 1), "extra_content", NULL));
+   TEST_ASSERT_NULL(strstr(json_object_to_json_string(msg), "hidden"));
+   json_object_put(msg);
+
+   /* Another model on the same endpoint: text and calls only. */
+   msg = llm_turn_blocks_render_chat(blocks, C, "m2");
+   const char *wire = json_object_to_json_string(msg);
+   TEST_ASSERT_NULL(strstr(wire, "reasoning_details"));
+   TEST_ASSERT_NULL(strstr(wire, "GEMSIG"));
+   TEST_ASSERT_NOT_NULL(strstr(wire, "c1"));
+   json_object_put(msg);
+   json_object_put(blocks);
+}
+
+/* The carrier: the host (lower case, no credentials) and a key fingerprint. */
+static void test_carrier(void) {
+   char a[LLM_CARRIER_MAX], b[LLM_CARRIER_MAX], c[LLM_CARRIER_MAX];
+   llm_turn_blocks_carrier("https://User:Pass@API.Example.com/v1", "key-1", a, sizeof(a));
+   llm_turn_blocks_carrier("https://api.example.com/v1", "key-1", b, sizeof(b));
+   llm_turn_blocks_carrier("https://api.example.com/v1", "key-2", c, sizeof(c));
+   TEST_ASSERT_EQUAL_STRING(a, b);
+   TEST_ASSERT_NULL(strstr(a, "Pass"));
+   TEST_ASSERT_EQUAL_INT(0, strncmp(a, "api.example.com#", 16));
+   TEST_ASSERT_NOT_EQUAL(0, strcmp(b, c));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_capture_keeps_every_block_in_order);
@@ -450,5 +613,11 @@ int main(void) {
    RUN_TEST(test_render_responses);
    RUN_TEST(test_blocks_with_calls);
    RUN_TEST(test_message_blocks);
+   RUN_TEST(test_reasoning_details_merge);
+   RUN_TEST(test_reasoning_details_small_deltas);
+   RUN_TEST(test_served_as_asked);
+   RUN_TEST(test_openrouter_entry_counts_whole);
+   RUN_TEST(test_render_chat);
+   RUN_TEST(test_carrier);
    return UNITY_END();
 }

@@ -21,8 +21,12 @@
 
 #include "llm/llm_turn_blocks.h"
 
+#include <ctype.h>
 #include <json-c/json.h>
 #include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 
@@ -70,6 +74,32 @@ void llm_turn_blocks_add_tool_call(struct json_object *blocks,
    json_object_array_add(blocks, b);
 }
 
+void llm_turn_blocks_add_signed_tool_call(struct json_object *blocks,
+                                          const char *id,
+                                          const char *name,
+                                          const char *arguments,
+                                          const char *carrier,
+                                          const char *model,
+                                          const char *signature) {
+   const size_t before = blocks ? json_object_array_length(blocks) : 0;
+   llm_turn_blocks_add_tool_call(blocks, id, name, arguments);
+   const size_t n = blocks ? json_object_array_length(blocks) : 0;
+   if (n != before + 1 || !signature || !*signature) {
+      return; /* never on another call's block */
+   }
+   struct json_object *sig = json_object_new_object();
+   if (!sig) {
+      return;
+   }
+   json_object_object_add(sig, "carrier", json_object_new_string(or_empty(carrier)));
+   json_object_object_add(sig, "format", json_object_new_string(LLM_FORMAT_GEMINI));
+   if (model) {
+      json_object_object_add(sig, "model", json_object_new_string(model));
+   }
+   json_object_object_add(sig, "value", json_object_new_string(signature));
+   json_object_object_add(json_object_array_get_idx(blocks, n - 1), "sig", sig);
+}
+
 static void add_vendor_block(struct json_object *blocks,
                              const char *type,
                              const char *carrier,
@@ -99,10 +129,32 @@ void llm_turn_blocks_add_reasoning(struct json_object *blocks,
    add_vendor_block(blocks, "reasoning", carrier, format, model, native);
 }
 
+/* Where vendor-issued data may go back: the one rule every renderer uses.
+ * Vendor data is (a) a reasoning or opaque block and (b) a tool call's "sig";
+ * each carries the carrier, format and model that issued it.  It goes back
+ * only to that carrier in that format, and (when both say) the same model:
+ * reasoning is encrypted or signed for the model and organization that made
+ * it.  Claude is the exception by design: its blocks go back to any Claude
+ * model (NULL model), and the API drops what the current model can't read. */
+static bool replays_to(struct json_object *v,
+                       const char *format,
+                       const char *carrier,
+                       const char *model) {
+   if (!is(str_of(v, "carrier"), carrier) || !is(str_of(v, "format"), format)) {
+      return false;
+   }
+   const char *from = str_of(v, "model");
+   return !model || !from || strcmp(from, model) == 0;
+}
+
+/* Whether block @p b is reasoning or opaque vendor content. */
+static bool is_vendor_block(struct json_object *b) {
+   const char *type = str_of(b, "type");
+   return is(type, "reasoning") || is(type, "opaque");
+}
+
 bool llm_turn_blocks_is_own(struct json_object *block, const char *carrier, const char *format) {
-   const char *type = str_of(block, "type");
-   return (is(type, "reasoning") || is(type, "opaque")) && is(str_of(block, "carrier"), carrier) &&
-          is(str_of(block, "format"), format);
+   return is_vendor_block(block) && replays_to(block, format, carrier, NULL);
 }
 
 /* A deep copy of @p obj (NULL on failure). */
@@ -182,17 +234,89 @@ struct json_object *llm_turn_blocks_render_claude(struct json_object *blocks) {
    return content;
 }
 
-/* Whether OpenAI reasoning block @p b may go back to @p carrier's @p model:
- * the same endpoint, and the same model (a reasoning item is encrypted for
- * the model and organization that produced it). */
-static bool openai_reasoning_replays(struct json_object *b,
-                                     const char *carrier,
-                                     const char *model) {
-   if (!llm_turn_blocks_is_own(b, carrier, LLM_FORMAT_OPENAI)) {
-      return false;
+
+struct json_object *llm_turn_blocks_render_chat(struct json_object *blocks,
+                                                const char *carrier,
+                                                const char *model) {
+   struct json_object *msg = json_object_new_object();
+   if (!msg) {
+      return NULL;
    }
-   const char *from = str_of(b, "model");
-   return !model || !from || strcmp(from, model) == 0;
+   json_object_object_add(msg, "role", json_object_new_string("assistant"));
+   size_t text_len = 0;
+   const size_t n = blocks && json_object_is_type(blocks, json_type_array)
+                        ? json_object_array_length(blocks)
+                        : 0;
+   for (size_t i = 0; i < n; i++) {
+      struct json_object *b = json_object_array_get_idx(blocks, i);
+      if (is(str_of(b, "type"), "text")) {
+         text_len += strlen(or_empty(str_of(b, "text"))) + 2; /* and a "\n\n" between */
+      }
+   }
+   char *text = malloc(text_len + 1);
+   if (!text) {
+      json_object_put(msg);
+      return NULL;
+   }
+   size_t off = 0;
+   struct json_object *calls = NULL;
+   struct json_object *details = NULL;
+   for (size_t i = 0; i < n; i++) {
+      struct json_object *b = json_object_array_get_idx(blocks, i);
+      const char *type = str_of(b, "type");
+      if (is(type, "text")) {
+         const char *t = or_empty(str_of(b, "text"));
+         if (off > 0 && *t) {
+            memcpy(text + off, "\n\n", 2); /* separate blocks, as a Claude turn reads */
+            off += 2;
+         }
+         memcpy(text + off, t, strlen(t));
+         off += strlen(t);
+      } else if (is(type, "tool_call")) {
+         if (!calls && !(calls = json_object_new_array())) {
+            continue;
+         }
+         const char *args = str_of(b, "arguments");
+         struct json_object *call = json_object_new_object();
+         struct json_object *fn = json_object_new_object();
+         json_object_object_add(call, "id", json_object_new_string(or_empty(str_of(b, "id"))));
+         json_object_object_add(call, "type", json_object_new_string("function"));
+         json_object_object_add(fn, "name", json_object_new_string(or_empty(str_of(b, "name"))));
+         json_object_object_add(fn, "arguments",
+                                json_object_new_string(args && *args ? args : "{}"));
+         json_object_object_add(call, "function", fn);
+         struct json_object *sig = NULL;
+         if (json_object_object_get_ex(b, "sig", &sig) &&
+             replays_to(sig, LLM_FORMAT_GEMINI, carrier, model)) {
+            struct json_object *extra = json_object_new_object();
+            struct json_object *google = json_object_new_object();
+            json_object_object_add(google, "thought_signature",
+                                   json_object_new_string(or_empty(str_of(sig, "value"))));
+            json_object_object_add(extra, "google", google);
+            json_object_object_add(call, "extra_content", extra);
+         }
+         json_object_array_add(calls, call);
+      } else if (is_vendor_block(b) && replays_to(b, LLM_FORMAT_OPENROUTER, carrier, model)) {
+         struct json_object *native = NULL;
+         if (json_object_object_get_ex(b, "native", &native) &&
+             (details || (details = json_object_new_array()))) {
+            struct json_object *copy = copy_of(native);
+            if (copy) {
+               json_object_array_add(details, copy);
+            }
+         }
+      }
+   }
+   text[off] = '\0';
+   json_object_object_add(msg, "content", json_object_new_string(text));
+   free(text);
+   if (calls) {
+      json_object_object_add(msg, "tool_calls", calls);
+   }
+   if (details) {
+      json_object_object_add(msg, "reasoning_details", details);
+   }
+   return msg;
 }
 
 void llm_turn_blocks_render_responses(struct json_object *blocks,
@@ -238,7 +362,7 @@ void llm_turn_blocks_render_responses(struct json_object *blocks,
          json_object_object_add(call, "arguments",
                                 json_object_new_string(args && *args ? args : "{}"));
          json_object_array_add(input, call);
-      } else if (openai_reasoning_replays(b, carrier, model)) {
+      } else if (is_vendor_block(b) && replays_to(b, LLM_FORMAT_OPENAI, carrier, model)) {
          struct json_object *native = NULL;
          if (json_object_object_get_ex(b, "native", &native)) {
             struct json_object *copy = copy_of(native);
@@ -376,19 +500,6 @@ struct json_object *llm_turn_blocks_with_final_text(struct json_object *blocks,
    return out;
 }
 
-bool llm_turn_blocks_has_reasoning(struct json_object *blocks, const char *carrier) {
-   const size_t n = blocks && json_object_is_type(blocks, json_type_array)
-                        ? json_object_array_length(blocks)
-                        : 0;
-   for (size_t i = 0; i < n; i++) {
-      struct json_object *b = json_object_array_get_idx(blocks, i);
-      if (is(str_of(b, "type"), "reasoning") && is(str_of(b, "carrier"), carrier)) {
-         return true;
-      }
-   }
-   return false;
-}
-
 void llm_turn_message_set_text(struct json_object *message, const char *text) {
    if (!message || !text) {
       return;
@@ -416,6 +527,12 @@ size_t llm_turn_message_reasoning_chars(struct json_object *message) {
    for (size_t i = 0; i < n; i++) {
       struct json_object *b = json_object_array_get_idx(blocks, i);
       struct json_object *native = NULL;
+      struct json_object *sig = NULL;
+      if (is(str_of(b, "type"), "tool_call") && json_object_object_get_ex(b, "sig", &sig)) {
+         const char *v = str_of(sig, "value"); /* a Gemini signature goes back with its call */
+         chars += v ? strlen(v) : 0;
+         continue;
+      }
       if (!json_object_object_get_ex(b, "native", &native)) {
          continue;
       }
@@ -425,6 +542,15 @@ size_t llm_turn_message_reasoning_chars(struct json_object *message) {
          continue;
       }
       if (!is(str_of(b, "type"), "reasoning")) {
+         continue;
+      }
+      if (is(str_of(b, "format"), LLM_FORMAT_OPENROUTER)) {
+         /* An entry goes back whole: its text, signature, data and summary. */
+         static const char *const FIELDS[] = { "text", "signature", "data", "summary" };
+         for (size_t k = 0; k < sizeof(FIELDS) / sizeof(FIELDS[0]); k++) {
+            const char *v = str_of(native, FIELDS[k]);
+            chars += v ? strlen(v) : 0;
+         }
          continue;
       }
       const char *text = str_of(native, "thinking");
@@ -524,4 +650,40 @@ struct json_object *llm_history_wire_copy(struct json_object *history) {
 
 struct json_object *llm_history_strip_internal(struct json_object *history) {
    return copy_history(history, true);
+}
+
+/* The host of @p url ("https://api.openai.com/v1" → "api.openai.com"). */
+static void url_host(const char *url, char *out, size_t out_len) {
+   if (out_len == 0) {
+      return;
+   }
+   const char *start = url ? strstr(url, "://") : NULL;
+   start = start ? start + 3 : (url ? url : "");
+   size_t n = strcspn(start, "/?#");
+   const char *at = memchr(start, '@', n); /* never carry credentials */
+   if (at) {
+      n -= (size_t)(at + 1 - start);
+      start = at + 1;
+   }
+   if (n >= out_len) {
+      n = out_len - 1;
+   }
+   for (size_t i = 0; i < n; i++) {
+      out[i] = (char)tolower((unsigned char)start[i]);
+   }
+   out[n] = '\0';
+}
+
+/* The carrier of this request's reasoning: the endpoint's host and a short
+ * fingerprint of the API key (an item is encrypted for the organization that
+ * produced it; another key may belong to another one).  FNV-1a, 32 bits: it
+ * tells keys apart, and says nothing useful about one. */
+void llm_turn_blocks_carrier(const char *base_url, const char *api_key, char *out, size_t out_len) {
+   char host[96];
+   url_host(base_url, host, sizeof(host));
+   uint32_t h = 2166136261u;
+   for (const char *k = api_key ? api_key : ""; *k; k++) {
+      h = (h ^ (uint8_t)*k) * 16777619u;
+   }
+   snprintf(out, out_len, "%s#%08x", host, h);
 }

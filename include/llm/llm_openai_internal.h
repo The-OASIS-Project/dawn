@@ -76,10 +76,18 @@ bool llm_openai_model_prefers_responses_api(const char *model_name);
  * Claude-format tool/image blocks to OpenAI format, and strips vision content
  * when the target LLM lacks vision support.
  *
+ * An assistant turn with blocks (llm_turn_blocks.h) is rendered from them:
+ * its text and tool calls, and the reasoning @p carrier and @p model issued
+ * (OpenRouter reasoning_details, a Gemini call's thought signature).
+ *
  * @param conversation_history Original conversation history (not modified).
+ * @param carrier The request's carrier (llm_turn_blocks_carrier).
+ * @param model   The request's model.
  * @return Converted history (new object, caller frees with json_object_put).
  */
-json_object *llm_openai_prepare_chat_history(struct json_object *conversation_history);
+json_object *llm_openai_prepare_chat_history(struct json_object *conversation_history,
+                                             const char *carrier,
+                                             const char *model);
 
 /**
  * @brief Return a request-private messages array with vision images applied,

@@ -120,7 +120,7 @@ typedef struct {
    size_t block_bytes;
    bool blocks_over;
    const char *model;
-   char carrier[128]; /* who issued its reasoning (reasoning_carrier) */
+   char carrier[LLM_CARRIER_MAX]; /* who issued its reasoning (llm_turn_blocks_carrier) */
 
    /* Final response.id captured at response.completed */
    char response_id[64];
@@ -208,44 +208,6 @@ static bool is_current_session_remote_local(void) {
    return s->type != SESSION_TYPE_LOCAL;
 }
 
-/* The host of @p url ("https://api.openai.com/v1" → "api.openai.com"). */
-static void url_host(const char *url, char *out, size_t out_len) {
-   if (out_len == 0) {
-      return;
-   }
-   const char *start = url ? strstr(url, "://") : NULL;
-   start = start ? start + 3 : (url ? url : "");
-   size_t n = strcspn(start, "/?#");
-   const char *at = memchr(start, '@', n); /* never carry credentials */
-   if (at) {
-      n -= (size_t)(at + 1 - start);
-      start = at + 1;
-   }
-   if (n >= out_len) {
-      n = out_len - 1;
-   }
-   for (size_t i = 0; i < n; i++) {
-      out[i] = (char)tolower((unsigned char)start[i]);
-   }
-   out[n] = '\0';
-}
-
-/* The carrier of this request's reasoning: the endpoint's host and a short
- * fingerprint of the API key (an item is encrypted for the organization that
- * produced it; another key may belong to another one).  FNV-1a, 32 bits: it
- * tells keys apart, and says nothing useful about one. */
-static void reasoning_carrier(const char *base_url,
-                              const char *api_key,
-                              char *out,
-                              size_t out_len) {
-   char host[96];
-   url_host(base_url, host, sizeof(host));
-   uint32_t h = 2166136261u;
-   for (const char *k = api_key ? api_key : ""; *k; k++) {
-      h = (h ^ (uint8_t)*k) * 16777619u;
-   }
-   snprintf(out, out_len, "%s#%08x", host, h);
-}
 
 /**
  * @brief Build the full Responses request JSON payload.
@@ -956,8 +918,8 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
 
    /* Whose reasoning this request may replay, and whose this turn's is: the
     * endpoint and the key's organization. */
-   char carrier[128];
-   reasoning_carrier(base_url, api_key, carrier, sizeof(carrier));
+   char carrier[LLM_CARRIER_MAX];
+   llm_turn_blocks_carrier(base_url, api_key, carrier, sizeof(carrier));
 
    /* Build request JSON */
    struct json_object *root = build_responses_request(conversation_history, input_text,

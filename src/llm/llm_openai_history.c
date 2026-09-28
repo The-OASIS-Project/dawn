@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "llm/llm_claude_parts.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_openai_internal.h"
 #include "llm/llm_tools.h"
@@ -166,15 +167,13 @@ int convert_claude_tool_to_openai(struct json_object *msg, struct json_object *o
          struct json_object *tool_msg = json_object_new_object();
          json_object_object_add(tool_msg, "role", json_object_new_string("tool"));
          json_object_object_add(tool_msg, "tool_call_id", json_object_get(tuid));
-         /* Claude tool_result content may be a string or an array of blocks. */
-         struct json_object *content_obj;
-         const char *result = "";
-         if (json_object_object_get_ex(elem, "content", &content_obj)) {
-            result = (json_object_get_type(content_obj) == json_type_string)
-                         ? json_object_get_string(content_obj)
-                         : json_object_to_json_string(content_obj);
+         /* A string, or its text parts joined (not the parts' JSON). */
+         char *result = llm_claude_tool_result_text(elem);
+         if (!result) {
+            OLOG_WARNING("OpenAI: tool result text not converted (out of memory); sent empty");
          }
-         json_object_object_add(tool_msg, "content", json_object_new_string(result));
+         json_object_object_add(tool_msg, "content", json_object_new_string(result ? result : ""));
+         free(result);
          json_object_array_add(out_array, tool_msg);
          appended++;
       }
@@ -198,34 +197,12 @@ static struct json_object *convert_content_block_to_openai(struct json_object *b
       return json_object_get(block);
    }
 
-   struct json_object *source_obj;
-   if (!json_object_object_get_ex(block, "source", &source_obj)) {
-      OLOG_WARNING("OpenAI: Claude image block missing source field");
-      return NULL;
-   }
-
-   struct json_object *media_type_obj, *data_obj;
-   const char *media_type = "image/jpeg";
-   const char *data = NULL;
-
-   if (json_object_object_get_ex(source_obj, "media_type", &media_type_obj)) {
-      media_type = json_object_get_string(media_type_obj);
-   }
-   if (json_object_object_get_ex(source_obj, "data", &data_obj)) {
-      data = json_object_get_string(data_obj);
-   }
-
-   if (!data) {
-      OLOG_WARNING("OpenAI: Claude image block missing data");
-      return NULL;
-   }
-
-   size_t url_len = strlen("data:") + strlen(media_type) + strlen(";base64,") + strlen(data) + 1;
-   char *data_url = malloc(url_len);
+   char *data_url = llm_claude_image_data_url(block);
    if (!data_url) {
+      OLOG_WARNING("OpenAI: Claude image block not convertible (no base64 data, or an image type "
+                   "not every provider accepts)");
       return NULL;
    }
-   snprintf(data_url, url_len, "data:%s;base64,%s", media_type, data);
 
    struct json_object *image_obj = json_object_new_object();
    json_object_object_add(image_obj, "type", json_object_new_string("image_url"));
@@ -235,8 +212,6 @@ static struct json_object *convert_content_block_to_openai(struct json_object *b
    json_object_object_add(image_obj, "image_url", url_obj);
 
    free(data_url);
-
-   OLOG_INFO("OpenAI: Converted Claude image to OpenAI image_url (media_type=%s)", media_type);
    return image_obj;
 }
 
@@ -292,6 +267,9 @@ static struct json_object *filter_orphaned_tool_messages(struct json_object *his
          continue;
       }
       const char *role = json_object_get_string(role_obj);
+      if (!role) {
+         continue;
+      }
 
       if (strcmp(role, "tool") == 0) {
          struct json_object *tcid_obj;
@@ -329,6 +307,9 @@ static struct json_object *filter_orphaned_tool_messages(struct json_object *his
          continue;
       }
       const char *role = json_object_get_string(role_obj);
+      if (!role) {
+         continue;
+      }
 
       if (strcmp(role, "tool") == 0) {
          struct json_object *tcid_obj;
@@ -379,6 +360,10 @@ static struct json_object *filter_orphaned_tool_messages(struct json_object *his
          continue;
       }
       const char *role = json_object_get_string(role_obj);
+      if (!role) {
+         json_object_array_add(filtered, json_object_get(msg)); /* kept, as with no role */
+         continue;
+      }
 
       if (strcmp(role, "tool") == 0) {
          struct json_object *tcid_obj;
@@ -446,6 +431,11 @@ static struct json_object *filter_orphaned_tool_messages(struct json_object *his
                json_object_object_add(rebuilt, "content", json_object_get(content_obj));
             }
             json_object_object_add(rebuilt, "tool_calls", kept_calls);
+            /* The turn's reasoning stays with the calls that remain. */
+            struct json_object *details;
+            if (json_object_object_get_ex(msg, "reasoning_details", &details)) {
+               json_object_object_add(rebuilt, "reasoning_details", json_object_get(details));
+            }
             json_object_array_add(filtered, rebuilt);
             orphan_count += (tc_len - json_object_array_length(kept_calls));
          } else {
@@ -555,10 +545,42 @@ static struct json_object *convert_claude_tool_messages(struct json_object *hist
 
 /* ── Public entry point ─────────────────────────────────────────────────── */
 
-json_object *llm_openai_prepare_chat_history(struct json_object *conversation_history) {
-   json_object *filtered = filter_orphaned_tool_messages(conversation_history);
-   json_object *converted = convert_claude_tool_messages(filtered);
-   json_object_put(filtered);
+/* @p history with every assistant turn that has blocks rendered from them
+ * (llm_turn_blocks_render_chat), for @p carrier's @p model.  Other messages
+ * are shared.  New array (caller puts), or NULL. */
+static json_object *render_turns_from_blocks(struct json_object *history,
+                                             const char *carrier,
+                                             const char *model) {
+   json_object *out = json_object_new_array();
+   const int n = json_object_array_length(history);
+   for (int i = 0; out && i < n; i++) {
+      json_object *msg = json_object_array_get_idx(history, i);
+      json_object *role = NULL, *blocks = NULL;
+      json_object *rendered = NULL;
+      if (json_object_object_get_ex(msg, "role", &role) && json_object_get_string(role) &&
+          strcmp(json_object_get_string(role), "assistant") == 0 &&
+          json_object_object_get_ex(msg, LLM_TURN_BLOCKS_KEY, &blocks)) {
+         rendered = llm_turn_blocks_render_chat(blocks, carrier, model);
+      }
+      json_object_array_add(out, rendered ? rendered : json_object_get(msg));
+   }
+   return out;
+}
+
+json_object *llm_openai_prepare_chat_history(struct json_object *conversation_history,
+                                             const char *carrier,
+                                             const char *model) {
+   json_object *rendered = render_turns_from_blocks(conversation_history, carrier, model);
+   if (!rendered) {
+      return NULL;
+   }
+   /* Everything in OpenAI shape first (Claude results too), then pairing:
+    * the filter matches calls to "tool" results, and a Claude result still in
+    * a user message would leave its rendered call looking unanswered. */
+   json_object *converted_all = convert_claude_tool_messages(rendered);
+   json_object_put(rendered);
+   json_object *converted = filter_orphaned_tool_messages(converted_all);
+   json_object_put(converted_all);
    /* DAWN's own message keys never go on the wire (llm_turn_blocks.h). */
    json_object *stripped = llm_history_wire_copy(converted);
    json_object_put(converted);

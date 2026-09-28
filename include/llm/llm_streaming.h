@@ -28,6 +28,7 @@
 #include "llm/llm_claude_binding.h"
 #include "llm/llm_claude_blocks.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_reasoning_details.h"
 #include "llm/llm_tools.h"
 
 /**
@@ -187,6 +188,15 @@ typedef struct {
    /* Tool calls output (populated by either provider) */
    tool_call_list_t tool_calls; /**< Accumulated tool calls */
    int has_tool_calls;          /**< Flag: 1 if tool_calls detected in response */
+
+   /* Chat-completions reasoning to replay (outside the provider union: a
+    * Claude stream leaves them NULL).  Gemini signs its reasoning per tool
+    * call; OpenRouter streams reasoning_details pieces, merged by type and index
+    * and type.  Both go back only to the endpoint and model that issued them
+    * (llm_stream_chat_blocks). */
+   char *call_signatures[LLM_TOOLS_MAX_PARALLEL_CALLS]; /**< heap, by tool-call index */
+   llm_reasoning_details_t reasoning_details;           /**< OpenRouter pieces, merged */
+   char served_model[128]; /**< the model the response says served it ("" = not said) */
 } llm_stream_context_t;
 
 /**
@@ -270,6 +280,19 @@ int llm_stream_has_tool_calls(llm_stream_context_t *ctx);
  * @return Pointer to tool_call_list_t (do not free), or NULL if no tool calls
  */
 const tool_call_list_t *llm_stream_get_tool_calls(llm_stream_context_t *ctx);
+
+/**
+ * @brief A chat-completions stream's turn as blocks (llm_turn_blocks.h)
+ *
+ * OpenRouter reasoning_details (in order), the text, and the tool calls, each
+ * with the Gemini signature it came with.  Reasoning and signatures are bound
+ * to @p carrier and @p model, so they only ever go back there.
+ *
+ * @return New blocks (caller owns them), or NULL
+ */
+struct json_object *llm_stream_chat_blocks(llm_stream_context_t *ctx,
+                                           const char *carrier,
+                                           const char *model);
 
 /**
  * @brief Create stream context with extended thinking callback

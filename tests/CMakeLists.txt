@@ -968,6 +968,7 @@ dawn_add_unit_test(test_llm_turn_blocks
    SOURCES test_llm_turn_blocks.c
            ${SRC_ROOT}/src/llm/llm_claude_blocks.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_reasoning_details.c
            ${SRC_ROOT}/src/core/strbuf.c
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
@@ -976,6 +977,7 @@ dawn_add_unit_test(test_llm_turn_blocks
 dawn_add_unit_test(test_openai_history
    SOURCES test_openai_history.c
            ${SRC_ROOT}/src/llm/llm_openai_history.c
+           ${SRC_ROOT}/src/llm/llm_claude_parts.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
@@ -1533,6 +1535,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_openai_chat_completions.c
            ${SRC_ROOT}/src/llm/llm_openai_history.c
            ${SRC_ROOT}/src/llm/llm_streaming.c
+           ${SRC_ROOT}/src/llm/llm_reasoning_details.c
            ${SRC_ROOT}/src/llm/llm_tools.c
            ${SRC_ROOT}/src/llm/llm_rate_limit.c
            ${SRC_ROOT}/src/llm/llm_openai_responses.c
@@ -1618,6 +1621,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_openai_chat_completions.c
            ${SRC_ROOT}/src/llm/llm_openai_history.c
            ${SRC_ROOT}/src/llm/llm_streaming.c
+           ${SRC_ROOT}/src/llm/llm_reasoning_details.c
            ${SRC_ROOT}/src/llm/llm_tools.c
            ${SRC_ROOT}/src/llm/llm_rate_limit.c
            ${SRC_ROOT}/src/llm/llm_openai_responses.c

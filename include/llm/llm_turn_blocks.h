@@ -34,6 +34,11 @@
  *   a reasoning item {type, id, summary, encrypted_content})
  *   { "type": "opaque", "carrier": ..., "format": ..., "model": ..., "native": {...} }
  *
+ * Vendor-issued data is exactly this: reasoning and opaque blocks, and a
+ * tool_call's "sig" (a Gemini thought signature for that call).  Each
+ * carries the carrier, format and model that issued it, and goes back only
+ * where they match (one rule, in llm_turn_blocks.c).
+ *
  * "carrier" is who issued it (the API it came through); "format" is whose
  * object it is (the same vendor directly; through a gateway, the upstream
  * vendor); "native" is that object exactly as received (for Anthropic, a
@@ -67,6 +72,14 @@ struct json_object;
 #define LLM_CARRIER_ANTHROPIC "anthropic"
 #define LLM_FORMAT_ANTHROPIC "anthropic"
 #define LLM_FORMAT_OPENAI "openai"
+/* OpenRouter's reasoning_details entries (any upstream vendor: the entry's own
+ * "format" says which), replayed as a sequence to the carrier that issued it. */
+#define LLM_FORMAT_OPENROUTER "openrouter"
+/* A Gemini thought signature, carried on the tool call it was issued with. */
+#define LLM_FORMAT_GEMINI "gemini"
+
+/** Room for a carrier (llm_turn_blocks_carrier). */
+#define LLM_CARRIER_MAX 128
 /* OpenAI-format reasoning is carried by the endpoint and organization that
  * issued it: its carrier is the endpoint's host and a fingerprint of the API
  * key ("api.openai.com#1a2b3c4d"). */
@@ -77,11 +90,38 @@ struct json_object *llm_turn_blocks_new(void);
 /** Append a text block (empty text is skipped). */
 void llm_turn_blocks_add_text(struct json_object *blocks, const char *text);
 
+/**
+ * @brief The carrier of a request's reasoning: its endpoint and API key
+ *
+ * The endpoint's host and a short fingerprint of the key
+ * ("api.openai.com#1a2b3c4d"): reasoning is encrypted or signed for the
+ * organization that produced it, and another key may belong to another one.
+ * The fingerprint (FNV-1a, 32 bits) tells keys apart and says nothing useful
+ * about one.  Credentials in the URL are never included.
+ *
+ * @param out At least LLM_CARRIER_MAX bytes
+ */
+void llm_turn_blocks_carrier(const char *base_url, const char *api_key, char *out, size_t out_len);
+
 /** Append a tool call; @p arguments is its JSON argument text ("" = {}). */
 void llm_turn_blocks_add_tool_call(struct json_object *blocks,
                                    const char *id,
                                    const char *name,
                                    const char *arguments);
+
+/**
+ * @brief Append a tool call with the signature a vendor issued for it
+ *
+ * Gemini signs its reasoning per call ("thought_signature"); it goes back only
+ * on requests to the same @p carrier and @p model, and nowhere else.
+ */
+void llm_turn_blocks_add_signed_tool_call(struct json_object *blocks,
+                                          const char *id,
+                                          const char *name,
+                                          const char *arguments,
+                                          const char *carrier,
+                                          const char *model,
+                                          const char *signature);
 
 /** Append a reasoning block, taking ownership of @p native. */
 void llm_turn_blocks_add_reasoning(struct json_object *blocks,
@@ -151,6 +191,22 @@ void llm_turn_blocks_render_responses(struct json_object *blocks,
                                       const char *carrier,
                                       const char *model);
 
+/**
+ * @brief Render blocks as one chat-completions assistant message
+ *
+ * The text joined as "content" ("" when none), tool calls as "tool_calls", a
+ * Gemini signature on its call (extra_content.google.thought_signature) and
+ * OpenRouter "reasoning_details" (in order, unmodified) when they came from
+ * @p carrier and @p model.  Other vendors' reasoning is left out.
+ *
+ * @param carrier The request's carrier (llm_turn_blocks_carrier)
+ * @param model   The request's model
+ * @return A new message (caller owns it), or NULL
+ */
+struct json_object *llm_turn_blocks_render_chat(struct json_object *blocks,
+                                                const char *carrier,
+                                                const char *model);
+
 /** Most tool calls one turn reconciles (at least the parallel tool-call limit). */
 #define LLM_TURN_CALLS_MAX 16
 
@@ -188,9 +244,6 @@ struct json_object *llm_turn_blocks_with_calls(struct json_object *blocks,
  * @return Blocks (caller owns a reference), or NULL
  */
 struct json_object *llm_turn_message_blocks(struct json_object *message);
-
-/** Whether any block is reasoning from @p carrier. */
-bool llm_turn_blocks_has_reasoning(struct json_object *blocks, const char *carrier);
 
 /**
  * @brief Set an assistant message's text, keeping its blocks in step

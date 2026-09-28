@@ -430,7 +430,8 @@ static void fire_tool_iteration_boundary(llm_tool_loop_params_t *params) {
  * @brief Add assistant message with tool calls in OpenAI format
  *
  * Appends the assistant message containing tool_calls array, then adds
- * tool result messages. Handles Gemini thought_signature if present.
+ * tool result messages.  The turn's blocks (reasoning, a call's signature)
+ * go with it; each request renders what belongs to its endpoint.
  */
 static void append_openai_tool_history(struct json_object *history,
                                        const llm_tool_response_t *response,
@@ -455,17 +456,6 @@ static void append_openai_tool_history(struct json_object *history,
       json_object_object_add(func, "arguments",
                              json_object_new_string(response->tool_calls.calls[i].arguments));
       json_object_object_add(tc, "function", func);
-
-      /* Gemini 3+ models: Include thought_signature in first tool call */
-      if (i == 0 && response->tool_calls.thought_signature[0] != '\0') {
-         json_object *extra_content = json_object_new_object();
-         json_object *google_obj = json_object_new_object();
-         json_object_object_add(google_obj, "thought_signature",
-                                json_object_new_string(response->tool_calls.thought_signature));
-         json_object_object_add(extra_content, "google", google_obj);
-         json_object_object_add(tc, "extra_content", extra_content);
-         OLOG_INFO("Tool loop: Including Gemini thought_signature in follow-up request");
-      }
 
       json_object_array_add(tc_array, tc);
    }
