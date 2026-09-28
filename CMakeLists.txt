@@ -862,17 +862,13 @@ list(APPEND DAWN_SOURCES
     src/tools/document_index_pipeline.c
 )
 
-# External focus-source adapters — Phase 1d (document chunks, calendar
-# events).  Email adapter deferred to v2 — no cache layer.  Compiled
-# into the daemon binary so 1e's wiring lands as a one-line caller-side
-# change; no production caller invokes external_focus_adapters_register_all()
-# until 1e ships.  Until then, these symbols are dead-stripped from the
-# daemon binary by the linker (no callers ⇒ DCE).  The test binary
-# (tests/CMakeLists.txt::test_external_focus_adapters) pulls these in
-# directly.
+# Context sources for per-turn injection and recall: document chunks (through
+# the shared document ranker) and calendar events.  Always built: the focus
+# framework uses them in every mode, independent of which tools are enabled.
 list(APPEND DAWN_SOURCES
     src/tools/document_focus_adapter.c
     src/tools/document_embed_cache.c
+    src/tools/document_rank.c
     src/tools/calendar_focus_adapter.c
     src/tools/external_focus_adapters_init.c
 )

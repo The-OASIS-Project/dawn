@@ -2060,7 +2060,7 @@ int auth_db_prepare_statements(void) {
     * Global-IDF caveat: per-user safety is the JOIN + (user_id=? OR is_global=1)
     * filter, not the index. */
    rc = sqlite3_prepare_v2(s_db.db,
-                           "SELECT c.id, c.chunk_index, c.text, c.document_id, d.filename, "
+                           "SELECT c.id, c.chunk_index, c.document_id, d.filename, "
                            "d.filetype, d.num_chunks, c.created_at, "
                            "bm25(document_chunks_fts, ?2, ?3) AS score "
                            "FROM document_chunks_fts "

@@ -70,6 +70,32 @@ int document_embed_rank(int user_id,
                         int *n_out,
                         document_rank_stats_t *stats);
 
+/** Most chunk ids document_embed_rank_with() scores on request. */
+#define DOCUMENT_RANK_WANT_MAX 64
+
+/**
+ * @brief document_embed_rank(), also returning the cosine of chosen chunks
+ *
+ * The rank already scores every accessible chunk, so the cosine of a chunk
+ * found another way (a keyword hit outside the top @p keep) comes from the same
+ * pass instead of a second scan.
+ *
+ * @param want_ids  Chunk ids to report (any order; NULL when @p n_want is 0)
+ * @param n_want    How many (<= DOCUMENT_RANK_WANT_MAX)
+ * @param want_cos  [out] Their cosines, in @p want_ids order; NAN for an id the
+ *                  user can't access or that has no embedding of @p dims
+ */
+int document_embed_rank_with(int user_id,
+                             const float *query,
+                             int dims,
+                             int keep,
+                             document_chunk_score_t *top,
+                             int *n_out,
+                             document_rank_stats_t *stats,
+                             const int64_t *want_ids,
+                             int n_want,
+                             float *want_cos);
+
 /** Free the cache (daemon shutdown). */
 void document_embed_cache_shutdown(void);
 

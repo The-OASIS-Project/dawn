@@ -159,6 +159,66 @@ int document_db_chunks_get_by_ids(int user_id,
    return SUCCESS;
 }
 
+int document_db_chunks_meta_by_ids(int user_id,
+                                   const int64_t *ids,
+                                   int n,
+                                   doc_chunk_meta_t *out,
+                                   int *count_out) {
+   if (ids == NULL || out == NULL || count_out == NULL || n <= 0)
+      return FAILURE;
+   int count = 0;
+   for (int i = 0; i < s_ext_mock.chunk_count && count < n; i++) {
+      if (s_ext_mock.chunk_user_id[i] != user_id)
+         continue;
+      for (int k = 0; k < n; k++) {
+         if (ids[k] == s_ext_mock.chunks[i].id) {
+            const document_chunk_t *c = &s_ext_mock.chunks[i];
+            doc_chunk_meta_t *m = &out[count++];
+            memset(m, 0, sizeof(*m));
+            m->id = c->id;
+            m->chunk_index = c->chunk_index;
+            m->document_id = c->document_id;
+            m->created_at = c->created_at;
+            snprintf(m->filename, sizeof(m->filename), "%s", c->doc_filename);
+            break;
+         }
+      }
+   }
+   *count_out = count;
+   return SUCCESS;
+}
+
+int document_db_chunk_search_bm25(int user_id,
+                                  const char *query,
+                                  float label_weight,
+                                  float body_weight,
+                                  doc_bm25_hit_t *out,
+                                  float *out_scores,
+                                  int max_hits,
+                                  int *count_out) {
+   (void)query;
+   (void)label_weight;
+   (void)body_weight;
+   s_ext_mock.call_count_bm25++;
+   int count = 0;
+   for (int i = 0; i < s_ext_mock.chunk_count && count < max_hits; i++) {
+      if (s_ext_mock.chunk_user_id[i] != user_id || s_ext_mock.chunk_bm25[i] <= 0.0f)
+         continue;
+      const document_chunk_t *c = &s_ext_mock.chunks[i];
+      doc_bm25_hit_t *h = &out[count];
+      memset(h, 0, sizeof(*h));
+      h->id = c->id;
+      h->chunk_index = c->chunk_index;
+      h->document_id = c->document_id;
+      h->created_at = c->created_at;
+      snprintf(h->filename, sizeof(h->filename), "%s", c->doc_filename);
+      out_scores[count] = s_ext_mock.chunk_bm25[i];
+      count++;
+   }
+   *count_out = count;
+   return SUCCESS;
+}
+
 /* =============================================================================
  * calendar_db stubs
  * ============================================================================= */

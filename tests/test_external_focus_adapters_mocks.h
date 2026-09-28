@@ -47,6 +47,10 @@ typedef struct {
    const float *chunk_embeddings[EXT_MOCK_MAX_CHUNKS]; /* fixture-owned */
    int chunk_count;
    int chunk_dim; /* per-fixture; honors expected_dims contract */
+   /* Keyword channel: a chunk with a score > 0 is returned by
+    * document_db_chunk_search_bm25 with that normalized score. */
+   float chunk_bm25[EXT_MOCK_MAX_CHUNKS];
+   int call_count_bm25;
 
    /* Calendar accounts. */
    calendar_account_t accounts[EXT_MOCK_MAX_ACCOUNTS];

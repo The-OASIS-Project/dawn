@@ -891,13 +891,16 @@ dawn_add_unit_test(test_external_focus_adapters
    SOURCES test_external_focus_adapters.c test_external_focus_adapters_stub.c
            ${SRC_ROOT}/src/tools/document_focus_adapter.c
            ${SRC_ROOT}/src/tools/document_embed_cache.c
+           ${SRC_ROOT}/src/tools/document_rank.c
            ${SRC_ROOT}/src/tools/calendar_focus_adapter.c
            ${SRC_ROOT}/src/tools/external_focus_adapters_init.c
            ${SRC_ROOT}/src/core/focus/focus_source.c
            ${SRC_ROOT}/src/core/focus/focus_recency.c
            ${SRC_ROOT}/src/core/focus/focus_candidate_helpers.c
            ${SRC_ROOT}/src/core/focus/focus_dominant_token.c
-   LIBS    dawn_common unity pthread m
+           ${SRC_ROOT}/src/core/time_query_parser.c
+           ${SRC_ROOT}/src/memory/memory_stem.c
+   LIBS    dawn_common unity pthread m stemmer
    LABEL   ci)
 
 # Silent-observe primitive (Phase 0 of Dynamic Context Injection).

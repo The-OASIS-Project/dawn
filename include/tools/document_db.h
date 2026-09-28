@@ -88,9 +88,9 @@ typedef struct {
    int64_t archived_at;
 } document_version_meta_t;
 
-/* v61: one lexical (BM25) candidate from document_db_chunk_search_bm25.  Carries
- * enough to fuse with the semantic channel and format a citation — no embedding
- * (the lexical side doesn't need it). */
+/* A chunk's coordinates and its document's label, without its text or
+ * embedding: what ranking needs (text is fetched for the chunks kept, with
+ * document_db_chunks_get_by_ids). */
 typedef struct {
    int64_t id; /* chunk id (== FTS rowid) */
    int chunk_index;
@@ -99,8 +99,10 @@ typedef struct {
    char filetype[DOC_FILETYPE_MAX];
    int num_chunks; /* parent doc chunk count (1 == note / whole-record) */
    int64_t created_at;
-   char text[DOC_CHUNK_TEXT_MAX];
-} doc_bm25_hit_t;
+} doc_chunk_meta_t;
+
+/* One lexical (BM25) candidate from document_db_chunk_search_bm25. */
+typedef doc_chunk_meta_t doc_bm25_hit_t;
 
 /* One literal-grep hit: just the coordinates needed to fetch a context window
  * (the matching text comes from document_db_chunk_read_range, not duplicated
@@ -671,12 +673,27 @@ int document_db_chunks_get_by_ids(int user_id,
                                   int *count_out);
 
 /**
+ * @brief Load chunks' coordinates and labels by id (no text, no embedding)
+ *
+ * Same access rule and ordering as document_db_chunks_get_by_ids().
+ *
+ * @param[out] count_out Entries written to @p out
+ * @return SUCCESS or FAILURE
+ */
+int document_db_chunks_meta_by_ids(int user_id,
+                                   const int64_t *ids,
+                                   int n,
+                                   doc_chunk_meta_t *out,
+                                   int *count_out);
+
+/**
  * @brief Lexical (BM25) chunk search — the v61 keyword candidate set.
  *
  * Runs the column-weighted FTS5 bm25() query over document_chunks_fts and
  * returns its OWN ranked candidates (NOT a re-rank of the semantic top-K), so a
  * semantically-buried but lexically-matching chunk still surfaces.  Scores are
  * sigmoid-normalized to [0, 1] (memory_bm25_normalize) for fusion with cosine.
+ * Hits carry no text, so the database lock is held for the search alone.
  *
  * @param user_id      User scope (own docs + global)
  * @param query        Raw query text (stemmed internally)

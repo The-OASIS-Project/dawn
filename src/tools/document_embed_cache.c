@@ -40,6 +40,7 @@
 
 #include "tools/document_embed_cache.h"
 
+#include <math.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -81,6 +82,12 @@ static struct {
    uint64_t clock;
 } s_cache = { .mutex = PTHREAD_MUTEX_INITIALIZER };
 
+/* A requested chunk id and where its cosine goes (sorted by id for lookup). */
+typedef struct {
+   int64_t id;
+   int slot;
+} want_t;
+
 /* Top-K accumulator shared by the cached and streaming paths. */
 typedef struct {
    const float *query;
@@ -90,13 +97,45 @@ typedef struct {
    document_chunk_score_t *top; /* sorted, best first */
    int n;
    document_rank_stats_t stats;
+   const want_t *want; /* sorted by id; NULL when none requested */
+   int n_want;
+   float *want_cos;
 } rank_acc_t;
+
+static void acc_record_wanted(rank_acc_t *acc, int64_t chunk_id, float cos) {
+   if (chunk_id < acc->want[0].id || chunk_id > acc->want[acc->n_want - 1].id) {
+      return; /* most chunks: outside the requested range */
+   }
+   int lo = 0;
+   int hi = acc->n_want - 1;
+   while (lo <= hi) {
+      const int mid = lo + (hi - lo) / 2;
+      if (acc->want[mid].id == chunk_id) {
+         /* Duplicates in the request sit next to each other after sorting. */
+         for (int i = mid; i >= 0 && acc->want[i].id == chunk_id; i--) {
+            acc->want_cos[acc->want[i].slot] = cos;
+         }
+         for (int i = mid + 1; i < acc->n_want && acc->want[i].id == chunk_id; i++) {
+            acc->want_cos[acc->want[i].slot] = cos;
+         }
+         return;
+      }
+      if (acc->want[mid].id < chunk_id) {
+         lo = mid + 1;
+      } else {
+         hi = mid - 1;
+      }
+   }
+}
 
 static void acc_add(rank_acc_t *acc, int64_t chunk_id, const float *emb, float norm) {
    const float cos = embedding_engine_cosine_with_norms(acc->query, emb, acc->dims, acc->query_norm,
                                                         norm);
    acc->stats.pool++;
    acc->stats.cosine_sum += cos;
+   if (acc->n_want > 0) {
+      acc_record_wanted(acc, chunk_id, cos);
+   }
    if (acc->n == acc->keep) {
       if (cos <= acc->top[acc->n - 1].cosine) {
          return;
@@ -371,6 +410,12 @@ static void install_locked(cache_slot_t *built) {
    }
 }
 
+static int want_cmp(const void *a, const void *b) {
+   const int64_t x = ((const want_t *)a)->id;
+   const int64_t y = ((const want_t *)b)->id;
+   return (x > y) - (x < y);
+}
+
 int document_embed_rank(int user_id,
                         const float *query,
                         int dims,
@@ -378,20 +423,46 @@ int document_embed_rank(int user_id,
                         document_chunk_score_t *top,
                         int *n_out,
                         document_rank_stats_t *stats) {
+   return document_embed_rank_with(user_id, query, dims, keep, top, n_out, stats, NULL, 0, NULL);
+}
+
+int document_embed_rank_with(int user_id,
+                             const float *query,
+                             int dims,
+                             int keep,
+                             document_chunk_score_t *top,
+                             int *n_out,
+                             document_rank_stats_t *stats,
+                             const int64_t *want_ids,
+                             int n_want,
+                             float *want_cos) {
    if (n_out) {
       *n_out = 0;
    }
    if (stats) {
       memset(stats, 0, sizeof(*stats));
    }
-   if (!query || dims <= 0 || keep <= 0 || keep > DOCUMENT_RANK_MAX || !top || !n_out) {
+   if (!query || dims <= 0 || keep <= 0 || keep > DOCUMENT_RANK_MAX || !top || !n_out ||
+       n_want < 0 || n_want > DOCUMENT_RANK_WANT_MAX || (n_want > 0 && (!want_ids || !want_cos))) {
       return FAILURE;
+   }
+   want_t want[DOCUMENT_RANK_WANT_MAX];
+   for (int i = 0; i < n_want; i++) {
+      want[i].id = want_ids[i];
+      want[i].slot = i;
+      want_cos[i] = NAN;
+   }
+   if (n_want > 1) {
+      qsort(want, (size_t)n_want, sizeof(want[0]), want_cmp);
    }
    rank_acc_t acc = { .query = query,
                       .query_norm = embedding_engine_l2_norm(query, dims),
                       .dims = dims,
                       .keep = keep,
-                      .top = top };
+                      .top = top,
+                      .want = n_want > 0 ? want : NULL,
+                      .n_want = n_want,
+                      .want_cos = want_cos };
 
    document_chunk_gen_t gen = { 0 };
    const bool have_gen = document_db_chunk_generation(user_id, &gen) == SUCCESS;
