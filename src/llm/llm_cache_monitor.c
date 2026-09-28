@@ -224,11 +224,8 @@ static void thinking_text(struct json_object *request, char *out, size_t out_len
    } else if (json_object_object_get_ex(request, "reasoning_effort", &f)) {
       effort = json_object_get_string(f);
    }
-   if (type[0] || effort[0]) {
-      snprintf(out, out_len, "%s/%s", type, effort);
-   } else {
-      out[0] = '\0';
-   }
+   /* "type/effort", "type" or "/effort" (OpenAI sends only an effort). */
+   snprintf(out, out_len, "%s%s%s", type, effort[0] ? "/" : "", effort);
 }
 
 /* Whether the newest message (the one this call adds) carries an image: its
@@ -442,6 +439,10 @@ static void enqueue_row(const llm_cache_record_t *rec, session_t *session, const
    safe_strscpy(row.thinking, rec->thinking);
    safe_strscpy(row.cache_miss_reason, rec->miss_reason);
    row.cache_missed_tokens = rec->missed_tokens;
+   row.binding_reported = rec->drops.reported;
+   row.binding_prefix_drops = rec->drops.prefix_drops;
+   row.binding_model_drops = rec->drops.model_drops;
+   row.binding_other_drops = rec->drops.other_drops;
 
    pthread_mutex_lock(&s_queue_mutex);
    if (s_queue_count == USAGE_QUEUE_MAX) {
@@ -507,6 +508,9 @@ void llm_cache_monitor_record(uint32_t session_id,
       safe_strscpy(rec.miss_reason, usage->cache_miss_reason);
       rec.missed_tokens = usage->cache_missed_tokens;
    }
+   if (usage->drops) {
+      rec.drops = *usage->drops;
+   }
 
    const char *provider = rec.type == LLM_LOCAL ? "local" : cloud_provider_to_string(rec.provider);
    const int coverage = rec.prompt > 0 ? (int)((int64_t)rec.read * 100 / rec.prompt) : 0;
@@ -514,16 +518,38 @@ void llm_cache_monitor_record(uint32_t session_id,
    if (rec.expected >= 0) {
       snprintf(expected_str, sizeof(expected_str), "%d", rec.expected);
    }
+   /* Binding drops as prefix/model: "-" when the response carried no list. */
+   char drops_str[24] = "-";
+   if (rec.drops.reported) {
+      snprintf(drops_str, sizeof(drops_str), "%d/%d", rec.drops.prefix_drops,
+               rec.drops.model_drops);
+   }
    OLOG_INFO("LLM cache: provider=%s model=%s kind=%s conv=%lld iter=%d prompt=%d read=%d "
              "write=%d uncached=%d coverage=%d%% expected=%s state=%s gap=%.1fs tools=%08x "
-             "system=%08x thinking=%s images=%d miss=%s/%d output=%d",
+             "system=%08x thinking=%s images=%d miss=%s/%d drops=%s output=%d",
              provider ? provider : "?", rec.model[0] ? rec.model : "?",
              llm_call_kind_name(rec.kind), (long long)rec.conversation_id, rec.iteration,
              rec.prompt, rec.read, rec.write, rec.uncached, coverage, expected_str,
              rec.expected >= 0 ? llm_cache_state_name(rec.state) : "n/a",
              (double)rec.gap_ms / 1000.0, rec.tools_hash, rec.system_hash,
              rec.thinking[0] ? rec.thinking : "-", rec.images ? 1 : 0,
-             rec.miss_reason[0] ? rec.miss_reason : "-", rec.missed_tokens, rec.output);
+             rec.miss_reason[0] ? rec.miss_reason : "-", rec.missed_tokens, drops_str, rec.output);
+   if (rec.drops.prefix_drops > 0) {
+      /* The history changed under a replayed thinking block: DAWN edited a
+       * prefix it must only append to.  The API dropped the block (and every
+       * later one) instead of failing the turn, so the answer lost reasoning. */
+      OLOG_WARNING("LLM binding: %d thinking block(s) dropped for a prefix change (first at %s), "
+                   "model=%s conv=%lld kind=%s: this is a DAWN bug, please report it",
+                   rec.drops.prefix_drops, rec.drops.first_path[0] ? rec.drops.first_path : "?",
+                   rec.model[0] ? rec.model : "?", (long long)rec.conversation_id,
+                   llm_call_kind_name(rec.kind));
+   }
+   if (rec.drops.other_drops > 0) {
+      OLOG_WARNING("LLM binding: %d input transformation(s) of a kind this build doesn't know, "
+                   "model=%s conv=%lld",
+                   rec.drops.other_drops, rec.model[0] ? rec.model : "?",
+                   (long long)rec.conversation_id);
+   }
    enqueue_row(&rec, session, provider);
    if (out) {
       *out = rec;

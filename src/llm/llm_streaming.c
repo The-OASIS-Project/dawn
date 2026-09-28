@@ -873,6 +873,7 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
       ctx->provider.claude.message_id[0] = '\0';
       ctx->provider.claude.cache_miss_reason[0] = '\0';
       ctx->provider.claude.cache_missed_tokens = 0;
+      memset(&ctx->provider.claude.drops, 0, sizeof(ctx->provider.claude.drops));
       if (json_object_object_get_ex(event, "message", &message_obj)) {
          /* The response id (the next request's diagnostics.previous_message_id)
           * and, with cache diagnostics on, why the cache missed. */
@@ -882,6 +883,7 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
          if (json_object_object_get_ex(message_obj, "id", &v)) {
             safe_strscpy(ctx->provider.claude.message_id, json_object_get_string(v));
          }
+         llm_claude_drops_from_message(message_obj, &ctx->provider.claude.drops);
          if (json_object_object_get_ex(message_obj, "diagnostics", &diag) &&
              json_object_object_get_ex(diag, "cache_miss_reason", &miss)) {
             if (json_object_object_get_ex(miss, "type", &v)) {
@@ -1132,6 +1134,13 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
 
       ctx->provider.claude.content_block_active = 0;
    } else if (strcmp(type, "message_delta") == 0) {
+      /* After a mid-stream server-side fallback, the final list replaces the first.
+       * It sits beside usage on the event; delta is read too, in case it's there. */
+      llm_claude_drops_from_message(event, &ctx->provider.claude.drops);
+      json_object *drops_delta = NULL;
+      if (json_object_object_get_ex(event, "delta", &drops_delta)) {
+         llm_claude_drops_from_message(drops_delta, &ctx->provider.claude.drops);
+      }
       // Extract stop_reason
       json_object *delta_obj, *stop_reason_obj;
       if (json_object_object_get_ex(event, "delta", &delta_obj)) {
@@ -1175,6 +1184,7 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
                .message_id = ctx->provider.claude.message_id,
                .cache_miss_reason = ctx->provider.claude.cache_miss_reason,
                .cache_missed_tokens = ctx->provider.claude.cache_missed_tokens,
+               .drops = &ctx->provider.claude.drops,
             };
             llm_context_update_usage(session_id, &usage);
 

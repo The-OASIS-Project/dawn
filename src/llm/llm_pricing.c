@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "llm/llm_model_family.h"
 #include "logging.h"
 #include "tools/toml.h"
 
@@ -145,50 +146,21 @@ static llm_cache_pricing_t lookup(const price_entry_t *arr,
    return *defaults;
 }
 
-/* Anthropic's own ids spell versions with dashes (claude-opus-5-5); OpenRouter
- * with dots (anthropic/claude-opus-5.5).  Look both up the Anthropic way. */
-static llm_cache_pricing_t lookup_anthropic(const char *model) {
-   char id[96];
-   size_t n = 0;
-   for (; model && model[n] && n < sizeof(id) - 1; n++) {
-      const bool version_dot = model[n] == '.' && n > 0 && model[n - 1] >= '0' &&
-                               model[n - 1] <= '9' && model[n + 1] >= '0' && model[n + 1] <= '9';
-      id[n] = version_dot ? '-' : model[n];
-   }
-   id[n] = '\0';
-   return lookup(s_anthropic_prices, id, &DEFAULT_ANTHROPIC);
-}
-
 llm_cache_pricing_t llm_cache_pricing(llm_type_t type,
                                       cloud_provider_t provider,
                                       const char *model) {
    if (type != LLM_CLOUD) {
       return NO_BILLING;
    }
-   switch (provider) {
-      case CLOUD_PROVIDER_CLAUDE:
-         return lookup_anthropic(model);
-      case CLOUD_PROVIDER_OPENAI:
-         return lookup(s_openai_prices, model, &DEFAULT_OPENAI);
-      case CLOUD_PROVIDER_GEMINI:
-         return lookup(s_gemini_prices, model, &DEFAULT_GEMINI);
-      case CLOUD_PROVIDER_OPENROUTER: {
-         /* "vendor/model": priced as the vendor prices it. */
-         const char *slash = model ? strchr(model, '/') : NULL;
-         if (slash) {
-            const size_t vlen = (size_t)(slash - model);
-            if (vlen == 9 && strncmp(model, "anthropic", 9) == 0) {
-               return lookup_anthropic(slash + 1);
-            }
-            if (vlen == 6 && strncmp(model, "openai", 6) == 0) {
-               return lookup(s_openai_prices, slash + 1, &DEFAULT_OPENAI);
-            }
-            if (vlen == 6 && strncmp(model, "google", 6) == 0) {
-               return lookup(s_gemini_prices, slash + 1, &DEFAULT_GEMINI);
-            }
-         }
-         return DEFAULT_OTHER;
-      }
+   /* An OpenRouter "vendor/model" is priced as its vendor prices it. */
+   char id[96];
+   switch (llm_model_route(type, provider, model, id, sizeof(id))) {
+      case LLM_FAMILY_ANTHROPIC:
+         return lookup(s_anthropic_prices, id, &DEFAULT_ANTHROPIC);
+      case LLM_FAMILY_OPENAI:
+         return lookup(s_openai_prices, id, &DEFAULT_OPENAI);
+      case LLM_FAMILY_GEMINI:
+         return lookup(s_gemini_prices, id, &DEFAULT_GEMINI);
       default:
          return DEFAULT_OTHER;
    }

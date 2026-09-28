@@ -59,14 +59,6 @@ struct curl_slist *llm_openai_build_headers(const char *api_key, const char *bas
 const char *llm_openai_parse_error_message(const char *response_body, long http_code);
 
 /**
- * @brief Whether the model is in the GPT-5 base family.
- *
- * Only the original gpt-5 / gpt-5-mini / gpt-5-nano accept reasoning_effort=minimal.
- * gpt-5.1 and later versioned variants reject "minimal" and use "none" instead.
- */
-bool llm_openai_is_gpt5_base_family(const char *model_name);
-
-/**
  * @brief Whether the model should be routed to /v1/responses instead of /v1/chat/completions.
  *
  * Returns true for gpt-5.4* (and any future model OpenAI gates the same way), where
@@ -74,24 +66,6 @@ bool llm_openai_is_gpt5_base_family(const char *model_name);
  * The caller still chooses based on the configured mode (auto/always/never).
  */
 bool llm_openai_model_prefers_responses_api(const char *model_name);
-
-/**
- * @brief Clamp a `reasoning_effort` string to what the given model accepts on
- *        /v1/chat/completions or /v1/responses.
- *
- * Different model families accept different value sets:
- *   gpt-5 base/-mini/-nano:  minimal | low | medium | high
- *   gpt-5.1:                 none | low | medium | high
- *   gpt-5.2 / gpt-5.4*:      none | low | medium | high | xhigh
- *   o1 / o3 series:          low | medium | high
- *   Gemini 2.5+/3.x (OAI-compat): low | medium | high (no none, no xhigh, no minimal)
- *
- * `xhigh` not supported → clamps to `high`. `none` not supported → clamps to
- * `minimal` for gpt-5 base/-mini/-nano, otherwise to `low`. `minimal` is only
- * valid on gpt-5 base; clamps to `low` elsewhere. Returns a string-literal
- * pointer; do not free.
- */
-const char *llm_openai_clamp_effort_for_model(const char *model_name, const char *effort);
 
 /* ── History conversion (llm_openai_history.c) ──────────────────────────── */
 

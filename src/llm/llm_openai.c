@@ -123,17 +123,6 @@ const char *llm_openai_parse_error_message(const char *response_body, long http_
    return error_msg;
 }
 
-bool llm_openai_is_gpt5_base_family(const char *model_name) {
-   if (!model_name)
-      return false;
-   if (strncmp(model_name, "gpt-5", 5) != 0)
-      return false;
-   /* gpt-5, gpt-5-mini, gpt-5-nano — but NOT gpt-5.1, gpt-5.2, gpt-5.4* */
-   if (model_name[5] == '\0' || model_name[5] == '-')
-      return true;
-   return false;
-}
-
 bool llm_openai_model_prefers_responses_api(const char *model_name) {
    if (!model_name)
       return false;
@@ -160,37 +149,6 @@ bool llm_openai_model_prefers_responses_api(const char *model_name) {
    if (major == 5 && minor >= 4)
       return true;
    return false;
-}
-
-const char *llm_openai_clamp_effort_for_model(const char *model_name, const char *effort) {
-   if (!effort || !model_name)
-      return effort;
-
-   bool is_o_series = (strncmp(model_name, "o1", 2) == 0 || strncmp(model_name, "o3", 2) == 0);
-   bool is_gpt5_base = llm_openai_is_gpt5_base_family(model_name);
-   bool is_gemini = (strncmp(model_name, "gemini-", 7) == 0);
-
-   /* xhigh: only gpt-5.2+ supports it */
-   if (strcmp(effort, "xhigh") == 0) {
-      if (is_o_series || is_gpt5_base || is_gemini)
-         return "high";
-   }
-
-   /* none: o-series and Gemini don't support it */
-   if (strcmp(effort, "none") == 0) {
-      if (is_o_series || is_gemini)
-         return "low";
-      if (is_gpt5_base)
-         return "minimal";
-   }
-
-   /* minimal: only gpt-5 base family */
-   if (strcmp(effort, "minimal") == 0) {
-      if (!is_gpt5_base)
-         return "low";
-   }
-
-   return effort;
 }
 
 /* ── Public entry points (dispatch to chat-completions or responses) ────── */

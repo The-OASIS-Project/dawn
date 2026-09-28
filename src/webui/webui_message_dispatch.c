@@ -475,7 +475,6 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
          session_llm_config_t config;
          session_get_llm_config(conn->session, &config);
          bool has_changes = false;
-         bool thinking_clamped_on = false; /* set-time thinking-disable clamp fired */
 
          /* Track old model + type for context cache invalidation */
          char old_model[LLM_MODEL_NAME_MAX];
@@ -610,39 +609,17 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
             OLOG_INFO("WebUI: Corrected stale local type to cloud for model '%s'", config.model);
          }
 
-         /* Parse thinking_mode (disabled/auto/enabled) */
+         /* Parse thinking_mode.  Stored as picked; each request resolves it
+          * against what the model accepts (llm_thinking_resolve_current). */
          struct json_object *thinking_mode_obj;
          if (json_object_object_get_ex(payload, "thinking_mode", &thinking_mode_obj)) {
             const char *new_thinking_mode = json_object_get_string(thinking_mode_obj);
             if (new_thinking_mode) {
                /* Validate thinking mode value */
                if (strcmp(new_thinking_mode, "disabled") == 0 ||
-                   strcmp(new_thinking_mode, "auto") == 0 ||
-                   strcmp(new_thinking_mode, "enabled") == 0) {
-                  /* Native Claude rejects disabling thinking on a conversation whose
-                   * history already contains thinking blocks ("assistant message cannot
-                   * contain thinking"). Clamp the stored value to enabled at set-time so
-                   * the persisted/effective state stays consistent and the response
-                   * reflects reality to the client — the control follows the effective
-                   * value, not the unachievable pick. Only native Claude has this
-                   * constraint (OpenRouter uses the OpenAI-compatible formatter). The
-                   * request-time formatter clamp remains the safety net for non-WebUI
-                   * clients. */
-                  if (strcmp(new_thinking_mode, "disabled") == 0 && config.type == LLM_CLOUD &&
-                      config.cloud_provider == CLOUD_PROVIDER_CLAUDE) {
-                     pthread_mutex_lock(&conn->session->history_mutex);
-                     bool has_thinking = claude_history_has_thinking_blocks(
-                         conn->session->conversation_history);
-                     pthread_mutex_unlock(&conn->session->history_mutex);
-                     if (has_thinking) {
-                        OLOG_INFO("WebUI: thinking disable clamped to enabled (conversation "
-                                  "already contains reasoning Claude must preserve)");
-                        new_thinking_mode = "enabled";
-                        /* Notify only after the config actually persists (below), so a
-                         * failed apply doesn't produce a "kept on" + "failed" double toast. */
-                        thinking_clamped_on = true;
-                     }
-                  }
+                   strcmp(new_thinking_mode, "adaptive") == 0 ||
+                   strcmp(new_thinking_mode, "enabled") == 0 ||
+                   strcmp(new_thinking_mode, "auto") == 0) {
                   has_changes = true;
                   safe_strscpy(config.thinking_mode, new_thinking_mode);
                   OLOG_INFO("WebUI: Session thinking_mode set to '%s'", config.thinking_mode);
@@ -653,16 +630,16 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
             }
          }
 
-         /* Parse reasoning_effort. The allowlist mirrors the gpt-5.4 Responses API
-          * (none/low/medium/high/xhigh); Claude maps low/medium/high to budget
-          * tokens via llm_get_effective_budget_tokens. */
+         /* Parse reasoning_effort: any effort name some model takes; each
+          * request snaps it to the nearest one its model offers. */
          struct json_object *reasoning_effort_obj;
          if (json_object_object_get_ex(payload, "reasoning_effort", &reasoning_effort_obj)) {
             const char *new_effort = json_object_get_string(reasoning_effort_obj);
             if (new_effort) {
-               if (strcmp(new_effort, "none") == 0 || strcmp(new_effort, "low") == 0 ||
-                   strcmp(new_effort, "medium") == 0 || strcmp(new_effort, "high") == 0 ||
-                   strcmp(new_effort, "xhigh") == 0) {
+               if (strcmp(new_effort, "none") == 0 || strcmp(new_effort, "minimal") == 0 ||
+                   strcmp(new_effort, "low") == 0 || strcmp(new_effort, "medium") == 0 ||
+                   strcmp(new_effort, "high") == 0 || strcmp(new_effort, "xhigh") == 0 ||
+                   strcmp(new_effort, "max") == 0) {
                   has_changes = true;
                   safe_strscpy(config.reasoning_effort, new_effort);
                   OLOG_INFO("WebUI: Session reasoning_effort set to '%s'", config.reasoning_effort);
@@ -682,18 +659,6 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
             } else {
                OLOG_INFO("WebUI: Session %u LLM config updated (type=%d, provider=%d)",
                          conn->session->session_id, config.type, config.cloud_provider);
-
-               /* Set-time thinking clamp fired and persisted — tell the user why the
-                * Disabled toggle didn't take. The dropdown follows the effective value
-                * via the response's thinking_mode field. */
-               if (thinking_clamped_on) {
-                  webui_send_error_ex(
-                      conn->session, "INFO_THINKING_KEPT_ON",
-                      "Extended thinking stayed on: this conversation already contains "
-                      "reasoning, which Claude requires be preserved. Start a new "
-                      "conversation to turn thinking off.",
-                      WS_SEVERITY_INFO);
-               }
 
                /* If local model or LLM type changed, context size may differ */
                if (config.type == LLM_LOCAL &&

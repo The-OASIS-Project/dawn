@@ -722,8 +722,12 @@ dawn_add_unit_test(test_messaging_format
 dawn_add_unit_test(test_claude_format
    SOURCES test_claude_format.c
            ${SRC_ROOT}/src/llm/llm_claude_format.c
+           ${SRC_ROOT}/src/llm/llm_capabilities.c
+           ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/src/llm/llm_model_version.c
+           ${SRC_ROOT}/src/tools/toml.c
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
+   DEFINES MODELS_TOML_PATH="${SRC_ROOT}/models.toml"
    LABEL   ci)
 
 # OpenRouter→Anthropic prompt-cache injector — copy-on-write invariant guard.
@@ -912,13 +916,46 @@ dawn_add_unit_test(test_llm_cache_monitor
    LIBS    dawn_common unity ${JSONC_LIBRARIES} pthread
    LABEL   ci)
 
+# Per-model reasoning capabilities + the mode/effort resolver, against the
+# shipped models.toml.
+dawn_add_unit_test(test_llm_capabilities
+   SOURCES test_llm_capabilities.c
+           ${SRC_ROOT}/src/llm/llm_capabilities.c
+           ${SRC_ROOT}/src/llm/llm_model_family.c
+           ${SRC_ROOT}/src/tools/toml.c
+   LIBS    dawn_common unity
+   DEFINES MODELS_TOML_PATH="${SRC_ROOT}/models.toml"
+   LABEL   ci)
+
+# Loading models.toml: the disk copy over the built-in one, table by table.
+dawn_add_unit_test(test_llm_models_toml
+   SOURCES test_llm_models_toml.c
+           ${SRC_ROOT}/src/llm/llm_models_toml.c
+           ${SRC_ROOT}/src/tools/toml.c
+   LIBS    dawn_common unity
+   LABEL   ci)
+
 # Per-model prompt-cache pricing, against the shipped models.toml.
 dawn_add_unit_test(test_llm_pricing
    SOURCES test_llm_pricing.c
            ${SRC_ROOT}/src/llm/llm_pricing.c
+           ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/src/tools/toml.c
    LIBS    dawn_common unity m
    DEFINES MODELS_TOML_PATH="${SRC_ROOT}/models.toml"
+   LABEL   ci)
+
+dawn_add_unit_test(test_llm_claude_binding
+   SOURCES test_llm_claude_binding.c
+           ${SRC_ROOT}/src/llm/llm_claude_binding.c
+   LIBS    dawn_common unity json-c
+   LABEL   ci)
+
+# Anthropic betas: request fields, header, and which 400s turn one off.
+dawn_add_unit_test(test_llm_claude_betas
+   SOURCES test_llm_claude_betas.c
+           ${SRC_ROOT}/src/llm/llm_claude_betas.c
+   LIBS    dawn_common unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_word_to_number
@@ -1421,7 +1458,11 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_interface.c
            ${SRC_ROOT}/src/llm/llm_local_provider.c
            ${SRC_ROOT}/src/llm/llm_claude.c
+           ${SRC_ROOT}/src/llm/llm_claude_betas.c
+           ${SRC_ROOT}/src/llm/llm_claude_binding.c
            ${SRC_ROOT}/src/llm/llm_claude_format.c
+           ${SRC_ROOT}/src/llm/llm_capabilities.c
+           ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/src/llm/llm_model_version.c
            ${SRC_ROOT}/src/llm/llm_openai.c
            ${SRC_ROOT}/src/llm/llm_openai_cache.c
@@ -1433,6 +1474,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_openai_responses.c
            ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
            ${SRC_ROOT}/src/llm/llm_context.c
+           ${SRC_ROOT}/src/llm/llm_models_toml.c
            ${SRC_ROOT}/src/llm/llm_cache_monitor.c
            ${SRC_ROOT}/src/llm/llm_context_merge.c
            ${SRC_ROOT}/src/llm/llm_pricing.c
@@ -1494,7 +1536,11 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_interface.c
            ${SRC_ROOT}/src/llm/llm_local_provider.c
            ${SRC_ROOT}/src/llm/llm_claude.c
+           ${SRC_ROOT}/src/llm/llm_claude_betas.c
+           ${SRC_ROOT}/src/llm/llm_claude_binding.c
            ${SRC_ROOT}/src/llm/llm_claude_format.c
+           ${SRC_ROOT}/src/llm/llm_capabilities.c
+           ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/src/llm/llm_model_version.c
            ${SRC_ROOT}/src/llm/llm_openai.c
            ${SRC_ROOT}/src/llm/llm_openai_cache.c
@@ -1506,6 +1552,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_openai_responses.c
            ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
            ${SRC_ROOT}/src/llm/llm_context.c
+           ${SRC_ROOT}/src/llm/llm_models_toml.c
            ${SRC_ROOT}/src/llm/llm_cache_monitor.c
            ${SRC_ROOT}/src/llm/llm_context_merge.c
            ${SRC_ROOT}/src/llm/llm_pricing.c
@@ -1585,3 +1632,8 @@ add_test(NAME check_settings_sections_rendered
          COMMAND bash ${SRC_ROOT}/tests/check_settings_sections_rendered.sh
          WORKING_DIRECTORY ${SRC_ROOT})
 set_tests_properties(check_settings_sections_rendered PROPERTIES LABELS "ci")
+
+# The tests that load models.toml read the copy compiled in (models_toml_builtin.h).
+add_dependencies(bench_retrieval models_toml_builtin)
+add_dependencies(test_memory_remember models_toml_builtin)
+add_dependencies(test_llm_models_toml models_toml_builtin)

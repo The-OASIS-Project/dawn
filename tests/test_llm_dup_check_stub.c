@@ -139,3 +139,10 @@ void webui_send_state_with_detail(void *session, const char *state, const char *
 void *worker_pool_get_mosq(void) {
    return NULL;
 }
+
+/* llm_budget_tokens_for_effort (llm_tools.c) takes the level's size from the
+ * capability module, which this test doesn't link. */
+int llm_thinking_budget_size(const char *level) {
+   (void)level;
+   return 8192;
+}

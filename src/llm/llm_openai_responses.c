@@ -41,6 +41,7 @@
 #include "core/curl_buffer.h"
 #include "core/session_manager.h"
 #include "llm/llm_cache_monitor.h"
+#include "llm/llm_capabilities.h"
 #include "llm/llm_context.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_model_version.h"
@@ -172,49 +173,20 @@ static struct json_object *flatten_tools_for_responses(struct json_object *cc_to
  * Reasoning effort selection
  * ============================================================================= */
 
-/**
- * @brief Validate that an effort string is one of the values gpt-5.4+ accepts.
- *
- * Per OpenAI: gpt-5.4 family accepts {none, low, medium, high, xhigh}. "minimal"
- * is gpt-5-base only; mapped to "low" before reaching this gate. Anything else
- * (including operator-supplied junk in g_config.llm.thinking.reasoning_effort)
- * is normalized to "medium" rather than passed verbatim into the JSON.
- */
-static bool effort_is_allowed_for_responses(const char *effort) {
-   if (!effort)
-      return false;
-   return strcmp(effort, "none") == 0 || strcmp(effort, "low") == 0 ||
-          strcmp(effort, "medium") == 0 || strcmp(effort, "high") == 0 ||
-          strcmp(effort, "xhigh") == 0;
-}
-
-static const char *select_reasoning_effort(const char *model_name) {
-   (void)model_name; /* Reserved for future per-model effort floors. */
-   const char *thinking_mode = llm_get_current_thinking_mode();
-
-   if (strcmp(thinking_mode, "disabled") == 0) {
-      /* gpt-5.4 (and other Responses-routed models) accept "none" as the lowest. */
+/* The request's reasoning effort: the session's mode and effort resolved
+ * against the model (models.toml [thinking.openai]).  "disabled" is effort
+ * "none"; a model that can't turn reasoning off, or a utility call, gets its
+ * lowest level.  Always explicit: an omitted effort runs OpenAI's default. */
+static const char *select_reasoning_effort(const char *model_name,
+                                           llm_thinking_resolved_t *resolved) {
+   llm_thinking_resolve_current(LLM_CLOUD, CLOUD_PROVIDER_OPENAI, model_name, resolved);
+   if (!resolved->controllable) {
+      return NULL;
+   }
+   if (resolved->mode == LLM_THINK_DISABLED) {
       return "none";
    }
-
-   const char *candidate = NULL;
-   if (strcmp(thinking_mode, "enabled") == 0 || strcmp(thinking_mode, "auto") == 0) {
-      candidate = g_config.llm.thinking.reasoning_effort;
-   } else if (strcmp(thinking_mode, "minimal") == 0) {
-      candidate = "low";
-   } else {
-      candidate = thinking_mode;
-   }
-
-   if (candidate && strcmp(candidate, "minimal") == 0) {
-      candidate = "low";
-   }
-   if (!effort_is_allowed_for_responses(candidate)) {
-      OLOG_WARNING("Responses: rejecting unknown reasoning effort '%s', using 'medium'",
-                   candidate ? candidate : "(null)");
-      return "medium";
-   }
-   return candidate;
+   return resolved->effort[0] ? resolved->effort : NULL;
 }
 
 /* =============================================================================
@@ -308,12 +280,17 @@ static struct json_object *build_responses_request(struct json_object *history,
    json_object_object_add(root, "include", include_arr);
 
    /* Reasoning config */
-   if (!llm_tools_suppressed()) {
+   llm_thinking_resolved_t resolved;
+   const char *effort = select_reasoning_effort(model_name, &resolved);
+   if (effort) {
       struct json_object *reasoning = json_object_new_object();
-      json_object_object_add(reasoning, "effort",
-                             json_object_new_string(select_reasoning_effort(model_name)));
-      json_object_object_add(reasoning, "summary", json_object_new_string("auto"));
+      json_object_object_add(reasoning, "effort", json_object_new_string(effort));
+      if (resolved.mode != LLM_THINK_DISABLED) {
+         json_object_object_add(reasoning, "summary", json_object_new_string("auto"));
+      }
       json_object_object_add(root, "reasoning", reasoning);
+      OLOG_INFO("Responses: reasoning effort '%s' for %s%s", effort, model_name,
+                resolved.clamped ? " (setting resolved to what the model accepts)" : "");
    }
 
    /* System → instructions: ONLY the stable segment, kept byte-stable across turns so

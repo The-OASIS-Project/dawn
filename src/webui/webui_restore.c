@@ -360,9 +360,12 @@ static bool conversation_llm_config(const conversation_t *conv,
       }
    }
 
-   /* Fix #6: Restore thinking_mode from conversation DB */
+   /* The conversation's reasoning: its mode and its effort, both. */
    if (conv->thinking_mode[0] != '\0') {
       safe_strscpy(cfg.thinking_mode, conv->thinking_mode);
+   }
+   if (conv->reasoning_effort[0] != '\0') {
+      safe_strscpy(cfg.reasoning_effort, conv->reasoning_effort);
    }
    *out = cfg;
    return true;

@@ -1433,14 +1433,14 @@ void llm_get_default_config(session_llm_config_t *config) {
    if (g_config.llm.thinking.mode[0] != '\0') {
       safe_strscpy(config->thinking_mode, g_config.llm.thinking.mode);
    } else {
-      safe_strscpy(config->thinking_mode, "disabled");
+      safe_strscpy(config->thinking_mode, LLM_THINKING_MODE_DEFAULT);
    }
 
    // Copy reasoning effort from global config
    if (g_config.llm.thinking.reasoning_effort[0] != '\0') {
       safe_strscpy(config->reasoning_effort, g_config.llm.thinking.reasoning_effort);
    } else {
-      safe_strscpy(config->reasoning_effort, "medium");
+      safe_strscpy(config->reasoning_effort, LLM_REASONING_EFFORT_DEFAULT);
    }
 
    OLOG_INFO("Default LLM config: type=%s, provider=%s",
@@ -1551,7 +1551,7 @@ int llm_resolve_config(const session_llm_config_t *session_config,
    } else if (g_config.llm.thinking.mode[0] != '\0') {
       safe_strscpy(resolved->thinking_mode, g_config.llm.thinking.mode);
    } else {
-      safe_strscpy(resolved->thinking_mode, "auto");
+      safe_strscpy(resolved->thinking_mode, LLM_THINKING_MODE_DEFAULT);
    }
 
    // Resolve reasoning_effort - use session config if set, otherwise global config
@@ -1560,7 +1560,7 @@ int llm_resolve_config(const session_llm_config_t *session_config,
    } else if (g_config.llm.thinking.reasoning_effort[0] != '\0') {
       safe_strscpy(resolved->reasoning_effort, g_config.llm.thinking.reasoning_effort);
    } else {
-      safe_strscpy(resolved->reasoning_effort, "medium");
+      safe_strscpy(resolved->reasoning_effort, LLM_REASONING_EFFORT_DEFAULT);
    }
 
    /* Stabilize `model` into the config's own inline model_buf.  Until here it may

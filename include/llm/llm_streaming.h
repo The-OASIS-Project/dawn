@@ -25,6 +25,7 @@
 #include <stddef.h>
 #include <sys/time.h>
 
+#include "llm/llm_claude_binding.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
 
@@ -102,6 +103,7 @@ typedef struct {
    char message_id[64];             /**< message_start message.id (cache diagnostics' next key) */
    char cache_miss_reason[32]; /**< message_start diagnostics.cache_miss_reason.type ("" = none) */
    int cache_missed_tokens;    /**< ...cache_miss_reason.cache_missed_input_tokens */
+   llm_claude_drops_t drops;   /**< input_transformations (message_start / final message_delta) */
 
    /* Tool use block tracking */
    int tool_block_active;              /**< Currently in a tool_use block */

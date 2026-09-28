@@ -93,6 +93,21 @@ add_definitions(-DGIT_SHA=\"${GIT_SHA}\")
 include_directories(include)
 include_directories(common/include)
 
+# models.toml, compiled in: the registry loader falls back to it for any table
+# the models.toml on disk lacks, so an older copy (a service install keeps its
+# own) can't silently drop a newer table (src/llm/llm_models_toml.c).
+set(DAWN_GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
+include_directories(${DAWN_GENERATED_DIR})
+add_custom_command(
+   OUTPUT ${DAWN_GENERATED_DIR}/models_toml_builtin.h
+   COMMAND ${CMAKE_COMMAND} -E make_directory ${DAWN_GENERATED_DIR}
+   COMMAND ${CMAKE_COMMAND} -DIN=${CMAKE_SOURCE_DIR}/models.toml
+           -DOUT=${DAWN_GENERATED_DIR}/models_toml_builtin.h -DNAME=MODELS_TOML_BUILTIN
+           -P ${CMAKE_SOURCE_DIR}/cmake/embed_text.cmake
+   DEPENDS ${CMAKE_SOURCE_DIR}/models.toml ${CMAKE_SOURCE_DIR}/cmake/embed_text.cmake
+   COMMENT "Embedding models.toml")
+add_custom_target(models_toml_builtin DEPENDS ${DAWN_GENERATED_DIR}/models_toml_builtin.h)
+
 # =============================================================================
 # Common Library (shared between daemon and satellites)
 # =============================================================================
@@ -590,6 +605,11 @@ set(DAWN_SOURCES
     src/llm/llm_tool_loop.c
     src/llm/llm_context.c
     src/llm/llm_cache_monitor.c
+    src/llm/llm_capabilities.c
+    src/llm/llm_model_family.c
+    src/llm/llm_models_toml.c
+    src/llm/llm_claude_betas.c
+    src/llm/llm_claude_binding.c
     src/llm/llm_context_merge.c
     src/llm/llm_pricing.c
     src/llm/llm_local_provider.c
@@ -999,6 +1019,7 @@ if(AEC_ENABLED)
 endif()
 
 add_executable(dawn ${DAWN_SOURCES})
+add_dependencies(dawn models_toml_builtin)
 
 # Coding-harness CI invariant: forbid process-management primitives in the MCP
 # bridge / code-project sources (bridge is socket-only; git is in-process via

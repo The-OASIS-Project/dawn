@@ -35,8 +35,11 @@
 #include <stdlib.h>
 
 #include "config/dawn_config.h"
+#include "llm/llm_capabilities.h"
 #include "llm/llm_claude_format.h"
+#include "llm/llm_local_provider.h"
 #include "llm/llm_tools.h"
+#include "tools/toml.h"
 #include "unity.h"
 
 /* ---- Stubs for the config / tool-registry deps the converter references.
@@ -45,21 +48,27 @@ dawn_config_t g_config;
 const char *llm_get_default_claude_model(void) {
    return "claude-sonnet-4-6";
 }
+static const char *s_mode = "disabled";
+static const char *s_effort = "medium";
+static bool s_suppressed;
 const char *llm_get_current_thinking_mode(void) {
-   return "disabled";
+   return s_mode;
 }
 const char *llm_get_current_reasoning_effort(void) {
-   return NULL;
+   return s_effort;
 }
 bool llm_tools_enabled(const llm_resolved_config_t *c) {
    (void)c;
    return false;
 }
 bool llm_tools_suppressed(void) {
-   return false;
+   return s_suppressed;
 }
-int llm_get_effective_budget_tokens(void) {
-   return 8192;
+int llm_budget_tokens_for_effort(const char *effort) {
+   return (effort && strcmp(effort, "low") == 0) ? 1024 : 8192;
+}
+local_provider_t llm_local_get_provider(void) {
+   return LOCAL_PROVIDER_LLAMA_CPP;
 }
 struct json_object *llm_tools_get_claude_format_filtered(bool r) {
    (void)r;
@@ -95,6 +104,9 @@ void webui_send_error_ex(struct session *s, const char *code, const char *messag
 
 void setUp(void) {
    g_config.llm.max_tokens = 4096;
+   s_mode = "disabled";
+   s_effort = "medium";
+   s_suppressed = false;
 }
 void tearDown(void) {
 }
@@ -171,9 +183,130 @@ static void test_single_tool_result_ok(void) {
    json_object_put(conv);
 }
 
+/* ---- Reasoning: the request's thinking config, from models.toml ---- */
+
+static json_object *one_user_turn(void) {
+   json_object *conv = json_object_new_array();
+   json_object *u = json_object_new_object();
+   json_object_object_add(u, "role", json_object_new_string("user"));
+   json_object_object_add(u, "content", json_object_new_string("hi"));
+   json_object_array_add(conv, u);
+   return conv;
+}
+
+static const char *thinking_type(json_object *req) {
+   json_object *t = NULL;
+   json_object *v = NULL;
+   if (!json_object_object_get_ex(req, "thinking", &t) ||
+       !json_object_object_get_ex(t, "type", &v)) {
+      return NULL;
+   }
+   return json_object_get_string(v);
+}
+
+static const char *effort_of(json_object *req) {
+   json_object *o = NULL;
+   json_object *v = NULL;
+   if (!json_object_object_get_ex(req, "output_config", &o) ||
+       !json_object_object_get_ex(o, "effort", &v)) {
+      return NULL;
+   }
+   return json_object_get_string(v);
+}
+
+static json_object *request_for(const char *model) {
+   json_object *conv = one_user_turn();
+   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, model, 0);
+   json_object_put(conv);
+   TEST_ASSERT_NOT_NULL(req);
+   return req;
+}
+
+/* A model that can't turn thinking off: "disabled" runs adaptive at its lowest
+ * effort, explicitly, never omitted. */
+static void test_disabled_on_adaptive_only_model_is_lowest_adaptive(void) {
+   json_object *req = request_for("claude-opus-5-5");
+   TEST_ASSERT_EQUAL_STRING("adaptive", thinking_type(req));
+   TEST_ASSERT_EQUAL_STRING("low", effort_of(req));
+   json_object_put(req);
+}
+
+static void test_disabled_is_sent_where_accepted(void) {
+   json_object *req = request_for("claude-sonnet-5");
+   TEST_ASSERT_EQUAL_STRING("disabled", thinking_type(req));
+   TEST_ASSERT_NULL(effort_of(req));
+   json_object_put(req);
+}
+
+static void test_adaptive_carries_the_session_effort(void) {
+   s_mode = "enabled"; /* the WebUI's "on": adaptive where that's the model's way */
+   s_effort = "high";
+   json_object *req = request_for("claude-opus-5-5");
+   TEST_ASSERT_EQUAL_STRING("adaptive", thinking_type(req));
+   TEST_ASSERT_EQUAL_STRING("high", effort_of(req));
+   json_object_put(req);
+}
+
+static void test_budget_model_gets_enabled_with_budget(void) {
+   s_mode = "enabled";
+   s_effort = "low";
+   json_object *req = request_for("claude-haiku-4-5");
+   TEST_ASSERT_EQUAL_STRING("enabled", thinking_type(req));
+   json_object *t = NULL;
+   json_object *b = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(req, "thinking", &t));
+   TEST_ASSERT_TRUE(json_object_object_get_ex(t, "budget_tokens", &b));
+   TEST_ASSERT_EQUAL_INT(1024, json_object_get_int(b));
+   TEST_ASSERT_NULL(effort_of(req));
+   json_object_put(req);
+}
+
+static void test_utility_call_gets_the_cheapest_legal_setting(void) {
+   s_mode = "enabled";
+   s_effort = "high";
+   s_suppressed = true;
+   json_object *req = request_for("claude-opus-5-5");
+   TEST_ASSERT_EQUAL_STRING("adaptive", thinking_type(req));
+   TEST_ASSERT_EQUAL_STRING("low", effort_of(req));
+   json_object_put(req);
+   req = request_for("claude-sonnet-5");
+   TEST_ASSERT_EQUAL_STRING("disabled", thinking_type(req));
+   json_object_put(req);
+}
+
+/* An earlier tool call with no thinking block (adaptive chose not to think)
+ * no longer turns reasoning off for the conversation. */
+static void test_tool_use_without_thinking_keeps_reasoning(void) {
+   s_mode = "enabled";
+   s_effort = "medium";
+   json_object *conv = one_user_turn();
+   json_object_array_add(conv, assistant_with_tool_calls(1));
+   add_tool_result(conv, 0);
+   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-opus-5-5", 1);
+   json_object_put(conv);
+   TEST_ASSERT_EQUAL_STRING("adaptive", thinking_type(req));
+   TEST_ASSERT_EQUAL_STRING("medium", effort_of(req));
+   json_object_put(req);
+}
+
+static toml_table_t *s_models;
+
 int main(void) {
+   char err[256];
+   FILE *f = fopen(MODELS_TOML_PATH, "r");
+   s_models = f ? toml_parse_file(f, err, sizeof(err)) : NULL;
+   if (f) {
+      fclose(f);
+   }
+   llm_capabilities_load_registry(s_models);
    UNITY_BEGIN();
    RUN_TEST(test_parallel_tool_results_no_double_free);
    RUN_TEST(test_single_tool_result_ok);
+   RUN_TEST(test_disabled_on_adaptive_only_model_is_lowest_adaptive);
+   RUN_TEST(test_disabled_is_sent_where_accepted);
+   RUN_TEST(test_adaptive_carries_the_session_effort);
+   RUN_TEST(test_budget_model_gets_enabled_with_budget);
+   RUN_TEST(test_utility_call_gets_the_cheapest_legal_setting);
+   RUN_TEST(test_tool_use_without_thinking_keeps_reasoning);
    return UNITY_END();
 }

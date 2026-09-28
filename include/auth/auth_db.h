@@ -2611,6 +2611,10 @@ typedef struct {
    bool images;
    char cache_miss_reason[32]; /**< Anthropic cache diagnostics ("" = none) */
    int cache_missed_tokens;
+   bool binding_reported;    /**< Anthropic returned input_transformations */
+   int binding_prefix_drops; /**< prefix_binding_mismatch drops (a harness bug) */
+   int binding_model_drops;  /**< model_binding_mismatch drops (a model switch) */
+   int binding_other_drops;  /**< Entries this build doesn't classify */
 } llm_usage_row_t;
 
 /**

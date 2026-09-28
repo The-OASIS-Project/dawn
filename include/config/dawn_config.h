@@ -335,14 +335,18 @@ typedef struct llm_tools_config {
 #define LLM_THINKING_BUDGET_HIGH_DEFAULT 16384
 #define LLM_THINKING_BUDGET_XHIGH_DEFAULT 32768
 
+/* The thinking mode and effort when nothing sets one.  Each request resolves
+ * them against what its model accepts (models.toml [thinking.*]): "disabled" on
+ * a model that can't turn reasoning off runs it at its lowest effort. */
+#define LLM_THINKING_MODE_DEFAULT "disabled"
+#define LLM_REASONING_EFFORT_DEFAULT "medium"
+
 typedef struct {
-   char mode[16];            /* "disabled", "enabled" (legacy "auto" also accepted) */
-   char reasoning_effort[8]; /* "none"/"low"/"medium"/"high"/"xhigh" for reasoning models
-                              * OpenAI gpt-5.4+ and gpt-5.2: full range incl. none/xhigh.
-                              * OpenAI gpt-5/5.1 + Gemini OpenAI-compat: clamps xhigh→high
-                              *   and (for non-5.1+) none→low at request-build time.
-                              * Claude: maps to budget_low/medium/high/xhigh via budget switch
-                              *   (see llm_get_effective_budget_tokens). */
+   char mode[16];            /* "disabled", "adaptive", "enabled" (legacy "auto" = on) */
+   char reasoning_effort[8]; /* "none"/"minimal"/"low"/"medium"/"high"/"xhigh"/"max".
+                              * Resolved per request to the nearest level the model
+                              * offers (models.toml [thinking.*]); a Claude or local
+                              * "enabled" budget maps low..xhigh to budget_*. */
    int budget_low;           /* Token budget for "low"   effort (default: 1024)  */
    int budget_medium;        /* Token budget for "medium" effort (default: 8192)  */
    int budget_high;          /* Token budget for "high"  effort (default: 16384) */

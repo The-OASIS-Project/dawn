@@ -33,6 +33,7 @@
 #include "core/session_manager.h"
 #include "dawn.h"
 #include "llm/llm_cache_monitor.h"
+#include "llm/llm_capabilities.h"
 #include "llm/llm_claude.h"
 #include "llm/llm_context.h"
 #include "llm/llm_interface.h"
@@ -133,45 +134,46 @@ static void openai_sse_event_handler(const char *event_type,
 /* ── Local LLM thinking parameters ─────────────────────────────────────── */
 
 static void add_local_thinking_params(json_object *root) {
-   const char *thinking_mode = llm_get_current_thinking_mode();
+   /* The session's mode and effort, resolved for the local provider in use
+    * (llama.cpp: off or a fixed budget; Ollama: think on or off).  A utility
+    * call resolves to off. */
+   llm_thinking_resolved_t thinking;
+   llm_thinking_resolve_current(LLM_LOCAL, CLOUD_PROVIDER_NONE, NULL, &thinking);
+   const bool on = thinking.controllable && thinking.mode != LLM_THINK_DISABLED;
    local_provider_t provider = llm_local_get_provider();
 
    if (provider == LOCAL_PROVIDER_OLLAMA) {
-      if (strcmp(thinking_mode, "disabled") != 0 && !llm_tools_suppressed()) {
-         json_object_object_add(root, "think", json_object_new_boolean(1));
-         OLOG_INFO("Local LLM (Ollama): Thinking enabled (think: true)");
-      } else {
-         json_object_object_add(root, "think", json_object_new_boolean(0));
-         OLOG_INFO("Local LLM (Ollama): Thinking disabled (think: false)");
-      }
+      json_object_object_add(root, "think", json_object_new_boolean(on));
+      OLOG_INFO("Local LLM (Ollama): Thinking %s (think: %s)", on ? "enabled" : "disabled",
+                on ? "true" : "false");
+      return;
+   }
+   if (on) {
+      json_object *thinking_obj = json_object_new_object();
+      json_object_object_add(thinking_obj, "type", json_object_new_string("enabled"));
+
+      int budget = llm_budget_tokens_for_effort(thinking.effort);
+      json_object_object_add(thinking_obj, "budget_tokens", json_object_new_int(budget));
+
+      json_object_object_add(root, "thinking", thinking_obj);
+
+      json_object_object_add(root, "thinking_forced_open", json_object_new_boolean(1));
+
+      json_object *template_kwargs = json_object_new_object();
+      json_object_object_add(template_kwargs, "enable_thinking", json_object_new_boolean(1));
+      json_object_object_add(root, "chat_template_kwargs", template_kwargs);
+
+      OLOG_INFO("Local LLM (llama.cpp): Extended thinking enabled (budget: %d tokens, "
+                "forced_open: true, chat_template_kwargs.enable_thinking: true)",
+                budget);
    } else {
-      if (strcmp(thinking_mode, "disabled") != 0 && !llm_tools_suppressed()) {
-         json_object *thinking = json_object_new_object();
-         json_object_object_add(thinking, "type", json_object_new_string("enabled"));
+      json_object_object_add(root, "reasoning_budget", json_object_new_int(0));
 
-         int budget = llm_get_effective_budget_tokens();
-         json_object_object_add(thinking, "budget_tokens", json_object_new_int(budget));
+      json_object *template_kwargs = json_object_new_object();
+      json_object_object_add(template_kwargs, "enable_thinking", json_object_new_boolean(0));
+      json_object_object_add(root, "chat_template_kwargs", template_kwargs);
 
-         json_object_object_add(root, "thinking", thinking);
-
-         json_object_object_add(root, "thinking_forced_open", json_object_new_boolean(1));
-
-         json_object *template_kwargs = json_object_new_object();
-         json_object_object_add(template_kwargs, "enable_thinking", json_object_new_boolean(1));
-         json_object_object_add(root, "chat_template_kwargs", template_kwargs);
-
-         OLOG_INFO("Local LLM (llama.cpp): Extended thinking enabled (budget: %d tokens, "
-                   "forced_open: true, chat_template_kwargs.enable_thinking: true)",
-                   budget);
-      } else if (strcmp(thinking_mode, "disabled") == 0) {
-         json_object_object_add(root, "reasoning_budget", json_object_new_int(0));
-
-         json_object *template_kwargs = json_object_new_object();
-         json_object_object_add(template_kwargs, "enable_thinking", json_object_new_boolean(0));
-         json_object_object_add(root, "chat_template_kwargs", template_kwargs);
-
-         OLOG_INFO("Local LLM (llama.cpp): Reasoning explicitly disabled (reasoning_budget: 0)");
-      }
+      OLOG_INFO("Local LLM (llama.cpp): Reasoning explicitly disabled (reasoning_budget: 0)");
    }
 }
 
@@ -180,63 +182,40 @@ static void add_local_thinking_params(json_object *root) {
 static void add_cloud_reasoning_effort(json_object *root,
                                        const char *model_name,
                                        const char *base_url) {
-   const char *thinking_mode = llm_get_current_thinking_mode();
+   /* The session's mode and effort, resolved against the model
+    * (models.toml [thinking.*]; OpenRouter "vendor/model" by its vendor). */
+   const cloud_provider_t provider = provider_for_endpoint(base_url);
+   llm_thinking_resolved_t thinking;
+   llm_thinking_resolve_current(LLM_CLOUD, provider, model_name, &thinking);
+   if (!thinking.controllable) {
+      return; /* the model has no reasoning control */
+   }
+   const char *note = thinking.clamped ? " (setting resolved to what the model accepts)" : "";
 
-   /* OpenRouter: use the unified reasoning OBJECT (`reasoning: { effort }`), not OpenAI's
-    * flat `reasoning_effort` string.  Gate on the gateway endpoint rather than model-name
-    * heuristics — OpenRouter slugs are "vendor/model" (e.g. anthropic/claude-sonnet-4.6) so
-    * the gpt-5/o-series/gemini prefix checks below never match.  OpenRouter ignores the
-    * field for models that don't support reasoning, so it's safe to always send it when
-    * thinking is on.  The streamed reasoning comes back in delta.reasoning_details[]
-    * (parsed in llm_streaming.c). */
-   if (base_url && strstr(base_url, "openrouter.ai") != NULL) {
-      if (strcmp(thinking_mode, "disabled") == 0 || llm_tools_suppressed()) {
+   /* OpenRouter: the unified reasoning OBJECT (`reasoning: { effort }`), not
+    * OpenAI's flat `reasoning_effort`.  "disabled" sends nothing: OpenRouter's
+    * off switch varies by upstream, and Anthropic models, the ones that can't
+    * turn reasoning off, never resolve to it.  Streamed reasoning comes back in
+    * delta.reasoning_details[] (llm_streaming.c). */
+   if (provider == CLOUD_PROVIDER_OPENROUTER) {
+      if (thinking.mode == LLM_THINK_DISABLED || !thinking.effort[0]) {
          return;
       }
-      const char *effort = thinking_mode;
-      if (strcmp(effort, "enabled") == 0 || strcmp(effort, "auto") == 0) {
-         effort = g_config.llm.thinking.reasoning_effort;
-         if (!effort || effort[0] == '\0') {
-            effort = "medium";
-         }
-      }
       json_object *reasoning = json_object_new_object();
-      json_object_object_add(reasoning, "effort", json_object_new_string(effort));
+      json_object_object_add(reasoning, "effort", json_object_new_string(thinking.effort));
       json_object_object_add(root, "reasoning", reasoning);
-      OLOG_INFO("OpenRouter: reasoning effort '%s' requested for model %s", effort, model_name);
+      OLOG_INFO("OpenRouter: reasoning effort '%s' requested for model %s%s", thinking.effort,
+                model_name, note);
       return;
    }
 
-   bool is_o_series = (strncmp(model_name, "o1", 2) == 0 || strncmp(model_name, "o3", 2) == 0);
-   bool is_gpt5 = (strncmp(model_name, "gpt-5", 5) == 0);
-   bool is_gemini_thinking = (strncmp(model_name, "gemini-2.5", 10) == 0 ||
-                              strncmp(model_name, "gemini-3", 8) == 0);
-   bool supports_reasoning = is_o_series || is_gpt5 || is_gemini_thinking;
-
-   if (supports_reasoning && !llm_tools_suppressed()) {
-      const char *effort = NULL;
-
-      if (strcmp(thinking_mode, "disabled") == 0) {
-         if (is_gpt5) {
-            effort = llm_openai_is_gpt5_base_family(model_name) ? "minimal" : "none";
-         } else if (is_gemini_thinking) {
-            effort = "low";
-         }
-      } else {
-         effort = thinking_mode;
-         if (strcmp(effort, "enabled") == 0 || strcmp(effort, "auto") == 0) {
-            effort = g_config.llm.thinking.reasoning_effort;
-            if (effort[0] == '\0')
-               effort = "medium";
-         }
-      }
-
-      if (effort != NULL) {
-         effort = llm_openai_clamp_effort_for_model(model_name, effort);
-         json_object_object_add(root, "reasoning_effort", json_object_new_string(effort));
-         OLOG_INFO("Cloud LLM: Reasoning effort set to '%s' for model %s", effort, model_name);
-      }
+   /* OpenAI (o-series, gpt-5.0-5.3) and Gemini: "disabled" is effort "none". */
+   const char *effort = thinking.mode == LLM_THINK_DISABLED ? "none" : thinking.effort;
+   if (!effort[0]) {
+      return;
    }
+   json_object_object_add(root, "reasoning_effort", json_object_new_string(effort));
+   OLOG_INFO("Cloud LLM: Reasoning effort set to '%s' for model %s%s", effort, model_name, note);
 }
 
 /* ── Non-streaming chat completion ──────────────────────────────────────── */

@@ -160,6 +160,9 @@ void llm_context_refresh_local(void);
  * Token Tracking Functions
  * ============================================================================= */
 
+/* Anthropic's drop report (llm/llm_claude_binding.h); only a pointer here. */
+typedef struct llm_claude_drops llm_claude_drops_t;
+
 /**
  * @brief A turn's token usage, reported to the context tracker
  *
@@ -175,8 +178,9 @@ typedef struct {
    llm_type_t type;           /**< LLM_LOCAL or LLM_CLOUD (selects cache economics) */
    cloud_provider_t provider; /**< Cloud provider that produced the tokens */
    const char *message_id;    /**< Anthropic: the response's id (NULL otherwise) */
-   const char *cache_miss_reason; /**< Anthropic cache diagnostics: why the cache missed */
-   int cache_missed_tokens;       /**< ...and how many input tokens it missed */
+   const char *cache_miss_reason;   /**< Anthropic cache diagnostics: why the cache missed */
+   int cache_missed_tokens;         /**< ...and how many input tokens it missed */
+   const llm_claude_drops_t *drops; /**< Anthropic: thinking blocks the API dropped (NULL: none) */
 } llm_usage_report_t;
 
 /**

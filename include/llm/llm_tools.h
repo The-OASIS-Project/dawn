@@ -614,18 +614,15 @@ const char *llm_get_current_thinking_mode(void);
 const char *llm_get_current_reasoning_effort(void);
 
 /**
- * @brief Get effective budget tokens for thinking
+ * @brief The thinking budget for a budget level
  *
- * Maps reasoning_effort to token budget using the standard levels:
- *   low    = LLM_THINKING_BUDGET_LOW    (1024)
- *   medium = LLM_THINKING_BUDGET_MEDIUM (8192)
- *   high   = LLM_THINKING_BUDGET_HIGH   (16384)
+ * "low" | "medium" | "high" | "xhigh" (and "max") name the [llm.thinking]
+ * budget_* sizes; resolve the effort first (llm_thinking_resolve).  Clamped to
+ * half the current model's context window.
  *
- * If global config budget_tokens > 0, uses that as an explicit override.
- *
- * @return Token budget for thinking/reasoning
+ * @return Token budget for a Claude "enabled" or llama.cpp thinking request
  */
-int llm_get_effective_budget_tokens(void);
+int llm_budget_tokens_for_effort(const char *effort);
 
 /**
  * @brief Check if text contains thinking trigger phrases

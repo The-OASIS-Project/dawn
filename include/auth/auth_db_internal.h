@@ -64,35 +64,40 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 90
+#define AUTH_DB_SCHEMA_VERSION 91
 
 /* v90 llm_usage_log: in the base schema (created on every start) and repeated by
- * the v90 migration step, so the two can't drift. */
-#define LLM_USAGE_LOG_SCHEMA_SQL                      \
-   "CREATE TABLE IF NOT EXISTS llm_usage_log ("       \
-   "  id INTEGER PRIMARY KEY AUTOINCREMENT,"          \
-   "  created_at INTEGER NOT NULL,"                   \
-   "  user_id INTEGER NOT NULL DEFAULT 0,"            \
-   "  conversation_id INTEGER NOT NULL DEFAULT 0,"    \
-   "  provider TEXT NOT NULL,"                        \
-   "  model TEXT NOT NULL DEFAULT '',"                \
-   "  kind TEXT NOT NULL,"                            \
-   "  iteration INTEGER NOT NULL DEFAULT -1,"         \
-   "  prompt_tokens INTEGER NOT NULL DEFAULT 0,"      \
-   "  cache_read_tokens INTEGER NOT NULL DEFAULT 0,"  \
-   "  cache_write_tokens INTEGER NOT NULL DEFAULT 0," \
-   "  uncached_tokens INTEGER NOT NULL DEFAULT 0,"    \
-   "  output_tokens INTEGER NOT NULL DEFAULT 0,"      \
-   "  expected_read INTEGER,"                         \
-   "  cache_state TEXT,"                              \
-   "  gap_ms INTEGER NOT NULL DEFAULT 0,"             \
-   "  tools_hash INTEGER NOT NULL DEFAULT 0,"         \
-   "  system_hash INTEGER NOT NULL DEFAULT 0,"        \
-   "  thinking TEXT NOT NULL DEFAULT '',"             \
-   "  images INTEGER NOT NULL DEFAULT 0,"             \
-   "  cache_miss_reason TEXT NOT NULL DEFAULT '',"    \
-   "  cache_missed_tokens INTEGER NOT NULL DEFAULT 0" \
-   ");"                                               \
+ * the v90 migration step, so the two can't drift.  The binding_* columns (v91)
+ * are added to an existing table by the v91 step. */
+#define LLM_USAGE_LOG_SCHEMA_SQL                        \
+   "CREATE TABLE IF NOT EXISTS llm_usage_log ("         \
+   "  id INTEGER PRIMARY KEY AUTOINCREMENT,"            \
+   "  created_at INTEGER NOT NULL,"                     \
+   "  user_id INTEGER NOT NULL DEFAULT 0,"              \
+   "  conversation_id INTEGER NOT NULL DEFAULT 0,"      \
+   "  provider TEXT NOT NULL,"                          \
+   "  model TEXT NOT NULL DEFAULT '',"                  \
+   "  kind TEXT NOT NULL,"                              \
+   "  iteration INTEGER NOT NULL DEFAULT -1,"           \
+   "  prompt_tokens INTEGER NOT NULL DEFAULT 0,"        \
+   "  cache_read_tokens INTEGER NOT NULL DEFAULT 0,"    \
+   "  cache_write_tokens INTEGER NOT NULL DEFAULT 0,"   \
+   "  uncached_tokens INTEGER NOT NULL DEFAULT 0,"      \
+   "  output_tokens INTEGER NOT NULL DEFAULT 0,"        \
+   "  expected_read INTEGER,"                           \
+   "  cache_state TEXT,"                                \
+   "  gap_ms INTEGER NOT NULL DEFAULT 0,"               \
+   "  tools_hash INTEGER NOT NULL DEFAULT 0,"           \
+   "  system_hash INTEGER NOT NULL DEFAULT 0,"          \
+   "  thinking TEXT NOT NULL DEFAULT '',"               \
+   "  images INTEGER NOT NULL DEFAULT 0,"               \
+   "  cache_miss_reason TEXT NOT NULL DEFAULT '',"      \
+   "  cache_missed_tokens INTEGER NOT NULL DEFAULT 0,"  \
+   "  binding_reported INTEGER NOT NULL DEFAULT 0,"     \
+   "  binding_prefix_drops INTEGER NOT NULL DEFAULT 0," \
+   "  binding_model_drops INTEGER NOT NULL DEFAULT 0,"  \
+   "  binding_other_drops INTEGER NOT NULL DEFAULT 0"   \
+   ");"                                                 \
    "CREATE INDEX IF NOT EXISTS idx_llm_usage_log_time ON llm_usage_log(created_at);"
 
 /* Retention periods */

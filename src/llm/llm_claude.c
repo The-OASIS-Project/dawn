@@ -33,6 +33,7 @@
 #include "core/session_manager.h"
 #include "dawn.h"
 #include "llm/llm_cache_monitor.h"
+#include "llm/llm_claude_betas.h"
 #include "llm/llm_claude_format.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_openai.h"
@@ -53,113 +54,14 @@ extern int llm_curl_progress_callback(void *clientp,
                                       curl_off_t ultotal,
                                       curl_off_t ulnow);
 
-/* Anthropic cache diagnostics (beta, first-party API only): each response says
- * why its prompt cache missed, compared with the request it names in
- * diagnostics.previous_message_id.  A request's fingerprint is kept only when
- * it carries the header AND a diagnostics object (empty when there is no
- * previous one), so every request carries both. */
-#define CLAUDE_CACHE_DIAGNOSIS_BETA "anthropic-beta: cache-diagnosis-2026-04-07"
-
-/* Set once Anthropic rejects the diagnostics (a retired beta, say): the rest of
- * this process sends none, rather than failing every request. */
-static atomic_bool s_diagnostics_off = false;
-/* The calling thread's request was rejected for its diagnostics: retry once. */
-static __thread bool t_retry_without_diagnostics = false;
-/* The calling thread's current request carries the diagnostics (only then can a
- * rejection be about them). */
-static __thread bool t_diagnostics_sent = false;
-
-/* The Anthropic API itself (exact host), where the diagnostics beta exists; a
- * gateway or proxy in front of it may reject the unknown field. */
-static bool is_first_party_endpoint(const char *base_url) {
-   if (!base_url) {
-      return false;
-   }
-   CURLU *url = curl_url();
-   char *host = NULL;
-   bool first_party = false;
-   if (url && curl_url_set(url, CURLUPART_URL, base_url, 0) == CURLUE_OK &&
-       curl_url_get(url, CURLUPART_HOST, &host, 0) == CURLUE_OK && host) {
-      first_party = strcasecmp(host, "api.anthropic.com") == 0;
-   }
-   curl_free(host);
-   curl_url_cleanup(url);
-   return first_party;
-}
-
-static bool diagnostics_enabled(const char *base_url) {
-   return !atomic_load(&s_diagnostics_off) && is_first_party_endpoint(base_url);
-}
-
-/* A 400 naming the diagnostics field or beta: turn them off for the process and
- * mark this request for one retry without them (the caller's wrapper does it,
- * and the failure isn't reported to the user). */
-static bool diagnostics_rejected(long http_code, const char *body) {
-   if (http_code != 400 || !body || !t_diagnostics_sent) {
-      return false;
-   }
-   /* The error's own message must name the field or the beta. */
-   json_object *parsed = json_tokener_parse(body);
-   json_object *error = NULL;
-   json_object *message = NULL;
-   const char *text = NULL;
-   if (parsed && json_object_object_get_ex(parsed, "error", &error) &&
-       json_object_object_get_ex(error, "message", &message)) {
-      text = json_object_get_string(message);
-   }
-   const bool about_them = text && (strstr(text, "diagnostics") || strstr(text, "cache-diagnosis"));
-   if (about_them) {
-      if (!atomic_exchange(&s_diagnostics_off, true)) {
-         OLOG_WARNING("Claude API rejected the cache diagnostics (%.200s); continuing without "
-                      "them",
-                      text);
-      }
-      t_retry_without_diagnostics = true;
-   }
-   json_object_put(parsed);
-   return about_them;
-}
-
-/* Whether the calling thread's request should be sent again without them. */
-static bool take_diagnostics_retry(void) {
-   const bool retry = t_retry_without_diagnostics;
-   t_retry_without_diagnostics = false;
-   return retry;
-}
-
-/* Add the diagnostics object: the previous response on this conversation, if
- * any (see CLAUDE_CACHE_DIAGNOSIS_BETA). */
-static void add_cache_diagnostics(struct json_object *request, const char *base_url) {
-   t_diagnostics_sent = false;
-   if (!diagnostics_enabled(base_url)) {
-      return;
-   }
-   struct json_object *diagnostics = json_object_new_object();
-   if (!diagnostics) {
-      return;
-   }
-   t_diagnostics_sent = true;
-   /* A side call (a compaction on the turn's session, ...) isn't the
-    * conversation's next request: nothing to compare it with. */
-   session_t *session = llm_cache_monitor_in_side_call() ? NULL : session_get_command_context();
-   char previous[64];
-   if (session &&
-       llm_cache_monitor_previous_message_id(session->session_id,
-                                             atomic_load(&session->stream_conversation_id),
-                                             previous, sizeof(previous))) {
-      json_object_object_add(diagnostics, "previous_message_id", json_object_new_string(previous));
-   }
-   json_object_object_add(request, "diagnostics", diagnostics);
-}
-
 /**
  * @brief Build HTTP headers for Claude API request
  *
  * @param api_key Anthropic API key (required)
- * @param base_url The endpoint (cache diagnostics are first-party only)
+ * @param betas The betas the body carries (claude_betas_add)
  * @return CURL header list (caller must free with curl_slist_free_all)
  */
-static struct curl_slist *build_claude_headers(const char *api_key, const char *base_url) {
+static struct curl_slist *build_claude_headers(const char *api_key, const claude_betas_t *betas) {
    struct curl_slist *headers = NULL;
    char api_key_header[512];
    char version_header[128];
@@ -173,9 +75,7 @@ static struct curl_slist *build_claude_headers(const char *api_key, const char *
    // Claude requires API version header
    snprintf(version_header, sizeof(version_header), "anthropic-version: %s", CLAUDE_API_VERSION);
    headers = curl_slist_append(headers, version_header);
-   if (diagnostics_enabled(base_url)) {
-      headers = curl_slist_append(headers, CLAUDE_CACHE_DIAGNOSIS_BETA);
-   }
+   headers = claude_betas_header(headers, betas);
 
    return headers;
 }
@@ -203,7 +103,8 @@ static char *claude_chat_completion_once(struct json_object *conversation_histor
                                                    vision_image_sizes, vision_image_count, model,
                                                    0);
 
-   add_cache_diagnostics(request, base_url);
+   claude_betas_t betas;
+   claude_betas_add(request, base_url, &betas);
    llm_cache_monitor_note_request(request); /* for this call's "LLM cache:" line */
    const char *payload = json_object_to_json_string_ext(
        request, JSON_C_TO_STRING_PLAIN | JSON_C_TO_STRING_NOSLASHESCAPE);
@@ -227,7 +128,7 @@ static char *claude_chat_completion_once(struct json_object *conversation_histor
       return NULL;
    }
 
-   headers = build_claude_headers(api_key, base_url);
+   headers = build_claude_headers(api_key, &betas);
    snprintf(full_url, sizeof(full_url), "%s%s", base_url, CLAUDE_MESSAGES_ENDPOINT);
 
    curl_easy_setopt(curl_handle, CURLOPT_URL, full_url);
@@ -279,7 +180,7 @@ static char *claude_chat_completion_once(struct json_object *conversation_histor
    curl_easy_getinfo(curl_handle, CURLINFO_RESPONSE_CODE, &http_code);
 
    if (http_code != 200) {
-      if (diagnostics_rejected(http_code, chunk.data)) {
+      if (claude_betas_rejected(http_code, chunk.data, &betas)) {
          /* retried without them by llm_claude_chat_completion */
       } else if (http_code == 401) {
          OLOG_ERROR("Claude API: Invalid or missing API key (HTTP 401)");
@@ -412,6 +313,9 @@ static char *claude_chat_completion_once(struct json_object *conversation_histor
             missed_tokens = json_object_get_int(v);
          }
       }
+      llm_claude_drops_t drops;
+      memset(&drops, 0, sizeof(drops));
+      llm_claude_drops_from_message(parsed, &drops);
       llm_usage_report_t usage = {
          .prompt_tokens = input_tokens + cached_tokens + cache_created,
          .completion_tokens = output_tokens,
@@ -422,6 +326,7 @@ static char *claude_chat_completion_once(struct json_object *conversation_histor
          .message_id = message_id,
          .cache_miss_reason = miss_reason,
          .cache_missed_tokens = missed_tokens,
+         .drops = &drops,
       };
       llm_context_update_usage(session ? session->session_id : 0, &usage);
    }
@@ -591,7 +496,8 @@ static char *llm_claude_streaming_internal(struct json_object *conversation_hist
    // Enable streaming
    json_object_object_add(request, "stream", json_object_new_boolean(1));
 
-   add_cache_diagnostics(request, base_url);
+   claude_betas_t betas;
+   claude_betas_add(request, base_url, &betas);
    llm_cache_monitor_note_request(request); /* for this call's "LLM cache:" line */
    payload = json_object_to_json_string_ext(request, JSON_C_TO_STRING_PLAIN |
                                                          JSON_C_TO_STRING_NOSLASHESCAPE);
@@ -629,7 +535,7 @@ static char *llm_claude_streaming_internal(struct json_object *conversation_hist
       return NULL;
    }
 
-   headers = build_claude_headers(api_key, base_url);
+   headers = build_claude_headers(api_key, &betas);
    snprintf(full_url, sizeof(full_url), "%s%s", base_url, CLAUDE_MESSAGES_ENDPOINT);
 
    curl_easy_setopt(curl_handle, CURLOPT_URL, full_url);
@@ -699,7 +605,8 @@ static char *llm_claude_streaming_internal(struct json_object *conversation_hist
    if (http_code != 200) {
       /* Determine error code based on HTTP status */
       const char *error_code;
-      const bool retrying = diagnostics_rejected(http_code, streaming_ctx.raw_response.data);
+      const bool retrying = claude_betas_rejected(http_code, streaming_ctx.raw_response.data,
+                                                  &betas);
       if (retrying) {
          error_code = "LLM_BAD_REQUEST"; /* not reported: the wrapper retries */
       } else if (http_code == 401) {
@@ -896,14 +803,17 @@ static char *llm_claude_streaming_internal(struct json_object *conversation_hist
 
             // Make one final call with tools disabled
             OLOG_INFO("Claude streaming: Making final call without tools to present results");
-            char *final = llm_claude_streaming_internal(conversation_history, "", NULL, NULL, 0,
-                                                        base_url, api_key, model, chunk_callback,
-                                                        callback_userdata, MAX_TOOL_ITERATIONS);
-            if (!final && take_diagnostics_retry()) { /* this call only, not the turn */
+            /* A beta rejection resends this call only, not the turn. */
+            char *final = NULL;
+            for (int attempt = 0; attempt < CLAUDE_BETA_ATTEMPTS; attempt++) {
                final = llm_claude_streaming_internal(conversation_history, "", NULL, NULL, 0,
                                                      base_url, api_key, model, chunk_callback,
                                                      callback_userdata, MAX_TOOL_ITERATIONS);
+               if (final || !claude_betas_take_retry()) {
+                  break;
+               }
             }
+            claude_betas_take_retry(); /* no mark outlives this call */
             return final;
          }
 
@@ -959,19 +869,19 @@ static char *llm_claude_streaming_internal(struct json_object *conversation_hist
             const char *fresh_url = config_valid ? current_config.endpoint : base_url;
             const char *fresh_api_key = config_valid ? current_config.api_key : api_key;
 
-            result = llm_claude_streaming_internal(conversation_history, "", result_vision_arr,
-                                                   result_vision_size_arr, result_vision_count,
-                                                   fresh_url, fresh_api_key, model, chunk_callback,
-                                                   callback_userdata, iteration + 1);
-            /* Diagnostics rejected on the follow-up: resend it (the tools above
-             * have run and their text is out; the turn is not repeated). */
-            if (!result && take_diagnostics_retry()) {
+            /* A beta rejected on the follow-up resends the follow-up only: the
+             * tools above have run and their text is out. */
+            for (int attempt = 0; attempt < CLAUDE_BETA_ATTEMPTS; attempt++) {
                result = llm_claude_streaming_internal(conversation_history, "", result_vision_arr,
                                                       result_vision_size_arr, result_vision_count,
                                                       fresh_url, fresh_api_key, model,
                                                       chunk_callback, callback_userdata,
                                                       iteration + 1);
+               if (result || !claude_betas_take_retry()) {
+                  break;
+               }
             }
+            claude_betas_take_retry(); /* no mark outlives this call */
          }
 
          // Free vision data from tool results after use
@@ -1015,16 +925,17 @@ char *llm_claude_chat_completion_streaming(struct json_object *conversation_hist
                                            const char *model,
                                            llm_claude_text_chunk_callback chunk_callback,
                                            void *callback_userdata) {
-   char *response = llm_claude_streaming_internal(conversation_history, input_text, vision_images,
-                                                  vision_image_sizes, vision_image_count, base_url,
-                                                  api_key, model, chunk_callback, callback_userdata,
-                                                  0);
-   if (!response && take_diagnostics_retry()) {
+   char *response = NULL;
+   for (int attempt = 0; attempt < CLAUDE_BETA_ATTEMPTS; attempt++) {
       response = llm_claude_streaming_internal(conversation_history, input_text, vision_images,
                                                vision_image_sizes, vision_image_count, base_url,
                                                api_key, model, chunk_callback, callback_userdata,
                                                0);
+      if (response || !claude_betas_take_retry()) {
+         break;
+      }
    }
+   claude_betas_take_retry(); /* no mark outlives this call */
    return response;
 }
 
@@ -1076,7 +987,8 @@ static int claude_single_shot_once(struct json_object *conversation_history,
 
    json_object_object_add(request, "stream", json_object_new_boolean(1));
 
-   add_cache_diagnostics(request, base_url);
+   claude_betas_t betas;
+   claude_betas_add(request, base_url, &betas);
    llm_cache_monitor_note_request(request); /* for this call's "LLM cache:" line */
    payload = json_object_to_json_string_ext(request, JSON_C_TO_STRING_PLAIN |
                                                          JSON_C_TO_STRING_NOSLASHESCAPE);
@@ -1117,7 +1029,7 @@ static int claude_single_shot_once(struct json_object *conversation_history,
          return 1;
       }
 
-      headers = build_claude_headers(api_key, base_url);
+      headers = build_claude_headers(api_key, &betas);
       snprintf(full_url, sizeof(full_url), "%s%s", base_url, CLAUDE_MESSAGES_ENDPOINT);
 
       curl_easy_setopt(curl_handle, CURLOPT_URL, full_url);
@@ -1201,7 +1113,8 @@ static int claude_single_shot_once(struct json_object *conversation_history,
    curl_easy_getinfo(curl_handle, CURLINFO_RESPONSE_CODE, &http_code);
 
    if (http_code != 200) {
-      const bool retrying = diagnostics_rejected(http_code, streaming_ctx.raw_response.data);
+      const bool retrying = claude_betas_rejected(http_code, streaming_ctx.raw_response.data,
+                                                  &betas);
       OLOG_ERROR("Claude API: Request failed (HTTP %ld)", http_code);
       if (http_code == 429 || (http_code >= 500 && http_code < 600)) {
          llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
@@ -1261,8 +1174,8 @@ static int claude_single_shot_once(struct json_object *conversation_history,
    return 0;
 }
 
-/* The public entry points: each request is sent once more, without the cache
- * diagnostics, if Anthropic rejected them (see diagnostics_rejected). */
+/* The public entry points: a request is sent again, without the beta, when
+ * Anthropic rejects one (see claude_betas_rejected). */
 char *llm_claude_chat_completion(struct json_object *conversation_history,
                                  const char *input_text,
                                  const char **vision_images,
@@ -1271,14 +1184,16 @@ char *llm_claude_chat_completion(struct json_object *conversation_history,
                                  const char *base_url,
                                  const char *api_key,
                                  const char *model) {
-   char *response = claude_chat_completion_once(conversation_history, input_text, vision_images,
-                                                vision_image_sizes, vision_image_count, base_url,
-                                                api_key, model);
-   if (!response && take_diagnostics_retry()) {
+   char *response = NULL;
+   for (int attempt = 0; attempt < CLAUDE_BETA_ATTEMPTS; attempt++) {
       response = claude_chat_completion_once(conversation_history, input_text, vision_images,
                                              vision_image_sizes, vision_image_count, base_url,
                                              api_key, model);
+      if (response || !claude_betas_take_retry()) {
+         break;
+      }
    }
+   claude_betas_take_retry(); /* no mark outlives this call */
    return response;
 }
 
@@ -1294,13 +1209,15 @@ int llm_claude_streaming_single_shot(struct json_object *conversation_history,
                                      void *callback_userdata,
                                      int iteration,
                                      llm_tool_response_t *result) {
-   int rc = claude_single_shot_once(conversation_history, input_text, vision_images,
-                                    vision_image_sizes, vision_image_count, base_url, api_key,
-                                    model, chunk_callback, callback_userdata, iteration, result);
-   if (rc != 0 && take_diagnostics_retry()) {
+   int rc = 1;
+   for (int attempt = 0; attempt < CLAUDE_BETA_ATTEMPTS; attempt++) {
       rc = claude_single_shot_once(conversation_history, input_text, vision_images,
                                    vision_image_sizes, vision_image_count, base_url, api_key, model,
                                    chunk_callback, callback_userdata, iteration, result);
+      if (rc == 0 || !claude_betas_take_retry()) {
+         break;
+      }
    }
+   claude_betas_take_retry(); /* no mark outlives this call */
    return rc;
 }

@@ -41,9 +41,11 @@
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "llm/llm_cache_monitor.h"
+#include "llm/llm_capabilities.h"
 #include "llm/llm_context_merge.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_local_provider.h"
+#include "llm/llm_models_toml.h"
 #include "llm/llm_pricing.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
@@ -196,7 +198,7 @@ static int model_entry_cmp_desc(const void *a, const void *b) {
  * sorted longest-prefix-first and NULL-terminated.  Returns NULL for a missing or
  * empty table (caller then falls back to the per-provider default). */
 static model_context_entry_t *load_provider_table(toml_table_t *root, const char *provider) {
-   toml_table_t *tab = toml_table_in(root, provider);
+   toml_table_t *tab = root ? toml_table_in(root, provider) : NULL;
    if (!tab) {
       return NULL;
    }
@@ -252,55 +254,20 @@ static void free_model_table(model_context_entry_t **arr) {
    *arr = NULL;
 }
 
-/* Locate models.toml via the config search path (cwd, then ~/.config/dawn, then
- * /etc/dawn — mirroring dawn.toml).  Returns true and fills `out` on the first hit. */
-static bool find_models_toml_path(char *out, size_t out_sz) {
-   if (config_file_readable("models.toml")) {
-      snprintf(out, out_sz, "models.toml");
-      return true;
-   }
-   const char *home = getenv("HOME");
-   if (home && *home) {
-      snprintf(out, out_sz, "%s/.config/dawn/models.toml", home);
-      if (config_file_readable(out)) {
-         return true;
-      }
-   }
-   if (config_file_readable("/etc/dawn/models.toml")) {
-      snprintf(out, out_sz, "/etc/dawn/models.toml");
-      return true;
-   }
-   return false;
-}
-
-/* Load the model context-window registry from models.toml into the three
- * per-provider tables.  Best-effort: a missing/invalid file leaves the tables
- * NULL, and every lookup then uses the conservative per-provider default. */
+/* Load the model reference tables from models.toml: the context windows here,
+ * cache pricing and reasoning capabilities in their modules.  Each table comes
+ * from the disk copy when it has it, else from the shipped copy compiled in. */
 static void load_model_registry(void) {
-   char path[512];
-   if (!find_models_toml_path(path, sizeof(path))) {
-      OLOG_INFO("llm_context: no models.toml found; using per-provider context defaults");
-      return;
-   }
-   FILE *fp = fopen(path, "r");
-   if (!fp) {
-      OLOG_WARNING("llm_context: cannot open %s (%s); using context defaults", path,
-                   strerror(errno));
-      return;
-   }
-   char errbuf[200];
-   toml_table_t *root = toml_parse_file(fp, errbuf, sizeof(errbuf));
-   fclose(fp);
-   if (!root) {
-      OLOG_WARNING("llm_context: models.toml parse error: %s; using context defaults", errbuf);
-      return;
-   }
-   s_openai_models = load_provider_table(root, "openai");
-   s_claude_models = load_provider_table(root, "anthropic");
-   s_gemini_models = load_provider_table(root, "gemini");
-   llm_pricing_load_registry(root); /* [cache_pricing.*], same file */
-   toml_free(root);
-   OLOG_INFO("llm_context: loaded model context registry from %s", path);
+   llm_models_toml_t m;
+   llm_models_toml_open(&m);
+   s_openai_models = load_provider_table(llm_models_toml_root_for(&m, "openai"), "openai");
+   s_claude_models = load_provider_table(llm_models_toml_root_for(&m, "anthropic"), "anthropic");
+   s_gemini_models = load_provider_table(llm_models_toml_root_for(&m, "gemini"), "gemini");
+   llm_pricing_load_registry(llm_models_toml_root_for(&m, "cache_pricing"));
+   llm_capabilities_load_registry(llm_models_toml_root_for(&m, "thinking"));
+   OLOG_INFO("llm_context: loaded the model registry (%s)",
+             m.disk ? m.path : "built-in models.toml");
+   llm_models_toml_close(&m);
 }
 
 int llm_context_init(void) {
@@ -343,6 +310,7 @@ void llm_context_cleanup(void) {
    free_model_table(&s_claude_models);
    free_model_table(&s_gemini_models);
    llm_pricing_free_registry();
+   llm_capabilities_free_registry();
 
    pthread_mutex_destroy(&s_state.mutex);
    s_state.initialized = false;

@@ -26,6 +26,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "llm/llm_claude_binding.h"
 #include "llm/llm_context.h"
 
 #ifdef __cplusplus
@@ -108,6 +109,7 @@ typedef struct {
    bool images;                           /**< The newest message carries an image */
    char miss_reason[32];                  /**< Anthropic's own diagnosis ("" = none) */
    int missed_tokens;                     /**< Input tokens that diagnosis says missed */
+   llm_claude_drops_t drops; /**< Anthropic: thinking blocks the API dropped (binding controls) */
 } llm_cache_record_t;
 
 /**

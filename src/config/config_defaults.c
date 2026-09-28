@@ -181,8 +181,8 @@ void config_set_defaults(dawn_config_t *config) {
    config->llm.silent_observe.model[0] = '\0'; /* Empty = let provider pick */
 
    /* LLM Thinking/Reasoning */
-   safe_strscpy(config->llm.thinking.mode, "disabled"); /* "disabled", "enabled", "auto" */
-   safe_strscpy(config->llm.thinking.reasoning_effort, "medium"); /* Controls budget via dropdown */
+   safe_strscpy(config->llm.thinking.mode, LLM_THINKING_MODE_DEFAULT);
+   safe_strscpy(config->llm.thinking.reasoning_effort, LLM_REASONING_EFFORT_DEFAULT);
    config->llm.thinking.budget_low = LLM_THINKING_BUDGET_LOW_DEFAULT;
    config->llm.thinking.budget_medium = LLM_THINKING_BUDGET_MEDIUM_DEFAULT;
    config->llm.thinking.budget_high = LLM_THINKING_BUDGET_HIGH_DEFAULT;

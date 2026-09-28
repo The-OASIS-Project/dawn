@@ -1,0 +1,272 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s).
+ *
+ * Unit tests for per-model reasoning capabilities and the mode/effort resolver,
+ * against the shipped models.toml parsed by DAWN's own TOML reader.
+ */
+
+#include <stdio.h>
+#include <string.h>
+
+#include "config/dawn_config.h"
+#include "llm/llm_capabilities.h"
+#include "llm/llm_local_provider.h"
+#include "tools/toml.h"
+#include "unity.h"
+
+/* ---- stubs ---- */
+dawn_config_t g_config;
+static local_provider_t s_local = LOCAL_PROVIDER_LLAMA_CPP;
+local_provider_t llm_local_get_provider(void) {
+   return s_local;
+}
+const char *llm_get_current_thinking_mode(void) {
+   return "disabled";
+}
+const char *llm_get_current_reasoning_effort(void) {
+   return "medium";
+}
+bool llm_tools_suppressed(void) {
+   return false;
+}
+
+static toml_table_t *s_root;
+
+void setUp(void) {
+   s_local = LOCAL_PROVIDER_LLAMA_CPP;
+}
+void tearDown(void) {
+}
+
+static llm_thinking_resolved_t resolve(cloud_provider_t provider,
+                                       const char *model,
+                                       const char *mode,
+                                       const char *effort) {
+   llm_thinking_caps_t caps;
+   llm_thinking_caps(LLM_CLOUD, provider, model, &caps);
+   llm_thinking_resolved_t r;
+   llm_thinking_resolve(&caps, mode, effort, false, &r);
+   return r;
+}
+
+static void assert_resolved(llm_thinking_resolved_t r,
+                            llm_think_mode_t mode,
+                            const char *effort,
+                            bool clamped) {
+   TEST_ASSERT_TRUE(r.controllable);
+   TEST_ASSERT_EQUAL_STRING(llm_think_mode_name(mode), llm_think_mode_name(r.mode));
+   TEST_ASSERT_EQUAL_STRING(effort, r.effort);
+   TEST_ASSERT_EQUAL(clamped, r.clamped);
+}
+
+static void test_adaptive_only_claude_has_no_off_switch(void) {
+   llm_thinking_caps_t caps;
+   llm_thinking_caps(LLM_CLOUD, CLOUD_PROVIDER_CLAUDE, "claude-opus-5-5", &caps);
+   TEST_ASSERT_EQUAL_INT(LLM_CAPS_ROW, caps.source);
+   TEST_ASSERT_EQUAL_INT(1, caps.mode_count);
+   TEST_ASSERT_EQUAL_STRING("adaptive", llm_think_mode_name(caps.modes[0].mode));
+   TEST_ASSERT_EQUAL_INT(5, caps.modes[0].effort_count);
+   TEST_ASSERT_EQUAL_STRING("low", caps.modes[0].efforts[0]);
+   TEST_ASSERT_EQUAL_STRING("max", caps.modes[0].efforts[4]);
+
+   /* "disabled" becomes the gentlest reasoning, and says so. */
+   assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-opus-5-5", "disabled", "high"),
+                   LLM_THINK_ADAPTIVE, "low", true);
+   /* Fable 5 and 5.1 share the row. */
+   assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-fable-5-1", "disabled", ""),
+                   LLM_THINK_ADAPTIVE, "low", true);
+}
+
+static void test_claude_that_accepts_disabled(void) {
+   assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-sonnet-5", "disabled", "high"),
+                   LLM_THINK_DISABLED, "", false);
+   /* The WebUI's "enabled" and the legacy "auto" mean reasoning on. */
+   assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-sonnet-5", "enabled", "high"),
+                   LLM_THINK_ADAPTIVE, "high", false);
+   assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-opus-5", "auto", "max"),
+                   LLM_THINK_ADAPTIVE, "max", false);
+   /* The longer row wins: opus-5-5 is not opus-5. */
+   assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-opus-5-5", "enabled", "max"),
+                   LLM_THINK_ADAPTIVE, "max", false);
+}
+
+static void test_budget_claude_uses_budget_levels(void) {
+   llm_thinking_caps_t caps;
+   llm_thinking_caps(LLM_CLOUD, CLOUD_PROVIDER_CLAUDE, "claude-haiku-4-5-20251001", &caps);
+   TEST_ASSERT_EQUAL_INT(2, caps.mode_count);
+   TEST_ASSERT_TRUE(caps.modes[1].budget);
+   TEST_ASSERT_EQUAL_INT(4, caps.modes[1].effort_count); /* low..xhigh */
+
+   llm_thinking_resolved_t r = resolve(CLOUD_PROVIDER_CLAUDE, "claude-haiku-4-5", "enabled", "max");
+   assert_resolved(r, LLM_THINK_ENABLED, "xhigh", true); /* nearest budget level */
+   TEST_ASSERT_TRUE(r.budget);
+}
+
+static void test_claude_with_both_shapes_honours_the_pick(void) {
+   assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-sonnet-4-6", "adaptive", "medium"),
+                   LLM_THINK_ADAPTIVE, "medium", false);
+   llm_thinking_resolved_t r = resolve(CLOUD_PROVIDER_CLAUDE, "claude-sonnet-4-6", "enabled",
+                                       "high");
+   assert_resolved(r, LLM_THINK_ENABLED, "high", false);
+   TEST_ASSERT_TRUE(r.budget);
+   /* 4.6 adaptive has no xhigh: the nearest level is taken. */
+   assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-opus-4-6", "adaptive", "xhigh"),
+                   LLM_THINK_ADAPTIVE, "high", true);
+}
+
+static void test_openai_rows(void) {
+   /* gpt-5.1+: "disabled" is effort none; there's no separate "none" effort. */
+   assert_resolved(resolve(CLOUD_PROVIDER_OPENAI, "gpt-5.6-luna", "disabled", "high"),
+                   LLM_THINK_DISABLED, "", false);
+   assert_resolved(resolve(CLOUD_PROVIDER_OPENAI, "gpt-5.6-luna", "enabled", "max"),
+                   LLM_THINK_ENABLED, "xhigh", true);
+   assert_resolved(resolve(CLOUD_PROVIDER_OPENAI, "gpt-5.1", "enabled", "xhigh"), LLM_THINK_ENABLED,
+                   "high", true);
+   /* gpt-5 base can't turn reasoning off: minimal is its floor. */
+   assert_resolved(resolve(CLOUD_PROVIDER_OPENAI, "gpt-5-mini", "disabled", ""), LLM_THINK_ENABLED,
+                   "minimal", true);
+   assert_resolved(resolve(CLOUD_PROVIDER_OPENAI, "o3-mini", "enabled", "none"), LLM_THINK_ENABLED,
+                   "low", true);
+   /* A family row doesn't catch a newer or specialty variant: those get
+    * nothing until listed, never a level they reject. */
+   TEST_ASSERT_FALSE(resolve(CLOUD_PROVIDER_OPENAI, "gpt-5.7", "disabled", "").controllable);
+   TEST_ASSERT_FALSE(
+       resolve(CLOUD_PROVIDER_OPENAI, "gpt-5-chat-latest", "enabled", "high").controllable);
+   TEST_ASSERT_FALSE(resolve(CLOUD_PROVIDER_OPENAI, "o1-mini", "enabled", "high").controllable);
+   assert_resolved(resolve(CLOUD_PROVIDER_OPENAI, "gpt-5-2025-08-07", "disabled", ""),
+                   LLM_THINK_ENABLED, "minimal", true);
+   TEST_ASSERT_FALSE(
+       resolve(CLOUD_PROVIDER_GEMINI, "gemini-2.5-flash-image", "enabled", "high").controllable);
+   /* No reasoning control: nothing to send. */
+   llm_thinking_resolved_t r = resolve(CLOUD_PROVIDER_OPENAI, "gpt-4o", "enabled", "high");
+   TEST_ASSERT_FALSE(r.controllable);
+}
+
+static void test_gemini_rows(void) {
+   assert_resolved(resolve(CLOUD_PROVIDER_GEMINI, "gemini-3-flash-preview", "disabled", ""),
+                   LLM_THINK_ENABLED, "low", true);
+   TEST_ASSERT_FALSE(
+       resolve(CLOUD_PROVIDER_GEMINI, "gemini-1.5-pro", "enabled", "high").controllable);
+}
+
+static void test_openrouter_follows_the_vendor(void) {
+   assert_resolved(resolve(CLOUD_PROVIDER_OPENROUTER, "anthropic/claude-opus-5.5", "disabled", ""),
+                   LLM_THINK_ADAPTIVE, "low", true);
+   assert_resolved(resolve(CLOUD_PROVIDER_OPENROUTER, "openai/gpt-5.6-sol", "enabled", "high"),
+                   LLM_THINK_ENABLED, "high", false);
+   assert_resolved(resolve(CLOUD_PROVIDER_OPENROUTER, "qwen/qwen3-max", "disabled", "high"),
+                   LLM_THINK_DISABLED, "", false);
+}
+
+static void test_unlisted_models_get_conservative_defaults(void) {
+   llm_thinking_caps_t caps;
+   llm_thinking_caps(LLM_CLOUD, CLOUD_PROVIDER_CLAUDE, "claude-opus-9", &caps);
+   TEST_ASSERT_EQUAL_INT(LLM_CAPS_PROVIDER_DEFAULT, caps.source);
+   /* No "disabled" unless known. */
+   assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-opus-9", "disabled", ""),
+                   LLM_THINK_ADAPTIVE, "low", true);
+   /* An unlisted OpenAI-compatible model gets no reasoning parameters: an
+    * OpenAI-compatible endpoint serves anything, and most reject them. */
+   TEST_ASSERT_FALSE(
+       resolve(CLOUD_PROVIDER_OPENAI, "gpt-3.5-turbo", "enabled", "high").controllable);
+   TEST_ASSERT_FALSE(
+       resolve(CLOUD_PROVIDER_OPENAI, "ft:gpt-4o-mini:acme::1", "disabled", "").controllable);
+}
+
+static void test_older_claude_models_take_a_budget(void) {
+   llm_thinking_resolved_t r = resolve(CLOUD_PROVIDER_CLAUDE, "claude-sonnet-4-20250514", "enabled",
+                                       "high");
+   assert_resolved(r, LLM_THINK_ENABLED, "high", false);
+   TEST_ASSERT_TRUE(r.budget);
+   assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-opus-4-1-20250805", "disabled", ""),
+                   LLM_THINK_DISABLED, "", false);
+   assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-3-7-sonnet-latest", "enabled", "low"),
+                   LLM_THINK_ENABLED, "low", false);
+   /* The newer rows still win over their shorter prefixes. */
+   assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-sonnet-4-6", "adaptive", "high"),
+                   LLM_THINK_ADAPTIVE, "high", false);
+   TEST_ASSERT_FALSE(
+       resolve(CLOUD_PROVIDER_CLAUDE, "claude-3-5-haiku-latest", "enabled", "high").controllable);
+}
+
+static void test_a_named_mode_the_model_lacks_is_a_clamp(void) {
+   /* "adaptive" is Claude's; on OpenAI it becomes reasoning at the effort, and
+    * the user is told.  The older clients' "enabled" means "on": no clamp. */
+   assert_resolved(resolve(CLOUD_PROVIDER_OPENAI, "gpt-5.6-luna", "adaptive", "high"),
+                   LLM_THINK_ENABLED, "high", true);
+   assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-opus-5-5", "enabled", "high"),
+                   LLM_THINK_ADAPTIVE, "high", false);
+}
+
+static void test_local_providers(void) {
+   llm_thinking_caps_t caps;
+   llm_thinking_resolved_t r;
+   llm_thinking_caps(LLM_LOCAL, CLOUD_PROVIDER_NONE, "qwen3", &caps);
+   TEST_ASSERT_EQUAL_INT(LLM_CAPS_LOCAL, caps.source);
+   llm_thinking_resolve(&caps, "enabled", "high", false, &r);
+   assert_resolved(r, LLM_THINK_ENABLED, "high", false);
+   TEST_ASSERT_TRUE(r.budget);
+
+   s_local = LOCAL_PROVIDER_OLLAMA;
+   llm_thinking_caps(LLM_LOCAL, CLOUD_PROVIDER_NONE, "qwen3", &caps);
+   llm_thinking_resolve(&caps, "enabled", "high", false, &r);
+   TEST_ASSERT_EQUAL_STRING("enabled", llm_think_mode_name(r.mode));
+   TEST_ASSERT_EQUAL_STRING("", r.effort); /* think on/off only */
+}
+
+static void test_utility_calls_are_cheapest_and_never_clamped(void) {
+   llm_thinking_caps_t caps;
+   llm_thinking_resolved_t r;
+   llm_thinking_caps(LLM_CLOUD, CLOUD_PROVIDER_CLAUDE, "claude-opus-5-5", &caps);
+   llm_thinking_resolve(&caps, "enabled", "max", true, &r);
+   assert_resolved(r, LLM_THINK_ADAPTIVE, "low", false);
+   llm_thinking_caps(LLM_CLOUD, CLOUD_PROVIDER_OPENAI, "gpt-5.6-luna", &caps);
+   llm_thinking_resolve(&caps, "enabled", "max", true, &r);
+   assert_resolved(r, LLM_THINK_DISABLED, "", false);
+}
+
+int main(void) {
+   char err[256];
+   FILE *f = fopen(MODELS_TOML_PATH, "r");
+   TEST_ASSERT_NOT_NULL_MESSAGE(f, MODELS_TOML_PATH);
+   s_root = toml_parse_file(f, err, sizeof(err));
+   fclose(f);
+   if (!s_root) {
+      fprintf(stderr, "models.toml parse error: %s\n", err);
+      return 1;
+   }
+   llm_capabilities_load_registry(s_root);
+
+   UNITY_BEGIN();
+   RUN_TEST(test_adaptive_only_claude_has_no_off_switch);
+   RUN_TEST(test_claude_that_accepts_disabled);
+   RUN_TEST(test_budget_claude_uses_budget_levels);
+   RUN_TEST(test_claude_with_both_shapes_honours_the_pick);
+   RUN_TEST(test_openai_rows);
+   RUN_TEST(test_gemini_rows);
+   RUN_TEST(test_openrouter_follows_the_vendor);
+   RUN_TEST(test_unlisted_models_get_conservative_defaults);
+   RUN_TEST(test_older_claude_models_take_a_budget);
+   RUN_TEST(test_a_named_mode_the_model_lacks_is_a_clamp);
+   RUN_TEST(test_local_providers);
+   RUN_TEST(test_utility_calls_are_cheapest_and_never_clamped);
+   const int rc = UNITY_END();
+   llm_capabilities_free_registry();
+   toml_free(s_root);
+   return rc;
+}

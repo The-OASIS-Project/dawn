@@ -32,46 +32,6 @@
 #include "llm/llm_tools.h"
 
 /**
- * @brief Check if conversation history has tool_use blocks without thinking blocks
- *
- * Claude requires that when thinking is enabled, assistant messages with tool_use
- * must start with a thinking block. This checks for incompatible history that would
- * cause Claude API to reject the request.
- *
- * @param conversation OpenAI-format conversation history
- * @return true if history has tool_use without thinking (incompatible with thinking mode)
- */
-bool claude_history_has_tool_use_without_thinking(struct json_object *conversation);
-
-/**
- * @brief Check if conversation history contains any thinking blocks
- *
- * Used to detect if thinking was previously enabled for this conversation.
- * If history has thinking blocks, we cannot disable thinking mid-conversation or
- * Claude will reject with "assistant message cannot contain thinking".
- *
- * @param conversation OpenAI-format conversation history
- * @return true if history contains thinking blocks
- */
-bool claude_history_has_thinking_blocks(struct json_object *conversation);
-
-/**
- * @brief Check if conversation history contains OpenAI-format tool_calls.
- *
- * These appear when the user switched providers mid-conversation (gpt-5.x or
- * gemini turn produced an OpenAI-shaped `tool_calls` field rather than a Claude
- * `tool_use` content block). Distinct from the catch-all
- * claude_history_has_tool_use_without_thinking() — useful for log severity:
- * Claude follow-ups after a tool_result legitimately omit thinking, so that
- * shape isn't a real concern; OpenAI tool_calls in a Claude conversation
- * usually are.
- *
- * @param conversation OpenAI-format conversation history
- * @return true if any assistant message carries a non-empty `tool_calls` array
- */
-bool claude_history_has_openai_tool_calls(struct json_object *conversation);
-
-/**
  * @brief Convert OpenAI-format conversation to Claude's native format
  *
  * Transforms conversation history from OpenAI's message format to Claude's format:

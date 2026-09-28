@@ -425,14 +425,17 @@ int auth_db_llm_usage_insert(const llm_usage_row_t *rows, int count) {
        "INSERT INTO llm_usage_log (created_at, user_id, conversation_id, provider, model, kind, "
        "iteration, prompt_tokens, cache_read_tokens, cache_write_tokens, uncached_tokens, "
        "output_tokens, expected_read, cache_state, gap_ms, tools_hash, system_hash, thinking, "
-       "images, cache_miss_reason, cache_missed_tokens) "
+       "images, cache_miss_reason, cache_missed_tokens, binding_reported, binding_prefix_drops, "
+       "binding_model_drops, binding_other_drops) "
        /* Privacy at the write: rows queued before a conversation went private or
         * was deleted, or made after, keep no link to it; a deleted user's rows
         * aren't written.  (conv_db_set_private / conv_db_delete / user delete
         * handle the rows already stored.) */
        "SELECT ?1, ?2, CASE WHEN EXISTS (SELECT 1 FROM conversations WHERE id = ?3 AND "
        "is_private = 0) THEN ?3 ELSE 0 END, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, "
-       "?16, ?17, ?18, ?19, ?20, ?21 WHERE ?2 = 0 OR EXISTS (SELECT 1 FROM users WHERE id = ?2)",
+       "?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25 WHERE ?2 = 0 OR EXISTS (SELECT 1 FROM "
+       "users "
+       "WHERE id = ?2)",
        -1, &st, NULL);
    const bool began = rc == SQLITE_OK &&
                       sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK;
@@ -466,6 +469,10 @@ int auth_db_llm_usage_insert(const llm_usage_row_t *rows, int count) {
       sqlite3_bind_int(st, 19, r->images ? 1 : 0);
       sqlite3_bind_text(st, 20, r->cache_miss_reason, -1, SQLITE_STATIC);
       sqlite3_bind_int(st, 21, r->cache_missed_tokens);
+      sqlite3_bind_int(st, 22, r->binding_reported ? 1 : 0);
+      sqlite3_bind_int(st, 23, r->binding_prefix_drops);
+      sqlite3_bind_int(st, 24, r->binding_model_drops);
+      sqlite3_bind_int(st, 25, r->binding_other_drops);
       ok = sqlite3_step(st) == SQLITE_DONE;
    }
    if (!ok) {

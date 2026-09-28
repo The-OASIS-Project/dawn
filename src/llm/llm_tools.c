@@ -48,6 +48,7 @@
 #include "core/worker_pool.h"
 #include "dawn.h"
 #include "dawn_error.h"
+#include "llm/llm_capabilities.h"
 #include "llm/llm_claude_format.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_context.h"
@@ -2325,18 +2326,16 @@ void llm_tools_set_current_config(const llm_resolved_config_t *config) {
 }
 
 const char *llm_get_current_thinking_mode(void) {
-   /* Priority: thread-local config > global config > default.
-    * "auto" is treated as a synonym of "enabled" by all providers (see
-    * llm_openai.c, llm_openai_responses.c, llm_claude_format.c) and remains
-    * accepted from legacy DB rows / older clients. The default is "enabled"
-    * since the WebUI dropdown only emits disabled/enabled. */
+   /* Priority: thread-local config > global config > default.  The value is
+    * what was picked; requests resolve it against the model
+    * (llm_thinking_resolve_current).  Legacy "auto" means reasoning on. */
    if (tl_current_config && tl_current_config->thinking_mode[0] != '\0') {
       return tl_current_config->thinking_mode;
    }
    if (g_config.llm.thinking.mode[0] != '\0') {
       return g_config.llm.thinking.mode;
    }
-   return "enabled";
+   return LLM_THINKING_MODE_DEFAULT;
 }
 
 const char *llm_get_current_reasoning_effort(void) {
@@ -2347,38 +2346,13 @@ const char *llm_get_current_reasoning_effort(void) {
    if (g_config.llm.thinking.reasoning_effort[0] != '\0') {
       return g_config.llm.thinking.reasoning_effort;
    }
-   return "medium";
+   return LLM_REASONING_EFFORT_DEFAULT;
 }
 
-int llm_get_effective_budget_tokens(void) {
-   /* Map reasoning_effort to configured budget using first-char for efficiency.
-    *
-    * Effort vocabulary across providers:
-    *   none    — gpt-5.4 / gpt-5.1+ only ("don't reason"). For Claude (which has
-    *             no API "none"), map to budget_low so the thinking block at least
-    *             has a minimum viable budget if "none" leaks through.
-    *   low     — Claude budget_low.    OpenAI/Gemini pass through.
-    *   medium  — Claude budget_medium. OpenAI/Gemini pass through. Default.
-    *   high    — Claude budget_high.   OpenAI/Gemini pass through.
-    *   xhigh   — Claude budget_xhigh.  OpenAI gpt-5.2/5.4 pass through; older OpenAI
-    *             and Gemini get clamped to "high" at request build time. */
-   const char *effort = llm_get_current_reasoning_effort();
-   int budget;
-   switch (effort[0]) {
-      case 'n': /* none */
-      case 'l': /* low */
-         budget = g_config.llm.thinking.budget_low;
-         break;
-      case 'x': /* xhigh */
-         budget = g_config.llm.thinking.budget_xhigh;
-         break;
-      case 'h': /* high */
-         budget = g_config.llm.thinking.budget_high;
-         break;
-      default: /* medium */
-         budget = g_config.llm.thinking.budget_medium;
-         break;
-   }
+int llm_budget_tokens_for_effort(const char *effort) {
+   /* The level's size (the capability module owns the levels), capped for
+    * the current model below. */
+   int budget = llm_thinking_budget_size(effort);
 
    /* Clamp to 50% of model's context size if we have session config */
    if (tl_current_config) {

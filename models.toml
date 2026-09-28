@@ -135,3 +135,84 @@
 [cache_pricing.gemini]
 "gemini" = { read = 0.10, write_5m = 1.0, write_1h = 1.0 } # 2.5 and 3.x families
 
+
+# ---------------------------------------------------------------------------
+# Thinking / reasoning capabilities
+# ---------------------------------------------------------------------------
+# Which reasoning modes each model accepts, and its effort levels.  DAWN sends
+# only what a model takes, the WebUI and Aurora show only what it takes, and a
+# setting a model can't honor is resolved to the nearest one it can (and the
+# client told).  Same longest-prefix matching as the context windows; a model
+# with no row gets its provider's conservative default (below each table).
+#
+#   modes    the reasoning modes the model accepts, in the order shown to users:
+#              "disabled"  no reasoning (Claude thinking.type "disabled";
+#                          OpenAI effort "none").  Absent = can't be turned off.
+#              "adaptive"  Claude adaptive thinking, sized by effort
+#              "enabled"   Claude/local: a fixed thinking budget (DAWN's
+#                          [llm.thinking] budget_* for low/medium/high/xhigh);
+#                          OpenAI/Gemini: reasoning at an effort level
+#            An empty list: the model has no reasoning control.
+#   efforts  effort levels for "adaptive" (Claude output_config.effort) or, on
+#            OpenAI/Gemini, for "enabled"; lowest first.  Claude "enabled" uses
+#            the budget levels instead.
+#
+# A prefix matches every model it starts, so a family row catches its future
+# and specialty variants too: those get a row with no modes (below) until
+# they're known.  Better no reasoning parameters than ones a model rejects.
+#
+# Anthropic rows were read from the Models API (capabilities.thinking/effort)
+# and a thinking.type "disabled" probe per model, 2026-09-28.  OpenAI and
+# Gemini rows encode DAWN's shipped effort rules for those families.
+
+[thinking.anthropic]
+"claude-opus-5-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
+"claude-fable-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
+"claude-opus-5" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
+"claude-sonnet-5" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
+"claude-opus-4-8" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
+"claude-opus-4-7" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
+"claude-opus-4-6" = { modes = ["disabled", "adaptive", "enabled"], efforts = ["low", "medium", "high", "max"] }
+"claude-sonnet-4-6" = { modes = ["disabled", "adaptive", "enabled"], efforts = ["low", "medium", "high", "max"] }
+"claude-opus-4-5" = { modes = ["disabled", "enabled"], efforts = [] }
+"claude-sonnet-4-5" = { modes = ["disabled", "enabled"], efforts = [] }
+"claude-haiku-4-5" = { modes = ["disabled", "enabled"], efforts = [] }
+# Older models, budget thinking only (the 4.5+ rows above are longer, so they win):
+"claude-opus-4-1" = { modes = ["disabled", "enabled"], efforts = [] }
+"claude-opus-4" = { modes = ["disabled", "enabled"], efforts = [] }
+"claude-sonnet-4" = { modes = ["disabled", "enabled"], efforts = [] }
+"claude-3-7-sonnet" = { modes = ["disabled", "enabled"], efforts = [] }
+"claude-3" = { modes = [], efforts = [] } # 3.5 and earlier: no extended thinking
+# Default for an unlisted Claude model: adaptive, low/medium/high, no "disabled".
+
+[thinking.openai]
+"gpt-5.6" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"] }
+"gpt-5.5" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"] }
+"gpt-5.4" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"] }
+"gpt-5.3" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"] }
+"gpt-5.2" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"] }
+"gpt-5.1" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high"] }
+"gpt-5" = { modes = ["enabled"], efforts = ["minimal", "low", "medium", "high"] } # 5, mini, nano
+"gpt-5." = { modes = [], efforts = [] } # a gpt-5.x newer than the rows above: unknown until listed
+"gpt-5-chat" = { modes = [], efforts = [] } # the chat alias takes no reasoning parameter
+"o1" = { modes = ["enabled"], efforts = ["low", "medium", "high"] }
+"o1-mini" = { modes = [], efforts = [] } # takes no reasoning_effort
+"o1-preview" = { modes = [], efforts = [] }
+"o3" = { modes = ["enabled"], efforts = ["low", "medium", "high"] }
+"o4-mini" = { modes = ["enabled"], efforts = ["low", "medium", "high"] }
+"gpt-4" = { modes = [], efforts = [] } # 4o, 4.1: no reasoning
+# Default for an unlisted OpenAI model: no reasoning control (nothing sent).
+# An OpenAI-compatible endpoint can serve anything, so only models listed
+# here get reasoning parameters.
+
+[thinking.gemini]
+"gemini-3" = { modes = ["enabled"], efforts = ["low", "medium", "high"] }
+"gemini-2.5" = { modes = ["enabled"], efforts = ["low", "medium", "high"] }
+"gemini-2.5-flash-image" = { modes = [], efforts = [] } # image generation: no reasoning
+# Default for an unlisted Gemini model: no reasoning control.
+#
+# OpenRouter models ("vendor/model") use their vendor's table: anthropic/,
+# openai/, google/ (Gemini).  Other vendors default to "disabled" + "enabled",
+# low/medium/high (OpenRouter ignores the setting where it doesn't apply).
+# Local models aren't listed: llama.cpp takes "disabled" + "enabled" (budget),
+# Ollama "disabled" + "enabled" with no levels.

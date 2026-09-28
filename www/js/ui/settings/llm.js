@@ -263,9 +263,8 @@
       if (grid) {
          grid.classList.toggle('locked', locked);
       }
-      // Reasoning mode + effort stay editable mid-conversation. Effort never
-      // errors on any provider; a reasoning-mode change is made safe server-side
-      // (Claude clamps an incompatible thinking toggle instead of 400ing).
+      // Reasoning mode + effort stay editable mid-conversation: every change is
+      // sent, and the server resolves it to what the model accepts.
       if (reasoningSelect) {
          reasoningSelect.disabled = false;
       }
@@ -292,20 +291,16 @@
             conversationLlmState.thinking_mode = reasoningSelect.value;
             // Update depth selector enabled state
             updateDepthEnabled();
-            // Immediately update session config so thinking_mode takes effect
-            if (!conversationLlmState.locked) {
-               setSessionLlm({ thinking_mode: reasoningSelect.value });
-            }
+            // Takes effect on the next request, mid-conversation included
+            setSessionLlm({ thinking_mode: reasoningSelect.value });
          });
       }
 
       if (depthSelect) {
          depthSelect.addEventListener('change', () => {
             conversationLlmState.reasoning_effort = depthSelect.value;
-            // Immediately update session config so reasoning_effort takes effect
-            if (!conversationLlmState.locked) {
-               setSessionLlm({ reasoning_effort: depthSelect.value });
-            }
+            // Takes effect on the next request, mid-conversation included
+            setSessionLlm({ reasoning_effort: depthSelect.value });
          });
          // Initialize enabled state
          updateDepthEnabled();

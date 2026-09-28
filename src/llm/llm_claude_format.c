@@ -32,6 +32,7 @@
 
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
+#include "llm/llm_capabilities.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_model_version.h"
 #include "llm/llm_tools.h"
@@ -170,122 +171,6 @@ static bool has_matching_tool_result(const char *tool_id,
          return true;
       }
    }
-   return false;
-}
-
-bool claude_history_has_tool_use_without_thinking(struct json_object *conversation) {
-   if (!conversation) {
-      return false;
-   }
-
-   int conv_len = json_object_array_length(conversation);
-   for (int i = 0; i < conv_len; i++) {
-      json_object *msg = json_object_array_get_idx(conversation, i);
-      json_object *role_obj, *content_obj;
-
-      if (!json_object_object_get_ex(msg, "role", &role_obj)) {
-         continue;
-      }
-      const char *role = json_object_get_string(role_obj);
-
-      // Check assistant messages with array content (Claude format with tool_use)
-      if (strcmp(role, "assistant") == 0 &&
-          json_object_object_get_ex(msg, "content", &content_obj) &&
-          json_object_is_type(content_obj, json_type_array)) {
-         int content_len = json_object_array_length(content_obj);
-         bool has_tool_use = false;
-         bool has_thinking = false;
-
-         for (int j = 0; j < content_len; j++) {
-            json_object *block = json_object_array_get_idx(content_obj, j);
-            json_object *type_obj;
-            if (json_object_object_get_ex(block, "type", &type_obj)) {
-               const char *block_type = json_object_get_string(type_obj);
-               if (strcmp(block_type, "tool_use") == 0) {
-                  has_tool_use = true;
-               } else if (strcmp(block_type, "thinking") == 0) {
-                  has_thinking = true;
-               }
-            }
-         }
-
-         // If this message has tool_use but no thinking, history is incompatible
-         if (has_tool_use && !has_thinking) {
-            return true;
-         }
-      }
-
-      // Check for OpenAI-format tool_calls (also incompatible - no thinking block format)
-      json_object *tool_calls_obj;
-      if (strcmp(role, "assistant") == 0 &&
-          json_object_object_get_ex(msg, "tool_calls", &tool_calls_obj) &&
-          json_object_is_type(tool_calls_obj, json_type_array) &&
-          json_object_array_length(tool_calls_obj) > 0) {
-         // OpenAI-format tool_calls - these never have thinking blocks
-         return true;
-      }
-   }
-
-   return false;
-}
-
-bool claude_history_has_openai_tool_calls(struct json_object *conversation) {
-   if (!conversation) {
-      return false;
-   }
-   int conv_len = json_object_array_length(conversation);
-   for (int i = 0; i < conv_len; i++) {
-      json_object *msg = json_object_array_get_idx(conversation, i);
-      json_object *role_obj, *tool_calls_obj;
-      if (!json_object_object_get_ex(msg, "role", &role_obj)) {
-         continue;
-      }
-      if (strcmp(json_object_get_string(role_obj), "assistant") != 0) {
-         continue;
-      }
-      if (json_object_object_get_ex(msg, "tool_calls", &tool_calls_obj) &&
-          json_object_is_type(tool_calls_obj, json_type_array) &&
-          json_object_array_length(tool_calls_obj) > 0) {
-         return true;
-      }
-   }
-   return false;
-}
-
-bool claude_history_has_thinking_blocks(struct json_object *conversation) {
-   if (!conversation) {
-      return false;
-   }
-
-   int conv_len = json_object_array_length(conversation);
-   for (int i = 0; i < conv_len; i++) {
-      json_object *msg = json_object_array_get_idx(conversation, i);
-      json_object *role_obj, *content_obj;
-
-      if (!json_object_object_get_ex(msg, "role", &role_obj)) {
-         continue;
-      }
-      const char *role = json_object_get_string(role_obj);
-
-      // Check assistant messages with array content
-      if (strcmp(role, "assistant") == 0 &&
-          json_object_object_get_ex(msg, "content", &content_obj) &&
-          json_object_is_type(content_obj, json_type_array)) {
-         int content_len = json_object_array_length(content_obj);
-
-         for (int j = 0; j < content_len; j++) {
-            json_object *block = json_object_array_get_idx(content_obj, j);
-            json_object *type_obj;
-            if (json_object_object_get_ex(block, "type", &type_obj)) {
-               const char *block_type = json_object_get_string(type_obj);
-               if (strcmp(block_type, "thinking") == 0) {
-                  return true;
-               }
-            }
-         }
-      }
-   }
-
    return false;
 }
 
@@ -538,46 +423,6 @@ static void add_vision_to_claude_messages(json_object *messages_array,
    }
 }
 
-/**
- * @brief Whether a Claude model requires adaptive thinking instead of the
- *        legacy `thinking.type=enabled` + `budget_tokens` shape.
- *
- * Anthropic removed `thinking.type=enabled` / `budget_tokens` on Opus 4.7+,
- * Sonnet 5, and Fable/Mythos 5 — those models reject it with a 400 and require
- * `thinking.type=adaptive` + `output_config.effort`.  Opus 4.6 / Sonnet 4.6,
- * Haiku 4.5, Sonnet 4.5, and older still accept the legacy enabled+budget shape.
- */
-static bool claude_model_requires_adaptive_thinking(const char *model_name) {
-   int major = 0, minor = 0;
-   llm_parse_model_version(model_name, &major, &minor);
-   if (major >= 5) {
-      return true; /* Sonnet 5, Fable 5, Mythos 5, and future 5.x */
-   }
-   if (major == 4 && minor >= 7) {
-      return true; /* Opus 4.7, 4.8 */
-   }
-   return false;
-}
-
-#ifdef ENABLE_WEBUI
-/* Emit a WebUI info notice about a thinking-mode clamp, at most once per session.
- * Shared by the auto-disable and auto-enable clamps below so the matched pair stays
- * in sync. *last_session is a single-slot "most recently notified session" tracker
- * (per-session best-effort dedup; a benign redundant/skipped notice is possible when
- * two sessions collide on the static — same precedent as before). */
-static void claude_notify_thinking_clamp_once(uint32_t *last_session,
-                                              const char *code,
-                                              const char *log_label,
-                                              const char *notice_msg) {
-   session_t *session = session_get_command_context();
-   if (session && session->type == SESSION_TYPE_WEBUI && session->session_id != *last_session) {
-      *last_session = session->session_id;
-      OLOG_INFO("Claude: %s for session %u", log_label, session->session_id);
-      webui_send_error_ex(session, code, notice_msg, WS_SEVERITY_INFO);
-   }
-}
-#endif
-
 json_object *convert_to_claude_format(struct json_object *openai_conversation,
                                       const char *input_text,
                                       const char **vision_images,
@@ -595,148 +440,45 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
    }
    json_object_object_add(claude_request, "model", json_object_new_string(model_name));
 
-   // Determine if extended thinking will be enabled
-   // Use session-aware thinking mode (respects per-conversation settings)
-   const char *thinking_mode = llm_get_current_thinking_mode();
-   bool thinking_enabled = false;
-   int thinking_budget = 0;
-   OLOG_INFO("Claude: thinking_mode='%s', model='%s'", thinking_mode, model_name);
+   /* Reasoning: the session's mode and effort, resolved against what this
+    * model accepts (models.toml [thinking.anthropic]), sent explicitly.  Never
+    * omitted: on current Claude models an omitted `thinking` runs adaptive at
+    * the model's default effort, whatever the user picked. */
+   llm_thinking_resolved_t thinking;
+   llm_thinking_resolve_current(LLM_CLOUD, CLOUD_PROVIDER_CLAUDE, model_name, &thinking);
+   const int thinking_budget = (thinking.controllable && thinking.budget)
+                                   ? llm_budget_tokens_for_effort(thinking.effort)
+                                   : 0;
 
-   // Detect extended-thinking support (Claude 3.5+) once — both the enable path
-   // below and the mid-conversation disable-clamp further down need it.
-   bool model_supports_thinking = false;
-   {
-      int major = 0, minor = 0;
-      llm_parse_model_version(model_name, &major, &minor);
-      // Extended thinking is supported on Claude 3.5+ (the version is always the
-      // first token in a Claude id, so the shared first-token parser matches).
-      model_supports_thinking = (major > 3 || (major == 3 && minor >= 5));
-      OLOG_INFO("Claude: version detected %d.%d, model_supports=%d", major, minor,
-                model_supports_thinking);
-   }
-
-   if (strcmp(thinking_mode, "disabled") != 0) {
-      if (model_supports_thinking || strcmp(thinking_mode, "enabled") == 0) {
-         thinking_enabled = true;
-         thinking_budget = llm_get_effective_budget_tokens();
-      }
-   }
-
-   // Disable thinking for internal utility calls (search summarization, context compaction)
-   // These calls suppress tools and expect simple text responses
-   if (thinking_enabled && llm_tools_suppressed()) {
-      thinking_enabled = false;
-   }
-
-   // Check if conversation history is compatible with thinking mode
-   // Claude requires assistant messages with tool_use to start with thinking blocks
-   // IMPORTANT: If history already has thinking blocks, we CANNOT disable thinking
-   // (Claude rejects "assistant message cannot contain thinking" when disabled)
-   bool has_existing_thinking = claude_history_has_thinking_blocks(openai_conversation);
-
-   if (thinking_enabled && claude_history_has_tool_use_without_thinking(openai_conversation)) {
-      if (has_existing_thinking) {
-         // History has both thinking blocks AND tool_use without thinking — keep
-         // thinking enabled (disabling would cause "cannot contain thinking" error).
-         //
-         // Two sub-cases:
-         //   (a) Pure Claude history where a follow-up turn after a tool_result
-         //       legitimately omitted its thinking block. Normal behavior, silent.
-         //   (b) OpenAI-format `tool_calls` field is present (provider switched
-         //       mid-conversation). Real concern worth surfacing — INFO log so
-         //       the operator can spot it without it screaming WARN.
-         if (claude_history_has_openai_tool_calls(openai_conversation)) {
-            OLOG_INFO("Claude: History has OpenAI-format tool_calls mixed with Claude "
-                      "thinking blocks (provider switched mid-conversation); keeping "
-                      "thinking enabled");
-         }
-      } else {
-         // Safe to disable - no thinking blocks in history
-         thinking_enabled = false;
-
-#ifdef ENABLE_WEBUI
-         static uint32_t last_notified_session = 0;
-         claude_notify_thinking_clamp_once(
-             &last_notified_session, "INFO_THINKING_DISABLED",
-             "Auto-disabled thinking (incompatible history)",
-             "Extended thinking auto-disabled: conversation history from previous provider "
-             "is incompatible. Start a new conversation to use thinking with Claude.");
-#endif
-      }
-   }
-
-   // Inverse of the auto-disable above: the user has thinking DISABLED, but the
-   // conversation already contains thinking blocks. Claude rejects that request
-   // ("assistant message cannot contain thinking"), so force thinking back on for
-   // this turn. This is the server-side guarantee that lets any client (WebUI,
-   // satellite, ...) allow a mid-conversation thinking toggle: enabling is guarded
-   // above (auto-disabled when incompatible), disabling is guarded here.
-   //
-   // Residual case this can't fix: if the model was switched mid-conversation to
-   // one that does NOT support thinking, the model_supports_thinking guard skips
-   // the clamp and Claude still 400s (can't preserve thinking blocks, can't strip
-   // them here). Rare in practice (a thinking history implies a thinking model);
-   // resolving it would require stripping thinking blocks from history — out of scope.
-   //
-   // The !llm_tools_suppressed() guard is deliberate: internal utility calls
-   // (search summarization, context compaction) already force thinking off above
-   // and must not have it forced back on here. Those paths build minimal prompts,
-   // so has_existing_thinking is expected false for them.
-   if (!thinking_enabled && has_existing_thinking && model_supports_thinking &&
-       !llm_tools_suppressed()) {
-      thinking_enabled = true;
-      thinking_budget = llm_get_effective_budget_tokens();
-
-#ifdef ENABLE_WEBUI
-      static uint32_t last_kept_on_session = 0;
-      claude_notify_thinking_clamp_once(
-          &last_kept_on_session, "INFO_THINKING_KEPT_ON",
-          "Forced thinking ON (history contains thinking blocks)",
-          "Extended thinking stayed on: this conversation already contains reasoning, which "
-          "Claude requires be preserved. Start a new conversation to turn thinking off.");
-#else
-      OLOG_INFO("Claude: Forced thinking ON (history contains thinking blocks)");
-#endif
-   }
-
-   // Max tokens: Claude requires max_tokens > budget_tokens when thinking is enabled
+   /* max_tokens must exceed a thinking budget: leave room for the answer. */
    int max_tokens = g_config.llm.max_tokens;
-   if (thinking_enabled && max_tokens <= thinking_budget) {
-      // Ensure max_tokens > budget_tokens, add buffer for response
+   if (thinking_budget > 0 && max_tokens <= thinking_budget) {
       max_tokens = thinking_budget + 4096;
       OLOG_INFO("Claude: Adjusted max_tokens to %d (budget %d + 4096 response buffer)", max_tokens,
                 thinking_budget);
    }
    json_object_object_add(claude_request, "max_tokens", json_object_new_int(max_tokens));
 
-   // Add extended thinking configuration.  Newer Claude models (Opus 4.7+,
-   // Sonnet 5, Fable/Mythos 5) reject `thinking.type=enabled` + `budget_tokens`
-   // with a 400 and require `thinking.type=adaptive` + `output_config.effort`;
-   // older models still use the legacy enabled+budget shape.
-   if (thinking_enabled) {
-      json_object *thinking = json_object_new_object();
-      if (claude_model_requires_adaptive_thinking(model_name)) {
-         json_object_object_add(thinking, "type", json_object_new_string("adaptive"));
-         /* Default display is "omitted" on these models (empty thinking text);
-          * request "summarized" so DAWN's thinking UI still shows reasoning. */
-         json_object_object_add(thinking, "display", json_object_new_string("summarized"));
-         json_object_object_add(claude_request, "thinking", thinking);
-
-         const char *effort = llm_get_current_reasoning_effort();
-         if (!effort || effort[0] == '\0') {
-            effort = "medium";
-         }
+   if (thinking.controllable) {
+      json_object *thinking_obj = json_object_new_object();
+      json_object_object_add(thinking_obj, "type",
+                             json_object_new_string(llm_think_mode_name(thinking.mode)));
+      if (thinking.mode == LLM_THINK_ADAPTIVE) {
+         /* The default display is "omitted" (empty thinking text); ask for a
+          * summary so DAWN's thinking UI shows the reasoning. */
+         json_object_object_add(thinking_obj, "display", json_object_new_string("summarized"));
          json_object *output_config = json_object_new_object();
-         json_object_object_add(output_config, "effort", json_object_new_string(effort));
+         json_object_object_add(output_config, "effort", json_object_new_string(thinking.effort));
          json_object_object_add(claude_request, "output_config", output_config);
-         OLOG_INFO("Claude: Adaptive thinking enabled (effort: %s)", effort);
-      } else {
-         json_object_object_add(thinking, "type", json_object_new_string("enabled"));
-         json_object_object_add(thinking, "budget_tokens", json_object_new_int(thinking_budget));
-         json_object_object_add(claude_request, "thinking", thinking);
-         OLOG_INFO("Claude: Extended thinking enabled (budget: %d tokens)", thinking_budget);
+      } else if (thinking.mode == LLM_THINK_ENABLED) {
+         json_object_object_add(thinking_obj, "budget_tokens",
+                                json_object_new_int(thinking_budget));
       }
+      json_object_object_add(claude_request, "thinking", thinking_obj);
    }
+   OLOG_INFO("Claude: thinking=%s%s%s model=%s%s", llm_think_mode_name(thinking.mode),
+             thinking.effort[0] ? "/" : "", thinking.effort, model_name,
+             thinking.clamped ? " (setting resolved to what the model accepts)" : "");
 
    // Add tools if native tool calling is enabled
    if (llm_tools_enabled(NULL)) {
