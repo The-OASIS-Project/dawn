@@ -71,6 +71,7 @@
 "claude-opus-4-7" = 1000000
 "claude-opus-4-6" = 1000000
 "claude-sonnet-4-6" = 1000000
+"claude-sonnet-5-5" = 1000000
 "claude-sonnet-5" = 1000000
 "claude-fable-5" = 1000000
 "claude-mythos-5" = 1000000
@@ -169,6 +170,7 @@
 "claude-opus-5-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
 "claude-fable-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
 "claude-opus-5" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
+"claude-sonnet-5-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
 "claude-sonnet-5" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
 "claude-opus-4-8" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
 "claude-opus-4-7" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }

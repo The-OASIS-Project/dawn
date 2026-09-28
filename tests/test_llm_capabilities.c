@@ -93,7 +93,10 @@ static void test_adaptive_only_claude_has_no_off_switch(void) {
    assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-opus-5-5", "disabled", "high"),
                    LLM_THINK_ADAPTIVE, "low", true);
    /* Fable 5 and 5.1 share the row. */
-   assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-fable-5-1", "disabled", ""),
+   assert_resolved(
+       resolve(CLOUD_PROVIDER_CLAUDE, "claude-fable-5-1", "disabled", ""), LLM_THINK_ADAPTIVE,
+       "low", true); /* Sonnet 5.5 can't turn it off either: its row, not Sonnet 5's, applies. */
+   assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-sonnet-5-5", "disabled", "high"),
                    LLM_THINK_ADAPTIVE, "low", true);
 }
 
