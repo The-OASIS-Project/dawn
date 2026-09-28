@@ -45,6 +45,7 @@
 #include "llm/llm_openai_internal.h"
 #include "llm/llm_rate_limit.h"
 #include "llm/llm_tools.h"
+#include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "utils/string_utils.h"
 #include "webui/webui_server.h"
@@ -350,7 +351,7 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
  *     §6c-G1).
  * Both are additive + best-effort: other callers never read last_finish_reason, a lookup
  * miss is a no-op (the worker then reads an empty reason = "not truncated"), and a turn
- * with no thinking content leaves final_reasoning_json NULL (build_reasoning_json returns
+ * with no thinking content leaves final_answer.reasoning_json NULL (build_reasoning_json returns
  * NULL; the turn-start clear in llm_call_prepare guarantees no stale inheritance).  Folded
  * from two helpers into one so a final-answer return does a single session_get_for_reconnect
  * rather than two.  TAKES ownership of the built reasoning JSON into the session (the
@@ -361,7 +362,8 @@ static void tool_loop_stash_final(uint32_t session_id,
    const char *reason = result != NULL ? result->finish_reason : NULL;
    bool have_reason = (reason != NULL && reason[0] != '\0');
    char *json = build_reasoning_json(result, provider_label);
-   if (!have_reason && json == NULL) {
+   struct json_object *blocks = result != NULL ? result->blocks : NULL;
+   if (!have_reason && json == NULL && blocks == NULL) {
       return; /* nothing to write — skip the lookup entirely */
    }
    session_t *s = session_get_for_reconnect(session_id);
@@ -373,8 +375,12 @@ static void tool_loop_stash_final(uint32_t session_id,
       snprintf(s->last_finish_reason, sizeof(s->last_finish_reason), "%s", reason);
    }
    if (json != NULL) {
-      free(s->final_reasoning_json);
-      s->final_reasoning_json = json; /* take ownership */
+      free(s->final_answer.reasoning_json);
+      s->final_answer.reasoning_json = json; /* take ownership */
+   }
+   if (blocks != NULL) {
+      json_object_put(s->final_answer.blocks);
+      s->final_answer.blocks = json_object_get(blocks); /* the answer's blocks */
    }
    session_release(s);
 }
@@ -466,22 +472,21 @@ static void append_claude_tool_history(struct json_object *history,
    json_object *assistant_msg = json_object_new_object();
    json_object_object_add(assistant_msg, "role", json_object_new_string("assistant"));
 
-   json_object *content_array = json_object_new_array();
-
-   /* If thinking was enabled, add the thinking block first (required by Claude API) */
-   if (response->thinking_content) {
-      json_object *thinking_block = json_object_new_object();
-      json_object_object_add(thinking_block, "type", json_object_new_string("thinking"));
-      json_object_object_add(thinking_block, "thinking",
-                             json_object_new_string(response->thinking_content));
-
-      if (response->thinking_signature) {
-         json_object_object_add(thinking_block, "signature",
-                                json_object_new_string(response->thinking_signature));
-      }
-
-      json_object_array_add(content_array, thinking_block);
+   /* The turn exactly as the model produced it: every block in order, each
+    * thinking block with its own signature (empty text or not).  The blocks
+    * travel with the message; each formatter renders them for its provider. */
+   json_object *rendered = llm_turn_blocks_render_claude(response->blocks);
+   if (rendered) {
+      json_object_object_add(assistant_msg, "content", rendered);
+      json_object_object_add(assistant_msg, LLM_TURN_BLOCKS_KEY, json_object_get(response->blocks));
+      session_history_append(history, assistant_msg);
+      llm_tools_add_results_claude(history, results);
+      return;
    }
+
+   /* A path without blocks: the text and tool calls (its reasoning, if any,
+    * can't be replayed without the blocks it came in). */
+   json_object *content_array = json_object_new_array();
 
    /* Preserve any text the LLM streamed before its tool_use blocks, so the follow-up
     * iteration can see what was already said and won't repeat itself. */

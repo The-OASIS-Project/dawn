@@ -42,6 +42,7 @@
 #include "core/text_filter.h"
 #include "llm/llm_context.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "tools/time_utils.h"
 #include "utils/sentence_buffer.h"
@@ -159,10 +160,7 @@ static int llm_call_prepare(session_t *session,
     * so a leftover from a prior turn (a persist that never consumed it) must not attach to
     * this row.  Safe here precisely because the write is in-dispatch (after prepare) — a
     * prepare-clear cannot clobber the current turn's stash. */
-   if (session->final_reasoning_json != NULL) {
-      free(session->final_reasoning_json);
-      session->final_reasoning_json = NULL;
-   }
+   session_final_answer_clear(session);
 
    /* Turn-start reset of the per-turn cache-token trackers so an interrupted or
     * usage-less turn (Stop / wake-word barge-in / a provider that omits the usage
@@ -379,9 +377,17 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
       // else: finalize alloc failure — keep the raw response (degraded, not fatal)
    }
 
-   // Add assistant response to history (only if non-empty to avoid Claude API errors)
+   // Add assistant response to history (only if non-empty to avoid Claude API errors),
+   // with its blocks: the model's reasoning, and the answer as DAWN keeps it
    if (*response) {
-      session_add_turn_message(session, "assistant", response);
+      struct json_object *blocks = NULL;
+      if (session->final_answer.blocks) {
+         blocks = llm_turn_blocks_with_final_text(session->final_answer.blocks, response);
+         json_object_put(session->final_answer.blocks);
+         session->final_answer.blocks = NULL;
+      }
+      session_add_turn_assistant(session, response, blocks);
+      json_object_put(blocks);
    } else {
       OLOG_WARNING("Session %u: LLM returned empty response, not adding to history",
                    session->session_id);

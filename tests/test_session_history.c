@@ -34,7 +34,7 @@ static session_t *s;
 
 /* ---- stubs ---------------------------------------------------------------- */
 
-struct json_object *llm_history_strip_provider_state(struct json_object *history) {
+struct json_object *llm_history_strip_internal(struct json_object *history) {
    struct json_object *copy = NULL;
    json_object_deep_copy(history, &copy, NULL);
    return copy;

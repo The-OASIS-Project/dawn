@@ -234,9 +234,11 @@ typedef struct llm_tool_response {
    bool has_tool_calls;         /**< true if tool_calls.count > 0 */
    char finish_reason[32];      /**< "stop", "tool_calls", "tool_use", etc. */
    /* Extended thinking fields (Claude/Gemini) */
-   char *thinking_content;   /**< Extended thinking text (caller must free) */
-   char *thinking_signature; /**< Thinking signature for follow-up (caller must free) */
-   int reasoning_tokens;     /**< Reasoning token count (OpenAI o-series / Responses); 0 if none */
+   char *thinking_content;     /**< Extended thinking text (caller must free) */
+   struct json_object *blocks; /**< The turn's provider-neutral blocks, in order
+                                *   (llm_turn_blocks.h; NULL if the path has none).
+                                *   Freed with the response. */
+   int reasoning_tokens; /**< Reasoning token count (OpenAI o-series / Responses); 0 if none */
    /* OpenAI Responses API round-trip fields (NULL for chat-completions / Claude paths) */
    char *response_id;         /**< response.id from /v1/responses (Mode A future use) */
    char *provider_state_json; /**< Opaque JSON blob to attach as _provider_state on the
@@ -665,25 +667,6 @@ int llm_tools_build_disabled_hint(bool is_remote, char *buffer, size_t buffer_si
  * @param response Response to free (text and thinking fields are freed if not NULL)
  */
 void llm_tool_response_free(llm_tool_response_t *response);
-
-/**
- * @brief Return a deep-copied history array with provider-private fields stripped.
- *
- * Currently strips `_provider_state` from each message — that's where the OpenAI
- * Responses path stashes encrypted reasoning blobs (and where future providers
- * will stash their own opaque per-turn state). Those blobs are session-bound,
- * provider-specific, and MUST NOT be:
- *   - Forwarded to a different LLM provider (e.g. memory extraction sending DAWN
- *     conversation history to a Claude/Gemini/local model for summarization).
- *   - Persisted to disk in pre-compact logs or conversation exports.
- *
- * The returned array is a new json_object with refcount 1; caller must
- * json_object_put it. Original history is unmodified. NULL on allocation failure.
- *
- * @param history JSON array of messages.
- * @return Sanitized deep-copy (caller json_object_put), or NULL on error.
- */
-struct json_object *llm_history_strip_provider_state(struct json_object *history);
 
 /**
  * @brief Strip image content blocks from conversation history

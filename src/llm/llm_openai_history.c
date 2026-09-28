@@ -32,6 +32,7 @@
 #include "llm/llm_command_parser.h"
 #include "llm/llm_openai_internal.h"
 #include "llm/llm_tools.h"
+#include "llm/llm_turn_blocks.h"
 #include "logging.h"
 
 /* Stack buffer for accumulating concatenated Claude text blocks during
@@ -558,6 +559,13 @@ json_object *llm_openai_prepare_chat_history(struct json_object *conversation_hi
    json_object *filtered = filter_orphaned_tool_messages(conversation_history);
    json_object *converted = convert_claude_tool_messages(filtered);
    json_object_put(filtered);
+   /* DAWN's own message keys never go on the wire (llm_turn_blocks.h). */
+   json_object *stripped = llm_history_wire_copy(converted);
+   json_object_put(converted);
+   converted = stripped;
+   if (!converted) {
+      return NULL; /* never the unstripped history */
+   }
 
    if (!is_vision_enabled_for_current_llm()) {
       json_object *sanitized = llm_history_strip_vision_content(converted);

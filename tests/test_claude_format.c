@@ -39,6 +39,7 @@
 #include "llm/llm_claude_format.h"
 #include "llm/llm_local_provider.h"
 #include "llm/llm_tools.h"
+#include "llm/llm_turn_blocks.h"
 #include "tools/toml.h"
 #include "unity.h"
 
@@ -293,6 +294,45 @@ static void test_tool_use_without_thinking_keeps_reasoning(void) {
    json_object_put(req);
 }
 
+/* A history final answer that carries blocks is replayed with its thinking,
+ * signature intact, not as bare text. */
+static void test_final_answer_replays_its_blocks(void) {
+   json_object *conv = one_user_turn();
+   json_object *answer = json_object_new_object();
+   json_object_object_add(answer, "role", json_object_new_string("assistant"));
+   json_object_object_add(answer, "content", json_object_new_string("Clean answer."));
+   json_object *blocks = llm_turn_blocks_new();
+   llm_turn_blocks_add_reasoning(blocks, LLM_CARRIER_ANTHROPIC, LLM_FORMAT_ANTHROPIC,
+                                 "claude-opus-5-5",
+                                 json_tokener_parse("{\"type\":\"thinking\",\"thinking\":\"\","
+                                                    "\"signature\":\"SIG\"}"));
+   llm_turn_blocks_add_text(blocks, "Clean answer.");
+   json_object_object_add(answer, LLM_TURN_BLOCKS_KEY, blocks);
+   json_object_array_add(conv, answer);
+   json_object *next = json_object_new_object();
+   json_object_object_add(next, "role", json_object_new_string("user"));
+   json_object_object_add(next, "content", json_object_new_string("And tomorrow?"));
+   json_object_array_add(conv, next);
+
+   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-opus-5-5", 0);
+   json_object *messages = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(req, "messages", &messages));
+   json_object *assistant = json_object_array_get_idx(messages, 1);
+   json_object *content = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(assistant, "content", &content));
+   TEST_ASSERT_TRUE(json_object_is_type(content, json_type_array));
+   TEST_ASSERT_EQUAL_INT(2, json_object_array_length(content));
+   json_object *first = json_object_array_get_idx(content, 0);
+   TEST_ASSERT_EQUAL_STRING("thinking",
+                            json_object_get_string(json_object_object_get(first, "type")));
+   TEST_ASSERT_EQUAL_STRING("SIG",
+                            json_object_get_string(json_object_object_get(first, "signature")));
+   /* DAWN's key never reaches the wire. */
+   TEST_ASSERT_FALSE(json_object_object_get_ex(assistant, LLM_TURN_BLOCKS_KEY, NULL));
+   json_object_put(req);
+   json_object_put(conv);
+}
+
 static toml_table_t *s_models;
 
 int main(void) {
@@ -312,5 +352,6 @@ int main(void) {
    RUN_TEST(test_budget_model_gets_enabled_with_budget);
    RUN_TEST(test_utility_call_gets_the_cheapest_legal_setting);
    RUN_TEST(test_tool_use_without_thinking_keeps_reasoning);
+   RUN_TEST(test_final_answer_replays_its_blocks);
    return UNITY_END();
 }

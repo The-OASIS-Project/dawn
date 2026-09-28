@@ -783,8 +783,8 @@ int webui_persist_final_answer(session_t *session,
     * stream_conversation_id.  (Deliberately different from the visual take just below,
     * which IS under tools_mutex because the render_visual tool callback writes it from a
     * tool-worker thread — do NOT "consistency-fix" the two to match.) */
-   char *reasoning = session->final_reasoning_json;
-   session->final_reasoning_json = NULL;
+   char *reasoning = session->final_answer.reasoning_json;
+   session->final_answer.reasoning_json = NULL;
 
    /* Take the accumulated visual under tools_mutex, then RELEASE before the body build /
     * DB write / fan-out — never hold a leaf lock across the persist (lock-ordering). */

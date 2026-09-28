@@ -919,6 +919,8 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
       // Check if this is a tool_use block
       json_object *content_block, *block_type_obj;
       if (json_object_object_get_ex(event, "content_block", &content_block)) {
+         /* Every block, in order, exactly as sent: what the turn replays. */
+         llm_claude_capture_start(&ctx->provider.claude.capture, content_block);
          if (json_object_object_get_ex(content_block, "type", &block_type_obj)) {
             const char *block_type = json_object_get_string(block_type_obj);
 
@@ -977,6 +979,7 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
       json_object *delta, *delta_type_obj, *text_obj;
 
       if (json_object_object_get_ex(event, "delta", &delta)) {
+         llm_claude_capture_delta(&ctx->provider.claude.capture, delta);
          // Check delta type
          if (json_object_object_get_ex(delta, "type", &delta_type_obj)) {
             const char *delta_type = json_object_get_string(delta_type_obj);
@@ -1048,54 +1051,16 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
                 * in bursts (not smoothly), so byte count and title extraction arrive
                 * too late to provide meaningful progress. The placeholder with pulsing
                 * dot + client-side timer is the best UX for this API constraint. */
-            } else if (strcmp(delta_type, "signature_delta") == 0 &&
-                       ctx->provider.claude.thinking_block_active) {
-               // Accumulate signature for thinking block (required when sending back to Claude)
-               json_object *signature_obj;
-               if (json_object_object_get_ex(delta, "signature", &signature_obj)) {
-                  const char *sig_chunk = json_object_get_string(signature_obj);
-                  if (sig_chunk) {
-                     size_t sig_len = strlen(sig_chunk);
-                     size_t needed = ctx->provider.claude.thinking_signature_len + sig_len + 1;
-
-                     /* Grow buffer if needed */
-                     if (needed > ctx->provider.claude.thinking_signature_cap) {
-                        size_t new_cap = ctx->provider.claude.thinking_signature_cap;
-                        if (new_cap == 0)
-                           new_cap = LLM_THINKING_SIGNATURE_INITIAL;
-                        while (new_cap < needed)
-                           new_cap *= 2;
-                        char *new_buf = realloc(ctx->provider.claude.thinking_signature, new_cap);
-                        if (!new_buf) {
-                           OLOG_ERROR("Claude: Failed to allocate signature buffer (%zu bytes)",
-                                      new_cap);
-                        } else {
-                           ctx->provider.claude.thinking_signature = new_buf;
-                           ctx->provider.claude.thinking_signature_cap = new_cap;
-                        }
-                     }
-
-                     if (ctx->provider.claude.thinking_signature &&
-                         needed <= ctx->provider.claude.thinking_signature_cap) {
-                        memcpy(ctx->provider.claude.thinking_signature +
-                                   ctx->provider.claude.thinking_signature_len,
-                               sig_chunk, sig_len);
-                        ctx->provider.claude.thinking_signature_len += sig_len;
-                        ctx->provider.claude
-                            .thinking_signature[ctx->provider.claude.thinking_signature_len] = '\0';
-                     }
-                  }
-               }
             }
          }
       }
    } else if (strcmp(type, "content_block_stop") == 0) {
+      llm_claude_capture_stop(&ctx->provider.claude.capture);
       // If we were in a thinking block, finalize it
       if (ctx->provider.claude.thinking_block_active) {
          ctx->provider.claude.thinking_block_active = 0;
          ctx->thinking_active = 0;
-         OLOG_INFO("Claude: Thinking block completed (%zu bytes, signature %zu bytes)",
-                   ctx->thinking_size, ctx->provider.claude.thinking_signature_len);
+         OLOG_INFO("Claude: Thinking block completed (%zu bytes)", ctx->thinking_size);
 
          // Send thinking_end to WebUI
          if (has_ws_session) {
@@ -1270,16 +1235,15 @@ void llm_stream_free(llm_stream_context_t *ctx) {
 
    free(ctx->accumulated_response);
    free(ctx->accumulated_thinking);
-   /* thinking_signature is a heap pointer that lives ONLY in the Claude arm of
-    * the `provider` union; it's allocated solely by the Claude SSE parser.  For
+   /* The block capture holds heap pointers that live ONLY in the Claude arm of
+    * the `provider` union; only the Claude SSE parser fills them.  For
     * OpenAI/OpenRouter/Gemini/local streams the active union member is
-    * openai.tool_args_buffer, whose bytes alias this pointer — a response with
-    * >=2 parallel tool calls writes arg JSON into tool_args_buffer[1], which
-    * overlaps thinking_signature, so freeing it unconditionally hands free() a
-    * pointer made of JSON text → SIGSEGV.  Only free it for actual Claude
-    * streams (matches the parse-routing condition in llm_stream_handle_event). */
+    * openai.tool_args_buffer, whose bytes alias these pointers — freeing them
+    * unconditionally hands free() a pointer made of JSON text → SIGSEGV.  Only
+    * free them for actual Claude streams (matches the parse-routing condition in
+    * llm_stream_handle_event). */
    if (ctx->llm_type != LLM_LOCAL && ctx->cloud_provider == CLOUD_PROVIDER_CLAUDE) {
-      free(ctx->provider.claude.thinking_signature);
+      llm_claude_capture_reset(&ctx->provider.claude.capture);
    }
    free(ctx);
 }
@@ -1385,12 +1349,11 @@ char *llm_stream_get_thinking(llm_stream_context_t *ctx) {
    return strdup(ctx->accumulated_thinking);
 }
 
-char *llm_stream_get_thinking_signature(llm_stream_context_t *ctx) {
-   if (!ctx || ctx->provider.claude.thinking_signature_len == 0) {
+struct json_object *llm_stream_take_claude_content(llm_stream_context_t *ctx) {
+   if (!ctx || ctx->llm_type == LLM_LOCAL || ctx->cloud_provider != CLOUD_PROVIDER_CLAUDE) {
       return NULL;
    }
-
-   return strdup(ctx->provider.claude.thinking_signature);
+   return llm_claude_capture_take(&ctx->provider.claude.capture);
 }
 
 const char *llm_stream_get_response_ref(llm_stream_context_t *ctx) {
@@ -1407,12 +1370,4 @@ const char *llm_stream_get_thinking_ref(llm_stream_context_t *ctx) {
    }
 
    return ctx->accumulated_thinking;
-}
-
-const char *llm_stream_get_thinking_signature_ref(llm_stream_context_t *ctx) {
-   if (!ctx || ctx->provider.claude.thinking_signature_len == 0) {
-      return NULL;
-   }
-
-   return ctx->provider.claude.thinking_signature;
 }

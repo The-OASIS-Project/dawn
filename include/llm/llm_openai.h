@@ -72,36 +72,6 @@ char *llm_openai_chat_completion(struct json_object *conversation_history,
                                  const char *model);
 
 /**
- * @brief OpenAI chat completion with streaming
- *
- * Handles OpenAI-compatible API calls with Server-Sent Events (SSE) streaming.
- * Calls chunk_callback for each incremental text chunk as it arrives.
- * Returns the complete accumulated response when streaming completes.
- *
- * @param conversation_history JSON array of messages (OpenAI format)
- * @param input_text User input text
- * @param vision_images Array of base64 images for vision models (NULL if not used)
- * @param vision_image_sizes Array of image sizes in bytes (NULL if not used)
- * @param vision_image_count Number of images (0 if not used)
- * @param base_url Base URL (cloud: https://api.openai.com, local: http://127.0.0.1:8080)
- * @param api_key API key (NULL for local LLM, required for cloud)
- * @param model Model name (NULL = use config default)
- * @param chunk_callback Function to call for each text chunk
- * @param callback_userdata User context passed to chunk_callback
- * @return Complete response text (caller must free), or NULL on error
- */
-char *llm_openai_chat_completion_streaming(struct json_object *conversation_history,
-                                           const char *input_text,
-                                           const char **vision_images,
-                                           const size_t *vision_image_sizes,
-                                           int vision_image_count,
-                                           const char *base_url,
-                                           const char *api_key,
-                                           const char *model,
-                                           llm_openai_text_chunk_callback chunk_callback,
-                                           void *callback_userdata);
-
-/**
  * @brief Single-shot OpenAI streaming call (no tool execution or recursion)
  *
  * Makes exactly one HTTP call and returns structured results. Does NOT execute

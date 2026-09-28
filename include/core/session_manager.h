@@ -632,22 +632,27 @@ typedef struct session {
    // same worker after dispatch returns (turn-queue serialized) — no lock needed.
    char *cancelled_final_response;
 
-   // Final-answer reasoning stash (SERVER_AUTHORITATIVE_PERSISTENCE §6c-G1 / Phase 2).
-   // The tool loop persists per-tool-iteration reasoning via the persist hook, but the
-   // FINAL answer's reasoning (E3 "AI thought" panel) is dropped server-side — only the
-   // browser client-save carried it.  The tool loop stashes build_reasoning_json() of the
-   // final turn HERE (tool_loop_stash_final_reasoning) at every text-returning path; the
-   // post-dispatch persist (webui_persist_final_answer) takes it and writes it to the
-   // messages.reasoning column + the message_appended fan-out.  Owned by the session;
-   // the consuming caller takes it (sets NULL) + frees.
+   // The final answer's stash, written by the tool loop at every text-returning path
+   // and taken after dispatch (SERVER_AUTHORITATIVE_PERSISTENCE §6c-G1 / Phase 2):
+   //   - reasoning_json: the display-only reasoning (E3 "AI thought" panel), taken by
+   //     the post-dispatch persist (webui_persist_final_answer) for the
+   //     messages.reasoning column + the message_appended fan-out;
+   //   - blocks: the answer's provider-neutral blocks (llm_turn_blocks.h), taken by
+   //     llm_call_finalize when the answer joins the history, so it's replayed with its
+   //     reasoning rather than as bare text.
+   // Owned by the session; the consumer takes (sets NULL) and frees.
    //
    // LIFETIME (differs from will_persist_turn — do NOT "consistency-fix"): WRITTEN during
    // dispatch (inside the tool loop) and READ post-dispatch, so cleared at turn start in
    // llm_call_prepare (a prepare-clear cannot clobber an in-dispatch write).  will_persist_turn
    // is armed BEFORE dispatch, so it must reset in session_begin_turn_flags instead.  This
    // asymmetry is intentional.  No lock (single-writer-in-dispatch / read-post-dispatch,
-   // same discipline as stream_conversation_id).  Freed at session teardown.
-   char *final_reasoning_json;
+   // same discipline as stream_conversation_id).  Cleared together by
+   // session_final_answer_clear() at turn start and at session teardown.
+   struct {
+      char *reasoning_json;
+      struct json_object *blocks;
+   } final_answer;
 
    // Whether THIS turn's step events (tool_call/tool_result) should be persisted
    // to conversation_events and fanned out.  Set at dispatch from the same
@@ -1619,6 +1624,23 @@ void session_clear_history(session_t *session);
  * @return true if appended
  */
 bool session_add_turn_message(session_t *session, const char *role, const char *content);
+
+/**
+ * @brief Append the turn's assistant answer with its blocks
+ *
+ * As session_add_turn_message(session, "assistant", content), with the answer's
+ * provider-neutral blocks (llm_turn_blocks.h) under LLM_TURN_BLOCKS_KEY, so each
+ * provider replays it with its own reasoning.  @p blocks may be NULL (plain text);
+ * the message takes a reference.
+ *
+ * @return true if appended
+ */
+/** Drop the final answer's stash (reasoning + blocks): turn start and teardown. */
+void session_final_answer_clear(session_t *session);
+
+bool session_add_turn_assistant(session_t *session,
+                                const char *content,
+                                struct json_object *blocks);
 
 /** Image variant of session_add_turn_message(); see session_add_message_with_images(). */
 bool session_add_turn_message_with_images(session_t *session,

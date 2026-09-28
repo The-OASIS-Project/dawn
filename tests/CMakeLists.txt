@@ -722,6 +722,7 @@ dawn_add_unit_test(test_messaging_format
 dawn_add_unit_test(test_claude_format
    SOURCES test_claude_format.c
            ${SRC_ROOT}/src/llm/llm_claude_format.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
            ${SRC_ROOT}/src/llm/llm_capabilities.c
            ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/src/llm/llm_model_version.c
@@ -933,6 +934,23 @@ dawn_add_unit_test(test_llm_models_toml
            ${SRC_ROOT}/src/llm/llm_models_toml.c
            ${SRC_ROOT}/src/tools/toml.c
    LIBS    dawn_common unity
+   LABEL   ci)
+
+# Claude content-block capture + provider-neutral turn blocks (replay fidelity).
+dawn_add_unit_test(test_llm_turn_blocks
+   SOURCES test_llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_claude_blocks.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# Chat-completions history preparation: no internal keys or foreign reasoning.
+dawn_add_unit_test(test_openai_history
+   SOURCES test_openai_history.c
+           ${SRC_ROOT}/src/llm/llm_openai_history.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
 # Per-model prompt-cache pricing, against the shipped models.toml.
@@ -1458,6 +1476,8 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_interface.c
            ${SRC_ROOT}/src/llm/llm_local_provider.c
            ${SRC_ROOT}/src/llm/llm_claude.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_claude_blocks.c
            ${SRC_ROOT}/src/llm/llm_claude_betas.c
            ${SRC_ROOT}/src/llm/llm_claude_binding.c
            ${SRC_ROOT}/src/llm/llm_claude_format.c
@@ -1536,6 +1556,8 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_interface.c
            ${SRC_ROOT}/src/llm/llm_local_provider.c
            ${SRC_ROOT}/src/llm/llm_claude.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_claude_blocks.c
            ${SRC_ROOT}/src/llm/llm_claude_betas.c
            ${SRC_ROOT}/src/llm/llm_claude_binding.c
            ${SRC_ROOT}/src/llm/llm_claude_format.c

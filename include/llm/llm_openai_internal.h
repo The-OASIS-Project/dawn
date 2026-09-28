@@ -132,22 +132,6 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
                                     const char *model);
 
 /**
- * @brief Streaming /v1/chat/completions with recursive tool execution.
- *
- * Used by the legacy llm_openai_chat_completion_streaming() wrapper.
- */
-char *llm_openai_cc_streaming(struct json_object *conversation_history,
-                              const char *input_text,
-                              const char **vision_images,
-                              const size_t *vision_image_sizes,
-                              int vision_image_count,
-                              const char *base_url,
-                              const char *api_key,
-                              const char *model,
-                              llm_openai_text_chunk_callback chunk_callback,
-                              void *callback_userdata);
-
-/**
  * @brief Single-shot /v1/chat/completions streaming call (no tool loop).
  *
  * Makes exactly one HTTP call and returns structured results. Does NOT

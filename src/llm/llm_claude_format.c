@@ -36,6 +36,7 @@
 #include "llm/llm_interface.h"
 #include "llm/llm_model_version.h"
 #include "llm/llm_tools.h"
+#include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "utils/string_utils.h"
 #ifdef ENABLE_WEBUI
@@ -577,6 +578,18 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
 
       const char *role = json_object_get_string(role_obj);
 
+      /* An assistant turn with provider-neutral blocks is rendered from them:
+       * its text, tool calls and Anthropic reasoning, exactly as produced. */
+      json_object *rendered_blocks = NULL;
+      json_object *blocks_obj = NULL;
+      if (strcmp(role, "assistant") == 0 &&
+          json_object_object_get_ex(msg, LLM_TURN_BLOCKS_KEY, &blocks_obj)) {
+         rendered_blocks = llm_turn_blocks_render_claude(blocks_obj);
+         if (rendered_blocks) {
+            content_obj = rendered_blocks;
+         }
+      }
+
       // Handle Claude-format assistant messages with tool_use content blocks
       // These need to be filtered to remove orphaned tool_use blocks
       if (strcmp(role, "assistant") == 0 && json_object_is_type(content_obj, json_type_array)) {
@@ -624,6 +637,7 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
          } else {
             json_object_put(filtered_content);
          }
+         json_object_put(rendered_blocks);
          continue;
       }
 

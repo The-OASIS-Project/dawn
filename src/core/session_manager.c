@@ -39,6 +39,7 @@
 #include "llm/llm_command_parser.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
+#include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "memory/memory_extraction.h"
 #include "utils/string_utils.h"
@@ -322,8 +323,7 @@ static void session_free(session_t *session) {
    session->cancelled_final_response = NULL;
 
    // Free any unconsumed final-answer reasoning stash (SERVER_AUTHORITATIVE §6c-G1)
-   free(session->final_reasoning_json);
-   session->final_reasoning_json = NULL;
+   session_final_answer_clear(session);
 
    // Free async compaction resources
    if (session->async_compact.snapshot_last) {
@@ -1151,7 +1151,7 @@ void session_destroy(uint32_t session_id) {
          snprintf(session_id_str, sizeof(session_id_str), "ws_%u", session->session_id);
 
          /* The snapshot has provider state stripped (see
-          * llm_history_strip_provider_state); extraction copies it again. */
+          * llm_history_strip_internal); extraction copies it again. */
          memory_extraction_fallback_t fb;
          memory_extraction_build_fallback(session, &fb);
          memory_trigger_extraction(session->metrics.user_id, conv_id, session_id_str, clean,
@@ -1581,7 +1581,7 @@ int session_save_voice_conversation(session_t *session, int64_t *conv_id_out) {
     * memory-extraction LLM (which may be Claude/Gemini/local).  Extraction
     * starts after the lock is released: building its fallback reads the LLM
     * settings under llm_config_mutex, never held together with this one. */
-   struct json_object *history_copy = g_config.memory.enabled ? llm_history_strip_provider_state(
+   struct json_object *history_copy = g_config.memory.enabled ? llm_history_strip_internal(
                                                                     session->conversation_history)
                                                               : NULL;
 
@@ -2191,8 +2191,8 @@ bool session_replace_last_message_content(session_t *session,
          struct json_object *content_obj = NULL;
          if (json_object_object_get_ex(msg, "content", &content_obj) && content_obj &&
              json_object_is_type(content_obj, json_type_string)) {
-            json_object_object_del(msg, "content");
-            json_object_object_add(msg, "content", json_object_new_string(new_content));
+            /* Text and blocks together: no provider replays the old text. */
+            llm_turn_message_set_text(msg, new_content);
             replaced = true;
          }
          break;

@@ -35,6 +35,7 @@
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "llm/llm_tools.h"
+#include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "utils/string_utils.h"
 
@@ -194,7 +195,11 @@ static void append_message_locked(session_t *session,
    }
 }
 
-static bool add_message_impl(session_t *session, const char *role, const char *content, bool turn) {
+static bool add_message_impl(session_t *session,
+                             const char *role,
+                             const char *content,
+                             bool turn,
+                             struct json_object *blocks) {
    if (!session || !role || !content) {
       return false;
    }
@@ -229,6 +234,9 @@ static bool add_message_impl(session_t *session, const char *role, const char *c
 
    json_object_object_add(message, "role", json_object_new_string(role));
    json_object_object_add(message, "content", json_object_new_string(content));
+   if (blocks) {
+      json_object_object_add(message, LLM_TURN_BLOCKS_KEY, json_object_get(blocks));
+   }
 
    if (!turn && session_turn_defers_writes_locked(session)) {
       /* Only the turn writes the history it is serializing; another thread has
@@ -322,11 +330,27 @@ bool session_stop_turn(session_t *session, const char *note) {
 }
 
 void session_add_message(session_t *session, const char *role, const char *content) {
-   (void)add_message_impl(session, role, content, false);
+   (void)add_message_impl(session, role, content, false, NULL);
 }
 
 bool session_add_turn_message(session_t *session, const char *role, const char *content) {
-   return add_message_impl(session, role, content, true);
+   return add_message_impl(session, role, content, true, NULL);
+}
+
+void session_final_answer_clear(session_t *session) {
+   if (!session) {
+      return;
+   }
+   free(session->final_answer.reasoning_json);
+   session->final_answer.reasoning_json = NULL;
+   json_object_put(session->final_answer.blocks);
+   session->final_answer.blocks = NULL;
+}
+
+bool session_add_turn_assistant(session_t *session,
+                                const char *content,
+                                struct json_object *blocks) {
+   return add_message_impl(session, "assistant", content, true, blocks);
 }
 
 
@@ -516,7 +540,7 @@ static bool add_message_with_images_impl(session_t *session,
 
    /* No images? Fall back to simple text message */
    if (!vision_images || vision_image_count <= 0) {
-      return add_message_impl(session, role, text, turn);
+      return add_message_impl(session, role, text, turn, NULL);
    }
 
    pthread_mutex_lock(&session->history_mutex);
@@ -655,7 +679,7 @@ struct json_object *session_snapshot_history(session_t *session,
    pthread_mutex_lock(&session->history_mutex);
    struct json_object *copy = NULL;
    if (session->conversation_history) {
-      copy = llm_history_strip_provider_state(session->conversation_history);
+      copy = llm_history_strip_internal(session->conversation_history);
    }
    if (conv_out) {
       *conv_out = atomic_load(&session->history_conversation_id);

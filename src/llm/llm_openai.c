@@ -206,29 +206,6 @@ char *llm_openai_chat_completion(struct json_object *conversation_history,
                                         model);
 }
 
-char *llm_openai_chat_completion_streaming(struct json_object *conversation_history,
-                                           const char *input_text,
-                                           const char **vision_images,
-                                           const size_t *vision_image_sizes,
-                                           int vision_image_count,
-                                           const char *base_url,
-                                           const char *api_key,
-                                           const char *model,
-                                           llm_openai_text_chunk_callback chunk_callback,
-                                           void *callback_userdata) {
-   if (should_dispatch_to_responses_api(api_key, base_url, model)) {
-      /* Legacy streaming entry (the Claude->OpenAI fallback path). Reuse the
-       * streaming single-shot for Responses-only models, forwarding the real TTS
-       * chunk sink so tokens still stream to the caller. */
-      return llm_openai_single_shot_collect_text(conversation_history, input_text, vision_images,
-                                                 vision_image_sizes, vision_image_count, base_url,
-                                                 api_key, model, chunk_callback, callback_userdata);
-   }
-   return llm_openai_cc_streaming(conversation_history, input_text, vision_images,
-                                  vision_image_sizes, vision_image_count, base_url, api_key, model,
-                                  chunk_callback, callback_userdata);
-}
-
 int llm_openai_streaming_single_shot(struct json_object *conversation_history,
                                      const char *input_text,
                                      const char **vision_images,

@@ -190,7 +190,7 @@ struct session; /* forward decl — avoids pulling session_manager.h into this l
  * @brief The single server-authoritative "persist one final assistant answer" seam
  *        (SERVER_AUTHORITATIVE_PERSISTENCE_DESIGN, Phase 2, arch HIGH-1).
  *
- * Splices the session's accumulated `pending_visual` + `final_reasoning_json` — TAKING
+ * Splices the session's accumulated `pending_visual` + `final_answer.reasoning_json` — TAKING
  * ownership of BOTH from @p session — into @p body, writes ONE assistant row to @p conv_id,
  * promotes the reply body's image markers to PERMANENT retention, stamps the in-memory
  * history id, and fans out `message_appended` stamped with the turn's `current_stream_id`

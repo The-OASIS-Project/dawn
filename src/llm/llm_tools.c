@@ -2565,34 +2565,6 @@ int llm_tools_build_disabled_hint(bool is_remote, char *buffer, size_t buffer_si
    return len;
 }
 
-struct json_object *llm_history_strip_provider_state(struct json_object *history) {
-   if (!history || json_object_get_type(history) != json_type_array) {
-      return NULL;
-   }
-
-   /* Deep-copy via json-c's deep_copy (single pass, no serializer round-trip)
-    * then strip transient fields from each message. */
-   struct json_object *copy = NULL;
-   if (json_object_deep_copy(history, &copy, NULL) != 0 || !copy) {
-      if (copy)
-         json_object_put(copy);
-      return NULL;
-   }
-   if (json_object_get_type(copy) != json_type_array) {
-      json_object_put(copy);
-      return NULL;
-   }
-
-   int n = json_object_array_length(copy);
-   for (int i = 0; i < n; i++) {
-      struct json_object *msg = json_object_array_get_idx(copy, i);
-      if (msg && json_object_get_type(msg) == json_type_object) {
-         json_object_object_del(msg, "_provider_state");
-      }
-   }
-   return copy;
-}
-
 #define VISION_STRIP_TEXT_BUF_MAX 8192
 
 static bool is_vision_content_block(struct json_object *block) {
@@ -2714,9 +2686,9 @@ void llm_tool_response_free(llm_tool_response_t *response) {
          free(response->thinking_content);
          response->thinking_content = NULL;
       }
-      if (response->thinking_signature) {
-         free(response->thinking_signature);
-         response->thinking_signature = NULL;
+      if (response->blocks) {
+         json_object_put(response->blocks);
+         response->blocks = NULL;
       }
       if (response->response_id) {
          free(response->response_id);

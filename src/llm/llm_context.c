@@ -48,6 +48,7 @@
 #include "llm/llm_models_toml.h"
 #include "llm/llm_pricing.h"
 #include "llm/llm_tools.h"
+#include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "tools/toml.h"
 #include "tts/text_to_speech.h"
@@ -1073,7 +1074,7 @@ int llm_context_save_conversation(uint32_t session_id,
 
    /* Strip provider-private fields (encrypted reasoning blobs etc.) before
     * writing to disk — they're session-bound and must not be persisted. */
-   struct json_object *sanitized = llm_history_strip_provider_state(history);
+   struct json_object *sanitized = llm_history_strip_internal(history);
    if (!sanitized) {
       OLOG_ERROR("llm_context: Failed to strip provider state — skipping save to avoid "
                  "persisting session-bound fields");
@@ -1209,6 +1210,10 @@ static int estimate_tokens_range(struct json_object *history, int start_idx, int
       struct json_object *msg = json_object_array_get_idx(history, i);
       struct json_object *content_obj = NULL;
 
+      /* Reasoning a turn replays (a Claude answer's thinking) counts toward
+       * the next request's context too. */
+      total_chars += llm_turn_message_reasoning_chars(msg);
+
       if (json_object_object_get_ex(msg, "content", &content_obj)) {
          if (json_object_is_type(content_obj, json_type_string)) {
             const char *content = json_object_get_string(content_obj);
@@ -1326,7 +1331,7 @@ static char *compact_with_llm(struct json_object *to_summarize,
                               llm_type_t type,
                               cloud_provider_t provider,
                               const char *model) {
-   struct json_object *clean = llm_history_strip_provider_state(to_summarize);
+   struct json_object *clean = llm_history_strip_internal(to_summarize);
    /* Persisted tool-captured images (see llm_tools_add_results_openai/claude)
     * would otherwise get JSON-serialized whole below — hundreds of KB of
     * base64 shipped as literal prompt text to the summarizer for zero

@@ -26,17 +26,9 @@
 #include <sys/time.h>
 
 #include "llm/llm_claude_binding.h"
+#include "llm/llm_claude_blocks.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
-
-/**
- * @brief Initial size for Claude thinking signature buffer
- *
- * Claude's extended thinking returns a cryptographic signature that must be
- * preserved and sent back in conversation history. The buffer grows dynamically
- * since signature sizes vary across model versions.
- */
-#define LLM_THINKING_SIGNATURE_INITIAL 8192
 
 /**
  * @brief Callback function type for text chunks from LLM stream
@@ -118,10 +110,8 @@ typedef struct {
    int visual_progress_active; /**< Notify frontend when render_visual generation starts */
 
    /* Thinking block tracking (extended thinking) */
-   int thinking_block_active;     /**< Currently in a thinking block */
-   char *thinking_signature;      /**< Accumulated signature (heap, grows as needed) */
-   size_t thinking_signature_len; /**< Length of accumulated signature */
-   size_t thinking_signature_cap; /**< Capacity of signature buffer */
+   int thinking_block_active;    /**< Currently in a thinking block */
+   llm_claude_capture_t capture; /**< Every content block, in order, as sent (the turn's replay) */
 } claude_stream_state_t;
 
 /**
@@ -320,15 +310,13 @@ int llm_stream_has_thinking(llm_stream_context_t *ctx);
 char *llm_stream_get_thinking(llm_stream_context_t *ctx);
 
 /**
- * @brief Get the thinking signature (Claude extended thinking)
+ * @brief Take a Claude stream's content blocks (in order, exactly as sent)
  *
- * Returns the signature that was provided with the thinking block.
- * This must be included when sending thinking content back to Claude.
- *
- * @param ctx Stream context
- * @return Signature string (caller must free), or NULL if no signature
+ * The response as the model produced it: thinking blocks with their own
+ * signatures, redacted thinking, text, tool_use.  NULL for non-Claude streams
+ * or an empty response.  Caller owns the array.
  */
-char *llm_stream_get_thinking_signature(llm_stream_context_t *ctx);
+struct json_object *llm_stream_take_claude_content(llm_stream_context_t *ctx);
 
 /**
  * @brief Get response without allocation (reference to internal buffer)
@@ -352,15 +340,5 @@ const char *llm_stream_get_response_ref(llm_stream_context_t *ctx);
  */
 const char *llm_stream_get_thinking_ref(llm_stream_context_t *ctx);
 
-/**
- * @brief Get thinking signature without allocation (reference to internal buffer)
- *
- * Returns a pointer to the internal signature buffer. Caller must NOT free.
- * Valid only while stream context exists.
- *
- * @param ctx Stream context
- * @return Signature string (do NOT free), or NULL if no signature
- */
-const char *llm_stream_get_thinking_signature_ref(llm_stream_context_t *ctx);
 
 #endif  // LLM_STREAMING_H
