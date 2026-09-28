@@ -32,6 +32,7 @@
 #include "llm/llm_command_parser.h"
 #include "llm/llm_interface.h"
 #include "logging.h"
+#include "memory/memory_history_loader.h"
 #include "utils/string_utils.h"
 #include "webui/webui_handlers.h"
 #include "webui/webui_image_rehydrate.h"
@@ -185,16 +186,12 @@ static json_object *webui_build_conversation_context(int user_id,
       if (!all_msgs) {
          return NULL;
       }
-      int rc;
-      if (conv->context_watermark_msg_id > 0) {
-         /* v67: bound restored context to messages after the compaction watermark;
-          * the injected summary (below) stands in for the compacted prefix. The
-          * full transcript is still shown in the UI (display load is unbounded). */
-         rc = conv_db_get_messages_after(conv_id, user_id, conv->context_watermark_msg_id,
-                                         webui_session_restore_msg_cb, all_msgs);
-      } else {
-         rc = conv_db_get_messages(conv_id, user_id, webui_session_restore_msg_cb, all_msgs);
-      }
+      /* v67: bound restored context to messages after the compaction watermark;
+       * the injected summary (below) stands in for the compacted prefix. The
+       * full transcript is still shown in the UI (display load is unbounded). */
+      const int rc = memory_history_load_rows(conv_id, user_id, conv->context_watermark_msg_id,
+                                              webui_session_restore_msg_cb, all_msgs, all_msgs,
+                                              NULL);
       if (rc != AUTH_DB_SUCCESS) {
          json_object_put(all_msgs);
          return NULL;

@@ -335,6 +335,120 @@ static void test_final_answer_replays_its_blocks(void) {
 
 static toml_table_t *s_models;
 
+/* Results whose call isn't in the message before them (a compaction point
+ * inside a tool exchange): sent as notes, never as tool_result blocks. */
+static void test_results_without_their_call_become_notes(void) {
+   json_object *conv = json_object_new_array();
+   json_object *summary = json_object_new_object();
+   json_object_object_add(summary, "role", json_object_new_string("assistant"));
+   json_object_object_add(summary, "content", json_object_new_string("Earlier: summarized."));
+   json_object_array_add(conv, summary);
+   add_tool_result(conv, 5); /* its call is in the summary */
+   json_object_array_add(conv, assistant_with_tool_calls(1));
+   add_tool_result(conv, 0); /* answered properly */
+   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-sonnet-4-6", 0);
+   TEST_ASSERT_NOT_NULL(req);
+   const char *wire = json_object_to_json_string(req);
+   TEST_ASSERT_NULL(strstr(wire, "\"call_05\""));
+   TEST_ASSERT_NOT_NULL(strstr(wire, "Earlier tool result: Forgotten 1 fact"));
+   TEST_ASSERT_TRUE(strstr(wire, "\"tool_use_id\": \"call_00\"") ||
+                    strstr(wire, "\"tool_use_id\":\"call_00\""));
+   json_object_put(req);
+   json_object_put(conv);
+}
+
+/* Pairs Claude accepts, whatever the history: a call whose result isn't in
+ * the next message is dropped (not left unanswered); results come before any
+ * other content in their message. */
+static void test_calls_and_results_are_paired(void) {
+   json_object *conv = json_object_new_array();
+   json_object_array_add(conv, assistant_with_tool_calls(2)); /* call_00, call_01 */
+   add_tool_result(conv, 0);
+   /* A tool message without an id: the formatter turns it into an assistant
+    * note, which separates call_01 from its result. */
+   json_object *lost = json_object_new_object();
+   json_object_object_add(lost, "role", json_object_new_string("tool"));
+   json_object_object_add(lost, "content", json_object_new_string("stray"));
+   json_object_array_add(conv, lost);
+   add_tool_result(conv, 1);
+   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-sonnet-4-6", 0);
+   TEST_ASSERT_NOT_NULL(req);
+   json_object *messages = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(req, "messages", &messages));
+   /* Every tool_use is answered in the next message, every tool_result answers
+    * one in the message before, and results lead their message. */
+   const size_t n = json_object_array_length(messages);
+   for (size_t i = 0; i < n; i++) {
+      json_object *m = json_object_array_get_idx(messages, i), *parts = NULL;
+      if (!json_object_object_get_ex(m, "content", &parts) ||
+          !json_object_is_type(parts, json_type_array)) {
+         continue;
+      }
+      bool other_seen = false;
+      const size_t k = json_object_array_length(parts);
+      for (size_t j = 0; j < k; j++) {
+         json_object *p = json_object_array_get_idx(parts, j), *t = NULL, *id = NULL;
+         json_object_object_get_ex(p, "type", &t);
+         const char *type = json_object_get_string(t);
+         if (strcmp(type, "tool_use") == 0) {
+            TEST_ASSERT_TRUE(json_object_object_get_ex(p, "id", &id));
+            TEST_ASSERT_TRUE(i + 1 < n);
+            TEST_ASSERT_NOT_NULL(
+                strstr(json_object_to_json_string(json_object_array_get_idx(messages, i + 1)),
+                       json_object_get_string(id)));
+         } else if (strcmp(type, "tool_result") == 0) {
+            TEST_ASSERT_FALSE(other_seen);
+            TEST_ASSERT_TRUE(json_object_object_get_ex(p, "tool_use_id", &id));
+            TEST_ASSERT_TRUE(i > 0);
+            TEST_ASSERT_NOT_NULL(
+                strstr(json_object_to_json_string(json_object_array_get_idx(messages, i - 1)),
+                       json_object_get_string(id)));
+         } else {
+            other_seen = true;
+         }
+      }
+   }
+   json_object_put(req);
+   json_object_put(conv);
+}
+
+/* A turn left with only its reasoning after its unanswered calls are dropped
+ * says what happened instead; a user's text before a tool result stays. */
+static void test_reasoning_only_turn_and_user_text(void) {
+   json_object *conv = json_object_new_array();
+   json_object *a = json_object_new_object();
+   json_object_object_add(a, "role", json_object_new_string("assistant"));
+   json_object *content = json_object_new_array();
+   json_object *th = json_object_new_object();
+   json_object_object_add(th, "type", json_object_new_string("thinking"));
+   json_object_object_add(th, "thinking", json_object_new_string("plan"));
+   json_object_object_add(th, "signature", json_object_new_string("SIG"));
+   json_object_array_add(content, th);
+   json_object *use = json_object_new_object();
+   json_object_object_add(use, "type", json_object_new_string("tool_use"));
+   json_object_object_add(use, "id", json_object_new_string("toolu_x"));
+   json_object_object_add(use, "name", json_object_new_string("memory"));
+   json_object_object_add(use, "input", json_object_new_object());
+   json_object_array_add(content, use);
+   json_object_object_add(a, "content", content);
+   json_object_array_add(conv, a);
+   json_object *u = json_object_new_object();
+   json_object_object_add(u, "role", json_object_new_string("user"));
+   json_object_object_add(u, "content", json_object_new_string("my question stays"));
+   json_object_array_add(conv, u);
+   add_tool_result(conv, 3); /* follows the user's text; its call isn't anywhere */
+
+   json_object *req = convert_to_claude_format(conv, NULL, NULL, NULL, 0, "claude-sonnet-4-6", 0);
+   TEST_ASSERT_NOT_NULL(req);
+   const char *wire = json_object_to_json_string(req);
+   TEST_ASSERT_NULL(strstr(wire, "SIG"));
+   TEST_ASSERT_NULL(strstr(wire, "toolu_x"));
+   TEST_ASSERT_NOT_NULL(strstr(wire, "Tool call not completed"));
+   TEST_ASSERT_NOT_NULL(strstr(wire, "my question stays"));
+   json_object_put(req);
+   json_object_put(conv);
+}
+
 int main(void) {
    char err[256];
    FILE *f = fopen(MODELS_TOML_PATH, "r");
@@ -353,5 +467,8 @@ int main(void) {
    RUN_TEST(test_utility_call_gets_the_cheapest_legal_setting);
    RUN_TEST(test_tool_use_without_thinking_keeps_reasoning);
    RUN_TEST(test_final_answer_replays_its_blocks);
+   RUN_TEST(test_results_without_their_call_become_notes);
+   RUN_TEST(test_calls_and_results_are_paired);
+   RUN_TEST(test_reasoning_only_turn_and_user_text);
    return UNITY_END();
 }

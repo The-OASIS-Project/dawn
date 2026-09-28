@@ -32,9 +32,33 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "auth/auth_db.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/**
+ * @brief Load a conversation's context rows past its compaction point
+ *
+ * The one way a conversation's rows are read back into an LLM context: every
+ * row when @p watermark is 0, else the rows after it.  Each row goes through
+ * @p cb (which appends it to @p rows).  Past a compaction point, tool results
+ * at the start of what was loaded answer a call inside the summary; they are
+ * dropped (llm_history_drop_leading_results), on every such load.
+ *
+ * @param rows        The array @p cb appends to (the new rows start at its
+ *                    current length)
+ * @param chars_out   Receives the length of dropped rows' text (may be NULL)
+ * @return AUTH_DB_SUCCESS, or the read's error
+ */
+int memory_history_load_rows(int64_t conv_id,
+                             int user_id,
+                             int64_t watermark,
+                             message_callback_t cb,
+                             void *ctx,
+                             struct json_object *rows,
+                             size_t *chars_out);
 
 /**
  * @brief Reconstruct conversation history as a json_object array.

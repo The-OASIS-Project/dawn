@@ -516,7 +516,8 @@ dawn_add_unit_test(test_memory_embeddings
 
 dawn_add_unit_test(test_context_compaction
    SOURCES test_context_compaction.c test_context_compaction_impl.c
-   LIBS    unity ${JSONC_LIBRARIES}
+           ${SRC_ROOT}/src/llm/llm_compaction_range.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_time_query_parser
@@ -1279,6 +1280,16 @@ dawn_add_unit_test(test_research_allowlist
    LIBS    unity
    LABEL   ci)
 
+# A compaction point recorded inside a tool exchange reloads cleanly (real
+# auth_db, in memory).
+dawn_add_unit_test(test_history_reload_watermark
+   SOURCES test_history_reload_watermark.c
+           ${SRC_ROOT}/src/memory/memory_history_loader.c
+           ${SRC_ROOT}/src/llm/llm_compaction_range.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # Pure string transform shared by six history-hydration callers  (json-c is for
 # the rest of the TU, not the helper under test) (resume,
 # reinvoke, messaging drift reload, ...).  Links the loader against the real
@@ -1287,6 +1298,7 @@ dawn_add_unit_test(test_research_allowlist
 dawn_add_unit_test(test_history_strip_markers
    SOURCES test_history_strip_markers.c
            ${SRC_ROOT}/src/memory/memory_history_loader.c
+           ${SRC_ROOT}/src/llm/llm_compaction_range.c
            ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
@@ -1527,6 +1539,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
            ${SRC_ROOT}/src/llm/llm_claude_parts.c
            ${SRC_ROOT}/src/llm/llm_context.c
+           ${SRC_ROOT}/src/llm/llm_compaction_range.c
            ${SRC_ROOT}/src/llm/llm_models_toml.c
            ${SRC_ROOT}/src/llm/llm_cache_monitor.c
            ${SRC_ROOT}/src/llm/llm_context_merge.c
@@ -1611,6 +1624,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
            ${SRC_ROOT}/src/llm/llm_claude_parts.c
            ${SRC_ROOT}/src/llm/llm_context.c
+           ${SRC_ROOT}/src/llm/llm_compaction_range.c
            ${SRC_ROOT}/src/llm/llm_models_toml.c
            ${SRC_ROOT}/src/llm/llm_cache_monitor.c
            ${SRC_ROOT}/src/llm/llm_context_merge.c

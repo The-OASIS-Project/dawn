@@ -22,7 +22,9 @@
 #include "llm/llm_turn_blocks.h"
 
 #include <json-c/json.h>
+#include <stdbool.h>
 #include <string.h>
+
 
 static const char *str_of(struct json_object *obj, const char *key) {
    struct json_object *v = NULL;

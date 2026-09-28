@@ -42,6 +42,7 @@
 #include "dawn_error.h"
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_capabilities.h"
+#include "llm/llm_compaction_range.h"
 #include "llm/llm_context_merge.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_local_provider.h"
@@ -1105,65 +1106,6 @@ int llm_context_save_conversation(uint32_t session_id,
    return 0;
 }
 
-/**
- * @brief Check if a message is part of a tool call/result exchange
- *
- * Detects tool-related messages in both OpenAI and Claude history formats:
- * - OpenAI: role "tool", or assistant with "tool_calls" field
- * - Claude: assistant content with "tool_use" blocks, user content with "tool_result" blocks
- */
-static bool is_tool_message(struct json_object *msg) {
-   struct json_object *role_obj = NULL;
-   if (!json_object_object_get_ex(msg, "role", &role_obj)) {
-      return false;
-   }
-   const char *role = json_object_get_string(role_obj);
-
-   /* OpenAI: tool result message */
-   if (strcmp(role, "tool") == 0) {
-      return true;
-   }
-
-   /* Assistant with tool_calls (OpenAI) or tool_use content (Claude) */
-   if (strcmp(role, "assistant") == 0) {
-      if (json_object_object_get_ex(msg, "tool_calls", NULL)) {
-         return true;
-      }
-      struct json_object *content = NULL;
-      if (json_object_object_get_ex(msg, "content", &content) &&
-          json_object_is_type(content, json_type_array)) {
-         int len = json_object_array_length(content);
-         for (int i = 0; i < len; i++) {
-            struct json_object *block = json_object_array_get_idx(content, i);
-            struct json_object *type_val = NULL;
-            if (json_object_object_get_ex(block, "type", &type_val) &&
-                strcmp(json_object_get_string(type_val), "tool_use") == 0) {
-               return true;
-            }
-         }
-      }
-      return false;
-   }
-
-   /* User with tool_result content (Claude format) */
-   if (strcmp(role, "user") == 0) {
-      struct json_object *content = NULL;
-      if (json_object_object_get_ex(msg, "content", &content) &&
-          json_object_is_type(content, json_type_array)) {
-         int len = json_object_array_length(content);
-         for (int i = 0; i < len; i++) {
-            struct json_object *block = json_object_array_get_idx(content, i);
-            struct json_object *type_val = NULL;
-            if (json_object_object_get_ex(block, "type", &type_val) &&
-                strcmp(json_object_get_string(type_val), "tool_result") == 0) {
-               return true;
-            }
-         }
-      }
-   }
-
-   return false;
-}
 
 /* =============================================================================
  * Compaction Helpers (Phase 1 LCM — escalation levels)
@@ -1191,6 +1133,52 @@ static int calculate_compaction_target(int context_size, float threshold) {
  * history. 8000 chars (~2000 tokens) is a generous flat upper bound for a
  * single real capture at typical camera resolutions. */
 #define VISION_IMAGE_TOKEN_ESTIMATE_CHARS 8000
+
+/* Rows past the last stamped id that belong to a summarized tool exchange. */
+typedef struct {
+   struct json_object *ids;
+   int64_t last;
+   int64_t below; /* the kept part's first row id (0 = unknown) */
+} tail_rows_t;
+
+static int tail_row_cb(const conversation_message_t *msg, void *ctx) {
+   tail_rows_t *t = (tail_rows_t *)ctx;
+   if ((t->below == 0 || msg->id < t->below) &&
+       llm_compaction_row_in_calls(msg->role, msg->tool_calls, msg->tool_call_id, t->ids) &&
+       msg->id > t->last) {
+      t->last = msg->id;
+   }
+   return 0;
+}
+
+/**
+ * @brief @p last_id raised over the rows of the summarized tool exchanges
+ *
+ * A live session's tool calls and results carry no row id, so a summarized
+ * range can end past its last stamped id.  Their rows are found by call id
+ * (llm_compaction_tail_call_ids), never by position: a conversation can hold
+ * rows written outside the session in between (a research result, a
+ * scheduled message), and those were never summarized.
+ */
+static int64_t extend_over_tail_calls(int64_t conv_id,
+                                      struct json_object *history,
+                                      int start_idx,
+                                      int end_idx,
+                                      int64_t last_id) {
+   session_t *s = session_get_command_context();
+   const int user_id = s ? s->metrics.user_id : 0;
+   if (last_id <= 0 || user_id <= 0) {
+      return last_id;
+   }
+   tail_rows_t t = { .ids = llm_compaction_tail_call_ids(history, start_idx, end_idx),
+                     .last = last_id,
+                     .below = llm_compaction_kept_first_id(history, end_idx) };
+   if (t.ids && json_object_array_length(t.ids) > 0) {
+      (void)conv_db_get_messages_after(conv_id, user_id, last_id, tail_row_cb, &t);
+   }
+   json_object_put(t.ids);
+   return t.last;
+}
 
 static int estimate_tokens_range(struct json_object *history, int start_idx, int end_idx) {
    if (!history || !json_object_is_type(history, json_type_array))
@@ -1543,26 +1531,8 @@ int llm_context_compact(uint32_t session_id,
    }
    int start_idx = n_sys;
 
-   /* Keep last N exchanges (user + assistant pairs) */
-   int keep_messages = LLM_CONTEXT_KEEP_EXCHANGES * 2;
-   int end_idx = history_len - keep_messages;
-
-   /* Expand keep window backward to preserve complete tool call sequences.
-    * The LLM needs to see: [user question] + [assistant(tool_calls)] + [tool results]
-    * to continue coherently. Walk backward past all tool messages, then include
-    * the preceding user message that triggered the tool exchange. */
-   while (end_idx > start_idx && is_tool_message(json_object_array_get_idx(history, end_idx - 1))) {
-      end_idx--;
-   }
-   /* Include the user message that triggered the tool call sequence */
-   if (end_idx > start_idx) {
-      struct json_object *prev = json_object_array_get_idx(history, end_idx - 1);
-      struct json_object *prev_role = NULL;
-      if (json_object_object_get_ex(prev, "role", &prev_role) &&
-          strcmp(json_object_get_string(prev_role), "user") == 0) {
-         end_idx--;
-      }
-   }
+   /* Keep the last exchanges, starting at a turn (llm_compaction_range.h). */
+   int end_idx = llm_compaction_keep_start(history, start_idx, LLM_CONTEXT_KEEP_EXCHANGES * 2);
 
    if (end_idx <= start_idx) {
       /* Tool-call expansion consumed the entire summarizable window.
@@ -1731,21 +1701,11 @@ int llm_context_compact(uint32_t session_id,
       json_object_array_add(new_history, json_object_get(json_object_array_get_idx(history, i)));
    }
 
-   /* Resolve message IDs for the summarized range (LCM Phase 3): the database
-    * row ids restored and stamped on the messages themselves. */
+   /* The summarized range's database rows (LCM Phase 3). */
    int64_t first_msg_id = 0, last_msg_id = 0;
    if (conv_id > 0) {
-      for (int i = start_idx; i < end_idx; i++) {
-         struct json_object *id_obj = NULL;
-         if (json_object_object_get_ex(json_object_array_get_idx(history, i), "id", &id_obj) &&
-             json_object_get_int64(id_obj) > 0) {
-            const int64_t id = json_object_get_int64(id_obj);
-            if (first_msg_id == 0) {
-               first_msg_id = id;
-            }
-            last_msg_id = id;
-         }
-      }
+      llm_compaction_summary_ids(history, start_idx, end_idx, &first_msg_id, &last_msg_id);
+      last_msg_id = extend_over_tail_calls(conv_id, history, start_idx, end_idx, last_msg_id);
    }
 
    /* Create summary node (LCM Phase 4 — hierarchical summaries) */

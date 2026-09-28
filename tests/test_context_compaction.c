@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "llm/llm_compaction_range.h"
 #include "llm/llm_context.h"
 #include "unity.h"
 
@@ -231,6 +232,131 @@ static void test_level_ordering(void) {
  * Main
  * ============================================================================= */
 
+
+/* =============================================================================
+ * Compaction range: where the kept part starts, and which rows it summarizes
+ * ============================================================================= */
+
+static struct json_object *with_id(struct json_object *msg, int64_t id) {
+   json_object_object_add(msg, "id", json_object_new_int64(id));
+   return msg;
+}
+
+/* A Claude-shaped assistant tool call, or its results message (no row ids:
+ * a live session doesn't stamp them). */
+static struct json_object *claude_call(const char *id) {
+   struct json_object *m = json_object_new_object(), *c = json_object_new_array(),
+                      *b = json_object_new_object();
+   json_object_object_add(m, "role", json_object_new_string("assistant"));
+   json_object_object_add(b, "type", json_object_new_string("tool_use"));
+   json_object_object_add(b, "id", json_object_new_string(id));
+   json_object_array_add(c, b);
+   json_object_object_add(m, "content", c);
+   return m;
+}
+
+static struct json_object *claude_results(const char *id, int n) {
+   struct json_object *m = json_object_new_object(), *c = json_object_new_array();
+   json_object_object_add(m, "role", json_object_new_string("user"));
+   for (int i = 0; i < n; i++) {
+      struct json_object *b = json_object_new_object();
+      json_object_object_add(b, "type", json_object_new_string("tool_result"));
+      json_object_object_add(b, "tool_use_id", json_object_new_string(id));
+      json_object_array_add(c, b);
+   }
+   json_object_object_add(m, "content", c);
+   return m;
+}
+
+/* A turn with parallel Claude results: the kept part starts at its question,
+ * and the summarized rows end right before that question's row, past the
+ * turn's unstamped calls and results (rows 101-107). */
+static void test_compaction_range_claude_tool_turn(void) {
+   struct json_object *h = json_object_new_array();
+   json_object_array_add(h, make_msg("system", "s"));
+   json_object_array_add(h, with_id(make_msg("user", "q1"), 90));
+   json_object_array_add(h, with_id(make_msg("assistant", "a1"), 91));
+   json_object_array_add(h, with_id(make_msg("user", "q2"), 100));
+   json_object_array_add(h, claude_call("toolu_1"));
+   json_object_array_add(h, claude_results("toolu_1", 7));
+   json_object_array_add(h, with_id(make_msg("user", "q3"), 110)); /* 6 */
+   json_object_array_add(h, claude_call("toolu_2"));
+   json_object_array_add(h, claude_results("toolu_2", 1));
+   json_object_array_add(h, make_msg("assistant", "a3"));
+
+   /* Keeping 3 would start inside q3's tool exchange: it moves back to q3. */
+   const int kept = llm_compaction_keep_start(h, 1, 3);
+   TEST_ASSERT_EQUAL_INT(6, kept);
+
+   int64_t first = 0, last = 0;
+   llm_compaction_summary_ids(h, 1, kept, &first, &last);
+   TEST_ASSERT_EQUAL_INT64(90, first);
+   TEST_ASSERT_EQUAL_INT64(100, last); /* q2's call and results carry no id */
+
+   /* Those are found by call id: q2's exchange, not q3's (kept). */
+   struct json_object *ids = llm_compaction_tail_call_ids(h, 1, kept);
+   TEST_ASSERT_NOT_NULL(ids);
+   TEST_ASSERT_TRUE(json_object_array_length(ids) > 0);
+   TEST_ASSERT_TRUE(llm_compaction_row_in_calls("tool", NULL, "toolu_1", ids));
+   TEST_ASSERT_TRUE(llm_compaction_row_in_calls(
+       "assistant", "[{\"id\":\"toolu_1\",\"type\":\"function\"}]", NULL, ids));
+   /* A row written outside the session (a research result) isn't one of them. */
+   TEST_ASSERT_FALSE(llm_compaction_row_in_calls("assistant", NULL, NULL, ids));
+   TEST_ASSERT_FALSE(llm_compaction_row_in_calls("tool", NULL, "toolu_9", ids));
+   /* An id that is only part of another's doesn't match. */
+   TEST_ASSERT_FALSE(llm_compaction_row_in_calls(
+       "assistant", "[{\"id\":\"toolu_10\",\"type\":\"function\"}]", NULL, ids));
+   json_object_put(ids);
+
+   /* The kept part starts at row 110: a raise over tail rows stops below it. */
+   TEST_ASSERT_EQUAL_INT64(110, llm_compaction_kept_first_id(h, kept));
+
+   /* The kept turn reusing the id (per-response numbering) can't tell the rows
+    * apart, so it's left out. */
+   json_object_array_add(h, claude_call("toolu_1"));
+   json_object_array_add(h, claude_results("toolu_1", 1));
+   ids = llm_compaction_tail_call_ids(h, 1, kept);
+   TEST_ASSERT_EQUAL_INT(0, json_object_array_length(ids));
+   json_object_put(ids);
+   json_object_put(h);
+}
+
+/* Messages loaded after a compaction point that begin with results whose
+ * call is in the summary lose those results, and only those. */
+static void test_drop_leading_results(void) {
+   struct json_object *h = json_object_new_array();
+   struct json_object *summary = json_object_new_object();
+   json_object_object_add(summary, "role", json_object_new_string("assistant"));
+   json_object_object_add(summary, "content", json_object_new_string("summary"));
+   json_object_array_add(h, summary);
+   for (int i = 0; i < 2; i++) {
+      struct json_object *t = json_object_new_object();
+      json_object_object_add(t, "role", json_object_new_string("tool"));
+      json_object_object_add(t, "tool_call_id", json_object_new_string("c"));
+      json_object_object_add(t, "content", json_object_new_string("r"));
+      json_object_array_add(h, t);
+   }
+   struct json_object *claude = json_object_new_object(), *parts = json_object_new_array(),
+                      *part = json_object_new_object();
+   json_object_object_add(claude, "role", json_object_new_string("user"));
+   json_object_object_add(part, "type", json_object_new_string("tool_result"));
+   json_object_array_add(parts, part);
+   json_object_object_add(claude, "content", parts);
+   json_object_array_add(h, claude);
+   struct json_object *q = json_object_new_object();
+   json_object_object_add(q, "role", json_object_new_string("user"));
+   json_object_object_add(q, "content", json_object_new_string("next question"));
+   json_object_array_add(h, q);
+   struct json_object *later = json_object_new_object();
+   json_object_object_add(later, "role", json_object_new_string("tool"));
+   json_object_array_add(h, later);
+
+   TEST_ASSERT_EQUAL_INT(3, llm_history_drop_leading_results(h, 1, NULL));
+   TEST_ASSERT_EQUAL_INT(3, json_object_array_length(h)); /* summary, question, later */
+   TEST_ASSERT_EQUAL_INT(0, llm_history_drop_leading_results(h, 1, NULL));
+   json_object_put(h);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_compact_deterministic_basic);
@@ -245,5 +371,7 @@ int main(void) {
    RUN_TEST(test_estimate_tokens_range);
    RUN_TEST(test_estimate_counts_claude_tool_result);
    RUN_TEST(test_level_ordering);
+   RUN_TEST(test_compaction_range_claude_tool_turn);
+   RUN_TEST(test_drop_leading_results);
    return UNITY_END();
 }

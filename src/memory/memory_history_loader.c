@@ -26,6 +26,7 @@
 
 #include "auth/auth_db.h"
 #include "dawn_error.h"
+#include "llm/llm_compaction_range.h"
 #include "logging.h"
 
 typedef struct {
@@ -131,6 +132,27 @@ static int append_message_to_history(const conversation_message_t *msg, void *ct
    return 0;
 }
 
+int memory_history_load_rows(int64_t conv_id,
+                             int user_id,
+                             int64_t watermark,
+                             message_callback_t cb,
+                             void *ctx,
+                             struct json_object *rows,
+                             size_t *chars_out) {
+   if (chars_out) {
+      *chars_out = 0;
+   }
+   const int from = rows ? (int)json_object_array_length(rows) : 0;
+   const int rc = (watermark > 0) ? conv_db_get_messages_after(conv_id, user_id, watermark, cb, ctx)
+                                  : conv_db_get_messages(conv_id, user_id, cb, ctx);
+   if (rc == AUTH_DB_SUCCESS && watermark > 0) {
+      /* A point recorded inside a tool exchange leaves results whose call is
+       * in the summary: drop them, on every load. */
+      (void)llm_history_drop_leading_results(rows, from, chars_out);
+   }
+   return rc;
+}
+
 struct json_object *memory_history_load_from_db(int64_t conv_id,
                                                 int user_id,
                                                 size_t *text_len_out) {
@@ -166,14 +188,14 @@ struct json_object *memory_history_load_from_db(int64_t conv_id,
    }
    conv_free(&conv);
 
-   int rc = (watermark > 0)
-                ? conv_db_get_messages_after(conv_id, user_id, watermark, append_message_to_history,
-                                             &ctx)
-                : conv_db_get_messages(conv_id, user_id, append_message_to_history, &ctx);
+   size_t dropped_chars = 0;
+   const int rc = memory_history_load_rows(conv_id, user_id, watermark, append_message_to_history,
+                                           &ctx, ctx.array, &dropped_chars);
    if (rc != AUTH_DB_SUCCESS) {
       json_object_put(ctx.array);
       return NULL;
    }
+   ctx.total_text_len -= dropped_chars <= ctx.total_text_len ? dropped_chars : ctx.total_text_len;
    if (text_len_out) {
       *text_len_out = ctx.total_text_len;
    }

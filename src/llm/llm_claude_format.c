@@ -54,126 +54,6 @@ static bool is_current_session_remote(void) {
    return (session->type != SESSION_TYPE_LOCAL);
 }
 
-/**
- * @brief Count tool results in conversation history
- *
- * First pass to determine how many tool_result IDs exist, used to allocate
- * the correct size for the ID collection array.
- */
-static int count_tool_results(struct json_object *conversation) {
-   int count = 0;
-   int conv_len = json_object_array_length(conversation);
-
-   for (int i = 0; i < conv_len; i++) {
-      json_object *msg = json_object_array_get_idx(conversation, i);
-      json_object *role_obj;
-      if (!json_object_object_get_ex(msg, "role", &role_obj)) {
-         continue;
-      }
-      const char *role = json_object_get_string(role_obj);
-
-      // OpenAI format: role="tool" with tool_call_id
-      if (strcmp(role, "tool") == 0) {
-         count++;
-      }
-
-      // Claude format: role="user" with content array containing tool_result blocks
-      if (strcmp(role, "user") == 0) {
-         json_object *content_obj;
-         if (json_object_object_get_ex(msg, "content", &content_obj) &&
-             json_object_is_type(content_obj, json_type_array)) {
-            int content_len = json_object_array_length(content_obj);
-            for (int j = 0; j < content_len; j++) {
-               json_object *block = json_object_array_get_idx(content_obj, j);
-               json_object *type_obj;
-               if (json_object_object_get_ex(block, "type", &type_obj) &&
-                   strcmp(json_object_get_string(type_obj), "tool_result") == 0) {
-                  count++;
-               }
-            }
-         }
-      }
-   }
-   return count;
-}
-
-/**
- * @brief Collect tool result IDs from conversation history
- *
- * Pre-scans conversation to find all tool result IDs, used to filter
- * orphaned tool_use blocks that don't have matching results.
- *
- * @param conversation The conversation history to scan
- * @param tool_result_ids Dynamically allocated array to store IDs (caller allocates)
- * @param max_results Size of the tool_result_ids array
- * @return Number of IDs collected
- */
-static int collect_tool_result_ids(struct json_object *conversation,
-                                   char (*tool_result_ids)[LLM_TOOLS_ID_LEN],
-                                   int max_results) {
-   int count = 0;
-   int conv_len = json_object_array_length(conversation);
-
-   for (int i = 0; i < conv_len && count < max_results; i++) {
-      json_object *msg = json_object_array_get_idx(conversation, i);
-      json_object *role_obj;
-      if (!json_object_object_get_ex(msg, "role", &role_obj)) {
-         continue;
-      }
-      const char *role = json_object_get_string(role_obj);
-
-      // OpenAI format: role="tool" with tool_call_id
-      if (strcmp(role, "tool") == 0) {
-         json_object *tool_call_id_obj;
-         if (json_object_object_get_ex(msg, "tool_call_id", &tool_call_id_obj)) {
-            const char *id = json_object_get_string(tool_call_id_obj);
-            if (id && count < max_results) {
-               safe_strscpy(tool_result_ids[count], id);
-               count++;
-            }
-         }
-      }
-
-      // Claude format: role="user" with content array containing tool_result blocks
-      if (strcmp(role, "user") == 0) {
-         json_object *content_obj;
-         if (json_object_object_get_ex(msg, "content", &content_obj) &&
-             json_object_is_type(content_obj, json_type_array)) {
-            int content_len = json_object_array_length(content_obj);
-            for (int j = 0; j < content_len && count < max_results; j++) {
-               json_object *block = json_object_array_get_idx(content_obj, j);
-               json_object *type_obj;
-               if (json_object_object_get_ex(block, "type", &type_obj) &&
-                   strcmp(json_object_get_string(type_obj), "tool_result") == 0) {
-                  json_object *tool_use_id_obj;
-                  if (json_object_object_get_ex(block, "tool_use_id", &tool_use_id_obj)) {
-                     const char *id = json_object_get_string(tool_use_id_obj);
-                     if (id && count < max_results) {
-                        safe_strscpy(tool_result_ids[count], id);
-                        count++;
-                     }
-                  }
-               }
-            }
-         }
-      }
-   }
-   return count;
-}
-
-/**
- * @brief Check if a tool ID has a matching result
- */
-static bool has_matching_tool_result(const char *tool_id,
-                                     char tool_result_ids[][LLM_TOOLS_ID_LEN],
-                                     int count) {
-   for (int k = 0; k < count; k++) {
-      if (strcmp(tool_id, tool_result_ids[k]) == 0) {
-         return true;
-      }
-   }
-   return false;
-}
 
 /**
  * @brief Detect MIME type from base64-encoded image data
@@ -424,6 +304,251 @@ static void add_vision_to_claude_messages(json_object *messages_array,
    }
 }
 
+/* Longest text kept from a tool result turned into a note. */
+#define ORPHAN_RESULT_TEXT_MAX 1900
+
+/* @p msg's role, when it's an object with one. */
+static const char *msg_role(json_object *msg) {
+   json_object *role = NULL;
+   return (msg && json_object_object_get_ex(msg, "role", &role)) ? json_object_get_string(role)
+                                                                 : NULL;
+}
+
+/* @p msg's content array, or NULL. */
+static json_object *msg_parts(json_object *msg) {
+   json_object *content = NULL;
+   return (msg && json_object_object_get_ex(msg, "content", &content) &&
+           json_object_is_type(content, json_type_array))
+              ? content
+              : NULL;
+}
+
+/* A part's type, and its call id: a tool_use's id or a tool_result's tool_use_id. */
+static const char *part_type(json_object *part) {
+   json_object *t = NULL;
+   return json_object_object_get_ex(part, "type", &t) ? json_object_get_string(t) : NULL;
+}
+
+static const char *part_call_id(json_object *part) {
+   const char *type = part_type(part);
+   json_object *id = NULL;
+   const char *key = (type && strcmp(type, "tool_use") == 0)      ? "id"
+                     : (type && strcmp(type, "tool_result") == 0) ? "tool_use_id"
+                                                                  : NULL;
+   return (key && json_object_object_get_ex(part, key, &id)) ? json_object_get_string(id) : NULL;
+}
+
+/* Whether @p parts holds a part of type @p type for call @p id. */
+static bool parts_have_call(json_object *parts, const char *type, const char *id) {
+   const size_t n = parts ? json_object_array_length(parts) : 0;
+   for (size_t i = 0; id && i < n; i++) {
+      json_object *p = json_object_array_get_idx(parts, i);
+      const char *t = part_type(p);
+      const char *pid = part_call_id(p);
+      if (t && pid && strcmp(t, type) == 0 && strcmp(pid, id) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
+/* Whether @p parts holds a part of type @p type. */
+static bool parts_have_type(json_object *parts, const char *type) {
+   const size_t n = parts ? json_object_array_length(parts) : 0;
+   for (size_t i = 0; i < n; i++) {
+      const char *t = part_type(json_object_array_get_idx(parts, i));
+      if (t && strcmp(t, type) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
+/* A tool_result part's text: its content string, or its text parts joined.
+ * Returns whether it was cut to fit @p out. */
+static bool tool_result_text(json_object *block, char *out, size_t out_len) {
+   out[0] = '\0';
+   json_object *content = NULL;
+   if (!json_object_object_get_ex(block, "content", &content) || !content) {
+      return false;
+   }
+   if (!json_object_is_type(content, json_type_array)) {
+      const int w = snprintf(out, out_len, "%s", json_object_get_string(content));
+      return w >= 0 && (size_t)w >= out_len;
+   }
+   size_t off = 0;
+   bool cut = false;
+   const size_t n = json_object_array_length(content);
+   for (size_t i = 0; i < n; i++) {
+      json_object *p = json_object_array_get_idx(content, i), *text = NULL;
+      if (!json_object_object_get_ex(p, "text", &text) || !json_object_get_string(text)) {
+         continue;
+      }
+      if (off + 1 >= out_len) {
+         cut = true;
+         break;
+      }
+      const int w = snprintf(out + off, out_len - off, "%s%s", off ? "\n" : "",
+                             json_object_get_string(text));
+      if (w < 0) {
+         continue;
+      }
+      if ((size_t)w >= out_len - off) {
+         cut = true;
+         off = out_len - 1;
+      } else {
+         off += (size_t)w;
+      }
+   }
+   return cut;
+}
+
+/* A note standing in for a tool result that can't be sent as one. */
+static json_object *result_note(json_object *block) {
+   char text[ORPHAN_RESULT_TEXT_MAX + 1];
+   const bool cut = tool_result_text(block, text, sizeof(text));
+   char note[ORPHAN_RESULT_TEXT_MAX + 64];
+   snprintf(note, sizeof(note), "[Earlier tool result: %s%s]", text, cut ? "..." : "");
+   sanitize_utf8_for_json(note); /* a byte cut can split a character */
+   json_object *out = json_object_new_object();
+   if (out) {
+      json_object_object_add(out, "type", json_object_new_string("text"));
+      json_object_object_add(out, "text", json_object_new_string(note));
+   }
+   return out;
+}
+
+/* @p msg's content replaced by @p parts (taking them). */
+static void set_parts(json_object *msg, json_object *parts) {
+   json_object_object_add(msg, "content", parts);
+}
+
+/**
+ * @brief Make every tool call and result a pair Claude accepts
+ *
+ * Claude requires each tool_use to be answered by a tool_result in the very
+ * next message, each tool_result to answer a tool_use in the message just
+ * before it, and a message's tool_results to come before its other content.
+ * A history can still break that: a compaction point recorded inside a tool
+ * exchange by an older build, a conversion from another provider, a call
+ * whose result was lost.  Any break fails the request, and every later one.
+ * Per adjacent assistant/user pair: a call without its result there is
+ * dropped (an assistant left empty says so), and a result without its call
+ * there becomes a note with its text, so nothing the model saw is lost.
+ *
+ * @return How many calls and results were changed
+ */
+static int repair_tool_pairs(json_object *messages) {
+   int changed = 0;
+   const size_t n = json_object_array_length(messages);
+   for (size_t i = 0; i < n; i++) {
+      json_object *msg = json_object_array_get_idx(messages, i);
+      const char *role = msg_role(msg);
+      json_object *parts = msg_parts(msg);
+      if (!role || !parts) {
+         continue;
+      }
+      if (strcmp(role, "assistant") == 0) {
+         json_object *next = (i + 1 < n) ? json_object_array_get_idx(messages, i + 1) : NULL;
+         const char *next_role = msg_role(next);
+         json_object *answers = (next_role && strcmp(next_role, "user") == 0) ? msg_parts(next)
+                                                                              : NULL;
+         json_object *kept = json_object_new_array();
+         const size_t k = json_object_array_length(parts);
+         for (size_t j = 0; kept && j < k; j++) {
+            json_object *p = json_object_array_get_idx(parts, j);
+            const char *t = part_type(p);
+            if (t && strcmp(t, "tool_use") == 0 &&
+                !parts_have_call(answers, "tool_result", part_call_id(p))) {
+               changed++;
+               continue;
+            }
+            json_object_array_add(kept, json_object_get(p));
+         }
+         if (!kept || json_object_array_length(kept) == k) {
+            json_object_put(kept);
+            continue;
+         }
+         /* Nothing said and nothing called: a turn of reasoning alone isn't one
+          * Claude takes.  Its thinking goes, a note says what happened, and any
+          * other part (a server tool's call and result) stays.  (Editing an
+          * earlier turn never fails the request: DAWN asks for such thinking
+          * to be dropped, not refused.) */
+         if (!parts_have_type(kept, "text") && !parts_have_type(kept, "tool_use")) {
+            json_object *rest = json_object_new_array();
+            json_object *note = rest ? json_object_new_object() : NULL;
+            if (!note) {
+               json_object_put(rest);
+               json_object_put(kept);
+               continue;
+            }
+            const size_t r = json_object_array_length(kept);
+            for (size_t j = 0; j < r; j++) {
+               json_object *p = json_object_array_get_idx(kept, j);
+               const char *t = part_type(p);
+               if (t && (strcmp(t, "thinking") == 0 || strcmp(t, "redacted_thinking") == 0)) {
+                  continue;
+               }
+               json_object_array_add(rest, json_object_get(p));
+            }
+            json_object_object_add(note, "type", json_object_new_string("text"));
+            json_object_object_add(note, "text",
+                                   json_object_new_string("[Tool call not completed]"));
+            json_object_array_add(rest, note);
+            json_object_put(kept);
+            kept = rest;
+         }
+         set_parts(msg, kept);
+      } else if (strcmp(role, "user") == 0) {
+         json_object *prev = (i > 0) ? json_object_array_get_idx(messages, i - 1) : NULL;
+         const char *prev_role = msg_role(prev);
+         json_object *calls = (prev_role && strcmp(prev_role, "assistant") == 0) ? msg_parts(prev)
+                                                                                 : NULL;
+         /* Results first, then everything else, in order. */
+         json_object *results = json_object_new_array();
+         json_object *rest = json_object_new_array();
+         bool reordered = false;
+         bool seen_other = false;
+         const size_t k = json_object_array_length(parts);
+         for (size_t j = 0; results && rest && j < k; j++) {
+            json_object *p = json_object_array_get_idx(parts, j);
+            const char *t = part_type(p);
+            if (!t || strcmp(t, "tool_result") != 0) {
+               json_object_array_add(rest, json_object_get(p));
+               seen_other = true;
+               continue;
+            }
+            if (!parts_have_call(calls, "tool_use", part_call_id(p))) {
+               json_object *note = result_note(p);
+               if (note) {
+                  json_object_array_add(rest, note);
+               }
+               changed++;
+               reordered = true;
+               continue;
+            }
+            reordered = reordered || seen_other;
+            json_object_array_add(results, json_object_get(p));
+         }
+         if (!results || !rest || !reordered) {
+            json_object_put(results);
+            json_object_put(rest);
+            continue;
+         }
+         const size_t r = json_object_array_length(rest);
+         for (size_t j = 0; j < r; j++) {
+            json_object_array_add(results, json_object_get(json_object_array_get_idx(rest, j)));
+         }
+         json_object_put(rest);
+         set_parts(msg, results);
+      }
+   }
+   if (changed > 0) {
+      OLOG_WARNING("Claude: %d tool call(s)/result(s) without their pair repaired", changed);
+   }
+   return changed;
+}
+
 json_object *convert_to_claude_format(struct json_object *openai_conversation,
                                       const char *input_text,
                                       const char **vision_images,
@@ -524,48 +649,9 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
    const char *last_role = NULL;
    json_object *last_message = NULL;
 
-   // Pre-scan to collect tool result IDs for orphaned tool_use filtering.
-   //
-   // Runs on EVERY iteration, not just iteration 0.  The history can contain
-   // orphaned tool_use blocks left over from an interrupted earlier turn (a
-   // tool_use whose tool_result never landed — e.g. wake-word interrupt / rolled
-   // back call).  Those orphans persist in conversation_history and must be
-   // filtered out of every request, or Claude rejects the follow-up call with
-   // "tool_use ids were found without tool_result blocks" (HTTP 400).  Filtering
-   // is safe on follow-up iterations too: by the time each call is built, every
-   // legitimate tool_use already has its paired tool_result appended, so only the
-   // true orphans get dropped.
-   //
-   // Two-pass approach (count then allocate) is preferred over a growing array:
-   // - Single exact-size malloc avoids fragmentation and realloc overhead
-   // - Memory footprint is predictable (typically 64-320 bytes)
-   // - CPU cost is acceptable since this runs once per provider call, not in audio loops
-   //
-   // `iteration` is no longer read (request-building is iteration-independent now
-   // that filtering is unconditional); kept in the signature for caller stability.
+   /* Tool calls and results are paired once, after every message is built
+    * (repair_tool_pairs), not filtered here message by message. */
    (void)iteration;
-   char(*tool_result_ids)[LLM_TOOLS_ID_LEN] = NULL;
-   int tool_result_count = 0;
-
-   {
-      // Count tool results first, then allocate exact size needed
-      int result_count = count_tool_results(openai_conversation);
-
-      // Sanity bound to prevent integer overflow in allocation calculation
-      if (result_count > 10000) {
-         OLOG_WARNING("Claude: Excessive tool results in history (%d), capping at 10000",
-                      result_count);
-         result_count = 10000;
-      }
-
-      if (result_count > 0) {
-         tool_result_ids = malloc(result_count * LLM_TOOLS_ID_LEN);
-         if (tool_result_ids) {
-            tool_result_count = collect_tool_result_ids(openai_conversation, tool_result_ids,
-                                                        result_count);
-         }
-      }
-   }
 
    for (int i = 0; i < conv_len; i++) {
       json_object *msg = json_object_array_get_idx(openai_conversation, i);
@@ -590,8 +676,7 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
          }
       }
 
-      // Handle Claude-format assistant messages with tool_use content blocks
-      // These need to be filtered to remove orphaned tool_use blocks
+      // Claude-format assistant messages (a content array)
       if (strcmp(role, "assistant") == 0 && json_object_is_type(content_obj, json_type_array)) {
          int content_len = json_object_array_length(content_obj);
          json_object *filtered_content = json_object_new_array();
@@ -606,25 +691,7 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
                continue;
             }
 
-            const char *block_type = json_object_get_string(type_obj);
-
-            if (strcmp(block_type, "tool_use") == 0) {
-               // Drop this tool_use if the history has no matching tool_result (orphan)
-               json_object *id_obj;
-               if (json_object_object_get_ex(block, "id", &id_obj)) {
-                  const char *tool_id = json_object_get_string(id_obj);
-                  // tool_result_ids is NULL only when there are no results at all
-                  if (!tool_result_ids ||
-                      has_matching_tool_result(tool_id, tool_result_ids, tool_result_count)) {
-                     json_object_array_add(filtered_content, json_object_get(block));
-                  } else {
-                     OLOG_WARNING("Claude: Skipping orphaned tool_use %s", tool_id);
-                  }
-               }
-            } else {
-               // Keep text and other blocks
-               json_object_array_add(filtered_content, json_object_get(block));
-            }
+            json_object_array_add(filtered_content, json_object_get(block));
          }
 
          // Only add if we have content
@@ -658,7 +725,6 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
          }
 
          // Convert each tool call to Claude tool_use format
-         // Only include tool calls that have matching results in the history
          int num_calls = json_object_array_length(tool_calls_obj);
          int added_tool_uses = 0;
          for (int j = 0; j < num_calls; j++) {
@@ -671,13 +737,6 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
 
             if (json_object_object_get_ex(call, "id", &id_obj)) {
                call_id = json_object_get_string(id_obj);
-            }
-
-            // Skip this tool call if the history has no matching result (orphan)
-            if (tool_result_ids &&
-                !has_matching_tool_result(call_id, tool_result_ids, tool_result_count)) {
-               OLOG_WARNING("Claude: Skipping tool_use %s (no matching tool_result)", call_id);
-               continue;
             }
 
             if (json_object_object_get_ex(call, "function", &func_obj)) {
@@ -817,7 +876,7 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
          // Tool results must be in user messages for Claude
          if (last_role != NULL && strcmp(last_role, "user") == 0 && last_message != NULL) {
             // Append to existing user message content array
-            json_object *last_content;
+            json_object *last_content = NULL;
             if (json_object_object_get_ex(last_message, "content", &last_content) &&
                 json_object_is_type(last_content, json_type_array)) {
                /* result_block is already owned by result_array (added above); take a second
@@ -828,7 +887,17 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
                json_object_array_add(last_content, json_object_get(result_block));
                json_object_put(result_array);  // Don't need the wrapper array
             } else {
-               // Replace string content with array
+               /* A plain-text user message: keep its text beside the result
+                * (results lead; repair_tool_pairs keeps that order). */
+               const char *text = last_content ? json_object_get_string(last_content) : NULL;
+               if (text && *text) {
+                  json_object *text_block = json_object_new_object();
+                  if (text_block) {
+                     json_object_object_add(text_block, "type", json_object_new_string("text"));
+                     json_object_object_add(text_block, "text", json_object_new_string(text));
+                     json_object_array_add(result_array, text_block);
+                  }
+               }
                json_object_object_add(last_message, "content", result_array);
             }
          } else {
@@ -973,12 +1042,8 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
       add_vision_to_claude_messages(messages_array, input_text, vision_images, vision_image_count);
    }
 
+   (void)repair_tool_pairs(messages_array);
    json_object_object_add(claude_request, "messages", messages_array);
-
-   // Free dynamically allocated tool result IDs
-   if (tool_result_ids) {
-      free(tool_result_ids);
-   }
 
    return claude_request;
 }
